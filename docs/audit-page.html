@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>AppCrane - Audit Log</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="stylesheet" href="/docs/shared.css">
+</head>
+<body>
+<script src="/docs/shared.js"></script>
+<script>
+if (!checkAuth()) throw 'auth';
+document.body.innerHTML = topbar('audit') +
+  '<div class="container">' +
+    '<h2>Audit Log</h2>' +
+    '<div style="margin-bottom:12px;display:flex;gap:8px;align-items:center">' +
+      '<select id="appFilter" onchange="loadAudit()" style="background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px 10px;font-size:13px"><option value="">All apps</option></select>' +
+      '<select id="limitFilter" onchange="loadAudit()" style="background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px 10px;font-size:13px"><option value="20">20</option><option value="50" selected>50</option><option value="100">100</option><option value="200">200</option></select>' +
+    '</div>' +
+    '<div id="auditTable">Loading...</div>' +
+  '</div>';
+loadVersion(); loadUserInfo();
+
+// Load app list for filter
+(async () => {
+  try {
+    const apps = await apiFetch('/api/apps');
+    const sel = document.getElementById('appFilter');
+    (apps.apps || []).forEach(a => { const o = document.createElement('option'); o.value = a.slug; o.textContent = a.name; sel.appendChild(o); });
+  } catch(e) {}
+})();
+
+async function loadAudit() {
+  const app = document.getElementById('appFilter').value;
+  const limit = document.getElementById('limitFilter').value;
+  const params = '?limit=' + limit + (app ? '&app=' + app : '');
+  const auditEl = document.getElementById('auditTable');
+  try {
+    const data = await apiFetch('/api/audit' + params);
+    auditEl.textContent = '';
+    if (data.entries?.length) {
+      const tbl = document.createElement('table');
+      const hdr = tbl.insertRow();
+      ['Time','User','App','Action','Detail'].forEach(h => { const th = document.createElement('th'); th.textContent = h; hdr.appendChild(th); });
+      data.entries.forEach(e => {
+        let detail = '-';
+        try { const d = JSON.parse(e.detail); detail = d.method ? d.method + ' ' + d.path : JSON.stringify(d).slice(0, 60); } catch(x) { detail = e.detail?.slice(0, 60) || '-'; }
+        const tr = tbl.insertRow();
+        const tdTime = tr.insertCell(); tdTime.style.cssText = 'white-space:nowrap;font-size:12px'; tdTime.textContent = e.created_at || '';
+        tr.insertCell().textContent = e.user_name || 'system';
+        tr.insertCell().textContent = e.app_slug || '-';
+        const tdAction = tr.insertCell();
+        const tag = document.createElement('span'); tag.className = 'tag'; tag.textContent = e.action;
+        tdAction.appendChild(tag);
+        const tdDetail = tr.insertCell(); tdDetail.style.cssText = 'color:var(--dim);font-size:12px;max-width:300px;overflow:hidden;text-overflow:ellipsis'; tdDetail.textContent = detail;
+      });
+      auditEl.appendChild(tbl);
+      const footer = document.createElement('div');
+      footer.style.cssText = 'color:var(--dim);font-size:12px;margin-top:8px';
+      footer.textContent = data.entries.length + ' of ' + (data.total || '?') + ' entries';
+      auditEl.appendChild(footer);
+    } else {
+      const div = document.createElement('div');
+      div.style.color = 'var(--dim)'; div.textContent = 'No audit entries';
+      auditEl.appendChild(div);
+    }
+  } catch(e) { auditEl.textContent = 'Error: ' + e.message; }
+}
+
+loadAudit();
+</script>
+</body>
+</html>

@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>AppCrane - Users</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="stylesheet" href="/docs/shared.css">
+<style>
+.editable{background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:4px;font-size:13px;width:100%}
+.editable:focus{border-color:var(--accent);outline:none}
+.role-none{color:var(--dim)}.role-user{color:var(--green)}.role-admin{color:var(--accent)}
+</style>
+</head>
+<body>
+<script src="/docs/shared.js"></script>
+<script>
+if (!checkAuth()) throw 'auth';
+document.body.innerHTML = topbar('users') +
+  '<div class="container">' +
+    '<h2>App Users <button class="btn" onclick="toggleCreate()" style="font-size:12px;padding:3px 12px;margin-left:8px">+ New User</button></h2>' +
+    '<p style="color:var(--dim);font-size:.85rem;margin-bottom:12px">People who log into your hosted apps via /login. Edit fields directly in the table. Roles are set per app below.</p>' +
+    '<div id="createPanel" style="display:none;background:var(--surface);border:1px solid var(--accent);border-radius:8px;padding:16px;margin-bottom:12px">' +
+      '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:end">' +
+        '<div><label style="font-size:.75rem;color:var(--dim)">Name*</label><br><input id="nu_name" placeholder="Name" class="editable" style="width:120px"></div>' +
+        '<div><label style="font-size:.75rem;color:var(--dim)">Email*</label><br><input id="nu_email" placeholder="Email" class="editable" style="width:180px"></div>' +
+        '<div><label style="font-size:.75rem;color:var(--dim)">Username</label><br><input id="nu_username" placeholder="Username" class="editable" style="width:120px"></div>' +
+        '<div><label style="font-size:.75rem;color:var(--dim)">Password*</label><br><input id="nu_password" type="password" placeholder="Password" class="editable" style="width:120px"></div>' +
+        '<div><label style="font-size:.75rem;color:var(--dim)">Phone</label><br><input id="nu_phone" placeholder="Phone" class="editable" style="width:120px"></div>' +
+        '<div><label style="font-size:.75rem;color:var(--dim)">Year of Birth</label><br><input id="nu_yob" type="number" placeholder="1990" class="editable" style="width:80px"></div>' +
+        '<button onclick="createUser()" class="btn btn-accent" style="height:32px">Create</button>' +
+      '</div>' +
+      '<div id="createResult" style="margin-top:8px;font-size:.85rem"></div>' +
+    '</div>' +
+    '<div id="usersTable">Loading...</div>' +
+    '<h2>App Roles</h2>' +
+    '<p style="color:var(--dim);font-size:.85rem;margin-bottom:12px">Set access per user per app: <span class="role-none">none</span> = no access, <span class="role-user">user</span> = limited, <span class="role-admin">admin</span> = full access to app settings.</p>' +
+    '<div id="rolesMatrix">Loading...</div>' +
+  '</div>';
+loadVersion(); loadUserInfo();
+
+function toggleCreate() {
+  const p = document.getElementById('createPanel');
+  p.style.display = p.style.display === 'none' ? 'block' : 'none';
+}
+
+async function createUser() {
+  const name = document.getElementById('nu_name').value.trim();
+  const email = document.getElementById('nu_email').value.trim();
+  const password = document.getElementById('nu_password').value;
+  if (!name || !email || !password) { alert('Name, email, and password are required'); return; }
+  const data = await apiPost('/api/users', {
+    name, email, role: 'user',
+    username: document.getElementById('nu_username').value.trim() || undefined,
+    password,
+    phone: document.getElementById('nu_phone').value.trim() || undefined,
+    year_of_birth: document.getElementById('nu_yob').value ? parseInt(document.getElementById('nu_yob').value) : undefined,
+  });
+  if (data.error) {
+    const el = document.getElementById('createResult');
+    el.textContent = '';
+    const span = document.createElement('span'); span.style.color = 'var(--red)'; span.textContent = data.error.message;
+    el.appendChild(span);
+    return;
+  }
+  const el = document.getElementById('createResult');
+  el.textContent = '';
+  const span = document.createElement('span'); span.style.color = 'var(--green)'; span.textContent = 'User created!';
+  el.appendChild(span);
+  ['nu_name','nu_email','nu_username','nu_password','nu_phone','nu_yob'].forEach(id => document.getElementById(id).value = '');
+  loadUsers();
+}
+
+async function updateField(userId, field, value) {
+  const body = {}; body[field] = value || null;
+  await apiPut('/api/users/' + userId + '/profile', body);
+}
+
+async function setPassword(userId) {
+  const pw = prompt('New password:');
+  if (!pw) return;
+  const data = await apiPut('/api/users/' + userId + '/password', { password: pw });
+  if (data.error) { alert(data.error.message); return; }
+  alert('Password set');
+  loadUsers();
+}
+
+async function deleteUser(id, name) {
+  if (!confirm('Delete "' + name + '"? They will lose access to all apps.')) return;
+  await apiDelete('/api/users/' + id);
+  loadUsers();
+}
+
+async function setAppRole(slug, userId, role, sel) {
+  if (sel) { sel.disabled = true; sel.style.opacity = '.5'; }
+  const data = await apiPut('/api/apps/' + slug + '/roles', { user_id: userId, app_role: role });
+  if (sel) { sel.disabled = false; sel.style.opacity = '1'; }
+  if (data && data.error) { alert('Failed to save role: ' + data.error.message); if (sel) loadUsers(); }
+}
+
+function fmtLastLogin(ts) {
+  const span = document.createElement('span');
+  span.style.cssText = 'color:var(--dim);font-size:.85rem';
+  if (!ts) { span.textContent = 'never'; return span; }
+  const d = new Date(ts.replace(' ', 'T') + 'Z');
+  if (isNaN(d.getTime())) { span.textContent = '—'; return span; }
+  const diff = Date.now() - d.getTime();
+  const min = Math.floor(diff / 60000);
+  const hr = Math.floor(min / 60);
+  const day = Math.floor(hr / 24);
+  let rel;
+  if (min < 1) rel = 'just now';
+  else if (min < 60) rel = min + 'm ago';
+  else if (hr < 24) rel = hr + 'h ago';
+  else if (day < 30) rel = day + 'd ago';
+  else rel = d.toISOString().slice(0, 10);
+  span.textContent = rel;
+  span.title = d.toLocaleString();
+  return span;
+}
+
+async function loadUsers() {
+  const users = await apiFetch('/api/users');
+  const allUsers = (users.users || []).filter(u => u.role !== 'admin');
+
+  const usersEl = document.getElementById('usersTable');
+  if (allUsers.length) {
+    const tbl = document.createElement('table');
+    const hdr = tbl.insertRow();
+    ['ID','Name','Email','Username','Phone','Password','Last login',''].forEach(t => { const th = document.createElement('th'); th.textContent = t; hdr.appendChild(th); });
+    for (const u of allUsers) {
+      const tr = tbl.insertRow();
+      const tdId = tr.insertCell(); tdId.textContent = u.id;
+      const tdName = tr.insertCell();
+      const nameInput = document.createElement('input'); nameInput.className = 'editable'; nameInput.value = u.name || '';
+      nameInput.addEventListener('change', function() { updateField(u.id, 'name', this.value); });
+      tdName.appendChild(nameInput);
+      if (u.sso_provider) {
+        const badge = document.createElement('span'); badge.style.cssText = 'font-size:10px;background:var(--surface2);border:1px solid var(--border);border-radius:3px;padding:1px 5px;color:var(--dim);vertical-align:middle';
+        badge.textContent = u.sso_provider.toUpperCase(); tdName.appendChild(badge);
+      }
+      const tdEmail = tr.insertCell(); const emailInput = document.createElement('input'); emailInput.className = 'editable'; emailInput.value = u.email || '';
+      emailInput.addEventListener('change', function() { updateField(u.id, 'email', this.value); }); tdEmail.appendChild(emailInput);
+      const tdUser = tr.insertCell(); const userInput = document.createElement('input'); userInput.className = 'editable'; userInput.value = u.username || '';
+      userInput.addEventListener('change', function() { updateField(u.id, 'username', this.value); }); tdUser.appendChild(userInput);
+      const tdPhone = tr.insertCell(); const phoneInput = document.createElement('input'); phoneInput.className = 'editable'; phoneInput.value = u.phone || '';
+      phoneInput.addEventListener('change', function() { updateField(u.id, 'phone', this.value); }); tdPhone.appendChild(phoneInput);
+      const tdPw = tr.insertCell(); tdPw.style.textAlign = 'center';
+      if (u.has_password) { const chk = document.createElement('span'); chk.style.color = 'var(--green)'; chk.textContent = '✓'; tdPw.appendChild(chk); }
+      const pwBtn = document.createElement('button'); pwBtn.className = 'btn'; pwBtn.style.cssText = 'font-size:10px;padding:1px 6px'; pwBtn.textContent = 'set';
+      pwBtn.addEventListener('click', () => setPassword(u.id)); tdPw.appendChild(pwBtn);
+      const tdLogin = tr.insertCell(); tdLogin.appendChild(fmtLastLogin(u.last_login_at));
+      const tdDel = tr.insertCell(); const delBtn = document.createElement('button'); delBtn.className = 'btn btn-red'; delBtn.style.cssText = 'font-size:11px;padding:2px 8px'; delBtn.textContent = 'Delete';
+      delBtn.addEventListener('click', () => deleteUser(u.id, u.name)); tdDel.appendChild(delBtn);
+    }
+    usersEl.textContent = ''; usersEl.appendChild(tbl);
+  } else {
+    usersEl.textContent = ''; const dim = document.createElement('div'); dim.style.color = 'var(--dim)'; dim.textContent = 'No app users. Click "+ New User" to create one.'; usersEl.appendChild(dim);
+  }
+
+  // Roles matrix - ALL non-admin users x ALL apps
+  const apps = await apiFetch('/api/apps');
+  const allApps = apps.apps || [];
+  const matrixEl = document.getElementById('rolesMatrix');
+  if (allUsers.length && allApps.length) {
+    const tbl2 = document.createElement('table');
+    const hdr2 = tbl2.insertRow(); const thUser = document.createElement('th'); thUser.textContent = 'User'; hdr2.appendChild(thUser);
+    allApps.forEach(a => { const th = document.createElement('th'); th.textContent = a.name; hdr2.appendChild(th); });
+    for (const u of allUsers) {
+      const tr = tbl2.insertRow(); const tdN = tr.insertCell(); tdN.style.fontWeight = '600'; tdN.textContent = u.name;
+      for (const a of allApps) {
+        const td = tr.insertCell(); const sel = document.createElement('select');
+        sel.id = 'role_' + a.slug + '_' + u.id; sel.style.cssText = 'background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:13px;width:100%';
+        ['none','user','admin'].forEach(v => { const opt = document.createElement('option'); opt.value = v; opt.textContent = v || '—'; sel.appendChild(opt); });
+        sel.addEventListener('change', function() { setAppRole(a.slug, u.id, this.value, this); }); td.appendChild(sel);
+      }
+    }
+    matrixEl.textContent = ''; matrixEl.appendChild(tbl2);
+
+    // Load current roles
+    for (const a of allApps) {
+      try {
+        const au = await apiFetch('/api/apps/' + a.slug + '/identity/users');
+        for (const u of (au.users || [])) {
+          const sel = document.getElementById('role_' + a.slug + '_' + u.id);
+          if (sel) sel.value = u.app_role || 'none';
+        }
+      } catch(e) {}
+    }
+  } else {
+    const msg2 = document.createElement('div'); msg2.style.color = 'var(--dim)'; msg2.textContent = !allUsers.length ? 'Create users first.' : 'No apps created yet.'; matrixEl.textContent = ''; matrixEl.appendChild(msg2);
+  }
+}
+
+loadUsers();
+</script>
+</body>
+</html>

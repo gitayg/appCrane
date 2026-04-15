@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AppCrane - App Manager</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<style>
+:root{--bg:#0f1117;--surface:#1a1d27;--surface2:#222536;--border:#2a2d3a;--text:#e4e4e7;--dim:#71717a;--accent:#3b82f6;--green:#22c55e;--yellow:#eab308;--red:#ef4444;--orange:#f97316}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text);font-size:14px}
+.topbar{background:var(--surface);border-bottom:1px solid var(--border);padding:10px 24px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:10}
+.topbar .logo{font-weight:700;font-size:1.1rem;text-decoration:none}.topbar .logo span{color:var(--accent)}
+.topbar .right{display:flex;gap:10px;align-items:center;font-size:.85rem}
+.topbar .right a{color:var(--dim);text-decoration:none}
+.container{max-width:900px;margin:0 auto;padding:24px}
+.login{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:32px;text-align:center;max-width:420px;margin:80px auto}
+.login h2{margin-bottom:12px}.login p{color:var(--dim);margin-bottom:16px;font-size:.9rem}
+.login input,.login select{background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:6px;width:100%;margin-bottom:10px;font-size:14px}
+.login button,.btn{background:var(--accent);color:#fff;border:none;padding:8px 18px;border-radius:6px;cursor:pointer;font-weight:600;font-size:.85rem}
+.btn:hover{opacity:.9}.btn-sm{padding:5px 12px;font-size:.8rem}
+.btn-red{background:var(--red)}.btn-green{background:var(--green)}.btn-orange{background:var(--orange)}.btn-dim{background:var(--surface2);color:var(--dim);border:1px solid var(--border)}
+h2{font-size:1rem;color:var(--dim);text-transform:uppercase;letter-spacing:.5px;margin:24px 0 12px;font-weight:500}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:12px}
+.card h3{font-size:.9rem;margin-bottom:8px;color:var(--text)}
+.env-toggle{display:flex;gap:0;margin-bottom:16px}
+.env-btn{flex:1;padding:8px;text-align:center;cursor:pointer;font-weight:600;font-size:.85rem;border:1px solid var(--border);background:var(--surface)}
+.env-btn:first-child{border-radius:6px 0 0 6px}.env-btn:last-child{border-radius:0 6px 6px 0}
+.env-btn.active-prod{background:#22c55e22;border-color:#22c55e44;color:var(--green)}
+.env-btn.active-sand{background:#f9731622;border-color:#f9731644;color:var(--orange)}
+table{width:100%;border-collapse:collapse;font-size:.85rem}
+th,td{padding:8px 10px;text-align:left;border-bottom:1px solid var(--border)}
+th{color:var(--dim);font-weight:500}
+.mono{font-family:'SF Mono',Monaco,monospace;font-size:.8rem}
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:6px}
+.badge{padding:2px 8px;border-radius:4px;font-size:.75rem;font-weight:600}
+.badge-live{background:#22c55e22;color:var(--green)}.badge-failed{background:#ef444422;color:var(--red)}
+.badge-building{background:#eab30822;color:var(--yellow)}
+.add-row{display:flex;gap:8px;margin-top:8px}
+.add-row input{background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:4px;font-size:.85rem;font-family:'SF Mono',Monaco,monospace}
+.hidden{display:none}
+.msg{padding:8px 12px;border-radius:6px;margin-bottom:12px;font-size:.85rem}
+.msg-ok{background:#22c55e18;border:1px solid #22c55e44;color:var(--green)}
+.msg-err{background:#ef444418;border:1px solid #ef444444;color:var(--red)}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <a href="/" class="logo">App<span>Crane</span></a>
+  <div class="right">
+    <span id="appName" style="color:var(--dim)"></span>
+    <span id="userName" style="color:var(--dim)"></span>
+    <a href="/agent-guide">Agent Guide</a>
+    <a href="/">Home</a>
+  </div>
+</div>
+
+<!-- Login -->
+<div id="loginPanel" class="login hidden">
+  <h2>App Manager</h2>
+  <p>Enter your app user API key to manage your app</p>
+  <input type="password" id="keyInput" placeholder="dhk_user_..." autofocus onkeydown="if(event.key==='Enter')doLogin()">
+  <button onclick="doLogin()" style="width:100%">Login</button>
+</div>
+
+<!-- App selector (if user has multiple apps) -->
+<div id="appSelector" class="login hidden">
+  <h2>Select App</h2>
+  <select id="appSelect" onchange="selectApp(this.value)"></select>
+</div>
+
+<!-- Main content -->
+<div id="main" class="container hidden">
+  <div id="msgBox"></div>
+
+  <!-- Env toggle -->
+  <div class="env-toggle">
+    <div class="env-btn" onclick="setEnv('production')" id="envProd">Production</div>
+    <div class="env-btn" onclick="setEnv('sandbox')" id="envSand">Sandbox</div>
+  </div>
+
+  <!-- Health -->
+  <div class="card">
+    <h3>Health</h3>
+    <div id="healthInfo">Loading...</div>
+    <button class="btn btn-sm btn-dim" onclick="testHealth()" style="margin-top:8px">Test Now</button>
+  </div>
+
+  <!-- Deploy -->
+  <div class="card">
+    <h3>Deployment</h3>
+    <div id="deployInfo">Loading...</div>
+    <div style="display:flex;gap:8px;margin-top:10px">
+      <button class="btn btn-sm btn-green" onclick="deploy()">Deploy</button>
+      <button class="btn btn-sm btn-orange" onclick="promote()">Promote Sandbox → Prod</button>
+      <button class="btn btn-sm btn-red" onclick="rollback()">Rollback</button>
+    </div>
+  </div>
+
+  <!-- Env vars -->
+  <h2>Environment Variables</h2>
+  <div class="card">
+    <div id="envVars">Loading...</div>
+    <div class="add-row">
+      <input type="text" id="newKey" placeholder="KEY" style="flex:1">
+      <input type="text" id="newVal" placeholder="value" style="flex:2">
+      <button class="btn btn-sm" onclick="addEnvVar()">Add</button>
+    </div>
+  </div>
+
+  <!-- Deploy history -->
+  <h2>Deploy History</h2>
+  <div class="card">
+    <div id="deployHistory">Loading...</div>
+  </div>
+</div>
+
+<script>
+const API = window.location.origin;
+let KEY = localStorage.getItem('cc_user_key') || localStorage.getItem('cc_api_key') || '';
+const urlSlug = new URLSearchParams(window.location.search).get('slug');
+let currentApp = urlSlug || localStorage.getItem('cc_current_app') || '';
+let currentEnv = 'production';
+
+function doLogin() {
+  KEY = document.getElementById('keyInput').value.trim();
+  if (!KEY) return;
+  localStorage.setItem('cc_user_key', KEY);
+  init();
+}
+
+async function apiFetch(path, opts = {}) {
+  const headers = { 'X-API-Key': KEY, ...opts.headers };
+  if (opts.body) headers['Content-Type'] = 'application/json';
+  const res = await fetch(API + path, { ...opts, headers, body: opts.body ? JSON.stringify(opts.body) : undefined });
+  if (res.status === 401) { localStorage.removeItem('cc_user_key'); location.reload(); }
+  return res.json();
+}
+
+function showMsg(msg, ok) {
+  const div = document.createElement('div');
+  div.className = 'msg ' + (ok ? 'msg-ok' : 'msg-err');
+  div.textContent = msg;
+  const box = document.getElementById('msgBox');
+  box.textContent = '';
+  box.appendChild(div);
+  setTimeout(() => { box.textContent = ''; }, 5000);
+}
+
+async function init() {
+  try {
+    const me = await apiFetch('/api/auth/me');
+    document.getElementById('userName').textContent = me.user.name + ' (' + me.user.role + ')';
+
+    if (me.apps.length === 0) {
+      showMsg('No apps assigned to you. Ask an admin to assign you.', false);
+      return;
+    }
+
+    if (me.apps.length === 1 || currentApp) {
+      currentApp = currentApp || me.apps[0].slug;
+      localStorage.setItem('cc_current_app', currentApp);
+      document.getElementById('loginPanel').classList.add('hidden');
+      document.getElementById('appSelector').classList.add('hidden');
+      document.getElementById('main').classList.remove('hidden');
+      loadApp();
+    } else {
+      document.getElementById('loginPanel').classList.add('hidden');
+      const sel = document.getElementById('appSelect');
+      sel.textContent = '';
+      me.apps.forEach(a => {
+        const opt = document.createElement('option');
+        opt.value = a.slug;
+        opt.textContent = a.name + ' (' + a.slug + ')';
+        sel.appendChild(opt);
+      });
+      document.getElementById('appSelector').classList.remove('hidden');
+    }
+  } catch (e) {
+    document.getElementById('loginPanel').classList.remove('hidden');
+  }
+}
+
+function selectApp(slug) {
+  currentApp = slug;
+  localStorage.setItem('cc_current_app', slug);
+  document.getElementById('appSelector').classList.add('hidden');
+  document.getElementById('main').classList.remove('hidden');
+  loadApp();
+}
+
+function setEnv(env) {
+  currentEnv = env;
+  document.getElementById('envProd').className = 'env-btn' + (env === 'production' ? ' active-prod' : '');
+  document.getElementById('envSand').className = 'env-btn' + (env === 'sandbox' ? ' active-sand' : '');
+  loadApp();
+}
+
+async function loadApp() {
+  // Update toggle UI without calling loadApp again
+  document.getElementById('envProd').className = 'env-btn' + (currentEnv === 'production' ? ' active-prod' : '');
+  document.getElementById('envSand').className = 'env-btn' + (currentEnv === 'sandbox' ? ' active-sand' : '');
+  document.getElementById('appName').textContent = currentApp;
+
+  // Health
+  try {
+    const h = await apiFetch('/api/apps/' + currentApp + '/health/' + currentEnv);
+    const s = h.state;
+    const c = h.config;
+    const dotColor = s?.is_down ? 'var(--red)' : s?.last_status === 200 ? 'var(--green)' : 'var(--dim)';
+    const statusText = s?.is_down ? 'DOWN' : s?.last_status === 200 ? 'Healthy' : 'Unknown';
+    const healthEl = document.getElementById('healthInfo');
+    healthEl.textContent = '';
+    const dotSpan = document.createElement('span');
+    dotSpan.className = 'dot';
+    dotSpan.style.background = dotColor;
+    healthEl.appendChild(dotSpan);
+    let healthText = statusText;
+    if (s?.last_response_ms) healthText += ' (' + s.last_response_ms + 'ms)';
+    if (c?.endpoint) healthText += ' \u2014 ' + c.endpoint;
+    if (s?.last_check_at) healthText += ' \u2014 last: ' + s.last_check_at;
+    healthEl.appendChild(document.createTextNode(healthText));
+  } catch (e) { document.getElementById('healthInfo').textContent = 'Error loading health'; }
+
+  // Deploy info
+  try {
+    const d = await apiFetch('/api/apps/' + currentApp + '/deployments/' + currentEnv);
+    if (d.deployments?.length) {
+      const latest = d.deployments[0];
+      const badgeCls = latest.status === 'live' ? 'badge-live' : latest.status === 'failed' ? 'badge-failed' : 'badge-building';
+      const deployEl = document.getElementById('deployInfo');
+      deployEl.textContent = '';
+      const badgeSpan = document.createElement('span');
+      badgeSpan.className = 'badge ' + badgeCls;
+      badgeSpan.textContent = latest.status;
+      deployEl.appendChild(badgeSpan);
+      deployEl.appendChild(document.createTextNode(' v' + (latest.version || '-')));
+      if (latest.commit_hash) {
+        const hashSpan = document.createElement('span');
+        hashSpan.className = 'mono';
+        hashSpan.textContent = ' ' + latest.commit_hash;
+        deployEl.appendChild(hashSpan);
+      }
+      deployEl.appendChild(document.createTextNode(' \u2014 ' + (latest.finished_at || latest.started_at)));
+    } else {
+      document.getElementById('deployInfo').textContent = 'No deployments yet';
+    }
+  } catch (e) { document.getElementById('deployInfo').textContent = 'Error loading deploys'; }
+
+  // Check for newer version on GitHub
+  var oldBanner = document.getElementById('updateBanner');
+  if (oldBanner) oldBanner.remove();
+  try {
+    var upd = await apiFetch('/api/apps/' + currentApp + '/updates');
+    if (upd[currentEnv]?.update_available) {
+      var msg = upd.latest_message || upd.latest_sha;
+      if (msg.length > 50) msg = msg.slice(0, 50) + '…';
+      var el = document.createElement('div');
+      el.id = 'updateBanner';
+      el.style.cssText = 'margin-top:8px;padding:8px 12px;background:rgba(250,204,21,.08);border:1px solid var(--yellow);border-radius:6px;font-size:.85rem;display:flex;align-items:center;justify-content:space-between;gap:8px';
+      var txt = document.createElement('span');
+      txt.style.color = 'var(--yellow)';
+      txt.textContent = '⬆ Update available: ' + msg + ' (' + upd.latest_sha + ')';
+      var btn = document.createElement('button');
+      btn.className = 'btn btn-sm btn-green';
+      btn.textContent = 'Deploy Now';
+      btn.onclick = function() { deploy(); };
+      el.appendChild(txt);
+      el.appendChild(btn);
+      document.getElementById('deployInfo').appendChild(el);
+    }
+  } catch (e) {}
+
+  // Env vars
+  try {
+    const ev = await apiFetch('/api/apps/' + currentApp + '/env/' + currentEnv + '?reveal=true');
+    const evEl = document.getElementById('envVars');
+    evEl.textContent = '';
+    if (ev.vars?.length) {
+      const tbl = document.createElement('table');
+      const hdr = tbl.insertRow();
+      ['Key','Value',''].forEach(h => { const th = document.createElement('th'); th.textContent = h; hdr.appendChild(th); });
+      ev.vars.forEach(v => {
+        const tr = tbl.insertRow();
+        const tdKey = tr.insertCell(); tdKey.className = 'mono'; tdKey.textContent = v.key;
+        const tdVal = tr.insertCell(); tdVal.className = 'mono'; tdVal.textContent = v.value;
+        const tdBtn = tr.insertCell();
+        const btn = document.createElement('button');
+        btn.className = 'btn btn-sm btn-red';
+        btn.textContent = 'Del';
+        btn.dataset.key = v.key;
+        btn.addEventListener('click', function() { delEnvVar(this.dataset.key); });
+        tdBtn.appendChild(btn);
+      });
+      evEl.appendChild(tbl);
+      if (ev.warnings?.length) {
+        ev.warnings.forEach(w => {
+          const div = document.createElement('div');
+          div.style.cssText = 'color:var(--yellow);font-size:.8rem;margin-top:6px';
+          div.textContent = '\u26a0 ' + w;
+          evEl.appendChild(div);
+        });
+      }
+    } else {
+      const span = document.createElement('span');
+      span.style.color = 'var(--dim)';
+      span.textContent = 'No env vars set';
+      evEl.appendChild(span);
+    }
+  } catch (e) {
+    const evEl = document.getElementById('envVars');
+    evEl.textContent = '';
+    const span = document.createElement('span');
+    span.style.color = 'var(--red)';
+    span.textContent = e.message || 'Cannot load env vars (admin cannot access)';
+    evEl.appendChild(span);
+  }
+
+  // Deploy history
+  try {
+    const d = await apiFetch('/api/apps/' + currentApp + '/deployments/' + currentEnv);
+    const histEl = document.getElementById('deployHistory');
+    histEl.textContent = '';
+    if (d.deployments?.length) {
+      const tbl = document.createElement('table');
+      const hdr = tbl.insertRow();
+      ['Version','Status','By','When'].forEach(h => { const th = document.createElement('th'); th.textContent = h; hdr.appendChild(th); });
+      d.deployments.forEach(dep => {
+        const depBadgeCls = dep.status === 'live' ? 'badge-live' : dep.status === 'failed' ? 'badge-failed' : 'badge-building';
+        const tr = tbl.insertRow();
+        tr.insertCell().textContent = dep.version || '-';
+        const tdS = tr.insertCell();
+        const sp = document.createElement('span');
+        sp.className = 'badge ' + depBadgeCls;
+        sp.textContent = dep.status;
+        tdS.appendChild(sp);
+        tr.insertCell().textContent = dep.deployed_by_name || '-';
+        tr.insertCell().textContent = dep.finished_at || dep.started_at;
+      });
+      histEl.appendChild(tbl);
+    } else {
+      const span = document.createElement('span');
+      span.style.color = 'var(--dim)';
+      span.textContent = 'No deployments';
+      histEl.appendChild(span);
+    }
+  } catch (e) { document.getElementById('deployHistory').textContent = 'Error'; }
+}
+
+async function testHealth() {
+  showMsg('Testing health...', true);
+  const data = await apiFetch('/api/apps/' + currentApp + '/health/' + currentEnv + '/test', { method: 'POST' });
+  showMsg(data.healthy ? 'Healthy: ' + data.status + ' (' + data.response_ms + 'ms)' : 'Failed: ' + (data.error || data.status), data.healthy);
+  loadApp();
+}
+
+async function deploy() {
+  if (!confirm('Deploy ' + currentApp + ' to ' + currentEnv + '?')) return;
+  showMsg('Deploying...', true);
+  const data = await apiFetch('/api/apps/' + currentApp + '/deploy/' + currentEnv, { method: 'POST' });
+  showMsg(data.message || 'Deploy triggered', true);
+  setTimeout(loadApp, 3000);
+}
+
+async function promote() {
+  if (!confirm('Promote sandbox code to production? (env vars and data stay separate)')) return;
+  const data = await apiFetch('/api/apps/' + currentApp + '/promote', { method: 'POST' });
+  showMsg(data.message || 'Promoted', true);
+  setTimeout(loadApp, 3000);
+}
+
+async function rollback() {
+  if (!confirm('Rollback ' + currentApp + ' ' + currentEnv + ' to previous version?')) return;
+  const data = await apiFetch('/api/apps/' + currentApp + '/rollback/' + currentEnv, { method: 'POST' });
+  showMsg(data.message || 'Rolled back', true);
+  setTimeout(loadApp, 2000);
+}
+
+async function addEnvVar() {
+  const key = document.getElementById('newKey').value.trim();
+  const val = document.getElementById('newVal').value;
+  if (!key) return;
+  const vars = {}; vars[key] = val;
+  const data = await apiFetch('/api/apps/' + currentApp + '/env/' + currentEnv, { method: 'PUT', body: { vars } });
+  showMsg(data.message || 'Added', true);
+  document.getElementById('newKey').value = '';
+  document.getElementById('newVal').value = '';
+  loadApp();
+}
+
+async function delEnvVar(key) {
+  if (!confirm('Delete ' + key + '?')) return;
+  await apiFetch('/api/apps/' + currentApp + '/env/' + currentEnv + '/' + key, { method: 'DELETE' });
+  showMsg('Deleted ' + key, true);
+  loadApp();
+}
+
+// Init
+if (KEY) { init(); } else { document.getElementById('loginPanel').classList.remove('hidden'); }
+</script>
+</body>
+</html>

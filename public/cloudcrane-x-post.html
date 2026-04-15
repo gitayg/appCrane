@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{width:100%;max-width:1200px;height:675px;background:#0f1117;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#e4e4e7;overflow:hidden;position:relative}
+
+.glow{position:absolute;border-radius:50%;filter:blur(140px);opacity:.1}
+.g1{width:600px;height:600px;background:#3b82f6;top:-250px;left:-100px}
+.g2{width:500px;height:500px;background:#a78bfa;bottom:-200px;right:0}
+
+.wrap{padding:40px 48px;position:relative;z-index:1;height:100%;display:flex;flex-direction:column}
+
+.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px}
+.logo{font-size:32px;font-weight:800;letter-spacing:-1px}
+.logo span{color:#3b82f6}
+.badge{background:#a78bfa22;border:1px solid #a78bfa44;color:#c4b5fd;padding:4px 14px;border-radius:14px;font-size:12px;font-weight:600}
+
+.headline{font-size:28px;font-weight:800;line-height:1.25;margin-bottom:6px}
+.headline em{font-style:normal;color:#3b82f6}
+.sub{color:#71717a;font-size:15px;margin-bottom:24px}
+
+.features{display:flex;gap:12px;margin-bottom:22px}
+.feat{flex:1;background:#1a1d27;border:1px solid #2a2d3a;border-radius:10px;padding:14px}
+.feat-icon{font-size:20px;margin-bottom:4px}
+.feat h3{font-size:12px;font-weight:700;margin-bottom:4px;color:#e4e4e7}
+.feat p{font-size:10.5px;color:#71717a;line-height:1.4}
+
+.flow{background:#1a1d27;border:1px solid #2a2d3a;border-radius:10px;padding:16px 24px;display:flex;align-items:center;justify-content:center;gap:0}
+.step{text-align:center;flex:1}
+.step-emoji{font-size:20px}
+.step-text{font-size:11px;color:#a1a1aa;margin-top:2px}
+.step-cmd{font-family:'SF Mono',Monaco,monospace;font-size:9.5px;color:#22c55e;margin-top:3px}
+.arrow{color:#3b82f6;font-size:18px;padding:0 4px}
+
+.bottom{position:absolute;bottom:0;left:0;right:0;background:#1a1d27cc;border-top:1px solid #2a2d3a;padding:14px 48px;display:flex;justify-content:space-between;align-items:center;backdrop-filter:blur(10px)}
+.bottom-left{font-size:12px;color:#71717a}
+.bottom-left b{color:#e4e4e7}
+.gh{display:flex;align-items:center;gap:8px;font-size:13px}
+.gh svg{width:18px;height:18px;fill:#e4e4e7}
+.gh a{color:#3b82f6;font-weight:600;text-decoration:none}
+</style>
+</head>
+<body>
+
+<div class="glow g1"></div>
+<div class="glow g2"></div>
+
+<div class="wrap">
+  <div class="top">
+    <div class="logo">App<span>Crane</span></div>
+    <div class="badge">Open Source DevOps for AI Agents</div>
+  </div>
+
+  <div class="headline">Your AI agent writes the code.<br><em>Now it deploys, monitors, and secures it too.</em></div>
+  <div class="sub">One URL. One curl command. No human touches a server.</div>
+
+  <div class="features">
+    <div class="feat">
+      <div class="feat-icon">🚀</div>
+      <h3>One-Command Deploy</h3>
+      <p>Push to GitHub → curl → live with HTTPS. No Docker, no CI/CD, no DevOps team.</p>
+    </div>
+    <div class="feat">
+      <div class="feat-icon">🔐</div>
+      <h3>Central Identity</h3>
+      <p>One login for all apps. Per-app roles. Agent adds full auth with copy-paste code.</p>
+    </div>
+    <div class="feat">
+      <div class="feat-icon">🛡️</div>
+      <h3>Encrypted Secrets</h3>
+      <p>AES-256 at rest. Even the server admin can't read app secrets.</p>
+    </div>
+    <div class="feat">
+      <div class="feat-icon">💚</div>
+      <h3>Self-Healing</h3>
+      <p>Auto health checks. Auto restart. Email alerts. Apps stay up without you.</p>
+    </div>
+    <div class="feat">
+      <div class="feat-icon">⏪</div>
+      <h3>Instant Rollback</h3>
+      <p>One command. Previous version restored in seconds. Last 5 releases kept.</p>
+    </div>
+  </div>
+
+  <div class="flow">
+    <div class="step">
+      <div class="step-emoji">🤖</div>
+      <div class="step-text">AI builds app</div>
+      <div class="step-cmd">git push</div>
+    </div>
+    <div class="arrow">→</div>
+    <div class="step">
+      <div class="step-emoji">📡</div>
+      <div class="step-text">Reads /agent-guide</div>
+      <div class="step-cmd">curl /agent-guide</div>
+    </div>
+    <div class="arrow">→</div>
+    <div class="step">
+      <div class="step-emoji">🏗️</div>
+      <div class="step-text">Deploys to sandbox</div>
+      <div class="step-cmd">curl POST /deploy</div>
+    </div>
+    <div class="arrow">→</div>
+    <div class="step">
+      <div class="step-emoji">✅</div>
+      <div class="step-text">Health check</div>
+      <div class="step-cmd">curl /health/test</div>
+    </div>
+    <div class="arrow">→</div>
+    <div class="step">
+      <div class="step-emoji">🚀</div>
+      <div class="step-text">Ships to production</div>
+      <div class="step-cmd">curl POST /promote</div>
+    </div>
+  </div>
+</div>
+
+<div class="bottom">
+  <div class="bottom-left"><b>6,800 lines</b> · Node.js · SQLite · PM2 · Caddy · <b>$5 VPS</b></div>
+  <div class="gh">
+    <svg viewBox="0 0 24 24"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
+    <a href="https://github.com/gitayg/cloudCrane">github.com/gitayg/cloudCrane</a>
+  </div>
+</div>
+
+</body>
+</html>

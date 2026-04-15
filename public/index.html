@@ -1,0 +1,743 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="AppCrane — Self-hosted deployment manager for Ubuntu servers. Multi-app management, dual environments, auto-HTTPS, GitHub webhooks, zero-downtime deploys.">
+<title>AppCrane — Self-hosted deployment manager</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+
+:root {
+  --bg:       #080808;
+  --bg2:      #0e0e0e;
+  --bg3:      #141414;
+  --border:   #1c1c1c;
+  --border2:  #2a2a2a;
+  --text:     #e8e8e0;
+  --dim:      #666;
+  --dim2:     #444;
+  --amber:    #f5a623;
+  --amber-dim:#7a5312;
+  --green:    #3ecf8e;
+  --red:      #ff4f4f;
+  --font-mono: ui-monospace, 'Cascadia Mono', 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  --font-sans: 'Arial Black', 'Helvetica Neue', Arial, sans-serif;
+}
+
+html { scroll-behavior: smooth; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 14px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+
+/* ── NAV ── */
+nav {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 32px; height: 56px;
+  background: rgba(8,8,8,0.85);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border);
+}
+.nav-logo {
+  font-size: 15px; font-weight: 700; letter-spacing: .08em;
+  color: var(--text); text-decoration: none;
+}
+.nav-logo span { color: var(--amber); }
+.nav-links { display: flex; gap: 8px; align-items: center; }
+.nav-link {
+  font-size: 12px; color: var(--dim); text-decoration: none; padding: 6px 12px;
+  border: 1px solid transparent; border-radius: 4px; transition: all .15s;
+  letter-spacing: .05em;
+}
+.nav-link:hover { color: var(--text); border-color: var(--border2); }
+.nav-cta {
+  font-size: 12px; color: var(--bg); background: var(--amber);
+  text-decoration: none; padding: 7px 16px; border-radius: 4px;
+  font-weight: 700; letter-spacing: .06em; transition: all .15s;
+}
+.nav-cta:hover { background: #ffc04a; }
+
+/* ── HERO ── */
+.hero {
+  min-height: 100vh;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  padding: 120px 24px 80px;
+  position: relative; overflow: hidden;
+  text-align: center;
+}
+
+/* dot grid background */
+.hero::before {
+  content: '';
+  position: absolute; inset: 0;
+  background-image: radial-gradient(circle, #222 1px, transparent 1px);
+  background-size: 28px 28px;
+  opacity: .35;
+  pointer-events: none;
+}
+
+/* amber glow behind title */
+.hero::after {
+  content: '';
+  position: absolute; top: 30%; left: 50%; transform: translate(-50%, -50%);
+  width: 600px; height: 300px;
+  background: radial-gradient(ellipse, rgba(245,166,35,.08) 0%, transparent 70%);
+  pointer-events: none;
+}
+
+.hero-eyebrow {
+  font-size: 11px; letter-spacing: .25em; text-transform: uppercase;
+  color: var(--amber); margin-bottom: 28px;
+  opacity: 0; transform: translateY(12px);
+  animation: fadeUp .5s .1s forwards;
+}
+
+.hero-title {
+  font-family: var(--font-sans);
+  font-size: clamp(72px, 14vw, 156px);
+  font-weight: 900;
+  line-height: .88;
+  letter-spacing: -.02em;
+  text-transform: uppercase;
+  color: var(--text);
+  position: relative; z-index: 1;
+  opacity: 0; transform: translateY(20px);
+  animation: fadeUp .6s .2s forwards;
+}
+.hero-title .accent { color: var(--amber); }
+
+.hero-sub {
+  font-size: 15px; color: var(--dim); margin-top: 32px; max-width: 500px;
+  line-height: 1.7;
+  opacity: 0; transform: translateY(12px);
+  animation: fadeUp .5s .45s forwards;
+}
+
+.hero-terminal {
+  margin-top: 48px; position: relative; z-index: 1;
+  opacity: 0; transform: translateY(12px);
+  animation: fadeUp .5s .6s forwards;
+}
+
+.terminal-box {
+  display: inline-flex; align-items: center; gap: 0;
+  background: var(--bg3); border: 1px solid var(--border2);
+  border-radius: 8px; overflow: hidden;
+  box-shadow: 0 0 0 1px rgba(245,166,35,.06), 0 20px 60px rgba(0,0,0,.5);
+  max-width: 100%;
+}
+.terminal-prompt {
+  padding: 14px 16px 14px 20px;
+  display: flex; align-items: center; gap: 12px;
+  border-right: 1px solid var(--border);
+}
+.terminal-ps { color: var(--amber); font-size: 13px; user-select: none; flex-shrink: 0; }
+.terminal-cmd {
+  font-size: 13px; color: var(--text); white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; max-width: 480px;
+}
+.terminal-cursor {
+  display: inline-block; width: 7px; height: 14px;
+  background: var(--amber); margin-left: 2px; vertical-align: middle;
+  animation: blink 1s step-end infinite;
+}
+.terminal-copy {
+  padding: 14px 18px; background: none; border: none; cursor: pointer;
+  color: var(--dim); font-family: var(--font-mono); font-size: 11px;
+  letter-spacing: .06em; text-transform: uppercase; transition: all .15s;
+  white-space: nowrap; flex-shrink: 0;
+  display: flex; align-items: center; gap: 6px;
+}
+.terminal-copy:hover { color: var(--amber); background: rgba(245,166,35,.05); }
+.terminal-copy.copied { color: var(--green); }
+
+.hero-actions {
+  margin-top: 28px; display: flex; gap: 12px; justify-content: center; flex-wrap: wrap;
+  opacity: 0; transform: translateY(10px);
+  animation: fadeUp .5s .75s forwards;
+}
+.btn-ghost {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 9px 20px; border: 1px solid var(--border2); border-radius: 5px;
+  font-family: var(--font-mono); font-size: 12px; color: var(--dim);
+  text-decoration: none; letter-spacing: .05em; transition: all .15s;
+}
+.btn-ghost:hover { color: var(--text); border-color: var(--border2); background: var(--bg3); }
+.btn-ghost svg { flex-shrink: 0; }
+
+.hero-scroll {
+  position: absolute; bottom: 32px;
+  font-size: 11px; letter-spacing: .15em; color: var(--dim2); text-transform: uppercase;
+  opacity: 0; animation: fadeIn 1s 1.2s forwards;
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+}
+.scroll-line {
+  width: 1px; height: 40px;
+  background: linear-gradient(to bottom, var(--dim2), transparent);
+  animation: scrollPulse 2s 1.2s ease-in-out infinite;
+}
+
+/* ── SECTION COMMON ── */
+section { padding: 100px 24px; }
+.section-inner { max-width: 1100px; margin: 0 auto; }
+.section-label {
+  font-size: 11px; letter-spacing: .25em; text-transform: uppercase;
+  color: var(--amber); margin-bottom: 16px; display: block;
+}
+.section-title {
+  font-family: var(--font-sans);
+  font-size: clamp(32px, 5vw, 52px);
+  font-weight: 900; letter-spacing: -.02em; line-height: 1;
+  text-transform: uppercase; color: var(--text); margin-bottom: 16px;
+}
+.section-lead {
+  font-size: 14px; color: var(--dim); max-width: 560px; line-height: 1.7;
+  margin-bottom: 56px;
+}
+
+/* ── DIVIDER ── */
+.divider {
+  border: none; border-top: 1px solid var(--border);
+  margin: 0 24px;
+}
+
+/* ── FEATURES ── */
+.features { background: var(--bg); }
+.features-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 1px;
+  background: var(--border);
+  border: 1px solid var(--border);
+  border-radius: 8px; overflow: hidden;
+}
+.feature-card {
+  background: var(--bg2); padding: 28px 28px 32px;
+  transition: background .2s;
+  position: relative;
+}
+.feature-card::before {
+  content: '';
+  position: absolute; top: 0; left: 0; right: 0; height: 2px;
+  background: var(--amber); transform: scaleX(0); transform-origin: left;
+  transition: transform .25s;
+}
+.feature-card:hover { background: var(--bg3); }
+.feature-card:hover::before { transform: scaleX(1); }
+.feature-icon {
+  width: 36px; height: 36px; margin-bottom: 16px;
+  color: var(--amber); opacity: .8;
+}
+.feature-name {
+  font-size: 13px; font-weight: 700; color: var(--text);
+  margin-bottom: 8px; letter-spacing: .03em;
+}
+.feature-desc { font-size: 12px; color: var(--dim); line-height: 1.65; }
+
+/* ── HOW IT WORKS ── */
+.how { background: var(--bg2); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+.steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0; }
+.step {
+  padding: 32px 28px; position: relative;
+  border-right: 1px solid var(--border);
+}
+.step:last-child { border-right: none; }
+.step-num {
+  font-family: var(--font-sans); font-size: 52px; font-weight: 900;
+  color: var(--amber); opacity: .15; line-height: 1; margin-bottom: 16px;
+  letter-spacing: -.03em;
+}
+.step-title { font-size: 13px; font-weight: 700; color: var(--text); margin-bottom: 8px; }
+.step-desc { font-size: 12px; color: var(--dim); line-height: 1.6; }
+
+/* ── DEPLOY FLOW (terminal) ── */
+.flow { background: var(--bg); }
+.flow-terminal {
+  background: var(--bg3); border: 1px solid var(--border2);
+  border-radius: 8px; overflow: hidden;
+  box-shadow: 0 24px 64px rgba(0,0,0,.4);
+}
+.flow-bar {
+  background: var(--bg2); padding: 10px 16px;
+  display: flex; align-items: center; gap: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.flow-dot { width: 10px; height: 10px; border-radius: 50%; }
+.flow-dot.r { background: #ff5f56; }
+.flow-dot.y { background: #ffbd2e; }
+.flow-dot.g { background: #27c93f; }
+.flow-title-bar { font-size: 11px; color: var(--dim); margin-left: auto; margin-right: auto; letter-spacing: .05em; }
+.flow-body { padding: 24px 28px; font-size: 13px; line-height: 2; }
+.flow-line { display: flex; align-items: baseline; gap: 0; }
+.flow-ps  { color: var(--amber); white-space: pre; user-select: none; }
+.flow-comment { color: var(--dim2); font-style: normal; }
+.flow-cmd { color: var(--text); }
+.flow-out { color: var(--green); padding-left: 16px; }
+.flow-br { height: 8px; }
+
+/* ── PERMISSIONS ── */
+.perms { background: var(--bg2); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+.perms-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+.perm-card {
+  background: var(--bg3); border: 1px solid var(--border2); border-radius: 8px;
+  overflow: hidden;
+}
+.perm-header {
+  padding: 18px 24px; border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 12px;
+}
+.perm-badge {
+  font-size: 10px; letter-spacing: .12em; text-transform: uppercase; font-weight: 700;
+  padding: 3px 10px; border-radius: 3px;
+}
+.perm-badge.admin { background: rgba(245,166,35,.15); color: var(--amber); }
+.perm-badge.user  { background: rgba(62,207,142,.12); color: var(--green); }
+.perm-role { font-size: 13px; color: var(--dim); }
+.perm-list { padding: 20px 24px; list-style: none; display: flex; flex-direction: column; gap: 10px; }
+.perm-item { font-size: 12px; color: var(--text); display: flex; align-items: flex-start; gap: 10px; }
+.perm-item::before { content: '—'; color: var(--amber); flex-shrink: 0; }
+.perm-item.blocked { color: var(--dim); }
+.perm-item.blocked::before { content: '×'; color: var(--red); }
+.perm-note {
+  margin: 0 24px 20px; padding: 12px 14px;
+  background: rgba(255,79,79,.06); border: 1px solid rgba(255,79,79,.15);
+  border-radius: 5px; font-size: 11px; color: #ff8080; line-height: 1.55;
+}
+
+/* ── STACK ── */
+.stack-row {
+  display: flex; flex-wrap: wrap; gap: 10px; margin-top: 40px;
+}
+.stack-badge {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 16px; background: var(--bg3); border: 1px solid var(--border2);
+  border-radius: 4px; font-size: 12px; color: var(--text); letter-spacing: .04em;
+  transition: all .15s;
+}
+.stack-badge:hover { border-color: var(--amber); color: var(--amber); }
+
+/* ── CTA ── */
+.cta {
+  background: var(--bg);
+  text-align: center;
+  padding: 100px 24px;
+}
+.cta-title {
+  font-family: var(--font-sans);
+  font-size: clamp(36px, 6vw, 72px);
+  font-weight: 900; text-transform: uppercase; letter-spacing: -.02em;
+  line-height: 1; color: var(--text); margin-bottom: 16px;
+}
+.cta-title span { color: var(--amber); }
+.cta-sub { font-size: 13px; color: var(--dim); margin-bottom: 48px; }
+.cta .terminal-box { margin: 0 auto; }
+
+/* ── FOOTER ── */
+footer {
+  padding: 32px 24px;
+  border-top: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;
+}
+.footer-copy { font-size: 11px; color: var(--dim2); letter-spacing: .04em; }
+.footer-links { display: flex; gap: 20px; }
+.footer-link { font-size: 11px; color: var(--dim); text-decoration: none; letter-spacing: .06em; transition: color .15s; }
+.footer-link:hover { color: var(--amber); }
+
+/* ── REVEAL ── */
+.reveal {
+  opacity: 0; transform: translateY(24px);
+  transition: opacity .6s, transform .6s;
+}
+.reveal.visible { opacity: 1; transform: none; }
+
+/* ── ANIMATIONS ── */
+@keyframes fadeUp {
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes fadeIn {
+  to { opacity: 1; }
+}
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+@keyframes scrollPulse {
+  0%, 100% { opacity: .4; transform: scaleY(1); }
+  50% { opacity: 1; transform: scaleY(1.1); }
+}
+
+/* ── RESPONSIVE ── */
+@media (max-width: 640px) {
+  nav { padding: 0 16px; }
+  .nav-link { display: none; }
+  section { padding: 72px 16px; }
+  .perms-grid { grid-template-columns: 1fr; }
+  .steps { grid-template-columns: 1fr 1fr; }
+  .step { border-right: none; border-bottom: 1px solid var(--border); }
+  .step:last-child { border-bottom: none; }
+  .terminal-cmd { max-width: 200px; }
+  footer { flex-direction: column; align-items: flex-start; }
+}
+</style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav>
+  <a class="nav-logo" href="#">App<span>Crane</span></a>
+  <div class="nav-links">
+    <a class="nav-link" href="#features">Features</a>
+    <a class="nav-link" href="#how">How it works</a>
+    <a class="nav-link" href="#permissions">Permissions</a>
+    <a class="nav-cta" href="https://github.com/gitayg/appCrane" target="_blank" rel="noopener">GitHub ↗</a>
+  </div>
+</nav>
+
+<!-- HERO -->
+<header class="hero">
+  <span class="hero-eyebrow">Open source · self-hosted · production-ready</span>
+  <h1 class="hero-title">App<br><span class="accent">Crane</span></h1>
+  <p class="hero-sub">Deploy and manage multiple apps on a single Ubuntu server — with zero-downtime deploys, dual environments, auto-HTTPS, and a full REST API.</p>
+
+  <div class="hero-terminal">
+    <div class="terminal-box">
+      <div class="terminal-prompt">
+        <span class="terminal-ps">$</span>
+        <span class="terminal-cmd" id="heroCmd">curl -fsSL https://raw.githubusercontent.com/gitayg/appCrane/main/install.sh | sudo bash</span>
+        <span class="terminal-cursor"></span>
+      </div>
+      <button class="terminal-copy" id="heroCopy" onclick="copyCmd()" title="Copy install command">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+          <rect x="5" y="5" width="9" height="9" rx="1.5"/>
+          <path d="M11 5V3.5A1.5 1.5 0 0 0 9.5 2h-6A1.5 1.5 0 0 0 2 3.5v6A1.5 1.5 0 0 0 3.5 11H5"/>
+        </svg>
+        <span id="heroCopyLabel">copy</span>
+      </button>
+    </div>
+  </div>
+
+  <div class="hero-actions">
+    <a class="btn-ghost" href="https://github.com/gitayg/appCrane" target="_blank" rel="noopener">
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+        <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/>
+      </svg>
+      View on GitHub
+    </a>
+    <a class="btn-ghost" href="#how">How it works ↓</a>
+  </div>
+
+  <div class="hero-scroll">
+    <div class="scroll-line"></div>
+    scroll
+  </div>
+</header>
+
+<hr class="divider">
+
+<!-- FEATURES -->
+<section class="features" id="features">
+  <div class="section-inner">
+    <span class="section-label reveal">Capabilities</span>
+    <h2 class="section-title reveal">Everything you need<br>to ship.</h2>
+    <p class="section-lead reveal">A full deployment platform on your own machine. No monthly fees, no vendor lock-in, no cloud bill surprises.</p>
+
+    <div class="features-grid reveal">
+      <div class="feature-card">
+        <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <rect x="2" y="3" width="20" height="14" rx="2"/>
+          <path d="M8 21h8M12 17v4"/>
+        </svg>
+        <div class="feature-name">Multi-app on one server</div>
+        <div class="feature-desc">Run as many apps as your server can handle. Each gets isolated PM2 processes, its own ports, and automatic Caddy routing.</div>
+      </div>
+      <div class="feature-card">
+        <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <circle cx="12" cy="12" r="9"/>
+          <path d="M12 3v9l4 2"/>
+        </svg>
+        <div class="feature-name">Dual environments</div>
+        <div class="feature-desc">Every app gets a production and sandbox environment, always-on. Test on sandbox, promote to production in one command.</div>
+      </div>
+      <div class="feature-card">
+        <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+        </svg>
+        <div class="feature-name">Auto-HTTPS via Caddy</div>
+        <div class="feature-desc">Caddy handles TLS certificates automatically via Let's Encrypt. Apps are reachable at your-domain.com/appname with no manual cert work.</div>
+      </div>
+      <div class="feature-card">
+        <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"/>
+        </svg>
+        <div class="feature-name">GitHub webhook auto-deploy</div>
+        <div class="feature-desc">Push to main and your sandbox deploys automatically. HMAC-verified webhooks keep the pipeline secure. Register directly from the dashboard.</div>
+      </div>
+      <div class="feature-card">
+        <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <polyline points="1 4 1 10 7 10"/>
+          <path d="M3.51 15a9 9 0 1 0 .49-4.95"/>
+        </svg>
+        <div class="feature-name">Rollback in seconds</div>
+        <div class="feature-desc">Symlink-based releases keep the last 5 builds. Rolling back is a symlink swap — instant, no re-build required.</div>
+      </div>
+      <div class="feature-card">
+        <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
+        </svg>
+        <div class="feature-name">Zero-downtime deploys</div>
+        <div class="feature-desc">Start new → health check → swap → drain old. Production stays up throughout the deploy cycle.</div>
+      </div>
+      <div class="feature-card">
+        <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <rect x="3" y="11" width="18" height="11" rx="2"/>
+          <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+        </svg>
+        <div class="feature-name">Encrypted env vars</div>
+        <div class="feature-desc">AES-256-GCM encrypted at rest. Admin is blocked from reading them by design — only app users can access their own secrets.</div>
+      </div>
+      <div class="feature-card">
+        <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M3 18v-6a9 9 0 0 1 18 0v6"/>
+          <path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3z"/>
+          <path d="M3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"/>
+        </svg>
+        <div class="feature-name">Health checks + alerts</div>
+        <div class="feature-desc">Pings your /api/health endpoint every 30s. Auto-restarts on failure. Sends email when apps go down or recover.</div>
+      </div>
+      <div class="feature-card">
+        <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+          <path d="M2 17l10 5 10-5"/>
+          <path d="M2 12l10 5 10-5"/>
+        </svg>
+        <div class="feature-name">AI-agent friendly API</div>
+        <div class="feature-desc">Every operation has a curl equivalent. Point your AI agent to /agent-guide for a complete markdown doc with copy-paste commands.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<hr class="divider">
+
+<!-- HOW IT WORKS -->
+<section class="how" id="how">
+  <div class="section-inner">
+    <span class="section-label reveal">Workflow</span>
+    <h2 class="section-title reveal">Deploy in<br>five steps.</h2>
+    <p class="section-lead reveal">From fresh Ubuntu server to running app in under ten minutes.</p>
+
+    <div class="steps reveal">
+      <div class="step">
+        <div class="step-num">01</div>
+        <div class="step-title">Install</div>
+        <div class="step-desc">Run the one-liner. Installs Node 20, Caddy, PM2, AppCrane, and creates an admin key.</div>
+      </div>
+      <div class="step">
+        <div class="step-num">02</div>
+        <div class="step-title">Create app</div>
+        <div class="step-desc">crane app create with a slug, domain, and GitHub URL. AppCrane allocates ports, creates PM2 processes, and wires up Caddy routing.</div>
+      </div>
+      <div class="step">
+        <div class="step-num">03</div>
+        <div class="step-title">Set env vars</div>
+        <div class="step-desc">crane env set or the dashboard. Encrypted at rest. Separate values per environment. Admin can't read them.</div>
+      </div>
+      <div class="step">
+        <div class="step-num">04</div>
+        <div class="step-title">Deploy to sandbox</div>
+        <div class="step-desc">crane deploy --env sandbox. AppCrane pulls, builds, starts, health-checks, and swaps the symlink. Production is untouched.</div>
+      </div>
+      <div class="step">
+        <div class="step-num">05</div>
+        <div class="step-title">Promote</div>
+        <div class="step-desc">crane promote. Copies code from sandbox to production with zero downtime. Never bypasses the sandbox step.</div>
+      </div>
+    </div>
+
+    <div style="margin-top: 56px;" class="reveal">
+      <div class="flow-terminal">
+        <div class="flow-bar">
+          <div class="flow-dot r"></div>
+          <div class="flow-dot y"></div>
+          <div class="flow-dot g"></div>
+          <span class="flow-title-bar">crane — deploy workflow</span>
+        </div>
+        <div class="flow-body">
+          <div class="flow-line"><span class="flow-ps"># </span><span class="flow-comment">Create the app</span></div>
+          <div class="flow-line"><span class="flow-ps">$ </span><span class="flow-cmd">crane app create --name MyApp --slug myapp --repo https://github.com/org/myapp</span></div>
+          <div class="flow-line"><span class="flow-out">✓ App myapp created. Available at https://your-domain.com/myapp</span></div>
+          <div class="flow-br"></div>
+          <div class="flow-line"><span class="flow-ps"># </span><span class="flow-comment">Set env vars (encrypted, sandbox only)</span></div>
+          <div class="flow-line"><span class="flow-ps">$ </span><span class="flow-cmd">crane env set myapp --env sandbox DATABASE_URL=postgres://... API_KEY=sk-xxx</span></div>
+          <div class="flow-line"><span class="flow-out">✓ 2 vars set for myapp/sandbox</span></div>
+          <div class="flow-br"></div>
+          <div class="flow-line"><span class="flow-ps"># </span><span class="flow-comment">Deploy to sandbox, check health, promote</span></div>
+          <div class="flow-line"><span class="flow-ps">$ </span><span class="flow-cmd">crane deploy myapp --env sandbox</span></div>
+          <div class="flow-line"><span class="flow-out">✓ Deploy #12 live — v1.4.2 — 23s</span></div>
+          <div class="flow-line"><span class="flow-ps">$ </span><span class="flow-cmd">crane promote myapp</span></div>
+          <div class="flow-line"><span class="flow-out">✓ myapp/sandbox → production (zero downtime)</span></div>
+          <div class="flow-br"></div>
+          <div class="flow-line"><span class="flow-ps"># </span><span class="flow-comment">Something wrong? Rollback takes 1s</span></div>
+          <div class="flow-line"><span class="flow-ps">$ </span><span class="flow-cmd">crane rollback myapp --env production</span></div>
+          <div class="flow-line"><span class="flow-out">✓ Rolled back to v1.4.1</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<hr class="divider">
+
+<!-- PERMISSIONS -->
+<section class="perms" id="permissions">
+  <div class="section-inner">
+    <span class="section-label reveal">Security model</span>
+    <h2 class="section-title reveal">Admin can't read<br>your secrets.</h2>
+    <p class="section-lead reveal">Two distinct roles with a hard wall between infrastructure control and application data. Admin manages the platform. App users own their deployments.</p>
+
+    <div class="perms-grid reveal">
+      <div class="perm-card">
+        <div class="perm-header">
+          <span class="perm-badge admin">Admin</span>
+          <span class="perm-role">Platform operator — manages infrastructure</span>
+        </div>
+        <ul class="perm-list">
+          <li class="perm-item">Create and delete apps</li>
+          <li class="perm-item">Create users and assign them to apps</li>
+          <li class="perm-item">View server health (CPU, RAM, disk)</li>
+          <li class="perm-item">Configure branding and settings</li>
+          <li class="perm-item blocked">Cannot read env vars or /data/</li>
+          <li class="perm-item blocked">Cannot deploy, rollback, or promote</li>
+          <li class="perm-item blocked">Cannot view backups or configure health</li>
+        </ul>
+        <div class="perm-note">Admin isolation is enforced at middleware level — not by convention. Even with direct database access, env vars are AES-256-GCM encrypted with a key only on-disk.</div>
+      </div>
+      <div class="perm-card">
+        <div class="perm-header">
+          <span class="perm-badge user">App User</span>
+          <span class="perm-role">Developer — owns their app's lifecycle</span>
+        </div>
+        <ul class="perm-list">
+          <li class="perm-item">Deploy, rollback, and promote (own apps only)</li>
+          <li class="perm-item">Read and write env vars (own apps only)</li>
+          <li class="perm-item">Configure health checks and webhooks</li>
+          <li class="perm-item">Create and restore backups</li>
+          <li class="perm-item">View logs and audit trail</li>
+          <li class="perm-item">Access /data/ directory</li>
+          <li class="perm-item blocked">Cannot access other users' apps</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<hr class="divider">
+
+<!-- STACK -->
+<section style="background:var(--bg); padding: 80px 24px;">
+  <div class="section-inner">
+    <span class="section-label reveal">Built with</span>
+    <h2 class="section-title reveal">Boring tech.<br>Reliable stack.</h2>
+    <p class="section-lead reveal">No microservices. No containers. No orchestration. Just proven Linux tools running directly on your server.</p>
+    <div class="stack-row reveal">
+      <div class="stack-badge">Node.js 20</div>
+      <div class="stack-badge">Express 5</div>
+      <div class="stack-badge">SQLite</div>
+      <div class="stack-badge">PM2</div>
+      <div class="stack-badge">Caddy 2</div>
+      <div class="stack-badge">Commander.js</div>
+      <div class="stack-badge">AES-256-GCM</div>
+      <div class="stack-badge">Let's Encrypt</div>
+      <div class="stack-badge">Ubuntu 22.04+</div>
+    </div>
+  </div>
+</section>
+
+<hr class="divider">
+
+<!-- CTA -->
+<section class="cta">
+  <div class="section-inner">
+    <div class="reveal">
+      <p class="cta-title">Ready to<br><span>deploy?</span></p>
+      <p class="cta-sub">One command. Your server. Your apps.</p>
+      <div class="terminal-box" style="max-width:680px">
+        <div class="terminal-prompt">
+          <span class="terminal-ps">$</span>
+          <span class="terminal-cmd" id="ctaCmd">curl -fsSL https://raw.githubusercontent.com/gitayg/appCrane/main/install.sh | sudo bash</span>
+          <span class="terminal-cursor"></span>
+        </div>
+        <button class="terminal-copy" id="ctaCopy" onclick="copyCmd('cta')" title="Copy install command">
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+            <rect x="5" y="5" width="9" height="9" rx="1.5"/>
+            <path d="M11 5V3.5A1.5 1.5 0 0 0 9.5 2h-6A1.5 1.5 0 0 0 2 3.5v6A1.5 1.5 0 0 0 3.5 11H5"/>
+          </svg>
+          <span id="ctaCopyLabel">copy</span>
+        </button>
+      </div>
+      <div style="margin-top:28px; display:flex; gap:12px; justify-content:center; flex-wrap:wrap;">
+        <a class="btn-ghost" href="https://github.com/gitayg/appCrane" target="_blank" rel="noopener">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+            <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/>
+          </svg>
+          Star on GitHub
+        </a>
+        <a class="btn-ghost" href="https://github.com/gitayg/appCrane/blob/main/README.md" target="_blank" rel="noopener">Read the docs ↗</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<footer>
+  <span class="footer-copy">AppCrane — MIT License</span>
+  <div class="footer-links">
+    <a class="footer-link" href="https://github.com/gitayg/appCrane" target="_blank" rel="noopener">GitHub</a>
+    <a class="footer-link" href="https://github.com/gitayg/appCrane/issues" target="_blank" rel="noopener">Issues</a>
+    <a class="footer-link" href="https://github.com/gitayg/appCrane/blob/main/README.md" target="_blank" rel="noopener">Docs</a>
+  </div>
+</footer>
+
+<script>
+const INSTALL_CMD = 'curl -fsSL https://raw.githubusercontent.com/gitayg/appCrane/main/install.sh | sudo bash';
+
+function copyCmd(which) {
+  navigator.clipboard.writeText(INSTALL_CMD).then(() => {
+    const id = which === 'cta' ? 'ctaCopyLabel' : 'heroCopyLabel';
+    const btnId = which === 'cta' ? 'ctaCopy' : 'heroCopy';
+    const label = document.getElementById(id);
+    const btn = document.getElementById(btnId);
+    label.textContent = 'copied!';
+    btn.classList.add('copied');
+    setTimeout(() => { label.textContent = 'copy'; btn.classList.remove('copied'); }, 2000);
+  });
+}
+
+// Scroll reveal
+const observer = new IntersectionObserver((entries) => {
+  entries.forEach((e, i) => {
+    if (e.isIntersecting) {
+      const delay = e.target.dataset.delay || 0;
+      setTimeout(() => e.target.classList.add('visible'), delay);
+      observer.unobserve(e.target);
+    }
+  });
+}, { threshold: 0.1, rootMargin: '0px 0px -40px 0px' });
+
+document.querySelectorAll('.reveal').forEach((el, i) => {
+  const siblings = el.parentElement.querySelectorAll('.reveal');
+  const idx = Array.from(siblings).indexOf(el);
+  el.dataset.delay = idx * 80;
+  observer.observe(el);
+});
+</script>
+</body>
+</html>

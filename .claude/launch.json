@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "AppCrane API",
+      "runtimeExecutable": "/opt/homebrew/bin/node",
+      "runtimeArgs": ["server/index.js"],
+      "port": 5001
+    }
+  ]
+}
