@@ -1,0 +1,27 @@
+{
+  "name": "appcrane",
+  "version": "1.4.11",
+  "description": "AppCrane - Self-hosted deployment manager. CLI + REST API.",
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "bin": {
+    "crane": "./bin/deployhub.js",
+    "appcrane": "./bin/deployhub.js"
+  },
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js"
+  },
+  "overrides": {
+    "follow-redirects": "^1.16.0"
+  },
+  "dependencies": {
+    "@node-saml/node-saml": "^5.1.0",
+    "better-sqlite3": "^11.7.0",
+    "chalk": "^5.4.1",
+    "commander": "^13.1.0",
+    "express": "^5.1.0",
+    "multer": "^2.0.0",
+    "nodemailer": "^8.0.5"
+  }
+}

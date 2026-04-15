@@ -1,0 +1,47 @@
+:root{--bg:#0f1117;--surface:#1a1d27;--surface2:#222536;--border:#2a2d3a;--text:#e4e4e7;--dim:#71717a;--accent:#3b82f6;--green:#22c55e;--yellow:#eab308;--red:#ef4444;--orange:#f97316;--purple:#a78bfa}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text);font-size:14px}
+.topbar{background:var(--surface);border-bottom:1px solid var(--border);padding:10px 24px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:10}
+.topbar .logo{font-weight:700;font-size:1.1rem}.topbar .logo span{color:var(--accent)}
+.topbar .nav{display:flex;gap:4px;margin-left:16px}
+.topbar .nav a{color:var(--dim);text-decoration:none;font-size:.85rem;padding:4px 12px;border-radius:4px}
+.topbar .nav a:hover,.topbar .nav a.active{color:var(--text);background:var(--surface2)}
+.topbar .right{display:flex;gap:10px;align-items:center;font-size:.85rem}
+.topbar .right a{color:var(--dim);text-decoration:none}
+.container{max-width:1200px;margin:0 auto;padding:24px}
+h2{font-size:1.1rem;color:var(--dim);margin:24px 0 12px;text-transform:uppercase;letter-spacing:.5px;font-weight:500}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px;margin-bottom:24px}
+.stat{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px}
+.stat .label{color:var(--dim);font-size:.8rem;text-transform:uppercase;letter-spacing:.5px}
+.stat .value{font-size:1.8rem;font-weight:700;margin:4px 0}
+.stat .sub{color:var(--dim);font-size:.85rem}
+.bar{height:6px;background:var(--surface2);border-radius:3px;margin-top:8px;overflow:hidden}
+.bar-fill{height:100%;border-radius:3px;transition:width .3s}
+table{width:100%;border-collapse:collapse;background:var(--surface);border:1px solid var(--border);border-radius:8px;overflow:hidden}
+th,td{padding:10px 14px;text-align:left;border-bottom:1px solid var(--border);font-size:.85rem}
+th{color:var(--dim);font-weight:500;background:var(--surface2)}
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block}
+.dot-green{background:var(--green)}.dot-red{background:var(--red)}.dot-gray{background:var(--dim)}
+.badge{padding:2px 8px;border-radius:4px;font-size:.75rem;font-weight:600}
+.badge-live{background:#22c55e22;color:var(--green)}.badge-failed{background:#ef444422;color:var(--red)}
+.badge-building{background:#eab30822;color:var(--yellow)}.badge-pending{background:#71717a22;color:var(--dim)}
+.btn{background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:6px 14px;border-radius:6px;cursor:pointer;font-size:.85rem}
+.btn:hover{background:var(--border)}
+.btn-accent{background:var(--accent);color:#fff;border:1px solid var(--accent)}
+.btn-red{background:none;border:1px solid var(--red);color:var(--red)}
+.tag{background:var(--surface2);border:1px solid var(--border);padding:2px 8px;border-radius:4px;font-size:.75rem;color:var(--dim)}
+.app-row{background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:10px;overflow:hidden}
+.app-row .row-top{display:flex;justify-content:space-between;align-items:center;padding:10px 16px;border-bottom:1px solid var(--border)}
+.app-row .row-top .app-name{font-weight:700;font-size:1.05rem}
+.app-row .row-envs{display:flex}
+.app-row .env-half{flex:1;padding:10px 16px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.app-row .env-half:first-child{border-right:1px solid var(--border)}
+.app-row .env-label{font-weight:700;font-size:13px;min-width:50px}
+.app-row .env-label a{text-decoration:none;color:inherit}.app-row .env-label a:hover{text-decoration:underline}
+.app-row .env-label.prod{color:var(--green)}.app-row .env-label.sand{color:var(--orange)}
+.app-row .env-info{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--dim);flex-wrap:wrap}
+.app-row .env-info .ver{color:var(--text);font-weight:600}
+.app-row .env-info button,.app-row .env-info a{font-size:12px;padding:2px 8px;color:var(--dim);background:var(--surface2);border:1px solid var(--border);border-radius:4px;cursor:pointer;text-decoration:none}
+.app-row .env-info button:hover,.app-row .env-info a:hover{color:var(--accent);border-color:var(--accent)}
+.mono{font-family:'SF Mono',Monaco,monospace}
+#loading{text-align:center;padding:60px;color:var(--dim)}

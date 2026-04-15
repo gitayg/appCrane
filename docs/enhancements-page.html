@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>AppCrane - Enhancements</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="stylesheet" href="/docs/shared.css">
+<style>
+.filter-row{display:flex;gap:8px;align-items:center;margin-bottom:16px;flex-wrap:wrap}
+.filter-row select,.filter-row input{background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px 10px;font-size:13px}
+.filter-row input{flex:1;min-width:160px}
+#count{font-size:.8rem;color:var(--dim);margin-left:auto}
+
+.enh-table{width:100%;border-collapse:collapse}
+.enh-table th{text-align:left;font-size:.72rem;text-transform:uppercase;letter-spacing:.5px;color:var(--dim);font-weight:600;padding:8px 12px;border-bottom:1px solid var(--border);white-space:nowrap}
+.enh-table td{padding:12px 12px;border-bottom:1px solid var(--border);vertical-align:top;font-size:.875rem}
+.enh-table tr:last-child td{border-bottom:none}
+.enh-table tbody tr{background:var(--surface);transition:background .12s}
+.enh-table tbody tr:hover{background:var(--surface2)}
+.enh-table tbody tr.s-new td:first-child{border-left:3px solid var(--accent)}
+.enh-table tbody tr.s-selected td:first-child{border-left:3px solid var(--dim)}
+.enh-table tbody tr.s-planning td:first-child{border-left:3px solid #8b5cf6}
+.enh-table tbody tr.s-in_progress td:first-child{border-left:3px solid #f59e0b}
+.enh-table tbody tr.s-done td:first-child{border-left:3px solid #22c55e}
+
+.col-app{width:130px}
+.col-user{width:120px}
+.col-date{width:130px;white-space:nowrap;color:var(--dim);font-size:.8rem}
+.col-msg{max-width:0}
+.col-status{width:170px}
+.col-del{width:36px;text-align:center}
+
+.app-pill{display:inline-block;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-size:.75rem;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:120px}
+.app-none{color:var(--dim);font-size:.78rem;font-style:italic}
+.user-cell{font-weight:600;font-size:.82rem}
+.msg-cell{line-height:1.5;white-space:pre-wrap;word-break:break-word}
+
+.status-select{background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:5px;padding:4px 8px;font-size:.75rem;cursor:pointer;outline:none;width:100%}
+.status-select.s-new{border-color:var(--accent);color:var(--accent);background:#3b82f610}
+.status-select.s-selected{border-color:var(--border);color:var(--dim)}
+.status-select.s-planning{border-color:#8b5cf6;color:#8b5cf6;background:#8b5cf610}
+.status-select.s-in_progress{border-color:#f59e0b;color:#f59e0b;background:#f59e0b10}
+.status-select.s-done{border-color:#22c55e;color:#22c55e;background:#22c55e10}
+
+.enh-del{background:none;border:none;color:var(--dim);cursor:pointer;font-size:.9rem;padding:2px 6px;border-radius:4px;transition:color .15s}
+.enh-del:hover{color:var(--red)}
+.enh-empty{color:var(--dim);padding:40px 0;text-align:center;font-size:.9rem}
+</style>
+</head>
+<body>
+<script src="/docs/shared.js"></script>
+<script>
+if (!checkAuth()) throw 'auth';
+document.body.appendChild(createTopbar());
+const container = document.createElement('div');
+container.className = 'container';
+document.body.appendChild(container);
+
+const h2 = document.createElement('h2');
+h2.textContent = 'Enhancement Requests';
+container.appendChild(h2);
+
+const filterRow = document.createElement('div');
+filterRow.className = 'filter-row';
+
+const appFilter = document.createElement('select');
+appFilter.addEventListener('change', render);
+const allOpt = document.createElement('option');
+allOpt.value = ''; allOpt.textContent = 'All apps';
+appFilter.appendChild(allOpt);
+
+const statusFilter = document.createElement('select');
+statusFilter.addEventListener('change', render);
+[['', 'All statuses'], ['new', 'New'], ['selected', 'Selected for Implementation'], ['planning', 'Planning'], ['in_progress', 'In Progress'], ['done', 'Done']].forEach(([v, t]) => {
+  const o = document.createElement('option');
+  o.value = v; o.textContent = t;
+  statusFilter.appendChild(o);
+});
+
+const search = document.createElement('input');
+search.placeholder = 'Search message or user\u2026';
+search.addEventListener('input', render);
+
+const countEl = document.createElement('span');
+countEl.id = 'count';
+
+filterRow.appendChild(appFilter);
+filterRow.appendChild(statusFilter);
+filterRow.appendChild(search);
+filterRow.appendChild(countEl);
+container.appendChild(filterRow);
+
+const tableWrap = document.createElement('div');
+tableWrap.style.cssText = 'background:var(--surface);border:1px solid var(--border);border-radius:8px;overflow:hidden';
+container.appendChild(tableWrap);
+
+const table = document.createElement('table');
+table.className = 'enh-table';
+tableWrap.appendChild(table);
+
+const thead = table.createTHead();
+const hrow = thead.insertRow();
+['Application', 'User', 'Date', 'Message', 'Status', ''].forEach(h => {
+  const th = document.createElement('th');
+  th.textContent = h;
+  hrow.appendChild(th);
+});
+
+const tbody = table.createTBody();
+tbody.id = 'tbody';
+
+loadVersion(); loadUserInfo();
+
+function createTopbar() {
+  const wrap = document.createElement('div');
+  wrap.innerHTML = topbar('enhancements');
+  return wrap.firstElementChild;
+}
+
+let _all = [];
+
+(async () => {
+  try {
+    const [data, appsData] = await Promise.all([
+      apiFetch('/api/enhancements'),
+      apiFetch('/api/apps').catch(() => ({ apps: [] })),
+    ]);
+    _all = data.requests || [];
+
+    const slugs = new Set(_all.map(r => r.app_slug).filter(Boolean));
+    (appsData.apps || []).forEach(a => slugs.add(a.slug));
+    [...slugs].sort().forEach(s => {
+      const o = document.createElement('option');
+      o.value = s; o.textContent = s;
+      appFilter.appendChild(o);
+    });
+
+    render();
+  } catch(e) {
+    tbody.textContent = '';
+    const errTr = document.createElement('tr');
+    const errTd = document.createElement('td');
+    errTd.colSpan = 6; errTd.className = 'enh-empty'; errTd.textContent = 'Error: ' + e.message;
+    errTr.appendChild(errTd); tbody.appendChild(errTr);
+  }
+})();
+
+function fmtDate(str) {
+  if (!str) return '';
+  const d = new Date(str.replace(' ', 'T') + (str.includes('T') ? '' : 'Z'));
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
+    + '\n' + d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+}
+
+function buildRow(r) {
+  const status = r.status || 'new';
+  const tr = document.createElement('tr');
+  tr.className = 's-' + status;
+  tr.id = 'enh-' + r.id;
+
+  // Application
+  const tdApp = tr.insertCell();
+  tdApp.className = 'col-app';
+  if (r.app_slug) {
+    const pill = document.createElement('span');
+    pill.className = 'app-pill';
+    pill.textContent = r.app_slug;
+    pill.title = r.app_slug;
+    tdApp.appendChild(pill);
+  } else {
+    const none = document.createElement('span');
+    none.className = 'app-none';
+    none.textContent = '—';
+    tdApp.appendChild(none);
+  }
+
+  // User
+  const tdUser = tr.insertCell();
+  tdUser.className = 'col-user user-cell';
+  tdUser.textContent = r.user_name || 'unknown';
+
+  // Date
+  const tdDate = tr.insertCell();
+  tdDate.className = 'col-date';
+  tdDate.style.whiteSpace = 'pre';
+  tdDate.textContent = fmtDate(r.created_at);
+
+  // Message
+  const tdMsg = tr.insertCell();
+  tdMsg.className = 'col-msg msg-cell';
+  tdMsg.textContent = r.message;
+
+  // Status
+  const tdStatus = tr.insertCell();
+  tdStatus.className = 'col-status';
+  const sel = document.createElement('select');
+  sel.className = 'status-select s-' + status;
+  [['new', 'New'], ['selected', 'Selected for Implementation'], ['planning', 'Planning'], ['in_progress', 'In Progress'], ['done', 'Done']].forEach(([v, t]) => {
+    const o = document.createElement('option');
+    o.value = v; o.textContent = t;
+    if (v === status) o.selected = true;
+    sel.appendChild(o);
+  });
+  sel.addEventListener('change', () => setStatus(r.id, sel.value, sel, tr));
+  tdStatus.appendChild(sel);
+
+  // Delete
+  const tdDel = tr.insertCell();
+  tdDel.className = 'col-del';
+  const del = document.createElement('button');
+  del.className = 'enh-del';
+  del.title = 'Delete';
+  del.textContent = '\u2715';
+  del.addEventListener('click', () => delRequest(r.id));
+  tdDel.appendChild(del);
+
+  return tr;
+}
+
+function render() {
+  const appF = appFilter.value;
+  const statusF = statusFilter.value;
+  const q = search.value.trim().toLowerCase();
+  const rows = _all.filter(r => {
+    if (appF && r.app_slug !== appF) return false;
+    if (statusF && (r.status || 'new') !== statusF) return false;
+    if (q && !r.message.toLowerCase().includes(q) && !(r.user_name || '').toLowerCase().includes(q) && !(r.app_slug || '').toLowerCase().includes(q)) return false;
+    return true;
+  });
+  countEl.textContent = rows.length + ' request' + (rows.length !== 1 ? 's' : '');
+  tbody.textContent = '';
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="6" class="enh-empty">No enhancement requests' + (appF || q || statusF ? ' matching filters' : '') + '</td></tr>';
+    return;
+  }
+  rows.forEach(r => tbody.appendChild(buildRow(r)));
+}
+
+async function setStatus(id, status, sel, tr) {
+  sel.disabled = true;
+  try {
+    await apiPost('/api/enhancements/' + id + '/set-status', { status });
+    const idx = _all.findIndex(x => x.id === id);
+    if (idx !== -1) _all[idx].status = status;
+    tr.className = 's-' + status;
+    sel.className = 'status-select s-' + status;
+  } catch(e) {
+    alert('Failed: ' + e.message);
+  }
+  sel.disabled = false;
+}
+
+async function delRequest(id) {
+  if (!confirm('Delete this enhancement request?')) return;
+  try {
+    await apiPost('/api/enhancements/' + id + '/delete', {});
+    _all = _all.filter(r => r.id !== id);
+    render();
+  } catch(e) { alert('Delete failed: ' + e.message); }
+}
+</script>
+</body>
+</html>

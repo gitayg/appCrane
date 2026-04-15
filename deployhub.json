@@ -1,0 +1,10 @@
+{
+  "name": "AppCrane",
+  "version": "0.1.0",
+  "be": {
+    "entry": "node server/index.js",
+    "health": "/api/info"
+  },
+  "data_dirs": ["data/"],
+  "env_example": ".env.example"
+}

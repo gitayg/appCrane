@@ -1,0 +1,812 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AppCrane Dashboard</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="stylesheet" href="/docs/shared.css">
+<style>
+/* Dashboard-specific overrides */
+.setup{background:var(--surface);border:1px solid var(--accent);border-radius:8px;padding:24px;margin-bottom:24px;text-align:center}
+.setup input{background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:6px;width:300px;margin:8px}
+.setup button{background:var(--accent);color:#fff;border:none;padding:8px 20px;border-radius:6px;cursor:pointer;font-weight:600}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px;margin-bottom:24px}
+.stat .value{font-size:1.6rem}
+.stat .sub{font-size:.8rem}
+h2{font-size:.85rem;margin:28px 0 10px;letter-spacing:.6px;font-weight:600}
+.trend-box{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px 12px 4px;margin-bottom:24px}
+.trend-legend{display:flex;gap:20px;font-size:.78rem;color:var(--dim);margin-bottom:8px;padding-left:4px}
+.app-row .row-top .app-actions{display:flex;gap:6px;align-items:center}
+.app-row.errored{border-color:#ef444444;background:#0f1117}
+.users-tags{display:flex;gap:4px;flex-wrap:wrap}
+</style>
+<script src="/docs/shared.js"></script>
+</head>
+<body>
+
+<div class="container">
+  <div id="setupPanel" style="display:none" class="setup">
+    <h3 style="margin-bottom:8px">Enter your API Key</h3>
+    <p style="color:var(--dim);margin-bottom:12px">Paste the admin API key to access the dashboard</p>
+    <input type="password" id="apiKeyInput" placeholder="dhk_admin_...">
+    <button onclick="saveKey()">Connect</button>
+    <div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--border);display:flex;gap:20px;justify-content:center">
+      <a href="/app" style="color:var(--accent);font-size:.85rem;text-decoration:none">App Manager</a>
+      <a href="/api/info" style="color:var(--accent);font-size:.85rem;text-decoration:none">API Info</a>
+      <a href="/docs" style="color:var(--accent);font-size:.85rem;text-decoration:none">Documentation</a>
+      <a href="/agent-guide" style="color:var(--accent);font-size:.85rem;text-decoration:none">Agent Guide</a>
+    </div>
+  </div>
+
+  <!-- App iframe viewer -->
+  <div id="appFrame" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;z-index:50;background:var(--bg)">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 16px;background:var(--surface);border-bottom:1px solid var(--border)">
+      <div style="display:flex;align-items:center;gap:12px">
+        <span style="font-weight:700">App<span style="color:var(--accent)">Crane</span></span>
+        <span id="frameAppName" style="color:var(--dim);font-size:.9rem"></span>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <a id="frameOpenNew" href="#" target="_blank" style="color:var(--accent);font-size:.85rem;text-decoration:none">Open in new tab ↗</a>
+        <button onclick="openDashEnhModal()" style="background:var(--surface2);color:var(--text);border:1px solid var(--border);padding:4px 14px;border-radius:4px;cursor:pointer;font-size:.85rem">💡 Request Enhancement</button>
+        <button onclick="closeAppFrame()" style="background:var(--surface2);color:var(--text);border:1px solid var(--border);padding:4px 14px;border-radius:4px;cursor:pointer;font-size:.85rem">✕ Close</button>
+      </div>
+    </div>
+    <iframe id="frameIframe" style="width:100%;height:calc(100% - 44px);border:none;background:#fff"></iframe>
+  </div>
+
+  <div id="main" style="display:none">
+    <!-- Server + system stats -->
+    <div class="grid" id="serverStats"></div>
+
+    <!-- Activity trend chart -->
+    <h2>Visitors — Last 7 Days</h2>
+    <div class="trend-box">
+      <div class="trend-legend" id="trendLegend"></div>
+      <div id="trendChart"></div>
+    </div>
+
+    <!-- Apps with issues (shown only when errors exist) -->
+    <div id="errorSection" style="display:none">
+      <h2 style="color:var(--red)">Apps with Issues</h2>
+      <div id="erroredApps"></div>
+    </div>
+
+    <!-- Applications -->
+    <h2>Applications <button class="refresh-btn" onclick="generateAgentKey()" style="font-size:.75rem;padding:3px 10px;margin-left:8px">+ New App Agent</button></h2>
+    <div id="appCards"></div>
+
+  </div>
+
+  <div id="loading">Loading...</div>
+</div>
+
+<!-- Enhancement request modal (dashboard frame) -->
+<div id="dashEnhModal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.6);z-index:200;align-items:center;justify-content:center">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:28px;max-width:480px;width:90%">
+    <h3 style="margin-bottom:8px">💡 Request Enhancement</h3>
+    <p style="color:var(--dim);font-size:.85rem;margin-bottom:14px">Describe a feature or improvement you'd like to see.</p>
+    <textarea id="dashEnhMsg" rows="5" placeholder="I'd love it if..." style="width:100%;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:10px;border-radius:6px;font-size:.9rem;resize:vertical;box-sizing:border-box"></textarea>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px">
+      <button onclick="closeDashEnhModal()" style="background:var(--surface2);color:var(--dim);border:1px solid var(--border);padding:7px 18px;border-radius:6px;cursor:pointer">Cancel</button>
+      <button id="dashEnhSubmitBtn" onclick="submitDashEnhancement()" style="background:var(--accent);color:#fff;border:none;padding:7px 18px;border-radius:6px;cursor:pointer;font-weight:600">Submit</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// Inject shared topbar (Dashboard active)
+document.body.insertAdjacentHTML('afterbegin', topbar('dashboard'));
+
+// Override apiFetch to show setup panel on 401 instead of redirecting
+async function apiFetch(path) {
+  const res = await fetch(API + path, { headers: { 'X-API-Key': KEY } });
+  if (res.status === 401) {
+    document.getElementById('setupPanel').style.display = 'block';
+    document.getElementById('main').style.display = 'none';
+    document.getElementById('loading').style.display = 'none';
+    throw new Error('Unauthorized');
+  }
+  return res.json();
+}
+
+function saveKey() {
+  setKey(document.getElementById('apiKeyInput').value.trim());
+  document.getElementById('setupPanel').style.display = 'none';
+  loadAll();
+}
+
+async function apiFetch(path) {
+  const res = await fetch(API + path, { headers: { 'X-API-Key': KEY } });
+  if (res.status === 401) {
+    document.getElementById('setupPanel').style.display = 'block';
+    document.getElementById('main').style.display = 'none';
+    document.getElementById('loading').style.display = 'none';
+    throw new Error('Unauthorized');
+  }
+  return res.json();
+}
+
+function fmt(bytes) {
+  if (!bytes) return '0';
+  const k = 1024, s = ['B','KB','MB','GB','TB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return (bytes / Math.pow(k, i)).toFixed(1) + ' ' + s[i];
+}
+
+function dot(status) {
+  const cls = status === 'healthy' ? 'dot-green' : status === 'down' ? 'dot-red' : 'dot-gray';
+  return '<span class="dot ' + cls + '"></span>';
+}
+
+function badge(status) {
+  const cls = {live:'badge-live',failed:'badge-failed',building:'badge-building',deploying:'badge-building'}[status] || 'badge-pending';
+  return '<span class="badge ' + cls + '">' + status + '</span>';
+}
+
+function barColor(pct) {
+  return pct > 80 ? 'var(--red)' : pct > 60 ? 'var(--yellow)' : 'var(--green)';
+}
+
+const ICON_PATHS = [
+  '/icon.svg', '/favicon.svg', '/logo.svg',
+  '/apple-touch-icon.png', '/favicon.png',
+  '/logo192.png', '/logo512.png', '/favicon.ico',
+];
+
+function tryLoadIcon(slug, productionUrl) {
+  const img = document.getElementById('icon_' + slug);
+  if (!img) return;
+  // Phase 1: AppCrane stored icon (same-origin, reliable)
+  // Phase 2: app's production URL + ICON_PATHS fallback chain
+  img.dataset.iconPhase = '1';
+  img.dataset.iconBase = (productionUrl || '').replace(/\/$/, '');
+  img.src = API + '/api/apps/' + slug + '/icon';
+}
+
+function tryNextIcon(img) {
+  if (img.dataset.iconPhase === '1') {
+    // AppCrane icon failed — try app's own URL
+    img.dataset.iconPhase = '2';
+    const base = img.dataset.iconBase;
+    if (!base) { img.style.display = 'none'; return; }
+    img.dataset.iconIdx = '0';
+    img.src = base + ICON_PATHS[0];
+    return;
+  }
+  const base = img.dataset.iconBase;
+  const idx = parseInt(img.dataset.iconIdx || '0') + 1;
+  if (!base || idx >= ICON_PATHS.length) { img.style.display = 'none'; return; }
+  img.dataset.iconIdx = idx;
+  img.src = base + ICON_PATHS[idx];
+}
+
+async function loadAll() {
+  try {
+    document.getElementById('loading').style.display = 'block';
+
+    // Parallel fetch
+    const [health, appsData, users, enhData, activityData] = await Promise.all([
+      apiFetch('/api/server/health'),
+      apiFetch('/api/apps'),
+      apiFetch('/api/users'),
+      apiFetch('/api/enhancements').catch(() => ({ requests: [] })),
+      apiFetch('/api/dashboard/app-activity').catch(() => ({ days: [], apps: [] })),
+    ]);
+
+    const allApps = appsData.apps || [];
+    const allUsers = users.users || [];
+    const s = health.system;
+
+    // Counts
+    const prodLive = allApps.filter(a => a.production?.deploy?.status === 'live').length;
+    const sandLive = allApps.filter(a => a.sandbox?.deploy?.status === 'live').length;
+    const totalUsers = allUsers.length;
+    const totalEnhReqs = (enhData.requests || []).length;
+
+    // Stat row
+    const statsEl = document.getElementById('serverStats');
+    statsEl.textContent = '';
+    [
+      statCard('CPU', s.cpu.percent + '%', s.cpu.count + ' cores', s.cpu.percent, barColor(s.cpu.percent)),
+      statCard('Memory', s.memory_formatted.used, 'of ' + s.memory_formatted.total, s.memory.percent, barColor(s.memory.percent)),
+      statCard('Disk', s.disk_formatted.used, 'of ' + s.disk_formatted.total, s.disk.percent, barColor(s.disk.percent)),
+      statCard('Production', prodLive + ' live', allApps.length + ' total apps', 0, 'var(--green)'),
+      statCard('Sandbox', sandLive + ' live', allApps.length + ' total apps', 0, 'var(--orange)'),
+      statCard('Users', totalUsers, totalUsers === 1 ? '1 in system' : totalUsers + ' in system', 0, 'var(--purple)'),
+      statCard('Enhancements', totalEnhReqs, 'all time requests', 0, 'var(--yellow)', '/enhancements-page'),
+    ].forEach(card => { statsEl.insertAdjacentHTML('beforeend', card); });
+
+    // Trend chart
+    renderAppTrend(activityData.days || [], activityData.apps || []);
+
+    // Split apps: errored vs healthy
+    const errored = allApps.filter(a =>
+      a.production?.deploy?.status === 'failed' || a.sandbox?.deploy?.status === 'failed'
+    );
+    const healthy = allApps.filter(a =>
+      a.production?.deploy?.status !== 'failed' && a.sandbox?.deploy?.status !== 'failed'
+    );
+
+    const errorSec = document.getElementById('errorSection');
+    if (errored.length) {
+      errorSec.style.display = 'block';
+      const erroredEl = document.getElementById('erroredApps');
+      erroredEl.textContent = '';
+      errored.forEach(a => { erroredEl.insertAdjacentHTML('beforeend', appCard(a, true)); });
+    } else {
+      errorSec.style.display = 'none';
+    }
+
+    const appCardsEl = document.getElementById('appCards');
+    appCardsEl.textContent = '';
+    if (healthy.length === 0 && errored.length === 0) {
+      const div = document.createElement('div');
+      div.style.cssText = 'color:var(--dim);padding:20px';
+      div.textContent = 'No apps yet. Create one with: crane app create --name "MyApp" --slug myapp';
+      appCardsEl.appendChild(div);
+    } else {
+      healthy.forEach(a => { appCardsEl.insertAdjacentHTML('beforeend', appCard(a, false)); });
+    }
+
+    // Async: live versions + icons
+    for (const a of allApps) {
+      fetchLiveVersion(a.slug, 'production');
+      fetchLiveVersion(a.slug, 'sandbox');
+      tryLoadIcon(a.slug, a.urls?.production);
+    }
+
+    document.getElementById('main').style.display = 'block';
+    document.getElementById('loading').style.display = 'none';
+  } catch (e) {
+    if (e.message !== 'Unauthorized') {
+      document.getElementById('loading').textContent = 'Error: ' + e.message;
+    }
+  }
+}
+
+function statCard(label, value, sub, pct, color, href) {
+  const inner = '<div class="label">' + label + '</div>' +
+    '<div class="value" style="color:' + (color || 'var(--text)') + '">' + value + '</div>' +
+    '<div class="sub">' + sub + '</div>' +
+    (pct > 0 ? '<div class="bar"><div class="bar-fill" style="width:' + pct + '%;background:' + (color || barColor(pct)) + '"></div></div>' : '');
+  return href
+    ? '<a class="stat" href="' + href + '" style="text-decoration:none;cursor:pointer">' + inner + '</a>'
+    : '<div class="stat">' + inner + '</div>';
+}
+
+const TREND_PALETTE = ['#4f9cf9', '#a855f7', '#f97316', '#22c55e', '#eab308', '#e91e63', '#00bcd4', '#ff5722'];
+
+function renderAppTrend(days, apps) {
+  const W = 900, H = 160, PL = 28, PR = 12, PT = 16, PB = 28;
+  const innerW = W - PL - PR, innerH = H - PT - PB;
+  const n = days.length || 7;
+  const xPos = i => PL + (n <= 1 ? innerW / 2 : (i / (n - 1)) * innerW);
+
+  const labels = days.map(d => {
+    const [, m, day] = d.split('-');
+    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    return months[parseInt(m, 10) - 1] + ' ' + parseInt(day, 10);
+  });
+
+  const allCounts = apps.flatMap(a => a.counts || []);
+  const maxVal = Math.max(...allCounts, 1);
+  const yPos = v => PT + (1 - v / maxVal) * innerH;
+
+  let svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" style="width:100%;height:' + H + 'px;display:block">';
+
+  for (let g = 0; g <= 4; g++) {
+    const y = PT + (g / 4) * innerH;
+    const val = Math.round(maxVal * (1 - g / 4));
+    svg += '<line x1="' + PL + '" y1="' + y + '" x2="' + (W - PR) + '" y2="' + y + '" stroke="var(--border)" stroke-width="1"/>';
+    if (g < 4 && val > 0) svg += '<text x="' + (PL - 4) + '" y="' + (y + 4) + '" text-anchor="end" font-size="9" fill="var(--dim)">' + val + '</text>';
+  }
+
+  labels.forEach((l, i) => {
+    svg += '<text x="' + xPos(i) + '" y="' + (H - 4) + '" text-anchor="middle" font-size="10" fill="var(--dim)">' + l + '</text>';
+  });
+
+  apps.forEach((app, ai) => {
+    const color = TREND_PALETTE[ai % TREND_PALETTE.length];
+    const counts = app.counts || [];
+    if (counts.length === 0) return;
+    svg += '<polyline points="' + counts.map((v, i) => xPos(i) + ',' + yPos(v)).join(' ') + '" fill="none" stroke="' + color + '" stroke-width="2" stroke-linejoin="round"/>';
+    counts.forEach((v, i) => {
+      svg += '<circle cx="' + xPos(i) + '" cy="' + yPos(v) + '" r="3" fill="' + color + '"/>';
+      if (v > 0) svg += '<text x="' + xPos(i) + '" y="' + (yPos(v) - 7) + '" text-anchor="middle" font-size="9" fill="' + color + '">' + v + '</text>';
+    });
+  });
+
+  svg += '</svg>';
+  const trendEl = document.getElementById('trendChart');
+  trendEl.textContent = '';
+  trendEl.insertAdjacentHTML('beforeend', svg);
+
+  // Build legend
+  const legend = document.getElementById('trendLegend');
+  legend.textContent = '';
+  if (apps.length === 0) {
+    const span = document.createElement('span');
+    span.style.cssText = 'color:var(--dim);font-size:.8rem';
+    span.textContent = 'No visitor data yet';
+    legend.appendChild(span);
+  } else {
+    apps.forEach((app, ai) => {
+      const color = TREND_PALETTE[ai % TREND_PALETTE.length];
+      const item = document.createElement('span');
+      item.style.cssText = 'display:inline-flex;align-items:center;gap:5px;font-size:.8rem';
+      const swatch = document.createElement('span');
+      swatch.style.cssText = 'display:inline-block;width:12px;height:3px;border-radius:2px;background:' + color;
+      item.appendChild(swatch);
+      item.appendChild(document.createTextNode(app.name || app.slug));
+      legend.appendChild(item);
+    });
+  }
+}
+
+function appCard(a, isErrored) {
+  const prodHealth = a.production?.health?.status || 'unknown';
+  const sandHealth = a.sandbox?.health?.status || 'unknown';
+  const prodVersion = a.production?.deploy?.version || '-';
+  const sandVersion = a.sandbox?.deploy?.version || '-';
+  const prodUrl = a.urls?.production || null;
+  const sandUrl = a.urls?.sandbox || null;
+
+  // Build user tags with regen key button per user — returned as DOM node
+  const noUsers = !a.users?.length;
+  function buildAssignSection() {
+    const wrap = document.createElement('div');
+    wrap.style.marginTop = '8px';
+    if (noUsers) {
+      const btn = document.createElement('button');
+      btn.className = 'refresh-btn';
+      btn.style.cssText = 'font-size:.7rem;padding:3px 8px';
+      btn.textContent = '+ Create Deploy Agent';
+      btn.setAttribute('onclick', 'createAgentForApp(' + jsStr(a.slug) + ')');
+      wrap.appendChild(btn);
+    } else {
+      wrap.className = 'users-tags';
+      wrap.style.marginTop = '8px';
+      (a.users || []).forEach(u => {
+        const tag = document.createElement('span');
+        tag.className = 'tag';
+        tag.style.cssText = 'display:inline-flex;align-items:center;gap:4px';
+        tag.appendChild(document.createTextNode(u.name));
+        const keyBtn = document.createElement('button');
+        keyBtn.style.cssText = 'background:none;border:none;color:var(--accent);cursor:pointer;font-size:.7rem;padding:0';
+        keyBtn.textContent = '\uD83D\uDD11';
+        keyBtn.title = 'Regenerate API key for ' + u.name;
+        keyBtn.setAttribute('onclick', 'regenKey(' + u.id + ',' + jsStr(u.name) + ')');
+        tag.appendChild(keyBtn);
+        wrap.appendChild(tag);
+      });
+      const instrBtn = document.createElement('button');
+      instrBtn.className = 'refresh-btn';
+      instrBtn.style.cssText = 'font-size:.65rem;padding:2px 6px;margin-left:4px';
+      instrBtn.textContent = '\uD83D\uDCCB';
+      instrBtn.title = 'Show deploy instructions';
+      instrBtn.setAttribute('onclick', 'showAppToken(' + jsStr(a.slug) + ')');
+      wrap.appendChild(instrBtn);
+      const addBtn = document.createElement('button');
+      addBtn.className = 'refresh-btn';
+      addBtn.style.cssText = 'font-size:.65rem;padding:2px 6px';
+      addBtn.textContent = '+';
+      addBtn.title = 'Add another agent';
+      addBtn.setAttribute('onclick', 'createAgentForApp(' + jsStr(a.slug) + ')');
+      wrap.appendChild(addBtn);
+    }
+    return wrap.outerHTML;
+  }
+  const assignSection = buildAssignSection();
+
+  function envHalf(env, health, version, url, slug, deployStatus) {
+    const isProd = env === 'production';
+    const cls = isProd ? 'prod' : 'sand';
+    const label = isProd ? 'Production' : 'Sandbox';
+    return '<div class="env-half">' +
+      dot(health) +
+      '<span class="env-label ' + cls + '">' + (url ? '<a href="#" onclick="openAppFrame(\'' + url + '\',\'' + slug + ' ' + label + '\',\'' + slug + '\');return false">' + label + ' ↗</a>' : label) + '</span>' +
+      '<span class="env-info">' +
+        '<span class="ver" id="ver_' + slug + '_' + env + '">v' + version + '</span>' +
+        '<span>' + health + '</span>' +
+        (deployStatus ? badge(deployStatus) : '') +
+        '<button onclick="toggleEnvVars(\'' + slug + '\',\'' + env + '\')">env</button>' +
+        '<a href="/app?slug=' + slug + '">manage</a>' +
+      '</span>' +
+    '</div>';
+  }
+
+  const errorBadge = isErrored ? '<span style="background:#ef444422;color:var(--red);padding:2px 8px;border-radius:4px;font-size:.75rem;font-weight:600;margin-right:4px">ERROR</span>' : '';
+  const onboardBtn = errorBadge +
+    '<button class="refresh-btn" style="font-size:12px;padding:3px 12px" onclick="showAppToken(\'' + a.slug + '\')">Onboard Prompt</button>' +
+    '<button style="font-size:11px;padding:2px 8px;background:none;border:1px solid var(--red);color:var(--red);border-radius:4px;cursor:pointer;margin-left:4px" onclick="deleteApp(\'' + a.slug + '\',\'' + a.name + '\')">Delete</button>';
+  const githubLink = a.github_url
+    ? '<a href="' + a.github_url + '" target="_blank" style="color:var(--dim);font-size:.72rem;text-decoration:none;opacity:.7" title="GitHub repo">⎊ GitHub</a>'
+    : '';
+  const initials = esc(a.name.split(/\s+/).map(w => w[0] || '').join('').slice(0, 2).toUpperCase());
+  const iconHtml =
+    '<div style="position:relative;width:36px;height:36px;border-radius:8px;overflow:hidden;flex-shrink:0;background:var(--surface2);border:1px solid var(--border)">' +
+      '<span id="icon_ph_' + a.slug + '" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:.65rem;font-weight:700;color:var(--dim)">' + initials + '</span>' +
+      '<img id="icon_' + a.slug + '" src="" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:none" onerror="tryNextIcon(this)" onload="this.style.display=\'block\';var ph=document.getElementById(\'icon_ph_' + a.slug + '\');if(ph)ph.style.display=\'none\'">' +
+    '</div>';
+  const descHtml = a.description
+    ? '<div style="color:var(--dim);font-size:.78rem;margin-top:1px;font-weight:400">' + esc(a.description) + '</div>'
+    : '';
+  const nameBlock =
+    '<div>' +
+      '<div style="display:flex;align-items:center;gap:6px"><span class="app-name">' + esc(a.name) + '</span>' + githubLink + '</div>' +
+      descHtml +
+    '</div>';
+
+  return '<div class="app-row' + (isErrored ? ' errored' : '') + '">' +
+    '<div class="row-top">' +
+      '<div style="display:flex;align-items:center;gap:10px">' + iconHtml + nameBlock + '</div>' +
+      '<div class="app-actions">' + onboardBtn + '</div>' +
+    '</div>' +
+    '<div class="row-envs">' +
+      envHalf('production', prodHealth, prodVersion, prodUrl, a.slug, a.production?.deploy?.status) +
+      envHalf('sandbox', sandHealth, sandVersion, sandUrl, a.slug, a.sandbox?.deploy?.status) +
+    '</div>' +
+    '<div id="tokenInfo_' + a.slug + '" style="display:none;padding:10px 16px;border-top:1px solid var(--border);background:var(--surface2);font-size:13px"></div>' +
+    '<div id="envVars_' + a.slug + '" style="display:none;padding:10px 16px;border-top:1px solid var(--border);background:var(--surface2);font-size:13px"></div>' +
+  '</div>';
+}
+
+let currentFrameSlug = '';
+
+function openAppFrame(url, name, slug) {
+  currentFrameSlug = slug || '';
+  document.getElementById('frameAppName').textContent = name;
+  document.getElementById('frameOpenNew').href = url;
+  document.getElementById('frameIframe').src = url;
+  document.getElementById('appFrame').style.display = 'block';
+}
+
+function closeAppFrame() {
+  document.getElementById('appFrame').style.display = 'none';
+  document.getElementById('frameIframe').src = '';
+}
+
+function openDashEnhModal() {
+  document.getElementById('dashEnhModal').style.display = 'flex';
+  document.getElementById('dashEnhMsg').value = '';
+  document.getElementById('dashEnhMsg').focus();
+}
+
+function closeDashEnhModal() {
+  document.getElementById('dashEnhModal').style.display = 'none';
+}
+
+async function submitDashEnhancement() {
+  const msg = document.getElementById('dashEnhMsg').value.trim();
+  if (!msg) return;
+  const btn = document.getElementById('dashEnhSubmitBtn');
+  btn.disabled = true;
+  btn.textContent = 'Sending...';
+  try {
+    const res = await fetch(API + '/api/enhancements', {
+      method: 'POST',
+      headers: { 'X-API-Key': KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: msg, app_slug: currentFrameSlug || undefined }),
+    });
+    const data = await res.json();
+    if (!res.ok) { alert(data.error?.message || 'Failed to submit'); return; }
+    closeDashEnhModal();
+  } catch (e) { alert('Failed: ' + e.message); }
+  finally { btn.disabled = false; btn.textContent = 'Submit'; }
+}
+
+async function fetchLiveVersion(slug, env) {
+  try {
+    const res = await fetch(API + '/api/apps/' + slug + '/live-version/' + env, { headers: { 'X-API-Key': KEY } });
+    const data = await res.json();
+    const el = document.getElementById('ver_' + slug + '_' + env);
+    if (el && data.version) {
+      el.textContent = 'v' + data.version;
+      el.style.color = 'var(--green)';
+    }
+  } catch (e) {}
+}
+
+async function createAgentForApp(slug) {
+  const agentName = slug + '-agent';
+  try {
+    // Create a deploy user for this app
+    const res = await fetch(API + '/api/users', {
+      method: 'POST',
+      headers: { 'X-API-Key': KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: agentName, email: agentName + '@appcrane', role: 'user' }),
+    });
+    const data = await res.json();
+    if (!res.ok) { alert(data.error?.message || 'Failed to create agent'); return; }
+
+    // Assign to the app
+    await fetch(API + '/api/apps/' + slug + '/users', {
+      method: 'PUT',
+      headers: { 'X-API-Key': KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user_emails: [agentName + '@appcrane'] }),
+    });
+
+    showKeyModal(agentName + ' (for ' + slug + ')', data.api_key);
+    loadAll();
+  } catch (e) { alert('Failed: ' + e.message); }
+}
+
+function showAppToken(slug) {
+  const apiUrl = window.location.origin;
+  const guideUrl = apiUrl + '/agent-guide';
+  const prompt = 'You are deploying the app "' + slug + '" on AppCrane.\n\nAPI Base URL: ' + apiUrl + '\nAgent Guide: ' + guideUrl + '\nApp Slug: ' + slug + '\n\nTo deploy:\ncurl -X POST ' + apiUrl + '/api/apps/' + slug + '/deploy/sandbox -H "X-API-Key: YOUR_KEY"\n\nTo promote to production:\ncurl -X POST ' + apiUrl + '/api/apps/' + slug + '/promote -H "X-API-Key: YOUR_KEY"\n\nRead the full agent guide for all available operations.';
+  showPromptModal('Deploy Instructions: ' + slug, prompt);
+}
+
+async function generateAgentKey() {
+  const agentName = 'agent-' + Date.now().toString(36);
+  try {
+    const res = await fetch(API + '/api/users', {
+      method: 'POST',
+      headers: { 'X-API-Key': KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: agentName, email: agentName + '@appcrane', role: 'user' }),
+    });
+    const data = await res.json();
+    if (!res.ok) { alert(data.error?.message || 'Failed'); return; }
+
+    const guideUrl = window.location.origin + '/agent-guide';
+    const apiUrl = window.location.origin;
+    const instructions = 'Read the agent guide at ' + guideUrl + '\nUse API key: ' + data.api_key + '\nAPI base URL: ' + apiUrl;
+
+    const prompt = 'You are an AI agent managing deployments on AppCrane.\n\nAPI Base URL: ' + apiUrl + '\nAPI Key: ' + data.api_key + '\nAgent Guide: ' + guideUrl + '\n\nRead the agent guide first. You can create apps, deploy, manage env vars, configure health checks, and rollback.\nYou do NOT need admin help. Create an app with POST /api/apps and start deploying.';
+    showPromptModal('New Agent: ' + agentName, prompt);
+    loadAll();
+  } catch (e) { alert('Failed: ' + e.message); }
+}
+
+async function toggleEnvVars(slug, env) {
+  const el = document.getElementById('envVars_' + slug);
+  if (el.style.display !== 'none' && el.dataset.env === env) { el.style.display = 'none'; return; }
+  el.dataset.env = env;
+  el.style.display = 'block';
+  el.textContent = '';
+  const loadDiv = document.createElement('div');
+  loadDiv.style.color = 'var(--dim)';
+  loadDiv.textContent = 'Loading ' + env + ' env vars...';
+  el.appendChild(loadDiv);
+  try {
+    const res = await fetch(API + '/api/apps/' + slug + '/env/' + env + '?reveal=true', { headers: { 'X-API-Key': KEY } });
+    const data = await res.json();
+    el.textContent = '';
+    if (data.error) {
+      const errDiv = document.createElement('div');
+      errDiv.style.color = 'var(--red)';
+      errDiv.textContent = data.error.message || 'Failed to load';
+      el.appendChild(errDiv);
+      return;
+    }
+    const inputStyle = 'background:var(--bg);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:4px;font-size:13px;font-family:monospace';
+    const labelSpan = document.createElement('span');
+    labelSpan.style.color = env === 'production' ? 'var(--green)' : 'var(--orange)';
+    labelSpan.textContent = env === 'production' ? 'Production' : 'Sandbox';
+    el.appendChild(labelSpan);
+    const countSpan = document.createElement('span');
+    countSpan.style.color = 'var(--dim)';
+    countSpan.textContent = ' ' + (data.vars?.length || 0) + ' vars';
+    el.appendChild(countSpan);
+    if (data.vars?.length) {
+      const tbl = document.createElement('table');
+      tbl.style.marginTop = '6px';
+      const hdr = tbl.insertRow();
+      ['Key','Value',''].forEach(h => { const th = document.createElement('th'); th.textContent = h; hdr.appendChild(th); });
+      data.vars.forEach(v => {
+        const tr = tbl.insertRow();
+        const tdKey = tr.insertCell(); tdKey.className = 'mono'; tdKey.style.fontSize = '13px'; tdKey.textContent = v.key;
+        const tdVal = tr.insertCell();
+        const inp = document.createElement('input');
+        inp.id = 'val_' + slug + '_' + env + '_' + v.key;
+        inp.value = v.value;
+        inp.style.cssText = inputStyle + ';width:100%';
+        inp.dataset.slug = slug; inp.dataset.env = env; inp.dataset.key = v.key;
+        inp.addEventListener('change', function() { updateEnvVar(this.dataset.slug, this.dataset.env, this.dataset.key, this.value); });
+        tdVal.appendChild(inp);
+        const tdDel = tr.insertCell();
+        const delBtn = document.createElement('button');
+        delBtn.style.cssText = 'background:none;border:none;color:var(--red);cursor:pointer;font-size:13px';
+        delBtn.textContent = 'x';
+        delBtn.dataset.slug = slug; delBtn.dataset.env = env; delBtn.dataset.key = v.key;
+        delBtn.addEventListener('click', function() { deleteEnvVar(this.dataset.slug, this.dataset.env, this.dataset.key); });
+        tdDel.appendChild(delBtn);
+      });
+      el.appendChild(tbl);
+    }
+    const addRow = document.createElement('div');
+    addRow.style.cssText = 'display:flex;gap:4px;margin-top:8px';
+    const ekInp = document.createElement('input');
+    ekInp.id = 'ek_' + slug + '_' + env; ekInp.placeholder = 'NEW_KEY';
+    ekInp.style.cssText = inputStyle + ';width:120px';
+    const evInp = document.createElement('input');
+    evInp.id = 'ev_' + slug + '_' + env; evInp.placeholder = 'value';
+    evInp.style.cssText = inputStyle + ';flex:1';
+    const addBtn = document.createElement('button');
+    addBtn.style.cssText = 'background:var(--accent);color:#fff;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:13px';
+    addBtn.textContent = 'Add';
+    addBtn.dataset.slug = slug; addBtn.dataset.env = env;
+    addBtn.addEventListener('click', function() { addEnvVar(this.dataset.slug, this.dataset.env); });
+    addRow.appendChild(ekInp); addRow.appendChild(evInp); addRow.appendChild(addBtn);
+    el.appendChild(addRow);
+    if (data.warnings?.length) {
+      data.warnings.forEach(w => {
+        const wDiv = document.createElement('div');
+        wDiv.style.cssText = 'color:var(--yellow);font-size:13px;margin-top:4px';
+        wDiv.textContent = w;
+        el.appendChild(wDiv);
+      });
+    }
+  } catch (e) {
+    el.textContent = '';
+    const errDiv = document.createElement('div');
+    errDiv.style.color = 'var(--red)';
+    errDiv.textContent = 'Error: ' + e.message;
+    el.appendChild(errDiv);
+  }
+}
+
+async function updateEnvVar(slug, env, key, value) {
+  const vars = {}; vars[key] = value;
+  try {
+    await fetch(API + '/api/apps/' + slug + '/env/' + env, {
+      method: 'PUT', headers: { 'X-API-Key': KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ vars }),
+    });
+  } catch (e) { alert('Failed: ' + e.message); }
+}
+
+async function addEnvVar(slug, env) {
+  const key = document.getElementById('ek_' + slug + '_' + env).value.trim();
+  const val = document.getElementById('ev_' + slug + '_' + env).value;
+  if (!key) return;
+  const vars = {}; vars[key] = val;
+  try {
+    await fetch(API + '/api/apps/' + slug + '/env/' + env, {
+      method: 'PUT', headers: { 'X-API-Key': KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ vars }),
+    });
+    toggleEnvVars(slug, env); // force close
+    toggleEnvVars(slug, env); // reopen to refresh
+  } catch (e) { alert('Failed: ' + e.message); }
+}
+
+async function deleteEnvVar(slug, env, varKey) {
+  if (!confirm('Delete ' + varKey + ' from ' + env + '?')) return;
+  try {
+    await fetch(API + '/api/apps/' + slug + '/env/' + env + '/' + varKey, {
+      method: 'DELETE', headers: { 'X-API-Key': KEY },
+    });
+    toggleEnvVars(slug, env);
+    toggleEnvVars(slug, env);
+  } catch (e) { alert('Failed: ' + e.message); }
+}
+
+async function deleteApp(slug, name) {
+  if (!confirm('Delete app "' + name + '" (' + slug + ')? This will stop all processes and remove the app.')) return;
+  if (!confirm('Are you REALLY sure? This cannot be undone.')) return;
+  try {
+    const res = await fetch(API + '/api/apps/' + slug + '?confirm=true', { method: 'DELETE', headers: { 'X-API-Key': KEY } });
+    const data = await res.json();
+    if (!res.ok) { alert(data.error?.message || 'Failed'); return; }
+    loadAll();
+  } catch (e) { alert('Failed: ' + e.message); }
+}
+
+async function regenKey(userId, userName) {
+  if (!confirm('Regenerate API key for ' + userName + '? The old key will stop working.')) return;
+  try {
+    const res = await fetch(API + '/api/users/' + userId + '/regenerate-key?confirm=true', {
+      method: 'POST', headers: { 'X-API-Key': KEY }
+    });
+    const data = await res.json();
+    if (!res.ok) { alert(data.error?.message || 'Failed'); return; }
+    showKeyModal(userName, data.api_key);
+  } catch (e) { alert('Failed: ' + e.message); }
+}
+
+function showKeyModal(name, key) {
+  const guideUrl = window.location.origin + '/agent-guide';
+  const apiUrl = window.location.origin;
+  const prompt = 'You are an AI agent managing deployments on AppCrane.\n\nAPI Base URL: ' + apiUrl + '\nAPI Key: ' + key + '\nAgent Guide: ' + guideUrl + '\n\nRead the agent guide first. You can create apps, deploy, manage env vars, configure health checks, and rollback.\nYou do NOT need admin help. Create an app with POST /api/apps and start deploying.';
+  showPromptModal('Agent Credentials: ' + name, prompt);
+}
+
+function showPromptModal(title, prompt) {
+  const keyMatch = prompt.match(/API Key: (dhk_\S+)/);
+  const keyOnly = keyMatch ? keyMatch[1] : '';
+
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.7);display:flex;align-items:center;justify-content:center;z-index:100';
+
+  const modal = document.createElement('div');
+  modal.style.cssText = 'background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:32px;max-width:600px;width:90%';
+
+  const h3 = document.createElement('h3');
+  h3.style.cssText = 'margin-bottom:12px;color:var(--green)';
+  h3.textContent = title;
+  modal.appendChild(h3);
+
+  // API Key section
+  const keySection = document.createElement('div');
+  keySection.style.marginBottom = '16px';
+  const keyHdr = document.createElement('div');
+  keyHdr.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin-bottom:6px';
+  const keyLabel = document.createElement('span');
+  keyLabel.style.cssText = 'color:var(--dim);font-size:.8rem';
+  keyLabel.textContent = 'API Key';
+  const copyKeyBtn = document.createElement('button');
+  copyKeyBtn.style.cssText = 'background:var(--accent);color:#fff;border:none;padding:4px 14px;border-radius:4px;cursor:pointer;font-size:.75rem;font-weight:600';
+  copyKeyBtn.textContent = 'Copy Key';
+  copyKeyBtn.addEventListener('click', function() { navigator.clipboard.writeText(keyOnly); this.textContent = 'Copied!'; });
+  keyHdr.appendChild(keyLabel); keyHdr.appendChild(copyKeyBtn);
+  const keyBox = document.createElement('div');
+  keyBox.style.cssText = 'background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px;cursor:pointer;font-family:\'SF Mono\',Monaco,monospace;font-size:.85rem;font-weight:700;color:var(--text);user-select:all;word-break:break-all';
+  keyBox.textContent = keyOnly;
+  keyBox.addEventListener('click', function() { navigator.clipboard.writeText(keyOnly); });
+  keyBox.addEventListener('mouseover', function() { this.style.borderColor = 'var(--accent)'; });
+  keyBox.addEventListener('mouseout', function() { this.style.borderColor = 'var(--border)'; });
+  keySection.appendChild(keyHdr); keySection.appendChild(keyBox);
+  modal.appendChild(keySection);
+
+  // Full prompt section
+  const promptSection = document.createElement('div');
+  const promptHdr = document.createElement('div');
+  promptHdr.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin-bottom:6px';
+  const promptLabel = document.createElement('span');
+  promptLabel.style.cssText = 'color:var(--dim);font-size:.8rem';
+  promptLabel.textContent = 'Full Agent Prompt';
+  const copyPromptBtn = document.createElement('button');
+  copyPromptBtn.style.cssText = 'background:var(--surface2);color:var(--text);border:1px solid var(--border);padding:4px 14px;border-radius:4px;cursor:pointer;font-size:.75rem;font-weight:600';
+  copyPromptBtn.textContent = 'Copy Prompt';
+  const promptBox = document.createElement('div');
+  promptBox.id = 'promptBox';
+  promptBox.style.cssText = 'background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:12px;cursor:pointer;transition:border-color .2s;white-space:pre-wrap;font-family:\'SF Mono\',Monaco,monospace;font-size:.75rem;line-height:1.5;color:var(--dim);user-select:all;max-height:200px;overflow-y:auto';
+  promptBox.textContent = prompt;
+  copyPromptBtn.addEventListener('click', function() { navigator.clipboard.writeText(promptBox.textContent); this.textContent = 'Copied!'; });
+  promptBox.addEventListener('click', function() { navigator.clipboard.writeText(this.textContent); copyPromptBtn.textContent = 'Copied!'; });
+  promptBox.addEventListener('mouseover', function() { this.style.borderColor = 'var(--accent)'; });
+  promptBox.addEventListener('mouseout', function() { this.style.borderColor = 'var(--border)'; });
+  promptHdr.appendChild(promptLabel); promptHdr.appendChild(copyPromptBtn);
+  promptSection.appendChild(promptHdr); promptSection.appendChild(promptBox);
+  modal.appendChild(promptSection);
+
+  const footer = document.createElement('div');
+  footer.style.cssText = 'display:flex;justify-content:flex-end;margin-top:16px';
+  const closeBtn = document.createElement('button');
+  closeBtn.style.cssText = 'background:var(--surface2);color:var(--dim);border:1px solid var(--border);padding:8px 20px;border-radius:6px;cursor:pointer';
+  closeBtn.textContent = 'Close';
+  closeBtn.addEventListener('click', () => overlay.remove());
+  footer.appendChild(closeBtn);
+  modal.appendChild(footer);
+
+  const note = document.createElement('div');
+  note.style.cssText = 'color:var(--yellow);font-size:.75rem;margin-top:8px';
+  note.textContent = 'The API key will not be shown again after closing.';
+  modal.appendChild(note);
+
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+}
+
+// Auto-refresh every 30s
+setInterval(loadAll, 30000);
+
+// Initial load
+(async () => {
+  loadVersion();
+  loadUserInfo();
+  if (KEY && KEY.length > 10) {
+    loadAll();
+  } else {
+    document.getElementById('setupPanel').style.display = 'block';
+    const loading = document.getElementById('loading');
+    if (loading) loading.style.display = 'none';
+  }
+})()
+</script>
+</body>
+</html>
