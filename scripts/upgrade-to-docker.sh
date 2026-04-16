@@ -24,8 +24,9 @@ warn() { printf '\033[1;33m!!\033[0m  %s\n' "$*" >&2; }
 
 [[ $EUID -eq 0 ]] || { warn "upgrade-to-docker.sh must run as root"; exit 1; }
 
-do_prepare() {
-  # 1. Docker
+do_ensure_docker() {
+  # Install Docker if missing and ensure the run user is in the docker group.
+  # Idempotent — safe to call on every update.
   if ! command -v docker >/dev/null 2>&1; then
     log "Installing docker.io"
     export DEBIAN_FRONTEND=noninteractive
@@ -36,13 +37,17 @@ do_prepare() {
     log "Docker already present: $(docker --version | head -n1)"
   fi
 
-  # 2. Docker group
   if ! id -nG "$RUN_USER" | tr ' ' '\n' | grep -qx docker; then
     log "Adding $RUN_USER to docker group"
     usermod -aG docker "$RUN_USER"
   fi
+}
 
-  # 3. systemd unit (write + enable, do NOT start — port may still be held by PM2)
+do_prepare() {
+  # 1. Docker
+  do_ensure_docker
+
+  # 2. systemd unit (write + enable, do NOT start — port may still be held by PM2)
   NODE_BIN="$(command -v node)"
   SERVICE_FILE="/etc/systemd/system/appcrane.service"
   log "Writing $SERVICE_FILE"
@@ -178,6 +183,8 @@ do_cleanup() {
   # Idempotent post-upgrade hygiene — runs on every self-update once AppCrane
   # is under systemd. Safe because killing PM2 cannot kill *us* (we're now a
   # systemd-managed process, independent of the PM2 daemon).
+  # Always ensures Docker is installed (covers servers that missed the initial migration).
+  do_ensure_docker
   # If PM2 was actually killed, those apps are offline → trigger bulk redeploy.
   if kill_pm2_if_running; then
     log "cleanup: PM2 artifacts removed — apps were offline, rebuilding as containers"
