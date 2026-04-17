@@ -80,6 +80,11 @@ input:focus{border-color:var(--accent)}
 .btn-enhance{background:none;color:var(--dim);border:1px solid var(--border);border-radius:5px;padding:4px 12px;cursor:pointer;font-size:.78rem;font-weight:500;width:auto;transition:border-color .15s,color .15s}
 .btn-enhance:hover{border-color:var(--accent);color:var(--accent)}
 .app-frame iframe{flex:1;border:none;background:#fff}
+.presence-wrap{display:flex;align-items:center;gap:4px}
+.presence-avatars{display:flex;align-items:center}
+.presence-avatar{width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:.58rem;font-weight:700;color:#fff;border:2px solid var(--surface);margin-left:-6px;flex-shrink:0;cursor:default}
+.presence-avatars .presence-avatar:first-child{margin-left:0}
+.presence-label{font-size:.72rem;color:var(--dim);white-space:nowrap}
 
 /* Enhancement modal */
 .enh-overlay{display:none;position:fixed;inset:0;z-index:200;background:rgba(0,0,0,.55);align-items:center;justify-content:center}
@@ -150,6 +155,10 @@ input:focus{border-color:var(--accent)}
       <span class="frame-name" id="frameAppName"></span>
     </div>
     <div class="frame-right">
+      <div id="presenceWrap" class="presence-wrap" style="display:none">
+        <div id="presenceAvatars" class="presence-avatars"></div>
+        <span id="presenceLabel" class="presence-label"></span>
+      </div>
       <span id="frameUserInfo" class="frame-user"></span>
       <button class="btn-enhance" onclick="openEnhModal()">💡 Request Enhancement</button>
       <a id="frameNewTab" href="#" target="_blank" class="btn-newtab">Open in new tab ↗</a>
@@ -616,6 +625,7 @@ function openApp(url, name, slug, hasIcon) {
   document.getElementById('frameNewTab').href = url;
   document.getElementById('frameIframe').src = url;
   document.getElementById('appFrame').classList.add('open');
+  startPresence(slug);
   const icon = document.getElementById('frameAppIcon');
   icon.style.display = 'none';
   icon.onload = function() { icon.style.display = 'block'; };
@@ -632,6 +642,58 @@ function closeApp() {
   const icon = document.getElementById('frameAppIcon');
   icon.style.display = 'none'; icon.src = '';
   currentAppSlug = null;
+  stopPresence();
+}
+
+var _presenceTimer = null;
+
+function startPresence(slug) {
+  stopPresence();
+  pingPresence(slug);
+  _presenceTimer = setInterval(function() { pingPresence(slug); }, 15000);
+}
+
+function stopPresence() {
+  if (_presenceTimer) { clearInterval(_presenceTimer); _presenceTimer = null; }
+  document.getElementById('presenceWrap').style.display = 'none';
+  document.getElementById('presenceAvatars').textContent = '';
+}
+
+async function pingPresence(slug) {
+  if (!sessionToken || !slug) return;
+  try {
+    const res = await fetch(window.location.origin + '/api/presence/ping', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + sessionToken },
+      body: JSON.stringify({ slug }),
+    });
+    if (!res.ok) return;
+    const data = await res.json();
+    renderPresence(data.viewers || []);
+  } catch (_) {}
+}
+
+function renderPresence(others) {
+  const wrap = document.getElementById('presenceWrap');
+  const avatarsEl = document.getElementById('presenceAvatars');
+  const labelEl = document.getElementById('presenceLabel');
+  avatarsEl.textContent = '';
+  if (!others.length) { wrap.style.display = 'none'; return; }
+  wrap.style.display = 'flex';
+  const shown = others.slice(0, 4);
+  shown.forEach(function(v) {
+    const av = document.createElement('div');
+    av.className = 'presence-avatar';
+    av.style.background = colorFor(v.name);
+    av.title = v.name + ' is also here';
+    av.textContent = initials(v.name);
+    avatarsEl.appendChild(av);
+  });
+  const extra = others.length - shown.length;
+  labelEl.textContent = others.length === 1
+    ? '1 other here'
+    : others.length + ' others here';
+  if (extra > 0) labelEl.textContent += ' (+' + extra + ')';
 }
 
 function fmtDate(str) {
