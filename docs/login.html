@@ -297,6 +297,10 @@ function colorFor(s) {
 function initials(name) {
   return (name || '?').trim().split(/\s+/).map(w => w[0]).slice(0, 2).join('').toUpperCase();
 }
+function trimAppNameFromDescription(name, desc) {
+  if (!desc || !name) return desc || '';
+  return desc.startsWith(name) ? desc.slice(name.length).replace(/^[\s\-–:]+/, '') : desc;
+}
 
 // Host-only cookie: path-based routing means crane + all apps share one host,
 // so no Domain attribute is needed (and setting one breaks on IPs/single-label hosts).
