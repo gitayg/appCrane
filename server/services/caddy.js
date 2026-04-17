@@ -102,6 +102,18 @@ export function generateCaddyfile() {
     const ports = getPortsForSlot(app.slot);
     const slug = app.slug;
 
+    // Permanent redirects for any old slugs (after a rename)
+    let aliases = [];
+    try { aliases = JSON.parse(app.slug_aliases || '[]'); } catch (_) {}
+    for (const alias of aliases) {
+      caddyfile += `    handle /${alias}-sandbox* {\n`;
+      caddyfile += `        redir /${slug}-sandbox{uri} permanent\n`;
+      caddyfile += `    }\n\n`;
+      caddyfile += `    handle /${alias}* {\n`;
+      caddyfile += `        redir /${slug}{uri} permanent\n`;
+      caddyfile += `    }\n\n`;
+    }
+
     // Sandbox — longer prefix /${slug}-sandbox* wins over /${slug}* via mutual exclusivity
     caddyfile += `    handle /${slug}-sandbox* {\n`;
     if (liveSet.has(`${app.id}:sandbox`)) {
