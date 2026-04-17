@@ -202,13 +202,15 @@ router.post('/callback', async (req, res) => {
       return res.redirect(302, base + '/login?saml_error=no_account');
     }
 
-    const token    = createIdentitySession(user.id);
+    const token      = createIdentitySession(user.id);
     const relayState = req.body.RelayState || '';
-    const dest     = relayState && relayState.startsWith('http') ? relayState : base + '/login';
-    const sep      = dest.includes('?') ? '&' : '?';
+    const p          = new URLSearchParams({ oidc_token: token });
+    if (relayState && relayState.startsWith('http') && !relayState.includes('/login')) {
+      p.set('redirect', relayState);
+    }
 
     log.info(`SAML login: ${user.name} (${nameId})`);
-    res.redirect(302, `${dest}${sep}oidc_token=${encodeURIComponent(token)}`);
+    res.redirect(302, `${base}/login?${p.toString()}`);
   } catch (e) {
     log.error('SAML callback error: ' + e.message);
     res.redirect(302, base + '/login?saml_error=' + encodeURIComponent(e.message));

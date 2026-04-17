@@ -315,10 +315,12 @@ router.get('/callback', async (req, res) => {
     const token = createIdentitySession(user.id);
     log.info(`OIDC login: ${user.name} (${email || sub})`);
 
-    // Pass token in URL; login page stores it in localStorage + cookie and cleans the URL
-    const dest = stateData.r && stateData.r.startsWith('http') ? stateData.r : base + '/login';
-    const sep  = dest.includes('?') ? '&' : '?';
-    res.redirect(302, `${dest}${sep}oidc_token=${encodeURIComponent(token)}`);
+    // Always go through /login so it sets the cookie, then forward to redirect target
+    const p = new URLSearchParams({ oidc_token: token });
+    if (stateData.r && stateData.r.startsWith('http') && !stateData.r.includes('/login')) {
+      p.set('redirect', stateData.r);
+    }
+    res.redirect(302, `${base}/login?${p.toString()}`);
   } catch (e) {
     log.error('OIDC callback error: ' + e.message);
     res.redirect(302, base + '/login?sso_error=' + encodeURIComponent(e.message));
