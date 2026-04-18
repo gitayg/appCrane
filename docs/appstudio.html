@@ -241,9 +241,15 @@ async function showDetail(id) {
     planBtn.className = 'btn btn-accent'; planBtn.textContent = 'Plan with AI';
     planBtn.dataset.id = e.id;
     planBtn.addEventListener('click', async function() {
-      this.disabled = true; this.textContent = 'Queuing...';
-      await apiPost('/api/appstudio/' + this.dataset.id + '/plan');
-      showDetail(parseInt(this.dataset.id));
+      var btn = this;
+      btn.disabled = true; btn.textContent = 'Queuing...';
+      var result = await apiPost('/api/appstudio/' + btn.dataset.id + '/plan');
+      if (result && result.error) {
+        alert('Failed: ' + (result.error.message || JSON.stringify(result.error)));
+        btn.disabled = false; btn.textContent = 'Plan with AI';
+        return;
+      }
+      showDetail(parseInt(btn.dataset.id));
     });
     actions.appendChild(planBtn);
   }
@@ -253,9 +259,10 @@ async function showDetail(id) {
     approveBtn.className = 'btn btn-accent'; approveBtn.textContent = 'Approve plan + code it';
     approveBtn.dataset.id = e.id;
     approveBtn.addEventListener('click', async function() {
-      this.disabled = true;
-      await apiPost('/api/appstudio/' + this.dataset.id + '/approve-plan');
-      showDetail(parseInt(this.dataset.id));
+      var btn = this; btn.disabled = true;
+      var result = await apiPost('/api/appstudio/' + btn.dataset.id + '/approve-plan');
+      if (result && result.error) { alert('Failed: ' + (result.error.message || JSON.stringify(result.error))); btn.disabled = false; return; }
+      showDetail(parseInt(btn.dataset.id));
     });
     actions.appendChild(approveBtn);
 
@@ -265,7 +272,8 @@ async function showDetail(id) {
     feedbackBtn.addEventListener('click', async function() {
       var comment = prompt('What should change in the plan?');
       if (!comment) return;
-      await apiPost('/api/appstudio/' + this.dataset.id + '/plan-feedback', { comment: comment });
+      var result = await apiPost('/api/appstudio/' + this.dataset.id + '/plan-feedback', { comment: comment });
+      if (result && result.error) { alert('Failed: ' + (result.error.message || JSON.stringify(result.error))); return; }
       showDetail(parseInt(this.dataset.id));
     });
     actions.appendChild(feedbackBtn);
@@ -276,9 +284,10 @@ async function showDetail(id) {
     shipBtn.className = 'btn btn-accent'; shipBtn.textContent = 'Ship it (open PR + promote)';
     shipBtn.dataset.id = e.id;
     shipBtn.addEventListener('click', async function() {
-      this.disabled = true;
-      await apiPost('/api/appstudio/' + this.dataset.id + '/approve-sandbox');
-      showDetail(parseInt(this.dataset.id));
+      var btn = this; btn.disabled = true;
+      var result = await apiPost('/api/appstudio/' + btn.dataset.id + '/approve-sandbox');
+      if (result && result.error) { alert('Failed: ' + (result.error.message || JSON.stringify(result.error))); btn.disabled = false; return; }
+      showDetail(parseInt(btn.dataset.id));
     });
     actions.appendChild(shipBtn);
   }
