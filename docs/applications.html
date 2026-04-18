@@ -37,8 +37,9 @@ tr:hover td{background:var(--surface2)}
 <script src="/docs/shared.js"></script>
 <script>
 if (!checkAuth()) throw 'auth';
-document.body.insertAdjacentHTML('beforeend', topbar('applications') +
-  '<div class="container">' +
+document.body.insertAdjacentHTML('beforeend',
+  '<div class="page-body">' + sidebar('applications') +
+  '<div class="page-content"><div class="container">' +
     '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">' +
       '<h2 style="margin:0">Applications</h2>' +
       '<button class="btn" onclick="generateAgentKey()" style="font-size:12px;padding:4px 14px">+ New App Agent</button>' +
@@ -48,7 +49,7 @@ document.body.insertAdjacentHTML('beforeend', topbar('applications') +
       '<tbody id="appsBody"><tr><td colspan="5" style="color:var(--dim)">Loading...</td></tr></tbody></table>' +
     '</div>' +
     '<h2 style="margin-top:24px">Unused Keys</h2><div id="unusedKeys"></div>' +
-  '</div>');
+  '</div></div></div>');
 loadVersion(); loadUserInfo();
 
 function openAppFrame(url, name) {
