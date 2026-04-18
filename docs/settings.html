@@ -39,12 +39,71 @@ container.appendChild(settingsDiv);
 loadVersion(); loadUserInfo();
 
 async function loadSettings() {
-  const [brand, tlsCert, tlsKey] = await Promise.all([
+  const [brand, tlsCert, tlsKey, anthropicStatus] = await Promise.all([
     apiFetch('/api/settings/branding').catch(() => ({ value: null })),
     apiFetch('/api/settings/tls_cert_file').catch(() => ({ value: null })),
     apiFetch('/api/settings/tls_key_file').catch(() => ({ value: null })),
+    apiFetch('/api/appstudio/anthropic-key').catch(() => ({ configured: false })),
   ]);
 
+  // --- Anthropic API key card ---
+  const aiCard = document.createElement('div');
+  aiCard.className = 'setting-card';
+
+  const aiH3 = document.createElement('h3');
+  aiH3.textContent = 'AppStudio — Anthropic API Key';
+  aiCard.appendChild(aiH3);
+
+  const aiDesc = document.createElement('p');
+  aiDesc.textContent = 'Required for AppStudio AI planning and code generation. Get your key from console.anthropic.com. The key is stored in the server .env file and applied immediately without a restart.';
+  aiCard.appendChild(aiDesc);
+
+  const aiStatus = document.createElement('div');
+  aiStatus.style.cssText = 'font-size:.82rem;margin-bottom:10px;display:flex;align-items:center;gap:6px';
+  const aiDot = document.createElement('span');
+  aiDot.style.cssText = 'width:8px;height:8px;border-radius:50%;display:inline-block;background:' + (anthropicStatus.configured ? 'var(--green)' : 'var(--red)');
+  aiStatus.appendChild(aiDot);
+  const aiStatusText = document.createElement('span');
+  aiStatusText.id = 'aiStatusText';
+  aiStatusText.textContent = anthropicStatus.configured ? 'Key configured' : 'Not configured';
+  aiStatus.appendChild(aiStatusText);
+  aiCard.appendChild(aiStatus);
+
+  const aiInputWrap = makeInput('API Key', 'anthropicKeyInput', 'sk-ant-...', anthropicStatus.configured ? '••••••••••••••••' : '');
+  const aiInp = aiInputWrap.querySelector('input');
+  aiInp.type = 'password';
+  aiInp.autocomplete = 'off';
+  aiInp.onfocus = () => { if (aiInp.value === '••••••••••••••••') aiInp.value = ''; aiInp.style.borderColor = 'var(--accent)'; };
+  aiInp.onblur  = () => { aiInp.style.borderColor = 'var(--border)'; };
+  aiCard.appendChild(aiInputWrap);
+
+  const aiSaveRow = document.createElement('div');
+  aiSaveRow.className = 'save-row';
+
+  const aiSaveBtn = document.createElement('button');
+  aiSaveBtn.className = 'btn';
+  aiSaveBtn.textContent = 'Save Key';
+  aiSaveBtn.onclick = async () => {
+    const val = aiInp.value.trim();
+    if (!val || val === '••••••••••••••••') { alert('Enter a valid API key'); return; }
+    aiSaveBtn.disabled = true; aiSaveBtn.textContent = 'Saving…';
+    const result = await apiPut('/api/appstudio/anthropic-key', { key: val });
+    aiSaveBtn.disabled = false; aiSaveBtn.textContent = 'Save Key';
+    if (result && result.error) { alert('Failed: ' + (result.error.message || JSON.stringify(result.error))); return; }
+    aiInp.value = '••••••••••••••••';
+    aiDot.style.background = 'var(--green)';
+    aiStatusText.textContent = 'Key configured';
+    const ok = document.getElementById('aiSaved'); ok.style.opacity = 1; setTimeout(() => { ok.style.opacity = 0; }, 2000);
+  };
+  aiSaveRow.appendChild(aiSaveBtn);
+
+  const aiSavedMsg = document.createElement('span');
+  aiSavedMsg.className = 'saved-msg'; aiSavedMsg.id = 'aiSaved'; aiSavedMsg.textContent = 'Saved ✓';
+  aiSaveRow.appendChild(aiSavedMsg);
+  aiCard.appendChild(aiSaveRow);
+  settingsDiv.appendChild(aiCard);
+
+  // --- Branding card ---
   const card = document.createElement('div');
   card.className = 'setting-card';
 
