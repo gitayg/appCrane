@@ -27,7 +27,8 @@
 .col-user{width:120px}
 .col-date{width:130px;white-space:nowrap;color:var(--dim);font-size:.8rem}
 .col-msg{max-width:0}
-.col-status{width:170px}
+.col-status{width:150px}
+.col-action{width:140px}
 .col-del{width:36px;text-align:center}
 
 .app-pill{display:inline-block;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-size:.75rem;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:120px}
@@ -35,12 +36,15 @@
 .user-cell{font-weight:600;font-size:.82rem}
 .msg-cell{line-height:1.5;white-space:pre-wrap;word-break:break-word}
 
-.status-select{background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:5px;padding:4px 8px;font-size:.75rem;cursor:pointer;outline:none;width:100%}
-.status-select.s-new{border-color:var(--accent);color:var(--accent);background:#3b82f610}
-.status-select.s-selected{border-color:var(--border);color:var(--dim)}
-.status-select.s-planning{border-color:#8b5cf6;color:#8b5cf6;background:#8b5cf610}
-.status-select.s-in_progress{border-color:#f59e0b;color:#f59e0b;background:#f59e0b10}
-.status-select.s-done{border-color:#22c55e;color:#22c55e;background:#22c55e10}
+.status-badge{display:inline-block;border:1px solid;border-radius:5px;padding:3px 9px;font-size:.73rem;font-weight:600;white-space:nowrap}
+.status-badge.s-new{border-color:var(--accent);color:var(--accent);background:#3b82f610}
+.status-badge.s-selected{border-color:var(--border);color:var(--dim);background:var(--surface2)}
+.status-badge.s-planning{border-color:#8b5cf6;color:#8b5cf6;background:#8b5cf610}
+.status-badge.s-in_progress{border-color:#f59e0b;color:#f59e0b;background:#f59e0b10}
+.status-badge.s-done{border-color:#22c55e;color:#22c55e;background:#22c55e10}
+
+.btn-start{background:var(--accent);color:#fff;border:none;border-radius:5px;padding:4px 10px;font-size:.75rem;font-weight:600;cursor:pointer;white-space:nowrap}
+.btn-start:hover{opacity:.85}
 
 .enh-del{background:none;border:none;color:var(--dim);cursor:pointer;font-size:.9rem;padding:2px 6px;border-radius:4px;transition:color .15s}
 .enh-del:hover{color:var(--red)}
@@ -100,7 +104,7 @@ tableWrap.appendChild(table);
 
 const thead = table.createTHead();
 const hrow = thead.insertRow();
-['Application', 'User', 'Date', 'Message', 'Status', ''].forEach(h => {
+['Application', 'User', 'Date', 'Message', 'Status', 'Action', ''].forEach(h => {
   const th = document.createElement('th');
   th.textContent = h;
   hrow.appendChild(th);
@@ -140,7 +144,7 @@ let _all = [];
     tbody.textContent = '';
     const errTr = document.createElement('tr');
     const errTd = document.createElement('td');
-    errTd.colSpan = 6; errTd.className = 'enh-empty'; errTd.textContent = 'Error: ' + e.message;
+    errTd.colSpan = 7; errTd.className = 'enh-empty'; errTd.textContent = 'Error: ' + e.message;
     errTr.appendChild(errTd); tbody.appendChild(errTr);
   }
 })();
@@ -188,19 +192,25 @@ function buildRow(r) {
   tdMsg.className = 'col-msg msg-cell';
   tdMsg.textContent = r.message;
 
-  // Status
+  // Status — read-only badge
+  const STATUS_LABELS = { new: 'New', selected: 'Selected for Implementation', planning: 'Planning', in_progress: 'In Progress', done: 'Done' };
   const tdStatus = tr.insertCell();
   tdStatus.className = 'col-status';
-  const sel = document.createElement('select');
-  sel.className = 'status-select s-' + status;
-  [['new', 'New'], ['selected', 'Selected for Implementation'], ['planning', 'Planning'], ['in_progress', 'In Progress'], ['done', 'Done']].forEach(([v, t]) => {
-    const o = document.createElement('option');
-    o.value = v; o.textContent = t;
-    if (v === status) o.selected = true;
-    sel.appendChild(o);
-  });
-  sel.addEventListener('change', () => setStatus(r.id, sel.value, sel, tr));
-  tdStatus.appendChild(sel);
+  const badge = document.createElement('span');
+  badge.className = 'status-badge s-' + status;
+  badge.textContent = STATUS_LABELS[status] || status;
+  tdStatus.appendChild(badge);
+
+  // Action
+  const tdAction = tr.insertCell();
+  tdAction.className = 'col-action';
+  if (status === 'new') {
+    const btn = document.createElement('button');
+    btn.className = 'btn-start';
+    btn.textContent = 'Start Developing';
+    btn.addEventListener('click', () => startDeveloping(r.id, tr, badge));
+    tdAction.appendChild(btn);
+  }
 
   // Delete
   const tdDel = tr.insertCell();
@@ -228,24 +238,21 @@ function render() {
   countEl.textContent = rows.length + ' request' + (rows.length !== 1 ? 's' : '');
   tbody.textContent = '';
   if (!rows.length) {
-    tbody.innerHTML = '<tr><td colspan="6" class="enh-empty">No enhancement requests' + (appF || q || statusF ? ' matching filters' : '') + '</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" class="enh-empty">No enhancement requests' + (appF || q || statusF ? ' matching filters' : '') + '</td></tr>';
     return;
   }
   rows.forEach(r => tbody.appendChild(buildRow(r)));
 }
 
-async function setStatus(id, status, sel, tr) {
-  sel.disabled = true;
+async function startDeveloping(id, tr, badge) {
   try {
-    await apiPost('/api/enhancements/' + id + '/set-status', { status });
+    await apiPost('/api/enhancements/' + id + '/set-status', { status: 'selected' });
     const idx = _all.findIndex(x => x.id === id);
-    if (idx !== -1) _all[idx].status = status;
-    tr.className = 's-' + status;
-    sel.className = 'status-select s-' + status;
+    if (idx !== -1) _all[idx].status = 'selected';
+    render();
   } catch(e) {
     alert('Failed: ' + e.message);
   }
-  sel.disabled = false;
 }
 
 async function delRequest(id) {
