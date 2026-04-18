@@ -488,61 +488,73 @@ function showApps(data) {
       card.appendChild(desc);
     }
 
-    const envs = document.createElement('div');
-    envs.className = 'app-envs';
+    const isAppAdmin = role === 'admin';
 
-    function makeEnvBtn(url, label, tag, isDown, status) {
-      const btn = document.createElement('button');
-      btn.className = 'env-btn';
+    if (isAppAdmin) {
+      // Admin: show Production + Sandbox env buttons
+      const envs = document.createElement('div');
+      envs.className = 'app-envs';
 
-      btn.appendChild(makeDot(isDown, status));
-
-      const lbl = document.createElement('span');
-      lbl.className = 'env-label';
-      lbl.textContent = label;
-      btn.appendChild(lbl);
-
-      if (tag) {
-        const tg = document.createElement('span');
-        tg.className = 'env-tag';
-        tg.textContent = tag;
-        btn.appendChild(tg);
+      function makeEnvBtn(url, label, tag, isDown, status) {
+        const btn = document.createElement('button');
+        btn.className = 'env-btn';
+        btn.appendChild(makeDot(isDown, status));
+        const lbl = document.createElement('span');
+        lbl.className = 'env-label';
+        lbl.textContent = label;
+        btn.appendChild(lbl);
+        if (tag) {
+          const tg = document.createElement('span');
+          tg.className = 'env-tag';
+          tg.textContent = tag;
+          btn.appendChild(tg);
+        }
+        const arr = document.createElement('span');
+        arr.className = 'env-arr';
+        arr.textContent = '\u2197';
+        btn.appendChild(arr);
+        btn.addEventListener('click', function() {
+          openApp(url, a.name + ' (' + label + ')', a.slug, a.has_icon);
+        });
+        return btn;
       }
 
-      const arr = document.createElement('span');
-      arr.className = 'env-arr';
-      arr.textContent = '\u2197';
-      btn.appendChild(arr);
-
-      btn.addEventListener('click', function() {
-        openApp(url, a.name + ' (' + label + ')', a.slug, a.has_icon);
-      });
-      return btn;
-    }
-
-    envs.appendChild(makeEnvBtn(prodUrl, 'Production', '', a.prod_down, a.prod_status));
-    // Sandbox is only accessible to app admins
-    if ((a.app_role || a.role) === 'admin') {
+      envs.appendChild(makeEnvBtn(prodUrl, 'Production', '', a.prod_down, a.prod_status));
       envs.appendChild(makeEnvBtn(sandUrl, 'Sandbox', 'dev', a.sand_down, a.sand_status));
+      card.appendChild(envs);
+
+      // Admin hover quick actions
+      const qa = document.createElement('div');
+      qa.className = 'card-quick-actions';
+      [
+        ['Open \u25b8', function() { openApp(prodUrl, a.name + ' (Production)', a.slug, a.has_icon); }],
+        ['\uD83D\uDCA1 Enhance', function() { openEnhModal(a.slug, a.name); }],
+        ['Manage \u25b8', function() { window.open('/app?slug=' + encodeURIComponent(a.slug), '_blank'); }],
+      ].forEach(function(pair) {
+        var btn = document.createElement('button');
+        btn.className = 'quick-btn';
+        btn.textContent = pair[0];
+        btn.addEventListener('click', function(e) { e.stopPropagation(); pair[1](); });
+        qa.appendChild(btn);
+      });
+      card.appendChild(qa);
+    } else {
+      // User: card itself is clickable → opens production
+      card.style.cursor = 'pointer';
+      card.addEventListener('click', function() {
+        openApp(prodUrl, a.name, a.slug, a.has_icon);
+      });
+
+      // Only 💡 Enhance on hover
+      const qa = document.createElement('div');
+      qa.className = 'card-quick-actions';
+      const enhBtn = document.createElement('button');
+      enhBtn.className = 'quick-btn';
+      enhBtn.textContent = '\uD83D\uDCA1 Enhance';
+      enhBtn.addEventListener('click', function(e) { e.stopPropagation(); openEnhModal(a.slug, a.name); });
+      qa.appendChild(enhBtn);
+      card.appendChild(qa);
     }
-
-    card.appendChild(envs);
-
-    // Hover quick actions
-    const qa = document.createElement('div');
-    qa.className = 'card-quick-actions';
-    [
-      ['Open ▸', function() { openApp(prodUrl, a.name + ' (Production)', a.slug, a.has_icon); }],
-      ['Enhance ▸', function() { openEnhModal(a.slug, a.name); }],
-      ['Manage ▸', function() { window.open('/app?slug=' + encodeURIComponent(a.slug), '_blank'); }],
-    ].forEach(function(pair) {
-      var btn = document.createElement('button');
-      btn.className = 'quick-btn';
-      btn.textContent = pair[0];
-      btn.addEventListener('click', function(e) { e.stopPropagation(); pair[1](); });
-      qa.appendChild(btn);
-    });
-    card.appendChild(qa);
 
     return card;
   }
@@ -846,8 +858,9 @@ async function loadMyEnhancements() {
   } catch (e) {}
 }
 
-function openEnhModal() {
-  const appName = document.getElementById('frameAppName').textContent;
+function openEnhModal(slug, name) {
+  if (slug) currentAppSlug = slug;
+  const appName = name || document.getElementById('frameAppName').textContent;
   document.getElementById('enhAppLabel').textContent = appName ? 'App: ' + appName : '';
   document.getElementById('enhText').value = '';
   document.getElementById('enhStatus').textContent = '';
