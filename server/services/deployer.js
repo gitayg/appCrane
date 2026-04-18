@@ -132,11 +132,15 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
         cloneUrl = url.toString();
       }
 
-      execFileSync('git', [
-        'clone', '--depth', '1',
-        '--branch', app.branch || 'main',
-        cloneUrl, releaseDir,
-      ], { timeout: 120000, stdio: 'pipe' });
+      try {
+        execFileSync('git', [
+          'clone', '--depth', '1',
+          '--branch', app.branch || 'main',
+          cloneUrl, releaseDir,
+        ], { timeout: 120000, stdio: 'pipe' });
+      } catch (err) {
+        throw new Error(err.message.replaceAll(cloneUrl, app.github_url));
+      }
 
       // Get commit hash
       try {
