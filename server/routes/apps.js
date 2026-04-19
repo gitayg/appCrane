@@ -513,16 +513,6 @@ router.post('/:slug/deployment-key/recycle', requireAuth, requireAdmin, auditMid
 });
 
 /**
- * GET /api/apps/:slug/icon - Serve app icon SVG
- */
-router.get('/:slug/icon', (req, res) => {
-  const dataDir = process.env.DATA_DIR || './data';
-  const iconPath = join(dataDir, 'apps', req.params.slug, 'icon.svg');
-  if (!existsSync(iconPath)) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'No icon uploaded' } });
-  res.type('image/svg+xml').sendFile(iconPath, { root: '/' });
-});
-
-/**
  * POST /api/apps/:slug/icon - Upload app icon SVG (admin or assigned app user)
  */
 router.post('/:slug/icon', requireAuth, requireAppAccess, async (req, res) => {
