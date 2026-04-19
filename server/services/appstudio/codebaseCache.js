@@ -85,10 +85,99 @@ export function getOrBuildCache(appSlug, repoDir) {
 }
 
 /**
- * Invalidate cache for an app (call after a new production deploy).
+ * Refresh cache for an app after a production deploy.
+ * If the git hash is unchanged, does nothing.
+ * If hash changed, rebuilds only the diff (changed/new/deleted files).
  */
-export function invalidateCache(appSlug) {
-  try {
-    getDb().prepare('DELETE FROM app_codebase_cache WHERE app_slug = ?').run(appSlug);
-  } catch (_) {}
+export function refreshCache(appSlug, repoDir) {
+  if (!existsSync(repoDir)) return;
+
+  const db = getDb();
+  const gitHash = getGitHash(repoDir);
+  if (!gitHash) return;
+
+  const cached = db.prepare('SELECT * FROM app_codebase_cache WHERE app_slug = ?').get(appSlug);
+
+  if (cached && cached.git_hash === gitHash) {
+    log.info(`AppStudio cache for ${appSlug} unchanged @ ${gitHash.slice(0, 8)}`);
+    return;
+  }
+
+  let filesMap = {};
+  if (cached) {
+    try { filesMap = JSON.parse(cached.files_json || '{}'); } catch (_) {}
+
+    // Get files changed between old and new commit
+    try {
+      const diff = execFileSync('git', ['diff', '--name-status', cached.git_hash, gitHash], {
+        cwd: repoDir, encoding: 'utf8', timeout: 10000, stdio: 'pipe',
+      }).trim();
+
+      for (const line of diff.split('\n')) {
+        if (!line) continue;
+        const [status, ...parts] = line.split('\t');
+        const filePath = parts[parts.length - 1]; // handles renames (R old\tnew)
+        const oldPath = parts[0];
+
+        if (!filePath) continue;
+
+        if (status === 'D') {
+          // Deleted
+          delete filesMap[filePath];
+        } else if (status.startsWith('R')) {
+          // Renamed: remove old, add new
+          delete filesMap[oldPath];
+          if (SOURCE_EXTS.test(filePath)) {
+            const abs = join(repoDir, filePath);
+            if (existsSync(abs)) {
+              try {
+                const content = readFileSync(abs, 'utf8');
+                if (content.length <= MAX_FILE_BYTES) filesMap[filePath] = content;
+              } catch (_) {}
+            }
+          }
+        } else {
+          // Added or modified
+          if (SOURCE_EXTS.test(filePath)) {
+            const abs = join(repoDir, filePath);
+            if (existsSync(abs)) {
+              try {
+                const content = readFileSync(abs, 'utf8');
+                if (content.length <= MAX_FILE_BYTES) filesMap[filePath] = content;
+                else delete filesMap[filePath]; // file grew too large — evict
+              } catch (_) {}
+            }
+          }
+        }
+      }
+      log.info(`AppStudio cache for ${appSlug} updated (diff from ${cached.git_hash.slice(0, 8)} → ${gitHash.slice(0, 8)})`);
+    } catch (_) {
+      // Old commit unreachable (shallow clone, etc.) — full rebuild
+      log.info(`AppStudio cache for ${appSlug} — diff unavailable, full rebuild`);
+      const fileTree = buildFileTree(repoDir);
+      filesMap = buildFilesMap(repoDir, fileTree);
+      db.prepare(`
+        INSERT INTO app_codebase_cache (app_slug, git_hash, built_at, file_tree, files_json)
+        VALUES (?, ?, datetime('now'), ?, ?)
+        ON CONFLICT(app_slug) DO UPDATE SET
+          git_hash = excluded.git_hash, built_at = excluded.built_at,
+          file_tree = excluded.file_tree, files_json = excluded.files_json
+      `).run(appSlug, gitHash, buildFileTree(repoDir), JSON.stringify(filesMap));
+      return;
+    }
+  } else {
+    // No existing cache — full build
+    const fileTree = buildFileTree(repoDir);
+    filesMap = buildFilesMap(repoDir, fileTree);
+    log.info(`AppStudio cache for ${appSlug} — initial build @ ${gitHash.slice(0, 8)}`);
+  }
+
+  const fileTree = buildFileTree(repoDir);
+  db.prepare(`
+    INSERT INTO app_codebase_cache (app_slug, git_hash, built_at, file_tree, files_json)
+    VALUES (?, ?, datetime('now'), ?, ?)
+    ON CONFLICT(app_slug) DO UPDATE SET
+      git_hash = excluded.git_hash, built_at = excluded.built_at,
+      file_tree = excluded.file_tree, files_json = excluded.files_json
+  `).run(appSlug, gitHash, fileTree, JSON.stringify(filesMap));
 }
