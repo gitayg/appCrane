@@ -74,6 +74,12 @@ input:focus{border-color:var(--accent)}
 .app-card:hover .card-enh-icon{opacity:.6}
 .card-enh-icon:hover{opacity:1!important}
 
+/* View-as bar */
+.viewas-bar{display:flex;align-items:center;gap:10px;background:#3b82f611;border:1px solid #3b82f633;border-radius:8px;padding:8px 14px;margin-bottom:16px;font-size:.82rem}
+.viewas-bar select{flex:1;background:var(--surface);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:6px;font-size:.82rem;font-family:inherit}
+.viewas-bar button{background:none;border:1px solid var(--border);color:var(--dim);padding:3px 10px;border-radius:5px;cursor:pointer;font-size:.78rem;font-family:inherit}
+.viewas-bar button:hover{border-color:var(--accent);color:var(--accent)}
+
 /* Iframe overlay */
 .app-frame{display:none;position:fixed;inset:0;z-index:100;flex-direction:column;background:var(--bg)}
 .app-frame.open{display:flex}
@@ -389,6 +395,121 @@ function makeDot(isDown, status) {
   return dot;
 }
 
+var _viewAsUsers = null;
+var _viewAsActive = null; // userId being previewed, or null
+
+async function setupViewAsBar(list, adminUser) {
+  const bar = document.createElement('div');
+  bar.className = 'viewas-bar';
+  bar.id = 'viewAsBar';
+
+  const lbl = document.createElement('span');
+  lbl.textContent = '\uD83D\uDC64 View as:';
+  lbl.style.whiteSpace = 'nowrap';
+
+  const sel = document.createElement('select');
+  sel.id = 'viewAsSelect';
+
+  const defaultOpt = document.createElement('option');
+  defaultOpt.value = '';
+  defaultOpt.textContent = 'Myself (admin view)';
+  sel.appendChild(defaultOpt);
+
+  const resetBtn = document.createElement('button');
+  resetBtn.textContent = 'Reset';
+  resetBtn.style.display = 'none';
+  resetBtn.onclick = function() {
+    sel.value = '';
+    _viewAsActive = null;
+    resetBtn.style.display = 'none';
+    renderPreviewGrid(null);
+  };
+
+  sel.onchange = async function() {
+    const uid = Number(this.value);
+    if (!uid) {
+      _viewAsActive = null;
+      resetBtn.style.display = 'none';
+      renderPreviewGrid(null);
+      return;
+    }
+    _viewAsActive = uid;
+    resetBtn.style.display = '';
+    try {
+      const r = await fetch(API + '/api/identity/preview-as/' + uid, {
+        headers: { 'Authorization': 'Bearer ' + sessionToken }
+      });
+      const d = await r.json();
+      if (d.error) { alert(d.error.message); return; }
+      const userName = (d.user && d.user.name) || '';
+      renderPreviewGrid(d.apps || [], userName);
+    } catch (e) {
+      alert('Failed to load preview: ' + e.message);
+    }
+  };
+
+  bar.appendChild(lbl);
+  bar.appendChild(sel);
+  bar.appendChild(resetBtn);
+  list.appendChild(bar);
+
+  // Load users async
+  if (!_viewAsUsers) {
+    try {
+      const r = await fetch(API + '/api/users', { headers: { 'X-API-Key': KEY } });
+      const d = await r.json();
+      _viewAsUsers = (d.users || []).filter(function(u) { return u.id !== adminUser.id; });
+    } catch (e) { _viewAsUsers = []; }
+  }
+  _viewAsUsers.forEach(function(u) {
+    const opt = document.createElement('option');
+    opt.value = u.id;
+    opt.textContent = u.name + (u.email ? ' (' + u.email + ')' : '');
+    sel.appendChild(opt);
+  });
+  if (_viewAsActive) {
+    sel.value = String(_viewAsActive);
+    resetBtn.style.display = '';
+  }
+}
+
+// Grid element that lives below the view-as bar
+var _appsGridContainer = null;
+
+function renderPreviewGrid(apps, userName) {
+  if (!_appsGridContainer) return;
+  _appsGridContainer.textContent = '';
+  if (!apps) {
+    // restore original grid — page will re-render naturally on next showApps call
+    location.reload();
+    return;
+  }
+  if (userName) {
+    const notice = document.createElement('div');
+    notice.style.cssText = 'font-size:.78rem;color:var(--dim);margin-bottom:12px';
+    notice.textContent = 'Showing portal as seen by ' + userName;
+    _appsGridContainer.appendChild(notice);
+  }
+  const accessible = apps.filter(function(a) { return (a.app_role || a.role) !== 'none'; });
+  if (accessible.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'no-apps';
+    empty.textContent = 'This user has no app access.';
+    _appsGridContainer.appendChild(empty);
+    return;
+  }
+  const g = document.createElement('div');
+  g.className = 'apps-grid';
+  // Render cards using the user's role (not admin role)
+  accessible.forEach(function(a) {
+    const savedRole = a.app_role;
+    a.app_role = savedRole; // keep as-is (could be 'admin', 'user', 'viewer')
+    g.appendChild(buildAppCard(a));
+    a.app_role = savedRole;
+  });
+  _appsGridContainer.appendChild(g);
+}
+
 function showApps(data) {
   currentUser = data.user;
   document.getElementById('loginWrap').classList.add('hidden');
@@ -404,6 +525,17 @@ function showApps(data) {
 
   const list = document.getElementById('appsList');
   list.textContent = '';
+
+  // Admin: inject "View as" bar
+  if (data.user.role === 'admin') {
+    setupViewAsBar(list, data.user);
+  }
+
+  // Container for the app grid (swapped out by renderPreviewGrid)
+  const appsContainer = document.createElement('div');
+  appsContainer.id = 'appsGridContainer';
+  list.appendChild(appsContainer);
+  _appsGridContainer = appsContainer;
 
   const allApps = data.apps || [];
   const apps = allApps.filter(function(a) { return (a.app_role || a.role) !== 'none'; });
@@ -424,7 +556,7 @@ function showApps(data) {
     msg.appendChild(ico);
     msg.appendChild(ttl);
     msg.appendChild(sub);
-    list.appendChild(msg);
+    appsContainer.appendChild(msg);
   }
 
   function buildAppCard(a) {
@@ -580,18 +712,18 @@ function showApps(data) {
     if (!isFirst) {
       const hr = document.createElement('hr');
       hr.style.cssText = 'border:none;border-top:1px solid var(--border,#333);margin:28px 0 20px';
-      list.appendChild(hr);
+      appsContainer.appendChild(hr);
     }
     if (title) {
       const titleEl = document.createElement('div');
       titleEl.className = 'section-title';
       titleEl.textContent = title;
-      list.appendChild(titleEl);
+      appsContainer.appendChild(titleEl);
     }
     const g = document.createElement('div');
     g.className = 'apps-grid';
     groupApps.forEach(function(a) { g.appendChild(buildAppCard(a)); });
-    list.appendChild(g);
+    appsContainer.appendChild(g);
     isFirst = false;
   }
 

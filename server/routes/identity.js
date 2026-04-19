@@ -339,4 +339,57 @@ router.get('/me', (req, res) => {
   });
 });
 
+/**
+ * GET /api/identity/preview-as/:userId
+ * Admin-only: returns the portal view (apps + roles) as a specific user would see it.
+ * Headers: Authorization: Bearer <admin-session-token>
+ */
+router.get('/preview-as/:userId', (req, res) => {
+  const authHeader = req.headers.authorization || '';
+  const token = authHeader.replace('Bearer ', '').trim();
+  if (!token) throw new AppError('Authorization: Bearer TOKEN header required', 401, 'NO_TOKEN');
+
+  const db = getDb();
+  const tokenHash = hashApiKey(token);
+
+  const session = db.prepare(`
+    SELECT u.role FROM identity_sessions s
+    JOIN users u ON s.user_id = u.id
+    WHERE s.token_hash = ? AND s.expires_at > datetime('now')
+  `).get(tokenHash);
+
+  if (!session) throw new AppError('Invalid or expired token', 401, 'INVALID_TOKEN');
+  if (session.role !== 'admin') throw new AppError('Admin only', 403, 'FORBIDDEN');
+
+  const targetId = Number(req.params.userId);
+  const target = db.prepare('SELECT id, name, email, username, avatar_url, role FROM users WHERE id = ?').get(targetId);
+  if (!target) throw new AppError('User not found', 404, 'NOT_FOUND');
+
+  const apps = db.prepare(`
+    SELECT a.slug, a.name, a.domain, a.description, a.public_access, a.category,
+      CASE WHEN a.public_access THEN 'viewer' ELSE COALESCE(aur.app_role, 'none') END as app_role,
+      hp.is_down as prod_down, hp.last_status as prod_status,
+      hs.is_down as sand_down, hs.last_status as sand_status,
+      dp.version as prod_version,
+      ds.version as sand_version
+    FROM apps a
+    LEFT JOIN app_user_roles aur ON a.id = aur.app_id AND aur.user_id = ?
+    LEFT JOIN health_state hp ON a.id = hp.app_id AND hp.env = 'production'
+    LEFT JOIN health_state hs ON a.id = hs.app_id AND hs.env = 'sandbox'
+    LEFT JOIN deployments dp ON dp.id = (
+      SELECT id FROM deployments WHERE app_id = a.id AND env = 'production' AND status = 'live' ORDER BY finished_at DESC LIMIT 1
+    )
+    LEFT JOIN deployments ds ON ds.id = (
+      SELECT id FROM deployments WHERE app_id = a.id AND env = 'sandbox' AND status = 'live' ORDER BY finished_at DESC LIMIT 1
+    )
+    ORDER BY a.name
+  `).all(targetId).map(a => ({
+    ...a,
+    app_role: a.app_role,
+    has_icon: hasIcon(a.slug),
+  }));
+
+  res.json({ user: target, apps });
+});
+
 export default router;
