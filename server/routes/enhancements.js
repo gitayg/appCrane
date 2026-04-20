@@ -17,7 +17,7 @@ function getUserFromBearer(token) {
   const db = getDb();
   const tokenHash = hashApiKey(token);
   const session = db.prepare(`
-    SELECT s.*, u.id as user_id, u.name, u.email, u.username
+    SELECT s.*, u.id as user_id, u.name, u.email, u.username, u.role
     FROM identity_sessions s
     JOIN users u ON s.user_id = u.id
     WHERE s.token_hash = ? AND s.expires_at > datetime('now')
@@ -36,10 +36,11 @@ router.post('/', (req, res) => {
   const session = getUserFromBearer(token);
 
   // Fall back to API key auth (for admin dashboard submissions)
-  let userId, userName;
+  let userId, userName, userRole;
   if (session) {
     userId = session.user_id;
     userName = session.name;
+    userRole = session.role;
   } else {
     const apiKey = req.headers['x-api-key'];
     if (!apiKey) throw new AppError('Authentication required', 401, 'UNAUTHORIZED');
@@ -48,6 +49,7 @@ router.post('/', (req, res) => {
     if (!user) throw new AppError('Invalid API key', 401, 'UNAUTHORIZED');
     userId = user.id;
     userName = user.name;
+    userRole = user.role;
   }
 
   const { message, app_slug } = req.body || {};
@@ -56,10 +58,16 @@ router.post('/', (req, res) => {
   }
 
   const db = getDb();
-  db.prepare(`
+  const { lastInsertRowid } = db.prepare(`
     INSERT INTO enhancement_requests (app_slug, user_id, user_name, message, status)
     VALUES (?, ?, ?, ?, 'new')
   `).run(app_slug || null, userId, userName, message.trim());
+
+  if (userRole === 'admin' && process.env.ANTHROPIC_API_KEY) {
+    db.prepare("UPDATE enhancement_requests SET mode = 'auto', status = 'planning' WHERE id = ?")
+      .run(lastInsertRowid);
+    db.prepare('INSERT INTO enhancement_jobs (enhancement_id, phase) VALUES (?, ?)').run(lastInsertRowid, 'plan');
+  }
 
   res.json({ message: 'Enhancement request submitted. Thank you!' });
 });
