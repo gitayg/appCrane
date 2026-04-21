@@ -228,13 +228,13 @@ async function handleCode(job) {
 
   db.prepare(`
     UPDATE enhancement_requests
-    SET status = 'sandbox_ready', branch_name = ?, fix_version = ?,
+    SET status = 'pushing', branch_name = ?, fix_version = ?,
         ai_log = COALESCE(ai_log, '') || ?
     WHERE id = ?
   `).run(
     branchName,
     branchName,
-    `\n[${new Date().toISOString()}] Code generated, branch ${branchName} pushed\n`,
+    `\n[${new Date().toISOString()}] Code generated, branch ${branchName} pushed to GitHub\n`,
     enh.id,
   );
 
@@ -250,6 +250,8 @@ async function handleBuild(job) {
 
   const branchName = enh.branch_name;
   if (!branchName) throw new Error('No branch from code phase');
+
+  db.prepare("UPDATE enhancement_requests SET status = 'building' WHERE id = ?").run(enh.id);
 
   const workspace = cloneForBuild(job.id, app, branchName);
 
@@ -270,7 +272,7 @@ async function handleBuild(job) {
 
   db.prepare(`
     UPDATE enhancement_requests
-    SET sandbox_deploy_id = ?,
+    SET status = 'sandbox_ready', sandbox_deploy_id = ?,
         ai_log = COALESCE(ai_log, '') || ?
     WHERE id = ?
   `).run(
