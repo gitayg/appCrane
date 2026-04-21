@@ -209,6 +209,23 @@ input:focus{border-color:var(--accent)}
 .jobs-empty{padding:18px 14px;font-size:.82rem;color:var(--dim);text-align:center}
 .jobs-badge{background:#ef4444;color:#fff;border-radius:8px;font-size:.62rem;font-weight:700;padding:1px 5px;line-height:1.4;margin-left:3px;vertical-align:middle;display:none}
 .jobs-badge.has-jobs{display:inline}
+.plan-panel{position:absolute;top:44px;right:0;width:520px;height:calc(100% - 44px);background:var(--surface);border-left:1px solid var(--border);display:flex;flex-direction:column;z-index:12;transform:translateX(100%);transition:transform .2s}
+.plan-panel.open{transform:translateX(0)}
+.plan-header{display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--border);font-weight:600;flex-shrink:0;font-size:.9rem}
+.plan-messages{flex:1;overflow-y:auto;padding:0}
+.plan-msg{padding:10px 16px;border-bottom:1px solid var(--border)}
+.plan-msg.user{background:var(--surface2)}
+.plan-msg-label{font-size:.63rem;color:var(--dim);text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px;font-weight:600}
+.plan-streaming{white-space:pre-wrap;font-size:.82rem;line-height:1.5;color:var(--dim)}
+.plan-summary{font-weight:600;font-size:.88rem;margin-bottom:10px}
+.plan-section{margin-bottom:12px}
+.plan-section-hdr{font-size:.68rem;color:var(--dim);text-transform:uppercase;letter-spacing:.5px;font-weight:700;margin-bottom:5px}
+.plan-file{font-size:.78rem;padding:3px 0}
+.plan-file-path{color:var(--accent);font-family:monospace}
+.plan-file-action{background:var(--surface2);border-radius:3px;padding:0 5px;font-size:.68rem;margin:0 4px}
+.plan-file-rationale{color:var(--dim)}
+.plan-test-text{font-size:.82rem;color:var(--dim);line-height:1.5;white-space:pre-wrap}
+.plan-build-btn{background:#22c55e!important;border-color:transparent!important;color:#fff!important}
 </style>
 </head>
 <body>
@@ -232,8 +249,9 @@ input:focus{border-color:var(--accent)}
       <span id="frameUserInfo" class="frame-user"></span>
       <button id="peekBtn" class="btn-enhance" onclick="togglePeekMode()" title="Point & click an element to add context (Esc to cancel)">🎯 Point</button>
       <button class="btn-enhance" onclick="openAskPanel()">🤖 Ask</button>
-      <button class="btn-enhance" onclick="openEnhModal()">💡 Request Enhancement</button>
+      <button class="btn-enhance" onclick="openPlanPanel()">💡 Plan</button>
       <button id="jobsBtn" class="btn-enhance" onclick="toggleJobsPanel()" style="display:none">📋 Jobs<span id="jobsBadge" class="jobs-badge"></span></button>
+      <button class="btn-enhance" onclick="refreshApp()" title="Reload app">🔄</button>
       <a id="frameNewTab" href="#" target="_blank" class="btn-newtab">Open in new tab ↗</a>
       <button class="btn-back" onclick="closeApp()">← Back</button>
     </div>
@@ -266,6 +284,39 @@ input:focus{border-color:var(--accent)}
         <textarea id="askInput" class="ask-textarea" placeholder="Ask about this application..." rows="2" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendAskQuestion();}"></textarea>
         <button id="askPeekBtn" class="btn-enhance" onclick="togglePeekMode()" title="Point & click an element to add context (Esc to cancel)" style="padding:7px 10px;flex-shrink:0">🎯</button>
         <button id="askSendBtn" class="ask-send" onclick="sendAskQuestion()">Send</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Plan panel -->
+  <div id="planPanel" class="plan-panel">
+    <div class="plan-header">
+      <span>🗺️ Plan</span>
+      <span id="planPanelAppLabel" class="ask-app-label"></span>
+      <div class="ask-header-right">
+        <button class="ask-sessions-btn" onclick="resetPlanPanel()" title="Start a new plan">New</button>
+        <button class="ask-close" onclick="closePlanPanel()">×</button>
+      </div>
+    </div>
+    <div id="planMessages" class="plan-messages">
+      <div class="ask-empty" style="padding:20px 16px">Describe an enhancement and Claude will generate an implementation plan.</div>
+    </div>
+    <div id="planWorking" class="ask-working" style="display:none">
+      <div class="ask-spinner"></div>
+      <div id="planWorkingText" class="ask-working-text">Generating plan...</div>
+    </div>
+    <div class="ask-input-area">
+      <div id="planPeekBar" class="ask-peek-bar" style="display:none">
+        <span>🎯</span><span id="planPeekLabel" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+        <button onclick="clearPlanPeekCtx()">×</button>
+      </div>
+      <div class="ask-input-row">
+        <textarea id="planInput" class="ask-textarea" placeholder="Describe the enhancement or feature you want..." rows="2"
+          onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendPlanRequest();}"></textarea>
+        <button id="planSendBtn" class="ask-send" onclick="sendPlanRequest()">Plan</button>
+      </div>
+      <div id="planBuildRow" class="ask-input-row" style="display:none;justify-content:flex-end;padding:4px 0 0">
+        <button id="planBuildBtn" class="ask-send plan-build-btn" onclick="buildFromPlan()">Build</button>
       </div>
     </div>
   </div>
@@ -602,6 +653,7 @@ function renderPreviewGrid(apps, userName) {
 
 function showApps(data) {
   currentUser = data.user;
+  _userRole = data.user.role || 'user';
   document.getElementById('loginWrap').classList.add('hidden');
   document.getElementById('portalWrap').classList.remove('hidden');
   if (location.pathname !== '/portal') history.replaceState(null, '', '/portal');
@@ -939,10 +991,21 @@ function openApp(url, name, slug, hasIcon) {
   currentAppSlug = slug;
   _askSessionId = null;
   _askPeekCtx = null;
+  _planEnhId = null;
+  _planBusy = false;
+  _planHasPlan = false;
+  _planPeekCtx = null;
   document.getElementById('askPanelAppLabel').textContent = name || '';
   document.getElementById('askMessages').innerHTML = '<div class="ask-empty">Ask Claude anything about this application — it will read the source code to answer.</div>';
   document.getElementById('askWorking').style.display = 'none';
   document.getElementById('askPeekBar').style.display = 'none';
+  document.getElementById('planPanelAppLabel').textContent = name || '';
+  document.getElementById('planMessages').innerHTML = '<div class="ask-empty" style="padding:20px 16px">Describe an enhancement and Claude will generate an implementation plan.</div>';
+  document.getElementById('planWorking').style.display = 'none';
+  document.getElementById('planPeekBar').style.display = 'none';
+  document.getElementById('planBuildRow').style.display = 'none';
+  document.getElementById('planSendBtn').textContent = 'Plan';
+  document.getElementById('planInput').placeholder = 'Describe the enhancement or feature you want...';
   document.getElementById('frameAppName').textContent = name;
   document.getElementById('frameNewTab').href = url;
   document.getElementById('frameIframe').src = url;
@@ -963,6 +1026,7 @@ function openApp(url, name, slug, hasIcon) {
 function closeApp() {
   if (_peekActive) stopPeekMode();
   closeAskPanel();
+  closePlanPanel();
   closeJobsPanel();
   document.getElementById('appFrame').classList.remove('open');
   document.getElementById('frameIframe').src = '';
@@ -1174,8 +1238,11 @@ function _peekClick(e) {
     document.getElementById('askPeekLabel').textContent = (info.tag ? '<' + info.tag + '>' : '') + (info.text ? ' "' + info.text.slice(0, 60) + '"' : ' ' + info.selector);
     document.getElementById('askPeekBar').style.display = 'flex';
   } else {
-    _peekContext = info;
-    openEnhModal(currentAppSlug, document.getElementById('frameAppName').textContent);
+    _planPeekCtx = info;
+    document.getElementById('planPeekLabel').textContent = (info.tag ? '<' + info.tag + '>' : '') + (info.text ? ' "' + info.text.slice(0, 60) + '"' : ' ' + info.selector);
+    document.getElementById('planPeekBar').style.display = 'flex';
+    openPlanPanel();
+    setTimeout(function() { document.getElementById('planInput').focus(); }, 50);
   }
 }
 
@@ -1434,6 +1501,7 @@ function startSaml() {
 var _askSessionId = null;
 var _askPeekCtx   = null;
 var _askBusy      = false;
+var _userRole     = null;
 
 function openAskPanel() {
   if (!currentAppSlug) return;
@@ -1566,6 +1634,295 @@ async function showAskSessionsPicker() {
   } catch (err) {
     alert('Failed to load sessions: ' + err.message);
   }
+}
+
+// ── Plan panel ──────────────────────────────────────────────────────────
+var _planEnhId   = null;
+var _planBusy    = false;
+var _planHasPlan = false;
+var _planPeekCtx = null;
+
+function openPlanPanel() {
+  if (!currentAppSlug) return;
+  document.getElementById('planPanel').classList.add('open');
+  setTimeout(function() { document.getElementById('planInput').focus(); }, 50);
+}
+
+function closePlanPanel() {
+  document.getElementById('planPanel').classList.remove('open');
+}
+
+function resetPlanPanel() {
+  _planEnhId = null;
+  _planBusy = false;
+  _planHasPlan = false;
+  _planPeekCtx = null;
+  document.getElementById('planMessages').innerHTML = '<div class="ask-empty" style="padding:20px 16px">Describe an enhancement and Claude will generate an implementation plan.</div>';
+  document.getElementById('planWorking').style.display = 'none';
+  document.getElementById('planPeekBar').style.display = 'none';
+  document.getElementById('planBuildRow').style.display = 'none';
+  document.getElementById('planSendBtn').textContent = 'Plan';
+  document.getElementById('planSendBtn').disabled = false;
+  document.getElementById('planInput').value = '';
+  document.getElementById('planInput').placeholder = 'Describe the enhancement or feature you want...';
+}
+
+function clearPlanPeekCtx() {
+  _planPeekCtx = null;
+  document.getElementById('planPeekBar').style.display = 'none';
+}
+
+function _appendPlanMsg(role, content) {
+  var container = document.getElementById('planMessages');
+  var empty = container.querySelector('.ask-empty');
+  if (empty) empty.remove();
+  var div = document.createElement('div');
+  div.className = 'plan-msg ' + role;
+  var label = document.createElement('div');
+  label.className = 'plan-msg-label';
+  label.textContent = role === 'user' ? 'You' : 'Claude';
+  div.appendChild(label);
+  if (typeof content === 'string') {
+    var p = document.createElement('div');
+    p.style.fontSize = '.85rem';
+    p.textContent = content;
+    div.appendChild(p);
+  } else {
+    div.appendChild(content);
+  }
+  container.appendChild(div);
+  container.scrollTop = container.scrollHeight;
+  return div;
+}
+
+function _renderPlan(plan) {
+  var wrap = document.createElement('div');
+  if (!plan) { var err = document.createElement('div'); err.textContent = '(no plan data)'; wrap.appendChild(err); return wrap; }
+  if (plan.summary) {
+    var s = document.createElement('div');
+    s.className = 'plan-summary';
+    s.textContent = plan.summary;
+    wrap.appendChild(s);
+  }
+  if (plan.files_to_change && plan.files_to_change.length > 0) {
+    var sec = document.createElement('div');
+    sec.className = 'plan-section';
+    var hdr = document.createElement('div');
+    hdr.className = 'plan-section-hdr';
+    hdr.textContent = 'Files to change';
+    sec.appendChild(hdr);
+    plan.files_to_change.forEach(function(f) {
+      var row = document.createElement('div');
+      row.className = 'plan-file';
+      var path = document.createElement('span');
+      path.className = 'plan-file-path';
+      path.textContent = f.path;
+      var action = document.createElement('span');
+      action.className = 'plan-file-action';
+      action.textContent = f.action;
+      var rat = document.createElement('span');
+      rat.className = 'plan-file-rationale';
+      rat.textContent = f.rationale || '';
+      row.appendChild(path); row.appendChild(action); row.appendChild(rat);
+      sec.appendChild(row);
+    });
+    wrap.appendChild(sec);
+  }
+  if (plan.test_plan) {
+    var tsec = document.createElement('div');
+    tsec.className = 'plan-section';
+    var thdr = document.createElement('div');
+    thdr.className = 'plan-section-hdr';
+    thdr.textContent = 'Test plan';
+    tsec.appendChild(thdr);
+    var tt = document.createElement('div');
+    tt.className = 'plan-test-text';
+    tt.textContent = plan.test_plan;
+    tsec.appendChild(tt);
+    wrap.appendChild(tsec);
+  }
+  return wrap;
+}
+
+function _streamPlan() {
+  return new Promise(function(resolve, reject) {
+    var workEl = document.getElementById('planWorking');
+    var workTxt = document.getElementById('planWorkingText');
+    var es = new EventSource(API + '/api/plan/' + _planEnhId + '/stream');
+    var esErrCount = 0;
+    var streamMsgDiv = null;
+    var streamContentDiv = null;
+
+    es.onmessage = function(e) {
+      esErrCount = 0;
+      var evt = JSON.parse(e.data);
+      if (evt.type === 'progress') {
+        workEl.style.display = 'none';
+        if (!streamMsgDiv) {
+          var container = document.getElementById('planMessages');
+          var empty = container.querySelector('.ask-empty');
+          if (empty) empty.remove();
+          streamMsgDiv = document.createElement('div');
+          streamMsgDiv.className = 'plan-msg assistant';
+          var lbl = document.createElement('div');
+          lbl.className = 'plan-msg-label';
+          lbl.textContent = 'Claude';
+          streamContentDiv = document.createElement('div');
+          streamContentDiv.className = 'plan-streaming';
+          streamMsgDiv.appendChild(lbl);
+          streamMsgDiv.appendChild(streamContentDiv);
+          container.appendChild(streamMsgDiv);
+        }
+        streamContentDiv.textContent = evt.text;
+        document.getElementById('planMessages').scrollTop = document.getElementById('planMessages').scrollHeight;
+      } else if (evt.type === 'plan') {
+        es.close();
+        workEl.style.display = 'none';
+        _planHasPlan = true;
+        _planBusy = false;
+        document.getElementById('planSendBtn').disabled = false;
+        document.getElementById('planSendBtn').textContent = 'Refine';
+        document.getElementById('planInput').placeholder = 'Send feedback to refine the plan...';
+        var rendered = _renderPlan(evt.plan || {});
+        if (streamContentDiv) {
+          streamContentDiv.className = '';
+          streamContentDiv.textContent = '';
+          streamContentDiv.appendChild(rendered);
+        } else {
+          _appendPlanMsg('assistant', rendered);
+        }
+        var buildBtn = document.getElementById('planBuildBtn');
+        buildBtn.textContent = _userRole === 'admin' ? '🔨 Build' : '📤 Submit for Review';
+        buildBtn.disabled = false;
+        document.getElementById('planBuildRow').style.display = 'flex';
+        document.getElementById('planMessages').scrollTop = document.getElementById('planMessages').scrollHeight;
+        refreshJobsBadge();
+        resolve();
+      } else if (evt.type === 'error') {
+        es.close();
+        workEl.style.display = 'none';
+        _appendPlanMsg('assistant', '⚠️ ' + evt.message);
+        _planBusy = false;
+        document.getElementById('planSendBtn').disabled = false;
+        reject(new Error(evt.message));
+      }
+    };
+
+    es.onerror = function() {
+      esErrCount++;
+      if (esErrCount <= 5) { workTxt.textContent = 'Waiting for plan job\u2026'; return; }
+      es.close();
+      workEl.style.display = 'none';
+      _appendPlanMsg('assistant', '⚠️ Could not connect. Please try again.');
+      _planBusy = false;
+      document.getElementById('planSendBtn').disabled = false;
+      reject(new Error('Connection error'));
+    };
+  });
+}
+
+async function sendPlanRequest() {
+  if (_planBusy || !currentAppSlug) return;
+  var input = document.getElementById('planInput');
+  var message = input.value.trim();
+
+  if (_planHasPlan && _planEnhId) {
+    if (!message) return;
+    input.value = '';
+    _planBusy = true;
+    _planHasPlan = false;
+    document.getElementById('planSendBtn').disabled = true;
+    document.getElementById('planBuildRow').style.display = 'none';
+    _appendPlanMsg('user', message);
+    var workEl = document.getElementById('planWorking');
+    var workTxt = document.getElementById('planWorkingText');
+    workEl.style.display = 'flex';
+    workTxt.textContent = 'Re-planning\u2026';
+    try {
+      var fr = await fetch(API + '/api/plan/' + _planEnhId + '/feedback', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + sessionToken },
+        body: JSON.stringify({ comment: message }),
+      });
+      var fd = await fr.json();
+      if (!fr.ok) throw new Error((fd.error && fd.error.message) || 'Feedback failed');
+      await _streamPlan();
+    } catch (err) {
+      document.getElementById('planWorking').style.display = 'none';
+      _appendPlanMsg('assistant', '⚠️ ' + err.message);
+      _planBusy = false;
+      document.getElementById('planSendBtn').disabled = false;
+    }
+    return;
+  }
+
+  if (!message) return;
+
+  if (_planPeekCtx) {
+    var c = _planPeekCtx;
+    var ctx = ['--- Pointed element ---', 'URL: ' + c.path, 'Selector: ' + c.selector,
+      'Tag: <' + c.tag + '>' + (c.id ? ' #' + c.id : ''), c.text ? 'Text: "' + c.text + '"' : null]
+      .filter(Boolean).join('\n');
+    message = ctx + '\n\n' + message;
+    clearPlanPeekCtx();
+  }
+
+  input.value = '';
+  _planBusy = true;
+  document.getElementById('planSendBtn').disabled = true;
+  _appendPlanMsg('user', message);
+
+  var workEl2 = document.getElementById('planWorking');
+  var workTxt2 = document.getElementById('planWorkingText');
+  workEl2.style.display = 'flex';
+  workTxt2.textContent = 'Submitting request\u2026';
+
+  try {
+    var r = await fetch(API + '/api/enhancements', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + sessionToken },
+      body: JSON.stringify({ message: message, app_slug: currentAppSlug }),
+    });
+    var d = await r.json();
+    if (!r.ok) throw new Error((d.error && d.error.message) || 'Submission failed');
+    _planEnhId = d.enhancement_id;
+    workTxt2.textContent = 'Generating plan\u2026';
+    await _streamPlan();
+  } catch (err) {
+    document.getElementById('planWorking').style.display = 'none';
+    _appendPlanMsg('assistant', '⚠️ ' + err.message);
+    _planBusy = false;
+    document.getElementById('planSendBtn').disabled = false;
+  }
+}
+
+async function buildFromPlan() {
+  if (!_planEnhId) return;
+  document.getElementById('planBuildBtn').disabled = true;
+  try {
+    var r = await fetch(API + '/api/plan/' + _planEnhId + '/build', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + sessionToken },
+    });
+    var d = await r.json();
+    if (!r.ok) throw new Error((d.error && d.error.message) || 'Build failed');
+    document.getElementById('planBuildRow').style.display = 'none';
+    _appendPlanMsg('assistant', d.auto
+      ? '\u2705 Build queued! Check the Jobs panel for progress.'
+      : '\u2705 Plan submitted for admin approval.');
+    refreshJobsBadge();
+  } catch (err) {
+    document.getElementById('planBuildBtn').disabled = false;
+    _appendPlanMsg('assistant', '⚠️ ' + err.message);
+  }
+}
+
+function refreshApp() {
+  var src = document.getElementById('frameNewTab').href;
+  if (!src || src === '#') return;
+  var f = document.getElementById('frameIframe');
+  f.src = 'about:blank';
+  requestAnimationFrame(function() { f.src = src; });
 }
 
 // ── Jobs panel ───────────────────────────────────────────────────────────

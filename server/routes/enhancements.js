@@ -63,13 +63,16 @@ router.post('/', (req, res) => {
     VALUES (?, ?, ?, ?, 'new')
   `).run(app_slug || null, userId, userName, message.trim());
 
-  if (userRole === 'admin' && process.env.ANTHROPIC_API_KEY) {
-    db.prepare("UPDATE enhancement_requests SET mode = 'auto', status = 'planning' WHERE id = ?")
-      .run(lastInsertRowid);
+  if (process.env.ANTHROPIC_API_KEY) {
+    if (userRole === 'admin') {
+      db.prepare("UPDATE enhancement_requests SET mode = 'auto', status = 'planning' WHERE id = ?").run(lastInsertRowid);
+    } else {
+      db.prepare("UPDATE enhancement_requests SET status = 'planning' WHERE id = ?").run(lastInsertRowid);
+    }
     db.prepare('INSERT INTO enhancement_jobs (enhancement_id, phase) VALUES (?, ?)').run(lastInsertRowid, 'plan');
   }
 
-  res.json({ message: 'Enhancement request submitted. Thank you!' });
+  res.json({ message: 'Enhancement request submitted. Thank you!', enhancement_id: lastInsertRowid });
 });
 
 /**

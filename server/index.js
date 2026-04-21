@@ -51,6 +51,7 @@ import samlRoutes from './routes/saml.js';
 import scimRoutes, { scimAdminRouter } from './routes/scim.js';
 import presenceRoutes from './routes/presence.js';
 import askRoutes from './routes/ask.js';
+import planRoutes from './routes/plan.js';
 
 const PORT = process.env.PORT || 5001;
 const HOST = process.env.HOST || '0.0.0.0';
@@ -459,7 +460,8 @@ app.use('/api/enhancements', enhancementsRoutes); // Enhancement requests (Beare
 app.use('/api/appstudio', appstudioRoutes); // AppStudio plan/code/build pipeline
 app.use('/api/webhooks', webhooksRoutes); // Public webhook endpoint (no auth — must be before logsRoutes)
 app.use('/api/presence', presenceRoutes); // Bearer auth (identity) — must be before logsRoutes (which installs X-API-Key requireAuth at /api)
-app.use('/api/ask', askRoutes);          // Ask Claude (Bearer auth) — must be before logsRoutes
+app.use('/api/ask', askRoutes);           // Ask Claude (Bearer auth)
+app.use('/api/plan', planRoutes);         // Plan panel (Bearer auth)
 
 app.use('/api', logsRoutes);             // /api/audit, /api/apps/:slug/audit
 app.use('/api', monitoringRoutes);       // /api/server/health
