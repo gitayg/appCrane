@@ -226,7 +226,7 @@ export async function generateCode({ jobId, app, enhancementId, plan, summary, a
     'run', '--rm',
     '--name', containerName,
     '--label', 'appcrane=true',
-    '--label', 'appstudio=true',
+    '--label', 'appcrane.container.type=job',
     '--label', `enhancement_id=${enhancementId}`,
     '--memory=2g', '--cpus=1',
     '-e', `ANTHROPIC_API_KEY=${process.env.ANTHROPIC_API_KEY}`,

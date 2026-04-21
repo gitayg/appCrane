@@ -115,17 +115,19 @@ async function ensureSessionContainer(sessionId, app, onLog) {
   onLog?.('[ask] Cloning repository...');
   log.info(`AskClaude: starting session container ${containerName}`);
 
+  // Clone then immediately remove the git remote — ask containers cannot commit or push
   execFileSync('docker', [
     'run', '-d',
     '--name', containerName,
     '--label', 'appcrane=true',
+    '--label', 'appcrane.container.type=ask',
     '--memory=1g', '--cpus=0.5',
     '-e', `ANTHROPIC_API_KEY=${process.env.ANTHROPIC_API_KEY}`,
     '-e', `ASK_MODEL=${ASK_MODEL}`,
     '-v', `${dir}:/studio:ro`,
     ASK_IMAGE,
     'sh', '-c',
-    `git clone --depth 1 --branch "${app.branch || 'main'}" "${cloneUrl}" /workspace && tail -f /dev/null`,
+    `git clone --depth 1 --branch "${app.branch || 'main'}" "${cloneUrl}" /workspace && git -C /workspace remote remove origin && tail -f /dev/null`,
   ], { stdio: 'pipe', timeout: 15000 });
 
   await waitForWorkspace(containerName, onLog);
