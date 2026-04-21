@@ -8,9 +8,10 @@ import log from '../utils/logger.js';
 const ASK_IMAGE      = process.env.APPSTUDIO_IMAGE || 'appcrane-studio:latest';
 const ASK_MODEL      = process.env.APPSTUDIO_CODER_MODEL || 'claude-sonnet-4-6';
 const ASK_TIMEOUT_MS = parseInt(process.env.ASK_TIMEOUT_MS || '300000', 10);
-const IDLE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+const IDLE_TIMEOUT_MS = 5 * 60 * 1000;   // 5 minutes idle
+const MAX_SESSION_MS  = 2 * 60 * 60 * 1000; // 2 hour hard cap
 
-// sessionId -> { containerName, dir, idleTimer }
+// sessionId -> { containerName, dir, idleTimer, maxTimer }
 const liveSessions = new Map();
 
 function sessionDir(sessionId) {
@@ -129,7 +130,8 @@ async function ensureSessionContainer(sessionId, app, onLog) {
 
   await waitForWorkspace(containerName, onLog);
 
-  const session = { containerName, dir, idleTimer: null };
+  const session = { containerName, dir, idleTimer: null, maxTimer: null };
+  session.maxTimer = setTimeout(() => stopSession(sessionId), MAX_SESSION_MS);
   liveSessions.set(sessionId, session);
   return session;
 }
@@ -189,6 +191,7 @@ export function stopSession(sessionId) {
   if (!session) return;
   liveSessions.delete(sessionId);
   clearTimeout(session.idleTimer);
+  clearTimeout(session.maxTimer);
   try { execFileSync('docker', ['rm', '-f', session.containerName], { stdio: 'pipe', timeout: 15000 }); } catch (_) {}
   try { rmSync(session.dir, { recursive: true, force: true }); } catch (_) {}
   log.info(`AskClaude: session ${sessionId} container stopped (idle timeout)`);
