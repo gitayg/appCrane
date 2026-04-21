@@ -38,18 +38,21 @@ process.chdir('/workspace');
 const ctx = JSON.parse(fs.readFileSync('/studio/context.json', 'utf8'));
 
 let prompt = '';
+if (ctx.contextDoc) {
+  prompt += '# Codebase context\\n' + ctx.contextDoc + '\\n\\n';
+}
 if (ctx.agentContext) {
-  prompt += 'Context about this application:\\n' + ctx.agentContext + '\\n\\n';
+  prompt += '# Operator notes\\n' + ctx.agentContext + '\\n\\n';
 }
 if (ctx.history && ctx.history.length > 0) {
-  prompt += 'Previous conversation:\\n';
+  prompt += '# Previous conversation\\n';
   for (const m of ctx.history) {
     prompt += (m.role === 'user' ? 'User' : 'Assistant') + ': ' + m.content + '\\n\\n';
   }
   prompt += '---\\n\\n';
 }
-prompt += 'Question: ' + ctx.question + '\\n\\n';
-prompt += 'Instructions: Answer based on the codebase in /workspace. Read relevant source files as needed. Be concise and accurate. Do NOT modify any files.';
+prompt += '# Question\\n' + ctx.question + '\\n\\n';
+prompt += '# Instructions\\nAnswer based on the codebase in /workspace. The context doc above gives the architecture overview — read specific source files as needed for details. Be concise and accurate. Do NOT modify any files.';
 
 console.log('[ask] Running Claude Code...');
 const claudeEnv = { ...process.env, HOME: '/home/studio', PATH: '/usr/local/bin:/usr/bin:/bin' };
@@ -69,7 +72,7 @@ console.log('[ask] Done');
 `;
 }
 
-export async function runAskJob({ jobId, app, question, history, agentContext, onLog }) {
+export async function runAskJob({ jobId, app, question, history, agentContext, contextDoc, onLog }) {
   const dir = jobDir(jobId);
   if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
   mkdirSync(dir, { recursive: true });
@@ -86,7 +89,7 @@ export async function runAskJob({ jobId, app, question, history, agentContext, o
     } catch (_) {}
   }
 
-  writeFileSync(join(dir, 'context.json'), JSON.stringify({ question, history, agentContext })); // nosemgrep
+  writeFileSync(join(dir, 'context.json'), JSON.stringify({ question, history, agentContext, contextDoc })); // nosemgrep
   writeFileSync(join(dir, 'runner.js'), buildRunnerScript()); // nosemgrep
 
   const containerName = `appcrane-ask-${jobId}`;

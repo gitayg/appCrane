@@ -5,6 +5,7 @@ import { getDb } from '../db.js';
 import { hashApiKey } from '../services/encryption.js';
 import { AppError } from '../utils/errors.js';
 import { runAskJob, cleanupAskWorkspace } from '../services/askClaude.js';
+import { ensureCodebaseContext } from '../services/appstudio/contextBuilder.js';
 import log from '../utils/logger.js';
 
 const router = Router();
@@ -72,11 +73,23 @@ router.post('/:appSlug', async (req, res) => {
   const ctxPath = join(resolve(process.env.DATA_DIR || './data'), 'apps', app.slug, 'agent-context.md'); // nosemgrep: path-join-resolve-traversal — slug is DB-validated
   const agentContext = existsSync(ctxPath) ? readFileSync(ctxPath, 'utf8') : '';
 
+  const repoDir = join(resolve(process.env.DATA_DIR || './data'), 'apps', app.slug, 'production', 'current'); // nosemgrep: path-join-resolve-traversal — slug is DB-validated
+  let contextDoc = null;
+  try {
+    if (existsSync(repoDir)) {
+      const result = await ensureCodebaseContext(app.slug, repoDir);
+      contextDoc = result.contextDoc || null;
+    } else {
+      const cached = getDb().prepare('SELECT context_doc FROM app_codebase_context WHERE app_slug = ?').get(app.slug);
+      contextDoc = cached?.context_doc || null;
+    }
+  } catch (_) {}
+
   const jobId = Date.now();
   const jobState = { logs: [], clients: new Set(), done: false, answer: null, error: null, sessionId };
   pendingJobs.set(jobId, jobState);
 
-  runAskJob({ jobId, app, question: question.trim(), history, agentContext, onLog: (line) => {
+  runAskJob({ jobId, app, question: question.trim(), history, agentContext, contextDoc, onLog: (line) => {
     jobState.logs.push(line);
     for (const c of jobState.clients) c.write(`data: ${JSON.stringify({ type: 'log', text: line })}\n\n`);
   }}).then(answer => {
