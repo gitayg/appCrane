@@ -226,6 +226,14 @@ input:focus{border-color:var(--accent)}
 .plan-file-rationale{color:var(--dim)}
 .plan-test-text{font-size:.82rem;color:var(--dim);line-height:1.5;white-space:pre-wrap}
 .plan-build-btn{background:#22c55e!important;border-color:transparent!important;color:#fff!important}
+.job-detail-modal{background:var(--surface);border-radius:10px;padding:20px;width:640px;max-width:96vw;display:flex;flex-direction:column;gap:12px;max-height:80vh}
+.job-detail-header{display:flex;align-items:center;gap:10px}
+.job-detail-title{font-weight:700;font-size:.95rem;flex:1}
+.job-detail-logs{flex:1;overflow-y:auto;background:var(--surface2);border-radius:6px;padding:10px 12px;font-family:monospace;font-size:.71rem;line-height:1.6;white-space:pre-wrap;min-height:220px;max-height:380px;color:var(--fg)}
+.job-detail-footer{display:flex;align-items:center;gap:12px;font-size:.78rem;color:var(--dim)}
+.job-detail-tokens{font-weight:600;color:var(--fg)}
+.job-row{cursor:pointer}
+.job-row:hover{background:var(--surface2)}
 </style>
 </head>
 <body>
@@ -331,6 +339,23 @@ input:focus{border-color:var(--accent)}
   </div>
 
   <iframe id="frameIframe" src="" allow="fullscreen"></iframe>
+
+  <!-- Job detail overlay (inside appFrame so it appears over the iframe) -->
+  <div id="jobDetailOverlay" class="enh-overlay" onclick="if(event.target===this)closeJobDetail()" style="z-index:20">
+    <div class="job-detail-modal">
+      <div class="job-detail-header">
+        <span id="jobDetailTitle" class="job-detail-title">Job</span>
+        <span id="jobDetailStatus" class="job-phase"></span>
+        <button class="ask-close" onclick="closeJobDetail()">×</button>
+      </div>
+      <div id="jobDetailLogs" class="job-detail-logs">Loading…</div>
+      <div class="job-detail-footer">
+        <span>Tokens: <span id="jobDetailTokens" class="job-detail-tokens">—</span></span>
+        <span id="jobDetailCost"></span>
+        <span id="jobDetailTime" style="margin-left:auto"></span>
+      </div>
+    </div>
+  </div>
 </div>
 
 <!-- Enhancement request modal -->
@@ -1974,6 +1999,77 @@ async function openPlanById(enhId, appSlug) {
   }
 }
 
+// ── Job detail ───────────────────────────────────────────────────────────
+var _jobDetailTimer = null;
+var _jobDetailId    = null;
+
+function openJobDetail(jobId) {
+  _jobDetailId = jobId;
+  document.getElementById('jobDetailTitle').textContent = 'JOB-' + String(jobId).padStart(4, '0');
+  document.getElementById('jobDetailStatus').textContent = '';
+  document.getElementById('jobDetailLogs').textContent = 'Loading\u2026';
+  document.getElementById('jobDetailTokens').textContent = '\u2014';
+  document.getElementById('jobDetailCost').textContent = '';
+  document.getElementById('jobDetailTime').textContent = '';
+  document.getElementById('jobDetailOverlay').classList.add('open');
+  _fetchJobDetail();
+  if (_jobDetailTimer) clearInterval(_jobDetailTimer);
+  _jobDetailTimer = setInterval(_fetchJobDetail, 3000);
+}
+
+function closeJobDetail() {
+  document.getElementById('jobDetailOverlay').classList.remove('open');
+  if (_jobDetailTimer) { clearInterval(_jobDetailTimer); _jobDetailTimer = null; }
+  _jobDetailId = null;
+}
+
+async function _fetchJobDetail() {
+  if (!_jobDetailId) return;
+  try {
+    var r = await fetch(API + '/api/plan/job/' + _jobDetailId, {
+      headers: { 'Authorization': 'Bearer ' + sessionToken },
+    });
+    var d = await r.json();
+    if (!r.ok) { document.getElementById('jobDetailLogs').textContent = (d.error && d.error.message) || 'Error loading job'; return; }
+
+    var logsEl = document.getElementById('jobDetailLogs');
+    var lines = [];
+    if (d.output && Array.isArray(d.output.log)) {
+      lines = d.output.log;
+    } else if (d.output && d.output.streaming && d.output.text) {
+      lines = [d.output.text];
+    } else if (d.error) {
+      lines = ['Error: ' + d.error];
+    }
+    if (lines.length) {
+      var wasAtBottom = logsEl.scrollHeight - logsEl.scrollTop <= logsEl.clientHeight + 40;
+      logsEl.textContent = lines.join('\n');
+      if (wasAtBottom) logsEl.scrollTop = logsEl.scrollHeight;
+    } else if (d.status === 'queued') {
+      logsEl.textContent = 'Queued \u2014 waiting for worker to pick up this job\u2026';
+    } else if (d.status === 'running') {
+      logsEl.textContent = 'Running \u2014 no output yet\u2026';
+    }
+
+    document.getElementById('jobDetailTitle').textContent = 'JOB-' + String(d.id).padStart(4, '0') + ' \u00b7 ' + (d.phase || '');
+    document.getElementById('jobDetailStatus').textContent = _JOB_STATUS_LABELS[d.status] || d.status || '';
+    document.getElementById('jobDetailTokens').textContent = d.cost_tokens > 0 ? d.cost_tokens.toLocaleString() : '\u2014';
+    if (d.cost_usd_cents > 0) {
+      document.getElementById('jobDetailCost').textContent = '$' + (d.cost_usd_cents / 100).toFixed(3);
+    }
+    if (d.started_at) {
+      var elapsed = d.finished_at
+        ? Math.round((new Date(d.finished_at.replace(' ','T')+'Z') - new Date(d.started_at.replace(' ','T')+'Z')) / 1000) + 's'
+        : Math.round((Date.now() - new Date(d.started_at.replace(' ','T')+'Z')) / 1000) + 's elapsed';
+      document.getElementById('jobDetailTime').textContent = elapsed;
+    }
+
+    if (d.status === 'done' || d.status === 'failed') {
+      if (_jobDetailTimer) { clearInterval(_jobDetailTimer); _jobDetailTimer = null; }
+    }
+  } catch (_) {}
+}
+
 // ── Jobs panel ───────────────────────────────────────────────────────────
 var _jobsPollTimer = null;
 
@@ -2054,7 +2150,9 @@ async function refreshJobsList() {
       hdr.textContent = 'Active (all users)';
       list.appendChild(hdr);
       activeJobs.forEach(function(j) {
-        list.appendChild(_makeJobRow(j.app_slug, j.phase, j.status, j.status === 'running' ? 'job-status-running' : 'job-status-queued', j.enhancement_message));
+        var row = _makeJobRow(j.app_slug, j.phase, j.status, j.status === 'running' ? 'job-status-running' : 'job-status-queued', j.enhancement_message);
+        row.addEventListener('click', (function(id) { return function() { openJobDetail(id); }; })(j.id));
+        list.appendChild(row);
       });
     }
 
@@ -2069,7 +2167,11 @@ async function refreshJobsList() {
         const actionFn = req.status === 'pending_user_review_plan'
           ? function() { openPlanById(req.id, req.app_slug); }
           : null;
-        list.appendChild(_makeJobRow(req.app_slug, req.phase || '', req.status, cls, req.message, actionFn, 'View Plan \u2192'));
+        var row = _makeJobRow(req.app_slug, req.phase || '', req.status, cls, req.message, actionFn, 'View Plan \u2192');
+        if (req.job_id) {
+          row.addEventListener('click', (function(jid, af) { return function(e) { if (!af || !e.target.closest('button')) openJobDetail(jid); }; })(req.job_id, actionFn));
+        }
+        list.appendChild(row);
       });
     }
 
