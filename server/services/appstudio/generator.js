@@ -159,8 +159,14 @@ try {
 
 // Push
 console.log('[studio] Pushing branch ' + branch + '…');
-run('git', ['push', '-u', '--force-with-lease', 'origin', branch]);
-console.log('[studio] Done — ' + branch);
+try {
+  run('git', ['push', '-u', 'origin', branch]);
+  console.log('[studio] Done — ' + branch);
+} catch (_) {
+  // Remote branch has work we don't have locally — signal replan needed
+  console.error('[studio:push_conflict] Remote branch has diverged — replan needed');
+  process.exit(3);
+}
 `;
 }
 
@@ -264,6 +270,7 @@ export async function generateCode({ jobId, app, enhancementId, plan, summary, a
     child.on('close', (code) => {
       clearTimeout(timer);
       if (timedOut) return reject(new Error('Code generation timed out'));
+      if (code === 3) return resolve({ branchName, pushConflict: true });
       if (code !== 0) return reject(new Error(`Studio container exited with code ${code}`));
       resolve({ branchName });
     });
