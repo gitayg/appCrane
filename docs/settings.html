@@ -197,6 +197,25 @@ async function loadSettings() {
   const saveRow = document.createElement('div');
   saveRow.className = 'save-row';
 
+  const fileInput = document.createElement('input');
+  fileInput.type = 'file';
+  fileInput.accept = '.txt,.md,.markdown';
+  fileInput.style.display = 'none';
+  fileInput.onchange = function() {
+    const file = fileInput.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = function(e) { document.getElementById('brandingText').value = e.target.result; fileInput.value = ''; };
+    reader.readAsText(file);
+  };
+  saveRow.appendChild(fileInput);
+
+  const importBtn = document.createElement('button');
+  importBtn.className = 'btn';
+  importBtn.textContent = 'Import from file';
+  importBtn.onclick = () => fileInput.click();
+  saveRow.appendChild(importBtn);
+
   const saveBtn = document.createElement('button');
   saveBtn.className = 'btn';
   saveBtn.textContent = 'Save Guidelines';
