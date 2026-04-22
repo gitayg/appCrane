@@ -166,7 +166,7 @@ if (result.status !== 0) {
 }
 
 // Write sentinel — host picks this up and runs git add/commit/push
-fs.writeFileSync('/workspace/.appcrane_done', new Date().toISOString());
+fs.writeFileSync('/sentinel/done', new Date().toISOString());
 console.log('[studio] Coding complete — host will handle commit and push');
 `;
 }
@@ -214,9 +214,12 @@ export async function generateCode({ jobId, app, enhancementId, plan, summary, a
 
   await ensureStudioImage(onLog);
 
-  const branchName = `appstudio/${enhancementId}-${app.slug}`;
-  const studioDir  = join(dir, 'studio');
+  const branchName   = `appstudio/${enhancementId}-${app.slug}`;
+  const studioDir    = join(dir, 'studio');
+  const sentinelDir  = join(dir, 'sentinel');
   mkdirSync(studioDir, { recursive: true });
+  mkdirSync(sentinelDir, { recursive: true });
+  chmodSync(sentinelDir, 0o777); // world-writable so the studio user inside the container can write the sentinel
 
   // Clone the repo on the host — no credentials reach the container
   const workspaceDir = await cloneForCode(dir, app, app.branch || 'main', branchName, onLog);
@@ -225,7 +228,7 @@ export async function generateCode({ jobId, app, enhancementId, plan, summary, a
   writeFileSync(join(studioDir, 'runner.js'), buildRunnerScript()); // nosemgrep
 
   const containerName = `appcrane-studio-${jobId}`;
-  const sentinelPath  = join(workspaceDir, '.appcrane_done');
+  const sentinelPath  = join(sentinelDir, 'done');
 
   const containerArgs = [
     'run', '--rm',
@@ -238,6 +241,7 @@ export async function generateCode({ jobId, app, enhancementId, plan, summary, a
     '-e', `STUDIO_MODEL=${GEN_MODEL}`,
     '-v', `${workspaceDir}:/workspace`,   // rw — Claude Code writes files here
     '-v', `${studioDir}:/studio:ro`,      // ro — prompt + runner only
+    '-v', `${sentinelDir}:/sentinel`,     // rw — sentinel file only (no git files)
     STUDIO_IMAGE,
     'node', '/studio/runner.js',
   ];
