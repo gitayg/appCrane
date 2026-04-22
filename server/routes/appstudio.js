@@ -289,10 +289,25 @@ function writeEnvKey(key, value) {
 }
 
 /**
- * GET /api/appstudio/anthropic-key — returns whether key is configured (never the value)
+ * GET /api/appstudio/anthropic-key — returns whether key is configured and where it came from (never the value)
  */
-router.get('/anthropic-key', requireAdmin, (req, res) => {
-  res.json({ configured: !!process.env.ANTHROPIC_API_KEY });
+router.get('/anthropic-key', requireAdmin, async (req, res) => {
+  const configured = !!process.env.ANTHROPIC_API_KEY;
+  if (!configured) return res.json({ configured: false, source: null });
+  const inFile = existsSync(envFilePath) &&
+    readFileSync(envFilePath, 'utf8').split('\n').some(l => l.trim().startsWith('ANTHROPIC_API_KEY='));
+  // If ?test=1, make a minimal real API call to verify the key works
+  if (req.query.test === '1') {
+    try {
+      const { default: Anthropic } = await import('@anthropic-ai/sdk');
+      const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+      await client.messages.create({ model: 'claude-haiku-4-5-20251001', max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] });
+      return res.json({ configured: true, source: inFile ? 'file' : 'env', valid: true });
+    } catch (err) {
+      return res.json({ configured: true, source: inFile ? 'file' : 'env', valid: false, error: err.message });
+    }
+  }
+  res.json({ configured: true, source: inFile ? 'file' : 'env' });
 });
 
 /**
