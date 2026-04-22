@@ -249,7 +249,7 @@ input:focus{border-color:var(--accent)}
 .jd-sys.blue{color:#58a6ff;border-color:#1f3a5a}
 .jd-sys.red{color:#f85149;border-color:#4a1a1a}
 .jd-sys.green{color:#3fb950;border-color:#1a3a22}
-.jd-tool{display:flex;align-items:center;gap:6px;font-size:.72rem;font-family:monospace;padding:3px 8px;background:var(--surface2);border-radius:4px;border:1px solid var(--border);align-self:flex-start;max-width:100%;overflow:hidden;opacity:.85}
+.jd-tool{display:flex;align-items:center;gap:6px;font-size:.72rem;font-family:'SF Mono',Monaco,Consolas,monospace;padding:3px 8px;background:var(--surface2);border-radius:4px;border:1px solid var(--border);align-self:flex-start;max-width:100%;overflow:hidden;opacity:.85}
 .jd-tool-name{color:#7ee787;font-weight:700;flex-shrink:0}
 .jd-tool-arg{color:#9ecbff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:300px}
 .jd-text{max-width:94%;padding:8px 12px;border-radius:0 8px 8px 8px;font-size:.8rem;line-height:1.55;background:var(--surface);border:1px solid var(--border);border-left:2px solid var(--accent);align-self:flex-start;color:var(--text);white-space:pre-wrap;word-break:break-word}
@@ -1072,6 +1072,7 @@ function openApp(url, name, slug, hasIcon) {
   document.getElementById('frameNewTab').href = url;
   document.getElementById('frameIframe').src = url;
   document.getElementById('appFrame').classList.add('open');
+  document.body.style.overflow = 'hidden';
   startPresence(slug);
   const icon = document.getElementById('frameAppIcon');
   icon.style.display = 'none';
@@ -1091,6 +1092,7 @@ function closeApp() {
   closePlanPanel();
   closeJobsPanel();
   document.getElementById('appFrame').classList.remove('open');
+  document.body.style.overflow = '';
   document.getElementById('frameIframe').src = '';
   const icon = document.getElementById('frameAppIcon');
   icon.style.display = 'none'; icon.src = '';
