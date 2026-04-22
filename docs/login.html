@@ -89,6 +89,10 @@ input:focus{border-color:var(--accent)}
 .frame-logo span{color:var(--accent)}
 .frame-icon{width:20px;height:20px;border-radius:4px;object-fit:cover;display:none;clip-path:inset(0 round 4px)}
 .frame-name{font-size:.82rem;color:var(--dim)}
+.frame-version{font-size:.7rem;color:var(--dim);background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:1px 6px;font-family:'SF Mono',Monaco,Consolas,monospace}
+.frame-env-switcher{display:flex;background:var(--surface2);border:1px solid var(--border);border-radius:5px;overflow:hidden;flex-shrink:0}
+.env-sw-btn{background:none;border:none;cursor:pointer;padding:3px 11px;font-size:.74rem;font-weight:600;color:var(--dim);transition:background .15s,color .15s;white-space:nowrap}
+.env-sw-btn.active{background:var(--accent);color:#fff}
 .frame-right{display:flex;align-items:center;gap:10px}
 .frame-user{font-size:.78rem;color:var(--dim)}
 .btn-newtab{color:var(--accent);font-size:.78rem;text-decoration:none}
@@ -209,7 +213,9 @@ input:focus{border-color:var(--accent)}
 .jobs-empty{padding:18px 14px;font-size:.82rem;color:var(--dim);text-align:center}
 .jobs-badge{background:#ef4444;color:#fff;border-radius:8px;font-size:.62rem;font-weight:700;padding:1px 5px;line-height:1.4;margin-left:3px;vertical-align:middle;display:none}
 .jobs-badge.has-jobs{display:inline}
-.plan-panel{position:absolute;top:44px;right:0;width:520px;height:calc(100% - 44px);background:var(--surface);border-left:1px solid var(--border);display:flex;flex-direction:column;z-index:12;transform:translateX(100%);transition:transform .2s,height .2s}
+.plan-panel{position:absolute;top:44px;right:0;width:520px;height:calc(100% - 44px);background:var(--surface);border-left:1px solid var(--border);display:flex;flex-direction:column;z-index:12;transform:translateX(100%);transition:transform .2s,height .2s;min-width:320px;max-width:85vw}
+.plan-resize-handle{position:absolute;left:0;top:0;bottom:0;width:5px;cursor:ew-resize;z-index:5;transition:background .15s}
+.plan-resize-handle:hover,.plan-resize-handle.dragging{background:var(--accent)}
 .plan-panel.open{transform:translateX(0)}
 .plan-panel.minimized{height:44px;overflow:hidden}
 .plan-header{display:flex;align-items:center;gap:6px;padding:8px 10px;border-bottom:1px solid var(--border);font-weight:600;flex-shrink:0;font-size:.9rem;cursor:default}
@@ -269,6 +275,11 @@ input:focus{border-color:var(--accent)}
       <span class="frame-logo">App<span>Crane</span></span>
       <img id="frameAppIcon" class="frame-icon" src="" alt="">
       <span class="frame-name" id="frameAppName"></span>
+      <span id="frameVersion" class="frame-version" style="display:none"></span>
+      <div id="frameEnvSwitcher" class="frame-env-switcher" style="display:none">
+        <button class="env-sw-btn" id="frameEnvProdBtn" onclick="switchFrameEnv('prod')">Production</button>
+        <button class="env-sw-btn" id="frameEnvSandBtn" onclick="switchFrameEnv('sandbox')">Sandbox</button>
+      </div>
     </div>
     <div class="frame-right">
       <div id="presenceWrap" class="presence-wrap" style="display:none">
@@ -322,6 +333,7 @@ input:focus{border-color:var(--accent)}
 
   <!-- Enhance panel -->
   <div id="planPanel" class="plan-panel">
+    <div id="planResizeHandle" class="plan-resize-handle"></div>
     <div class="plan-header" ondblclick="togglePlanMinimize()">
       <span>💡 Enhance</span>
       <span id="planPanelAppLabel" class="ask-app-label"></span>
@@ -356,7 +368,8 @@ input:focus{border-color:var(--accent)}
       </div>
       <div class="ask-input-row">
         <textarea id="planInput" class="ask-textarea" placeholder="Describe the enhancement or feature you want..." rows="2"
-          onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendPlanRequest();}"></textarea>
+          onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendPlanRequest();}"
+          oninput="_onPlanInputChange()"></textarea>
         <button id="planSendBtn" class="ask-send" onclick="sendPlanRequest()">Enhance</button>
       </div>
       <div id="planBuildRow" class="ask-input-row" style="display:none;justify-content:flex-end;padding:4px 0 0">
@@ -854,7 +867,8 @@ function showApps(data) {
         arr.textContent = '\u2197';
         btn.appendChild(arr);
         btn.addEventListener('click', function() {
-          openApp(url, a.name + ' (' + label + ')', a.slug, a.has_icon);
+          const env = label === 'Production' ? 'prod' : 'sandbox';
+          openApp(url, a.name, a.slug, a.has_icon, { prodUrl, sandUrl, prodVersion: a.prod_version || '', sandVersion: a.sand_version || 'dev', env });
         });
         return btn;
       }
@@ -867,7 +881,7 @@ function showApps(data) {
       const qa = document.createElement('div');
       qa.className = 'card-quick-actions';
       [
-        ['Open \u25b8', function() { openApp(prodUrl, a.name + ' (Production)', a.slug, a.has_icon); }],
+        ['Open \u25b8', function() { openApp(prodUrl, a.name, a.slug, a.has_icon, { prodUrl, sandUrl, prodVersion: a.prod_version || '', sandVersion: a.sand_version || 'dev', env: 'prod' }); }],
         ['\uD83D\uDCA1 Enhance', function() { openEnhModal(a.slug, a.name); }],
         ['Manage \u25b8', function() { window.open('/app?slug=' + encodeURIComponent(a.slug), '_blank'); }],
       ].forEach(function(pair) {
@@ -882,7 +896,7 @@ function showApps(data) {
       // User: card itself is clickable → opens production
       card.style.cursor = 'pointer';
       card.addEventListener('click', function() {
-        openApp(prodUrl, a.name, a.slug, a.has_icon);
+        openApp(prodUrl, a.name, a.slug, a.has_icon, { prodVersion: a.prod_version || '' });
       });
 
       // 💡 icon-only enhance button, top-right corner on hover
@@ -1048,9 +1062,50 @@ async function doLogout() {
 }
 
 let currentAppSlug = null;
+let _currentAppProdUrl = null;
+let _currentAppSandUrl = null;
+let _currentAppProdVersion = null;
+let _currentAppSandVersion = null;
+let _currentAppEnv = 'prod';
 
-function openApp(url, name, slug, hasIcon) {
+function switchFrameEnv(env) {
+  if (env === _currentAppEnv) return;
+  _currentAppEnv = env;
+  const url = env === 'prod' ? _currentAppProdUrl : _currentAppSandUrl;
+  const version = env === 'prod' ? _currentAppProdVersion : _currentAppSandVersion;
+  document.getElementById('frameIframe').src = url;
+  document.getElementById('frameNewTab').href = url;
+  _updateFrameEnvUI(env, version);
+}
+
+function _updateFrameEnvUI(env, version) {
+  document.getElementById('frameEnvProdBtn').classList.toggle('active', env === 'prod');
+  document.getElementById('frameEnvSandBtn').classList.toggle('active', env === 'sandbox');
+  const vEl = document.getElementById('frameVersion');
+  if (version) { vEl.textContent = version; vEl.style.display = ''; }
+  else { vEl.style.display = 'none'; }
+}
+
+function openApp(url, name, slug, hasIcon, appData) {
   currentAppSlug = slug;
+  _currentAppProdUrl = (appData && appData.prodUrl) || url;
+  _currentAppSandUrl = (appData && appData.sandUrl) || null;
+  _currentAppProdVersion = (appData && appData.prodVersion) || null;
+  _currentAppSandVersion = (appData && appData.sandVersion) || null;
+  _currentAppEnv = (appData && appData.env) || 'prod';
+
+  const isAdmin = _userRole === 'admin';
+  const switcher = document.getElementById('frameEnvSwitcher');
+  if (isAdmin && _currentAppSandUrl) {
+    switcher.style.display = '';
+    const version = _currentAppEnv === 'prod' ? _currentAppProdVersion : _currentAppSandVersion;
+    _updateFrameEnvUI(_currentAppEnv, version);
+  } else {
+    switcher.style.display = 'none';
+    const vEl = document.getElementById('frameVersion');
+    if (_currentAppProdVersion) { vEl.textContent = _currentAppProdVersion; vEl.style.display = ''; }
+    else { vEl.style.display = 'none'; }
+  }
   _askSessionId = null;
   _askPeekCtx = null;
   _planEnhId = null;
@@ -1709,6 +1764,45 @@ var _planPeekCtx = null;
 var _planJobTimer = null;
 var _planJobId    = null;
 
+function _onPlanInputChange() {
+  if (!_planHasPlan) return;
+  var empty = !document.getElementById('planInput').value.trim();
+  document.getElementById('planSendBtn').disabled = empty;
+}
+
+// Resize handle for plan panel
+(function() {
+  var handle, panel, dragging = false, startX = 0, startW = 0;
+  function onMouseMove(e) {
+    if (!dragging) return;
+    var dx = startX - e.clientX;
+    var w = Math.min(Math.max(startW + dx, 320), Math.round(window.innerWidth * 0.85));
+    panel.style.width = w + 'px';
+  }
+  function onMouseUp() {
+    if (!dragging) return;
+    dragging = false;
+    handle.classList.remove('dragging');
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+  }
+  document.addEventListener('DOMContentLoaded', function() {
+    handle = document.getElementById('planResizeHandle');
+    panel = document.getElementById('planPanel');
+    handle.addEventListener('mousedown', function(e) {
+      dragging = true;
+      startX = e.clientX;
+      startW = panel.offsetWidth;
+      handle.classList.add('dragging');
+      document.body.style.cursor = 'ew-resize';
+      document.body.style.userSelect = 'none';
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+  });
+})();
+
 function openPlanPanel() {
   if (!currentAppSlug) return;
   document.getElementById('planPanel').classList.add('open');
@@ -1948,8 +2042,8 @@ function _streamPlan() {
         workEl.style.display = 'none';
         _planHasPlan = true;
         _planBusy = false;
-        document.getElementById('planSendBtn').disabled = false;
         document.getElementById('planSendBtn').textContent = 'Refine';
+        document.getElementById('planSendBtn').disabled = true;
         document.getElementById('planInput').placeholder = 'Send feedback to refine the plan...';
         var rendered = _renderPlan(evt.plan || {});
         if (streamContentDiv) {
@@ -2128,6 +2222,7 @@ async function openPlanById(enhId, appSlug) {
       buildBtn.disabled = false;
       document.getElementById('planBuildRow').style.display = 'flex';
       document.getElementById('planSendBtn').textContent = 'Refine';
+      document.getElementById('planSendBtn').disabled = true;
       document.getElementById('planInput').placeholder = 'Send feedback to refine the plan...';
     } else if (d.status === 'planning') {
       _planBusy = true;
