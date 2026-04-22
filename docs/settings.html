@@ -14,6 +14,12 @@ textarea:focus{border-color:var(--accent)}
 .save-row{display:flex;align-items:center;gap:12px;margin-top:10px}
 .saved-msg{font-size:.82rem;color:var(--green);opacity:0;transition:opacity .3s}
 code.api-pill{background:var(--surface2);border:1px solid var(--border);border-radius:5px;padding:2px 8px;font-size:.78rem;color:var(--dim)}
+.settings-tabs{display:flex;gap:2px;border-bottom:1px solid var(--border);margin-bottom:24px}
+.settings-tab{background:none;border:none;border-bottom:2px solid transparent;padding:8px 18px;cursor:pointer;font-size:.88rem;font-weight:600;color:var(--dim);transition:color .15s,border-color .15s;margin-bottom:-1px}
+.settings-tab:hover{color:var(--text)}
+.settings-tab.active{color:var(--accent);border-bottom-color:var(--accent)}
+.settings-tab-panel{display:none}
+.settings-tab-panel.active{display:block}
 </style>
 </head>
 <body>
@@ -37,9 +43,38 @@ heading.style.marginBottom = '16px';
 heading.textContent = 'Settings';
 container.appendChild(heading);
 
-const settingsDiv = document.createElement('div');
-settingsDiv.id = 'settingsContent';
-container.appendChild(settingsDiv);
+// Tab bar
+const tabBar = document.createElement('div');
+tabBar.className = 'settings-tabs';
+const TABS = ['Branding', 'Security', 'AppStudio'];
+TABS.forEach((name, i) => {
+  const btn = document.createElement('button');
+  btn.className = 'settings-tab' + (i === 0 ? ' active' : '');
+  btn.textContent = name;
+  btn.dataset.tab = name;
+  btn.onclick = () => switchTab(name);
+  tabBar.appendChild(btn);
+});
+container.appendChild(tabBar);
+
+// Tab panels
+const tabPanels = {};
+TABS.forEach((name, i) => {
+  const panel = document.createElement('div');
+  panel.className = 'settings-tab-panel' + (i === 0 ? ' active' : '');
+  panel.id = 'tab-' + name;
+  container.appendChild(panel);
+  tabPanels[name] = panel;
+});
+
+function switchTab(name) {
+  document.querySelectorAll('.settings-tab').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
+  document.querySelectorAll('.settings-tab-panel').forEach(p => p.classList.toggle('active', p.id === 'tab-' + name));
+}
+
+// settingsDiv kept for compat — points to current tab target
+const settingsDiv = { appendChild: (el) => _currentTabTarget.appendChild(el) };
+let _currentTabTarget = tabPanels['Branding'];
 
 loadVersion(); loadUserInfo();
 
@@ -51,6 +86,7 @@ async function loadSettings() {
     apiFetch('/api/appstudio/anthropic-key').catch(() => ({ configured: false })),
   ]);
 
+  _currentTabTarget = tabPanels['AppStudio'];
   // --- Anthropic API key card ---
   const aiCard = document.createElement('div');
   aiCard.className = 'setting-card';
@@ -102,12 +138,39 @@ async function loadSettings() {
   };
   aiSaveRow.appendChild(aiSaveBtn);
 
+  const aiTestBtn = document.createElement('button');
+  aiTestBtn.className = 'btn';
+  aiTestBtn.style.cssText = 'background:var(--surface2);color:var(--text);border:1px solid var(--border)';
+  aiTestBtn.textContent = 'Test Key';
+  aiTestBtn.onclick = async () => {
+    aiTestBtn.disabled = true; aiTestBtn.textContent = 'Testing…';
+    try {
+      const r = await apiFetch('/api/appstudio/anthropic-key');
+      aiTestBtn.disabled = false; aiTestBtn.textContent = 'Test Key';
+      if (r.configured) {
+        aiTestMsg.style.color = 'var(--green)'; aiTestMsg.textContent = '✓ Key is working';
+      } else {
+        aiTestMsg.style.color = 'var(--red)'; aiTestMsg.textContent = '✗ Key not configured';
+      }
+    } catch (e) {
+      aiTestBtn.disabled = false; aiTestBtn.textContent = 'Test Key';
+      aiTestMsg.style.color = 'var(--red)'; aiTestMsg.textContent = '✗ ' + e.message;
+    }
+    setTimeout(() => { aiTestMsg.textContent = ''; }, 4000);
+  };
+  aiSaveRow.appendChild(aiTestBtn);
+
+  const aiTestMsg = document.createElement('span');
+  aiTestMsg.style.cssText = 'font-size:.82rem';
+  aiSaveRow.appendChild(aiTestMsg);
+
   const aiSavedMsg = document.createElement('span');
   aiSavedMsg.className = 'saved-msg'; aiSavedMsg.id = 'aiSaved'; aiSavedMsg.textContent = 'Saved ✓';
   aiSaveRow.appendChild(aiSavedMsg);
   aiCard.appendChild(aiSaveRow);
   settingsDiv.appendChild(aiCard);
 
+  _currentTabTarget = tabPanels['Branding'];
   // --- Branding card ---
   const card = document.createElement('div');
   card.className = 'setting-card';
@@ -149,6 +212,7 @@ async function loadSettings() {
   card.appendChild(saveRow);
   settingsDiv.appendChild(card);
 
+  _currentTabTarget = tabPanels['Security'];
   // --- TLS Certificate card ---
   const tlsCard = document.createElement('div');
   tlsCard.className = 'setting-card';
@@ -461,6 +525,7 @@ async function loadSettings() {
   scimCard.appendChild(scimSaveRow);
   settingsDiv.appendChild(scimCard);
 
+  _currentTabTarget = tabPanels['AppStudio'];
   // --- Dev container limit card ---
   const devCard = document.createElement('div');
   devCard.className = 'setting-card';
