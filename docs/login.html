@@ -295,6 +295,7 @@ input:focus{border-color:var(--accent)}
       </div>
       <span id="frameUserInfo" class="frame-user"></span>
 
+      <div id="planContainerBadge" class="plan-container-badge"><span class="plan-container-dot"></span>Coder Agent Active</div>
       <button class="btn-enhance" onclick="openAskPanel()">🤖 Ask</button>
       <button class="btn-enhance" onclick="openPlanPanel()">💡 Enhance</button>
       <button id="jobsBtn" class="btn-enhance" onclick="toggleJobsPanel()" style="display:none">📋 Jobs<span id="jobsBadge" class="jobs-badge"></span></button>
@@ -341,7 +342,6 @@ input:focus{border-color:var(--accent)}
     <div class="plan-header" ondblclick="togglePlanMinimize()">
       <span>💡 Enhance</span>
       <span id="planPanelAppLabel" class="ask-app-label"></span>
-      <div id="planContainerBadge" class="plan-container-badge"><span class="plan-container-dot"></span>Coder Agent Active</div>
       <div class="ask-header-right" style="margin-left:auto">
         <button class="ask-sessions-btn" id="planPeekToggleBtn" onclick="togglePeekMode()" title="Point at an element to add context">🎯</button>
         <button class="ask-sessions-btn" onclick="resetPlanPanel()" title="New enhancement">New</button>
