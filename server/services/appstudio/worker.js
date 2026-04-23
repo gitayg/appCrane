@@ -465,8 +465,10 @@ async function handleOpenPr(job) {
 
   if (!res.ok) {
     // PR already exists for this branch — find and reuse it
-    const alreadyExists = res.status === 422 &&
-      (data.errors || []).some(e => e.message?.includes('already exists'));
+    const alreadyExists = res.status === 422 && (
+      data.message?.toLowerCase().includes('already exists') ||
+      (data.errors || []).some(e => e.message?.toLowerCase().includes('already exists'))
+    );
     if (!alreadyExists) throw new Error(`GitHub PR creation failed: ${data.message || res.status}`);
 
     onLog?.('[studio:git] PR already exists for this branch — looking it up…');

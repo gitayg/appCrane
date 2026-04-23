@@ -1,6 +1,6 @@
 {
   "name": "appcrane",
-  "version": "1.12.49",
+  "version": "1.12.50",
   "description": "AppCrane - AI-powered app builder. CLI + REST API.",
   "license": "PolyForm-Noncommercial-1.0.0",
   "type": "module",
