@@ -250,7 +250,6 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       APP_BASE_PATH: appBasePath,
       CRANE_URL: craneUrl,
       CRANE_INTERNAL_URL: craneInternalUrl,
-      DATA_DIR: '/data',
     });
 
     const limits = parseResourceLimits(app.resource_limits);

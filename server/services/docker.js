@@ -104,6 +104,7 @@ export async function startApp({ slug, env, image, hostPort, envVars = {}, volum
     ...envVars,
     PORT: String(CONTAINER_PORT),
     NODE_ENV: env === 'production' ? 'production' : 'development',
+    DATA_DIR: '/data',  // platform guarantee — every app container has /data mounted
   };
   for (const [k, v] of Object.entries(runtimeEnv)) {
     args.push('-e', `${k}=${v}`);
