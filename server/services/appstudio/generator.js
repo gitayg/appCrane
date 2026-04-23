@@ -89,8 +89,59 @@ async function cloneForCode(dir, app, baseBranch, branchName, onLog) {
   execFileSync('git', ['-C', workspaceDir, 'config', 'user.name', 'AppStudio'], { stdio: 'pipe' });
   onLog?.(`[studio:git] Creating branch ${branchName}…`);
   execFileSync('git', ['-C', workspaceDir, 'checkout', '-b', branchName], { stdio: 'pipe' });
+
+  // Make all workspace files writable by the container's studio user (UID 1000)
+  try { execFileSync('chown', ['-R', '1000:1000', workspaceDir], { stdio: 'pipe' }); } catch (_) {}
+
+  writeFileSync(join(workspaceDir, 'CLAUDE.md'), buildWorkspaceClaude(), { mode: 0o644 }); // nosemgrep
+
   onLog?.(`[studio:git] Workspace ready at host path ${workspaceDir}`);
   return workspaceDir;
+}
+
+function buildWorkspaceClaude() {
+  return `# AppStudio Coder Agent — Environment Guide
+
+## Where you are
+You are running inside a Docker container as the \`studio\` user.
+- Your working directory is \`/workspace\` — the full app codebase, pre-cloned from GitHub.
+- You can read and write all files in \`/workspace\`.
+- \`/studio/prompt.txt\` contains the full task description (already loaded as your prompt).
+
+## Your job
+Implement exactly the files described in the approved plan.
+Make all changes directly in \`/workspace\`.
+
+## When you are done
+Run \`git add\` to stage every file you changed or created — nothing more.
+Do NOT commit. Do NOT push. The host handles commit, push, and deploy automatically after you exit.
+
+Example:
+\`\`\`
+git add path/to/changed/file.js path/to/new/file.jsx
+\`\`\`
+Or to stage everything you touched:
+\`\`\`
+git add -A
+\`\`\`
+
+Then exit. That's it.
+
+## Hard constraints
+- Do NOT run \`npm install\`, \`yarn\`, or any package manager.
+- Do NOT start or restart any server or process.
+- Do NOT run tests.
+- Do NOT push to git.
+- Do NOT modify files outside the plan unless fixing a direct dependency.
+- Do NOT add unrelated refactoring or "improvements".
+- Do NOT modify database schemas or deploy configs unless the plan explicitly lists them.
+
+## Git safe directory
+If git warns about safe.directory, run:
+\`\`\`
+git config --global --add safe.directory /workspace
+\`\`\`
+`;
 }
 
 function buildPrompt({ plan, summary, agentContext, enhancementMessage }) {

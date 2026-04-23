@@ -295,7 +295,7 @@ input:focus{border-color:var(--accent)}
       </div>
       <span id="frameUserInfo" class="frame-user"></span>
 
-      <div id="planContainerBadge" class="plan-container-badge"><span class="plan-container-dot"></span>Coder Agent Active</div>
+      <div id="planContainerBadge" class="plan-container-badge"><span class="plan-container-dot"></span>AI Coder Live</div>
       <button class="btn-enhance" onclick="openAskPanel()">🤖 Ask</button>
       <button class="btn-enhance" onclick="openPlanPanel()">💡 Enhance</button>
       <button id="jobsBtn" class="btn-enhance" onclick="toggleJobsPanel()" style="display:none">📋 Jobs<span id="jobsBadge" class="jobs-badge"></span></button>
@@ -1143,7 +1143,6 @@ function openApp(url, name, slug, hasIcon, appData) {
     icon.src = window.location.origin + '/api/apps/' + slug + '/icon';
   }
   document.getElementById('jobsBtn').style.display = '';
-  document.getElementById('planContainerBadge').classList.remove('active');
   refreshJobsBadge();
   if (_userRole === 'admin' && slug) {
     fetch(API + '/api/plan/active-job/' + encodeURIComponent(slug), {
@@ -1152,6 +1151,7 @@ function openApp(url, name, slug, hasIcon, appData) {
       if (d && d.job_id) _startPlanJobPolling(d.job_id);
     }).catch(function() {});
   }
+  if (slug) startAskContainerPoll(slug);
 }
 
 function closeApp() {
@@ -1159,6 +1159,7 @@ function closeApp() {
   closeAskPanel();
   closePlanPanel();
   closeJobsPanel();
+  stopAskContainerPoll();
   document.getElementById('appFrame').classList.remove('open');
   document.body.style.overflow = '';
   document.getElementById('frameIframe').src = '';
@@ -1166,6 +1167,27 @@ function closeApp() {
   icon.style.display = 'none'; icon.src = '';
   currentAppSlug = null;
   stopPresence();
+}
+
+var _askContainerPollTimer = null;
+
+function startAskContainerPoll(slug) {
+  stopAskContainerPoll();
+  function poll() {
+    if (!slug) return;
+    fetch(API + '/api/ask/active/' + encodeURIComponent(slug), {
+      headers: { 'Authorization': 'Bearer ' + sessionToken },
+    }).then(function(r) { return r.ok ? r.json() : null; }).then(function(d) {
+      document.getElementById('planContainerBadge').classList.toggle('active', !!(d && d.active));
+    }).catch(function() {});
+  }
+  poll();
+  _askContainerPollTimer = setInterval(poll, 5000);
+}
+
+function stopAskContainerPoll() {
+  if (_askContainerPollTimer) { clearInterval(_askContainerPollTimer); _askContainerPollTimer = null; }
+  document.getElementById('planContainerBadge').classList.remove('active');
 }
 
 var _presenceTimer = null;
@@ -1855,7 +1877,7 @@ function resetPlanPanel() {
 
 function _stopPlanJobPolling() {
   if (_planJobTimer) { clearInterval(_planJobTimer); _planJobTimer = null; }
-  document.getElementById('planContainerBadge').classList.remove('active');
+  // badge driven by askContainerPoll — don't touch it here
 }
 
 function _startPlanJobPolling(jobId) {
@@ -1890,9 +1912,7 @@ async function _pollPlanJob() {
     document.getElementById('planJobId').textContent = d.id ? '#' + String(d.id).padStart(4, '0') : '';
     var status = _JOB_STATUS_LABELS[d.status] || d.status || '';
     document.getElementById('planJobStatus').textContent = status;
-    if (_userRole === 'admin') {
-      document.getElementById('planContainerBadge').classList.toggle('active', d.status === 'running');
-    }
+    // badge is now driven by startAskContainerPoll, not by AppStudio job status
     if (d.cost_usd_cents > 0) {
       document.getElementById('planJobCost').textContent = '$' + (d.cost_usd_cents / 100).toFixed(3);
     }

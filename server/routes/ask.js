@@ -4,7 +4,7 @@ import { join, resolve } from 'path';
 import { getDb } from '../db.js';
 import { hashApiKey } from '../services/encryption.js';
 import { AppError } from '../utils/errors.js';
-import { runAskJob } from '../services/askClaude.js';
+import { runAskJob, hasActiveContainer } from '../services/askClaude.js';
 import { ensureCodebaseContext } from '../services/appstudio/contextBuilder.js';
 import log from '../utils/logger.js';
 
@@ -191,6 +191,11 @@ router.get('/jobs', (req, res) => {
   }
 
   res.json({ active_jobs, my_requests });
+});
+
+// GET /api/ask/active/:appSlug — is an Ask Claude container live for this app?
+router.get('/active/:appSlug', (req, res) => {
+  res.json({ active: hasActiveContainer(req.params.appSlug) });
 });
 
 export default router;
