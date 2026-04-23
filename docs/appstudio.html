@@ -16,8 +16,11 @@
 .filter-row select,.filter-row input{background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px 10px;font-size:13px}
 .filter-row input{flex:1;min-width:160px}
 .req-count{font-size:.8rem;color:var(--dim);margin-left:auto}
-.req-table{width:100%;border-collapse:collapse;background:var(--surface);border:1px solid var(--border);border-radius:8px;overflow:hidden}
-.req-table th{text-align:left;font-size:.72rem;text-transform:uppercase;letter-spacing:.5px;color:var(--dim);font-weight:600;padding:8px 12px;border-bottom:1px solid var(--border);white-space:nowrap}
+.req-table-wrap{overflow-x:auto}
+.req-table{width:100%;border-collapse:collapse;background:var(--surface);border:1px solid var(--border);border-radius:8px;overflow:hidden;table-layout:fixed}
+.req-table th{text-align:left;font-size:.72rem;text-transform:uppercase;letter-spacing:.5px;color:var(--dim);font-weight:600;padding:8px 12px;border-bottom:1px solid var(--border);white-space:nowrap;position:relative}
+.req-table th .col-resize{position:absolute;top:0;right:0;width:6px;height:100%;cursor:col-resize;user-select:none;z-index:2}
+.req-table th .col-resize:hover{background:var(--accent);opacity:.3}
 .req-table td{padding:10px 12px;border-bottom:1px solid var(--border);vertical-align:top;font-size:.875rem}
 .req-table tbody tr:last-child td{border-bottom:none}
 .req-table tbody tr{background:var(--surface);transition:background .12s}
@@ -240,28 +243,38 @@ function renderRequests(el) {
   filterDiv.appendChild(searchInput); filterDiv.appendChild(countEl); filterDiv.appendChild(newBtn);
   el.appendChild(filterDiv);
 
-  var wrap = document.createElement('div');
+  var wrap = document.createElement('div'); wrap.className = 'req-table-wrap';
   var table = document.createElement('table'); table.className = 'req-table';
   var thead = table.createTHead(); var hrow = thead.insertRow();
   var sortState = { key: 'id', dir: 'desc' };
+  var COL_WIDTHS_KEY = 'appstudio.requests.colWidths.v1';
+  var savedWidths = {};
+  try { savedWidths = JSON.parse(localStorage.getItem(COL_WIDTHS_KEY) || '{}'); } catch (_) {}
   var columns = [
-    { label: '#',           key: 'id',             get: function(r) { return r.id; } },
-    { label: 'App',         key: 'app_slug',       get: function(r) { return (r.app_slug || '').toLowerCase(); } },
-    { label: 'User',        key: 'user_name',      get: function(r) { return (r.user_name || '').toLowerCase(); } },
-    { label: 'Date',        key: 'created_at',     get: function(r) { return r.created_at || ''; } },
-    { label: 'Message',     key: 'message',        get: function(r) { return (r.message || '').toLowerCase(); } },
-    { label: 'Status',      key: 'status',         get: function(r) { return r.status || 'new'; } },
-    { label: 'Latest Job',  key: 'latest_job_id',  get: function(r) { return r.latest_job_id || 0; } },
-    { label: 'Cost',        key: 'cost_tokens',    get: function(r) { return r.cost_tokens || 0; } },
-    { label: 'Branch / PR', key: 'branch_name',    get: function(r) { return (r.branch_name || r.fix_version || '').toLowerCase(); } },
-    { label: '',            key: null,             get: null },
+    { label: '#',           key: 'id',             w: 70,  get: function(r) { return r.id; } },
+    { label: 'App',         key: 'app_slug',       w: 130, get: function(r) { return (r.app_slug || '').toLowerCase(); } },
+    { label: 'User',        key: 'user_name',      w: 120, get: function(r) { return (r.user_name || '').toLowerCase(); } },
+    { label: 'Date',        key: 'created_at',     w: 160, get: function(r) { return r.created_at || ''; } },
+    { label: 'Message',     key: 'message',        w: 420, get: function(r) { return (r.message || '').toLowerCase(); } },
+    { label: 'Status',      key: 'status',         w: 130, get: function(r) { return r.status || 'new'; } },
+    { label: 'Latest Job',  key: 'latest_job_id',  w: 120, get: function(r) { return r.latest_job_id || 0; } },
+    { label: 'Cost',        key: 'cost_tokens',    w: 100, get: function(r) { return r.cost_tokens || 0; } },
+    { label: 'Version / PR', key: 'fix_version',   w: 140, get: function(r) { return (r.fix_version || r.branch_name || '').toLowerCase(); } },
+    { label: '',            key: null,             w: 44,  get: null },
   ];
+  function persistWidths() {
+    var out = {};
+    columns.forEach(function(c) { if (c.key && c._th && c._th.style.width) out[c.key] = parseInt(c._th.style.width, 10); });
+    try { localStorage.setItem(COL_WIDTHS_KEY, JSON.stringify(out)); } catch (_) {}
+  }
   columns.forEach(function(col) {
     var th = document.createElement('th');
+    var width = (savedWidths[col.key] || col.w);
+    th.style.width = width + 'px';
     if (col.key) {
-      th.style.cursor = 'pointer';
-      th.style.userSelect = 'none';
-      th.addEventListener('click', function() {
+      var labelSpan = document.createElement('span');
+      labelSpan.style.cssText = 'cursor:pointer;user-select:none;display:inline-block';
+      labelSpan.addEventListener('click', function() {
         if (sortState.key === col.key) {
           sortState.dir = sortState.dir === 'asc' ? 'desc' : 'asc';
         } else {
@@ -270,6 +283,20 @@ function renderRequests(el) {
         }
         doRender();
       });
+      th.appendChild(labelSpan);
+      col._labelSpan = labelSpan;
+      // Drag-to-resize handle on the right edge of the header
+      var handle = document.createElement('div');
+      handle.className = 'col-resize';
+      handle.addEventListener('mousedown', function(ev) {
+        ev.preventDefault(); ev.stopPropagation();
+        var startX = ev.clientX, startW = th.offsetWidth;
+        function onMove(mv) { th.style.width = Math.max(50, startW + (mv.clientX - startX)) + 'px'; }
+        function onUp() { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); persistWidths(); }
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+      });
+      th.appendChild(handle);
     }
     col._th = th;
     hrow.appendChild(th);
@@ -278,7 +305,7 @@ function renderRequests(el) {
     columns.forEach(function(col) {
       if (!col.key) { col._th.textContent = col.label; return; }
       var arrow = sortState.key === col.key ? (sortState.dir === 'asc' ? ' ▲' : ' ▼') : '';
-      col._th.textContent = col.label + arrow;
+      if (col._labelSpan) col._labelSpan.textContent = col.label + arrow;
     });
   }
   var tbody = table.createTBody();
@@ -384,9 +411,14 @@ function renderRequests(el) {
       }
       if (!totalTokens && !totalCents) { tdCost.style.color = 'var(--dim)'; tdCost.textContent = '—'; }
 
-      // Branch / PR
-      var tdBranch = tr.insertCell(); tdBranch.style.cssText = 'font-size:.72rem;font-family:monospace;white-space:nowrap;max-width:160px;overflow:hidden;text-overflow:ellipsis';
-      if (r.pr_url) {
+      // Version / PR — prefer released version once merged; else PR link while in flight
+      var tdBranch = tr.insertCell(); tdBranch.style.cssText = 'font-size:.75rem;font-family:monospace;white-space:nowrap;max-width:160px;overflow:hidden;text-overflow:ellipsis';
+      var shipped = (status === 'merged' || status === 'done') && r.fix_version && !r.fix_version.startsWith('appstudio/');
+      if (shipped) {
+        var ver = document.createElement('span'); ver.style.cssText = 'color:#22c55e;font-weight:600';
+        ver.textContent = r.fix_version; ver.title = 'Released version';
+        tdBranch.appendChild(ver);
+      } else if (r.pr_url) {
         var prLink = document.createElement('a'); prLink.href = r.pr_url; prLink.target = '_blank';
         prLink.style.cssText = 'color:var(--accent);text-decoration:none'; prLink.textContent = 'PR ↗';
         prLink.addEventListener('click', function(ev) { ev.stopPropagation(); });
