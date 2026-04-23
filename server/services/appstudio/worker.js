@@ -5,6 +5,7 @@ import { getDb } from '../../db.js';
 import { decrypt } from '../encryption.js';
 import { planEnhancement } from './planner.js';
 import { generateCode, cloneForBuild, cleanupWorkspace } from './generator.js';
+import { ensureCodebaseContext } from './contextBuilder.js';
 import log from '../../utils/logger.js';
 
 const POLL_MS          = parseInt(process.env.APPSTUDIO_POLL_MS || '5000', 10);
@@ -224,6 +225,21 @@ async function handleCode(job) {
   db.prepare("UPDATE enhancement_requests SET status = 'coding' WHERE id = ?").run(enh.id);
 
   const agentContext = getAgentContext(app.slug);
+
+  // Pre-built codebase context — lets the coder skip orientation grepping and saves tokens per run.
+  // Falls back to the DB cache when the prod clone isn't on disk yet.
+  let contextDoc = null;
+  try {
+    const repoDir = join(resolve(process.env.DATA_DIR || './data'), 'apps', app.slug, 'production', 'current');
+    if (existsSync(repoDir)) {
+      const result = await ensureCodebaseContext(app.slug, repoDir);
+      contextDoc = result.contextDoc || null;
+    } else {
+      const cached = db.prepare('SELECT context_doc FROM app_codebase_context WHERE app_slug = ?').get(app.slug);
+      contextDoc = cached?.context_doc || null;
+    }
+  } catch (_) {}
+
   const logLines = [];
   let codeOutputTokens = 0;
   let codeLastInputTokens = 0;
@@ -319,6 +335,7 @@ async function handleCode(job) {
     plan,
     summary: plan.summary || enh.message,
     agentContext,
+    contextDoc,
     enhancementMessage: enh.message,
     onLog,
     onCodingDone,
