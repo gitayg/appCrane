@@ -193,9 +193,21 @@ router.get('/jobs', (req, res) => {
   res.json({ active_jobs, my_requests });
 });
 
-// GET /api/ask/active/:appSlug — is an Ask Claude container live for this app?
+// GET /api/ask/active/:appSlug — is any coder container live for this app?
+// Returns true when an Ask session container OR an AppStudio coding job is running.
 router.get('/active/:appSlug', (req, res) => {
-  res.json({ active: hasActiveContainer(req.params.appSlug) });
+  const slug = req.params.appSlug;
+  const askActive = hasActiveContainer(slug);
+  if (askActive) return res.json({ active: true });
+
+  const db = getDb();
+  const job = db.prepare(`
+    SELECT j.id FROM enhancement_jobs j
+    JOIN enhancement_requests er ON er.id = j.enhancement_id
+    WHERE er.app_slug = ? AND j.phase = 'code' AND j.status IN ('queued', 'running')
+    LIMIT 1
+  `).get(slug);
+  res.json({ active: !!job });
 });
 
 export default router;
