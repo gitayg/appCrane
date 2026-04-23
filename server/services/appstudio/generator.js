@@ -90,7 +90,9 @@ async function cloneForCode(dir, app, baseBranch, branchName, onLog) {
   onLog?.(`[studio:git] Creating branch ${branchName}…`);
   execFileSync('git', ['-C', workspaceDir, 'checkout', '-b', branchName], { stdio: 'pipe' });
 
-  // Make all workspace files writable by the container's studio user (UID 1000)
+  // Make all workspace files writable by the container's studio user.
+  // chmod works regardless of who runs AppCrane; chown requires root.
+  try { execFileSync('chmod', ['-R', 'a+rw', workspaceDir], { stdio: 'pipe' }); } catch (_) {}
   try { execFileSync('chown', ['-R', '1000:1000', workspaceDir], { stdio: 'pipe' }); } catch (_) {}
 
   writeFileSync(join(workspaceDir, 'CLAUDE.md'), buildWorkspaceClaude(), { mode: 0o644 }); // nosemgrep
