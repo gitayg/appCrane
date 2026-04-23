@@ -43,7 +43,7 @@
 .btn-start:hover{opacity:.85}
 .enh-del{background:none;border:none;color:var(--dim);cursor:pointer;font-size:.9rem;padding:2px 6px;border-radius:4px;transition:color .15s}
 .enh-del:hover{color:var(--red)}
-.msg-cell{line-height:1.45;max-width:0}
+.msg-cell{line-height:1.45;width:100%;min-width:420px}
 .date-cell{white-space:nowrap;color:var(--dim);font-size:.8rem}
 
 /* Detail */
@@ -166,7 +166,7 @@ function statusLabel(s) { return STATUS_LABELS[s] || s; }
 function fmtDate(str) {
   if (!str) return '';
   var d = new Date(str.replace(' ', 'T') + (str.includes('T') ? '' : 'Z'));
-  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+  return d.toLocaleString(undefined, { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
 function fmtJobTime(str) {
@@ -243,9 +243,44 @@ function renderRequests(el) {
   var wrap = document.createElement('div');
   var table = document.createElement('table'); table.className = 'req-table';
   var thead = table.createTHead(); var hrow = thead.insertRow();
-  ['#', 'App', 'User', 'Date', 'Message', 'Status', 'Latest Job', 'Cost', 'Branch / PR', ''].forEach(function(h) {
-    var th = document.createElement('th'); th.textContent = h; hrow.appendChild(th);
+  var sortState = { key: 'id', dir: 'desc' };
+  var columns = [
+    { label: '#',           key: 'id',             get: function(r) { return r.id; } },
+    { label: 'App',         key: 'app_slug',       get: function(r) { return (r.app_slug || '').toLowerCase(); } },
+    { label: 'User',        key: 'user_name',      get: function(r) { return (r.user_name || '').toLowerCase(); } },
+    { label: 'Date',        key: 'created_at',     get: function(r) { return r.created_at || ''; } },
+    { label: 'Message',     key: 'message',        get: function(r) { return (r.message || '').toLowerCase(); } },
+    { label: 'Status',      key: 'status',         get: function(r) { return r.status || 'new'; } },
+    { label: 'Latest Job',  key: 'latest_job_id',  get: function(r) { return r.latest_job_id || 0; } },
+    { label: 'Cost',        key: 'cost_tokens',    get: function(r) { return r.cost_tokens || 0; } },
+    { label: 'Branch / PR', key: 'branch_name',    get: function(r) { return (r.branch_name || r.fix_version || '').toLowerCase(); } },
+    { label: '',            key: null,             get: null },
+  ];
+  columns.forEach(function(col) {
+    var th = document.createElement('th');
+    if (col.key) {
+      th.style.cursor = 'pointer';
+      th.style.userSelect = 'none';
+      th.addEventListener('click', function() {
+        if (sortState.key === col.key) {
+          sortState.dir = sortState.dir === 'asc' ? 'desc' : 'asc';
+        } else {
+          sortState.key = col.key;
+          sortState.dir = (col.key === 'id' || col.key === 'created_at' || col.key === 'latest_job_id' || col.key === 'cost_tokens') ? 'desc' : 'asc';
+        }
+        doRender();
+      });
+    }
+    col._th = th;
+    hrow.appendChild(th);
   });
+  function updateHeaderLabels() {
+    columns.forEach(function(col) {
+      if (!col.key) { col._th.textContent = col.label; return; }
+      var arrow = sortState.key === col.key ? (sortState.dir === 'asc' ? ' ▲' : ' ▼') : '';
+      col._th.textContent = col.label + arrow;
+    });
+  }
   var tbody = table.createTBody();
   wrap.appendChild(table); el.appendChild(wrap);
 
@@ -257,6 +292,17 @@ function renderRequests(el) {
       if (q && !(r.message || '').toLowerCase().includes(q) && !(r.user_name || '').toLowerCase().includes(q) && !(r.app_slug || '').toLowerCase().includes(q)) return false;
       return true;
     });
+    var sortCol = columns.find(function(c) { return c.key === sortState.key; });
+    if (sortCol && sortCol.get) {
+      var dir = sortState.dir === 'asc' ? 1 : -1;
+      rows.sort(function(a, b) {
+        var av = sortCol.get(a), bv = sortCol.get(b);
+        if (av < bv) return -1 * dir;
+        if (av > bv) return 1 * dir;
+        return 0;
+      });
+    }
+    updateHeaderLabels();
     countEl.textContent = rows.length + ' request' + (rows.length !== 1 ? 's' : '');
     tbody.textContent = '';
     if (!rows.length) {
