@@ -86,13 +86,19 @@ router.post('/:appSlug', async (req, res) => {
   } catch (_) {}
 
   const jobId = Date.now();
-  const jobState = { logs: [], clients: new Set(), done: false, answer: null, error: null, sessionId };
+  const jobState = { logs: [], clients: new Set(), done: false, answer: null, error: null, sessionId, tokens: 0 };
   pendingJobs.set(jobId, jobState);
 
-  runAskJob({ sessionId, app, question: question.trim(), history, agentContext, contextDoc, onLog: (line) => {
-    jobState.logs.push(line);
-    for (const c of jobState.clients) c.write(`data: ${JSON.stringify({ type: 'log', text: line })}\n\n`);
-  }}).then(answer => {
+  runAskJob({ sessionId, app, question: question.trim(), history, agentContext, contextDoc,
+    onTokens: (count) => {
+      jobState.tokens = count;
+      for (const c of jobState.clients) c.write(`data: ${JSON.stringify({ type: 'tokens', count })}\n\n`);
+    },
+    onLog: (line) => {
+      jobState.logs.push(line);
+      for (const c of jobState.clients) c.write(`data: ${JSON.stringify({ type: 'log', text: line })}\n\n`);
+    },
+  }).then(answer => {
     db.prepare("INSERT INTO ask_messages (session_id, role, content) VALUES (?, 'assistant', ?)").run(sessionId, answer);
     db.prepare("UPDATE ask_sessions SET updated_at = datetime('now') WHERE id = ?").run(sessionId);
     jobState.done = true; jobState.answer = answer;
@@ -124,6 +130,7 @@ router.get('/stream/:jobId', (req, res) => {
   res.write(': connected\n\n');
 
   for (const line of job.logs) res.write(`data: ${JSON.stringify({ type: 'log', text: line })}\n\n`);
+  if (job.tokens > 0) res.write(`data: ${JSON.stringify({ type: 'tokens', count: job.tokens })}\n\n`);
 
   if (job.done) {
     if (job.error) res.write(`data: ${JSON.stringify({ type: 'error', message: job.error })}\n\n`);

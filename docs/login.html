@@ -322,6 +322,7 @@ input:focus{border-color:var(--accent)}
     <div id="askWorking" class="ask-working" style="display:none">
       <div class="ask-spinner"></div>
       <div id="askWorkingText" class="ask-working-text">Analyzing codebase...</div>
+      <span id="askLiveStats" style="font-size:.68rem;color:var(--dim);font-family:monospace;white-space:nowrap;flex-shrink:0"></span>
     </div>
     <div class="ask-input-area">
       <div id="askPeekBar" class="ask-peek-bar" style="display:none">
@@ -362,7 +363,8 @@ input:focus{border-color:var(--accent)}
         <span id="planJobPhase">code</span>
         <span id="planJobStatus" style="margin-left:4px"></span>
         <span id="planJobId" style="font-family:monospace;color:var(--dim);font-size:.65rem;margin-left:4px"></span>
-        <span id="planJobCost" style="margin-left:auto;font-family:monospace"></span>
+        <span id="planJobTokens" style="margin-left:auto;font-family:monospace;font-size:.68rem;color:var(--dim)"></span>
+        <span id="planJobCost" style="margin-left:6px;font-family:monospace"></span>
       </div>
       <div id="planJobLog" class="plan-job-log"></div>
     </div>
@@ -1706,8 +1708,18 @@ async function sendAskQuestion() {
 
   const workEl = document.getElementById('askWorking');
   const workTxt = document.getElementById('askWorkingText');
+  const statsEl = document.getElementById('askLiveStats');
   workEl.style.display = 'flex';
   workTxt.textContent = 'Spinning up container...';
+  statsEl.textContent = '';
+  _askStartedAt = Date.now();
+  _askLiveTokens = 0;
+  if (_askElapsedTimer) clearInterval(_askElapsedTimer);
+  _askElapsedTimer = setInterval(function() {
+    if (!_askStartedAt) return;
+    var s = Math.round((Date.now() - _askStartedAt) / 1000);
+    statsEl.textContent = _askLiveTokens > 0 ? s + 's · ' + _askLiveTokens.toLocaleString() + ' tok' : s + 's';
+  }, 1000);
 
   try {
     const r = await fetch(API + '/api/ask/' + currentAppSlug, {
@@ -1726,8 +1738,11 @@ async function sendAskQuestion() {
       const evt = JSON.parse(e.data);
       if (evt.type === 'log') {
         workTxt.textContent = evt.text.replace(/^\[ask\]\s*/, '').replace(/^\[stderr\]\s*/, '');
+      } else if (evt.type === 'tokens') {
+        _askLiveTokens = evt.count || 0;
       } else if (evt.type === 'done') {
         es.close();
+        if (_askElapsedTimer) { clearInterval(_askElapsedTimer); _askElapsedTimer = null; }
         workEl.style.display = 'none';
         _appendAskMsg('assistant', evt.answer || '(no response)');
         _askBusy = false;
@@ -1735,6 +1750,7 @@ async function sendAskQuestion() {
         document.getElementById('askInput').focus();
       } else if (evt.type === 'error') {
         es.close();
+        if (_askElapsedTimer) { clearInterval(_askElapsedTimer); _askElapsedTimer = null; }
         workEl.style.display = 'none';
         _appendAskMsg('assistant', '⚠️ ' + evt.message);
         _askBusy = false;
@@ -1797,6 +1813,22 @@ var _planBusy    = false;
 var _planHasPlan = false;
 var _planPeekCtx = null;
 var _planJobTimer = null;
+var _planJobStartedAt = null;
+var _planElapsedTimer = null;
+var _jobDetailStartedAt = null;
+var _jobDetailElapsedTimer = null;
+var _askStartedAt = null;
+var _askElapsedTimer = null;
+var _askLiveTokens = 0;
+
+function _startElapsedTick(getStartedAt, updateFn) {
+  var timer = setInterval(function() {
+    var t = getStartedAt();
+    if (!t) return;
+    updateFn(Math.round((Date.now() - t) / 1000));
+  }, 1000);
+  return timer;
+}
 var _planJobId    = null;
 
 function _onPlanInputChange() {
@@ -1877,16 +1909,28 @@ function resetPlanPanel() {
 
 function _stopPlanJobPolling() {
   if (_planJobTimer) { clearInterval(_planJobTimer); _planJobTimer = null; }
+  if (_planElapsedTimer) { clearInterval(_planElapsedTimer); _planElapsedTimer = null; }
   // badge driven by askContainerPoll — don't touch it here
 }
 
 function _startPlanJobPolling(jobId) {
   _planJobId = jobId;
   _stopPlanJobPolling();
+  _planJobStartedAt = null;
   document.getElementById('planJobSection').style.display = 'flex';
-  document.getElementById('planJobLog').innerHTML = '<div class="jd-sys">Waiting for worker…</div>';
+  var logEl = document.getElementById('planJobLog');
+  logEl.textContent = '';
+  var waiting = document.createElement('div');
+  waiting.className = 'jd-sys';
+  waiting.textContent = 'Waiting for worker…';
+  logEl.appendChild(waiting);
+  document.getElementById('planJobTokens').textContent = '';
+  _planElapsedTimer = _startElapsedTick(
+    function() { return _planJobStartedAt; },
+    function(s) { var el = document.getElementById('planJobCost'); if (el && !el.textContent.startsWith('$')) el.textContent = s + 's'; }
+  );
   _pollPlanJob();
-  _planJobTimer = setInterval(_pollPlanJob, 3000);
+  _planJobTimer = setInterval(_pollPlanJob, 1000);
 }
 
 async function _pollPlanJob() {
@@ -1912,6 +1956,12 @@ async function _pollPlanJob() {
     document.getElementById('planJobId').textContent = d.id ? '#' + String(d.id).padStart(4, '0') : '';
     var status = _JOB_STATUS_LABELS[d.status] || d.status || '';
     document.getElementById('planJobStatus').textContent = status;
+    if (d.started_at && !_planJobStartedAt) {
+      _planJobStartedAt = new Date(d.started_at.replace(' ', 'T') + 'Z').getTime();
+    }
+    if (d.cost_tokens > 0) {
+      document.getElementById('planJobTokens').textContent = d.cost_tokens.toLocaleString() + ' tok';
+    }
     // badge is now driven by startAskContainerPoll, not by AppStudio job status
     if (d.cost_usd_cents > 0) {
       document.getElementById('planJobCost').textContent = '$' + (d.cost_usd_cents / 100).toFixed(3);
@@ -2081,6 +2131,9 @@ function _streamPlan() {
         var txt = evt.text;
         if (evt.elapsed > 0) txt += ' (' + evt.elapsed + 's)';
         workTxt.textContent = txt;
+        if (evt.tokens > 0) document.getElementById('planJobTokens').textContent = evt.tokens.toLocaleString() + ' tok';
+      } else if (evt.type === 'tokens') {
+        if (evt.count > 0) document.getElementById('planJobTokens').textContent = evt.count.toLocaleString() + ' tok';
       } else if (evt.type === 'progress') {
         workEl.style.display = 'none';
         if (!streamMsgDiv) {
@@ -2355,12 +2408,22 @@ function openJobDetail(jobId) {
   document.getElementById('jobDetailPanel').classList.add('open');
   _fetchJobDetail();
   if (_jobDetailTimer) clearInterval(_jobDetailTimer);
-  _jobDetailTimer = setInterval(_fetchJobDetail, 3000);
+  _jobDetailTimer = setInterval(_fetchJobDetail, 1000);
+  if (_jobDetailElapsedTimer) clearInterval(_jobDetailElapsedTimer);
+  _jobDetailStartedAt = null;
+  _jobDetailElapsedTimer = _startElapsedTick(
+    function() { return _jobDetailStartedAt; },
+    function(s) {
+      var el = document.getElementById('jobDetailTime');
+      if (el && _jobDetailStartedAt) el.textContent = s + 's elapsed';
+    }
+  );
 }
 
 function closeJobDetail() {
   document.getElementById('jobDetailPanel').classList.remove('open');
   if (_jobDetailTimer) { clearInterval(_jobDetailTimer); _jobDetailTimer = null; }
+  if (_jobDetailElapsedTimer) { clearInterval(_jobDetailElapsedTimer); _jobDetailElapsedTimer = null; }
   _jobDetailId = null;
 }
 
@@ -2399,15 +2462,17 @@ async function _fetchJobDetail() {
     if (d.cost_usd_cents > 0) {
       document.getElementById('jobDetailCost').textContent = '$' + (d.cost_usd_cents / 100).toFixed(3);
     }
-    if (d.started_at) {
-      var elapsed = d.finished_at
-        ? Math.round((new Date(d.finished_at.replace(' ','T')+'Z') - new Date(d.started_at.replace(' ','T')+'Z')) / 1000) + 's'
-        : Math.round((Date.now() - new Date(d.started_at.replace(' ','T')+'Z')) / 1000) + 's elapsed';
-      document.getElementById('jobDetailTime').textContent = elapsed;
+    if (d.started_at && !_jobDetailStartedAt) {
+      _jobDetailStartedAt = new Date(d.started_at.replace(' ','T')+'Z').getTime();
+    }
+    if (d.finished_at) {
+      var finSec = Math.round((new Date(d.finished_at.replace(' ','T')+'Z') - new Date(d.started_at.replace(' ','T')+'Z')) / 1000);
+      document.getElementById('jobDetailTime').textContent = finSec + 's';
     }
 
     if (d.status === 'done' || d.status === 'failed') {
       if (_jobDetailTimer) { clearInterval(_jobDetailTimer); _jobDetailTimer = null; }
+      if (_jobDetailElapsedTimer) { clearInterval(_jobDetailElapsedTimer); _jobDetailElapsedTimer = null; }
     }
   } catch (_) {}
 }

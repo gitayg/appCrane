@@ -130,14 +130,17 @@ router.get('/:enhancementId/stream', (req, res) => {
         const runSec = startedAt ? Math.round((Date.now() - startedAt) / 1000) : null;
         const estTotal = 45; // typical plan generation ~30-60s
         const estRemaining = startedAt ? Math.max(0, estTotal - runSec) : null;
+        const tokens = db.prepare('SELECT cost_tokens FROM enhancement_jobs WHERE id = ?').get(job.id)?.cost_tokens || 0;
         const runningMsg = runSec !== null
           ? `Analyzing codebase… (${runSec}s elapsed${estRemaining > 0 ? `, ~${estRemaining}s remaining` : ''})`
           : 'Analyzing codebase and generating plan…';
         if (lastStatus !== 'running') {
           lastStatus = 'running';
-          sendStatus(runningMsg, { run_sec: runSec, est_remaining: estRemaining });
+          sendStatus(runningMsg, { run_sec: runSec, est_remaining: estRemaining, tokens });
         } else if (runSec !== null && runSec % 5 === 0) {
-          sendStatus(runningMsg, { run_sec: runSec, est_remaining: estRemaining });
+          sendStatus(runningMsg, { run_sec: runSec, est_remaining: estRemaining, tokens });
+        } else {
+          res.write(`data: ${JSON.stringify({ type: 'tokens', count: tokens })}\n\n`);
         }
         let output = null;
         try { output = job.output_json ? JSON.parse(job.output_json) : null; } catch (_) {}
