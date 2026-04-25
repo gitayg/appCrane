@@ -247,7 +247,7 @@ router.get('/:slug', requireAppAccess, (req, res) => {
 router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), (req, res) => {
   const db = getDb();
   const app = req.app;
-  const { name, domain, description, category, source_type, github_url, branch, github_token, max_ram_mb, max_cpu_percent, public_access } = req.body;
+  const { name, domain, description, category, source_type, github_url, branch, github_token, max_ram_mb, max_cpu_percent, public_access, visibility } = req.body;
 
   const updates = {};
   if (name !== undefined) updates.name = name;
@@ -260,7 +260,16 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), (req, res)
     updates.github_url = github_url;
   }
   if (branch !== undefined) updates.branch = branch;
-  if (public_access !== undefined) updates.public_access = public_access ? 1 : 0;
+  if (visibility !== undefined) {
+    if (!['hidden', 'private', 'public'].includes(visibility)) {
+      throw new AppError('visibility must be one of: hidden, private, public', 400, 'VALIDATION');
+    }
+    updates.visibility = visibility;
+    updates.public_access = visibility === 'public' ? 1 : 0;
+  } else if (public_access !== undefined) {
+    updates.public_access = public_access ? 1 : 0;
+    updates.visibility = public_access ? 'public' : 'private';
+  }
   if (github_token !== undefined) updates.github_token_encrypted = encrypt(github_token);
   if (max_ram_mb !== undefined || max_cpu_percent !== undefined) {
     if (req.user?.role !== 'admin') {
@@ -285,7 +294,7 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), (req, res)
     return res.json({ app, message: 'No changes' });
   }
 
-  const ALLOWED_APP_COLS = new Set(['name','domain','description','category','source_type','github_url','branch','public_access','github_token_encrypted','resource_limits','runtime']);
+  const ALLOWED_APP_COLS = new Set(['name','domain','description','category','source_type','github_url','branch','public_access','visibility','github_token_encrypted','resource_limits','runtime']);
   const invalidKey = Object.keys(updates).find(k => !ALLOWED_APP_COLS.has(k));
   if (invalidKey) throw new AppError(`Invalid field: ${invalidKey}`, 400, 'VALIDATION');
 
