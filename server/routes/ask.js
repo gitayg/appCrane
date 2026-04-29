@@ -169,7 +169,7 @@ router.get('/jobs', (req, res) => {
 
   const my_requests = db.prepare(`
     SELECT er.id, er.app_slug, er.message, er.status, er.created_at,
-           j.phase, j.status as job_status
+           j.id as job_id, j.phase, j.status as job_status
     FROM enhancement_requests er
     LEFT JOIN enhancement_jobs j ON j.enhancement_id = er.id AND j.status IN ('queued', 'running')
     WHERE er.user_id = ?

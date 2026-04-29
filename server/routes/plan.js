@@ -197,4 +197,43 @@ router.post('/:enhancementId/build', (req, res) => {
   }
 });
 
+// GET /api/plan/job/:jobId — job detail with logs and token count (polled by UI)
+router.get('/job/:jobId', (req, res) => {
+  const user = resolveUser(req);
+  if (!user) throw new AppError('Authentication required', 401, 'UNAUTHORIZED');
+  const jobId = parseInt(req.params.jobId, 10);
+  if (isNaN(jobId)) throw new AppError('Invalid job id', 400, 'VALIDATION');
+
+  const db = getDb();
+  const job = db.prepare(`
+    SELECT j.id, j.phase, j.status, j.output_json, j.cost_tokens, j.cost_usd_cents,
+           j.error_message, j.created_at, j.started_at, j.finished_at,
+           er.user_id, er.message as enhancement_message, er.app_slug
+    FROM enhancement_jobs j
+    JOIN enhancement_requests er ON er.id = j.enhancement_id
+    WHERE j.id = ?
+  `).get(jobId);
+
+  if (!job) throw new AppError('Job not found', 404, 'NOT_FOUND');
+  if (job.user_id !== user.userId && user.role !== 'admin') throw new AppError('Access denied', 403, 'FORBIDDEN');
+
+  let output = null;
+  try { output = job.output_json ? JSON.parse(job.output_json) : null; } catch (_) {}
+
+  res.json({
+    id: job.id,
+    phase: job.phase,
+    status: job.status,
+    output,
+    cost_tokens: job.cost_tokens || 0,
+    cost_usd_cents: job.cost_usd_cents || 0,
+    error: job.error_message,
+    created_at: job.created_at,
+    started_at: job.started_at,
+    finished_at: job.finished_at,
+    enhancement_message: job.enhancement_message,
+    app_slug: job.app_slug,
+  });
+});
+
 export default router;
