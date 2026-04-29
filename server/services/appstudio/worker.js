@@ -276,12 +276,14 @@ async function handleCode(job) {
   let noChanges = false;
 
   const onCodingDone = async (workspaceDir, _branch) => {
+    const git = (args, opts = {}) => execFileSync('git', ['-c', `safe.directory=${workspaceDir}`, '-C', workspaceDir, ...args], { stdio: 'pipe', ...opts });
+
     onLog('[studio:git] Staging all file changes…');
-    execFileSync('git', ['-C', workspaceDir, 'add', '-A'], { stdio: 'pipe' });
+    git(['add', '-A']);
 
     let changedFiles = [];
     try {
-      const out = execFileSync('git', ['-C', workspaceDir, 'diff', '--cached', '--name-only'], { stdio: 'pipe' }).toString().trim();
+      const out = git(['diff', '--cached', '--name-only']).toString().trim();
       changedFiles = out ? out.split('\n').filter(Boolean) : [];
     } catch (_) {}
 
@@ -292,18 +294,18 @@ async function handleCode(job) {
     } else {
       onLog(`[studio:git] ${changedFiles.length} file(s) staged:\n` + changedFiles.map(f => `  + ${f}`).join('\n'));
       onLog(`[studio:git] Committing: "${commitMsg}"`);
-      execFileSync('git', ['-C', workspaceDir, 'commit', '-m', commitMsg], { stdio: 'pipe' });
+      git(['commit', '-m', commitMsg]);
       onLog('[studio:git] Commit created');
     }
 
     onLog(`[studio:git] Pushing branch ${branchName} to origin…`);
     try {
-      execFileSync('git', ['-C', workspaceDir, 'push', '-u', 'origin', branchName], { stdio: 'pipe', timeout: 60000 });
+      git(['push', '-u', 'origin', branchName], { timeout: 60000 });
       onLog(`[studio:git] Branch ${branchName} pushed`);
     } catch (_) {
       if (branchName.startsWith('appstudio/')) {
         onLog('[studio:git] Remote branch exists from prior attempt — force-pushing…');
-        execFileSync('git', ['-C', workspaceDir, 'push', '--force', '-u', 'origin', branchName], { stdio: 'pipe', timeout: 60000 });
+        git(['push', '--force', '-u', 'origin', branchName], { timeout: 60000 });
         onLog(`[studio:git] Branch ${branchName} force-pushed`);
       } else {
         pushConflict = true;
