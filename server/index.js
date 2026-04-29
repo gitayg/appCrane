@@ -211,7 +211,7 @@ crane init --name admin --email you@example.com</pre>
 // Excludes /api/identity/* and /api/apps/* so apps can still call AppCrane's
 // own identity / icon endpoints from inside their iframe.
 const APPCRANE_PASSTHROUGH = ['/api/identity', '/api/apps', '/api/info', '/api/_crashed', '/favicon.svg', '/docs'];
-const APPCRANE_PAGE_SLUGS = new Set(['login', 'portal', 'dashboard', 'applications', 'users-page', 'audit-page', 'settings', 'docs', 'agent-guide', 'app', 'studio']);
+const APPCRANE_PAGE_SLUGS = new Set(['login', 'portal', 'dashboard', 'applications', 'users-page', 'audit-page', 'settings', 'docs', 'agent-guide', 'app', 'studio', 'appstudio']);
 app.use((req, res, next) => {
   if (req.method === 'OPTIONS') return next();
   for (const prefix of APPCRANE_PASSTHROUGH) {

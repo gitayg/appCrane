@@ -116,6 +116,7 @@ document.body.insertAdjacentHTML('beforeend',
     '<div class="tabs">' +
       '<div class="tab active" data-tab="requests">Requests</div>' +
       '<div class="tab" data-tab="library">Library</div>' +
+      '<div class="tab" data-tab="studio">Studio</div>' +
     '</div>' +
     '<div id="tabContent"></div>' +
   '</div></div></div>');
@@ -150,7 +151,18 @@ function renderTab() {
   switch (activeTab) {
     case 'requests': renderRequests(el); break;
     case 'library': renderLibrary(el); break;
+    case 'studio': renderStudio(el); break;
   }
+}
+
+function renderStudio(el) {
+  var frame = document.createElement('iframe');
+  frame.src = '/docs/studio-app/';
+  frame.style.cssText = 'width:100%;border:none;border-radius:8px;display:block;' +
+    'height:calc(100vh - 200px);min-height:500px;background:var(--bg)';
+  frame.title = 'AppCrane Studio';
+  el.style.padding = '0';
+  el.appendChild(frame);
 }
 
 var STATUS_LABELS = {
