@@ -106,37 +106,47 @@ async function loadSettings() {
   aiStatus.appendChild(aiDot);
   const aiStatusText = document.createElement('span');
   aiStatusText.id = 'aiStatusText';
-  aiStatusText.textContent = anthropicStatus.configured ? 'Key configured' : 'Not configured';
+  if (anthropicStatus.source === 'env') {
+    aiStatusText.textContent = 'Configured via environment variable (ANTHROPIC_API_KEY)';
+  } else {
+    aiStatusText.textContent = anthropicStatus.configured ? 'Key configured' : 'Not configured';
+  }
   aiStatus.appendChild(aiStatusText);
   aiCard.appendChild(aiStatus);
 
-  const aiInputWrap = makeInput('API Key', 'anthropicKeyInput', 'sk-ant-...', anthropicStatus.configured ? '••••••••••••••••' : '');
-  const aiInp = aiInputWrap.querySelector('input');
-  aiInp.type = 'password';
-  aiInp.autocomplete = 'off';
-  aiInp.onfocus = () => { if (aiInp.value === '••••••••••••••••') aiInp.value = ''; aiInp.style.borderColor = 'var(--accent)'; };
-  aiInp.onblur  = () => { aiInp.style.borderColor = 'var(--border)'; };
-  aiCard.appendChild(aiInputWrap);
+  // Only show the input + save button when the key is NOT from an env variable
+  let aiInp = null;
+  if (anthropicStatus.source !== 'env') {
+    const aiInputWrap = makeInput('API Key', 'anthropicKeyInput', 'sk-ant-...', anthropicStatus.configured ? '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022' : '');
+    aiInp = aiInputWrap.querySelector('input');
+    aiInp.type = 'password';
+    aiInp.autocomplete = 'off';
+    aiInp.onfocus = () => { if (aiInp.value === '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022') aiInp.value = ''; aiInp.style.borderColor = 'var(--accent)'; };
+    aiInp.onblur  = () => { aiInp.style.borderColor = 'var(--border)'; };
+    aiCard.appendChild(aiInputWrap);
+  }
 
   const aiSaveRow = document.createElement('div');
   aiSaveRow.className = 'save-row';
 
-  const aiSaveBtn = document.createElement('button');
-  aiSaveBtn.className = 'btn';
-  aiSaveBtn.textContent = 'Save Key';
-  aiSaveBtn.onclick = async () => {
-    const val = aiInp.value.trim();
-    if (!val || val === '••••••••••••••••') { alert('Enter a valid API key'); return; }
-    aiSaveBtn.disabled = true; aiSaveBtn.textContent = 'Saving…';
-    const result = await apiPut('/api/appstudio/anthropic-key', { key: val });
-    aiSaveBtn.disabled = false; aiSaveBtn.textContent = 'Save Key';
-    if (result && result.error) { alert('Failed: ' + (result.error.message || JSON.stringify(result.error))); return; }
-    aiInp.value = '••••••••••••••••';
-    aiDot.style.background = 'var(--green)';
-    aiStatusText.textContent = 'Key configured';
-    const ok = document.getElementById('aiSaved'); ok.style.opacity = 1; setTimeout(() => { ok.style.opacity = 0; }, 2000);
-  };
-  aiSaveRow.appendChild(aiSaveBtn);
+  if (anthropicStatus.source !== 'env' && aiInp) {
+    const aiSaveBtn = document.createElement('button');
+    aiSaveBtn.className = 'btn';
+    aiSaveBtn.textContent = 'Save Key';
+    aiSaveBtn.onclick = async () => {
+      const val = aiInp.value.trim();
+      if (!val || val === '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022') { alert('Enter a valid API key'); return; }
+      aiSaveBtn.disabled = true; aiSaveBtn.textContent = 'Saving\u2026';
+      const result = await apiPut('/api/appstudio/anthropic-key', { key: val });
+      aiSaveBtn.disabled = false; aiSaveBtn.textContent = 'Save Key';
+      if (result && result.error) { alert('Failed: ' + (result.error.message || JSON.stringify(result.error))); return; }
+      aiInp.value = '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022';
+      aiDot.style.background = 'var(--green)';
+      aiStatusText.textContent = 'Key configured';
+      const ok = document.getElementById('aiSaved'); ok.style.opacity = 1; setTimeout(() => { ok.style.opacity = 0; }, 2000);
+    };
+    aiSaveRow.appendChild(aiSaveBtn);
+  }
 
   const aiTestBtn = document.createElement('button');
   aiTestBtn.className = 'btn';
@@ -145,12 +155,14 @@ async function loadSettings() {
   aiTestBtn.onclick = async () => {
     aiTestBtn.disabled = true; aiTestBtn.textContent = 'Testing…';
     try {
-      const r = await apiFetch('/api/appstudio/anthropic-key');
+      const r = await apiFetch('/api/appstudio/anthropic-key?test=1');
       aiTestBtn.disabled = false; aiTestBtn.textContent = 'Test Key';
-      if (r.configured) {
-        aiTestMsg.style.color = 'var(--green)'; aiTestMsg.textContent = '✓ Key is working';
-      } else {
+      if (!r.configured) {
         aiTestMsg.style.color = 'var(--red)'; aiTestMsg.textContent = '✗ Key not configured';
+      } else if (r.valid === false) {
+        aiTestMsg.style.color = 'var(--red)'; aiTestMsg.textContent = '✗ Key invalid: ' + (r.error || 'API rejected');
+      } else {
+        aiTestMsg.style.color = 'var(--green)'; aiTestMsg.textContent = '✓ Key is valid';
       }
     } catch (e) {
       aiTestBtn.disabled = false; aiTestBtn.textContent = 'Test Key';
