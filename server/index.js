@@ -157,7 +157,7 @@ app.use((req, res, next) => {
 });
 
 // Guard: block everything except public routes until admin is configured
-const PUBLIC_PATHS = ['/api/info', '/favicon.svg', '/login', '/api/identity/login', '/api/identity/verify', '/api/identity/logout', '/api/identity/me'];
+const PUBLIC_PATHS = ['/api/info', '/favicon.svg', '/login', '/portal', '/api/identity/login', '/api/identity/verify', '/api/identity/logout', '/api/identity/me'];
 app.use((req, res, next) => {
   // Settings GETs are public (agents read branding); writes go through requireAdmin.
   const isPublicSettingsRead = req.method === 'GET' && req.path.startsWith('/api/settings');
@@ -205,7 +205,7 @@ crane init --name admin --email you@example.com</pre>
 // Excludes /api/identity/* and /api/apps/* so apps can still call AppCrane's
 // own identity / icon endpoints from inside their iframe.
 const APPCRANE_PASSTHROUGH = ['/api/identity', '/api/apps', '/api/info', '/api/_crashed', '/favicon.svg', '/docs'];
-const APPCRANE_PAGE_SLUGS = new Set(['login', 'dashboard', 'applications', 'users-page', 'audit-page', 'settings', 'docs', 'agent-guide', 'app']);
+const APPCRANE_PAGE_SLUGS = new Set(['login', 'portal', 'dashboard', 'applications', 'users-page', 'audit-page', 'settings', 'docs', 'agent-guide', 'app']);
 app.use((req, res, next) => {
   if (req.method === 'OPTIONS') return next();
   for (const prefix of APPCRANE_PASSTHROUGH) {
@@ -468,6 +468,7 @@ app.use('/api/presence', presenceRoutes);
 
 // Login page
 app.get('/login', (req, res) => sendHtml(res, join(__dirname, '..', 'docs', 'login.html')));
+app.get('/portal', (req, res) => sendHtml(res, join(__dirname, '..', 'docs', 'login.html')));
 
 // Dashboard (admin)
 app.get('/dashboard', (req, res) => sendHtml(res, join(__dirname, '..', 'docs', 'dashboard.html')));

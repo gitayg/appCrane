@@ -514,6 +514,7 @@ function showApps(data) {
   currentUser = data.user;
   document.getElementById('loginWrap').classList.add('hidden');
   document.getElementById('portalWrap').classList.remove('hidden');
+  if (location.pathname !== '/portal') history.replaceState(null, '', '/portal');
 
   document.getElementById('userName').textContent = data.user.name;
   document.getElementById('userEmail').textContent = data.user.email || data.user.username || '';
@@ -837,6 +838,7 @@ async function doLogout() {
   sessionToken = '';
   document.getElementById('portalWrap').classList.add('hidden');
   document.getElementById('loginWrap').classList.remove('hidden');
+  if (location.pathname !== '/login') history.replaceState(null, '', '/login');
   document.getElementById('loginInput').value = '';
   document.getElementById('passInput').value = '';
 }
