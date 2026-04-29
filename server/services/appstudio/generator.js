@@ -129,6 +129,9 @@ git add -A
 
 Then exit. That's it.
 
+## Version bump (required)
+Always apply a patch version bump to \`package.json\` — increment the last digit of the \`version\` field (e.g. \`1.2.3\` → \`1.2.4\`). Do this even if the plan does not list it. This is mandatory for every enhancement.
+
 ## Hard constraints
 - Do NOT run \`npm install\`, \`yarn\`, or any package manager.
 - Do NOT start or restart any server or process.
