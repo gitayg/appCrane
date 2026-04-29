@@ -4,7 +4,7 @@ import { join, resolve } from 'path';
 import { getDb } from '../db.js';
 import { hashApiKey } from '../services/encryption.js';
 import { AppError } from '../utils/errors.js';
-import { runAskJob, cleanupAskWorkspace } from '../services/askClaude.js';
+import { runAskJob } from '../services/askClaude.js';
 import { ensureCodebaseContext } from '../services/appstudio/contextBuilder.js';
 import log from '../utils/logger.js';
 
@@ -89,7 +89,7 @@ router.post('/:appSlug', async (req, res) => {
   const jobState = { logs: [], clients: new Set(), done: false, answer: null, error: null, sessionId };
   pendingJobs.set(jobId, jobState);
 
-  runAskJob({ jobId, app, question: question.trim(), history, agentContext, contextDoc, onLog: (line) => {
+  runAskJob({ sessionId, app, question: question.trim(), history, agentContext, contextDoc, onLog: (line) => {
     jobState.logs.push(line);
     for (const c of jobState.clients) c.write(`data: ${JSON.stringify({ type: 'log', text: line })}\n\n`);
   }}).then(answer => {
@@ -97,13 +97,11 @@ router.post('/:appSlug', async (req, res) => {
     db.prepare("UPDATE ask_sessions SET updated_at = datetime('now') WHERE id = ?").run(sessionId);
     jobState.done = true; jobState.answer = answer;
     for (const c of jobState.clients) { c.write(`data: ${JSON.stringify({ type: 'done', answer, session_id: sessionId })}\n\n`); c.end(); }
-    cleanupAskWorkspace(jobId);
     setTimeout(() => pendingJobs.delete(jobId), 120000);
   }).catch(err => {
     log.error(`Ask job ${jobId} failed: ${err.message}`);
     jobState.done = true; jobState.error = err.message;
     for (const c of jobState.clients) { c.write(`data: ${JSON.stringify({ type: 'error', message: err.message })}\n\n`); c.end(); }
-    cleanupAskWorkspace(jobId);
     setTimeout(() => pendingJobs.delete(jobId), 120000);
   });
 
