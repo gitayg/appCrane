@@ -101,8 +101,8 @@ router.post('/login', (req, res) => {
   // Get all apps with this user's role, health state, and current version
   const isAdmin = user.role === 'admin';
   const apps = db.prepare(`
-    SELECT a.slug, a.name, a.domain, a.description, a.public_access, a.category,
-      CASE WHEN a.public_access THEN 'viewer' ELSE COALESCE(aur.app_role, 'none') END as app_role,
+    SELECT a.slug, a.name, a.domain, a.description, a.public_access, a.visibility, a.category,
+      CASE WHEN a.visibility = 'public' THEN 'viewer' ELSE COALESCE(aur.app_role, 'none') END as app_role,
       hp.is_down as prod_down, hp.last_status as prod_status,
       hs.is_down as sand_down, hs.last_status as sand_status,
       (SELECT version FROM deployments WHERE app_id = a.id AND env = 'production' AND status = 'live' ORDER BY finished_at DESC LIMIT 1) as prod_version,
@@ -116,7 +116,7 @@ router.post('/login', (req, res) => {
     ...a,
     app_role: isAdmin && (a.app_role === 'none' || a.app_role === 'viewer') ? 'admin' : a.app_role,
     has_icon: hasIcon(a.slug),
-  }));
+  })).filter(a => isAdmin || a.visibility !== 'hidden');
 
   res.json({
     token,
@@ -210,7 +210,7 @@ router.get('/verify', (req, res) => {
     const appRecord = db.prepare('SELECT * FROM apps WHERE slug = ?').get(appSlug);
     if (appRecord) {
       appName = appRecord.name;
-      if (appRecord.public_access) {
+      if (appRecord.visibility === 'public') {
         appRole = 'viewer';
       } else {
         const roleRecord = db.prepare('SELECT app_role FROM app_user_roles WHERE app_id = ? AND user_id = ?').get(appRecord.id, session.user_id);
@@ -221,7 +221,7 @@ router.get('/verify', (req, res) => {
     const appRecord = db.prepare('SELECT * FROM apps WHERE id = ?').get(session.app_id);
     if (appRecord) {
       appName = appRecord.name;
-      if (appRecord.public_access) {
+      if (appRecord.visibility === 'public') {
         appRole = 'viewer';
       } else {
         const roleRecord = db.prepare('SELECT app_role FROM app_user_roles WHERE app_id = ? AND user_id = ?').get(session.app_id, session.user_id);
@@ -305,8 +305,8 @@ router.get('/me', (req, res) => {
   // Get all apps with roles, health state, and current version
   const isAdmin = session.role === 'admin';
   const apps = db.prepare(`
-    SELECT a.slug, a.name, a.domain, a.description, a.public_access, a.category,
-      CASE WHEN a.public_access THEN 'viewer' ELSE COALESCE(aur.app_role, 'none') END as role,
+    SELECT a.slug, a.name, a.domain, a.description, a.public_access, a.visibility, a.category,
+      CASE WHEN a.visibility = 'public' THEN 'viewer' ELSE COALESCE(aur.app_role, 'none') END as role,
       hp.is_down as prod_down, hp.last_status as prod_status,
       hs.is_down as sand_down, hs.last_status as sand_status,
       (SELECT version FROM deployments WHERE app_id = a.id AND env = 'production' AND status = 'live' ORDER BY finished_at DESC LIMIT 1) as prod_version,
@@ -320,7 +320,7 @@ router.get('/me', (req, res) => {
     ...a,
     role: isAdmin && (a.role === 'none' || a.role === 'viewer') ? 'admin' : a.role,
     has_icon: hasIcon(a.slug),
-  }));
+  })).filter(a => isAdmin || a.visibility !== 'hidden');
 
   res.json({
     user: {
@@ -362,9 +362,10 @@ router.get('/preview-as/:userId', (req, res) => {
   const target = db.prepare('SELECT id, name, email, username, avatar_url, role FROM users WHERE id = ?').get(targetId);
   if (!target) throw new AppError('User not found', 404, 'NOT_FOUND');
 
+  const isTargetAdmin = target.role === 'admin';
   const apps = db.prepare(`
-    SELECT a.slug, a.name, a.domain, a.description, a.public_access, a.category,
-      CASE WHEN a.public_access THEN 'viewer' ELSE COALESCE(aur.app_role, 'none') END as app_role,
+    SELECT a.slug, a.name, a.domain, a.description, a.public_access, a.visibility, a.category,
+      CASE WHEN a.visibility = 'public' THEN 'viewer' ELSE COALESCE(aur.app_role, 'none') END as app_role,
       hp.is_down as prod_down, hp.last_status as prod_status,
       hs.is_down as sand_down, hs.last_status as sand_status,
       (SELECT version FROM deployments WHERE app_id = a.id AND env = 'production' AND status = 'live' ORDER BY finished_at DESC LIMIT 1) as prod_version,
@@ -376,9 +377,8 @@ router.get('/preview-as/:userId', (req, res) => {
     ORDER BY a.name
   `).all(targetId).map(a => ({
     ...a,
-    app_role: a.app_role,
     has_icon: hasIcon(a.slug),
-  }));
+  })).filter(a => isTargetAdmin || a.visibility !== 'hidden');
 
   res.json({ user: target, apps });
 });

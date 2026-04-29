@@ -2299,12 +2299,27 @@ async function buildFromPlan() {
   }
 }
 
-function refreshApp() {
+async function refreshApp() {
   var src = document.getElementById('frameNewTab').href;
   if (!src || src === '#') return;
   var f = document.getElementById('frameIframe');
   f.src = 'about:blank';
   requestAnimationFrame(function() { f.src = src; });
+  if (currentAppSlug && sessionToken) {
+    try {
+      const r = await fetch(API + '/api/identity/me', { headers: { 'Authorization': 'Bearer ' + sessionToken } });
+      if (r.ok) {
+        const data = await r.json();
+        const appData = (data.apps || []).find(function(a) { return a.slug === currentAppSlug; });
+        if (appData) {
+          _currentAppProdVersion = appData.prod_version || '';
+          _currentAppSandVersion = appData.sand_version || '';
+          var version = _currentAppEnv === 'prod' ? _currentAppProdVersion : _currentAppSandVersion;
+          _updateFrameEnvUI(_currentAppEnv, version);
+        }
+      }
+    } catch (e) {}
+  }
 }
 
 async function openPlanById(enhId, appSlug) {
