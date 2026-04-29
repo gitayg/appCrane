@@ -98,17 +98,25 @@ router.post('/login', (req, res) => {
 
   log.info(`Identity login: ${user.name} (${login})${app ? ' for app ' + app : ''}`);
 
-  // Get all apps with this user's role and health state
+  // Get all apps with this user's role, health state, and current version
   const isAdmin = user.role === 'admin';
   const apps = db.prepare(`
     SELECT a.slug, a.name, a.domain, a.description, a.public_access, a.category,
       CASE WHEN a.public_access THEN 'viewer' ELSE COALESCE(aur.app_role, 'none') END as app_role,
       hp.is_down as prod_down, hp.last_status as prod_status,
-      hs.is_down as sand_down, hs.last_status as sand_status
+      hs.is_down as sand_down, hs.last_status as sand_status,
+      dp.version as prod_version,
+      ds.version as sand_version
     FROM apps a
     LEFT JOIN app_user_roles aur ON a.id = aur.app_id AND aur.user_id = ?
     LEFT JOIN health_state hp ON a.id = hp.app_id AND hp.env = 'production'
     LEFT JOIN health_state hs ON a.id = hs.app_id AND hs.env = 'sandbox'
+    LEFT JOIN deployments dp ON dp.id = (
+      SELECT id FROM deployments WHERE app_id = a.id AND env = 'production' AND status = 'live' ORDER BY finished_at DESC LIMIT 1
+    )
+    LEFT JOIN deployments ds ON ds.id = (
+      SELECT id FROM deployments WHERE app_id = a.id AND env = 'sandbox' AND status = 'live' ORDER BY finished_at DESC LIMIT 1
+    )
     ORDER BY a.name
   `).all(user.id).map(a => ({
     ...a,
@@ -291,17 +299,25 @@ router.get('/me', (req, res) => {
 
   if (!session) throw new AppError('Invalid or expired token', 401, 'INVALID_TOKEN');
 
-  // Get all apps with roles and health state
+  // Get all apps with roles, health state, and current version
   const isAdmin = session.role === 'admin';
   const apps = db.prepare(`
     SELECT a.slug, a.name, a.domain, a.description, a.public_access, a.category,
       CASE WHEN a.public_access THEN 'viewer' ELSE COALESCE(aur.app_role, 'none') END as role,
       hp.is_down as prod_down, hp.last_status as prod_status,
-      hs.is_down as sand_down, hs.last_status as sand_status
+      hs.is_down as sand_down, hs.last_status as sand_status,
+      dp.version as prod_version,
+      ds.version as sand_version
     FROM apps a
     LEFT JOIN app_user_roles aur ON a.id = aur.app_id AND aur.user_id = ?
     LEFT JOIN health_state hp ON a.id = hp.app_id AND hp.env = 'production'
     LEFT JOIN health_state hs ON a.id = hs.app_id AND hs.env = 'sandbox'
+    LEFT JOIN deployments dp ON dp.id = (
+      SELECT id FROM deployments WHERE app_id = a.id AND env = 'production' AND status = 'live' ORDER BY finished_at DESC LIMIT 1
+    )
+    LEFT JOIN deployments ds ON ds.id = (
+      SELECT id FROM deployments WHERE app_id = a.id AND env = 'sandbox' AND status = 'live' ORDER BY finished_at DESC LIMIT 1
+    )
     ORDER BY a.name
   `).all(session.id).map(a => ({
     ...a,

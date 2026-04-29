@@ -522,8 +522,8 @@ function showApps(data) {
         return btn;
       }
 
-      envs.appendChild(makeEnvBtn(prodUrl, 'Production', '', a.prod_down, a.prod_status));
-      envs.appendChild(makeEnvBtn(sandUrl, 'Sandbox', 'dev', a.sand_down, a.sand_status));
+      envs.appendChild(makeEnvBtn(prodUrl, 'Production', a.prod_version || '', a.prod_down, a.prod_status));
+      envs.appendChild(makeEnvBtn(sandUrl, 'Sandbox', a.sand_version || 'dev', a.sand_down, a.sand_status));
       card.appendChild(envs);
 
       // Admin hover quick actions
