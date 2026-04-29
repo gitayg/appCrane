@@ -72,14 +72,16 @@ app.use((req, res, next) => {
   next();
 });
 
-// Global API rate limiter: 300 req/min per IP
+// Global API rate limiter: 300 req/min per authenticated user (or IP as fallback)
 const _apiRateMap = new Map();
-setInterval(() => { const now = Date.now(); for (const [ip, rec] of _apiRateMap) { if (now > rec.resetAt) _apiRateMap.delete(ip); } }, 5 * 60_000);
+setInterval(() => { const now = Date.now(); for (const [k, rec] of _apiRateMap) { if (now > rec.resetAt) _apiRateMap.delete(k); } }, 5 * 60_000);
 function apiRateLimit(req, res, next) {
-  const ip = req.ip || req.socket?.remoteAddress || 'unknown';
+  const bearer = (req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
+  const apiKey = req.headers['x-api-key'] || '';
+  const key = bearer ? `t:${bearer}` : apiKey ? `k:${apiKey}` : `ip:${req.ip || req.socket?.remoteAddress || 'unknown'}`;
   const now = Date.now();
-  const rec = _apiRateMap.get(ip);
-  if (!rec || now > rec.resetAt) { _apiRateMap.set(ip, { count: 1, resetAt: now + 60_000 }); return next(); }
+  const rec = _apiRateMap.get(key);
+  if (!rec || now > rec.resetAt) { _apiRateMap.set(key, { count: 1, resetAt: now + 60_000 }); return next(); }
   if (rec.count >= 300) return res.status(429).json({ error: { message: 'Too many requests', code: 'RATE_LIMITED' } });
   rec.count++;
   next();
