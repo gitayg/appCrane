@@ -577,6 +577,17 @@ app.listen(PORT, HOST, async () => {
     log.warn('Or run: crane init');
   }
 
+  // Mark orphaned in-flight deployments as failed
+  const orphaned = db.prepare(`
+    UPDATE deployments
+    SET status = 'failed', finished_at = datetime('now'),
+        log = COALESCE(log || char(10), '') || '[Deployment interrupted by service restart]'
+    WHERE status IN ('deploying', 'building', 'pending')
+  `).run();
+  if (orphaned.changes > 0) {
+    log.warn(`Marked ${orphaned.changes} orphaned deployment(s) as failed (interrupted by restart)`);
+  }
+
   // Start health checker
   try {
     const { startHealthChecker } = await import('./services/healthChecker.js');
