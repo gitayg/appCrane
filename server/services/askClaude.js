@@ -115,7 +115,10 @@ async function ensureSessionContainer(sessionId, app, onLog) {
   onLog?.('[ask] Cloning repository...');
   log.info(`AskClaude: starting session container ${containerName}`);
 
-  // Clone then immediately remove the git remote — ask containers cannot commit or push
+  // Write token URL to a file — never put it in an env var (would persist in /proc/environ)
+  writeFileSync(join(dir, 'clone_url'), cloneUrl, { mode: 0o600 }); // nosemgrep
+
+  // Clone, strip remote, disable credential helper — ask containers cannot commit or push
   execFileSync('docker', [
     'run', '-d',
     '--name', containerName,
@@ -127,10 +130,13 @@ async function ensureSessionContainer(sessionId, app, onLog) {
     '-v', `${dir}:/studio:ro`,
     ASK_IMAGE,
     'sh', '-c',
-    `git clone --depth 1 --branch "${app.branch || 'main'}" "${cloneUrl}" /workspace && git -C /workspace remote remove origin && tail -f /dev/null`,
+    `CLONE_URL=$(cat /studio/clone_url) && git clone --depth 1 --branch "${app.branch || 'main'}" "$CLONE_URL" /workspace && git -C /workspace remote remove origin && git -C /workspace config --local credential.helper '' && tail -f /dev/null`,
   ], { stdio: 'pipe', timeout: 15000 });
 
   await waitForWorkspace(containerName, onLog);
+
+  // Clear the token from the mounted file — clone is done, container no longer needs it
+  writeFileSync(join(dir, 'clone_url'), '', { mode: 0o600 }); // nosemgrep
 
   const session = { containerName, dir, idleTimer: null, maxTimer: null };
   session.maxTimer = setTimeout(() => stopSession(sessionId), MAX_SESSION_MS);
