@@ -87,7 +87,7 @@ export async function buildImage({ slug, env, contextDir, commitHash, appBasePat
     child.on('error', (err) => { clearTimeout(timer); reject(err); });
     child.on('close', (code) => {
       clearTimeout(timer);
-      if (code !== 0) return reject(new Error(`docker build failed: ${outputBuf.slice(-800)}`));
+      if (code !== 0) return reject(new Error(`docker build failed: ${outputBuf.slice(-3000)}`));
       resolve(tag);
     });
   });
