@@ -254,7 +254,62 @@ async function handleCode(job) {
     }
   };
 
-  const { branchName, pushConflict } = await generateCode({
+  const branchName = `appstudio/${enh.id}-${app.slug}`;
+  const commitMsg  = `appstudio: ${(plan?.summary || enh.message).slice(0, 72)}`;
+  let pushConflict = false;
+
+  const onCodingDone = async (workspaceDir, _branch) => {
+    onLog('[studio:git] Staging all file changes…');
+    execFileSync('git', ['-C', workspaceDir, 'add', '-A'], { stdio: 'pipe' });
+
+    let changedFiles = [];
+    try {
+      const out = execFileSync('git', ['-C', workspaceDir, 'diff', '--cached', '--name-only'], { stdio: 'pipe' }).toString().trim();
+      changedFiles = out ? out.split('\n').filter(Boolean) : [];
+    } catch (_) {}
+
+    if (changedFiles.length === 0) {
+      onLog('[studio:git] No file changes detected after coding');
+    } else {
+      onLog(`[studio:git] ${changedFiles.length} file(s) staged:\n` + changedFiles.map(f => `  + ${f}`).join('\n'));
+      onLog(`[studio:git] Committing: "${commitMsg}"`);
+      execFileSync('git', ['-C', workspaceDir, 'commit', '-m', commitMsg], { stdio: 'pipe' });
+      onLog('[studio:git] Commit created');
+    }
+
+    onLog(`[studio:git] Pushing branch ${branchName} to origin…`);
+    try {
+      execFileSync('git', ['-C', workspaceDir, 'push', '-u', 'origin', branchName], { stdio: 'pipe', timeout: 60000 });
+      onLog(`[studio:git] Branch ${branchName} pushed`);
+    } catch (_) {
+      if (branchName.startsWith('appstudio/')) {
+        onLog('[studio:git] Remote branch exists from prior attempt — force-pushing…');
+        execFileSync('git', ['-C', workspaceDir, 'push', '--force', '-u', 'origin', branchName], { stdio: 'pipe', timeout: 60000 });
+        onLog(`[studio:git] Branch ${branchName} force-pushed`);
+      } else {
+        pushConflict = true;
+        onLog('[studio:git] Push conflict — branch has diverged, will re-plan');
+        return;
+      }
+    }
+
+    // Update DB immediately — container may still be running at this point
+    db.prepare('UPDATE enhancement_jobs SET output_json = ? WHERE id = ?')
+      .run(JSON.stringify({ log: logLines.slice(-200), branchName }), job.id);
+    db.prepare(`
+      UPDATE enhancement_requests
+      SET status = 'pushing', branch_name = ?, fix_version = ?,
+          ai_log = COALESCE(ai_log, '') || ?
+      WHERE id = ?
+    `).run(
+      branchName, branchName,
+      `\n[${new Date().toISOString()}] Code generated and pushed to branch ${branchName}\n`,
+      enh.id,
+    );
+    onLog(`[studio:git] Enhancement #${enh.id} status → pushing`);
+  };
+
+  const { branchName: _b } = await generateCode({
     jobId: job.id,
     app,
     enhancementId: enh.id,
@@ -263,6 +318,7 @@ async function handleCode(job) {
     agentContext,
     enhancementMessage: enh.message,
     onLog,
+    onCodingDone,
   });
 
   cleanupWorkspace(job.id);
@@ -285,21 +341,6 @@ async function handleCode(job) {
     finishJob(job.id, 'done', null);
     return;
   }
-
-  db.prepare('UPDATE enhancement_jobs SET output_json = ? WHERE id = ?')
-    .run(JSON.stringify({ log: logLines.slice(-200), branchName }), job.id);
-
-  db.prepare(`
-    UPDATE enhancement_requests
-    SET status = 'pushing', branch_name = ?, fix_version = ?,
-        ai_log = COALESCE(ai_log, '') || ?
-    WHERE id = ?
-  `).run(
-    branchName,
-    branchName,
-    `\n[${new Date().toISOString()}] Code generated, branch ${branchName} pushed to GitHub\n`,
-    enh.id,
-  );
 
   db.prepare('INSERT INTO enhancement_jobs (enhancement_id, phase) VALUES (?, ?)').run(enh.id, 'build');
 
