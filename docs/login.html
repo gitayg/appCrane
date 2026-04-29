@@ -175,7 +175,7 @@ input:focus{border-color:var(--accent)}
 .ask-header-right{margin-left:auto;display:flex;align-items:center;gap:6px}
 .ask-close{background:none;border:none;cursor:pointer;color:var(--dim);font-size:1.1rem;padding:2px 4px;line-height:1}
 .ask-sessions-btn{background:none;border:none;cursor:pointer;color:var(--accent);font-size:.73rem;padding:2px 6px}
-.ask-messages{flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:10px}
+.ask-messages{flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:10px;min-height:0}
 .ask-empty{color:var(--dim);font-size:.82rem;text-align:center;margin-top:40px}
 .ask-msg{max-width:88%;padding:8px 12px;border-radius:8px;font-size:.83rem;line-height:1.55;white-space:pre-wrap;word-break:break-word}
 .ask-msg.user{background:var(--accent);color:#fff;align-self:flex-end;border-bottom-right-radius:3px}
@@ -212,7 +212,7 @@ input:focus{border-color:var(--accent)}
 .plan-panel{position:absolute;top:44px;right:0;width:520px;height:calc(100% - 44px);background:var(--surface);border-left:1px solid var(--border);display:flex;flex-direction:column;z-index:12;transform:translateX(100%);transition:transform .2s}
 .plan-panel.open{transform:translateX(0)}
 .plan-header{display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--border);font-weight:600;flex-shrink:0;font-size:.9rem}
-.plan-messages{flex:1;overflow-y:auto;padding:0}
+.plan-messages{flex:1;overflow-y:auto;padding:0;min-height:0}
 .plan-msg{padding:10px 16px;border-bottom:1px solid var(--border)}
 .plan-msg.user{background:var(--surface2)}
 .plan-msg-label{font-size:.63rem;color:var(--dim);text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px;font-weight:600}
@@ -240,7 +240,7 @@ input:focus{border-color:var(--accent)}
 .job-detail-panel.open{transform:translateX(0)}
 .job-detail-phead{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--border);flex-shrink:0;font-weight:600;font-size:.88rem}
 .job-detail-title{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.job-detail-messages{flex:1;overflow-y:auto;padding:10px 12px;display:flex;flex-direction:column;gap:6px}
+.job-detail-messages{flex:1;overflow-y:auto;padding:10px 12px;display:flex;flex-direction:column;gap:6px;min-height:0}
 .jd-sys{align-self:center;font-size:.68rem;color:var(--dim);background:var(--surface2);border-radius:10px;padding:2px 10px;border:1px solid var(--border)}
 .jd-sys.blue{color:#58a6ff;border-color:#1f3a5a}
 .jd-sys.red{color:#f85149;border-color:#4a1a1a}
