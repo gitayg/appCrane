@@ -298,7 +298,7 @@ function connectSSE() {
   eventSource.onerror = () => {
     eventSource.close();
     eventSource = null;
-    if (sessionStatus === 'active') {
+    if (!['shipped', 'error'].includes(sessionStatus)) {
       setTimeout(connectSSE, 3000);
     }
   };
