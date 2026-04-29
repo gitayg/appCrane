@@ -148,8 +148,7 @@ let _all = [];
 function fmtDate(str) {
   if (!str) return '';
   const d = new Date(str.replace(' ', 'T') + (str.includes('T') ? '' : 'Z'));
-  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
-    + '\n' + d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
 function buildRow(r) {
@@ -182,7 +181,6 @@ function buildRow(r) {
   // Date
   const tdDate = tr.insertCell();
   tdDate.className = 'col-date';
-  tdDate.style.whiteSpace = 'pre';
   tdDate.textContent = fmtDate(r.created_at);
 
   // Message
