@@ -49,6 +49,7 @@ import appstudioRoutes from './routes/appstudio.js';
 import oidcRoutes from './routes/oidc.js';
 import samlRoutes from './routes/saml.js';
 import scimRoutes, { scimAdminRouter } from './routes/scim.js';
+import presenceRoutes from './routes/presence.js';
 
 const PORT = process.env.PORT || 5001;
 const HOST = process.env.HOST || '0.0.0.0';
@@ -436,6 +437,7 @@ app.use('/api/users', usersRoutes);
 app.use('/api/apps', webhooksRoutes);     // /api/apps/:slug/webhook config
 app.use('/api/apps', usersRoutes);        // /api/apps/:slug/roles, /api/apps/:slug/identity/users (admin)
 app.use('/api/settings', settingsRoutes); // General settings (branding, etc.)
+app.use('/api/presence', presenceRoutes);
 
 // Login page
 app.get('/login', (req, res) => res.sendFile(join(__dirname, '..', 'docs', 'login.html')));
