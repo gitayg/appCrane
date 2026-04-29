@@ -460,6 +460,50 @@ async function loadSettings() {
 
   scimCard.appendChild(scimSaveRow);
   settingsDiv.appendChild(scimCard);
+
+  // --- Dev container limit card ---
+  const devCard = document.createElement('div');
+  devCard.className = 'setting-card';
+  const devH3 = document.createElement('h3');
+  devH3.textContent = 'Dev Container Limit';
+  devCard.appendChild(devH3);
+  const devDesc = document.createElement('p');
+  devDesc.textContent = 'Maximum number of AppStudio and Ask Claude containers that can run simultaneously. If the limit is reached, new requests will be rejected with a capacity error. Default: 5.';
+  devCard.appendChild(devDesc);
+
+  const devInputWrap = makeInput('Max dev containers', 'maxDevContainersInput', '5', '');
+  const devInp = devInputWrap.querySelector('input');
+  devInp.type = 'number';
+  devInp.min = '1';
+  devInp.max = '50';
+  devCard.appendChild(devInputWrap);
+
+  const devSaveRow = document.createElement('div');
+  devSaveRow.className = 'save-row';
+  const devSaveBtn = document.createElement('button');
+  devSaveBtn.className = 'btn';
+  devSaveBtn.textContent = 'Save';
+  devSaveBtn.onclick = async () => {
+    const val = parseInt(devInp.value, 10);
+    if (!val || val < 1) { alert('Enter a number ≥ 1'); return; }
+    devSaveBtn.disabled = true; devSaveBtn.textContent = 'Saving…';
+    const r = await apiPut('/api/settings/max_dev_containers', { value: String(val) });
+    devSaveBtn.disabled = false; devSaveBtn.textContent = 'Save';
+    if (r && r.error) { alert('Failed: ' + (r.error.message || JSON.stringify(r.error))); return; }
+    const ok = document.getElementById('devSaved'); ok.style.opacity = '1'; setTimeout(() => { ok.style.opacity = '0'; }, 2000);
+  };
+  devSaveRow.appendChild(devSaveBtn);
+  const devSavedMsg = document.createElement('span');
+  devSavedMsg.className = 'saved-msg'; devSavedMsg.id = 'devSaved'; devSavedMsg.textContent = 'Saved ✓';
+  devSaveRow.appendChild(devSavedMsg);
+  devCard.appendChild(devSaveRow);
+  settingsDiv.appendChild(devCard);
+
+  // Load current value
+  apiFetch('/api/settings/max_dev_containers').then(r => {
+    if (r && r.value) devInp.value = r.value;
+    else devInp.value = '5';
+  }).catch(() => { devInp.value = '5'; });
 }
 
 async function saveScimEnabled() {

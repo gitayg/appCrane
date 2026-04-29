@@ -2,6 +2,7 @@ import { spawn, execFileSync } from 'child_process';
 import { mkdirSync, existsSync, writeFileSync, rmSync } from 'fs';
 import { join, resolve } from 'path';
 import { decrypt } from '../encryption.js';
+import { assertCapacity } from '../containerLimit.js';
 import log from '../../utils/logger.js';
 
 const GEN_MODEL       = process.env.APPSTUDIO_CODER_MODEL || 'claude-sonnet-4-6';
@@ -240,6 +241,7 @@ export async function generateCode({ jobId, app, enhancementId, plan, summary, a
     'node', '/studio/runner.js',
   ];
 
+  assertCapacity();
   onLog?.(`[studio] Starting container ${containerName}`);
   log.info(`AppStudio: running container ${containerName}`);
 

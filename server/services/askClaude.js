@@ -3,6 +3,7 @@ import { mkdirSync, existsSync, writeFileSync, rmSync } from 'fs';
 import { join, resolve } from 'path';
 import { decrypt } from './encryption.js';
 import { ensureStudioImage } from './appstudio/generator.js';
+import { assertCapacity } from './containerLimit.js';
 import log from '../utils/logger.js';
 
 const ASK_IMAGE      = process.env.APPSTUDIO_IMAGE || 'appcrane-studio:latest';
@@ -100,6 +101,7 @@ async function ensureSessionContainer(sessionId, app, onLog) {
     liveSessions.delete(sessionId);
   }
 
+  assertCapacity();
   await ensureStudioImage(onLog);
 
   const containerName = `appcrane-ask-s${sessionId}`;
