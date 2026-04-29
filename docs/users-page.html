@@ -94,7 +94,8 @@ async function setAppRole(slug, userId, role, sel) {
   if (sel) { sel.disabled = true; sel.style.opacity = '.5'; }
   const data = await apiPut('/api/apps/' + slug + '/roles', { user_id: userId, app_role: role });
   if (sel) { sel.disabled = false; sel.style.opacity = '1'; }
-  if (data && data.error) { alert('Failed to save role: ' + data.error.message); if (sel) loadUsers(); }
+  if (data && data.error) { alert('Failed to save role: ' + data.error.message); if (sel) loadUsers(); return; }
+  _cmdToast('Permission saved', 'var(--green)');
 }
 
 function fmtLastLogin(ts) {
