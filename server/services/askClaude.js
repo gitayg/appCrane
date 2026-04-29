@@ -140,7 +140,7 @@ async function ensureSessionContainer(sessionId, app, onLog) {
   // Clear the token from the mounted file — clone is done, container no longer needs it
   writeFileSync(join(dir, 'clone_url'), '', { mode: 0o644 }); // nosemgrep
 
-  const session = { containerName, dir, idleTimer: null, maxTimer: null };
+  const session = { containerName, dir, appSlug: app.slug, idleTimer: null, maxTimer: null };
   session.maxTimer = setTimeout(() => stopSession(sessionId), MAX_SESSION_MS);
   liveSessions.set(sessionId, session);
   return session;
@@ -194,6 +194,13 @@ export async function runAskJob({ sessionId, app, question, history, agentContex
       resolve(extractAnswer(stdout));
     });
   });
+}
+
+export function hasActiveContainer(appSlug) {
+  for (const [, session] of liveSessions) {
+    if (session.appSlug === appSlug) return true;
+  }
+  return false;
 }
 
 export function stopSession(sessionId) {
