@@ -46,10 +46,14 @@ router.use((req, res, next) => {
   return next(new AppError('Authentication required', 401, 'UNAUTHORIZED'));
 });
 
-function getApp(slug) {
+function getApp(slug, user) {
   const db = getDb();
   const app = db.prepare('SELECT * FROM apps WHERE slug = ?').get(slug);
   if (!app) throw new AppError(`App '${slug}' not found`, 404, 'NOT_FOUND');
+  if (user.role !== 'admin') {
+    const assigned = db.prepare('SELECT 1 FROM app_users WHERE app_id = ? AND user_id = ?').get(app.id, user.id);
+    if (!assigned) throw new AppError('You do not have access to this app', 403, 'FORBIDDEN');
+  }
   return app;
 }
 
@@ -64,7 +68,7 @@ function getSession(sessionId, slug) {
 // ── POST /api/coder/:slug/session — start a new session ─────────────────
 
 router.post('/:slug/session', auditMiddleware('coder.start'), async (req, res) => {
-  const app = getApp(req.params.slug);
+  const app = getApp(req.params.slug, req.user);
   if (!process.env.ANTHROPIC_API_KEY) {
     throw new AppError('ANTHROPIC_API_KEY not configured', 503, 'NOT_CONFIGURED');
   }
@@ -85,7 +89,7 @@ router.post('/:slug/session', auditMiddleware('coder.start'), async (req, res) =
 // ── GET /api/coder/:slug/session — get active/latest session ─────────────
 
 router.get('/:slug/session', (req, res) => {
-  getApp(req.params.slug);
+  getApp(req.params.slug, req.user);
   const db = getDb();
   const session = db.prepare(`
     SELECT * FROM coder_sessions WHERE app_slug = ? ORDER BY created_at DESC LIMIT 1
@@ -108,7 +112,7 @@ router.get('/:slug/session/:id', (req, res) => {
 // ── POST /api/coder/:slug/session/:id/dispatch — send a message ──────────
 
 router.post('/:slug/session/:id/dispatch', async (req, res) => {
-  getApp(req.params.slug);
+  getApp(req.params.slug, req.user);
   const session = getSession(req.params.id, req.params.slug);
   if (!['idle', 'active'].includes(session.status)) {
     throw new AppError(`Session is '${session.status}', must be idle to dispatch`, 400, 'WRONG_STATUS');
@@ -124,7 +128,7 @@ router.post('/:slug/session/:id/dispatch', async (req, res) => {
 // ── POST /api/coder/:slug/session/:id/stop — stop current dispatch ───────
 
 router.post('/:slug/session/:id/stop', (req, res) => {
-  getApp(req.params.slug);
+  getApp(req.params.slug, req.user);
   getSession(req.params.id, req.params.slug);
   stopDispatch(req.params.id);
   res.json({ message: 'Stopped' });
@@ -133,7 +137,7 @@ router.post('/:slug/session/:id/stop', (req, res) => {
 // ── POST /api/coder/:slug/session/:id/resume — re-start evicted session ──
 
 router.post('/:slug/session/:id/resume', auditMiddleware('coder.resume'), async (req, res) => {
-  getApp(req.params.slug);
+  getApp(req.params.slug, req.user);
   const session = getSession(req.params.id, req.params.slug);
   if (session.status !== 'paused') {
     throw new AppError(`Session is '${session.status}', must be paused to resume`, 400, 'WRONG_STATUS');
@@ -147,7 +151,7 @@ router.post('/:slug/session/:id/resume', auditMiddleware('coder.resume'), async 
 // ── POST /api/coder/:slug/session/:id/ship — commit, push, deploy sandbox
 
 router.post('/:slug/session/:id/ship', auditMiddleware('coder.ship'), async (req, res) => {
-  const app = getApp(req.params.slug);
+  const app = getApp(req.params.slug, req.user);
   const session = getSession(req.params.id, req.params.slug);
   if (!['idle', 'paused'].includes(session.status)) {
     throw new AppError(`Session is '${session.status}', stop the current run before shipping`, 400, 'WRONG_STATUS');
@@ -195,7 +199,7 @@ router.post('/:slug/session/:id/ship', auditMiddleware('coder.ship'), async (req
 // ── GET /api/coder/:slug/session/:id/events — SSE stream ─────────────────
 
 router.get('/:slug/session/:id/events', (req, res) => {
-  getApp(req.params.slug);
+  getApp(req.params.slug, req.user);
   const session = getSession(req.params.id, req.params.slug);
 
   res.setHeader('Content-Type', 'text/event-stream');
