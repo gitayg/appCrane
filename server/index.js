@@ -210,7 +210,7 @@ crane init --name admin --email you@example.com</pre>
 // Excludes /api/identity/* and /api/apps/* so apps can still call AppCrane's
 // own identity / icon endpoints from inside their iframe.
 const APPCRANE_PASSTHROUGH = ['/api/identity', '/api/apps', '/api/info', '/api/_crashed', '/favicon.svg', '/docs'];
-const APPCRANE_PAGE_SLUGS = new Set(['login', 'portal', 'dashboard', 'applications', 'users-page', 'audit-page', 'settings', 'docs', 'agent-guide', 'app', 'coder']);
+const APPCRANE_PAGE_SLUGS = new Set(['login', 'portal', 'dashboard', 'applications', 'users-page', 'audit-page', 'settings', 'docs', 'agent-guide', 'app', 'studio']);
 app.use((req, res, next) => {
   if (req.method === 'OPTIONS') return next();
   for (const prefix of APPCRANE_PASSTHROUGH) {
@@ -407,7 +407,7 @@ app.use('/api/webhooks', webhooksRoutes); // Public webhook endpoint (no auth â€
 app.use('/api/presence', presenceRoutes); // Bearer auth (identity) â€” must be before logsRoutes (which installs X-API-Key requireAuth at /api)
 app.use('/api/ask', askRoutes);           // Ask Claude (Bearer auth)
 app.use('/api/plan', planRoutes);         // Plan panel (Bearer auth)
-app.use('/api/coder', coderRoutes);       // AppCrane Coder (API key auth)
+app.use('/api/coder', coderRoutes);       // AppCrane Studio (API key + Bearer auth)
 
 app.use('/api', logsRoutes);             // /api/audit, /api/apps/:slug/audit
 app.use('/api', monitoringRoutes);       // /api/server/health
@@ -428,7 +428,8 @@ app.get('/audit-page', (req, res) => sendHtml(res, join(__dirname, '..', 'docs',
 app.get('/enhancements-page', (req, res) => sendHtml(res, join(__dirname, '..', 'docs', 'enhancements-page.html')));
 app.get('/appstudio', (req, res) => sendHtml(res, join(__dirname, '..', 'docs', 'appstudio.html')));
 app.get('/settings', (req, res) => sendHtml(res, join(__dirname, '..', 'docs', 'settings.html')));
-app.get('/coder', (req, res) => sendHtml(res, join(__dirname, '..', 'docs', 'coder.html')));
+app.get('/studio', (req, res) => sendHtml(res, join(__dirname, '..', 'docs', 'coder.html')));
+app.get('/coder', (req, res) => res.redirect(301, '/studio')); // legacy redirect
 
 // App manager (app user)
 app.get('/app', (req, res) => sendHtml(res, join(__dirname, '..', 'docs', 'app.html')));
