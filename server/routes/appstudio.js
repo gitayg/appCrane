@@ -199,4 +199,50 @@ router.get('/usage/summary', requireAdmin, (req, res) => {
   });
 });
 
+// ── Anthropic API key management ────────────────────────────────────────
+
+const envFilePath = join(resolve(import.meta.dirname, '..', '..'), '.env');
+
+function writeEnvKey(key, value) {
+  let content = existsSync(envFilePath) ? readFileSync(envFilePath, 'utf8') : '';
+  const lines = content.split('\n');
+  const idx = lines.findIndex(l => l.trim().startsWith(key + '='));
+  if (idx !== -1) {
+    lines[idx] = `${key}=${value}`;
+  } else {
+    if (content && !content.endsWith('\n')) content += '\n';
+    lines.push(`${key}=${value}`);
+  }
+  writeFileSync(envFilePath, lines.join('\n'), 'utf8');
+}
+
+/**
+ * GET /api/appstudio/anthropic-key — returns whether key is configured (never the value)
+ */
+router.get('/anthropic-key', requireAdmin, (req, res) => {
+  res.json({ configured: !!process.env.ANTHROPIC_API_KEY });
+});
+
+/**
+ * PUT /api/appstudio/anthropic-key — save key to .env and activate immediately
+ */
+router.put('/anthropic-key', requireAdmin, auditMiddleware('appstudio.set-anthropic-key'), async (req, res) => {
+  const { key } = req.body || {};
+  if (!key || typeof key !== 'string' || !key.trim()) {
+    throw new AppError('key is required', 400, 'VALIDATION');
+  }
+  const trimmed = key.trim();
+  writeEnvKey('ANTHROPIC_API_KEY', trimmed);
+  process.env.ANTHROPIC_API_KEY = trimmed;
+
+  // Start the worker if it wasn't already running
+  try {
+    const { startWorker } = await import('../services/appstudio/worker.js');
+    startWorker();
+  } catch (_) {}
+
+  log.info('Anthropic API key updated via settings');
+  res.json({ message: 'Anthropic API key saved and applied' });
+});
+
 export default router;
