@@ -30,29 +30,65 @@ function buildCloneUrl(app) {
   } catch (_) { return app.github_url; }
 }
 
-// Runner script executed via `docker exec` — reads /studio/prompt.txt, runs Claude, emits answer
+// Runner script executed via `docker exec` — reads /studio/prompt.txt, runs Claude,
+// emits [tokens:N] lines for live tracking, then emits the answer between sentinels.
 function buildRunnerScript() {
   return `#!/usr/bin/env node
 'use strict';
-const { spawnSync } = require('child_process');
+const { spawn } = require('child_process');
+const { createInterface } = require('readline');
 const fs = require('fs');
 
 const model = process.env.ASK_MODEL;
 const prompt = fs.readFileSync('/studio/prompt.txt', 'utf8');
-
 const claudeEnv = { ...process.env, HOME: '/home/studio', PATH: '/usr/local/bin:/usr/bin:/bin' };
-const result = spawnSync('claude', [
+
+const child = spawn('claude', [
   '-p', prompt,
   '--model', model,
   '--dangerously-skip-permissions',
-  '--output-format', 'text',
-], { stdio: ['ignore', 'pipe', 'inherit'], cwd: '/workspace', timeout: ${ASK_TIMEOUT_MS}, env: claudeEnv });
+  '--output-format', 'stream-json',
+  '--verbose',
+], { stdio: ['ignore', 'pipe', 'pipe'], cwd: '/workspace', env: claudeEnv });
 
-if (result.error) { console.error('[ask] Error: ' + result.error.message); process.exit(1); }
-if (result.status !== 0) { console.error('[ask] Claude exited with code ' + result.status); process.exit(result.status || 1); }
+let answer = '';
+let totalTokens = 0;
+let lastEmittedTokens = -1;
 
-const answer = (result.stdout || '').toString().trim();
-process.stdout.write('\\x00ASK_START\\x00' + answer + '\\x00ASK_END\\x00\\n');
+const rl = createInterface({ input: child.stdout, crlfDelay: Infinity });
+rl.on('line', (line) => {
+  if (!line.trim()) return;
+  try {
+    const evt = JSON.parse(line);
+    if (evt.type === 'result') {
+      answer = evt.result || '';
+      if (evt.usage) {
+        totalTokens = (evt.usage.input_tokens || 0) + (evt.usage.output_tokens || 0)
+          + (evt.usage.cache_read_input_tokens || 0);
+      }
+    } else if (evt.type === 'assistant' && evt.message && evt.message.usage) {
+      const u = evt.message.usage;
+      totalTokens = (u.input_tokens || 0) + (u.output_tokens || 0) + (u.cache_read_input_tokens || 0);
+      if (totalTokens !== lastEmittedTokens) {
+        lastEmittedTokens = totalTokens;
+        process.stdout.write('[tokens:' + totalTokens + ']\\n');
+      }
+    }
+  } catch (_) {}
+});
+
+child.stderr.on('data', (c) => process.stderr.write(c));
+
+const killTimer = setTimeout(() => { child.kill('SIGTERM'); }, ${ASK_TIMEOUT_MS});
+child.on('error', (err) => { clearTimeout(killTimer); console.error('[ask] Error: ' + err.message); process.exit(1); });
+child.on('close', (code) => {
+  clearTimeout(killTimer);
+  if (code !== 0 && code !== null) { console.error('[ask] Claude exited with code ' + code); process.exit(code || 1); }
+  if (totalTokens > 0 && totalTokens !== lastEmittedTokens) {
+    process.stdout.write('[tokens:' + totalTokens + ']\\n');
+  }
+  process.stdout.write('\\x00ASK_START\\x00' + answer + '\\x00ASK_END\\x00\\n');
+});
 `;
 }
 
@@ -156,7 +192,7 @@ function extractAnswer(stdout) {
     : stdout.split('\n').filter(l => !l.startsWith('[ask]') && !l.startsWith('[stderr]')).join('\n').trim();
 }
 
-export async function runAskJob({ sessionId, app, question, history, agentContext, contextDoc, onLog }) {
+export async function runAskJob({ sessionId, app, question, history, agentContext, contextDoc, onLog, onTokens }) {
   const session = await ensureSessionContainer(sessionId, app, onLog);
 
   const prompt = buildPrompt({ contextDoc, agentContext, history, question });
@@ -177,7 +213,12 @@ export async function runAskJob({ sessionId, app, question, history, agentContex
     child.stdout.on('data', (c) => {
       const text = c.toString();
       stdout += text;
-      text.split('\n').forEach(line => { if (line.trim() && !line.startsWith('\x00')) onLog?.(line); });
+      text.split('\n').forEach(line => {
+        if (!line.trim() || line.startsWith('\x00')) return;
+        const tm = line.match(/^\[tokens:(\d+)\]$/);
+        if (tm) { onTokens?.(parseInt(tm[1], 10)); return; }
+        onLog?.(line);
+      });
     });
     child.stderr.on('data', (c) => c.toString().split('\n').forEach(l => { if (l.trim()) onLog?.(`[stderr] ${l}`); }));
 
