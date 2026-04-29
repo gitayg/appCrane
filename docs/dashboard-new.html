@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>AppCrane - Dashboard</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="stylesheet" href="/docs/shared.css">
+</head>
+<body>
+<script src="/docs/shared.js"></script>
+<script>
+if (!checkAuth()) throw 'auth';
+document.body.innerHTML = topbar('dashboard') + '<div class="container"><div id="loading">Loading...</div><div id="content" style="display:none"><div class="grid" id="stats"></div><h2>Quick Overview</h2><div id="overview"></div></div></div>';
+loadVersion(); loadUserInfo();
+
+(async () => {
+  try {
+    const health = await apiFetch('/api/server/health');
+    const s = health.system;
+    document.getElementById('stats').innerHTML = [
+      statCard('CPU', s.cpu.percent + '%', s.cpu.count + ' cores', s.cpu.percent),
+      statCard('Memory', s.memory_formatted.used, 'of ' + s.memory_formatted.total, s.memory.percent),
+      statCard('Disk', s.disk_formatted.used, 'of ' + s.disk_formatted.total, s.disk.percent),
+      statCard('Apps', health.apps.total, health.apps.healthy + ' healthy, ' + health.apps.down + ' down', 0),
+    ].join('');
+
+    // Quick overview: recent deploys
+    let ov = '';
+    if (health.recent_deploys?.length) {
+      ov += '<table><tr><th>App</th><th>Env</th><th>Version</th><th>Status</th><th>When</th></tr>';
+      health.recent_deploys.slice(0, 8).forEach(d => {
+        ov += '<tr><td>' + (d.slug || '-') + '</td><td>' + d.env + '</td><td>' + (d.version || '-') + '</td><td>' + badge(d.status) + '</td><td>' + (d.finished_at || d.started_at) + '</td></tr>';
+      });
+      ov += '</table>';
+    }
+    document.getElementById('overview').innerHTML = ov || '<div style="color:var(--dim)">No recent deploys</div>';
+
+    document.getElementById('content').style.display = 'block';
+    document.getElementById('loading').style.display = 'none';
+  } catch(e) { document.getElementById('loading').textContent = 'Error: ' + e.message; }
+})();
+</script>
+</body>
+</html>

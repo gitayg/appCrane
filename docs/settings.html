@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>AppCrane - Settings</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="stylesheet" href="/docs/shared.css">
+<style>
+.setting-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:20px;margin-bottom:20px}
+.setting-card h3{font-size:.95rem;font-weight:700;margin-bottom:4px}
+.setting-card p{color:var(--dim);font-size:.85rem;margin-bottom:12px;line-height:1.5}
+textarea{background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:12px;border-radius:6px;width:100%;font-size:.85rem;font-family:inherit;resize:vertical;min-height:220px;line-height:1.6;outline:none}
+textarea:focus{border-color:var(--accent)}
+.save-row{display:flex;align-items:center;gap:12px;margin-top:10px}
+.saved-msg{font-size:.82rem;color:var(--green);opacity:0;transition:opacity .3s}
+code.api-pill{background:var(--surface2);border:1px solid var(--border);border-radius:5px;padding:2px 8px;font-size:.78rem;color:var(--dim)}
+</style>
+</head>
+<body>
+<script src="/docs/shared.js"></script>
+<div id="pageRoot"></div>
+<script>
+if (!checkAuth()) throw 'auth';
+document.getElementById('pageRoot').insertAdjacentHTML('beforeend', topbar('settings'));
+
+const container = document.createElement('div');
+container.className = 'container';
+document.getElementById('pageRoot').appendChild(container);
+
+const heading = document.createElement('h2');
+heading.style.marginBottom = '16px';
+heading.textContent = 'Settings';
+container.appendChild(heading);
+
+const settingsDiv = document.createElement('div');
+settingsDiv.id = 'settingsContent';
+container.appendChild(settingsDiv);
+
+loadVersion(); loadUserInfo();
+
+async function loadSettings() {
+  const [brand, tlsCert, tlsKey] = await Promise.all([
+    apiFetch('/api/settings/branding').catch(() => ({ value: null })),
+    apiFetch('/api/settings/tls_cert_file').catch(() => ({ value: null })),
+    apiFetch('/api/settings/tls_key_file').catch(() => ({ value: null })),
+  ]);
+
+  const card = document.createElement('div');
+  card.className = 'setting-card';
+
+  const h3 = document.createElement('h3');
+  h3.textContent = 'Branding Guidelines';
+  card.appendChild(h3);
+
+  const desc = document.createElement('p');
+  desc.textContent = 'Paste your brand guidelines here — colors, typography, tone of voice, design principles, etc. AI agents read this via ';
+  const pill = document.createElement('code');
+  pill.className = 'api-pill';
+  pill.textContent = 'GET /api/settings/branding';
+  desc.appendChild(pill);
+  desc.appendChild(document.createTextNode(' before building apps, so every new app follows your brand automatically.'));
+  card.appendChild(desc);
+
+  const textarea = document.createElement('textarea');
+  textarea.id = 'brandingText';
+  textarea.placeholder = 'Example:\n\nPrimary color: #3b82f6 (blue)\nAccent: #22c55e (green)\nFont: Inter, system-ui\nTone: Professional but approachable\n\nDesign principles:\n- Clean, minimal UI\n- Cards with subtle borders\n- Rounded buttons (6px radius)\n...';
+  textarea.value = brand.value || '';
+  card.appendChild(textarea);
+
+  const saveRow = document.createElement('div');
+  saveRow.className = 'save-row';
+
+  const saveBtn = document.createElement('button');
+  saveBtn.className = 'btn';
+  saveBtn.textContent = 'Save Guidelines';
+  saveBtn.onclick = () => saveSetting('branding', 'brandingText', 'brandingSaved');
+  saveRow.appendChild(saveBtn);
+
+  const savedMsg = document.createElement('span');
+  savedMsg.className = 'saved-msg';
+  savedMsg.id = 'brandingSaved';
+  savedMsg.textContent = 'Saved \u2713';
+  saveRow.appendChild(savedMsg);
+
+  card.appendChild(saveRow);
+  settingsDiv.appendChild(card);
+
+  // --- TLS Certificate card ---
+  const tlsCard = document.createElement('div');
+  tlsCard.className = 'setting-card';
+
+  const tlsH3 = document.createElement('h3');
+  tlsH3.textContent = 'Manual TLS Certificate';
+  tlsCard.appendChild(tlsH3);
+
+  const tlsDesc = document.createElement('p');
+  tlsDesc.textContent = 'Provide paths to an existing certificate and private key (e.g. a wildcard cert from Cloudflare or ZeroSSL). When set, Caddy skips ACME and uses these files directly. Leave blank to use automatic ACME (Let\'s Encrypt).';
+  tlsCard.appendChild(tlsDesc);
+
+  function makeInput(labelText, id, placeholder, currentValue) {
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'margin-bottom:10px';
+    const lbl = document.createElement('label');
+    lbl.textContent = labelText;
+    lbl.style.cssText = 'display:block;font-size:.82rem;color:var(--dim);margin-bottom:4px';
+    const inp = document.createElement('input');
+    inp.id = id;
+    inp.type = 'text';
+    inp.placeholder = placeholder;
+    inp.value = currentValue || '';
+    inp.style.cssText = 'background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:6px;width:100%;font-size:.85rem;font-family:inherit;outline:none;box-sizing:border-box';
+    inp.onfocus = () => { inp.style.borderColor = 'var(--accent)'; };
+    inp.onblur  = () => { inp.style.borderColor = 'var(--border)'; };
+    wrap.appendChild(lbl);
+    wrap.appendChild(inp);
+    return wrap;
+  }
+
+  tlsCard.appendChild(makeInput('Certificate file path', 'tlsCertInput', '/etc/caddy/certs/fullchain.pem', tlsCert.value));
+  tlsCard.appendChild(makeInput('Private key file path', 'tlsKeyInput', '/etc/caddy/certs/privkey.pem', tlsKey.value));
+
+  const tlsSaveRow = document.createElement('div');
+  tlsSaveRow.className = 'save-row';
+
+  const tlsSaveBtn = document.createElement('button');
+  tlsSaveBtn.className = 'btn';
+  tlsSaveBtn.textContent = 'Save & Reload Caddy';
+  tlsSaveBtn.onclick = saveTls;
+  tlsSaveRow.appendChild(tlsSaveBtn);
+
+  const tlsSavedMsg = document.createElement('span');
+  tlsSavedMsg.className = 'saved-msg';
+  tlsSavedMsg.id = 'tlsSaved';
+  tlsSavedMsg.textContent = 'Saved \u2713';
+  tlsSaveRow.appendChild(tlsSavedMsg);
+
+  tlsCard.appendChild(tlsSaveRow);
+  settingsDiv.appendChild(tlsCard);
+
+  // --- TLS Health card ---
+  const healthCard = document.createElement('div');
+  healthCard.className = 'setting-card';
+
+  const healthH3 = document.createElement('h3');
+  healthH3.textContent = 'TLS Health Check';
+  healthCard.appendChild(healthH3);
+
+  const healthBody = document.createElement('div');
+  healthBody.id = 'tlsHealth';
+  healthBody.style.cssText = 'font-size:.85rem;color:var(--dim)';
+  healthBody.textContent = 'Loading\u2026';
+  healthCard.appendChild(healthBody);
+
+  settingsDiv.appendChild(healthCard);
+  loadTlsCheck();
+
+  // --- OIDC card ---
+  const oidcCard = document.createElement('div');
+  oidcCard.className = 'setting-card';
+
+  const oidcH3 = document.createElement('h3');
+  oidcH3.textContent = 'OIDC / SSO';
+  oidcCard.appendChild(oidcH3);
+
+  const oidcDesc = document.createElement('p');
+  oidcDesc.textContent = 'Connect an OpenID Connect provider (Azure AD, Okta, Google Workspace, Keycloak, etc.) so users can sign in with SSO. The discovery URL is the base issuer URL — AppCrane appends /.well-known/openid-configuration automatically.';
+  oidcCard.appendChild(oidcDesc);
+
+  const cfg = await apiFetch('/api/auth/oidc/admin-config').catch(() => ({}));
+
+  const enableRow = document.createElement('div');
+  enableRow.style.cssText = 'display:flex;align-items:center;gap:10px;margin-bottom:14px';
+  const enableChk = document.createElement('input');
+  enableChk.type = 'checkbox'; enableChk.id = 'oidcEnabled'; enableChk.checked = !!cfg.enabled;
+  enableChk.style.cssText = 'width:16px;height:16px;accent-color:var(--accent);cursor:pointer';
+  const enableLbl = document.createElement('label');
+  enableLbl.htmlFor = 'oidcEnabled';
+  enableLbl.textContent = 'Enable SSO login';
+  enableLbl.style.cssText = 'font-size:.88rem;cursor:pointer';
+  enableRow.appendChild(enableChk); enableRow.appendChild(enableLbl);
+  oidcCard.appendChild(enableRow);
+
+  oidcCard.appendChild(makeInput('Provider name (shown on login button)', 'oidcProviderName', 'Azure AD', cfg.provider_name || ''));
+  oidcCard.appendChild(makeInput('Discovery URL (issuer)', 'oidcDiscoveryUrl', 'https://login.microsoftonline.com/{tenant}/v2.0', cfg.discovery_url || ''));
+  oidcCard.appendChild(makeInput('Client ID', 'oidcClientId', 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx', cfg.client_id || ''));
+
+  const secretWrap = document.createElement('div');
+  secretWrap.style.cssText = 'margin-bottom:10px';
+  const secretLbl = document.createElement('label');
+  secretLbl.textContent = 'Client Secret' + (cfg.client_secret_set ? ' (set — leave blank to keep)' : '');
+  secretLbl.style.cssText = 'display:block;font-size:.82rem;color:var(--dim);margin-bottom:4px';
+  const secretInp = document.createElement('input');
+  secretInp.id = 'oidcClientSecret'; secretInp.type = 'password';
+  secretInp.placeholder = cfg.client_secret_set ? '••••••••••••' : 'Client secret';
+  secretInp.style.cssText = 'background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:6px;width:100%;font-size:.85rem;font-family:inherit;outline:none;box-sizing:border-box';
+  secretInp.onfocus = () => { secretInp.style.borderColor = 'var(--accent)'; };
+  secretInp.onblur  = () => { secretInp.style.borderColor = 'var(--border)'; };
+  secretWrap.appendChild(secretLbl); secretWrap.appendChild(secretInp);
+  oidcCard.appendChild(secretWrap);
+
+  const provRow = document.createElement('div');
+  provRow.style.cssText = 'display:flex;align-items:center;gap:10px;margin-bottom:14px';
+  const provChk = document.createElement('input');
+  provChk.type = 'checkbox'; provChk.id = 'oidcAutoProvision'; provChk.checked = !!cfg.auto_provision;
+  provChk.style.cssText = 'width:16px;height:16px;accent-color:var(--accent);cursor:pointer';
+  const provLbl = document.createElement('label');
+  provLbl.htmlFor = 'oidcAutoProvision';
+  provLbl.textContent = 'Auto-provision new users (create account on first SSO login)';
+  provLbl.style.cssText = 'font-size:.88rem;cursor:pointer';
+  provRow.appendChild(provChk); provRow.appendChild(provLbl);
+  oidcCard.appendChild(provRow);
+
+  const oidcSaveRow = document.createElement('div');
+  oidcSaveRow.className = 'save-row';
+
+  const oidcTestBtn = document.createElement('button');
+  oidcTestBtn.className = 'btn';
+  oidcTestBtn.style.cssText = 'background:var(--surface2);color:var(--text);border:1px solid var(--border)';
+  oidcTestBtn.textContent = 'Test Connection';
+  oidcTestBtn.onclick = testOidc;
+  oidcSaveRow.appendChild(oidcTestBtn);
+
+  const oidcSaveBtn = document.createElement('button');
+  oidcSaveBtn.className = 'btn';
+  oidcSaveBtn.textContent = 'Save';
+  oidcSaveBtn.onclick = saveOidc;
+  oidcSaveRow.appendChild(oidcSaveBtn);
+
+  const oidcSavedMsg = document.createElement('span');
+  oidcSavedMsg.className = 'saved-msg'; oidcSavedMsg.id = 'oidcSaved';
+  oidcSavedMsg.textContent = 'Saved ✓';
+  oidcSaveRow.appendChild(oidcSavedMsg);
+
+  const oidcTestMsg = document.createElement('span');
+  oidcTestMsg.id = 'oidcTestMsg';
+  oidcTestMsg.style.cssText = 'font-size:.82rem';
+  oidcSaveRow.appendChild(oidcTestMsg);
+
+  oidcCard.appendChild(oidcSaveRow);
+  settingsDiv.appendChild(oidcCard);
+
+  // --- SAML card ---
+  const samlCard = document.createElement('div');
+  samlCard.className = 'setting-card';
+
+  const samlH3 = document.createElement('h3');
+  samlH3.textContent = 'SAML 2.0 (Okta)';
+  samlCard.appendChild(samlH3);
+
+  const samlDesc = document.createElement('p');
+  const metaLink = document.createElement('a');
+  metaLink.href = '/api/auth/saml/metadata';
+  metaLink.target = '_blank';
+  metaLink.style.cssText = 'color:var(--accent);text-decoration:none';
+  metaLink.textContent = '/api/auth/saml/metadata';
+  samlDesc.textContent = 'Configure SAML 2.0 with Okta (or any IdP). In Okta, create a new SAML 2.0 app and paste your SP metadata URL: ';
+  samlDesc.appendChild(metaLink);
+  samlDesc.appendChild(document.createTextNode('. Then paste the Okta SSO URL and X.509 certificate below.'));
+  samlCard.appendChild(samlDesc);
+
+  const samlCfg = await apiFetch('/api/auth/saml/admin-config').catch(() => ({}));
+
+  const samlEnableRow = document.createElement('div');
+  samlEnableRow.style.cssText = 'display:flex;align-items:center;gap:10px;margin-bottom:14px';
+  const samlEnabledChk = document.createElement('input');
+  samlEnabledChk.type = 'checkbox'; samlEnabledChk.id = 'samlEnabled'; samlEnabledChk.checked = !!samlCfg.enabled;
+  samlEnabledChk.style.cssText = 'width:16px;height:16px;accent-color:var(--accent);cursor:pointer';
+  const samlEnableLbl = document.createElement('label');
+  samlEnableLbl.htmlFor = 'samlEnabled'; samlEnableLbl.textContent = 'Enable SAML login';
+  samlEnableLbl.style.cssText = 'font-size:.88rem;cursor:pointer';
+  samlEnableRow.appendChild(samlEnabledChk); samlEnableRow.appendChild(samlEnableLbl);
+  samlCard.appendChild(samlEnableRow);
+
+  samlCard.appendChild(makeInput('Provider name (shown on login button)', 'samlProviderName', 'Okta', samlCfg.provider_name || ''));
+  samlCard.appendChild(makeInput('Okta SSO URL', 'samlSsoUrl', 'https://company.okta.com/app/xxx/sso/saml', samlCfg.idp_sso_url || ''));
+
+  const certWrap = document.createElement('div');
+  certWrap.style.cssText = 'margin-bottom:10px';
+  const certLbl = document.createElement('label');
+  certLbl.textContent = 'Okta X.509 Certificate' + (samlCfg.idp_cert_set ? ' (set — paste new to replace)' : '');
+  certLbl.style.cssText = 'display:block;font-size:.82rem;color:var(--dim);margin-bottom:4px';
+  const certArea = document.createElement('textarea');
+  certArea.id = 'samlIdpCert';
+  certArea.placeholder = samlCfg.idp_cert_set
+    ? 'Paste new certificate to replace existing…'
+    : 'MIIDpDCCAoygAwIBAgIGAV...  (paste the certificate from Okta, with or without BEGIN/END headers)';
+  certArea.style.cssText = 'background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:6px;width:100%;font-size:.78rem;font-family:monospace;resize:vertical;min-height:90px;outline:none;box-sizing:border-box';
+  certArea.onfocus = () => { certArea.style.borderColor = 'var(--accent)'; };
+  certArea.onblur  = () => { certArea.style.borderColor = 'var(--border)'; };
+  certWrap.appendChild(certLbl); certWrap.appendChild(certArea);
+  samlCard.appendChild(certWrap);
+
+  const samlProvRow = document.createElement('div');
+  samlProvRow.style.cssText = 'display:flex;align-items:center;gap:10px;margin-bottom:14px';
+  const samlProvChk = document.createElement('input');
+  samlProvChk.type = 'checkbox'; samlProvChk.id = 'samlAutoProvision'; samlProvChk.checked = !!samlCfg.auto_provision;
+  samlProvChk.style.cssText = 'width:16px;height:16px;accent-color:var(--accent);cursor:pointer';
+  const samlProvLbl = document.createElement('label');
+  samlProvLbl.htmlFor = 'samlAutoProvision';
+  samlProvLbl.textContent = 'Auto-provision new users on first SAML login';
+  samlProvLbl.style.cssText = 'font-size:.88rem;cursor:pointer';
+  samlProvRow.appendChild(samlProvChk); samlProvRow.appendChild(samlProvLbl);
+  samlCard.appendChild(samlProvRow);
+
+  const samlSaveRow = document.createElement('div');
+  samlSaveRow.className = 'save-row';
+
+  const samlSaveBtn = document.createElement('button');
+  samlSaveBtn.className = 'btn'; samlSaveBtn.textContent = 'Save';
+  samlSaveBtn.onclick = saveSaml;
+  samlSaveRow.appendChild(samlSaveBtn);
+
+  const samlSavedMsg = document.createElement('span');
+  samlSavedMsg.className = 'saved-msg'; samlSavedMsg.id = 'samlSaved';
+  samlSavedMsg.textContent = 'Saved ✓';
+  samlSaveRow.appendChild(samlSavedMsg);
+
+  samlCard.appendChild(samlSaveRow);
+  settingsDiv.appendChild(samlCard);
+
+  // --- SCIM card ---
+  const scimCard = document.createElement('div');
+  scimCard.className = 'setting-card';
+
+  const scimH3 = document.createElement('h3');
+  scimH3.textContent = 'SCIM Provisioning';
+  scimCard.appendChild(scimH3);
+
+  const scimDesc = document.createElement('p');
+  scimDesc.textContent = 'Enables Okta (or any IdP) to automatically create, update, and deactivate AppCrane users via the SCIM 2.0 API. Generate a bearer token below and paste it into your IdP\'s SCIM configuration along with the base URL shown.';
+  scimCard.appendChild(scimDesc);
+
+  const scimCfg = await apiFetch('/api/auth/scim/config').catch(() => ({}));
+
+  const scimEnableRow = document.createElement('div');
+  scimEnableRow.style.cssText = 'display:flex;align-items:center;gap:10px;margin-bottom:14px';
+  const scimEnabledChk = document.createElement('input');
+  scimEnabledChk.type = 'checkbox'; scimEnabledChk.id = 'scimEnabled'; scimEnabledChk.checked = !!scimCfg.enabled;
+  scimEnabledChk.style.cssText = 'width:16px;height:16px;accent-color:var(--accent);cursor:pointer';
+  const scimEnableLbl = document.createElement('label');
+  scimEnableLbl.htmlFor = 'scimEnabled'; scimEnableLbl.textContent = 'Enable SCIM provisioning';
+  scimEnableLbl.style.cssText = 'font-size:.88rem;cursor:pointer';
+  scimEnableRow.appendChild(scimEnabledChk); scimEnableRow.appendChild(scimEnableLbl);
+  scimCard.appendChild(scimEnableRow);
+
+  // Base URL display
+  const urlRow = document.createElement('div');
+  urlRow.style.cssText = 'margin-bottom:14px';
+  const urlLbl = document.createElement('div');
+  urlLbl.style.cssText = 'font-size:.82rem;color:var(--dim);margin-bottom:4px';
+  urlLbl.textContent = 'SCIM base URL (paste into Okta)';
+  const urlVal = document.createElement('code');
+  urlVal.style.cssText = 'background:var(--surface2);border:1px solid var(--border);border-radius:5px;padding:6px 10px;font-size:.82rem;display:block;word-break:break-all';
+  urlVal.textContent = scimCfg.base_url || '';
+  urlRow.appendChild(urlLbl); urlRow.appendChild(urlVal);
+  scimCard.appendChild(urlRow);
+
+  // Token section
+  const tokenLbl = document.createElement('div');
+  tokenLbl.style.cssText = 'font-size:.82rem;color:var(--dim);margin-bottom:6px';
+  tokenLbl.textContent = scimCfg.token_created_at
+    ? 'Bearer token last generated: ' + new Date(scimCfg.token_created_at).toLocaleString()
+    : 'No bearer token generated yet.';
+  scimCard.appendChild(tokenLbl);
+
+  const tokenBox = document.createElement('div');
+  tokenBox.id = 'scimTokenBox';
+  tokenBox.style.cssText = 'display:none;margin-bottom:10px';
+  const tokenPre = document.createElement('code');
+  tokenPre.id = 'scimTokenVal';
+  tokenPre.style.cssText = 'background:var(--surface2);border:1px solid var(--yellow);border-radius:5px;padding:8px 12px;font-size:.82rem;display:block;word-break:break-all;color:var(--yellow)';
+  const tokenNote = document.createElement('div');
+  tokenNote.style.cssText = 'font-size:.78rem;color:var(--dim);margin-top:4px';
+  tokenNote.textContent = '⚠ Copy this token now — it will not be shown again.';
+  tokenBox.appendChild(tokenPre); tokenBox.appendChild(tokenNote);
+  scimCard.appendChild(tokenBox);
+
+  const scimSaveRow = document.createElement('div');
+  scimSaveRow.className = 'save-row';
+
+  const scimEnableSaveBtn = document.createElement('button');
+  scimEnableSaveBtn.className = 'btn'; scimEnableSaveBtn.textContent = 'Save';
+  scimEnableSaveBtn.style.cssText = 'background:var(--surface2);color:var(--text);border:1px solid var(--border)';
+  scimEnableSaveBtn.onclick = saveScimEnabled;
+  scimSaveRow.appendChild(scimEnableSaveBtn);
+
+  const scimGenBtn = document.createElement('button');
+  scimGenBtn.className = 'btn'; scimGenBtn.textContent = 'Generate New Token';
+  scimGenBtn.onclick = generateScimToken;
+  scimSaveRow.appendChild(scimGenBtn);
+
+  const scimSavedMsg = document.createElement('span');
+  scimSavedMsg.className = 'saved-msg'; scimSavedMsg.id = 'scimSaved';
+  scimSavedMsg.textContent = 'Saved ✓';
+  scimSaveRow.appendChild(scimSavedMsg);
+
+  scimCard.appendChild(scimSaveRow);
+  settingsDiv.appendChild(scimCard);
+}
+
+async function saveScimEnabled() {
+  const enabled = document.getElementById('scimEnabled').checked;
+  const r = await apiPut('/api/auth/scim/config', { enabled });
+  if (r.error) { alert('Save failed: ' + r.error.message); return; }
+  const msg = document.getElementById('scimSaved');
+  msg.style.opacity = '1';
+  setTimeout(() => { msg.style.opacity = '0'; }, 2500);
+}
+
+async function generateScimToken() {
+  if (!confirm('Generate a new SCIM bearer token? The old token will stop working immediately.')) return;
+  const r = await apiPost('/api/auth/scim/token', {});
+  if (r.error) { alert('Failed: ' + r.error.message); return; }
+  const pre = document.getElementById('scimTokenVal');
+  if (pre) pre.textContent = r.token;
+  document.getElementById('scimTokenBox').style.display = '';
+}
+
+async function saveTls() {
+  const certVal = document.getElementById('tlsCertInput').value.trim();
+  const keyVal  = document.getElementById('tlsKeyInput').value.trim();
+  const [r1, r2] = await Promise.all([
+    apiPut('/api/settings/tls_cert_file', { value: certVal }),
+    apiPut('/api/settings/tls_key_file',  { value: keyVal }),
+  ]);
+  if (r1.error || r2.error) {
+    alert('Save failed: ' + (r1.error?.message || r2.error?.message));
+    return;
+  }
+  const msg = document.getElementById('tlsSaved');
+  msg.style.opacity = '1';
+  setTimeout(() => { msg.style.opacity = '0'; }, 2500);
+  loadTlsCheck();
+}
+
+async function loadTlsCheck() {
+  const el = document.getElementById('tlsHealth');
+  if (!el) return;
+  el.textContent = 'Checking\u2026';
+  try {
+    const data = await apiFetch('/api/server/tls-check');
+    if (data.skipped) {
+      el.textContent = 'CRANE_DOMAIN is not set — no domain to check.';
+      return;
+    }
+    const lines = [];
+    lines.push('Domain: ' + data.domain);
+    lines.push('TLS mode: ' + data.tls_mode);
+    lines.push('HSTS preloaded: ' + (data.hsts_preloaded ? 'yes' : 'no'));
+    lines.push('Cert valid: ' + (data.cert_valid === null ? 'unknown' : data.cert_valid ? 'yes' : 'no'));
+    el.innerHTML = '';
+    const pre = document.createElement('pre');
+    pre.style.cssText = 'margin:0 0 10px;white-space:pre-wrap;color:var(--text)';
+    pre.textContent = lines.join('\n');
+    el.appendChild(pre);
+    if (data.warnings && data.warnings.length) {
+      for (const w of data.warnings) {
+        const d = document.createElement('div');
+        d.style.cssText = 'padding:8px 12px;border-radius:6px;margin-bottom:6px;font-size:.82rem;line-height:1.5;background:' +
+          (w.level === 'error' ? 'rgba(239,68,68,.12);color:#f87171;border:1px solid rgba(239,68,68,.3)' : 'rgba(234,179,8,.12);color:#fbbf24;border:1px solid rgba(234,179,8,.3)');
+        d.textContent = w.message;
+        el.appendChild(d);
+      }
+    } else {
+      const ok = document.createElement('div');
+      ok.style.cssText = 'color:var(--green);font-size:.82rem';
+      ok.textContent = 'No issues detected.';
+      el.appendChild(ok);
+    }
+  } catch (e) {
+    el.textContent = 'Check failed: ' + e.message;
+  }
+}
+
+async function saveSetting(key, textareaId, msgId) {
+  const value = document.getElementById(textareaId).value;
+  const data = await apiPut('/api/settings/' + key, { value });
+  if (data.error) { alert('Save failed: ' + data.error.message); return; }
+  const msg = document.getElementById(msgId);
+  msg.style.opacity = '1';
+  setTimeout(() => { msg.style.opacity = '0'; }, 2500);
+}
+
+async function saveOidc() {
+  const secret = document.getElementById('oidcClientSecret').value;
+  const body = {
+    enabled:        document.getElementById('oidcEnabled').checked,
+    provider_name:  document.getElementById('oidcProviderName').value.trim(),
+    discovery_url:  document.getElementById('oidcDiscoveryUrl').value.trim(),
+    client_id:      document.getElementById('oidcClientId').value.trim(),
+    auto_provision: document.getElementById('oidcAutoProvision').checked,
+  };
+  if (secret) body.client_secret = secret;
+  const data = await apiPut('/api/auth/oidc/config', body);
+  if (data.error) { alert('Save failed: ' + data.error.message); return; }
+  const msg = document.getElementById('oidcSaved');
+  msg.style.opacity = '1';
+  setTimeout(() => { msg.style.opacity = '0'; }, 2500);
+  document.getElementById('oidcClientSecret').value = '';
+}
+
+async function saveSaml() {
+  const cert = document.getElementById('samlIdpCert').value.trim();
+  const body = {
+    enabled:        document.getElementById('samlEnabled').checked,
+    provider_name:  document.getElementById('samlProviderName').value.trim(),
+    idp_sso_url:    document.getElementById('samlSsoUrl').value.trim(),
+    auto_provision: document.getElementById('samlAutoProvision').checked,
+  };
+  if (cert) body.idp_cert = cert;
+  const data = await apiPut('/api/auth/saml/config', body);
+  if (data.error) { alert('Save failed: ' + data.error.message); return; }
+  const msg = document.getElementById('samlSaved');
+  msg.style.opacity = '1';
+  setTimeout(() => { msg.style.opacity = '0'; }, 2500);
+  document.getElementById('samlIdpCert').value = '';
+}
+
+async function testOidc() {
+  const url = document.getElementById('oidcDiscoveryUrl').value.trim();
+  const msg = document.getElementById('oidcTestMsg');
+  if (!url) { msg.style.color = 'var(--red)'; msg.textContent = 'Enter a discovery URL first'; return; }
+  msg.style.color = 'var(--dim)'; msg.textContent = 'Testing\u2026';
+  try {
+    const data = await apiPost('/api/auth/oidc/test', { discovery_url: url });
+    if (data.ok) {
+      msg.style.color = 'var(--green)';
+      msg.textContent = '✓ Connected — issuer: ' + data.issuer;
+    } else {
+      msg.style.color = 'var(--red)';
+      msg.textContent = '✗ ' + (data.error?.message || 'Failed');
+    }
+  } catch (e) {
+    msg.style.color = 'var(--red)'; msg.textContent = '✗ ' + e.message;
+  }
+}
+
+loadSettings();
+</script>
+</body>
+</html>

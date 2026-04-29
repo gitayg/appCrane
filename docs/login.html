@@ -1,0 +1,864 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AppCrane - Login</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<style>
+:root{--bg:#0f1117;--surface:#1a1d27;--surface2:#222536;--border:#2a2d3a;--text:#e4e4e7;--dim:#71717a;--accent:#3b82f6;--green:#22c55e;--red:#ef4444;--yellow:#f59e0b}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+
+/* Login */
+.login-wrap{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;padding:20px}
+.logo{font-size:1.8rem;font-weight:800;margin-bottom:28px;text-align:center}
+.logo span{color:var(--accent)}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:32px;width:100%;max-width:380px}
+.card h2{margin-bottom:4px;font-size:1.15rem;font-weight:700}
+.card p{color:var(--dim);margin-bottom:20px;font-size:.88rem}
+input{background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:10px 14px;border-radius:7px;width:100%;margin-bottom:10px;font-size:.9rem;outline:none;transition:border-color .15s}
+input:focus{border-color:var(--accent)}
+.btn-primary{background:var(--accent);color:#fff;border:none;padding:11px;border-radius:7px;width:100%;cursor:pointer;font-weight:600;font-size:.9rem;transition:opacity .15s}
+.btn-primary:hover{opacity:.88}
+.btn-primary:disabled{opacity:.5;cursor:not-allowed}
+.error-box{background:#ef444412;border:1px solid #ef444440;color:var(--red);padding:9px 12px;border-radius:7px;font-size:.83rem;margin-bottom:12px;display:none}
+.back-link{color:var(--dim);font-size:.82rem;margin-top:14px;text-align:center}
+.back-link a{color:var(--accent);text-decoration:none}
+
+/* Portal */
+.portal{min-height:100vh;display:flex;flex-direction:column}
+.portal-header{background:var(--surface);border-bottom:1px solid var(--border);padding:0 24px;height:56px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0}
+.portal-logo{font-size:1.1rem;font-weight:800}
+.portal-logo span{color:var(--accent)}
+.portal-right{display:flex;align-items:center;gap:12px}
+.avatar{width:32px;height:32px;border-radius:50%;color:#fff;display:flex;align-items:center;justify-content:center;font-size:.75rem;font-weight:700;flex-shrink:0}
+.user-details .uname{font-size:.88rem;font-weight:600}
+.user-details .uemail{font-size:.73rem;color:var(--dim)}
+.btn-signout{background:none;border:1px solid var(--border);color:var(--dim);padding:5px 12px;border-radius:6px;cursor:pointer;font-size:.78rem;font-weight:500;width:auto;transition:border-color .15s,color .15s}
+.btn-signout:hover{border-color:var(--text);color:var(--text)}
+.portal-body{flex:1;padding:28px 24px;max-width:900px;margin:0 auto;width:100%}
+.section-title{font-size:.72rem;text-transform:uppercase;letter-spacing:.8px;color:var(--dim);font-weight:600;margin-bottom:16px}
+
+/* App cards */
+.apps-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px}
+.app-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:18px 16px;display:flex;flex-direction:column;gap:14px}
+.app-card-top{display:flex;align-items:center;gap:11px}
+.app-icon{width:42px;height:42px;border-radius:9px;flex-shrink:0;object-fit:cover;clip-path:inset(0 round 9px);display:none}
+.app-icon-ph{width:42px;height:42px;border-radius:9px;flex-shrink:0;display:none;align-items:center;justify-content:center;font-size:1rem;font-weight:800;color:#fff}
+.app-card-meta{min-width:0;flex:1}
+.app-card-name{font-size:.9rem;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.app-card-desc{font-size:.75rem;color:var(--dim);margin-top:6px;line-height:1.45;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.role-badge{display:inline-block;font-size:.6rem;padding:2px 6px;border-radius:4px;font-weight:600;margin-top:3px}
+.role-admin{background:#3b82f622;color:var(--accent)}
+.role-user{background:#22c55e22;color:var(--green)}
+.app-envs{display:flex;flex-direction:column;gap:7px}
+.env-btn{display:flex;align-items:center;gap:8px;padding:8px 11px;background:var(--surface2);border:1px solid var(--border);border-radius:7px;cursor:pointer;color:var(--text);transition:border-color .15s;width:100%;text-align:left}
+.env-btn:hover{border-color:var(--accent)}
+.env-label{font-size:.8rem;font-weight:600;flex:1}
+.env-tag{font-size:.68rem;color:var(--dim);background:var(--bg);border:1px solid var(--border);padding:1px 5px;border-radius:4px}
+.hdot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
+.h-green{background:var(--green)}
+.h-red{background:var(--red)}
+.h-gray{background:var(--dim)}
+.env-arr{color:var(--dim);font-size:.75rem;margin-left:auto}
+.no-apps{color:var(--dim);padding:40px 0;text-align:center;font-size:.9rem;line-height:1.7}
+
+/* Iframe overlay */
+.app-frame{display:none;position:fixed;inset:0;z-index:100;flex-direction:column;background:var(--bg)}
+.app-frame.open{display:flex}
+.frame-topbar{display:flex;align-items:center;justify-content:space-between;padding:0 16px;height:44px;background:var(--surface);border-bottom:1px solid var(--border);flex-shrink:0}
+.frame-left{display:flex;align-items:center;gap:8px}
+.frame-logo{font-size:1rem;font-weight:800}
+.frame-logo span{color:var(--accent)}
+.frame-icon{width:20px;height:20px;border-radius:4px;object-fit:cover;display:none;clip-path:inset(0 round 4px)}
+.frame-name{font-size:.82rem;color:var(--dim)}
+.frame-right{display:flex;align-items:center;gap:10px}
+.frame-user{font-size:.78rem;color:var(--dim)}
+.btn-newtab{color:var(--accent);font-size:.78rem;text-decoration:none}
+.btn-back{background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:5px;padding:4px 12px;cursor:pointer;font-size:.78rem;font-weight:600;width:auto}
+.btn-enhance{background:none;color:var(--dim);border:1px solid var(--border);border-radius:5px;padding:4px 12px;cursor:pointer;font-size:.78rem;font-weight:500;width:auto;transition:border-color .15s,color .15s}
+.btn-enhance:hover{border-color:var(--accent);color:var(--accent)}
+.app-frame iframe{flex:1;border:none;background:#fff}
+
+/* Enhancement modal */
+.enh-overlay{display:none;position:fixed;inset:0;z-index:200;background:rgba(0,0,0,.55);align-items:center;justify-content:center}
+.enh-overlay.open{display:flex}
+.enh-modal{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:28px 24px;width:100%;max-width:440px;display:flex;flex-direction:column;gap:14px}
+.enh-modal h3{font-size:1rem;font-weight:700;margin:0}
+.enh-modal p{font-size:.82rem;color:var(--dim);margin:0}
+.enh-textarea{background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:7px;padding:10px 12px;font-size:.87rem;resize:vertical;min-height:90px;width:100%;outline:none;font-family:inherit;transition:border-color .15s}
+.enh-textarea:focus{border-color:var(--accent)}
+.enh-actions{display:flex;gap:8px;justify-content:flex-end}
+.enh-status{font-size:.8rem;min-height:1.2em}
+
+/* Access denied */
+.denied-wrap{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;padding:20px;text-align:center}
+.denied-icon{font-size:2.5rem;margin-bottom:16px}
+.denied-title{font-size:1.3rem;font-weight:700;margin-bottom:8px}
+.denied-sub{color:var(--dim);font-size:.9rem;max-width:340px;line-height:1.6;margin-bottom:24px}
+.denied-actions{display:flex;flex-direction:column;gap:10px;width:100%;max-width:280px}
+
+/* Catalog section */
+.catalog-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px}
+.catalog-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:18px 16px;opacity:.7;display:flex;flex-direction:column;gap:14px}
+.catalog-card-top{display:flex;align-items:center;gap:11px}
+.catalog-lock{font-size:.9rem;color:var(--dim);margin-left:auto;flex-shrink:0}
+.btn-request{background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:7px;padding:8px 11px;cursor:pointer;font-size:.8rem;font-weight:600;width:100%;text-align:center;transition:border-color .15s}
+.btn-request:hover{border-color:var(--accent);color:var(--accent)}
+
+/* Access request modal */
+.access-overlay{display:none;position:fixed;inset:0;z-index:300;background:rgba(0,0,0,.55);align-items:center;justify-content:center}
+.access-overlay.open{display:flex}
+.access-modal{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:28px 24px;width:100%;max-width:400px;display:flex;flex-direction:column;gap:14px}
+.access-modal h3{font-size:1rem;font-weight:700;margin:0}
+.access-modal p{font-size:.85rem;color:var(--dim);margin:0}
+.access-status{font-size:.8rem;min-height:1.2em}
+.access-actions{display:flex;gap:8px;justify-content:flex-end}
+
+/* My Requests */
+.my-enh-list{display:flex;flex-direction:column;gap:10px}
+.my-enh-card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 16px;border-left-width:3px}
+.my-enh-card.s-new{border-left-color:var(--accent)}
+.my-enh-card.s-selected{border-left-color:var(--border)}
+.my-enh-card.s-planning{border-left-color:#8b5cf6}
+.my-enh-card.s-in_progress{border-left-color:#f59e0b}
+.my-enh-card.s-done{border-left-color:#22c55e}
+.my-enh-header{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:7px}
+.my-enh-app{background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:1px 7px;font-size:.7rem;color:var(--dim)}
+.my-enh-date{font-size:.7rem;color:var(--dim);margin-left:auto}
+.my-enh-status{display:inline-flex;align-items:center;border-radius:4px;padding:2px 7px;font-size:.68rem;font-weight:600}
+.my-enh-status.s-new{background:#3b82f618;color:var(--accent)}
+.my-enh-status.s-selected{background:var(--surface2);color:var(--dim)}
+.my-enh-status.s-planning{background:#8b5cf618;color:#8b5cf6}
+.my-enh-status.s-in_progress{background:#f59e0b18;color:#f59e0b}
+.my-enh-status.s-done{background:#22c55e18;color:#22c55e}
+.my-enh-msg{font-size:.85rem;color:var(--text);line-height:1.5;white-space:pre-wrap;word-break:break-word}
+
+.hidden{display:none!important}
+@media(max-width:500px){.user-details{display:none}.apps-grid{grid-template-columns:1fr}.catalog-grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+
+<!-- Iframe overlay -->
+<div id="appFrame" class="app-frame">
+  <div class="frame-topbar">
+    <div class="frame-left">
+      <span class="frame-logo">App<span>Crane</span></span>
+      <img id="frameAppIcon" class="frame-icon" src="" alt="">
+      <span class="frame-name" id="frameAppName"></span>
+    </div>
+    <div class="frame-right">
+      <span id="frameUserInfo" class="frame-user"></span>
+      <button class="btn-enhance" onclick="openEnhModal()">💡 Request Enhancement</button>
+      <a id="frameNewTab" href="#" target="_blank" class="btn-newtab">Open in new tab ↗</a>
+      <button class="btn-back" onclick="closeApp()">← Back</button>
+    </div>
+  </div>
+  <iframe id="frameIframe" src="" allow="fullscreen"></iframe>
+</div>
+
+<!-- Enhancement request modal -->
+<div id="enhOverlay" class="enh-overlay" onclick="if(event.target===this)closeEnhModal()">
+  <div class="enh-modal">
+    <h3>Request Enhancement</h3>
+    <p id="enhAppLabel"></p>
+    <textarea id="enhText" class="enh-textarea" placeholder="Describe the enhancement or feature you'd like..."></textarea>
+    <div id="enhStatus" class="enh-status"></div>
+    <div class="enh-actions">
+      <button class="btn-back" onclick="closeEnhModal()">Cancel</button>
+      <button class="btn-primary" style="width:auto;padding:6px 18px" onclick="submitEnhancement()" id="enhSubmitBtn">Submit</button>
+    </div>
+  </div>
+</div>
+
+<!-- Access denied -->
+<div id="deniedWrap" class="denied-wrap hidden">
+  <div class="denied-icon">🔒</div>
+  <div class="denied-title" id="deniedTitle">Access denied</div>
+  <div class="denied-sub" id="deniedSub">You don't have access to this app.</div>
+  <div class="denied-actions">
+    <button class="btn-primary" id="deniedRequestBtn" onclick="openAccessModal()">Request Access</button>
+    <button class="btn-primary" style="background:var(--surface2);color:var(--text);border:1px solid var(--border)" onclick="showPortalFromDenied()">Back to my apps</button>
+  </div>
+</div>
+
+<!-- Access request modal -->
+<div id="accessOverlay" class="access-overlay" onclick="if(event.target===this)closeAccessModal()">
+  <div class="access-modal">
+    <h3>Request Access</h3>
+    <p id="accessModalDesc"></p>
+    <textarea id="accessNote" class="enh-textarea" placeholder="Optional: explain why you need access..." style="min-height:70px"></textarea>
+    <div id="accessStatus" class="access-status"></div>
+    <div class="access-actions">
+      <button class="btn-back" onclick="closeAccessModal()">Cancel</button>
+      <button class="btn-primary" style="width:auto;padding:6px 18px" onclick="submitAccessRequest()" id="accessSubmitBtn">Send Request</button>
+    </div>
+  </div>
+</div>
+
+<!-- Login -->
+<div id="loginWrap" class="login-wrap">
+  <div class="logo">App<span>Crane</span></div>
+  <div class="card">
+    <h2>Sign in</h2>
+    <p>Enter your credentials to access your apps</p>
+    <div id="error" class="error-box"></div>
+    <input type="text" id="loginInput" placeholder="Email or username" autofocus
+      onkeydown="if(event.key==='Enter')document.getElementById('passInput').focus()">
+    <input type="password" id="passInput" placeholder="Password"
+      onkeydown="if(event.key==='Enter')doLogin()">
+    <button class="btn-primary" onclick="doLogin()" id="loginBtn">Sign In</button>
+    <div id="ssoBtnWrap" style="display:none;margin-top:10px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+        <div style="flex:1;height:1px;background:var(--border)"></div>
+        <span style="color:var(--dim);font-size:.75rem">or</span>
+        <div style="flex:1;height:1px;background:var(--border)"></div>
+      </div>
+      <button id="oidcBtn" class="btn-primary" style="display:none;background:var(--surface2);color:var(--text);border:1px solid var(--border);margin-bottom:8px" onclick="startOidc()">Sign in with SSO</button>
+      <button id="samlBtn" class="btn-primary" style="display:none;background:var(--surface2);color:var(--text);border:1px solid var(--border)" onclick="startSaml()">Sign in with Okta</button>
+    </div>
+    <div class="back-link"><a href="/dashboard" title="Management panel">⚙ Management</a></div>
+  </div>
+</div>
+
+<!-- Portal (shown after login) -->
+<div id="portalWrap" class="portal hidden">
+  <div class="portal-header">
+    <span class="portal-logo">App<span>Crane</span></span>
+    <div class="portal-right">
+      <div class="avatar" id="userAvatar"></div>
+      <div class="user-details">
+        <div class="uname" id="userName"></div>
+        <div class="uemail" id="userEmail"></div>
+      </div>
+      <button class="btn-signout" onclick="doLogout()">Sign out</button>
+    </div>
+  </div>
+  <div class="portal-body">
+    <div class="section-title">Your Applications</div>
+    <div id="appsList"></div>
+    <div id="myEnhSection" class="hidden">
+      <div class="section-title" style="margin-top:32px">My Enhancement Requests</div>
+      <div id="myEnhList" class="my-enh-list"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = window.location.origin;
+const params = new URLSearchParams(window.location.search);
+const appSlug = params.get('app');
+const redirectUrl = params.get('redirect');
+const isDenied = params.get('denied') === '1';
+
+// Handle OIDC/SAML callback token — store it and clean the URL
+const oidcToken = params.get('oidc_token'); // SAML callback also reuses this param
+if (oidcToken) {
+  localStorage.setItem('cc_identity_token', oidcToken);
+  setAuthCookie(oidcToken);
+  const clean = new URL(window.location.href);
+  clean.searchParams.delete('oidc_token');
+  history.replaceState(null, '', clean.toString());
+}
+const deniedAppSlug = params.get('app') || '';
+const deniedAppName = params.get('name') || 'this app';
+
+let sessionToken = localStorage.getItem('cc_identity_token') || '';
+let currentUser = null;
+let _deniedSessionData = null; // stored for "back to apps"
+let _accessRequestSlug = ''; // slug for current access request
+let _accessRequestName = ''; // name for current access request
+
+const PALETTE = ['#3b82f6','#8b5cf6','#ec4899','#f97316','#22c55e','#14b8a6','#f59e0b','#ef4444'];
+function colorFor(s) {
+  let h = 0;
+  for (const c of (s || '')) h = (h * 31 + c.charCodeAt(0)) & 0xffffffff;
+  return PALETTE[Math.abs(h) % PALETTE.length];
+}
+function initials(name) {
+  return (name || '?').trim().split(/\s+/).map(w => w[0]).slice(0, 2).join('').toUpperCase();
+}
+
+// Host-only cookie: path-based routing means crane + all apps share one host,
+// so no Domain attribute is needed (and setting one breaks on IPs/single-label hosts).
+function setAuthCookie(token) {
+  const secure = window.location.protocol === 'https:' ? '; Secure' : '';
+  document.cookie = 'cc_token=' + encodeURIComponent(token) + '; Path=/; Max-Age=' + (7*24*3600) + '; SameSite=Lax' + secure;
+}
+
+function clearAuthCookie() {
+  document.cookie = 'cc_token=; Path=/; Max-Age=0';
+}
+
+async function doLogin() {
+  const login = document.getElementById('loginInput').value.trim();
+  const password = document.getElementById('passInput').value;
+  if (!login || !password) return;
+
+  const btn = document.getElementById('loginBtn');
+  btn.disabled = true; btn.textContent = 'Signing in\u2026';
+  document.getElementById('error').style.display = 'none';
+
+  try {
+    const res = await fetch(API + '/api/identity/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ login, password, app: appSlug })
+    });
+    const data = await res.json();
+
+    if (!res.ok) {
+      document.getElementById('error').textContent = (data.error && data.error.message) || 'Login failed';
+      document.getElementById('error').style.display = 'block';
+      btn.disabled = false; btn.textContent = 'Sign In';
+      return;
+    }
+
+    sessionToken = data.token;
+    localStorage.setItem('cc_identity_token', sessionToken);
+    setAuthCookie(sessionToken);
+
+    if (isDenied) { showDenied(data); return; }
+
+    if (redirectUrl) {
+      const sep = redirectUrl.includes('?') ? '&' : '?';
+      window.location.href = redirectUrl + sep + 'token=' + encodeURIComponent(sessionToken);
+      return;
+    }
+
+    showApps(data);
+  } catch (e) {
+    document.getElementById('error').textContent = 'Connection failed';
+    document.getElementById('error').style.display = 'block';
+    btn.disabled = false; btn.textContent = 'Sign In';
+  }
+}
+
+function makeDot(isDown, status) {
+  const dot = document.createElement('span');
+  dot.className = 'hdot';
+  if (isDown === null || isDown === undefined) {
+    dot.classList.add('h-gray');
+  } else if (isDown) {
+    dot.classList.add('h-red');
+  } else {
+    dot.classList.add(status === 200 ? 'h-green' : 'h-gray');
+  }
+  return dot;
+}
+
+function showApps(data) {
+  currentUser = data.user;
+  document.getElementById('loginWrap').classList.add('hidden');
+  document.getElementById('portalWrap').classList.remove('hidden');
+
+  document.getElementById('userName').textContent = data.user.name;
+  document.getElementById('userEmail').textContent = data.user.email || data.user.username || '';
+  document.getElementById('frameUserInfo').textContent = data.user.name;
+
+  const av = document.getElementById('userAvatar');
+  av.textContent = initials(data.user.name);
+  av.style.background = colorFor(data.user.name);
+
+  const list = document.getElementById('appsList');
+  list.textContent = '';
+
+  const allApps = data.apps || [];
+  const apps = allApps.filter(function(a) { return (a.app_role || a.role) !== 'none'; });
+  const catalog = allApps.filter(function(a) { return (a.app_role || a.role) === 'none'; });
+
+  if (apps.length === 0) {
+    const msg = document.createElement('div');
+    msg.className = 'no-apps';
+    msg.textContent = 'No apps assigned to you yet. Contact your administrator.';
+    list.appendChild(msg);
+  }
+
+  const grid = document.createElement('div');
+  grid.className = 'apps-grid';
+
+  apps.forEach(function(a) {
+    const role = a.app_role || a.role || 'user';
+    const color = colorFor(a.slug);
+    // Serve from AppCrane's data dir directly — doesn't depend on the app being up,
+    // and falls through to the initials placeholder via img.onerror if not uploaded.
+    const iconSrc = window.location.origin + '/api/apps/' + a.slug + '/icon';
+    const prodUrl = window.location.origin + '/' + a.slug;
+    const sandUrl = window.location.origin + '/' + a.slug + '-sandbox';
+
+    // Card
+    const card = document.createElement('div');
+    card.className = 'app-card';
+
+    // Top row
+    const top = document.createElement('div');
+    top.className = 'app-card-top';
+
+    const img = document.createElement('img');
+    img.className = 'app-icon';
+    img.alt = '';
+
+    const ph = document.createElement('div');
+    ph.className = 'app-icon-ph';
+    ph.style.background = color;
+    ph.style.display = 'none';
+    ph.textContent = initials(a.name);
+
+    img.onload = function() { img.style.display = 'block'; ph.style.display = 'none'; };
+    img.onerror = function() { img.style.display = 'none'; ph.style.display = 'flex'; };
+    if (a.has_icon) {
+      img.src = iconSrc;
+    } else {
+      // No uploaded icon — skip the request and show initials placeholder.
+      ph.style.display = 'flex';
+    }
+
+    const meta = document.createElement('div');
+    meta.className = 'app-card-meta';
+
+    const nameEl = document.createElement('div');
+    nameEl.className = 'app-card-name';
+    nameEl.textContent = a.name;
+
+    const badge = document.createElement('span');
+    if (a.public_access) {
+      badge.className = 'role-badge';
+      badge.style.cssText = 'background:#3b82f622;color:#3b82f6';
+      badge.textContent = 'Public';
+    } else {
+      badge.className = 'role-badge ' + (role === 'admin' ? 'role-admin' : 'role-user');
+      badge.textContent = role === 'admin' ? 'Admin' : 'User';
+    }
+
+    meta.appendChild(nameEl);
+    meta.appendChild(badge);
+    top.appendChild(img);
+    top.appendChild(ph);
+    top.appendChild(meta);
+
+    card.appendChild(top);
+
+    if (a.description) {
+      const desc = document.createElement('div');
+      desc.className = 'app-card-desc';
+      desc.textContent = a.description;
+      card.appendChild(desc);
+    }
+
+    // Env buttons
+    const envs = document.createElement('div');
+    envs.className = 'app-envs';
+
+    function makeEnvBtn(url, label, tag, isDown, status) {
+      const btn = document.createElement('button');
+      btn.className = 'env-btn';
+
+      btn.appendChild(makeDot(isDown, status));
+
+      const lbl = document.createElement('span');
+      lbl.className = 'env-label';
+      lbl.textContent = label;
+      btn.appendChild(lbl);
+
+      if (tag) {
+        const tg = document.createElement('span');
+        tg.className = 'env-tag';
+        tg.textContent = tag;
+        btn.appendChild(tg);
+      }
+
+      const arr = document.createElement('span');
+      arr.className = 'env-arr';
+      arr.textContent = '\u2197';
+      btn.appendChild(arr);
+
+      btn.addEventListener('click', function() {
+        openApp(url, a.name + ' (' + label + ')', a.slug, a.has_icon);
+      });
+      return btn;
+    }
+
+    envs.appendChild(makeEnvBtn(prodUrl, 'Production', '', a.prod_down, a.prod_status));
+    envs.appendChild(makeEnvBtn(sandUrl, 'Sandbox', 'dev', a.sand_down, a.sand_status));
+
+    card.appendChild(envs);
+    grid.appendChild(card);
+  });
+
+  if (apps.length > 0) list.appendChild(grid);
+
+  loadMyEnhancements();
+
+  // Catalog — apps the user can see but can't access yet
+  if (catalog.length > 0) {
+    const catTitle = document.createElement('div');
+    catTitle.className = 'section-title';
+    catTitle.style.marginTop = apps.length > 0 ? '32px' : '0';
+    catTitle.textContent = 'Discover';
+    list.appendChild(catTitle);
+
+    const catGrid = document.createElement('div');
+    catGrid.className = 'catalog-grid';
+
+    catalog.forEach(function(a) {
+      const color = colorFor(a.slug);
+      const card = document.createElement('div');
+      card.className = 'catalog-card';
+
+      const top = document.createElement('div');
+      top.className = 'catalog-card-top';
+
+      const ph = document.createElement('div');
+      ph.className = 'app-icon-ph';
+      ph.style.cssText = 'display:flex;background:' + color + ';filter:grayscale(60%)';
+      ph.textContent = initials(a.name);
+
+      if (a.has_icon) {
+        const img = document.createElement('img');
+        img.className = 'app-icon';
+        img.alt = '';
+        img.style.filter = 'grayscale(60%)';
+        img.onload = function() { img.style.display = 'block'; ph.style.display = 'none'; };
+        img.onerror = function() { img.style.display = 'none'; ph.style.display = 'flex'; };
+        img.src = window.location.origin + '/api/apps/' + a.slug + '/icon';
+        top.appendChild(img);
+      }
+      top.appendChild(ph);
+
+      const meta = document.createElement('div');
+      meta.className = 'app-card-meta';
+      const nameEl = document.createElement('div');
+      nameEl.className = 'app-card-name';
+      nameEl.textContent = a.name;
+      meta.appendChild(nameEl);
+      top.appendChild(meta);
+
+      const lock = document.createElement('span');
+      lock.className = 'catalog-lock';
+      lock.textContent = '🔒';
+      top.appendChild(lock);
+
+      card.appendChild(top);
+
+      if (a.description) {
+        const desc = document.createElement('div');
+        desc.className = 'app-card-desc';
+        desc.textContent = a.description;
+        card.appendChild(desc);
+      }
+
+      const reqBtn = document.createElement('button');
+      reqBtn.className = 'btn-request';
+      reqBtn.textContent = 'Request access';
+      reqBtn.onclick = function() { openAccessModal(a.slug, a.name); };
+      card.appendChild(reqBtn);
+
+      catGrid.appendChild(card);
+    });
+
+    list.appendChild(catGrid);
+  }
+}
+
+async function doLogout() {
+  try {
+    await fetch(API + '/api/identity/logout', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + sessionToken }
+    });
+  } catch (e) {}
+  localStorage.removeItem('cc_identity_token');
+  clearAuthCookie();
+  sessionToken = '';
+  document.getElementById('portalWrap').classList.add('hidden');
+  document.getElementById('loginWrap').classList.remove('hidden');
+  document.getElementById('loginInput').value = '';
+  document.getElementById('passInput').value = '';
+}
+
+let currentAppSlug = null;
+
+function openApp(url, name, slug, hasIcon) {
+  currentAppSlug = slug;
+  document.getElementById('frameAppName').textContent = name;
+  document.getElementById('frameNewTab').href = url;
+  document.getElementById('frameIframe').src = url;
+  document.getElementById('appFrame').classList.add('open');
+  const icon = document.getElementById('frameAppIcon');
+  icon.style.display = 'none';
+  icon.onload = function() { icon.style.display = 'block'; };
+  icon.onerror = function() { icon.style.display = 'none'; };
+  icon.removeAttribute('src');
+  if (hasIcon && slug) {
+    icon.src = window.location.origin + '/api/apps/' + slug + '/icon';
+  }
+}
+
+function closeApp() {
+  document.getElementById('appFrame').classList.remove('open');
+  document.getElementById('frameIframe').src = '';
+  const icon = document.getElementById('frameAppIcon');
+  icon.style.display = 'none'; icon.src = '';
+  currentAppSlug = null;
+}
+
+function fmtDate(str) {
+  if (!str) return '';
+  const d = new Date(str.replace(' ', 'T') + (str.includes('T') ? '' : 'Z'));
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+const ENH_STATUS_LABELS = { new: 'New', selected: 'Selected for Implementation', planning: 'Planning', in_progress: 'In Progress', done: 'Done' };
+
+async function loadMyEnhancements() {
+  try {
+    const res = await fetch(API + '/api/enhancements/my', {
+      headers: { 'Authorization': 'Bearer ' + sessionToken }
+    });
+    if (!res.ok) return;
+    const data = await res.json();
+    const requests = data.requests || [];
+    const section = document.getElementById('myEnhSection');
+    const listEl = document.getElementById('myEnhList');
+    listEl.textContent = '';
+    if (!requests.length) { section.classList.add('hidden'); return; }
+    section.classList.remove('hidden');
+    requests.forEach(function(r) {
+      const status = r.status || 'new';
+      const card = document.createElement('div');
+      card.className = 'my-enh-card s-' + status;
+
+      const header = document.createElement('div');
+      header.className = 'my-enh-header';
+
+      if (r.app_slug) {
+        const appBadge = document.createElement('span');
+        appBadge.className = 'my-enh-app';
+        appBadge.textContent = r.app_slug;
+        header.appendChild(appBadge);
+      }
+
+      const statusBadge = document.createElement('span');
+      statusBadge.className = 'my-enh-status s-' + status;
+      statusBadge.textContent = ENH_STATUS_LABELS[status] || status;
+      header.appendChild(statusBadge);
+
+      const date = document.createElement('span');
+      date.className = 'my-enh-date';
+      date.textContent = fmtDate(r.created_at);
+      header.appendChild(date);
+
+      const msg = document.createElement('div');
+      msg.className = 'my-enh-msg';
+      msg.textContent = r.message;
+
+      card.appendChild(header);
+      card.appendChild(msg);
+      listEl.appendChild(card);
+    });
+  } catch (e) {}
+}
+
+function openEnhModal() {
+  const appName = document.getElementById('frameAppName').textContent;
+  document.getElementById('enhAppLabel').textContent = appName ? 'App: ' + appName : '';
+  document.getElementById('enhText').value = '';
+  document.getElementById('enhStatus').textContent = '';
+  document.getElementById('enhStatus').style.color = '';
+  document.getElementById('enhSubmitBtn').disabled = false;
+  document.getElementById('enhOverlay').classList.add('open');
+  document.getElementById('enhText').focus();
+}
+
+function closeEnhModal() {
+  document.getElementById('enhOverlay').classList.remove('open');
+}
+
+async function submitEnhancement() {
+  const message = document.getElementById('enhText').value.trim();
+  if (!message) {
+    document.getElementById('enhStatus').textContent = 'Please enter a message.';
+    document.getElementById('enhStatus').style.color = 'var(--red)';
+    return;
+  }
+
+  const btn = document.getElementById('enhSubmitBtn');
+  btn.disabled = true;
+  document.getElementById('enhStatus').textContent = 'Submitting\u2026';
+  document.getElementById('enhStatus').style.color = 'var(--dim)';
+
+  try {
+    const res = await fetch(API + '/api/enhancements', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + sessionToken
+      },
+      body: JSON.stringify({ message, app_slug: currentAppSlug })
+    });
+    const data = await res.json();
+    if (res.ok) {
+      document.getElementById('enhStatus').textContent = data.message || 'Submitted!';
+      document.getElementById('enhStatus').style.color = 'var(--green)';
+      setTimeout(function() { closeEnhModal(); loadMyEnhancements(); }, 1400);
+    } else {
+      document.getElementById('enhStatus').textContent = data.error?.message || 'Submission failed.';
+      document.getElementById('enhStatus').style.color = 'var(--red)';
+      btn.disabled = false;
+    }
+  } catch (e) {
+    document.getElementById('enhStatus').textContent = 'Connection error.';
+    document.getElementById('enhStatus').style.color = 'var(--red)';
+    btn.disabled = false;
+  }
+}
+
+function showDenied(data) {
+  _deniedSessionData = data;
+  currentUser = data.user;
+  document.getElementById('loginWrap').classList.add('hidden');
+  document.getElementById('portalWrap').classList.add('hidden');
+  document.getElementById('deniedWrap').classList.remove('hidden');
+  document.getElementById('deniedTitle').textContent = 'No access to ' + deniedAppName;
+  document.getElementById('deniedSub').textContent =
+    'You\u2019re signed in as ' + data.user.name + ' but don\u2019t have access to \u201c' + deniedAppName + '\u201d. ' +
+    'Request access below and an admin will be notified.';
+}
+
+function showPortalFromDenied() {
+  document.getElementById('deniedWrap').classList.add('hidden');
+  if (_deniedSessionData) showApps(_deniedSessionData);
+}
+
+function openAccessModal(slug, name) {
+  _accessRequestSlug = slug || deniedAppSlug;
+  _accessRequestName = name || deniedAppName;
+  document.getElementById('accessModalDesc').textContent =
+    'Send an access request for \u201c' + _accessRequestName + '\u201d. The admin will be notified.';
+  document.getElementById('accessNote').value = '';
+  document.getElementById('accessStatus').textContent = '';
+  document.getElementById('accessStatus').style.color = '';
+  document.getElementById('accessSubmitBtn').disabled = false;
+  document.getElementById('accessOverlay').classList.add('open');
+  setTimeout(function() { document.getElementById('accessNote').focus(); }, 50);
+}
+
+function closeAccessModal() {
+  document.getElementById('accessOverlay').classList.remove('open');
+}
+
+async function submitAccessRequest() {
+  const note = document.getElementById('accessNote').value.trim();
+  const message = 'Access request for app \u201c' + _accessRequestName + '\u201d' + (note ? ':\n' + note : '');
+  const btn = document.getElementById('accessSubmitBtn');
+  btn.disabled = true;
+  document.getElementById('accessStatus').textContent = 'Sending\u2026';
+  document.getElementById('accessStatus').style.color = 'var(--dim)';
+  try {
+    const res = await fetch(API + '/api/enhancements', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + sessionToken },
+      body: JSON.stringify({ message, app_slug: _accessRequestSlug }),
+    });
+    const data = await res.json();
+    if (res.ok) {
+      document.getElementById('accessStatus').textContent = 'Request sent! An admin will review it.';
+      document.getElementById('accessStatus').style.color = 'var(--green)';
+      setTimeout(closeAccessModal, 2000);
+    } else {
+      document.getElementById('accessStatus').textContent = data.error?.message || 'Failed to send.';
+      document.getElementById('accessStatus').style.color = 'var(--red)';
+      btn.disabled = false;
+    }
+  } catch (e) {
+    document.getElementById('accessStatus').textContent = 'Connection error.';
+    document.getElementById('accessStatus').style.color = 'var(--red)';
+    btn.disabled = false;
+  }
+}
+
+async function checkSession() {
+  if (!sessionToken) return;
+  try {
+    const res = await fetch(API + '/api/identity/me', {
+      headers: { 'Authorization': 'Bearer ' + sessionToken }
+    });
+    if (res.ok) {
+      const data = await res.json();
+      setAuthCookie(sessionToken);
+      if (isDenied) { showDenied(data); return; }
+      if (redirectUrl) {
+        const sep = redirectUrl.includes('?') ? '&' : '?';
+        window.location.href = redirectUrl + sep + 'token=' + encodeURIComponent(sessionToken);
+        return;
+      }
+      showApps(data);
+    } else {
+      localStorage.removeItem('cc_identity_token');
+      clearAuthCookie();
+      sessionToken = '';
+    }
+  } catch (e) {
+    localStorage.removeItem('cc_identity_token');
+    clearAuthCookie();
+    sessionToken = '';
+  }
+}
+
+// Show SSO/SAML errors from callbacks
+const ssoError  = params.get('sso_error');
+const samlError = params.get('saml_error');
+const anyError  = ssoError || samlError;
+if (anyError) {
+  const errEl = document.getElementById('error');
+  const raw = anyError === 'no_account'
+    ? 'No AppCrane account found for your identity. Contact your administrator.'
+    : 'SSO error: ' + anyError;
+  errEl.textContent = raw;
+  errEl.style.display = 'block';
+  const clean = new URL(window.location.href);
+  clean.searchParams.delete('sso_error');
+  clean.searchParams.delete('saml_error');
+  history.replaceState(null, '', clean.toString());
+}
+
+// Show SSO / SAML buttons if providers are configured
+(async function initSsoBtns() {
+  try {
+    const [oidcCfg, samlCfg] = await Promise.all([
+      fetch(API + '/api/auth/oidc/config').then(r => r.json()).catch(() => ({})),
+      fetch(API + '/api/auth/saml/config').then(r => r.json()).catch(() => ({})),
+    ]);
+    let anyShown = false;
+    if (oidcCfg.enabled) {
+      const btn = document.getElementById('oidcBtn');
+      btn.textContent = 'Sign in with ' + (oidcCfg.provider_name || 'SSO');
+      btn.style.display = 'block';
+      anyShown = true;
+    }
+    if (samlCfg.enabled) {
+      const btn = document.getElementById('samlBtn');
+      btn.textContent = 'Sign in with ' + (samlCfg.provider_name || 'Okta');
+      btn.style.display = 'block';
+      anyShown = true;
+    }
+    if (anyShown) document.getElementById('ssoBtnWrap').style.display = 'block';
+  } catch (e) {}
+})();
+
+function startOidc() {
+  const redirect = redirectUrl || window.location.origin + '/login';
+  window.location.href = API + '/api/auth/oidc/start?redirect=' + encodeURIComponent(redirect);
+}
+
+function startSaml() {
+  const redirect = redirectUrl || window.location.origin + '/login';
+  window.location.href = API + '/api/auth/saml/start?redirect=' + encodeURIComponent(redirect);
+}
+
+checkSession();
+</script>
+</body>
+</html>
