@@ -120,7 +120,7 @@ function fmtLastLogin(ts) {
 
 async function loadUsers() {
   const users = await apiFetch('/api/users');
-  const allUsers = (users.users || []).filter(u => u.role !== 'admin');
+  const allUsers = users.users || [];
 
   const usersEl = document.getElementById('usersTable');
   if (allUsers.length) {
