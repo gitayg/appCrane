@@ -85,6 +85,10 @@ h2{font-size:.85rem;margin:28px 0 10px;letter-spacing:.6px;font-weight:600}
     <!-- Server + system stats -->
     <div class="grid" id="serverStats"></div>
 
+    <!-- App Creation (AppStudio usage this month) -->
+    <h2 id="appCreationHdr" style="display:none">App Creation <span id="appCreationMonth" style="color:var(--dim);font-weight:400;margin-left:6px"></span></h2>
+    <div class="grid" id="appCreationStats" style="display:none"></div>
+
     <!-- Activity trend chart -->
     <h2>Visitors — Last 7 Days</h2>
     <div class="trend-box">
@@ -298,6 +302,9 @@ async function loadAll() {
     // Trend chart
     renderAppTrend(activityData.days || [], activityData.apps || []);
 
+    // App Creation (AppStudio usage) — non-blocking, shown only if endpoint responds
+    apiFetch('/api/appstudio/usage/summary').then(renderAppCreation).catch(() => {});
+
     // Split apps: errored vs healthy
     const errored = allApps.filter(a =>
       a.production?.deploy?.status === 'failed' || a.sandbox?.deploy?.status === 'failed'
@@ -351,6 +358,23 @@ function statCard(label, value, sub, pct, color, href) {
   return href
     ? '<a class="stat" href="' + href + '" style="text-decoration:none;cursor:pointer">' + inner + '</a>'
     : '<div class="stat">' + inner + '</div>';
+}
+
+function renderAppCreation(data) {
+  if (!data) return;
+  const hdr = document.getElementById('appCreationHdr');
+  const stats = document.getElementById('appCreationStats');
+  const month = document.getElementById('appCreationMonth');
+  hdr.style.display = ''; stats.style.display = '';
+  month.textContent = data.month ? '· ' + data.month : '';
+  stats.textContent = '';
+  [
+    statCard('Total jobs', data.total_jobs || 0, 'this month', 0, 'var(--text)', '/appstudio'),
+    statCard('Succeeded', data.succeeded || 0, 'jobs completed', 0, 'var(--green)'),
+    statCard('Failed', data.failed || 0, 'jobs failed', 0, 'var(--red)'),
+    statCard('Total tokens', (data.total_tokens || 0).toLocaleString(), 'this month', 0, 'var(--purple)'),
+    statCard('Total cost', '$' + (data.total_usd || '0.00'), 'this month', 0, 'var(--yellow)'),
+  ].forEach(card => { stats.insertAdjacentHTML('beforeend', card); });
 }
 
 const TREND_PALETTE = ['#4f9cf9', '#a855f7', '#f97316', '#22c55e', '#eab308', '#e91e63', '#00bcd4', '#ff5722'];

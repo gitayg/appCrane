@@ -80,7 +80,7 @@
 .trace-ai-log{padding:10px 14px;font-size:.78rem;color:var(--dim);background:var(--surface);white-space:pre-wrap;border-top:1px solid var(--border);line-height:1.5}
 .ti-queued{color:var(--dim)}.ti-running{color:var(--accent)}.ti-done{color:var(--green)}.ti-failed{color:var(--red)}
 
-/* Library / Jobs / Usage */
+/* Library / Jobs */
 .context-editor{width:100%;min-height:200px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:12px;color:var(--text);font-family:monospace;font-size:.82rem;resize:vertical}
 .job-row{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);font-size:.82rem}
 .job-row:last-child{border-bottom:none}
@@ -89,7 +89,6 @@
 .enh-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:12px;cursor:default}
 .enh-header{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}
 .enh-meta{font-size:.75rem;color:var(--dim);display:flex;gap:12px;flex-wrap:wrap}
-.usage-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:12px}
 /* Chat planning panel (Feature 17) */
 .chat-overlay{position:fixed;inset:0;background:#00000080;z-index:200;display:flex;align-items:center;justify-content:center}
 .chat-modal{background:var(--surface);border:1px solid var(--border);border-radius:10px;width:min(560px,95vw);max-height:80vh;display:flex;flex-direction:column;padding:0;overflow:hidden}
@@ -117,7 +116,6 @@ document.body.insertAdjacentHTML('beforeend',
     '<div class="tabs">' +
       '<div class="tab active" data-tab="requests">Requests</div>' +
       '<div class="tab" data-tab="library">Library</div>' +
-      '<div class="tab" data-tab="usage">Usage</div>' +
     '</div>' +
     '<div id="tabContent"></div>' +
   '</div></div></div>');
@@ -152,7 +150,6 @@ function renderTab() {
   switch (activeTab) {
     case 'requests': renderRequests(el); break;
     case 'library': renderLibrary(el); break;
-    case 'usage': renderUsage(el); break;
   }
 }
 
@@ -820,34 +817,6 @@ async function renderLibrary(el) {
       apiFetch('/api/appstudio/context/' + slug).then(function(d) { textarea.value = d.content || ''; });
     })(app.slug, ta);
   }
-}
-
-async function renderUsage(el) {
-  el.textContent = 'Loading...';
-  var data = await apiFetch('/api/appstudio/usage/summary');
-  el.textContent = '';
-  var panel = document.createElement('div'); panel.className = 'detail-panel';
-  var h = document.createElement('h4'); h.style.margin = '0 0 12px'; h.textContent = 'Usage — ' + data.month;
-  panel.appendChild(h);
-  var grid = document.createElement('div'); grid.className = 'usage-grid';
-  var items = [
-    { label: 'Total jobs', value: data.total_jobs || 0 },
-    { label: 'Succeeded', value: data.succeeded || 0, color: 'var(--green)' },
-    { label: 'Failed', value: data.failed || 0, color: 'var(--red)' },
-    { label: 'Total tokens', value: (data.total_tokens || 0).toLocaleString() },
-    { label: 'Total cost', value: '$' + (data.total_usd || '0.00') },
-  ];
-  for (var i = 0; i < items.length; i++) {
-    var it = items[i];
-    var stat = document.createElement('div'); stat.className = 'stat';
-    var lbl = document.createElement('div'); lbl.className = 'label'; lbl.textContent = it.label;
-    var val = document.createElement('div'); val.className = 'value'; val.textContent = it.value;
-    if (it.color) val.style.color = it.color;
-    stat.appendChild(lbl); stat.appendChild(val);
-    grid.appendChild(stat);
-  }
-  panel.appendChild(grid);
-  el.appendChild(panel);
 }
 
 loadData();
