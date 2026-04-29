@@ -1928,6 +1928,52 @@ function refreshApp() {
   requestAnimationFrame(function() { f.src = src; });
 }
 
+async function openPlanById(enhId, appSlug) {
+  closeJobsPanel();
+  if (!document.getElementById('appFrame').classList.contains('open')) return;
+
+  try {
+    var r = await fetch(API + '/api/plan/' + enhId, {
+      headers: { 'Authorization': 'Bearer ' + sessionToken },
+    });
+    var d = await r.json();
+    if (!r.ok) throw new Error((d.error && d.error.message) || 'Failed to load plan');
+
+    _planEnhId = enhId;
+    _planBusy = false;
+    _planHasPlan = false;
+    document.getElementById('planMessages').innerHTML = '';
+    document.getElementById('planWorking').style.display = 'none';
+    document.getElementById('planBuildRow').style.display = 'none';
+    document.getElementById('planSendBtn').textContent = 'Plan';
+    document.getElementById('planSendBtn').disabled = false;
+    document.getElementById('planInput').placeholder = 'Describe the enhancement or feature you want...';
+
+    _appendPlanMsg('user', d.message || '');
+
+    if (d.plan) {
+      _planHasPlan = true;
+      _appendPlanMsg('assistant', _renderPlan(d.plan));
+      var buildBtn = document.getElementById('planBuildBtn');
+      buildBtn.textContent = _userRole === 'admin' ? '\uD83D\uDD28 Build' : '\uD83D\uDCE4 Submit for Review';
+      buildBtn.disabled = false;
+      document.getElementById('planBuildRow').style.display = 'flex';
+      document.getElementById('planSendBtn').textContent = 'Refine';
+      document.getElementById('planInput').placeholder = 'Send feedback to refine the plan...';
+    } else if (d.status === 'planning') {
+      _planBusy = true;
+      document.getElementById('planSendBtn').disabled = true;
+      document.getElementById('planWorking').style.display = 'flex';
+      document.getElementById('planWorkingText').textContent = 'Generating plan\u2026';
+      _streamPlan().catch(function() {});
+    }
+
+    openPlanPanel();
+  } catch (err) {
+    alert('Failed to load plan: ' + err.message);
+  }
+}
+
 // ── Jobs panel ───────────────────────────────────────────────────────────
 var _jobsPollTimer = null;
 
@@ -1944,7 +1990,20 @@ function closeJobsPanel() {
   if (_jobsPollTimer) { clearInterval(_jobsPollTimer); _jobsPollTimer = null; }
 }
 
-function _makeJobRow(slug, label, statusText, statusClass, message) {
+const _JOB_STATUS_LABELS = {
+  new: 'New',
+  selected: 'Queued for review',
+  planning: 'Generating plan\u2026',
+  pending_user_review_plan: 'Plan ready \u2014 review needed',
+  plan_approved: 'Build queued',
+  coding: 'Writing code\u2026',
+  sandbox_ready: 'Sandbox ready',
+  done: 'Done',
+  merged: 'Merged',
+  auto_failed: 'Failed',
+};
+
+function _makeJobRow(slug, phase, rawStatus, statusClass, message, actionFn, actionLabel) {
   const row = document.createElement('div');
   row.className = 'job-row';
   const top = document.createElement('div');
@@ -1952,13 +2011,21 @@ function _makeJobRow(slug, label, statusText, statusClass, message) {
   const slugEl = document.createElement('span');
   slugEl.className = 'job-slug';
   slugEl.textContent = slug || '';
-  const labelEl = document.createElement('span');
-  labelEl.className = 'job-phase';
-  labelEl.textContent = label || '';
+  const phaseEl = document.createElement('span');
+  phaseEl.className = 'job-phase';
+  phaseEl.textContent = phase || '';
   const statusEl = document.createElement('span');
   statusEl.className = statusClass;
-  statusEl.textContent = statusText || '';
-  top.appendChild(slugEl); top.appendChild(labelEl); top.appendChild(statusEl);
+  statusEl.textContent = _JOB_STATUS_LABELS[rawStatus] || rawStatus || '';
+  top.appendChild(slugEl); top.appendChild(phaseEl); top.appendChild(statusEl);
+  if (actionFn) {
+    const btn = document.createElement('button');
+    btn.className = 'ask-sessions-btn';
+    btn.style.cssText = 'margin-left:auto;font-size:.68rem;padding:2px 8px';
+    btn.textContent = actionLabel || 'View \u2192';
+    btn.addEventListener('click', function(e) { e.stopPropagation(); actionFn(); });
+    top.appendChild(btn);
+  }
   const msg = document.createElement('div');
   msg.className = 'job-msg';
   msg.textContent = message || '';
@@ -1999,7 +2066,10 @@ async function refreshJobsList() {
       myReqs.forEach(function(req) {
         const statusMap = { new: 'job-status-queued', selected: 'job-status-queued', planning: 'job-status-running', pending_user_review_plan: 'job-status-running', plan_approved: 'job-status-running', coding: 'job-status-running', sandbox_ready: 'job-status-queued', done: '', merged: '' };
         const cls = statusMap[req.status] || 'job-status-queued';
-        list.appendChild(_makeJobRow(req.app_slug, req.phase || req.status, req.status, cls, req.message));
+        const actionFn = req.status === 'pending_user_review_plan'
+          ? function() { openPlanById(req.id, req.app_slug); }
+          : null;
+        list.appendChild(_makeJobRow(req.app_slug, req.phase || '', req.status, cls, req.message, actionFn, 'View Plan \u2192'));
       });
     }
 
