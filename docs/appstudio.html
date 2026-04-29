@@ -59,8 +59,10 @@
 
 /* Library / Jobs / Usage */
 .context-editor{width:100%;min-height:200px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:12px;color:var(--text);font-family:monospace;font-size:.82rem;resize:vertical}
-.job-row{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);font-size:.82rem}
+.job-row{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);font-size:.82rem}
 .job-row:last-child{border-bottom:none}
+.job-tag{font-family:monospace;font-size:.72rem;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:1px 6px;cursor:pointer;color:var(--dim);white-space:nowrap;flex-shrink:0}
+.job-tag:hover{border-color:var(--accent);color:var(--accent)}
 .enh-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:12px;cursor:default}
 .enh-header{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}
 .enh-meta{font-size:.75rem;color:var(--dim);display:flex;gap:12px;flex-wrap:wrap}
@@ -473,12 +475,16 @@ async function showDetail(id) {
     for (var ji = 0; ji < jobs.length; ji++) {
       var j = jobs[ji];
       var row = document.createElement('div'); row.className = 'job-row';
-      var left = document.createElement('span');
-      left.textContent = '#' + j.id + ' ' + j.phase + ' (' + j.status + ')';
+      var tag = document.createElement('span'); tag.className = 'job-tag';
+      tag.textContent = 'JOB-' + String(j.id).padStart(4, '0');
+      tag.title = 'Click to copy tracking ID';
+      tag.addEventListener('click', function(jid) { return function() { navigator.clipboard.writeText('JOB-' + String(jid).padStart(4, '0')); }; }(j.id));
+      var left = document.createElement('span'); left.style.margin = '0 8px';
+      left.textContent = j.phase + ' (' + j.status + ')';
       var right = document.createElement('span'); right.style.color = 'var(--dim)';
       right.textContent = (j.started_at || j.created_at || '').slice(0, 19);
       if (j.error_message) { right.textContent += ' — ' + j.error_message.slice(0, 80); right.style.color = 'var(--red)'; }
-      row.appendChild(left); row.appendChild(right);
+      row.appendChild(tag); row.appendChild(left); row.appendChild(right);
       panel.appendChild(row);
     }
   }
@@ -500,12 +506,19 @@ async function renderJobs(el) {
     var card = document.createElement('div');
     card.className = 'enh-card'; card.style.cursor = 'default';
     var top = document.createElement('div'); top.className = 'enh-header';
+    var jtag = document.createElement('span'); jtag.className = 'job-tag';
+    jtag.textContent = 'JOB-' + String(j.id).padStart(4, '0');
+    jtag.title = 'Click to copy tracking ID';
+    jtag.style.marginRight = '8px';
+    jtag.addEventListener('click', function(jid) { return function(e) { e.stopPropagation(); navigator.clipboard.writeText('JOB-' + String(jid).padStart(4, '0')); }; }(j.id));
     var lbl = document.createElement('span');
-    lbl.textContent = '#' + j.id + ' ' + j.phase + ' — ' + (j.enhancement_message || '').slice(0, 60);
+    lbl.textContent = j.phase + ' — ' + (j.enhancement_message || '').slice(0, 55);
+    var lbl2 = document.createElement('span'); lbl2.style.display = 'flex'; lbl2.style.alignItems = 'center';
+    lbl2.appendChild(jtag); lbl2.appendChild(lbl);
     var badge = document.createElement('span');
     badge.className = 'enh-status s-' + (j.status === 'done' ? 'done' : j.status === 'failed' ? 'auto_failed' : 'coding');
     badge.textContent = j.status;
-    top.appendChild(lbl); top.appendChild(badge);
+    top.appendChild(lbl2); top.appendChild(badge);
     card.appendChild(top);
     var meta = document.createElement('div'); meta.className = 'enh-meta';
     if (j.app_slug) { var s1 = document.createElement('span'); s1.textContent = j.app_slug; meta.appendChild(s1); }

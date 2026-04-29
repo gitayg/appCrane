@@ -1,10 +1,9 @@
-import { execFileSync } from 'child_process';
 import { existsSync, readFileSync } from 'fs';
 import { join, resolve } from 'path';
 import { getDb } from '../../db.js';
 import { decrypt } from '../encryption.js';
 import { planEnhancement } from './planner.js';
-import { prepareWorkspace, generateCode, cleanupWorkspace } from './generator.js';
+import { generateCode, cloneForBuild, cleanupWorkspace } from './generator.js';
 import log from '../../utils/logger.js';
 
 const POLL_MS = parseInt(process.env.APPSTUDIO_POLL_MS || '5000', 10);
@@ -174,7 +173,7 @@ async function handleCode(job) {
 
   db.prepare("UPDATE enhancement_requests SET status = 'coding' WHERE id = ?").run(enh.id);
 
-  const workspace = prepareWorkspace(job.id, app);
+  const agentContext = getAgentContext(app.slug);
   const logLines = [];
   const onLog = (line) => {
     logLines.push(line);
@@ -184,10 +183,10 @@ async function handleCode(job) {
     }
   };
 
-  const agentContext = getAgentContext(app.slug);
-
-  await generateCode({
-    workspace,
+  const { branchName } = await generateCode({
+    jobId: job.id,
+    app,
+    enhancementId: enh.id,
     plan,
     summary: plan.summary || enh.message,
     agentContext,
@@ -195,33 +194,10 @@ async function handleCode(job) {
     onLog,
   });
 
+  cleanupWorkspace(job.id);
+
   db.prepare('UPDATE enhancement_jobs SET output_json = ? WHERE id = ?')
-    .run(JSON.stringify({ log: logLines.slice(-200), workspace }), job.id);
-
-  // Push to a branch
-  const branchName = `appstudio/${enh.id}-${app.slug}`;
-  try {
-    execFileSync('git', ['checkout', '-b', branchName], { cwd: workspace, stdio: 'pipe' });
-    execFileSync('git', ['add', '-A'], { cwd: workspace, stdio: 'pipe' });
-    execFileSync('git', ['commit', '-m', `appstudio: ${plan.summary?.slice(0, 60) || 'enhancement #' + enh.id}`], {
-      cwd: workspace, stdio: 'pipe',
-    });
-
-    let pushUrl = app.github_url;
-    if (app.github_token_encrypted) {
-      try {
-        const token = decrypt(app.github_token_encrypted);
-        const url = new URL(app.github_url);
-        url.username = token;
-        pushUrl = url.toString();
-      } catch (_) {}
-    }
-    execFileSync('git', ['remote', 'set-url', 'origin', pushUrl], { cwd: workspace, stdio: 'pipe' });
-    execFileSync('git', ['push', '-u', 'origin', branchName], { cwd: workspace, stdio: 'pipe', timeout: 60000 });
-    log.info(`AppStudio: pushed branch ${branchName}`);
-  } catch (e) {
-    log.warn(`AppStudio: git push failed: ${e.message}`);
-  }
+    .run(JSON.stringify({ log: logLines.slice(-200), branchName }), job.id);
 
   db.prepare(`
     UPDATE enhancement_requests
@@ -234,7 +210,6 @@ async function handleCode(job) {
     enh.id,
   );
 
-  // Queue the build phase
   db.prepare('INSERT INTO enhancement_jobs (enhancement_id, phase) VALUES (?, ?)').run(enh.id, 'build');
 }
 
@@ -245,19 +220,10 @@ async function handleBuild(job) {
   const app = enh.app_slug ? getApp(enh.app_slug) : null;
   if (!app) throw new Error(`App ${enh.app_slug} not found`);
 
-  // Find the workspace from the code phase
-  const codeJob = db.prepare(`
-    SELECT * FROM enhancement_jobs
-    WHERE enhancement_id = ? AND phase = 'code' AND status = 'done'
-    ORDER BY id DESC LIMIT 1
-  `).get(enh.id);
+  const branchName = enh.branch_name;
+  if (!branchName) throw new Error('No branch from code phase');
 
-  let workspace;
-  if (codeJob?.output_json) {
-    try { workspace = JSON.parse(codeJob.output_json).workspace; } catch (_) {}
-  }
-
-  if (!workspace) throw new Error('No workspace from code phase');
+  const workspace = cloneForBuild(job.id, app, branchName);
 
   // Trigger AppCrane deploy from the workspace
   const { deployApp } = await import('../deployer.js');
@@ -285,6 +251,7 @@ async function handleBuild(job) {
     enh.id,
   );
 
+  try { cleanupWorkspace(`build-${job.id}`); } catch (_) {}
   log.info(`AppStudio: sandbox deploy queued for enh #${enh.id}`);
 }
 
