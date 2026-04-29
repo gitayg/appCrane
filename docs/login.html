@@ -236,11 +236,20 @@ input:focus{border-color:var(--accent)}
 .plan-file-rationale{color:var(--dim)}
 .plan-test-text{font-size:.82rem;color:var(--dim);line-height:1.5;white-space:pre-wrap}
 .plan-build-btn{background:#22c55e!important;border-color:transparent!important;color:#fff!important}
-.job-detail-modal{background:var(--surface);border-radius:10px;padding:20px;width:640px;max-width:96vw;display:flex;flex-direction:column;gap:12px;max-height:80vh}
-.job-detail-header{display:flex;align-items:center;gap:10px}
-.job-detail-title{font-weight:700;font-size:.95rem;flex:1}
-.job-detail-logs{flex:1;overflow-y:auto;background:var(--surface2);border-radius:6px;padding:10px 12px;font-family:monospace;font-size:.71rem;line-height:1.6;white-space:pre-wrap;min-height:220px;max-height:380px;color:var(--fg)}
-.job-detail-footer{display:flex;align-items:center;gap:12px;font-size:.78rem;color:var(--dim)}
+.job-detail-panel{position:absolute;top:44px;right:0;width:460px;height:calc(100% - 44px);background:var(--bg);border-left:1px solid var(--border);display:flex;flex-direction:column;z-index:21;transform:translateX(100%);transition:transform .25s ease}
+.job-detail-panel.open{transform:translateX(0)}
+.job-detail-phead{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--border);flex-shrink:0;font-weight:600;font-size:.88rem}
+.job-detail-title{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.job-detail-messages{flex:1;overflow-y:auto;padding:10px 12px;display:flex;flex-direction:column;gap:6px}
+.jd-sys{align-self:center;font-size:.68rem;color:var(--dim);background:var(--surface2);border-radius:10px;padding:2px 10px;border:1px solid var(--border)}
+.jd-sys.blue{color:#58a6ff;border-color:#1f3a5a}
+.jd-sys.red{color:#f85149;border-color:#4a1a1a}
+.jd-sys.green{color:#3fb950;border-color:#1a3a22}
+.jd-tool{display:flex;align-items:baseline;gap:6px;font-size:.72rem;font-family:monospace;padding:3px 8px;background:var(--surface);border-radius:6px;border:1px solid var(--border);align-self:flex-start;max-width:100%;overflow:hidden}
+.jd-tool-name{color:#7ee787;font-weight:700;flex-shrink:0}
+.jd-tool-arg{color:#9ecbff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.jd-text{max-width:92%;padding:7px 11px;border-radius:8px;font-size:.8rem;line-height:1.5;background:var(--surface);border:1px solid var(--border);align-self:flex-start;border-bottom-left-radius:3px;color:var(--text);white-space:pre-wrap;word-break:break-word}
+.job-detail-footer{padding:8px 12px;border-top:1px solid var(--border);display:flex;align-items:center;gap:12px;font-size:.75rem;color:var(--dim);flex-shrink:0}
 .job-detail-tokens{font-weight:600;color:var(--fg)}
 .job-row{cursor:pointer}
 .job-row:hover{background:var(--surface2)}
@@ -350,20 +359,21 @@ input:focus{border-color:var(--accent)}
 
   <iframe id="frameIframe" src="" allow="fullscreen"></iframe>
 
-  <!-- Job detail overlay (inside appFrame so it appears over the iframe) -->
-  <div id="jobDetailOverlay" class="enh-overlay" onclick="if(event.target===this)closeJobDetail()" style="z-index:20">
-    <div class="job-detail-modal">
-      <div class="job-detail-header">
-        <span id="jobDetailTitle" class="job-detail-title">Job</span>
-        <span id="jobDetailStatus" class="job-phase"></span>
+  <!-- Job detail side panel -->
+  <div id="jobDetailPanel" class="job-detail-panel">
+    <div class="job-detail-phead">
+      <span id="jobDetailTitle" class="job-detail-title">Job</span>
+      <span id="jobDetailStatus" class="job-phase"></span>
+      <div class="ask-header-right">
+        <span id="jobDetailId" style="font-size:.68rem;color:var(--dim);font-family:monospace;font-weight:400"></span>
         <button class="ask-close" onclick="closeJobDetail()">×</button>
       </div>
-      <div id="jobDetailLogs" class="job-detail-logs">Loading…</div>
-      <div class="job-detail-footer">
-        <span>Tokens: <span id="jobDetailTokens" class="job-detail-tokens">—</span></span>
-        <span id="jobDetailCost"></span>
-        <span id="jobDetailTime" style="margin-left:auto"></span>
-      </div>
+    </div>
+    <div id="jobDetailMessages" class="job-detail-messages"><div class="jd-sys">Loading…</div></div>
+    <div class="job-detail-footer">
+      <span>Tokens: <span id="jobDetailTokens" class="job-detail-tokens">—</span></span>
+      <span id="jobDetailCost"></span>
+      <span id="jobDetailTime" style="margin-left:auto"></span>
     </div>
   </div>
 </div>
@@ -2056,52 +2066,54 @@ function _formatLogLine(raw) {
   var esc = function(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); };
   var line = raw.trim();
   if (!line) return '';
-  // Try to parse as Claude Code stream-json event
   try {
     var evt = JSON.parse(line);
     var t = evt.type;
     if (t === 'assistant' && evt.message) {
       var content = evt.message.content || [];
-      var parts = [];
+      var html = '';
       for (var i = 0; i < content.length; i++) {
         var blk = content[i];
-        if (blk.type === 'text' && blk.text) parts.push('<span style="color:#e6edf3">' + esc(blk.text) + '</span>');
-        else if (blk.type === 'tool_use') parts.push('<span style="color:#7ee787">⚙ ' + esc(blk.name) + '</span>' + (blk.input && blk.input.command ? ' <span style="color:#9ecbff;font-size:.68rem">' + esc(blk.input.command) + '</span>' : blk.input && blk.input.path ? ' <span style="color:#9ecbff;font-size:.68rem">' + esc(blk.input.path) + '</span>' : ''));
+        if (blk.type === 'text' && blk.text && blk.text.trim()) {
+          html += '<div class="jd-text">' + esc(blk.text.trim()) + '</div>';
+        } else if (blk.type === 'tool_use') {
+          var arg = (blk.input && (blk.input.command || blk.input.file_path || blk.input.path)) || '';
+          html += '<div class="jd-tool"><span class="jd-tool-name">' + esc(blk.name) + '</span><span class="jd-tool-arg">' + esc(arg) + '</span></div>';
+        }
       }
-      if (parts.length) return '<div style="padding:1px 0">' + parts.join('<br>') + '</div>';
-      return '';
+      return html;
     }
-    if (t === 'tool_result') return '';
+    if (t === 'tool_result' || t === 'system') return '';
     if (t === 'result') {
       var cost = evt.total_cost_usd ? ' · $' + parseFloat(evt.total_cost_usd).toFixed(4) : '';
-      return '<div style="color:#7ee787;border-top:1px solid #30363d;margin-top:4px;padding-top:4px">✔ ' + esc(evt.subtype || 'done') + cost + '</div>';
+      var ok = evt.subtype !== 'error';
+      return '<div class="jd-sys ' + (ok ? 'green' : 'red') + '">' + (ok ? '✔' : '✖') + ' ' + esc(evt.subtype || 'done') + cost + '</div>';
     }
-    if (t === 'system') return '<div style="color:#6e7681;font-size:.7rem">' + esc(JSON.stringify(evt).slice(0,120)) + '</div>';
     return '';
   } catch (_) {}
-  // Plain text line — color by prefix
-  if (/^\[stderr\]/.test(line)) return '<div style="color:#f85149">' + esc(line) + '</div>';
-  if (/^\[studio\]/.test(line)) return '<div style="color:#58a6ff">' + esc(line) + '</div>';
-  if (/^\[build\]/.test(line))  return '<div style="color:#8b949e;font-size:.7rem">' + esc(line) + '</div>';
-  return '<div>' + esc(line) + '</div>';
+  if (/^\[stderr\]/.test(line)) return '<div class="jd-sys red">' + esc(line.replace(/^\[stderr\]\s*/,'')) + '</div>';
+  if (/^\[studio\]/.test(line)) return '<div class="jd-sys blue">' + esc(line.replace(/^\[studio\]\s*/,'')) + '</div>';
+  if (/^\[build\]/.test(line))  return '<div class="jd-sys">' + esc(line.replace(/^\[build\]\s*/,'')) + '</div>';
+  return '';
 }
 
 function openJobDetail(jobId) {
   _jobDetailId = jobId;
-  document.getElementById('jobDetailTitle').textContent = 'JOB-' + String(jobId).padStart(4, '0');
+  document.getElementById('jobDetailTitle').textContent = 'Job';
+  document.getElementById('jobDetailId').textContent = '#' + String(jobId).padStart(4, '0');
   document.getElementById('jobDetailStatus').textContent = '';
-  document.getElementById('jobDetailLogs').innerHTML = '<div style="color:#8b949e">Loading…</div>';
+  document.getElementById('jobDetailMessages').innerHTML = '<div class="jd-sys">Loading…</div>';
   document.getElementById('jobDetailTokens').textContent = '\u2014';
   document.getElementById('jobDetailCost').textContent = '';
   document.getElementById('jobDetailTime').textContent = '';
-  document.getElementById('jobDetailOverlay').classList.add('open');
+  document.getElementById('jobDetailPanel').classList.add('open');
   _fetchJobDetail();
   if (_jobDetailTimer) clearInterval(_jobDetailTimer);
   _jobDetailTimer = setInterval(_fetchJobDetail, 3000);
 }
 
 function closeJobDetail() {
-  document.getElementById('jobDetailOverlay').classList.remove('open');
+  document.getElementById('jobDetailPanel').classList.remove('open');
   if (_jobDetailTimer) { clearInterval(_jobDetailTimer); _jobDetailTimer = null; }
   _jobDetailId = null;
 }
@@ -2113,28 +2125,29 @@ async function _fetchJobDetail() {
       headers: { 'Authorization': 'Bearer ' + sessionToken },
     });
     var d = await r.json();
-    if (!r.ok) { document.getElementById('jobDetailLogs').textContent = (d.error && d.error.message) || 'Error loading job'; return; }
+    var msgsEl = document.getElementById('jobDetailMessages');
+    if (!r.ok) { msgsEl.innerHTML = '<div class="jd-sys red">' + ((d.error && d.error.message) || 'Error loading job') + '</div>'; return; }
 
-    var logsEl = document.getElementById('jobDetailLogs');
     var lines = [];
     if (d.output && Array.isArray(d.output.log)) {
       lines = d.output.log;
     } else if (d.output && d.output.streaming && d.output.text) {
       lines = [d.output.text];
     } else if (d.error) {
-      lines = ['Error: ' + d.error];
+      lines = ['[stderr] ' + d.error];
     }
     if (lines.length) {
-      var wasAtBottom = logsEl.scrollHeight - logsEl.scrollTop <= logsEl.clientHeight + 40;
-      logsEl.innerHTML = lines.map(_formatLogLine).join('');
-      if (wasAtBottom) logsEl.scrollTop = logsEl.scrollHeight;
+      var wasAtBottom = msgsEl.scrollHeight - msgsEl.scrollTop <= msgsEl.clientHeight + 40;
+      msgsEl.innerHTML = lines.map(_formatLogLine).filter(Boolean).join('');
+      if (wasAtBottom) msgsEl.scrollTop = msgsEl.scrollHeight;
     } else if (d.status === 'queued') {
-      logsEl.innerHTML = '<div style="color:#8b949e">Queued — waiting for worker to pick up this job…</div>';
+      msgsEl.innerHTML = '<div class="jd-sys">Queued — waiting for worker…</div>';
     } else if (d.status === 'running') {
-      logsEl.innerHTML = '<div style="color:#8b949e">Running — no output yet…</div>';
+      msgsEl.innerHTML = '<div class="jd-sys blue">Running — no output yet…</div>';
     }
 
-    document.getElementById('jobDetailTitle').textContent = 'JOB-' + String(d.id).padStart(4, '0') + ' \u00b7 ' + (d.phase || '');
+    document.getElementById('jobDetailTitle').textContent = (d.phase || 'job') + (d.app_slug ? ' · ' + d.app_slug : '');
+    document.getElementById('jobDetailId').textContent = '#' + String(d.id).padStart(4, '0');
     document.getElementById('jobDetailStatus').textContent = _JOB_STATUS_LABELS[d.status] || d.status || '';
     document.getElementById('jobDetailTokens').textContent = d.cost_tokens > 0 ? d.cost_tokens.toLocaleString() : '\u2014';
     if (d.cost_usd_cents > 0) {
