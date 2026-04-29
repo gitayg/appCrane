@@ -100,7 +100,6 @@ document.body.insertAdjacentHTML('beforeend',
     '</div>' +
     '<div class="tabs">' +
       '<div class="tab active" data-tab="requests">Requests</div>' +
-      '<div class="tab" data-tab="jobs">Jobs</div>' +
       '<div class="tab" data-tab="library">Library</div>' +
       '<div class="tab" data-tab="usage">Usage</div>' +
     '</div>' +
@@ -136,7 +135,6 @@ function renderTab() {
   el.textContent = '';
   switch (activeTab) {
     case 'requests': renderRequests(el); break;
-    case 'jobs': renderJobs(el); break;
     case 'library': renderLibrary(el); break;
     case 'usage': renderUsage(el); break;
   }
@@ -193,8 +191,9 @@ async function startDeveloping(id) {
   renderTab();
 }
 
+var JOB_STATUS_COLOR = { queued: 'var(--dim)', running: '#f59e0b', done: 'var(--green)', failed: 'var(--red)' };
+
 function renderRequests(el) {
-  // Filters
   var filterDiv = document.createElement('div');
   filterDiv.className = 'filter-row';
 
@@ -205,9 +204,11 @@ function renderRequests(el) {
   Array.from(slugSet).sort().forEach(function(s) { var o = document.createElement('option'); o.value = s; o.textContent = s; appSel.appendChild(o); });
 
   var statusSel = document.createElement('select');
-  [['', 'All statuses'], ['new', 'New'], ['selected', 'Selected for Implementation'],
+  [['', 'All statuses'], ['new', 'New'], ['selected', 'Selected'],
    ['planning', 'Planning'], ['pending_user_review_plan', 'Plan ready'],
-   ['coding', 'Coding'], ['sandbox_ready', 'Sandbox ready'], ['done', 'Done'], ['auto_failed', 'Failed']
+   ['plan_approved', 'Approved'], ['coding', 'Coding'], ['pushing', 'Pushing'],
+   ['building', 'Building'], ['sandbox_ready', 'Sandbox ready'],
+   ['merged', 'Shipped'], ['done', 'Done'], ['auto_failed', 'Failed']
   ].forEach(function(pair) { var o = document.createElement('option'); o.value = pair[0]; o.textContent = pair[1]; statusSel.appendChild(o); });
 
   var searchInput = document.createElement('input');
@@ -219,11 +220,10 @@ function renderRequests(el) {
   filterDiv.appendChild(searchInput); filterDiv.appendChild(countEl);
   el.appendChild(filterDiv);
 
-  // Table
   var wrap = document.createElement('div');
   var table = document.createElement('table'); table.className = 'req-table';
   var thead = table.createTHead(); var hrow = thead.insertRow();
-  ['Application', 'User', 'Date', 'Message', 'Status', 'Fix Version', 'Action', ''].forEach(function(h) {
+  ['#', 'App', 'User', 'Date', 'Message', 'Status', 'Latest Job', 'Cost', 'Branch / PR', ''].forEach(function(h) {
     var th = document.createElement('th'); th.textContent = h; hrow.appendChild(th);
   });
   var tbody = table.createTBody();
@@ -241,7 +241,7 @@ function renderRequests(el) {
     tbody.textContent = '';
     if (!rows.length) {
       var empty = document.createElement('tr'); var etd = document.createElement('td');
-      etd.colSpan = 8; etd.style.cssText = 'text-align:center;padding:32px;color:var(--dim)';
+      etd.colSpan = 10; etd.style.cssText = 'text-align:center;padding:32px;color:var(--dim)';
       etd.textContent = 'No enhancement requests' + (appF || statusF || q ? ' matching filters' : '');
       empty.appendChild(etd); tbody.appendChild(empty); return;
     }
@@ -249,8 +249,12 @@ function renderRequests(el) {
       var status = r.status || 'new';
       var isNew = status === 'new';
       var tr = document.createElement('tr');
-      tr.className = 's-' + status + (isNew ? '' : ' clickable');
-      if (!isNew) tr.addEventListener('click', function() { showDetail(r.id); });
+      tr.className = 's-' + status + ' clickable';
+      tr.addEventListener('click', function() { showDetail(r.id); });
+
+      // ID
+      var tdId = tr.insertCell(); tdId.style.cssText = 'font-family:monospace;font-size:.72rem;color:var(--dim);white-space:nowrap';
+      tdId.textContent = '#' + String(r.id).padStart(4, '0');
 
       // App
       var tdApp = tr.insertCell();
@@ -258,33 +262,74 @@ function renderRequests(el) {
       else { tdApp.style.color = 'var(--dim)'; tdApp.textContent = '—'; }
 
       // User
-      var tdUser = tr.insertCell(); tdUser.style.cssText = 'font-weight:600;font-size:.82rem'; tdUser.textContent = r.user_name || 'unknown';
+      var tdUser = tr.insertCell(); tdUser.style.cssText = 'font-size:.82rem'; tdUser.textContent = r.user_name || '—';
 
       // Date
       var tdDate = tr.insertCell(); tdDate.className = 'date-cell'; tdDate.textContent = fmtDate(r.created_at);
 
       // Message
-      var tdMsg = tr.insertCell(); tdMsg.className = 'msg-cell';
-      tdMsg.textContent = r.message;
+      var tdMsg = tr.insertCell(); tdMsg.className = 'msg-cell'; tdMsg.textContent = r.message;
 
-      // Status badge
+      // Enhancement status badge
       var tdStatus = tr.insertCell();
       var badge = document.createElement('span'); badge.className = 'enh-status s-' + status; badge.textContent = statusLabel(status); tdStatus.appendChild(badge);
-
-      // Fix Version
-      var tdFix = tr.insertCell(); tdFix.style.cssText = 'font-family:monospace;font-size:.75rem;white-space:nowrap';
-      tdFix.textContent = r.fix_version || '—';
-
-      // Action
-      var tdAct = tr.insertCell();
       if (isNew) {
-        var startBtn = document.createElement('button'); startBtn.className = 'btn-start'; startBtn.textContent = 'Start Developing';
+        var startBtn = document.createElement('button'); startBtn.className = 'btn-start'; startBtn.style.cssText = 'margin-top:4px;display:block';
+        startBtn.textContent = 'Start';
         startBtn.addEventListener('click', function(ev) { ev.stopPropagation(); startDeveloping(r.id); });
-        tdAct.appendChild(startBtn);
+        tdStatus.appendChild(startBtn);
+      }
+
+      // Latest job
+      var tdJob = tr.insertCell(); tdJob.style.cssText = 'white-space:nowrap;font-size:.78rem';
+      if (r.latest_job_id) {
+        var jobTag = document.createElement('span'); jobTag.className = 'job-tag';
+        jobTag.textContent = 'JOB-' + String(r.latest_job_id).padStart(4, '0');
+        jobTag.title = 'Click to copy'; jobTag.style.marginRight = '4px';
+        jobTag.addEventListener('click', function(jid) { return function(ev) { ev.stopPropagation(); navigator.clipboard.writeText('JOB-' + String(jid).padStart(4,'0')); }; }(r.latest_job_id));
+        tdJob.appendChild(jobTag);
+        var phaseSpan = document.createElement('span'); phaseSpan.style.cssText = 'font-size:.7rem;margin-right:4px'; phaseSpan.textContent = r.latest_job_phase || '';
+        tdJob.appendChild(phaseSpan);
+        var jstSpan = document.createElement('span');
+        jstSpan.style.cssText = 'font-size:.7rem;font-weight:700;color:' + (JOB_STATUS_COLOR[r.latest_job_status] || 'var(--dim)');
+        jstSpan.textContent = r.latest_job_status || '';
+        tdJob.appendChild(jstSpan);
+        if (r.latest_job_error) {
+          var errSpan = document.createElement('div'); errSpan.style.cssText = 'font-size:.68rem;color:var(--red);max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+          errSpan.title = r.latest_job_error; errSpan.textContent = r.latest_job_error;
+          tdJob.appendChild(errSpan);
+        }
       } else {
-        var openBtn = document.createElement('button'); openBtn.className = 'btn-start'; openBtn.style.background = 'var(--surface2)'; openBtn.style.color = 'var(--text)'; openBtn.style.border = '1px solid var(--border)'; openBtn.textContent = 'Open';
-        openBtn.addEventListener('click', function(ev) { ev.stopPropagation(); showDetail(r.id); });
-        tdAct.appendChild(openBtn);
+        tdJob.style.color = 'var(--dim)'; tdJob.textContent = '—';
+      }
+
+      // Cost
+      var tdCost = tr.insertCell(); tdCost.style.cssText = 'font-size:.75rem;white-space:nowrap';
+      var totalTokens = (r.cost_tokens || 0);
+      var totalCents = (r.cost_usd_cents || 0);
+      if (totalTokens > 0) {
+        var tokDiv = document.createElement('div'); tokDiv.style.color = 'var(--dim)'; tokDiv.textContent = totalTokens.toLocaleString() + ' tok';
+        tdCost.appendChild(tokDiv);
+      }
+      if (totalCents > 0) {
+        var costDiv = document.createElement('div'); costDiv.style.fontWeight = '600';
+        costDiv.textContent = '$' + (totalCents / 100).toFixed(3);
+        tdCost.appendChild(costDiv);
+      }
+      if (!totalTokens && !totalCents) { tdCost.style.color = 'var(--dim)'; tdCost.textContent = '—'; }
+
+      // Branch / PR
+      var tdBranch = tr.insertCell(); tdBranch.style.cssText = 'font-size:.72rem;font-family:monospace;white-space:nowrap;max-width:160px;overflow:hidden;text-overflow:ellipsis';
+      if (r.pr_url) {
+        var prLink = document.createElement('a'); prLink.href = r.pr_url; prLink.target = '_blank';
+        prLink.style.cssText = 'color:var(--accent);text-decoration:none'; prLink.textContent = 'PR ↗';
+        prLink.addEventListener('click', function(ev) { ev.stopPropagation(); });
+        tdBranch.appendChild(prLink);
+      } else if (r.branch_name || r.fix_version) {
+        tdBranch.style.color = 'var(--dim)'; tdBranch.title = r.branch_name || r.fix_version;
+        tdBranch.textContent = (r.branch_name || r.fix_version || '').replace('appstudio/', '');
+      } else {
+        tdBranch.style.color = 'var(--dim)'; tdBranch.textContent = '—';
       }
 
       // Delete
@@ -640,53 +685,6 @@ async function showDetail(id) {
   el.appendChild(panel);
 }
 
-async function renderJobs(el) {
-  el.textContent = 'Loading...';
-  var data = await apiFetch('/api/appstudio/jobs/list');
-  el.textContent = '';
-  if (!data.jobs || !data.jobs.length) {
-    var dim = document.createElement('div');
-    dim.style.color = 'var(--dim)'; dim.textContent = 'No jobs yet.';
-    el.appendChild(dim); return;
-  }
-  for (var i = 0; i < data.jobs.length; i++) {
-    var j = data.jobs[i];
-    var card = document.createElement('div');
-    card.className = 'enh-card'; card.style.cursor = 'default';
-    var top = document.createElement('div'); top.className = 'enh-header';
-    var jtag = document.createElement('span'); jtag.className = 'job-tag';
-    jtag.textContent = 'JOB-' + String(j.id).padStart(4, '0');
-    jtag.title = 'Click to copy tracking ID';
-    jtag.style.marginRight = '8px';
-    jtag.addEventListener('click', function(jid) { return function(e) { e.stopPropagation(); navigator.clipboard.writeText('JOB-' + String(jid).padStart(4, '0')); }; }(j.id));
-    var lbl = document.createElement('span');
-    lbl.textContent = j.phase + ' — ' + (j.enhancement_message || '').slice(0, 55);
-    var lbl2 = document.createElement('span'); lbl2.style.display = 'flex'; lbl2.style.alignItems = 'center';
-    lbl2.appendChild(jtag); lbl2.appendChild(lbl);
-    var badge = document.createElement('span');
-    badge.className = 'enh-status s-' + (j.status === 'done' ? 'done' : j.status === 'failed' ? 'auto_failed' : 'coding');
-    badge.textContent = j.status;
-    top.appendChild(lbl2); top.appendChild(badge);
-    card.appendChild(top);
-    var meta = document.createElement('div'); meta.className = 'enh-meta';
-    if (j.app_slug) { var s1 = document.createElement('span'); s1.textContent = j.app_slug; meta.appendChild(s1); }
-    var s2 = document.createElement('span'); s2.textContent = (j.started_at || j.created_at || '').slice(0, 19); meta.appendChild(s2);
-    if (j.error_message) { var s3 = document.createElement('span'); s3.style.color = 'var(--red)'; s3.textContent = j.error_message.slice(0, 100); meta.appendChild(s3); }
-    card.appendChild(meta);
-    if (j.status !== 'running') {
-      var jdelBtn = document.createElement('button');
-      jdelBtn.textContent = 'Delete'; jdelBtn.style.cssText = 'margin-top:8px;font-size:.72rem;padding:2px 10px;color:var(--red);background:none;border:1px solid var(--red);border-radius:4px;cursor:pointer';
-      jdelBtn.addEventListener('click', function(jid) { return async function() {
-        if (!confirm('Delete job JOB-' + String(jid).padStart(4,'0') + '?')) return;
-        var r = await apiDelete('/api/appstudio/jobs/' + jid);
-        if (r.error) { alert(r.error); return; }
-        renderJobs(el);
-      }; }(j.id));
-      card.appendChild(jdelBtn);
-    }
-    el.appendChild(card);
-  }
-}
 
 async function renderLibrary(el) {
   el.textContent = '';

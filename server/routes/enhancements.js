@@ -102,9 +102,20 @@ router.get('/my', (req, res) => {
 router.get('/', requireAuth, requireAdmin, (req, res) => {
   const db = getDb();
   const rows = db.prepare(`
-    SELECT id, app_slug, user_id, user_name, message, created_at, status
-    FROM enhancement_requests
-    ORDER BY created_at DESC
+    SELECT
+      er.id, er.app_slug, er.user_name, er.message, er.created_at, er.status,
+      er.fix_version, er.cost_tokens, er.cost_usd_cents, er.branch_name, er.pr_url,
+      j.id        AS latest_job_id,
+      j.phase     AS latest_job_phase,
+      j.status    AS latest_job_status,
+      j.error_message AS latest_job_error,
+      j.cost_tokens   AS latest_job_tokens,
+      j.cost_usd_cents AS latest_job_cents
+    FROM enhancement_requests er
+    LEFT JOIN enhancement_jobs j ON j.id = (
+      SELECT id FROM enhancement_jobs WHERE enhancement_id = er.id ORDER BY id DESC LIMIT 1
+    )
+    ORDER BY er.created_at DESC
   `).all();
   res.json({ requests: rows });
 });
