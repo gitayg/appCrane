@@ -79,6 +79,7 @@ router.get('/:enhancementId/stream', (req, res) => {
   res.write(': connected\n\n');
 
   let lastText = '';
+  let lastStatus = '';
   let lastJobId = null;
   let done = false;
 
@@ -94,14 +95,30 @@ router.get('/:enhancementId/stream', (req, res) => {
         ORDER BY id DESC LIMIT 1
       `).get(id);
 
-      if (!job) return;
+      if (!job) {
+        if (lastStatus !== 'waiting') {
+          lastStatus = 'waiting';
+          res.write(`data: ${JSON.stringify({ type: 'status', text: 'Queued — waiting for worker…' })}\n\n`);
+        }
+        return;
+      }
 
-      if (lastJobId !== null && job.id !== lastJobId) lastText = '';
+      if (lastJobId !== null && job.id !== lastJobId) { lastText = ''; lastStatus = ''; }
       lastJobId = job.id;
 
-      if (job.status === 'queued') return;
+      if (job.status === 'queued') {
+        if (lastStatus !== 'queued') {
+          lastStatus = 'queued';
+          res.write(`data: ${JSON.stringify({ type: 'status', text: 'Plan job queued — worker will pick it up shortly…' })}\n\n`);
+        }
+        return;
+      }
 
       if (job.status === 'running') {
+        if (lastStatus !== 'running') {
+          lastStatus = 'running';
+          res.write(`data: ${JSON.stringify({ type: 'status', text: 'Analyzing codebase and generating plan…' })}\n\n`);
+        }
         let output = null;
         try { output = job.output_json ? JSON.parse(job.output_json) : null; } catch (_) {}
         if (output?.streaming && output.text && output.text !== lastText) {

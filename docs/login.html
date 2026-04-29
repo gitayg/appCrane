@@ -1756,7 +1756,10 @@ function _streamPlan() {
     es.onmessage = function(e) {
       esErrCount = 0;
       var evt = JSON.parse(e.data);
-      if (evt.type === 'progress') {
+      if (evt.type === 'status') {
+        workEl.style.display = 'flex';
+        workTxt.textContent = evt.text;
+      } else if (evt.type === 'progress') {
         workEl.style.display = 'none';
         if (!streamMsgDiv) {
           var container = document.getElementById('planMessages');
