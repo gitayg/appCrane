@@ -21,11 +21,16 @@ code.api-pill{background:var(--surface2);border:1px solid var(--border);border-r
 <div id="pageRoot"></div>
 <script>
 if (!checkAuth()) throw 'auth';
-document.getElementById('pageRoot').insertAdjacentHTML('beforeend', topbar('settings'));
+const pageRoot = document.getElementById('pageRoot');
+pageRoot.className = 'page-body';
+pageRoot.insertAdjacentHTML('beforeend', sidebar('settings'));
+const pageContent = document.createElement('div');
+pageContent.className = 'page-content';
+pageRoot.appendChild(pageContent);
 
 const container = document.createElement('div');
 container.className = 'container';
-document.getElementById('pageRoot').appendChild(container);
+pageContent.appendChild(container);
 
 const heading = document.createElement('h2');
 heading.style.marginBottom = '16px';

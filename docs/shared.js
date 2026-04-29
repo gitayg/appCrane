@@ -96,7 +96,7 @@ function statCard(label, value, sub, pct) {
     (pct > 0 ? '<div class="bar"><div class="bar-fill" style="width:' + pct + '%;background:' + barColor(pct) + '"></div></div>' : '') + '</div>';
 }
 
-function topbar(active) {
+function sidebar(active) {
   const pages = [
     {id:'dashboard',label:'Dashboard',href:'/dashboard'},
     {id:'applications',label:'Applications',href:'/applications'},
@@ -105,22 +105,26 @@ function topbar(active) {
     {id:'appstudio',label:'AppStudio',href:'/appstudio'},
     {id:'settings',label:'Settings',href:'/settings'},
   ];
-  const nav = pages.map(p => '<a href="' + p.href + '" class="' + (active === p.id ? 'active' : '') + '">' + p.label + '</a>').join('');
+  const nav = pages.map(p =>
+    '<a href="' + p.href + '" class="sidebar-link' + (active === p.id ? ' active' : '') + '">' + p.label + '</a>'
+  ).join('');
 
-  return '<div class="topbar">' +
-    '<div style="display:flex;align-items:center">' +
-      '<span class="logo">App<span>Crane</span></span>' +
-      '<div class="nav" id="mainNav">' + nav + '</div>' +
+  return '<aside class="sidebar">' +
+    '<a href="/dashboard" class="sidebar-logo">App<span>Crane</span></a>' +
+    '<nav class="sidebar-nav">' + nav + '</nav>' +
+    '<div class="sidebar-footer">' +
+      '<div id="userInfo" style="color:var(--text);font-weight:600"></div>' +
+      '<div id="craneVersion" style="color:var(--dim);cursor:pointer" onclick="checkForUpdate()" title="Click to check for updates"></div>' +
+      '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:2px">' +
+        '<a href="/docs" style="color:var(--dim);text-decoration:none">Docs</a>' +
+        '<a href="/agent-guide" style="color:var(--dim);text-decoration:none">Agent Guide</a>' +
+        '<button class="btn" onclick="setKey(\'\');location.href=\'/dashboard\'" style="font-size:.72rem;padding:2px 8px;margin-left:auto">Logout</button>' +
+      '</div>' +
     '</div>' +
-    '<div class="right" id="mainRight">' +
-      '<span id="craneVersion" style="color:var(--dim);font-size:.8rem;cursor:pointer" onclick="checkForUpdate()" title="Click to check for updates"></span>' +
-      '<span id="userInfo" style="color:var(--dim)"></span>' +
-      '<a href="/docs" style="color:var(--dim);text-decoration:none;font-size:.85rem">Docs</a>' +
-      '<a href="/agent-guide" style="color:var(--dim);text-decoration:none;font-size:.85rem">Agent Guide</a>' +
-      '<button class="btn" onclick="setKey(\'\');location.href=\'/dashboard\'" style="font-size:.8rem;padding:3px 10px">Logout</button>' +
-    '</div>' +
-  '</div>';
+  '</aside>';
 }
+
+function topbar(active) { return sidebar(active); }
 
 async function loadVersion() {
   try {
@@ -226,7 +230,7 @@ function showPromptModal(title, prompt) {
 function checkAuth() {
   if (!KEY) {
     document.body.innerHTML =
-      '<div class="topbar"><span class="logo">App<span>Crane</span></span></div>' +
+      '<div style="background:var(--surface);border-bottom:1px solid var(--border);padding:12px 24px"><span style="font-weight:700;font-size:1.05rem">App<span style="color:var(--accent)">Crane</span></span></div>' +
       '<div style="max-width:440px;margin:60px auto;padding:0 20px">' +
         '<div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:32px">' +
           '<h2 style="margin:0 0 4px;font-size:1.3rem">Sign In</h2>' +

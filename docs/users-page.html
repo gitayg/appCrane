@@ -15,8 +15,8 @@
 <script src="/docs/shared.js"></script>
 <script>
 if (!checkAuth()) throw 'auth';
-document.body.innerHTML = topbar('users') +
-  '<div class="container">' +
+document.body.innerHTML = '<div class="page-body">' + sidebar('users') +
+  '<div class="page-content"><div class="container">' +
     '<h2>App Users <button class="btn" onclick="toggleCreate()" style="font-size:12px;padding:3px 12px;margin-left:8px">+ New User</button></h2>' +
     '<p style="color:var(--dim);font-size:.85rem;margin-bottom:12px">People who log into your hosted apps via /login. Edit fields directly in the table. Roles are set per app below.</p>' +
     '<div id="createPanel" style="display:none;background:var(--surface);border:1px solid var(--accent);border-radius:8px;padding:16px;margin-bottom:12px">' +
@@ -35,7 +35,7 @@ document.body.innerHTML = topbar('users') +
     '<h2>App Roles</h2>' +
     '<p style="color:var(--dim);font-size:.85rem;margin-bottom:12px">Set access per user per app: <span class="role-none">none</span> = no access, <span class="role-user">user</span> = limited, <span class="role-admin">admin</span> = full access to app settings.</p>' +
     '<div id="rolesMatrix">Loading...</div>' +
-  '</div>';
+  '</div></div></div>';
 loadVersion(); loadUserInfo();
 
 function toggleCreate() {

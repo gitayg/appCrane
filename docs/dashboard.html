@@ -24,7 +24,8 @@ h2{font-size:.85rem;margin:28px 0 10px;letter-spacing:.6px;font-weight:600}
 <script src="/docs/shared.js"></script>
 </head>
 <body>
-
+<div class="page-body">
+<div class="page-content">
 <div class="container">
   <div id="setupPanel" style="display:none" class="setup">
     <h3 style="margin-bottom:8px">Enter your API Key</h3>
@@ -80,6 +81,8 @@ h2{font-size:.85rem;margin:28px 0 10px;letter-spacing:.6px;font-weight:600}
 
   <div id="loading">Loading...</div>
 </div>
+</div>
+</div>
 
 <!-- Enhancement request modal (dashboard frame) -->
 <div id="dashEnhModal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.6);z-index:200;align-items:center;justify-content:center">
@@ -96,7 +99,7 @@ h2{font-size:.85rem;margin:28px 0 10px;letter-spacing:.6px;font-weight:600}
 
 <script>
 // Inject shared topbar (Dashboard active)
-document.body.insertAdjacentHTML('afterbegin', topbar('dashboard'));
+document.querySelector('.page-body').insertAdjacentHTML('afterbegin', sidebar('dashboard'));
 
 // Override apiFetch to show setup panel on 401 instead of redirecting
 async function apiFetch(path) {

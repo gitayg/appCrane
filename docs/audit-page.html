@@ -10,15 +10,15 @@
 <script src="/docs/shared.js"></script>
 <script>
 if (!checkAuth()) throw 'auth';
-document.body.innerHTML = topbar('audit') +
-  '<div class="container">' +
+document.body.innerHTML = '<div class="page-body">' + sidebar('audit') +
+  '<div class="page-content"><div class="container">' +
     '<h2>Audit Log</h2>' +
     '<div style="margin-bottom:12px;display:flex;gap:8px;align-items:center">' +
       '<select id="appFilter" onchange="loadAudit()" style="background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px 10px;font-size:13px"><option value="">All apps</option></select>' +
       '<select id="limitFilter" onchange="loadAudit()" style="background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px 10px;font-size:13px"><option value="20">20</option><option value="50" selected>50</option><option value="100">100</option><option value="200">200</option></select>' +
     '</div>' +
     '<div id="auditTable">Loading...</div>' +
-  '</div>';
+  '</div></div></div>';
 loadVersion(); loadUserInfo();
 
 // Load app list for filter
