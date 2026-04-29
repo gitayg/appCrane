@@ -13,7 +13,7 @@ export function getMaxDevContainers() {
 
 export function countRunningDevContainers() {
   try {
-    const out = execFileSync('docker', ['ps', '-q', '--filter', 'label=appcrane=true'], { stdio: 'pipe', timeout: 8000 });
+    const out = execFileSync('docker', ['ps', '-q', '--filter', 'label=appcrane.container.type'], { stdio: 'pipe', timeout: 8000 });
     return out.toString().trim().split('\n').filter(Boolean).length;
   } catch (_) { return 0; }
 }
