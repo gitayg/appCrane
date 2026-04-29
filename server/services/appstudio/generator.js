@@ -133,7 +133,7 @@ Then exit. That's it.
 Always apply a patch version bump to \`package.json\` — increment the last digit of the \`version\` field (e.g. \`1.2.3\` → \`1.2.4\`). Do this even if the plan does not list it. This is mandatory for every enhancement.
 
 ## Hard constraints
-- Do NOT run \`npm install\`, \`yarn\`, or any package manager.
+- Do NOT run \`npm install\` or \`yarn\` for a full install — the host regenerates \`package-lock.json\` automatically after you finish if you modified \`package.json\`.
 - Do NOT start or restart any server or process.
 - Do NOT run tests.
 - Do NOT push to git.

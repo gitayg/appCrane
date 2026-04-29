@@ -291,12 +291,27 @@ async function handleCode(job) {
       onLog('[studio:git] No file changes detected — enhancement may already be implemented');
       noChanges = true;
       return;
-    } else {
-      onLog(`[studio:git] ${changedFiles.length} file(s) staged:\n` + changedFiles.map(f => `  + ${f}`).join('\n'));
-      onLog(`[studio:git] Committing: "${commitMsg}"`);
-      git(['commit', '-m', commitMsg]);
-      onLog('[studio:git] Commit created');
     }
+
+    // Regenerate package-lock.json when package.json was modified so npm ci
+    // inside the Docker build doesn't abort due to a stale lock file.
+    if (changedFiles.includes('package.json')) {
+      onLog('[studio:git] package.json modified — regenerating package-lock.json…');
+      try {
+        execFileSync('npm', ['install', '--package-lock-only', '--ignore-scripts'], {
+          cwd: workspaceDir, stdio: 'pipe', timeout: 120000,
+        });
+        git(['add', 'package-lock.json']);
+        onLog('[studio:git] package-lock.json updated and staged');
+      } catch (err) {
+        onLog(`[studio:git] Warning: could not regenerate package-lock.json: ${err.message}`);
+      }
+    }
+
+    onLog(`[studio:git] ${changedFiles.length} file(s) staged:\n` + changedFiles.map(f => `  + ${f}`).join('\n'));
+    onLog(`[studio:git] Committing: "${commitMsg}"`);
+    git(['commit', '-m', commitMsg]);
+    onLog('[studio:git] Commit created');
 
     onLog(`[studio:git] Pushing branch ${branchName} to origin…`);
     try {
