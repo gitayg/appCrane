@@ -49,7 +49,6 @@ export async function ensureStudioImage(onLog) {
   await new Promise((res, rej) => {
     const build = spawn('docker', ['build', '-t', STUDIO_IMAGE, buildDir], {
       stdio: 'pipe',
-      env: { ...process.env, DOCKER_BUILDKIT: '1' },
     });
     const emit = (l) => { if (l.trim()) onLog?.(`[build] ${l}`); };
     build.stdout.on('data', (c) => c.toString().split('\n').forEach(emit));
