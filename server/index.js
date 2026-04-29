@@ -53,6 +53,7 @@ import presenceRoutes from './routes/presence.js';
 import askRoutes from './routes/ask.js';
 import planRoutes from './routes/plan.js';
 import coderRoutes from './routes/coder.js';
+import agentsRoutes from './routes/agents.js';
 
 const PORT = process.env.PORT || 5001;
 const HOST = process.env.HOST || '0.0.0.0';
@@ -408,6 +409,7 @@ app.use('/api/presence', presenceRoutes); // Bearer auth (identity) — must be 
 app.use('/api/ask', askRoutes);           // Ask Claude (Bearer auth)
 app.use('/api/plan', planRoutes);         // Plan panel (Bearer auth)
 app.use('/api/coder', coderRoutes);       // AppCrane Studio (API key + Bearer auth)
+app.use('/api/agents', agentsRoutes);     // AIDE-compatible Studio API
 
 app.use('/api', logsRoutes);             // /api/audit, /api/apps/:slug/audit
 app.use('/api', monitoringRoutes);       // /api/server/health
@@ -428,7 +430,8 @@ app.get('/audit-page', (req, res) => sendHtml(res, join(__dirname, '..', 'docs',
 app.get('/enhancements-page', (req, res) => sendHtml(res, join(__dirname, '..', 'docs', 'enhancements-page.html')));
 app.get('/appstudio', (req, res) => sendHtml(res, join(__dirname, '..', 'docs', 'appstudio.html')));
 app.get('/settings', (req, res) => sendHtml(res, join(__dirname, '..', 'docs', 'settings.html')));
-app.get('/studio', (req, res) => sendHtml(res, join(__dirname, '..', 'docs', 'coder.html')));
+app.get('/studio', (req, res) => sendHtml(res, join(__dirname, '..', 'docs', 'studio-app', 'index.html')));
+app.get('/studio/*splat', (req, res) => sendHtml(res, join(__dirname, '..', 'docs', 'studio-app', 'index.html')));
 app.get('/coder', (req, res) => res.redirect(301, '/studio')); // legacy redirect
 
 // App manager (app user)
