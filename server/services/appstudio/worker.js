@@ -318,6 +318,11 @@ async function handleBuild(job) {
 
   try { cleanupWorkspace(`build-${job.id}`); } catch (_) {}
   log.info(`AppStudio: sandbox deploy queued for enh #${enh.id}`);
+
+  if (enh.mode === 'auto') {
+    db.prepare('INSERT INTO enhancement_jobs (enhancement_id, phase) VALUES (?, ?)').run(enh.id, 'open_pr');
+    log.info(`AppStudio: auto-queuing open_pr for auto-mode enh #${enh.id}`);
+  }
 }
 
 async function handleOpenPr(job) {
