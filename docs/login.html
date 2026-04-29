@@ -179,6 +179,8 @@ input:focus{border-color:var(--accent)}
 .my-enh-status.s-in_progress{background:#f59e0b18;color:#f59e0b}
 .my-enh-status.s-done{background:#22c55e18;color:#22c55e}
 .my-enh-msg{font-size:.85rem;color:var(--text);line-height:1.5;white-space:pre-wrap;word-break:break-word}
+.my-enh-del{background:none;border:none;cursor:pointer;color:var(--dim);font-size:.9rem;padding:0 2px;line-height:1;opacity:.5;transition:opacity .15s,color .15s}
+.my-enh-del:hover{opacity:1;color:#ef4444}
 
 .hidden{display:none!important}
 @media(max-width:500px){.user-details{display:none}.apps-grid{grid-template-columns:1fr}.catalog-grid{grid-template-columns:1fr}}
@@ -1389,6 +1391,13 @@ async function loadMyEnhancements() {
       date.textContent = fmtDate(r.created_at);
       header.appendChild(date);
 
+      const delBtn = document.createElement('button');
+      delBtn.className = 'my-enh-del';
+      delBtn.title = 'Delete request';
+      delBtn.textContent = '×';
+      delBtn.onclick = function(e) { e.stopPropagation(); deleteMyEnhancement(r.id, card); };
+      header.appendChild(delBtn);
+
       const msg = document.createElement('div');
       msg.className = 'my-enh-msg';
       msg.textContent = r.message;
@@ -1398,6 +1407,26 @@ async function loadMyEnhancements() {
       listEl.appendChild(card);
     });
   } catch (e) {}
+}
+
+async function deleteMyEnhancement(id, cardEl) {
+  if (!confirm('Delete this enhancement request? This cannot be undone.')) return;
+  try {
+    const res = await fetch(API + '/api/enhancements/' + id + '/delete', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + sessionToken }
+    });
+    const data = await res.json().catch(function() { return {}; });
+    if (!res.ok) {
+      alert(data.error || data.message || 'Could not delete — try again later.');
+      return;
+    }
+    cardEl.remove();
+    const listEl = document.getElementById('myEnhList');
+    if (!listEl.children.length) document.getElementById('myEnhSection').classList.add('hidden');
+  } catch (e) {
+    alert('Network error — could not delete request.');
+  }
 }
 
 // ─── Peek / point-and-click element selector ─────────────────────────────
