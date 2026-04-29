@@ -6,8 +6,12 @@ import { planEnhancement } from './planner.js';
 import { generateCode, cloneForBuild, cleanupWorkspace } from './generator.js';
 import log from '../../utils/logger.js';
 
-const POLL_MS = parseInt(process.env.APPSTUDIO_POLL_MS || '5000', 10);
-let _running = false;
+const POLL_MS          = parseInt(process.env.APPSTUDIO_POLL_MS || '5000', 10);
+const MAX_PLAN_PARALLEL = parseInt(process.env.APPSTUDIO_MAX_PLAN_PARALLEL || '3', 10);
+
+let _running       = false;
+let _activePlans   = 0;  // concurrent plan/revise_plan jobs (read-only, safe to parallelize)
+let _activeCodeJob = false; // only one code/build/open_pr job at a time
 
 export function startWorker() {
   if (_running) return;
@@ -23,27 +27,40 @@ export function stopWorker() {
 async function tick() {
   if (!_running) return;
   try {
-    const job = claimJob();
-    if (job) await runJob(job);
+    // Drain plan queue — run up to MAX_PLAN_PARALLEL concurrently (fire-and-forget per job)
+    while (_activePlans < MAX_PLAN_PARALLEL) {
+      const job = claimJob(['plan', 'revise_plan']);
+      if (!job) break;
+      _activePlans++;
+      runJob(job).finally(() => { _activePlans--; });
+    }
+
+    // Run at most one code/build/open_pr job at a time
+    if (!_activeCodeJob) {
+      const job = claimJob(['code', 'build', 'open_pr']);
+      if (job) {
+        _activeCodeJob = true;
+        runJob(job).finally(() => { _activeCodeJob = false; });
+      }
+    }
   } catch (err) {
-    log.error(`AppStudio worker error: ${err.message}`);
+    log.error(`AppStudio worker tick error: ${err.message}`);
   }
   if (_running) setTimeout(tick, POLL_MS);
 }
 
-function claimJob() {
+function claimJob(phases) {
   const db = getDb();
+  const placeholders = phases.map(() => '?').join(',');
   return db.transaction(() => {
     const job = db.prepare(`
       SELECT * FROM enhancement_jobs
-      WHERE status = 'queued'
+      WHERE status = 'queued' AND phase IN (${placeholders})
       ORDER BY id ASC LIMIT 1
-    `).get();
+    `).get(...phases);
     if (!job) return null;
     db.prepare(`
-      UPDATE enhancement_jobs
-      SET status = 'running', started_at = datetime('now')
-      WHERE id = ?
+      UPDATE enhancement_jobs SET status = 'running', started_at = datetime('now') WHERE id = ?
     `).run(job.id);
     return job;
   })();
