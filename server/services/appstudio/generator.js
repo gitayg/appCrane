@@ -163,9 +163,16 @@ try {
   run('git', ['push', '-u', 'origin', branch]);
   console.log('[studio] Done — ' + branch);
 } catch (_) {
-  // Remote branch has work we don't have locally — signal replan needed
-  console.error('[studio:push_conflict] Remote branch has diverged — replan needed');
-  process.exit(3);
+  // Check if this is AppCrane's own branch from a prior attempt (orphan recovery retry)
+  var ownBranch = /^appstudio\//.test(branch);
+  if (ownBranch) {
+    console.log('[studio] Remote branch exists from prior attempt — force-pushing…');
+    run('git', ['push', '--force', '-u', 'origin', branch]);
+    console.log('[studio] Done (force-push) — ' + branch);
+  } else {
+    console.error('[studio:push_conflict] Remote branch has diverged — replan needed');
+    process.exit(3);
+  }
 }
 `;
 }
