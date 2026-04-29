@@ -23,7 +23,8 @@ function containerName(slug, env) {
 }
 
 function imageTag(slug, commitHash) {
-  const tag = commitHash && commitHash !== 'unknown' ? commitHash : `t${Date.now()}`;
+  const raw = commitHash && commitHash !== 'unknown' ? commitHash : `t${Date.now()}`;
+  const tag = raw.replace(/[^a-zA-Z0-9._-]/g, '-');
   return `appcrane-${slug}:${tag}`;
 }
 
