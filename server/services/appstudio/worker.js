@@ -452,6 +452,18 @@ async function handleOpenPr(job) {
   const app = enh.app_slug ? getApp(enh.app_slug) : null;
   if (!app?.github_url || !enh.branch_name) throw new Error('Missing GitHub URL or branch');
 
+  // Capture logs into the job's output_json so the UI detail panel shows PR and deploy progress.
+  const logLines = [];
+  const onLog = (line) => {
+    if (!line) return;
+    logLines.push(line);
+    log.info(`AppStudio[open_pr]: ${line}`);
+    try {
+      db.prepare('UPDATE enhancement_jobs SET output_json = ? WHERE id = ?')
+        .run(JSON.stringify({ log: logLines.slice(-200) }), job.id);
+    } catch (_) {}
+  };
+
   const plan = JSON.parse(enh.ai_plan_json || '{}');
 
   let token = null;
