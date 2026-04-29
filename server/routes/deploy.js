@@ -373,7 +373,7 @@ router.post('/:slug/promote', requireAppAccess, auditMiddleware('promote'), asyn
       const ports = getPortsForSlot(fullApp.slot);
       await deployApp(newDeployId, fullApp, 'production', ports, {
         preExtractedDir: newReleaseDir,
-        commitHash: sandboxDeployment.commit_hash,
+        commitHash: sandboxDeploy.commit_hash,
       });
     } catch (e) {
       log.warn(`Promote deploy failed for ${app.slug}-production: ${e.message}`);

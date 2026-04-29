@@ -90,6 +90,7 @@ router.post('/', requireAuth, auditMiddleware('app-create'), async (req, res) =>
 
   if (!name || !slug) throw new AppError('Name and slug are required', 400, 'VALIDATION');
   if (!/^[a-z0-9][a-z0-9-]*$/.test(slug)) throw new AppError('Slug must be lowercase alphanumeric with dashes', 400, 'VALIDATION');
+  if (github_url && !/^https:\/\/.+/.test(github_url)) throw new AppError('github_url must use HTTPS', 400, 'VALIDATION');
 
   const db = getDb();
 
@@ -228,7 +229,10 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), (req, res)
   if (description !== undefined) updates.description = description;
   if (category !== undefined) updates.category = category || null;
   if (source_type !== undefined) updates.source_type = source_type;
-  if (github_url !== undefined) updates.github_url = github_url;
+  if (github_url !== undefined) {
+    if (github_url && !/^https:\/\/.+/.test(github_url)) throw new AppError('github_url must use HTTPS', 400, 'VALIDATION');
+    updates.github_url = github_url;
+  }
   if (branch !== undefined) updates.branch = branch;
   if (public_access !== undefined) updates.public_access = public_access ? 1 : 0;
   if (github_token !== undefined) updates.github_token_encrypted = encrypt(github_token);

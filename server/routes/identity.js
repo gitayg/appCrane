@@ -35,6 +35,7 @@ function checkLoginRateLimit(ip) {
 router.post('/login', (req, res) => {
   const ip = req.ip || req.socket?.remoteAddress || 'unknown';
   if (!checkLoginRateLimit(ip)) {
+    log.warn(`Login rate limit hit from ${ip}`);
     throw new AppError('Too many login attempts. Try again in a minute.', 429, 'RATE_LIMITED');
   }
 
@@ -64,6 +65,7 @@ router.post('/login', (req, res) => {
   }
 
   if (!verifyPassword(password, user.password_hash)) {
+    log.warn(`Failed login for "${login}" from ${ip}`);
     throw new AppError('Invalid credentials', 401, 'INVALID_CREDENTIALS');
   }
 

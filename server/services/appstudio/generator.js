@@ -172,9 +172,13 @@ export function cloneForBuild(jobId, app, branch) {
     } catch (_) {}
   }
 
-  execFileSync('git', ['clone', '--depth', '1', '--branch', branch, cloneUrl, dir], {
-    timeout: 120000, stdio: 'pipe',
-  });
+  try {
+    execFileSync('git', ['clone', '--depth', '1', '--branch', branch, cloneUrl, dir], {
+      timeout: 120000, stdio: 'pipe',
+    });
+  } catch (err) {
+    throw new Error(err.message.replaceAll(cloneUrl, app.github_url));
+  }
   log.info(`AppStudio: cloned branch ${branch} for build into ${dir}`);
   return dir;
 }

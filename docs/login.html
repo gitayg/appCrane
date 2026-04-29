@@ -344,9 +344,14 @@ async function doLogin() {
     if (isDenied) { showDenied(data); return; }
 
     if (redirectUrl) {
-      const sep = redirectUrl.includes('?') ? '&' : '?';
-      window.location.href = redirectUrl + sep + 'token=' + encodeURIComponent(sessionToken);
-      return;
+      try {
+        const dest = new URL(redirectUrl, window.location.origin);
+        if (dest.origin === window.location.origin) {
+          const sep = redirectUrl.includes('?') ? '&' : '?';
+          window.location.href = redirectUrl + sep + 'token=' + encodeURIComponent(sessionToken);
+          return;
+        }
+      } catch (_) {}
     }
 
     showApps(data);
@@ -911,9 +916,14 @@ async function checkSession() {
       setAuthCookie(sessionToken);
       if (isDenied) { showDenied(data); return; }
       if (redirectUrl) {
-        const sep = redirectUrl.includes('?') ? '&' : '?';
-        window.location.href = redirectUrl + sep + 'token=' + encodeURIComponent(sessionToken);
-        return;
+        try {
+          const dest = new URL(redirectUrl, window.location.origin);
+          if (dest.origin === window.location.origin) {
+            const sep = redirectUrl.includes('?') ? '&' : '?';
+            window.location.href = redirectUrl + sep + 'token=' + encodeURIComponent(sessionToken);
+            return;
+          }
+        } catch (_) {}
       }
       showApps(data);
     } else {

@@ -215,7 +215,9 @@ router.get('/start', async (req, res) => {
   try {
     const discovery = await getDiscovery(cfg.discovery_url);
     const redirectUri = craneBaseUrl() + '/api/auth/oidc/callback';
-    const state = makeState(req.query.redirect || '');
+    const rawRedirect = req.query.redirect || '';
+    const safeRedirect = rawRedirect.startsWith('/') && !rawRedirect.startsWith('//') ? rawRedirect : '';
+    const state = makeState(safeRedirect);
     const params = new URLSearchParams({
       response_type: 'code',
       client_id:     cfg.client_id,
