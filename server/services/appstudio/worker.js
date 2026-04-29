@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'fs';
 import { join, resolve } from 'path';
+import { execFileSync } from 'child_process';
 import { getDb } from '../../db.js';
 import { decrypt } from '../encryption.js';
 import { planEnhancement } from './planner.js';
@@ -13,10 +14,36 @@ let _running       = false;
 let _activePlans   = 0;  // concurrent plan/revise_plan jobs (read-only, safe to parallelize)
 let _activeCodeJob = false; // only one code/build/open_pr job at a time
 
+function recoverOrphanedJobs() {
+  const db = getDb();
+  const stuck = db.prepare("SELECT * FROM enhancement_jobs WHERE status = 'running'").all();
+  if (!stuck.length) return;
+
+  // Get all live studio container names in one docker ps call
+  let liveContainers = new Set();
+  try {
+    const out = execFileSync('docker', ['ps', '--format', '{{.Names}}', '--filter', 'label=appcrane.container.type=job'], { stdio: 'pipe', timeout: 8000 });
+    out.toString().split('\n').forEach(n => { if (n.trim()) liveContainers.add(n.trim()); });
+  } catch (_) {}
+
+  const phaseEnhStatus = { plan: 'planning', revise_plan: 'planning', code: 'plan_approved', build: 'pushing', open_pr: 'sandbox_ready' };
+
+  for (const job of stuck) {
+    const containerName = `appcrane-studio-${job.id}`;
+    if (liveContainers.has(containerName)) continue; // still running, leave it
+
+    const enhStatus = phaseEnhStatus[job.phase] || 'planning';
+    db.prepare("UPDATE enhancement_jobs SET status = 'queued', started_at = NULL, error_message = 'Recovered from orphan on restart' WHERE id = ?").run(job.id);
+    db.prepare('UPDATE enhancement_requests SET status = ? WHERE id = ?').run(enhStatus, job.enhancement_id);
+    log.warn(`AppStudio: orphaned job #${job.id} (phase=${job.phase}) reset to queued — container ${containerName} not found`);
+  }
+}
+
 export function startWorker() {
   if (_running) return;
   _running = true;
   log.info('AppStudio worker started');
+  recoverOrphanedJobs();
   tick();
 }
 
