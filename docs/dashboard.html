@@ -519,8 +519,15 @@ function appCard(a, isErrored) {
     '</div>';
   }
 
+  const vis = a.visibility || 'private';
+  const visSelect =
+    '<select title="Visibility" onchange="setAppVisibility(\'' + a.slug + '\',this.value)" style="font-size:.72rem;padding:2px 6px;border-radius:4px;border:1px solid var(--border);background:var(--surface2);color:var(--text);cursor:pointer;margin-right:4px">' +
+      '<option value="hidden"'  + (vis === 'hidden'  ? ' selected' : '') + '>🔒 Hidden</option>'  +
+      '<option value="private"' + (vis === 'private' ? ' selected' : '') + '>🔑 Private</option>' +
+      '<option value="public"'  + (vis === 'public'  ? ' selected' : '') + '>🌐 Public</option>'  +
+    '</select>';
   const errorBadge = isErrored ? '<span style="background:#ef444422;color:var(--red);padding:2px 8px;border-radius:4px;font-size:.75rem;font-weight:600;margin-right:4px">ERROR</span>' : '';
-  const onboardBtn = errorBadge +
+  const onboardBtn = errorBadge + visSelect +
     '<button class="refresh-btn" style="font-size:12px;padding:3px 12px" onclick="showAppToken(\'' + a.slug + '\')">Onboard Prompt</button>' +
     '<button style="font-size:11px;padding:2px 8px;background:none;border:1px solid var(--red);color:var(--red);border-radius:4px;cursor:pointer;margin-left:4px" onclick="deleteApp(\'' + a.slug + '\',\'' + a.name + '\')">Delete</button>';
   const githubLink = a.github_url
@@ -554,6 +561,17 @@ function appCard(a, isErrored) {
     '<div id="tokenInfo_' + a.slug + '" style="display:none;padding:10px 16px;border-top:1px solid var(--border);background:var(--surface2);font-size:13px"></div>' +
     '<div id="envVars_' + a.slug + '" style="display:none;padding:10px 16px;border-top:1px solid var(--border);background:var(--surface2);font-size:13px"></div>' +
   '</div>';
+}
+
+async function setAppVisibility(slug, visibility) {
+  try {
+    const r = await fetch(API + '/api/apps/' + slug, {
+      method: 'PUT',
+      headers: { 'X-API-Key': KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ visibility }),
+    });
+    if (!r.ok) { const d = await r.json().catch(() => ({})); alert('Failed: ' + (d.error || r.status)); await loadAll(); }
+  } catch (e) { alert('Failed: ' + e.message); await loadAll(); }
 }
 
 let currentFrameSlug = '';
