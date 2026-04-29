@@ -1,5 +1,5 @@
 import { spawn, execFileSync } from 'child_process';
-import { mkdirSync, existsSync, writeFileSync, rmSync } from 'fs';
+import { mkdirSync, existsSync, writeFileSync, rmSync, chmodSync } from 'fs';
 import { join, resolve } from 'path';
 import { decrypt } from '../encryption.js';
 import { assertCapacity } from '../containerLimit.js';
@@ -63,7 +63,8 @@ export async function ensureStudioImage(onLog) {
 
 async function cloneForCode(dir, app, baseBranch, branchName, onLog) {
   const workspaceDir = join(dir, 'workspace');
-  mkdirSync(workspaceDir, { recursive: true, mode: 0o777 });
+  mkdirSync(workspaceDir, { recursive: true });
+  chmodSync(workspaceDir, 0o777); // explicit chmod — mkdirSync mode is clipped by umask
 
   let cloneUrl = app.github_url;
   if (app.github_token_encrypted) {
