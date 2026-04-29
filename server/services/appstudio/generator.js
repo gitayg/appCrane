@@ -147,17 +147,21 @@ git config --global --add safe.directory /workspace
 `;
 }
 
-function buildPrompt({ plan, summary, agentContext, enhancementMessage }) {
+function buildPrompt({ plan, summary, agentContext, contextDoc, enhancementMessage }) {
   const testSection = plan?.test_files?.length
     ? `# Test files to write\nThe plan requires these test files (create or update each one):\n${
         plan.test_files.map(f => `- ${f.path} (${f.action}): ${f.what}`).join('\n')
       }\nFollow the testing framework and style already used in the repo.`
     : '# Tests\nNo specific test files were planned. If you can identify an appropriate test file to add coverage for your changes, create it.';
 
+  const contextSection = contextDoc
+    ? `# Codebase context\nUse this architectural overview to skip broad exploration. Read specific files directly when you need exact details.\n\n${contextDoc}\n`
+    : '';
+
   return `You are implementing an approved change to an existing application.
 The codebase is already cloned into the current working directory.
 
-# Enhancement request
+${contextSection}# Enhancement request
 ${enhancementMessage}
 
 # Approved plan
@@ -261,7 +265,7 @@ export function cloneForBuild(jobId, app, branch) {
  * a sentinel file; the host detects it and calls onCodingDone(workspaceDir, branchName)
  * to run git add/commit/push. Returns { branchName }.
  */
-export async function generateCode({ jobId, app, enhancementId, plan, summary, agentContext, enhancementMessage, onLog, onCodingDone }) {
+export async function generateCode({ jobId, app, enhancementId, plan, summary, agentContext, contextDoc, enhancementMessage, onLog, onCodingDone }) {
   const dir = jobDir(jobId);
   if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
   mkdirSync(dir, { recursive: true });
@@ -278,8 +282,9 @@ export async function generateCode({ jobId, app, enhancementId, plan, summary, a
   // Clone the repo on the host — no credentials reach the container
   const workspaceDir = await cloneForCode(dir, app, app.branch || 'main', branchName, onLog);
 
-  writeFileSync(join(studioDir, 'prompt.txt'), buildPrompt({ plan, summary, agentContext, enhancementMessage })); // nosemgrep
+  writeFileSync(join(studioDir, 'prompt.txt'), buildPrompt({ plan, summary, agentContext, contextDoc, enhancementMessage })); // nosemgrep
   writeFileSync(join(studioDir, 'runner.js'), buildRunnerScript()); // nosemgrep
+  if (contextDoc) onLog?.(`[studio] Injected codebase context (${contextDoc.length} chars) — coder will skip orientation exploration`);
 
   const containerName = `appcrane-studio-${jobId}`;
   const sentinelPath  = join(sentinelDir, 'done');
