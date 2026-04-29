@@ -353,7 +353,7 @@ export async function generateCode({ jobId, app, enhancementId, plan, summary, a
       // Final sentinel check — file may have been written in the last poll window before exit
       if (!codingDoneHandled && existsSync(sentinelPath)) {
         codingDoneHandled = true;
-        onLog?.('[studio] Sentinel detected at container exit — handing off to host for git operations');
+        onLog?.('[studio] Coding complete — committing and pushing…');
         try { await onCodingDone?.(workspaceDir, branchName); } catch (err) { return reject(err); }
         return resolve({ branchName });
       }

@@ -563,7 +563,34 @@ async function handleOpenPr(job) {
       VALUES (?, 'production', 'pending', ?, ?)
     `).run(app.id, `AppStudio enhancement #${enh.id} — auto deploy after merge`, mergeData.sha || 'appstudio');
     await deployApp(deployResult.lastInsertRowid, app, 'production', ports);
-    onLog?.(`[studio] ✅ Production deploy complete`);
+    onLog?.(`[studio] ✅ Deployed to production (${app.slug})`);
+
+    // Capture the released version from the deployed package.json so the UI can
+    // show "v1.2.3" instead of a dead branch name after merge.
+    let releasedVersion = null;
+    try {
+      const pkgPath = join(resolve(process.env.DATA_DIR || './data'), 'apps', app.slug, 'production', 'current', 'package.json');
+      if (existsSync(pkgPath)) {
+        const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
+        if (pkg.version) {
+          releasedVersion = `v${pkg.version}`;
+          db.prepare('UPDATE enhancement_requests SET fix_version = ? WHERE id = ?').run(releasedVersion, enh.id);
+        }
+      }
+      // Fallback to short SHA if no package.json version exists
+      if (!releasedVersion && mergeData.sha) {
+        releasedVersion = mergeData.sha.slice(0, 7);
+        const cur = db.prepare('SELECT fix_version FROM enhancement_requests WHERE id = ?').get(enh.id);
+        if (!cur?.fix_version || cur.fix_version.startsWith('appstudio/')) {
+          db.prepare('UPDATE enhancement_requests SET fix_version = ? WHERE id = ?').run(releasedVersion, enh.id);
+        }
+      }
+    } catch (verr) {
+      log.warn(`AppStudio: could not capture fix_version for enh #${enh.id}: ${verr.message}`);
+    }
+
+    if (releasedVersion) onLog?.(`[studio] 📦 Released as ${releasedVersion} — live on production`);
+    onLog?.(`[studio] 🔄 Refresh this panel to see the final status`);
   } catch (err) {
     log.warn(`AppStudio: auto production deploy failed for enh #${enh.id}: ${err.message}`);
     onLog?.(`[studio] ⚠️ Production deploy failed: ${err.message} — deploy manually from the dashboard`);
