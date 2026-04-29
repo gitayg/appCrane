@@ -2,7 +2,7 @@
   "name": "appcrane",
   "version": "1.6.4",
   "description": "AppCrane - Self-hosted deployment manager. CLI + REST API.",
-  "license": "FSL-1.1-ALv2",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "type": "module",
   "bin": {
     "crane": "./bin/deployhub.js",
