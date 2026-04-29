@@ -1,104 +1,190 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { api } from './api'
-import type { Agent } from './types'
+import type { Agent, AppCraneApp } from './types'
 import { ChatPanel } from './components/ChatPanel'
 
+function HealthDot({ status }: { status: string }) {
+  const color = status === 'healthy' ? 'var(--working)' : status === 'down' ? 'var(--danger)' : 'var(--fg-2)'
+  return <span style={{ display: 'inline-block', width: 7, height: 7, borderRadius: '50%', background: color, marginRight: 4, verticalAlign: 'middle' }} />
+}
+
 export function App() {
-  const [sessions, setSessions] = useState<Agent[]>([])
-  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [apps, setApps] = useState<AppCraneApp[]>([])
+  const [selectedSlug, setSelectedSlug] = useState<string | null>(null)
+  const [activeAgent, setActiveAgent] = useState<Agent | null>(null)
+  const [loadingSession, setLoadingSession] = useState(false)
+  const [startingSession, setStartingSession] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [newSlug, setNewSlug] = useState('')
-  const [creating, setCreating] = useState(false)
 
-  const load = () => api.listAgents().then(setSessions).catch((e) => setError(String(e)))
-
-  useEffect(() => {
-    load()
-    const t = setInterval(load, 5000)
-    return () => clearInterval(t)
+  const loadApps = useCallback(() => {
+    return api.listApps().then(setApps).catch((e) => setError(String(e)))
   }, [])
 
-  const selected = sessions.find((s) => s.id === selectedId) ?? null
+  useEffect(() => {
+    loadApps()
+    const t = setInterval(loadApps, 8000)
+    return () => clearInterval(t)
+  }, [loadApps])
 
-  const startSession = async () => {
-    const slug = newSlug.trim()
-    if (!slug) return
-    setCreating(true)
+  const selectedApp = apps.find((a) => a.slug === selectedSlug) ?? null
+
+  const selectApp = async (app: AppCraneApp) => {
+    setSelectedSlug(app.slug)
+    setActiveAgent(null)
+    if (app.currentSession) {
+      setLoadingSession(true)
+      try {
+        const agent = await api.getAgent(app.currentSession.id)
+        setActiveAgent(agent)
+      } catch (e) {
+        setError(String(e))
+      } finally {
+        setLoadingSession(false)
+      }
+    }
+  }
+
+  const startSession = async (app: AppCraneApp) => {
+    setStartingSession(true)
     setError(null)
     try {
-      const agent = await api.createAgent(slug)
-      setSessions((prev) => [agent, ...prev])
-      setSelectedId(agent.id)
-      setNewSlug('')
+      const agent = await api.createSession(app.slug)
+      setActiveAgent(agent)
+      await loadApps()
     } catch (e) {
       setError(String(e))
     } finally {
-      setCreating(false)
+      setStartingSession(false)
     }
   }
+
+  const onSessionUpdate = useCallback(async (_updated: Agent) => {
+    await loadApps()
+    if (selectedSlug) {
+      const refreshed = apps.find((a) => a.slug === selectedSlug)
+      if (refreshed?.currentSession) {
+        const agent = await api.getAgent(refreshed.currentSession.id)
+        setActiveAgent(agent)
+      }
+    }
+  }, [apps, selectedSlug, loadApps])
 
   return (
     <div className="app">
       <aside className="sidebar">
         <div className="sidebar-header">
-          <h2>Studio Sessions</h2>
+          <h2>Applications</h2>
         </div>
         {error && (
           <div style={{ padding: '6px 10px', fontSize: 11, color: 'var(--danger)' }}>{error}</div>
         )}
         <div className="sidebar-list">
-          {sessions.map((s) => (
+          {apps.map((app) => (
             <div
-              key={s.id}
-              className={`session-item ${selectedId === s.id ? 'selected' : ''}`}
-              onClick={() => setSelectedId(s.id)}
+              key={app.slug}
+              className={`session-item ${selectedSlug === app.slug ? 'selected' : ''}`}
+              onClick={() => selectApp(app)}
             >
               <div className="sname">
-                {s.name}
-                <span className={`sbadge ${s.sessionStatus || 'idle'}`}>
-                  {s.sessionStatus || 'idle'}
-                </span>
+                <HealthDot status={app.production.health.status} />
+                {app.name}
+                {app.currentSession && (
+                  <span className={`sbadge ${app.currentSession.status}`}>
+                    {app.currentSession.status}
+                  </span>
+                )}
               </div>
-              {s.branchName && <div className="smeta">{s.branchName}</div>}
+              {app.description && (
+                <div className="smeta" style={{ fontFamily: 'inherit', opacity: 0.75 }}>
+                  {app.description}
+                </div>
+              )}
+              {app.currentSession?.branchName && (
+                <div className="smeta">{app.currentSession.branchName}</div>
+              )}
+              {!app.currentSession && (
+                <div className="smeta" style={{ fontFamily: 'inherit' }}>No session</div>
+              )}
             </div>
           ))}
-          {sessions.length === 0 && (
+          {apps.length === 0 && !error && (
             <div style={{ padding: '8px', fontSize: 11, color: 'var(--fg-2)' }}>
-              No active sessions
+              No apps found
             </div>
           )}
         </div>
-        <div className="new-session-form">
-          <input
-            value={newSlug}
-            placeholder="App slug…"
-            onChange={(e) => setNewSlug(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && startSession()}
-          />
-          <button
-            className="primary"
-            disabled={!newSlug.trim() || creating}
-            onClick={startSession}
-          >
-            {creating ? 'Starting…' : '+ New Session'}
-          </button>
-        </div>
       </aside>
 
-      {selected ? (
-        <ChatPanel
-          key={selected.id}
-          agent={selected}
-          onSessionUpdate={(updated) =>
-            setSessions((prev) => prev.map((s) => (s.id === updated.id ? updated : s)))
-          }
-        />
+      {selectedApp ? (
+        loadingSession ? (
+          <div className="empty"><div>Loading session…</div></div>
+        ) : activeAgent ? (
+          <ChatPanel
+            key={activeAgent.id}
+            agent={activeAgent}
+            app={selectedApp}
+            onSessionUpdate={onSessionUpdate}
+          />
+        ) : (
+          <AppDetail
+            app={selectedApp}
+            starting={startingSession}
+            onStart={() => startSession(selectedApp)}
+          />
+        )
       ) : (
         <div className="empty">
-          <div>Select a session or start a new one</div>
-          <div style={{ fontSize: 11 }}>{sessions.length} session(s) loaded</div>
+          <div>Select an application</div>
+          <div style={{ fontSize: 11 }}>{apps.length} app(s) loaded</div>
         </div>
       )}
+    </div>
+  )
+}
+
+function AppDetail({
+  app, starting, onStart,
+}: { app: AppCraneApp; starting: boolean; onStart: () => void }) {
+  return (
+    <main className="chat">
+      <header>
+        <span className="name">{app.name}</span>
+        {app.category && <span className="branch">{app.category}</span>}
+        <span className={`status-pill ${app.production.health.status === 'healthy' ? 'idle' : app.production.health.status === 'down' ? 'error' : 'paused'}`}>
+          prod: {app.production.health.status}
+        </span>
+      </header>
+      <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 14 }}>
+        {app.description && (
+          <p style={{ margin: 0, color: 'var(--fg-2)', lineHeight: 1.6 }}>{app.description}</p>
+        )}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 12 }}>
+          <Row label="Slug" value={app.slug} mono />
+          {app.github_url && <Row label="GitHub" value={app.github_url} mono />}
+          <Row label="Type" value={app.source_type} />
+          {app.production.deploy && (
+            <Row label="Prod version" value={`${app.production.deploy.version || '—'} (${app.production.deploy.status})`} mono />
+          )}
+        </div>
+        {app.github_url ? (
+          <button className="primary" disabled={starting} onClick={onStart} style={{ width: 'fit-content' }}>
+            {starting ? 'Starting…' : '+ Start Studio Session'}
+          </button>
+        ) : (
+          <div style={{ fontSize: 12, color: 'var(--waiting)' }}>
+            App needs a GitHub URL configured before Studio can be used.
+          </div>
+        )}
+      </div>
+    </main>
+  )
+}
+
+function Row({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div style={{ display: 'flex', gap: 8, alignItems: 'baseline' }}>
+      <span style={{ color: 'var(--fg-2)', minWidth: 100 }}>{label}</span>
+      <span style={{ fontFamily: mono ? 'monospace' : 'inherit', wordBreak: 'break-all' }}>{value}</span>
     </div>
   )
 }
