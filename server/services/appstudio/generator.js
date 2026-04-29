@@ -20,21 +20,29 @@ export function cleanupWorkspace(jobId) {
   try { rmSync(jobDir(jobId), { recursive: true, force: true }); } catch (_) {}
 }
 
-// Build the studio Docker image the first time it's needed (cached after that)
+const STUDIO_IMAGE_VERSION = '2'; // bump to force image rebuild
+
+// Build the studio Docker image when missing or outdated
 async function ensureStudioImage(onLog) {
   try {
-    execFileSync('docker', ['image', 'inspect', STUDIO_IMAGE], { stdio: 'pipe', timeout: 10000 });
-    return;
-  } catch (_) {}
-
-  onLog?.('[studio] Building studio image (one-time setup, ~2 min)…');
+    const info = execFileSync('docker', ['image', 'inspect', '--format', '{{index .Config.Labels "appcrane.studio.version"}}', STUDIO_IMAGE], { stdio: 'pipe', timeout: 10000 });
+    if (info.toString().trim() === STUDIO_IMAGE_VERSION) return;
+    onLog?.('[studio] Studio image outdated, rebuilding…');
+  } catch (_) {
+    onLog?.('[studio] Building studio image (one-time setup, ~2 min)…');
+  }
 
   const buildDir = join(workspaceRoot(), '_image-build');
   mkdirSync(buildDir, { recursive: true });
   writeFileSync(join(buildDir, 'Dockerfile'), [
     'FROM node:20-alpine',
+    `LABEL appcrane.studio.version="${STUDIO_IMAGE_VERSION}"`,
     'RUN apk add --no-cache git',
     'RUN npm install -g @anthropic-ai/claude-code',
+    'RUN addgroup -S studio && adduser -S -G studio studio \\',
+    '    && mkdir -p /home/studio /workspace \\',
+    '    && chown studio:studio /home/studio /workspace',
+    'USER studio',
   ].join('\n'));
 
   execFileSync('docker', ['build', '-t', STUDIO_IMAGE, buildDir], {
@@ -103,7 +111,7 @@ console.log('[studio] Running Claude Code on ' + model + '…');
 const prompt = fs.readFileSync('/studio/prompt.txt', 'utf8');
 const claudeEnv = {
   ...process.env,
-  HOME: '/root',
+  HOME: '/home/studio',
   PATH: '/usr/local/bin:/usr/bin:/bin',
 };
 const result = spawnSync('claude', [
