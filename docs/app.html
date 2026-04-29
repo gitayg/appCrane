@@ -114,6 +114,22 @@ th{color:var(--dim);font-weight:500}
   <div class="card">
     <div id="deployHistory">Loading...</div>
   </div>
+
+  <!-- App Info — admin only -->
+  <div id="infoSection" class="hidden">
+    <h2>App Info</h2>
+    <div class="card">
+      <div style="margin-bottom:12px">
+        <label style="font-size:.78rem;color:var(--dim);display:block;margin-bottom:5px">Display Name</label>
+        <input type="text" id="infoName" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:7px 10px;border-radius:6px;width:100%;font-size:.88rem">
+      </div>
+      <div style="margin-bottom:12px">
+        <label style="font-size:.78rem;color:var(--dim);display:block;margin-bottom:5px">Description</label>
+        <textarea id="infoDesc" rows="3" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:7px 10px;border-radius:6px;width:100%;font-size:.88rem;resize:vertical;font-family:inherit"></textarea>
+      </div>
+      <button class="btn btn-sm" onclick="saveInfo()">Save</button>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -122,6 +138,7 @@ let KEY = localStorage.getItem('cc_user_key') || localStorage.getItem('cc_api_ke
 const urlSlug = new URLSearchParams(window.location.search).get('slug');
 let currentApp = urlSlug || localStorage.getItem('cc_current_app') || '';
 let currentEnv = 'production';
+let isAdmin = false;
 
 function doLogin() {
   KEY = document.getElementById('keyInput').value.trim();
@@ -152,6 +169,8 @@ async function init() {
   try {
     const me = await apiFetch('/api/auth/me');
     document.getElementById('userName').textContent = me.user.name + ' (' + me.user.role + ')';
+    isAdmin = me.user.role === 'admin';
+    if (isAdmin) document.getElementById('infoSection').classList.remove('hidden');
 
     if (me.apps.length === 0) {
       showMsg('No apps assigned to you. Ask an admin to assign you.', false);
@@ -202,6 +221,15 @@ async function loadApp() {
   document.getElementById('envProd').className = 'env-btn' + (currentEnv === 'production' ? ' active-prod' : '');
   document.getElementById('envSand').className = 'env-btn' + (currentEnv === 'sandbox' ? ' active-sand' : '');
   document.getElementById('appName').textContent = currentApp;
+
+  // App info (admin only)
+  if (isAdmin) {
+    try {
+      const appData = await apiFetch('/api/apps/' + currentApp);
+      document.getElementById('infoName').value = appData.app.name || '';
+      document.getElementById('infoDesc').value = appData.app.description || '';
+    } catch (e) {}
+  }
 
   // Health
   try {
@@ -394,6 +422,15 @@ async function delEnvVar(key) {
   await apiFetch('/api/apps/' + currentApp + '/env/' + currentEnv + '/' + key, { method: 'DELETE' });
   showMsg('Deleted ' + key, true);
   loadApp();
+}
+
+async function saveInfo() {
+  const name = document.getElementById('infoName').value.trim();
+  const desc = document.getElementById('infoDesc').value.trim();
+  if (!name) { showMsg('Name is required', false); return; }
+  const data = await apiFetch('/api/apps/' + currentApp, { method: 'PUT', body: { name, description: desc || null } });
+  if (data.error) { showMsg(data.error.message, false); return; }
+  showMsg('Saved', true);
 }
 
 // Init
