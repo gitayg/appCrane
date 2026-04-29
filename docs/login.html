@@ -376,23 +376,16 @@ function showApps(data) {
     list.appendChild(msg);
   }
 
-  const grid = document.createElement('div');
-  grid.className = 'apps-grid';
-
-  apps.forEach(function(a) {
+  function buildAppCard(a) {
     const role = a.app_role || a.role || 'user';
     const color = colorFor(a.slug);
-    // Serve from AppCrane's data dir directly — doesn't depend on the app being up,
-    // and falls through to the initials placeholder via img.onerror if not uploaded.
     const iconSrc = window.location.origin + '/api/apps/' + a.slug + '/icon';
     const prodUrl = window.location.origin + '/' + a.slug;
     const sandUrl = window.location.origin + '/' + a.slug + '-sandbox';
 
-    // Card
     const card = document.createElement('div');
     card.className = 'app-card';
 
-    // Top row
     const top = document.createElement('div');
     top.className = 'app-card-top';
 
@@ -411,7 +404,6 @@ function showApps(data) {
     if (a.has_icon) {
       img.src = iconSrc;
     } else {
-      // No uploaded icon — skip the request and show initials placeholder.
       ph.style.display = 'flex';
     }
 
@@ -440,17 +432,14 @@ function showApps(data) {
 
     card.appendChild(top);
 
-    {
-      const cleanDesc = trimAppNameFromDescription(a.name, a.description);
-      if (cleanDesc) {
-        const desc = document.createElement('div');
-        desc.className = 'app-card-desc';
-        desc.textContent = cleanDesc;
-        card.appendChild(desc);
-      }
+    var cleanDesc = trimAppNameFromDescription(a.name, a.description);
+    if (cleanDesc) {
+      const desc = document.createElement('div');
+      desc.className = 'app-card-desc';
+      desc.textContent = cleanDesc;
+      card.appendChild(desc);
     }
 
-    // Env buttons
     const envs = document.createElement('div');
     envs.className = 'app-envs';
 
@@ -487,10 +476,45 @@ function showApps(data) {
     envs.appendChild(makeEnvBtn(sandUrl, 'Sandbox', 'dev', a.sand_down, a.sand_status));
 
     card.appendChild(envs);
-    grid.appendChild(card);
+    return card;
+  }
+
+  // Group apps by category
+  var grouped = {};
+  var ungrouped = [];
+  apps.forEach(function(a) {
+    var cat = a.category ? a.category.trim() : '';
+    if (cat) {
+      if (!grouped[cat]) grouped[cat] = [];
+      grouped[cat].push(a);
+    } else {
+      ungrouped.push(a);
+    }
   });
 
-  if (apps.length > 0) list.appendChild(grid);
+  var hasCategories = Object.keys(grouped).length > 0;
+  var isFirst = true;
+
+  function renderGroup(title, groupApps) {
+    if (title) {
+      const titleEl = document.createElement('div');
+      titleEl.className = 'section-title';
+      if (!isFirst) titleEl.style.marginTop = '28px';
+      titleEl.textContent = title;
+      list.appendChild(titleEl);
+      isFirst = false;
+    }
+    const g = document.createElement('div');
+    g.className = 'apps-grid';
+    groupApps.forEach(function(a) { g.appendChild(buildAppCard(a)); });
+    list.appendChild(g);
+    isFirst = false;
+  }
+
+  if (apps.length > 0) {
+    Object.keys(grouped).sort().forEach(function(cat) { renderGroup(cat, grouped[cat]); });
+    if (ungrouped.length > 0) renderGroup(hasCategories ? 'Other' : '', ungrouped);
+  }
 
   loadMyEnhancements();
 

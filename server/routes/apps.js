@@ -86,7 +86,7 @@ router.get('/', (req, res) => {
  * POST /api/apps - Create app (any authenticated user, auto-assigns creator)
  */
 router.post('/', requireAuth, auditMiddleware('app-create'), async (req, res) => {
-  const { name, slug, domain, description, source_type, github_url, branch, github_token, max_ram_mb, max_cpu_percent } = req.body;
+  const { name, slug, domain, description, category, source_type, github_url, branch, github_token, max_ram_mb, max_cpu_percent } = req.body;
 
   if (!name || !slug) throw new AppError('Name and slug are required', 400, 'VALIDATION');
   if (!/^[a-z0-9][a-z0-9-]*$/.test(slug)) throw new AppError('Slug must be lowercase alphanumeric with dashes', 400, 'VALIDATION');
@@ -111,9 +111,9 @@ router.post('/', requireAuth, auditMiddleware('app-create'), async (req, res) =>
   const appDomain = domain || null;
 
   const result = db.prepare(`
-    INSERT INTO apps (name, slug, slot, domain, description, source_type, github_url, branch, github_token_encrypted, resource_limits, created_by)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(name, slug, slot, appDomain, description || null, source_type || 'github', github_url || null, branch || 'main', tokenEncrypted, resourceLimits, req.user.id);
+    INSERT INTO apps (name, slug, slot, domain, description, category, source_type, github_url, branch, github_token_encrypted, resource_limits, created_by)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(name, slug, slot, appDomain, description || null, category || null, source_type || 'github', github_url || null, branch || 'main', tokenEncrypted, resourceLimits, req.user.id);
 
   const appId = result.lastInsertRowid;
 
@@ -220,12 +220,13 @@ router.get('/:slug', requireAppAccess, (req, res) => {
 router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), (req, res) => {
   const db = getDb();
   const app = req.app;
-  const { name, domain, description, source_type, github_url, branch, github_token, max_ram_mb, max_cpu_percent, public_access } = req.body;
+  const { name, domain, description, category, source_type, github_url, branch, github_token, max_ram_mb, max_cpu_percent, public_access } = req.body;
 
   const updates = {};
   if (name !== undefined) updates.name = name;
   if (domain !== undefined) updates.domain = domain;
   if (description !== undefined) updates.description = description;
+  if (category !== undefined) updates.category = category || null;
   if (source_type !== undefined) updates.source_type = source_type;
   if (github_url !== undefined) updates.github_url = github_url;
   if (branch !== undefined) updates.branch = branch;
@@ -254,7 +255,7 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), (req, res)
     return res.json({ app, message: 'No changes' });
   }
 
-  const ALLOWED_APP_COLS = new Set(['name','domain','description','source_type','github_url','branch','public_access','github_token_encrypted','resource_limits','runtime']);
+  const ALLOWED_APP_COLS = new Set(['name','domain','description','category','source_type','github_url','branch','public_access','github_token_encrypted','resource_limits','runtime']);
   const invalidKey = Object.keys(updates).find(k => !ALLOWED_APP_COLS.has(k));
   if (invalidKey) throw new AppError(`Invalid field: ${invalidKey}`, 400, 'VALIDATION');
 

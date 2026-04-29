@@ -93,8 +93,9 @@ function appRow(a) {
   const iconSrc = '/api/apps/' + sl + '/icon';
   const iconFallback = 'this.onerror=null;this.style.display=\'none\'';
   const publicBadge = a.public_access ? ' <span style="font-size:10px;background:#3b82f622;border:1px solid #3b82f644;color:#3b82f6;border-radius:3px;padding:1px 5px;vertical-align:middle">PUBLIC</span>' : '';
+  const catBadge = a.category ? ' <span style="font-size:10px;background:var(--surface2);border:1px solid var(--border);color:var(--dim);border-radius:3px;padding:1px 5px;vertical-align:middle">' + esc(a.category) + '</span>' : '';
   const initial = (a.name && a.name[0]) ? a.name[0].toUpperCase() : (a.slug && a.slug[0] ? a.slug[0].toUpperCase() : '?');
-  row += '<td style="min-width:140px"><span class="app-icon-wrap" onclick="uploadIcon(event,\'' + sl + '\')" title="Click to upload icon"><span class="app-icon-ph">' + esc(initial) + '</span><img id="icon_' + sl + '" src="' + iconSrc + '" onload="this.style.display=\'block\'" onerror="' + iconFallback + '"></span><span style="font-weight:600">' + nm + '</span>' + publicBadge + '</td>';
+  row += '<td style="min-width:140px"><span class="app-icon-wrap" onclick="uploadIcon(event,\'' + sl + '\')" title="Click to upload icon"><span class="app-icon-ph">' + esc(initial) + '</span><img id="icon_' + sl + '" src="' + iconSrc + '" onload="this.style.display=\'block\'" onerror="' + iconFallback + '"></span><span style="font-weight:600">' + nm + '</span>' + publicBadge + catBadge + '</td>';
   row += '<td>' + envCell('production', prodH, prodV, prodUrl, a.slug) + '</td>';
   row += '<td>' + envCell('sandbox', sandH, sandV, sandUrl, a.slug) + '</td>';
   const rl = a.resource_limits || {};
@@ -119,6 +120,9 @@ function appRow(a) {
     row += '<button class="btn btn-xs" id="hookbtn_' + sl + '" onclick="registerGithubHook(\'' + sl + '\')">gh hook</button>';
   }
   row += '<button id="pubBtn_' + sl + '" class="btn btn-xs" style="' + (a.public_access ? 'background:#3b82f622;color:#3b82f6;border:1px solid #3b82f644' : '') + '" onclick="togglePublic(\'' + sl + '\',' + (a.public_access ? 1 : 0) + ')" title="' + (a.public_access ? 'Public — any authenticated user can access. Click to make private.' : 'Private — only assigned users can access. Click to make public.') + '">' + (a.public_access ? '🌐 public' : '🔒 private') + '</button>';
+  if (isAdmin()) {
+    row += '<button class="btn btn-xs" onclick="setCategory(\'' + sl + '\',' + jsStr(a.category || '') + ')" title="Set category">tag</button>';
+  }
   row += '<button class="btn btn-xs btn-red" onclick="deleteApp(\'' + sl + '\',\'' + nm + '\')">delete</button>';
   row += '</div></td></tr>';
   row += '<tr id="evars_' + sl + '" style="display:none"><td colspan="5" style="padding:0;background:var(--surface2)"><div class="evars-inner" id="evarsInner_' + sl + '"></div></td></tr>';
@@ -416,6 +420,14 @@ async function editResources(slug, currentRam, currentCpu) {
   const data = await apiPut('/api/apps/' + slug, { max_ram_mb: ram, max_cpu_percent: cpu });
   if (data.error) { alert('Failed: ' + data.error.message); return; }
   alert('Resource limits updated. Takes effect on the next deploy (container must be recreated to apply cgroup changes).');
+  loadApps();
+}
+
+async function setCategory(slug, current) {
+  const val = prompt('Category for "' + slug + '" (leave blank to clear):', current);
+  if (val === null) return;
+  const data = await apiPut('/api/apps/' + slug, { category: val.trim() || null });
+  if (data.error) { alert('Failed: ' + data.error.message); return; }
   loadApps();
 }
 
