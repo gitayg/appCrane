@@ -74,6 +74,12 @@ function defaultInstall() {
  */
 export function ensureDockerfile({ releaseDir, manifest, appBasePath, craneUrl, craneInternalUrl }) {
   const existing = join(releaseDir, 'Dockerfile');
+
+  // If the app ships its own Dockerfile, use it as-is.
+  if (existsSync(existing)) {
+    return { path: existing, userProvided: true };
+  }
+
   const node = pickNodeVersion(manifest);
 
   const beWorkdir = manifest?.be?.workdir ? safeRel(manifest.be.workdir) : null;

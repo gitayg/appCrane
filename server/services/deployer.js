@@ -207,8 +207,8 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     // node server.js" are safe in a Dockerfile CMD but would fail the
     // host-oriented validator (which blocks shell metacharacters and non-allowlisted executables).
 
-    ensureDockerfile({ releaseDir, manifest, appBasePath, craneUrl, craneInternalUrl });
-    appendLog('Generated Dockerfile (Node Alpine, non-root)');
+    const { userProvided } = ensureDockerfile({ releaseDir, manifest, appBasePath, craneUrl, craneInternalUrl });
+    appendLog(userProvided ? 'Using app-provided Dockerfile' : 'Generated Dockerfile (Node Alpine, non-root)');
 
     appendLog('Building docker image...');
     const image = buildImage({
