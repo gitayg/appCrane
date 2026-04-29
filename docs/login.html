@@ -245,10 +245,11 @@ input:focus{border-color:var(--accent)}
 .jd-sys.blue{color:#58a6ff;border-color:#1f3a5a}
 .jd-sys.red{color:#f85149;border-color:#4a1a1a}
 .jd-sys.green{color:#3fb950;border-color:#1a3a22}
-.jd-tool{display:flex;align-items:baseline;gap:6px;font-size:.72rem;font-family:monospace;padding:3px 8px;background:var(--surface);border-radius:6px;border:1px solid var(--border);align-self:flex-start;max-width:100%;overflow:hidden}
+.jd-tool{display:flex;align-items:center;gap:6px;font-size:.72rem;font-family:monospace;padding:3px 8px;background:var(--surface2);border-radius:4px;border:1px solid var(--border);align-self:flex-start;max-width:100%;overflow:hidden;opacity:.85}
 .jd-tool-name{color:#7ee787;font-weight:700;flex-shrink:0}
-.jd-tool-arg{color:#9ecbff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.jd-text{max-width:92%;padding:7px 11px;border-radius:8px;font-size:.8rem;line-height:1.5;background:var(--surface);border:1px solid var(--border);align-self:flex-start;border-bottom-left-radius:3px;color:var(--text);white-space:pre-wrap;word-break:break-word}
+.jd-tool-arg{color:#9ecbff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:300px}
+.jd-text{max-width:94%;padding:8px 12px;border-radius:0 8px 8px 8px;font-size:.8rem;line-height:1.55;background:var(--surface);border:1px solid var(--border);border-left:2px solid var(--accent);align-self:flex-start;color:var(--text);white-space:pre-wrap;word-break:break-word}
+.jd-text code{background:var(--surface2);border:1px solid var(--border);border-radius:3px;padding:0 4px;font-family:'SF Mono',Monaco,monospace;font-size:.75rem;color:#9ecbff}
 .job-detail-footer{padding:8px 12px;border-top:1px solid var(--border);display:flex;align-items:center;gap:12px;font-size:.75rem;color:var(--dim);flex-shrink:0}
 .job-detail-tokens{font-weight:600;color:var(--fg)}
 .job-row{cursor:pointer}
@@ -2064,6 +2065,9 @@ var _jobDetailId    = null;
 
 function _formatLogLine(raw) {
   var esc = function(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); };
+  var fmtText = function(s) {
+    return esc(s).replace(/`([^`\n]+)`/g, '<code>$1</code>');
+  };
   var line = raw.trim();
   if (!line) return '';
   try {
@@ -2075,7 +2079,7 @@ function _formatLogLine(raw) {
       for (var i = 0; i < content.length; i++) {
         var blk = content[i];
         if (blk.type === 'text' && blk.text && blk.text.trim()) {
-          html += '<div class="jd-text">' + esc(blk.text.trim()) + '</div>';
+          html += '<div class="jd-text">' + fmtText(blk.text.trim()) + '</div>';
         } else if (blk.type === 'tool_use') {
           var arg = (blk.input && (blk.input.command || blk.input.file_path || blk.input.path)) || '';
           html += '<div class="jd-tool"><span class="jd-tool-name">' + esc(blk.name) + '</span><span class="jd-tool-arg">' + esc(arg) + '</span></div>';
