@@ -2091,9 +2091,11 @@ const _JOB_STATUS_LABELS = {
   selected: 'Queued for review',
   planning: 'Generating plan\u2026',
   pending_user_review_plan: 'Plan ready \u2014 review needed',
-  plan_approved: 'Build queued',
+  plan_approved: 'Coding queued',
   coding: 'Writing code\u2026',
-  sandbox_ready: 'Sandbox ready',
+  pushing: 'Pushed to GitHub \u2714',
+  building: 'Building sandbox\u2026',
+  sandbox_ready: 'Sandbox ready \u2714',
   done: 'Done',
   merged: 'Merged',
   auto_failed: 'Failed',
@@ -2162,7 +2164,7 @@ async function refreshJobsList() {
       hdr.textContent = 'My Requests';
       list.appendChild(hdr);
       myReqs.forEach(function(req) {
-        const statusMap = { new: 'job-status-queued', selected: 'job-status-queued', planning: 'job-status-running', pending_user_review_plan: 'job-status-running', plan_approved: 'job-status-running', coding: 'job-status-running', sandbox_ready: 'job-status-queued', done: '', merged: '' };
+        const statusMap = { new: 'job-status-queued', selected: 'job-status-queued', planning: 'job-status-running', pending_user_review_plan: 'job-status-running', plan_approved: 'job-status-running', coding: 'job-status-running', pushing: 'job-status-queued', building: 'job-status-running', sandbox_ready: 'job-status-queued', done: '', merged: '' };
         const cls = statusMap[req.status] || 'job-status-queued';
         const actionFn = req.status === 'pending_user_review_plan'
           ? function() { openPlanById(req.id, req.app_slug); }
