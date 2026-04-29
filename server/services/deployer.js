@@ -210,7 +210,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     db.prepare("UPDATE deployments SET status = 'deploying' WHERE id = ?").run(deployId);
 
     const { dockerAvailable, buildImageIfNeeded, getContainerImage, startApp: dockerStart, stopApp: dockerStop, pruneOldImages } = await import('./docker.js');
-    const { ensureDockerfile } = await import('./dockerfileGen.js');
+    const { ensureDockerfile, injectAppBasePathArg } = await import('./dockerfileGen.js');
     const { validateDockerfile } = await import('./dockerfileValidator.js');
 
     if (!await dockerAvailable()) throw new Error('Docker daemon is not available on this host');
@@ -222,6 +222,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       const { valid, errors, warnings } = validateDockerfile(releaseDir, { expectedPort });
       for (const w of warnings) appendLog(`⚠ Dockerfile: ${w}`);
       if (!valid) throw new Error(`Dockerfile validation failed:\n${errors.map(e => '  • ' + e).join('\n')}`);
+      injectAppBasePathArg(join(releaseDir, 'Dockerfile'));
       appendLog('Using app-provided Dockerfile (validated)');
     } else {
       appendLog('Generated Dockerfile (Node Alpine, non-root)');
@@ -287,7 +288,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       appendLog('Health check passed');
     }
 
-    pruneOldImages(app.slug, env, 2);
+    pruneOldImages(app.slug, env, (app.image_retention ?? 0) + 1);
 
     // 7. Update current symlink (remove old even if target is gone)
     const currentLink = resolve(join(appDir, 'current'));
