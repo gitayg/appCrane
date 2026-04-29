@@ -2052,11 +2052,45 @@ async function openPlanById(enhId, appSlug) {
 var _jobDetailTimer = null;
 var _jobDetailId    = null;
 
+function _formatLogLine(raw) {
+  var esc = function(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); };
+  var line = raw.trim();
+  if (!line) return '';
+  // Try to parse as Claude Code stream-json event
+  try {
+    var evt = JSON.parse(line);
+    var t = evt.type;
+    if (t === 'assistant' && evt.message) {
+      var content = evt.message.content || [];
+      var parts = [];
+      for (var i = 0; i < content.length; i++) {
+        var blk = content[i];
+        if (blk.type === 'text' && blk.text) parts.push('<span style="color:#e6edf3">' + esc(blk.text) + '</span>');
+        else if (blk.type === 'tool_use') parts.push('<span style="color:#7ee787">⚙ ' + esc(blk.name) + '</span>' + (blk.input && blk.input.command ? ' <span style="color:#9ecbff;font-size:.68rem">' + esc(blk.input.command) + '</span>' : blk.input && blk.input.path ? ' <span style="color:#9ecbff;font-size:.68rem">' + esc(blk.input.path) + '</span>' : ''));
+      }
+      if (parts.length) return '<div style="padding:1px 0">' + parts.join('<br>') + '</div>';
+      return '';
+    }
+    if (t === 'tool_result') return '';
+    if (t === 'result') {
+      var cost = evt.total_cost_usd ? ' · $' + parseFloat(evt.total_cost_usd).toFixed(4) : '';
+      return '<div style="color:#7ee787;border-top:1px solid #30363d;margin-top:4px;padding-top:4px">✔ ' + esc(evt.subtype || 'done') + cost + '</div>';
+    }
+    if (t === 'system') return '<div style="color:#6e7681;font-size:.7rem">' + esc(JSON.stringify(evt).slice(0,120)) + '</div>';
+    return '';
+  } catch (_) {}
+  // Plain text line — color by prefix
+  if (/^\[stderr\]/.test(line)) return '<div style="color:#f85149">' + esc(line) + '</div>';
+  if (/^\[studio\]/.test(line)) return '<div style="color:#58a6ff">' + esc(line) + '</div>';
+  if (/^\[build\]/.test(line))  return '<div style="color:#8b949e;font-size:.7rem">' + esc(line) + '</div>';
+  return '<div>' + esc(line) + '</div>';
+}
+
 function openJobDetail(jobId) {
   _jobDetailId = jobId;
   document.getElementById('jobDetailTitle').textContent = 'JOB-' + String(jobId).padStart(4, '0');
   document.getElementById('jobDetailStatus').textContent = '';
-  document.getElementById('jobDetailLogs').textContent = 'Loading\u2026';
+  document.getElementById('jobDetailLogs').innerHTML = '<div style="color:#8b949e">Loading…</div>';
   document.getElementById('jobDetailTokens').textContent = '\u2014';
   document.getElementById('jobDetailCost').textContent = '';
   document.getElementById('jobDetailTime').textContent = '';
@@ -2092,12 +2126,12 @@ async function _fetchJobDetail() {
     }
     if (lines.length) {
       var wasAtBottom = logsEl.scrollHeight - logsEl.scrollTop <= logsEl.clientHeight + 40;
-      logsEl.textContent = lines.join('\n');
+      logsEl.innerHTML = lines.map(_formatLogLine).join('');
       if (wasAtBottom) logsEl.scrollTop = logsEl.scrollHeight;
     } else if (d.status === 'queued') {
-      logsEl.textContent = 'Queued \u2014 waiting for worker to pick up this job\u2026';
+      logsEl.innerHTML = '<div style="color:#8b949e">Queued — waiting for worker to pick up this job…</div>';
     } else if (d.status === 'running') {
-      logsEl.textContent = 'Running \u2014 no output yet\u2026';
+      logsEl.innerHTML = '<div style="color:#8b949e">Running — no output yet…</div>';
     }
 
     document.getElementById('jobDetailTitle').textContent = 'JOB-' + String(d.id).padStart(4, '0') + ' \u00b7 ' + (d.phase || '');
