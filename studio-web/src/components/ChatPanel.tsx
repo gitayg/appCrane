@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
-import type { Agent, Message, SessionStatus } from '../types'
+import type { Agent, AppCraneApp, Message, SessionStatus } from '../types'
 
 interface Props {
   agent: Agent
+  app: AppCraneApp
   onSessionUpdate: (updated: Agent) => void
 }
 
-export function ChatPanel({ agent, onSessionUpdate }: Props) {
+export function ChatPanel({ agent, app, onSessionUpdate }: Props) {
   const [messages, setMessages] = useState<Message[]>([])
   const [status, setStatus] = useState<SessionStatus>({
     isStreaming: false, queuedTasks: [], hasUncommittedChanges: false,
@@ -23,9 +24,10 @@ export function ChatPanel({ agent, onSessionUpdate }: Props) {
 
   useEffect(() => {
     api.messages(agent.id).then(setMessages).catch(console.error)
+    const sessionStatus = agent.sessionStatus || 'idle'
     const es = api.events(agent.id, setMessages, setStatus)
     const reconnect = () => {
-      if (!['shipped', 'error'].includes(agent.sessionStatus || '')) {
+      if (!['shipped', 'error'].includes(sessionStatus)) {
         const es2 = api.events(agent.id, setMessages, setStatus)
         es2.onerror = reconnect
       }
@@ -54,10 +56,7 @@ export function ChatPanel({ agent, onSessionUpdate }: Props) {
     setShipError(null)
     try {
       const result = await api.shipSandbox(agent.id, shipMsg || undefined)
-      if (result.deployed) {
-        const updated = await api.getAgent(agent.id)
-        onSessionUpdate(updated)
-      }
+      onSessionUpdate(agent)
       setShipMsg('')
       alert(result.message)
     } catch (e) {
@@ -100,7 +99,7 @@ export function ChatPanel({ agent, onSessionUpdate }: Props) {
   return (
     <main className="chat">
       <header>
-        <span className="name">{agent.name}</span>
+        <span className="name">{app.name}</span>
         {agent.branchName && <span className="branch">{agent.branchName}</span>}
         <span className={`status-pill ${status.isStreaming ? 'streaming' : sessionStatus}`}>
           {status.isStreaming ? '● streaming' : sessionStatus}

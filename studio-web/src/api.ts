@@ -1,4 +1,4 @@
-import type { Agent, Message, SessionStatus, ShipResult } from './types'
+import type { Agent, AppCraneApp, Message, SessionStatus, ShipResult } from './types'
 
 function getToken(): string {
   return localStorage.getItem('cc_identity_token') || ''
@@ -24,9 +24,13 @@ async function j<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  listAgents:    () => j<Agent[]>('/api/agents'),
+  // Apps list (primary sidebar source)
+  listApps:      () => j<AppCraneApp[]>('/api/agents/apps'),
+
+  // Session (agent) operations
   getAgent:      (id: string) => j<Agent>(`/api/agents/${id}`),
-  createAgent:   (name: string) => j<Agent>('/api/agents', { method: 'POST', body: JSON.stringify({ name }) }),
+  createSession: (appSlug: string) =>
+                   j<Agent>('/api/agents', { method: 'POST', body: JSON.stringify({ name: appSlug }) }),
   deleteAgent:   (id: string) => j<void>(`/api/agents/${id}`, { method: 'DELETE' }),
 
   messages:      (id: string) => j<Message[]>(`/api/agents/${id}/messages`),

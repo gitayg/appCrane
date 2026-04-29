@@ -182,6 +182,64 @@ router.get('/health', (req, res) => {
   res.json({ ok: true, version: process.env.npm_package_version || '1.x' });
 });
 
+// ── GET /api/agents/apps — apps with embedded session + health context ────────
+
+router.get('/apps', (req, res) => {
+  const db = getDb();
+  let apps;
+  if (req.user.role === 'admin') {
+    apps = db.prepare('SELECT * FROM apps ORDER BY name ASC').all();
+  } else {
+    apps = db.prepare(`
+      SELECT a.* FROM apps a
+      WHERE a.id IN (SELECT app_id FROM app_users WHERE user_id = ?)
+      ORDER BY a.name ASC
+    `).all(req.user.id);
+  }
+
+  const enriched = apps.map(app => {
+    const session = db.prepare(
+      "SELECT id, status, branch_name, created_at, shipped_at FROM coder_sessions " +
+      "WHERE app_slug = ? AND status NOT IN ('error') ORDER BY created_at DESC LIMIT 1"
+    ).get(app.slug);
+
+    const healthProd = db.prepare('SELECT is_down, last_status FROM health_state WHERE app_id = ? AND env = ?').get(app.id, 'production');
+    const healthSand = db.prepare('SELECT is_down, last_status FROM health_state WHERE app_id = ? AND env = ?').get(app.id, 'sandbox');
+
+    const lastDeployProd = db.prepare(
+      'SELECT version, status, finished_at FROM deployments WHERE app_id = ? AND env = ? ORDER BY started_at DESC LIMIT 1'
+    ).get(app.id, 'production');
+
+    const healthLabel = (h) => !h ? 'unknown' : h.is_down ? 'down' : h.last_status === 200 ? 'healthy' : 'unknown';
+
+    return {
+      id: app.id,
+      name: app.name,
+      slug: app.slug,
+      description: app.description || null,
+      github_url: app.github_url || null,
+      source_type: app.source_type || 'github',
+      category: app.category || null,
+      production: {
+        health: { status: healthLabel(healthProd) },
+        deploy: lastDeployProd || null,
+      },
+      sandbox: {
+        health: { status: healthLabel(healthSand) },
+      },
+      currentSession: session ? {
+        id: session.id,
+        status: session.status,
+        branchName: session.branch_name,
+        createdAt: session.created_at,
+        shippedAt: session.shipped_at,
+      } : null,
+    };
+  });
+
+  res.json(enriched);
+});
+
 // ── POST /api/agents — create session for an app ─────────────────────────────
 
 router.post('/', auditMiddleware('agents.create'), async (req, res) => {

@@ -54,3 +54,31 @@ export interface ShipResult {
   deploy_id?: number
   branch?: string
 }
+
+export type HealthStatus = 'healthy' | 'down' | 'unknown'
+
+export interface AppSession {
+  id: string
+  status: 'idle' | 'active' | 'paused' | 'shipped' | 'error'
+  branchName: string | null
+  createdAt: string
+  shippedAt: string | null
+}
+
+export interface AppCraneApp {
+  id: number
+  name: string
+  slug: string
+  description: string | null
+  github_url: string | null
+  source_type: string
+  category: string | null
+  production: {
+    health: { status: HealthStatus }
+    deploy: { version: string; status: string; finished_at: string } | null
+  }
+  sandbox: {
+    health: { status: HealthStatus }
+  }
+  currentSession: AppSession | null
+}
