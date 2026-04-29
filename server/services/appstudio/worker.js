@@ -424,16 +424,39 @@ async function handleOpenPr(job) {
     throw new Error(`GitHub PR creation failed: ${data.message || res.status}`);
   }
 
+  const prUrl = data.html_url;
+  const prNumber = data.number;
+  log.info(`AppStudio: PR #${prNumber} opened for enh #${enh.id}: ${prUrl}`);
+
   db.prepare(`
     UPDATE enhancement_requests
-    SET status = 'merged', pr_url = ?,
+    SET status = 'pr_open', pr_url = ?,
         ai_log = COALESCE(ai_log, '') || ?
     WHERE id = ?
-  `).run(
-    data.html_url,
-    `\n[${new Date().toISOString()}] PR opened: ${data.html_url}\n`,
-    enh.id,
-  );
+  `).run(prUrl, `\n[${new Date().toISOString()}] PR opened: ${prUrl}\n`, enh.id);
 
-  log.info(`AppStudio: PR opened for enh #${enh.id}: ${data.html_url}`);
+  // Merge the PR on GitHub
+  const mergeRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/pulls/${prNumber}/merge`, {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify({
+      commit_title: `appstudio: ${plan.summary?.slice(0, 60) || enh.message.slice(0, 60)}`,
+      commit_message: `Merged by AppCrane AppStudio (enhancement #${enh.id})`,
+      merge_method: 'squash',
+    }),
+  });
+  const mergeData = await mergeRes.json();
+
+  if (!mergeRes.ok) {
+    throw new Error(`GitHub PR merge failed: ${mergeData.message || mergeRes.status}`);
+  }
+
+  db.prepare(`
+    UPDATE enhancement_requests
+    SET status = 'merged',
+        ai_log = COALESCE(ai_log, '') || ?
+    WHERE id = ?
+  `).run(`\n[${new Date().toISOString()}] PR #${prNumber} merged: ${mergeData.sha || ''}\n`, enh.id);
+
+  log.info(`AppStudio: PR #${prNumber} merged for enh #${enh.id}`);
 }
