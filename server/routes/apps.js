@@ -311,6 +311,82 @@ router.delete('/:slug', requireAdmin, requireAppAccess, auditMiddleware('app-del
 });
 
 /**
+ * POST /api/apps/:slug/rename - Rename app slug (admin only)
+ * Stops containers, renames data dir, updates DB, reloads Caddy, redeploys.
+ */
+router.post('/:slug/rename', requireAdmin, requireAppAccess, auditMiddleware('app-rename'), async (req, res) => {
+  const { new_slug, redirect = true } = req.body;
+
+  if (!new_slug) throw new AppError('new_slug is required', 400, 'VALIDATION');
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(new_slug)) {
+    throw new AppError('Slug must be lowercase alphanumeric with dashes', 400, 'VALIDATION');
+  }
+
+  const db = getDb();
+  const app = req.app;
+  const oldSlug = app.slug;
+
+  if (new_slug === oldSlug) throw new AppError('New slug is the same as current slug', 400, 'VALIDATION');
+  if (db.prepare('SELECT id FROM apps WHERE slug = ?').get(new_slug)) {
+    throw new AppError(`Slug '${new_slug}' is already in use`, 409, 'DUPLICATE');
+  }
+
+  // Stop old containers
+  try {
+    const { stopApp } = await import('../services/docker.js');
+    await stopApp(oldSlug, 'production').catch(() => {});
+    await stopApp(oldSlug, 'sandbox').catch(() => {});
+  } catch (_) {}
+
+  // Rename data directory
+  const dataDir = process.env.DATA_DIR || './data';
+  const oldDir = join(dataDir, 'apps', oldSlug);
+  const newDir = join(dataDir, 'apps', new_slug);
+  if (existsSync(oldDir)) {
+    renameSync(oldDir, newDir);
+  }
+
+  // Build updated slug_aliases (append old slug for redirect)
+  let aliases = [];
+  try { aliases = JSON.parse(app.slug_aliases || '[]'); } catch (_) {}
+  if (redirect && !aliases.includes(oldSlug)) aliases.push(oldSlug);
+
+  // Update DB
+  db.prepare('UPDATE apps SET slug = ?, slug_aliases = ? WHERE id = ?')
+    .run(new_slug, aliases.length ? JSON.stringify(aliases) : null, app.id);
+
+  // Reload Caddy with new routes (+ redirect if requested)
+  await reloadCaddy().catch(e => log.warn(`Caddy reload after rename: ${e.message}`));
+
+  // Redeploy live environments so containers get the updated APP_BASE_PATH and new name
+  const liveEnvs = db.prepare("SELECT env FROM deployments WHERE app_id = ? AND status = 'live'").all(app.id);
+  const updatedApp = db.prepare('SELECT * FROM apps WHERE id = ?').get(app.id);
+  const ports = getPortsForSlot(updatedApp.slot);
+
+  for (const { env } of liveEnvs) {
+    try {
+      const result = db.prepare(
+        "INSERT INTO deployments (app_id, env, status, deployed_by) VALUES (?, ?, 'pending', ?)"
+      ).run(app.id, env, req.user.id);
+      const { deployApp } = await import('../services/deployer.js');
+      deployApp(result.lastInsertRowid, updatedApp, env, ports).catch(err => {
+        log.error(`Rename redeploy failed (${env}): ${err.message}`);
+      });
+    } catch (e) {
+      log.warn(`Could not queue rename redeploy for ${env}: ${e.message}`);
+    }
+  }
+
+  res.json({
+    message: `App renamed from '${oldSlug}' to '${new_slug}'`,
+    old_slug: oldSlug,
+    new_slug,
+    redirect,
+    redeploying: liveEnvs.map(r => r.env),
+  });
+});
+
+/**
  * PUT /api/apps/:slug/users - Assign users to app (admin or assigned user)
  */
 router.put('/:slug/users', requireAppAccess, auditMiddleware('app-assign-users'), (req, res) => {

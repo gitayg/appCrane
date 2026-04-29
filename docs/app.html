@@ -128,6 +128,17 @@ th{color:var(--dim);font-weight:500}
         <textarea id="infoDesc" rows="3" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:7px 10px;border-radius:6px;width:100%;font-size:.88rem;resize:vertical;font-family:inherit"></textarea>
       </div>
       <button class="btn btn-sm" onclick="saveInfo()">Save</button>
+
+      <hr style="border:none;border-top:1px solid var(--border);margin:18px 0">
+
+      <div style="margin-bottom:8px">
+        <label style="font-size:.78rem;color:var(--dim);display:block;margin-bottom:5px">URL Slug (path)</label>
+        <div style="display:flex;gap:8px">
+          <input type="text" id="infoSlug" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:7px 10px;border-radius:6px;flex:1;font-size:.88rem;font-family:monospace">
+          <button class="btn btn-sm btn-dim" onclick="renameSlug()">Rename</button>
+        </div>
+        <div style="font-size:.75rem;color:var(--dim);margin-top:5px">Renames the URL path. Old path redirects to new one. Triggers a redeploy.</div>
+      </div>
     </div>
   </div>
 </div>
@@ -228,6 +239,7 @@ async function loadApp() {
       const appData = await apiFetch('/api/apps/' + currentApp);
       document.getElementById('infoName').value = appData.app.name || '';
       document.getElementById('infoDesc').value = appData.app.description || '';
+      document.getElementById('infoSlug').value = appData.app.slug || '';
     } catch (e) {}
   }
 
@@ -431,6 +443,26 @@ async function saveInfo() {
   const data = await apiFetch('/api/apps/' + currentApp, { method: 'PUT', body: { name, description: desc || null } });
   if (data.error) { showMsg(data.error.message, false); return; }
   showMsg('Saved', true);
+}
+
+async function renameSlug() {
+  const newSlug = document.getElementById('infoSlug').value.trim();
+  if (!newSlug) { showMsg('Slug is required', false); return; }
+  if (newSlug === currentApp) { showMsg('Slug unchanged', false); return; }
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(newSlug)) {
+    showMsg('Slug must be lowercase letters, numbers, and dashes', false); return;
+  }
+  if (!confirm('Rename /' + currentApp + ' → /' + newSlug + '?\n\nThe old path will redirect to the new one. Both environments will be redeployed.')) return;
+  showMsg('Renaming...', true);
+  const data = await apiFetch('/api/apps/' + currentApp + '/rename', { method: 'POST', body: { new_slug: newSlug, redirect: true } });
+  if (data.error) { showMsg(data.error.message, false); return; }
+  showMsg('Renamed to /' + newSlug + '. Redeploying...', true);
+  currentApp = newSlug;
+  localStorage.setItem('cc_current_app', newSlug);
+  const url = new URL(location.href);
+  url.searchParams.set('slug', newSlug);
+  history.replaceState(null, '', url.toString());
+  setTimeout(loadApp, 3000);
 }
 
 // Init
