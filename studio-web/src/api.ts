@@ -1,12 +1,20 @@
 import type { Agent, AppCraneApp, Message, SessionStatus, ShipResult } from './types'
 
-function getToken(): string {
-  return localStorage.getItem('cc_identity_token') || ''
+function authHeaders(): Record<string, string> {
+  const token = localStorage.getItem('cc_identity_token') || ''
+  if (token) return { Authorization: `Bearer ${token}` }
+  const apiKey = localStorage.getItem('cc_api_key') || ''
+  if (apiKey) return { 'X-API-Key': apiKey }
+  return {}
 }
 
-function authHeaders(): Record<string, string> {
-  const t = getToken()
-  return t ? { Authorization: `Bearer ${t}` } : {}
+function sseUrl(id: string): string {
+  const token = localStorage.getItem('cc_identity_token') || ''
+  const apiKey = localStorage.getItem('cc_api_key') || ''
+  const base = `/api/agents/${id}/events`
+  if (token) return `${base}?token=${encodeURIComponent(token)}`
+  if (apiKey) return `${base}?api_key=${encodeURIComponent(apiKey)}`
+  return base
 }
 
 async function j<T>(path: string, init?: RequestInit): Promise<T> {
@@ -52,9 +60,7 @@ export const api = {
     onMessages: (msgs: Message[]) => void,
     onStatus: (s: SessionStatus) => void,
   ): EventSource => {
-    const t = getToken()
-    const url = `/api/agents/${id}/events${t ? `?token=${encodeURIComponent(t)}` : ''}`
-    const es = new EventSource(url)
+    const es = new EventSource(sseUrl(id))
     es.addEventListener('messages', (e) => onMessages(JSON.parse((e as MessageEvent).data)))
     es.addEventListener('status',   (e) => onStatus(JSON.parse((e as MessageEvent).data)))
     return es
