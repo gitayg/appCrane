@@ -227,7 +227,7 @@ async function handleCode(job) {
     }
   };
 
-  const { branchName } = await generateCode({
+  const { branchName, pushConflict } = await generateCode({
     jobId: job.id,
     app,
     enhancementId: enh.id,
@@ -239,6 +239,25 @@ async function handleCode(job) {
   });
 
   cleanupWorkspace(job.id);
+
+  if (pushConflict) {
+    const note = `\n[${new Date().toISOString()}] Push rejected — branch ${branchName} already has remote changes. Re-planning with updated context.\n`;
+    db.prepare(`
+      UPDATE enhancement_requests
+      SET status = 'planning', ai_plan_json = NULL,
+          admin_comments = COALESCE(admin_comments, '') || ?,
+          ai_log = COALESCE(ai_log, '') || ?
+      WHERE id = ?
+    `).run(
+      `\n[${new Date().toISOString()}] Note: branch ${branchName} has existing remote changes — review and incorporate if needed.`,
+      note,
+      enh.id,
+    );
+    db.prepare('INSERT INTO enhancement_jobs (enhancement_id, phase) VALUES (?, ?)').run(enh.id, 'revise_plan');
+    log.info(`AppStudio: push conflict on enh #${enh.id}, re-queued for replanning`);
+    finishJob(job.id, 'done', null);
+    return;
+  }
 
   db.prepare('UPDATE enhancement_jobs SET output_json = ? WHERE id = ?')
     .run(JSON.stringify({ log: logLines.slice(-200), branchName }), job.id);
