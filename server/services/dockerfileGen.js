@@ -174,3 +174,26 @@ export function ensureDockerfile({ releaseDir, manifest, appBasePath, craneUrl, 
   writeFileSync(existing, lines.join('\n'));
   return { path: existing };
 }
+
+/**
+ * Inject `ARG APP_BASE_PATH` + `ENV APP_BASE_PATH=$APP_BASE_PATH` into a
+ * user-provided Dockerfile if those declarations are absent.
+ *
+ * Docker silently discards `--build-arg` values that the Dockerfile never
+ * declares with ARG, so bundlers (Vite, CRA) see `undefined` and fall back to
+ * `/` or `./`, breaking sub-path deployments.
+ *
+ * The injection is placed immediately after the first FROM line so it is
+ * in scope for all subsequent RUN / ENV / CMD instructions.
+ */
+export function injectAppBasePathArg(dockerfilePath) {
+  const content = readFileSync(dockerfilePath, 'utf8');
+  if (/^ARG\s+APP_BASE_PATH\b/m.test(content)) return; // already declared
+
+  const lines = content.split('\n');
+  const fromIdx = lines.findIndex(l => /^\s*FROM\s+/i.test(l));
+  if (fromIdx === -1) return; // malformed Dockerfile — skip silently
+
+  lines.splice(fromIdx + 1, 0, 'ARG APP_BASE_PATH=/', 'ENV APP_BASE_PATH=$APP_BASE_PATH', '');
+  writeFileSync(dockerfilePath, lines.join('\n'), 'utf8');
+}
