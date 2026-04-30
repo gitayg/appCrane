@@ -6,11 +6,6 @@
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <link rel="stylesheet" href="/docs/shared.css">
 <style>
-.tabs{display:flex;gap:0;border-bottom:1px solid var(--border);margin-bottom:16px}
-.tab{padding:10px 20px;color:var(--dim);cursor:pointer;border-bottom:2px solid transparent;font-size:.9rem;font-weight:500}
-.tab:hover{color:var(--text)}
-.tab.active{color:var(--accent);border-bottom-color:var(--accent)}
-
 /* Request table */
 .filter-row{display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap}
 .filter-row select,.filter-row input{background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px 10px;font-size:13px}
@@ -109,31 +104,36 @@
     <h2 style="margin:0">AppStudio</h2>
     <span style="color:var(--dim);font-size:.8rem">AI-powered enhancement pipeline</span>
   </div>
-  <div class="tabs">
-    <div class="tab active" data-tab="requests">Requests</div>
-    <div class="tab" data-tab="library">Library</div>
-    <div class="tab" data-tab="studio">Studio</div>
-  </div>
   <div id="tabContent"></div>
 </div></div>
 </div>
 <script src="/docs/shared.js"></script>
 <script>
-document.querySelector('.page-body').insertAdjacentHTML('afterbegin', sidebar('appstudio'));
+var STUDIO_SUB_ITEMS = [
+  {id:'requests', label:'Requests', href:'#requests'},
+  {id:'library',  label:'Library',  href:'#library'},
+  {id:'studio',   label:'Studio',   href:'#studio'},
+];
+
+function getActiveTab() {
+  var h = location.hash.replace('#', '');
+  return ['requests','library','studio'].indexOf(h) !== -1 ? h : 'requests';
+}
+
+document.querySelector('.page-body').insertAdjacentHTML('afterbegin', sidebar('appstudio', STUDIO_SUB_ITEMS, getActiveTab()));
 if (!checkAuth()) throw 'auth';
 loadVersion(); loadUserInfo();
 
-let activeTab = 'requests';
+let activeTab = getActiveTab();
 let allEnhancements = [];
 let allApps = [];
 
-document.querySelectorAll('.tab').forEach(function(t) {
-  t.addEventListener('click', function() {
-    document.querySelectorAll('.tab').forEach(function(x){ x.classList.remove('active'); });
-    t.classList.add('active');
-    activeTab = t.dataset.tab;
-    renderTab();
+window.addEventListener('hashchange', function() {
+  activeTab = getActiveTab();
+  document.querySelectorAll('.sidebar-sub-link').forEach(function(a) {
+    a.classList.toggle('active', a.getAttribute('href') === '#' + activeTab);
   });
+  renderTab();
 });
 
 async function loadData() {
