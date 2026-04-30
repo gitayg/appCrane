@@ -125,25 +125,23 @@ function sidebar(active, subItems, activeSub) {
     return html;
   }).join('');
 
-  return '<div class="admin-topbar">' +
+  return '<div class="mobile-topbar">' +
+      '<a href="/dashboard" style="font-weight:700;font-size:1.05rem;text-decoration:none;color:var(--text)">App<span style="color:var(--accent)">Crane</span></a>' +
       '<button class="hamburger" onclick="toggleSidebar()" aria-label="Menu">&#9776;</button>' +
-      '<a href="/dashboard" class="admin-topbar-logo">App<span>Crane</span></a>' +
-      '<div class="admin-topbar-right">' +
-        '<span id="topbarUser" class="admin-topbar-user"></span>' +
-        '<button class="btn-topbar-signout" onclick="setKey(\'\');location.href=\'/dashboard\'">Sign out</button>' +
-      '</div>' +
     '</div>' +
     '<div class="sidebar-overlay" id="sidebarOverlay" onclick="closeSidebar()"></div>' +
     '<aside class="sidebar" id="mainSidebar">' +
       '<a href="/dashboard" class="sidebar-logo">App<span>Crane</span></a>' +
+      '<div class="sidebar-user-section">' +
+        '<span id="topbarUser" class="sidebar-user-name"></span>' +
+        '<button class="sidebar-user-signout" onclick="setKey(\'\');location.href=\'/dashboard\'">Sign out</button>' +
+      '</div>' +
       '<nav class="sidebar-nav">' + nav + '</nav>' +
       '<div class="sidebar-footer">' +
-        '<div id="userInfo" style="color:var(--text);font-weight:600" class="sidebar-footer-meta"></div>' +
         '<div id="craneVersion" style="color:var(--dim);cursor:pointer" class="sidebar-footer-meta" onclick="checkForUpdate()" title="Click to check for updates"></div>' +
         '<div class="sidebar-footer-links" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:2px">' +
           '<a href="/docs" style="color:var(--dim);text-decoration:none">Docs</a>' +
           '<a href="/agent-guide" style="color:var(--dim);text-decoration:none">Agent Guide</a>' +
-          '<button class="btn" onclick="setKey(\'\');location.href=\'/dashboard\'" style="font-size:.72rem;padding:2px 8px;margin-left:auto">Logout</button>' +
         '</div>' +
         '<div style="display:flex;align-items:center;gap:4px;margin-top:5px">' +
           '<div class="sidebar-kbd-hint" onclick="openCmdPalette()" title="Command palette (⌘K)">' +
@@ -213,11 +211,8 @@ async function loadUserInfo() {
   try {
     const me = await apiFetch('/api/auth/me');
     window.currentUser = me.user;
-    const display = me.user.name + ' (' + me.user.role + ')';
-    const sidebarUser = document.getElementById('userInfo');
-    if (sidebarUser) sidebarUser.textContent = display;
     const topbarUser = document.getElementById('topbarUser');
-    if (topbarUser) topbarUser.textContent = me.user.name;
+    if (topbarUser) topbarUser.textContent = me.user.name + ' (' + me.user.role + ')';
   } catch(e) {}
 }
 
