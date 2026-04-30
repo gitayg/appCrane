@@ -78,10 +78,25 @@ body {
   font-size: 1rem;
   color: var(--text);
 }
+.admin-topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
 .admin-topbar-user {
   font-size: .82rem;
   color: var(--dim);
 }
+.admin-topbar-signout {
+  background: var(--surface2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 5px 12px;
+  font-size: .8rem;
+  cursor: pointer;
+}
+.admin-topbar-signout:hover { border-color: var(--accent); color: var(--accent); }
 @media (max-width: 768px) {
   .admin-topbar { display: none; }
 }
@@ -91,6 +106,9 @@ body {
   padding: 14px 16px 10px;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
 }
 .sidebar-logo {
   font-weight: 700;
@@ -99,9 +117,16 @@ body {
   color: var(--text);
   white-space: nowrap;
   overflow: hidden;
-  display: block;
 }
 .sidebar-logo span { color: var(--accent); }
+.sidebar-logo-version {
+  font-size: .7rem;
+  color: var(--dim);
+  cursor: pointer;
+  font-family: monospace;
+  white-space: nowrap;
+}
+.sidebar-logo-version:hover { color: var(--accent); }
 .admin-sidebar.collapsed .sidebar-logo-section { padding: 14px 10px 10px; }
 .admin-sidebar.collapsed .sidebar-logo { font-size: .65rem; letter-spacing: .5px; }
 

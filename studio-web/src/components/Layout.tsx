@@ -106,17 +106,39 @@ export function Layout({ children, subItems, activeSub }: Props) {
 
       {/* Sidebar */}
       <aside className={`admin-sidebar${collapsed ? ' collapsed' : ''}${mobileOpen ? ' open' : ''}`} id="mainSidebar">
-        {/* Logo */}
+        {/* Logo + version */}
         <div className="sidebar-logo-section">
           <a href="/dashboard" className="sidebar-logo">
             App<span>Crane</span>
           </a>
-        </div>
-
-        {/* User section */}
-        <div className="sidebar-user-section">
-          <span className="sidebar-user-name">{userName}</span>
-          <button className="sidebar-user-signout" onClick={signOut}>Sign out</button>
+          {!collapsed && version && (
+            <span
+              className="sidebar-logo-version"
+              id="craneVersion"
+              title="Click to check for updates"
+              onClick={async () => {
+                const el = document.getElementById('craneVersion')
+                if (!el) return
+                el.textContent = 'checking...'
+                try {
+                  const data = await adminApi.get<any>('/api/version-check')
+                  if (data.update_available) {
+                    el.textContent = 'v' + data.current + ' → v' + data.latest + ' available!'
+                    if (confirm('Update to v' + data.latest + '?')) {
+                      el.textContent = 'updating...'
+                      await adminApi.post('/api/self-update')
+                      setTimeout(() => window.location.reload(), 5000)
+                    }
+                  } else {
+                    el.textContent = 'v' + data.current + ' (latest)'
+                    setTimeout(() => { el.textContent = version }, 3000)
+                  }
+                } catch { el.textContent = 'check failed' }
+              }}
+            >
+              {version}
+            </span>
+          )}
         </div>
 
         {/* Nav */}
@@ -150,32 +172,6 @@ export function Layout({ children, subItems, activeSub }: Props) {
 
         {/* Footer */}
         <div className="sidebar-footer">
-          <span
-            className="sidebar-footer-meta"
-            onClick={async () => {
-              const el = document.getElementById('craneVersion')
-              if (!el) return
-              el.textContent = 'checking...'
-              try {
-                const data = await adminApi.get<any>('/api/version-check')
-                if (data.update_available) {
-                  el.textContent = 'v' + data.current + ' → v' + data.latest + ' available!'
-                  if (confirm('Update to v' + data.latest + '?')) {
-                    el.textContent = 'updating...'
-                    await adminApi.post('/api/self-update')
-                    setTimeout(() => window.location.reload(), 5000)
-                  }
-                } else {
-                  el.textContent = 'v' + data.current + ' (latest)'
-                  setTimeout(() => { el.textContent = version }, 3000)
-                }
-              } catch { el.textContent = 'check failed' }
-            }}
-            id="craneVersion"
-            title="Click to check for updates"
-          >
-            {version}
-          </span>
           <div className="sidebar-footer-links">
             <a href="/docs">Docs</a>
             <a href="/agent-guide">Agent Guide</a>
@@ -221,7 +217,10 @@ export function Layout({ children, subItems, activeSub }: Props) {
       <main className={`admin-content${collapsed ? ' collapsed' : ''}`}>
         <div className="admin-topbar">
           <span className="admin-topbar-title">{pageTitle}</span>
-          {userName && <span className="admin-topbar-user">{userName}</span>}
+          <div className="admin-topbar-right">
+            {userName && <span className="admin-topbar-user">{userName}</span>}
+            <button className="admin-topbar-signout" onClick={signOut}>Sign out</button>
+          </div>
         </div>
         {children}
       </main>
