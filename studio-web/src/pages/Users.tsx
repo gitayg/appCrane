@@ -46,23 +46,25 @@ export function Users() {
   const yobRef = useRef<HTMLInputElement>(null)
 
   const loadUsers = () =>
-    adminApi.get<User[]>('/api/users').then(setUsers).catch(() => {})
+    adminApi.get<{ users: User[] }>('/api/users').then(d => setUsers(d.users ?? [])).catch(() => {})
 
   useEffect(() => {
     Promise.all([
-      adminApi.get<User[]>('/api/users'),
-      adminApi.get<App[]>('/api/apps'),
-    ]).then(([u, a]) => {
+      adminApi.get<{ users: User[] }>('/api/users'),
+      adminApi.get<{ apps: App[] }>('/api/apps'),
+    ]).then(([ur, ar]) => {
+      const u = ur.users ?? []
+      const a = ar.apps ?? []
       setUsers(u)
       setApps(a)
       const roleMap: Record<string, Record<number, AppRole>> = {}
       Promise.all(
         a.map(app =>
           adminApi
-            .get<{ user_id: number; app_role: AppRole }[]>(`/api/apps/${app.slug}/identity/users`)
-            .then(rows => {
+            .get<{ users: { id: number; user_id?: number; app_role: AppRole }[] }>(`/api/apps/${app.slug}/identity/users`)
+            .then(d => {
               roleMap[app.slug] = {}
-              for (const r of rows) roleMap[app.slug][r.user_id] = r.app_role
+              for (const r of (d.users ?? [])) roleMap[app.slug][r.user_id ?? r.id] = r.app_role
             })
             .catch(() => {
               roleMap[app.slug] = {}
