@@ -195,7 +195,7 @@ export async function createSession(app, userId, onLog) {
   const branchName = `coder/${sessionId}`;
 
   mkdirSync(sessionDir(sessionId), { recursive: true });
-  writeFileSync(apiKeyPath(sessionId), process.env.ANTHROPIC_API_KEY, { mode: 0o600 }); // nosemgrep
+  writeFileSync(apiKeyPath(sessionId), process.env.ANTHROPIC_API_KEY, { mode: 0o644 }); // nosemgrep
 
   db.prepare(`
     INSERT INTO coder_sessions (id, app_slug, user_id, branch_name, status)
