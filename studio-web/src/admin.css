@@ -217,7 +217,12 @@ body {
   flex-direction: column;
   gap: 5px;
 }
-.admin-sidebar.collapsed .sidebar-footer { display: none; }
+.admin-sidebar.collapsed .sidebar-footer-links,
+.admin-sidebar.collapsed .sidebar-footer .theme-btn,
+.admin-sidebar.collapsed .sidebar-footer .notif-wrap { display: none; }
+.admin-sidebar.collapsed .sidebar-footer { padding: 8px 4px; }
+.admin-sidebar.collapsed .sidebar-footer-row { justify-content: center; }
+.admin-sidebar.collapsed .sidebar-collapse-btn { margin-left: 0 !important; width: 100%; }
 .sidebar-footer-links { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 2px; }
 .sidebar-footer-links a { color: var(--dim); text-decoration: none; font-size: .78rem; }
 .sidebar-footer-links a:hover { color: var(--text); }
