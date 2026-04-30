@@ -101,7 +101,7 @@ function statCard(label, value, sub, pct) {
     (pct > 0 ? '<div class="bar"><div class="bar-fill" style="width:' + pct + '%;background:' + barColor(pct) + '"></div></div>' : '') + '</div>';
 }
 
-function sidebar(active) {
+function sidebar(active, subItems, activeSub) {
   const pages = [
     {id:'dashboard',  label:'Dashboard',   href:'/dashboard',    icon:'⊞'},
     {id:'applications',label:'Applications',href:'/applications', icon:'▣'},
@@ -110,12 +110,20 @@ function sidebar(active) {
     {id:'appstudio',  label:'AppStudio',    href:'/appstudio',    icon:'✦'},
     {id:'settings',   label:'Settings',     href:'/settings',     icon:'⚙'},
   ];
-  const nav = pages.map(p =>
-    '<a href="' + p.href + '" class="sidebar-link' + (active === p.id ? ' active' : '') + '" title="' + p.label + '">' +
+  const nav = pages.map(p => {
+    let html = '<a href="' + p.href + '" class="sidebar-link' + (active === p.id ? ' active' : '') + '" title="' + p.label + '">' +
       '<span class="sidebar-link-icon">' + p.icon + '</span>' +
       '<span class="sidebar-link-text">' + p.label + '</span>' +
-    '</a>'
-  ).join('');
+    '</a>';
+    if (active === p.id && subItems && subItems.length) {
+      html += '<div class="sidebar-sub-nav">';
+      subItems.forEach(s => {
+        html += '<a href="' + s.href + '" class="sidebar-sub-link' + (activeSub === s.id ? ' active' : '') + '">' + s.label + '</a>';
+      });
+      html += '</div>';
+    }
+    return html;
+  }).join('');
 
   return '<div class="mobile-topbar">' +
       '<a href="/dashboard" style="font-weight:700;font-size:1.05rem;text-decoration:none;color:var(--text)">App<span style="color:var(--accent)">Crane</span></a>' +
