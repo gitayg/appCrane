@@ -61,6 +61,31 @@ body {
 
 .container { max-width: 1200px; margin: 0 auto; padding: 24px; }
 
+/* ── Desktop topbar ──────────────────────────────── */
+.admin-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 24px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 7;
+}
+.admin-topbar-title {
+  font-weight: 600;
+  font-size: 1rem;
+  color: var(--text);
+}
+.admin-topbar-user {
+  font-size: .82rem;
+  color: var(--dim);
+}
+@media (max-width: 768px) {
+  .admin-topbar { display: none; }
+}
+
 /* ── Sidebar logo ────────────────────────────────── */
 .sidebar-logo-section {
   padding: 14px 16px 10px;

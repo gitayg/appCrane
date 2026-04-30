@@ -87,7 +87,9 @@ export function Layout({ children, subItems, activeSub }: Props) {
   }, [notifOpen, notifLoaded])
 
   const currentPath = location.pathname
-  const activeNavId = NAV.find(n => n.href === currentPath)?.id ?? ''
+  const activeNav = NAV.find(n => n.href === currentPath)
+  const activeNavId = activeNav?.id ?? ''
+  const pageTitle = activeNav?.label ?? ''
 
   return (
     <div className="admin-layout">
@@ -217,6 +219,10 @@ export function Layout({ children, subItems, activeSub }: Props) {
 
       {/* Page content */}
       <main className={`admin-content${collapsed ? ' collapsed' : ''}`}>
+        <div className="admin-topbar">
+          <span className="admin-topbar-title">{pageTitle}</span>
+          {userName && <span className="admin-topbar-user">{userName}</span>}
+        </div>
         {children}
       </main>
     </div>
