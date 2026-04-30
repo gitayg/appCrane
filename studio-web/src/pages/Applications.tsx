@@ -87,10 +87,12 @@ export function Applications() {
   const iconInputRefs = useRef<Record<string, HTMLInputElement | null>>({})
 
   async function loadAll() {
-    const [a, u] = await Promise.all([
-      adminApi.get<App[]>('/api/apps').catch(() => [] as App[]),
-      adminApi.get<User[]>('/api/users').catch(() => [] as User[]),
+    const [ar, ur] = await Promise.all([
+      adminApi.get<{ apps: App[] }>('/api/apps').catch(() => ({ apps: [] as App[] })),
+      adminApi.get<{ users: User[] }>('/api/users').catch(() => ({ users: [] as User[] })),
     ])
+    const a = ar.apps ?? []
+    const u = ur.users ?? []
     setApps(a)
     setUsers(u)
     fetchVersions(a)
