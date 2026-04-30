@@ -125,9 +125,13 @@ function sidebar(active, subItems, activeSub) {
     return html;
   }).join('');
 
-  return '<div class="mobile-topbar">' +
-      '<a href="/dashboard" style="font-weight:700;font-size:1.05rem;text-decoration:none;color:var(--text)">App<span style="color:var(--accent)">Crane</span></a>' +
+  return '<div class="admin-topbar">' +
       '<button class="hamburger" onclick="toggleSidebar()" aria-label="Menu">&#9776;</button>' +
+      '<a href="/dashboard" class="admin-topbar-logo">App<span>Crane</span></a>' +
+      '<div class="admin-topbar-right">' +
+        '<span id="topbarUser" class="admin-topbar-user"></span>' +
+        '<button class="btn-topbar-signout" onclick="setKey(\'\');location.href=\'/dashboard\'">Sign out</button>' +
+      '</div>' +
     '</div>' +
     '<div class="sidebar-overlay" id="sidebarOverlay" onclick="closeSidebar()"></div>' +
     '<aside class="sidebar" id="mainSidebar">' +
@@ -209,7 +213,11 @@ async function loadUserInfo() {
   try {
     const me = await apiFetch('/api/auth/me');
     window.currentUser = me.user;
-    document.getElementById('userInfo').textContent = me.user.name + ' (' + me.user.role + ')';
+    const display = me.user.name + ' (' + me.user.role + ')';
+    const sidebarUser = document.getElementById('userInfo');
+    if (sidebarUser) sidebarUser.textContent = display;
+    const topbarUser = document.getElementById('topbarUser');
+    if (topbarUser) topbarUser.textContent = me.user.name;
   } catch(e) {}
 }
 
