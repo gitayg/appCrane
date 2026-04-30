@@ -123,6 +123,9 @@ export function ChatPanel({ agent, app, onSessionUpdate }: Props) {
     <main className="chat">
       <header>
         <span className="name">{app.name}</span>
+        {app.production.deploy?.version && (
+          <span className="version">v{app.production.deploy.version}</span>
+        )}
         {agent.branchName && <span className="branch">{agent.branchName}</span>}
         <span className={`status-pill ${status.isStreaming ? 'streaming' : sessionStatus}`}>
           {status.isStreaming ? '● streaming' : sessionStatus}
