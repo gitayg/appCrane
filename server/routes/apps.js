@@ -15,6 +15,12 @@ import { reconcileOrphanedApps } from '../services/reconcile.js';
 
 const router = Router();
 
+const ICON_EXTS = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg'];
+function hasIconFile(slug) {
+  const dir = join(process.env.DATA_DIR || './data', 'apps', slug);
+  return ICON_EXTS.some(ext => existsSync(join(dir, `icon.${ext}`)));
+}
+
 router.use(requireAuth);
 
 /**
@@ -68,6 +74,7 @@ router.get('/', (req, res) => {
     return {
       ...app,
       resource_limits: JSON.parse(app.resource_limits || '{}'),
+      has_icon: hasIconFile(app.slug),
       ...(req.user.role === 'admin' ? { ports } : {}),
       urls,
       base_path: { production: `/${app.slug}/`, sandbox: `/${app.slug}-sandbox/` },
