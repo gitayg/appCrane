@@ -177,21 +177,34 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       appendLog(`Using uploaded release: ${releases[0]}`);
     }
 
-    // Read deployhub.json manifest
+    // Read deployhub.json manifest (everything except `version`)
     let manifest = {};
     const manifestPath = join(releaseDir, 'deployhub.json');
     if (existsSync(manifestPath)) {
       manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
-      appendLog(`Found deployhub.json: ${manifest.name} v${manifest.version}`);
     } else {
       appendLog('WARNING: No deployhub.json found. Using defaults.');
-      // Try to read version from package.json
-      const pkgPath = join(releaseDir, 'package.json');
-      if (existsSync(pkgPath)) {
+    }
+
+    // Resolve `version` with precedence:
+    //   1. package.json:version (always wins for Node apps — the field
+    //      developers actually bump)
+    //   2. deployhub.json:version (fallback for non-Node apps, e.g. Python/Go)
+    //   3. package.json:name (fills `manifest.name` if deployhub.json is absent)
+    // This eliminates the drift class where deployhub.json:version goes stale
+    // because every Node release bumps package.json but forgets the manifest.
+    const pkgPath = join(releaseDir, 'package.json');
+    if (existsSync(pkgPath)) {
+      try {
         const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
-        manifest.version = pkg.version;
-        manifest.name = pkg.name;
+        if (pkg.version) manifest.version = pkg.version;
+        if (!manifest.name && pkg.name) manifest.name = pkg.name;
+      } catch (e) {
+        appendLog(`WARNING: package.json parse failed (${e.message}); falling back to deployhub.json:version`);
       }
+    }
+    if (existsSync(manifestPath)) {
+      appendLog(`Found deployhub.json: ${manifest.name || '(no name)'} v${manifest.version || '(no version)'}`);
     }
 
     const envVars = db.prepare(
