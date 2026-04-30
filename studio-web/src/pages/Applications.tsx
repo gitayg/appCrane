@@ -9,6 +9,7 @@ interface App {
   visibility?: string
   github_url?: string
   source_type?: string
+  has_icon?: boolean
   resource_limits?: { max_ram_mb?: number; max_cpu_percent?: number }
   image_retention?: number
   production?: { deploy?: { status?: string; version?: string }; health?: { status: string } }
@@ -96,18 +97,11 @@ export function Applications() {
     setApps(a)
     setUsers(u)
     fetchVersions(a)
-    fetchIcons(a)
-  }
-
-  function fetchIcons(appList: App[]) {
-    appList.forEach(app => {
-      fetch(`/api/apps/${app.slug}/icon`, { method: 'HEAD' })
-        .then(r => {
-          if (!r.ok) return
-          setIconUrls(prev => ({ ...prev, [app.slug]: `/api/apps/${app.slug}/icon` }))
-        })
-        .catch(() => {})
-    })
+    const iconMap: Record<string, string> = {}
+    for (const app of a) {
+      if (app.has_icon) iconMap[app.slug] = `/api/apps/${app.slug}/icon`
+    }
+    setIconUrls(prev => ({ ...iconMap, ...prev }))
   }
 
   function fetchVersions(appList: App[]) {

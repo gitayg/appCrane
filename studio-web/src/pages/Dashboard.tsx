@@ -8,6 +8,7 @@ interface App {
   visibility?: string
   github_url?: string
   users?: { id: number; name: string }[]
+  has_icon?: boolean
   urls?: { production?: string; sandbox?: string }
   production?: { deploy?: { status?: string; version?: string }; health?: { status: string; config?: { endpoint?: string } } }
   sandbox?: { deploy?: { status?: string; version?: string }; health?: { status: string } }
@@ -184,19 +185,8 @@ function TrendChart({ days, apps }: { days: string[]; apps: ActivityApp[] }) {
   )
 }
 
-function AppIcon({ slug, name, onClick }: { slug: string; name: string; onClick?: () => void }) {
-  const [iconUrl, setIconUrl] = useState<string | null>(null)
-
-  useEffect(() => {
-    let cancelled = false
-    fetch(`/api/apps/${slug}/icon`, { method: 'HEAD' })
-      .then(r => {
-        if (cancelled || !r.ok) return
-        setIconUrl(`/api/apps/${slug}/icon`)
-      })
-      .catch(() => {})
-    return () => { cancelled = true }
-  }, [slug])
+function AppIcon({ slug, name, hasIcon, onClick }: { slug: string; name: string; hasIcon?: boolean; onClick?: () => void }) {
+  const iconUrl = hasIcon ? `/api/apps/${slug}/icon` : null
 
   return (
     <div
@@ -419,6 +409,7 @@ function AppCard({
           <AppIcon
             slug={app.slug}
             name={app.name}
+            hasIcon={app.has_icon}
             onClick={() => {
               const url = prodUrl || sandUrl
               if (url) onOpenFrame(app.slug, app.name, url)
