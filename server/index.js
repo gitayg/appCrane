@@ -74,17 +74,22 @@ app.use((req, res, next) => {
   next();
 });
 
-// Global API rate limiter: 300 req/min per authenticated user (or IP as fallback)
+// Global API rate limiter: 2000 req/min per authenticated user (or 600/min per IP fallback).
+// The admin SPA fans out ~40 requests per dashboard load (server health, apps, users,
+// enhancements, activity, metrics, plus per-app live-version probes) and auto-refreshes
+// every 30s, so the limit needs headroom for that plus normal navigation.
 const _apiRateMap = new Map();
 setInterval(() => { const now = Date.now(); for (const [k, rec] of _apiRateMap) { if (now > rec.resetAt) _apiRateMap.delete(k); } }, 5 * 60_000);
 function apiRateLimit(req, res, next) {
   const bearer = (req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
   const apiKey = req.headers['x-api-key'] || '';
+  const isAuthed = Boolean(bearer || apiKey);
   const key = bearer ? `t:${bearer}` : apiKey ? `k:${apiKey}` : `ip:${req.ip || req.socket?.remoteAddress || 'unknown'}`;
+  const limit = isAuthed ? 2000 : 600;
   const now = Date.now();
   const rec = _apiRateMap.get(key);
   if (!rec || now > rec.resetAt) { _apiRateMap.set(key, { count: 1, resetAt: now + 60_000 }); return next(); }
-  if (rec.count >= 300) return res.status(429).json({ error: { message: 'Too many requests', code: 'RATE_LIMITED' } });
+  if (rec.count >= limit) return res.status(429).json({ error: { message: 'Too many requests', code: 'RATE_LIMITED' } });
   rec.count++;
   next();
 }
