@@ -329,6 +329,25 @@ function bootSentinelFile() {
 app.post('/api/self-update', requireAuth, requireAdmin, async (req, res) => {
   const cwd = join(__dirname, '..');
   try {
+    // Refuse to restart while builds are in flight — interrupting docker build mid-stream
+    // leaves orphan dangling layers that pruneOldImages can't clean up. Caller can pass
+    // ?force=1 to override (e.g. if a build is genuinely stuck).
+    if (!req.query.force) {
+      const db = getDb();
+      const inflight = db.prepare(
+        "SELECT id, app_id, env FROM deployments WHERE status IN ('pending','building','deploying') LIMIT 5"
+      ).all();
+      if (inflight.length > 0) {
+        return res.status(409).json({
+          error: {
+            code: 'BUILDS_IN_FLIGHT',
+            message: `Refusing to self-update: ${inflight.length} deployment(s) currently building. Wait for them to finish or POST again with ?force=1.`,
+            in_flight: inflight,
+          },
+        });
+      }
+    }
+
     const { execFileSync, spawn } = await import('child_process');
     const { logAudit } = await import('./middleware/audit.js');
 

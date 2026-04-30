@@ -221,6 +221,13 @@ export async function pruneOldImages(slug, env, keep = 2) {
   } catch (e) {}
 }
 
+// Reclaim dangling/untagged images left behind by failed or interrupted builds.
+// Safe by default — `docker image prune -f` only removes images with no tags
+// AND no descendant tagged images, never touches anything in use by a container.
+export async function pruneDanglingImages() {
+  try { await dockerExec(['image', 'prune', '-f']); } catch (e) {}
+}
+
 export async function dockerAvailable() {
   try {
     await execFileAsync('docker', ['version', '--format', '{{.Server.Version}}'], { timeout: 5000 });

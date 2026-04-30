@@ -127,8 +127,13 @@ export function Layout({ children, subItems, activeSub }: Props) {
                     el.textContent = 'v' + data.current + ' → v' + data.latest + ' available!'
                     if (confirm('Update to v' + data.latest + '?')) {
                       el.textContent = 'updating...'
-                      await adminApi.post('/api/self-update')
-                      setTimeout(() => window.location.reload(), 5000)
+                      try {
+                        await adminApi.post('/api/self-update')
+                        setTimeout(() => window.location.reload(), 5000)
+                      } catch (err) {
+                        el.textContent = (err as Error).message || 'update failed'
+                        setTimeout(() => { el.textContent = version }, 6000)
+                      }
                     }
                   } else {
                     el.textContent = 'v' + data.current + ' (latest)'

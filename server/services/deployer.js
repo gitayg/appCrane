@@ -209,7 +209,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
 
     db.prepare("UPDATE deployments SET status = 'deploying' WHERE id = ?").run(deployId);
 
-    const { dockerAvailable, buildImageIfNeeded, getContainerImage, startApp: dockerStart, stopApp: dockerStop, pruneOldImages } = await import('./docker.js');
+    const { dockerAvailable, buildImageIfNeeded, getContainerImage, startApp: dockerStart, stopApp: dockerStop, pruneOldImages, pruneDanglingImages } = await import('./docker.js');
     const { ensureDockerfile, injectAppBasePathArg } = await import('./dockerfileGen.js');
     const { validateDockerfile } = await import('./dockerfileValidator.js');
 
@@ -289,6 +289,8 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     }
 
     pruneOldImages(app.slug, env, (app.image_retention ?? 0) + 1);
+    // Reclaim dangling layers from failed/interrupted prior builds (safe — never touches in-use images).
+    pruneDanglingImages();
 
     // 7. Update current symlink (remove old even if target is gone)
     const currentLink = resolve(join(appDir, 'current'));
