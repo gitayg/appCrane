@@ -14,22 +14,27 @@ textarea:focus{border-color:var(--accent)}
 .save-row{display:flex;align-items:center;gap:12px;margin-top:10px}
 .saved-msg{font-size:.82rem;color:var(--green);opacity:0;transition:opacity .3s}
 code.api-pill{background:var(--surface2);border:1px solid var(--border);border-radius:5px;padding:2px 8px;font-size:.78rem;color:var(--dim)}
-.settings-tabs{display:flex;gap:2px;border-bottom:1px solid var(--border);margin-bottom:24px}
-.settings-tab{background:none;border:none;border-bottom:2px solid transparent;padding:8px 18px;cursor:pointer;font-size:.88rem;font-weight:600;color:var(--dim);transition:color .15s,border-color .15s;margin-bottom:-1px}
-.settings-tab:hover{color:var(--text)}
-.settings-tab.active{color:var(--accent);border-bottom-color:var(--accent)}
-.settings-tab-panel{display:none}
-.settings-tab-panel.active{display:block}
 </style>
 </head>
 <body>
+<div class="page-body" id="pageRoot"></div>
 <script src="/docs/shared.js"></script>
-<div id="pageRoot"></div>
 <script>
-if (!checkAuth()) throw 'auth';
+const SETTINGS_SUB_ITEMS = [
+  {id:'branding',  label:'Branding',  href:'#branding'},
+  {id:'security',  label:'Security',  href:'#security'},
+  {id:'appstudio', label:'AppStudio', href:'#appstudio'},
+];
+
+function getActiveTab() {
+  const h = location.hash.replace('#', '');
+  return ['branding','security','appstudio'].indexOf(h) !== -1 ? h : 'appstudio';
+}
+
 const pageRoot = document.getElementById('pageRoot');
-pageRoot.className = 'page-body';
-pageRoot.insertAdjacentHTML('beforeend', sidebar('settings'));
+pageRoot.insertAdjacentHTML('afterbegin', sidebar('settings', SETTINGS_SUB_ITEMS, getActiveTab()));
+if (!checkAuth()) throw 'auth';
+
 const pageContent = document.createElement('div');
 pageContent.className = 'page-content';
 pageRoot.appendChild(pageContent);
@@ -43,35 +48,30 @@ heading.style.marginBottom = '16px';
 heading.textContent = 'Settings';
 container.appendChild(heading);
 
-// Tab bar
-const tabBar = document.createElement('div');
-tabBar.className = 'settings-tabs';
 const TABS = ['Branding', 'Security', 'AppStudio'];
-const DEFAULT_TAB = 'AppStudio';
-TABS.forEach((name) => {
-  const btn = document.createElement('button');
-  btn.className = 'settings-tab' + (name === DEFAULT_TAB ? ' active' : '');
-  btn.textContent = name;
-  btn.dataset.tab = name;
-  btn.onclick = () => switchTab(name);
-  tabBar.appendChild(btn);
-});
-container.appendChild(tabBar);
-
-// Tab panels
 const tabPanels = {};
 TABS.forEach((name) => {
   const panel = document.createElement('div');
-  panel.className = 'settings-tab-panel' + (name === DEFAULT_TAB ? ' active' : '');
   panel.id = 'tab-' + name;
+  panel.style.display = name.toLowerCase() === getActiveTab() ? 'block' : 'none';
   container.appendChild(panel);
   tabPanels[name] = panel;
 });
 
-function switchTab(name) {
-  document.querySelectorAll('.settings-tab').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
-  document.querySelectorAll('.settings-tab-panel').forEach(p => p.classList.toggle('active', p.id === 'tab-' + name));
+function tabNameFromHash(hash) {
+  if (hash === 'branding') return 'Branding';
+  if (hash === 'security') return 'Security';
+  return 'AppStudio';
 }
+
+window.addEventListener('hashchange', () => {
+  const active = getActiveTab();
+  const name = tabNameFromHash(active);
+  TABS.forEach(n => { tabPanels[n].style.display = n === name ? 'block' : 'none'; });
+  document.querySelectorAll('.sidebar-sub-link').forEach(a => {
+    a.classList.toggle('active', a.getAttribute('href') === '#' + active);
+  });
+});
 
 // settingsDiv kept for compat — points to current tab target
 const settingsDiv = { appendChild: (el) => _currentTabTarget.appendChild(el) };
