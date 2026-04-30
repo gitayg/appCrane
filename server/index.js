@@ -426,16 +426,17 @@ app.use('/api/settings', settingsRoutes); // General settings (branding, etc.)
 app.get('/login', (req, res) => sendHtml(res, join(__dirname, '..', 'docs', 'login.html')));
 app.get('/portal', (req, res) => sendHtml(res, join(__dirname, '..', 'docs', 'login.html')));
 
-// Dashboard (admin)
-app.get('/dashboard', (req, res) => sendHtml(res, join(__dirname, '..', 'docs', 'dashboard.html')));
-app.get('/applications', (req, res) => sendHtml(res, join(__dirname, '..', 'docs', 'applications.html')));
-app.get('/users-page', (req, res) => sendHtml(res, join(__dirname, '..', 'docs', 'users-page.html')));
-app.get('/audit-page', (req, res) => sendHtml(res, join(__dirname, '..', 'docs', 'audit-page.html')));
-app.get('/enhancements-page', (req, res) => sendHtml(res, join(__dirname, '..', 'docs', 'enhancements-page.html')));
-app.get('/appstudio', (req, res) => sendHtml(res, join(__dirname, '..', 'docs', 'appstudio.html')));
-app.get('/settings', (req, res) => sendHtml(res, join(__dirname, '..', 'docs', 'settings.html')));
-app.get('/studio', (req, res) => sendHtml(res, join(__dirname, '..', 'docs', 'studio-app', 'index.html')));
-app.get('/studio/*splat', (req, res) => sendHtml(res, join(__dirname, '..', 'docs', 'studio-app', 'index.html')));
+// Admin SPA — all admin routes served by the React admin-app bundle
+const adminSpa = join(__dirname, '..', 'docs', 'admin-app', 'index.html');
+app.get('/dashboard', (req, res) => sendHtml(res, adminSpa));
+app.get('/applications', (req, res) => sendHtml(res, adminSpa));
+app.get('/users-page', (req, res) => sendHtml(res, adminSpa));
+app.get('/audit-page', (req, res) => sendHtml(res, adminSpa));
+app.get('/enhancements-page', (req, res) => sendHtml(res, adminSpa));
+app.get('/appstudio', (req, res) => sendHtml(res, adminSpa));
+app.get('/settings', (req, res) => sendHtml(res, adminSpa));
+app.get('/studio', (req, res) => res.redirect(301, '/appstudio'));
+app.get('/studio/*splat', (req, res) => res.redirect(301, '/appstudio'));
 app.get('/coder', (req, res) => res.redirect(301, '/studio')); // legacy redirect
 
 // App manager (app user)
