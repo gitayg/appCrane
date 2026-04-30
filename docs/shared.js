@@ -131,7 +131,6 @@ function sidebar(active, subItems, activeSub) {
     '</div>' +
     '<div class="sidebar-overlay" id="sidebarOverlay" onclick="closeSidebar()"></div>' +
     '<aside class="sidebar" id="mainSidebar">' +
-      '<a href="/dashboard" class="sidebar-logo">App<span>Crane</span></a>' +
       '<div class="sidebar-user-section">' +
         '<span id="topbarUser" class="sidebar-user-name"></span>' +
         '<button class="sidebar-user-signout" onclick="setKey(\'\');location.href=\'/dashboard\'">Sign out</button>' +

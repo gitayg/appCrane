@@ -17,8 +17,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 /* Sidebar layout */
 .page-body{display:flex;min-height:100vh}
 .sidebar{width:220px;flex-shrink:0;background:var(--surface);border-right:1px solid var(--border);display:flex;flex-direction:column;position:fixed;top:0;left:0;bottom:0;overflow-y:auto;z-index:10}
-.sidebar-logo{display:block;padding:18px 16px 14px;font-weight:700;font-size:1.05rem;text-decoration:none;color:var(--text);border-bottom:1px solid var(--border);white-space:nowrap}
-.sidebar-logo span{color:var(--accent)}
 .sidebar-nav{flex:1;padding:8px}
 .sidebar-link{display:block;padding:7px 12px;border-radius:6px;color:var(--dim);text-decoration:none;font-size:.85rem;margin-bottom:2px}
 .sidebar-link:hover{background:var(--surface2);color:var(--text)}
