@@ -9,6 +9,7 @@ const NAV = [
   { id: 'users',        label: 'Users',         href: '/users-page',   icon: '◉' },
   { id: 'audit',        label: 'Audit Log',     href: '/audit-page',   icon: '≡' },
   { id: 'appstudio',    label: 'AppStudio',     href: '/appstudio',    icon: '✦' },
+  { id: 'docs',         label: 'Docs',          href: '/docs',         icon: '📖' },
   { id: 'settings',     label: 'Settings',      href: '/settings',     icon: '⚙' },
 ]
 
@@ -173,7 +174,6 @@ export function Layout({ children, subItems, activeSub }: Props) {
         {/* Footer */}
         <div className="sidebar-footer">
           <div className="sidebar-footer-links">
-            <a href="/docs">Docs</a>
             <a href="/agent-guide">Agent Guide</a>
           </div>
           <div className="sidebar-footer-row">
