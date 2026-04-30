@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>AppCrane - App Manager</title>
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="stylesheet" href="/docs/shared.css">
 <style>
 :root{--bg:#0f1117;--surface:#1a1d27;--surface2:#222536;--border:#3d4155;--text:#e4e4e7;--dim:#71717a;--accent:#3b82f6;--green:#22c55e;--yellow:#eab308;--red:#ef4444;--orange:#f97316}
 *{margin:0;padding:0;box-sizing:border-box}
@@ -93,17 +94,12 @@ th{color:var(--dim);font-weight:500}
 </style>
 </head>
 <body>
+<script src="/docs/shared.js"></script>
+<div class="page-body">
+<div class="page-content" style="overflow-y:auto">
 
-<div class="topbar">
-  <a href="/" class="logo">App<span>Crane</span></a>
-  <div class="right">
-    <span id="userName" style="color:var(--dim)"></span>
-    <a href="/agent-guide">Agent Guide</a>
-    <a href="/">Home</a>
-  </div>
-</div>
 <nav class="breadcrumb" id="breadcrumb" style="display:none">
-  <a href="/">Apps</a>
+  <a href="/applications">Apps</a>
   <span class="breadcrumb-sep">/</span>
   <span id="bcApp" style="color:var(--text);font-weight:500"></span>
   <span class="breadcrumb-sep">/</span>
@@ -228,17 +224,23 @@ th{color:var(--dim);font-weight:500}
 </div>
 
 <script>
+// Inject sidebar (shared.js already loaded; 'applications' is the active nav item)
+document.querySelector('.page-body').insertAdjacentHTML('afterbegin', sidebar('applications'));
+loadVersion(); loadUserInfo();
+
 const API = window.location.origin;
-let KEY = localStorage.getItem('cc_user_key') || localStorage.getItem('cc_api_key') || '';
+// KEY is already declared by shared.js (reads cc_api_key). Extend to also try cc_user_key.
+if (!KEY) KEY = localStorage.getItem('cc_user_key') || '';
 const urlSlug = new URLSearchParams(window.location.search).get('slug');
 let currentApp = urlSlug || localStorage.getItem('cc_current_app') || '';
 let currentEnv = 'production';
 let isAdmin = false;
 
 function doLogin() {
-  KEY = document.getElementById('keyInput').value.trim();
-  if (!KEY) return;
-  localStorage.setItem('cc_user_key', KEY);
+  const k = document.getElementById('keyInput').value.trim();
+  if (!k) return;
+  KEY = k;
+  localStorage.setItem('cc_user_key', k);
   init();
 }
 
@@ -263,7 +265,7 @@ function showMsg(msg, ok) {
 async function init() {
   try {
     const me = await apiFetch('/api/auth/me');
-    document.getElementById('userName').textContent = me.user.name + ' (' + me.user.role + ')';
+    // user display handled by sidebar footer (loadUserInfo)
     isAdmin = me.user.role === 'admin';
     if (isAdmin) document.getElementById('infoSection').classList.remove('hidden');
 
@@ -847,6 +849,8 @@ async function saveLimits() {
 // Init — remove stale appName display (breadcrumb replaces it)
 if (KEY) { init(); } else { document.getElementById('loginPanel').classList.remove('hidden'); }
 </script>
+
+</div></div><!-- /.page-content /.page-body -->
 
 <div id="logDrawer">
   <div class="log-drawer-hdr">
