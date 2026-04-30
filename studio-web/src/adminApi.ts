@@ -20,6 +20,11 @@ async function req<T = unknown>(path: string, init?: RequestInit): Promise<T> {
     window.location.href = '/dashboard'
     throw new Error('Unauthorized')
   }
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}))
+    const msg = (body as { error?: { message?: string } })?.error?.message || `HTTP ${r.status}`
+    throw new Error(msg)
+  }
   const data = await r.json().catch(() => ({}))
   return data as T
 }
