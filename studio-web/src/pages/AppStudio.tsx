@@ -275,7 +275,8 @@ export function AppStudio() {
 
   async function deleteEnhancement(id: number) {
     if (!confirm('Delete this request?')) return
-    await adminApi.del(`/api/enhancements/${id}`).catch(() => {})
+    const res = await adminApi.post<{ error?: { message?: string } }>(`/api/enhancements/${id}/delete`).catch(() => null)
+    if (res && res.error) { alert('Delete failed: ' + (res.error.message || 'unknown')); return }
     setAllEnhancements(prev => prev.filter(e => e.id !== id))
   }
 
