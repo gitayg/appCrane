@@ -8,9 +8,18 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .topbar .nav a:hover,.topbar .nav a.active{color:var(--text);background:var(--surface2)}
 .topbar .right{display:flex;gap:10px;align-items:center;font-size:.85rem}
 .topbar .right a{color:var(--dim);text-decoration:none}
+/* Admin top bar — matches portal header */
+.admin-topbar{position:fixed;top:0;left:0;right:0;height:56px;background:var(--surface);border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 16px;z-index:20;gap:10px}
+.admin-topbar-logo{font-size:1.05rem;font-weight:800;text-decoration:none;color:var(--text);flex-shrink:0}
+.admin-topbar-logo span{color:var(--accent)}
+.admin-topbar-right{display:flex;align-items:center;gap:10px;margin-left:auto}
+.admin-topbar-user{font-size:.82rem;color:var(--dim)}
+.admin-topbar .hamburger{display:none}
+.btn-topbar-signout{background:none;border:1px solid var(--border);color:var(--dim);padding:4px 10px;border-radius:6px;cursor:pointer;font-size:.78rem;font-weight:500;transition:border-color .15s,color .15s;white-space:nowrap;font-family:inherit}
+.btn-topbar-signout:hover{border-color:var(--text);color:var(--text)}
 /* Sidebar layout */
-.page-body{display:flex;min-height:100vh}
-.sidebar{width:220px;flex-shrink:0;background:var(--surface);border-right:1px solid var(--border);display:flex;flex-direction:column;position:fixed;top:0;left:0;bottom:0;overflow-y:auto;z-index:10}
+.page-body{display:flex;min-height:100vh;padding-top:56px}
+.sidebar{width:220px;flex-shrink:0;background:var(--surface);border-right:1px solid var(--border);display:flex;flex-direction:column;position:fixed;top:56px;left:0;bottom:0;overflow-y:auto;z-index:10}
 .sidebar-logo{display:block;padding:18px 16px 14px;font-weight:700;font-size:1.05rem;text-decoration:none;color:var(--text);border-bottom:1px solid var(--border);white-space:nowrap}
 .sidebar-logo span{color:var(--accent)}
 .sidebar-nav{flex:1;padding:8px}
@@ -25,13 +34,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .sidebar-footer{padding:12px 14px;border-top:1px solid var(--border);font-size:.78rem;display:flex;flex-direction:column;gap:5px}
 .page-content{margin-left:220px;flex:1;min-width:0}
 .container{max-width:1200px;margin:0 auto;padding:24px}
-.mobile-topbar{display:none}
+.mobile-topbar{display:none!important}
 .sidebar-overlay{display:none;position:fixed;inset:0;z-index:9;background:rgba(0,0,0,.45)}
 .sidebar-overlay.open{display:block}
 .hamburger{background:none;border:none;color:var(--text);font-size:1.3rem;cursor:pointer;padding:4px 8px;line-height:1}
 @media(max-width:768px){
-  .page-body{flex-direction:column}
-  .mobile-topbar{display:flex;align-items:center;justify-content:space-between;padding:10px 16px;background:var(--surface);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:8;width:100%}
+  .admin-topbar .hamburger{display:flex}
   .sidebar{transform:translateX(-220px);transition:transform .22s ease;box-shadow:none}
   .sidebar.open{transform:translateX(0);box-shadow:4px 0 24px rgba(0,0,0,.5)}
   .page-content{margin-left:0}
