@@ -144,10 +144,26 @@ export function Applications() {
   }
 
   async function checkUpdates(slug: string) {
-    const r = await adminApi.get<{ message?: string; status?: string; current?: string; latest?: string }>(`/api/apps/${slug}/updates`).catch(() => null)
-    const text = r
-      ? (r.message ?? (r.status === 'up-to-date' ? 'Up to date' : `${r.current} → ${r.latest}`))
-      : 'Error'
+    type UpdatesRes = {
+      latest_sha?: string
+      latest_message?: string
+      production?: { deployed_sha?: string | null; update_available?: boolean }
+      sandbox?: { deployed_sha?: string | null; update_available?: boolean }
+      error?: { message?: string }
+    }
+    const r = await adminApi.get<UpdatesRes>(`/api/apps/${slug}/updates`).catch(() => null)
+    let text: string
+    if (!r) text = 'Error'
+    else if (r.error) text = r.error.message || 'Error'
+    else if (r.production?.update_available || r.sandbox?.update_available) {
+      const envs = [
+        r.production?.update_available ? 'prod' : null,
+        r.sandbox?.update_available ? 'sand' : null,
+      ].filter(Boolean).join(' + ')
+      text = `↑ ${envs} → ${r.latest_sha ?? 'new'}`
+    } else {
+      text = '✓ up to date'
+    }
     setCheckUpdateText(prev => ({ ...prev, [slug]: text }))
     setTimeout(() => setCheckUpdateText(prev => ({ ...prev, [slug]: '' })), 5000)
   }
