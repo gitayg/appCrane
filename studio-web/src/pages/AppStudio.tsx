@@ -348,27 +348,6 @@ export function AppStudio() {
 
   return (
     <div className="container" style={{ maxWidth: 1400 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 0, marginBottom: 20, borderBottom: '1px solid var(--border)' }}>
-        {(['requests', 'library', 'studio'] as const).map(t => (
-          <a
-            key={t}
-            href={`#${t}`}
-            style={{
-              padding: '10px 20px',
-              fontWeight: 600,
-              fontSize: '.88rem',
-              color: tab === t ? 'var(--text)' : 'var(--dim)',
-              borderBottom: tab === t ? '2px solid var(--accent)' : '2px solid transparent',
-              textDecoration: 'none',
-              textTransform: 'capitalize',
-              marginBottom: -1,
-            }}
-          >
-            {t}
-          </a>
-        ))}
-      </div>
-
       {tab === 'requests' && (
         selected ? (
           <DetailView
