@@ -288,7 +288,10 @@ export async function generateCode({ jobId, app, enhancementId, plan, summary, a
 
   writeFileSync(join(studioDir, 'prompt.txt'), buildPrompt({ plan, summary, agentContext, contextDoc, enhancementMessage })); // nosemgrep
   writeFileSync(join(studioDir, 'runner.js'), buildRunnerScript()); // nosemgrep
-  writeFileSync(join(studioDir, 'api_key'), process.env.ANTHROPIC_API_KEY || '', { mode: 0o600 }); // nosemgrep — key written to ro-mounted dir, not passed via docker env
+  // 0o644 (not 0o600) — the studio container runs as a non-root user that
+  // wouldn't otherwise be able to read this file. Host-side this dir is under
+  // DATA_DIR/appstudio/jobs/{jobId}/ and is cleaned up when the job finishes.
+  writeFileSync(join(studioDir, 'api_key'), process.env.ANTHROPIC_API_KEY || '', { mode: 0o644 }); // nosemgrep — key written to ro-mounted dir, not passed via docker env
   if (contextDoc) onLog?.(`[studio] Injected codebase context (${contextDoc.length} chars) — coder will skip orientation exploration`);
 
   const containerName = `appcrane-studio-${jobId}`;
