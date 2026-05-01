@@ -1,9 +1,10 @@
-import { spawn, execFileSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import { mkdirSync, existsSync, writeFileSync, rmSync } from 'fs';
 import { join, resolve } from 'path';
 import { decrypt } from './encryption.js';
 import { ensureStudioImage } from './appstudio/generator.js';
 import { assertCapacity } from './containerLimit.js';
+import { runAgentExec } from './llm/runAgent.js';
 import log from '../utils/logger.js';
 
 const ASK_IMAGE      = process.env.APPSTUDIO_IMAGE || 'appcrane-studio:latest';
@@ -28,68 +29,6 @@ function buildCloneUrl(app) {
     url.username = token;
     return url.toString();
   } catch (_) { return app.github_url; }
-}
-
-// Runner script executed via `docker exec` — reads /studio/prompt.txt, runs Claude,
-// emits [tokens:N] lines for live tracking, then emits the answer between sentinels.
-function buildRunnerScript() {
-  return `#!/usr/bin/env node
-'use strict';
-const { spawn } = require('child_process');
-const { createInterface } = require('readline');
-const fs = require('fs');
-
-const model = process.env.ASK_MODEL;
-const prompt = fs.readFileSync('/studio/prompt.txt', 'utf8');
-const claudeEnv = { ...process.env, HOME: '/home/studio', PATH: '/usr/local/bin:/usr/bin:/bin' };
-
-const child = spawn('claude', [
-  '-p', prompt,
-  '--model', model,
-  '--dangerously-skip-permissions',
-  '--output-format', 'stream-json',
-  '--verbose',
-], { stdio: ['ignore', 'pipe', 'pipe'], cwd: '/workspace', env: claudeEnv });
-
-let answer = '';
-let totalTokens = 0;
-let lastEmittedTokens = -1;
-
-const rl = createInterface({ input: child.stdout, crlfDelay: Infinity });
-rl.on('line', (line) => {
-  if (!line.trim()) return;
-  try {
-    const evt = JSON.parse(line);
-    if (evt.type === 'result') {
-      answer = evt.result || '';
-      if (evt.usage) {
-        totalTokens = (evt.usage.input_tokens || 0) + (evt.usage.output_tokens || 0)
-          + (evt.usage.cache_read_input_tokens || 0);
-      }
-    } else if (evt.type === 'assistant' && evt.message && evt.message.usage) {
-      const u = evt.message.usage;
-      totalTokens = (u.input_tokens || 0) + (u.output_tokens || 0) + (u.cache_read_input_tokens || 0);
-      if (totalTokens !== lastEmittedTokens) {
-        lastEmittedTokens = totalTokens;
-        process.stdout.write('[tokens:' + totalTokens + ']\\n');
-      }
-    }
-  } catch (_) {}
-});
-
-child.stderr.on('data', (c) => process.stderr.write(c));
-
-const killTimer = setTimeout(() => { child.kill('SIGTERM'); }, ${ASK_TIMEOUT_MS});
-child.on('error', (err) => { clearTimeout(killTimer); console.error('[ask] Error: ' + err.message); process.exit(1); });
-child.on('close', (code) => {
-  clearTimeout(killTimer);
-  if (code !== 0 && code !== null) { console.error('[ask] Claude exited with code ' + code); process.exit(code || 1); }
-  if (totalTokens > 0 && totalTokens !== lastEmittedTokens) {
-    process.stdout.write('[tokens:' + totalTokens + ']\\n');
-  }
-  process.stdout.write('\\x00ASK_START\\x00' + answer + '\\x00ASK_END\\x00\\n');
-});
-`;
 }
 
 function buildPrompt({ contextDoc, agentContext, history, question }) {
@@ -143,7 +82,6 @@ async function ensureSessionContainer(sessionId, app, onLog) {
   const containerName = `appcrane-ask-s${sessionId}`;
   const dir = sessionDir(sessionId);
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, 'runner.js'), buildRunnerScript()); // nosemgrep
 
   // Kill any existing container with this name (e.g. from a previous server run)
   try { execFileSync('docker', ['rm', '-f', containerName], { stdio: 'pipe', timeout: 10000 }); } catch (_) {}
@@ -182,58 +120,50 @@ async function ensureSessionContainer(sessionId, app, onLog) {
   return session;
 }
 
-function extractAnswer(stdout) {
-  const startMark = '\x00ASK_START\x00';
-  const endMark   = '\x00ASK_END\x00';
-  const si = stdout.indexOf(startMark);
-  const ei = stdout.indexOf(endMark);
-  return (si !== -1 && ei !== -1)
-    ? stdout.slice(si + startMark.length, ei).trim()
-    : stdout.split('\n').filter(l => !l.startsWith('[ask]') && !l.startsWith('[stderr]')).join('\n').trim();
-}
-
 export async function runAskJob({ sessionId, app, question, history, agentContext, contextDoc, onLog, onTokens }) {
   const session = await ensureSessionContainer(sessionId, app, onLog);
-
   const prompt = buildPrompt({ contextDoc, agentContext, history, question });
-  writeFileSync(join(session.dir, 'prompt.txt'), prompt); // nosemgrep
 
   onLog?.('[ask] Running Claude Code...');
 
   return new Promise((resolve, reject) => {
-    const child = spawn('docker', ['exec', session.containerName, 'node', '/studio/runner.js'], { stdio: 'pipe' });
-    let stdout = '';
+    let answer = '';
     let timedOut = false;
 
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill('SIGTERM');
-    }, ASK_TIMEOUT_MS + 60000);
-
-    child.stdout.on('data', (c) => {
-      const text = c.toString();
-      stdout += text;
-      text.split('\n').forEach(line => {
-        if (!line.trim() || line.startsWith('\x00')) return;
-        const tm = line.match(/^\[tokens:(\d+)\]$/);
-        if (tm) { onTokens?.(parseInt(tm[1], 10)); return; }
-        onLog?.(line);
-      });
+    const runner = runAgentExec({
+      containerId: session.containerName,
+      prompt,
+      apiKey: process.env.ANTHROPIC_API_KEY,
+      model: ASK_MODEL,
+      timeoutMs: ASK_TIMEOUT_MS + 60000,
     });
-    child.stderr.on('data', (c) => c.toString().split('\n').forEach(l => { if (l.trim()) onLog?.(`[stderr] ${l}`); }));
 
-    child.on('error', (err) => { clearTimeout(timer); reject(err); });
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      if (timedOut) return reject(new Error('Ask Claude timed out'));
-      if (code !== 0) return reject(new Error(`Runner exited with code ${code}`));
+    runner.on('data', (ev) => {
+      if (ev.type === 'text') answer += ev.text;
+      else if (ev.type === 'tool') onLog?.(`[ask:tool] ${ev.name}`);
+    });
+
+    runner.on('result', (ev) => {
+      onTokens?.(ev.inputTokens + ev.outputTokens);
+    });
+
+    runner.on('error', (err) => {
+      timedOut = /timed out/i.test(err.message);
+      reject(timedOut ? new Error('Ask Claude timed out') : err);
+    });
+
+    runner.on('exit', (code) => {
+      if (timedOut) return; // already rejected via 'error'
+      if (code !== 0) return reject(new Error(`Ask Claude exited with code ${code}`));
 
       // Reset idle timer — container stays alive for 5 more minutes
       clearTimeout(session.idleTimer);
       session.idleTimer = setTimeout(() => stopSession(sessionId), IDLE_TIMEOUT_MS);
 
-      resolve(extractAnswer(stdout));
+      resolve(answer.trim());
     });
+
+    runner.start();
   });
 }
 
