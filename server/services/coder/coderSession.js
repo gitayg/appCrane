@@ -1,10 +1,11 @@
 import { execFileSync } from 'child_process';
-import { mkdirSync, chmodSync, existsSync } from 'fs';
+import { mkdirSync, chmodSync, existsSync, readFileSync } from 'fs';
 import { join, resolve } from 'path';
 import { randomUUID } from 'crypto';
 import { getDb } from '../../db.js';
 import { decrypt } from '../encryption.js';
 import { ensureStudioImage } from '../appstudio/generator.js';
+import { ensureCodebaseContext } from '../appstudio/contextBuilder.js';
 import { ClaudeRunner } from './claudeRunner.js';
 import log from '../../utils/logger.js';
 
@@ -98,6 +99,7 @@ export function recoverOrphans() {
       execFileSync('docker', ['inspect', '--format', '{{.State.Running}}', s.container_id], { stdio: 'pipe', timeout: 5000 });
       // Container still running — re-register in memory
       sessions.set(s.id, {
+        appSlug: s.app_slug,
         containerId: s.container_id,
         workspaceDir: s.workspace_dir,
         branch: s.branch_name,
@@ -199,6 +201,7 @@ export async function createSession(app, userId, onLog) {
     const containerId  = startContainer(sessionId, workspaceDir, onLog);
 
     sessions.set(sessionId, {
+      appSlug: app.slug,
       containerId,
       workspaceDir,
       branch: branchName,
@@ -212,6 +215,13 @@ export async function createSession(app, userId, onLog) {
       container_id: containerId,
       workspace_dir: workspaceDir,
     });
+
+    // Pre-warm the codebase context so the first dispatch doesn't pay the
+    // ~30s build cost. Fire-and-forget; the dispatch path will await this
+    // anyway and read from cache once it lands.
+    ensureCodebaseContext(app.slug, workspaceDir).catch(err =>
+      log.warn(`Coder: context pre-warm failed for ${app.slug}: ${err.message}`)
+    );
 
     publish(sessionId, { type: 'status', status: 'idle' });
     return sessionId;
@@ -235,6 +245,7 @@ export async function resumeSession(sessionId, onLog) {
   const containerId = startContainer(sessionId, row.workspace_dir, onLog);
 
   sessions.set(sessionId, {
+    appSlug: row.app_slug,
     containerId,
     workspaceDir: row.workspace_dir,
     branch: row.branch_name,
@@ -247,21 +258,77 @@ export async function resumeSession(sessionId, onLog) {
   publish(sessionId, { type: 'status', status: 'idle' });
 }
 
+// Mirror the context bundling that AppStudio enhancement coders use
+// (server/services/appstudio/generator.js: buildPrompt). Each Studio
+// chat dispatch is a one-shot `claude -p`, so we re-supply the context
+// every turn — Claude has no in-process memory across dispatches.
+function buildChatPrompt({ contextDoc, agentContext, userMessage }) {
+  const parts = [];
+  if (contextDoc?.trim()) {
+    parts.push('# Codebase context');
+    parts.push('Use this architectural overview to skip broad exploration. Read specific files directly when you need exact details.');
+    parts.push('');
+    parts.push(contextDoc);
+    parts.push('');
+  }
+  if (agentContext?.trim()) {
+    parts.push('# Per-app context from the operator');
+    parts.push(agentContext);
+    parts.push('');
+  }
+  parts.push('# User message');
+  parts.push(userMessage);
+  return parts.join('\n');
+}
+
+async function loadDispatchContext(appSlug, workspaceDir) {
+  let contextDoc = '';
+  try {
+    const r = await ensureCodebaseContext(appSlug, workspaceDir);
+    contextDoc = r?.contextDoc || '';
+  } catch (err) {
+    log.warn(`Coder: ensureCodebaseContext failed for ${appSlug}: ${err.message}`);
+  }
+  let agentContext = '';
+  try {
+    const notesPath = join(resolve(process.env.DATA_DIR || './data'), 'apps', appSlug, 'agent-context.md');
+    if (existsSync(notesPath)) agentContext = readFileSync(notesPath, 'utf8');
+  } catch (_) {}
+  return { contextDoc, agentContext };
+}
+
 export async function dispatch(sessionId, prompt) {
   const state = sessions.get(sessionId);
   if (!state) throw new Error('Session not active (start or resume first)');
   if (state.runner) throw new Error('A dispatch is already running');
 
   touchActivity(sessionId);
+  // Persist the ORIGINAL user message so chat history shows what the user typed.
   appendMessage(sessionId, 'user', prompt);
   updateDb(sessionId, { status: 'active' });
   state.status = 'active';
   publish(sessionId, { type: 'status', status: 'active' });
 
+  // Augment the prompt sent to Claude with the same context bundle the
+  // enhancement-request coder gets: cached codebase summary + per-app
+  // operator notes (data/apps/<slug>/agent-context.md). Falls back to the
+  // bare user message if either source is unavailable.
+  let augmentedPrompt = prompt;
+  if (state.appSlug) {
+    try {
+      const { contextDoc, agentContext } = await loadDispatchContext(state.appSlug, state.workspaceDir);
+      if (contextDoc || agentContext) {
+        augmentedPrompt = buildChatPrompt({ contextDoc, agentContext, userMessage: prompt });
+      }
+    } catch (err) {
+      log.warn(`Coder: dispatch context load failed: ${err.message}`);
+    }
+  }
+
   const runner = new ClaudeRunner({
     containerId:  state.containerId,
     workspaceDir: state.workspaceDir,
-    prompt,
+    prompt: augmentedPrompt,
     apiKey: process.env.ANTHROPIC_API_KEY,
   });
   state.runner = runner;
