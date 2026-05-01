@@ -1,20 +1,11 @@
-import Anthropic from '@anthropic-ai/sdk';
 import { execFileSync } from 'child_process';
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { getDb } from '../../db.js';
 import log from '../../utils/logger.js';
+import { complete as oneShotComplete } from '../llm/oneShot.js';
 
 const MODEL = process.env.APPSTUDIO_PLANNER_MODEL || 'claude-sonnet-4-6';
-
-let _client = null;
-function client() {
-  if (!_client) {
-    if (!process.env.ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY not set');
-    _client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-  }
-  return _client;
-}
 
 function getGitHash(repoDir) {
   try {
@@ -74,12 +65,8 @@ function collectKeyFiles(repoDir, fileTree) {
 }
 
 async function callClaude(prompt) {
-  const msg = await client().messages.create({
-    model: MODEL,
-    max_tokens: 2048,
-    messages: [{ role: 'user', content: prompt }],
-  });
-  return msg.content.find(b => b.type === 'text')?.text || '';
+  const { text } = await oneShotComplete({ prompt, model: MODEL, maxTokens: 2048 });
+  return text;
 }
 
 async function buildContextDoc(repoDir, fileTree, keyFiles) {
