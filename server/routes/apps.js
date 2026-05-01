@@ -251,10 +251,10 @@ router.get('/:slug', requireAppAccess, (req, res) => {
 /**
  * PUT /api/apps/:slug - Update app (admin or assigned user)
  */
-router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), (req, res) => {
+router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req, res) => {
   const db = getDb();
   const app = req.app;
-  const { name, domain, description, category, source_type, github_url, branch, github_token, max_ram_mb, max_cpu_percent, public_access, visibility, image_retention } = req.body;
+  const { name, domain, description, category, source_type, github_url, branch, github_token, max_ram_mb, max_cpu_percent, public_access, visibility, image_retention, frame_ancestors } = req.body;
 
   const updates = {};
   if (name !== undefined) updates.name = name;
@@ -307,11 +307,30 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), (req, res)
     });
   }
 
+  if (frame_ancestors !== undefined) {
+    if (frame_ancestors === null || frame_ancestors === '') {
+      updates.frame_ancestors = null;
+    } else {
+      // Validate CSP source-list syntax: tokens separated by spaces, each
+      // either 'self' / 'none' (with quotes) or a scheme://host[:port]
+      // (optional wildcards in subdomain only). Reject anything containing
+      // ;, newlines, double-quotes, or other CSP-injection characters.
+      const v = String(frame_ancestors).trim();
+      if (!/^[A-Za-z0-9 _.\-:/'*]+$/.test(v))     throw new AppError("frame_ancestors contains invalid characters", 400, 'VALIDATION');
+      if (v.length > 512)                          throw new AppError("frame_ancestors too long (max 512 chars)", 400, 'VALIDATION');
+      const tokens = v.split(/\s+/).filter(Boolean);
+      const TOKEN_RE = /^('self'|'none'|https?:\/\/(\*\.)?[a-z0-9.\-]+(:\d+)?)$/i;
+      const bad = tokens.find(t => !TOKEN_RE.test(t));
+      if (bad) throw new AppError(`frame_ancestors token "${bad}" is not a valid CSP source`, 400, 'VALIDATION');
+      updates.frame_ancestors = tokens.join(' ');
+    }
+  }
+
   if (Object.keys(updates).length === 0) {
     return res.json({ app, message: 'No changes' });
   }
 
-  const ALLOWED_APP_COLS = new Set(['name','domain','description','category','source_type','github_url','branch','public_access','visibility','github_token_encrypted','resource_limits','runtime','image_retention']);
+  const ALLOWED_APP_COLS = new Set(['name','domain','description','category','source_type','github_url','branch','public_access','visibility','github_token_encrypted','resource_limits','runtime','image_retention','frame_ancestors']);
   const invalidKey = Object.keys(updates).find(k => !ALLOWED_APP_COLS.has(k));
   if (invalidKey) throw new AppError(`Invalid field: ${invalidKey}`, 400, 'VALIDATION');
 
@@ -319,6 +338,11 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), (req, res)
   const values = Object.values(updates);
 
   db.prepare(`UPDATE apps SET ${setClauses} WHERE id = ?`).run(...values, app.id);
+
+  // frame_ancestors changes the per-app Caddyfile block — reload to apply.
+  if ('frame_ancestors' in updates) {
+    await reloadCaddy().catch(e => log.warn(`Caddy reload after frame_ancestors update: ${e.message}`));
+  }
 
   const updated = db.prepare('SELECT * FROM apps WHERE id = ?').get(app.id);
   res.json({ app: { ...updated, resource_limits: JSON.parse(updated.resource_limits || '{}') } });

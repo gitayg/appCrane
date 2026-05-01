@@ -450,8 +450,30 @@ app.use('/api/apps', usersRoutes);        // /api/apps/:slug/roles, /api/apps/:s
 app.use('/api/settings', settingsRoutes); // General settings (branding, etc.)
 
 // Login page
-app.get('/login', (req, res) => sendHtml(res, join(__dirname, '..', 'docs', 'login.html')));
-app.get('/portal', (req, res) => sendHtml(res, join(__dirname, '..', 'docs', 'login.html')));
+// /login + /portal: when the SSO redirect targets an app with custom
+// frame_ancestors, drop the global X-Frame-Options + emit a permissive
+// CSP so the SSO step renders inside that app's allowed embedders.
+function loginHandler(req, res) {
+  const redirect = String(req.query.redirect || '');
+  // Pull the leading path segment and match it against an app slug
+  // (e.g. /snc, /snc-sandbox, /snc/…)
+  const m = redirect.match(/^\/([a-z][a-z0-9-]*)/);
+  if (m) {
+    const candidateSlug = m[1].replace(/-sandbox$/, '');
+    try {
+      const row = getDb().prepare('SELECT frame_ancestors FROM apps WHERE slug = ?').get(candidateSlug);
+      if (row?.frame_ancestors) {
+        res.removeHeader('X-Frame-Options');
+        res.setHeader('Content-Security-Policy',
+          `${HTML_CSP}; frame-ancestors ${row.frame_ancestors}`);
+        return res.sendFile(join(__dirname, '..', 'docs', 'login.html'));
+      }
+    } catch (_) {}
+  }
+  sendHtml(res, join(__dirname, '..', 'docs', 'login.html'));
+}
+app.get('/login', loginHandler);
+app.get('/portal', loginHandler);
 
 // Admin SPA — all admin routes served by the React admin-app bundle
 const adminSpa = join(__dirname, '..', 'docs', 'admin-app', 'index.html');
