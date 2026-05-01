@@ -309,6 +309,49 @@ async function handleCode(job) {
       }
     }
 
+    // Rebuild any frontend sub-workspace whose source files were touched, so a
+    // checked-in dist/ stays in sync with src/. Detection: any top-level dir
+    // referenced by changedFiles that has its own package.json with `scripts.build`.
+    // Common case: monorepo with `client/` (React/Vue/Svelte) and a checked-in
+    // `client/dist/`. Without this step, AppStudio merges src changes but the
+    // deployed bundle stays stale.
+    const touchedTopDirs = new Set();
+    for (const f of changedFiles) {
+      const slash = f.indexOf('/');
+      if (slash > 0) touchedTopDirs.add(f.slice(0, slash));
+    }
+    let rebuiltAny = false;
+    for (const dir of touchedTopDirs) {
+      const subPkgPath = join(workspaceDir, dir, 'package.json');
+      if (!existsSync(subPkgPath)) continue;
+      let subPkg;
+      try { subPkg = JSON.parse(readFileSync(subPkgPath, 'utf8')); } catch (_) { continue; }
+      if (!subPkg.scripts?.build) continue;
+      onLog(`[studio:build] ${dir}/ has a build script — running npm install && npm run build`);
+      try {
+        execFileSync('npm', ['install', '--prefer-offline', '--no-audit', '--no-fund'], {
+          cwd: join(workspaceDir, dir), stdio: 'pipe', timeout: 300000,
+        });
+        execFileSync('npm', ['run', 'build'], {
+          cwd: join(workspaceDir, dir), stdio: 'pipe', timeout: 300000,
+        });
+        onLog(`[studio:build] ${dir}/ built successfully`);
+        rebuiltAny = true;
+      } catch (err) {
+        const detail = (err.stderr?.toString() || err.stdout?.toString() || err.message || '').trim();
+        onLog(`[studio:build] ${dir}/ build FAILED: ${detail.slice(0, 500)}`);
+        throw new Error(`Frontend build failed in ${dir}/: ${detail.slice(0, 200)}`);
+      }
+    }
+    if (rebuiltAny) {
+      git(['add', '-A']);
+      try {
+        const out2 = git(['diff', '--cached', '--name-only']).toString().trim();
+        changedFiles = out2 ? out2.split('\n').filter(Boolean) : changedFiles;
+      } catch (_) {}
+      onLog(`[studio:git] Re-staged after build — ${changedFiles.length} file(s) total`);
+    }
+
     onLog(`[studio:git] ${changedFiles.length} file(s) staged:\n` + changedFiles.map(f => `  + ${f}`).join('\n'));
     onLog(`[studio:git] Committing: "${commitMsg}"`);
     git(['commit', '-m', commitMsg]);
