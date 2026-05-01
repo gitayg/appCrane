@@ -1,5 +1,5 @@
 import { execFileSync } from 'child_process';
-import { mkdirSync, chmodSync, existsSync, readFileSync } from 'fs';
+import { mkdirSync, chmodSync, existsSync, readFileSync, readdirSync } from 'fs';
 import { join, resolve } from 'path';
 import { randomUUID } from 'crypto';
 import { getDb } from '../../db.js';
@@ -11,6 +11,7 @@ import { prepareSkillsMount } from '../skills.js';
 import log from '../../utils/logger.js';
 
 const STUDIO_IMAGE  = process.env.APPSTUDIO_IMAGE || 'appcrane-studio:latest';
+const BUILDER_MODEL = process.env.APPSTUDIO_CODER_MODEL || 'claude-sonnet-4-6';
 const IDLE_EVICT_MS = parseInt(process.env.CODER_IDLE_MS || '1800000', 10); // 30 min
 
 // On-disk dir name kept as 'coder-sessions' for backward compatibility
@@ -46,6 +47,54 @@ function updateDb(sessionId, fields) {
   const sets = Object.keys(fields).map(k => `${k} = ?`).join(', ');
   db.prepare(`UPDATE coder_sessions SET ${sets} WHERE id = ?`)
     .run(...Object.values(fields), sessionId);
+}
+
+// Build a one-time intro message that the chat panel renders as the first
+// 'agent' bubble. Tells the user who the agent is, what it can see, and
+// what skills are loaded. Inserted on createSession only — NOT on resume
+// (the chat history already contains it from the original create).
+function buildIntroMessage(app, workspaceDir, branchName, containerId, skillsMounted) {
+  const lines = [];
+  lines.push(`👋 AppCrane Builder for ${app.name} (${app.slug})`);
+  lines.push('');
+  lines.push('I read and edit the code in your repo, run shell commands, and ship branches back to GitHub. You can ask me to add features, fix bugs, refactor, or explain how something works.');
+  lines.push('');
+
+  lines.push('── Runtime ──');
+  lines.push(`Model:      ${BUILDER_MODEL}`);
+  lines.push(`Container:  ${containerId.slice(0, 12)}  (image ${STUDIO_IMAGE})`);
+  lines.push('Substrate:  Claude Code CLI (claude -p … --resume) — conversational continuity across turns');
+  lines.push('');
+
+  lines.push('── Workspace ──');
+  lines.push(`Cloned branch:  ${app.branch || 'main'}`);
+  lines.push(`Working branch: ${branchName}`);
+  let topEntries = [];
+  try {
+    topEntries = readdirSync(workspaceDir).filter(n => !n.startsWith('.')).sort();
+  } catch (_) {}
+  if (topEntries.length) {
+    const shown = topEntries.slice(0, 14).join(', ');
+    const more = topEntries.length > 14 ? ` … +${topEntries.length - 14} more` : '';
+    lines.push(`Top-level:      ${shown}${more}`);
+  }
+  lines.push('');
+
+  let skills = [];
+  try {
+    skills = getDb().prepare('SELECT slug, name, description FROM skills WHERE enabled = 1 ORDER BY name').all();
+  } catch (_) {}
+  lines.push('── Skills loaded ──');
+  if (!skillsMounted || !skills.length) {
+    lines.push('(none enabled — manage skills under Settings → Skills)');
+  } else {
+    for (const s of skills) {
+      lines.push(`• ${s.name} (${s.slug})${s.description ? ` — ${s.description}` : ''}`);
+    }
+  }
+  lines.push('');
+  lines.push('What would you like to work on?');
+  return lines.join('\n');
 }
 
 function appendMessage(sessionId, role, content, tokens) {
@@ -237,6 +286,18 @@ export async function createSession(app, userId, onLog) {
       workspace_dir: workspaceDir,
       claude_session_id: null,
     });
+
+    // Insert a one-time intro message so the chat panel opens with an
+    // overview of who the agent is, where it's running, and which skills
+    // are loaded. Stored as 'assistant' so the UI renders it as an
+    // agent bubble. Subsequent resumes don't re-insert (chat history
+    // already contains it).
+    try {
+      const introText = buildIntroMessage(app, workspaceDir, branchName, containerId, !!skillsCleanup);
+      appendMessage(sessionId, 'assistant', introText);
+    } catch (err) {
+      log.warn(`Builder: intro message generation failed: ${err.message}`);
+    }
 
     // Pre-warm the codebase context so the first dispatch doesn't pay the
     // ~30s build cost. Fire-and-forget; the dispatch path will await this
