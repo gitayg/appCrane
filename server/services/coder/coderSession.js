@@ -97,7 +97,10 @@ export function recoverOrphans() {
     }
     try {
       execFileSync('docker', ['inspect', '--format', '{{.State.Running}}', s.container_id], { stdio: 'pipe', timeout: 5000 });
-      // Container still running — re-register in memory
+      // Container still running — re-register in memory.
+      // claudeSessionId stays valid as long as the container is alive: the
+      // CLI's session log lives at /home/studio/.claude/sessions/<id>.json
+      // inside the container's writable layer.
       sessions.set(s.id, {
         appSlug: s.app_slug,
         containerId: s.container_id,
@@ -106,6 +109,7 @@ export function recoverOrphans() {
         status: 'idle',
         lastActivityAt: new Date(s.last_activity_at + 'Z').getTime() || Date.now(),
         runner: null,
+        claudeSessionId: s.claude_session_id || null,
       });
       log.info(`Coder: recovered session ${s.id} (container ${s.container_id})`);
     } catch (_) {
@@ -208,12 +212,14 @@ export async function createSession(app, userId, onLog) {
       status: 'idle',
       lastActivityAt: Date.now(),
       runner: null,
+      claudeSessionId: null,
     });
 
     updateDb(sessionId, {
       status: 'idle',
       container_id: containerId,
       workspace_dir: workspaceDir,
+      claude_session_id: null,
     });
 
     // Pre-warm the codebase context so the first dispatch doesn't pay the
@@ -244,6 +250,9 @@ export async function resumeSession(sessionId, onLog) {
   await ensureStudioImage(onLog);
   const containerId = startContainer(sessionId, row.workspace_dir, onLog);
 
+  // The previous container is gone, so its in-container CLI session log
+  // (~/.claude/sessions/<id>.json) is gone too. Clear claudeSessionId —
+  // the next dispatch starts a fresh Claude session.
   sessions.set(sessionId, {
     appSlug: row.app_slug,
     containerId,
@@ -252,9 +261,10 @@ export async function resumeSession(sessionId, onLog) {
     status: 'idle',
     lastActivityAt: Date.now(),
     runner: null,
+    claudeSessionId: null,
   });
 
-  updateDb(sessionId, { status: 'idle', container_id: containerId });
+  updateDb(sessionId, { status: 'idle', container_id: containerId, claude_session_id: null });
   publish(sessionId, { type: 'status', status: 'idle' });
 }
 
@@ -316,16 +326,25 @@ export async function dispatch(sessionId, prompt) {
   state.status = 'active';
   publish(sessionId, { type: 'status', status: 'active' });
 
-  // Augment the prompt sent to Claude with the same context bundle the
-  // enhancement-request coder gets: cached codebase summary + per-app
-  // operator notes (data/apps/<slug>/agent-context.md). Falls back to the
-  // bare user message if either source is unavailable.
+  // Build the augmented prompt. On the FIRST dispatch (no claudeSessionId
+  // yet), include the full context bundle — codebase summary, operator
+  // notes, workspace-state warning. On SUBSEQUENT dispatches, --resume
+  // gives Claude its prior turns from the in-container session log, so we
+  // skip the heavy contextDoc (Claude already saw it). agentContext stays
+  // since the operator may edit it mid-session.
+  const isResume = !!state.claudeSessionId;
   let augmentedPrompt = prompt;
   if (state.appSlug) {
     try {
       const { contextDoc, agentContext } = await loadDispatchContext(state.appSlug, state.workspaceDir);
-      if (contextDoc || agentContext) {
-        augmentedPrompt = buildChatPrompt({ contextDoc, agentContext, userMessage: prompt });
+      const shouldBundle = (!isResume && (contextDoc || agentContext)) ||
+                           (isResume && agentContext);
+      if (shouldBundle) {
+        augmentedPrompt = buildChatPrompt({
+          contextDoc:   isResume ? '' : contextDoc, // skip on resume — already seen
+          agentContext,
+          userMessage:  prompt,
+        });
       }
     } catch (err) {
       log.warn(`Coder: dispatch context load failed: ${err.message}`);
@@ -336,10 +355,24 @@ export async function dispatch(sessionId, prompt) {
     containerId:  state.containerId,
     prompt:       augmentedPrompt,
     apiKey:       process.env.ANTHROPIC_API_KEY,
+    resume:       state.claudeSessionId || undefined,
   });
   state.runner = runner;
 
   let assistantBuf = '';
+
+  // Capture Claude's session id from the system init event. Persist on
+  // first sighting; subsequent dispatches will pass it via --resume.
+  // If Claude returns a different id (e.g. prior session log was lost),
+  // we overwrite — continuity is broken for the current turn but the new
+  // id keeps subsequent turns chained.
+  runner.on('system', (ev) => {
+    const sid = ev?.data?.session_id;
+    if (sid && sid !== state.claudeSessionId) {
+      state.claudeSessionId = sid;
+      updateDb(sessionId, { claude_session_id: sid });
+    }
+  });
 
   runner.on('data', (ev) => {
     touchActivity(sessionId);
