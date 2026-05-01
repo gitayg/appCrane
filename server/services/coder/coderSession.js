@@ -266,7 +266,7 @@ function buildChatPrompt({ contextDoc, agentContext, userMessage }) {
   const parts = [];
   if (contextDoc?.trim()) {
     parts.push('# Codebase context');
-    parts.push('Use this architectural overview to skip broad exploration. Read specific files directly when you need exact details.');
+    parts.push('Use this architectural overview to skip broad exploration. Read specific files directly when you need exact details. This overview was generated at an earlier git revision and may be out of date — when its claims affect what you are about to do, verify by reading the live file.');
     parts.push('');
     parts.push(contextDoc);
     parts.push('');
@@ -276,6 +276,13 @@ function buildChatPrompt({ contextDoc, agentContext, userMessage }) {
     parts.push(agentContext);
     parts.push('');
   }
+  // Workspace mutability note — important whether or not --resume is used.
+  // The user (or git pull, or another process) may have changed files between
+  // chat turns; the agent must not rely on its prior reads or the architectural
+  // overview for any file it is about to modify.
+  parts.push('# Workspace state');
+  parts.push('The workspace may have changed since your previous response — files may have been edited by the user, by another process, or pulled from git. Do not rely on memory from prior turns. Before modifying any file, read its current contents. Prefer Glob/Grep over assumptions about file locations or names.');
+  parts.push('');
   parts.push('# User message');
   parts.push(userMessage);
   return parts.join('\n');
