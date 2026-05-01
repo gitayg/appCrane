@@ -332,7 +332,7 @@ input:focus{border-color:var(--accent)}
   <!-- Ask Claude panel -->
   <div id="askPanel" class="ask-panel">
     <div class="ask-header">
-      <span>🤖 Ask Claude</span>
+      <span>🤖 Learn</span>
       <span id="askPanelAppLabel" class="ask-app-label"></span>
       <div class="ask-header-right">
         <button class="ask-sessions-btn" onclick="showAskSessionsPicker()" title="Previous conversations">History</button>
@@ -340,7 +340,7 @@ input:focus{border-color:var(--accent)}
       </div>
     </div>
     <div id="askMessages" class="ask-messages">
-      <div class="ask-empty">Ask Claude anything about this application — it will read the source code to answer.</div>
+      <div class="ask-empty">Learn about this application — Claude will read the source code to answer.</div>
     </div>
     <div id="askWorking" class="ask-working" style="display:none">
       <div class="ask-spinner"></div>
@@ -353,7 +353,7 @@ input:focus{border-color:var(--accent)}
         <button onclick="clearAskPeekCtx()">×</button>
       </div>
       <div class="ask-input-row">
-        <textarea id="askInput" class="ask-textarea" placeholder="Ask about this application..." rows="2" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendAskQuestion();}"></textarea>
+        <textarea id="askInput" class="ask-textarea" placeholder="Learn about this application..." rows="2" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendAskQuestion();}"></textarea>
         <button id="askPeekBtn" class="btn-enhance" onclick="togglePeekMode()" title="Point & click an element to add context (Esc to cancel)" style="padding:7px 10px;flex-shrink:0">🎯</button>
         <button id="askSendBtn" class="ask-send" onclick="sendAskQuestion()">Send</button>
       </div>
@@ -364,7 +364,7 @@ input:focus{border-color:var(--accent)}
   <div id="planPanel" class="plan-panel">
     <div id="planResizeHandle" class="plan-resize-handle"></div>
     <div class="plan-header" ondblclick="togglePlanMinimize()">
-      <span>💡 Enhance</span>
+      <span>💡 Request</span>
       <span id="planPanelAppLabel" class="ask-app-label"></span>
       <div class="ask-header-right" style="margin-left:auto">
         <button class="ask-sessions-btn" id="planPeekToggleBtn" onclick="togglePeekMode()" title="Point at an element to add context">🎯</button>
@@ -400,7 +400,7 @@ input:focus{border-color:var(--accent)}
         <textarea id="planInput" class="ask-textarea" placeholder="Describe the enhancement or feature you want..." rows="2"
           onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendPlanRequest();}"
           oninput="_onPlanInputChange()"></textarea>
-        <button id="planSendBtn" class="ask-send" onclick="sendPlanRequest()">Enhance</button>
+        <button id="planSendBtn" class="ask-send" onclick="sendPlanRequest()">Request</button>
       </div>
       <div id="planBuildRow" class="ask-input-row" style="display:none;justify-content:flex-end;padding:4px 0 0">
         <button id="planBuildBtn" class="ask-send plan-build-btn" onclick="buildFromPlan()">Build</button>
@@ -441,7 +441,7 @@ input:focus{border-color:var(--accent)}
 <!-- Enhancement request modal -->
 <div id="enhOverlay" class="enh-overlay" onclick="if(event.target===this)closeEnhModal()">
   <div class="enh-modal">
-    <h3>Request Enhancement</h3>
+    <h3>New Request</h3>
     <p id="enhAppLabel"></p>
     <textarea id="enhText" class="enh-textarea" placeholder="Describe the enhancement or feature you'd like..."></textarea>
     <div id="enhStatus" class="enh-status"></div>
@@ -523,11 +523,11 @@ input:focus{border-color:var(--accent)}
     </div>
     <div id="appsList"></div>
     <div id="myEnhSection" class="hidden">
-      <div class="section-title" style="margin-top:32px">My Enhancement Requests</div>
+      <div class="section-title" style="margin-top:32px">My Requests</div>
       <div id="myEnhList" class="my-enh-list"></div>
     </div>
     <div id="adminEnhSection" class="hidden">
-      <div class="section-title" style="margin-top:32px">All Enhancement Requests</div>
+      <div class="section-title" style="margin-top:32px">All Requests</div>
       <div id="adminEnhList" class="my-enh-list"></div>
     </div>
   </div>
@@ -916,7 +916,7 @@ function showApps(data) {
       qa.className = 'card-quick-actions';
       [
         ['Open \u25b8', function() { openApp(prodUrl, a.name, a.slug, a.has_icon, { prodUrl, sandUrl, prodVersion: a.prod_version || '', sandVersion: a.sand_version || 'dev', env: 'prod' }); }],
-        ['\uD83D\uDCA1 Enhance', function() { openEnhModal(a.slug, a.name); }],
+        ['\uD83D\uDCA1 Request', function() { openEnhModal(a.slug, a.name); }],
         ['Manage \u25b8', function() { window.open('/app?slug=' + encodeURIComponent(a.slug), '_blank'); }],
       ].forEach(function(pair) {
         var btn = document.createElement('button');
@@ -936,7 +936,7 @@ function showApps(data) {
       // 💡 icon-only enhance button, top-right corner on hover
       const enhBtn = document.createElement('button');
       enhBtn.className = 'card-enh-icon';
-      enhBtn.title = 'Request Enhancement';
+      enhBtn.title = 'New Request';
       enhBtn.textContent = '\uD83D\uDCA1';
       enhBtn.addEventListener('click', function(e) { e.stopPropagation(); openEnhModal(a.slug, a.name); });
       card.appendChild(enhBtn);
@@ -1148,7 +1148,7 @@ function openApp(url, name, slug, hasIcon, appData) {
   _planHasPlan = false;
   _planPeekCtx = null;
   document.getElementById('askPanelAppLabel').textContent = name || '';
-  document.getElementById('askMessages').innerHTML = '<div class="ask-empty">Ask Claude anything about this application — it will read the source code to answer.</div>';
+  document.getElementById('askMessages').innerHTML = '<div class="ask-empty">Learn about this application — Claude will read the source code to answer.</div>';
   document.getElementById('askWorking').style.display = 'none';
   document.getElementById('askPeekBar').style.display = 'none';
   document.getElementById('planPanelAppLabel').textContent = name || '';
@@ -1156,7 +1156,7 @@ function openApp(url, name, slug, hasIcon, appData) {
   document.getElementById('planWorking').style.display = 'none';
   document.getElementById('planPeekBar').style.display = 'none';
   document.getElementById('planBuildRow').style.display = 'none';
-  document.getElementById('planSendBtn').textContent = 'Enhance';
+  document.getElementById('planSendBtn').textContent = 'Request';
   document.getElementById('planInput').placeholder = 'Describe the enhancement or feature you want...';
   document.getElementById('frameAppName').textContent = name;
   document.getElementById('frameNewTab').href = url;
@@ -2101,7 +2101,7 @@ function resetPlanPanel() {
   document.getElementById('planBuildRow').style.display = 'none';
   document.getElementById('planJobSection').style.display = 'none';
   document.getElementById('planJobLog').innerHTML = '';
-  document.getElementById('planSendBtn').textContent = 'Enhance';
+  document.getElementById('planSendBtn').textContent = 'Request';
   document.getElementById('planSendBtn').disabled = false;
   document.getElementById('planInput').value = '';
   document.getElementById('planInput').placeholder = 'Describe the enhancement or feature you want...';
@@ -2539,7 +2539,7 @@ async function openPlanById(enhId, appSlug) {
     document.getElementById('planMessages').innerHTML = '';
     document.getElementById('planWorking').style.display = 'none';
     document.getElementById('planBuildRow').style.display = 'none';
-    document.getElementById('planSendBtn').textContent = 'Enhance';
+    document.getElementById('planSendBtn').textContent = 'Request';
     document.getElementById('planSendBtn').disabled = false;
     document.getElementById('planInput').placeholder = 'Describe the enhancement or feature you want...';
 
