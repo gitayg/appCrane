@@ -1,8 +1,9 @@
-import { spawn, execFileSync } from 'child_process';
-import { mkdirSync, existsSync, writeFileSync, rmSync, chmodSync } from 'fs';
+import { execFileSync } from 'child_process';
+import { mkdirSync, existsSync, rmSync, writeFileSync, chmodSync } from 'fs';
 import { join, resolve } from 'path';
 import { decrypt } from '../encryption.js';
 import { assertCapacity } from '../containerLimit.js';
+import { runAgentNew } from '../llm/runAgent.js';
 import log from '../../utils/logger.js';
 
 const GEN_MODEL       = process.env.APPSTUDIO_CODER_MODEL || 'claude-sonnet-4-6';
@@ -188,50 +189,9 @@ ${agentContext || '(none)'}
 - Do NOT push.`;
 }
 
-// Node.js runner script executed inside the container.
-// The workspace is pre-cloned by the host — this script only runs Claude Code
-// and writes a sentinel file when done. No git credentials inside the container.
-function buildRunnerScript() {
-  return `#!/usr/bin/env node
-'use strict';
-const { spawnSync } = require('child_process');
-const fs = require('fs');
-
-const model = process.env.STUDIO_MODEL;
-const apiKey = fs.readFileSync('/studio/api_key', 'utf8').trim();
-
-process.chdir('/workspace');
-console.log('[studio] Coder agent starting (model: ' + model + ')…');
-
-const prompt = fs.readFileSync('/studio/prompt.txt', 'utf8');
-const claudeEnv = {
-  ...process.env,
-  HOME: '/home/studio',
-  PATH: '/usr/local/bin:/usr/bin:/bin',
-  ANTHROPIC_API_KEY: apiKey,
-};
-const result = spawnSync('claude', [
-  '-p', prompt,
-  '--model', model,
-  '--dangerously-skip-permissions',
-  '--output-format', 'stream-json',
-  '--verbose',
-], { stdio: 'inherit', cwd: '/workspace', timeout: ${GEN_TIMEOUT_MS}, env: claudeEnv });
-
-if (result.error) {
-  console.error('[studio] Failed to spawn Claude Code: ' + result.error.message);
-  process.exit(1);
-}
-if (result.status !== 0) {
-  console.error('[studio] Claude Code exited with status ' + result.status);
-  process.exit(result.status || 1);
-}
-
-// Write sentinel — host picks this up and runs git add/commit/push
-fs.writeFileSync('/sentinel/done', new Date().toISOString());
-console.log('[studio] Coding complete — host will handle commit and push');
-`;
-}
+// (No embedded runner.js — runAgentNew invokes claude directly inside the
+// container, parses stream-json on the host, and uses container exit code
+// in place of the previous /sentinel/done file.)
 
 /**
  * Clone a specific branch from GitHub to a local dir for the build/deploy phase.
@@ -277,103 +237,65 @@ export async function generateCode({ jobId, app, enhancementId, plan, summary, a
   await ensureStudioImage(onLog);
 
   const branchName   = `appstudio/${enhancementId}-${app.slug}`;
-  const studioDir    = join(dir, 'studio');
-  const sentinelDir  = join(dir, 'sentinel');
-  mkdirSync(studioDir, { recursive: true });
-  mkdirSync(sentinelDir, { recursive: true });
-  chmodSync(sentinelDir, 0o777); // world-writable so the studio user inside the container can write the sentinel
 
   // Clone the repo on the host — no credentials reach the container
   const workspaceDir = await cloneForCode(dir, app, app.branch || 'main', branchName, onLog);
-
-  writeFileSync(join(studioDir, 'prompt.txt'), buildPrompt({ plan, summary, agentContext, contextDoc, enhancementMessage })); // nosemgrep
-  writeFileSync(join(studioDir, 'runner.js'), buildRunnerScript()); // nosemgrep
-  // 0o644 (not 0o600) — the studio container runs as a non-root user that
-  // wouldn't otherwise be able to read this file. Host-side this dir is under
-  // DATA_DIR/appstudio/jobs/{jobId}/ and is cleaned up when the job finishes.
-  writeFileSync(join(studioDir, 'api_key'), process.env.ANTHROPIC_API_KEY || '', { mode: 0o644 }); // nosemgrep — key written to ro-mounted dir, not passed via docker env
+  const prompt = buildPrompt({ plan, summary, agentContext, contextDoc, enhancementMessage });
   if (contextDoc) onLog?.(`[studio] Injected codebase context (${contextDoc.length} chars) — coder will skip orientation exploration`);
 
   const containerName = `appcrane-studio-${jobId}`;
-  const sentinelPath  = join(sentinelDir, 'done');
-
-  const containerArgs = [
-    'run', '--rm',
-    '--name', containerName,
-    '--label', 'appcrane=true',
-    '--label', 'appcrane.container.type=job',
-    '--label', `enhancement_id=${enhancementId}`,
-    '--memory=2g', '--cpus=1',
-    '-e', `STUDIO_MODEL=${GEN_MODEL}`,
-    '-v', `${workspaceDir}:/workspace`,   // rw — Claude Code writes files here
-    '-v', `${studioDir}:/studio:ro`,      // ro — prompt + runner only
-    '-v', `${sentinelDir}:/sentinel`,     // rw — sentinel file only (no git files)
-    STUDIO_IMAGE,
-    'node', '/studio/runner.js',
-  ];
-
   assertCapacity();
   onLog?.(`[studio] Starting container ${containerName} (git credentials stay on host)`);
   log.info(`AppStudio: running container ${containerName}`);
 
+  const runner = runAgentNew({
+    image:         STUDIO_IMAGE,
+    containerName,
+    workspaceDir,
+    prompt,
+    apiKey:        process.env.ANTHROPIC_API_KEY,
+    model:         GEN_MODEL,
+    timeoutMs:     GEN_TIMEOUT_MS + 60000,
+    labels:        {
+      'appcrane.container.type': 'job',
+      'enhancement_id':          String(enhancementId),
+    },
+    memory: '2g',
+    cpus:   '1',
+  });
+
   return new Promise((resolve, reject) => {
-    const child = spawn('docker', containerArgs, { stdio: 'pipe' });
+    let timedOut = false;
 
-    let timedOut            = false;
-    let codingDoneHandled   = false;
-    let codingDonePromise   = null;
-    let pendingCodingError  = null;
-
-    const timer = setTimeout(() => {
-      timedOut = true;
-      try { execFileSync('docker', ['stop', '-t', '5', containerName], { stdio: 'pipe', timeout: 15000 }); } catch (_) {}
-      child.kill('SIGTERM');
-    }, GEN_TIMEOUT_MS + 60000);
-
-    // Poll every 2s for the sentinel file written by the runner when coding is done.
-    // codingDonePromise is captured so the close handler can await it if the container
-    // exits while the async git work is still in flight.
-    const sentinelPoll = setInterval(() => {
-      if (codingDoneHandled || timedOut) return;
-      if (existsSync(sentinelPath)) {
-        codingDoneHandled = true;
-        clearInterval(sentinelPoll);
-        onLog?.('[studio] Coding complete — committing and pushing…');
-        codingDonePromise = (async () => {
-          try {
-            await onCodingDone?.(workspaceDir, branchName);
-          } catch (err) {
-            pendingCodingError = err;
-          }
-        })();
-      }
-    }, 2000);
-
-    const emit = (line) => { if (line.trim()) onLog?.(line); };
-    child.stdout.on('data', (c) => c.toString().split('\n').forEach(emit));
-    child.stderr.on('data', (c) => c.toString().split('\n').forEach(l => emit(`[stderr] ${l}`)));
-
-    child.on('error', (err) => {
-      clearTimeout(timer); clearInterval(sentinelPoll);
-      reject(err);
+    runner.on('data', (ev) => {
+      if (ev.type === 'text')      onLog?.(ev.text);
+      else if (ev.type === 'tool') onLog?.(`[studio:tool] ${ev.name}`);
     });
-
-    child.on('close', async (code) => {
-      clearTimeout(timer); clearInterval(sentinelPoll);
-      // Await any in-flight onCodingDone before making decisions
-      if (codingDonePromise) await codingDonePromise;
-      if (pendingCodingError) return reject(pendingCodingError);
-      if (timedOut)           return reject(new Error('Code generation timed out'));
-      // Final sentinel check — file may have been written in the last poll window before exit
-      if (!codingDoneHandled && existsSync(sentinelPath)) {
-        codingDoneHandled = true;
-        onLog?.('[studio] Coding complete — committing and pushing…');
-        try { await onCodingDone?.(workspaceDir, branchName); } catch (err) { return reject(err); }
-        return resolve({ branchName });
+    runner.on('result', (ev) => {
+      onLog?.(`[studio:result] ${ev.inputTokens + ev.outputTokens} tokens · $${(ev.costUsdCents / 100).toFixed(3)}`);
+    });
+    runner.on('error', (err) => {
+      timedOut = /timed out/i.test(err.message);
+      // Best-effort container kill on timeout
+      if (timedOut) {
+        try { execFileSync('docker', ['stop', '-t', '5', containerName], { stdio: 'pipe', timeout: 15000 }); } catch (_) {}
       }
-      if (!codingDoneHandled && code !== 0) return reject(new Error(`Studio container exited with code ${code}`));
-      if (!codingDoneHandled) return reject(new Error('Container exited before coding sentinel was written'));
+      reject(timedOut ? new Error('Code generation timed out') : err);
+    });
+    runner.on('exit', async (code) => {
+      if (timedOut) return; // already rejected via 'error'
+      if (code !== 0) return reject(new Error(`Studio container exited with code ${code}`));
+      // Container exit 0 = claude finished cleanly. This replaces the prior
+      // /sentinel/done file: a clean exit IS the success signal.
+      onLog?.('[studio] Coding complete — committing and pushing…');
+      try {
+        await onCodingDone?.(workspaceDir, branchName);
+      } catch (err) {
+        return reject(err);
+      }
       resolve({ branchName });
     });
+
+    runner.start();
   });
 }
