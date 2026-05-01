@@ -12,12 +12,15 @@ import log from '../../utils/logger.js';
 const STUDIO_IMAGE  = process.env.APPSTUDIO_IMAGE || 'appcrane-studio:latest';
 const IDLE_EVICT_MS = parseInt(process.env.CODER_IDLE_MS || '1800000', 10); // 30 min
 
-function coderRoot() {
+// On-disk dir name kept as 'coder-sessions' for backward compatibility
+// with existing workspaces on production. Function renamed; the legacy
+// path string is a stable artifact.
+function builderRoot() {
   return resolve(join(process.env.DATA_DIR || './data', 'coder-sessions'));
 }
 
 function sessionDir(sessionId) {
-  return join(coderRoot(), sessionId);
+  return join(builderRoot(), sessionId);
 }
 
 /** In-memory map of active sessions { sessionId → SessionState } */
@@ -65,8 +68,8 @@ setInterval(() => {
   for (const [sessionId, state] of sessions) {
     if (state.status !== 'idle') continue;
     if (state.lastActivityAt > threshold) continue;
-    log.info(`Coder: idle evicting session ${sessionId}`);
-    _evict(sessionId, state).catch(err => log.warn(`Coder evict error: ${err.message}`));
+    log.info(`Builder: idle evicting session ${sessionId}`);
+    _evict(sessionId, state).catch(err => log.warn(`Builder evict error: ${err.message}`));
   }
 }, 5 * 60 * 1000);
 
@@ -111,10 +114,10 @@ export function recoverOrphans() {
         runner: null,
         claudeSessionId: s.claude_session_id || null,
       });
-      log.info(`Coder: recovered session ${s.id} (container ${s.container_id})`);
+      log.info(`Builder: recovered session ${s.id} (container ${s.container_id})`);
     } catch (_) {
       db.prepare("UPDATE coder_sessions SET status = 'paused', container_id = NULL WHERE id = ?").run(s.id);
-      log.warn(`Coder: orphan session ${s.id} — container gone, marked paused`);
+      log.warn(`Builder: orphan session ${s.id} — container gone, marked paused`);
     }
   }
 }
@@ -136,7 +139,7 @@ function cloneWorkspace(sessionId, app, branchName, onLog) {
     } catch (_) {}
   }
 
-  onLog?.(`[coder:git] Cloning ${app.github_url} (${app.branch || 'main'})…`);
+  onLog?.(`[builder:git] Cloning ${app.github_url} (${app.branch || 'main'})…`);
   try {
     execFileSync('git', ['clone', '--depth', '1', '--branch', app.branch || 'main', cloneUrl, workspaceDir], {
       stdio: 'pipe', timeout: 120000,
@@ -145,36 +148,36 @@ function cloneWorkspace(sessionId, app, branchName, onLog) {
     throw new Error(err.message.replaceAll(cloneUrl, app.github_url));
   }
 
-  execFileSync('git', ['-C', workspaceDir, 'config', 'user.email', 'coder@appcrane.local'], { stdio: 'pipe' });
-  execFileSync('git', ['-C', workspaceDir, 'config', 'user.name', 'AppCrane Coder'], { stdio: 'pipe' });
+  execFileSync('git', ['-C', workspaceDir, 'config', 'user.email', 'builder@appcrane.local'], { stdio: 'pipe' });
+  execFileSync('git', ['-C', workspaceDir, 'config', 'user.name', 'AppCrane Builder'], { stdio: 'pipe' });
   execFileSync('git', ['-C', workspaceDir, 'checkout', '-b', branchName], { stdio: 'pipe' });
 
   try { execFileSync('chmod', ['-R', '777', workspaceDir], { stdio: 'pipe' }); } catch (_) {}
   try { execFileSync('chown', ['-R', '1000:1000', workspaceDir], { stdio: 'pipe' }); } catch (_) {}
 
-  onLog?.(`[coder:git] Workspace ready`);
+  onLog?.(`[builder:git] Workspace ready`);
   return workspaceDir;
 }
 
 function startContainer(sessionId, workspaceDir, onLog) {
-  const containerName = `appcrane-coder-${sessionId}`;
+  const containerName = `appcrane-builder-${sessionId}`;
 
   const args = [
     'run', '-d', '--rm',
     '--name', containerName,
     '--label', 'appcrane=true',
-    '--label', 'appcrane.container.type=coder',
-    '--label', `coder.session=${sessionId}`,
+    '--label', 'appcrane.container.type=builder',
+    '--label', `builder.session=${sessionId}`,
     '--memory=2g', '--cpus=1',
     '-v', `${workspaceDir}:/workspace`,
     STUDIO_IMAGE,
     'tail', '-f', '/dev/null',
   ];
 
-  onLog?.(`[coder] Starting container ${containerName}…`);
+  onLog?.(`[builder] Starting container ${containerName}…`);
   const out = execFileSync('docker', args, { stdio: 'pipe', timeout: 30000 });
   const containerId = out.toString().trim();
-  onLog?.(`[coder] Container ready: ${containerId.slice(0, 12)}`);
+  onLog?.(`[builder] Container ready: ${containerId.slice(0, 12)}`);
   return containerId;
 }
 
@@ -189,10 +192,10 @@ export async function createSession(app, userId, onLog) {
   const existing = db.prepare(
     "SELECT id FROM coder_sessions WHERE app_slug = ? AND status NOT IN ('shipped', 'paused', 'error')"
   ).get(app.slug);
-  if (existing) throw new Error(`Active coder session already exists: ${existing.id}`);
+  if (existing) throw new Error(`Active builder session already exists: ${existing.id}`);
 
   const sessionId  = randomUUID();
-  const branchName = `coder/${sessionId}`;
+  const branchName = `builder/${sessionId}`;
 
   db.prepare(`
     INSERT INTO coder_sessions (id, app_slug, user_id, branch_name, status)
@@ -226,7 +229,7 @@ export async function createSession(app, userId, onLog) {
     // ~30s build cost. Fire-and-forget; the dispatch path will await this
     // anyway and read from cache once it lands.
     ensureCodebaseContext(app.slug, workspaceDir).catch(err =>
-      log.warn(`Coder: context pre-warm failed for ${app.slug}: ${err.message}`)
+      log.warn(`Builder: context pre-warm failed for ${app.slug}: ${err.message}`)
     );
 
     publish(sessionId, { type: 'status', status: 'idle' });
@@ -268,7 +271,7 @@ export async function resumeSession(sessionId, onLog) {
   publish(sessionId, { type: 'status', status: 'idle' });
 }
 
-// Mirror the context bundling that AppStudio enhancement coders use
+// Mirror the context bundling that AppStudio enhancement builders use
 // (server/services/appstudio/generator.js: buildPrompt). Each Studio
 // chat dispatch is a one-shot `claude -p`, so we re-supply the context
 // every turn — Claude has no in-process memory across dispatches.
@@ -304,7 +307,7 @@ async function loadDispatchContext(appSlug, workspaceDir) {
     const r = await ensureCodebaseContext(appSlug, workspaceDir);
     contextDoc = r?.contextDoc || '';
   } catch (err) {
-    log.warn(`Coder: ensureCodebaseContext failed for ${appSlug}: ${err.message}`);
+    log.warn(`Builder: ensureCodebaseContext failed for ${appSlug}: ${err.message}`);
   }
   let agentContext = '';
   try {
@@ -347,7 +350,7 @@ export async function dispatch(sessionId, prompt) {
         });
       }
     } catch (err) {
-      log.warn(`Coder: dispatch context load failed: ${err.message}`);
+      log.warn(`Builder: dispatch context load failed: ${err.message}`);
     }
   }
 

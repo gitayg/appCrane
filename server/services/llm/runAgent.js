@@ -17,7 +17,7 @@
 
 import { spawn } from 'child_process';
 import { EventEmitter } from 'events';
-import { parseLine } from '../coder/streamJsonParser.js';
+import { parseLine } from '../builder/streamJsonParser.js';
 import log from '../../utils/logger.js';
 
 const DEFAULT_MODEL   = process.env.APPSTUDIO_CODER_MODEL || 'claude-sonnet-4-6';

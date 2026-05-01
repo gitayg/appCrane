@@ -603,7 +603,7 @@ app.listen(PORT, HOST, async () => {
 
   // Recover any coder sessions that were active when the server last restarted
   try {
-    const { recoverOrphans } = await import('./services/coder/coderSession.js');
+    const { recoverOrphans } = await import('./services/builder/builderSession.js');
     recoverOrphans();
   } catch (e) {
     log.warn('Coder orphan recovery skipped: ' + e.message);
