@@ -3,9 +3,11 @@ import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import log from '../../utils/logger.js';
 import { ensureCodebaseContext } from './contextBuilder.js';
-import { stream as oneShotStream, extractJsonBlock } from '../llm/oneShot.js';
+import { runAgentOneShot } from '../llm/runAgent.js';
+import { extractJsonBlock } from '../llm/oneShot.js';
 
-const MODEL = process.env.APPSTUDIO_PLANNER_MODEL || 'claude-sonnet-4-6';
+const MODEL         = process.env.APPSTUDIO_PLANNER_MODEL || 'claude-sonnet-4-6';
+const STUDIO_IMAGE  = process.env.APPSTUDIO_IMAGE || 'appcrane-studio:latest';
 
 const SYSTEM_PROMPT = `You are a senior software engineer planning a surgical change to an existing application.
 
@@ -138,11 +140,16 @@ export async function planEnhancement({ appSlug, request, repoDir, agentContext,
 
   log.info(`AppStudio plan: ${MODEL}, ${relevantPaths.length} files, context=${fromCache ? 'cached' : 'built'}`);
 
-  const { text, usage, costUsd } = await oneShotStream({
-    model: MODEL,
-    maxTokens: 4096,
-    system: SYSTEM_PROMPT,
-    prompt: userContent,
+  const { text, usage, costUsd } = await runAgentOneShot({
+    image:         STUDIO_IMAGE,
+    workspaceDir:  repoDir,
+    workspaceMode: 'ro',
+    prompt:        userContent,
+    systemPrompt:  SYSTEM_PROMPT,
+    apiKey:        process.env.ANTHROPIC_API_KEY,
+    model:         MODEL,
+    timeoutMs:     parseInt(process.env.APPSTUDIO_PLAN_TIMEOUT_MS || '300000', 10),
+    labels:        { 'appcrane.container.type': 'plan' },
     onChunk,
     onTokens,
   });

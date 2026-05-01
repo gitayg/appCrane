@@ -3,9 +3,10 @@ import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { getDb } from '../../db.js';
 import log from '../../utils/logger.js';
-import { complete as oneShotComplete } from '../llm/oneShot.js';
+import { runAgentOneShot } from '../llm/runAgent.js';
 
-const MODEL = process.env.APPSTUDIO_PLANNER_MODEL || 'claude-sonnet-4-6';
+const MODEL        = process.env.APPSTUDIO_PLANNER_MODEL || 'claude-sonnet-4-6';
+const STUDIO_IMAGE = process.env.APPSTUDIO_IMAGE || 'appcrane-studio:latest';
 
 function getGitHash(repoDir) {
   try {
@@ -64,8 +65,17 @@ function collectKeyFiles(repoDir, fileTree) {
   return result;
 }
 
-async function callClaude(prompt) {
-  const { text } = await oneShotComplete({ prompt, model: MODEL, maxTokens: 2048 });
+async function callClaude(prompt, repoDir) {
+  const { text } = await runAgentOneShot({
+    image:         STUDIO_IMAGE,
+    workspaceDir:  repoDir,
+    workspaceMode: 'ro',
+    prompt,
+    apiKey:        process.env.ANTHROPIC_API_KEY,
+    model:         MODEL,
+    timeoutMs:     parseInt(process.env.APPSTUDIO_CONTEXT_TIMEOUT_MS || '300000', 10),
+    labels:        { 'appcrane.container.type': 'context' },
+  });
   return text;
 }
 
@@ -97,7 +107,7 @@ Write a structured technical reference document that covers:
 
 Be concise (aim for ~500-800 words). Focus on what an AI needs to make precise surgical changes without breaking things. Do not include generic advice — only facts specific to this codebase.`;
 
-  return callClaude(prompt);
+  return callClaude(prompt, repoDir);
 }
 
 async function updateContextDoc(existingDoc, changedFiles, repoDir) {
@@ -121,7 +131,7 @@ ${diffs}
 
 Update the context document to reflect these changes. Update only the sections affected by the changes. Preserve the structure and everything that is still accurate. Return the full updated document.`;
 
-  return callClaude(prompt);
+  return callClaude(prompt, repoDir);
 }
 
 function getChangedFiles(repoDir, oldHash, newHash) {
