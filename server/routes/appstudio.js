@@ -182,9 +182,8 @@ router.get('/anthropic-key', requireAdmin, async (req, res) => {
     readFileSync(envFilePath, 'utf8').split('\n').some(l => l.trim().startsWith('ANTHROPIC_API_KEY='));
   if (req.query.test === '1') {
     try {
-      const { default: Anthropic } = await import('@anthropic-ai/sdk');
-      const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-      await client.messages.create({ model: 'claude-haiku-4-5-20251001', max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] });
+      const { complete } = await import('../services/llm/oneShot.js');
+      await complete({ prompt: 'hi', model: 'claude-haiku-4-5-20251001', maxTokens: 1 });
       return res.json({ configured: true, source: inFile ? 'file' : 'env', suffix: process.env.ANTHROPIC_API_KEY.slice(-4), valid: true });
     } catch (err) {
       return res.json({ configured: true, source: inFile ? 'file' : 'env', suffix: process.env.ANTHROPIC_API_KEY.slice(-4), valid: false, error: err.message });
@@ -202,6 +201,10 @@ router.put('/anthropic-key', requireAdmin, auditMiddleware('appstudio.set-anthro
   const trimmed = key.trim();
   writeEnvKey('ANTHROPIC_API_KEY', trimmed);
   process.env.ANTHROPIC_API_KEY = trimmed;
+  try {
+    const { resetClient } = await import('../services/llm/oneShot.js');
+    resetClient();
+  } catch (_) {}
   try {
     const { startWorker } = await import('../services/appstudio/worker.js');
     startWorker();

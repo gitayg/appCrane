@@ -1,18 +1,9 @@
-import Anthropic from '@anthropic-ai/sdk';
 import { execFileSync } from 'child_process';
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import log from '../../utils/logger.js';
 import { ensureCodebaseContext } from './contextBuilder.js';
-
-let _client = null;
-function client() {
-  if (!_client) {
-    if (!process.env.ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY not set');
-    _client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-  }
-  return _client;
-}
+import { stream as oneShotStream, extractJsonBlock } from '../llm/oneShot.js';
 
 const MODEL = process.env.APPSTUDIO_PLANNER_MODEL || 'claude-sonnet-4-6';
 
@@ -111,21 +102,6 @@ function extractKeywords(text) {
   return text.replace(/[^a-zA-Z0-9_\s]/g, ' ').split(/\s+/).filter(w => w.length >= 4).slice(0, 10);
 }
 
-function usdCost(usage) {
-  const inPrice = parseFloat(process.env.SONNET_INPUT_PRICE_PER_MTOK || '3');
-  const outPrice = parseFloat(process.env.SONNET_OUTPUT_PRICE_PER_MTOK || '15');
-  const tokensIn = (usage.input_tokens || 0) + (usage.cache_read_input_tokens || 0) + (usage.cache_creation_input_tokens || 0);
-  return (tokensIn / 1_000_000) * inPrice + ((usage.output_tokens || 0) / 1_000_000) * outPrice;
-}
-
-function extractJsonBlock(text) {
-  const fenced = text.match(/```json\s*([\s\S]*?)```/);
-  const candidate = fenced ? fenced[1] : text;
-  try { return JSON.parse(candidate.trim()); } catch (_) {}
-  const first = candidate.indexOf('{'), last = candidate.lastIndexOf('}');
-  if (first >= 0 && last > first) { try { return JSON.parse(candidate.slice(first, last + 1)); } catch (_) {} }
-  return null;
-}
 
 export async function planEnhancement({ appSlug, request, repoDir, agentContext, priorComments, onChunk, onTokens }) {
   // Step 1: get (or build) the AI-generated codebase context document
@@ -162,36 +138,22 @@ export async function planEnhancement({ appSlug, request, repoDir, agentContext,
 
   log.info(`AppStudio plan: ${MODEL}, ${relevantPaths.length} files, context=${fromCache ? 'cached' : 'built'}`);
 
-  let fullText = '';
-  let streamInputTokens = 0, streamOutputTokens = 0;
-  const stream = client().messages.stream({
+  const { text, usage, costUsd } = await oneShotStream({
     model: MODEL,
-    max_tokens: 4096,
-    system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
-    messages: [{ role: 'user', content: userContent }],
+    maxTokens: 4096,
+    system: SYSTEM_PROMPT,
+    prompt: userContent,
+    onChunk,
+    onTokens,
   });
 
-  for await (const event of stream) {
-    if (event.type === 'message_start' && event.message?.usage) {
-      streamInputTokens = event.message.usage.input_tokens || 0;
-      onTokens?.(streamInputTokens + streamOutputTokens);
-    } else if (event.type === 'message_delta' && event.usage) {
-      streamOutputTokens = event.usage.output_tokens || 0;
-      onTokens?.(streamInputTokens + streamOutputTokens);
-    } else if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
-      fullText += event.delta.text;
-      onChunk?.(fullText);
-    }
-  }
-
-  const finalMsg = await stream.finalMessage();
-  const plan = extractJsonBlock(fullText);
-  const summary = fullText.replace(/```json[\s\S]*?```/, '').trim();
+  const plan = extractJsonBlock(text);
+  const summary = text.replace(/```json[\s\S]*?```/, '').trim();
 
   return {
-    plan, summary, rawText: fullText,
-    tokensIn: finalMsg.usage?.input_tokens || 0,
-    tokensOut: finalMsg.usage?.output_tokens || 0,
-    costUsd: usdCost(finalMsg.usage || {}),
+    plan, summary, rawText: text,
+    tokensIn: usage?.input_tokens || 0,
+    tokensOut: usage?.output_tokens || 0,
+    costUsd,
   };
 }
