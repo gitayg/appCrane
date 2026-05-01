@@ -1,6 +1,6 @@
 {
   "name": "appcrane",
-  "version": "1.24.0",
+  "version": "1.24.1",
   "description": "AppCrane - AI-powered app builder.",
   "license": "PolyForm-Noncommercial-1.0.0",
   "type": "module",
@@ -16,12 +16,13 @@
     "follow-redirects": "^1.16.0"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
     "@node-saml/node-saml": "^5.1.0",
+    "adm-zip": "^0.5.17",
     "better-sqlite3": "^11.7.0",
     "chalk": "^5.4.1",
     "commander": "^13.1.0",
     "express": "^5.1.0",
-    "@anthropic-ai/sdk": "^0.39.0",
     "multer": "^2.0.0",
     "nodemailer": "^8.0.5"
   }

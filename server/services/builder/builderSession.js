@@ -7,6 +7,7 @@ import { decrypt } from '../encryption.js';
 import { ensureStudioImage } from '../appstudio/generator.js';
 import { ensureCodebaseContext } from '../appstudio/contextBuilder.js';
 import { runAgentExec } from '../llm/runAgent.js';
+import { prepareSkillsMount } from '../skills.js';
 import log from '../../utils/logger.js';
 
 const STUDIO_IMAGE  = process.env.APPSTUDIO_IMAGE || 'appcrane-studio:latest';
@@ -79,6 +80,10 @@ async function _evict(sessionId, state) {
     try {
       execFileSync('docker', ['stop', '-t', '10', state.containerId], { stdio: 'pipe', timeout: 20000 });
     } catch (_) {}
+  }
+  // Free the skills mount dir we created at startContainer time.
+  if (state.skillsCleanup) {
+    try { state.skillsCleanup(); } catch (_) {}
   }
   updateDb(sessionId, { status: 'paused', container_id: null });
   sessions.delete(sessionId);
@@ -162,6 +167,12 @@ function cloneWorkspace(sessionId, app, branchName, onLog) {
 function startContainer(sessionId, workspaceDir, onLog) {
   const containerName = `appcrane-builder-${sessionId}`;
 
+  // Bind any enabled skills as ~/.claude/skills/ so the CLI loads them
+  // natively. The mount is captured for the session's lifetime — toggling
+  // a skill mid-session won't apply until the user pauses + resumes (which
+  // creates a new container with a fresh mount).
+  const skillsMount = prepareSkillsMount();
+
   const args = [
     'run', '-d', '--rm',
     '--name', containerName,
@@ -170,15 +181,16 @@ function startContainer(sessionId, workspaceDir, onLog) {
     '--label', `builder.session=${sessionId}`,
     '--memory=2g', '--cpus=1',
     '-v', `${workspaceDir}:/workspace`,
-    STUDIO_IMAGE,
-    'tail', '-f', '/dev/null',
   ];
+  if (skillsMount) args.push('-v', `${skillsMount.dir}:/home/studio/.claude/skills:ro`);
+  args.push(STUDIO_IMAGE, 'tail', '-f', '/dev/null');
 
   onLog?.(`[builder] Starting container ${containerName}…`);
   const out = execFileSync('docker', args, { stdio: 'pipe', timeout: 30000 });
   const containerId = out.toString().trim();
+  if (skillsMount) onLog?.(`[builder] Mounted skills dir ${skillsMount.dir}`);
   onLog?.(`[builder] Container ready: ${containerId.slice(0, 12)}`);
-  return containerId;
+  return { containerId, skillsCleanup: skillsMount?.cleanup || null };
 }
 
 // ── Public API ────────────────────────────────────────────────────────────
@@ -205,7 +217,7 @@ export async function createSession(app, userId, onLog) {
   try {
     await ensureStudioImage(onLog);
     const workspaceDir = cloneWorkspace(sessionId, app, branchName, onLog);
-    const containerId  = startContainer(sessionId, workspaceDir, onLog);
+    const { containerId, skillsCleanup } = startContainer(sessionId, workspaceDir, onLog);
 
     sessions.set(sessionId, {
       appSlug: app.slug,
@@ -216,6 +228,7 @@ export async function createSession(app, userId, onLog) {
       lastActivityAt: Date.now(),
       runner: null,
       claudeSessionId: null,
+      skillsCleanup,
     });
 
     updateDb(sessionId, {
@@ -251,7 +264,7 @@ export async function resumeSession(sessionId, onLog) {
   }
 
   await ensureStudioImage(onLog);
-  const containerId = startContainer(sessionId, row.workspace_dir, onLog);
+  const { containerId, skillsCleanup } = startContainer(sessionId, row.workspace_dir, onLog);
 
   // The previous container is gone, so its in-container CLI session log
   // (~/.claude/sessions/<id>.json) is gone too. Clear claudeSessionId —
@@ -265,6 +278,7 @@ export async function resumeSession(sessionId, onLog) {
     lastActivityAt: Date.now(),
     runner: null,
     claudeSessionId: null,
+    skillsCleanup,
   });
 
   updateDb(sessionId, { status: 'idle', container_id: containerId, claude_session_id: null });

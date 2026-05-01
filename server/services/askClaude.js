@@ -5,6 +5,7 @@ import { decrypt } from './encryption.js';
 import { ensureStudioImage } from './appstudio/generator.js';
 import { assertCapacity } from './containerLimit.js';
 import { runAgentExec } from './llm/runAgent.js';
+import { prepareSkillsMount } from './skills.js';
 import log from '../utils/logger.js';
 
 const ASK_IMAGE      = process.env.APPSTUDIO_IMAGE || 'appcrane-studio:latest';
@@ -94,8 +95,12 @@ async function ensureSessionContainer(sessionId, app, onLog) {
   // Write token URL to a file — never put it in an env var (would persist in /proc/environ)
   writeFileSync(join(dir, 'clone_url'), cloneUrl, { mode: 0o644 }); // nosemgrep: container runs as non-root, needs read access
 
+  // Bind any enabled skills as ~/.claude/skills/ — same mechanism as the
+  // builder session container, so Ask gets the same skill set natively.
+  const skillsMount = prepareSkillsMount();
+
   // Clone, strip remote, disable credential helper — ask containers cannot commit or push
-  execFileSync('docker', [
+  const dockerArgs = [
     'run', '-d',
     '--name', containerName,
     '--label', 'appcrane=true',
@@ -104,17 +109,25 @@ async function ensureSessionContainer(sessionId, app, onLog) {
     '-e', `ANTHROPIC_API_KEY=${process.env.ANTHROPIC_API_KEY}`,
     '-e', `ASK_MODEL=${ASK_MODEL}`,
     '-v', `${dir}:/studio:ro`,
+  ];
+  if (skillsMount) dockerArgs.push('-v', `${skillsMount.dir}:/home/studio/.claude/skills:ro`);
+  dockerArgs.push(
     ASK_IMAGE,
     'sh', '-c',
     `CLONE_URL=$(cat /studio/clone_url) && git clone --depth 1 --branch "${app.branch || 'main'}" "$CLONE_URL" /workspace && git -C /workspace remote remove origin && git -C /workspace config --local credential.helper '' && tail -f /dev/null`,
-  ], { stdio: 'pipe', timeout: 15000 });
+  );
+  execFileSync('docker', dockerArgs, { stdio: 'pipe', timeout: 15000 });
 
   await waitForWorkspace(containerName, onLog);
 
   // Clear the token from the mounted file — clone is done, container no longer needs it
   writeFileSync(join(dir, 'clone_url'), '', { mode: 0o644 }); // nosemgrep
 
-  const session = { containerName, dir, appSlug: app.slug, idleTimer: null, maxTimer: null };
+  const session = {
+    containerName, dir, appSlug: app.slug,
+    idleTimer: null, maxTimer: null,
+    skillsCleanup: skillsMount?.cleanup || null,
+  };
   session.maxTimer = setTimeout(() => stopSession(sessionId), MAX_SESSION_MS);
   liveSessions.set(sessionId, session);
   return session;
@@ -182,5 +195,6 @@ export function stopSession(sessionId) {
   clearTimeout(session.maxTimer);
   try { execFileSync('docker', ['rm', '-f', session.containerName], { stdio: 'pipe', timeout: 15000 }); } catch (_) {}
   try { rmSync(session.dir, { recursive: true, force: true }); } catch (_) {}
+  if (session.skillsCleanup) { try { session.skillsCleanup(); } catch (_) {} }
   log.info(`AskClaude: session ${sessionId} container stopped (idle timeout)`);
 }

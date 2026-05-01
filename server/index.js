@@ -54,6 +54,7 @@ import askRoutes from './routes/ask.js';
 import planRoutes from './routes/plan.js';
 import coderRoutes from './routes/coder.js';
 import agentsRoutes from './routes/agents.js';
+import skillsRoutes from './routes/skills.js';
 
 const PORT = process.env.PORT || 5001;
 const HOST = process.env.HOST || '0.0.0.0';
@@ -433,6 +434,7 @@ app.use('/api/apps', notificationsRoutes); // /api/apps/:slug/notifications
 app.use('/api/identity', identityRoutes);
 app.use('/api/enhancements', enhancementsRoutes); // Enhancement requests (Bearer auth, must be before logsRoutes)
 app.use('/api/appstudio', appstudioRoutes); // AppStudio plan/code/build pipeline
+app.use('/api/skills', skillsRoutes);       // Skill bundles loaded by all CLI agents via ~/.claude/skills/
 app.use('/api/webhooks', webhooksRoutes); // Public webhook endpoint (no auth — must be before logsRoutes)
 app.use('/api/presence', presenceRoutes); // Bearer auth (identity) — must be before logsRoutes (which installs X-API-Key requireAuth at /api)
 app.use('/api/ask', askRoutes);           // Ask Claude (Bearer auth)
@@ -608,6 +610,12 @@ app.listen(PORT, HOST, async () => {
   } catch (e) {
     log.warn('Coder orphan recovery skipped: ' + e.message);
   }
+
+  // Sweep stale per-call skills runtime dirs (24h+) left behind by killed processes.
+  try {
+    const { sweepStaleRuntimes } = await import('./services/skills.js');
+    sweepStaleRuntimes();
+  } catch (_) {}
 
   // Start health checker
   try {
