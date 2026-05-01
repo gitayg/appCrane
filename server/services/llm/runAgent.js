@@ -133,6 +133,7 @@ export function runAgentNew({
   model       = DEFAULT_MODEL,
   resume,
   workspaceDir,                        // host path → mounted as /workspace (rw)
+  workdir     = '/workspace',          // container cwd
   extraMounts = [],                    // [{host, container, mode?}]
   envVars     = {},                    // extra -e VAR=val pairs
   labels      = {},                    // extra --label key=val pairs
@@ -150,6 +151,7 @@ export function runAgentNew({
   args.push('--label', 'appcrane=true');
   for (const [k, v] of Object.entries(labels)) args.push('--label', `${k}=${v}`);
   args.push(`--memory=${memory}`, `--cpus=${cpus}`);
+  args.push('--workdir', workdir);
   args.push('-e', `HOME=${homeDir}`);
   args.push('-e', `ANTHROPIC_API_KEY=${apiKey}`);
   for (const [k, v] of Object.entries(envVars)) args.push('-e', `${k}=${v}`);
