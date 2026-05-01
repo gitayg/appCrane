@@ -14,7 +14,7 @@ import { getDb } from '../db.js';
 import { hashApiKey } from '../services/encryption.js';
 import { AppError } from '../utils/errors.js';
 import { auditMiddleware } from '../middleware/audit.js';
-import { commitAndPush } from '../services/coder/gitOps.js';
+import { commitAndPush } from '../services/builder/gitOps.js';
 import {
   createSession,
   resumeSession,
@@ -22,7 +22,7 @@ import {
   stopDispatch,
   subscribe,
   getInMemorySession,
-} from '../services/coder/coderSession.js';
+} from '../services/builder/builderSession.js';
 import log from '../utils/logger.js';
 
 const router = Router();

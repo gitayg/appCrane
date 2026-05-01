@@ -3,14 +3,14 @@ import { getDb } from '../db.js';
 import { hashApiKey } from '../services/encryption.js';
 import { AppError } from '../utils/errors.js';
 import { auditMiddleware } from '../middleware/audit.js';
-import { commitAndPush } from '../services/coder/gitOps.js';
+import { commitAndPush } from '../services/builder/gitOps.js';
 import {
   createSession,
   resumeSession,
   dispatch,
   stopDispatch,
   subscribe,
-} from '../services/coder/coderSession.js';
+} from '../services/builder/builderSession.js';
 import log from '../utils/logger.js';
 
 const router = Router();
@@ -79,7 +79,7 @@ router.post('/:slug/session', auditMiddleware('coder.start'), async (req, res) =
   const logs = [];
   const onLog = (msg) => {
     logs.push(msg);
-    log.info(`[coder:${app.slug}] ${msg}`);
+    log.info(`[builder:${app.slug}] ${msg}`);
   };
 
   const sessionId = await createSession(app, req.user.id, onLog);
@@ -144,7 +144,7 @@ router.post('/:slug/session/:id/resume', auditMiddleware('coder.resume'), async 
   }
 
   const logs = [];
-  await resumeSession(req.params.id, (msg) => { logs.push(msg); log.info(`[coder:resume] ${msg}`); });
+  await resumeSession(req.params.id, (msg) => { logs.push(msg); log.info(`[builder:resume] ${msg}`); });
   res.json({ message: 'Session resumed', log: logs });
 });
 
@@ -168,7 +168,7 @@ router.post('/:slug/session/:id/ship', auditMiddleware('coder.ship'), async (req
   const commitMsg  = `coder: ${summaryMsg.slice(0, 72)}`;
 
   const logs = [];
-  const onLog = (msg) => { logs.push(msg); log.info(`[coder:ship] ${msg}`); };
+  const onLog = (msg) => { logs.push(msg); log.info(`[builder:ship] ${msg}`); };
 
   const { pushed, reason } = await commitAndPush({
     workspaceDir: session.workspace_dir,
