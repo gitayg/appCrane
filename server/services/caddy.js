@@ -114,12 +114,22 @@ export function generateCaddyfile() {
       caddyfile += `    }\n\n`;
     }
 
+    // Per-app embedding policy: when frame_ancestors is set we override the
+    // default-locked iframe headers from any upstream so embedders listed in
+    // the policy can iframe this app. Default (NULL) → no override; any
+    // headers from the upstream pass through.
+    const fa = app.frame_ancestors;
+
     // Sandbox — longer prefix /${slug}-sandbox* wins over /${slug}* via mutual exclusivity
     caddyfile += `    handle /${slug}-sandbox* {\n`;
     if (liveSet.has(`${app.id}:sandbox`)) {
       caddyfile += `        forward_auth 127.0.0.1:${cranePort} {\n`;
       caddyfile += `            uri /api/identity/verify?app=${slug}\n`;
       caddyfile += `        }\n`;
+      if (fa) {
+        caddyfile += `        header Content-Security-Policy "frame-ancestors ${fa}"\n`;
+        caddyfile += `        header -X-Frame-Options\n`;
+      }
       caddyfile += `        uri strip_prefix /${slug}-sandbox\n`;
       caddyfile += `        reverse_proxy 127.0.0.1:${ports.sand_be}\n`;
     } else {
@@ -133,6 +143,10 @@ export function generateCaddyfile() {
       caddyfile += `        forward_auth 127.0.0.1:${cranePort} {\n`;
       caddyfile += `            uri /api/identity/verify?app=${slug}\n`;
       caddyfile += `        }\n`;
+      if (fa) {
+        caddyfile += `        header Content-Security-Policy "frame-ancestors ${fa}"\n`;
+        caddyfile += `        header -X-Frame-Options\n`;
+      }
       caddyfile += `        uri strip_prefix /${slug}\n`;
       caddyfile += `        reverse_proxy 127.0.0.1:${ports.prod_be}\n`;
     } else {

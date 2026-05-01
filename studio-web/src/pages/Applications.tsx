@@ -12,6 +12,7 @@ interface App {
   has_icon?: boolean
   resource_limits?: { max_ram_mb?: number; max_cpu_percent?: number }
   image_retention?: number
+  frame_ancestors?: string | null
   production?: { deploy?: { status?: string; version?: string }; health?: { status: string } }
   sandbox?: { deploy?: { status?: string; version?: string }; health?: { status: string } }
 }
@@ -199,6 +200,25 @@ export function Applications() {
     if (cat === null) return
     await adminApi.put(`/api/apps/${app.slug}`, { category: cat }).catch(() => {})
     setApps(prev => prev.map(a => a.slug === app.slug ? { ...a, category: cat || undefined } : a))
+  }
+
+  async function setFrameAncestors(app: App) {
+    const help = "Allowed embedders (CSP frame-ancestors syntax).\n\n" +
+      "Examples:\n" +
+      "  'self'                              (default — only same origin)\n" +
+      "  'self' https://my.opswat.com        (also allow MyOPSWAT)\n" +
+      "  'self' https://*.opswat.com         (any opswat.com subdomain)\n\n" +
+      "Leave blank to reset to default.";
+    const val = prompt(help, app.frame_ancestors ?? '')
+    if (val === null) return
+    try {
+      const r = await adminApi.put<{ app?: App; error?: { message?: string } }>(`/api/apps/${app.slug}`, { frame_ancestors: val.trim() || null })
+      if (r?.error) { alert('Failed: ' + (r.error.message || 'unknown')); return }
+      const newVal = val.trim() || null
+      setApps(prev => prev.map(a => a.slug === app.slug ? { ...a, frame_ancestors: newVal ?? undefined } : a))
+    } catch (e) {
+      alert('Failed: ' + (e as Error).message)
+    }
   }
 
   async function showAppToken(slug: string) {
@@ -440,6 +460,11 @@ export function Applications() {
                   <button className="btn btn-xs" onClick={() => setCategory(app)}>tag</button>
                   <button className="btn btn-xs" onClick={() => editResources(app)}>⚙ limits</button>
                   <button className="btn btn-xs" onClick={() => editRetention(app)}>🗂 images</button>
+                  <button
+                    className="btn btn-xs"
+                    onClick={() => setFrameAncestors(app)}
+                    title={app.frame_ancestors ? `Embedders: ${app.frame_ancestors}` : 'Allowed embedders (default: same origin only)'}
+                  >🖼 embed{app.frame_ancestors ? ' ✓' : ''}</button>
                   <button className="btn btn-xs btn-red" onClick={() => deleteApp(app.slug, app.name)}>delete</button>
                 </div>
               </div>
