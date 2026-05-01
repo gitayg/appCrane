@@ -6,7 +6,7 @@ import { getDb } from '../../db.js';
 import { decrypt } from '../encryption.js';
 import { ensureStudioImage } from '../appstudio/generator.js';
 import { ensureCodebaseContext } from '../appstudio/contextBuilder.js';
-import { ClaudeRunner } from './claudeRunner.js';
+import { runAgentExec } from '../llm/runAgent.js';
 import log from '../../utils/logger.js';
 
 const STUDIO_IMAGE  = process.env.APPSTUDIO_IMAGE || 'appcrane-studio:latest';
@@ -325,11 +325,10 @@ export async function dispatch(sessionId, prompt) {
     }
   }
 
-  const runner = new ClaudeRunner({
+  const runner = runAgentExec({
     containerId:  state.containerId,
-    workspaceDir: state.workspaceDir,
-    prompt: augmentedPrompt,
-    apiKey: process.env.ANTHROPIC_API_KEY,
+    prompt:       augmentedPrompt,
+    apiKey:       process.env.ANTHROPIC_API_KEY,
   });
   state.runner = runner;
 
