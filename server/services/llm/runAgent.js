@@ -18,6 +18,7 @@
 import { spawn } from 'child_process';
 import { EventEmitter } from 'events';
 import { parseLine } from '../builder/streamJsonParser.js';
+import { prepareSkillsMount } from '../skills.js';
 import log from '../../utils/logger.js';
 
 const DEFAULT_MODEL   = process.env.APPSTUDIO_CODER_MODEL || 'claude-sonnet-4-6';
@@ -75,6 +76,22 @@ class Agent extends EventEmitter {
     this._child      = null;
     this._timer      = null;
     this._stopped    = false;
+    this._cleanups   = [];
+    this._cleanedUp  = false;
+  }
+
+  // Register a cleanup callback that runs exactly once on exit/error/stop.
+  // Used by skills mount preparation to remove the per-call symlink dir.
+  registerCleanup(fn) {
+    if (typeof fn === 'function') this._cleanups.push(fn);
+  }
+
+  _runCleanups() {
+    if (this._cleanedUp) return;
+    this._cleanedUp = true;
+    for (const fn of this._cleanups) {
+      try { fn(); } catch (e) { log.warn(`Agent cleanup failed: ${e.message}`); }
+    }
   }
 
   start() {
@@ -87,14 +104,23 @@ class Agent extends EventEmitter {
 
     attachStdoutParser(this._child, this);
 
-    this._child.on('error', (err) => { clearTimeout(this._timer); this.emit('error', err); });
-    this._child.on('close', (code) => { clearTimeout(this._timer); if (!this._stopped) this.emit('exit', code); });
+    this._child.on('error', (err) => {
+      clearTimeout(this._timer);
+      this._runCleanups();
+      this.emit('error', err);
+    });
+    this._child.on('close', (code) => {
+      clearTimeout(this._timer);
+      this._runCleanups();
+      if (!this._stopped) this.emit('exit', code);
+    });
     this._child.unref();
   }
 
   stop() {
     this._stopped = true;
     clearTimeout(this._timer);
+    this._runCleanups();
     if (this._child?.pid) {
       try { process.kill(-this._child.pid, 'SIGTERM'); } catch (_) {}
     }
@@ -165,8 +191,19 @@ export function runAgentNew({
   for (const m of extraMounts) {
     args.push('-v', `${m.host}:${m.container}${m.mode ? `:${m.mode}` : ''}`);
   }
+
+  // Bind any enabled skills under ~/.claude/skills/ so the CLI's native loader
+  // discovers them. The mount dir is a per-call symlink farm; cleanup runs
+  // when the agent exits/errors/is stopped.
+  const skillsMount = prepareSkillsMount();
+  if (skillsMount) {
+    args.push('-v', `${skillsMount.dir}:${homeDir}/.claude/skills:ro`);
+  }
+
   args.push(image, 'sh', '-c', buildClaudeCmd({ prompt, model, resume, addDir, systemPrompt }));
-  return new Agent(args, timeoutMs);
+  const agent = new Agent(args, timeoutMs);
+  if (skillsMount) agent.registerCleanup(skillsMount.cleanup);
+  return agent;
 }
 
 // One-shot wrapper: run a fresh container, collect text + usage into a Promise.
