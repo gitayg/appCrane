@@ -29,9 +29,11 @@ function shellQuote(str) {
 }
 
 // Build the `claude -p ...` shell command that runs inside the container.
-// `resume` (session id) is for v1.22.2's --resume continuity work; ignored
-// when undefined.
-function buildClaudeCmd({ prompt, model, resume, addDir = '/workspace' }) {
+// `resume` (session id) is for chat continuity (v1.23.0); ignored when undefined.
+// `systemPrompt` appends to Claude Code's default system prompt — used for
+// non-tool-using callers (planner, contextBuilder) that need specialized
+// instructions instead of the default coding-agent priming.
+function buildClaudeCmd({ prompt, model, resume, addDir = '/workspace', systemPrompt }) {
   const parts = [
     `claude -p ${shellQuote(prompt)}`,
     `--model ${model}`,
@@ -39,7 +41,8 @@ function buildClaudeCmd({ prompt, model, resume, addDir = '/workspace' }) {
     `--output-format stream-json --verbose`,
     `--add-dir ${addDir}`,
   ];
-  if (resume) parts.push(`--resume ${resume}`);
+  if (systemPrompt) parts.push(`--append-system-prompt ${shellQuote(systemPrompt)}`);
+  if (resume)       parts.push(`--resume ${resume}`);
   return parts.join(' ');
 }
 
@@ -104,12 +107,13 @@ export function runAgentExec({
   containerId,
   prompt,
   apiKey,
-  model     = DEFAULT_MODEL,
+  model        = DEFAULT_MODEL,
   resume,
-  workdir   = '/workspace',
-  addDir    = '/workspace',
-  homeDir   = '/home/studio',
-  timeoutMs = DEFAULT_TIMEOUT,
+  systemPrompt,
+  workdir      = '/workspace',
+  addDir       = '/workspace',
+  homeDir      = '/home/studio',
+  timeoutMs    = DEFAULT_TIMEOUT,
 }) {
   const args = [
     'exec', '-i',
@@ -118,7 +122,7 @@ export function runAgentExec({
     '-e', `ANTHROPIC_API_KEY=${apiKey}`,
     containerId,
     'sh', '-c',
-    buildClaudeCmd({ prompt, model, resume, addDir }),
+    buildClaudeCmd({ prompt, model, resume, addDir, systemPrompt }),
   ];
   return new Agent(args, timeoutMs);
 }
@@ -130,18 +134,20 @@ export function runAgentNew({
   containerName,
   prompt,
   apiKey,
-  model       = DEFAULT_MODEL,
+  model         = DEFAULT_MODEL,
   resume,
-  workspaceDir,                        // host path → mounted as /workspace (rw)
-  workdir     = '/workspace',          // container cwd
-  extraMounts = [],                    // [{host, container, mode?}]
-  envVars     = {},                    // extra -e VAR=val pairs
-  labels      = {},                    // extra --label key=val pairs
-  memory      = '2g',
-  cpus        = '1',
-  timeoutMs   = DEFAULT_TIMEOUT,
-  addDir      = '/workspace',
-  homeDir     = '/home/studio',
+  systemPrompt,                          // appends to claude's default system prompt
+  workspaceDir,                          // host path → mounted as /workspace
+  workspaceMode = 'rw',                  // 'rw' (default, for coders) or 'ro' (planner/contextBuilder — read-only)
+  workdir       = '/workspace',          // container cwd
+  extraMounts   = [],                    // [{host, container, mode?}]
+  envVars       = {},                    // extra -e VAR=val pairs
+  labels        = {},                    // extra --label key=val pairs
+  memory        = '2g',
+  cpus          = '1',
+  timeoutMs     = DEFAULT_TIMEOUT,
+  addDir        = '/workspace',
+  homeDir       = '/home/studio',
 }) {
   if (!image) throw new Error('runAgentNew: image required');
   if (!workspaceDir) throw new Error('runAgentNew: workspaceDir required');
@@ -155,10 +161,42 @@ export function runAgentNew({
   args.push('-e', `HOME=${homeDir}`);
   args.push('-e', `ANTHROPIC_API_KEY=${apiKey}`);
   for (const [k, v] of Object.entries(envVars)) args.push('-e', `${k}=${v}`);
-  args.push('-v', `${workspaceDir}:/workspace`);
+  args.push('-v', `${workspaceDir}:/workspace${workspaceMode === 'ro' ? ':ro' : ''}`);
   for (const m of extraMounts) {
     args.push('-v', `${m.host}:${m.container}${m.mode ? `:${m.mode}` : ''}`);
   }
-  args.push(image, 'sh', '-c', buildClaudeCmd({ prompt, model, resume, addDir }));
+  args.push(image, 'sh', '-c', buildClaudeCmd({ prompt, model, resume, addDir, systemPrompt }));
   return new Agent(args, timeoutMs);
+}
+
+// One-shot wrapper: run a fresh container, collect text + usage into a Promise.
+// Used by callers that previously went through oneShot.js (planner,
+// contextBuilder) but now share the CLI substrate so skills load uniformly.
+// Resolves with { text, usage, costUsd }; rejects on non-zero exit or timeout.
+export function runAgentOneShot(opts) {
+  return new Promise((resolve, reject) => {
+    let text = '';
+    let usage = null;
+    let costUsd = 0;
+    const runner = runAgentNew(opts);
+
+    runner.on('data', (ev) => {
+      if (ev.type === 'text') {
+        text += ev.text;
+        opts.onChunk?.(text);
+      }
+    });
+    runner.on('result', (ev) => {
+      usage = { input_tokens: ev.inputTokens, output_tokens: ev.outputTokens };
+      costUsd = (ev.costUsdCents || 0) / 100;
+      opts.onTokens?.(ev.inputTokens + ev.outputTokens);
+    });
+    runner.on('error', reject);
+    runner.on('exit', (code) => {
+      if (code !== 0) return reject(new Error(`Agent exited with code ${code}`));
+      resolve({ text, usage, costUsd });
+    });
+
+    runner.start();
+  });
 }
