@@ -4,7 +4,7 @@ import { join } from 'path';
 import log from '../../utils/logger.js';
 import { ensureCodebaseContext } from './contextBuilder.js';
 import { runAgentOneShot } from '../llm/runAgent.js';
-import { extractJsonBlock } from '../llm/oneShot.js';
+import { extractJsonBlock } from '../../utils/json.js';
 import { ensureStudioImage } from './generator.js';
 
 const MODEL         = process.env.APPSTUDIO_PLANNER_MODEL || 'claude-sonnet-4-6';

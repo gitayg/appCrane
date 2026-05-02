@@ -1,8 +1,7 @@
 // Single helper for tool-using Claude agent calls.
 // All callers go through here so docker invocation, stream-json parsing,
 // timeouts, process-group lifecycle, and event normalization live in one
-// place. Mirrors the SDK consolidation in oneShot.js but for the
-// CLI-in-Docker substrate.
+// place.
 //
 // Two modes:
 //   exec — `docker exec` into an existing container (used by Studio chat)
@@ -220,8 +219,8 @@ export function runAgentNew({
 }
 
 // One-shot wrapper: run a fresh container, collect text + usage into a Promise.
-// Used by callers that previously went through oneShot.js (planner,
-// contextBuilder) but now share the CLI substrate so skills load uniformly.
+// Used by planner + contextBuilder so they share the CLI substrate (skills
+// load uniformly, tool-use available if a prompt asks for it).
 // Resolves with { text, usage, costUsd }; rejects on non-zero exit or timeout.
 export function runAgentOneShot(opts) {
   return new Promise((resolve, reject) => {

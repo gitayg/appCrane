@@ -31,6 +31,9 @@ function client() {
   return _client;
 }
 
+/** Drop the cached Anthropic client so the next call picks up a freshly-rotated key. */
+export function resetClient() { _client = null; }
+
 function tmpDir() {
   return resolve(process.env.DATA_DIR || './data', 'analyzer-tmp');
 }
