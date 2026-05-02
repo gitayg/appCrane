@@ -67,6 +67,7 @@ interface FrameState {
   prodVersion?: string
   sandVersion?: string
   hasIcon?: boolean
+  hasGithub?: boolean
 }
 
 interface PromptModal {
@@ -334,6 +335,7 @@ export function Applications() {
       prodVersion: app.production?.deploy?.version || '',
       sandVersion: app.sandbox?.deploy?.version    || '',
       hasIcon:     iconUrls[app.slug] != null,
+      hasGithub:   !!app.github_url,
     })
   }
 
@@ -637,18 +639,22 @@ export function Applications() {
             <div className="app-frame-right">
               <PresenceAvatars slug={frame.slug ?? null} />
               <BuilderBadge slug={frame.slug ?? null} />
-              <button
-                type="button"
-                className="btn btn-xs"
-                onClick={() => setFramePanel(p => p === 'ask' ? null : 'ask')}
-                title="Ask Claude about this app's source code"
-              >🤖 Learn</button>
-              <button
-                type="button"
-                className="btn btn-xs"
-                onClick={() => setFramePanel(p => p === 'request' ? null : 'request')}
-                title="File an enhancement request"
-              >💡 Request</button>
+              {frame.hasGithub && (
+                <>
+                  <button
+                    type="button"
+                    className="btn btn-xs"
+                    onClick={() => setFramePanel(p => p === 'ask' ? null : 'ask')}
+                    title="Ask Claude about this app's source code"
+                  >🤖 Learn</button>
+                  <button
+                    type="button"
+                    className="btn btn-xs"
+                    onClick={() => setFramePanel(p => p === 'request' ? null : 'request')}
+                    title="File an enhancement request"
+                  >💡 Request</button>
+                </>
+              )}
               <JobsButton slug={frame.slug ?? null} />
               <button
                 className="btn btn-xs"
