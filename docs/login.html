@@ -319,8 +319,8 @@ input:focus{border-color:var(--accent)}
       <span id="frameUserInfo" class="frame-user"></span>
 
       <div id="planContainerBadge" class="plan-container-badge"><span class="plan-container-dot"></span>Builder Working</div>
-      <button class="btn-enhance" onclick="openAskPanel()">🤖 Learn</button>
-      <button class="btn-enhance" onclick="openPlanPanel()">💡 Request</button>
+      <button id="frameLearnBtn" class="btn-enhance" onclick="openAskPanel()">🤖 Learn</button>
+      <button id="frameRequestBtn" class="btn-enhance" onclick="openPlanPanel()">💡 Request</button>
       <button id="jobsBtn" class="btn-enhance" onclick="toggleJobsPanel()" style="display:none">📋 Jobs<span id="jobsBadge" class="jobs-badge"></span></button>
       <button class="btn-enhance" onclick="refreshApp()" title="Reload app">↺ Refresh</button>
       <a id="frameNewTab" href="#" target="_blank" class="btn-newtab">Open in new tab ↗</a>
@@ -912,7 +912,7 @@ function showApps(data) {
         btn.appendChild(arr);
         btn.addEventListener('click', function() {
           const env = label === 'Production' ? 'prod' : 'sandbox';
-          openApp(url, a.name, a.slug, a.has_icon, { prodUrl, sandUrl, prodVersion: a.prod_version || '', sandVersion: a.sand_version || 'dev', env });
+          openApp(url, a.name, a.slug, a.has_icon, { prodUrl, sandUrl, prodVersion: a.prod_version || '', sandVersion: a.sand_version || 'dev', env, hasGithub: !!a.has_github });
         });
         return btn;
       }
@@ -924,11 +924,12 @@ function showApps(data) {
       // Admin hover quick actions
       const qa = document.createElement('div');
       qa.className = 'card-quick-actions';
-      [
-        ['Open \u25b8', function() { openApp(prodUrl, a.name, a.slug, a.has_icon, { prodUrl, sandUrl, prodVersion: a.prod_version || '', sandVersion: a.sand_version || 'dev', env: 'prod' }); }],
-        ['\uD83D\uDCA1 Request', function() { openEnhModal(a.slug, a.name); }],
-        ['Manage \u25b8', function() { window.open('/app?slug=' + encodeURIComponent(a.slug), '_blank'); }],
-      ].forEach(function(pair) {
+      var quickActions = [
+        ['Open \u25b8', function() { openApp(prodUrl, a.name, a.slug, a.has_icon, { prodUrl, sandUrl, prodVersion: a.prod_version || '', sandVersion: a.sand_version || 'dev', env: 'prod', hasGithub: !!a.has_github }); }],
+      ];
+      if (a.has_github) quickActions.push(['\uD83D\uDCA1 Request', function() { openEnhModal(a.slug, a.name); }]);
+      quickActions.push(['Manage \u25b8', function() { window.open('/app?slug=' + encodeURIComponent(a.slug), '_blank'); }]);
+      quickActions.forEach(function(pair) {
         var btn = document.createElement('button');
         btn.className = 'quick-btn';
         btn.textContent = pair[0];
@@ -940,8 +941,10 @@ function showApps(data) {
       // User: card itself is clickable → opens production
       card.style.cursor = 'pointer';
       card.addEventListener('click', function() {
-        openApp(prodUrl, a.name, a.slug, a.has_icon, { prodVersion: a.prod_version || '' });
+        openApp(prodUrl, a.name, a.slug, a.has_icon, { prodVersion: a.prod_version || '', hasGithub: !!a.has_github });
       });
+
+      if (!a.has_github) { return card; }
 
       // 💡 icon-only enhance button, top-right corner on hover
       const enhBtn = document.createElement('button');
@@ -1184,6 +1187,12 @@ function openApp(url, name, slug, hasIcon, appData) {
   }
   document.getElementById('jobsBtn').style.display = '';
   refreshJobsBadge();
+
+  // Hide Learn / Request when the app has no GitHub repo connected
+  // (Ask + Improve both require source-code access).
+  const _hasGh = !!(appData && appData.hasGithub);
+  document.getElementById('frameLearnBtn').style.display   = _hasGh ? '' : 'none';
+  document.getElementById('frameRequestBtn').style.display = _hasGh ? '' : 'none';
   if (_userRole === 'admin' && slug) {
     fetch(API + '/api/plan/active-job/' + encodeURIComponent(slug), {
       headers: { 'Authorization': 'Bearer ' + sessionToken },

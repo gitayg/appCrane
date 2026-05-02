@@ -632,6 +632,11 @@ async function handleOpenPr(job) {
   log.info(`AppStudio: PR #${prNumber} merged for enh #${enh.id}`);
   onLog?.(`[studio] ✅ Merged — triggering production deploy…`);
 
+  try {
+    const { closeRequest } = await import('../github/issuesMirror.js');
+    closeRequest(app, { id: enh.id, status: 'merged' }, { resolution: `Resolved by AppStudio.`, prUrl }).catch(() => {});
+  } catch (_) {}
+
   // Auto-deploy to production from the default branch after merge
   try {
     const { deployApp } = await import('../deployer.js');

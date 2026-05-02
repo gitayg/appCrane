@@ -103,6 +103,7 @@ router.post('/login', (req, res) => {
   const apps = db.prepare(`
     SELECT a.slug, a.name, a.domain, a.description, a.public_access, a.visibility, a.category,
       CASE WHEN a.visibility = 'public' THEN 'viewer' ELSE COALESCE(aur.app_role, 'none') END as app_role,
+      CASE WHEN a.github_url IS NOT NULL AND a.github_url != '' THEN 1 ELSE 0 END as has_github,
       hp.is_down as prod_down, hp.last_status as prod_status,
       hs.is_down as sand_down, hs.last_status as sand_status,
       (SELECT version FROM deployments WHERE app_id = a.id AND env = 'production' AND status = 'live' ORDER BY finished_at DESC LIMIT 1) as prod_version,
@@ -116,6 +117,7 @@ router.post('/login', (req, res) => {
     ...a,
     app_role: isAdmin && (a.app_role === 'none' || a.app_role === 'viewer') ? 'admin' : a.app_role,
     has_icon: hasIcon(a.slug),
+    has_github: !!a.has_github,
   })).filter(a => isAdmin || a.visibility !== 'hidden');
 
   res.json({
@@ -321,6 +323,7 @@ router.get('/me', (req, res) => {
   const apps = db.prepare(`
     SELECT a.slug, a.name, a.domain, a.description, a.public_access, a.visibility, a.category,
       CASE WHEN a.visibility = 'public' THEN 'viewer' ELSE COALESCE(aur.app_role, 'none') END as role,
+      CASE WHEN a.github_url IS NOT NULL AND a.github_url != '' THEN 1 ELSE 0 END as has_github,
       hp.is_down as prod_down, hp.last_status as prod_status,
       hs.is_down as sand_down, hs.last_status as sand_status,
       (SELECT version FROM deployments WHERE app_id = a.id AND env = 'production' AND status = 'live' ORDER BY finished_at DESC LIMIT 1) as prod_version,
@@ -334,6 +337,7 @@ router.get('/me', (req, res) => {
     ...a,
     role: isAdmin && (a.role === 'none' || a.role === 'viewer') ? 'admin' : a.role,
     has_icon: hasIcon(a.slug),
+    has_github: !!a.has_github,
   })).filter(a => isAdmin || a.visibility !== 'hidden');
 
   res.json({
@@ -380,6 +384,7 @@ router.get('/preview-as/:userId', (req, res) => {
   const apps = db.prepare(`
     SELECT a.slug, a.name, a.domain, a.description, a.public_access, a.visibility, a.category,
       CASE WHEN a.visibility = 'public' THEN 'viewer' ELSE COALESCE(aur.app_role, 'none') END as app_role,
+      CASE WHEN a.github_url IS NOT NULL AND a.github_url != '' THEN 1 ELSE 0 END as has_github,
       hp.is_down as prod_down, hp.last_status as prod_status,
       hs.is_down as sand_down, hs.last_status as sand_status,
       (SELECT version FROM deployments WHERE app_id = a.id AND env = 'production' AND status = 'live' ORDER BY finished_at DESC LIMIT 1) as prod_version,
@@ -392,6 +397,7 @@ router.get('/preview-as/:userId', (req, res) => {
   `).all(targetId).map(a => ({
     ...a,
     has_icon: hasIcon(a.slug),
+    has_github: !!a.has_github,
   })).filter(a => isTargetAdmin || a.visibility !== 'hidden');
 
   res.json({ user: target, apps });
