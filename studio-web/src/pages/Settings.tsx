@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { adminApi } from '../adminApi'
+import { parseFrontmatter } from '../lib/parseFrontmatter'
 
 const inputStyle: React.CSSProperties = {
   background: 'var(--surface2)',
@@ -535,6 +536,28 @@ function SkillsTab() {
   const [bundle, setBundle] = useState<File | null>(null)
   const [uploading, setUploading] = useState(false)
   const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null)
+  const [autoFilled, setAutoFilled] = useState<{ name?: boolean; slug?: boolean; description?: boolean }>({})
+
+  // Pre-fill empty form fields from a SKILL.md frontmatter. Operator-typed
+  // values always win — we only touch fields that are blank OR were
+  // previously auto-filled by us (so re-picking a different file updates).
+  function applyFrontmatter(text: string) {
+    const fm = parseFrontmatter(text)
+    if (!Object.keys(fm).length) return
+    const next: typeof autoFilled = {}
+    if (fm.name && (!name || autoFilled.name))               { setName(fm.name); next.name = true }
+    if (fm.slug && (!slug || autoFilled.slug))               { setSlug(fm.slug); next.slug = true }
+    if (fm.description && (!description || autoFilled.description)) { setDescription(fm.description); next.description = true }
+    setAutoFilled(prev => ({ ...prev, ...next }))
+  }
+
+  function onPickFile(file: File | null) {
+    setBundle(file)
+    if (!file) return
+    const lower = file.name.toLowerCase()
+    if (!(lower.endsWith('.md') || lower.endsWith('.markdown'))) return // .zip not parsed client-side
+    file.text().then(applyFrontmatter).catch(() => {})
+  }
 
   function load() {
     setLoading(true)
@@ -595,7 +618,7 @@ function SkillsTab() {
           content,
         })
       }
-      setName(''); setSlug(''); setDescription(''); setContent(''); setBundle(null)
+      setName(''); setSlug(''); setDescription(''); setContent(''); setBundle(null); setAutoFilled({})
       flash('Skill uploaded', true)
       load()
     } catch (e) {
@@ -657,23 +680,27 @@ function SkillsTab() {
       <h3 style={{ marginTop: 32, marginBottom: 8, fontSize: '.95rem' }}>Add a skill</h3>
       <form onSubmit={upload} style={{ display: 'flex', flexDirection: 'column', gap: 8, maxWidth: 640 }}>
         <input
-          className="editable" placeholder="Name" value={name} onChange={e => setName(e.target.value)}
+          className="editable" placeholder="Name" value={name}
+          onChange={e => { setName(e.target.value); setAutoFilled(p => ({ ...p, name: false })) }}
         />
         <input
-          className="editable" placeholder="Slug (auto-generated if empty)" value={slug} onChange={e => setSlug(e.target.value)}
+          className="editable" placeholder="Slug (auto-generated if empty)" value={slug}
+          onChange={e => { setSlug(e.target.value); setAutoFilled(p => ({ ...p, slug: false })) }}
         />
         <input
-          className="editable" placeholder="Description (optional)" value={description} onChange={e => setDescription(e.target.value)}
+          className="editable" placeholder="Description (optional)" value={description}
+          onChange={e => { setDescription(e.target.value); setAutoFilled(p => ({ ...p, description: false })) }}
         />
         <textarea
           className="editable" rows={8}
           placeholder="Paste SKILL.md content here, OR upload a .md / .zip file below"
-          value={content} onChange={e => setContent(e.target.value)}
+          value={content}
+          onChange={e => { setContent(e.target.value); applyFrontmatter(e.target.value) }}
           style={{ fontFamily: 'monospace', fontSize: '.85rem' }}
         />
         <div>
           <label style={{ fontSize: '.85rem', color: 'var(--dim)' }}>or upload a .md file (single skill) or .zip bundle (multi-file skill):</label><br/>
-          <input type="file" accept=".md,.markdown,.zip" onChange={e => setBundle(e.target.files?.[0] || null)} />
+          <input type="file" accept=".md,.markdown,.zip" onChange={e => onPickFile(e.target.files?.[0] || null)} />
           {bundle && <span style={{ marginLeft: 8, fontSize: '.82rem', color: 'var(--dim)' }}>{bundle.name}</span>}
         </div>
         <div>
