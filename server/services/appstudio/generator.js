@@ -4,6 +4,7 @@ import { join, resolve } from 'path';
 import { decrypt } from '../encryption.js';
 import { assertCapacity } from '../containerLimit.js';
 import { runAgentNew } from '../llm/runAgent.js';
+import { writeSnapshot } from '../github/snapshot.js';
 import log from '../../utils/logger.js';
 
 const GEN_MODEL       = process.env.APPSTUDIO_CODER_MODEL || 'claude-sonnet-4-6';
@@ -98,6 +99,12 @@ async function cloneForCode(dir, app, baseBranch, branchName, onLog) {
 
   writeFileSync(join(workspaceDir, 'CLAUDE.md'), buildWorkspaceClaude(), { mode: 0o644 }); // nosemgrep
 
+  // Drop a GitHub-state snapshot into .appcrane/ before the container starts.
+  // The token stays on the host. Fail-soft: snapshot errors do not block coding.
+  try { await writeSnapshot(app, workspaceDir, onLog); } catch (err) {
+    log.warn(`AppStudio: snapshot write failed for ${app.slug}: ${err.message}`);
+  }
+
   onLog?.(`[studio:git] Workspace ready at host path ${workspaceDir}`);
   return workspaceDir;
 }
@@ -164,7 +171,13 @@ function buildPrompt({ plan, summary, agentContext, contextDoc, enhancementMessa
   return `You are implementing an approved change to an existing application.
 The codebase is already cloned into the current working directory.
 
-${contextSection}# Enhancement request
+${contextSection}# Project history
+A GitHub state snapshot has been written to \`.appcrane/github-snapshot.md\` in
+the workspace. It contains recent commits, open pull requests, open feature
+requests, and recent releases. Read it if you need to understand what has
+already shipped or what is in flight before changing files.
+
+# Enhancement request
 ${enhancementMessage}
 
 # Approved plan

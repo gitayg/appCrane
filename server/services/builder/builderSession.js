@@ -6,6 +6,7 @@ import { getDb } from '../../db.js';
 import { decrypt } from '../encryption.js';
 import { ensureStudioImage } from '../appstudio/generator.js';
 import { ensureCodebaseContext } from '../appstudio/contextBuilder.js';
+import { writeSnapshot } from '../github/snapshot.js';
 import { runAgentExec } from '../llm/runAgent.js';
 import { prepareSkillsMount } from '../skills.js';
 import log from '../../utils/logger.js';
@@ -77,6 +78,11 @@ function buildIntroMessage(app, workspaceDir, branchName, containerId, skillsMou
     const shown = topEntries.slice(0, 14).join(', ');
     const more = topEntries.length > 14 ? ` … +${topEntries.length - 14} more` : '';
     lines.push(`Top-level:      ${shown}${more}`);
+  }
+  let hasSnapshot = false;
+  try { hasSnapshot = existsSync(join(workspaceDir, '.appcrane', 'github-snapshot.md')); } catch (_) {}
+  if (hasSnapshot) {
+    lines.push(`GitHub snapshot: .appcrane/github-snapshot.md (commits, PRs, requests, releases)`);
   }
   lines.push('');
 
@@ -266,6 +272,12 @@ export async function createSession(app, userId, onLog) {
   try {
     await ensureStudioImage(onLog);
     const workspaceDir = cloneWorkspace(sessionId, app, branchName, onLog);
+    // Drop a GitHub-state snapshot into the workspace BEFORE the container
+    // starts. The token stays on the host. Fail-soft: snapshot errors do
+    // not block session creation.
+    try { await writeSnapshot(app, workspaceDir, onLog); } catch (err) {
+      log.warn(`Builder: snapshot write failed for ${app.slug}: ${err.message}`);
+    }
     const { containerId, skillsCleanup } = startContainer(sessionId, workspaceDir, onLog);
 
     sessions.set(sessionId, {
@@ -325,6 +337,15 @@ export async function resumeSession(sessionId, onLog) {
   }
 
   await ensureStudioImage(onLog);
+  // Refresh the GitHub snapshot — the previous one was written when the
+  // session was originally created and may be hours/days stale. Look up
+  // the app row to get the current github_url and token.
+  try {
+    const app = db.prepare('SELECT slug, name, branch, github_url, github_token_encrypted FROM apps WHERE slug = ?').get(row.app_slug);
+    if (app) await writeSnapshot(app, row.workspace_dir, onLog);
+  } catch (err) {
+    log.warn(`Builder: snapshot refresh failed for ${row.app_slug}: ${err.message}`);
+  }
   const { containerId, skillsCleanup } = startContainer(sessionId, row.workspace_dir, onLog);
 
   // The previous container is gone, so its in-container CLI session log
@@ -350,13 +371,18 @@ export async function resumeSession(sessionId, onLog) {
 // (server/services/appstudio/generator.js: buildPrompt). Each Studio
 // chat dispatch is a one-shot `claude -p`, so we re-supply the context
 // every turn — Claude has no in-process memory across dispatches.
-function buildChatPrompt({ contextDoc, agentContext, userMessage }) {
+function buildChatPrompt({ contextDoc, agentContext, userMessage, includeSnapshotPointer }) {
   const parts = [];
   if (contextDoc?.trim()) {
     parts.push('# Codebase context');
     parts.push('Use this architectural overview to skip broad exploration. Read specific files directly when you need exact details. This overview was generated at an earlier git revision and may be out of date — when its claims affect what you are about to do, verify by reading the live file.');
     parts.push('');
     parts.push(contextDoc);
+    parts.push('');
+  }
+  if (includeSnapshotPointer) {
+    parts.push('# GitHub project snapshot');
+    parts.push('A snapshot of recent commits, open pull requests, open feature requests (`appcrane:request` issues) and recent releases for this repo was written to `.appcrane/github-snapshot.md` in the workspace before this session started. Read it once when you need historical context for what has shipped, what is in flight, or what users have asked for. It is not refreshed during the session — for live state use `git log` or `git status`.');
     parts.push('');
   }
   if (agentContext?.trim()) {
@@ -422,6 +448,7 @@ export async function dispatch(sessionId, prompt) {
           contextDoc:   isResume ? '' : contextDoc, // skip on resume — already seen
           agentContext,
           userMessage:  prompt,
+          includeSnapshotPointer: !isResume, // snapshot is mentioned once per session
         });
       }
     } catch (err) {
