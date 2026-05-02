@@ -3,6 +3,7 @@ import { adminApi } from '../adminApi'
 import { BuilderBadge } from '../components/runtime-topbar/BuilderBadge'
 import { PresenceAvatars } from '../components/runtime-topbar/PresenceAvatars'
 import { JobsButton } from '../components/runtime-topbar/JobsButton'
+import { AskPanel } from '../components/runtime-topbar/AskPanel'
 
 interface App {
   slug: string
@@ -82,6 +83,7 @@ export function Applications() {
   const [openEvars, setOpenEvars] = useState<Record<string, string | null>>({})
   const [evarData, setEvarData] = useState<Record<string, EnvVar[]>>({})
   const [frame, setFrame] = useState<FrameState>({ open: false, url: '', title: '' })
+  const [askOpen, setAskOpen] = useState(false)
   const [promptModal, setPromptModal] = useState<PromptModal>({ open: false })
   const [wizardOpen, setWizardOpen] = useState(false)
   const [wizardStep, setWizardStep] = useState<WizardStep>('input')
@@ -634,6 +636,12 @@ export function Applications() {
             <div className="app-frame-right">
               <PresenceAvatars slug={frame.slug ?? null} />
               <BuilderBadge slug={frame.slug ?? null} />
+              <button
+                type="button"
+                className="btn btn-xs"
+                onClick={() => setAskOpen(o => !o)}
+                title="Ask Claude about this app's source code"
+              >🤖 Learn</button>
               <JobsButton slug={frame.slug ?? null} />
               <button
                 className="btn btn-xs"
@@ -649,6 +657,12 @@ export function Applications() {
             </div>
           </div>
           {frame.url && <iframe className="app-frame-iframe" src={frame.url} title={frame.title} />}
+          <AskPanel
+            slug={frame.slug ?? null}
+            appName={frame.appName ?? frame.title ?? ''}
+            open={askOpen}
+            onClose={() => setAskOpen(false)}
+          />
         </div>
       )}
 

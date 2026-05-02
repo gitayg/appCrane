@@ -747,6 +747,31 @@ code.api-pill { background: var(--surface2); border: 1px solid var(--border); bo
 .job-del:disabled { opacity: .35; cursor: not-allowed; }
 .jobs-empty { padding: 18px 14px; font-size: .82rem; color: var(--dim); text-align: center; }
 
+/* Ask "Learn" panel — right drawer inside the app-frame overlay */
+.ask-panel { position: absolute; top: 44px; right: 0; bottom: 0; width: 380px; background: var(--bg); border-left: 1px solid var(--border); display: flex; flex-direction: column; z-index: 70; }
+.ask-header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; font-weight: 600; font-size: .88rem; }
+.ask-app-label { font-size: .75rem; color: var(--dim); font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 140px; }
+.ask-header-right { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+.ask-close { background: none; border: none; cursor: pointer; color: var(--dim); font-size: 1.1rem; padding: 2px 4px; line-height: 1; }
+.ask-sessions-btn { background: none; border: none; cursor: pointer; color: var(--accent); font-size: .73rem; padding: 2px 6px; }
+.ask-messages { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+.ask-empty { color: var(--dim); font-size: .82rem; text-align: center; margin-top: 40px; }
+.ask-msg { max-width: 88%; padding: 8px 12px; border-radius: 8px; font-size: .83rem; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
+.ask-msg.user { background: var(--accent); color: #fff; align-self: flex-end; border-bottom-right-radius: 3px; }
+.ask-msg.assistant { background: var(--surface); border: 1px solid var(--border); align-self: flex-start; border-bottom-left-radius: 3px; }
+.ask-working { padding: 8px 12px 4px; flex-shrink: 0; display: flex; align-items: center; gap: 8px; }
+.ask-spinner { width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: ask-spin .8s linear infinite; flex-shrink: 0; }
+@keyframes ask-spin { to { transform: rotate(360deg); } }
+.ask-working-text { font-size: .75rem; color: var(--dim); font-style: italic; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.ask-live-stats { font-size: .68rem; color: var(--dim); font-family: monospace; white-space: nowrap; flex-shrink: 0; }
+.ask-input-area { border-top: 1px solid var(--border); padding: 10px; flex-shrink: 0; }
+.ask-input-row { display: flex; gap: 8px; align-items: flex-end; }
+.ask-textarea { flex: 1; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: .83rem; padding: 7px 10px; resize: none; font-family: inherit; line-height: 1.4; max-height: 120px; }
+.ask-textarea:focus { outline: none; border-color: var(--accent); }
+.ask-textarea:disabled { opacity: .6; }
+.ask-send { background: var(--accent); color: #fff; border: none; border-radius: 6px; padding: 7px 14px; cursor: pointer; font-size: .83rem; font-weight: 500; white-space: nowrap; }
+.ask-send:disabled { opacity: .45; cursor: not-allowed; }
+
 /* ── Prompt modal ────────────────────────────────── */
 .prompt-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.7); display: flex; align-items: center; justify-content: center; z-index: 100; }
 .prompt-modal { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 32px; max-width: 600px; width: 90%; }
