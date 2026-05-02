@@ -64,7 +64,16 @@ function attachStdoutParser(child, emitter) {
   });
   child.stderr.on('data', (chunk) => {
     const t = chunk.toString().trim();
-    if (t) log.debug(`[agent] stderr: ${t}`);
+    if (!t) return;
+    log.debug(`[agent] stderr: ${t}`);
+    // Capture last few stderr lines on the emitter so the exit handler
+    // can surface them in error messages (e.g. exit-125 → image missing).
+    if (Array.isArray(emitter._stderrTail)) {
+      for (const line of t.split('\n')) {
+        emitter._stderrTail.push(line);
+        if (emitter._stderrTail.length > 20) emitter._stderrTail.shift();
+      }
+    }
   });
 }
 
@@ -78,7 +87,11 @@ class Agent extends EventEmitter {
     this._stopped    = false;
     this._cleanups   = [];
     this._cleanedUp  = false;
+    this._stderrTail = [];
   }
+
+  /** Last ~20 lines of docker/agent stderr — useful for diagnosing nonzero exit codes. */
+  getStderrTail() { return this._stderrTail.slice(); }
 
   // Register a cleanup callback that runs exactly once on exit/error/stop.
   // Used by skills mount preparation to remove the per-call symlink dir.
@@ -230,8 +243,20 @@ export function runAgentOneShot(opts) {
     });
     runner.on('error', reject);
     runner.on('exit', (code) => {
-      if (code !== 0) return reject(new Error(`Agent exited with code ${code}`));
-      resolve({ text, usage, costUsd });
+      if (code === 0) return resolve({ text, usage, costUsd });
+      // Exit 125 = docker daemon couldn't start the container at all (image
+      // missing / pull denied / daemon down). Surface that explicitly so it
+      // doesn't read like a Claude failure. For other codes, include the
+      // stderr tail so the operator sees why.
+      const tail = (typeof runner.getStderrTail === 'function' ? runner.getStderrTail() : []).join('\n').trim();
+      if (code === 125) {
+        const detail = tail ? `\n\nDocker stderr:\n${tail}` : '';
+        return reject(new Error(
+          `Agent could not start: docker run exited 125 (image '${opts.image}' missing, pull denied, or daemon down). Build/pull the image on this host before retrying.${detail}`
+        ));
+      }
+      const detail = tail ? ` — ${tail.split('\n').slice(-3).join(' | ')}` : '';
+      return reject(new Error(`Agent exited with code ${code}${detail}`));
     });
 
     runner.start();

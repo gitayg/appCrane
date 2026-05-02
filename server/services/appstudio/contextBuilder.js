@@ -4,6 +4,7 @@ import { join } from 'path';
 import { getDb } from '../../db.js';
 import log from '../../utils/logger.js';
 import { runAgentOneShot } from '../llm/runAgent.js';
+import { ensureStudioImage } from './generator.js';
 
 const MODEL        = process.env.APPSTUDIO_PLANNER_MODEL || 'claude-sonnet-4-6';
 const STUDIO_IMAGE = process.env.APPSTUDIO_IMAGE || 'appcrane-studio:latest';
@@ -66,6 +67,9 @@ function collectKeyFiles(repoDir, fileTree) {
 }
 
 async function callClaude(prompt, repoDir) {
+  // Make sure the studio image exists before spawning — without this,
+  // a fresh prod fails contextBuilder with exit-125 (no image to run).
+  await ensureStudioImage((m) => log.info(`[contextBuilder] ${m}`));
   const { text } = await runAgentOneShot({
     image:         STUDIO_IMAGE,
     workspaceDir:  repoDir,
