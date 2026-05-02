@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { adminApi } from '../adminApi'
+import { BuilderBadge } from '../components/runtime-topbar/BuilderBadge'
 
 interface App {
   slug: string
@@ -629,6 +630,7 @@ export function Applications() {
               )}
             </div>
             <div className="app-frame-right">
+              <BuilderBadge slug={frame.slug ?? null} />
               <button
                 className="btn btn-xs"
                 title="Reload app"
