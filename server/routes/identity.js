@@ -157,11 +157,25 @@ router.get('/verify', (req, res) => {
     ? `https://${process.env.CRANE_DOMAIN}`
     : `http://localhost:${process.env.PORT || 5001}`;
 
-  // Reconstruct original URL from Caddy forward_auth headers for post-login redirect
+  // Reconstruct original URL from Caddy forward_auth headers for post-login redirect.
+  //
+  // Caddy's default directive ordering runs `uri strip_prefix /<slug>` BEFORE
+  // forward_auth, so X-Forwarded-Uri arrives stripped (e.g. '/' for a /<slug>
+  // root request, '/sub' for /<slug>/sub). Without compensation, the post-SSO
+  // redirect lands on '/' instead of '/<slug>'.
+  //
+  // Caddyfile generator now passes ?prefix=/<slug-or-sandbox-prefix> on the
+  // verify URL — we re-prepend it here. Falls back to ?app=<slug> if prefix
+  // is missing (e.g. older Caddyfile from a pre-v1.25.2 deployment).
   function originalUrl() {
     const proto = req.headers['x-forwarded-proto'] || 'https';
     const host  = req.headers['x-forwarded-host']  || process.env.CRANE_DOMAIN || '';
-    const uri   = req.headers['x-forwarded-uri']   || '';
+    let uri     = req.headers['x-forwarded-uri']   || '';
+    const prefix = req.query.prefix || (req.query.app ? '/' + req.query.app : '');
+    if (prefix) {
+      if (!uri || uri === '/') uri = prefix;
+      else if (!uri.startsWith(prefix)) uri = prefix + uri;
+    }
     if (!host || !uri) return '';
     return `${proto}://${host}${uri}`;
   }
