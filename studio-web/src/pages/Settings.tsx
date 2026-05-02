@@ -573,7 +573,7 @@ function SkillsTab() {
   async function upload(e: React.FormEvent) {
     e.preventDefault()
     if (!name.trim()) { flash('Name required', false); return }
-    if (!content.trim() && !bundle) { flash('Either paste SKILL.md content OR pick a zip bundle', false); return }
+    if (!content.trim() && !bundle) { flash('Either paste SKILL.md content OR pick a .md or .zip file', false); return }
     setUploading(true)
     try {
       if (bundle) {
@@ -667,13 +667,13 @@ function SkillsTab() {
         />
         <textarea
           className="editable" rows={8}
-          placeholder="Paste SKILL.md content here, OR upload a zip below"
+          placeholder="Paste SKILL.md content here, OR upload a .md / .zip file below"
           value={content} onChange={e => setContent(e.target.value)}
           style={{ fontFamily: 'monospace', fontSize: '.85rem' }}
         />
         <div>
-          <label style={{ fontSize: '.85rem', color: 'var(--dim)' }}>or upload a .zip bundle (must contain SKILL.md):</label><br/>
-          <input type="file" accept=".zip" onChange={e => setBundle(e.target.files?.[0] || null)} />
+          <label style={{ fontSize: '.85rem', color: 'var(--dim)' }}>or upload a .md file (single skill) or .zip bundle (multi-file skill):</label><br/>
+          <input type="file" accept=".md,.markdown,.zip" onChange={e => setBundle(e.target.files?.[0] || null)} />
           {bundle && <span style={{ marginLeft: 8, fontSize: '.82rem', color: 'var(--dim)' }}>{bundle.name}</span>}
         </div>
         <div>
