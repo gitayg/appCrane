@@ -305,11 +305,22 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     // Reclaim dangling layers from failed/interrupted prior builds (safe — never touches in-use images).
     pruneDanglingImages();
 
-    // 7. Update current symlink (remove old even if target is gone)
+    // 7. Update current symlink (remove old even if target is gone).
+    // This is the atomic publish step — until it lands, the release isn't
+    // visible to the worker / enhancement lookups. We validate after the
+    // flip so a partial deploy can't quietly leave the app in the
+    // "deployed but unfindable" state described in the
+    // 2026-05-02 current-symlink-missing triage.
     const currentLink = resolve(join(appDir, 'current'));
     try { unlinkSync(currentLink); } catch (e) {} // ignore if doesn't exist
     symlinkSync(resolve(releaseDir), currentLink);
-    appendLog('Updated current symlink');
+    if (!existsSync(currentLink)) {
+      throw new Error(`Deploy verification failed: current symlink at ${currentLink} did not resolve after creation`);
+    }
+    if (!existsSync(join(currentLink, 'package.json')) && !existsSync(join(currentLink, 'deployhub.json'))) {
+      throw new Error(`Deploy verification failed: current symlink target ${releaseDir} has no package.json or deployhub.json`);
+    }
+    appendLog(`Updated current symlink → ${releaseDir.split('/').pop()}`);
 
     // 8. Update deployment record
     deployFinished = true;
