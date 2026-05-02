@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'fs';
+import { existsSync, readFileSync, readdirSync } from 'fs';
 import { join, resolve } from 'path';
 import { execFileSync } from 'child_process';
 import { getDb } from '../../db.js';
@@ -147,8 +147,31 @@ function getAgentContext(slug) {
 
 function getRepoDir(app) {
   const dataDir = resolve(process.env.DATA_DIR || './data');
-  const current = join(dataDir, 'apps', app.slug, 'production', 'current'); // nosemgrep: path-join-resolve-traversal — slug is DB-validated
+  const prodDir = join(dataDir, 'apps', app.slug, 'production'); // nosemgrep: path-join-resolve-traversal — slug is DB-validated
+  const current = join(prodDir, 'current');
   if (existsSync(current)) return current;
+
+  // Recovery: deploys are supposed to end with `production/current` pointing
+  // at the just-shipped release. If the symlink is missing but exactly ONE
+  // release directory exists under `production/releases/`, use it — this is
+  // the "deployed but symlink lost" case (a deploy crashed between unpacking
+  // and the symlink-flip step). Multiple releases or zero releases stay a
+  // hard fail so we don't silently pick a stale one.
+  try {
+    const releasesDir = join(prodDir, 'releases');
+    if (existsSync(releasesDir)) {
+      const candidates = readdirSync(releasesDir).filter(n => !n.startsWith('.'));
+      if (candidates.length === 1) {
+        const guess = join(releasesDir, candidates[0]);
+        if (existsSync(join(guess, 'package.json')) || existsSync(join(guess, 'deployhub.json'))) {
+          log.warn(`AppStudio: ${app.slug} has no production/current symlink — falling back to the single release ${candidates[0]}`);
+          return guess;
+        }
+      }
+    }
+  } catch (err) {
+    log.warn(`AppStudio: getRepoDir recovery probe failed for ${app.slug}: ${err.message}`);
+  }
   return null;
 }
 
@@ -159,7 +182,13 @@ async function handlePlan(job) {
   const app = enh.app_slug ? getApp(enh.app_slug) : null;
 
   const repoDir = app ? getRepoDir(app) : null;
-  if (!repoDir) throw new Error(`No deployed code found for ${enh.app_slug}`);
+  if (!repoDir) {
+    throw new Error(
+      `No deployed code found for ${enh.app_slug}. Expected a directory at production/current ` +
+      `(or exactly one release under production/releases/). Either the app has never been ` +
+      `deployed, or its last deploy failed before publishing — check the deployments page.`
+    );
+  }
 
   const agentContext = enh.app_slug ? getAgentContext(enh.app_slug) : '';
   const priorComments = enh.user_comments || enh.admin_comments || null;
