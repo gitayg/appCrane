@@ -15,6 +15,44 @@ import { reconcileOrphanedApps } from '../services/reconcile.js';
 
 const router = Router();
 
+// Owners we know can't be real GitHub accounts. Catches the placeholder
+// patterns (e.g. github.com/local/foo) the 2026-05-02 triage flagged on
+// `healthchampion`.
+const PLACEHOLDER_GH_OWNERS = new Set([
+  'local', 'localhost', 'example', 'test', 'placeholder', 'todo', 'tbd', 'unknown',
+]);
+
+function validateGithubUrl(url) {
+  if (!/^https:\/\//.test(url)) {
+    throw new AppError('github_url must use HTTPS', 400, 'VALIDATION');
+  }
+  const m = url.match(/^https:\/\/github\.com\/([^/]+)\/([^/]+?)(\.git)?\/?$/);
+  if (!m) {
+    throw new AppError('github_url must look like https://github.com/owner/repo[.git]', 400, 'VALIDATION');
+  }
+  if (PLACEHOLDER_GH_OWNERS.has(m[1].toLowerCase())) {
+    throw new AppError(
+      `github_url owner "${m[1]}" looks like a placeholder — use the real GitHub repo URL`,
+      400, 'VALIDATION',
+    );
+  }
+}
+
+/**
+ * Returns a list of apps whose github_url is missing, malformed, or uses a
+ * known placeholder owner. Used by the admin triage page to surface rows
+ * that slipped past validation in earlier versions of this service.
+ */
+function listSuspiciousGithubUrls() {
+  const db = getDb();
+  const rows = db.prepare('SELECT id, slug, name, github_url FROM apps').all();
+  return rows.filter(r => {
+    const u = r.github_url;
+    if (!u) return false; // empty is OK — app simply has no repo
+    try { validateGithubUrl(u); return false; } catch { return true; }
+  });
+}
+
 const ICON_EXTS = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg'];
 function hasIconFile(slug) {
   const dir = join(process.env.DATA_DIR || './data', 'apps', slug);
@@ -101,7 +139,7 @@ router.get('/', (req, res) => {
 router.post('/analyze', requireAdmin, async (req, res) => {
   const { github_url, branch, github_token } = req.body || {};
   if (!github_url) throw new AppError('github_url is required', 400, 'VALIDATION');
-  if (!/^https:\/\/.+/.test(github_url)) throw new AppError('github_url must use HTTPS', 400, 'VALIDATION');
+  validateGithubUrl(github_url);
 
   const { analyzeGithubRepo } = await import('../services/appAnalyzer.js');
   const { encrypt } = await import('../services/encryption.js');
@@ -123,7 +161,7 @@ router.post('/', requireAuth, auditMiddleware('app-create'), async (req, res) =>
 
   if (!name || !slug) throw new AppError('Name and slug are required', 400, 'VALIDATION');
   if (!/^[a-z0-9][a-z0-9-]*$/.test(slug)) throw new AppError('Slug must be lowercase alphanumeric with dashes', 400, 'VALIDATION');
-  if (github_url && !/^https:\/\/.+/.test(github_url)) throw new AppError('github_url must use HTTPS', 400, 'VALIDATION');
+  if (github_url) validateGithubUrl(github_url);
 
   const db = getDb();
 
@@ -263,7 +301,7 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
   if (category !== undefined) updates.category = category || null;
   if (source_type !== undefined) updates.source_type = source_type;
   if (github_url !== undefined) {
-    if (github_url && !/^https:\/\/.+/.test(github_url)) throw new AppError('github_url must use HTTPS', 400, 'VALIDATION');
+    if (github_url) validateGithubUrl(github_url);
     updates.github_url = github_url;
   }
   if (branch !== undefined) updates.branch = branch;
@@ -603,6 +641,15 @@ router.post('/reconcile', requireAdmin, async (req, res) => {
   const dryRun = req.query.dry_run === '1' || req.body?.dry_run === true;
   const result = await reconcileOrphanedApps({ dryRun });
   res.json({ ...result, dry_run: dryRun });
+});
+
+/**
+ * GET /api/apps/suspicious-github-urls — admin-only triage list of apps
+ * whose github_url is malformed or uses a placeholder owner. Backstop
+ * for rows that slipped past validation in earlier service versions.
+ */
+router.get('/suspicious-github-urls', requireAdmin, (req, res) => {
+  res.json({ apps: listSuspiciousGithubUrls() });
 });
 
 export default router;
