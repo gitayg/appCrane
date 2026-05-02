@@ -4,6 +4,7 @@ import { BuilderBadge } from '../components/runtime-topbar/BuilderBadge'
 import { PresenceAvatars } from '../components/runtime-topbar/PresenceAvatars'
 import { JobsButton } from '../components/runtime-topbar/JobsButton'
 import { AskPanel } from '../components/runtime-topbar/AskPanel'
+import { RequestPanel } from '../components/runtime-topbar/RequestPanel'
 
 interface App {
   slug: string
@@ -83,7 +84,7 @@ export function Applications() {
   const [openEvars, setOpenEvars] = useState<Record<string, string | null>>({})
   const [evarData, setEvarData] = useState<Record<string, EnvVar[]>>({})
   const [frame, setFrame] = useState<FrameState>({ open: false, url: '', title: '' })
-  const [askOpen, setAskOpen] = useState(false)
+  const [framePanel, setFramePanel] = useState<'ask' | 'request' | null>(null)
   const [promptModal, setPromptModal] = useState<PromptModal>({ open: false })
   const [wizardOpen, setWizardOpen] = useState(false)
   const [wizardStep, setWizardStep] = useState<WizardStep>('input')
@@ -639,9 +640,15 @@ export function Applications() {
               <button
                 type="button"
                 className="btn btn-xs"
-                onClick={() => setAskOpen(o => !o)}
+                onClick={() => setFramePanel(p => p === 'ask' ? null : 'ask')}
                 title="Ask Claude about this app's source code"
               >🤖 Learn</button>
+              <button
+                type="button"
+                className="btn btn-xs"
+                onClick={() => setFramePanel(p => p === 'request' ? null : 'request')}
+                title="File an enhancement request"
+              >💡 Request</button>
               <JobsButton slug={frame.slug ?? null} />
               <button
                 className="btn btn-xs"
@@ -660,8 +667,14 @@ export function Applications() {
           <AskPanel
             slug={frame.slug ?? null}
             appName={frame.appName ?? frame.title ?? ''}
-            open={askOpen}
-            onClose={() => setAskOpen(false)}
+            open={framePanel === 'ask'}
+            onClose={() => setFramePanel(null)}
+          />
+          <RequestPanel
+            slug={frame.slug ?? null}
+            appName={frame.appName ?? frame.title ?? ''}
+            open={framePanel === 'request'}
+            onClose={() => setFramePanel(null)}
           />
         </div>
       )}
