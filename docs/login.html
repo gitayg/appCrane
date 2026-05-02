@@ -114,7 +114,16 @@ input:focus{border-color:var(--accent)}
 .updates-msg{color:var(--text);overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 .updates-close{background:none;border:none;color:var(--dim);cursor:pointer;font-size:1.1rem;padding:0 2px;line-height:1;flex-shrink:0}
 .updates-close:hover{color:var(--text)}
-.app-frame iframe{flex:1;border:none;background:#fff}
+.app-frame iframe{flex:1;border:none;background:#fff;transition:margin-right .2s ease,width .2s ease}
+/* Side-dock layout: when a Learn or Request panel is open, shrink the iframe instead of overlaying it */
+.app-frame.dock-active iframe{margin-right:var(--dock-width,400px)}
+.app-frame.dock-active .ask-panel.open,
+.app-frame.dock-active .plan-panel.open{width:var(--dock-width,400px) !important}
+.dock-resizer{position:absolute;top:44px;bottom:0;width:6px;cursor:ew-resize;z-index:25;background:transparent;transition:background .12s,opacity .12s;display:none}
+.dock-resizer:hover,.dock-resizer.dragging{background:var(--accent);opacity:.5}
+.app-frame.dock-active .dock-resizer{display:block;right:var(--dock-width,400px)}
+.dock-resizing{user-select:none}
+.dock-resizing iframe{pointer-events:none}
 .presence-wrap{display:flex;align-items:center;gap:4px;position:relative;cursor:default}
 .presence-avatars{display:flex;align-items:center}
 .presence-avatar{width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:.58rem;font-weight:700;color:#fff;border:2px solid var(--surface);margin-left:-6px;flex-shrink:0}
@@ -418,6 +427,7 @@ input:focus{border-color:var(--accent)}
   </div>
 
   <iframe id="frameIframe" src="" allow="fullscreen"></iframe>
+  <div id="dockResizer" class="dock-resizer" title="Drag to resize panel"></div>
 
   <!-- Job detail side panel -->
   <div id="jobDetailPanel" class="job-detail-panel">
@@ -1884,13 +1894,82 @@ var _askPeekCtx   = null;
 var _askBusy      = false;
 var _userRole     = null;
 
+// ── Right-side dock for Learn / Request panels ───────────────────────────
+// Replaces the prior overlay behavior: when a panel opens it docks on the
+// right and the app iframe shrinks via margin-right, so both are usable
+// simultaneously. Width is user-resizable via a vertical drag handle and
+// persisted in localStorage.
+
+var _DOCK_MIN = 280;
+var _DOCK_MAX_VW_PCT = 80; // cap at 80% viewport so iframe stays usable
+
+function _activateDock() {
+  var w = parseInt(localStorage.getItem('cc_dock_width') || '400', 10);
+  if (!Number.isFinite(w) || w < _DOCK_MIN) w = 400;
+  var maxPx = Math.floor(window.innerWidth * _DOCK_MAX_VW_PCT / 100);
+  if (w > maxPx) w = maxPx;
+  document.getElementById('appFrame').style.setProperty('--dock-width', w + 'px');
+  document.getElementById('appFrame').classList.add('dock-active');
+}
+
+function _maybeDeactivateDock() {
+  var ask  = document.getElementById('askPanel').classList.contains('open');
+  var plan = document.getElementById('planPanel').classList.contains('open');
+  if (!ask && !plan) {
+    document.getElementById('appFrame').classList.remove('dock-active');
+  }
+}
+
+(function _initDockResizer() {
+  var resizer = document.getElementById('dockResizer');
+  if (!resizer) return;
+  var dragging = false;
+  var startX = 0, startW = 0;
+
+  function onMove(ev) {
+    if (!dragging) return;
+    var dx = startX - ev.clientX; // moving left widens the dock
+    var w = startW + dx;
+    var maxPx = Math.floor(window.innerWidth * _DOCK_MAX_VW_PCT / 100);
+    if (w < _DOCK_MIN) w = _DOCK_MIN;
+    if (w > maxPx)     w = maxPx;
+    document.getElementById('appFrame').style.setProperty('--dock-width', w + 'px');
+  }
+
+  function onUp() {
+    if (!dragging) return;
+    dragging = false;
+    resizer.classList.remove('dragging');
+    document.body.classList.remove('dock-resizing');
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+    var cur = document.getElementById('appFrame').style.getPropertyValue('--dock-width');
+    var n = parseInt(cur, 10);
+    if (Number.isFinite(n)) localStorage.setItem('cc_dock_width', String(n));
+  }
+
+  resizer.addEventListener('mousedown', function(ev) {
+    ev.preventDefault();
+    dragging = true;
+    startX = ev.clientX;
+    var cur = document.getElementById('appFrame').style.getPropertyValue('--dock-width') || '400px';
+    startW = parseInt(cur, 10) || 400;
+    resizer.classList.add('dragging');
+    document.body.classList.add('dock-resizing');
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+})();
+
 function openAskPanel() {
   if (!currentAppSlug) return;
   document.getElementById('askPanel').classList.add('open');
+  _activateDock();
 }
 
 function closeAskPanel() {
   document.getElementById('askPanel').classList.remove('open');
+  _maybeDeactivateDock();
 }
 
 function clearAskPeekCtx() {
@@ -2098,11 +2177,13 @@ function openPlanPanel() {
   if (!currentAppSlug) return;
   document.getElementById('planPanel').classList.add('open');
   document.getElementById('planPanel').classList.remove('minimized');
+  _activateDock();
   setTimeout(function() { document.getElementById('planInput').focus(); }, 50);
 }
 
 function closePlanPanel() {
   document.getElementById('planPanel').classList.remove('open');
+  _maybeDeactivateDock();
   _stopPlanJobPolling();
 }
 
