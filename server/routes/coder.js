@@ -13,6 +13,7 @@ import {
   evictApp,
 } from '../services/builder/builderSession.js';
 import { getContainer } from '../services/builder/appContainer.js';
+import { getQueueState, subscribeQueue } from '../services/builder/appQueue.js';
 import log from '../utils/logger.js';
 
 const router = Router();
@@ -237,6 +238,16 @@ router.get('/:slug/container', (req, res) => {
     last_activity_at: new Date(c.lastActivityAt).toISOString(),
     claude_session_id: c.claudeSessionId || null,
   });
+});
+
+// ── GET /api/coder/:slug/queue — current per-app FIFO queue ──────────────
+//
+// Returns { depth, running, items[] } where running/items expose
+// { id, priority, sourceType, sourceId, label, enqueuedAt }. Improve = 1,
+// Builder = 2 (lower drains first; FIFO within same priority).
+router.get('/:slug/queue', (req, res) => {
+  getApp(req.params.slug, req.user);
+  res.json(getQueueState(req.params.slug));
 });
 
 // ── GET /api/coder/:slug/session/:id/events — SSE stream ─────────────────

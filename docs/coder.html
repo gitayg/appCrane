@@ -20,6 +20,7 @@ html,body{height:100%;background:#0f1117;color:#e4e4e7;font-family:-apple-system
 .status-dot.idle{background:#22c55e}
 .status-dot.active{background:#f59e0b;animation:pulse 1.2s infinite}
 .status-dot.starting{background:#3b82f6;animation:pulse 1.2s infinite}
+.status-dot.queued{background:#a855f7;animation:pulse 1.5s infinite}
 .status-dot.paused{background:#6b7280}
 .status-dot.error{background:#ef4444}
 .status-dot.shipped{background:#a855f7}
@@ -98,6 +99,7 @@ html,body{height:100%;background:#0f1117;color:#e4e4e7;font-family:-apple-system
   </div>
 
   <div id="error-banner"></div>
+  <div id="queue-banner" style="display:none;background:#1e1b4b;border-bottom:1px solid #4c1d95;color:#c4b5fd;padding:8px 16px;font-size:13px"></div>
 
   <!-- Start session panel (shown when no active session) -->
   <div id="start-panel">
@@ -189,11 +191,26 @@ function setStatus(status) {
   $statusDot.style.display = 'inline-block';
   const isIdle = status === 'idle';
   const isActive = status === 'active';
+  const isQueued = status === 'queued';
   $sendBtn.disabled = !isIdle;
   $stopBtn.style.display = isActive ? '' : 'none';
   $shipBtn.style.display = ['idle', 'paused'].includes(status) ? '' : 'none';
   $prompt.disabled = !isIdle;
+  if (!isQueued) hideQueueBanner();
 }
+
+const $queueBanner = document.getElementById('queue-banner');
+function showQueueBanner(ahead, runningLabel) {
+  if (ahead <= 0 && !runningLabel) return hideQueueBanner();
+  const ahead_n = Math.max(0, ahead - (runningLabel ? 1 : 0));
+  const parts = [];
+  if (runningLabel) parts.push(`Running now: <b>${escHtml(runningLabel)}</b>`);
+  if (ahead_n > 0) parts.push(`${ahead_n} ${ahead_n === 1 ? 'item' : 'items'} ahead in the queue`);
+  if (!parts.length) parts.push('Waiting in queue…');
+  $queueBanner.innerHTML = '⏳ ' + parts.join(' · ');
+  $queueBanner.style.display = 'block';
+}
+function hideQueueBanner() { $queueBanner.style.display = 'none'; }
 
 function showChat() {
   $startPanel.style.display = 'none';
@@ -315,7 +332,17 @@ function handleSSEEvent(ev) {
     case 'status':
       finalizeStream();
       setStatus(ev.status);
+      if (ev.status === 'queued') {
+        const runningLabel = ev.running?.label || '';
+        showQueueBanner(ev.ahead || 0, runningLabel);
+      }
       if (ev.status === 'idle') $prompt.focus();
+      break;
+    case 'queue':
+      if (sessionStatus === 'queued') {
+        const runningLabel = ev.running?.label || '';
+        showQueueBanner(ev.ahead || 0, runningLabel);
+      }
       break;
     case 'cost':
       costTokens += (ev.inputTokens || 0) + (ev.outputTokens || 0);
