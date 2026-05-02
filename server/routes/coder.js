@@ -14,6 +14,7 @@ import {
 } from '../services/builder/builderSession.js';
 import { getContainer } from '../services/builder/appContainer.js';
 import { getQueueState, subscribeQueue } from '../services/builder/appQueue.js';
+import { fetchReleasesAndChangelog, renderReleasesPage } from '../services/github/releases.js';
 import log from '../utils/logger.js';
 
 const router = Router();
@@ -238,6 +239,43 @@ router.get('/:slug/container', (req, res) => {
     last_activity_at: new Date(c.lastActivityAt).toISOString(),
     claude_session_id: c.claudeSessionId || null,
   });
+});
+
+// ── GET /api/coder/:slug/releases — JSON release feed ───────────────────
+//
+// Returns { repo, releases, changelog, fetchedAt }. Pulls GitHub Releases
+// API + raw CHANGELOG.md from the default branch on every call. The token
+// stays on the host; the agent never sees it.
+router.get('/:slug/releases', async (req, res, next) => {
+  try {
+    const app = getApp(req.params.slug, req.user);
+    if (!app.github_url) {
+      return res.status(400).json({ error: 'App has no GitHub repository connected.' });
+    }
+    const data = await fetchReleasesAndChangelog(app);
+    res.json({ ...data, app: { slug: app.slug, name: app.name, github_url: app.github_url } });
+  } catch (err) { next(err); }
+});
+
+// ── GET /api/coder/:slug/releases/view — sandboxed HTML release viewer ──
+//
+// Returns a self-contained HTML page (CSP locked: no scripts) intended
+// to be loaded inside an iframe with sandbox="allow-popups". Renders
+// the release notes as markdown via a tiny in-tree renderer.
+router.get('/:slug/releases/view', async (req, res, next) => {
+  try {
+    const app = getApp(req.params.slug, req.user);
+    if (!app.github_url) {
+      res.set('Content-Type', 'text/html; charset=utf-8');
+      return res.status(400).send('<p style="color:#fca5a5;font-family:sans-serif;padding:20px">App has no GitHub repository connected.</p>');
+    }
+    const data = await fetchReleasesAndChangelog(app);
+    const html = renderReleasesPage({ app, ...data });
+    res.set('Content-Type', 'text/html; charset=utf-8');
+    res.set('X-Content-Type-Options', 'nosniff');
+    res.set('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; img-src https: data:; font-src https: data:");
+    res.send(html);
+  } catch (err) { next(err); }
 });
 
 // ── GET /api/coder/:slug/queue — current per-app FIFO queue ──────────────
