@@ -64,9 +64,6 @@ function AppStudioTab() {
   const [keyInput, setKeyInput] = useState('')
   const [keyFocused, setKeyFocused] = useState(false)
   const [keySaved, flashKeySaved] = useFlash()
-  const [keyTest, setKeyTest] = useState<{ ok: boolean; msg: string } | null>(null)
-  const keyTestTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-
   const [maxContainers, setMaxContainers] = useState(5)
   const [containerSaved, flashContainerSaved] = useFlash()
 
@@ -82,14 +79,6 @@ function AppStudioTab() {
     flashKeySaved()
     adminApi.get<{ configured: boolean; source?: string; suffix?: string }>('/api/appstudio/anthropic-key')
       .then(setKeyInfo).catch(() => {})
-  }
-
-  async function testKey() {
-    const r = await adminApi.get<{ ok: boolean; error?: string }>('/api/appstudio/anthropic-key?test=1').catch(() => null)
-    const ok = r?.ok ?? false
-    setKeyTest({ ok, msg: ok ? 'Connection successful' : (r?.error ?? 'Test failed') })
-    if (keyTestTimer.current) clearTimeout(keyTestTimer.current)
-    keyTestTimer.current = setTimeout(() => setKeyTest(null), 5000)
   }
 
   async function saveContainers() {
@@ -135,13 +124,7 @@ function AppStudioTab() {
           {!showEnvKey && (
             <button className="btn btn-accent" onClick={saveKey}>Save Key</button>
           )}
-          <button className="btn" onClick={testKey}>Test Key</button>
           {keySaved && <span className="saved-msg">Saved ✓</span>}
-          {keyTest && (
-            <span style={{ fontSize: '.82rem', color: keyTest.ok ? 'var(--green)' : 'var(--red)' }}>
-              {keyTest.ok ? '✓' : '✗'} {keyTest.msg}
-            </span>
-          )}
         </div>
       </div>
 

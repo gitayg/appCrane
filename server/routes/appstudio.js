@@ -175,22 +175,16 @@ function writeEnvKey(key, value) {
   writeFileSync(envFilePath, lines.join('\n'), 'utf8');
 }
 
-router.get('/anthropic-key', requireAdmin, async (req, res) => {
+router.get('/anthropic-key', requireAdmin, (req, res) => {
   const configured = !!process.env.ANTHROPIC_API_KEY;
   if (!configured) return res.json({ configured: false, source: null });
   const inFile = existsSync(envFilePath) &&
     readFileSync(envFilePath, 'utf8').split('\n').some(l => l.trim().startsWith('ANTHROPIC_API_KEY='));
-  if (req.query.test === '1') {
-    try {
-      const { complete } = await import('../services/llm/oneShot.js');
-      await complete({ prompt: 'hi', model: 'claude-haiku-4-5-20251001', maxTokens: 1 });
-      return res.json({ configured: true, source: inFile ? 'file' : 'env', suffix: process.env.ANTHROPIC_API_KEY.slice(-4), valid: true });
-    } catch (err) {
-      return res.json({ configured: true, source: inFile ? 'file' : 'env', suffix: process.env.ANTHROPIC_API_KEY.slice(-4), valid: false, error: err.message });
-    }
-  }
-  const suffix = process.env.ANTHROPIC_API_KEY.slice(-4);
-  res.json({ configured: true, source: inFile ? 'file' : 'env', suffix });
+  // No SDK liveness probe — the CLI (used for every real workload) gets
+  // the same env var and any auth failure surfaces in the first job.
+  // Calling complete({}) just to check the key is misleading: it can pass
+  // while the CLI runs still fail (e.g. image missing, docker down).
+  res.json({ configured: true, source: inFile ? 'file' : 'env', suffix: process.env.ANTHROPIC_API_KEY.slice(-4) });
 });
 
 router.put('/anthropic-key', requireAdmin, auditMiddleware('appstudio.set-anthropic-key'), async (req, res) => {
