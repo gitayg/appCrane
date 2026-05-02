@@ -625,6 +625,16 @@ app.listen(PORT, HOST, async () => {
     log.warn(`Marked ${orphaned.changes} orphaned deployment(s) as failed (interrupted by restart)`);
   }
 
+  // Wipe any leftover per-app shared containers + workspaces from a prior
+  // process. Must run BEFORE coder session orphan recovery so the latter
+  // sees a clean slate to mark sessions paused against.
+  try {
+    const { recoverOrphans: recoverAppContainers } = await import('./services/builder/appContainer.js');
+    recoverAppContainers();
+  } catch (e) {
+    log.warn('App container orphan cleanup skipped: ' + e.message);
+  }
+
   // Recover any coder sessions that were active when the server last restarted
   try {
     const { recoverOrphans } = await import('./services/builder/builderSession.js');

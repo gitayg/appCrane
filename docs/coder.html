@@ -93,6 +93,7 @@ html,body{height:100%;background:#0f1117;color:#e4e4e7;font-family:-apple-system
     <div id="header-actions">
       <button id="stop-btn" class="btn btn-danger" style="display:none">Stop</button>
       <button id="ship-btn" class="btn btn-success" style="display:none">Ship to Sandbox</button>
+      <button id="evict-btn" class="btn btn-ghost" title="Tear down this app's shared container and wipe its workspace. Next session re-clones from GitHub.">Evict container</button>
     </div>
   </div>
 
@@ -169,6 +170,7 @@ const $prompt    = document.getElementById('prompt');
 const $sendBtn   = document.getElementById('send-btn');
 const $stopBtn   = document.getElementById('stop-btn');
 const $shipBtn   = document.getElementById('ship-btn');
+const $evictBtn  = document.getElementById('evict-btn');
 const $errBanner = document.getElementById('error-banner');
 
 // ── Error display ───────────────────────────────────────────────────────────
@@ -487,6 +489,20 @@ $stopBtn.addEventListener('click', async () => {
 });
 
 // ── Ship to sandbox ───────────────────────────────────────────────────────────
+
+$evictBtn.addEventListener('click', async () => {
+  if (!confirm('Tear down the shared container for this app?\n\nThis kills the container, wipes the workspace dir, and pauses every active Builder session for this app. Next session will re-clone fresh from GitHub.')) return;
+  $evictBtn.disabled = true;
+  try {
+    const data = await apiFetch(`/api/coder/${slug}/evict`, { method: 'POST' });
+    appendMessage('system', data.evicted ? 'Container evicted. Open a new session to start fresh.' : (data.message || 'No live container.'));
+    setStatus('paused');
+  } catch (err) {
+    showError(err.message);
+  } finally {
+    $evictBtn.disabled = false;
+  }
+});
 
 $shipBtn.addEventListener('click', async () => {
   const message = prompt('Describe this change (used as commit message):');
