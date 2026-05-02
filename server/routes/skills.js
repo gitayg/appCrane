@@ -49,9 +49,16 @@ router.post('/', auditMiddleware('skill.create'), async (req, res) => {
       if (!name)             return res.status(400).json({ error: { code: 'VALIDATION', message: 'name required' } });
       if (!isValidSlug(slug)) return res.status(400).json({ error: { code: 'VALIDATION', message: 'invalid slug' } });
 
+      // Accept either a zip bundle (multi-file skill) or a single .md file
+      // (the common case — most skills are just a SKILL.md). Detect by extension.
+      const fname = (req.file.originalname || '').toLowerCase();
       let files;
       try {
-        files = await unzipBuffer(req.file.buffer);
+        if (fname.endsWith('.md') || fname.endsWith('.markdown')) {
+          files = { 'SKILL.md': req.file.buffer.toString('utf8') };
+        } else {
+          files = await unzipBuffer(req.file.buffer);
+        }
       } catch (e) {
         return res.status(400).json({ error: { code: 'UNZIP_FAILED', message: e.message } });
       }
