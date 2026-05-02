@@ -5,6 +5,7 @@ import log from '../../utils/logger.js';
 import { ensureCodebaseContext } from './contextBuilder.js';
 import { runAgentOneShot } from '../llm/runAgent.js';
 import { extractJsonBlock } from '../llm/oneShot.js';
+import { ensureStudioImage } from './generator.js';
 
 const MODEL         = process.env.APPSTUDIO_PLANNER_MODEL || 'claude-sonnet-4-6';
 const STUDIO_IMAGE  = process.env.APPSTUDIO_IMAGE || 'appcrane-studio:latest';
@@ -139,6 +140,11 @@ export async function planEnhancement({ appSlug, request, repoDir, agentContext,
   ].filter(Boolean).join('\n\n---\n\n');
 
   log.info(`AppStudio plan: ${MODEL}, ${relevantPaths.length} files, context=${fromCache ? 'cached' : 'built'}`);
+
+  // Make sure the agent image exists before we try to spawn a container.
+  // Without this, a fresh prod with no image fails every plan job with
+  // exit-125, and the operator only sees "Agent exited with code 125".
+  await ensureStudioImage((m) => log.info(`[planner] ${m}`));
 
   const { text, usage, costUsd } = await runAgentOneShot({
     image:         STUDIO_IMAGE,
