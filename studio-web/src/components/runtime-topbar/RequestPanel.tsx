@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useEnhancementSubmit } from '../../hooks/useEnhancementSubmit'
+import { useMe, isAdmin } from '../../hooks/useMe'
 
 interface Props {
   slug:    string | null | undefined
@@ -17,6 +18,8 @@ interface Props {
  */
 export function RequestPanel({ slug, appName, open, onClose }: Props) {
   const { submit, busy, last, reset } = useEnhancementSubmit(slug)
+  const me = useMe()
+  const canBuild = isAdmin(me)
   const [text, setText] = useState('')
 
   useEffect(() => {
@@ -81,7 +84,12 @@ export function RequestPanel({ slug, appName, open, onClose }: Props) {
             className="ask-send"
             onClick={onSubmit}
             disabled={busy || !text.trim()}
-          >{busy ? 'Submitting…' : 'Request'}</button>
+            title={canBuild
+              ? 'Admin: AppCrane will plan, code, and open a PR automatically'
+              : 'Submit for review by an admin — they decide what to build'}
+          >{busy
+            ? 'Submitting…'
+            : (canBuild ? '🔨 Build' : '📤 Submit for Review')}</button>
         </div>
       </div>
     </div>
