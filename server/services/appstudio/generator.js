@@ -1,5 +1,5 @@
-import { execFileSync } from 'child_process';
-import { mkdirSync, existsSync, rmSync, writeFileSync, chmodSync } from 'fs';
+import { execFileSync, spawn } from 'child_process';
+import { mkdirSync, existsSync, readFileSync, rmSync, writeFileSync, chmodSync } from 'fs';
 import { join, resolve } from 'path';
 import { decrypt } from '../encryption.js';
 import { assertCapacity } from '../containerLimit.js';
@@ -25,7 +25,15 @@ export function cleanupWorkspace(jobId) {
 
 const STUDIO_IMAGE_VERSION = '2'; // bump to force image rebuild
 
-// Build the studio Docker image when missing or outdated
+// Build the studio Docker image when missing or outdated.
+//
+// Recipe lives in infra/studio.Dockerfile (checked into git so the build
+// path is reviewable + re-runnable by hand via scripts/build-studio-image.sh).
+// We copy the file into a scratch build context and pass STUDIO_IMAGE_VERSION
+// as a build-arg so the label tracks the JS const here.
+//
+// Falls back to writing the recipe inline if the checked-in file is somehow
+// missing — keeps dev hosts running before they pull the latest tree.
 export async function ensureStudioImage(onLog) {
   try {
     const info = execFileSync('docker', ['image', 'inspect', '--format', '{{index .Config.Labels "appcrane.studio.version"}}', STUDIO_IMAGE], { stdio: 'pipe', timeout: 10000 });
@@ -37,21 +45,36 @@ export async function ensureStudioImage(onLog) {
 
   const buildDir = join(workspaceRoot(), '_image-build');
   mkdirSync(buildDir, { recursive: true });
-  writeFileSync(join(buildDir, 'Dockerfile'), [
-    'FROM node:20-alpine',
-    `LABEL appcrane.studio.version="${STUDIO_IMAGE_VERSION}"`,
-    'RUN apk add --no-cache git',
-    'RUN npm install -g @anthropic-ai/claude-code',
-    'RUN addgroup -S studio && adduser -S -G studio studio \\',
-    '    && mkdir -p /home/studio /workspace \\',
-    '    && chown studio:studio /home/studio /workspace',
-    'USER studio',
-  ].join('\n'));
+
+  // Resolve infra/studio.Dockerfile relative to this file
+  // (server/services/appstudio/generator.js → ../../../infra/studio.Dockerfile)
+  const checkedInDockerfile = resolve(import.meta.dirname, '..', '..', '..', 'infra', 'studio.Dockerfile');
+  const buildDockerfile = join(buildDir, 'Dockerfile');
+  if (existsSync(checkedInDockerfile)) {
+    writeFileSync(buildDockerfile, readFileSync(checkedInDockerfile, 'utf8'));
+  } else {
+    onLog?.('[studio] infra/studio.Dockerfile missing — using inline recipe');
+    writeFileSync(buildDockerfile, [
+      'ARG STUDIO_IMAGE_VERSION=2',
+      'FROM node:20-alpine',
+      'ARG STUDIO_IMAGE_VERSION',
+      'LABEL appcrane.studio.version="${STUDIO_IMAGE_VERSION}"',
+      'RUN apk add --no-cache git',
+      'RUN npm install -g @anthropic-ai/claude-code',
+      'RUN addgroup -S studio && adduser -S -G studio studio \\',
+      '    && mkdir -p /home/studio /workspace \\',
+      '    && chown studio:studio /home/studio /workspace',
+      'USER studio',
+    ].join('\n'));
+  }
 
   await new Promise((res, rej) => {
-    const build = spawn('docker', ['build', '-t', STUDIO_IMAGE, buildDir], {
-      stdio: 'pipe',
-    });
+    const build = spawn('docker', [
+      'build',
+      '--build-arg', `STUDIO_IMAGE_VERSION=${STUDIO_IMAGE_VERSION}`,
+      '-t', STUDIO_IMAGE,
+      buildDir,
+    ], { stdio: 'pipe' });
     const emit = (l) => { if (l.trim()) onLog?.(`[build] ${l}`); };
     build.stdout.on('data', (c) => c.toString().split('\n').forEach(emit));
     build.stderr.on('data', (c) => c.toString().split('\n').forEach(emit));
