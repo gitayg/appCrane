@@ -285,6 +285,16 @@ export function AppStudio() {
     if (selected) fetchTrace(selected.id)
   }
 
+  async function retryJob(jobId: number) {
+    try {
+      await adminApi.post(`/api/appstudio/jobs/${jobId}/retry`)
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Retry failed')
+      return
+    }
+    if (selected) fetchTrace(selected.id)
+  }
+
   function openChat() {
     setChatMessages([{ role: 'assistant', content: "What would you like to add or improve? Describe it briefly and I'll help you refine it." }])
     setChatInput('')
@@ -341,6 +351,7 @@ export function AppStudio() {
             onBack={backToList}
             onAction={sendAction}
             onDeleteJob={deleteJob}
+            onRetryJob={retryJob}
           />
         ) : (
           <RequestsTab
@@ -593,9 +604,10 @@ interface DetailViewProps {
   onBack: () => void
   onAction: (id: number, path: string, body?: unknown) => void
   onDeleteJob: (jobId: number) => void
+  onRetryJob: (jobId: number) => void
 }
 
-function DetailView({ enh, trace, openJobs, onToggleJob, onBack, onAction, onDeleteJob }: DetailViewProps) {
+function DetailView({ enh, trace, openJobs, onToggleJob, onBack, onAction, onDeleteJob, onRetryJob }: DetailViewProps) {
   const plan = enh.ai_plan
 
   async function handlePlanFeedback(id: number) {
@@ -721,8 +733,8 @@ function DetailView({ enh, trace, openJobs, onToggleJob, onBack, onAction, onDel
                   {isFailed && (
                     <button
                       className="btn btn-xs btn-accent"
-                      onClick={e => { e.stopPropagation(); }}
-                      title="Retry"
+                      onClick={e => { e.stopPropagation(); onRetryJob(job.id) }}
+                      title="Retry this job"
                     >
                       ↺
                     </button>
