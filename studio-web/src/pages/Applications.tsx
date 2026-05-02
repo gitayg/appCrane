@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { adminApi } from '../adminApi'
 import { BuilderBadge } from '../components/runtime-topbar/BuilderBadge'
+import { PresenceAvatars } from '../components/runtime-topbar/PresenceAvatars'
 
 interface App {
   slug: string
@@ -630,6 +631,7 @@ export function Applications() {
               )}
             </div>
             <div className="app-frame-right">
+              <PresenceAvatars slug={frame.slug ?? null} />
               <BuilderBadge slug={frame.slug ?? null} />
               <button
                 className="btn btn-xs"
