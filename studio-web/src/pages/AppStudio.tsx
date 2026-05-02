@@ -134,7 +134,8 @@ type SortDir = 'asc' | 'desc'
 
 function getHash(): string {
   const h = window.location.hash.replace('#', '')
-  if (h === 'library' || h === 'studio') return h
+  // Old hashes (#library, #studio) collapse into the merged Builders view
+  if (h === 'library' || h === 'studio' || h === 'builders') return 'builders'
   return 'requests'
 }
 
@@ -153,8 +154,6 @@ export function AppStudio() {
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
   const [chatInput, setChatInput] = useState('')
   const [chatSending, setChatSending] = useState(false)
-  const [contextMap, setContextMap] = useState<Record<string, string>>({})
-  const [savedMap, setSavedMap] = useState<Record<string, boolean>>({})
   const chatBottomRef = useRef<HTMLDivElement>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const [trace, setTrace] = useState<TraceData | null>(null)
@@ -178,16 +177,6 @@ export function AppStudio() {
   }, [])
 
   useEffect(() => { loadData() }, [loadData])
-
-  useEffect(() => {
-    if (tab === 'library' && apps.length > 0) {
-      apps.forEach(app => {
-        adminApi.get<{ content?: string }>(`/api/appstudio/context/${app.slug}`)
-          .then(r => setContextMap(prev => ({ ...prev, [app.slug]: r?.content ?? '' })))
-          .catch(() => {})
-      })
-    }
-  }, [tab, apps])
 
   const stopPoll = useCallback(() => {
     if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null }
@@ -331,12 +320,6 @@ export function AppStudio() {
     chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [chatMessages])
 
-  async function saveContext(slug: string) {
-    await adminApi.put(`/api/appstudio/context/${slug}`, { content: contextMap[slug] ?? '' }).catch(() => {})
-    setSavedMap(prev => ({ ...prev, [slug]: true }))
-    setTimeout(() => setSavedMap(prev => ({ ...prev, [slug]: false })), 1500)
-  }
-
   function toggleJob(id: number) {
     setOpenJobs(prev => {
       const next = new Set(prev)
@@ -382,17 +365,7 @@ export function AppStudio() {
         )
       )}
 
-      {tab === 'library' && (
-        <LibraryTab
-          apps={apps}
-          contextMap={contextMap}
-          savedMap={savedMap}
-          onChange={(slug, val) => setContextMap(prev => ({ ...prev, [slug]: val }))}
-          onSave={saveContext}
-        />
-      )}
-
-      {tab === 'studio' && (
+      {tab === 'builders' && (
         <div style={{ height: 'calc(100vh - 120px)', overflow: 'hidden' }}>
           <StudioApp />
         </div>
@@ -796,36 +769,3 @@ function DetailView({ enh, trace, openJobs, onToggleJob, onBack, onAction, onDel
   )
 }
 
-interface LibraryTabProps {
-  apps: AppOption[]
-  contextMap: Record<string, string>
-  savedMap: Record<string, boolean>
-  onChange: (slug: string, val: string) => void
-  onSave: (slug: string) => void
-}
-
-function LibraryTab({ apps, contextMap, savedMap, onChange, onSave }: LibraryTabProps) {
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-      {apps.map(app => (
-        <div key={app.slug} style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 8, padding: '16px 20px' }}>
-          <div style={{ fontWeight: 700, fontSize: '.95rem', marginBottom: 10 }}>{app.name}</div>
-          <textarea
-            className="context-editor"
-            value={contextMap[app.slug] ?? ''}
-            onChange={e => onChange(app.slug, e.target.value)}
-            placeholder="Paste system context, coding guidelines, or notes for this app's AI sessions…"
-          />
-          <div style={{ marginTop: 8 }}>
-            <button className="btn btn-sm btn-accent" onClick={() => onSave(app.slug)}>
-              {savedMap[app.slug] ? 'Saved ✓' : 'Save'}
-            </button>
-          </div>
-        </div>
-      ))}
-      {apps.length === 0 && (
-        <div style={{ color: 'var(--dim)', fontSize: '.88rem' }}>No apps found</div>
-      )}
-    </div>
-  )
-}
