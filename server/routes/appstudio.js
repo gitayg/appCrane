@@ -195,8 +195,11 @@ router.put('/anthropic-key', requireAdmin, auditMiddleware('appstudio.set-anthro
   const trimmed = key.trim();
   writeEnvKey('ANTHROPIC_API_KEY', trimmed);
   process.env.ANTHROPIC_API_KEY = trimmed;
+  // Drop appAnalyzer's cached Anthropic client so the next analyze call uses
+  // the freshly-rotated key. (POST /chat instantiates per-request and POST /chat
+  // is the only other SDK consumer, so no other caches need busting.)
   try {
-    const { resetClient } = await import('../services/llm/oneShot.js');
+    const { resetClient } = await import('../services/appAnalyzer.js');
     resetClient();
   } catch (_) {}
   try {
