@@ -6,6 +6,7 @@ import { hashApiKey } from '../services/encryption.js';
 import { AppError } from '../utils/errors.js';
 import { runAskJob, hasActiveContainer } from '../services/askClaude.js';
 import { ensureCodebaseContext } from '../services/appstudio/contextBuilder.js';
+import { mirrorAsk } from '../services/github/issuesMirror.js';
 import log from '../utils/logger.js';
 
 const router = Router();
@@ -104,6 +105,10 @@ router.post('/:appSlug', async (req, res) => {
     jobState.done = true; jobState.answer = answer;
     for (const c of jobState.clients) { c.write(`data: ${JSON.stringify({ type: 'done', answer, session_id: sessionId })}\n\n`); c.end(); }
     setTimeout(() => pendingJobs.delete(jobId), 120000);
+
+    if (app.github_url) {
+      mirrorAsk(app, { question: question.trim(), answer, userName: user.userName, sessionId }).catch(() => {});
+    }
   }).catch(err => {
     log.error(`Ask job ${jobId} failed: ${err.message}`);
     jobState.done = true; jobState.error = err.message;

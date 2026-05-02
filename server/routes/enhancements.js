@@ -3,6 +3,7 @@ import { getDb } from '../db.js';
 import { hashApiKey } from '../services/encryption.js';
 import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { AppError } from '../utils/errors.js';
+import { mirrorRequest, closeRequest, getAppForMirror } from '../services/github/issuesMirror.js';
 
 const router = Router();
 
@@ -81,6 +82,14 @@ router.post('/', (req, res) => {
   }
 
   res.json({ message: 'Enhancement request submitted. Thank you!', enhancement_id: lastInsertRowid });
+
+  if (app_slug) {
+    const app = getAppForMirror(app_slug);
+    if (app?.github_url) {
+      const row = db.prepare('SELECT id, message, user_name, status, created_at FROM enhancement_requests WHERE id = ?').get(lastInsertRowid);
+      mirrorRequest(app, row).catch(() => {});
+    }
+  }
 });
 
 /**
@@ -140,10 +149,17 @@ router.post('/:id/set-status', requireAuth, requireAdmin, (req, res) => {
   }
   const db = getDb();
   const id = parseInt(req.params.id, 10);
-  const row = db.prepare('SELECT id FROM enhancement_requests WHERE id = ?').get(id);
+  const row = db.prepare('SELECT id, app_slug, message, user_name, pr_url FROM enhancement_requests WHERE id = ?').get(id);
   if (!row) throw new AppError('Not found', 404, 'NOT_FOUND');
   db.prepare('UPDATE enhancement_requests SET status = ? WHERE id = ?').run(status, id);
   res.json({ status });
+
+  if (status === 'done' && row.app_slug) {
+    const app = getAppForMirror(row.app_slug);
+    if (app?.github_url) {
+      closeRequest(app, { ...row, status }, { resolution: 'Marked done in AppCrane.', prUrl: row.pr_url || null }).catch(() => {});
+    }
+  }
 });
 
 /**
