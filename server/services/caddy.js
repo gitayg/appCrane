@@ -120,11 +120,15 @@ export function generateCaddyfile() {
     // headers from the upstream pass through.
     const fa = app.frame_ancestors;
 
-    // Sandbox — longer prefix /${slug}-sandbox* wins over /${slug}* via mutual exclusivity
+    // Sandbox — longer prefix /${slug}-sandbox* wins over /${slug}* via mutual exclusivity.
+    // Pass the full prefix on the verify URL so identity.js can reconstruct the
+    // original request URL even when Caddy's directive ordering strips the
+    // prefix before forward_auth runs (the X-Forwarded-Uri header otherwise
+    // arrives as '/' and the post-auth redirect points to the wrong place).
     caddyfile += `    handle /${slug}-sandbox* {\n`;
     if (liveSet.has(`${app.id}:sandbox`)) {
       caddyfile += `        forward_auth 127.0.0.1:${cranePort} {\n`;
-      caddyfile += `            uri /api/identity/verify?app=${slug}\n`;
+      caddyfile += `            uri /api/identity/verify?app=${slug}&prefix=/${slug}-sandbox\n`;
       caddyfile += `        }\n`;
       if (fa) {
         caddyfile += `        header Content-Security-Policy "frame-ancestors ${fa}"\n`;
@@ -141,7 +145,7 @@ export function generateCaddyfile() {
     caddyfile += `    handle /${slug}* {\n`;
     if (liveSet.has(`${app.id}:production`)) {
       caddyfile += `        forward_auth 127.0.0.1:${cranePort} {\n`;
-      caddyfile += `            uri /api/identity/verify?app=${slug}\n`;
+      caddyfile += `            uri /api/identity/verify?app=${slug}&prefix=/${slug}\n`;
       caddyfile += `        }\n`;
       if (fa) {
         caddyfile += `        header Content-Security-Policy "frame-ancestors ${fa}"\n`;
