@@ -1844,14 +1844,38 @@ if (anyError) {
   } catch (e) {}
 })();
 
+// Identity providers (Okta, Auth0, Azure AD, OIDC providers in general) almost
+// universally refuse to be loaded inside an iframe — they set X-Frame-Options:
+// DENY on their login pages to prevent clickjacking. So if /login is currently
+// inside an iframe (e.g. AppCrane's own dashboard "Open" app viewer), we must
+// break out to the top window before the SSO redirect or the IdP's response
+// will be browser-blocked with "This content is blocked".
+function gotoSso(url) {
+  if (window.top !== window) {
+    try {
+      // Same-origin or browsers that allow it — replaces the parent navigation.
+      // After SSO completes, the top window lands on the redirect target
+      // (typically the app at e.g. /<slug>) at top-level, which means the
+      // user loses whatever was framing /login but the SSO flow actually works.
+      window.top.location.href = url;
+      return;
+    } catch (_) {
+      // Cross-origin parent that blocks top-level navigation from a child
+      // frame — fall through to a regular redirect inside the iframe. The IdP
+      // will likely still block, but at least we tried.
+    }
+  }
+  window.location.href = url;
+}
+
 function startOidc() {
   const redirect = redirectUrl || window.location.origin + '/login';
-  window.location.href = API + '/api/auth/oidc/start?redirect=' + encodeURIComponent(redirect);
+  gotoSso(API + '/api/auth/oidc/start?redirect=' + encodeURIComponent(redirect));
 }
 
 function startSaml() {
   const redirect = redirectUrl || window.location.origin + '/login';
-  window.location.href = API + '/api/auth/saml/start?redirect=' + encodeURIComponent(redirect);
+  gotoSso(API + '/api/auth/saml/start?redirect=' + encodeURIComponent(redirect));
 }
 
 // ── Ask Claude ───────────────────────────────────────────────────────────
