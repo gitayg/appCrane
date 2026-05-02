@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { adminApi } from '../adminApi'
 import { BuilderBadge } from '../components/runtime-topbar/BuilderBadge'
 import { PresenceAvatars } from '../components/runtime-topbar/PresenceAvatars'
+import { JobsButton } from '../components/runtime-topbar/JobsButton'
 
 interface App {
   slug: string
@@ -633,6 +634,7 @@ export function Applications() {
             <div className="app-frame-right">
               <PresenceAvatars slug={frame.slug ?? null} />
               <BuilderBadge slug={frame.slug ?? null} />
+              <JobsButton slug={frame.slug ?? null} />
               <button
                 className="btn btn-xs"
                 title="Reload app"

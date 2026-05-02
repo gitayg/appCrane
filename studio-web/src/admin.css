@@ -723,6 +723,30 @@ code.api-pill { background: var(--surface2); border: 1px solid var(--border); bo
 .presence-tooltip-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); flex-shrink: 0; }
 .presence-tooltip-title { font-size: .7rem; color: var(--dim); padding: 4px 12px 2px; text-transform: uppercase; letter-spacing: .5px; font-weight: 600; }
 
+.jobs-wrap { position: relative; }
+.jobs-btn { display: inline-flex; align-items: center; gap: 4px; }
+.jobs-badge { display: none; background: #ef4444; color: #fff; border-radius: 8px; font-size: .62rem; font-weight: 700; padding: 1px 5px; line-height: 1.4; }
+.jobs-badge.has-jobs { display: inline; }
+.jobs-panel { position: absolute; top: calc(100% + 6px); right: 0; width: 360px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; z-index: 60; box-shadow: 0 8px 24px rgba(0,0,0,.4); display: none; }
+.jobs-panel.open { display: block; }
+.jobs-panel-header { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; border-bottom: 1px solid var(--border); font-size: .85rem; font-weight: 600; }
+.jobs-panel-close { background: none; border: none; cursor: pointer; color: var(--dim); font-size: 1.1rem; padding: 0 4px; line-height: 1; }
+.jobs-list { max-height: 60vh; overflow-y: auto; }
+.jobs-section-hdr { padding: 6px 14px 2px; font-size: .68rem; color: var(--dim); text-transform: uppercase; letter-spacing: .5px; font-weight: 600; }
+.job-row { padding: 8px 14px; display: flex; flex-direction: column; gap: 3px; border-bottom: 1px solid var(--border); }
+.job-row:last-child { border-bottom: none; }
+.job-row-top { display: flex; align-items: center; gap: 8px; font-size: .78rem; flex-wrap: wrap; }
+.job-slug { color: var(--accent); font-weight: 600; }
+.job-phase { background: var(--surface2); border-radius: 4px; padding: 1px 7px; font-size: .68rem; }
+.job-status-running { color: #f59e0b; font-size: .7rem; font-weight: 600; }
+.job-status-queued  { color: var(--dim); font-size: .7rem; }
+.job-id { margin-left: auto; font-size: .65rem; color: var(--dim); font-family: monospace; opacity: .7; }
+.job-msg { font-size: .75rem; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.job-del { background: none; border: 1px solid var(--border); color: var(--dim); border-radius: 4px; cursor: pointer; font-size: .68rem; padding: 1px 6px; }
+.job-del:hover:not(:disabled) { border-color: #ef4444; color: #ef4444; }
+.job-del:disabled { opacity: .35; cursor: not-allowed; }
+.jobs-empty { padding: 18px 14px; font-size: .82rem; color: var(--dim); text-align: center; }
+
 /* ── Prompt modal ────────────────────────────────── */
 .prompt-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.7); display: flex; align-items: center; justify-content: center; z-index: 100; }
 .prompt-modal { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 32px; max-width: 600px; width: 90%; }
