@@ -10,7 +10,9 @@ import {
   dispatch,
   stopDispatch,
   subscribe,
+  evictApp,
 } from '../services/builder/builderSession.js';
+import { getContainer } from '../services/builder/appContainer.js';
 import log from '../utils/logger.js';
 
 const router = Router();
@@ -82,8 +84,15 @@ router.post('/:slug/session', auditMiddleware('coder.start'), async (req, res) =
     log.info(`[builder:${app.slug}] ${msg}`);
   };
 
-  const sessionId = await createSession(app, req.user.id, onLog);
-  res.status(201).json({ session_id: sessionId, log: logs });
+  try {
+    const sessionId = await createSession(app, req.user.id, onLog);
+    res.status(201).json({ session_id: sessionId, log: logs });
+  } catch (err) {
+    if (err.code === 'BUILDER_OCCUPIED') {
+      throw new AppError(err.message, 409, 'BUILDER_OCCUPIED');
+    }
+    throw err;
+  }
 });
 
 // ── GET /api/coder/:slug/session — get active/latest session ─────────────
@@ -144,7 +153,14 @@ router.post('/:slug/session/:id/resume', auditMiddleware('coder.resume'), async 
   }
 
   const logs = [];
-  await resumeSession(req.params.id, (msg) => { logs.push(msg); log.info(`[builder:resume] ${msg}`); });
+  try {
+    await resumeSession(req.params.id, (msg) => { logs.push(msg); log.info(`[builder:resume] ${msg}`); });
+  } catch (err) {
+    if (err.code === 'BUILDER_OCCUPIED') {
+      throw new AppError(err.message, 409, 'BUILDER_OCCUPIED');
+    }
+    throw err;
+  }
   res.json({ message: 'Session resumed', log: logs });
 });
 
@@ -194,6 +210,33 @@ router.post('/:slug/session/:id/ship', auditMiddleware('coder.ship'), async (req
     .catch(err => log.error(`Coder ship deploy failed for ${app.slug}: ${err.message}`));
 
   res.json({ message: 'Shipped to sandbox', deploy_id: deployRow.id, branch: session.branch_name });
+});
+
+// ── POST /api/coder/:slug/evict — manual app-container teardown ──────────
+//
+// Kills the shared container for this app, deletes its workspace, and pauses
+// every in-memory session bound to it. Anyone in the chat will get a
+// `status=paused` event and can resume on the next dispatch.
+router.post('/:slug/evict', auditMiddleware('coder.evict'), (req, res) => {
+  getApp(req.params.slug, req.user);
+  const evicted = evictApp(req.params.slug, `manual:${req.user.id}`);
+  res.json({ evicted, message: evicted ? 'Container evicted' : 'No live container for this app' });
+});
+
+// ── GET /api/coder/:slug/container — current per-app container state ─────
+router.get('/:slug/container', (req, res) => {
+  getApp(req.params.slug, req.user);
+  const c = getContainer(req.params.slug);
+  if (!c) return res.json({ live: false });
+  res.json({
+    live: true,
+    container_id: c.containerId,
+    workspace_dir: c.workspaceDir,
+    branch_name: c.branchName,
+    busy: c.busy,
+    last_activity_at: new Date(c.lastActivityAt).toISOString(),
+    claude_session_id: c.claudeSessionId || null,
+  });
 });
 
 // ── GET /api/coder/:slug/session/:id/events — SSE stream ─────────────────
