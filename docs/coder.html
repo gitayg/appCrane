@@ -94,6 +94,7 @@ html,body{height:100%;background:#0f1117;color:#e4e4e7;font-family:-apple-system
     <div id="header-actions">
       <button id="stop-btn" class="btn btn-danger" style="display:none">Stop</button>
       <button id="ship-btn" class="btn btn-success" style="display:none">Ship to Sandbox</button>
+      <button id="releases-btn" class="btn btn-ghost" title="View GitHub releases + CHANGELOG.md for this app">Release notes</button>
       <button id="evict-btn" class="btn btn-ghost" title="Tear down this app's shared container and wipe its workspace. Next session re-clones from GitHub.">Evict container</button>
     </div>
   </div>
@@ -118,6 +119,18 @@ html,body{height:100%;background:#0f1117;color:#e4e4e7;font-family:-apple-system
   <div id="input-area" style="display:none">
     <textarea id="prompt" rows="1" placeholder="Describe what you want to change…"></textarea>
     <button id="send-btn" class="btn btn-primary">Send</button>
+  </div>
+
+  <!-- Release notes overlay (sandboxed iframe) -->
+  <div id="releases-overlay" style="display:none;position:absolute;inset:0;background:rgba(15,17,23,.96);z-index:50;flex-direction:column">
+    <div style="display:flex;align-items:center;gap:12px;padding:10px 16px;border-bottom:1px solid #2a2d3a;background:#13161f">
+      <span style="font-weight:600;color:#e4e4e7">Release notes</span>
+      <span style="color:#71717a;font-size:12px;font-family:monospace" id="releases-source"></span>
+      <div style="flex:1"></div>
+      <button id="releases-refresh-btn" class="btn btn-ghost" title="Re-fetch from GitHub">Refresh</button>
+      <button id="releases-close-btn" class="btn btn-ghost">Close</button>
+    </div>
+    <iframe id="releases-iframe" sandbox="allow-popups allow-popups-to-escape-sandbox" style="border:0;flex:1;width:100%;background:#0f1117"></iframe>
   </div>
 </div>
 
@@ -170,9 +183,15 @@ const $inputArea = document.getElementById('input-area');
 const $costArea  = document.getElementById('cost-area');
 const $prompt    = document.getElementById('prompt');
 const $sendBtn   = document.getElementById('send-btn');
-const $stopBtn   = document.getElementById('stop-btn');
-const $shipBtn   = document.getElementById('ship-btn');
-const $evictBtn  = document.getElementById('evict-btn');
+const $stopBtn       = document.getElementById('stop-btn');
+const $shipBtn       = document.getElementById('ship-btn');
+const $evictBtn      = document.getElementById('evict-btn');
+const $releasesBtn   = document.getElementById('releases-btn');
+const $releasesOverlay = document.getElementById('releases-overlay');
+const $releasesIframe  = document.getElementById('releases-iframe');
+const $releasesSource  = document.getElementById('releases-source');
+const $releasesClose   = document.getElementById('releases-close-btn');
+const $releasesRefresh = document.getElementById('releases-refresh-btn');
 const $errBanner = document.getElementById('error-banner');
 
 // ── Error display ───────────────────────────────────────────────────────────
@@ -516,6 +535,32 @@ $stopBtn.addEventListener('click', async () => {
 });
 
 // ── Ship to sandbox ───────────────────────────────────────────────────────────
+
+function buildReleasesViewUrl() {
+  const headers = authHeaders();
+  const bearer  = headers['Authorization']?.replace(/^Bearer\s+/i, '') || '';
+  const apiKey  = headers['X-API-Key'] || '';
+  const params = new URLSearchParams();
+  if (apiKey) params.set('api_key', apiKey);
+  if (bearer) params.set('token', bearer);
+  params.set('_', Date.now().toString());
+  return `/api/coder/${encodeURIComponent(slug)}/releases/view?${params.toString()}`;
+}
+
+$releasesBtn.addEventListener('click', () => {
+  $releasesSource.textContent = `${slug}`;
+  $releasesIframe.src = buildReleasesViewUrl();
+  $releasesOverlay.style.display = 'flex';
+});
+
+$releasesClose.addEventListener('click', () => {
+  $releasesOverlay.style.display = 'none';
+  $releasesIframe.src = 'about:blank';
+});
+
+$releasesRefresh.addEventListener('click', () => {
+  $releasesIframe.src = buildReleasesViewUrl();
+});
 
 $evictBtn.addEventListener('click', async () => {
   if (!confirm('Tear down the shared container for this app?\n\nThis kills the container, wipes the workspace dir, and pauses every active Builder session for this app. Next session will re-clone fresh from GitHub.')) return;
