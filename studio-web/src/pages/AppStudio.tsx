@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { adminApi } from '../adminApi'
 import { App as StudioApp } from '../App'
+import { SkillsTab } from '../components/SkillsTab'
 
 interface Enhancement {
   id: number
@@ -136,6 +137,7 @@ function getHash(): string {
   const h = window.location.hash.replace('#', '')
   // Old hashes (#library, #studio) collapse into the merged Builders view
   if (h === 'library' || h === 'studio' || h === 'builders') return 'builders'
+  if (h === 'skills') return 'skills'
   return 'requests'
 }
 
@@ -381,6 +383,8 @@ export function AppStudio() {
           <StudioApp />
         </div>
       )}
+
+      {tab === 'skills' && <SkillsTab />}
 
       {chatOpen && (
         <div className="chat-overlay">
