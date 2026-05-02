@@ -54,6 +54,14 @@ interface FrameState {
   open: boolean
   url: string
   title: string
+  slug?: string
+  appName?: string
+  env?: 'production' | 'sandbox'
+  prodUrl?: string
+  sandUrl?: string
+  prodVersion?: string
+  sandVersion?: string
+  hasIcon?: boolean
 }
 
 interface PromptModal {
@@ -305,8 +313,22 @@ export function Applications() {
     }))
   }
 
-  function openFrame(url: string, title: string) {
-    setFrame({ open: true, url, title })
+  function openAppFrame(app: App, env: 'production' | 'sandbox') {
+    const prodUrl = `/${app.slug}`
+    const sandUrl = `/${app.slug}-sandbox`
+    setFrame({
+      open:        true,
+      url:         env === 'production' ? prodUrl : sandUrl,
+      title:       `${app.name} (${env === 'production' ? 'prod' : 'sandbox'})`,
+      slug:        app.slug,
+      appName:     app.name,
+      env,
+      prodUrl,
+      sandUrl,
+      prodVersion: app.production?.deploy?.version || '',
+      sandVersion: app.sandbox?.deploy?.version    || '',
+      hasIcon:     iconUrls[app.slug] != null,
+    })
   }
 
   async function uploadIcon(slug: string, file: File) {
@@ -473,7 +495,6 @@ export function Applications() {
                 {(['production', 'sandbox'] as const).map(env => {
                   const isProd = env === 'production'
                   const ver = versions[app.slug]?.[isProd ? 'prod' : 'sand']
-                  const envPath = isProd ? `/${app.slug}` : `/${app.slug}-sandbox`
                   return (
                     <div key={env} className={`card-env${isProd ? ' prod' : ' sand'}`}>
                       <div className={`env-heading${isProd ? ' prod-heading' : ' sand-heading'}`}>
@@ -485,7 +506,7 @@ export function Applications() {
                         <a
                           className="env-link"
                           href="#"
-                          onClick={e => { e.preventDefault(); openFrame(envPath, `${app.name} (${isProd ? 'prod' : 'sandbox'})`) }}
+                          onClick={e => { e.preventDefault(); openAppFrame(app, env) }}
                         >
                           ↗ open
                         </a>
@@ -584,10 +605,44 @@ export function Applications() {
       {frame.open && (
         <div className="app-frame-overlay">
           <div className="app-frame-topbar">
-            <span style={{ fontWeight: 600 }}>{frame.title}</span>
-            <button className="btn btn-xs" onClick={() => setFrame({ open: false, url: '', title: '' })}>✕ Close</button>
+            <div className="app-frame-left">
+              <span className="app-frame-brand">App<span style={{ color: 'var(--accent)' }}>Crane</span></span>
+              {frame.hasIcon && frame.slug && (
+                <img className="app-frame-icon" src={`/api/apps/${frame.slug}/icon`} alt="" />
+              )}
+              <span className="app-frame-name">{frame.appName ?? frame.title}</span>
+              {(() => {
+                const v = frame.env === 'sandbox' ? frame.sandVersion : frame.prodVersion;
+                return v ? <span className="app-frame-version">{v.startsWith('v') ? v : 'v' + v}</span> : null;
+              })()}
+              {frame.prodUrl && frame.sandUrl && (
+                <div className="app-frame-envsw">
+                  <button
+                    className={'env-sw-btn' + (frame.env === 'production' ? ' active-prod' : '')}
+                    onClick={() => setFrame(f => ({ ...f, url: f.prodUrl!, env: 'production', title: `${f.appName} (prod)` }))}
+                  >Production</button>
+                  <button
+                    className={'env-sw-btn' + (frame.env === 'sandbox' ? ' active-sand' : '')}
+                    onClick={() => setFrame(f => ({ ...f, url: f.sandUrl!, env: 'sandbox', title: `${f.appName} (sandbox)` }))}
+                  >Sandbox</button>
+                </div>
+              )}
+            </div>
+            <div className="app-frame-right">
+              <button
+                className="btn btn-xs"
+                title="Reload app"
+                onClick={() => {
+                  const cur = frame.url;
+                  setFrame(f => ({ ...f, url: '' }));
+                  setTimeout(() => setFrame(f => ({ ...f, url: cur })), 0);
+                }}
+              >↺ Refresh</button>
+              <a className="btn btn-xs" href={frame.url} target="_blank" rel="noreferrer">Open in new tab ↗</a>
+              <button className="btn btn-xs" onClick={() => setFrame({ open: false, url: '', title: '' })}>← Back</button>
+            </div>
           </div>
-          <iframe className="app-frame-iframe" src={frame.url} title={frame.title} />
+          {frame.url && <iframe className="app-frame-iframe" src={frame.url} title={frame.title} />}
         </div>
       )}
 
