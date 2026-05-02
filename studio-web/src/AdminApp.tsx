@@ -14,8 +14,7 @@ import { AppManager } from './pages/AppManager'
 
 const STUDIO_SUB = [
   { id: 'requests', label: 'Requests', href: '#requests' },
-  { id: 'library',  label: 'Library',  href: '#library' },
-  { id: 'studio',   label: 'Studio',   href: '#studio' },
+  { id: 'builders', label: 'Builders', href: '#builders' },
 ]
 
 const SETTINGS_SUB = [
@@ -37,7 +36,9 @@ function useHash() {
 
 function AppStudioRoute() {
   const hash = useHash()
-  const activeSub = ['requests', 'library', 'studio'].includes(hash) ? hash : 'requests'
+  // Back-compat: old #library and #studio hashes both map to the merged Builders view
+  const remapped = (hash === 'library' || hash === 'studio') ? 'builders' : hash
+  const activeSub = ['requests', 'builders'].includes(remapped) ? remapped : 'requests'
   return (
     <Layout subItems={STUDIO_SUB} activeSub={activeSub}>
       <AppStudio />

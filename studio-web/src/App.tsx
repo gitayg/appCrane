@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from 'react'
 import { api } from './api'
 import type { Agent, AppCraneApp } from './types'
 import { ChatPanel } from './components/ChatPanel'
+import { AppContextPanel } from './components/AppContextPanel'
 
 function HealthDot({ status }: { status: string }) {
   const color = status === 'healthy' ? 'var(--working)' : status === 'down' ? 'var(--danger)' : 'var(--fg-2)'
@@ -15,6 +16,7 @@ export function App() {
   const [loadingSession, setLoadingSession] = useState(false)
   const [startingSession, setStartingSession] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [contextOpen, setContextOpen] = useState(false)
 
   const loadApps = useCallback(() => {
     return api.listApps().then(setApps).catch((e) => setError(String(e)))
@@ -115,29 +117,47 @@ export function App() {
         </div>
       </aside>
 
-      {selectedApp ? (
-        loadingSession ? (
-          <div className="empty"><div>Loading session…</div></div>
-        ) : activeAgent ? (
-          <ChatPanel
-            key={activeAgent.id}
-            agent={activeAgent}
-            app={selectedApp}
-            onSessionUpdate={onSessionUpdate}
-          />
+      <div style={{ position: 'relative', height: '100%', minWidth: 0 }}>
+        {selectedApp && (
+          <button
+            type="button"
+            className={`ctx-toggle ${contextOpen ? 'active' : ''}`}
+            onClick={() => setContextOpen(o => !o)}
+            title="Per-app context the AI agents (Builder / Improve / Ask) load on every run"
+          >📚 Context</button>
+        )}
+
+        {selectedApp ? (
+          loadingSession ? (
+            <div className="empty"><div>Loading session…</div></div>
+          ) : activeAgent ? (
+            <ChatPanel
+              key={activeAgent.id}
+              agent={activeAgent}
+              app={selectedApp}
+              onSessionUpdate={onSessionUpdate}
+            />
+          ) : (
+            <AppDetail
+              app={selectedApp}
+              starting={startingSession}
+              onStart={() => startSession(selectedApp)}
+            />
+          )
         ) : (
-          <AppDetail
-            app={selectedApp}
-            starting={startingSession}
-            onStart={() => startSession(selectedApp)}
-          />
-        )
-      ) : (
-        <div className="empty">
-          <div>Select an application</div>
-          <div style={{ fontSize: 11 }}>{apps.length} app(s) loaded</div>
-        </div>
-      )}
+          <div className="empty">
+            <div>Select an application</div>
+            <div style={{ fontSize: 11 }}>{apps.length} app(s) loaded</div>
+          </div>
+        )}
+
+        <AppContextPanel
+          slug={selectedApp?.slug ?? null}
+          appName={selectedApp?.name ?? ''}
+          open={contextOpen && !!selectedApp}
+          onClose={() => setContextOpen(false)}
+        />
+      </div>
     </div>
   )
 }
