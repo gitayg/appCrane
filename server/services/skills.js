@@ -63,6 +63,52 @@ export function readSkillMd(slug) {
   return existsSync(p) ? readFileSync(p, 'utf8') : null;
 }
 
+// Parse the YAML frontmatter at the top of a SKILL.md.
+//
+// Anthropic's skill format is flat top-level scalars (name, description,
+// when_to_use, …) — that's all this needs to handle. Supports plain
+// `key: value`, single/double quoted values, and basic block scalars
+// (`key: |` and `key: >`). Returns {} for files without a frontmatter.
+//
+// Used to auto-fill the description field when the upload form left it
+// blank — a properly-authored skill shouldn't lose its description just
+// because the operator skipped a UI field.
+export function parseSkillFrontmatter(content) {
+  if (typeof content !== 'string') return {};
+  const m = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
+  if (!m) return {};
+  const out = {};
+  const lines = m[1].split(/\r?\n/);
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (!line.trim() || line.trim().startsWith('#')) { i++; continue; }
+    const kv = line.match(/^([A-Za-z_][\w-]*)\s*:\s*(.*)$/);
+    if (!kv) { i++; continue; }
+    const key = kv[1];
+    let val = kv[2];
+    if (val === '|' || val === '>') {
+      // Block scalar — gather subsequent indented lines.
+      const fold = val === '>';
+      const buf = [];
+      i++;
+      while (i < lines.length && /^\s+/.test(lines[i])) {
+        buf.push(lines[i].replace(/^\s+/, ''));
+        i++;
+      }
+      val = fold ? buf.join(' ').trim() : buf.join('\n').trim();
+    } else {
+      i++;
+      // Strip matching surrounding quotes.
+      const q = val.match(/^(['"])([\s\S]*)\1$/);
+      if (q) val = q[2];
+      val = val.trim();
+    }
+    out[key] = val;
+  }
+  return out;
+}
+
 // Create a skill from inline markdown content (paste flow).
 // Returns the created row.
 export function createSkillFromMarkdown({ slug, name, description, content, uploadedBy }) {
@@ -75,10 +121,15 @@ export function createSkillFromMarkdown({ slug, name, description, content, uplo
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'SKILL.md'), content);
 
+  // Fall back to the SKILL.md frontmatter description if the upload form
+  // left the field empty — a properly-authored skill ships with one.
+  const fm = parseSkillFrontmatter(content);
+  const finalDescription = (description?.trim() || fm.description?.trim() || null);
+
   const db = getDb();
   db.prepare(
     'INSERT INTO skills (slug, name, description, uploaded_by) VALUES (?, ?, ?, ?)'
-  ).run(slug, name.trim(), description?.trim() || null, uploadedBy || null);
+  ).run(slug, name.trim(), finalDescription, uploadedBy || null);
 
   log.info(`Skills: created '${slug}' from markdown (${content.length} chars)`);
   return getSkill(slug);
@@ -107,10 +158,16 @@ export function createSkillFromFiles({ slug, name, description, files, uploadedB
     writeFileSync(dest, buf);
   }
 
+  // Fall back to SKILL.md frontmatter for description when the form was empty.
+  const skillMd = files['SKILL.md'];
+  const skillMdText = Buffer.isBuffer(skillMd) ? skillMd.toString('utf8') : String(skillMd || '');
+  const fm = parseSkillFrontmatter(skillMdText);
+  const finalDescription = (description?.trim() || fm.description?.trim() || null);
+
   const db = getDb();
   db.prepare(
     'INSERT INTO skills (slug, name, description, uploaded_by) VALUES (?, ?, ?, ?)'
-  ).run(slug, name.trim(), description?.trim() || null, uploadedBy || null);
+  ).run(slug, name.trim(), finalDescription, uploadedBy || null);
 
   log.info(`Skills: created '${slug}' from ${Object.keys(files).length} files`);
   return getSkill(slug);
