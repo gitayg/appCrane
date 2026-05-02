@@ -15,13 +15,13 @@ import { AppManager } from './pages/AppManager'
 const STUDIO_SUB = [
   { id: 'requests', label: 'Requests', href: '#requests' },
   { id: 'builders', label: 'Builders', href: '#builders' },
+  { id: 'skills',   label: 'Skills',   href: '#skills' },
 ]
 
 const SETTINGS_SUB = [
   { id: 'branding',  label: 'Branding',  href: '#branding' },
   { id: 'security',  label: 'Security',  href: '#security' },
   { id: 'appstudio', label: 'AppStudio', href: '#appstudio' },
-  { id: 'skills',    label: 'Skills',    href: '#skills' },
 ]
 
 function useHash() {
@@ -38,7 +38,7 @@ function AppStudioRoute() {
   const hash = useHash()
   // Back-compat: old #library and #studio hashes both map to the merged Builders view
   const remapped = (hash === 'library' || hash === 'studio') ? 'builders' : hash
-  const activeSub = ['requests', 'builders'].includes(remapped) ? remapped : 'requests'
+  const activeSub = ['requests', 'builders', 'skills'].includes(remapped) ? remapped : 'requests'
   return (
     <Layout subItems={STUDIO_SUB} activeSub={activeSub}>
       <AppStudio />
@@ -48,7 +48,7 @@ function AppStudioRoute() {
 
 function SettingsRoute() {
   const hash = useHash()
-  const activeSub = ['branding', 'security', 'appstudio', 'skills'].includes(hash) ? hash : 'appstudio'
+  const activeSub = ['branding', 'security', 'appstudio'].includes(hash) ? hash : 'appstudio'
   return (
     <Layout subItems={SETTINGS_SUB} activeSub={activeSub}>
       <Settings />
