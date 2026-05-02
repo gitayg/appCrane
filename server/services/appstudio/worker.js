@@ -6,6 +6,7 @@ import { decrypt } from '../encryption.js';
 import { planEnhancement } from './planner.js';
 import { generateCode, cloneForBuild, cleanupWorkspace } from './generator.js';
 import { ensureCodebaseContext } from './contextBuilder.js';
+import { enqueue as enqueueWork, PRIORITY } from '../builder/appQueue.js';
 import log from '../../utils/logger.js';
 
 const POLL_MS          = parseInt(process.env.APPSTUDIO_POLL_MS || '5000', 10);
@@ -391,18 +392,27 @@ async function handleCode(job) {
     onLog(`[studio:git] Enhancement #${enh.id} status → pushing`);
   };
 
+  // Route through the per-app queue so Improve work blocks Builder turns
+  // while it's running, and any Builder turn already queued waits behind us.
+  // Improve > Builder priority; FIFO within Improve.
   try {
-    await generateCode({
-      jobId: job.id,
-      app,
-      enhancementId: enh.id,
-      plan,
-      summary: plan.summary || enh.message,
-      agentContext,
-      contextDoc,
-      enhancementMessage: enh.message,
-      onLog,
-      onCodingDone,
+    await enqueueWork(app.slug, {
+      priority:   PRIORITY.IMPROVE,
+      sourceType: 'improve',
+      sourceId:   String(enh.id),
+      label:      `Improve #${enh.id}: ${(plan.summary || enh.message || '').slice(0, 60)}`,
+      run: () => generateCode({
+        jobId: job.id,
+        app,
+        enhancementId: enh.id,
+        plan,
+        summary: plan.summary || enh.message,
+        agentContext,
+        contextDoc,
+        enhancementMessage: enh.message,
+        onLog,
+        onCodingDone,
+      }),
     });
   } finally {
     cleanupWorkspace(job.id);

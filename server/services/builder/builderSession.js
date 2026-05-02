@@ -14,6 +14,12 @@ import {
   setClaudeSessionId as setAppClaudeSessionId,
   onEvict as onAppContainerEvict,
 } from './appContainer.js';
+import {
+  enqueue as enqueueWork,
+  subscribeQueue,
+  aheadOf,
+  PRIORITY,
+} from './appQueue.js';
 import log from '../../utils/logger.js';
 
 const STUDIO_IMAGE  = process.env.APPSTUDIO_IMAGE || 'appcrane-studio:latest';
@@ -310,21 +316,68 @@ async function loadDispatchContext(appSlug, workspaceDir) {
 export async function dispatch(sessionId, prompt) {
   const state = sessions.get(sessionId);
   if (!state) throw new Error('Session not active (start or resume first)');
-  if (state.runner) throw new Error('A dispatch is already running');
+  if (state.runner || state.queued) throw new Error('A dispatch is already running');
 
-  const c = getContainer(state.appSlug);
-  if (!c) throw new Error('App container is no longer available — resume the session first');
-
-  // Acquire the per-app write lock. Asks (read-only) bypass this check; future
-  // Improve jobs (v1.26.2.1) will participate so writes are FIFO.
-  if (c.busy) throw new Error('Another write operation is in progress on this app');
-  setContainerBusy(state.appSlug, true);
+  const c0 = getContainer(state.appSlug);
+  if (!c0) throw new Error('App container is no longer available — resume the session first');
 
   touchActivity(sessionId);
   appendMessage(sessionId, 'user', prompt);
-  updateDb(sessionId, { status: 'active' });
-  state.status = 'active';
-  publish(sessionId, { type: 'status', status: 'active' });
+
+  // Mark queued. If anything is ahead of us — running Improve, or another
+  // queued Builder turn (shouldn't normally happen since "no takeover" caps
+  // Builder at 1 user, but Improve jobs can stack) — surface the position
+  // to the chat UI so the user sees they're waiting in line.
+  const ahead = aheadOf(state.appSlug, PRIORITY.BUILDER);
+  state.queued = true;
+  if (ahead > 0) {
+    updateDb(sessionId, { status: 'queued' });
+    state.status = 'queued';
+    publish(sessionId, { type: 'status', status: 'queued', ahead });
+  } else {
+    updateDb(sessionId, { status: 'active' });
+    state.status = 'active';
+    publish(sessionId, { type: 'status', status: 'active' });
+  }
+
+  // Subscribe to queue updates so the chat panel can show "N ahead" live.
+  // aheadOf(BUILDER) counts running + queued items with priority<=BUILDER —
+  // once our own item is enqueued, that count includes us. Subtract 1 to
+  // get the true "ahead of me" number. Safe because no-takeover guarantees
+  // at most one Builder item per app is ever queued at a time.
+  const unsubQueue = subscribeQueue(state.appSlug, (snap) => {
+    if (!state.queued) return;
+    const raw = aheadOf(state.appSlug, PRIORITY.BUILDER);
+    const myAhead = Math.max(0, raw - 1);
+    publish(sessionId, { type: 'queue', ahead: myAhead, depth: snap.depth, running: snap.running });
+  });
+
+  enqueueWork(state.appSlug, {
+    priority:   PRIORITY.BUILDER,
+    sourceType: 'builder',
+    sourceId:   sessionId,
+    label:      `Builder turn (${prompt.slice(0, 60)})`,
+    run: () => runBuilderTurn(sessionId, state, prompt),
+  }).finally(() => {
+    state.queued = false;
+    try { unsubQueue(); } catch (_) {}
+  });
+}
+
+async function runBuilderTurn(sessionId, state, prompt) {
+  const c = getContainer(state.appSlug);
+  if (!c) {
+    publish(sessionId, { type: 'error', message: 'App container vanished while waiting in queue' });
+    publish(sessionId, { type: 'status', status: 'paused' });
+    return;
+  }
+
+  setContainerBusy(state.appSlug, true);
+  if (state.status !== 'active') {
+    updateDb(sessionId, { status: 'active' });
+    state.status = 'active';
+    publish(sessionId, { type: 'status', status: 'active' });
+  }
 
   // Pull the latest claudeSessionId from the shared app container so the next
   // dispatch resumes the SAME thread as any previous turn (regardless of
@@ -349,67 +402,72 @@ export async function dispatch(sessionId, prompt) {
     }
   }
 
-  const runner = runAgentExec({
-    containerId:  c.containerId,
-    prompt:       augmentedPrompt,
-    apiKey:       process.env.ANTHROPIC_API_KEY,
-    resume:       c.claudeSessionId || undefined,
+  return new Promise((resolveRun) => {
+    const runner = runAgentExec({
+      containerId:  c.containerId,
+      prompt:       augmentedPrompt,
+      apiKey:       process.env.ANTHROPIC_API_KEY,
+      resume:       c.claudeSessionId || undefined,
+    });
+    state.runner = runner;
+
+    let assistantBuf = '';
+    let settled = false;
+    const settle = () => { if (!settled) { settled = true; resolveRun(); } };
+
+    runner.on('system', (ev) => {
+      const sid = ev?.data?.session_id;
+      if (sid && sid !== c.claudeSessionId) {
+        setAppClaudeSessionId(state.appSlug, sid);
+        try {
+          getDb().prepare('UPDATE coder_sessions SET claude_session_id = ? WHERE app_slug = ?')
+            .run(sid, state.appSlug);
+        } catch (_) {}
+      }
+    });
+
+    runner.on('data', (ev) => {
+      touchActivity(sessionId);
+      if (ev.type === 'text') assistantBuf += ev.text;
+      const db = getDb();
+      db.prepare(`
+        INSERT INTO coder_session_messages (session_id, role, content) VALUES (?, 'system', ?)
+      `).run(sessionId, JSON.stringify(ev));
+      publish(sessionId, { type: 'stream', event: ev });
+    });
+
+    runner.on('result', (ev) => {
+      const db = getDb();
+      const newTokens = (db.prepare('SELECT cost_tokens FROM coder_sessions WHERE id = ?').get(sessionId)?.cost_tokens || 0)
+        + ev.inputTokens + ev.outputTokens;
+      const newCents = (db.prepare('SELECT cost_usd_cents FROM coder_sessions WHERE id = ?').get(sessionId)?.cost_usd_cents || 0)
+        + ev.costUsdCents;
+      updateDb(sessionId, { cost_tokens: newTokens, cost_usd_cents: newCents });
+      publish(sessionId, { type: 'cost', inputTokens: ev.inputTokens, outputTokens: ev.outputTokens, costUsdCents: ev.costUsdCents });
+    });
+
+    runner.on('exit', (code) => {
+      if (assistantBuf) appendMessage(sessionId, 'assistant', assistantBuf);
+      state.runner = null;
+      state.status = 'idle';
+      updateDb(sessionId, { status: 'idle' });
+      setContainerBusy(state.appSlug, false);
+      publish(sessionId, { type: 'status', status: 'idle', exitCode: code });
+      settle();
+    });
+
+    runner.on('error', (err) => {
+      state.runner = null;
+      state.status = 'idle';
+      updateDb(sessionId, { status: 'idle' });
+      setContainerBusy(state.appSlug, false);
+      publish(sessionId, { type: 'error', message: err.message });
+      publish(sessionId, { type: 'status', status: 'idle' });
+      settle();
+    });
+
+    runner.start();
   });
-  state.runner = runner;
-
-  let assistantBuf = '';
-
-  runner.on('system', (ev) => {
-    const sid = ev?.data?.session_id;
-    if (sid && sid !== c.claudeSessionId) {
-      setAppClaudeSessionId(state.appSlug, sid);
-      // Mirror to ALL coder_sessions for this app so every chat thread sees the same id
-      try {
-        getDb().prepare('UPDATE coder_sessions SET claude_session_id = ? WHERE app_slug = ?')
-          .run(sid, state.appSlug);
-      } catch (_) {}
-    }
-  });
-
-  runner.on('data', (ev) => {
-    touchActivity(sessionId);
-    if (ev.type === 'text') assistantBuf += ev.text;
-    const db = getDb();
-    db.prepare(`
-      INSERT INTO coder_session_messages (session_id, role, content) VALUES (?, 'system', ?)
-    `).run(sessionId, JSON.stringify(ev));
-    publish(sessionId, { type: 'stream', event: ev });
-  });
-
-  runner.on('result', (ev) => {
-    const db = getDb();
-    const newTokens = (db.prepare('SELECT cost_tokens FROM coder_sessions WHERE id = ?').get(sessionId)?.cost_tokens || 0)
-      + ev.inputTokens + ev.outputTokens;
-    const newCents = (db.prepare('SELECT cost_usd_cents FROM coder_sessions WHERE id = ?').get(sessionId)?.cost_usd_cents || 0)
-      + ev.costUsdCents;
-    updateDb(sessionId, { cost_tokens: newTokens, cost_usd_cents: newCents });
-    publish(sessionId, { type: 'cost', inputTokens: ev.inputTokens, outputTokens: ev.outputTokens, costUsdCents: ev.costUsdCents });
-  });
-
-  runner.on('exit', (code) => {
-    if (assistantBuf) appendMessage(sessionId, 'assistant', assistantBuf);
-    state.runner = null;
-    state.status = 'idle';
-    updateDb(sessionId, { status: 'idle' });
-    setContainerBusy(state.appSlug, false);
-    publish(sessionId, { type: 'status', status: 'idle', exitCode: code });
-  });
-
-  runner.on('error', (err) => {
-    state.runner = null;
-    state.status = 'idle';
-    updateDb(sessionId, { status: 'idle' });
-    setContainerBusy(state.appSlug, false);
-    publish(sessionId, { type: 'error', message: err.message });
-    publish(sessionId, { type: 'status', status: 'idle' });
-  });
-
-  runner.start();
 }
 
 export function stopDispatch(sessionId) {
