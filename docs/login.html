@@ -1949,38 +1949,11 @@ function _onPlanInputChange() {
   document.getElementById('planSendBtn').disabled = empty;
 }
 
-// Resize handle for plan panel
-(function() {
-  var handle, panel, dragging = false, startX = 0, startW = 0;
-  function onMouseMove(e) {
-    if (!dragging) return;
-    var dx = startX - e.clientX;
-    var w = Math.min(Math.max(startW + dx, 320), Math.round(window.innerWidth * 0.85));
-    panel.style.width = w + 'px';
-  }
-  function onMouseUp() {
-    if (!dragging) return;
-    dragging = false;
-    handle.classList.remove('dragging');
-    document.body.style.cursor = '';
-    document.body.style.userSelect = '';
-  }
-  document.addEventListener('DOMContentLoaded', function() {
-    handle = document.getElementById('planResizeHandle');
-    panel = document.getElementById('planPanel');
-    handle.addEventListener('mousedown', function(e) {
-      dragging = true;
-      startX = e.clientX;
-      startW = panel.offsetWidth;
-      handle.classList.add('dragging');
-      document.body.style.cursor = 'ew-resize';
-      document.body.style.userSelect = 'none';
-      e.preventDefault();
-    });
-    document.addEventListener('mousemove', onMouseMove);
-    document.addEventListener('mouseup', onMouseUp);
-  });
-})();
+// Plan panel resize handle removed in v1.27.73 — the legacy
+// <div id="planResizeHandle"> lived inside the old planPanel div which
+// was deleted in v1.27.61 when the panel became a Custom Element.
+// Resizing now goes through #dockResizer (which targets the dock-width
+// CSS variable), so the dedicated plan-panel handle isn't needed.
 
 // Request panel — backed by <crane-request-panel> Custom Element since
 // v1.27.61. The React component handles the form, plan SSE, refine,
