@@ -10,6 +10,16 @@ interface User {
   has_password: boolean
   last_login_at: string | null
   sso_provider: string | null
+  kind?: 'human' | 'agent'
+  created_at?: string
+}
+
+interface AgentUser {
+  id: number
+  name: string
+  email: string
+  created_at?: string
+  assigned_apps?: string | null
 }
 
 interface App {
@@ -33,6 +43,7 @@ function relativeTime(iso: string | null): { rel: string; abs: string } {
 
 export function Users() {
   const [users, setUsers] = useState<User[]>([])
+  const [agents, setAgents] = useState<AgentUser[]>([])
   const [apps, setApps] = useState<App[]>([])
   const [roles, setRoles] = useState<Record<string, Record<number, AppRole>>>({})
   const [showForm, setShowForm] = useState(false)
@@ -45,17 +56,29 @@ export function Users() {
   const phoneRef = useRef<HTMLInputElement>(null)
   const yobRef = useRef<HTMLInputElement>(null)
 
+  // Settings → Users is for human portal users only. Agent / API-key
+  // users created via "+ New App Agent" on /applications live in the
+  // App Agents section below — they have no profile to edit, just
+  // create + delete.  Pre-migration rows (kind absent) treat as human.
   const loadUsers = () =>
-    adminApi.get<{ users: User[] }>('/api/users').then(d => setUsers(d.users ?? [])).catch(() => {})
+    adminApi.get<{ users: User[] }>('/api/users')
+      .then(d => {
+        const all = d.users ?? []
+        setUsers(all.filter(u => (u.kind ?? 'human') === 'human'))
+        setAgents(all.filter(u => u.kind === 'agent') as AgentUser[])
+      })
+      .catch(() => {})
 
   useEffect(() => {
     Promise.all([
       adminApi.get<{ users: User[] }>('/api/users'),
       adminApi.get<{ apps: App[] }>('/api/apps'),
     ]).then(([ur, ar]) => {
-      const u = ur.users ?? []
+      const all = ur.users ?? []
+      const u = all.filter(x => (x.kind ?? 'human') === 'human')
       const a = ar.apps ?? []
       setUsers(u)
+      setAgents(all.filter(x => x.kind === 'agent') as AgentUser[])
       setApps(a)
       const roleMap: Record<string, Record<number, AppRole>> = {}
       Promise.all(
@@ -250,6 +273,46 @@ export function Users() {
           })}
         </tbody>
       </table>
+
+      <h2 style={{ marginTop: 32 }}>App Agents</h2>
+      <p style={{ color: 'var(--dim)', fontSize: '.85rem', marginTop: -8, marginBottom: 12 }}>
+        API-key identities created from <a href="/applications" style={{ color: 'var(--accent)' }}>/applications</a> via &ldquo;+ New App Agent&rdquo;.
+        These have no profile to edit — manage them here.
+      </p>
+      {agents.length === 0 ? (
+        <p style={{ color: 'var(--dim)', fontSize: '.85rem' }}>No app agents.</p>
+      ) : (
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Name</th>
+              <th>Email</th>
+              <th>Assigned apps</th>
+              <th>Created</th>
+              <th>Delete</th>
+            </tr>
+          </thead>
+          <tbody>
+            {agents.map(a => (
+              <tr key={a.id}>
+                <td style={{ fontFamily: 'monospace', fontSize: '.8rem' }}>{a.id}</td>
+                <td>{a.name}</td>
+                <td>{a.email}</td>
+                <td style={{ color: a.assigned_apps ? 'var(--text)' : 'var(--dim)', fontSize: '.82rem' }}>
+                  {a.assigned_apps || 'unused'}
+                </td>
+                <td style={{ color: 'var(--dim)', fontSize: '.8rem' }}>
+                  {a.created_at ? new Date(a.created_at).toLocaleDateString() : ''}
+                </td>
+                <td>
+                  <button className="btn btn-red btn-xs" onClick={() => deleteUser(a.id)}>Delete</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
 
       {apps.length > 0 && users.length > 0 && (
         <>
