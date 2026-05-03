@@ -187,6 +187,8 @@ body {
 }
 .sidebar-link-icon { font-size: .9rem; flex-shrink: 0; width: 16px; text-align: center; }
 .sidebar-link-text { overflow: hidden; text-overflow: ellipsis; }
+.sidebar-link-badge { margin-left: auto; background: var(--accent); color: #fff; font-size: .65rem; font-weight: 700; padding: 1px 6px; border-radius: 8px; min-width: 16px; text-align: center; }
+.admin-sidebar.collapsed .sidebar-link-badge { display: none; }
 .admin-sidebar.collapsed .sidebar-link-text { display: none; }
 .admin-sidebar.collapsed .sidebar-link { justify-content: center; padding: 10px 0; }
 .admin-sidebar.collapsed .sidebar-link.active { border-left: none; padding-left: 0; border-bottom: 2px solid var(--accent); }
