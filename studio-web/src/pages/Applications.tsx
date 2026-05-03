@@ -5,6 +5,10 @@ import { PresenceAvatars } from '../components/runtime-topbar/PresenceAvatars'
 import { JobsButton } from '../components/runtime-topbar/JobsButton'
 import { AskPanel } from '../components/runtime-topbar/AskPanel'
 import { RequestPanel } from '../components/runtime-topbar/RequestPanel'
+import { defineCraneAppTopbar } from '../topbar-element/entry'
+import '../topbar-element/jsx.d.ts'
+
+defineCraneAppTopbar()
 
 interface App {
   slug: string
@@ -611,78 +615,12 @@ export function Applications() {
       )}
 
       {frame.open && (
-        <div className="app-frame-overlay">
-          <div className="app-frame-topbar">
-            <div className="app-frame-left">
-              <span className="app-frame-brand">App<span style={{ color: 'var(--accent)' }}>Crane</span></span>
-              {frame.hasIcon && frame.slug && (
-                <img className="app-frame-icon" src={`/api/apps/${frame.slug}/icon`} alt="" />
-              )}
-              <span className="app-frame-name">{frame.appName ?? frame.title}</span>
-              {(() => {
-                const v = frame.env === 'sandbox' ? frame.sandVersion : frame.prodVersion;
-                return v ? <span className="app-frame-version">{v.startsWith('v') ? v : 'v' + v}</span> : null;
-              })()}
-              {frame.prodUrl && frame.sandUrl && (
-                <div className="app-frame-envsw">
-                  <button
-                    className={'env-sw-btn' + (frame.env === 'production' ? ' active-prod' : '')}
-                    onClick={() => setFrame(f => ({ ...f, url: f.prodUrl!, env: 'production', title: `${f.appName} (prod)` }))}
-                  >Production</button>
-                  <button
-                    className={'env-sw-btn' + (frame.env === 'sandbox' ? ' active-sand' : '')}
-                    onClick={() => setFrame(f => ({ ...f, url: f.sandUrl!, env: 'sandbox', title: `${f.appName} (sandbox)` }))}
-                  >Sandbox</button>
-                </div>
-              )}
-            </div>
-            <div className="app-frame-right">
-              <PresenceAvatars slug={frame.slug ?? null} />
-              <BuilderBadge slug={frame.slug ?? null} />
-              {frame.hasGithub && (
-                <>
-                  <button
-                    type="button"
-                    className="btn btn-xs"
-                    onClick={() => setFramePanel(p => p === 'ask' ? null : 'ask')}
-                    title="Ask Claude about this app's source code"
-                  >🤖 Learn</button>
-                  <button
-                    type="button"
-                    className="btn btn-xs"
-                    onClick={() => setFramePanel(p => p === 'request' ? null : 'request')}
-                    title="File an enhancement request"
-                  >💡 Request</button>
-                </>
-              )}
-              <JobsButton slug={frame.slug ?? null} />
-              <button
-                className="btn btn-xs"
-                title="Reload app"
-                onClick={() => {
-                  const cur = frame.url;
-                  setFrame(f => ({ ...f, url: '' }));
-                  setTimeout(() => setFrame(f => ({ ...f, url: cur })), 0);
-                }}
-              >↺ Refresh</button>
-              <a className="btn btn-xs" href={frame.url} target="_blank" rel="noreferrer">Open in new tab ↗</a>
-              <button className="btn btn-xs" onClick={() => setFrame({ open: false, url: '', title: '' })}>← Back</button>
-            </div>
-          </div>
-          {frame.url && <iframe className="app-frame-iframe" src={frame.url} title={frame.title} />}
-          <AskPanel
-            slug={frame.slug ?? null}
-            appName={frame.appName ?? frame.title ?? ''}
-            open={framePanel === 'ask'}
-            onClose={() => setFramePanel(null)}
-          />
-          <RequestPanel
-            slug={frame.slug ?? null}
-            appName={frame.appName ?? frame.title ?? ''}
-            open={framePanel === 'request'}
-            onClose={() => setFramePanel(null)}
-          />
-        </div>
+        <FrameOverlay
+          frame={frame}
+          framePanel={framePanel}
+          setFrame={setFrame}
+          setFramePanel={setFramePanel}
+        />
       )}
 
       <div className={`az-overlay${wizardOpen ? ' open' : ''}`}>
@@ -815,6 +753,110 @@ export function Applications() {
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+interface FrameOverlayProps {
+  frame: FrameState
+  framePanel: 'ask' | 'request' | null
+  setFrame: React.Dispatch<React.SetStateAction<FrameState>>
+  setFramePanel: React.Dispatch<React.SetStateAction<'ask' | 'request' | null>>
+}
+
+function FrameOverlay({ frame, framePanel, setFrame, setFramePanel }: FrameOverlayProps) {
+  const topbarRef = useRef<HTMLElement>(null)
+  const [folded, setFolded] = useState(false)
+
+  // The Custom Element fires CustomEvents (not React synthetic events) so
+  // we wire a per-mount listener block. Re-binds when callbacks change.
+  useEffect(() => {
+    const el = topbarRef.current
+    if (!el) return
+
+    const onBack    = () => setFrame({ open: false, url: '', title: '' })
+    const onRefresh = () => {
+      const cur = frame.url
+      setFrame(f => ({ ...f, url: '' }))
+      setTimeout(() => setFrame(f => ({ ...f, url: cur })), 0)
+    }
+    const onEnv = (e: Event) => {
+      const env = (e as CustomEvent<{ env: 'production' | 'sandbox' }>).detail.env
+      setFrame(f => ({
+        ...f,
+        env,
+        url:   env === 'sandbox' ? f.sandUrl! : f.prodUrl!,
+        title: `${f.appName} (${env === 'sandbox' ? 'sandbox' : 'prod'})`,
+      }))
+    }
+    const onFold = (e: Event) => {
+      const next = (e as CustomEvent<{ folded: boolean }>).detail.folded
+      setFolded(next)
+    }
+
+    el.addEventListener('crane-back',        onBack)
+    el.addEventListener('crane-refresh',     onRefresh)
+    el.addEventListener('crane-env-change',  onEnv)
+    el.addEventListener('crane-fold-toggle', onFold)
+    return () => {
+      el.removeEventListener('crane-back',        onBack)
+      el.removeEventListener('crane-refresh',     onRefresh)
+      el.removeEventListener('crane-env-change',  onEnv)
+      el.removeEventListener('crane-fold-toggle', onFold)
+    }
+  }, [frame.url, frame.appName, setFrame])
+
+  return (
+    <div className="app-frame-overlay">
+      <crane-app-topbar
+        ref={topbarRef}
+        app-name={frame.appName ?? frame.title ?? ''}
+        app-icon-url={frame.hasIcon && frame.slug ? `/api/apps/${frame.slug}/icon` : ''}
+        app-slug={frame.slug ?? ''}
+        prod-version={frame.prodVersion ?? ''}
+        sand-version={frame.sandVersion ?? ''}
+        prod-url={frame.prodUrl ?? ''}
+        sand-url={frame.sandUrl ?? ''}
+        env={frame.env ?? 'production'}
+        current-url={frame.url}
+        {...(folded ? { folded: '' } : {})}
+      >
+        <span slot="actions" style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+          <PresenceAvatars slug={frame.slug ?? null} />
+          <BuilderBadge slug={frame.slug ?? null} />
+          {frame.hasGithub && (
+            <>
+              <button
+                type="button"
+                className="btn btn-xs"
+                onClick={() => setFramePanel(p => p === 'ask' ? null : 'ask')}
+                title="Ask Claude about this app's source code"
+              >🤖 Learn</button>
+              <button
+                type="button"
+                className="btn btn-xs"
+                onClick={() => setFramePanel(p => p === 'request' ? null : 'request')}
+                title="File an enhancement request"
+              >💡 Request</button>
+            </>
+          )}
+          <JobsButton slug={frame.slug ?? null} />
+        </span>
+      </crane-app-topbar>
+
+      {frame.url && <iframe className="app-frame-iframe" src={frame.url} title={frame.title} />}
+      <AskPanel
+        slug={frame.slug ?? null}
+        appName={frame.appName ?? frame.title ?? ''}
+        open={framePanel === 'ask'}
+        onClose={() => setFramePanel(null)}
+      />
+      <RequestPanel
+        slug={frame.slug ?? null}
+        appName={frame.appName ?? frame.title ?? ''}
+        open={framePanel === 'request'}
+        onClose={() => setFramePanel(null)}
+      />
     </div>
   )
 }

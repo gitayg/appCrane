@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "tsc -b && vite build && vite build --config vite.config.topbar.js",
+    "build:admin": "tsc -b && vite build",
+    "build:topbar": "vite build --config vite.config.topbar.js",
     "preview": "vite preview"
   },
   "dependencies": {
