@@ -10,6 +10,7 @@ interface Skill {
   enabled: 0 | 1
   uploaded_at: string
   apps?: string[]
+  files?: string[]
 }
 
 interface AppOption {
@@ -172,7 +173,20 @@ export function SkillsTab() {
                 <td style={{ padding: 6 }}>
                   <input type="checkbox" checked={s.enabled === 1} onChange={() => toggle(s)} />
                 </td>
-                <td style={{ padding: 6 }}>{s.name}</td>
+                <td style={{ padding: 6 }}>
+                  {s.name}
+                  {s.files && s.files.filter(f => f !== 'SKILL.md').length > 0 && (
+                    <span
+                      title={s.files.filter(f => f !== 'SKILL.md').join('\n')}
+                      style={{
+                        marginLeft: 8, fontSize: '.7rem', padding: '1px 6px',
+                        borderRadius: 4, background: 'var(--surface2)',
+                        border: '1px solid var(--border)', color: 'var(--dim)',
+                        cursor: 'help', verticalAlign: 'middle',
+                      }}
+                    >📎 {s.files.filter(f => f !== 'SKILL.md').length} file{s.files.filter(f => f !== 'SKILL.md').length === 1 ? '' : 's'}</span>
+                  )}
+                </td>
                 <td style={{ padding: 6, fontFamily: 'monospace', fontSize: '.82rem', color: 'var(--dim)' }}>{s.slug}</td>
                 <td style={{ padding: 6, color: 'var(--dim)', fontSize: '.85rem' }}>{s.description || '—'}</td>
                 <td style={{ padding: 6, fontSize: '.82rem' }}>

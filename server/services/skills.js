@@ -63,6 +63,25 @@ export function readSkillMd(slug) {
   return existsSync(p) ? readFileSync(p, 'utf8') : null;
 }
 
+// Recursively list files in a skill bundle (relative paths from the skill
+// dir). Used by the UI to show "this skill ships SKILL.md + N other files".
+export function listSkillFiles(slug) {
+  const root = skillDir(slug);
+  if (!existsSync(root)) return [];
+  const out = [];
+  const walk = (dir, prefix) => {
+    let entries;
+    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      const rel = prefix ? `${prefix}/${e.name}` : e.name;
+      if (e.isDirectory()) walk(join(dir, e.name), rel);
+      else if (e.isFile()) out.push(rel);
+    }
+  };
+  walk(root, '');
+  return out.sort();
+}
+
 // Parse the YAML frontmatter at the top of a SKILL.md.
 //
 // Anthropic's skill format is flat top-level scalars (name, description,
