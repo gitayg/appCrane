@@ -35,6 +35,7 @@ interface User {
   email: string
   assigned_apps?: number
   role: string
+  kind?: 'human' | 'agent'
   created_at: string
 }
 
@@ -272,6 +273,7 @@ export function Applications() {
       name,
       email,
       role: 'user',
+      kind: 'agent',
     }).catch(() => null)
     const key = r?.key ?? r?.api_key ?? ''
     setPromptModal({
@@ -425,7 +427,9 @@ export function Applications() {
     setUsers(prev => prev.filter(u => u.id !== id))
   }
 
-  const unusedKeys = users.filter(u => !u.assigned_apps && u.role !== 'admin')
+  // Only agent / API-key users — never humans. Humans without app
+  // assignments belong in /settings#users, not here.
+  const unusedKeys = users.filter(u => u.kind === 'agent' && !u.assigned_apps)
 
   function healthDot(app: App, env: 'production' | 'sandbox') {
     const h = app[env]?.health?.status
@@ -607,9 +611,9 @@ export function Applications() {
         })}
       </div>
 
-      <h2>Unused Keys</h2>
+      <h2>Unused App Agents</h2>
       {unusedKeys.length === 0 ? (
-        <p style={{ color: 'var(--dim)', fontSize: '.85rem' }}>No unused keys.</p>
+        <p style={{ color: 'var(--dim)', fontSize: '.85rem' }}>No unused app agents.</p>
       ) : (
         <table>
           <thead>

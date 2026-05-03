@@ -15,7 +15,7 @@ router.use(requireAuth);
 router.get('/', requireAdmin, (req, res) => {
   const db = getDb();
   const users = db.prepare(`
-    SELECT u.id, u.name, u.email, u.username, u.role, u.created_at, u.last_login_at,
+    SELECT u.id, u.name, u.email, u.username, u.role, u.kind, u.created_at, u.last_login_at,
       CASE WHEN u.password_hash IS NOT NULL THEN 1 ELSE 0 END as has_password,
       CASE WHEN u.saml_name_id IS NOT NULL THEN 'saml' WHEN u.sso_sub IS NOT NULL THEN 'oidc' ELSE NULL END as sso_provider,
       (SELECT GROUP_CONCAT(a.slug, ', ') FROM app_users au JOIN apps a ON a.id = au.app_id WHERE au.user_id = u.id) as assigned_apps
@@ -29,10 +29,11 @@ router.get('/', requireAdmin, (req, res) => {
  * POST /api/users - Create user (admin only)
  */
 router.post('/', requireAdmin, auditMiddleware('user-create'), (req, res) => {
-  const { name, email, role, username, password, avatar_url, phone, year_of_birth } = req.body;
+  const { name, email, role, kind, username, password, avatar_url, phone, year_of_birth } = req.body;
   if (!name) throw new AppError('Name is required', 400, 'VALIDATION');
 
   const userRole = role === 'admin' ? 'admin' : 'user';
+  const userKind = kind === 'agent' ? 'agent' : 'human';
   const prefix = userRole === 'admin' ? 'dhk_admin' : 'dhk_user';
   const apiKey = generateApiKey(prefix);
   const keyHash = hashApiKey(apiKey);
@@ -53,11 +54,11 @@ router.post('/', requireAdmin, auditMiddleware('user-create'), (req, res) => {
   }
 
   const result = db.prepare(
-    'INSERT INTO users (name, email, role, api_key_hash, username, password_hash, avatar_url, phone, year_of_birth) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
-  ).run(name, email || null, userRole, keyHash, username || null, pwHash, avatar_url || null, phone || null, year_of_birth || null);
+    'INSERT INTO users (name, email, role, kind, api_key_hash, username, password_hash, avatar_url, phone, year_of_birth) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+  ).run(name, email || null, userRole, userKind, keyHash, username || null, pwHash, avatar_url || null, phone || null, year_of_birth || null);
 
   res.json({
-    user: { id: result.lastInsertRowid, name, email, role: userRole },
+    user: { id: result.lastInsertRowid, name, email, role: userRole, kind: userKind },
     api_key: apiKey,
     warning: 'Save this API key! It will not be shown again.',
   });
