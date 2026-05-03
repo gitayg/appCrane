@@ -116,6 +116,50 @@ router.post('/:id/plan-feedback', auditMiddleware('appstudio.plan-feedback'), (r
 });
 
 /**
+ * POST /api/appstudio/:id/redo - Re-run the request from scratch.
+ *
+ * Wipes the prior plan + collected operator comments and queues a
+ * fresh `plan` job. Original message stays. Useful when a plan went
+ * sideways or got stuck mid-iteration and the operator wants a clean
+ * restart instead of refining (which keeps history).
+ *
+ * Does NOT delete the existing branch on the remote — the next coder
+ * run will detect that branch (per v1.27.69) and either continue on
+ * top OR refuse if a PR is open. Operator can `branch_name = NULL` if
+ * they want a literal blank slate.
+ */
+router.post('/:id/redo', auditMiddleware('appstudio.redo'), (req, res) => {
+  const db = getDb();
+  const enh = db.prepare('SELECT * FROM enhancement_requests WHERE id = ?').get(req.params.id);
+  if (!enh) throw new AppError('Enhancement not found', 404, 'NOT_FOUND');
+  if (req.user.role !== 'admin' && !isAppAdmin(req.user.id, enh.app_slug)) {
+    throw new AppError('Forbidden', 403, 'FORBIDDEN');
+  }
+
+  // Optional reset_branch=true also clears the branch_name so the next
+  // coder run starts on a fresh branch (caller wants a clean slate).
+  const resetBranch = req.body?.reset_branch === true;
+
+  db.transaction(() => {
+    db.prepare(`
+      UPDATE enhancement_requests
+      SET status = 'planning',
+          ai_plan_json = NULL,
+          ai_cost_estimate = NULL,
+          user_comments = NULL,
+          admin_comments = NULL,
+          ai_log = COALESCE(ai_log, '') || ?,
+          ${resetBranch ? "branch_name = NULL," : ''}
+          pr_url = NULL
+      WHERE id = ?
+    `).run(`\n[${new Date().toISOString()}] Redo requested by ${req.user.name || req.user.email || 'admin'} — replanning from scratch.\n`, enh.id);
+    db.prepare('INSERT INTO enhancement_jobs (enhancement_id, phase) VALUES (?, ?)').run(enh.id, 'plan');
+  })();
+
+  res.json({ message: 'Redo queued — fresh plan job created', enhancement_id: enh.id });
+});
+
+/**
  * POST /api/appstudio/:id/approve-sandbox - Approve sandbox → open PR + promote
  */
 router.post('/:id/approve-sandbox', auditMiddleware('appstudio.approve-sandbox'), (req, res) => {
