@@ -5,6 +5,7 @@ import { PresenceAvatars } from '../components/runtime-topbar/PresenceAvatars'
 import { JobsButton } from '../components/runtime-topbar/JobsButton'
 import { AskPanel } from '../components/runtime-topbar/AskPanel'
 import { RequestPanel } from '../components/runtime-topbar/RequestPanel'
+import { BugPanel } from '../components/runtime-topbar/BugPanel'
 import { defineCraneAppTopbar } from '../topbar-element/entry'
 import '../topbar-element/jsx.d.ts'
 
@@ -89,7 +90,7 @@ export function Applications() {
   const [openEvars, setOpenEvars] = useState<Record<string, string | null>>({})
   const [evarData, setEvarData] = useState<Record<string, EnvVar[]>>({})
   const [frame, setFrame] = useState<FrameState>({ open: false, url: '', title: '' })
-  const [framePanel, setFramePanel] = useState<'ask' | 'request' | null>(null)
+  const [framePanel, setFramePanel] = useState<'ask' | 'request' | 'bug' | null>(null)
   const [promptModal, setPromptModal] = useState<PromptModal>({ open: false })
   const [wizardOpen, setWizardOpen] = useState(false)
   const [wizardStep, setWizardStep] = useState<WizardStep>('input')
@@ -759,9 +760,9 @@ export function Applications() {
 
 interface FrameOverlayProps {
   frame: FrameState
-  framePanel: 'ask' | 'request' | null
+  framePanel: 'ask' | 'request' | 'bug' | null
   setFrame: React.Dispatch<React.SetStateAction<FrameState>>
-  setFramePanel: React.Dispatch<React.SetStateAction<'ask' | 'request' | null>>
+  setFramePanel: React.Dispatch<React.SetStateAction<'ask' | 'request' | 'bug' | null>>
 }
 
 function FrameOverlay({ frame, framePanel, setFrame, setFramePanel }: FrameOverlayProps) {
@@ -838,6 +839,12 @@ function FrameOverlay({ frame, framePanel, setFrame, setFramePanel }: FrameOverl
                 onClick={() => setFramePanel(p => p === 'request' ? null : 'request')}
                 title="File an enhancement request"
               >💡 Request</button>
+              <button
+                type="button"
+                className="btn btn-xs"
+                onClick={() => setFramePanel(p => p === 'bug' ? null : 'bug')}
+                title="Report a bug — same Plan / Code / Build pipeline as a request"
+              >🐛 Bug</button>
             </>
           )}
           <JobsButton slug={frame.slug ?? null} />
@@ -855,6 +862,12 @@ function FrameOverlay({ frame, framePanel, setFrame, setFramePanel }: FrameOverl
         slug={frame.slug ?? null}
         appName={frame.appName ?? frame.title ?? ''}
         open={framePanel === 'request'}
+        onClose={() => setFramePanel(null)}
+      />
+      <BugPanel
+        slug={frame.slug ?? null}
+        appName={frame.appName ?? frame.title ?? ''}
+        open={framePanel === 'bug'}
         onClose={() => setFramePanel(null)}
       />
     </div>
