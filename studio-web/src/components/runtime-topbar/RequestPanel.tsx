@@ -83,6 +83,13 @@ export function RequestPanel({ slug, appName, open, onClose, width = 420, iframe
               <span>{w.text || 'Working…'}</span>
               {w.elapsedSec > 0 && <span style={{ color: 'var(--dim)', marginLeft: 'auto' }}>{w.elapsedSec}s</span>}
             </div>
+            {plan.state.activity.length > 0 && (
+              <ul className="plan-activity">
+                {plan.state.activity.slice(-8).map((line, i) => (
+                  <li key={`${plan.state.activity.length - 8 + i}-${line}`}>{line}</li>
+                ))}
+              </ul>
+            )}
           </div>
         )}
 

@@ -364,6 +364,12 @@ export function runAgentOneShot(opts) {
       if (ev.type === 'text') {
         text += ev.text;
         opts.onChunk?.(text);
+      } else if (ev.type === 'tool') {
+        // Bubble tool-use events up so callers can show "Reading foo.ts /
+        // Grepping 'X'" breadcrumbs while the model is exploring before
+        // it starts emitting the plan text. Without this, users see a
+        // long blank wait between "started" and the first plan chunk.
+        opts.onTool?.({ name: ev.name, input: ev.input });
       }
     });
     runner.on('result', (ev) => {

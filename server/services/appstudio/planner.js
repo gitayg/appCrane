@@ -107,7 +107,7 @@ function extractKeywords(text) {
 }
 
 
-export async function planEnhancement({ appSlug, enhancementId, request, repoDir, agentContext, priorComments, onChunk, onTokens }) {
+export async function planEnhancement({ appSlug, enhancementId, request, repoDir, agentContext, priorComments, onChunk, onTokens, onTool }) {
   // Step 1: get (or build) the AI-generated codebase context document
   const { contextDoc, fileTree, gitHash, fromCache, builtAt } = await ensureCodebaseContext(appSlug, repoDir);
 
@@ -166,6 +166,7 @@ export async function planEnhancement({ appSlug, enhancementId, request, repoDir
     labels:        { 'appcrane.container.type': 'plan' },
     onChunk,
     onTokens,
+    onTool,
   });
 
   const plan = extractJsonBlock(text);

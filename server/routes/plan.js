@@ -90,6 +90,7 @@ router.get('/:enhancementId/stream', (req, res) => {
   let lastText = '';
   let lastStatus = '';
   let lastJobId = null;
+  let lastActivityLen = 0;
   let done = false;
   const connectedAt = Date.now();
 
@@ -117,7 +118,7 @@ router.get('/:enhancementId/stream', (req, res) => {
         return;
       }
 
-      if (lastJobId !== null && job.id !== lastJobId) { lastText = ''; lastStatus = ''; }
+      if (lastJobId !== null && job.id !== lastJobId) { lastText = ''; lastStatus = ''; lastActivityLen = 0; }
       lastJobId = job.id;
 
       if (job.status === 'queued') {
@@ -156,6 +157,13 @@ router.get('/:enhancementId/stream', (req, res) => {
         if (output?.streaming && output.text && output.text !== lastText) {
           lastText = output.text;
           res.write(`data: ${JSON.stringify({ type: 'progress', text: output.text })}\n\n`);
+        }
+        // Emit only the new tail of the activity log so the client can
+        // append without re-rendering the whole list each tick.
+        if (output?.streaming && Array.isArray(output.activity) && output.activity.length > lastActivityLen) {
+          const fresh = output.activity.slice(lastActivityLen);
+          lastActivityLen = output.activity.length;
+          res.write(`data: ${JSON.stringify({ type: 'activity', lines: fresh })}\n\n`);
         }
         return;
       }

@@ -861,6 +861,8 @@ code.api-pill { background: var(--surface2); border: 1px solid var(--border); bo
 .ask-msg { max-width: 88%; padding: 8px 12px; border-radius: 8px; font-size: .83rem; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
 .ask-msg.user { background: var(--accent); color: #fff; align-self: flex-end; border-bottom-right-radius: 3px; }
 .ask-msg.assistant { background: var(--surface); border: 1px solid var(--border); align-self: flex-start; border-bottom-left-radius: 3px; }
+.plan-activity { list-style: none; padding: 6px 0 0; margin: 6px 0 0; border-top: 1px dashed var(--border); display: flex; flex-direction: column; gap: 2px; font-size: .72rem; color: var(--dim); font-family: monospace; }
+.plan-activity li { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ask-working { padding: 8px 12px 4px; flex-shrink: 0; display: flex; align-items: center; gap: 8px; }
 .ask-spinner { width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: ask-spin .8s linear infinite; flex-shrink: 0; }
 @keyframes ask-spin { to { transform: rotate(360deg); } }
