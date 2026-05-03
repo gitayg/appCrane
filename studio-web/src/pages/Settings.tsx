@@ -2,6 +2,9 @@ import { useState, useEffect, useRef } from 'react'
 import { adminApi } from '../adminApi'
 import { useFlash, FocusInput, FocusTextarea } from '../components/formHelpers'
 import { Users } from './Users'
+import { AuditLog } from './AuditLog'
+import { SkillsTab } from '../components/SkillsTab'
+import { BrandingTab } from '../components/BrandingTab'
 
 function AppStudioTab() {
   const [keyInfo, setKeyInfo] = useState<{ configured: boolean; source?: string; suffix?: string } | null>(null)
@@ -377,9 +380,9 @@ function SecurityTab() {
   )
 }
 
-type Tab = 'appstudio' | 'security' | 'users'
+type Tab = 'appstudio' | 'security' | 'users' | 'skills' | 'branding' | 'audit'
 
-const VALID_TABS: Tab[] = ['appstudio', 'security', 'users']
+const VALID_TABS: Tab[] = ['appstudio', 'security', 'users', 'skills', 'branding', 'audit']
 
 function getTab(): Tab {
   const hash = window.location.hash.replace('#', '') as Tab
@@ -388,15 +391,6 @@ function getTab(): Tab {
 
 export function Settings() {
   const [tab, setTab] = useState<Tab>(getTab)
-
-  // Back-compat redirects:
-  // - v1.27.12: Skills moved Settings → AppStudio
-  // - v1.27.27: Branding moved Settings → AppStudio (it's AI-pipeline
-  //             context the agents read before building, not chrome)
-  useEffect(() => {
-    if (window.location.hash === '#skills')   window.location.replace('/appstudio#skills')
-    if (window.location.hash === '#branding') window.location.replace('/appstudio#branding')
-  }, [])
 
   useEffect(() => {
     const handler = () => setTab(getTab())
@@ -414,6 +408,15 @@ export function Settings() {
       </div>
       <div style={{ display: tab === 'users' ? 'block' : 'none' }}>
         <Users />
+      </div>
+      <div style={{ display: tab === 'skills' ? 'block' : 'none' }}>
+        <SkillsTab />
+      </div>
+      <div style={{ display: tab === 'branding' ? 'block' : 'none' }}>
+        <BrandingTab />
+      </div>
+      <div style={{ display: tab === 'audit' ? 'block' : 'none' }}>
+        <AuditLog />
       </div>
     </div>
   )

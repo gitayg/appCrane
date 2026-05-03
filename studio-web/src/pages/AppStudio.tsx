@@ -1,8 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { adminApi } from '../adminApi'
 import { App as StudioApp } from '../App'
-import { SkillsTab } from '../components/SkillsTab'
-import { BrandingTab } from '../components/BrandingTab'
 
 interface Enhancement {
   id: number
@@ -156,8 +154,15 @@ function getHash(): string {
   return 'requests'
 }
 
-export function AppStudio() {
-  const [tab, setTab] = useState<string>(getHash)
+interface AppStudioProps {
+  /** When set, locks the tab and ignores hash changes. Used by the
+   *  /requests and /builders routes after the AppStudio nav level was
+   *  collapsed in v1.27.38. */
+  tab?: string
+}
+
+export function AppStudio({ tab: forcedTab }: AppStudioProps = {}) {
+  const [tab, setTab] = useState<string>(forcedTab ?? getHash())
   const [allEnhancements, setAllEnhancements] = useState<Enhancement[]>([])
   const [apps, setApps] = useState<AppOption[]>([])
   const [filterApp, setFilterApp] = useState('')
@@ -170,10 +175,11 @@ export function AppStudio() {
   const [trace, setTrace] = useState<TraceData | null>(null)
 
   useEffect(() => {
+    if (forcedTab) { setTab(forcedTab); return }
     function onHash() { setTab(getHash()) }
     window.addEventListener('hashchange', onHash)
     return () => window.removeEventListener('hashchange', onHash)
-  }, [])
+  }, [forcedTab])
 
   const loadData = useCallback(() => {
     return Promise.all([
@@ -333,8 +339,6 @@ export function AppStudio() {
         </div>
       )}
 
-      {tab === 'skills'   && <SkillsTab />}
-      {tab === 'branding' && <BrandingTab />}
     </div>
   )
 }
