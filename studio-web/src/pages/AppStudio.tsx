@@ -561,6 +561,29 @@ function DetailView({ enh, trace, onBack, onAction, onDeleteJob, onRetryJob }: D
           )}
         </div>
 
+        {/* Inline hint for merge conflicts on the open_pr phase — points
+            the user at the right action instead of leaving them staring
+            at "Pull Request has merge conflicts" with no next step. */}
+        {(() => {
+          const openPrJobs = (trace?.trace || []).filter(j => j.phase === 'open_pr')
+          const failedConflict = openPrJobs.find(j => j.status === 'failed' && /merge conflict/i.test(j.error || ''))
+          if (!failedConflict) return null
+          return (
+            <div style={{
+              background: 'rgba(239, 68, 68, .1)', border: '1px solid rgba(239, 68, 68, .3)',
+              borderRadius: 6, padding: '10px 14px', marginBottom: 14, fontSize: '.85rem', lineHeight: 1.5,
+            }}>
+              <div style={{ fontWeight: 600, marginBottom: 4 }}>⚠️ Merge conflict</div>
+              <div style={{ color: 'var(--dim)' }}>
+                <code>main</code> moved while this branch was being coded — GitHub can't auto-merge.
+                Click <strong>🔁 Redo + reset branch</strong> above to re-plan + re-code against the
+                current <code>main</code> on a fresh branch (sidesteps the conflict). Or rebase the
+                existing PR locally and click <strong>Ship it</strong> on the Build tab to retry.
+              </div>
+            </div>
+          )
+        })()}
+
         <PhaseTabs
           enh={enh}
           trace={trace}
