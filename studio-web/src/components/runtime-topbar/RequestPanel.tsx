@@ -7,6 +7,7 @@ interface Props {
   appName: string
   open:    boolean
   onClose: () => void
+  width?:  number
 }
 
 /**
@@ -16,7 +17,7 @@ interface Props {
  * Jobs button already surfaces status. Plan-review/refine UI is a
  * follow-up.
  */
-export function RequestPanel({ slug, appName, open, onClose }: Props) {
+export function RequestPanel({ slug, appName, open, onClose, width = 420 }: Props) {
   const { submit, busy, last, reset } = useEnhancementSubmit(slug)
   const me = useMe()
   const canBuild = isAdmin(me)
@@ -35,7 +36,7 @@ export function RequestPanel({ slug, appName, open, onClose }: Props) {
   }
 
   return (
-    <div className="ask-panel open" style={{ width: 420 }}>
+    <div className="ask-panel open" style={{ width }}>
       <div className="ask-header">
         <span>💡 Request</span>
         <span className="ask-app-label">{appName}</span>

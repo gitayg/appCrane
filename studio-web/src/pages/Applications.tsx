@@ -790,6 +790,31 @@ interface FrameOverlayProps {
 function FrameOverlay({ frame, framePanel, setFrame, setFramePanel }: FrameOverlayProps) {
   const topbarRef = useRef<HTMLElement>(null)
   const [folded, setFolded] = useState(false)
+  // Per-panel last-used width, persisted across open/close so closing
+  // and reopening Request keeps the user's chosen width.
+  const [widths, setWidths] = useState<Record<'ask' | 'request' | 'bug', number>>({
+    ask: 380, request: 420, bug: 460,
+  })
+  const dragRef = useRef<{ startX: number; startW: number; key: 'ask' | 'request' | 'bug' } | null>(null)
+  const onResizerDown = (e: React.MouseEvent) => {
+    if (!framePanel) return
+    e.preventDefault()
+    dragRef.current = { startX: e.clientX, startW: widths[framePanel], key: framePanel }
+    const onMove = (ev: MouseEvent) => {
+      const d = dragRef.current
+      if (!d) return
+      const delta = d.startX - ev.clientX
+      const next = Math.max(280, Math.min(900, d.startW + delta))
+      setWidths(w => ({ ...w, [d.key]: next }))
+    }
+    const onUp = () => {
+      dragRef.current = null
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+  }
 
   // The Custom Element fires CustomEvents (not React synthetic events) so
   // we wire a per-mount listener block. Re-binds when callbacks change.
@@ -830,12 +855,9 @@ function FrameOverlay({ frame, framePanel, setFrame, setFramePanel }: FrameOverl
   }, [frame.url, frame.appName, setFrame])
 
   // Shrink the iframe to leave room for the active drawer instead of
-  // letting the drawer overlap the app. Width matches each panel's own
-  // declared width — keep them in sync if either changes.
-  const dockWidth =
-    framePanel === 'bug'     ? 460 :
-    framePanel === 'request' ? 420 :
-    framePanel === 'ask'     ? 380 : 0
+  // letting the drawer overlap the app. Width is user-resizable via the
+  // .frame-dock-resizer; persisted per panel in `widths` state.
+  const dockWidth = framePanel ? widths[framePanel] : 0
   return (
     <div
       className="app-frame-overlay"
@@ -884,23 +906,34 @@ function FrameOverlay({ frame, framePanel, setFrame, setFramePanel }: FrameOverl
       </crane-app-topbar>
 
       {frame.url && <iframe className="app-frame-iframe" src={frame.url} title={frame.title} />}
+      {framePanel && (
+        <div
+          className="frame-dock-resizer"
+          style={{ right: dockWidth }}
+          onMouseDown={onResizerDown}
+          title="Drag to resize panel"
+        />
+      )}
       <AskPanel
         slug={frame.slug ?? null}
         appName={frame.appName ?? frame.title ?? ''}
         open={framePanel === 'ask'}
         onClose={() => setFramePanel(null)}
+        width={widths.ask}
       />
       <RequestPanel
         slug={frame.slug ?? null}
         appName={frame.appName ?? frame.title ?? ''}
         open={framePanel === 'request'}
         onClose={() => setFramePanel(null)}
+        width={widths.request}
       />
       <BugPanel
         slug={frame.slug ?? null}
         appName={frame.appName ?? frame.title ?? ''}
         open={framePanel === 'bug'}
         onClose={() => setFramePanel(null)}
+        width={widths.bug}
       />
     </div>
   )
