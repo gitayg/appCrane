@@ -83,19 +83,11 @@ input:focus{border-color:var(--accent)}
 /* Iframe overlay */
 .app-frame{display:none;position:fixed;inset:0;z-index:100;flex-direction:column;background:var(--bg)}
 .app-frame.open{display:flex}
-.frame-topbar{display:flex;align-items:center;justify-content:space-between;padding:0 16px;height:44px;background:var(--surface);border-bottom:1px solid var(--border);flex-shrink:0}
-.frame-left{display:flex;align-items:center;gap:8px}
-.frame-logo{font-size:1rem;font-weight:800}
-.frame-logo span{color:var(--accent)}
-.frame-icon{width:20px;height:20px;border-radius:4px;object-fit:cover;display:none;clip-path:inset(0 round 4px)}
-.frame-name{font-size:.82rem;color:var(--dim)}
-.frame-version{font-size:.7rem;color:var(--dim);background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:1px 6px;font-family:'SF Mono',Monaco,Consolas,monospace}
-.frame-env-switcher{display:flex;background:var(--surface2);border:1px solid var(--border);border-radius:5px;overflow:hidden;flex-shrink:0}
-.env-sw-btn{background:none;border:none;cursor:pointer;padding:3px 11px;font-size:.74rem;font-weight:600;color:var(--dim);transition:background .15s,color .15s;white-space:nowrap}
-.env-sw-btn.active{background:var(--accent);color:#fff}
-.frame-right{display:flex;align-items:center;gap:10px}
+/* Chrome (.frame-topbar, .frame-left/right, .frame-logo, .frame-icon, .frame-name,
+   .frame-version, .frame-env-switcher, .env-sw-btn, .btn-newtab) is now owned by
+   <crane-app-topbar>. The slotted user-info span + modal Cancel buttons keep
+   their classes here since they're still rendered as light DOM. */
 .frame-user{font-size:.78rem;color:var(--dim)}
-.btn-newtab{color:var(--accent);font-size:.78rem;text-decoration:none}
 .btn-back{background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:5px;padding:4px 12px;cursor:pointer;font-size:.78rem;font-weight:600;width:auto}
 .btn-enhance{background:none;color:var(--dim);border:1px solid var(--border);border-radius:5px;padding:4px 12px;cursor:pointer;font-size:.78rem;font-weight:500;width:auto;transition:border-color .15s,color .15s}
 .btn-enhance:hover{border-color:var(--accent);color:var(--accent)}
@@ -292,23 +284,15 @@ input:focus{border-color:var(--accent)}
 .job-row{cursor:pointer}
 .job-row:hover{background:var(--surface2)}
 </style>
+<!-- Shared <crane-app-topbar> Custom Element. Same source as the admin SPA — see studio-web/src/topbar-element/. -->
+<script src="/docs/shared/crane-topbar.js" defer></script>
 </head>
 <body>
 
 <!-- Iframe overlay -->
 <div id="appFrame" class="app-frame">
-  <div class="frame-topbar">
-    <div class="frame-left">
-      <span class="frame-logo">App<span>Crane</span></span>
-      <img id="frameAppIcon" class="frame-icon" src="" alt="">
-      <span class="frame-name" id="frameAppName"></span>
-      <span id="frameVersion" class="frame-version" style="display:none"></span>
-      <div id="frameEnvSwitcher" class="frame-env-switcher" style="display:none">
-        <button class="env-sw-btn" id="frameEnvProdBtn" onclick="switchFrameEnv('prod')">Production</button>
-        <button class="env-sw-btn" id="frameEnvSandBtn" onclick="switchFrameEnv('sandbox')">Sandbox</button>
-      </div>
-    </div>
-    <div class="frame-right">
+  <crane-app-topbar id="appTopbar">
+    <span slot="actions" id="frameActions">
       <div id="presenceWrap" class="presence-wrap" style="display:none">
         <div id="presenceAvatars" class="presence-avatars"></div>
         <span id="presenceLabel" class="presence-label"></span>
@@ -317,16 +301,12 @@ input:focus{border-color:var(--accent)}
         </div>
       </div>
       <span id="frameUserInfo" class="frame-user"></span>
-
       <div id="planContainerBadge" class="plan-container-badge"><span class="plan-container-dot"></span>Builder Working</div>
       <button id="frameLearnBtn" class="btn-enhance" onclick="openAskPanel()">🤖 Learn</button>
       <button id="frameRequestBtn" class="btn-enhance" onclick="openPlanPanel()">💡 Request</button>
       <button id="jobsBtn" class="btn-enhance" onclick="toggleJobsPanel()" style="display:none">📋 Jobs<span id="jobsBadge" class="jobs-badge"></span></button>
-      <button class="btn-enhance" onclick="refreshApp()" title="Reload app">↺ Refresh</button>
-      <a id="frameNewTab" href="#" target="_blank" class="btn-newtab">Open in new tab ↗</a>
-      <button class="btn-back" onclick="closeApp()">← Back</button>
-    </div>
-  </div>
+    </span>
+  </crane-app-topbar>
   <div id="peekHint" class="peek-hint">🎯 Click any element in the page to capture it as context · Press <b>Esc</b> to cancel</div>
 
   <!-- What's new popup -->
@@ -1116,22 +1096,19 @@ let _currentAppProdVersion = null;
 let _currentAppSandVersion = null;
 let _currentAppEnv = 'prod';
 
+// Env switching is now driven by the <crane-app-topbar>'s 'crane-env-change'
+// event (see _wireTopbarEvents below). Keeping this function as a shim
+// in case any legacy onclick handler still references it from cached HTML.
 function switchFrameEnv(env) {
   if (env === _currentAppEnv) return;
   _currentAppEnv = env;
   const url = env === 'prod' ? _currentAppProdUrl : _currentAppSandUrl;
-  const version = env === 'prod' ? _currentAppProdVersion : _currentAppSandVersion;
   document.getElementById('frameIframe').src = url;
-  document.getElementById('frameNewTab').href = url;
-  _updateFrameEnvUI(env, version);
-}
-
-function _updateFrameEnvUI(env, version) {
-  document.getElementById('frameEnvProdBtn').classList.toggle('active', env === 'prod');
-  document.getElementById('frameEnvSandBtn').classList.toggle('active', env === 'sandbox');
-  const vEl = document.getElementById('frameVersion');
-  if (version) { vEl.textContent = version; vEl.style.display = ''; }
-  else { vEl.style.display = 'none'; }
+  const tb = document.getElementById('appTopbar');
+  if (tb) {
+    tb.setAttribute('env', env === 'prod' ? 'production' : 'sandbox');
+    tb.setAttribute('current-url', url || '');
+  }
 }
 
 function openApp(url, name, slug, hasIcon, appData) {
@@ -1143,17 +1120,9 @@ function openApp(url, name, slug, hasIcon, appData) {
   _currentAppEnv = (appData && appData.env) || 'prod';
 
   const isAdmin = _userRole === 'admin';
-  const switcher = document.getElementById('frameEnvSwitcher');
-  if (isAdmin && _currentAppSandUrl) {
-    switcher.style.display = '';
-    const version = _currentAppEnv === 'prod' ? _currentAppProdVersion : _currentAppSandVersion;
-    _updateFrameEnvUI(_currentAppEnv, version);
-  } else {
-    switcher.style.display = 'none';
-    const vEl = document.getElementById('frameVersion');
-    if (_currentAppProdVersion) { vEl.textContent = _currentAppProdVersion; vEl.style.display = ''; }
-    else { vEl.style.display = 'none'; }
-  }
+  // Env switcher visibility is driven by whether the topbar gets both
+  // prod-url and sand-url attributes. Non-admins only ever see prod.
+  const showSwitcher = isAdmin && !!_currentAppSandUrl;
   _askSessionId = null;
   _askPeekCtx = null;
   _planEnhId = null;
@@ -1171,19 +1140,28 @@ function openApp(url, name, slug, hasIcon, appData) {
   document.getElementById('planBuildRow').style.display = 'none';
   document.getElementById('planSendBtn').textContent = 'Request';
   document.getElementById('planInput').placeholder = 'Describe the enhancement or feature you want...';
-  document.getElementById('frameAppName').textContent = name;
-  document.getElementById('frameNewTab').href = url;
   document.getElementById('frameIframe').src = url;
   document.getElementById('appFrame').classList.add('open');
   document.body.style.overflow = 'hidden';
   startPresence(slug);
-  const icon = document.getElementById('frameAppIcon');
-  icon.style.display = 'none';
-  icon.onload = function() { icon.style.display = 'block'; };
-  icon.onerror = function() { icon.style.display = 'none'; };
-  icon.removeAttribute('src');
-  if (hasIcon && slug) {
-    icon.src = window.location.origin + '/api/apps/' + slug + '/icon';
+  // Drive the shared <crane-app-topbar> chrome via attributes. The element
+  // re-renders on each attribute change.
+  const tb = document.getElementById('appTopbar');
+  if (tb) {
+    tb.setAttribute('app-name',     name || '');
+    tb.setAttribute('app-slug',     slug || '');
+    tb.setAttribute('app-icon-url', hasIcon && slug ? window.location.origin + '/api/apps/' + slug + '/icon' : '');
+    tb.setAttribute('current-url',  url || '');
+    tb.setAttribute('env', _currentAppEnv === 'prod' ? 'production' : 'sandbox');
+    if (showSwitcher) {
+      tb.setAttribute('prod-url', _currentAppProdUrl || '');
+      tb.setAttribute('sand-url', _currentAppSandUrl || '');
+    } else {
+      tb.removeAttribute('prod-url');
+      tb.removeAttribute('sand-url');
+    }
+    if (_currentAppProdVersion) tb.setAttribute('prod-version', _currentAppProdVersion); else tb.removeAttribute('prod-version');
+    if (_currentAppSandVersion) tb.setAttribute('sand-version', _currentAppSandVersion); else tb.removeAttribute('sand-version');
   }
   document.getElementById('jobsBtn').style.display = '';
   refreshJobsBadge();
@@ -1277,8 +1255,15 @@ function closeApp() {
   document.getElementById('appFrame').classList.remove('open');
   document.body.style.overflow = '';
   document.getElementById('frameIframe').src = '';
-  const icon = document.getElementById('frameAppIcon');
-  icon.style.display = 'none'; icon.src = '';
+  // Clear topbar attributes so the next openApp() doesn't briefly flash
+  // the previous app's chrome before its setAttribute calls land.
+  const tb = document.getElementById('appTopbar');
+  if (tb) {
+    tb.removeAttribute('app-name'); tb.removeAttribute('app-icon-url');
+    tb.removeAttribute('current-url');
+    tb.removeAttribute('prod-url'); tb.removeAttribute('sand-url');
+    tb.removeAttribute('prod-version'); tb.removeAttribute('sand-version');
+  }
   currentAppSlug = null;
   stopPresence();
 }
@@ -1656,7 +1641,7 @@ function _capturePeekInfo(el) {
 
 function openEnhModal(slug, name) {
   if (slug) currentAppSlug = slug;
-  const appName = name || document.getElementById('frameAppName').textContent;
+  const appName = name || (document.getElementById('appTopbar')?.getAttribute('app-name') || '');
   document.getElementById('enhAppLabel').textContent = appName ? 'App: ' + appName : '';
   const textarea = document.getElementById('enhText');
   if (_peekContext) {
@@ -2614,9 +2599,9 @@ async function buildFromPlan() {
 }
 
 async function refreshApp() {
-  var src = document.getElementById('frameNewTab').href;
-  if (!src || src === '#') return;
   var f = document.getElementById('frameIframe');
+  var src = f && f.src && f.src !== 'about:blank' ? f.src : '';
+  if (!src) return;
   f.src = 'about:blank';
   requestAnimationFrame(function() { f.src = src; });
   if (currentAppSlug && sessionToken) {
@@ -2987,6 +2972,20 @@ async function refreshJobsBadge() {
 }
 
 checkSession();
+
+// Wire <crane-app-topbar> events to the existing handlers. The element
+// fires CustomEvents instead of inline onclicks so the same chrome can
+// drive both the React admin (Applications.tsx) and this vanilla portal.
+(function wireTopbarEvents() {
+  const tb = document.getElementById('appTopbar');
+  if (!tb) return;
+  tb.addEventListener('crane-back', closeApp);
+  tb.addEventListener('crane-refresh', refreshApp);
+  tb.addEventListener('crane-env-change', function(e) {
+    var env = e.detail && e.detail.env === 'sandbox' ? 'sandbox' : 'prod';
+    switchFrameEnv(env);
+  });
+})();
 </script>
 </body>
 </html>
