@@ -408,19 +408,20 @@ async function handleCode(job) {
     onLog('[studio:git] Commit created');
 
     onLog(`[studio:git] Pushing branch ${branchName} to origin…`);
+    // No --force fallback (v1.27.69). cloneForCode now clones FROM the
+    // existing remote branch when one exists (and refuses outright if a
+    // PR is already open), so this push fast-forwards in the normal
+    // continuation case. Genuine divergence (someone else pushed to the
+    // same branch between clone and push) is rare; treat it as a
+    // re-plan signal so the operator can re-evaluate, NOT silently
+    // overwrite the conflicting commits.
     try {
       git(['push', '-u', 'origin', branchName], { timeout: 60000 });
       onLog(`[studio:git] Branch ${branchName} pushed`);
     } catch (_) {
-      if (branchName.startsWith('appstudio/')) {
-        onLog('[studio:git] Remote branch exists from prior attempt — force-pushing…');
-        git(['push', '--force', '-u', 'origin', branchName], { timeout: 60000 });
-        onLog(`[studio:git] Branch ${branchName} force-pushed`);
-      } else {
-        pushConflict = true;
-        onLog('[studio:git] Push conflict — branch has diverged, will re-plan');
-        return;
-      }
+      pushConflict = true;
+      onLog('[studio:git] Push conflict — branch has diverged, will re-plan');
+      return;
     }
 
     // Update DB immediately — container may still be running at this point

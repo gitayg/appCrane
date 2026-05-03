@@ -14,6 +14,48 @@ const GEN_TIMEOUT_MS  = parseInt(process.env.APPSTUDIO_TIMEOUT_MS || '1800000', 
 const STUDIO_IMAGE    = process.env.APPSTUDIO_IMAGE || 'appcrane-studio:latest';
 
 /**
+ * `git ls-remote --heads <url> <branch>` — returns true iff the branch
+ * exists on the remote. Silent on errors (treats unreachable / auth
+ * failure as "doesn't exist" so coding still attempts the normal path
+ * and fails loudly via the clone instead).
+ */
+function checkRemoteBranchExists(cloneUrl, branch, onLog) {
+  try {
+    const out = execFileSync('git', ['ls-remote', '--heads', cloneUrl, branch], {
+      stdio: 'pipe', timeout: 30000,
+    }).toString().trim();
+    return out.length > 0;
+  } catch (err) {
+    onLog?.(`[studio:git] ls-remote check failed (treating as no-branch): ${(err.stderr?.toString() || err.message).slice(0, 120)}`);
+    return false;
+  }
+}
+
+/**
+ * GitHub API: returns the first OPEN PR whose head ref matches `branch`,
+ * or null if none open / the API call fails. Used to refuse a re-coding
+ * attempt that would otherwise rewrite an active PR's history.
+ */
+async function checkOpenPr(app, branch, token, onLog) {
+  if (!app?.github_url) return null;
+  const m = app.github_url.match(/github\.com[/:]([^/]+)\/([^/]+?)(?:\.git)?$/);
+  if (!m) return null;
+  const [, owner, repo] = m;
+  try {
+    const headers = { 'Accept': 'application/vnd.github.v3+json', 'User-Agent': 'AppCrane-Coder' };
+    if (token) headers.Authorization = `token ${token}`;
+    const url = `https://api.github.com/repos/${owner}/${repo}/pulls?state=open&head=${owner}:${encodeURIComponent(branch)}&per_page=1`;
+    const r = await fetch(url, { headers });
+    if (!r.ok) return null;
+    const arr = await r.json();
+    return Array.isArray(arr) && arr.length ? arr[0] : null;
+  } catch (err) {
+    onLog?.(`[studio:git] open-PR check failed (proceeding without it): ${err.message}`);
+    return null;
+  }
+}
+
+/**
  * Safety net for the planner-prompt rule that says "if deployhub.json
  * exists, bump it to match package.json's version". The agent sometimes
  * forgets to touch deployhub.json even though the prompt asks for both;
@@ -121,18 +163,49 @@ async function cloneForCode(dir, app, baseBranch, branchName, onLog) {
   chmodSync(workspaceDir, 0o777); // explicit chmod — mkdirSync mode is clipped by umask
 
   let cloneUrl = app.github_url;
+  let token = null;
   if (app.github_token_encrypted) {
     try {
-      const token = decrypt(app.github_token_encrypted);
+      token = decrypt(app.github_token_encrypted);
       const url = new URL(app.github_url);
       url.username = token;
       cloneUrl = url.toString();
     } catch (_) {}
   }
 
-  onLog?.(`[studio:git] Cloning ${app.github_url} (${baseBranch})…`);
+  // Detect whether the branch already exists on the remote — happens when a
+  // prior coder run pushed the branch and this is a re-coding attempt for
+  // the same enhancement. Three cases:
+  //   1. Branch exists AND has an open PR  → REFUSE. Force-pushing would
+  //      rewrite the PR's history; we don't want to silently destroy review
+  //      comments / approvals tied to the original commits.
+  //   2. Branch exists, no open PR         → clone FROM that branch so the
+  //      agent's new work goes on top of the prior commits. push then
+  //      fast-forwards naturally — no force needed.
+  //   3. Branch does not exist             → clone baseBranch + create the
+  //      new branch (original behavior).
+  // Avoids the previous bug where every re-coding attempt force-pushed and
+  // wiped out the prior coder's commits (and any open PR's history).
+  const remoteBranchExists = checkRemoteBranchExists(cloneUrl, branchName, onLog);
+  let cloneFromBranch = baseBranch;
+  let isContinuation  = false;
+  if (remoteBranchExists) {
+    const openPr = await checkOpenPr(app, branchName, token, onLog);
+    if (openPr) {
+      throw new Error(
+        `Branch ${branchName} already has open PR #${openPr.number} (${openPr.html_url}). ` +
+        `Re-coding would overwrite the PR's history. Close or merge the PR first, ` +
+        `then re-trigger coding.`,
+      );
+    }
+    onLog?.(`[studio:git] Branch ${branchName} already exists on remote — continuing on top of prior commits`);
+    cloneFromBranch = branchName;
+    isContinuation  = true;
+  }
+
+  onLog?.(`[studio:git] Cloning ${app.github_url} (${cloneFromBranch})…`);
   try {
-    execFileSync('git', ['clone', '--depth', '1', '--branch', baseBranch, cloneUrl, workspaceDir], {
+    execFileSync('git', ['clone', '--depth', '1', '--branch', cloneFromBranch, cloneUrl, workspaceDir], {
       timeout: 120000, stdio: 'pipe',
     });
   } catch (err) {
@@ -141,8 +214,13 @@ async function cloneForCode(dir, app, baseBranch, branchName, onLog) {
 
   execFileSync('git', ['-C', workspaceDir, 'config', 'user.email', 'appstudio@appcrane.local'], { stdio: 'pipe' });
   execFileSync('git', ['-C', workspaceDir, 'config', 'user.name', 'AppStudio'], { stdio: 'pipe' });
-  onLog?.(`[studio:git] Creating branch ${branchName}…`);
-  execFileSync('git', ['-C', workspaceDir, 'checkout', '-b', branchName], { stdio: 'pipe' });
+  if (isContinuation) {
+    // Already on the right branch from --branch above; nothing to create.
+    onLog?.(`[studio:git] On branch ${branchName} (continuation)`);
+  } else {
+    onLog?.(`[studio:git] Creating branch ${branchName}…`);
+    execFileSync('git', ['-C', workspaceDir, 'checkout', '-b', branchName], { stdio: 'pipe' });
+  }
 
   // Make workspace fully accessible to the container's studio user.
   // chmod 777 works regardless of who runs AppCrane (no root needed) and

@@ -41,12 +41,13 @@ export async function commitAndPush({ workspaceDir, branchName, commitMsg, onLog
   onLog?.('[builder:git] Committed');
 
   onLog?.(`[builder:git] Pushing ${branchName}…`);
-  try {
-    git(['push', '-u', 'origin', branchName]);
-  } catch (_) {
-    onLog?.('[builder:git] Remote branch exists — force-pushing…');
-    git(['push', '--force', '-u', 'origin', branchName]);
-  }
+  // No --force fallback (v1.27.69). Force-pushing was destroying prior
+  // coder commits and rewriting open PR histories. The caller is now
+  // responsible for cloning from the existing remote branch (when one
+  // exists) so the push fast-forwards. If push still fails here, it
+  // means the branch genuinely diverged — surface the error instead of
+  // overwriting.
+  git(['push', '-u', 'origin', branchName]);
   onLog?.(`[builder:git] Branch ${branchName} pushed`);
   log.info(`Coder: pushed branch ${branchName}`);
   return { pushed: true };
