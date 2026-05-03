@@ -329,52 +329,12 @@ input:focus{border-color:var(--accent)}
   </div>
 
   <!-- Enhance panel -->
-  <div id="planPanel" class="plan-panel">
-    <div id="planResizeHandle" class="plan-resize-handle"></div>
-    <div class="plan-header" ondblclick="togglePlanMinimize()">
-      <span>💡 Request</span>
-      <span id="planPanelAppLabel" class="ask-app-label"></span>
-      <div class="ask-header-right" style="margin-left:auto">
-        <button class="ask-sessions-btn" id="planPeekToggleBtn" onclick="togglePeekMode()" title="Point at an element to add context">🎯</button>
-        <button class="ask-sessions-btn" onclick="resetPlanPanel()" title="New enhancement">New</button>
-        <button class="ask-sessions-btn" onclick="togglePlanMinimize()" title="Minimize" id="planMinBtn">–</button>
-        <button class="ask-close" onclick="closePlanPanel()">×</button>
-      </div>
-    </div>
-    <div id="planMessages" class="plan-messages">
-      <div class="ask-empty" style="padding:20px 16px">Describe an enhancement and Claude will generate an implementation plan.</div>
-    </div>
-    <div id="planWorking" class="ask-working" style="display:none">
-      <div class="ask-spinner"></div>
-      <div id="planWorkingText" class="ask-working-text">Generating plan...</div>
-    </div>
-    <!-- Inline job log section -->
-    <div id="planJobSection" class="plan-job-section" style="display:none">
-      <div class="plan-job-header">
-        <span id="planJobPhase">code</span>
-        <span id="planJobStatus" style="margin-left:4px"></span>
-        <span id="planJobId" style="font-family:monospace;color:var(--dim);font-size:.65rem;margin-left:4px"></span>
-        <span id="planJobTokens" style="margin-left:auto;font-family:monospace;font-size:.68rem;color:var(--dim)"></span>
-        <span id="planJobCost" style="margin-left:6px;font-family:monospace"></span>
-      </div>
-      <div id="planJobLog" class="plan-job-log"></div>
-    </div>
-    <div class="ask-input-area">
-      <div id="planPeekBar" class="ask-peek-bar" style="display:none">
-        <span>🎯</span><span id="planPeekLabel" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
-        <button onclick="clearPlanPeekCtx()">×</button>
-      </div>
-      <div class="ask-input-row">
-        <textarea id="planInput" class="ask-textarea" placeholder="Describe the enhancement or feature you want..." rows="2"
-          onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendPlanRequest();}"
-          oninput="_onPlanInputChange()"></textarea>
-        <button id="planSendBtn" class="ask-send" onclick="sendPlanRequest()">Request</button>
-      </div>
-      <div id="planBuildRow" class="ask-input-row" style="display:none;justify-content:flex-end;padding:4px 0 0">
-        <button id="planBuildBtn" class="ask-send plan-build-btn" onclick="buildFromPlan()">Build</button>
-      </div>
-    </div>
-  </div>
+  <!-- Request panel — Custom Element from /docs/shared/crane-topbar.js
+       so portal + /applications share one implementation (Phase B.2 step 3,
+       v1.27.61). Plan flow + Build + Refine + 🎯 element-pick all live in
+       the React component. Post-build job polling moves to the 📋 Jobs
+       panel (one source of truth). -->
+  <crane-request-panel id="planPanel" iframe-selector="#frameIframe"></crane-request-panel>
 
   <!-- Bug report panel — same pipeline as Request, structured fields -->
   <!-- Bug panel — Custom Element from /docs/shared/crane-topbar.js so the
@@ -1154,13 +1114,8 @@ function openApp(url, name, slug, hasIcon, appData) {
   document.getElementById('frameLearnBtn').style.display   = _hasGh ? '' : 'none';
   document.getElementById('frameRequestBtn').style.display = _hasGh ? '' : 'none';
   document.getElementById('frameBugBtn').style.display     = _hasGh ? '' : 'none';
-  if (_userRole === 'admin' && slug) {
-    fetch(API + '/api/plan/active-job/' + encodeURIComponent(slug), {
-      headers: { 'Authorization': 'Bearer ' + sessionToken },
-    }).then(function(r) { return r.ok ? r.json() : null; }).then(function(d) {
-      if (d && d.job_id) _startPlanJobPolling(d.job_id);
-    }).catch(function() {});
-  }
+  // Active-job auto-resume removed in v1.27.61 along with the vanilla
+  // plan panel; the 📋 Jobs panel surfaces in-flight jobs centrally.
   if (slug) startAskContainerPoll(slug);
   closeUpdatesPopup();
   if (slug) checkAppUpdates(slug, name);
@@ -2027,19 +1982,30 @@ function _onPlanInputChange() {
   });
 })();
 
+// Request panel — backed by <crane-request-panel> Custom Element since
+// v1.27.61. The React component handles the form, plan SSE, refine,
+// build, and 🎯 element-pick. Post-build job state lives in 📋 Jobs.
 function openPlanPanel() {
   if (!currentAppSlug) return;
-  document.getElementById('planPanel').classList.add('open');
-  document.getElementById('planPanel').classList.remove('minimized');
+  var el = document.getElementById('planPanel');
+  if (!el) return;
+  el.setAttribute('slug',     currentAppSlug);
+  el.setAttribute('app-name', document.getElementById('appTopbar')?.getAttribute('app-name') || '');
+  el.setAttribute('open', '');
+  var w = parseInt(localStorage.getItem('cc_dock_width') || '400', 10);
+  if (Number.isFinite(w)) el.setAttribute('width', String(w));
   _activateDock();
-  setTimeout(function() { document.getElementById('planInput').focus(); }, 50);
 }
 
 function closePlanPanel() {
-  document.getElementById('planPanel').classList.remove('open');
+  var el = document.getElementById('planPanel');
+  if (el) el.removeAttribute('open');
   _maybeDeactivateDock();
-  _stopPlanJobPolling();
 }
+
+document.addEventListener('crane-close', function(ev) {
+  if (ev.target && ev.target.id === 'planPanel') closePlanPanel();
+});
 
 // ── Bug report panel ────────────────────────────────────────────
 // Same pipeline as Request: POST /api/enhancements with the message

@@ -37,7 +37,14 @@ export function RequestPanel({ slug, appName, open, onClose, width = 420, iframe
   function onSubmit() {
     if (!text.trim() || plan.state.busy) return
     const prefix = peek.ctx ? peekToPromptPrefix(peek.ctx) : ''
-    plan.submit(prefix + text.trim())
+    // After a plan is ready and BEFORE Build is clicked, Send refines
+    // the same enhancement instead of creating a new one. After Build
+    // (or if no plan exists yet), Send creates a fresh request.
+    if (plan.state.planReady && !plan.state.built) {
+      plan.refine(prefix + text.trim())
+    } else {
+      plan.submit(prefix + text.trim())
+    }
     setText('')
     peek.clear()
   }
@@ -130,10 +137,19 @@ export function RequestPanel({ slug, appName, open, onClose, width = 420, iframe
             className="ask-send"
             onClick={onSubmit}
             disabled={plan.state.busy || !text.trim()}
-            title={canBuild
-              ? 'Plan first — review the proposal, then Build.'
-              : 'Submit for review by an admin'}
-          >{plan.state.busy ? '…' : (canBuild ? '📋 Plan' : '📤 Submit')}</button>
+            title={
+              plan.state.planReady && !plan.state.built
+                ? 'Send refinement — Claude will re-plan with this feedback'
+                : canBuild
+                  ? 'Plan first — review the proposal, then Build.'
+                  : 'Submit for review by an admin'
+            }
+          >{
+            plan.state.busy ? '…'
+            : plan.state.planReady && !plan.state.built ? '🔁 Refine'
+            : canBuild ? '📋 Plan'
+            : '📤 Submit'
+          }</button>
         </div>
       </div>
     </div>
