@@ -100,6 +100,27 @@ input::placeholder, textarea::placeholder { color: var(--fg-2); }
 .sbadge.paused  { background: var(--waiting); color: white; }
 .sbadge.shipped { background: var(--info); color: white; }
 .sbadge.error   { background: var(--danger); color: white; }
+button.sbadge { font-family: inherit; }
+button.sbadge:hover { filter: brightness(1.2); }
+
+/* Skills / pending requests popup attached to a sidebar app row */
+.builder-popup {
+  margin-top: 6px; padding: 8px;
+  background: var(--bg-2, #1c1c1c); border: 1px solid var(--border, #333);
+  border-radius: 6px; font-size: 11px; color: var(--fg, #ddd);
+  max-height: 220px; overflow-y: auto;
+}
+.builder-popup-hdr {
+  font-weight: 600; font-size: 11px; color: var(--fg-2, #999);
+  margin-bottom: 6px; text-transform: uppercase; letter-spacing: .4px;
+}
+.builder-popup-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 4px; }
+.builder-popup-list li { padding: 4px 6px; background: var(--bg-3, #232323); border-radius: 4px; line-height: 1.35; }
+.builder-popup-list a { color: var(--accent, #6366f1); text-decoration: none; display: block; }
+.builder-popup-list a:hover { text-decoration: underline; }
+.builder-popup-status { font-size: 9px; color: var(--fg-2); margin-left: 6px; text-transform: uppercase; letter-spacing: .3px; }
+.builder-popup-msg { color: var(--fg-2); font-size: 10px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.builder-popup-empty { color: var(--fg-2); font-style: italic; background: transparent; }
 
 /* New session form */
 .new-session-form {
