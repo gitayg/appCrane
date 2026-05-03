@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { adminApi } from '../adminApi'
 import { useFlash, FocusInput, FocusTextarea } from '../components/formHelpers'
 import { Users } from './Users'
+import { Agents } from './Agents'
 import { AuditLog } from './AuditLog'
 import { SkillsTab } from '../components/SkillsTab'
 import { BrandingTab } from '../components/BrandingTab'
@@ -380,9 +381,9 @@ function SecurityTab() {
   )
 }
 
-type Tab = 'appstudio' | 'security' | 'users' | 'skills' | 'branding' | 'audit'
+type Tab = 'appstudio' | 'security' | 'users' | 'agents' | 'skills' | 'branding' | 'audit'
 
-const VALID_TABS: Tab[] = ['appstudio', 'security', 'users', 'skills', 'branding', 'audit']
+const VALID_TABS: Tab[] = ['appstudio', 'security', 'users', 'agents', 'skills', 'branding', 'audit']
 
 function getTab(): Tab {
   const hash = window.location.hash.replace('#', '') as Tab
@@ -408,6 +409,9 @@ export function Settings() {
       </div>
       <div style={{ display: tab === 'users' ? 'block' : 'none' }}>
         <Users />
+      </div>
+      <div style={{ display: tab === 'agents' ? 'block' : 'none' }}>
+        <Agents />
       </div>
       <div style={{ display: tab === 'skills' ? 'block' : 'none' }}>
         <SkillsTab />
