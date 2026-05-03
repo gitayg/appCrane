@@ -1,8 +1,13 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import { api } from './api'
 import type { Agent, AppCraneApp } from './types'
 import { ChatPanel } from './components/ChatPanel'
 import { AppContextPanel } from './components/AppContextPanel'
+import { adminApi } from './adminApi'
+
+interface SkillSummary { slug: string; name: string; apps?: string[] }
+interface RequestSummary { id: number; app_slug: string; message: string; status?: string; created_at?: string }
+const TERMINAL_STATUSES = new Set(['done', 'merged', 'closed', 'failed', 'cancelled'])
 
 function HealthDot({ status }: { status: string }) {
   const color = status === 'healthy' ? 'var(--working)' : status === 'down' ? 'var(--danger)' : 'var(--fg-2)'
@@ -18,15 +23,55 @@ export function App() {
   const [error, setError] = useState<string | null>(null)
   const [contextOpen, setContextOpen] = useState(false)
 
+  // skill name list per app slug — populated from /api/skills (one fetch).
+  const [skillsByApp, setSkillsByApp] = useState<Record<string, string[]>>({})
+  // open enhancement requests grouped per app slug — refreshed every 8s.
+  const [pendingByApp, setPendingByApp] = useState<Record<string, RequestSummary[]>>({})
+  // Which app + which popup is currently open: 'skills' | 'pending' | null.
+  const [popup, setPopup] = useState<{ slug: string; kind: 'skills' | 'pending' } | null>(null)
+  const popupRef = useRef<HTMLDivElement>(null)
+
   const loadApps = useCallback(() => {
     return api.listApps().then(setApps).catch((e) => setError(String(e)))
   }, [])
 
+  const loadPending = useCallback(() => {
+    // /api/enhancements is admin-only; fall back to /my for portal users.
+    return adminApi.get<{ requests: RequestSummary[] }>('/api/enhancements')
+      .catch(() => adminApi.get<{ requests: RequestSummary[] }>('/api/enhancements/my').catch(() => ({ requests: [] })))
+      .then(({ requests }) => {
+        const map: Record<string, RequestSummary[]> = {}
+        for (const r of requests || []) {
+          if (TERMINAL_STATUSES.has((r.status || '').toLowerCase())) continue
+          ;(map[r.app_slug] ||= []).push(r)
+        }
+        setPendingByApp(map)
+      })
+  }, [])
+
   useEffect(() => {
     loadApps()
-    const t = setInterval(loadApps, 8000)
+    loadPending()
+    adminApi.get<{ skills: SkillSummary[] }>('/api/skills').then(({ skills }) => {
+      const map: Record<string, string[]> = {}
+      for (const s of skills || []) {
+        for (const slug of s.apps || []) (map[slug] ||= []).push(s.name || s.slug)
+      }
+      setSkillsByApp(map)
+    }).catch(() => {})
+    const t = setInterval(() => { loadApps(); loadPending() }, 8000)
     return () => clearInterval(t)
-  }, [loadApps])
+  }, [loadApps, loadPending])
+
+  // Close popup on outside click
+  useEffect(() => {
+    if (!popup) return
+    const onClick = (e: MouseEvent) => {
+      if (popupRef.current && !popupRef.current.contains(e.target as Node)) setPopup(null)
+    }
+    document.addEventListener('mousedown', onClick)
+    return () => document.removeEventListener('mousedown', onClick)
+  }, [popup])
 
   const selectedApp = apps.find((a) => a.slug === selectedSlug) ?? null
 
@@ -97,12 +142,70 @@ export function App() {
                     title="OAuth — this app uses its own Claude credentials.json. AI work bills against the operator's subscription, not the global ANTHROPIC_API_KEY."
                   >🔑 OAuth</span>
                 )}
+                {(skillsByApp[app.slug]?.length ?? 0) > 0 && (
+                  <button
+                    type="button"
+                    className="sbadge"
+                    style={{ cursor: 'pointer', background: 'var(--surface, #2a2a2a)', border: '1px solid var(--border, #333)' }}
+                    title="Skills assigned to this app's builder"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      setPopup(p => p?.slug === app.slug && p.kind === 'skills' ? null : { slug: app.slug, kind: 'skills' })
+                    }}
+                  >🧩 {skillsByApp[app.slug].length}</button>
+                )}
+                {(pendingByApp[app.slug]?.length ?? 0) > 0 && (
+                  <button
+                    type="button"
+                    className="sbadge"
+                    style={{ cursor: 'pointer', background: 'var(--surface, #2a2a2a)', border: '1px solid var(--border, #333)' }}
+                    title="Pending requests for this app"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      setPopup(p => p?.slug === app.slug && p.kind === 'pending' ? null : { slug: app.slug, kind: 'pending' })
+                    }}
+                  >📋 {pendingByApp[app.slug].length}</button>
+                )}
                 {app.currentSession && (
                   <span className={`sbadge ${app.currentSession.status}`}>
                     {app.currentSession.status}
                   </span>
                 )}
               </div>
+              {popup?.slug === app.slug && (
+                <div
+                  ref={popupRef}
+                  className="builder-popup"
+                  onClick={e => e.stopPropagation()}
+                >
+                  <div className="builder-popup-hdr">
+                    {popup.kind === 'skills'
+                      ? `🧩 Skills (${skillsByApp[app.slug]?.length ?? 0})`
+                      : `📋 Pending requests (${pendingByApp[app.slug]?.length ?? 0})`}
+                  </div>
+                  {popup.kind === 'skills' && (
+                    <ul className="builder-popup-list">
+                      {(skillsByApp[app.slug] ?? []).map((name, i) => (
+                        <li key={i}>{name}</li>
+                      ))}
+                      {(skillsByApp[app.slug] ?? []).length === 0 && <li className="builder-popup-empty">No skills assigned.</li>}
+                    </ul>
+                  )}
+                  {popup.kind === 'pending' && (
+                    <ul className="builder-popup-list">
+                      {(pendingByApp[app.slug] ?? []).map(r => (
+                        <li key={r.id}>
+                          <a href={`/requests#${r.id}`} title={r.message} onClick={e => e.stopPropagation()}>
+                            #{r.id} <span className="builder-popup-status">{r.status || 'queued'}</span>
+                            <div className="builder-popup-msg">{r.message}</div>
+                          </a>
+                        </li>
+                      ))}
+                      {(pendingByApp[app.slug] ?? []).length === 0 && <li className="builder-popup-empty">No pending requests.</li>}
+                    </ul>
+                  )}
+                </div>
+              )}
               {app.description && (
                 <div className="smeta" style={{ fontFamily: 'inherit', opacity: 0.75 }}>
                   {app.description}
