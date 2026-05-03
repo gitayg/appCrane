@@ -152,7 +152,6 @@ export function AppStudio() {
   const [selected, setSelected] = useState<Enhancement | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const [trace, setTrace] = useState<TraceData | null>(null)
-  const [openJobs, setOpenJobs] = useState<Set<number>>(new Set())
 
   useEffect(() => {
     function onHash() { setTab(getHash()) }
@@ -181,17 +180,6 @@ export function AppStudio() {
     adminApi.get<TraceData>(`/api/appstudio/${id}/trace`)
       .then(t => {
         setTrace(t)
-        const defaultOpen = new Set<number>()
-        for (const j of t.trace) {
-          if (j.status === 'running' || j.status === 'failed' || j.status === 'error' || j.status === 'queued') {
-            defaultOpen.add(j.id)
-          }
-        }
-        setOpenJobs(prev => {
-          const merged = new Set(prev)
-          defaultOpen.forEach(id => merged.add(id))
-          return merged
-        })
         if (!t.active) stopPoll()
       })
       .catch(() => {})
@@ -201,7 +189,6 @@ export function AppStudio() {
     stopPoll()
     setSelected(enh)
     setTrace(null)
-    setOpenJobs(new Set())
     fetchTrace(enh.id)
     pollRef.current = setInterval(() => fetchTrace(enh.id), 1500)
   }, [fetchTrace, stopPoll])
@@ -290,15 +277,6 @@ export function AppStudio() {
     if (selected) fetchTrace(selected.id)
   }
 
-  function toggleJob(id: number) {
-    setOpenJobs(prev => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
-  }
-
   return (
     <div className="container" style={{ maxWidth: 1400 }}>
       {tab === 'requests' && (
@@ -306,8 +284,6 @@ export function AppStudio() {
           <DetailView
             enh={selected}
             trace={trace}
-            openJobs={openJobs}
-            onToggleJob={toggleJob}
             onBack={backToList}
             onAction={sendAction}
             onDeleteJob={deleteJob}
@@ -512,15 +488,13 @@ function RequestsTab({
 interface DetailViewProps {
   enh: Enhancement
   trace: TraceData | null
-  openJobs: Set<number>
-  onToggleJob: (id: number) => void
   onBack: () => void
   onAction: (id: number, path: string, body?: unknown) => void
   onDeleteJob: (jobId: number) => void
   onRetryJob: (jobId: number) => void
 }
 
-function DetailView({ enh, trace, openJobs, onToggleJob, onBack, onAction, onDeleteJob, onRetryJob }: DetailViewProps) {
+function DetailView({ enh, trace, onBack, onAction, onDeleteJob, onRetryJob }: DetailViewProps) {
   return (
     <div>
       <div style={{ marginBottom: 16 }}>
@@ -545,8 +519,6 @@ function DetailView({ enh, trace, openJobs, onToggleJob, onBack, onAction, onDel
         <PhaseTabs
           enh={enh}
           trace={trace}
-          openJobs={openJobs}
-          onToggleJob={onToggleJob}
           onAction={onAction}
           onRetryJob={onRetryJob}
           onDeleteJob={onDeleteJob}
@@ -585,8 +557,6 @@ const PHASE_LABELS: Record<Phase, string> = {
 interface PhaseTabsProps {
   enh: Enhancement
   trace: TraceData | null
-  openJobs: Set<number>
-  onToggleJob: (id: number) => void
   onAction: (id: number, path: string, body?: unknown) => void
   onRetryJob: (jobId: number) => void
   onDeleteJob: (jobId: number) => void
@@ -624,7 +594,7 @@ function defaultTabFor(enh: Enhancement, trace: TraceData | null): Phase {
   return 'request'
 }
 
-function PhaseTabs({ enh, trace, openJobs, onToggleJob, onAction, onRetryJob, onDeleteJob }: PhaseTabsProps) {
+function PhaseTabs({ enh, trace, onAction, onRetryJob, onDeleteJob }: PhaseTabsProps) {
   // The Plan tab merges 'plan' + 'revise_plan' jobs (revisions are still
   // planning) so the operator sees the full iteration history in one place.
   const planJobs = [...jobsForPhase(trace, 'plan'), ...jobsForPhase(trace, 'revise_plan')]
@@ -683,14 +653,11 @@ function PhaseTabs({ enh, trace, openJobs, onToggleJob, onAction, onRetryJob, on
                                                onRetryJob={onRetryJob} onDeleteJob={onDeleteJob} />}
         {active === 'code'    && <PhaseLogPane phase="code"
                                                jobs={jobsForPhase(trace, 'code')}
-                                               openJobs={openJobs} onToggleJob={onToggleJob}
                                                onRetryJob={onRetryJob} onDeleteJob={onDeleteJob}
                                                emptyHint="Coding hasn't started yet — approve the plan to kick it off." />}
         {active === 'build'   && <BuildPane   enh={enh} jobs={jobsForPhase(trace, 'build')}
-                                               openJobs={openJobs} onToggleJob={onToggleJob}
                                                onAction={onAction} onRetryJob={onRetryJob} onDeleteJob={onDeleteJob} />}
         {active === 'open_pr' && <OpenPrPane  enh={enh} trace={trace} jobs={jobsForPhase(trace, 'open_pr')}
-                                               openJobs={openJobs} onToggleJob={onToggleJob}
                                                onRetryJob={onRetryJob} onDeleteJob={onDeleteJob} />}
       </div>
     </div>
@@ -792,26 +759,24 @@ function PlanPane({ enh, trace, jobs, onAction, onRetryJob, onDeleteJob }: {
   )
 }
 
-function PhaseLogPane({ jobs, openJobs, onToggleJob, onRetryJob, onDeleteJob, emptyHint }: {
+function PhaseLogPane({ jobs, onRetryJob, onDeleteJob, emptyHint }: {
   phase: Phase; jobs: Job[];
-  openJobs: Set<number>; onToggleJob: (id: number) => void;
   onRetryJob: (id: number) => void; onDeleteJob: (id: number) => void;
   emptyHint: string;
 }) {
   if (!jobs.length) return <div className="pane-empty">{emptyHint}</div>
-  return <JobsTrace jobs={jobs} openJobs={openJobs} onToggleJob={onToggleJob} onRetryJob={onRetryJob} onDeleteJob={onDeleteJob} />
+  return <ExpandedJobsTrace jobs={jobs} onRetryJob={onRetryJob} onDeleteJob={onDeleteJob} />
 }
 
-function BuildPane({ enh, jobs, openJobs, onToggleJob, onAction, onRetryJob, onDeleteJob }: {
+function BuildPane({ enh, jobs, onAction, onRetryJob, onDeleteJob }: {
   enh: Enhancement; jobs: Job[];
-  openJobs: Set<number>; onToggleJob: (id: number) => void;
   onAction: PhaseTabsProps['onAction']; onRetryJob: (id: number) => void; onDeleteJob: (id: number) => void;
 }) {
   return (
     <>
       {jobs.length === 0
         ? <div className="pane-empty">Build hasn't started — happens automatically after Code completes.</div>
-        : <JobsTrace jobs={jobs} openJobs={openJobs} onToggleJob={onToggleJob} onRetryJob={onRetryJob} onDeleteJob={onDeleteJob} />
+        : <ExpandedJobsTrace jobs={jobs} onRetryJob={onRetryJob} onDeleteJob={onDeleteJob} />
       }
       {enh.status === 'sandbox_ready' && (
         <div className="pane-actions">
@@ -822,9 +787,8 @@ function BuildPane({ enh, jobs, openJobs, onToggleJob, onAction, onRetryJob, onD
   )
 }
 
-function OpenPrPane({ enh, trace, jobs, openJobs, onToggleJob, onRetryJob, onDeleteJob }: {
+function OpenPrPane({ enh, trace, jobs, onRetryJob, onDeleteJob }: {
   enh: Enhancement; trace: TraceData | null; jobs: Job[];
-  openJobs: Set<number>; onToggleJob: (id: number) => void;
   onRetryJob: (id: number) => void; onDeleteJob: (id: number) => void;
 }) {
   // Trace returns these too — prefer it (fresher than the row from the list).
@@ -842,7 +806,7 @@ function OpenPrPane({ enh, trace, jobs, openJobs, onToggleJob, onRetryJob, onDel
       )}
       {jobs.length === 0
         ? <div className="pane-empty">No PR opened yet — runs after Build succeeds (auto-mode) or after manual approval.</div>
-        : <JobsTrace jobs={jobs} openJobs={openJobs} onToggleJob={onToggleJob} onRetryJob={onRetryJob} onDeleteJob={onDeleteJob} />
+        : <ExpandedJobsTrace jobs={jobs} onRetryJob={onRetryJob} onDeleteJob={onDeleteJob} />
       }
     </>
   )
@@ -860,6 +824,7 @@ function ExpandedJobsTrace({ jobs, onRetryJob, onDeleteJob }: {
       {jobs.map(job => {
         const isRunning = job.status === 'running'
         const isFailed = job.status === 'failed' || job.status === 'error'
+        const waitMs = job.started_at ? msGap(job.created_at, job.started_at) : null
         const durMs = job.duration_ms ?? (job.started_at && job.finished_at ? msGap(job.started_at, job.finished_at) : null)
         const bodyLines: string[] = []
         if (job.text) bodyLines.push(job.text)
@@ -887,53 +852,6 @@ function ExpandedJobsTrace({ jobs, onRetryJob, onDeleteJob }: {
                 )}
               </div>
             </div>
-            {bodyLines.length > 0 && (
-              <pre className="trace-body">{bodyLines.join('\n')}</pre>
-            )}
-          </div>
-        )
-      })}
-    </>
-  )
-}
-
-function JobsTrace({ jobs, openJobs, onToggleJob, onRetryJob, onDeleteJob }: {
-  jobs: Job[];
-  openJobs: Set<number>; onToggleJob: (id: number) => void;
-  onRetryJob: (id: number) => void; onDeleteJob: (id: number) => void;
-}) {
-  return (
-    <>
-      {jobs.map(job => {
-        const isOpen = openJobs.has(job.id)
-        const isRunning = job.status === 'running'
-        const isFailed = job.status === 'failed' || job.status === 'error'
-        const waitMs = job.started_at ? msGap(job.created_at, job.started_at) : null
-        const durMs = job.duration_ms ?? (job.started_at && job.finished_at ? msGap(job.started_at, job.finished_at) : null)
-        const bodyLines: string[] = []
-        if (job.text) bodyLines.push(job.text)
-        if (job.log?.length) bodyLines.push(...job.log)
-        if (job.branch) bodyLines.push(`branch: ${job.branch}`)
-        if (job.error) bodyLines.push(`ERROR: ${job.error}`)
-        return (
-          <div key={job.id} className="trace-block">
-            <div className="trace-block-hdr" onClick={() => onToggleJob(job.id)}>
-              <JobTag id={job.id} />
-              {statusIcon(job.status)}
-              <span style={{ fontSize: '.75rem', fontWeight: 600, color: isFailed ? 'var(--red)' : isRunning ? 'var(--accent)' : 'var(--dim)' }}>
-                {job.status}
-              </span>
-              {durMs != null && <span className="trace-timing">{fmtMs(durMs)}</span>}
-              <CostBadge tokens={job.cost_tokens} cents={job.cost_usd_cents} />
-              <div style={{ marginLeft: 'auto', display: 'flex', gap: 4 }}>
-                {isFailed && (
-                  <button className="btn btn-xs btn-accent" onClick={e => { e.stopPropagation(); onRetryJob(job.id) }} title="Retry this job">↺</button>
-                )}
-                {!isRunning && (
-                  <button className="btn btn-xs btn-red" onClick={e => { e.stopPropagation(); onDeleteJob(job.id) }} title="Delete job">✕</button>
-                )}
-              </div>
-            </div>
             {(job.created_at || job.started_at || job.finished_at) && (
               <div style={{ padding: '4px 14px', fontSize: '.72rem', color: 'var(--dim)', display: 'flex', gap: 12, flexWrap: 'wrap', background: 'var(--surface)', borderTop: '1px solid var(--border)' }}>
                 {job.created_at && <span>queued {fmtJobTime(job.created_at)}</span>}
@@ -951,7 +869,7 @@ function JobsTrace({ jobs, openJobs, onToggleJob, onRetryJob, onDeleteJob }: {
                 )}
               </div>
             )}
-            {isOpen && bodyLines.length > 0 && (
+            {bodyLines.length > 0 && (
               <pre className="trace-body">{bodyLines.join('\n')}</pre>
             )}
           </div>
