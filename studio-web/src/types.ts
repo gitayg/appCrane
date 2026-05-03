@@ -74,6 +74,7 @@ export interface AppCraneApp {
   source_type: string
   category: string | null
   has_claude_credentials?: boolean
+  claude_credentials_expires_at?: string | number | null
   production: {
     health: { status: HealthStatus }
     deploy: { version: string; status: string; finished_at: string } | null

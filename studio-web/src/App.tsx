@@ -14,6 +14,33 @@ function HealthDot({ status }: { status: string }) {
   return <span style={{ display: 'inline-block', width: 7, height: 7, borderRadius: '50%', background: color, marginRight: 4, verticalAlign: 'middle' }} />
 }
 
+/**
+ * Compact OAuth badge with inline expiry. Bg color flips:
+ *   accent (default) → green, ok
+ *   orange           → expires within 24h
+ *   red              → already expired
+ * Tooltip carries the full datetime + a re-upload hint when stale.
+ */
+function OAuthBadge({ expiresAt }: { expiresAt?: string | number | null }) {
+  const ms = typeof expiresAt === 'number' ? expiresAt
+           : expiresAt ? Date.parse(String(expiresAt)) : NaN
+  const valid   = Number.isFinite(ms) && ms > 0
+  const expired = valid && ms < Date.now()
+  const soon    = valid && !expired && ms - Date.now() < 24 * 3600 * 1000
+  const bg = expired ? 'var(--danger, #ef4444)'
+           : soon    ? '#f97316'
+           :           'var(--accent, #6366f1)'
+  const human = valid ? new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : ''
+  const fullTip = valid
+    ? `OAuth — Claude credentials expire ${new Date(ms).toLocaleString()}` + (expired ? '. ⚠ EXPIRED — re-run `claude login` and re-upload.' : soon ? '. ⏰ Expires soon.' : '.')
+    : 'OAuth — this app uses its own Claude credentials.json.'
+  return (
+    <span className="sbadge" style={{ background: bg, color: '#fff' }} title={fullTip}>
+      🔑 {valid ? human : 'OAuth'}{expired ? ' ⚠' : soon ? ' ⏰' : ''}
+    </span>
+  )
+}
+
 export function App() {
   const [apps, setApps] = useState<AppCraneApp[]>([])
   const [selectedSlug, setSelectedSlug] = useState<string | null>(null)
@@ -136,11 +163,7 @@ export function App() {
                 <HealthDot status={app.production.health.status} />
                 {app.name}
                 {app.has_claude_credentials && (
-                  <span
-                    className="sbadge"
-                    style={{ background: 'var(--accent, #6366f1)', color: '#fff' }}
-                    title="OAuth — this app uses its own Claude credentials.json. AI work bills against the operator's subscription, not the global ANTHROPIC_API_KEY."
-                  >🔑 OAuth</span>
+                  <OAuthBadge expiresAt={app.claude_credentials_expires_at} />
                 )}
                 {(skillsByApp[app.slug]?.length ?? 0) > 0 && (
                   <button
@@ -281,11 +304,7 @@ function AppDetail({
         <span className="name">{app.name}</span>
         {app.category && <span className="branch">{app.category}</span>}
         {app.has_claude_credentials && (
-          <span
-            className="status-pill idle"
-            style={{ background: 'var(--accent, #6366f1)', color: '#fff' }}
-            title="OAuth — this app uses its own Claude credentials.json"
-          >🔑 OAuth</span>
+          <OAuthBadge expiresAt={app.claude_credentials_expires_at} />
         )}
         <span className={`status-pill ${app.production.health.status === 'healthy' ? 'idle' : app.production.health.status === 'down' ? 'error' : 'paused'}`}>
           prod: {app.production.health.status}
