@@ -220,6 +220,10 @@ router.get('/apps', (req, res) => {
       github_url: app.github_url || null,
       source_type: app.source_type || 'github',
       category: app.category || null,
+      // True when the app has uploaded its own Claude OAuth credentials.json,
+      // so AI work bills against the operator's subscription instead of the
+      // global ANTHROPIC_API_KEY. Surfaced as a badge in the Builders page.
+      has_claude_credentials: !!app.claude_credentials_encrypted,
       production: {
         health: { status: healthLabel(healthProd) },
         deploy: lastDeployProd || null,

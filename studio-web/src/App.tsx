@@ -90,6 +90,13 @@ export function App() {
               <div className="sname">
                 <HealthDot status={app.production.health.status} />
                 {app.name}
+                {app.has_claude_credentials && (
+                  <span
+                    className="sbadge"
+                    style={{ background: 'var(--accent, #6366f1)', color: '#fff' }}
+                    title="OAuth — this app uses its own Claude credentials.json. AI work bills against the operator's subscription, not the global ANTHROPIC_API_KEY."
+                  >🔑 OAuth</span>
+                )}
                 {app.currentSession && (
                   <span className={`sbadge ${app.currentSession.status}`}>
                     {app.currentSession.status}
@@ -170,6 +177,13 @@ function AppDetail({
       <header>
         <span className="name">{app.name}</span>
         {app.category && <span className="branch">{app.category}</span>}
+        {app.has_claude_credentials && (
+          <span
+            className="status-pill idle"
+            style={{ background: 'var(--accent, #6366f1)', color: '#fff' }}
+            title="OAuth — this app uses its own Claude credentials.json"
+          >🔑 OAuth</span>
+        )}
         <span className={`status-pill ${app.production.health.status === 'healthy' ? 'idle' : app.production.health.status === 'down' ? 'error' : 'paused'}`}>
           prod: {app.production.health.status}
         </span>
