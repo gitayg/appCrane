@@ -724,6 +724,13 @@ function RequestPane({ enh, onAction }: { enh: Enhancement; onAction: PhaseTabsP
   )
 }
 
+// States where a plan is rendered but approval is no longer relevant —
+// either already approved or the workflow moved past it.
+const PLAN_APPROVE_HIDDEN_STATES = new Set([
+  'plan_approved', 'coding', 'sandbox_ready', 'pr_opened', 'pr_merged',
+  'merged', 'shipped', 'closed', 'failed', 'auto_failed',
+])
+
 function PlanPane({ enh, trace, jobs, onAction, onRetryJob, onDeleteJob }: {
   enh: Enhancement; trace: TraceData | null; jobs: Job[];
   onAction: PhaseTabsProps['onAction']; onRetryJob: (id: number) => void; onDeleteJob: (id: number) => void;
@@ -780,7 +787,12 @@ function PlanPane({ enh, trace, jobs, onAction, onRetryJob, onDeleteJob }: {
         </div>
       )}
 
-      {enh.status === 'pending_user_review_plan' && (
+      {/* Approve gate: show whenever a plan exists AND the workflow
+          hasn't moved past the plan phase. Previously gated only on
+          'pending_user_review_plan' which hid the button when the
+          status was 'planning' (a re-plan is in flight) or 'selected'
+          (a non-admin user built it but admin still needs to approve). */}
+      {plan && !PLAN_APPROVE_HIDDEN_STATES.has(enh.status || '') && (
         <div className="pane-actions">
           <button className="btn btn-accent btn-sm" onClick={() => onAction(enh.id, 'approve-plan')}>Approve plan + code it</button>
           <button
@@ -790,6 +802,12 @@ function PlanPane({ enh, trace, jobs, onAction, onRetryJob, onDeleteJob }: {
               if (comment) onAction(enh.id, 'plan-feedback', { comment })
             }}
           >Request changes</button>
+        </div>
+      )}
+      {plan && PLAN_APPROVE_HIDDEN_STATES.has(enh.status || '') && (
+        <div className="pane-empty" style={{ marginTop: 12, fontSize: '.78rem' }}>
+          Plan already past approval — current status: <strong>{enh.status}</strong>.
+          Watch the Code / Build / Open PR tabs for progress.
         </div>
       )}
     </>

@@ -28,6 +28,7 @@ export interface PlanState {
   planReady:   boolean
   error:       string | null
   built:       boolean
+  activity:    string[]   // tool-use breadcrumbs streamed during exploration
 }
 
 const IDLE: PlanState['working'] = { active: false, text: '', elapsedSec: 0, tokens: 0 }
@@ -35,7 +36,7 @@ const IDLE: PlanState['working'] = { active: false, text: '', elapsedSec: 0, tok
 export function usePlanFlow(slug: string | null | undefined) {
   const [state, setState] = useState<PlanState>({
     busy: false, enhId: null, working: IDLE,
-    planText: '', planReady: false, error: null, built: false,
+    planText: '', planReady: false, error: null, built: false, activity: [],
   })
   const esRef     = useRef<EventSource | null>(null)
   const tickRef   = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -51,7 +52,7 @@ export function usePlanFlow(slug: string | null | undefined) {
   const reset = useCallback(() => {
     closeStream()
     stopTicker()
-    setState({ busy: false, enhId: null, working: IDLE, planText: '', planReady: false, error: null, built: false })
+    setState({ busy: false, enhId: null, working: IDLE, planText: '', planReady: false, error: null, built: false, activity: [] })
   }, [])
 
   // Reset when slug changes.
@@ -79,6 +80,11 @@ export function usePlanFlow(slug: string | null | undefined) {
         }))
       } else if (data.type === 'progress') {
         setState(s => ({ ...s, planText: String(data.text || ''), working: { ...s.working, active: true } }))
+      } else if (data.type === 'activity') {
+        const fresh: string[] = Array.isArray(data.lines) ? data.lines : []
+        if (fresh.length) {
+          setState(s => ({ ...s, activity: [...s.activity, ...fresh].slice(-30) }))
+        }
       } else if (data.type === 'plan') {
         const txt = formatPlan(data.plan) || state.planText || '(plan returned no text)'
         es.close(); esRef.current = null
@@ -105,7 +111,7 @@ export function usePlanFlow(slug: string | null | undefined) {
     setState({
       busy: true, enhId: null,
       working: { active: true, text: 'Submitting request…', elapsedSec: 0, tokens: 0 },
-      planText: '', planReady: false, error: null, built: false,
+      planText: '', planReady: false, error: null, built: false, activity: [],
     })
     tickRef.current = setInterval(() => {
       const sec = Math.round((Date.now() - startedRef.current) / 1000)
@@ -151,6 +157,7 @@ export function usePlanFlow(slug: string | null | undefined) {
       planReady: false,
       built: false,
       planText: '',
+      activity: [],
       error: null,
       working: { active: true, text: 'Re-planning…', elapsedSec: 0, tokens: 0 },
     }))

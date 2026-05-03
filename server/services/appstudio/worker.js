@@ -12,6 +12,30 @@ import log from '../../utils/logger.js';
 const POLL_MS          = parseInt(process.env.APPSTUDIO_POLL_MS || '5000', 10);
 const MAX_PLAN_PARALLEL = parseInt(process.env.APPSTUDIO_MAX_PLAN_PARALLEL || '3', 10);
 
+/**
+ * Format a stream-json tool-use event as a one-line breadcrumb the UI
+ * shows while the agent is exploring. Returns null for tools we want to
+ * suppress (e.g. internal Read of skill index files would be noise).
+ */
+function formatToolBreadcrumb(ev) {
+  const name  = ev?.name || '?';
+  const input = ev?.input || {};
+  const trim  = (s, n = 60) => { const x = String(s ?? ''); return x.length > n ? x.slice(0, n - 1) + '…' : x; };
+  const baseName = (p) => trim((p || '').split('/').pop() || p);
+  switch (name) {
+    case 'Read':       return `📖 Reading ${baseName(input.file_path)}`;
+    case 'Glob':       return `📁 Globbing ${trim(input.pattern, 50)}`;
+    case 'Grep':       return `🔍 Grepping ${trim(input.pattern, 50)}${input.path ? ' in ' + baseName(input.path) : ''}`;
+    case 'Bash':       return `▶ Bash: ${trim(input.command, 60)}`;
+    case 'WebFetch':   return `🌐 Fetching ${trim(input.url, 60)}`;
+    case 'WebSearch':  return `🔎 Searching: ${trim(input.query, 50)}`;
+    case 'Edit':       return `✏️  Editing ${baseName(input.file_path)}`;
+    case 'Write':      return `📝 Writing ${baseName(input.file_path)}`;
+    case 'TodoWrite':  return `✅ Updating todo list`;
+    default:           return `🔧 ${name}`;
+  }
+}
+
 let _running       = false;
 let _activePlans   = 0;  // concurrent plan/revise_plan jobs (read-only, safe to parallelize)
 let _activeCodeJob = false; // only one code/build/open_pr job at a time
@@ -193,14 +217,28 @@ async function handlePlan(job) {
   const agentContext = enh.app_slug ? getAgentContext(enh.app_slug) : '';
   const priorComments = enh.user_comments || enh.admin_comments || null;
 
+  // Streaming activity: tool-use breadcrumbs the UI shows below the
+  // working spinner ("📖 Reading foo.ts / 🔍 Grepping 'X'") so the user
+  // sees what the agent is doing during the long pause between started
+  // and the first plan-text chunk. Capped at 30 entries to keep the
+  // output_json blob small.
+  const activity = [];
+  let lastText = '';
   let lastWriteMs = 0;
-  const onChunk = (fullText) => {
+  const flush = (force = false) => {
     const now = Date.now();
-    if (now - lastWriteMs > 600) {
-      db.prepare('UPDATE enhancement_jobs SET output_json = ? WHERE id = ?')
-        .run(JSON.stringify({ streaming: true, text: fullText }), job.id);
-      lastWriteMs = now;
-    }
+    if (!force && now - lastWriteMs < 600) return;
+    db.prepare('UPDATE enhancement_jobs SET output_json = ? WHERE id = ?')
+      .run(JSON.stringify({ streaming: true, text: lastText, activity }), job.id);
+    lastWriteMs = now;
+  };
+  const onChunk = (fullText) => { lastText = fullText; flush(); };
+  const onTool  = (ev) => {
+    const line = formatToolBreadcrumb(ev);
+    if (!line) return;
+    activity.push(line);
+    if (activity.length > 30) activity.splice(0, activity.length - 30);
+    flush(true); // immediate so the user sees the breadcrumb without waiting for the next chunk
   };
 
   const onTokens = (total) => {
@@ -216,6 +254,7 @@ async function handlePlan(job) {
     priorComments,
     onChunk,
     onTokens,
+    onTool,
   });
 
   const costCents = Math.ceil(result.costUsd * 100);
