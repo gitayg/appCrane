@@ -24,7 +24,11 @@ export function cleanupWorkspace(jobId) {
   try { rmSync(jobDir(jobId), { recursive: true, force: true }); } catch (_) {}
 }
 
-const STUDIO_IMAGE_VERSION = '2'; // bump to force image rebuild
+const STUDIO_IMAGE_VERSION = '3'; // bump to force image rebuild
+// v3 (2026-05-03): rebuild to pull latest @anthropic-ai/claude-code in
+// case a cached older CLI looks at a different credentials.json path
+// than what AppCrane mounts. Symptom: "Not logged in · Please run /login"
+// even with valid OAuth credentials uploaded.
 
 // Build the studio Docker image when missing or outdated.
 //
@@ -56,7 +60,7 @@ export async function ensureStudioImage(onLog) {
   } else {
     onLog?.('[studio] infra/studio.Dockerfile missing — using inline recipe');
     writeFileSync(buildDockerfile, [
-      'ARG STUDIO_IMAGE_VERSION=2',
+      'ARG STUDIO_IMAGE_VERSION=3',
       'FROM node:20-alpine',
       'ARG STUDIO_IMAGE_VERSION',
       'LABEL appcrane.studio.version="${STUDIO_IMAGE_VERSION}"',
