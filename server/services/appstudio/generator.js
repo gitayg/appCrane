@@ -6,6 +6,7 @@ import { assertCapacity } from '../containerLimit.js';
 import { runAgentNew } from '../llm/runAgent.js';
 import { writeSnapshot } from '../github/snapshot.js';
 import { renderOpenCommentsSection } from '../enhancementComments.js';
+import { formatToolBreadcrumb } from './toolBreadcrumb.js';
 import log from '../../utils/logger.js';
 
 const GEN_MODEL       = process.env.APPSTUDIO_CODER_MODEL || 'claude-sonnet-4-6';
@@ -315,7 +316,10 @@ export async function generateCode({ jobId, app, enhancementId, plan, summary, a
 
     runner.on('data', (ev) => {
       if (ev.type === 'text')      onLog?.(ev.text);
-      else if (ev.type === 'tool') onLog?.(`[studio:tool] ${ev.name}`);
+      else if (ev.type === 'tool') {
+        const crumb = formatToolBreadcrumb(ev);
+        if (crumb) onLog?.(`[studio:tool] ${crumb}`);
+      }
     });
     runner.on('result', (ev) => {
       onLog?.(`[studio:result] ${ev.inputTokens + ev.outputTokens} tokens · $${(ev.costUsdCents / 100).toFixed(3)}`);
