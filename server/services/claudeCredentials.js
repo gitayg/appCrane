@@ -11,7 +11,7 @@
 //   - Each dispatch gets its own copy so concurrent runs don't fight
 //   - Cleanup wipes the plaintext from disk after the run
 
-import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, chownSync } from 'fs';
+import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'fs';
 import { join, resolve } from 'path';
 import { randomUUID } from 'crypto';
 import { getDb } from '../db.js';
@@ -151,17 +151,17 @@ export function prepareClaudeCredentialsMount(appSlug) {
 
   mkdirSync(tmpRoot(), { recursive: true });
   const tmpDir = join(tmpRoot(), randomUUID());
-  mkdirSync(tmpDir, { mode: 0o700 });
+  // 0o755 + 0o666 (not chown) because the studio image's `studio` user
+  // is created via Alpine's `adduser -S` which picks an arbitrary system
+  // UID — usually NOT 1000 — so a chown to a hard-coded UID misses.
+  // World-rw is acceptable here: the host file is root-owned in
+  // /var/lib/appcrane/... where only AppCrane runs, and the container is
+  // isolated; the only reader is the dispatched Claude CLI inside.
+  // Without this, container reads fail with EACCES which surfaces as
+  // "Not logged in · Please run /login" inside Claude CLI.
+  mkdirSync(tmpDir, { mode: 0o755 });
   const tmpFile = join(tmpDir, 'credentials.json');
-  writeFileSync(tmpFile, payload, { mode: 0o600 });
-  // The studio image runs as UID 1000 (`studio`). The bind-mount preserves
-  // host ownership; without this chown the file is owned by root and the
-  // container user gets EACCES — surfaces inside Claude CLI as
-  // "Not logged in · Please run /login" because credentials.json appears
-  // missing. Best-effort: skip on platforms without root or when the
-  // process can't chown (dev/macOS).
-  try { chownSync(tmpDir,  1000, 1000); } catch (_) {}
-  try { chownSync(tmpFile, 1000, 1000); } catch (_) {}
+  writeFileSync(tmpFile, payload, { mode: 0o666 });
 
   return {
     tmpFile,
