@@ -1,63 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { adminApi } from '../adminApi'
-
-const inputStyle: React.CSSProperties = {
-  background: 'var(--surface2)',
-  border: '1px solid var(--border)',
-  color: 'var(--text)',
-  padding: '8px 12px',
-  borderRadius: 6,
-  width: '100%',
-  fontSize: '.85rem',
-  fontFamily: 'inherit',
-  outline: 'none',
-  boxSizing: 'border-box',
-}
-
-function useFlash(): [boolean, () => void] {
-  const [show, setShow] = useState(false)
-  const t = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const flash = () => {
-    setShow(true)
-    if (t.current) clearTimeout(t.current)
-    t.current = setTimeout(() => setShow(false), 2500)
-  }
-  return [show, flash]
-}
-
-function FocusInput(props: React.InputHTMLAttributes<HTMLInputElement>) {
-  return (
-    <input
-      {...props}
-      style={{ ...inputStyle, ...props.style }}
-      onFocus={e => {
-        e.currentTarget.style.borderColor = 'var(--accent)'
-        props.onFocus?.(e)
-      }}
-      onBlur={e => {
-        e.currentTarget.style.borderColor = 'var(--border)'
-        props.onBlur?.(e)
-      }}
-    />
-  )
-}
-
-function FocusTextarea(props: React.TextareaHTMLAttributes<HTMLTextAreaElement>) {
-  return (
-    <textarea
-      {...props}
-      style={{ ...inputStyle, resize: 'vertical', ...props.style }}
-      onFocus={e => {
-        e.currentTarget.style.borderColor = 'var(--accent)'
-        props.onFocus?.(e)
-      }}
-      onBlur={e => {
-        e.currentTarget.style.borderColor = 'var(--border)'
-        props.onBlur?.(e)
-      }}
-    />
-  )
-}
+import { useFlash, FocusInput, FocusTextarea } from '../components/formHelpers'
+import { Users } from './Users'
 
 function AppStudioTab() {
   const [keyInfo, setKeyInfo] = useState<{ configured: boolean; source?: string; suffix?: string } | null>(null)
@@ -145,53 +89,6 @@ function AppStudioTab() {
         </div>
       </div>
     </>
-  )
-}
-
-function BrandingTab() {
-  const [guidelines, setGuidelines] = useState('')
-  const [saved, flashSaved] = useFlash()
-  const fileRef = useRef<HTMLInputElement>(null)
-
-  useEffect(() => {
-    adminApi.get<{ value?: string }>('/api/settings/branding')
-      .then(r => { if (r?.value) setGuidelines(r.value) }).catch(() => {})
-  }, [])
-
-  async function save() {
-    await adminApi.put('/api/settings/branding', { value: guidelines }).catch(() => {})
-    flashSaved()
-  }
-
-  function importFile() {
-    fileRef.current?.click()
-  }
-
-  function onFileChange(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0]
-    if (!file) return
-    const reader = new FileReader()
-    reader.onload = ev => { setGuidelines(ev.target?.result as string) }
-    reader.readAsText(file)
-    e.target.value = ''
-  }
-
-  return (
-    <div className="setting-card">
-      <h3>Branding Guidelines</h3>
-      <p>Paste your brand guidelines here — AI agents read this via GET /api/settings/branding before building apps.</p>
-      <FocusTextarea
-        value={guidelines}
-        onChange={e => setGuidelines(e.target.value)}
-        style={{ minHeight: 220 }}
-      />
-      <input ref={fileRef} type="file" accept=".txt,.md" style={{ display: 'none' }} onChange={onFileChange} />
-      <div className="save-row">
-        <button className="btn" onClick={importFile}>Import from file</button>
-        <button className="btn btn-accent" onClick={save}>Save Guidelines</button>
-        {saved && <span className="saved-msg">Saved ✓</span>}
-      </div>
-    </div>
   )
 }
 
@@ -480,9 +377,9 @@ function SecurityTab() {
   )
 }
 
-type Tab = 'appstudio' | 'branding' | 'security'
+type Tab = 'appstudio' | 'security' | 'users'
 
-const VALID_TABS: Tab[] = ['appstudio', 'branding', 'security']
+const VALID_TABS: Tab[] = ['appstudio', 'security', 'users']
 
 function getTab(): Tab {
   const hash = window.location.hash.replace('#', '') as Tab
@@ -492,12 +389,13 @@ function getTab(): Tab {
 export function Settings() {
   const [tab, setTab] = useState<Tab>(getTab)
 
-  // Back-compat: Skills moved from Settings to AppStudio in v1.27.12.
-  // Anyone with /settings#skills bookmarked gets bounced to the new home.
+  // Back-compat redirects:
+  // - v1.27.12: Skills moved Settings → AppStudio
+  // - v1.27.27: Branding moved Settings → AppStudio (it's AI-pipeline
+  //             context the agents read before building, not chrome)
   useEffect(() => {
-    if (window.location.hash === '#skills') {
-      window.location.replace('/appstudio#skills')
-    }
+    if (window.location.hash === '#skills')   window.location.replace('/appstudio#skills')
+    if (window.location.hash === '#branding') window.location.replace('/appstudio#branding')
   }, [])
 
   useEffect(() => {
@@ -511,11 +409,11 @@ export function Settings() {
       <div style={{ display: tab === 'appstudio' ? 'block' : 'none' }}>
         <AppStudioTab />
       </div>
-      <div style={{ display: tab === 'branding' ? 'block' : 'none' }}>
-        <BrandingTab />
-      </div>
       <div style={{ display: tab === 'security' ? 'block' : 'none' }}>
         <SecurityTab />
+      </div>
+      <div style={{ display: tab === 'users' ? 'block' : 'none' }}>
+        <Users />
       </div>
     </div>
   )

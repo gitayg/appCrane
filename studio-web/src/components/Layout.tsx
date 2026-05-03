@@ -6,11 +6,11 @@ import { adminApi } from '../adminApi'
 const NAV = [
   { id: 'dashboard',    label: 'Dashboard',    href: '/dashboard',    icon: '⊞' },
   { id: 'applications', label: 'Applications', href: '/applications', icon: '▣' },
-  { id: 'users',        label: 'Users',         href: '/users-page',   icon: '◉' },
-  { id: 'audit',        label: 'Audit Log',     href: '/audit-page',   icon: '≡' },
-  { id: 'appstudio',    label: 'AppStudio',     href: '/appstudio',    icon: '✦' },
-  { id: 'docs',         label: 'Docs',          href: '/docs',         icon: '📖' },
-  { id: 'settings',     label: 'Settings',      href: '/settings',     icon: '⚙' },
+  // Users moved to Settings → Users in v1.27.27 (top nav was getting cluttered).
+  { id: 'audit',        label: 'Audit Log',    href: '/audit-page',   icon: '≡' },
+  { id: 'appstudio',    label: 'AppStudio',    href: '/appstudio',    icon: '✦' },
+  { id: 'docs',         label: 'Docs',         href: '/docs',         icon: '📖' },
+  { id: 'settings',     label: 'Settings',     href: '/settings',     icon: '⚙' },
 ]
 
 interface SubItem { id: string; label: string; href: string }

@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { adminApi } from '../adminApi'
 import { App as StudioApp } from '../App'
 import { SkillsTab } from '../components/SkillsTab'
+import { BrandingTab } from '../components/BrandingTab'
 
 interface Enhancement {
   id: number
@@ -136,7 +137,8 @@ function getHash(): string {
   const h = window.location.hash.replace('#', '')
   // Old hashes (#library, #studio) collapse into the merged Builders view
   if (h === 'library' || h === 'studio' || h === 'builders') return 'builders'
-  if (h === 'skills') return 'skills'
+  if (h === 'skills')   return 'skills'
+  if (h === 'branding') return 'branding'
   return 'requests'
 }
 
@@ -317,7 +319,8 @@ export function AppStudio() {
         </div>
       )}
 
-      {tab === 'skills' && <SkillsTab />}
+      {tab === 'skills'   && <SkillsTab />}
+      {tab === 'branding' && <BrandingTab />}
     </div>
   )
 }
