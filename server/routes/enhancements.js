@@ -25,7 +25,7 @@ function getUserFromBearer(token) {
     SELECT s.*, u.id as user_id, u.name, u.email, u.username, u.role
     FROM identity_sessions s
     JOIN users u ON s.user_id = u.id
-    WHERE s.token_hash = ? AND s.expires_at > datetime('now')
+    WHERE s.token_hash = ? AND s.expires_at > datetime('now') AND u.active = 1
   `).get(tokenHash);
   return session || null;
 }
@@ -259,21 +259,41 @@ function resolveAuthOrThrow(req) {
 }
 
 function loadEnhOr404(id) {
-  const enh = getDb().prepare('SELECT id, user_id FROM enhancement_requests WHERE id = ?').get(id);
+  // SECURITY (v1.27.34 C3): pull app_slug too so the per-route access
+  // check below knows which app gates this enhancement.
+  const enh = getDb().prepare('SELECT id, user_id, app_slug FROM enhancement_requests WHERE id = ?').get(id);
   if (!enh) throw new AppError('Enhancement not found', 404, 'NOT_FOUND');
   return enh;
 }
 
+/**
+ * Refuse access if the caller isn't admin and isn't assigned to enh.app_slug.
+ * Mirror of appstudio.js ensureAppAccessForEnh (kept local here to avoid an
+ * import cycle between routes files).
+ */
+function ensureAppAccessForEnh(auth, enh) {
+  if (auth?.role === 'admin') return;
+  if (!enh?.app_slug) throw new AppError('Forbidden', 403, 'FORBIDDEN');
+  const db = getDb();
+  const app = db.prepare('SELECT id FROM apps WHERE slug = ?').get(enh.app_slug);
+  if (!app) throw new AppError('Forbidden', 403, 'FORBIDDEN');
+  const ok = db.prepare('SELECT 1 FROM app_users WHERE app_id = ? AND user_id = ?').get(app.id, auth.userId)
+          || db.prepare('SELECT 1 FROM app_user_roles WHERE app_id = ? AND user_id = ?').get(app.id, auth.userId);
+  if (!ok) throw new AppError('Forbidden', 403, 'FORBIDDEN');
+}
+
 router.get('/:id/comments', (req, res) => {
-  resolveAuthOrThrow(req);
-  loadEnhOr404(parseInt(req.params.id, 10));
+  const auth = resolveAuthOrThrow(req);
+  const enh = loadEnhOr404(parseInt(req.params.id, 10));
+  ensureAppAccessForEnh(auth, enh);
   res.json({ comments: listComments(parseInt(req.params.id, 10)) });
 });
 
 router.post('/:id/comments', (req, res) => {
   const auth = resolveAuthOrThrow(req);
   const enhId = parseInt(req.params.id, 10);
-  loadEnhOr404(enhId);
+  const enh = loadEnhOr404(enhId);
+  ensureAppAccessForEnh(auth, enh);
   const { type, body } = req.body || {};
   try {
     const c = createComment(enhId, {
@@ -292,7 +312,8 @@ router.patch('/:id/comments/:cid', (req, res) => {
   const auth = resolveAuthOrThrow(req);
   const enhId = parseInt(req.params.id, 10);
   const cid   = parseInt(req.params.cid, 10);
-  loadEnhOr404(enhId);
+  const enh = loadEnhOr404(enhId);
+  ensureAppAccessForEnh(auth, enh);
   const { status } = req.body || {};
   try {
     const c = setCommentStatus(enhId, cid, status, auth.userId);
@@ -307,7 +328,8 @@ router.delete('/:id/comments/:cid', (req, res) => {
   const auth = resolveAuthOrThrow(req);
   const enhId = parseInt(req.params.id, 10);
   const cid   = parseInt(req.params.cid, 10);
-  loadEnhOr404(enhId);
+  const enh = loadEnhOr404(enhId);
+  ensureAppAccessForEnh(auth, enh);
   const existing = getComment(enhId, cid);
   if (!existing) throw new AppError('comment not found', 404, 'NOT_FOUND');
   // Author can delete their own; admins can delete anyone's.

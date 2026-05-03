@@ -58,11 +58,12 @@ router.post('/:slug/upload/:env', requireAppUser, auditMiddleware('upload'), asy
         const filePath = req.file.path;
         const origName = req.file.originalname.toLowerCase();
 
-        if (origName.endsWith('.zip')) {
-          execFileSync('unzip', ['-o', filePath, '-d', releaseDir], { timeout: 60000, stdio: 'pipe' });
-        } else {
-          execFileSync('tar', ['-xzf', filePath, '-C', releaseDir], { timeout: 60000, stdio: 'pipe' });
-        }
+        // SECURITY: see server/utils/safeExtract.js — validates every
+        // archive entry against zip-slip / tar-slip before writing.
+        // Replaces the prior raw `unzip -o` / `tar -xzf` calls (security
+        // review v1.27.34 H5).
+        const { safeExtract } = await import('../utils/safeExtract.js');
+        await safeExtract(filePath, releaseDir, origName);
 
         // Clean up temp file
         try { unlinkSync(filePath); } catch (_) {}

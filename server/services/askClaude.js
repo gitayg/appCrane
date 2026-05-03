@@ -103,15 +103,35 @@ async function ensureSessionContainer(sessionId, app, onLog) {
   // Per-app Claude OAuth credentials (if uploaded) override the global API key.
   const credsMount = prepareClaudeCredentialsMount(app.slug);
 
-  // Clone, strip remote, disable credential helper — ask containers cannot commit or push
+  // SECURITY: app.branch is interpolated into a `sh -c` command below.
+  // If a writer ever bypasses the validation in routes/apps.js, refuse to
+  // start the container rather than open up command injection. The regex
+  // matches what git accepts as a valid ref char (alnum + . _ / -).
+  // See feedback memory: "Never interpolate user-controlled strings into sh -c".
+  const branch = String(app.branch || 'main');
+  if (!/^[A-Za-z0-9._/\-]{1,200}$/.test(branch)) {
+    throw new Error(`Refusing to start ask container for ${app.slug}: unsafe branch name`);
+  }
+
+  // Clone, strip remote, disable credential helper — ask containers cannot commit or push.
+  // BRANCH is passed as an env var instead of inline-interpolated into the
+  // shell command so a parser slip in the validator above can't escalate
+  // to command injection (the inner shell expands "$BRANCH", which docker
+  // sets verbatim from the -e flag — no extra shell parsing pass).
+  // SECURITY hardening (v1.27.34 H7): drop all caps, no-new-privs, pids-limit.
+  // Network stays default — clone needs GitHub access.
   const dockerArgs = [
     'run', '-d',
     '--name', containerName,
     '--label', 'appcrane=true',
     '--label', 'appcrane.container.type=ask',
     '--memory=1g', '--cpus=0.5',
+    '--cap-drop=ALL',
+    '--security-opt', 'no-new-privileges:true',
+    '--pids-limit=256',
     '-e', `ANTHROPIC_API_KEY=${process.env.ANTHROPIC_API_KEY || ''}`,
     '-e', `ASK_MODEL=${ASK_MODEL}`,
+    '-e', `BRANCH=${branch}`,
     '-v', `${dir}:/studio:ro`,
   ];
   if (credsMount)  dockerArgs.push('-v', `${credsMount.tmpFile}:/home/studio/.claude/credentials.json`);
@@ -119,7 +139,7 @@ async function ensureSessionContainer(sessionId, app, onLog) {
   dockerArgs.push(
     ASK_IMAGE,
     'sh', '-c',
-    `CLONE_URL=$(cat /studio/clone_url) && git clone --depth 1 --branch "${app.branch || 'main'}" "$CLONE_URL" /workspace && git -C /workspace remote remove origin && git -C /workspace config --local credential.helper '' && tail -f /dev/null`,
+    'CLONE_URL=$(cat /studio/clone_url) && git clone --depth 1 --branch "$BRANCH" "$CLONE_URL" /workspace && git -C /workspace remote remove origin && git -C /workspace config --local credential.helper "" && tail -f /dev/null',
   );
   execFileSync('docker', dockerArgs, { stdio: 'pipe', timeout: 15000 });
 

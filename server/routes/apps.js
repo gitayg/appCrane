@@ -166,6 +166,10 @@ router.post('/', requireAuth, auditMiddleware('app-create'), async (req, res) =>
   if (!name || !slug) throw new AppError('Name and slug are required', 400, 'VALIDATION');
   if (!/^[a-z0-9][a-z0-9-]*$/.test(slug)) throw new AppError('Slug must be lowercase alphanumeric with dashes', 400, 'VALIDATION');
   if (github_url) validateGithubUrl(github_url);
+  // SECURITY: same regex as PUT — branch flows into `sh -c` calls.
+  if (branch && !/^[A-Za-z0-9._/\-]{1,200}$/.test(branch)) {
+    throw new AppError('branch must be alphanumeric with . _ / - (max 200 chars)', 400, 'VALIDATION');
+  }
 
   const db = getDb();
 
@@ -308,7 +312,16 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
     if (github_url) validateGithubUrl(github_url);
     updates.github_url = github_url;
   }
-  if (branch !== undefined) updates.branch = branch;
+  if (branch !== undefined) {
+    // SECURITY: branch flows into `sh -c` arguments inside container start
+    // commands (askClaude.js, generator.js). Validate at the write boundary
+    // so a future inline interpolation can't be exploited via this column.
+    // Regex matches the chars git accepts in a ref name plus '/' for paths.
+    if (branch && !/^[A-Za-z0-9._/\-]{1,200}$/.test(branch)) {
+      throw new AppError('branch must be alphanumeric with . _ / - (max 200 chars)', 400, 'VALIDATION');
+    }
+    updates.branch = branch;
+  }
   if (visibility !== undefined) {
     if (!['hidden', 'private', 'public'].includes(visibility)) {
       throw new AppError('visibility must be one of: hidden, private, public', 400, 'VALIDATION');
@@ -350,6 +363,13 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
   }
 
   if (frame_ancestors !== undefined) {
+    // SECURITY: changing frame_ancestors lets the app be embedded in
+    // arbitrary origins → clickjacking on /login (which strips
+    // X-Frame-Options for that slug's redirect). Restrict to admin so an
+    // app-assigned user can't open the door (security review v1.27.34 H3).
+    if (req.user?.role !== 'admin') {
+      throw new AppError('Only admins can change frame_ancestors', 403, 'FORBIDDEN');
+    }
     if (frame_ancestors === null || frame_ancestors === '') {
       updates.frame_ancestors = null;
     } else {
@@ -693,8 +713,12 @@ router.get('/:slug/claude-credentials', requireAppAccess, async (req, res) => {
  * Body: { credentials: <full JSON object> }  OR  raw JSON body that itself
  * is the credentials.json contents. Either shape is accepted to keep the
  * UI form simple (just FileReader → fetch).
+ *
+ * SECURITY: admin only. An app-assigned (non-admin) user must not be able
+ * to overwrite the operator's billing credentials with their own — see
+ * the v1.27.34 security review (H2).
  */
-router.put('/:slug/claude-credentials', requireAppAccess, auditMiddleware('app-claude-credentials'), async (req, res) => {
+router.put('/:slug/claude-credentials', requireAdmin, requireAppAccess, auditMiddleware('app-claude-credentials'), async (req, res) => {
   const body = req.body || {};
   const payload = body.credentials && typeof body.credentials === 'object'
     ? body.credentials
@@ -714,8 +738,10 @@ router.put('/:slug/claude-credentials', requireAppAccess, auditMiddleware('app-c
 /**
  * DELETE /api/apps/:slug/claude-credentials — clear stored creds. The next
  * dispatch falls back to the global ANTHROPIC_API_KEY.
+ *
+ * SECURITY: admin only. Same reasoning as PUT.
  */
-router.delete('/:slug/claude-credentials', requireAppAccess, auditMiddleware('app-claude-credentials'), async (req, res) => {
+router.delete('/:slug/claude-credentials', requireAdmin, requireAppAccess, auditMiddleware('app-claude-credentials'), async (req, res) => {
   const { clearCredentials } = await import('../services/claudeCredentials.js');
   clearCredentials(req.params.slug);
   res.json({ present: false });

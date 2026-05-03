@@ -21,7 +21,7 @@ function resolveUser(req) {
     const session = db.prepare(`
       SELECT s.*, u.id as user_id, u.name, u.role
       FROM identity_sessions s JOIN users u ON s.user_id = u.id
-      WHERE s.token_hash = ? AND s.expires_at > datetime('now')
+      WHERE s.token_hash = ? AND s.expires_at > datetime('now') AND u.active = 1
     `).get(hashApiKey(token));
     if (session) return { userId: session.user_id, userName: session.name, role: session.role };
   }

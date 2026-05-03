@@ -1,6 +1,11 @@
 import { Router } from 'express';
 import { getDb } from '../db.js';
-import { requireAuth, requireAppAccess } from '../middleware/auth.js';
+// requireAppUser: assigned app users only — admins are explicitly NOT
+// granted access to env-var values (the comment on requireAppUser in
+// middleware/auth.js codifies this rule). The previous use of
+// requireAppUser silently let admin read every app's env via
+// ?reveal=true (security review v1.27.34 H4).
+import { requireAuth, requireAppUser } from '../middleware/auth.js';
 import { auditMiddleware } from '../middleware/audit.js';
 import { encrypt, decrypt } from '../services/encryption.js';
 import { AppError } from '../utils/errors.js';
@@ -11,9 +16,11 @@ router.use(requireAuth);
 
 /**
  * GET /api/apps/:slug/env/:env - List env vars
- * Admin can read (to see what agents configured). App users can read/write.
+ * Assigned app users only — admins do NOT see plaintext values, even
+ * with ?reveal=true. If admins need a one-time read for incident
+ * response, add a separate audited break-glass endpoint.
  */
-router.get('/:slug/env/:env', requireAppAccess, (req, res) => {
+router.get('/:slug/env/:env', requireAppUser, (req, res) => {
   const { env } = req.params;
   // Express 5: req.query may be a getter; access safely
   const url = new URL(req.url, `http://${req.headers.host}`);
@@ -53,7 +60,7 @@ router.get('/:slug/env/:env', requireAppAccess, (req, res) => {
  * PUT /api/apps/:slug/env/:env - Set env vars (bulk)
  * Body: { "vars": { "KEY1": "value1", "KEY2": "value2" } }
  */
-router.put('/:slug/env/:env', requireAppAccess, auditMiddleware('env-set'), (req, res) => {
+router.put('/:slug/env/:env', requireAppUser, auditMiddleware('env-set'), (req, res) => {
   const { env } = req.params;
   const { vars } = req.body;
 
@@ -89,7 +96,7 @@ router.put('/:slug/env/:env', requireAppAccess, auditMiddleware('env-set'), (req
 /**
  * DELETE /api/apps/:slug/env/:env/:key - Delete single env var
  */
-router.delete('/:slug/env/:env/:key', requireAppAccess, auditMiddleware('env-delete'), (req, res) => {
+router.delete('/:slug/env/:env/:key', requireAppUser, auditMiddleware('env-delete'), (req, res) => {
   const { env, key } = req.params;
   const db = getDb();
 
