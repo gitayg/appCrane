@@ -138,7 +138,39 @@ export function usePlanFlow(slug: string | null | undefined) {
     }
   }, [state.enhId, state.built])
 
-  return { state, submit, build, reset }
+  // Send refinement feedback against the current enhId — server queues a
+  // 'revise_plan' job; we re-open the SSE so the new plan streams in
+  // place of the old one. Mirrors portal's sendPlanRequest refine branch.
+  const refine = useCallback(async (comment: string) => {
+    if (!state.enhId || !comment.trim() || state.busy) return
+    closeStream(); stopTicker()
+    startedRef.current = Date.now()
+    setState(s => ({
+      ...s,
+      busy: true,
+      planReady: false,
+      built: false,
+      planText: '',
+      error: null,
+      working: { active: true, text: 'Re-planning…', elapsedSec: 0, tokens: 0 },
+    }))
+    tickRef.current = setInterval(() => {
+      const sec = Math.round((Date.now() - startedRef.current) / 1000)
+      setState(s => s.working.active ? { ...s, working: { ...s.working, elapsedSec: sec } } : s)
+    }, 1000)
+    try {
+      const r = await adminApi.post<{ error?: { message?: string } }>(
+        `/api/plan/${state.enhId}/feedback`, { comment: comment.trim() },
+      )
+      if (r.error) throw new Error(r.error.message || 'Feedback failed')
+      streamPlan(state.enhId)
+    } catch (err) {
+      stopTicker()
+      setState(s => ({ ...s, busy: false, error: err instanceof Error ? err.message : String(err), working: IDLE }))
+    }
+  }, [state.enhId, state.busy])
+
+  return { state, submit, build, refine, reset }
 }
 
 function formatPlan(plan: any): string {

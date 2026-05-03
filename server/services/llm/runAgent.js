@@ -40,7 +40,44 @@ function shellQuote(str) {
 // See feedback memory: "Never interpolate user-controlled strings into sh -c".
 const SESSION_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 
-function buildClaudeCmd({ prompt, model, resume, addDir = '/workspace', systemPrompt }) {
+/**
+ * Build a shell preflight that verifies every mounted path is accessible
+ * by the container's user before invoking claude. Failures abort the
+ * dispatch with a clear `[preflight] <path>: <reason>` line that gets
+ * captured in stderrTail and surfaced to the operator — much better than
+ * letting Claude CLI swallow the underlying EACCES and emit a generic
+ * "Not logged in" / "tool failed" message.
+ *
+ * `checks` is an array of { path, mode, label } where mode is:
+ *   'r'  — file must be readable
+ *   'rw' — file must be readable AND writable (e.g. credentials.json
+ *          which Claude rewrites on token refresh)
+ *   'd'  — directory must exist and be enterable (x bit)
+ *   'dw' — directory must be writable too
+ */
+function buildPreflightShell(checks) {
+  if (!checks?.length) return '';
+  const lines = [
+    'preflight_fail() { echo "[preflight] $1" >&2; exit 75; }',
+    'preflight_meta() { echo "uid=$(id -u) gid=$(id -g) mode=$(stat -c %a "$1" 2>/dev/null || echo ?) owner=$(stat -c %U:%G "$1" 2>/dev/null || echo ?:?)"; }',
+  ];
+  for (const c of checks) {
+    const path  = shellQuote(c.path);
+    const label = c.label || c.path;
+    if (c.mode === 'r') {
+      lines.push(`{ [ -e ${path} ] && [ -r ${path} ]; } || preflight_fail "${label} (${c.path}) not readable: $(preflight_meta ${path})";`);
+    } else if (c.mode === 'rw') {
+      lines.push(`{ [ -e ${path} ] && [ -r ${path} ] && [ -w ${path} ]; } || preflight_fail "${label} (${c.path}) not read+writable (Claude needs to refresh tokens): $(preflight_meta ${path})";`);
+    } else if (c.mode === 'd') {
+      lines.push(`{ [ -d ${path} ] && [ -x ${path} ]; } || preflight_fail "${label} (${c.path}) not an enterable directory: $(preflight_meta ${path})";`);
+    } else if (c.mode === 'dw') {
+      lines.push(`{ [ -d ${path} ] && [ -x ${path} ] && [ -w ${path} ]; } || preflight_fail "${label} (${c.path}) not a writable directory: $(preflight_meta ${path})";`);
+    }
+  }
+  return lines.join(' ') + ' ';
+}
+
+function buildClaudeCmd({ prompt, model, resume, addDir = '/workspace', systemPrompt, preflight = [] }) {
   const parts = [
     `claude -p ${shellQuote(prompt)}`,
     `--model ${model}`,
@@ -58,6 +95,7 @@ function buildClaudeCmd({ prompt, model, resume, addDir = '/workspace', systemPr
     }
     parts.push(`--resume ${resume}`);
   }
+  const preflightSh = buildPreflightShell(preflight);
   // Optional one-line diagnostic to stderr — set APPCRANE_DEBUG_CREDS=1
   // on AppCrane to investigate "Not logged in" issues. Output is captured
   // in the agent's stderrTail and shown back to the operator on failure.
@@ -67,9 +105,9 @@ function buildClaudeCmd({ prompt, model, resume, addDir = '/workspace', systemPr
       'echo "[creds-diag] uid=$(id -u) home=$HOME" >&2; ' +
       'ls -la "$HOME/.claude/" >&2 2>&1 || echo "[creds-diag] no .claude dir" >&2; ' +
       'claude --version >&2 2>&1 || echo "[creds-diag] claude --version failed" >&2; ';
-    return diag + parts.join(' ');
+    return preflightSh + diag + parts.join(' ');
   }
-  return parts.join(' ');
+  return preflightSh + parts.join(' ');
 }
 
 // Common stdout pipeline: line-buffer NDJSON, parse each line, emit events.
@@ -191,10 +229,18 @@ export function runAgentExec({
   if (!hasAppCredentials) {
     args.push('-e', `ANTHROPIC_API_KEY=${apiKey}`);
   }
+  // Preflight what we expect to be mounted in the container that was
+  // started by appContainer.startContainer. This catches mode/uid issues
+  // (umask-stripped perms, wrong owner) before claude swallows EACCES
+  // and emits a misleading "Not logged in" / generic auth error.
+  const preflight = [{ path: workdir, mode: 'dw', label: 'Workspace' }];
+  if (hasAppCredentials) {
+    preflight.push({ path: `${homeDir}/.claude/credentials.json`, mode: 'rw', label: 'Claude credentials' });
+  }
   args.push(
     containerId,
     'sh', '-c',
-    buildClaudeCmd({ prompt, model, resume, addDir, systemPrompt }),
+    buildClaudeCmd({ prompt, model, resume, addDir, systemPrompt, preflight }),
   );
   return new Agent(args, timeoutMs);
 }
@@ -241,6 +287,11 @@ export function runAgentNew({
   args.push(`--memory=${memory}`, `--cpus=${cpus}`);
   args.push('--workdir', workdir);
   args.push('-e', `HOME=${homeDir}`);
+  // Preflight checks built up alongside the mounts so each has the
+  // matching access expectation. Workspace gets 'd' for ro, 'dw' for rw.
+  const preflight = [
+    { path: workdir, mode: workspaceMode === 'ro' ? 'd' : 'dw', label: 'Workspace' },
+  ];
   // If the app has its own Claude OAuth credentials, mount the file AND
   // suppress ANTHROPIC_API_KEY entirely — Claude Code's auth precedence
   // is API key > credentials.json, so leaving the env var set means the
@@ -249,6 +300,7 @@ export function runAgentNew({
   const credsMount = prepareClaudeCredentialsMount(appSlug);
   if (credsMount) {
     args.push('-v', `${credsMount.tmpFile}:${homeDir}/.claude/credentials.json`);
+    preflight.push({ path: `${homeDir}/.claude/credentials.json`, mode: 'rw', label: 'Claude credentials' });
   } else {
     args.push('-e', `ANTHROPIC_API_KEY=${apiKey || ''}`);
   }
@@ -256,6 +308,7 @@ export function runAgentNew({
   args.push('-v', `${workspaceDir}:/workspace${workspaceMode === 'ro' ? ':ro' : ''}`);
   for (const m of extraMounts) {
     args.push('-v', `${m.host}:${m.container}${m.mode ? `:${m.mode}` : ''}`);
+    preflight.push({ path: m.container, mode: m.mode === 'ro' ? 'r' : 'rw', label: 'Extra mount' });
   }
 
   // Bind skills assigned to this app under ~/.claude/skills/ so the CLI's
@@ -266,9 +319,10 @@ export function runAgentNew({
   const skillsMount = prepareSkillsMount(appSlug);
   if (skillsMount) {
     args.push('-v', `${skillsMount.dir}:${homeDir}/.claude/skills:ro`);
+    preflight.push({ path: `${homeDir}/.claude/skills`, mode: 'd', label: 'Skills dir' });
   }
 
-  args.push(image, 'sh', '-c', buildClaudeCmd({ prompt, model, resume, addDir, systemPrompt }));
+  args.push(image, 'sh', '-c', buildClaudeCmd({ prompt, model, resume, addDir, systemPrompt, preflight }));
   const agent = new Agent(args, timeoutMs);
   if (credsMount)  agent.registerCleanup(credsMount.cleanup);
   if (skillsMount) agent.registerCleanup(skillsMount.cleanup);
