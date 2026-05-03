@@ -27,7 +27,12 @@ export function Login() {
       const data = await res.json()
       if (!res.ok) { setError(data.error?.message || 'Login failed'); return }
       localStorage.setItem('cc_identity_token', data.token)
-      window.location.href = '/login'
+      // Reload the current page rather than bouncing to /login.
+      // adminApi (v1.27.56) accepts cc_identity_token as a Bearer fallback
+      // so admin pages now work for portal-style logins. Reloading keeps
+      // the user wherever they were trying to go (/dashboard / /requests
+      // / etc.) instead of dumping them on the portal home.
+      window.location.reload()
     } catch { setError('Connection failed') }
   }
 
