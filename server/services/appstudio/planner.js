@@ -48,7 +48,7 @@ Guidelines:
 - If the request is ambiguous, add entries to a top-level "open_questions" array.
 - Respect any constraints in the operator's per-app context notes.
 - Estimate tokens conservatively (the budget will be enforced).
-- Always include \`package.json\` in \`files_to_change\` with action \`modify\` to apply a patch version bump (increment the last digit of the \`version\` field). This is required for every enhancement without exception.`;
+- Always include \`package.json\` in \`files_to_change\` with action \`modify\` to apply a patch version bump (increment the last digit of the \`version\` field). If \`deployhub.json\` exists in the repo, ALSO include it with the same patch version bump — both files must end up with the same version. This is required for every enhancement without exception.`;
 
 function grepRelevantFiles(repoDir, fileTree, keywords, maxFiles = 6) {
   const files = new Set();
