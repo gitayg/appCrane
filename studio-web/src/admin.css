@@ -558,6 +558,23 @@ textarea:focus { border-color: var(--accent); }
 .res-fill { height: 100%; border-radius: 2px; transition: width .4s; }
 .res-val { font-size: .68rem; color: var(--dim); width: 44px; text-align: right; flex-shrink: 0; font-family: monospace; }
 
+/* ── Applications table (v1.27.41) ────────────────────────────────
+   Replaces the per-app cards with a sortable + filterable table so
+   admins can scan dozens of apps without scrolling through stacked
+   cards. Inline-editable cells use the existing .editable styling. */
+.apps-table-wrap { overflow-x: auto; margin-bottom: 16px; }
+.apps-table { width: 100%; border-collapse: collapse; font-size: .82rem; }
+.apps-table th, .apps-table td { padding: 6px 8px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: middle; }
+.apps-table thead th { background: var(--surface); font-weight: 600; font-size: .76rem; color: var(--dim); text-transform: uppercase; letter-spacing: .4px; white-space: nowrap; position: sticky; top: 0; z-index: 1; }
+.apps-table th.th-sort { cursor: pointer; user-select: none; }
+.apps-table th.th-sort:hover { color: var(--accent); }
+.apps-filter-row th { background: var(--bg); padding: 4px 8px; }
+.apps-filter-input { width: 100%; min-width: 70px; max-width: 160px; padding: 3px 6px; font-size: .76rem; background: var(--surface); border: 1px solid var(--border); color: var(--text); border-radius: 4px; }
+.apps-table tbody tr:hover { background: var(--surface); }
+.apps-table .editable { background: transparent; border: 1px solid transparent; padding: 3px 5px; font-size: .82rem; color: var(--text); border-radius: 3px; }
+.apps-table .editable:hover { border-color: var(--border); }
+.apps-table .editable:focus { border-color: var(--accent); background: var(--surface); }
+
 /* ── App cards (applications page) ───────────────────────────────────
    Compact rows: ~50% less vertical space than the previous layout by
    tightening paddings, shrinking the icon, dropping the description

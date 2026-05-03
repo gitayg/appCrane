@@ -75,6 +75,7 @@ interface PromptModal {
 }
 
 type WizardStep = 'input' | 'analyzing' | 'review'
+type SortKey = 'name' | 'visibility' | 'category' | 'ram' | 'cpu' | 'images'
 
 export function Applications() {
   const [apps, setApps] = useState<App[]>([])
@@ -90,6 +91,14 @@ export function Applications() {
   const [wizardEnvValues, setWizardEnvValues] = useState<Record<string, string>>({})
   const [checkUpdateText, setCheckUpdateText] = useState<Record<string, string>>({})
   const [iconUrls, setIconUrls] = useState<Record<string, string>>({})
+
+  // Filter / sort state for the table view (v1.27.41).
+  const [filter, setFilter] = useState({ vis: '', name: '', tag: '', ramMin: '', cpuMin: '' })
+  const [sort, setSort] = useState<{ key: SortKey; dir: 'asc' | 'desc' }>({ key: 'name', dir: 'asc' })
+
+  // Tag editor: when user picks "+ New tag" in the Tag dropdown, switch
+  // that row's tag cell into a free-text input. Map slug -> draft string.
+  const [tagDraft, setTagDraft] = useState<Record<string, string>>({})
 
   const ghUrlRef = useRef<HTMLInputElement>(null)
   const branchRef = useRef<HTMLInputElement>(null)
@@ -192,32 +201,48 @@ export function Applications() {
     alert(r?.message ?? r?.error ?? 'Done')
   }
 
-  async function editResources(app: App) {
-    const ram = prompt('Max RAM (MB):', String(app.resource_limits?.max_ram_mb ?? ''))
-    if (ram === null) return
-    const cpu = prompt('Max CPU (%):', String(app.resource_limits?.max_cpu_percent ?? ''))
-    if (cpu === null) return
-    await adminApi.put(`/api/apps/${app.slug}`, {
-      max_ram_mb: ram ? Number(ram) : undefined,
-      max_cpu_percent: cpu ? Number(cpu) : undefined,
-    }).catch(() => {})
-    loadAll()
+  async function saveRam(slug: string, raw: string) {
+    const ram = raw.trim() ? Number(raw) : null
+    if (raw.trim() && (isNaN(ram!) || ram! < 0)) return
+    await adminApi.put(`/api/apps/${slug}`, { max_ram_mb: ram }).catch(() => {})
+    setApps(prev => prev.map(a => a.slug === slug
+      ? { ...a, resource_limits: { ...(a.resource_limits ?? {}), max_ram_mb: ram ?? undefined } }
+      : a))
   }
 
-  async function editRetention(app: App) {
-    const val = prompt('Image retention count (0-50):', String(app.image_retention ?? ''))
-    if (val === null) return
-    const n = parseInt(val, 10)
+  async function saveCpu(slug: string, raw: string) {
+    const cpu = raw.trim() ? Number(raw) : null
+    if (raw.trim() && (isNaN(cpu!) || cpu! < 0)) return
+    await adminApi.put(`/api/apps/${slug}`, { max_cpu_percent: cpu }).catch(() => {})
+    setApps(prev => prev.map(a => a.slug === slug
+      ? { ...a, resource_limits: { ...(a.resource_limits ?? {}), max_cpu_percent: cpu ?? undefined } }
+      : a))
+  }
+
+  async function saveImages(slug: string, raw: string) {
+    if (!raw.trim()) return
+    const n = parseInt(raw, 10)
     if (isNaN(n) || n < 0 || n > 50) return
-    await adminApi.put(`/api/apps/${app.slug}`, { image_retention: n }).catch(() => {})
-    loadAll()
+    await adminApi.put(`/api/apps/${slug}`, { image_retention: n }).catch(() => {})
+    setApps(prev => prev.map(a => a.slug === slug ? { ...a, image_retention: n } : a))
   }
 
-  async function setCategory(app: App) {
-    const cat = prompt('Category:', app.category ?? '')
-    if (cat === null) return
-    await adminApi.put(`/api/apps/${app.slug}`, { category: cat }).catch(() => {})
-    setApps(prev => prev.map(a => a.slug === app.slug ? { ...a, category: cat || undefined } : a))
+  async function saveCategory(slug: string, cat: string) {
+    const value = cat.trim()
+    await adminApi.put(`/api/apps/${slug}`, { category: value }).catch(() => {})
+    setApps(prev => prev.map(a => a.slug === slug ? { ...a, category: value || undefined } : a))
+  }
+
+  async function saveName(slug: string, name: string) {
+    const value = name.trim()
+    if (!value) return
+    await adminApi.put(`/api/apps/${slug}`, { name: value }).catch(() => {})
+    setApps(prev => prev.map(a => a.slug === slug ? { ...a, name: value } : a))
+  }
+
+  async function saveDescription(slug: string, desc: string) {
+    await adminApi.put(`/api/apps/${slug}`, { description: desc }).catch(() => {})
+    setApps(prev => prev.map(a => a.slug === slug ? { ...a, description: desc } : a))
   }
 
   async function setFrameAncestors(app: App) {
@@ -418,6 +443,46 @@ export function Applications() {
     return 'vis-badge vis-hidden'
   }
 
+  // Distinct, sorted list of every category currently in use — feeds the
+  // Tag dropdowns in the table (filter row + per-row editor).
+  const allTags = Array.from(
+    new Set(apps.map(a => (a.category || '').trim()).filter(Boolean)),
+  ).sort((a, b) => a.localeCompare(b))
+
+  const visOf = (a: App) => a.visibility || 'hidden'
+  const ramOf = (a: App) => a.resource_limits?.max_ram_mb ?? -1
+  const cpuOf = (a: App) => a.resource_limits?.max_cpu_percent ?? -1
+  const imgOf = (a: App) => a.image_retention ?? -1
+
+  function toggleSort(key: SortKey) {
+    setSort(s => s.key === key ? { key, dir: s.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: 'asc' })
+  }
+  function sortArrow(key: SortKey) {
+    if (sort.key !== key) return ''
+    return sort.dir === 'asc' ? ' ↑' : ' ↓'
+  }
+
+  const filtered = apps.filter(a => {
+    if (filter.vis  && visOf(a) !== filter.vis) return false
+    if (filter.tag  && (a.category || '') !== filter.tag) return false
+    if (filter.name && !(a.name || '').toLowerCase().includes(filter.name.toLowerCase())) return false
+    if (filter.ramMin && ramOf(a) < Number(filter.ramMin)) return false
+    if (filter.cpuMin && cpuOf(a) < Number(filter.cpuMin)) return false
+    return true
+  })
+  const sorted = [...filtered].sort((x, y) => {
+    let cmp = 0
+    switch (sort.key) {
+      case 'name':       cmp = (x.name || '').toLowerCase().localeCompare((y.name || '').toLowerCase()); break
+      case 'visibility': cmp = visOf(x).localeCompare(visOf(y)); break
+      case 'category':   cmp = (x.category || '').localeCompare(y.category || ''); break
+      case 'ram':        cmp = ramOf(x) - ramOf(y); break
+      case 'cpu':        cmp = cpuOf(x) - cpuOf(y); break
+      case 'images':     cmp = imgOf(x) - imgOf(y); break
+    }
+    return sort.dir === 'asc' ? cmp : -cmp
+  })
+
   return (
     <div className="container">
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
@@ -428,161 +493,264 @@ export function Applications() {
         <button className="btn" onClick={generateAgentKey}>+ New App Agent</button>
       </div>
 
-      <div id="appsBody">
-        {apps.map(app => {
-          const activeEnv = openEvars[app.slug]
-          return (
-            <div key={app.slug} className="app-card">
-              <div className="card-hdr">
-                <div className="card-meta">
-                  <div
-                    className="app-icon-wrap"
-                    onClick={() => iconInputRefs.current[app.slug]?.click()}
-                    title="Click to upload icon"
-                  >
-                    {iconUrls[app.slug]
-                      ? <img src={iconUrls[app.slug]} className="app-icon-img" alt="" />
-                      : <span className="app-icon-ph">{app.name.charAt(0).toUpperCase()}</span>
-                    }
-                    <input
-                      type="file"
-                      accept="image/*"
-                      style={{ display: 'none' }}
-                      ref={el => { iconInputRefs.current[app.slug] = el }}
-                      onChange={e => {
-                        const f = e.target.files?.[0]
-                        if (f) uploadIcon(app.slug, f)
-                      }}
-                    />
-                  </div>
-                  <div className="card-name-row">
-                    <span>{app.name}</span>
-                    <span className={visBadgeClass(app.visibility)}>{app.visibility ?? 'hidden'}</span>
-                    {app.category && <span className="cat-badge">{app.category}</span>}
-                    {app.has_claude_credentials && (
-                      <span
-                        className="claude-badge"
-                        title="This app has its own Claude OAuth credentials — AI work bills to that account, not the global ANTHROPIC_API_KEY"
-                      >🔑 Claude</span>
-                    )}
-                  </div>
-                  {app.description && <div className="card-desc">{app.description}</div>}
-                  {app.resource_limits && (app.resource_limits.max_ram_mb != null || app.resource_limits.max_cpu_percent != null) && (
-                    <div className="card-res">
-                      {app.resource_limits.max_ram_mb != null && `RAM: ${app.resource_limits.max_ram_mb}MB`}
-                      {app.resource_limits.max_ram_mb != null && app.resource_limits.max_cpu_percent != null && '  '}
-                      {app.resource_limits.max_cpu_percent != null && `CPU: ${app.resource_limits.max_cpu_percent}%`}
-                    </div>
-                  )}
-                </div>
-                <div className="card-hdr-actions">
-                  <select
-                    value={app.visibility ?? 'hidden'}
-                    onChange={e => setVisibility(app.slug, e.target.value)}
-                    style={{ fontSize: '.75rem', padding: '3px 6px' }}
-                  >
-                    <option value="hidden">hidden</option>
-                    <option value="private">private</option>
-                    <option value="public">public</option>
-                  </select>
-                  <a className="btn btn-xs" href={`/app?slug=${app.slug}`}>manage</a>
-                  <button className="btn btn-xs" onClick={() => showAppToken(app.slug)}>onboard</button>
-                  <button className="btn btn-xs" onClick={() => setCategory(app)}>tag</button>
-                  <button className="btn btn-xs" onClick={() => editResources(app)}>⚙ limits</button>
-                  <button className="btn btn-xs" onClick={() => editRetention(app)}>🗂 images</button>
-                  <button
-                    className="btn btn-xs"
-                    onClick={() => setFrameAncestors(app)}
-                    title={app.frame_ancestors ? `Embedders: ${app.frame_ancestors}` : 'Allowed embedders (default: same origin only)'}
-                  >🖼 embed{app.frame_ancestors ? ' ✓' : ''}</button>
-                  {(app.source_type === 'github' || app.github_url) && (
-                    <>
-                      {app.github_url && (
-                        <a className="btn btn-xs" href={app.github_url} target="_blank" rel="noreferrer" title={app.github_url}>GitHub ↗</a>
-                      )}
-                      <button
-                        className="btn btn-xs"
-                        onClick={() => checkUpdates(app.slug)}
-                        title="Check GitHub for new commits since last deploy"
+      <div className="apps-table-wrap">
+        <table className="apps-table">
+          <thead>
+            <tr>
+              <th></th>
+              <th className="th-sort" onClick={() => toggleSort('name')}>Name{sortArrow('name')}</th>
+              <th>Description</th>
+              <th className="th-sort" onClick={() => toggleSort('visibility')}>Visibility{sortArrow('visibility')}</th>
+              <th className="th-sort" onClick={() => toggleSort('category')}>Tag{sortArrow('category')}</th>
+              <th className="th-sort" onClick={() => toggleSort('ram')}>RAM (MB){sortArrow('ram')}</th>
+              <th className="th-sort" onClick={() => toggleSort('cpu')}>CPU (%){sortArrow('cpu')}</th>
+              <th className="th-sort" onClick={() => toggleSort('images')}>Images{sortArrow('images')}</th>
+              <th>Sandbox</th>
+              <th>Production</th>
+              <th>Actions</th>
+            </tr>
+            <tr className="apps-filter-row">
+              <th></th>
+              <th>
+                <input
+                  className="apps-filter-input"
+                  type="text" placeholder="filter name…"
+                  value={filter.name} onChange={e => setFilter(f => ({ ...f, name: e.target.value }))}
+                />
+              </th>
+              <th></th>
+              <th>
+                <select
+                  className="apps-filter-input"
+                  value={filter.vis} onChange={e => setFilter(f => ({ ...f, vis: e.target.value }))}
+                >
+                  <option value="">all</option>
+                  <option value="hidden">hidden</option>
+                  <option value="private">private</option>
+                  <option value="public">public</option>
+                </select>
+              </th>
+              <th>
+                <select
+                  className="apps-filter-input"
+                  value={filter.tag} onChange={e => setFilter(f => ({ ...f, tag: e.target.value }))}
+                >
+                  <option value="">all</option>
+                  {allTags.map(t => <option key={t} value={t}>{t}</option>)}
+                </select>
+              </th>
+              <th>
+                <input
+                  className="apps-filter-input"
+                  type="number" min={0} placeholder="≥"
+                  value={filter.ramMin} onChange={e => setFilter(f => ({ ...f, ramMin: e.target.value }))}
+                />
+              </th>
+              <th>
+                <input
+                  className="apps-filter-input"
+                  type="number" min={0} placeholder="≥"
+                  value={filter.cpuMin} onChange={e => setFilter(f => ({ ...f, cpuMin: e.target.value }))}
+                />
+              </th>
+              <th></th>
+              <th></th>
+              <th></th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {sorted.map(app => {
+              const activeEnv = openEvars[app.slug]
+              const ramVal = app.resource_limits?.max_ram_mb ?? ''
+              const cpuVal = app.resource_limits?.max_cpu_percent ?? ''
+              const imgVal = app.image_retention ?? ''
+              const tagDraftVal = tagDraft[app.slug]
+              return (
+                <>
+                  <tr key={app.slug}>
+                    <td>
+                      <div
+                        className="app-icon-wrap"
+                        onClick={() => iconInputRefs.current[app.slug]?.click()}
+                        title="Click to upload icon"
+                        style={{ width: 28, height: 28 }}
                       >
-                        {checkUpdateText[app.slug] || '↑ updates'}
-                      </button>
-                      <button
-                        className="btn btn-xs"
-                        onClick={() => registerGithubHook(app.slug)}
-                        title="Register GitHub webhook for auto-deploy"
-                      >gh hook</button>
-                    </>
-                  )}
-                  <button className="btn btn-xs btn-red" onClick={() => deleteApp(app.slug, app.name)}>delete</button>
-                </div>
-              </div>
-
-              <div className="card-envs">
-                {(['sandbox', 'production'] as const).map(env => {
-                  const isProd = env === 'production'
-                  const ver = versions[app.slug]?.[isProd ? 'prod' : 'sand']
-                  return (
-                    <div key={env} className={`card-env${isProd ? ' prod' : ' sand'}`}>
-                      <div className={`env-heading${isProd ? ' prod-heading' : ' sand-heading'}`}>
-                        {isProd ? 'Production' : 'Sandbox'}
+                        {iconUrls[app.slug]
+                          ? <img src={iconUrls[app.slug]} className="app-icon-img" alt="" />
+                          : <span className="app-icon-ph">{app.name.charAt(0).toUpperCase()}</span>
+                        }
+                        <input
+                          type="file" accept="image/*"
+                          style={{ display: 'none' }}
+                          ref={el => { iconInputRefs.current[app.slug] = el }}
+                          onChange={e => {
+                            const f = e.target.files?.[0]
+                            if (f) uploadIcon(app.slug, f)
+                          }}
+                        />
                       </div>
-                      <div className="env-status-row">
-                        <span className={healthDot(app, env)} />
-                        <span className="env-ver" id={`ver_${app.slug}_${env}`}>{ver ?? '…'}</span>
-                        <a
-                          className="env-link"
-                          href="#"
-                          onClick={e => { e.preventDefault(); openAppFrame(app, env) }}
+                    </td>
+                    <td>
+                      <input
+                        className="editable" defaultValue={app.name}
+                        onBlur={e => { if (e.target.value !== app.name) saveName(app.slug, e.target.value) }}
+                        style={{ minWidth: 130 }}
+                      />
+                      {app.has_claude_credentials && (
+                        <span className="claude-badge" style={{ marginLeft: 6 }} title="App has its own Claude OAuth credentials">🔑</span>
+                      )}
+                    </td>
+                    <td>
+                      <input
+                        className="editable" defaultValue={app.description ?? ''}
+                        placeholder="—"
+                        onBlur={e => { if (e.target.value !== (app.description ?? '')) saveDescription(app.slug, e.target.value) }}
+                        style={{ minWidth: 180 }}
+                      />
+                    </td>
+                    <td>
+                      <select
+                        value={app.visibility ?? 'hidden'}
+                        onChange={e => setVisibility(app.slug, e.target.value)}
+                        className={visBadgeClass(app.visibility)}
+                        style={{ fontSize: '.75rem' }}
+                      >
+                        <option value="hidden">hidden</option>
+                        <option value="private">private</option>
+                        <option value="public">public</option>
+                      </select>
+                    </td>
+                    <td>
+                      {tagDraftVal !== undefined ? (
+                        <input
+                          className="editable" autoFocus defaultValue={tagDraftVal}
+                          placeholder="new tag…"
+                          onBlur={e => {
+                            saveCategory(app.slug, e.target.value)
+                            setTagDraft(d => { const n = { ...d }; delete n[app.slug]; return n })
+                          }}
+                          onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
+                          style={{ minWidth: 100 }}
+                        />
+                      ) : (
+                        <select
+                          value={app.category ?? ''}
+                          onChange={e => {
+                            const v = e.target.value
+                            if (v === '__new__') setTagDraft(d => ({ ...d, [app.slug]: '' }))
+                            else saveCategory(app.slug, v)
+                          }}
+                          style={{ fontSize: '.78rem' }}
                         >
-                          ↗ open
-                        </a>
-                      </div>
-                      <div className="env-act-row">
+                          <option value="">—</option>
+                          {allTags.map(t => <option key={t} value={t}>{t}</option>)}
+                          <option value="__new__">+ New tag…</option>
+                        </select>
+                      )}
+                    </td>
+                    <td>
+                      <input
+                        className="editable" type="number" min={0} defaultValue={ramVal}
+                        onBlur={e => { if (String(e.target.value) !== String(ramVal)) saveRam(app.slug, e.target.value) }}
+                        style={{ width: 70 }}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        className="editable" type="number" min={0} defaultValue={cpuVal}
+                        onBlur={e => { if (String(e.target.value) !== String(cpuVal)) saveCpu(app.slug, e.target.value) }}
+                        style={{ width: 60 }}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        className="editable" type="number" min={0} max={50} defaultValue={imgVal}
+                        onBlur={e => { if (String(e.target.value) !== String(imgVal)) saveImages(app.slug, e.target.value) }}
+                        style={{ width: 60 }}
+                      />
+                    </td>
+                    {(['sandbox', 'production'] as const).map(env => {
+                      const ver = versions[app.slug]?.[env === 'production' ? 'prod' : 'sand']
+                      return (
+                        <td key={env}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
+                            <span className={healthDot(app, env)} />
+                            <span style={{ fontFamily: 'monospace', fontSize: '.72rem', color: 'var(--dim)' }}>{ver ?? '…'}</span>
+                            <a className="env-link" href="#" onClick={e => { e.preventDefault(); openAppFrame(app, env) }}>↗</a>
+                            <button className="btn btn-xs" onClick={() => toggleEvars(app.slug, env)}>env</button>
+                            <button className="btn btn-xs" onClick={() => restartApp(app.slug, env)}>↺</button>
+                          </div>
+                        </td>
+                      )
+                    })}
+                    <td>
+                      <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap' }}>
+                        <a className="btn btn-xs" href={`/app?slug=${app.slug}`}>manage</a>
+                        <button className="btn btn-xs" onClick={() => showAppToken(app.slug)}>onboard</button>
                         <button
                           className="btn btn-xs"
-                          onClick={() => toggleEvars(app.slug, env)}
-                        >
-                          env vars
-                        </button>
-                        <button className="btn btn-xs" onClick={() => restartApp(app.slug, env)}>↺ restart</button>
+                          onClick={() => setFrameAncestors(app)}
+                          title={app.frame_ancestors ? `Embedders: ${app.frame_ancestors}` : 'Allowed embedders (default: same origin only)'}
+                        >🖼{app.frame_ancestors ? ' ✓' : ''}</button>
+                        {(app.source_type === 'github' || app.github_url) && (
+                          <>
+                            {app.github_url && (
+                              <a className="btn btn-xs" href={app.github_url} target="_blank" rel="noreferrer" title={app.github_url}>gh ↗</a>
+                            )}
+                            <button
+                              className="btn btn-xs"
+                              onClick={() => checkUpdates(app.slug)}
+                              title="Check GitHub for new commits since last deploy"
+                            >{checkUpdateText[app.slug] || '↑'}</button>
+                            <button
+                              className="btn btn-xs"
+                              onClick={() => registerGithubHook(app.slug)}
+                              title="Register GitHub webhook for auto-deploy"
+                            >hook</button>
+                          </>
+                        )}
+                        <button className="btn btn-xs btn-red" onClick={() => deleteApp(app.slug, app.name)}>✕</button>
                       </div>
-                    </div>
-                  )
-                })}
-              </div>
-
-              {activeEnv && (
-                <div className="evars-panel" id={`evars_${app.slug}`}>
-                  <div style={{ fontWeight: 600, fontSize: '.78rem', marginBottom: 10, textTransform: 'uppercase', letterSpacing: '.5px', color: 'var(--dim)' }}>
-                    {activeEnv === 'production' ? 'Production' : 'Sandbox'} Env Vars
-                  </div>
-                  {(evarData[`${app.slug}:${activeEnv}`] ?? []).map((row, idx) => (
-                    <div key={idx} style={{ display: 'flex', gap: 6, marginBottom: 6, alignItems: 'center' }}>
-                      <input
-                        style={{ flex: 1, padding: '4px 8px', fontSize: '.8rem' }}
-                        value={row.key}
-                        onChange={e => updateEnvVar(app.slug, activeEnv, idx, 'key', e.target.value)}
-                        onBlur={() => saveEnvVar(app.slug, activeEnv, idx)}
-                        placeholder="KEY"
-                      />
-                      <input
-                        style={{ flex: 2, padding: '4px 8px', fontSize: '.8rem', fontFamily: 'monospace' }}
-                        value={row.value}
-                        onChange={e => updateEnvVar(app.slug, activeEnv, idx, 'value', e.target.value)}
-                        onBlur={() => saveEnvVar(app.slug, activeEnv, idx)}
-                        placeholder="value"
-                      />
-                      <button className="btn btn-xs btn-red" onClick={() => deleteEnvVar(app.slug, activeEnv, idx)}>✕</button>
-                    </div>
-                  ))}
-                  <button className="btn btn-xs" style={{ marginTop: 4 }} onClick={() => addEnvVar(app.slug, activeEnv)}>+ Add var</button>
-                </div>
-              )}
-
-            </div>
-          )
-        })}
+                    </td>
+                  </tr>
+                  {activeEnv && (
+                    <tr key={`${app.slug}-evars`}>
+                      <td colSpan={11} className="evars-panel">
+                        <div style={{ fontWeight: 600, fontSize: '.78rem', marginBottom: 10, textTransform: 'uppercase', letterSpacing: '.5px', color: 'var(--dim)' }}>
+                          {activeEnv === 'production' ? 'Production' : 'Sandbox'} Env Vars · {app.name}
+                        </div>
+                        {(evarData[`${app.slug}:${activeEnv}`] ?? []).map((row, idx) => (
+                          <div key={idx} style={{ display: 'flex', gap: 6, marginBottom: 6, alignItems: 'center' }}>
+                            <input
+                              style={{ flex: 1, padding: '4px 8px', fontSize: '.8rem' }}
+                              value={row.key}
+                              onChange={e => updateEnvVar(app.slug, activeEnv, idx, 'key', e.target.value)}
+                              onBlur={() => saveEnvVar(app.slug, activeEnv, idx)}
+                              placeholder="KEY"
+                            />
+                            <input
+                              style={{ flex: 2, padding: '4px 8px', fontSize: '.8rem', fontFamily: 'monospace' }}
+                              value={row.value}
+                              onChange={e => updateEnvVar(app.slug, activeEnv, idx, 'value', e.target.value)}
+                              onBlur={() => saveEnvVar(app.slug, activeEnv, idx)}
+                              placeholder="value"
+                            />
+                            <button className="btn btn-xs btn-red" onClick={() => deleteEnvVar(app.slug, activeEnv, idx)}>✕</button>
+                          </div>
+                        ))}
+                        <button className="btn btn-xs" style={{ marginTop: 4 }} onClick={() => addEnvVar(app.slug, activeEnv)}>+ Add var</button>
+                      </td>
+                    </tr>
+                  )}
+                </>
+              )
+            })}
+            {sorted.length === 0 && (
+              <tr><td colSpan={11} style={{ textAlign: 'center', color: 'var(--dim)', padding: 24 }}>No apps match the filters.</td></tr>
+            )}
+          </tbody>
+        </table>
       </div>
 
       {frame.open && (
