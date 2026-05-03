@@ -186,6 +186,7 @@ export function runAgentNew({
   timeoutMs     = DEFAULT_TIMEOUT,
   addDir        = '/workspace',
   homeDir       = '/home/studio',
+  appSlug,                               // scopes which skills get bind-mounted; required for skill loading
 }) {
   if (!image) throw new Error('runAgentNew: image required');
   if (!workspaceDir) throw new Error('runAgentNew: workspaceDir required');
@@ -204,10 +205,12 @@ export function runAgentNew({
     args.push('-v', `${m.host}:${m.container}${m.mode ? `:${m.mode}` : ''}`);
   }
 
-  // Bind any enabled skills under ~/.claude/skills/ so the CLI's native loader
-  // discovers them. The mount dir is a per-call symlink farm; cleanup runs
-  // when the agent exits/errors/is stopped.
-  const skillsMount = prepareSkillsMount();
+  // Bind skills assigned to this app under ~/.claude/skills/ so the CLI's
+  // native loader discovers them. The mount dir is a per-call symlink farm;
+  // cleanup runs when the agent exits/errors/is stopped. Skips entirely
+  // when no appSlug is passed — callers without a slug get no skills (we
+  // don't fall back to a global set anymore).
+  const skillsMount = prepareSkillsMount(appSlug);
   if (skillsMount) {
     args.push('-v', `${skillsMount.dir}:${homeDir}/.claude/skills:ro`);
   }

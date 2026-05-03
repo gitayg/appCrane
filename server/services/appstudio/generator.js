@@ -292,6 +292,7 @@ export async function generateCode({ jobId, app, enhancementId, plan, summary, a
     apiKey:        process.env.ANTHROPIC_API_KEY,
     model:         GEN_MODEL,
     timeoutMs:     GEN_TIMEOUT_MS + 60000,
+    appSlug:       app.slug,
     labels:        {
       'appcrane.container.type': 'job',
       'enhancement_id':          String(enhancementId),

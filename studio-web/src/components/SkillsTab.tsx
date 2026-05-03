@@ -9,10 +9,18 @@ interface Skill {
   description: string | null
   enabled: 0 | 1
   uploaded_at: string
+  apps?: string[]
+}
+
+interface AppOption {
+  slug: string
+  name: string
 }
 
 export function SkillsTab() {
   const [skills, setSkills] = useState<Skill[]>([])
+  const [apps, setApps] = useState<AppOption[]>([])
+  const [editingSkill, setEditingSkill] = useState<Skill | null>(null)
   const [loading, setLoading] = useState(true)
   const [name, setName] = useState('')
   const [slug, setSlug] = useState('')
@@ -46,13 +54,26 @@ export function SkillsTab() {
 
   function load() {
     setLoading(true)
-    adminApi.get<{ skills: Skill[] }>('/api/skills')
-      .then(d => setSkills(d.skills || []))
-      .catch(() => {})
-      .finally(() => setLoading(false))
+    Promise.all([
+      adminApi.get<{ skills: Skill[] }>('/api/skills').catch(() => ({ skills: [] })),
+      adminApi.get<{ apps: AppOption[] }>('/api/apps').catch(() => ({ apps: [] })),
+    ]).then(([sRes, aRes]) => {
+      setSkills(sRes.skills || [])
+      setApps((aRes.apps || []).map(a => ({ slug: a.slug, name: a.name })))
+    }).finally(() => setLoading(false))
   }
 
   useEffect(() => { load() }, [])
+
+  async function saveAssignment(skillSlug: string, appSlugs: string[]) {
+    try {
+      const r = await adminApi.put<{ apps: string[] }>(`/api/skills/${skillSlug}/apps`, { app_slugs: appSlugs })
+      setSkills(prev => prev.map(s => s.slug === skillSlug ? { ...s, apps: r.apps || [] } : s))
+      setEditingSkill(null)
+    } catch (e) {
+      flash((e as Error).message, false)
+    }
+  }
 
   function flash(text: string, ok: boolean) {
     setMsg({ text, ok })
@@ -141,6 +162,7 @@ export function SkillsTab() {
               <th style={{ textAlign: 'left',  padding: 6, borderBottom: '1px solid var(--border)' }}>Name</th>
               <th style={{ textAlign: 'left',  padding: 6, borderBottom: '1px solid var(--border)' }}>Slug</th>
               <th style={{ textAlign: 'left',  padding: 6, borderBottom: '1px solid var(--border)' }}>Description</th>
+              <th style={{ textAlign: 'left',  padding: 6, borderBottom: '1px solid var(--border)' }}>Apps</th>
               <th style={{ textAlign: 'right', padding: 6, borderBottom: '1px solid var(--border)' }}></th>
             </tr>
           </thead>
@@ -153,6 +175,17 @@ export function SkillsTab() {
                 <td style={{ padding: 6 }}>{s.name}</td>
                 <td style={{ padding: 6, fontFamily: 'monospace', fontSize: '.82rem', color: 'var(--dim)' }}>{s.slug}</td>
                 <td style={{ padding: 6, color: 'var(--dim)', fontSize: '.85rem' }}>{s.description || '—'}</td>
+                <td style={{ padding: 6, fontSize: '.82rem' }}>
+                  {s.apps && s.apps.length
+                    ? <span style={{ color: 'var(--text)' }}>{s.apps.join(', ')}</span>
+                    : <span style={{ color: 'var(--dim)', fontStyle: 'italic' }}>none</span>}
+                  {' '}
+                  <button
+                    className="btn btn-xs"
+                    style={{ marginLeft: 6 }}
+                    onClick={() => setEditingSkill(s)}
+                  >Edit</button>
+                </td>
                 <td style={{ padding: 6, textAlign: 'right' }}>
                   <button className="btn btn-red" onClick={() => remove(s)}>Delete</button>
                 </td>
@@ -194,6 +227,76 @@ export function SkillsTab() {
           </button>
         </div>
       </form>
+
+      {editingSkill && (
+        <AssignAppsModal
+          skill={editingSkill}
+          allApps={apps}
+          onSave={(slugs) => saveAssignment(editingSkill.slug, slugs)}
+          onCancel={() => setEditingSkill(null)}
+        />
+      )}
+    </div>
+  )
+}
+
+interface AssignProps {
+  skill: Skill
+  allApps: AppOption[]
+  onSave: (appSlugs: string[]) => void
+  onCancel: () => void
+}
+
+function AssignAppsModal({ skill, allApps, onSave, onCancel }: AssignProps) {
+  const [selected, setSelected] = useState<Set<string>>(new Set(skill.apps || []))
+
+  function toggle(slug: string) {
+    setSelected(prev => {
+      const next = new Set(prev)
+      if (next.has(slug)) next.delete(slug); else next.add(slug)
+      return next
+    })
+  }
+
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', zIndex: 200,
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+    }} onClick={onCancel}>
+      <div style={{
+        background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 8,
+        padding: 20, minWidth: 320, maxWidth: 480, maxHeight: '80vh', overflow: 'auto',
+      }} onClick={e => e.stopPropagation()}>
+        <h3 style={{ marginTop: 0, marginBottom: 4, fontSize: '1rem' }}>
+          Assign apps to <code>{skill.slug}</code>
+        </h3>
+        <p style={{ color: 'var(--dim)', fontSize: '.8rem', marginBottom: 12 }}>
+          The skill loads into each selected app's Builder, Improve, and Ask containers.
+          Apps not selected get nothing.
+        </p>
+
+        {allApps.length === 0
+          ? <div style={{ color: 'var(--dim)', fontSize: '.85rem' }}>No apps registered yet.</div>
+          : <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 14 }}>
+              {allApps.map(a => (
+                <label key={a.slug} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 6px', borderRadius: 4, cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={selected.has(a.slug)}
+                    onChange={() => toggle(a.slug)}
+                  />
+                  <span>{a.name}</span>
+                  <span style={{ marginLeft: 'auto', fontFamily: 'monospace', fontSize: '.75rem', color: 'var(--dim)' }}>{a.slug}</span>
+                </label>
+              ))}
+            </div>
+        }
+
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+          <button className="btn" onClick={onCancel}>Cancel</button>
+          <button className="btn btn-primary" onClick={() => onSave([...selected])}>Save</button>
+        </div>
+      </div>
     </div>
   )
 }

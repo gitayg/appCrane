@@ -66,7 +66,7 @@ function collectKeyFiles(repoDir, fileTree) {
   return result;
 }
 
-async function callClaude(prompt, repoDir) {
+async function callClaude(prompt, repoDir, appSlug) {
   // Make sure the studio image exists before spawning — without this,
   // a fresh prod fails contextBuilder with exit-125 (no image to run).
   await ensureStudioImage((m) => log.info(`[contextBuilder] ${m}`));
@@ -78,12 +78,13 @@ async function callClaude(prompt, repoDir) {
     apiKey:        process.env.ANTHROPIC_API_KEY,
     model:         MODEL,
     timeoutMs:     parseInt(process.env.APPSTUDIO_CONTEXT_TIMEOUT_MS || '300000', 10),
+    appSlug,
     labels:        { 'appcrane.container.type': 'context' },
   });
   return text;
 }
 
-async function buildContextDoc(repoDir, fileTree, keyFiles) {
+async function buildContextDoc(repoDir, fileTree, keyFiles, appSlug) {
   const filesSection = keyFiles
     .map(f => `### ${f.path}\n\`\`\`\n${f.content}\n\`\`\``)
     .join('\n\n');
@@ -111,10 +112,10 @@ Write a structured technical reference document that covers:
 
 Be concise (aim for ~500-800 words). Focus on what an AI needs to make precise surgical changes without breaking things. Do not include generic advice — only facts specific to this codebase.`;
 
-  return callClaude(prompt, repoDir);
+  return callClaude(prompt, repoDir, appSlug);
 }
 
-async function updateContextDoc(existingDoc, changedFiles, repoDir) {
+async function updateContextDoc(existingDoc, changedFiles, repoDir, appSlug) {
   if (!changedFiles.length) return existingDoc;
 
   const diffs = changedFiles.slice(0, 10).map(({ status, path, newPath }) => {
@@ -135,7 +136,7 @@ ${diffs}
 
 Update the context document to reflect these changes. Update only the sections affected by the changes. Preserve the structure and everything that is still accurate. Return the full updated document.`;
 
-  return callClaude(prompt, repoDir);
+  return callClaude(prompt, repoDir, appSlug);
 }
 
 function getChangedFiles(repoDir, oldHash, newHash) {
@@ -189,7 +190,7 @@ export async function ensureCodebaseContext(appSlug, repoDir) {
     const changedFiles = getChangedFiles(repoDir, cached.git_hash, gitHash);
 
     if (changedFiles !== null) {
-      const updatedDoc = await updateContextDoc(cached.context_doc, changedFiles, repoDir);
+      const updatedDoc = await updateContextDoc(cached.context_doc, changedFiles, repoDir, appSlug);
       saveContext(appSlug, gitHash, fileTree, updatedDoc);
       return { contextDoc: updatedDoc, fileTree, gitHash, fromCache: false, builtAt: new Date().toISOString() };
     }
@@ -199,7 +200,7 @@ export async function ensureCodebaseContext(appSlug, repoDir) {
   // No cache or unreachable old hash — full build
   log.info(`AppStudio context BUILD for ${appSlug} @ ${gitHash?.slice(0, 8)}`);
   const keyFiles = collectKeyFiles(repoDir, fileTree);
-  const contextDoc = await buildContextDoc(repoDir, fileTree, keyFiles);
+  const contextDoc = await buildContextDoc(repoDir, fileTree, keyFiles, appSlug);
   if (gitHash) saveContext(appSlug, gitHash, fileTree, contextDoc);
 
   return { contextDoc, fileTree, gitHash, fromCache: false, builtAt: new Date().toISOString() };

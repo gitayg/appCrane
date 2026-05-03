@@ -109,7 +109,7 @@ function startContainer(slug, workspaceDir, onLog) {
   // Clean up any leftover container with the same name (previous AppCrane process)
   try { execFileSync('docker', ['rm', '-f', containerName], { stdio: 'pipe', timeout: 10000 }); } catch (_) {}
 
-  const skillsMount = prepareSkillsMount();
+  const skillsMount = prepareSkillsMount(slug);
   const args = [
     'run', '-d', '--rm',
     '--name', containerName,

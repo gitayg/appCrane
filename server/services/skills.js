@@ -199,16 +199,67 @@ export function deleteSkill(slug) {
   return true;
 }
 
+// ── App ↔ Skill assignment ───────────────────────────────────────
+
+/** App slugs this skill is assigned to. */
+export function listAppsForSkill(skillSlug) {
+  return getDb()
+    .prepare('SELECT app_slug FROM app_skills WHERE skill_slug = ? ORDER BY app_slug')
+    .all(skillSlug)
+    .map(r => r.app_slug);
+}
+
+/** Skill slugs assigned to this app. */
+export function listSkillsForApp(appSlug) {
+  return getDb()
+    .prepare('SELECT skill_slug FROM app_skills WHERE app_slug = ? ORDER BY skill_slug')
+    .all(appSlug)
+    .map(r => r.skill_slug);
+}
+
+/**
+ * Replace the set of apps assigned to a skill. Validates each slug
+ * against the apps table. Returns the new list.
+ */
+export function setAppsForSkill(skillSlug, appSlugs) {
+  if (!getSkill(skillSlug)) throw new Error('skill not found');
+  if (!Array.isArray(appSlugs)) throw new Error('app_slugs must be an array');
+  const db = getDb();
+  const known = new Set(db.prepare('SELECT slug FROM apps').all().map(r => r.slug));
+  const cleaned = [...new Set(appSlugs.map(s => String(s).trim()).filter(Boolean))];
+  for (const s of cleaned) {
+    if (!known.has(s)) throw new Error(`unknown app: ${s}`);
+  }
+  db.transaction(() => {
+    db.prepare('DELETE FROM app_skills WHERE skill_slug = ?').run(skillSlug);
+    const ins = db.prepare('INSERT INTO app_skills (app_slug, skill_slug) VALUES (?, ?)');
+    for (const s of cleaned) ins.run(s, skillSlug);
+  })();
+  log.info(`Skills: ${skillSlug} assigned to ${cleaned.length} app(s)`);
+  return cleaned;
+}
+
 // ── Mount preparation ────────────────────────────────────────────
 
 // Build a fresh dir of symlinks pointing to all currently enabled skills.
-// Returns { dir, cleanup } or null if no skills are enabled.
+// Returns { dir, cleanup } or null if no skills apply to this app.
 //
 // Caller bind-mounts `dir` into the container as ~/.claude/skills/ and is
 // responsible for invoking cleanup() when done. For long-lived session
 // containers (Builder/Ask) the cleanup happens on session stop.
-export function prepareSkillsMount() {
-  const enabled = getDb().prepare('SELECT slug FROM skills WHERE enabled = 1').all();
+//
+// `appSlug` filters by the app_skills join — only skills that are
+// (a) enabled globally AND (b) assigned to this app land in the mount.
+// Passing no slug returns null (no mount) — every legitimate caller
+// knows which app it's running for, so this catches accidental misuse
+// rather than silently leaking the global set.
+export function prepareSkillsMount(appSlug) {
+  if (!appSlug) return null;
+  const enabled = getDb().prepare(`
+    SELECT s.slug FROM skills s
+    JOIN app_skills aps ON aps.skill_slug = s.slug
+    WHERE s.enabled = 1 AND aps.app_slug = ?
+  `).all(appSlug);
   if (!enabled.length) return null;
 
   mkdirSync(runtimeRoot(), { recursive: true });
