@@ -167,16 +167,24 @@ export function runAgentExec({
   addDir       = '/workspace',
   homeDir      = '/home/studio',
   timeoutMs    = DEFAULT_TIMEOUT,
+  hasAppCredentials = false,  // when true, omit ANTHROPIC_API_KEY so the
+                              // mounted ~/.claude/credentials.json wins
 }) {
   const args = [
     'exec', '-i',
     '--workdir', workdir,
     '-e', `HOME=${homeDir}`,
-    '-e', `ANTHROPIC_API_KEY=${apiKey}`,
+  ];
+  // Same precedence rule as runAgentNew — see comment there. Passing the
+  // env var makes Claude CLI prefer the API key over the OAuth file.
+  if (!hasAppCredentials) {
+    args.push('-e', `ANTHROPIC_API_KEY=${apiKey}`);
+  }
+  args.push(
     containerId,
     'sh', '-c',
     buildClaudeCmd({ prompt, model, resume, addDir, systemPrompt }),
-  ];
+  );
   return new Agent(args, timeoutMs);
 }
 
@@ -222,14 +230,17 @@ export function runAgentNew({
   args.push(`--memory=${memory}`, `--cpus=${cpus}`);
   args.push('--workdir', workdir);
   args.push('-e', `HOME=${homeDir}`);
-  // If the app has its own Claude OAuth credentials, prefer those — but
-  // still pass the API key as a fallback in case the credentials file is
-  // unreadable or expired-and-refresh-failed inside the container.
+  // If the app has its own Claude OAuth credentials, mount the file AND
+  // suppress ANTHROPIC_API_KEY entirely — Claude Code's auth precedence
+  // is API key > credentials.json, so leaving the env var set means the
+  // global key wins and the operator's per-app subscription is ignored
+  // (manifested as "Credit balance is too low" against the wrong account).
   const credsMount = prepareClaudeCredentialsMount(appSlug);
   if (credsMount) {
     args.push('-v', `${credsMount.tmpFile}:${homeDir}/.claude/credentials.json`);
+  } else {
+    args.push('-e', `ANTHROPIC_API_KEY=${apiKey || ''}`);
   }
-  args.push('-e', `ANTHROPIC_API_KEY=${apiKey || ''}`);
   for (const [k, v] of Object.entries(envVars)) args.push('-e', `${k}=${v}`);
   args.push('-v', `${workspaceDir}:/workspace${workspaceMode === 'ro' ? ':ro' : ''}`);
   for (const m of extraMounts) {

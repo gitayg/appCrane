@@ -408,6 +408,7 @@ async function runBuilderTurn(sessionId, state, prompt) {
       prompt:       augmentedPrompt,
       apiKey:       process.env.ANTHROPIC_API_KEY,
       resume:       c.claudeSessionId || undefined,
+      hasAppCredentials: !!c.credsCleanup,
     });
     state.runner = runner;
 
