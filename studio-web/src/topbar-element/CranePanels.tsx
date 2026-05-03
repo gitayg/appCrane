@@ -69,6 +69,11 @@ abstract class CranePanelBase extends HTMLElement {
     const widthAttr = this.getAttribute('width')
     const width     = widthAttr ? Number(widthAttr) || undefined : undefined
     const ifSel     = this.getAttribute('iframe-selector') || ''
+    // Mirror the `open` attribute as a class so host-page CSS that
+    // targets the legacy `#bugPanel.open` / `#askPanel.open` /
+    // `#planPanel.open` selectors keeps applying to the new element
+    // without rewrites in portal.
+    this.classList.toggle('open', open)
     // Re-resolve the iframe element on every render so navigations or
     // env-switches (which destroy + recreate the iframe DOM node) get
     // picked up by the next pick attempt.

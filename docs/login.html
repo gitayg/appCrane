@@ -402,32 +402,9 @@ input:focus{border-color:var(--accent)}
   </div>
 
   <!-- Bug report panel — same pipeline as Request, structured fields -->
-  <div id="bugPanel" class="plan-panel">
-    <div class="plan-header">
-      <span>🐛 Report bug</span>
-      <span id="bugPanelAppLabel" class="ask-app-label"></span>
-      <div class="ask-header-right" style="margin-left:auto">
-        <button class="ask-close" onclick="closeBugPanel()">×</button>
-      </div>
-    </div>
-    <div class="plan-messages" style="padding:14px 16px;overflow-y:auto">
-      <div class="ask-empty" style="text-align:left;margin-top:0;margin-bottom:14px">
-        Found something broken? Describe what went wrong. AppCrane will plan a fix, generate the code, and open a PR — same pipeline as feature requests; track it in the 📋 Jobs panel.
-      </div>
-      <div id="bugResult" style="margin-bottom:12px;display:none"></div>
-      <label class="bug-field-label">What went wrong? <span style="color:#ef4444;font-size:.7rem;margin-left:4px">required</span></label>
-      <textarea id="bugWhat" class="ask-textarea" rows="3" style="width:100%;margin-bottom:8px" placeholder="Briefly describe the bug — what you saw vs what you expected"></textarea>
-      <label class="bug-field-label">Steps to reproduce <span style="color:var(--dim);font-size:.7rem;margin-left:4px;font-style:italic">optional</span></label>
-      <textarea id="bugSteps" class="ask-textarea" rows="3" style="width:100%;margin-bottom:8px" placeholder="1. Go to …&#10;2. Click …&#10;3. Observe …"></textarea>
-      <label class="bug-field-label">Expected behavior <span style="color:var(--dim);font-size:.7rem;margin-left:4px;font-style:italic">optional</span></label>
-      <textarea id="bugExpected" class="ask-textarea" rows="2" style="width:100%;margin-bottom:8px" placeholder="What should have happened instead?"></textarea>
-    </div>
-    <div class="ask-input-area">
-      <div class="ask-input-row" style="justify-content:flex-end">
-        <button id="bugSendBtn" class="ask-send" onclick="sendBugReport()">🐛 Report bug</button>
-      </div>
-    </div>
-  </div>
+  <!-- Bug panel — Custom Element from /docs/shared/crane-topbar.js so the
+       portal and /applications share one implementation (Phase B.2). -->
+  <crane-bug-panel id="bugPanel" iframe-selector="#frameIframe"></crane-bug-panel>
 
   <!-- Pending jobs panel -->
   <div id="jobsPanel" class="jobs-panel">
@@ -1942,7 +1919,10 @@ function _activateDock() {
 function _maybeDeactivateDock() {
   var ask  = document.getElementById('askPanel').classList.contains('open');
   var plan = document.getElementById('planPanel').classList.contains('open');
-  var bug  = document.getElementById('bugPanel')?.classList.contains('open');
+  // Bug panel is a Custom Element — `open` is an attribute. The element
+  // mirrors it as a class too, but check both for robustness.
+  var bugEl = document.getElementById('bugPanel');
+  var bug  = !!bugEl && (bugEl.hasAttribute('open') || bugEl.classList.contains('open'));
   if (!ask && !plan && !bug) {
     document.getElementById('appFrame').classList.remove('dock-active');
   }
@@ -2221,74 +2201,37 @@ function closePlanPanel() {
 // to know it's a bug — the planner reads the prefix and treats it
 // as a fix-this task.
 
+// Bug panel — now backed by <crane-bug-panel> Custom Element from
+// /docs/shared/crane-topbar.js (Phase B.2). The element handles its own
+// chrome, form, submit, and ✕ close (which fires `crane-close`). We
+// wire open / close + dock activate, plus listen for the close event.
 function openBugPanel() {
   if (!currentAppSlug) return;
   closeAskPanel();
   closePlanPanel();
   closeJobsPanel();
-  document.getElementById('bugPanelAppLabel').textContent =
-    document.getElementById('appTopbar')?.getAttribute('app-name') || '';
-  document.getElementById('bugResult').style.display = 'none';
-  document.getElementById('bugPanel').classList.add('open');
+  var el = document.getElementById('bugPanel');
+  if (!el) return;
+  el.setAttribute('slug',     currentAppSlug);
+  el.setAttribute('app-name', document.getElementById('appTopbar')?.getAttribute('app-name') || '');
+  el.setAttribute('open', '');
+  // Match the dock width so the panel and iframe align (the React panel
+  // takes its width from the `width` attribute; portal's --dock-width
+  // already drives the iframe's margin-right via existing CSS).
+  var w = parseInt(localStorage.getItem('cc_dock_width') || '400', 10);
+  if (Number.isFinite(w)) el.setAttribute('width', String(w));
   _activateDock();
-  setTimeout(function() { document.getElementById('bugWhat').focus(); }, 50);
 }
 
 function closeBugPanel() {
-  document.getElementById('bugPanel').classList.remove('open');
+  var el = document.getElementById('bugPanel');
+  if (el) el.removeAttribute('open');
   _maybeDeactivateDock();
 }
 
-async function sendBugReport() {
-  if (!currentAppSlug) return;
-  const what = document.getElementById('bugWhat').value.trim();
-  if (!what) return;
-  const steps = document.getElementById('bugSteps').value.trim();
-  const expected = document.getElementById('bugExpected').value.trim();
-  const lines = ['[BUG]', what];
-  if (steps)    lines.push('', '## Steps to reproduce', steps);
-  if (expected) lines.push('', '## Expected behavior', expected);
-
-  const sendBtn = document.getElementById('bugSendBtn');
-  const resultEl = document.getElementById('bugResult');
-  sendBtn.disabled = true;
-  sendBtn.textContent = 'Submitting…';
-  try {
-    const r = await fetch(API + '/api/enhancements', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + sessionToken },
-      body: JSON.stringify({ message: lines.join('\n'), app_slug: currentAppSlug }),
-    });
-    const d = await r.json();
-    if (!r.ok) throw new Error((d.error && d.error.message) || ('HTTP ' + r.status));
-    resultEl.style.display = 'block';
-    resultEl.innerHTML = ''; // clear before building safely
-    const wrap = document.createElement('div');
-    wrap.className = 'ask-msg assistant';
-    wrap.style.cssText = 'align-self:stretch;max-width:100%';
-    wrap.textContent = '✅ Bug report ' + (d.enhancement_id ? '#' + d.enhancement_id + ' ' : '') + 'submitted.';
-    const note = document.createElement('div');
-    note.style.cssText = 'font-size:.78rem;color:var(--dim);margin-top:6px';
-    note.textContent = 'Track its progress in the 📋 Jobs panel.';
-    wrap.appendChild(note);
-    resultEl.appendChild(wrap);
-    document.getElementById('bugWhat').value = '';
-    document.getElementById('bugSteps').value = '';
-    document.getElementById('bugExpected').value = '';
-    refreshJobsBadge();
-  } catch (e) {
-    resultEl.style.display = 'block';
-    resultEl.innerHTML = '';
-    const errEl = document.createElement('div');
-    errEl.className = 'ask-msg assistant';
-    errEl.style.cssText = 'align-self:stretch;max-width:100%;border-color:#ef4444';
-    errEl.textContent = '⚠️ ' + e.message;
-    resultEl.appendChild(errEl);
-  } finally {
-    sendBtn.disabled = false;
-    sendBtn.textContent = '🐛 Report bug';
-  }
-}
+document.addEventListener('crane-close', function(ev) {
+  if (ev.target && ev.target.id === 'bugPanel') closeBugPanel();
+});
 
 function togglePlanMinimize() {
   var p = document.getElementById('planPanel');
