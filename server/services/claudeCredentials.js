@@ -11,7 +11,7 @@
 //   - Each dispatch gets its own copy so concurrent runs don't fight
 //   - Cleanup wipes the plaintext from disk after the run
 
-import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'fs';
+import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, chownSync } from 'fs';
 import { join, resolve } from 'path';
 import { randomUUID } from 'crypto';
 import { getDb } from '../db.js';
@@ -154,6 +154,14 @@ export function prepareClaudeCredentialsMount(appSlug) {
   mkdirSync(tmpDir, { mode: 0o700 });
   const tmpFile = join(tmpDir, 'credentials.json');
   writeFileSync(tmpFile, payload, { mode: 0o600 });
+  // The studio image runs as UID 1000 (`studio`). The bind-mount preserves
+  // host ownership; without this chown the file is owned by root and the
+  // container user gets EACCES — surfaces inside Claude CLI as
+  // "Not logged in · Please run /login" because credentials.json appears
+  // missing. Best-effort: skip on platforms without root or when the
+  // process can't chown (dev/macOS).
+  try { chownSync(tmpDir,  1000, 1000); } catch (_) {}
+  try { chownSync(tmpFile, 1000, 1000); } catch (_) {}
 
   return {
     tmpFile,
