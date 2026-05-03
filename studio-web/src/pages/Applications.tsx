@@ -839,19 +839,19 @@ function FrameOverlay({ frame, framePanel, setFrame, setFramePanel }: FrameOverl
             <>
               <button
                 type="button"
-                className="btn btn-xs"
+                className={'crane-topbar-btn' + (framePanel === 'ask' ? ' active' : '')}
                 onClick={() => setFramePanel(p => p === 'ask' ? null : 'ask')}
                 title="Ask Claude about this app's source code"
               >🤖 Learn</button>
               <button
                 type="button"
-                className="btn btn-xs"
+                className={'crane-topbar-btn' + (framePanel === 'request' ? ' active' : '')}
                 onClick={() => setFramePanel(p => p === 'request' ? null : 'request')}
                 title="File an enhancement request"
               >💡 Request</button>
               <button
                 type="button"
-                className="btn btn-xs"
+                className={'crane-topbar-btn' + (framePanel === 'bug' ? ' active' : '')}
                 onClick={() => setFramePanel(p => p === 'bug' ? null : 'bug')}
                 title="Report a bug — same Plan / Code / Build pipeline as a request"
               >🐛 Bug</button>

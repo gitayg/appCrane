@@ -710,7 +710,31 @@ code.api-pill { background: var(--surface2); border: 1px solid var(--border); bo
 /* ── App iframe viewer ───────────────────────────── */
 .app-frame-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 50; background: var(--bg); display: flex; flex-direction: column; }
 .app-frame-topbar { display: flex; align-items: center; justify-content: space-between; padding: 6px 14px; background: var(--surface); border-bottom: 1px solid var(--border); flex-shrink: 0; gap: 12px; }
-.app-frame-iframe { flex: 1; border: none; background: #fff; margin-right: var(--frame-dock-width, 0px); transition: margin-right .18s ease; }
+.app-frame-iframe {
+  /* Overlay is flex-direction:column; flex:1 still fills remaining
+     vertical space. Width is explicit so the iframe genuinely shrinks
+     to leave room for the open drawer instead of sitting underneath it. */
+  flex: 1;
+  border: none; background: #fff;
+  width: calc(100% - var(--frame-dock-width, 0px));
+  align-self: flex-start;
+  transition: width .18s ease;
+}
+
+/* Slotted topbar buttons — kept visually identical to the portal's
+   .btn-enhance so the same chrome appears on both surfaces. Overrides
+   the generic .btn / .btn-xs admin button styling for buttons that
+   live inside the <crane-app-topbar slot="actions"> region. */
+.crane-topbar-btn {
+  background: none; color: var(--dim);
+  border: 1px solid var(--border); border-radius: 5px;
+  padding: 4px 12px; cursor: pointer;
+  font-size: .78rem; font-weight: 500; font-family: inherit;
+  width: auto; line-height: 1.2;
+  transition: border-color .15s, color .15s;
+}
+.crane-topbar-btn:hover { border-color: var(--accent); color: var(--accent); }
+.crane-topbar-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
 .app-frame-left  { display: flex; align-items: center; gap: 12px; min-width: 0; flex: 1; }
 .app-frame-right { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 .app-frame-brand { font-weight: 700; font-size: .95rem; }
