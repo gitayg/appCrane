@@ -314,7 +314,12 @@ export function runAgentNew({
   // (manifested as "Credit balance is too low" against the wrong account).
   const credsMount = prepareClaudeCredentialsMount(appSlug);
   if (credsMount) {
+    // Mount at BOTH the legacy ~/.claude/credentials.json AND the
+    // newer dot-prefixed ~/.claude/.credentials.json — recent Claude
+    // Code releases switched paths and we don't want a CLI version
+    // upgrade in the studio image to silently break auth.
     args.push('-v', `${credsMount.tmpFile}:${homeDir}/.claude/credentials.json`);
+    args.push('-v', `${credsMount.tmpFile}:${homeDir}/.claude/.credentials.json`);
     preflight.push({ path: `${homeDir}/.claude/credentials.json`, mode: 'rw', label: 'Claude credentials' });
   } else {
     args.push('-e', `ANTHROPIC_API_KEY=${apiKey || ''}`);

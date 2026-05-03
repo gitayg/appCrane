@@ -131,7 +131,11 @@ function startContainer(slug, workspaceDir, onLog) {
     '--pids-limit=512',
     '-v', `${workspaceDir}:/workspace`,
   ];
+  // Mount creds at BOTH credentials.json and .credentials.json — newer
+  // Claude Code releases moved to the dot-prefixed path. Mount both so a
+  // CLI version bump in the studio image doesn't silently break auth.
   if (credsMount)  args.push('-v', `${credsMount.tmpFile}:/home/studio/.claude/credentials.json`);
+  if (credsMount)  args.push('-v', `${credsMount.tmpFile}:/home/studio/.claude/.credentials.json`);
   if (skillsMount) args.push('-v', `${skillsMount.dir}:/home/studio/.claude/skills:ro`);
   args.push(STUDIO_IMAGE, 'tail', '-f', '/dev/null');
 

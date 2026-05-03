@@ -138,7 +138,10 @@ async function ensureSessionContainer(sessionId, app, onLog) {
   // setting both means the global key wins and the operator's
   // subscription is bypassed.
   if (!credsMount) dockerArgs.push('-e', `ANTHROPIC_API_KEY=${process.env.ANTHROPIC_API_KEY || ''}`);
+  // Mount creds at BOTH credentials.json and .credentials.json — newer
+  // Claude Code releases moved to the dot-prefixed path.
   if (credsMount)  dockerArgs.push('-v', `${credsMount.tmpFile}:/home/studio/.claude/credentials.json`);
+  if (credsMount)  dockerArgs.push('-v', `${credsMount.tmpFile}:/home/studio/.claude/.credentials.json`);
   if (skillsMount) dockerArgs.push('-v', `${skillsMount.dir}:/home/studio/.claude/skills:ro`);
   dockerArgs.push(
     ASK_IMAGE,
