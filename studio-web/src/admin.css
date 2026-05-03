@@ -577,6 +577,17 @@ textarea:focus { border-color: var(--accent); }
 .apps-table .editable:hover { border-color: var(--border); }
 .apps-table .editable:focus { border-color: var(--accent); background: var(--surface); }
 
+/* Per-row drill-down toggle + the expansion row holding sandbox/production
+   controls. Keeps the table tight while leaving the env actions one click
+   away (v1.27.47). */
+.apps-row-toggle { background: none; border: none; color: var(--dim); cursor: pointer; font-size: .9rem; padding: 0 2px; line-height: 1; }
+.apps-row-toggle:hover { color: var(--accent); }
+.apps-row-drill > td { background: var(--bg); border-top: 1px solid var(--border); padding: 8px 12px; }
+.apps-drill-envs { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.apps-drill-env { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; }
+.apps-drill-env-hdr { font-size: .68rem; font-weight: 600; color: var(--dim); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 6px; }
+.apps-drill-env-body { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
 /* ── App cards (applications page) ───────────────────────────────────
    Compact rows: ~50% less vertical space than the previous layout by
    tightening paddings, shrinking the icon, dropping the description

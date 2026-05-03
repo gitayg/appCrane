@@ -100,6 +100,10 @@ export function Applications() {
   // that row's tag cell into a free-text input. Map slug -> draft string.
   const [tagDraft, setTagDraft] = useState<Record<string, string>>({})
 
+  // Drill-down state — sandbox + production controls live in an
+  // expandable row below each app to keep the table compact (v1.27.47).
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({})
+
   const ghUrlRef = useRef<HTMLInputElement>(null)
   const branchRef = useRef<HTMLInputElement>(null)
   const patRef = useRef<HTMLInputElement>(null)
@@ -498,6 +502,7 @@ export function Applications() {
           <thead>
             <tr>
               <th></th>
+              <th></th>
               <th className="th-sort" onClick={() => toggleSort('name')}>Name{sortArrow('name')}</th>
               <th>Description</th>
               <th className="th-sort" onClick={() => toggleSort('visibility')}>Visibility{sortArrow('visibility')}</th>
@@ -505,11 +510,11 @@ export function Applications() {
               <th className="th-sort" onClick={() => toggleSort('ram')}>RAM (MB){sortArrow('ram')}</th>
               <th className="th-sort" onClick={() => toggleSort('cpu')}>CPU (%){sortArrow('cpu')}</th>
               <th className="th-sort" onClick={() => toggleSort('images')}>Images{sortArrow('images')}</th>
-              <th>Sandbox</th>
-              <th>Production</th>
+              <th>Status</th>
               <th>Actions</th>
             </tr>
             <tr className="apps-filter-row">
+              <th></th>
               <th></th>
               <th>
                 <input
@@ -556,7 +561,6 @@ export function Applications() {
               <th></th>
               <th></th>
               <th></th>
-              <th></th>
             </tr>
           </thead>
           <tbody>
@@ -566,9 +570,18 @@ export function Applications() {
               const cpuVal = app.resource_limits?.max_cpu_percent ?? ''
               const imgVal = app.image_retention ?? ''
               const tagDraftVal = tagDraft[app.slug]
+              const isExpanded = !!expanded[app.slug]
               return (
                 <>
                   <tr key={app.slug}>
+                    <td style={{ width: 22 }}>
+                      <button
+                        type="button"
+                        className="apps-row-toggle"
+                        onClick={() => setExpanded(p => ({ ...p, [app.slug]: !p[app.slug] }))}
+                        title={isExpanded ? 'Hide environments' : 'Show sandbox / production'}
+                      >{isExpanded ? '▾' : '▸'}</button>
+                    </td>
                     <td>
                       <div
                         className="app-icon-wrap"
@@ -670,20 +683,20 @@ export function Applications() {
                         style={{ width: 60 }}
                       />
                     </td>
-                    {(['sandbox', 'production'] as const).map(env => {
-                      const ver = versions[app.slug]?.[env === 'production' ? 'prod' : 'sand']
-                      return (
-                        <td key={env}>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
-                            <span className={healthDot(app, env)} />
-                            <span style={{ fontFamily: 'monospace', fontSize: '.72rem', color: 'var(--dim)' }}>{ver ?? '…'}</span>
-                            <a className="env-link" href="#" onClick={e => { e.preventDefault(); openAppFrame(app, env) }}>↗</a>
-                            <button className="btn btn-xs" onClick={() => toggleEvars(app.slug, env)}>env</button>
-                            <button className="btn btn-xs" onClick={() => restartApp(app.slug, env)}>↺</button>
-                          </div>
-                        </td>
-                      )
-                    })}
+                    <td>
+                      {/* Compact dual health summary; expand the row for the
+                          full sandbox / production controls. */}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <span title="Sandbox" style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                          <span className={healthDot(app, 'sandbox')} />
+                          <span style={{ fontSize: '.66rem', color: 'var(--dim)' }}>S</span>
+                        </span>
+                        <span title="Production" style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                          <span className={healthDot(app, 'production')} />
+                          <span style={{ fontSize: '.66rem', color: 'var(--dim)' }}>P</span>
+                        </span>
+                      </div>
+                    </td>
                     <td>
                       <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap' }}>
                         <a className="btn btn-xs" href={`/app?slug=${app.slug}`}>manage</a>
@@ -714,7 +727,33 @@ export function Applications() {
                       </div>
                     </td>
                   </tr>
-                  {activeEnv && (
+                  {isExpanded && (
+                    <tr key={`${app.slug}-envs`} className="apps-row-drill">
+                      <td colSpan={11}>
+                        <div className="apps-drill-envs">
+                          {(['sandbox', 'production'] as const).map(env => {
+                            const ver = versions[app.slug]?.[env === 'production' ? 'prod' : 'sand']
+                            const isProd = env === 'production'
+                            return (
+                              <div key={env} className={`apps-drill-env apps-drill-env-${env}`}>
+                                <div className="apps-drill-env-hdr">
+                                  {isProd ? 'Production' : 'Sandbox'}
+                                </div>
+                                <div className="apps-drill-env-body">
+                                  <span className={healthDot(app, env)} />
+                                  <span style={{ fontFamily: 'monospace', fontSize: '.74rem', color: 'var(--dim)' }}>{ver ?? '…'}</span>
+                                  <a className="env-link" href="#" onClick={e => { e.preventDefault(); openAppFrame(app, env) }}>↗ open</a>
+                                  <button className="btn btn-xs" onClick={() => toggleEvars(app.slug, env)}>env vars</button>
+                                  <button className="btn btn-xs" onClick={() => restartApp(app.slug, env)}>↺ restart</button>
+                                </div>
+                              </div>
+                            )
+                          })}
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                  {isExpanded && activeEnv && (
                     <tr key={`${app.slug}-evars`}>
                       <td colSpan={11} className="evars-panel">
                         <div style={{ fontWeight: 600, fontSize: '.78rem', marginBottom: 10, textTransform: 'uppercase', letterSpacing: '.5px', color: 'var(--dim)' }}>
