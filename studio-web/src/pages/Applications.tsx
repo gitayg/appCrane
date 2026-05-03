@@ -944,6 +944,7 @@ interface FrameOverlayProps {
 
 function FrameOverlay({ frame, framePanel, setFrame, setFramePanel }: FrameOverlayProps) {
   const topbarRef = useRef<HTMLElement>(null)
+  const iframeRef = useRef<HTMLIFrameElement | null>(null)
   const [folded, setFolded] = useState(false)
   // Per-panel last-used width, persisted across open/close so closing
   // and reopening Request keeps the user's chosen width.
@@ -1060,7 +1061,7 @@ function FrameOverlay({ frame, framePanel, setFrame, setFramePanel }: FrameOverl
         </span>
       </crane-app-topbar>
 
-      {frame.url && <iframe className="app-frame-iframe" src={frame.url} title={frame.title} />}
+      {frame.url && <iframe ref={iframeRef} className="app-frame-iframe" src={frame.url} title={frame.title} />}
       {framePanel && (
         <div
           className="frame-dock-resizer"
@@ -1075,6 +1076,7 @@ function FrameOverlay({ frame, framePanel, setFrame, setFramePanel }: FrameOverl
         open={framePanel === 'ask'}
         onClose={() => setFramePanel(null)}
         width={widths.ask}
+        iframeRef={iframeRef}
       />
       <RequestPanel
         slug={frame.slug ?? null}
@@ -1082,6 +1084,7 @@ function FrameOverlay({ frame, framePanel, setFrame, setFramePanel }: FrameOverl
         open={framePanel === 'request'}
         onClose={() => setFramePanel(null)}
         width={widths.request}
+        iframeRef={iframeRef}
       />
       <BugPanel
         slug={frame.slug ?? null}

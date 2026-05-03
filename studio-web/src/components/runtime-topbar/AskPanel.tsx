@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useAskSession } from '../../hooks/useAskSession'
+import { usePeek, PeekChip, peekToPromptPrefix } from '../../hooks/usePeek'
 
 interface Props {
   slug:    string | null | undefined
@@ -7,6 +8,7 @@ interface Props {
   open:    boolean
   onClose: () => void
   width?:  number
+  iframeRef?: React.RefObject<HTMLIFrameElement | null>
 }
 
 /**
@@ -15,10 +17,11 @@ interface Props {
  * picker and the 🎯 element-peek (those are deferred — they need a
  * session-listing UI and a DOM picker overlay respectively).
  */
-export function AskPanel({ slug, appName, open, onClose, width = 380 }: Props) {
+export function AskPanel({ slug, appName, open, onClose, width = 380, iframeRef }: Props) {
   const { messages, working, busy, send, reset } = useAskSession(slug)
   const [input, setInput] = useState('')
   const messagesRef = useRef<HTMLDivElement>(null)
+  const peek = usePeek(iframeRef ?? { current: null })
 
   // Auto-scroll to newest message + working indicator
   useEffect(() => {
@@ -26,12 +29,19 @@ export function AskPanel({ slug, appName, open, onClose, width = 380 }: Props) {
     messagesRef.current.scrollTop = messagesRef.current.scrollHeight
   }, [messages, working.active])
 
+  // Drop pick context when the panel closes.
+  useEffect(() => {
+    if (!open) { peek.stop(); peek.clear() }
+  }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
+
   if (!open) return null
 
   function submit() {
     if (!input.trim() || busy) return
-    send(input)
+    const prefix = peek.ctx ? peekToPromptPrefix(peek.ctx) : ''
+    send(prefix + input)
     setInput('')
+    peek.clear()
   }
 
   return (
@@ -40,6 +50,12 @@ export function AskPanel({ slug, appName, open, onClose, width = 380 }: Props) {
         <span>🤖 Learn</span>
         <span className="ask-app-label">{appName}</span>
         <div className="ask-header-right">
+          <button
+            type="button"
+            className={'ask-sessions-btn' + (peek.active ? ' active' : '')}
+            onClick={() => peek.toggle()}
+            title="Point at an element in the app to add it as context"
+          >🎯</button>
           <button
             type="button"
             className="ask-sessions-btn"
@@ -74,6 +90,7 @@ export function AskPanel({ slug, appName, open, onClose, width = 380 }: Props) {
       )}
 
       <div className="ask-input-area">
+        {peek.ctx && <PeekChip ctx={peek.ctx} onClear={peek.clear} />}
         <div className="ask-input-row">
           <textarea
             className="ask-textarea"
