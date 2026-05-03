@@ -482,6 +482,10 @@ app.get('/applications', (req, res) => sendHtml(res, adminSpa));
 app.get('/users-page', (req, res) => sendHtml(res, adminSpa));
 app.get('/audit-page', (req, res) => sendHtml(res, adminSpa));
 app.get('/enhancements-page', (req, res) => sendHtml(res, adminSpa));
+// AppStudio collapsed in v1.27.38: Requests + Builders are top-level
+// SPA routes; the React router redirects /appstudio → /requests.
+app.get('/requests', (req, res) => sendHtml(res, adminSpa));
+app.get('/builders', (req, res) => sendHtml(res, adminSpa));
 app.get('/appstudio', (req, res) => sendHtml(res, adminSpa));
 app.get('/settings', (req, res) => sendHtml(res, adminSpa));
 app.get('/studio', (req, res) => res.redirect(301, '/appstudio'));
