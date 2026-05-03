@@ -209,6 +209,92 @@ export function updateSkill(slug, { enabled, name, description }) {
   return getSkill(slug);
 }
 
+/**
+ * Replace the on-disk file set for an existing skill. Wipes the current
+ * bundle and writes the new files. Caller controls whether the SKILL.md
+ * description gets re-derived from frontmatter (pass syncDescription=true
+ * when the operator hasn't manually overridden it).
+ */
+export function replaceSkillFiles(slug, files, { syncDescription } = {}) {
+  const row = getSkill(slug);
+  if (!row) throw new Error('skill not found');
+  if (!files || typeof files !== 'object') throw new Error('files required');
+  if (!files['SKILL.md']) throw new Error('SKILL.md missing from upload');
+
+  const dir = skillDir(slug);
+  // Wipe and rewrite — keeps the row + its app_skills assignments intact.
+  try { rmSync(dir, { recursive: true, force: true }); } catch (_) {}
+  mkdirSync(dir, { recursive: true });
+  for (const [relPath, buf] of Object.entries(files)) {
+    if (relPath.includes('..') || relPath.startsWith('/')) {
+      throw new Error(`unsafe path in upload: ${relPath}`);
+    }
+    const dest = join(dir, relPath);
+    mkdirSync(join(dest, '..'), { recursive: true });
+    writeFileSync(dest, buf);
+  }
+
+  if (syncDescription) {
+    const skillMd = files['SKILL.md'];
+    const text = Buffer.isBuffer(skillMd) ? skillMd.toString('utf8') : String(skillMd || '');
+    const fm = parseSkillFrontmatter(text);
+    if (fm.description) {
+      getDb().prepare('UPDATE skills SET description = ? WHERE slug = ?')
+        .run(fm.description.trim() || null, slug);
+    }
+  }
+  log.info(`Skills: replaced bundle for '${slug}' (${Object.keys(files).length} files)`);
+  return getSkill(slug);
+}
+
+/** Replace via plain markdown content (single SKILL.md). */
+export function replaceSkillFromMarkdown(slug, content, opts) {
+  if (!content?.trim()) throw new Error('content required');
+  return replaceSkillFiles(slug, { 'SKILL.md': content }, opts);
+}
+
+// ── URL fetching ──────────────────────────────────────────────────
+
+/**
+ * Rewrite a GitHub blob URL to the raw equivalent so operators can paste
+ * either form. Other URLs pass through unchanged.
+ *   https://github.com/owner/repo/blob/main/path  →  https://raw.githubusercontent.com/owner/repo/main/path
+ */
+export function normalizeFetchUrl(url) {
+  const m = String(url || '').match(
+    /^https?:\/\/github\.com\/([^/]+)\/([^/]+)\/blob\/([^/]+)\/(.+)$/,
+  );
+  if (!m) return String(url || '');
+  return `https://raw.githubusercontent.com/${m[1]}/${m[2]}/${m[3]}/${m[4]}`;
+}
+
+/**
+ * Fetch a SKILL.md (or .zip bundle) from a public URL. Returns a files
+ * map ready for createSkillFromFiles / replaceSkillFiles. Detects format
+ * by URL extension first, then by content sniff (PK\x03\x04 zip header).
+ */
+export async function fetchSkillFromUrl(url) {
+  const target = normalizeFetchUrl(url);
+  if (!/^https?:\/\//.test(target)) throw new Error('URL must be http(s)');
+  let res;
+  try {
+    res = await fetch(target, { redirect: 'follow' });
+  } catch (e) {
+    throw new Error(`fetch failed: ${e.message}`);
+  }
+  if (!res.ok) throw new Error(`fetch failed: HTTP ${res.status}`);
+  const buf = Buffer.from(await res.arrayBuffer());
+
+  const lower = target.toLowerCase();
+  const looksZip = buf.length >= 4 && buf[0] === 0x50 && buf[1] === 0x4b && buf[2] === 0x03 && buf[3] === 0x04;
+  if (looksZip || lower.endsWith('.zip')) {
+    // Defer to existing unzip path — caller wires it via the route handler.
+    return { kind: 'zip', buffer: buf };
+  }
+  // Treat anything else as SKILL.md text.
+  return { kind: 'md', content: buf.toString('utf8') };
+}
+
 export function deleteSkill(slug) {
   const row = getSkill(slug);
   if (!row) return false;
