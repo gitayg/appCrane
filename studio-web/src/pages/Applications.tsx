@@ -807,8 +807,18 @@ function FrameOverlay({ frame, framePanel, setFrame, setFramePanel }: FrameOverl
     }
   }, [frame.url, frame.appName, setFrame])
 
+  // Shrink the iframe to leave room for the active drawer instead of
+  // letting the drawer overlap the app. Width matches each panel's own
+  // declared width — keep them in sync if either changes.
+  const dockWidth =
+    framePanel === 'bug'     ? 460 :
+    framePanel === 'request' ? 420 :
+    framePanel === 'ask'     ? 380 : 0
   return (
-    <div className="app-frame-overlay">
+    <div
+      className="app-frame-overlay"
+      style={{ ['--frame-dock-width' as string]: `${dockWidth}px` } as React.CSSProperties}
+    >
       <crane-app-topbar
         ref={topbarRef}
         app-name={frame.appName ?? frame.title ?? ''}
