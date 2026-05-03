@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { readFileSync, existsSync } from 'fs';
 import { join, resolve } from 'path';
+import { randomBytes } from 'crypto';
 import { getDb } from '../db.js';
 import { hashApiKey } from '../services/encryption.js';
 import { AppError } from '../utils/errors.js';
@@ -11,7 +12,11 @@ import log from '../utils/logger.js';
 
 const router = Router();
 
-const pendingJobs = new Map(); // jobId -> { logs, clients, done, answer, error }
+// jobId -> { logs, clients, done, answer, error, ownerUserId }
+// jobId is an opaque 128-bit base64url handle from crypto.randomBytes —
+// see feedback memory "Opaque token handles". Ownership is checked on the
+// SSE stream as defense in depth.
+const pendingJobs = new Map();
 
 function resolveUser(req) {
   const authHeader = req.headers.authorization || '';
@@ -86,8 +91,8 @@ router.post('/:appSlug', async (req, res) => {
     }
   } catch (_) {}
 
-  const jobId = Date.now();
-  const jobState = { logs: [], clients: new Set(), done: false, answer: null, error: null, sessionId, tokens: 0 };
+  const jobId = randomBytes(16).toString('base64url');
+  const jobState = { logs: [], clients: new Set(), done: false, answer: null, error: null, sessionId, tokens: 0, ownerUserId: user.userId };
   pendingJobs.set(jobId, jobState);
 
   runAskJob({ sessionId, app, question: question.trim(), history, agentContext, contextDoc,
@@ -120,11 +125,21 @@ router.post('/:appSlug', async (req, res) => {
 });
 
 // GET /api/ask/stream/:jobId — SSE stream
+// Auth: EventSource cannot set headers, so accept ?token= query upgrade like
+// /api/coder and /api/agents. Ownership check on top of unguessable jobId is
+// defense in depth — see feedback memory "Opaque token handles".
 router.get('/stream/:jobId', (req, res) => {
-  const jobId = parseInt(req.params.jobId, 10);
-  if (isNaN(jobId)) return res.status(400).json({ error: 'Invalid job id' });
+  if (req.query.token && !req.headers.authorization) req.headers.authorization = `Bearer ${req.query.token}`;
+  const user = resolveUser(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+
+  const jobId = String(req.params.jobId || '');
+  if (!/^[A-Za-z0-9_-]{16,64}$/.test(jobId)) return res.status(400).json({ error: 'Invalid job id' });
   const job = pendingJobs.get(jobId);
   if (!job) return res.status(404).json({ error: 'Job not found or already completed' });
+  if (job.ownerUserId !== user.userId && user.role !== 'admin') {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');

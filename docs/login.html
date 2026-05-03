@@ -2062,7 +2062,7 @@ async function sendAskQuestion() {
     if (!r.ok) throw new Error((d.error && d.error.message) || 'Failed');
     _askSessionId = d.session_id;
 
-    const es = new EventSource(API + '/api/ask/stream/' + d.job_id);
+    const es = new EventSource(API + '/api/ask/stream/' + encodeURIComponent(d.job_id) + '?token=' + encodeURIComponent(sessionToken));
     var esErrCount = 0;
     es.onmessage = function(e) {
       esErrCount = 0;
