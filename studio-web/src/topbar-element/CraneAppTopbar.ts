@@ -99,7 +99,6 @@ button.fold:hover { color: var(--text, #e4e4e7); border-color: var(--accent, #3b
 :host([folded]) ::slotted([slot="actions"]),
 :host([folded]) .right > .btn { display: none; }
 :host([folded]) .bar { padding: 0 8px; }
-:host([folded]) .brand { font-size: .72rem; }
 `
 
 function esc(s: string | null | undefined): string {
@@ -191,8 +190,10 @@ export class CraneAppTopbar extends HTMLElement {
       : `<button class="fold" data-action="fold" title="Hide topbar">▴</button>`
 
     if (folded) {
+      // Bar collapses to just the unfold chevron — no logo, no slot, no name.
+      // Lets the iframe reclaim almost all the vertical space.
       return `<div class="bar folded">
-        <div class="left"><span class="brand">App<span>Crane</span></span></div>
+        <div class="left"></div>
         <div class="right">${foldChev}</div>
       </div>`
     }
