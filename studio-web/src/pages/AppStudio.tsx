@@ -516,10 +516,34 @@ interface DetailViewProps {
 }
 
 function DetailView({ enh, trace, onBack, onAction, onDeleteJob, onRetryJob }: DetailViewProps) {
+  function onRedo() {
+    const resetBranch = confirm(
+      `Redo "${enh.message.slice(0, 60)}${enh.message.length > 60 ? '…' : ''}"?\n\n` +
+      `Wipes the current plan + comments and queues a fresh plan job.\n\n` +
+      `Click OK to keep the existing branch (the next coder run continues on top).\n` +
+      `Click Cancel to abort. To also reset the branch to a fresh one, use the "Redo + reset branch" option from a follow-up.`,
+    )
+    if (!resetBranch) return
+    onAction(enh.id, 'redo')
+  }
+  function onRedoReset() {
+    if (!confirm(`Redo + RESET BRANCH for "${enh.message.slice(0, 60)}${enh.message.length > 60 ? '…' : ''}"?\n\nClears the linked branch_name so the next coder run starts on a fresh branch. Existing remote branch (and any open PR) is left alone.`)) return
+    onAction(enh.id, 'redo', { reset_branch: true })
+  }
   return (
     <div>
-      <div style={{ marginBottom: 16 }}>
+      <div style={{ marginBottom: 16, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
         <button className="btn btn-sm" onClick={onBack}>← Back to list</button>
+        <button
+          className="btn btn-sm"
+          onClick={onRedo}
+          title="Re-run from scratch — wipes plan + comments, queues fresh plan job. Keeps the existing branch."
+        >🔁 Redo</button>
+        <button
+          className="btn btn-sm"
+          onClick={onRedoReset}
+          title="Redo AND clear branch_name so coder starts on a fresh branch (existing remote branch / PR untouched)."
+        >🔁 Redo + reset branch</button>
       </div>
       <div className="detail-panel">
         <div style={{ fontWeight: 700, fontSize: '1.05rem', marginBottom: 10, wordBreak: 'break-word' }}>
