@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
-import { useEnhancementSubmit } from '../../hooks/useEnhancementSubmit'
 import { useMe, isAdmin } from '../../hooks/useMe'
+import { usePlanFlow } from '../../hooks/usePlanFlow'
+import { usePeek, PeekChip, peekToPromptPrefix } from '../../hooks/usePeek'
 
 interface Props {
   slug:    string | null | undefined
@@ -8,32 +9,40 @@ interface Props {
   open:    boolean
   onClose: () => void
   width?:  number
+  iframeRef?: React.RefObject<HTMLIFrameElement | null>
 }
 
 /**
- * Right drawer for "Request" — file an enhancement request against the
- * app. Matches the portal's planPanel UX visually but trims the
- * planner/refine loop: submit goes straight to /api/enhancements and the
- * Jobs button already surfaces status. Plan-review/refine UI is a
- * follow-up.
+ * Right drawer for "Request" — file an enhancement request, watch the
+ * planner stream the plan inline, then click Build to confirm. Mirrors
+ * the portal's planPanel UX (sendPlanRequest → _streamPlan → buildFromPlan).
+ *
+ * Pick-element (🎯) injects a hover/click overlay into the embedded
+ * iframe and captures CSS-selector + text context to prepend to the
+ * prompt. Same-origin only (AppCrane apps live under the same host).
  */
-export function RequestPanel({ slug, appName, open, onClose, width = 420 }: Props) {
-  const { submit, busy, last, reset } = useEnhancementSubmit(slug)
+export function RequestPanel({ slug, appName, open, onClose, width = 420, iframeRef }: Props) {
   const me = useMe()
   const canBuild = isAdmin(me)
   const [text, setText] = useState('')
+  const plan = usePlanFlow(slug)
+  const peek = usePeek(iframeRef ?? { current: null })
 
   useEffect(() => {
-    if (!open) { setText(''); reset() }
-  }, [open, reset])
+    if (!open) { setText(''); peek.stop(); peek.clear(); plan.reset() }
+  }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!open) return null
 
-  async function onSubmit() {
-    if (!text.trim() || busy) return
-    const r = await submit(text)
-    if (r.ok) setText('')
+  function onSubmit() {
+    if (!text.trim() || plan.state.busy) return
+    const prefix = peek.ctx ? peekToPromptPrefix(peek.ctx) : ''
+    plan.submit(prefix + text.trim())
+    setText('')
+    peek.clear()
   }
+
+  const w = plan.state.working
 
   return (
     <div className="ask-panel open" style={{ width }}>
@@ -41,33 +50,69 @@ export function RequestPanel({ slug, appName, open, onClose, width = 420 }: Prop
         <span>💡 Request</span>
         <span className="ask-app-label">{appName}</span>
         <div className="ask-header-right">
+          <button
+            type="button"
+            className={'ask-sessions-btn' + (peek.active ? ' active' : '')}
+            onClick={() => peek.toggle()}
+            title="Point at an element in the app to add it as context"
+          >🎯</button>
           <button type="button" className="ask-close" onClick={onClose}>×</button>
         </div>
       </div>
 
       <div className="ask-messages">
-        <div className="ask-empty">
-          Describe an enhancement or feature you want for this app. AppCrane
-          will plan it, generate code, and open a PR — you can track progress
-          in the 📋 Jobs panel.
-        </div>
+        {!plan.state.busy && !plan.state.planReady && !plan.state.error && (
+          <div className="ask-empty">
+            Describe an enhancement or feature you want for this app. AppCrane
+            will plan it, then you can click <strong>Build</strong> to generate
+            the code and open a PR.
+          </div>
+        )}
 
-        {last && last.ok && (
-          <div className="ask-msg assistant" style={{ alignSelf: 'stretch', maxWidth: '100%' }}>
-            ✅ Request {last.enhancementId ? `#${last.enhancementId} ` : ''}submitted.
-            <div style={{ fontSize: '.78rem', color: 'var(--dim)', marginTop: 6 }}>
-              Track its progress in the 📋 Jobs panel.
+        {(plan.state.busy || w.elapsedSec > 0) && (
+          <div className="ask-msg assistant plan-working">
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '.82rem' }}>
+              <span className="az-spinner" />
+              <span>{w.text || 'Working…'}</span>
+              {w.elapsedSec > 0 && <span style={{ color: 'var(--dim)', marginLeft: 'auto' }}>{w.elapsedSec}s</span>}
             </div>
           </div>
         )}
-        {last && !last.ok && last.message && (
+
+        {plan.state.planText && (
+          <div className="ask-msg assistant" style={{ alignSelf: 'stretch', maxWidth: '100%' }}>
+            <div style={{ fontWeight: 600, fontSize: '.78rem', color: 'var(--dim)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.5px' }}>
+              Plan #{plan.state.enhId}
+            </div>
+            <pre style={{ whiteSpace: 'pre-wrap', margin: 0, fontFamily: 'inherit', fontSize: '.85rem', lineHeight: 1.45 }}>{plan.state.planText}</pre>
+          </div>
+        )}
+
+        {plan.state.error && (
           <div className="ask-msg assistant" style={{ alignSelf: 'stretch', maxWidth: '100%', borderColor: '#ef4444' }}>
-            ⚠️ {last.message}
+            ⚠️ {plan.state.error}
+          </div>
+        )}
+
+        {plan.state.built && !plan.state.error && (
+          <div className="ask-msg assistant" style={{ alignSelf: 'stretch', maxWidth: '100%' }}>
+            ✅ Build queued — track progress in the 📋 Jobs panel.
           </div>
         )}
       </div>
 
       <div className="ask-input-area">
+        {peek.ctx && <PeekChip ctx={peek.ctx} onClear={peek.clear} />}
+        {plan.state.planReady && canBuild && !plan.state.built && (
+          <div className="ask-input-row" style={{ justifyContent: 'flex-end', padding: '0 0 6px' }}>
+            <button
+              type="button"
+              className="ask-send plan-build-btn"
+              onClick={() => plan.build()}
+              disabled={plan.state.built}
+            >🔨 Build</button>
+          </div>
+        )}
         <div className="ask-input-row">
           <textarea
             className="ask-textarea"
@@ -76,21 +121,19 @@ export function RequestPanel({ slug, appName, open, onClose, width = 420 }: Prop
             onKeyDown={e => {
               if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); onSubmit() }
             }}
-            placeholder="Describe the enhancement or feature you want…"
+            placeholder={plan.state.planReady ? 'Refine the plan or describe a new request…' : 'Describe the enhancement or feature you want…'}
             rows={3}
-            disabled={busy}
+            disabled={plan.state.busy}
           />
           <button
             type="button"
             className="ask-send"
             onClick={onSubmit}
-            disabled={busy || !text.trim()}
+            disabled={plan.state.busy || !text.trim()}
             title={canBuild
-              ? 'Admin: AppCrane will plan, code, and open a PR automatically'
-              : 'Submit for review by an admin — they decide what to build'}
-          >{busy
-            ? 'Submitting…'
-            : (canBuild ? '🔨 Build' : '📤 Submit for Review')}</button>
+              ? 'Plan first — review the proposal, then Build.'
+              : 'Submit for review by an admin'}
+          >{plan.state.busy ? '…' : (canBuild ? '📋 Plan' : '📤 Submit')}</button>
         </div>
       </div>
     </div>
