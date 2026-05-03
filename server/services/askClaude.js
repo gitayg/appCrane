@@ -129,11 +129,15 @@ async function ensureSessionContainer(sessionId, app, onLog) {
     '--cap-drop=ALL',
     '--security-opt', 'no-new-privileges:true',
     '--pids-limit=256',
-    '-e', `ANTHROPIC_API_KEY=${process.env.ANTHROPIC_API_KEY || ''}`,
     '-e', `ASK_MODEL=${ASK_MODEL}`,
     '-e', `BRANCH=${branch}`,
     '-v', `${dir}:/studio:ro`,
   ];
+  // Only set ANTHROPIC_API_KEY when no per-app OAuth credentials are
+  // mounted — Claude CLI prefers the env var over credentials.json so
+  // setting both means the global key wins and the operator's
+  // subscription is bypassed.
+  if (!credsMount) dockerArgs.push('-e', `ANTHROPIC_API_KEY=${process.env.ANTHROPIC_API_KEY || ''}`);
   if (credsMount)  dockerArgs.push('-v', `${credsMount.tmpFile}:/home/studio/.claude/credentials.json`);
   if (skillsMount) dockerArgs.push('-v', `${skillsMount.dir}:/home/studio/.claude/skills:ro`);
   dockerArgs.push(
@@ -175,6 +179,7 @@ export async function runAskJob({ sessionId, app, question, history, agentContex
       apiKey: process.env.ANTHROPIC_API_KEY,
       model: ASK_MODEL,
       timeoutMs: ASK_TIMEOUT_MS + 60000,
+      hasAppCredentials: !!session.credsCleanup,
     });
 
     runner.on('data', (ev) => {
