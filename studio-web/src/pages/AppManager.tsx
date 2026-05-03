@@ -385,7 +385,9 @@ interface ClaudeCredsInfo {
   malformed?: boolean
   expiresAt?: string | null
   accountUuid?: string | null
-  accessTokenTail?: string | null
+  // No token field — once uploaded, the secret is write-only. The card
+  // only ever surfaces metadata (account UUID + expiry); the operator
+  // can replace or delete but can't see or download the stored value.
 }
 
 interface ClaudeCredsCardProps {
@@ -494,8 +496,8 @@ function ClaudeCredsCard({ slug, reload, onMsg }: ClaudeCredsCardProps) {
         <div style={{ background: 'var(--surface2)', border: '1px solid var(--border)', borderRadius: 6, padding: '10px 12px', marginBottom: 12, fontSize: '.82rem' }}>
           <div><strong style={{ color: 'var(--green)' }}>✓ Configured</strong></div>
           {info.malformed && <div style={{ color: 'var(--red)', marginTop: 4 }}>⚠ Stored payload is unreadable — re-upload to fix.</div>}
-          {info.accessTokenTail && <div style={{ color: 'var(--dim)', marginTop: 4 }}>Token tail: <code>{info.accessTokenTail}</code></div>}
-          {info.accountUuid && <div style={{ color: 'var(--dim)', marginTop: 2 }}>Account: <code style={{ fontSize: '.72rem' }}>{info.accountUuid}</code></div>}
+          <div style={{ color: 'var(--dim)', marginTop: 4, fontSize: '.72rem', fontStyle: 'italic' }}>Token is write-only — replace or delete; cannot be viewed or downloaded.</div>
+          {info.accountUuid && <div style={{ color: 'var(--dim)', marginTop: 4 }}>Account: <code style={{ fontSize: '.72rem' }}>{info.accountUuid}</code></div>}
           {info.expiresAt && <div style={{ color: 'var(--dim)', marginTop: 2 }}>Access token expires: {info.expiresAt}</div>}
         </div>
       ) : (
