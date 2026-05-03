@@ -5,7 +5,6 @@ import { Layout } from './components/Layout'
 import { Login } from './components/Login'
 import { Dashboard } from './pages/Dashboard'
 import { Applications } from './pages/Applications'
-import { Users } from './pages/Users'
 import { AuditLog } from './pages/AuditLog'
 import { AppStudio } from './pages/AppStudio'
 import { Settings } from './pages/Settings'
@@ -16,12 +15,13 @@ const STUDIO_SUB = [
   { id: 'requests', label: 'Requests', href: '#requests' },
   { id: 'builders', label: 'Builders', href: '#builders' },
   { id: 'skills',   label: 'Skills',   href: '#skills' },
+  { id: 'branding', label: 'Branding', href: '#branding' },
 ]
 
 const SETTINGS_SUB = [
-  { id: 'branding',  label: 'Branding',  href: '#branding' },
-  { id: 'security',  label: 'Security',  href: '#security' },
   { id: 'appstudio', label: 'AppStudio', href: '#appstudio' },
+  { id: 'security',  label: 'Security',  href: '#security' },
+  { id: 'users',     label: 'Users',     href: '#users' },
 ]
 
 function useHash() {
@@ -38,7 +38,7 @@ function AppStudioRoute() {
   const hash = useHash()
   // Back-compat: old #library and #studio hashes both map to the merged Builders view
   const remapped = (hash === 'library' || hash === 'studio') ? 'builders' : hash
-  const activeSub = ['requests', 'builders', 'skills'].includes(remapped) ? remapped : 'requests'
+  const activeSub = ['requests', 'builders', 'skills', 'branding'].includes(remapped) ? remapped : 'requests'
   return (
     <Layout subItems={STUDIO_SUB} activeSub={activeSub}>
       <AppStudio />
@@ -48,7 +48,7 @@ function AppStudioRoute() {
 
 function SettingsRoute() {
   const hash = useHash()
-  const activeSub = ['branding', 'security', 'appstudio'].includes(hash) ? hash : 'appstudio'
+  const activeSub = ['appstudio', 'security', 'users'].includes(hash) ? hash : 'appstudio'
   return (
     <Layout subItems={SETTINGS_SUB} activeSub={activeSub}>
       <Settings />
@@ -74,7 +74,9 @@ export function AdminApp() {
           <Route path="/" element={<Navigate to="/dashboard" replace />} />
           <Route path="/dashboard" element={<Layout><Dashboard /></Layout>} />
           <Route path="/applications" element={<Layout><Applications /></Layout>} />
-          <Route path="/users-page" element={<Layout><Users /></Layout>} />
+          {/* Users moved to Settings → Users in v1.27.27. Keep the old
+              path as a redirect so any bookmarked URLs still work. */}
+          <Route path="/users-page" element={<Navigate to="/settings#users" replace />} />
           <Route path="/audit-page" element={<Layout><AuditLog /></Layout>} />
           <Route path="/appstudio" element={<AppStudioRoute />} />
           <Route path="/settings" element={<SettingsRoute />} />

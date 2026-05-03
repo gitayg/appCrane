@@ -725,6 +725,10 @@ All commands use your API key: `-H "X-API-Key: $KEY"`
 
 **Read branding guidelines before building any UI — treat it like reading this agent guide.**
 
+Operators set the brand text under **AppStudio → Branding** in the admin UI
+(was Settings → Branding before v1.27.27). The endpoint below is unchanged
+either way — agents always read from the same path.
+
 Just as you fetched this guide at the start of your session, fetch the branding settings now:
 
 ```bash
