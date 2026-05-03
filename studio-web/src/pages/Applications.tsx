@@ -20,6 +20,8 @@ interface App {
   github_url?: string
   source_type?: string
   has_icon?: boolean
+  has_claude_credentials?: boolean
+  has_github_token?: boolean
   resource_limits?: { max_ram_mb?: number; max_cpu_percent?: number }
   image_retention?: number
   frame_ancestors?: string | null
@@ -480,6 +482,12 @@ export function Applications() {
                       <span>{app.name}</span>
                       <span className={visBadgeClass(app.visibility)}>{app.visibility ?? 'hidden'}</span>
                       {app.category && <span className="cat-badge">{app.category}</span>}
+                      {app.has_claude_credentials && (
+                        <span
+                          className="claude-badge"
+                          title="This app has its own Claude OAuth credentials — AI work bills to that account, not the global ANTHROPIC_API_KEY"
+                        >🔑 Claude</span>
+                      )}
                     </div>
                     {app.description && <div className="card-desc">{app.description}</div>}
                     {app.resource_limits && (
