@@ -517,14 +517,6 @@ interface DetailViewProps {
 }
 
 function DetailView({ enh, trace, openJobs, onToggleJob, onBack, onAction, onDeleteJob, onRetryJob }: DetailViewProps) {
-  const plan = enh.ai_plan
-
-  async function handlePlanFeedback(id: number) {
-    const comment = prompt('Describe your requested changes:')
-    if (!comment) return
-    onAction(id, 'plan-feedback', { comment })
-  }
-
   return (
     <div>
       <div style={{ marginBottom: 16 }}>
@@ -546,147 +538,365 @@ function DetailView({ enh, trace, openJobs, onToggleJob, onBack, onAction, onDel
           )}
         </div>
 
-        <div style={{ fontSize: '.88rem', lineHeight: 1.6, color: 'var(--text)', marginBottom: 16, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
-          {enh.message}
-        </div>
-
-        {plan && (
-          <div style={{ background: 'var(--surface2)', border: '1px solid var(--border)', borderRadius: 7, padding: '12px 16px', marginBottom: 16, fontSize: '.85rem' }}>
-            <div style={{ fontWeight: 700, marginBottom: 8, color: 'var(--dim)', fontSize: '.72rem', textTransform: 'uppercase', letterSpacing: '.5px' }}>AI Plan</div>
-            {plan.summary && <p style={{ marginBottom: 8, lineHeight: 1.5 }}>{plan.summary}</p>}
-            {plan.files_to_change?.length > 0 && (
-              <div style={{ marginBottom: 8 }}>
-                <div style={{ fontWeight: 600, fontSize: '.78rem', marginBottom: 4, color: 'var(--dim)' }}>Files to change</div>
-                <ul style={{ margin: 0, paddingLeft: 18 }}>
-                  {plan.files_to_change.map((f: string, i: number) => <li key={i} style={{ fontFamily: 'monospace', fontSize: '.78rem', color: 'var(--dim)' }}>{f}</li>)}
-                </ul>
-              </div>
-            )}
-            {plan.test_files?.length > 0 && (
-              <div style={{ marginBottom: 8 }}>
-                <div style={{ fontWeight: 600, fontSize: '.78rem', marginBottom: 4, color: 'var(--dim)' }}>Test files</div>
-                <ul style={{ margin: 0, paddingLeft: 18 }}>
-                  {plan.test_files.map((f: string, i: number) => <li key={i} style={{ fontFamily: 'monospace', fontSize: '.78rem', color: 'var(--dim)' }}>{f}</li>)}
-                </ul>
-              </div>
-            )}
-            {plan.risks && <div style={{ marginBottom: 8 }}><span style={{ fontWeight: 600, color: 'var(--dim)', fontSize: '.78rem' }}>Risks: </span>{plan.risks}</div>}
-            {plan.test_plan && <div><span style={{ fontWeight: 600, color: 'var(--dim)', fontSize: '.78rem' }}>Test plan: </span>{plan.test_plan}</div>}
-          </div>
-        )}
-
-        {enh.pr_url && (
-          <div style={{ marginBottom: 16 }}>
-            <a href={enh.pr_url} target="_blank" rel="noreferrer" className="btn btn-sm">View PR ↗</a>
-          </div>
-        )}
-
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-          {(enh.status === 'new' || enh.status === 'selected') && (
-            <button className="btn btn-accent btn-sm" onClick={() => onAction(enh.id, 'plan')}>Plan with AI</button>
-          )}
-          {enh.status === 'pending_user_review_plan' && (
-            <>
-              <button className="btn btn-accent btn-sm" onClick={() => onAction(enh.id, 'approve-plan')}>Approve plan + code it</button>
-              <button className="btn btn-sm" onClick={() => handlePlanFeedback(enh.id)}>Request changes</button>
-            </>
-          )}
-          {enh.status === 'sandbox_ready' && (
-            <button className="btn btn-accent btn-sm" onClick={() => onAction(enh.id, 'approve-sandbox')}>Ship it</button>
-          )}
-          {enh.status !== 'done' && enh.status !== 'merged' && enh.status !== 'auto_failed' && (
-            <button
-              className="btn btn-danger btn-sm"
-              onClick={() => { if (confirm('Reject this request?')) onAction(enh.id, 'reject') }}
-            >
-              Reject
-            </button>
-          )}
-        </div>
+        <PhaseTabs
+          enh={enh}
+          trace={trace}
+          openJobs={openJobs}
+          onToggleJob={onToggleJob}
+          onAction={onAction}
+          onRetryJob={onRetryJob}
+          onDeleteJob={onDeleteJob}
+        />
       </div>
 
-      <div className="trace-panel">
-        <div className="trace-heading">
-          {trace?.active ? (
-            <>
-              <span className="trace-pulse" />
-              Live trace — job running
-            </>
-          ) : (
-            `Trace — ${trace?.trace?.length ?? 0} jobs`
-          )}
-        </div>
-        {(trace?.trace ?? []).map(job => {
-          const isOpen = openJobs.has(job.id)
-          const isRunning = job.status === 'running'
-          const isFailed = job.status === 'failed' || job.status === 'error'
-          const waitMs = job.started_at ? msGap(job.created_at, job.started_at) : null
-          const durMs = job.duration_ms ?? (job.started_at && job.finished_at ? msGap(job.started_at, job.finished_at) : null)
-          const bodyLines: string[] = []
-          if (job.text) bodyLines.push(job.text)
-          if (job.log?.length) bodyLines.push(...job.log)
-          if (job.branch) bodyLines.push(`branch: ${job.branch}`)
-          if (job.error) bodyLines.push(`ERROR: ${job.error}`)
+    </div>
+  )
+}
+
+// ── Phase tabs ─────────────────────────────────────────────────────
+//
+// Tabs follow the enhancement lifecycle: Request → Plan → (Revise plan) →
+// Code → Build → Open PR. Each tab corresponds to a phase the worker
+// emits in enhancement_jobs.phase, except 'request' which is the initial
+// submission itself. 'revise_plan' is hidden when no revise jobs exist.
+//
+// Each tab carries a state badge driven by the latest job for that
+// phase. The next-up tab (first 'idle' one after the current activity)
+// gets an accent ring so the operator always sees what's coming.
+//
+// Default tab on open is status-driven: jump to whichever tab needs
+// operator action (pending review → Plan, sandbox ready → Build, etc).
+
+type Phase = 'request' | 'plan' | 'revise_plan' | 'code' | 'build' | 'open_pr'
+
+const PHASE_ORDER: Phase[] = ['request', 'plan', 'revise_plan', 'code', 'build', 'open_pr']
+const PHASE_LABELS: Record<Phase, string> = {
+  request:     'Request',
+  plan:        'Plan',
+  revise_plan: 'Revise plan',
+  code:        'Code',
+  build:       'Build',
+  open_pr:     'Open PR',
+}
+
+interface PhaseTabsProps {
+  enh: Enhancement
+  trace: TraceData | null
+  openJobs: Set<number>
+  onToggleJob: (id: number) => void
+  onAction: (id: number, path: string, body?: unknown) => void
+  onRetryJob: (jobId: number) => void
+  onDeleteJob: (jobId: number) => void
+}
+
+type TabState = 'idle' | 'queued' | 'running' | 'done' | 'failed'
+
+function jobsForPhase(trace: TraceData | null, phase: Phase): Job[] {
+  if (!trace?.trace) return []
+  return trace.trace.filter(j => j.phase === phase)
+}
+
+function tabState(jobs: Job[]): TabState {
+  if (!jobs.length) return 'idle'
+  const latest = jobs[jobs.length - 1]
+  if (latest.status === 'running') return 'running'
+  if (latest.status === 'queued')  return 'queued'
+  if (latest.status === 'failed' || latest.status === 'error') return 'failed'
+  return 'done'
+}
+
+function defaultTabFor(enh: Enhancement, trace: TraceData | null): Phase {
+  // Status-driven: jump straight to the tab that needs operator action.
+  switch (enh.status) {
+    case 'pending_user_review_plan': return 'plan'
+    case 'sandbox_ready':            return 'build'
+    case 'merged': case 'done':      return 'open_pr'
+  }
+  // Otherwise: latest active phase, falling back to Request.
+  const jobs = trace?.trace ?? []
+  for (let i = jobs.length - 1; i >= 0; i--) {
+    const p = jobs[i].phase as Phase
+    if (PHASE_ORDER.includes(p)) return p
+  }
+  return 'request'
+}
+
+function PhaseTabs({ enh, trace, openJobs, onToggleJob, onAction, onRetryJob, onDeleteJob }: PhaseTabsProps) {
+  const states: Record<Phase, TabState> = {
+    // Request is "done" the moment the row exists.
+    request:     'done',
+    plan:        tabState(jobsForPhase(trace, 'plan')),
+    revise_plan: tabState(jobsForPhase(trace, 'revise_plan')),
+    code:        tabState(jobsForPhase(trace, 'code')),
+    build:       tabState(jobsForPhase(trace, 'build')),
+    open_pr:     tabState(jobsForPhase(trace, 'open_pr')),
+  }
+  const reviseJobs = jobsForPhase(trace, 'revise_plan')
+  const visibleTabs = PHASE_ORDER.filter(p => p !== 'revise_plan' || reviseJobs.length > 0)
+
+  // First idle tab = the next up. Used to draw the accent ring.
+  const nextUp = visibleTabs.find(p => states[p] === 'idle') ?? null
+
+  const [active, setActive] = useState<Phase>(() => defaultTabFor(enh, trace))
+  // Re-sync default when the enhancement changes (e.g. parent flipped to a
+  // different request). Don't fight the user once they've clicked a tab.
+  const enhId = enh.id
+  const sawEnhId = useRef<number>(enhId)
+  useEffect(() => {
+    if (sawEnhId.current !== enhId) {
+      sawEnhId.current = enhId
+      setActive(defaultTabFor(enh, trace))
+    }
+  }, [enhId, enh, trace])
+
+  return (
+    <div className="phase-tabs">
+      <div className="phase-tab-strip" role="tablist">
+        {visibleTabs.map(p => {
+          const s = states[p]
+          const isActive = p === active
+          const isNext = p === nextUp && s === 'idle'
           return (
-            <div key={job.id} className="trace-block">
-              <div className="trace-block-hdr" onClick={() => onToggleJob(job.id)}>
-                <JobTag id={job.id} />
-                <span className="trace-phase">{job.phase}</span>
-                {statusIcon(job.status)}
-                <span style={{ fontSize: '.75rem', fontWeight: 600, color: isFailed ? 'var(--red)' : isRunning ? 'var(--accent)' : 'var(--dim)' }}>
-                  {job.status}
-                </span>
-                {durMs != null && <span className="trace-timing">{fmtMs(durMs)}</span>}
-                <CostBadge tokens={job.cost_tokens} cents={job.cost_usd_cents} />
-                <div style={{ marginLeft: 'auto', display: 'flex', gap: 4 }}>
-                  {isFailed && (
-                    <button
-                      className="btn btn-xs btn-accent"
-                      onClick={e => { e.stopPropagation(); onRetryJob(job.id) }}
-                      title="Retry this job"
-                    >
-                      ↺
-                    </button>
-                  )}
-                  {!isRunning && (
-                    <button
-                      className="btn btn-xs btn-red"
-                      onClick={e => { e.stopPropagation(); onDeleteJob(job.id) }}
-                      title="Delete job"
-                    >
-                      ✕
-                    </button>
-                  )}
-                </div>
-              </div>
-              {(job.created_at || job.started_at || job.finished_at) && (
-                <div style={{ padding: '4px 14px', fontSize: '.72rem', color: 'var(--dim)', display: 'flex', gap: 12, flexWrap: 'wrap', background: 'var(--surface)', borderTop: '1px solid var(--border)' }}>
-                  {job.created_at && <span>queued {fmtJobTime(job.created_at)}</span>}
-                  {job.started_at && (
-                    <span>
-                      → started {fmtJobTime(job.started_at)}
-                      {waitMs != null && waitMs > 0 && <span style={{ color: 'var(--yellow)', marginLeft: 4 }}>(+{fmtMs(waitMs)} wait)</span>}
-                    </span>
-                  )}
-                  {job.finished_at && (
-                    <span>
-                      → done {fmtJobTime(job.finished_at)}
-                      {durMs != null && <span style={{ color: isFailed ? 'var(--red)' : 'var(--green)', marginLeft: 4 }}>{fmtMs(durMs)}</span>}
-                    </span>
-                  )}
-                </div>
-              )}
-              {isOpen && bodyLines.length > 0 && (
-                <pre className="trace-body">{bodyLines.join('\n')}</pre>
-              )}
-            </div>
+            <button
+              key={p}
+              type="button"
+              role="tab"
+              aria-selected={isActive}
+              className={`phase-tab phase-tab-${s}${isActive ? ' active' : ''}${isNext ? ' next-up' : ''}`}
+              onClick={() => setActive(p)}
+            >
+              <span className="phase-tab-label">{PHASE_LABELS[p]}</span>
+              <span className={`phase-tab-dot phase-tab-dot-${s}`} aria-hidden="true" />
+            </button>
           )
         })}
-        {(!trace || trace.trace.length === 0) && (
-          <div style={{ padding: '16px 14px', color: 'var(--dim)', fontSize: '.82rem' }}>No jobs yet</div>
-        )}
+      </div>
+      <div className="phase-tab-content" role="tabpanel">
+        {active === 'request'     && <RequestPane     enh={enh} onAction={onAction} />}
+        {active === 'plan'        && <PlanPane        enh={enh} jobs={jobsForPhase(trace, 'plan')}
+                                                       openJobs={openJobs} onToggleJob={onToggleJob}
+                                                       onAction={onAction} onRetryJob={onRetryJob} onDeleteJob={onDeleteJob} />}
+        {active === 'revise_plan' && <RevisePlanPane  jobs={reviseJobs}
+                                                       openJobs={openJobs} onToggleJob={onToggleJob}
+                                                       onRetryJob={onRetryJob} onDeleteJob={onDeleteJob} />}
+        {active === 'code'        && <PhaseLogPane    phase="code"
+                                                       jobs={jobsForPhase(trace, 'code')}
+                                                       openJobs={openJobs} onToggleJob={onToggleJob}
+                                                       onRetryJob={onRetryJob} onDeleteJob={onDeleteJob}
+                                                       emptyHint="Coding hasn't started yet — approve the plan to kick it off." />}
+        {active === 'build'       && <BuildPane       enh={enh} jobs={jobsForPhase(trace, 'build')}
+                                                       openJobs={openJobs} onToggleJob={onToggleJob}
+                                                       onAction={onAction} onRetryJob={onRetryJob} onDeleteJob={onDeleteJob} />}
+        {active === 'open_pr'     && <OpenPrPane      enh={enh} jobs={jobsForPhase(trace, 'open_pr')}
+                                                       openJobs={openJobs} onToggleJob={onToggleJob}
+                                                       onRetryJob={onRetryJob} onDeleteJob={onDeleteJob} />}
       </div>
     </div>
   )
 }
+
+// ── Tab pane components ──────────────────────────────────────────
+
+function RequestPane({ enh, onAction }: { enh: Enhancement; onAction: PhaseTabsProps['onAction'] }) {
+  const canPlan = enh.status === 'new' || enh.status === 'selected'
+  const canReject = enh.status !== 'done' && enh.status !== 'merged' && enh.status !== 'auto_failed'
+  return (
+    <>
+      <div className="pane-text">{enh.message}</div>
+      <div className="pane-actions">
+        {canPlan && (
+          <button className="btn btn-accent btn-sm" onClick={() => onAction(enh.id, 'plan')}>Plan with AI</button>
+        )}
+        {canReject && (
+          <button
+            className="btn btn-danger btn-sm"
+            onClick={() => { if (confirm('Reject this request?')) onAction(enh.id, 'reject') }}
+          >Reject</button>
+        )}
+      </div>
+    </>
+  )
+}
+
+function PlanPane({ enh, jobs, openJobs, onToggleJob, onAction, onRetryJob, onDeleteJob }: {
+  enh: Enhancement; jobs: Job[];
+  openJobs: Set<number>; onToggleJob: (id: number) => void;
+  onAction: PhaseTabsProps['onAction']; onRetryJob: (id: number) => void; onDeleteJob: (id: number) => void;
+}) {
+  const plan = enh.ai_plan
+  return (
+    <>
+      {plan ? (
+        <div className="pane-card">
+          {plan.summary && <p style={{ marginBottom: 10, lineHeight: 1.55 }}>{plan.summary}</p>}
+          {plan.files_to_change?.length > 0 && (
+            <div className="pane-section">
+              <div className="pane-section-hdr">Files to change</div>
+              <ul className="pane-list">
+                {plan.files_to_change.map((f: string, i: number) => <li key={i}>{f}</li>)}
+              </ul>
+            </div>
+          )}
+          {plan.test_files?.length > 0 && (
+            <div className="pane-section">
+              <div className="pane-section-hdr">Test files</div>
+              <ul className="pane-list">
+                {plan.test_files.map((f: string, i: number) => <li key={i}>{f}</li>)}
+              </ul>
+            </div>
+          )}
+          {plan.risks && (
+            <div className="pane-section"><span className="pane-section-hdr">Risks: </span>{plan.risks}</div>
+          )}
+          {plan.test_plan && (
+            <div className="pane-section"><span className="pane-section-hdr">Test plan: </span>{plan.test_plan}</div>
+          )}
+        </div>
+      ) : (
+        <div className="pane-empty">No plan yet — click <em>Plan with AI</em> on the Request tab.</div>
+      )}
+
+      {jobs.length > 0 && <JobsTrace jobs={jobs} openJobs={openJobs} onToggleJob={onToggleJob} onRetryJob={onRetryJob} onDeleteJob={onDeleteJob} />}
+
+      {enh.status === 'pending_user_review_plan' && (
+        <div className="pane-actions">
+          <button className="btn btn-accent btn-sm" onClick={() => onAction(enh.id, 'approve-plan')}>Approve plan + code it</button>
+          <button
+            className="btn btn-sm"
+            onClick={() => {
+              const comment = prompt('Describe your requested changes:')
+              if (comment) onAction(enh.id, 'plan-feedback', { comment })
+            }}
+          >Request changes</button>
+        </div>
+      )}
+    </>
+  )
+}
+
+function RevisePlanPane({ jobs, openJobs, onToggleJob, onRetryJob, onDeleteJob }: {
+  jobs: Job[];
+  openJobs: Set<number>; onToggleJob: (id: number) => void;
+  onRetryJob: (id: number) => void; onDeleteJob: (id: number) => void;
+}) {
+  if (!jobs.length) return <div className="pane-empty">No revisions yet.</div>
+  return <JobsTrace jobs={jobs} openJobs={openJobs} onToggleJob={onToggleJob} onRetryJob={onRetryJob} onDeleteJob={onDeleteJob} />
+}
+
+function PhaseLogPane({ jobs, openJobs, onToggleJob, onRetryJob, onDeleteJob, emptyHint }: {
+  phase: Phase; jobs: Job[];
+  openJobs: Set<number>; onToggleJob: (id: number) => void;
+  onRetryJob: (id: number) => void; onDeleteJob: (id: number) => void;
+  emptyHint: string;
+}) {
+  if (!jobs.length) return <div className="pane-empty">{emptyHint}</div>
+  return <JobsTrace jobs={jobs} openJobs={openJobs} onToggleJob={onToggleJob} onRetryJob={onRetryJob} onDeleteJob={onDeleteJob} />
+}
+
+function BuildPane({ enh, jobs, openJobs, onToggleJob, onAction, onRetryJob, onDeleteJob }: {
+  enh: Enhancement; jobs: Job[];
+  openJobs: Set<number>; onToggleJob: (id: number) => void;
+  onAction: PhaseTabsProps['onAction']; onRetryJob: (id: number) => void; onDeleteJob: (id: number) => void;
+}) {
+  return (
+    <>
+      {jobs.length === 0
+        ? <div className="pane-empty">Build hasn't started — happens automatically after Code completes.</div>
+        : <JobsTrace jobs={jobs} openJobs={openJobs} onToggleJob={onToggleJob} onRetryJob={onRetryJob} onDeleteJob={onDeleteJob} />
+      }
+      {enh.status === 'sandbox_ready' && (
+        <div className="pane-actions">
+          <button className="btn btn-accent btn-sm" onClick={() => onAction(enh.id, 'approve-sandbox')}>Ship it</button>
+        </div>
+      )}
+    </>
+  )
+}
+
+function OpenPrPane({ enh, jobs, openJobs, onToggleJob, onRetryJob, onDeleteJob }: {
+  enh: Enhancement; jobs: Job[];
+  openJobs: Set<number>; onToggleJob: (id: number) => void;
+  onRetryJob: (id: number) => void; onDeleteJob: (id: number) => void;
+}) {
+  return (
+    <>
+      {enh.pr_url && (
+        <div className="pane-actions" style={{ marginBottom: 12 }}>
+          <a href={enh.pr_url} target="_blank" rel="noreferrer" className="btn btn-sm">View PR ↗</a>
+          {enh.fix_version && <span style={{ marginLeft: 8, color: 'var(--dim)', fontSize: '.82rem' }}>fix version: <code>{enh.fix_version}</code></span>}
+          {enh.branch_name && <span style={{ marginLeft: 8, color: 'var(--dim)', fontSize: '.82rem' }}>branch: <code>{enh.branch_name}</code></span>}
+        </div>
+      )}
+      {jobs.length === 0
+        ? <div className="pane-empty">No PR opened yet — runs after Build succeeds (auto-mode) or after manual approval.</div>
+        : <JobsTrace jobs={jobs} openJobs={openJobs} onToggleJob={onToggleJob} onRetryJob={onRetryJob} onDeleteJob={onDeleteJob} />
+      }
+    </>
+  )
+}
+
+function JobsTrace({ jobs, openJobs, onToggleJob, onRetryJob, onDeleteJob }: {
+  jobs: Job[];
+  openJobs: Set<number>; onToggleJob: (id: number) => void;
+  onRetryJob: (id: number) => void; onDeleteJob: (id: number) => void;
+}) {
+  return (
+    <>
+      {jobs.map(job => {
+        const isOpen = openJobs.has(job.id)
+        const isRunning = job.status === 'running'
+        const isFailed = job.status === 'failed' || job.status === 'error'
+        const waitMs = job.started_at ? msGap(job.created_at, job.started_at) : null
+        const durMs = job.duration_ms ?? (job.started_at && job.finished_at ? msGap(job.started_at, job.finished_at) : null)
+        const bodyLines: string[] = []
+        if (job.text) bodyLines.push(job.text)
+        if (job.log?.length) bodyLines.push(...job.log)
+        if (job.branch) bodyLines.push(`branch: ${job.branch}`)
+        if (job.error) bodyLines.push(`ERROR: ${job.error}`)
+        return (
+          <div key={job.id} className="trace-block">
+            <div className="trace-block-hdr" onClick={() => onToggleJob(job.id)}>
+              <JobTag id={job.id} />
+              {statusIcon(job.status)}
+              <span style={{ fontSize: '.75rem', fontWeight: 600, color: isFailed ? 'var(--red)' : isRunning ? 'var(--accent)' : 'var(--dim)' }}>
+                {job.status}
+              </span>
+              {durMs != null && <span className="trace-timing">{fmtMs(durMs)}</span>}
+              <CostBadge tokens={job.cost_tokens} cents={job.cost_usd_cents} />
+              <div style={{ marginLeft: 'auto', display: 'flex', gap: 4 }}>
+                {isFailed && (
+                  <button className="btn btn-xs btn-accent" onClick={e => { e.stopPropagation(); onRetryJob(job.id) }} title="Retry this job">↺</button>
+                )}
+                {!isRunning && (
+                  <button className="btn btn-xs btn-red" onClick={e => { e.stopPropagation(); onDeleteJob(job.id) }} title="Delete job">✕</button>
+                )}
+              </div>
+            </div>
+            {(job.created_at || job.started_at || job.finished_at) && (
+              <div style={{ padding: '4px 14px', fontSize: '.72rem', color: 'var(--dim)', display: 'flex', gap: 12, flexWrap: 'wrap', background: 'var(--surface)', borderTop: '1px solid var(--border)' }}>
+                {job.created_at && <span>queued {fmtJobTime(job.created_at)}</span>}
+                {job.started_at && (
+                  <span>
+                    → started {fmtJobTime(job.started_at)}
+                    {waitMs != null && waitMs > 0 && <span style={{ color: 'var(--yellow)', marginLeft: 4 }}>(+{fmtMs(waitMs)} wait)</span>}
+                  </span>
+                )}
+                {job.finished_at && (
+                  <span>
+                    → done {fmtJobTime(job.finished_at)}
+                    {durMs != null && <span style={{ color: isFailed ? 'var(--red)' : 'var(--green)', marginLeft: 4 }}>{fmtMs(durMs)}</span>}
+                  </span>
+                )}
+              </div>
+            )}
+            {isOpen && bodyLines.length > 0 && (
+              <pre className="trace-body">{bodyLines.join('\n')}</pre>
+            )}
+          </div>
+        )
+      })}
+    </>
+  )
+}
+
 
