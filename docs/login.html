@@ -326,7 +326,6 @@ input:focus{border-color:var(--accent)}
   <!-- Ask "Learn" panel — Custom Element from /docs/shared/crane-topbar.js
        so portal + /applications share one implementation (Phase B.2). -->
   <crane-ask-panel id="askPanel" iframe-selector="#frameIframe"></crane-ask-panel>
-  </div>
 
   <!-- Enhance panel -->
   <!-- Request panel — Custom Element from /docs/shared/crane-topbar.js
@@ -1075,13 +1074,12 @@ function openApp(url, name, slug, hasIcon, appData) {
   document.getElementById('askMessages').innerHTML = '<div class="ask-empty">Learn about this application — Claude will read the source code to answer.</div>';
   document.getElementById('askWorking').style.display = 'none';
   document.getElementById('askPeekBar').style.display = 'none';
-  document.getElementById('planPanelAppLabel').textContent = name || '';
-  document.getElementById('planMessages').innerHTML = '<div class="ask-empty" style="padding:20px 16px">Describe an enhancement and Claude will generate an implementation plan.</div>';
-  document.getElementById('planWorking').style.display = 'none';
-  document.getElementById('planPeekBar').style.display = 'none';
-  document.getElementById('planBuildRow').style.display = 'none';
-  document.getElementById('planSendBtn').textContent = 'Request';
-  document.getElementById('planInput').placeholder = 'Describe the enhancement or feature you want...';
+  // Plan panel inner DOM (planPanelAppLabel / planMessages / planWorking
+  // / planPeekBar / planBuildRow / planSendBtn / planInput) was removed
+  // in v1.27.61 when the panel became a Custom Element. The element
+  // owns its own state — no manual reset needed here. Stale references
+  // were throwing "Cannot set properties of null" and aborting openApp
+  // mid-flight, leaving the iframe visible on /login.
   document.getElementById('frameIframe').src = url;
   document.getElementById('appFrame').classList.add('open');
   document.body.style.overflow = 'hidden';
