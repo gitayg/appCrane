@@ -13,6 +13,30 @@ const GEN_MODEL       = process.env.APPSTUDIO_CODER_MODEL || 'claude-sonnet-4-6'
 const GEN_TIMEOUT_MS  = parseInt(process.env.APPSTUDIO_TIMEOUT_MS || '1800000', 10);
 const STUDIO_IMAGE    = process.env.APPSTUDIO_IMAGE || 'appcrane-studio:latest';
 
+/**
+ * Safety net for the planner-prompt rule that says "if deployhub.json
+ * exists, bump it to match package.json's version". The agent sometimes
+ * forgets to touch deployhub.json even though the prompt asks for both;
+ * this post-process sync rewrites deployhub.json's version field to
+ * match package.json's whenever they drift.
+ *
+ * Skips silently when either file is missing or unreadable — never
+ * throws. Failures log a non-fatal warning via onLog.
+ */
+function syncDeployhubVersion(workspaceDir, onLog) {
+  const pkgPath = join(workspaceDir, 'package.json');     // nosemgrep: path-join-resolve-traversal — workspaceDir is internal
+  const dhPath  = join(workspaceDir, 'deployhub.json');   // nosemgrep
+  if (!existsSync(pkgPath) || !existsSync(dhPath)) return;
+  const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
+  const dh  = JSON.parse(readFileSync(dhPath,  'utf8'));
+  if (!pkg?.version) return;
+  if (dh.version === pkg.version) return;
+  const before = dh.version;
+  dh.version = pkg.version;
+  writeFileSync(dhPath, JSON.stringify(dh, null, 2) + '\n');
+  onLog?.(`[studio] Synced deployhub.json version ${before} → ${pkg.version} (matches package.json)`);
+}
+
 function workspaceRoot() {
   return join(resolve(process.env.DATA_DIR || './data'), 'appstudio-jobs');
 }
@@ -337,6 +361,7 @@ export async function generateCode({ jobId, app, enhancementId, plan, summary, a
       if (code !== 0) return reject(new Error(`Studio container exited with code ${code}`));
       // Container exit 0 = claude finished cleanly. This replaces the prior
       // /sentinel/done file: a clean exit IS the success signal.
+      try { syncDeployhubVersion(workspaceDir, onLog); } catch (e) { onLog?.(`[studio] deployhub.json sync failed (non-fatal): ${e.message}`); }
       onLog?.('[studio] Coding complete — committing and pushing…');
       try {
         await onCodingDone?.(workspaceDir, branchName);
