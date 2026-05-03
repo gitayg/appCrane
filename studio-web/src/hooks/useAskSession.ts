@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { adminApi } from '../adminApi'
+import { adminApi, authTokenForSSE } from '../adminApi'
 
 export interface AskMessage {
   role: 'user' | 'assistant'
@@ -97,9 +97,11 @@ export function useAskSession(slug: string | null | undefined): AskSession {
         sessionIdRef.current = d.session_id
 
         // EventSource: jobId is now an opaque 128-bit handle AND
-        // server checks ?token= ownership (defense in depth).
-        const apiKey = localStorage.getItem('cc_api_key') || ''
-        const qs = apiKey ? `?token=${encodeURIComponent(apiKey)}` : ''
+        // server checks ?token= ownership (defense in depth). Token is
+        // either the admin X-API-Key OR a portal Bearer — see
+        // adminApi.authTokenForSSE.
+        const token = authTokenForSSE()
+        const qs = token ? `?token=${encodeURIComponent(token)}` : ''
         const es = new EventSource(`/api/ask/stream/${encodeURIComponent(d.job_id)}${qs}`)
         esRef.current = es
         let errCount = 0

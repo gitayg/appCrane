@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { adminApi } from '../adminApi'
+import { adminApi, authTokenForSSE } from '../adminApi'
 
 /**
  * Plan-then-Build flow used by the React RequestPanel — mirrors the
@@ -61,8 +61,8 @@ export function usePlanFlow(slug: string | null | undefined) {
   useEffect(() => () => { closeStream(); stopTicker() }, [])
 
   function streamPlan(enhId: number) {
-    const apiKey = localStorage.getItem('cc_api_key') || ''
-    const qs = apiKey ? `?token=${encodeURIComponent(apiKey)}` : ''
+    const token = authTokenForSSE()
+    const qs = token ? `?token=${encodeURIComponent(token)}` : ''
     const es = new EventSource(`/api/plan/${enhId}/stream${qs}`)
     esRef.current = es
     es.onmessage = (ev) => {
