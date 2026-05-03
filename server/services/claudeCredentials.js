@@ -39,9 +39,15 @@ export function validateCredentials(json) {
 }
 
 /**
- * Public summary safe to return from API endpoints — never includes the
- * raw tokens. Lets the UI show "configured / expires at / account UUID"
- * without leaking the secret.
+ * Public summary safe to return from API endpoints. Returns ONLY metadata —
+ * never any portion of the access_token or refresh_token, not even a
+ * truncated tail. Once an operator uploads credentials, the only allowed
+ * actions are: replace (upload new) or delete. There is no download
+ * endpoint and no field that exposes the secret value back to the client.
+ *
+ * Account UUID is kept since it's an identifier (not a credential) — useful
+ * for the "yes this matches the account I expected" sanity check.
+ * Expires-at is kept so the operator can see if the access token is stale.
  */
 export function credentialsInfo(slug) {
   const row = getDb()
@@ -59,11 +65,6 @@ export function credentialsInfo(slug) {
     present: true,
     expiresAt: parsed.expires_at || null,
     accountUuid: parsed.accountUuid || parsed.account_uuid || null,
-    // Tail of the access token only — useful as a "yes this is the one I
-    // uploaded" check without exposing the secret.
-    accessTokenTail: typeof parsed.access_token === 'string'
-      ? '…' + parsed.access_token.slice(-8)
-      : null,
   };
 }
 
