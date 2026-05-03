@@ -710,7 +710,7 @@ code.api-pill { background: var(--surface2); border: 1px solid var(--border); bo
 /* ── App iframe viewer ───────────────────────────── */
 .app-frame-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 50; background: var(--bg); display: flex; flex-direction: column; }
 .app-frame-topbar { display: flex; align-items: center; justify-content: space-between; padding: 6px 14px; background: var(--surface); border-bottom: 1px solid var(--border); flex-shrink: 0; gap: 12px; }
-.app-frame-iframe { flex: 1; border: none; background: #fff; }
+.app-frame-iframe { flex: 1; border: none; background: #fff; margin-right: var(--frame-dock-width, 0px); transition: margin-right .18s ease; }
 .app-frame-left  { display: flex; align-items: center; gap: 12px; min-width: 0; flex: 1; }
 .app-frame-right { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 .app-frame-brand { font-weight: 700; font-size: .95rem; }

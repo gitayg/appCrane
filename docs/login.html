@@ -110,7 +110,8 @@ input:focus{border-color:var(--accent)}
 /* Side-dock layout: when a Learn or Request panel is open, shrink the iframe instead of overlaying it */
 .app-frame.dock-active iframe{margin-right:var(--dock-width,400px)}
 .app-frame.dock-active .ask-panel.open,
-.app-frame.dock-active .plan-panel.open{width:var(--dock-width,400px) !important}
+.app-frame.dock-active .plan-panel.open,
+.app-frame.dock-active #bugPanel.open{width:var(--dock-width,400px) !important}
 .dock-resizer{position:absolute;top:44px;bottom:0;width:6px;cursor:ew-resize;z-index:25;background:transparent;transition:background .12s,opacity .12s;display:none}
 .dock-resizer:hover,.dock-resizer.dragging{background:var(--accent);opacity:.5}
 .app-frame.dock-active .dock-resizer{display:block;right:var(--dock-width,400px)}
@@ -1941,7 +1942,8 @@ function _activateDock() {
 function _maybeDeactivateDock() {
   var ask  = document.getElementById('askPanel').classList.contains('open');
   var plan = document.getElementById('planPanel').classList.contains('open');
-  if (!ask && !plan) {
+  var bug  = document.getElementById('bugPanel')?.classList.contains('open');
+  if (!ask && !plan && !bug) {
     document.getElementById('appFrame').classList.remove('dock-active');
   }
 }
@@ -2228,6 +2230,7 @@ function openBugPanel() {
     document.getElementById('appTopbar')?.getAttribute('app-name') || '';
   document.getElementById('bugResult').style.display = 'none';
   document.getElementById('bugPanel').classList.add('open');
+  _activateDock();
   setTimeout(function() { document.getElementById('bugWhat').focus(); }, 50);
 }
 
