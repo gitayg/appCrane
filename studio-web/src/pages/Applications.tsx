@@ -113,16 +113,27 @@ export function Applications() {
       adminApi.get<{ apps: App[] }>('/api/apps').catch(() => ({ apps: [] as App[] })),
       adminApi.get<{ users: User[] }>('/api/users').catch(() => ({ users: [] as User[] })),
     ])
-    const a = ar.apps ?? []
+    // Sort apps alphabetically by name (case-insensitive). The /api/apps
+    // endpoint returns insertion order which makes the list hard to scan
+    // once you have more than a handful.
+    const a = (ar.apps ?? []).slice().sort((x, y) =>
+      (x.name || '').toLowerCase().localeCompare((y.name || '').toLowerCase()),
+    )
     const u = ur.users ?? []
     setApps(a)
     setUsers(u)
     fetchVersions(a)
+    // Prefer the freshly-fetched icon state over what's in `prev` so a
+    // newly-uploaded icon (or a deleted one) takes effect immediately.
+    // The previous {...iconMap, ...prev} ordering let stale state win.
+    // Cache-bust by appending the load timestamp; the icon endpoint
+    // ignores query strings.
     const iconMap: Record<string, string> = {}
+    const stamp = Date.now()
     for (const app of a) {
-      if (app.has_icon) iconMap[app.slug] = `/api/apps/${app.slug}/icon`
+      if (app.has_icon) iconMap[app.slug] = `/api/apps/${app.slug}/icon?v=${stamp}`
     }
-    setIconUrls(prev => ({ ...iconMap, ...prev }))
+    setIconUrls(iconMap)
   }
 
   function fetchVersions(appList: App[]) {

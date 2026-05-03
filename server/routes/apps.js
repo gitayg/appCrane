@@ -9,7 +9,7 @@ import { AppError } from '../utils/errors.js';
 import { resolveSafe } from '../utils/paths.js';
 import { reloadCaddy } from '../services/caddy.js';
 import log from '../utils/logger.js';
-import { existsSync, mkdirSync, renameSync } from 'fs';
+import { existsSync, mkdirSync, renameSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { reconcileOrphanedApps } from '../services/reconcile.js';
 
@@ -628,7 +628,21 @@ router.post('/:slug/icon', requireAuth, requireAppAccess, async (req, res) => {
     if (err) return res.status(400).json({ error: { code: 'UPLOAD_ERROR', message: err.message } });
     if (!req.file) return res.status(400).json({ error: { code: 'NO_FILE', message: 'No icon file uploaded' } });
     const ext = ALLOWED_ICON_MIMES[req.file.mimetype] || 'png';
-    const iconPath = join(dataDir, 'apps', app.slug, `icon.${ext}`);
+    const appIconDir = join(dataDir, 'apps', app.slug);
+    // App dir might not exist yet (rare — app created but never deployed).
+    mkdirSync(appIconDir, { recursive: true });
+    // Wipe any prior icons with a different extension so the GET endpoint
+    // (which scans ICON_EXTS in order) doesn't keep serving the stale one.
+    // Without this, uploading a JPG over an existing PNG silently kept
+    // returning the PNG forever.
+    for (const oldExt of ICON_EXTS) {
+      if (oldExt === ext) continue;
+      const oldPath = join(appIconDir, `icon.${oldExt}`);
+      if (existsSync(oldPath)) {
+        try { unlinkSync(oldPath); } catch (_) {}
+      }
+    }
+    const iconPath = join(appIconDir, `icon.${ext}`);
     renameSync(req.file.path, iconPath);
     res.json({ message: 'Icon uploaded', url: `/api/apps/${app.slug}/icon` });
   });
