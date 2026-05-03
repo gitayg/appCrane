@@ -31,6 +31,7 @@ export function Layout({ children, subItems, activeSub }: Props) {
   const [notifOpen, setNotifOpen] = useState(false)
   const [notifItems, setNotifItems] = useState<{ title: string; sub: string; color: string }[]>([])
   const [notifLoaded, setNotifLoaded] = useState(false)
+  const [openRequests, setOpenRequests] = useState(0)
   const notifRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -45,6 +46,22 @@ export function Layout({ children, subItems, activeSub }: Props) {
     adminApi.get<{ version: string }>('/api/info')
       .then(d => setVersion('v' + d.version))
       .catch(() => {})
+  }, [key])
+
+  // Open-requests counter for the Requests nav badge.
+  // Admin endpoint first, fall back to /my for portal users.
+  useEffect(() => {
+    if (!key) return
+    const TERM = new Set(['done', 'merged', 'closed', 'failed', 'cancelled'])
+    const fetchCount = () =>
+      adminApi.get<{ requests: { status?: string }[] }>('/api/enhancements')
+        .catch(() => adminApi.get<{ requests: { status?: string }[] }>('/api/enhancements/my').catch(() => ({ requests: [] })))
+        .then(({ requests }) => {
+          setOpenRequests((requests || []).filter(r => !TERM.has((r.status || '').toLowerCase())).length)
+        })
+    fetchCount()
+    const t = setInterval(fetchCount, 15000)
+    return () => clearInterval(t)
   }, [key])
 
   useEffect(() => {
@@ -153,10 +170,13 @@ export function Layout({ children, subItems, activeSub }: Props) {
               <NavLink
                 to={p.href}
                 className={({ isActive }) => 'sidebar-link' + (isActive ? ' active' : '')}
-                title={p.label}
+                title={p.id === 'requests' && openRequests > 0 ? `${p.label} — ${openRequests} open` : p.label}
               >
                 <span className="sidebar-link-icon">{p.icon}</span>
                 <span className="sidebar-link-text">{p.label}</span>
+                {p.id === 'requests' && openRequests > 0 && (
+                  <span className="sidebar-link-badge">{openRequests}</span>
+                )}
               </NavLink>
               {activeNavId === p.id && subItems && subItems.length > 0 && !collapsed && (
                 <div className="sidebar-sub-nav">
