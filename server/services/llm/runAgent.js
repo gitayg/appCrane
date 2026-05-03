@@ -58,6 +58,17 @@ function buildClaudeCmd({ prompt, model, resume, addDir = '/workspace', systemPr
     }
     parts.push(`--resume ${resume}`);
   }
+  // Optional one-line diagnostic to stderr — set APPCRANE_DEBUG_CREDS=1
+  // on AppCrane to investigate "Not logged in" issues. Output is captured
+  // in the agent's stderrTail and shown back to the operator on failure.
+  // Never logs credential CONTENT, only path / version / file metadata.
+  if (process.env.APPCRANE_DEBUG_CREDS === '1') {
+    const diag =
+      'echo "[creds-diag] uid=$(id -u) home=$HOME" >&2; ' +
+      'ls -la "$HOME/.claude/" >&2 2>&1 || echo "[creds-diag] no .claude dir" >&2; ' +
+      'claude --version >&2 2>&1 || echo "[creds-diag] claude --version failed" >&2; ';
+    return diag + parts.join(' ');
+  }
   return parts.join(' ');
 }
 

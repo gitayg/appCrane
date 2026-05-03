@@ -11,7 +11,7 @@
 # or directly:
 #   docker build -t appcrane-studio:latest -f infra/studio.Dockerfile infra/
 
-ARG STUDIO_IMAGE_VERSION=2
+ARG STUDIO_IMAGE_VERSION=3
 
 FROM node:20-alpine
 ARG STUDIO_IMAGE_VERSION
