@@ -584,6 +584,53 @@ function DetailView({ enh, trace, onBack, onAction, onDeleteJob, onRetryJob }: D
           )
         })()}
 
+        {/* Inline hint when the code phase refused because a PR is already
+            open for the branch (v1.27.69 safety net). Shows the PR link +
+            a "Merge in AppCrane" action so the user doesn't have to click
+            through to the Open PR tab to find the merge button. */}
+        {(() => {
+          const codeJobs = (trace?.trace || []).filter(j => j.phase === 'code')
+          const blocked = codeJobs.find(j => j.status === 'failed' && /already has open PR/i.test(j.error || ''))
+          if (!blocked) return null
+          const m = (blocked.error || '').match(/open PR #(\d+)\s*\(([^)]+)\)/i)
+          const prNumber = m?.[1]
+          const prUrl    = m?.[2]
+          return (
+            <div style={{
+              background: 'rgba(245, 158, 11, .1)', border: '1px solid rgba(245, 158, 11, .35)',
+              borderRadius: 6, padding: '10px 14px', marginBottom: 14, fontSize: '.85rem', lineHeight: 1.5,
+            }}>
+              <div style={{ fontWeight: 600, marginBottom: 4 }}>⚠️ Coding blocked — PR already open</div>
+              <div style={{ color: 'var(--dim)', marginBottom: 8 }}>
+                A previous attempt opened {prNumber ? <>PR #{prNumber}</> : 'a PR'} for this branch.
+                Re-coding would overwrite the PR's history, so it was refused.
+                Pick one:
+              </div>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                {prUrl && <a href={prUrl} target="_blank" rel="noreferrer" className="btn btn-sm">View PR ↗</a>}
+                <button
+                  className="btn btn-accent btn-sm"
+                  onClick={() => {
+                    if (confirm('Ship the existing PR via AppCrane?\n\nReuses the existing PR (no force-push, no new code). Runs the merge step + production deploy.')) {
+                      onAction(enh.id, 'approve-sandbox')
+                    }
+                  }}
+                  title="Reuse the existing PR — AppCrane runs the merge API call + production deploy"
+                >🚀 Merge existing PR</button>
+                <button
+                  className="btn btn-sm"
+                  onClick={() => {
+                    if (confirm('Close PR ' + (prNumber ? '#' + prNumber : '') + ' on GitHub yourself first.\n\nThen click OK here to redo: re-plan + re-code on a fresh branch.')) {
+                      onAction(enh.id, 'redo', { reset_branch: true })
+                    }
+                  }}
+                  title="After closing the PR on GitHub, redo from scratch on a fresh branch"
+                >🔁 Close PR + redo on fresh branch</button>
+              </div>
+            </div>
+          )
+        })()}
+
         <PhaseTabs
           enh={enh}
           trace={trace}
