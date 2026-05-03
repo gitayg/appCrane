@@ -565,12 +565,13 @@ textarea:focus { border-color: var(--accent); }
    the prod / sandbox envs in a single horizontal strip instead of a
    2-column grid with per-env headings + 2-line status. */
 .app-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; margin-bottom: 6px; }
-.card-hdr { display: flex; align-items: center; justify-content: space-between; padding: 6px 12px; gap: 10px; }
-.card-meta { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
-.card-name-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-weight: 600; font-size: .88rem; }
-.card-desc { color: var(--dim); font-size: .72rem; max-width: 340px; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-left: 6px; }
-.card-res { font-size: .7rem; color: var(--dim); margin-left: 6px; }
-.card-hdr-actions { display: flex; align-items: center; gap: 3px; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; max-width: 280px; }
+.card-hdr { display: flex; flex-direction: column; align-items: stretch; padding: 6px 12px; gap: 6px; }
+.card-meta { display: flex; align-items: center; gap: 8px; min-width: 0; width: 100%; }
+.card-name-row { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; font-weight: 600; font-size: .88rem; min-width: 0; flex-shrink: 0; }
+.card-name-row > span:first-child { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 280px; }
+.card-desc { color: var(--dim); font-size: .72rem; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-left: 6px; flex: 1; min-width: 0; }
+.card-res { font-size: .7rem; color: var(--dim); margin-left: auto; white-space: nowrap; flex-shrink: 0; }
+.card-hdr-actions { display: flex; align-items: center; gap: 3px; flex-wrap: wrap; width: 100%; }
 /* Sandbox left, Production right — 50/50 split for symmetry. The
    border-right lives on the first cell (sandbox) so the divider sits
    between them regardless of column count. */
