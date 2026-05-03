@@ -27,10 +27,13 @@ export function SkillsTab() {
   const [slug, setSlug] = useState('')
   const [description, setDescription] = useState('')
   const [content, setContent] = useState('')
+  const [url, setUrl] = useState('')
   const [bundle, setBundle] = useState<File | null>(null)
   const [uploading, setUploading] = useState(false)
   const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null)
   const [autoFilled, setAutoFilled] = useState<{ name?: boolean; slug?: boolean; description?: boolean }>({})
+  const [renamingSkill, setRenamingSkill] = useState<Skill | null>(null)
+  const [updatingSkill, setUpdatingSkill] = useState<Skill | null>(null)
 
   // Pre-fill empty form fields from a SKILL.md frontmatter. Operator-typed
   // values always win — we only touch fields that are blank OR were
@@ -103,7 +106,9 @@ export function SkillsTab() {
   async function upload(e: React.FormEvent) {
     e.preventDefault()
     if (!name.trim()) { flash('Name required', false); return }
-    if (!content.trim() && !bundle) { flash('Either paste SKILL.md content OR pick a .md or .zip file', false); return }
+    if (!content.trim() && !bundle && !url.trim()) {
+      flash('Provide one of: paste SKILL.md, pick a .md/.zip file, or paste a URL', false); return
+    }
     setUploading(true)
     try {
       if (bundle) {
@@ -122,16 +127,56 @@ export function SkillsTab() {
           name: name.trim(),
           slug: slug.trim() || undefined,
           description: description.trim() || undefined,
-          content,
+          content: content.trim() || undefined,
+          url:     url.trim()     || undefined,
         })
       }
-      setName(''); setSlug(''); setDescription(''); setContent(''); setBundle(null); setAutoFilled({})
+      setName(''); setSlug(''); setDescription(''); setContent(''); setUrl(''); setBundle(null); setAutoFilled({})
       flash('Skill uploaded', true)
       load()
     } catch (e) {
       flash((e as Error).message, false)
     } finally {
       setUploading(false)
+    }
+  }
+
+  async function saveRename(skillSlug: string, newName: string, newDescription: string) {
+    try {
+      await adminApi.put(`/api/skills/${skillSlug}`, {
+        name: newName,
+        description: newDescription,
+      })
+      setRenamingSkill(null)
+      load()
+    } catch (e) {
+      flash((e as Error).message, false)
+    }
+  }
+
+  async function saveContentReplace(skillSlug: string, body: { content?: string; url?: string; bundle?: File | null }) {
+    try {
+      if (body.bundle) {
+        const fd = new FormData()
+        fd.append('bundle', body.bundle)
+        const r = await fetch(`/api/skills/${skillSlug}/content`, {
+          method: 'PUT', headers: adminApi.authHeaders(), body: fd,
+        })
+        if (!r.ok) {
+          const errBody = await r.json().catch(() => ({}))
+          throw new Error(errBody?.error?.message || `HTTP ${r.status}`)
+        }
+      } else {
+        await adminApi.put(`/api/skills/${skillSlug}/content`, {
+          content: body.content?.trim() || undefined,
+          url:     body.url?.trim()     || undefined,
+        })
+      }
+      setUpdatingSkill(null)
+      flash('Skill content updated', true)
+      load()
+    } catch (e) {
+      flash((e as Error).message, false)
     }
   }
 
@@ -200,8 +245,12 @@ export function SkillsTab() {
                     onClick={() => setEditingSkill(s)}
                   >Edit</button>
                 </td>
-                <td style={{ padding: 6, textAlign: 'right' }}>
-                  <button className="btn btn-red" onClick={() => remove(s)}>Delete</button>
+                <td style={{ padding: 6, textAlign: 'right', whiteSpace: 'nowrap' }}>
+                  <button className="btn btn-xs" onClick={() => setRenamingSkill(s)} title="Rename or update description">Edit</button>
+                  {' '}
+                  <button className="btn btn-xs" onClick={() => setUpdatingSkill(s)} title="Replace SKILL.md content / bundle">Update file</button>
+                  {' '}
+                  <button className="btn btn-xs btn-red" onClick={() => remove(s)}>Delete</button>
                 </td>
               </tr>
             ))}
@@ -236,6 +285,14 @@ export function SkillsTab() {
           {bundle && <span style={{ marginLeft: 8, fontSize: '.82rem', color: 'var(--dim)' }}>{bundle.name}</span>}
         </div>
         <div>
+          <label style={{ fontSize: '.85rem', color: 'var(--dim)' }}>or fetch from URL (raw SKILL.md or .zip — GitHub blob URLs are auto-rewritten):</label><br/>
+          <input
+            className="editable" value={url} onChange={e => setUrl(e.target.value)}
+            placeholder="https://raw.githubusercontent.com/owner/repo/main/skills/foo/SKILL.md"
+            style={{ width: '100%', fontFamily: 'monospace', fontSize: '.8rem' }}
+          />
+        </div>
+        <div>
           <button type="submit" className="btn btn-primary" disabled={uploading}>
             {uploading ? 'Uploading…' : 'Add skill'}
           </button>
@@ -250,8 +307,112 @@ export function SkillsTab() {
           onCancel={() => setEditingSkill(null)}
         />
       )}
+
+      {renamingSkill && (
+        <RenameSkillModal
+          skill={renamingSkill}
+          onSave={(n, d) => saveRename(renamingSkill.slug, n, d)}
+          onCancel={() => setRenamingSkill(null)}
+        />
+      )}
+
+      {updatingSkill && (
+        <UpdateContentModal
+          skill={updatingSkill}
+          onSave={(body) => saveContentReplace(updatingSkill.slug, body)}
+          onCancel={() => setUpdatingSkill(null)}
+        />
+      )}
     </div>
   )
+}
+
+interface RenameProps {
+  skill: Skill
+  onSave: (name: string, description: string) => void
+  onCancel: () => void
+}
+
+function RenameSkillModal({ skill, onSave, onCancel }: RenameProps) {
+  const [n, setN] = useState(skill.name)
+  const [d, setD] = useState(skill.description ?? '')
+  return (
+    <div style={modalBackdrop} onClick={onCancel}>
+      <div style={modalCard} onClick={e => e.stopPropagation()}>
+        <h3 style={{ marginTop: 0, marginBottom: 4, fontSize: '1rem' }}>Rename <code>{skill.slug}</code></h3>
+        <p style={{ color: 'var(--dim)', fontSize: '.78rem', marginBottom: 12 }}>
+          Slug stays <code>{skill.slug}</code> (it's referenced by app assignments + on-disk paths).
+        </p>
+        <label style={modalLabel}>Name</label>
+        <input className="editable" value={n} onChange={e => setN(e.target.value)} style={{ width: '100%', marginBottom: 10 }} />
+        <label style={modalLabel}>Description</label>
+        <textarea className="editable" rows={3} value={d} onChange={e => setD(e.target.value)} style={{ width: '100%', marginBottom: 14, fontFamily: 'inherit' }} />
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+          <button className="btn" onClick={onCancel}>Cancel</button>
+          <button className="btn btn-primary" disabled={!n.trim()} onClick={() => onSave(n.trim(), d.trim())}>Save</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+interface UpdateProps {
+  skill: Skill
+  onSave: (body: { content?: string; url?: string; bundle?: File | null }) => void
+  onCancel: () => void
+}
+
+function UpdateContentModal({ skill, onSave, onCancel }: UpdateProps) {
+  const [c, setC] = useState('')
+  const [u, setU] = useState('')
+  const [f, setF] = useState<File | null>(null)
+  const empty = !c.trim() && !u.trim() && !f
+  return (
+    <div style={modalBackdrop} onClick={onCancel}>
+      <div style={modalCard} onClick={e => e.stopPropagation()}>
+        <h3 style={{ marginTop: 0, marginBottom: 4, fontSize: '1rem' }}>Replace content for <code>{skill.slug}</code></h3>
+        <p style={{ color: 'var(--dim)', fontSize: '.78rem', marginBottom: 12 }}>
+          Replaces the on-disk bundle (SKILL.md + any extra files). The skill row, app assignments, and enabled state are preserved.
+          Description re-syncs from the new SKILL.md frontmatter.
+        </p>
+        <label style={modalLabel}>Paste SKILL.md content</label>
+        <textarea
+          className="editable" rows={6} value={c} onChange={e => setC(e.target.value)}
+          placeholder="---&#10;name: my-skill&#10;description: …&#10;---&#10;&#10;Body goes here."
+          style={{ width: '100%', marginBottom: 10, fontFamily: 'monospace', fontSize: '.82rem' }}
+        />
+        <label style={modalLabel}>or upload a .md / .zip</label>
+        <input type="file" accept=".md,.markdown,.zip" onChange={e => setF(e.target.files?.[0] || null)} style={{ marginBottom: 10 }} />
+        {f && <span style={{ marginLeft: 8, fontSize: '.78rem', color: 'var(--dim)' }}>{f.name}</span>}
+        <label style={modalLabel}>or fetch from URL</label>
+        <input
+          className="editable" value={u} onChange={e => setU(e.target.value)}
+          placeholder="https://raw.githubusercontent.com/… or GitHub blob URL"
+          style={{ width: '100%', marginBottom: 14, fontFamily: 'monospace', fontSize: '.78rem' }}
+        />
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+          <button className="btn" onClick={onCancel}>Cancel</button>
+          <button
+            className="btn btn-primary"
+            disabled={empty}
+            onClick={() => onSave({ content: c, url: u, bundle: f })}
+          >Replace</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+const modalBackdrop: React.CSSProperties = {
+  position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', zIndex: 200,
+  display: 'flex', alignItems: 'center', justifyContent: 'center',
+}
+const modalCard: React.CSSProperties = {
+  background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 8,
+  padding: 20, minWidth: 360, maxWidth: 560, maxHeight: '85vh', overflow: 'auto',
+}
+const modalLabel: React.CSSProperties = {
+  display: 'block', fontSize: '.75rem', color: 'var(--dim)', marginBottom: 4, fontWeight: 600,
 }
 
 interface AssignProps {

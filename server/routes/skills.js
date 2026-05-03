@@ -9,6 +9,7 @@ import {
   listSkills, getSkill, createSkillFromMarkdown, createSkillFromFiles,
   updateSkill, deleteSkill, slugify, isValidSlug, readSkillMd,
   listAppsForSkill, setAppsForSkill, listSkillFiles,
+  replaceSkillFiles, replaceSkillFromMarkdown, fetchSkillFromUrl,
 } from '../services/skills.js';
 import log from '../utils/logger.js';
 
@@ -94,19 +95,94 @@ router.post('/', auditMiddleware('skill.create'), async (req, res) => {
     });
   }
 
-  // JSON body: paste-markdown flow
-  const { name, content } = req.body || {};
+  // JSON body: paste-markdown flow OR fetch-from-URL flow
+  const { name, content, url } = req.body || {};
   const slug = (req.body?.slug || slugify(name)).trim();
   const description = (req.body?.description || '').trim() || null;
   if (!name?.trim())       throw new AppError('name required', 400, 'VALIDATION');
-  if (!content?.trim())    throw new AppError('content required', 400, 'VALIDATION');
   if (!isValidSlug(slug))  throw new AppError('invalid slug', 400, 'VALIDATION');
+  if (!content?.trim() && !url?.trim()) {
+    throw new AppError('content or url required', 400, 'VALIDATION');
+  }
 
   try {
-    const skill = createSkillFromMarkdown({ slug, name, description, content, uploadedBy: req.user?.id });
+    let skill;
+    if (url?.trim()) {
+      // Server-side fetch: handles GitHub blob → raw rewrite + zip detection.
+      const fetched = await fetchSkillFromUrl(url.trim());
+      if (fetched.kind === 'md') {
+        skill = createSkillFromMarkdown({ slug, name, description, content: fetched.content, uploadedBy: req.user?.id });
+      } else {
+        const files = await unzipBuffer(fetched.buffer);
+        skill = createSkillFromFiles({ slug, name, description, files, uploadedBy: req.user?.id });
+      }
+    } else {
+      skill = createSkillFromMarkdown({ slug, name, description, content, uploadedBy: req.user?.id });
+    }
     res.status(201).json({ skill });
   } catch (e) {
     res.status(400).json({ error: { code: 'CREATE_FAILED', message: e.message } });
+  }
+});
+
+// PUT /api/skills/:slug/content — replace bundle of an existing skill.
+// Same accepted shapes as POST: multipart bundle, JSON {content}, JSON {url}.
+// Slug + name + description preserved (use PUT /api/skills/:slug to rename).
+router.put('/:slug/content', auditMiddleware('skill.replace-content'), async (req, res) => {
+  if (!getSkill(req.params.slug)) throw new AppError('skill not found', 404, 'NOT_FOUND');
+  const slug = req.params.slug;
+  const ct = (req.headers['content-type'] || '').toLowerCase();
+
+  if (ct.startsWith('multipart/')) {
+    const multer = (await import('multer')).default;
+    const upload = multer({
+      storage: multer.memoryStorage(),
+      limits: { fileSize: 5 * 1024 * 1024 },
+    }).single('bundle');
+
+    return upload(req, res, async (err) => {
+      if (err) return res.status(400).json({ error: { code: 'UPLOAD_FAILED', message: err.message } });
+      if (!req.file) return res.status(400).json({ error: { code: 'NO_FILE', message: 'bundle file required' } });
+      const fname = (req.file.originalname || '').toLowerCase();
+      let files;
+      try {
+        if (fname.endsWith('.md') || fname.endsWith('.markdown')) {
+          files = { 'SKILL.md': req.file.buffer.toString('utf8') };
+        } else {
+          files = await unzipBuffer(req.file.buffer);
+        }
+      } catch (e) {
+        return res.status(400).json({ error: { code: 'UNZIP_FAILED', message: e.message } });
+      }
+      try {
+        const skill = replaceSkillFiles(slug, files, { syncDescription: true });
+        return res.json({ skill });
+      } catch (e) {
+        return res.status(400).json({ error: { code: 'REPLACE_FAILED', message: e.message } });
+      }
+    });
+  }
+
+  const { content, url } = req.body || {};
+  if (!content?.trim() && !url?.trim()) {
+    throw new AppError('content or url required', 400, 'VALIDATION');
+  }
+  try {
+    let skill;
+    if (url?.trim()) {
+      const fetched = await fetchSkillFromUrl(url.trim());
+      if (fetched.kind === 'md') {
+        skill = replaceSkillFromMarkdown(slug, fetched.content, { syncDescription: true });
+      } else {
+        const files = await unzipBuffer(fetched.buffer);
+        skill = replaceSkillFiles(slug, files, { syncDescription: true });
+      }
+    } else {
+      skill = replaceSkillFromMarkdown(slug, content, { syncDescription: true });
+    }
+    res.json({ skill });
+  } catch (e) {
+    res.status(400).json({ error: { code: 'REPLACE_FAILED', message: e.message } });
   }
 });
 
