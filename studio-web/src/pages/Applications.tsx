@@ -684,17 +684,26 @@ export function Applications() {
                       />
                     </td>
                     <td>
-                      {/* Compact dual health summary; expand the row for the
-                          full sandbox / production controls. */}
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                        <span title="Sandbox" style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
-                          <span className={healthDot(app, 'sandbox')} />
-                          <span style={{ fontSize: '.66rem', color: 'var(--dim)' }}>S</span>
-                        </span>
-                        <span title="Production" style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
-                          <span className={healthDot(app, 'production')} />
-                          <span style={{ fontSize: '.66rem', color: 'var(--dim)' }}>P</span>
-                        </span>
+                      {/* Compact per-env summary: health dot + version + open
+                          link, both envs side by side. Drill-down (chevron)
+                          adds env-vars + restart on a second row. */}
+                      <div className="apps-status-cell">
+                        {(['sandbox', 'production'] as const).map(env => {
+                          const ver = versions[app.slug]?.[env === 'production' ? 'prod' : 'sand']
+                          return (
+                            <span key={env} className="apps-status-env" title={env === 'production' ? 'Production' : 'Sandbox'}>
+                              <span className={healthDot(app, env)} />
+                              <span className="apps-status-label">{env === 'production' ? 'P' : 'S'}</span>
+                              <span className="apps-status-ver">{ver ?? '…'}</span>
+                              <a
+                                className="env-link"
+                                href="#"
+                                onClick={e => { e.preventDefault(); openAppFrame(app, env) }}
+                                title={`Open ${env}`}
+                              >↗</a>
+                            </span>
+                          )
+                        })}
                       </div>
                     </td>
                     <td>

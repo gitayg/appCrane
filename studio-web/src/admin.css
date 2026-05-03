@@ -577,6 +577,14 @@ textarea:focus { border-color: var(--accent); }
 .apps-table .editable:hover { border-color: var(--border); }
 .apps-table .editable:focus { border-color: var(--accent); background: var(--surface); }
 
+/* Compact Status cell — sandbox + production side by side on the
+   single-line row. Each env shows: health dot · S/P label · version ·
+   ↗ open. Restart + env-vars stay in the drill-down (v1.27.57). */
+.apps-status-cell { display: flex; flex-direction: column; gap: 2px; min-width: 130px; }
+.apps-status-env { display: inline-flex; align-items: center; gap: 5px; font-size: .72rem; }
+.apps-status-label { color: var(--dim); font-weight: 600; min-width: 9px; }
+.apps-status-ver { font-family: monospace; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 90px; }
+
 /* Per-row drill-down toggle + the expansion row holding sandbox/production
    controls. Keeps the table tight while leaving the env actions one click
    away (v1.27.47). */
