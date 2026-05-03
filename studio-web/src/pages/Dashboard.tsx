@@ -10,6 +10,7 @@ interface App {
   users?: { id: number; name: string }[]
   has_icon?: boolean
   urls?: { production?: string; sandbox?: string }
+  resource_limits?: { max_ram_mb?: number; max_cpu_percent?: number }
   production?: { deploy?: { status?: string; version?: string }; health?: { status: string; config?: { endpoint?: string } } }
   sandbox?: { deploy?: { status?: string; version?: string }; health?: { status: string } }
 }
@@ -325,9 +326,16 @@ function EnvVarsPanel({ slug, env, onClose }: { slug: string; env: string; onClo
   )
 }
 
-function MetricsBar({ cpu, memory }: { cpu: string; memory: number }) {
+function MetricsBar({ cpu, memory, maxRamMb }: { cpu: string; memory: number; maxRamMb?: number }) {
   const cpuNum = parseFloat(cpu) || 0
-  const memMb = memory || 0
+  // The server returns docker stats memory in BYTES (parseMemoryUsage in
+  // server/services/docker.js). Pre-v1.27.58 the client labeled bytes as
+  // "MB" and divided by a hardcoded 512 — so every running container
+  // showed 100% on the RAM bar regardless of actual usage. Fix: convert
+  // bytes → MB for display, and divide by the app's real max_ram_mb.
+  const memMb = Math.round((memory || 0) / 1024 / 1024)
+  const cap = maxRamMb && maxRamMb > 0 ? maxRamMb : 512
+  const ramPct = cap > 0 ? (memMb / cap) * 100 : 0
 
   return (
     <div className="env-metrics">
@@ -341,9 +349,9 @@ function MetricsBar({ cpu, memory }: { cpu: string; memory: number }) {
       <div className="res-row">
         <span className="res-lbl">RAM</span>
         <div className="res-bar">
-          <div className="res-fill" style={{ width: `${Math.min((memMb / 512) * 100, 100)}%`, background: 'var(--accent)' }} />
+          <div className="res-fill" style={{ width: `${Math.min(ramPct, 100)}%`, background: barColor(ramPct) }} />
         </div>
-        <span className="res-val">{memMb}MB</span>
+        <span className="res-val" title={`${memMb}MB / ${cap}MB`}>{memMb}/{cap}MB</span>
       </div>
     </div>
   )
@@ -460,7 +468,7 @@ function AppCard({
             <a href={`/applications#${app.slug}`}>manage</a>
           </div>
           {prodMetrics && (
-            <MetricsBar cpu={prodMetrics.cpu} memory={prodMetrics.memory} />
+            <MetricsBar cpu={prodMetrics.cpu} memory={prodMetrics.memory} maxRamMb={app.resource_limits?.max_ram_mb} />
           )}
         </div>
 
@@ -477,7 +485,7 @@ function AppCard({
             <a href={`/applications#${app.slug}`}>manage</a>
           </div>
           {sandMetrics && (
-            <MetricsBar cpu={sandMetrics.cpu} memory={sandMetrics.memory} />
+            <MetricsBar cpu={sandMetrics.cpu} memory={sandMetrics.memory} maxRamMb={app.resource_limits?.max_ram_mb} />
           )}
         </div>
       </div>
