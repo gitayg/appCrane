@@ -741,7 +741,7 @@ function PhaseTabs({ enh, trace, onAction, onRetryJob, onDeleteJob }: PhaseTabsP
         {active === 'build'   && <BuildPane   enh={enh} jobs={jobsForPhase(trace, 'build')}
                                                onAction={onAction} onRetryJob={onRetryJob} onDeleteJob={onDeleteJob} />}
         {active === 'open_pr' && <OpenPrPane  enh={enh} trace={trace} jobs={jobsForPhase(trace, 'open_pr')}
-                                               onRetryJob={onRetryJob} onDeleteJob={onDeleteJob} />}
+                                               onAction={onAction} onRetryJob={onRetryJob} onDeleteJob={onDeleteJob} />}
         {active === 'feedback' && <FeedbackPane enh={enh} trace={trace} onAction={onAction} />}
       </div>
     </div>
@@ -889,19 +889,37 @@ function BuildPane({ enh, jobs, onAction, onRetryJob, onDeleteJob }: {
   )
 }
 
-function OpenPrPane({ enh, trace, jobs, onRetryJob, onDeleteJob }: {
+function OpenPrPane({ enh, trace, jobs, onAction, onRetryJob, onDeleteJob }: {
   enh: Enhancement; trace: TraceData | null; jobs: Job[];
+  onAction: PhaseTabsProps['onAction'];
   onRetryJob: (id: number) => void; onDeleteJob: (id: number) => void;
 }) {
   // Trace returns these too — prefer it (fresher than the row from the list).
   const prUrl       = trace?.pr_url       ?? enh.pr_url
   const branchName  = trace?.branch_name  ?? enh.branch_name
   const fixVersion  = trace?.fix_version  ?? enh.fix_version
+  // "Merge in AppCrane" lets the user kick the merge step when the PR
+  // exists but the original open_pr job's merge call failed (or never
+  // ran). Re-queues an open_pr job; worker.js detects the existing PR
+  // (worker.js:638 "already exists" branch) and proceeds straight to
+  // the merge API call without trying to recreate the PR.
+  const canMerge = prUrl && !['merged', 'shipped', 'closed'].includes(enh.status || '')
   return (
     <>
       {prUrl && (
         <div className="pane-actions" style={{ marginBottom: 12 }}>
           <a href={prUrl} target="_blank" rel="noreferrer" className="btn btn-sm">View PR ↗</a>
+          {canMerge && (
+            <button
+              className="btn btn-accent btn-sm"
+              onClick={() => {
+                if (confirm('Ask AppCrane to merge this PR via the GitHub API?\n\nReuses the existing PR (no force-push, no overwrite). The merge step is the same one that runs after a successful sandbox build.')) {
+                  onAction(enh.id, 'approve-sandbox')
+                }
+              }}
+              title="Reuse the existing PR and run the merge step. Useful when the original merge attempt failed (e.g. earlier conflict, API rate limit) or never ran."
+            >🚀 Merge in AppCrane</button>
+          )}
           {fixVersion && <span style={{ marginLeft: 8, color: 'var(--dim)', fontSize: '.82rem' }}>fix version: <code>{fixVersion}</code></span>}
           {branchName && <span style={{ marginLeft: 8, color: 'var(--dim)', fontSize: '.82rem' }}>branch: <code>{branchName}</code></span>}
         </div>
