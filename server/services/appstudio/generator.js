@@ -415,8 +415,29 @@ export async function generateCode({ jobId, app, enhancementId, plan, summary, a
 
   return new Promise((resolve, reject) => {
     let timedOut = false;
+    // Heartbeat: between container start and the first stream-json event,
+    // there's a 30-120s gap while Claude initializes + makes its first
+    // API call + the model "thinks" before any output. Without this, the
+    // log goes silent and the user thinks the coder is stuck. Tick every
+    // 15s with elapsed time + a short status; cancel on first real event.
+    const hbStart = Date.now();
+    let firstEventSeen = false;
+    const hbStatus = () => {
+      const sec = Math.round((Date.now() - hbStart) / 1000);
+      if (sec < 30)  return `Container starting + Claude initializing… (${sec}s)`;
+      if (sec < 90)  return `Waiting on Claude — model is reading the plan + repo context… (${sec}s)`;
+      if (sec < 180) return `Still waiting — first tool call should appear any moment (${sec}s)`;
+      return `Long wait — model may be doing extended planning (${sec}s)`;
+    };
+    const hb = setInterval(() => {
+      if (firstEventSeen) return;
+      onLog?.(`[studio:heartbeat] ${hbStatus()}`);
+    }, 15000);
+    const stopHb = () => { firstEventSeen = true; clearInterval(hb); };
 
+    runner.on('system', () => stopHb()); // 'system' event fires on stream init — earliest signal
     runner.on('data', (ev) => {
+      stopHb();
       if (ev.type === 'text')      onLog?.(ev.text);
       else if (ev.type === 'tool') {
         const crumb = formatToolBreadcrumb(ev);
@@ -424,9 +445,11 @@ export async function generateCode({ jobId, app, enhancementId, plan, summary, a
       }
     });
     runner.on('result', (ev) => {
+      stopHb();
       onLog?.(`[studio:result] ${ev.inputTokens + ev.outputTokens} tokens · $${(ev.costUsdCents / 100).toFixed(3)}`);
     });
     runner.on('error', (err) => {
+      stopHb();
       timedOut = /timed out/i.test(err.message);
       // Best-effort container kill on timeout
       if (timedOut) {
@@ -435,6 +458,7 @@ export async function generateCode({ jobId, app, enhancementId, plan, summary, a
       reject(timedOut ? new Error('Code generation timed out') : err);
     });
     runner.on('exit', async (code) => {
+      stopHb();
       if (timedOut) return; // already rejected via 'error'
       if (code !== 0) return reject(new Error(`Studio container exited with code ${code}`));
       // Container exit 0 = claude finished cleanly. This replaces the prior
