@@ -5,6 +5,7 @@ import { decrypt } from '../encryption.js';
 import { assertCapacity } from '../containerLimit.js';
 import { runAgentNew } from '../llm/runAgent.js';
 import { writeSnapshot } from '../github/snapshot.js';
+import { renderOpenCommentsSection } from '../enhancementComments.js';
 import log from '../../utils/logger.js';
 
 const GEN_MODEL       = process.env.APPSTUDIO_CODER_MODEL || 'claude-sonnet-4-6';
@@ -180,7 +181,7 @@ git config --global --add safe.directory /workspace
 `;
 }
 
-function buildPrompt({ plan, summary, agentContext, contextDoc, enhancementMessage }) {
+function buildPrompt({ plan, summary, agentContext, contextDoc, enhancementMessage, enhancementId }) {
   const testSection = plan?.test_files?.length
     ? `# Test files to write\nThe plan requires these test files (create or update each one):\n${
         plan.test_files.map(f => `- ${f.path} (${f.action}): ${f.what}`).join('\n')
@@ -190,6 +191,10 @@ function buildPrompt({ plan, summary, agentContext, contextDoc, enhancementMessa
   const contextSection = contextDoc
     ? `# Codebase context\nUse this architectural overview to skip broad exploration. Read specific files directly when you need exact details.\n\n${contextDoc}\n`
     : '';
+
+  // Open feedback comments (bugs / notes / reviews) the operator added on
+  // the request since the last code attempt. Empty when nothing's open.
+  const openFeedback = enhancementId ? renderOpenCommentsSection(enhancementId) : '';
 
   return `You are implementing an approved change to an existing application.
 The codebase is already cloned into the current working directory.
@@ -202,7 +207,7 @@ already shipped or what is in flight before changing files.
 
 # Enhancement request
 ${enhancementMessage}
-
+${openFeedback ? '\n' + openFeedback + '\n' : ''}
 # Approved plan
 \`\`\`json
 ${JSON.stringify(plan, null, 2)}
@@ -276,7 +281,7 @@ export async function generateCode({ jobId, app, enhancementId, plan, summary, a
 
   // Clone the repo on the host — no credentials reach the container
   const workspaceDir = await cloneForCode(dir, app, app.branch || 'main', branchName, onLog);
-  const prompt = buildPrompt({ plan, summary, agentContext, contextDoc, enhancementMessage });
+  const prompt = buildPrompt({ plan, summary, agentContext, contextDoc, enhancementMessage, enhancementId });
   if (contextDoc) onLog?.(`[studio] Injected codebase context (${contextDoc.length} chars) — coder will skip orientation exploration`);
 
   const containerName = `appcrane-studio-${jobId}`;

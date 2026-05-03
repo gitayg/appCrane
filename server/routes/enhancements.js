@@ -4,6 +4,10 @@ import { hashApiKey } from '../services/encryption.js';
 import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { AppError } from '../utils/errors.js';
 import { mirrorRequest, closeRequest, getAppForMirror } from '../services/github/issuesMirror.js';
+import {
+  listComments, createComment, setStatus as setCommentStatus,
+  deleteComment, getComment,
+} from '../services/enhancementComments.js';
 
 const router = Router();
 
@@ -231,6 +235,88 @@ router.post('/:id/delete', (req, res) => {
     db.prepare('DELETE FROM enhancement_requests WHERE id = ?').run(id);
   })();
   res.json({ message: 'Deleted' });
+});
+
+// ── Comments thread (bugs / notes / reviews) ───────────────────────────
+//
+// Authenticates with the same Bearer-or-API-key pattern as the rest of
+// this file. Read access for any authenticated user; write access for
+// the request submitter or any admin (admins own the triage queue).
+
+function resolveAuthOrThrow(req) {
+  const authHeader = req.headers.authorization || '';
+  const token = authHeader.replace(/^Bearer\s+/i, '').trim();
+  const session = getUserFromBearer(token);
+  if (session) return { userId: session.user_id, userName: session.name, role: session.role };
+
+  const apiKey = req.headers['x-api-key'];
+  if (apiKey) {
+    const db = getDb();
+    const user = db.prepare('SELECT * FROM users WHERE api_key_hash = ?').get(hashApiKey(apiKey));
+    if (user) return { userId: user.id, userName: user.name, role: user.role };
+  }
+  throw new AppError('Authentication required', 401, 'UNAUTHORIZED');
+}
+
+function loadEnhOr404(id) {
+  const enh = getDb().prepare('SELECT id, user_id FROM enhancement_requests WHERE id = ?').get(id);
+  if (!enh) throw new AppError('Enhancement not found', 404, 'NOT_FOUND');
+  return enh;
+}
+
+router.get('/:id/comments', (req, res) => {
+  resolveAuthOrThrow(req);
+  loadEnhOr404(parseInt(req.params.id, 10));
+  res.json({ comments: listComments(parseInt(req.params.id, 10)) });
+});
+
+router.post('/:id/comments', (req, res) => {
+  const auth = resolveAuthOrThrow(req);
+  const enhId = parseInt(req.params.id, 10);
+  loadEnhOr404(enhId);
+  const { type, body } = req.body || {};
+  try {
+    const c = createComment(enhId, {
+      type: type || 'note',
+      body,
+      authorUserId: auth.userId,
+      authorName:   auth.userName,
+    });
+    res.status(201).json({ comment: c });
+  } catch (e) {
+    throw new AppError(e.message, 400, 'VALIDATION');
+  }
+});
+
+router.patch('/:id/comments/:cid', (req, res) => {
+  const auth = resolveAuthOrThrow(req);
+  const enhId = parseInt(req.params.id, 10);
+  const cid   = parseInt(req.params.cid, 10);
+  loadEnhOr404(enhId);
+  const { status } = req.body || {};
+  try {
+    const c = setCommentStatus(enhId, cid, status, auth.userId);
+    res.json({ comment: c });
+  } catch (e) {
+    if (e.message === 'comment not found') throw new AppError(e.message, 404, 'NOT_FOUND');
+    throw new AppError(e.message, 400, 'VALIDATION');
+  }
+});
+
+router.delete('/:id/comments/:cid', (req, res) => {
+  const auth = resolveAuthOrThrow(req);
+  const enhId = parseInt(req.params.id, 10);
+  const cid   = parseInt(req.params.cid, 10);
+  loadEnhOr404(enhId);
+  const existing = getComment(enhId, cid);
+  if (!existing) throw new AppError('comment not found', 404, 'NOT_FOUND');
+  // Author can delete their own; admins can delete anyone's.
+  const isAuthor = existing.author_user_id === auth.userId;
+  if (!isAuthor && auth.role !== 'admin') {
+    throw new AppError('Forbidden', 403, 'FORBIDDEN');
+  }
+  deleteComment(enhId, cid);
+  res.json({ deleted: true });
 });
 
 export default router;

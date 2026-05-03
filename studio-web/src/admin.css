@@ -683,6 +683,7 @@ code.api-pill { background: var(--surface2); border: 1px solid var(--border); bo
 .phase-tab-dot-queued  { background: var(--accent); border-color: var(--accent); animation: pulse-dot 1.4s ease-in-out infinite; }
 .phase-tab-dot-failed  { background: var(--red); border-color: var(--red); }
 .phase-tab-content { display: flex; flex-direction: column; gap: 14px; min-height: 120px; }
+.phase-tab-count { margin-left: 6px; font-size: .68rem; color: var(--accent); font-weight: 600; }
 
 .pane-text { white-space: pre-wrap; word-break: break-word; line-height: 1.6; font-size: .9rem; }
 .pane-card { background: var(--surface2); border: 1px solid var(--border); border-radius: 7px; padding: 14px 18px; font-size: .85rem; }

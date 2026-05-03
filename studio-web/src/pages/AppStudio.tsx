@@ -47,6 +47,20 @@ interface TraceData {
   pr_url?: string | null
   branch_name?: string | null
   fix_version?: string | null
+  comments?: Comment[]
+  open_comment_count?: number
+}
+
+export interface Comment {
+  id: number
+  type: 'bug' | 'note' | 'review'
+  body: string
+  status: 'open' | 'resolved'
+  author_user_id: number | null
+  author_name: string | null
+  created_at: string
+  resolved_at: string | null
+  resolved_by: number | null
 }
 
 interface AppOption {
@@ -546,15 +560,20 @@ function DetailView({ enh, trace, onBack, onAction, onDeleteJob, onRetryJob }: D
 // Default tab on open is status-driven: jump to whichever tab needs
 // operator action (pending review → Plan, sandbox ready → Build, etc).
 
-type Phase = 'request' | 'plan' | 'code' | 'build' | 'open_pr'
+type Phase = 'request' | 'plan' | 'code' | 'build' | 'open_pr' | 'feedback'
 
-const PHASE_ORDER: Phase[] = ['request', 'plan', 'code', 'build', 'open_pr']
+// Feedback is at the end — it's not a lifecycle phase, it's a thread
+// the operator can interact with at any point. Keeping it last so it
+// reads as "review / comment after seeing the work" but accessible
+// from the start.
+const PHASE_ORDER: Phase[] = ['request', 'plan', 'code', 'build', 'open_pr', 'feedback']
 const PHASE_LABELS: Record<Phase, string> = {
-  request: 'Request',
-  plan:    'Plan',
-  code:    'Code',
-  build:   'Build',
-  open_pr: 'Open PR',
+  request:  'Request',
+  plan:     'Plan',
+  code:     'Code',
+  build:    'Build',
+  open_pr:  'Open PR',
+  feedback: 'Feedback',
 }
 
 interface PhaseTabsProps {
@@ -602,13 +621,18 @@ function PhaseTabs({ enh, trace, onAction, onRetryJob, onDeleteJob }: PhaseTabsP
   // planning) so the operator sees the full iteration history in one place.
   const planJobs = [...jobsForPhase(trace, 'plan'), ...jobsForPhase(trace, 'revise_plan')]
     .sort((a, b) => a.id - b.id)
+  // Feedback's "state" tracks open-comment count: idle when nothing's
+  // open, queued when there are open items waiting on the agent. We
+  // never mark it done/failed — it's not a phase the worker drives.
+  const openComments = trace?.open_comment_count ?? 0
   const states: Record<Phase, TabState> = {
     // Request is "done" the moment the row exists.
-    request: 'done',
-    plan:    tabState(planJobs),
-    code:    tabState(jobsForPhase(trace, 'code')),
-    build:   tabState(jobsForPhase(trace, 'build')),
-    open_pr: tabState(jobsForPhase(trace, 'open_pr')),
+    request:  'done',
+    plan:     tabState(planJobs),
+    code:     tabState(jobsForPhase(trace, 'code')),
+    build:    tabState(jobsForPhase(trace, 'build')),
+    open_pr:  tabState(jobsForPhase(trace, 'open_pr')),
+    feedback: openComments > 0 ? 'queued' : 'idle',
   }
   const visibleTabs = PHASE_ORDER
 
@@ -643,7 +667,12 @@ function PhaseTabs({ enh, trace, onAction, onRetryJob, onDeleteJob }: PhaseTabsP
               className={`phase-tab phase-tab-${s}${isActive ? ' active' : ''}${isNext ? ' next-up' : ''}`}
               onClick={() => setActive(p)}
             >
-              <span className="phase-tab-label">{PHASE_LABELS[p]}</span>
+              <span className="phase-tab-label">
+                {PHASE_LABELS[p]}
+                {p === 'feedback' && openComments > 0 && (
+                  <span className="phase-tab-count">({openComments} open)</span>
+                )}
+              </span>
               <span className={`phase-tab-dot phase-tab-dot-${s}`} aria-hidden="true" />
             </button>
           )
@@ -662,6 +691,7 @@ function PhaseTabs({ enh, trace, onAction, onRetryJob, onDeleteJob }: PhaseTabsP
                                                onAction={onAction} onRetryJob={onRetryJob} onDeleteJob={onDeleteJob} />}
         {active === 'open_pr' && <OpenPrPane  enh={enh} trace={trace} jobs={jobsForPhase(trace, 'open_pr')}
                                                onRetryJob={onRetryJob} onDeleteJob={onDeleteJob} />}
+        {active === 'feedback' && <FeedbackPane enh={enh} trace={trace} onAction={onAction} />}
       </div>
     </div>
   )
@@ -878,6 +908,148 @@ function ExpandedJobsTrace({ jobs, onRetryJob, onDeleteJob }: {
           </div>
         )
       })}
+    </>
+  )
+}
+
+// ── Feedback pane: bugs / notes / reviews thread ───────────────
+
+const COMMENT_TYPE_META: Record<Comment['type'], { icon: string; label: string }> = {
+  bug:    { icon: '🐛', label: 'Bug' },
+  note:   { icon: '📝', label: 'Note' },
+  review: { icon: '👀', label: 'Review' },
+}
+
+function FeedbackPane({ enh, trace, onAction }: {
+  enh: Enhancement; trace: TraceData | null;
+  onAction: PhaseTabsProps['onAction'];
+}) {
+  // Comments come from the trace endpoint (which polls every 1.5s) so the
+  // list stays fresh without an extra fetch loop here. The mutating
+  // actions below hit the API; the next trace poll picks up the change.
+  const comments: Comment[] = trace?.comments ?? []
+  const [type, setType]   = useState<Comment['type']>('bug')
+  const [body, setBody]   = useState('')
+  const [busy, setBusy]   = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const isTerminal = enh.status === 'done' || enh.status === 'merged' || enh.status === 'auto_failed'
+  const openComments = comments.filter(c => c.status === 'open')
+
+  async function submit() {
+    const trimmed = body.trim()
+    if (!trimmed || busy) return
+    setBusy(true); setError(null)
+    try {
+      await adminApi.post(`/api/enhancements/${enh.id}/comments`, { type, body: trimmed })
+      setBody('')
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function toggleStatus(c: Comment) {
+    const next = c.status === 'open' ? 'resolved' : 'open'
+    try {
+      await fetch(`/api/enhancements/${enh.id}/comments/${c.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', ...adminApi.authHeaders() },
+        body: JSON.stringify({ status: next }),
+      })
+    } catch (_) {}
+  }
+
+  async function remove(c: Comment) {
+    if (!confirm('Delete this comment?')) return
+    try {
+      await adminApi.del(`/api/enhancements/${enh.id}/comments/${c.id}`)
+    } catch (_) {}
+  }
+
+  return (
+    <>
+      {/* Banner: re-trigger pipeline when terminal status + open feedback */}
+      {isTerminal && openComments.length > 0 && (
+        <div className="pane-card" style={{ background: 'rgba(245,158,11,.12)', borderColor: '#f59e0b' }}>
+          <div style={{ fontWeight: 600, marginBottom: 4 }}>This request is {enh.status}, but {openComments.length} feedback item{openComments.length === 1 ? '' : 's'} {openComments.length === 1 ? 'is' : 'are'} still open.</div>
+          <div style={{ fontSize: '.82rem', color: 'var(--dim)', marginBottom: 8 }}>
+            Re-run the pipeline to address them. The planner will see the open items and incorporate them into a new plan.
+          </div>
+          <button
+            className="btn btn-accent btn-sm"
+            onClick={() => onAction(enh.id, 'plan')}
+          >Re-plan with open feedback</button>
+        </div>
+      )}
+
+      {/* Add form */}
+      <div className="pane-card">
+        <div className="pane-section-hdr" style={{ marginBottom: 8 }}>Add feedback</div>
+        <div style={{ display: 'flex', gap: 12, marginBottom: 8, flexWrap: 'wrap' }}>
+          {(['bug', 'note', 'review'] as Comment['type'][]).map(t => (
+            <label key={t} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: '.82rem', cursor: 'pointer' }}>
+              <input type="radio" checked={type === t} onChange={() => setType(t)} />
+              {COMMENT_TYPE_META[t].icon} {COMMENT_TYPE_META[t].label}
+            </label>
+          ))}
+        </div>
+        <textarea
+          value={body}
+          onChange={e => setBody(e.target.value)}
+          placeholder={
+            type === 'bug'    ? 'What broke? What did you expect vs see?'
+          : type === 'review' ? 'Your assessment — what works, what to change'
+          :                     'Anything the agent should know on the next run'
+          }
+          rows={3}
+          disabled={busy}
+          style={{ width: '100%', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 6, padding: 8, color: 'var(--text)', fontFamily: 'inherit', fontSize: '.85rem', resize: 'vertical' }}
+        />
+        {error && <div style={{ color: 'var(--red)', fontSize: '.78rem', marginTop: 6 }}>{error}</div>}
+        <div className="pane-actions" style={{ marginTop: 8 }}>
+          <button className="btn btn-accent btn-sm" onClick={submit} disabled={busy || !body.trim()}>
+            {busy ? 'Adding…' : `Add ${COMMENT_TYPE_META[type].label.toLowerCase()}`}
+          </button>
+        </div>
+      </div>
+
+      {/* Thread */}
+      {comments.length === 0
+        ? <div className="pane-empty">No feedback yet.</div>
+        : <div>
+            <div className="pane-section-hdr" style={{ marginBottom: 8 }}>
+              Thread ({comments.length}, {openComments.length} open)
+            </div>
+            {comments.map(c => (
+              <div
+                key={c.id}
+                style={{
+                  border: '1px solid var(--border)', borderRadius: 7, padding: '10px 12px',
+                  marginBottom: 8, background: c.status === 'resolved' ? 'var(--surface)' : 'var(--surface2)',
+                  opacity: c.status === 'resolved' ? 0.7 : 1,
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, fontSize: '.78rem', marginBottom: 6, flexWrap: 'wrap' }}>
+                  <span>{COMMENT_TYPE_META[c.type].icon} <strong>{COMMENT_TYPE_META[c.type].label}</strong></span>
+                  {c.author_name && <span style={{ color: 'var(--dim)' }}>{c.author_name}</span>}
+                  <span style={{ color: 'var(--dim)' }}>{fmtDate(c.created_at)}</span>
+                  {c.status === 'resolved' && (
+                    <span style={{ color: 'var(--green)', fontWeight: 600 }}>✓ resolved</span>
+                  )}
+                  <div style={{ marginLeft: 'auto', display: 'flex', gap: 4 }}>
+                    <button className="btn btn-xs" onClick={() => toggleStatus(c)}>
+                      {c.status === 'open' ? 'Resolve' : 'Reopen'}
+                    </button>
+                    <button className="btn btn-xs btn-red" onClick={() => remove(c)}>✕</button>
+                  </div>
+                </div>
+                <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: '.85rem', lineHeight: 1.55 }}>{c.body}</div>
+              </div>
+            ))}
+          </div>
+      }
     </>
   )
 }
