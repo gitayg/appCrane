@@ -49,11 +49,6 @@ interface AppOption {
   name: string
 }
 
-interface ChatMessage {
-  role: 'user' | 'assistant'
-  content: string
-}
-
 const STATUS_LABELS: Record<string, string> = {
   new: 'New',
   selected: 'Selected for Implementation',
@@ -151,12 +146,6 @@ export function AppStudio() {
   const [sortKey, setSortKey] = useState<SortKey>('id')
   const [sortDir, setSortDir] = useState<SortDir>('desc')
   const [selected, setSelected] = useState<Enhancement | null>(null)
-  const [chatOpen, setChatOpen] = useState(false)
-  const [chatApp, setChatApp] = useState('')
-  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
-  const [chatInput, setChatInput] = useState('')
-  const [chatSending, setChatSending] = useState(false)
-  const chatBottomRef = useRef<HTMLDivElement>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const [trace, setTrace] = useState<TraceData | null>(null)
   const [openJobs, setOpenJobs] = useState<Set<number>>(new Set())
@@ -297,41 +286,6 @@ export function AppStudio() {
     if (selected) fetchTrace(selected.id)
   }
 
-  function openChat() {
-    setChatMessages([{ role: 'assistant', content: "What would you like to add or improve? Describe it briefly and I'll help you refine it." }])
-    setChatInput('')
-    setChatApp(apps[0]?.slug ?? '')
-    setChatOpen(true)
-  }
-
-  async function sendChat() {
-    const text = chatInput.trim()
-    if (!text || chatSending) return
-    const msgs: ChatMessage[] = [...chatMessages, { role: 'user', content: text }]
-    setChatMessages(msgs)
-    setChatInput('')
-    setChatSending(true)
-    const r = await adminApi.post<{ reply?: string; message?: string }>('/api/appstudio/chat', {
-      app_slug: chatApp,
-      messages: msgs,
-    }).catch(() => null)
-    const reply = r?.reply ?? r?.message ?? ''
-    if (reply) setChatMessages(prev => [...prev, { role: 'assistant', content: reply }])
-    setChatSending(false)
-  }
-
-  async function submitRequest() {
-    const lastAi = [...chatMessages].reverse().find(m => m.role === 'assistant')
-    if (!lastAi) return
-    await adminApi.post('/api/enhancements', { message: lastAi.content, app_slug: chatApp }).catch(() => {})
-    setChatOpen(false)
-    loadData()
-  }
-
-  useEffect(() => {
-    chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [chatMessages])
-
   function toggleJob(id: number) {
     setOpenJobs(prev => {
       const next = new Set(prev)
@@ -372,7 +326,6 @@ export function AppStudio() {
             onSelect={openDetail}
             onSetStatus={setStatus}
             onDelete={deleteEnhancement}
-            onNewRequest={openChat}
             total={sortedFiltered.length}
           />
         )
@@ -385,52 +338,6 @@ export function AppStudio() {
       )}
 
       {tab === 'skills' && <SkillsTab />}
-
-      {chatOpen && (
-        <div className="chat-overlay">
-          <div className="chat-modal">
-            <div className="chat-header">
-              <span style={{ fontWeight: 700 }}>New Request</span>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <select
-                  value={chatApp}
-                  onChange={e => setChatApp(e.target.value)}
-                  style={{ fontSize: '.8rem', padding: '3px 6px' }}
-                >
-                  {apps.map(a => <option key={a.slug} value={a.slug}>{a.name}</option>)}
-                </select>
-                <button className="btn btn-xs" onClick={() => setChatOpen(false)}>✕</button>
-              </div>
-            </div>
-            <div className="chat-messages">
-              {chatMessages.map((m, i) => (
-                <div key={i} className={`chat-bubble ${m.role === 'user' ? 'user' : 'ai'}`}>
-                  {m.content}
-                </div>
-              ))}
-              {chatSending && <div className="chat-bubble ai" style={{ color: 'var(--dim)' }}>…</div>}
-              <div ref={chatBottomRef} />
-            </div>
-            <div className="chat-input-row">
-              <textarea
-                className="chat-input"
-                value={chatInput}
-                onChange={e => setChatInput(e.target.value)}
-                onKeyDown={e => {
-                  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat() }
-                }}
-                placeholder="Describe your request…"
-                rows={2}
-              />
-              <button className="btn btn-accent btn-sm" onClick={sendChat} disabled={chatSending}>Send</button>
-            </div>
-            <div className="chat-footer">
-              <button className="btn btn-accent btn-sm" onClick={submitRequest}>Submit as Request</button>
-              <button className="btn btn-sm" onClick={() => setChatOpen(false)}>Cancel</button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   )
 }
@@ -451,14 +358,13 @@ interface RequestsTabProps {
   onSelect: (e: Enhancement) => void
   onSetStatus: (id: number, status: string) => void
   onDelete: (id: number) => void
-  onNewRequest: () => void
   total: number
 }
 
 function RequestsTab({
   enhancements, apps, filterApp, filterStatus, filterText,
   onFilterApp, onFilterStatus, onFilterText,
-  onSort, thArrow, onSelect, onSetStatus, onDelete, onNewRequest, total,
+  onSort, thArrow, onSelect, onSetStatus, onDelete, total,
 }: RequestsTabProps) {
   return (
     <>
@@ -479,7 +385,6 @@ function RequestsTab({
           style={{ flex: 1, fontSize: '.82rem' }}
         />
         <span style={{ marginLeft: 'auto', color: 'var(--dim)', fontSize: '.82rem', whiteSpace: 'nowrap' }}>{total} requests</span>
-        <button className="btn btn-accent btn-sm" onClick={onNewRequest}>+ New Request</button>
       </div>
       <div className="req-table-wrap">
         <table className="req-table">
