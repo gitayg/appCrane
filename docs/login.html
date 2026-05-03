@@ -323,34 +323,9 @@ input:focus{border-color:var(--accent)}
   </div>
 
   <!-- Ask Claude panel -->
-  <div id="askPanel" class="ask-panel">
-    <div class="ask-header">
-      <span>🤖 Learn</span>
-      <span id="askPanelAppLabel" class="ask-app-label"></span>
-      <div class="ask-header-right">
-        <button class="ask-sessions-btn" onclick="showAskSessionsPicker()" title="Previous conversations">History</button>
-        <button class="ask-close" onclick="closeAskPanel()">×</button>
-      </div>
-    </div>
-    <div id="askMessages" class="ask-messages">
-      <div class="ask-empty">Learn about this application — Claude will read the source code to answer.</div>
-    </div>
-    <div id="askWorking" class="ask-working" style="display:none">
-      <div class="ask-spinner"></div>
-      <div id="askWorkingText" class="ask-working-text">Analyzing codebase...</div>
-      <span id="askLiveStats" style="font-size:.68rem;color:var(--dim);font-family:monospace;white-space:nowrap;flex-shrink:0"></span>
-    </div>
-    <div class="ask-input-area">
-      <div id="askPeekBar" class="ask-peek-bar" style="display:none">
-        <span>🎯</span><span id="askPeekLabel" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
-        <button onclick="clearAskPeekCtx()">×</button>
-      </div>
-      <div class="ask-input-row">
-        <textarea id="askInput" class="ask-textarea" placeholder="Learn about this application..." rows="2" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendAskQuestion();}"></textarea>
-        <button id="askPeekBtn" class="btn-enhance" onclick="togglePeekMode()" title="Point & click an element to add context (Esc to cancel)" style="padding:7px 10px;flex-shrink:0">🎯</button>
-        <button id="askSendBtn" class="ask-send" onclick="sendAskQuestion()">Send</button>
-      </div>
-    </div>
+  <!-- Ask "Learn" panel — Custom Element from /docs/shared/crane-topbar.js
+       so portal + /applications share one implementation (Phase B.2). -->
+  <crane-ask-panel id="askPanel" iframe-selector="#frameIframe"></crane-ask-panel>
   </div>
 
   <!-- Enhance panel -->
@@ -1132,8 +1107,6 @@ function openApp(url, name, slug, hasIcon, appData) {
   // Env switcher visibility is driven by whether the topbar gets both
   // prod-url and sand-url attributes. Non-admins only ever see prod.
   const showSwitcher = isAdmin && !!_currentAppSandUrl;
-  _askSessionId = null;
-  _askPeekCtx = null;
   _planEnhId = null;
   _planBusy = false;
   _planHasPlan = false;
@@ -1604,17 +1577,13 @@ function _peekClick(e) {
   e.stopPropagation();
   const info = _capturePeekInfo(e.target);
   stopPeekMode();
-  if (document.getElementById('askPanel').classList.contains('open')) {
-    _askPeekCtx = info;
-    document.getElementById('askPeekLabel').textContent = (info.tag ? '<' + info.tag + '>' : '') + (info.text ? ' "' + info.text.slice(0, 60) + '"' : ' ' + info.selector);
-    document.getElementById('askPeekBar').style.display = 'flex';
-  } else {
-    _planPeekCtx = info;
-    document.getElementById('planPeekLabel').textContent = (info.tag ? '<' + info.tag + '>' : '') + (info.text ? ' "' + info.text.slice(0, 60) + '"' : ' ' + info.selector);
-    document.getElementById('planPeekBar').style.display = 'flex';
-    openPlanPanel();
-    setTimeout(function() { document.getElementById('planInput').focus(); }, 50);
-  }
+  // Only the Plan panel still uses the vanilla peek router. Ask uses
+  // its own picker inside the React panel since v1.27.56.
+  _planPeekCtx = info;
+  document.getElementById('planPeekLabel').textContent = (info.tag ? '<' + info.tag + '>' : '') + (info.text ? ' "' + info.text.slice(0, 60) + '"' : ' ' + info.selector);
+  document.getElementById('planPeekBar').style.display = 'flex';
+  openPlanPanel();
+  setTimeout(function() { document.getElementById('planInput').focus(); }, 50);
 }
 
 function _peekKeydown(e) {
@@ -1893,9 +1862,8 @@ function startSaml() {
 }
 
 // ── Ask Claude ───────────────────────────────────────────────────────────
-var _askSessionId = null;
-var _askPeekCtx   = null;
-var _askBusy      = false;
+// Backed by <crane-ask-panel> Custom Element since v1.27.56 (Phase B.2
+// step 2). Session, peek, streaming all live in the React component.
 var _userRole     = null;
 
 // ── Right-side dock for Learn / Request panels ───────────────────────────
@@ -1969,154 +1937,35 @@ function _maybeDeactivateDock() {
   });
 })();
 
+// Ask panel — backed by <crane-ask-panel>. We just toggle attributes;
+// the React component handles the form, peek, SSE stream, etc.
 function openAskPanel() {
   if (!currentAppSlug) return;
-  document.getElementById('askPanel').classList.add('open');
+  var el = document.getElementById('askPanel');
+  if (!el) return;
+  el.setAttribute('slug',     currentAppSlug);
+  el.setAttribute('app-name', document.getElementById('appTopbar')?.getAttribute('app-name') || '');
+  el.setAttribute('open', '');
+  var w = parseInt(localStorage.getItem('cc_dock_width') || '400', 10);
+  if (Number.isFinite(w)) el.setAttribute('width', String(w));
   _activateDock();
 }
 
 function closeAskPanel() {
-  document.getElementById('askPanel').classList.remove('open');
+  var el = document.getElementById('askPanel');
+  if (el) el.removeAttribute('open');
   _maybeDeactivateDock();
 }
 
-function clearAskPeekCtx() {
-  _askPeekCtx = null;
-  document.getElementById('askPeekBar').style.display = 'none';
-}
+document.addEventListener('crane-close', function(ev) {
+  if (ev.target && ev.target.id === 'askPanel') closeAskPanel();
+});
 
-function _appendAskMsg(role, content) {
-  const container = document.getElementById('askMessages');
-  const empty = container.querySelector('.ask-empty');
-  if (empty) empty.remove();
-  const div = document.createElement('div');
-  div.className = 'ask-msg ' + role;
-  div.textContent = content;
-  container.appendChild(div);
-  container.scrollTop = container.scrollHeight;
-  return div;
-}
+// sendAskQuestion / showAskSessionsPicker / _appendAskMsg /
+// clearAskPeekCtx / _askStartedAt+timer all removed in v1.27.56 — the
+// <crane-ask-panel> Custom Element handles them. History picker is the
+// only feature regression; can be re-added inside the React panel.
 
-async function sendAskQuestion() {
-  if (_askBusy) return;
-  const input = document.getElementById('askInput');
-  let question = input.value.trim();
-  if (!question) return;
-
-  if (_askPeekCtx) {
-    const c = _askPeekCtx;
-    const ctx = ['--- Pointed element ---', 'URL: ' + c.path, 'Selector: ' + c.selector,
-      'Tag: <' + c.tag + '>' + (c.id ? ' #' + c.id : ''), c.text ? 'Text: "' + c.text + '"' : null]
-      .filter(Boolean).join('\n');
-    question = ctx + '\n\n' + question;
-    clearAskPeekCtx();
-  }
-
-  input.value = '';
-  _askBusy = true;
-  document.getElementById('askSendBtn').disabled = true;
-  _appendAskMsg('user', question);
-
-  const workEl = document.getElementById('askWorking');
-  const workTxt = document.getElementById('askWorkingText');
-  const statsEl = document.getElementById('askLiveStats');
-  workEl.style.display = 'flex';
-  workTxt.textContent = 'Spinning up container...';
-  statsEl.textContent = '';
-  _askStartedAt = Date.now();
-  _askLiveTokens = 0;
-  if (_askElapsedTimer) clearInterval(_askElapsedTimer);
-  _askElapsedTimer = setInterval(function() {
-    if (!_askStartedAt) return;
-    var s = Math.round((Date.now() - _askStartedAt) / 1000);
-    statsEl.textContent = _askLiveTokens > 0 ? s + 's · ' + _askLiveTokens.toLocaleString() + ' tok' : s + 's';
-  }, 1000);
-
-  try {
-    const r = await fetch(API + '/api/ask/' + currentAppSlug, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + sessionToken },
-      body: JSON.stringify({ question: question, session_id: _askSessionId }),
-    });
-    const d = await r.json();
-    if (!r.ok) throw new Error((d.error && d.error.message) || 'Failed');
-    _askSessionId = d.session_id;
-
-    const es = new EventSource(API + '/api/ask/stream/' + encodeURIComponent(d.job_id) + '?token=' + encodeURIComponent(sessionToken));
-    var esErrCount = 0;
-    es.onmessage = function(e) {
-      esErrCount = 0;
-      const evt = JSON.parse(e.data);
-      if (evt.type === 'log') {
-        workTxt.textContent = evt.text.replace(/^\[ask\]\s*/, '').replace(/^\[stderr\]\s*/, '');
-      } else if (evt.type === 'tokens') {
-        _askLiveTokens = evt.count || 0;
-      } else if (evt.type === 'done') {
-        es.close();
-        if (_askElapsedTimer) { clearInterval(_askElapsedTimer); _askElapsedTimer = null; }
-        workEl.style.display = 'none';
-        _appendAskMsg('assistant', evt.answer || '(no response)');
-        _askBusy = false;
-        document.getElementById('askSendBtn').disabled = false;
-        document.getElementById('askInput').focus();
-      } else if (evt.type === 'error') {
-        es.close();
-        if (_askElapsedTimer) { clearInterval(_askElapsedTimer); _askElapsedTimer = null; }
-        workEl.style.display = 'none';
-        _appendAskMsg('assistant', '⚠️ ' + evt.message);
-        _askBusy = false;
-        document.getElementById('askSendBtn').disabled = false;
-      }
-    };
-    es.onerror = function() {
-      esErrCount++;
-      if (esErrCount <= 5) {
-        // Likely a cold-start proxy retry — keep waiting, EventSource will reconnect automatically
-        workTxt.textContent = 'Starting session\u2026';
-        return;
-      }
-      es.close();
-      workEl.style.display = 'none';
-      _appendAskMsg('assistant', '⚠️ Could not connect. Please try again.');
-      _askBusy = false;
-      document.getElementById('askSendBtn').disabled = false;
-    };
-  } catch (err) {
-    workEl.style.display = 'none';
-    _appendAskMsg('assistant', '⚠️ ' + err.message);
-    _askBusy = false;
-    document.getElementById('askSendBtn').disabled = false;
-  }
-}
-
-async function showAskSessionsPicker() {
-  if (!currentAppSlug) return;
-  try {
-    const r = await fetch(API + '/api/ask/sessions/' + currentAppSlug, {
-      headers: { 'Authorization': 'Bearer ' + sessionToken },
-    });
-    const d = await r.json();
-    if (!d.sessions || !d.sessions.length) { alert('No previous conversations for this app.'); return; }
-    const labels = d.sessions.map(function(s, i) { return (i + 1) + '. ' + (s.title || 'Untitled') + ' (' + s.updated_at.slice(0, 10) + ')'; });
-    const choice = prompt('Select a conversation (enter number):\n\n' + labels.join('\n'));
-    const idx = parseInt(choice, 10) - 1;
-    if (isNaN(idx) || idx < 0 || idx >= d.sessions.length) return;
-    const sess = d.sessions[idx];
-    _askSessionId = sess.id;
-    const mr = await fetch(API + '/api/ask/session/' + sess.id, {
-      headers: { 'Authorization': 'Bearer ' + sessionToken },
-    });
-    const md = await mr.json();
-    const container = document.getElementById('askMessages');
-    container.innerHTML = '';
-    (md.messages || []).forEach(function(m) { _appendAskMsg(m.role, m.content); });
-    if (!md.messages || !md.messages.length) {
-      container.innerHTML = '<div class="ask-empty">No messages in this session.</div>';
-    }
-  } catch (err) {
-    alert('Failed to load sessions: ' + err.message);
-  }
-}
 
 // ── Plan panel ──────────────────────────────────────────────────────────
 var _planEnhId   = null;
@@ -2128,9 +1977,6 @@ var _planJobStartedAt = null;
 var _planElapsedTimer = null;
 var _jobDetailStartedAt = null;
 var _jobDetailElapsedTimer = null;
-var _askStartedAt = null;
-var _askElapsedTimer = null;
-var _askLiveTokens = 0;
 
 function _startElapsedTick(getStartedAt, updateFn) {
   var timer = setInterval(function() {
