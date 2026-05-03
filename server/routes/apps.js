@@ -727,6 +727,16 @@ router.put('/:slug/claude-credentials', requireAdmin, requireAppAccess, auditMid
   try {
     validateCredentials(payload);
     setCredentials(req.params.slug, payload);
+    // Long-lived per-app builder containers mount credentials.json at
+    // start-time only. If one is running, evict it so the next Build/
+    // Code dispatch starts a fresh container with the new creds —
+    // otherwise the user uploads new creds and the container keeps
+    // using the stale (or absent) mount, surfacing as "Not logged in"
+    // or "Credit balance is too low" depending on auth precedence.
+    try {
+      const { evict } = await import('../services/builder/appContainer.js');
+      evict(req.params.slug, 'credentials-changed');
+    } catch (_) {}
     // Return the fresh summary so the UI can update without a second fetch.
     const { credentialsInfo } = await import('../services/claudeCredentials.js');
     res.json(credentialsInfo(req.params.slug));
@@ -744,6 +754,13 @@ router.put('/:slug/claude-credentials', requireAdmin, requireAppAccess, auditMid
 router.delete('/:slug/claude-credentials', requireAdmin, requireAppAccess, auditMiddleware('app-claude-credentials'), async (req, res) => {
   const { clearCredentials } = await import('../services/claudeCredentials.js');
   clearCredentials(req.params.slug);
+  // Same reasoning as PUT — evict the running builder so it stops
+  // mounting the (now-deleted) creds and falls back to API key auth
+  // on the next dispatch.
+  try {
+    const { evict } = await import('../services/builder/appContainer.js');
+    evict(req.params.slug, 'credentials-cleared');
+  } catch (_) {}
   res.json({ present: false });
 });
 
