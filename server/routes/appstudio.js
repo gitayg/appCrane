@@ -169,11 +169,22 @@ router.post('/:id/approve-sandbox', auditMiddleware('appstudio.approve-sandbox')
   if (req.user.role !== 'admin' && !isAppAdmin(req.user.id, enh.app_slug)) {
     throw new AppError('Forbidden', 403, 'FORBIDDEN');
   }
-  if (!enh.branch_name) throw new AppError('No branch to open PR from', 400, 'NO_BRANCH');
+
+  // branch_name is set by handleCode AFTER the push succeeds. When the
+  // user is asking AppCrane to merge an existing PR (e.g. v1.27.79's
+  // "Merge existing PR" banner after a coder refusal), branch_name on
+  // the row may still be NULL — but the branch DOES exist on GitHub
+  // under the deterministic appstudio/<id>-<slug> name. Backfill it.
+  let branchName = enh.branch_name;
+  if (!branchName && enh.app_slug) {
+    branchName = `appstudio/${enh.id}-${enh.app_slug}`;
+    db.prepare('UPDATE enhancement_requests SET branch_name = ? WHERE id = ?').run(branchName, enh.id);
+  }
+  if (!branchName) throw new AppError('No branch to open PR from (and could not derive one)', 400, 'NO_BRANCH');
 
   db.prepare('INSERT INTO enhancement_jobs (enhancement_id, phase) VALUES (?, ?)').run(enh.id, 'open_pr');
 
-  res.json({ message: 'PR creation queued' });
+  res.json({ message: 'PR creation queued', branch_name: branchName });
 });
 
 /**

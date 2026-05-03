@@ -274,7 +274,15 @@ export function AppStudio({ tab: forcedTab }: AppStudioProps = {}) {
   }
 
   async function sendAction(id: number, path: string, body?: unknown) {
-    await adminApi.post(`/api/appstudio/${id}/${path}`, body).catch(() => {})
+    try {
+      await adminApi.post(`/api/appstudio/${id}/${path}`, body)
+    } catch (err) {
+      // Was silently swallowed pre-v1.27.80 — left users staring at an
+      // unchanged UI when a route 4xx'd (e.g., approve-sandbox 400 when
+      // branch_name was null after a code-phase refusal).
+      alert('Action failed: ' + (err instanceof Error ? err.message : String(err)))
+      return
+    }
     loadData()
     if (selected?.id === id) {
       stopPoll()
