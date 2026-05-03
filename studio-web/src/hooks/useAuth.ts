@@ -30,8 +30,19 @@ export function useAuthState(): AuthCtx {
 
   const signOut = useCallback(() => {
     setKey('')
+    localStorage.removeItem('cc_identity_token')
     window.location.href = '/dashboard'
   }, [setKey])
 
-  return { key, setKey, isAuthed: key.length > 5, signOut }
+  // A portal Bearer token (cc_identity_token, set by /api/identity/login)
+  // also counts as authed — adminApi's authHeaders already falls back to
+  // it as a Bearer header for SPA-side calls (v1.27.56). Without this,
+  // a user who logged in via password on /dashboard saw the Login screen
+  // forever because cc_api_key was empty.
+  const identityToken = typeof localStorage !== 'undefined'
+    ? (localStorage.getItem('cc_identity_token') || '')
+    : ''
+  const isAuthed = key.length > 5 || identityToken.length > 5
+
+  return { key, setKey, isAuthed, signOut }
 }
