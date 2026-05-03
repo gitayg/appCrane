@@ -511,12 +511,31 @@ export function Applications() {
                     onClick={() => setFrameAncestors(app)}
                     title={app.frame_ancestors ? `Embedders: ${app.frame_ancestors}` : 'Allowed embedders (default: same origin only)'}
                   >🖼 embed{app.frame_ancestors ? ' ✓' : ''}</button>
+                  {(app.source_type === 'github' || app.github_url) && (
+                    <>
+                      {app.github_url && (
+                        <a className="btn btn-xs" href={app.github_url} target="_blank" rel="noreferrer" title={app.github_url}>GitHub ↗</a>
+                      )}
+                      <button
+                        className="btn btn-xs"
+                        onClick={() => checkUpdates(app.slug)}
+                        title="Check GitHub for new commits since last deploy"
+                      >
+                        {checkUpdateText[app.slug] || '↑ updates'}
+                      </button>
+                      <button
+                        className="btn btn-xs"
+                        onClick={() => registerGithubHook(app.slug)}
+                        title="Register GitHub webhook for auto-deploy"
+                      >gh hook</button>
+                    </>
+                  )}
                   <button className="btn btn-xs btn-red" onClick={() => deleteApp(app.slug, app.name)}>delete</button>
                 </div>
               </div>
 
               <div className="card-envs">
-                {(['production', 'sandbox'] as const).map(env => {
+                {(['sandbox', 'production'] as const).map(env => {
                   const isProd = env === 'production'
                   const ver = versions[app.slug]?.[isProd ? 'prod' : 'sand']
                   return (
@@ -577,20 +596,6 @@ export function Applications() {
                 </div>
               )}
 
-              {(app.source_type === 'github' || app.github_url) && (
-                <div className="card-footer">
-                  {app.github_url && (
-                    <a className="btn btn-xs" href={app.github_url} target="_blank" rel="noreferrer">GitHub ↗</a>
-                  )}
-                  <button
-                    className="btn btn-xs"
-                    onClick={() => checkUpdates(app.slug)}
-                  >
-                    {checkUpdateText[app.slug] || '↑ check updates'}
-                  </button>
-                  <button className="btn btn-xs" onClick={() => registerGithubHook(app.slug)}>gh hook</button>
-                </div>
-              )}
             </div>
           )
         })}

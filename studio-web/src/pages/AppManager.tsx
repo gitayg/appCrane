@@ -403,30 +403,59 @@ interface ClaudeCredsCardProps {
 function ClaudeCredsCard({ slug, reload, onMsg }: ClaudeCredsCardProps) {
   const [info, setInfo] = useState<ClaudeCredsInfo>({ present: false })
   const [busy, setBusy] = useState(false)
+  // Inline status renders persistently in the card body (the parent's
+  // toast banner disappears after 5s and was easy to miss). Cleared by
+  // the next user action or after 8s, whichever comes first.
+  const [status, setStatus] = useState<{ kind: 'ok' | 'err'; text: string; at: number } | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
+  const statusTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  function load() {
-    adminApi.get<ClaudeCredsInfo>(`/api/apps/${slug}/claude-credentials`)
-      .then(setInfo).catch(() => setInfo({ present: false }))
+  function flashStatus(kind: 'ok' | 'err', text: string) {
+    setStatus({ kind, text, at: Date.now() })
+    if (statusTimer.current) clearTimeout(statusTimer.current)
+    statusTimer.current = setTimeout(() => setStatus(null), 8000)
   }
-  useEffect(() => { load() }, [slug, reload])
+
+  async function load() {
+    try {
+      const fresh = await adminApi.get<ClaudeCredsInfo>(`/api/apps/${slug}/claude-credentials`)
+      setInfo(fresh ?? { present: false })
+    } catch {
+      setInfo({ present: false })
+    }
+  }
+  useEffect(() => {
+    load()
+    return () => { if (statusTimer.current) clearTimeout(statusTimer.current) }
+  }, [slug, reload])
 
   async function onPickFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
     if (!file) return
     e.target.value = ''
     setBusy(true)
+    setStatus(null)
     try {
       const text = await file.text()
-      const parsed = JSON.parse(text)
-      const next = await adminApi.put<ClaudeCredsInfo>(
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(text)
+      } catch {
+        throw new Error('File is not valid JSON. Re-export and try again.')
+      }
+      await adminApi.put<ClaudeCredsInfo>(
         `/api/apps/${slug}/claude-credentials`,
         { credentials: parsed },
       )
-      setInfo(next)
-      onMsg({ text: 'Claude credentials saved. Next dispatch uses them.', ok: true })
+      // Re-fetch from the server rather than trusting the PUT response —
+      // confirms the round-trip actually persisted the file.
+      await load()
+      flashStatus('ok', `Saved ${file.name} (${Math.round(file.size / 1024)} KB). Next dispatch uses it.`)
+      onMsg({ text: 'Claude credentials saved.', ok: true })
     } catch (err) {
-      onMsg({ text: `Upload failed: ${(err as Error).message}`, ok: false })
+      const msg = (err as Error).message || 'Upload failed'
+      flashStatus('err', msg)
+      onMsg({ text: `Upload failed: ${msg}`, ok: false })
     } finally {
       setBusy(false)
     }
@@ -435,12 +464,18 @@ function ClaudeCredsCard({ slug, reload, onMsg }: ClaudeCredsCardProps) {
   async function clear() {
     if (!confirm('Remove Claude credentials? Future dispatches will fall back to the global ANTHROPIC_API_KEY.')) return
     setBusy(true)
+    setStatus(null)
     try {
       await adminApi.del(`/api/apps/${slug}/claude-credentials`)
-      setInfo({ present: false })
+      // Re-fetch to confirm the server actually cleared the row, in case
+      // a route conflict or audit hook silently dropped the request.
+      await load()
+      flashStatus('ok', 'Credentials cleared. Falling back to the global ANTHROPIC_API_KEY.')
       onMsg({ text: 'Claude credentials cleared', ok: true })
     } catch (err) {
-      onMsg({ text: (err as Error).message, ok: false })
+      const msg = (err as Error).message || 'Clear failed'
+      flashStatus('err', msg)
+      onMsg({ text: msg, ok: false })
     } finally {
       setBusy(false)
     }
@@ -493,12 +528,27 @@ function ClaudeCredsCard({ slug, reload, onMsg }: ClaudeCredsCardProps) {
         style={{ display: 'none' }}
         onChange={onPickFile}
       />
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
         <button className="btn btn-accent btn-sm" disabled={busy} onClick={() => fileRef.current?.click()}>
-          {info.present ? 'Replace credentials' : 'Upload credentials.json'}
+          {busy ? 'Working…' : info.present ? 'Replace credentials' : 'Upload credentials.json'}
         </button>
         {info.present && (
-          <button className="btn btn-danger btn-sm" disabled={busy} onClick={clear}>Clear</button>
+          <button className="btn btn-danger btn-sm" disabled={busy} onClick={clear}>
+            {busy ? 'Working…' : 'Clear'}
+          </button>
+        )}
+        {status && (
+          <span style={{
+            fontSize: '.78rem',
+            padding: '4px 10px',
+            borderRadius: 4,
+            background: status.kind === 'ok' ? 'rgba(34,197,94,.12)' : 'rgba(239,68,68,.12)',
+            color:      status.kind === 'ok' ? 'var(--green)'        : 'var(--red)',
+            border: '1px solid',
+            borderColor: status.kind === 'ok' ? 'rgba(34,197,94,.4)' : 'rgba(239,68,68,.4)',
+          }}>
+            {status.kind === 'ok' ? '✓' : '⚠'} {status.text}
+          </span>
         )}
       </div>
     </div>
