@@ -95,9 +95,10 @@ async function ensureSessionContainer(sessionId, app, onLog) {
   // Write token URL to a file — never put it in an env var (would persist in /proc/environ)
   writeFileSync(join(dir, 'clone_url'), cloneUrl, { mode: 0o644 }); // nosemgrep: container runs as non-root, needs read access
 
-  // Bind any enabled skills as ~/.claude/skills/ — same mechanism as the
-  // builder session container, so Ask gets the same skill set natively.
-  const skillsMount = prepareSkillsMount();
+  // Bind skills assigned to this app as ~/.claude/skills/ — same mechanism
+  // as the builder session container, so Ask gets the same skill set the
+  // app's Builder uses.
+  const skillsMount = prepareSkillsMount(app.slug);
 
   // Clone, strip remote, disable credential helper — ask containers cannot commit or push
   const dockerArgs = [

@@ -8,22 +8,35 @@ import { AppError } from '../utils/errors.js';
 import {
   listSkills, getSkill, createSkillFromMarkdown, createSkillFromFiles,
   updateSkill, deleteSkill, slugify, isValidSlug, readSkillMd,
+  listAppsForSkill, setAppsForSkill,
 } from '../services/skills.js';
 import log from '../utils/logger.js';
 
 const router = Router();
 router.use(requireAuth, requireAdmin);
 
-// GET /api/skills — list all skills
+// GET /api/skills — list all skills, each with its assigned app slugs
 router.get('/', (req, res) => {
-  res.json({ skills: listSkills() });
+  const skills = listSkills().map(s => ({ ...s, apps: listAppsForSkill(s.slug) }));
+  res.json({ skills });
 });
 
-// GET /api/skills/:slug — fetch one with SKILL.md preview
+// GET /api/skills/:slug — fetch one with SKILL.md preview + app assignments
 router.get('/:slug', (req, res) => {
   const skill = getSkill(req.params.slug);
   if (!skill) throw new AppError('skill not found', 404, 'NOT_FOUND');
-  res.json({ skill, content: readSkillMd(req.params.slug) });
+  res.json({ skill, content: readSkillMd(req.params.slug), apps: listAppsForSkill(req.params.slug) });
+});
+
+// PUT /api/skills/:slug/apps — replace app assignment list. Body: { app_slugs: string[] }
+router.put('/:slug/apps', auditMiddleware('skill.assign'), (req, res) => {
+  const { app_slugs } = req.body || {};
+  try {
+    const apps = setAppsForSkill(req.params.slug, app_slugs ?? []);
+    res.json({ apps });
+  } catch (e) {
+    res.status(400).json({ error: { code: 'ASSIGN_FAILED', message: e.message } });
+  }
 });
 
 // POST /api/skills — create from inline markdown OR multipart zip
