@@ -18,6 +18,7 @@ import { spawn } from 'child_process';
 import { EventEmitter } from 'events';
 import { parseLine } from '../builder/streamJsonParser.js';
 import { prepareSkillsMount } from '../skills.js';
+import { prepareClaudeCredentialsMount } from '../claudeCredentials.js';
 import log from '../../utils/logger.js';
 
 const DEFAULT_MODEL   = process.env.APPSTUDIO_CODER_MODEL || 'claude-sonnet-4-6';
@@ -198,7 +199,14 @@ export function runAgentNew({
   args.push(`--memory=${memory}`, `--cpus=${cpus}`);
   args.push('--workdir', workdir);
   args.push('-e', `HOME=${homeDir}`);
-  args.push('-e', `ANTHROPIC_API_KEY=${apiKey}`);
+  // If the app has its own Claude OAuth credentials, prefer those — but
+  // still pass the API key as a fallback in case the credentials file is
+  // unreadable or expired-and-refresh-failed inside the container.
+  const credsMount = prepareClaudeCredentialsMount(appSlug);
+  if (credsMount) {
+    args.push('-v', `${credsMount.tmpFile}:${homeDir}/.claude/credentials.json`);
+  }
+  args.push('-e', `ANTHROPIC_API_KEY=${apiKey || ''}`);
   for (const [k, v] of Object.entries(envVars)) args.push('-e', `${k}=${v}`);
   args.push('-v', `${workspaceDir}:/workspace${workspaceMode === 'ro' ? ':ro' : ''}`);
   for (const m of extraMounts) {
@@ -217,6 +225,7 @@ export function runAgentNew({
 
   args.push(image, 'sh', '-c', buildClaudeCmd({ prompt, model, resume, addDir, systemPrompt }));
   const agent = new Agent(args, timeoutMs);
+  if (credsMount)  agent.registerCleanup(credsMount.cleanup);
   if (skillsMount) agent.registerCleanup(skillsMount.cleanup);
   return agent;
 }

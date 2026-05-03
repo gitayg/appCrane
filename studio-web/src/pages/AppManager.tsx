@@ -380,6 +380,131 @@ function LimitsCard({ slug, reload, onMsg }: LimitsCardProps) {
   )
 }
 
+interface ClaudeCredsInfo {
+  present: boolean
+  malformed?: boolean
+  expiresAt?: string | null
+  accountUuid?: string | null
+  accessTokenTail?: string | null
+}
+
+interface ClaudeCredsCardProps {
+  slug: string
+  reload: number
+  onMsg: (m: MsgState) => void
+}
+
+/**
+ * Per-app Claude Code OAuth credentials.
+ * Lets the operator upload a credentials.json (the file `claude login`
+ * writes) so this app's CLI containers authenticate as their Claude.ai
+ * subscription instead of charging the global ANTHROPIC_API_KEY.
+ */
+function ClaudeCredsCard({ slug, reload, onMsg }: ClaudeCredsCardProps) {
+  const [info, setInfo] = useState<ClaudeCredsInfo>({ present: false })
+  const [busy, setBusy] = useState(false)
+  const fileRef = useRef<HTMLInputElement>(null)
+
+  function load() {
+    adminApi.get<ClaudeCredsInfo>(`/api/apps/${slug}/claude-credentials`)
+      .then(setInfo).catch(() => setInfo({ present: false }))
+  }
+  useEffect(() => { load() }, [slug, reload])
+
+  async function onPickFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    e.target.value = ''
+    setBusy(true)
+    try {
+      const text = await file.text()
+      const parsed = JSON.parse(text)
+      const next = await adminApi.put<ClaudeCredsInfo>(
+        `/api/apps/${slug}/claude-credentials`,
+        { credentials: parsed },
+      )
+      setInfo(next)
+      onMsg({ text: 'Claude credentials saved. Next dispatch uses them.', ok: true })
+    } catch (err) {
+      onMsg({ text: `Upload failed: ${(err as Error).message}`, ok: false })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function clear() {
+    if (!confirm('Remove Claude credentials? Future dispatches will fall back to the global ANTHROPIC_API_KEY.')) return
+    setBusy(true)
+    try {
+      await adminApi.del(`/api/apps/${slug}/claude-credentials`)
+      setInfo({ present: false })
+      onMsg({ text: 'Claude credentials cleared', ok: true })
+    } catch (err) {
+      onMsg({ text: (err as Error).message, ok: false })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="am-card">
+      <h3 style={{ marginBottom: 6 }}>Claude Code Credentials</h3>
+      <p style={{ fontSize: '.78rem', color: 'var(--dim)', marginBottom: 12, lineHeight: 1.5 }}>
+        Upload your Claude Code <code>credentials.json</code> to charge this app's
+        AI work to your Claude.ai subscription instead of the AppCrane wallet.
+        When unset, falls back to the global <code>ANTHROPIC_API_KEY</code>.
+      </p>
+
+      {info.present ? (
+        <div style={{ background: 'var(--surface2)', border: '1px solid var(--border)', borderRadius: 6, padding: '10px 12px', marginBottom: 12, fontSize: '.82rem' }}>
+          <div><strong style={{ color: 'var(--green)' }}>✓ Configured</strong></div>
+          {info.malformed && <div style={{ color: 'var(--red)', marginTop: 4 }}>⚠ Stored payload is unreadable — re-upload to fix.</div>}
+          {info.accessTokenTail && <div style={{ color: 'var(--dim)', marginTop: 4 }}>Token tail: <code>{info.accessTokenTail}</code></div>}
+          {info.accountUuid && <div style={{ color: 'var(--dim)', marginTop: 2 }}>Account: <code style={{ fontSize: '.72rem' }}>{info.accountUuid}</code></div>}
+          {info.expiresAt && <div style={{ color: 'var(--dim)', marginTop: 2 }}>Access token expires: {info.expiresAt}</div>}
+        </div>
+      ) : (
+        <div style={{ background: 'var(--surface2)', border: '1px solid var(--border)', borderRadius: 6, padding: '10px 12px', marginBottom: 12, fontSize: '.82rem', color: 'var(--dim)' }}>
+          Not configured — using global API key.
+        </div>
+      )}
+
+      <details style={{ fontSize: '.78rem', color: 'var(--dim)', marginBottom: 12 }}>
+        <summary style={{ cursor: 'pointer', fontWeight: 600, color: 'var(--text)' }}>
+          How to get your credentials.json
+        </summary>
+        <div style={{ marginTop: 8, paddingLeft: 8, borderLeft: '2px solid var(--border)', lineHeight: 1.6 }}>
+          <p style={{ marginBottom: 6 }}><strong>macOS</strong> (Keychain):</p>
+          <pre style={{ background: 'var(--bg)', padding: '8px 10px', borderRadius: 4, fontSize: '.72rem', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{`security find-generic-password -s "Claude Code-credentials" -a "$USER" -w > claude-credentials.json`}</pre>
+          <p style={{ margin: '8px 0 6px' }}><strong>Linux</strong>:</p>
+          <pre style={{ background: 'var(--bg)', padding: '8px 10px', borderRadius: 4, fontSize: '.72rem' }}>{`cp ~/.claude/credentials.json claude-credentials.json`}</pre>
+          <p style={{ margin: '8px 0 6px' }}><strong>Windows</strong>:</p>
+          <pre style={{ background: 'var(--bg)', padding: '8px 10px', borderRadius: 4, fontSize: '.72rem' }}>{`Copy-Item "$env:USERPROFILE\\.claude\\credentials.json" claude-credentials.json`}</pre>
+          <p style={{ marginTop: 8 }}>
+            File should contain <code>access_token</code> + <code>refresh_token</code> + <code>expires_at</code> + <code>accountUuid</code>.
+          </p>
+        </div>
+      </details>
+
+      <input
+        ref={fileRef}
+        type="file"
+        accept=".json,application/json"
+        style={{ display: 'none' }}
+        onChange={onPickFile}
+      />
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        <button className="btn btn-accent btn-sm" disabled={busy} onClick={() => fileRef.current?.click()}>
+          {info.present ? 'Replace credentials' : 'Upload credentials.json'}
+        </button>
+        {info.present && (
+          <button className="btn btn-danger btn-sm" disabled={busy} onClick={clear}>Clear</button>
+        )}
+      </div>
+    </div>
+  )
+}
+
 interface DeployCardProps {
   slug: string
   env: EnvName
@@ -1058,6 +1183,7 @@ export function AppManager() {
             <HealthCard slug={currentApp} env={currentEnv} reload={reloadCounter} onMsg={showMsg} />
             <MetricsCard slug={currentApp} env={currentEnv} />
             {isAdminUser && <LimitsCard slug={currentApp} reload={reloadCounter} onMsg={showMsg} />}
+            {isAdminUser && <ClaudeCredsCard slug={currentApp} reload={reloadCounter} onMsg={showMsg} />}
             <DeployCard
               slug={currentApp}
               env={currentEnv}

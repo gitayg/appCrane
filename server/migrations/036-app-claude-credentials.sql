@@ -1,0 +1,17 @@
+-- Per-app Claude Code OAuth credentials.
+--
+-- Operators can upload a credentials.json (the file the Claude Code CLI
+-- writes after `claude login`) scoped to a specific app. AppCrane mounts
+-- it into that app's CLI containers (Builder, Improve, Ask, planner,
+-- contextBuilder) so the agent authenticates as the operator's Claude.ai
+-- subscription instead of charging the global ANTHROPIC_API_KEY wallet.
+--
+-- Storage: full JSON blob, encrypted with the same scheme as
+-- github_token_encrypted (see services/encryption.js). The CLI inside
+-- the container refreshes the access_token automatically; AppCrane
+-- captures the refreshed file back into this column after each dispatch
+-- so the next run starts with a fresh token.
+--
+-- When this column is NULL, AppCrane falls back to ANTHROPIC_API_KEY
+-- (existing behavior). Per-app credentials always win when present.
+ALTER TABLE apps ADD COLUMN claude_credentials_encrypted TEXT;
