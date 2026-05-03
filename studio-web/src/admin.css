@@ -607,6 +607,13 @@ textarea:focus { border-color: var(--accent); }
 .app-icon-img { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; }
 
 .vis-badge { font-size: .65rem; padding: 1px 6px; border-radius: 4px; font-weight: 600; white-space: nowrap; }
+.claude-badge {
+  font-size: .65rem; padding: 1px 6px; border-radius: 4px; font-weight: 600;
+  white-space: nowrap; cursor: help;
+  background: rgba(139, 92, 246, .14);  /* purple — distinct from visibility/category */
+  color: #a78bfa;
+  border: 1px solid rgba(139, 92, 246, .35);
+}
 .vis-hidden { background: #6b728022; color: var(--dim); }
 .vis-private { background: #3b82f622; color: #3b82f6; }
 .vis-public { background: #22c55e22; color: #22c55e; }

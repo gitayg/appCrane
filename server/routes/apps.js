@@ -113,6 +113,10 @@ router.get('/', (req, res) => {
       ...app,
       resource_limits: JSON.parse(app.resource_limits || '{}'),
       has_icon: hasIconFile(app.slug),
+      // Boolean flags derived from secret-bearing columns so the UI can
+      // show "this app has its own X" without ever shipping the secret.
+      has_claude_credentials: !!app.claude_credentials_encrypted,
+      has_github_token:       !!app.github_token_encrypted,
       ...(req.user.role === 'admin' ? { ports } : {}),
       urls,
       base_path: { production: `/${app.slug}/`, sandbox: `/${app.slug}-sandbox/` },
