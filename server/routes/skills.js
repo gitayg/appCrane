@@ -8,24 +8,33 @@ import { AppError } from '../utils/errors.js';
 import {
   listSkills, getSkill, createSkillFromMarkdown, createSkillFromFiles,
   updateSkill, deleteSkill, slugify, isValidSlug, readSkillMd,
-  listAppsForSkill, setAppsForSkill,
+  listAppsForSkill, setAppsForSkill, listSkillFiles,
 } from '../services/skills.js';
 import log from '../utils/logger.js';
 
 const router = Router();
 router.use(requireAuth, requireAdmin);
 
-// GET /api/skills — list all skills, each with its assigned app slugs
+// GET /api/skills — list all skills, each with assigned app slugs + bundled file paths
 router.get('/', (req, res) => {
-  const skills = listSkills().map(s => ({ ...s, apps: listAppsForSkill(s.slug) }));
+  const skills = listSkills().map(s => ({
+    ...s,
+    apps: listAppsForSkill(s.slug),
+    files: listSkillFiles(s.slug),
+  }));
   res.json({ skills });
 });
 
-// GET /api/skills/:slug — fetch one with SKILL.md preview + app assignments
+// GET /api/skills/:slug — fetch one with SKILL.md preview + app assignments + file list
 router.get('/:slug', (req, res) => {
   const skill = getSkill(req.params.slug);
   if (!skill) throw new AppError('skill not found', 404, 'NOT_FOUND');
-  res.json({ skill, content: readSkillMd(req.params.slug), apps: listAppsForSkill(req.params.slug) });
+  res.json({
+    skill,
+    content: readSkillMd(req.params.slug),
+    apps:    listAppsForSkill(req.params.slug),
+    files:   listSkillFiles(req.params.slug),
+  });
 });
 
 // PUT /api/skills/:slug/apps — replace app assignment list. Body: { app_slugs: string[] }
