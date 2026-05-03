@@ -15,6 +15,7 @@ import { hashApiKey } from '../services/encryption.js';
 import { AppError } from '../utils/errors.js';
 import { auditMiddleware } from '../middleware/audit.js';
 import { commitAndPush } from '../services/builder/gitOps.js';
+import { credentialsInfo } from '../services/claudeCredentials.js';
 import {
   createSession,
   resumeSession,
@@ -224,6 +225,14 @@ router.get('/apps', (req, res) => {
       // so AI work bills against the operator's subscription instead of the
       // global ANTHROPIC_API_KEY. Surfaced as a badge in the Builders page.
       has_claude_credentials: !!app.claude_credentials_encrypted,
+      // Expiry of the OAuth access token (ms-since-epoch OR ISO string,
+      // depending on the uploaded shape — see extractTokens). Lets the
+      // Builders sidebar render an inline date + warn when expired so the
+      // operator doesn't dispatch jobs against stale creds.
+      claude_credentials_expires_at:
+        app.claude_credentials_encrypted
+          ? (credentialsInfo(app.slug)?.expiresAt ?? null)
+          : null,
       production: {
         health: { status: healthLabel(healthProd) },
         deploy: lastDeployProd || null,
