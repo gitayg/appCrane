@@ -52,7 +52,7 @@ export function JobsButton({ slug }: Props) {
     <div className="jobs-wrap">
       <button
         type="button"
-        className="btn btn-xs jobs-btn"
+        className={'crane-topbar-btn jobs-btn' + (open ? ' active' : '')}
         onClick={() => setOpen(o => !o)}
         title="Active jobs and your enhancement requests"
       >
