@@ -215,7 +215,9 @@ router.put('/anthropic-key', requireAdmin, auditMiddleware('appstudio.set-anthro
  */
 router.get('/:id/trace', (req, res) => {
   const db = getDb();
-  const enh = db.prepare('SELECT id, status, ai_log FROM enhancement_requests WHERE id = ?').get(req.params.id);
+  // Pull ai_plan_json too — the Plan tab in the UI needs the parsed plan
+  // alongside the trace so it doesn't have to make a second request.
+  const enh = db.prepare('SELECT id, status, ai_log, ai_plan_json, pr_url, branch_name, fix_version FROM enhancement_requests WHERE id = ?').get(req.params.id);
   if (!enh) throw new AppError('Enhancement not found', 404, 'NOT_FOUND');
 
   const jobs = db.prepare('SELECT * FROM enhancement_jobs WHERE enhancement_id = ? ORDER BY id ASC').all(enh.id);
@@ -242,10 +244,19 @@ router.get('/:id/trace', (req, res) => {
     };
   });
 
+  let ai_plan = null;
+  if (enh.ai_plan_json) {
+    try { ai_plan = JSON.parse(enh.ai_plan_json); } catch (_) {}
+  }
+
   res.json({
     id: enh.id,
     status: enh.status,
     ai_log: enh.ai_log || '',
+    ai_plan,
+    pr_url: enh.pr_url,
+    branch_name: enh.branch_name,
+    fix_version: enh.fix_version,
     active: jobs.some(j => j.status === 'running' || j.status === 'queued'),
     trace,
   });

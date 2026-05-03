@@ -42,6 +42,10 @@ interface TraceData {
   active: boolean
   trace: Job[]
   ai_log?: string
+  ai_plan?: any
+  pr_url?: string | null
+  branch_name?: string | null
+  fix_version?: string | null
 }
 
 interface AppOption {
@@ -567,16 +571,15 @@ function DetailView({ enh, trace, openJobs, onToggleJob, onBack, onAction, onDel
 // Default tab on open is status-driven: jump to whichever tab needs
 // operator action (pending review → Plan, sandbox ready → Build, etc).
 
-type Phase = 'request' | 'plan' | 'revise_plan' | 'code' | 'build' | 'open_pr'
+type Phase = 'request' | 'plan' | 'code' | 'build' | 'open_pr'
 
-const PHASE_ORDER: Phase[] = ['request', 'plan', 'revise_plan', 'code', 'build', 'open_pr']
+const PHASE_ORDER: Phase[] = ['request', 'plan', 'code', 'build', 'open_pr']
 const PHASE_LABELS: Record<Phase, string> = {
-  request:     'Request',
-  plan:        'Plan',
-  revise_plan: 'Revise plan',
-  code:        'Code',
-  build:       'Build',
-  open_pr:     'Open PR',
+  request: 'Request',
+  plan:    'Plan',
+  code:    'Code',
+  build:   'Build',
+  open_pr: 'Open PR',
 }
 
 interface PhaseTabsProps {
@@ -591,7 +594,7 @@ interface PhaseTabsProps {
 
 type TabState = 'idle' | 'queued' | 'running' | 'done' | 'failed'
 
-function jobsForPhase(trace: TraceData | null, phase: Phase): Job[] {
+function jobsForPhase(trace: TraceData | null, phase: string): Job[] {
   if (!trace?.trace) return []
   return trace.trace.filter(j => j.phase === phase)
 }
@@ -622,17 +625,19 @@ function defaultTabFor(enh: Enhancement, trace: TraceData | null): Phase {
 }
 
 function PhaseTabs({ enh, trace, openJobs, onToggleJob, onAction, onRetryJob, onDeleteJob }: PhaseTabsProps) {
+  // The Plan tab merges 'plan' + 'revise_plan' jobs (revisions are still
+  // planning) so the operator sees the full iteration history in one place.
+  const planJobs = [...jobsForPhase(trace, 'plan'), ...jobsForPhase(trace, 'revise_plan')]
+    .sort((a, b) => a.id - b.id)
   const states: Record<Phase, TabState> = {
     // Request is "done" the moment the row exists.
-    request:     'done',
-    plan:        tabState(jobsForPhase(trace, 'plan')),
-    revise_plan: tabState(jobsForPhase(trace, 'revise_plan')),
-    code:        tabState(jobsForPhase(trace, 'code')),
-    build:       tabState(jobsForPhase(trace, 'build')),
-    open_pr:     tabState(jobsForPhase(trace, 'open_pr')),
+    request: 'done',
+    plan:    tabState(planJobs),
+    code:    tabState(jobsForPhase(trace, 'code')),
+    build:   tabState(jobsForPhase(trace, 'build')),
+    open_pr: tabState(jobsForPhase(trace, 'open_pr')),
   }
-  const reviseJobs = jobsForPhase(trace, 'revise_plan')
-  const visibleTabs = PHASE_ORDER.filter(p => p !== 'revise_plan' || reviseJobs.length > 0)
+  const visibleTabs = PHASE_ORDER
 
   // First idle tab = the next up. Used to draw the accent ring.
   const nextUp = visibleTabs.find(p => states[p] === 'idle') ?? null
@@ -672,24 +677,21 @@ function PhaseTabs({ enh, trace, openJobs, onToggleJob, onAction, onRetryJob, on
         })}
       </div>
       <div className="phase-tab-content" role="tabpanel">
-        {active === 'request'     && <RequestPane     enh={enh} onAction={onAction} />}
-        {active === 'plan'        && <PlanPane        enh={enh} jobs={jobsForPhase(trace, 'plan')}
-                                                       openJobs={openJobs} onToggleJob={onToggleJob}
-                                                       onAction={onAction} onRetryJob={onRetryJob} onDeleteJob={onDeleteJob} />}
-        {active === 'revise_plan' && <RevisePlanPane  jobs={reviseJobs}
-                                                       openJobs={openJobs} onToggleJob={onToggleJob}
-                                                       onRetryJob={onRetryJob} onDeleteJob={onDeleteJob} />}
-        {active === 'code'        && <PhaseLogPane    phase="code"
-                                                       jobs={jobsForPhase(trace, 'code')}
-                                                       openJobs={openJobs} onToggleJob={onToggleJob}
-                                                       onRetryJob={onRetryJob} onDeleteJob={onDeleteJob}
-                                                       emptyHint="Coding hasn't started yet — approve the plan to kick it off." />}
-        {active === 'build'       && <BuildPane       enh={enh} jobs={jobsForPhase(trace, 'build')}
-                                                       openJobs={openJobs} onToggleJob={onToggleJob}
-                                                       onAction={onAction} onRetryJob={onRetryJob} onDeleteJob={onDeleteJob} />}
-        {active === 'open_pr'     && <OpenPrPane      enh={enh} jobs={jobsForPhase(trace, 'open_pr')}
-                                                       openJobs={openJobs} onToggleJob={onToggleJob}
-                                                       onRetryJob={onRetryJob} onDeleteJob={onDeleteJob} />}
+        {active === 'request' && <RequestPane enh={enh} onAction={onAction} />}
+        {active === 'plan'    && <PlanPane    enh={enh} trace={trace} jobs={planJobs}
+                                               onAction={onAction}
+                                               onRetryJob={onRetryJob} onDeleteJob={onDeleteJob} />}
+        {active === 'code'    && <PhaseLogPane phase="code"
+                                               jobs={jobsForPhase(trace, 'code')}
+                                               openJobs={openJobs} onToggleJob={onToggleJob}
+                                               onRetryJob={onRetryJob} onDeleteJob={onDeleteJob}
+                                               emptyHint="Coding hasn't started yet — approve the plan to kick it off." />}
+        {active === 'build'   && <BuildPane   enh={enh} jobs={jobsForPhase(trace, 'build')}
+                                               openJobs={openJobs} onToggleJob={onToggleJob}
+                                               onAction={onAction} onRetryJob={onRetryJob} onDeleteJob={onDeleteJob} />}
+        {active === 'open_pr' && <OpenPrPane  enh={enh} trace={trace} jobs={jobsForPhase(trace, 'open_pr')}
+                                               openJobs={openJobs} onToggleJob={onToggleJob}
+                                               onRetryJob={onRetryJob} onDeleteJob={onDeleteJob} />}
       </div>
     </div>
   )
@@ -718,22 +720,29 @@ function RequestPane({ enh, onAction }: { enh: Enhancement; onAction: PhaseTabsP
   )
 }
 
-function PlanPane({ enh, jobs, openJobs, onToggleJob, onAction, onRetryJob, onDeleteJob }: {
-  enh: Enhancement; jobs: Job[];
-  openJobs: Set<number>; onToggleJob: (id: number) => void;
+function PlanPane({ enh, trace, jobs, onAction, onRetryJob, onDeleteJob }: {
+  enh: Enhancement; trace: TraceData | null; jobs: Job[];
   onAction: PhaseTabsProps['onAction']; onRetryJob: (id: number) => void; onDeleteJob: (id: number) => void;
 }) {
-  const plan = enh.ai_plan
+  // Trace endpoint includes the parsed plan so we don't need a second
+  // fetch. Fall back to enh.ai_plan in case the trace hasn't loaded yet.
+  const plan = trace?.ai_plan ?? enh.ai_plan
+  const reviseCount = jobs.filter(j => j.phase === 'revise_plan').length
   return (
     <>
       {plan ? (
         <div className="pane-card">
+          <div className="pane-section-hdr" style={{ marginBottom: 8, fontSize: '.7rem', textTransform: 'uppercase', letterSpacing: '.5px' }}>
+            Current plan{reviseCount > 0 ? ` — revised ${reviseCount}× from feedback below` : ''}
+          </div>
           {plan.summary && <p style={{ marginBottom: 10, lineHeight: 1.55 }}>{plan.summary}</p>}
           {plan.files_to_change?.length > 0 && (
             <div className="pane-section">
               <div className="pane-section-hdr">Files to change</div>
               <ul className="pane-list">
-                {plan.files_to_change.map((f: string, i: number) => <li key={i}>{f}</li>)}
+                {plan.files_to_change.map((f: any, i: number) => (
+                  <li key={i}>{typeof f === 'string' ? f : `${f.path ?? ''} (${f.action ?? '?'})${f.rationale ? ` — ${f.rationale}` : ''}`}</li>
+                ))}
               </ul>
             </div>
           )}
@@ -741,7 +750,9 @@ function PlanPane({ enh, jobs, openJobs, onToggleJob, onAction, onRetryJob, onDe
             <div className="pane-section">
               <div className="pane-section-hdr">Test files</div>
               <ul className="pane-list">
-                {plan.test_files.map((f: string, i: number) => <li key={i}>{f}</li>)}
+                {plan.test_files.map((f: any, i: number) => (
+                  <li key={i}>{typeof f === 'string' ? f : `${f.path ?? ''} (${f.action ?? '?'})${f.what ? ` — ${f.what}` : ''}`}</li>
+                ))}
               </ul>
             </div>
           )}
@@ -756,7 +767,14 @@ function PlanPane({ enh, jobs, openJobs, onToggleJob, onAction, onRetryJob, onDe
         <div className="pane-empty">No plan yet — click <em>Plan with AI</em> on the Request tab.</div>
       )}
 
-      {jobs.length > 0 && <JobsTrace jobs={jobs} openJobs={openJobs} onToggleJob={onToggleJob} onRetryJob={onRetryJob} onDeleteJob={onDeleteJob} />}
+      {jobs.length > 0 && (
+        <div>
+          <div className="pane-section-hdr" style={{ marginBottom: 6 }}>
+            Iteration history ({jobs.length} {jobs.length === 1 ? 'run' : 'runs'})
+          </div>
+          <ExpandedJobsTrace jobs={jobs} onRetryJob={onRetryJob} onDeleteJob={onDeleteJob} />
+        </div>
+      )}
 
       {enh.status === 'pending_user_review_plan' && (
         <div className="pane-actions">
@@ -772,15 +790,6 @@ function PlanPane({ enh, jobs, openJobs, onToggleJob, onAction, onRetryJob, onDe
       )}
     </>
   )
-}
-
-function RevisePlanPane({ jobs, openJobs, onToggleJob, onRetryJob, onDeleteJob }: {
-  jobs: Job[];
-  openJobs: Set<number>; onToggleJob: (id: number) => void;
-  onRetryJob: (id: number) => void; onDeleteJob: (id: number) => void;
-}) {
-  if (!jobs.length) return <div className="pane-empty">No revisions yet.</div>
-  return <JobsTrace jobs={jobs} openJobs={openJobs} onToggleJob={onToggleJob} onRetryJob={onRetryJob} onDeleteJob={onDeleteJob} />
 }
 
 function PhaseLogPane({ jobs, openJobs, onToggleJob, onRetryJob, onDeleteJob, emptyHint }: {
@@ -813,24 +822,77 @@ function BuildPane({ enh, jobs, openJobs, onToggleJob, onAction, onRetryJob, onD
   )
 }
 
-function OpenPrPane({ enh, jobs, openJobs, onToggleJob, onRetryJob, onDeleteJob }: {
-  enh: Enhancement; jobs: Job[];
+function OpenPrPane({ enh, trace, jobs, openJobs, onToggleJob, onRetryJob, onDeleteJob }: {
+  enh: Enhancement; trace: TraceData | null; jobs: Job[];
   openJobs: Set<number>; onToggleJob: (id: number) => void;
   onRetryJob: (id: number) => void; onDeleteJob: (id: number) => void;
 }) {
+  // Trace returns these too — prefer it (fresher than the row from the list).
+  const prUrl       = trace?.pr_url       ?? enh.pr_url
+  const branchName  = trace?.branch_name  ?? enh.branch_name
+  const fixVersion  = trace?.fix_version  ?? enh.fix_version
   return (
     <>
-      {enh.pr_url && (
+      {prUrl && (
         <div className="pane-actions" style={{ marginBottom: 12 }}>
-          <a href={enh.pr_url} target="_blank" rel="noreferrer" className="btn btn-sm">View PR ↗</a>
-          {enh.fix_version && <span style={{ marginLeft: 8, color: 'var(--dim)', fontSize: '.82rem' }}>fix version: <code>{enh.fix_version}</code></span>}
-          {enh.branch_name && <span style={{ marginLeft: 8, color: 'var(--dim)', fontSize: '.82rem' }}>branch: <code>{enh.branch_name}</code></span>}
+          <a href={prUrl} target="_blank" rel="noreferrer" className="btn btn-sm">View PR ↗</a>
+          {fixVersion && <span style={{ marginLeft: 8, color: 'var(--dim)', fontSize: '.82rem' }}>fix version: <code>{fixVersion}</code></span>}
+          {branchName && <span style={{ marginLeft: 8, color: 'var(--dim)', fontSize: '.82rem' }}>branch: <code>{branchName}</code></span>}
         </div>
       )}
       {jobs.length === 0
         ? <div className="pane-empty">No PR opened yet — runs after Build succeeds (auto-mode) or after manual approval.</div>
         : <JobsTrace jobs={jobs} openJobs={openJobs} onToggleJob={onToggleJob} onRetryJob={onRetryJob} onDeleteJob={onDeleteJob} />
       }
+    </>
+  )
+}
+
+// Always-expanded variant of JobsTrace — no click-to-expand, log/text
+// always visible. Used in the Plan tab so the operator can read the
+// plan + every revision iteration without clicking through.
+function ExpandedJobsTrace({ jobs, onRetryJob, onDeleteJob }: {
+  jobs: Job[];
+  onRetryJob: (id: number) => void; onDeleteJob: (id: number) => void;
+}) {
+  return (
+    <>
+      {jobs.map(job => {
+        const isRunning = job.status === 'running'
+        const isFailed = job.status === 'failed' || job.status === 'error'
+        const durMs = job.duration_ms ?? (job.started_at && job.finished_at ? msGap(job.started_at, job.finished_at) : null)
+        const bodyLines: string[] = []
+        if (job.text) bodyLines.push(job.text)
+        if (job.log?.length) bodyLines.push(...job.log)
+        if (job.branch) bodyLines.push(`branch: ${job.branch}`)
+        if (job.error) bodyLines.push(`ERROR: ${job.error}`)
+        const isRevise = job.phase === 'revise_plan'
+        return (
+          <div key={job.id} className="trace-block" style={{ marginBottom: 10 }}>
+            <div className="trace-block-hdr" style={{ cursor: 'default' }}>
+              <JobTag id={job.id} />
+              <span className="trace-phase">{isRevise ? 'revise' : job.phase}</span>
+              {statusIcon(job.status)}
+              <span style={{ fontSize: '.75rem', fontWeight: 600, color: isFailed ? 'var(--red)' : isRunning ? 'var(--accent)' : 'var(--dim)' }}>
+                {job.status}
+              </span>
+              {durMs != null && <span className="trace-timing">{fmtMs(durMs)}</span>}
+              <CostBadge tokens={job.cost_tokens} cents={job.cost_usd_cents} />
+              <div style={{ marginLeft: 'auto', display: 'flex', gap: 4 }}>
+                {isFailed && (
+                  <button className="btn btn-xs btn-accent" onClick={() => onRetryJob(job.id)} title="Retry this job">↺</button>
+                )}
+                {!isRunning && (
+                  <button className="btn btn-xs btn-red" onClick={() => onDeleteJob(job.id)} title="Delete job">✕</button>
+                )}
+              </div>
+            </div>
+            {bodyLines.length > 0 && (
+              <pre className="trace-body">{bodyLines.join('\n')}</pre>
+            )}
+          </div>
+        )
+      })}
     </>
   )
 }
