@@ -29,16 +29,6 @@ interface App {
   sandbox?: { deploy?: { status?: string; version?: string }; health?: { status: string } }
 }
 
-interface User {
-  id: number
-  name: string
-  email: string
-  assigned_apps?: number
-  role: string
-  kind?: 'human' | 'agent'
-  created_at: string
-}
-
 interface EnvVar {
   key: string
   value: string
@@ -88,7 +78,6 @@ type WizardStep = 'input' | 'analyzing' | 'review'
 
 export function Applications() {
   const [apps, setApps] = useState<App[]>([])
-  const [users, setUsers] = useState<User[]>([])
   const [versions, setVersions] = useState<Record<string, { prod?: string; sand?: string }>>({})
   const [openEvars, setOpenEvars] = useState<Record<string, string | null>>({})
   const [evarData, setEvarData] = useState<Record<string, EnvVar[]>>({})
@@ -112,19 +101,14 @@ export function Applications() {
   const iconInputRefs = useRef<Record<string, HTMLInputElement | null>>({})
 
   async function loadAll() {
-    const [ar, ur] = await Promise.all([
-      adminApi.get<{ apps: App[] }>('/api/apps').catch(() => ({ apps: [] as App[] })),
-      adminApi.get<{ users: User[] }>('/api/users').catch(() => ({ users: [] as User[] })),
-    ])
+    const ar = await adminApi.get<{ apps: App[] }>('/api/apps').catch(() => ({ apps: [] as App[] }))
     // Sort apps alphabetically by name (case-insensitive). The /api/apps
     // endpoint returns insertion order which makes the list hard to scan
     // once you have more than a handful.
     const a = (ar.apps ?? []).slice().sort((x, y) =>
       (x.name || '').toLowerCase().localeCompare((y.name || '').toLowerCase()),
     )
-    const u = ur.users ?? []
     setApps(a)
-    setUsers(u)
     fetchVersions(a)
     // Prefer the freshly-fetched icon state over what's in `prev` so a
     // newly-uploaded icon (or a deleted one) takes effect immediately.
@@ -421,16 +405,6 @@ export function Applications() {
     loadAll()
   }
 
-  async function deleteUser(id: number) {
-    if (!confirm('Delete this user?')) return
-    await adminApi.del(`/api/users/${id}`).catch(() => {})
-    setUsers(prev => prev.filter(u => u.id !== id))
-  }
-
-  // Only agent / API-key users — never humans. Humans without app
-  // assignments belong in /settings#users, not here.
-  const unusedKeys = users.filter(u => u.kind === 'agent' && !u.assigned_apps)
-
   function healthDot(app: App, env: 'production' | 'sandbox') {
     const h = app[env]?.health?.status
     if (!h || h === 'unknown') return 'dot dot-gray'
@@ -610,36 +584,6 @@ export function Applications() {
           )
         })}
       </div>
-
-      <h2>Unused App Agents</h2>
-      {unusedKeys.length === 0 ? (
-        <p style={{ color: 'var(--dim)', fontSize: '.85rem' }}>No unused app agents.</p>
-      ) : (
-        <table>
-          <thead>
-            <tr>
-              <th>ID</th>
-              <th>Name</th>
-              <th>Email</th>
-              <th>Created</th>
-              <th>Delete</th>
-            </tr>
-          </thead>
-          <tbody>
-            {unusedKeys.map(u => (
-              <tr key={u.id}>
-                <td style={{ fontFamily: 'monospace', fontSize: '.8rem' }}>{u.id}</td>
-                <td>{u.name}</td>
-                <td>{u.email}</td>
-                <td style={{ color: 'var(--dim)', fontSize: '.8rem' }}>{new Date(u.created_at).toLocaleDateString()}</td>
-                <td>
-                  <button className="btn btn-xs btn-red" onClick={() => deleteUser(u.id)}>Delete</button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
 
       {frame.open && (
         <FrameOverlay
