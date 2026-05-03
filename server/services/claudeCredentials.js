@@ -23,16 +23,47 @@ function tmpRoot() {
 }
 
 /**
- * Validate a credentials.json payload before storing. Throws on anything
- * that doesn't look like a real Claude Code credentials file so we don't
- * persist garbage that'd break dispatches later.
+ * Pull the OAuth fields from a credentials.json regardless of which
+ * Claude Code release wrote it. Two shapes seen in the wild:
+ *   1. Legacy / API-key style — fields at the top level in snake_case:
+ *        { access_token, refresh_token, expires_at, accountUuid }
+ *   2. Current `claude login` output — wrapped in `claudeAiOauth` with
+ *        camelCase fields:
+ *        { claudeAiOauth: { accessToken, refreshToken, expiresAt, scopes, ... } }
+ *
+ * Returns the normalized fields (always snake_case), or { access_token: '' }
+ * if neither shape is recognized so validateCredentials can give a clean
+ * error.
+ */
+function extractTokens(json) {
+  if (!json || typeof json !== 'object') return {};
+  const oauth = json.claudeAiOauth && typeof json.claudeAiOauth === 'object' ? json.claudeAiOauth : null;
+  return {
+    access_token:  json.access_token  || oauth?.accessToken  || '',
+    refresh_token: json.refresh_token || oauth?.refreshToken || '',
+    expires_at:    json.expires_at    || oauth?.expiresAt    || null,
+    account_uuid:  json.accountUuid   || json.account_uuid   || oauth?.accountUuid || null,
+  };
+}
+
+/**
+ * Validate a credentials.json payload before storing. Accepts both the
+ * legacy top-level snake_case shape and the current `claudeAiOauth`
+ * wrapped/camelCase shape — see extractTokens for the conversion. Throws
+ * on anything that doesn't carry both an access + refresh token so we
+ * don't persist garbage that'd break dispatches later.
+ *
+ * The file is round-tripped to the container as-is (we don't rewrite the
+ * shape on disk), so Claude Code inside the container reads exactly
+ * what was uploaded.
  */
 export function validateCredentials(json) {
   if (!json || typeof json !== 'object') throw new Error('credentials must be a JSON object');
-  if (typeof json.access_token !== 'string' || !json.access_token.length) {
-    throw new Error('credentials.json missing access_token');
+  const t = extractTokens(json);
+  if (typeof t.access_token !== 'string' || !t.access_token.length) {
+    throw new Error('credentials.json missing access_token (or claudeAiOauth.accessToken)');
   }
-  if (typeof json.refresh_token !== 'string' || !json.refresh_token.length) {
+  if (typeof t.refresh_token !== 'string' || !t.refresh_token.length) {
     throw new Error('credentials.json missing refresh_token (refresh would fail at expiry)');
   }
   return true;
@@ -61,10 +92,11 @@ export function credentialsInfo(slug) {
     log.warn(`claudeCredentials: parse failed for ${slug}: ${err.message}`);
     return { present: true, malformed: true };
   }
+  const t = extractTokens(parsed);
   return {
     present: true,
-    expiresAt: parsed.expires_at || null,
-    accountUuid: parsed.accountUuid || parsed.account_uuid || null,
+    expiresAt: t.expires_at,
+    accountUuid: t.account_uuid,
   };
 }
 
