@@ -34,6 +34,12 @@ function shellQuote(str) {
 // `systemPrompt` appends to Claude Code's default system prompt — used for
 // non-tool-using callers (planner, contextBuilder) that need specialized
 // instructions instead of the default coding-agent priming.
+// Claude session IDs are UUIDs (or short opaque strings). Reject anything
+// outside a strict alnum/dash/underscore set so a poisoned stream-json
+// event can't smuggle shell metacharacters through `--resume`.
+// See feedback memory: "Never interpolate user-controlled strings into sh -c".
+const SESSION_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
+
 function buildClaudeCmd({ prompt, model, resume, addDir = '/workspace', systemPrompt }) {
   const parts = [
     `claude -p ${shellQuote(prompt)}`,
@@ -43,7 +49,15 @@ function buildClaudeCmd({ prompt, model, resume, addDir = '/workspace', systemPr
     `--add-dir ${addDir}`,
   ];
   if (systemPrompt) parts.push(`--append-system-prompt ${shellQuote(systemPrompt)}`);
-  if (resume)       parts.push(`--resume ${resume}`);
+  if (resume) {
+    if (!SESSION_ID_RE.test(String(resume))) {
+      // Defense in depth — the writer in builderSession.js already validates
+      // before persisting, but anything that loaded a stale or attacker-
+      // injected session_id would otherwise hit this command unescaped.
+      throw new Error('Refusing to pass unsafe resume id to shell');
+    }
+    parts.push(`--resume ${resume}`);
+  }
   return parts.join(' ');
 }
 
@@ -192,7 +206,16 @@ export function runAgentNew({
   if (!image) throw new Error('runAgentNew: image required');
   if (!workspaceDir) throw new Error('runAgentNew: workspaceDir required');
 
-  const args = ['run', '--rm'];
+  // SECURITY hardening (v1.27.34 H7): drop all Linux capabilities,
+  // forbid suid escalation, cap PIDs. Network stays default because
+  // the agent needs to reach GitHub + npm; further isolation would
+  // require a per-app outbound proxy (out of scope today).
+  const args = [
+    'run', '--rm',
+    '--cap-drop=ALL',
+    '--security-opt', 'no-new-privileges:true',
+    '--pids-limit=256',
+  ];
   if (containerName) args.push('--name', containerName);
   args.push('--label', 'appcrane=true');
   for (const [k, v] of Object.entries(labels)) args.push('--label', `${k}=${v}`);

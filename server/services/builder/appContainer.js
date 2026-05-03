@@ -117,6 +117,8 @@ function startContainer(slug, workspaceDir, onLog) {
   // path below) reads the file back and updates the encrypted DB column
   // so the next container start gets the freshest tokens.
   const credsMount = prepareClaudeCredentialsMount(slug);
+  // SECURITY hardening (v1.27.34 H7): drop all caps, no-new-privs, pids-limit.
+  // Network stays default — agent needs GitHub + npm.
   const args = [
     'run', '-d', '--rm',
     '--name', containerName,
@@ -124,6 +126,9 @@ function startContainer(slug, workspaceDir, onLog) {
     '--label', 'appcrane.container.type=app',
     '--label', `app.slug=${slug}`,
     '--memory=2g', '--cpus=1',
+    '--cap-drop=ALL',
+    '--security-opt', 'no-new-privileges:true',
+    '--pids-limit=512',
     '-v', `${workspaceDir}:/workspace`,
   ];
   if (credsMount)  args.push('-v', `${credsMount.tmpFile}:/home/studio/.claude/credentials.json`);

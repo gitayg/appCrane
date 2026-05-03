@@ -61,12 +61,12 @@ router.post('/:slug/deploy/upload', requireAppAccess, auditMiddleware('deploy-up
     mkdirSync(releaseDir, { recursive: true });
 
     try {
-      const origName = req.file.originalname.toLowerCase();
-      if (origName.endsWith('.zip')) {
-        execFileSync('unzip', ['-o', req.file.path, '-d', releaseDir], { timeout: 60000, stdio: 'pipe' });
-      } else {
-        execFileSync('tar', ['-xzf', req.file.path, '-C', releaseDir], { timeout: 60000, stdio: 'pipe' });
-      }
+      // SECURITY: see server/utils/safeExtract.js — validates every
+      // archive entry against zip-slip / tar-slip before writing.
+      // Replaces the prior raw `unzip -o` / `tar -xzf` calls (security
+      // review v1.27.34 H5).
+      const { safeExtract } = await import('../utils/safeExtract.js');
+      await safeExtract(req.file.path, releaseDir, req.file.originalname);
     } catch (e) {
       try { unlinkSync(req.file.path); } catch (_) {}
       return res.status(500).json({ error: { code: 'EXTRACT_FAILED', message: e.message } });

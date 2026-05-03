@@ -20,6 +20,30 @@ function isAppAdmin(userId, appSlug) {
   return row?.app_role === 'admin';
 }
 
+/**
+ * SECURITY (v1.27.34 C3): every endpoint that loads an enhancement_requests
+ * row by id must call this before returning data or accepting a mutation.
+ * Prevents a portal user assigned to App A from reading App B's plans /
+ * trace / agent context, or injecting feedback comments into App B's
+ * agent runs by guessing tiny integer enhancement IDs.
+ *
+ * See feedback memory: "Per-app authz on every per-app resource".
+ */
+export function ensureAppAccessForEnh(req, enh) {
+  if (req.user?.role === 'admin') return;
+  if (!enh?.app_slug) {
+    // Enhancement with no app_slug: only admin can touch it. Refuse all
+    // non-admin reads/writes rather than guessing intent.
+    throw new AppError('Forbidden', 403, 'FORBIDDEN');
+  }
+  const db = getDb();
+  const app = db.prepare('SELECT id FROM apps WHERE slug = ?').get(enh.app_slug);
+  if (!app) throw new AppError('Forbidden', 403, 'FORBIDDEN');
+  const ok = db.prepare('SELECT 1 FROM app_users WHERE app_id = ? AND user_id = ?').get(app.id, req.user.id)
+          || db.prepare('SELECT 1 FROM app_user_roles WHERE app_id = ? AND user_id = ?').get(app.id, req.user.id);
+  if (!ok) throw new AppError('Forbidden', 403, 'FORBIDDEN');
+}
+
 const AUTO_STATUSES = [
   'new', 'selected', 'planning', 'pending_user_review_plan',
   'plan_approved', 'coding', 'sandbox_ready', 'merged',
@@ -75,6 +99,7 @@ router.post('/:id/plan-feedback', auditMiddleware('appstudio.plan-feedback'), (r
   const db = getDb();
   const enh = db.prepare('SELECT * FROM enhancement_requests WHERE id = ?').get(req.params.id);
   if (!enh) throw new AppError('Enhancement not found', 404, 'NOT_FOUND');
+  ensureAppAccessForEnh(req, enh); // v1.27.34 H8
 
   const isAdmin = req.user?.role === 'admin';
   const existing = isAdmin ? (enh.admin_comments || '') : (enh.user_comments || '');
@@ -215,10 +240,12 @@ router.put('/anthropic-key', requireAdmin, auditMiddleware('appstudio.set-anthro
  */
 router.get('/:id/trace', async (req, res) => {
   const db = getDb();
-  // Pull ai_plan_json too — the Plan tab in the UI needs the parsed plan
-  // alongside the trace so it doesn't have to make a second request.
-  const enh = db.prepare('SELECT id, status, ai_log, ai_plan_json, pr_url, branch_name, fix_version FROM enhancement_requests WHERE id = ?').get(req.params.id);
+  // Pull ai_plan_json + app_slug too — the Plan tab in the UI needs the
+  // parsed plan, and ensureAppAccessForEnh needs app_slug to verify the
+  // caller can read this request.
+  const enh = db.prepare('SELECT id, app_slug, status, ai_log, ai_plan_json, pr_url, branch_name, fix_version FROM enhancement_requests WHERE id = ?').get(req.params.id);
   if (!enh) throw new AppError('Enhancement not found', 404, 'NOT_FOUND');
+  ensureAppAccessForEnh(req, enh); // v1.27.34 C3
 
   const jobs = db.prepare('SELECT * FROM enhancement_jobs WHERE enhancement_id = ? ORDER BY id ASC').all(enh.id);
 
@@ -277,6 +304,7 @@ router.get('/:id', (req, res) => {
   const db = getDb();
   const enh = db.prepare('SELECT * FROM enhancement_requests WHERE id = ?').get(req.params.id);
   if (!enh) throw new AppError('Enhancement not found', 404, 'NOT_FOUND');
+  ensureAppAccessForEnh(req, enh); // v1.27.34 C3
 
   const jobs = db.prepare('SELECT * FROM enhancement_jobs WHERE enhancement_id = ? ORDER BY id ASC').all(enh.id);
 
@@ -318,6 +346,18 @@ function agentContextPath(slug) {
  * GET /api/appstudio/context/:slug - Read agent context for an app
  */
 router.get('/context/:slug', (req, res) => {
+  // SECURITY (v1.27.34 C3): agent-context.md may contain secrets / notes
+  // operators wrote for their own apps. Restrict to admin or assigned
+  // app users; previously any authenticated portal user could read any
+  // app's context.
+  if (req.user?.role !== 'admin') {
+    const db = getDb();
+    const app = db.prepare('SELECT id FROM apps WHERE slug = ?').get(req.params.slug);
+    if (!app) throw new AppError('App not found', 404, 'NOT_FOUND');
+    const ok = db.prepare('SELECT 1 FROM app_users WHERE app_id = ? AND user_id = ?').get(app.id, req.user.id)
+            || db.prepare('SELECT 1 FROM app_user_roles WHERE app_id = ? AND user_id = ?').get(app.id, req.user.id);
+    if (!ok) throw new AppError('Forbidden', 403, 'FORBIDDEN');
+  }
   const path = agentContextPath(req.params.slug);
   const content = existsSync(path) ? readFileSync(path, 'utf8') : '';
   res.json({ slug: req.params.slug, content });

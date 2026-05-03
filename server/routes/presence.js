@@ -29,7 +29,7 @@ function resolveUser(req) {
     const row = db.prepare(`
       SELECT u.id, u.name FROM identity_sessions s
       JOIN users u ON u.id = s.user_id
-      WHERE s.token_hash = ? AND s.expires_at > datetime('now')
+      WHERE s.token_hash = ? AND s.expires_at > datetime('now') AND u.active = 1
     `).get(tokenHash);
     return row || null;
   } catch (_) { return null; }

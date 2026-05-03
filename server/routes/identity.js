@@ -197,8 +197,12 @@ router.get('/verify', (req, res) => {
   const db = getDb();
   const tokenHash = hashApiKey(token);
 
+  // SECURITY: pull u.active too so a deactivated user's lingering session
+  // doesn't keep waving them through Caddy forward_auth into iframed apps
+  // (security review v1.27.34 H6). Lookup remains a single query so the
+  // existing redirect-when-cookie-only flow stays intact.
   const session = db.prepare(`
-    SELECT s.*, u.id as user_id, u.name, u.email, u.username, u.avatar_url, u.phone, u.year_of_birth, u.role as crane_role
+    SELECT s.*, u.id as user_id, u.name, u.email, u.username, u.avatar_url, u.phone, u.year_of_birth, u.role as crane_role, u.active as user_active
     FROM identity_sessions s
     JOIN users u ON s.user_id = u.id
     WHERE s.token_hash = ?
@@ -214,6 +218,14 @@ router.get('/verify', (req, res) => {
     db.prepare('DELETE FROM identity_sessions WHERE token_hash = ?').run(tokenHash);
     if (!isApiClient) return loginRedirect();
     throw new AppError('Token expired', 401, 'TOKEN_EXPIRED');
+  }
+
+  // Refuse the session if the user has been deactivated since login. The
+  // session row stays (so they can't slip through during cleanup) but no
+  // operation is performed on their behalf.
+  if (session.user_active === 0) {
+    if (!isApiClient) return loginRedirect();
+    throw new AppError('Account is deactivated', 403, 'DEACTIVATED');
   }
 
   // Get app role
@@ -313,7 +325,7 @@ router.get('/me', (req, res) => {
   const session = db.prepare(`
     SELECT u.* FROM identity_sessions s
     JOIN users u ON s.user_id = u.id
-    WHERE s.token_hash = ? AND s.expires_at > datetime('now')
+    WHERE s.token_hash = ? AND s.expires_at > datetime('now') AND u.active = 1
   `).get(tokenHash);
 
   if (!session) throw new AppError('Invalid or expired token', 401, 'INVALID_TOKEN');
@@ -370,7 +382,7 @@ router.get('/preview-as/:userId', (req, res) => {
   const session = db.prepare(`
     SELECT u.role FROM identity_sessions s
     JOIN users u ON s.user_id = u.id
-    WHERE s.token_hash = ? AND s.expires_at > datetime('now')
+    WHERE s.token_hash = ? AND s.expires_at > datetime('now') AND u.active = 1
   `).get(tokenHash);
 
   if (!session) throw new AppError('Invalid or expired token', 401, 'INVALID_TOKEN');
@@ -417,7 +429,7 @@ router.get('/app-updates/:slug', (req, res) => {
   const session = db.prepare(`
     SELECT u.id as user_id FROM identity_sessions s
     JOIN users u ON s.user_id = u.id
-    WHERE s.token_hash = ? AND s.expires_at > datetime('now')
+    WHERE s.token_hash = ? AND s.expires_at > datetime('now') AND u.active = 1
   `).get(hashApiKey(token));
   if (!session) throw new AppError('Invalid or expired token', 401, 'INVALID_TOKEN');
 

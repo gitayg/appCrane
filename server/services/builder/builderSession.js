@@ -417,6 +417,16 @@ async function runBuilderTurn(sessionId, state, prompt) {
 
     runner.on('system', (ev) => {
       const sid = ev?.data?.session_id;
+      // SECURITY: session_id flows back into a `sh -c` --resume arg next
+      // time. Validate before storing so a poisoned event from a
+      // misbehaving CLI/skill can't seed a shell-injection that fires on
+      // the next dispatch (across users sharing the per-app container).
+      // See feedback memory: "Validate user-controlled strings at the DB
+      // write boundary AND at the shell-build boundary."
+      if (sid && !/^[A-Za-z0-9_-]{1,128}$/.test(String(sid))) {
+        log.warn(`Builder: refusing to store malformed session_id from ${state.appSlug}`);
+        return;
+      }
       if (sid && sid !== c.claudeSessionId) {
         setAppClaudeSessionId(state.appSlug, sid);
         try {
