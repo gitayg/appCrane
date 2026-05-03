@@ -477,27 +477,25 @@ export function Applications() {
                       }}
                     />
                   </div>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div className="card-name-row">
-                      <span>{app.name}</span>
-                      <span className={visBadgeClass(app.visibility)}>{app.visibility ?? 'hidden'}</span>
-                      {app.category && <span className="cat-badge">{app.category}</span>}
-                      {app.has_claude_credentials && (
-                        <span
-                          className="claude-badge"
-                          title="This app has its own Claude OAuth credentials — AI work bills to that account, not the global ANTHROPIC_API_KEY"
-                        >🔑 Claude</span>
-                      )}
-                    </div>
-                    {app.description && <div className="card-desc">{app.description}</div>}
-                    {app.resource_limits && (
-                      <div className="card-res">
-                        {app.resource_limits.max_ram_mb != null && `RAM: ${app.resource_limits.max_ram_mb}MB`}
-                        {app.resource_limits.max_ram_mb != null && app.resource_limits.max_cpu_percent != null && '  '}
-                        {app.resource_limits.max_cpu_percent != null && `CPU: ${app.resource_limits.max_cpu_percent}%`}
-                      </div>
+                  <div className="card-name-row">
+                    <span>{app.name}</span>
+                    <span className={visBadgeClass(app.visibility)}>{app.visibility ?? 'hidden'}</span>
+                    {app.category && <span className="cat-badge">{app.category}</span>}
+                    {app.has_claude_credentials && (
+                      <span
+                        className="claude-badge"
+                        title="This app has its own Claude OAuth credentials — AI work bills to that account, not the global ANTHROPIC_API_KEY"
+                      >🔑 Claude</span>
                     )}
                   </div>
+                  {app.description && <div className="card-desc">{app.description}</div>}
+                  {app.resource_limits && (app.resource_limits.max_ram_mb != null || app.resource_limits.max_cpu_percent != null) && (
+                    <div className="card-res">
+                      {app.resource_limits.max_ram_mb != null && `RAM: ${app.resource_limits.max_ram_mb}MB`}
+                      {app.resource_limits.max_ram_mb != null && app.resource_limits.max_cpu_percent != null && '  '}
+                      {app.resource_limits.max_cpu_percent != null && `CPU: ${app.resource_limits.max_cpu_percent}%`}
+                    </div>
+                  )}
                 </div>
                 <div className="card-hdr-actions">
                   <select
