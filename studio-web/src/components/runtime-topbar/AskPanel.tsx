@@ -6,6 +6,7 @@ interface Props {
   appName: string
   open:    boolean
   onClose: () => void
+  width?:  number
 }
 
 /**
@@ -14,7 +15,7 @@ interface Props {
  * picker and the 🎯 element-peek (those are deferred — they need a
  * session-listing UI and a DOM picker overlay respectively).
  */
-export function AskPanel({ slug, appName, open, onClose }: Props) {
+export function AskPanel({ slug, appName, open, onClose, width = 380 }: Props) {
   const { messages, working, busy, send, reset } = useAskSession(slug)
   const [input, setInput] = useState('')
   const messagesRef = useRef<HTMLDivElement>(null)
@@ -34,7 +35,7 @@ export function AskPanel({ slug, appName, open, onClose }: Props) {
   }
 
   return (
-    <div className="ask-panel open">
+    <div className="ask-panel open" style={{ width }}>
       <div className="ask-header">
         <span>🤖 Learn</span>
         <span className="ask-app-label">{appName}</span>

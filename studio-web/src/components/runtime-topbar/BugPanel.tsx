@@ -6,6 +6,7 @@ interface Props {
   appName: string
   open:    boolean
   onClose: () => void
+  width?:  number
 }
 
 /**
@@ -17,7 +18,7 @@ interface Props {
  * Uses the existing useEnhancementSubmit hook — no new server endpoint.
  * Bugs flow through the same Plan → Code → Build → Open PR pipeline.
  */
-export function BugPanel({ slug, appName, open, onClose }: Props) {
+export function BugPanel({ slug, appName, open, onClose, width = 460 }: Props) {
   const { submit, busy, last, reset } = useEnhancementSubmit(slug)
   const [what, setWhat]       = useState('')
   const [steps, setSteps]     = useState('')
@@ -44,7 +45,7 @@ export function BugPanel({ slug, appName, open, onClose }: Props) {
   }
 
   return (
-    <div className="ask-panel open" style={{ width: 460 }}>
+    <div className="ask-panel open" style={{ width }}>
       <div className="ask-header">
         <span>🐛 Report bug</span>
         <span className="ask-app-label">{appName}</span>
