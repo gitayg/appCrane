@@ -57,24 +57,39 @@ const SESSION_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
  */
 function buildPreflightShell(checks) {
   if (!checks?.length) return '';
+  // Statements separated by `;` not space — Alpine ash needs an explicit
+  // terminator after `}` before the next command. Each check uses `if … fi`
+  // (not `… || preflight_fail`) so the failure path is inside the function
+  // body where parsing is unambiguous.
+  // `echo unknown` instead of `echo ?` because `?` is a single-char glob
+  // that some shells expand or warn about.
   const lines = [
     'preflight_fail() { echo "[preflight] $1" >&2; exit 75; }',
-    'preflight_meta() { echo "uid=$(id -u) gid=$(id -g) mode=$(stat -c %a "$1" 2>/dev/null || echo ?) owner=$(stat -c %U:%G "$1" 2>/dev/null || echo ?:?)"; }',
+    'preflight_meta() { echo "uid=$(id -u) gid=$(id -g) mode=$(stat -c %a "$1" 2>/dev/null || echo unknown) owner=$(stat -c %U:%G "$1" 2>/dev/null || echo unknown)"; }',
   ];
   for (const c of checks) {
     const path  = shellQuote(c.path);
     const label = c.label || c.path;
+    let test;
+    let reason;
     if (c.mode === 'r') {
-      lines.push(`{ [ -e ${path} ] && [ -r ${path} ]; } || preflight_fail "${label} (${c.path}) not readable: $(preflight_meta ${path})";`);
+      test = `[ -e ${path} ] && [ -r ${path} ]`;
+      reason = 'not readable';
     } else if (c.mode === 'rw') {
-      lines.push(`{ [ -e ${path} ] && [ -r ${path} ] && [ -w ${path} ]; } || preflight_fail "${label} (${c.path}) not read+writable (Claude needs to refresh tokens): $(preflight_meta ${path})";`);
+      test = `[ -e ${path} ] && [ -r ${path} ] && [ -w ${path} ]`;
+      reason = 'not read+writable (Claude needs to refresh tokens)';
     } else if (c.mode === 'd') {
-      lines.push(`{ [ -d ${path} ] && [ -x ${path} ]; } || preflight_fail "${label} (${c.path}) not an enterable directory: $(preflight_meta ${path})";`);
+      test = `[ -d ${path} ] && [ -x ${path} ]`;
+      reason = 'not an enterable directory';
     } else if (c.mode === 'dw') {
-      lines.push(`{ [ -d ${path} ] && [ -x ${path} ] && [ -w ${path} ]; } || preflight_fail "${label} (${c.path}) not a writable directory: $(preflight_meta ${path})";`);
+      test = `[ -d ${path} ] && [ -x ${path} ] && [ -w ${path} ]`;
+      reason = 'not a writable directory';
+    } else {
+      continue;
     }
+    lines.push(`if ! ${test}; then preflight_fail "${label} (${c.path}) ${reason}: $(preflight_meta ${path})"; fi`);
   }
-  return lines.join(' ') + ' ';
+  return lines.join('; ') + '; ';
 }
 
 function buildClaudeCmd({ prompt, model, resume, addDir = '/workspace', systemPrompt, preflight = [] }) {
