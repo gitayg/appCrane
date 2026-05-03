@@ -383,7 +383,7 @@ function LimitsCard({ slug, reload, onMsg }: LimitsCardProps) {
 interface ClaudeCredsInfo {
   present: boolean
   malformed?: boolean
-  expiresAt?: string | null
+  expiresAt?: string | number | null   // ISO string OR ms-since-epoch (claudeAiOauth shape)
   accountUuid?: string | null
   // No token field — once uploaded, the secret is write-only. The card
   // only ever surfaces metadata (account UUID + expiry); the operator
@@ -498,7 +498,23 @@ function ClaudeCredsCard({ slug, reload, onMsg }: ClaudeCredsCardProps) {
           {info.malformed && <div style={{ color: 'var(--red)', marginTop: 4 }}>⚠ Stored payload is unreadable — re-upload to fix.</div>}
           <div style={{ color: 'var(--dim)', marginTop: 4, fontSize: '.72rem', fontStyle: 'italic' }}>Token is write-only — replace or delete; cannot be viewed or downloaded.</div>
           {info.accountUuid && <div style={{ color: 'var(--dim)', marginTop: 4 }}>Account: <code style={{ fontSize: '.72rem' }}>{info.accountUuid}</code></div>}
-          {info.expiresAt && <div style={{ color: 'var(--dim)', marginTop: 2 }}>Access token expires: {info.expiresAt}</div>}
+          {info.expiresAt && (() => {
+            // Server may return expiresAt as either a JS-friendly ISO string
+            // OR a raw ms-since-epoch number (claudeAiOauth.expiresAt). Try
+            // both. Show explicit warning when expired or expiring within 24h.
+            const ms = typeof info.expiresAt === 'number' ? info.expiresAt : Date.parse(String(info.expiresAt))
+            const valid = Number.isFinite(ms) && ms > 0
+            const expired = valid && ms < Date.now()
+            const soon    = valid && !expired && ms - Date.now() < 24 * 3600 * 1000
+            const human   = valid ? new Date(ms).toLocaleString() : String(info.expiresAt)
+            const color = expired ? 'var(--red)' : soon ? '#f97316' : 'var(--dim)'
+            const tag = expired ? '⚠ EXPIRED — re-run `claude login` and re-upload' : soon ? '⏰ expires soon' : ''
+            return (
+              <div style={{ color, marginTop: 2 }}>
+                Access token expires: {human} {tag && <strong style={{ marginLeft: 6 }}>{tag}</strong>}
+              </div>
+            )
+          })()}
         </div>
       ) : (
         <div style={{ background: 'var(--surface2)', border: '1px solid var(--border)', borderRadius: 6, padding: '10px 12px', marginBottom: 12, fontSize: '.82rem', color: 'var(--dim)' }}>
