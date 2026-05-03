@@ -11,7 +11,7 @@
 //   - Each dispatch gets its own copy so concurrent runs don't fight
 //   - Cleanup wipes the plaintext from disk after the run
 
-import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'fs';
+import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, chmodSync } from 'fs';
 import { join, resolve } from 'path';
 import { randomUUID } from 'crypto';
 import { getDb } from '../db.js';
@@ -151,17 +151,23 @@ export function prepareClaudeCredentialsMount(appSlug) {
 
   mkdirSync(tmpRoot(), { recursive: true });
   const tmpDir = join(tmpRoot(), randomUUID());
-  // 0o755 + 0o666 (not chown) because the studio image's `studio` user
-  // is created via Alpine's `adduser -S` which picks an arbitrary system
-  // UID — usually NOT 1000 — so a chown to a hard-coded UID misses.
-  // World-rw is acceptable here: the host file is root-owned in
+  // 0o755 dir + 0o666 file (not chown) because the studio image's
+  // `studio` user is created via Alpine's `adduser -S` which picks an
+  // arbitrary system UID — usually NOT 1000 — so a chown to a hard-coded
+  // UID misses. World-rw is acceptable here: host file is root-owned in
   // /var/lib/appcrane/... where only AppCrane runs, and the container is
-  // isolated; the only reader is the dispatched Claude CLI inside.
-  // Without this, container reads fail with EACCES which surfaces as
-  // "Not logged in · Please run /login" inside Claude CLI.
+  // isolated; only reader is the dispatched Claude CLI inside.
+  //
+  // CRITICAL: writeFileSync's `mode` is masked by the process umask
+  // (default 022 → 0o666 becomes 0o644). The container's `studio` user
+  // is "others" relative to root and gets read-only — Claude CLI then
+  // fails to refresh the token (write) and surfaces as "Not logged in".
+  // chmodSync bypasses umask. Same for the dir.
   mkdirSync(tmpDir, { mode: 0o755 });
+  chmodSync(tmpDir, 0o755);
   const tmpFile = join(tmpDir, 'credentials.json');
   writeFileSync(tmpFile, payload, { mode: 0o666 });
+  chmodSync(tmpFile, 0o666);
 
   return {
     tmpFile,
