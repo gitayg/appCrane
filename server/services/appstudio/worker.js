@@ -208,8 +208,9 @@ async function handlePlan(job) {
   };
 
   const result = await planEnhancement({
-    appSlug: enh.app_slug,
-    request: enh.message,
+    appSlug:       enh.app_slug,
+    enhancementId: enh.id,
+    request:       enh.message,
     repoDir,
     agentContext,
     priorComments,

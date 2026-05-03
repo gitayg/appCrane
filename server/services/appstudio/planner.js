@@ -6,6 +6,7 @@ import { ensureCodebaseContext } from './contextBuilder.js';
 import { runAgentOneShot } from '../llm/runAgent.js';
 import { extractJsonBlock } from '../../utils/json.js';
 import { ensureStudioImage } from './generator.js';
+import { renderOpenCommentsSection } from '../enhancementComments.js';
 
 const MODEL         = process.env.APPSTUDIO_PLANNER_MODEL || 'claude-sonnet-4-6';
 const STUDIO_IMAGE  = process.env.APPSTUDIO_IMAGE || 'appcrane-studio:latest';
@@ -106,7 +107,7 @@ function extractKeywords(text) {
 }
 
 
-export async function planEnhancement({ appSlug, request, repoDir, agentContext, priorComments, onChunk, onTokens }) {
+export async function planEnhancement({ appSlug, enhancementId, request, repoDir, agentContext, priorComments, onChunk, onTokens }) {
   // Step 1: get (or build) the AI-generated codebase context document
   const { contextDoc, fileTree, gitHash, fromCache, builtAt } = await ensureCodebaseContext(appSlug, repoDir);
 
@@ -126,9 +127,15 @@ export async function planEnhancement({ appSlug, request, repoDir, agentContext,
     ? `git ${gitHash?.slice(0, 8)} · cached ${builtAt?.slice(0, 16)} UTC`
     : `git ${gitHash?.slice(0, 8)} · freshly analyzed`;
 
+  // Open feedback (bugs / notes / reviews) the operator added since the
+  // last run. Empty string when nothing's open, so the .filter(Boolean)
+  // below drops the section.
+  const openFeedback = enhancementId ? renderOpenCommentsSection(enhancementId) : '';
+
   const userContent = [
     `## Enhancement request\n\n${request}`,
     priorComments ? `## Prior reviewer feedback\n\n${priorComments}` : '',
+    openFeedback,
     contextDoc
       ? `## Codebase context (${contextNote})\n\n${contextDoc}`
       : `## Repo file tree\n\`\`\`\n${fileTree}\n\`\`\``,

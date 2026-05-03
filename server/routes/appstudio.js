@@ -213,7 +213,7 @@ router.put('/anthropic-key', requireAdmin, auditMiddleware('appstudio.set-anthro
 /**
  * GET /api/appstudio/:id/trace - Full job trace with parsed output
  */
-router.get('/:id/trace', (req, res) => {
+router.get('/:id/trace', async (req, res) => {
   const db = getDb();
   // Pull ai_plan_json too — the Plan tab in the UI needs the parsed plan
   // alongside the trace so it doesn't have to make a second request.
@@ -249,6 +249,12 @@ router.get('/:id/trace', (req, res) => {
     try { ai_plan = JSON.parse(enh.ai_plan_json); } catch (_) {}
   }
 
+  // Bundle comments thread + open count so the Feedback tab stays fresh
+  // on every 1.5s trace poll without a separate fetch.
+  const { listComments, openCommentCount } = await import('../services/enhancementComments.js');
+  const comments = listComments(enh.id);
+  const open_comment_count = openCommentCount(enh.id);
+
   res.json({
     id: enh.id,
     status: enh.status,
@@ -259,6 +265,8 @@ router.get('/:id/trace', (req, res) => {
     fix_version: enh.fix_version,
     active: jobs.some(j => j.status === 'running' || j.status === 'queued'),
     trace,
+    comments,
+    open_comment_count,
   });
 });
 
