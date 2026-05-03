@@ -3,30 +3,41 @@ import { hashApiKey } from '../services/encryption.js';
 import { AppError } from '../utils/errors.js';
 
 /**
- * API Key authentication middleware.
- * Reads X-API-Key header, looks up user by hashed key.
+ * Authentication middleware. Accepts either:
+ *   - `X-API-Key:` header (admin-key flow used by the SPA + CLI)
+ *   - `Authorization: Bearer <identity_token>` (portal password / OIDC /
+ *     SAML sessions persisted in the identity_sessions table)
+ *
+ * The Bearer fallback was added so the React panels — which now run
+ * embedded in /portal via the IIFE bundle — can call admin-style
+ * endpoints (/api/auth/me, etc.) using the portal user's session
+ * instead of erroring with "Missing X-API-Key header" → 401.
  */
 export function requireAuth(req, res, next) {
-  const apiKey = req.headers['x-api-key'];
-
-  if (!apiKey) {
-    return next(new AppError('Missing X-API-Key header', 401, 'UNAUTHORIZED'));
-  }
-
   const db = getDb();
-  const keyHash = hashApiKey(apiKey);
-  const user = db.prepare('SELECT * FROM users WHERE api_key_hash = ?').get(keyHash);
 
-  if (!user) {
-    return next(new AppError('Invalid API key', 401, 'UNAUTHORIZED'));
+  const apiKey = req.headers['x-api-key'];
+  if (apiKey) {
+    const user = db.prepare('SELECT * FROM users WHERE api_key_hash = ?').get(hashApiKey(apiKey));
+    if (!user) return next(new AppError('Invalid API key', 401, 'UNAUTHORIZED'));
+    if (!user.active) return next(new AppError('Account is deactivated', 403, 'DEACTIVATED'));
+    req.user = user;
+    return next();
   }
 
-  if (!user.active) {
-    return next(new AppError('Account is deactivated', 403, 'DEACTIVATED'));
+  const bearer = (req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
+  if (bearer) {
+    const session = db.prepare(`
+      SELECT u.*
+      FROM identity_sessions s JOIN users u ON s.user_id = u.id
+      WHERE s.token_hash = ? AND s.expires_at > datetime('now') AND u.active = 1
+    `).get(hashApiKey(bearer));
+    if (!session) return next(new AppError('Invalid or expired session', 401, 'UNAUTHORIZED'));
+    req.user = session;
+    return next();
   }
 
-  req.user = user;
-  next();
+  return next(new AppError('Missing X-API-Key header or Bearer token', 401, 'UNAUTHORIZED'));
 }
 
 /**
