@@ -5,6 +5,7 @@ import { decrypt } from '../encryption.js';
 import { ensureStudioImage } from '../appstudio/generator.js';
 import { writeSnapshot } from '../github/snapshot.js';
 import { prepareSkillsMount } from '../skills.js';
+import { prepareClaudeCredentialsMount } from '../claudeCredentials.js';
 import log from '../../utils/logger.js';
 
 const STUDIO_IMAGE  = process.env.APPSTUDIO_IMAGE || 'appcrane-studio:latest';
@@ -110,6 +111,12 @@ function startContainer(slug, workspaceDir, onLog) {
   try { execFileSync('docker', ['rm', '-f', containerName], { stdio: 'pipe', timeout: 10000 }); } catch (_) {}
 
   const skillsMount = prepareSkillsMount(slug);
+  // Per-app Claude OAuth credentials override the global API key. The
+  // mount is read-write so the CLI can refresh the access token in place;
+  // the credsMount.cleanup callback (registered on the container teardown
+  // path below) reads the file back and updates the encrypted DB column
+  // so the next container start gets the freshest tokens.
+  const credsMount = prepareClaudeCredentialsMount(slug);
   const args = [
     'run', '-d', '--rm',
     '--name', containerName,
@@ -119,15 +126,21 @@ function startContainer(slug, workspaceDir, onLog) {
     '--memory=2g', '--cpus=1',
     '-v', `${workspaceDir}:/workspace`,
   ];
+  if (credsMount)  args.push('-v', `${credsMount.tmpFile}:/home/studio/.claude/credentials.json`);
   if (skillsMount) args.push('-v', `${skillsMount.dir}:/home/studio/.claude/skills:ro`);
   args.push(STUDIO_IMAGE, 'tail', '-f', '/dev/null');
 
   onLog?.(`[appContainer] Starting ${containerName}…`);
   const out = execFileSync('docker', args, { stdio: 'pipe', timeout: 30000 });
   const containerId = out.toString().trim();
+  if (credsMount)  onLog?.(`[appContainer] Mounted Claude OAuth credentials (per-app)`);
   if (skillsMount) onLog?.(`[appContainer] Mounted skills dir`);
   onLog?.(`[appContainer] Container ready: ${containerId.slice(0, 12)}`);
-  return { containerId, skillsCleanup: skillsMount?.cleanup || null };
+  return {
+    containerId,
+    skillsCleanup: skillsMount?.cleanup || null,
+    credsCleanup:  credsMount?.cleanup  || null,
+  };
 }
 
 /**
@@ -171,7 +184,7 @@ export async function getOrCreate(app, onLog) {
       log.warn(`appContainer: failed to create branch ${branchName}: ${err.message}`);
     }
 
-    const { containerId, skillsCleanup } = startContainer(slug, workspaceDir, onLog);
+    const { containerId, skillsCleanup, credsCleanup } = startContainer(slug, workspaceDir, onLog);
 
     const c = {
       ready: true,
@@ -183,6 +196,7 @@ export async function getOrCreate(app, onLog) {
       claudeSessionId: null,
       lastActivityAt: Date.now(),
       skillsCleanup,
+      credsCleanup,
     };
     containers.set(slug, c);
     log.info(`appContainer: created for ${slug} (container ${containerId.slice(0, 12)}, branch ${branchName})`);
@@ -216,6 +230,11 @@ export function evict(slug, reason = 'manual') {
     try { execFileSync('docker', ['stop', '-t', '5', c.containerId], { stdio: 'pipe', timeout: 15000 }); } catch (_) {}
     try { execFileSync('docker', ['rm', '-f', c.containerId], { stdio: 'pipe', timeout: 10000 }); } catch (_) {}
   }
+  // credsCleanup must run BEFORE skillsCleanup so the refreshed credentials
+  // file (rewritten by the in-container CLI on token refresh) gets read
+  // back and persisted to the encrypted DB column. Wiping the tmpdir
+  // first would lose the refreshed token.
+  if (c.credsCleanup)  { try { c.credsCleanup();  } catch (_) {} }
   if (c.skillsCleanup) { try { c.skillsCleanup(); } catch (_) {} }
   // No workspace caching — wipe the directory so the next session re-clones fresh
   try { rmSync(workspaceDirFor(slug), { recursive: true, force: true }); } catch (_) {}

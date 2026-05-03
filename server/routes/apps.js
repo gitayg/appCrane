@@ -652,4 +652,55 @@ router.get('/suspicious-github-urls', requireAdmin, (req, res) => {
   res.json({ apps: listSuspiciousGithubUrls() });
 });
 
+// ── Per-app Claude Code OAuth credentials ──────────────────────────────
+//
+// Operators upload a credentials.json (the file `claude login` writes)
+// scoped to a specific app. AppCrane mounts it into that app's CLI
+// containers so the agent authenticates as the operator's Claude.ai
+// subscription instead of charging the global ANTHROPIC_API_KEY wallet.
+// Stored encrypted on the app row; never returned in plaintext.
+
+/**
+ * GET /api/apps/:slug/claude-credentials — public summary of what's stored.
+ * Never returns the raw tokens — just `{ present, expiresAt, accountUuid,
+ * accessTokenTail }` so the UI can show a "configured" state without leaking.
+ */
+router.get('/:slug/claude-credentials', requireAppAccess, async (req, res) => {
+  const { credentialsInfo } = await import('../services/claudeCredentials.js');
+  res.json(credentialsInfo(req.params.slug));
+});
+
+/**
+ * PUT /api/apps/:slug/claude-credentials — upload/replace the stored creds.
+ * Body: { credentials: <full JSON object> }  OR  raw JSON body that itself
+ * is the credentials.json contents. Either shape is accepted to keep the
+ * UI form simple (just FileReader → fetch).
+ */
+router.put('/:slug/claude-credentials', requireAppAccess, auditMiddleware('app-claude-credentials'), async (req, res) => {
+  const body = req.body || {};
+  const payload = body.credentials && typeof body.credentials === 'object'
+    ? body.credentials
+    : body;
+  const { setCredentials, validateCredentials } = await import('../services/claudeCredentials.js');
+  try {
+    validateCredentials(payload);
+    setCredentials(req.params.slug, payload);
+    // Return the fresh summary so the UI can update without a second fetch.
+    const { credentialsInfo } = await import('../services/claudeCredentials.js');
+    res.json(credentialsInfo(req.params.slug));
+  } catch (e) {
+    throw new AppError(`invalid credentials: ${e.message}`, 400, 'VALIDATION');
+  }
+});
+
+/**
+ * DELETE /api/apps/:slug/claude-credentials — clear stored creds. The next
+ * dispatch falls back to the global ANTHROPIC_API_KEY.
+ */
+router.delete('/:slug/claude-credentials', requireAppAccess, auditMiddleware('app-claude-credentials'), async (req, res) => {
+  const { clearCredentials } = await import('../services/claudeCredentials.js');
+  clearCredentials(req.params.slug);
+  res.json({ present: false });
+});
+
 export default router;

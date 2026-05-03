@@ -6,6 +6,7 @@ import { ensureStudioImage } from './appstudio/generator.js';
 import { assertCapacity } from './containerLimit.js';
 import { runAgentExec } from './llm/runAgent.js';
 import { prepareSkillsMount } from './skills.js';
+import { prepareClaudeCredentialsMount } from './claudeCredentials.js';
 import log from '../utils/logger.js';
 
 const ASK_IMAGE      = process.env.APPSTUDIO_IMAGE || 'appcrane-studio:latest';
@@ -99,6 +100,8 @@ async function ensureSessionContainer(sessionId, app, onLog) {
   // as the builder session container, so Ask gets the same skill set the
   // app's Builder uses.
   const skillsMount = prepareSkillsMount(app.slug);
+  // Per-app Claude OAuth credentials (if uploaded) override the global API key.
+  const credsMount = prepareClaudeCredentialsMount(app.slug);
 
   // Clone, strip remote, disable credential helper — ask containers cannot commit or push
   const dockerArgs = [
@@ -107,10 +110,11 @@ async function ensureSessionContainer(sessionId, app, onLog) {
     '--label', 'appcrane=true',
     '--label', 'appcrane.container.type=ask',
     '--memory=1g', '--cpus=0.5',
-    '-e', `ANTHROPIC_API_KEY=${process.env.ANTHROPIC_API_KEY}`,
+    '-e', `ANTHROPIC_API_KEY=${process.env.ANTHROPIC_API_KEY || ''}`,
     '-e', `ASK_MODEL=${ASK_MODEL}`,
     '-v', `${dir}:/studio:ro`,
   ];
+  if (credsMount)  dockerArgs.push('-v', `${credsMount.tmpFile}:/home/studio/.claude/credentials.json`);
   if (skillsMount) dockerArgs.push('-v', `${skillsMount.dir}:/home/studio/.claude/skills:ro`);
   dockerArgs.push(
     ASK_IMAGE,
@@ -128,6 +132,7 @@ async function ensureSessionContainer(sessionId, app, onLog) {
     containerName, dir, appSlug: app.slug,
     idleTimer: null, maxTimer: null,
     skillsCleanup: skillsMount?.cleanup || null,
+    credsCleanup:  credsMount?.cleanup  || null,
   };
   session.maxTimer = setTimeout(() => stopSession(sessionId), MAX_SESSION_MS);
   liveSessions.set(sessionId, session);
@@ -196,6 +201,9 @@ export function stopSession(sessionId) {
   clearTimeout(session.maxTimer);
   try { execFileSync('docker', ['rm', '-f', session.containerName], { stdio: 'pipe', timeout: 15000 }); } catch (_) {}
   try { rmSync(session.dir, { recursive: true, force: true }); } catch (_) {}
+  // credsCleanup before skillsCleanup so refreshed Claude tokens get
+  // captured back to the DB before the tmpdir is wiped.
+  if (session.credsCleanup)  { try { session.credsCleanup();  } catch (_) {} }
   if (session.skillsCleanup) { try { session.skillsCleanup(); } catch (_) {} }
   log.info(`AskClaude: session ${sessionId} container stopped (idle timeout)`);
 }
