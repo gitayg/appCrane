@@ -1070,16 +1070,13 @@ function openApp(url, name, slug, hasIcon, appData) {
   _planBusy = false;
   _planHasPlan = false;
   _planPeekCtx = null;
-  document.getElementById('askPanelAppLabel').textContent = name || '';
-  document.getElementById('askMessages').innerHTML = '<div class="ask-empty">Learn about this application — Claude will read the source code to answer.</div>';
-  document.getElementById('askWorking').style.display = 'none';
-  document.getElementById('askPeekBar').style.display = 'none';
-  // Plan panel inner DOM (planPanelAppLabel / planMessages / planWorking
-  // / planPeekBar / planBuildRow / planSendBtn / planInput) was removed
-  // in v1.27.61 when the panel became a Custom Element. The element
-  // owns its own state — no manual reset needed here. Stale references
-  // were throwing "Cannot set properties of null" and aborting openApp
-  // mid-flight, leaving the iframe visible on /login.
+  // Both the Ask panel inner DOM (askPanelAppLabel / askMessages /
+  // askWorking / askPeekBar — deleted in v1.27.56) and the Plan panel
+  // inner DOM (deleted in v1.27.61) became Custom Elements. The
+  // elements own their own state — no manual reset needed here.
+  // Stale references were throwing "Cannot set properties of null"
+  // and aborting openApp mid-flight, so the iframe never loaded and
+  // the env-btn click in /portal looked like a no-op (v1.27.87).
   document.getElementById('frameIframe').src = url;
   document.getElementById('appFrame').classList.add('open');
   document.body.style.overflow = 'hidden';
@@ -1473,9 +1470,12 @@ function togglePeekMode() {
 
   _peekActive = true;
   openPlanPanel();
-  document.getElementById('planPeekToggleBtn').classList.add('active');
-  document.getElementById('askPeekBtn').classList.add('active');
-  document.getElementById('peekHint').classList.add('active');
+  // planPeekToggleBtn / askPeekBtn lived inside the panels deleted in
+  // v1.27.56 / v1.27.61 — guard so this dead path doesn't throw on
+  // null if ever triggered.
+  document.getElementById('planPeekToggleBtn')?.classList.add('active');
+  document.getElementById('askPeekBtn')?.classList.add('active');
+  document.getElementById('peekHint')?.classList.add('active');
 
   var style = doc.getElementById('__ac_peek_style');
   if (!style) {
@@ -1496,9 +1496,9 @@ function togglePeekMode() {
 
 function stopPeekMode() {
   _peekActive = false;
-  document.getElementById('planPeekToggleBtn').classList.remove('active');
-  document.getElementById('askPeekBtn').classList.remove('active');
-  document.getElementById('peekHint').classList.remove('active');
+  document.getElementById('planPeekToggleBtn')?.classList.remove('active');
+  document.getElementById('askPeekBtn')?.classList.remove('active');
+  document.getElementById('peekHint')?.classList.remove('active');
   try {
     const doc = document.getElementById('frameIframe').contentDocument;
     if (doc) {
@@ -1533,10 +1533,14 @@ function _peekClick(e) {
   // Only the Plan panel still uses the vanilla peek router. Ask uses
   // its own picker inside the React panel since v1.27.56.
   _planPeekCtx = info;
-  document.getElementById('planPeekLabel').textContent = (info.tag ? '<' + info.tag + '>' : '') + (info.text ? ' "' + info.text.slice(0, 60) + '"' : ' ' + info.selector);
-  document.getElementById('planPeekBar').style.display = 'flex';
+  // planPeekLabel / planPeekBar / planInput were inside the deleted
+  // planPanel div (v1.27.61). Guards keep this dead-path tolerant.
+  const lbl = document.getElementById('planPeekLabel');
+  if (lbl) lbl.textContent = (info.tag ? '<' + info.tag + '>' : '') + (info.text ? ' "' + info.text.slice(0, 60) + '"' : ' ' + info.selector);
+  const bar = document.getElementById('planPeekBar');
+  if (bar) bar.style.display = 'flex';
   openPlanPanel();
-  setTimeout(function() { document.getElementById('planInput').focus(); }, 50);
+  setTimeout(function() { document.getElementById('planInput')?.focus(); }, 50);
 }
 
 function _peekKeydown(e) {
