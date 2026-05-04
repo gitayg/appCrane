@@ -160,6 +160,49 @@ router.post('/:id/redo', auditMiddleware('appstudio.redo'), (req, res) => {
 });
 
 /**
+ * POST /api/appstudio/:id/recode - Re-run only the code phase against
+ * the latest base branch.
+ *
+ * Use case: PR has merge conflicts because main moved while the
+ * branch was being coded. The PLAN is still valid — only the diff
+ * needs to regenerate against current main. Wiping + re-planning
+ * (the existing /redo route) would discard a perfectly good plan.
+ *
+ * Behavior:
+ * - Requires an existing approved plan (ai_plan_json set).
+ * - Clears branch_name + pr_url so cloneForCode starts on a fresh
+ *   branch from app.branch, not the stale one.
+ * - Inserts a new 'code' phase job.
+ * - Plan, comments, log are preserved.
+ *
+ * The previously-pushed remote branch + open PR are left untouched
+ * — operator should close the PR themselves once the new one merges.
+ */
+router.post('/:id/recode', auditMiddleware('appstudio.recode'), (req, res) => {
+  const db = getDb();
+  const enh = db.prepare('SELECT * FROM enhancement_requests WHERE id = ?').get(req.params.id);
+  if (!enh) throw new AppError('Enhancement not found', 404, 'NOT_FOUND');
+  if (req.user.role !== 'admin' && !isAppAdmin(req.user.id, enh.app_slug)) {
+    throw new AppError('Forbidden', 403, 'FORBIDDEN');
+  }
+  if (!enh.ai_plan_json) throw new AppError('No plan to re-code from — run /redo to plan first', 400, 'NO_PLAN');
+
+  db.transaction(() => {
+    db.prepare(`
+      UPDATE enhancement_requests
+      SET status = 'plan_approved',
+          branch_name = NULL,
+          pr_url = NULL,
+          ai_log = COALESCE(ai_log, '') || ?
+      WHERE id = ?
+    `).run(`\n[${new Date().toISOString()}] Recode requested by ${req.user.name || req.user.email || 'admin'} — re-coding plan against latest base branch.\n`, enh.id);
+    db.prepare('INSERT INTO enhancement_jobs (enhancement_id, phase) VALUES (?, ?)').run(enh.id, 'code');
+  })();
+
+  res.json({ message: 'Recode queued — plan preserved, fresh code job', enhancement_id: enh.id });
+});
+
+/**
  * POST /api/appstudio/:id/approve-sandbox - Approve sandbox → open PR + promote
  */
 router.post('/:id/approve-sandbox', auditMiddleware('appstudio.approve-sandbox'), (req, res) => {

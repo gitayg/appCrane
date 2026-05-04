@@ -524,34 +524,10 @@ interface DetailViewProps {
 }
 
 function DetailView({ enh, trace, onBack, onAction, onDeleteJob, onRetryJob }: DetailViewProps) {
-  function onRedo() {
-    const resetBranch = confirm(
-      `Redo "${enh.message.slice(0, 60)}${enh.message.length > 60 ? '…' : ''}"?\n\n` +
-      `Wipes the current plan + comments and queues a fresh plan job.\n\n` +
-      `Click OK to keep the existing branch (the next coder run continues on top).\n` +
-      `Click Cancel to abort. To also reset the branch to a fresh one, use the "Redo + reset branch" option from a follow-up.`,
-    )
-    if (!resetBranch) return
-    onAction(enh.id, 'redo')
-  }
-  function onRedoReset() {
-    if (!confirm(`Redo + RESET BRANCH for "${enh.message.slice(0, 60)}${enh.message.length > 60 ? '…' : ''}"?\n\nClears the linked branch_name so the next coder run starts on a fresh branch. Existing remote branch (and any open PR) is left alone.`)) return
-    onAction(enh.id, 'redo', { reset_branch: true })
-  }
   return (
     <div>
-      <div style={{ marginBottom: 16, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+      <div style={{ marginBottom: 16 }}>
         <button className="btn btn-sm" onClick={onBack}>← Back to list</button>
-        <button
-          className="btn btn-sm"
-          onClick={onRedo}
-          title="Re-run from scratch — wipes plan + comments, queues fresh plan job. Keeps the existing branch."
-        >🔁 Redo</button>
-        <button
-          className="btn btn-sm"
-          onClick={onRedoReset}
-          title="Redo AND clear branch_name so coder starts on a fresh branch (existing remote branch / PR untouched)."
-        >🔁 Redo + reset branch</button>
       </div>
       <div className="detail-panel">
         <div style={{ fontWeight: 700, fontSize: '1.05rem', marginBottom: 10, wordBreak: 'break-word' }}>
@@ -582,11 +558,32 @@ function DetailView({ enh, trace, onBack, onAction, onDeleteJob, onRetryJob }: D
               borderRadius: 6, padding: '10px 14px', marginBottom: 14, fontSize: '.85rem', lineHeight: 1.5,
             }}>
               <div style={{ fontWeight: 600, marginBottom: 4 }}>⚠️ Merge conflict</div>
-              <div style={{ color: 'var(--dim)' }}>
+              <div style={{ color: 'var(--dim)', marginBottom: 8 }}>
                 <code>main</code> moved while this branch was being coded — GitHub can't auto-merge.
-                Click <strong>🔁 Redo + reset branch</strong> above to re-plan + re-code against the
-                current <code>main</code> on a fresh branch (sidesteps the conflict). Or rebase the
-                existing PR locally and click <strong>Ship it</strong> on the Build tab to retry.
+                The plan is still valid; only the diff needs to regenerate against the current
+                <code>main</code>.
+              </div>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                <button
+                  className="btn btn-accent btn-sm"
+                  onClick={() => {
+                    if (confirm('Re-run only the CODE phase against the latest base branch.\n\nKeeps the plan + comments + log. Clears branch_name so the coder starts on a fresh branch. The previous PR / branch are left on GitHub — close them yourself when convenient.')) {
+                      onAction(enh.id, 'recode')
+                    }
+                  }}
+                  title="Re-code only — preserve the plan, regenerate the diff against current main"
+                >🔧 Recode (keep plan)</button>
+                <button
+                  className="btn btn-sm"
+                  onClick={() => {
+                    if (confirm('Wipe the plan and start over from scratch on a fresh branch? Use Recode (keep plan) instead unless you want to re-think the plan itself.')) {
+                      onAction(enh.id, 'redo', { reset_branch: true })
+                    }
+                  }}
+                >🔁 Full redo</button>
+              </div>
+              <div style={{ color: 'var(--dim)', marginTop: 8, fontSize: '.78rem' }}>
+                Or rebase the existing PR locally and click <strong>Merge existing PR</strong> on the Open PR tab.
               </div>
             </div>
           )
@@ -790,6 +787,7 @@ function PhaseTabs({ enh, trace, onAction, onRetryJob, onDeleteJob }: PhaseTabsP
                                                onAction={onAction}
                                                onRetryJob={onRetryJob} onDeleteJob={onDeleteJob} />}
         {active === 'code'    && <PhaseLogPane phase="code"
+                                               enh={enh} onAction={onAction}
                                                jobs={jobsForPhase(trace, 'code')}
                                                onRetryJob={onRetryJob} onDeleteJob={onDeleteJob}
                                                emptyHint="Coding hasn't started yet — approve the plan to kick it off." />}
@@ -832,6 +830,55 @@ const PLAN_APPROVE_HIDDEN_STATES = new Set([
   'plan_approved', 'coding', 'sandbox_ready', 'pr_opened', 'pr_merged',
   'merged', 'shipped', 'closed', 'failed', 'auto_failed',
 ])
+
+/**
+ * Compact row of phase-recovery buttons. Used at the bottom of every
+ * phase pane so each phase exposes only the actions that make sense
+ * there, rather than a header crowded with Recode/Redo/Redo+reset for
+ * every request regardless of state.
+ *
+ * Set the `show` flags per call site:
+ *   recode   → re-run only the code phase against latest base, keep plan
+ *   redo     → wipe plan + comments, queue fresh plan (keep branch)
+ *   redoReset → wipe plan + comments + branch_name (fresh everything)
+ */
+function PhaseActions({ enhId, message, onAction, recode = false, redo = false, redoReset = false, hint }: {
+  enhId: number; message: string;
+  onAction: PhaseTabsProps['onAction'];
+  recode?: boolean; redo?: boolean; redoReset?: boolean;
+  hint?: string;
+}) {
+  if (!recode && !redo && !redoReset) return null
+  const short = message.slice(0, 60) + (message.length > 60 ? '…' : '')
+  return (
+    <div style={{ marginTop: 14, paddingTop: 12, borderTop: '1px solid var(--border)' }}>
+      {hint && <div style={{ color: 'var(--dim)', fontSize: '.78rem', marginBottom: 8 }}>{hint}</div>}
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+        {recode && (
+          <button
+            className="btn btn-sm"
+            onClick={() => { if (confirm(`Recode "${short}"?\n\nRe-runs only the CODE phase against the latest base branch.\nKeeps plan + comments. Resets branch_name. Existing remote branch / PR are left alone.`)) onAction(enhId, 'recode') }}
+            title="Re-run code phase against latest main, keep the plan"
+          >🔧 Recode (keep plan)</button>
+        )}
+        {redo && (
+          <button
+            className="btn btn-sm"
+            onClick={() => { if (confirm(`Redo "${short}"?\n\nWipes plan + comments and queues a fresh plan job. Keeps the existing branch (next coder run continues on top).`)) onAction(enhId, 'redo') }}
+            title="Re-plan from scratch — keeps branch"
+          >🔁 Redo (re-plan)</button>
+        )}
+        {redoReset && (
+          <button
+            className="btn btn-sm"
+            onClick={() => { if (confirm(`Redo + RESET branch for "${short}"?\n\nWipes plan + comments + branch_name. Coder starts on a fresh branch. Existing remote branch / PR untouched.`)) onAction(enhId, 'redo', { reset_branch: true }) }}
+            title="Wipe plan AND clear branch — start completely fresh"
+          >🔁 Redo + reset branch</button>
+        )}
+      </div>
+    </div>
+  )
+}
 
 function PlanPane({ enh, trace, jobs, onAction, onRetryJob, onDeleteJob }: {
   enh: Enhancement; trace: TraceData | null; jobs: Job[];
@@ -912,17 +959,40 @@ function PlanPane({ enh, trace, jobs, onAction, onRetryJob, onDeleteJob }: {
           Watch the Code / Build / Open PR tabs for progress.
         </div>
       )}
+      <PhaseActions
+        enhId={enh.id}
+        message={enh.message}
+        onAction={onAction}
+        redo
+        redoReset
+        hint="Re-think the plan? Wipe it and start over."
+      />
     </>
   )
 }
 
-function PhaseLogPane({ jobs, onRetryJob, onDeleteJob, emptyHint }: {
-  phase: Phase; jobs: Job[];
+function PhaseLogPane({ enh, jobs, onAction, onRetryJob, onDeleteJob, emptyHint }: {
+  phase: Phase; enh: Enhancement; jobs: Job[];
+  onAction: PhaseTabsProps['onAction'];
   onRetryJob: (id: number) => void; onDeleteJob: (id: number) => void;
   emptyHint: string;
 }) {
-  if (!jobs.length) return <div className="pane-empty">{emptyHint}</div>
-  return <ExpandedJobsTrace jobs={jobs} onRetryJob={onRetryJob} onDeleteJob={onDeleteJob} />
+  return (
+    <>
+      {jobs.length === 0
+        ? <div className="pane-empty">{emptyHint}</div>
+        : <ExpandedJobsTrace jobs={jobs} onRetryJob={onRetryJob} onDeleteJob={onDeleteJob} />
+      }
+      <PhaseActions
+        enhId={enh.id}
+        message={enh.message}
+        onAction={onAction}
+        recode
+        redoReset
+        hint="Code phase failed or stuck? Recode regenerates the diff against latest base."
+      />
+    </>
+  )
 }
 
 function BuildPane({ enh, jobs, onAction, onRetryJob, onDeleteJob }: {
@@ -940,6 +1010,14 @@ function BuildPane({ enh, jobs, onAction, onRetryJob, onDeleteJob }: {
           <button className="btn btn-accent btn-sm" onClick={() => onAction(enh.id, 'approve-sandbox')}>Ship it</button>
         </div>
       )}
+      <PhaseActions
+        enhId={enh.id}
+        message={enh.message}
+        onAction={onAction}
+        recode
+        redoReset
+        hint="Build failed? Recode against latest base to retry."
+      />
     </>
   )
 }
@@ -983,6 +1061,14 @@ function OpenPrPane({ enh, trace, jobs, onAction, onRetryJob, onDeleteJob }: {
         ? <div className="pane-empty">No PR opened yet — runs after Build succeeds (auto-mode) or after manual approval.</div>
         : <ExpandedJobsTrace jobs={jobs} onRetryJob={onRetryJob} onDeleteJob={onDeleteJob} />
       }
+      <PhaseActions
+        enhId={enh.id}
+        message={enh.message}
+        onAction={onAction}
+        recode
+        redoReset
+        hint="PR has merge conflicts or is otherwise stuck? Recode regenerates against latest base on a fresh branch."
+      />
     </>
   )
 }
