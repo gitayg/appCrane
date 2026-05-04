@@ -150,7 +150,7 @@ const TOOLS = [
       required: ['slug'],
       additionalProperties: false,
     },
-    requiredRole: 'any', // gated by app-admin check inside handler
+    requiredRole: 'app_admin', // also gated per-slug inside handler
     handler: async (user, args) => {
       const env = args.env === 'production' ? 'production' : 'sandbox';
       const app = getAppForUser(user, args.slug);
@@ -291,7 +291,7 @@ const TOOLS = [
       required: ['id', 'bucket'],
       additionalProperties: false,
     },
-    requiredRole: 'any',
+    requiredRole: 'app_admin',
     handler: async (user, args) => {
       if (!BUCKETS.includes(args.bucket)) throw new Error(`Unknown bucket: ${args.bucket}`);
       const db = getDb();
@@ -519,7 +519,7 @@ const TOOLS = [
       required: ['slug', 'key', 'value'],
       additionalProperties: false,
     },
-    requiredRole: 'any',
+    requiredRole: 'app_admin',
     handler: async (user, args) => {
       const env = args.env === 'production' ? 'production' : 'sandbox';
       const app = getAppForUser(user, args.slug);
@@ -583,6 +583,16 @@ export async function callTool(user, name, args) {
 
 function canUseTool(user, tool) {
   if (tool.requiredRole === 'admin') return user.role === 'admin';
+  if (tool.requiredRole === 'app_admin') {
+    if (user.role === 'admin') return true;
+    // Caller must be admin of at least one app for this tool to even appear.
+    // Per-slug authz still happens inside the handler when invoked.
+    const db = getDb();
+    const row = db.prepare(
+      `SELECT 1 FROM app_user_roles WHERE user_id = ? AND app_role = 'admin' LIMIT 1`
+    ).get(user.id);
+    return !!row;
+  }
   return true;
 }
 
