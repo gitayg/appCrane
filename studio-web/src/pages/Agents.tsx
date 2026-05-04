@@ -14,6 +14,7 @@ interface NewKeyResult {
   name: string
   email: string
   key: string
+  rotated?: boolean
 }
 
 export function Agents() {
@@ -58,6 +59,23 @@ export function Agents() {
     if (!confirm('Delete this app agent? Its API key will stop working immediately.')) return
     await adminApi.del(`/api/users/${id}`).catch(() => {})
     load()
+  }
+
+  async function rotateKey(agent: AgentUser) {
+    if (!confirm(`Rotate the API key for "${agent.name}"?\n\nThe current key will stop working immediately. Anything using it must be updated with the new key.`)) return
+    setBusy(true)
+    try {
+      const r = await adminApi.post<{ api_key?: string }>(`/api/users/${agent.id}/regenerate-key?confirm=true`, {})
+      const key = r?.api_key ?? ''
+      if (!key) throw new Error('Server returned no key')
+      setNewKey({ name: agent.name, email: agent.email, key, rotated: true })
+      setCopied(false)
+      load()
+    } catch (e) {
+      alert('Rotate failed: ' + (e instanceof Error ? e.message : String(e)))
+    } finally {
+      setBusy(false)
+    }
   }
 
   function copyKey() {
@@ -117,7 +135,17 @@ export function Agents() {
                   {a.created_at ? new Date(a.created_at).toLocaleDateString() : ''}
                 </td>
                 <td>
-                  <button className="btn btn-red btn-xs" onClick={() => deleteAgent(a.id)}>Delete</button>
+                  <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
+                    <button
+                      className="btn btn-xs"
+                      onClick={() => rotateKey(a)}
+                      disabled={busy}
+                      title="Issue a new API key for this agent. The old key stops working immediately."
+                    >
+                      Rotate key
+                    </button>
+                    <button className="btn btn-red btn-xs" onClick={() => deleteAgent(a.id)}>Delete</button>
+                  </div>
                 </td>
               </tr>
             ))}
@@ -143,7 +171,7 @@ export function Agents() {
             }}
           >
             <h3 style={{ margin: '0 0 6px', color: 'var(--green)', fontSize: '1.1rem' }}>
-              ✓ Agent created
+              ✓ {newKey.rotated ? 'Key rotated' : 'Agent created'}
             </h3>
             <p style={{ color: 'var(--dim)', fontSize: '.85rem', marginBottom: 18 }}>
               <strong style={{ color: 'var(--text)' }}>{newKey.name}</strong> · {newKey.email}

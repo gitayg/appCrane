@@ -1,7 +1,10 @@
 import { getDb } from '../db.js';
-import { decrypt } from './encryption.js';
+import { decrypt, encrypt } from './encryption.js';
 import { BUCKETS, bucketize, applyBucket } from './requestStatus.js';
 import log from '../utils/logger.js';
+import { mkdirSync } from 'fs';
+import { join } from 'path';
+import crypto from 'crypto';
 
 /**
  * MCP tool registry. Each tool:
@@ -336,6 +339,206 @@ const TOOLS = [
       const { getAppLogs } = await import('./docker.js');
       const logLines = await getAppLogs(app.slug, env, lines, args.search || '');
       return { app: app.slug, env, lines: logLines, count: logLines.length };
+    },
+  },
+
+  {
+    name: 'appcrane_create_github_repo',
+    description:
+      'Create a brand new GitHub repository to host an app. Requires the user to provide a GitHub PAT ' +
+      'with `repo` scope. Use this BEFORE appcrane_create_app when the user wants to start a fresh project ' +
+      '(rather than register an existing repo). Returns the new repo URL — chain it directly into appcrane_create_app. ' +
+      'The user is expected to push their actual code afterwards (via local git or Claude Code). ' +
+      'Repo is private by default.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name:         { type: 'string', description: 'Repo name (will live at github.com/<owner>/<name>)' },
+        github_token: { type: 'string', description: 'GitHub PAT with `repo` scope. Not stored — only used for this one call.' },
+        owner:        { type: 'string', description: 'Org name to create the repo under. Omit to create under the authenticated user.' },
+        private:      { type: 'boolean', description: 'Default: true', default: true },
+        description:  { type: 'string' },
+        auto_init:    { type: 'boolean', description: 'Initialize with a README so the repo has a default branch. Default: true', default: true },
+      },
+      required: ['name', 'github_token'],
+      additionalProperties: false,
+    },
+    requiredRole: 'admin',
+    handler: async (_user, args) => {
+      const isPrivate = args.private !== false;
+      const autoInit = args.auto_init !== false;
+      const url = args.owner
+        ? `https://api.github.com/orgs/${encodeURIComponent(args.owner)}/repos`
+        : 'https://api.github.com/user/repos';
+      const body = {
+        name: args.name,
+        description: args.description || undefined,
+        private: isPrivate,
+        auto_init: autoInit,
+      };
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Authorization': `token ${args.github_token}`,
+          'Accept': 'application/vnd.github+json',
+          'User-Agent': 'AppCrane-MCP',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const detail = data?.message || `HTTP ${res.status}`;
+        throw new Error(`GitHub repo creation failed: ${detail}`);
+      }
+      return {
+        url:            data.html_url,
+        clone_url:      data.clone_url,
+        owner:          data.owner?.login,
+        name:           data.name,
+        default_branch: data.default_branch,
+        private:        data.private,
+        next: `Now call appcrane_create_app with github_url="${data.html_url}" and the same github_token to register the new repo with AppCrane.`,
+      };
+    },
+  },
+
+  {
+    name: 'appcrane_create_app',
+    description:
+      'Register a new app in AppCrane from a GitHub repository. Use this only after the user has explicitly ' +
+      'confirmed they want to onboard a new app and provided a real github URL. ' +
+      'Allocates ports, creates the data directories, configures Caddy routing, and starts health checks. ' +
+      'After this returns, call appcrane_set_env to set any required env vars, then appcrane_deploy to ship the first build. ' +
+      'Admin-only — non-admins cannot create apps.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name:        { type: 'string', description: 'Display name (shown in dashboard)' },
+        slug:        { type: 'string', description: 'URL-safe identifier — lowercase letters, digits, dashes; must start with a letter or digit. Lives at /<slug>/.' },
+        github_url:  { type: 'string', description: 'GitHub repo URL, e.g. https://github.com/me/mysite' },
+        branch:      { type: 'string', description: 'Branch to track. Default: main', default: 'main' },
+        description: { type: 'string' },
+        domain:      { type: 'string', description: 'Optional custom domain. If omitted, the app lives under CRANE_DOMAIN/<slug>/.' },
+        github_token:    { type: 'string', description: 'GitHub PAT for private repos. Stored encrypted; only used to clone.' },
+        max_ram_mb:      { type: 'number', description: 'Per-container memory cap. Default: 512.' },
+        max_cpu_percent: { type: 'number', description: 'Per-container CPU cap. Default: 50.' },
+      },
+      required: ['name', 'slug', 'github_url'],
+      additionalProperties: false,
+    },
+    requiredRole: 'admin',
+    handler: async (user, args) => {
+      // Mirror server/routes/apps.js POST / validation rules
+      const { name, slug, github_url } = args;
+      if (!name || !slug) throw new Error('name and slug are required');
+      if (!/^[a-z0-9][a-z0-9-]*$/.test(slug)) throw new Error('slug must be lowercase alphanumeric with dashes');
+      if (args.branch && !/^[A-Za-z0-9._/\-]{1,200}$/.test(args.branch)) {
+        throw new Error('branch must be alphanumeric with . _ / - (max 200 chars)');
+      }
+      if (!/^https?:\/\/(www\.)?github\.com\/[A-Za-z0-9_.\-]+\/[A-Za-z0-9_.\-]+(\.git)?\/?$/.test(github_url)) {
+        throw new Error('github_url must be a valid github.com URL');
+      }
+
+      const db = getDb();
+      if (db.prepare('SELECT id FROM apps WHERE slug = ?').get(slug)) {
+        throw new Error(`App slug '${slug}' already exists`);
+      }
+
+      const { getNextSlot, getPortsForSlot } = await import('./portAllocator.js');
+      const { reloadCaddy } = await import('./caddy.js');
+
+      const slot = getNextSlot(db);
+      const ports = getPortsForSlot(slot);
+      const resourceLimits = JSON.stringify({
+        max_ram_mb:      args.max_ram_mb      || 512,
+        max_cpu_percent: args.max_cpu_percent || 50,
+      });
+      const tokenEncrypted = args.github_token ? encrypt(args.github_token) : null;
+      const branch = args.branch || 'main';
+
+      const result = db.prepare(`
+        INSERT INTO apps (name, slug, slot, domain, description, category, source_type, github_url, branch, github_token_encrypted, resource_limits, created_by)
+        VALUES (?, ?, ?, ?, ?, ?, 'github', ?, ?, ?, ?, ?)
+      `).run(name, slug, slot, args.domain || null, args.description || null, null, github_url, branch, tokenEncrypted, resourceLimits, user.id);
+      const appId = result.lastInsertRowid;
+
+      for (const env of ['production', 'sandbox']) {
+        db.prepare('INSERT INTO health_configs (app_id, env) VALUES (?, ?)').run(appId, env);
+        db.prepare('INSERT INTO health_state (app_id, env) VALUES (?, ?)').run(appId, env);
+      }
+      db.prepare('INSERT OR IGNORE INTO app_users (app_id, user_id) VALUES (?, ?)').run(appId, user.id);
+
+      const webhookToken = crypto.randomBytes(16).toString('hex');
+      const webhookSecret = crypto.randomBytes(32).toString('hex');
+      db.prepare('INSERT INTO webhook_configs (app_id, token, secret) VALUES (?, ?, ?)').run(appId, webhookToken, webhookSecret);
+
+      const dataDir = process.env.DATA_DIR || './data';
+      const appDir = join(dataDir, 'apps', slug);
+      for (const env of ['production', 'sandbox']) {
+        const envDir = join(appDir, env);
+        mkdirSync(join(envDir, 'releases'), { recursive: true });
+        mkdirSync(join(envDir, 'shared', 'data'), { recursive: true });
+      }
+
+      try { await reloadCaddy(); } catch (_) {}
+      try {
+        const { refreshAppChecks } = await import('./healthChecker.js');
+        refreshAppChecks(appId);
+      } catch (_) {}
+
+      log.info(`MCP: app '${slug}' created by user ${user.id}`);
+      const craneDomain = process.env.CRANE_DOMAIN;
+      const urls = craneDomain ? {
+        production: `https://${craneDomain}/${slug}`,
+        sandbox:    `https://${craneDomain}/${slug}-sandbox`,
+      } : null;
+      return {
+        app: { slug, name, github_url, branch },
+        ports,
+        urls,
+        next: `Set env vars with appcrane_set_env, then deploy with appcrane_deploy slug="${slug}" env="sandbox".`,
+      };
+    },
+  },
+
+  {
+    name: 'appcrane_set_env',
+    description:
+      'Set or update an environment variable on an app. Encrypted at rest; only the running app process can read the plaintext. ' +
+      'Defaults to sandbox; require explicit env="production" only when the user asks. ' +
+      'App-admin or AppCrane admin only. Respects the caller\'s mcp_app_scope.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        slug:  { type: 'string' },
+        env:   { type: 'string', enum: ['sandbox', 'production'], default: 'sandbox' },
+        key:   { type: 'string', description: 'Env var name. Letters, digits, underscores; must not start with a digit.' },
+        value: { type: 'string', description: 'The value to store (will be encrypted server-side).' },
+      },
+      required: ['slug', 'key', 'value'],
+      additionalProperties: false,
+    },
+    requiredRole: 'any',
+    handler: async (user, args) => {
+      const env = args.env === 'production' ? 'production' : 'sandbox';
+      const app = getAppForUser(user, args.slug);
+      if (!isAppAdmin(user, app)) throw new Error('Forbidden: setting env vars requires admin or app-admin role');
+      if (!/^[A-Z_][A-Z0-9_]*$/i.test(args.key)) {
+        throw new Error(`Invalid env var key: ${args.key} (must match /^[A-Z_][A-Z0-9_]*$/i)`);
+      }
+      const db = getDb();
+      const encrypted = encrypt(String(args.value));
+      db.prepare(`
+        INSERT INTO env_vars (app_id, env, key, value_encrypted, updated_by, updated_at)
+        VALUES (?, ?, ?, ?, ?, datetime('now'))
+        ON CONFLICT(app_id, env, key) DO UPDATE SET
+          value_encrypted = excluded.value_encrypted,
+          updated_by = excluded.updated_by,
+          updated_at = excluded.updated_at
+      `).run(app.id, env, args.key, encrypted, user.id);
+      log.info(`MCP: env var ${args.key} set on ${app.slug}/${env} by user ${user.id}`);
+      return { app: app.slug, env, key: args.key, ok: true };
     },
   },
 ];
