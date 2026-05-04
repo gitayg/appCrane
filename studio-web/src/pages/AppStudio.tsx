@@ -891,9 +891,14 @@ function PhaseLogPane({ enh, jobs, onAction, onRetryJob, onDeleteJob, emptyHint 
   onRetryJob: (id: number) => void; onDeleteJob: (id: number) => void;
   emptyHint: string;
 }) {
-  // Detect the v1.27.69 "PR already open" refusal so the action banner
-  // appears INSIDE the Code tab where the user is reading the failure.
-  const blocked = jobs.find(j => j.status === 'failed' && /already has open PR/i.test(j.error || ''))
+  // Detect the v1.27.69 "PR already open" refusal — but only when the
+  // LATEST code job is the failure. Historical failed jobs that have
+  // since been superseded by a successful recode shouldn't keep
+  // triggering the banner.
+  const latestCode = jobs.length ? jobs.reduce((a, b) => (a.id > b.id ? a : b)) : null
+  const blocked = latestCode && latestCode.status === 'failed' && /already has open PR/i.test(latestCode.error || '')
+    ? latestCode
+    : null
   const m = blocked && (blocked.error || '').match(/open PR #(\d+)\s*\(([^)]+)\)/i)
   const prNumber = m?.[1]
   const prUrl    = m?.[2]
