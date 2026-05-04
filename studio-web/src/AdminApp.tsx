@@ -6,6 +6,7 @@ import { Login } from './components/Login'
 import { Dashboard } from './pages/Dashboard'
 import { Applications } from './pages/Applications'
 import { AppStudio } from './pages/AppStudio'
+import { Mcp } from './pages/Mcp'
 import { Settings } from './pages/Settings'
 import { Docs } from './pages/Docs'
 import { AppManager } from './pages/AppManager'
@@ -14,7 +15,6 @@ import { AppManager } from './pages/AppManager'
 // became top-level nav items, Skills + Style Guide (renamed from Branding)
 // + Audit Log moved into Settings.
 const SETTINGS_SUB = [
-  { id: 'appstudio',  label: 'AppStudio',   href: '#appstudio' },
   { id: 'security',   label: 'Security',    href: '#security' },
   { id: 'users',      label: 'Users',       href: '#users' },
   { id: 'agents',     label: 'App Agents',  href: '#agents' },
@@ -35,8 +35,8 @@ function useHash() {
 
 function SettingsRoute() {
   const hash = useHash()
-  const valid = ['appstudio', 'security', 'users', 'agents', 'skills', 'branding', 'audit']
-  const activeSub = valid.includes(hash) ? hash : 'appstudio'
+  const valid = ['security', 'users', 'agents', 'skills', 'branding', 'audit']
+  const activeSub = valid.includes(hash) ? hash : 'security'
   return (
     <Layout subItems={SETTINGS_SUB} activeSub={activeSub}>
       <Settings />
@@ -66,11 +66,12 @@ export function AdminApp() {
               so old bookmarks still work. */}
           <Route path="/users-page"  element={<Navigate to="/settings#users" replace />} />
           <Route path="/audit-page"  element={<Navigate to="/settings#audit" replace />} />
-          {/* AppStudio collapsed in v1.27.38: Requests + Builders are
-              top-level; Skills/Style Guide moved to Settings. */}
+          {/* AppStudio collapsed: Requests is top-level. Builders removed
+              v1.27.89 — internal builders moved to local Claude Code via MCP. */}
           <Route path="/requests"    element={<Layout><AppStudio tab="requests" /></Layout>} />
-          <Route path="/builders"    element={<Layout><AppStudio tab="builders" /></Layout>} />
+          <Route path="/builders"    element={<Navigate to="/requests" replace />} />
           <Route path="/appstudio"   element={<Navigate to="/requests" replace />} />
+          <Route path="/mcp"         element={<Layout><Mcp /></Layout>} />
           <Route path="/settings"    element={<SettingsRoute />} />
           <Route path="/docs"        element={<Layout><Docs /></Layout>} />
           <Route path="/app"         element={<Layout><AppManager /></Layout>} />

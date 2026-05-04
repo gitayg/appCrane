@@ -1,6 +1,5 @@
 import { createRoot, Root } from 'react-dom/client'
 import { createElement } from 'react'
-import { AskPanel }     from '../components/runtime-topbar/AskPanel'
 import { RequestPanel } from '../components/runtime-topbar/RequestPanel'
 import { BugPanel }     from '../components/runtime-topbar/BugPanel'
 
@@ -30,7 +29,7 @@ import { BugPanel }     from '../components/runtime-topbar/BugPanel'
  *   crane-close       fires when the user clicks the × button
  */
 
-type PanelKind = 'ask' | 'request' | 'bug'
+type PanelKind = 'request' | 'bug'
 
 abstract class CranePanelBase extends HTMLElement {
   private root: Root | null = null
@@ -85,7 +84,6 @@ abstract class CranePanelBase extends HTMLElement {
 
     let Comp: React.ComponentType<any>
     switch (this.kind) {
-      case 'ask':     Comp = AskPanel; break
       case 'request': Comp = RequestPanel; break
       case 'bug':     Comp = BugPanel; break
     }
@@ -93,14 +91,12 @@ abstract class CranePanelBase extends HTMLElement {
   }
 }
 
-class CraneAskPanel     extends CranePanelBase { kind: PanelKind = 'ask' }
 class CraneRequestPanel extends CranePanelBase { kind: PanelKind = 'request' }
 class CraneBugPanel     extends CranePanelBase { kind: PanelKind = 'bug' }
 
 export function defineCranePanels() {
-  if (!customElements.get('crane-ask-panel'))     customElements.define('crane-ask-panel',     CraneAskPanel)
   if (!customElements.get('crane-request-panel')) customElements.define('crane-request-panel', CraneRequestPanel)
   if (!customElements.get('crane-bug-panel'))     customElements.define('crane-bug-panel',     CraneBugPanel)
 }
 
-export { CraneAskPanel, CraneRequestPanel, CraneBugPanel }
+export { CraneRequestPanel, CraneBugPanel }

@@ -892,3 +892,21 @@ code.api-pill { background: var(--surface2); border: 1px solid var(--border); bo
 /* ── Misc utility ────────────────────────────────── */
 #loading { text-align: center; padding: 60px; color: var(--dim); }
 .mono { font-family: 'SF Mono', Monaco, monospace; }
+
+/* ── Polish v1.27.89 — focus, hover, transitions ──── */
+:root { --ring: 0 0 0 2px rgba(59,130,246,.35); }
+.btn, button, a.btn, select, input, textarea, .sidebar-link, .sidebar-sub-link {
+  transition: background .14s ease, border-color .14s ease, color .14s ease, box-shadow .14s ease, opacity .14s ease;
+}
+.btn:focus-visible, button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-visible,
+.sidebar-link:focus-visible, .sidebar-sub-link:focus-visible, a.btn:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+.btn:hover { filter: brightness(1.08); }
+.btn:active { transform: translateY(1px); }
+.btn-accent:hover { filter: brightness(1.1); }
+table tr.clickable:hover td { background: rgba(59,130,246,.04); }
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
+}

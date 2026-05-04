@@ -3,11 +3,12 @@ import { NavLink, useLocation } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth'
 import { adminApi } from '../adminApi'
 
-const NAV = [
+interface NavItem { id: string; label: string; href: string; icon: string; external?: boolean }
+const NAV: NavItem[] = [
   { id: 'dashboard',    label: 'Dashboard',    href: '/dashboard',    icon: '⊞' },
   { id: 'applications', label: 'Applications', href: '/applications', icon: '▣' },
   { id: 'requests',     label: 'Requests',     href: '/requests',     icon: '💡' },
-  { id: 'builders',     label: 'Builders',     href: '/builders',     icon: '✦' },
+  { id: 'mcp',          label: 'MCP',          href: '/mcp',          icon: '⌬' },
   { id: 'docs',         label: 'Docs',         href: '/docs',         icon: '📖' },
   { id: 'settings',     label: 'Settings',     href: '/settings',     icon: '⚙' },
 ]
@@ -167,17 +168,28 @@ export function Layout({ children, subItems, activeSub }: Props) {
         <nav className="sidebar-nav">
           {NAV.map(p => (
             <div key={p.id}>
-              <NavLink
-                to={p.href}
-                className={({ isActive }) => 'sidebar-link' + (isActive ? ' active' : '')}
-                title={p.id === 'requests' && openRequests > 0 ? `${p.label} — ${openRequests} open` : p.label}
-              >
-                <span className="sidebar-link-icon">{p.icon}</span>
-                <span className="sidebar-link-text">{p.label}</span>
-                {p.id === 'requests' && openRequests > 0 && (
-                  <span className="sidebar-link-badge">{openRequests}</span>
-                )}
-              </NavLink>
+              {p.external ? (
+                <a
+                  href={p.href}
+                  className={'sidebar-link' + (location.pathname === p.href ? ' active' : '')}
+                  title={p.label}
+                >
+                  <span className="sidebar-link-icon">{p.icon}</span>
+                  <span className="sidebar-link-text">{p.label}</span>
+                </a>
+              ) : (
+                <NavLink
+                  to={p.href}
+                  className={({ isActive }) => 'sidebar-link' + (isActive ? ' active' : '')}
+                  title={p.id === 'requests' && openRequests > 0 ? `${p.label} — ${openRequests} open` : p.label}
+                >
+                  <span className="sidebar-link-icon">{p.icon}</span>
+                  <span className="sidebar-link-text">{p.label}</span>
+                  {p.id === 'requests' && openRequests > 0 && (
+                    <span className="sidebar-link-badge">{openRequests}</span>
+                  )}
+                </NavLink>
+              )}
               {activeNavId === p.id && subItems && subItems.length > 0 && !collapsed && (
                 <div className="sidebar-sub-nav">
                   {subItems.map(s => (

@@ -257,6 +257,32 @@ router.post('/:id/recode', auditMiddleware('appstudio.recode'), async (req, res)
 });
 
 /**
+ * POST /api/appstudio/:id/mark-done - Operator-driven "I'm finished
+ * with this request" toggle. Sets status='done' so the row drops off
+ * the default /api/enhancements list (admin can show closed via
+ * ?include_done=1).
+ *
+ * Doesn't touch any GitHub state — branch, PR, deploy are independent
+ * of this flag. Use this AFTER you've verified the PR merged + deploy
+ * happened (or after explicitly abandoning the request).
+ */
+router.post('/:id/mark-done', auditMiddleware('appstudio.mark-done'), (req, res) => {
+  const db = getDb();
+  const enh = db.prepare('SELECT * FROM enhancement_requests WHERE id = ?').get(req.params.id);
+  if (!enh) throw new AppError('Enhancement not found', 404, 'NOT_FOUND');
+  if (req.user.role !== 'admin' && !isAppAdmin(req.user.id, enh.app_slug)) {
+    throw new AppError('Forbidden', 403, 'FORBIDDEN');
+  }
+  db.prepare(`
+    UPDATE enhancement_requests
+    SET status = 'done',
+        ai_log = COALESCE(ai_log, '') || ?
+    WHERE id = ?
+  `).run(`\n[${new Date().toISOString()}] Marked done by ${req.user.name || req.user.email || 'admin'}\n`, enh.id);
+  res.json({ message: 'Marked as done', enhancement_id: enh.id });
+});
+
+/**
  * POST /api/appstudio/:id/approve-sandbox - Approve sandbox → open PR + promote
  */
 router.post('/:id/approve-sandbox', auditMiddleware('appstudio.approve-sandbox'), (req, res) => {
