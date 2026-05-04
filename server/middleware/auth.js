@@ -18,6 +18,39 @@ export function requireAuth(req, res, next) {
 
   const apiKey = req.headers['x-api-key'];
   if (apiKey) {
+    // App-scoped key (issued by an Owner; format: dhk_app_<slug>_<random>)
+    if (apiKey.startsWith('dhk_app_')) {
+      const keyHash = hashApiKey(apiKey);
+      const row = db.prepare(`
+        SELECT
+          ak.id AS ak_id, ak.app_id, ak.scope, ak.label, ak.expires_at, ak.revoked_at,
+          a.slug AS app_slug,
+          u.id AS uid, u.name, u.email, u.role, u.active, u.kind, u.username
+        FROM app_keys ak
+        JOIN apps  a ON a.id = ak.app_id
+        JOIN users u ON u.id = ak.created_by
+        WHERE ak.key_hash = ?
+          AND ak.revoked_at IS NULL
+          AND (ak.expires_at IS NULL OR ak.expires_at > datetime('now'))
+      `).get(keyHash);
+      if (row) {
+        if (!row.active) return next(new AppError('Issuer account is deactivated', 403, 'DEACTIVATED'));
+        try { db.prepare("UPDATE app_keys SET last_used_at = datetime('now') WHERE id = ?").run(row.ak_id); } catch (_) {}
+        req.user = {
+          id: row.uid, name: row.name, email: row.email,
+          role: row.role, active: row.active, kind: row.kind, username: row.username,
+        };
+        req.app_key = {
+          id: row.ak_id, app_id: row.app_id, app_slug: row.app_slug,
+          scope: row.scope, label: row.label,
+        };
+        return next();
+      }
+      // dhk_app_ key with no match → fall through to user-key path so the
+      // error surfaces as "Invalid API key" rather than leaking that the
+      // prefix is a known format.
+    }
+
     const user = db.prepare('SELECT * FROM users WHERE api_key_hash = ?').get(hashApiKey(apiKey));
     if (!user) return next(new AppError('Invalid API key', 401, 'UNAUTHORIZED'));
     if (!user.active) return next(new AppError('Account is deactivated', 403, 'DEACTIVATED'));

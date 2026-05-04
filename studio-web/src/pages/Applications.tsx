@@ -6,6 +6,7 @@ import { JobsButton } from '../components/runtime-topbar/JobsButton'
 import { RequestPanel } from '../components/runtime-topbar/RequestPanel'
 import { BugPanel } from '../components/runtime-topbar/BugPanel'
 import { defineCraneAppTopbar } from '../topbar-element/entry'
+import { AppKeysPanel } from '../components/AppKeysPanel'
 import '../topbar-element/jsx.d.ts'
 
 defineCraneAppTopbar()
@@ -750,6 +751,13 @@ export function Applications() {
                             )
                           })}
                         </div>
+                      </td>
+                    </tr>
+                  )}
+                  {isExpanded && (
+                    <tr key={`${app.slug}-keys`}>
+                      <td colSpan={11} style={{ background: 'var(--bg)', borderTop: '1px dashed var(--border)' }}>
+                        <AppKeysPanel slug={app.slug} appName={app.name} />
                       </td>
                     </tr>
                   )}
