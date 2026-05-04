@@ -616,11 +616,20 @@ function DetailView({ enh, trace, onBack, onAction, onDeleteJob, onRetryJob }: D
                 <button
                   className="btn btn-accent btn-sm"
                   onClick={() => {
-                    if (confirm('Ship the existing PR via AppCrane?\n\nReuses the existing PR (no force-push, no new code). Runs the merge step + production deploy.')) {
+                    if (confirm('Recode this request?\n\nKeeps the plan + comments. Re-runs ONLY the code phase against the latest base branch on a fresh branch (sidesteps merge conflicts entirely). The existing PR/branch are left on GitHub — close them yourself when convenient.')) {
+                      onAction(enh.id, 'recode')
+                    }
+                  }}
+                  title="Best for merge conflicts — preserves the plan, regenerates code on a fresh branch from latest main"
+                >🔧 Recode (keep plan)</button>
+                <button
+                  className="btn btn-sm"
+                  onClick={() => {
+                    if (confirm('Try to merge the existing PR via AppCrane?\n\nOnly works if the PR is mergeable. If it has merge conflicts (which is likely if you got here), use Recode instead.')) {
                       onAction(enh.id, 'approve-sandbox')
                     }
                   }}
-                  title="Reuse the existing PR — AppCrane runs the merge API call + production deploy"
+                  title="Only works if the existing PR is conflict-free"
                 >🚀 Merge existing PR</button>
                 <button
                   className="btn btn-sm"
@@ -629,8 +638,8 @@ function DetailView({ enh, trace, onBack, onAction, onDeleteJob, onRetryJob }: D
                       onAction(enh.id, 'redo', { reset_branch: true })
                     }
                   }}
-                  title="After closing the PR on GitHub, redo from scratch on a fresh branch"
-                >🔁 Close PR + redo on fresh branch</button>
+                  title="Wipes the plan AND clears branch — for cases where you also want to re-think the plan itself"
+                >🔁 Full redo</button>
               </div>
             </div>
           )
