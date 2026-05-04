@@ -48,6 +48,12 @@ Defaults & conventions:
 Auth: every call uses the caller's AppCrane API key. Tools requiring admin or
 app-admin role are filtered out of tools/list when the caller doesn't have the
 permission, so you won't see them at all if you can't use them.
+
+Multi-identity hint: a single user may register this URL multiple times under
+different names (e.g. appcrane-readonly, appcrane-app1, appcrane-app2), each
+with its own API key. Tools are namespaced per registration. If the user asks
+you to "use the X key" or operates against a specific app, prefer the matching
+registration.
 `.trim();
 
 /**

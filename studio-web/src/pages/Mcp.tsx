@@ -194,6 +194,27 @@ export function Mcp() {
       </div>
 
       <div className="setting-card">
+        <h3>Multiple AppCrane identities</h3>
+        <p>
+          You can register the same AppCrane URL <strong>multiple times under different names</strong>, each
+          with its own API key. Useful when you have a different key per app, or want a read-only key
+          alongside an admin key.
+        </p>
+        <CopyableCodeBlock code={`claude mcp add --transport http appcrane-app1 ${endpoint} \\\n  --header "X-API-Key: dhk_user_AAA..."\n\nclaude mcp add --transport http appcrane-app2 ${endpoint} \\\n  --header "X-API-Key: dhk_user_BBB..."`} />
+        <p style={{ marginTop: 10, fontSize: '.82rem', color: 'var(--dim)' }}>
+          Each entry shows up as a separate server in <code style={{ fontFamily: 'monospace', fontSize: '.78rem' }}>claude mcp list</code>,
+          with tools namespaced as <code style={{ fontFamily: 'monospace', fontSize: '.78rem' }}>mcp__appcrane-app1__*</code> vs
+          <code style={{ fontFamily: 'monospace', fontSize: '.78rem' }}>mcp__appcrane-app2__*</code>. The model picks whichever toolset matches the call.
+        </p>
+        <ul style={{ marginTop: 10, marginBottom: 0, fontSize: '.8rem', color: 'var(--dim)', paddingLeft: 20, lineHeight: 1.7 }}>
+          <li><strong>Name them clearly</strong> — e.g. <code style={{ fontFamily: 'monospace', fontSize: '.78rem' }}>appcrane-readonly</code> / <code style={{ fontFamily: 'monospace', fontSize: '.78rem' }}>appcrane-admin</code> / <code style={{ fontFamily: 'monospace', fontSize: '.78rem' }}>appcrane-{`<app-slug>`}</code> so the agent knows which to use.</li>
+          <li><strong>Scope each entry separately</strong> with <code style={{ fontFamily: 'monospace', fontSize: '.78rem' }}>-s local|user|project</code> if you want them to live in different scopes.</li>
+          <li><strong>Tradeoff:</strong> tool descriptions appear in the model's context once per registration — costs tokens, and the model may pick the wrong one if names aren't distinct.</li>
+          <li><strong>No built-in switch</strong> between active keys — keep both registered, or remove and re-add to swap.</li>
+        </ul>
+      </div>
+
+      <div className="setting-card">
         <h3>Server instructions</h3>
         <p>The system prompt every agent receives on connect. It tells the agent how to use AppCrane tools.</p>
         <CopyableCodeBlock code={catalog.instructions} fontSize=".78rem" />
