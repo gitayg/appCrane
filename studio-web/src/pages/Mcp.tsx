@@ -152,10 +152,10 @@ export function Mcp() {
           </span>
         )}
       </div>
-      <p style={{ color: 'var(--dim)', fontSize: '.85rem', marginBottom: 16, maxWidth: 700 }}>
+      <p style={{ color: 'var(--dim)', fontSize: '.85rem', marginBottom: 16, maxWidth: 740 }}>
         The Model Context Protocol lets any compatible AI agent (Claude Code, Cursor, Continue, Cline, Zed, …)
-        discover and use AppCrane tools. Each user authenticates with their own AppCrane API key —
-        access is scoped to apps they already have permission for.
+        discover and use AppCrane tools. AppCrane handles <strong>deploys, env vars, logs, and requests</strong>;
+        for <strong>code, PRs, and issues</strong> install GitHub's official MCP alongside.
       </p>
 
       <div className="setting-card">
@@ -175,8 +175,22 @@ export function Mcp() {
 
       <div className="setting-card">
         <h3>Quick setup (Claude Code)</h3>
-        <p>Each user runs this in their own terminal — substituting their AppCrane API key:</p>
-        <CopyableCodeBlock code={`claude mcp add --transport http appcrane ${endpoint} \\\n  --header "X-API-Key: <user-api-key>"`} />
+        <p style={{ marginBottom: 8 }}>
+          <strong style={{ color: 'var(--accent)' }}>Step 1.</strong> Connect AppCrane MCP — substitute your AppCrane API key:
+        </p>
+        <CopyableCodeBlock code={`claude mcp add --transport http appcrane ${endpoint} \\\n  --header "X-API-Key: <your-appcrane-api-key>"`} />
+        <p style={{ marginTop: 16, marginBottom: 8 }}>
+          <strong style={{ color: 'var(--accent)' }}>Step 2.</strong> Connect GitHub MCP (so the agent can read code, open PRs, manage issues) —
+          substitute a GitHub PAT with <code style={{ fontFamily: 'monospace', fontSize: '.78rem', background: 'var(--surface2)', padding: '1px 5px', borderRadius: 3 }}>repo</code> scope:
+        </p>
+        <CopyableCodeBlock code={`claude mcp add github docker run -i --rm \\\n  -e GITHUB_PERSONAL_ACCESS_TOKEN=<your-github-pat> \\\n  ghcr.io/github/github-mcp-server`} />
+        <p style={{ marginTop: 10, fontSize: '.78rem', color: 'var(--dim)' }}>
+          No Docker? Use the npm form: <code style={{ fontFamily: 'monospace', fontSize: '.78rem' }}>claude mcp add github npx -- -y @modelcontextprotocol/server-github</code>
+          {' '}with <code style={{ fontFamily: 'monospace', fontSize: '.78rem' }}>GITHUB_PERSONAL_ACCESS_TOKEN</code> in your env.
+        </p>
+        <p style={{ marginTop: 10, marginBottom: 0, fontSize: '.78rem', color: 'var(--dim)' }}>
+          Verify both: <code style={{ fontFamily: 'monospace', fontSize: '.78rem' }}>claude mcp list</code> — you should see <strong>appcrane</strong> and <strong>github</strong>.
+        </p>
       </div>
 
       <div className="setting-card">
