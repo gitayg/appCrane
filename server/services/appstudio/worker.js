@@ -321,10 +321,26 @@ async function handleCode(job) {
     }
   };
 
-  const branchName = `appstudio/${enh.id}-${app.slug}`;
+  // Branch name is deterministic per (enh.id, app.slug) for the FIRST
+  // attempt — so the operator can see the canonical name in the UI
+  // without a database round-trip. On retries, a -rN suffix is added
+  // so the new attempt doesn't clash with a still-open PR pointing at
+  // the previous branch (the v1.27.69 safety net would otherwise
+  // refuse to re-code).
+  //
+  // Retry count = number of prior code jobs for this enhancement, NOT
+  // including the current one. So job #1 → bare name, job #2 → -r2,
+  // job #3 → -r3, etc. The /recode endpoint nulls branch_name and
+  // queues a new code job; that gets the next suffix here.
+  const priorCodeJobs = db.prepare(
+    `SELECT COUNT(*) as n FROM enhancement_jobs WHERE enhancement_id = ? AND phase = 'code' AND id < ?`,
+  ).get(enh.id, job.id)?.n || 0;
+  const baseBranchName = `appstudio/${enh.id}-${app.slug}`;
+  const branchName     = priorCodeJobs > 0 ? `${baseBranchName}-r${priorCodeJobs + 1}` : baseBranchName;
   const commitMsg  = `appstudio: ${(plan?.summary || enh.message).slice(0, 72)}`;
   let pushConflict = false;
   let noChanges = false;
+  if (priorCodeJobs > 0) onLog(`[studio:git] Retry #${priorCodeJobs + 1} — using new branch name ${branchName} (avoids the previous attempt's PR)`);
 
   const onCodingDone = async (workspaceDir, _branch) => {
     const git = (args, opts = {}) => execFileSync('git', ['-c', `safe.directory=${workspaceDir}`, '-C', workspaceDir, ...args], { stdio: 'pipe', ...opts });
