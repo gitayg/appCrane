@@ -478,6 +478,7 @@ async function handleCode(job) {
         enhancementMessage: enh.message,
         onLog,
         onCodingDone,
+        branchName,  // pass the suffixed -rN name from handleCode (v1.27.86)
       }),
     });
   } finally {

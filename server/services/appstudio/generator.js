@@ -377,14 +377,19 @@ export function cloneForBuild(jobId, app, branch) {
  * a sentinel file; the host detects it and calls onCodingDone(workspaceDir, branchName)
  * to run git add/commit/push. Returns { branchName }.
  */
-export async function generateCode({ jobId, app, enhancementId, plan, summary, agentContext, contextDoc, enhancementMessage, onLog, onCodingDone }) {
+export async function generateCode({ jobId, app, enhancementId, plan, summary, agentContext, contextDoc, enhancementMessage, onLog, onCodingDone, branchName: callerBranchName }) {
   const dir = jobDir(jobId);
   if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
   mkdirSync(dir, { recursive: true });
 
   await ensureStudioImage(onLog);
 
-  const branchName   = `appstudio/${enhancementId}-${app.slug}`;
+  // Caller (worker.js handleCode) computes a -rN suffix on retries so
+  // the new attempt doesn't clash with a still-open PR pointing at the
+  // previous branch — see worker.js comment on the same logic. Fall
+  // back to the deterministic name when the caller didn't pass one
+  // (e.g. older worker code paths).
+  const branchName   = callerBranchName || `appstudio/${enhancementId}-${app.slug}`;
 
   // Clone the repo on the host — no credentials reach the container
   const workspaceDir = await cloneForCode(dir, app, app.branch || 'main', branchName, onLog);
