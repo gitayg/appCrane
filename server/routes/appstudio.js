@@ -2,10 +2,54 @@ import { Router } from 'express';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { join, resolve } from 'path';
 import { getDb } from '../db.js';
+import { decrypt } from '../services/encryption.js';
 import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { auditMiddleware } from '../middleware/audit.js';
 import { AppError } from '../utils/errors.js';
 import log from '../utils/logger.js';
+
+/**
+ * Best-effort cleanup of the existing remote branch + open PR before a
+ * recode. Used by POST /recode so the operator doesn't have to manually
+ * close PR / delete branch on GitHub. Failures are logged but never
+ * thrown — the worker's v1.27.84 -rN suffix logic catches whatever this
+ * misses.
+ */
+async function tearDownExistingPrAndBranch(app, branchName) {
+  if (!app?.github_url || !app?.github_token_encrypted || !branchName) return;
+  let token;
+  try { token = decrypt(app.github_token_encrypted); } catch { return; }
+  const m = app.github_url.match(/github\.com[/:]([^/]+)\/([^/]+?)(?:\.git)?$/);
+  if (!m) return;
+  const [, owner, repo] = m;
+  const headers = { 'Accept': 'application/vnd.github.v3+json', 'User-Agent': 'AppCrane-Recode', Authorization: `token ${token}` };
+
+  // 1. Find any open PR for the branch and close it
+  try {
+    const r = await fetch(`https://api.github.com/repos/${owner}/${repo}/pulls?state=open&head=${owner}:${encodeURIComponent(branchName)}&per_page=1`, { headers });
+    if (r.ok) {
+      const arr = await r.json();
+      const pr = Array.isArray(arr) && arr.length ? arr[0] : null;
+      if (pr?.number) {
+        await fetch(`https://api.github.com/repos/${owner}/${repo}/pulls/${pr.number}`, {
+          method: 'PATCH', headers, body: JSON.stringify({ state: 'closed' }),
+        });
+        log.info(`AppStudio recode: closed PR #${pr.number} for branch ${branchName}`);
+      }
+    }
+  } catch (err) { log.warn(`AppStudio recode: PR close failed: ${err.message}`); }
+
+  // 2. Delete the remote branch so the next code job starts on a fresh
+  //    one from the base. (Note: cloneForCode would otherwise see the
+  //    branch exists + no PR open and CONTINUE on top — but we want
+  //    fresh code against latest main here.)
+  try {
+    await fetch(`https://api.github.com/repos/${owner}/${repo}/git/refs/heads/${encodeURIComponent(branchName)}`, {
+      method: 'DELETE', headers,
+    });
+    log.info(`AppStudio recode: deleted branch ${branchName}`);
+  } catch (err) { log.warn(`AppStudio recode: branch delete failed: ${err.message}`); }
+}
 
 const router = Router();
 
@@ -178,7 +222,7 @@ router.post('/:id/redo', auditMiddleware('appstudio.redo'), (req, res) => {
  * The previously-pushed remote branch + open PR are left untouched
  * — operator should close the PR themselves once the new one merges.
  */
-router.post('/:id/recode', auditMiddleware('appstudio.recode'), (req, res) => {
+router.post('/:id/recode', auditMiddleware('appstudio.recode'), async (req, res) => {
   const db = getDb();
   const enh = db.prepare('SELECT * FROM enhancement_requests WHERE id = ?').get(req.params.id);
   if (!enh) throw new AppError('Enhancement not found', 404, 'NOT_FOUND');
@@ -186,6 +230,16 @@ router.post('/:id/recode', auditMiddleware('appstudio.recode'), (req, res) => {
     throw new AppError('Forbidden', 403, 'FORBIDDEN');
   }
   if (!enh.ai_plan_json) throw new AppError('No plan to re-code from — run /redo to plan first', 400, 'NO_PLAN');
+
+  // Best-effort: close any open PR and delete the remote branch BEFORE
+  // queuing the next code job, so the user doesn't have to touch
+  // GitHub manually. Uses the deterministic branch name when
+  // branch_name is null on the row.
+  const app = enh.app_slug
+    ? db.prepare('SELECT github_url, github_token_encrypted FROM apps WHERE slug = ?').get(enh.app_slug)
+    : null;
+  const branchName = enh.branch_name || (enh.app_slug ? `appstudio/${enh.id}-${enh.app_slug}` : null);
+  if (app && branchName) await tearDownExistingPrAndBranch(app, branchName);
 
   db.transaction(() => {
     db.prepare(`
@@ -195,11 +249,11 @@ router.post('/:id/recode', auditMiddleware('appstudio.recode'), (req, res) => {
           pr_url = NULL,
           ai_log = COALESCE(ai_log, '') || ?
       WHERE id = ?
-    `).run(`\n[${new Date().toISOString()}] Recode requested by ${req.user.name || req.user.email || 'admin'} — re-coding plan against latest base branch.\n`, enh.id);
+    `).run(`\n[${new Date().toISOString()}] Recode requested by ${req.user.name || req.user.email || 'admin'} — closed prior PR + deleted branch ${branchName ?? '?'}, queued fresh code job.\n`, enh.id);
     db.prepare('INSERT INTO enhancement_jobs (enhancement_id, phase) VALUES (?, ?)').run(enh.id, 'code');
   })();
 
-  res.json({ message: 'Recode queued — plan preserved, fresh code job', enhancement_id: enh.id });
+  res.json({ message: 'Recode queued — prior PR closed, branch deleted, plan preserved, fresh code job', enhancement_id: enh.id });
 });
 
 /**
