@@ -21,18 +21,27 @@ const pendingJobs = new Map();
 function resolveUser(req) {
   const authHeader = req.headers.authorization || '';
   const token = authHeader.replace(/^Bearer\s+/i, '').trim();
+  const db = getDb();
+  // Same dual-lookup as plan.js (v1.27.88): admin SPA users open
+  // EventSource with their cc_api_key as ?token= and the SSE route
+  // upgrades it to a Bearer header. Try identity_sessions first, then
+  // users.api_key_hash so both portal and admin flows work.
   if (token) {
-    const db = getDb();
+    const hash = hashApiKey(token);
     const session = db.prepare(`
       SELECT s.*, u.id as user_id, u.name, u.role
       FROM identity_sessions s JOIN users u ON s.user_id = u.id
       WHERE s.token_hash = ? AND s.expires_at > datetime('now') AND u.active = 1
-    `).get(hashApiKey(token));
+    `).get(hash);
     if (session) return { userId: session.user_id, userName: session.name, role: session.role };
+
+    const apiKeyUser = db.prepare('SELECT * FROM users WHERE api_key_hash = ?').get(hash);
+    if (apiKeyUser && apiKeyUser.active) {
+      return { userId: apiKeyUser.id, userName: apiKeyUser.name, role: apiKeyUser.role };
+    }
   }
   const apiKey = req.headers['x-api-key'];
   if (apiKey) {
-    const db = getDb();
     const user = db.prepare('SELECT * FROM users WHERE api_key_hash = ?').get(hashApiKey(apiKey));
     if (user && user.active) return { userId: user.id, userName: user.name, role: user.role };
   }

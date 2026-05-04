@@ -18,18 +18,33 @@ function isAppAdmin(userId, appSlug) {
 function resolveUser(req) {
   const authHeader = req.headers.authorization || '';
   const token = (authHeader.replace(/^Bearer\s+/i, '').trim()) || (req.query.token || '');
+  const db = getDb();
+
+  // EventSource can only set auth via ?token= query (no header support).
+  // The client doesn't know whether the operator's stored token is a
+  // portal identity-session token (cc_identity_token) OR an admin API
+  // key (cc_api_key) — adminApi.authTokenForSSE just returns whichever
+  // exists. So try BOTH lookups against the same hash. Without the
+  // api_key fallback, admin-SPA users embedded in the React panels
+  // open EventSource with their cc_api_key, get silently 401'd, and
+  // the plan never streams to the UI (v1.27.88).
   if (token) {
-    const db = getDb();
+    const hash = hashApiKey(token);
     const session = db.prepare(`
       SELECT s.*, u.id as user_id, u.name, u.role
       FROM identity_sessions s JOIN users u ON s.user_id = u.id
       WHERE s.token_hash = ? AND s.expires_at > datetime('now') AND u.active = 1
-    `).get(hashApiKey(token));
+    `).get(hash);
     if (session) return { userId: session.user_id, userName: session.name, role: session.role };
+
+    const apiKeyUser = db.prepare('SELECT * FROM users WHERE api_key_hash = ?').get(hash);
+    if (apiKeyUser && apiKeyUser.active) {
+      return { userId: apiKeyUser.id, userName: apiKeyUser.name, role: apiKeyUser.role };
+    }
   }
+  // Header-based X-API-Key (non-SSE callers like REST clients)
   const apiKey = req.headers['x-api-key'];
   if (apiKey) {
-    const db = getDb();
     const user = db.prepare('SELECT * FROM users WHERE api_key_hash = ?').get(hashApiKey(apiKey));
     if (user && user.active) return { userId: user.id, userName: user.name, role: user.role };
   }
