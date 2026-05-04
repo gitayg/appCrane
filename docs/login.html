@@ -305,9 +305,8 @@ input:focus{border-color:var(--accent)}
       </div>
       <span id="frameUserInfo" class="frame-user"></span>
       <div id="planContainerBadge" class="plan-container-badge"><span class="plan-container-dot"></span>Builder Working</div>
-      <button id="frameLearnBtn" class="btn-enhance" onclick="openAskPanel()">🤖 Learn</button>
       <button id="frameRequestBtn" class="btn-enhance" onclick="openPlanPanel()">💡 Request</button>
-      <button id="frameBugBtn" class="btn-enhance" onclick="openBugPanel()" title="Report a bug — same Plan / Code / Build pipeline">🐛 Bug</button>
+      <button id="frameBugBtn" class="btn-enhance" onclick="openBugPanel()" title="Report a bug">🐛 Bug</button>
       <button id="jobsBtn" class="btn-enhance" onclick="toggleJobsPanel()" style="display:none">📋 Jobs<span id="jobsBadge" class="jobs-badge"></span></button>
     </span>
   </crane-app-topbar>
@@ -321,11 +320,6 @@ input:focus{border-color:var(--accent)}
     </div>
     <div class="updates-list" id="updatesList"></div>
   </div>
-
-  <!-- Ask Claude panel -->
-  <!-- Ask "Learn" panel — Custom Element from /docs/shared/crane-topbar.js
-       so portal + /applications share one implementation (Phase B.2). -->
-  <crane-ask-panel id="askPanel" iframe-selector="#frameIframe"></crane-ask-panel>
 
   <!-- Enhance panel -->
   <!-- Request panel — Custom Element from /docs/shared/crane-topbar.js

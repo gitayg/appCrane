@@ -3,7 +3,6 @@ import { adminApi } from '../adminApi'
 import { BuilderBadge } from '../components/runtime-topbar/BuilderBadge'
 import { PresenceAvatars } from '../components/runtime-topbar/PresenceAvatars'
 import { JobsButton } from '../components/runtime-topbar/JobsButton'
-import { AskPanel } from '../components/runtime-topbar/AskPanel'
 import { RequestPanel } from '../components/runtime-topbar/RequestPanel'
 import { BugPanel } from '../components/runtime-topbar/BugPanel'
 import { defineCraneAppTopbar } from '../topbar-element/entry'
@@ -20,7 +19,6 @@ interface App {
   github_url?: string
   source_type?: string
   has_icon?: boolean
-  has_claude_credentials?: boolean
   has_github_token?: boolean
   resource_limits?: { max_ram_mb?: number; max_cpu_percent?: number }
   image_retention?: number
@@ -510,8 +508,8 @@ export function Applications() {
               <th className="th-sort" onClick={() => toggleSort('ram')}>RAM (MB){sortArrow('ram')}</th>
               <th className="th-sort" onClick={() => toggleSort('cpu')}>CPU (%){sortArrow('cpu')}</th>
               <th className="th-sort" onClick={() => toggleSort('images')}>Images{sortArrow('images')}</th>
-              <th>Status</th>
-              <th>Actions</th>
+              <th>Sandbox</th>
+              <th>Production</th>
             </tr>
             <tr className="apps-filter-row">
               <th></th>
@@ -610,9 +608,6 @@ export function Applications() {
                         onBlur={e => { if (e.target.value !== app.name) saveName(app.slug, e.target.value) }}
                         style={{ minWidth: 130 }}
                       />
-                      {app.has_claude_credentials && (
-                        <span className="claude-badge" style={{ marginLeft: 6 }} title="App has its own Claude OAuth credentials">🔑</span>
-                      )}
                     </td>
                     <td>
                       <input
@@ -683,31 +678,27 @@ export function Applications() {
                         style={{ width: 60 }}
                       />
                     </td>
-                    <td>
-                      {/* Compact per-env summary: health dot + version + open
-                          link, both envs side by side. Drill-down (chevron)
-                          adds env-vars + restart on a second row. */}
-                      <div className="apps-status-cell">
-                        {(['sandbox', 'production'] as const).map(env => {
-                          const ver = versions[app.slug]?.[env === 'production' ? 'prod' : 'sand']
-                          return (
-                            <span key={env} className="apps-status-env" title={env === 'production' ? 'Production' : 'Sandbox'}>
-                              <span className={healthDot(app, env)} />
-                              <span className="apps-status-label">{env === 'production' ? 'P' : 'S'}</span>
-                              <span className="apps-status-ver">{ver ?? '…'}</span>
-                              <a
-                                className="env-link"
-                                href="#"
-                                onClick={e => { e.preventDefault(); openAppFrame(app, env) }}
-                                title={`Open ${env}`}
-                              >↗</a>
-                            </span>
-                          )
-                        })}
-                      </div>
-                    </td>
-                    <td>
-                      <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap' }}>
+                    {(['sandbox', 'production'] as const).map(env => {
+                      const ver = versions[app.slug]?.[env === 'production' ? 'prod' : 'sand']
+                      return (
+                        <td key={env}>
+                          <span className="apps-status-env" title={env === 'production' ? 'Production' : 'Sandbox'}>
+                            <span className={healthDot(app, env)} />
+                            <span className="apps-status-ver">{ver ?? '…'}</span>
+                            <a
+                              className="env-link"
+                              href="#"
+                              onClick={e => { e.preventDefault(); openAppFrame(app, env) }}
+                              title={`Open ${env}`}
+                            >↗</a>
+                          </span>
+                        </td>
+                      )
+                    })}
+                  </tr>
+                  <tr key={`${app.slug}-actions`} className="apps-row-actions">
+                    <td colSpan={11} style={{ borderTop: 'none', paddingTop: 0, paddingBottom: 8 }}>
+                      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', paddingLeft: 8 }}>
                         <a className="btn btn-xs" href={`/app?slug=${app.slug}`}>manage</a>
                         <button className="btn btn-xs" onClick={() => showAppToken(app.slug)}>onboard</button>
                         <button
@@ -1048,12 +1039,6 @@ function FrameOverlay({ frame, framePanel, setFrame, setFramePanel }: FrameOverl
             <>
               <button
                 type="button"
-                className={'crane-topbar-btn' + (framePanel === 'ask' ? ' active' : '')}
-                onClick={() => setFramePanel(p => p === 'ask' ? null : 'ask')}
-                title="Ask Claude about this app's source code"
-              >🤖 Learn</button>
-              <button
-                type="button"
                 className={'crane-topbar-btn' + (framePanel === 'request' ? ' active' : '')}
                 onClick={() => setFramePanel(p => p === 'request' ? null : 'request')}
                 title="File an enhancement request"
@@ -1079,14 +1064,6 @@ function FrameOverlay({ frame, framePanel, setFrame, setFramePanel }: FrameOverl
           title="Drag to resize panel"
         />
       )}
-      <AskPanel
-        slug={frame.slug ?? null}
-        appName={frame.appName ?? frame.title ?? ''}
-        open={framePanel === 'ask'}
-        onClose={() => setFramePanel(null)}
-        width={widths.ask}
-        iframeRef={iframeRef}
-      />
       <RequestPanel
         slug={frame.slug ?? null}
         appName={frame.appName ?? frame.title ?? ''}

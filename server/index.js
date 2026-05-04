@@ -55,6 +55,7 @@ import planRoutes from './routes/plan.js';
 import coderRoutes from './routes/coder.js';
 import agentsRoutes from './routes/agents.js';
 import skillsRoutes from './routes/skills.js';
+import mcpRoutes from './routes/mcp.js';
 
 const PORT = process.env.PORT || 5001;
 const HOST = process.env.HOST || '0.0.0.0';
@@ -441,6 +442,7 @@ app.use('/api/ask', askRoutes);           // Ask Claude (Bearer auth)
 app.use('/api/plan', planRoutes);         // Plan panel (Bearer auth)
 app.use('/api/coder', coderRoutes);       // AppCrane Studio (API key + Bearer auth)
 app.use('/api/agents', agentsRoutes);     // AIDE-compatible Studio API
+app.use('/api/mcp', mcpRoutes);          // Model Context Protocol endpoint (JSON-RPC + admin catalog)
 
 app.use('/api', logsRoutes);             // /api/audit, /api/apps/:slug/audit
 app.use('/api', monitoringRoutes);       // /api/server/health
@@ -485,9 +487,10 @@ app.get('/enhancements-page', (req, res) => sendHtml(res, adminSpa));
 // AppStudio collapsed in v1.27.38: Requests + Builders are top-level
 // SPA routes; the React router redirects /appstudio → /requests.
 app.get('/requests', (req, res) => sendHtml(res, adminSpa));
-app.get('/builders', (req, res) => sendHtml(res, adminSpa));
+app.get('/builders', (req, res) => sendHtml(res, adminSpa)); // legacy — SPA redirects to /requests
 app.get('/appstudio', (req, res) => sendHtml(res, adminSpa));
 app.get('/settings', (req, res) => sendHtml(res, adminSpa));
+app.get('/mcp', (req, res) => sendHtml(res, adminSpa));
 app.get('/studio', (req, res) => res.redirect(301, '/appstudio'));
 app.get('/studio/*splat', (req, res) => res.redirect(301, '/appstudio'));
 app.get('/coder', (req, res) => res.redirect(301, '/studio')); // legacy redirect

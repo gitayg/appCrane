@@ -7,95 +7,6 @@ import { AuditLog } from './AuditLog'
 import { SkillsTab } from '../components/SkillsTab'
 import { BrandingTab } from '../components/BrandingTab'
 
-function AppStudioTab() {
-  const [keyInfo, setKeyInfo] = useState<{ configured: boolean; source?: string; suffix?: string } | null>(null)
-  const [keyInput, setKeyInput] = useState('')
-  const [keyFocused, setKeyFocused] = useState(false)
-  const [keySaved, flashKeySaved] = useFlash()
-  const [maxContainers, setMaxContainers] = useState(5)
-  const [containerSaved, flashContainerSaved] = useFlash()
-
-  useEffect(() => {
-    adminApi.get<{ configured: boolean; source?: string; suffix?: string }>('/api/appstudio/anthropic-key')
-      .then(setKeyInfo).catch(() => {})
-    adminApi.get<{ value?: string }>('/api/settings/max_dev_containers')
-      .then(r => { if (r?.value) setMaxContainers(Number(r.value)) }).catch(() => {})
-  }, [])
-
-  async function saveKey() {
-    await adminApi.put('/api/appstudio/anthropic-key', { key: keyInput }).catch(() => {})
-    flashKeySaved()
-    adminApi.get<{ configured: boolean; source?: string; suffix?: string }>('/api/appstudio/anthropic-key')
-      .then(setKeyInfo).catch(() => {})
-  }
-
-  async function saveContainers() {
-    await adminApi.put('/api/settings/max_dev_containers', { value: String(maxContainers) }).catch(() => {})
-    flashContainerSaved()
-  }
-
-  const showEnvKey = keyInfo?.source === 'env'
-  let keyStatusText = 'Not configured'
-  if (keyInfo?.configured) {
-    if (keyInfo.source === 'env') {
-      keyStatusText = `Configured — via ANTHROPIC_API_KEY environment variable (ends in ••••${keyInfo.suffix ?? ''})`
-    } else {
-      keyStatusText = 'Configured — stored in .env file'
-    }
-  }
-
-  return (
-    <>
-      <div className="setting-card">
-        <h3>Anthropic API Key</h3>
-        <p>Required for AppStudio and Ask Claude features.</p>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
-          <span style={{
-            width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
-            background: keyInfo?.configured ? 'var(--green)' : 'var(--red)',
-          }} />
-          <span style={{ fontSize: '.85rem', color: 'var(--dim)' }}>{keyStatusText}</span>
-        </div>
-        {!showEnvKey && (
-          <div style={{ marginBottom: 10 }}>
-            <FocusInput
-              type={keyFocused ? 'text' : (keyInfo?.configured ? 'password' : 'text')}
-              value={keyFocused ? keyInput : (keyInput || (keyInfo?.configured ? '••••••••••••••••' : ''))}
-              placeholder="sk-ant-..."
-              onFocus={() => { setKeyFocused(true); setKeyInput('') }}
-              onBlur={() => setKeyFocused(false)}
-              onChange={e => setKeyInput(e.target.value)}
-            />
-          </div>
-        )}
-        <div className="save-row">
-          {!showEnvKey && (
-            <button className="btn btn-accent" onClick={saveKey}>Save Key</button>
-          )}
-          {keySaved && <span className="saved-msg">Saved ✓</span>}
-        </div>
-      </div>
-
-      <div className="setting-card">
-        <h3>Dev Container Limit</h3>
-        <p>Maximum number of AppStudio and Ask Claude containers that can run simultaneously. Default: 5.</p>
-        <FocusInput
-          type="number"
-          min={1}
-          max={50}
-          value={maxContainers}
-          onChange={e => setMaxContainers(Number(e.target.value))}
-          style={{ width: 120 }}
-        />
-        <div className="save-row">
-          <button className="btn btn-accent" onClick={saveContainers}>Save</button>
-          {containerSaved && <span className="saved-msg">Saved ✓</span>}
-        </div>
-      </div>
-    </>
-  )
-}
-
 function SecurityTab() {
   const [certFile, setCertFile] = useState('')
   const [keyFile, setKeyFile] = useState('')
@@ -381,13 +292,13 @@ function SecurityTab() {
   )
 }
 
-type Tab = 'appstudio' | 'security' | 'users' | 'agents' | 'skills' | 'branding' | 'audit'
+type Tab = 'security' | 'users' | 'agents' | 'skills' | 'branding' | 'audit'
 
-const VALID_TABS: Tab[] = ['appstudio', 'security', 'users', 'agents', 'skills', 'branding', 'audit']
+const VALID_TABS: Tab[] = ['security', 'users', 'agents', 'skills', 'branding', 'audit']
 
 function getTab(): Tab {
   const hash = window.location.hash.replace('#', '') as Tab
-  return VALID_TABS.includes(hash) ? hash : 'appstudio'
+  return VALID_TABS.includes(hash) ? hash : 'security'
 }
 
 export function Settings() {
@@ -401,9 +312,6 @@ export function Settings() {
 
   return (
     <div className="container">
-      <div style={{ display: tab === 'appstudio' ? 'block' : 'none' }}>
-        <AppStudioTab />
-      </div>
       <div style={{ display: tab === 'security' ? 'block' : 'none' }}>
         <SecurityTab />
       </div>

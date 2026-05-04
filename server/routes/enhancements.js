@@ -8,6 +8,7 @@ import {
   listComments, createComment, setStatus as setCommentStatus,
   deleteComment, getComment,
 } from '../services/enhancementComments.js';
+import { BUCKETS, bucketize, applyBucket } from '../services/requestStatus.js';
 
 const router = Router();
 
@@ -122,10 +123,15 @@ router.get('/my', (req, res) => {
  */
 router.get('/', requireAuth, requireAdmin, (req, res) => {
   const db = getDb();
+  // By default hide requests the user marked as done — they're cleanup
+  // clutter on the active list. ?include_done=1 shows everything.
+  const includeDone = req.query.include_done === '1' || req.query.include_done === 'true';
+  const where = includeDone ? '' : "WHERE er.status != 'done' OR er.status IS NULL";
   const rows = db.prepare(`
     SELECT
       er.id, er.app_slug, er.user_name, er.message, er.created_at, er.status,
       er.fix_version, er.cost_tokens, er.cost_usd_cents, er.branch_name, er.pr_url,
+      er.validated_at, er.validated_by,
       j.id        AS latest_job_id,
       j.phase     AS latest_job_phase,
       j.status    AS latest_job_status,
@@ -136,9 +142,50 @@ router.get('/', requireAuth, requireAdmin, (req, res) => {
     LEFT JOIN enhancement_jobs j ON j.id = (
       SELECT id FROM enhancement_jobs WHERE enhancement_id = er.id ORDER BY id DESC LIMIT 1
     )
+    ${where}
     ORDER BY er.created_at DESC
   `).all();
-  res.json({ requests: rows });
+  // Add bucket label so the UI doesn't have to compute it
+  const enriched = rows.map(r => ({ ...r, bucket: bucketize(r.status, r.validated_at) }));
+  res.json({ requests: enriched });
+});
+
+/**
+ * PUT /api/enhancements/:id/bucket
+ * Move a request through the simplified lifecycle:
+ *   triage → in_progress → shipped → validated
+ * Body: { bucket: 'triage' | 'in_progress' | 'shipped' | 'validated' }
+ *
+ * App-admins or AppCrane admins only. Mirrors back to GitHub on shipped.
+ */
+router.put('/:id/bucket', requireAuth, (req, res) => {
+  const { bucket } = req.body || {};
+  if (!BUCKETS.includes(bucket)) {
+    throw new AppError(`bucket must be one of: ${BUCKETS.join(', ')}`, 400, 'VALIDATION');
+  }
+  const db = getDb();
+  const id = parseInt(req.params.id, 10);
+  const row = db.prepare(
+    'SELECT id, app_slug, message, user_name, pr_url, status, validated_at FROM enhancement_requests WHERE id = ?'
+  ).get(id);
+  if (!row) throw new AppError('Not found', 404, 'NOT_FOUND');
+
+  if (req.user.role !== 'admin') {
+    if (!row.app_slug) throw new AppError('Forbidden', 403, 'FORBIDDEN');
+    const app = db.prepare('SELECT id FROM apps WHERE slug = ?').get(row.app_slug);
+    const ar = db.prepare('SELECT app_role FROM app_user_roles WHERE app_id = ? AND user_id = ?').get(app?.id, req.user.id);
+    if (ar?.app_role !== 'admin') throw new AppError('Forbidden', 403, 'FORBIDDEN');
+  }
+
+  applyBucket(db, id, bucket, req.user.id);
+  res.json({ bucket });
+
+  if (bucket === 'shipped' && row.app_slug) {
+    const app = getAppForMirror(row.app_slug);
+    if (app?.github_url) {
+      closeRequest(app, { ...row, status: 'done' }, { resolution: 'Shipped via AppCrane.', prUrl: row.pr_url || null }).catch(() => {});
+    }
+  }
 });
 
 /**

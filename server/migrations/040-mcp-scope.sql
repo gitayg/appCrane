@@ -1,0 +1,11 @@
+-- v1.28.x: per-user MCP app scope.
+-- When set, the MCP server restricts that user's tool calls to the listed
+-- app slugs regardless of their dashboard role. Lets an AppCrane admin
+-- carry full dashboard privileges while issuing a tightly-scoped MCP token
+-- (their own API key, used in their MCP client).
+--
+-- NULL = inherit existing role-based scoping (admins → all apps, users →
+-- assigned apps via app_users/app_user_roles).
+-- JSON array of slugs (e.g. '["mysite","blog"]') = restrict MCP to those.
+-- '[]' (empty array) = lock out of MCP entirely.
+ALTER TABLE users ADD COLUMN mcp_app_scope TEXT;

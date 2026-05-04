@@ -107,7 +107,7 @@ function sidebar(active, subItems, activeSub) {
     {id:'applications',label:'Applications',href:'/applications', icon:'▣'},
     {id:'users',      label:'Users',        href:'/users-page',   icon:'◉'},
     {id:'audit',      label:'Audit Log',    href:'/audit-page',   icon:'≡'},
-    {id:'appstudio',  label:'AppStudio',    href:'/appstudio',    icon:'✦'},
+    {id:'mcp',        label:'MCP',          href:'/mcp',          icon:'⌬'},
     {id:'settings',   label:'Settings',     href:'/settings',     icon:'⚙'},
   ];
   const nav = pages.map(p => {
@@ -407,7 +407,7 @@ function _cmdItems() {
   var nav = [
     {g:'Navigation',icon:'⊞',label:'Dashboard',href:'/dashboard'},
     {g:'Navigation',icon:'▣',label:'Applications',href:'/applications'},
-    {g:'Navigation',icon:'✦',label:'AppStudio',href:'/appstudio'},
+    {g:'Navigation',icon:'⌬',label:'MCP',href:'/mcp'},
     {g:'Navigation',icon:'◉',label:'Users',href:'/users-page'},
     {g:'Navigation',icon:'≡',label:'Audit Log',href:'/audit-page'},
     {g:'Navigation',icon:'⚙',label:'Settings',href:'/settings'},

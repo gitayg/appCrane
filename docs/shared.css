@@ -173,3 +173,35 @@ th{color:var(--dim);font-weight:500;background:var(--surface2)}
 .onboard-check{width:16px;height:16px;border-radius:50%;border:2px solid var(--border);flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:.55rem;color:transparent}
 .onboard-check.done{background:var(--green);border-color:var(--green);color:#fff}
 .onboard-item-text{color:var(--dim)}.onboard-item-text.done{color:var(--text);text-decoration:line-through}
+
+/* ── Polish v1.27.89 — focus, hover, transitions, consistency ──── */
+:root{--radius-sm:4px;--radius:6px;--radius-lg:8px;--ring:0 0 0 2px rgba(59,130,246,.35)}
+.btn,button.btn,.btn-accent,.btn-red,.btn-green,.btn-orange,.btn-dim,
+.sidebar-link,.sidebar-sub-link,.sidebar-user-signout,
+.cmd-item,select,input,textarea{
+  transition:background .14s ease,border-color .14s ease,color .14s ease,box-shadow .14s ease,opacity .14s ease;
+}
+.btn:focus-visible,
+button:focus-visible,
+.sidebar-link:focus-visible,
+.sidebar-sub-link:focus-visible,
+select:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+a.btn:focus-visible{
+  outline:none;
+  box-shadow:var(--ring);
+}
+.btn:hover{filter:brightness(1.08)}
+.btn:active{transform:translateY(1px)}
+.btn-accent:hover{filter:brightness(1.1)}
+table tr:hover td{background:var(--surface)}
+table tr.clickable:hover td{background:rgba(59,130,246,.04)}
+/* Tighter card rhythm */
+.detail-panel,.card,.setting-card{border-radius:var(--radius-lg)}
+.btn{border-radius:var(--radius)}
+.tag,.badge{border-radius:var(--radius-sm)}
+/* Reduced motion respect */
+@media (prefers-reduced-motion:reduce){
+  *{animation:none!important;transition:none!important}
+}
