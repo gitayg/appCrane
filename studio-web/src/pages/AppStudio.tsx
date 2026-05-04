@@ -545,105 +545,10 @@ function DetailView({ enh, trace, onBack, onAction, onDeleteJob, onRetryJob }: D
           )}
         </div>
 
-        {/* Inline hint for merge conflicts on the open_pr phase — points
-            the user at the right action instead of leaving them staring
-            at "Pull Request has merge conflicts" with no next step. */}
-        {(() => {
-          const openPrJobs = (trace?.trace || []).filter(j => j.phase === 'open_pr')
-          const failedConflict = openPrJobs.find(j => j.status === 'failed' && /merge conflict/i.test(j.error || ''))
-          if (!failedConflict) return null
-          return (
-            <div style={{
-              background: 'rgba(239, 68, 68, .1)', border: '1px solid rgba(239, 68, 68, .3)',
-              borderRadius: 6, padding: '10px 14px', marginBottom: 14, fontSize: '.85rem', lineHeight: 1.5,
-            }}>
-              <div style={{ fontWeight: 600, marginBottom: 4 }}>⚠️ Merge conflict</div>
-              <div style={{ color: 'var(--dim)', marginBottom: 8 }}>
-                <code>main</code> moved while this branch was being coded — GitHub can't auto-merge.
-                The plan is still valid; only the diff needs to regenerate against the current
-                <code>main</code>.
-              </div>
-              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                <button
-                  className="btn btn-accent btn-sm"
-                  onClick={() => {
-                    if (confirm('Re-run only the CODE phase against the latest base branch.\n\nKeeps the plan + comments + log. Clears branch_name so the coder starts on a fresh branch. The previous PR / branch are left on GitHub — close them yourself when convenient.')) {
-                      onAction(enh.id, 'recode')
-                    }
-                  }}
-                  title="Re-code only — preserve the plan, regenerate the diff against current main"
-                >🔧 Recode (keep plan)</button>
-                <button
-                  className="btn btn-sm"
-                  onClick={() => {
-                    if (confirm('Wipe the plan and start over from scratch on a fresh branch? Use Recode (keep plan) instead unless you want to re-think the plan itself.')) {
-                      onAction(enh.id, 'redo', { reset_branch: true })
-                    }
-                  }}
-                >🔁 Full redo</button>
-              </div>
-              <div style={{ color: 'var(--dim)', marginTop: 8, fontSize: '.78rem' }}>
-                Or rebase the existing PR locally and click <strong>Merge existing PR</strong> on the Open PR tab.
-              </div>
-            </div>
-          )
-        })()}
-
-        {/* Inline hint when the code phase refused because a PR is already
-            open for the branch (v1.27.69 safety net). Shows the PR link +
-            a "Merge in AppCrane" action so the user doesn't have to click
-            through to the Open PR tab to find the merge button. */}
-        {(() => {
-          const codeJobs = (trace?.trace || []).filter(j => j.phase === 'code')
-          const blocked = codeJobs.find(j => j.status === 'failed' && /already has open PR/i.test(j.error || ''))
-          if (!blocked) return null
-          const m = (blocked.error || '').match(/open PR #(\d+)\s*\(([^)]+)\)/i)
-          const prNumber = m?.[1]
-          const prUrl    = m?.[2]
-          return (
-            <div style={{
-              background: 'rgba(245, 158, 11, .1)', border: '1px solid rgba(245, 158, 11, .35)',
-              borderRadius: 6, padding: '10px 14px', marginBottom: 14, fontSize: '.85rem', lineHeight: 1.5,
-            }}>
-              <div style={{ fontWeight: 600, marginBottom: 4 }}>⚠️ Coding blocked — PR already open</div>
-              <div style={{ color: 'var(--dim)', marginBottom: 8 }}>
-                A previous attempt opened {prNumber ? <>PR #{prNumber}</> : 'a PR'} for this branch.
-                Re-coding would overwrite the PR's history, so it was refused.
-                Pick one:
-              </div>
-              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                {prUrl && <a href={prUrl} target="_blank" rel="noreferrer" className="btn btn-sm">View PR ↗</a>}
-                <button
-                  className="btn btn-accent btn-sm"
-                  onClick={() => {
-                    if (confirm('Recode this request?\n\nKeeps the plan + comments. Re-runs ONLY the code phase against the latest base branch on a fresh branch (sidesteps merge conflicts entirely). The existing PR/branch are left on GitHub — close them yourself when convenient.')) {
-                      onAction(enh.id, 'recode')
-                    }
-                  }}
-                  title="Best for merge conflicts — preserves the plan, regenerates code on a fresh branch from latest main"
-                >🔧 Recode (keep plan)</button>
-                <button
-                  className="btn btn-sm"
-                  onClick={() => {
-                    if (confirm('Try to merge the existing PR via AppCrane?\n\nOnly works if the PR is mergeable. If it has merge conflicts (which is likely if you got here), use Recode instead.')) {
-                      onAction(enh.id, 'approve-sandbox')
-                    }
-                  }}
-                  title="Only works if the existing PR is conflict-free"
-                >🚀 Merge existing PR</button>
-                <button
-                  className="btn btn-sm"
-                  onClick={() => {
-                    if (confirm('Close PR ' + (prNumber ? '#' + prNumber : '') + ' on GitHub yourself first.\n\nThen click OK here to redo: re-plan + re-code on a fresh branch.')) {
-                      onAction(enh.id, 'redo', { reset_branch: true })
-                    }
-                  }}
-                  title="Wipes the plan AND clears branch — for cases where you also want to re-think the plan itself"
-                >🔁 Full redo</button>
-              </div>
-            </div>
-          )
-        })()}
+        {/* Per-phase recovery banners moved INSIDE the phase tabs in
+            v1.27.84 — each phase owns its own conflict / blocked hint
+            so the header stays clean. See PhaseLogPane (code phase
+            "PR already open" hint) and OpenPrPane (merge-conflict). */}
 
         <PhaseTabs
           enh={enh}
@@ -986,8 +891,28 @@ function PhaseLogPane({ enh, jobs, onAction, onRetryJob, onDeleteJob, emptyHint 
   onRetryJob: (id: number) => void; onDeleteJob: (id: number) => void;
   emptyHint: string;
 }) {
+  // Detect the v1.27.69 "PR already open" refusal so the action banner
+  // appears INSIDE the Code tab where the user is reading the failure.
+  const blocked = jobs.find(j => j.status === 'failed' && /already has open PR/i.test(j.error || ''))
+  const m = blocked && (blocked.error || '').match(/open PR #(\d+)\s*\(([^)]+)\)/i)
+  const prNumber = m?.[1]
+  const prUrl    = m?.[2]
   return (
     <>
+      {blocked && (
+        <div style={{
+          background: 'rgba(245, 158, 11, .1)', border: '1px solid rgba(245, 158, 11, .35)',
+          borderRadius: 6, padding: '10px 14px', marginBottom: 14, fontSize: '.85rem', lineHeight: 1.5,
+        }}>
+          <div style={{ fontWeight: 600, marginBottom: 4 }}>⚠️ Coding refused — PR already open</div>
+          <div style={{ color: 'var(--dim)', marginBottom: 8 }}>
+            A previous attempt opened {prNumber ? <>PR #{prNumber}</> : 'a PR'} on the original branch.
+            Click <strong>🔧 Recode (keep plan)</strong> below — it'll push to a new <code>-rN</code>
+            branch so the existing PR is left alone.
+          </div>
+          {prUrl && <a href={prUrl} target="_blank" rel="noreferrer" className="btn btn-xs">View PR ↗</a>}
+        </div>
+      )}
       {jobs.length === 0
         ? <div className="pane-empty">{emptyHint}</div>
         : <ExpandedJobsTrace jobs={jobs} onRetryJob={onRetryJob} onDeleteJob={onDeleteJob} />
@@ -998,7 +923,7 @@ function PhaseLogPane({ enh, jobs, onAction, onRetryJob, onDeleteJob, emptyHint 
         onAction={onAction}
         recode
         redoReset
-        hint="Code phase failed or stuck? Recode regenerates the diff against latest base."
+        hint="Code phase failed or stuck? Recode regenerates against latest base on a fresh -rN branch."
       />
     </>
   )
@@ -1046,8 +971,27 @@ function OpenPrPane({ enh, trace, jobs, onAction, onRetryJob, onDeleteJob }: {
   // (worker.js:638 "already exists" branch) and proceeds straight to
   // the merge API call without trying to recreate the PR.
   const canMerge = prUrl && !['merged', 'shipped', 'closed'].includes(enh.status || '')
+  // Detect merge-conflict failure on the open_pr job — show the banner
+  // INSIDE this tab (where the user is reading the error) instead of
+  // at the top of the request.
+  const conflictJob = jobs.find(j => j.status === 'failed' && /merge conflict/i.test(j.error || ''))
   return (
     <>
+      {conflictJob && (
+        <div style={{
+          background: 'rgba(239, 68, 68, .1)', border: '1px solid rgba(239, 68, 68, .3)',
+          borderRadius: 6, padding: '10px 14px', marginBottom: 14, fontSize: '.85rem', lineHeight: 1.5,
+        }}>
+          <div style={{ fontWeight: 600, marginBottom: 4 }}>⚠️ Merge conflict</div>
+          <div style={{ color: 'var(--dim)' }}>
+            <code>main</code> moved while this branch was being coded — GitHub can't auto-merge.
+            Click <strong>🔧 Recode (keep plan)</strong> below to regenerate the diff against the
+            current <code>main</code> on a new <code>-rN</code> branch (sidesteps the conflict;
+            the existing PR is left alone). Or rebase the existing PR locally and click
+            <strong>Merge existing PR</strong>.
+          </div>
+        </div>
+      )}
       {prUrl && (
         <div className="pane-actions" style={{ marginBottom: 12 }}>
           <a href={prUrl} target="_blank" rel="noreferrer" className="btn btn-sm">View PR ↗</a>
