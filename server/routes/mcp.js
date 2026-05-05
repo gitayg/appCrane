@@ -78,14 +78,18 @@ router.post('/', requireAuth, async (req, res) => {
         };
         break;
       case 'tools/list':
-        result = { tools: listTools(req.user, req.app_key) };
+        result = { tools: listTools(req.user, req.app_key, req.user_mcp_key) };
         break;
       case 'tools/call':
         if (!params?.name) {
           return res.json({ jsonrpc: '2.0', id, error: { code: -32602, message: 'Missing tool name' } });
         }
-        log.info(`MCP: tools/call name=${params.name} user=${req.user.id}${req.app_key ? ` app_key=${req.app_key.id}/${req.app_key.app_slug}` : ''}`);
-        result = await callTool(req.user, params.name, params.arguments, req.app_key);
+        log.info(
+          `MCP: tools/call name=${params.name} user=${req.user.id}` +
+          (req.app_key ? ` app_key=${req.app_key.id}/${req.app_key.app_slug}` : '') +
+          (req.user_mcp_key ? ` user_mcp_key=${req.user_mcp_key.id}` : '')
+        );
+        result = await callTool(req.user, params.name, params.arguments, req.app_key, req.user_mcp_key);
         break;
       case 'ping':
         result = {};
@@ -98,6 +102,20 @@ router.post('/', requireAuth, async (req, res) => {
     log.warn(`MCP ${method} error: ${err.message}`);
     res.json({ jsonrpc: '2.0', id, error: { code: -32000, message: err.message } });
   }
+});
+
+/**
+ * GET /api/mcp/connection — connection info available to any authed user.
+ * Returns endpoint + transport + server name/version. No tool descriptions
+ * (those are admin-only via /catalog because they reveal internal surface).
+ */
+router.get('/connection', requireAuth, (req, res) => {
+  res.json({
+    server: SERVER_INFO,
+    endpoint: '/api/mcp',
+    transport: 'http',
+    auth: 'X-API-Key header',
+  });
 });
 
 /**

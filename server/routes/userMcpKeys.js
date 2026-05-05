@@ -1,0 +1,117 @@
+import { Router } from 'express';
+import { getDb } from '../db.js';
+import { generateApiKey, hashApiKey } from '../services/encryption.js';
+import { requireAuth } from '../middleware/auth.js';
+import { auditMiddleware } from '../middleware/audit.js';
+import { AppError } from '../utils/errors.js';
+import log from '../utils/logger.js';
+
+const router = Router();
+router.use(requireAuth);
+
+/**
+ * Personal MCP keys are self-issued by any logged-in user. They grant
+ * MCP-only access; at call time the key's accessibility resolves to
+ * "every app where the issuing user is currently Owner."
+ *
+ * Personal MCP keys cannot manage other personal MCP keys (avoids loops
+ * where a leaked key reissues itself). Routes refuse req.user_mcp_key
+ * and req.app_key callers.
+ */
+function requireSession(req, res, next) {
+  if (req.user_mcp_key || req.app_key) {
+    return next(new AppError('Manage personal keys from the dashboard, not via an MCP key', 403, 'KEY_FORBIDDEN'));
+  }
+  next();
+}
+
+function ownerAppCount(userId) {
+  return getDb().prepare(`
+    SELECT COUNT(*) AS n FROM app_user_roles
+    WHERE user_id = ? AND app_role = 'owner'
+  `).get(userId).n;
+}
+
+/**
+ * GET /api/me/mcp-keys — list current user's personal MCP keys
+ */
+router.get('/me/mcp-keys', requireSession, (req, res) => {
+  const db = getDb();
+  const keys = db.prepare(`
+    SELECT id, label, created_at, last_used_at, expires_at, revoked_at
+    FROM user_mcp_keys
+    WHERE user_id = ?
+    ORDER BY id DESC
+  `).all(req.user.id);
+  res.json({
+    keys,
+    owner_app_count: ownerAppCount(req.user.id),
+  });
+});
+
+/**
+ * POST /api/me/mcp-keys — issue a new key. Plaintext returned ONCE.
+ */
+router.post('/me/mcp-keys', requireSession, auditMiddleware('user-mcp-key-create'), (req, res) => {
+  const { label, expires_at } = req.body || {};
+  if (label && typeof label !== 'string') throw new AppError('label must be a string', 400, 'VALIDATION');
+  if (label && label.length > 80) throw new AppError('label must be ≤ 80 chars', 400, 'VALIDATION');
+  if (expires_at && Number.isNaN(Date.parse(expires_at))) {
+    throw new AppError('expires_at must be a valid ISO datetime', 400, 'VALIDATION');
+  }
+
+  const apiKey = generateApiKey('dhk_mcp');
+  const keyHash = hashApiKey(apiKey);
+  const db = getDb();
+  const result = db.prepare(`
+    INSERT INTO user_mcp_keys (user_id, key_hash, label, expires_at)
+    VALUES (?, ?, ?, ?)
+  `).run(req.user.id, keyHash, label || null, expires_at || null);
+
+  log.info(`UserMcpKey: created id=${result.lastInsertRowid} user=${req.user.id}`);
+  res.json({
+    key: { id: result.lastInsertRowid, label: label || null, expires_at: expires_at || null },
+    api_key: apiKey,
+    warning: 'Save this API key — it will not be shown again.',
+    owner_app_count: ownerAppCount(req.user.id),
+  });
+});
+
+/**
+ * POST /api/me/mcp-keys/:id/rotate — issue a new plaintext for an existing key,
+ * invalidating the old hash. Useful when a key may have leaked.
+ */
+router.post('/me/mcp-keys/:id/rotate', requireSession, auditMiddleware('user-mcp-key-rotate'), (req, res) => {
+  const keyId = parseInt(req.params.id, 10);
+  const db = getDb();
+  const existing = db.prepare('SELECT * FROM user_mcp_keys WHERE id = ? AND user_id = ?').get(keyId, req.user.id);
+  if (!existing) throw new AppError('Key not found', 404, 'NOT_FOUND');
+  if (existing.revoked_at) throw new AppError('Cannot rotate a revoked key — create a new one instead', 400, 'KEY_REVOKED');
+
+  const apiKey = generateApiKey('dhk_mcp');
+  const keyHash = hashApiKey(apiKey);
+  db.prepare('UPDATE user_mcp_keys SET key_hash = ?, last_used_at = NULL WHERE id = ?').run(keyHash, keyId);
+
+  log.info(`UserMcpKey: rotated id=${keyId} user=${req.user.id}`);
+  res.json({
+    key: { id: keyId, label: existing.label },
+    api_key: apiKey,
+    warning: 'Save this API key — it will not be shown again. The previous value is now invalid.',
+  });
+});
+
+/**
+ * DELETE /api/me/mcp-keys/:id — revoke. Soft-delete (keeps row for audit).
+ */
+router.delete('/me/mcp-keys/:id', requireSession, auditMiddleware('user-mcp-key-revoke'), (req, res) => {
+  const keyId = parseInt(req.params.id, 10);
+  const db = getDb();
+  const existing = db.prepare('SELECT * FROM user_mcp_keys WHERE id = ? AND user_id = ?').get(keyId, req.user.id);
+  if (!existing) throw new AppError('Key not found', 404, 'NOT_FOUND');
+  if (existing.revoked_at) return res.json({ message: 'Already revoked', id: keyId });
+  db.prepare("UPDATE user_mcp_keys SET revoked_at = datetime('now') WHERE id = ?").run(keyId);
+  log.info(`UserMcpKey: revoked id=${keyId} user=${req.user.id}`);
+  res.json({ message: 'Key revoked', id: keyId });
+});
+
+export default router;

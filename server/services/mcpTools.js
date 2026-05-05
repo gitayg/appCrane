@@ -45,6 +45,17 @@ function accessibleSlugsForUser(user) {
   // so existing tool handlers see the same restriction.)
   if (user._mcpAppKey) return [user._mcpAppKey.app_slug];
 
+  // Personal MCP key — dynamically resolves to apps where the user is currently
+  // Owner. Role changes take effect on the next call (no key reissue needed).
+  if (user._mcpUserKey) {
+    return getDb().prepare(`
+      SELECT DISTINCT a.slug
+      FROM apps a
+      JOIN app_user_roles aur ON aur.app_id = a.id
+      WHERE aur.user_id = ? AND aur.app_role = 'owner'
+    `).all(user.id).map(r => r.slug);
+  }
+
   const scope = mcpScope(user);
   if (scope) return scope; // explicit scope wins over role
   const db = getDb();
@@ -67,6 +78,15 @@ function getAppForUser(user, slug) {
   const db = getDb();
   const app = db.prepare('SELECT * FROM apps WHERE slug = ?').get(slug);
   if (!app) throw new Error(`App not found: ${slug}`);
+
+  // Personal MCP key locks scope to "apps where this user is Owner"
+  if (user._mcpUserKey) {
+    const owns = db.prepare(
+      "SELECT 1 FROM app_user_roles WHERE app_id = ? AND user_id = ? AND app_role = 'owner'"
+    ).get(app.id, user.id);
+    if (!owns) throw new Error(`Forbidden: this personal MCP key only covers apps you own; ${slug} is not one`);
+    return app;
+  }
 
   // Explicit MCP scope (if set) trumps role
   const inScope = isInMcpScope(user, slug);
@@ -548,15 +568,18 @@ const TOOLS = [
   },
 ];
 
-export function listTools(user, appKey = null) {
-  return TOOLS.filter((t) => canUseTool(user, t, appKey)).map((t) => ({
+export function listTools(user, appKey = null, userMcpKey = null) {
+  // Stash userMcpKey on user so canUseTool's helpers (and future custom checks)
+  // can see it. AppKey takes precedence — it's app-scoped, the strictest.
+  const userView = userMcpKey && !appKey ? { ...user, _mcpUserKey: userMcpKey } : user;
+  return TOOLS.filter((t) => canUseTool(userView, t, appKey)).map((t) => ({
     name: t.name,
     description: t.description,
     inputSchema: t.inputSchema,
   }));
 }
 
-export async function callTool(user, name, args, appKey = null) {
+export async function callTool(user, name, args, appKey = null, userMcpKey = null) {
   const tool = TOOLS.find((t) => t.name === name);
   if (!tool) {
     auditMcpCall(user, name, args, new Error('unknown tool'));
@@ -587,9 +610,13 @@ export async function callTool(user, name, args, appKey = null) {
     auditMcpCall(user, name, args, err);
     throw err;
   }
-  // Stash the app_key on user so accessibleSlugsForUser (and any tool that
-  // wants to know) can constrain output to the bound app.
-  const userWithKey = appKey ? { ...user, _mcpAppKey: appKey } : user;
+  // Stash auth context on user so helpers (accessibleSlugsForUser,
+  // getAppForUser) can constrain output. App-key wins if both are set.
+  const userWithKey = appKey
+    ? { ...user, _mcpAppKey: appKey }
+    : userMcpKey
+      ? { ...user, _mcpUserKey: userMcpKey }
+      : user;
   try {
     const result = await tool.handler(userWithKey, args || {});
     auditMcpCall(user, name, args, null);
