@@ -158,6 +158,25 @@ export function Applications() {
     loadAll()
   }, [])
 
+  // MCP recently-active per app (last 5 min). Polls every 30s.
+  const [mcpActive, setMcpActive] = useState<Record<string, { last_at: string; calls: number }>>({})
+  useEffect(() => {
+    let cancelled = false
+    function refresh() {
+      adminApi.get<{ active: { slug: string; last_at: string; calls: number }[] }>('/api/mcp/recent-activity?minutes=5')
+        .then(r => {
+          if (cancelled) return
+          const m: Record<string, { last_at: string; calls: number }> = {}
+          for (const row of r.active ?? []) m[row.slug] = { last_at: row.last_at, calls: row.calls }
+          setMcpActive(m)
+        })
+        .catch(() => {})
+    }
+    refresh()
+    const iv = setInterval(refresh, 30000)
+    return () => { cancelled = true; clearInterval(iv) }
+  }, [])
+
   async function setVisibility(slug: string, vis: string) {
     await adminApi.put(`/api/apps/${slug}`, { visibility: vis }).catch(() => {})
     setApps(prev => prev.map(a => a.slug === slug ? { ...a, visibility: vis } : a))
@@ -604,11 +623,25 @@ export function Applications() {
                       </div>
                     </td>
                     <td>
-                      <input
-                        className="editable" defaultValue={app.name}
-                        onBlur={e => { if (e.target.value !== app.name) saveName(app.slug, e.target.value) }}
-                        style={{ minWidth: 130 }}
-                      />
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <input
+                          className="editable" defaultValue={app.name}
+                          onBlur={e => { if (e.target.value !== app.name) saveName(app.slug, e.target.value) }}
+                          style={{ minWidth: 130, flex: 1 }}
+                        />
+                        {mcpActive[app.slug] && (
+                          <span
+                            title={`MCP active — ${mcpActive[app.slug].calls} call(s) in last 5min, latest ${new Date(mcpActive[app.slug].last_at).toLocaleTimeString()}`}
+                            style={{
+                              fontSize: '.65rem', fontWeight: 600, letterSpacing: '.3px',
+                              padding: '2px 6px', borderRadius: 3,
+                              color: 'var(--accent)', background: 'rgba(59,130,246,.12)',
+                              border: '1px solid rgba(59,130,246,.3)',
+                              whiteSpace: 'nowrap',
+                            }}
+                          >MCP ●</span>
+                        )}
+                      </div>
                     </td>
                     <td>
                       <input

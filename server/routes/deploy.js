@@ -6,6 +6,7 @@ import { requireAuth, requireAppAccess } from '../middleware/auth.js';
 import { auditMiddleware } from '../middleware/audit.js';
 import { AppError } from '../utils/errors.js';
 import { getPortsForSlot } from '../services/portAllocator.js';
+import { userHasAppPermission } from '../services/permissions.js';
 import log from '../utils/logger.js';
 
 const router = Router();
@@ -107,6 +108,11 @@ router.post('/:slug/deploy/:env', requireAppAccess, auditMiddleware('deploy'), a
   const { env } = req.params;
   if (!['production', 'sandbox'].includes(env)) {
     throw new AppError('env must be production or sandbox', 400, 'VALIDATION');
+  }
+
+  // Configurable RBAC: production deploys gated by deploy.production permission
+  if (env === 'production' && !userHasAppPermission(req.user, req.app, 'deploy.production')) {
+    throw new AppError('Production deploys are not permitted by your role on this app', 403, 'FORBIDDEN');
   }
 
   const db = getDb();

@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { listTools, callTool, getToolCatalog } from '../services/mcpTools.js';
+import { getDb } from '../db.js';
 import log from '../utils/logger.js';
 
 const router = Router();
@@ -102,6 +103,26 @@ router.post('/', requireAuth, async (req, res) => {
     log.warn(`MCP ${method} error: ${err.message}`);
     res.json({ jsonrpc: '2.0', id, error: { code: -32000, message: err.message } });
   }
+});
+
+/**
+ * GET /api/mcp/recent-activity — admin-only. Returns app slugs that had a
+ * mcp.* audit entry in the last N minutes (default 5). Used by the
+ * /applications page to badge live agent traffic.
+ */
+router.get('/recent-activity', requireAuth, requireAdmin, (req, res) => {
+  const minutes = Math.min(Math.max(parseInt(req.query.minutes) || 5, 1), 60);
+  const db = getDb();
+  const rows = db.prepare(`
+    SELECT a.slug AS slug, MAX(al.created_at) AS last_at, COUNT(*) AS calls
+    FROM audit_log al
+    JOIN apps a ON a.id = al.app_id
+    WHERE al.action LIKE 'mcp.%'
+      AND al.created_at >= datetime('now', '-' || ? || ' minutes')
+    GROUP BY a.slug
+    ORDER BY last_at DESC
+  `).all(minutes);
+  res.json({ active: rows });
 });
 
 /**
