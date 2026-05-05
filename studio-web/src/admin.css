@@ -1,4 +1,6 @@
 /* Admin SPA global styles — ported from shared.css */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
 :root {
   --bg: #0f1117;
   --surface: #1a1d27;
@@ -32,10 +34,19 @@
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
   background: var(--bg);
   color: var(--text);
-  font-size: 14px;
+  font-size: 13.5px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';  /* Inter variant glyphs */
+  letter-spacing: -0.005em;
+}
+/* Code, monospace, identifiers — keep traditional mono stack */
+code, kbd, .mono, .job-tag, pre {
+  font-family: 'SF Mono', Monaco, Consolas, 'Roboto Mono', 'Courier New', monospace;
+  font-feature-settings: normal;
 }
 
 /* ── Layout ──────────────────────────────────────── */
@@ -939,3 +950,88 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 .sidebar-link { gap: 10px; }
 /* Topbar buttons (Request, Bug) — give the SVG/text combo a tidy gap */
 .crane-topbar-btn { display: inline-flex; align-items: center; gap: 5px; }
+
+/* ── Density pass v2.1 — tighter chrome, refined hierarchy ───────── */
+/* Per global CLAUDE.md backlog #14: chat panel header 44 → 36, agent
+   name 13/bold → 12/medium. Buttons get a touch more padding to
+   compensate visually for the smaller font. */
+.admin-topbar { padding: 8px 24px; }
+.admin-topbar-title { font-size: .95rem; font-weight: 600; }
+
+/* Buttons — slightly tighter, consistent height */
+.btn {
+  padding: 6px 12px;
+  font-size: .82rem;
+  font-weight: 500;
+  letter-spacing: -0.005em;
+}
+.btn-xs { padding: 3px 9px; font-size: .73rem; }
+.btn-sm { padding: 5px 11px; font-size: .78rem; }
+
+/* Tables — denser rows, lighter divider lines */
+table { font-size: .82rem; }
+th, td { padding: 8px 12px; }
+th {
+  font-weight: 500;
+  font-size: .72rem;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--dim);
+}
+
+/* Setting card — cleaner heading typography */
+.setting-card h3 {
+  font-weight: 600;
+  font-size: .95rem;
+  letter-spacing: -0.01em;
+  margin-bottom: 4px;
+}
+.setting-card p {
+  color: var(--dim);
+  font-size: .82rem;
+  line-height: 1.55;
+  margin-bottom: 12px;
+}
+
+/* H2 page titles — tighten and remove the all-caps shoutiness */
+h2 {
+  font-weight: 600;
+  font-size: 1.15rem;
+  letter-spacing: -0.015em;
+  text-transform: none;  /* override the legacy uppercase */
+  color: var(--text);
+  margin: 16px 0 12px;
+}
+
+/* Inputs — match button height for visual rhythm */
+input[type='text'], input[type='number'], input[type='password'],
+input[type='email'], select, textarea {
+  font-family: inherit;
+  font-size: .85rem;
+  padding: 6px 11px;
+}
+.editable {
+  font-size: .82rem !important;
+  padding: 4px 8px !important;
+}
+
+/* Sidebar — slightly smaller, more elegant */
+.sidebar-link { font-size: .82rem; padding: 6px 12px; }
+.sidebar-link.active { padding-left: 9px; }
+.sidebar-sub-link { font-size: .77rem; padding: 4px 10px; }
+.sidebar-logo { font-size: 1rem; }
+
+/* Chat-style panels (per CLAUDE.md backlog #14: 44 → 36) */
+.chat-header,
+.app-row .row-top { min-height: 36px; padding: 7px 16px; }
+
+/* Cards — slightly more breathing room between, less inside */
+.setting-card,
+.detail-panel,
+.app-row { padding: 16px 18px; margin-bottom: 14px; }
+
+/* Tags / pills — refined */
+.tag, .badge, .enh-status, .app-pill {
+  font-weight: 500;
+  letter-spacing: .005em;
+}

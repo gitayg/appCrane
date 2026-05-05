@@ -104,7 +104,7 @@ function apiRateLimit(req, res, next) {
   next();
 }
 
-const HTML_CSP = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self'; frame-src 'self'; font-src 'self' data:; object-src 'none'; base-uri 'self'";
+const HTML_CSP = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: https:; connect-src 'self'; frame-src 'self'; font-src 'self' data: https://fonts.gstatic.com; object-src 'none'; base-uri 'self'";
 
 function sendHtml(res, filePath) {
   res.setHeader('Content-Security-Policy', HTML_CSP);
