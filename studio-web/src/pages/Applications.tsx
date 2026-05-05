@@ -1,8 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { adminApi } from '../adminApi'
-import { BuilderBadge } from '../components/runtime-topbar/BuilderBadge'
 import { PresenceAvatars } from '../components/runtime-topbar/PresenceAvatars'
-import { JobsButton } from '../components/runtime-topbar/JobsButton'
 import { RequestPanel } from '../components/runtime-topbar/RequestPanel'
 import { BugPanel } from '../components/runtime-topbar/BugPanel'
 import { defineCraneAppTopbar } from '../topbar-element/entry'
@@ -1076,7 +1074,6 @@ function FrameOverlay({ frame, framePanel, setFrame, setFramePanel }: FrameOverl
       >
         <span slot="actions" style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
           <PresenceAvatars slug={frame.slug ?? null} />
-          <BuilderBadge slug={frame.slug ?? null} />
           {frame.hasGithub && (
             <>
               <button
@@ -1093,7 +1090,6 @@ function FrameOverlay({ frame, framePanel, setFrame, setFramePanel }: FrameOverl
               ><Icon.Bug size={14} /> Bug</button>
             </>
           )}
-          <JobsButton slug={frame.slug ?? null} />
         </span>
       </crane-app-topbar>
 

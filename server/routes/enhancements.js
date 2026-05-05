@@ -70,22 +70,14 @@ router.post('/', (req, res) => {
     VALUES (?, ?, ?, ?, 'new')
   `).run(app_slug || null, userId, userName, message.trim());
 
-  if (process.env.ANTHROPIC_API_KEY) {
-    if (userRole === 'admin') {
-      db.prepare("UPDATE enhancement_requests SET mode = 'auto', status = 'planning' WHERE id = ?").run(lastInsertRowid);
-    } else {
-      db.prepare("UPDATE enhancement_requests SET status = 'planning' WHERE id = ?").run(lastInsertRowid);
-    }
-    db.prepare('INSERT INTO enhancement_jobs (enhancement_id, phase) VALUES (?, ?)').run(lastInsertRowid, 'plan');
-  } else {
-    // Surface the missing-key state instead of silently leaving the request
-    // stuck on 'new' with no job — the dashboard would otherwise show a
-    // forever-spinner. The job's failed status + error_message is what the
-    // /api/enhancements list response renders.
-    db.prepare(
-      "INSERT INTO enhancement_jobs (enhancement_id, phase, status, error_message, finished_at) VALUES (?, 'plan', 'failed', ?, datetime('now'))"
-    ).run(lastInsertRowid, 'ANTHROPIC_API_KEY not configured');
-  }
+  // v2: requests land in 'triage' for human/MCP-agent pickup. We no longer
+  // auto-queue an AppStudio plan job — that whole pipeline (Anthropic API
+  // calls + container-based code generation) was deprecated when AppCrane
+  // pivoted to "AI is the user's tool, MCP is the integration." Letting an
+  // invalid ANTHROPIC_API_KEY produce a noisy 401 on every request submission
+  // (the user-reported bug) is exactly the noise this removal eliminates.
+  // The request is now just a tracked work item; agents call appcrane_list_requests
+  // to pick it up via local Claude Code / Cursor / any MCP-capable client.
 
   res.json({ message: 'Enhancement request submitted. Thank you!', enhancement_id: lastInsertRowid });
 
