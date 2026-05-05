@@ -43,7 +43,52 @@ function trimAppNameFromDescription(name, description) {
 }
 
 function getKey() { return KEY; }
-function setKey(k) { KEY = k; localStorage.setItem('cc_api_key', k); }
+function setKey(k) {
+  KEY = k;
+  if (k) localStorage.setItem('cc_api_key', k);
+  else   localStorage.removeItem('cc_api_key');
+}
+
+// Fire-and-forget logout that invalidates the server-side identity session
+// before the page navigates away. Mirrors useAuth.ts in the SPA.
+function signOutNow() {
+  var bearer = localStorage.getItem('cc_identity_token');
+  if (bearer && navigator.sendBeacon) {
+    try {
+      navigator.sendBeacon('/api/identity/logout-beacon',
+        new Blob([JSON.stringify({ token: bearer })], { type: 'application/json' }));
+    } catch (_) {}
+  } else if (bearer) {
+    fetch('/api/identity/logout', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + bearer },
+      keepalive: true,
+    }).catch(function() {});
+  }
+  setKey('');
+  localStorage.removeItem('cc_identity_token');
+  location.replace('/dashboard');
+}
+
+// ── Cross-tab + BFCache auth invalidation ───────────────────────
+// If another tab clears the API key (sign-out, key rotation), this tab
+// must immediately re-evaluate auth and bounce to the Login screen.
+// pageshow with persisted=true catches BFCache restore (browser BACK).
+window.addEventListener('storage', function(e) {
+  if (e.key !== 'cc_api_key' && e.key !== 'cc_identity_token') return;
+  KEY = localStorage.getItem('cc_api_key') || '';
+  if (!KEY && !localStorage.getItem('cc_identity_token')) {
+    window.location.replace('/dashboard');
+  }
+});
+window.addEventListener('pageshow', function(e) {
+  if (!e.persisted) return;
+  // BFCache restore — re-read localStorage and bounce if no auth
+  KEY = localStorage.getItem('cc_api_key') || '';
+  if (!KEY && !localStorage.getItem('cc_identity_token')) {
+    window.location.replace('/dashboard');
+  }
+});
 
 async function apiFetch(path) {
   if (!KEY) throw new Error('No API key');
@@ -133,7 +178,7 @@ function sidebar(active, subItems, activeSub) {
     '<aside class="sidebar" id="mainSidebar">' +
       '<div class="sidebar-user-section">' +
         '<span id="topbarUser" class="sidebar-user-name"></span>' +
-        '<button class="sidebar-user-signout" onclick="setKey(\'\');location.href=\'/dashboard\'">Sign out</button>' +
+        '<button class="sidebar-user-signout" onclick="signOutNow()">Sign out</button>' +
       '</div>' +
       '<nav class="sidebar-nav">' + nav + '</nav>' +
       '<div class="sidebar-footer">' +
