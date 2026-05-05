@@ -113,17 +113,19 @@ function StatusPill({ status }: { status: ConnStatus }) {
 
 function PersonalKeyCard({ endpoint }: { endpoint: string }) {
   const [keys, setKeys] = useState<UserMcpKey[] | null>(null)
-  const [ownerCount, setOwnerCount] = useState<number>(0)
+  const [accessibleCount, setAccessibleCount] = useState<number>(0)
+  const [isAdmin, setIsAdmin] = useState(false)
   const [busy, setBusy] = useState(false)
   const [draftLabel, setDraftLabel] = useState('')
   const [created, setCreated] = useState<CreatedKey | null>(null)
   const [copied, setCopied] = useState(false)
 
   function load() {
-    adminApi.get<{ keys: UserMcpKey[]; owner_app_count: number }>('/api/me/mcp-keys')
+    adminApi.get<{ keys: UserMcpKey[]; accessible_app_count: number; is_admin: boolean }>('/api/me/mcp-keys')
       .then(r => {
         setKeys(r.keys ?? [])
-        setOwnerCount(r.owner_app_count ?? 0)
+        setAccessibleCount(r.accessible_app_count ?? 0)
+        setIsAdmin(!!r.is_admin)
       })
       .catch(() => setKeys([]))
   }
@@ -134,7 +136,7 @@ function PersonalKeyCard({ endpoint }: { endpoint: string }) {
     if (busy) return
     setBusy(true)
     try {
-      const r = await adminApi.post<{ key?: UserMcpKey; api_key?: string; owner_app_count?: number }>(
+      const r = await adminApi.post<{ key?: UserMcpKey; api_key?: string; accessible_app_count?: number; is_admin?: boolean }>(
         '/api/me/mcp-keys', { label: draftLabel.trim() || null },
       )
       const apiKey = r?.api_key ?? ''
@@ -142,7 +144,8 @@ function PersonalKeyCard({ endpoint }: { endpoint: string }) {
       setCreated({ id: r.key!.id, label: r.key!.label, api_key: apiKey })
       setCopied(false)
       setDraftLabel('')
-      if (typeof r.owner_app_count === 'number') setOwnerCount(r.owner_app_count)
+      if (typeof r.accessible_app_count === 'number') setAccessibleCount(r.accessible_app_count)
+      if (typeof r.is_admin === 'boolean') setIsAdmin(r.is_admin)
       load()
     } catch (e) {
       alert('Create failed: ' + (e instanceof Error ? e.message : String(e)))
@@ -190,10 +193,20 @@ function PersonalKeyCard({ endpoint }: { endpoint: string }) {
     <div className="setting-card">
       <h3>Your MCP key</h3>
       <p>
-        A personal MCP key that grants access to <strong>every app where you're an Owner</strong> —
-        currently <strong>{ownerCount}</strong> app{ownerCount === 1 ? '' : 's'}.
-        Resolved dynamically: gain Owner access on a new app and your key picks it up immediately;
-        lose Owner role and the corresponding tools disappear next call.
+        {isAdmin ? (
+          <>
+            A personal MCP key for your AppCrane admin account. Grants access to{' '}
+            <strong>all {accessibleCount} app{accessibleCount === 1 ? '' : 's'}</strong> — admins
+            see everything regardless of per-app role.
+          </>
+        ) : (
+          <>
+            A personal MCP key that grants access to <strong>every app where you're an Owner</strong> —
+            currently <strong>{accessibleCount}</strong> app{accessibleCount === 1 ? '' : 's'}.
+            Resolved dynamically: gain Owner access on a new app and your key picks it up immediately;
+            lose Owner role and the corresponding tools disappear next call.
+          </>
+        )}
       </p>
 
       {keys && keys.length > 0 && (
@@ -250,7 +263,7 @@ function PersonalKeyCard({ endpoint }: { endpoint: string }) {
           {busy ? 'Creating…' : (activeKeys.length > 0 ? '+ Another key' : 'Generate my MCP key')}
         </button>
       </div>
-      {ownerCount === 0 && (
+      {!isAdmin && accessibleCount === 0 && (
         <p style={{ marginTop: 12, fontSize: '.78rem', color: 'var(--yellow)', padding: '8px 12px', background: 'rgba(234,179,8,.06)', borderRadius: 6 }}>
           ⚠ You're not an Owner of any app yet. The key will authenticate but tools/list will be empty.
           Ask an admin to assign you Owner role on an app first.

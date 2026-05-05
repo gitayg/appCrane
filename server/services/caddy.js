@@ -194,9 +194,25 @@ export async function reloadCaddy() {
   // Write Caddyfile and reload via systemctl (most reliable)
   try {
     const { writeFileSync } = await import('fs');
+    const { execSync, execFileSync } = await import('child_process');
     const caddyfile = generateCaddyfile();
+
+    // Pre-apply validation: write to a tmp path, run `caddy validate` against
+    // it, only swap into /etc/caddy/Caddyfile if it parses cleanly. Prevents
+    // a bad config from breaking routing for every app at once.
+    const tmpPath = '/tmp/Caddyfile.appcrane-validate';
+    writeFileSync(tmpPath, caddyfile);
+    try {
+      execFileSync('caddy', ['validate', '--config', tmpPath, '--adapter', 'caddyfile'], {
+        timeout: 8000, stdio: 'pipe',
+      });
+    } catch (validateErr) {
+      const detail = validateErr.stderr?.toString().trim() || validateErr.message;
+      log.error(`Caddy validate failed — refusing reload. Config:\n${caddyfile}\nError: ${detail}`);
+      return { success: false, error: `Generated Caddyfile is invalid: ${detail}` };
+    }
+
     writeFileSync('/etc/caddy/Caddyfile', caddyfile);
-    const { execSync } = await import('child_process');
     execSync('systemctl reload caddy', { timeout: 10000, stdio: 'pipe' });
     log.info('Caddy reloaded: ' + caddyfile.split('\n').filter(l => l.includes('{')).map(l => l.trim().split(' ')[0]).join(', '));
     return { success: true };

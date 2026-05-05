@@ -356,6 +356,17 @@ app.post('/api/self-update', requireAuth, requireAdmin, async (req, res) => {
     const { logAudit } = await import('./middleware/audit.js');
 
     const gitOpts = { cwd, stdio: 'pipe', timeout: 30000 };
+
+    // Self-heal git's "dubious ownership" check that fires when the repo
+    // directory's owner uid differs from the running process's uid (common
+    // after manual deploys, container restarts, or VPS console git pulls).
+    // Whitelist the cwd globally so future runs don't have to re-do this.
+    try {
+      execFileSync('git', ['config', '--global', '--add', 'safe.directory', cwd], gitOpts);
+    } catch (_) {
+      // Best-effort; if it fails we'll see a clearer error from `fetch` below.
+    }
+
     execFileSync('git', ['-c', 'credential.helper=', 'fetch', 'origin'], gitOpts);
     const pullOutput = execFileSync('git', ['reset', '--hard', 'origin/main'], gitOpts).toString().trim();
 
@@ -668,6 +679,14 @@ app.listen(PORT, HOST, async () => {
     if (process.env.ANTHROPIC_API_KEY) {
       const { startWorker } = await import('./services/appstudio/worker.js');
       startWorker();
+    }
+
+    // GitHub PR poller — closes the request lifecycle (Closes appcrane#N).
+    // Outbound only, safe in firewalled installs. Set APPCRANE_PR_POLL_DISABLED=1
+    // to skip if you don't want it.
+    if (process.env.APPCRANE_PR_POLL_DISABLED !== '1') {
+      const { startGithubPoller } = await import('./services/githubPoller.js');
+      startGithubPoller();
     }
   } catch (e) {
     log.warn('Health checker startup deferred');
