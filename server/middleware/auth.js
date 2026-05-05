@@ -18,6 +18,32 @@ export function requireAuth(req, res, next) {
 
   const apiKey = req.headers['x-api-key'];
   if (apiKey) {
+    // Personal MCP key (user-issued; format: dhk_mcp_<random>). Authenticates
+    // AS the user but is MCP-only — accessibility resolves dynamically to
+    // "apps where this user is currently Owner" (see mcpTools.js).
+    if (apiKey.startsWith('dhk_mcp_')) {
+      const keyHash = hashApiKey(apiKey);
+      const row = db.prepare(`
+        SELECT umk.id AS umk_id, umk.label, umk.expires_at, umk.revoked_at,
+               u.id AS uid, u.name, u.email, u.role, u.active, u.kind, u.username
+        FROM user_mcp_keys umk
+        JOIN users u ON u.id = umk.user_id
+        WHERE umk.key_hash = ?
+          AND umk.revoked_at IS NULL
+          AND (umk.expires_at IS NULL OR umk.expires_at > datetime('now'))
+      `).get(keyHash);
+      if (row) {
+        if (!row.active) return next(new AppError('Account is deactivated', 403, 'DEACTIVATED'));
+        try { db.prepare("UPDATE user_mcp_keys SET last_used_at = datetime('now') WHERE id = ?").run(row.umk_id); } catch (_) {}
+        req.user = {
+          id: row.uid, name: row.name, email: row.email,
+          role: row.role, active: row.active, kind: row.kind, username: row.username,
+        };
+        req.user_mcp_key = { id: row.umk_id, label: row.label };
+        return next();
+      }
+    }
+
     // App-scoped key (issued by an Owner; format: dhk_app_<slug>_<random>)
     if (apiKey.startsWith('dhk_app_')) {
       const keyHash = hashApiKey(apiKey);
