@@ -292,9 +292,149 @@ function SecurityTab() {
   )
 }
 
-type Tab = 'security' | 'users' | 'agents' | 'skills' | 'branding' | 'audit'
+interface PermDef { key: string; label: string; description: string }
+type Role = 'user' | 'admin' | 'owner'
+type Matrix = Record<string, Record<Role, number>>
 
-const VALID_TABS: Tab[] = ['security', 'users', 'agents', 'skills', 'branding', 'audit']
+function RolesTab() {
+  const [permissions, setPermissions] = useState<PermDef[]>([])
+  const [matrix, setMatrix] = useState<Matrix>({})
+  const [busy, setBusy] = useState(false)
+  const [saved, flashSaved] = useFlash()
+  const [error, setError] = useState<string | null>(null)
+
+  const load = () => {
+    adminApi.get<{ permissions: PermDef[]; matrix: Matrix; roles: Role[] }>('/api/settings/role-permissions/catalog')
+      .then(r => { setPermissions(r.permissions ?? []); setMatrix(r.matrix ?? {}) })
+      .catch(e => setError(e?.message || 'Failed to load matrix'))
+  }
+  useEffect(() => { load() }, [])
+
+  function toggle(perm: string, role: Role) {
+    setMatrix(prev => ({
+      ...prev,
+      [perm]: { ...prev[perm], [role]: prev[perm]?.[role] ? 0 : 1 },
+    }))
+  }
+
+  async function save() {
+    if (busy) return
+    setBusy(true)
+    try {
+      const r = await adminApi.put<{ matrix: Matrix }>('/api/settings/role-permissions', { matrix })
+      if (r?.matrix) setMatrix(r.matrix)
+      flashSaved()
+    } catch (e) {
+      alert('Save failed: ' + (e instanceof Error ? e.message : String(e)))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function resetRow(permKey: string) {
+    if (!confirm(`Reset "${permKey}" to defaults?`)) return
+    setBusy(true)
+    try {
+      const r = await adminApi.post<{ matrix: Matrix }>('/api/settings/role-permissions/reset', { permissions: [permKey] })
+      if (r?.matrix) setMatrix(r.matrix)
+      flashSaved()
+    } catch (e) {
+      alert('Reset failed: ' + (e instanceof Error ? e.message : String(e)))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function resetAll() {
+    if (!confirm('Reset all permissions to seeded defaults? This will overwrite all current settings.')) return
+    setBusy(true)
+    try {
+      const r = await adminApi.post<{ matrix: Matrix }>('/api/settings/role-permissions/reset', {})
+      if (r?.matrix) setMatrix(r.matrix)
+      flashSaved()
+    } catch (e) {
+      alert('Reset failed: ' + (e instanceof Error ? e.message : String(e)))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (error) {
+    return (
+      <div className="setting-card" style={{ borderColor: '#ef444444' }}>
+        <h3 style={{ color: 'var(--red)' }}>Roles unavailable</h3>
+        <p>{error}</p>
+      </div>
+    )
+  }
+
+  const roles: Role[] = ['user', 'admin', 'owner']
+
+  return (
+    <>
+      <div className="setting-card">
+        <h3>Per-app role permissions</h3>
+        <p>
+          High-stakes operations where AppCrane lets you decide who's allowed. Most other authz
+          stays hardcoded — these are the cells that genuinely vary across teams.
+          AppCrane global admins (<code style={{ fontFamily: 'monospace', background: 'var(--surface2)', padding: '1px 5px', borderRadius: 3, fontSize: '.78rem' }}>users.role = admin</code>)
+          always have every permission regardless of this matrix; the table below governs only the
+          per-app role tiers.
+        </p>
+
+        <table style={{ width: '100%', fontSize: '.85rem', marginTop: 12 }}>
+          <thead>
+            <tr>
+              <th style={{ textAlign: 'left', color: 'var(--dim)', fontWeight: 500, padding: '6px 8px' }}>Permission</th>
+              {roles.map(r => (
+                <th key={r} style={{ textAlign: 'center', color: 'var(--dim)', fontWeight: 500, padding: '6px 8px', textTransform: 'uppercase', letterSpacing: '.4px', fontSize: '.72rem' }}>
+                  {r}
+                </th>
+              ))}
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {permissions.map(p => (
+              <tr key={p.key} style={{ borderTop: '1px solid var(--border)' }}>
+                <td style={{ padding: '10px 8px', verticalAlign: 'top' }}>
+                  <div style={{ fontWeight: 600 }}>{p.label}</div>
+                  <div style={{ color: 'var(--dim)', fontSize: '.78rem', marginTop: 2 }}>{p.description}</div>
+                  <div style={{ color: 'var(--dim)', fontFamily: 'monospace', fontSize: '.72rem', marginTop: 4 }}>{p.key}</div>
+                </td>
+                {roles.map(role => (
+                  <td key={role} style={{ textAlign: 'center', padding: '10px 8px', verticalAlign: 'top' }}>
+                    <input
+                      type="checkbox"
+                      checked={!!(matrix[p.key]?.[role])}
+                      onChange={() => toggle(p.key, role)}
+                      style={{ width: 18, height: 18, cursor: 'pointer' }}
+                    />
+                  </td>
+                ))}
+                <td style={{ textAlign: 'right', padding: '10px 8px', verticalAlign: 'top' }}>
+                  <button className="btn btn-xs" onClick={() => resetRow(p.key)} disabled={busy}>Reset</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+
+        <div className="save-row" style={{ marginTop: 16, justifyContent: 'space-between' }}>
+          <button className="btn" onClick={resetAll} disabled={busy}>Reset all to defaults</button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            {saved && <span className="saved-msg">Saved ✓</span>}
+            <button className="btn btn-accent" onClick={save} disabled={busy}>{busy ? 'Saving…' : 'Save'}</button>
+          </div>
+        </div>
+      </div>
+    </>
+  )
+}
+
+type Tab = 'security' | 'users' | 'agents' | 'roles' | 'skills' | 'branding' | 'audit'
+
+const VALID_TABS: Tab[] = ['security', 'users', 'agents', 'roles', 'skills', 'branding', 'audit']
 
 function getTab(): Tab {
   const hash = window.location.hash.replace('#', '') as Tab
@@ -320,6 +460,9 @@ export function Settings() {
       </div>
       <div style={{ display: tab === 'agents' ? 'block' : 'none' }}>
         <Agents />
+      </div>
+      <div style={{ display: tab === 'roles' ? 'block' : 'none' }}>
+        <RolesTab />
       </div>
       <div style={{ display: tab === 'skills' ? 'block' : 'none' }}>
         <SkillsTab />

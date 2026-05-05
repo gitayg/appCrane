@@ -8,6 +8,7 @@ import { getDb } from '../db.js';
 import { requireAuth, requireAppUser } from '../middleware/auth.js';
 import { auditMiddleware } from '../middleware/audit.js';
 import { encrypt, decrypt } from '../services/encryption.js';
+import { userHasAppPermission } from '../services/permissions.js';
 import { AppError } from '../utils/errors.js';
 
 const router = Router();
@@ -66,6 +67,11 @@ router.put('/:slug/env/:env', requireAppUser, auditMiddleware('env-set'), (req, 
 
   if (!vars || typeof vars !== 'object') {
     throw new AppError('Body must contain { vars: { KEY: "value" } }', 400, 'VALIDATION');
+  }
+
+  // Configurable RBAC: production env writes gated by env.write.production
+  if (env === 'production' && !userHasAppPermission(req.user, req.app, 'env.write.production')) {
+    throw new AppError('Writing production env vars is not permitted by your role on this app', 403, 'FORBIDDEN');
   }
 
   const db = getDb();

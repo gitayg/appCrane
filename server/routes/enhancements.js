@@ -9,6 +9,7 @@ import {
   deleteComment, getComment,
 } from '../services/enhancementComments.js';
 import { BUCKETS, bucketize, applyBucket } from '../services/requestStatus.js';
+import { userHasAppPermission } from '../services/permissions.js';
 
 const router = Router();
 
@@ -172,9 +173,15 @@ router.put('/:id/bucket', requireAuth, (req, res) => {
 
   if (req.user.role !== 'admin') {
     if (!row.app_slug) throw new AppError('Forbidden', 403, 'FORBIDDEN');
-    const app = db.prepare('SELECT id FROM apps WHERE slug = ?').get(row.app_slug);
+    const app = db.prepare('SELECT * FROM apps WHERE slug = ?').get(row.app_slug);
     const ar = db.prepare('SELECT app_role FROM app_user_roles WHERE app_id = ? AND user_id = ?').get(app?.id, req.user.id);
-    if (ar?.app_role !== 'admin') throw new AppError('Forbidden', 403, 'FORBIDDEN');
+    // Admin/owner of app: most transitions allowed. The 'shipped' transition
+    // is configurable via the request.ship permission.
+    const hasAppRole = ar?.app_role === 'admin' || ar?.app_role === 'owner';
+    if (!hasAppRole) throw new AppError('Forbidden', 403, 'FORBIDDEN');
+    if (bucket === 'shipped' && !userHasAppPermission(req.user, app, 'request.ship')) {
+      throw new AppError('Marking shipped is not permitted by your role on this app', 403, 'FORBIDDEN');
+    }
   }
 
   applyBucket(db, id, bucket, req.user.id);

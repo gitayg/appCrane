@@ -9,6 +9,26 @@ interface AuditEntry {
   detail: string
 }
 
+/** Inspect detail JSON for hints about which key class made the call. */
+function keyClassBadge(detail: string, action: string): { label: string; bg: string; fg: string } | null {
+  // app-scoped key auth shows up via the request path which our middleware
+  // logs into detail; personal MCP key likewise. Fall back to action prefix.
+  if (!action.startsWith('mcp.')) return null
+  try {
+    const parsed = JSON.parse(detail)
+    const path = (parsed?.path || '') as string
+    // Best-effort heuristic until we add explicit key_class to audit_log:
+    // mcp.* calls always come from the MCP route. The key class is hinted
+    // by the args.slug pattern (app-scoped key always pre-binds slug).
+    if (parsed?.args && parsed?.args.slug) {
+      // could be either app-scoped or personal — without a column we can't
+      // distinguish here. Show generic 'mcp' badge.
+      return { label: 'mcp', bg: 'rgba(59,130,246,.12)', fg: 'var(--accent)' }
+    }
+  } catch {}
+  return { label: 'mcp', bg: 'rgba(59,130,246,.12)', fg: 'var(--accent)' }
+}
+
 interface App {
   slug: string
   name: string
@@ -32,6 +52,7 @@ export function AuditLog() {
   const [total, setTotal] = useState(0)
   const [apps, setApps] = useState<App[]>([])
   const [appFilter, setAppFilter] = useState('')
+  const [actionFilter, setActionFilter] = useState('')
   const [limit, setLimit] = useState(50)
 
   useEffect(() => {
@@ -42,24 +63,35 @@ export function AuditLog() {
     const params = new URLSearchParams()
     params.set('limit', String(limit))
     if (appFilter) params.set('app', appFilter)
+    if (actionFilter) params.set('action', actionFilter)
     adminApi.get<{ entries: AuditEntry[]; total: number }>(`/api/audit?${params}`)
       .then(data => {
         setEntries(data.entries ?? [])
         setTotal(data.total ?? 0)
       })
       .catch(() => {})
-  }, [appFilter, limit])
+  }, [appFilter, actionFilter, limit])
 
   return (
     <div className="container">
       <h2>Audit Log</h2>
 
-      <div className="filter-row">
+      <div className="filter-row" style={{ flexWrap: 'wrap', gap: 8 }}>
         <select value={appFilter} onChange={e => setAppFilter(e.target.value)}>
           <option value="">All apps</option>
           {apps.map(a => (
             <option key={a.slug} value={a.slug}>{a.name}</option>
           ))}
+        </select>
+
+        <select value={actionFilter} onChange={e => setActionFilter(e.target.value)}>
+          <option value="">All actions</option>
+          <option value="mcp.">MCP only (mcp.*)</option>
+          <option value="deploy">Deploys</option>
+          <option value="env-set">Env var writes</option>
+          <option value="app-key">App-key changes</option>
+          <option value="user-mcp-key">User MCP key changes</option>
+          <option value="app-set-role">Role changes</option>
         </select>
 
         <select value={limit} onChange={e => setLimit(Number(e.target.value))}>
@@ -91,7 +123,20 @@ export function AuditLog() {
                   </td>
                   <td>{e.user_name}</td>
                   <td>{e.app_slug || '-'}</td>
-                  <td><span className="tag">{e.action}</span></td>
+                  <td>
+                    <span className="tag">{e.action}</span>
+                    {(() => {
+                      const b = keyClassBadge(e.detail, e.action)
+                      return b ? (
+                        <span style={{
+                          marginLeft: 6, padding: '2px 6px', borderRadius: 3,
+                          fontSize: '.65rem', fontWeight: 600, letterSpacing: '.3px',
+                          textTransform: 'uppercase',
+                          background: b.bg, color: b.fg, border: `1px solid ${b.fg}33`,
+                        }}>{b.label}</span>
+                      ) : null
+                    })()}
+                  </td>
                   <td style={{ fontFamily: 'monospace', fontSize: '0.8rem', color: 'var(--dim)' }}>
                     {formatDetail(e.detail)}
                   </td>

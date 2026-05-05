@@ -185,7 +185,7 @@ router.put('/:id/profile', requireAdmin, auditMiddleware('user-update-profile'),
 router.put('/:slug/roles', requireAdmin, auditMiddleware('app-set-role'), (req, res) => {
   const { user_id, app_role } = req.body;
   if (!user_id || !app_role) throw new AppError('user_id and app_role required', 400, 'VALIDATION');
-  if (!['admin', 'user', 'none'].includes(app_role)) throw new AppError('app_role must be admin, user, or none', 400, 'VALIDATION');
+  if (!['owner', 'admin', 'user', 'none'].includes(app_role)) throw new AppError('app_role must be owner, admin, user, or none', 400, 'VALIDATION');
 
   const db = getDb();
   const app = db.prepare('SELECT * FROM apps WHERE slug = ?').get(req.params.slug);

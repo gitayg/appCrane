@@ -8,6 +8,7 @@ import { encrypt, generateApiKey, hashApiKey } from '../services/encryption.js';
 import { AppError } from '../utils/errors.js';
 import { resolveSafe } from '../utils/paths.js';
 import { reloadCaddy } from '../services/caddy.js';
+import { userHasAppPermission } from '../services/permissions.js';
 import log from '../utils/logger.js';
 import { existsSync, mkdirSync, renameSync, unlinkSync } from 'fs';
 import { join } from 'path';
@@ -302,6 +303,18 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
   const app = req.app;
   const { name, domain, description, category, source_type, github_url, branch, github_token, max_ram_mb, max_cpu_percent, public_access, visibility, image_retention, frame_ancestors } = req.body;
 
+  // Configurable RBAC: changes to repo-related fields gated by code.modify_repo_settings.
+  // Other fields (name, description, category, visibility, etc.) stay open to any
+  // app-assigned user via requireAppAccess.
+  const repoFieldChanged =
+    github_url !== undefined ||
+    branch !== undefined ||
+    github_token !== undefined ||
+    source_type !== undefined;
+  if (repoFieldChanged && !userHasAppPermission(req.user, app, 'code.modify_repo_settings')) {
+    throw new AppError('Modifying repo settings is not permitted by your role on this app', 403, 'FORBIDDEN');
+  }
+
   const updates = {};
   if (name !== undefined) updates.name = name;
   if (domain !== undefined) updates.domain = domain;
@@ -411,9 +424,15 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
 });
 
 /**
- * DELETE /api/apps/:slug - Delete app (admin only, requires ?confirm=true)
+ * DELETE /api/apps/:slug - Delete app
+ * Configurable RBAC: gated by app.delete permission. AppCrane global admin
+ * always allowed; per-app deletion follows the role_permissions matrix
+ * (default: Owner only). Requires ?confirm=true.
  */
-router.delete('/:slug', requireAdmin, requireAppAccess, auditMiddleware('app-delete'), async (req, res) => {
+router.delete('/:slug', requireAppAccess, auditMiddleware('app-delete'), async (req, res) => {
+  if (!userHasAppPermission(req.user, req.app, 'app.delete')) {
+    throw new AppError('Deleting this app is not permitted by your role', 403, 'FORBIDDEN');
+  }
   const url = new URL(req.url, `http://${req.headers.host}`);
   if (url.searchParams.get('confirm') !== 'true') {
     throw new AppError('Add ?confirm=true to delete', 400, 'CONFIRMATION_REQUIRED');

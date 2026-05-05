@@ -19,7 +19,7 @@ interface App {
   name: string
 }
 
-type AppRole = 'none' | 'user' | 'admin'
+type AppRole = 'none' | 'user' | 'admin' | 'owner'
 
 function relativeTime(iso: string | null): { rel: string; abs: string } {
   if (!iso) return { rel: 'never', abs: '' }
@@ -282,6 +282,7 @@ export function Users() {
                           <option value="none">none</option>
                           <option value="user">user</option>
                           <option value="admin">admin</option>
+                          <option value="owner">owner</option>
                         </select>
                       </td>
                     ))}
