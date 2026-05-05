@@ -108,6 +108,12 @@ const HTML_CSP = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-s
 
 function sendHtml(res, filePath) {
   res.setHeader('Content-Security-Policy', HTML_CSP);
+  // SPA shell HTML must always be re-fetched so the latest auth-check JS
+  // runs on every navigation. Without this, browser back/forward can
+  // restore a cached page that bypasses the post-logout redirect.
+  // Asset bundles (hashed filenames) keep their long-cache headers.
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+  res.setHeader('Pragma', 'no-cache');
   res.sendFile(filePath);
 }
 
@@ -489,6 +495,8 @@ function loginHandler(req, res) {
         res.removeHeader('X-Frame-Options');
         res.setHeader('Content-Security-Policy',
           `${HTML_CSP}; frame-ancestors ${row.frame_ancestors}`);
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+        res.setHeader('Pragma', 'no-cache');
         return res.sendFile(join(__dirname, '..', 'docs', 'login.html'));
       }
     } catch (_) {}

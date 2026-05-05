@@ -309,6 +309,25 @@ router.post('/logout', (req, res) => {
 });
 
 /**
+ * POST /api/identity/logout-beacon
+ * navigator.sendBeacon-compatible logout. The Beacon API can't set custom
+ * headers (no Authorization), so the token rides in the request body. This
+ * endpoint is otherwise identical to /logout and exists purely so the SPA
+ * can fire-and-forget a session invalidation that survives the immediate
+ * page navigation. Fail-open on parse error — the goal is best-effort
+ * cleanup, not a hard auth surface.
+ */
+router.post('/logout-beacon', (req, res) => {
+  const token = (req.body && typeof req.body.token === 'string' && req.body.token.trim()) || '';
+  if (!token) return res.status(204).end();
+  try {
+    const db = getDb();
+    db.prepare('DELETE FROM identity_sessions WHERE token_hash = ?').run(hashApiKey(token));
+  } catch (_) {}
+  res.status(204).end();
+});
+
+/**
  * GET /api/identity/me
  * Get current user profile from session token
  * Headers: Authorization: Bearer TOKEN
