@@ -2,6 +2,12 @@ import { Router } from 'express';
 import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { listTools, callTool, getToolCatalog } from '../services/mcpTools.js';
 import { getDb } from '../db.js';
+import {
+  listToolsForUser as ghListTools,
+  callToolForUser as ghCallTool,
+  listActive as ghListActive,
+  killUserContainer as ghKill,
+} from '../services/githubMcpContainers.js';
 import log from '../utils/logger.js';
 
 const router = Router();
@@ -78,9 +84,21 @@ router.post('/', requireAuth, async (req, res) => {
           instructions: SERVER_INSTRUCTIONS,
         };
         break;
-      case 'tools/list':
-        result = { tools: listTools(req.user, req.app_key, req.user_mcp_key) };
+      case 'tools/list': {
+        const appcraneTools = listTools(req.user, req.app_key, req.user_mcp_key);
+        // Append github_* tools if the caller provided X-Github-Token. Lazy-
+        // spawns a container; idle-reaped after settings.github_mcp_idle_timeout.
+        let githubTools = [];
+        if (req.github_token) {
+          try {
+            githubTools = await ghListTools(req.user.id, req.github_token);
+          } catch (e) {
+            log.warn(`MCP tools/list: github fetch failed for user ${req.user.id}: ${e.message}`);
+          }
+        }
+        result = { tools: [...appcraneTools, ...githubTools] };
         break;
+      }
       case 'tools/call':
         if (!params?.name) {
           return res.json({ jsonrpc: '2.0', id, error: { code: -32602, message: 'Missing tool name' } });
@@ -90,7 +108,18 @@ router.post('/', requireAuth, async (req, res) => {
           (req.app_key ? ` app_key=${req.app_key.id}/${req.app_key.app_slug}` : '') +
           (req.user_mcp_key ? ` user_mcp_key=${req.user_mcp_key.id}` : '')
         );
-        result = await callTool(req.user, params.name, params.arguments, req.app_key, req.user_mcp_key);
+        // Route by name: appcrane_* stays local, github_* goes to the user's
+        // GitHub MCP container, anything else is unknown.
+        if (params.name.startsWith('github_') || params.name.startsWith('mcp__github__')) {
+          if (!req.github_token) {
+            return res.json({ jsonrpc: '2.0', id, error: { code: -32000, message: 'GitHub MCP requires X-Github-Token header. Add `--header "X-Github-Token: ghp_..."` to your AppCrane MCP setup command.' } });
+          }
+          // Strip the mcp__github__ namespace prefix some clients add
+          const upstreamName = params.name.startsWith('mcp__github__') ? params.name.replace(/^mcp__github__/, '') : params.name;
+          result = await ghCallTool(req.user.id, req.github_token, upstreamName, params.arguments);
+        } else {
+          result = await callTool(req.user, params.name, params.arguments, req.app_key, req.user_mcp_key);
+        }
         break;
       case 'ping':
         result = {};
@@ -103,6 +132,20 @@ router.post('/', requireAuth, async (req, res) => {
     log.warn(`MCP ${method} error: ${err.message}`);
     res.json({ jsonrpc: '2.0', id, error: { code: -32000, message: err.message } });
   }
+});
+
+/**
+ * GET /api/mcp/github/containers — admin-only. Live roster of per-user
+ * GitHub MCP containers. POST /api/mcp/github/containers/:user_id/kill
+ * force-stops one (e.g. if a PAT got revoked and a container is hung).
+ */
+router.get('/github/containers', requireAuth, requireAdmin, (req, res) => {
+  res.json({ active: ghListActive() });
+});
+router.post('/github/containers/:user_id/kill', requireAuth, requireAdmin, (req, res) => {
+  const userId = parseInt(req.params.user_id, 10);
+  const ok = ghKill(userId);
+  res.json({ ok, user_id: userId });
 });
 
 /**

@@ -19,6 +19,7 @@ const SETTINGS_SUB = [
   { id: 'users',      label: 'Users',       href: '#users' },
   { id: 'agents',     label: 'App Agents',  href: '#agents' },
   { id: 'roles',      label: 'Roles',       href: '#roles' },
+  { id: 'github',     label: 'GitHub',      href: '#github' },
   { id: 'skills',     label: 'Skills',      href: '#skills' },
   { id: 'branding',   label: 'Style Guide', href: '#branding' },
   { id: 'audit',      label: 'Audit Log',   href: '#audit' },
@@ -36,7 +37,7 @@ function useHash() {
 
 function SettingsRoute() {
   const hash = useHash()
-  const valid = ['security', 'users', 'agents', 'roles', 'skills', 'branding', 'audit']
+  const valid = ['security', 'users', 'agents', 'roles', 'github', 'skills', 'branding', 'audit']
   const activeSub = valid.includes(hash) ? hash : 'security'
   return (
     <Layout subItems={SETTINGS_SUB} activeSub={activeSub}>

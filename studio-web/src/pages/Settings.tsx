@@ -432,9 +432,144 @@ function RolesTab() {
   )
 }
 
-type Tab = 'security' | 'users' | 'agents' | 'roles' | 'skills' | 'branding' | 'audit'
+interface ContainerEntry {
+  user_id: number
+  started_at: string
+  last_active_at: string
+  idle_seconds: number
+  alive: boolean
+}
 
-const VALID_TABS: Tab[] = ['security', 'users', 'agents', 'roles', 'skills', 'branding', 'audit']
+function GithubTab() {
+  const [idleTimeout, setIdleTimeout] = useState(600)
+  const [maxConcurrent, setMaxConcurrent] = useState(10)
+  const [image, setImage] = useState('ghcr.io/github/github-mcp-server:latest')
+  const [containers, setContainers] = useState<ContainerEntry[]>([])
+  const [saved, flashSaved] = useFlash()
+  const [busy, setBusy] = useState(false)
+
+  function loadSettings() {
+    Promise.all([
+      adminApi.get<{ value?: string }>('/api/settings/github_mcp_idle_timeout').catch(() => ({ value: '600' })),
+      adminApi.get<{ value?: string }>('/api/settings/github_mcp_max_concurrent').catch(() => ({ value: '10' })),
+      adminApi.get<{ value?: string }>('/api/settings/github_mcp_image').catch(() => ({ value: 'ghcr.io/github/github-mcp-server:latest' })),
+    ]).then(([t, m, i]) => {
+      if (t?.value) setIdleTimeout(Number(t.value))
+      if (m?.value) setMaxConcurrent(Number(m.value))
+      if (i?.value) setImage(i.value)
+    })
+  }
+
+  function loadContainers() {
+    adminApi.get<{ active: ContainerEntry[] }>('/api/mcp/github/containers')
+      .then(r => setContainers(r.active ?? []))
+      .catch(() => {})
+  }
+
+  useEffect(() => {
+    loadSettings()
+    loadContainers()
+    const iv = setInterval(loadContainers, 15000)
+    return () => clearInterval(iv)
+  }, [])
+
+  async function save() {
+    if (busy) return
+    setBusy(true)
+    try {
+      await Promise.all([
+        adminApi.put('/api/settings/github_mcp_idle_timeout', { value: String(idleTimeout) }),
+        adminApi.put('/api/settings/github_mcp_max_concurrent', { value: String(maxConcurrent) }),
+        adminApi.put('/api/settings/github_mcp_image', { value: image }),
+      ])
+      flashSaved()
+    } catch (e) {
+      alert('Save failed: ' + (e instanceof Error ? e.message : String(e)))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function killContainer(userId: number) {
+    if (!confirm(`Force-stop the GitHub MCP container for user ${userId}?\n\nIn-flight tool calls will fail. The user's next call will spawn a new container.`)) return
+    await adminApi.post(`/api/mcp/github/containers/${userId}/kill`, {}).catch(() => {})
+    loadContainers()
+  }
+
+  return (
+    <>
+      <div className="setting-card">
+        <h3>GitHub MCP — Per-user containers</h3>
+        <p>
+          AppCrane spawns a per-user <code style={{ fontFamily: 'monospace' }}>github-mcp-server</code> Docker container on demand
+          when a user passes their PAT via <code style={{ fontFamily: 'monospace' }}>X-Github-Token</code> header in their MCP setup.
+          Each container is scoped to that user; <code style={{ fontFamily: 'monospace' }}>github_*</code> tool calls are forwarded
+          via stdio. Idle containers are reaped automatically.
+        </p>
+        <p style={{ color: 'var(--dim)', fontSize: '.8rem', marginTop: -4 }}>
+          User setup: <code style={{ fontFamily: 'monospace', fontSize: '.78rem' }}>claude mcp add --transport http appcrane &lt;url&gt; --header "X-API-Key: dhk_mcp_…" --header "X-Github-Token: ghp_…"</code>
+        </p>
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '12px 16px', alignItems: 'center', marginTop: 16, maxWidth: 600 }}>
+          <label style={{ fontSize: '.85rem', color: 'var(--dim)' }}>Idle timeout (seconds)</label>
+          <FocusInput type="number" min={60} max={86400} value={idleTimeout} onChange={e => setIdleTimeout(Number(e.target.value))} style={{ width: 140 }} />
+
+          <label style={{ fontSize: '.85rem', color: 'var(--dim)' }}>Max concurrent containers</label>
+          <FocusInput type="number" min={1} max={100} value={maxConcurrent} onChange={e => setMaxConcurrent(Number(e.target.value))} style={{ width: 140 }} />
+
+          <label style={{ fontSize: '.85rem', color: 'var(--dim)' }}>Container image</label>
+          <FocusInput type="text" value={image} onChange={e => setImage(e.target.value)} placeholder="ghcr.io/github/github-mcp-server:latest" />
+        </div>
+
+        <div className="save-row" style={{ marginTop: 16 }}>
+          <button className="btn btn-accent" onClick={save} disabled={busy}>{busy ? 'Saving…' : 'Save'}</button>
+          {saved && <span className="saved-msg">Saved ✓</span>}
+        </div>
+      </div>
+
+      <div className="setting-card">
+        <h3>Active containers <span style={{ fontWeight: 400, color: 'var(--dim)', fontSize: '.82rem' }}>({containers.length} / {maxConcurrent})</span></h3>
+        <p>Live roster — refreshes every 15 seconds. Force-stop to recover stuck containers (e.g. after a PAT was revoked).</p>
+        {containers.length === 0 ? (
+          <div style={{ color: 'var(--dim)', fontSize: '.85rem', padding: '8px 0' }}>No containers running.</div>
+        ) : (
+          <table style={{ width: '100%', fontSize: '.85rem', marginTop: 8 }}>
+            <thead>
+              <tr>
+                <th style={{ textAlign: 'left', color: 'var(--dim)', fontWeight: 500, padding: '4px 8px' }}>User ID</th>
+                <th style={{ textAlign: 'left', color: 'var(--dim)', fontWeight: 500, padding: '4px 8px' }}>Started</th>
+                <th style={{ textAlign: 'left', color: 'var(--dim)', fontWeight: 500, padding: '4px 8px' }}>Last active</th>
+                <th style={{ textAlign: 'left', color: 'var(--dim)', fontWeight: 500, padding: '4px 8px' }}>Idle</th>
+                <th style={{ textAlign: 'left', color: 'var(--dim)', fontWeight: 500, padding: '4px 8px' }}>Status</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {containers.map(c => (
+                <tr key={c.user_id}>
+                  <td style={{ padding: '4px 8px', fontFamily: 'monospace' }}>{c.user_id}</td>
+                  <td style={{ padding: '4px 8px', color: 'var(--dim)' }}>{new Date(c.started_at).toLocaleTimeString()}</td>
+                  <td style={{ padding: '4px 8px', color: 'var(--dim)' }}>{new Date(c.last_active_at).toLocaleTimeString()}</td>
+                  <td style={{ padding: '4px 8px', color: c.idle_seconds > idleTimeout / 2 ? 'var(--yellow)' : 'var(--dim)' }}>
+                    {c.idle_seconds < 60 ? `${c.idle_seconds}s` : `${Math.floor(c.idle_seconds / 60)}m ${c.idle_seconds % 60}s`}
+                  </td>
+                  <td style={{ padding: '4px 8px', color: c.alive ? 'var(--green)' : 'var(--red)' }}>{c.alive ? 'running' : 'dead'}</td>
+                  <td style={{ padding: '4px 8px', textAlign: 'right' }}>
+                    <button className="btn btn-xs btn-red" onClick={() => killContainer(c.user_id)}>Kill</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </>
+  )
+}
+
+type Tab = 'security' | 'users' | 'agents' | 'roles' | 'github' | 'skills' | 'branding' | 'audit'
+
+const VALID_TABS: Tab[] = ['security', 'users', 'agents', 'roles', 'github', 'skills', 'branding', 'audit']
 
 function getTab(): Tab {
   const hash = window.location.hash.replace('#', '') as Tab
@@ -463,6 +598,9 @@ export function Settings() {
       </div>
       <div style={{ display: tab === 'roles' ? 'block' : 'none' }}>
         <RolesTab />
+      </div>
+      <div style={{ display: tab === 'github' ? 'block' : 'none' }}>
+        <GithubTab />
       </div>
       <div style={{ display: tab === 'skills' ? 'block' : 'none' }}>
         <SkillsTab />

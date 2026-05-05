@@ -16,6 +16,12 @@ import { AppError } from '../utils/errors.js';
 export function requireAuth(req, res, next) {
   const db = getDb();
 
+  // Optional GitHub PAT passed via header — used by the MCP route to forward
+  // github_* tool calls to the user's per-user GitHub MCP container. We just
+  // attach it to req here; mcp.js handles it. Not stored, not logged.
+  const ghToken = req.headers['x-github-token'];
+  if (ghToken && typeof ghToken === 'string') req.github_token = ghToken;
+
   const apiKey = req.headers['x-api-key'];
   if (apiKey) {
     // SECURITY (v1.30.2): app-scoped and personal MCP keys are MCP-only.
