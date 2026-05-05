@@ -1,6 +1,7 @@
 import { getDb } from '../db.js';
 import { decrypt, encrypt } from './encryption.js';
 import { BUCKETS, bucketize, applyBucket } from './requestStatus.js';
+import { userHasAppPermission } from './permissions.js';
 import log from '../utils/logger.js';
 import { mkdirSync } from 'fs';
 import { join } from 'path';
@@ -137,6 +138,12 @@ function auditMcpCall(user, toolName, args, error) {
     ).run(user.id, appId, `mcp.${toolName}`, detail);
   } catch (e) {
     log.warn(`MCP audit log failed: ${e.message}`);
+    // Compliance/regulated installs can flip this to fail-closed: any audit
+    // write failure (table locked, schema drift, disk full) refuses the call
+    // rather than letting the action proceed without a trail.
+    if (process.env.APPCRANE_AUDIT_REQUIRED === '1') {
+      throw new Error(`Audit log unavailable — refusing to proceed (APPCRANE_AUDIT_REQUIRED=1): ${e.message}`);
+    }
   }
 }
 
@@ -333,12 +340,22 @@ const TOOLS = [
       ).get(args.id);
       if (!row) throw new Error(`Request ${args.id} not found`);
 
-      // Authz: AppCrane admin or per-app admin
+      // Authz: AppCrane admin OR per-app admin OR per-app owner.
+      // The 'shipped' transition is gated by the configurable role_permissions
+      // matrix (request.ship permission) so the matrix change applies to MCP
+      // and REST identically.
+      let appRow = null;
       if (user.role !== 'admin') {
         if (!row.app_slug) throw new Error('Forbidden: only AppCrane admin can move requests with no app');
-        const app = db.prepare('SELECT id FROM apps WHERE slug = ?').get(row.app_slug);
-        const ar = db.prepare('SELECT app_role FROM app_user_roles WHERE app_id = ? AND user_id = ?').get(app?.id, user.id);
-        if (ar?.app_role !== 'admin') throw new Error(`Forbidden: not an admin of ${row.app_slug}`);
+        appRow = db.prepare('SELECT * FROM apps WHERE slug = ?').get(row.app_slug);
+        const ar = db.prepare('SELECT app_role FROM app_user_roles WHERE app_id = ? AND user_id = ?').get(appRow?.id, user.id);
+        const hasAppRole = ar?.app_role === 'admin' || ar?.app_role === 'owner';
+        if (!hasAppRole) throw new Error(`Forbidden: not an admin or owner of ${row.app_slug}`);
+        if (args.bucket === 'shipped') {
+          if (!userHasAppPermission(user, appRow, 'request.ship')) {
+            throw new Error(`Forbidden: marking shipped is not permitted by your role on ${row.app_slug}`);
+          }
+        }
       }
 
       applyBucket(db, args.id, args.bucket, user.id);

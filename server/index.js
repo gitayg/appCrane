@@ -2,6 +2,7 @@ import express from 'express';
 import { dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, openSync, unlinkSync } from 'fs';
+import { createHash } from 'crypto';
 import { initDb, getDb } from './db.js';
 import { errorHandler, notFound } from './utils/errors.js';
 import log from './utils/logger.js';
@@ -88,7 +89,12 @@ function apiRateLimit(req, res, next) {
   const bearer = (req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
   const apiKey = req.headers['x-api-key'] || '';
   const isAuthed = Boolean(bearer || apiKey);
-  const key = bearer ? `t:${bearer}` : apiKey ? `k:${apiKey}` : `ip:${req.ip || req.socket?.remoteAddress || 'unknown'}`;
+  // Hash the credential before using it as the bucket key — keeping plaintext
+  // keys in process memory (the rate-limit Map persists for up to 5 min beyond
+  // request lifetime) was unnecessary residue. SHA-256 is enough; keys are
+  // already 192-bit random so collision risk is nil.
+  const credHash = (s) => createHash('sha256').update(s).digest('hex').slice(0, 32);
+  const key = bearer ? `t:${credHash(bearer)}` : apiKey ? `k:${credHash(apiKey)}` : `ip:${req.ip || req.socket?.remoteAddress || 'unknown'}`;
   const limit = isAuthed ? 2000 : 600;
   const now = Date.now();
   const rec = _apiRateMap.get(key);
