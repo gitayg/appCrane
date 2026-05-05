@@ -694,6 +694,15 @@ app.listen(PORT, HOST, async () => {
       const { startGithubPoller } = await import('./services/githubPoller.js');
       startGithubPoller();
     }
+
+    // Per-user GitHub MCP container manager — spawns github-mcp-server on
+    // demand when an MCP client passes X-Github-Token, idle-reaps after
+    // settings.github_mcp_idle_timeout. Set APPCRANE_GH_MCP_DISABLED=1 to
+    // skip (for envs without docker).
+    if (process.env.APPCRANE_GH_MCP_DISABLED !== '1') {
+      const { startContainerManager } = await import('./services/githubMcpContainers.js');
+      startContainerManager();
+    }
   } catch (e) {
     log.warn('Health checker startup deferred');
   }

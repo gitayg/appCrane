@@ -402,20 +402,19 @@ export function Mcp() {
 
       <div className="setting-card">
         <h3>Setup (Claude Code)</h3>
+        <p style={{ marginBottom: 10 }}>
+          <strong>One MCP, both surfaces.</strong> AppCrane proxies <code style={{ fontFamily: 'monospace', fontSize: '.78rem' }}>github_*</code> tools to a per-user GitHub MCP container
+          spawned on demand. You only register one MCP in your client; AppCrane handles the rest.
+        </p>
         <p style={{ marginBottom: 8 }}>
-          <strong style={{ color: 'var(--accent)' }}>Step 1.</strong> Connect AppCrane MCP — copy the snippet from <em>"Your MCP key"</em> above (it embeds the key directly).
+          <strong style={{ color: 'var(--accent)' }}>Setup.</strong> Run this in your terminal — both your AppCrane key (from the card above)
+          and your GitHub PAT (with <code style={{ fontFamily: 'monospace', fontSize: '.78rem', background: 'var(--surface2)', padding: '1px 5px', borderRadius: 3 }}>repo</code> scope):
         </p>
-        <p style={{ marginTop: 12, marginBottom: 8 }}>
-          <strong style={{ color: 'var(--accent)' }}>Step 2.</strong> Connect GitHub MCP (so the agent can read code, open PRs, manage issues) —
-          substitute a GitHub PAT with <code style={{ fontFamily: 'monospace', fontSize: '.78rem', background: 'var(--surface2)', padding: '1px 5px', borderRadius: 3 }}>repo</code> scope:
-        </p>
-        <CopyableCodeBlock code={`claude mcp add github docker run -i --rm \\\n  -e GITHUB_PERSONAL_ACCESS_TOKEN=<your-github-pat> \\\n  ghcr.io/github/github-mcp-server`} />
-        <p style={{ marginTop: 10, fontSize: '.78rem', color: 'var(--dim)' }}>
-          No Docker? Use the npm form: <code style={{ fontFamily: 'monospace', fontSize: '.78rem' }}>claude mcp add github npx -- -y @modelcontextprotocol/server-github</code>
-          {' '}with <code style={{ fontFamily: 'monospace', fontSize: '.78rem' }}>GITHUB_PERSONAL_ACCESS_TOKEN</code> in your env.
-        </p>
+        <CopyableCodeBlock code={`claude mcp add --transport http appcrane ${endpoint} \\\n  --header "X-API-Key: <your-appcrane-mcp-key>" \\\n  --header "X-Github-Token: <your-github-pat>"`} />
         <p style={{ marginTop: 10, marginBottom: 0, fontSize: '.78rem', color: 'var(--dim)' }}>
-          Verify both: <code style={{ fontFamily: 'monospace', fontSize: '.78rem' }}>claude mcp list</code> — you should see <strong>appcrane</strong> and <strong>github</strong>.
+          Verify: <code style={{ fontFamily: 'monospace', fontSize: '.78rem' }}>claude mcp list</code> — you should see <strong>appcrane</strong>.
+          The first <code style={{ fontFamily: 'monospace', fontSize: '.78rem' }}>github_*</code> tool call spawns your container (1-2s cold start);
+          subsequent calls are instant. Idle containers are reaped automatically (default: 10 minutes).
         </p>
       </div>
 
