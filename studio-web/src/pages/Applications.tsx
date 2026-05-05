@@ -70,6 +70,7 @@ interface PromptModal {
   open: boolean
   key?: string
   prompt?: string
+  title?: string
 }
 
 type WizardStep = 'input' | 'analyzing' | 'review'
@@ -297,19 +298,137 @@ export function Applications() {
 
   async function generateAgentKey() {
     const ts = Date.now()
-    const name = `agent-${ts}`
-    const email = `agent-${ts}@appcrane`
+    const name = `onboarding-${ts}`
+    const email = `onboarding-${ts}@appcrane`
     const r = await adminApi.post<{ key?: string; api_key?: string; user?: { id: number } }>('/api/users', {
       name,
       email,
-      role: 'user',
+      role: 'admin',
       kind: 'agent',
     }).catch(() => null)
     const key = r?.key ?? r?.api_key ?? ''
+    const origin = typeof window !== 'undefined' ? window.location.origin : 'https://your-appcrane-host'
+    const host = typeof window !== 'undefined' ? window.location.host : 'your-appcrane-host'
+    const brief = `You are AppCrane's app-onboarding agent. Your job: take this conversation
+from "user wants something deployed" to "a working sandbox URL on
+${host}", end-to-end, in one session.
+
+YOU HAVE TWO TOOL FAMILIES on the same MCP connection:
+  - appcrane_*  — AppCrane lifecycle ops (create_app, deploy, get_logs, env, …)
+  - github_*    — GitHub passthrough (read/write files, open PRs, list
+                  branches, create repos). The user's PAT was wired into
+                  your MCP config via the X-Github-Token header, so github_*
+                  calls authenticate automatically — you do NOT pass a token
+                  argument to them.
+
+Use github_* for ALL code-level GitHub work. Do NOT shell out to \`gh\` or
+\`git\` CLI. Do NOT clone to local disk. Everything happens through MCP tools.
+
+INPUTS YOU NEED FROM THE USER (ask in your first turn, all at once):
+  1. Starting point — one of:
+       (a) An idea, no code yet              → scaffold from scratch
+       (b) Local code, no GitHub repo        → create repo, push existing code
+       (c) Existing GitHub repo URL          → skip scaffolding, just register
+  2. The PAT they configured in their \`claude mcp add\` command. You need it
+     once to pass as \`github_token\` to appcrane_create_app (AppCrane stores
+     it encrypted on the app record so it can clone for future deploys).
+     You're not asking for a new PAT — just the same value they already used.
+     Don't echo it back.
+  3. Any env vars / secrets (usually none).
+  4. Display name (you'll propose; user confirms).
+
+KEY APPCRANE TOOLS:
+  appcrane_create_app(name, slug, github_url, github_token, branch?, …)
+  appcrane_set_env(slug, env, key, value)
+  appcrane_deploy(slug, env)                       — env="sandbox"
+  appcrane_get_logs(slug, env, lines?, search?)
+
+KEY GITHUB TOOLS (call tools/list to see exact names on your connection —
+they may be prefixed \`github_\` or \`mcp__github__\` depending on server
+version):
+  create_repository                                — paths (a), (b)
+  create_or_update_file / push_files               — scaffold or edit
+  get_file_contents                                — read existing repo
+  create_pull_request                              — for path (c) fixes
+  list_branches, list_commits, …
+
+ORDER, BY PATH:
+
+  Path (a) — fresh idea:
+    1. Pick slug (lowercase-hyphen, ≤20 chars). Pick stack (default: Vite +
+       React + TS SPA; Express + Vite SPA single Node process if backend is
+       needed). Propose; wait for ✅.
+    2. github_create_repository (private: true).
+    3. Push scaffolded files via github_push_files: package.json,
+       deployhub.json (version 0.1.0, build, start, health "/healthz", port
+       hint), source files, a /healthz endpoint returning {ok:true}.
+    4. appcrane_create_app({ name, slug, github_url, github_token, branch: "main" })
+    5. appcrane_set_env (only if user has secrets)
+    6. appcrane_deploy(slug, "sandbox")
+    7. appcrane_get_logs — confirm health green. If red, read logs, fix via
+       github_create_or_update_file, redeploy.
+
+  Path (b) — local code, no repo:
+    As (a), but step 3 = read user's local code, audit for missing pieces
+    (deployhub.json, /healthz, start script), add via github_push_files.
+    Don't modify files the user wrote without asking.
+
+  Path (c) — repo already on GitHub:
+    1. github_get_file_contents to verify deployhub.json + /healthz exist.
+       If missing, github_create_pull_request adding them; ask user to merge.
+    2. appcrane_create_app
+    3-5 as above (set_env, deploy, get_logs).
+
+CONSTRAINTS — common pitfalls that fail deploys:
+  - Sandbox only. Never deploy to production.
+  - Vite: \`base: process.env.APP_BASE_PATH || './'\`. Never '/'. AppCrane does
+    NOT inject APP_BASE_PATH at build time.
+  - If you write a custom Dockerfile:
+      • EXPOSE must match the port in deployhub.json (default 3000).
+      • Do NOT declare VOLUME /data — AppCrane mounts it at runtime.
+      • Do NOT set ENV DATA_DIR — AppCrane injects it.
+      • Must end with USER <non-root>.
+  - App must read PORT from process.env (\`process.env.PORT || 3000\`).
+  - On failure, surface the error and ask before retrying. No silent loops.
+  - End with the sandbox URL + one line of "what's deployed".`
+    const prompt = `Onboard a new application end-to-end via an AppCrane onboarding agent.
+
+=== STEP 1 — Generate a GitHub PAT ===
+
+At https://github.com/settings/tokens. Classic: scope \`repo\`. Or
+fine-grained: Contents R/W, Metadata R, Administration W (for the orgs/repos
+you want to onboard apps for). The PAT lives only in your local
+~/.claude.json — never stored on the AppCrane server, only passed through as
+a header at request time.
+
+=== STEP 2 — Wire AppCrane MCP into your local Claude Code ===
+
+Replace <YOUR_GITHUB_PAT> with the PAT from Step 1, then run once in any
+terminal (the X-API-Key value is already inlined):
+
+  claude mcp add appcrane http ${origin}/api/mcp \\
+    --header "X-API-Key: ${key}" \\
+    --header "X-Github-Token: <YOUR_GITHUB_PAT>"
+
+The X-Github-Token header is what enables AppCrane's GitHub passthrough — the
+agent gets \`github_*\` tools (read files, push files, open PRs, create repos)
+on the same MCP connection. No separate GitHub MCP server install needed.
+
+=== STEP 3 — Open a fresh Claude Code session and paste the brief below ===
+
+In any terminal: \`claude\`. Paste everything between BEGIN and END as your
+first message:
+
+>>>>> BEGIN BRIEF >>>>>
+
+${brief}
+
+<<<<< END BRIEF <<<<<`
     setPromptModal({
       open: true,
+      title: 'New Application Onboarding',
       key,
-      prompt: `Agent user created: ${name}\nEmail: ${email}\n\nAdd this API key to your agent's environment:\n  APPCRANE_API_KEY=${key}\n\nThis key grants user-level access. The API key will not be shown again.`,
+      prompt,
     })
   }
 
@@ -508,10 +627,8 @@ export function Applications() {
     <div className="container">
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
         <h2 style={{ margin: 0 }}>Applications</h2>
-        <button className="btn btn-accent" onClick={() => { setWizardOpen(true); setWizardStep('input'); setAnalysis(null) }}>
-          + Add from GitHub
-        </button>
-        <button className="btn" onClick={generateAgentKey}>+ New App Agent</button>
+        {/* "+ Add from GitHub" hidden — onboarding now flows through the agent. Wizard state/code retained for future revival. */}
+        <button className="btn btn-accent" onClick={generateAgentKey}>New Application Onboarding</button>
       </div>
 
       <div className="apps-table-wrap">
@@ -937,7 +1054,7 @@ export function Applications() {
       {promptModal.open && (
         <div className="prompt-overlay" onClick={() => setPromptModal({ open: false })}>
           <div className="prompt-modal" onClick={e => e.stopPropagation()}>
-            <div style={{ fontWeight: 700, fontSize: '1rem', marginBottom: 16 }}>API Key</div>
+            <div style={{ fontWeight: 700, fontSize: '1rem', marginBottom: 16 }}>{promptModal.title ?? 'API Key'}</div>
             <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 7, padding: '10px 14px', fontFamily: 'monospace', fontSize: '.85rem', wordBreak: 'break-all', marginBottom: 12, cursor: 'text', userSelect: 'all' }}>
               {promptModal.key}
             </div>
