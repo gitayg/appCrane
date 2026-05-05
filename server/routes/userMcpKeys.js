@@ -25,11 +25,20 @@ function requireSession(req, res, next) {
   next();
 }
 
-function ownerAppCount(userId) {
-  return getDb().prepare(`
+/**
+ * Count of apps this user can reach via a personal MCP key. AppCrane global
+ * admins see every app; everyone else only sees apps where they're Owner.
+ * Mirrors the resolution in mcpTools.js → accessibleSlugsForUser.
+ */
+function accessibleAppCount(user) {
+  const db = getDb();
+  if (user.role === 'admin') {
+    return db.prepare('SELECT COUNT(*) AS n FROM apps').get().n;
+  }
+  return db.prepare(`
     SELECT COUNT(*) AS n FROM app_user_roles
     WHERE user_id = ? AND app_role = 'owner'
-  `).get(userId).n;
+  `).get(user.id).n;
 }
 
 /**
@@ -45,7 +54,8 @@ router.get('/me/mcp-keys', requireSession, (req, res) => {
   `).all(req.user.id);
   res.json({
     keys,
-    owner_app_count: ownerAppCount(req.user.id),
+    accessible_app_count: accessibleAppCount(req.user),
+    is_admin: req.user.role === 'admin',
   });
 });
 
@@ -73,7 +83,8 @@ router.post('/me/mcp-keys', requireSession, auditMiddleware('user-mcp-key-create
     key: { id: result.lastInsertRowid, label: label || null, expires_at: expires_at || null },
     api_key: apiKey,
     warning: 'Save this API key — it will not be shown again.',
-    owner_app_count: ownerAppCount(req.user.id),
+    accessible_app_count: accessibleAppCount(req.user),
+    is_admin: req.user.role === 'admin',
   });
 });
 

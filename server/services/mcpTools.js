@@ -45,10 +45,15 @@ function accessibleSlugsForUser(user) {
   // so existing tool handlers see the same restriction.)
   if (user._mcpAppKey) return [user._mcpAppKey.app_slug];
 
-  // Personal MCP key — dynamically resolves to apps where the user is currently
-  // Owner. Role changes take effect on the next call (no key reissue needed).
+  // Personal MCP key — dynamically resolves to apps where the user has access.
+  // AppCrane global admins see every app; everyone else sees apps they own.
+  // Role changes take effect on the next call (no key reissue needed).
   if (user._mcpUserKey) {
-    return getDb().prepare(`
+    const db = getDb();
+    if (user.role === 'admin') {
+      return db.prepare('SELECT slug FROM apps').all().map(r => r.slug);
+    }
+    return db.prepare(`
       SELECT DISTINCT a.slug
       FROM apps a
       JOIN app_user_roles aur ON aur.app_id = a.id
@@ -79,8 +84,11 @@ function getAppForUser(user, slug) {
   const app = db.prepare('SELECT * FROM apps WHERE slug = ?').get(slug);
   if (!app) throw new Error(`App not found: ${slug}`);
 
-  // Personal MCP key locks scope to "apps where this user is Owner"
+  // Personal MCP key locks scope to apps the user has access to. AppCrane
+  // global admins keep their global access; everyone else is restricted to
+  // apps where they're explicitly Owner.
   if (user._mcpUserKey) {
+    if (user.role === 'admin') return app;
     const owns = db.prepare(
       "SELECT 1 FROM app_user_roles WHERE app_id = ? AND user_id = ? AND app_role = 'owner'"
     ).get(app.id, user.id);
