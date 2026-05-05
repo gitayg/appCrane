@@ -7,6 +7,7 @@ import { RequestPanel } from '../components/runtime-topbar/RequestPanel'
 import { BugPanel } from '../components/runtime-topbar/BugPanel'
 import { defineCraneAppTopbar } from '../topbar-element/entry'
 import { AppKeysPanel } from '../components/AppKeysPanel'
+import { Icon } from '../components/icons'
 import '../topbar-element/jsx.d.ts'
 
 defineCraneAppTopbar()
@@ -1083,13 +1084,13 @@ function FrameOverlay({ frame, framePanel, setFrame, setFramePanel }: FrameOverl
                 className={'crane-topbar-btn' + (framePanel === 'request' ? ' active' : '')}
                 onClick={() => setFramePanel(p => p === 'request' ? null : 'request')}
                 title="File an enhancement request"
-              >💡 Request</button>
+              ><Icon.Lightbulb size={14} /> Request</button>
               <button
                 type="button"
                 className={'crane-topbar-btn' + (framePanel === 'bug' ? ' active' : '')}
                 onClick={() => setFramePanel(p => p === 'bug' ? null : 'bug')}
-                title="Report a bug — same Plan / Code / Build pipeline as a request"
-              >🐛 Bug</button>
+                title="Report a bug"
+              ><Icon.Bug size={14} /> Bug</button>
             </>
           )}
           <JobsButton slug={frame.slug ?? null} />
