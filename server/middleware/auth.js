@@ -18,6 +18,13 @@ export function requireAuth(req, res, next) {
 
   const apiKey = req.headers['x-api-key'];
   if (apiKey) {
+    // SECURITY (v1.30.2): app-scoped and personal MCP keys are MCP-only.
+    // Without this guard a leaked dhk_app_<slug> "read" key would
+    // authenticate as its issuer on /api/apps/<slug>/env/production etc.
+    // and bypass the scope. Reject non-MCP paths up-front.
+    const path = req.baseUrl + (req.path || '') || req.originalUrl || '';
+    const isMcpPath = path.startsWith('/api/mcp');
+
     // Personal MCP key (user-issued; format: dhk_mcp_<random>). Authenticates
     // AS the user but is MCP-only — accessibility resolves dynamically to
     // "apps where this user is currently Owner" (see mcpTools.js).
@@ -34,6 +41,9 @@ export function requireAuth(req, res, next) {
       `).get(keyHash);
       if (row) {
         if (!row.active) return next(new AppError('Account is deactivated', 403, 'DEACTIVATED'));
+        if (!isMcpPath) {
+          return next(new AppError('Personal MCP keys (dhk_mcp_*) are restricted to /api/mcp endpoints', 403, 'KEY_SCOPE_RESTRICTED'));
+        }
         try { db.prepare("UPDATE user_mcp_keys SET last_used_at = datetime('now') WHERE id = ?").run(row.umk_id); } catch (_) {}
         req.user = {
           id: row.uid, name: row.name, email: row.email,
@@ -61,6 +71,9 @@ export function requireAuth(req, res, next) {
       `).get(keyHash);
       if (row) {
         if (!row.active) return next(new AppError('Issuer account is deactivated', 403, 'DEACTIVATED'));
+        if (!isMcpPath) {
+          return next(new AppError('App-scoped keys (dhk_app_*) are restricted to /api/mcp endpoints', 403, 'KEY_SCOPE_RESTRICTED'));
+        }
         try { db.prepare("UPDATE app_keys SET last_used_at = datetime('now') WHERE id = ?").run(row.ak_id); } catch (_) {}
         req.user = {
           id: row.uid, name: row.name, email: row.email,
