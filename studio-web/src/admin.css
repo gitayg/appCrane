@@ -185,7 +185,9 @@ body {
   border-left: 3px solid var(--accent);
   padding-left: 9px;
 }
-.sidebar-link-icon { font-size: .9rem; flex-shrink: 0; width: 16px; text-align: center; }
+.sidebar-link-icon { flex-shrink: 0; width: 16px; height: 16px; display: inline-flex; align-items: center; justify-content: center; opacity: .85; }
+.sidebar-link.active .sidebar-link-icon,
+.sidebar-link:hover .sidebar-link-icon { opacity: 1; }
 .sidebar-link-text { overflow: hidden; text-overflow: ellipsis; }
 .sidebar-link-badge { margin-left: auto; background: var(--accent); color: #fff; font-size: .65rem; font-weight: 700; padding: 1px 6px; border-radius: 8px; min-width: 16px; text-align: center; }
 .admin-sidebar.collapsed .sidebar-link-badge { display: none; }
@@ -910,3 +912,30 @@ table tr.clickable:hover td { background: rgba(59,130,246,.04); }
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; }
 }
+
+/* ── UI refresh v1.30.x — softer surfaces, punchier focus ──── */
+:root {
+  --shadow-sm: 0 1px 2px rgba(0,0,0,.18);
+  --shadow:    0 2px 8px rgba(0,0,0,.22);
+  --shadow-lg: 0 8px 24px rgba(0,0,0,.32);
+}
+/* Card-like surfaces get a subtle drop shadow so they stand out from the
+   page background. Keeps the dark theme readable without being heavy. */
+.setting-card,
+.detail-panel,
+.app-row,
+.req-table-wrap,
+.am-card {
+  box-shadow: var(--shadow-sm);
+}
+/* Input/select focus glow uses the accent color, smoother than the old ring */
+input:focus-visible, select:focus-visible, textarea:focus-visible {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(59,130,246,.18);
+}
+/* Subtle separator under section headings inside cards */
+.setting-card > h3 + p { margin-top: 4px; }
+/* Sidebar nav: tighten spacing now that icons have proper proportions */
+.sidebar-link { gap: 10px; }
+/* Topbar buttons (Request, Bug) — give the SVG/text combo a tidy gap */
+.crane-topbar-btn { display: inline-flex; align-items: center; gap: 5px; }

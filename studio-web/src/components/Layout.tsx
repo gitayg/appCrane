@@ -1,16 +1,18 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
+import type { ReactElement } from 'react'
 import { NavLink, useLocation } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth'
 import { adminApi } from '../adminApi'
+import { Icon } from './icons'
 
-interface NavItem { id: string; label: string; href: string; icon: string; external?: boolean }
+interface NavItem { id: string; label: string; href: string; icon: ReactElement; external?: boolean }
 const NAV: NavItem[] = [
-  { id: 'dashboard',    label: 'Dashboard',    href: '/dashboard',    icon: '⊞' },
-  { id: 'applications', label: 'Applications', href: '/applications', icon: '▣' },
-  { id: 'requests',     label: 'Requests',     href: '/requests',     icon: '💡' },
-  { id: 'mcp',          label: 'MCP',          href: '/mcp',          icon: '⌬' },
-  { id: 'docs',         label: 'Docs',         href: '/docs',         icon: '📖' },
-  { id: 'settings',     label: 'Settings',     href: '/settings',     icon: '⚙' },
+  { id: 'dashboard',    label: 'Dashboard',    href: '/dashboard',    icon: <Icon.Dashboard /> },
+  { id: 'applications', label: 'Applications', href: '/applications', icon: <Icon.Layers /> },
+  { id: 'requests',     label: 'Requests',     href: '/requests',     icon: <Icon.Lightbulb /> },
+  { id: 'mcp',          label: 'MCP',          href: '/mcp',          icon: <Icon.PlugZap /> },
+  { id: 'docs',         label: 'Docs',         href: '/docs',         icon: <Icon.Book /> },
+  { id: 'settings',     label: 'Settings',     href: '/settings',     icon: <Icon.Settings /> },
 ]
 
 interface SubItem { id: string; label: string; href: string }
