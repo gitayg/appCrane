@@ -108,17 +108,36 @@ router.post('/', requireAuth, async (req, res) => {
           (req.app_key ? ` app_key=${req.app_key.id}/${req.app_key.app_slug}` : '') +
           (req.user_mcp_key ? ` user_mcp_key=${req.user_mcp_key.id}` : '')
         );
-        // Route by name: appcrane_* stays local, github_* goes to the user's
-        // GitHub MCP container, anything else is unknown.
-        if (params.name.startsWith('github_') || params.name.startsWith('mcp__github__')) {
-          if (!req.github_token) {
-            return res.json({ jsonrpc: '2.0', id, error: { code: -32000, message: 'GitHub MCP requires X-Github-Token header. Add `--header "X-Github-Token: ghp_..."` to your AppCrane MCP setup command.' } });
+        // Route by namespace ownership:
+        //   - appcrane_* (and mcp__appcrane__*) → local AppCrane handler
+        //   - everything else → user's GitHub MCP container
+        // Note: github-mcp-server's tools are mostly UNPREFIXED (get_me,
+        // create_issue, list_pull_requests, etc.), so we can't match by
+        // a `github_*` prefix. We own the `appcrane_*` namespace; anything
+        // outside it belongs to the upstream GitHub MCP.
+        {
+          const isAppCraneTool =
+            params.name.startsWith('appcrane_') ||
+            params.name.startsWith('mcp__appcrane__');
+          const stripPrefix = (name, prefix) =>
+            name.startsWith(prefix) ? name.slice(prefix.length) : name;
+
+          if (isAppCraneTool) {
+            const upstreamName = stripPrefix(params.name, 'mcp__appcrane__');
+            result = await callTool(req.user, upstreamName, params.arguments, req.app_key, req.user_mcp_key);
+          } else {
+            if (!req.github_token) {
+              return res.json({
+                jsonrpc: '2.0', id,
+                error: {
+                  code: -32000,
+                  message: `Tool '${params.name}' is not an AppCrane tool. To call GitHub MCP tools, add --header "X-Github-Token: ghp_..." to your AppCrane MCP setup command, then retry.`,
+                },
+              });
+            }
+            const upstreamName = stripPrefix(params.name, 'mcp__github__');
+            result = await ghCallTool(req.user.id, req.github_token, upstreamName, params.arguments);
           }
-          // Strip the mcp__github__ namespace prefix some clients add
-          const upstreamName = params.name.startsWith('mcp__github__') ? params.name.replace(/^mcp__github__/, '') : params.name;
-          result = await ghCallTool(req.user.id, req.github_token, upstreamName, params.arguments);
-        } else {
-          result = await callTool(req.user, params.name, params.arguments, req.app_key, req.user_mcp_key);
         }
         break;
       case 'ping':
