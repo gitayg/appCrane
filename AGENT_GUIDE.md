@@ -4,6 +4,29 @@ You are an AI agent with a **deployment key** for a specific app on an AppCrane 
 
 ## Connection
 
+AppCrane offers two transports. **AI agents should prefer MCP**; REST is kept for CI/CD, scripts, and human admins.
+
+### Option 1 — MCP (recommended for AI agents)
+
+AppCrane runs its own MCP server at `/api/mcp` (HTTP/JSON-RPC, single endpoint). One `claude mcp add` command wires it into your local Claude Code, including a built-in **GitHub passthrough** so you don't need a separate GitHub MCP server:
+
+```bash
+claude mcp add appcrane http https://crane.example.com/api/mcp \
+  --header "X-API-Key: dhk_admin_or_user_xxxxxxxxxxxxx" \
+  --header "X-Github-Token: ghp_your_github_pat"
+```
+
+- `X-API-Key` authenticates against AppCrane (admin or scoped user/agent key).
+- `X-Github-Token` (optional) enables `github_*` tools — read files, push files, open PRs, create repos — all through the same connection. Drop the header if you don't need GitHub access.
+
+After running the command, restart your Claude Code session. `tools/list` will surface:
+- `appcrane_*` — lifecycle ops (`appcrane_create_app`, `appcrane_deploy`, `appcrane_get_logs`, `appcrane_set_env`, `appcrane_list_requests`, …)
+- `github_*` — GitHub passthrough (only when `X-Github-Token` is set)
+
+Tool catalog and role gating: `GET /api/mcp/catalog` (admin) returns the full surface with role badges. The MCP `tools/list` response is auto-filtered per the caller's role.
+
+### Option 2 — REST API (CI/CD, scripts, non-AI)
+
 ```bash
 # Set these two values (provided by the admin)
 export CC="https://crane.example.com"
@@ -12,6 +35,8 @@ export KEY="your_api_key_here"
 # All requests use the X-API-Key header
 # Example: curl -s -H "X-API-Key: $KEY" $CC/api/apps
 ```
+
+The REST surface (documented in [Available API Endpoints](#available-api-endpoints)) is still fully supported. Same auth (`X-API-Key`), same data, no MCP setup. Use this when you can't run `claude mcp add` (CI runners, GitHub Actions, shell scripts).
 
 ## App Requirements
 
@@ -489,6 +514,16 @@ By default AppCrane generates a `Dockerfile` for every app (Node Alpine, non-roo
 - Must not run as root — end with `USER <non-root-user>`
 - Must not hardcode secrets in `ENV` instructions — use AppCrane env vars instead
 - Do not declare `VOLUME /data` — AppCrane mounts it at runtime
+- Do not set `ENV DATA_DIR=...` — AppCrane injects `DATA_DIR=/data` at runtime and the value will be overridden anyway
+
+**Validator error patterns (memorize these — they're the most common deploy failures):**
+
+| Error you see | Cause | Fix |
+|---|---|---|
+| `EXPOSE port mismatch` / `validator rejects mismatch` | Dockerfile `EXPOSE 3131` but `deployhub.json` says port 3000 (or vice versa) | Either change `EXPOSE` to match the manifest, or update the manifest port. Default is 3000. The two MUST agree. |
+| `VOLUME directive in Dockerfile` | You declared `VOLUME /data` | Remove the line. AppCrane mounts the volume itself. |
+| `hardcoded secret in ENV` | You wrote `ENV API_KEY=...` | Move it to AppCrane env vars (`appcrane_set_env` or REST `PUT /api/apps/SLUG/env/sandbox`). |
+| Health check fails after green deploy | App doesn't read `process.env.PORT` | Use `app.listen(process.env.PORT \|\| 3000)` — never hardcode. |
 
 > **UID caveat.** AppCrane chowns the host-side `shared/data/` dir to
 > `1000:1000` on deploy because that's the UID the stock `node:*-alpine`
@@ -766,6 +801,30 @@ Wait for a yes/no before moving to the next item. Never batch them or apply them
 ---
 
 ## Typical Workflow (for an AI agent)
+
+Two flows are documented below. **Prefer the MCP flow** if you have the AppCrane MCP server wired into your Claude Code (see [Connection → Option 1](#option-1--mcp-recommended-for-ai-agents)). The REST flow is functionally equivalent — same endpoints under the hood — and is the right choice for CI/CD or non-AI tooling.
+
+### MCP flow (recommended)
+
+Assumes you ran `claude mcp add appcrane http <CC>/api/mcp --header "X-API-Key: ..." --header "X-Github-Token: ..."` and your session shows both `appcrane_*` and `github_*` tools in `tools/list`.
+
+0. **Read branding guidelines:** call `appcrane_get_setting({ key: "branding" })` (or fetch the REST equivalent if the tool isn't on your surface). Apply colors/tone before writing UI.
+1. **Decide the starting point:** brand-new code (scaffold), local code (push existing), or existing GitHub repo (just register).
+2. **Create the GitHub repo** (skip if it exists): `github_create_repository({ name: <slug>, private: true })` — uses the X-Github-Token header automatically.
+3. **Scaffold or push code** via `github_push_files` / `github_create_or_update_file`. Include `deployhub.json`, a health endpoint (`/healthz` or `/api/health` returning 200), and a `package.json` with build/start scripts. If you ship a custom Dockerfile, follow the rules in [Custom Dockerfile](#custom-dockerfile-optional) — especially the `EXPOSE` ↔ deployhub.json port match.
+4. **Register the app:** `appcrane_create_app({ name, slug, github_url, github_token, branch: "main" })`. The PAT is required so AppCrane can clone for future deploys.
+5. **Set env vars (if any):** `appcrane_set_env({ slug, env: "sandbox", key, value })` per secret.
+6. **Deploy to sandbox:** `appcrane_deploy({ slug, env: "sandbox" })`.
+7. **Verify health:** `appcrane_get_logs({ slug, env: "sandbox" })`. If red, read the log, fix via `github_create_or_update_file`, redeploy. **Do not loop** — surface any failure that doesn't yield to one round-trip and ask the user.
+8. **(Optional, only if user asks)** Set prod env vars and promote — but onboarding sessions normally end at green sandbox.
+
+Constraints (these match the deploy-time validators — violating them fails the deploy):
+- Sandbox first; never deploy directly to production from an onboarding flow.
+- App must read `process.env.PORT`. Custom Dockerfile `EXPOSE` must match `deployhub.json` port (default 3000).
+- No `VOLUME /data` or `ENV DATA_DIR=...` in your Dockerfile — AppCrane handles both at runtime.
+- Vite SPAs: `base: process.env.APP_BASE_PATH || './'`. Never `'/'` — `APP_BASE_PATH` is build-only and AppCrane doesn't inject it.
+
+### REST flow (curl / CI / scripts)
 
 You have an API key. Here's the full flow to build and deploy an app:
 

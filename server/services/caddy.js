@@ -197,18 +197,28 @@ export async function reloadCaddy() {
     const { execSync, execFileSync } = await import('child_process');
     const caddyfile = generateCaddyfile();
 
-    // Pre-apply validation: write to a tmp path, run `caddy validate` against
-    // it, only swap into /etc/caddy/Caddyfile if it parses cleanly. Prevents
-    // a bad config from breaking routing for every app at once.
+    // Pre-apply validation: write to a tmp path, run `caddy adapt` against
+    // it to confirm it parses cleanly. Only swap into /etc/caddy/Caddyfile
+    // if it does. Prevents a bad config from breaking routing for every app
+    // at once.
+    //
+    // We use `caddy adapt` rather than `caddy validate` because validate
+    // runs full provisioning — including loading TLS certs from
+    // /etc/caddy/certs/. AppCrane runs as `ubuntu` (UID 1000) but the certs
+    // are owned by the `caddy` user, so validate fails with EACCES and the
+    // new Caddyfile is silently never written (the failure is .catch()'d at
+    // every callsite as a log.warn). `adapt` parses the Caddyfile to JSON
+    // without touching certs, exits non-zero on syntax errors — exactly
+    // what we want here.
     const tmpPath = '/tmp/Caddyfile.appcrane-validate';
     writeFileSync(tmpPath, caddyfile);
     try {
-      execFileSync('caddy', ['validate', '--config', tmpPath, '--adapter', 'caddyfile'], {
+      execFileSync('caddy', ['adapt', '--config', tmpPath, '--adapter', 'caddyfile'], {
         timeout: 8000, stdio: 'pipe',
       });
     } catch (validateErr) {
       const detail = validateErr.stderr?.toString().trim() || validateErr.message;
-      log.error(`Caddy validate failed — refusing reload. Config:\n${caddyfile}\nError: ${detail}`);
+      log.error(`Caddy adapt failed — refusing reload. Config:\n${caddyfile}\nError: ${detail}`);
       return { success: false, error: `Generated Caddyfile is invalid: ${detail}` };
     }
 
