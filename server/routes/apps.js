@@ -9,6 +9,7 @@ import { AppError } from '../utils/errors.js';
 import { resolveSafe } from '../utils/paths.js';
 import { reloadCaddy } from '../services/caddy.js';
 import { userHasAppPermission } from '../services/permissions.js';
+import { isAdmin } from '../utils/roles.js';
 import log from '../utils/logger.js';
 import { existsSync, mkdirSync, renameSync, unlinkSync } from 'fs';
 import { join } from 'path';
@@ -69,7 +70,7 @@ router.get('/', (req, res) => {
   const db = getDb();
   let apps;
 
-  if (req.user.role === 'admin') {
+  if (isAdmin(req.user)) {
     apps = db.prepare('SELECT * FROM apps ORDER BY created_at DESC').all();
   } else {
     apps = db.prepare(`
@@ -118,7 +119,7 @@ router.get('/', (req, res) => {
       // show "this app has its own X" without ever shipping the secret.
       has_claude_credentials: !!app.claude_credentials_encrypted,
       has_github_token:       !!app.github_token_encrypted,
-      ...(req.user.role === 'admin' ? { ports } : {}),
+      ...(isAdmin(req.user) ? { ports } : {}),
       urls,
       base_path: { production: `/${app.slug}/`, sandbox: `/${app.slug}-sandbox/` },
       production: {
@@ -284,7 +285,7 @@ router.get('/:slug', requireAppAccess, (req, res) => {
     app: { ...app, resource_limits: JSON.parse(app.resource_limits || '{}') },
     urls: urlsDetail,
     base_path: { production: `/${app.slug}/`, sandbox: `/${app.slug}-sandbox/` },
-    ...(req.user.role === 'admin' ? { ports } : {}),
+    ...(isAdmin(req.user) ? { ports } : {}),
     users,
     deployments,
     health: {
@@ -347,7 +348,7 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
   }
   if (github_token !== undefined) updates.github_token_encrypted = encrypt(github_token);
   if (image_retention !== undefined) {
-    if (req.user?.role !== 'admin') {
+    if (!isAdmin(req.user)) {
       throw new AppError('Only admins can change image retention', 403, 'FORBIDDEN');
     }
     const ret = Number(image_retention);
@@ -357,7 +358,7 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
     updates.image_retention = ret;
   }
   if (max_ram_mb !== undefined || max_cpu_percent !== undefined) {
-    if (req.user?.role !== 'admin') {
+    if (!isAdmin(req.user)) {
       throw new AppError('Only admins can change resource limits', 403, 'FORBIDDEN');
     }
     const ram = max_ram_mb !== undefined ? Number(max_ram_mb) : null;
@@ -380,7 +381,7 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
     // arbitrary origins → clickjacking on /login (which strips
     // X-Frame-Options for that slug's redirect). Restrict to admin so an
     // app-assigned user can't open the door (security review v1.27.34 H3).
-    if (req.user?.role !== 'admin') {
+    if (!isAdmin(req.user)) {
       throw new AppError('Only admins can change frame_ancestors', 403, 'FORBIDDEN');
     }
     if (frame_ancestors === null || frame_ancestors === '') {

@@ -5,10 +5,21 @@
 // This lets the same panels work in both contexts without bundling a
 // separate fetch helper for portal.
 
+/**
+ * Strip any character that can't go into an HTTP header. Browsers throw
+ * "String contains non ISO-8859-1 code point" out of fetch otherwise.
+ * Defense in depth — useAuth.setKey already validates at write time, but
+ * a key that pre-dates that validation (e.g. one stored before v2.1.5)
+ * shouldn't crash the SPA.
+ */
+function asciiOnly(s: string): string {
+  return s.replace(/[^\x20-\x7E]/g, '').trim()
+}
+
 function authHeaders(): Record<string, string> {
-  const key = localStorage.getItem('cc_api_key') || ''
+  const key = asciiOnly(localStorage.getItem('cc_api_key') || '')
   if (key) return { 'X-API-Key': key }
-  const bearer = localStorage.getItem('cc_identity_token') || ''
+  const bearer = asciiOnly(localStorage.getItem('cc_identity_token') || '')
   if (bearer) return { 'Authorization': 'Bearer ' + bearer }
   return {}
 }

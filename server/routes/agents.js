@@ -16,6 +16,7 @@ import { AppError } from '../utils/errors.js';
 import { auditMiddleware } from '../middleware/audit.js';
 import { commitAndPush } from '../services/builder/gitOps.js';
 import { credentialsInfo } from '../services/claudeCredentials.js';
+import { isAdmin } from '../utils/roles.js';
 import {
   createSession,
   resumeSession,
@@ -70,7 +71,7 @@ function getAppForSlug(slug) {
 
 function requireAppAccess(app, user) {
   if (!app) throw new AppError('App not found', 404, 'NOT_FOUND');
-  if (user.role === 'admin') return;
+  if (isAdmin(user)) return;
   const db = getDb();
   const row = db.prepare('SELECT 1 FROM app_users WHERE app_id = ? AND user_id = ?').get(app.id, user.id);
   if (!row) throw new AppError('You do not have access to this app', 403, 'FORBIDDEN');
@@ -159,7 +160,7 @@ function buildStatus(sessionId, lastError = null) {
 router.get('/', (req, res) => {
   const db = getDb();
   let rows;
-  if (req.user.role === 'admin') {
+  if (isAdmin(req.user)) {
     rows = db.prepare(`
       SELECT cs.*, a.name as app_name FROM coder_sessions cs
       LEFT JOIN apps a ON a.slug = cs.app_slug
@@ -188,7 +189,7 @@ router.get('/health', (req, res) => {
 router.get('/apps', (req, res) => {
   const db = getDb();
   let apps;
-  if (req.user.role === 'admin') {
+  if (isAdmin(req.user)) {
     apps = db.prepare('SELECT * FROM apps ORDER BY name ASC').all();
   } else {
     apps = db.prepare(`

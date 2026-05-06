@@ -4,6 +4,7 @@ import { generateApiKey, hashApiKey } from '../services/encryption.js';
 import { requireAuth } from '../middleware/auth.js';
 import { auditMiddleware } from '../middleware/audit.js';
 import { AppError } from '../utils/errors.js';
+import { isAdmin } from '../utils/roles.js';
 import log from '../utils/logger.js';
 
 const router = Router();
@@ -32,7 +33,7 @@ function requireSession(req, res, next) {
  */
 function accessibleAppCount(user) {
   const db = getDb();
-  if (user.role === 'admin') {
+  if (isAdmin(user)) {
     return db.prepare('SELECT COUNT(*) AS n FROM apps').get().n;
   }
   return db.prepare(`
@@ -55,7 +56,7 @@ router.get('/me/mcp-keys', requireSession, (req, res) => {
   res.json({
     keys,
     accessible_app_count: accessibleAppCount(req.user),
-    is_admin: req.user.role === 'admin',
+    is_admin: isAdmin(req.user),
   });
 });
 
@@ -84,7 +85,7 @@ router.post('/me/mcp-keys', requireSession, auditMiddleware('user-mcp-key-create
     api_key: apiKey,
     warning: 'Save this API key — it will not be shown again.',
     accessible_app_count: accessibleAppCount(req.user),
-    is_admin: req.user.role === 'admin',
+    is_admin: isAdmin(req.user),
   });
 });
 
