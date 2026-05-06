@@ -16,6 +16,42 @@ function safeRel(p) {
   return cleaned;
 }
 
+/**
+ * Auto-detect a monorepo frontend workdir when the manifest doesn't declare one.
+ *
+ * Common pattern: repo root holds the backend's package.json, and a sub-directory
+ * (`client/`, `frontend/`, `web/`, `app/`) holds a Vite/webpack/CRA frontend with
+ * its own package.json + build script. Without this detection, the generated
+ * Dockerfile only installs root deps and the frontend never gets built —
+ * deploy goes "live" with a missing or stale dist.
+ *
+ * Returns the workdir name (string) or null. Caller should treat as a
+ * fallback: explicit manifest.fe.workdir always wins.
+ */
+function detectFrontendWorkdir(releaseDir) {
+  const candidates = ['client', 'frontend', 'web', 'app', 'apps/web', 'apps/frontend'];
+  for (const dir of candidates) {
+    const pkgPath = join(releaseDir, dir, 'package.json');
+    if (!existsSync(pkgPath)) continue;
+    let pkg;
+    try { pkg = JSON.parse(readFileSync(pkgPath, 'utf8')); } catch { continue; }
+    const hasBuild = !!pkg?.scripts?.build;
+    const deps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
+    const hasBundler = !!(
+      deps.vite ||
+      deps.webpack ||
+      deps['react-scripts'] ||
+      deps['@vitejs/plugin-react'] ||
+      deps['@vitejs/plugin-vue'] ||
+      deps.parcel ||
+      deps.rollup ||
+      deps.esbuild
+    );
+    if (hasBuild && hasBundler) return dir;
+  }
+  return null;
+}
+
 function detectEntry(manifest, releaseDir, beWorkdir) {
   if (manifest?.be?.entry) return manifest.be.entry;
   if (manifest?.start?.backend) return manifest.start.backend;
@@ -83,7 +119,14 @@ export function ensureDockerfile({ releaseDir, manifest, appBasePath, craneUrl, 
   const node = pickNodeVersion(manifest);
 
   const beWorkdir = manifest?.be?.workdir ? safeRel(manifest.be.workdir) : null;
-  const feWorkdir = manifest?.fe?.workdir ? safeRel(manifest.fe.workdir) : null;
+  // Auto-detect a frontend monorepo workdir when the manifest doesn't say.
+  // Only kicks in if there's no `fe` block at all — if the user declared
+  // `fe.workdir` we honor it, and if they declared `fe` without a workdir
+  // they probably meant the flat layout (root has the frontend too).
+  let feWorkdir = manifest?.fe?.workdir ? safeRel(manifest.fe.workdir) : null;
+  if (!feWorkdir && !manifest?.fe) {
+    feWorkdir = detectFrontendWorkdir(releaseDir);
+  }
   const beInstall = manifest?.be?.install || defaultInstall();
   const feInstall = manifest?.fe?.install || defaultInstall();
 

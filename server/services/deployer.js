@@ -18,6 +18,58 @@ async function waitForHealth(url, timeoutMs) {
   return false;
 }
 
+/**
+ * Post-deploy probe — fetches the user-visible index page through Caddy and
+ * verifies every asset reference (src=/href=) returns non-404. Catches the
+ * "container is up, /api/health is green, users see a white page" failure
+ * mode where the frontend asset URLs don't resolve through Caddy's routing
+ * for some reason (missing dist, bad APP_BASE_PATH, mis-routed slug, etc.).
+ *
+ * Returns one of:
+ *   { status: 'ok' }
+ *   { status: 'missing', missing: [...refs that 404'd] }
+ *   { status: 'inconclusive', reason: 'why we couldn't tell' }
+ */
+async function probeFrontendAssets(slug, env) {
+  const caddyPort = process.env.CADDY_HTTP_PORT || '80';
+  const basePath = env === 'production' ? `/${slug}/` : `/${slug}-sandbox/`;
+  const indexUrl = `http://127.0.0.1:${caddyPort}${basePath}`;
+
+  let html;
+  try {
+    const r = await fetch(indexUrl, { signal: AbortSignal.timeout(8000), redirect: 'manual' });
+    if (r.status >= 300 && r.status < 400) {
+      return { status: 'inconclusive', reason: `Caddy returned ${r.status} (likely SSO/auth redirect); cannot probe assets without a token` };
+    }
+    if (!r.ok) return { status: 'inconclusive', reason: `index page returned ${r.status}` };
+    html = await r.text();
+  } catch (e) {
+    return { status: 'inconclusive', reason: `index fetch failed: ${e.message}` };
+  }
+
+  const refs = [];
+  const matcher = /\b(?:src|href)=["']([^"']+)["']/gi;
+  for (const m of html.matchAll(matcher)) {
+    const ref = m[1];
+    if (/^(https?:|data:|\/\/|mailto:|tel:|#)/i.test(ref)) continue;
+    refs.push(ref);
+  }
+  if (!refs.length) return { status: 'inconclusive', reason: 'index.html has no asset references to probe' };
+
+  const missing = [];
+  for (const ref of refs) {
+    const url = ref.startsWith('/')
+      ? `http://127.0.0.1:${caddyPort}${ref}`
+      : `http://127.0.0.1:${caddyPort}${basePath}${ref.replace(/^\.\//, '')}`;
+    try {
+      const r = await fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(3000), redirect: 'manual' });
+      if (r.status === 404) missing.push(ref);
+    } catch (_) { /* network error — don't false-positive */ }
+  }
+
+  return missing.length ? { status: 'missing', missing } : { status: 'ok' };
+}
+
 function parseResourceLimits(raw) {
   try {
     const parsed = typeof raw === 'string' ? JSON.parse(raw) : (raw || {});
@@ -225,8 +277,24 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     const { dockerAvailable, buildImageIfNeeded, getContainerImage, startApp: dockerStart, stopApp: dockerStop, pruneOldImages, pruneDanglingImages } = await import('./docker.js');
     const { ensureDockerfile, injectAppBasePathArg } = await import('./dockerfileGen.js');
     const { validateDockerfile } = await import('./dockerfileValidator.js');
+    const { validateDistConsistency } = await import('./distValidator.js');
 
     if (!await dockerAvailable()) throw new Error('Docker daemon is not available on this host');
+
+    // Pre-build: if the app committed a `dist/`, verify it's not stale.
+    // Catches the "white page on live" failure mode where index.html
+    // references hashed asset names that don't exist on disk anymore.
+    const distCheck = validateDistConsistency(releaseDir);
+    for (const w of distCheck.warnings) appendLog(`⚠ ${w}`);
+    if (!distCheck.valid) {
+      throw new Error(
+        `DIST_OUT_OF_SYNC: committed ${distCheck.foundDistAt} is stale.\n` +
+        distCheck.errors.map(e => '  • ' + e).join('\n')
+      );
+    }
+    if (distCheck.foundDistAt) {
+      appendLog(`Committed ${distCheck.foundDistAt} validated — index.html references resolve.`);
+    }
 
     const { userProvided } = ensureDockerfile({ releaseDir, manifest, appBasePath, craneUrl, craneInternalUrl });
 
@@ -356,6 +424,31 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     } catch (e) {
       appendLog(`Caddy update skipped: ${e.message}`);
     }
+
+    // 10b. Post-deploy frontend asset probe. Catches the "white page on live"
+    // class of bug — container is healthy, /api/health is green, but Caddy
+    // returns 404 for one or more script/style refs in the served index.
+    // Result is persisted on the deployment row so MCP agents can read it.
+    let frontendAssets = null;
+    try {
+      const probe = await probeFrontendAssets(app.slug, env);
+      frontendAssets = probe.status;
+      if (probe.status === 'missing') {
+        const sample = probe.missing.slice(0, 5).join(', ');
+        const more = probe.missing.length > 5 ? ` (+${probe.missing.length - 5} more)` : '';
+        appendLog(`⚠ frontend_assets=missing — Caddy 404'd: ${sample}${more}`);
+      } else if (probe.status === 'inconclusive') {
+        appendLog(`frontend_assets=inconclusive — ${probe.reason}`);
+      } else {
+        appendLog('frontend_assets=ok — every asset reference resolved through Caddy');
+      }
+    } catch (e) {
+      appendLog(`Frontend probe error: ${e.message}`);
+    }
+    try {
+      db.prepare('UPDATE deployments SET frontend_assets = ?, log = ? WHERE id = ?')
+        .run(frontendAssets, deployLog.join('\n'), deployId);
+    } catch (_) {}
 
     // Cleanup old releases (keep last 5)
     try {
