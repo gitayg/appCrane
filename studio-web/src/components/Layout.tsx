@@ -47,8 +47,19 @@ export function Layout({ children, subItems, activeSub }: Props) {
     adminApi.get<{ user: { name: string; role: string } }>('/api/auth/me')
       .then(d => setUserName(d.user.name + ' (' + d.user.role + ')'))
       .catch(() => {})
-    adminApi.get<{ version: string }>('/api/info')
-      .then(d => setVersion('v' + d.version))
+    // Defensive: /api/info can return without `version` if the request races
+    // auth-state setup (older servers gated it on a header check). Fall back
+    // to /api/version-check.current so the sidebar never renders "vundefined".
+    adminApi.get<{ version?: string }>('/api/info')
+      .then(d => {
+        if (d?.version) {
+          setVersion('v' + d.version)
+        } else {
+          return adminApi.get<{ current?: string }>('/api/version-check')
+            .then(v => { if (v?.current) setVersion('v' + v.current) })
+            .catch(() => {})
+        }
+      })
       .catch(() => {})
   }, [key])
 
