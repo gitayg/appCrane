@@ -447,7 +447,7 @@ input:focus{border-color:var(--accent)}
   <div class="portal-body">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
       <div class="section-title" style="margin-bottom:0">Your Applications</div>
-      <input id="appSearch" placeholder="Search apps…" autocomplete="off"
+      <input id="appSearch" placeholder="Search apps…" autocomplete="off" autofocus
         style="width:200px;margin-bottom:0;font-size:.8rem;padding:6px 10px;border-radius:6px">
     </div>
     <div id="appsList"></div>
@@ -695,6 +695,14 @@ function showApps(data) {
   document.getElementById('loginWrap').classList.add('hidden');
   document.getElementById('portalWrap').classList.remove('hidden');
   if (location.pathname !== '/portal') history.replaceState(null, '', '/portal');
+  // The HTML `autofocus` attribute only fires on initial page load — when
+  // the portal section transitions from hidden → visible after login it
+  // doesn't apply. Force focus programmatically so the user can start
+  // typing to filter immediately.
+  setTimeout(function() {
+    var s = document.getElementById('appSearch');
+    if (s) s.focus();
+  }, 0);
 
   document.getElementById('userName').textContent = data.user.name;
   document.getElementById('userEmail').textContent = data.user.email || data.user.username || '';
