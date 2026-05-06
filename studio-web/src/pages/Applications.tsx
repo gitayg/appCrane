@@ -629,6 +629,25 @@ ${brief}
         <h2 style={{ margin: 0 }}>Applications</h2>
         {/* "+ Add from GitHub" hidden — onboarding now flows through the agent. Wizard state/code retained for future revival. */}
         <button className="btn btn-accent" onClick={generateAgentKey}>New Application Onboarding</button>
+        <input
+          type="text"
+          autoFocus
+          autoComplete="off"
+          placeholder="Search applications by name…"
+          value={filter.name}
+          onChange={e => setFilter(f => ({ ...f, name: e.target.value }))}
+          style={{
+            marginLeft: 'auto',
+            minWidth: 280,
+            padding: '8px 12px',
+            border: '1px solid var(--border)',
+            borderRadius: 7,
+            background: 'var(--surface2)',
+            color: 'var(--text)',
+            fontSize: '.9rem',
+            outline: 'none',
+          }}
+        />
       </div>
 
       <div className="apps-table-wrap">
