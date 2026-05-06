@@ -35,6 +35,7 @@ export function Layout({ children, subItems, activeSub }: Props) {
   const [notifItems, setNotifItems] = useState<{ title: string; sub: string; color: string }[]>([])
   const [notifLoaded, setNotifLoaded] = useState(false)
   const [openRequests, setOpenRequests] = useState(0)
+  const [mcpStatus, setMcpStatus] = useState<'unknown' | 'connected' | 'disconnected'>('unknown')
   const notifRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -64,6 +65,22 @@ export function Layout({ children, subItems, activeSub }: Props) {
         })
     fetchCount()
     const t = setInterval(fetchCount, 15000)
+    return () => clearInterval(t)
+  }, [key])
+
+  // MCP connection status pill — pings /api/mcp/connection. 200 → connected;
+  // anything else → disconnected. The endpoint requires auth; if the user's
+  // session is broken the pill shows disconnected, which is correct since
+  // their MCP calls would fail too. Refresh every 30s.
+  useEffect(() => {
+    if (!key) return
+    const ping = () => {
+      adminApi.get<{ server: { name: string; version: string } }>('/api/mcp/connection')
+        .then(() => setMcpStatus('connected'))
+        .catch(() => setMcpStatus('disconnected'))
+    }
+    ping()
+    const t = setInterval(ping, 30000)
     return () => clearInterval(t)
   }, [key])
 
@@ -189,6 +206,25 @@ export function Layout({ children, subItems, activeSub }: Props) {
                   <span className="sidebar-link-text">{p.label}</span>
                   {p.id === 'requests' && openRequests > 0 && (
                     <span className="sidebar-link-badge">{openRequests}</span>
+                  )}
+                  {p.id === 'mcp' && mcpStatus !== 'unknown' && (
+                    <span
+                      className="sidebar-link-pill"
+                      title={mcpStatus === 'connected' ? 'MCP server is reachable' : 'MCP server is unreachable'}
+                      style={{
+                        marginLeft: 'auto',
+                        fontSize: '.62rem',
+                        fontWeight: 700,
+                        letterSpacing: '.5px',
+                        textTransform: 'uppercase',
+                        padding: '2px 7px',
+                        borderRadius: 999,
+                        background: mcpStatus === 'connected' ? 'var(--green, #22c55e)' : 'var(--dim, #71717a)',
+                        color: 'var(--bg, #0f1117)',
+                      }}
+                    >
+                      {mcpStatus === 'connected' ? 'on' : 'off'}
+                    </span>
                   )}
                 </NavLink>
               )}

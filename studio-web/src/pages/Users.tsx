@@ -37,6 +37,7 @@ export function Users() {
   const [users, setUsers] = useState<User[]>([])
   const [apps, setApps] = useState<App[]>([])
   const [roles, setRoles] = useState<Record<string, Record<number, AppRole>>>({})
+  const [roleSaveStatus, setRoleSaveStatus] = useState<Record<string, 'saving' | 'saved' | 'error'>>({})
   const [showForm, setShowForm] = useState(false)
   const [formMsg, setFormMsg] = useState<{ text: string; ok: boolean } | null>(null)
 
@@ -130,11 +131,38 @@ export function Users() {
   }
 
   async function changeRole(slug: string, userId: number, role: AppRole) {
+    const cellKey = `${slug}:${userId}`
+    const previousRole = roles[slug]?.[userId] ?? 'none'
+
+    // Optimistic UI update + "saving" indicator
     setRoles(prev => ({
       ...prev,
       [slug]: { ...prev[slug], [userId]: role },
     }))
-    await adminApi.put(`/api/apps/${slug}/roles`, { user_id: userId, app_role: role }).catch(() => {})
+    setRoleSaveStatus(s => ({ ...s, [cellKey]: 'saving' }))
+
+    try {
+      await adminApi.put(`/api/apps/${slug}/roles`, { user_id: userId, app_role: role })
+      setRoleSaveStatus(s => ({ ...s, [cellKey]: 'saved' }))
+      // Auto-clear the green check after 1.8s.
+      setTimeout(() => {
+        setRoleSaveStatus(s => {
+          if (s[cellKey] !== 'saved') return s
+          const copy = { ...s }
+          delete copy[cellKey]
+          return copy
+        })
+      }, 1800)
+    } catch (e) {
+      // Revert the optimistic update so the dropdown reflects truth.
+      setRoles(prev => ({
+        ...prev,
+        [slug]: { ...prev[slug], [userId]: previousRole },
+      }))
+      setRoleSaveStatus(s => ({ ...s, [cellKey]: 'error' }))
+      const msg = e instanceof Error ? e.message : String(e)
+      alert(`Could not save role for "${slug}": ${msg}`)
+    }
   }
 
   return (
@@ -273,19 +301,33 @@ export function Users() {
                 {users.map(u => (
                   <tr key={u.id}>
                     <td style={{ whiteSpace: 'nowrap' }}>{u.name}</td>
-                    {apps.map(a => (
-                      <td key={a.slug}>
-                        <select
-                          value={roles[a.slug]?.[u.id] ?? 'none'}
-                          onChange={e => changeRole(a.slug, u.id, e.target.value as AppRole)}
-                        >
-                          <option value="none">none</option>
-                          <option value="user">user</option>
-                          <option value="admin">admin</option>
-                          <option value="owner">owner</option>
-                        </select>
-                      </td>
-                    ))}
+                    {apps.map(a => {
+                      const cellKey = `${a.slug}:${u.id}`
+                      const status = roleSaveStatus[cellKey]
+                      return (
+                        <td key={a.slug} style={{ whiteSpace: 'nowrap' }}>
+                          <select
+                            value={roles[a.slug]?.[u.id] ?? 'none'}
+                            disabled={status === 'saving'}
+                            onChange={e => changeRole(a.slug, u.id, e.target.value as AppRole)}
+                          >
+                            <option value="none">none</option>
+                            <option value="user">user</option>
+                            <option value="admin">admin</option>
+                            <option value="owner">owner</option>
+                          </select>
+                          {status === 'saving' && (
+                            <span style={{ marginLeft: 6, fontSize: '0.75rem', color: 'var(--dim)' }} title="Saving…">…</span>
+                          )}
+                          {status === 'saved' && (
+                            <span style={{ marginLeft: 6, color: 'var(--green)', fontSize: '0.85rem' }} title="Saved">✓</span>
+                          )}
+                          {status === 'error' && (
+                            <span style={{ marginLeft: 6, color: 'var(--red)', fontSize: '0.85rem' }} title="Save failed — change reverted">✗</span>
+                          )}
+                        </td>
+                      )
+                    })}
                   </tr>
                 ))}
               </tbody>
