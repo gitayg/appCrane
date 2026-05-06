@@ -178,8 +178,17 @@ export function requireAppAccess(req, res, next) {
 }
 
 /**
- * Require app user (NOT admin) - for env vars, data, deploy operations.
- * This enforces the "admin cannot access data/env" rule.
+ * Require app user (or platform_admin) — for env vars, data, deploy
+ * operations.
+ *
+ * The "admin cannot access app data/env" guardrail still applies to
+ * regular admins (`role: 'admin'`): they're responsible for hub-level
+ * config and shouldn't accidentally tamper with a specific app's prod
+ * env vars. To do that they must "step down" by assigning themselves
+ * to the app as a regular user.
+ *
+ * Platform admins (`role: 'platform_admin'`) bypass that guardrail
+ * entirely. They're the platform owner — universal access is the point.
  */
 export function requireAppUser(req, res, next) {
   const { slug } = req.params;
@@ -192,8 +201,14 @@ export function requireAppUser(req, res, next) {
 
   req.app = app;
 
-  // Admin / platform_admin explicitly blocked from env/data/deploy operations
-  if (isAdmin(req.user)) {
+  // Platform admin: full access, no assignment needed.
+  if (req.user.role === 'platform_admin') {
+    return next();
+  }
+
+  // Regular admin: blocked from env/data/deploy until they assign
+  // themselves as an app user (intentional guardrail).
+  if (req.user.role === 'admin') {
     return next(new AppError('Admin cannot access app data/env. Assign yourself as an app user first.', 403, 'ADMIN_BLOCKED'));
   }
 
