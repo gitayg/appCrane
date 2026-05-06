@@ -18,28 +18,41 @@ const SERVER_INFO = {
 };
 
 const SERVER_INSTRUCTIONS = `
-AppCrane is a deploy and lifecycle platform for AI-built apps.
+AppCrane is a deploy and lifecycle platform for AI-built apps. This single
+MCP connection exposes BOTH lifecycle and source-code tooling:
 
-This MCP exposes APPCRANE-SPECIFIC operations:
-  - appcrane_list_apps       — discovery
-  - appcrane_get_app         — health, deploys, recent activity
-  - appcrane_get_env         — read env vars (admin / app-admin)
-  - appcrane_set_env         — write env vars (admin / app-admin)
-  - appcrane_deploy          — trigger deploy (defaults to sandbox)
-  - appcrane_get_logs        — runtime logs
-  - appcrane_list_requests   — intake-form queue (filter by bucket)
-  - appcrane_set_request_status — move requests through the lifecycle
-  - appcrane_create_github_repo — bootstrap a new repo for an app
-  - appcrane_create_app      — register an app with AppCrane
+  appcrane_*  — AppCrane-native lifecycle operations:
+    appcrane_list_apps             — discovery
+    appcrane_get_app               — health, deploys, recent activity
+    appcrane_get_env               — read env vars (admin / app-admin)
+    appcrane_set_env               — write env vars (admin / app-admin)
+    appcrane_deploy                — trigger deploy (defaults to sandbox)
+    appcrane_get_logs              — runtime logs
+    appcrane_list_requests         — intake-form queue (filter by bucket)
+    appcrane_set_request_status    — move requests through the lifecycle
+    appcrane_create_github_repo    — bootstrap a new repo for an app
+    appcrane_create_app            — register an app with AppCrane
 
-Code-level operations (file contents, PRs, issues, branches, code search,
-GitHub Actions, releases) live in the OFFICIAL GITHUB MCP SERVER, not here.
-You should normally have BOTH MCPs configured side-by-side. AppCrane mediates
-deploys/env/lifecycle; GitHub MCP mediates source code.
+  github_*    — GitHub passthrough (file contents, PRs, issues, branches,
+                code search, Actions, releases). These appear in tools/list
+                ONLY when the connection has the X-Github-Token header set.
+                AppCrane lazy-spawns a per-user GitHub MCP container and
+                forwards calls to it; you do not need to install or
+                configure a separate GitHub MCP server. The user's PAT was
+                provided once at \`claude mcp add\` time and is reused for
+                every github_* call until they update or revoke it.
 
-A typical end-to-end app onboarding:
+If you do not see github_* tools in tools/list, the user did not include
+X-Github-Token in their AppCrane MCP setup. Either ask them to add it
+(\`claude mcp add appcrane http <url> --header "X-API-Key: ..." --header
+"X-Github-Token: ghp_..."\`) or fall back to the gh / git CLI on their
+machine for code-level operations.
+
+A typical end-to-end app onboarding (no second MCP needed):
   1. appcrane_create_github_repo(...) — create the repo
-  2. <push scaffold via GitHub MCP or local git>
+  2. github_push_files / github_create_or_update_file — scaffold via the
+     same connection (or appcrane_create_github_repo + the user's local git
+     if X-Github-Token isn't configured)
   3. appcrane_create_app(...)         — register with AppCrane
   4. appcrane_set_env(...)            — encrypted env vars
   5. appcrane_deploy(slug, "sandbox") — first deploy
@@ -48,9 +61,10 @@ A typical end-to-end app onboarding:
 Defaults & conventions:
 - Prefer sandbox over production unless the user explicitly asks for production
 - When the user asks "what should I work on?", call appcrane_list_requests
-- For code reading / PRs / issues, route through GitHub MCP, not AppCrane
-- When opening a PR for a request via GitHub MCP, include "Closes appcrane#<id>"
-  in the body so AppCrane can auto-link it on the next status sync
+- Use github_* tools (not gh/git CLI) when X-Github-Token is configured —
+  works in any environment, no shell access needed
+- When opening a PR for a request, include "Closes appcrane#<id>" in the
+  body so AppCrane can auto-link it on the next status sync
 
 Auth: every call uses the caller's AppCrane API key. Tools requiring admin or
 app-admin role are filtered out of tools/list when the caller doesn't have the
