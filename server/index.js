@@ -464,6 +464,27 @@ app.post('/api/self-update', requireAuth, requireAdmin, async (req, res) => {
       cwd, stdio: 'pipe', timeout: 120000,
     });
 
+    // Rebuild the admin SPA if studio-web/ source changed. Otherwise the
+    // server runs new code while serving a stale UI bundle. Skip-if-unchanged
+    // is gated by docs/admin-app/.built-from stamp file.
+    try {
+      const { ensureSpaBuilt } = await import('./services/spaBuilder.js');
+      const spa = ensureSpaBuilt(cwd, { onLog: (m) => log.info(`[self-update] ${m}`) });
+      if (spa.rebuilt === false && spa.reason === 'up-to-date') {
+        log.info(`Self-update: SPA bundle up-to-date (hash=${spa.hash?.slice(0, 7)})`);
+      } else if (spa.rebuilt) {
+        log.info(`Self-update: SPA rebuilt (${spa.reason}) in ${spa.durationMs}ms`);
+      } else {
+        // Build failed but server install succeeded. Surface the error to
+        // the operator without aborting the upgrade — server will boot on
+        // new code with a (potentially stale) old bundle, which is still
+        // better than a partially-installed-and-crashing process.
+        log.error(`Self-update: SPA rebuild FAILED (${spa.reason}): ${spa.error}`);
+      }
+    } catch (e) {
+      log.error(`Self-update: SPA rebuild step crashed: ${e.message}`);
+    }
+
     const newPkg = JSON.parse(readFileSync(join(cwd, 'package.json'), 'utf8'));
     const targetVersion = newPkg.version;
 
@@ -750,6 +771,47 @@ app.listen(PORT, HOST, async () => {
   if (userCount === 0) {
     log.warn('No users found. Initialize with: POST /api/auth/init');
     log.warn('Or run: crane init');
+  }
+
+  // Boot-time SPA freshness check. Catches operators who pulled new server
+  // code (manual `git pull` + restart, no /api/self-update) without
+  // rebuilding the admin bundle. By default we just warn so a misbuild
+  // doesn't keep the server from booting; opt into auto-rebuild via
+  // APPCRANE_SPA_AUTOBUILD=1 in the systemd unit env.
+  try {
+    const { ensureSpaBuilt } = await import('./services/spaBuilder.js');
+    const force = process.env.APPCRANE_SPA_AUTOBUILD === '1';
+    const repoDir = join(__dirname, '..');
+    if (force) {
+      const spa = ensureSpaBuilt(repoDir, { onLog: (m) => log.info(`[boot] ${m}`) });
+      if (spa.rebuilt) {
+        log.info(`Boot: SPA rebuilt (${spa.reason}) in ${spa.durationMs}ms`);
+      } else if (spa.reason !== 'up-to-date') {
+        log.warn(`Boot: SPA rebuild attempted but failed: ${spa.error}. Serving existing bundle.`);
+      }
+    } else {
+      // Quick stamp check, no build.
+      const { execFileSync } = await import('child_process');
+      let sourceHash = null;
+      try {
+        sourceHash = execFileSync(
+          'git', ['-C', repoDir, 'log', '-1', '--format=%H', '--', 'studio-web'],
+          { stdio: 'pipe', timeout: 5000 }
+        ).toString().trim();
+      } catch (_) {}
+      let stampHash = null;
+      const stampPath = join(repoDir, 'docs', 'admin-app', '.built-from');
+      try { stampHash = readFileSync(stampPath, 'utf8').trim(); } catch (_) {}
+      if (sourceHash && stampHash && sourceHash !== stampHash) {
+        log.warn(
+          `Admin SPA bundle may be stale: source=${sourceHash.slice(0, 7)} ` +
+          `stamp=${stampHash.slice(0, 7)}. Run \`cd studio-web && npm run build:admin\` ` +
+          `or set APPCRANE_SPA_AUTOBUILD=1 in the systemd unit env to auto-rebuild on boot.`
+        );
+      }
+    }
+  } catch (e) {
+    log.warn('SPA freshness check skipped: ' + e.message);
   }
 
   // Mark orphaned in-flight deployments as failed
