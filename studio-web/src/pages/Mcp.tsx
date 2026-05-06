@@ -394,8 +394,10 @@ export function Mcp() {
       </div>
       <p style={{ color: 'var(--dim)', fontSize: '.85rem', marginBottom: 16, maxWidth: 740 }}>
         The Model Context Protocol lets any compatible AI agent (Claude Code, Cursor, Continue, Cline, Zed, …)
-        discover and use AppCrane tools. AppCrane handles <strong>deploys, env vars, logs, and requests</strong>;
-        for <strong>code, PRs, and issues</strong> install GitHub's official MCP alongside.
+        discover and use AppCrane tools. One connection covers both <strong>deploys, env vars, logs, and requests</strong>
+        (AppCrane native) and <strong>code, PRs, issues, branches, code search</strong> (GitHub passthrough,
+        when an <code style={{ fontFamily: 'monospace', fontSize: '.78rem' }}>X-Github-Token</code> header is supplied).
+        No separate GitHub MCP install required.
       </p>
 
       <PersonalKeyCard endpoint={endpoint} />
