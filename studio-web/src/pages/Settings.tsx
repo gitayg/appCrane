@@ -293,19 +293,24 @@ function SecurityTab() {
 }
 
 interface PermDef { key: string; label: string; description: string }
-type Role = 'user' | 'admin' | 'owner'
+type Role = 'user' | 'admin' | 'owner' | 'platform_admin'
 type Matrix = Record<string, Record<Role, number>>
 
 function RolesTab() {
   const [permissions, setPermissions] = useState<PermDef[]>([])
   const [matrix, setMatrix] = useState<Matrix>({})
+  const [roles, setRoles] = useState<Role[]>(['user', 'admin', 'owner', 'platform_admin'])
   const [busy, setBusy] = useState(false)
   const [saved, flashSaved] = useFlash()
   const [error, setError] = useState<string | null>(null)
 
   const load = () => {
     adminApi.get<{ permissions: PermDef[]; matrix: Matrix; roles: Role[] }>('/api/settings/role-permissions/catalog')
-      .then(r => { setPermissions(r.permissions ?? []); setMatrix(r.matrix ?? {}) })
+      .then(r => {
+        setPermissions(r.permissions ?? [])
+        setMatrix(r.matrix ?? {})
+        if (Array.isArray(r.roles) && r.roles.length) setRoles(r.roles)
+      })
       .catch(e => setError(e?.message || 'Failed to load matrix'))
   }
   useEffect(() => { load() }, [])
@@ -368,8 +373,6 @@ function RolesTab() {
     )
   }
 
-  const roles: Role[] = ['user', 'admin', 'owner']
-
   return (
     <>
       <div className="setting-card">
@@ -377,7 +380,7 @@ function RolesTab() {
         <p>
           High-stakes operations where AppCrane lets you decide who's allowed. Most other authz
           stays hardcoded — these are the cells that genuinely vary across teams.
-          AppCrane global admins (<code style={{ fontFamily: 'monospace', background: 'var(--surface2)', padding: '1px 5px', borderRadius: 3, fontSize: '.78rem' }}>users.role = admin</code>)
+          AppCrane global admins (<code style={{ fontFamily: 'monospace', background: 'var(--surface2)', padding: '1px 5px', borderRadius: 3, fontSize: '.78rem' }}>users.role = admin</code> or <code style={{ fontFamily: 'monospace', background: 'var(--surface2)', padding: '1px 5px', borderRadius: 3, fontSize: '.78rem' }}>platform_admin</code>)
           always have every permission regardless of this matrix; the table below governs only the
           per-app role tiers.
         </p>
