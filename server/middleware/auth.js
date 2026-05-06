@@ -119,11 +119,27 @@ export function requireAuth(req, res, next) {
 }
 
 /**
- * Require admin role.
+ * Require admin or platform_admin role. Both tiers can hit any endpoint
+ * gated by this middleware — the role-permissions matrix governs the
+ * fine-grained per-app capabilities, and a separate requirePlatformAdmin
+ * exists for the small set of operations that must stay platform-only
+ * (e.g. assigning the platform_admin role itself).
  */
 export function requireAdmin(req, res, next) {
-  if (!req.user || req.user.role !== 'admin') {
+  const role = req.user?.role;
+  if (!req.user || (role !== 'admin' && role !== 'platform_admin')) {
     return next(new AppError('Admin access required', 403, 'FORBIDDEN'));
+  }
+  next();
+}
+
+/**
+ * Require platform_admin role specifically. Used only by endpoints that
+ * mutate the role-tier system itself (assign/revoke platform_admin, etc.).
+ */
+export function requirePlatformAdmin(req, res, next) {
+  if (!req.user || req.user.role !== 'platform_admin') {
+    return next(new AppError('Platform admin access required', 403, 'FORBIDDEN_PLATFORM_ADMIN'));
   }
   next();
 }

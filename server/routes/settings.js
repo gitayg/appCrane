@@ -30,6 +30,40 @@ router.get('/', (req, res) => {
   res.json({ settings });
 });
 
+// ── Configurable RBAC matrix ───────────────────────────────────────────
+//
+// /api/settings/role-permissions GET (any authed) returns the catalog +
+// current matrix. PUT (admin) bulk-updates. POST /reset (admin) restores
+// the seeded defaults.
+//
+// IMPORTANT: these routes MUST be registered before the generic /:key
+// handlers below — otherwise PUT /:key captures /role-permissions first
+// and rejects the body with "value required" (the matrix payload has no
+// `value` field).
+
+router.get('/role-permissions/catalog', requireAuth, (req, res) => {
+  res.json({
+    permissions: PERMISSIONS,
+    matrix: getMatrix(),
+    roles: ['user', 'admin', 'owner', 'platform_admin'],
+  });
+});
+
+router.put('/role-permissions', requireAuth, requireAdmin, (req, res) => {
+  const { matrix } = req.body || {};
+  if (!matrix || typeof matrix !== 'object') {
+    return res.status(400).json({ error: { code: 'VALIDATION', message: 'matrix required' } });
+  }
+  setMatrix(matrix);
+  res.json({ matrix: getMatrix() });
+});
+
+router.post('/role-permissions/reset', requireAuth, requireAdmin, (req, res) => {
+  const { permissions } = req.body || {};
+  resetToDefaults(Array.isArray(permissions) ? permissions : null);
+  res.json({ matrix: getMatrix() });
+});
+
 /**
  * GET /api/settings/:key - Single setting (public, sensitive keys blocked)
  */
@@ -54,35 +88,6 @@ router.put('/:key', requireAuth, requireAdmin, (req, res) => {
     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_by = excluded.updated_by, updated_at = datetime('now')
   `).run(req.params.key, String(value), req.user.id);
   res.json({ key: req.params.key, value, message: 'Setting saved' });
-});
-
-// ── Configurable RBAC matrix ───────────────────────────────────────────
-//
-// /api/settings/role-permissions GET (any authed) returns the catalog +
-// current matrix. PUT (admin) bulk-updates. POST /reset (admin) restores
-// the seeded defaults.
-
-router.get('/role-permissions/catalog', requireAuth, (req, res) => {
-  res.json({
-    permissions: PERMISSIONS,
-    matrix: getMatrix(),
-    roles: ['user', 'admin', 'owner'],
-  });
-});
-
-router.put('/role-permissions', requireAuth, requireAdmin, (req, res) => {
-  const { matrix } = req.body || {};
-  if (!matrix || typeof matrix !== 'object') {
-    return res.status(400).json({ error: { code: 'VALIDATION', message: 'matrix required' } });
-  }
-  setMatrix(matrix);
-  res.json({ matrix: getMatrix() });
-});
-
-router.post('/role-permissions/reset', requireAuth, requireAdmin, (req, res) => {
-  const { permissions } = req.body || {};
-  resetToDefaults(Array.isArray(permissions) ? permissions : null);
-  res.json({ matrix: getMatrix() });
 });
 
 export default router;

@@ -593,10 +593,13 @@ When deploying a brand new app for the first time:
 
 AppCrane has two types of keys:
 
-| Type | Scope | Created by |
-|------|-------|------------|
-| **Admin key** (`dhk_admin_*`) | Full hub access — manage all apps, users, Caddy | `crane init` CLI on the server |
-| **Deployment key** (`dhk_user_*`) | One specific app — deploy, env vars, health, rollback | Admin via dashboard "Onboard" button or API |
+| Type | Role | Scope | Created by |
+|------|------|-------|------------|
+| **Admin key** (`dhk_admin_*`) | `platform_admin` | Full hub access + manage role assignments (assign/revoke `platform_admin`). The bootstrap admin (`id=1`) is auto-promoted to this role. | `crane init` CLI on the server |
+| **Admin key** (`dhk_admin_*`) | `admin` | Day-to-day hub admin — manage apps, users, Caddy. Cannot assign `platform_admin`. | Promoted from a `user`-role record by a platform admin via dashboard or `PUT /api/users/:id/role` |
+| **Deployment key** (`dhk_user_*`) | `user` | One specific app — deploy, env vars, health, rollback | Admin via dashboard "Onboard" button or API |
+
+The role-permissions matrix at `/settings#roles` configures what each tier can do per app — `platform_admin` is shown as a column there alongside `owner` / `admin` / `user`. Defaults grant `platform_admin` everything; operators can revoke per-permission.
 
 **IMPORTANT: API keys are shown ONLY ONCE at creation. They cannot be retrieved later.**
 

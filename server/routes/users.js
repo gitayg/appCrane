@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { getDb } from '../db.js';
 import { generateApiKey, hashApiKey, hashPassword, encrypt } from '../services/encryption.js';
-import { requireAuth, requireAdmin } from '../middleware/auth.js';
+import { requireAuth, requireAdmin, requirePlatformAdmin } from '../middleware/auth.js';
 import { auditMiddleware } from '../middleware/audit.js';
 import { AppError } from '../utils/errors.js';
 
@@ -32,9 +32,21 @@ router.post('/', requireAdmin, auditMiddleware('user-create'), (req, res) => {
   const { name, email, role, kind, username, password, avatar_url, phone, year_of_birth } = req.body;
   if (!name) throw new AppError('Name is required', 400, 'VALIDATION');
 
-  const userRole = role === 'admin' ? 'admin' : 'user';
+  // Role assignment rules:
+  //   - 'platform_admin' can only be assigned by an existing platform_admin (no privilege escalation)
+  //   - 'admin' can be assigned by admin or platform_admin
+  //   - anything else falls back to 'user'
+  let userRole = 'user';
+  if (role === 'platform_admin') {
+    if (req.user.role !== 'platform_admin') {
+      throw new AppError('Only platform admins can create platform admins', 403, 'FORBIDDEN_PLATFORM_ADMIN');
+    }
+    userRole = 'platform_admin';
+  } else if (role === 'admin') {
+    userRole = 'admin';
+  }
   const userKind = kind === 'agent' ? 'agent' : 'human';
-  const prefix = userRole === 'admin' ? 'dhk_admin' : 'dhk_user';
+  const prefix = (userRole === 'admin' || userRole === 'platform_admin') ? 'dhk_admin' : 'dhk_user';
   const apiKey = generateApiKey(prefix);
   const keyHash = hashApiKey(apiKey);
   const pwHash = password ? hashPassword(password) : null;
@@ -98,6 +110,41 @@ router.delete('/:id', requireAdmin, auditMiddleware('user-delete'), (req, res) =
     db.prepare('DELETE FROM users WHERE id = ?').run(userId);
   })();
   res.json({ message: `User '${user.name}' deleted` });
+});
+
+/**
+ * PUT /api/users/:id/role - Change a user's role (platform_admin only).
+ *
+ * Body: { role: 'platform_admin' | 'admin' | 'user' }
+ *
+ * Only platform_admin can call this. Guarded against demoting the last
+ * platform_admin (would lock the org out of role-assignment forever) and
+ * against self-demotion (use a different platform_admin to do that).
+ */
+router.put('/:id/role', requirePlatformAdmin, auditMiddleware('user-set-role'), (req, res) => {
+  const db = getDb();
+  const userId = parseInt(req.params.id);
+  const { role } = req.body || {};
+
+  if (!['platform_admin', 'admin', 'user'].includes(role)) {
+    throw new AppError("role must be 'platform_admin', 'admin', or 'user'", 400, 'VALIDATION');
+  }
+
+  const user = db.prepare('SELECT id, role FROM users WHERE id = ?').get(userId);
+  if (!user) throw new AppError('User not found', 404, 'NOT_FOUND');
+
+  if (user.role === 'platform_admin' && role !== 'platform_admin') {
+    if (userId === req.user.id) {
+      throw new AppError('Cannot demote yourself. Have another platform admin do it.', 400, 'SELF_DEMOTE');
+    }
+    const others = db.prepare("SELECT COUNT(*) AS n FROM users WHERE role = 'platform_admin' AND id != ?").get(userId);
+    if (others.n === 0) {
+      throw new AppError('Cannot demote the only platform admin', 400, 'LAST_PLATFORM_ADMIN');
+    }
+  }
+
+  db.prepare('UPDATE users SET role = ? WHERE id = ?').run(role, userId);
+  res.json({ user: { id: userId, role } });
 });
 
 /**
