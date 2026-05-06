@@ -50,7 +50,11 @@ export const PERMISSIONS = [
 ];
 
 const PERMISSION_KEYS = new Set(PERMISSIONS.map(p => p.key));
-const VALID_ROLES = ['user', 'admin', 'owner'];
+// Per-app role tiers shown in the matrix. 'platform_admin' is technically a
+// global role on users.role, but it's surfaced here so the operator can
+// configure what platform admins are allowed to do per-permission, same
+// UI/storage as the per-app tiers.
+const VALID_ROLES = ['user', 'admin', 'owner', 'platform_admin'];
 
 /**
  * Resolve the caller's role on a specific app:
@@ -86,7 +90,7 @@ export function userHasAppPermission(user, app, permission) {
     throw new Error(`Unknown permission: ${permission}`);
   }
   if (!user) return false;
-  if (user.role === 'admin') return true;
+  if (user.role === 'admin' || user.role === 'platform_admin') return true;
 
   const role = roleForUserOnApp(user, app);
   if (!role) return false;
@@ -99,15 +103,16 @@ export function userHasAppPermission(user, app, permission) {
 }
 
 /**
- * Return the entire matrix as { permission: { user: 0|1, admin: 0|1, owner: 0|1 } }
- * for the Settings UI to render.
+ * Return the entire matrix as { permission: { user, admin, owner, platform_admin } }
+ * for the Settings UI to render. All cells default to 0 if the row is
+ * missing in role_permissions.
  */
 export function getMatrix() {
   const db = getDb();
   const rows = db.prepare('SELECT permission, role, granted FROM role_permissions').all();
   const matrix = {};
   for (const p of PERMISSIONS) {
-    matrix[p.key] = { user: 0, admin: 0, owner: 0 };
+    matrix[p.key] = Object.fromEntries(VALID_ROLES.map(r => [r, 0]));
   }
   for (const r of rows) {
     if (matrix[r.permission] && VALID_ROLES.includes(r.role)) {
@@ -141,11 +146,11 @@ export function setMatrix(matrix) {
 /** Restore the seeded defaults for one or more permissions. */
 export function resetToDefaults(permissionKeys = null) {
   const DEFAULTS = {
-    'deploy.production':         { user: 0, admin: 1, owner: 1 },
-    'request.ship':              { user: 0, admin: 0, owner: 1 },
-    'env.write.production':      { user: 0, admin: 1, owner: 1 },
-    'code.modify_repo_settings': { user: 0, admin: 0, owner: 1 },
-    'app.delete':                { user: 0, admin: 0, owner: 1 },
+    'deploy.production':         { user: 0, admin: 1, owner: 1, platform_admin: 1 },
+    'request.ship':              { user: 0, admin: 0, owner: 1, platform_admin: 1 },
+    'env.write.production':      { user: 0, admin: 1, owner: 1, platform_admin: 1 },
+    'code.modify_repo_settings': { user: 0, admin: 0, owner: 1, platform_admin: 1 },
+    'app.delete':                { user: 0, admin: 0, owner: 1, platform_admin: 1 },
   };
   const subset = {};
   const keys = permissionKeys || Object.keys(DEFAULTS);
