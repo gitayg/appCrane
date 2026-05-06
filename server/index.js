@@ -197,7 +197,7 @@ app.use((req, res, next) => {
   if (PUBLIC_PATHS.includes(req.path) || req.path.startsWith('/docs/') || isPublicSettingsRead || isCrashPage || req.method === 'OPTIONS') return next();
 
   const db = getDb();
-  const adminExists = db.prepare("SELECT COUNT(*) as count FROM users WHERE role = 'admin'").get().count > 0;
+  const adminExists = db.prepare("SELECT COUNT(*) as count FROM users WHERE role IN ('admin', 'platform_admin')").get().count > 0;
   if (!adminExists) {
     const accept = req.headers.accept || '';
     if (accept.includes('text/html')) {
@@ -264,7 +264,7 @@ app.use((req, res, next) => {
 // Public API endpoints (no auth)
 app.get('/api/info', (req, res) => {
   const db = getDb();
-  const adminExists = db.prepare("SELECT COUNT(*) as count FROM users WHERE role = 'admin'").get().count > 0;
+  const adminExists = db.prepare("SELECT COUNT(*) as count FROM users WHERE role IN ('admin', 'platform_admin')").get().count > 0;
   const apiKey = req.headers['x-api-key'] || req.headers['authorization']?.replace(/^Bearer\s+/i, '');
   const authenticated = !!(apiKey && apiKey.length > 10);
   res.json({

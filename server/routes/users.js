@@ -262,7 +262,7 @@ router.get('/:slug/identity/users', requireAdmin, (req, res) => {
       COALESCE(aur.app_role, 'none') as app_role
     FROM users u
     LEFT JOIN app_user_roles aur ON u.id = aur.user_id AND aur.app_id = ?
-    WHERE u.role != 'admin'
+    WHERE u.role NOT IN ('admin', 'platform_admin')
     ORDER BY u.name
   `).all(app.id);
 
