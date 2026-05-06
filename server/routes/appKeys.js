@@ -4,6 +4,7 @@ import { generateApiKey, hashApiKey } from '../services/encryption.js';
 import { requireAuth } from '../middleware/auth.js';
 import { auditMiddleware } from '../middleware/audit.js';
 import { AppError } from '../utils/errors.js';
+import { isAdmin } from '../utils/roles.js';
 import log from '../utils/logger.js';
 
 const router = Router();
@@ -28,7 +29,7 @@ function requireAppOwner(req, res, next) {
     return next(new AppError('App-scoped keys cannot manage keys. Sign in as a user.', 403, 'KEY_FORBIDDEN'));
   }
 
-  if (req.user.role === 'admin') return next();
+  if (isAdmin(req.user)) return next();
 
   const role = db.prepare(
     "SELECT app_role FROM app_user_roles WHERE app_id = ? AND user_id = ?"

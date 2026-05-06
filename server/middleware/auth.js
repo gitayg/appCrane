@@ -1,6 +1,7 @@
 import { getDb } from '../db.js';
 import { hashApiKey } from '../services/encryption.js';
 import { AppError } from '../utils/errors.js';
+import { isAdmin } from '../utils/roles.js';
 
 /**
  * Authentication middleware. Accepts either:
@@ -159,8 +160,8 @@ export function requireAppAccess(req, res, next) {
 
   req.app = app;
 
-  // Admin can access app info (but not env/data - enforced in those routes)
-  if (req.user.role === 'admin') {
+  // Admin / platform_admin can access app info (env/data still gated below)
+  if (isAdmin(req.user)) {
     return next();
   }
 
@@ -191,8 +192,8 @@ export function requireAppUser(req, res, next) {
 
   req.app = app;
 
-  // Admin explicitly blocked from env/data/deploy operations
-  if (req.user.role === 'admin') {
+  // Admin / platform_admin explicitly blocked from env/data/deploy operations
+  if (isAdmin(req.user)) {
     return next(new AppError('Admin cannot access app data/env. Assign yourself as an app user first.', 403, 'ADMIN_BLOCKED'));
   }
 

@@ -32,9 +32,25 @@ export function useAuthState(): AuthCtx {
   const [identityToken, setIdentityToken] = useState(() => readAuth().identityToken)
 
   const setKey = useCallback((k: string) => {
-    setKeyState(k)
-    if (k) localStorage.setItem(KEY_STORE, k)
-    else   localStorage.removeItem(KEY_STORE)
+    // Reject keys with non-ASCII characters before they hit localStorage.
+    // Browsers refuse to put non-ISO-8859-1 chars into HTTP headers and
+    // throw a TypeError out of fetch. Common culprit: a placeholder
+    // ellipsis (U+2026) accidentally pasted instead of the real key, or
+    // smart quotes / em-dashes from a rich-text source.
+    if (k) {
+      const trimmed = k.trim()
+      const cleaned = trimmed.replace(/[^\x20-\x7E]/g, '')
+      if (cleaned !== trimmed) {
+        // eslint-disable-next-line no-alert
+        alert('API key contained invalid (non-ASCII) characters and was rejected. Re-copy the key using the modal\'s "Copy key" button — do not select surrounding text.')
+        return
+      }
+      setKeyState(cleaned)
+      localStorage.setItem(KEY_STORE, cleaned)
+    } else {
+      setKeyState('')
+      localStorage.removeItem(KEY_STORE)
+    }
   }, [])
 
   const signOut = useCallback(() => {
