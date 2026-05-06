@@ -31,6 +31,17 @@ export function authTokenForSSE(): string {
       || ''
 }
 
+/** Server messages that mean the stored credential is genuinely bad and
+ *  should be cleared. Anything else (a missing header due to a transient
+ *  state mismatch, a scope-restricted key, etc.) leaves localStorage alone
+ *  so a single oddball 401 doesn't take out a working session. */
+const PROVEN_BAD_CREDENTIAL_MESSAGES = new Set([
+  'Invalid API key',
+  'Invalid or expired session',
+  'Account is deactivated',
+  'Issuer account is deactivated',
+])
+
 async function req<T = unknown>(path: string, init?: RequestInit): Promise<T> {
   const r = await fetch(path, {
     ...init,
@@ -41,13 +52,21 @@ async function req<T = unknown>(path: string, init?: RequestInit): Promise<T> {
     },
   })
   if (r.status === 401) {
-    // Don't auto-redirect when running embedded in the portal — portal
-    // owns the auth flow. Only the admin SPA should bounce on 401.
-    if (localStorage.getItem('cc_api_key')) {
+    // Read the server's specific message before deciding whether to nuke
+    // the session. Older logic wiped cc_api_key on ANY 401 — which
+    // includes "Missing X-API-Key header or Bearer token" (the header
+    // failed to attach for a reason unrelated to the key being valid)
+    // and would chain-react: one transient miss → cleared session →
+    // every subsequent fetch un-authed.
+    const body = await r.clone().json().catch(() => ({}))
+    const message = (body as { error?: { message?: string } })?.error?.message || ''
+    const provenBad = PROVEN_BAD_CREDENTIAL_MESSAGES.has(message)
+
+    if (provenBad && localStorage.getItem('cc_api_key')) {
       localStorage.removeItem('cc_api_key')
       window.location.href = '/dashboard'
     }
-    throw new Error('Unauthorized')
+    throw new Error(message ? `Unauthorized: ${message}` : 'Unauthorized')
   }
   if (!r.ok) {
     const body = await r.json().catch(() => ({}))
