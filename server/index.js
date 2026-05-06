@@ -341,6 +341,78 @@ function bootSentinelFile() {
   return join(selfUpdateDataDir(), 'boot-sentinel.json');
 }
 
+/**
+ * If a pending self-update exists and the boot sequence just failed,
+ * roll the working tree back to the previous SHA, npm install, and exit
+ * so systemd restarts us on the rolled-back code. Hard cap of 3 attempts
+ * (counter persisted to the pending file) so a doubly-broken state
+ * doesn't loop forever.
+ *
+ * Returns nothing; either exits the process or returns to let the caller
+ * crash with the original error.
+ */
+async function maybeAutoRollback(originalError) {
+  const pendingPath = pendingUpdateFile();
+  if (!existsSync(pendingPath)) {
+    log.error('No pending self-update — cannot auto-rollback. Manual intervention required.');
+    return;
+  }
+  let pending;
+  try {
+    pending = JSON.parse(readFileSync(pendingPath, 'utf8'));
+  } catch (_) {
+    log.error('Pending self-update file unreadable — cannot auto-rollback.');
+    return;
+  }
+  if (pending.completed_at) {
+    log.error('Pending update was already completed — boot failure is unrelated to a recent update. Cannot auto-rollback.');
+    return;
+  }
+  if (!pending.previous_sha) {
+    log.error(`Pending update lacks previous_sha (legacy format) — cannot auto-rollback. Manually: cd /path/to/appcrane && git reset --hard <sha-before-${pending.previous_version}> && npm install && systemctl restart appcrane`);
+    return;
+  }
+  const attempts = pending.rollback_attempts || 0;
+  if (attempts >= 3) {
+    log.error(`Auto-rollback budget exhausted (${attempts} attempts on ${pending.previous_version} → ${pending.target_version}). Both versions failing. Manual intervention required.`);
+    return;
+  }
+
+  log.error(`Triggering auto-rollback to ${pending.previous_version} @ ${pending.previous_sha.slice(0, 7)} (attempt ${attempts + 1}/3)`);
+  try {
+    const { execFileSync } = await import('child_process');
+    const cwd = join(__dirname, '..');
+    const gitOpts = { cwd, stdio: 'pipe', timeout: 30000 };
+
+    // Persist the attempt BEFORE we do anything destructive so a crash
+    // mid-rollback doesn't burn an attempt without recording it.
+    writeFileSync(pendingPath, JSON.stringify({
+      ...pending,
+      rollback_attempts: attempts + 1,
+      last_rollback_at: new Date().toISOString(),
+      last_rollback_error: String(originalError?.message || originalError).slice(0, 500),
+    }, null, 2));
+
+    // Self-heal git's "dubious ownership" if uid drifts (mirrors the
+    // self-update endpoint's defensive setup).
+    try {
+      execFileSync('git', ['config', '--global', '--add', 'safe.directory', cwd], gitOpts);
+    } catch (_) { /* best-effort */ }
+
+    execFileSync('git', ['fetch', 'origin'], gitOpts);
+    execFileSync('git', ['reset', '--hard', pending.previous_sha], gitOpts);
+    execFileSync('npm', ['install', '--omit=dev', '--prefer-offline'], {
+      cwd, stdio: 'pipe', timeout: 120000,
+    });
+
+    log.error(`Auto-rollback to ${pending.previous_version} complete. Exiting for systemd restart.`);
+    process.exit(0);
+  } catch (rollbackErr) {
+    log.error(`Auto-rollback ITSELF failed: ${rollbackErr.stderr?.toString?.() || rollbackErr.message}`);
+    log.error('Both forward update and rollback failed — AppCrane is bricked. SSH in to recover.');
+  }
+}
+
 // Self-update endpoint (admin only)
 app.post('/api/self-update', requireAuth, requireAdmin, async (req, res) => {
   const cwd = join(__dirname, '..');
@@ -379,6 +451,12 @@ app.post('/api/self-update', requireAuth, requireAdmin, async (req, res) => {
       // Best-effort; if it fails we'll see a clearer error from `fetch` below.
     }
 
+    // Capture the SHA we're rolling FROM before the reset, so the boot
+    // sentinel can `git reset --hard <previous_sha>` if the new version
+    // crashes on first boot. SHA is more reliable than version-tag (we
+    // don't tag releases).
+    const previousSha = execFileSync('git', ['rev-parse', 'HEAD'], gitOpts).toString().trim();
+
     execFileSync('git', ['-c', 'credential.helper=', 'fetch', 'origin'], gitOpts);
     const pullOutput = execFileSync('git', ['reset', '--hard', 'origin/main'], gitOpts).toString().trim();
 
@@ -393,6 +471,7 @@ app.post('/api/self-update', requireAuth, requireAdmin, async (req, res) => {
     if (!existsSync(dataDir)) mkdirSync(dataDir, { recursive: true });
     writeFileSync(pendingUpdateFile(), JSON.stringify({
       previous_version: VERSION,
+      previous_sha: previousSha,
       target_version: targetVersion,
       started_at: new Date().toISOString(),
       pid: process.pid,
@@ -619,7 +698,33 @@ app.listen(PORT, HOST, async () => {
       version: VERSION,
       boot_time: new Date().toISOString(),
     }, null, 2));
+  } catch (e) {
+    log.warn('Boot sentinel write failed: ' + e.message);
+  }
 
+  // First run check — initialize DB (which runs migrations). If migrations
+  // fail AND a pending self-update is present, that's almost certainly a bad
+  // release that just landed; auto-rollback to the previous SHA and let
+  // systemd restart us on the working version. The reconcile of the pending
+  // file moves AFTER this point so 'success: true' is only recorded when
+  // the DB is genuinely healthy.
+  let db;
+  try {
+    const { getDb } = await import('./db.js');
+    db = getDb();
+  } catch (e) {
+    log.error(`DB initialization failed during boot: ${e.message}`);
+    if (e.stack) log.error(e.stack);
+    await maybeAutoRollback(e);
+    // If maybeAutoRollback returned without exiting, no rollback was attempted.
+    // Bail loudly so systemd doesn't restart us in a tight loop.
+    process.exit(1);
+  }
+
+  // Reconcile a pending self-update — only AFTER DB is healthy, otherwise
+  // we'd mark a broken release "success: true" before its migrations have
+  // even run.
+  try {
     const pending = pendingUpdateFile();
     if (existsSync(pending)) {
       const info = JSON.parse(readFileSync(pending, 'utf8'));
@@ -638,12 +743,9 @@ app.listen(PORT, HOST, async () => {
       }
     }
   } catch (e) {
-    log.warn('Boot sentinel write failed: ' + e.message);
+    log.warn('Pending self-update reconcile failed: ' + e.message);
   }
 
-  // First run check
-  const { getDb } = await import('./db.js');
-  const db = getDb();
   const userCount = db.prepare('SELECT COUNT(*) as count FROM users').get().count;
   if (userCount === 0) {
     log.warn('No users found. Initialize with: POST /api/auth/init');
