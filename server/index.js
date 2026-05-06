@@ -265,11 +265,13 @@ app.use((req, res, next) => {
 app.get('/api/info', (req, res) => {
   const db = getDb();
   const adminExists = db.prepare("SELECT COUNT(*) as count FROM users WHERE role IN ('admin', 'platform_admin')").get().count > 0;
-  const apiKey = req.headers['x-api-key'] || req.headers['authorization']?.replace(/^Bearer\s+/i, '');
-  const authenticated = !!(apiKey && apiKey.length > 10);
+  // Version is no longer auth-gated. It already leaks through
+  // /api/version-check, bundle filenames, GitHub releases, and the
+  // sidebar's first /api/info call (which can race auth-state setup).
+  // Hiding it here was net-negative for ops without buying any security.
   res.json({
     name: 'AppCrane',
-    ...(authenticated && { version: VERSION }),
+    version: VERSION,
     status: adminExists ? 'ready' : 'needs_init',
     description: 'AI-powered app builder',
     docs: '/docs',
