@@ -2,6 +2,7 @@ import { getDb } from '../db.js';
 import { decrypt, encrypt } from './encryption.js';
 import { BUCKETS, bucketize, applyBucket } from './requestStatus.js';
 import { userHasAppPermission } from './permissions.js';
+import { isAdmin } from '../utils/roles.js';
 import log from '../utils/logger.js';
 import { mkdirSync } from 'fs';
 import { join } from 'path';
@@ -47,11 +48,11 @@ function accessibleSlugsForUser(user) {
   if (user._mcpAppKey) return [user._mcpAppKey.app_slug];
 
   // Personal MCP key — dynamically resolves to apps where the user has access.
-  // AppCrane global admins see every app; everyone else sees apps they own.
-  // Role changes take effect on the next call (no key reissue needed).
+  // AppCrane global admins (admin OR platform_admin) see every app; everyone
+  // else sees apps they own. Role changes take effect on the next call.
   if (user._mcpUserKey) {
     const db = getDb();
-    if (user.role === 'admin') {
+    if (isAdmin(user)) {
       return db.prepare('SELECT slug FROM apps').all().map(r => r.slug);
     }
     return db.prepare(`
@@ -65,7 +66,7 @@ function accessibleSlugsForUser(user) {
   const scope = mcpScope(user);
   if (scope) return scope; // explicit scope wins over role
   const db = getDb();
-  if (user.role === 'admin') {
+  if (isAdmin(user)) {
     return db.prepare('SELECT slug FROM apps').all().map(r => r.slug);
   }
   return db
@@ -86,10 +87,10 @@ function getAppForUser(user, slug) {
   if (!app) throw new Error(`App not found: ${slug}`);
 
   // Personal MCP key locks scope to apps the user has access to. AppCrane
-  // global admins keep their global access; everyone else is restricted to
-  // apps where they're explicitly Owner.
+  // global admins (admin OR platform_admin) keep their global access;
+  // everyone else is restricted to apps where they're explicitly Owner.
   if (user._mcpUserKey) {
-    if (user.role === 'admin') return app;
+    if (isAdmin(user)) return app;
     const owns = db.prepare(
       "SELECT 1 FROM app_user_roles WHERE app_id = ? AND user_id = ? AND app_role = 'owner'"
     ).get(app.id, user.id);
@@ -103,7 +104,7 @@ function getAppForUser(user, slug) {
   if (inScope === true) return app;
 
   // No explicit scope: fall back to role/assignment check
-  if (user.role === 'admin') return app;
+  if (isAdmin(user)) return app;
   const hasAccess =
     db.prepare('SELECT 1 FROM app_users WHERE app_id = ? AND user_id = ?').get(app.id, user.id) ||
     db.prepare('SELECT 1 FROM app_user_roles WHERE app_id = ? AND user_id = ?').get(app.id, user.id);
@@ -113,8 +114,9 @@ function getAppForUser(user, slug) {
 
 function isAppAdmin(user, app) {
   // MCP scope only restricts WHICH apps; if the user has the slug in scope
-  // and is a global admin, they're still an app-admin for it.
-  if (user.role === 'admin') return true;
+  // and is a global admin (admin or platform_admin), they're still an
+  // app-admin for it.
+  if (isAdmin(user)) return true;
   const db = getDb();
   const row = db.prepare('SELECT app_role FROM app_user_roles WHERE app_id = ? AND user_id = ?').get(app.id, user.id);
   return row?.app_role === 'admin';
@@ -147,13 +149,59 @@ function auditMcpCall(user, toolName, args, error) {
   }
 }
 
+/**
+ * Augment an app row with the canonical URLs (production + sandbox) and
+ * the most recent live deployment version for each environment. Used by
+ * appcrane_list_apps and appcrane_get_app so an agent can answer
+ * "what's deployed and where" without a follow-up call.
+ *
+ * `app` must include `id`, `slug`, and `domain`.
+ */
+function enrichAppRow(db, app) {
+  const craneDomain = process.env.CRANE_DOMAIN;
+  const urls = craneDomain
+    ? {
+        production: app.domain ? `https://${app.domain}` : `https://${craneDomain}/${app.slug}`,
+        sandbox: `https://${craneDomain}/${app.slug}-sandbox`,
+      }
+    : null;
+
+  const lastLiveProd = db
+    .prepare(
+      "SELECT version, finished_at FROM deployments WHERE app_id = ? AND env = 'production' AND status = 'live' ORDER BY started_at DESC LIMIT 1"
+    )
+    .get(app.id);
+  const lastLiveSand = db
+    .prepare(
+      "SELECT version, finished_at FROM deployments WHERE app_id = ? AND env = 'sandbox' AND status = 'live' ORDER BY started_at DESC LIMIT 1"
+    )
+    .get(app.id);
+
+  return {
+    slug: app.slug,
+    name: app.name,
+    description: app.description ?? null,
+    domain: app.domain ?? null,
+    urls,
+    versions: {
+      production: lastLiveProd?.version ?? null,
+      sandbox: lastLiveSand?.version ?? null,
+    },
+    last_deploy: {
+      production: lastLiveProd?.finished_at ?? null,
+      sandbox: lastLiveSand?.finished_at ?? null,
+    },
+  };
+}
+
 const TOOLS = [
   {
     name: 'appcrane_list_apps',
     description:
-      'List all AppCrane apps the current user has access to. Returns slug, name, description, and domain for each. ' +
+      'List all AppCrane apps the current user has access to. Each app includes slug, name, description, ' +
+      'urls (production + sandbox), and the version currently live in each environment. ' +
       'Call this first when the user asks about "my apps", "what apps exist", or before doing anything app-specific. ' +
-      'Non-admin users see only their assigned apps; admins see everything.',
+      'Non-admin users see only their assigned apps; admins (admin or platform_admin) see everything.',
     inputSchema: {
       type: 'object',
       properties: {},
@@ -167,10 +215,126 @@ const TOOLS = [
       const placeholders = slugs.map(() => '?').join(',');
       const apps = db
         .prepare(
-          `SELECT slug, name, description, domain FROM apps WHERE slug IN (${placeholders}) ORDER BY name`
+          `SELECT id, slug, name, description, domain FROM apps WHERE slug IN (${placeholders}) ORDER BY name`
         )
-        .all(...slugs);
+        .all(...slugs)
+        .map(a => enrichAppRow(db, a));
       return { apps, count: apps.length };
+    },
+  },
+
+  {
+    name: 'appcrane_get_app',
+    description:
+      'Get detailed info for a single app: URLs, current versions per environment, recent deployments, and ' +
+      'health state. Use this when the user asks "what\'s the status of <app>", "is <app> deployed", or after a ' +
+      'deploy to confirm what landed. Returns 404-equivalent error if the slug doesn\'t exist or the caller has no access.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        slug: { type: 'string', description: 'App slug, e.g. "mysite"' },
+      },
+      required: ['slug'],
+      additionalProperties: false,
+    },
+    requiredRole: 'any',
+    handler: async (user, args) => {
+      const app = getAppForUser(user, args.slug);
+      const db = getDb();
+      const enriched = enrichAppRow(db, app);
+
+      const recentDeploys = db
+        .prepare(
+          `SELECT id, env, version, status, commit_hash, started_at, finished_at, frontend_assets
+           FROM deployments WHERE app_id = ?
+           ORDER BY started_at DESC LIMIT 6`
+        )
+        .all(app.id);
+
+      const healthProd = db
+        .prepare('SELECT last_check_at, last_status, last_response_ms, is_down FROM health_state WHERE app_id = ? AND env = ?')
+        .get(app.id, 'production');
+      const healthSand = db
+        .prepare('SELECT last_check_at, last_status, last_response_ms, is_down FROM health_state WHERE app_id = ? AND env = ?')
+        .get(app.id, 'sandbox');
+
+      return {
+        ...enriched,
+        recent_deployments: recentDeploys,
+        health: {
+          production: healthProd
+            ? {
+                status: healthProd.is_down ? 'down' : (healthProd.last_status === 200 ? 'healthy' : 'unknown'),
+                last_check: healthProd.last_check_at,
+                response_ms: healthProd.last_response_ms,
+              }
+            : { status: 'unknown' },
+          sandbox: healthSand
+            ? {
+                status: healthSand.is_down ? 'down' : (healthSand.last_status === 200 ? 'healthy' : 'unknown'),
+                last_check: healthSand.last_check_at,
+                response_ms: healthSand.last_response_ms,
+              }
+            : { status: 'unknown' },
+        },
+      };
+    },
+  },
+
+  {
+    name: 'appcrane_get_health',
+    description:
+      'Fetch the deployed app\'s health endpoint server-side, bypassing AppCrane\'s auth proxy. Use this to validate ' +
+      'that a deploy actually landed the expected version, or to check if the app is responding. AppCrane hits the ' +
+      'app\'s configured health endpoint (default /api/health) on the internal port directly — no Caddy, no SSO ' +
+      'redirect — and returns the response status + body. ' +
+      'Defaults to sandbox; pass env="production" only when the user asks about prod.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        slug: { type: 'string', description: 'App slug, e.g. "mysite"' },
+        env:  { type: 'string', enum: ['sandbox', 'production'], default: 'sandbox' },
+      },
+      required: ['slug'],
+      additionalProperties: false,
+    },
+    requiredRole: 'any',
+    handler: async (user, args) => {
+      const env = args.env === 'production' ? 'production' : 'sandbox';
+      const app = getAppForUser(user, args.slug);
+      const { getPortsForSlot } = await import('./portAllocator.js');
+      const ports = getPortsForSlot(app.slot);
+      const port = env === 'production' ? ports.prod_be : ports.sand_be;
+
+      const db = getDb();
+      const cfg = db
+        .prepare('SELECT endpoint FROM health_configs WHERE app_id = ? AND env = ?')
+        .get(app.id, env);
+      const path = cfg?.endpoint || '/api/health';
+      const url = `http://127.0.0.1:${port}${path}`;
+
+      try {
+        const r = await fetch(url, { signal: AbortSignal.timeout(5000) });
+        const text = await r.text();
+        let body;
+        try { body = JSON.parse(text); } catch { body = text.slice(0, 4096); }
+        return {
+          app: app.slug,
+          env,
+          url,
+          status: r.status,
+          ok: r.ok,
+          body,
+        };
+      } catch (e) {
+        return {
+          app: app.slug,
+          env,
+          url,
+          ok: false,
+          error: e.message || String(e),
+        };
+      }
     },
   },
 
@@ -345,7 +509,7 @@ const TOOLS = [
       // matrix (request.ship permission) so the matrix change applies to MCP
       // and REST identically.
       let appRow = null;
-      if (user.role !== 'admin') {
+      if (!isAdmin(user)) {
         if (!row.app_slug) throw new Error('Forbidden: only AppCrane admin can move requests with no app');
         appRow = db.prepare('SELECT * FROM apps WHERE slug = ?').get(row.app_slug);
         const ar = db.prepare('SELECT app_role FROM app_user_roles WHERE app_id = ? AND user_id = ?').get(appRow?.id, user.id);
@@ -683,9 +847,9 @@ function canUseTool(user, tool, appKey) {
     const allowed = APP_KEY_SCOPE_TOOLS[appKey.scope] || APP_KEY_SCOPE_TOOLS.read;
     return allowed.has(tool.name);
   }
-  if (tool.requiredRole === 'admin') return user.role === 'admin';
+  if (tool.requiredRole === 'admin') return isAdmin(user);
   if (tool.requiredRole === 'app_admin') {
-    if (user.role === 'admin') return true;
+    if (isAdmin(user)) return true;
     // Caller must be admin or owner of at least one app for this tool to even appear.
     // Per-slug authz still happens inside the handler when invoked.
     const db = getDb();

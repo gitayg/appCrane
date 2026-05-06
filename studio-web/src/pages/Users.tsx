@@ -5,6 +5,7 @@ interface User {
   id: number
   name: string
   email: string
+  role: 'platform_admin' | 'admin' | 'user'
   username: string | null
   phone: string | null
   has_password: boolean
@@ -304,11 +305,20 @@ export function Users() {
                     {apps.map(a => {
                       const cellKey = `${a.slug}:${u.id}`
                       const status = roleSaveStatus[cellKey]
+                      const isPlatformAdmin = u.role === 'platform_admin'
+                      // Platform admins have implicit owner-equivalent access on
+                      // every app via their global role; the per-app dropdown is
+                      // pinned to "owner" and disabled to make that obvious and
+                      // prevent confusing no-op writes that the server would
+                      // override anyway.
                       return (
                         <td key={a.slug} style={{ whiteSpace: 'nowrap' }}>
                           <select
-                            value={roles[a.slug]?.[u.id] ?? 'none'}
-                            disabled={status === 'saving'}
+                            value={isPlatformAdmin ? 'owner' : (roles[a.slug]?.[u.id] ?? 'none')}
+                            disabled={isPlatformAdmin || status === 'saving'}
+                            title={isPlatformAdmin
+                              ? 'Platform admin has owner-equivalent access to every app. Demote their global role first to change per-app assignments.'
+                              : undefined}
                             onChange={e => changeRole(a.slug, u.id, e.target.value as AppRole)}
                           >
                             <option value="none">none</option>
@@ -316,13 +326,13 @@ export function Users() {
                             <option value="admin">admin</option>
                             <option value="owner">owner</option>
                           </select>
-                          {status === 'saving' && (
+                          {!isPlatformAdmin && status === 'saving' && (
                             <span style={{ marginLeft: 6, fontSize: '0.75rem', color: 'var(--dim)' }} title="Saving…">…</span>
                           )}
-                          {status === 'saved' && (
+                          {!isPlatformAdmin && status === 'saved' && (
                             <span style={{ marginLeft: 6, color: 'var(--green)', fontSize: '0.85rem' }} title="Saved">✓</span>
                           )}
-                          {status === 'error' && (
+                          {!isPlatformAdmin && status === 'error' && (
                             <span style={{ marginLeft: 6, color: 'var(--red)', fontSize: '0.85rem' }} title="Save failed — change reverted">✗</span>
                           )}
                         </td>
