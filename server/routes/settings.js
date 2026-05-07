@@ -14,6 +14,7 @@ const SENSITIVE_KEYS = new Set([
   'saml_idp_cert_enc',
   'scim_token_hash',
   'scim_token_created_at',
+  'github_service_token_enc',
 ]);
 
 /**

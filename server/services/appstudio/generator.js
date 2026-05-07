@@ -254,19 +254,7 @@ Implement exactly the files described in the approved plan.
 Make all changes directly in \`/workspace\`.
 
 ## When you are done
-Run \`git add\` to stage every file you changed or created — nothing more.
-Do NOT commit. Do NOT push. The host handles commit, push, and deploy automatically after you exit.
-
-Example:
-\`\`\`
-git add path/to/changed/file.js path/to/new/file.jsx
-\`\`\`
-Or to stage everything you touched:
-\`\`\`
-git add -A
-\`\`\`
-
-Then exit. That's it.
+Just write your files and exit. The host handles staging, commit, push, and deploy automatically — you never need to run any git command. (Pre-v2.2.15 this prompt asked you to \`git add\`; that was wasteful — runner.js has always done that itself.)
 
 ## Version bump (required)
 Always apply a patch version bump to \`package.json\` — increment the last digit of the \`version\` field (e.g. \`1.2.3\` → \`1.2.4\`). Do this even if the plan does not list it. This is mandatory for every enhancement.
