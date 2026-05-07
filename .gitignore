@@ -2,3 +2,11 @@ node_modules/
 data/
 .env
 *.log
+
+# Compiled output of studio-web TypeScript sources. These get emitted by
+# stray `tsc -b` invocations and silently shadow .tsx files via Vite's
+# resolve order. studio-web source is .ts/.tsx only; never commit a .js
+# sibling under src/. Cost a full diagnostic session before being caught.
+studio-web/src/**/*.js
+studio-web/src/**/*.js.map
+studio-web/src/**/*.d.ts
