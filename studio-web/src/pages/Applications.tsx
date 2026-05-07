@@ -23,6 +23,7 @@ interface App {
   resource_limits?: { max_ram_mb?: number; max_cpu_percent?: number }
   image_retention?: number
   frame_ancestors?: string | null
+  owner?: { id: number; name: string; email: string } | null
   production?: { deploy?: { status?: string; version?: string }; health?: { status: string } }
   sandbox?: { deploy?: { status?: string; version?: string }; health?: { status: string } }
 }
@@ -30,25 +31,6 @@ interface App {
 interface EnvVar {
   key: string
   value: string
-}
-
-interface AnalysisEnvVar {
-  key: string
-  required: boolean
-  example?: string
-  description?: string
-}
-
-interface Analysis {
-  name: string
-  slug: string
-  description?: string
-  framework?: string
-  language?: string
-  env_vars?: AnalysisEnvVar[]
-  notes?: string
-  github_url?: string
-  branch?: string
 }
 
 interface FrameState {
@@ -73,7 +55,6 @@ interface PromptModal {
   title?: string
 }
 
-type WizardStep = 'input' | 'analyzing' | 'review'
 type SortKey = 'name' | 'visibility' | 'category' | 'ram' | 'cpu' | 'images'
 
 export function Applications() {
@@ -84,10 +65,6 @@ export function Applications() {
   const [frame, setFrame] = useState<FrameState>({ open: false, url: '', title: '' })
   const [framePanel, setFramePanel] = useState<'ask' | 'request' | 'bug' | null>(null)
   const [promptModal, setPromptModal] = useState<PromptModal>({ open: false })
-  const [wizardOpen, setWizardOpen] = useState(false)
-  const [wizardStep, setWizardStep] = useState<WizardStep>('input')
-  const [analysis, setAnalysis] = useState<Analysis | null>(null)
-  const [wizardEnvValues, setWizardEnvValues] = useState<Record<string, string>>({})
   const [checkUpdateText, setCheckUpdateText] = useState<Record<string, string>>({})
   const [iconUrls, setIconUrls] = useState<Record<string, string>>({})
 
@@ -102,13 +79,6 @@ export function Applications() {
   // Drill-down state — sandbox + production controls live in an
   // expandable row below each app to keep the table compact (v1.27.47).
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
-
-  const ghUrlRef = useRef<HTMLInputElement>(null)
-  const branchRef = useRef<HTMLInputElement>(null)
-  const patRef = useRef<HTMLInputElement>(null)
-  const azNameRef = useRef<HTMLInputElement>(null)
-  const azSlugRef = useRef<HTMLInputElement>(null)
-  const azDescRef = useRef<HTMLInputElement>(null)
 
   const iconInputRefs = useRef<Record<string, HTMLInputElement | null>>({})
 
@@ -360,8 +330,12 @@ ORDER, BY PATH:
        needed). Propose; wait for ✅.
     2. github_create_repository (private: true).
     3. Push scaffolded files via github_push_files: package.json,
-       deployhub.json (version 0.1.0, build, start, health "/healthz", port
-       hint), source files, a /healthz endpoint returning {ok:true}.
+       deployhub.json (version 0.1.0, build, start, be.health "/api/health",
+       port hint), source files, AND an /api/health route that returns
+       JSON: {status: "ok", version: "<value from package.json>"}.
+       AppCrane's deploy validator REJECTS apps whose health endpoint
+       does not return both `status` and `version` fields — this is
+       enforced server-side; skipping it means the deploy fails.
     4. appcrane_create_app({ name, slug, github_url, github_token, branch: "main" })
     5. appcrane_set_env (only if user has secrets)
     6. appcrane_deploy(slug, "sandbox")
@@ -370,12 +344,15 @@ ORDER, BY PATH:
 
   Path (b) — local code, no repo:
     As (a), but step 3 = read user's local code, audit for missing pieces
-    (deployhub.json, /healthz, start script), add via github_push_files.
-    Don't modify files the user wrote without asking.
+    (deployhub.json, /api/health endpoint returning {status, version},
+    start script), add via github_push_files. Don't modify files the
+    user wrote without asking.
 
   Path (c) — repo already on GitHub:
-    1. github_get_file_contents to verify deployhub.json + /healthz exist.
-       If missing, github_create_pull_request adding them; ask user to merge.
+    1. github_get_file_contents to verify deployhub.json exists AND the
+       app exposes /api/health returning {status, version}. If missing,
+       github_create_pull_request adding them; ask user to merge.
+       Without a valid health endpoint the deploy will be rejected.
     2. appcrane_create_app
     3-5 as above (set_env, deploy, get_logs).
 
@@ -406,7 +383,7 @@ a header at request time.
 Replace <YOUR_GITHUB_PAT> with the PAT from Step 1, then run once in any
 terminal (the X-API-Key value is already inlined):
 
-  claude mcp add appcrane http ${origin}/api/mcp \\
+  claude mcp add --transport http appcrane ${origin}/api/mcp \\
     --header "X-API-Key: ${key}" \\
     --header "X-Github-Token: <YOUR_GITHUB_PAT>"
 
@@ -519,62 +496,32 @@ ${brief}
     setIconUrls(prev => ({ ...prev, [slug]: URL.createObjectURL(file) }))
   }
 
-  async function analyzeRepo() {
-    const github_url = ghUrlRef.current?.value.trim()
-    if (!github_url) return
-    const branch = branchRef.current?.value.trim() || 'main'
-    const github_token = patRef.current?.value.trim() || undefined
-    setWizardStep('analyzing')
-    const r = await adminApi
-      .post<{ analysis: Analysis }>('/api/apps/analyze', { github_url, branch, github_token })
-      .catch(() => null)
-    if (!r?.analysis) {
-      setWizardStep('input')
-      alert('Analysis failed')
-      return
-    }
-    setAnalysis(r.analysis)
-    const vals: Record<string, string> = {}
-    for (const ev of r.analysis.env_vars ?? []) {
-      vals[ev.key] = ev.example ?? ''
-    }
-    setWizardEnvValues(vals)
-    setWizardStep('review')
-  }
-
-  async function createApp() {
-    if (!analysis) return
-    const name = azNameRef.current?.value.trim() || analysis.name
-    const slug = azSlugRef.current?.value.trim() || analysis.slug
-    const description = azDescRef.current?.value.trim() || analysis.description
-    await adminApi.post('/api/apps', {
-      name,
-      slug,
-      description,
-      github_url: analysis.github_url,
-      branch: analysis.branch,
-      source_type: 'github',
-    }).catch(() => {})
-    for (const env of ['production', 'sandbox']) {
-      const body: Record<string, string> = {}
-      for (const [k, v] of Object.entries(wizardEnvValues)) {
-        if (v) body[k] = v
-      }
-      if (Object.keys(body).length) {
-        await adminApi.put(`/api/apps/${slug}/env/${env}`, body).catch(() => {})
-      }
-    }
-    setWizardOpen(false)
-    setWizardStep('input')
-    setAnalysis(null)
-    loadAll()
-  }
-
   function healthDot(app: App, env: 'production' | 'sandbox') {
+    return healthState(app, env).className
+  }
+
+  /**
+   * Health-state badge class + tooltip. Distinguishes three cases that
+   * pre-v2.2.11 all looked the same (gray dot, "—" version):
+   *
+   *   never deployed       → gray dot, "Not deployed yet"
+   *   deployed, no health  → yellow dot, "Health endpoint not responding —
+   *                           the app is running but /api/health didn't
+   *                           return JSON with {status, version}. Check
+   *                           deploy logs."
+   *   deployed, healthy    → green dot
+   *   deployed, down       → red dot
+   */
+  function healthState(app: App, env: 'production' | 'sandbox') {
     const h = app[env]?.health?.status
-    if (!h || h === 'unknown') return 'dot dot-gray'
-    if (h === 'healthy') return 'dot dot-green'
-    return 'dot dot-red'
+    const ver = versions[app.slug]?.[env === 'production' ? 'prod' : 'sand']
+    if (h === 'healthy') return { className: 'dot dot-green', title: 'Healthy' }
+    if (h === 'down')    return { className: 'dot dot-red',   title: 'Down — last health check failed' }
+    if (!ver) return { className: 'dot dot-gray', title: 'Not deployed yet' }
+    return {
+      className: 'dot dot-yellow',
+      title: 'Health endpoint not responding — app is running but /api/health did not return JSON with {status, version}. Check deploy logs.',
+    }
   }
 
   function visBadgeClass(vis?: string) {
@@ -627,7 +574,6 @@ ${brief}
     <div className="container">
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
         <h2 style={{ margin: 0 }}>Applications</h2>
-        {/* "+ Add from GitHub" hidden — onboarding now flows through the agent. Wizard state/code retained for future revival. */}
         <button className="btn btn-accent" onClick={generateAgentKey}>New Application Onboarding</button>
         <input
           type="text"
@@ -852,8 +798,8 @@ ${brief}
                       return (
                         <td key={env}>
                           <span className="apps-status-env" title={env === 'production' ? 'Production' : 'Sandbox'}>
-                            <span className={healthDot(app, env)} />
-                            <span className="apps-status-ver">{ver ?? '…'}</span>
+                            {(() => { const s = healthState(app, env); return <span className={s.className} title={s.title} /> })()}
+                            <span className="apps-status-ver">{ver ?? '—'}</span>
                             <a
                               className="env-link"
                               href="#"
@@ -867,7 +813,24 @@ ${brief}
                   </tr>
                   <tr key={`${app.slug}-actions`} className="apps-row-actions">
                     <td colSpan={11} style={{ borderTop: 'none', paddingTop: 0, paddingBottom: 8 }}>
-                      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', paddingLeft: 8 }}>
+                      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', paddingLeft: 8, alignItems: 'center' }}>
+                        {app.owner ? (
+                          <span
+                            className="badge"
+                            title={`Owner: ${app.owner.name}${app.owner.email ? ` (${app.owner.email})` : ''}`}
+                            style={{ background: 'var(--surface2)', color: 'var(--dim)', fontSize: '.7rem', fontWeight: 500 }}
+                          >
+                            👤 {app.owner.name}
+                          </span>
+                        ) : (
+                          <span
+                            className="badge"
+                            title="No owner assigned. Set one from /users by promoting an assigned user to owner."
+                            style={{ background: 'rgba(245,158,11,.15)', color: 'var(--yellow, #f59e0b)', fontSize: '.7rem', fontWeight: 600 }}
+                          >
+                            ⚠ No owner
+                          </span>
+                        )}
                         <a className="btn btn-xs" href={`/app?slug=${app.slug}`}>manage</a>
                         <button className="btn btn-xs" onClick={() => showAppToken(app.slug)}>onboard</button>
                         <button
@@ -909,8 +872,8 @@ ${brief}
                                   {isProd ? 'Production' : 'Sandbox'}
                                 </div>
                                 <div className="apps-drill-env-body">
-                                  <span className={healthDot(app, env)} />
-                                  <span style={{ fontFamily: 'monospace', fontSize: '.74rem', color: 'var(--dim)' }}>{ver ?? '…'}</span>
+                                  {(() => { const s = healthState(app, env); return <span className={s.className} title={s.title} /> })()}
+                                  <span style={{ fontFamily: 'monospace', fontSize: '.74rem', color: 'var(--dim)' }}>{ver ?? '—'}</span>
                                   <a className="env-link" href="#" onClick={e => { e.preventDefault(); openAppFrame(app, env) }}>↗ open</a>
                                   <button className="btn btn-xs" onClick={() => toggleEvars(app.slug, env)}>env vars</button>
                                   <button className="btn btn-xs" onClick={() => restartApp(app.slug, env)}>↺ restart</button>
@@ -976,99 +939,6 @@ ${brief}
           setFramePanel={setFramePanel}
         />
       )}
-
-      <div className={`az-overlay${wizardOpen ? ' open' : ''}`}>
-        <div className="az-modal">
-          {wizardStep === 'input' && (
-            <>
-              <div className="az-title" style={{ fontWeight: 700, fontSize: '1.05rem' }}>Add from GitHub</div>
-              <div className="az-field">
-                <label className="az-label">GitHub URL</label>
-                <input ref={ghUrlRef} className="az-input" placeholder="https://github.com/owner/repo" />
-              </div>
-              <div className="az-field">
-                <label className="az-label">Branch</label>
-                <input ref={branchRef} className="az-input" placeholder="main" defaultValue="main" />
-              </div>
-              <div className="az-field">
-                <label className="az-label">Personal Access Token (optional)</label>
-                <input ref={patRef} className="az-input" type="password" placeholder="ghp_..." />
-              </div>
-              <div className="az-actions">
-                <button className="btn" onClick={() => setWizardOpen(false)}>Cancel</button>
-                <button className="btn btn-accent" onClick={analyzeRepo}>Analyze with AI →</button>
-              </div>
-            </>
-          )}
-
-          {wizardStep === 'analyzing' && (
-            <div style={{ textAlign: 'center', padding: '20px 0' }}>
-              <div style={{ marginBottom: 14 }}>
-                <span className="az-spinner" />
-                <span style={{ color: 'var(--dim)' }}>Cloning and analyzing repository…</span>
-              </div>
-            </div>
-          )}
-
-          {wizardStep === 'review' && analysis && (
-            <>
-              <div className="az-title" style={{ fontWeight: 700, fontSize: '1.05rem' }}>Review & Create</div>
-              {(analysis.framework || analysis.language) && (
-                <div style={{ display: 'flex', gap: 6 }}>
-                  {analysis.framework && <span className="az-badge" style={{ background: 'var(--accent)', color: '#fff', padding: '2px 10px', borderRadius: 5, fontSize: '.8rem', fontWeight: 600 }}>{analysis.framework}</span>}
-                  {analysis.language && <span style={{ background: 'var(--surface2)', border: '1px solid var(--border)', padding: '2px 10px', borderRadius: 5, fontSize: '.8rem', color: 'var(--dim)' }}>{analysis.language}</span>}
-                </div>
-              )}
-              <div className="az-field">
-                <label className="az-label">Name</label>
-                <input ref={azNameRef} className="az-input" defaultValue={analysis.name} />
-              </div>
-              <div className="az-field">
-                <label className="az-label">Slug</label>
-                <input ref={azSlugRef} className="az-input" defaultValue={analysis.slug} />
-              </div>
-              <div className="az-field">
-                <label className="az-label">Description</label>
-                <input ref={azDescRef} className="az-input" defaultValue={analysis.description ?? ''} />
-              </div>
-              {(analysis.env_vars ?? []).length > 0 && (
-                <div className="az-section">
-                  <div style={{ fontWeight: 600, fontSize: '.82rem', marginBottom: 8, color: 'var(--dim)', textTransform: 'uppercase', letterSpacing: '.5px' }}>Environment Variables</div>
-                  {(analysis.env_vars ?? []).map(ev => (
-                    <div key={ev.key} style={{ marginBottom: 8 }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-                        <span style={{ fontFamily: 'monospace', fontSize: '.82rem', fontWeight: 600 }}>{ev.key}</span>
-                        <span className={ev.required ? 'az-req' : 'az-opt'} style={{
-                          fontSize: '.68rem', padding: '1px 6px', borderRadius: 4, fontWeight: 600,
-                          background: ev.required ? '#ef444422' : '#22c55e22',
-                          color: ev.required ? 'var(--red)' : 'var(--green)',
-                        }}>
-                          {ev.required ? 'required' : 'optional'}
-                        </span>
-                      </div>
-                      {ev.description && <div style={{ fontSize: '.75rem', color: 'var(--dim)', marginBottom: 4 }}>{ev.description}</div>}
-                      <input
-                        className="az-input"
-                        placeholder={ev.example ?? ''}
-                        value={wizardEnvValues[ev.key] ?? ''}
-                        onChange={e => setWizardEnvValues(prev => ({ ...prev, [ev.key]: e.target.value }))}
-                      />
-                    </div>
-                  ))}
-                </div>
-              )}
-              {analysis.notes && (
-                <div className="az-notes">{analysis.notes}</div>
-              )}
-              <div className="az-actions">
-                <button className="btn" onClick={() => { setWizardStep('input'); setAnalysis(null) }}>Back</button>
-                <button className="btn" onClick={() => setWizardOpen(false)}>Cancel</button>
-                <button className="btn btn-accent" onClick={createApp}>Create App</button>
-              </div>
-            </>
-          )}
-        </div>
-      </div>
 
       {promptModal.open && (
         <div className="prompt-overlay" onClick={() => setPromptModal({ open: false })}>

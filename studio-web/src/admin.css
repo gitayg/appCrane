@@ -423,6 +423,7 @@ tr:last-child td { border-bottom: none; }
 .dot-green { background: var(--green); }
 .dot-red { background: var(--red); }
 .dot-gray { background: var(--dim); }
+.dot-yellow { background: var(--yellow, #f59e0b); }
 
 .badge { padding: 2px 8px; border-radius: 4px; font-size: .75rem; font-weight: 600; }
 .badge-live { background: #22c55e22; color: var(--green); }

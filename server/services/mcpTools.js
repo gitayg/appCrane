@@ -557,67 +557,6 @@ const TOOLS = [
   },
 
   {
-    name: 'appcrane_create_github_repo',
-    description:
-      'Create a brand new GitHub repository to host an app. Requires the user to provide a GitHub PAT ' +
-      'with `repo` scope. Use this BEFORE appcrane_create_app when the user wants to start a fresh project ' +
-      '(rather than register an existing repo). Returns the new repo URL — chain it directly into appcrane_create_app. ' +
-      'The user is expected to push their actual code afterwards (via local git or Claude Code). ' +
-      'Repo is private by default.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        name:         { type: 'string', description: 'Repo name (will live at github.com/<owner>/<name>)' },
-        github_token: { type: 'string', description: 'GitHub PAT with `repo` scope. Not stored — only used for this one call.' },
-        owner:        { type: 'string', description: 'Org name to create the repo under. Omit to create under the authenticated user.' },
-        private:      { type: 'boolean', description: 'Default: true', default: true },
-        description:  { type: 'string' },
-        auto_init:    { type: 'boolean', description: 'Initialize with a README so the repo has a default branch. Default: true', default: true },
-      },
-      required: ['name', 'github_token'],
-      additionalProperties: false,
-    },
-    requiredRole: 'admin',
-    handler: async (_user, args) => {
-      const isPrivate = args.private !== false;
-      const autoInit = args.auto_init !== false;
-      const url = args.owner
-        ? `https://api.github.com/orgs/${encodeURIComponent(args.owner)}/repos`
-        : 'https://api.github.com/user/repos';
-      const body = {
-        name: args.name,
-        description: args.description || undefined,
-        private: isPrivate,
-        auto_init: autoInit,
-      };
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Authorization': `token ${args.github_token}`,
-          'Accept': 'application/vnd.github+json',
-          'User-Agent': 'AppCrane-MCP',
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(body),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        const detail = data?.message || `HTTP ${res.status}`;
-        throw new Error(`GitHub repo creation failed: ${detail}`);
-      }
-      return {
-        url:            data.html_url,
-        clone_url:      data.clone_url,
-        owner:          data.owner?.login,
-        name:           data.name,
-        default_branch: data.default_branch,
-        private:        data.private,
-        next: `Now call appcrane_create_app with github_url="${data.html_url}" and the same github_token to register the new repo with AppCrane.`,
-      };
-    },
-  },
-
-  {
     name: 'appcrane_create_app',
     description:
       'Register a new app in AppCrane from a GitHub repository. Use this only after the user has explicitly ' +

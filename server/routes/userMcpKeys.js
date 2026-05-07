@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { getDb } from '../db.js';
 import { generateApiKey, hashApiKey } from '../services/encryption.js';
-import { requireAuth } from '../middleware/auth.js';
+import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { auditMiddleware } from '../middleware/audit.js';
 import { AppError } from '../utils/errors.js';
 import { isAdmin } from '../utils/roles.js';
@@ -86,6 +86,54 @@ router.post('/me/mcp-keys', requireSession, auditMiddleware('user-mcp-key-create
     warning: 'Save this API key — it will not be shown again.',
     accessible_app_count: accessibleAppCount(req.user),
     is_admin: isAdmin(req.user),
+  });
+});
+
+/**
+ * POST /api/users/:id/mcp-keys — admin-side: issue an MCP key on behalf of
+ * another user. Lets an operator hand out an MCP key without that user
+ * needing to log into the dashboard first.
+ *
+ * The key is bound to the target user's identity — when called, the MCP
+ * server resolves it to that user's apps + role, exactly the same as if
+ * the user had created it themselves via /api/me/mcp-keys.
+ *
+ * Auth: requireAuth + requireAdmin (enforced via the middleware imports).
+ * Body: { label?, expires_at? } — same shape as the self-issue endpoint.
+ */
+router.post('/users/:id/mcp-keys', requireAdmin, auditMiddleware('user-mcp-key-create-admin'), (req, res) => {
+  if (req.user_mcp_key || req.app_key) {
+    throw new AppError('Issuing keys for other users requires a session, not an MCP key', 403, 'KEY_FORBIDDEN');
+  }
+  const targetId = parseInt(req.params.id, 10);
+  if (!Number.isFinite(targetId) || targetId <= 0) {
+    throw new AppError('Invalid user id', 400, 'VALIDATION');
+  }
+  const { label, expires_at } = req.body || {};
+  if (label && typeof label !== 'string') throw new AppError('label must be a string', 400, 'VALIDATION');
+  if (label && label.length > 80) throw new AppError('label must be ≤ 80 chars', 400, 'VALIDATION');
+  if (expires_at && Number.isNaN(Date.parse(expires_at))) {
+    throw new AppError('expires_at must be a valid ISO datetime', 400, 'VALIDATION');
+  }
+
+  const db = getDb();
+  const target = db.prepare('SELECT id, name, email, active FROM users WHERE id = ?').get(targetId);
+  if (!target) throw new AppError('User not found', 404, 'NOT_FOUND');
+  if (!target.active) throw new AppError('Cannot issue keys for a deactivated user', 400, 'USER_INACTIVE');
+
+  const apiKey = generateApiKey('dhk_mcp');
+  const keyHash = hashApiKey(apiKey);
+  const result = db.prepare(`
+    INSERT INTO user_mcp_keys (user_id, key_hash, label, expires_at)
+    VALUES (?, ?, ?, ?)
+  `).run(targetId, keyHash, label || `issued-by-admin-${req.user.id}`, expires_at || null);
+
+  log.info(`UserMcpKey: admin id=${req.user.id} issued key id=${result.lastInsertRowid} for user id=${targetId}`);
+  res.json({
+    key: { id: result.lastInsertRowid, label: label || null, expires_at: expires_at || null },
+    api_key: apiKey,
+    target: { id: target.id, name: target.name, email: target.email },
+    warning: 'Save this API key — it will not be shown again. Send it to the user via a secure channel.',
   });
 });
 
