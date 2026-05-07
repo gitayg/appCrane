@@ -419,7 +419,11 @@ function AppCard({
             name={app.name}
             hasIcon={app.has_icon}
             onClick={() => {
-              const url = prodUrl || sandUrl
+              // Prefer a healthy env over a down one — clicking the icon
+              // when prod is red but sand is green should still open sand.
+              const prodOk = prodHealth !== 'down' && prodHealth !== 'unhealthy'
+              const sandOk = sandHealth !== 'down' && sandHealth !== 'unhealthy'
+              const url = (prodOk && prodUrl) || (sandOk && sandUrl) || ''
               if (url) onOpenFrame(app.slug, app.name, url)
             }}
           />
@@ -458,7 +462,9 @@ function AppCard({
         <div className="env-half">
           <span className={healthDotClass(prodHealth)} />
           <span className="env-label prod">
-            {prodUrl ? <a href={prodUrl} target="_blank" rel="noreferrer">PROD</a> : 'PROD'}
+            {prodUrl && prodHealth !== 'down' && prodHealth !== 'unhealthy'
+              ? <a href={prodUrl} target="_blank" rel="noreferrer">PROD</a>
+              : 'PROD'}
           </span>
           <div className="env-info">
             <span className="ver" id={`ver_${app.slug}_production`}>{prodVer ?? '—'}</span>
@@ -475,7 +481,9 @@ function AppCard({
         <div className="env-half">
           <span className={healthDotClass(sandHealth)} />
           <span className="env-label sand">
-            {sandUrl ? <a href={sandUrl} target="_blank" rel="noreferrer">SAND</a> : 'SAND'}
+            {sandUrl && sandHealth !== 'down' && sandHealth !== 'unhealthy'
+              ? <a href={sandUrl} target="_blank" rel="noreferrer">SAND</a>
+              : 'SAND'}
           </span>
           <div className="env-info">
             <span className="ver" id={`ver_${app.slug}_sandbox`}>{sandVer ?? '—'}</span>
