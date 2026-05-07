@@ -269,7 +269,7 @@ router.post('/:id/delete', (req, res) => {
   const row = db.prepare('SELECT id, user_id FROM enhancement_requests WHERE id = ?').get(id);
   if (!row) throw new AppError('Not found', 404, 'NOT_FOUND');
 
-  const isAdmin = userRole === 'admin';
+  const isAdmin = userRole === 'admin' || userRole === 'platform_admin';
   const isOwner = row.user_id && row.user_id === userId;
   if (!isAdmin && !isOwner) throw new AppError('You can only delete your own requests', 403, 'FORBIDDEN');
 

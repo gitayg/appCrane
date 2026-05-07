@@ -25,10 +25,10 @@ export function requireAuth(req, res, next) {
 
   const apiKey = req.headers['x-api-key'];
   if (apiKey) {
-    // SECURITY (v1.30.2): app-scoped and personal MCP keys are MCP-only.
-    // Without this guard a leaked dhk_app_<slug> "read" key would
-    // authenticate as its issuer on /api/apps/<slug>/env/production etc.
-    // and bypass the scope. Reject non-MCP paths up-front.
+    // SECURITY: personal MCP keys (dhk_mcp_*) are restricted to /api/mcp
+    // paths. Without this guard a leaked key would authenticate as its
+    // issuer on every REST endpoint. (App-scoped keys dhk_app_* were
+    // removed entirely in v2.2.12; see auth.js below.)
     const path = req.baseUrl + (req.path || '') || req.originalUrl || '';
     const isMcpPath = path.startsWith('/api/mcp');
 
@@ -61,40 +61,16 @@ export function requireAuth(req, res, next) {
       }
     }
 
-    // App-scoped key (issued by an Owner; format: dhk_app_<slug>_<random>)
+    // App-scoped MCP keys (dhk_app_*) were removed in v2.2.12. The model
+    // duplicated what user keys (dhk_mcp_*) plus per-app role assignments
+    // already provided. Anyone holding a `dhk_app_*` from before now gets
+    // a clear migration message instead of silent rejection.
     if (apiKey.startsWith('dhk_app_')) {
-      const keyHash = hashApiKey(apiKey);
-      const row = db.prepare(`
-        SELECT
-          ak.id AS ak_id, ak.app_id, ak.scope, ak.label, ak.expires_at, ak.revoked_at,
-          a.slug AS app_slug,
-          u.id AS uid, u.name, u.email, u.role, u.active, u.kind, u.username
-        FROM app_keys ak
-        JOIN apps  a ON a.id = ak.app_id
-        JOIN users u ON u.id = ak.created_by
-        WHERE ak.key_hash = ?
-          AND ak.revoked_at IS NULL
-          AND (ak.expires_at IS NULL OR ak.expires_at > datetime('now'))
-      `).get(keyHash);
-      if (row) {
-        if (!row.active) return next(new AppError('Issuer account is deactivated', 403, 'DEACTIVATED'));
-        if (!isMcpPath) {
-          return next(new AppError('App-scoped keys (dhk_app_*) are restricted to /api/mcp endpoints', 403, 'KEY_SCOPE_RESTRICTED'));
-        }
-        try { db.prepare("UPDATE app_keys SET last_used_at = datetime('now') WHERE id = ?").run(row.ak_id); } catch (_) {}
-        req.user = {
-          id: row.uid, name: row.name, email: row.email,
-          role: row.role, active: row.active, kind: row.kind, username: row.username,
-        };
-        req.app_key = {
-          id: row.ak_id, app_id: row.app_id, app_slug: row.app_slug,
-          scope: row.scope, label: row.label,
-        };
-        return next();
-      }
-      // dhk_app_ key with no match → fall through to user-key path so the
-      // error surfaces as "Invalid API key" rather than leaking that the
-      // prefix is a known format.
+      return next(new AppError(
+        'App-scoped keys (dhk_app_*) were removed in v2.2.12. Issue a personal MCP key (dhk_mcp_*) for the user instead, and assign them the appropriate per-app role at /users.',
+        410,
+        'KEY_TYPE_REMOVED',
+      ));
     }
 
     const user = db.prepare('SELECT * FROM users WHERE api_key_hash = ?').get(hashApiKey(apiKey));

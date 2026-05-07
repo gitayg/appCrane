@@ -17,10 +17,10 @@ router.use(requireAuth);
  *
  * Personal MCP keys cannot manage other personal MCP keys (avoids loops
  * where a leaked key reissues itself). Routes refuse req.user_mcp_key
- * and req.app_key callers.
+ * callers — the operator must use a session login or an admin API key.
  */
 function requireSession(req, res, next) {
-  if (req.user_mcp_key || req.app_key) {
+  if (req.user_mcp_key) {
     return next(new AppError('Manage personal keys from the dashboard, not via an MCP key', 403, 'KEY_FORBIDDEN'));
   }
   next();
@@ -102,7 +102,7 @@ router.post('/me/mcp-keys', requireSession, auditMiddleware('user-mcp-key-create
  * Body: { label?, expires_at? } — same shape as the self-issue endpoint.
  */
 router.post('/users/:id/mcp-keys', requireAdmin, auditMiddleware('user-mcp-key-create-admin'), (req, res) => {
-  if (req.user_mcp_key || req.app_key) {
+  if (req.user_mcp_key) {
     throw new AppError('Issuing keys for other users requires a session, not an MCP key', 403, 'KEY_FORBIDDEN');
   }
   const targetId = parseInt(req.params.id, 10);

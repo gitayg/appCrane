@@ -294,9 +294,18 @@ export function AppStudio({ tab: forcedTab }: AppStudioProps = {}) {
 
   async function deleteEnhancement(id: number) {
     if (!confirm('Delete this request?')) return
-    const res = await adminApi.post<{ error?: { message?: string } }>(`/api/enhancements/${id}/delete`).catch(() => null)
-    if (res && res.error) { alert('Delete failed: ' + (res.error.message || 'unknown')); return }
-    setAllEnhancements(prev => prev.filter(e => e.id !== id))
+    // Don't optimistic-remove until the server confirms — the previous
+    // version did `.catch(() => null)` which swallowed every error and
+    // then dropped the row from local state regardless. The row would
+    // disappear from the UI and reappear on refresh because the server
+    // never actually deleted it.
+    try {
+      await adminApi.post(`/api/enhancements/${id}/delete`)
+      setAllEnhancements(prev => prev.filter(e => e.id !== id))
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      alert(`Delete failed: ${msg}`)
+    }
   }
 
   return (

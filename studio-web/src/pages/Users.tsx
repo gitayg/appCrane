@@ -41,8 +41,15 @@ export function Users() {
   const [roleSaveStatus, setRoleSaveStatus] = useState<Record<string, 'saving' | 'saved' | 'error'>>({})
   const [showForm, setShowForm] = useState(false)
   const [formMsg, setFormMsg] = useState<{ text: string; ok: boolean } | null>(null)
+  const [newKind, setNewKind] = useState<'human' | 'agent'>('human')
+  const [kindFilter, setKindFilter] = useState<'all' | 'human' | 'agent'>('human')
+  // Modal shows the result of any key-issuance flow. `kind === 'mcp'` →
+  // the value is a dhk_mcp_* key with a `claude mcp add` command.
+  // `kind === 'legacy'` → a dhk_user_* / dhk_admin_* key intended for CI
+  // env vars; the "setup command" shows the env-var form instead.
   const [mcpKeyModal, setMcpKeyModal] = useState<{
     open: boolean
+    kind?: 'mcp' | 'legacy'
     userName?: string
     userEmail?: string
     apiKey?: string
@@ -97,11 +104,19 @@ export function Users() {
     const name = nameRef.current?.value.trim() ?? ''
     const email = emailRef.current?.value.trim() ?? ''
     const password = passwordRef.current?.value ?? ''
-    if (!name || !email || !password) {
-      setFormMsg({ text: 'Name, email, and password are required.', ok: false })
+    const isAgent = newKind === 'agent'
+
+    if (!name || !email) {
+      setFormMsg({ text: 'Name and email are required.', ok: false })
       return
     }
-    const body: Record<string, unknown> = { name, email, role: 'user', password }
+    if (!isAgent && !password) {
+      setFormMsg({ text: 'Password is required for human users.', ok: false })
+      return
+    }
+
+    const body: Record<string, unknown> = { name, email, role: 'user', kind: newKind }
+    if (password) body.password = password
     const username = usernameRef.current?.value.trim()
     if (username) body.username = username
     const phone = phoneRef.current?.value.trim()
@@ -109,18 +124,51 @@ export function Users() {
     const yob = yobRef.current?.value.trim()
     if (yob) body.year_of_birth = Number(yob)
 
-    const res = await adminApi.post<{ error?: string }>('/api/users', body).catch(e => ({ error: String(e) }))
+    const res = await adminApi
+      .post<{ error?: string; key?: string; api_key?: string; user?: { name: string; email: string } }>(
+        '/api/users',
+        body,
+      )
+      .catch(e => ({ error: String(e) }))
     if (res && (res as { error?: string }).error) {
       setFormMsg({ text: (res as { error?: string }).error!, ok: false })
+      return
+    }
+
+    // Clear the form
+    if (nameRef.current) nameRef.current.value = ''
+    if (emailRef.current) emailRef.current.value = ''
+    if (usernameRef.current) usernameRef.current.value = ''
+    if (passwordRef.current) passwordRef.current.value = ''
+    if (phoneRef.current) phoneRef.current.value = ''
+    if (yobRef.current) yobRef.current.value = ''
+    loadUsers()
+
+    // Agents come back with a freshly-generated legacy API key — show it
+    // in the same modal we use for MCP keys, with an env-var setup hint
+    // instead of a `claude mcp add` command.
+    if (isAgent) {
+      const apiKey = (res as { key?: string; api_key?: string }).key ?? (res as { api_key?: string }).api_key ?? ''
+      if (apiKey) {
+        setMcpKeyModal({
+          open: true,
+          kind: 'legacy',
+          userName: name,
+          userEmail: email,
+          apiKey,
+          setupCmd:
+            `# CI / scripts / external integrations:\n` +
+            `export APPCRANE_API_KEY="${apiKey}"\n` +
+            `\n` +
+            `# Or pass directly with curl:\n` +
+            `curl -H "X-API-Key: ${apiKey}" https://${typeof window !== 'undefined' ? window.location.host : 'your-appcrane-host'}/api/info`,
+        })
+        setFormMsg({ text: `Agent created — API key shown in dialog (won't be shown again).`, ok: true })
+      } else {
+        setFormMsg({ text: 'Agent created (no API key returned).', ok: true })
+      }
     } else {
-      setFormMsg({ text: 'User created!', ok: true })
-      if (nameRef.current) nameRef.current.value = ''
-      if (emailRef.current) emailRef.current.value = ''
-      if (usernameRef.current) usernameRef.current.value = ''
-      if (passwordRef.current) passwordRef.current.value = ''
-      if (phoneRef.current) phoneRef.current.value = ''
-      if (yobRef.current) yobRef.current.value = ''
-      loadUsers()
+      setFormMsg({ text: 'User created.', ok: true })
     }
   }
 
@@ -160,6 +208,7 @@ export function Users() {
         `  --header "X-Github-Token: <YOUR_GITHUB_PAT>"`
       setMcpKeyModal({
         open: true,
+        kind: 'mcp',
         userName: r.target?.name || u.name,
         userEmail: r.target?.email || u.email,
         apiKey: r.api_key,
@@ -212,11 +261,35 @@ export function Users() {
         <button className="btn btn-sm" onClick={() => setShowForm(v => !v)}>
           {showForm ? 'Cancel' : '+ New User'}
         </button>
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 4 }}>
+          {(['all', 'human', 'agent'] as const).map(k => (
+            <button
+              key={k}
+              className={`btn btn-xs${kindFilter === k ? ' btn-accent' : ''}`}
+              onClick={() => setKindFilter(k)}
+              style={{ textTransform: 'capitalize' }}
+            >
+              {k === 'all' ? 'All' : k === 'human' ? 'Humans' : 'Agents'}
+            </button>
+          ))}
+        </div>
       </div>
 
       {showForm && (
         <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 8, padding: 16, marginBottom: 20 }}>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'flex-end' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <label style={{ fontSize: '0.75rem', color: 'var(--dim)' }}>Kind</label>
+              <select
+                value={newKind}
+                onChange={e => setNewKind(e.target.value as 'human' | 'agent')}
+                style={{ width: 100 }}
+                title="Human users sign in with a password. Agents are bot/CI identities that authenticate by API key (legacy or MCP)."
+              >
+                <option value="human">Human</option>
+                <option value="agent">Agent</option>
+              </select>
+            </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
               <label style={{ fontSize: '0.75rem', color: 'var(--dim)' }}>Name *</label>
               <input ref={nameRef} type="text" style={{ width: 120 }} placeholder="Name" />
@@ -230,8 +303,16 @@ export function Users() {
               <input ref={usernameRef} type="text" style={{ width: 120 }} placeholder="Username" />
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              <label style={{ fontSize: '0.75rem', color: 'var(--dim)' }}>Password *</label>
-              <input ref={passwordRef} type="password" style={{ width: 120 }} placeholder="Password" />
+              <label style={{ fontSize: '0.75rem', color: 'var(--dim)' }}>
+                Password{newKind === 'human' ? ' *' : ''}
+              </label>
+              <input
+                ref={passwordRef}
+                type="password"
+                style={{ width: 120, opacity: newKind === 'agent' ? 0.5 : 1 }}
+                placeholder={newKind === 'agent' ? '(not used)' : 'Password'}
+                disabled={newKind === 'agent'}
+              />
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
               <label style={{ fontSize: '0.75rem', color: 'var(--dim)' }}>Phone</label>
@@ -265,7 +346,13 @@ export function Users() {
           </tr>
         </thead>
         <tbody>
-          {users.map(u => {
+          {users
+            .filter(u => {
+              if (kindFilter === 'all') return true
+              const kind = u.kind ?? 'human'
+              return kindFilter === kind
+            })
+            .map(u => {
             const { rel, abs } = relativeTime(u.last_login_at)
             return (
               <tr key={u.id}>
@@ -412,7 +499,7 @@ export function Users() {
             }}
           >
             <h3 style={{ margin: '0 0 6px', color: 'var(--green)', fontSize: '1.1rem' }}>
-              ✓ MCP key issued
+              ✓ {mcpKeyModal.kind === 'legacy' ? 'Agent created — legacy API key issued' : 'MCP key issued'}
             </h3>
             <p style={{ color: 'var(--dim)', fontSize: '.85rem', marginBottom: 18 }}>
               For <strong style={{ color: 'var(--text)' }}>{mcpKeyModal.userName}</strong>
@@ -449,7 +536,9 @@ export function Users() {
 
             <div style={{ marginBottom: 14 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-                <span style={{ color: 'var(--dim)', fontSize: '.8rem' }}>Setup command (paste-ready for the user)</span>
+                <span style={{ color: 'var(--dim)', fontSize: '.8rem' }}>
+                  {mcpKeyModal.kind === 'legacy' ? 'CI / env-var setup' : 'Setup command (paste-ready for the user)'}
+                </span>
                 <button
                   className="btn btn-xs"
                   onClick={() => {
@@ -474,9 +563,11 @@ export function Users() {
               >
                 {mcpKeyModal.setupCmd}
               </pre>
-              <p style={{ fontSize: '.75rem', color: 'var(--dim)', marginTop: 6, marginBottom: 0 }}>
-                The user replaces <code style={{ fontFamily: 'monospace' }}>&lt;YOUR_GITHUB_PAT&gt;</code> with their own GitHub PAT before running.
-              </p>
+              {mcpKeyModal.kind !== 'legacy' && (
+                <p style={{ fontSize: '.75rem', color: 'var(--dim)', marginTop: 6, marginBottom: 0 }}>
+                  The user replaces <code style={{ fontFamily: 'monospace' }}>&lt;YOUR_GITHUB_PAT&gt;</code> with their own GitHub PAT before running.
+                </p>
+              )}
             </div>
 
             <div style={{

@@ -44,19 +44,21 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 STRICT=0
 [[ "${1:-}" == "--strict" ]] && STRICT=1
 
-# Match `<accessor>.role` or `<accessor>.crane_role` compared to the literal
-# 'admin' or "admin". The leading `.` requirement skips bare `role === 'admin'`
-# in role-name-assignment contexts (e.g. `if (role === 'admin')` while reading
-# req.body.role at user-creation time — that's setting a role, not checking
-# the caller's role).
+# Match anything that compares a role-shaped identifier to 'admin'/"admin".
+# Two patterns covered:
+#   .role / .crane_role / .app_role-style member access
+#   bare local variables: role, userRole, sessionRole, callerRole, etc.
+# The bare-variable form is what got us in v2.2.11 — enhancements.js had
+# `const isAdmin = userRole === 'admin'` and the original .role-only regex
+# missed it.
 #
 # Filter out:
 #   - app_role (per-app tier — different concept, correct as-is)
-#   - lines that already include platform_admin nearby (already covered)
-#   - lines marked `// role:platform-admin-skipped` (intentional regular-admin-only paths)
-#   - vendored / generated output (node_modules, dist/, docs/admin-app/)
+#   - lines that already include platform_admin nearby
+#   - lines marked `// role:platform-admin-skipped` (intentional)
+#   - vendored / generated output
 HITS=$(
-  grep -rnE "\.(role|crane_role)\s*[!=]==\s*['\"]admin['\"]" \
+  grep -rnE "(\.|\b)((user|session|caller|target)?[Rr]ole|crane_role)\s*[!=]==\s*['\"]admin['\"]" \
     server/ \
     --include="*.js" 2>/dev/null \
   | grep -vE "app_role" \

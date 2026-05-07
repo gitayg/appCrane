@@ -2,7 +2,6 @@ import { useState, useEffect, useRef } from 'react'
 import { adminApi } from '../adminApi'
 import { useFlash, FocusInput, FocusTextarea } from '../components/formHelpers'
 import { Users } from './Users'
-import { Agents } from './Agents'
 import { AuditLog } from './AuditLog'
 import { SkillsTab } from '../components/SkillsTab'
 import { BrandingTab } from '../components/BrandingTab'
@@ -570,9 +569,9 @@ function GithubTab() {
   )
 }
 
-type Tab = 'security' | 'users' | 'agents' | 'roles' | 'github' | 'skills' | 'branding' | 'audit'
+type Tab = 'security' | 'users' | 'roles' | 'github' | 'skills' | 'branding' | 'audit'
 
-const VALID_TABS: Tab[] = ['security', 'users', 'agents', 'roles', 'github', 'skills', 'branding', 'audit']
+const VALID_TABS: Tab[] = ['security', 'users', 'roles', 'github', 'skills', 'branding', 'audit']
 
 function getTab(): Tab {
   const hash = window.location.hash.replace('#', '') as Tab
@@ -595,9 +594,6 @@ export function Settings() {
       </div>
       <div style={{ display: tab === 'users' ? 'block' : 'none' }}>
         <Users />
-      </div>
-      <div style={{ display: tab === 'agents' ? 'block' : 'none' }}>
-        <Agents />
       </div>
       <div style={{ display: tab === 'roles' ? 'block' : 'none' }}>
         <RolesTab />

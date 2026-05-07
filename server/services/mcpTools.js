@@ -42,14 +42,11 @@ function isInMcpScope(user, slug) {
 }
 
 function accessibleSlugsForUser(user) {
-  // App-scoped MCP key locks visibility to its single app, regardless of the
-  // issuer's other access. (See callTool — we stash appKey on user._mcpAppKey
-  // so existing tool handlers see the same restriction.)
-  if (user._mcpAppKey) return [user._mcpAppKey.app_slug];
-
   // Personal MCP key — dynamically resolves to apps where the user has access.
   // AppCrane global admins (admin OR platform_admin) see every app; everyone
   // else sees apps they own. Role changes take effect on the next call.
+  // (App-scoped keys removed in v2.2.12 — per-app scoping comes from the
+  // user's app_user_roles assignments, not from a separate key type.)
   if (user._mcpUserKey) {
     const db = getDb();
     if (isAdmin(user)) {
@@ -696,55 +693,38 @@ const TOOLS = [
   },
 ];
 
-export function listTools(user, appKey = null, userMcpKey = null) {
+export function listTools(user, userMcpKey = null) {
   // Stash userMcpKey on user so canUseTool's helpers (and future custom checks)
-  // can see it. AppKey takes precedence — it's app-scoped, the strictest.
-  const userView = userMcpKey && !appKey ? { ...user, _mcpUserKey: userMcpKey } : user;
-  return TOOLS.filter((t) => canUseTool(userView, t, appKey)).map((t) => ({
+  // can see it.
+  const userView = userMcpKey ? { ...user, _mcpUserKey: userMcpKey } : user;
+  return TOOLS.filter((t) => canUseTool(userView, t)).map((t) => ({
     name: t.name,
     description: t.description,
     inputSchema: t.inputSchema,
   }));
 }
 
-export async function callTool(user, name, args, appKey = null, userMcpKey = null) {
+export async function callTool(user, name, args, userMcpKey = null) {
   const tool = TOOLS.find((t) => t.name === name);
   if (!tool) {
     auditMcpCall(user, name, args, new Error('unknown tool'));
     throw new Error(`Unknown tool: ${name}`);
   }
-  if (!canUseTool(user, tool, appKey)) {
-    const reason = appKey
-      ? `tool ${name} not allowed by app-key scope '${appKey.scope}'`
-      : `tool ${name} requires ${tool.requiredRole}`;
-    const err = new Error(`Forbidden: ${reason}`);
+  if (!canUseTool(user, tool)) {
+    const err = new Error(`Forbidden: tool ${name} requires ${tool.requiredRole}`);
     auditMcpCall(user, name, args, err);
     throw err;
   }
-  // App-scoped keys: bind every per-app call to the key's app
-  if (appKey && args && typeof args.slug === 'string' && args.slug !== appKey.app_slug) {
-    const err = new Error(`Forbidden: this key is scoped to app '${appKey.app_slug}', not '${args.slug}'`);
-    auditMcpCall(user, name, args, err);
-    throw err;
-  }
-  // App-scoped key with no slug arg on a per-app tool: inject the key's app
-  if (appKey && args && !args.slug && tool.inputSchema?.required?.includes('slug')) {
-    args = { ...args, slug: appKey.app_slug };
-  }
-  // Reject (user-level) keys with empty MCP scope outright
+  // Reject keys with empty MCP scope outright (per-user mcp_scope override)
   const scope = mcpScope(user);
-  if (!appKey && scope && scope.length === 0) {
+  if (scope && scope.length === 0) {
     const err = new Error('Forbidden: this key has an empty MCP scope (locked out)');
     auditMcpCall(user, name, args, err);
     throw err;
   }
   // Stash auth context on user so helpers (accessibleSlugsForUser,
-  // getAppForUser) can constrain output. App-key wins if both are set.
-  const userWithKey = appKey
-    ? { ...user, _mcpAppKey: appKey }
-    : userMcpKey
-      ? { ...user, _mcpUserKey: userMcpKey }
-      : user;
+  // getAppForUser) can constrain output.
+  const userWithKey = userMcpKey ? { ...user, _mcpUserKey: userMcpKey } : user;
   try {
     const result = await tool.handler(userWithKey, args || {});
     auditMcpCall(user, name, args, null);
@@ -757,35 +737,7 @@ export async function callTool(user, name, args, appKey = null, userMcpKey = nul
   }
 }
 
-/**
- * Allowed tools per app_key scope. App-scoped keys see ONLY these tools
- * via tools/list; calls to other tools are rejected.
- *   read   — discovery + read-only state
- *   deploy — read + deploy + claim/ship requests
- *   full   — deploy + read/write env vars
- */
-const APP_KEY_SCOPE_TOOLS = {
-  read: new Set([
-    'appcrane_list_apps', 'appcrane_get_app', 'appcrane_get_logs',
-    'appcrane_list_requests',
-  ]),
-  deploy: new Set([
-    'appcrane_list_apps', 'appcrane_get_app', 'appcrane_get_logs',
-    'appcrane_list_requests', 'appcrane_deploy', 'appcrane_set_request_status',
-  ]),
-  full: new Set([
-    'appcrane_list_apps', 'appcrane_get_app', 'appcrane_get_logs',
-    'appcrane_list_requests', 'appcrane_deploy', 'appcrane_set_request_status',
-    'appcrane_get_env', 'appcrane_set_env',
-  ]),
-};
-
-function canUseTool(user, tool, appKey) {
-  // App-scoped key: scope is the gate, not the user's role
-  if (appKey) {
-    const allowed = APP_KEY_SCOPE_TOOLS[appKey.scope] || APP_KEY_SCOPE_TOOLS.read;
-    return allowed.has(tool.name);
-  }
+function canUseTool(user, tool) {
   if (tool.requiredRole === 'admin') return isAdmin(user);
   if (tool.requiredRole === 'app_admin') {
     if (isAdmin(user)) return true;
