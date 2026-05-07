@@ -1,0 +1,18 @@
+name: Watchdog checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  role-and-shadow-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Role-pattern watchdog (platform_admin coverage)
+        run: bash scripts/check-role-patterns.sh --strict
+
+      - name: Shadow .js detector (Vite resolve safety)
+        run: bash scripts/check-no-shadow-js.sh --strict

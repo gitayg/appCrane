@@ -119,6 +119,24 @@ function isAppAdmin(user, app) {
   return row?.app_role === 'admin';
 }
 
+/**
+ * Whitelist for container exec paths. Only /app and /data are reachable —
+ * everything else (/etc, /root, /proc, the host bind-mounts) is off-limits
+ * for read tools so a curious agent can't grep secrets out of the OS image.
+ * `..` traversal is rejected even after the prefix check.
+ */
+function validateContainerPath(p) {
+  const path = String(p == null ? '' : p).trim();
+  if (!path) throw new Error('path is required');
+  if (!path.startsWith('/')) throw new Error('path must be absolute');
+  if (path.includes('..')) throw new Error('path must not contain ".."');
+  if (path !== '/app' && path !== '/data' &&
+      !path.startsWith('/app/') && !path.startsWith('/data/')) {
+    throw new Error('path must be under /app or /data');
+  }
+  return path;
+}
+
 function auditMcpCall(user, toolName, args, error) {
   try {
     const db = getDb();
@@ -522,6 +540,206 @@ const TOOLS = [
       applyBucket(db, args.id, args.bucket, user.id);
       log.info(`MCP: request ${args.id} → bucket=${args.bucket} (user ${user.id})`);
       return { id: args.id, bucket: args.bucket };
+    },
+  },
+
+  {
+    name: 'appcrane_ls',
+    description:
+      'List files inside a running app container at a specific path. Use to verify what actually got built / what files made it into the deployed image. Read-only; bound to safe roots (/app and /data only). Returns the directory listing as text.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        slug: { type: 'string' },
+        env: { type: 'string', enum: ['sandbox', 'production'], default: 'sandbox' },
+        path: { type: 'string', description: 'Absolute path inside the container, must start with /app or /data', default: '/app' },
+      },
+      required: ['slug'],
+      additionalProperties: false,
+    },
+    requiredRole: 'any',
+    handler: async (user, args) => {
+      const env = args.env === 'production' ? 'production' : 'sandbox';
+      const app = getAppForUser(user, args.slug);
+      const safePath = validateContainerPath(args.path || '/app');
+      const { execFileSync } = await import('child_process');
+      const containerName = `appcrane-${app.slug}-${env}`;
+      try {
+        const out = execFileSync('docker', ['exec', containerName, 'ls', '-la', '--', safePath], {
+          stdio: 'pipe',
+          timeout: 5000,
+        }).toString();
+        return { app: app.slug, env, path: safePath, listing: out };
+      } catch (e) {
+        const detail = e.stderr?.toString().trim() || e.message;
+        throw new Error(`ls failed in ${containerName}:${safePath}: ${detail}`);
+      }
+    },
+  },
+
+  {
+    name: 'appcrane_cat',
+    description:
+      'Print the contents of a file inside a running app container. Read-only; bound to safe roots (/app and /data only). Refuses files larger than 256KB; truncate by reading the first N bytes via path tricks if you need a tail.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        slug: { type: 'string' },
+        env: { type: 'string', enum: ['sandbox', 'production'], default: 'sandbox' },
+        path: { type: 'string', description: 'Absolute path inside the container, must start with /app or /data' },
+      },
+      required: ['slug', 'path'],
+      additionalProperties: false,
+    },
+    requiredRole: 'any',
+    handler: async (user, args) => {
+      const env = args.env === 'production' ? 'production' : 'sandbox';
+      const app = getAppForUser(user, args.slug);
+      const safePath = validateContainerPath(args.path);
+      const { execFileSync } = await import('child_process');
+      const containerName = `appcrane-${app.slug}-${env}`;
+      const MAX_BYTES = 256 * 1024;
+      // Probe size first so we don't pull a multi-MB file into the response.
+      let size;
+      try {
+        const sizeOut = execFileSync('docker', ['exec', containerName, 'stat', '-c', '%s', '--', safePath], {
+          stdio: 'pipe',
+          timeout: 5000,
+        }).toString().trim();
+        size = parseInt(sizeOut, 10);
+      } catch (e) {
+        const detail = e.stderr?.toString().trim() || e.message;
+        throw new Error(`stat failed in ${containerName}:${safePath}: ${detail}`);
+      }
+      if (Number.isFinite(size) && size > MAX_BYTES) {
+        throw new Error(`File too large (${size} bytes > ${MAX_BYTES} cap). Use a tail/head invocation outside this tool, or read a specific range.`);
+      }
+      try {
+        const out = execFileSync('docker', ['exec', containerName, 'cat', '--', safePath], {
+          stdio: 'pipe',
+          timeout: 5000,
+          maxBuffer: MAX_BYTES + 1024,
+        }).toString();
+        return { app: app.slug, env, path: safePath, size, content: out };
+      } catch (e) {
+        const detail = e.stderr?.toString().trim() || e.message;
+        throw new Error(`cat failed in ${containerName}:${safePath}: ${detail}`);
+      }
+    },
+  },
+
+  {
+    name: 'appcrane_wait_deploy',
+    description:
+      'Block until a deployment reaches a terminal state (live / failed / rolled_back), then return its final status. ' +
+      'Use after appcrane_deploy instead of polling appcrane_get_logs in a loop. Returns immediately if the deployment ' +
+      'is already terminal. Defaults to 180s timeout, hard-capped at 600s. On timeout, returns { status: "pending", ' +
+      'timed_out: true } so the caller can decide whether to keep waiting.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        deployment_id: { type: 'number', description: 'Deployment id from appcrane_deploy' },
+        timeout_sec:   { type: 'number', description: 'How long to wait. Default 180s, max 600s.', default: 180 },
+      },
+      required: ['deployment_id'],
+      additionalProperties: false,
+    },
+    requiredRole: 'any',
+    handler: async (user, args) => {
+      const id = parseInt(args.deployment_id, 10);
+      if (!Number.isFinite(id) || id <= 0) throw new Error('deployment_id must be a positive integer');
+      const timeoutSec = Math.min(Math.max(parseInt(args.timeout_sec, 10) || 180, 1), 600);
+      const TERMINAL = new Set(['live', 'failed', 'rolled_back']);
+
+      const db = getDb();
+      // Verify the caller can see this deployment's app — same accessibility
+      // as appcrane_get_app would enforce. Resolves the slug from the row.
+      const initial = db
+        .prepare(
+          `SELECT d.id, d.app_id, d.env, d.status, d.version, d.commit_hash, d.started_at, d.finished_at, d.frontend_assets,
+                  a.slug AS app_slug
+           FROM deployments d JOIN apps a ON a.id = d.app_id
+           WHERE d.id = ?`
+        )
+        .get(id);
+      if (!initial) throw new Error(`Deployment #${id} not found`);
+      // getAppForUser throws Forbidden if the caller can't see the app.
+      getAppForUser(user, initial.app_slug);
+
+      // Already terminal? Return immediately.
+      if (TERMINAL.has(initial.status)) {
+        return {
+          deployment_id: id,
+          app: initial.app_slug,
+          env: initial.env,
+          status: initial.status,
+          version: initial.version,
+          commit_hash: initial.commit_hash,
+          started_at: initial.started_at,
+          finished_at: initial.finished_at,
+          frontend_assets: initial.frontend_assets,
+          timed_out: false,
+          waited_ms: 0,
+        };
+      }
+
+      // Poll once per 2s until terminal or timeout. setInterval-style with
+      // setTimeout so we can cancel cleanly. No DB load to speak of —
+      // single primary-key lookup per tick.
+      const start = Date.now();
+      const deadline = start + timeoutSec * 1000;
+      const stmt = db.prepare(
+        `SELECT id, status, version, commit_hash, started_at, finished_at, frontend_assets
+         FROM deployments WHERE id = ?`
+      );
+      while (Date.now() < deadline) {
+        const remaining = deadline - Date.now();
+        await new Promise(r => setTimeout(r, Math.min(2000, remaining)));
+        const row = stmt.get(id);
+        if (!row) {
+          // Deleted under us — extremely unusual. Return a synthetic gone status.
+          return {
+            deployment_id: id,
+            app: initial.app_slug,
+            env: initial.env,
+            status: 'gone',
+            timed_out: false,
+            waited_ms: Date.now() - start,
+          };
+        }
+        if (TERMINAL.has(row.status)) {
+          return {
+            deployment_id: id,
+            app: initial.app_slug,
+            env: initial.env,
+            status: row.status,
+            version: row.version,
+            commit_hash: row.commit_hash,
+            started_at: row.started_at,
+            finished_at: row.finished_at,
+            frontend_assets: row.frontend_assets,
+            timed_out: false,
+            waited_ms: Date.now() - start,
+          };
+        }
+      }
+
+      // Timed out — give the caller back the latest known state.
+      const last = stmt.get(id) || initial;
+      return {
+        deployment_id: id,
+        app: initial.app_slug,
+        env: initial.env,
+        status: last.status,
+        version: last.version,
+        commit_hash: last.commit_hash,
+        started_at: last.started_at,
+        finished_at: last.finished_at,
+        frontend_assets: last.frontend_assets,
+        timed_out: true,
+        waited_ms: Date.now() - start,
+        next: `Deployment still ${last.status} after ${timeoutSec}s. Call appcrane_wait_deploy again or use appcrane_get_logs to see what's happening.`,
+      };
     },
   },
 
