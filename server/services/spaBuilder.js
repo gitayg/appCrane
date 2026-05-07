@@ -91,6 +91,23 @@ export function rebuildSpa(repoDir, { onLog } = {}) {
   }
 
   try {
+    // Pre-build: delete any .js / .js.map / .d.ts files emitted into the
+    // source tree by previous tsc -b runs. tsconfig.json sets noEmit=true
+    // post-v2.2.14, so new builds shouldn't create them — but existing
+    // deploy servers may have shadows from earlier rebuilds that would
+    // (a) shadow .tsx sources via Vite's resolve order on older configs
+    // and (b) be picked up by tsc on the next build. Belt + suspenders.
+    let cleaned = 0;
+    try {
+      const out = execFileSync('find', [
+        join(studioDir, 'src'),
+        '(', '-name', '*.js', '-o', '-name', '*.js.map', '-o', '-name', '*.d.ts', ')',
+        '-type', 'f', '-delete', '-print',
+      ], { stdio: 'pipe', timeout: 10000 }).toString();
+      cleaned = out.trim() ? out.trim().split('\n').length : 0;
+    } catch (_) { /* find failure is non-fatal */ }
+    if (cleaned > 0) emit(`SPA rebuild: removed ${cleaned} stale .js/.d.ts shadow file(s) from src/`);
+
     emit(`SPA rebuild: npm install in ${SPA_SOURCE_DIR}/ ...`);
     execFileSync(
       'npm',

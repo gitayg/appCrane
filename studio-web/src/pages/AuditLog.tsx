@@ -16,7 +16,6 @@ function keyClassBadge(detail: string, action: string): { label: string; bg: str
   if (!action.startsWith('mcp.')) return null
   try {
     const parsed = JSON.parse(detail)
-    const path = (parsed?.path || '') as string
     // Best-effort heuristic until we add explicit key_class to audit_log:
     // mcp.* calls always come from the MCP route. The key class is hinted
     // by the args.slug pattern (app-scoped key always pre-binds slug).
