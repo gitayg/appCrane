@@ -637,6 +637,7 @@ textarea:focus { border-color: var(--accent); }
 .env-ver { font-size: .78rem; font-family: monospace; color: var(--text); }
 .env-link { color: var(--dim); text-decoration: none; font-size: .74rem; }
 .env-link:hover { color: var(--accent); }
+.env-link-disabled { color: var(--dim); opacity: .35; cursor: not-allowed; pointer-events: none; }
 .env-act-row { display: inline-flex; align-items: center; gap: 3px; flex-wrap: wrap; }
 .card-footer { padding: 5px 12px; border-top: 1px solid var(--border); background: var(--bg); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .evars-panel { border-top: 1px solid var(--border); background: var(--surface2); padding: 10px 12px; font-size: .8rem; }

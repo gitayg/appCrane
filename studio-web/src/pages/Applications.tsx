@@ -790,17 +790,22 @@ ${brief}
                     </td>
                     {(['sandbox', 'production'] as const).map(env => {
                       const ver = versions[app.slug]?.[env === 'production' ? 'prod' : 'sand']
+                      const isDown = app[env]?.health?.status === 'down'
                       return (
                         <td key={env}>
                           <span className="apps-status-env" title={env === 'production' ? 'Production' : 'Sandbox'}>
                             {(() => { const s = healthState(app, env); return <span className={s.className} title={s.title} /> })()}
                             <span className="apps-status-ver">{ver ?? '—'}</span>
-                            <a
-                              className="env-link"
-                              href="#"
-                              onClick={e => { e.preventDefault(); openAppFrame(app, env) }}
-                              title={`Open ${env}`}
-                            >↗</a>
+                            {isDown ? (
+                              <span className="env-link env-link-disabled" title={`${env} is down — open disabled`} aria-disabled="true">↗</span>
+                            ) : (
+                              <a
+                                className="env-link"
+                                href="#"
+                                onClick={e => { e.preventDefault(); openAppFrame(app, env) }}
+                                title={`Open ${env}`}
+                              >↗</a>
+                            )}
                           </span>
                         </td>
                       )
@@ -861,6 +866,7 @@ ${brief}
                           {(['sandbox', 'production'] as const).map(env => {
                             const ver = versions[app.slug]?.[env === 'production' ? 'prod' : 'sand']
                             const isProd = env === 'production'
+                            const isDown = app[env]?.health?.status === 'down'
                             return (
                               <div key={env} className={`apps-drill-env apps-drill-env-${env}`}>
                                 <div className="apps-drill-env-hdr">
@@ -869,7 +875,11 @@ ${brief}
                                 <div className="apps-drill-env-body">
                                   {(() => { const s = healthState(app, env); return <span className={s.className} title={s.title} /> })()}
                                   <span style={{ fontFamily: 'monospace', fontSize: '.74rem', color: 'var(--dim)' }}>{ver ?? '—'}</span>
-                                  <a className="env-link" href="#" onClick={e => { e.preventDefault(); openAppFrame(app, env) }}>↗ open</a>
+                                  {isDown ? (
+                                    <span className="env-link env-link-disabled" title={`${env} is down — open disabled`} aria-disabled="true">↗ open</span>
+                                  ) : (
+                                    <a className="env-link" href="#" onClick={e => { e.preventDefault(); openAppFrame(app, env) }}>↗ open</a>
+                                  )}
                                   <button className="btn btn-xs" onClick={() => toggleEvars(app.slug, env)}>env vars</button>
                                   <button className="btn btn-xs" onClick={() => restartApp(app.slug, env)}>↺ restart</button>
                                 </div>
