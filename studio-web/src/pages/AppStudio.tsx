@@ -40,33 +40,6 @@ const BUCKET_COLORS: Record<Bucket, { bg: string; fg: string; border: string }> 
 
 const BUCKETS: Bucket[] = ['triage', 'in_progress', 'shipped', 'validated']
 
-interface Job {
-  id: number
-  phase: string
-  status: string
-  error?: string
-  created_at?: string
-  started_at?: string
-  finished_at?: string
-  duration_ms?: number
-  cost_tokens?: number
-  cost_usd_cents?: number
-  text?: string
-  log?: string[]
-  branch?: string
-}
-
-interface TraceData {
-  active: boolean
-  trace: Job[]
-  ai_log?: string
-  ai_plan?: any
-  pr_url?: string | null
-  branch_name?: string | null
-  fix_version?: string | null
-  comments?: Comment[]
-  open_comment_count?: number
-}
 
 export interface Comment {
   id: number
@@ -85,23 +58,6 @@ interface AppOption {
   name: string
 }
 
-const STATUS_LABELS: Record<string, string> = {
-  new: 'New',
-  selected: 'Selected for Implementation',
-  planning: 'Planning…',
-  no_changes_needed: 'No changes needed',
-  pending_user_review_plan: 'Plan ready',
-  plan_approved: 'Approved',
-  coding: 'Coding…',
-  sandbox_ready: 'Sandbox ready',
-  merged: 'Shipped',
-  done: 'Done',
-  auto_failed: 'Failed',
-  in_progress: 'In Progress',
-}
-
-const ALL_STATUSES = Object.keys(STATUS_LABELS)
-
 function fmtDate(str?: string): string {
   if (!str) return '—'
   const d = new Date(str)
@@ -112,33 +68,6 @@ function fmtDate(str?: string): string {
     hour: 'numeric',
     minute: '2-digit',
   })
-}
-
-function fmtMs(ms?: number): string {
-  if (ms == null) return ''
-  if (ms < 1000) return '<1s'
-  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`
-  const m = Math.floor(ms / 60000)
-  const s = Math.floor((ms % 60000) / 1000)
-  return `${m}m ${s}s`
-}
-
-function fmtJobTime(str?: string): string {
-  if (!str) return ''
-  const d = new Date(str)
-  return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-}
-
-function msGap(a?: string, b?: string): number {
-  if (!a || !b) return 0
-  return Math.abs(new Date(b).getTime() - new Date(a).getTime())
-}
-
-function StatusBadge({ status }: { status?: string }) {
-  const label = status ? (STATUS_LABELS[status] ?? status) : '—'
-  return (
-    <span className={`enh-status badge-status s-${status ?? 'new'}`}>{label}</span>
-  )
 }
 
 function BucketAction({ bucket, onChange }: { bucket?: Bucket; onChange: (b: Bucket) => void }) {
@@ -173,26 +102,6 @@ function BucketBadge({ bucket }: { bucket?: Bucket }) {
       whiteSpace: 'nowrap',
     }}>
       {BUCKET_LABELS[b]}
-    </span>
-  )
-}
-
-function JobTag({ id }: { id: number }) {
-  return <span className="job-tag">JOB-{String(id).padStart(4, '0')}</span>
-}
-
-function statusIcon(status: string) {
-  if (status === 'done' || status === 'success') return <span style={{ color: 'var(--green)' }}>✓</span>
-  if (status === 'failed' || status === 'error') return <span style={{ color: 'var(--red)' }}>✗</span>
-  if (status === 'running') return <span style={{ color: 'var(--accent)' }}>▶</span>
-  return <span style={{ color: 'var(--dim)' }}>·</span>
-}
-
-function CostBadge({ tokens, cents }: { tokens?: number; cents?: number }) {
-  if (!tokens && !cents) return null
-  return (
-    <span style={{ fontSize: '.72rem', color: 'var(--dim)', background: 'var(--surface2)', border: '1px solid var(--border)', borderRadius: 4, padding: '1px 6px', whiteSpace: 'nowrap' }}>
-      {tokens ? `${tokens.toLocaleString()}t` : ''}{tokens && cents ? ' ' : ''}{cents ? `$${(cents / 100).toFixed(3)}` : ''}
     </span>
   )
 }

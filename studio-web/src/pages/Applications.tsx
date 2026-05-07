@@ -333,7 +333,7 @@ ORDER, BY PATH:
        port hint), source files, AND an /api/health route that returns
        JSON: {status: "ok", version: "<value from package.json>"}.
        AppCrane's deploy validator REJECTS apps whose health endpoint
-       does not return both `status` and `version` fields — this is
+       does not return both \`status\` and \`version\` fields — this is
        enforced server-side; skipping it means the deploy fails.
     4. appcrane_create_app({ name, slug, github_url, github_token, branch: "main" })
     5. appcrane_set_env (only if user has secrets)
@@ -493,10 +493,6 @@ ${brief}
       body: fd,
     })
     setIconUrls(prev => ({ ...prev, [slug]: URL.createObjectURL(file) }))
-  }
-
-  function healthDot(app: App, env: 'production' | 'sandbox') {
-    return healthState(app, env).className
   }
 
   /**
