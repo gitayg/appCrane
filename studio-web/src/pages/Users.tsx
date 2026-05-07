@@ -41,6 +41,15 @@ export function Users() {
   const [roleSaveStatus, setRoleSaveStatus] = useState<Record<string, 'saving' | 'saved' | 'error'>>({})
   const [showForm, setShowForm] = useState(false)
   const [formMsg, setFormMsg] = useState<{ text: string; ok: boolean } | null>(null)
+  const [mcpKeyModal, setMcpKeyModal] = useState<{
+    open: boolean
+    userName?: string
+    userEmail?: string
+    apiKey?: string
+    setupCmd?: string
+    copiedKey?: boolean
+    copiedCmd?: boolean
+  }>({ open: false })
 
   const nameRef = useRef<HTMLInputElement>(null)
   const emailRef = useRef<HTMLInputElement>(null)
@@ -129,6 +138,36 @@ export function Users() {
     if (!confirm('Delete this user?')) return
     await adminApi.del(`/api/users/${id}`).catch(() => {})
     loadUsers()
+  }
+
+  /**
+   * Admin issues an MCP key for any user — they don't need to log in to
+   * the dashboard themselves. Output is the full `claude mcp add` command
+   * with the key inlined, ready to paste into a note/email to the user.
+   */
+  async function issueMcpKey(u: User) {
+    if (!confirm(`Issue an MCP key for ${u.name}?\n\nThe key will be shown once. You'll need to send it to them via a secure channel.`)) return
+    try {
+      const r = await adminApi.post<{
+        api_key?: string
+        target?: { name: string; email: string }
+      }>(`/api/users/${u.id}/mcp-keys`, { label: `admin-issued-${new Date().toISOString().slice(0, 10)}` })
+      if (!r?.api_key) throw new Error('Server returned no key')
+      const origin = typeof window !== 'undefined' ? window.location.origin : 'https://your-appcrane-host'
+      const setupCmd =
+        `claude mcp add --transport http appcrane ${origin}/api/mcp \\\n` +
+        `  --header "X-API-Key: ${r.api_key}" \\\n` +
+        `  --header "X-Github-Token: <YOUR_GITHUB_PAT>"`
+      setMcpKeyModal({
+        open: true,
+        userName: r.target?.name || u.name,
+        userEmail: r.target?.email || u.email,
+        apiKey: r.api_key,
+        setupCmd,
+      })
+    } catch (e) {
+      alert('Could not issue MCP key: ' + (e instanceof Error ? e.message : String(e)))
+    }
   }
 
   async function changeRole(slug: string, userId: number, role: AppRole) {
@@ -277,9 +316,18 @@ export function Users() {
                   <span style={{ color: 'var(--dim)', fontSize: '0.82rem' }} title={abs}>{rel}</span>
                 </td>
                 <td>
-                  {u.id !== 1 && (
-                    <button className="btn btn-red btn-xs" onClick={() => deleteUser(u.id)}>Delete</button>
-                  )}
+                  <div style={{ display: 'flex', gap: 4, justifyContent: 'flex-end' }}>
+                    <button
+                      className="btn btn-xs"
+                      onClick={() => issueMcpKey(u)}
+                      title="Issue an MCP key for this user — they don't need to log in to the dashboard. The key is shown once."
+                    >
+                      + MCP key
+                    </button>
+                    {u.id !== 1 && (
+                      <button className="btn btn-red btn-xs" onClick={() => deleteUser(u.id)}>Delete</button>
+                    )}
+                  </div>
                 </td>
               </tr>
             )
@@ -344,6 +392,106 @@ export function Users() {
             </table>
           </div>
         </>
+      )}
+
+      {mcpKeyModal.open && (
+        <div
+          onClick={() => setMcpKeyModal({ open: false })}
+          style={{
+            position: 'fixed', inset: 0, background: 'rgba(0,0,0,.65)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100,
+            backdropFilter: 'blur(2px)',
+          }}
+        >
+          <div
+            onClick={e => e.stopPropagation()}
+            style={{
+              background: 'var(--surface)', border: '1px solid var(--border)',
+              borderRadius: 12, padding: 28, maxWidth: 720, width: '94%',
+              boxShadow: '0 24px 64px rgba(0,0,0,.5)',
+            }}
+          >
+            <h3 style={{ margin: '0 0 6px', color: 'var(--green)', fontSize: '1.1rem' }}>
+              ✓ MCP key issued
+            </h3>
+            <p style={{ color: 'var(--dim)', fontSize: '.85rem', marginBottom: 18 }}>
+              For <strong style={{ color: 'var(--text)' }}>{mcpKeyModal.userName}</strong>
+              {mcpKeyModal.userEmail ? <> · {mcpKeyModal.userEmail}</> : null}
+            </p>
+
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                <span style={{ color: 'var(--dim)', fontSize: '.8rem' }}>API key</span>
+                <button
+                  className="btn btn-xs"
+                  onClick={() => {
+                    if (mcpKeyModal.apiKey) {
+                      navigator.clipboard.writeText(mcpKeyModal.apiKey).then(() => {
+                        setMcpKeyModal(s => ({ ...s, copiedKey: true }))
+                        setTimeout(() => setMcpKeyModal(s => ({ ...s, copiedKey: false })), 1800)
+                      })
+                    }
+                  }}
+                >
+                  {mcpKeyModal.copiedKey ? '✓ Copied' : 'Copy key'}
+                </button>
+              </div>
+              <code
+                style={{
+                  display: 'block', background: 'var(--bg)', border: '1px solid var(--border)',
+                  borderRadius: 6, padding: '10px 14px', fontFamily: 'monospace',
+                  fontSize: '.82rem', wordBreak: 'break-all', userSelect: 'all',
+                }}
+              >
+                {mcpKeyModal.apiKey}
+              </code>
+            </div>
+
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                <span style={{ color: 'var(--dim)', fontSize: '.8rem' }}>Setup command (paste-ready for the user)</span>
+                <button
+                  className="btn btn-xs"
+                  onClick={() => {
+                    if (mcpKeyModal.setupCmd) {
+                      navigator.clipboard.writeText(mcpKeyModal.setupCmd).then(() => {
+                        setMcpKeyModal(s => ({ ...s, copiedCmd: true }))
+                        setTimeout(() => setMcpKeyModal(s => ({ ...s, copiedCmd: false })), 1800)
+                      })
+                    }
+                  }}
+                >
+                  {mcpKeyModal.copiedCmd ? '✓ Copied' : 'Copy command'}
+                </button>
+              </div>
+              <pre
+                style={{
+                  background: 'var(--bg)', border: '1px solid var(--border)',
+                  borderRadius: 6, padding: '10px 14px', fontFamily: 'monospace',
+                  fontSize: '.78rem', whiteSpace: 'pre-wrap', wordBreak: 'break-all',
+                  userSelect: 'all', margin: 0,
+                }}
+              >
+                {mcpKeyModal.setupCmd}
+              </pre>
+              <p style={{ fontSize: '.75rem', color: 'var(--dim)', marginTop: 6, marginBottom: 0 }}>
+                The user replaces <code style={{ fontFamily: 'monospace' }}>&lt;YOUR_GITHUB_PAT&gt;</code> with their own GitHub PAT before running.
+              </p>
+            </div>
+
+            <div style={{
+              padding: '10px 14px', background: 'rgba(234,179,8,.08)',
+              border: '1px solid rgba(234,179,8,.3)', borderRadius: 6,
+              fontSize: '.82rem', color: 'var(--yellow, #f59e0b)', marginBottom: 16,
+            }}>
+              ⚠ This key will <strong>not be shown again</strong>. Send it to the user via a secure channel (encrypted message, password manager, etc.).
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+              <button className="btn" onClick={() => setMcpKeyModal({ open: false })}>Close</button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )

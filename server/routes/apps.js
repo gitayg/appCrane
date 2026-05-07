@@ -105,6 +105,18 @@ router.get('/', (req, res) => {
       WHERE au.app_id = ?
     `).all(app.id);
 
+    // The owner of the app — single row from app_user_roles (multiple owners
+    // shouldn't exist by design, but if they do we surface the first by id).
+    // null when the owner record was never created (e.g. apps from before
+    // migration 048 fixed the latent CHECK bug, or apps whose creator was
+    // deleted leaving created_by NULL).
+    const ownerRow = db.prepare(`
+      SELECT u.id, u.name, u.email FROM users u
+      JOIN app_user_roles aur ON aur.user_id = u.id
+      WHERE aur.app_id = ? AND aur.app_role = 'owner'
+      ORDER BY u.id LIMIT 1
+    `).get(app.id);
+
     const craneDomain = process.env.CRANE_DOMAIN;
     const urls = craneDomain ? {
       production: `https://${craneDomain}/${app.slug}`,
@@ -120,6 +132,7 @@ router.get('/', (req, res) => {
       has_claude_credentials: !!app.claude_credentials_encrypted,
       has_github_token:       !!app.github_token_encrypted,
       ...(isAdmin(req.user) ? { ports } : {}),
+      owner: ownerRow || null,
       urls,
       base_path: { production: `/${app.slug}/`, sandbox: `/${app.slug}-sandbox/` },
       production: {
@@ -135,28 +148,6 @@ router.get('/', (req, res) => {
   });
 
   res.json({ apps: enriched });
-});
-
-/**
- * POST /api/apps/analyze - AI analysis of a GitHub repo (admin only)
- * Body: { github_url, branch?, github_token? }
- * Returns: { name, slug, description, framework, port, env_vars, notes }
- */
-router.post('/analyze', requireAdmin, async (req, res) => {
-  const { github_url, branch, github_token } = req.body || {};
-  if (!github_url) throw new AppError('github_url is required', 400, 'VALIDATION');
-  validateGithubUrl(github_url);
-
-  const { analyzeGithubRepo } = await import('../services/appAnalyzer.js');
-  const { encrypt } = await import('../services/encryption.js');
-  const githubTokenEncrypted = github_token ? encrypt(github_token) : null;
-
-  const analysis = await analyzeGithubRepo({
-    githubUrl: github_url,
-    branch: branch || 'main',
-    githubTokenEncrypted,
-  });
-  res.json({ analysis });
 });
 
 /**

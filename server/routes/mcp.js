@@ -30,7 +30,6 @@ MCP connection exposes BOTH lifecycle and source-code tooling:
     appcrane_get_logs              — runtime logs
     appcrane_list_requests         — intake-form queue (filter by bucket)
     appcrane_set_request_status    — move requests through the lifecycle
-    appcrane_create_github_repo    — bootstrap a new repo for an app
     appcrane_create_app            — register an app with AppCrane
 
   github_*    — GitHub passthrough (file contents, PRs, issues, branches,
@@ -44,15 +43,15 @@ MCP connection exposes BOTH lifecycle and source-code tooling:
 
 If you do not see github_* tools in tools/list, the user did not include
 X-Github-Token in their AppCrane MCP setup. Either ask them to add it
-(\`claude mcp add appcrane http <url> --header "X-API-Key: ..." --header
+(\`claude mcp add --transport http appcrane <url> --header "X-API-Key: ..." --header
 "X-Github-Token: ghp_..."\`) or fall back to the gh / git CLI on their
 machine for code-level operations.
 
 A typical end-to-end app onboarding (no second MCP needed):
-  1. appcrane_create_github_repo(...) — create the repo
+  1. github_create_repository(...) — create the repo via GitHub passthrough
+     (requires X-Github-Token to be configured)
   2. github_push_files / github_create_or_update_file — scaffold via the
-     same connection (or appcrane_create_github_repo + the user's local git
-     if X-Github-Token isn't configured)
+     same connection
   3. appcrane_create_app(...)         — register with AppCrane
   4. appcrane_set_env(...)            — encrypted env vars
   5. appcrane_deploy(slug, "sandbox") — first deploy

@@ -11,10 +11,12 @@ AppCrane offers two transports. **AI agents should prefer MCP**; REST is kept fo
 AppCrane runs its own MCP server at `/api/mcp` (HTTP/JSON-RPC, single endpoint). One `claude mcp add` command wires it into your local Claude Code, including a built-in **GitHub passthrough** so you don't need a separate GitHub MCP server:
 
 ```bash
-claude mcp add appcrane http https://crane.example.com/api/mcp \
+claude mcp add --transport http appcrane https://crane.example.com/api/mcp \
   --header "X-API-Key: dhk_admin_or_user_xxxxxxxxxxxxx" \
   --header "X-Github-Token: ghp_your_github_pat"
 ```
+
+> Use the `--transport http` flag form, not `claude mcp add <name> http <url>`. The positional form parses `http` as the stdio command and creates a broken stdio entry rather than an HTTP transport.
 
 - `X-API-Key` authenticates against AppCrane (admin or scoped user/agent key).
 - `X-Github-Token` (optional) enables `github_*` tools — read files, push files, open PRs, create repos — all through the same connection. Drop the header if you don't need GitHub access.
@@ -809,7 +811,7 @@ Two flows are documented below. **Prefer the MCP flow** if you have the AppCrane
 
 ### MCP flow (recommended)
 
-Assumes you ran `claude mcp add appcrane http <CC>/api/mcp --header "X-API-Key: ..." --header "X-Github-Token: ..."` and your session shows both `appcrane_*` and `github_*` tools in `tools/list`.
+Assumes you ran `claude mcp add --transport http appcrane <CC>/api/mcp --header "X-API-Key: ..." --header "X-Github-Token: ..."` and your session shows both `appcrane_*` and `github_*` tools in `tools/list`.
 
 0. **Read branding guidelines:** call `appcrane_get_setting({ key: "branding" })` (or fetch the REST equivalent if the tool isn't on your surface). Apply colors/tone before writing UI.
 1. **Decide the starting point:** brand-new code (scaffold), local code (push existing), or existing GitHub repo (just register).

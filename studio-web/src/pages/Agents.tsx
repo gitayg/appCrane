@@ -22,6 +22,17 @@ export function Agents() {
   const [busy, setBusy] = useState(false)
   const [newKey, setNewKey] = useState<NewKeyResult | null>(null)
   const [copied, setCopied] = useState(false)
+  // MCP-key issuance modal — separate from legacy `newKey` so they can't
+  // collide when the operator runs both flows in quick succession.
+  const [mcpKeyModal, setMcpKeyModal] = useState<{
+    open: boolean
+    userName?: string
+    userEmail?: string
+    apiKey?: string
+    setupCmd?: string
+    copiedKey?: boolean
+    copiedCmd?: boolean
+  }>({ open: false })
 
   const load = () =>
     adminApi.get<{ users: AgentUser[] }>('/api/users')
@@ -59,6 +70,40 @@ export function Agents() {
     if (!confirm('Delete this app agent? Its API key will stop working immediately.')) return
     await adminApi.del(`/api/users/${id}`).catch(() => {})
     load()
+  }
+
+  /**
+   * Issue an MCP-only (`dhk_mcp_*`) key for this agent on behalf of the
+   * admin — same admin endpoint that Users.tsx uses. The legacy key flow
+   * (`dhk_admin_*` / `dhk_user_*`) above stays for CI/REST consumers; the
+   * MCP key here is the recommended option for Claude Code agents.
+   */
+  async function issueMcpKey(agent: AgentUser) {
+    if (!confirm(`Issue an MCP key for ${agent.name}?\n\nThe key will be shown once. You'll need to send it to whoever runs the agent via a secure channel.`)) return
+    setBusy(true)
+    try {
+      const r = await adminApi.post<{
+        api_key?: string
+        target?: { name: string; email: string }
+      }>(`/api/users/${agent.id}/mcp-keys`, { label: `admin-issued-${new Date().toISOString().slice(0, 10)}` })
+      if (!r?.api_key) throw new Error('Server returned no key')
+      const origin = typeof window !== 'undefined' ? window.location.origin : 'https://your-appcrane-host'
+      const setupCmd =
+        `claude mcp add --transport http appcrane ${origin}/api/mcp \\\n` +
+        `  --header "X-API-Key: ${r.api_key}" \\\n` +
+        `  --header "X-Github-Token: <YOUR_GITHUB_PAT>"`
+      setMcpKeyModal({
+        open: true,
+        userName: r.target?.name || agent.name,
+        userEmail: r.target?.email || agent.email,
+        apiKey: r.api_key,
+        setupCmd,
+      })
+    } catch (e) {
+      alert('Could not issue MCP key: ' + (e instanceof Error ? e.message : String(e)))
+    } finally {
+      setBusy(false)
+    }
   }
 
   async function rotateKey(agent: AgentUser) {
@@ -100,8 +145,10 @@ export function Agents() {
         </button>
       </div>
       <p style={{ color: 'var(--dim)', fontSize: '.85rem', marginTop: -8, marginBottom: 16 }}>
-        API-key identities for agents and external integrations. Each key is shown once on creation —
-        save it somewhere safe. Assign apps to a key from <a href="/applications" style={{ color: 'var(--accent)' }}>/applications</a> if it should be scoped.
+        API-key identities for agents and external integrations. Two key types per agent:
+        the <strong>+ MCP key</strong> button (per row) issues a <code style={{ fontFamily: 'monospace' }}>dhk_mcp_*</code> scoped key — recommended for Claude Code / Cursor / Cline (restricted to <code style={{ fontFamily: 'monospace' }}>/api/mcp</code>);
+        the <strong>+ New API Key</strong> button (top right) creates a legacy <code style={{ fontFamily: 'monospace' }}>dhk_admin_* / dhk_user_*</code> key for CI/CD and REST consumers.
+        Keys are shown once on creation. Assign apps to an agent from <a href="/applications" style={{ color: 'var(--accent)' }}>/applications</a> if it should be scoped.
       </p>
 
       {agents.length === 0 ? (
@@ -138,11 +185,19 @@ export function Agents() {
                   <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
                     <button
                       className="btn btn-xs"
+                      onClick={() => issueMcpKey(a)}
+                      disabled={busy}
+                      title="Issue an MCP-scoped key (dhk_mcp_*). Recommended for Claude Code / Cursor / Cline agents — restricted to /api/mcp endpoints, smaller blast radius if leaked."
+                    >
+                      + MCP key
+                    </button>
+                    <button
+                      className="btn btn-xs"
                       onClick={() => rotateKey(a)}
                       disabled={busy}
-                      title="Issue a new API key for this agent. The old key stops working immediately."
+                      title="Rotate the legacy API key (dhk_admin_* / dhk_user_*). For CI/REST consumers; not recommended for new MCP setups."
                     >
-                      Rotate key
+                      Rotate legacy key
                     </button>
                     <button className="btn btn-red btn-xs" onClick={() => deleteAgent(a.id)}>Delete</button>
                   </div>
@@ -215,6 +270,106 @@ export function Agents() {
 
             <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
               <button className="btn" onClick={() => setNewKey(null)}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {mcpKeyModal.open && (
+        <div
+          onClick={() => setMcpKeyModal({ open: false })}
+          style={{
+            position: 'fixed', inset: 0, background: 'rgba(0,0,0,.65)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100,
+            backdropFilter: 'blur(2px)',
+          }}
+        >
+          <div
+            onClick={e => e.stopPropagation()}
+            style={{
+              background: 'var(--surface)', border: '1px solid var(--border)',
+              borderRadius: 12, padding: 28, maxWidth: 720, width: '94%',
+              boxShadow: '0 24px 64px rgba(0,0,0,.5)',
+            }}
+          >
+            <h3 style={{ margin: '0 0 6px', color: 'var(--green)', fontSize: '1.1rem' }}>
+              ✓ MCP key issued
+            </h3>
+            <p style={{ color: 'var(--dim)', fontSize: '.85rem', marginBottom: 18 }}>
+              For <strong style={{ color: 'var(--text)' }}>{mcpKeyModal.userName}</strong>
+              {mcpKeyModal.userEmail ? <> · {mcpKeyModal.userEmail}</> : null}
+            </p>
+
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                <span style={{ color: 'var(--dim)', fontSize: '.8rem' }}>API key</span>
+                <button
+                  className="btn btn-xs"
+                  onClick={() => {
+                    if (mcpKeyModal.apiKey) {
+                      navigator.clipboard.writeText(mcpKeyModal.apiKey).then(() => {
+                        setMcpKeyModal(s => ({ ...s, copiedKey: true }))
+                        setTimeout(() => setMcpKeyModal(s => ({ ...s, copiedKey: false })), 1800)
+                      })
+                    }
+                  }}
+                >
+                  {mcpKeyModal.copiedKey ? '✓ Copied' : 'Copy key'}
+                </button>
+              </div>
+              <code
+                style={{
+                  display: 'block', background: 'var(--bg)', border: '1px solid var(--border)',
+                  borderRadius: 6, padding: '10px 14px', fontFamily: 'monospace',
+                  fontSize: '.82rem', wordBreak: 'break-all', userSelect: 'all',
+                }}
+              >
+                {mcpKeyModal.apiKey}
+              </code>
+            </div>
+
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                <span style={{ color: 'var(--dim)', fontSize: '.8rem' }}>Setup command (paste-ready)</span>
+                <button
+                  className="btn btn-xs"
+                  onClick={() => {
+                    if (mcpKeyModal.setupCmd) {
+                      navigator.clipboard.writeText(mcpKeyModal.setupCmd).then(() => {
+                        setMcpKeyModal(s => ({ ...s, copiedCmd: true }))
+                        setTimeout(() => setMcpKeyModal(s => ({ ...s, copiedCmd: false })), 1800)
+                      })
+                    }
+                  }}
+                >
+                  {mcpKeyModal.copiedCmd ? '✓ Copied' : 'Copy command'}
+                </button>
+              </div>
+              <pre
+                style={{
+                  background: 'var(--bg)', border: '1px solid var(--border)',
+                  borderRadius: 6, padding: '10px 14px', fontFamily: 'monospace',
+                  fontSize: '.78rem', whiteSpace: 'pre-wrap', wordBreak: 'break-all',
+                  userSelect: 'all', margin: 0,
+                }}
+              >
+                {mcpKeyModal.setupCmd}
+              </pre>
+              <p style={{ fontSize: '.75rem', color: 'var(--dim)', marginTop: 6, marginBottom: 0 }}>
+                The recipient replaces <code style={{ fontFamily: 'monospace' }}>&lt;YOUR_GITHUB_PAT&gt;</code> with their own GitHub PAT before running.
+              </p>
+            </div>
+
+            <div style={{
+              padding: '10px 14px', background: 'rgba(234,179,8,.08)',
+              border: '1px solid rgba(234,179,8,.3)', borderRadius: 6,
+              fontSize: '.82rem', color: 'var(--yellow, #f59e0b)', marginBottom: 16,
+            }}>
+              ⚠ This key will <strong>not be shown again</strong>. Send it via a secure channel (encrypted message, password manager, etc.).
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+              <button className="btn" onClick={() => setMcpKeyModal({ open: false })}>Close</button>
             </div>
           </div>
         </div>

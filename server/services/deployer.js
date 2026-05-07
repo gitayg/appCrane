@@ -6,16 +6,68 @@ import { decrypt } from './encryption.js';
 import log from '../utils/logger.js';
 import { ensureCodebaseContext } from './appstudio/contextBuilder.js';
 
-async function waitForHealth(url, timeoutMs) {
+/**
+ * Health-endpoint contract for AppCrane apps:
+ *   - Responds 200 within the timeout
+ *   - Body is JSON
+ *   - Body has both `status` and `version` fields (any non-empty value)
+ *
+ * Pre-v2.2.11 the deployer only ran a health check when manifest.be.health
+ * was explicitly declared; apps without one deployed "successfully" and
+ * then sat with no health monitor data forever. Now health is mandatory:
+ * if the manifest doesn't say where, we assume `/api/health` and require
+ * it to satisfy the contract above.
+ *
+ * Returns:
+ *   { ok: true }                                  on contract met
+ *   { ok: false, reason: 'timeout', detail }      no 200 within window
+ *   { ok: false, reason: 'not_json', detail }     200 but body wasn't JSON
+ *   { ok: false, reason: 'missing_fields', detail } JSON but lacks status/version
+ */
+async function probeHealthEndpoint(url, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
+  let lastError = null;
+  let lastStatus = null;
+  let lastBodyPreview = null;
+
   while (Date.now() < deadline) {
     try {
       const res = await fetch(url, { signal: AbortSignal.timeout(3000) });
-      if (res.ok) return true;
-    } catch (_) {}
+      lastStatus = res.status;
+      if (res.ok) {
+        const text = await res.text();
+        lastBodyPreview = text.slice(0, 200);
+        let body;
+        try {
+          body = JSON.parse(text);
+        } catch {
+          return {
+            ok: false,
+            reason: 'not_json',
+            detail: `Health endpoint returned 200 but body wasn't JSON. Got: ${JSON.stringify(text.slice(0, 80))}. Expected: {"status": "ok", "version": "<your-app-version>"}`,
+          };
+        }
+        if (body && typeof body === 'object' && body.status !== undefined && body.version !== undefined) {
+          return { ok: true };
+        }
+        return {
+          ok: false,
+          reason: 'missing_fields',
+          detail: `Health endpoint returned JSON but missing required fields. Got: ${JSON.stringify(body).slice(0, 120)}. Expected both "status" and "version" fields.`,
+        };
+      }
+    } catch (e) {
+      lastError = e.message || String(e);
+    }
     await new Promise(r => setTimeout(r, 2000));
   }
-  return false;
+  return {
+    ok: false,
+    reason: 'timeout',
+    detail: lastError
+      ? `No healthy response within ${timeoutMs}ms (last error: ${lastError})`
+      : `No healthy response within ${timeoutMs}ms (last status: ${lastStatus ?? 'no response'}, last body: ${JSON.stringify(lastBodyPreview ?? '')})`,
+  };
 }
 
 /**
@@ -352,22 +404,33 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     });
     appendLog(`Container started: appcrane-${app.slug}-${env} (host port ${bePort})`);
 
-    // Health-validate the new container; revert to previous image on failure (Feature 9)
-    if (manifest.be?.health) {
-      const healthUrl = `http://localhost:${bePort}${manifest.be.health}`;
-      appendLog(`Validating new container health at ${manifest.be.health} (30s)…`);
-      const healthy = await waitForHealth(healthUrl, 30000);
-      if (!healthy) {
-        appendLog('Health check failed — stopping new container');
-        await dockerStop(app.slug, env).catch(() => {});
-        if (prevImage) {
-          appendLog(`Reverting to previous image: ${prevImage}`);
-          await dockerStart({ slug: app.slug, env, image: prevImage, hostPort: bePort, envVars: runtimeEnvVars, volumes: [{ host: resolve(join(sharedDir, 'data')), container: '/data' }], memoryMb: limits.max_ram_mb, cpus: limits.max_cpu_percent / 100 }).catch(() => {});
-        }
-        throw new Error(`New container failed health check (${manifest.be.health}). Previous version restored.`);
+    // Health-validate the new container; revert to previous image on failure (Feature 9).
+    // v2.2.11: health check is now mandatory. If manifest.be.health is unset
+    // we assume the /api/health convention and require the same contract:
+    // 200 + JSON with {status, version}. Apps without a health endpoint used
+    // to deploy "successfully" then leave the dashboard's version/health
+    // columns blank forever, with no signal to the developer that anything
+    // was wrong.
+    const healthPath = manifest.be?.health || '/api/health';
+    const healthSource = manifest.be?.health ? `manifest.be.health="${manifest.be.health}"` : `default /api/health (manifest.be.health unset)`;
+    const healthUrl = `http://localhost:${bePort}${healthPath}`;
+    appendLog(`Validating new container health at ${healthPath} (30s, ${healthSource})…`);
+    const healthResult = await probeHealthEndpoint(healthUrl, 30000);
+    if (!healthResult.ok) {
+      appendLog(`Health check failed (${healthResult.reason}): ${healthResult.detail}`);
+      await dockerStop(app.slug, env).catch(() => {});
+      if (prevImage) {
+        appendLog(`Reverting to previous image: ${prevImage}`);
+        await dockerStart({ slug: app.slug, env, image: prevImage, hostPort: bePort, envVars: runtimeEnvVars, volumes: [{ host: resolve(join(sharedDir, 'data')), container: '/data' }], memoryMb: limits.max_ram_mb, cpus: limits.max_cpu_percent / 100 }).catch(() => {});
       }
-      appendLog('Health check passed');
+      throw new Error(
+        `New container failed health check at ${healthPath}: ${healthResult.detail}\n` +
+        `Add a route that returns JSON like {"status":"ok","version":"1.0.0"} ` +
+        `(declare the path in deployhub.json as be.health, or use the default /api/health). ` +
+        `Previous version restored.`
+      );
     }
+    appendLog('Health check passed');
 
     pruneOldImages(app.slug, env, (app.image_retention ?? 0) + 1);
     // Reclaim dangling layers from failed/interrupted prior builds (safe — never touches in-use images).
