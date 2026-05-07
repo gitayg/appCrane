@@ -55,7 +55,7 @@ function getEnhancement(id, user) {
   const db = getDb();
   const enh = db.prepare('SELECT * FROM enhancement_requests WHERE id = ?').get(id);
   if (!enh) throw new AppError('Enhancement not found', 404, 'NOT_FOUND');
-  if (enh.user_id !== user.userId && user.role !== 'admin') throw new AppError('Access denied', 403, 'FORBIDDEN');
+  if (enh.user_id !== user.userId && user.role !== 'admin' && user.role !== 'platform_admin') throw new AppError('Access denied', 403, 'FORBIDDEN');
   return enh;
 }
 
@@ -225,7 +225,7 @@ router.post('/:enhancementId/feedback', (req, res) => {
   if (!comment?.trim()) throw new AppError('comment is required', 400, 'VALIDATION');
 
   const db = getDb();
-  const isAdmin = user.role === 'admin';
+  const isAdmin = user.role === 'admin' || user.role === 'platform_admin';
   const existing = isAdmin ? (enh.admin_comments || '') : (enh.user_comments || '');
   const updated = existing + `\n[${new Date().toISOString()}] ${comment.trim()}`;
 
@@ -251,7 +251,7 @@ router.post('/:enhancementId/build', (req, res) => {
 
   const db = getDb();
 
-  if (user.role === 'admin' || isAppAdmin(user.userId, enh.app_slug)) {
+  if (user.role === 'admin' || user.role === 'platform_admin' || isAppAdmin(user.userId, enh.app_slug)) {
     db.prepare("UPDATE enhancement_requests SET status = 'plan_approved' WHERE id = ?").run(id);
     const { lastInsertRowid } = db.prepare('INSERT INTO enhancement_jobs (enhancement_id, phase) VALUES (?, ?)').run(id, 'code');
     res.json({ message: 'Build queued', auto: true, job_id: Number(lastInsertRowid) });
@@ -264,7 +264,7 @@ router.post('/:enhancementId/build', (req, res) => {
 // GET /api/plan/active-job/:slug — returns the active code job for an app (admin only)
 router.get('/active-job/:slug', (req, res) => {
   const user = resolveUser(req);
-  if (!user || user.role !== 'admin') throw new AppError('Admin only', 403, 'FORBIDDEN');
+  if (!user || (user.role !== 'admin' && user.role !== 'platform_admin')) throw new AppError('Admin only', 403, 'FORBIDDEN');
   const { slug } = req.params;
   const db = getDb();
   const job = db.prepare(`
@@ -295,7 +295,7 @@ router.get('/job/:jobId', (req, res) => {
   `).get(jobId);
 
   if (!job) throw new AppError('Job not found', 404, 'NOT_FOUND');
-  if (job.user_id !== user.userId && user.role !== 'admin') throw new AppError('Access denied', 403, 'FORBIDDEN');
+  if (job.user_id !== user.userId && user.role !== 'admin' && user.role !== 'platform_admin') throw new AppError('Access denied', 403, 'FORBIDDEN');
 
   let output = null;
   try { output = job.output_json ? JSON.parse(job.output_json) : null; } catch (_) {}

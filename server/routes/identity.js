@@ -98,8 +98,11 @@ router.post('/login', (req, res) => {
 
   log.info(`Identity login: ${user.name} (${login})${app ? ' for app ' + app : ''}`);
 
-  // Get all apps with this user's role, health state, and current version
-  const isAdmin = user.role === 'admin';
+  // Get all apps with this user's role, health state, and current version.
+  // platform_admin counts as admin everywhere — same blast radius, same
+  // capabilities. This block was the source of the v2.2.6 follow-up bug
+  // where platform_admin saw the "request access" screen for private apps.
+  const isAdmin = user.role === 'admin' || user.role === 'platform_admin';
   const apps = db.prepare(`
     SELECT a.slug, a.name, a.domain, a.description, a.public_access, a.visibility, a.category,
       CASE WHEN a.visibility = 'public' THEN 'viewer' ELSE COALESCE(aur.app_role, 'none') END as app_role,
@@ -242,7 +245,7 @@ router.get('/verify', (req, res) => {
         appRole = 'viewer';
       } else {
         const roleRecord = db.prepare('SELECT app_role FROM app_user_roles WHERE app_id = ? AND user_id = ?').get(appRecord.id, session.user_id);
-        appRole = roleRecord?.app_role || (session.crane_role === 'admin' ? 'admin' : 'none');
+        appRole = roleRecord?.app_role || ((session.crane_role === 'admin' || session.crane_role === 'platform_admin') ? 'admin' : 'none');
       }
     }
   } else if (session.app_id) {
@@ -253,7 +256,7 @@ router.get('/verify', (req, res) => {
         appRole = 'viewer';
       } else {
         const roleRecord = db.prepare('SELECT app_role FROM app_user_roles WHERE app_id = ? AND user_id = ?').get(session.app_id, session.user_id);
-        appRole = roleRecord?.app_role || (session.crane_role === 'admin' ? 'admin' : 'none');
+        appRole = roleRecord?.app_role || ((session.crane_role === 'admin' || session.crane_role === 'platform_admin') ? 'admin' : 'none');
       }
     }
   }
@@ -349,8 +352,10 @@ router.get('/me', (req, res) => {
 
   if (!session) throw new AppError('Invalid or expired token', 401, 'INVALID_TOKEN');
 
-  // Get all apps with roles, health state, and current version
-  const isAdmin = session.role === 'admin';
+  // Get all apps with roles, health state, and current version. Same
+  // platform_admin treatment as above — global admins of either tier
+  // bypass per-app role restrictions.
+  const isAdmin = session.role === 'admin' || session.role === 'platform_admin';
   const apps = db.prepare(`
     SELECT a.slug, a.name, a.domain, a.description, a.public_access, a.visibility, a.category,
       CASE WHEN a.visibility = 'public' THEN 'viewer' ELSE COALESCE(aur.app_role, 'none') END as role,
@@ -405,13 +410,13 @@ router.get('/preview-as/:userId', (req, res) => {
   `).get(tokenHash);
 
   if (!session) throw new AppError('Invalid or expired token', 401, 'INVALID_TOKEN');
-  if (session.role !== 'admin') throw new AppError('Admin only', 403, 'FORBIDDEN');
+  if (session.role !== 'admin' && session.role !== 'platform_admin') throw new AppError('Admin only', 403, 'FORBIDDEN');
 
   const targetId = Number(req.params.userId);
   const target = db.prepare('SELECT id, name, email, username, avatar_url, role FROM users WHERE id = ?').get(targetId);
   if (!target) throw new AppError('User not found', 404, 'NOT_FOUND');
 
-  const isTargetAdmin = target.role === 'admin';
+  const isTargetAdmin = target.role === 'admin' || target.role === 'platform_admin';
   const apps = db.prepare(`
     SELECT a.slug, a.name, a.domain, a.description, a.public_access, a.visibility, a.category,
       CASE WHEN a.visibility = 'public' THEN 'viewer' ELSE COALESCE(aur.app_role, 'none') END as app_role,

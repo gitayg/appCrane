@@ -54,7 +54,7 @@ function getApp(slug, user) {
   const db = getDb();
   const app = db.prepare('SELECT * FROM apps WHERE slug = ?').get(slug);
   if (!app) throw new AppError(`App '${slug}' not found`, 404, 'NOT_FOUND');
-  if (user.role !== 'admin') {
+  if (user.role !== 'admin' && user.role !== 'platform_admin') {
     const assigned = db.prepare('SELECT 1 FROM app_users WHERE app_id = ? AND user_id = ?').get(app.id, user.id);
     if (!assigned) throw new AppError('You do not have access to this app', 403, 'FORBIDDEN');
   }
