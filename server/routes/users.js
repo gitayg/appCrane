@@ -42,7 +42,7 @@ router.post('/', requireAdmin, auditMiddleware('user-create'), (req, res) => {
       throw new AppError('Only platform admins can create platform admins', 403, 'FORBIDDEN_PLATFORM_ADMIN');
     }
     userRole = 'platform_admin';
-  } else if (role === 'admin') {
+  } else if (role === 'admin') { // role:platform-admin-skipped — assigning role STRING from req.body, not a caller-role check
     userRole = 'admin';
   }
   const userKind = kind === 'agent' ? 'agent' : 'human';

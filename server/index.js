@@ -57,7 +57,6 @@ import coderRoutes from './routes/coder.js';
 import agentsRoutes from './routes/agents.js';
 import skillsRoutes from './routes/skills.js';
 import mcpRoutes from './routes/mcp.js';
-import appKeysRoutes from './routes/appKeys.js';
 import userMcpKeysRoutes from './routes/userMcpKeys.js';
 
 const PORT = process.env.PORT || 5001;
@@ -570,7 +569,6 @@ app.use('/api/plan', planRoutes);         // Plan panel (Bearer auth)
 app.use('/api/coder', coderRoutes);       // AppCrane Studio (API key + Bearer auth)
 app.use('/api/agents', agentsRoutes);     // AIDE-compatible Studio API
 app.use('/api/mcp', mcpRoutes);          // Model Context Protocol endpoint (JSON-RPC + admin catalog)
-app.use('/api/apps', appKeysRoutes);     // /api/apps/:slug/keys — Owner-issued app-scoped keys
 app.use('/api', userMcpKeysRoutes);      // /api/me/mcp-keys — personal MCP keys
 
 app.use('/api', logsRoutes);             // /api/audit, /api/apps/:slug/audit

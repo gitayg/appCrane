@@ -98,7 +98,7 @@ router.post('/', requireAuth, async (req, res) => {
         };
         break;
       case 'tools/list': {
-        const appcraneTools = listTools(req.user, req.app_key, req.user_mcp_key);
+        const appcraneTools = listTools(req.user, req.user_mcp_key);
         // Append github_* tools if the caller provided X-Github-Token. Lazy-
         // spawns a container; idle-reaped after settings.github_mcp_idle_timeout.
         let githubTools = [];
@@ -118,7 +118,6 @@ router.post('/', requireAuth, async (req, res) => {
         }
         log.info(
           `MCP: tools/call name=${params.name} user=${req.user.id}` +
-          (req.app_key ? ` app_key=${req.app_key.id}/${req.app_key.app_slug}` : '') +
           (req.user_mcp_key ? ` user_mcp_key=${req.user_mcp_key.id}` : '')
         );
         // Route by namespace ownership:
@@ -137,7 +136,7 @@ router.post('/', requireAuth, async (req, res) => {
 
           if (isAppCraneTool) {
             const upstreamName = stripPrefix(params.name, 'mcp__appcrane__');
-            result = await callTool(req.user, upstreamName, params.arguments, req.app_key, req.user_mcp_key);
+            result = await callTool(req.user, upstreamName, params.arguments, req.user_mcp_key);
           } else {
             if (!req.github_token) {
               return res.json({
