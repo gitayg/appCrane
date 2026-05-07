@@ -207,8 +207,9 @@ export function requireAppUser(req, res, next) {
   }
 
   // Regular admin: blocked from env/data/deploy until they assign
-  // themselves as an app user (intentional guardrail).
-  if (req.user.role === 'admin') {
+  // themselves as an app user (intentional guardrail). platform_admin
+  // bypasses this entirely; that's handled at line 205 above.
+  if (req.user.role === 'admin') { // role:platform-admin-skipped
     return next(new AppError('Admin cannot access app data/env. Assign yourself as an app user first.', 403, 'ADMIN_BLOCKED'));
   }
 

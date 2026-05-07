@@ -162,12 +162,12 @@ router.post('/:id/regenerate-key', requireAdmin, auditMiddleware('user-regen-key
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
   if (!user) throw new AppError('User not found', 404, 'NOT_FOUND');
 
-  // Block admin key regeneration via API -- use crane regenerate-key on server
-  if (user.role === 'admin') {
+  // Block admin/platform_admin key regeneration via API -- use crane regenerate-key on server
+  if (user.role === 'admin' || user.role === 'platform_admin') {
     throw new AppError('Admin keys cannot be regenerated via API. Run: crane regenerate-key --on the server.', 403, 'ADMIN_KEY_PROTECTED');
   }
 
-  const prefix = user.role === 'admin' ? 'dhk_admin' : 'dhk_user';
+  const prefix = (user.role === 'admin' || user.role === 'platform_admin') ? 'dhk_admin' : 'dhk_user';
   const apiKey = generateApiKey(prefix);
   const keyHash = hashApiKey(apiKey);
 

@@ -62,7 +62,7 @@ router.post('/:appSlug', async (req, res) => {
   if (!app) throw new AppError('App not found', 404, 'NOT_FOUND');
   if (!app.github_url) throw new AppError('App has no GitHub repository — Ask Claude requires source code access', 400, 'NO_REPO');
 
-  if (user.role !== 'admin') {
+  if (user.role !== 'admin' && user.role !== 'platform_admin') {
     const access = db.prepare('SELECT 1 FROM app_users WHERE app_id = ? AND user_id = ?').get(app.id, user.userId);
     if (!access) throw new AppError('Access denied', 403, 'FORBIDDEN');
   }
@@ -146,7 +146,7 @@ router.get('/stream/:jobId', (req, res) => {
   if (!/^[A-Za-z0-9_-]{16,64}$/.test(jobId)) return res.status(400).json({ error: 'Invalid job id' });
   const job = pendingJobs.get(jobId);
   if (!job) return res.status(404).json({ error: 'Job not found or already completed' });
-  if (job.ownerUserId !== user.userId && user.role !== 'admin') {
+  if (job.ownerUserId !== user.userId && user.role !== 'admin' && user.role !== 'platform_admin') {
     return res.status(403).json({ error: 'Forbidden' });
   }
 
@@ -192,7 +192,7 @@ router.get('/session/:sessionId', (req, res) => {
   const db = getDb();
   const session = db.prepare('SELECT * FROM ask_sessions WHERE id = ?').get(parseInt(req.params.sessionId, 10));
   if (!session) throw new AppError('Session not found', 404, 'NOT_FOUND');
-  if (session.user_id !== user.userId && user.role !== 'admin') throw new AppError('Access denied', 403, 'FORBIDDEN');
+  if (session.user_id !== user.userId && user.role !== 'admin' && user.role !== 'platform_admin') throw new AppError('Access denied', 403, 'FORBIDDEN');
   const messages = db.prepare('SELECT role, content, created_at FROM ask_messages WHERE session_id = ? ORDER BY id').all(session.id);
   res.json({ session, messages });
 });
@@ -217,7 +217,7 @@ router.get('/jobs', (req, res) => {
   let active_jobs = [];
   let app_requests = [];
 
-  if (user.role === 'admin') {
+  if (user.role === 'admin' || user.role === 'platform_admin') {
     active_jobs = db.prepare(`
       SELECT j.id, j.phase, j.status, j.created_at,
              er.message as enhancement_message, er.app_slug, er.user_name
