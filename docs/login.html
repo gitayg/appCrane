@@ -451,6 +451,23 @@ input:focus{border-color:var(--accent)}
         style="width:200px;margin-bottom:0;font-size:.8rem;padding:6px 10px;border-radius:6px">
     </div>
     <div id="appsList"></div>
+
+    <!-- MCP keys: self-service for any portal user. The server endpoint
+         POST /api/me/mcp-keys accepts the user's Bearer token, so we just
+         need to surface the create/list/revoke UI here. -->
+    <div id="mcpKeysSection" style="margin-top:32px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+        <div class="section-title" style="margin-bottom:0">Your MCP Keys</div>
+        <button id="mcpKeyCreateBtn" class="btn-primary" style="font-size:.78rem;padding:6px 14px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;cursor:pointer">
+          + Create MCP key
+        </button>
+      </div>
+      <p style="color:var(--dim);font-size:.78rem;margin:0 0 10px;line-height:1.5">
+        Personal keys for connecting Claude Code, Cursor, or any MCP-compatible agent to AppCrane. Each key authenticates as you and inherits your per-app access. Shown once on creation — copy then.
+      </p>
+      <div id="mcpKeysList" style="font-size:.82rem"></div>
+    </div>
+
     <div id="myEnhSection" class="hidden">
       <div class="section-title" style="margin-top:32px">My Requests</div>
       <div id="myEnhList" class="my-enh-list"></div>
@@ -944,6 +961,7 @@ function showApps(data) {
 
   loadMyEnhancements();
   if (data.user.role === 'admin') loadAdminEnhancements();
+  loadMcpKeys();
 
   // Catalog — apps the user can see but can't access yet
   if (catalog.length > 0) {
@@ -1374,6 +1392,245 @@ async function deleteMyEnhancement(id, cardEl) {
     alert('Network error — could not delete request.');
   }
 }
+
+// ── MCP keys (self-service) ─────────────────────────────────────────
+//
+// Any portal user can issue / list / revoke their own MCP keys here, no
+// dashboard access needed. Server endpoint POST /api/me/mcp-keys accepts
+// the user's Bearer token and returns plaintext exactly once.
+//
+// All dynamic content uses textContent / DOM construction (never innerHTML)
+// — labels can contain user-supplied text, API keys are sensitive enough
+// that we want zero chance of even a transient string-eval path.
+
+async function loadMcpKeys() {
+  const listEl = document.getElementById('mcpKeysList');
+  if (!listEl) return;
+  try {
+    const res = await fetch(API + '/api/me/mcp-keys', {
+      headers: { 'Authorization': 'Bearer ' + sessionToken }
+    });
+    if (!res.ok) {
+      listEl.textContent = '';
+      const empty = document.createElement('div');
+      empty.style.cssText = 'color:var(--dim);font-size:.78rem;font-style:italic';
+      empty.textContent = 'No keys yet.';
+      listEl.appendChild(empty);
+      return;
+    }
+    const data = await res.json();
+    renderMcpKeys(data.keys || []);
+  } catch (e) {
+    listEl.textContent = '';
+    const err = document.createElement('div');
+    err.style.cssText = 'color:var(--red);font-size:.78rem';
+    err.textContent = 'Failed to load MCP keys: ' + (e.message || e);
+    listEl.appendChild(err);
+  }
+}
+
+function renderMcpKeys(keys) {
+  const el = document.getElementById('mcpKeysList');
+  el.textContent = '';
+  const active = keys.filter(function(k) { return !k.revoked_at; });
+  if (active.length === 0) {
+    const empty = document.createElement('div');
+    empty.style.cssText = 'color:var(--dim);font-size:.78rem;font-style:italic';
+    empty.textContent = 'No keys yet. Click "+ Create MCP key" to issue one.';
+    el.appendChild(empty);
+    return;
+  }
+  active.forEach(function(k) {
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 12px;border:1px solid var(--border);border-radius:6px;margin-bottom:6px;background:var(--surface)';
+
+    const left = document.createElement('div');
+    left.style.cssText = 'flex:1;min-width:0';
+    const labelLine = document.createElement('div');
+    labelLine.style.cssText = 'font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+    if (k.label) {
+      labelLine.textContent = k.label;
+    } else {
+      const noLabel = document.createElement('span');
+      noLabel.style.color = 'var(--dim)';
+      noLabel.textContent = '(no label)';
+      labelLine.appendChild(noLabel);
+    }
+    const meta = document.createElement('div');
+    meta.style.cssText = 'font-size:.72rem;color:var(--dim);margin-top:2px';
+    const created = k.created_at ? new Date(k.created_at).toLocaleDateString() : '';
+    const used = k.last_used_at ? 'last used ' + new Date(k.last_used_at).toLocaleDateString() : 'never used';
+    meta.textContent = 'created ' + created + ' · ' + used;
+    left.appendChild(labelLine);
+    left.appendChild(meta);
+
+    const btn = document.createElement('button');
+    btn.textContent = 'Revoke';
+    btn.style.cssText = 'font-size:.72rem;padding:4px 10px;background:transparent;color:var(--red);border:1px solid var(--red);border-radius:4px;cursor:pointer';
+    btn.onclick = function() { revokeMcpKey(k.id, k.label); };
+
+    row.appendChild(left);
+    row.appendChild(btn);
+    el.appendChild(row);
+  });
+}
+
+async function createMcpKey() {
+  const label = prompt('Label for this key (optional, helps you tell keys apart later):', 'claude-code-' + new Date().toISOString().slice(0, 10));
+  if (label === null) return; // cancelled
+  try {
+    const res = await fetch(API + '/api/me/mcp-keys', {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer ' + sessionToken,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ label: label.trim() || null }),
+    });
+    if (!res.ok) {
+      const errBody = await res.json().catch(function() { return {}; });
+      alert('Could not create MCP key: ' + (errBody.error && errBody.error.message || res.statusText));
+      return;
+    }
+    const data = await res.json();
+    showMcpKeyResult(data.api_key, label.trim());
+    loadMcpKeys();
+  } catch (e) {
+    alert('Network error creating MCP key: ' + (e.message || e));
+  }
+}
+
+async function revokeMcpKey(id, label) {
+  const lbl = label || '(this key)';
+  if (!confirm('Revoke "' + lbl + '"?\n\nAny agent using this key will stop working immediately. This cannot be undone.')) return;
+  try {
+    const res = await fetch(API + '/api/me/mcp-keys/' + id, {
+      method: 'DELETE',
+      headers: { 'Authorization': 'Bearer ' + sessionToken },
+    });
+    if (!res.ok) {
+      const errBody = await res.json().catch(function() { return {}; });
+      alert('Could not revoke: ' + (errBody.error && errBody.error.message || res.statusText));
+      return;
+    }
+    loadMcpKeys();
+  } catch (e) {
+    alert('Network error revoking key: ' + (e.message || e));
+  }
+}
+
+function showMcpKeyResult(apiKey, label) {
+  const setupCmd =
+    'claude mcp add --transport http appcrane ' + window.location.origin + '/api/mcp \\\n' +
+    '  --header "X-API-Key: ' + apiKey + '" \\\n' +
+    '  --header "X-Github-Token: <YOUR_GITHUB_PAT>"';
+
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.65);display:flex;align-items:center;justify-content:center;z-index:1000;backdrop-filter:blur(2px)';
+  overlay.onclick = function() { document.body.removeChild(overlay); };
+
+  const modal = document.createElement('div');
+  modal.style.cssText = 'background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:28px;max-width:680px;width:94%;box-shadow:0 24px 64px rgba(0,0,0,.5)';
+  modal.onclick = function(e) { e.stopPropagation(); };
+
+  const title = document.createElement('h3');
+  title.style.cssText = 'margin:0 0 6px;color:var(--green);font-size:1.1rem';
+  title.textContent = '✓ MCP key created';
+  modal.appendChild(title);
+
+  if (label) {
+    const sub = document.createElement('p');
+    sub.style.cssText = 'color:var(--dim);font-size:.85rem;margin-bottom:18px';
+    sub.appendChild(document.createTextNode('Label: '));
+    const strong = document.createElement('strong');
+    strong.style.color = 'var(--text)';
+    strong.textContent = label;
+    sub.appendChild(strong);
+    modal.appendChild(sub);
+  } else {
+    const spacer = document.createElement('div');
+    spacer.style.marginBottom = '18px';
+    modal.appendChild(spacer);
+  }
+
+  // API key row
+  const keyWrap = document.createElement('div');
+  keyWrap.style.marginBottom = '14px';
+  const keyHdr = document.createElement('div');
+  keyHdr.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin-bottom:6px';
+  const keyLabel = document.createElement('span');
+  keyLabel.style.cssText = 'color:var(--dim);font-size:.8rem';
+  keyLabel.textContent = 'API key';
+  const keyCopyBtn = document.createElement('button');
+  keyCopyBtn.style.cssText = 'font-size:.72rem;padding:4px 10px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;cursor:pointer';
+  keyCopyBtn.textContent = 'Copy key';
+  keyCopyBtn.onclick = function() {
+    navigator.clipboard.writeText(apiKey).then(function() {
+      keyCopyBtn.textContent = '✓ Copied';
+      setTimeout(function() { keyCopyBtn.textContent = 'Copy key'; }, 1800);
+    });
+  };
+  keyHdr.appendChild(keyLabel);
+  keyHdr.appendChild(keyCopyBtn);
+  const keyCode = document.createElement('code');
+  keyCode.style.cssText = 'display:block;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px 14px;font-family:monospace;font-size:.82rem;word-break:break-all;user-select:all';
+  keyCode.textContent = apiKey;
+  keyWrap.appendChild(keyHdr);
+  keyWrap.appendChild(keyCode);
+  modal.appendChild(keyWrap);
+
+  // Setup command row
+  const cmdWrap = document.createElement('div');
+  cmdWrap.style.marginBottom = '14px';
+  const cmdHdr = document.createElement('div');
+  cmdHdr.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin-bottom:6px';
+  const cmdLabel = document.createElement('span');
+  cmdLabel.style.cssText = 'color:var(--dim);font-size:.8rem';
+  cmdLabel.textContent = 'Setup command for Claude Code';
+  const cmdCopyBtn = document.createElement('button');
+  cmdCopyBtn.style.cssText = 'font-size:.72rem;padding:4px 10px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;cursor:pointer';
+  cmdCopyBtn.textContent = 'Copy command';
+  cmdCopyBtn.onclick = function() {
+    navigator.clipboard.writeText(setupCmd).then(function() {
+      cmdCopyBtn.textContent = '✓ Copied';
+      setTimeout(function() { cmdCopyBtn.textContent = 'Copy command'; }, 1800);
+    });
+  };
+  cmdHdr.appendChild(cmdLabel);
+  cmdHdr.appendChild(cmdCopyBtn);
+  const cmdPre = document.createElement('pre');
+  cmdPre.style.cssText = 'background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px 14px;font-family:monospace;font-size:.78rem;white-space:pre-wrap;word-break:break-all;user-select:all;margin:0';
+  cmdPre.textContent = setupCmd;
+  const note = document.createElement('p');
+  note.style.cssText = 'font-size:.75rem;color:var(--dim);margin-top:6px;margin-bottom:0';
+  note.textContent = 'Replace <YOUR_GITHUB_PAT> with your own GitHub personal access token before running.';
+  cmdWrap.appendChild(cmdHdr);
+  cmdWrap.appendChild(cmdPre);
+  cmdWrap.appendChild(note);
+  modal.appendChild(cmdWrap);
+
+  const warning = document.createElement('div');
+  warning.style.cssText = 'padding:10px 14px;background:rgba(234,179,8,.08);border:1px solid rgba(234,179,8,.3);border-radius:6px;font-size:.82rem;color:var(--yellow);margin-bottom:16px';
+  warning.textContent = '⚠ This key will not be shown again. Copy it now and store it safely.';
+  modal.appendChild(warning);
+
+  const closeWrap = document.createElement('div');
+  closeWrap.style.cssText = 'display:flex;justify-content:flex-end';
+  const closeBtn = document.createElement('button');
+  closeBtn.style.cssText = 'padding:8px 16px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;cursor:pointer';
+  closeBtn.textContent = 'Close';
+  closeBtn.onclick = function() { document.body.removeChild(overlay); };
+  closeWrap.appendChild(closeBtn);
+  modal.appendChild(closeWrap);
+
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+  var btn = document.getElementById('mcpKeyCreateBtn');
+  if (btn) btn.addEventListener('click', createMcpKey);
+});
 
 async function loadAdminEnhancements() {
   try {
