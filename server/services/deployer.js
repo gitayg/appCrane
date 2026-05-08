@@ -266,19 +266,31 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       } catch (e) {}
 
       appendLog(`Cloned successfully. Commit: ${commitHash}`);
-    } else {
-      // Find latest upload release
+    } else if (app.source_type === 'managed_legacy') {
+      // v2.3.1: deprecation branch — replays the last upload-time release
+      // dir for apps that pre-date the service-account model. Upload as a
+      // feature is gone (POST /api/apps/:slug/upload/:env was removed) so
+      // this code only finds artifacts written by older versions of
+      // AppCrane. Promote these apps to 'github' or 'managed' to retire it.
       const releases = readdirSync(releasesDir)
         .filter(d => d.includes('upload'))
         .sort()
         .reverse();
 
       if (releases.length === 0) {
-        throw new Error('No uploaded release found. Upload files first.');
+        throw new Error(
+          `No legacy release found for app '${app.slug}'. Upload-based deploys were removed in v2.3.1; ` +
+          `promote this app to source_type='github' (with a github_url) or 'managed' (service-account repo) to deploy fresh.`
+        );
       }
 
       releaseDir = resolve(join(releasesDir, releases[0]));
-      appendLog(`Using uploaded release: ${releases[0]}`);
+      appendLog(`Using legacy upload release (deprecated): ${releases[0]}`);
+    } else {
+      throw new Error(
+        `App '${app.slug}' has source_type='${app.source_type || '(unset)'}' which is not deployable. ` +
+        `Set source_type to 'github' with a github_url, or 'managed' for a service-account-owned repo.`
+      );
     }
 
     // Read deployhub.json manifest (everything except `version`)

@@ -44,14 +44,18 @@ function readAppMeta(slug, dataDir) {
         return {
           name: data.name || slug,
           description: data.description || null,
-          source_type: data.github_url ? 'github' : 'upload',
+          // v2.3.1: 'upload' is gone. An orphan with no github_url maps to
+          // 'managed_legacy' so the deployer's release-replay branch still
+          // handles it; future migration can promote it to 'managed' once
+          // the files are pushed to a service-account repo.
+          source_type: data.github_url ? 'github' : 'managed_legacy',
           github_url: data.github_url || null,
           branch: data.branch || 'main',
         };
       } catch (_) {}
     }
   }
-  return { name: slug, description: null, source_type: 'upload', github_url: null, branch: 'main' };
+  return { name: slug, description: null, source_type: 'managed_legacy', github_url: null, branch: 'main' };
 }
 
 /**

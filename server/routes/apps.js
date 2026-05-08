@@ -163,6 +163,17 @@ router.post('/', requireAuth, auditMiddleware('app-create'), async (req, res) =>
   if (branch && !/^[A-Za-z0-9._/\-]{1,200}$/.test(branch)) {
     throw new AppError('branch must be alphanumeric with . _ / - (max 200 chars)', 400, 'VALIDATION');
   }
+  // v2.3.1: 'upload' is dead. Only 'github' (user/external repo) and
+  // 'managed' (service-account-owned repo) are valid for new apps.
+  // 'managed_legacy' is the deprecation marker for existing upload apps;
+  // it can't be set via API.
+  const VALID_SOURCE_TYPES = new Set(['github', 'managed']);
+  if (source_type && !VALID_SOURCE_TYPES.has(source_type)) {
+    throw new AppError(
+      `source_type must be 'github' or 'managed' — '${source_type}' is no longer supported`,
+      400, 'VALIDATION',
+    );
+  }
 
   const db = getDb();
 
@@ -305,6 +316,20 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
     source_type !== undefined;
   if (repoFieldChanged && !userHasAppPermission(req.user, app, 'code.modify_repo_settings')) {
     throw new AppError('Modifying repo settings is not permitted by your role on this app', 403, 'FORBIDDEN');
+  }
+
+  // v2.3.1: same allowlist as POST. Editing an app's source_type to
+  // 'upload' is no longer permitted; the only legal targets are 'github'
+  // and 'managed'. Existing 'managed_legacy' apps can stay or be promoted
+  // to 'github' / 'managed' once their files are pushed to a real repo.
+  if (source_type !== undefined) {
+    const VALID_SOURCE_TYPES = new Set(['github', 'managed']);
+    if (!VALID_SOURCE_TYPES.has(source_type)) {
+      throw new AppError(
+        `source_type must be 'github' or 'managed' — '${source_type}' is no longer supported`,
+        400, 'VALIDATION',
+      );
+    }
   }
 
   const updates = {};
