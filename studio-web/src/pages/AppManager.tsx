@@ -411,21 +411,54 @@ function DeployCard({ slug, env, reload, onDeploy, onPromote, onRollback }: Depl
       .catch(() => {})
   }, [slug, env, reload])
 
+  // v2.5.1: while the latest deploy is non-terminal, poll for log + status
+  // changes so the pipeline animates Pull → Build → Health → Live without
+  // a manual refresh. Stops polling the moment status hits a terminal
+  // value (live / failed / rolled_back). Also keeps a brief lingering
+  // poll after a transition to terminal so the final log lines (which can
+  // arrive a moment after status flips) populate the Health/Live dots.
+  useEffect(() => {
+    if (!latest) return
+    const TERMINAL = new Set(['live', 'failed', 'rolled_back'])
+    if (TERMINAL.has(latest.status)) return
+    let cancelled = false
+    const tick = setInterval(async () => {
+      if (cancelled) return
+      try {
+        const d = await adminApi.get<{ deployments: Deployment[] }>(
+          `/api/apps/${slug}/deployments?env=${env}&limit=1`
+        )
+        if (!cancelled) setLatest(d.deployments?.[0] ?? null)
+      } catch (_) { /* keep last good state, retry next tick */ }
+    }, 2000)
+    return () => { cancelled = true; clearInterval(tick) }
+  }, [latest?.id, latest?.status, slug, env])
+
   function pipeline(latest: Deployment) {
-    if (latest.status !== 'building') return null
+    // v2.5.1: keep the pipeline rendered for terminal states too, so the
+    // user sees the final Pull → Build → Health → Live progression
+    // instead of the bar disappearing the instant status flips. We
+    // mark all steps done on success; failed deploys mark the in-flight
+    // step as failed (red) and stop there.
     const log = latest.log || ''
+    const isLive       = latest.status === 'live'
+    const isFailed     = latest.status === 'failed' || latest.status === 'rolled_back'
     const stepDefs = [
-      { label: 'Pull', done: /cloned|pulling|fetched/i.test(log), active: false },
-      { label: 'Build', done: /built|build complete/i.test(log), active: /building|docker build/i.test(log) || true },
-      { label: 'Health', done: /health.*pass|healthy/i.test(log), active: /health check/i.test(log) },
-      { label: 'Live', done: false, active: false },
+      { label: 'Pull',   done: isLive || /cloned|pulling|fetched/i.test(log),    active: false, fail: false },
+      { label: 'Build',  done: isLive || /built|build complete/i.test(log),       active: false, fail: false },
+      { label: 'Health', done: isLive || /health.*pass|healthy/i.test(log),       active: false, fail: false },
+      { label: 'Live',   done: isLive,                                            active: false, fail: false },
     ]
-    const firstActive = stepDefs.findIndex(s => !s.done)
-    stepDefs.forEach((s, i) => { if (i === firstActive) s.active = true })
+    // First not-done step is the active one (the regex over commit log
+    // is the previous heuristic; this generalizes it: whichever step
+    // hasn't completed yet is what we're working on right now).
+    const firstNotDone = stepDefs.findIndex(s => !s.done)
+    if (firstNotDone >= 0 && !isFailed) stepDefs[firstNotDone].active = true
+    if (isFailed && firstNotDone >= 0) stepDefs[firstNotDone].fail = true
     return (
       <div className="deploy-pipeline">
         {stepDefs.map(s => (
-          <div key={s.label} className={'dp-step' + (s.done ? ' dp-done' : s.active ? ' dp-active' : '')}>
+          <div key={s.label} className={'dp-step' + (s.fail ? ' dp-fail' : s.done ? ' dp-done' : s.active ? ' dp-active' : '')}>
             <div className="dp-dot" />
             {s.label}
           </div>
