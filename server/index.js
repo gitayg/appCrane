@@ -42,7 +42,6 @@ import backupsRoutes from './routes/backups.js';
 import logsRoutes from './routes/logs.js';
 import monitoringRoutes from './routes/monitoring.js';
 import notificationsRoutes from './routes/notifications.js';
-import uploadRoutes from './routes/upload.js';
 import identityRoutes from './routes/identity.js';
 import settingsRoutes from './routes/settings.js';
 import enhancementsRoutes from './routes/enhancements.js';
@@ -562,7 +561,6 @@ app.use('/api/apps', deployRoutes);     // /api/apps/:slug/deploy/:env
 app.use('/api/apps', envVarsRoutes);     // /api/apps/:slug/env/:env
 app.use('/api/apps', healthRoutes);      // /api/apps/:slug/health/:env
 app.use('/api/apps', backupsRoutes);     // /api/apps/:slug/backup/:env
-app.use('/api/apps', uploadRoutes);      // /api/apps/:slug/upload/:env
 app.use('/api/apps', notificationsRoutes); // /api/apps/:slug/notifications
 // Mount identity FIRST so its routes don't get caught by other middleware
 app.use('/api/identity', identityRoutes);
