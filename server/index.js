@@ -58,6 +58,7 @@ import agentsRoutes from './routes/agents.js';
 import skillsRoutes from './routes/skills.js';
 import mcpRoutes from './routes/mcp.js';
 import userMcpKeysRoutes from './routes/userMcpKeys.js';
+import filesRoutes, { sweepStagedFiles } from './routes/files.js';
 
 const PORT = process.env.PORT || 5001;
 const HOST = process.env.HOST || '0.0.0.0';
@@ -84,6 +85,11 @@ app.use((req, res, next) => {
 // every 30s, so the limit needs headroom for that plus normal navigation.
 const _apiRateMap = new Map();
 setInterval(() => { const now = Date.now(); for (const [k, rec] of _apiRateMap) { if (now > rec.resetAt) _apiRateMap.delete(k); } }, 5 * 60_000);
+
+// MCP-E (v2.2.18): reap expired staged_files rows + their scratch dirs every
+// 5 minutes. Idempotent; safe across server restarts (the row's expires_at
+// is the source of truth, not in-memory state).
+setInterval(() => { try { sweepStagedFiles(); } catch (_) {} }, 5 * 60_000);
 function apiRateLimit(req, res, next) {
   const bearer = (req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
   const apiKey = req.headers['x-api-key'] || '';
@@ -570,6 +576,7 @@ app.use('/api/coder', coderRoutes);       // AppCrane Studio (API key + Bearer a
 app.use('/api/agents', agentsRoutes);     // AIDE-compatible Studio API
 app.use('/api/mcp', mcpRoutes);          // Model Context Protocol endpoint (JSON-RPC + admin catalog)
 app.use('/api', userMcpKeysRoutes);      // /api/me/mcp-keys — personal MCP keys
+app.use('/api/files', filesRoutes);      // /api/files/staged — staged uploads for MCP-E
 
 app.use('/api', logsRoutes);             // /api/audit, /api/apps/:slug/audit
 app.use('/api', monitoringRoutes);       // /api/server/health

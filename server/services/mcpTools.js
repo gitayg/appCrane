@@ -629,6 +629,71 @@ const TOOLS = [
   },
 
   {
+    name: 'appcrane_push_staged_file',
+    description:
+      'Move a previously-staged file (uploaded via POST /api/files/staged) into a running container at a path under /app or /data. ' +
+      'Use this when the file is too large to send inline as a JSON arg — upload to the staging endpoint first, then call this with the returned token. ' +
+      'The container must be running. Path is validated (no "..", must start with /app or /data). The staged blob is deleted on success.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        slug:  { type: 'string', description: 'Target app slug' },
+        env:   { type: 'string', enum: ['sandbox', 'production'], default: 'sandbox' },
+        token: { type: 'string', description: 'Token returned by POST /api/files/staged' },
+        dest:  { type: 'string', description: 'Absolute container path under /app or /data — destination file or directory' },
+      },
+      required: ['slug', 'token', 'dest'],
+      additionalProperties: false,
+    },
+    requiredRole: 'any',
+    handler: async (user, args) => {
+      const env = args.env === 'production' ? 'production' : 'sandbox';
+      const app = getAppForUser(user, args.slug);
+      const safeDest = validateContainerPath(args.dest);
+
+      const db = getDb();
+      const row = db.prepare('SELECT * FROM staged_files WHERE token = ?').get(args.token);
+      if (!row)                       throw new Error('staged file not found (token unknown or already swept)');
+      if (row.user_id !== user.id)    throw new Error('staged file is owned by a different user');
+      if (row.pushed_at)              throw new Error('staged file was already consumed');
+      const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
+      if (row.expires_at < now)       throw new Error(`staged file expired at ${row.expires_at}`);
+
+      const { execFileSync } = await import('child_process');
+      const containerName = `appcrane-${app.slug}-${env}`;
+      const cpSpec = `${containerName}:${safeDest}`;
+      try {
+        execFileSync('docker', ['cp', row.scratch_path, cpSpec], {
+          stdio: 'pipe',
+          timeout: 30000,
+        });
+      } catch (e) {
+        const detail = e.stderr?.toString().trim() || e.message;
+        throw new Error(`docker cp into ${cpSpec} failed: ${detail}`);
+      }
+
+      // Mark consumed and reap the scratch dir. The 5-min sweeper would
+      // catch this at expires_at anyway, but freeing disk immediately is
+      // friendlier on busy boxes.
+      try {
+        const { rmSync } = await import('fs');
+        const { dirname } = await import('path');
+        rmSync(dirname(row.scratch_path), { recursive: true, force: true });
+      } catch (_) { /* sweeper will retry */ }
+      db.prepare("UPDATE staged_files SET pushed_at = datetime('now') WHERE token = ?").run(row.token);
+
+      return {
+        app: app.slug,
+        env,
+        container: containerName,
+        dest: safeDest,
+        size_bytes: row.size_bytes,
+        sha256: row.sha256,
+      };
+    },
+  },
+
+  {
     name: 'appcrane_wait_deploy',
     description:
       'Block until a deployment reaches a terminal state (live / failed / rolled_back), then return its final status. ' +
