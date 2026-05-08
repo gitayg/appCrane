@@ -193,8 +193,8 @@ export async function reloadCaddy() {
 
   // Write Caddyfile and reload via systemctl (most reliable)
   try {
-    const { writeFileSync } = await import('fs');
-    const { execSync, execFileSync } = await import('child_process');
+    const { writeFileSync, readFileSync, existsSync, mkdirSync, readdirSync, unlinkSync } = await import('fs');
+    const { execFileSync } = await import('child_process');
     const caddyfile = generateCaddyfile();
 
     // Pre-apply validation: write to a tmp path, run `caddy adapt` against
@@ -222,16 +222,70 @@ export async function reloadCaddy() {
       return { success: false, error: `Generated Caddyfile is invalid: ${detail}` };
     }
 
-    writeFileSync('/etc/caddy/Caddyfile', caddyfile);
-    execSync('systemctl reload caddy', { timeout: 10000, stdio: 'pipe' });
+    // Skip-if-unchanged: byte-identical reads of the existing Caddyfile mean
+    // a reload would just disrupt live connections for no reason. Cheap to
+    // check, common case during routine app touches.
+    const livePath = '/etc/caddy/Caddyfile';
+    let prev = '';
+    try { prev = readFileSync(livePath, 'utf8'); } catch (_) { /* first run */ }
+    if (prev === caddyfile) {
+      log.info('Caddy config unchanged — skipping reload.');
+      return { success: true, unchanged: true };
+    }
+
+    // Backup-before-overwrite. /etc/caddy/.appcrane-backups/Caddyfile-<ts>.
+    // Keeps the last 10; older are pruned. Manual rollback is then a
+    // straight `cp` away — no replay of DB state needed.
+    if (prev) {
+      try {
+        const backupDir = '/etc/caddy/.appcrane-backups';
+        if (!existsSync(backupDir)) mkdirSync(backupDir, { recursive: true });
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+        writeFileSync(`${backupDir}/Caddyfile-${stamp}`, prev);
+        const files = readdirSync(backupDir).filter(f => f.startsWith('Caddyfile-')).sort();
+        const stale = files.slice(0, Math.max(0, files.length - 10));
+        for (const f of stale) {
+          try { unlinkSync(`${backupDir}/${f}`); } catch (_) { /* best-effort */ }
+        }
+      } catch (e) {
+        log.warn(`Caddy backup failed (non-fatal): ${e.message}`);
+      }
+    }
+
+    writeFileSync(livePath, caddyfile);
+    execFileSync('systemctl', ['reload', 'caddy'], { timeout: 10000, stdio: 'pipe' });
+
+    // Post-reload verification. systemctl reload returns 0 even when Caddy
+    // logs the reload but rejects the config internally. Hit the admin API
+    // to confirm Caddy is actually answering — a non-2xx or timeout means
+    // we should restart rather than leave it half-loaded.
+    let adminOk = true;
+    try {
+      const r = await fetch(`${CADDY_ADMIN}/config/`, { signal: AbortSignal.timeout(2000) });
+      adminOk = r.ok;
+    } catch (_) {
+      adminOk = false;
+    }
+    if (!adminOk) {
+      log.warn('Caddy admin API not responsive after reload — escalating to restart.');
+      try {
+        execFileSync('systemctl', ['restart', 'caddy'], { timeout: 15000, stdio: 'pipe' });
+        log.info('Caddy restarted after unresponsive reload.');
+        return { success: true, restarted: true };
+      } catch (restartErr) {
+        log.error(`Caddy restart after bad reload failed: ${restartErr.message}`);
+        return { success: false, error: `Reload completed but admin API unresponsive; restart also failed: ${restartErr.message}` };
+      }
+    }
+
     log.info('Caddy reloaded: ' + caddyfile.split('\n').filter(l => l.includes('{')).map(l => l.trim().split(' ')[0]).join(', '));
     return { success: true };
   } catch (e) {
     log.error(`Caddy reload failed: ${e.message}`);
     // Try restart instead of reload
     try {
-      const { execSync } = await import('child_process');
-      execSync('systemctl restart caddy', { timeout: 15000, stdio: 'pipe' });
+      const { execFileSync } = await import('child_process');
+      execFileSync('systemctl', ['restart', 'caddy'], { timeout: 15000, stdio: 'pipe' });
       log.info('Caddy restarted (reload failed)');
       return { success: true, restarted: true };
     } catch (e2) {
