@@ -638,6 +638,59 @@ textarea:focus { border-color: var(--accent); }
 .env-link { color: var(--dim); text-decoration: none; font-size: .74rem; }
 .env-link:hover { color: var(--accent); }
 .env-link-disabled { color: var(--dim); opacity: .35; cursor: not-allowed; pointer-events: none; }
+
+/* RequestModal — floating draggable card replacing the side-drawer Request flow (v2.3.2) */
+.request-modal {
+  position: fixed; z-index: 10000;
+  background: var(--surface, #1a1a1a);
+  color: var(--text, #e8e8e8);
+  border: 1px solid var(--border, #333);
+  border-radius: 8px;
+  box-shadow: 0 16px 48px rgba(0,0,0,.45), 0 4px 12px rgba(0,0,0,.3);
+  display: flex; flex-direction: column;
+  max-height: calc(100vh - 24px);
+  overflow: hidden;
+}
+.request-modal-header {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px;
+  background: var(--surface2, #232323);
+  border-bottom: 1px solid var(--border, #333);
+  cursor: move; user-select: none;
+}
+.request-modal-title { font-weight: 600; font-size: .82rem; }
+.request-modal-app   { flex: 1; color: var(--dim); font-size: .76rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.request-modal-close { background: none; border: none; color: var(--dim); font-size: 1.2rem; line-height: 1; cursor: pointer; padding: 0 4px; }
+.request-modal-close:hover { color: var(--text); }
+
+.request-modal-pinned {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 10px;
+  background: rgba(59,130,246,.08);
+  border-bottom: 1px solid var(--border, #333);
+  font-size: .76rem; color: var(--dim);
+  font-family: monospace;
+}
+
+.request-modal-body {
+  padding: 10px 12px;
+  overflow-y: auto;
+  flex: 1; min-height: 80px; max-height: 50vh;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.request-modal-empty { font-size: .82rem; color: var(--dim); line-height: 1.45; }
+.request-modal-status { display: flex; align-items: center; gap: 6px; font-size: .82rem; padding: 6px 8px; background: var(--surface2, #232323); border-radius: 4px; }
+.request-modal-plan { background: var(--surface2, #232323); border-radius: 4px; padding: 8px 10px; font-size: .82rem; }
+.request-modal-plan-hdr { font-weight: 600; font-size: .72rem; color: var(--dim); margin-bottom: 4px; text-transform: uppercase; letter-spacing: .5px; }
+.request-modal-plan pre { white-space: pre-wrap; margin: 0; font-family: inherit; line-height: 1.45; }
+.request-modal-error { background: rgba(239,68,68,.12); border-radius: 4px; padding: 6px 8px; font-size: .82rem; color: #ef4444; }
+.request-modal-built { background: rgba(46,125,50,.12); border-radius: 4px; padding: 6px 8px; font-size: .82rem; color: var(--green, #2e7d32); }
+
+.request-modal-input {
+  padding: 8px 10px;
+  border-top: 1px solid var(--border, #333);
+  background: var(--surface2, #232323);
+}
 .env-act-row { display: inline-flex; align-items: center; gap: 3px; flex-wrap: wrap; }
 .card-footer { padding: 5px 12px; border-top: 1px solid var(--border); background: var(--bg); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .evars-panel { border-top: 1px solid var(--border); background: var(--surface2); padding: 10px 12px; font-size: .8rem; }

@@ -21,6 +21,17 @@ export interface PeekCtx {
   id:       string
   text:     string
   path:     string  // page URL where the element was picked
+  /**
+   * Click coordinates and element bounding rect at the moment of capture,
+   * in viewport coordinates of the parent (host) document — already
+   * translated through the iframe's getBoundingClientRect so the consumer
+   * doesn't need to know about the iframe at all. Used by the floating
+   * request modal to position itself next to the picked element.
+   * Both are missing when usePeek runs against a non-iframe document.
+   */
+  clickX?: number
+  clickY?: number
+  rect?:   { left: number; top: number; width: number; height: number }
 }
 
 export function usePeek(iframeRef: React.RefObject<HTMLIFrameElement | null>) {
@@ -71,6 +82,21 @@ export function usePeek(iframeRef: React.RefObject<HTMLIFrameElement | null>) {
       e.preventDefault()
       e.stopPropagation()
       const info = capture(e.target as Element)
+      // Translate iframe-relative click + element rect into host-document
+      // viewport coords so a floating modal in the host page can position
+      // itself relative to the actual visual click target.
+      try {
+        const iframeRect = iframe.getBoundingClientRect()
+        const elRect = (e.target as Element).getBoundingClientRect()
+        info.clickX = iframeRect.left + e.clientX
+        info.clickY = iframeRect.top  + e.clientY
+        info.rect = {
+          left:   iframeRect.left + elRect.left,
+          top:    iframeRect.top  + elRect.top,
+          width:  elRect.width,
+          height: elRect.height,
+        }
+      } catch (_) { /* leave undefined */ }
       setCtx(info)
       stop()
     }

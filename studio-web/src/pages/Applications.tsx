@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef } from 'react'
 import { adminApi } from '../adminApi'
 import { PresenceAvatars } from '../components/runtime-topbar/PresenceAvatars'
-import { RequestPanel } from '../components/runtime-topbar/RequestPanel'
+import { RequestModal } from '../components/runtime-topbar/RequestModal'
+import { usePeek, type PeekCtx } from '../hooks/usePeek'
 import { BugPanel } from '../components/runtime-topbar/BugPanel'
 import { defineCraneAppTopbar } from '../topbar-element/entry'
 import { Icon } from '../components/icons'
@@ -990,6 +991,18 @@ function FrameOverlay({ frame, framePanel, setFrame, setFramePanel }: FrameOverl
   const topbarRef = useRef<HTMLElement>(null)
   const iframeRef = useRef<HTMLIFrameElement | null>(null)
   const [folded, setFolded] = useState(false)
+  // v2.3.2: point-and-click Request flow — picker activates on button
+  // click, then the captured ctx drives a floating modal instead of a
+  // side drawer. The drawer-based Request panel is kept for portal embed
+  // compatibility (CranePanels.tsx) but no longer mounted from here.
+  const peek = usePeek(iframeRef)
+  const [requestCtx, setRequestCtx] = useState<PeekCtx | null>(null)
+  useEffect(() => {
+    if (peek.ctx) {
+      setRequestCtx(peek.ctx)
+      peek.clear()
+    }
+  }, [peek.ctx]) // eslint-disable-line react-hooks/exhaustive-deps
   // Per-panel last-used width, persisted across open/close so closing
   // and reopening Request keeps the user's chosen width.
   const [widths, setWidths] = useState<Record<'ask' | 'request' | 'bug', number>>({
@@ -1082,10 +1095,19 @@ function FrameOverlay({ frame, framePanel, setFrame, setFramePanel }: FrameOverl
             <>
               <button
                 type="button"
-                className={'crane-topbar-btn' + (framePanel === 'request' ? ' active' : '')}
-                onClick={() => setFramePanel(p => p === 'request' ? null : 'request')}
-                title="File an enhancement request"
-              ><Icon.Lightbulb size={14} /> Request</button>
+                className={'crane-topbar-btn' + (peek.active || requestCtx ? ' active' : '')}
+                onClick={() => {
+                  // v2.3.2 flow: click → immediately enter pick mode → on
+                  // capture, the useEffect above opens the floating modal
+                  // anchored to the picked element. No drawer.
+                  if (requestCtx) { setRequestCtx(null); return }
+                  if (peek.active) { peek.stop(); return }
+                  peek.start()
+                }}
+                title={peek.active
+                  ? 'Click an element in the app, then describe the change. Esc to cancel.'
+                  : 'Point at an element to request an enhancement'}
+              ><Icon.Lightbulb size={14} /> {peek.active ? 'Pick…' : 'Request'}</button>
               <button
                 type="button"
                 className={'crane-topbar-btn' + (framePanel === 'bug' ? ' active' : '')}
@@ -1106,14 +1128,14 @@ function FrameOverlay({ frame, framePanel, setFrame, setFramePanel }: FrameOverl
           title="Drag to resize panel"
         />
       )}
-      <RequestPanel
-        slug={frame.slug ?? null}
-        appName={frame.appName ?? frame.title ?? ''}
-        open={framePanel === 'request'}
-        onClose={() => setFramePanel(null)}
-        width={widths.request}
-        iframeRef={iframeRef}
-      />
+      {requestCtx && (
+        <RequestModal
+          slug={frame.slug ?? null}
+          appName={frame.appName ?? frame.title ?? ''}
+          peekCtx={requestCtx}
+          onClose={() => setRequestCtx(null)}
+        />
+      )}
       <BugPanel
         slug={frame.slug ?? null}
         appName={frame.appName ?? frame.title ?? ''}
