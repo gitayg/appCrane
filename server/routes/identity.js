@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { existsSync } from 'fs';
 import { join, resolve } from 'path';
 import { getDb } from '../db.js';
-import { verifyPassword, generateSessionToken, hashApiKey } from '../services/encryption.js';
+import { verifyPassword, generateSessionToken, hashApiKey, hashPassword } from '../services/encryption.js';
 import { AppError } from '../utils/errors.js';
 import log from '../utils/logger.js';
 
@@ -387,6 +387,72 @@ router.get('/me', (req, res) => {
       year_of_birth: session.year_of_birth,
     },
     apps,
+  });
+});
+
+/**
+ * POST /api/identity/set-password
+ *
+ * Self-service: the *currently authenticated user* sets THEIR own password
+ * + receives a fresh Bearer session token. Accepts either Bearer
+ * (cc_identity_token) or X-API-Key auth so an admin who currently signs
+ * in via dhk_admin_* can set a password and migrate to the unified login
+ * without needing a different admin's help.
+ *
+ * Wipes all of the user's existing identity_sessions on success — any
+ * Bearer that may have leaked is invalidated; the new token returned
+ * here is the only valid one.
+ *
+ * Bridges the v2.4.0 migration off `dhk_admin_*`-only login.
+ */
+router.post('/set-password', (req, res) => {
+  const db = getDb();
+
+  // Auth: prefer Bearer (matches /me), fall back to X-API-Key (lets a
+  // dhk_admin_* / dhk_user_* paste-key user migrate themselves).
+  let user = null;
+  const bearer = (req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
+  if (bearer) {
+    const tokenHash = hashApiKey(bearer);
+    user = db.prepare(`
+      SELECT u.* FROM identity_sessions s
+      JOIN users u ON s.user_id = u.id
+      WHERE s.token_hash = ? AND s.expires_at > datetime('now') AND u.active = 1
+    `).get(tokenHash);
+  }
+  if (!user) {
+    const apiKey = req.headers['x-api-key'];
+    if (apiKey) {
+      const keyHash = hashApiKey(apiKey);
+      user = db.prepare('SELECT * FROM users WHERE api_key_hash = ? AND active = 1').get(keyHash);
+    }
+  }
+  if (!user) throw new AppError('Authentication required', 401, 'UNAUTHORIZED');
+
+  const { password } = req.body || {};
+  if (!password || typeof password !== 'string' || password.length < 12) {
+    throw new AppError('Password must be at least 12 characters', 400, 'VALIDATION');
+  }
+
+  db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(password), user.id);
+  db.prepare('DELETE FROM identity_sessions WHERE user_id = ?').run(user.id);
+
+  // Issue a fresh session so the caller can drop the API-key path
+  // immediately and start using Bearer (cc_identity_token) right away.
+  const token = generateSessionToken();
+  const expiresAt = new Date(Date.now() + SESSION_DURATION_HOURS * 3600 * 1000)
+    .toISOString().slice(0, 19).replace('T', ' ');
+  db.prepare(`
+    INSERT INTO identity_sessions (user_id, token_hash, expires_at)
+    VALUES (?, ?, ?)
+  `).run(user.id, hashApiKey(token), expiresAt);
+
+  log.info(`User ${user.id} (${user.email || user.username}) set their own password`);
+  res.json({
+    ok: true,
+    token,
+    expires_at: expiresAt,
+    user: { id: user.id, name: user.name, email: user.email, username: user.username },
   });
 });
 
