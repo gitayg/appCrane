@@ -1,6 +1,6 @@
 {
   "name": "AppCrane",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "be": {
     "entry": "node server/index.js",
     "health": "/api/info"
