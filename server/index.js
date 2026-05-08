@@ -59,6 +59,7 @@ import skillsRoutes from './routes/skills.js';
 import mcpRoutes from './routes/mcp.js';
 import userMcpKeysRoutes from './routes/userMcpKeys.js';
 import filesRoutes, { sweepStagedFiles } from './routes/files.js';
+import githubServiceRoutes from './routes/githubService.js';
 
 const PORT = process.env.PORT || 5001;
 const HOST = process.env.HOST || '0.0.0.0';
@@ -577,6 +578,7 @@ app.use('/api/agents', agentsRoutes);     // AIDE-compatible Studio API
 app.use('/api/mcp', mcpRoutes);          // Model Context Protocol endpoint (JSON-RPC + admin catalog)
 app.use('/api', userMcpKeysRoutes);      // /api/me/mcp-keys — personal MCP keys
 app.use('/api/files', filesRoutes);      // /api/files/staged — staged uploads for MCP-E
+app.use('/api/github-service', githubServiceRoutes); // service-account config + verify (admin)
 
 app.use('/api', logsRoutes);             // /api/audit, /api/apps/:slug/audit
 app.use('/api', monitoringRoutes);       // /api/server/health

@@ -139,3 +139,54 @@ export async function apiFetch(path, { method = 'GET', body, headers = {} } = {}
   }
   return data;
 }
+
+/**
+ * Create a repository under the configured service account/org.
+ *
+ * Returns the GitHub API response (cherry-picked to the fields AppCrane
+ * cares about: full_name, html_url, clone_url, default_branch, private).
+ *
+ * Throws if the service account is disabled, unconfigured, or GitHub
+ * rejects the request (most commonly: name collision → 422).
+ *
+ * `slug` is the AppCrane app slug; we use it verbatim as the repo name so
+ * the mapping stays predictable. Caller is responsible for slug validation
+ * upstream (the apps.slug column already enforces a sane charset).
+ */
+export async function createAppRepo(slug, { description = '', autoInit = true } = {}) {
+  if (!slug || typeof slug !== 'string') throw new Error('slug is required');
+  const cfg = getServiceConfig();
+  if (!cfg.owner) throw new Error('github_service_owner is not configured');
+
+  // Org repos go through /orgs/{owner}/repos; user repos through /user/repos.
+  // We don't know which the owner is up front, so probe /users/{owner} once
+  // and cache the type implicitly via the body.type — the service-account
+  // user is unlikely to switch between org and personal mid-session.
+  const owner = await apiFetch(`/users/${encodeURIComponent(cfg.owner)}`);
+  const isOrg = owner?.type === 'Organization';
+
+  const path = isOrg ? `/orgs/${encodeURIComponent(cfg.owner)}/repos` : '/user/repos';
+  const body = {
+    name:        slug,
+    description: description || `AppCrane-managed app: ${slug}`,
+    private:     cfg.visibility !== 'public',
+    visibility:  cfg.visibility,
+    auto_init:   !!autoInit,
+    has_issues:  true,
+    has_wiki:    false,
+    has_projects: false,
+  };
+
+  const repo = await apiFetch(path, { method: 'POST', body });
+
+  return {
+    full_name:      repo.full_name,
+    html_url:       repo.html_url,
+    clone_url:      repo.clone_url,
+    ssh_url:        repo.ssh_url,
+    default_branch: repo.default_branch,
+    private:        repo.private,
+    visibility:     repo.visibility,
+    owner_type:     isOrg ? 'org' : 'user',
+  };
+}
