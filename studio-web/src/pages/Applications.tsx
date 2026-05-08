@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { adminApi } from '../adminApi'
 import { PresenceAvatars } from '../components/runtime-topbar/PresenceAvatars'
 import { RequestModal } from '../components/runtime-topbar/RequestModal'
+import { WhatsNewModal, type WhatsNewChange } from '../components/WhatsNewModal'
 import { usePeek, type PeekCtx } from '../hooks/usePeek'
 import { BugPanel } from '../components/runtime-topbar/BugPanel'
 import { defineCraneAppTopbar } from '../topbar-element/entry'
@@ -1003,6 +1004,29 @@ function FrameOverlay({ frame, framePanel, setFrame, setFramePanel }: FrameOverl
       peek.clear()
     }
   }, [peek.ctx]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // v2.3.4 What's New — when this frame opens for an app, ask the server
+  // if there are deployments the user hasn't acknowledged yet. Shows a
+  // dialog when the live version differs from the user's last_seen. The
+  // server silently records first-time visits (no dialog) so users don't
+  // get a wall of historic changes for an app that's been live for months.
+  const [whatsNew, setWhatsNew] = useState<{ currentVersion: string | null; changes: WhatsNewChange[] } | null>(null)
+  useEffect(() => {
+    if (!frame.slug) return
+    let cancelled = false
+    adminApi
+      .get<{ current_version: string | null; changes: WhatsNewChange[]; first_time: boolean }>(
+        `/api/apps/${encodeURIComponent(frame.slug)}/whats-new`,
+      )
+      .then(r => {
+        if (cancelled || !r) return
+        if (!r.first_time && r.changes && r.changes.length > 0) {
+          setWhatsNew({ currentVersion: r.current_version, changes: r.changes })
+        }
+      })
+      .catch(() => { /* silent — this is a nice-to-have, not a blocker */ })
+    return () => { cancelled = true }
+  }, [frame.slug])
   // Per-panel last-used width, persisted across open/close so closing
   // and reopening Request keeps the user's chosen width.
   const [widths, setWidths] = useState<Record<'ask' | 'request' | 'bug', number>>({
@@ -1134,6 +1158,15 @@ function FrameOverlay({ frame, framePanel, setFrame, setFramePanel }: FrameOverl
           appName={frame.appName ?? frame.title ?? ''}
           peekCtx={requestCtx}
           onClose={() => setRequestCtx(null)}
+        />
+      )}
+      {whatsNew && frame.slug && (
+        <WhatsNewModal
+          slug={frame.slug}
+          appName={frame.appName ?? frame.title ?? frame.slug}
+          currentVersion={whatsNew.currentVersion}
+          changes={whatsNew.changes}
+          onClose={() => setWhatsNew(null)}
         />
       )}
       <BugPanel
