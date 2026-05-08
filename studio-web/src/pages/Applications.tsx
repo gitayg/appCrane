@@ -4,6 +4,8 @@ import { PresenceAvatars } from '../components/runtime-topbar/PresenceAvatars'
 import { RequestModal } from '../components/runtime-topbar/RequestModal'
 import { WhatsNewModal, type WhatsNewChange } from '../components/WhatsNewModal'
 import { usePeek, type PeekCtx } from '../hooks/usePeek'
+import { LauncherView } from './LauncherView'
+import { useMe, isAdmin } from '../hooks/useMe'
 import { BugPanel } from '../components/runtime-topbar/BugPanel'
 import { defineCraneAppTopbar } from '../topbar-element/entry'
 import { Icon } from '../components/icons'
@@ -59,6 +61,19 @@ interface PromptModal {
 type SortKey = 'name' | 'visibility' | 'category' | 'ram' | 'cpu' | 'images'
 
 export function Applications() {
+  const me = useMe()
+  // v2.5.0 role-aware view mode. End users default to launcher (tile
+  // grid, no manage chrome). Admins / platform_admins default to manage
+  // (the existing table) but can flip to launcher via the toggle. Stored
+  // in localStorage so the choice persists across reloads.
+  const adminLike = isAdmin(me)
+  const [viewMode, setViewMode] = useState<'launcher' | 'manage'>(() => {
+    const saved = typeof window !== 'undefined' ? localStorage.getItem('cc_apps_view') : null
+    if (saved === 'launcher' || saved === 'manage') return saved
+    return adminLike ? 'manage' : 'launcher'
+  })
+  useEffect(() => { try { localStorage.setItem('cc_apps_view', viewMode) } catch (_) {} }, [viewMode])
+
   const [apps, setApps] = useState<App[]>([])
   const [versions, setVersions] = useState<Record<string, { prod?: string; sand?: string }>>({})
   const [openEvars, setOpenEvars] = useState<Record<string, string | null>>({})
@@ -592,11 +607,56 @@ ${brief}
     return sort.dir === 'asc' ? cmp : -cmp
   })
 
+  // v2.5.0: end users get the tile launcher. Admins can flip to it via
+  // the toggle; non-admins never see the manage table at all (the data
+  // would be filtered server-side anyway, but the toggle is hidden).
+  if (viewMode === 'launcher') {
+    return (
+      <>
+        <LauncherView
+          onOpen={(slug, name, hasIcon) => {
+            const a = apps.find(x => x.slug === slug)
+            const prodUrl = `/${slug}`
+            const sandUrl = `/${slug}-sandbox`
+            setFrame({
+              open: true,
+              url: prodUrl,
+              title: `${name} (prod)`,
+              slug, appName: name, env: 'production',
+              prodUrl, sandUrl,
+              prodVersion: a?.production?.deploy?.version || '',
+              sandVersion: a?.sandbox?.deploy?.version || '',
+              hasIcon,
+              hasGithub: !!a?.github_url,
+            })
+          }}
+        />
+        {adminLike && (
+          <div style={{ position: 'fixed', bottom: 16, right: 16, zIndex: 50 }}>
+            <div className="applications-mode-toggle">
+              <button className="active">Launcher</button>
+              <button onClick={() => setViewMode('manage')}>Manage</button>
+            </div>
+          </div>
+        )}
+        {frame.open && (
+          <FrameOverlay frame={frame} framePanel={framePanel} setFrame={setFrame} setFramePanel={setFramePanel} />
+        )}
+      </>
+    )
+  }
+
   return (
     <div className="container">
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
         <h2 style={{ margin: 0 }}>Applications</h2>
         <button className="btn btn-accent" onClick={generateAgentKey}>New Application Onboarding</button>
+        {adminLike && (
+          <div className="applications-mode-toggle" style={{ marginLeft: 8 }}>
+            <button onClick={() => setViewMode('launcher')}>Launcher</button>
+            <button className="active">Manage</button>
+          </div>
+        )}
         <input
           type="text"
           autoFocus
