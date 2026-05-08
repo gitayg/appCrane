@@ -266,6 +266,19 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       } catch (e) {}
 
       appendLog(`Cloned successfully. Commit: ${commitHash}`);
+
+      // v2.3.6: cross-check local HEAD against GitHub's claim for this
+      // branch. Mismatch = refuse deploy. Skips quietly when disabled,
+      // for non-github URLs, or when GitHub is unreachable (we log but
+      // don't block on transient network issues).
+      try {
+        const { verifyCommitSha } = await import('./supplyChain.js');
+        await verifyCommitSha(app, releaseDir, app.branch || 'main', appendLog);
+      } catch (e) {
+        // Genuine mismatch — abort the deploy. The verifier already
+        // formatted a clear error; just rethrow.
+        throw e;
+      }
     } else if (app.source_type === 'managed_legacy') {
       // v2.3.1: deprecation branch — replays the last upload-time release
       // dir for apps that pre-date the service-account model. Upload as a
