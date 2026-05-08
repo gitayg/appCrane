@@ -936,6 +936,117 @@ const TOOLS = [
   },
 
   {
+    name: 'appcrane_create_managed_app',
+    description:
+      'Create a new app using AppCrane\'s GitHub service-account — the platform creates a repo on the configured org/user, owns it, and the agent works against it through github_* tools without the end user ever needing their own PAT. Use this when the user does not have a GitHub account or does not want to deal with GitHub at all. Requires the platform admin to have configured the service-account in Settings → GitHub. Returns the same shape as appcrane_create_app, plus the auto-created repo metadata.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name:        { type: 'string', description: 'Display name (human-readable)' },
+        slug:        { type: 'string', description: 'URL slug, lowercase-alphanumeric-with-dashes. Becomes the repo name.' },
+        description: { type: 'string', description: 'Optional. Used as both app description and repo description.' },
+        branch:      { type: 'string', description: 'Default branch for the new repo. Defaults to "main".' },
+        domain:      { type: 'string', description: 'Optional custom domain.' },
+        max_ram_mb:      { type: 'number', description: 'Per-container memory cap. Default: 512.' },
+        max_cpu_percent: { type: 'number', description: 'Per-container CPU cap. Default: 50.' },
+      },
+      required: ['name', 'slug'],
+      additionalProperties: false,
+    },
+    requiredRole: 'admin',
+    handler: async (user, args) => {
+      const { name, slug } = args;
+      if (!name || !slug) throw new Error('name and slug are required');
+      if (!/^[a-z0-9][a-z0-9-]*$/.test(slug)) throw new Error('slug must be lowercase alphanumeric with dashes');
+      if (args.branch && !/^[A-Za-z0-9._/\-]{1,200}$/.test(args.branch)) {
+        throw new Error('branch must be alphanumeric with . _ / - (max 200 chars)');
+      }
+
+      const db = getDb();
+      if (db.prepare('SELECT id FROM apps WHERE slug = ?').get(slug)) {
+        throw new Error(`App slug '${slug}' already exists`);
+      }
+
+      // Create the GitHub repo first — if this fails (token misconfigured,
+      // owner is wrong, slug collides), bail before touching the DB so we
+      // don't leave half-baked apps behind.
+      const { createAppRepo, getServiceConfig } = await import('./githubService.js');
+      const cfg = getServiceConfig();
+      if (!cfg.enabled) throw new Error('GitHub service-account is disabled. Enable it in Settings → GitHub before using managed mode.');
+      if (!cfg.configured) throw new Error('GitHub service-account has no token. Configure it in Settings → GitHub before using managed mode.');
+
+      let repo;
+      try {
+        repo = await createAppRepo(slug, { description: args.description || '' });
+      } catch (e) {
+        throw new Error(`Failed to create managed repo for '${slug}': ${e.message}`);
+      }
+
+      const { getNextSlot, getPortsForSlot } = await import('./portAllocator.js');
+      const { reloadCaddy } = await import('./caddy.js');
+
+      const slot = getNextSlot(db);
+      const ports = getPortsForSlot(slot);
+      const resourceLimits = JSON.stringify({
+        max_ram_mb:      args.max_ram_mb      || 512,
+        max_cpu_percent: args.max_cpu_percent || 50,
+      });
+      const branch = args.branch || repo.default_branch || 'main';
+
+      const result = db.prepare(`
+        INSERT INTO apps (name, slug, slot, domain, description, category, source_type, github_url, branch, github_token_encrypted, resource_limits, created_by)
+        VALUES (?, ?, ?, ?, ?, ?, 'managed', ?, ?, NULL, ?, ?)
+      `).run(name, slug, slot, args.domain || null, args.description || null, null, repo.html_url, branch, resourceLimits, user.id);
+      const appId = result.lastInsertRowid;
+
+      for (const env of ['production', 'sandbox']) {
+        db.prepare('INSERT INTO health_configs (app_id, env) VALUES (?, ?)').run(appId, env);
+        db.prepare('INSERT INTO health_state (app_id, env) VALUES (?, ?)').run(appId, env);
+      }
+      db.prepare('INSERT OR IGNORE INTO app_users (app_id, user_id) VALUES (?, ?)').run(appId, user.id);
+
+      const webhookToken = crypto.randomBytes(16).toString('hex');
+      const webhookSecret = crypto.randomBytes(32).toString('hex');
+      db.prepare('INSERT INTO webhook_configs (app_id, token, secret) VALUES (?, ?, ?)').run(appId, webhookToken, webhookSecret);
+
+      const dataDir = process.env.DATA_DIR || './data';
+      const appDir = join(dataDir, 'apps', slug);
+      for (const env of ['production', 'sandbox']) {
+        const envDir = join(appDir, env);
+        mkdirSync(join(envDir, 'releases'), { recursive: true });
+        mkdirSync(join(envDir, 'shared', 'data'), { recursive: true });
+      }
+
+      try { await reloadCaddy(); } catch (_) {}
+      try {
+        const { refreshAppChecks } = await import('./healthChecker.js');
+        refreshAppChecks(appId);
+      } catch (_) {}
+
+      log.info(`MCP: managed app '${slug}' created by user ${user.id}; repo=${repo.full_name}`);
+      const craneDomain = process.env.CRANE_DOMAIN;
+      const urls = craneDomain ? {
+        production: `https://${craneDomain}/${slug}`,
+        sandbox:    `https://${craneDomain}/${slug}-sandbox`,
+      } : null;
+      return {
+        app: { slug, name, github_url: repo.html_url, branch, source_type: 'managed' },
+        repo: {
+          full_name:      repo.full_name,
+          html_url:       repo.html_url,
+          clone_url:      repo.clone_url,
+          default_branch: repo.default_branch,
+          private:        repo.private,
+          owner_type:     repo.owner_type,
+        },
+        ports,
+        urls,
+        next: `Push scaffolding to the repo (the repo is auto-init'd with a README on default branch '${branch}'), then appcrane_deploy slug="${slug}" env="sandbox".`,
+      };
+    },
+  },
+
+  {
     name: 'appcrane_set_env',
     description:
       'Set or update an environment variable on an app. Encrypted at rest; only the running app process can read the plaintext. ' +
