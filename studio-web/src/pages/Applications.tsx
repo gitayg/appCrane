@@ -300,16 +300,25 @@ INPUTS YOU NEED FROM THE USER (ask in your first turn, all at once):
        (a) An idea, no code yet              → scaffold from scratch
        (b) Local code, no GitHub repo        → create repo, push existing code
        (c) Existing GitHub repo URL          → skip scaffolding, just register
+       (d) "I don't have / want a GitHub"    → AppCrane manages the code:
+           call appcrane_create_managed_app — AppCrane provisions a private
+           repo on its service account, stores the credential, and you push
+           scaffolding through github_* tools as usual. The user never sees
+           github.com. Requires platform_admin to have configured the
+           service-account in Settings → GitHub. If \`appcrane_create_managed_app\`
+           returns "service-account is disabled / no token", fall back to
+           paths (a)-(c) and ask the user for a PAT.
   2. The PAT they configured in their \`claude mcp add\` command. You need it
      once to pass as \`github_token\` to appcrane_create_app (AppCrane stores
      it encrypted on the app record so it can clone for future deploys).
-     You're not asking for a new PAT — just the same value they already used.
-     Don't echo it back.
+     Path (d) does not require a PAT — managed apps use the service-account
+     credential server-side. Don't echo it back.
   3. Any env vars / secrets (usually none).
   4. Display name (you'll propose; user confirms).
 
 KEY APPCRANE TOOLS:
   appcrane_create_app(name, slug, github_url, github_token, branch?, …)
+  appcrane_create_managed_app(name, slug, branch?, description?)  — path (d)
   appcrane_set_env(slug, env, key, value)
   appcrane_deploy(slug, env)                       — env="sandbox"
   appcrane_get_logs(slug, env, lines?, search?)
@@ -356,6 +365,22 @@ ORDER, BY PATH:
        Without a valid health endpoint the deploy will be rejected.
     2. appcrane_create_app
     3-5 as above (set_env, deploy, get_logs).
+
+  Path (d) — AppCrane-managed code (no user PAT needed):
+    1. Pick slug + stack as in (a). Propose; wait for ✅.
+    2. appcrane_create_managed_app({ name, slug, branch: "main", description })
+       — AppCrane creates the private repo on its service account; the
+       returned repo.html_url is the github_url and the repo is auto-init'd
+       with a README on the default branch.
+    3. Push scaffolding via github_push_files to the returned full_name —
+       the SAME files as path (a) step 3 (package.json, deployhub.json,
+       sources, /api/health route returning {status, version}).
+    4. appcrane_set_env (only if user has secrets)
+    5. appcrane_deploy(slug, "sandbox")
+    6. appcrane_get_logs — confirm health green; iterate via
+       github_create_or_update_file + redeploy if red.
+
+    The end user never sees github.com. They get a sandbox URL.
 
 CONSTRAINTS — common pitfalls that fail deploys:
   - Sandbox only. Never deploy to production.
