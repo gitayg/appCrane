@@ -217,7 +217,26 @@ router.get('/jobs', (req, res) => {
   let active_jobs = [];
   let app_requests = [];
 
-  if (user.role === 'admin' || user.role === 'platform_admin') {
+  // v2.3.3: app-scoped triage view is now visible to per-app owners as
+  // well as global admins / platform_admins. Visibility rules:
+  //   - global admin / platform_admin: see active_jobs across every app
+  //     and (when ?app_slug=… is supplied) every request for that app
+  //   - per-app owner: see active_jobs scoped to apps they own and (when
+  //     ?app_slug=… matches one of those apps) every request for it
+  //   - anyone else: my_requests only
+  const isGlobalAdmin = user.role === 'admin' || user.role === 'platform_admin';
+  const appSlug = req.query.app_slug;
+
+  // Resolve owned-app slugs once. Cheap: indexed read, single user.
+  const ownedSlugs = db.prepare(`
+    SELECT a.slug
+    FROM apps a
+    JOIN app_user_roles aur ON aur.app_id = a.id AND aur.user_id = ?
+    WHERE aur.app_role = 'owner'
+  `).all(user.userId).map(r => r.slug);
+  const ownsCurrentApp = !!(appSlug && ownedSlugs.includes(appSlug));
+
+  if (isGlobalAdmin) {
     active_jobs = db.prepare(`
       SELECT j.id, j.phase, j.status, j.created_at,
              er.message as enhancement_message, er.app_slug, er.user_name
@@ -227,21 +246,35 @@ router.get('/jobs', (req, res) => {
       ORDER BY j.id DESC
       LIMIT 30
     `).all();
+  } else if (ownedSlugs.length > 0) {
+    // Owners see active jobs only for apps they own. The IN-list is
+    // bound positionally; cap at 30 owned-app slugs to avoid blowing the
+    // SQLite parameter limit.
+    const slugList = ownedSlugs.slice(0, 30);
+    const placeholders = slugList.map(() => '?').join(',');
+    active_jobs = db.prepare(`
+      SELECT j.id, j.phase, j.status, j.created_at,
+             er.message as enhancement_message, er.app_slug, er.user_name
+      FROM enhancement_jobs j
+      JOIN enhancement_requests er ON er.id = j.enhancement_id
+      WHERE j.status IN ('queued', 'running') AND er.app_slug IN (${placeholders})
+      ORDER BY j.id DESC
+      LIMIT 30
+    `).all(...slugList);
+  }
 
-    const appSlug = req.query.app_slug;
-    if (appSlug) {
-      app_requests = db.prepare(`
-        SELECT er.id, er.app_slug, er.user_name, er.message, er.status, er.created_at,
-               j.id as latest_job_id, j.phase, j.status as job_status
-        FROM enhancement_requests er
-        LEFT JOIN enhancement_jobs j ON j.id = (
-          SELECT id FROM enhancement_jobs WHERE enhancement_id = er.id ORDER BY id DESC LIMIT 1
-        )
-        WHERE er.app_slug = ?
-        ORDER BY er.created_at DESC
-        LIMIT 50
-      `).all(appSlug);
-    }
+  if (appSlug && (isGlobalAdmin || ownsCurrentApp)) {
+    app_requests = db.prepare(`
+      SELECT er.id, er.app_slug, er.user_name, er.message, er.status, er.created_at,
+             j.id as latest_job_id, j.phase, j.status as job_status
+      FROM enhancement_requests er
+      LEFT JOIN enhancement_jobs j ON j.id = (
+        SELECT id FROM enhancement_jobs WHERE enhancement_id = er.id ORDER BY id DESC LIMIT 1
+      )
+      WHERE er.app_slug = ?
+      ORDER BY er.created_at DESC
+      LIMIT 50
+    `).all(appSlug);
   }
 
   res.json({ active_jobs, my_requests, app_requests });
