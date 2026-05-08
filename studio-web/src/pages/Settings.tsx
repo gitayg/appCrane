@@ -442,6 +442,13 @@ interface ContainerEntry {
   alive: boolean
 }
 
+interface GithubServiceConfig {
+  owner: string
+  visibility: 'private' | 'internal' | 'public'
+  enabled: boolean
+  configured: boolean
+}
+
 function GithubTab() {
   const [idleTimeout, setIdleTimeout] = useState(600)
   const [maxConcurrent, setMaxConcurrent] = useState(10)
@@ -449,6 +456,58 @@ function GithubTab() {
   const [containers, setContainers] = useState<ContainerEntry[]>([])
   const [saved, flashSaved] = useFlash()
   const [busy, setBusy] = useState(false)
+
+  // Service-account config (v2.3.0+) — single platform PAT that owns the
+  // per-app repos when the user opts into "AppCrane manages my code."
+  const [svc, setSvc] = useState<GithubServiceConfig>({ owner: '', visibility: 'private', enabled: false, configured: false })
+  const [svcToken, setSvcToken] = useState('')
+  const [svcSaved, flashSvcSaved] = useFlash()
+  const [svcVerify, setSvcVerify] = useState<{ ok: boolean; login?: string; type?: string; scopes?: string | null; error?: string } | null>(null)
+  const [svcBusy, setSvcBusy] = useState(false)
+
+  function loadServiceConfig() {
+    adminApi.get<GithubServiceConfig>('/api/github-service/config').then(setSvc).catch(() => {})
+  }
+
+  async function saveService() {
+    if (svcBusy) return
+    setSvcBusy(true)
+    try {
+      const body: Record<string, unknown> = { owner: svc.owner, visibility: svc.visibility, enabled: svc.enabled }
+      if (svcToken) body.token = svcToken
+      const next = await adminApi.put<GithubServiceConfig>('/api/github-service/config', body)
+      if (next) setSvc(next)
+      setSvcToken('')
+      flashSvcSaved()
+    } catch (e) {
+      alert('Save failed: ' + (e instanceof Error ? e.message : String(e)))
+    } finally {
+      setSvcBusy(false)
+    }
+  }
+
+  async function clearServiceToken() {
+    if (!confirm('Clear the stored service-account token? This will disable the integration.')) return
+    setSvcBusy(true)
+    try {
+      const next = await adminApi.put<GithubServiceConfig>('/api/github-service/config', { token: null })
+      if (next) setSvc(next)
+      setSvcToken('')
+      setSvcVerify(null)
+      flashSvcSaved()
+    } finally { setSvcBusy(false) }
+  }
+
+  async function verifyService() {
+    setSvcVerify(null)
+    setSvcBusy(true)
+    try {
+      const r = await adminApi.post<typeof svcVerify>('/api/github-service/verify', {})
+      setSvcVerify(r)
+    } catch (e) {
+      setSvcVerify({ ok: false, error: e instanceof Error ? e.message : String(e) })
+    } finally { setSvcBusy(false) }
+  }
 
   function loadSettings() {
     Promise.all([
@@ -471,6 +530,7 @@ function GithubTab() {
   useEffect(() => {
     loadSettings()
     loadContainers()
+    loadServiceConfig()
     const iv = setInterval(loadContainers, 15000)
     return () => clearInterval(iv)
   }, [])
@@ -563,6 +623,82 @@ function GithubTab() {
               ))}
             </tbody>
           </table>
+        )}
+      </div>
+
+      <div className="setting-card">
+        <h3>Service-account — AppCrane-managed repos</h3>
+        <p>
+          Configure a single GitHub user or org that AppCrane uses to host per-app repositories. End users who don't have
+          their own GitHub PAT can opt into "AppCrane manages my code" — AppCrane creates the repo, holds the credential,
+          and proxies all reads and writes. The user never sees github.com.
+        </p>
+        <p style={{ color: 'var(--dim)', fontSize: '.8rem', marginTop: -4 }}>
+          The PAT stays encrypted at rest (AES-256-GCM, same envelope as the SSO secrets). It's never returned to the browser.
+        </p>
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '12px 16px', alignItems: 'center', marginTop: 16, maxWidth: 600 }}>
+          <label style={{ fontSize: '.85rem', color: 'var(--dim)' }}>Owner (user or org)</label>
+          <FocusInput
+            type="text"
+            value={svc.owner}
+            onChange={e => setSvc(s => ({ ...s, owner: e.target.value }))}
+            placeholder="appcrane-bot or my-org"
+          />
+
+          <label style={{ fontSize: '.85rem', color: 'var(--dim)' }}>
+            PAT {svc.configured && <span style={{ color: 'var(--green)' }}>· stored</span>}
+          </label>
+          <FocusInput
+            type="password"
+            value={svcToken}
+            onChange={e => setSvcToken(e.target.value)}
+            placeholder={svc.configured ? '•••••••• (leave empty to keep current)' : 'ghp_… or fine-grained token'}
+          />
+
+          <label style={{ fontSize: '.85rem', color: 'var(--dim)' }}>Default repo visibility</label>
+          <select
+            value={svc.visibility}
+            onChange={e => setSvc(s => ({ ...s, visibility: e.target.value as GithubServiceConfig['visibility'] }))}
+            style={{ width: 200, padding: '6px 8px' }}
+          >
+            <option value="private">private</option>
+            <option value="internal">internal</option>
+            <option value="public">public</option>
+          </select>
+
+          <label style={{ fontSize: '.85rem', color: 'var(--dim)' }}>Enabled</label>
+          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+            <input
+              type="checkbox"
+              checked={svc.enabled}
+              onChange={e => setSvc(s => ({ ...s, enabled: e.target.checked }))}
+            />
+            <span style={{ fontSize: '.82rem', color: 'var(--dim)' }}>
+              When enabled, the "+ New App" wizard offers the managed-repo path.
+            </span>
+          </label>
+        </div>
+
+        <div className="save-row" style={{ marginTop: 16, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <button className="btn btn-accent" onClick={saveService} disabled={svcBusy}>{svcBusy ? 'Saving…' : 'Save'}</button>
+          <button className="btn" onClick={verifyService} disabled={svcBusy || !svc.configured}>
+            Verify token
+          </button>
+          {svc.configured && (
+            <button className="btn btn-red" onClick={clearServiceToken} disabled={svcBusy}>
+              Clear token
+            </button>
+          )}
+          {svcSaved && <span className="saved-msg">Saved ✓</span>}
+        </div>
+
+        {svcVerify && (
+          <div style={{ marginTop: 12, padding: '8px 12px', borderRadius: 4, background: svcVerify.ok ? 'rgba(46,125,50,.12)' : 'rgba(226,75,74,.12)', fontSize: '.85rem' }}>
+            {svcVerify.ok
+              ? <>✓ Authenticated as <code style={{ fontFamily: 'monospace' }}>{svcVerify.login}</code> ({svcVerify.type}). Scopes: <code style={{ fontFamily: 'monospace', fontSize: '.78rem' }}>{svcVerify.scopes || '(fine-grained or none)'}</code></>
+              : <>✗ {svcVerify.error}</>}
+          </div>
         )}
       </div>
     </>
