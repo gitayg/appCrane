@@ -876,7 +876,14 @@ ${brief}
                       />
                     </td>
                     {(['sandbox', 'production'] as const).map(env => {
-                      const ver = versions[app.slug]?.[env === 'production' ? 'prod' : 'sand']
+                      // v2.5.5: live-fetch reads the running app's /api/health
+                      // body.version. Most user apps don't expose that field,
+                      // so the cell was permanently '—'. Fall back to the
+                      // last live deployment's version (captured at deploy
+                      // time from the manifest) when the live read is missing.
+                      const liveVer = versions[app.slug]?.[env === 'production' ? 'prod' : 'sand']
+                      const deployVer = app[env]?.deploy?.version
+                      const ver = (liveVer && liveVer !== '—') ? liveVer : (deployVer || null)
                       const isDown = app[env]?.health?.status === 'down'
                       return (
                         <td key={env}>
@@ -925,7 +932,7 @@ ${brief}
                           onClick={() => setFrameAncestors(app)}
                           title={app.frame_ancestors ? `Embedders: ${app.frame_ancestors}` : 'Allowed embedders (default: same origin only)'}
                         >🖼{app.frame_ancestors ? ' ✓' : ''}</button>
-                        {(app.source_type === 'github' || app.github_url) && (
+                        {(app.source_type === 'github' || app.source_type === 'managed' || app.github_url) && (
                           <>
                             {app.github_url && (
                               <a className="btn btn-xs" href={app.github_url} target="_blank" rel="noreferrer" title={app.github_url}>gh ↗</a>
@@ -934,7 +941,7 @@ ${brief}
                               className="btn btn-xs"
                               onClick={() => checkUpdates(app.slug)}
                               title="Check GitHub for new commits since last deploy"
-                            >{checkUpdateText[app.slug] || '↑'}</button>
+                            >{checkUpdateText[app.slug] || '↑ updates'}</button>
                             <button
                               className="btn btn-xs"
                               onClick={() => registerGithubHook(app.slug)}
@@ -951,7 +958,9 @@ ${brief}
                       <td colSpan={11}>
                         <div className="apps-drill-envs">
                           {(['sandbox', 'production'] as const).map(env => {
-                            const ver = versions[app.slug]?.[env === 'production' ? 'prod' : 'sand']
+                            const liveVer = versions[app.slug]?.[env === 'production' ? 'prod' : 'sand']
+                            const deployVer = app[env]?.deploy?.version
+                            const ver = (liveVer && liveVer !== '—') ? liveVer : (deployVer || null)
                             const isProd = env === 'production'
                             const isDown = app[env]?.health?.status === 'down'
                             return (
