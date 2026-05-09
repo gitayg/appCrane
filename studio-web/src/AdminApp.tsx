@@ -14,10 +14,13 @@ import { AppManager } from './pages/AppManager'
 // AppStudio top-level nav was collapsed in v1.27.38: Requests + Builders
 // became top-level nav items, Skills + Style Guide (renamed from Branding)
 // + Audit Log moved into Settings.
+// `#agents` was folded into Users in v2.2.12 — the sub-nav entry was
+// orphaned (Settings.tsx's VALID_TABS doesn't list it, so clicks
+// silently fell through to Security). Removed from the nav in v2.5.10
+// so users don't click a dead link. Old bookmarks still hit Security.
 const SETTINGS_SUB = [
   { id: 'security',   label: 'Security',    href: '#security' },
   { id: 'users',      label: 'Users',       href: '#users' },
-  { id: 'agents',     label: 'App Agents',  href: '#agents' },
   { id: 'roles',      label: 'Roles',       href: '#roles' },
   { id: 'github',     label: 'GitHub',      href: '#github' },
   { id: 'skills',     label: 'Skills',      href: '#skills' },
@@ -37,7 +40,7 @@ function useHash() {
 
 function SettingsRoute() {
   const hash = useHash()
-  const valid = ['security', 'users', 'agents', 'roles', 'github', 'skills', 'branding', 'audit']
+  const valid = ['security', 'users', 'roles', 'github', 'skills', 'branding', 'audit']
   const activeSub = valid.includes(hash) ? hash : 'security'
   return (
     <Layout subItems={SETTINGS_SUB} activeSub={activeSub}>
