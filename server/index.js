@@ -301,7 +301,7 @@ function compareVersions(a, b) {
 // Version check endpoint (compares local vs GitHub)
 let _cachedRemoteVersion = null;
 let _lastVersionCheck = 0;
-app.get('/api/version-check', requireAuth, requireAdmin, async (req, res) => {
+app.get('/api/version-check', requireAuth, requirePlatformAdmin, async (req, res) => {
   const now = Date.now();
   // Cache for 5 minutes
   if (_cachedRemoteVersion && now - _lastVersionCheck < 5 * 60 * 1000) {
@@ -325,7 +325,7 @@ app.get('/api/version-check', requireAuth, requireAdmin, async (req, res) => {
 });
 
 // Caddy reload endpoint (admin only)
-import { requireAuth, requireAdmin } from './middleware/auth.js';
+import { requireAuth, requireAdmin, requirePlatformAdmin } from './middleware/auth.js';
 import { reloadCaddy, generateCaddyfile } from './services/caddy.js';
 
 app.post('/api/caddy/reload', requireAuth, requireAdmin, async (req, res) => {
@@ -422,7 +422,7 @@ async function maybeAutoRollback(originalError) {
 }
 
 // Self-update endpoint (admin only)
-app.post('/api/self-update', requireAuth, requireAdmin, async (req, res) => {
+app.post('/api/self-update', requireAuth, requirePlatformAdmin, async (req, res) => {
   const cwd = join(__dirname, '..');
   try {
     // Refuse to restart while builds are in flight — interrupting docker build mid-stream
