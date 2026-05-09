@@ -830,11 +830,80 @@ const TOOLS = [
   },
 
   {
+    name: 'appcrane_get_deploy_log',
+    description:
+      'Read the deploy/build log for a specific deployment — the output that came out of clone / npm install / docker build / health-validate, BEFORE the container started running. This is what you want when a deploy fails fast (1-2 second failures are almost always pre-build errors that never reach the runtime container, so appcrane_get_logs has nothing to show). Pass a deployment_id from appcrane_deploy / appcrane_get_app.recent_deployments, OR omit it and pass slug+env to get the latest deployment\'s log.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        deployment_id: { type: 'integer', description: 'Specific deployment id. Preferred — unambiguous.' },
+        slug:          { type: 'string',  description: 'App slug. Required when deployment_id is not given.' },
+        env:           { type: 'string',  enum: ['sandbox', 'production'], description: 'Required when deployment_id is not given.' },
+        tail:          { type: 'integer', minimum: 1, maximum: 5000, default: 500, description: 'Return only the last N lines. Defaults to 500; full log can be many KB on a long build.' },
+      },
+      additionalProperties: false,
+    },
+    requiredRole: 'any',
+    handler: async (user, args) => {
+      const db = getDb();
+      let row;
+      if (args.deployment_id) {
+        row = db.prepare(`
+          SELECT d.*, a.slug AS app_slug
+          FROM deployments d JOIN apps a ON a.id = d.app_id
+          WHERE d.id = ?
+        `).get(args.deployment_id);
+        if (!row) throw new Error(`Deployment ${args.deployment_id} not found`);
+        // Authz: caller must have access to the deployment's app.
+        getAppForUser(user, row.app_slug);
+      } else {
+        if (!args.slug || !args.env) {
+          throw new Error('Either deployment_id, or both slug and env, must be provided');
+        }
+        const app = getAppForUser(user, args.slug);
+        row = db.prepare(`
+          SELECT * FROM deployments
+          WHERE app_id = ? AND env = ?
+          ORDER BY started_at DESC
+          LIMIT 1
+        `).get(app.id, args.env);
+        if (!row) throw new Error(`No deployments found for ${args.slug} (${args.env})`);
+        row.app_slug = app.slug;
+      }
+
+      const fullLog = row.log || '';
+      const tail = Math.min(parseInt(args.tail, 10) || 500, 5000);
+      const lines = fullLog.split('\n');
+      const trimmed = lines.length > tail ? lines.slice(-tail) : lines;
+      const truncated = lines.length > tail;
+
+      return {
+        deployment_id:   row.id,
+        app:             row.app_slug,
+        env:             row.env,
+        status:          row.status,
+        version:         row.version,
+        commit_hash:     row.commit_hash,
+        commit_message:  row.commit_message,
+        started_at:      row.started_at,
+        finished_at:     row.finished_at,
+        duration_seconds: row.finished_at && row.started_at
+          ? Math.round((new Date(row.finished_at).getTime() - new Date(row.started_at).getTime()) / 1000)
+          : null,
+        log:             trimmed.join('\n'),
+        line_count:      trimmed.length,
+        truncated,
+        original_line_count: lines.length,
+      };
+    },
+  },
+
+  {
     name: 'appcrane_get_logs',
     description:
-      'Get recent runtime logs from a running app container. Use this to debug issues, watch a deploy, ' +
-      'or verify that a fix worked in production. Returns the most recent N lines (default 100, max 1000). ' +
-      'Pass search to filter to lines containing a substring (case-insensitive).',
+      'Get recent runtime logs from a running app container (docker logs). Use this for runtime issues — once the container is up. ' +
+      'Returns the most recent N lines (default 100, max 1000). Pass search to filter to lines containing a substring (case-insensitive). ' +
+      'NOT the right tool for fast deploy failures (1-2 second exits, "no such container" errors): those happen during clone / npm install / docker build / health-validate, BEFORE any container exists. Use appcrane_get_deploy_log for that.',
     inputSchema: {
       type: 'object',
       properties: {
