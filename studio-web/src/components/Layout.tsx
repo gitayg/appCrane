@@ -24,7 +24,7 @@ interface Props {
 }
 
 export function Layout({ children, subItems, activeSub }: Props) {
-  const { key, signOut } = useAuth()
+  const { isAuthed, signOut } = useAuth()
   const location = useLocation()
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem('cc_sb_col') === '1')
   const [mobileOpen, setMobileOpen] = useState(false)
@@ -50,7 +50,7 @@ export function Layout({ children, subItems, activeSub }: Props) {
   }, [theme])
 
   useEffect(() => {
-    if (!key) return
+    if (!isAuthed) return
     adminApi.get<{ user: { name: string; role: string } }>('/api/auth/me')
       .then(d => setUserName(d.user.name + ' (' + d.user.role + ')'))
       .catch(() => {})
@@ -68,13 +68,13 @@ export function Layout({ children, subItems, activeSub }: Props) {
         }
       })
       .catch(() => {})
-  }, [key])
+  }, [isAuthed])
 
   // v2.5.6: auto-check for AppCrane self-updates so the sidebar pill
   // can light up without the user clicking. Runs on mount and every 30
   // min; the server caches the GitHub call for 5 min so this is cheap.
   useEffect(() => {
-    if (!key) return
+    if (!isAuthed) return
     let cancelled = false
     const check = async () => {
       try {
@@ -85,7 +85,7 @@ export function Layout({ children, subItems, activeSub }: Props) {
     check()
     const t = setInterval(check, 30 * 60 * 1000)
     return () => { cancelled = true; clearInterval(t) }
-  }, [key])
+  }, [isAuthed])
 
   async function runSelfUpdate() {
     if (!updateInfo?.update_available || updating) return
@@ -105,7 +105,7 @@ export function Layout({ children, subItems, activeSub }: Props) {
   // Open-requests counter for the Requests nav badge.
   // Admin endpoint first, fall back to /my for portal users.
   useEffect(() => {
-    if (!key) return
+    if (!isAuthed) return
     const TERM = new Set(['done', 'merged', 'closed', 'failed', 'cancelled'])
     const fetchCount = () =>
       adminApi.get<{ requests: { status?: string }[] }>('/api/enhancements')
@@ -116,14 +116,14 @@ export function Layout({ children, subItems, activeSub }: Props) {
     fetchCount()
     const t = setInterval(fetchCount, 15000)
     return () => clearInterval(t)
-  }, [key])
+  }, [isAuthed])
 
   // MCP connection status pill — pings /api/mcp/connection. 200 → connected;
   // anything else → disconnected. The endpoint requires auth; if the user's
   // session is broken the pill shows disconnected, which is correct since
   // their MCP calls would fail too. Refresh every 30s.
   useEffect(() => {
-    if (!key) return
+    if (!isAuthed) return
     const ping = () => {
       adminApi.get<{ server: { name: string; version: string } }>('/api/mcp/connection')
         .then(() => setMcpStatus('connected'))
@@ -132,7 +132,7 @@ export function Layout({ children, subItems, activeSub }: Props) {
     ping()
     const t = setInterval(ping, 30000)
     return () => clearInterval(t)
-  }, [key])
+  }, [isAuthed])
 
   useEffect(() => {
     function handleClick(e: MouseEvent) {
