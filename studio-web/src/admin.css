@@ -138,6 +138,25 @@ code, kbd, .mono, .job-tag, pre {
   white-space: nowrap;
 }
 .sidebar-logo-version:hover { color: var(--accent); }
+.sidebar-logo-version-update {
+  font-size: .7rem; font-family: monospace; white-space: nowrap;
+  cursor: pointer;
+  display: inline-block;
+  padding: 2px 8px; border-radius: 4px;
+  background: linear-gradient(90deg, rgba(245, 158, 11, .2), rgba(245, 158, 11, .35));
+  color: #fbbf24; font-weight: 600;
+  border: 1px solid rgba(245, 158, 11, .5);
+  animation: sidebar-update-pulse 2.4s ease-in-out infinite;
+}
+.sidebar-logo-version-update:hover {
+  background: linear-gradient(90deg, rgba(245, 158, 11, .35), rgba(245, 158, 11, .55));
+  color: #fef3c7;
+}
+.sidebar-logo-version-current { color: rgba(255, 255, 255, .55); font-weight: 400; margin-left: 6px; }
+@keyframes sidebar-update-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, .25); }
+  50%      { box-shadow: 0 0 0 5px rgba(245, 158, 11, 0); }
+}
 .admin-sidebar.collapsed .sidebar-logo-section { padding: 14px 10px 10px; }
 .admin-sidebar.collapsed .sidebar-logo { font-size: .65rem; letter-spacing: .5px; }
 

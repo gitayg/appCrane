@@ -36,6 +36,13 @@ export function Layout({ children, subItems, activeSub }: Props) {
   const [notifLoaded, setNotifLoaded] = useState(false)
   const [openRequests, setOpenRequests] = useState(0)
   const [mcpStatus, setMcpStatus] = useState<'unknown' | 'connected' | 'disconnected'>('unknown')
+  // v2.5.6: AppCrane self-update auto-check. Today the version pill in the
+  // sidebar only learns about updates on click — that's why people miss
+  // them. We hit /api/version-check on mount + every 30 min so the pill
+  // can render "↑ v2.5.7 available" without user action. Click still does
+  // the self-update flow (uses updateInfo state, not DOM manipulation).
+  const [updateInfo, setUpdateInfo] = useState<{ current: string; latest: string | null; update_available: boolean } | null>(null)
+  const [updating, setUpdating] = useState(false)
   const notifRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -62,6 +69,38 @@ export function Layout({ children, subItems, activeSub }: Props) {
       })
       .catch(() => {})
   }, [key])
+
+  // v2.5.6: auto-check for AppCrane self-updates so the sidebar pill
+  // can light up without the user clicking. Runs on mount and every 30
+  // min; the server caches the GitHub call for 5 min so this is cheap.
+  useEffect(() => {
+    if (!key) return
+    let cancelled = false
+    const check = async () => {
+      try {
+        const data = await adminApi.get<{ current: string; latest: string | null; update_available: boolean }>('/api/version-check')
+        if (!cancelled) setUpdateInfo(data)
+      } catch (_) { /* keep last good state */ }
+    }
+    check()
+    const t = setInterval(check, 30 * 60 * 1000)
+    return () => { cancelled = true; clearInterval(t) }
+  }, [key])
+
+  async function runSelfUpdate() {
+    if (!updateInfo?.update_available || updating) return
+    if (!confirm(`Update AppCrane from v${updateInfo.current} to v${updateInfo.latest}?\n\nThe server will rebuild the SPA and restart. Active deploys are checked first; the update aborts if any are in flight.`)) return
+    setUpdating(true)
+    try {
+      await adminApi.post('/api/self-update', {})
+      // Self-update kicks off async; the server restarts a few seconds
+      // later. Reload to pick up the new bundle.
+      setTimeout(() => window.location.reload(), 5000)
+    } catch (err) {
+      alert('Self-update failed: ' + (err instanceof Error ? err.message : String(err)))
+      setUpdating(false)
+    }
+  }
 
   // Open-requests counter for the Requests nav badge.
   // Admin endpoint first, fall back to /my for portal users.
@@ -160,37 +199,35 @@ export function Layout({ children, subItems, activeSub }: Props) {
             App<span>Crane</span>
           </a>
           {!collapsed && version && (
-            <span
-              className="sidebar-logo-version"
-              id="craneVersion"
-              title="Click to check for updates"
-              onClick={async () => {
-                const el = document.getElementById('craneVersion')
-                if (!el) return
-                el.textContent = 'checking...'
-                try {
-                  const data = await adminApi.get<any>('/api/version-check')
-                  if (data.update_available) {
-                    el.textContent = 'v' + data.current + ' → v' + data.latest + ' available!'
-                    if (confirm('Update to v' + data.latest + '?')) {
-                      el.textContent = 'updating...'
-                      try {
-                        await adminApi.post('/api/self-update')
-                        setTimeout(() => window.location.reload(), 5000)
-                      } catch (err) {
-                        el.textContent = (err as Error).message || 'update failed'
-                        setTimeout(() => { el.textContent = version }, 6000)
-                      }
+            updateInfo?.update_available ? (
+              <span
+                className="sidebar-logo-version sidebar-logo-version-update"
+                title={`Click to update AppCrane v${updateInfo.current} → v${updateInfo.latest}`}
+                onClick={runSelfUpdate}
+                style={{ cursor: 'pointer' }}
+              >
+                {updating
+                  ? '⏳ updating…'
+                  : <>↑ v{updateInfo.latest}<span className="sidebar-logo-version-current"> (now v{updateInfo.current})</span></>}
+              </span>
+            ) : (
+              <span
+                className="sidebar-logo-version"
+                title="Click to re-check for updates"
+                style={{ cursor: 'pointer' }}
+                onClick={async () => {
+                  try {
+                    const data = await adminApi.get<{ current: string; latest: string | null; update_available: boolean }>('/api/version-check')
+                    setUpdateInfo(data)
+                    if (!data.update_available) {
+                      alert(`AppCrane v${data.current} — already up to date${data.latest ? ` (latest is v${data.latest})` : ''}.`)
                     }
-                  } else {
-                    el.textContent = 'v' + data.current + ' (latest)'
-                    setTimeout(() => { el.textContent = version }, 3000)
-                  }
-                } catch { el.textContent = 'check failed' }
-              }}
-            >
-              {version}
-            </span>
+                  } catch { /* silent */ }
+                }}
+              >
+                {version}
+              </span>
+            )
           )}
         </div>
 
