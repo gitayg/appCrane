@@ -990,7 +990,15 @@ const TOOLS = [
         db.prepare('INSERT INTO health_configs (app_id, env) VALUES (?, ?)').run(appId, env);
         db.prepare('INSERT INTO health_state (app_id, env) VALUES (?, ?)').run(appId, env);
       }
+      // Auto-assign creator as both member and owner. The app_user_roles
+      // owner row is what makes "⚠ No owner" go away on /applications and
+      // gives this user per-app authz boundaries (e.g. the appcrane_*
+      // access-management tools). Forgetting it was the v2.5.12 bug.
       db.prepare('INSERT OR IGNORE INTO app_users (app_id, user_id) VALUES (?, ?)').run(appId, user.id);
+      db.prepare(`
+        INSERT INTO app_user_roles (app_id, user_id, app_role) VALUES (?, ?, 'owner')
+        ON CONFLICT(app_id, user_id) DO UPDATE SET app_role = 'owner'
+      `).run(appId, user.id);
 
       const webhookToken = crypto.randomBytes(16).toString('hex');
       const webhookSecret = crypto.randomBytes(32).toString('hex');
@@ -1477,7 +1485,15 @@ const TOOLS = [
         db.prepare('INSERT INTO health_configs (app_id, env) VALUES (?, ?)').run(appId, env);
         db.prepare('INSERT INTO health_state (app_id, env) VALUES (?, ?)').run(appId, env);
       }
+      // Auto-assign creator as both member and owner. The app_user_roles
+      // owner row is what makes "⚠ No owner" go away on /applications and
+      // gives this user per-app authz boundaries (e.g. the appcrane_*
+      // access-management tools). Forgetting it was the v2.5.12 bug.
       db.prepare('INSERT OR IGNORE INTO app_users (app_id, user_id) VALUES (?, ?)').run(appId, user.id);
+      db.prepare(`
+        INSERT INTO app_user_roles (app_id, user_id, app_role) VALUES (?, ?, 'owner')
+        ON CONFLICT(app_id, user_id) DO UPDATE SET app_role = 'owner'
+      `).run(appId, user.id);
 
       const webhookToken = crypto.randomBytes(16).toString('hex');
       const webhookSecret = crypto.randomBytes(32).toString('hex');
