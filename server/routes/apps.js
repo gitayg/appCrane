@@ -207,8 +207,19 @@ router.post('/', requireAuth, auditMiddleware('app-create'), async (req, res) =>
     db.prepare('INSERT INTO health_state (app_id, env) VALUES (?, ?)').run(appId, env);
   }
 
-  // Auto-assign creator to the app
+  // Auto-assign creator to the app — both as a member (app_users) and as
+  // the owner (app_user_roles). Two tables because they predate each other:
+  // - app_users: bare "this user has access" rows
+  // - app_user_roles: per-app role (none/user/admin/owner)
+  // Forgetting the second was the v2.5.12 "⚠ No owner" bug — apps would
+  // be created without anyone to administer them per-app, and only global
+  // admins could touch them. Both inserts are idempotent (INSERT OR IGNORE
+  // / ON CONFLICT) so re-running this code path is safe.
   db.prepare('INSERT OR IGNORE INTO app_users (app_id, user_id) VALUES (?, ?)').run(appId, req.user.id);
+  db.prepare(`
+    INSERT INTO app_user_roles (app_id, user_id, app_role) VALUES (?, ?, 'owner')
+    ON CONFLICT(app_id, user_id) DO UPDATE SET app_role = 'owner'
+  `).run(appId, req.user.id);
 
   // Create webhook config
   const webhookToken = crypto.randomBytes(16).toString('hex');
