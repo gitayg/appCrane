@@ -319,6 +319,39 @@ export function Layout({ children, subItems, activeSub }: Props) {
         <div className="admin-topbar">
           <span className="admin-topbar-title">{pageTitle}</span>
           <div className="admin-topbar-right">
+            {/* v2.5.7: AppCrane version + update indicator. Lives in the
+                topbar so it's visible on every page even with the sidebar
+                collapsed. The pulsing amber state when an update is
+                available is the same flow as the sidebar pill. */}
+            {version && (
+              updateInfo?.update_available ? (
+                <span
+                  className="topbar-version-pill topbar-version-pill-update"
+                  title={`Click to update AppCrane v${updateInfo.current} → v${updateInfo.latest}`}
+                  onClick={runSelfUpdate}
+                >
+                  {updating
+                    ? '⏳ updating…'
+                    : <>↑ AppCrane v{updateInfo.latest}<span className="topbar-version-pill-current"> (now v{updateInfo.current})</span></>}
+                </span>
+              ) : (
+                <span
+                  className="topbar-version-pill"
+                  title="Click to re-check for AppCrane updates"
+                  onClick={async () => {
+                    try {
+                      const data = await adminApi.get<{ current: string; latest: string | null; update_available: boolean }>('/api/version-check')
+                      setUpdateInfo(data)
+                      if (!data.update_available) {
+                        alert(`AppCrane v${data.current} — already up to date${data.latest ? ` (latest is v${data.latest})` : ''}.`)
+                      }
+                    } catch { /* silent */ }
+                  }}
+                >
+                  AppCrane {version}
+                </span>
+              )
+            )}
             <div className="notif-wrap" ref={notifRef}>
               <button className="notif-bell-btn" onClick={openNotif} title="Notifications">🔔</button>
               {notifItems.length > 0 && (

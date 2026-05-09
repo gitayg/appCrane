@@ -157,6 +157,41 @@ code, kbd, .mono, .job-tag, pre {
   0%, 100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, .25); }
   50%      { box-shadow: 0 0 0 5px rgba(245, 158, 11, 0); }
 }
+
+/* Topbar version + update pill (v2.5.7) — visible on every page so users
+   don't need to expand the sidebar to see what AppCrane version is running
+   or whether an update is available. */
+.topbar-version-pill {
+  font-size: .76rem; font-family: monospace;
+  color: var(--dim);
+  padding: 4px 10px; border-radius: 5px;
+  border: 1px solid var(--border, #333);
+  background: var(--surface2, #232323);
+  cursor: pointer;
+  transition: color .12s, background .12s, border-color .12s;
+  white-space: nowrap;
+}
+.topbar-version-pill:hover {
+  color: var(--text); border-color: var(--accent, #3b82f6);
+}
+.topbar-version-pill-update {
+  font-size: .78rem; font-family: monospace; font-weight: 600;
+  color: #fbbf24;
+  padding: 4px 10px; border-radius: 5px;
+  background: linear-gradient(90deg, rgba(245, 158, 11, .2), rgba(245, 158, 11, .35));
+  border: 1px solid rgba(245, 158, 11, .55);
+  cursor: pointer; white-space: nowrap;
+  animation: topbar-update-pulse 2.4s ease-in-out infinite;
+}
+.topbar-version-pill-update:hover {
+  color: #fef3c7;
+  background: linear-gradient(90deg, rgba(245, 158, 11, .35), rgba(245, 158, 11, .55));
+}
+.topbar-version-pill-current { color: rgba(255, 255, 255, .55); font-weight: 400; margin-left: 6px; }
+@keyframes topbar-update-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, .35); }
+  50%      { box-shadow: 0 0 0 4px rgba(245, 158, 11, 0); }
+}
 .admin-sidebar.collapsed .sidebar-logo-section { padding: 14px 10px 10px; }
 .admin-sidebar.collapsed .sidebar-logo { font-size: .65rem; letter-spacing: .5px; }
 
