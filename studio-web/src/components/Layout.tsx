@@ -30,6 +30,11 @@ export function Layout({ children, subItems, activeSub }: Props) {
   const [mobileOpen, setMobileOpen] = useState(false)
   const [theme, setTheme] = useState(() => localStorage.getItem('cc_theme') || 'dark')
   const [userName, setUserName] = useState('')
+  // v2.5.9: AppCrane version + update info is platform_admin-only. We
+  // capture role here from /api/auth/me and gate every version-related
+  // render on it; non-platform-admins never see the pill or the badge.
+  const [userRole, setUserRole] = useState<string>('')
+  const isPlatformAdmin = userRole === 'platform_admin'
   const [version, setVersion] = useState('')
   const [notifOpen, setNotifOpen] = useState(false)
   const [notifItems, setNotifItems] = useState<{ title: string; sub: string; color: string }[]>([])
@@ -52,29 +57,28 @@ export function Layout({ children, subItems, activeSub }: Props) {
   useEffect(() => {
     if (!isAuthed) return
     adminApi.get<{ user: { name: string; role: string } }>('/api/auth/me')
-      .then(d => setUserName(d.user.name + ' (' + d.user.role + ')'))
-      .catch(() => {})
-    // Defensive: /api/info can return without `version` if the request races
-    // auth-state setup (older servers gated it on a header check). Fall back
-    // to /api/version-check.current so the sidebar never renders "vundefined".
-    adminApi.get<{ version?: string }>('/api/info')
       .then(d => {
-        if (d?.version) {
-          setVersion('v' + d.version)
-        } else {
-          return adminApi.get<{ current?: string }>('/api/version-check')
-            .then(v => { if (v?.current) setVersion('v' + v.current) })
-            .catch(() => {})
-        }
+        setUserName(d.user.name + ' (' + d.user.role + ')')
+        setUserRole(d.user.role || '')
       })
+      .catch(() => {})
+    // Version display is platform-admin only (gated by isPlatformAdmin
+    // on render below). The /api/info call still happens here for
+    // backward compat — the response only renders when the role is
+    // resolved. We deliberately skip /api/version-check fallback for
+    // non-platform-admins because the endpoint now enforces the same.
+    adminApi.get<{ version?: string }>('/api/info')
+      .then(d => { if (d?.version) setVersion('v' + d.version) })
       .catch(() => {})
   }, [isAuthed])
 
   // v2.5.6: auto-check for AppCrane self-updates so the sidebar pill
   // can light up without the user clicking. Runs on mount and every 30
   // min; the server caches the GitHub call for 5 min so this is cheap.
+  // v2.5.9: gated on isPlatformAdmin — regular admins don't see version
+  // info or update offers; the endpoint enforces the same role server-side.
   useEffect(() => {
-    if (!isAuthed) return
+    if (!isAuthed || !isPlatformAdmin) return
     let cancelled = false
     const check = async () => {
       try {
@@ -85,7 +89,7 @@ export function Layout({ children, subItems, activeSub }: Props) {
     check()
     const t = setInterval(check, 30 * 60 * 1000)
     return () => { cancelled = true; clearInterval(t) }
-  }, [isAuthed])
+  }, [isAuthed, isPlatformAdmin])
 
   async function runSelfUpdate() {
     if (!updateInfo?.update_available || updating) return
@@ -198,7 +202,7 @@ export function Layout({ children, subItems, activeSub }: Props) {
           <a href="/dashboard" className="sidebar-logo">
             App<span>Crane</span>
           </a>
-          {!collapsed && version && (
+          {!collapsed && version && isPlatformAdmin && (
             updateInfo?.update_available ? (
               <span
                 className="sidebar-logo-version sidebar-logo-version-update"
@@ -322,8 +326,9 @@ export function Layout({ children, subItems, activeSub }: Props) {
             {/* v2.5.7: AppCrane version + update indicator. Lives in the
                 topbar so it's visible on every page even with the sidebar
                 collapsed. The pulsing amber state when an update is
-                available is the same flow as the sidebar pill. */}
-            {version && (
+                available is the same flow as the sidebar pill.
+                v2.5.9: platform-admin only — regular admins don't see this. */}
+            {isPlatformAdmin && version && (
               updateInfo?.update_available ? (
                 <span
                   className="topbar-version-pill topbar-version-pill-update"
