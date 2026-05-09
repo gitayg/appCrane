@@ -66,8 +66,10 @@ export function Users() {
   const yobRef = useRef<HTMLInputElement>(null)
 
   // Settings → Users is for human portal users only. Agent / API-key
-  // identities live in /settings#agents. Pre-migration rows (kind
-  // absent) treat as human.
+  // identities are filtered out client-side (kind === 'agent' rows are
+  // dropped). Pre-migration rows (kind absent) treat as human. The
+  // separate /settings#agents tab was removed in v2.5.10 — agents are
+  // managed via the API key issuance flow, not a UI tab.
   const loadUsers = () =>
     adminApi.get<{ users: User[] }>('/api/users')
       .then(d => setUsers((d.users ?? []).filter(u => (u.kind ?? 'human') === 'human')))
