@@ -782,6 +782,19 @@ app.listen(PORT, HOST, async () => {
     log.warn('Or run: crane init');
   }
 
+  // v2.5.13: backfill app_user_roles owners for apps created before
+  // v2.5.12 (when the create-paths started writing the owner row). Done
+  // as a tolerant runtime task instead of a SQL migration so a hiccup
+  // doesn't tank boot — the previous attempt (migration 055) caused a
+  // 502 on self-update because boot rolled back when the migration
+  // tripped on edge-case data.
+  try {
+    const { backfillAppOwners } = await import('./services/ownerBackfill.js');
+    backfillAppOwners();
+  } catch (e) {
+    log.warn(`[owner-backfill] startup hook failed (continuing): ${e.message}`);
+  }
+
   // Boot-time SPA freshness check. Catches operators who pulled new server
   // code (manual `git pull` + restart, no /api/self-update) without
   // rebuilding the admin bundle. By default we just warn so a misbuild
