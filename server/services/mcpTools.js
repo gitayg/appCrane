@@ -273,6 +273,13 @@ const TOOLS = [
         .prepare('SELECT last_check_at, last_status, last_response_ms, is_down FROM health_state WHERE app_id = ? AND env = ?')
         .get(app.id, 'sandbox');
 
+      // v2.5.2: surface the mutable config fields so agents can see what's
+      // actually stored before calling appcrane_update_app to patch one.
+      // Token field is intentionally a boolean (`token_set`) — never the
+      // plaintext, never the encrypted blob.
+      let resourceLimits = null;
+      try { resourceLimits = app.resource_limits ? JSON.parse(app.resource_limits) : null; } catch (_) {}
+
       return {
         ...enriched,
         recent_deployments: recentDeploys,
@@ -291,6 +298,20 @@ const TOOLS = [
                 response_ms: healthSand.last_response_ms,
               }
             : { status: 'unknown' },
+        },
+        config: {
+          source_type:    app.source_type,
+          github_url:     app.github_url,
+          branch:         app.branch,
+          token_set:      !!app.github_token_encrypted,
+          domain:         app.domain,
+          category:       app.category,
+          visibility:     app.visibility,
+          public_access:  app.public_access,
+          image_retention: app.image_retention,
+          frame_ancestors: app.frame_ancestors,
+          max_ram_mb:      resourceLimits?.max_ram_mb      ?? null,
+          max_cpu_percent: resourceLimits?.max_cpu_percent ?? null,
         },
       };
     },
@@ -931,6 +952,123 @@ const TOOLS = [
         ports,
         urls,
         next: `Set env vars with appcrane_set_env, then deploy with appcrane_deploy slug="${slug}" env="sandbox".`,
+      };
+    },
+  },
+
+  {
+    name: 'appcrane_update_app',
+    description:
+      'Patch fields on an existing app. Use this to fix a missing github_url after the fact, change branch, rotate the github_token, retag with category/visibility, or adjust resource limits — anything you would otherwise need direct DB access for. Only includes fields you pass; omitted fields are left alone. To clear a string field pass an empty string. Returns the same shape as appcrane_get_app.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        slug:           { type: 'string', description: 'App slug to update.' },
+        name:           { type: 'string' },
+        description:    { type: 'string' },
+        category:       { type: 'string' },
+        domain:         { type: 'string' },
+        source_type:    { type: 'string', enum: ['github', 'managed', 'managed_legacy'] },
+        github_url:     { type: 'string', description: 'github.com URL of the source repo. Pass empty string to clear.' },
+        branch:         { type: 'string' },
+        github_token:   { type: 'string', description: 'PAT for private clones. Stored encrypted (AES-256-GCM). Omit to leave the existing token alone; pass empty string to clear it; pass a value to rotate.' },
+        visibility:     { type: 'string', enum: ['public', 'private', 'hidden'] },
+        public_access:  { type: 'integer', enum: [0, 1] },
+        image_retention: { type: 'integer', minimum: 0, maximum: 50 },
+        frame_ancestors: { type: 'string' },
+        max_ram_mb:      { type: 'number', description: 'Per-container memory cap.' },
+        max_cpu_percent: { type: 'number', description: 'Per-container CPU cap (0-100).' },
+      },
+      required: ['slug'],
+      additionalProperties: false,
+    },
+    requiredRole: 'admin',
+    handler: async (user, args) => {
+      const { slug } = args;
+      if (!slug || typeof slug !== 'string') throw new Error('slug is required');
+
+      const db = getDb();
+      const app = db.prepare('SELECT * FROM apps WHERE slug = ?').get(slug);
+      if (!app) throw new Error(`App not found: ${slug}`);
+
+      // Validate any field that's been passed. Mirrors server/routes/apps.js
+      // PUT validation; agents calling this through MCP shouldn't be able
+      // to bypass the same checks.
+      const updates = {};
+      if (args.name        !== undefined) {
+        if (!args.name || typeof args.name !== 'string') throw new Error('name must be a non-empty string');
+        updates.name = args.name;
+      }
+      if (args.description !== undefined) updates.description = args.description ? String(args.description) : null;
+      if (args.category    !== undefined) updates.category    = args.category    ? String(args.category)    : null;
+      if (args.domain      !== undefined) updates.domain      = args.domain      ? String(args.domain)      : null;
+      if (args.source_type !== undefined) updates.source_type = args.source_type;
+      if (args.github_url  !== undefined) {
+        if (args.github_url && !/^https?:\/\/(www\.)?github\.com\/[A-Za-z0-9_.\-]+\/[A-Za-z0-9_.\-]+(\.git)?\/?$/.test(args.github_url)) {
+          throw new Error('github_url must be a valid github.com URL or empty string to clear');
+        }
+        updates.github_url = args.github_url || null;
+      }
+      if (args.branch !== undefined) {
+        if (args.branch && !/^[A-Za-z0-9._/\-]{1,200}$/.test(args.branch)) {
+          throw new Error('branch must be alphanumeric with . _ / - (max 200 chars)');
+        }
+        updates.branch = args.branch || null;
+      }
+      if (args.visibility    !== undefined) updates.visibility    = args.visibility;
+      if (args.public_access !== undefined) updates.public_access = args.public_access ? 1 : 0;
+      if (args.image_retention !== undefined) {
+        const n = parseInt(args.image_retention, 10);
+        if (!Number.isFinite(n) || n < 0 || n > 50) throw new Error('image_retention must be 0-50');
+        updates.image_retention = n;
+      }
+      if (args.frame_ancestors !== undefined) updates.frame_ancestors = args.frame_ancestors ? String(args.frame_ancestors) : null;
+
+      if (args.github_token !== undefined) {
+        // '' clears, undefined leaves alone, anything else rotates
+        updates.github_token_encrypted = args.github_token ? encrypt(args.github_token) : null;
+      }
+
+      if (args.max_ram_mb !== undefined || args.max_cpu_percent !== undefined) {
+        let limits = {};
+        try { limits = app.resource_limits ? JSON.parse(app.resource_limits) : {}; } catch (_) {}
+        if (args.max_ram_mb      !== undefined) limits.max_ram_mb      = args.max_ram_mb;
+        if (args.max_cpu_percent !== undefined) limits.max_cpu_percent = args.max_cpu_percent;
+        updates.resource_limits = JSON.stringify(limits);
+      }
+
+      const keys = Object.keys(updates);
+      if (keys.length === 0) throw new Error('No fields to update — pass at least one field besides slug.');
+
+      const setClause = keys.map(k => `${k} = ?`).join(', ');
+      const values    = keys.map(k => updates[k]);
+      db.prepare(`UPDATE apps SET ${setClause} WHERE id = ?`).run(...values, app.id);
+
+      log.info(`MCP: app '${slug}' updated by user ${user.id}; fields=${keys.join(',')}`);
+
+      // Return the same shape as appcrane_get_app so the agent can verify
+      // what landed without a separate get_app round-trip.
+      const fresh = db.prepare('SELECT * FROM apps WHERE id = ?').get(app.id);
+      const enriched = enrichAppRow(db, fresh);
+      let resourceLimits = null;
+      try { resourceLimits = fresh.resource_limits ? JSON.parse(fresh.resource_limits) : null; } catch (_) {}
+      return {
+        ...enriched,
+        updated_fields: keys,
+        config: {
+          source_type:    fresh.source_type,
+          github_url:     fresh.github_url,
+          branch:         fresh.branch,
+          token_set:      !!fresh.github_token_encrypted,
+          domain:         fresh.domain,
+          category:       fresh.category,
+          visibility:     fresh.visibility,
+          public_access:  fresh.public_access,
+          image_retention: fresh.image_retention,
+          frame_ancestors: fresh.frame_ancestors,
+          max_ram_mb:      resourceLimits?.max_ram_mb      ?? null,
+          max_cpu_percent: resourceLimits?.max_cpu_percent ?? null,
+        },
       };
     },
   },
