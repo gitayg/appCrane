@@ -1074,6 +1074,273 @@ const TOOLS = [
   },
 
   {
+    name: 'appcrane_list_app_members',
+    description:
+      'List every user who has access to an app, with their per-app role (owner / admin / user / viewer / none). Use this before granting or revoking to see who is already in. Returns email + name + role for each member. App-admin or owner of the app required (or global admin / platform_admin).',
+    inputSchema: {
+      type: 'object',
+      properties: { slug: { type: 'string' } },
+      required: ['slug'],
+      additionalProperties: false,
+    },
+    requiredRole: 'any',
+    handler: async (user, args) => {
+      const app = getAppForUser(user, args.slug);
+      if (!isAppAdmin(user, app)) {
+        // Owners are accepted by isAppAdmin in v2.3.x; this guards against
+        // a regular user reading the full member roster.
+        const db = getDb();
+        const row = db.prepare("SELECT app_role FROM app_user_roles WHERE app_id = ? AND user_id = ?").get(app.id, user.id);
+        if (row?.app_role !== 'owner') throw new Error('Forbidden: only app admins / owners can list members');
+      }
+      const db = getDb();
+      const rows = db.prepare(`
+        SELECT u.id, u.name, u.email, u.username, COALESCE(aur.app_role, 'none') AS role
+        FROM users u
+        LEFT JOIN app_user_roles aur ON aur.user_id = u.id AND aur.app_id = ?
+        WHERE u.active = 1
+          AND (aur.app_id IS NOT NULL OR EXISTS (SELECT 1 FROM app_users au WHERE au.app_id = ? AND au.user_id = u.id))
+        ORDER BY
+          CASE COALESCE(aur.app_role, 'none')
+            WHEN 'owner' THEN 0 WHEN 'admin' THEN 1
+            WHEN 'user'  THEN 2 WHEN 'viewer' THEN 3 ELSE 4
+          END, u.name
+      `).all(app.id, app.id);
+      return { app: app.slug, members: rows };
+    },
+  },
+
+  {
+    name: 'appcrane_grant_app_access',
+    description:
+      'Grant a user access to an app at a specific per-app role. `user` accepts a numeric user id, an email, or a username — first match wins. role defaults to "user". Idempotent: existing rows are upgraded/downgraded to the new role. App-admin or owner of the app required (or global admin).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        slug: { type: 'string' },
+        user: { type: 'string', description: 'User id (numeric string), email, or username' },
+        role: { type: 'string', enum: ['user', 'admin', 'owner'], default: 'user' },
+      },
+      required: ['slug', 'user'],
+      additionalProperties: false,
+    },
+    requiredRole: 'any',
+    handler: async (user, args) => {
+      const app = getAppForUser(user, args.slug);
+      if (!isAppAdmin(user, app)) {
+        const db = getDb();
+        const r = db.prepare("SELECT app_role FROM app_user_roles WHERE app_id = ? AND user_id = ?").get(app.id, user.id);
+        if (r?.app_role !== 'owner') throw new Error('Forbidden: only app admins / owners can grant access');
+      }
+      const role = args.role || 'user';
+      if (!['user', 'admin', 'owner'].includes(role)) {
+        throw new Error('role must be one of: user, admin, owner');
+      }
+      const db = getDb();
+      const target = db.prepare(`
+        SELECT id, name, email, username FROM users
+        WHERE active = 1 AND (CAST(id AS TEXT) = ? OR email = ? OR username = ?)
+        LIMIT 1
+      `).get(args.user, args.user, args.user);
+      if (!target) throw new Error(`User not found: ${args.user}`);
+
+      // Both tables: app_users (membership) + app_user_roles (role).
+      // getAppForUser walks both, so we keep them in sync.
+      db.prepare('INSERT OR IGNORE INTO app_users (app_id, user_id) VALUES (?, ?)').run(app.id, target.id);
+      db.prepare(`
+        INSERT INTO app_user_roles (app_id, user_id, app_role) VALUES (?, ?, ?)
+        ON CONFLICT(app_id, user_id) DO UPDATE SET app_role = excluded.app_role
+      `).run(app.id, target.id, role);
+
+      log.info(`MCP: granted ${role} on ${app.slug} to user ${target.id} by ${user.id}`);
+      return { app: app.slug, user: { id: target.id, name: target.name, email: target.email }, role };
+    },
+  },
+
+  {
+    name: 'appcrane_revoke_app_access',
+    description:
+      'Remove a user\'s access from an app entirely. Idempotent: returns ok even if the user had no access. App-admin or owner of the app required (or global admin). Refuses to remove the only remaining owner.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        slug: { type: 'string' },
+        user: { type: 'string', description: 'User id, email, or username' },
+      },
+      required: ['slug', 'user'],
+      additionalProperties: false,
+    },
+    requiredRole: 'any',
+    handler: async (user, args) => {
+      const app = getAppForUser(user, args.slug);
+      if (!isAppAdmin(user, app)) {
+        const db = getDb();
+        const r = db.prepare("SELECT app_role FROM app_user_roles WHERE app_id = ? AND user_id = ?").get(app.id, user.id);
+        if (r?.app_role !== 'owner') throw new Error('Forbidden: only app admins / owners can revoke access');
+      }
+      const db = getDb();
+      const target = db.prepare(`
+        SELECT id, name, email FROM users WHERE active = 1
+          AND (CAST(id AS TEXT) = ? OR email = ? OR username = ?) LIMIT 1
+      `).get(args.user, args.user, args.user);
+      if (!target) throw new Error(`User not found: ${args.user}`);
+
+      // Owner-protection: refuse to remove the last owner — would leave
+      // the app un-ownable. Caller must promote a different user first.
+      const cur = db.prepare("SELECT app_role FROM app_user_roles WHERE app_id = ? AND user_id = ?").get(app.id, target.id);
+      if (cur?.app_role === 'owner') {
+        const ownerCount = db.prepare("SELECT COUNT(*) AS c FROM app_user_roles WHERE app_id = ? AND app_role = 'owner'").get(app.id).c;
+        if (ownerCount <= 1) {
+          throw new Error(`Refusing to revoke: ${target.email || target.id} is the only owner of ${app.slug}. Promote another user first.`);
+        }
+      }
+
+      const r1 = db.prepare('DELETE FROM app_user_roles WHERE app_id = ? AND user_id = ?').run(app.id, target.id);
+      const r2 = db.prepare('DELETE FROM app_users      WHERE app_id = ? AND user_id = ?').run(app.id, target.id);
+
+      log.info(`MCP: revoked access on ${app.slug} from user ${target.id} by ${user.id}`);
+      return { app: app.slug, user: { id: target.id, email: target.email }, removed: { roles: r1.changes, members: r2.changes } };
+    },
+  },
+
+  {
+    name: 'appcrane_list_access_requests',
+    description:
+      'List pending access requests — enhancement_requests rows whose message starts with "Access request for app …" (the portal\'s Request-access button posts these). With slug, scopes to one app; without, returns access requests across every app the caller can administer. App-admin / owner / global admin required.',
+    inputSchema: {
+      type: 'object',
+      properties: { slug: { type: 'string', description: 'Optional. Limit to one app.' } },
+      additionalProperties: false,
+    },
+    requiredRole: 'any',
+    handler: async (user, args) => {
+      const db = getDb();
+      // Determine which slugs the caller can administer. Global admins get
+      // every slug; otherwise only slugs where they are owner / admin.
+      let scopedSlugs;
+      if (isAdmin(user)) {
+        scopedSlugs = null; // null = unrestricted
+      } else {
+        scopedSlugs = db.prepare(`
+          SELECT DISTINCT a.slug FROM apps a
+          JOIN app_user_roles aur ON aur.app_id = a.id AND aur.user_id = ?
+          WHERE aur.app_role IN ('owner', 'admin')
+        `).all(user.id).map(r => r.slug);
+        if (scopedSlugs.length === 0) return { requests: [], count: 0 };
+      }
+
+      let where = "er.status != 'done' AND er.message LIKE 'Access request for app%'";
+      const params = [];
+      if (args.slug) {
+        where += ' AND er.app_slug = ?';
+        params.push(args.slug);
+      }
+      if (scopedSlugs) {
+        const placeholders = scopedSlugs.map(() => '?').join(',');
+        where += ` AND er.app_slug IN (${placeholders})`;
+        params.push(...scopedSlugs);
+      }
+
+      const rows = db.prepare(`
+        SELECT er.id, er.app_slug, er.user_id, er.user_name, er.message, er.status, er.created_at
+        FROM enhancement_requests er
+        WHERE ${where}
+        ORDER BY er.created_at DESC
+        LIMIT 100
+      `).all(...params);
+
+      return { requests: rows, count: rows.length };
+    },
+  },
+
+  {
+    name: 'appcrane_approve_access_request',
+    description:
+      'Approve a pending access request: grants the requester access to the app at `role` (default "user") and marks the enhancement_request as done. Verifies the request is actually an access request before acting. App-admin / owner / global admin required.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        request_id: { type: 'integer', description: 'enhancement_requests.id from appcrane_list_access_requests' },
+        role:       { type: 'string', enum: ['user', 'admin', 'owner'], default: 'user' },
+      },
+      required: ['request_id'],
+      additionalProperties: false,
+    },
+    requiredRole: 'any',
+    handler: async (user, args) => {
+      const db = getDb();
+      const req = db.prepare('SELECT * FROM enhancement_requests WHERE id = ?').get(args.request_id);
+      if (!req) throw new Error(`Request ${args.request_id} not found`);
+      if (!/^Access request for app/i.test(req.message || '')) {
+        throw new Error(`Request ${args.request_id} is not an access request — refusing to grant`);
+      }
+      if (req.status === 'done') throw new Error(`Request ${args.request_id} is already closed`);
+
+      const app = getAppForUser(user, req.app_slug);
+      if (!isAppAdmin(user, app)) {
+        const r = db.prepare("SELECT app_role FROM app_user_roles WHERE app_id = ? AND user_id = ?").get(app.id, user.id);
+        if (r?.app_role !== 'owner') throw new Error('Forbidden: only app admins / owners can approve access');
+      }
+
+      const role = args.role || 'user';
+      db.prepare('INSERT OR IGNORE INTO app_users (app_id, user_id) VALUES (?, ?)').run(app.id, req.user_id);
+      db.prepare(`
+        INSERT INTO app_user_roles (app_id, user_id, app_role) VALUES (?, ?, ?)
+        ON CONFLICT(app_id, user_id) DO UPDATE SET app_role = excluded.app_role
+      `).run(app.id, req.user_id, role);
+      db.prepare("UPDATE enhancement_requests SET status = 'done' WHERE id = ?").run(req.id);
+
+      log.info(`MCP: approved access request #${req.id} → ${role} on ${app.slug} for user ${req.user_id} by ${user.id}`);
+      return {
+        request_id: req.id,
+        app: app.slug,
+        granted_to: { id: req.user_id, name: req.user_name },
+        role,
+        status: 'approved',
+      };
+    },
+  },
+
+  {
+    name: 'appcrane_deny_access_request',
+    description:
+      'Deny a pending access request: marks the enhancement_request as done WITHOUT granting access. Optionally appends a reason to the original message so the requester (and the audit trail) sees why. App-admin / owner / global admin required.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        request_id: { type: 'integer' },
+        reason:     { type: 'string', description: 'Optional. Appended to the request message.' },
+      },
+      required: ['request_id'],
+      additionalProperties: false,
+    },
+    requiredRole: 'any',
+    handler: async (user, args) => {
+      const db = getDb();
+      const req = db.prepare('SELECT * FROM enhancement_requests WHERE id = ?').get(args.request_id);
+      if (!req) throw new Error(`Request ${args.request_id} not found`);
+      if (!/^Access request for app/i.test(req.message || '')) {
+        throw new Error(`Request ${args.request_id} is not an access request`);
+      }
+      if (req.status === 'done') throw new Error(`Request ${args.request_id} is already closed`);
+
+      const app = getAppForUser(user, req.app_slug);
+      if (!isAppAdmin(user, app)) {
+        const r = db.prepare("SELECT app_role FROM app_user_roles WHERE app_id = ? AND user_id = ?").get(app.id, user.id);
+        if (r?.app_role !== 'owner') throw new Error('Forbidden: only app admins / owners can deny access');
+      }
+
+      const newMessage = args.reason
+        ? `${req.message}\n\n[DENIED by ${user.email || user.username || user.id} on ${new Date().toISOString().slice(0, 19).replace('T', ' ')}]\n${args.reason}`
+        : req.message;
+      db.prepare("UPDATE enhancement_requests SET status = 'done', message = ? WHERE id = ?").run(newMessage, req.id);
+
+      log.info(`MCP: denied access request #${req.id} on ${app.slug} by ${user.id}`);
+      return { request_id: req.id, app: app.slug, status: 'denied', reason: args.reason || null };
+    },
+  },
+
+  {
     name: 'appcrane_create_managed_app',
     description:
       'Create a new app using AppCrane\'s GitHub service-account — the platform creates a repo on the configured org/user, owns it, and the agent works against it through github_* tools without the end user ever needing their own PAT. Use this when the user does not have a GitHub account or does not want to deal with GitHub at all. Requires the platform admin to have configured the service-account in Settings → GitHub. Returns the same shape as appcrane_create_app, plus the auto-created repo metadata.',
