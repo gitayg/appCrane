@@ -437,64 +437,15 @@ export function Users() {
         </tbody>
       </table>
 
-      {apps.length > 0 && users.length > 0 && (
-        <>
-          <h2 style={{ marginTop: 32 }}>App Roles</h2>
-          <div style={{ overflowX: 'auto' }}>
-            <table>
-              <thead>
-                <tr>
-                  <th>User</th>
-                  {apps.map(a => <th key={a.slug}>{a.name}</th>)}
-                </tr>
-              </thead>
-              <tbody>
-                {users.map(u => (
-                  <tr key={u.id}>
-                    <td style={{ whiteSpace: 'nowrap' }}>{u.name}</td>
-                    {apps.map(a => {
-                      const cellKey = `${a.slug}:${u.id}`
-                      const status = roleSaveStatus[cellKey]
-                      const isPlatformAdmin = u.role === 'platform_admin'
-                      // Platform admins have implicit owner-equivalent access on
-                      // every app via their global role; the per-app dropdown is
-                      // pinned to "owner" and disabled to make that obvious and
-                      // prevent confusing no-op writes that the server would
-                      // override anyway.
-                      return (
-                        <td key={a.slug} style={{ whiteSpace: 'nowrap' }}>
-                          <select
-                            value={isPlatformAdmin ? 'owner' : (roles[a.slug]?.[u.id] ?? 'none')}
-                            disabled={isPlatformAdmin || status === 'saving'}
-                            title={isPlatformAdmin
-                              ? 'Platform admin has owner-equivalent access to every app. Demote their global role first to change per-app assignments.'
-                              : undefined}
-                            onChange={e => changeRole(a.slug, u.id, e.target.value as AppRole)}
-                          >
-                            <option value="none">none</option>
-                            <option value="user">user</option>
-                            <option value="admin">admin</option>
-                            <option value="owner">owner</option>
-                          </select>
-                          {!isPlatformAdmin && status === 'saving' && (
-                            <span style={{ marginLeft: 6, fontSize: '0.75rem', color: 'var(--dim)' }} title="Saving…">…</span>
-                          )}
-                          {!isPlatformAdmin && status === 'saved' && (
-                            <span style={{ marginLeft: 6, color: 'var(--green)', fontSize: '0.85rem' }} title="Saved">✓</span>
-                          )}
-                          {!isPlatformAdmin && status === 'error' && (
-                            <span style={{ marginLeft: 6, color: 'var(--red)', fontSize: '0.85rem' }} title="Save failed — change reverted">✗</span>
-                          )}
-                        </td>
-                      )
-                    })}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </>
-      )}
+      {/* v2.5.21: the wide N×M App Roles matrix moved out of Users in two
+          directions:
+          - Per-user editor: the "Apps" button on each user row above
+            (added v2.5.19) opens a focused per-user modal.
+          - Per-app editor: a "Users" button on each app row in the
+            Applications Manage table opens a focused per-app modal.
+          The matrix is gone — same surface area, less visual noise,
+          and it scales to many apps × many users without becoming a
+          400-cell soup. */}
 
       {mcpKeyModal.open && (
         <div
