@@ -612,62 +612,32 @@ router.put('/:slug/users', requireAppAccess, auditMiddleware('app-assign-users')
   res.json({ app: req.app.slug, users });
 });
 
-/**
- * POST /api/apps/:slug/deployment-key - Create a scoped deployment key for this app (admin only)
- * Creates a new user with role 'user', assigns them to this app, and returns the API key.
+/*
+ * Retired in v2.6.0: POST /api/apps/:slug/deployment-key (+ /recycle).
+ *
+ * These endpoints minted per-app `user_<random>` REST keys for an
+ * X-Deployment-Key flow that duplicated MCP. AppCrane is MCP-only for
+ * agents now (see appcrane_get_guide topic="operations"); per-app
+ * access lives in app_user_roles, not in paste-key headers.
+ *
+ * Existing keys keep authenticating until v3.0; no new ones are issued.
  */
-router.post('/:slug/deployment-key', requireAuth, requireAdmin, auditMiddleware('deployment-key-create'), (req, res) => {
-  const db = getDb();
-  const app = db.prepare('SELECT * FROM apps WHERE slug = ?').get(req.params.slug);
-  if (!app) throw new AppError('App not found', 404, 'NOT_FOUND');
-
-  const apiKey = generateApiKey('user');
-  const keyHash = hashApiKey(apiKey);
-  const name = 'deploy-' + app.slug + '-' + Date.now().toString(36);
-
-  const result = db.transaction(() => {
-    const userResult = db.prepare(`
-      INSERT INTO users (name, email, role, api_key_hash) VALUES (?, ?, 'user', ?)
-    `).run(name, name + '@appcrane.local', keyHash);
-    db.prepare('INSERT OR IGNORE INTO app_users (app_id, user_id) VALUES (?, ?)').run(app.id, userResult.lastInsertRowid);
-    return userResult.lastInsertRowid;
-  })();
-
-  res.json({ id: result, name, api_key: apiKey, app: app.slug, message: 'Deployment key created and assigned to app' });
+router.post('/:slug/deployment-key', requireAuth, (_req, res) => {
+  res.status(410).json({
+    error: {
+      code: 'GONE',
+      message: 'Deployment keys are retired (v2.6.0). Agents authenticate via MCP; use appcrane_grant_app_access for per-app access.',
+    },
+  });
 });
 
-/**
- * POST /api/apps/:slug/deployment-key/recycle - Rotate the deployment key for this app (admin only)
- * Finds the most-recently-created deploy user for the app and regenerates its API key.
- */
-router.post('/:slug/deployment-key/recycle', requireAuth, requireAdmin, auditMiddleware('deployment-key-recycle'), (req, res) => {
-  const db = getDb();
-  const app = db.prepare('SELECT * FROM apps WHERE slug = ?').get(req.params.slug);
-  if (!app) throw new AppError('App not found', 404, 'NOT_FOUND');
-
-  const deployUser = db.prepare(`
-    SELECT u.* FROM users u
-    JOIN app_users au ON u.id = au.user_id
-    WHERE au.app_id = ? AND u.name LIKE 'deploy-%'
-    ORDER BY u.id DESC LIMIT 1
-  `).get(app.id);
-
-  if (!deployUser) {
-    throw new AppError(
-      `No deployment key found for '${app.slug}'. Create one first: POST /api/apps/${app.slug}/deployment-key`,
-      404, 'NO_DEPLOYMENT_KEY'
-    );
-  }
-
-  const apiKey = generateApiKey('user');
-  const keyHash = hashApiKey(apiKey);
-  db.prepare('UPDATE users SET api_key_hash = ? WHERE id = ?').run(keyHash, deployUser.id);
-
-  res.json({
-    user: { id: deployUser.id, name: deployUser.name },
-    api_key: apiKey,
-    app: app.slug,
-    warning: 'Save this API key — it will not be shown again. The old key is now invalid.',
+/* Recycle path also retired — same rationale as above. */
+router.post('/:slug/deployment-key/recycle', requireAuth, (_req, res) => {
+  res.status(410).json({
+    error: {
+      code: 'GONE',
+      message: 'Deployment keys are retired (v2.6.0). Use appcrane_grant_app_access for per-app access.',
+    },
   });
 });
 

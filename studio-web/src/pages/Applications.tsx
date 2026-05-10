@@ -329,15 +329,13 @@ export function Applications() {
     }
   }
 
-  async function showAppToken(slug: string) {
-    const r = await adminApi.post<{ key?: string; deployment_key?: string }>(`/api/apps/${slug}/deployment-key`).catch(() => null)
-    const key = r?.key ?? r?.deployment_key ?? ''
-    setPromptModal({
-      open: true,
-      key,
-      prompt: `Use this deployment key to authenticate API calls for app "${slug}".\n\nSet the header:\n  X-Deployment-Key: ${key}\n\nKeep it secret — it grants deploy access to this app.`,
-    })
-  }
+  // v2.6.0: showAppToken removed — it minted a `user_<random>` deployment
+  // key for an X-Deployment-Key REST flow that duplicates MCP. Agents
+  // authenticate to AppCrane via MCP only; per-app access is governed
+  // by app_user_roles, not by paste-keys.
+  // (The corresponding POST /api/apps/:slug/deployment-key endpoint was
+  // removed server-side in this same commit. Existing keys keep working
+  // until v3.0.)
 
   async function generateAgentKey() {
     const ts = Date.now()
@@ -1009,7 +1007,6 @@ Stays in sync as AppCrane evolves; no copy-paste required.`
                           onClick={() => setUsersModalApp(app)}
                           title="Manage which users have access to this app and at what role"
                         >Users</button>
-                        <button className="btn btn-xs" onClick={() => showAppToken(app.slug)}>onboard</button>
                         <button
                           className="btn btn-xs"
                           onClick={() => setFrameAncestors(app)}
