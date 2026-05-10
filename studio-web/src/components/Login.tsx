@@ -1,20 +1,38 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useAuth } from '../hooks/useAuth'
 
 /**
- * v2.4.0 — unified login screen.
+ * Set the cc_token cookie that Caddy's forward_auth on per-app routes
+ * reads via /api/identity/verify. localStorage alone isn't enough — that
+ * only travels with explicit fetches, not with browser navigation into
+ * proxied apps. SameSite=Lax so it survives the first-party navigation
+ * but doesn't leak across cross-site requests; Secure when on HTTPS.
  *
- * Email/username + password is the only first-class path now. The
- * `dhk_admin_*` paste box is demoted to a small "Have an API key?"
- * disclosure for legacy / break-glass cases, and is intended to be
- * removed entirely once every admin has set a password.
+ * Mirrors docs/login.html's setAuthCookie before v2.5.14 collapsed the
+ * dual-login flow into the SPA. Without this, post-SPA-login navigation
+ * to a Caddy-proxied app would fail forward_auth and produce the
+ * /{slug}/login loop the operator reported.
+ */
+function setAuthCookie(token: string) {
+  const secure = window.location.protocol === 'https:' ? '; Secure' : ''
+  document.cookie =
+    'cc_token=' + encodeURIComponent(token) +
+    '; Path=/; Max-Age=' + (7 * 24 * 3600) + '; SameSite=Lax' + secure
+}
+
+/**
+ * v2.5.14 — single canonical login.
  *
- * For admins who land here without a password yet (e.g. fresh installs
- * where the bootstrap admin's password_hash is still NULL), the helper
- * text below the form points them at:
- *   1. Click "Have an API key?", paste their dhk_admin_* once
- *   2. After login, hit POST /api/identity/set-password to bridge to
- *      Bearer auth, then log out and back in with email + password
+ * Replaces the dual /login (docs/login.html) + SPA-Login.tsx duplication.
+ * Email/username + password is the first-class path; the API-key paste
+ * box is a small disclosure for legacy / break-glass cases.
+ *
+ * SSO callback handling absorbed from docs/login.html so the OIDC and
+ * SAML flows still work without the legacy HTML page in the loop:
+ *   - ?oidc_token=… (also used by SAML callbacks) → store + clean URL
+ *     + go to ?redirect= or /applications
+ *   - ?sso_error=… / ?saml_error=… → render inline
+ *   - ?redirect=… → preserved and used after successful password login
  */
 export function Login() {
   const { setKey } = useAuth()
@@ -24,10 +42,51 @@ export function Login() {
   const [keyVal, setKeyVal] = useState('')
   const [error, setError] = useState('')
 
+  // Read SSO callback / redirect query params on mount. Both providers
+  // hand the bearer back via ?oidc_token=…; we store it as cc_identity_token
+  // (same key the unified login uses) and forward to the redirect target.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const ssoErr = params.get('sso_error') || params.get('saml_error')
+    if (ssoErr) {
+      setError('SSO failed: ' + ssoErr)
+      const url = new URL(window.location.href)
+      url.searchParams.delete('sso_error')
+      url.searchParams.delete('saml_error')
+      window.history.replaceState({}, '', url.toString())
+      return
+    }
+    const oidcToken = params.get('oidc_token')
+    if (oidcToken) {
+      localStorage.setItem('cc_identity_token', oidcToken)
+      setAuthCookie(oidcToken)
+      const redirect = params.get('redirect')
+      if (redirect && redirect.startsWith('/')) {
+        window.location.replace(redirect)
+      } else {
+        // Strip the SSO-token from the URL before reload so it doesn't
+        // sit in the address bar / browser history.
+        const url = new URL(window.location.href)
+        url.searchParams.delete('oidc_token')
+        url.searchParams.delete('redirect')
+        window.location.replace(url.pathname + url.search + url.hash)
+      }
+    }
+  }, [])
+
+  function postLoginRedirect() {
+    const redirect = new URLSearchParams(window.location.search).get('redirect')
+    if (redirect && redirect.startsWith('/')) {
+      window.location.replace(redirect)
+    } else {
+      window.location.reload()
+    }
+  }
+
   const doKeyLogin = () => {
     if (!keyVal.trim()) return
     setKey(keyVal.trim())
-    window.location.reload()
+    postLoginRedirect()
   }
 
   const doPassLogin = async () => {
@@ -42,7 +101,8 @@ export function Login() {
       const data = await res.json()
       if (!res.ok) { setError(data.error?.message || 'Login failed'); return }
       localStorage.setItem('cc_identity_token', data.token)
-      window.location.reload()
+      setAuthCookie(data.token)
+      postLoginRedirect()
     } catch { setError('Connection failed') }
   }
 

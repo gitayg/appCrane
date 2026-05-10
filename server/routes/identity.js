@@ -158,9 +158,25 @@ router.get('/verify', (req, res) => {
     if (match) token = decodeURIComponent(match[1]);
   }
 
-  const craneUrl = process.env.CRANE_DOMAIN
-    ? `https://${process.env.CRANE_DOMAIN}`
-    : `http://localhost:${process.env.PORT || 5001}`;
+  // v2.5.14: always build an absolute https://<crane-host>/login URL so a
+  // Caddy forward_auth 302 can never produce a slug-prefixed relative
+  // path. Tries CRANE_DOMAIN, then X-Forwarded-Host, then req.headers.host.
+  // Strips any accidental scheme prefix on CRANE_DOMAIN (= "https://x.com"
+  // would otherwise yield "https://https://x.com/login"). Falls back to
+  // localhost only when no usable host is found anywhere — that means
+  // we're not behind a proxy and the verify endpoint shouldn't have been
+  // reachable from a browser anyway.
+  function craneAbsBase() {
+    const proto = req.headers['x-forwarded-proto'] || 'https';
+    let host = process.env.CRANE_DOMAIN
+      || req.headers['x-forwarded-host']
+      || req.headers.host
+      || '';
+    host = String(host).replace(/^https?:\/\//, '').replace(/\/+$/, '');
+    if (!host) return `http://localhost:${process.env.PORT || 5001}`;
+    return `${proto}://${host}`;
+  }
+  const craneUrl = craneAbsBase();
 
   // Reconstruct original URL from Caddy forward_auth headers for post-login redirect.
   //
@@ -172,6 +188,31 @@ router.get('/verify', (req, res) => {
   // Caddyfile generator now passes ?prefix=/<slug-or-sandbox-prefix> on the
   // verify URL — we re-prepend it here. Falls back to ?app=<slug> if prefix
   // is missing (e.g. older Caddyfile from a pre-v1.25.2 deployment).
+  //
+  // v2.5.14: dedupe nested `?redirect=` chains. If a previous redirect
+  // loop already wrapped the URL once (e.g. login → app → forward_auth
+  // fail → login again with the previous /login?redirect=… as the new
+  // redirect target), unwrap until we have the innermost concrete URL.
+  // Caps at 5 levels so a malicious crafted chain can't pin a CPU.
+  function unwrapNestedRedirect(url) {
+    let cur = url;
+    for (let i = 0; i < 5; i++) {
+      try {
+        const u = new URL(cur);
+        // Only unwrap when the URL itself points at a /login route on
+        // any host — that's the loop signature. Real apps with their
+        // own ?redirect= params keep their value.
+        if (!/\/login\/?$/.test(u.pathname)) return cur;
+        const inner = u.searchParams.get('redirect');
+        if (!inner) return cur;
+        cur = inner;
+      } catch (_) {
+        return cur;
+      }
+    }
+    return cur;
+  }
+
   function originalUrl() {
     const proto = req.headers['x-forwarded-proto'] || 'https';
     const host  = req.headers['x-forwarded-host']  || process.env.CRANE_DOMAIN || '';
@@ -182,7 +223,8 @@ router.get('/verify', (req, res) => {
       else if (!uri.startsWith(prefix)) uri = prefix + uri;
     }
     if (!host || !uri) return '';
-    return `${proto}://${host}${uri}`;
+    const rawUrl = `${proto}://${host}${uri}`;
+    return unwrapNestedRedirect(rawUrl);
   }
 
   function loginRedirect(extra = {}) {

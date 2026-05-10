@@ -612,8 +612,21 @@ function loginHandler(req, res) {
   }
   sendHtml(res, join(__dirname, '..', 'docs', 'login.html'));
 }
-app.get('/login', loginHandler);
-app.get('/portal', loginHandler);
+// v2.5.14: collapse the dual-login UX. /login and /portal forward to
+// /applications, which renders the SPA's <Login> when unauthenticated.
+// The SPA handles the SSO query params (`oidc_token`, `sso_error`,
+// `saml_error`, `redirect`) that docs/login.html used to.
+//
+// loginHandler (above) is kept for any iframe-embedded SSO flow that
+// needs the custom-frame-ancestors CSP — exposed at /login-legacy.
+// Once we confirm SSO works through the SPA, this can be deleted.
+function forwardToApplications(req, res) {
+  const qs = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
+  res.redirect(302, '/applications' + qs);
+}
+app.get('/login',  forwardToApplications);
+app.get('/portal', forwardToApplications);
+app.get('/login-legacy', loginHandler);
 
 // Admin SPA — all admin routes served by the React admin-app bundle
 const adminSpa = join(__dirname, '..', 'docs', 'admin-app', 'index.html');
