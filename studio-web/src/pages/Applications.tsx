@@ -477,6 +477,13 @@ CONSTRAINTS — common pitfalls that fail deploys:
   - App must read PORT from process.env (\`process.env.PORT || 3000\`).
   - On failure, surface the error and ask before retrying. No silent loops.
   - End with the sandbox URL + one line of "what's deployed".`
+    // v2.5.23: the full onboarding playbook now lives server-side at
+    // server/services/guides/onboarding.md and is fetched by agents via
+    // the appcrane_get_guide('onboarding') MCP tool. This modal no longer
+    // pastes a 4 KB brief into the user's chat — they just run the
+    // setup command, open Claude Code, and ask. The agent pulls the
+    // latest playbook itself. Single source of truth on the server.
+    void brief // kept above for reference; the modal now hands off to MCP
     const prompt = `Onboard a new application end-to-end via an AppCrane onboarding agent.
 
 === STEP 1 — Generate a GitHub PAT ===
@@ -500,16 +507,17 @@ The X-Github-Token header is what enables AppCrane's GitHub passthrough — the
 agent gets \`github_*\` tools (read files, push files, open PRs, create repos)
 on the same MCP connection. No separate GitHub MCP server install needed.
 
-=== STEP 3 — Open a fresh Claude Code session and paste the brief below ===
+=== STEP 3 — Ask the agent to onboard your app ===
 
-In any terminal: \`claude\`. Paste everything between BEGIN and END as your
-first message:
+In any terminal: \`claude\`. First message (paste verbatim or paraphrase):
 
->>>>> BEGIN BRIEF >>>>>
+  Onboard a new app on AppCrane. Start by calling appcrane_get_guide with
+  topic="onboarding" to fetch the latest playbook. Then ask me the inputs
+  the guide lists, and walk through paths (a)/(b)/(c)/(d) accordingly.
 
-${brief}
-
-<<<<< END BRIEF <<<<<`
+The agent pulls the current playbook itself — covers the four onboarding
+paths, the health-endpoint contract, app-icon convention, common pitfalls.
+Stays in sync as AppCrane evolves; no copy-paste required.`
     setPromptModal({
       open: true,
       title: 'New Application Onboarding',
