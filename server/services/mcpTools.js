@@ -1487,6 +1487,54 @@ const TOOLS = [
   },
 
   {
+    name: 'appcrane_get_guide',
+    description:
+      'Fetch the latest AppCrane playbook on a given topic. Use this at the START of any non-trivial workflow so you operate on the current authoritative guidance, not on whatever you remember from a past session. Topics: "onboarding" = the full new-app onboarding playbook (paths a/b/c/d, health-endpoint contract, common pitfalls). "operations" = the comprehensive agent operations guide (deploy, env, logs, rollback, every appcrane_* tool). Topic defaults to "onboarding" if omitted. Returns markdown.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        topic: {
+          type: 'string',
+          enum: ['onboarding', 'operations'],
+          description: 'Which guide to fetch. Default: onboarding.',
+        },
+      },
+      additionalProperties: false,
+    },
+    requiredRole: 'any',
+    handler: async (_user, args) => {
+      const topic = args.topic === 'operations' ? 'operations' : 'onboarding';
+      const { readFileSync, existsSync } = await import('fs');
+      const { join, dirname } = await import('path');
+      const { fileURLToPath } = await import('url');
+      const __dirname = dirname(fileURLToPath(import.meta.url));
+
+      let path;
+      if (topic === 'onboarding') {
+        path = join(__dirname, 'guides', 'onboarding.md');
+      } else {
+        // Operations guide = the long-form AGENT_GUIDE.md at the repo root.
+        path = join(__dirname, '..', '..', 'AGENT_GUIDE.md');
+      }
+      if (!existsSync(path)) throw new Error(`Guide '${topic}' not found on this AppCrane install`);
+
+      let content = readFileSync(path, 'utf8');
+      // Substitute {{HOST}} placeholder with the configured CRANE_DOMAIN so
+      // the agent sees the right host in its instructions. Falls back to a
+      // generic phrasing when CRANE_DOMAIN is unset.
+      const host = process.env.CRANE_DOMAIN || 'your AppCrane host';
+      content = content.replace(/\{\{HOST\}\}/g, host);
+
+      return {
+        topic,
+        host,
+        markdown: content,
+        bytes: Buffer.byteLength(content, 'utf8'),
+      };
+    },
+  },
+
+  {
     name: 'appcrane_create_managed_app',
     description:
       'Create a new app using AppCrane\'s GitHub service-account — the platform creates a repo on the configured org/user, owns it, and the agent works against it through github_* tools without the end user ever needing their own PAT. Use this when the user does not have a GitHub account or does not want to deal with GitHub at all. Requires the platform admin to have configured the service-account in Settings → GitHub. Returns the same shape as appcrane_create_app, plus the auto-created repo metadata.',
