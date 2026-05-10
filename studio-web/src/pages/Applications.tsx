@@ -66,13 +66,23 @@ export function Applications() {
   // grid, no manage chrome). Admins / platform_admins default to manage
   // (the existing table) but can flip to launcher via the toggle. Stored
   // in localStorage so the choice persists across reloads.
+  //
+  // v2.5.17 fix: useState initializer ran before /api/auth/me resolved,
+  // so isAdmin(null) was always false and the default fell to 'launcher'
+  // for every user including platform_admin. Now: start `null` until me
+  // loads, then resolve to the role-appropriate default. Saved
+  // localStorage value still wins. Toggle button stays interactive.
   const adminLike = isAdmin(me)
-  const [viewMode, setViewMode] = useState<'launcher' | 'manage'>(() => {
+  const [viewMode, setViewMode] = useState<'launcher' | 'manage' | null>(() => {
     const saved = typeof window !== 'undefined' ? localStorage.getItem('cc_apps_view') : null
     if (saved === 'launcher' || saved === 'manage') return saved
-    return adminLike ? 'manage' : 'launcher'
+    return null
   })
-  useEffect(() => { try { localStorage.setItem('cc_apps_view', viewMode) } catch (_) {} }, [viewMode])
+  useEffect(() => {
+    if (viewMode !== null || me === null) return
+    setViewMode(adminLike ? 'manage' : 'launcher')
+  }, [me, adminLike, viewMode])
+  useEffect(() => { if (viewMode) { try { localStorage.setItem('cc_apps_view', viewMode) } catch (_) {} } }, [viewMode])
 
   const [apps, setApps] = useState<App[]>([])
   const [versions, setVersions] = useState<Record<string, { prod?: string; sand?: string }>>({})
