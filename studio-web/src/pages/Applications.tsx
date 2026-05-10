@@ -454,6 +454,17 @@ ORDER, BY PATH:
 
     The end user never sees github.com. They get a sandbox URL.
 
+APP TILE ICON (optional, recommended):
+  Commit \`public/icon.png\` (256×256 PNG preferred; SVG / WEBP / JPEG / GIF also accepted)
+  in the repo. AppCrane picks it up on every deploy and uses it as the tile icon
+  on the Dashboard, the Launcher cards, the Manage table, and the frame topbar.
+  When the user has no design ready, propose a minimal monochrome SVG with their
+  app name's initials or a single thematic glyph — committing one is part of a
+  clean onboarding, not an afterthought.
+
+  For mid-flight icon swaps without a redeploy: call appcrane_set_app_icon
+  with the slug, format ("png"/"svg"/etc.), and base64-encoded image bytes.
+
 CONSTRAINTS — common pitfalls that fail deploys:
   - Sandbox only. Never deploy to production.
   - Vite: \`base: process.env.APP_BASE_PATH || './'\`. Never '/'. AppCrane does

@@ -1418,6 +1418,75 @@ const TOOLS = [
   },
 
   {
+    name: 'appcrane_set_app_icon',
+    description:
+      'Set the tile icon for an app (shown on the Dashboard, the Launcher cards, the Manage table, and the frame topbar). Accepts a base64-encoded image in PNG / SVG / WEBP / JPEG / GIF. ' +
+      'For repo-tracked icons prefer committing public/icon.png to the repo — AppCrane picks it up automatically on each deploy. Use this MCP tool when the icon needs to change without a redeploy, or when the source isn\'t in the repo. ' +
+      'Replaces any existing icon. App-admin or owner required (or global admin).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        slug:    { type: 'string', description: 'App slug.' },
+        format:  { type: 'string', enum: ['png', 'svg', 'webp', 'jpg', 'jpeg', 'gif'], description: 'Image format. Determines the on-disk file extension (icon.<format>).' },
+        base64:  { type: 'string', description: 'Base64-encoded image payload. May or may not include the data URL prefix (data:image/png;base64,…) — both work. Max 500 KB decoded.' },
+      },
+      required: ['slug', 'format', 'base64'],
+      additionalProperties: false,
+    },
+    requiredRole: 'any',
+    handler: async (user, args) => {
+      const app = getAppForUser(user, args.slug);
+      if (!isAppAdmin(user, app)) {
+        const db = getDb();
+        const r = db.prepare("SELECT app_role FROM app_user_roles WHERE app_id = ? AND user_id = ?").get(app.id, user.id);
+        if (r?.app_role !== 'owner') throw new Error('Forbidden: only app admins / owners can set the app icon');
+      }
+
+      const ext = String(args.format || '').toLowerCase();
+      const ICON_EXTS = ['png', 'svg', 'webp', 'jpg', 'jpeg', 'gif'];
+      if (!ICON_EXTS.includes(ext)) throw new Error(`format must be one of: ${ICON_EXTS.join(', ')}`);
+
+      // Strip an optional data-URL prefix so callers can paste either form.
+      let raw = String(args.base64 || '').trim();
+      const m = raw.match(/^data:[^;]+;base64,(.+)$/i);
+      if (m) raw = m[1];
+      if (!raw) throw new Error('base64 payload is empty');
+
+      let buf;
+      try { buf = Buffer.from(raw, 'base64'); } catch (e) { throw new Error(`base64 decode failed: ${e.message}`); }
+      const MAX_BYTES = 500 * 1024;
+      if (buf.length === 0)        throw new Error('decoded payload is empty');
+      if (buf.length > MAX_BYTES)  throw new Error(`icon too large (${buf.length} bytes > ${MAX_BYTES} cap)`);
+
+      const { writeFileSync, unlinkSync, existsSync, mkdirSync } = await import('fs');
+      const { join } = await import('path');
+      const dataDir = process.env.DATA_DIR || './data';
+      const appIconDir = join(dataDir, 'apps', app.slug);
+      mkdirSync(appIconDir, { recursive: true });
+
+      // Wipe stale-extension siblings so the GET endpoint doesn't keep
+      // serving an old icon under a different extension. Mirrors what
+      // the POST /api/apps/:slug/icon upload endpoint does.
+      for (const oldExt of ICON_EXTS) {
+        if (oldExt === ext) continue;
+        const oldPath = join(appIconDir, `icon.${oldExt}`);
+        if (existsSync(oldPath)) { try { unlinkSync(oldPath); } catch (_) {} }
+      }
+
+      const destPath = join(appIconDir, `icon.${ext}`);
+      writeFileSync(destPath, buf);
+
+      log.info(`MCP: app icon updated for ${app.slug} (${ext}, ${buf.length} bytes) by user ${user.id}`);
+      return {
+        app: app.slug,
+        format: ext,
+        size_bytes: buf.length,
+        url: `/api/apps/${app.slug}/icon`,
+      };
+    },
+  },
+
+  {
     name: 'appcrane_create_managed_app',
     description:
       'Create a new app using AppCrane\'s GitHub service-account — the platform creates a repo on the configured org/user, owns it, and the agent works against it through github_* tools without the end user ever needing their own PAT. Use this when the user does not have a GitHub account or does not want to deal with GitHub at all. Requires the platform admin to have configured the service-account in Settings → GitHub. Returns the same shape as appcrane_create_app, plus the auto-created repo metadata.',
