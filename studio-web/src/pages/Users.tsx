@@ -41,6 +41,12 @@ export function Users() {
   const [roleSaveStatus, setRoleSaveStatus] = useState<Record<string, 'saving' | 'saved' | 'error'>>({})
   const [showForm, setShowForm] = useState(false)
   const [formMsg, setFormMsg] = useState<{ text: string; ok: boolean } | null>(null)
+  // v2.5.19: per-user app-access modal. Click "Apps" on a user row to
+  // open a focused list of every app + that user's role on it. Uses the
+  // same changeRole + roles state as the wide matrix below — both views
+  // stay in sync, and the modal is easier with many apps. The wide
+  // matrix stays for now as a power-user / bulk-edit affordance.
+  const [appsModalUser, setAppsModalUser] = useState<User | null>(null)
   const [newKind, setNewKind] = useState<'human' | 'agent'>('human')
   const [kindFilter, setKindFilter] = useState<'all' | 'human' | 'agent'>('human')
   // Modal shows the result of any key-issuance flow. `kind === 'mcp'` →
@@ -408,6 +414,13 @@ export function Users() {
                   <div style={{ display: 'flex', gap: 4, justifyContent: 'flex-end' }}>
                     <button
                       className="btn btn-xs"
+                      onClick={() => setAppsModalUser(u)}
+                      title="Edit which apps this user has access to and at what role"
+                    >
+                      Apps
+                    </button>
+                    <button
+                      className="btn btn-xs"
                       onClick={() => issueMcpKey(u)}
                       title="Issue an MCP key for this user — they don't need to log in to the dashboard. The key is shown once."
                     >
@@ -582,6 +595,121 @@ export function Users() {
 
             <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
               <button className="btn" onClick={() => setMcpKeyModal({ open: false })}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* v2.5.19: per-user apps modal. Reuses changeRole + roles state so
+          changes here are immediately visible in the wide matrix below. */}
+      {appsModalUser && (
+        <div
+          style={{
+            position: 'fixed', inset: 0, background: 'rgba(0,0,0,.55)', zIndex: 10500,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}
+          onClick={() => setAppsModalUser(null)}
+        >
+          <div
+            style={{
+              width: 'min(560px, 92vw)', maxHeight: '80vh',
+              background: 'var(--surface, #1a1a1a)', color: 'var(--text)',
+              border: '1px solid var(--border, #333)', borderRadius: 8,
+              boxShadow: '0 16px 48px rgba(0,0,0,.5)',
+              display: 'flex', flexDirection: 'column', overflow: 'hidden',
+            }}
+            onClick={e => e.stopPropagation()}
+            role="dialog"
+            aria-label={`Apps for ${appsModalUser.name}`}
+          >
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 10,
+              padding: '12px 16px',
+              borderBottom: '1px solid var(--border, #333)',
+              background: 'var(--surface2, #232323)',
+            }}>
+              <span style={{ fontWeight: 600, fontSize: '.95rem' }}>
+                Apps · {appsModalUser.name}
+              </span>
+              {appsModalUser.role === 'platform_admin' && (
+                <span style={{
+                  fontSize: '.7rem', padding: '2px 8px', borderRadius: 3,
+                  background: 'rgba(245, 158, 11, .2)', color: '#fbbf24',
+                  border: '1px solid rgba(245, 158, 11, .4)',
+                }}>
+                  platform_admin — implicit owner everywhere
+                </span>
+              )}
+              <button
+                style={{
+                  marginLeft: 'auto', background: 'none', border: 'none',
+                  color: 'var(--dim)', fontSize: '1.4rem', lineHeight: 1, cursor: 'pointer',
+                }}
+                onClick={() => setAppsModalUser(null)}
+                aria-label="Close"
+              >×</button>
+            </div>
+
+            <div style={{ overflowY: 'auto', padding: '8px 16px', flex: 1 }}>
+              {apps.length === 0 ? (
+                <div style={{ color: 'var(--dim)', padding: 16 }}>No apps registered.</div>
+              ) : (
+                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                  <thead>
+                    <tr style={{ borderBottom: '1px solid var(--border, #333)' }}>
+                      <th style={{ textAlign: 'left', padding: '8px 4px', fontSize: '.78rem', color: 'var(--dim)', fontWeight: 500 }}>App</th>
+                      <th style={{ textAlign: 'right', padding: '8px 4px', fontSize: '.78rem', color: 'var(--dim)', fontWeight: 500 }}>Role</th>
+                      <th style={{ width: 28 }}></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {apps.map(a => {
+                      const cellKey = `${a.slug}:${appsModalUser.id}`
+                      const status = roleSaveStatus[cellKey]
+                      const isPlatformAdmin = appsModalUser.role === 'platform_admin'
+                      const value = isPlatformAdmin ? 'owner' : (roles[a.slug]?.[appsModalUser.id] ?? 'none')
+                      return (
+                        <tr key={a.slug} style={{ borderBottom: '1px solid var(--border-faint, #2a2a2a)' }}>
+                          <td style={{ padding: '8px 4px', fontSize: '.88rem' }}>
+                            <div style={{ fontWeight: 500 }}>{a.name}</div>
+                            <div style={{ fontSize: '.74rem', color: 'var(--dim)', fontFamily: 'monospace' }}>{a.slug}</div>
+                          </td>
+                          <td style={{ padding: '8px 4px', textAlign: 'right' }}>
+                            <select
+                              value={value}
+                              disabled={isPlatformAdmin || status === 'saving'}
+                              onChange={e => changeRole(a.slug, appsModalUser.id, e.target.value as AppRole)}
+                              style={{ minWidth: 110 }}
+                            >
+                              <option value="none">none</option>
+                              <option value="user">user</option>
+                              <option value="admin">admin</option>
+                              <option value="owner">owner</option>
+                            </select>
+                          </td>
+                          <td style={{ padding: '8px 0', textAlign: 'center', width: 28 }}>
+                            {!isPlatformAdmin && status === 'saving' && <span style={{ color: 'var(--dim)' }}>…</span>}
+                            {!isPlatformAdmin && status === 'saved'  && <span style={{ color: 'var(--green)' }}>✓</span>}
+                            {!isPlatformAdmin && status === 'error'  && <span style={{ color: 'var(--red)' }}>✗</span>}
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              )}
+            </div>
+
+            <div style={{
+              padding: '10px 16px',
+              borderTop: '1px solid var(--border, #333)',
+              background: 'var(--surface2, #232323)',
+              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+            }}>
+              <span style={{ fontSize: '.74rem', color: 'var(--dim)' }}>
+                Changes save automatically.
+              </span>
+              <button className="btn btn-accent" onClick={() => setAppsModalUser(null)}>Done</button>
             </div>
           </div>
         </div>
