@@ -321,6 +321,48 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       );
     }
 
+    // v2.5.22: auto-pickup app icon from the release dir.
+    //
+    // Convention: an app can ship a tile icon by committing
+    // `public/icon.png` (or .svg / .webp / .jpg) at the repo root. On
+    // each deploy we copy it to <DATA_DIR>/apps/<slug>/icon.<ext> — the
+    // same path the dashboard upload endpoint (POST /api/apps/:slug/icon)
+    // writes to. So all five surfaces light up at once: Dashboard tile,
+    // Manage table row, Launcher cards, frame topbar, legacy /portal.
+    //
+    // Preference order is PNG → SVG → WEBP → JPG → JPEG → GIF. We
+    // copy at most one file, wiping any stale-extension siblings so the
+    // GET handler doesn't keep serving an old icon under a different
+    // extension. Idempotent on each deploy; the manual dashboard upload
+    // still works — whichever one ran most recently wins, since both
+    // write to the same path.
+    try {
+      const ICON_PREFERENCE = ['png', 'svg', 'webp', 'jpg', 'jpeg', 'gif'];
+      const found = ICON_PREFERENCE
+        .map(ext => ({ ext, path: join(releaseDir, 'public', `icon.${ext}`) }))
+        .find(({ path }) => existsSync(path));
+      if (found) {
+        const appIconDir = join(dataDir, 'apps', app.slug);
+        mkdirSync(appIconDir, { recursive: true });
+        // Wipe stale icons under a different extension before copying.
+        for (const oldExt of ICON_PREFERENCE) {
+          if (oldExt === found.ext) continue;
+          const oldPath = join(appIconDir, `icon.${oldExt}`);
+          if (existsSync(oldPath)) {
+            try { unlinkSync(oldPath); } catch (_) {}
+          }
+        }
+        const destPath = join(appIconDir, `icon.${found.ext}`);
+        // copyFileSync rather than rename — the source lives inside the
+        // release dir and we don't want to corrupt that dir's contents.
+        const { copyFileSync } = await import('fs');
+        copyFileSync(found.path, destPath);
+        appendLog(`Picked up app icon from public/icon.${found.ext}`);
+      }
+    } catch (e) {
+      appendLog(`WARNING: icon pickup failed: ${e.message}`);
+    }
+
     // Read deployhub.json manifest (everything except `version`)
     let manifest = {};
     const manifestPath = join(releaseDir, 'deployhub.json');
