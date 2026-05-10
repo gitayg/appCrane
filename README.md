@@ -2,7 +2,7 @@
 
 Self-hosted deployment platform for AI applications. Run on your own server — Docker isolation, enterprise SSO, an AI code pipeline, and real-time team presence. A production-ready alternative to Railway and Coolify with enterprise features neither offers.
 
-**CLI + REST API + Dashboard.** AI agents can use the curl API via `/agent-guide`.
+**MCP-first.** AI agents connect once via `claude mcp add ... /api/mcp` and operate the platform through `appcrane_*` tools. No curl, no separate scripts — `appcrane_get_guide(topic="onboarding"|"operations")` returns the latest playbook on demand.
 
 ## Why AppCrane
 
@@ -33,7 +33,7 @@ Self-hosted deployment platform for AI applications. Run on your own server — 
 - **Encrypted env vars** (AES-256-GCM) — admin cannot read them by design
 - **Health checks** with auto-restart and email notifications
 - **Audit log** for every action
-- **AI-agent friendly** API at `/agent-guide` (plain markdown, all curl commands)
+- **MCP server** at `/api/mcp` exposing 25+ `appcrane_*` tools — agents operate the platform without ever touching curl, gh, or shell
 
 ## Quick Start
 
@@ -128,22 +128,26 @@ crane logs myapp --env production
 crane audit --app myapp
 ```
 
-## curl API (for AI agents)
+## MCP (for AI agents)
+
+AppCrane is MCP-first. One `claude mcp add` and the agent gets 25+
+`appcrane_*` tools — list apps, deploy, set env, read logs, manage
+access, rotate icons, the lot.
 
 ```bash
-curl https://crane.example.com/agent-guide
+claude mcp add --transport http appcrane https://crane.example.com/api/mcp \
+  --header "X-API-Key: dhk_admin_or_user_xxxxxxxxxxxxx" \
+  --header "X-Github-Token: ghp_your_github_pat"
 ```
 
-Returns a markdown document with every operation as a copy-paste curl command.
+Then in any Claude Code session:
 
-```bash
-export CC="https://crane.example.com"
-export KEY="dhk_admin_your_key"
+> Onboard a new app. Start by calling `appcrane_get_guide` with `topic="onboarding"` for the playbook.
 
-curl -s -H "X-API-Key: $KEY" $CC/api/apps
-curl -s -X POST $CC/api/apps/myapp/deploy/sandbox -H "X-API-Key: $KEY"
-curl -s -H "X-API-Key: $KEY" $CC/api/server/health
-```
+The agent pulls the current guide from the server, so edits propagate
+without a redeploy of your tooling. `topic="operations"` returns the
+post-onboarding reference (deploy lifecycle, troubleshooting fast
+failures, access management, etc.).
 
 ## Architecture
 
