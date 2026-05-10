@@ -26,6 +26,13 @@ interface AppRow {
 
 interface Props {
   onOpen: (slug: string, name: string, hasIcon: boolean) => void
+  /**
+   * Optional slot for a header-right control — used by Applications.tsx
+   * (admin-only) to render the Launcher/Manage view toggle inline with
+   * the page header. Without this slot the launcher renders no toggle;
+   * end users have no Manage view to switch to anyway.
+   */
+  headerRight?: React.ReactNode
 }
 
 function initials(name: string): string {
@@ -44,7 +51,7 @@ function dotClass(prodHealth?: string, sandHealth?: string): { cls: string; titl
   return                 { cls: 'launcher-dot launcher-dot-gray',   title: 'Not deployed' }
 }
 
-export function LauncherView({ onOpen }: Props) {
+export function LauncherView({ onOpen, headerRight }: Props) {
   const [apps, setApps] = useState<AppRow[]>([])
   const [search, setSearch] = useState('')
 
@@ -67,6 +74,7 @@ export function LauncherView({ onOpen }: Props) {
     <div className="container launcher-container">
       <div className="launcher-header">
         <h2 style={{ margin: 0 }}>My Apps</h2>
+        {headerRight}
         <input
           type="text"
           placeholder="Search…"
