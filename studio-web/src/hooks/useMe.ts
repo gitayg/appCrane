@@ -42,6 +42,14 @@ export function useMe(): Me | null {
   return me
 }
 
+/**
+ * Recurring bug: `role === 'admin'` checks across the codebase forgot
+ * about platform_admin (added v2.1.5+). Server-side has a centralized
+ * helper at server/utils/roles.js; this is the SPA mirror. ANY caller
+ * asking "is this user an admin" should go through here so a future
+ * admin tier doesn't require touching every call site.
+ */
 export function isAdmin(me: Me | null): boolean {
-  return me?.user?.role === 'admin'
+  const r = me?.user?.role
+  return r === 'admin' || r === 'platform_admin'
 }
