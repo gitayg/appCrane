@@ -55,7 +55,7 @@ export function Docs() {
 
         <h1>App<span>Crane</span> API Reference</h1>
         <p className="sub">
-          AI-powered app builder — ship and manage apps without DevOps.<br />
+          Self-service app hosting and deployment — ship and manage apps without DevOps.<br />
           All operations available via curl. No client installation required.<br />
           Base URL: <code>https://crane.example.com</code> (or <code>http://localhost:5001</code> for local)
         </p>
