@@ -279,7 +279,7 @@ app.get('/api/info', (req, res) => {
     name: 'AppCrane',
     version: VERSION,
     status: adminExists ? 'ready' : 'needs_init',
-    description: 'AI-powered app builder',
+    description: 'Self-service app hosting and deployment',
     docs: '/docs',
     dashboard: '/dashboard',
     agent_guide: '/agent-guide',
@@ -725,7 +725,7 @@ app.use(errorHandler);
 // Start server
 app.listen(PORT, HOST, async () => {
   log.info('');
-  log.info(`  AppCrane v${VERSION} - Self-hosted deploy manager`);
+  log.info(`  AppCrane v${VERSION} - Self-service app hosting and deployment`);
   log.info(`  API:       http://${HOST}:${PORT}`);
   log.info(`  Dashboard: http://${HOST}:${PORT}/dashboard`);
   log.info(`  Docs:      http://${HOST}:${PORT}/docs`);

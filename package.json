@@ -1,7 +1,7 @@
 {
   "name": "appcrane",
-  "version": "2.5.17",
-  "description": "AppCrane - AI-powered app builder.",
+  "version": "2.5.18",
+  "description": "AppCrane - Self-service app hosting and deployment.",
   "license": "PolyForm-Noncommercial-1.0.0",
   "type": "module",
   "bin": {
