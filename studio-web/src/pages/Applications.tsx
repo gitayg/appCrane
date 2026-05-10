@@ -640,15 +640,17 @@ ${brief}
               hasGithub: !!a?.github_url,
             })
           }}
-        />
-        {adminLike && (
-          <div style={{ position: 'fixed', bottom: 16, right: 16, zIndex: 50 }}>
-            <div className="applications-mode-toggle">
+          headerRight={adminLike && (
+            // v2.5.20: moved from a floating bottom-right pill into the
+            // Launcher header. The bottom-right placement was easy to
+            // miss — multiple platform_admins ended up "stuck" on
+            // Launcher with no obvious way back to the manage table.
+            <div className="applications-mode-toggle" style={{ marginLeft: 8 }}>
               <button className="active">Launcher</button>
               <button onClick={() => setViewMode('manage')}>Manage</button>
             </div>
-          </div>
-        )}
+          )}
+        />
         {frame.open && (
           <FrameOverlay frame={frame} framePanel={framePanel} setFrame={setFrame} setFramePanel={setFramePanel} />
         )}
