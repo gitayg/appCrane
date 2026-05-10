@@ -34,6 +34,8 @@ function setAuthCookie(token: string) {
  *   - ?sso_error=… / ?saml_error=… → render inline
  *   - ?redirect=… → preserved and used after successful password login
  */
+interface SsoCfg { enabled?: boolean; provider_name?: string }
+
 export function Login() {
   const { setKey } = useAuth()
   const [showKey, setShowKey] = useState(false)
@@ -41,6 +43,30 @@ export function Login() {
   const [password, setPassword] = useState('')
   const [keyVal, setKeyVal] = useState('')
   const [error, setError] = useState('')
+  // v2.5.15: SSO entry-point buttons. Fetched from the public
+  // /api/auth/oidc/config and /api/auth/saml/config, shown only when the
+  // provider is enabled. Clicking goes through /api/auth/{oidc,saml}/start
+  // which redirects to the IdP; the IdP comes back to /login (now
+  // forwarded to /applications) with ?oidc_token=… that the useEffect
+  // above absorbs.
+  const [oidc, setOidc] = useState<SsoCfg>({})
+  const [saml, setSaml] = useState<SsoCfg>({})
+
+  useEffect(() => {
+    fetch('/api/auth/oidc/config').then(r => r.json()).then(setOidc).catch(() => {})
+    fetch('/api/auth/saml/config').then(r => r.json()).then(setSaml).catch(() => {})
+  }, [])
+
+  function startOidc() {
+    const redirect = new URLSearchParams(window.location.search).get('redirect')
+      || window.location.origin + '/applications'
+    window.location.href = '/api/auth/oidc/start?redirect=' + encodeURIComponent(redirect)
+  }
+  function startSaml() {
+    const redirect = new URLSearchParams(window.location.search).get('redirect')
+      || window.location.origin + '/applications'
+    window.location.href = '/api/auth/saml/start?redirect=' + encodeURIComponent(redirect)
+  }
 
   // Read SSO callback / redirect query params on mount. Both providers
   // hand the bearer back via ?oidc_token=…; we store it as cc_identity_token
@@ -134,6 +160,32 @@ export function Login() {
           style={{ width: '100%', marginBottom: 12 }}
         />
         <button className="btn btn-accent" onClick={doPassLogin} style={{ width: '100%', padding: 10 }}>Sign In</button>
+
+        {(oidc.enabled || saml.enabled) && (
+          <div style={{ marginTop: 14, display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--dim)', fontSize: '.74rem' }}>
+              <span style={{ flex: 1, height: 1, background: 'var(--border, #333)' }} />
+              <span>or</span>
+              <span style={{ flex: 1, height: 1, background: 'var(--border, #333)' }} />
+            </div>
+            {oidc.enabled && (
+              <button
+                type="button"
+                className="btn"
+                onClick={startOidc}
+                style={{ width: '100%', padding: 10 }}
+              >Sign in with {oidc.provider_name || 'SSO'}</button>
+            )}
+            {saml.enabled && (
+              <button
+                type="button"
+                className="btn"
+                onClick={startSaml}
+                style={{ width: '100%', padding: 10 }}
+              >Sign in with {saml.provider_name || 'Okta'}</button>
+            )}
+          </div>
+        )}
 
         {!showKey ? (
           <p style={{ marginTop: 18, marginBottom: 0, fontSize: '.78rem', color: 'var(--dim)', textAlign: 'center' }}>
