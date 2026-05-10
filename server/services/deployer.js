@@ -228,6 +228,12 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     // 1. Clone or locate release
     const timestamp = Date.now();
     let commitHash = 'unknown';
+    // v2.5.16: capture the commit message too so the What's New dialog
+    // has actual content to show end users on a version bump. Previously
+    // only the webhook + manual-upload paths populated this column; the
+    // dashboard / MCP deploy path left it NULL, so the dialog rendered a
+    // version pill with no body.
+    let commitMessage = null;
     let releaseDir;
 
     if (opts.preExtractedDir) {
@@ -265,7 +271,16 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
           .toString().trim();
       } catch (e) {}
 
-      appendLog(`Cloned successfully. Commit: ${commitHash}`);
+      // Get commit message (subject + body). %s is the subject line,
+      // %B includes body — we use %B and trim, capping at 2000 chars
+      // so a verbose merge-commit body doesn't blow up the row.
+      try {
+        const raw = execFileSync('git', ['-C', releaseDir, 'log', '-1', '--format=%B'], { timeout: 5000 })
+          .toString().trim();
+        if (raw) commitMessage = raw.slice(0, 2000);
+      } catch (e) { /* commitMessage stays null */ }
+
+      appendLog(`Cloned successfully. Commit: ${commitHash}${commitMessage ? ` — ${commitMessage.split('\n')[0].slice(0, 80)}` : ''}`);
 
       // v2.3.6: cross-check local HEAD against GitHub's claim for this
       // branch. Mismatch = refuse deploy. Skips quietly when disabled,
@@ -482,9 +497,9 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     deployFinished = true;
     appendLog(`Deploy complete! Version: ${manifest.version || 'unknown'}`);
     db.prepare(`
-      UPDATE deployments SET status = 'live', version = ?, commit_hash = ?, release_path = ?, finished_at = datetime('now'), log = ?
+      UPDATE deployments SET status = 'live', version = ?, commit_hash = ?, commit_message = ?, release_path = ?, finished_at = datetime('now'), log = ?
       WHERE id = ?
-    `).run(manifest.version || 'unknown', commitHash, releaseDir, deployLog.join('\n'), deployId);
+    `).run(manifest.version || 'unknown', commitHash, commitMessage, releaseDir, deployLog.join('\n'), deployId);
     // Refresh AI codebase context in background after production deploy
     if (env === 'production') {
       ensureCodebaseContext(app.slug, releaseDir).catch(err => log.warn(`Context refresh failed for ${app.slug}: ${err.message}`));

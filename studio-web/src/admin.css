@@ -805,6 +805,7 @@ textarea:focus { border-color: var(--accent); }
 .whatsnew-item-date { color: var(--dim); }
 .whatsnew-item-sha { color: var(--dim); font-family: monospace; }
 .whatsnew-item-msg { font-size: .88rem; line-height: 1.5; white-space: pre-wrap; }
+.whatsnew-item-msg-empty { color: var(--dim); font-size: .82rem; }
 
 .whatsnew-footer {
   padding: 10px 16px;
