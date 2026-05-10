@@ -1509,13 +1509,10 @@ const TOOLS = [
       const { fileURLToPath } = await import('url');
       const __dirname = dirname(fileURLToPath(import.meta.url));
 
-      let path;
-      if (topic === 'onboarding') {
-        path = join(__dirname, 'guides', 'onboarding.md');
-      } else {
-        // Operations guide = the long-form AGENT_GUIDE.md at the repo root.
-        path = join(__dirname, '..', '..', 'AGENT_GUIDE.md');
-      }
+      // v2.5.24: both guides now live in server/services/guides/. The
+      // legacy AGENT_GUIDE.md at the repo root was retired along with
+      // its REST/curl examples — AppCrane is MCP-only for agents now.
+      const path = join(__dirname, 'guides', `${topic}.md`);
       if (!existsSync(path)) throw new Error(`Guide '${topic}' not found on this AppCrane install`);
 
       let content = readFileSync(path, 'utf8');

@@ -243,7 +243,7 @@ crane init --name admin --email you@example.com</pre>
 // Excludes /api/identity/* and /api/apps/* so apps can still call AppCrane's
 // own identity / icon endpoints from inside their iframe.
 const APPCRANE_PASSTHROUGH = ['/api/identity', '/api/apps', '/api/info', '/api/_crashed', '/favicon.svg', '/docs'];
-const APPCRANE_PAGE_SLUGS = new Set(['login', 'portal', 'dashboard', 'applications', 'users-page', 'audit-page', 'settings', 'docs', 'agent-guide', 'app', 'studio', 'appstudio']);
+const APPCRANE_PAGE_SLUGS = new Set(['login', 'portal', 'dashboard', 'applications', 'users-page', 'audit-page', 'settings', 'docs', 'app', 'studio', 'appstudio']);
 app.use((req, res, next) => {
   if (req.method === 'OPTIONS') return next();
   for (const prefix of APPCRANE_PASSTHROUGH) {
@@ -282,7 +282,7 @@ app.get('/api/info', (req, res) => {
     description: 'Self-service app hosting and deployment',
     docs: '/docs',
     dashboard: '/dashboard',
-    agent_guide: '/agent-guide',
+    mcp: '/api/mcp',
     ...(!adminExists && { init: 'POST /api/auth/init -d \'{"name":"admin","email":"you@example.com"}\'' }),
   });
 });
@@ -655,8 +655,11 @@ app.get('/', (req, res) => res.redirect('/login'));
 // Docs page (now part of admin SPA)
 app.get('/docs', (req, res) => sendHtml(res, adminSpa));
 
-// Agent guide
-app.get('/agent-guide', (req, res) => { res.type('text/markdown'); res.sendFile(join(__dirname, '..', 'AGENT_GUIDE.md')); });
+// v2.5.24: agent guides are MCP-only. Both /agent-guide (legacy) and an
+// /api/guides/:topic HTTP endpoint were considered and rejected — the
+// content is for agents operating through MCP, not for humans reading
+// docs. Agents call appcrane_get_guide(topic="onboarding"|"operations")
+// to fetch from server/services/guides/. No HTTP surface, no curl path.
 
 // Friendly crash page. Caddy's handle_errors rewrites failed app proxy requests
 // to /api/_crashed<original-uri> so we can identify the app from the URL and
