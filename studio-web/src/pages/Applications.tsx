@@ -94,6 +94,53 @@ export function Applications() {
   const [checkUpdateText, setCheckUpdateText] = useState<Record<string, string>>({})
   const [iconUrls, setIconUrls] = useState<Record<string, string>>({})
 
+  // v2.5.21: per-app Users modal — replaces the old wide N×M App Roles
+  // matrix that lived under /settings#users. Click "Users" on an app row
+  // to open a focused modal that lists every user with a role select for
+  // this specific app.
+  const [usersModalApp, setUsersModalApp] = useState<App | null>(null)
+  type ModalUser = { id: number; name: string; email: string | null; role: string; app_role: 'none' | 'user' | 'admin' | 'owner' }
+  const [usersModalData, setUsersModalData] = useState<ModalUser[] | null>(null)
+  const [usersModalSaving, setUsersModalSaving] = useState<Record<number, 'saving' | 'saved' | 'error'>>({})
+  useEffect(() => {
+    if (!usersModalApp) { setUsersModalData(null); return }
+    let cancelled = false
+    Promise.all([
+      adminApi.get<{ users: { id: number; name: string; email: string | null; role: string }[] }>('/api/users'),
+      adminApi.get<{ users: { id: number; app_role: ModalUser['app_role'] }[] }>(`/api/apps/${usersModalApp.slug}/identity/users`),
+    ])
+      .then(([allUsers, appUsers]) => {
+        if (cancelled) return
+        const roleByUserId = new Map(appUsers.users.map(u => [u.id, u.app_role]))
+        const merged: ModalUser[] = (allUsers.users || []).map(u => ({
+          id: u.id, name: u.name, email: u.email, role: u.role,
+          app_role: roleByUserId.get(u.id) ?? 'none',
+        }))
+        setUsersModalData(merged)
+      })
+      .catch(() => { if (!cancelled) setUsersModalData([]) })
+    return () => { cancelled = true }
+  }, [usersModalApp])
+
+  async function changeUserAppRole(userId: number, newRole: ModalUser['app_role']) {
+    if (!usersModalApp) return
+    const prev = usersModalData?.find(u => u.id === userId)?.app_role ?? 'none'
+    setUsersModalData(d => d ? d.map(u => u.id === userId ? { ...u, app_role: newRole } : u) : d)
+    setUsersModalSaving(s => ({ ...s, [userId]: 'saving' }))
+    try {
+      await adminApi.put(`/api/apps/${usersModalApp.slug}/roles`, { user_id: userId, app_role: newRole })
+      setUsersModalSaving(s => ({ ...s, [userId]: 'saved' }))
+      setTimeout(() => setUsersModalSaving(s => {
+        if (s[userId] !== 'saved') return s
+        const c = { ...s }; delete c[userId]; return c
+      }), 1800)
+    } catch (e) {
+      setUsersModalData(d => d ? d.map(u => u.id === userId ? { ...u, app_role: prev } : u) : d)
+      setUsersModalSaving(s => ({ ...s, [userId]: 'error' }))
+      alert('Save failed: ' + (e instanceof Error ? e.message : String(e)))
+    }
+  }
+
   // Filter / sort state for the table view (v1.27.41).
   const [filter, setFilter] = useState({ vis: '', name: '', tag: '', ramMin: '', cpuMin: '' })
   const [sort, setSort] = useState<{ key: SortKey; dir: 'asc' | 'desc' }>({ key: 'name', dir: 'asc' })
@@ -938,6 +985,11 @@ ${brief}
                           </span>
                         )}
                         <a className="btn btn-xs" href={`/app?slug=${app.slug}`}>manage</a>
+                        <button
+                          className="btn btn-xs"
+                          onClick={() => setUsersModalApp(app)}
+                          title="Manage which users have access to this app and at what role"
+                        >Users</button>
                         <button className="btn btn-xs" onClick={() => showAppToken(app.slug)}>onboard</button>
                         <button
                           className="btn btn-xs"
@@ -1079,6 +1131,132 @@ ${brief}
             </div>
             <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
               <button className="btn" onClick={() => setPromptModal({ open: false })}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* v2.5.21: per-app Users modal — opened from "Users" button on
+          each Manage row. Lists every user with a role select for THIS
+          app. Replaces the wide N×M App Roles matrix that used to live
+          on /settings#users. */}
+      {usersModalApp && (
+        <div
+          style={{
+            position: 'fixed', inset: 0, background: 'rgba(0,0,0,.55)', zIndex: 10500,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}
+          onClick={() => setUsersModalApp(null)}
+        >
+          <div
+            style={{
+              width: 'min(640px, 92vw)', maxHeight: '80vh',
+              background: 'var(--surface, #1a1a1a)', color: 'var(--text)',
+              border: '1px solid var(--border, #333)', borderRadius: 8,
+              boxShadow: '0 16px 48px rgba(0,0,0,.5)',
+              display: 'flex', flexDirection: 'column', overflow: 'hidden',
+            }}
+            onClick={e => e.stopPropagation()}
+            role="dialog"
+            aria-label={`Users for ${usersModalApp.name}`}
+          >
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 10,
+              padding: '12px 16px',
+              borderBottom: '1px solid var(--border, #333)',
+              background: 'var(--surface2, #232323)',
+            }}>
+              <span style={{ fontWeight: 600, fontSize: '.95rem' }}>
+                Users · {usersModalApp.name}
+              </span>
+              <span style={{ fontSize: '.74rem', color: 'var(--dim)', fontFamily: 'monospace' }}>
+                {usersModalApp.slug}
+              </span>
+              <button
+                style={{
+                  marginLeft: 'auto', background: 'none', border: 'none',
+                  color: 'var(--dim)', fontSize: '1.4rem', lineHeight: 1, cursor: 'pointer',
+                }}
+                onClick={() => setUsersModalApp(null)}
+                aria-label="Close"
+              >×</button>
+            </div>
+
+            <div style={{ overflowY: 'auto', padding: '8px 16px', flex: 1 }}>
+              {usersModalData === null ? (
+                <div style={{ color: 'var(--dim)', padding: 16 }}>Loading…</div>
+              ) : usersModalData.length === 0 ? (
+                <div style={{ color: 'var(--dim)', padding: 16 }}>No users registered.</div>
+              ) : (
+                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                  <thead>
+                    <tr style={{ borderBottom: '1px solid var(--border, #333)' }}>
+                      <th style={{ textAlign: 'left',  padding: '8px 4px', fontSize: '.78rem', color: 'var(--dim)', fontWeight: 500 }}>User</th>
+                      <th style={{ textAlign: 'right', padding: '8px 4px', fontSize: '.78rem', color: 'var(--dim)', fontWeight: 500 }}>Role on this app</th>
+                      <th style={{ width: 28 }}></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {usersModalData.map(u => {
+                      const status = usersModalSaving[u.id]
+                      const isPlatformAdmin = u.role === 'platform_admin'
+                      const value = isPlatformAdmin ? 'owner' : u.app_role
+                      return (
+                        <tr key={u.id} style={{ borderBottom: '1px solid var(--border-faint, #2a2a2a)' }}>
+                          <td style={{ padding: '8px 4px', fontSize: '.88rem' }}>
+                            <div style={{ fontWeight: 500, display: 'flex', alignItems: 'center', gap: 8 }}>
+                              {u.name}
+                              {isPlatformAdmin && (
+                                <span style={{
+                                  fontSize: '.66rem', padding: '1px 6px', borderRadius: 3,
+                                  background: 'rgba(245, 158, 11, .2)', color: '#fbbf24',
+                                  border: '1px solid rgba(245, 158, 11, .4)',
+                                }}>platform_admin</span>
+                              )}
+                            </div>
+                            {u.email && (
+                              <div style={{ fontSize: '.74rem', color: 'var(--dim)' }}>{u.email}</div>
+                            )}
+                          </td>
+                          <td style={{ padding: '8px 4px', textAlign: 'right' }}>
+                            <select
+                              value={value}
+                              disabled={isPlatformAdmin || status === 'saving'}
+                              title={isPlatformAdmin
+                                ? 'Platform admin has owner-equivalent access to every app. Demote their global role first.'
+                                : undefined}
+                              onChange={e => changeUserAppRole(u.id, e.target.value as ModalUser['app_role'])}
+                              style={{ minWidth: 110 }}
+                            >
+                              <option value="none">none</option>
+                              <option value="user">user</option>
+                              <option value="admin">admin</option>
+                              <option value="owner">owner</option>
+                            </select>
+                          </td>
+                          <td style={{ padding: '8px 0', textAlign: 'center', width: 28 }}>
+                            {!isPlatformAdmin && status === 'saving' && <span style={{ color: 'var(--dim)' }}>…</span>}
+                            {!isPlatformAdmin && status === 'saved'  && <span style={{ color: 'var(--green)' }}>✓</span>}
+                            {!isPlatformAdmin && status === 'error'  && <span style={{ color: 'var(--red)' }}>✗</span>}
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              )}
+            </div>
+
+            <div style={{
+              padding: '10px 16px',
+              borderTop: '1px solid var(--border, #333)',
+              background: 'var(--surface2, #232323)',
+              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+            }}>
+              <span style={{ fontSize: '.74rem', color: 'var(--dim)' }}>
+                Changes save automatically.
+              </span>
+              <button className="btn btn-accent" onClick={() => setUsersModalApp(null)}>Done</button>
             </div>
           </div>
         </div>
