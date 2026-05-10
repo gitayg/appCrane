@@ -52,6 +52,21 @@ function SettingsRoute() {
 export function AdminApp() {
   const auth = useAuthState()
 
+  // v2.5.14: when an already-authed user lands at /applications?redirect=/foo
+  // (the case where /login was redirected here from forward_auth + the user
+  // already had a valid token), forward them to the original target instead
+  // of leaving them stranded on /applications. Skip if the redirect points
+  // back at /login or /applications to avoid a fresh loop.
+  if (auth.isAuthed && typeof window !== 'undefined') {
+    const params = new URLSearchParams(window.location.search)
+    const redirect = params.get('redirect')
+    if (redirect && redirect.startsWith('/') &&
+        !/^\/(login|applications)(\/|\?|$)/.test(redirect)) {
+      window.location.replace(redirect)
+      return null
+    }
+  }
+
   if (!auth.isAuthed) {
     return (
       <AuthContext.Provider value={auth}>
