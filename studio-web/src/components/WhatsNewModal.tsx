@@ -56,12 +56,21 @@ export function WhatsNewModal({ slug, appName, currentVersion, changes, onClose 
                     {c.finished_at && (
                       <span className="whatsnew-item-date">{c.finished_at.replace('T', ' ').slice(0, 16)}</span>
                     )}
-                    {c.commit_hash && (
+                    {c.commit_hash && c.commit_hash !== 'unknown' && (
                       <span className="whatsnew-item-sha">{c.commit_hash.slice(0, 7)}</span>
                     )}
                   </div>
-                  {c.commit_message && (
+                  {c.commit_message ? (
                     <div className="whatsnew-item-msg">{c.commit_message}</div>
+                  ) : (
+                    // v2.5.16: legacy deployments (pre-v2.5.16 dashboard/MCP
+                    // path) didn't capture commit messages, so the body would
+                    // have been empty and the entry visually unhelpful.
+                    // Surface a placeholder so the user sees something
+                    // meaningful instead of just a version pill.
+                    <div className="whatsnew-item-msg whatsnew-item-msg-empty">
+                      <em>No release notes for this version{c.commit_hash && c.commit_hash !== 'unknown' ? ` (commit ${c.commit_hash.slice(0, 7)})` : ''}.</em>
+                    </div>
                   )}
                 </li>
               ))}
