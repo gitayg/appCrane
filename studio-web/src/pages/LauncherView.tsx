@@ -193,6 +193,14 @@ export function LauncherView({ onOpen, headerRight }: Props) {
                         <div className="launcher-tile-cta">
                           {busy ? 'Sending…' : alreadyRequested ? '✓ Access requested' : '🔒 Request access'}
                         </div>
+                        {/* v2.6.8 hover popover with the full description. CSS-only:
+                            hidden by default, shown on .launcher-tile:hover. The
+                            short version above stays line-clamped — this surfaces
+                            the rest on hover with no click required. Only renders
+                            when there's actually a description to show. */}
+                        {app.description && (
+                          <div className="launcher-tile-tip" role="tooltip">{app.description}</div>
+                        )}
                       </button>
                     )
                   }
@@ -217,6 +225,11 @@ export function LauncherView({ onOpen, headerRight }: Props) {
                       <div className="launcher-tile-name">{app.name}</div>
                       {app.description && (
                         <div className="launcher-tile-desc">{app.description}</div>
+                      )}
+                      {/* v2.6.8: full-description hover popover. See note in
+                          the request-access tile above. */}
+                      {app.description && (
+                        <div className="launcher-tile-tip" role="tooltip">{app.description}</div>
                       )}
                     </button>
                   )

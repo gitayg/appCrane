@@ -927,6 +927,40 @@ textarea:focus { border-color: var(--accent); }
 }
 .launcher-tile-requested .launcher-tile-cta { color: var(--green, #22c55e); }
 
+/* v2.6.8: full-description hover popover. Rendered as a child of the
+   tile button; hidden by default, fades in on tile hover. pointer-events:
+   none so it doesn't interfere with click. Positioned below the tile and
+   centered; the grid container doesn't clip overflow so this is safe. */
+.launcher-tile { position: relative; }
+.launcher-tile-tip {
+  position: absolute;
+  top: 100%; left: 50%;
+  transform: translateX(-50%) translateY(8px);
+  width: max-content;
+  max-width: 280px;
+  padding: 10px 14px;
+  background: var(--surface, #1a1a1a);
+  border: 1px solid var(--border, #333);
+  border-radius: 6px;
+  font-size: .82rem;
+  line-height: 1.45;
+  color: var(--text);
+  white-space: normal;
+  text-align: left;
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity .12s ease-out, visibility 0s linear .12s;
+  z-index: 100;
+  box-shadow: 0 6px 20px rgba(0,0,0,.45);
+}
+.launcher-tile:hover .launcher-tile-tip,
+.launcher-tile:focus-visible .launcher-tile-tip {
+  opacity: 1;
+  visibility: visible;
+  transition: opacity .12s ease-out, visibility 0s linear 0s;
+}
+
 /* Mode toggle in the Applications page header */
 .applications-mode-toggle {
   display: inline-flex; gap: 0;
