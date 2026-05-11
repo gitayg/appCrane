@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { Navigate } from 'react-router-dom'
 import { adminApi } from '../adminApi'
+import { useMe, isAdmin } from '../hooks/useMe'
 
 interface App {
   slug: string
@@ -644,6 +646,13 @@ To deploy changes, use the AppCrane deploy API. Submit enhancement requests thro
 const ONBOARD_KEY = 'cc_onboard_dismissed'
 
 export function Dashboard() {
+  // v2.6.6: Dashboard is admin-flavored — it fetches /api/users (admin
+  // only) inside the main Promise.all without a .catch, so a regular
+  // user landing here saw "Error: Admin access required" with no
+  // recovery path. Non-admins redirect to /applications (Launcher view)
+  // which is where they should be anyway. The role check happens after
+  // all hooks fire to stay within React's rules-of-hooks.
+  const me = useMe()
   const [health, setHealth] = useState<ServerHealth | null>(null)
   const [apps, setApps] = useState<App[]>([])
   const [users, setUsers] = useState<User[]>([])
@@ -663,14 +672,21 @@ export function Dashboard() {
 
   const fetchMain = useCallback(async () => {
     try {
+      // v2.6.6: every admin-only call gets a `.catch(() => safe-empty)`
+      // so a single 403 (e.g. /api/users for a non-admin who somehow
+      // got past the redirect) doesn't reject the whole Promise.all
+      // and render a bare "Admin access required" error page. /api/apps
+      // works for everyone (server filters by role); /api/server/health
+      // works for everyone (status only, no sensitive detail). The
+      // admin-only ones now degrade gracefully.
       const [h, appsRes, usersRes, enhRes, actRes] = await Promise.all([
-        adminApi.get<ServerHealth>('/api/server/health'),
+        adminApi.get<ServerHealth>('/api/server/health').catch(() => null),
         adminApi.get<{ apps: App[] }>('/api/apps'),
-        adminApi.get<{ users: User[] }>('/api/users'),
+        adminApi.get<{ users: User[] }>('/api/users').catch(() => ({ users: [] })),
         adminApi.get<{ requests: Enhancement[] }>('/api/enhancements').catch(() => ({ requests: [] })),
         adminApi.get<{ days: string[]; apps: ActivityApp[] }>('/api/dashboard/app-activity').catch(() => ({ days: [], apps: [] })),
       ])
-      setHealth(h)
+      if (h) setHealth(h)
       setApps(appsRes.apps ?? [])
       setUsers(usersRes.users ?? [])
       setEnhancements(enhRes.requests ?? [])
@@ -772,6 +788,14 @@ export function Dashboard() {
     const ss = a.sandbox?.deploy?.status?.toLowerCase()
     return ps === 'failed' || ps === 'error' || ss === 'failed' || ss === 'error'
   })
+
+  // v2.6.6: after all hooks have run, check the role. Non-admins go to
+  // /applications. Returning <Navigate> at this position is safe under
+  // React's rules-of-hooks because every hook above this point has
+  // already been called this render.
+  if (me && !isAdmin(me)) {
+    return <Navigate to="/applications" replace />
+  }
 
   return (
     <div className="container">

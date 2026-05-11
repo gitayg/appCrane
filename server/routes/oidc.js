@@ -2,7 +2,7 @@ import { Router } from 'express';
 import crypto from 'crypto';
 import { getDb } from '../db.js';
 import { encrypt, decrypt, generateSessionToken, hashApiKey, generateApiKey } from '../services/encryption.js';
-import { requireAuth, requireAdmin } from '../middleware/auth.js';
+import { requireAuth, requirePlatformAdmin } from '../middleware/auth.js';
 import log from '../utils/logger.js';
 
 const router = Router();
@@ -157,7 +157,7 @@ router.get('/config', (req, res) => {
 /**
  * GET /api/auth/oidc/admin-config — admin: full config for settings page
  */
-router.get('/admin-config', requireAuth, requireAdmin, (req, res) => {
+router.get('/admin-config', requireAuth, requirePlatformAdmin, (req, res) => {
   const cfg = getOidcConfig();
   res.json({
     enabled:           cfg.enabled,
@@ -172,7 +172,7 @@ router.get('/admin-config', requireAuth, requireAdmin, (req, res) => {
 /**
  * PUT /api/auth/oidc/config — admin: save OIDC settings
  */
-router.put('/config', requireAuth, requireAdmin, (req, res) => {
+router.put('/config', requireAuth, requirePlatformAdmin, (req, res) => {
   const { enabled, discovery_url, client_id, client_secret, provider_name, auto_provision } = req.body || {};
   const db = getDb();
   const save = (k, v) => upsertSetting(db, k, v, req.user.id);
@@ -193,7 +193,7 @@ router.put('/config', requireAuth, requireAdmin, (req, res) => {
 /**
  * POST /api/auth/oidc/test — admin: verify discovery URL is reachable
  */
-router.post('/test', requireAuth, requireAdmin, async (req, res) => {
+router.post('/test', requireAuth, requirePlatformAdmin, async (req, res) => {
   const { discovery_url } = req.body || {};
   if (!discovery_url) return res.status(400).json({ error: { code: 'VALIDATION', message: 'discovery_url required' } });
   try {
