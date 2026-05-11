@@ -692,11 +692,20 @@ Stays in sync as AppCrane evolves; no copy-paste required.`
             const a = apps.find(x => x.slug === slug)
             const prodUrl = `/${slug}`
             const sandUrl = `/${slug}-sandbox`
+            // v2.6.1: open production by default. If production isn't
+            // healthy (down / unknown / never deployed) but sandbox is,
+            // fall back to sandbox so end users still see something
+            // working. If both are problematic, still open production —
+            // the topbar lets them switch envs, and the tile click is
+            // already gated to disable when both are down.
+            const prodOk = a?.production?.health?.status === 'healthy'
+            const sandOk = a?.sandbox?.health?.status === 'healthy'
+            const useSand = !prodOk && sandOk
             setFrame({
               open: true,
-              url: prodUrl,
-              title: `${name} (prod)`,
-              slug, appName: name, env: 'production',
+              url: useSand ? sandUrl : prodUrl,
+              title: `${name} (${useSand ? 'sandbox' : 'prod'})`,
+              slug, appName: name, env: useSand ? 'sandbox' : 'production',
               prodUrl, sandUrl,
               prodVersion: a?.production?.deploy?.version || '',
               sandVersion: a?.sandbox?.deploy?.version || '',

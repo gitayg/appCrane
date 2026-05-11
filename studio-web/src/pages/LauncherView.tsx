@@ -42,13 +42,20 @@ function initials(name: string): string {
 }
 
 function dotClass(prodHealth?: string, sandHealth?: string): { cls: string; title: string } {
-  // Prefer production health; fall back to sandbox if prod missing.
-  const h = prodHealth || sandHealth
-  if (h === 'healthy')   return { cls: 'launcher-dot launcher-dot-green',  title: 'Healthy' }
-  if (h === 'down')      return { cls: 'launcher-dot launcher-dot-red',    title: 'Down' }
-  if (h === 'unhealthy') return { cls: 'launcher-dot launcher-dot-red',    title: 'Unhealthy' }
-  if (h)                 return { cls: 'launcher-dot launcher-dot-yellow', title: 'Health unknown' }
-  return                 { cls: 'launcher-dot launcher-dot-gray',   title: 'Not deployed' }
+  // v2.6.1: report the health of the env we'll actually open. Parent
+  // opens production by default and falls back to sandbox when prod
+  // isn't healthy — so the dot should be green whenever EITHER env is
+  // healthy (clicking will work), red only when both are unreachable,
+  // yellow/gray for in-between uncertainty.
+  const prodOk = prodHealth === 'healthy'
+  const sandOk = sandHealth === 'healthy'
+  if (prodOk) return { cls: 'launcher-dot launcher-dot-green', title: 'Production healthy' }
+  if (sandOk) return { cls: 'launcher-dot launcher-dot-green', title: 'Production unavailable — sandbox healthy (will open sandbox)' }
+  const prodBad = prodHealth === 'down' || prodHealth === 'unhealthy'
+  const sandBad = sandHealth === 'down' || sandHealth === 'unhealthy'
+  if (prodBad && sandBad) return { cls: 'launcher-dot launcher-dot-red',    title: 'Both environments down' }
+  if (prodHealth || sandHealth) return { cls: 'launcher-dot launcher-dot-yellow', title: 'Health unknown' }
+  return { cls: 'launcher-dot launcher-dot-gray', title: 'Not deployed' }
 }
 
 export function LauncherView({ onOpen, headerRight }: Props) {
@@ -92,36 +99,63 @@ export function LauncherView({ onOpen, headerRight }: Props) {
             : `No apps match "${search}".`}
         </div>
       ) : (
-        <div className="launcher-grid">
-          {filtered.map(app => {
-            const dot = dotClass(app.production?.health?.status, app.sandbox?.health?.status)
-            const isDown = (app.production?.health?.status === 'down' || app.production?.health?.status === 'unhealthy') &&
-                           (app.sandbox?.health?.status === 'down' || app.sandbox?.health?.status === 'unhealthy' || !app.sandbox?.health?.status)
-            return (
-              <button
-                key={app.slug}
-                type="button"
-                className={'launcher-tile' + (isDown ? ' launcher-tile-disabled' : '')}
-                onClick={() => { if (!isDown) onOpen(app.slug, app.name, !!app.has_icon) }}
-                disabled={isDown}
-                title={isDown ? 'App is down — open disabled' : `Open ${app.name}`}
-              >
-                <div className="launcher-tile-icon">
-                  {app.has_icon ? (
-                    <img src={`/api/apps/${app.slug}/icon`} alt="" />
-                  ) : (
-                    <span>{initials(app.name)}</span>
-                  )}
-                  <span className={dot.cls} title={dot.title} />
-                </div>
-                <div className="launcher-tile-name">{app.name}</div>
-                {app.category && (
-                  <div className="launcher-tile-cat">{app.category}</div>
-                )}
-              </button>
-            )
-          })}
-        </div>
+        // v2.6.1: group apps by category. Apps with no category fall into
+        // an "Uncategorized" bucket rendered last. Within a group the
+        // sort is whatever order the server returned; we don't re-sort
+        // alphabetically because the server already does.
+        (() => {
+          const groups = new Map<string, AppRow[]>()
+          for (const app of filtered) {
+            const cat = (app.category || '').trim() || 'Uncategorized'
+            if (!groups.has(cat)) groups.set(cat, [])
+            groups.get(cat)!.push(app)
+          }
+          // Stable category ordering: named groups alphabetical, Uncategorized last.
+          const orderedCats = [...groups.keys()]
+            .sort((a, b) => {
+              if (a === 'Uncategorized') return 1
+              if (b === 'Uncategorized') return -1
+              return a.localeCompare(b)
+            })
+          return orderedCats.map(cat => (
+            <section key={cat} className="launcher-category">
+              <h3 className="launcher-category-title">
+                {cat}
+                <span className="launcher-category-count">{groups.get(cat)!.length}</span>
+              </h3>
+              <div className="launcher-grid">
+                {groups.get(cat)!.map(app => {
+                  const dot = dotClass(app.production?.health?.status, app.sandbox?.health?.status)
+                  const isDown = (app.production?.health?.status === 'down' || app.production?.health?.status === 'unhealthy') &&
+                                 (app.sandbox?.health?.status === 'down' || app.sandbox?.health?.status === 'unhealthy' || !app.sandbox?.health?.status)
+                  return (
+                    <button
+                      key={app.slug}
+                      type="button"
+                      className={'launcher-tile' + (isDown ? ' launcher-tile-disabled' : '')}
+                      onClick={() => { if (!isDown) onOpen(app.slug, app.name, !!app.has_icon) }}
+                      disabled={isDown}
+                      title={isDown ? 'App is down — open disabled' : `Open ${app.name}`}
+                    >
+                      <div className="launcher-tile-icon">
+                        {app.has_icon ? (
+                          <img src={`/api/apps/${app.slug}/icon`} alt="" />
+                        ) : (
+                          <span>{initials(app.name)}</span>
+                        )}
+                        <span className={dot.cls} title={dot.title} />
+                      </div>
+                      <div className="launcher-tile-name">{app.name}</div>
+                      {app.description && (
+                        <div className="launcher-tile-desc">{app.description}</div>
+                      )}
+                    </button>
+                  )
+                })}
+              </div>
+            </section>
+          ))
+        })()
       )}
     </div>
   )
