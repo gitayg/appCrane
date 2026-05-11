@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { SAML } from '@node-saml/node-saml';
 import { getDb } from '../db.js';
 import { encrypt, decrypt, generateSessionToken, hashApiKey, generateApiKey } from '../services/encryption.js';
-import { requireAuth, requireAdmin } from '../middleware/auth.js';
+import { requireAuth, requirePlatformAdmin } from '../middleware/auth.js';
 import log from '../utils/logger.js';
 
 const router = Router();
@@ -79,7 +79,7 @@ router.get('/config', (req, res) => {
 /**
  * GET /api/auth/saml/admin-config — admin, for settings page
  */
-router.get('/admin-config', requireAuth, requireAdmin, (req, res) => {
+router.get('/admin-config', requireAuth, requirePlatformAdmin, (req, res) => {
   const cfg = getSamlConfig();
   res.json({
     enabled:        cfg.enabled,
@@ -93,7 +93,7 @@ router.get('/admin-config', requireAuth, requireAdmin, (req, res) => {
 /**
  * PUT /api/auth/saml/config — admin: save SAML settings
  */
-router.put('/config', requireAuth, requireAdmin, (req, res) => {
+router.put('/config', requireAuth, requirePlatformAdmin, (req, res) => {
   const { enabled, idp_sso_url, idp_cert, provider_name, auto_provision } = req.body || {};
   const db = getDb();
   const save = (k, v) => upsertSetting(db, k, v, req.user.id);

@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { getDb } from '../db.js';
-import { requireAuth, requireAdmin } from '../middleware/auth.js';
+import { requireAuth, requirePlatformAdmin } from '../middleware/auth.js';
 import { PERMISSIONS, getMatrix, setMatrix, resetToDefaults } from '../services/permissions.js';
 
 const router = Router();
@@ -50,7 +50,7 @@ router.get('/role-permissions/catalog', requireAuth, (req, res) => {
   });
 });
 
-router.put('/role-permissions', requireAuth, requireAdmin, (req, res) => {
+router.put('/role-permissions', requireAuth, requirePlatformAdmin, (req, res) => {
   const { matrix } = req.body || {};
   if (!matrix || typeof matrix !== 'object') {
     return res.status(400).json({ error: { code: 'VALIDATION', message: 'matrix required' } });
@@ -59,7 +59,7 @@ router.put('/role-permissions', requireAuth, requireAdmin, (req, res) => {
   res.json({ matrix: getMatrix() });
 });
 
-router.post('/role-permissions/reset', requireAuth, requireAdmin, (req, res) => {
+router.post('/role-permissions/reset', requireAuth, requirePlatformAdmin, (req, res) => {
   const { permissions } = req.body || {};
   resetToDefaults(Array.isArray(permissions) ? permissions : null);
   res.json({ matrix: getMatrix() });
@@ -80,7 +80,7 @@ router.get('/:key', (req, res) => {
 /**
  * PUT /api/settings/:key - Upsert a setting (admin only)
  */
-router.put('/:key', requireAuth, requireAdmin, (req, res) => {
+router.put('/:key', requireAuth, requirePlatformAdmin, (req, res) => {
   const { value } = req.body;
   if (value === undefined) return res.status(400).json({ error: { code: 'VALIDATION', message: 'value required' } });
   const db = getDb();

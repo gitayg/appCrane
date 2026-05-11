@@ -18,7 +18,7 @@ import { Router } from 'express';
 import { timingSafeEqual } from 'crypto';
 import { getDb } from '../db.js';
 import { hashApiKey, generateApiKey, hashPassword } from '../services/encryption.js';
-import { requireAuth, requireAdmin } from '../middleware/auth.js';
+import { requireAuth, requirePlatformAdmin } from '../middleware/auth.js';
 import log from '../utils/logger.js';
 
 const router = Router();
@@ -334,7 +334,7 @@ export const scimAdminRouter = Router();
  * POST /api/auth/scim/token — generate a new SCIM bearer token (admin only)
  * Returns the plaintext token ONCE — it is never stored.
  */
-scimAdminRouter.post('/token', requireAuth, requireAdmin, (req, res) => {
+scimAdminRouter.post('/token', requireAuth, requirePlatformAdmin, (req, res) => {
   const db    = getDb();
   const token = generateApiKey('scim');
   const hash  = hashApiKey(token);
@@ -352,7 +352,7 @@ scimAdminRouter.post('/token', requireAuth, requireAdmin, (req, res) => {
 /**
  * PUT /api/auth/scim/config — enable/disable SCIM (admin only)
  */
-scimAdminRouter.put('/config', requireAuth, requireAdmin, (req, res) => {
+scimAdminRouter.put('/config', requireAuth, requirePlatformAdmin, (req, res) => {
   const { enabled } = req.body || {};
   const db = getDb();
   db.prepare(`INSERT INTO settings (key, value, updated_by, updated_at) VALUES (?, ?, ?, datetime('now'))
@@ -364,7 +364,7 @@ scimAdminRouter.put('/config', requireAuth, requireAdmin, (req, res) => {
 /**
  * GET /api/auth/scim/config — admin: current SCIM state
  */
-scimAdminRouter.get('/config', requireAuth, requireAdmin, (req, res) => {
+scimAdminRouter.get('/config', requireAuth, requirePlatformAdmin, (req, res) => {
   const db = getDb();
   const rows = db.prepare("SELECT key, value FROM settings WHERE key LIKE 'scim_%' AND key != 'scim_token_hash'").all();
   const cfg  = Object.fromEntries(rows.map(r => [r.key, r.value]));

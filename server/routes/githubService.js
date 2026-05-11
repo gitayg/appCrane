@@ -9,7 +9,7 @@
  */
 
 import { Router } from 'express';
-import { requireAuth, requireAdmin } from '../middleware/auth.js';
+import { requireAuth, requirePlatformAdmin } from '../middleware/auth.js';
 import {
   getServiceConfig,
   setServiceConfig,
@@ -24,7 +24,7 @@ router.get('/config', (_req, res) => {
   res.json(getServiceConfig());
 });
 
-router.put('/config', requireAdmin, (req, res) => {
+router.put('/config', requirePlatformAdmin, (req, res) => {
   const { owner, token, visibility, enabled } = req.body || {};
   try {
     const next = setServiceConfig({ owner, token, visibility, enabled }, req.user.id);
@@ -38,7 +38,7 @@ router.put('/config', requireAdmin, (req, res) => {
  * Verify the stored token actually works against GitHub. Doesn't return the
  * token — just enough to convince the operator the integration is wired up.
  */
-router.post('/verify', requireAdmin, async (_req, res) => {
+router.post('/verify', requirePlatformAdmin, async (_req, res) => {
   const token = getServiceTokenInternal();
   if (!token) return res.status(400).json({ ok: false, error: 'no token configured' });
 
