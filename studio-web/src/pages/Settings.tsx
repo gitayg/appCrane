@@ -3,7 +3,6 @@ import { adminApi } from '../adminApi'
 import { useFlash, FocusInput, FocusTextarea } from '../components/formHelpers'
 import { Users } from './Users'
 import { AuditLog } from './AuditLog'
-import { SkillsTab } from '../components/SkillsTab'
 import { BrandingTab } from '../components/BrandingTab'
 
 function SecurityTab() {
@@ -705,9 +704,9 @@ function GithubTab() {
   )
 }
 
-type Tab = 'security' | 'users' | 'roles' | 'github' | 'skills' | 'branding' | 'audit'
+type Tab = 'security' | 'users' | 'roles' | 'github' | 'branding' | 'audit'
 
-const VALID_TABS: Tab[] = ['security', 'users', 'roles', 'github', 'skills', 'branding', 'audit']
+const VALID_TABS: Tab[] = ['security', 'users', 'roles', 'github', 'branding', 'audit']
 
 function getTab(): Tab {
   const hash = window.location.hash.replace('#', '') as Tab
@@ -737,9 +736,7 @@ export function Settings() {
       <div style={{ display: tab === 'github' ? 'block' : 'none' }}>
         <GithubTab />
       </div>
-      <div style={{ display: tab === 'skills' ? 'block' : 'none' }}>
-        <SkillsTab />
-      </div>
+      {/* v2.6.9: skills tab removed from Settings — now top-level /skills */}
       <div style={{ display: tab === 'branding' ? 'block' : 'none' }}>
         <BrandingTab />
       </div>

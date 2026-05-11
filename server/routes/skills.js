@@ -2,7 +2,7 @@
 // All admin-only — skills are global infrastructure shared across apps.
 
 import { Router } from 'express';
-import { requireAuth, requireAdmin } from '../middleware/auth.js';
+import { requireAuth, requireAdmin, requirePlatformAdmin } from '../middleware/auth.js';
 import { auditMiddleware } from '../middleware/audit.js';
 import { AppError } from '../utils/errors.js';
 import {
@@ -197,8 +197,12 @@ router.put('/:slug', auditMiddleware('skill.update'), (req, res) => {
   }
 });
 
-// DELETE /api/skills/:slug
-router.delete('/:slug', auditMiddleware('skill.delete'), (req, res) => {
+// DELETE /api/skills/:slug — v2.6.9: platform_admin only.
+// Tier-2 admins can create / edit / assign skills (operational), but
+// deletion is destructive (removes the skill bundle for every app that
+// uses it) and reserved for the global super-admin. The router-wide
+// requireAdmin (line 17) is overridden here with requirePlatformAdmin.
+router.delete('/:slug', requirePlatformAdmin, auditMiddleware('skill.delete'), (req, res) => {
   if (!deleteSkill(req.params.slug)) throw new AppError('skill not found', 404, 'NOT_FOUND');
   res.sendStatus(204);
 });

@@ -1370,9 +1370,22 @@ function FrameOverlay({ frame, framePanel, setFrame, setFramePanel }: FrameOverl
 
     const onBack    = () => setFrame({ open: false, url: '', title: '' })
     const onRefresh = () => {
+      // v2.6.10: cache-bust on refresh. Setting an iframe's src to the
+      // same URL it already has can be served from the browser disk
+      // cache — the user clicks Refresh, the iframe unmounts and
+      // remounts at /myapp, but the HTML response is cached so the new
+      // asset hashes (and therefore the new version) never load.
+      // Appending a fresh `_ts=…` query param forces a real network
+      // fetch on every refresh; the app's server ignores unknown query
+      // params and the SPA bundle picks up its current content-hashed
+      // assets via the freshly fetched HTML.
       const cur = frame.url
+      if (!cur) return
+      const stripped = cur.replace(/([?&])_ts=\d+&?/, '$1').replace(/[?&]$/, '')
+      const sep = stripped.includes('?') ? '&' : '?'
+      const next = `${stripped}${sep}_ts=${Date.now()}`
       setFrame(f => ({ ...f, url: '' }))
-      setTimeout(() => setFrame(f => ({ ...f, url: cur })), 0)
+      setTimeout(() => setFrame(f => ({ ...f, url: next })), 0)
     }
     const onEnv = (e: Event) => {
       const env = (e as CustomEvent<{ env: 'production' | 'sandbox' }>).detail.env

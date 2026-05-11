@@ -67,6 +67,15 @@ async function runCheck(config) {
   } catch (e) {
     responseMs = Date.now() - start;
     status = 0;
+    // v2.6.10: surface the underlying cause. Node's fetch wraps the
+    // real error as `cause`; without unwrapping it we lost "bad port"
+    // (WHATWG block list), "ECONNREFUSED" vs "ETIMEDOUT", etc. — every
+    // failure looked like a generic "fetch failed" and operators chased
+    // wrong hypotheses for hours (castle / slot 23 → port 4045 = NFS
+    // lockd, blocked by undici). Logged at WARN since healthy apps
+    // would generate noise — only fires on failure.
+    const cause = e?.cause?.message || e?.cause?.code || e?.message || String(e);
+    log.warn(`[health-probe] ${config.slug} ${config.env} ${url}: ${cause}`);
   }
 
   // Get current state
