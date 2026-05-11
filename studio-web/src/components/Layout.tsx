@@ -5,19 +5,22 @@ import { useAuth } from '../hooks/useAuth'
 import { adminApi } from '../adminApi'
 import { Icon } from './icons'
 
-interface NavItem { id: string; label: string; href: string; icon: ReactElement; external?: boolean; adminOnly?: boolean }
-// v2.6.4: Settings is now `adminOnly`. Non-admins used to see the link,
-// click it, and land on a half-rendered page where most cards 403'd
-// silently. The Requests entry shows for everyone but the badge gates
-// it visually: zero open requests + non-admin → hidden (see filtering
-// in the render below). Everything else is universal.
+interface NavItem { id: string; label: string; href: string; icon: ReactElement; external?: boolean; platformAdminOnly?: boolean }
+// v2.6.5: Settings is `platformAdminOnly` (was adminOnly in v2.6.4).
+// Tier-2 admins still need access to user management / audit log etc.
+// at the API level — they just shouldn't see the Settings entry in the
+// sidebar. Only platform_admin sees the link. Non-platform-admins who
+// type /settings directly still hit the page; the nav just doesn't
+// surface it. Tier-2 admin user management happens via the per-user
+// "Apps" modal on /settings#users (which they reach by typing the URL
+// or via direct nav if needed).
 const NAV: NavItem[] = [
   { id: 'dashboard',    label: 'Dashboard',    href: '/dashboard',    icon: <Icon.Dashboard /> },
   { id: 'applications', label: 'Applications', href: '/applications', icon: <Icon.Layers /> },
   { id: 'requests',     label: 'Requests',     href: '/requests',     icon: <Icon.Lightbulb /> },
   { id: 'mcp',          label: 'MCP',          href: '/mcp',          icon: <Icon.PlugZap /> },
   { id: 'docs',         label: 'Docs',         href: '/docs',         icon: <Icon.Book /> },
-  { id: 'settings',     label: 'Settings',     href: '/settings',     icon: <Icon.Settings />, adminOnly: true },
+  { id: 'settings',     label: 'Settings',     href: '/settings',     icon: <Icon.Settings />, platformAdminOnly: true },
 ]
 
 interface SubItem { id: string; label: string; href: string }
@@ -240,15 +243,17 @@ export function Layout({ children, subItems, activeSub }: Props) {
           )}
         </div>
 
-        {/* Nav. v2.6.4 role-gating:
-            - adminOnly entries (Settings) hidden unless the caller is admin
-              or platform_admin
+        {/* Nav. Role-gating:
+            - platformAdminOnly entries (Settings) hidden unless the
+              caller is platform_admin (v2.6.5 tightened from v2.6.4
+              which let admin see it too — tier-2 admins shouldn't
+              normally need it)
             - Requests hidden when the user has zero open requests AND
               isn't admin/platform_admin (no use for the page either way) */}
         <nav className="sidebar-nav">
           {NAV.filter(p => {
             const adminLike = userRole === 'admin' || userRole === 'platform_admin'
-            if (p.adminOnly && !adminLike) return false
+            if (p.platformAdminOnly && userRole !== 'platform_admin') return false
             if (p.id === 'requests' && openRequests === 0 && !adminLike) return false
             return true
           }).map(p => (
