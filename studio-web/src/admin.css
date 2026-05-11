@@ -870,10 +870,37 @@ textarea:focus { border-color: var(--accent); }
   font-size: .92rem; font-weight: 600;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   width: 100%; max-width: 140px;
+  text-align: center;
 }
-.launcher-tile-cat {
-  font-size: .72rem; color: var(--dim);
-  text-transform: uppercase; letter-spacing: .5px;
+/* v2.6.1: description below the app name. Centered, dim, clamped to two
+   lines so a long description doesn't blow up the tile height. */
+.launcher-tile-desc {
+  font-size: .76rem; color: var(--dim);
+  text-align: center;
+  line-height: 1.35;
+  width: 100%; max-width: 150px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+/* Per-category section heading on the launcher (v2.6.1). */
+.launcher-category { margin-bottom: 28px; }
+.launcher-category:last-child { margin-bottom: 0; }
+.launcher-category-title {
+  font-size: .88rem; font-weight: 600;
+  color: var(--text);
+  margin: 0 0 12px 0;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border, #333);
+  display: flex; align-items: center; gap: 8px;
+}
+.launcher-category-count {
+  font-size: .7rem; font-weight: 500;
+  color: var(--dim);
+  padding: 1px 7px; border-radius: 10px;
+  background: var(--surface2, #232323);
+  border: 1px solid var(--border, #333);
 }
 .launcher-dot {
   position: absolute; top: 4px; right: 4px;
