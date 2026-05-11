@@ -20,6 +20,10 @@ interface AppRow {
   visibility?: string
   has_icon?:   boolean
   category?:   string
+  // v2.6.7: per-user role from the caller's perspective. 'none' means
+  // the user can see the app exists but doesn't have an open-it
+  // permission yet — the Launcher renders a Request-access tile.
+  app_role?:   'admin' | 'owner' | 'user' | 'viewer' | 'none'
   production?: { health?: { status: string } }
   sandbox?:    { health?: { status: string } }
 }
@@ -60,12 +64,40 @@ function availability(prodHealth?: string, sandHealth?: string): { dotCls: strin
 export function LauncherView({ onOpen, headerRight }: Props) {
   const [apps, setApps] = useState<AppRow[]>([])
   const [search, setSearch] = useState('')
+  // v2.6.7: track which apps the user has already filed an access
+  // request for in this session so we don't fire duplicates on repeated
+  // clicks. Keyed by slug; value is true once submitted. Survives only
+  // for the current page — refreshing would clear, but that's fine
+  // because the access request lands in enhancement_requests on the
+  // server and admins see it regardless.
+  const [requested, setRequested] = useState<Record<string, boolean>>({})
+  const [requestingSlug, setRequestingSlug] = useState<string | null>(null)
 
   useEffect(() => {
     adminApi.get<{ apps: AppRow[] }>('/api/apps')
       .then(r => setApps(r?.apps || []))
       .catch(() => setApps([]))
   }, [])
+
+  async function requestAccess(slug: string, name: string) {
+    if (requested[slug] || requestingSlug) return
+    setRequestingSlug(slug)
+    try {
+      // Use the same shape docs/login.html used pre-v2.5.14 — server
+      // recognizes the "Access request for app …" prefix in
+      // appcrane_list_access_requests, so the request appears in the
+      // platform_admin's queue for approve/deny via MCP or dashboard.
+      await adminApi.post('/api/enhancements', {
+        message: `Access request for app "${name}"`,
+        app_slug: slug,
+      })
+      setRequested(prev => ({ ...prev, [slug]: true }))
+    } catch (e) {
+      alert('Failed to send access request: ' + (e instanceof Error ? e.message : String(e)))
+    } finally {
+      setRequestingSlug(null)
+    }
+  }
 
   const filtered = apps.filter(a => {
     if (a.visibility === 'hidden') return false
@@ -124,6 +156,46 @@ export function LauncherView({ onOpen, headerRight }: Props) {
               </h3>
               <div className="launcher-grid">
                 {groups.get(cat)!.map(app => {
+                  // v2.6.7: three render modes:
+                  //   - app_role === 'none' → discoverable. Show
+                  //     Request-access tile. Don't fire onOpen.
+                  //   - app_role !== 'none' AND env available → normal
+                  //     tile, opens via onOpen
+                  //   - app_role !== 'none' AND no env available → tile
+                  //     disabled (the existing red-dot case)
+                  const canOpen = app.app_role && app.app_role !== 'none'
+                  if (!canOpen) {
+                    const alreadyRequested = !!requested[app.slug]
+                    const busy = requestingSlug === app.slug
+                    return (
+                      <button
+                        key={app.slug}
+                        type="button"
+                        className={'launcher-tile launcher-tile-request' + (alreadyRequested ? ' launcher-tile-requested' : '')}
+                        onClick={() => { if (!alreadyRequested) requestAccess(app.slug, app.name) }}
+                        disabled={alreadyRequested || busy}
+                        title={alreadyRequested
+                          ? `Access requested — an admin will review`
+                          : `Request access to ${app.name}`}
+                      >
+                        <div className="launcher-tile-icon">
+                          {app.has_icon ? (
+                            <img src={`/api/apps/${app.slug}/icon`} alt="" />
+                          ) : (
+                            <span>{initials(app.name)}</span>
+                          )}
+                          <span className="launcher-dot launcher-dot-amber" title="No access — click to request" />
+                        </div>
+                        <div className="launcher-tile-name">{app.name}</div>
+                        {app.description && (
+                          <div className="launcher-tile-desc">{app.description}</div>
+                        )}
+                        <div className="launcher-tile-cta">
+                          {busy ? 'Sending…' : alreadyRequested ? '✓ Access requested' : '🔒 Request access'}
+                        </div>
+                      </button>
+                    )
+                  }
                   const avail = availability(app.production?.health?.status, app.sandbox?.health?.status)
                   return (
                     <button
