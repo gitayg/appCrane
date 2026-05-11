@@ -911,6 +911,22 @@ textarea:focus { border-color: var(--accent); }
 .launcher-dot-red    { background: #ef4444; }
 .launcher-dot-amber  { background: #f59e0b; }
 
+/* v2.6.7: Request-access tile variant. Subtle amber border so it reads
+   as "discoverable, action required" rather than "broken". When the
+   request has been submitted in this session it locks into a green
+   "requested" state. */
+.launcher-tile-request { border-color: rgba(245, 158, 11, .35); }
+.launcher-tile-request:hover { border-color: #f59e0b; }
+.launcher-tile-requested { border-color: rgba(34, 197, 94, .4) !important; opacity: .75; cursor: default; }
+.launcher-tile-requested:hover { transform: none; }
+.launcher-tile-cta {
+  margin-top: 4px;
+  font-size: .72rem; font-weight: 600;
+  color: #f59e0b;
+  letter-spacing: .3px;
+}
+.launcher-tile-requested .launcher-tile-cta { color: var(--green, #22c55e); }
+
 /* Mode toggle in the Applications page header */
 .applications-mode-toggle {
   display: inline-flex; gap: 0;

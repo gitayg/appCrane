@@ -35,11 +35,20 @@ export function authTokenForSSE(): string {
  *  should be cleared. Anything else (a missing header due to a transient
  *  state mismatch, a scope-restricted key, etc.) leaves localStorage alone
  *  so a single oddball 401 doesn't take out a working session. */
+// v2.6.7: also treat "Missing X-API-Key header or Bearer token" as
+// proven-bad. Previously this was the "transient" branch that left
+// localStorage alone, but the practical effect was: an expired session
+// where the SPA still considered the user authed (token in localStorage
+// but server rejected it) would render the raw JSON error instead of
+// the Login form. Clearing on this message + reloading puts the user
+// back on Login where they can sign in. False-positive risk is low —
+// if the SPA sent no creds, it means it didn't have any to send.
 const PROVEN_BAD_CREDENTIAL_MESSAGES = new Set([
   'Invalid API key',
   'Invalid or expired session',
   'Account is deactivated',
   'Issuer account is deactivated',
+  'Missing X-API-Key header or Bearer token',
 ])
 
 async function req<T = unknown>(path: string, init?: RequestInit): Promise<T> {
@@ -62,9 +71,25 @@ async function req<T = unknown>(path: string, init?: RequestInit): Promise<T> {
     const message = (body as { error?: { message?: string } })?.error?.message || ''
     const provenBad = PROVEN_BAD_CREDENTIAL_MESSAGES.has(message)
 
-    if (provenBad && localStorage.getItem('cc_api_key')) {
-      localStorage.removeItem('cc_api_key')
-      window.location.href = '/dashboard'
+    if (provenBad) {
+      // v2.6.7: clear BOTH credential types AND the cc_token cookie
+      // that forward_auth reads. Old behavior only cleared cc_api_key,
+      // so Bearer-only sessions (the unified-login default since v2.4.0)
+      // never got reset on a server-side 401 and the user kept seeing
+      // raw-JSON errors. Reload to /applications so AdminApp re-renders
+      // with no auth → Login form takes over with a fresh state.
+      try {
+        localStorage.removeItem('cc_api_key')
+        localStorage.removeItem('cc_identity_token')
+        document.cookie = 'cc_token=; Path=/; Max-Age=0; SameSite=Lax'
+      } catch (_) { /* SSR / locked storage */ }
+      // Preserve the user's intended destination so Login can bounce
+      // them back after re-auth (Login.tsx already handles ?redirect=).
+      const here = window.location.pathname + window.location.search
+      const target = '/applications' + (here && here !== '/applications' && here !== '/login'
+        ? '?redirect=' + encodeURIComponent(here)
+        : '')
+      window.location.replace(target)
     }
     throw new Error(message ? `Unauthorized: ${message}` : 'Unauthorized')
   }

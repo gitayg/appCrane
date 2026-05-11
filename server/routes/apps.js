@@ -64,7 +64,25 @@ function hasIconFile(slug) {
 router.use(requireAuth);
 
 /**
- * GET /api/apps - List apps (admin sees all, user sees assigned)
+ * GET /api/apps - List apps.
+ *
+ * v2.6.7: visibility rules:
+ *   - admin / platform_admin → every app
+ *   - other authed users     → every app EXCEPT visibility='hidden'.
+ *                              That's both the apps they have a role on
+ *                              and the ones they don't — the latter
+ *                              render as "Request access" tiles in the
+ *                              Launcher. Public apps openable for all,
+ *                              private apps openable only if the user
+ *                              has an explicit role row
+ *
+ * The previous query only returned assigned apps, which meant a brand-
+ * new user with no assignments saw an empty Launcher and no way to
+ * discover what was available. Per the user direction: "if user is
+ * able to access the system he should see discoverable apps (to request
+ * access), public apps, private apps that he is user or an admin."
+ *
+ * Hidden apps still stay invisible to non-admins.
  */
 router.get('/', (req, res) => {
   const db = getDb();
@@ -75,13 +93,32 @@ router.get('/', (req, res) => {
   } else {
     apps = db.prepare(`
       SELECT a.* FROM apps a
-      WHERE a.id IN (
-        SELECT app_id FROM app_users WHERE user_id = ?
-        UNION
-        SELECT app_id FROM app_user_roles WHERE user_id = ?
-      )
+      WHERE a.visibility != 'hidden'
       ORDER BY a.created_at DESC
-    `).all(req.user.id, req.user.id);
+    `).all();
+  }
+
+  // v2.6.7: per-user role on every returned app, so the Launcher can
+  // decide whether the user can open the app or needs to request
+  // access. Batch-fetched up front to avoid N+1 query per app row.
+  // For admins, role is implicitly 'admin' on every app via the global
+  // gate — we still surface it so the SPA doesn't have to special-case.
+  const userRolesBySlug = new Map();
+  if (!isAdmin(req.user)) {
+    const rows = db.prepare(`
+      SELECT a.slug, aur.app_role
+      FROM app_user_roles aur
+      JOIN apps a ON a.id = aur.app_id
+      WHERE aur.user_id = ?
+    `).all(req.user.id);
+    for (const r of rows) userRolesBySlug.set(r.slug, r.app_role);
+  }
+  function userAppRole(app) {
+    if (isAdmin(req.user)) return 'admin';                       // global admins everywhere
+    const explicit = userRolesBySlug.get(app.slug);
+    if (explicit && explicit !== 'none') return explicit;         // 'user' / 'admin' / 'owner'
+    if (app.visibility === 'public') return 'viewer';             // public apps openable by anyone
+    return 'none';                                                 // discoverable: needs request access
   }
 
   // Enrich with ports and health status
@@ -131,6 +168,9 @@ router.get('/', (req, res) => {
       // show "this app has its own X" without ever shipping the secret.
       has_claude_credentials: !!app.claude_credentials_encrypted,
       has_github_token:       !!app.github_token_encrypted,
+      // v2.6.7: per-user role on this app from the caller's perspective.
+      // 'admin' / 'owner' / 'user' / 'viewer' / 'none'.
+      app_role: userAppRole(app),
       ...(isAdmin(req.user) ? { ports } : {}),
       owner: ownerRow || null,
       urls,
