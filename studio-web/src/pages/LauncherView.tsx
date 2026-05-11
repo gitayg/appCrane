@@ -41,21 +41,20 @@ function initials(name: string): string {
   return parts.map(p => p[0]?.toUpperCase() || '').join('') || name[0].toUpperCase()
 }
 
-function dotClass(prodHealth?: string, sandHealth?: string): { cls: string; title: string } {
-  // v2.6.1: report the health of the env we'll actually open. Parent
-  // opens production by default and falls back to sandbox when prod
-  // isn't healthy — so the dot should be green whenever EITHER env is
-  // healthy (clicking will work), red only when both are unreachable,
-  // yellow/gray for in-between uncertainty.
+// v2.6.2: three-state availability semantics, matching what the user
+// actually cares about when deciding whether to click:
+//   green  — production is up; clicking opens prod
+//   amber  — production is NOT up but sandbox is; clicking opens sandbox
+//   red    — neither env is up; clicking is disabled
+// No more yellow-for-uncertain or gray-for-never-deployed — those all
+// collapse into red because the practical answer ("can I open this?")
+// is the same. Tooltip explains which env the click will hit.
+function availability(prodHealth?: string, sandHealth?: string): { dotCls: string; title: string; clickable: boolean } {
   const prodOk = prodHealth === 'healthy'
   const sandOk = sandHealth === 'healthy'
-  if (prodOk) return { cls: 'launcher-dot launcher-dot-green', title: 'Production healthy' }
-  if (sandOk) return { cls: 'launcher-dot launcher-dot-green', title: 'Production unavailable — sandbox healthy (will open sandbox)' }
-  const prodBad = prodHealth === 'down' || prodHealth === 'unhealthy'
-  const sandBad = sandHealth === 'down' || sandHealth === 'unhealthy'
-  if (prodBad && sandBad) return { cls: 'launcher-dot launcher-dot-red',    title: 'Both environments down' }
-  if (prodHealth || sandHealth) return { cls: 'launcher-dot launcher-dot-yellow', title: 'Health unknown' }
-  return { cls: 'launcher-dot launcher-dot-gray', title: 'Not deployed' }
+  if (prodOk) return { dotCls: 'launcher-dot launcher-dot-green',  title: 'Production available',                       clickable: true  }
+  if (sandOk) return { dotCls: 'launcher-dot launcher-dot-amber',  title: 'Production unavailable — sandbox available', clickable: true  }
+  return       { dotCls: 'launcher-dot launcher-dot-red',    title: 'Neither environment is available',           clickable: false }
 }
 
 export function LauncherView({ onOpen, headerRight }: Props) {
@@ -125,17 +124,15 @@ export function LauncherView({ onOpen, headerRight }: Props) {
               </h3>
               <div className="launcher-grid">
                 {groups.get(cat)!.map(app => {
-                  const dot = dotClass(app.production?.health?.status, app.sandbox?.health?.status)
-                  const isDown = (app.production?.health?.status === 'down' || app.production?.health?.status === 'unhealthy') &&
-                                 (app.sandbox?.health?.status === 'down' || app.sandbox?.health?.status === 'unhealthy' || !app.sandbox?.health?.status)
+                  const avail = availability(app.production?.health?.status, app.sandbox?.health?.status)
                   return (
                     <button
                       key={app.slug}
                       type="button"
-                      className={'launcher-tile' + (isDown ? ' launcher-tile-disabled' : '')}
-                      onClick={() => { if (!isDown) onOpen(app.slug, app.name, !!app.has_icon) }}
-                      disabled={isDown}
-                      title={isDown ? 'App is down — open disabled' : `Open ${app.name}`}
+                      className={'launcher-tile' + (!avail.clickable ? ' launcher-tile-disabled' : '')}
+                      onClick={() => { if (avail.clickable) onOpen(app.slug, app.name, !!app.has_icon) }}
+                      disabled={!avail.clickable}
+                      title={!avail.clickable ? avail.title : `Open ${app.name} — ${avail.title.toLowerCase()}`}
                     >
                       <div className="launcher-tile-icon">
                         {app.has_icon ? (
@@ -143,7 +140,7 @@ export function LauncherView({ onOpen, headerRight }: Props) {
                         ) : (
                           <span>{initials(app.name)}</span>
                         )}
-                        <span className={dot.cls} title={dot.title} />
+                        <span className={avail.dotCls} title={avail.title} />
                       </div>
                       <div className="launcher-tile-name">{app.name}</div>
                       {app.description && (
