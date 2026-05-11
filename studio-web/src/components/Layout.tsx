@@ -213,39 +213,12 @@ export function Layout({ children, subItems, activeSub }: Props) {
           <a href="/dashboard" className="sidebar-logo">
             App<span>Crane</span>
           </a>
-          {!collapsed && version && isPlatformAdmin && (
-            updateInfo?.update_available ? (
-              <span
-                className="sidebar-logo-version sidebar-logo-version-update"
-                title={`Click to update AppCrane v${updateInfo.current} → v${updateInfo.latest}`}
-                onClick={runSelfUpdate}
-                style={{ cursor: 'pointer' }}
-              >
-                {updating
-                  ? '⏳ updating…'
-                  : <>↑ v{updateInfo.latest}<span className="sidebar-logo-version-current"> (now v{updateInfo.current})</span></>}
-              </span>
-            ) : (
-              <span
-                className="sidebar-logo-version"
-                title="Click to re-check for updates"
-                style={{ cursor: 'pointer' }}
-                onClick={async () => {
-                  // v2.6.10: force=1 bypasses the 5-min server cache.
-                  // Manual click = "I want a real check, not the cache".
-                  try {
-                    const data = await adminApi.get<{ current: string; latest: string | null; update_available: boolean }>('/api/version-check?force=1')
-                    setUpdateInfo(data)
-                    if (!data.update_available) {
-                      alert(`AppCrane v${data.current} — already up to date${data.latest ? ` (latest is v${data.latest})` : ''}.`)
-                    }
-                  } catch { /* silent */ }
-                }}
-              >
-                {version}
-              </span>
-            )
-          )}
+          {/* v2.6.10: the sidebar version pill was removed — it duplicated
+              the topbar version pill (added v2.5.7) which is visible on
+              every page regardless of sidebar state. Both pills shared
+              state, both fired the same self-update flow, and seeing
+              "AppCrane v2.6.x" twice was confusing. Keeping the topbar
+              one as the single source of truth. */}
         </div>
 
         {/* Nav. Role-gating:
