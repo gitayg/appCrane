@@ -5,14 +5,19 @@ import { useAuth } from '../hooks/useAuth'
 import { adminApi } from '../adminApi'
 import { Icon } from './icons'
 
-interface NavItem { id: string; label: string; href: string; icon: ReactElement; external?: boolean }
+interface NavItem { id: string; label: string; href: string; icon: ReactElement; external?: boolean; adminOnly?: boolean }
+// v2.6.4: Settings is now `adminOnly`. Non-admins used to see the link,
+// click it, and land on a half-rendered page where most cards 403'd
+// silently. The Requests entry shows for everyone but the badge gates
+// it visually: zero open requests + non-admin → hidden (see filtering
+// in the render below). Everything else is universal.
 const NAV: NavItem[] = [
   { id: 'dashboard',    label: 'Dashboard',    href: '/dashboard',    icon: <Icon.Dashboard /> },
   { id: 'applications', label: 'Applications', href: '/applications', icon: <Icon.Layers /> },
   { id: 'requests',     label: 'Requests',     href: '/requests',     icon: <Icon.Lightbulb /> },
   { id: 'mcp',          label: 'MCP',          href: '/mcp',          icon: <Icon.PlugZap /> },
   { id: 'docs',         label: 'Docs',         href: '/docs',         icon: <Icon.Book /> },
-  { id: 'settings',     label: 'Settings',     href: '/settings',     icon: <Icon.Settings /> },
+  { id: 'settings',     label: 'Settings',     href: '/settings',     icon: <Icon.Settings />, adminOnly: true },
 ]
 
 interface SubItem { id: string; label: string; href: string }
@@ -235,9 +240,18 @@ export function Layout({ children, subItems, activeSub }: Props) {
           )}
         </div>
 
-        {/* Nav */}
+        {/* Nav. v2.6.4 role-gating:
+            - adminOnly entries (Settings) hidden unless the caller is admin
+              or platform_admin
+            - Requests hidden when the user has zero open requests AND
+              isn't admin/platform_admin (no use for the page either way) */}
         <nav className="sidebar-nav">
-          {NAV.map(p => (
+          {NAV.filter(p => {
+            const adminLike = userRole === 'admin' || userRole === 'platform_admin'
+            if (p.adminOnly && !adminLike) return false
+            if (p.id === 'requests' && openRequests === 0 && !adminLike) return false
+            return true
+          }).map(p => (
             <div key={p.id}>
               {p.external ? (
                 <a
@@ -297,11 +311,11 @@ export function Layout({ children, subItems, activeSub }: Props) {
           ))}
         </nav>
 
-        {/* Footer */}
+        {/* Footer. v2.6.4: dropped the "Agent Guide" link — /agent-guide
+            was retired in v2.5.24 along with the curl-heavy AGENT_GUIDE.md.
+            Agents pull guidance through appcrane_get_guide; nobody opens
+            this page in a browser anymore. */}
         <div className="sidebar-footer">
-          <div className="sidebar-footer-links">
-            <a href="/agent-guide">Agent Guide</a>
-          </div>
           <div className="sidebar-footer-row">
             <button className="theme-btn" onClick={toggleTheme} title="Toggle theme">
               {theme === 'dark' ? '☀' : '🌙'}

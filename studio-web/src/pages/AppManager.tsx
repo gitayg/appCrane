@@ -965,7 +965,13 @@ export function AppManager() {
     setLogDeployId(null)
   }, [currentApp, currentEnv])
 
-  const isAdminUser = me?.user.role === 'admin'
+  // v2.6.4: was `me?.user.role === 'admin'` — the recurring bug that
+  // excluded platform_admin from admin-tier UI. Hits the same surface
+  // as feedback_things_to_not_forget.md item #5/#12. Inlined here
+  // because the centralized isAdmin helper imports adminApi and would
+  // create a circular import in this page; the check is one line.
+  const role = me?.user.role
+  const isAdminUser = role === 'admin' || role === 'platform_admin'
 
   function selectApp(slug: string) {
     setCurrentApp(slug)
