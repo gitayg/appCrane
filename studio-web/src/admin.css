@@ -909,8 +909,7 @@ textarea:focus { border-color: var(--accent); }
 }
 .launcher-dot-green  { background: #22c55e; }
 .launcher-dot-red    { background: #ef4444; }
-.launcher-dot-yellow { background: #eab308; }
-.launcher-dot-gray   { background: #6b7280; }
+.launcher-dot-amber  { background: #f59e0b; }
 
 /* Mode toggle in the Applications page header */
 .applications-mode-toggle {
