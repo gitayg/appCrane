@@ -5,19 +5,22 @@ import { useAuth } from '../hooks/useAuth'
 import { adminApi } from '../adminApi'
 import { Icon } from './icons'
 
-interface NavItem { id: string; label: string; href: string; icon: ReactElement; external?: boolean; platformAdminOnly?: boolean }
-// v2.6.5: Settings is `platformAdminOnly` (was adminOnly in v2.6.4).
-// Tier-2 admins still need access to user management / audit log etc.
-// at the API level — they just shouldn't see the Settings entry in the
-// sidebar. Only platform_admin sees the link. Non-platform-admins who
-// type /settings directly still hit the page; the nav just doesn't
-// surface it. Tier-2 admin user management happens via the per-user
-// "Apps" modal on /settings#users (which they reach by typing the URL
-// or via direct nav if needed).
+interface NavItem { id: string; label: string; href: string; icon: ReactElement; external?: boolean; platformAdminOnly?: boolean; adminOnly?: boolean }
+// v2.6.5: Settings is `platformAdminOnly`. Tier-2 admins still need
+// access to user management / audit log etc. at the API level — they
+// just shouldn't see the Settings entry in the sidebar.
+// v2.6.9: Skills is `adminOnly` (admin OR platform_admin) and lives at
+// the top level — was buried under /settings#skills, which non-platform
+// admins couldn't reach after v2.6.5. Promoting because skill bundles
+// are an admin-day-to-day workflow (assign skills to apps, refresh
+// content) and don't belong behind a platform-level gate. DELETE-skill
+// is still platform_admin-only (server-side gate), enforced both in
+// the SkillsTab UI and on the API.
 const NAV: NavItem[] = [
   { id: 'dashboard',    label: 'Dashboard',    href: '/dashboard',    icon: <Icon.Dashboard /> },
   { id: 'applications', label: 'Applications', href: '/applications', icon: <Icon.Layers /> },
   { id: 'requests',     label: 'Requests',     href: '/requests',     icon: <Icon.Lightbulb /> },
+  { id: 'skills',       label: 'Skills',       href: '/skills',       icon: <Icon.Sparkles />, adminOnly: true },
   { id: 'mcp',          label: 'MCP',          href: '/mcp',          icon: <Icon.PlugZap /> },
   { id: 'docs',         label: 'Docs',         href: '/docs',         icon: <Icon.Book /> },
   { id: 'settings',     label: 'Settings',     href: '/settings',     icon: <Icon.Settings />, platformAdminOnly: true },
@@ -228,8 +231,10 @@ export function Layout({ children, subItems, activeSub }: Props) {
                 title="Click to re-check for updates"
                 style={{ cursor: 'pointer' }}
                 onClick={async () => {
+                  // v2.6.10: force=1 bypasses the 5-min server cache.
+                  // Manual click = "I want a real check, not the cache".
                   try {
-                    const data = await adminApi.get<{ current: string; latest: string | null; update_available: boolean }>('/api/version-check')
+                    const data = await adminApi.get<{ current: string; latest: string | null; update_available: boolean }>('/api/version-check?force=1')
                     setUpdateInfo(data)
                     if (!data.update_available) {
                       alert(`AppCrane v${data.current} — already up to date${data.latest ? ` (latest is v${data.latest})` : ''}.`)
@@ -254,6 +259,7 @@ export function Layout({ children, subItems, activeSub }: Props) {
           {NAV.filter(p => {
             const adminLike = userRole === 'admin' || userRole === 'platform_admin'
             if (p.platformAdminOnly && userRole !== 'platform_admin') return false
+            if (p.adminOnly && !adminLike) return false
             if (p.id === 'requests' && openRequests === 0 && !adminLike) return false
             return true
           }).map(p => (
@@ -363,8 +369,9 @@ export function Layout({ children, subItems, activeSub }: Props) {
                   className="topbar-version-pill"
                   title="Click to re-check for AppCrane updates"
                   onClick={async () => {
+                    // v2.6.10: force=1 bypasses the server-side 5-min cache.
                     try {
-                      const data = await adminApi.get<{ current: string; latest: string | null; update_available: boolean }>('/api/version-check')
+                      const data = await adminApi.get<{ current: string; latest: string | null; update_available: boolean }>('/api/version-check?force=1')
                       setUpdateInfo(data)
                       if (!data.update_available) {
                         alert(`AppCrane v${data.current} — already up to date${data.latest ? ` (latest is v${data.latest})` : ''}.`)

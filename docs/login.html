@@ -2702,8 +2702,15 @@ async function refreshApp() {
   var f = document.getElementById('frameIframe');
   var src = f && f.src && f.src !== 'about:blank' ? f.src : '';
   if (!src) return;
+  // v2.6.10: cache-bust on refresh. about:blank-then-back doesn't
+  // force a network fetch if the browser disk-cached the HTML —
+  // after a version upgrade the user would see the old bundle still.
+  // Append a fresh _ts query param to force a real navigation.
+  var stripped = src.replace(/([?&])_ts=\d+&?/, '$1').replace(/[?&]$/, '');
+  var sep = stripped.indexOf('?') === -1 ? '?' : '&';
+  var next = stripped + sep + '_ts=' + Date.now();
   f.src = 'about:blank';
-  requestAnimationFrame(function() { f.src = src; });
+  requestAnimationFrame(function() { f.src = next; });
   if (currentAppSlug && sessionToken) {
     try {
       const r = await fetch(API + '/api/identity/me', { headers: { 'Authorization': 'Bearer ' + sessionToken } });

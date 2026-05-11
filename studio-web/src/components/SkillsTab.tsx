@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { adminApi } from '../adminApi'
 import { parseFrontmatter } from '../lib/parseFrontmatter'
+import { useMe } from '../hooks/useMe'
 
 interface Skill {
   id: number
@@ -19,6 +20,11 @@ interface AppOption {
 }
 
 export function SkillsTab() {
+  // v2.6.9: Skill deletion is platform_admin-only server-side. Hide the
+  // Delete button for everyone else so they don't click and 403. Tier-2
+  // admins still see Edit / Update file — the operational surface.
+  const me = useMe()
+  const canDelete = me?.user?.role === 'platform_admin'
   const [skills, setSkills] = useState<Skill[]>([])
   const [apps, setApps] = useState<AppOption[]>([])
   const [editingSkill, setEditingSkill] = useState<Skill | null>(null)
@@ -249,8 +255,12 @@ export function SkillsTab() {
                   <button className="btn btn-xs" onClick={() => setRenamingSkill(s)} title="Rename or update description">Edit</button>
                   {' '}
                   <button className="btn btn-xs" onClick={() => setUpdatingSkill(s)} title="Replace SKILL.md content / bundle">Update file</button>
-                  {' '}
-                  <button className="btn btn-xs btn-red" onClick={() => remove(s)}>Delete</button>
+                  {canDelete && (
+                    <>
+                      {' '}
+                      <button className="btn btn-xs btn-red" onClick={() => remove(s)} title="Delete skill (platform_admin only)">Delete</button>
+                    </>
+                  )}
                 </td>
               </tr>
             ))}

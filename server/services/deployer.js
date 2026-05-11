@@ -398,6 +398,31 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     ).all(app.id, env);
 
     const bePort = env === 'production' ? ports.prod_be : ports.sand_be;
+
+    // v2.6.10: fail fast when the assigned port is on the WHATWG bad-
+    // ports list. Without this guard the container would start fine
+    // and the health probe (Node fetch) would silently 0-status with
+    // "bad port" — operator chases the deploy log for hours seeing no
+    // signal. New apps don't hit this since v2.6.10's getNextSlot
+    // skips bad slots; this catches existing apps that were allocated
+    // before the fix landed.
+    try {
+      const { isPortSafe } = await import('./blockedPorts.js');
+      if (!isPortSafe(bePort)) {
+        throw new Error(
+          `PORT_BLOCKED: ${env} backend port ${bePort} is on the WHATWG fetch-spec blocklist. ` +
+          `Node fetch() refuses to connect to this port, so the health probe cannot reach the container. ` +
+          `Reassign the app's slot — see scripts/reassign-app-slot.js or run "UPDATE apps SET slot = <new_slot> WHERE slug = '${app.slug}'" with a safe slot from getNextSlot.`
+        );
+      }
+    } catch (e) {
+      if (e.message?.startsWith('PORT_BLOCKED')) {
+        appendLog(e.message);
+        throw e;
+      }
+      // import failure shouldn't block the deploy
+    }
+
     const cranePort = process.env.PORT || 5001;
     const craneUrl = process.env.CRANE_DOMAIN
       ? `https://${process.env.CRANE_DOMAIN}`

@@ -318,6 +318,71 @@ const TOOLS = [
   },
 
   {
+    name: 'appcrane_top_apps',
+    description:
+      'Top apps by distinct active users in a lookback window. Useful for "which apps are getting the most use this week" or "what should I deprecate" type questions. Sourced from app_visits which is recorded on every Caddy forward_auth (one row per user/app/day). Returns rows ordered by user count descending. Admin only.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        days: { type: 'integer', minimum: 1, maximum: 90, default: 7,  description: 'Lookback window. Default 7, max 90.' },
+        top:  { type: 'integer', minimum: 1, maximum: 50, default: 10, description: 'How many rows. Default 10, max 50.' },
+      },
+      additionalProperties: false,
+    },
+    requiredRole: 'admin',
+    handler: async (_user, args) => {
+      const days = Math.min(Math.max(parseInt(args.days, 10) || 7, 1), 90);
+      const top  = Math.min(Math.max(parseInt(args.top,  10) || 10, 1), 50);
+      const db = getDb();
+      const rows = db.prepare(`
+        SELECT a.slug, a.name,
+               COUNT(DISTINCT v.user_id) AS users,
+               COUNT(*) AS visit_days
+        FROM app_visits v
+        JOIN apps a ON a.id = v.app_id
+        WHERE v.day >= date('now', '-' || ? || ' days')
+        GROUP BY a.slug, a.name
+        ORDER BY users DESC, visit_days DESC, a.name ASC
+        LIMIT ?
+      `).all(days, top);
+      return { days, top, apps: rows };
+    },
+  },
+
+  {
+    name: 'appcrane_top_users',
+    description:
+      'Top users by distinct apps opened in a lookback window. Surfaces who the heaviest cross-app users are — handy for finding power users to interview, or spotting churn risk (a user who used 10 apps last month and 0 this week). Sourced from app_visits. Active users only. Admin only.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        days: { type: 'integer', minimum: 1, maximum: 90, default: 7,  description: 'Lookback window. Default 7, max 90.' },
+        top:  { type: 'integer', minimum: 1, maximum: 50, default: 10, description: 'How many rows. Default 10, max 50.' },
+      },
+      additionalProperties: false,
+    },
+    requiredRole: 'admin',
+    handler: async (_user, args) => {
+      const days = Math.min(Math.max(parseInt(args.days, 10) || 7, 1), 90);
+      const top  = Math.min(Math.max(parseInt(args.top,  10) || 10, 1), 50);
+      const db = getDb();
+      const rows = db.prepare(`
+        SELECT u.id, u.name, u.email,
+               COUNT(DISTINCT v.app_id) AS apps,
+               COUNT(*) AS visit_days
+        FROM app_visits v
+        JOIN users u ON u.id = v.user_id
+        WHERE v.day >= date('now', '-' || ? || ' days')
+          AND u.active = 1
+        GROUP BY u.id, u.name, u.email
+        ORDER BY apps DESC, visit_days DESC, u.name ASC
+        LIMIT ?
+      `).all(days, top);
+      return { days, top, users: rows };
+    },
+  },
+
+  {
     name: 'appcrane_get_health',
     description:
       'Fetch the deployed app\'s health endpoint server-side, bypassing AppCrane\'s auth proxy. Use this to validate ' +

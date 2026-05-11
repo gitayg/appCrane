@@ -10,6 +10,7 @@ import { Mcp } from './pages/Mcp'
 import { Settings } from './pages/Settings'
 import { Docs } from './pages/Docs'
 import { AppManager } from './pages/AppManager'
+import { SkillsTab } from './components/SkillsTab'
 
 // AppStudio top-level nav was collapsed in v1.27.38: Requests + Builders
 // became top-level nav items, Skills + Style Guide (renamed from Branding)
@@ -23,10 +24,12 @@ const SETTINGS_SUB = [
   { id: 'users',      label: 'Users',       href: '#users' },
   { id: 'roles',      label: 'Roles',       href: '#roles' },
   { id: 'github',     label: 'GitHub',      href: '#github' },
-  { id: 'skills',     label: 'Skills',      href: '#skills' },
   { id: 'branding',   label: 'Style Guide', href: '#branding' },
   { id: 'audit',      label: 'Audit Log',   href: '#audit' },
 ]
+// v2.6.9: `skills` moved to top-level /skills (visible to all admins,
+// not just platform_admin). Old /settings#skills bookmarks fall
+// through to Security via the valid-hash check below.
 
 function useHash() {
   const [hash, setHash] = useState(() => window.location.hash.replace('#', ''))
@@ -40,7 +43,7 @@ function useHash() {
 
 function SettingsRoute() {
   const hash = useHash()
-  const valid = ['security', 'users', 'roles', 'github', 'skills', 'branding', 'audit']
+  const valid = ['security', 'users', 'roles', 'github', 'branding', 'audit']
   const activeSub = valid.includes(hash) ? hash : 'security'
   return (
     <Layout subItems={SETTINGS_SUB} activeSub={activeSub}>
@@ -115,6 +118,11 @@ export function AdminApp() {
           <Route path="/builders"    element={<Navigate to="/requests" replace />} />
           <Route path="/appstudio"   element={<Navigate to="/requests" replace />} />
           <Route path="/mcp"         element={<Layout><Mcp /></Layout>} />
+          {/* v2.6.9: Skills promoted out of /settings to a top-level
+              admin-readable page. SkillsTab is self-contained — same
+              component the old /settings#skills mounted. */}
+          <Route path="/skills"      element={<Layout><div className="container"><SkillsTab /></div></Layout>} />
+          {/* Legacy /settings#skills bookmark → top-level /skills */}
           <Route path="/settings"    element={<SettingsRoute />} />
           <Route path="/docs"        element={<Layout><Docs /></Layout>} />
           <Route path="/app"         element={<Layout><AppManager /></Layout>} />

@@ -658,6 +658,13 @@ export function Dashboard() {
   const [users, setUsers] = useState<User[]>([])
   const [enhancements, setEnhancements] = useState<Enhancement[]>([])
   const [activity, setActivity] = useState<{ days: string[]; apps: ActivityApp[] }>({ days: [], apps: [] })
+  // v2.6.10: top-10 leaderboards. Apps by distinct daily active users
+  // and users by distinct apps opened, both over the last 7 days.
+  // Source: app_visits table, populated on every Caddy forward_auth.
+  const [leaders, setLeaders] = useState<{
+    apps: { slug: string; name: string; users: number }[]
+    users: { id: number; name: string; email: string | null; apps: number }[]
+  }>({ apps: [], users: [] })
   const [metrics, setMetrics] = useState<Record<string, Record<string, { cpu: string; memory: number }>>>({})
   const [usageSummary, setUsageSummary] = useState<UsageSummary | null>(null)
   const [loading, setLoading] = useState(true)
@@ -679,17 +686,19 @@ export function Dashboard() {
       // works for everyone (server filters by role); /api/server/health
       // works for everyone (status only, no sensitive detail). The
       // admin-only ones now degrade gracefully.
-      const [h, appsRes, usersRes, enhRes, actRes] = await Promise.all([
+      const [h, appsRes, usersRes, enhRes, actRes, ldrRes] = await Promise.all([
         adminApi.get<ServerHealth>('/api/server/health').catch(() => null),
         adminApi.get<{ apps: App[] }>('/api/apps'),
         adminApi.get<{ users: User[] }>('/api/users').catch(() => ({ users: [] })),
         adminApi.get<{ requests: Enhancement[] }>('/api/enhancements').catch(() => ({ requests: [] })),
         adminApi.get<{ days: string[]; apps: ActivityApp[] }>('/api/dashboard/app-activity').catch(() => ({ days: [], apps: [] })),
+        adminApi.get<typeof leaders>('/api/dashboard/leaderboards?days=7&top=10').catch(() => ({ apps: [], users: [] })),
       ])
       if (h) setHealth(h)
       setApps(appsRes.apps ?? [])
       setUsers(usersRes.users ?? [])
       setEnhancements(enhRes.requests ?? [])
+      setLeaders({ apps: ldrRes.apps ?? [], users: ldrRes.users ?? [] })
       setActivity(actRes)
     } catch (e) {
       setError(String(e))
@@ -924,6 +933,45 @@ export function Dashboard() {
         )}
         <TrendChart days={activity.days} apps={activity.apps} />
       </div>
+
+      {/* v2.6.10: top-10 leaderboards. Distinct active users per app,
+          distinct apps opened per user. 7-day window, source app_visits. */}
+      {(leaders.apps.length > 0 || leaders.users.length > 0) && (
+        <div className="leaderboards">
+          <div className="leaderboard-card">
+            <h3>Top apps · 7 days <span className="leaderboard-sub">by distinct users</span></h3>
+            {leaders.apps.length === 0 ? (
+              <div className="leaderboard-empty">No app activity in the last 7 days.</div>
+            ) : (
+              <ol className="leaderboard-list">
+                {leaders.apps.map((a, i) => (
+                  <li key={a.slug}>
+                    <span className="leaderboard-rank">{i + 1}</span>
+                    <span className="leaderboard-name">{a.name || a.slug}</span>
+                    <span className="leaderboard-count">{a.users} {a.users === 1 ? 'user' : 'users'}</span>
+                  </li>
+                ))}
+              </ol>
+            )}
+          </div>
+          <div className="leaderboard-card">
+            <h3>Top users · 7 days <span className="leaderboard-sub">by distinct apps</span></h3>
+            {leaders.users.length === 0 ? (
+              <div className="leaderboard-empty">No user activity in the last 7 days.</div>
+            ) : (
+              <ol className="leaderboard-list">
+                {leaders.users.map((u, i) => (
+                  <li key={u.id}>
+                    <span className="leaderboard-rank">{i + 1}</span>
+                    <span className="leaderboard-name" title={u.email || ''}>{u.name}</span>
+                    <span className="leaderboard-count">{u.apps} {u.apps === 1 ? 'app' : 'apps'}</span>
+                  </li>
+                ))}
+              </ol>
+            )}
+          </div>
+        </div>
+      )}
 
       {erroredApps.length > 0 && (
         <>

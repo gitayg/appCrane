@@ -303,10 +303,17 @@ let _cachedRemoteVersion = null;
 let _lastVersionCheck = 0;
 app.get('/api/version-check', requireAuth, requirePlatformAdmin, async (req, res) => {
   const now = Date.now();
-  // Cache for 5 minutes
-  if (_cachedRemoteVersion && now - _lastVersionCheck < 5 * 60 * 1000) {
+  // v2.6.10: `?force=1` bypasses the 5-min cache. The topbar pill's
+  // manual click sends force=1 so a user-initiated check ALWAYS does
+  // a real GitHub fetch — was hitting the cached old "latest" and
+  // showing "already up to date" right after a real release landed.
+  // Auto-poll (every 30 min from Layout.tsx) still uses the cache:
+  // bandwidth-friendly when nothing's changed, and 30 min is well
+  // past the cache TTL anyway.
+  const force = req.query.force === '1' || req.query.force === 'true';
+  if (!force && _cachedRemoteVersion && now - _lastVersionCheck < 5 * 60 * 1000) {
     const isNewer = compareVersions(_cachedRemoteVersion, VERSION) > 0;
-    return res.json({ current: VERSION, latest: _cachedRemoteVersion, update_available: isNewer });
+    return res.json({ current: VERSION, latest: _cachedRemoteVersion, update_available: isNewer, cached: true });
   }
   try {
     const response = await fetch('https://raw.githubusercontent.com/gitayg/appCrane/main/package.json', { signal: AbortSignal.timeout(5000) });
@@ -315,7 +322,7 @@ app.get('/api/version-check', requireAuth, requirePlatformAdmin, async (req, res
       _cachedRemoteVersion = remotePkg.version;
       _lastVersionCheck = now;
       const isNewer = compareVersions(remotePkg.version, VERSION) > 0;
-      res.json({ current: VERSION, latest: remotePkg.version, update_available: isNewer });
+      res.json({ current: VERSION, latest: remotePkg.version, update_available: isNewer, cached: false });
     } else {
       res.json({ current: VERSION, latest: null, update_available: false, error: 'Could not fetch remote version' });
     }

@@ -160,6 +160,60 @@ router.get('/dashboard/app-activity', requireAdmin, (req, res) => {
 });
 
 /**
+ * GET /api/dashboard/leaderboards (v2.6.10+)
+ *
+ * Two leaderboards driven off the existing app_visits table (one row
+ * per user/app/day, written from /api/identity/verify on every Caddy
+ * forward_auth call):
+ *
+ *   - apps[]:  top apps by distinct active users over the window
+ *   - users[]: top users by distinct apps opened over the window
+ *
+ * Query params:
+ *   days  — lookback window in days (default 7, max 90)
+ *   top   — how many rows per leaderboard (default 10, max 50)
+ *
+ * Both lists are admin-only — user-level activity rolled up by name is
+ * sensitive enough to keep behind requireAdmin. Per-app rollups are
+ * admin too (in line with /dashboard/app-activity which is already
+ * gated the same way).
+ */
+router.get('/dashboard/leaderboards', requireAdmin, (req, res) => {
+  const db = getDb();
+  const days = Math.min(Math.max(parseInt(req.query.days, 10) || 7, 1), 90);
+  const top  = Math.min(Math.max(parseInt(req.query.top,  10) || 10, 1), 50);
+
+  // ─ Top apps by distinct active users in the window
+  const apps = db.prepare(`
+    SELECT a.slug, a.name,
+           COUNT(DISTINCT v.user_id) AS users,
+           COUNT(*) AS visit_days
+    FROM app_visits v
+    JOIN apps a ON a.id = v.app_id
+    WHERE v.day >= date('now', '-' || ? || ' days')
+    GROUP BY a.slug, a.name
+    ORDER BY users DESC, visit_days DESC, a.name ASC
+    LIMIT ?
+  `).all(days, top);
+
+  // ─ Top users by distinct apps opened in the window
+  const users = db.prepare(`
+    SELECT u.id, u.name, u.email,
+           COUNT(DISTINCT v.app_id) AS apps,
+           COUNT(*) AS visit_days
+    FROM app_visits v
+    JOIN users u ON u.id = v.user_id
+    WHERE v.day >= date('now', '-' || ? || ' days')
+      AND u.active = 1
+    GROUP BY u.id, u.name, u.email
+    ORDER BY apps DESC, visit_days DESC, u.name ASC
+    LIMIT ?
+  `).all(days, top);
+
+  res.json({ days, top, apps, users });
+});
+
+/**
  * GET /api/server/tls-check - ENH-005: HSTS preload + cert validity check
  */
 router.get('/server/tls-check', requireAdmin, async (req, res) => {

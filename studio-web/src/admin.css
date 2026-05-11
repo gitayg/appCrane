@@ -961,6 +961,62 @@ textarea:focus { border-color: var(--accent); }
   transition: opacity .12s ease-out, visibility 0s linear 0s;
 }
 
+/* v2.6.10: Top-10 leaderboards on the Dashboard. Two cards side-by-side
+   on wide screens, stacked on narrow. Rank → name → count, monospace
+   count column for alignment. */
+.leaderboards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 16px;
+  margin: 24px 0;
+}
+.leaderboard-card {
+  background: var(--surface, #1a1a1a);
+  border: 1px solid var(--border, #333);
+  border-radius: 8px;
+  padding: 16px 18px;
+}
+.leaderboard-card h3 {
+  margin: 0 0 12px 0;
+  font-size: .92rem; font-weight: 600;
+  color: var(--text);
+  display: flex; align-items: baseline; gap: 8px;
+}
+.leaderboard-sub { font-size: .72rem; color: var(--dim); font-weight: 400; }
+.leaderboard-list {
+  list-style: none; margin: 0; padding: 0;
+  display: flex; flex-direction: column; gap: 4px;
+}
+.leaderboard-list li {
+  display: grid;
+  grid-template-columns: 28px 1fr auto;
+  gap: 10px;
+  align-items: center;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border-faint, #2a2a2a);
+  font-size: .85rem;
+}
+.leaderboard-list li:last-child { border-bottom: none; }
+.leaderboard-rank {
+  font-family: monospace;
+  font-size: .78rem;
+  color: var(--dim);
+  font-weight: 600;
+  text-align: right;
+}
+.leaderboard-name {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.leaderboard-count {
+  font-family: monospace; font-size: .78rem;
+  color: var(--dim);
+  white-space: nowrap;
+}
+.leaderboard-empty {
+  font-size: .82rem; color: var(--dim);
+  padding: 12px 0;
+}
+
 /* Mode toggle in the Applications page header */
 .applications-mode-toggle {
   display: inline-flex; gap: 0;
