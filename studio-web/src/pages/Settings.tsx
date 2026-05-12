@@ -635,6 +635,27 @@ function GithubTab() {
         <p style={{ color: 'var(--dim)', fontSize: '.8rem', marginTop: -4 }}>
           The PAT stays encrypted at rest (AES-256-GCM, same envelope as the SSO secrets). It's never returned to the browser.
         </p>
+        <div style={{
+          marginTop: 12,
+          padding: '10px 12px',
+          background: 'rgba(245, 158, 11, .08)',
+          border: '1px solid rgba(245, 158, 11, .3)',
+          borderRadius: 6,
+          fontSize: '.82rem', color: 'var(--text)', lineHeight: 1.5,
+        }}>
+          <strong style={{ color: '#fbbf24' }}>Scope the PAT to just what AppCrane needs.</strong>
+          {' '}AppCrane only touches repos it creates. Every managed repo is prefixed
+          {' '}<code style={{ fontFamily: 'monospace', fontSize: '.78rem' }}>AMC_</code> (AppCrane-Managed-Code) so the
+          {' '}PAT can be scoped accordingly:
+          <ul style={{ margin: '6px 0 0 18px', padding: 0, color: 'var(--dim)' }}>
+            <li><strong>Fine-grained PAT (recommended)</strong>: select <em>"Only select repositories"</em> and pick the
+            {' '}<code style={{ fontFamily: 'monospace', fontSize: '.78rem' }}>AMC_*</code> repos. Permissions:
+            {' '}Contents <em>R/W</em>, Metadata <em>R</em>, Administration <em>R/W</em> (needed to create new repos).</li>
+            <li><strong>Dedicated org or sub-account</strong>: put the service account in its own GitHub org / user
+            {' '}that holds only AppCrane-managed repos. A classic PAT with <code>repo</code> scope is then bounded by
+            {' '}what the account itself owns. Easier to reason about; weaker isolation than fine-grained.</li>
+          </ul>
+        </div>
 
         <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '12px 16px', alignItems: 'center', marginTop: 16, maxWidth: 600 }}>
           <label style={{ fontSize: '.85rem', color: 'var(--dim)' }}>Owner (user or org)</label>
@@ -694,9 +715,22 @@ function GithubTab() {
 
         {svcVerify && (
           <div style={{ marginTop: 12, padding: '8px 12px', borderRadius: 4, background: svcVerify.ok ? 'rgba(46,125,50,.12)' : 'rgba(226,75,74,.12)', fontSize: '.85rem' }}>
-            {svcVerify.ok
-              ? <>✓ Authenticated as <code style={{ fontFamily: 'monospace' }}>{svcVerify.login}</code> ({svcVerify.type}). Scopes: <code style={{ fontFamily: 'monospace', fontSize: '.78rem' }}>{svcVerify.scopes || '(fine-grained or none)'}</code></>
-              : <>✗ {svcVerify.error}</>}
+            {svcVerify.ok ? (
+              <>
+                ✓ Authenticated as <code style={{ fontFamily: 'monospace' }}>{svcVerify.login}</code> ({svcVerify.type}).
+                {' '}Scopes: <code style={{ fontFamily: 'monospace', fontSize: '.78rem' }}>{svcVerify.scopes || '(fine-grained — repo-scoped at token-creation time)'}</code>
+                {/* v2.6.11: warn when the token has full classic-PAT `repo` scope.
+                    AppCrane only needs Contents + Metadata + Administration on
+                    AMC_*-prefixed repos. `repo` is broader than that. */}
+                {svcVerify.scopes && /\brepo\b/.test(svcVerify.scopes) && (
+                  <div style={{ marginTop: 6, color: '#fbbf24', fontSize: '.78rem' }}>
+                    ⚠ This is a classic PAT with full <code>repo</code> scope — broader than AppCrane needs.
+                    {' '}Switch to a fine-grained PAT scoped to <code>AMC_*</code> repos
+                    {' '}(Contents R/W, Metadata R, Administration R/W) when convenient.
+                  </div>
+                )}
+              </>
+            ) : <>✗ {svcVerify.error}</>}
           </div>
         )}
       </div>
