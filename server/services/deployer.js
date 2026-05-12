@@ -624,9 +624,58 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     const healthSource = manifest.be?.health ? `manifest.be.health="${manifest.be.health}"` : `default /api/health (manifest.be.health unset)`;
     const healthUrl = `http://localhost:${bePort}${healthPath}`;
     appendLog(`Validating new container health at ${healthPath} (30s, ${healthSource})…`);
-    const healthResult = await probeHealthEndpoint(healthUrl, 30000);
+
+    // v2.6.17: boot-watch races the HTTP probe. If the container
+    // exits or restarts within the first 5s, boot-watch wins and we
+    // capture the FULL container log (no --tail) — preserving the
+    // first-attempt stderr that the v2.6.15 tail-200 capture would
+    // otherwise miss in a restart loop. Happy path: container stays
+    // up, boot-watch resolves with crashed=false, probe wins as
+    // usual.
+    const containerNameForWatch = `appcrane-${app.slug}-${env}`;
+    const { watchBootForEarlyCrash } = await import('./bootWatch.js');
+
+    const probePromise = probeHealthEndpoint(healthUrl, 30000);
+    const bootCrashSignal = watchBootForEarlyCrash({ containerName: containerNameForWatch, windowMs: 5000 })
+      .then((r) => (r.crashed ? r : new Promise(() => {})));
+
+    let healthResult;
+    let bootCrash = null;
+    const winner = await Promise.race([
+      probePromise.then((r) => ({ kind: 'probe', r })),
+      bootCrashSignal.then((r) => ({ kind: 'boot_crash', r })),
+    ]);
+    if (winner.kind === 'boot_crash') {
+      bootCrash = winner.r;
+      // Synthesize a healthResult so the existing failure path below
+      // runs (rollback, notification). Mark it so v2.6.15's
+      // tail-200 capture is skipped — we already have the full log.
+      healthResult = {
+        ok: false,
+        reason: 'boot_crash',
+        detail: `Container ${bootCrash.reason} after ${Math.round(bootCrash.elapsedMs / 1000)}s`,
+      };
+    } else {
+      healthResult = winner.r;
+    }
+
     if (!healthResult.ok) {
       appendLog(`Health check failed (${healthResult.reason}): ${healthResult.detail}`);
+
+      // v2.6.17: surface the full-log capture before the
+      // truncated tail-200 capture below. When we got here via
+      // boot-watch, we already have the original stderr; emit it
+      // first so it's directly above the "Container state" line
+      // in the deploy log.
+      if (bootCrash) {
+        if (bootCrash.logTail && bootCrash.logTail.length > 0) {
+          appendLog('── container stdout/stderr (full boot log, captured before restart-loop overwrote it) ──');
+          for (const line of bootCrash.logTail) appendLog(`  ${line}`);
+          appendLog('── end container output ──');
+        } else {
+          appendLog('Container produced no output before crash (process exited before writing to stdout/stderr).');
+        }
+      }
 
       // v2.6.15: capture diagnostics from the failing container BEFORE
       // dockerStop destroys it. Previously the container was rm'd with
