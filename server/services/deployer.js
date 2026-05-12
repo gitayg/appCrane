@@ -241,15 +241,35 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       if (!releaseDir.startsWith(dataDir)) throw new Error('Security: preExtractedDir is outside data directory');
       commitHash = opts.commitHash || 'unknown';
       appendLog(`Using pre-extracted release: ${releaseDir.split('/').pop()}`);
-    } else if (app.source_type === 'github' && app.github_url) {
-      appendLog(`Cloning ${app.github_url} (branch: ${app.branch || 'main'})...`);
+    } else if ((app.source_type === 'github' || app.source_type === 'managed') && app.github_url) {
+      // v2.6.14: 'github' and 'managed' clone the same way; only the token
+      // source differs. github = per-app PAT stored encrypted on the app
+      // row. managed = the platform-wide service-account PAT in settings
+      // (the same one appcrane_create_managed_app used to create the
+      // AMC_<slug> repo). Pre-v2.6.14 the deployer only handled 'github'
+      // and managed apps fell through to the "not deployable" error.
+      const isManaged = app.source_type === 'managed';
+      appendLog(`Cloning ${isManaged ? 'managed repo ' : ''}${app.github_url} (branch: ${app.branch || 'main'})...`);
 
       releaseDir = resolve(join(releasesDir, `${timestamp}-git`));
       mkdirSync(releaseDir, { recursive: true });
 
+      let token = null;
+      if (isManaged) {
+        const { getServiceTokenInternal } = await import('./githubService.js');
+        token = getServiceTokenInternal();
+        if (!token) {
+          throw new Error(
+            `App '${app.slug}' is source_type='managed' but the GitHub service-account token is not configured on this AppCrane install. ` +
+            `A platform_admin needs to set it at Settings → GitHub → "Service-account — AppCrane-managed repos" before managed apps can deploy.`
+          );
+        }
+      } else if (app.github_token_encrypted) {
+        token = decrypt(app.github_token_encrypted);
+      }
+
       let cloneUrl = app.github_url;
-      if (app.github_token_encrypted) {
-        const token = decrypt(app.github_token_encrypted);
+      if (token) {
         const url = new URL(app.github_url);
         url.username = token;
         cloneUrl = url.toString();
@@ -283,9 +303,9 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       appendLog(`Cloned successfully. Commit: ${commitHash}${commitMessage ? ` — ${commitMessage.split('\n')[0].slice(0, 80)}` : ''}`);
 
       // v2.3.6: cross-check local HEAD against GitHub's claim for this
-      // branch. Mismatch = refuse deploy. Skips quietly when disabled,
-      // for non-github URLs, or when GitHub is unreachable (we log but
-      // don't block on transient network issues).
+      // branch. Mismatch = refuse deploy. supplyChain.authForApp already
+      // handles both 'github' (per-app PAT) and 'managed' (service token),
+      // so no change needed here for the managed addition.
       try {
         const { verifyCommitSha } = await import('./supplyChain.js');
         await verifyCommitSha(app, releaseDir, app.branch || 'main', appendLog);
@@ -315,9 +335,22 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       releaseDir = resolve(join(releasesDir, releases[0]));
       appendLog(`Using legacy upload release (deprecated): ${releases[0]}`);
     } else {
+      // v2.6.14: be specific about WHAT'S WRONG instead of recommending
+      // a value the app might already have. The pre-fix message said
+      // "Set source_type to 'github' or 'managed'" — which read as
+      // contradictory for an app whose source_type was already 'managed'
+      // but missing github_url (created out-of-band, or row corrupted).
+      const st = app.source_type || '(unset)';
+      if ((st === 'github' || st === 'managed') && !app.github_url) {
+        throw new Error(
+          `App '${app.slug}' has source_type='${st}' but no github_url set. ` +
+          `Run appcrane_update_app slug='${app.slug}' github_url='https://github.com/<owner>/<repo>' (and, for source_type='github', a github_token too).`
+        );
+      }
       throw new Error(
-        `App '${app.slug}' has source_type='${app.source_type || '(unset)'}' which is not deployable. ` +
-        `Set source_type to 'github' with a github_url, or 'managed' for a service-account-owned repo.`
+        `App '${app.slug}' has source_type='${st}' which is not deployable on this AppCrane install. ` +
+        `Valid source_types are 'github' (per-app PAT, github_url required) and 'managed' (service-account-owned AMC_<slug> repo, no per-app PAT). ` +
+        `Run appcrane_update_app to set a deployable source_type.`
       );
     }
 
