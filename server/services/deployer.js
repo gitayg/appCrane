@@ -24,9 +24,42 @@ import { ensureCodebaseContext } from './appstudio/contextBuilder.js';
  *   { ok: false, reason: 'not_json', detail }     200 but body wasn't JSON
  *   { ok: false, reason: 'missing_fields', detail } JSON but lacks status/version
  */
+// v2.6.15: classify the network-level failure mode that bubbles up from
+// undici (Node's fetch implementation). "fetch failed" alone doesn't tell
+// you whether to look at your CMD, your listen(), or AppCrane's network —
+// `e.cause?.code` does. Map the common codes to a human label so the
+// deploy log says "connection refused — process running but port not
+// open" instead of "fetch failed".
+function classifyFetchError(e) {
+  const code = e?.cause?.code || e?.code || '';
+  const messageCue = String(e?.cause?.message || e?.message || '');
+  switch (code) {
+    case 'ECONNREFUSED':
+      return { code, label: 'connection refused', hint: 'Process not yet listening on the port, or listening on a different interface than 0.0.0.0' };
+    case 'ECONNRESET':
+      return { code, label: 'connection reset',   hint: 'Port opened then the server crashed/closed mid-handshake. Check app logs for a panic.' };
+    case 'ETIMEDOUT':
+    case 'UND_ERR_CONNECT_TIMEOUT':
+      return { code: code || 'ETIMEDOUT', label: 'connection timeout', hint: 'Port might be accepting but never responding. Container blocked? Loopback firewalled?' };
+    case 'UND_ERR_HEADERS_TIMEOUT':
+    case 'UND_ERR_BODY_TIMEOUT':
+      return { code, label: 'response timeout', hint: 'Port opened and accepted, but the app never wrote a response. Synchronous CPU-bound work blocking the event loop?' };
+    case 'ENOTFOUND':
+    case 'EAI_AGAIN':
+      return { code, label: 'DNS failure', hint: 'Hostname unresolvable — unusual for a localhost probe; check the URL.' };
+    case 'EHOSTUNREACH':
+    case 'ENETUNREACH':
+      return { code, label: 'host unreachable', hint: 'Routing problem on the AppCrane host itself.' };
+    default:
+      if (/aborted|signal/i.test(messageCue)) return { code: 'ABORT', label: 'timeout (3s per attempt)', hint: 'Server accepted but never replied within 3s.' };
+      return { code: code || 'UNKNOWN', label: e?.message || 'fetch failed', hint: '' };
+  }
+}
+
 async function probeHealthEndpoint(url, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   let lastError = null;
+  let lastErrorClass = null;
   let lastStatus = null;
   let lastBodyPreview = null;
 
@@ -57,15 +90,18 @@ async function probeHealthEndpoint(url, timeoutMs) {
         };
       }
     } catch (e) {
-      lastError = e.message || String(e);
+      lastErrorClass = classifyFetchError(e);
+      lastError = lastErrorClass.label + (lastErrorClass.code && lastErrorClass.code !== 'UNKNOWN' ? ` [${lastErrorClass.code}]` : '');
     }
     await new Promise(r => setTimeout(r, 2000));
   }
+  const cls = lastErrorClass;
   return {
     ok: false,
     reason: 'timeout',
+    errorCode: cls?.code || null,
     detail: lastError
-      ? `No healthy response within ${timeoutMs}ms (last error: ${lastError})`
+      ? `No healthy response within ${timeoutMs}ms. Last failure: ${lastError}${cls?.hint ? `. ${cls.hint}` : ''}`
       : `No healthy response within ${timeoutMs}ms (last status: ${lastStatus ?? 'no response'}, last body: ${JSON.stringify(lastBodyPreview ?? '')})`,
   };
 }
@@ -205,11 +241,17 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
   // Our Dockerfile runs as the `node` user (UID 1000 in node:*-alpine), so
   // chown -R the shared dir to 1000:1000 on Linux; otherwise the container
   // gets a read-only /data and apps crash with EACCES on their first write.
-  // Recursive chown also fixes files left over from older rootful containers.
-  // No-op on macOS/dev (chown fails silently, containers run rootful there).
+  // v2.6.15: log the result of chown — silent failure was masking a
+  // suspected first-deploy permissions issue (sub-bug C in the deploy
+  // #178 report). Successful chown logs at info; failure logs the
+  // underlying error so the operator can see EACCES / no-such-user.
+  let chownDetail = null;
   try {
     execFileSync('chown', ['-R', '1000:1000', sharedData], { stdio: 'pipe', timeout: 30000 });
-  } catch (_) {}
+    chownDetail = `chown 1000:1000 ${sharedData} → ok`;
+  } catch (e) {
+    chownDetail = `chown 1000:1000 ${sharedData} → failed (${e?.stderr?.toString().trim() || e.message}). App may hit EACCES on /data writes if its container runs as a non-root user.`;
+  }
 
   const deployLog = [];
   let deployFinished = false;
@@ -223,6 +265,11 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
         .run(deployLog.join('\n'), deployId);
     }
   };
+
+  // v2.6.15: surface the data-volume chown result captured during dir
+  // setup. Was silently swallowed; now visible in the deploy log so an
+  // operator chasing "fetch failed" can rule volume permissions in/out.
+  if (chownDetail) appendLog(chownDetail);
 
   try {
     // 1. Clone or locate release
@@ -558,6 +605,37 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     const healthResult = await probeHealthEndpoint(healthUrl, 30000);
     if (!healthResult.ok) {
       appendLog(`Health check failed (${healthResult.reason}): ${healthResult.detail}`);
+
+      // v2.6.15: capture diagnostics from the failing container BEFORE
+      // dockerStop destroys it. Previously the container was rm'd with
+      // its logs, leaving the operator with "fetch failed" and zero
+      // evidence. Now we capture container state (running / exited +
+      // exit code + OOM flag + start/finish times) and a 200-line tail
+      // of stdout/stderr into the deploy log, so the failure stays
+      // diagnosable from the persisted deployments.log row.
+      const containerName = `appcrane-${app.slug}-${env}`;
+      try {
+        const inspectOut = execFileSync('docker', ['inspect', containerName, '--format',
+          '{{.State.Status}}|{{.State.ExitCode}}|{{.State.OOMKilled}}|{{.State.Error}}|{{.State.StartedAt}}|{{.State.FinishedAt}}',
+        ], { stdio: 'pipe', timeout: 5000 }).toString().trim();
+        const [status, exitCode, oom, err, startedAt, finishedAt] = inspectOut.split('|');
+        appendLog(`Container state: status=${status}${exitCode !== '0' ? ` exit=${exitCode}` : ''}${oom === 'true' ? ' OOM-KILLED' : ''}${err ? ` err="${err}"` : ''} started=${startedAt}${finishedAt && finishedAt !== '0001-01-01T00:00:00Z' ? ` finished=${finishedAt}` : ''}`);
+      } catch (e) {
+        appendLog(`docker inspect ${containerName} failed: ${e?.stderr?.toString().trim() || e.message}`);
+      }
+      try {
+        const logsOut = execFileSync('docker', ['logs', '--tail', '200', containerName], { stdio: 'pipe', timeout: 10000 }).toString();
+        if (logsOut.trim()) {
+          appendLog(`── container stdout/stderr (last 200 lines) ──`);
+          for (const line of logsOut.trimEnd().split('\n')) appendLog(`  ${line}`);
+          appendLog(`── end container output ──`);
+        } else {
+          appendLog(`Container produced no stdout/stderr (process exited before printing, or wrote to a file).`);
+        }
+      } catch (e) {
+        appendLog(`docker logs ${containerName} failed: ${e?.stderr?.toString().trim() || e.message}`);
+      }
+
       await dockerStop(app.slug, env).catch(() => {});
       if (prevImage) {
         appendLog(`Reverting to previous image: ${prevImage}`);
@@ -567,7 +645,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
         `New container failed health check at ${healthPath}: ${healthResult.detail}\n` +
         `Add a route that returns JSON like {"status":"ok","version":"1.0.0"} ` +
         `(declare the path in deployhub.json as be.health, or use the default /api/health). ` +
-        `Previous version restored.`
+        `${prevImage ? 'Previous version restored.' : 'Container destroyed (first deploy, no previous version to fall back to). See deploy log above for container output captured before rollback.'}`
       );
     }
     appendLog('Health check passed');
