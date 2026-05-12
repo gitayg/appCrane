@@ -341,13 +341,32 @@ export function Applications() {
     const ts = Date.now()
     const name = `onboarding-${ts}`
     const email = `onboarding-${ts}@appcrane`
-    const r = await adminApi.post<{ key?: string; api_key?: string; user?: { id: number } }>('/api/users', {
+    // v2.6.12: two-step issuance. POST /api/users creates the agent
+    // identity (and a `dhk_admin_*` REST key as a side-effect of user
+    // creation — never shown to anyone, stays in users.api_key_hash).
+    // Then POST /api/users/:id/mcp-keys issues a `dhk_mcp_*` key that's
+    // restricted server-side to /api/mcp only (see auth.js KEY_SCOPE_
+    // RESTRICTED). That's the key we hand to the agent — if leaked it
+    // can't be used to hit REST endpoints, only the MCP surface this
+    // identity actually needs.
+    const u = await adminApi.post<{ user?: { id: number } }>('/api/users', {
       name,
       email,
-      role: 'admin',
+      role: 'admin',  // role for MCP authz; admin needed for create_app
       kind: 'agent',
     }).catch(() => null)
-    const key = r?.key ?? r?.api_key ?? ''
+    const userId = u?.user?.id
+    let key = ''
+    if (userId) {
+      const k = await adminApi.post<{ api_key?: string }>(`/api/users/${userId}/mcp-keys`, {
+        label: `onboarding-${ts}`,
+      }).catch(() => null)
+      key = k?.api_key ?? ''
+    }
+    if (!key) {
+      alert('Failed to issue MCP key for the new onboarding agent. Check the server logs.')
+      return
+    }
     const origin = typeof window !== 'undefined' ? window.location.origin : 'https://your-appcrane-host'
     const host = typeof window !== 'undefined' ? window.location.host : 'your-appcrane-host'
     const brief = `You are AppCrane's app-onboarding agent. Your job: take this conversation
@@ -484,13 +503,17 @@ CONSTRAINTS — common pitfalls that fail deploys:
     void brief // kept above for reference; the modal now hands off to MCP
     const prompt = `Onboard a new application end-to-end via an AppCrane onboarding agent.
 
+────────────────────────────────────────────────────────────────────
+ PATH A — You have a GitHub account (or can create one)
+────────────────────────────────────────────────────────────────────
+
 === STEP 1 — Generate a GitHub PAT ===
 
 At https://github.com/settings/tokens. Classic: scope \`repo\`. Or
-fine-grained: Contents R/W, Metadata R, Administration W (for the orgs/repos
-you want to onboard apps for). The PAT lives only in your local
-~/.claude.json — never stored on the AppCrane server, only passed through as
-a header at request time.
+fine-grained (recommended): Contents R/W, Metadata R, Administration W
+(for the orgs/repos you want to onboard apps for). The PAT lives only in
+your local ~/.claude.json — never stored on the AppCrane server, only
+passed through as a header at request time.
 
 === STEP 2 — Wire AppCrane MCP into your local Claude Code ===
 
@@ -511,11 +534,49 @@ In any terminal: \`claude\`. First message (paste verbatim or paraphrase):
 
   Onboard a new app on AppCrane. Start by calling appcrane_get_guide with
   topic="onboarding" to fetch the latest playbook. Then ask me the inputs
-  the guide lists, and walk through paths (a)/(b)/(c)/(d) accordingly.
+  the guide lists, and walk through paths (a)/(b)/(c) accordingly.
 
-The agent pulls the current playbook itself — covers the four onboarding
-paths, the health-endpoint contract, app-icon convention, common pitfalls.
-Stays in sync as AppCrane evolves; no copy-paste required.`
+────────────────────────────────────────────────────────────────────
+ PATH B — Managed app (no GitHub account, no PAT, nothing to install)
+────────────────────────────────────────────────────────────────────
+
+If you don't have a GitHub account or don't want to deal with one,
+AppCrane can host the code for you. Your platform admin has to have
+configured the service-account in Settings → GitHub first (one-time per
+install); after that the flow for you is:
+
+=== STEP M1 — Wire AppCrane MCP into your local Claude Code ===
+
+Same install as above, but DROP the X-Github-Token header — you're not
+using your own GitHub:
+
+  claude mcp add --transport http appcrane ${origin}/api/mcp \\
+    --header "X-API-Key: ${key}"
+
+=== STEP M2 — Ask the agent to onboard a managed app ===
+
+In any terminal: \`claude\`. First message:
+
+  Onboard a new managed AppCrane app for me. I don't have a GitHub
+  account, so use path (d). Call appcrane_get_guide topic="onboarding"
+  first to pull the latest playbook, then walk me through it. Pick a
+  small Vite + React + TS stack, ask me a name + what it does, and ship
+  it to sandbox.
+
+The agent will call \`appcrane_create_managed_app\` — AppCrane's service
+account creates a private repo named \`AMC_<your_slug>\`, holds the
+credential, and pushes scaffolding for you via github_* tools that
+authenticate transparently. You end with a sandbox URL. You never touch
+github.com, never enter a token anywhere.
+
+If the platform admin hasn't enabled the service-account yet, the agent
+will fall back to PATH A and ask you for a PAT.
+
+────────────────────────────────────────────────────────────────────
+
+Both paths use the same onboarding playbook — the agent fetches it on
+every run, so it stays in sync as AppCrane evolves. No copy-paste of
+the playbook itself required.`
     setPromptModal({
       open: true,
       title: 'New Application Onboarding',

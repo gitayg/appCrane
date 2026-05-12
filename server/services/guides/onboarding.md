@@ -105,18 +105,45 @@ wrote without asking.
 
 1. Pick slug + stack as in (a). Propose; wait for ✅.
 2. `appcrane_create_managed_app({ name, slug, branch: "main", description })` —
-   AppCrane creates the private repo on its service account; the returned
-   `repo.html_url` is the github_url and the repo is auto-init'd with a
-   README on the default branch.
-3. Push scaffolding via `github_push_files` to the returned `full_name` —
-   the SAME files as path (a) step 3 (package.json, deployhub.json, sources,
-   `/api/health` route returning `{status, version}`).
+   AppCrane creates a private repo named `AMC_<slug>` on its service
+   account. The returned `repo.html_url` is the github_url and the repo
+   is auto-init'd with a README on the default branch.
+3. **Push scaffolding via `appcrane_push_to_managed_app`, NOT `github_push_files`.**
+   This is the most common mistake. The reason: `github_*` tools authenticate
+   with your X-Github-Token header — which is the END USER'S personal PAT (or
+   nothing, on path (d)). It has ZERO write permission on the AppCrane service
+   account's repos. You can only push to managed repos through AppCrane's
+   server-side service-account credential, which `appcrane_push_to_managed_app`
+   does for you. Same files as path (a) step 3 — package.json, deployhub.json,
+   sources, `/api/health` route returning `{status, version}` — but passed as
+   an array of `{ path, content }` in one call:
+   ```
+   appcrane_push_to_managed_app({
+     slug: "<your_slug>",
+     files: [
+       { path: "package.json",   content: "..." },
+       { path: "deployhub.json", content: "..." },
+       { path: "src/index.js",   content: "..." },
+       ...
+     ],
+     message: "scaffolding for <your_slug>"
+   })
+   ```
+   All files land as a single commit. For binary files (e.g. `public/icon.png`),
+   base64-encode the content and add `encoding: "base64"` to that file.
 4. `appcrane_set_env` (only if user has secrets)
 5. `appcrane_deploy(slug, "sandbox")`
-6. `appcrane_get_logs` — confirm health green; iterate via
-   `github_create_or_update_file` + redeploy if red.
+6. `appcrane_get_logs` — confirm health green. If red and you need to fix a
+   file: another `appcrane_push_to_managed_app` call with the corrected file,
+   then redeploy.
 
 The end user never sees github.com. They get a sandbox URL.
+
+**Reading from a managed repo.** For now there's no MCP tool for reading
+files from a managed app. If you need to see what's there (e.g. before
+patching), check `repo.html_url` from the create response and the user
+can paste relevant content back to you. A read-side tool can be added
+later if this becomes a recurring need.
 
 ## App tile icon (optional, recommended)
 

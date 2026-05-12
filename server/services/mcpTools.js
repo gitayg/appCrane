@@ -1710,7 +1710,59 @@ const TOOLS = [
         },
         ports,
         urls,
-        next: `Push scaffolding to the repo (the repo is auto-init'd with a README on default branch '${branch}'), then appcrane_deploy slug="${slug}" env="sandbox".`,
+        next: `Push scaffolding via appcrane_push_to_managed_app slug="${slug}" files=[…], then appcrane_deploy slug="${slug}" env="sandbox". Do NOT use github_push_files for this repo — that's authed with the user's PAT and has zero access to the service account.`,
+      };
+    },
+  },
+
+  {
+    name: 'appcrane_push_to_managed_app',
+    description:
+      'Push a batch of files to a managed app\'s AMC_<slug> repo, authenticated server-side via AppCrane\'s service-account credential. Use this — NOT github_push_files — for managed apps, because github_* tools authenticate with the caller\'s personal PAT, which has zero access to the service account\'s repos. Multiple files become a single commit. files: [{ path, content, encoding? }] where encoding defaults to "utf-8" (use "base64" for binaries like icons). Requires the app to already exist via appcrane_create_managed_app.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        slug:    { type: 'string', description: 'Managed app slug. Repo name resolved as AMC_<slug>.' },
+        files:   {
+          type: 'array',
+          minItems: 1,
+          maxItems: 200,
+          items: {
+            type: 'object',
+            properties: {
+              path:     { type: 'string', description: 'Repo-relative path (no leading slash, no ..)' },
+              content:  { type: 'string', description: 'File content. For binary, base64-encode and set encoding="base64".' },
+              encoding: { type: 'string', enum: ['utf-8', 'base64'], description: 'Defaults to utf-8.' },
+            },
+            required: ['path', 'content'],
+            additionalProperties: false,
+          },
+        },
+        message: { type: 'string', description: 'Commit message. Defaults to "chore: scaffolding for <slug>".' },
+        branch:  { type: 'string', description: 'Target branch. Defaults to the repo\'s default branch (usually "main").' },
+      },
+      required: ['slug', 'files'],
+      additionalProperties: false,
+    },
+    requiredRole: 'admin',
+    handler: async (user, args) => {
+      const app = getAppForUser(user, args.slug);
+      if (app.source_type !== 'managed') {
+        throw new Error(`App '${app.slug}' is source_type='${app.source_type || 'github'}' — appcrane_push_to_managed_app only works for source_type='managed' apps. For regular GitHub apps, use the github_* MCP tools with your X-Github-Token.`);
+      }
+      const { pushFilesToManagedRepo } = await import('./githubService.js');
+      const result = await pushFilesToManagedRepo(app.slug, args.files, {
+        message: args.message,
+        branch:  args.branch || app.branch,
+      });
+      log.info(`MCP: pushed ${result.files.length} file(s) to managed repo AMC_${app.slug} (commit ${result.commit.sha.slice(0, 7)}) by user ${user.id}`);
+      return {
+        app:     app.slug,
+        commit:  result.commit,
+        branch:  result.branch,
+        files:   result.files,
+        message: result.message,
+        next:    `Files pushed. Next: appcrane_deploy slug="${app.slug}" env="sandbox" to ship.`,
       };
     },
   },

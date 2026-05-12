@@ -1,7 +1,7 @@
 {
   "name": "AppCrane",
   "description": "Self-service app hosting and deployment.",
-  "version": "0.6.10",
+  "version": "0.6.13",
   "be": {
     "entry": "node server/index.js",
     "health": "/api/info"

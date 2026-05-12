@@ -141,22 +141,44 @@ export async function apiFetch(path, { method = 'GET', body, headers = {} } = {}
 }
 
 /**
+ * Naming convention for AppCrane-managed repos (v2.6.11+).
+ *
+ * Every repo created via the service account is prefixed `AMC_` so the
+ * service-account's repo list is easy to identify, audit, and scope
+ * fine-grained PAT access to. The slug stays the AppCrane-internal
+ * identifier; the GitHub repo name is `AMC_<slug>`.
+ *
+ * Example: AppCrane app slug `castle` → GitHub repo `AMC_castle`.
+ *
+ * Exposed so the audit / cleanup tooling can match against the same
+ * prefix without duplicating it.
+ */
+export const MANAGED_REPO_PREFIX = 'AMC_';
+export function managedRepoNameForSlug(slug) {
+  return `${MANAGED_REPO_PREFIX}${slug}`;
+}
+
+/**
  * Create a repository under the configured service account/org.
  *
- * Returns the GitHub API response (cherry-picked to the fields AppCrane
- * cares about: full_name, html_url, clone_url, default_branch, private).
+ * v2.6.11 changes:
+ *   - Repo name is `AMC_<slug>` (not just `<slug>`). Lets the operator
+ *     scope a fine-grained PAT to "AMC_*" repos and trust the rest of
+ *     the service account's namespace is untouched
+ *   - Pre-flight existence check via GET /repos/{owner}/{name}. If the
+ *     repo already exists, throw a clear "REPO_EXISTS" error before
+ *     POSTing — the previous behavior leaked GitHub's 422 verbatim
+ *     ("name already exists on this account"), which was confusing in
+ *     the deploy log
  *
- * Throws if the service account is disabled, unconfigured, or GitHub
- * rejects the request (most commonly: name collision → 422).
- *
- * `slug` is the AppCrane app slug; we use it verbatim as the repo name so
- * the mapping stays predictable. Caller is responsible for slug validation
- * upstream (the apps.slug column already enforces a sane charset).
+ * Returns the GitHub API response (cherry-picked).
  */
 export async function createAppRepo(slug, { description = '', autoInit = true } = {}) {
   if (!slug || typeof slug !== 'string') throw new Error('slug is required');
   const cfg = getServiceConfig();
   if (!cfg.owner) throw new Error('github_service_owner is not configured');
+
+  const repoName = managedRepoNameForSlug(slug);
 
   // Org repos go through /orgs/{owner}/repos; user repos through /user/repos.
   // We don't know which the owner is up front, so probe /users/{owner} once
@@ -165,9 +187,33 @@ export async function createAppRepo(slug, { description = '', autoInit = true } 
   const owner = await apiFetch(`/users/${encodeURIComponent(cfg.owner)}`);
   const isOrg = owner?.type === 'Organization';
 
+  // Pre-flight: does the repo already exist on the service account?
+  // A 404 here = clean to create; a 200 = name taken, fail with a
+  // diagnostic rather than letting POST blow up with a generic 422.
+  // Anything else (403, 500, network) = let the create attempt surface
+  // it; this check is best-effort.
+  try {
+    const existing = await apiFetch(
+      `/repos/${encodeURIComponent(cfg.owner)}/${encodeURIComponent(repoName)}`
+    );
+    if (existing?.full_name) {
+      const err = new Error(
+        `REPO_EXISTS: ${existing.full_name} already exists on the service account. ` +
+        `Pick a different app slug, or delete the existing repo if it's safe to do so.`
+      );
+      err.status = 409;
+      err.body = { code: 'REPO_EXISTS', existing: existing.full_name };
+      throw err;
+    }
+  } catch (e) {
+    if (e?.status === 409) throw e;          // re-throw our own collision
+    if (e?.status === 404) { /* expected — proceed to create */ }
+    // any other status: log-and-continue; the POST will surface real errors
+  }
+
   const path = isOrg ? `/orgs/${encodeURIComponent(cfg.owner)}/repos` : '/user/repos';
   const body = {
-    name:        slug,
+    name:        repoName,
     description: description || `AppCrane-managed app: ${slug}`,
     private:     cfg.visibility !== 'public',
     visibility:  cfg.visibility,
@@ -188,5 +234,109 @@ export async function createAppRepo(slug, { description = '', autoInit = true } 
     private:        repo.private,
     visibility:     repo.visibility,
     owner_type:     isOrg ? 'org' : 'user',
+  };
+}
+
+/**
+ * Push a batch of files to a managed AMC_<slug> repo as a single commit
+ * (v2.6.13).
+ *
+ * The end-user agent's `github_push_files` MCP tool authenticates with
+ * the user's own X-Github-Token header — which has zero permissions on
+ * the AppCrane service account's repos. So managed-app scaffolding has
+ * to go through the SERVER-side service-account credential we already
+ * hold encrypted. That's this helper.
+ *
+ * Uses the Trees + Commits + Refs API rather than per-file Contents API
+ * so N files = 1 commit (not N commits). Cheaper, cleaner history.
+ *
+ *   files: [{ path, content, encoding? }]
+ *   encoding: 'utf-8' (default) or 'base64' (for binaries like icons)
+ *
+ * Returns { commit: { sha, html_url }, branch, files: [paths] }.
+ *
+ * Throws REPO_NOT_FOUND if the AMC_<slug> repo doesn't exist on the
+ * service account; the caller probably forgot to call
+ * appcrane_create_managed_app first.
+ */
+export async function pushFilesToManagedRepo(slug, files, opts = {}) {
+  if (!slug || typeof slug !== 'string') throw new Error('slug is required');
+  if (!Array.isArray(files) || files.length === 0) throw new Error('files must be a non-empty array');
+  for (const f of files) {
+    if (!f || typeof f.path !== 'string' || typeof f.content !== 'string') {
+      throw new Error('each file needs { path: string, content: string }');
+    }
+    if (f.path.includes('..') || f.path.startsWith('/')) {
+      throw new Error(`invalid file path '${f.path}': must be repo-relative, no ".." or leading slash`);
+    }
+    if (f.encoding && !['utf-8', 'base64'].includes(f.encoding)) {
+      throw new Error(`invalid encoding '${f.encoding}': must be 'utf-8' or 'base64'`);
+    }
+  }
+
+  const cfg = getServiceConfig();
+  if (!cfg.owner) throw new Error('github_service_owner is not configured');
+  const repoName = managedRepoNameForSlug(slug);
+  const ownerRepo = `${encodeURIComponent(cfg.owner)}/${encodeURIComponent(repoName)}`;
+
+  // Repo must exist. Fast-fail with a clearer error than the GitHub 404.
+  let repo;
+  try {
+    repo = await apiFetch(`/repos/${ownerRepo}`);
+  } catch (e) {
+    if (e?.status === 404) {
+      const err = new Error(`REPO_NOT_FOUND: ${cfg.owner}/${repoName} doesn't exist on the service account. Did you call appcrane_create_managed_app first?`);
+      err.status = 404;
+      throw err;
+    }
+    throw e;
+  }
+
+  const branch = opts.branch || repo.default_branch || 'main';
+  const message = opts.message || `chore: scaffolding for ${slug}`;
+
+  // 1. Current branch tip
+  const ref = await apiFetch(`/repos/${ownerRepo}/git/ref/heads/${encodeURIComponent(branch)}`);
+  const parentCommitSha = ref.object.sha;
+
+  // 2. Parent commit's tree
+  const parentCommit = await apiFetch(`/repos/${ownerRepo}/git/commits/${parentCommitSha}`);
+  const parentTreeSha = parentCommit.tree.sha;
+
+  // 3. Create blobs for every file. Done in parallel — GitHub rate-limits
+  // separately from REST endpoints (5000/h for authenticated). For a
+  // ~20-file scaffold that's fine.
+  const blobs = await Promise.all(files.map(async (f) => {
+    const blob = await apiFetch(`/repos/${ownerRepo}/git/blobs`, {
+      method: 'POST',
+      body: { content: f.content, encoding: f.encoding || 'utf-8' },
+    });
+    return { path: f.path, sha: blob.sha, mode: '100644', type: 'blob' };
+  }));
+
+  // 4. New tree based on parent, with our blobs grafted in.
+  const newTree = await apiFetch(`/repos/${ownerRepo}/git/trees`, {
+    method: 'POST',
+    body: { base_tree: parentTreeSha, tree: blobs },
+  });
+
+  // 5. Commit pointing at the new tree.
+  const newCommit = await apiFetch(`/repos/${ownerRepo}/git/commits`, {
+    method: 'POST',
+    body: { message, tree: newTree.sha, parents: [parentCommitSha] },
+  });
+
+  // 6. Move the branch ref forward. Not force — if someone else pushed
+  // in the meantime we'd want a clear error rather than silent overwrite.
+  await apiFetch(`/repos/${ownerRepo}/git/refs/heads/${encodeURIComponent(branch)}`, {
+    method: 'PATCH',
+    body: { sha: newCommit.sha, force: false },
+  });
+
+  return {
+    commit: { sha: newCommit.sha, html_url: `${repo.html_url}/commit/${newCommit.sha}` },
+    branch,
+    files: files.map(f => f.path),
+    message,
   };
 }
