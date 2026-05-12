@@ -559,6 +559,28 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     });
     appendLog(`Image ready: ${image}`);
 
+    // v2.6.16: pre-flight entry-exists check. Validate that the entry
+    // declared in deployhub.json actually resolves in the built image
+    // BEFORE we stop the old container or hand off to the 30s health
+    // probe. Converts a 30s mystery timeout (the common
+    // monorepo-build-vs-flat-entry mismatch) into a 1s actionable
+    // error with suggested candidates spelled out.
+    if (manifest.be?.entry) {
+      const { preflightEntryCheck } = await import('./preflightCheck.js');
+      appendLog(`Pre-flight: validating be.entry "${manifest.be.entry}" against built image…`);
+      const pf = await preflightEntryCheck({ image, entry: manifest.be.entry });
+      if (pf.skipped) {
+        appendLog(`Pre-flight skipped (${pf.skipped}); proceeding to health check.`);
+      } else if (!pf.ok) {
+        for (const line of pf.message.split('\n')) appendLog(line);
+        // Old container is still running — we have NOT called dockerStop yet,
+        // so the previous version stays live and serving traffic.
+        throw new Error(`Pre-flight: ${pf.shortReason}. See deploy log for suggested candidates and fix.`);
+      } else {
+        appendLog('Pre-flight passed.');
+      }
+    }
+
     // Capture old image tag so we can revert if health check fails (Feature 9)
     let prevImage = null;
     try { prevImage = await getContainerImage(app.slug, env); } catch (_) {}
