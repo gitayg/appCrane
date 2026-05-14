@@ -4,6 +4,7 @@ import { join, resolve } from 'path';
 import { getDb } from '../db.js';
 import { verifyPassword, generateSessionToken, hashApiKey, hashPassword } from '../services/encryption.js';
 import { AppError } from '../utils/errors.js';
+import { setSessionCookie, clearSessionCookie } from '../utils/sessionCookie.js';
 import log from '../utils/logger.js';
 
 const ICON_DIR = resolve(process.env.DATA_DIR || './data', 'apps');
@@ -123,6 +124,13 @@ router.post('/login', (req, res) => {
     has_github: !!a.has_github,
   })).filter(a => isAdmin || a.visibility !== 'hidden');
 
+  // v2.6.18: set cc_token cookie server-side. Eliminates the class
+  // of bugs where the SPA's client-side cookie write was missing
+  // (direct nav, new tab, browser restart) or had wrong attributes
+  // (path / SameSite), which blocked Caddy forward_auth on per-app
+  // routes and bounced users to /applications.
+  setSessionCookie(res, token, req);
+
   res.json({
     token,
     expires_at: expiresAt,
@@ -149,10 +157,16 @@ router.post('/login', (req, res) => {
 router.get('/verify', (req, res) => {
   const authHeader = req.headers.authorization || '';
   let token = authHeader.replace('Bearer ', '').trim();
-  const isApiClient = !!authHeader; // API clients send Authorization header; browsers/Caddy don't
+  // v2.6.18: also accept X-API-Key (matches the rest of the AppCrane
+  // API surface and lets ops tools / MCP clients hit per-app URLs
+  // without juggling browser cookies). Looked up against
+  // users.api_key_hash, not identity_sessions — same as the rest of
+  // the codebase's middleware/auth.js path.
+  const apiKey = (req.headers['x-api-key'] || '').toString().trim();
+  const isApiClient = !!(authHeader || apiKey); // browsers/Caddy don't send either header
 
   // Fallback: read cc_token cookie (forwarded by Caddy forward_auth from the browser)
-  if (!token) {
+  if (!token && !apiKey) {
     const cookies = req.headers.cookie || '';
     const match = cookies.match(/(?:^|;\s*)cc_token=([^;]+)/);
     if (match) token = decodeURIComponent(match[1]);
@@ -234,35 +248,52 @@ router.get('/verify', (req, res) => {
     return res.redirect(302, `${craneUrl}/login${qs}`);
   }
 
-  if (!token) {
+  if (!token && !apiKey) {
     if (!isApiClient) return loginRedirect();
-    throw new AppError('Authorization: Bearer TOKEN header required', 401, 'NO_TOKEN');
+    throw new AppError('Authorization: Bearer TOKEN, X-API-Key, or cc_token cookie required', 401, 'NO_TOKEN');
   }
 
   const db = getDb();
-  const tokenHash = hashApiKey(token);
 
-  // SECURITY: pull u.active too so a deactivated user's lingering session
-  // doesn't keep waving them through Caddy forward_auth into iframed apps
-  // (security review v1.27.34 H6). Lookup remains a single query so the
-  // existing redirect-when-cookie-only flow stays intact.
-  const session = db.prepare(`
-    SELECT s.*, u.id as user_id, u.name, u.email, u.username, u.avatar_url, u.phone, u.year_of_birth, u.role as crane_role, u.active as user_active
-    FROM identity_sessions s
-    JOIN users u ON s.user_id = u.id
-    WHERE s.token_hash = ?
-  `).get(tokenHash);
+  // Resolve to a session-like row { user_id, name, email, username,
+  // avatar_url, phone, year_of_birth, crane_role, user_active,
+  // app_id, expires_at }. Two paths:
+  //   (1) X-API-Key  → users.api_key_hash (no expiry, no app_id)
+  //   (2) Bearer / cc_token → identity_sessions
+  let session = null;
+  if (apiKey) {
+    const keyHash = hashApiKey(apiKey);
+    const u = db.prepare(`
+      SELECT id as user_id, name, email, username, avatar_url, phone, year_of_birth,
+             role as crane_role, active as user_active
+      FROM users WHERE api_key_hash = ?
+    `).get(keyHash);
+    if (u) {
+      session = { ...u, app_id: null, expires_at: null };
+    }
+  } else {
+    const tokenHash = hashApiKey(token);
+    // SECURITY: pull u.active too so a deactivated user's lingering session
+    // doesn't keep waving them through Caddy forward_auth into iframed apps
+    // (security review v1.27.34 H6). Lookup remains a single query so the
+    // existing redirect-when-cookie-only flow stays intact.
+    session = db.prepare(`
+      SELECT s.*, u.id as user_id, u.name, u.email, u.username, u.avatar_url, u.phone, u.year_of_birth, u.role as crane_role, u.active as user_active
+      FROM identity_sessions s
+      JOIN users u ON s.user_id = u.id
+      WHERE s.token_hash = ?
+    `).get(tokenHash);
+
+    if (session && session.expires_at && new Date(session.expires_at) < new Date()) {
+      db.prepare('DELETE FROM identity_sessions WHERE token_hash = ?').run(tokenHash);
+      if (!isApiClient) return loginRedirect();
+      throw new AppError('Token expired', 401, 'TOKEN_EXPIRED');
+    }
+  }
 
   if (!session) {
     if (!isApiClient) return loginRedirect();
     throw new AppError('Invalid or expired token', 401, 'INVALID_TOKEN');
-  }
-
-  // Check expiry
-  if (new Date(session.expires_at) < new Date()) {
-    db.prepare('DELETE FROM identity_sessions WHERE token_hash = ?').run(tokenHash);
-    if (!isApiClient) return loginRedirect();
-    throw new AppError('Token expired', 401, 'TOKEN_EXPIRED');
   }
 
   // Refuse the session if the user has been deactivated since login. The
@@ -341,6 +372,11 @@ router.get('/verify', (req, res) => {
 router.post('/logout', (req, res) => {
   const authHeader = req.headers.authorization || '';
   const token = authHeader.replace('Bearer ', '').trim();
+
+  // v2.6.18: clear the server-set cc_token cookie regardless of whether
+  // a Bearer token was provided (e.g. user already cleared localStorage
+  // but the cookie was lingering).
+  clearSessionCookie(res);
 
   if (!token) {
     return res.json({ message: 'No token provided' });
@@ -488,6 +524,13 @@ router.post('/set-password', (req, res) => {
     INSERT INTO identity_sessions (user_id, token_hash, expires_at)
     VALUES (?, ?, ?)
   `).run(user.id, hashApiKey(token), expiresAt);
+
+  // v2.6.18: set cc_token cookie for the fresh session — same as
+  // POST /login. Without this, the user logs in via /set-password
+  // (the migration path off dhk_admin_* API keys), gets a Bearer
+  // token, but per-app routes still 302 to /login because no cookie
+  // was set.
+  setSessionCookie(res, token, req);
 
   log.info(`User ${user.id} (${user.email || user.username}) set their own password`);
   res.json({

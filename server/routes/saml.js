@@ -3,6 +3,7 @@ import { SAML } from '@node-saml/node-saml';
 import { getDb } from '../db.js';
 import { encrypt, decrypt, generateSessionToken, hashApiKey, generateApiKey } from '../services/encryption.js';
 import { requireAuth, requirePlatformAdmin } from '../middleware/auth.js';
+import { setSessionCookie } from '../utils/sessionCookie.js';
 import log from '../utils/logger.js';
 
 const router = Router();
@@ -203,6 +204,10 @@ router.post('/callback', async (req, res) => {
     }
 
     const token      = createIdentitySession(user.id);
+    // v2.6.18: set cc_token cookie server-side on the redirect — see
+    // matching block in oidc.js callback for the full rationale.
+    setSessionCookie(res, token, req);
+
     const relayState = req.body.RelayState || '';
     const p          = new URLSearchParams({ oidc_token: token });
     if (relayState && relayState.startsWith('http') && !relayState.includes('/login')) {

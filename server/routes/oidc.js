@@ -3,6 +3,7 @@ import crypto from 'crypto';
 import { getDb } from '../db.js';
 import { encrypt, decrypt, generateSessionToken, hashApiKey, generateApiKey } from '../services/encryption.js';
 import { requireAuth, requirePlatformAdmin } from '../middleware/auth.js';
+import { setSessionCookie } from '../utils/sessionCookie.js';
 import log from '../utils/logger.js';
 
 const router = Router();
@@ -316,6 +317,14 @@ router.get('/callback', async (req, res) => {
     // Create session and hand token back to the browser via login page JS
     const token = createIdentitySession(user.id);
     log.info(`OIDC login: ${user.name} (${email || sub})`);
+
+    // v2.6.18: set cc_token cookie server-side on the redirect response.
+    // The SPA's /login page also writes it client-side (Login.tsx's
+    // setAuthCookie absorbs ?oidc_token=…), but that fails to fire when
+    // the IdP redirect chain skips the SPA execution (e.g. browser
+    // navigates straight into a per-app route after callback). Setting
+    // it here closes that gap.
+    setSessionCookie(res, token, req);
 
     // Always go through /login so it sets the cookie, then forward to redirect target
     const p = new URLSearchParams({ oidc_token: token });
