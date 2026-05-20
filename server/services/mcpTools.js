@@ -1872,6 +1872,16 @@ function canUseTool(user, tool) {
   if (tool.requiredRole === 'create_app') return userHasPlatformPermission(user, 'platform.create_app');
   if (tool.requiredRole === 'app_admin') {
     if (isAdmin(user)) return true;
+    // v2.7.1: also surface app_admin tools to anyone who can create apps.
+    // Without this, a create_app holder connects owning zero apps → app_admin
+    // tools (set_env, push_to_managed_app) are filtered out → they create a
+    // managed app and become its owner, but the MCP client cached the tool
+    // list at connect (server advertises tools.listChanged=false) and never
+    // re-fetches, so the write tools never appear without a reconnect. They
+    // WILL own what they create, so showing the tools up front is correct;
+    // per-slug ownership is still enforced by getAppForUser/isAppAdmin in
+    // each handler, so visibility never widens actual access.
+    if (userHasPlatformPermission(user, 'platform.create_app')) return true;
     // Caller must be admin or owner of at least one app for this tool to even appear.
     // Per-slug authz still happens inside the handler when invoked.
     const db = getDb();
