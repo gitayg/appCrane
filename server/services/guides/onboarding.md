@@ -15,6 +15,21 @@ end-to-end, in one session.
 Use `github_*` for ALL code-level GitHub work. Do NOT shell out to `gh` or
 `git` CLI. Do NOT clone to local disk. Everything happens through MCP tools.
 
+## Prerequisite — the create-apps permission
+
+Creating an app is gated by the `platform.create_app` permission. AppCrane
+global admins always have it; any other user needs a platform admin to grant
+their tier at **Settings → Roles** (flip the `user` cell on the **Create apps**
+row). The gate is enforced both on `POST /api/apps` and on the MCP tools.
+
+If `appcrane_create_app` / `appcrane_create_managed_app` are NOT in your
+tool list, you don't hold the permission — the MCP server only advertises
+tools the calling key is authorized for. Tell the user to ask a platform
+admin to grant **Create apps** for their role, then reconnect / re-list
+tools. Once you create an app you become its **owner**, which unlocks
+`appcrane_set_env`, `appcrane_push_to_managed_app`, and `appcrane_deploy`
+for that app.
+
 ## Inputs to gather from the user (first turn, all at once)
 
 1. **Starting point** — one of:

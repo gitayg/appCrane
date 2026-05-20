@@ -5,6 +5,7 @@ import { getDb } from '../db.js';
 import { verifyPassword, generateSessionToken, hashApiKey, hashPassword } from '../services/encryption.js';
 import { AppError } from '../utils/errors.js';
 import { setSessionCookie, clearSessionCookie } from '../utils/sessionCookie.js';
+import { isSsoOnly } from '../services/authPolicy.js';
 import log from '../utils/logger.js';
 
 const ICON_DIR = resolve(process.env.DATA_DIR || './data', 'apps');
@@ -48,6 +49,14 @@ router.post('/login', (req, res) => {
   }
 
   const db = getDb();
+
+  // v2.7.0: SSO-only mode. When a platform admin has set auth_sso_only,
+  // password sign-in is disabled for everyone — the IdP is the only browser
+  // login path. OIDC/SAML callbacks issue sessions elsewhere and are
+  // unaffected; X-API-Key auth stays open as the CLI/recovery path.
+  if (isSsoOnly(db)) {
+    throw new AppError('Password sign-in is disabled. Use single sign-on.', 403, 'SSO_REQUIRED');
+  }
 
   // Find user by email or username
   const user = db.prepare(

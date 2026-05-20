@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { adminApi } from '../adminApi'
 
 export interface Me {
-  user: { role: string; name?: string; id?: number }
+  user: { role: string; name?: string; id?: number; can_create_apps?: boolean }
   apps?: Array<{ slug: string; name: string }>
 }
 
@@ -52,4 +52,13 @@ export function useMe(): Me | null {
 export function isAdmin(me: Me | null): boolean {
   const r = me?.user?.role
   return r === 'admin' || r === 'platform_admin'
+}
+
+/**
+ * Whether the current user may onboard new apps. Backed by the configurable
+ * platform.create_app permission (server resolves it on /api/auth/me); global
+ * admins always qualify. Gates the "+ Add Application" button.
+ */
+export function canCreateApps(me: Me | null): boolean {
+  return isAdmin(me) || me?.user?.can_create_apps === true
 }

@@ -36,6 +36,12 @@ function SecurityTab() {
   const [scimSaved, flashScimSaved] = useFlash()
   const [scimToken, setScimToken] = useState('')
 
+  // v2.7.0: require-SSO toggle. Disables password sign-in across the
+  // instance; the IdP becomes the only browser login path.
+  const [ssoOnly, setSsoOnly] = useState(false)
+  const [ssoOnlySaved, flashSsoOnlySaved] = useFlash()
+  const [ssoOnlyError, setSsoOnlyError] = useState<string | null>(null)
+
   useEffect(() => {
     adminApi.get<{ value?: string }>('/api/settings/tls_cert_file').then(r => { if (r?.value) setCertFile(r.value) }).catch(() => {})
     adminApi.get<{ value?: string }>('/api/settings/tls_key_file').then(r => { if (r?.value) setKeyFile(r.value) }).catch(() => {})
@@ -47,7 +53,19 @@ function SecurityTab() {
       if (r) setSaml({ enabled: r.enabled, provider_name: r.provider_name, idp_sso_url: r.idp_sso_url, idp_cert_set: r.idp_cert_set, auto_provision: r.auto_provision })
     }).catch(() => {})
     adminApi.get<typeof scim>('/api/auth/scim/config').then(r => { if (r) setScim(r) }).catch(() => {})
+    adminApi.get<{ value?: string }>('/api/settings/auth_sso_only').then(r => setSsoOnly(r?.value === 'true')).catch(() => {})
   }, [])
+
+  async function saveSsoOnly(next: boolean) {
+    setSsoOnlyError(null)
+    try {
+      await adminApi.put('/api/settings/auth_sso_only', { value: next ? 'true' : 'false' })
+      setSsoOnly(next)
+      flashSsoOnlySaved()
+    } catch (e) {
+      setSsoOnlyError(e instanceof Error ? e.message : 'Save failed')
+    }
+  }
 
   async function saveTls() {
     await Promise.all([
@@ -250,6 +268,37 @@ function SecurityTab() {
       </div>
 
       <div className="setting-card">
+        <h3>Require SSO</h3>
+        <p>
+          Disable email/username + password sign-in for everyone. The SSO button becomes the only
+          browser login path; the API-key break-glass paste is hidden too. OIDC or SAML must be
+          enabled and configured first. CLI / API keys still work for recovery.
+        </p>
+        {!(oidc.enabled || saml.enabled) && (
+          <div style={{
+            background: 'rgba(234,179,8,.12)', border: '1px solid var(--yellow)', color: 'var(--yellow)',
+            borderRadius: 6, padding: '8px 12px', marginBottom: 12, fontSize: '.84rem',
+          }}>
+            No SSO provider is enabled yet. Configure OIDC or SAML above before requiring SSO.
+          </div>
+        )}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+          <input
+            type="checkbox"
+            id="sso-only"
+            checked={ssoOnly}
+            disabled={!ssoOnly && !(oidc.enabled || saml.enabled)}
+            onChange={e => saveSsoOnly(e.target.checked)}
+          />
+          <label htmlFor="sso-only" style={{ fontSize: '.85rem' }}>Require SSO (disable password sign-in)</label>
+          {ssoOnlySaved && <span className="saved-msg">Saved ✓</span>}
+        </div>
+        {ssoOnlyError && (
+          <div style={{ fontSize: '.82rem', color: 'var(--red)' }}>{ssoOnlyError}</div>
+        )}
+      </div>
+
+      <div className="setting-card">
         <h3>SCIM Provisioning</h3>
         <p>Automate user provisioning and de-provisioning via SCIM 2.0.</p>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
@@ -290,7 +339,7 @@ function SecurityTab() {
   )
 }
 
-interface PermDef { key: string; label: string; description: string }
+interface PermDef { key: string; label: string; description: string; scope?: 'app' | 'platform' }
 type Role = 'user' | 'admin' | 'owner' | 'platform_admin'
 type Matrix = Record<string, Record<Role, number>>
 
@@ -380,7 +429,8 @@ function RolesTab() {
           stays hardcoded — these are the cells that genuinely vary across teams.
           AppCrane global admins (<code style={{ fontFamily: 'monospace', background: 'var(--surface2)', padding: '1px 5px', borderRadius: 3, fontSize: '.78rem' }}>users.role = admin</code> or <code style={{ fontFamily: 'monospace', background: 'var(--surface2)', padding: '1px 5px', borderRadius: 3, fontSize: '.78rem' }}>platform_admin</code>)
           always have every permission regardless of this matrix; the table below governs only the
-          per-app role tiers.
+          per-app role tiers. Rows tagged <span style={{ fontSize: '.68rem', letterSpacing: '.4px', textTransform: 'uppercase', color: 'var(--accent)', border: '1px solid var(--accent)', borderRadius: 3, padding: '0 4px' }}>platform</span> are
+          checked against the user's global role instead — there's no app yet — so the per-app OWNER column doesn't apply.
         </p>
 
         <table style={{ width: '100%', fontSize: '.85rem', marginTop: 12 }}>
@@ -399,20 +449,33 @@ function RolesTab() {
             {permissions.map(p => (
               <tr key={p.key} style={{ borderTop: '1px solid var(--border)' }}>
                 <td style={{ padding: '10px 8px', verticalAlign: 'top' }}>
-                  <div style={{ fontWeight: 600 }}>{p.label}</div>
+                  <div style={{ fontWeight: 600 }}>
+                    {p.label}
+                    {p.scope === 'platform' && (
+                      <span style={{ marginLeft: 6, fontSize: '.62rem', letterSpacing: '.4px', textTransform: 'uppercase', color: 'var(--accent)', border: '1px solid var(--accent)', borderRadius: 3, padding: '0 4px', verticalAlign: 'middle' }}>platform</span>
+                    )}
+                  </div>
                   <div style={{ color: 'var(--dim)', fontSize: '.78rem', marginTop: 2 }}>{p.description}</div>
                   <div style={{ color: 'var(--dim)', fontFamily: 'monospace', fontSize: '.72rem', marginTop: 4 }}>{p.key}</div>
                 </td>
-                {roles.map(role => (
-                  <td key={role} style={{ textAlign: 'center', padding: '10px 8px', verticalAlign: 'top' }}>
-                    <input
-                      type="checkbox"
-                      checked={!!(matrix[p.key]?.[role])}
-                      onChange={() => toggle(p.key, role)}
-                      style={{ width: 18, height: 18, cursor: 'pointer' }}
-                    />
-                  </td>
-                ))}
+                {roles.map(role => {
+                  // Platform-scoped perms have no per-app OWNER concept.
+                  const naCell = p.scope === 'platform' && role === 'owner'
+                  return (
+                    <td key={role} style={{ textAlign: 'center', padding: '10px 8px', verticalAlign: 'top' }}>
+                      {naCell ? (
+                        <span style={{ color: 'var(--dim)' }} title="Not applicable — platform permission has no per-app owner">—</span>
+                      ) : (
+                        <input
+                          type="checkbox"
+                          checked={!!(matrix[p.key]?.[role])}
+                          onChange={() => toggle(p.key, role)}
+                          style={{ width: 18, height: 18, cursor: 'pointer' }}
+                        />
+                      )}
+                    </td>
+                  )
+                })}
                 <td style={{ textAlign: 'right', padding: '10px 8px', verticalAlign: 'top' }}>
                   <button className="btn btn-xs" onClick={() => resetRow(p.key)} disabled={busy}>Reset</button>
                 </td>

@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { getDb } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
+import { userHasPlatformPermission } from '../services/permissions.js';
 
 const router = Router();
 
@@ -27,7 +28,8 @@ router.get('/me', requireAuth, (req, res) => {
     apps = db.prepare('SELECT slug, name, domain FROM apps').all();
   }
 
-  res.json({ user: { id, name, email, role, created_at }, apps });
+  const can_create_apps = userHasPlatformPermission(req.user, 'platform.create_app');
+  res.json({ user: { id, name, email, role, created_at, can_create_apps }, apps });
 });
 
 export default router;
