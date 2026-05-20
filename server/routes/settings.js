@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { getDb } from '../db.js';
 import { requireAuth, requirePlatformAdmin } from '../middleware/auth.js';
 import { PERMISSIONS, getMatrix, setMatrix, resetToDefaults } from '../services/permissions.js';
+import { ssoProviderConfigured } from '../services/authPolicy.js';
 
 const router = Router();
 
@@ -84,6 +85,15 @@ router.put('/:key', requireAuth, requirePlatformAdmin, (req, res) => {
   const { value } = req.body;
   if (value === undefined) return res.status(400).json({ error: { code: 'VALIDATION', message: 'value required' } });
   const db = getDb();
+
+  // v2.7.0: guard SSO-only so it can't lock the org out. Refuse to turn it
+  // on unless an SSO provider (OIDC or SAML) is already enabled.
+  if (req.params.key === 'auth_sso_only' && String(value) === 'true' && !ssoProviderConfigured(db)) {
+    return res.status(400).json({
+      error: { code: 'NO_SSO_PROVIDER', message: 'Enable and configure an SSO provider (OIDC or SAML) before requiring SSO-only login.' },
+    });
+  }
+
   db.prepare(`
     INSERT INTO settings (key, value, updated_by, updated_at) VALUES (?, ?, ?, datetime('now'))
     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_by = excluded.updated_by, updated_at = datetime('now')

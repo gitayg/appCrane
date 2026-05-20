@@ -1,7 +1,7 @@
 import { getDb } from '../db.js';
 import { decrypt, encrypt } from './encryption.js';
 import { BUCKETS, bucketize, applyBucket } from './requestStatus.js';
-import { userHasAppPermission } from './permissions.js';
+import { userHasAppPermission, userHasPlatformPermission } from './permissions.js';
 import { isAdmin } from '../utils/roles.js';
 import log from '../utils/logger.js';
 import { mkdirSync } from 'fs';
@@ -116,7 +116,13 @@ function isAppAdmin(user, app) {
   if (isAdmin(user)) return true;
   const db = getDb();
   const row = db.prepare('SELECT app_role FROM app_user_roles WHERE app_id = ? AND user_id = ?').get(app.id, user.id);
-  return row?.app_role === 'admin';
+  // v2.7.0: owner is the highest per-app tier (none < user < admin < owner),
+  // so it must satisfy admin-level write gates. The canUseTool 'app_admin'
+  // visibility check already includes owner; this handler-side check omitted
+  // it, so an owner who created an app saw write tools (set_env, etc.) but
+  // got "Forbidden" on call. Matters for non-admin onboarding: the app
+  // creator is auto-assigned owner.
+  return row?.app_role === 'admin' || row?.app_role === 'owner';
 }
 
 /**
@@ -998,7 +1004,7 @@ const TOOLS = [
       'confirmed they want to onboard a new app and provided a real github URL. ' +
       'Allocates ports, creates the data directories, configures Caddy routing, and starts health checks. ' +
       'After this returns, call appcrane_set_env to set any required env vars, then appcrane_deploy to ship the first build. ' +
-      'Admin-only — non-admins cannot create apps.',
+      'Requires the create-apps permission (global admins, or any role a platform admin granted at Settings → Roles).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1015,7 +1021,7 @@ const TOOLS = [
       required: ['name', 'slug', 'github_url'],
       additionalProperties: false,
     },
-    requiredRole: 'admin',
+    requiredRole: 'create_app',
     handler: async (user, args) => {
       // Mirror server/routes/apps.js POST / validation rules
       const { name, slug, github_url } = args;
@@ -1614,7 +1620,7 @@ const TOOLS = [
       required: ['name', 'slug'],
       additionalProperties: false,
     },
-    requiredRole: 'admin',
+    requiredRole: 'create_app',
     handler: async (user, args) => {
       const { name, slug } = args;
       if (!name || !slug) throw new Error('name and slug are required');
@@ -1744,9 +1750,15 @@ const TOOLS = [
       required: ['slug', 'files'],
       additionalProperties: false,
     },
-    requiredRole: 'admin',
+    // v2.7.0: was 'admin' — that blocked the non-admin path (d) flow, where a
+    // user granted platform.create_app calls appcrane_create_managed_app (now
+    // create_app-gated), becomes owner, and then needs to push scaffolding.
+    // app_admin matches set_env; getAppForUser + isAppAdmin enforce per-slug
+    // ownership.
+    requiredRole: 'app_admin',
     handler: async (user, args) => {
       const app = getAppForUser(user, args.slug);
+      if (!isAppAdmin(user, app)) throw new Error('Forbidden: pushing to a managed repo requires admin or app-admin role');
       if (app.source_type !== 'managed') {
         throw new Error(`App '${app.slug}' is source_type='${app.source_type || 'github'}' — appcrane_push_to_managed_app only works for source_type='managed' apps. For regular GitHub apps, use the github_* MCP tools with your X-Github-Token.`);
       }
@@ -1854,6 +1866,10 @@ export async function callTool(user, name, args, userMcpKey = null) {
 
 function canUseTool(user, tool) {
   if (tool.requiredRole === 'admin') return isAdmin(user);
+  // v2.7.0: app-creation tools gated by the configurable platform.create_app
+  // permission — global admins always, plus any role a platform admin
+  // granted at /settings#roles. Mirrors POST /api/apps.
+  if (tool.requiredRole === 'create_app') return userHasPlatformPermission(user, 'platform.create_app');
   if (tool.requiredRole === 'app_admin') {
     if (isAdmin(user)) return true;
     // Caller must be admin or owner of at least one app for this tool to even appear.

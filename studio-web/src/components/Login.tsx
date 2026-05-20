@@ -51,10 +51,15 @@ export function Login() {
   // above absorbs.
   const [oidc, setOidc] = useState<SsoCfg>({})
   const [saml, setSaml] = useState<SsoCfg>({})
+  // v2.7.0: SSO-only mode. When a platform admin has required SSO, hide the
+  // password form and the API-key break-glass paste entirely — the IdP
+  // button is the only browser login path (full lockdown).
+  const [ssoOnly, setSsoOnly] = useState(false)
 
   useEffect(() => {
     fetch('/api/auth/oidc/config').then(r => r.json()).then(setOidc).catch(() => {})
     fetch('/api/auth/saml/config').then(r => r.json()).then(setSaml).catch(() => {})
+    fetch('/api/settings/auth_sso_only').then(r => r.json()).then(d => setSsoOnly(d?.value === 'true')).catch(() => {})
   }, [])
 
   function startOidc() {
@@ -137,37 +142,43 @@ export function Login() {
       <div className="login-box">
         <h2 style={{ marginBottom: 4, fontSize: '1.3rem' }}>Sign In</h2>
         <p style={{ color: 'var(--dim)', marginBottom: 20, fontSize: '.9rem' }}>
-          Email or username and password.
+          {ssoOnly ? 'Single sign-on is required for this instance.' : 'Email or username and password.'}
         </p>
         {error && <div className="login-error">{error}</div>}
 
-        <input
-          type="text"
-          placeholder="Email or username"
-          value={login}
-          onChange={e => setLogin(e.target.value)}
-          onKeyDown={e => e.key === 'Enter' && document.getElementById('loginPass')?.focus()}
-          autoFocus
-          style={{ width: '100%', marginBottom: 8 }}
-        />
-        <input
-          id="loginPass"
-          type="password"
-          placeholder="Password"
-          value={password}
-          onChange={e => setPassword(e.target.value)}
-          onKeyDown={e => e.key === 'Enter' && doPassLogin()}
-          style={{ width: '100%', marginBottom: 12 }}
-        />
-        <button className="btn btn-accent" onClick={doPassLogin} style={{ width: '100%', padding: 10 }}>Sign In</button>
+        {!ssoOnly && (
+          <>
+            <input
+              type="text"
+              placeholder="Email or username"
+              value={login}
+              onChange={e => setLogin(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && document.getElementById('loginPass')?.focus()}
+              autoFocus
+              style={{ width: '100%', marginBottom: 8 }}
+            />
+            <input
+              id="loginPass"
+              type="password"
+              placeholder="Password"
+              value={password}
+              onChange={e => setPassword(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && doPassLogin()}
+              style={{ width: '100%', marginBottom: 12 }}
+            />
+            <button className="btn btn-accent" onClick={doPassLogin} style={{ width: '100%', padding: 10 }}>Sign In</button>
+          </>
+        )}
 
         {(oidc.enabled || saml.enabled) && (
-          <div style={{ marginTop: 14, display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--dim)', fontSize: '.74rem' }}>
-              <span style={{ flex: 1, height: 1, background: 'var(--border, #333)' }} />
-              <span>or</span>
-              <span style={{ flex: 1, height: 1, background: 'var(--border, #333)' }} />
-            </div>
+          <div style={{ marginTop: ssoOnly ? 0 : 14, display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {!ssoOnly && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--dim)', fontSize: '.74rem' }}>
+                <span style={{ flex: 1, height: 1, background: 'var(--border, #333)' }} />
+                <span>or</span>
+                <span style={{ flex: 1, height: 1, background: 'var(--border, #333)' }} />
+              </div>
+            )}
             {oidc.enabled && (
               <button
                 type="button"
@@ -187,7 +198,7 @@ export function Login() {
           </div>
         )}
 
-        {!showKey ? (
+        {ssoOnly ? null : !showKey ? (
           <p style={{ marginTop: 18, marginBottom: 0, fontSize: '.78rem', color: 'var(--dim)', textAlign: 'center' }}>
             <button
               type="button"

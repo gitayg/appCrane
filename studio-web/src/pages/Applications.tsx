@@ -5,7 +5,7 @@ import { RequestModal } from '../components/runtime-topbar/RequestModal'
 import { WhatsNewModal, type WhatsNewChange } from '../components/WhatsNewModal'
 import { usePeek, type PeekCtx } from '../hooks/usePeek'
 import { LauncherView } from './LauncherView'
-import { useMe, isAdmin } from '../hooks/useMe'
+import { useMe, isAdmin, canCreateApps } from '../hooks/useMe'
 import { BugPanel } from '../components/runtime-topbar/BugPanel'
 import { defineCraneAppTopbar } from '../topbar-element/entry'
 import { Icon } from '../components/icons'
@@ -73,6 +73,10 @@ export function Applications() {
   // loads, then resolve to the role-appropriate default. Saved
   // localStorage value still wins. Toggle button stays interactive.
   const adminLike = isAdmin(me)
+  // v2.7.0: "+ Add Application" shows for anyone with the create-apps
+  // permission (global admins, or a tier a platform admin granted) — in
+  // both the Launcher and Manage views, not just admins in Manage.
+  const mayCreateApp = canCreateApps(me)
   const [viewMode, setViewMode] = useState<'launcher' | 'manage' | null>(() => {
     const saved = typeof window !== 'undefined' ? localStorage.getItem('cc_apps_view') : null
     if (saved === 'launcher' || saved === 'manage') return saved
@@ -339,32 +343,45 @@ export function Applications() {
 
   async function generateAgentKey() {
     const ts = Date.now()
-    const name = `onboarding-${ts}`
-    const email = `onboarding-${ts}@appcrane`
-    // v2.6.12: two-step issuance. POST /api/users creates the agent
-    // identity (and a `dhk_admin_*` REST key as a side-effect of user
-    // creation — never shown to anyone, stays in users.api_key_hash).
-    // Then POST /api/users/:id/mcp-keys issues a `dhk_mcp_*` key that's
-    // restricted server-side to /api/mcp only (see auth.js KEY_SCOPE_
-    // RESTRICTED). That's the key we hand to the agent — if leaked it
-    // can't be used to hit REST endpoints, only the MCP surface this
-    // identity actually needs.
-    const u = await adminApi.post<{ user?: { id: number } }>('/api/users', {
-      name,
-      email,
-      role: 'admin',  // role for MCP authz; admin needed for create_app
-      kind: 'agent',
-    }).catch(() => null)
-    const userId = u?.user?.id
     let key = ''
-    if (userId) {
-      const k = await adminApi.post<{ api_key?: string }>(`/api/users/${userId}/mcp-keys`, {
+    if (adminLike) {
+      // v2.6.12: two-step issuance. POST /api/users creates a dedicated
+      // onboarding agent identity (and a `dhk_admin_*` REST key as a
+      // side-effect — never shown to anyone, stays in users.api_key_hash).
+      // Then POST /api/users/:id/mcp-keys issues a `dhk_mcp_*` key that's
+      // restricted server-side to /api/mcp only (see auth.js KEY_SCOPE_
+      // RESTRICTED). That's the key we hand to the agent — if leaked it
+      // can't be used to hit REST endpoints, only the MCP surface this
+      // identity actually needs. Both endpoints are admin-only.
+      const name = `onboarding-${ts}`
+      const email = `onboarding-${ts}@appcrane`
+      const u = await adminApi.post<{ user?: { id: number } }>('/api/users', {
+        name,
+        email,
+        role: 'admin',  // role for MCP authz; admin needed for create_app
+        kind: 'agent',
+      }).catch(() => null)
+      const userId = u?.user?.id
+      if (userId) {
+        const k = await adminApi.post<{ api_key?: string }>(`/api/users/${userId}/mcp-keys`, {
+          label: `onboarding-${ts}`,
+        }).catch(() => null)
+        key = k?.api_key ?? ''
+      }
+    } else {
+      // v2.7.0: non-admins who hold the create-apps permission can't create
+      // the admin sub-agent above (those endpoints are admin-only), so issue
+      // a PERSONAL MCP key for the current user instead. The agent then runs
+      // as them — they hold platform.create_app via the role matrix and
+      // become owner of whatever app they create. Self-serve, no admin
+      // endpoint involved.
+      const k = await adminApi.post<{ api_key?: string }>('/api/me/mcp-keys', {
         label: `onboarding-${ts}`,
       }).catch(() => null)
       key = k?.api_key ?? ''
     }
     if (!key) {
-      alert('Failed to issue MCP key for the new onboarding agent. Check the server logs.')
+      alert('Failed to issue an MCP key for onboarding. Check the server logs.')
       return
     }
     const origin = typeof window !== 'undefined' ? window.location.origin : 'https://your-appcrane-host'
@@ -579,7 +596,7 @@ every run, so it stays in sync as AppCrane evolves. No copy-paste of
 the playbook itself required.`
     setPromptModal({
       open: true,
-      title: 'New Application Onboarding',
+      title: 'Add Application',
       key,
       prompt,
     })
@@ -774,15 +791,22 @@ the playbook itself required.`
               hasGithub: !!a?.github_url,
             })
           }}
-          headerRight={adminLike && (
-            // v2.5.20: moved from a floating bottom-right pill into the
-            // Launcher header. The bottom-right placement was easy to
-            // miss — multiple platform_admins ended up "stuck" on
-            // Launcher with no obvious way back to the manage table.
-            <div className="applications-mode-toggle" style={{ marginLeft: 8 }}>
-              <button className="active">Launcher</button>
-              <button onClick={() => setViewMode('manage')}>Manage</button>
-            </div>
+          headerRight={(mayCreateApp || adminLike) && (
+            <>
+              {mayCreateApp && (
+                <button className="btn btn-accent" onClick={generateAgentKey}>+ Add Application</button>
+              )}
+              {adminLike && (
+                // v2.5.20: moved from a floating bottom-right pill into the
+                // Launcher header. The bottom-right placement was easy to
+                // miss — multiple platform_admins ended up "stuck" on
+                // Launcher with no obvious way back to the manage table.
+                <div className="applications-mode-toggle" style={{ marginLeft: 8 }}>
+                  <button className="active">Launcher</button>
+                  <button onClick={() => setViewMode('manage')}>Manage</button>
+                </div>
+              )}
+            </>
           )}
         />
         {frame.open && (
@@ -796,7 +820,9 @@ the playbook itself required.`
     <div className="container">
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
         <h2 style={{ margin: 0 }}>Applications</h2>
-        <button className="btn btn-accent" onClick={generateAgentKey}>New Application Onboarding</button>
+        {mayCreateApp && (
+          <button className="btn btn-accent" onClick={generateAgentKey}>+ Add Application</button>
+        )}
         {adminLike && (
           <div className="applications-mode-toggle" style={{ marginLeft: 8 }}>
             <button onClick={() => setViewMode('launcher')}>Launcher</button>

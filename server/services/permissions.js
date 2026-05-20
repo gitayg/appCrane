@@ -23,6 +23,15 @@ import { getDb } from '../db.js';
  *  introducing new configurable gates. */
 export const PERMISSIONS = [
   {
+    key: 'platform.create_app',
+    label: 'Create apps',
+    description: 'Onboard a brand-new app (dashboard "+ Add Application" button and the appcrane_create_app / appcrane_create_managed_app MCP tools).',
+    // Platform-scoped: there is no app yet, so the per-app owner/admin tiers
+    // don't apply. Only the global `user` tier is meaningful — global admins
+    // always have it. The Settings matrix greys the per-app columns.
+    scope: 'platform',
+  },
+  {
     key: 'deploy.production',
     label: 'Deploy to production',
     description: 'Trigger a production deploy or promote sandbox → prod for this app.',
@@ -50,6 +59,13 @@ export const PERMISSIONS = [
 ];
 
 const PERMISSION_KEYS = new Set(PERMISSIONS.map(p => p.key));
+// Platform-scoped permissions are checked against the caller's GLOBAL role
+// (users.role) rather than a per-app role, because the action isn't tied to
+// an existing app. Checked via userHasPlatformPermission(), not
+// userHasAppPermission().
+const PLATFORM_PERMISSION_KEYS = new Set(
+  PERMISSIONS.filter(p => p.scope === 'platform').map(p => p.key)
+);
 // Per-app role tiers shown in the matrix. 'platform_admin' is technically a
 // global role on users.role, but it's surfaced here so the operator can
 // configure what platform admins are allowed to do per-permission, same
@@ -103,6 +119,28 @@ export function userHasAppPermission(user, app, permission) {
 }
 
 /**
+ * Check whether `user` holds a platform-scoped permission (e.g. creating an
+ * app, where no app exists yet to carry a per-app role). AppCrane global
+ * admins always return true. Otherwise the caller's GLOBAL role
+ * (users.role — 'user' for plain users) is looked up against the matrix.
+ *
+ * Throws if `permission` isn't a known platform permission key.
+ */
+export function userHasPlatformPermission(user, permission) {
+  if (!PLATFORM_PERMISSION_KEYS.has(permission)) {
+    throw new Error(`Unknown platform permission: ${permission}`);
+  }
+  if (!user) return false;
+  if (user.role === 'admin' || user.role === 'platform_admin') return true;
+
+  const db = getDb();
+  const row = db.prepare(
+    'SELECT granted FROM role_permissions WHERE permission = ? AND role = ?'
+  ).get(permission, user.role);
+  return row?.granted === 1;
+}
+
+/**
  * Return the entire matrix as { permission: { user, admin, owner, platform_admin } }
  * for the Settings UI to render. All cells default to 0 if the row is
  * missing in role_permissions.
@@ -146,6 +184,7 @@ export function setMatrix(matrix) {
 /** Restore the seeded defaults for one or more permissions. */
 export function resetToDefaults(permissionKeys = null) {
   const DEFAULTS = {
+    'platform.create_app':       { user: 0, admin: 1, owner: 1, platform_admin: 1 },
     'deploy.production':         { user: 0, admin: 1, owner: 1, platform_admin: 1 },
     'request.ship':              { user: 0, admin: 0, owner: 1, platform_admin: 1 },
     'env.write.production':      { user: 0, admin: 1, owner: 1, platform_admin: 1 },

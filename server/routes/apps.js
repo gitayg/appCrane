@@ -8,7 +8,7 @@ import { encrypt, generateApiKey, hashApiKey } from '../services/encryption.js';
 import { AppError } from '../utils/errors.js';
 import { resolveSafe } from '../utils/paths.js';
 import { reloadCaddy } from '../services/caddy.js';
-import { userHasAppPermission } from '../services/permissions.js';
+import { userHasAppPermission, userHasPlatformPermission } from '../services/permissions.js';
 import { isAdmin } from '../utils/roles.js';
 import log from '../utils/logger.js';
 import { existsSync, mkdirSync, renameSync, unlinkSync } from 'fs';
@@ -194,6 +194,15 @@ router.get('/', (req, res) => {
  * POST /api/apps - Create app (any authenticated user, auto-assigns creator)
  */
 router.post('/', requireAuth, auditMiddleware('app-create'), async (req, res) => {
+  // v2.7.0: app creation is gated by the configurable platform.create_app
+  // permission instead of plain requireAuth. Global admins always pass;
+  // plain users pass only if a platform admin granted the `user` tier at
+  // /settings#roles. Closes the old gap where any authenticated key could
+  // create apps via the API while the dashboard button was admin-only.
+  if (!userHasPlatformPermission(req.user, 'platform.create_app')) {
+    throw new AppError('You do not have permission to create apps.', 403, 'FORBIDDEN');
+  }
+
   const { name, slug, domain, description, category, source_type, github_url, branch, github_token, max_ram_mb, max_cpu_percent } = req.body;
 
   if (!name || !slug) throw new AppError('Name and slug are required', 400, 'VALIDATION');
