@@ -54,12 +54,19 @@ export function Login() {
   // v2.7.0: SSO-only mode. When a platform admin has required SSO, hide the
   // password form and the API-key break-glass paste entirely — the IdP
   // button is the only browser login path (full lockdown).
-  const [ssoOnly, setSsoOnly] = useState(false)
+  // v2.7.3: tri-state (null = policy not yet fetched). We must NOT render the
+  // password form before we know — otherwise an SSO-only instance briefly
+  // flashes the username/password screen until the fetch resolves. While
+  // null we render a tiny loading line instead.
+  const [ssoOnly, setSsoOnly] = useState<boolean | null>(null)
 
   useEffect(() => {
     fetch('/api/auth/oidc/config').then(r => r.json()).then(setOidc).catch(() => {})
     fetch('/api/auth/saml/config').then(r => r.json()).then(setSaml).catch(() => {})
-    fetch('/api/settings/auth_sso_only').then(r => r.json()).then(d => setSsoOnly(d?.value === 'true')).catch(() => {})
+    fetch('/api/settings/auth_sso_only')
+      .then(r => r.json())
+      .then(d => setSsoOnly(d?.value === 'true'))
+      .catch(() => setSsoOnly(false))
   }, [])
 
   function startOidc() {
@@ -141,6 +148,12 @@ export function Login() {
     <div className="login-wrap">
       <div className="login-box">
         <h2 style={{ marginBottom: 4, fontSize: '1.3rem' }}>Sign In</h2>
+        {ssoOnly === null ? (
+          // Policy unknown — render nothing actionable yet so we never flash
+          // the password form on an SSO-only instance.
+          <p style={{ color: 'var(--dim)', marginTop: 16, fontSize: '.9rem' }}>Loading…</p>
+        ) : (
+        <>
         <p style={{ color: 'var(--dim)', marginBottom: 20, fontSize: '.9rem' }}>
           {ssoOnly ? 'Single sign-on is required for this instance.' : 'Email or username and password.'}
         </p>
@@ -222,6 +235,8 @@ export function Login() {
             />
             <button className="btn" onClick={doKeyLogin} style={{ width: '100%', padding: 8 }}>Sign in with key</button>
           </div>
+        )}
+        </>
         )}
       </div>
     </div>
