@@ -344,6 +344,7 @@ export function Applications() {
   async function generateAgentKey() {
     const ts = Date.now()
     let key = ''
+    let failReason = ''
     if (adminLike) {
       // v2.6.12: two-step issuance. POST /api/users creates a dedicated
       // onboarding agent identity (and a `dhk_admin_*` REST key as a
@@ -377,11 +378,11 @@ export function Applications() {
       // endpoint involved.
       const k = await adminApi.post<{ api_key?: string }>('/api/me/mcp-keys', {
         label: `onboarding-${ts}`,
-      }).catch(() => null)
+      }).catch((e: unknown) => { failReason = e instanceof Error ? e.message : String(e); return null })
       key = k?.api_key ?? ''
     }
     if (!key) {
-      alert('Failed to issue an MCP key for onboarding. Check the server logs.')
+      alert('Failed to issue an MCP key for onboarding' + (failReason ? `: ${failReason}` : '. Check the server logs.'))
       return
     }
     const origin = typeof window !== 'undefined' ? window.location.origin : 'https://your-appcrane-host'
@@ -759,6 +760,49 @@ the playbook itself required.`
     return sort.dir === 'asc' ? cmp : -cmp
   })
 
+  // v2.7.2: the "+ Add Application" key/instructions modal, shared by both
+  // views. It used to live only in the Manage-view return, so a non-admin in
+  // the Launcher clicked the button, generateAgentKey issued a key and called
+  // setPromptModal({ open: true }) — but nothing rendered it. "Nothing
+  // happens." Define it once and render in both returns.
+  const promptModalEl = promptModal.open && (
+    <div className="prompt-overlay" onClick={() => setPromptModal({ open: false })}>
+      <div className="prompt-modal" onClick={e => e.stopPropagation()}>
+        <div style={{ fontWeight: 700, fontSize: '1rem', marginBottom: 16 }}>{promptModal.title ?? 'API Key'}</div>
+        <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 7, padding: '10px 14px', fontFamily: 'monospace', fontSize: '.85rem', wordBreak: 'break-all', marginBottom: 12, cursor: 'text', userSelect: 'all' }}>
+          {promptModal.key}
+        </div>
+        <button
+          className="btn btn-xs"
+          style={{ marginBottom: 16 }}
+          onClick={() => navigator.clipboard.writeText(promptModal.key ?? '')}
+        >
+          Copy key
+        </button>
+        {promptModal.prompt && (
+          <>
+            <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 7, padding: '10px 14px', fontSize: '.82rem', color: 'var(--dim)', maxHeight: 200, overflowY: 'auto', whiteSpace: 'pre-wrap', marginBottom: 12 }}>
+              {promptModal.prompt}
+            </div>
+            <button
+              className="btn btn-xs"
+              style={{ marginBottom: 16 }}
+              onClick={() => navigator.clipboard.writeText(promptModal.prompt ?? '')}
+            >
+              Copy instructions
+            </button>
+          </>
+        )}
+        <div style={{ fontSize: '.78rem', color: 'var(--red)', marginBottom: 16 }}>
+          The API key will not be shown again.
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+          <button className="btn" onClick={() => setPromptModal({ open: false })}>Close</button>
+        </div>
+      </div>
+    </div>
+  )
+
   // v2.5.0: end users get the tile launcher. Admins can flip to it via
   // the toggle; non-admins never see the manage table at all (the data
   // would be filtered server-side anyway, but the toggle is hidden).
@@ -812,6 +856,7 @@ the playbook itself required.`
         {frame.open && (
           <FrameOverlay frame={frame} framePanel={framePanel} setFrame={setFrame} setFramePanel={setFramePanel} />
         )}
+        {promptModalEl}
       </>
     )
   }
@@ -1210,43 +1255,7 @@ the playbook itself required.`
         />
       )}
 
-      {promptModal.open && (
-        <div className="prompt-overlay" onClick={() => setPromptModal({ open: false })}>
-          <div className="prompt-modal" onClick={e => e.stopPropagation()}>
-            <div style={{ fontWeight: 700, fontSize: '1rem', marginBottom: 16 }}>{promptModal.title ?? 'API Key'}</div>
-            <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 7, padding: '10px 14px', fontFamily: 'monospace', fontSize: '.85rem', wordBreak: 'break-all', marginBottom: 12, cursor: 'text', userSelect: 'all' }}>
-              {promptModal.key}
-            </div>
-            <button
-              className="btn btn-xs"
-              style={{ marginBottom: 16 }}
-              onClick={() => navigator.clipboard.writeText(promptModal.key ?? '')}
-            >
-              Copy key
-            </button>
-            {promptModal.prompt && (
-              <>
-                <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 7, padding: '10px 14px', fontSize: '.82rem', color: 'var(--dim)', maxHeight: 200, overflowY: 'auto', whiteSpace: 'pre-wrap', marginBottom: 12 }}>
-                  {promptModal.prompt}
-                </div>
-                <button
-                  className="btn btn-xs"
-                  style={{ marginBottom: 16 }}
-                  onClick={() => navigator.clipboard.writeText(promptModal.prompt ?? '')}
-                >
-                  Copy instructions
-                </button>
-              </>
-            )}
-            <div style={{ fontSize: '.78rem', color: 'var(--red)', marginBottom: 16 }}>
-              The API key will not be shown again.
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-              <button className="btn" onClick={() => setPromptModal({ open: false })}>Close</button>
-            </div>
-          </div>
-        </div>
-      )}
+      {promptModalEl}
 
       {/* v2.5.21: per-app Users modal — opened from "Users" button on
           each Manage row. Lists every user with a role select for THIS
