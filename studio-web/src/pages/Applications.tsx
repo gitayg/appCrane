@@ -343,44 +343,20 @@ export function Applications() {
 
   async function generateAgentKey() {
     const ts = Date.now()
-    let key = ''
     let failReason = ''
-    if (adminLike) {
-      // v2.6.12: two-step issuance. POST /api/users creates a dedicated
-      // onboarding agent identity (and a `dhk_admin_*` REST key as a
-      // side-effect — never shown to anyone, stays in users.api_key_hash).
-      // Then POST /api/users/:id/mcp-keys issues a `dhk_mcp_*` key that's
-      // restricted server-side to /api/mcp only (see auth.js KEY_SCOPE_
-      // RESTRICTED). That's the key we hand to the agent — if leaked it
-      // can't be used to hit REST endpoints, only the MCP surface this
-      // identity actually needs. Both endpoints are admin-only.
-      const name = `onboarding-${ts}`
-      const email = `onboarding-${ts}@appcrane`
-      const u = await adminApi.post<{ user?: { id: number } }>('/api/users', {
-        name,
-        email,
-        role: 'admin',  // role for MCP authz; admin needed for create_app
-        kind: 'agent',
-      }).catch(() => null)
-      const userId = u?.user?.id
-      if (userId) {
-        const k = await adminApi.post<{ api_key?: string }>(`/api/users/${userId}/mcp-keys`, {
-          label: `onboarding-${ts}`,
-        }).catch(() => null)
-        key = k?.api_key ?? ''
-      }
-    } else {
-      // v2.7.0: non-admins who hold the create-apps permission can't create
-      // the admin sub-agent above (those endpoints are admin-only), so issue
-      // a PERSONAL MCP key for the current user instead. The agent then runs
-      // as them — they hold platform.create_app via the role matrix and
-      // become owner of whatever app they create. Self-serve, no admin
-      // endpoint involved.
-      const k = await adminApi.post<{ api_key?: string }>('/api/me/mcp-keys', {
-        label: `onboarding-${ts}`,
-      }).catch((e: unknown) => { failReason = e instanceof Error ? e.message : String(e); return null })
-      key = k?.api_key ?? ''
-    }
+    // v2.7.4: ALWAYS issue a personal MCP key for the logged-in user — admins
+    // included. Previously admins got a throwaway role:admin onboarding-agent
+    // identity, and since every create path makes the CALLING identity the
+    // app owner, that agent (not the human who clicked) ended up owning the
+    // app. The human's own personal key — scope-restricted to apps they own —
+    // then couldn't see it. A personal dhk_mcp_* key is equally restricted to
+    // /api/mcp (auth.js KEY_SCOPE_RESTRICTED) but ties creation/ownership to
+    // the human, so they own what they onboard. No admin-only endpoint, works
+    // for admins and create_app-granted users alike.
+    const k = await adminApi.post<{ api_key?: string }>('/api/me/mcp-keys', {
+      label: `onboarding-${ts}`,
+    }).catch((e: unknown) => { failReason = e instanceof Error ? e.message : String(e); return null })
+    const key = k?.api_key ?? ''
     if (!key) {
       alert('Failed to issue an MCP key for onboarding' + (failReason ? `: ${failReason}` : '. Check the server logs.'))
       return
@@ -1432,6 +1408,29 @@ function FrameOverlay({ frame, framePanel, setFrame, setFramePanel }: FrameOverl
       .catch(() => { /* silent — this is a nice-to-have, not a blocker */ })
     return () => { cancelled = true }
   }, [frame.slug])
+
+  // v2.7.5: keep the topbar version pill live AND correct for the env being
+  // viewed. The frame was opened with a static deploy-record snapshot
+  // (app.<env>.deploy.version) captured once at open time — so it never
+  // changed when toggling Production/Sandbox, and showed a stale/empty value
+  // when the production deploy record lagged the live container. Fetch the
+  // live version for the ACTIVE env and write it into the matching attribute;
+  // re-runs on env switch so the pill always reflects what's actually running
+  // in the env you're looking at.
+  useEffect(() => {
+    if (!frame.slug) return
+    const env = frame.env ?? 'production'
+    let cancelled = false
+    adminApi
+      .get<{ version?: string }>(`/api/apps/${encodeURIComponent(frame.slug)}/live-version/${env}`)
+      .then(r => {
+        if (cancelled || !r?.version) return
+        const field = env === 'sandbox' ? 'sandVersion' : 'prodVersion'
+        setFrame(f => (f.slug === frame.slug && f.open ? { ...f, [field]: r.version } : f))
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [frame.slug, frame.env, setFrame])
   // Per-panel last-used width, persisted across open/close so closing
   // and reopening Request keeps the user's chosen width.
   const [widths, setWidths] = useState<Record<'ask' | 'request' | 'bug', number>>({

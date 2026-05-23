@@ -30,6 +30,15 @@ tools. Once you create an app you become its **owner**, which unlocks
 `appcrane_set_env`, `appcrane_push_to_managed_app`, and `appcrane_deploy`
 for that app.
 
+**Ownership follows the connecting key's identity.** Whichever identity the
+MCP key resolves to becomes the app's owner at creation. Onboard with a
+**personal** MCP key (the "+ Add Application" button issues one for the
+logged-in user) — NOT a shared global-admin key. If a shared admin key
+creates the app, the admin identity owns it and the human's personal key
+(scope-restricted to apps they own) won't see it. If that already happened,
+a platform admin can fix it at Settings → Users → the app's Users modal by
+setting the human's per-app role to **Owner**.
+
 ## Inputs to gather from the user (first turn, all at once)
 
 1. **Starting point** — one of:
@@ -61,7 +70,7 @@ for that app.
 appcrane_create_app(name, slug, github_url, github_token, branch?, …)
 appcrane_create_managed_app(name, slug, branch?, description?)  — path (d)
 appcrane_set_env(slug, env, key, value)
-appcrane_deploy(slug, env)                                       — env="sandbox"
+appcrane_deploy(slug, env)                                       — pulls latest commit from the branch + rebuilds
 appcrane_get_logs(slug, env, lines?, search?)
 appcrane_get_deploy_log(deployment_id | slug + env)              — pre-build / fast failures
 appcrane_set_app_icon(slug, format, base64)                      — mid-flight icon swap

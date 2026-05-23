@@ -487,8 +487,12 @@ const TOOLS = [
   {
     name: 'appcrane_deploy',
     description:
-      'Trigger a deployment for an app. Pulls latest code from the configured branch, builds the Docker image, ' +
-      'and starts a new container. Returns a deployment ID; use appcrane_get_logs to monitor progress. ' +
+      'Trigger a deployment — this IS how you "update an env to the latest". For github and managed apps it ' +
+      'pulls the latest commit from the app\'s configured branch on GitHub (server-side, using the app\'s stored ' +
+      'credentials — you do NOT need your own github token or to push/upload anything), builds a fresh Docker ' +
+      'image, and swaps in a new container. Use it whenever the user says things like "update sandbox to the ' +
+      'latest", "deploy the newest version", "pull my latest github changes", or "redeploy". Returns a ' +
+      'deployment ID; use appcrane_get_logs to monitor progress. ' +
       'Defaults to sandbox; production requires explicit confirmation from the user.',
     inputSchema: {
       type: 'object',
