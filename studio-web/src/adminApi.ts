@@ -72,16 +72,15 @@ async function req<T = unknown>(path: string, init?: RequestInit): Promise<T> {
     const provenBad = PROVEN_BAD_CREDENTIAL_MESSAGES.has(message)
 
     if (provenBad) {
-      // v2.6.7: clear BOTH credential types AND the cc_token cookie
-      // that forward_auth reads. Old behavior only cleared cc_api_key,
-      // so Bearer-only sessions (the unified-login default since v2.4.0)
-      // never got reset on a server-side 401 and the user kept seeing
-      // raw-JSON errors. Reload to /applications so AdminApp re-renders
-      // with no auth → Login form takes over with a fresh state.
+      // v2.6.7: clear stored credentials on a proven-bad 401 so the Login
+      // form takes over with a fresh state. v2.7.8: the cc_token cookie is
+      // now httpOnly and can't be cleared from JS — but it doesn't need to
+      // be: forward_auth validates the token server-side, and a proven-bad
+      // credential means the session is already invalid, so the cookie is a
+      // dead token /verify rejects.
       try {
         localStorage.removeItem('cc_api_key')
         localStorage.removeItem('cc_identity_token')
-        document.cookie = 'cc_token=; Path=/; Max-Age=0; SameSite=Lax'
       } catch (_) { /* SSR / locked storage */ }
       // Preserve the user's intended destination so Login can bounce
       // them back after re-auth (Login.tsx already handles ?redirect=).

@@ -19,6 +19,15 @@ const SENSITIVE_KEYS = new Set([
 ]);
 
 /**
+ * v2.7.8: keys kept OUT of the bulk public dump but still readable via the
+ * targeted GET /:key. `auth_sso_only` must stay readable by the
+ * unauthenticated login page (it decides whether to hide the password form),
+ * so it can't be gated — but it's auth policy, not general branding/config,
+ * so we don't enumerate it in the catch-all settings list.
+ */
+const BULK_EXCLUDED_KEYS = new Set(['auth_sso_only']);
+
+/**
  * GET /api/settings - All non-sensitive settings (public — agents need branding)
  */
 router.get('/', (req, res) => {
@@ -26,7 +35,7 @@ router.get('/', (req, res) => {
   const rows = db.prepare('SELECT key, value FROM settings').all();
   const settings = {};
   for (const row of rows) {
-    if (SENSITIVE_KEYS.has(row.key)) continue;
+    if (SENSITIVE_KEYS.has(row.key) || BULK_EXCLUDED_KEYS.has(row.key)) continue;
     settings[row.key] = row.value;
   }
   res.json({ settings });

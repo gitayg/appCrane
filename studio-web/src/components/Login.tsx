@@ -2,23 +2,12 @@ import { useEffect, useState } from 'react'
 import { useAuth } from '../hooks/useAuth'
 
 /**
- * Set the cc_token cookie that Caddy's forward_auth on per-app routes
- * reads via /api/identity/verify. localStorage alone isn't enough — that
- * only travels with explicit fetches, not with browser navigation into
- * proxied apps. SameSite=Lax so it survives the first-party navigation
- * but doesn't leak across cross-site requests; Secure when on HTTPS.
- *
- * Mirrors docs/login.html's setAuthCookie before v2.5.14 collapsed the
- * dual-login flow into the SPA. Without this, post-SPA-login navigation
- * to a Caddy-proxied app would fail forward_auth and produce the
- * /{slug}/login loop the operator reported.
+ * v2.7.8: the cc_token cookie is now httpOnly and set entirely by the
+ * server — on the password-login response, the set-password response, and
+ * the OIDC/SAML callback redirects. The SPA no longer writes it (it can't
+ * read an httpOnly cookie anyway); AdminApp re-establishes it on load via
+ * POST /api/identity/refresh-cookie. So there's no client-side setAuthCookie.
  */
-function setAuthCookie(token: string) {
-  const secure = window.location.protocol === 'https:' ? '; Secure' : ''
-  document.cookie =
-    'cc_token=' + encodeURIComponent(token) +
-    '; Path=/; Max-Age=' + (7 * 24 * 3600) + '; SameSite=Lax' + secure
-}
 
 /**
  * v2.5.14 — single canonical login.
@@ -97,7 +86,7 @@ export function Login() {
     const oidcToken = params.get('oidc_token')
     if (oidcToken) {
       localStorage.setItem('cc_identity_token', oidcToken)
-      setAuthCookie(oidcToken)
+      // cc_token cookie was already set httpOnly by the SSO callback redirect.
       const redirect = params.get('redirect')
       if (redirect && redirect.startsWith('/')) {
         window.location.replace(redirect)
@@ -139,7 +128,7 @@ export function Login() {
       const data = await res.json()
       if (!res.ok) { setError(data.error?.message || 'Login failed'); return }
       localStorage.setItem('cc_identity_token', data.token)
-      setAuthCookie(data.token)
+      // cc_token cookie was already set httpOnly on the login response.
       postLoginRedirect()
     } catch { setError('Connection failed') }
   }

@@ -84,12 +84,10 @@ export function useAuthState(): AuthCtx {
 
     localStorage.removeItem(KEY_STORE)
     localStorage.removeItem(TOKEN_STORE)
-    // v2.5.14: clear the cc_token cookie too so Caddy forward_auth on
-    // proxied apps no longer waves through the just-signed-out user.
-    // Mirror the path/SameSite from setAuthCookie in Login.tsx.
-    try {
-      document.cookie = 'cc_token=; Path=/; Max-Age=0; SameSite=Lax'
-    } catch (_) { /* SSR / non-browser */ }
+    // v2.7.8: the cc_token cookie is httpOnly now, so we can't clear it from
+    // JS — and we don't need to. The logout/​logout-beacon call above DELETES
+    // the identity_sessions row server-side, so the lingering cookie is a
+    // dead token that Caddy forward_auth (/verify) rejects.
     setKeyState('')
     setIdentityToken('')
     // Hard-reload so the browser drops any in-memory React state on this

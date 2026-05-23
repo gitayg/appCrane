@@ -406,11 +406,22 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
         throw new AppError('Only the app owner can change the category.', 403, 'FORBIDDEN');
       }
       // Owners may only assign an existing category; creating new categories
-      // is reserved for global admins.
+      // is reserved for global admins. v2.7.8: scope the "does this category
+      // exist" check to apps the owner can actually see (public, or apps
+      // they're assigned to) — matches the Launcher dropdown and avoids a
+      // cross-app oracle that would reveal categories used by apps hidden
+      // from this user.
       if (!globalAdmin && newCat) {
-        const exists = db.prepare(
-          "SELECT 1 FROM apps WHERE category = ? AND category IS NOT NULL AND category != '' LIMIT 1"
-        ).get(newCat);
+        const exists = db.prepare(`
+          SELECT 1 FROM apps a
+          WHERE a.category = ? AND a.category IS NOT NULL AND a.category != ''
+            AND (
+              a.visibility = 'public'
+              OR EXISTS (SELECT 1 FROM app_users au WHERE au.app_id = a.id AND au.user_id = ?)
+              OR EXISTS (SELECT 1 FROM app_user_roles aur WHERE aur.app_id = a.id AND aur.user_id = ?)
+            )
+          LIMIT 1
+        `).get(newCat, req.user.id, req.user.id);
         if (!exists) {
           throw new AppError('Only admins can create new categories — pick an existing one.', 403, 'NEW_CATEGORY_FORBIDDEN');
         }

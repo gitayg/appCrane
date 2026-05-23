@@ -399,6 +399,33 @@ router.post('/logout', (req, res) => {
 });
 
 /**
+ * POST /api/identity/refresh-cookie
+ * Re-establish the httpOnly cc_token cookie from a valid session Bearer.
+ *
+ * v2.7.8: the cookie is now httpOnly, so the SPA can no longer write it
+ * itself. On load the SPA calls this with its localStorage session token so
+ * Caddy's forward_auth on per-app routes has the cookie — covers sessions
+ * created before the cookie was server-managed and any cookie loss. Only a
+ * caller already holding a live session token can set the cookie (for that
+ * same token), so there's no new auth surface.
+ */
+router.post('/refresh-cookie', (req, res) => {
+  const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
+  if (!token) throw new AppError('Bearer session token required', 401, 'UNAUTHORIZED');
+
+  const db = getDb();
+  const row = db.prepare(`
+    SELECT s.id FROM identity_sessions s
+    JOIN users u ON s.user_id = u.id
+    WHERE s.token_hash = ? AND s.expires_at > datetime('now') AND u.active = 1
+  `).get(hashApiKey(token));
+  if (!row) throw new AppError('Invalid or expired session', 401, 'UNAUTHORIZED');
+
+  setSessionCookie(res, token, req);
+  res.json({ ok: true });
+});
+
+/**
  * POST /api/identity/logout-beacon
  * navigator.sendBeacon-compatible logout. The Beacon API can't set custom
  * headers (no Authorization), so the token rides in the request body. This
