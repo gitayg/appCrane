@@ -453,6 +453,15 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
     if (!['hidden', 'private', 'public'].includes(visibility)) {
       throw new AppError('visibility must be one of: hidden, private, public', 400, 'VALIDATION');
     }
+    // v2.7.9: visibility changes are owner/admin-only (it controls public
+    // exposure). Plain app 'user' members can't flip it.
+    if (visibility !== (app.visibility || 'hidden')) {
+      const globalAdmin = isAdmin(req.user);
+      const isOwner = roleForUserOnApp(req.user, app) === 'owner';
+      if (!globalAdmin && !isOwner) {
+        throw new AppError('Only the app owner can change visibility.', 403, 'FORBIDDEN');
+      }
+    }
     updates.visibility = visibility;
     updates.public_access = visibility === 'public' ? 1 : 0;
   } else if (public_access !== undefined) {
