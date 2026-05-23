@@ -855,6 +855,19 @@ textarea:focus { border-color: var(--accent); }
 .launcher-tile:hover { transform: translateY(-2px); border-color: var(--accent, #3b82f6); background: var(--surface2, #232323); }
 .launcher-tile-disabled { opacity: .45; cursor: not-allowed; }
 .launcher-tile-disabled:hover { transform: none; border-color: var(--border, #333); background: var(--surface, #1a1a1a); }
+/* v2.7.6: owner inline category picker. The cell wraps the tile button and
+   the select so the select isn't nested inside the button. */
+.launcher-tile-cell { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.launcher-tile-cell > .launcher-tile { width: 100%; box-sizing: border-box; }
+.launcher-tile-category {
+  width: 100%; box-sizing: border-box;
+  font-size: .72rem; padding: 4px 6px;
+  background: var(--surface2, #232323);
+  border: 1px solid var(--border, #333);
+  border-radius: 6px; color: var(--dim);
+  cursor: pointer;
+}
+.launcher-tile-category:focus { outline: none; border-color: var(--accent, #3b82f6); }
 .launcher-tile-icon {
   position: relative;
   width: 64px; height: 64px;

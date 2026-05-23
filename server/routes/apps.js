@@ -8,7 +8,7 @@ import { encrypt, generateApiKey, hashApiKey } from '../services/encryption.js';
 import { AppError } from '../utils/errors.js';
 import { resolveSafe } from '../utils/paths.js';
 import { reloadCaddy } from '../services/caddy.js';
-import { userHasAppPermission, userHasPlatformPermission } from '../services/permissions.js';
+import { userHasAppPermission, userHasPlatformPermission, roleForUserOnApp } from '../services/permissions.js';
 import { isAdmin } from '../utils/roles.js';
 import log from '../utils/logger.js';
 import { existsSync, mkdirSync, renameSync, unlinkSync } from 'fs';
@@ -392,11 +392,37 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
     }
   }
 
+  // v2.7.6: category changes are owner/admin-only, and only global admins may
+  // CREATE a new category. Owners pick from the existing set; plain app 'user'
+  // members can't change the category at all. (Other open fields below stay
+  // editable by any app-assigned user via requireAppAccess.)
+  if (category !== undefined) {
+    const newCat = category ? String(category).trim() : null;
+    const curCat = app.category || null;
+    if (newCat !== curCat) {
+      const globalAdmin = isAdmin(req.user);
+      const isOwner = roleForUserOnApp(req.user, app) === 'owner';
+      if (!globalAdmin && !isOwner) {
+        throw new AppError('Only the app owner can change the category.', 403, 'FORBIDDEN');
+      }
+      // Owners may only assign an existing category; creating new categories
+      // is reserved for global admins.
+      if (!globalAdmin && newCat) {
+        const exists = db.prepare(
+          "SELECT 1 FROM apps WHERE category = ? AND category IS NOT NULL AND category != '' LIMIT 1"
+        ).get(newCat);
+        if (!exists) {
+          throw new AppError('Only admins can create new categories — pick an existing one.', 403, 'NEW_CATEGORY_FORBIDDEN');
+        }
+      }
+    }
+  }
+
   const updates = {};
   if (name !== undefined) updates.name = name;
   if (domain !== undefined) updates.domain = domain;
   if (description !== undefined) updates.description = description;
-  if (category !== undefined) updates.category = category || null;
+  if (category !== undefined) updates.category = category ? String(category).trim() : null;
   if (source_type !== undefined) updates.source_type = source_type;
   if (github_url !== undefined) {
     if (github_url) validateGithubUrl(github_url);

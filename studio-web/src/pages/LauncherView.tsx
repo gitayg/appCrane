@@ -99,6 +99,24 @@ export function LauncherView({ onOpen, headerRight }: Props) {
     }
   }
 
+  // v2.7.6: owners can re-categorize apps they own from the tile. Existing
+  // categories only — creating a NEW category is admin-only (enforced server
+  // side too). The option list is the distinct set across visible apps.
+  const categories = Array.from(
+    new Set(apps.map(a => (a.category || '').trim()).filter(Boolean)),
+  ).sort((a, b) => a.localeCompare(b))
+
+  async function changeCategory(slug: string, value: string) {
+    const snapshot = apps
+    setApps(list => list.map(a => (a.slug === slug ? { ...a, category: value || undefined } : a)))
+    try {
+      await adminApi.put(`/api/apps/${slug}`, { category: value })
+    } catch (e) {
+      setApps(snapshot) // revert on failure (e.g. server rejects a new category)
+      alert('Could not change category: ' + (e instanceof Error ? e.message : String(e)))
+    }
+  }
+
   const filtered = apps.filter(a => {
     if (a.visibility === 'hidden') return false
     if (!search) return true
@@ -205,9 +223,12 @@ export function LauncherView({ onOpen, headerRight }: Props) {
                     )
                   }
                   const avail = availability(app.production?.health?.status, app.sandbox?.health?.status)
-                  return (
+                  // v2.7.6: owners get an inline category picker under the tile.
+                  // The tile itself is a <button>, so the <select> can't nest
+                  // inside it — wrap both in a cell. Existing categories only.
+                  const canEditCategory = app.app_role === 'owner'
+                  const tile = (
                     <button
-                      key={app.slug}
                       type="button"
                       className={'launcher-tile' + (!avail.clickable ? ' launcher-tile-disabled' : '')}
                       onClick={() => { if (avail.clickable) onOpen(app.slug, app.name, !!app.has_icon) }}
@@ -232,6 +253,22 @@ export function LauncherView({ onOpen, headerRight }: Props) {
                         <div className="launcher-tile-tip" role="tooltip">{app.description}</div>
                       )}
                     </button>
+                  )
+                  if (!canEditCategory) return <div key={app.slug} className="launcher-tile-cell">{tile}</div>
+                  return (
+                    <div key={app.slug} className="launcher-tile-cell">
+                      {tile}
+                      <select
+                        className="launcher-tile-category"
+                        value={app.category ?? ''}
+                        onChange={e => changeCategory(app.slug, e.target.value)}
+                        title="Category — pick an existing one (only admins can create new categories)"
+                        aria-label={`Category for ${app.name}`}
+                      >
+                        <option value="">— no category —</option>
+                        {categories.map(c => <option key={c} value={c}>{c}</option>)}
+                      </select>
+                    </div>
                   )
                 })}
               </div>
