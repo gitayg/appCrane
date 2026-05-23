@@ -270,9 +270,15 @@ function SecurityTab() {
       <div className="setting-card">
         <h3>Require SSO</h3>
         <p>
-          Disable email/username + password sign-in for everyone. The SSO button becomes the only
-          browser login path; the API-key break-glass paste is hidden too. OIDC or SAML must be
-          enabled and configured first. CLI / API keys still work for recovery.
+          Disable <strong>interactive password sign-in</strong> for everyone. The SSO button becomes
+          the only browser login path; the API-key break-glass paste is hidden too. OIDC or SAML must
+          be enabled and configured first.
+        </p>
+        <p style={{ fontSize: '.8rem', color: 'var(--dim)' }}>
+          Scope: this governs <em>browser/password</em> login only. Programmatic <strong>API keys</strong>{' '}
+          (<code style={{ fontFamily: 'monospace' }}>dhk_*</code> — CLI, MCP, CI) remain valid machine
+          credentials and are <em>not</em> disabled by this toggle; manage them under Users. To fully
+          cut off non-SSO access you must also revoke API keys.
         </p>
         {!(oidc.enabled || saml.enabled) && (
           <div style={{

@@ -13,17 +13,19 @@
 // an `identity_sessions` row: password login, set-password (issues a
 // fresh session), OIDC callback, SAML callback, and logout.
 //
-// We deliberately do NOT set httpOnly yet. The SPA still touches the
-// cookie in studio-web/src/AdminApp.tsx (backfill), useAuth.ts
-// (logout clear), and adminApi.ts (clear-on-failure). Switching to
-// httpOnly is a follow-up once those touch points are removed —
-// tracked separately. SameSite=Lax + Secure (when HTTPS) is the
-// pragmatic stopgap.
+// v2.7.8: now httpOnly. The SPA no longer reads or writes this cookie — the
+// server owns it end to end. On load the SPA re-establishes it via
+// POST /api/identity/refresh-cookie (Bearer the localStorage session token)
+// rather than writing document.cookie, and logout deletes the session row
+// server-side (so a lingering cookie is a dead token /verify rejects).
+// httpOnly means an XSS payload can no longer read the session token out of
+// the cookie.
 
 const SESSION_TTL_MS = (parseInt(process.env.SESSION_DURATION_HOURS, 10) || 24) * 60 * 60 * 1000;
 
 export function setSessionCookie(res, token, req) {
   res.cookie('cc_token', token, {
+    httpOnly: true,
     secure: isHttps(req),
     sameSite: 'lax',
     path: '/',
