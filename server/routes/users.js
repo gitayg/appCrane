@@ -1,27 +1,50 @@
 import { Router } from 'express';
 import { getDb } from '../db.js';
 import { generateApiKey, hashApiKey, hashPassword, encrypt } from '../services/encryption.js';
-import { requireAuth, requireAdmin, requirePlatformAdmin } from '../middleware/auth.js';
+import { requireAuth, requireAdmin, requirePlatformAdmin, requireAppAccess } from '../middleware/auth.js';
 import { auditMiddleware } from '../middleware/audit.js';
 import { AppError } from '../utils/errors.js';
+import { roleForUserOnApp } from '../services/permissions.js';
+import { isAdmin } from '../utils/roles.js';
 
 const router = Router();
 
 router.use(requireAuth);
 
-/**
- * GET /api/users - List all users (admin only)
- */
-router.get('/', requireAdmin, (req, res) => {
-  const db = getDb();
-  const users = db.prepare(`
-    SELECT u.id, u.name, u.email, u.username, u.role, u.kind, u.created_at, u.last_login_at,
-      CASE WHEN u.password_hash IS NOT NULL THEN 1 ELSE 0 END as has_password,
-      CASE WHEN u.saml_name_id IS NOT NULL THEN 'saml' WHEN u.sso_sub IS NOT NULL THEN 'oidc' ELSE NULL END as sso_provider,
-      (SELECT GROUP_CONCAT(a.slug, ', ') FROM app_users au JOIN apps a ON a.id = au.app_id WHERE au.user_id = u.id) as assigned_apps
-    FROM users u ORDER BY u.created_at DESC
-  `).all();
+/** True if `user` is the owner of at least one app — gates owner self-service. */
+function ownsAnyApp(db, userId) {
+  return !!db.prepare(
+    "SELECT 1 FROM app_user_roles WHERE user_id = ? AND app_role = 'owner' LIMIT 1"
+  ).get(userId);
+}
 
+/**
+ * GET /api/users - List users.
+ *
+ * Admins get the full directory (with login/SSO metadata). v2.7.9: app owners
+ * also get a list so they can manage members of their own apps from the
+ * Launcher, but a LEAN projection only (id, name, email, username, role,
+ * kind) — no password/SSO/last-login/assignment metadata. Non-owners are
+ * still denied.
+ */
+router.get('/', (req, res) => {
+  const db = getDb();
+  if (isAdmin(req.user)) {
+    const users = db.prepare(`
+      SELECT u.id, u.name, u.email, u.username, u.role, u.kind, u.created_at, u.last_login_at,
+        CASE WHEN u.password_hash IS NOT NULL THEN 1 ELSE 0 END as has_password,
+        CASE WHEN u.saml_name_id IS NOT NULL THEN 'saml' WHEN u.sso_sub IS NOT NULL THEN 'oidc' ELSE NULL END as sso_provider,
+        (SELECT GROUP_CONCAT(a.slug, ', ') FROM app_users au JOIN apps a ON a.id = au.app_id WHERE au.user_id = u.id) as assigned_apps
+      FROM users u ORDER BY u.created_at DESC
+    `).all();
+    return res.json({ users });
+  }
+  if (!ownsAnyApp(db, req.user.id)) {
+    throw new AppError('Admin access required', 403, 'FORBIDDEN');
+  }
+  const users = db.prepare(
+    'SELECT id, name, email, username, role, kind FROM users ORDER BY name'
+  ).all();
   res.json({ users });
 });
 
@@ -226,17 +249,33 @@ router.put('/:id/profile', requireAdmin, auditMiddleware('user-update-profile'),
 });
 
 /**
- * PUT /api/apps/:slug/roles - Set per-app role for a user (admin only)
- * Body: { user_id: 2, app_role: "admin" | "user" | "none" }
+ * PUT /api/apps/:slug/roles - Set per-app role for a user.
+ * Body: { user_id: 2, app_role: "owner" | "admin" | "user" | "none" }
+ *
+ * v2.7.9: global admins OR an owner of THIS app. Owners can grant up to
+ * 'owner' (co-owners), but a last-owner guard prevents removing the final
+ * owner so an app can't be left ownerless.
  */
-router.put('/:slug/roles', requireAdmin, auditMiddleware('app-set-role'), (req, res) => {
+router.put('/:slug/roles', requireAppAccess, auditMiddleware('app-set-role'), (req, res) => {
+  const app = req.app; // set by requireAppAccess
+  if (!isAdmin(req.user) && roleForUserOnApp(req.user, app) !== 'owner') {
+    throw new AppError('Only the app owner can manage users on this app.', 403, 'FORBIDDEN');
+  }
+
   const { user_id, app_role } = req.body;
   if (!user_id || !app_role) throw new AppError('user_id and app_role required', 400, 'VALIDATION');
   if (!['owner', 'admin', 'user', 'none'].includes(app_role)) throw new AppError('app_role must be owner, admin, user, or none', 400, 'VALIDATION');
 
   const db = getDb();
-  const app = db.prepare('SELECT * FROM apps WHERE slug = ?').get(req.params.slug);
-  if (!app) throw new AppError('App not found', 404, 'NOT_FOUND');
+
+  // Last-owner guard: don't let the final owner be demoted/removed.
+  if (app_role !== 'owner') {
+    const target = db.prepare('SELECT app_role FROM app_user_roles WHERE app_id = ? AND user_id = ?').get(app.id, user_id);
+    if (target?.app_role === 'owner') {
+      const owners = db.prepare("SELECT COUNT(*) AS n FROM app_user_roles WHERE app_id = ? AND app_role = 'owner'").get(app.id);
+      if (owners.n <= 1) throw new AppError('Cannot remove the last owner of the app. Assign another owner first.', 400, 'LAST_OWNER');
+    }
+  }
 
   db.prepare(`
     INSERT INTO app_user_roles (app_id, user_id, app_role) VALUES (?, ?, ?)
@@ -250,12 +289,15 @@ router.put('/:slug/roles', requireAdmin, auditMiddleware('app-set-role'), (req, 
 });
 
 /**
- * GET /api/apps/:slug/identity/users - List all users + roles for an app (admin only)
+ * GET /api/apps/:slug/identity/users - List all users + roles for an app.
+ * v2.7.9: global admins OR an owner of this app.
  */
-router.get('/:slug/identity/users', requireAdmin, (req, res) => {
+router.get('/:slug/identity/users', requireAppAccess, (req, res) => {
+  const app = req.app; // set by requireAppAccess
+  if (!isAdmin(req.user) && roleForUserOnApp(req.user, app) !== 'owner') {
+    throw new AppError('Only the app owner can view users on this app.', 403, 'FORBIDDEN');
+  }
   const db = getDb();
-  const app = db.prepare('SELECT * FROM apps WHERE slug = ?').get(req.params.slug);
-  if (!app) throw new AppError('App not found', 404, 'NOT_FOUND');
 
   const users = db.prepare(`
     SELECT u.id, u.name, u.email, u.username, u.avatar_url, u.phone, u.year_of_birth,

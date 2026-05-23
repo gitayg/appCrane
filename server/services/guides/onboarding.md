@@ -71,6 +71,8 @@ appcrane_create_app(name, slug, github_url, github_token, branch?, …)
 appcrane_create_managed_app(name, slug, branch?, description?)  — path (d)
 appcrane_set_env(slug, env, key, value)
 appcrane_deploy(slug, env)                                       — pulls latest commit from the branch + rebuilds
+appcrane_set_app_meta(slug, category?, visibility?)              — owner self-service (existing categories only)
+appcrane_grant_app_access(slug, user, role) / appcrane_revoke_app_access(slug, user)  — owner manages members
 appcrane_get_logs(slug, env, lines?, search?)
 appcrane_get_deploy_log(deployment_id | slug + env)              — pre-build / fast failures
 appcrane_set_app_icon(slug, format, base64)                      — mid-flight icon swap

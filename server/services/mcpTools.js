@@ -1,7 +1,7 @@
 import { getDb } from '../db.js';
 import { decrypt, encrypt } from './encryption.js';
 import { BUCKETS, bucketize, applyBucket } from './requestStatus.js';
-import { userHasAppPermission, userHasPlatformPermission } from './permissions.js';
+import { userHasAppPermission, userHasPlatformPermission, roleForUserOnApp } from './permissions.js';
 import { isAdmin } from '../utils/roles.js';
 import log from '../utils/logger.js';
 import { mkdirSync } from 'fs';
@@ -1222,6 +1222,71 @@ const TOOLS = [
           max_cpu_percent: resourceLimits?.max_cpu_percent ?? null,
         },
       };
+    },
+  },
+
+  {
+    name: 'appcrane_set_app_meta',
+    description:
+      'Set an app\'s category and/or visibility — the owner self-service fields (same controls the dashboard Launcher exposes to owners). Owner of the app (or global admin) required. Visibility is one of public / private / hidden. Owners may only assign an EXISTING category; creating a brand-new category is reserved for global admins. For powerful fields (github_url, branch, token, source_type, resource limits) use appcrane_update_app (admin only).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        slug:       { type: 'string', description: 'App slug.' },
+        category:   { type: 'string', description: 'Category/tag. Owners must pick one already in use; pass empty string to clear.' },
+        visibility: { type: 'string', enum: ['public', 'private', 'hidden'], description: 'public = anyone; private = assigned users; hidden = not discoverable.' },
+      },
+      required: ['slug'],
+      additionalProperties: false,
+    },
+    requiredRole: 'any', // handler enforces owner-or-admin per-slug
+    handler: async (user, args) => {
+      const app = getAppForUser(user, args.slug);
+      const globalAdmin = isAdmin(user);
+      if (!globalAdmin && roleForUserOnApp(user, app) !== 'owner') {
+        throw new Error('Forbidden: only the app owner (or a global admin) can change category/visibility.');
+      }
+      if (args.category === undefined && args.visibility === undefined) {
+        throw new Error('Pass at least one of category or visibility.');
+      }
+      const db = getDb();
+      const updates = {};
+
+      if (args.visibility !== undefined) {
+        if (!['public', 'private', 'hidden'].includes(args.visibility)) {
+          throw new Error('visibility must be one of: public, private, hidden');
+        }
+        updates.visibility = args.visibility;
+        updates.public_access = args.visibility === 'public' ? 1 : 0;
+      }
+
+      if (args.category !== undefined) {
+        const newCat = args.category ? String(args.category).trim() : null;
+        // Owners can't create new categories — must already exist on an app
+        // they can see (public or assigned). Mirrors POST/PUT /api/apps.
+        if (!globalAdmin && newCat) {
+          const exists = db.prepare(`
+            SELECT 1 FROM apps a
+            WHERE a.category = ? AND a.category IS NOT NULL AND a.category != ''
+              AND (
+                a.visibility = 'public'
+                OR EXISTS (SELECT 1 FROM app_users au WHERE au.app_id = a.id AND au.user_id = ?)
+                OR EXISTS (SELECT 1 FROM app_user_roles aur WHERE aur.app_id = a.id AND aur.user_id = ?)
+              )
+            LIMIT 1
+          `).get(newCat, user.id, user.id);
+          if (!exists) throw new Error('Only admins can create new categories — pick an existing one.');
+        }
+        updates.category = newCat;
+      }
+
+      const keys = Object.keys(updates);
+      const setClause = keys.map(k => `${k} = ?`).join(', ');
+      db.prepare(`UPDATE apps SET ${setClause} WHERE id = ?`).run(...keys.map(k => updates[k]), app.id);
+
+      log.info(`MCP: app '${app.slug}' meta updated by user ${user.id}; fields=${keys.join(',')}`);
+      const fresh = db.prepare('SELECT category, visibility, public_access FROM apps WHERE id = ?').get(app.id);
+      return { app: app.slug, category: fresh.category, visibility: fresh.visibility, public_access: fresh.public_access, updated_fields: keys };
     },
   },
 

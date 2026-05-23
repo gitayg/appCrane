@@ -28,6 +28,9 @@ interface AppRow {
   sandbox?:    { health?: { status: string } }
 }
 
+type AppMemberRole = 'none' | 'user' | 'admin' | 'owner'
+interface ModalUser { id: number; name: string; email: string | null; role: string; app_role: AppMemberRole }
+
 interface Props {
   onOpen: (slug: string, name: string, hasIcon: boolean) => void
   /**
@@ -72,6 +75,12 @@ export function LauncherView({ onOpen, headerRight }: Props) {
   // server and admins see it regardless.
   const [requested, setRequested] = useState<Record<string, boolean>>({})
   const [requestingSlug, setRequestingSlug] = useState<string | null>(null)
+  // v2.7.9: owner self-service — manage members of an app you own from a
+  // focused modal. Mirrors the admin per-app Users modal but reachable by
+  // owners (server gates the endpoints to admin-or-owner).
+  const [usersModalApp, setUsersModalApp] = useState<AppRow | null>(null)
+  const [usersModalData, setUsersModalData] = useState<ModalUser[] | null>(null)
+  const [usersSaving, setUsersSaving] = useState<Record<number, 'saving' | 'saved' | 'error'>>({})
 
   useEffect(() => {
     adminApi.get<{ apps: AppRow[] }>('/api/apps')
@@ -114,6 +123,54 @@ export function LauncherView({ onOpen, headerRight }: Props) {
     } catch (e) {
       setApps(snapshot) // revert on failure (e.g. server rejects a new category)
       alert('Could not change category: ' + (e instanceof Error ? e.message : String(e)))
+    }
+  }
+
+  // v2.7.9: owners can change visibility from the tile.
+  async function changeVisibility(slug: string, value: string) {
+    const snapshot = apps
+    setApps(list => list.map(a => (a.slug === slug ? { ...a, visibility: value } : a)))
+    try {
+      await adminApi.put(`/api/apps/${slug}`, { visibility: value })
+    } catch (e) {
+      setApps(snapshot)
+      alert('Could not change visibility: ' + (e instanceof Error ? e.message : String(e)))
+    }
+  }
+
+  // Load the merged user+role list when the Users modal opens.
+  useEffect(() => {
+    if (!usersModalApp) { setUsersModalData(null); return }
+    let cancelled = false
+    Promise.all([
+      adminApi.get<{ users: { id: number; name: string; email: string | null; role: string }[] }>('/api/users'),
+      adminApi.get<{ users: { id: number; app_role: AppMemberRole }[] }>(`/api/apps/${usersModalApp.slug}/identity/users`),
+    ])
+      .then(([allUsers, appUsers]) => {
+        if (cancelled) return
+        const roleByUser = new Map(appUsers.users.map(u => [u.id, u.app_role]))
+        setUsersModalData((allUsers.users || []).map(u => ({
+          id: u.id, name: u.name, email: u.email, role: u.role,
+          app_role: roleByUser.get(u.id) ?? 'none',
+        })))
+      })
+      .catch(() => { if (!cancelled) setUsersModalData([]) })
+    return () => { cancelled = true }
+  }, [usersModalApp])
+
+  async function changeUserAppRole(userId: number, newRole: AppMemberRole) {
+    if (!usersModalApp) return
+    const prev = usersModalData?.find(u => u.id === userId)?.app_role ?? 'none'
+    setUsersModalData(d => d ? d.map(u => u.id === userId ? { ...u, app_role: newRole } : u) : d)
+    setUsersSaving(s => ({ ...s, [userId]: 'saving' }))
+    try {
+      await adminApi.put(`/api/apps/${usersModalApp.slug}/roles`, { user_id: userId, app_role: newRole })
+      setUsersSaving(s => ({ ...s, [userId]: 'saved' }))
+      setTimeout(() => setUsersSaving(s => { const c = { ...s }; delete c[userId]; return c }), 1500)
+    } catch (e) {
+      setUsersModalData(d => d ? d.map(u => u.id === userId ? { ...u, app_role: prev } : u) : d)
+      setUsersSaving(s => ({ ...s, [userId]: 'error' }))
+      alert('Could not save role: ' + (e instanceof Error ? e.message : String(e)))
     }
   }
 
@@ -223,10 +280,10 @@ export function LauncherView({ onOpen, headerRight }: Props) {
                     )
                   }
                   const avail = availability(app.production?.health?.status, app.sandbox?.health?.status)
-                  // v2.7.6: owners get an inline category picker under the tile.
-                  // The tile itself is a <button>, so the <select> can't nest
-                  // inside it — wrap both in a cell. Existing categories only.
-                  const canEditCategory = app.app_role === 'owner'
+                  // v2.7.6/2.7.9: owners get inline controls under the tile —
+                  // category, visibility, and a Users button. The tile itself
+                  // is a <button>, so these can't nest inside it; wrap in a cell.
+                  const isOwner = app.app_role === 'owner'
                   const tile = (
                     <button
                       type="button"
@@ -254,20 +311,41 @@ export function LauncherView({ onOpen, headerRight }: Props) {
                       )}
                     </button>
                   )
-                  if (!canEditCategory) return <div key={app.slug} className="launcher-tile-cell">{tile}</div>
+                  if (!isOwner) return <div key={app.slug} className="launcher-tile-cell">{tile}</div>
                   return (
                     <div key={app.slug} className="launcher-tile-cell">
                       {tile}
-                      <select
-                        className="launcher-tile-category"
-                        value={app.category ?? ''}
-                        onChange={e => changeCategory(app.slug, e.target.value)}
-                        title="Category — pick an existing one (only admins can create new categories)"
-                        aria-label={`Category for ${app.name}`}
+                      <div className="launcher-tile-owner-row">
+                        <select
+                          className="launcher-tile-ctrl"
+                          value={app.category ?? ''}
+                          onChange={e => changeCategory(app.slug, e.target.value)}
+                          title="Category — pick an existing one (only admins can create new categories)"
+                          aria-label={`Category for ${app.name}`}
+                        >
+                          <option value="">— no category —</option>
+                          {categories.map(c => <option key={c} value={c}>{c}</option>)}
+                        </select>
+                        <select
+                          className="launcher-tile-ctrl"
+                          value={app.visibility ?? 'private'}
+                          onChange={e => changeVisibility(app.slug, e.target.value)}
+                          title="Visibility"
+                          aria-label={`Visibility for ${app.name}`}
+                        >
+                          <option value="public">public</option>
+                          <option value="private">private</option>
+                          <option value="hidden">hidden</option>
+                        </select>
+                      </div>
+                      <button
+                        type="button"
+                        className="launcher-tile-ctrl launcher-tile-users-btn"
+                        onClick={() => setUsersModalApp(app)}
+                        title={`Manage users for ${app.name}`}
                       >
-                        <option value="">— no category —</option>
-                        {categories.map(c => <option key={c} value={c}>{c}</option>)}
-                      </select>
+                        Users
+                      </button>
                     </div>
                   )
                 })}
@@ -275,6 +353,70 @@ export function LauncherView({ onOpen, headerRight }: Props) {
             </section>
           ))
         })()
+      )}
+
+      {usersModalApp && (
+        <div
+          onClick={() => setUsersModalApp(null)}
+          style={{
+            position: 'fixed', inset: 0, background: 'rgba(0,0,0,.65)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100,
+            backdropFilter: 'blur(2px)',
+          }}
+        >
+          <div
+            onClick={e => e.stopPropagation()}
+            style={{
+              background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 12,
+              padding: 24, maxWidth: 620, width: '94%', maxHeight: '80vh', overflowY: 'auto',
+              boxShadow: '0 24px 64px rgba(0,0,0,.5)',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+              <h3 style={{ margin: 0, fontSize: '1.05rem' }}>Users · {usersModalApp.name}</h3>
+              <button className="btn btn-xs" onClick={() => setUsersModalApp(null)}>Close</button>
+            </div>
+            <p style={{ color: 'var(--dim)', fontSize: '.8rem', marginTop: 4, marginBottom: 14 }}>
+              Set each user's role on this app. A last-owner guard keeps the app from being left ownerless.
+            </p>
+            {usersModalData === null ? (
+              <p style={{ color: 'var(--dim)', fontSize: '.85rem' }}>Loading…</p>
+            ) : usersModalData.length === 0 ? (
+              <p style={{ color: 'var(--dim)', fontSize: '.85rem' }}>No users found.</p>
+            ) : (
+              <table style={{ width: '100%', fontSize: '.85rem' }}>
+                <tbody>
+                  {usersModalData.map(u => {
+                    const status = usersSaving[u.id]
+                    return (
+                      <tr key={u.id} style={{ borderTop: '1px solid var(--border)' }}>
+                        <td style={{ padding: '8px 6px' }}>
+                          <div style={{ fontWeight: 600 }}>{u.name || u.email || `user#${u.id}`}</div>
+                          {u.email && <div style={{ color: 'var(--dim)', fontSize: '.76rem' }}>{u.email}</div>}
+                        </td>
+                        <td style={{ padding: '8px 6px', textAlign: 'right', whiteSpace: 'nowrap' }}>
+                          <select
+                            value={u.app_role}
+                            onChange={e => changeUserAppRole(u.id, e.target.value as AppMemberRole)}
+                            style={{ fontSize: '.8rem' }}
+                          >
+                            <option value="none">none</option>
+                            <option value="user">user</option>
+                            <option value="admin">admin</option>
+                            <option value="owner">owner</option>
+                          </select>
+                          {status === 'saving' && <span style={{ marginLeft: 6, color: 'var(--dim)', fontSize: '.74rem' }}>…</span>}
+                          {status === 'saved' && <span style={{ marginLeft: 6, color: 'var(--green)', fontSize: '.74rem' }}>✓</span>}
+                          {status === 'error' && <span style={{ marginLeft: 6, color: 'var(--red)', fontSize: '.74rem' }}>✗</span>}
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </div>
       )}
     </div>
   )
