@@ -507,6 +507,12 @@ const TOOLS = [
     handler: async (user, args) => {
       const env = args.env === 'production' ? 'production' : 'sandbox';
       const app = getAppForUser(user, args.slug);
+      // v2.7.11: production deploys require the deploy.production permission —
+      // mirrors POST /api/apps/:slug/deploy/:env. Was missing here, so an
+      // app-access key could ship to prod via MCP without the permission.
+      if (env === 'production' && !userHasAppPermission(user, app, 'deploy.production')) {
+        throw new Error('Forbidden: deploying to production requires the deploy.production permission for this app.');
+      }
       const db = getDb();
       const result = db
         .prepare("INSERT INTO deployments (app_id, env, status, deployed_by) VALUES (?, ?, 'pending', ?)")
@@ -529,6 +535,109 @@ const TOOLS = [
         env,
         status: 'pending',
         next: `Use appcrane_get_logs with slug="${app.slug}" env="${env}" to monitor.`,
+      };
+    },
+  },
+
+  {
+    name: 'appcrane_list_releases',
+    description:
+      'List the deploy/release history for an app + env, newest first — each release is id, version, commit, status (live / rolled_back / failed / pending), who deployed it, and when. Use this to see what is live and to pick a target for appcrane_rollback. App access required.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        slug:  { type: 'string' },
+        env:   { type: 'string', enum: ['sandbox', 'production'], default: 'sandbox' },
+        limit: { type: 'integer', minimum: 1, maximum: 50, description: 'Max rows (default 10).' },
+      },
+      required: ['slug'],
+      additionalProperties: false,
+    },
+    requiredRole: 'any', // gated by app-access via getAppForUser
+    handler: async (user, args) => {
+      const env = args.env === 'production' ? 'production' : 'sandbox';
+      const app = getAppForUser(user, args.slug);
+      const limit = Math.min(Math.max(parseInt(args.limit, 10) || 10, 1), 50);
+      const db = getDb();
+      const releases = db.prepare(`
+        SELECT d.id, d.version, d.commit_hash, d.status, d.started_at, d.finished_at,
+          u.name AS deployed_by_name,
+          CASE WHEN d.release_path IS NOT NULL AND d.release_path != '' THEN 1 ELSE 0 END AS rollbackable
+        FROM deployments d
+        LEFT JOIN users u ON d.deployed_by = u.id
+        WHERE d.app_id = ? AND d.env = ?
+        ORDER BY d.started_at DESC
+        LIMIT ?
+      `).all(app.id, env, limit);
+      return { app: app.slug, env, releases };
+    },
+  },
+
+  {
+    name: 'appcrane_rollback',
+    description:
+      'Roll an env back to a prior release. Pass deployment_id (from appcrane_list_releases) to target a specific release, or omit it to roll back to the immediately previous one. Re-runs that release from its recorded build (re-uses the cached per-commit image — no rebuild when it is still retained) and health-checks it. Records a NEW deployment and marks the previous live one rolled_back. Owner-only (or global admin).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        slug:          { type: 'string' },
+        env:           { type: 'string', enum: ['sandbox', 'production'], default: 'sandbox' },
+        deployment_id: { type: 'integer', description: 'Target release id. Omit to roll back to the previous release.' },
+      },
+      required: ['slug'],
+      additionalProperties: false,
+    },
+    requiredRole: 'any', // gated per-slug in handler (owner of the app, or global admin)
+    handler: async (user, args) => {
+      const env = args.env === 'production' ? 'production' : 'sandbox';
+      const app = getAppForUser(user, args.slug);
+      // v2.7.13: rollback is owner-only (or global admin), same gate as promote.
+      if (!isAdmin(user) && roleForUserOnApp(user, app) !== 'owner') {
+        throw new Error('Forbidden: only the app owner can roll back this app.');
+      }
+      const { rollbackApp } = await import('./deployer.js');
+      const r = await rollbackApp(app, env, args.deployment_id, user.id);
+      return {
+        app: app.slug,
+        env,
+        deployment_id: r.deployment_id,
+        rolled_back_to: r.rollback_to,
+        version: r.version,
+        commit_hash: r.commit_hash,
+        next: `Use appcrane_get_logs slug="${app.slug}" env="${env}" to confirm the rolled-back release is healthy.`,
+      };
+    },
+  },
+
+  {
+    name: 'appcrane_promote',
+    description:
+      'Promote the current live SANDBOX release to production — the gated sandbox→prod path. Refuses unless sandbox is live AND currently healthy (you do not ship a broken sandbox to prod), and the promoted prod release is health-checked with auto-revert. For github apps this rebuilds production from the EXACT sandbox commit; for managed/upload apps it copies the exact tested sandbox release. Owner-only (or global admin).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        slug: { type: 'string' },
+      },
+      required: ['slug'],
+      additionalProperties: false,
+    },
+    requiredRole: 'any', // gated per-slug in handler (owner of the app, or global admin)
+    handler: async (user, args) => {
+      const app = getAppForUser(user, args.slug);
+      // v2.7.12: promotion is owner-only (or global admin).
+      if (!isAdmin(user) && roleForUserOnApp(user, app) !== 'owner') {
+        throw new Error('Forbidden: only the app owner can promote to production.');
+      }
+      const { promoteApp } = await import('./deployer.js');
+      const r = await promoteApp(app, user.id);
+      return {
+        app: app.slug,
+        deployment_id: r.deployment_id,
+        from_sandbox: r.from_sandbox,
+        version: r.version,
+        mode: r.mode,
+        status: r.status,
+        next: `Use appcrane_get_logs slug="${app.slug}" env="production" to monitor the promotion.`,
       };
     },
   },

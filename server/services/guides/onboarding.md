@@ -71,6 +71,8 @@ appcrane_create_app(name, slug, github_url, github_token, branch?, …)
 appcrane_create_managed_app(name, slug, branch?, description?)  — path (d)
 appcrane_set_env(slug, env, key, value)
 appcrane_deploy(slug, env)                                       — pulls latest commit from the branch + rebuilds
+appcrane_list_releases(slug, env) / appcrane_rollback(slug, env, deployment_id?)  — release history + one-click rollback
+appcrane_promote(slug)                                           — owner-only gated sandbox→prod (live+healthy sandbox; prod built from the exact sandbox commit)
 appcrane_set_app_meta(slug, category?, visibility?)              — owner self-service (existing categories only)
 appcrane_grant_app_access(slug, user, role) / appcrane_revoke_app_access(slug, user)  — owner manages members
 appcrane_get_logs(slug, env, lines?, search?)
