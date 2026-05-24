@@ -1,9 +1,10 @@
 import { execFileSync } from 'child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, unlinkSync, symlinkSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, unlinkSync, symlinkSync, cpSync, writeFileSync } from 'fs';
 import { join, resolve } from 'path';
 import { getDb } from '../db.js';
 import { decrypt } from './encryption.js';
 import log from '../utils/logger.js';
+import { AppError } from '../utils/errors.js';
 import { ensureCodebaseContext } from './appstudio/contextBuilder.js';
 
 /**
@@ -219,6 +220,208 @@ function validateManifestCommand(value, field) {
  * 8. Swap 'current' symlink
  * 9. Cleanup old releases (keep last 5)
  */
+/**
+ * Roll an env back to a prior release ("release as an object"). Re-runs a
+ * recorded release from its on-disk release_path via the normal deploy
+ * pipeline (which re-uses the cached per-commit image, so no rebuild when the
+ * image is still retained). Records a NEW deployment, marks the previously
+ * live one rolled_back, and health-checks like any deploy.
+ *
+ * Shared by POST /api/apps/:slug/rollback/:env and the appcrane_rollback MCP
+ * tool so REST and MCP stay in lockstep. Caller is responsible for authz
+ * (production rollback must be gated by deploy.production).
+ *
+ * @param {object} app   - app row (needs id, slug, slot)
+ * @param {string} env   - 'production' | 'sandbox'
+ * @param {number|undefined} deploymentId - target release id; omit for the previous one
+ * @param {number} userId - who triggered it (for the audit/deployed_by column)
+ */
+export async function rollbackApp(app, env, deploymentId, userId) {
+  if (!['production', 'sandbox'].includes(env)) {
+    throw new AppError('env must be production or sandbox', 400, 'VALIDATION');
+  }
+  const db = getDb();
+
+  let target;
+  if (deploymentId) {
+    target = db.prepare(
+      "SELECT * FROM deployments WHERE id = ? AND app_id = ? AND env = ? AND status IN ('live', 'rolled_back')"
+    ).get(deploymentId, app.id, env);
+  } else {
+    // Previous live-or-rolled-back deployment (skip the current live one).
+    const history = db.prepare(
+      "SELECT * FROM deployments WHERE app_id = ? AND env = ? AND status IN ('live', 'rolled_back') ORDER BY started_at DESC LIMIT 2"
+    ).all(app.id, env);
+    target = history[1];
+  }
+
+  if (!target) throw new AppError('No previous deployment to roll back to', 404, 'NO_ROLLBACK_TARGET');
+  if (!target.release_path) throw new AppError('Target deployment has no release_path recorded (pre-rollback-support deploy)', 409, 'NO_RELEASE_PATH');
+  if (!existsSync(target.release_path)) throw new AppError(`Release directory missing on disk: ${target.release_path}`, 410, 'RELEASE_GONE');
+
+  const dataDir = resolve(process.env.DATA_DIR || './data');
+  const appDir = resolve(join(dataDir, 'apps', app.slug, env));
+  if (!appDir.startsWith(dataDir)) throw new AppError('Security: appDir outside dataDir', 500, 'PATH_TRAVERSAL');
+  const releaseDir = resolve(target.release_path);
+  if (!releaseDir.startsWith(dataDir)) throw new AppError('Security: release_path outside dataDir', 500, 'PATH_TRAVERSAL');
+
+  // Swap the current symlink to the rollback target.
+  const currentLink = join(appDir, 'current');
+  try { unlinkSync(currentLink); } catch (_) {}
+  symlinkSync(releaseDir, currentLink);
+
+  const rollbackInsert = db.prepare(`
+    INSERT INTO deployments (app_id, env, version, status, commit_hash, release_path, deployed_by, log)
+    VALUES (?, ?, ?, 'pending', ?, ?, ?, ?)
+  `).run(app.id, env, target.version, target.commit_hash, releaseDir, userId, `Rollback to deployment #${target.id}`);
+  const newId = rollbackInsert.lastInsertRowid;
+
+  // Mark the previously-live deployment as rolled_back.
+  db.prepare("UPDATE deployments SET status = 'rolled_back' WHERE app_id = ? AND env = ? AND status = 'live' AND id != ?")
+    .run(app.id, env, newId);
+
+  const { getPortsForSlot } = await import('./portAllocator.js');
+  const fullApp = db.prepare('SELECT * FROM apps WHERE id = ?').get(app.id);
+  const ports = getPortsForSlot(fullApp.slot);
+  await deployApp(newId, fullApp, env, ports, { preExtractedDir: releaseDir, commitHash: target.commit_hash });
+
+  log.info(`Rollback: ${app.slug}/${env} → deployment #${target.id} (v${target.version || '?'}) by user ${userId}`);
+  return { deployment_id: newId, rollback_to: target.id, version: target.version, commit_hash: target.commit_hash };
+}
+
+/**
+ * Promote the current live SANDBOX release to production — the gated
+ * sandbox→prod path (Shipper's "promote a tested, healthy release" idea).
+ *
+ * Gate: there must be a live sandbox deployment AND it must be currently
+ * healthy (health_state.is_down = 0) — we don't ship a broken sandbox to prod.
+ * The promoted production release is then health-checked by deployApp, which
+ * reverts to the previous prod image on failure, so a bad promote can't take
+ * production down.
+ *
+ * - github apps: a FRESH production build (so the bundler bakes the prod
+ *   base path /<slug>/ rather than the sandbox's /<slug>-sandbox/).
+ * - managed/upload apps: copies the EXACT tested sandbox release tree into
+ *   production (byte-identical artifact), rewriting only the prod .env.
+ *
+ * Shared by POST /api/apps/:slug/promote and the appcrane_promote MCP tool.
+ * Caller is responsible for authz (must require deploy.production).
+ */
+export async function promoteApp(app, userId) {
+  const db = getDb();
+
+  const sandboxDeploy = db.prepare(
+    "SELECT * FROM deployments WHERE app_id = ? AND env = 'sandbox' AND status = 'live' ORDER BY started_at DESC LIMIT 1"
+  ).get(app.id);
+  if (!sandboxDeploy) throw new AppError('No live sandbox deployment to promote', 400, 'NO_SANDBOX_DEPLOY');
+
+  // v2.7.12: promotion gate — only advance a HEALTHY sandbox to production.
+  const sbHealth = db.prepare("SELECT is_down FROM health_state WHERE app_id = ? AND env = 'sandbox'").get(app.id);
+  if (sbHealth && sbHealth.is_down) {
+    throw new AppError('Sandbox is currently unhealthy — fix sandbox before promoting it to production.', 409, 'SANDBOX_UNHEALTHY');
+  }
+
+  const { getPortsForSlot } = await import('./portAllocator.js');
+  const prodPorts = getPortsForSlot(app.slot);
+
+  // GitHub-sourced apps: fresh production build so the bundler picks up
+  // VITE_BASE_PATH=/<slug>/ instead of the sandbox's /<slug>-sandbox/.
+  if (app.source_type === 'github' && app.github_url) {
+    const freshResult = db.prepare(`
+      INSERT INTO deployments (app_id, env, version, status, commit_hash, deployed_by, log)
+      VALUES (?, 'production', ?, 'pending', ?, ?, ?)
+    `).run(app.id, sandboxDeploy.version, sandboxDeploy.commit_hash, userId,
+      `Promote from sandbox #${sandboxDeploy.id} — fresh production build @ ${sandboxDeploy.commit_hash || 'HEAD'}`);
+    const freshDeployId = freshResult.lastInsertRowid;
+    // v2.7.12: build production from the EXACT sandbox commit (targetCommit),
+    // not the branch tip — production ships precisely what was tested in
+    // sandbox. A fresh build (not the sandbox image) is still required so the
+    // bundler bakes the prod base path /<slug>/.
+    deployApp(freshDeployId, app, 'production', prodPorts, { targetCommit: sandboxDeploy.commit_hash }).catch(err => {
+      log.error(`Promote build ${freshDeployId} for ${app.slug} failed: ${err.message}`);
+    });
+    return { deployment_id: freshDeployId, status: 'pending', mode: 'rebuild', version: sandboxDeploy.version, from_sandbox: sandboxDeploy.id };
+  }
+
+  // Managed/upload apps: copy the exact sandbox release tree into production.
+  if (!sandboxDeploy.release_path || !existsSync(sandboxDeploy.release_path)) {
+    throw new AppError('Sandbox release directory missing on disk (pre-promote-support deploy?)', 409, 'NO_RELEASE_PATH');
+  }
+
+  const dataDir = resolve(process.env.DATA_DIR || './data');
+  const prodAppDir = resolve(join(dataDir, 'apps', app.slug, 'production'));
+  const prodReleasesDir = resolve(join(prodAppDir, 'releases'));
+  const prodSharedDir = resolve(join(prodAppDir, 'shared'));
+  const sandboxReleaseDir = resolve(sandboxDeploy.release_path);
+  for (const p of [prodAppDir, prodReleasesDir, prodSharedDir, sandboxReleaseDir]) {
+    if (!p.startsWith(dataDir)) throw new AppError('Security: path outside dataDir', 500, 'PATH_TRAVERSAL');
+  }
+
+  const insertResult = db.prepare(`
+    INSERT INTO deployments (app_id, env, version, status, commit_hash, deployed_by, log)
+    VALUES (?, 'production', ?, 'deploying', ?, ?, ?)
+  `).run(app.id, sandboxDeploy.version, sandboxDeploy.commit_hash, userId,
+    `Promoted from sandbox deployment #${sandboxDeploy.id}`);
+  const newDeployId = insertResult.lastInsertRowid;
+
+  try {
+    // 1. Copy sandbox release tree into production releases/ (skip .env + data symlinks).
+    const timestamp = Date.now();
+    const newReleaseDir = resolve(join(prodReleasesDir, `${timestamp}-promote`));
+    cpSync(sandboxReleaseDir, newReleaseDir, {
+      recursive: true,
+      dereference: false,
+      filter: (src) => {
+        const base = src.split('/').pop();
+        if (base === '.env' || base === 'data') return false;
+        return true;
+      },
+    });
+
+    // 2. Rewrite production .env from production env_vars (NEVER copy sandbox env).
+    const envRows = db.prepare('SELECT key, value_encrypted FROM env_vars WHERE app_id = ? AND env = ?').all(app.id, 'production');
+    const envContent = envRows.map(v => {
+      try { return `${v.key}=${decrypt(v.value_encrypted)}`; }
+      catch (_) { return `# ERROR decrypting ${v.key}`; }
+    }).join('\n');
+    const fullEnv = `${envContent}\nPORT=${prodPorts.prod_be}\nFE_PORT=${prodPorts.prod_fe}\nNODE_ENV=production\n`;
+    writeFileSync(join(prodSharedDir, '.env.production'), fullEnv);
+    const envDest = join(newReleaseDir, '.env');
+    try { unlinkSync(envDest); } catch (_) {}
+    symlinkSync(join(prodSharedDir, '.env.production'), envDest);
+
+    // 3. Symlink production shared /data.
+    const dataLink = join(newReleaseDir, 'data');
+    try { unlinkSync(dataLink); } catch (_) {}
+    try { symlinkSync(join(prodSharedDir, 'data'), dataLink); } catch (_) {}
+
+    // 4. Swap current symlink.
+    const currentLink = join(prodAppDir, 'current');
+    try { unlinkSync(currentLink); } catch (_) {}
+    symlinkSync(newReleaseDir, currentLink);
+
+    // 5. Rebuild production image + start fresh container, health-checked.
+    try {
+      const fullApp = db.prepare('SELECT * FROM apps WHERE id = ?').get(app.id);
+      await deployApp(newDeployId, fullApp, 'production', prodPorts, {
+        preExtractedDir: newReleaseDir,
+        commitHash: sandboxDeploy.commit_hash,
+      });
+    } catch (e) {
+      log.warn(`Promote deploy failed for ${app.slug}-production: ${e.message}`);
+    }
+
+    db.prepare("UPDATE deployments SET status = 'rolled_back' WHERE app_id = ? AND env = 'production' AND status = 'live'").run(app.id);
+    db.prepare("UPDATE deployments SET status = 'live', release_path = ?, finished_at = datetime('now') WHERE id = ?").run(newReleaseDir, newDeployId);
+
+    log.info(`Promote: ${app.slug} sandbox #${sandboxDeploy.id} → production (deployment #${newDeployId}) by user ${userId}`);
+    return { deployment_id: newDeployId, status: 'live', mode: 'copy', version: sandboxDeploy.version, from_sandbox: sandboxDeploy.id };
+  } catch (e) {
+    db.prepare("UPDATE deployments SET status = 'failed', finished_at = datetime('now'), log = ? WHERE id = ?").run(`Promote failed: ${e.message}`, newDeployId);
+    throw new AppError(`Promote failed: ${e.message}`, 500, 'PROMOTE_FAILED');
+  }
+}
+
 export async function deployApp(deployId, app, env, ports, opts = {}) {
   const db = getDb();
   const dataDir = resolve(process.env.DATA_DIR || './data');
@@ -330,6 +533,30 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
         ], { timeout: 120000, stdio: 'pipe' });
       } catch (err) {
         throw new Error(err.message.replaceAll(cloneUrl, app.github_url));
+      }
+
+      // v2.7.12: pin to an exact commit when asked (promote ships the EXACT
+      // release tested in sandbox, not the branch tip which may have moved).
+      // GitHub serves reachable full SHAs directly; fall back to deepening the
+      // branch history so an abbreviated SHA (deployments.commit_hash is short)
+      // still resolves, then check it out detached.
+      if (opts.targetCommit && opts.targetCommit !== 'unknown') {
+        appendLog(`Pinning to commit ${opts.targetCommit} (exact sandbox release)…`);
+        let fetched = false;
+        try {
+          execFileSync('git', ['-C', releaseDir, 'fetch', '--depth', '1', 'origin', opts.targetCommit], { timeout: 120000, stdio: 'pipe' });
+          fetched = true;
+        } catch (_) { /* abbreviated SHA or not directly fetchable — deepen below */ }
+        if (!fetched) {
+          try {
+            execFileSync('git', ['-C', releaseDir, 'fetch', '--depth', '200', 'origin', app.branch || 'main'], { timeout: 120000, stdio: 'pipe' });
+          } catch (_) { /* best effort; checkout will surface a clear error if the commit is unreachable */ }
+        }
+        try {
+          execFileSync('git', ['-C', releaseDir, 'checkout', '--detach', opts.targetCommit], { timeout: 30000, stdio: 'pipe' });
+        } catch (err) {
+          throw new Error(`Failed to check out commit ${opts.targetCommit} for promotion (is it on branch '${app.branch || 'main'}' within the last 200 commits?): ${String(err.message).replaceAll(cloneUrl, app.github_url)}`);
+        }
       }
 
       // Get commit hash
