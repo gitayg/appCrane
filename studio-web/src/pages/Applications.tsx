@@ -56,6 +56,9 @@ interface PromptModal {
   key?: string
   prompt?: string
   title?: string
+  // v2.7.15: independently-copyable sections (e.g. "Managed Code" vs
+  // "Unmanaged (GitHub)") so the user copies just the path they want.
+  sections?: { label: string; text: string }[]
 }
 
 type SortKey = 'name' | 'visibility' | 'category' | 'ram' | 'cpu' | 'images'
@@ -95,6 +98,13 @@ export function Applications() {
   const [frame, setFrame] = useState<FrameState>({ open: false, url: '', title: '' })
   const [framePanel, setFramePanel] = useState<'ask' | 'request' | 'bug' | null>(null)
   const [promptModal, setPromptModal] = useState<PromptModal>({ open: false })
+  const [copiedLabel, setCopiedLabel] = useState<string | null>(null)
+  function copyText(text: string, label: string) {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopiedLabel(label)
+      setTimeout(() => setCopiedLabel(l => (l === label ? null : l)), 1500)
+    }).catch(() => {})
+  }
   const [checkUpdateText, setCheckUpdateText] = useState<Record<string, string>>({})
   const [iconUrls, setIconUrls] = useState<Record<string, string>>({})
 
@@ -495,87 +505,59 @@ CONSTRAINTS — common pitfalls that fail deploys:
     // setup command, open Claude Code, and ask. The agent pulls the
     // latest playbook itself. Single source of truth on the server.
     void brief // kept above for reference; the modal now hands off to MCP
-    const prompt = `Onboard a new application end-to-end via an AppCrane onboarding agent.
 
-────────────────────────────────────────────────────────────────────
- PATH A — You have a GitHub account (or can create one)
-────────────────────────────────────────────────────────────────────
+    // Managed Code — AppCrane hosts the repo; no GitHub account or PAT needed.
+    const managedPrompt = `MANAGED CODE - AppCrane hosts the repo for you (no GitHub account or token).
+Requires a platform admin to have configured the service-account in Settings > GitHub.
 
-=== STEP 1 — Generate a GitHub PAT ===
+STEP 1 - Wire AppCrane MCP into your local Claude Code (run once in any terminal):
 
-At https://github.com/settings/tokens. Classic: scope \`repo\`. Or
-fine-grained (recommended): Contents R/W, Metadata R, Administration W
-(for the orgs/repos you want to onboard apps for). The PAT lives only in
-your local ~/.claude.json — never stored on the AppCrane server, only
-passed through as a header at request time.
+  claude mcp add --transport http appcrane ${origin}/api/mcp \\
+    --header "X-API-Key: ${key}"
 
-=== STEP 2 — Wire AppCrane MCP into your local Claude Code ===
+STEP 2 - In any terminal run \`claude\`, then paste:
 
-Replace <YOUR_GITHUB_PAT> with the PAT from Step 1, then run once in any
-terminal (the X-API-Key value is already inlined):
+  Onboard a new managed AppCrane app for me. I don't have a GitHub account,
+  so use path (d). Call appcrane_get_guide topic="onboarding" first to pull
+  the latest playbook, then walk me through it. Pick a small Vite + React +
+  TS stack, ask me a name + what it does, and ship it to sandbox.
+
+The agent calls appcrane_create_managed_app - AppCrane's service account creates a
+private repo (AMC_<your_slug>), holds the credential, and pushes scaffolding for you.
+You end with a sandbox URL and never touch github.com.`
+
+    // Unmanaged (GitHub) — bring your own repo + PAT.
+    const githubPrompt = `UNMANAGED (GITHUB) - you bring your own GitHub repo + Personal Access Token.
+
+STEP 1 - Generate a GitHub PAT at https://github.com/settings/tokens.
+  Classic: scope \`repo\`. Fine-grained (recommended): Contents R/W, Metadata R,
+  Administration W. The PAT stays only in your local ~/.claude.json - never
+  stored on the AppCrane server, only passed as a header at request time.
+
+STEP 2 - Wire AppCrane MCP into your local Claude Code. Replace <YOUR_GITHUB_PAT>,
+then run once in any terminal:
 
   claude mcp add --transport http appcrane ${origin}/api/mcp \\
     --header "X-API-Key: ${key}" \\
     --header "X-Github-Token: <YOUR_GITHUB_PAT>"
 
-The X-Github-Token header is what enables AppCrane's GitHub passthrough — the
-agent gets \`github_*\` tools (read files, push files, open PRs, create repos)
-on the same MCP connection. No separate GitHub MCP server install needed.
+The X-Github-Token header enables AppCrane's GitHub passthrough - the agent gets
+github_* tools (read/push files, open PRs, create repos) on the same connection.
 
-=== STEP 3 — Ask the agent to onboard your app ===
-
-In any terminal: \`claude\`. First message (paste verbatim or paraphrase):
+STEP 3 - In any terminal run \`claude\`, then paste:
 
   Onboard a new app on AppCrane. Start by calling appcrane_get_guide with
-  topic="onboarding" to fetch the latest playbook. Then ask me the inputs
-  the guide lists, and walk through paths (a)/(b)/(c) accordingly.
+  topic="onboarding" to fetch the latest playbook. Then ask me the inputs the
+  guide lists, and walk through paths (a)/(b)/(c) accordingly.`
 
-────────────────────────────────────────────────────────────────────
- PATH B — Managed app (no GitHub account, no PAT, nothing to install)
-────────────────────────────────────────────────────────────────────
-
-If you don't have a GitHub account or don't want to deal with one,
-AppCrane can host the code for you. Your platform admin has to have
-configured the service-account in Settings → GitHub first (one-time per
-install); after that the flow for you is:
-
-=== STEP M1 — Wire AppCrane MCP into your local Claude Code ===
-
-Same install as above, but DROP the X-Github-Token header — you're not
-using your own GitHub:
-
-  claude mcp add --transport http appcrane ${origin}/api/mcp \\
-    --header "X-API-Key: ${key}"
-
-=== STEP M2 — Ask the agent to onboard a managed app ===
-
-In any terminal: \`claude\`. First message:
-
-  Onboard a new managed AppCrane app for me. I don't have a GitHub
-  account, so use path (d). Call appcrane_get_guide topic="onboarding"
-  first to pull the latest playbook, then walk me through it. Pick a
-  small Vite + React + TS stack, ask me a name + what it does, and ship
-  it to sandbox.
-
-The agent will call \`appcrane_create_managed_app\` — AppCrane's service
-account creates a private repo named \`AMC_<your_slug>\`, holds the
-credential, and pushes scaffolding for you via github_* tools that
-authenticate transparently. You end with a sandbox URL. You never touch
-github.com, never enter a token anywhere.
-
-If the platform admin hasn't enabled the service-account yet, the agent
-will fall back to PATH A and ask you for a PAT.
-
-────────────────────────────────────────────────────────────────────
-
-Both paths use the same onboarding playbook — the agent fetches it on
-every run, so it stays in sync as AppCrane evolves. No copy-paste of
-the playbook itself required.`
     setPromptModal({
       open: true,
       title: 'Add Application',
       key,
-      prompt,
+      sections: [
+        { label: 'Managed Code', text: managedPrompt },
+        { label: 'Unmanaged (GitHub)', text: githubPrompt },
+      ],
     })
   }
 
@@ -751,10 +733,26 @@ the playbook itself required.`
         <button
           className="btn btn-xs"
           style={{ marginBottom: 16 }}
-          onClick={() => navigator.clipboard.writeText(promptModal.key ?? '')}
+          onClick={() => copyText(promptModal.key ?? '', 'key')}
         >
-          Copy key
+          {copiedLabel === 'key' ? 'Copied ✓' : 'Copy key'}
         </button>
+        {promptModal.sections && promptModal.sections.map(section => (
+          <div key={section.label} style={{ marginBottom: 18, borderTop: '1px solid var(--border)', paddingTop: 14 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+              <div style={{ fontWeight: 700, fontSize: '.9rem' }}>{section.label}</div>
+              <button
+                className="btn btn-xs btn-accent"
+                onClick={() => copyText(section.text, section.label)}
+              >
+                {copiedLabel === section.label ? 'Copied ✓' : `Copy ${section.label}`}
+              </button>
+            </div>
+            <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 7, padding: '10px 14px', fontSize: '.8rem', color: 'var(--dim)', maxHeight: 240, overflowY: 'auto', whiteSpace: 'pre-wrap', fontFamily: 'monospace' }}>
+              {section.text}
+            </div>
+          </div>
+        ))}
         {promptModal.prompt && (
           <>
             <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 7, padding: '10px 14px', fontSize: '.82rem', color: 'var(--dim)', maxHeight: 200, overflowY: 'auto', whiteSpace: 'pre-wrap', marginBottom: 12 }}>
@@ -763,9 +761,9 @@ the playbook itself required.`
             <button
               className="btn btn-xs"
               style={{ marginBottom: 16 }}
-              onClick={() => navigator.clipboard.writeText(promptModal.prompt ?? '')}
+              onClick={() => copyText(promptModal.prompt ?? '', 'instructions')}
             >
-              Copy instructions
+              {copiedLabel === 'instructions' ? 'Copied ✓' : 'Copy instructions'}
             </button>
           </>
         )}
