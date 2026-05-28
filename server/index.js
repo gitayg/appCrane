@@ -241,9 +241,12 @@ crane init --name admin --email you@example.com</pre>
 // (logsRoutes mounted at /api) install requireAuth as router-level middleware
 // and would 401 unmatched /api/* paths before we got a chance to redirect.
 //
-// Excludes /api/identity/* and /api/apps/* so apps can still call AppCrane's
-// own identity / icon endpoints from inside their iframe.
-const APPCRANE_PASSTHROUGH = ['/api/identity', '/api/apps', '/api/info', '/api/_crashed', '/favicon.svg', '/docs'];
+// Excludes platform endpoints that apps legitimately call from inside their
+// iframe. v2.7.18: added /api/me and /api/mcp — without them the slug-fallback
+// 307'd browser fetches from a deployed app's frontend back into the app's own
+// prefix (request never reached the platform endpoint), making the documented
+// `fetch('/api/me')` pattern unreachable from any per-app browser caller.
+const APPCRANE_PASSTHROUGH = ['/api/identity', '/api/apps', '/api/info', '/api/_crashed', '/api/me', '/api/mcp', '/favicon.svg', '/docs'];
 const APPCRANE_PAGE_SLUGS = new Set(['login', 'portal', 'dashboard', 'applications', 'users-page', 'audit-page', 'settings', 'docs', 'app', 'studio', 'appstudio']);
 app.use((req, res, next) => {
   if (req.method === 'OPTIONS') return next();
