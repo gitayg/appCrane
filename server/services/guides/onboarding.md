@@ -199,6 +199,42 @@ with the slug, format (`png`/`svg`/…), and base64-encoded image bytes.
 - On failure, surface the error and ask before retrying. No silent loops.
 - End with the sandbox URL + one line of "what's deployed".
 
+## Identity via proxy headers (the easiest path)
+
+For most "what's my user's role on this app" questions, the deployed app
+doesn't need to call anything — AppCrane already verified the user at the
+Caddy `forward_auth` boundary, and the result is **forwarded as request
+headers** so the app reads identity directly off the incoming request.
+
+| Header | Value | Notes |
+|---|---|---|
+| `X-AppCrane-User` | email | Always set for authenticated requests (backward-compat single identifier). |
+| `X-AppCrane-User-Id` | numeric id (string) | Always set. |
+| `X-AppCrane-User-Email` | email | Same value as `X-AppCrane-User`; granular header. May be absent if the user has no email. |
+| `X-AppCrane-User-Name` | display name, `encodeURIComponent`-d | `decodeURIComponent` on read. May be absent. |
+| `X-AppCrane-User-Role` | `platform_admin` \| `admin` \| `user` | Raw token, underscore intact. Always set for authenticated requests. |
+| `X-AppCrane-App-Role` | `owner` \| `admin` \| `user` \| `viewer` | Always set when the request is on a per-app prefix. |
+
+**Trust model:** Caddy strips any incoming `X-AppCrane-*` from the client *before* `forward_auth` runs and re-injects only what `/api/identity/verify` returned, so what the app sees is guaranteed platform-issued. Header-smuggling is impossible.
+
+**Absence semantics:** if `X-AppCrane-User-Role` isn't on the request, the request was not verified (Caddy would have failed closed at `forward_auth` and you'd never receive it). So **presence = trusted**.
+
+**Platform admin collapse:** a `platform_admin` always reads as `X-AppCrane-App-Role: admin` on every app — same short-circuit `/verify` and `/api/me` use. If the app needs to specifically target platform admins (not just any admin), branch on `X-AppCrane-User-Role === 'platform_admin'`.
+
+```js
+// Express example
+app.use((req, res, next) => {
+  const role     = req.get('X-AppCrane-User-Role')      // 'platform_admin' | 'admin' | 'user' | undefined
+  const appRole  = req.get('X-AppCrane-App-Role')       // 'owner' | 'admin' | 'user' | 'viewer' | undefined
+  const email    = req.get('X-AppCrane-User-Email') || req.get('X-AppCrane-User')
+  const name     = req.get('X-AppCrane-User-Name')
+  req.user = role ? { id: req.get('X-AppCrane-User-Id'), email, name: name && decodeURIComponent(name), role, appRole } : null
+  next()
+})
+```
+
+Use `/api/me` (next section) when you need *more* than the basics — full user object, the user's apps list, or you're a non-proxied caller (CLI, scripts, dashboard SPA).
+
 ## Authenticating the user inside your app
 
 Apps deployed on AppCrane run behind a Caddy proxy that has already
