@@ -358,6 +358,37 @@ router.get('/verify', (req, res) => {
     db.prepare('INSERT OR IGNORE INTO app_visits (user_id, app_id, day) VALUES (?, ?, ?)').run(session.user_id, visitAppId, today);
   }
 
+  // v2.7.19: emit X-AppCrane-* response headers so Caddy's per-app
+  // forward_auth blocks can copy_headers them onto the upstream request,
+  // and deployed apps read identity directly from the request — no callback
+  // to /api/me needed. The matching `request_header -X-AppCrane-*` strip in
+  // the Caddy generator kills client header-smuggling, so what the app
+  // receives is guaranteed platform-issued. Match the documented contract:
+  //   X-AppCrane-User       — email (backward-compat single identifier)
+  //   X-AppCrane-User-Id    — numeric id as string
+  //   X-AppCrane-User-Email — email
+  //   X-AppCrane-User-Name  — display name (URL-encoded for non-Latin-1 safety)
+  //   X-AppCrane-User-Role  — global role token (platform_admin / admin / user)
+  //   X-AppCrane-App-Role   — per-app role (owner / admin / user / viewer)
+  if (session.user_id !== undefined && session.user_id !== null) {
+    res.setHeader('X-AppCrane-User-Id', String(session.user_id));
+  }
+  if (session.email) {
+    res.setHeader('X-AppCrane-User', session.email);
+    res.setHeader('X-AppCrane-User-Email', session.email);
+  }
+  if (session.name) {
+    // HTTP headers are Latin-1; URL-encode so non-ASCII names round-trip
+    // safely. App parsers should decodeURIComponent() on read.
+    res.setHeader('X-AppCrane-User-Name', encodeURIComponent(session.name));
+  }
+  if (session.crane_role) {
+    res.setHeader('X-AppCrane-User-Role', session.crane_role);
+  }
+  if (appRole) {
+    res.setHeader('X-AppCrane-App-Role', appRole);
+  }
+
   res.json({
     user: {
       id: session.user_id,
