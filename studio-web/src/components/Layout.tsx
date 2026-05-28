@@ -67,10 +67,16 @@ export function Layout({ children, subItems, activeSub }: Props) {
 
   useEffect(() => {
     if (!isAuthed) return
-    adminApi.get<{ user: { name: string; role: string } }>('/api/auth/me')
+    adminApi.get<{ user: { name: string; email?: string; role: string } }>('/api/auth/me')
       .then(d => {
-        setUserName(d.user.name + ' (' + d.user.role + ')')
-        setUserRole(d.user.role || '')
+        // v2.7.16: show "email (humanized role)" in the topbar, e.g.
+        // "itay.glick@opswat.com (platform admin)". Falls back to name if
+        // the user has no email; omits the parens when role is empty.
+        const role = d.user.role || ''
+        const roleLabel = role.replace(/_/g, ' ')
+        const who = d.user.email || d.user.name || ''
+        setUserName(who ? (roleLabel ? `${who} (${roleLabel})` : who) : '')
+        setUserRole(role)
       })
       .catch(() => {})
     // Version display is platform-admin only (gated by isPlatformAdmin

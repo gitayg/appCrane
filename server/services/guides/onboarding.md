@@ -199,6 +199,63 @@ with the slug, format (`png`/`svg`/…), and base64-encoded image bytes.
 - On failure, surface the error and ask before retrying. No silent loops.
 - End with the sandbox URL + one line of "what's deployed".
 
+## Authenticating the user inside your app
+
+Apps deployed on AppCrane run behind a Caddy proxy that has already
+authenticated the user before forwarding the request (per-app forward_auth
+to `/api/identity/verify`). The container itself receives an anonymous-looking
+HTTP request — no identity headers, no token. To find out who the caller is,
+the app calls `GET /api/me` on the **same origin** the app is served from.
+
+**Endpoint:** `GET /api/me[?app=<slug>]`
+
+**Auth** (the endpoint accepts any one of these — `cc_token` is what a proxied
+app's browser already has, so usually nothing extra is needed):
+- `cc_token` cookie — auto-sent by the browser on same-origin fetches.
+- `Authorization: Bearer <token>` — for CLI / programmatic callers.
+- `X-API-Key: dhk_*` — admin / agent keys.
+
+**Per-app role resolution:**
+- `?app=<slug>` explicit query wins.
+- Otherwise the server infers the slug from the `Referer` header — so a plain
+  `fetch('/api/me')` from a page at `/<slug>/...` or `/<slug>-sandbox/...`
+  returns the per-app role with no extra work.
+- If neither resolves, the response is lean: just the global `user`.
+
+**Response:**
+
+```json
+{
+  "user":  { "id": 7, "name": "Alice", "email": "alice@...", "username": null, "role": "user" },
+  "app":   "case-analytics",
+  "app_role": "owner"
+}
+```
+
+- `user.role` is the global role: `platform_admin` / `admin` / `user`.
+- `app_role` (when an app slug resolved) is one of:
+  - `owner`  — the user owns this app.
+  - `admin`  — per-app admin (and global admins/platform_admins on every app).
+  - `user`   — assigned member.
+  - `viewer` — auto-granted to authenticated users on `visibility: public` apps.
+  - `none`   — no access (the proxy would normally have already blocked them,
+               so seeing `none` from inside the app is unusual).
+
+**Example — frontend JS:**
+
+```js
+const r = await fetch('/api/me');  // cookie auto-sent; slug inferred from Referer
+if (r.ok) {
+  const { user, app_role } = await r.json();
+  document.getElementById('whoami').textContent = `Hi, ${user.name}`;
+  if (app_role === 'owner' || app_role === 'admin') showAdminUI();
+}
+```
+
+The user's role is computed server-side from the authenticated identity, not
+from anything the client passes — so a spoofed `Referer` or `?app=` can only
+ask "what's MY role on app X", never escalate to someone else's role.
+
 ## Pre-build failures (1–2 second deploys)
 
 If `appcrane_deploy` finishes in ~1 second with status `failed`, the

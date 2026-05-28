@@ -57,6 +57,7 @@ import agentsRoutes from './routes/agents.js';
 import skillsRoutes from './routes/skills.js';
 import mcpRoutes from './routes/mcp.js';
 import userMcpKeysRoutes from './routes/userMcpKeys.js';
+import meRoutes from './routes/me.js';
 import filesRoutes, { sweepStagedFiles } from './routes/files.js';
 import githubServiceRoutes from './routes/githubService.js';
 import whatsNewRoutes from './routes/whatsNew.js';
@@ -583,6 +584,7 @@ app.use('/api/coder', coderRoutes);       // AppCrane Studio (API key + Bearer a
 app.use('/api/agents', agentsRoutes);     // AIDE-compatible Studio API
 app.use('/api/mcp', mcpRoutes);          // Model Context Protocol endpoint (JSON-RPC + admin catalog)
 app.use('/api', userMcpKeysRoutes);      // /api/me/mcp-keys — personal MCP keys
+app.use('/api', meRoutes);               // /api/me — proxied-app identity endpoint (cookie/Bearer/X-API-Key)
 app.use('/api/files', filesRoutes);      // /api/files/staged — staged uploads for MCP-E
 app.use('/api/github-service', githubServiceRoutes); // service-account config + verify (admin)
 app.use('/api/apps', whatsNewRoutes);     // /api/apps/:slug/whats-new — per-user version dialog state
