@@ -583,8 +583,15 @@ app.use('/api/plan', planRoutes);         // Plan panel (Bearer auth)
 app.use('/api/coder', coderRoutes);       // AppCrane Studio (API key + Bearer auth)
 app.use('/api/agents', agentsRoutes);     // AIDE-compatible Studio API
 app.use('/api/mcp', mcpRoutes);          // Model Context Protocol endpoint (JSON-RPC + admin catalog)
-app.use('/api', userMcpKeysRoutes);      // /api/me/mcp-keys — personal MCP keys
+// v2.7.17: meRoutes MUST come before userMcpKeysRoutes. userMcpKeys's
+// router.use(requireAuth) runs on every request entering it (including
+// /api/me), and requireAuth only accepts Bearer / X-API-Key — so a
+// cookie-only request to /api/me was 401'd before me.js's cookie handler
+// could run. Mounting meRoutes first lets GET /api/me match meRoutes,
+// and /api/me/mcp-keys/* still falls through to userMcpKeysRoutes
+// (meRoutes only matches GET /me).
 app.use('/api', meRoutes);               // /api/me — proxied-app identity endpoint (cookie/Bearer/X-API-Key)
+app.use('/api', userMcpKeysRoutes);      // /api/me/mcp-keys — personal MCP keys
 app.use('/api/files', filesRoutes);      // /api/files/staged — staged uploads for MCP-E
 app.use('/api/github-service', githubServiceRoutes); // service-account config + verify (admin)
 app.use('/api/apps', whatsNewRoutes);     // /api/apps/:slug/whats-new — per-user version dialog state
