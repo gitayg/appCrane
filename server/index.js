@@ -271,6 +271,12 @@ app.use((req, res, next) => {
   return res.redirect(307, target);
 });
 
+// v2.7.20: surface boot-time Caddy reload outcome so silent failures (which
+// used to log.warn and otherwise vanish) are visible to anyone polling
+// /api/info — the same endpoint already used to verify the deployed version.
+// Populated by the post-listen reload block at the bottom of this file.
+let caddyReloadStatus = { ok: null, at: null, error: null, restarted: false, unchanged: false };
+
 // Public API endpoints (no auth)
 app.get('/api/info', (req, res) => {
   const db = getDb();
@@ -287,6 +293,7 @@ app.get('/api/info', (req, res) => {
     docs: '/docs',
     dashboard: '/dashboard',
     mcp: '/api/mcp',
+    caddy_reload_status: caddyReloadStatus,
     ...(!adminExists && { init: 'POST /api/auth/init -d \'{"name":"admin","email":"you@example.com"}\'' }),
   });
 });
@@ -936,15 +943,29 @@ app.listen(PORT, HOST, async () => {
     log.warn('Health checker startup deferred');
   }
 
-  // Reload Caddy on startup so config changes (e.g. after self-update) take effect
+  // Reload Caddy on startup so config changes (e.g. after self-update) take effect.
+  // v2.7.20: log.error (not warn) on failure + record outcome in
+  // caddyReloadStatus so /api/info surfaces it. Silent boot-time reload
+  // failures were the foot-gun behind v2.7.19's "binary updated but Caddyfile
+  // never regenerated" symptom — operators saw `/api/info` happily reporting
+  // the new version while the live config was still the old one.
   try {
     const { reloadCaddy } = await import('./services/caddy.js');
     const result = await reloadCaddy();
-    if (result.mock) log.info('Caddy config generated (mock mode)');
-    else if (result.success) log.info('Caddy reloaded on startup');
-    else log.warn('Caddy reload on startup failed: ' + result.error);
+    const at = new Date().toISOString();
+    if (result.mock) {
+      log.info('Caddy config generated (mock mode)');
+      caddyReloadStatus = { ok: true, at, mock: true };
+    } else if (result.success) {
+      log.info(`Caddy reloaded on startup${result.unchanged ? ' (unchanged)' : ''}${result.restarted ? ' (escalated to restart)' : ''}`);
+      caddyReloadStatus = { ok: true, at, unchanged: !!result.unchanged, restarted: !!result.restarted, error: null };
+    } else {
+      log.error('Caddy reload on startup FAILED — live config is stale: ' + result.error);
+      caddyReloadStatus = { ok: false, at, error: result.error || 'unknown', unchanged: false, restarted: false };
+    }
   } catch (e) {
-    log.warn('Caddy reload on startup skipped: ' + e.message);
+    log.error('Caddy reload on startup THREW — live config is stale: ' + e.message);
+    caddyReloadStatus = { ok: false, at: new Date().toISOString(), error: e.message, unchanged: false, restarted: false };
   }
 
   // Bulk-redeploy sentinel — written by the upgrade script's cleanup phase
