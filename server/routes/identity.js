@@ -115,7 +115,10 @@ router.post('/login', (req, res) => {
   const isAdmin = user.role === 'admin' || user.role === 'platform_admin';
   const apps = db.prepare(`
     SELECT a.slug, a.name, a.domain, a.description, a.public_access, a.visibility, a.category,
-      CASE WHEN a.visibility = 'public' THEN 'viewer' ELSE COALESCE(aur.app_role, 'none') END as app_role,
+      -- v2.7.21: explicit per-app role wins; public-→-viewer is only the
+      -- fallback for users WITHOUT an explicit row. Old shape returned
+      -- 'viewer' for everyone on public apps, wiping owner/admin/user.
+      COALESCE(aur.app_role, CASE WHEN a.visibility = 'public' THEN 'viewer' ELSE 'none' END) as app_role,
       CASE WHEN a.github_url IS NOT NULL AND a.github_url != '' THEN 1 ELSE 0 END as has_github,
       hp.is_down as prod_down, hp.last_status as prod_status,
       hs.is_down as sand_down, hs.last_status as sand_status,
@@ -319,27 +322,33 @@ router.get('/verify', (req, res) => {
   let appRole = null;
   let appName = null;
 
+  // v2.7.21: correct role precedence is
+  //   explicit per-app row > global-admin short-circuit > public→viewer > none
+  // The old order put `visibility === 'public'` first and unconditionally set
+  // appRole = 'viewer', wiping any explicit app_user_roles entry. That meant
+  // an owner of a public app got 'viewer' on the wire (X-AppCrane-App-Role),
+  // and any in-app role gate (e.g. Settings) wrongly denied them.
+  const resolveAppRole = (appRecord, lookupAppId) => {
+    const roleRecord = db.prepare(
+      'SELECT app_role FROM app_user_roles WHERE app_id = ? AND user_id = ?'
+    ).get(lookupAppId, session.user_id);
+    if (roleRecord?.app_role) return roleRecord.app_role;          // explicit wins
+    if (session.crane_role === 'admin' || session.crane_role === 'platform_admin') return 'admin';
+    if (appRecord.visibility === 'public') return 'viewer';        // public fallback
+    return 'none';
+  };
+
   if (appSlug) {
     const appRecord = db.prepare('SELECT * FROM apps WHERE slug = ?').get(appSlug);
     if (appRecord) {
       appName = appRecord.name;
-      if (appRecord.visibility === 'public') {
-        appRole = 'viewer';
-      } else {
-        const roleRecord = db.prepare('SELECT app_role FROM app_user_roles WHERE app_id = ? AND user_id = ?').get(appRecord.id, session.user_id);
-        appRole = roleRecord?.app_role || ((session.crane_role === 'admin' || session.crane_role === 'platform_admin') ? 'admin' : 'none');
-      }
+      appRole = resolveAppRole(appRecord, appRecord.id);
     }
   } else if (session.app_id) {
     const appRecord = db.prepare('SELECT * FROM apps WHERE id = ?').get(session.app_id);
     if (appRecord) {
       appName = appRecord.name;
-      if (appRecord.visibility === 'public') {
-        appRole = 'viewer';
-      } else {
-        const roleRecord = db.prepare('SELECT app_role FROM app_user_roles WHERE app_id = ? AND user_id = ?').get(session.app_id, session.user_id);
-        appRole = roleRecord?.app_role || ((session.crane_role === 'admin' || session.crane_role === 'platform_admin') ? 'admin' : 'none');
-      }
+      appRole = resolveAppRole(appRecord, session.app_id);
     }
   }
 
@@ -503,7 +512,8 @@ router.get('/me', (req, res) => {
   const isAdmin = session.role === 'admin' || session.role === 'platform_admin';
   const apps = db.prepare(`
     SELECT a.slug, a.name, a.domain, a.description, a.public_access, a.visibility, a.category,
-      CASE WHEN a.visibility = 'public' THEN 'viewer' ELSE COALESCE(aur.app_role, 'none') END as role,
+      -- v2.7.21: same precedence fix as above — explicit role wins.
+      COALESCE(aur.app_role, CASE WHEN a.visibility = 'public' THEN 'viewer' ELSE 'none' END) as role,
       CASE WHEN a.github_url IS NOT NULL AND a.github_url != '' THEN 1 ELSE 0 END as has_github,
       hp.is_down as prod_down, hp.last_status as prod_status,
       hs.is_down as sand_down, hs.last_status as sand_status,
@@ -637,7 +647,10 @@ router.get('/preview-as/:userId', (req, res) => {
   const isTargetAdmin = target.role === 'admin' || target.role === 'platform_admin';
   const apps = db.prepare(`
     SELECT a.slug, a.name, a.domain, a.description, a.public_access, a.visibility, a.category,
-      CASE WHEN a.visibility = 'public' THEN 'viewer' ELSE COALESCE(aur.app_role, 'none') END as app_role,
+      -- v2.7.21: explicit per-app role wins; public-→-viewer is only the
+      -- fallback for users WITHOUT an explicit row. Old shape returned
+      -- 'viewer' for everyone on public apps, wiping owner/admin/user.
+      COALESCE(aur.app_role, CASE WHEN a.visibility = 'public' THEN 'viewer' ELSE 'none' END) as app_role,
       CASE WHEN a.github_url IS NOT NULL AND a.github_url != '' THEN 1 ELSE 0 END as has_github,
       hp.is_down as prod_down, hp.last_status as prod_status,
       hs.is_down as sand_down, hs.last_status as sand_status,
