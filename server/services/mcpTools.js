@@ -1337,13 +1337,14 @@ const TOOLS = [
   {
     name: 'appcrane_set_app_meta',
     description:
-      'Set an app\'s category and/or visibility — the owner self-service fields (same controls the dashboard Launcher exposes to owners). Owner of the app (or global admin) required. Visibility is one of public / private / hidden. Owners may only assign an EXISTING category; creating a brand-new category is reserved for global admins. For powerful fields (github_url, branch, token, source_type, resource limits) use appcrane_update_app (admin only).',
+      'Set an app\'s category, visibility, and/or auth_mode — the owner self-service fields (same controls the dashboard Launcher exposes to owners). Owner of the app (or global admin) required. visibility is one of public / private / hidden. auth_mode is `authenticated` (default — all routes go through AppCrane SSO) or `headless` (the app bypasses forward_auth ENTIRELY and is reachable without identity — right tool for telemetry ingest, public webhooks, status pages; the app\'s own server is responsible for any payload-level authn). Owners may only assign an EXISTING category; creating a brand-new category is reserved for global admins. For powerful fields (github_url, branch, token, source_type, resource limits) use appcrane_update_app (admin only).',
     inputSchema: {
       type: 'object',
       properties: {
         slug:       { type: 'string', description: 'App slug.' },
         category:   { type: 'string', description: 'Category/tag. Owners must pick one already in use; pass empty string to clear.' },
         visibility: { type: 'string', enum: ['public', 'private', 'hidden'], description: 'public = anyone; private = assigned users; hidden = not discoverable.' },
+        auth_mode:  { type: 'string', enum: ['authenticated', 'headless'], description: 'authenticated = AppCrane SSO + per-app role checks; headless = NO auth at the proxy (the entire app is reachable by anyone on the internet).' },
       },
       required: ['slug'],
       additionalProperties: false,
@@ -1353,10 +1354,10 @@ const TOOLS = [
       const app = getAppForUser(user, args.slug);
       const globalAdmin = isAdmin(user);
       if (!globalAdmin && roleForUserOnApp(user, app) !== 'owner') {
-        throw new Error('Forbidden: only the app owner (or a global admin) can change category/visibility.');
+        throw new Error('Forbidden: only the app owner (or a global admin) can change category/visibility/auth_mode.');
       }
-      if (args.category === undefined && args.visibility === undefined) {
-        throw new Error('Pass at least one of category or visibility.');
+      if (args.category === undefined && args.visibility === undefined && args.auth_mode === undefined) {
+        throw new Error('Pass at least one of category, visibility, or auth_mode.');
       }
       const db = getDb();
       const updates = {};
@@ -1389,13 +1390,29 @@ const TOOLS = [
         updates.category = newCat;
       }
 
+      if (args.auth_mode !== undefined) {
+        if (!['authenticated', 'headless'].includes(args.auth_mode)) {
+          throw new Error("auth_mode must be 'authenticated' or 'headless'");
+        }
+        updates.auth_mode = args.auth_mode;
+      }
+
       const keys = Object.keys(updates);
       const setClause = keys.map(k => `${k} = ?`).join(', ');
       db.prepare(`UPDATE apps SET ${setClause} WHERE id = ?`).run(...keys.map(k => updates[k]), app.id);
 
+      // v2.7.22: auth_mode flips the Caddy block shape (forward_auth on/off),
+      // so reload Caddy when it changes. Other fields don't need a reload.
+      if (updates.auth_mode !== undefined) {
+        try {
+          const { reloadCaddy } = await import('./caddy.js');
+          await reloadCaddy();
+        } catch (e) { log.warn(`Caddy reload after auth_mode change failed: ${e.message}`); }
+      }
+
       log.info(`MCP: app '${app.slug}' meta updated by user ${user.id}; fields=${keys.join(',')}`);
-      const fresh = db.prepare('SELECT category, visibility, public_access FROM apps WHERE id = ?').get(app.id);
-      return { app: app.slug, category: fresh.category, visibility: fresh.visibility, public_access: fresh.public_access, updated_fields: keys };
+      const fresh = db.prepare('SELECT category, visibility, public_access, auth_mode FROM apps WHERE id = ?').get(app.id);
+      return { app: app.slug, category: fresh.category, visibility: fresh.visibility, public_access: fresh.public_access, auth_mode: fresh.auth_mode, updated_fields: keys };
     },
   },
 
@@ -1902,7 +1919,7 @@ const TOOLS = [
   {
     name: 'appcrane_push_to_managed_app',
     description:
-      'Push a batch of files to a managed app\'s AMC_<slug> repo, authenticated server-side via AppCrane\'s service-account credential. Use this — NOT github_push_files — for managed apps, because github_* tools authenticate with the caller\'s personal PAT, which has zero access to the service account\'s repos. Multiple files become a single commit. files: [{ path, content, encoding? }] where encoding defaults to "utf-8" (use "base64" for binaries like icons). Requires the app to already exist via appcrane_create_managed_app.',
+      'Push a batch of files to a managed app\'s AMC_<slug> repo, authenticated server-side via AppCrane\'s service-account credential. Use this — NOT github_push_files — for managed apps, because github_* tools authenticate with the caller\'s personal PAT, which has zero access to the service account\'s repos. Multiple files become a single commit. files: [{ path, content, encoding? }] where encoding defaults to "utf-8" (use "base64" for binaries like icons). Requires the app to already exist via appcrane_create_managed_app. v2.7.22: response now includes per-file `sha256` (hex) and decoded `bytes` length so you can verify integrity — compute the SHA-256 of the bytes you sent, compare to the server\'s echo, and fail loudly if they differ. Essential for binary files where inline-string truncation or trailing-byte issues would otherwise produce a silently-broken commit.',
     inputSchema: {
       type: 'object',
       properties: {

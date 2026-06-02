@@ -20,6 +20,7 @@ interface AppRow {
   visibility?: string
   has_icon?:   boolean
   category?:   string
+  auth_mode?:  'authenticated' | 'headless'
   // v2.6.7: per-user role from the caller's perspective. 'none' means
   // the user can see the app exists but doesn't have an open-it
   // permission yet — the Launcher renders a Request-access tile.
@@ -135,6 +136,32 @@ export function LauncherView({ onOpen, headerRight }: Props) {
     } catch (e) {
       setApps(snapshot)
       alert('Could not change visibility: ' + (e instanceof Error ? e.message : String(e)))
+    }
+  }
+
+  // v2.7.22: auth_mode is an exposure-changing toggle. Going `headless`
+  // removes AppCrane's auth on the entire app (anyone on the internet can
+  // hit it). Confirm before doing it.
+  async function changeAuthMode(slug: string, name: string, value: string) {
+    if (value === 'headless') {
+      const ok = window.confirm(
+        `Make "${name}" HEADLESS?\n\n` +
+        'This removes ALL AppCrane authentication on the app. Anyone with the URL — ' +
+        'logged in or not — can reach it directly.\n\n' +
+        'Use this ONLY for single-purpose unauthenticated services (telemetry ingest, ' +
+        'public webhooks, status pages). Your app\'s own server is responsible for any ' +
+        'payload-level auth (HMAC, install-id, etc.).\n\n' +
+        'Continue?'
+      )
+      if (!ok) return
+    }
+    const snapshot = apps
+    setApps(list => list.map(a => (a.slug === slug ? { ...a, auth_mode: value as 'authenticated' | 'headless' } : a)))
+    try {
+      await adminApi.put(`/api/apps/${slug}`, { auth_mode: value })
+    } catch (e) {
+      setApps(snapshot)
+      alert('Could not change auth_mode: ' + (e instanceof Error ? e.message : String(e)))
     }
   }
 
@@ -336,6 +363,21 @@ export function LauncherView({ onOpen, headerRight }: Props) {
                           <option value="public">public</option>
                           <option value="private">private</option>
                           <option value="hidden">hidden</option>
+                        </select>
+                        <select
+                          className="launcher-tile-ctrl"
+                          value={app.auth_mode ?? 'authenticated'}
+                          onChange={e => changeAuthMode(app.slug, app.name, e.target.value)}
+                          title={app.auth_mode === 'headless'
+                            ? '⚠ HEADLESS — no AppCrane auth on this app; anyone can reach it.'
+                            : 'Auth mode — authenticated routes go through AppCrane SSO; headless bypasses auth entirely (telemetry / public webhooks / status pages).'}
+                          aria-label={`Auth mode for ${app.name}`}
+                          style={app.auth_mode === 'headless'
+                            ? { borderColor: 'var(--red, #ef4444)', color: 'var(--red, #ef4444)' }
+                            : undefined}
+                        >
+                          <option value="authenticated">SSO</option>
+                          <option value="headless">headless</option>
                         </select>
                       </div>
                       <button

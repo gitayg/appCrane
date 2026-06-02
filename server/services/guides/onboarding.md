@@ -199,6 +199,33 @@ with the slug, format (`png`/`svg`/…), and base64-encoded image bytes.
 - On failure, surface the error and ask before retrying. No silent loops.
 - End with the sandbox URL + one line of "what's deployed".
 
+## Authenticated vs headless apps (when to skip identity entirely)
+
+Most apps want AppCrane's SSO gate in front of them — the proxy verifies
+the user, sets the `X-AppCrane-*` identity headers, and only then forwards
+the request. That's `auth_mode: 'authenticated'`, the default.
+
+Some apps don't have users at all. Telemetry ingest endpoints, public
+webhooks, status pages, the squash CLI's `ping`/`stats` — single-purpose
+services where the *concept* of an authenticated caller doesn't apply.
+For those, set `auth_mode: 'headless'` and AppCrane bypasses `forward_auth`
+on the entire app:
+
+- No SSO redirect to login.
+- No `cc_token` cookie or `X-AppCrane-*` headers.
+- No per-app role check (`visibility` / `app_user_roles` are ignored).
+- One fewer request hop per call (no `/api/identity/verify` round-trip).
+
+**The app's own server is responsible for any payload-level authn** —
+HMAC signature on the request body, install-ID match, IP allowlist, etc.
+AppCrane treats the whole path-prefix as wide-open.
+
+**Owner-only toggle** in the dashboard Launcher (with a confirmation
+modal), or via MCP: `appcrane_set_app_meta slug=<slug> auth_mode=headless`.
+For mixed-auth apps (mostly-authenticated, with a couple of public
+endpoints), keep `authenticated` and gate the unauthenticated paths at
+the app's own router.
+
 ## Identity via proxy headers (the easiest path)
 
 For most "what's my user's role on this app" questions, the deployed app

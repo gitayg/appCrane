@@ -400,22 +400,33 @@ export async function promoteApp(app, userId) {
     try { unlinkSync(currentLink); } catch (_) {}
     symlinkSync(newReleaseDir, currentLink);
 
-    // 5. Rebuild production image + start fresh container, health-checked.
-    try {
-      const fullApp = db.prepare('SELECT * FROM apps WHERE id = ?').get(app.id);
-      await deployApp(newDeployId, fullApp, 'production', prodPorts, {
-        preExtractedDir: newReleaseDir,
-        commitHash: sandboxDeploy.commit_hash,
-      });
-    } catch (e) {
-      log.warn(`Promote deploy failed for ${app.slug}-production: ${e.message}`);
-    }
-
+    // 5. Mark any previously-live prod release as rolled_back, then update
+    //    the new release row with its on-disk path so observers can find it
+    //    while the build runs. release_path is the visible "this is the prod
+    //    current" pointer; deployApp will flip status to 'live' once health
+    //    passes (or 'failed' on revert), reusing its standard machinery.
     db.prepare("UPDATE deployments SET status = 'rolled_back' WHERE app_id = ? AND env = 'production' AND status = 'live'").run(app.id);
-    db.prepare("UPDATE deployments SET status = 'live', release_path = ?, finished_at = datetime('now') WHERE id = ?").run(newReleaseDir, newDeployId);
+    db.prepare("UPDATE deployments SET release_path = ? WHERE id = ?").run(newReleaseDir, newDeployId);
 
-    log.info(`Promote: ${app.slug} sandbox #${sandboxDeploy.id} → production (deployment #${newDeployId}) by user ${userId}`);
-    return { deployment_id: newDeployId, status: 'live', mode: 'copy', version: sandboxDeploy.version, from_sandbox: sandboxDeploy.id };
+    // 6. Rebuild production image + start fresh container, health-checked.
+    //    v2.7.22: fire-and-forget instead of `await`. The managed-copy path
+    //    used to block the caller until deployApp finished (build + health
+    //    check, often 30-90s), which exceeded MCP's socket timeout —
+    //    appcrane_promote returned "socket connection closed unexpectedly"
+    //    even when the promotion succeeded. Now we return immediately with
+    //    deployment_id + status='pending' (mirrors the github branch above);
+    //    deployApp marks the row live/failed itself when it's done. The
+    //    caller polls via appcrane_get_logs / appcrane_wait_deploy.
+    const fullApp = db.prepare('SELECT * FROM apps WHERE id = ?').get(app.id);
+    deployApp(newDeployId, fullApp, 'production', prodPorts, {
+      preExtractedDir: newReleaseDir,
+      commitHash: sandboxDeploy.commit_hash,
+    }).catch(e => {
+      log.error(`Promote deploy failed for ${app.slug}-production (deployment #${newDeployId}): ${e.message}`);
+    });
+
+    log.info(`Promote: ${app.slug} sandbox #${sandboxDeploy.id} → production (deployment #${newDeployId}, pending) by user ${userId}`);
+    return { deployment_id: newDeployId, status: 'pending', mode: 'copy', version: sandboxDeploy.version, from_sandbox: sandboxDeploy.id };
   } catch (e) {
     db.prepare("UPDATE deployments SET status = 'failed', finished_at = datetime('now'), log = ? WHERE id = ?").run(`Promote failed: ${e.message}`, newDeployId);
     throw new AppError(`Promote failed: ${e.message}`, 500, 'PROMOTE_FAILED');

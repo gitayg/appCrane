@@ -15,6 +15,7 @@
  * to any client and never logged.
  */
 
+import { createHash } from 'crypto';
 import { getDb } from '../db.js';
 import { encrypt, decrypt } from './encryption.js';
 import log from '../utils/logger.js';
@@ -311,13 +312,34 @@ export async function pushFilesToManagedRepo(slug, files, opts = {}) {
       method: 'POST',
       body: { content: f.content, encoding: f.encoding || 'utf-8' },
     });
-    return { path: f.path, sha: blob.sha, mode: '100644', type: 'blob' };
+    // v2.7.22: echo back the SHA-256 + decoded byte length of what we sent.
+    // Callers (esp. MCP agents pushing binary blobs) can compare against their
+    // pre-send hash and detect inline-string truncation / corruption /
+    // trailing-byte issues before they ship a broken release. Replaces the
+    // previous "silently committed a partial file" foot-gun with an explicit
+    // round-trip check.
+    const decoded = (f.encoding || 'utf-8') === 'base64'
+      ? Buffer.from(f.content, 'base64')
+      : Buffer.from(f.content, 'utf-8');
+    const sha256 = createHash('sha256').update(decoded).digest('hex');
+    return {
+      path: f.path,
+      sha: blob.sha,                  // git blob SHA (40 hex, matches GitHub)
+      sha256,                         // SHA-256 of the bytes we sent
+      bytes: decoded.length,          // decoded byte length
+      encoding: f.encoding || 'utf-8',
+      mode: '100644',
+      type: 'blob',
+    };
   }));
 
-  // 4. New tree based on parent, with our blobs grafted in.
+  // 4. New tree based on parent, with our blobs grafted in. Strip the v2.7.22
+  //    echo fields (sha256, bytes, encoding) — GitHub's tree create accepts
+  //    {path, sha, mode, type} and ignores extras, but keep the payload tidy.
+  const treeEntries = blobs.map(b => ({ path: b.path, sha: b.sha, mode: b.mode, type: b.type }));
   const newTree = await apiFetch(`/repos/${ownerRepo}/git/trees`, {
     method: 'POST',
-    body: { base_tree: parentTreeSha, tree: blobs },
+    body: { base_tree: parentTreeSha, tree: treeEntries },
   });
 
   // 5. Commit pointing at the new tree.
@@ -336,7 +358,10 @@ export async function pushFilesToManagedRepo(slug, files, opts = {}) {
   return {
     commit: { sha: newCommit.sha, html_url: `${repo.html_url}/commit/${newCommit.sha}` },
     branch,
-    files: files.map(f => f.path),
+    // v2.7.22: rich per-file result with sha256 + byte length so callers can
+    // verify integrity end-to-end. Same fields a Content-Length+ETag check
+    // would give in a normal HTTP upload.
+    files: blobs.map(b => ({ path: b.path, sha: b.sha, sha256: b.sha256, bytes: b.bytes, encoding: b.encoding })),
     message,
   };
 }
