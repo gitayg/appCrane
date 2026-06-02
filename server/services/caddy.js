@@ -145,13 +145,22 @@ export function generateCaddyfile() {
       .map(h => `        request_header -${h}\n`).join('');
     const copyFromVerify = `            copy_headers ${IDENTITY_HEADERS.join(' ')}\n`;
 
+    // v2.7.22: headless apps bypass forward_auth entirely — no identity,
+    // no role headers, no per-app verify round-trip. Right tool for pure
+    // unauthenticated services (telemetry ingest, public webhooks,
+    // status pages). For authenticated apps, the strip + forward_auth +
+    // copy_headers pair runs as before.
+    const isHeadless = app.auth_mode === 'headless';
+
     caddyfile += `    handle /${slug}-sandbox* {\n`;
     if (liveSet.has(`${app.id}:sandbox`)) {
-      caddyfile += stripIncoming;
-      caddyfile += `        forward_auth 127.0.0.1:${cranePort} {\n`;
-      caddyfile += `            uri /api/identity/verify?app=${slug}&prefix=/${slug}-sandbox\n`;
-      caddyfile += copyFromVerify;
-      caddyfile += `        }\n`;
+      if (!isHeadless) {
+        caddyfile += stripIncoming;
+        caddyfile += `        forward_auth 127.0.0.1:${cranePort} {\n`;
+        caddyfile += `            uri /api/identity/verify?app=${slug}&prefix=/${slug}-sandbox\n`;
+        caddyfile += copyFromVerify;
+        caddyfile += `        }\n`;
+      }
       if (fa) {
         caddyfile += `        header Content-Security-Policy "frame-ancestors ${fa}"\n`;
         caddyfile += `        header -X-Frame-Options\n`;
@@ -166,11 +175,13 @@ export function generateCaddyfile() {
     // Production
     caddyfile += `    handle /${slug}* {\n`;
     if (liveSet.has(`${app.id}:production`)) {
-      caddyfile += stripIncoming;
-      caddyfile += `        forward_auth 127.0.0.1:${cranePort} {\n`;
-      caddyfile += `            uri /api/identity/verify?app=${slug}&prefix=/${slug}\n`;
-      caddyfile += copyFromVerify;
-      caddyfile += `        }\n`;
+      if (!isHeadless) {
+        caddyfile += stripIncoming;
+        caddyfile += `        forward_auth 127.0.0.1:${cranePort} {\n`;
+        caddyfile += `            uri /api/identity/verify?app=${slug}&prefix=/${slug}\n`;
+        caddyfile += copyFromVerify;
+        caddyfile += `        }\n`;
+      }
       if (fa) {
         caddyfile += `        header Content-Security-Policy "frame-ancestors ${fa}"\n`;
         caddyfile += `        header -X-Frame-Options\n`;
