@@ -23,6 +23,9 @@ Self-hosted deployment platform for AI applications. Run on your own server — 
 
 - **Docker container isolation** — every app runs in its own container; no shared dependencies, no runaway processes
 - **Enterprise SSO** — SAML 2.0, OIDC, and SCIM provisioning; connect to Okta, Azure AD, Google Workspace
+- **Identity forwarded to apps as headers** — `X-AppCrane-User-Role`, `X-AppCrane-App-Role`, etc. are injected by the proxy after `forward_auth` verifies the user; deployed apps read identity directly off the request without a callback (oauth2-proxy / IAP pattern)
+- **`/api/me` endpoint** — canonical "who is the caller" for proxied apps; accepts the `cc_token` cookie, Bearer, or `X-API-Key`; returns global role + per-app role (`?app=<slug>` or `Referer`-inferred)
+- **Headless app type** — set `auth_mode: 'headless'` to bypass `forward_auth` entirely on an app; right tool for telemetry ingest, public webhooks, status pages, and single-purpose unauthenticated services
 - **AppStudio AI pipeline** — AI proposes code improvements on a schedule; you review and approve before anything ships
 - **Real-time presence** — see who's active on each app, which environment, and when they last deployed
 - **Dual environments** per app: production + sandbox, always-on, separate ports
@@ -33,7 +36,7 @@ Self-hosted deployment platform for AI applications. Run on your own server — 
 - **Encrypted env vars** (AES-256-GCM) — admin cannot read them by design
 - **Health checks** with auto-restart and email notifications
 - **Audit log** for every action
-- **MCP server** at `/api/mcp` exposing 25+ `appcrane_*` tools — agents operate the platform without ever touching curl, gh, or shell
+- **MCP server** at `/api/mcp` exposing 30+ `appcrane_*` tools — agents operate the platform without ever touching curl, gh, or shell
 
 ## Quick Start
 
@@ -179,6 +182,66 @@ Ubuntu Server
 - **Webhook HMAC** verification for GitHub
 - **SCIM deprovisioning** — removing a user from your IdP revokes AppCrane access automatically
 - **All actions audited** — who did what, when
+
+## Identity contract for deployed apps
+
+Apps deployed on AppCrane never need to implement their own auth. The Caddy proxy verifies every request against `/api/identity/verify` *before* forwarding it to the container, and the result is delivered to the app in three complementary ways. Apps should consume them in this **precedence order**:
+
+### 1. Request headers (zero-fetch, recommended)
+
+Caddy `copy_headers` the verified identity onto the upstream proxy request. The app reads them directly:
+
+| Header | Value | Notes |
+|---|---|---|
+| `X-AppCrane-User` | email | Backward-compat single identifier. Always set for authenticated requests. |
+| `X-AppCrane-User-Id` | numeric id (string) | Always set. |
+| `X-AppCrane-User-Email` | email | Granular. May be absent if the user has no email. |
+| `X-AppCrane-User-Name` | display name, `encodeURIComponent`-d | `decodeURIComponent` on read. May be absent. |
+| `X-AppCrane-User-Role` | `platform_admin` \| `admin` \| `user` | Raw token, underscore intact. Always set. |
+| `X-AppCrane-App-Role` | `owner` \| `admin` \| `user` \| `viewer` | Per-app role. Platform admins collapse to `admin` on every app — branch on `X-AppCrane-User-Role` if you specifically need to target platform admins. |
+
+**Trust model:** the Caddy generator emits `request_header -X-AppCrane-*` strip directives *before* the `forward_auth` block in each per-app handler. Caddy zeroes out any client-set `X-AppCrane-*` headers first, then `copy_headers` re-injects only what `/verify` returned. Header smuggling is impossible — what the app receives is guaranteed platform-issued.
+
+**Absence semantics:** if `X-AppCrane-User-Role` isn't on the request, the request was *not* verified (Caddy failed closed at `forward_auth` and you wouldn't receive it). So **presence = trusted**.
+
+```js
+// Express example
+app.use((req, res, next) => {
+  const role    = req.get('X-AppCrane-User-Role')    // 'platform_admin' | 'admin' | 'user'
+  const appRole = req.get('X-AppCrane-App-Role')     // 'owner' | 'admin' | 'user' | 'viewer'
+  const email   = req.get('X-AppCrane-User-Email') || req.get('X-AppCrane-User')
+  req.user = role ? { id: req.get('X-AppCrane-User-Id'), email, role, appRole } : null
+  next()
+})
+```
+
+### 2. `GET /api/me` (when you need more than the basics)
+
+Returns the full user object — name, email, username, global role — plus the per-app role for whatever app the caller is asking about. Same origin as the app, so the browser auto-sends `cc_token`; no SDK or token plumbing required:
+
+```js
+const r = await fetch('/api/me')        // ?app=<slug> optional; Referer-inferred otherwise
+if (r.status === 401) { location.href = '/login?redirect=' + encodeURIComponent(location.href); return }
+const { user, app_role } = await r.json()
+```
+
+Auth precedence inside `/api/me`:
+1. `cc_token` cookie (proxied apps' default — `httpOnly`, browser-managed).
+2. `Authorization: Bearer <session>` (CLI / programmatic).
+3. `X-API-Key: dhk_*` (admin / agent keys).
+
+App slug resolution:
+1. Explicit `?app=<slug>` query.
+2. `Referer`-inferred (first path segment; sandbox-suffix retry).
+3. Lean global-only payload if neither resolves.
+
+### 3. Headless apps — opt out entirely
+
+For services where the *whole app* is meant to be unauthenticated — telemetry ingest, public webhooks, status pages, the squash CLI's `ping`/`stats` — set the app's `auth_mode` to `headless` (owner-only toggle in the Launcher, or `appcrane_set_app_meta slug=<…> auth_mode=headless` via MCP). The Caddy block then skips `forward_auth`, copy_headers, and the strips entirely. No `X-AppCrane-*` headers, no `/api/me`, no `cc_token`. The app's own server takes responsibility for any payload-level authn it needs (HMAC, install-id, IP allowlist, etc.).
+
+Pick by shape:
+- **The whole app is unauth ingest** → headless app (clean separation, smaller blast radius).
+- **Mostly-auth app with a couple of public endpoints** → keep `authenticated`, gate the public paths at the app's own router.
 
 ## Permission Model
 
