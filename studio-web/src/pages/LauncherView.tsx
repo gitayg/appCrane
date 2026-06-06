@@ -82,6 +82,8 @@ export function LauncherView({ onOpen, headerRight }: Props) {
   const [usersModalApp, setUsersModalApp] = useState<AppRow | null>(null)
   const [usersModalData, setUsersModalData] = useState<ModalUser[] | null>(null)
   const [usersSaving, setUsersSaving] = useState<Record<number, 'saving' | 'saved' | 'error'>>({})
+  // v2.7.24: filter the per-app users modal by name/email. Resets on close.
+  const [usersFilter, setUsersFilter] = useState('')
 
   useEffect(() => {
     adminApi.get<{ apps: AppRow[] }>('/api/apps')
@@ -399,7 +401,7 @@ export function LauncherView({ onOpen, headerRight }: Props) {
 
       {usersModalApp && (
         <div
-          onClick={() => setUsersModalApp(null)}
+          onClick={() => { setUsersModalApp(null); setUsersFilter('') }}
           style={{
             position: 'fixed', inset: 0, background: 'rgba(0,0,0,.65)',
             display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100,
@@ -416,19 +418,43 @@ export function LauncherView({ onOpen, headerRight }: Props) {
           >
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
               <h3 style={{ margin: 0, fontSize: '1.05rem' }}>Users · {usersModalApp.name}</h3>
-              <button className="btn btn-xs" onClick={() => setUsersModalApp(null)}>Close</button>
+              <button className="btn btn-xs" onClick={() => { setUsersModalApp(null); setUsersFilter('') }}>Close</button>
             </div>
-            <p style={{ color: 'var(--dim)', fontSize: '.8rem', marginTop: 4, marginBottom: 14 }}>
+            <p style={{ color: 'var(--dim)', fontSize: '.8rem', marginTop: 4, marginBottom: 10 }}>
               Set each user's role on this app. A last-owner guard keeps the app from being left ownerless.
             </p>
+            {/* v2.7.24: search by name or email. Empty = show everyone. */}
+            <input
+              type="text"
+              placeholder="Search by name or email…"
+              value={usersFilter}
+              onChange={e => setUsersFilter(e.target.value)}
+              autoFocus
+              style={{
+                width: '100%', boxSizing: 'border-box', marginBottom: 12,
+                padding: '6px 10px', fontSize: '.85rem',
+                background: 'var(--surface2)', border: '1px solid var(--border)',
+                borderRadius: 6, color: 'var(--text)',
+              }}
+            />
             {usersModalData === null ? (
               <p style={{ color: 'var(--dim)', fontSize: '.85rem' }}>Loading…</p>
             ) : usersModalData.length === 0 ? (
               <p style={{ color: 'var(--dim)', fontSize: '.85rem' }}>No users found.</p>
-            ) : (
+            ) : (() => {
+              const q = usersFilter.trim().toLowerCase()
+              const filtered = q
+                ? usersModalData.filter(u =>
+                    (u.name || '').toLowerCase().includes(q) ||
+                    (u.email || '').toLowerCase().includes(q))
+                : usersModalData
+              if (filtered.length === 0) {
+                return <p style={{ color: 'var(--dim)', fontSize: '.85rem' }}>No users match &quot;{usersFilter}&quot;.</p>
+              }
+              return (
               <table style={{ width: '100%', fontSize: '.85rem' }}>
                 <tbody>
-                  {usersModalData.map(u => {
+                  {filtered.map(u => {
                     const status = usersSaving[u.id]
                     return (
                       <tr key={u.id} style={{ borderTop: '1px solid var(--border)' }}>
@@ -456,7 +482,8 @@ export function LauncherView({ onOpen, headerRight }: Props) {
                   })}
                 </tbody>
               </table>
-            )}
+              )
+            })()}
           </div>
         </div>
       )}
