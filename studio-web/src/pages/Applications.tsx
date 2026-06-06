@@ -113,6 +113,9 @@ export function Applications() {
   // to open a focused modal that lists every user with a role select for
   // this specific app.
   const [usersModalApp, setUsersModalApp] = useState<App | null>(null)
+  // v2.7.24: client-side filter for the per-app Users modal (name / email).
+  // Resets to empty on every close so opening another app doesn't carry over.
+  const [usersModalFilter, setUsersModalFilter] = useState('')
   type ModalUser = { id: number; name: string; email: string | null; role: string; app_role: 'none' | 'user' | 'admin' | 'owner' }
   const [usersModalData, setUsersModalData] = useState<ModalUser[] | null>(null)
   const [usersModalSaving, setUsersModalSaving] = useState<Record<number, 'saving' | 'saved' | 'error'>>({})
@@ -1241,7 +1244,7 @@ STEP 3 - In any terminal run \`claude\`, then paste:
             position: 'fixed', inset: 0, background: 'rgba(0,0,0,.55)', zIndex: 10500,
             display: 'flex', alignItems: 'center', justifyContent: 'center',
           }}
-          onClick={() => setUsersModalApp(null)}
+          onClick={() => { setUsersModalApp(null); setUsersModalFilter('') }}
         >
           <div
             style={{
@@ -1272,9 +1275,30 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                   marginLeft: 'auto', background: 'none', border: 'none',
                   color: 'var(--dim)', fontSize: '1.4rem', lineHeight: 1, cursor: 'pointer',
                 }}
-                onClick={() => setUsersModalApp(null)}
+                onClick={() => { setUsersModalApp(null); setUsersModalFilter('') }}
                 aria-label="Close"
               >×</button>
+            </div>
+
+            {/* v2.7.24: search box. Lives outside the scroll region so it
+                stays pinned while the list scrolls. autoFocus = the input is
+                ready as soon as the modal opens. */}
+            <div style={{ padding: '10px 16px 6px', borderBottom: '1px solid var(--border-faint, #2a2a2a)' }}>
+              <input
+                type="text"
+                placeholder="Search by name or email…"
+                value={usersModalFilter}
+                onChange={e => setUsersModalFilter(e.target.value)}
+                autoFocus
+                style={{
+                  width: '100%', boxSizing: 'border-box',
+                  padding: '6px 10px', fontSize: '.85rem',
+                  background: 'var(--surface2, #232323)',
+                  border: '1px solid var(--border, #333)',
+                  borderRadius: 6, color: 'var(--text)',
+                  outline: 'none',
+                }}
+              />
             </div>
 
             <div style={{ overflowY: 'auto', padding: '8px 16px', flex: 1 }}>
@@ -1282,7 +1306,17 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                 <div style={{ color: 'var(--dim)', padding: 16 }}>Loading…</div>
               ) : usersModalData.length === 0 ? (
                 <div style={{ color: 'var(--dim)', padding: 16 }}>No users registered.</div>
-              ) : (
+              ) : (() => {
+                const q = usersModalFilter.trim().toLowerCase()
+                const filtered = q
+                  ? usersModalData.filter(u =>
+                      (u.name || '').toLowerCase().includes(q) ||
+                      (u.email || '').toLowerCase().includes(q))
+                  : usersModalData
+                if (filtered.length === 0) {
+                  return <div style={{ color: 'var(--dim)', padding: 16 }}>No users match &quot;{usersModalFilter}&quot;.</div>
+                }
+                return (
                 <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                   <thead>
                     <tr style={{ borderBottom: '1px solid var(--border, #333)' }}>
@@ -1292,7 +1326,7 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                     </tr>
                   </thead>
                   <tbody>
-                    {usersModalData.map(u => {
+                    {filtered.map(u => {
                       const status = usersModalSaving[u.id]
                       const isPlatformAdmin = u.role === 'platform_admin'
                       const value = isPlatformAdmin ? 'owner' : u.app_role
@@ -1339,7 +1373,8 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                     })}
                   </tbody>
                 </table>
-              )}
+                )
+              })()}
             </div>
 
             <div style={{
