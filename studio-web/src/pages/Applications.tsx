@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { adminApi } from '../adminApi'
 import { PresenceAvatars } from '../components/runtime-topbar/PresenceAvatars'
+import { JobsButton } from '../components/runtime-topbar/JobsButton'
 import { RequestModal } from '../components/runtime-topbar/RequestModal'
 import { WhatsNewModal, type WhatsNewChange } from '../components/WhatsNewModal'
 import { usePeek, type PeekCtx } from '../hooks/usePeek'
@@ -1567,6 +1568,14 @@ function FrameOverlay({ frame, framePanel, setFrame, setFramePanel }: FrameOverl
           <PresenceAvatars slug={frame.slug ?? null} />
           {frame.hasGithub && (
             <>
+              {/* v2.7.25: 📋 Jobs button. The component existed since the
+                  AppStudio request flow shipped, multiple panels' copy points
+                  users at the "📋 Jobs panel" to track progress — but the
+                  button was never actually slotted into the topbar. Reporter
+                  bug #158 ("Jobs panel button does nothing") was real: it did
+                  nothing because it wasn't there. Gated on frame.hasGithub
+                  (same as Request/Bug) — Jobs only exist for github apps. */}
+              <JobsButton slug={frame.slug ?? null} />
               <button
                 type="button"
                 className={'crane-topbar-btn' + (peek.active || requestCtx ? ' active' : '')}
