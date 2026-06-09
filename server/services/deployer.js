@@ -690,6 +690,19 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       appendLog('WARNING: No deployhub.json found. Using defaults.');
     }
 
+    // v2.7.26: sync the cron declaration from deployhub.json into
+    // app_cron_jobs. Removed jobs are dropped, new ones added, existing rows
+    // updated. cronScheduler.js's tick loop picks them up on the next minute.
+    // Bad schedules surface here at deploy time as a hard error rather than
+    // silently failing at run time.
+    try {
+      const { syncCronJobsFromManifest } = await import('./cronScheduler.js');
+      const result = syncCronJobsFromManifest(app.id, env, manifest.cron);
+      if (result.synced > 0) appendLog(`Synced ${result.synced} cron job(s) from deployhub.json`);
+    } catch (e) {
+      appendLog(`WARNING: cron sync failed (deploy continues): ${e.message}`);
+    }
+
     // Resolve `version` with precedence:
     //   1. package.json:version (always wins for Node apps — the field
     //      developers actually bump)

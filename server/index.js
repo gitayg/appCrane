@@ -968,6 +968,17 @@ app.listen(PORT, HOST, async () => {
     caddyReloadStatus = { ok: false, at: new Date().toISOString(), error: e.message, unchanged: false, restarted: false };
   }
 
+  // v2.7.26: start the cron scheduler. Reads enabled rows from app_cron_jobs
+  // every minute and `docker exec`s due jobs against the app's container.
+  // Failure here is logged but boot continues — cron jobs are nice-to-have,
+  // they shouldn't block the main API from coming up.
+  try {
+    const { startCronScheduler } = await import('./services/cronScheduler.js');
+    startCronScheduler();
+  } catch (e) {
+    log.error('Cron scheduler failed to start: ' + e.message);
+  }
+
   // Bulk-redeploy sentinel — written by the upgrade script's cleanup phase
   // when it kills a PM2 daemon, because those apps are now offline and need
   // to be rebuilt as Docker containers. In-process, no API key needed.

@@ -2013,6 +2013,140 @@ const TOOLS = [
       return { app: app.slug, env, key: args.key, ok: true };
     },
   },
+
+  {
+    name: 'appcrane_set_data_blob',
+    description:
+      'Write a blob directly to the app\'s persistent /data volume on the host — single hop, no container round-trip, no GitHub round-trip, no inline size ceiling. The bytes land at /data/apps/<slug>/<env>/shared/data/<path>, which is the SAME path the running container sees mounted as /data/<path>. Right tool for multi-MB datasets, large fixtures, or anything where appcrane_push_to_managed_app\'s tool-arg ceiling would force chunking. Returns the SHA-256 + byte count of what was stored so the caller can verify integrity. App-admin or owner of the app required. NEVER returns secrets in the response. Path must be repo-relative, no `..`, no leading slash.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        slug:     { type: 'string', description: 'App slug.' },
+        env:      { type: 'string', enum: ['sandbox', 'production'], default: 'sandbox', description: 'Which env\'s /data volume to write to.' },
+        path:     { type: 'string', description: 'Path within /data, e.g. "datasets/threats.json" or "cache/build.tar.gz". No leading slash, no "..".' },
+        content:  { type: 'string', description: 'The data to write. utf-8 string or base64-encoded bytes depending on encoding.' },
+        encoding: { type: 'string', enum: ['utf-8', 'base64'], default: 'utf-8', description: 'Defaults to utf-8. Use base64 for binary blobs.' },
+      },
+      required: ['slug', 'path', 'content'],
+      additionalProperties: false,
+    },
+    requiredRole: 'app_admin',
+    handler: async (user, args) => {
+      const env = args.env === 'production' ? 'production' : 'sandbox';
+      const app = getAppForUser(user, args.slug);
+      if (!isAppAdmin(user, app)) throw new Error('Forbidden: writing to /data requires admin or app-admin role on this app');
+
+      // Path validation — repo-relative, no traversal, no absolute. resolveSafe
+      // verifies the final path is within the shared/data root after symlink
+      // expansion (same primitive deployer.js uses).
+      const rel = String(args.path || '').trim();
+      if (!rel) throw new Error('path is required');
+      if (rel.startsWith('/')) throw new Error('path must NOT start with "/" — it is relative to /data');
+      if (rel.split('/').some(seg => seg === '..' || seg === '.')) {
+        throw new Error('path must not contain "." or ".." segments');
+      }
+
+      const { mkdirSync, writeFileSync } = await import('fs');
+      const { resolve, join, dirname } = await import('path');
+      const { createHash } = await import('crypto');
+
+      const dataDir = resolve(process.env.DATA_DIR || './data');
+      const sharedRoot = resolve(join(dataDir, 'apps', app.slug, env, 'shared', 'data'));
+      const targetPath = resolve(join(sharedRoot, rel));
+      if (!targetPath.startsWith(sharedRoot + '/') && targetPath !== sharedRoot) {
+        throw new Error('Security: resolved path escapes shared/data');
+      }
+
+      // Decode content. utf-8 string passthrough or base64 → buffer.
+      const encoding = args.encoding === 'base64' ? 'base64' : 'utf-8';
+      const buf = encoding === 'base64'
+        ? Buffer.from(String(args.content), 'base64')
+        : Buffer.from(String(args.content), 'utf-8');
+
+      mkdirSync(dirname(targetPath), { recursive: true });
+      // Atomic write: write to .tmp, rename. Readers never see a partial file.
+      const tmpPath = targetPath + '.tmp-' + Date.now();
+      writeFileSync(tmpPath, buf);
+      const { renameSync } = await import('fs');
+      renameSync(tmpPath, targetPath);
+
+      const sha256 = createHash('sha256').update(buf).digest('hex');
+      log.info(`MCP: /data write ${app.slug}/${env}/${rel} ← ${buf.length} bytes (sha256=${sha256.slice(0, 12)}) by user ${user.id}`);
+      return {
+        app: app.slug,
+        env,
+        path: rel,
+        bytes: buf.length,
+        sha256,
+        encoding,
+        container_path: '/data/' + rel,
+        host_path: targetPath,
+      };
+    },
+  },
+
+  {
+    name: 'appcrane_list_cron',
+    description:
+      'List the scheduled jobs declared in an app\'s deployhub.json `cron` array (after the most recent deploy). Each entry includes the cron schedule, the command, when it last ran, the exit code, and the tail of the last run\'s stdout/stderr. Use to verify a job was registered, debug a missing run, or read the recent log. App-admin or owner.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        slug: { type: 'string' },
+        env:  { type: 'string', enum: ['sandbox', 'production'], description: 'Optional — omit to list both envs.' },
+      },
+      required: ['slug'],
+      additionalProperties: false,
+    },
+    requiredRole: 'app_admin',
+    handler: async (user, args) => {
+      const app = getAppForUser(user, args.slug);
+      if (!isAppAdmin(user, app)) throw new Error('Forbidden: reading cron jobs requires admin or app-admin role on this app');
+      const db = getDb();
+      const filters = args.env ? 'AND env = ?' : '';
+      const params = args.env ? [app.id, args.env] : [app.id];
+      const rows = db.prepare(`
+        SELECT id, env, name, schedule, command, enabled, timeout_seconds,
+               last_run_at, last_exit_code, last_log
+        FROM app_cron_jobs
+        WHERE app_id = ? ${filters}
+        ORDER BY env, name
+      `).all(...params);
+      return { app: app.slug, jobs: rows };
+    },
+  },
+
+  {
+    name: 'appcrane_run_cron_now',
+    description:
+      'Trigger a scheduled cron job RIGHT NOW, regardless of its schedule. Useful for "I want to test my daily rebuild without waiting until midnight" or "rerun yesterday\'s failed job." Runs the same `docker exec` the tick loop would, against the app\'s container; updates last_run_at / last_exit_code / last_log just like a scheduled run. Returns the exit code and last-log tail. App-admin or owner. Idempotent: if the job is already running (mutex held), reports it and skips rather than overlapping.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        slug: { type: 'string' },
+        env:  { type: 'string', enum: ['sandbox', 'production'], default: 'sandbox' },
+        name: { type: 'string', description: 'Job name from deployhub.json `cron[].name`.' },
+      },
+      required: ['slug', 'name'],
+      additionalProperties: false,
+    },
+    requiredRole: 'app_admin',
+    handler: async (user, args) => {
+      const env = args.env === 'production' ? 'production' : 'sandbox';
+      const app = getAppForUser(user, args.slug);
+      if (!isAppAdmin(user, app)) throw new Error('Forbidden: running cron jobs requires admin or app-admin role on this app');
+      const db = getDb();
+      const job = db.prepare(`
+        SELECT id, app_id, env, name, schedule, command, timeout_seconds
+        FROM app_cron_jobs
+        WHERE app_id = ? AND env = ? AND name = ?
+      `).get(app.id, env, String(args.name));
+      if (!job) throw new Error(`No cron job named "${args.name}" on ${app.slug}/${env}. Check deployhub.json or appcrane_list_cron.`);
+      const { runCronJob } = await import('./cronScheduler.js');
+      const result = await runCronJob(job);
+      return { app: app.slug, env, name: job.name, ...result };
+    },
+  },
 ];
 
 export function listTools(user, userMcpKey = null) {
