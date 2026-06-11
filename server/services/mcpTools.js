@@ -1358,7 +1358,7 @@ const TOOLS = [
   {
     name: 'appcrane_set_app_meta',
     description:
-      'Set an app\'s category, visibility, and/or auth_mode — the owner self-service fields (same controls the dashboard Launcher exposes to owners). Owner of the app (or global admin) required. visibility is one of public / private / hidden. auth_mode is `authenticated` (default — all routes go through AppCrane SSO) or `headless` (the app bypasses forward_auth ENTIRELY and is reachable without identity — right tool for telemetry ingest, public webhooks, status pages; the app\'s own server is responsible for any payload-level authn). Owners may only assign an EXISTING category; creating a brand-new category is reserved for global admins. For powerful fields (github_url, branch, token, source_type, resource limits) use appcrane_update_app (admin only).',
+      'Set an app\'s category, visibility, auth_mode, and/or auth_bypass_paths — the owner self-service fields (same controls the dashboard Launcher exposes to owners). Owner of the app (or global admin) required. visibility is one of public / private / hidden. auth_mode is `authenticated` (default — all routes go through AppCrane SSO) or `headless` (the app bypasses forward_auth ENTIRELY and is reachable without identity — right tool for telemetry ingest, public webhooks, status pages; the app\'s own server is responsible for any payload-level authn). auth_bypass_paths (v2.7.27+) is an array of path prefixes (e.g. ["/ws/local-runner"]) that bypass SSO on this app only — narrower than headless mode; the app authenticates those paths itself (e.g. token in query string). The platform strips incoming X-AppCrane-* headers on bypass paths (forgery defense intact) and suppresses access logging for them (token-in-query never sits in log storage). Owners may only assign an EXISTING category; creating a brand-new category is reserved for global admins. For powerful fields (github_url, branch, token, source_type, resource limits) use appcrane_update_app (admin only).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1366,6 +1366,12 @@ const TOOLS = [
         category:   { type: 'string', description: 'Category/tag. Owners must pick one already in use; pass empty string to clear.' },
         visibility: { type: 'string', enum: ['public', 'private', 'hidden'], description: 'public = anyone; private = assigned users; hidden = not discoverable.' },
         auth_mode:  { type: 'string', enum: ['authenticated', 'headless'], description: 'authenticated = AppCrane SSO + per-app role checks; headless = NO auth at the proxy (the entire app is reachable by anyone on the internet).' },
+        auth_bypass_paths: {
+          type: 'array',
+          maxItems: 10,
+          items: { type: 'string' },
+          description: 'v2.7.27: array of path prefixes (e.g. ["/ws/local-runner"]) that bypass SSO forward_auth on this app. Requests under these prefixes reach the container with NO X-AppCrane-* identity headers — the app authenticates them itself. Caddy suppresses access logging for these paths to prevent query-string-token leakage. Pass [] or null to clear.',
+        },
       },
       required: ['slug'],
       additionalProperties: false,
@@ -1375,10 +1381,10 @@ const TOOLS = [
       const app = getAppForUser(user, args.slug);
       const globalAdmin = isAdmin(user);
       if (!globalAdmin && roleForUserOnApp(user, app) !== 'owner') {
-        throw new Error('Forbidden: only the app owner (or a global admin) can change category/visibility/auth_mode.');
+        throw new Error('Forbidden: only the app owner (or a global admin) can change category/visibility/auth_mode/auth_bypass_paths.');
       }
-      if (args.category === undefined && args.visibility === undefined && args.auth_mode === undefined) {
-        throw new Error('Pass at least one of category, visibility, or auth_mode.');
+      if (args.category === undefined && args.visibility === undefined && args.auth_mode === undefined && args.auth_bypass_paths === undefined) {
+        throw new Error('Pass at least one of category, visibility, auth_mode, or auth_bypass_paths.');
       }
       const db = getDb();
       const updates = {};
@@ -1418,22 +1424,38 @@ const TOOLS = [
         updates.auth_mode = args.auth_mode;
       }
 
+      if (args.auth_bypass_paths !== undefined) {
+        const parsed = validateBypassPaths(args.auth_bypass_paths);
+        updates.auth_bypass_paths = parsed && parsed.length > 0 ? JSON.stringify(parsed) : null;
+      }
+
       const keys = Object.keys(updates);
       const setClause = keys.map(k => `${k} = ?`).join(', ');
       db.prepare(`UPDATE apps SET ${setClause} WHERE id = ?`).run(...keys.map(k => updates[k]), app.id);
 
-      // v2.7.22: auth_mode flips the Caddy block shape (forward_auth on/off),
-      // so reload Caddy when it changes. Other fields don't need a reload.
-      if (updates.auth_mode !== undefined) {
+      // v2.7.22: auth_mode flips the Caddy block shape (forward_auth on/off);
+      // v2.7.28: auth_bypass_paths emits inner handle blocks. Reload Caddy
+      // when either changes. Other fields don't need a reload.
+      if ('auth_mode' in updates || 'auth_bypass_paths' in updates) {
         try {
           const { reloadCaddy } = await import('./caddy.js');
           await reloadCaddy();
-        } catch (e) { log.warn(`Caddy reload after auth_mode change failed: ${e.message}`); }
+        } catch (e) { log.warn(`Caddy reload after auth_mode/auth_bypass_paths change failed: ${e.message}`); }
       }
 
       log.info(`MCP: app '${app.slug}' meta updated by user ${user.id}; fields=${keys.join(',')}`);
-      const fresh = db.prepare('SELECT category, visibility, public_access, auth_mode FROM apps WHERE id = ?').get(app.id);
-      return { app: app.slug, category: fresh.category, visibility: fresh.visibility, public_access: fresh.public_access, auth_mode: fresh.auth_mode, updated_fields: keys };
+      const fresh = db.prepare('SELECT category, visibility, public_access, auth_mode, auth_bypass_paths FROM apps WHERE id = ?').get(app.id);
+      let bypassPaths = [];
+      try { bypassPaths = fresh.auth_bypass_paths ? JSON.parse(fresh.auth_bypass_paths) : []; } catch (_) {}
+      return {
+        app: app.slug,
+        category: fresh.category,
+        visibility: fresh.visibility,
+        public_access: fresh.public_access,
+        auth_mode: fresh.auth_mode,
+        auth_bypass_paths: bypassPaths,
+        updated_fields: keys,
+      };
     },
   },
 
