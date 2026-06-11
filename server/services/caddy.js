@@ -2,6 +2,7 @@ import { getDb } from '../db.js';
 import { getPortsForSlot } from './portAllocator.js';
 import { isLinux } from './platform.js';
 import log from '../utils/logger.js';
+import { parseBypassPaths } from '../utils/authBypassPaths.js';
 
 const CADDY_ADMIN = process.env.CADDY_ADMIN_URL || 'http://localhost:2019';
 
@@ -151,6 +152,57 @@ export function generateCaddyfile() {
     // status pages). For authenticated apps, the strip + forward_auth +
     // copy_headers pair runs as before.
     const isHeadless = app.auth_mode === 'headless';
+
+    // v2.7.27: path-level auth bypass — narrower than headless mode. For
+    // each entry in auth_bypass_paths, emit a child `handle` BEFORE the
+    // parent that omits forward_auth so a CLI client (e.g. aghook → WS)
+    // can authenticate itself via a token in the query string. Caddy's
+    // `handle` is longest-prefix-wins inside a site block, so the child
+    // wins regardless of emission order — emitting it first keeps the
+    // file readable as "exceptions then catch-all."
+    //
+    // SECURITY INVARIANTS we keep on the bypass block:
+    //   1. stripIncoming runs on the bypass path too — a curl with
+    //      X-AppCrane-User-Role: platform_admin must NOT reach the app
+    //      just because forward_auth is off.
+    //   2. log_skip suppresses the access log line entirely for these
+    //      paths. The token aghook puts in the query string would
+    //      otherwise sit in Caddy's log storage. Granular query-param
+    //      redaction in Caddy's `log filter` would be cleaner but
+    //      requires syntax that hasn't been verified against this
+    //      install's caddy `adapt`; the app emits a redacted
+    //      connect-log line on its side as the agreed compensating
+    //      control. v2.7.28+ can swap to filtered logging in place.
+    //   3. flush_interval -1 + transport read/write_timeout 0 keep
+    //      long-lived idle WS connections from being cut by AppCrane.
+    //      Caddy's default global idle_timeout (5m) is far above
+    //      aghook's 25s keepalive and is not overridden here.
+    // Skipped entirely when the app is headless (whole app is already
+    // open) or the env isn't deployed (the parent block already 503's).
+    const bypassPaths = isHeadless ? [] : parseBypassPaths(app.auth_bypass_paths, e =>
+      log.warn(`[caddy] app ${app.slug}: bad auth_bypass_paths entry — ${e.message} (ignored)`));
+    // mountPrefix = the per-env path mount, e.g. "/agentclub-sandbox" or
+    // "/agentclub". The bypass path P (e.g. "/ws/local-runner") is appended
+    // to form the child handle path; the strip_prefix removes the SAME mount
+    // so the app sees its native /ws/local-runner.
+    const emitBypass = (mountPrefix, bypassPath, port) => {
+      caddyfile += `    handle ${mountPrefix}${bypassPath}* {\n`;
+      caddyfile += `        log_skip\n`;
+      caddyfile += stripIncoming;
+      caddyfile += `        uri strip_prefix ${mountPrefix}\n`;
+      caddyfile += `        reverse_proxy 127.0.0.1:${port} {\n`;
+      caddyfile += `            flush_interval -1\n`;
+      caddyfile += `            transport http {\n`;
+      caddyfile += `                read_timeout 0\n`;
+      caddyfile += `                write_timeout 0\n`;
+      caddyfile += `            }\n`;
+      caddyfile += `        }\n`;
+      caddyfile += `    }\n\n`;
+    };
+    for (const p of bypassPaths) {
+      if (liveSet.has(`${app.id}:sandbox`))    emitBypass(`/${slug}-sandbox`, p, ports.sand_be);
+      if (liveSet.has(`${app.id}:production`)) emitBypass(`/${slug}`,         p, ports.prod_be);
+    }
 
     caddyfile += `    handle /${slug}-sandbox* {\n`;
     if (liveSet.has(`${app.id}:sandbox`)) {

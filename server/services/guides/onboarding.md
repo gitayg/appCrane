@@ -407,3 +407,57 @@ Inspect / debug jobs with the matching tools:
 Jobs are synced from `deployhub.json` on every deploy: new entries added,
 missing ones removed, existing ones updated. So the source of truth lives
 with the app's code, not in some out-of-band UI.
+
+## Path-level SSO bypass — when one endpoint takes its own token
+
+Headless mode (`auth_mode: 'headless'`) drops SSO from the WHOLE app — right
+when the whole surface is unauthenticated, wrong when most of the app is
+behind SSO but ONE endpoint needs to accept its own token (because the
+caller can't carry a browser cookie). Classic shape: a CLI tool talks WS to
+the app over `/ws/<something>?token=…` and validates the token itself.
+
+`auth_bypass_paths` is the narrower primitive: a JSON array of path
+prefixes that bypass `forward_auth` on this app only. Everything outside
+those prefixes still goes through SSO as before.
+
+```
+appcrane_set_app_meta(
+  slug="my-app",
+  auth_bypass_paths=["/ws/local-runner"]
+)
+```
+
+What the platform guarantees on bypass paths:
+
+- The path prefix MUST validate: starts with `/`, no `..`, no `//`, no
+  whitespace, no overlap with reserved roots (`/api`, `/admin`, `/login`,
+  `/portal`, `/health`, `/__crashed`). Case-insensitive — `/API/...` is
+  rejected too. Percent-encoded traversal (`%2e%2e`, `%2f`) fails the
+  character-class check before string-level guards even run.
+- **Incoming `X-AppCrane-*` headers are stripped at the gateway** — same
+  invariant as on authenticated paths. A curl with a forged
+  `X-AppCrane-User-Role: platform_admin` does NOT reach your app just
+  because forward_auth is off.
+- **Access logs suppressed for bypass paths.** Caddy's access log line for
+  these requests is skipped entirely so a token in the query string can
+  never sit in log storage. Your app is on the hook for whatever auth /
+  connect log it wants — `wssRunner`-style "user X connected from Y" lines
+  are the conventional pattern.
+- **Long-lived idle connections are not cut by AppCrane.** The bypass
+  block sets `flush_interval -1` plus `read_timeout 0` / `write_timeout 0`
+  on the upstream. Caddy's global `idle_timeout` (5 min default) still
+  governs the client side — fine for any sane WS keepalive.
+
+What you own on the app side:
+
+- Validate the token before doing anything else with the request.
+- Treat the path as adversarial — the bypass is on the AUTH check, not on
+  the URL routing. If your app trusts `/admin` based on path alone (rather
+  than a session), bypassing SSO means anyone can hit it.
+- Rotate tokens. Bypass paths plus a long-lived shared secret = blast
+  radius proportional to the leak window. Short TTLs or rotatable tokens
+  shrink that window.
+
+Use headless mode when the WHOLE app is public (status page, telemetry
+ingest). Use `auth_bypass_paths` when most of the app is SSO'd but one
+endpoint takes its own token.
