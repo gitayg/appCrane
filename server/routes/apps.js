@@ -8,6 +8,7 @@ import { encrypt, generateApiKey, hashApiKey } from '../services/encryption.js';
 import { AppError } from '../utils/errors.js';
 import { resolveSafe } from '../utils/paths.js';
 import { reloadCaddy } from '../services/caddy.js';
+import { validateBypassPaths } from '../utils/authBypassPaths.js';
 import { userHasAppPermission, userHasPlatformPermission, roleForUserOnApp } from '../services/permissions.js';
 import { isAdmin } from '../utils/roles.js';
 import log from '../utils/logger.js';
@@ -364,7 +365,7 @@ router.get('/:slug', requireAppAccess, (req, res) => {
 router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req, res) => {
   const db = getDb();
   const app = req.app;
-  const { name, domain, description, category, source_type, github_url, branch, github_token, max_ram_mb, max_cpu_percent, public_access, visibility, image_retention, frame_ancestors, auth_mode } = req.body;
+  const { name, domain, description, category, source_type, github_url, branch, github_token, max_ram_mb, max_cpu_percent, public_access, visibility, image_retention, frame_ancestors, auth_mode, auth_bypass_paths } = req.body;
 
   // Configurable RBAC: changes to repo-related fields gated by code.modify_repo_settings.
   // Other fields (name, description, category, visibility, etc.) stay open to any
@@ -524,6 +525,24 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
     }
   }
 
+  // v2.7.27: auth_bypass_paths. Per-path bypass of forward_auth — narrower
+  // than headless mode (which removes SSO from the entire app). Same exposure
+  // class as auth_mode, so same gate: owner-or-admin. Validated centrally in
+  // utils/authBypassPaths.js so the API write path AND the Caddy generator
+  // read-back share one set of rules. Stored as JSON; Caddy emits one inner
+  // `handle` block per entry, BEFORE the forward_auth'd parent block.
+  if (auth_bypass_paths !== undefined) {
+    const globalAdmin = isAdmin(req.user);
+    const isOwner = roleForUserOnApp(req.user, app) === 'owner';
+    if (!globalAdmin && !isOwner) {
+      throw new AppError('Only the app owner can change auth_bypass_paths.', 403, 'FORBIDDEN');
+    }
+    let parsed;
+    try { parsed = validateBypassPaths(auth_bypass_paths); }
+    catch (e) { throw new AppError(e.message, 400, 'VALIDATION'); }
+    updates.auth_bypass_paths = parsed && parsed.length > 0 ? JSON.stringify(parsed) : null;
+  }
+
   // v2.7.22: auth_mode. 'headless' bypasses forward_auth entirely and exposes
   // the app to unauthenticated traffic. Owner-or-admin only, same gate as
   // visibility/category (it's an exposure change).
@@ -545,7 +564,7 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
     return res.json({ app, message: 'No changes' });
   }
 
-  const ALLOWED_APP_COLS = new Set(['name','domain','description','category','source_type','github_url','branch','public_access','visibility','github_token_encrypted','resource_limits','runtime','image_retention','frame_ancestors','auth_mode']);
+  const ALLOWED_APP_COLS = new Set(['name','domain','description','category','source_type','github_url','branch','public_access','visibility','github_token_encrypted','resource_limits','runtime','image_retention','frame_ancestors','auth_mode','auth_bypass_paths']);
   const invalidKey = Object.keys(updates).find(k => !ALLOWED_APP_COLS.has(k));
   if (invalidKey) throw new AppError(`Invalid field: ${invalidKey}`, 400, 'VALIDATION');
 
@@ -557,7 +576,7 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
   // frame_ancestors and auth_mode change the per-app Caddyfile block — reload to apply.
   // auth_mode flips whether forward_auth runs at all; without a reload the new
   // setting wouldn't take effect on the live proxy.
-  if ('frame_ancestors' in updates || 'auth_mode' in updates) {
+  if ('frame_ancestors' in updates || 'auth_mode' in updates || 'auth_bypass_paths' in updates) {
     await reloadCaddy().catch(e => log.warn(`Caddy reload after app meta update: ${e.message}`));
   }
 

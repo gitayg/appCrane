@@ -27,6 +27,7 @@ interface App {
   resource_limits?: { max_ram_mb?: number; max_cpu_percent?: number }
   image_retention?: number
   frame_ancestors?: string | null
+  auth_bypass_paths?: string[] | null
   owner?: { id: number; name: string; email: string } | null
   production?: { deploy?: { status?: string; version?: string }; health?: { status: string } }
   sandbox?: { deploy?: { status?: string; version?: string }; health?: { status: string } }
@@ -342,6 +343,30 @@ export function Applications() {
       if (r?.error) { alert('Failed: ' + (r.error.message || 'unknown')); return }
       const newVal = val.trim() || null
       setApps(prev => prev.map(a => a.slug === app.slug ? { ...a, frame_ancestors: newVal ?? undefined } : a))
+    } catch (e) {
+      alert('Failed: ' + (e as Error).message)
+    }
+  }
+
+  async function setAuthBypassPaths(app: App) {
+    const current = (app.auth_bypass_paths ?? []).join(', ')
+    const help = "Path prefixes that bypass SSO on this app (comma- or newline-separated).\n\n" +
+      "Each prefix must:\n" +
+      "  • start with '/' (e.g. /ws/local-runner)\n" +
+      "  • not overlap /api, /admin, /login, /portal, /health, /__crashed\n" +
+      "  • not contain '..', '//', or whitespace\n\n" +
+      "⚠ Requests under these prefixes reach your app with NO X-AppCrane-* identity\n" +
+      "headers. Your app must authenticate them itself (e.g. token in query string).\n" +
+      "Caddy suppresses access logging for these paths so query-string tokens don't\n" +
+      "sit in log storage.\n\n" +
+      "Leave blank to clear all bypass paths."
+    const val = prompt(help, current)
+    if (val === null) return
+    const list = val.split(/[,\n]/).map(s => s.trim()).filter(Boolean)
+    try {
+      const r = await adminApi.put<{ app?: App; error?: { message?: string } }>(`/api/apps/${app.slug}`, { auth_bypass_paths: list })
+      if (r?.error) { alert('Failed: ' + (r.error.message || 'unknown')); return }
+      setApps(prev => prev.map(a => a.slug === app.slug ? { ...a, auth_bypass_paths: list.length ? list : null } : a))
     } catch (e) {
       alert('Failed: ' + (e as Error).message)
     }
@@ -1131,6 +1156,13 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                           onClick={() => setFrameAncestors(app)}
                           title={app.frame_ancestors ? `Embedders: ${app.frame_ancestors}` : 'Allowed embedders (default: same origin only)'}
                         >🖼{app.frame_ancestors ? ' ✓' : ''}</button>
+                        <button
+                          className="btn btn-xs"
+                          onClick={() => setAuthBypassPaths(app)}
+                          title={app.auth_bypass_paths?.length
+                            ? `Auth-bypass paths: ${app.auth_bypass_paths.join(', ')}`
+                            : 'Path prefixes that bypass SSO on this app (advanced — apps must self-authenticate)'}
+                        >🔓{app.auth_bypass_paths?.length ? ' ✓' : ''}</button>
                         {(app.source_type === 'github' || app.source_type === 'managed' || app.github_url) && (
                           <>
                             {app.github_url && (

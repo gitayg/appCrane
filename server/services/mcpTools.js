@@ -4,6 +4,7 @@ import { BUCKETS, bucketize, applyBucket } from './requestStatus.js';
 import { userHasAppPermission, userHasPlatformPermission, roleForUserOnApp } from './permissions.js';
 import { isAdmin } from '../utils/roles.js';
 import log from '../utils/logger.js';
+import { validateBypassPaths } from '../utils/authBypassPaths.js';
 import { mkdirSync } from 'fs';
 import { join } from 'path';
 import crypto from 'crypto';
@@ -1237,6 +1238,12 @@ const TOOLS = [
         public_access:  { type: 'integer', enum: [0, 1] },
         image_retention: { type: 'integer', minimum: 0, maximum: 50 },
         frame_ancestors: { type: 'string' },
+        auth_bypass_paths: {
+          type: 'array',
+          maxItems: 10,
+          items: { type: 'string' },
+          description: 'v2.7.27: array of path prefixes (e.g. ["/ws/local-runner"]) that bypass SSO forward_auth on this app. Requests under these prefixes reach the container with NO X-AppCrane-* identity headers — the app authenticates them itself (e.g. token in query string). Caddy suppresses access logging for these paths to prevent token leakage to log storage. Pass [] or null to clear.',
+        },
         max_ram_mb:      { type: 'number', description: 'Per-container memory cap.' },
         max_cpu_percent: { type: 'number', description: 'Per-container CPU cap (0-100).' },
       },
@@ -1284,6 +1291,10 @@ const TOOLS = [
         updates.image_retention = n;
       }
       if (args.frame_ancestors !== undefined) updates.frame_ancestors = args.frame_ancestors ? String(args.frame_ancestors) : null;
+      if (args.auth_bypass_paths !== undefined) {
+        const parsed = validateBypassPaths(args.auth_bypass_paths);
+        updates.auth_bypass_paths = parsed && parsed.length > 0 ? JSON.stringify(parsed) : null;
+      }
 
       if (args.github_token !== undefined) {
         // '' clears, undefined leaves alone, anything else rotates
@@ -1307,6 +1318,15 @@ const TOOLS = [
 
       log.info(`MCP: app '${slug}' updated by user ${user.id}; fields=${keys.join(',')}`);
 
+      // frame_ancestors / auth_bypass_paths change the Caddyfile block
+      // (auth_mode is not exposed via this tool yet). Reload to apply.
+      if ('frame_ancestors' in updates || 'auth_bypass_paths' in updates) {
+        try {
+          const { reloadCaddy } = await import('./caddy.js');
+          await reloadCaddy();
+        } catch (e) { log.warn(`MCP set_app_meta: Caddy reload failed (non-fatal): ${e.message}`); }
+      }
+
       // Return the same shape as appcrane_get_app so the agent can verify
       // what landed without a separate get_app round-trip.
       const fresh = db.prepare('SELECT * FROM apps WHERE id = ?').get(app.id);
@@ -1327,6 +1347,7 @@ const TOOLS = [
           public_access:  fresh.public_access,
           image_retention: fresh.image_retention,
           frame_ancestors: fresh.frame_ancestors,
+          auth_bypass_paths: (() => { try { return fresh.auth_bypass_paths ? JSON.parse(fresh.auth_bypass_paths) : []; } catch (_) { return []; } })(),
           max_ram_mb:      resourceLimits?.max_ram_mb      ?? null,
           max_cpu_percent: resourceLimits?.max_cpu_percent ?? null,
         },
