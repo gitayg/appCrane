@@ -56,6 +56,11 @@ export const PERMISSIONS = [
     label: 'Delete the app',
     description: 'Permanently delete this app from AppCrane. Irreversible.',
   },
+  {
+    key: 'request.view_app',
+    label: 'View app requests',
+    description: 'See the enhancement/bug requests filed against this app on the Requests page (and the sidebar badge). Owners can always see their own app\'s requests; flip this on for Admin or User to widen the triage view.',
+  },
 ];
 
 const PERMISSION_KEYS = new Set(PERMISSIONS.map(p => p.key));
@@ -190,6 +195,7 @@ export function resetToDefaults(permissionKeys = null) {
     'env.write.production':      { user: 0, admin: 1, owner: 1, platform_admin: 1 },
     'code.modify_repo_settings': { user: 0, admin: 0, owner: 1, platform_admin: 1 },
     'app.delete':                { user: 0, admin: 0, owner: 1, platform_admin: 1 },
+    'request.view_app':          { user: 0, admin: 0, owner: 1, platform_admin: 1 },
   };
   const subset = {};
   const keys = permissionKeys || Object.keys(DEFAULTS);

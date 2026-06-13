@@ -141,9 +141,18 @@ export function AppStudio({ tab: forcedTab }: AppStudioProps = {}) {
   // omits status='done' rows; when on, request both lists and merge.
   const [showClosed] = useState(false)
   const loadData = useCallback(() => {
+    // /api/enhancements is admin-only; fall back to /owned (requests
+    // filed against apps the caller owns or admins) so an app owner
+    // sees their triage list without needing global admin. Without
+    // this, sairaj sees badge count "11" in the sidebar but "No
+    // requests found" on the page (bug surfaced 2026-06-11). /owned
+    // returns the same rich shape as the admin endpoint so this page
+    // renders identically.
     const url = showClosed ? '/api/enhancements?include_done=1' : '/api/enhancements'
+    const ownedUrl = showClosed ? '/api/enhancements/owned?include_done=1' : '/api/enhancements/owned'
     return Promise.all([
-      adminApi.get<{ requests: Enhancement[] }>(url).catch(() => ({ requests: [] })),
+      adminApi.get<{ requests: Enhancement[] }>(url)
+        .catch(() => adminApi.get<{ requests: Enhancement[] }>(ownedUrl).catch(() => ({ requests: [] }))),
       adminApi.get<{ apps: AppOption[] }>('/api/apps').catch(() => ({ apps: [] })),
     ]).then(([eRes, aRes]) => {
       const sorted = [...(eRes.requests ?? [])].sort((a, b) => b.id - a.id)

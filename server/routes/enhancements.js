@@ -111,6 +111,73 @@ router.get('/my', (req, res) => {
 });
 
 /**
+ * GET /api/enhancements/owned
+ * List enhancement requests filed against apps the caller may view requests
+ * for — gated by the configurable `request.view_app` permission (per-app
+ * role × the role_permissions matrix at /settings#roles). Default: owners
+ * only; an operator can flip Admin or User on to widen the triage view.
+ * Mirrors the rich shape of the admin /api/enhancements endpoint (bucket
+ * label + latest job info) so the page renders identically without the
+ * caller being a global admin. Users with no viewable app get [] (sidebar
+ * then hides the Requests item entirely).
+ *
+ * Out of scope: requests the caller personally submitted on apps they have
+ * no role on (that's /api/enhancements/my, kept separate so this view stays
+ * an app-triage list rather than mixing two mental models).
+ */
+router.get('/owned', (req, res) => {
+  const authHeader = req.headers.authorization || '';
+  const token = authHeader.replace(/^Bearer\s+/i, '').trim();
+  const session = getUserFromBearer(token);
+  if (!session) throw new AppError('Authentication required', 401, 'UNAUTHORIZED');
+
+  const db = getDb();
+  // Resolve the apps this caller may view requests for through the matrix
+  // rather than hardcoding roles — so /settings#roles drives who sees what.
+  // The candidate set is every app the caller has any per-app relationship
+  // with (a role row or a bare assignment); userHasAppPermission then
+  // applies the matrix (and the global-admin escape hatch) per app.
+  // userHasAppPermission reads user.id (per-app role lookup) + user.role
+  // (global-admin escape hatch). The session row's own `id` is the session
+  // id, not the user id — normalize so roleForUserOnApp queries correctly.
+  const principal = { id: session.user_id, role: session.role };
+  const candidateApps = db.prepare(`
+    SELECT DISTINCT a.id, a.slug FROM apps a
+    WHERE a.id IN (SELECT app_id FROM app_user_roles WHERE user_id = ?)
+       OR a.id IN (SELECT app_id FROM app_users      WHERE user_id = ?)
+  `).all(session.user_id, session.user_id);
+  const viewableSlugs = candidateApps
+    .filter(a => userHasAppPermission(principal, a, 'request.view_app'))
+    .map(a => a.slug);
+
+  if (viewableSlugs.length === 0) return res.json({ requests: [] });
+
+  const includeDone = req.query.include_done === '1' || req.query.include_done === 'true';
+  const placeholders = viewableSlugs.map(() => '?').join(', ');
+  const where = includeDone ? '' : "AND (er.status != 'done' OR er.status IS NULL)";
+  const rows = db.prepare(`
+    SELECT
+      er.id, er.app_slug, er.user_name, er.message, er.created_at, er.status,
+      er.fix_version, er.cost_tokens, er.cost_usd_cents, er.branch_name, er.pr_url,
+      er.validated_at, er.validated_by,
+      j.id        AS latest_job_id,
+      j.phase     AS latest_job_phase,
+      j.status    AS latest_job_status,
+      j.error_message AS latest_job_error,
+      j.cost_tokens   AS latest_job_tokens,
+      j.cost_usd_cents AS latest_job_cents
+    FROM enhancement_requests er
+    LEFT JOIN enhancement_jobs j ON j.id = (
+      SELECT id FROM enhancement_jobs WHERE enhancement_id = er.id ORDER BY id DESC LIMIT 1
+    )
+    WHERE er.app_slug IN (${placeholders}) ${where}
+    ORDER BY er.created_at DESC
+  `).all(...viewableSlugs);
+  const enriched = rows.map(r => ({ ...r, bucket: bucketize(r.status, r.validated_at) }));
+  res.json({ requests: enriched });
+});
+
+/**
  * GET /api/enhancements
  * List all enhancement requests. Requires admin API key.
  */
