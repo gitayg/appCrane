@@ -36,9 +36,11 @@ export function App() {
   }, [])
 
   const loadPending = useCallback(() => {
-    // /api/enhancements is admin-only; fall back to /my for portal users.
+    // /api/enhancements is admin-only; fall back to /owned (requests filed
+    // against apps the caller owns/admins) so owners see their triage list
+    // without global admin.
     return adminApi.get<{ requests: RequestSummary[] }>('/api/enhancements')
-      .catch(() => adminApi.get<{ requests: RequestSummary[] }>('/api/enhancements/my').catch(() => ({ requests: [] })))
+      .catch(() => adminApi.get<{ requests: RequestSummary[] }>('/api/enhancements/owned').catch(() => ({ requests: [] })))
       .then(({ requests }) => {
         const map: Record<string, RequestSummary[]> = {}
         for (const r of requests || []) {

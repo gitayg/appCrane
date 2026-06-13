@@ -124,13 +124,15 @@ export function Layout({ children, subItems, activeSub }: Props) {
   }
 
   // Open-requests counter for the Requests nav badge.
-  // Admin endpoint first, fall back to /my for portal users.
+  // Admin endpoint first, fall back to /owned (requests filed against apps
+  // the caller owns/admins) so the badge matches what the /requests page
+  // shows. Plain users with no app role get 0 → sidebar hides the link.
   useEffect(() => {
     if (!isAuthed) return
     const TERM = new Set(['done', 'merged', 'closed', 'failed', 'cancelled'])
     const fetchCount = () =>
       adminApi.get<{ requests: { status?: string }[] }>('/api/enhancements')
-        .catch(() => adminApi.get<{ requests: { status?: string }[] }>('/api/enhancements/my').catch(() => ({ requests: [] })))
+        .catch(() => adminApi.get<{ requests: { status?: string }[] }>('/api/enhancements/owned').catch(() => ({ requests: [] })))
         .then(({ requests }) => {
           setOpenRequests((requests || []).filter(r => !TERM.has((r.status || '').toLowerCase())).length)
         })
