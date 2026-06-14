@@ -120,6 +120,11 @@ router.post('/:slug/deploy/:env', requireAppAccess, auditMiddleware('deploy'), a
   const app = req.app;
   const ports = getPortsForSlot(app.slot);
 
+  // v2.7.31: refuse to pile a new deploy on top of one already in flight for
+  // this app+env (deploy-storm guard). Stale in-flight rows are reclaimed.
+  const { assertNoInflightDeploy } = await import('../services/deployer.js');
+  assertNoInflightDeploy(db, app.id, env, app.slug);
+
   // Create deployment record
   const result = db.prepare(`
     INSERT INTO deployments (app_id, env, status, deployed_by)

@@ -7,6 +7,52 @@ import log from '../utils/logger.js';
 import { AppError } from '../utils/errors.js';
 import { ensureCodebaseContext } from './appstudio/contextBuilder.js';
 
+// v2.7.31: a deploy that hasn't moved past these states in this long is
+// treated as orphaned (process died mid-build without the boot sweep, or a
+// build hung past any plausible duration) — so it can be reclaimed instead of
+// blocking deploys forever. Real builds finish in well under a minute or two.
+const STALE_DEPLOY_SECONDS = 30 * 60;
+
+/**
+ * v2.7.31: deploy concurrency guard. Refuses a new deploy when one is already
+ * in flight for the same app+env. Without this, a slow/hung build plus repeated
+ * triggers (rapid "Redeploy" clicks, an MCP/agent loop) spawned unbounded
+ * concurrent `docker build`s that starved each other and never finished —
+ * leaving a pile of stuck `building` rows (deploy storm).
+ *
+ * Stale in-flight rows (older than STALE_DEPLOY_SECONDS) are reclaimed —
+ * marked failed — and do NOT block, so a genuinely-stuck build can't wedge an
+ * app's deploys permanently. Call BEFORE inserting the new deployment row.
+ *
+ * Throws AppError(409, DEPLOY_IN_PROGRESS) when a fresh deploy is in flight.
+ */
+export function assertNoInflightDeploy(db, appId, env, slug) {
+  const rows = db.prepare(`
+    SELECT id, (strftime('%s','now') - strftime('%s', started_at)) AS age_s
+    FROM deployments
+    WHERE app_id = ? AND env = ? AND status IN ('pending','building','deploying')
+  `).all(appId, env);
+  if (rows.length === 0) return;
+
+  const newest = rows.reduce((a, b) => (a.id > b.id ? a : b));
+  if (newest.age_s == null || newest.age_s < STALE_DEPLOY_SECONDS) {
+    throw new AppError(
+      `A deploy is already in progress for ${slug}/${env} (#${newest.id}). ` +
+      `Wait for it to finish before starting another.`,
+      409, 'DEPLOY_IN_PROGRESS'
+    );
+  }
+
+  // All in-flight rows are stale → reclaim them so the new deploy can proceed.
+  const ids = rows.map(r => r.id);
+  db.prepare(
+    `UPDATE deployments SET status='failed', finished_at=datetime('now'),
+       log = COALESCE(log || char(10), '') || '[Reclaimed: stale in-flight deploy superseded by a newer deploy]'
+     WHERE id IN (${ids.map(() => '?').join(',')})`
+  ).run(...ids);
+  log.warn(`Reclaimed ${ids.length} stale in-flight deploy(s) for ${slug}/${env}: ${ids.join(', ')}`);
+}
+
 /**
  * Health-endpoint contract for AppCrane apps:
  *   - Responds 200 within the timeout
