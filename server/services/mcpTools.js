@@ -515,13 +515,19 @@ const TOOLS = [
         throw new Error('Forbidden: deploying to production requires the deploy.production permission for this app.');
       }
       const db = getDb();
+
+      // v2.7.31: deploy-storm guard — refuse a new deploy when one is already
+      // in flight for this app+env, so an agent loop calling appcrane_deploy
+      // can't spawn unbounded concurrent builds. Mirrors POST /deploy/:env.
+      const { getPortsForSlot } = await import('./portAllocator.js');
+      const { deployApp, assertNoInflightDeploy } = await import('./deployer.js');
+      assertNoInflightDeploy(db, app.id, env, app.slug);
+
       const result = db
         .prepare("INSERT INTO deployments (app_id, env, status, deployed_by) VALUES (?, ?, 'pending', ?)")
         .run(app.id, env, user.id);
       const deployId = result.lastInsertRowid;
 
-      const { getPortsForSlot } = await import('./portAllocator.js');
-      const { deployApp } = await import('./deployer.js');
       const ports = getPortsForSlot(app.slot);
 
       // Fire-and-forget — agent monitors via logs
