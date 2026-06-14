@@ -839,8 +839,29 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     await dockerStop(app.slug, env).catch(() => {});
 
     const runtimeEnvVars = {};
+    const decryptFailures = [];
     for (const v of envVars) {
-      try { runtimeEnvVars[v.key] = decrypt(v.value_encrypted); } catch (_) {}
+      try { runtimeEnvVars[v.key] = decrypt(v.value_encrypted); }
+      catch (_) { decryptFailures.push(v.key); }
+    }
+    // v2.7.30: surface env injection in the deploy log — KEY NAMES ONLY,
+    // never values. Lets an operator confirm a var actually reached the
+    // container (e.g. ANTHROPIC_API_KEY) without shelling in or exposing the
+    // secret. If a key is in this list, the `-e` flag was set; if the app
+    // still doesn't see it, the app is reading a baked .env, not process.env.
+    const injectedKeys = Object.keys(runtimeEnvVars);
+    appendLog(
+      injectedKeys.length
+        ? `Injecting ${injectedKeys.length} env var(s) into container: ${injectedKeys.join(', ')}`
+        : 'No app env vars to inject (env_vars empty for this app/env).'
+    );
+    // v2.7.30: a value that fails to decrypt was previously dropped silently —
+    // the container came up missing the secret with zero signal. Make it loud.
+    if (decryptFailures.length) {
+      appendLog(
+        `WARNING: ${decryptFailures.length} env var(s) failed to decrypt ` +
+        `(ENCRYPTION_KEY mismatch?) and were OMITTED from the container: ${decryptFailures.join(', ')}`
+      );
     }
     // APP_BASE_PATH is intentionally NOT set at runtime: Caddy strips the slug
     // prefix before requests reach the container, so backends must mount at '/'.

@@ -262,8 +262,15 @@ router.post('/:slug/restart/:env', requireAppAccess, auditMiddleware('restart'),
   ).all(app.id, env);
 
   const runtimeEnvVars = {};
+  const decryptFailures = [];
   for (const v of envVars) {
-    try { runtimeEnvVars[v.key] = decrypt(v.value_encrypted); } catch (_) {}
+    try { runtimeEnvVars[v.key] = decrypt(v.value_encrypted); }
+    catch (_) { decryptFailures.push(v.key); }
+  }
+  // v2.7.30: loud decrypt failures — a silently-dropped secret on restart
+  // is exactly the "I set it and it's still missing" mystery.
+  if (decryptFailures.length) {
+    log.warn(`Restart ${containerName}: ${decryptFailures.length} env var(s) failed to decrypt (ENCRYPTION_KEY mismatch?), omitted: ${decryptFailures.join(', ')}`);
   }
   const cranePort = process.env.PORT || 5001;
   const craneUrl = process.env.CRANE_DOMAIN ? `https://${process.env.CRANE_DOMAIN}` : `http://localhost:${cranePort}`;
@@ -303,7 +310,12 @@ router.post('/:slug/restart/:env', requireAppAccess, auditMiddleware('restart'),
     cpus: limits.max_cpu_percent / 100,
   });
 
-  res.json({ message: `Restarted ${app.slug} ${env} with updated env vars`, image });
+  res.json({
+    message: `Restarted ${app.slug} ${env} with updated env vars`,
+    image,
+    injected_keys: Object.keys(runtimeEnvVars),
+    decrypt_failures: decryptFailures,
+  });
 });
 
 export default router;
