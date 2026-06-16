@@ -79,6 +79,17 @@ const PAGE_CSS = `
 .app-manager .update-banner .ub-text{color:var(--yellow)}
 .app-manager .env-redeploy-banner{background:#eab30820;border:1px solid #eab30860;border-radius:8px;padding:10px 14px;margin-bottom:10px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
 .app-manager .env-redeploy-banner span{color:var(--yellow);font-size:.85rem;flex:1}
+@media (max-width:768px){
+  /* Deploy/version history: tl-hdr already wraps, but margin-left:auto on the
+     timestamp floats it to the far right of a wrapped line, detached from its
+     row. On a phone let everything flow left so each entry reads as one block,
+     and keep the Logs button reachable. */
+  .app-manager .tl-time{margin-left:0}
+  .app-manager .tl-hdr{gap:6px;padding:3px 4px}
+  .app-manager .tl-log-btn{margin-left:auto}
+  /* Tighten the rail + metric strip so cards aren't cramped at 375px. */
+  .app-manager .metric-row{gap:14px}
+}
 `
 
 interface MeApp { slug: string; name: string }
