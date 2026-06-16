@@ -61,6 +61,7 @@ import meRoutes from './routes/me.js';
 import filesRoutes, { sweepStagedFiles } from './routes/files.js';
 import githubServiceRoutes from './routes/githubService.js';
 import whatsNewRoutes from './routes/whatsNew.js';
+import serviceApiRoutes from './routes/serviceApi.js';
 
 const PORT = process.env.PORT || 5001;
 const HOST = process.env.HOST || '0.0.0.0';
@@ -246,7 +247,7 @@ crane init --name admin --email you@example.com</pre>
 // 307'd browser fetches from a deployed app's frontend back into the app's own
 // prefix (request never reached the platform endpoint), making the documented
 // `fetch('/api/me')` pattern unreachable from any per-app browser caller.
-const APPCRANE_PASSTHROUGH = ['/api/identity', '/api/apps', '/api/info', '/api/_crashed', '/api/me', '/api/mcp', '/favicon.svg', '/docs'];
+const APPCRANE_PASSTHROUGH = ['/api/identity', '/api/apps', '/api/info', '/api/_crashed', '/api/me', '/api/mcp', '/api/service', '/favicon.svg', '/docs'];
 const APPCRANE_PAGE_SLUGS = new Set(['login', 'portal', 'dashboard', 'applications', 'users-page', 'audit-page', 'settings', 'docs', 'app', 'studio', 'appstudio']);
 app.use((req, res, next) => {
   if (req.method === 'OPTIONS') return next();
@@ -584,6 +585,7 @@ app.use('/api/apps', notificationsRoutes); // /api/apps/:slug/notifications
 // Mount identity FIRST so its routes don't get caught by other middleware
 app.use('/api/identity', identityRoutes);
 app.use('/api/enhancements', enhancementsRoutes); // Enhancement requests (Bearer auth, must be before logsRoutes)
+app.use('/api/service', serviceApiRoutes); // v2.8.0 internal app service API (service-token auth, internal-only)
 app.use('/api/appstudio', appstudioRoutes); // AppStudio plan/code/build pipeline
 app.use('/api/skills', skillsRoutes);       // Skill bundles loaded by all CLI agents via ~/.claude/skills/
 app.use('/api/webhooks', webhooksRoutes); // Public webhook endpoint (no auth — must be before logsRoutes)
@@ -977,6 +979,16 @@ app.listen(PORT, HOST, async () => {
     startCronScheduler();
   } catch (e) {
     log.error('Cron scheduler failed to start: ' + e.message);
+  }
+
+  // v2.8.0: start the email queue worker. Drains email_queue, sends via Graph
+  // (or SMTP), retries with backoff, dead-letters to the platform admin.
+  // Failure here is logged but boot continues.
+  try {
+    const { startEmailWorker } = await import('./services/emailQueue.js');
+    startEmailWorker();
+  } catch (e) {
+    log.error('Email worker failed to start: ' + e.message);
   }
 
   // Bulk-redeploy sentinel — written by the upgrade script's cleanup phase

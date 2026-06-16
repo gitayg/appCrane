@@ -28,24 +28,43 @@ async function getTransporter() {
   }
 }
 
-export async function sendEmail({ to, subject, text, html }) {
-  const transport = await getTransporter();
+/**
+ * Send one email. Transport precedence: Microsoft Graph (if configured) →
+ * SMTP (if configured) → mock log. `fromName` sets only the display name; the
+ * address is always the platform-configured sender. `replyTo` is optional.
+ */
+export async function sendEmail({ to, subject, text, html, fromName, replyTo }) {
+  // 1. Microsoft Graph — the production transport (sends as the shared mailbox).
+  try {
+    const { isGraphConfigured, sendViaGraph } = await import('./graphMailer.js');
+    if (isGraphConfigured()) {
+      const result = await sendViaGraph({ to, subject, text, html, fromName, replyTo });
+      log.info(`Email sent to ${to} via Graph: ${subject}`);
+      return result;
+    }
+  } catch (e) {
+    // A configured-but-failing Graph send must propagate so the queue retries.
+    if (String(e.message) !== 'Graph not configured') throw e;
+  }
 
+  // 2. SMTP fallback.
+  const transport = await getTransporter();
   if (!transport) {
     log.info(`[EMAIL mock] To: ${to} | Subject: ${subject}`);
     log.debug(`[EMAIL mock] Body: ${text?.slice(0, 200)}`);
     return { mock: true };
   }
 
-  const result = await transport.sendMail({
-    from: process.env.SMTP_FROM || 'appcrane@example.com',
-    to,
-    subject,
-    text,
-    html,
-  });
+  const { getDb } = await import('../db.js');
+  const addr = getDb().prepare("SELECT value FROM settings WHERE key='email_from_address'").get()?.value
+    || process.env.SMTP_FROM || 'appcrane@example.com';
+  const from = fromName ? `${JSON.stringify(fromName)} <${addr}>` : addr;
 
-  log.info(`Email sent to ${to}: ${subject}`);
+  const result = await transport.sendMail({
+    from, to, subject, text, html,
+    ...(replyTo && { replyTo }),
+  });
+  log.info(`Email sent to ${to} via SMTP: ${subject}`);
   return result;
 }
 

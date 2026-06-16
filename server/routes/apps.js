@@ -365,7 +365,7 @@ router.get('/:slug', requireAppAccess, (req, res) => {
 router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req, res) => {
   const db = getDb();
   const app = req.app;
-  const { name, domain, description, category, source_type, github_url, branch, github_token, max_ram_mb, max_cpu_percent, public_access, visibility, image_retention, frame_ancestors, auth_mode, auth_bypass_paths } = req.body;
+  const { name, domain, description, category, source_type, github_url, branch, github_token, max_ram_mb, max_cpu_percent, public_access, visibility, image_retention, frame_ancestors, auth_mode, auth_bypass_paths, email_enabled, email_from_name } = req.body;
 
   // Configurable RBAC: changes to repo-related fields gated by code.modify_repo_settings.
   // Other fields (name, description, category, visibility, etc.) stay open to any
@@ -560,11 +560,33 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
     updates.auth_mode = auth_mode;
   }
 
+  // v2.8.0: email service enablement (owner-or-admin, same exposure gate).
+  // Enabling provisions a service token if the app doesn't have one yet; the
+  // token + reachability env only land in the container on the next deploy.
+  let emailJustEnabled = false;
+  if (email_enabled !== undefined) {
+    const globalAdmin = isAdmin(req.user);
+    const isOwner = roleForUserOnApp(req.user, app) === 'owner';
+    if (!globalAdmin && !isOwner) {
+      throw new AppError('Only the app owner can change email_enabled.', 403, 'FORBIDDEN');
+    }
+    const next = email_enabled ? 1 : 0;
+    updates.email_enabled = next;
+    if (next === 1 && !app.service_token_hash) {
+      const { issueServiceToken } = await import('../services/appServiceToken.js');
+      issueServiceToken(app.id);
+      emailJustEnabled = true;
+    }
+  }
+  if (email_from_name !== undefined) {
+    updates.email_from_name = email_from_name ? String(email_from_name).slice(0, 100) : null;
+  }
+
   if (Object.keys(updates).length === 0) {
     return res.json({ app, message: 'No changes' });
   }
 
-  const ALLOWED_APP_COLS = new Set(['name','domain','description','category','source_type','github_url','branch','public_access','visibility','github_token_encrypted','resource_limits','runtime','image_retention','frame_ancestors','auth_mode','auth_bypass_paths']);
+  const ALLOWED_APP_COLS = new Set(['name','domain','description','category','source_type','github_url','branch','public_access','visibility','github_token_encrypted','resource_limits','runtime','image_retention','frame_ancestors','auth_mode','auth_bypass_paths','email_enabled','email_from_name']);
   const invalidKey = Object.keys(updates).find(k => !ALLOWED_APP_COLS.has(k));
   if (invalidKey) throw new AppError(`Invalid field: ${invalidKey}`, 400, 'VALIDATION');
 
@@ -581,7 +603,10 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
   }
 
   const updated = db.prepare('SELECT * FROM apps WHERE id = ?').get(app.id);
-  res.json({ app: { ...updated, resource_limits: JSON.parse(updated.resource_limits || '{}') } });
+  res.json({
+    app: { ...updated, resource_limits: JSON.parse(updated.resource_limits || '{}') },
+    ...(emailJustEnabled && { message: 'Email enabled and a service token was provisioned. Redeploy the app so the token (APPCRANE_SERVICE_TOKEN) is injected into the container.' }),
+  });
 });
 
 /**

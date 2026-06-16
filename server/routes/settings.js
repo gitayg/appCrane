@@ -3,6 +3,7 @@ import { getDb } from '../db.js';
 import { requireAuth, requirePlatformAdmin } from '../middleware/auth.js';
 import { PERMISSIONS, getMatrix, setMatrix, resetToDefaults } from '../services/permissions.js';
 import { ssoProviderConfigured } from '../services/authPolicy.js';
+import { encrypt } from '../services/encryption.js';
 
 const router = Router();
 
@@ -16,6 +17,7 @@ const SENSITIVE_KEYS = new Set([
   'scim_token_hash',
   'scim_token_created_at',
   'github_service_token_enc',
+  'graph_client_secret_encrypted',
 ]);
 
 /**
@@ -73,6 +75,61 @@ router.post('/role-permissions/reset', requireAuth, requirePlatformAdmin, (req, 
   const { permissions } = req.body || {};
   resetToDefaults(Array.isArray(permissions) ? permissions : null);
   res.json({ matrix: getMatrix() });
+});
+
+// ── Mail configuration (v2.8.0) ────────────────────────────────────────
+//
+// Microsoft Graph send-as-mailbox config for the app email service. The
+// client secret is stored encrypted (graph_client_secret_encrypted, in
+// SENSITIVE_KEYS) and never returned — the GET reports only whether it's set.
+// Must be registered before the generic /:key handlers.
+
+const MAIL_KEYS = {
+  graph_tenant_id:   'tenant_id',
+  graph_client_id:   'client_id',
+  email_from_address:'from_address',
+  email_from_name:   'from_name',
+};
+
+router.get('/mail/config', requireAuth, requirePlatformAdmin, (req, res) => {
+  const db = getDb();
+  const get = (k) => db.prepare('SELECT value FROM settings WHERE key = ?').get(k)?.value ?? '';
+  const out = {};
+  for (const [key, field] of Object.entries(MAIL_KEYS)) out[field] = get(key);
+  out.client_secret_set = !!get('graph_client_secret_encrypted');
+  out.configured = !!(out.tenant_id && out.client_id && out.client_secret_set && out.from_address);
+  res.json({ mail: out });
+});
+
+router.put('/mail/config', requireAuth, requirePlatformAdmin, (req, res) => {
+  const db = getDb();
+  const body = req.body || {};
+  const upsert = db.prepare(`
+    INSERT INTO settings (key, value, updated_by, updated_at) VALUES (?, ?, ?, datetime('now'))
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_by = excluded.updated_by, updated_at = datetime('now')
+  `);
+  for (const [key, field] of Object.entries(MAIL_KEYS)) {
+    if (body[field] !== undefined) upsert.run(key, String(body[field] ?? '').trim(), req.user.id);
+  }
+  // client_secret: only write when a non-empty value is supplied (so a save
+  // that leaves the field blank doesn't wipe the stored secret). Encrypted.
+  if (typeof body.client_secret === 'string' && body.client_secret.trim()) {
+    upsert.run('graph_client_secret_encrypted', encrypt(body.client_secret.trim()), req.user.id);
+  }
+  res.json({ message: 'Mail settings saved' });
+});
+
+// Send a test email to the calling admin via the live transport + queue path.
+router.post('/mail/test', requireAuth, requirePlatformAdmin, async (req, res) => {
+  if (!req.user.email) throw new Error('Your account has no email address to send a test to');
+  const { enqueueEmail } = await import('../services/emailQueue.js');
+  const { id } = enqueueEmail({
+    to: req.user.email,
+    subject: '[AppCrane] Mail configuration test',
+    text: 'This is a test email from AppCrane. If you received it, the mail service is configured correctly.',
+    source: 'test',
+  });
+  res.json({ message: `Test email queued to ${req.user.email} (queue #${id}). Check your inbox shortly.`, queue_id: id });
 });
 
 /**

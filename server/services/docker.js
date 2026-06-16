@@ -93,7 +93,7 @@ export async function buildImage({ slug, env, contextDir, commitHash, appBasePat
   });
 }
 
-export async function startApp({ slug, env, image, hostPort, envVars = {}, volumes = [], memoryMb = 512, cpus = 0.5 }) {
+export async function startApp({ slug, env, image, hostPort, envVars = {}, volumes = [], memoryMb = 512, cpus = 0.5, addHostGateway = false }) {
   const name = containerName(slug, env);
 
   await stopApp(slug, env).catch(() => {});
@@ -111,6 +111,14 @@ export async function startApp({ slug, env, image, hostPort, envVars = {}, volum
     '--log-opt', 'max-size=10m',
     '--log-opt', 'max-file=3',
   ];
+
+  // v2.8.0: only email-enabled apps need to reach AppCrane from inside the
+  // container (for the email service). host-gateway maps host.docker.internal
+  // to the host so CRANE_INTERNAL_URL resolves. Off by default — every other
+  // container start is unchanged.
+  if (addHostGateway) {
+    args.push('--add-host', 'host.docker.internal:host-gateway');
+  }
 
   for (const vol of volumes) {
     args.push('-v', `${vol.host}:${vol.container}`);
