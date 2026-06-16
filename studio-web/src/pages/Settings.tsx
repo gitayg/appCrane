@@ -807,9 +807,82 @@ function GithubTab() {
   )
 }
 
-type Tab = 'security' | 'users' | 'roles' | 'github' | 'branding' | 'audit'
+function MailTab() {
+  const [cfg, setCfg] = useState({
+    tenant_id: '', client_id: '', from_address: '', from_name: '',
+    client_secret_set: false, configured: false,
+  })
+  const [secret, setSecret] = useState('')
+  const [saved, flashSaved] = useFlash()
+  const [test, setTest] = useState<{ ok: boolean; msg: string } | null>(null)
 
-const VALID_TABS: Tab[] = ['security', 'users', 'roles', 'github', 'branding', 'audit']
+  function load() {
+    adminApi.get<{ mail: typeof cfg }>('/api/settings/mail/config').then(r => { if (r?.mail) setCfg(r.mail) }).catch(() => {})
+  }
+  useEffect(load, [])
+
+  async function save() {
+    const body: Record<string, string> = {
+      tenant_id: cfg.tenant_id, client_id: cfg.client_id,
+      from_address: cfg.from_address, from_name: cfg.from_name,
+    }
+    if (secret.trim()) body.client_secret = secret.trim()
+    await adminApi.put('/api/settings/mail/config', body).catch(() => {})
+    setSecret('')
+    flashSaved()
+    load()
+  }
+
+  async function sendTest() {
+    setTest(null)
+    try {
+      const r = await adminApi.post<{ message?: string }>('/api/settings/mail/test', {})
+      setTest({ ok: true, msg: r?.message || 'Test queued.' })
+    } catch (e) {
+      setTest({ ok: false, msg: e instanceof Error ? e.message : 'Test failed' })
+    }
+  }
+
+  return (
+    <div className="settings-section">
+      <h2>Mail</h2>
+      <p className="settings-hint">
+        Microsoft Graph send-as-mailbox for the app email service. Apps send through AppCrane;
+        recipients are limited to registered platform users. The client secret is stored encrypted
+        and never shown again.
+      </p>
+
+      <label>Sender address (Graph mailbox)</label>
+      <FocusInput value={cfg.from_address} onChange={e => setCfg({ ...cfg, from_address: e.target.value })} placeholder="aimi@opswat.com" />
+
+      <label>Default display name</label>
+      <FocusInput value={cfg.from_name} onChange={e => setCfg({ ...cfg, from_name: e.target.value })} placeholder="AIMI" />
+
+      <label>Azure tenant ID</label>
+      <FocusInput value={cfg.tenant_id} onChange={e => setCfg({ ...cfg, tenant_id: e.target.value })} placeholder="00000000-0000-0000-0000-000000000000" />
+
+      <label>Client ID (application ID)</label>
+      <FocusInput value={cfg.client_id} onChange={e => setCfg({ ...cfg, client_id: e.target.value })} placeholder="00000000-0000-0000-0000-000000000000" />
+
+      <label>Client secret {cfg.client_secret_set && <span style={{ color: 'var(--green)' }}>— set ✓ (leave blank to keep)</span>}</label>
+      <FocusInput type="password" value={secret} onChange={e => setSecret(e.target.value)} placeholder={cfg.client_secret_set ? '••••••••' : 'paste the IT-provided secret'} />
+
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 12 }}>
+        <button className="btn" onClick={save}>Save</button>
+        <button className="btn" onClick={sendTest} disabled={!cfg.configured}>Send test email to me</button>
+        {saved && <span style={{ color: 'var(--green)' }}>Saved</span>}
+        <span style={{ color: cfg.configured ? 'var(--green)' : 'var(--dim)' }}>
+          {cfg.configured ? '● configured' : '○ not configured'}
+        </span>
+      </div>
+      {test && <p style={{ color: test.ok ? 'var(--green)' : 'var(--red)', marginTop: 8 }}>{test.msg}</p>}
+    </div>
+  )
+}
+
+type Tab = 'security' | 'users' | 'roles' | 'github' | 'mail' | 'branding' | 'audit'
+
+const VALID_TABS: Tab[] = ['security', 'users', 'roles', 'github', 'mail', 'branding', 'audit']
 
 function getTab(): Tab {
   const hash = window.location.hash.replace('#', '') as Tab
@@ -838,6 +911,9 @@ export function Settings() {
       </div>
       <div style={{ display: tab === 'github' ? 'block' : 'none' }}>
         <GithubTab />
+      </div>
+      <div style={{ display: tab === 'mail' ? 'block' : 'none' }}>
+        <MailTab />
       </div>
       {/* v2.6.9: skills tab removed from Settings — now top-level /skills */}
       <div style={{ display: tab === 'branding' ? 'block' : 'none' }}>

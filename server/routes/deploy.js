@@ -287,6 +287,19 @@ router.post('/:slug/restart/:env', requireAppAccess, auditMiddleware('restart'),
     DATA_DIR: '/data',
   });
 
+  // v2.8.0: email-enabled apps get the service token + host-gateway URL so the
+  // container can reach AppCrane's internal email API. Gated — other restarts
+  // are unchanged.
+  const emailEnabled = !!app.email_enabled;
+  if (emailEnabled) {
+    const { getServiceTokenPlaintext } = await import('../services/appServiceToken.js');
+    const token = getServiceTokenPlaintext(app);
+    if (token) {
+      runtimeEnvVars.APPCRANE_SERVICE_TOKEN = token;
+      runtimeEnvVars.CRANE_INTERNAL_URL = `http://host.docker.internal:${cranePort}`;
+    }
+  }
+
   const dataDir = resolve(process.env.DATA_DIR || './data');
   const sharedDir = resolve(join(dataDir, 'apps', app.slug, env, 'shared'));
   const bePort = env === 'production' ? ports.prod_be : ports.sand_be;
@@ -313,6 +326,7 @@ router.post('/:slug/restart/:env', requireAppAccess, auditMiddleware('restart'),
     volumes: [{ host: resolve(join(sharedDir, 'data')), container: '/data' }],
     memoryMb: limits.max_ram_mb,
     cpus: limits.max_cpu_percent / 100,
+    addHostGateway: emailEnabled,
   });
 
   res.json({

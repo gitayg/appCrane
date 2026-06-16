@@ -246,6 +246,13 @@ export function generateCaddyfile() {
     caddyfile += `    }\n\n`;
   }
 
+  // v2.8.0: the internal app service API (/api/service/*) must NOT be reachable
+  // from the public domain — apps call it only via the docker host-gateway.
+  // 404 it here, before the catch-all that would otherwise proxy it to AppCrane.
+  caddyfile += `    handle /api/service* {\n`;
+  caddyfile += `        respond 404\n`;
+  caddyfile += `    }\n\n`;
+
   // Everything else → AppCrane itself
   caddyfile += `    handle {\n`;
   caddyfile += `        reverse_proxy 127.0.0.1:${cranePort}\n`;

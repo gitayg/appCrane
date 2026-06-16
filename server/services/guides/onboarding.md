@@ -461,3 +461,56 @@ What you own on the app side:
 Use headless mode when the WHOLE app is public (status page, telemetry
 ingest). Use `auth_bypass_paths` when most of the app is SSO'd but one
 endpoint takes its own token.
+
+## Sending email from an app
+
+AppCrane can send email on an app's behalf — server-side only, async, and
+bounded to **registered platform users** (an app can never email an arbitrary
+address). Mail goes out as the platform sender (e.g. `AIMI <aimi@opswat.com>`)
+configured in Settings → Mail.
+
+**Enable it** (owner or admin): set `email_enabled` on the app
+(`appcrane_set_app_meta` / the dashboard), then **redeploy** — that injects two
+env vars into the container:
+
+- `APPCRANE_SERVICE_TOKEN` — the app's credential for the email API
+- `CRANE_INTERNAL_URL` — `http://host.docker.internal:5001`, AppCrane reachable
+  from inside the container
+
+**Send** (from the app's SERVER — never the browser; the token is a server-only
+env var):
+
+```js
+await fetch(`${process.env.CRANE_INTERNAL_URL}/api/service/email`, {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'X-AppCrane-Service-Token': process.env.APPCRANE_SERVICE_TOKEN,
+  },
+  body: JSON.stringify({
+    to: userEmail,            // MUST be a registered platform user
+    subject: 'Your report is ready',
+    text: 'Plain-text body',
+    html: '<p>Optional HTML body</p>',
+    replyTo: 'team@opswat.com',     // optional
+    idempotencyKey: 'report-123',   // optional — safe retries, no double-send
+  }),
+});
+// → 202 { queued: true, queue_id }   (async; a worker delivers it)
+```
+
+Rules and guarantees:
+
+- **Recipient must be a known platform user.** A non-user address → `400`. This
+  is the hard bound — no spam vector, no arbitrary recipients. To email the
+  logged-in user, pass the `X-AppCrane-User-Email` header AppCrane already
+  injects.
+- **Server-side only.** The endpoint is reachable only from the container (via
+  `host.docker.internal`), 404s on the public domain, and rejects any request
+  that arrived through the proxy. The token is a server env var the browser
+  never sees. Do NOT call this from frontend code.
+- **Async + retried.** You get `202` immediately; a worker sends with retries
+  and backoff. If delivery fails for good, the platform admin is emailed.
+- **From identity is platform-controlled.** Address is fixed
+  (`aimi@opswat.com`); only the display name is configurable (per-app via
+  `email_from_name`, else the Settings default). Apps cannot spoof the sender.
