@@ -349,7 +349,7 @@ export function Applications() {
   }
 
   async function setAuthBypassPaths(app: App) {
-    const current = (app.auth_bypass_paths ?? []).join(', ')
+    const current = (Array.isArray(app.auth_bypass_paths) ? app.auth_bypass_paths : []).join(', ')
     const help = "Path prefixes that bypass SSO on this app (comma- or newline-separated).\n\n" +
       "Each prefix must:\n" +
       "  • start with '/' (e.g. /ws/local-runner)\n" +
@@ -1156,13 +1156,18 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                           onClick={() => setFrameAncestors(app)}
                           title={app.frame_ancestors ? `Embedders: ${app.frame_ancestors}` : 'Allowed embedders (default: same origin only)'}
                         >🖼{app.frame_ancestors ? ' ✓' : ''}</button>
-                        <button
-                          className="btn btn-xs"
-                          onClick={() => setAuthBypassPaths(app)}
-                          title={app.auth_bypass_paths?.length
-                            ? `Auth-bypass paths: ${app.auth_bypass_paths.join(', ')}`
-                            : 'Path prefixes that bypass SSO on this app (advanced — apps must self-authenticate)'}
-                        >🔓{app.auth_bypass_paths?.length ? ' ✓' : ''}</button>
+                        {(() => {
+                          const abp = Array.isArray(app.auth_bypass_paths) ? app.auth_bypass_paths : []
+                          return (
+                            <button
+                              className="btn btn-xs"
+                              onClick={() => setAuthBypassPaths(app)}
+                              title={abp.length
+                                ? `Auth-bypass paths: ${abp.join(', ')}`
+                                : 'Path prefixes that bypass SSO on this app (advanced — apps must self-authenticate)'}
+                            >🔓{abp.length ? ' ✓' : ''}</button>
+                          )
+                        })()}
                         {(app.source_type === 'github' || app.source_type === 'managed' || app.github_url) && (
                           <>
                             {app.github_url && (

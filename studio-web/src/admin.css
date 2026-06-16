@@ -664,6 +664,34 @@ textarea:focus { border-color: var(--accent); }
 .apps-drill-env-hdr { font-size: .68rem; font-weight: 600; color: var(--dim); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 6px; }
 .apps-drill-env-body { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
+/* ── Applications manage table: mobile ───────────────────────────────
+   The manage table is 11 columns wide (toggle, icon, name, description,
+   visibility, tag, ram, cpu, images, sandbox, production) — unreadable on a
+   phone. On narrow screens we drop the secondary edit columns (4–9) and keep
+   the at-a-glance set: expand toggle, icon, name, and the sandbox/production
+   status cells. The hidden fields stay editable on the per-app manage page
+   (the "manage" button in the actions row), and the row's ▸ toggle still
+   drills into env detail. colSpan rows (actions / drill / env-vars) have a
+   single cell, so the nth-child hides never touch them. */
+@media (max-width: 768px) {
+  .apps-table th:nth-child(4),  .apps-table td:nth-child(4),   /* description */
+  .apps-table th:nth-child(5),  .apps-table td:nth-child(5),   /* visibility  */
+  .apps-table th:nth-child(6),  .apps-table td:nth-child(6),   /* tag         */
+  .apps-table th:nth-child(7),  .apps-table td:nth-child(7),   /* ram         */
+  .apps-table th:nth-child(8),  .apps-table td:nth-child(8),   /* cpu         */
+  .apps-table th:nth-child(9),  .apps-table td:nth-child(9) {  /* images      */
+    display: none;
+  }
+  .apps-table { font-size: .78rem; }
+  .apps-table th, .apps-table td { padding: 5px 6px; }
+  /* Name input was pinned to min-width 130; let it shrink to the column. */
+  .apps-table td:nth-child(3) input.editable { min-width: 0; width: 100%; }
+  /* Stack the env-vars drill grid into one column on a phone. */
+  .apps-drill-envs { grid-template-columns: 1fr; }
+  /* Trim the status cell's fixed min-width so two env columns still fit. */
+  .apps-status-cell { min-width: 0; }
+}
+
 /* ── App cards (applications page) ───────────────────────────────────
    Compact rows: ~50% less vertical space than the previous layout by
    tightening paddings, shrinking the icon, dropping the description

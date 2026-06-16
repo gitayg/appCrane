@@ -9,6 +9,15 @@ import { AppError } from '../utils/errors.js';
 import { resolveSafe } from '../utils/paths.js';
 import { reloadCaddy } from '../services/caddy.js';
 import { validateBypassPaths } from '../utils/authBypassPaths.js';
+
+// auth_bypass_paths is stored as a JSON string (or NULL). The UI expects an
+// array, so always parse it before returning an app row — a raw string would
+// crash the dashboard's `.join()` (bug: v2.7.27 added the column but several
+// serialization points returned it unparsed).
+function parseBypassPathsField(raw) {
+  if (!raw) return [];
+  try { const v = JSON.parse(raw); return Array.isArray(v) ? v : []; } catch { return []; }
+}
 import { userHasAppPermission, userHasPlatformPermission, roleForUserOnApp } from '../services/permissions.js';
 import { isAdmin } from '../utils/roles.js';
 import log from '../utils/logger.js';
@@ -164,6 +173,7 @@ router.get('/', (req, res) => {
     return {
       ...app,
       resource_limits: JSON.parse(app.resource_limits || '{}'),
+      auth_bypass_paths: parseBypassPathsField(app.auth_bypass_paths),
       has_icon: hasIconFile(app.slug),
       // Boolean flags derived from secret-bearing columns so the UI can
       // show "this app has its own X" without ever shipping the secret.
@@ -306,7 +316,7 @@ router.post('/', requireAuth, auditMiddleware('app-create'), async (req, res) =>
   } : null;
 
   res.status(201).json({
-    app: { ...app, resource_limits: JSON.parse(app.resource_limits) },
+    app: { ...app, resource_limits: JSON.parse(app.resource_limits), auth_bypass_paths: parseBypassPathsField(app.auth_bypass_paths) },
     urls,
     base_path: { production: `/${slug}/`, sandbox: `/${slug}-sandbox/` },
     webhook_url: `/api/webhooks/${webhookToken}`,
@@ -345,7 +355,7 @@ router.get('/:slug', requireAppAccess, (req, res) => {
   } : null;
 
   res.json({
-    app: { ...app, resource_limits: JSON.parse(app.resource_limits || '{}') },
+    app: { ...app, resource_limits: JSON.parse(app.resource_limits || '{}'), auth_bypass_paths: parseBypassPathsField(app.auth_bypass_paths) },
     urls: urlsDetail,
     base_path: { production: `/${app.slug}/`, sandbox: `/${app.slug}-sandbox/` },
     ...(isAdmin(req.user) ? { ports } : {}),
@@ -604,7 +614,7 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
 
   const updated = db.prepare('SELECT * FROM apps WHERE id = ?').get(app.id);
   res.json({
-    app: { ...updated, resource_limits: JSON.parse(updated.resource_limits || '{}') },
+    app: { ...updated, resource_limits: JSON.parse(updated.resource_limits || '{}'), auth_bypass_paths: parseBypassPathsField(updated.auth_bypass_paths) },
     ...(emailJustEnabled && { message: 'Email enabled and a service token was provisioned. Redeploy the app so the token (APPCRANE_SERVICE_TOKEN) is injected into the container.' }),
   });
 });
