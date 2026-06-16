@@ -8,11 +8,12 @@
 -- internal-only endpoint that enqueues the message. A worker drains the queue
 -- and sends with retries; a dead letter pages the platform admin by email.
 
--- Per-app email enablement + service token + display-name override.
+-- Per-app service token + display-name override. The email service is
+-- available to EVERY app (no enable flag) — the deployer provisions a token on
+-- first deploy and injects it into the container.
 -- service_token_hash      → fast lookup of the calling app (hash of the token)
 -- service_token_encrypted → the plaintext, AES-256-GCM, so the deployer can
 --                           inject it into the container at start time
-ALTER TABLE apps ADD COLUMN email_enabled           INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE apps ADD COLUMN service_token_hash       TEXT;
 ALTER TABLE apps ADD COLUMN service_token_encrypted  TEXT;
 ALTER TABLE apps ADD COLUMN email_from_name          TEXT;
