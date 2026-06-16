@@ -30,10 +30,11 @@ function assertInternal(req) {
 }
 
 function authApp(req) {
+  // v2.8.3: email is available to every app — a valid service token is the
+  // only requirement (no per-app enable flag).
   const token = (req.headers['x-appcrane-service-token'] || '').toString().trim();
   const app = appForServiceToken(token);
   if (!app) throw new AppError('Invalid or missing X-AppCrane-Service-Token', 401, 'BAD_SERVICE_TOKEN');
-  if (!app.email_enabled) throw new AppError(`Email is not enabled for app '${app.slug}'`, 403, 'EMAIL_DISABLED');
   return app;
 }
 

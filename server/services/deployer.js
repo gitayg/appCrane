@@ -918,21 +918,17 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       CRANE_INTERNAL_URL: craneInternalUrl,
     });
 
-    // v2.8.0: email-enabled apps get the service token + a container-reachable
-    // internal URL (localhost inside a container is the container itself, so
-    // we point at the docker host-gateway). Gated on email_enabled so every
-    // other app's container start is byte-for-byte unchanged.
-    const emailEnabled = !!app.email_enabled;
-    if (emailEnabled) {
-      const { getServiceTokenPlaintext } = await import('./appServiceToken.js');
-      const token = getServiceTokenPlaintext(app);
-      if (token) {
-        runtimeEnvVars.APPCRANE_SERVICE_TOKEN = token;
-        runtimeEnvVars.CRANE_INTERNAL_URL = `http://host.docker.internal:${cranePort}`;
-        appendLog('Email service enabled: injected APPCRANE_SERVICE_TOKEN + host-gateway CRANE_INTERNAL_URL');
-      } else {
-        appendLog('WARNING: email_enabled but no service token issued — run the enable action to provision one');
-      }
+    // v2.8.3: the email service is available to EVERY app, no per-app toggle.
+    // Inject the service token (provisioning one on first deploy if absent)
+    // plus a container-reachable internal URL — `localhost` inside a container
+    // is the container itself, so we point CRANE_INTERNAL_URL at the docker
+    // host-gateway. With this, any app's server can POST to /api/service/email.
+    {
+      const { getServiceTokenPlaintext, issueServiceToken } = await import('./appServiceToken.js');
+      const token = getServiceTokenPlaintext(app) || issueServiceToken(app.id);
+      runtimeEnvVars.APPCRANE_SERVICE_TOKEN = token;
+      runtimeEnvVars.CRANE_INTERNAL_URL = `http://host.docker.internal:${cranePort}`;
+      appendLog('Injected APPCRANE_SERVICE_TOKEN + host-gateway CRANE_INTERNAL_URL (email service)');
     }
 
     const limits = parseResourceLimits(app.resource_limits);
@@ -945,7 +941,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       volumes: [{ host: resolve(join(sharedDir, 'data')), container: '/data' }],
       memoryMb: limits.max_ram_mb,
       cpus: limits.max_cpu_percent / 100,
-      addHostGateway: emailEnabled,
+      addHostGateway: true,
     });
     appendLog(`Container started: appcrane-${app.slug}-${env} (host port ${bePort})`);
 

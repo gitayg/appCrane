@@ -469,13 +469,15 @@ bounded to **registered platform users** (an app can never email an arbitrary
 address). Mail goes out as the platform sender (e.g. `AIMI <aimi@opswat.com>`)
 configured in Settings → Mail.
 
-**Enable it** (owner or admin): set `email_enabled` on the app
-(`appcrane_set_app_meta` / the dashboard), then **redeploy** — that injects two
-env vars into the container:
+**No setup needed — it's available to every app.** On each deploy AppCrane
+injects two env vars into the container:
 
 - `APPCRANE_SERVICE_TOKEN` — the app's credential for the email API
 - `CRANE_INTERNAL_URL` — `http://host.docker.internal:5001`, AppCrane reachable
   from inside the container
+
+(If you just want to start using it on an already-running app, redeploy once so
+those vars are present.)
 
 **Send** (from the app's SERVER — never the browser; the token is a server-only
 env var):
