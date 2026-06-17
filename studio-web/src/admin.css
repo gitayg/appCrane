@@ -1006,6 +1006,23 @@ textarea:focus { border-color: var(--accent); }
   visibility: visible;
   transition: opacity .12s ease-out, visibility 0s linear 0s;
 }
+/* The tooltip's z-index only orders it WITHIN its own tile's stacking context.
+   A sibling tile painted later in the DOM (next column / next row) still covers
+   it. Lift the whole hovered unit above its siblings so the popover wins. The
+   owner-path tile is wrapped in .launcher-tile-cell (the grid item), so raise
+   that too — raising only the inner button doesn't escape the cell. */
+.launcher-tile-cell { position: relative; }
+.launcher-tile:hover,
+.launcher-tile:focus-visible,
+.launcher-tile-cell:hover,
+.launcher-tile-cell:focus-within { z-index: 30; }
+/* Owner line at the bottom of the description popover. */
+.launcher-tile-tip-owner {
+  margin-top: 8px; padding-top: 8px;
+  border-top: 1px solid var(--border, #333);
+  font-size: .74rem; color: var(--dim);
+}
+.launcher-tile-tip-owner b { color: var(--text); font-weight: 600; }
 
 /* v2.6.10: Top-10 leaderboards on the Dashboard. Two cards side-by-side
    on wide screens, stacked on narrow. Rank → name → count, monospace
