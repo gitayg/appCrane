@@ -213,8 +213,9 @@ export function Docs() {
           <p>
             Recipient must be a registered user (a <code>400</code> otherwise). The logged-in user's email
             arrives on every request as the <code>x-appcrane-user-email</code> header — use it as
-            <code> to</code>. Sender is the mailbox set in <code>Settings -&gt; Mail</code>; apps set only the
-            display name and reply-to. Full reference: <code>appcrane_get_guide(topic="email")</code>.
+            <code> to</code>. The from address is fixed (<code>Settings -&gt; Mail</code> mailbox); the display
+            name defaults to the app's own name and can be overridden per-send with a <code>fromName</code> field.
+            Full reference: <code>appcrane_get_guide(topic="email")</code>.
           </p>
 
           <h2 id="rest">REST API</h2>

@@ -36,6 +36,7 @@ Body fields:
 | `text` | one of text/html | Plain-text body |
 | `html` | one of text/html | HTML body (used over text if both given) |
 | `replyTo` | no | Reply-To address |
+| `fromName` | no | Sender display name. **Defaults to the app's own name** — MarketMind sends as `MarketMind <aimi@opswat.com>`. Pass this to override per-send (e.g. `"IntelOP"`). The address never changes. |
 | `env` | no | `sandbox` (default) or `production` |
 | `idempotencyKey` | no | Safe retries — the same key never double-sends |
 
@@ -93,10 +94,10 @@ await notify(userEmail, "Your report is ready", "Open the app to download it.");
   arrived through the proxy. The token is a server env var the browser never
   sees. Never call this from frontend code.
 - **Recipients are platform users only.** A non-user address returns `400`.
-- **The sender is platform-controlled.** From is fixed (the Settings → Mail
-  mailbox, e.g. `aimi@opswat.com`); only the display name is configurable
-  (per-app `email_from_name`, else the platform default). Apps may set
-  `replyTo`.
+- **The address is platform-controlled; the display name is the app's.** From
+  address is fixed (the Settings → Mail mailbox, e.g. `aimi@opswat.com`). The
+  display name defaults to the app's own name and can be overridden per-send
+  via `fromName` — no admin setting. Apps may also set `replyTo`.
 
 ## Errors
 
