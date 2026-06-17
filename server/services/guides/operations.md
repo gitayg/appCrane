@@ -181,3 +181,72 @@ queue so an agent can triage.
 `appcrane_list_apps` to see what you have. `appcrane_get_app(slug)` for any
 single app's full state. `appcrane_get_guide(topic="onboarding")` if you're
 about to onboard a new one.
+
+## Complete MCP tool reference
+
+Every `appcrane_*` tool, grouped by purpose. The authoritative input schema for each is on the tool itself (your MCP client shows it) — this is the at-a-glance index.
+
+### Discovery & info
+
+| Tool | What it does |
+|---|---|
+| `appcrane_list_apps` | List all AppCrane apps the current user has access to |
+| `appcrane_get_app` | Get detailed info for a single app: URLs, current versions per environment, recent deployments, and health state |
+| `appcrane_get_health` | Fetch the deployed app's health endpoint server-side, bypassing AppCrane's auth proxy |
+| `appcrane_get_logs` | Get recent runtime logs from a running app container (docker logs) |
+| `appcrane_get_deploy_log` | Read the deploy/build log for a specific deployment — the output that came out of clone / npm install / docker build / health-validate, BEFORE the ... |
+| `appcrane_list_releases` | List the deploy/release history for an app + env, newest first — each release is id, version, commit, status (live / rolled_back / failed / pending... |
+| `appcrane_top_apps` | Top apps by distinct active users in a lookback window |
+| `appcrane_top_users` | Top users by distinct apps opened in a lookback window |
+
+### Deploy lifecycle
+
+| Tool | What it does |
+|---|---|
+| `appcrane_deploy` | Trigger a deployment — this IS how you "update an env to the latest" |
+| `appcrane_wait_deploy` | Block until a deployment reaches a terminal state (live / failed / rolled_back), then return its final status |
+| `appcrane_rollback` | Roll an env back to a prior release |
+| `appcrane_promote` | Promote the current live SANDBOX release to production — the gated sandbox→prod path |
+| `appcrane_list_cron` | List the scheduled jobs declared in an app's deployhub.json `cron` array (after the most recent deploy) |
+| `appcrane_run_cron_now` | Trigger a scheduled cron job RIGHT NOW, regardless of its schedule |
+
+### App management
+
+| Tool | What it does |
+|---|---|
+| `appcrane_create_app` | Register a new app in AppCrane from a GitHub repository |
+| `appcrane_create_managed_app` | Create a new app using AppCrane's GitHub service-account — the platform creates a repo on the configured org/user, owns it, and the agent works aga... |
+| `appcrane_update_app` | Patch fields on an existing app |
+| `appcrane_set_app_meta` | Set an app's category, visibility, auth_mode, and/or auth_bypass_paths — the owner self-service fields (same controls the dashboard Launcher expose... |
+| `appcrane_set_app_icon` | Set the tile icon for an app (shown on the Dashboard, the Launcher cards, the Manage table, and the frame topbar) |
+
+### Env & files & data
+
+| Tool | What it does |
+|---|---|
+| `appcrane_get_env` | Get all environment variables for an app, decrypted |
+| `appcrane_set_env` | Set or update an environment variable on an app |
+| `appcrane_set_data_blob` | Write a blob directly to the app's persistent /data volume on the host — single hop, no container round-trip, no GitHub round-trip, no inline size ... |
+| `appcrane_ls` | List files inside a running app container at a specific path |
+| `appcrane_cat` | Print the contents of a file inside a running app container |
+| `appcrane_push_staged_file` | Move a previously-staged file (uploaded via POST /api/files/staged) into a running container at a path under /app or /data |
+| `appcrane_push_to_managed_app` | Push a batch of files to a managed app's AMC_<slug> repo, authenticated server-side via AppCrane's service-account credential |
+
+### Access control
+
+| Tool | What it does |
+|---|---|
+| `appcrane_list_app_members` | List every user who has access to an app, with their per-app role (owner / admin / user / viewer / none) |
+| `appcrane_grant_app_access` | Grant a user access to an app at a specific per-app role |
+| `appcrane_revoke_app_access` | Remove a user's access from an app entirely |
+| `appcrane_list_access_requests` | List pending access requests — enhancement_requests rows whose message starts with "Access request for app …" (the portal's Request-access button p... |
+| `appcrane_approve_access_request` | Approve a pending access request: grants the requester access to the app at `role` (default "user") and marks the enhancement_request as done |
+| `appcrane_deny_access_request` | Deny a pending access request: marks the enhancement_request as done WITHOUT granting access |
+
+### Requests & guides
+
+| Tool | What it does |
+|---|---|
+| `appcrane_list_requests` | List enhancement requests filed against an app via the AppCrane intake form |
+| `appcrane_set_request_status` | Move a request through the lifecycle: triage → in_progress → shipped → validated |
+| `appcrane_get_guide` | Fetch the latest AppCrane playbook on a given topic |

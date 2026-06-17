@@ -1804,13 +1804,13 @@ const TOOLS = [
   {
     name: 'appcrane_get_guide',
     description:
-      'Fetch the latest AppCrane playbook on a given topic. Use this at the START of any non-trivial workflow so you operate on the current authoritative guidance, not on whatever you remember from a past session. Topics: "onboarding" = the full new-app onboarding playbook (paths a/b/c/d, health-endpoint contract, common pitfalls). "operations" = the comprehensive agent operations guide (deploy, env, logs, rollback, every appcrane_* tool). Topic defaults to "onboarding" if omitted. Returns markdown.',
+      'Fetch the latest AppCrane playbook on a given topic. Use this at the START of any non-trivial workflow so you operate on the current authoritative guidance, not on whatever you remember from a past session. Topics: "onboarding" = the full new-app onboarding playbook (paths a/b/c/d, health-endpoint contract, common pitfalls). "operations" = the comprehensive agent operations guide (deploy, env, logs, rollback, every appcrane_* tool). "email" = how a hosted app sends email through AppCrane (the /api/service/email endpoint, env vars, recipient rules). Topic defaults to "onboarding" if omitted. Returns markdown.',
     inputSchema: {
       type: 'object',
       properties: {
         topic: {
           type: 'string',
-          enum: ['onboarding', 'operations'],
+          enum: ['onboarding', 'operations', 'email'],
           description: 'Which guide to fetch. Default: onboarding.',
         },
       },
@@ -1818,7 +1818,7 @@ const TOOLS = [
     },
     requiredRole: 'any',
     handler: async (_user, args) => {
-      const topic = args.topic === 'operations' ? 'operations' : 'onboarding';
+      const topic = ['operations', 'email'].includes(args.topic) ? args.topic : 'onboarding';
       const { readFileSync, existsSync } = await import('fs');
       const { join, dirname } = await import('path');
       const { fileURLToPath } = await import('url');
