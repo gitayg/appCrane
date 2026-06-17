@@ -25,6 +25,7 @@ interface AppRow {
   // the user can see the app exists but doesn't have an open-it
   // permission yet — the Launcher renders a Request-access tile.
   app_role?:   'admin' | 'owner' | 'user' | 'viewer' | 'none'
+  owner?:      { id: number; name: string; email: string } | null
   production?: { health?: { status: string } }
   sandbox?:    { health?: { status: string } }
 }
@@ -302,8 +303,13 @@ export function LauncherView({ onOpen, headerRight }: Props) {
                             short version above stays line-clamped — this surfaces
                             the rest on hover with no click required. Only renders
                             when there's actually a description to show. */}
-                        {app.description && (
-                          <div className="launcher-tile-tip" role="tooltip">{app.description}</div>
+                        {(app.description || app.owner) && (
+                          <div className="launcher-tile-tip" role="tooltip">
+                            {app.description}
+                            {app.owner && (
+                              <div className="launcher-tile-tip-owner">Owner: <b>{app.owner.name}</b></div>
+                            )}
+                          </div>
                         )}
                       </button>
                     )
@@ -334,9 +340,14 @@ export function LauncherView({ onOpen, headerRight }: Props) {
                         <div className="launcher-tile-desc">{app.description}</div>
                       )}
                       {/* v2.6.8: full-description hover popover. See note in
-                          the request-access tile above. */}
-                      {app.description && (
-                        <div className="launcher-tile-tip" role="tooltip">{app.description}</div>
+                          the request-access tile above. v2.8.8: + owner line. */}
+                      {(app.description || app.owner) && (
+                        <div className="launcher-tile-tip" role="tooltip">
+                          {app.description}
+                          {app.owner && (
+                            <div className="launcher-tile-tip-owner">Owner: <b>{app.owner.name}</b></div>
+                          )}
+                        </div>
                       )}
                     </button>
                   )
