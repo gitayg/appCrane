@@ -42,12 +42,13 @@ export function Docs() {
           Then in any Claude Code session, ask the agent to do the thing —
           onboard an app, deploy a change, debug a fast failure, manage
           access. The agent fetches the current playbook itself by calling
-          <code> appcrane_get_guide(topic="onboarding")</code> or
-          <code> appcrane_get_guide(topic="operations")</code>; you don't have
+          <code> appcrane_get_guide(topic="onboarding")</code>,
+          <code> appcrane_get_guide(topic="operations")</code>, or
+          <code> appcrane_get_guide(topic="email")</code>; you don't have
           to paste anything.
         </p>
 
-        <h3>The two guides</h3>
+        <h3>The guides</h3>
         <ul>
           <li>
             <span className="pill">onboarding</span> — new-app playbook. Covers paths
@@ -57,9 +58,38 @@ export function Docs() {
           <li>
             <span className="pill">operations</span> — post-onboarding ops reference.
             Deploy lifecycle, troubleshooting decision tree, access management,
-            tile icons, deploy constraints.
+            tile icons, deploy constraints, plus the complete 35-tool reference.
+          </li>
+          <li>
+            <span className="pill">email</span> — how a hosted app sends email through
+            AppCrane (the <code>/api/service/email</code> endpoint, the auto-injected
+            env vars, recipient rules).
           </li>
         </ul>
+
+        <h2>Apps can send email</h2>
+        <p>
+          Any hosted app can send email through AppCrane — server-side only,
+          async, and only to <b>registered platform users</b> (never an
+          arbitrary address). Nothing to enable: every deploy auto-injects
+          <code> APPCRANE_SERVICE_TOKEN</code> and <code> CRANE_INTERNAL_URL</code>
+          into the container. From the app's server (never the browser):
+        </p>
+        <pre><code>{`await fetch(\`\${process.env.CRANE_INTERNAL_URL}/api/service/email\`, {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    "X-AppCrane-Service-Token": process.env.APPCRANE_SERVICE_TOKEN,
+  },
+  body: JSON.stringify({ to: userEmail, subject: "Hi", text: "Hello" }),
+});
+// 202 { queued: true } — delivered async`}</code></pre>
+        <p>
+          Sender is the mailbox configured in <code>Settings → Mail</code>
+          (e.g. <code>aimi@opswat.com</code>); apps set only the display name and
+          reply-to. Full reference: ask an agent for
+          <code> appcrane_get_guide(topic="email")</code>.
+        </p>
 
         <h2>For operators on the AppCrane host</h2>
         <p>
