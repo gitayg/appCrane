@@ -132,6 +132,48 @@ router.post('/mail/test', requireAuth, requirePlatformAdmin, async (req, res) =>
   res.json({ message: `Test email queued to ${req.user.email} (queue #${id}). Check your inbox shortly.`, queue_id: id });
 });
 
+// ── Config backup / restore (v2.9.0) — platform_admin only ──────────────
+//
+// Export the whole-system config (DB + .env + icons) as one zip, and import
+// it back onto a fresh host. The bundle contains the ENCRYPTION_KEY and every
+// encrypted secret, so both routes are platform-admin-gated. Registered before
+// the generic /:key handlers.
+
+router.get('/config/export', requireAuth, requirePlatformAdmin, async (req, res) => {
+  const { exportConfig } = await import('../services/configBackup.js');
+  const { buffer, manifest } = exportConfig();
+  const host = (process.env.CRANE_DOMAIN || 'appcrane').replace(/[^a-z0-9.-]/gi, '');
+  const date = manifest.exported_at.slice(0, 10);
+  res.setHeader('Content-Type', 'application/zip');
+  res.setHeader('Content-Disposition', `attachment; filename="appcrane-backup-${host}-${date}.zip"`);
+  res.setHeader('Content-Length', buffer.length);
+  res.end(buffer);
+});
+
+router.post('/config/import', requireAuth, requirePlatformAdmin, async (req, res) => {
+  const multer = (await import('multer')).default;
+  const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 200 * 1024 * 1024 } }).single('file');
+  upload(req, res, async (err) => {
+    if (err) return res.status(400).json({ error: { code: 'UPLOAD_ERROR', message: err.message } });
+    if (!req.file) return res.status(400).json({ error: { code: 'NO_FILE', message: 'No backup file uploaded (field name: file)' } });
+    try {
+      const { importConfig } = await import('../services/configBackup.js');
+      const restoreEnv = req.query.restore_env !== '0';
+      const result = importConfig(req.file.buffer, { restoreEnv });
+      res.json({
+        message: 'Backup imported. The server will restart now to load the restored database.',
+        ...result,
+      });
+      // better-sqlite3 holds the old DB open; restart so the imported one
+      // takes effect. systemd brings the process back up. Delay so the
+      // response flushes first.
+      setTimeout(() => process.exit(0), 1200);
+    } catch (e) {
+      res.status(400).json({ error: { code: 'IMPORT_FAILED', message: e.message } });
+    }
+  });
+});
+
 /**
  * GET /api/settings/:key - Single setting (public, sensitive keys blocked)
  */
