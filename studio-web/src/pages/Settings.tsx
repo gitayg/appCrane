@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { adminApi } from '../adminApi'
+import { adminApi, authHeaders } from '../adminApi'
 import { useFlash, FocusInput, FocusTextarea } from '../components/formHelpers'
 import { Users } from './Users'
 import { AuditLog } from './AuditLog'
@@ -880,9 +880,98 @@ function MailTab() {
   )
 }
 
-type Tab = 'security' | 'users' | 'roles' | 'github' | 'mail' | 'branding' | 'audit'
+function BackupTab() {
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null)
+  const [importing, setImporting] = useState(false)
+  const [restoreEnv, setRestoreEnv] = useState(true)
+  const fileRef = useRef<HTMLInputElement>(null)
 
-const VALID_TABS: Tab[] = ['security', 'users', 'roles', 'github', 'mail', 'branding', 'audit']
+  async function download() {
+    setBusy(true); setMsg(null)
+    try {
+      const r = await fetch('/api/settings/config/export', { headers: authHeaders() })
+      if (!r.ok) throw new Error(`Export failed (${r.status})`)
+      const blob = await r.blob()
+      const cd = r.headers.get('Content-Disposition') || ''
+      const name = /filename="([^"]+)"/.exec(cd)?.[1] || 'appcrane-backup.zip'
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove()
+      URL.revokeObjectURL(url)
+      setMsg({ ok: true, text: `Downloaded ${name}` })
+    } catch (e) {
+      setMsg({ ok: false, text: (e as Error).message })
+    } finally { setBusy(false) }
+  }
+
+  async function doImport(file: File) {
+    if (!confirm(
+      `Import "${file.name}"?\n\nThis REPLACES the current database` +
+      (restoreEnv ? ' and .env' : '') + ' with the backup, then restarts the server. ' +
+      'The current config is copied to a pre-import-<timestamp> folder first. Continue?'
+    )) { if (fileRef.current) fileRef.current.value = ''; return }
+    setImporting(true); setMsg(null)
+    try {
+      const fd = new FormData()
+      fd.append('file', file)
+      const r = await fetch(`/api/settings/config/import?restore_env=${restoreEnv ? '1' : '0'}`, {
+        method: 'POST', headers: authHeaders(), body: fd,
+      })
+      const data = await r.json().catch(() => ({}))
+      if (!r.ok) throw new Error(data?.error?.message || `Import failed (${r.status})`)
+      setMsg({ ok: true, text: (data.message || 'Imported.') + ' Wait ~10s, then refresh.' })
+    } catch (e) {
+      setMsg({ ok: false, text: (e as Error).message })
+    } finally {
+      setImporting(false)
+      if (fileRef.current) fileRef.current.value = ''
+    }
+  }
+
+  return (
+    <div className="settings-section">
+      <h2>Backup &amp; Restore</h2>
+      <p className="settings-hint">
+        Package the whole AppCrane configuration into one zip: the database (apps, users,
+        settings, encrypted env vars, roles), the <code>.env</code> (including the
+        <code> ENCRYPTION_KEY</code> needed to decrypt secrets), and app icons. Use it to
+        back up or to stand the platform back up on a fresh host. Per-app <code>/data</code>
+        volumes are NOT included (that's app data, not config).
+      </p>
+      <p className="settings-hint" style={{ color: 'var(--yellow)' }}>
+        ⚠ The backup contains the <code>ENCRYPTION_KEY</code> and every encrypted secret. Store it somewhere safe.
+      </p>
+
+      <h3>Export</h3>
+      <button className="btn" onClick={download} disabled={busy}>
+        {busy ? 'Packaging…' : '⬇ Download config backup (.zip)'}
+      </button>
+
+      <h3 style={{ marginTop: 20 }}>Import</h3>
+      <p className="settings-hint">
+        Restores a backup onto this host. <b>Destructive</b> — replaces the live database, then
+        restarts. The current config is saved to a <code>pre-import-&lt;timestamp&gt;</code> folder first.
+      </p>
+      <label style={{ display: 'block', margin: '6px 0' }}>
+        <input type="checkbox" checked={restoreEnv} onChange={e => setRestoreEnv(e.target.checked)} />
+        {' '}Also restore <code>.env</code> (ENCRYPTION_KEY + platform secrets). Leave on when moving to a fresh host.
+      </label>
+      <input ref={fileRef} type="file" accept=".zip" style={{ display: 'none' }}
+        onChange={e => { const f = e.target.files?.[0]; if (f) doImport(f) }} />
+      <button className="btn" style={{ background: 'var(--red)', color: '#fff' }}
+        onClick={() => fileRef.current?.click()} disabled={importing}>
+        {importing ? 'Importing…' : '⬆ Import backup (replaces config + restarts)'}
+      </button>
+
+      {msg && <p style={{ color: msg.ok ? 'var(--green)' : 'var(--red)', marginTop: 12 }}>{msg.text}</p>}
+    </div>
+  )
+}
+
+type Tab = 'security' | 'users' | 'roles' | 'github' | 'mail' | 'backup' | 'branding' | 'audit'
+
+const VALID_TABS: Tab[] = ['security', 'users', 'roles', 'github', 'mail', 'backup', 'branding', 'audit']
 
 function getTab(): Tab {
   const hash = window.location.hash.replace('#', '') as Tab
@@ -914,6 +1003,9 @@ export function Settings() {
       </div>
       <div style={{ display: tab === 'mail' ? 'block' : 'none' }}>
         <MailTab />
+      </div>
+      <div style={{ display: tab === 'backup' ? 'block' : 'none' }}>
+        <BackupTab />
       </div>
       {/* v2.6.9: skills tab removed from Settings — now top-level /skills */}
       <div style={{ display: tab === 'branding' ? 'block' : 'none' }}>

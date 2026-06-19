@@ -16,7 +16,7 @@ function asciiOnly(s: string): string {
   return s.replace(/[^\x20-\x7E]/g, '').trim()
 }
 
-function authHeaders(): Record<string, string> {
+export function authHeaders(): Record<string, string> {
   const key = asciiOnly(localStorage.getItem('cc_api_key') || '')
   if (key) return { 'X-API-Key': key }
   const bearer = asciiOnly(localStorage.getItem('cc_identity_token') || '')
