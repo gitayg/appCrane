@@ -933,11 +933,12 @@ function BackupTab() {
     <div className="settings-section">
       <h2>Backup &amp; Restore</h2>
       <p className="settings-hint">
-        Package the whole AppCrane configuration into one zip: the database (apps, users,
+        Package the whole AppCrane setup into one zip: the database (apps, users,
         settings, encrypted env vars, roles), the <code>.env</code> (including the
-        <code> ENCRYPTION_KEY</code> needed to decrypt secrets), and app icons. Use it to
-        back up or to stand the platform back up on a fresh host. Per-app <code>/data</code>
-        volumes are NOT included (that's app data, not config).
+        <code> ENCRYPTION_KEY</code> needed to decrypt secrets), app icons, and every
+        app's persistent <code>/data</code> volume. Use it to back up or to stand the
+        platform back up on a fresh host. App <b>code</b> is not included (it redeploys
+        from GitHub), nor anything OS-level.
       </p>
       <p className="settings-hint" style={{ color: 'var(--yellow)' }}>
         ⚠ The backup contains the <code>ENCRYPTION_KEY</code> and every encrypted secret. Store it somewhere safe.

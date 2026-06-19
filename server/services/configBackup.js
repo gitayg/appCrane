@@ -63,14 +63,27 @@ export function exportConfig(version) {
   const hasEnv = existsSync(envPath());
   if (hasEnv) zip.addLocalFile(envPath(), '', '.env');
 
-  // 3. App tile icons.
+  // 3. Per-app: tile icons + the persistent /data volume for each env. We do
+  //    NOT back up the app's code or build artifacts (the `releases/` dirs) —
+  //    that's redeployable from GitHub — nor anything OS-level. Just config +
+  //    the data files an app would lose on a fresh host.
+  let dataApps = 0;
   const appsDir = join(dataDir(), 'apps');
   if (existsSync(appsDir)) {
     for (const slug of readdirSync(appsDir)) {
+      const appDir = join(appsDir, slug);
       let files = [];
-      try { files = readdirSync(join(appsDir, slug)); } catch (_) { continue; }
+      try { files = readdirSync(appDir); } catch (_) { continue; }
       for (const f of files) {
-        if (ICON_RE.test(f)) zip.addLocalFile(join(appsDir, slug, f), `icons/${slug}`);
+        if (ICON_RE.test(f)) zip.addLocalFile(join(appDir, f), `icons/${slug}`);
+      }
+      // The container's /data is mounted from <slug>/<env>/shared/data.
+      for (const env of ['sandbox', 'production']) {
+        const dataPath = join(appDir, env, 'shared', 'data');
+        if (existsSync(dataPath)) {
+          zip.addLocalFolder(dataPath, `appdata/${slug}/${env}`);
+          dataApps++;
+        }
       }
     }
   }
@@ -85,12 +98,12 @@ export function exportConfig(version) {
     version: version || 'unknown',
     exported_at: new Date().toISOString(),
     crane_domain: process.env.CRANE_DOMAIN || null,
-    includes: ['deployhub.db', ...(hasEnv ? ['.env'] : []), 'icons'],
+    includes: ['deployhub.db', ...(hasEnv ? ['.env'] : []), 'icons', 'appdata'],
     counts,
   };
   zip.addFile(MANIFEST, Buffer.from(JSON.stringify(manifest, null, 2)));
 
-  log.info(`[config-backup] exported (apps=${counts.apps}, users=${counts.users}, env=${hasEnv})`);
+  log.info(`[config-backup] exported (apps=${counts.apps}, users=${counts.users}, env=${hasEnv}, data-volumes=${dataApps})`);
   return { buffer: zip.toBuffer(), manifest };
 }
 
@@ -145,19 +158,35 @@ export function importConfig(buffer, opts = {}) {
     if (envEntry) { writeFileSync(envPath(), envEntry.getData()); envRestored = true; }
   }
 
-  // Icons — guard against path traversal in the zip entry names.
-  let icons = 0;
-  for (const e of zip.getEntries()) {
-    if (e.isDirectory || !e.entryName.startsWith('icons/')) continue;
-    const rel = e.entryName.slice('icons/'.length);
-    if (!rel || rel.includes('..') || rel.startsWith('/')) continue;
-    const dest = resolve(join(dataDir(), 'apps', rel));
-    if (!dest.startsWith(resolve(join(dataDir(), 'apps')) + '/')) continue;
+  // Restore everything under DATA_DIR/apps, with path-traversal guards:
+  //   icons/<slug>/<file>            -> apps/<slug>/<file>
+  //   appdata/<slug>/<env>/<path...> -> apps/<slug>/<env>/shared/data/<path...>
+  const appsRoot = resolve(join(dataDir(), 'apps'));
+  const writeUnderApps = (relParts, data) => {
+    const dest = resolve(join(appsRoot, ...relParts));
+    if (dest !== appsRoot && !dest.startsWith(appsRoot + '/')) return false;
     mkdirSync(dirname(dest), { recursive: true });
-    writeFileSync(dest, e.getData());
-    icons++;
+    writeFileSync(dest, data);
+    return true;
+  };
+
+  let icons = 0, dataFiles = 0;
+  for (const e of zip.getEntries()) {
+    if (e.isDirectory) continue;
+    const name = e.entryName;
+    if (name.includes('..')) continue;
+    if (name.startsWith('icons/')) {
+      const rel = name.slice('icons/'.length);
+      if (rel && writeUnderApps([rel], e.getData())) icons++;
+    } else if (name.startsWith('appdata/')) {
+      const segs = name.slice('appdata/'.length).split('/').filter(Boolean);
+      if (segs.length < 3) continue;                       // need slug / env / file
+      const [slug, env, ...rest] = segs;
+      if (env !== 'sandbox' && env !== 'production') continue;
+      if (writeUnderApps([slug, env, 'shared', 'data', ...rest], e.getData())) dataFiles++;
+    }
   }
 
-  log.warn(`[config-backup] IMPORTED backup from ${manifest.exported_at} (env=${envRestored}, icons=${icons}). Restart required. Pre-import copy at ${preDir}`);
-  return { manifest, envRestored, icons, preImportDir: preDir };
+  log.warn(`[config-backup] IMPORTED backup from ${manifest.exported_at} (env=${envRestored}, icons=${icons}, data-files=${dataFiles}). Restart required. Pre-import copy at ${preDir}`);
+  return { manifest, envRestored, icons, dataFiles, preImportDir: preDir };
 }

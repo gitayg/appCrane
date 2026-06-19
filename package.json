@@ -1,6 +1,6 @@
 {
   "name": "appcrane",
-  "version": "2.9.0",
+  "version": "2.9.1",
   "description": "AppCrane - Self-service app hosting and deployment.",
   "license": "PolyForm-Noncommercial-1.0.0",
   "type": "module",
