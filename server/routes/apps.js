@@ -442,7 +442,25 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
 
   const updates = {};
   if (name !== undefined) updates.name = name;
-  if (domain !== undefined) updates.domain = domain;
+  if (domain !== undefined) {
+    // v2.10.0: domain = a custom passthrough domain (served at root, no SSO,
+    // no topbar — the app does its own auth). Owner/admin only (it's a public
+    // exposure), validated so a bad value can't break the Caddyfile.
+    const globalAdmin = isAdmin(req.user);
+    const isOwner = roleForUserOnApp(req.user, app) === 'owner';
+    if (!globalAdmin && !isOwner) {
+      throw new AppError('Only the app owner can set a custom domain.', 403, 'FORBIDDEN');
+    }
+    try {
+      const { validateCustomDomain } = await import('../utils/customDomain.js');
+      updates.domain = validateCustomDomain(domain, process.env.CRANE_DOMAIN);
+    } catch (e) { throw new AppError(e.message, 400, 'VALIDATION'); }
+    // Reject if another app already claims this domain.
+    if (updates.domain) {
+      const clash = db.prepare('SELECT slug FROM apps WHERE lower(domain) = ? AND id != ?').get(updates.domain, app.id);
+      if (clash) throw new AppError(`Domain "${updates.domain}" is already used by app "${clash.slug}"`, 409, 'DOMAIN_TAKEN');
+    }
+  }
   if (description !== undefined) updates.description = description;
   if (category !== undefined) updates.category = category ? String(category).trim() : null;
   if (source_type !== undefined) updates.source_type = source_type;
@@ -592,7 +610,7 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
   // frame_ancestors and auth_mode change the per-app Caddyfile block — reload to apply.
   // auth_mode flips whether forward_auth runs at all; without a reload the new
   // setting wouldn't take effect on the live proxy.
-  if ('frame_ancestors' in updates || 'auth_mode' in updates || 'auth_bypass_paths' in updates) {
+  if ('frame_ancestors' in updates || 'auth_mode' in updates || 'auth_bypass_paths' in updates || 'domain' in updates) {
     await reloadCaddy().catch(e => log.warn(`Caddy reload after app meta update: ${e.message}`));
   }
 

@@ -3,6 +3,7 @@ import { getPortsForSlot } from './portAllocator.js';
 import { isLinux } from './platform.js';
 import log from '../utils/logger.js';
 import { parseBypassPaths } from '../utils/authBypassPaths.js';
+import { isValidDomainFormat } from '../utils/customDomain.js';
 
 const CADDY_ADMIN = process.env.CADDY_ADMIN_URL || 'http://localhost:2019';
 
@@ -271,6 +272,43 @@ export function generateCaddyfile() {
   caddyfile += `        }\n`;
   caddyfile += `    }\n`;
   caddyfile += `}\n`;
+
+  // ── Custom-domain passthrough apps (v2.10.0) ──────────────────────────
+  // When an app has `domain` set, serve it at the ROOT of that domain with NO
+  // forward_auth, NO topbar, NO path prefix — the app does its own auth, and
+  // AppCrane is just the deploy/ops layer. Maps to the PRODUCTION backend and
+  // is emitted only when prod is live. TLS is auto-provisioned by Caddy (ACME)
+  // for the domain — needs its DNS pointed at this host + ports 80/443 open.
+  // The /<slug> path under CRANE_DOMAIN stays (admin/ops access).
+  //
+  // We still strip any incoming X-AppCrane-* so a client can't smuggle forged
+  // platform identity into an app that does its own auth. The format is
+  // re-validated here so a bad DB value can't produce a broken Caddyfile
+  // (Caddy `adapt` would refuse the reload anyway, but better to skip cleanly).
+  const IDENTITY_STRIP = [
+    'X-AppCrane-User', 'X-AppCrane-User-Id', 'X-AppCrane-User-Email',
+    'X-AppCrane-User-Name', 'X-AppCrane-User-Role', 'X-AppCrane-App-Role',
+  ];
+  const emittedDomains = new Set([(craneDomain || '').toLowerCase()]);
+  for (const app of apps) {
+    const domain = (app.domain || '').trim().toLowerCase();
+    if (!domain) continue;
+    if (!isValidDomainFormat(domain)) {
+      log.warn(`[caddy] app ${app.slug}: invalid custom domain "${app.domain}" — skipped`);
+      continue;
+    }
+    if (emittedDomains.has(domain)) {
+      log.warn(`[caddy] custom domain "${domain}" already used — skipping duplicate on ${app.slug}`);
+      continue;
+    }
+    if (!liveSet.has(`${app.id}:production`)) continue; // prod not live → no site block
+    emittedDomains.add(domain);
+    const ports = getPortsForSlot(app.slot);
+    caddyfile += `\n${domain} {\n`;
+    for (const h of IDENTITY_STRIP) caddyfile += `    request_header -${h}\n`;
+    caddyfile += `    reverse_proxy 127.0.0.1:${ports.prod_be}\n`;
+    caddyfile += `}\n`;
+  }
 
   return caddyfile;
 }

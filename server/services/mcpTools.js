@@ -1275,7 +1275,15 @@ const TOOLS = [
       }
       if (args.description !== undefined) updates.description = args.description ? String(args.description) : null;
       if (args.category    !== undefined) updates.category    = args.category    ? String(args.category)    : null;
-      if (args.domain      !== undefined) updates.domain      = args.domain      ? String(args.domain)      : null;
+      if (args.domain      !== undefined) {
+        // v2.10.0: custom passthrough domain (served at root, no SSO/topbar).
+        const { validateCustomDomain } = await import('../utils/customDomain.js');
+        updates.domain = validateCustomDomain(args.domain, process.env.CRANE_DOMAIN);
+        if (updates.domain) {
+          const clash = db.prepare('SELECT slug FROM apps WHERE lower(domain) = ? AND id != ?').get(updates.domain, app.id);
+          if (clash) throw new Error(`Domain "${updates.domain}" is already used by app "${clash.slug}"`);
+        }
+      }
       if (args.source_type !== undefined) updates.source_type = args.source_type;
       if (args.github_url  !== undefined) {
         if (args.github_url && !/^https?:\/\/(www\.)?github\.com\/[A-Za-z0-9_.\-]+\/[A-Za-z0-9_.\-]+(\.git)?\/?$/.test(args.github_url)) {
@@ -1324,9 +1332,9 @@ const TOOLS = [
 
       log.info(`MCP: app '${slug}' updated by user ${user.id}; fields=${keys.join(',')}`);
 
-      // frame_ancestors / auth_bypass_paths change the Caddyfile block
-      // (auth_mode is not exposed via this tool yet). Reload to apply.
-      if ('frame_ancestors' in updates || 'auth_bypass_paths' in updates) {
+      // frame_ancestors / auth_bypass_paths / domain change the Caddyfile.
+      // Reload to apply (a custom domain adds/removes a whole site block).
+      if ('frame_ancestors' in updates || 'auth_bypass_paths' in updates || 'domain' in updates) {
         try {
           const { reloadCaddy } = await import('./caddy.js');
           await reloadCaddy();
@@ -1378,6 +1386,10 @@ const TOOLS = [
           items: { type: 'string' },
           description: 'v2.7.27: array of path prefixes (e.g. ["/ws/local-runner"]) that bypass SSO forward_auth on this app. Requests under these prefixes reach the container with NO X-AppCrane-* identity headers — the app authenticates them itself. Caddy suppresses access logging for these paths to prevent query-string-token leakage. Pass [] or null to clear.',
         },
+        domain: {
+          type: 'string',
+          description: 'v2.10.0: custom domain (e.g. "raise.glick.run") that serves this app at the ROOT of that domain with NO AppCrane SSO and NO topbar — the app does its own auth. Maps to production. Requires the domain\'s DNS to point at this host (Caddy auto-provisions TLS). Pass "" or null to remove. The /<slug> path under the platform domain stays.',
+        },
       },
       required: ['slug'],
       additionalProperties: false,
@@ -1387,10 +1399,10 @@ const TOOLS = [
       const app = getAppForUser(user, args.slug);
       const globalAdmin = isAdmin(user);
       if (!globalAdmin && roleForUserOnApp(user, app) !== 'owner') {
-        throw new Error('Forbidden: only the app owner (or a global admin) can change category/visibility/auth_mode/auth_bypass_paths.');
+        throw new Error('Forbidden: only the app owner (or a global admin) can change category/visibility/auth_mode/auth_bypass_paths/domain.');
       }
-      if (args.category === undefined && args.visibility === undefined && args.auth_mode === undefined && args.auth_bypass_paths === undefined) {
-        throw new Error('Pass at least one of category, visibility, auth_mode, or auth_bypass_paths.');
+      if (args.category === undefined && args.visibility === undefined && args.auth_mode === undefined && args.auth_bypass_paths === undefined && args.domain === undefined) {
+        throw new Error('Pass at least one of category, visibility, auth_mode, auth_bypass_paths, or domain.');
       }
       const db = getDb();
       const updates = {};
@@ -1435,18 +1447,27 @@ const TOOLS = [
         updates.auth_bypass_paths = parsed && parsed.length > 0 ? JSON.stringify(parsed) : null;
       }
 
+      if (args.domain !== undefined) {
+        const { validateCustomDomain } = await import('../utils/customDomain.js');
+        updates.domain = validateCustomDomain(args.domain, process.env.CRANE_DOMAIN);
+        if (updates.domain) {
+          const clash = db.prepare('SELECT slug FROM apps WHERE lower(domain) = ? AND id != ?').get(updates.domain, app.id);
+          if (clash) throw new Error(`Domain "${updates.domain}" is already used by app "${clash.slug}"`);
+        }
+      }
+
       const keys = Object.keys(updates);
       const setClause = keys.map(k => `${k} = ?`).join(', ');
       db.prepare(`UPDATE apps SET ${setClause} WHERE id = ?`).run(...keys.map(k => updates[k]), app.id);
 
       // v2.7.22: auth_mode flips the Caddy block shape (forward_auth on/off);
-      // v2.7.28: auth_bypass_paths emits inner handle blocks. Reload Caddy
-      // when either changes. Other fields don't need a reload.
-      if ('auth_mode' in updates || 'auth_bypass_paths' in updates) {
+      // v2.7.28: auth_bypass_paths emits inner handle blocks; v2.10.0: domain
+      // adds/removes a whole custom-domain site. Reload Caddy when any change.
+      if ('auth_mode' in updates || 'auth_bypass_paths' in updates || 'domain' in updates) {
         try {
           const { reloadCaddy } = await import('./caddy.js');
           await reloadCaddy();
-        } catch (e) { log.warn(`Caddy reload after auth_mode/auth_bypass_paths change failed: ${e.message}`); }
+        } catch (e) { log.warn(`Caddy reload after meta change failed: ${e.message}`); }
       }
 
       log.info(`MCP: app '${app.slug}' meta updated by user ${user.id}; fields=${keys.join(',')}`);

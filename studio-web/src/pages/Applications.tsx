@@ -28,6 +28,7 @@ interface App {
   image_retention?: number
   frame_ancestors?: string | null
   auth_bypass_paths?: string[] | null
+  domain?: string | null
   owner?: { id: number; name: string; email: string } | null
   production?: { deploy?: { status?: string; version?: string }; health?: { status: string } }
   sandbox?: { deploy?: { status?: string; version?: string }; health?: { status: string } }
@@ -343,6 +344,25 @@ export function Applications() {
       if (r?.error) { alert('Failed: ' + (r.error.message || 'unknown')); return }
       const newVal = val.trim() || null
       setApps(prev => prev.map(a => a.slug === app.slug ? { ...a, frame_ancestors: newVal ?? undefined } : a))
+    } catch (e) {
+      alert('Failed: ' + (e as Error).message)
+    }
+  }
+
+  async function setCustomDomain(app: App) {
+    const help = "Custom domain for this app (served at the root of that domain).\n\n" +
+      "e.g. raise.glick.run\n\n" +
+      "The app is served there with NO AppCrane SSO and NO topbar - it does its\n" +
+      "own auth. Maps to PRODUCTION. Point the domain's DNS at this host; Caddy\n" +
+      "auto-provisions HTTPS. The crane.glick.run/" + app.slug + " path stays for ops.\n\n" +
+      "Leave blank to remove the custom domain."
+    const val = prompt(help, app.domain ?? '')
+    if (val === null) return
+    const next = val.trim() || null
+    try {
+      const r = await adminApi.put<{ app?: App; error?: { message?: string } }>(`/api/apps/${app.slug}`, { domain: next })
+      if (r?.error) { alert('Failed: ' + (r.error.message || 'unknown')); return }
+      setApps(prev => prev.map(a => a.slug === app.slug ? { ...a, domain: next } : a))
     } catch (e) {
       alert('Failed: ' + (e as Error).message)
     }
@@ -1168,6 +1188,13 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                             >🔓{abp.length ? ' ✓' : ''}</button>
                           )
                         })()}
+                        <button
+                          className="btn btn-xs"
+                          onClick={() => setCustomDomain(app)}
+                          title={app.domain
+                            ? `Custom domain: ${app.domain} (served at root, no SSO/topbar)`
+                            : 'Custom domain — serve this app on its own domain, bypassing AppCrane auth'}
+                        >🌐{app.domain ? ' ✓' : ''}</button>
                         {(app.source_type === 'github' || app.source_type === 'managed' || app.github_url) && (
                           <>
                             {app.github_url && (
