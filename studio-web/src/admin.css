@@ -603,9 +603,12 @@ textarea:focus { border-color: var(--accent); }
 .onboard-items { display: flex; flex-direction: column; gap: 6px; }
 .onboard-item { display: flex; align-items: center; gap: 10px; }
 .onboard-check {
-  width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--border);
+  width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--border);
   display: flex; align-items: center; justify-content: center; font-size: .7rem; flex-shrink: 0;
+  background: none; color: var(--text); padding: 0; cursor: pointer; font-family: inherit;
+  transition: border-color .12s, background .12s;
 }
+.onboard-check:hover { border-color: var(--accent); }
 .onboard-check.done { background: var(--green); border-color: var(--green); color: #fff; }
 .onboard-item-text { font-size: .85rem; }
 .onboard-item-text.done { color: var(--dim); text-decoration: line-through; }
