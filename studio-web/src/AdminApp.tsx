@@ -29,6 +29,15 @@ const SETTINGS_SUB = [
   { id: 'branding',   label: 'Style Guide', href: '#branding' },
   { id: 'audit',      label: 'Audit Log',   href: '#audit' },
 ]
+
+const DOCS_SUB = [
+  { id: 'connect',  label: 'Connect',        href: '#connect' },
+  { id: 'mcp',      label: 'MCP Tools',      href: '#mcp' },
+  { id: 'email',    label: 'App Email',      href: '#email' },
+  { id: 'rest',     label: 'REST API',       href: '#rest' },
+  { id: 'manifest', label: 'deployhub.json', href: '#manifest' },
+  { id: 'cli',      label: 'Operator CLI',   href: '#cli' },
+]
 // v2.6.9: `skills` moved to top-level /skills (visible to all admins,
 // not just platform_admin). Old /settings#skills bookmarks fall
 // through to Security via the valid-hash check below.
@@ -50,6 +59,17 @@ function SettingsRoute() {
   return (
     <Layout subItems={SETTINGS_SUB} activeSub={activeSub}>
       <Settings />
+    </Layout>
+  )
+}
+
+function DocsRoute() {
+  const hash = useHash()
+  const valid = ['connect', 'mcp', 'email', 'rest', 'manifest', 'cli']
+  const activeSub = valid.includes(hash) ? hash : 'connect'
+  return (
+    <Layout subItems={DOCS_SUB} activeSub={activeSub}>
+      <Docs />
     </Layout>
   )
 }
@@ -121,7 +141,7 @@ export function AdminApp() {
           <Route path="/skills"      element={<Layout><div className="container"><SkillsTab /></div></Layout>} />
           {/* Legacy /settings#skills bookmark → top-level /skills */}
           <Route path="/settings"    element={<SettingsRoute />} />
-          <Route path="/docs"        element={<Layout><Docs /></Layout>} />
+          <Route path="/docs"        element={<DocsRoute />} />
           <Route path="/app"         element={<Layout><AppManager /></Layout>} />
           <Route path="*"            element={<Navigate to="/dashboard" replace />} />
         </Routes>

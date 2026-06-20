@@ -108,25 +108,13 @@ const REST_FAMILIES: { name: string; rows: [string, string, string][] }[] = [
   ] },
 ];
 
-const NAV = [
-  ["connect", "Connect"],
-  ["mcp", "MCP Tools"],
-  ["email", "App Email"],
-  ["rest", "REST API"],
-  ["manifest", "deployhub.json"],
-  ["cli", "Operator CLI"],
-];
-
 export function Docs() {
   return (
     <div className="docs-page">
       <style>{`
 .docs-page { color: var(--text); line-height: 1.7; font-size: 15px; }
 .docs-page * { box-sizing: border-box; }
-.docs-layout { display: grid; grid-template-columns: 180px 1fr; gap: 32px; max-width: 1000px; margin: 0 auto; padding: 28px 20px 80px; }
-.docs-nav { position: sticky; top: 16px; align-self: start; display: flex; flex-direction: column; gap: 2px; }
-.docs-nav a { color: var(--dim); text-decoration: none; font-size: .85rem; padding: 4px 8px; border-radius: 5px; }
-.docs-nav a:hover { color: var(--accent); background: var(--surface); }
+.docs-layout { max-width: 820px; margin: 0 auto; padding: 28px 20px 80px; }
 .docs-page h1 { font-size: 1.9rem; margin: 0 0 4px; }
 .docs-page h1 span { color: var(--accent); }
 .docs-page .sub { color: var(--dim); margin-bottom: 32px; }
@@ -149,17 +137,11 @@ export function Docs() {
 .tool-row .td { color: var(--dim); }
 .docs-footer { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--border); color: var(--dim); font-size: .85rem; }
 @media (max-width: 768px) {
-  .docs-layout { grid-template-columns: 1fr; gap: 8px; }
-  .docs-nav { position: static; flex-direction: row; flex-wrap: wrap; margin-bottom: 8px; }
   .tool-row { grid-template-columns: 1fr; gap: 0; }
 }
       `}</style>
 
       <div className="docs-layout">
-        <nav className="docs-nav">
-          {NAV.map(([id, label]) => <a key={id} href={`#${id}`}>{label}</a>)}
-        </nav>
-
         <div>
           <h1>App<span>Crane</span> Docs</h1>
           <p className="sub">
