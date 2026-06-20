@@ -516,3 +516,37 @@ Rules and guarantees:
 - **From identity is platform-controlled.** Address is fixed
   (`aimi@opswat.com`); only the display name is configurable (per-app via
   `email_from_name`, else the Settings default). Apps cannot spoof the sender.
+
+## Custom domains — serve an app on its own domain, bypassing AppCrane
+
+Most apps live at `{{HOST}}/<slug>` behind AppCrane SSO. When an app should be
+its OWN product on its OWN domain — its own login, no AppCrane chrome — set a
+**custom domain**:
+
+```
+appcrane_set_app_meta(slug="raise", domain="raise.glick.run")
+# or appcrane_update_app, or the 🌐 button on the Applications page
+```
+
+What that does:
+
+- AppCrane emits a dedicated Caddy site for `raise.glick.run` that serves the
+  app's **production** container **at the root** — no `/slug` prefix.
+- **No AppCrane SSO** (`forward_auth` is not applied) and **no topbar** — the
+  app does its own user authentication. Incoming `X-AppCrane-*` headers are
+  stripped, so a client can't forge platform identity.
+- AppCrane stays the **deploy/ops layer**: GitHub, builds, upgrades, rollbacks,
+  env vars, logs all still work exactly as before. Only the public serving
+  changes.
+- The `{{HOST}}/<slug>` path **stays** for admin/ops access. If you don't want
+  SSO there either, also set `auth_mode: "headless"`.
+
+Operator prerequisites:
+
+- Point the domain's **DNS A/AAAA at this host**. Caddy auto-provisions HTTPS
+  (Let's Encrypt) for it on first request — ports 80/443 must be reachable.
+- The domain must be unique across apps; it can't be the AppCrane platform
+  domain itself.
+
+Owner/admin only. Maps to production; the sandbox stays at
+`{{HOST}}/<slug>-sandbox`.
