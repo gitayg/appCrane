@@ -670,6 +670,18 @@ export function Dashboard() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [onboardDismissed, setOnboardDismissed] = useState(!!localStorage.getItem(ONBOARD_KEY))
+  // v2.10.0: let users tick items off by hand (some can't be auto-detected,
+  // and the checklist was previously display-only — unclickable). Persisted.
+  const [onboardChecked, setOnboardChecked] = useState<string[]>(() => {
+    try { return JSON.parse(localStorage.getItem('cc_onboard_checked') || '[]') } catch { return [] }
+  })
+  function toggleOnboard(key: string) {
+    setOnboardChecked(prev => {
+      const next = prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key]
+      try { localStorage.setItem('cc_onboard_checked', JSON.stringify(next)) } catch { /* ignore */ }
+      return next
+    })
+  }
 
   const [frameModal, setFrameModal] = useState<FrameModal | null>(null)
   const [enhModal, setEnhModal] = useState<EnhModal | null>(null)
@@ -782,13 +794,15 @@ export function Dashboard() {
   const totalUsers = users.length
   const totalEnhReqs = enhancements.length
 
+  // `auto` is what we can detect; the user can also tick any item by hand
+  // (onboardChecked). Either marks it done.
   const onboardItems = [
-    { label: 'AppCrane is running', done: true },
-    { label: 'Create your first app', done: apps.length > 0, link: '/applications' },
-    { label: 'Invite a team member', done: users.length > 1, link: '/users-page' },
-    { label: 'Configure a health check', done: apps.some(a => (a.production?.health as any)?.config?.endpoint), link: '/applications' },
-    { label: 'Set environment variables', done: false, hint: 'Open an app row and click "env" to set variables' },
-  ]
+    { key: 'running', label: 'AppCrane is running', auto: true },
+    { key: 'create-app', label: 'Create your first app', auto: apps.length > 0, link: '/applications' },
+    { key: 'invite', label: 'Invite a team member', auto: users.length > 1, link: '/users-page' },
+    { key: 'health', label: 'Configure a health check', auto: apps.some(a => (a.production?.health as any)?.config?.endpoint), link: '/applications' },
+    { key: 'env', label: 'Set environment variables', auto: false, hint: 'Open an app row and click "env" to set variables' },
+  ].map(i => ({ ...i, done: i.auto || onboardChecked.includes(i.key) }))
   const allOnboardDone = onboardItems.every(i => i.done)
   const showOnboard = !onboardDismissed && !allOnboardDone
 
@@ -818,9 +832,15 @@ export function Dashboard() {
             <div className="onboard-items">
               {onboardItems.map((item, i) => (
                 <div key={i} className="onboard-item">
-                  <div className={`onboard-check${item.done ? ' done' : ''}`}>
+                  <button
+                    type="button"
+                    className={`onboard-check${item.done ? ' done' : ''}`}
+                    onClick={() => toggleOnboard(item.key)}
+                    title={item.auto ? 'Auto-detected — click to override' : 'Click to mark done'}
+                    aria-pressed={item.done}
+                  >
                     {item.done && '✓'}
-                  </div>
+                  </button>
                   <span className={`onboard-item-text${item.done ? ' done' : ''}`}>
                     {item.link && !item.done ? (
                       <a href={item.link} style={{ color: 'inherit', textDecoration: 'underline' }}>{item.label}</a>
