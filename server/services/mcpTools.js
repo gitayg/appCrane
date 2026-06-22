@@ -2032,6 +2032,12 @@ const TOOLS = [
         message: args.message,
         branch:  args.branch || app.branch,
       });
+      // v2.10.2: record the SHA we just authored+pushed so the next deploy's
+      // supply-chain verify can compare the clone HEAD to THIS, not to GitHub's
+      // lagging branch-API HEAD (read-after-write race on the mirror push).
+      if (result?.commit?.sha && /^[0-9a-f]{40}$/.test(result.commit.sha)) {
+        getDb().prepare('UPDATE apps SET last_managed_push_sha = ? WHERE id = ?').run(result.commit.sha, app.id);
+      }
       log.info(`MCP: pushed ${result.files.length} file(s) to managed repo AMC_${app.slug} (commit ${result.commit.sha.slice(0, 7)}) by user ${user.id}`);
       return {
         app:     app.slug,
