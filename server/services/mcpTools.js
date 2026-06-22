@@ -1870,7 +1870,7 @@ const TOOLS = [
   {
     name: 'appcrane_create_managed_app',
     description:
-      'Create a new app using AppCrane\'s GitHub service-account — the platform creates a repo on the configured org/user, owns it, and the agent works against it through github_* tools without the end user ever needing their own PAT. Use this when the user does not have a GitHub account or does not want to deal with GitHub at all. Requires the platform admin to have configured the service-account in Settings → GitHub. Returns the same shape as appcrane_create_app, plus the auto-created repo metadata.',
+      'Create a new app using AppCrane\'s GitHub service-account — the platform creates a repo on the configured org/user, owns it, and the agent works against it through github_* tools without the end user ever needing their own PAT. Use this when the user does not have a GitHub account or does not want to deal with GitHub at all. Requires the platform admin to have configured the service-account in Settings → GitHub. Returns the same shape as appcrane_create_app, plus the auto-created repo metadata. IDEMPOTENT RECOVERY: if the slug already exists as a managed app but its AMC_ repo was never created (a half-created app from an earlier failure — push then returns REPO_NOT_FOUND), calling this again re-provisions the missing repo and returns { repaired: true } instead of erroring. So if a create attempt half-failed, just call it again with the same slug. Owner-or-admin to repair an existing one.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1895,17 +1895,48 @@ const TOOLS = [
       }
 
       const db = getDb();
-      if (db.prepare('SELECT id FROM apps WHERE slug = ?').get(slug)) {
-        throw new Error(`App slug '${slug}' already exists`);
+      const { createAppRepo, getServiceConfig } = await import('./githubService.js');
+      const cfg = getServiceConfig();
+      if (!cfg.enabled) throw new Error('GitHub service-account is disabled. Enable it in Settings → GitHub before using managed mode.');
+      if (!cfg.configured) throw new Error('GitHub service-account has no token. Configure it in Settings → GitHub before using managed mode.');
+
+      // v2.10.4: self-heal a half-created managed app. If an earlier attempt
+      // wrote the app row but never landed the AMC_ repo (e.g. it died on a
+      // 401 mid-provision), the app is stuck: create says "slug exists", push
+      // says REPO_NOT_FOUND, and there's no MCP delete. Re-calling this tool
+      // now RE-PROVISIONS the missing repo instead of erroring — idempotent
+      // recovery the agent can drive itself.
+      const existing = db.prepare('SELECT * FROM apps WHERE slug = ?').get(slug);
+      if (existing) {
+        if (existing.source_type !== 'managed') {
+          throw new Error(`App slug '${slug}' already exists (source_type='${existing.source_type}'). Pick a different slug.`);
+        }
+        if (!isAdmin(user) && roleForUserOnApp(user, existing) !== 'owner') {
+          throw new Error(`App slug '${slug}' already exists and you are not its owner.`);
+        }
+        let repaired;
+        try {
+          repaired = await createAppRepo(slug, { description: args.description || existing.description || '' });
+        } catch (e) {
+          if (/REPO_EXISTS/.test(e.message)) {
+            throw new Error(`App '${slug}' already exists and its AMC_ repo is provisioned — nothing to repair. Use appcrane_push_to_managed_app + appcrane_deploy.`);
+          }
+          throw new Error(`Failed to re-provision repo for '${slug}': ${e.message}`);
+        }
+        db.prepare("UPDATE apps SET github_url = ?, branch = COALESCE(NULLIF(branch, ''), ?), source_type = 'managed' WHERE id = ?")
+          .run(repaired.html_url, repaired.default_branch || 'main', existing.id);
+        log.info(`MCP: repaired half-created managed app '${slug}' — re-provisioned ${repaired.full_name || repaired.name} by user ${user.id}`);
+        return {
+          app: slug,
+          repaired: true,
+          repo: { name: repaired.name, html_url: repaired.html_url, default_branch: repaired.default_branch },
+          next: `Repo (re)provisioned. Next: appcrane_push_to_managed_app slug="${slug}" files=[…], then appcrane_deploy slug="${slug}" env="sandbox".`,
+        };
       }
 
       // Create the GitHub repo first — if this fails (token misconfigured,
       // owner is wrong, slug collides), bail before touching the DB so we
       // don't leave half-baked apps behind.
-      const { createAppRepo, getServiceConfig } = await import('./githubService.js');
-      const cfg = getServiceConfig();
-      if (!cfg.enabled) throw new Error('GitHub service-account is disabled. Enable it in Settings → GitHub before using managed mode.');
-      if (!cfg.configured) throw new Error('GitHub service-account has no token. Configure it in Settings → GitHub before using managed mode.');
 
       let repo;
       try {
