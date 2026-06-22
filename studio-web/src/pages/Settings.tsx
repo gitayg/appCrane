@@ -717,13 +717,42 @@ function GithubTab() {
           {' '}<code style={{ fontFamily: 'monospace', fontSize: '.78rem' }}>AMC_</code> (AppCrane-Managed-Code) so the
           {' '}PAT can be scoped accordingly:
           <ul style={{ margin: '6px 0 0 18px', padding: 0, color: 'var(--dim)' }}>
-            <li><strong>Fine-grained PAT (recommended)</strong>: select <em>"Only select repositories"</em> and pick the
-            {' '}<code style={{ fontFamily: 'monospace', fontSize: '.78rem' }}>AMC_*</code> repos. Permissions:
-            {' '}Contents <em>R/W</em>, Metadata <em>R</em>, Administration <em>R/W</em> (needed to create new repos).</li>
-            <li><strong>Dedicated org or sub-account</strong>: put the service account in its own GitHub org / user
-            {' '}that holds only AppCrane-managed repos. A classic PAT with <code>repo</code> scope is then bounded by
-            {' '}what the account itself owns. Easier to reason about; weaker isolation than fine-grained.</li>
+            <li><strong>Fine-grained PAT (recommended)</strong>: use a <strong>dedicated org/user</strong> as the resource
+            {' '}owner and grant <em>"All repositories"</em> — AppCrane creates the <code style={{ fontFamily: 'monospace', fontSize: '.78rem' }}>AMC_*</code> repos
+            {' '}on demand, so they don't exist yet to be hand-picked. Permissions: Administration <em>R/W</em> (create repos),
+            {' '}Contents <em>R/W</em> (push code), Metadata <em>R</em> (auto).</li>
+            <li><strong>Classic PAT</strong>: simpler — a token with the <code>repo</code> scope is bounded by what the
+            {' '}account owns. Put the service account in its own org/sub-account so that bound is just AppCrane's repos.
+            {' '}Weaker isolation than fine-grained.</li>
           </ul>
+        </div>
+
+        <div style={{
+          marginTop: 10, padding: '10px 12px',
+          background: 'var(--surface2, #232323)', border: '1px solid var(--border)',
+          borderRadius: 6, fontSize: '.82rem', color: 'var(--text)', lineHeight: 1.55,
+        }}>
+          <strong>How to create the token</strong>
+          <p style={{ margin: '4px 0 6px', color: 'var(--dim)' }}>Sign in to GitHub as the service account (or have an org admin do it), then:</p>
+          <div style={{ marginBottom: 8 }}>
+            <em style={{ color: 'var(--text)' }}>Fine-grained</em>
+            {' '}(<a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noreferrer" style={{ color: 'var(--accent)' }}>github.com/settings/personal-access-tokens/new</a>):
+            <ol style={{ margin: '4px 0 0 18px', padding: 0, color: 'var(--dim)' }}>
+              <li>Name it (e.g. "AppCrane managed repos"); set an <strong>expiration</strong> and a reminder — an expired PAT silently breaks managed deploys.</li>
+              <li><strong>Resource owner</strong> → the org/user that will own the <code style={{ fontFamily: 'monospace', fontSize: '.78rem' }}>AMC_*</code> repos.</li>
+              <li><strong>Repository access</strong> → <em>All repositories</em>.</li>
+              <li><strong>Repository permissions</strong> → Administration: <em>Read and write</em>, Contents: <em>Read and write</em>, Metadata: <em>Read-only</em> (auto).</li>
+              <li>Generate, copy the token, paste it below, and Save.</li>
+            </ol>
+          </div>
+          <div>
+            <em style={{ color: 'var(--text)' }}>Classic</em>
+            {' '}(<a href="https://github.com/settings/tokens/new" target="_blank" rel="noreferrer" style={{ color: 'var(--accent)' }}>github.com/settings/tokens/new</a>):
+            check the <code style={{ fontFamily: 'monospace', fontSize: '.78rem' }}>repo</code> scope, set an expiration, generate, copy, paste below.
+          </div>
+          <p style={{ margin: '8px 0 0', color: 'var(--dim)' }}>
+            Set the <strong>Owner</strong> field below to that same org/user. Then the New-App flow's "AppCrane manages my code" option creates and deploys repos under it.
+          </p>
         </div>
 
         <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '12px 16px', alignItems: 'center', marginTop: 16, maxWidth: 600 }}>
