@@ -109,6 +109,29 @@ export async function verifyCommitSha(app, releaseDir, branch, appendLog) {
     throw new Error(`supply-chain verify: local HEAD '${localSha}' is not a 40-char SHA`);
   }
 
+  // v2.10.2: managed apps — AppCrane authored the commit and pushed it to the
+  // AMC_* mirror, then deploys immediately. GitHub's branch-API HEAD is
+  // eventually-consistent and lags the push ~1s, so comparing the clone HEAD
+  // to a fresh GitHub query is a read-after-write race (false FAIL on the first
+  // deploy after every push). The external-tampering threat model doesn't apply
+  // here, so verify against the SHA we recorded at push time instead — race-free
+  // and still catches a genuinely-stale clone (clone HEAD != what we pushed).
+  if (app.source_type === 'managed') {
+    const expected = app.last_managed_push_sha;
+    if (!expected || !/^[0-9a-f]{40}$/.test(expected)) {
+      appendLog?.('Supply-chain verify: skipped (managed app, no recorded push SHA to compare).');
+      return { skipped: true, reason: 'managed-no-sha', localSha };
+    }
+    if (expected !== localSha) {
+      throw new Error(
+        `Supply-chain verify FAILED: managed clone HEAD ${localSha.slice(0, 12)}… does not match the last pushed commit ${expected.slice(0, 12)}…. ` +
+        `The clone is stale — re-run the deploy so it fetches the pushed commit.`
+      );
+    }
+    appendLog?.(`Supply-chain verify: OK (managed clone HEAD matches last pushed commit ${localSha.slice(0, 12)}).`);
+    return { skipped: false, localSha, remoteSha: expected, source: 'managed-pushed-sha' };
+  }
+
   const branchName = branch || app.branch || 'main';
   const url = `https://api.github.com/repos/${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.repo)}/branches/${encodeURIComponent(branchName)}`;
   const headers = {
