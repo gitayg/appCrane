@@ -224,7 +224,25 @@ export async function createAppRepo(slug, { description = '', autoInit = true } 
     has_projects: false,
   };
 
-  const repo = await apiFetch(path, { method: 'POST', body });
+  let repo;
+  try {
+    repo = await apiFetch(path, { method: 'POST', body });
+  } catch (e) {
+    // v2.10.5: 403/422 here = the token authenticated but isn't allowed to
+    // create repos (the most common managed-app setup failure). Surface an
+    // actionable message instead of GitHub's raw "Validation Failed" 422.
+    if (e?.status === 403 || e?.status === 422) {
+      const err = new Error(
+        `REPO_CREATE_FORBIDDEN: the GitHub service-account token authenticated but cannot create repositories on '${cfg.owner}' (GitHub ${e.status}). ` +
+        `Re-issue the token so it can create repos: a classic PAT with the 'repo' scope, OR a fine-grained PAT with ` +
+        `Administration: Read and write and '${cfg.owner}' as the resource owner. Set it at Settings → GitHub. (GitHub: ${e.message})`
+      );
+      err.status = e.status;
+      err.body = { code: 'REPO_CREATE_FORBIDDEN' };
+      throw err;
+    }
+    throw e;
+  }
 
   return {
     full_name:      repo.full_name,

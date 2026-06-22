@@ -530,7 +530,7 @@ function GithubTab() {
   const [svc, setSvc] = useState<GithubServiceConfig>({ owner: '', visibility: 'private', enabled: false, configured: false })
   const [svcToken, setSvcToken] = useState('')
   const [svcSaved, flashSvcSaved] = useFlash()
-  const [svcVerify, setSvcVerify] = useState<{ ok: boolean; login?: string; type?: string; scopes?: string | null; error?: string } | null>(null)
+  const [svcVerify, setSvcVerify] = useState<{ ok: boolean; login?: string; type?: string; scopes?: string | null; can_create_repos?: boolean | null; note?: string | null; error?: string } | null>(null)
   const [svcBusy, setSvcBusy] = useState(false)
 
   function loadServiceConfig() {
@@ -820,6 +820,16 @@ function GithubTab() {
                 {/* v2.6.11: warn when the token has full classic-PAT `repo` scope.
                     AppCrane only needs Contents + Metadata + Administration on
                     AMC_*-prefixed repos. `repo` is broader than that. */}
+                {svcVerify.can_create_repos === true && (
+                  <div style={{ marginTop: 6, color: 'var(--green)', fontSize: '.78rem' }}>✓ Can create repositories.</div>
+                )}
+                {/* v2.10.5: the load-bearing check — a token can authenticate
+                    but lack repo-creation permission (422 at create time). */}
+                {svcVerify.note && (
+                  <div style={{ marginTop: 6, color: svcVerify.can_create_repos === false ? 'var(--red)' : '#fbbf24', fontSize: '.78rem' }}>
+                    {svcVerify.can_create_repos === false ? '✗ ' : '⚠ '}{svcVerify.note}
+                  </div>
+                )}
                 {svcVerify.scopes && /\brepo\b/.test(svcVerify.scopes) && (
                   <div style={{ marginTop: 6, color: '#fbbf24', fontSize: '.78rem' }}>
                     ⚠ This is a classic PAT with full <code>repo</code> scope — broader than AppCrane needs.
