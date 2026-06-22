@@ -56,11 +56,33 @@ router.post('/verify', requirePlatformAdmin, async (_req, res) => {
     if (!r.ok) {
       return res.status(200).json({ ok: false, error: body.message || `HTTP ${r.status}` });
     }
+    // v2.10.5: authentication alone isn't enough — managed-app creation needs
+    // REPO-CREATION permission, and a token can authenticate without it (the
+    // 422-on-create trap). Assess capability so the operator learns here, not
+    // on the first create_managed_app.
+    //   - classic PAT → x-oauth-scopes header lists scopes; need 'repo'.
+    //   - fine-grained PAT → no scope header; capability (Administration:write)
+    //     can't be read non-destructively, so we warn rather than assert.
+    const scopes = r.headers.get('x-oauth-scopes');
+    const scopeList = scopes ? scopes.split(',').map(s => s.trim()).filter(Boolean) : [];
+    const classicCanCreate = scopeList.includes('repo');
+    let can_create_repos = null;   // null = unknown (fine-grained)
+    let note = null;
+    if (scopes !== null) {
+      can_create_repos = classicCanCreate;
+      if (!classicCanCreate) {
+        note = "This classic token lacks the 'repo' scope — it can authenticate but NOT create repositories, so managed-app creation will fail with 422. Re-issue it with the 'repo' scope.";
+      }
+    } else {
+      note = "Fine-grained token (no scope header) — Verify can't confirm repo-creation without attempting it. Ensure it has Administration: Read and write with the owner as resource owner, or managed-app creation will 422.";
+    }
     res.json({
       ok:     true,
       login:  body.login,
       type:   body.type,
-      scopes: r.headers.get('x-oauth-scopes') || null,
+      scopes: scopes || null,
+      can_create_repos,
+      note,
     });
   } catch (e) {
     res.status(200).json({ ok: false, error: e.message || String(e) });
