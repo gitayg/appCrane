@@ -29,8 +29,16 @@ export function requireAuth(req, res, next) {
     // paths. Without this guard a leaked key would authenticate as its
     // issuer on every REST endpoint. (App-scoped keys dhk_app_* were
     // removed entirely in v2.2.12; see auth.js below.)
+    //
+    // v2.10.6: also allow the staged-upload endpoints (/api/files/staged*).
+    // That flow is the designed channel for large binaries an agent can't
+    // inline through the JSON-RPC tool args (appcrane_set_data_blob), but it
+    // was unreachable for MCP agents because of this restriction. It's
+    // low-blast-radius: staged files are owner-scoped, expire, and do nothing
+    // until appcrane_push_staged_file (itself MCP-only + per-app authz) lands
+    // them — which a leaked MCP key could already invoke.
     const path = req.baseUrl + (req.path || '') || req.originalUrl || '';
-    const isMcpPath = path.startsWith('/api/mcp');
+    const isMcpPath = path.startsWith('/api/mcp') || path.startsWith('/api/files/staged');
 
     // Personal MCP key (user-issued; format: dhk_mcp_<random>). Authenticates
     // AS the user but is MCP-only — accessibility resolves dynamically to
@@ -49,7 +57,7 @@ export function requireAuth(req, res, next) {
       if (row) {
         if (!row.active) return next(new AppError('Account is deactivated', 403, 'DEACTIVATED'));
         if (!isMcpPath) {
-          return next(new AppError('Personal MCP keys (dhk_mcp_*) are restricted to /api/mcp endpoints', 403, 'KEY_SCOPE_RESTRICTED'));
+          return next(new AppError('Personal MCP keys (dhk_mcp_*) are restricted to /api/mcp and /api/files/staged endpoints', 403, 'KEY_SCOPE_RESTRICTED'));
         }
         try { db.prepare("UPDATE user_mcp_keys SET last_used_at = datetime('now') WHERE id = ?").run(row.umk_id); } catch (_) {}
         req.user = {
