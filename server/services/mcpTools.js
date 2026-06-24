@@ -843,8 +843,8 @@ const TOOLS = [
   {
     name: 'appcrane_push_staged_file',
     description:
-      'Move a previously-staged file (uploaded via POST /api/files/staged) into a running container at a path under /app or /data. ' +
-      'Use this when the file is too large to send inline as a JSON arg — upload to the staging endpoint first, then call this with the returned token. ' +
+      'Move a previously-staged file into a running container at a path under /app or /data. THE WAY TO GET LARGE BINARIES (DMGs, datasets, bundles) into a container when they\'re too big to inline through appcrane_set_data_blob. ' +
+      'Two steps: (1) upload the bytes with a plain multipart POST to ' + '`' + 'curl -F file=@local.dmg -H "X-API-Key: <your dhk_mcp_ key>" https://<host>/api/files/staged' + '`' + ' — your MCP key IS allowed on this endpoint (v2.10.6+); it returns { token, sha256, size_bytes }. (2) Call this tool with that token and a dest path. ' +
       'The container must be running. Path is validated (no "..", must start with /app or /data). The staged blob is deleted on success.',
     inputSchema: {
       type: 'object',
