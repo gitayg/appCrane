@@ -657,6 +657,9 @@ app.get('/portal', forwardToApplications);
 app.get('/login-legacy', loginHandler);
 
 // Admin SPA — all admin routes served by the React admin-app bundle
+// Static marketing page for RAISEME (the managed AI-security app hosted on this platform).
+app.get('/raiseme', (req, res) => sendHtml(res, join(__dirname, '..', 'public', 'raiseme.html')));
+
 const adminSpa = join(__dirname, '..', 'docs', 'admin-app', 'index.html');
 app.get('/dashboard', (req, res) => sendHtml(res, adminSpa));
 app.get('/applications', (req, res) => sendHtml(res, adminSpa));
