@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RAISEME — Managed AI Security, on the device</title>
+<meta name="description" content="RAISEME is a thin guarded layer for how your organization (or family) uses AI. It reviews every prompt on the device — before it reaches the agent — and lets you coach, allow, or block by policy.">
+<style>
+  :root{
+    --bg:#080808; --bg2:#0e0e0e; --bg3:#141414; --border:#1c1c1c; --border2:#2a2a2a;
+    --text:#e8e8e0; --dim:#888; --dim2:#555; --blue:#4c8dff; --blue2:#9fc2ff; --green:#3ecf8e;
+    --mono:ui-monospace,'SF Mono','Fira Code',Consolas,monospace;
+    --sans:'Helvetica Neue',Arial,sans-serif;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:var(--bg);color:var(--text);font-family:var(--sans);line-height:1.6;-webkit-font-smoothing:antialiased}
+  a{color:var(--blue);text-decoration:none}
+  .wrap{max-width:920px;margin:0 auto;padding:0 24px}
+  nav{display:flex;align-items:center;gap:14px;height:60px;border-bottom:1px solid var(--border);font-size:13px}
+  nav .back{color:var(--dim)}
+  nav .sp{flex:1}
+  nav .cta{background:var(--blue);color:#fff;padding:7px 16px;border-radius:8px;font-weight:700}
+  .hero{padding:72px 0 56px;text-align:center}
+  .mark{margin:0 auto 22px;display:block}
+  .kick{color:var(--blue);font-family:var(--mono);font-size:12px;letter-spacing:3px;text-transform:uppercase}
+  h1{font-size:44px;font-weight:900;letter-spacing:-1px;margin:14px 0 12px;line-height:1.1}
+  h1 em{font-style:normal;color:var(--blue)}
+  .lead{color:var(--dim);font-size:18px;max-width:640px;margin:0 auto}
+  .btns{margin-top:30px;display:flex;gap:12px;justify-content:center;flex-wrap:wrap}
+  .btn{padding:12px 24px;border-radius:10px;font-weight:700;font-size:15px}
+  .btn.p{background:var(--blue);color:#fff}
+  .btn.s{border:1px solid var(--border2);color:var(--text)}
+  section{padding:46px 0;border-top:1px solid var(--border)}
+  h2{font-size:13px;font-family:var(--mono);letter-spacing:2px;text-transform:uppercase;color:var(--dim);margin-bottom:18px}
+  .big{font-size:22px;font-weight:700;line-height:1.45;letter-spacing:-.3px}
+  .big b{color:var(--blue)}
+  .steps{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:8px}
+  .step{background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:18px}
+  .step .n{font-family:var(--mono);color:var(--blue);font-size:12px}
+  .step h3{font-size:15px;margin:8px 0 5px}
+  .step p{color:var(--dim);font-size:13.5px}
+  .eds{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .ed{background:var(--bg2);border:1px solid var(--border);border-radius:14px;padding:22px}
+  .ed .tag{font-family:var(--mono);font-size:11px;letter-spacing:1px;color:var(--dim)}
+  .ed h3{font-size:20px;margin:6px 0 8px}
+  .ed p{color:var(--dim);font-size:14px;margin-bottom:14px}
+  .ed .free{display:inline-block;background:rgba(62,207,142,.14);border:1px solid rgba(62,207,142,.4);color:var(--green);font-weight:700;font-size:12px;padding:4px 12px;border-radius:14px}
+  ol.start{list-style:none;counter-reset:s;display:grid;gap:10px}
+  ol.start li{counter-increment:s;position:relative;padding-left:38px;color:var(--text);font-size:15px}
+  ol.start li::before{content:counter(s);position:absolute;left:0;top:0;width:26px;height:26px;border-radius:50%;background:var(--bg3);border:1px solid var(--border2);color:var(--blue);font-family:var(--mono);font-size:12px;display:grid;place-items:center}
+  ol.start small{color:var(--dim);font-size:13px}
+  footer{border-top:1px solid var(--border);padding:30px 0 50px;color:var(--dim2);font-size:12px;display:flex;gap:14px;flex-wrap:wrap}
+  @media(max-width:680px){h1{font-size:32px}.steps,.eds{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav>
+    <a class="back" href="/">← glick.run</a>
+    <span class="sp"></span>
+    <a href="https://raiseme.glick.run/login" style="color:var(--dim)">Sign in</a>
+    <a class="cta" href="https://raiseme.glick.run/signup">Get started →</a>
+  </nav>
+
+  <header class="hero">
+    <svg class="mark" width="60" height="60" viewBox="0 0 64 64" aria-hidden="true">
+      <rect width="64" height="64" rx="15" fill="#0B0E14"/>
+      <path d="M14,49 L32,33 L50,49" fill="none" stroke="#2F6FE0" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M14,38 L32,22 L50,38" fill="none" stroke="#4C8DFF" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M17,27 L32,14 L47,27" fill="none" stroke="#9FC2FF" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+    <div class="kick">RAISEME · Managed AI Security</div>
+    <h1>Responsible AI use,<br><em>enforced on the device</em></h1>
+    <p class="lead">A thin guarded layer for how your team — or your family — uses AI. Every prompt is reviewed locally, before it ever reaches the agent.</p>
+    <div class="btns">
+      <a class="btn p" href="https://raiseme.glick.run/signup">Create your account</a>
+      <a class="btn s" href="https://raiseme.glick.run/login">Sign in</a>
+    </div>
+  </header>
+
+  <section>
+    <h2>What it is</h2>
+    <p class="big">RAISEME sits quietly between your people and AI — a lightweight host app on each device that every prompt passes through <b>before it reaches the agent</b>. Instead of routing your data through another cloud proxy, the review happens <b>locally</b>, so content never leaves the machine. Your security team gets visibility through redacted, content-free signals — never the actual conversations.</p>
+  </section>
+
+  <section>
+    <h2>How it works</h2>
+    <div class="steps">
+      <div class="step"><div class="n">01</div><h3>Review on the device</h3><p>Each prompt to Claude is checked locally against your policy, in the moment.</p></div>
+      <div class="step"><div class="n">02</div><h3>Coach · allow · block</h3><p>Let it through, nudge the user, or stop it — per the policy you set centrally.</p></div>
+      <div class="step"><div class="n">03</div><h3>Central visibility</h3><p>A web console shows posture, inventory, alerts and compliance — without the content.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Two editions, one engine</h2>
+    <div class="eds">
+      <div class="ed">
+        <div class="tag">ENTERPRISE</div>
+        <h3>AI-security &amp; data-loss governance</h3>
+        <p>Stop secrets, keys and PII from leaking into AI; catch prompt injection and risky tools. Per-device posture, SSO (OIDC/SAML), and SOC 2 / ISO 27001 / NIST AI RMF compliance reports.</p>
+        <span class="free">Free for up to 200 users</span>
+      </div>
+      <div class="ed">
+        <div class="tag">FAMILIES</div>
+        <h3>Parental controls for Claude</h3>
+        <p>Reviews what kids send to — and get back from — Claude, on the device. Steps in gently and gives you a heads-up, not their transcripts. Signs of self-harm surface real help, not a lecture.</p>
+        <span class="free">Always free</span>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Get started in minutes</h2>
+    <ol class="start">
+      <li><b>Sign up</b> — create your account at <a href="https://raiseme.glick.run/signup">raiseme.glick.run/signup</a>.<br><small>Verify your email and your tenant is live. Free.</small></li>
+      <li><b>Sign in</b> to the console at <a href="https://raiseme.glick.run/login">raiseme.glick.run/login</a> — by password or SSO (OIDC/SAML).<br><small>Set your policy once, then create a one-click install link.</small></li>
+      <li><b>Install the app</b> — your people download it and it self-enrols on first launch.<br><small>Notarized &amp; self-updating — it just opens, no setup.</small></li>
+    </ol>
+    <div class="btns" style="justify-content:flex-start">
+      <a class="btn p" href="https://raiseme.glick.run/signup">Create your account</a>
+      <a class="btn s" href="https://raiseme.glick.run/login">Sign in</a>
+    </div>
+  </section>
+
+  <footer>
+    <span>RAISEME · on-device, privacy-preserving AI governance</span>
+    <span>·</span>
+    <a href="https://raiseme.glick.run">raiseme.glick.run</a>
+    <span>·</span>
+    <a href="/">Built on AppCrane</a>
+  </footer>
+</div>
+</body>
+</html>
