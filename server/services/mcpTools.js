@@ -2020,7 +2020,8 @@ const TOOLS = [
   {
     name: 'appcrane_push_to_managed_app',
     description:
-      'Push a batch of files to a managed app\'s AMC_<slug> repo, authenticated server-side via AppCrane\'s service-account credential. Use this — NOT github_push_files — for managed apps, because github_* tools authenticate with the caller\'s personal PAT, which has zero access to the service account\'s repos. Multiple files become a single commit. files: [{ path, content, encoding? }] where encoding defaults to "utf-8" (use "base64" for binaries like icons). Requires the app to already exist via appcrane_create_managed_app. v2.7.22: response now includes per-file `sha256` (hex) and decoded `bytes` length so you can verify integrity — compute the SHA-256 of the bytes you sent, compare to the server\'s echo, and fail loudly if they differ. Essential for binary files where inline-string truncation or trailing-byte issues would otherwise produce a silently-broken commit.',
+      'Push a batch of files to a managed app\'s AMC_<slug> repo, authenticated server-side via AppCrane\'s service-account credential. Use this — NOT github_push_files — for managed apps, because github_* tools authenticate with the caller\'s personal PAT, which has zero access to the service account\'s repos. Multiple files become a single commit. files: [{ path, content, encoding? }] where encoding defaults to "utf-8" (use "base64" for binaries like icons). Requires the app to already exist via appcrane_create_managed_app. v2.7.22: response now includes per-file `sha256` (hex) and decoded `bytes` length so you can verify integrity — compute the SHA-256 of the bytes you sent, compare to the server\'s echo, and fail loudly if they differ. Essential for binary files where inline-string truncation or trailing-byte issues would otherwise produce a silently-broken commit. ' +
+      'v2.10.7: for a large CODE file, do NOT inline it — upload the bytes over HTTP and commit by token. (1) ' + '`' + 'curl -F file=@big.js -H "X-API-Key: <your dhk_mcp_ key>" https://<host>/api/files/staged' + '`' + ' returns { token, sha256, size_bytes }. (2) Pass that file as { path, staged_token } instead of { path, content }. The server reads the staged bytes and commits them verbatim, so 100+ KB sources push reliably without the model having to emit the content (which is where inline truncation comes from). Per file, provide exactly one of content or staged_token. Staged tokens are owner-scoped and expiring.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2032,11 +2033,12 @@ const TOOLS = [
           items: {
             type: 'object',
             properties: {
-              path:     { type: 'string', description: 'Repo-relative path (no leading slash, no ..)' },
-              content:  { type: 'string', description: 'File content. For binary, base64-encode and set encoding="base64".' },
-              encoding: { type: 'string', enum: ['utf-8', 'base64'], description: 'Defaults to utf-8.' },
+              path:         { type: 'string', description: 'Repo-relative path (no leading slash, no ..)' },
+              content:      { type: 'string', description: 'Inline file content. For binary, base64-encode and set encoding="base64". Omit when using staged_token.' },
+              encoding:     { type: 'string', enum: ['utf-8', 'base64'], description: 'Defaults to utf-8. Ignored when staged_token is used (staged bytes are committed as-is).' },
+              staged_token: { type: 'string', description: 'Token from POST /api/files/staged. Commits the uploaded bytes verbatim — use instead of content for large code files. Exactly one of content / staged_token per file.' },
             },
-            required: ['path', 'content'],
+            required: ['path'],
             additionalProperties: false,
           },
         },
@@ -2058,8 +2060,38 @@ const TOOLS = [
       if (app.source_type !== 'managed') {
         throw new Error(`App '${app.slug}' is source_type='${app.source_type || 'github'}' — appcrane_push_to_managed_app only works for source_type='managed' apps. For regular GitHub apps, use the github_* MCP tools with your X-Github-Token.`);
       }
+      // v2.10.7: a file entry may carry { staged_token } instead of inline
+      // { content }. Resolve each token to its HTTP-uploaded bytes (POST
+      // /api/files/staged) so large code files commit reliably without the
+      // model emitting them verbatim. Same owner/expiry checks as
+      // appcrane_push_staged_file; consumed rows are reaped after the commit.
+      const db = getDb();
+      const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
+      const consumedTokens = [];
+      let resolvedFiles = args.files;
+      if (args.files.some((f) => typeof f.staged_token === 'string' && f.staged_token)) {
+        const { readFileSync } = await import('fs');
+        resolvedFiles = args.files.map((f) => {
+          const hasInline = typeof f.content === 'string';
+          const hasStaged = typeof f.staged_token === 'string' && f.staged_token.length > 0;
+          if (hasStaged && hasInline) throw new Error(`File '${f.path}': provide either content or staged_token, not both`);
+          if (!hasStaged && !hasInline) throw new Error(`File '${f.path}': must provide content or staged_token`);
+          if (!hasStaged) return { path: f.path, content: f.content, encoding: f.encoding };
+
+          const row = db.prepare('SELECT * FROM staged_files WHERE token = ?').get(f.staged_token);
+          if (!row)                    throw new Error(`File '${f.path}': staged file not found (token unknown or already swept)`);
+          if (row.user_id !== user.id) throw new Error(`File '${f.path}': staged file is owned by a different user`);
+          if (row.pushed_at)           throw new Error(`File '${f.path}': staged file was already consumed`);
+          if (row.expires_at < now)    throw new Error(`File '${f.path}': staged file expired at ${row.expires_at}`);
+          let buf;
+          try { buf = readFileSync(row.scratch_path); } catch (e) { throw new Error(`File '${f.path}': cannot read staged bytes: ${e.message}`); }
+          consumedTokens.push(row);
+          return { path: f.path, content: buf.toString('base64'), encoding: 'base64' };
+        });
+      }
+
       const { pushFilesToManagedRepo } = await import('./githubService.js');
-      const result = await pushFilesToManagedRepo(app.slug, args.files, {
+      const result = await pushFilesToManagedRepo(app.slug, resolvedFiles, {
         message: args.message,
         branch:  args.branch || app.branch,
       });
@@ -2067,9 +2099,19 @@ const TOOLS = [
       // supply-chain verify can compare the clone HEAD to THIS, not to GitHub's
       // lagging branch-API HEAD (read-after-write race on the mirror push).
       if (result?.commit?.sha && /^[0-9a-f]{40}$/.test(result.commit.sha)) {
-        getDb().prepare('UPDATE apps SET last_managed_push_sha = ? WHERE id = ?').run(result.commit.sha, app.id);
+        db.prepare('UPDATE apps SET last_managed_push_sha = ? WHERE id = ?').run(result.commit.sha, app.id);
       }
-      log.info(`MCP: pushed ${result.files.length} file(s) to managed repo AMC_${app.slug} (commit ${result.commit.sha.slice(0, 7)}) by user ${user.id}`);
+      // v2.10.7: mark consumed staged rows + free their scratch dirs now the
+      // commit landed (the 5-min sweeper would catch them at expiry anyway).
+      if (consumedTokens.length) {
+        const { rmSync } = await import('fs');
+        const { dirname } = await import('path');
+        for (const row of consumedTokens) {
+          try { rmSync(dirname(row.scratch_path), { recursive: true, force: true }); } catch (_) { /* sweeper retries */ }
+          try { db.prepare("UPDATE staged_files SET pushed_at = datetime('now') WHERE token = ?").run(row.token); } catch (_) {}
+        }
+      }
+      log.info(`MCP: pushed ${result.files.length} file(s) to managed repo AMC_${app.slug} (commit ${result.commit.sha.slice(0, 7)}) by user ${user.id}${consumedTokens.length ? ` [${consumedTokens.length} staged]` : ''}`);
       return {
         app:     app.slug,
         commit:  result.commit,
