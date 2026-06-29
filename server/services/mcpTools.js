@@ -396,7 +396,7 @@ const TOOLS = [
       'that a deploy actually landed the expected version, or to check if the app is responding. AppCrane hits the ' +
       'app\'s configured health endpoint (default /api/health) on the internal port directly — no Caddy, no SSO ' +
       'redirect — and returns the response status + body. ' +
-      'Defaults to sandbox; pass env="production" only when the user asks about prod.',
+      'Defaults to sandbox; pass stage="production" only when the user asks about prod.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -447,11 +447,11 @@ const TOOLS = [
   },
 
   {
-    name: 'appcrane_get_env',
+    name: 'appcrane_get_secret',
     description:
-      'Get all environment variables for an app, decrypted. Use this when the user asks about config, secrets, ' +
+      'Get all secrets (the app\'s encrypted environment variables) for an app, decrypted. Use this when the user asks about config, secrets, ' +
       'or when you need to verify what env vars are set. ' +
-      'Defaults to sandbox; pass env="production" only when the user explicitly says production. ' +
+      'Defaults to sandbox; pass stage="production" only when the user explicitly says production. ' +
       'Requires app-admin or AppCrane admin role — non-admin users get a permission error.',
     inputSchema: {
       type: 'object',
@@ -644,7 +644,7 @@ const TOOLS = [
         version: r.version,
         mode: r.mode,
         status: r.status,
-        next: `Use appcrane_get_logs slug="${app.slug}" env="production" to monitor the promotion.`,
+        next: `Use appcrane_get_logs slug="${app.slug}" stage="production" to monitor the promotion.`,
       };
     },
   },
@@ -843,7 +843,7 @@ const TOOLS = [
   {
     name: 'appcrane_push_staged_file',
     description:
-      'Move a previously-staged file into a running container at a path under /app or /data. THE WAY TO GET LARGE BINARIES (DMGs, datasets, bundles) into a container when they\'re too big to inline through appcrane_set_data_blob. ' +
+      'Move a previously-staged file into a running container at a path under /app or /data. THE WAY TO GET LARGE BINARIES (DMGs, datasets, bundles) into a container when they\'re too big to inline through appcrane_cp. ' +
       'Two steps: (1) upload the bytes with a plain multipart POST to ' + '`' + 'curl -F file=@local.dmg -H "X-API-Key: <your dhk_mcp_ key>" https://<host>/api/files/staged' + '`' + ' — your MCP key IS allowed on this endpoint (v2.10.6+); it returns { token, sha256, size_bytes }. (2) Call this tool with that token and a dest path. ' +
       'The container must be running. Path is validated (no "..", must start with /app or /data). The staged blob is deleted on success.',
     inputSchema: {
@@ -1123,7 +1123,7 @@ const TOOLS = [
       'Register a new app in AppCrane from a GitHub repository. Use this only after the user has explicitly ' +
       'confirmed they want to onboard a new app and provided a real github URL. ' +
       'Allocates ports, creates the data directories, configures Caddy routing, and starts health checks. ' +
-      'After this returns, call appcrane_set_env to set any required env vars, then appcrane_deploy to ship the first build. ' +
+      'After this returns, call appcrane_set_secret to set any required secrets, then appcrane_deploy to ship the first build. ' +
       'Requires the create-apps permission (global admins, or any role a platform admin granted at Settings → Roles).',
     inputSchema: {
       type: 'object',
@@ -1219,7 +1219,7 @@ const TOOLS = [
         app: { slug, name, github_url, branch },
         ports,
         urls,
-        next: `Set env vars with appcrane_set_env, then deploy with appcrane_deploy slug="${slug}" env="sandbox".`,
+        next: `Set secrets with appcrane_set_secret, then deploy with appcrane_deploy slug="${slug}" stage="sandbox".`,
       };
     },
   },
@@ -1930,7 +1930,7 @@ const TOOLS = [
           app: slug,
           repaired: true,
           repo: { name: repaired.name, html_url: repaired.html_url, default_branch: repaired.default_branch },
-          next: `Repo (re)provisioned. Next: appcrane_push_to_managed_app slug="${slug}" files=[…], then appcrane_deploy slug="${slug}" env="sandbox".`,
+          next: `Repo (re)provisioned. Next: appcrane_push_to_managed_app slug="${slug}" files=[…], then appcrane_deploy slug="${slug}" stage="sandbox".`,
         };
       }
 
@@ -2012,7 +2012,7 @@ const TOOLS = [
         },
         ports,
         urls,
-        next: `Push scaffolding via appcrane_push_to_managed_app slug="${slug}" files=[…], then appcrane_deploy slug="${slug}" env="sandbox". Do NOT use github_push_files for this repo — that's authed with the user's PAT and has zero access to the service account.`,
+        next: `Push scaffolding via appcrane_push_to_managed_app slug="${slug}" files=[…], then appcrane_deploy slug="${slug}" stage="sandbox". Do NOT use github_push_files for this repo — that's authed with the user's PAT and has zero access to the service account.`,
       };
     },
   },
@@ -2118,16 +2118,16 @@ const TOOLS = [
         branch:  result.branch,
         files:   result.files,
         message: result.message,
-        next:    `Files pushed. Next: appcrane_deploy slug="${app.slug}" env="sandbox" to ship.`,
+        next:    `Files pushed. Next: appcrane_deploy slug="${app.slug}" stage="sandbox" to ship.`,
       };
     },
   },
 
   {
-    name: 'appcrane_set_env',
+    name: 'appcrane_set_secret',
     description:
-      'Set or update an environment variable on an app. Encrypted at rest; only the running app process can read the plaintext. ' +
-      'Defaults to sandbox; require explicit env="production" only when the user asks. ' +
+      'Set or update a secret (an encrypted environment variable injected into the app). Encrypted at rest; only the running app process can read the plaintext. ' +
+      'Defaults to sandbox; require explicit stage="production" only when the user asks. ' +
       'App-admin or AppCrane admin only. Respects the caller\'s mcp_app_scope.',
     inputSchema: {
       type: 'object',
@@ -2164,9 +2164,9 @@ const TOOLS = [
   },
 
   {
-    name: 'appcrane_set_data_blob',
+    name: 'appcrane_cp',
     description:
-      'Write a blob directly to the app\'s persistent /data volume on the host — single hop, no container round-trip, no GitHub round-trip, no inline size ceiling. The bytes land at /data/apps/<slug>/<env>/shared/data/<path>, which is the SAME path the running container sees mounted as /data/<path>. Right tool for multi-MB datasets, large fixtures, or anything where appcrane_push_to_managed_app\'s tool-arg ceiling would force chunking. Returns the SHA-256 + byte count of what was stored so the caller can verify integrity. App-admin or owner of the app required. NEVER returns secrets in the response. Path must be repo-relative, no `..`, no leading slash.',
+      'Copy/upload a file straight into the app\'s persistent /data volume on the host (aliases: appcrane_upload, appcrane_set_data_blob) — single hop, no container round-trip, no GitHub round-trip, no inline size ceiling. The bytes land at /data/apps/<slug>/<env>/shared/data/<path>, which is the SAME path the running container sees mounted as /data/<path>. Right tool for multi-MB datasets, large fixtures, or anything where appcrane_push_to_managed_app\'s tool-arg ceiling would force chunking. Returns the SHA-256 + byte count of what was stored so the caller can verify integrity. App-admin or owner of the app required. NEVER returns secrets in the response. Path must be repo-relative, no `..`, no leading slash.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2298,6 +2298,36 @@ const TOOLS = [
   },
 ];
 
+// v2.11.0: AWS-friendly naming. The catalog the LLM sees presents the
+// sandbox/production dimension as `stage` (Copilot/eb vocabulary) instead of
+// `env`; callTool bridges `stage` back to the `env` handlers still read, so no
+// handler or schema-literal changes are needed. One transform covers all 14
+// env-taking tools, keeping the convention consistent from a single place.
+function stageifySchema(schema) {
+  if (!schema || !schema.properties || !schema.properties.env) return schema;
+  const properties = {};
+  for (const [k, v] of Object.entries(schema.properties)) {
+    if (k === 'env') {
+      properties.stage = { ...v, description: `${v.description ? v.description + ' ' : ''}Target stage (legacy alias: env).` };
+    } else {
+      properties[k] = v;
+    }
+  }
+  const required = Array.isArray(schema.required)
+    ? schema.required.map((r) => (r === 'env' ? 'stage' : r))
+    : schema.required;
+  return { ...schema, properties, required };
+}
+
+// Old tool names kept working after the v2.11.0 rename so existing agents and
+// saved scripts don't break — accepted on call, no longer advertised.
+const TOOL_NAME_ALIASES = {
+  appcrane_set_env:       'appcrane_set_secret',
+  appcrane_get_env:       'appcrane_get_secret',
+  appcrane_set_data_blob: 'appcrane_cp',
+  appcrane_upload:        'appcrane_cp',
+};
+
 export function listTools(user, userMcpKey = null) {
   // Stash userMcpKey on user so canUseTool's helpers (and future custom checks)
   // can see it.
@@ -2305,12 +2335,13 @@ export function listTools(user, userMcpKey = null) {
   return TOOLS.filter((t) => canUseTool(userView, t)).map((t) => ({
     name: t.name,
     description: t.description,
-    inputSchema: t.inputSchema,
+    inputSchema: stageifySchema(t.inputSchema),
   }));
 }
 
 export async function callTool(user, name, args, userMcpKey = null) {
-  const tool = TOOLS.find((t) => t.name === name);
+  const canonicalName = TOOL_NAME_ALIASES[name] || name;
+  const tool = TOOLS.find((t) => t.name === canonicalName);
   if (!tool) {
     auditMcpCall(user, name, args, new Error('unknown tool'));
     throw new Error(`Unknown tool: ${name}`);
@@ -2330,8 +2361,13 @@ export async function callTool(user, name, args, userMcpKey = null) {
   // Stash auth context on user so helpers (accessibleSlugsForUser,
   // getAppForUser) can constrain output.
   const userWithKey = userMcpKey ? { ...user, _mcpUserKey: userMcpKey } : user;
+  // v2.11.0: 'stage' is the canonical sandbox/production param; bridge it to the
+  // legacy 'env' the handlers still read (and vice-versa, so both callers work).
+  const callArgs = { ...(args || {}) };
+  if (callArgs.stage != null && callArgs.env == null) callArgs.env = callArgs.stage;
+  else if (callArgs.env != null && callArgs.stage == null) callArgs.stage = callArgs.env;
   try {
-    const result = await tool.handler(userWithKey, args || {});
+    const result = await tool.handler(userWithKey, callArgs);
     auditMcpCall(user, name, args, null);
     return {
       content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
@@ -2376,7 +2412,7 @@ export function getToolCatalog() {
   return TOOLS.map((t) => ({
     name: t.name,
     description: t.description,
-    inputSchema: t.inputSchema,
+    inputSchema: stageifySchema(t.inputSchema),
     requiredRole: t.requiredRole,
   }));
 }
