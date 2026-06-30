@@ -1018,13 +1018,43 @@ textarea:focus { border-color: var(--accent); }
 .launcher-collapsed .lnav-owner-ctrls { display: none; }
 .launcher-collapsed .lnav-item { justify-content: center; padding: 7px 0; gap: 0; }
 .lstage { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--bg, #0e0e0e); }
-.lstage-frame { display: flex; flex-direction: column; height: 100%; }
+.lstage-frame { display: flex; flex-direction: column; height: calc(100dvh - var(--topnav-h, 56px)); }
 .lstage-iframe { flex: 1; width: 100%; border: 0; background: #fff; }
-.lstage-empty { flex: 1; display: flex; align-items: center; justify-content: center; color: var(--dim); }
+.lstage-empty { min-height: calc(100dvh - var(--topnav-h, 56px)); display: flex; align-items: center; justify-content: center; color: var(--dim); }
 .lstage-empty-inner { text-align: center; }
 .lstage-empty-glyph { font-size: 2.4rem; margin-bottom: 8px; opacity: .8; }
 .lstage-empty-inner h3 { margin: 0 0 4px; font-size: 1rem; color: var(--text); }
 .lstage-empty-inner p { margin: 0; font-size: .85rem; }
+
+/* ── Apps merged into the main sidebar nav (v2.13.0) ── */
+.sidebar-apps { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
+.sidebar-apps-toggle {
+  display: flex; align-items: center; gap: 6px; width: 100%; padding: 6px 12px;
+  background: transparent; border: 0; cursor: pointer; color: var(--dim);
+  font-size: .68rem; text-transform: uppercase; letter-spacing: .06em; font-weight: 700;
+}
+.sidebar-apps-label { flex: 1; text-align: left; }
+.sidebar-apps-chev { font-size: .7rem; opacity: .8; flex-shrink: 0; }
+.sidebar-apps-cat {
+  display: flex; align-items: center; gap: 6px; width: 100%; padding: 4px 12px;
+  background: transparent; border: 0; cursor: pointer; color: var(--dim); font-size: .7rem;
+}
+.sidebar-apps-cat-name { flex: 1; text-align: left; }
+.sidebar-apps-count { opacity: .55; font-size: .66rem; }
+.sidebar-app-link {
+  display: flex; align-items: center; gap: 9px; padding: 6px 12px 6px 18px;
+  color: var(--text); text-decoration: none; border-left: 2px solid transparent;
+}
+.sidebar-app-link:hover { background: var(--surface2); }
+.sidebar-app-link.active { background: rgba(245,166,35,.12); border-left-color: var(--accent, #f5a623); }
+.sidebar-app-ico {
+  position: relative; flex-shrink: 0; width: 22px; height: 22px; border-radius: 5px;
+  background: var(--surface2); display: inline-flex; align-items: center; justify-content: center;
+  font-size: .62rem; font-weight: 700; overflow: visible;
+}
+.sidebar-app-ico img { width: 22px; height: 22px; border-radius: 5px; object-fit: cover; }
+.sidebar-app-ico .launcher-dot { top: -3px; right: -3px; }
+.sidebar-app-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: .82rem; }
 
 /* v2.6.7: Request-access tile variant. Subtle amber border so it reads
    as "discoverable, action required" rather than "broken". When the

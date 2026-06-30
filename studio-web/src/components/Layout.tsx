@@ -5,7 +5,26 @@ import { useAuth } from '../hooks/useAuth'
 import { adminApi } from '../adminApi'
 import { Icon } from './icons'
 
-interface NavItem { id: string; label: string; href: string; icon: ReactElement; external?: boolean; platformAdminOnly?: boolean; adminOnly?: boolean }
+interface NavItem { id: string; label: string; href: string; icon: ReactElement; external?: boolean; platformAdminOnly?: boolean; adminOnly?: boolean; ownerOrAdmin?: boolean }
+interface NavApp {
+  slug: string; name: string; category?: string; has_icon?: boolean
+  app_role?: 'admin' | 'owner' | 'user' | 'viewer' | 'none'
+  visibility?: string
+  production?: { health?: { status: string } }
+  sandbox?:    { health?: { status: string } }
+}
+function appDotClass(a: NavApp): string {
+  const prodOk = a.production?.health?.status === 'healthy'
+  const sandOk = a.sandbox?.health?.status === 'healthy'
+  if (prodOk) return 'launcher-dot launcher-dot-green'
+  if (sandOk) return 'launcher-dot launcher-dot-amber'
+  return 'launcher-dot launcher-dot-red'
+}
+function appInitials(name: string): string {
+  if (!name) return '?'
+  const parts = name.trim().split(/\s+/).slice(0, 2)
+  return parts.map(p => p[0]?.toUpperCase() || '').join('') || name[0].toUpperCase()
+}
 // v2.6.5: Settings is `platformAdminOnly`. Tier-2 admins still need
 // access to user management / audit log etc. at the API level — they
 // just shouldn't see the Settings entry in the sidebar.
@@ -19,6 +38,7 @@ interface NavItem { id: string; label: string; href: string; icon: ReactElement;
 const NAV: NavItem[] = [
   { id: 'dashboard',    label: 'Dashboard',    href: '/dashboard',    icon: <Icon.Dashboard /> },
   { id: 'applications', label: 'Applications', href: '/applications', icon: <Icon.Layers /> },
+  { id: 'manage',       label: 'Manage',       href: '/manage',       icon: <Icon.Key />, ownerOrAdmin: true },
   { id: 'requests',     label: 'Requests',     href: '/requests',     icon: <Icon.Lightbulb /> },
   { id: 'skills',       label: 'Skills',       href: '/skills',       icon: <Icon.Sparkles />, adminOnly: true },
   { id: 'mcp',          label: 'MCP',          href: '/mcp',          icon: <Icon.PlugZap /> },
@@ -52,6 +72,20 @@ export function Layout({ children, subItems, activeSub }: Props) {
   const [notifLoaded, setNotifLoaded] = useState(false)
   const [openRequests, setOpenRequests] = useState(0)
   const [mcpStatus, setMcpStatus] = useState<'unknown' | 'connected' | 'disconnected'>('unknown')
+  // v2.13.0: app list merged into the main nav. Accessible apps grouped by
+  // category; the whole section and each category collapse (persisted).
+  const [navApps, setNavApps] = useState<NavApp[]>([])
+  const [appsOpen, setAppsOpen] = useState(() => localStorage.getItem('cc_nav_apps_open') !== '0')
+  const [closedCats, setClosedCats] = useState<Set<string>>(() => {
+    try { return new Set(JSON.parse(localStorage.getItem('cc_nav_closed_cats') || '[]') as string[]) } catch { return new Set() }
+  })
+  const toggleAppsOpen = () => setAppsOpen(o => { const n = !o; try { localStorage.setItem('cc_nav_apps_open', n ? '1' : '0') } catch (_) {} ; return n })
+  const toggleCat = (cat: string) => setClosedCats(prev => {
+    const next = new Set(prev)
+    if (next.has(cat)) next.delete(cat); else next.add(cat)
+    try { localStorage.setItem('cc_nav_closed_cats', JSON.stringify([...next])) } catch (_) {}
+    return next
+  })
   // v2.5.6: AppCrane self-update auto-check. Today the version pill in the
   // sidebar only learns about updates on click — that's why people miss
   // them. We hit /api/version-check on mount + every 30 min so the pill
@@ -196,6 +230,24 @@ export function Layout({ children, subItems, activeSub }: Props) {
     }
   }, [notifOpen, notifLoaded])
 
+  // v2.13.0: load the accessible app list for the nav "Apps" section.
+  useEffect(() => {
+    adminApi.get<{ apps: NavApp[] }>('/api/apps')
+      .then(r => setNavApps((r?.apps || []).filter(a => a.app_role !== 'none' && a.visibility !== 'hidden')))
+      .catch(() => setNavApps([]))
+  }, [])
+
+  // Group nav apps by category; Uncategorized last.
+  const appGroups: [string, NavApp[]][] = (() => {
+    const m = new Map<string, NavApp[]>()
+    for (const a of navApps) {
+      const cat = (a.category || '').trim() || 'Uncategorized'
+      if (!m.has(cat)) m.set(cat, [])
+      m.get(cat)!.push(a)
+    }
+    return [...m.entries()].sort(([a], [b]) => a === 'Uncategorized' ? 1 : b === 'Uncategorized' ? -1 : a.localeCompare(b))
+  })()
+
   const currentPath = location.pathname
   const activeNav = NAV.find(n => n.href === currentPath)
   const activeNavId = activeNav?.id ?? ''
@@ -239,8 +291,11 @@ export function Layout({ children, subItems, activeSub }: Props) {
         <nav className="sidebar-nav">
           {NAV.filter(p => {
             const adminLike = userRole === 'admin' || userRole === 'platform_admin'
+            const isOwner = navApps.some(a => a.app_role === 'owner')
             if (p.platformAdminOnly && userRole !== 'platform_admin') return false
             if (p.adminOnly && !adminLike) return false
+            // v2.13.0: Manage is owner self-service — visible to app-owners and admins.
+            if (p.ownerOrAdmin && !adminLike && !isOwner) return false
             if (p.id === 'requests' && openRequests === 0 && !adminLike) return false
             return true
           }).map(p => (
@@ -301,6 +356,46 @@ export function Layout({ children, subItems, activeSub }: Props) {
               )}
             </div>
           ))}
+
+          {/* v2.13.0: merged launcher — accessible apps live in the main nav,
+              grouped by category. Section + each category collapse. Apps open
+              inline at /launch/:slug. Hidden in the icon-rail (collapsed) mode. */}
+          {!collapsed && navApps.length > 0 && (
+            <div className="sidebar-apps">
+              <button className="sidebar-apps-toggle" onClick={toggleAppsOpen} title="Apps">
+                <span className="sidebar-apps-label">Apps</span>
+                <span className="sidebar-apps-chev">{appsOpen ? '▾' : '▸'}</span>
+              </button>
+              {appsOpen && appGroups.map(([cat, list]) => {
+                const closed = closedCats.has(cat)
+                return (
+                  <div key={cat} className="sidebar-apps-group">
+                    <button className="sidebar-apps-cat" onClick={() => toggleCat(cat)}>
+                      <span className="sidebar-apps-chev">{closed ? '▸' : '▾'}</span>
+                      <span className="sidebar-apps-cat-name">{cat}</span>
+                      <span className="sidebar-apps-count">{list.length}</span>
+                    </button>
+                    {!closed && list.map(a => (
+                      <NavLink
+                        key={a.slug}
+                        to={`/launch/${a.slug}`}
+                        className={({ isActive }) => 'sidebar-app-link' + (isActive ? ' active' : '')}
+                        title={a.name}
+                      >
+                        <span className="sidebar-app-ico">
+                          {a.has_icon
+                            ? <img src={`/api/apps/${a.slug}/icon`} alt="" />
+                            : <span>{appInitials(a.name)}</span>}
+                          <span className={appDotClass(a)} />
+                        </span>
+                        <span className="sidebar-app-name">{a.name}</span>
+                      </NavLink>
+                    ))}
+                  </div>
+                )
+              })}
+            </div>
+          )}
         </nav>
 
         {/* Footer. v2.6.4: dropped the "Agent Guide" link — /agent-guide
