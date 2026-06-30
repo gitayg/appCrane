@@ -78,6 +78,7 @@ const STYLES = `
 .env button:last-child  { border-radius: 0 4px 4px 0; }
 .env button.active-prod { background: rgba(34,197,94,.15);  color: #22c55e; border-color: rgba(34,197,94,.4); }
 .env button.active-sand { background: rgba(249,115,22,.15); color: #f97316; border-color: rgba(249,115,22,.4); }
+.env button .ev { font-family: monospace; opacity: .7; font-weight: 400; margin-left: 5px; }
 button.btn, a.btn {
   background: transparent; color: var(--dim, #a1a1aa);
   border: 1px solid var(--border, #2a2d3a); border-radius: 5px;
@@ -199,13 +200,18 @@ export class CraneAppTopbar extends HTMLElement {
     }
 
     const iconHtml = iconUrl ? `<img class="icon" src="${esc(iconUrl)}" alt="">` : ''
-    const versionHtml = version
-      ? `<span class="version">${esc(version.startsWith('v') ? version : 'v' + version)}</span>`
+    const verPill = (v: string) => esc(v.startsWith('v') ? v : 'v' + v)
+    // When the switch is shown, each version lives inside its own button
+    // (Production v1.19 / Sandbox v1.20); the standalone pill is only for
+    // single-env apps that have no switcher.
+    const versionHtml = (version && !showSwitch)
+      ? `<span class="version">${verPill(version)}</span>`
       : ''
+    const verLabel = (v: string) => v ? ` <span class="ev">${verPill(v)}</span>` : ''
     const envHtml = showSwitch ? `
       <div class="env">
-        <button data-action="env-prod" class="${env === 'production' ? 'active-prod' : ''}">Production</button>
-        <button data-action="env-sand" class="${env === 'sandbox'    ? 'active-sand' : ''}">Sandbox</button>
+        <button data-action="env-prod" class="${env === 'production' ? 'active-prod' : ''}">Production${verLabel(prodVersion)}</button>
+        <button data-action="env-sand" class="${env === 'sandbox'    ? 'active-sand' : ''}">Sandbox${verLabel(sandVersion)}</button>
       </div>` : ''
     const evictHtml = showEvict
       ? `<button class="btn danger" data-action="evict" title="Tear down this app's shared container">🗑 Evict</button>`

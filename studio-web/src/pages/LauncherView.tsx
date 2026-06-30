@@ -1,16 +1,18 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { adminApi } from '../adminApi'
 
 /**
- * Launcher view (v2.5.0) — tile grid alternate to the Applications
- * table. Used as the default for end users (non-admin, non-owner) and
- * available as a toggle for admins. Reuses the same data source as the
- * Applications table; no manage/delete/env affordances are exposed.
+ * Launcher view — sidebar navigation (v2.12.0). Left rail lists the apps
+ * (grouped by category, searchable, with health dots); selecting one opens
+ * it inline in the content stage on the right, hosted by the same
+ * <crane-app-topbar> custom element used by the full-screen FrameOverlay
+ * (env switch, per-env version, back, refresh, fold). The rail collapses to
+ * an icon-only strip.
  *
- * Click a tile → opens the embedded FrameOverlay via the parent's
- * onOpen callback (same as the Dashboard's icon click). Health dot is
- * rendered green / red / yellow / gray, mirroring Applications.tsx
- * healthState() but inline so this view stays free of import churn.
+ * Reuses the same /api/apps data source as the Applications table. The
+ * ask/request/bug drawers from the full-screen FrameOverlay are not hosted
+ * here — those stay on the Manage path. Owner controls (category /
+ * visibility / auth-mode / users) hang off owned-app rows when expanded.
  */
 
 interface AppRow {
@@ -21,26 +23,35 @@ interface AppRow {
   has_icon?:   boolean
   category?:   string
   auth_mode?:  'authenticated' | 'headless'
-  // v2.6.7: per-user role from the caller's perspective. 'none' means
-  // the user can see the app exists but doesn't have an open-it
-  // permission yet — the Launcher renders a Request-access tile.
   app_role?:   'admin' | 'owner' | 'user' | 'viewer' | 'none'
   owner?:      { id: number; name: string; email: string } | null
-  production?: { health?: { status: string } }
-  sandbox?:    { health?: { status: string } }
+  github_url?: string
+  production?: { health?: { status: string }; deploy?: { version?: string } }
+  sandbox?:    { health?: { status: string }; deploy?: { version?: string } }
 }
 
 type AppMemberRole = 'none' | 'user' | 'admin' | 'owner'
 interface ModalUser { id: number; name: string; email: string | null; role: string; app_role: AppMemberRole }
 
+// The app currently mounted in the content stage.
+interface Stage {
+  slug: string
+  name: string
+  hasIcon: boolean
+  hasGithub: boolean
+  env: 'production' | 'sandbox'
+  url: string
+  prodUrl: string
+  sandUrl: string
+  prodVersion: string
+  sandVersion: string
+}
+
 interface Props {
-  onOpen: (slug: string, name: string, hasIcon: boolean) => void
-  /**
-   * Optional slot for a header-right control — used by Applications.tsx
-   * (admin-only) to render the Launcher/Manage view toggle inline with
-   * the page header. Without this slot the launcher renders no toggle;
-   * end users have no Manage view to switch to anyway.
-   */
+  /** Legacy full-screen open callback. Unused — the launcher now opens apps
+   *  inline in its own content stage. Kept so existing call sites compile. */
+  onOpen?: (slug: string, name: string, hasIcon: boolean) => void
+  /** Optional header-right control (e.g. the Launcher/Manage toggle). */
   headerRight?: React.ReactNode
 }
 
@@ -50,14 +61,6 @@ function initials(name: string): string {
   return parts.map(p => p[0]?.toUpperCase() || '').join('') || name[0].toUpperCase()
 }
 
-// v2.6.2: three-state availability semantics, matching what the user
-// actually cares about when deciding whether to click:
-//   green  — production is up; clicking opens prod
-//   amber  — production is NOT up but sandbox is; clicking opens sandbox
-//   red    — neither env is up; clicking is disabled
-// No more yellow-for-uncertain or gray-for-never-deployed — those all
-// collapse into red because the practical answer ("can I open this?")
-// is the same. Tooltip explains which env the click will hit.
 function availability(prodHealth?: string, sandHealth?: string): { dotCls: string; title: string; clickable: boolean } {
   const prodOk = prodHealth === 'healthy'
   const sandOk = sandHealth === 'healthy'
@@ -66,25 +69,21 @@ function availability(prodHealth?: string, sandHealth?: string): { dotCls: strin
   return       { dotCls: 'launcher-dot launcher-dot-red',    title: 'Neither environment is available',           clickable: false }
 }
 
-export function LauncherView({ onOpen, headerRight }: Props) {
+export function LauncherView({ headerRight }: Props) {
   const [apps, setApps] = useState<AppRow[]>([])
   const [search, setSearch] = useState('')
-  // v2.6.7: track which apps the user has already filed an access
-  // request for in this session so we don't fire duplicates on repeated
-  // clicks. Keyed by slug; value is true once submitted. Survives only
-  // for the current page — refreshing would clear, but that's fine
-  // because the access request lands in enhancement_requests on the
-  // server and admins see it regardless.
   const [requested, setRequested] = useState<Record<string, boolean>>({})
   const [requestingSlug, setRequestingSlug] = useState<string | null>(null)
-  // v2.7.9: owner self-service — manage members of an app you own from a
-  // focused modal. Mirrors the admin per-app Users modal but reachable by
-  // owners (server gates the endpoints to admin-or-owner).
   const [usersModalApp, setUsersModalApp] = useState<AppRow | null>(null)
   const [usersModalData, setUsersModalData] = useState<ModalUser[] | null>(null)
   const [usersSaving, setUsersSaving] = useState<Record<number, 'saving' | 'saved' | 'error'>>({})
-  // v2.7.24: filter the per-app users modal by name/email. Resets on close.
   const [usersFilter, setUsersFilter] = useState('')
+
+  // Sidebar-nav state.
+  const [stage, setStage] = useState<Stage | null>(null)
+  const [collapsed, setCollapsed] = useState(false)
+  const [folded, setFolded] = useState(false)
+  const topbarRef = useRef<HTMLElement>(null)
 
   useEffect(() => {
     adminApi.get<{ apps: AppRow[] }>('/api/apps')
@@ -92,14 +91,66 @@ export function LauncherView({ onOpen, headerRight }: Props) {
       .catch(() => setApps([]))
   }, [])
 
+  function openApp(app: AppRow) {
+    const prodUrl = `/${app.slug}`
+    const sandUrl = `/${app.slug}-sandbox`
+    const prodOk = app.production?.health?.status === 'healthy'
+    const sandOk = app.sandbox?.health?.status === 'healthy'
+    const useSand = !prodOk && sandOk
+    setFolded(false)
+    setStage({
+      slug: app.slug,
+      name: app.name,
+      hasIcon: !!app.has_icon,
+      hasGithub: !!app.github_url,
+      env: useSand ? 'sandbox' : 'production',
+      url: useSand ? sandUrl : prodUrl,
+      prodUrl, sandUrl,
+      prodVersion: app.production?.deploy?.version || '',
+      sandVersion: app.sandbox?.deploy?.version || '',
+    })
+  }
+
+  // The topbar is a Custom Element firing CustomEvents (not React synthetic),
+  // so wire a per-mount listener block. Re-binds when the open app changes.
+  useEffect(() => {
+    const el = topbarRef.current
+    if (!el || !stage) return
+
+    const onBack = () => setStage(null)
+    const onRefresh = () => {
+      // Cache-bust on refresh: clear the src, then remount with a fresh _ts so
+      // the app's HTML is refetched and new content-hashed assets load.
+      setStage(s => (s ? { ...s, url: '' } : s))
+      setTimeout(() => setStage(s => {
+        if (!s) return s
+        const base = s.env === 'sandbox' ? s.sandUrl : s.prodUrl
+        const sep = base.includes('?') ? '&' : '?'
+        return { ...s, url: `${base}${sep}_ts=${Date.now()}` }
+      }), 0)
+    }
+    const onEnv = (e: Event) => {
+      const env = (e as CustomEvent<{ env: 'production' | 'sandbox' }>).detail.env
+      setStage(s => (s ? { ...s, env, url: env === 'sandbox' ? s.sandUrl : s.prodUrl } : s))
+    }
+    const onFold = (e: Event) => setFolded((e as CustomEvent<{ folded: boolean }>).detail.folded)
+
+    el.addEventListener('crane-back',        onBack)
+    el.addEventListener('crane-refresh',     onRefresh)
+    el.addEventListener('crane-env-change',  onEnv)
+    el.addEventListener('crane-fold-toggle', onFold)
+    return () => {
+      el.removeEventListener('crane-back',        onBack)
+      el.removeEventListener('crane-refresh',     onRefresh)
+      el.removeEventListener('crane-env-change',  onEnv)
+      el.removeEventListener('crane-fold-toggle', onFold)
+    }
+  }, [stage?.slug])
+
   async function requestAccess(slug: string, name: string) {
     if (requested[slug] || requestingSlug) return
     setRequestingSlug(slug)
     try {
-      // Use the same shape docs/login.html used pre-v2.5.14 — server
-      // recognizes the "Access request for app …" prefix in
-      // appcrane_list_access_requests, so the request appears in the
-      // platform_admin's queue for approve/deny via MCP or dashboard.
       await adminApi.post('/api/enhancements', {
         message: `Access request for app "${name}"`,
         app_slug: slug,
@@ -112,9 +163,6 @@ export function LauncherView({ onOpen, headerRight }: Props) {
     }
   }
 
-  // v2.7.6: owners can re-categorize apps they own from the tile. Existing
-  // categories only — creating a NEW category is admin-only (enforced server
-  // side too). The option list is the distinct set across visible apps.
   const categories = Array.from(
     new Set(apps.map(a => (a.category || '').trim()).filter(Boolean)),
   ).sort((a, b) => a.localeCompare(b))
@@ -125,12 +173,11 @@ export function LauncherView({ onOpen, headerRight }: Props) {
     try {
       await adminApi.put(`/api/apps/${slug}`, { category: value })
     } catch (e) {
-      setApps(snapshot) // revert on failure (e.g. server rejects a new category)
+      setApps(snapshot)
       alert('Could not change category: ' + (e instanceof Error ? e.message : String(e)))
     }
   }
 
-  // v2.7.9: owners can change visibility from the tile.
   async function changeVisibility(slug: string, value: string) {
     const snapshot = apps
     setApps(list => list.map(a => (a.slug === slug ? { ...a, visibility: value } : a)))
@@ -142,9 +189,6 @@ export function LauncherView({ onOpen, headerRight }: Props) {
     }
   }
 
-  // v2.7.22: auth_mode is an exposure-changing toggle. Going `headless`
-  // removes AppCrane's auth on the entire app (anyone on the internet can
-  // hit it). Confirm before doing it.
   async function changeAuthMode(slug: string, name: string, value: string) {
     if (value === 'headless') {
       const ok = window.confirm(
@@ -168,7 +212,6 @@ export function LauncherView({ onOpen, headerRight }: Props) {
     }
   }
 
-  // Load the merged user+role list when the Users modal opens.
   useEffect(() => {
     if (!usersModalApp) { setUsersModalData(null); return }
     let cancelled = false
@@ -213,202 +256,191 @@ export function LauncherView({ onOpen, headerRight }: Props) {
            (a.category || '').toLowerCase().includes(q)
   })
 
-  return (
-    <div className="container launcher-container">
-      <div className="launcher-header">
-        <h2 style={{ margin: 0 }}>My Apps</h2>
-        {headerRight}
-        <input
-          type="text"
-          placeholder="Search…"
-          value={search}
-          onChange={e => setSearch(e.target.value)}
-          autoComplete="off"
-          className="launcher-search"
-        />
-      </div>
+  const groups = new Map<string, AppRow[]>()
+  for (const app of filtered) {
+    const cat = (app.category || '').trim() || 'Uncategorized'
+    if (!groups.has(cat)) groups.set(cat, [])
+    groups.get(cat)!.push(app)
+  }
+  const orderedCats = [...groups.keys()].sort((a, b) => {
+    if (a === 'Uncategorized') return 1
+    if (b === 'Uncategorized') return -1
+    return a.localeCompare(b)
+  })
 
-      {filtered.length === 0 ? (
-        <div className="launcher-empty">
-          {apps.length === 0
-            ? 'No apps available yet.'
-            : `No apps match "${search}".`}
+  return (
+    <div className={'launcher-shell' + (collapsed ? ' launcher-collapsed' : '')}>
+      <aside className="lnav">
+        <div className="lnav-top">
+          <div className="lnav-top-row">
+            <button
+              type="button"
+              className="lnav-collapse"
+              onClick={() => setCollapsed(c => !c)}
+              title={collapsed ? 'Expand sidebar' : 'Collapse to icons'}
+              aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            >{collapsed ? '»' : '«'}</button>
+            {!collapsed && (
+              <input
+                type="text"
+                placeholder="Search…"
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+                autoComplete="off"
+                className="lnav-search"
+              />
+            )}
+          </div>
+          {!collapsed && headerRight && <div className="lnav-top-actions">{headerRight}</div>}
         </div>
-      ) : (
-        // v2.6.1: group apps by category. Apps with no category fall into
-        // an "Uncategorized" bucket rendered last. Within a group the
-        // sort is whatever order the server returned; we don't re-sort
-        // alphabetically because the server already does.
-        (() => {
-          const groups = new Map<string, AppRow[]>()
-          for (const app of filtered) {
-            const cat = (app.category || '').trim() || 'Uncategorized'
-            if (!groups.has(cat)) groups.set(cat, [])
-            groups.get(cat)!.push(app)
-          }
-          // Stable category ordering: named groups alphabetical, Uncategorized last.
-          const orderedCats = [...groups.keys()]
-            .sort((a, b) => {
-              if (a === 'Uncategorized') return 1
-              if (b === 'Uncategorized') return -1
-              return a.localeCompare(b)
-            })
-          return orderedCats.map(cat => (
-            <section key={cat} className="launcher-category">
-              <h3 className="launcher-category-title">
-                {cat}
-                <span className="launcher-category-count">{groups.get(cat)!.length}</span>
-              </h3>
-              <div className="launcher-grid">
+
+        <div className="lnav-list">
+          {filtered.length === 0 ? (
+            !collapsed && (
+              <div className="lnav-empty-list">
+                {apps.length === 0 ? 'No apps available yet.' : `No apps match "${search}".`}
+              </div>
+            )
+          ) : (
+            orderedCats.map(cat => (
+              <div key={cat} className="lnav-group">
+                {!collapsed && (
+                  <div className="lnav-group-title">
+                    <span>{cat}</span>
+                    <span className="lnav-group-count">{groups.get(cat)!.length}</span>
+                  </div>
+                )}
                 {groups.get(cat)!.map(app => {
-                  // v2.6.7: three render modes:
-                  //   - app_role === 'none' → discoverable. Show
-                  //     Request-access tile. Don't fire onOpen.
-                  //   - app_role !== 'none' AND env available → normal
-                  //     tile, opens via onOpen
-                  //   - app_role !== 'none' AND no env available → tile
-                  //     disabled (the existing red-dot case)
-                  const canOpen = app.app_role && app.app_role !== 'none'
-                  if (!canOpen) {
-                    const alreadyRequested = !!requested[app.slug]
-                    const busy = requestingSlug === app.slug
+                  const iconNode = app.has_icon
+                    ? <img src={`/api/apps/${app.slug}/icon`} alt="" />
+                    : <span>{initials(app.name)}</span>
+
+                  if (app.app_role === 'none') {
+                    const already = !!requested[app.slug]
                     return (
                       <button
                         key={app.slug}
                         type="button"
-                        className={'launcher-tile launcher-tile-request' + (alreadyRequested ? ' launcher-tile-requested' : '')}
-                        onClick={() => { if (!alreadyRequested) requestAccess(app.slug, app.name) }}
-                        disabled={alreadyRequested || busy}
-                        title={alreadyRequested
-                          ? `Access requested — an admin will review`
-                          : `Request access to ${app.name}`}
+                        className={'lnav-item lnav-item-req' + (already ? ' is-requested' : '')}
+                        onClick={() => { if (!already) requestAccess(app.slug, app.name) }}
+                        title={already ? 'Access requested' : `Request access to ${app.name}`}
                       >
-                        <div className="launcher-tile-icon">
-                          {app.has_icon ? (
-                            <img src={`/api/apps/${app.slug}/icon`} alt="" />
-                          ) : (
-                            <span>{initials(app.name)}</span>
-                          )}
-                          <span className="launcher-dot launcher-dot-amber" title="No access — click to request" />
-                        </div>
-                        <div className="launcher-tile-name">{app.name}</div>
-                        {app.description && (
-                          <div className="launcher-tile-desc">{app.description}</div>
-                        )}
-                        <div className="launcher-tile-cta">
-                          {busy ? 'Sending…' : alreadyRequested ? '✓ Access requested' : '🔒 Request access'}
-                        </div>
-                        {/* v2.6.8 hover popover with the full description. CSS-only:
-                            hidden by default, shown on .launcher-tile:hover. The
-                            short version above stays line-clamped — this surfaces
-                            the rest on hover with no click required. Only renders
-                            when there's actually a description to show. */}
-                        {(app.description || app.owner) && (
-                          <div className="launcher-tile-tip" role="tooltip">
-                            {app.description}
-                            {app.owner && (
-                              <div className="launcher-tile-tip-owner">Owner: <b>{app.owner.name}</b></div>
-                            )}
-                          </div>
-                        )}
+                        <span className="lnav-ico">
+                          {iconNode}
+                          <span className="launcher-dot launcher-dot-amber" />
+                        </span>
+                        {!collapsed && <span className="lnav-name">{app.name}</span>}
+                        {!collapsed && <span className="lnav-req-badge">{already ? 'Requested' : 'Request'}</span>}
                       </button>
                     )
                   }
+
                   const avail = availability(app.production?.health?.status, app.sandbox?.health?.status)
-                  // v2.7.6/2.7.9: owners get inline controls under the tile —
-                  // category, visibility, and a Users button. The tile itself
-                  // is a <button>, so these can't nest inside it; wrap in a cell.
-                  const isOwner = app.app_role === 'owner'
-                  const tile = (
-                    <button
-                      type="button"
-                      className={'launcher-tile' + (!avail.clickable ? ' launcher-tile-disabled' : '')}
-                      onClick={() => { if (avail.clickable) onOpen(app.slug, app.name, !!app.has_icon) }}
-                      disabled={!avail.clickable}
-                      title={!avail.clickable ? avail.title : `Open ${app.name} — ${avail.title.toLowerCase()}`}
-                    >
-                      <div className="launcher-tile-icon">
-                        {app.has_icon ? (
-                          <img src={`/api/apps/${app.slug}/icon`} alt="" />
-                        ) : (
-                          <span>{initials(app.name)}</span>
-                        )}
-                        <span className={avail.dotCls} title={avail.title} />
-                      </div>
-                      <div className="launcher-tile-name">{app.name}</div>
-                      {app.description && (
-                        <div className="launcher-tile-desc">{app.description}</div>
-                      )}
-                      {/* v2.6.8: full-description hover popover. See note in
-                          the request-access tile above. v2.8.8: + owner line. */}
-                      {(app.description || app.owner) && (
-                        <div className="launcher-tile-tip" role="tooltip">
-                          {app.description}
-                          {app.owner && (
-                            <div className="launcher-tile-tip-owner">Owner: <b>{app.owner.name}</b></div>
-                          )}
-                        </div>
-                      )}
-                    </button>
-                  )
-                  if (!isOwner) return <div key={app.slug} className="launcher-tile-cell">{tile}</div>
+                  const isActive = stage?.slug === app.slug
                   return (
-                    <div key={app.slug} className="launcher-tile-cell">
-                      {tile}
-                      <div className="launcher-tile-owner-row">
-                        <select
-                          className="launcher-tile-ctrl"
-                          value={app.category ?? ''}
-                          onChange={e => changeCategory(app.slug, e.target.value)}
-                          title="Category — pick an existing one (only admins can create new categories)"
-                          aria-label={`Category for ${app.name}`}
-                        >
-                          <option value="">— no category —</option>
-                          {categories.map(c => <option key={c} value={c}>{c}</option>)}
-                        </select>
-                        <select
-                          className="launcher-tile-ctrl"
-                          value={app.visibility ?? 'private'}
-                          onChange={e => changeVisibility(app.slug, e.target.value)}
-                          title="Visibility"
-                          aria-label={`Visibility for ${app.name}`}
-                        >
-                          <option value="public">public</option>
-                          <option value="private">private</option>
-                          <option value="hidden">hidden</option>
-                        </select>
-                        <select
-                          className="launcher-tile-ctrl"
-                          value={app.auth_mode ?? 'authenticated'}
-                          onChange={e => changeAuthMode(app.slug, app.name, e.target.value)}
-                          title={app.auth_mode === 'headless'
-                            ? '⚠ HEADLESS — no AppCrane auth on this app; anyone can reach it.'
-                            : 'Auth mode — authenticated routes go through AppCrane SSO; headless bypasses auth entirely (telemetry / public webhooks / status pages).'}
-                          aria-label={`Auth mode for ${app.name}`}
-                          style={app.auth_mode === 'headless'
-                            ? { borderColor: 'var(--red, #ef4444)', color: 'var(--red, #ef4444)' }
-                            : undefined}
-                        >
-                          <option value="authenticated">SSO</option>
-                          <option value="headless">headless</option>
-                        </select>
-                      </div>
+                    <div key={app.slug} className="lnav-item-wrap">
                       <button
                         type="button"
-                        className="launcher-tile-ctrl launcher-tile-users-btn"
-                        onClick={() => setUsersModalApp(app)}
-                        title={`Manage users for ${app.name}`}
+                        className={'lnav-item' + (isActive ? ' active' : '') + (!avail.clickable ? ' disabled' : '')}
+                        onClick={() => { if (avail.clickable) openApp(app) }}
+                        disabled={!avail.clickable}
+                        title={!avail.clickable ? avail.title : `Open ${app.name} — ${avail.title.toLowerCase()}`}
                       >
-                        Users
+                        <span className="lnav-ico">
+                          {iconNode}
+                          <span className={avail.dotCls} title={avail.title} />
+                        </span>
+                        {!collapsed && <span className="lnav-name">{app.name}</span>}
                       </button>
+                      {!collapsed && app.app_role === 'owner' && (
+                        <div className="lnav-owner-ctrls">
+                          <select
+                            className="launcher-tile-ctrl"
+                            value={app.category ?? ''}
+                            onChange={e => changeCategory(app.slug, e.target.value)}
+                            title="Category"
+                            aria-label={`Category for ${app.name}`}
+                          >
+                            <option value="">— no category —</option>
+                            {categories.map(c => <option key={c} value={c}>{c}</option>)}
+                          </select>
+                          <select
+                            className="launcher-tile-ctrl"
+                            value={app.visibility ?? 'private'}
+                            onChange={e => changeVisibility(app.slug, e.target.value)}
+                            title="Visibility"
+                            aria-label={`Visibility for ${app.name}`}
+                          >
+                            <option value="public">public</option>
+                            <option value="private">private</option>
+                            <option value="hidden">hidden</option>
+                          </select>
+                          <select
+                            className="launcher-tile-ctrl"
+                            value={app.auth_mode ?? 'authenticated'}
+                            onChange={e => changeAuthMode(app.slug, app.name, e.target.value)}
+                            title={app.auth_mode === 'headless'
+                              ? '⚠ HEADLESS — no AppCrane auth on this app; anyone can reach it.'
+                              : 'Auth mode — SSO routes through AppCrane; headless bypasses auth entirely.'}
+                            aria-label={`Auth mode for ${app.name}`}
+                            style={app.auth_mode === 'headless'
+                              ? { borderColor: 'var(--red, #ef4444)', color: 'var(--red, #ef4444)' }
+                              : undefined}
+                          >
+                            <option value="authenticated">SSO</option>
+                            <option value="headless">headless</option>
+                          </select>
+                          <button
+                            type="button"
+                            className="launcher-tile-ctrl launcher-tile-users-btn"
+                            onClick={() => setUsersModalApp(app)}
+                            title={`Manage users for ${app.name}`}
+                          >Users</button>
+                        </div>
+                      )}
                     </div>
                   )
                 })}
               </div>
-            </section>
-          ))
-        })()
-      )}
+            ))
+          )}
+        </div>
+      </aside>
+
+      <main className="lstage">
+        {stage ? (
+          <div className="lstage-frame">
+            <crane-app-topbar
+              ref={topbarRef}
+              app-name={stage.name}
+              app-icon-url={stage.hasIcon ? `/api/apps/${stage.slug}/icon` : ''}
+              app-slug={stage.slug}
+              prod-version={stage.prodVersion}
+              sand-version={stage.sandVersion}
+              prod-url={stage.prodUrl}
+              sand-url={stage.sandUrl}
+              env={stage.env}
+              current-url={stage.url}
+              {...(folded ? { folded: '' } : {})}
+            />
+            {stage.url && (
+              <iframe
+                className="lstage-iframe"
+                src={stage.url}
+                title={stage.name}
+              />
+            )}
+          </div>
+        ) : (
+          <div className="lstage-empty">
+            <div className="lstage-empty-inner">
+              <div className="lstage-empty-glyph">🚀</div>
+              <h3>Select an app</h3>
+              <p>Pick an app from the sidebar to open it here.</p>
+            </div>
+          </div>
+        )}
+      </main>
 
       {usersModalApp && (
         <div
@@ -434,7 +466,6 @@ export function LauncherView({ onOpen, headerRight }: Props) {
             <p style={{ color: 'var(--dim)', fontSize: '.8rem', marginTop: 4, marginBottom: 10 }}>
               Set each user's role on this app. A last-owner guard keeps the app from being left ownerless.
             </p>
-            {/* v2.7.24: search by name or email. Empty = show everyone. */}
             <input
               type="text"
               placeholder="Search by name or email…"
@@ -454,45 +485,45 @@ export function LauncherView({ onOpen, headerRight }: Props) {
               <p style={{ color: 'var(--dim)', fontSize: '.85rem' }}>No users found.</p>
             ) : (() => {
               const q = usersFilter.trim().toLowerCase()
-              const filtered = q
+              const flt = q
                 ? usersModalData.filter(u =>
                     (u.name || '').toLowerCase().includes(q) ||
                     (u.email || '').toLowerCase().includes(q))
                 : usersModalData
-              if (filtered.length === 0) {
+              if (flt.length === 0) {
                 return <p style={{ color: 'var(--dim)', fontSize: '.85rem' }}>No users match &quot;{usersFilter}&quot;.</p>
               }
               return (
-              <table style={{ width: '100%', fontSize: '.85rem' }}>
-                <tbody>
-                  {filtered.map(u => {
-                    const status = usersSaving[u.id]
-                    return (
-                      <tr key={u.id} style={{ borderTop: '1px solid var(--border)' }}>
-                        <td style={{ padding: '8px 6px' }}>
-                          <div style={{ fontWeight: 600 }}>{u.name || u.email || `user#${u.id}`}</div>
-                          {u.email && <div style={{ color: 'var(--dim)', fontSize: '.76rem' }}>{u.email}</div>}
-                        </td>
-                        <td style={{ padding: '8px 6px', textAlign: 'right', whiteSpace: 'nowrap' }}>
-                          <select
-                            value={u.app_role}
-                            onChange={e => changeUserAppRole(u.id, e.target.value as AppMemberRole)}
-                            style={{ fontSize: '.8rem' }}
-                          >
-                            <option value="none">none</option>
-                            <option value="user">user</option>
-                            <option value="admin">admin</option>
-                            <option value="owner">owner</option>
-                          </select>
-                          {status === 'saving' && <span style={{ marginLeft: 6, color: 'var(--dim)', fontSize: '.74rem' }}>…</span>}
-                          {status === 'saved' && <span style={{ marginLeft: 6, color: 'var(--green)', fontSize: '.74rem' }}>✓</span>}
-                          {status === 'error' && <span style={{ marginLeft: 6, color: 'var(--red)', fontSize: '.74rem' }}>✗</span>}
-                        </td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
+                <table style={{ width: '100%', fontSize: '.85rem' }}>
+                  <tbody>
+                    {flt.map(u => {
+                      const status = usersSaving[u.id]
+                      return (
+                        <tr key={u.id} style={{ borderTop: '1px solid var(--border)' }}>
+                          <td style={{ padding: '8px 6px' }}>
+                            <div style={{ fontWeight: 600 }}>{u.name || u.email || `user#${u.id}`}</div>
+                            {u.email && <div style={{ color: 'var(--dim)', fontSize: '.76rem' }}>{u.email}</div>}
+                          </td>
+                          <td style={{ padding: '8px 6px', textAlign: 'right', whiteSpace: 'nowrap' }}>
+                            <select
+                              value={u.app_role}
+                              onChange={e => changeUserAppRole(u.id, e.target.value as AppMemberRole)}
+                              style={{ fontSize: '.8rem' }}
+                            >
+                              <option value="none">none</option>
+                              <option value="user">user</option>
+                              <option value="admin">admin</option>
+                              <option value="owner">owner</option>
+                            </select>
+                            {status === 'saving' && <span style={{ marginLeft: 6, color: 'var(--dim)', fontSize: '.74rem' }}>…</span>}
+                            {status === 'saved' && <span style={{ marginLeft: 6, color: 'var(--green)', fontSize: '.74rem' }}>✓</span>}
+                            {status === 'error' && <span style={{ marginLeft: 6, color: 'var(--red)', fontSize: '.74rem' }}>✗</span>}
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
               )
             })()}
           </div>

@@ -960,6 +960,72 @@ textarea:focus { border-color: var(--accent); }
 .launcher-dot-red    { background: #ef4444; }
 .launcher-dot-amber  { background: #f59e0b; }
 
+/* ── Sidebar-nav launcher (v2.12.0) — left rail + inline app stage ── */
+.launcher-shell { display: flex; height: calc(100dvh - var(--topnav-h, 56px)); overflow: hidden; }
+.lnav {
+  width: 252px; flex-shrink: 0; display: flex; flex-direction: column;
+  border-right: 1px solid var(--border); background: var(--surface);
+  transition: width .15s ease; overflow: hidden;
+}
+.launcher-collapsed .lnav { width: 58px; }
+.lnav-top { border-bottom: 1px solid var(--border); padding: 10px; }
+.lnav-top-row { display: flex; align-items: center; gap: 8px; }
+.lnav-top-actions { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px; }
+.lnav-collapse {
+  flex-shrink: 0; width: 30px; height: 30px; border-radius: 6px; cursor: pointer;
+  background: var(--surface2); border: 1px solid var(--border); color: var(--dim); font-size: .9rem;
+}
+.lnav-collapse:hover { color: var(--text); border-color: var(--border2, #2a2d3a); }
+.lnav-search {
+  flex: 1; min-width: 0; padding: 6px 10px; font-size: .85rem;
+  background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; color: var(--text);
+}
+.lnav-list { flex: 1; overflow-y: auto; padding: 8px 6px; }
+.lnav-empty-list { color: var(--dim); font-size: .82rem; padding: 14px 10px; }
+.lnav-group { margin-bottom: 10px; }
+.lnav-group-title {
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: .66rem; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--dim); padding: 4px 9px;
+}
+.lnav-group-count { opacity: .6; }
+.lnav-item {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  padding: 7px 8px; border-radius: 7px; cursor: pointer; text-align: left;
+  background: transparent; border: 1px solid transparent; color: var(--text); font-size: .87rem;
+}
+.lnav-item:hover { background: var(--surface2); }
+.lnav-item.active { background: rgba(245, 166, 35, .12); border-color: rgba(245, 166, 35, .4); }
+.lnav-item.disabled { opacity: .5; cursor: not-allowed; }
+.lnav-item.disabled:hover { background: transparent; }
+.lnav-item-req.is-requested { opacity: .7; cursor: default; }
+.lnav-ico {
+  position: relative; flex-shrink: 0; width: 26px; height: 26px; border-radius: 6px;
+  background: var(--surface2); display: inline-flex; align-items: center; justify-content: center;
+  font-size: .68rem; font-weight: 700; overflow: visible;
+}
+.lnav-ico img { width: 26px; height: 26px; border-radius: 6px; object-fit: cover; }
+.lnav-ico .launcher-dot { top: -3px; right: -3px; }
+.lnav-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; }
+.lnav-req-badge { font-size: .68rem; font-weight: 600; color: #f59e0b; letter-spacing: .3px; flex-shrink: 0; }
+.lnav-owner-ctrls { display: flex; flex-wrap: wrap; gap: 4px; padding: 2px 8px 8px 44px; }
+.lnav-owner-ctrls .launcher-tile-ctrl { font-size: .68rem; padding: 2px 5px; }
+.launcher-collapsed .lnav-name,
+.launcher-collapsed .lnav-group-title,
+.launcher-collapsed .lnav-search,
+.launcher-collapsed .lnav-top-actions,
+.launcher-collapsed .lnav-req-badge,
+.launcher-collapsed .lnav-owner-ctrls { display: none; }
+.launcher-collapsed .lnav-item { justify-content: center; padding: 7px 0; gap: 0; }
+.lstage { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--bg, #0e0e0e); }
+.lstage-frame { display: flex; flex-direction: column; height: 100%; }
+.lstage-iframe { flex: 1; width: 100%; border: 0; background: #fff; }
+.lstage-empty { flex: 1; display: flex; align-items: center; justify-content: center; color: var(--dim); }
+.lstage-empty-inner { text-align: center; }
+.lstage-empty-glyph { font-size: 2.4rem; margin-bottom: 8px; opacity: .8; }
+.lstage-empty-inner h3 { margin: 0 0 4px; font-size: 1rem; color: var(--text); }
+.lstage-empty-inner p { margin: 0; font-size: .85rem; }
+
 /* v2.6.7: Request-access tile variant. Subtle amber border so it reads
    as "discoverable, action required" rather than "broken". When the
    request has been submitted in this session it locks into a green
