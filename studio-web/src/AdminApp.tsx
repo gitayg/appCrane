@@ -6,7 +6,6 @@ import { Login } from './components/Login'
 import { Dashboard } from './pages/Dashboard'
 import { Applications } from './pages/Applications'
 import { AppStudio } from './pages/AppStudio'
-import { Mcp } from './pages/Mcp'
 import { Settings } from './pages/Settings'
 import { Docs } from './pages/Docs'
 import { AppManager } from './pages/AppManager'
@@ -22,14 +21,16 @@ import { SkillsTab } from './components/SkillsTab'
 // silently fell through to Security). Removed from the nav in v2.5.10
 // so users don't click a dead link. Old bookmarks still hit Security.
 const SETTINGS_SUB = [
-  { id: 'security',   label: 'Security',    href: '#security' },
-  { id: 'users',      label: 'Users',       href: '#users' },
-  { id: 'roles',      label: 'Roles',       href: '#roles' },
-  { id: 'github',     label: 'GitHub',      href: '#github' },
-  { id: 'mail',       label: 'Mail',        href: '#mail' },
-  { id: 'backup',     label: 'Backup',      href: '#backup' },
-  { id: 'branding',   label: 'Style Guide', href: '#branding' },
-  { id: 'audit',      label: 'Audit Log',   href: '#audit' },
+  // v2.13.0: MCP moved under Settings; visible to app-owners + platform-admins.
+  { id: 'mcp',        label: 'MCP',         href: '#mcp',      ownerOrAdmin: true },
+  { id: 'security',   label: 'Security',    href: '#security', platformAdminOnly: true },
+  { id: 'users',      label: 'Users',       href: '#users',    platformAdminOnly: true },
+  { id: 'roles',      label: 'Roles',       href: '#roles',    platformAdminOnly: true },
+  { id: 'github',     label: 'GitHub',      href: '#github',   platformAdminOnly: true },
+  { id: 'mail',       label: 'Mail',        href: '#mail',     platformAdminOnly: true },
+  { id: 'backup',     label: 'Backup',      href: '#backup',   platformAdminOnly: true },
+  { id: 'branding',   label: 'Style Guide', href: '#branding', platformAdminOnly: true },
+  { id: 'audit',      label: 'Audit Log',   href: '#audit',    platformAdminOnly: true },
 ]
 
 const DOCS_SUB = [
@@ -56,7 +57,7 @@ function useHash() {
 
 function SettingsRoute() {
   const hash = useHash()
-  const valid = ['security', 'users', 'roles', 'github', 'mail', 'backup', 'branding', 'audit']
+  const valid = ['mcp', 'security', 'users', 'roles', 'github', 'mail', 'backup', 'branding', 'audit']
   const activeSub = valid.includes(hash) ? hash : 'security'
   return (
     <Layout subItems={SETTINGS_SUB} activeSub={activeSub}>
@@ -136,7 +137,8 @@ export function AdminApp() {
           <Route path="/requests"    element={<Layout><AppStudio tab="requests" /></Layout>} />
           <Route path="/builders"    element={<Navigate to="/requests" replace />} />
           <Route path="/appstudio"   element={<Navigate to="/requests" replace />} />
-          <Route path="/mcp"         element={<Layout><Mcp /></Layout>} />
+          {/* v2.13.0: MCP moved under Settings. Old links redirect. */}
+          <Route path="/mcp"         element={<Navigate to="/settings#mcp" replace />} />
           {/* v2.13.0: launcher merged into the main nav. Apps open inline here. */}
           <Route path="/launch"        element={<Layout><AppFrameView /></Layout>} />
           <Route path="/launch/:slug"  element={<Layout><AppFrameView /></Layout>} />

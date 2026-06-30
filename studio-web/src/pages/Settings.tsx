@@ -4,6 +4,8 @@ import { useFlash, FocusInput, FocusTextarea } from '../components/formHelpers'
 import { Users } from './Users'
 import { AuditLog } from './AuditLog'
 import { BrandingTab } from '../components/BrandingTab'
+import { Mcp } from './Mcp'
+import { useMe } from '../hooks/useMe'
 
 function SecurityTab() {
   const [certFile, setCertFile] = useState('')
@@ -1009,9 +1011,9 @@ function BackupTab() {
   )
 }
 
-type Tab = 'security' | 'users' | 'roles' | 'github' | 'mail' | 'backup' | 'branding' | 'audit'
+type Tab = 'security' | 'users' | 'roles' | 'github' | 'mail' | 'backup' | 'branding' | 'audit' | 'mcp'
 
-const VALID_TABS: Tab[] = ['security', 'users', 'roles', 'github', 'mail', 'backup', 'branding', 'audit']
+const VALID_TABS: Tab[] = ['security', 'users', 'roles', 'github', 'mail', 'backup', 'branding', 'audit', 'mcp']
 
 function getTab(): Tab {
   const hash = window.location.hash.replace('#', '') as Tab
@@ -1019,6 +1021,8 @@ function getTab(): Tab {
 }
 
 export function Settings() {
+  const me = useMe()
+  const isPlatformAdmin = me?.user?.role === 'platform_admin'
   const [tab, setTab] = useState<Tab>(getTab)
 
   useEffect(() => {
@@ -1027,8 +1031,22 @@ export function Settings() {
     return () => window.removeEventListener('hashchange', handler)
   }, [])
 
+  // v2.13.0: MCP moved under Settings, reachable by app-owners too. The other
+  // tabs are platform-admin-only — and since every tab mounts (display-toggled),
+  // rendering them for a non-platform-admin would fire their admin-only fetches
+  // (403 noise). So owners get ONLY the MCP tab here.
+  if (me === null) {
+    return <div className="container"><p style={{ color: 'var(--dim)' }}>Loading…</p></div>
+  }
+  if (!isPlatformAdmin) {
+    return <div className="container"><Mcp /></div>
+  }
+
   return (
     <div className="container">
+      <div style={{ display: tab === 'mcp' ? 'block' : 'none' }}>
+        <Mcp />
+      </div>
       <div style={{ display: tab === 'security' ? 'block' : 'none' }}>
         <SecurityTab />
       </div>

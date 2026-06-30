@@ -61,6 +61,7 @@ import meRoutes from './routes/me.js';
 import filesRoutes, { sweepStagedFiles } from './routes/files.js';
 import githubServiceRoutes from './routes/githubService.js';
 import whatsNewRoutes from './routes/whatsNew.js';
+import platformWhatsNewRoutes from './routes/platformWhatsNew.js';
 import serviceApiRoutes from './routes/serviceApi.js';
 
 const PORT = process.env.PORT || 5001;
@@ -607,6 +608,7 @@ app.use('/api', userMcpKeysRoutes);      // /api/me/mcp-keys — personal MCP ke
 app.use('/api/files', filesRoutes);      // /api/files/staged — staged uploads for MCP-E
 app.use('/api/github-service', githubServiceRoutes); // service-account config + verify (admin)
 app.use('/api/apps', whatsNewRoutes);     // /api/apps/:slug/whats-new — per-user version dialog state
+app.use('/api/whats-new', platformWhatsNewRoutes); // /api/whats-new/platform — AppCrane update dialog (platform admins)
 
 app.use('/api', logsRoutes);             // /api/audit, /api/apps/:slug/audit
 app.use('/api', monitoringRoutes);       // /api/server/health

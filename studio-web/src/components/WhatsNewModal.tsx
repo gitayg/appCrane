@@ -9,11 +9,18 @@ export interface WhatsNewChange {
 }
 
 interface Props {
-  slug:           string
+  slug?:          string
   appName:        string
   currentVersion: string | null
   changes:        WhatsNewChange[]
   onClose:        () => void
+  // v2.13.0: override the "seen" endpoint (the platform What's New posts to
+  // /api/whats-new/platform/seen instead of the per-app one).
+  seenUrl?:       string
+  // v2.13.0: optional primary action (e.g. "Upgrade now" on the upgrade
+  // preview). When set, the footer shows it alongside a "Later" dismiss.
+  primaryLabel?:  string
+  onPrimary?:     () => void
 }
 
 /**
@@ -24,9 +31,10 @@ interface Props {
  * Dismissing the modal POSTs to /whats-new/seen which records the current
  * live version; on the next open the same version no longer triggers it.
  */
-export function WhatsNewModal({ slug, appName, currentVersion, changes, onClose }: Props) {
+export function WhatsNewModal({ slug, appName, currentVersion, changes, onClose, seenUrl, primaryLabel, onPrimary }: Props) {
   function dismiss() {
-    adminApi.post(`/api/apps/${encodeURIComponent(slug)}/whats-new/seen`, {}).catch(() => {})
+    const url = seenUrl || (slug ? `/api/apps/${encodeURIComponent(slug)}/whats-new/seen` : null)
+    if (url) adminApi.post(url, {}).catch(() => {})
     onClose()
   }
 
@@ -78,7 +86,14 @@ export function WhatsNewModal({ slug, appName, currentVersion, changes, onClose 
           )}
         </div>
         <div className="whatsnew-footer">
-          <button className="btn btn-accent" onClick={dismiss}>Got it</button>
+          {onPrimary ? (
+            <>
+              <button className="btn" onClick={dismiss}>Later</button>
+              <button className="btn btn-accent" onClick={() => { onClose(); onPrimary() }}>{primaryLabel || 'Continue'}</button>
+            </>
+          ) : (
+            <button className="btn btn-accent" onClick={dismiss}>Got it</button>
+          )}
         </div>
       </div>
     </div>

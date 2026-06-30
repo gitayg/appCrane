@@ -4,6 +4,7 @@ import { NavLink, useLocation } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth'
 import { adminApi } from '../adminApi'
 import { Icon } from './icons'
+import { WhatsNewModal, type WhatsNewChange } from './WhatsNewModal'
 
 interface NavItem { id: string; label: string; href: string; icon: ReactElement; external?: boolean; platformAdminOnly?: boolean; adminOnly?: boolean; ownerOrAdmin?: boolean }
 interface NavApp {
@@ -41,12 +42,11 @@ const NAV: NavItem[] = [
   { id: 'manage',       label: 'Manage',       href: '/manage',       icon: <Icon.Key />, ownerOrAdmin: true },
   { id: 'requests',     label: 'Requests',     href: '/requests',     icon: <Icon.Lightbulb /> },
   { id: 'skills',       label: 'Skills',       href: '/skills',       icon: <Icon.Sparkles />, adminOnly: true },
-  { id: 'mcp',          label: 'MCP',          href: '/mcp',          icon: <Icon.PlugZap /> },
   { id: 'docs',         label: 'Docs',         href: '/docs',         icon: <Icon.Book /> },
-  { id: 'settings',     label: 'Settings',     href: '/settings',     icon: <Icon.Settings />, platformAdminOnly: true },
+  { id: 'settings',     label: 'Settings',     href: '/settings',     icon: <Icon.Settings /> },
 ]
 
-interface SubItem { id: string; label: string; href: string }
+interface SubItem { id: string; label: string; href: string; platformAdminOnly?: boolean; ownerOrAdmin?: boolean }
 
 interface Props {
   children: React.ReactNode
@@ -72,6 +72,9 @@ export function Layout({ children, subItems, activeSub }: Props) {
   const [notifLoaded, setNotifLoaded] = useState(false)
   const [openRequests, setOpenRequests] = useState(0)
   const [mcpStatus, setMcpStatus] = useState<'unknown' | 'connected' | 'disconnected'>('unknown')
+  // v2.13.0: AppCrane's own What's New, shown to platform admins post-login
+  // when the running version is newer than what they last saw.
+  const [platformWN, setPlatformWN] = useState<{ currentVersion: string | null; changes: WhatsNewChange[]; seenUrl?: string; primaryLabel?: string; onPrimary?: () => void } | null>(null)
   // v2.13.0: app list merged into the main nav. Accessible apps grouped by
   // category; the whole section and each category collapse (persisted).
   const [navApps, setNavApps] = useState<NavApp[]>([])
@@ -142,9 +145,9 @@ export function Layout({ children, subItems, activeSub }: Props) {
     return () => { cancelled = true; clearInterval(t) }
   }, [isAuthed, isPlatformAdmin])
 
-  async function runSelfUpdate() {
+  async function runSelfUpdate(skipConfirm = false) {
     if (!updateInfo?.update_available || updating) return
-    if (!confirm(`Update AppCrane from v${updateInfo.current} to v${updateInfo.latest}?\n\nThe server will rebuild the SPA and restart. Active deploys are checked first; the update aborts if any are in flight.`)) return
+    if (!skipConfirm && !confirm(`Update AppCrane from v${updateInfo.current} to v${updateInfo.latest}?\n\nThe server will rebuild the SPA and restart. Active deploys are checked first; the update aborts if any are in flight.`)) return
     setUpdating(true)
     try {
       await adminApi.post('/api/self-update', {})
@@ -237,6 +240,41 @@ export function Layout({ children, subItems, activeSub }: Props) {
       .catch(() => setNavApps([]))
   }, [])
 
+  // v2.13.0: post-login AppCrane What's New for platform admins. Checked once
+  // per browser session; the server records "seen" on dismiss so it won't
+  // re-fire until the next AppCrane update.
+  useEffect(() => {
+    if (userRole !== 'platform_admin') return
+    if (sessionStorage.getItem('cc_platform_wn') === '1') return
+    sessionStorage.setItem('cc_platform_wn', '1')
+    adminApi.get<{ current_version: string | null; changes: WhatsNewChange[] }>('/api/whats-new/platform')
+      .then(r => { if (r?.changes?.length) setPlatformWN({ currentVersion: r.current_version, changes: r.changes, seenUrl: '/api/whats-new/platform/seen' }) })
+      .catch(() => {})
+  }, [userRole])
+
+  // v2.13.0: clicking the "update available" pill previews the new version's
+  // What's New (current → latest) with an "Upgrade now" action — the same
+  // dialog as the post-login one, just forward-looking.
+  async function openUpgradeWhatsNew() {
+    if (!updateInfo?.update_available || !updateInfo.latest || updating) return
+    let changes: WhatsNewChange[] = []
+    try {
+      const r = await adminApi.get<{ changes: WhatsNewChange[] }>(
+        `/api/whats-new/platform?from=${encodeURIComponent(updateInfo.current)}&to=${encodeURIComponent(updateInfo.latest)}`
+      )
+      changes = r?.changes || []
+    } catch { /* still show the dialog so the user can upgrade */ }
+    if (changes.length === 0) {
+      changes = [{ version: updateInfo.latest, commit_hash: null, commit_message: 'A new version of AppCrane is available.', finished_at: null }]
+    }
+    setPlatformWN({
+      currentVersion: updateInfo.latest,
+      changes,
+      primaryLabel: 'Upgrade now',
+      onPrimary: () => runSelfUpdate(true),
+    })
+  }
+
   // Group nav apps by category; Uncategorized last.
   const appGroups: [string, NavApp[]][] = (() => {
     const m = new Map<string, NavApp[]>()
@@ -248,6 +286,8 @@ export function Layout({ children, subItems, activeSub }: Props) {
     return [...m.entries()].sort(([a], [b]) => a === 'Uncategorized' ? 1 : b === 'Uncategorized' ? -1 : a.localeCompare(b))
   })()
 
+  const adminLike = userRole === 'admin' || userRole === 'platform_admin'
+  const isOwner = navApps.some(a => a.app_role === 'owner')
   const currentPath = location.pathname
   const activeNav = NAV.find(n => n.href === currentPath)
   const activeNavId = activeNav?.id ?? ''
@@ -290,12 +330,12 @@ export function Layout({ children, subItems, activeSub }: Props) {
               isn't admin/platform_admin (no use for the page either way) */}
         <nav className="sidebar-nav">
           {NAV.filter(p => {
-            const adminLike = userRole === 'admin' || userRole === 'platform_admin'
-            const isOwner = navApps.some(a => a.app_role === 'owner')
             if (p.platformAdminOnly && userRole !== 'platform_admin') return false
             if (p.adminOnly && !adminLike) return false
             // v2.13.0: Manage is owner self-service — visible to app-owners and admins.
             if (p.ownerOrAdmin && !adminLike && !isOwner) return false
+            // v2.13.0: Settings is reachable by owners (MCP tab) or platform admins.
+            if (p.id === 'settings' && userRole !== 'platform_admin' && !isOwner) return false
             if (p.id === 'requests' && openRequests === 0 && !adminLike) return false
             return true
           }).map(p => (
@@ -343,7 +383,12 @@ export function Layout({ children, subItems, activeSub }: Props) {
               )}
               {activeNavId === p.id && subItems && subItems.length > 0 && !collapsed && (
                 <div className="sidebar-sub-nav">
-                  {subItems.map(s => (
+                  {subItems.filter(s => {
+                    // v2.13.0: per-sub-item gating so owners see only the MCP tab.
+                    if (s.platformAdminOnly && userRole !== 'platform_admin') return false
+                    if (s.ownerOrAdmin && !adminLike && !isOwner) return false
+                    return true
+                  }).map(s => (
                     <a
                       key={s.id}
                       href={s.href}
@@ -433,8 +478,8 @@ export function Layout({ children, subItems, activeSub }: Props) {
               updateInfo?.update_available ? (
                 <span
                   className="topbar-version-pill topbar-version-pill-update"
-                  title={`Click to update AppCrane v${updateInfo.current} → v${updateInfo.latest}`}
-                  onClick={runSelfUpdate}
+                  title={`See what's new and update AppCrane v${updateInfo.current} → v${updateInfo.latest}`}
+                  onClick={openUpgradeWhatsNew}
                 >
                   {updating
                     ? '⏳ updating…'
@@ -486,6 +531,17 @@ export function Layout({ children, subItems, activeSub }: Props) {
         </div>
         {children}
       </main>
+      {platformWN && (
+        <WhatsNewModal
+          appName="AppCrane"
+          currentVersion={platformWN.currentVersion}
+          changes={platformWN.changes}
+          seenUrl={platformWN.seenUrl}
+          primaryLabel={platformWN.primaryLabel}
+          onPrimary={platformWN.onPrimary}
+          onClose={() => setPlatformWN(null)}
+        />
+      )}
     </div>
   )
 }
