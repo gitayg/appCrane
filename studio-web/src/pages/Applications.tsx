@@ -5,7 +5,7 @@ import { JobsButton } from '../components/runtime-topbar/JobsButton'
 import { RequestModal } from '../components/runtime-topbar/RequestModal'
 import { WhatsNewModal, type WhatsNewChange } from '../components/WhatsNewModal'
 import { usePeek, type PeekCtx } from '../hooks/usePeek'
-import { LauncherView } from './LauncherView'
+import { Navigate } from 'react-router-dom'
 import { useMe, isAdmin, canCreateApps } from '../hooks/useMe'
 import { BugPanel } from '../components/runtime-topbar/BugPanel'
 import { defineCraneAppTopbar } from '../topbar-element/entry'
@@ -83,16 +83,9 @@ export function Applications() {
   // permission (global admins, or a tier a platform admin granted) — in
   // both the Launcher and Manage views, not just admins in Manage.
   const mayCreateApp = canCreateApps(me)
-  const [viewMode, setViewMode] = useState<'launcher' | 'manage' | null>(() => {
-    const saved = typeof window !== 'undefined' ? localStorage.getItem('cc_apps_view') : null
-    if (saved === 'launcher' || saved === 'manage') return saved
-    return null
-  })
-  useEffect(() => {
-    if (viewMode !== null || me === null) return
-    setViewMode(adminLike ? 'manage' : 'launcher')
-  }, [me, adminLike, viewMode])
-  useEffect(() => { if (viewMode) { try { localStorage.setItem('cc_apps_view', viewMode) } catch (_) {} } }, [viewMode])
+  // v2.13.0: the launcher view was dissolved into the main sidebar nav, so
+  // Applications is now just the admin manage table. Non-admins are redirected
+  // to /launch (see below).
 
   const [apps, setApps] = useState<App[]>([])
   const [versions, setVersions] = useState<Record<string, { prod?: string; sand?: string }>>({})
@@ -826,62 +819,11 @@ STEP 3 - In any terminal run \`claude\`, then paste:
     </div>
   )
 
-  // v2.5.0: end users get the tile launcher. Admins can flip to it via
-  // the toggle; non-admins never see the manage table at all (the data
-  // would be filtered server-side anyway, but the toggle is hidden).
-  if (viewMode === 'launcher') {
-    return (
-      <>
-        <LauncherView
-          onOpen={(slug, name, hasIcon) => {
-            const a = apps.find(x => x.slug === slug)
-            const prodUrl = `/${slug}`
-            const sandUrl = `/${slug}-sandbox`
-            // v2.6.1: open production by default. If production isn't
-            // healthy (down / unknown / never deployed) but sandbox is,
-            // fall back to sandbox so end users still see something
-            // working. If both are problematic, still open production —
-            // the topbar lets them switch envs, and the tile click is
-            // already gated to disable when both are down.
-            const prodOk = a?.production?.health?.status === 'healthy'
-            const sandOk = a?.sandbox?.health?.status === 'healthy'
-            const useSand = !prodOk && sandOk
-            setFrame({
-              open: true,
-              url: useSand ? sandUrl : prodUrl,
-              title: `${name} (${useSand ? 'sandbox' : 'prod'})`,
-              slug, appName: name, env: useSand ? 'sandbox' : 'production',
-              prodUrl, sandUrl,
-              prodVersion: a?.production?.deploy?.version || '',
-              sandVersion: a?.sandbox?.deploy?.version || '',
-              hasIcon,
-              hasGithub: !!a?.github_url,
-            })
-          }}
-          headerRight={(mayCreateApp || adminLike) && (
-            <>
-              {mayCreateApp && (
-                <button className="btn btn-accent" onClick={generateAgentKey}>+ Add Application</button>
-              )}
-              {adminLike && (
-                // v2.5.20: moved from a floating bottom-right pill into the
-                // Launcher header. The bottom-right placement was easy to
-                // miss — multiple platform_admins ended up "stuck" on
-                // Launcher with no obvious way back to the manage table.
-                <div className="applications-mode-toggle" style={{ marginLeft: 8 }}>
-                  <button className="active">Launcher</button>
-                  <button onClick={() => setViewMode('manage')}>Manage</button>
-                </div>
-              )}
-            </>
-          )}
-        />
-        {frame.open && (
-          <FrameOverlay frame={frame} framePanel={framePanel} setFrame={setFrame} setFramePanel={setFramePanel} />
-        )}
-        {promptModalEl}
-      </>
-    )
+  // v2.13.0: launcher dissolved into the main sidebar nav. Non-admins have no
+  // manage table — their apps live in the nav and open at /launch — so send
+  // them there. Admins fall through to the manage table below.
+  if (me !== null && !adminLike) {
+    return <Navigate to="/launch" replace />
   }
 
   return (
@@ -890,12 +832,6 @@ STEP 3 - In any terminal run \`claude\`, then paste:
         <h2 style={{ margin: 0 }}>Applications</h2>
         {mayCreateApp && (
           <button className="btn btn-accent" onClick={generateAgentKey}>+ Add Application</button>
-        )}
-        {adminLike && (
-          <div className="applications-mode-toggle" style={{ marginLeft: 8 }}>
-            <button onClick={() => setViewMode('launcher')}>Launcher</button>
-            <button className="active">Manage</button>
-          </div>
         )}
         <input
           type="text"
