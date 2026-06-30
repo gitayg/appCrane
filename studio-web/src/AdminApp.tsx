@@ -10,6 +10,8 @@ import { Mcp } from './pages/Mcp'
 import { Settings } from './pages/Settings'
 import { Docs } from './pages/Docs'
 import { AppManager } from './pages/AppManager'
+import { AppFrameView } from './pages/AppFrameView'
+import { ManageView } from './pages/ManageView'
 import { SkillsTab } from './components/SkillsTab'
 
 // AppStudio top-level nav was collapsed in v1.27.38: Requests + Builders
@@ -135,6 +137,11 @@ export function AdminApp() {
           <Route path="/builders"    element={<Navigate to="/requests" replace />} />
           <Route path="/appstudio"   element={<Navigate to="/requests" replace />} />
           <Route path="/mcp"         element={<Layout><Mcp /></Layout>} />
+          {/* v2.13.0: launcher merged into the main nav. Apps open inline here. */}
+          <Route path="/launch"        element={<Layout><AppFrameView /></Layout>} />
+          <Route path="/launch/:slug"  element={<Layout><AppFrameView /></Layout>} />
+          {/* v2.13.0: owner self-service (category/visibility/auth/users for owned apps). */}
+          <Route path="/manage"        element={<Layout><ManageView /></Layout>} />
           {/* v2.6.9: Skills promoted out of /settings to a top-level
               admin-readable page. SkillsTab is self-contained — same
               component the old /settings#skills mounted. */}
