@@ -1,6 +1,6 @@
 // <crane-app-topbar> — shared iframe-app top bar.
 //
-// Owns the chrome (brand, icon, name, version pill, env switcher, refresh,
+// Owns the chrome (icon, name, version pill, env switcher, refresh,
 // open-in-tab, back, evict, fold chevron). Per-runtime widgets — Learn /
 // Request / Jobs / Presence / Builder Working badge — are slotted as
 // children with slot="actions". Both the React admin and the vanilla
@@ -60,8 +60,6 @@ const STYLES = `
 }
 .left, .right { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .left { flex: 1; min-width: 0; }
-.brand { font-weight: 700; font-size: .9rem; flex-shrink: 0; }
-.brand span { color: var(--accent, #3b82f6); }
 .icon { width: 22px; height: 22px; border-radius: 4px; object-fit: cover; flex-shrink: 0; }
 .name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 320px; }
 .version {
@@ -223,7 +221,6 @@ export class CraneAppTopbar extends HTMLElement {
     return `
       <div class="bar">
         <div class="left">
-          <span class="brand">App<span>Crane</span></span>
           ${iconHtml}
           <span class="name">${esc(name)}</span>
           ${versionHtml}
