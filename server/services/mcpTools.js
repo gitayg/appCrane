@@ -5,6 +5,7 @@ import { userHasAppPermission, userHasPlatformPermission, roleForUserOnApp } fro
 import { isAdmin } from '../utils/roles.js';
 import log from '../utils/logger.js';
 import { validateBypassPaths } from '../utils/authBypassPaths.js';
+import { resolveVisibility } from '../utils/appVisibility.js';
 import { mkdirSync } from 'fs';
 import { join } from 'path';
 import crypto from 'crypto';
@@ -1297,8 +1298,12 @@ const TOOLS = [
         }
         updates.branch = args.branch || null;
       }
-      if (args.visibility    !== undefined) updates.visibility    = args.visibility;
-      if (args.public_access !== undefined) updates.public_access = args.public_access ? 1 : 0;
+      // v2.20.2: visibility + public_access stay in lock-step via the shared
+      // resolveVisibility helper (visibility wins if both are passed), so this
+      // path can't drift from the REST update. Setting one without the other
+      // used to leave an app publicly reachable yet catalog-private, which made
+      // the launcher prompt users to "Request access" to an already-open app.
+      Object.assign(updates, resolveVisibility({ visibility: args.visibility, public_access: args.public_access }));
       if (args.image_retention !== undefined) {
         const n = parseInt(args.image_retention, 10);
         if (!Number.isFinite(n) || n < 0 || n > 50) throw new Error('image_retention must be 0-50');
@@ -1407,13 +1412,9 @@ const TOOLS = [
       const db = getDb();
       const updates = {};
 
-      if (args.visibility !== undefined) {
-        if (!['public', 'private', 'hidden'].includes(args.visibility)) {
-          throw new Error('visibility must be one of: public, private, hidden');
-        }
-        updates.visibility = args.visibility;
-        updates.public_access = args.visibility === 'public' ? 1 : 0;
-      }
+      // v2.20.2: shared invariant helper (see resolveVisibility) — no-op when
+      // visibility isn't in the patch.
+      Object.assign(updates, resolveVisibility({ visibility: args.visibility }));
 
       if (args.category !== undefined) {
         const newCat = args.category ? String(args.category).trim() : null;

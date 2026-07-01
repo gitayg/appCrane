@@ -9,6 +9,7 @@ import { AppError } from '../utils/errors.js';
 import { resolveSafe } from '../utils/paths.js';
 import { reloadCaddy } from '../services/caddy.js';
 import { validateBypassPaths } from '../utils/authBypassPaths.js';
+import { resolveVisibility } from '../utils/appVisibility.js';
 
 // auth_bypass_paths is stored as a JSON string (or NULL). The UI expects an
 // array, so always parse it before returning an app row — a raw string would
@@ -478,25 +479,24 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
     }
     updates.branch = branch;
   }
-  if (visibility !== undefined) {
-    if (!['hidden', 'private', 'public'].includes(visibility)) {
-      throw new AppError('visibility must be one of: hidden, private, public', 400, 'VALIDATION');
-    }
-    // v2.7.9: visibility changes are owner/admin-only (it controls public
-    // exposure). Plain app 'user' members can't flip it.
-    if (visibility !== (app.visibility || 'hidden')) {
-      const globalAdmin = isAdmin(req.user);
-      const isOwner = roleForUserOnApp(req.user, app) === 'owner';
-      if (!globalAdmin && !isOwner) {
-        throw new AppError('Only the app owner can change visibility.', 403, 'FORBIDDEN');
-      }
-    }
-    updates.visibility = visibility;
-    updates.public_access = visibility === 'public' ? 1 : 0;
-  } else if (public_access !== undefined) {
-    updates.public_access = public_access ? 1 : 0;
-    updates.visibility = public_access ? 'public' : 'private';
+  // v2.20.2: the visibility/public_access invariant lives in one shared helper
+  // (resolveVisibility) so REST and the MCP config tools can't drift.
+  let visibilityUpdates;
+  try {
+    visibilityUpdates = resolveVisibility({ visibility, public_access });
+  } catch (e) {
+    throw new AppError(e.message, 400, 'VALIDATION');
   }
+  // v2.7.9: visibility changes are owner/admin-only (it controls public
+  // exposure). Plain app 'user' members can't flip it.
+  if (visibility !== undefined && visibility !== (app.visibility || 'hidden')) {
+    const globalAdmin = isAdmin(req.user);
+    const isOwner = roleForUserOnApp(req.user, app) === 'owner';
+    if (!globalAdmin && !isOwner) {
+      throw new AppError('Only the app owner can change visibility.', 403, 'FORBIDDEN');
+    }
+  }
+  Object.assign(updates, visibilityUpdates);
   if (github_token !== undefined) updates.github_token_encrypted = encrypt(github_token);
   if (image_retention !== undefined) {
     if (!isAdmin(req.user)) {
