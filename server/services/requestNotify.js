@@ -8,7 +8,7 @@ import { getDb } from '../db.js';
 import { enqueueEmail } from './emailQueue.js';
 import log from '../utils/logger.js';
 
-export function notifyRequesterFulfilled(enhancementId) {
+export function notifyRequesterFulfilled(enhancementId, actorUserId) {
   try {
     const db = getDb();
     const row = db.prepare(
@@ -18,6 +18,15 @@ export function notifyRequesterFulfilled(enhancementId) {
 
     const user = db.prepare('SELECT email, name FROM users WHERE id = ? AND active = 1').get(row.user_id);
     if (!user?.email) return;
+
+    // v2.19.0: sign the reply with the app owner/admin who actioned the
+    // request (marked it done / shipped / won't-do), not a generic AppCrane.
+    // Falls back to AppCrane if the actor is unknown or nameless.
+    let signer = 'AppCrane';
+    if (actorUserId) {
+      const actor = db.prepare('SELECT name FROM users WHERE id = ?').get(actorUserId);
+      if (actor?.name) signer = actor.name;
+    }
 
     let appName = row.app_slug || 'your app';
     const app = db.prepare('SELECT name FROM apps WHERE slug = ?').get(row.app_slug);
@@ -44,15 +53,15 @@ export function notifyRequesterFulfilled(enhancementId) {
           ? `Hi${user.name ? ' ' + user.name : ''},\n\n` +
             `After review, this request won't be actioned (no change needed / out of scope):\n\n` +
             `  "${requestText}"\n\n` +
-            `If you think that's a mistake, reply to your app admin.\n\n— AppCrane`
+            `If you think that's a mistake, reply to your app admin.\n\n— ${signer}`
           : `Hi${user.name ? ' ' + user.name : ''},\n\n` +
             `Good news — a request you submitted for ${appName} has been completed${verPart}:\n\n` +
             `  "${requestText}"\n\n` +
-            `You'll see it the next time you open the app.\n\n— AppCrane`;
+            `You'll see it the next time you open the app.\n\n— ${signer}`;
       } else {
         text =
           `Request #${row.id} from ${user.name || user.email} for ${appName} was ` +
-          `${wontDo ? "closed as won't-do" : 'completed'}.\n\n  "${requestText}"\n\n— AppCrane`;
+          `${wontDo ? "closed as won't-do" : 'completed'} by ${signer}.\n\n  "${requestText}"\n\n— ${signer}`;
       }
       try { enqueueEmail({ to, subject, text, source: 'request-fulfilled' }); } catch (_) { /* skip bad recipient */ }
     }

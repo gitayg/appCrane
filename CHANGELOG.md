@@ -5,6 +5,7 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.19.0 — Request-completed / won't-do emails are now signed by the app owner/admin who actioned the request (whoever shipped or closed it), instead of a generic "— AppCrane"
 ## 2.18.0 — AppCrane now inherits richer directory attributes from the IdP: SCIM syncs each user's department, region (state/province), and location (city) from Okta/Universal Directory; shown and editable on the Users page and returned by /api/auth/me
 ## 2.17.0 — Merged "My Requests" into the single Requests page, now role-scoped: platform admins see all requests, app owners see their apps' requests, and everyone else sees (and can delete) just their own
 ## 2.16.0 — New "My Requests" page: every signed-in user can now see the requests they've submitted and delete their own (unless one is actively being worked on)
