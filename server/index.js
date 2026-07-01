@@ -671,6 +671,8 @@ app.get('/enhancements-page', (req, res) => sendHtml(res, adminSpa));
 // AppStudio collapsed in v1.27.38: Requests + Builders are top-level
 // SPA routes; the React router redirects /appstudio → /requests.
 app.get('/requests', (req, res) => sendHtml(res, adminSpa));
+// v2.16.0: personal "My Requests" view (any signed-in user, see + delete own).
+app.get('/my-requests', (req, res) => sendHtml(res, adminSpa));
 app.get('/builders', (req, res) => sendHtml(res, adminSpa)); // legacy — SPA redirects to /requests
 app.get('/appstudio', (req, res) => sendHtml(res, adminSpa));
 app.get('/settings', (req, res) => sendHtml(res, adminSpa));
