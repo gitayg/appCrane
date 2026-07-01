@@ -9,7 +9,8 @@ import { AppStudio } from './pages/AppStudio'
 import { Settings } from './pages/Settings'
 import { Docs } from './pages/Docs'
 import { AppManager } from './pages/AppManager'
-import { AppFrameView } from './pages/AppFrameView'
+import { AppTabsProvider } from './components/AppTabsContext'
+import { PersistentAppTabs } from './components/PersistentAppTabs'
 
 // AppStudio top-level nav was collapsed in v1.27.38: Requests + Builders
 // became top-level nav items, Skills + Style Guide (renamed from Branding)
@@ -122,6 +123,7 @@ export function AdminApp() {
 
   return (
     <AuthContext.Provider value={auth}>
+      <AppTabsProvider>
       <BrowserRouter>
         <Routes>
           <Route path="/" element={<Navigate to="/dashboard" replace />} />
@@ -139,8 +141,10 @@ export function AdminApp() {
           {/* v2.13.0: MCP moved under Settings. Old links redirect. */}
           <Route path="/mcp"         element={<Navigate to="/settings#mcp" replace />} />
           {/* v2.13.0: launcher merged into the main nav. Apps open inline here. */}
-          <Route path="/launch"        element={<Layout><AppFrameView /></Layout>} />
-          <Route path="/launch/:slug"  element={<Layout><AppFrameView /></Layout>} />
+          {/* v2.15.0: the launch view is the persistent tab host (below), which
+              overlays the content area. These routes just render the chrome. */}
+          <Route path="/launch"        element={<Layout>{null}</Layout>} />
+          <Route path="/launch/:slug"  element={<Layout>{null}</Layout>} />
           {/* v2.6.9: Skills promoted out of /settings to a top-level
               admin-readable page. SkillsTab is self-contained — same
               component the old /settings#skills mounted. */}
@@ -152,7 +156,9 @@ export function AdminApp() {
           <Route path="/app"         element={<Layout><AppManager /></Layout>} />
           <Route path="*"            element={<Navigate to="/dashboard" replace />} />
         </Routes>
+        <PersistentAppTabs />
       </BrowserRouter>
+      </AppTabsProvider>
     </AuthContext.Provider>
   )
 }

@@ -1038,6 +1038,35 @@ textarea:focus { border-color: var(--accent); }
 .lstage-empty-inner h3 { margin: 0 0 4px; font-size: 1rem; color: var(--text); }
 .lstage-empty-inner p { margin: 0; font-size: .85rem; }
 
+/* ── Persistent multi-app tabs (v2.15.0) — overlays the content area ── */
+.persistent-app-tabs {
+  position: fixed; top: 52px; left: var(--content-left, 220px); right: 0; bottom: 0;
+  flex-direction: column; background: var(--bg, #0e0e0e); z-index: 5;
+}
+.app-tabs { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.app-tabs-bar {
+  display: flex; align-items: stretch; gap: 2px; flex-shrink: 0; overflow-x: auto;
+  border-bottom: 1px solid var(--border); background: var(--surface); padding: 6px 8px 0;
+}
+.app-tab {
+  display: inline-flex; align-items: center; gap: 8px; padding: 7px 11px; flex-shrink: 0;
+  border: 1px solid transparent; border-bottom: none; border-radius: 8px 8px 0 0;
+  color: var(--dim); font-size: .82rem; cursor: pointer; white-space: nowrap;
+}
+.app-tab:hover { color: var(--text); }
+.app-tab.active { background: var(--bg, #0e0e0e); color: var(--text); border-color: var(--border); }
+.app-tab-ico { width: 16px; height: 16px; border-radius: 4px; object-fit: cover; }
+.app-tab-name { max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
+.app-tab-close {
+  background: transparent; border: none; color: var(--dim); cursor: pointer;
+  font-size: 1rem; line-height: 1; padding: 0 2px; border-radius: 4px;
+}
+.app-tab-close:hover { color: var(--text); background: var(--surface2); }
+.app-tabs-body { flex: 1; min-height: 0; position: relative; }
+.app-tabs-body .lstage-frame { height: 100%; }
+.persistent-app-tabs .lstage-empty { min-height: 0; flex: 1; }
+@media (max-width: 900px) { .persistent-app-tabs { left: 0; top: 0; } }
+
 /* ── Apps merged into the main sidebar nav (v2.13.0) ── */
 .sidebar-apps { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
 .sidebar-apps-toggle {

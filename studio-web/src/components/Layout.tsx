@@ -5,6 +5,7 @@ import { useAuth } from '../hooks/useAuth'
 import { adminApi } from '../adminApi'
 import { Icon } from './icons'
 import { WhatsNewModal, type WhatsNewChange } from './WhatsNewModal'
+import { useAppTabs } from './AppTabsContext'
 
 interface NavItem { id: string; label: string; href: string; icon: ReactElement; external?: boolean; platformAdminOnly?: boolean; adminOnly?: boolean; ownerOrAdmin?: boolean }
 interface NavApp {
@@ -58,6 +59,7 @@ export function Layout({ children, subItems, activeSub }: Props) {
   const { isAuthed, signOut } = useAuth()
   const location = useLocation()
   const navigate = useNavigate()
+  const { addTab } = useAppTabs()
   // v2.14.1: whether the user can create apps — gates the sidebar "+ Add
   // Application" button (mirrors canCreateApps: admins or a granted tier).
   const [canCreate, setCanCreate] = useState(false)
@@ -241,6 +243,12 @@ export function Layout({ children, subItems, activeSub }: Props) {
       .catch(() => {})
   }, [userRole])
 
+  // v2.15.0: keep the persistent app-tabs overlay aligned with the content area
+  // as the sidebar collapses/expands.
+  useEffect(() => {
+    document.documentElement.style.setProperty('--content-left', collapsed ? '56px' : '220px')
+  }, [collapsed])
+
   // v2.13.0: clicking the "update available" pill previews the new version's
   // What's New (current → latest) with an "Upgrade now" action — the same
   // dialog as the post-login one, just forward-looking.
@@ -418,10 +426,11 @@ export function Layout({ children, subItems, activeSub }: Props) {
                       <span className="sidebar-apps-count">{list.length}</span>
                     </button>
                     {!closed && list.map(a => (
-                      <NavLink
+                      <button
                         key={a.slug}
-                        to={`/launch/${a.slug}`}
-                        className={({ isActive }) => 'sidebar-app-link' + (isActive ? ' active' : '')}
+                        type="button"
+                        className={'sidebar-app-link' + (location.pathname === `/launch/${a.slug}` ? ' active' : '')}
+                        onClick={() => { addTab({ slug: a.slug, name: a.name, hasIcon: a.has_icon }); navigate(`/launch/${a.slug}`) }}
                         title={[a.name, a.description, a.owner?.name ? `Owner: ${a.owner.name}` : null].filter(Boolean).join('\n')}
                       >
                         <span className="sidebar-app-ico">
@@ -431,7 +440,7 @@ export function Layout({ children, subItems, activeSub }: Props) {
                           <span className={appDotClass(a)} />
                         </span>
                         <span className="sidebar-app-name">{a.name}</span>
-                      </NavLink>
+                      </button>
                     ))}
                   </div>
                 )
