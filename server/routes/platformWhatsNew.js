@@ -72,6 +72,41 @@ async function fetchVersionCommits() {
   }
 }
 
+let _changelogCache = null;
+let _changelogCacheAt = 0;
+// Preferred notes source: CHANGELOG.md over raw.githubusercontent — the same
+// host version-check reaches successfully, so it works even where api.github.com
+// is blocked or rate-limited. Format: one line per release, `## <version> — <summary>`.
+async function fetchChangelogNotes() {
+  const now = Date.now();
+  if (_changelogCache && now - _changelogCacheAt < 5 * 60 * 1000) return _changelogCache;
+  try {
+    const r = await fetch('https://raw.githubusercontent.com/gitayg/appCrane/main/CHANGELOG.md', {
+      headers: { 'User-Agent': 'AppCrane' },
+      signal: AbortSignal.timeout(6000),
+    });
+    if (!r.ok) return _changelogCache || [];
+    const text = await r.text();
+    const parsed = [];
+    const re = /^##\s+v?(\d+\.\d+\.\d+)\s*[—:-]\s*(.+)$/gm;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      parsed.push({ version: m[1], commit_message: m[2].trim(), commit_hash: null, finished_at: null });
+    }
+    _changelogCache = parsed;
+    _changelogCacheAt = now;
+    return parsed;
+  } catch (_) {
+    return _changelogCache || [];
+  }
+}
+
+// CHANGELOG.md first (reliable host + curated wording); commit subjects fallback.
+async function getVersionNotes() {
+  const notes = await fetchChangelogNotes();
+  return notes.length ? notes : fetchVersionCommits();
+}
+
 router.use(requireAuth, requirePlatformAdmin);
 
 router.get('/platform', async (req, res) => {
@@ -83,8 +118,8 @@ router.get('/platform', async (req, res) => {
   const fromQ = typeof req.query.from === 'string' ? req.query.from : null;
   const toQ   = typeof req.query.to   === 'string' ? req.query.to   : null;
   if (fromQ && toQ) {
-    const commits = await fetchVersionCommits();
-    const changes = commits
+    const notes = await getVersionNotes();
+    const changes = notes
       .filter(c => cmp(c.version, fromQ) > 0 && cmp(c.version, toQ) <= 0)
       .slice(0, 25);
     return res.json({ current_version: toQ, changes, first_time: false });
@@ -104,8 +139,8 @@ router.get('/platform', async (req, res) => {
     return res.json({ current_version: current, changes: [], first_time: false });
   }
 
-  const commits = await fetchVersionCommits();
-  const changes = commits
+  const notes = await getVersionNotes();
+  const changes = notes
     .filter(c => cmp(c.version, row.last_seen_version) > 0 && cmp(c.version, current) <= 0)
     .slice(0, 25);
   res.json({ current_version: current, changes, first_time: false });

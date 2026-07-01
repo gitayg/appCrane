@@ -12,7 +12,7 @@ export function notifyRequesterFulfilled(enhancementId) {
   try {
     const db = getDb();
     const row = db.prepare(
-      'SELECT id, app_slug, user_id, message, fix_version FROM enhancement_requests WHERE id = ?'
+      'SELECT id, app_slug, user_id, message, fix_version, status FROM enhancement_requests WHERE id = ?'
     ).get(enhancementId);
     if (!row || !row.user_id) return;
 
@@ -23,19 +23,42 @@ export function notifyRequesterFulfilled(enhancementId) {
     const app = db.prepare('SELECT name FROM apps WHERE slug = ?').get(row.app_slug);
     if (app?.name) appName = app.name;
 
+    const wontDo = row.status === 'no_changes_needed';
     const verPart = row.fix_version ? ` in v${row.fix_version}` : '';
-    const subject = `Your request for ${appName} was completed`;
-    const text =
-      `Hi${user.name ? ' ' + user.name : ''},\n\n` +
-      `Good news — a request you submitted for ${appName} has been completed${verPart}:\n\n` +
-      `  "${String(row.message || '').slice(0, 500)}"\n\n` +
-      `You'll see it the next time you open the app.\n\n` +
-      `— AppCrane`;
+    const requestText = String(row.message || '').slice(0, 500);
+    const subject = wontDo
+      ? `Update on your request for ${appName}`
+      : `Your request for ${appName} was completed`;
 
-    enqueueEmail({ to: user.email, subject, text, source: 'request-fulfilled' });
-    log.info(`[request-notify] queued fulfillment email to ${user.email} for request ${row.id}`);
+    // Requester gets a personal note; platform admins get a copy for visibility.
+    const recipients = new Set([user.email]);
+    for (const a of db.prepare("SELECT email FROM users WHERE role = 'platform_admin' AND active = 1 AND email IS NOT NULL").all()) {
+      recipients.add(a.email);
+    }
+
+    for (const to of recipients) {
+      const forRequester = to === user.email;
+      let text;
+      if (forRequester) {
+        text = wontDo
+          ? `Hi${user.name ? ' ' + user.name : ''},\n\n` +
+            `After review, this request won't be actioned (no change needed / out of scope):\n\n` +
+            `  "${requestText}"\n\n` +
+            `If you think that's a mistake, reply to your app admin.\n\n— AppCrane`
+          : `Hi${user.name ? ' ' + user.name : ''},\n\n` +
+            `Good news — a request you submitted for ${appName} has been completed${verPart}:\n\n` +
+            `  "${requestText}"\n\n` +
+            `You'll see it the next time you open the app.\n\n— AppCrane`;
+      } else {
+        text =
+          `Request #${row.id} from ${user.name || user.email} for ${appName} was ` +
+          `${wontDo ? "closed as won't-do" : 'completed'}.\n\n  "${requestText}"\n\n— AppCrane`;
+      }
+      try { enqueueEmail({ to, subject, text, source: 'request-fulfilled' }); } catch (_) { /* skip bad recipient */ }
+    }
+    log.info(`[request-notify] queued ${wontDo ? "won't-do" : 'fulfillment'} email for request ${row.id} → ${recipients.size} recipient(s)`);
   } catch (e) {
-    log.warn(`[request-notify] could not notify requester for enhancement ${enhancementId}: ${e.message}`);
+    log.warn(`[request-notify] could not notify for enhancement ${enhancementId}: ${e.message}`);
   }
 }
 

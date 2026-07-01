@@ -1002,6 +1002,14 @@ app.listen(PORT, HOST, async () => {
     log.error('Email worker failed to start: ' + e.message);
   }
 
+  // v2.14.2: daily digest to app owners of requests awaiting their action.
+  try {
+    const { startRequestDigestScheduler } = await import('./services/requestDigest.js');
+    startRequestDigestScheduler();
+  } catch (e) {
+    log.error('Request-digest scheduler failed to start: ' + e.message);
+  }
+
   // Bulk-redeploy sentinel — written by the upgrade script's cleanup phase
   // when it kills a PM2 daemon, because those apps are now offline and need
   // to be rebuilt as Docker containers. In-process, no API key needed.
