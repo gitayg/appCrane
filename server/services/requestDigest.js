@@ -19,6 +19,39 @@ function setSetting(db, key, value) {
   ).run(key, String(value));
 }
 
+const esc = (s) => String(s ?? '')
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+
+function oneLine(s, max = 140) {
+  const t = String(s || '').replace(/\s+/g, ' ').trim();
+  return t.length > max ? t.slice(0, max - 1).trimEnd() + '...' : t;
+}
+
+// The 🎯 element-picker prepends a "--- Pointed element ---" block (URL /
+// Selector / Tag / Text) to the request message. That noise dominates the
+// digest, so collapse each request to one readable line: the user's own words
+// if they typed any, else a friendly hint from the pointed element.
+function summarizeRequest(raw) {
+  const msg = String(raw || '').trim();
+  const i = msg.indexOf('--- Pointed element ---');
+  if (i === -1) return { summary: oneLine(msg) || '(no description)', url: null };
+  const before = msg.slice(0, i).trim();
+  const block  = msg.slice(i);
+  const url = (block.match(/^URL:\s*(.+)$/m)       || [])[1]?.trim() || null;
+  const tag = (block.match(/^Tag:\s*<([^>\n]+)>/m) || [])[1]?.trim() || null;
+  const txt = (block.match(/Text:\s*"([^"\n]{1,120})"/) || [])[1]?.trim() || null;
+  const summary = before
+    || (txt ? `Pointed at "${txt}"` : tag ? `Pointed at <${tag}>` : 'Pointed at an element');
+  return { summary: oneLine(summary), url };
+}
+
+function fmtDate(iso) {
+  if (!iso) return '';
+  const d = new Date(String(iso).includes('T') ? iso : String(iso).replace(' ', 'T') + 'Z');
+  return isNaN(d.getTime()) ? '' : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
 /**
  * Queue a digest to every owner/admin who has open requests on their apps.
  * Returns { owners, requests } for logging / manual invocation.
@@ -57,19 +90,70 @@ export function sendPendingRequestDigests() {
     }
   }
 
+  const base = process.env.CRANE_DOMAIN ? `https://${process.env.CRANE_DOMAIN}` : '';
+  const reviewLink = base ? `${base}/requests` : null;
+  const PER_APP_CAP = 50; // guard against a pathologically long email
+
   let sent = 0;
   for (const [email, data] of byOwner) {
     const total = data.apps.reduce((n, a) => n + a.reqs.length, 0);
     const subject = `${total} request${total === 1 ? '' : 's'} awaiting your action`;
-    let body = `Hi${data.name ? ' ' + data.name : ''},\n\nYou have ${total} open request${total === 1 ? '' : 's'} awaiting action:\n`;
+    // Busiest app first.
+    data.apps.sort((a, b) => b.reqs.length - a.reqs.length);
+    const appWord = data.apps.length === 1 ? 'app' : 'apps';
+    const reqWord = total === 1 ? 'request' : 'requests';
+
+    // ---- plain-text fallback ----
+    let text = `Hi${data.name ? ' ' + data.name : ''},\n\n` +
+      `You have ${total} open ${reqWord} awaiting action across ${data.apps.length} ${appWord}:\n`;
     for (const a of data.apps) {
-      body += `\n${a.appName}\n`;
-      for (const r of a.reqs) {
-        body += `  • #${String(r.id).padStart(4, '0')} — ${String(r.message || '').slice(0, 120)} (${r.user_name || 'someone'})\n`;
+      text += `\n${a.appName} (${a.reqs.length})\n`;
+      const shown = a.reqs.slice(0, PER_APP_CAP);
+      for (const r of shown) {
+        const { summary, url } = summarizeRequest(r.message);
+        text += `  - #${String(r.id).padStart(4, '0')}  ${summary}` +
+          `  [${r.user_name || 'someone'}${url ? ', ' + url : ''}]\n`;
       }
+      if (a.reqs.length > shown.length) text += `  ...and ${a.reqs.length - shown.length} more\n`;
     }
-    body += `\nReview them in AppCrane -> Requests.\n\n-- AppCrane`;
-    try { enqueueEmail({ to: email, subject, text: body, source: 'request-digest' }); sent++; }
+    text += `\nReview them in AppCrane -> Requests${reviewLink ? ': ' + reviewLink : ''}.\n`;
+
+    // ---- HTML ----
+    const sections = data.apps.map(a => {
+      const shown = a.reqs.slice(0, PER_APP_CAP);
+      const rows = shown.map(r => {
+        const { summary, url } = summarizeRequest(r.message);
+        const meta = [esc(r.user_name || 'someone'), fmtDate(r.created_at), url ? esc(url) : null]
+          .filter(Boolean).join(' &middot; ');
+        return `<tr>` +
+          `<td style="padding:8px 10px;vertical-align:top;white-space:nowrap;font-family:ui-monospace,Menlo,monospace;font-size:12px;color:#6b7280;border-top:1px solid #eef0f3;">#${String(r.id).padStart(4, '0')}</td>` +
+          `<td style="padding:8px 10px;vertical-align:top;border-top:1px solid #eef0f3;">` +
+            `<div style="font-size:14px;color:#111827;">${esc(summary)}</div>` +
+            `<div style="font-size:12px;color:#6b7280;margin-top:2px;">${meta}</div>` +
+          `</td></tr>`;
+      }).join('');
+      const overflow = a.reqs.length > shown.length
+        ? `<tr><td colspan="2" style="padding:6px 10px;font-size:12px;color:#6b7280;border-top:1px solid #eef0f3;">...and ${a.reqs.length - shown.length} more in AppCrane</td></tr>`
+        : '';
+      return `<div style="margin:22px 0 0;">` +
+        `<div style="font-size:15px;font-weight:600;color:#111827;padding-bottom:6px;border-bottom:2px solid #e5e7eb;">` +
+          `${esc(a.appName)} <span style="font-weight:400;color:#6b7280;">&middot; ${a.reqs.length} open</span></div>` +
+        `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">${rows}${overflow}</table>` +
+      `</div>`;
+    }).join('');
+
+    const btn = reviewLink
+      ? `<a href="${esc(reviewLink)}" style="display:inline-block;margin-top:24px;background:#3b82f6;color:#ffffff;text-decoration:none;font-size:14px;font-weight:600;padding:10px 18px;border-radius:6px;">Review in AppCrane</a>`
+      : '';
+
+    const html = `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;max-width:640px;margin:0 auto;color:#111827;">` +
+      `<p style="font-size:15px;margin:0 0 4px;">Hi${data.name ? ' ' + esc(data.name) : ''},</p>` +
+      `<p style="font-size:14px;color:#374151;margin:0;">You have <strong>${total}</strong> open ${reqWord} awaiting action across <strong>${data.apps.length}</strong> ${appWord}.</p>` +
+      `${sections}${btn}` +
+      `<p style="font-size:12px;color:#9ca3af;margin-top:24px;">You're receiving this because you own or administer these apps.</p>` +
+    `</div>`;
+
+    try { enqueueEmail({ to: email, subject, text, html, source: 'request-digest' }); sent++; }
     catch (_) { /* skip bad recipient */ }
   }
   log.info(`[request-digest] queued ${sent} digest(s) covering ${rows.length} pending request(s)`);
