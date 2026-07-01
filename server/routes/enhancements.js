@@ -14,7 +14,7 @@ import { notifyRequesterFulfilled, notifyAppAdminsOfAccessRequest } from '../ser
 
 const router = Router();
 
-const VALID_STATUSES = ['new', 'selected', 'planning', 'in_progress', 'done'];
+const VALID_STATUSES = ['new', 'selected', 'planning', 'in_progress', 'done', 'no_changes_needed'];
 
 /**
  * Resolve an identity Bearer token to a user row.
@@ -276,14 +276,16 @@ router.post('/:id/set-status', requireAuth, requireAdmin, (req, res) => {
   db.prepare('UPDATE enhancement_requests SET status = ? WHERE id = ?').run(status, id);
   res.json({ status });
 
-  // v2.14.1: on first transition to done, email the requester and close the
-  // mirrored GitHub issue/PR. Guarded so re-marking done doesn't re-notify.
-  if (status === 'done' && row.status !== 'done') {
+  // v2.14.1/2: on first transition to a terminal state (done or won't-do),
+  // email the requester + platform admins and close the mirrored GitHub issue.
+  const terminal = status === 'done' || status === 'no_changes_needed';
+  if (terminal && row.status !== status) {
     notifyRequesterFulfilled(id);
     if (row.app_slug) {
       const app = getAppForMirror(row.app_slug);
       if (app?.github_url) {
-        closeRequest(app, { ...row, status }, { resolution: 'Marked done in AppCrane.', prUrl: row.pr_url || null }).catch(() => {});
+        const resolution = status === 'no_changes_needed' ? "Closed as won't-do in AppCrane." : 'Marked done in AppCrane.';
+        closeRequest(app, { ...row, status }, { resolution, prUrl: row.pr_url || null }).catch(() => {});
       }
     }
   }

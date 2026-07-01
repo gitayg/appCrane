@@ -318,8 +318,8 @@ function RequestsTab({
           <colgroup>
             <col style={{ width: 70 }} />
             <col style={{ width: 130 }} />
-            <col style={{ width: 120 }} />
-            <col style={{ width: 140 }} />
+            <col style={{ width: 190 }} />
+            <col style={{ width: 155 }} />
             <col />
             <col style={{ width: 110 }} />
             <col style={{ width: 130 }} />
@@ -348,8 +348,8 @@ function RequestsTab({
                     ? <span className="app-pill" style={{ background: 'var(--surface2)', border: '1px solid var(--border)', borderRadius: 4, padding: '2px 7px', fontSize: '.75rem', color: 'var(--dim)' }}>{e.app_slug}</span>
                     : '—'}
                 </td>
-                <td style={{ fontSize: '.82rem', color: 'var(--dim)' }}>{e.user_name ?? '—'}</td>
-                <td style={{ fontSize: '.78rem', color: 'var(--dim)' }}>{fmtDate(e.created_at)}</td>
+                <td style={{ fontSize: '.82rem', color: 'var(--dim)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={e.user_name ?? undefined}>{e.user_name ?? '—'}</td>
+                <td style={{ fontSize: '.78rem', color: 'var(--dim)', whiteSpace: 'nowrap' }}>{fmtDate(e.created_at)}</td>
                 <td style={{ fontSize: '.82rem', wordBreak: 'break-word' }}>{e.message}</td>
                 <td>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
