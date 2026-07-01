@@ -9,6 +9,7 @@ import { AppStudio } from './pages/AppStudio'
 import { Settings } from './pages/Settings'
 import { Docs } from './pages/Docs'
 import { AppManager } from './pages/AppManager'
+import { MyRequests } from './pages/MyRequests'
 import { AppTabsProvider } from './components/AppTabsContext'
 import { PersistentAppTabs } from './components/PersistentAppTabs'
 
@@ -136,6 +137,8 @@ export function AdminApp() {
           {/* AppStudio collapsed: Requests is top-level. Builders removed
               v1.27.89 — internal builders moved to local Claude Code via MCP. */}
           <Route path="/requests"    element={<Layout><AppStudio tab="requests" /></Layout>} />
+          {/* v2.16.0: personal requests view — any signed-in user, see + delete own. */}
+          <Route path="/my-requests" element={<Layout><MyRequests /></Layout>} />
           <Route path="/builders"    element={<Navigate to="/requests" replace />} />
           <Route path="/appstudio"   element={<Navigate to="/requests" replace />} />
           {/* v2.13.0: MCP moved under Settings. Old links redirect. */}
