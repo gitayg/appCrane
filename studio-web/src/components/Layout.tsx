@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import type { ReactElement } from 'react'
-import { NavLink, useLocation } from 'react-router-dom'
+import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth'
 import { adminApi } from '../adminApi'
 import { Icon } from './icons'
@@ -9,6 +9,8 @@ import { WhatsNewModal, type WhatsNewChange } from './WhatsNewModal'
 interface NavItem { id: string; label: string; href: string; icon: ReactElement; external?: boolean; platformAdminOnly?: boolean; adminOnly?: boolean; ownerOrAdmin?: boolean }
 interface NavApp {
   slug: string; name: string; category?: string; has_icon?: boolean
+  description?: string
+  owner?: { name: string } | null
   app_role?: 'admin' | 'owner' | 'user' | 'viewer' | 'none'
   visibility?: string
   production?: { health?: { status: string } }
@@ -38,8 +40,7 @@ function appInitials(name: string): string {
 // the SkillsTab UI and on the API.
 const NAV: NavItem[] = [
   { id: 'dashboard',    label: 'Dashboard',    href: '/dashboard',    icon: <Icon.Dashboard /> },
-  { id: 'applications', label: 'Applications', href: '/applications', icon: <Icon.Layers /> },
-  { id: 'manage',       label: 'Manage',       href: '/manage',       icon: <Icon.Key />, ownerOrAdmin: true },
+  { id: 'applications', label: 'Manage',       href: '/applications', icon: <Icon.Layers /> },
   { id: 'requests',     label: 'Requests',     href: '/requests',     icon: <Icon.Lightbulb /> },
   { id: 'skills',       label: 'Skills',       href: '/skills',       icon: <Icon.Sparkles />, adminOnly: true },
   { id: 'docs',         label: 'Docs',         href: '/docs',         icon: <Icon.Book /> },
@@ -57,6 +58,10 @@ interface Props {
 export function Layout({ children, subItems, activeSub }: Props) {
   const { isAuthed, signOut } = useAuth()
   const location = useLocation()
+  const navigate = useNavigate()
+  // v2.14.1: whether the user can create apps — gates the sidebar "+ Add
+  // Application" button (mirrors canCreateApps: admins or a granted tier).
+  const [canCreate, setCanCreate] = useState(false)
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem('cc_sb_col') === '1')
   const [mobileOpen, setMobileOpen] = useState(false)
   const [theme, setTheme] = useState(() => localStorage.getItem('cc_theme') || 'dark')
@@ -104,7 +109,7 @@ export function Layout({ children, subItems, activeSub }: Props) {
 
   useEffect(() => {
     if (!isAuthed) return
-    adminApi.get<{ user: { name: string; email?: string; role: string } }>('/api/auth/me')
+    adminApi.get<{ user: { name: string; email?: string; role: string; can_create_apps?: boolean } }>('/api/auth/me')
       .then(d => {
         // v2.7.16: show "email (humanized role)" in the topbar, e.g.
         // "itay.glick@opswat.com (platform admin)". Falls back to name if
@@ -114,6 +119,7 @@ export function Layout({ children, subItems, activeSub }: Props) {
         const who = d.user.email || d.user.name || ''
         setUserName(who ? (roleLabel ? `${who} (${roleLabel})` : who) : '')
         setUserRole(role)
+        setCanCreate(role === 'admin' || role === 'platform_admin' || d.user.can_create_apps === true)
       })
       .catch(() => {})
     // Version display is platform-admin only (gated by isPlatformAdmin
@@ -313,12 +319,39 @@ export function Layout({ children, subItems, activeSub }: Props) {
           <a href="/dashboard" className="sidebar-logo">
             App<span>Crane</span>
           </a>
-          {/* v2.6.10: the sidebar version pill was removed — it duplicated
-              the topbar version pill (added v2.5.7) which is visible on
-              every page regardless of sidebar state. Both pills shared
-              state, both fired the same self-update flow, and seeing
-              "AppCrane v2.6.x" twice was confusing. Keeping the topbar
-              one as the single source of truth. */}
+          {/* v2.14.1: the version + update pill lives in the sidebar (moved
+              from the topbar). Platform-admin only; hidden in the icon rail. */}
+          {isPlatformAdmin && version && !collapsed && (
+            <div className="sidebar-version">
+              {updateInfo?.update_available ? (
+                <span
+                  className="topbar-version-pill topbar-version-pill-update"
+                  title={`See what's new and update AppCrane v${updateInfo.current} → v${updateInfo.latest}`}
+                  onClick={openUpgradeWhatsNew}
+                >
+                  {updating
+                    ? '⏳ updating…'
+                    : <>↑ AppCrane v{updateInfo.latest}<span className="topbar-version-pill-current"> (now v{updateInfo.current})</span></>}
+                </span>
+              ) : (
+                <span
+                  className="topbar-version-pill"
+                  title="Click to re-check for AppCrane updates"
+                  onClick={async () => {
+                    try {
+                      const data = await adminApi.get<{ current: string; latest: string | null; update_available: boolean }>('/api/version-check?force=1')
+                      setUpdateInfo(data)
+                      if (!data.update_available) {
+                        alert(`AppCrane v${data.current} — already up to date${data.latest ? ` (latest is v${data.latest})` : ''}.`)
+                      }
+                    } catch { /* silent */ }
+                  }}
+                >
+                  AppCrane {version}
+                </span>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Nav. Role-gating:
@@ -328,6 +361,14 @@ export function Layout({ children, subItems, activeSub }: Props) {
               normally need it)
             - Requests hidden when the user has zero open requests AND
               isn't admin/platform_admin (no use for the page either way) */}
+        {canCreate && (
+          <button
+            type="button"
+            className="sidebar-add-app btn btn-accent"
+            onClick={() => navigate('/applications', { state: { addApp: true } })}
+            title="Add Application"
+          >{collapsed ? '+' : '+ Add Application'}</button>
+        )}
         <nav className="sidebar-nav">
           {NAV.filter(p => {
             if (p.platformAdminOnly && userRole !== 'platform_admin') return false
@@ -425,7 +466,7 @@ export function Layout({ children, subItems, activeSub }: Props) {
                         key={a.slug}
                         to={`/launch/${a.slug}`}
                         className={({ isActive }) => 'sidebar-app-link' + (isActive ? ' active' : '')}
-                        title={a.name}
+                        title={[a.name, a.description, a.owner?.name ? `Owner: ${a.owner.name}` : null].filter(Boolean).join('\n')}
                       >
                         <span className="sidebar-app-ico">
                           {a.has_icon
@@ -469,41 +510,7 @@ export function Layout({ children, subItems, activeSub }: Props) {
         <div className="admin-topbar">
           <span className="admin-topbar-title">{pageTitle}</span>
           <div className="admin-topbar-right">
-            {/* v2.5.7: AppCrane version + update indicator. Lives in the
-                topbar so it's visible on every page even with the sidebar
-                collapsed. The pulsing amber state when an update is
-                available is the same flow as the sidebar pill.
-                v2.5.9: platform-admin only — regular admins don't see this. */}
-            {isPlatformAdmin && version && (
-              updateInfo?.update_available ? (
-                <span
-                  className="topbar-version-pill topbar-version-pill-update"
-                  title={`See what's new and update AppCrane v${updateInfo.current} → v${updateInfo.latest}`}
-                  onClick={openUpgradeWhatsNew}
-                >
-                  {updating
-                    ? '⏳ updating…'
-                    : <>↑ AppCrane v{updateInfo.latest}<span className="topbar-version-pill-current"> (now v{updateInfo.current})</span></>}
-                </span>
-              ) : (
-                <span
-                  className="topbar-version-pill"
-                  title="Click to re-check for AppCrane updates"
-                  onClick={async () => {
-                    // v2.6.10: force=1 bypasses the server-side 5-min cache.
-                    try {
-                      const data = await adminApi.get<{ current: string; latest: string | null; update_available: boolean }>('/api/version-check?force=1')
-                      setUpdateInfo(data)
-                      if (!data.update_available) {
-                        alert(`AppCrane v${data.current} — already up to date${data.latest ? ` (latest is v${data.latest})` : ''}.`)
-                      }
-                    } catch { /* silent */ }
-                  }}
-                >
-                  AppCrane {version}
-                </span>
-              )
-            )}
+            {/* v2.14.1: AppCrane version + update pill moved to the sidebar. */}
             <div className="notif-wrap" ref={notifRef}>
               <button className="notif-bell-btn" onClick={openNotif} title="Notifications">🔔</button>
               {notifItems.length > 0 && (

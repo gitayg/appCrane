@@ -682,6 +682,12 @@ app.get('/coder', (req, res) => res.redirect(301, '/studio')); // legacy redirec
 // App manager (app user)
 app.get('/app', (req, res) => sendHtml(res, adminSpa));
 
+// v2.13.0: launcher merged into the nav — apps open inline at /launch/:slug,
+// owner self-service at /manage. Serve the SPA on direct nav / refresh / Back
+// (otherwise these single-segment paths fall through to the app-slug proxy).
+app.get('/launch', (req, res) => sendHtml(res, adminSpa));
+app.get('/launch/*splat', (req, res) => sendHtml(res, adminSpa));
+
 // Root redirects to login
 app.get('/', (req, res) => res.redirect('/login'));
 

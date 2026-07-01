@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
-import { useParams } from 'react-router-dom'
+import { useParams, useNavigate } from 'react-router-dom'
 import { adminApi } from '../adminApi'
+import { usePeek, type PeekCtx } from '../hooks/usePeek'
+import { RequestModal } from '../components/runtime-topbar/RequestModal'
+import { Icon } from '../components/icons'
 
 /**
  * Inline app view (v2.13.0). Renders a single app at /launch/:slug, hosted by
@@ -57,10 +60,21 @@ function buildStage(app: AppRow): Stage {
 
 export function AppFrameView() {
   const { slug } = useParams<{ slug: string }>()
+  const navigate = useNavigate()
   const [stage, setStage] = useState<Stage | null>(null)
   const [status, setStatus] = useState<'loading' | 'ready' | 'notfound' | 'empty'>('empty')
   const [folded, setFolded] = useState(false)
+  const [refreshNonce, setRefreshNonce] = useState(0)
   const topbarRef = useRef<HTMLElement>(null)
+  const iframeRef = useRef<HTMLIFrameElement>(null)
+
+  // v2.14.1: point-and-click Request flow (restored from the old launcher
+  // frame). Click "Request" → pick an element in the app → describe the change.
+  const peek = usePeek(iframeRef)
+  const [requestCtx, setRequestCtx] = useState<PeekCtx | null>(null)
+  useEffect(() => {
+    if (peek.ctx) { setRequestCtx(peek.ctx); peek.clear() }
+  }, [peek.ctx]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Resolve the slug → app row → stage. /api/apps is already access-filtered
   // server-side, so a slug missing from the list means no access / no app.
@@ -86,15 +100,18 @@ export function AppFrameView() {
     const el = topbarRef.current
     if (!el || !stage) return
 
-    const onBack = () => { window.location.href = '/launch' }
+    const onBack = () => navigate('/launch')
     const onRefresh = () => {
-      setStage(s => (s ? { ...s, url: '' } : s))
-      setTimeout(() => setStage(s => {
+      // Cache-bust the URL (new _ts) so the keyed iframe fully remounts and the
+      // app's HTML is refetched — picking up a new deploy's content-hashed
+      // assets. Also re-check the live version (below).
+      setRefreshNonce(n => n + 1)
+      setStage(s => {
         if (!s) return s
         const base = s.env === 'sandbox' ? s.sandUrl : s.prodUrl
         const sep = base.includes('?') ? '&' : '?'
         return { ...s, url: `${base}${sep}_ts=${Date.now()}` }
-      }), 0)
+      })
     }
     const onEnv = (e: Event) => {
       const env = (e as CustomEvent<{ env: 'production' | 'sandbox' }>).detail.env
@@ -114,8 +131,27 @@ export function AppFrameView() {
     }
   }, [stage?.slug])
 
+  // v2.14.1: the topbar opens with the deploy-record version from /api/apps.
+  // Re-fetch the app's LIVE version (its health endpoint) on open, env switch,
+  // and every Refresh — so after a redeploy the pill matches what's running.
+  useEffect(() => {
+    if (!stage?.slug) return
+    const s = stage.slug
+    const env = stage.env
+    adminApi.get<{ version?: string }>(`/api/apps/${encodeURIComponent(s)}/live-version/${env}`)
+      .then(r => {
+        if (!r?.version) return
+        setStage(prev => {
+          if (!prev || prev.slug !== s) return prev
+          return env === 'sandbox' ? { ...prev, sandVersion: r.version! } : { ...prev, prodVersion: r.version! }
+        })
+      })
+      .catch(() => {})
+  }, [stage?.slug, stage?.env, refreshNonce])
+
   if (status === 'ready' && stage) {
     return (
+      <>
       <div className="lstage-frame">
         <crane-app-topbar
           ref={topbarRef}
@@ -129,9 +165,35 @@ export function AppFrameView() {
           env={stage.env}
           current-url={stage.url}
           {...(folded ? { folded: '' } : {})}
-        />
-        {stage.url && <iframe className="lstage-iframe" src={stage.url} title={stage.name} />}
+        >
+          <span slot="actions" style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+            {stage.hasGithub && (
+              <button
+                type="button"
+                className={'crane-topbar-btn' + (peek.active || requestCtx ? ' active' : '')}
+                onClick={() => {
+                  if (requestCtx) { setRequestCtx(null); return }
+                  if (peek.active) { peek.stop(); return }
+                  peek.start()
+                }}
+                title={peek.active
+                  ? 'Click an element in the app, then describe the change. Esc to cancel.'
+                  : 'Point at an element to request an enhancement'}
+              ><Icon.Lightbulb size={14} /> {peek.active ? 'Pick…' : 'Request'}</button>
+            )}
+          </span>
+        </crane-app-topbar>
+        {stage.url && <iframe key={stage.url} ref={iframeRef} className="lstage-iframe" src={stage.url} title={stage.name} />}
       </div>
+      {requestCtx && (
+        <RequestModal
+          slug={stage.slug}
+          appName={stage.name}
+          peekCtx={requestCtx}
+          onClose={() => setRequestCtx(null)}
+        />
+      )}
+      </>
     )
   }
 

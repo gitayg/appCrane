@@ -5,7 +5,7 @@ import { JobsButton } from '../components/runtime-topbar/JobsButton'
 import { RequestModal } from '../components/runtime-topbar/RequestModal'
 import { WhatsNewModal, type WhatsNewChange } from '../components/WhatsNewModal'
 import { usePeek, type PeekCtx } from '../hooks/usePeek'
-import { Navigate } from 'react-router-dom'
+import { Navigate, useLocation } from 'react-router-dom'
 import { useMe, isAdmin, canCreateApps } from '../hooks/useMe'
 import { BugPanel } from '../components/runtime-topbar/BugPanel'
 import { defineCraneAppTopbar } from '../topbar-element/entry'
@@ -83,6 +83,16 @@ export function Applications() {
   // permission (global admins, or a tier a platform admin granted) — in
   // both the Launcher and Manage views, not just admins in Manage.
   const mayCreateApp = canCreateApps(me)
+  // v2.14.1: the sidebar "+ Add Application" button navigates here with
+  // { addApp: true } — auto-open the onboarding flow, then clear the state so
+  // a refresh doesn't re-trigger it.
+  const location = useLocation()
+  useEffect(() => {
+    if ((location.state as { addApp?: boolean } | null)?.addApp) {
+      generateAgentKey()
+      window.history.replaceState({}, '')
+    }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
   // v2.13.0: the launcher view was dissolved into the main sidebar nav, so
   // Applications is now just the admin manage table. Non-admins are redirected
   // to /launch (see below).
@@ -822,14 +832,14 @@ STEP 3 - In any terminal run \`claude\`, then paste:
   // v2.13.0: launcher dissolved into the main sidebar nav. Non-admins have no
   // manage table — their apps live in the nav and open at /launch — so send
   // them there. Admins fall through to the manage table below.
-  if (me !== null && !adminLike) {
+  if (me !== null && !adminLike && !mayCreateApp) {
     return <Navigate to="/launch" replace />
   }
 
   return (
     <div className="container">
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
-        <h2 style={{ margin: 0 }}>Applications</h2>
+        <h2 style={{ margin: 0 }}>Manage</h2>
         {mayCreateApp && (
           <button className="btn btn-accent" onClick={generateAgentKey}>+ Add Application</button>
         )}

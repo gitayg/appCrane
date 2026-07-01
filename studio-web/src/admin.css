@@ -118,9 +118,16 @@ code, kbd, .mono, .job-tag, pre {
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
   display: flex;
-  align-items: baseline;
+  flex-direction: column;
+  align-items: flex-start;
   gap: 8px;
 }
+/* v2.14.1: version + update pill moved under the sidebar logo. */
+.sidebar-version { max-width: 100%; }
+.sidebar-version .topbar-version-pill { max-width: 100%; }
+/* v2.14.1: "+ Add Application" in the sidebar. */
+.sidebar-add-app { display: block; width: calc(100% - 28px); margin: 4px 14px 8px; text-align: center; }
+.admin-sidebar.collapsed .sidebar-add-app { width: 36px; margin: 4px auto 8px; padding: 6px 0; }
 .sidebar-logo {
   font-weight: 700;
   font-size: 1.05rem;
