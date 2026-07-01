@@ -11,6 +11,8 @@
  * after confirming the shipped change actually works.
  */
 
+import { notifyRequesterFulfilled } from './requestNotify.js';
+
 const SHIPPED_STATUSES = new Set([
   'merged', 'done', 'sandbox_ready', 'no_changes_needed',
 ]);
@@ -57,6 +59,7 @@ export function bucketToStatus(bucket) {
 export function applyBucket(db, id, bucket, userId) {
   if (!BUCKETS.includes(bucket)) throw new Error(`Invalid bucket: ${bucket}`);
   const { status, clearValidated } = bucketToStatus(bucket);
+  const prev = db.prepare('SELECT status FROM enhancement_requests WHERE id = ?').get(id);
 
   if (bucket === 'validated') {
     db.prepare(
@@ -70,6 +73,11 @@ export function applyBucket(db, id, bucket, userId) {
     } else {
       db.prepare('UPDATE enhancement_requests SET status = ? WHERE id = ?').run(status, id);
     }
+  }
+
+  // v2.14.1: first time a request reaches the shipped bucket, email the requester.
+  if (bucket === 'shipped' && prev?.status !== 'done') {
+    notifyRequesterFulfilled(id);
   }
   return bucket;
 }
