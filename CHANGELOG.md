@@ -5,6 +5,7 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.15.0 — Open multiple apps at once, each in its own tab; the app views (and their iframes) now stay alive as you move around the dashboard, so switching tabs is instant and nothing reloads
 ## 2.14.3 — Skills moved under Settings; sidebar reorganized (Manage/Docs/Settings pinned to the bottom, your account moved into the sidebar); app owners now emailed on any new request to their app
 ## 2.14.2 — Requests table layout fixed; the update dialog now shows specific release notes; won't-do request emails (with a copy to platform admins); a daily digest of pending requests to app owners
 ## 2.14.1 — Sidebar & inline-app polish; email the requester when a request is fulfilled, and app admins on access requests
