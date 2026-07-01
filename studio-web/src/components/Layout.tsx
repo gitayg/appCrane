@@ -43,7 +43,6 @@ const NAV: NavItem[] = [
   { id: 'dashboard',    label: 'Dashboard',    href: '/dashboard',    icon: <Icon.Dashboard /> },
   { id: 'applications', label: 'Manage',       href: '/applications', icon: <Icon.Layers /> },
   { id: 'requests',     label: 'Requests',     href: '/requests',     icon: <Icon.Lightbulb /> },
-  { id: 'my-requests',  label: 'My Requests',  href: '/my-requests',  icon: <Icon.Activity /> },
   { id: 'docs',         label: 'Docs',         href: '/docs',         icon: <Icon.Book /> },
   { id: 'settings',     label: 'Settings',     href: '/settings',     icon: <Icon.Settings /> },
 ]
@@ -167,23 +166,32 @@ export function Layout({ children, subItems, activeSub }: Props) {
     }
   }
 
-  // Open-requests counter for the Requests nav badge.
-  // Admin endpoint first, fall back to /owned (requests filed against apps
-  // the caller owns/admins) so the badge matches what the /requests page
-  // shows. Plain users with no app role get 0 → sidebar hides the link.
+  // Open-requests counter for the Requests nav badge. v2.16.0: the Requests
+  // page is now role-scoped (platform admin → all, app owner → their apps,
+  // plain user → their own), so the badge queries the matching endpoint:
+  //   admin  → /api/enhancements  (fallback /owned)
+  //   owner  → /api/enhancements/owned
+  //   user   → /api/enhancements/my
   useEffect(() => {
     if (!isAuthed) return
     const TERM = new Set(['done', 'merged', 'closed', 'failed', 'cancelled'])
+    const adminLikeNow = userRole === 'admin' || userRole === 'platform_admin'
+    const ownerNow = navApps.some(a => a.app_role === 'owner')
+    const endpoint = adminLikeNow ? '/api/enhancements'
+      : ownerNow ? '/api/enhancements/owned'
+      : '/api/enhancements/my'
+    const countOpen = (requests?: { status?: string }[]) =>
+      (requests || []).filter(r => !TERM.has((r.status || '').toLowerCase())).length
     const fetchCount = () =>
-      adminApi.get<{ requests: { status?: string }[] }>('/api/enhancements')
-        .catch(() => adminApi.get<{ requests: { status?: string }[] }>('/api/enhancements/owned').catch(() => ({ requests: [] })))
-        .then(({ requests }) => {
-          setOpenRequests((requests || []).filter(r => !TERM.has((r.status || '').toLowerCase())).length)
-        })
+      adminApi.get<{ requests: { status?: string }[] }>(endpoint)
+        .catch(() => adminLikeNow
+          ? adminApi.get<{ requests: { status?: string }[] }>('/api/enhancements/owned').catch(() => ({ requests: [] }))
+          : { requests: [] })
+        .then(({ requests }) => setOpenRequests(countOpen(requests)))
     fetchCount()
     const t = setInterval(fetchCount, 15000)
     return () => clearInterval(t)
-  }, [isAuthed])
+  }, [isAuthed, userRole, navApps])
 
 
   useEffect(() => {
@@ -299,7 +307,8 @@ export function Layout({ children, subItems, activeSub }: Props) {
     if (p.adminOnly && !adminLike) return false
     if (p.ownerOrAdmin && !adminLike && !isOwner) return false
     if (p.id === 'settings' && !adminLike && !isOwner) return false
-    if (p.id === 'requests' && openRequests === 0 && !adminLike) return false
+    // v2.16.0: Requests is everyone's home for their own requests, so it's
+    // always shown (plain users see + delete their own submissions there).
     return true
   })
   const renderNavItem = (p: NavItem) => (

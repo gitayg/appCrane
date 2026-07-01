@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { AuthContext, useAuthState } from './hooks/useAuth'
+import { useMe, isAdmin } from './hooks/useMe'
+import { adminApi } from './adminApi'
 import { Layout } from './components/Layout'
 import { Login } from './components/Login'
 import { Dashboard } from './pages/Dashboard'
@@ -78,6 +80,26 @@ function DocsRoute() {
   )
 }
 
+// v2.16.0: the Requests page is role-scoped. Platform/global admins and app
+// owners get the triage view (all requests / their apps' requests, via
+// /api/enhancements + /owned); everyone else gets their own requests
+// (MyRequests → /api/enhancements/my) with delete. One nav item, one route.
+function RequestsRoute() {
+  const me = useMe()
+  const adminLike = isAdmin(me)
+  const [isOwner, setIsOwner] = useState<boolean | null>(null)
+  useEffect(() => {
+    if (me === null) return           // role not resolved yet
+    if (adminLike) { setIsOwner(true); return }
+    adminApi.get<{ apps: { app_role?: string }[] }>('/api/apps')
+      .then(r => setIsOwner((r.apps || []).some(a => a.app_role === 'owner')))
+      .catch(() => setIsOwner(false))
+  }, [me, adminLike])
+  const resolving = me === null || isOwner === null
+  const triage = adminLike || isOwner === true
+  return <Layout>{resolving ? null : (triage ? <AppStudio tab="requests" /> : <MyRequests />)}</Layout>
+}
+
 export function AdminApp() {
   const auth = useAuthState()
 
@@ -136,9 +158,10 @@ export function AdminApp() {
           <Route path="/audit-page"  element={<Navigate to="/settings#audit" replace />} />
           {/* AppStudio collapsed: Requests is top-level. Builders removed
               v1.27.89 — internal builders moved to local Claude Code via MCP. */}
-          <Route path="/requests"    element={<Layout><AppStudio tab="requests" /></Layout>} />
-          {/* v2.16.0: personal requests view — any signed-in user, see + delete own. */}
-          <Route path="/my-requests" element={<Layout><MyRequests /></Layout>} />
+          {/* v2.16.0: one role-scoped Requests page (admin=all, owner=their
+              apps, user=own). Old /my-requests link folds back into it. */}
+          <Route path="/requests"    element={<RequestsRoute />} />
+          <Route path="/my-requests" element={<Navigate to="/requests" replace />} />
           <Route path="/builders"    element={<Navigate to="/requests" replace />} />
           <Route path="/appstudio"   element={<Navigate to="/requests" replace />} />
           {/* v2.13.0: MCP moved under Settings. Old links redirect. */}
