@@ -5,7 +5,8 @@ import { Users } from './Users'
 import { AuditLog } from './AuditLog'
 import { BrandingTab } from '../components/BrandingTab'
 import { Mcp } from './Mcp'
-import { useMe } from '../hooks/useMe'
+import { SkillsTab } from '../components/SkillsTab'
+import { useMe, isAdmin } from '../hooks/useMe'
 
 function SecurityTab() {
   const [certFile, setCertFile] = useState('')
@@ -1011,9 +1012,9 @@ function BackupTab() {
   )
 }
 
-type Tab = 'security' | 'users' | 'roles' | 'github' | 'mail' | 'backup' | 'branding' | 'audit' | 'mcp'
+type Tab = 'security' | 'users' | 'roles' | 'github' | 'mail' | 'backup' | 'branding' | 'audit' | 'mcp' | 'skills'
 
-const VALID_TABS: Tab[] = ['security', 'users', 'roles', 'github', 'mail', 'backup', 'branding', 'audit', 'mcp']
+const VALID_TABS: Tab[] = ['security', 'users', 'roles', 'github', 'mail', 'backup', 'branding', 'audit', 'mcp', 'skills']
 
 function getTab(): Tab {
   const hash = window.location.hash.replace('#', '') as Tab
@@ -1023,6 +1024,7 @@ function getTab(): Tab {
 export function Settings() {
   const me = useMe()
   const isPlatformAdmin = me?.user?.role === 'platform_admin'
+  const adminLike = isAdmin(me)
   const [tab, setTab] = useState<Tab>(getTab)
 
   useEffect(() => {
@@ -1039,13 +1041,24 @@ export function Settings() {
     return <div className="container"><p style={{ color: 'var(--dim)' }}>Loading…</p></div>
   }
   if (!isPlatformAdmin) {
-    return <div className="container"><Mcp /></div>
+    // Owners get MCP only; admins also get Skills — tab-switched. The other
+    // platform-admin tabs are not mounted here (they'd fire admin-only fetches).
+    const showSkills = tab === 'skills' && adminLike
+    return (
+      <div className="container">
+        {adminLike && <div style={{ display: showSkills ? 'block' : 'none' }}><SkillsTab /></div>}
+        <div style={{ display: showSkills ? 'none' : 'block' }}><Mcp /></div>
+      </div>
+    )
   }
 
   return (
     <div className="container">
       <div style={{ display: tab === 'mcp' ? 'block' : 'none' }}>
         <Mcp />
+      </div>
+      <div style={{ display: tab === 'skills' ? 'block' : 'none' }}>
+        <SkillsTab />
       </div>
       <div style={{ display: tab === 'security' ? 'block' : 'none' }}>
         <SecurityTab />

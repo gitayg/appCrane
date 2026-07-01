@@ -66,11 +66,12 @@ export function notifyRequesterFulfilled(enhancementId) {
  * v2.14.1: email an app's owners/admins when someone requests access to it, so
  * they can approve/deny without waiting to notice it in the dashboard.
  */
-export function notifyAppAdminsOfAccessRequest(appSlug, requesterName) {
+export function notifyAppAdminsOfNewRequest(enhancementId) {
   try {
-    if (!appSlug) return;
     const db = getDb();
-    const app = db.prepare('SELECT id, name FROM apps WHERE slug = ?').get(appSlug);
+    const row = db.prepare('SELECT id, app_slug, user_name, message FROM enhancement_requests WHERE id = ?').get(enhancementId);
+    if (!row?.app_slug) return;
+    const app = db.prepare('SELECT id, name FROM apps WHERE slug = ?').get(row.app_slug);
     if (!app) return;
 
     const admins = db.prepare(`
@@ -81,19 +82,27 @@ export function notifyAppAdminsOfAccessRequest(appSlug, requesterName) {
     `).all(app.id);
     if (!admins.length) return;
 
-    const appName = app.name || appSlug;
-    const subject = `Access request for ${appName}`;
+    const appName = app.name || row.app_slug;
+    const who = row.user_name || 'A user';
+    const msg = String(row.message || '').trim();
+    const isAccess = /^Access request for app/i.test(msg);
+    const subject = isAccess ? `Access request for ${appName}` : `New request for ${appName}`;
+
     for (const a of admins) {
-      const text =
-        `Hi${a.name ? ' ' + a.name : ''},\n\n` +
-        `${requesterName || 'A user'} has requested access to ${appName}.\n\n` +
-        `Approve or deny it from AppCrane (it appears in the app's requests), or an agent ` +
-        `can handle it via appcrane_list_access_requests.\n\n` +
-        `— AppCrane`;
-      try { enqueueEmail({ to: a.email, subject, text, source: 'access-request' }); } catch (_) { /* skip bad recipient */ }
+      const hi = `Hi${a.name ? ' ' + a.name : ''},\n\n`;
+      const text = isAccess
+        ? hi +
+          `${who} has requested access to ${appName}.\n\n` +
+          `Approve or deny it from AppCrane (it appears in the app's requests), or an agent ` +
+          `can handle it via appcrane_list_access_requests.\n\n— AppCrane`
+        : hi +
+          `${who} submitted a new request for ${appName}:\n\n` +
+          `  "${msg.slice(0, 500)}"\n\n` +
+          `Review it in AppCrane -> Requests.\n\n— AppCrane`;
+      try { enqueueEmail({ to: a.email, subject, text, source: isAccess ? 'access-request' : 'new-request' }); } catch (_) { /* skip bad recipient */ }
     }
-    log.info(`[access-request] notified ${admins.length} admin(s) of ${appName}`);
+    log.info(`[request-notify] notified ${admins.length} admin(s) of ${isAccess ? 'access' : 'new'} request #${row.id} for ${appName}`);
   } catch (e) {
-    log.warn(`[access-request] could not notify app admins for ${appSlug}: ${e.message}`);
+    log.warn(`[request-notify] could not notify app admins for enhancement ${enhancementId}: ${e.message}`);
   }
 }

@@ -10,7 +10,6 @@ import { Settings } from './pages/Settings'
 import { Docs } from './pages/Docs'
 import { AppManager } from './pages/AppManager'
 import { AppFrameView } from './pages/AppFrameView'
-import { SkillsTab } from './components/SkillsTab'
 
 // AppStudio top-level nav was collapsed in v1.27.38: Requests + Builders
 // became top-level nav items, Skills + Style Guide (renamed from Branding)
@@ -22,6 +21,7 @@ import { SkillsTab } from './components/SkillsTab'
 const SETTINGS_SUB = [
   // v2.13.0: MCP moved under Settings; visible to app-owners + platform-admins.
   { id: 'mcp',        label: 'MCP',         href: '#mcp',      ownerOrAdmin: true },
+  { id: 'skills',     label: 'Skills',      href: '#skills',   adminOnly: true },
   { id: 'security',   label: 'Security',    href: '#security', platformAdminOnly: true },
   { id: 'users',      label: 'Users',       href: '#users',    platformAdminOnly: true },
   { id: 'roles',      label: 'Roles',       href: '#roles',    platformAdminOnly: true },
@@ -56,7 +56,7 @@ function useHash() {
 
 function SettingsRoute() {
   const hash = useHash()
-  const valid = ['mcp', 'security', 'users', 'roles', 'github', 'mail', 'backup', 'branding', 'audit']
+  const valid = ['mcp', 'skills', 'security', 'users', 'roles', 'github', 'mail', 'backup', 'branding', 'audit']
   const activeSub = valid.includes(hash) ? hash : 'security'
   return (
     <Layout subItems={SETTINGS_SUB} activeSub={activeSub}>
@@ -144,7 +144,8 @@ export function AdminApp() {
           {/* v2.6.9: Skills promoted out of /settings to a top-level
               admin-readable page. SkillsTab is self-contained — same
               component the old /settings#skills mounted. */}
-          <Route path="/skills"      element={<Layout><div className="container"><SkillsTab /></div></Layout>} />
+          {/* v2.14.3: Skills moved under Settings. Old links redirect. */}
+          <Route path="/skills"      element={<Navigate to="/settings#skills" replace />} />
           {/* Legacy /settings#skills bookmark → top-level /skills */}
           <Route path="/settings"    element={<SettingsRoute />} />
           <Route path="/docs"        element={<DocsRoute />} />

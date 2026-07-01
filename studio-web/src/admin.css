@@ -235,7 +235,12 @@ code, kbd, .mono, .job-tag, pre {
 .admin-sidebar.collapsed .sidebar-user-section { display: none; }
 
 /* ── Sidebar nav ─────────────────────────────────── */
-.sidebar-nav { flex: 1; padding: 8px; }
+.sidebar-nav { flex: 1; padding: 8px; overflow-y: auto; min-height: 0; }
+/* v2.14.3: admin/config nav pinned to the bottom of the rail. */
+.sidebar-nav-bottom { flex: 0 0 auto; overflow: visible; border-top: 1px solid var(--border); }
+.sidebar-user { padding: 4px 10px 8px; font-size: .72rem; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sidebar-signout { background: var(--surface2); border: 1px solid var(--border); color: var(--dim); border-radius: 6px; padding: 5px 10px; font-size: .78rem; cursor: pointer; }
+.sidebar-signout:hover { color: var(--text); border-color: var(--border2, #2a2d3a); }
 
 .sidebar-link {
   display: flex;

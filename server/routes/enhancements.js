@@ -10,7 +10,7 @@ import {
 } from '../services/enhancementComments.js';
 import { BUCKETS, bucketize, applyBucket } from '../services/requestStatus.js';
 import { userHasAppPermission } from '../services/permissions.js';
-import { notifyRequesterFulfilled, notifyAppAdminsOfAccessRequest } from '../services/requestNotify.js';
+import { notifyRequesterFulfilled, notifyAppAdminsOfNewRequest } from '../services/requestNotify.js';
 
 const router = Router();
 
@@ -88,10 +88,8 @@ router.post('/', (req, res) => {
       const row = db.prepare('SELECT id, message, user_name, status, created_at FROM enhancement_requests WHERE id = ?').get(lastInsertRowid);
       mirrorRequest(app, row).catch(() => {});
     }
-    // v2.14.1: access requests → email the app's owners/admins so they can act.
-    if (/^Access request for app/i.test(message.trim())) {
-      notifyAppAdminsOfAccessRequest(app_slug, userName);
-    }
+    // v2.14.1/3: email the app's owners/admins on any new request (access or feature).
+    notifyAppAdminsOfNewRequest(lastInsertRowid);
   }
 });
 
