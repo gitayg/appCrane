@@ -42,12 +42,11 @@ const NAV: NavItem[] = [
   { id: 'dashboard',    label: 'Dashboard',    href: '/dashboard',    icon: <Icon.Dashboard /> },
   { id: 'applications', label: 'Manage',       href: '/applications', icon: <Icon.Layers /> },
   { id: 'requests',     label: 'Requests',     href: '/requests',     icon: <Icon.Lightbulb /> },
-  { id: 'skills',       label: 'Skills',       href: '/skills',       icon: <Icon.Sparkles />, adminOnly: true },
   { id: 'docs',         label: 'Docs',         href: '/docs',         icon: <Icon.Book /> },
   { id: 'settings',     label: 'Settings',     href: '/settings',     icon: <Icon.Settings /> },
 ]
 
-interface SubItem { id: string; label: string; href: string; platformAdminOnly?: boolean; ownerOrAdmin?: boolean }
+interface SubItem { id: string; label: string; href: string; platformAdminOnly?: boolean; ownerOrAdmin?: boolean; adminOnly?: boolean }
 
 interface Props {
   children: React.ReactNode
@@ -76,7 +75,6 @@ export function Layout({ children, subItems, activeSub }: Props) {
   const [notifItems, setNotifItems] = useState<{ title: string; sub: string; color: string }[]>([])
   const [notifLoaded, setNotifLoaded] = useState(false)
   const [openRequests, setOpenRequests] = useState(0)
-  const [mcpStatus, setMcpStatus] = useState<'unknown' | 'connected' | 'disconnected'>('unknown')
   // v2.13.0: AppCrane's own What's New, shown to platform admins post-login
   // when the running version is newer than what they last saw.
   const [platformWN, setPlatformWN] = useState<{ currentVersion: string | null; changes: WhatsNewChange[]; seenUrl?: string; primaryLabel?: string; onPrimary?: () => void } | null>(null)
@@ -184,21 +182,6 @@ export function Layout({ children, subItems, activeSub }: Props) {
     return () => clearInterval(t)
   }, [isAuthed])
 
-  // MCP connection status pill — pings /api/mcp/connection. 200 → connected;
-  // anything else → disconnected. The endpoint requires auth; if the user's
-  // session is broken the pill shows disconnected, which is correct since
-  // their MCP calls would fail too. Refresh every 30s.
-  useEffect(() => {
-    if (!isAuthed) return
-    const ping = () => {
-      adminApi.get<{ server: { name: string; version: string } }>('/api/mcp/connection')
-        .then(() => setMcpStatus('connected'))
-        .catch(() => setMcpStatus('disconnected'))
-    }
-    ping()
-    const t = setInterval(ping, 30000)
-    return () => clearInterval(t)
-  }, [isAuthed])
 
   useEffect(() => {
     function handleClick(e: MouseEvent) {
@@ -299,6 +282,50 @@ export function Layout({ children, subItems, activeSub }: Props) {
   const activeNavId = activeNav?.id ?? ''
   const pageTitle = activeNav?.label ?? ''
 
+  // v2.14.3: split the nav — primary items (+ the Apps list) at the top, the
+  // admin/config items pinned to the bottom of the rail.
+  const BOTTOM_NAV = new Set(['applications', 'docs', 'settings'])
+  const gatedNav = NAV.filter(p => {
+    if (p.platformAdminOnly && userRole !== 'platform_admin') return false
+    if (p.adminOnly && !adminLike) return false
+    if (p.ownerOrAdmin && !adminLike && !isOwner) return false
+    if (p.id === 'settings' && !adminLike && !isOwner) return false
+    if (p.id === 'requests' && openRequests === 0 && !adminLike) return false
+    return true
+  })
+  const renderNavItem = (p: NavItem) => (
+    <div key={p.id}>
+      {p.external ? (
+        <a href={p.href} className={'sidebar-link' + (location.pathname === p.href ? ' active' : '')} title={p.label}>
+          <span className="sidebar-link-icon">{p.icon}</span>
+          <span className="sidebar-link-text">{p.label}</span>
+        </a>
+      ) : (
+        <NavLink
+          to={p.href}
+          className={({ isActive }) => 'sidebar-link' + (isActive ? ' active' : '')}
+          title={p.id === 'requests' && openRequests > 0 ? `${p.label} — ${openRequests} open` : p.label}
+        >
+          <span className="sidebar-link-icon">{p.icon}</span>
+          <span className="sidebar-link-text">{p.label}</span>
+          {p.id === 'requests' && openRequests > 0 && <span className="sidebar-link-badge">{openRequests}</span>}
+        </NavLink>
+      )}
+      {activeNavId === p.id && subItems && subItems.length > 0 && !collapsed && (
+        <div className="sidebar-sub-nav">
+          {subItems.filter(s => {
+            if (s.platformAdminOnly && userRole !== 'platform_admin') return false
+            if (s.ownerOrAdmin && !adminLike && !isOwner) return false
+            if (s.adminOnly && !adminLike) return false
+            return true
+          }).map(s => (
+            <a key={s.id} href={s.href} className={'sidebar-sub-link' + (activeSub === s.id ? ' active' : '')}>{s.label}</a>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+
   return (
     <div className="admin-layout">
       {/* Mobile topbar */}
@@ -370,78 +397,7 @@ export function Layout({ children, subItems, activeSub }: Props) {
           >{collapsed ? '+' : '+ Add Application'}</button>
         )}
         <nav className="sidebar-nav">
-          {NAV.filter(p => {
-            if (p.platformAdminOnly && userRole !== 'platform_admin') return false
-            if (p.adminOnly && !adminLike) return false
-            // v2.13.0: Manage is owner self-service — visible to app-owners and admins.
-            if (p.ownerOrAdmin && !adminLike && !isOwner) return false
-            // v2.13.0: Settings is reachable by owners (MCP tab) or platform admins.
-            if (p.id === 'settings' && userRole !== 'platform_admin' && !isOwner) return false
-            if (p.id === 'requests' && openRequests === 0 && !adminLike) return false
-            return true
-          }).map(p => (
-            <div key={p.id}>
-              {p.external ? (
-                <a
-                  href={p.href}
-                  className={'sidebar-link' + (location.pathname === p.href ? ' active' : '')}
-                  title={p.label}
-                >
-                  <span className="sidebar-link-icon">{p.icon}</span>
-                  <span className="sidebar-link-text">{p.label}</span>
-                </a>
-              ) : (
-                <NavLink
-                  to={p.href}
-                  className={({ isActive }) => 'sidebar-link' + (isActive ? ' active' : '')}
-                  title={p.id === 'requests' && openRequests > 0 ? `${p.label} — ${openRequests} open` : p.label}
-                >
-                  <span className="sidebar-link-icon">{p.icon}</span>
-                  <span className="sidebar-link-text">{p.label}</span>
-                  {p.id === 'requests' && openRequests > 0 && (
-                    <span className="sidebar-link-badge">{openRequests}</span>
-                  )}
-                  {p.id === 'mcp' && mcpStatus !== 'unknown' && (
-                    <span
-                      className="sidebar-link-pill"
-                      title={mcpStatus === 'connected' ? 'MCP server is reachable' : 'MCP server is unreachable'}
-                      style={{
-                        marginLeft: 'auto',
-                        fontSize: '.62rem',
-                        fontWeight: 700,
-                        letterSpacing: '.5px',
-                        textTransform: 'uppercase',
-                        padding: '2px 7px',
-                        borderRadius: 999,
-                        background: mcpStatus === 'connected' ? 'var(--green, #22c55e)' : 'var(--dim, #71717a)',
-                        color: 'var(--bg, #0f1117)',
-                      }}
-                    >
-                      {mcpStatus === 'connected' ? 'on' : 'off'}
-                    </span>
-                  )}
-                </NavLink>
-              )}
-              {activeNavId === p.id && subItems && subItems.length > 0 && !collapsed && (
-                <div className="sidebar-sub-nav">
-                  {subItems.filter(s => {
-                    // v2.13.0: per-sub-item gating so owners see only the MCP tab.
-                    if (s.platformAdminOnly && userRole !== 'platform_admin') return false
-                    if (s.ownerOrAdmin && !adminLike && !isOwner) return false
-                    return true
-                  }).map(s => (
-                    <a
-                      key={s.id}
-                      href={s.href}
-                      className={'sidebar-sub-link' + (activeSub === s.id ? ' active' : '')}
-                    >
-                      {s.label}
-                    </a>
-                  ))}
-                </div>
-              )}
-            </div>
-          ))}
+          {gatedNav.filter(p => !BOTTOM_NAV.has(p.id)).map(renderNavItem)}
 
           {/* v2.13.0: merged launcher — accessible apps live in the main nav,
               grouped by category. Section + each category collapse. Apps open
@@ -484,12 +440,19 @@ export function Layout({ children, subItems, activeSub }: Props) {
           )}
         </nav>
 
-        {/* Footer. v2.6.4: dropped the "Agent Guide" link — /agent-guide
-            was retired in v2.5.24 along with the curl-heavy AGENT_GUIDE.md.
-            Agents pull guidance through appcrane_get_guide; nobody opens
-            this page in a browser anymore. */}
+        {/* v2.14.3: admin/config items (Manage, Docs, Settings) pinned to the
+            bottom of the rail, above the footer. */}
+        <nav className="sidebar-nav sidebar-nav-bottom">
+          {gatedNav.filter(p => BOTTOM_NAV.has(p.id)).map(renderNavItem)}
+        </nav>
+
+        {/* Footer — user + sign out (moved here from the topbar in v2.14.3). */}
         <div className="sidebar-footer">
+          {!collapsed && userName && <div className="sidebar-user" title={userName}>{userName}</div>}
           <div className="sidebar-footer-row">
+            <button className="sidebar-signout" onClick={signOut} title="Sign out">
+              {collapsed ? '⎋' : 'Sign out'}
+            </button>
             <button className="theme-btn" onClick={toggleTheme} title="Toggle theme">
               {theme === 'dark' ? '☀' : '🌙'}
             </button>
@@ -532,8 +495,6 @@ export function Layout({ children, subItems, activeSub }: Props) {
                 }
               </div>
             </div>
-            {userName && <span className="admin-topbar-user">{userName}</span>}
-            <button className="admin-topbar-signout" onClick={signOut}>Sign out</button>
           </div>
         </div>
         {children}
