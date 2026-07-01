@@ -92,7 +92,7 @@ export function sendPendingRequestDigests() {
 
   const base = process.env.CRANE_DOMAIN ? `https://${process.env.CRANE_DOMAIN}` : '';
   const reviewLink = base ? `${base}/requests` : null;
-  const PER_APP_CAP = 50; // guard against a pathologically long email
+  const PER_APP_CAP = 10; // keep the email skimmable; the rest is one click away
 
   let sent = 0;
   for (const [email, data] of byOwner) {
@@ -114,7 +114,9 @@ export function sendPendingRequestDigests() {
         text += `  - #${String(r.id).padStart(4, '0')}  ${summary}` +
           `  [${r.user_name || 'someone'}${url ? ', ' + url : ''}]\n`;
       }
-      if (a.reqs.length > shown.length) text += `  ...and ${a.reqs.length - shown.length} more\n`;
+      if (a.reqs.length > shown.length) {
+        text += `  + ${a.reqs.length - shown.length} more — read more in AppCrane${reviewLink ? ': ' + reviewLink : ''}\n`;
+      }
     }
     text += `\nReview them in AppCrane -> Requests${reviewLink ? ': ' + reviewLink : ''}.\n`;
 
@@ -132,8 +134,12 @@ export function sendPendingRequestDigests() {
             `<div style="font-size:12px;color:#6b7280;margin-top:2px;">${meta}</div>` +
           `</td></tr>`;
       }).join('');
-      const overflow = a.reqs.length > shown.length
-        ? `<tr><td colspan="2" style="padding:6px 10px;font-size:12px;color:#6b7280;border-top:1px solid #eef0f3;">...and ${a.reqs.length - shown.length} more in AppCrane</td></tr>`
+      const moreN = a.reqs.length - shown.length;
+      const moreLabel = reviewLink
+        ? `<a href="${esc(reviewLink)}" style="color:#3b82f6;text-decoration:none;">read more in AppCrane</a>`
+        : 'read more in AppCrane';
+      const overflow = moreN > 0
+        ? `<tr><td colspan="2" style="padding:6px 10px;font-size:12px;color:#6b7280;border-top:1px solid #eef0f3;">+ ${moreN} more &mdash; ${moreLabel}</td></tr>`
         : '';
       return `<div style="margin:22px 0 0;">` +
         `<div style="font-size:15px;font-weight:600;color:#111827;padding-bottom:6px;border-bottom:2px solid #e5e7eb;">` +
