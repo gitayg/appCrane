@@ -76,8 +76,9 @@ export function applyBucket(db, id, bucket, userId) {
   }
 
   // v2.14.1: first time a request reaches the shipped bucket, email the requester.
+  // v2.19.0: pass the actor so the reply is signed by whoever shipped it.
   if (bucket === 'shipped' && prev?.status !== 'done') {
-    notifyRequesterFulfilled(id);
+    notifyRequesterFulfilled(id, userId);
   }
   return bucket;
 }

@@ -278,7 +278,7 @@ router.post('/:id/set-status', requireAuth, requireAdmin, (req, res) => {
   // email the requester + platform admins and close the mirrored GitHub issue.
   const terminal = status === 'done' || status === 'no_changes_needed';
   if (terminal && row.status !== status) {
-    notifyRequesterFulfilled(id);
+    notifyRequesterFulfilled(id, req.user.id);
     if (row.app_slug) {
       const app = getAppForMirror(row.app_slug);
       if (app?.github_url) {
