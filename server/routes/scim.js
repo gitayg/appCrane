@@ -24,9 +24,28 @@ import log from '../utils/logger.js';
 const router = Router();
 
 const SCIM_USER_SCHEMA = 'urn:ietf:params:scim:schemas:core:2.0:User';
+const SCIM_ENTERPRISE_SCHEMA = 'urn:ietf:params:scim:schemas:extension:enterprise:2.0:User';
 const SCIM_LIST_SCHEMA  = 'urn:ietf:params:scim:api:messages:2.0:ListResponse';
 const SCIM_ERROR_SCHEMA = 'urn:ietf:params:scim:api:messages:2.0:Error';
 const SCIM_PATCH_SCHEMA = 'urn:ietf:params:scim:api:messages:2.0:PatchOp';
+
+// v2.18.0: pull directory attributes AppCrane inherits from the IdP:
+//   department ← enterprise extension `department`
+//   region     ← primary/first address `region`   (state / province)
+//   location   ← primary/first address `locality` (city / office)
+// Accepts a SCIM resource body OR a PatchOp value object; both put the
+// enterprise fields under the extension URN and addresses on the core object.
+function directoryAttrs(src) {
+  if (!src || typeof src !== 'object') return {};
+  const ent = src[SCIM_ENTERPRISE_SCHEMA] || {};
+  const addrs = Array.isArray(src.addresses) ? src.addresses : [];
+  const addr = addrs.find(a => a && a.primary) || addrs[0] || {};
+  const out = {};
+  if (ent.department !== undefined) out.department = ent.department || null;
+  if (addr.region !== undefined) out.region = addr.region || null;
+  if (addr.locality !== undefined) out.location = addr.locality || null;
+  return out;
+}
 
 // ---------------------------------------------------------------------------
 // Auth middleware — Bearer token verified against stored hash
@@ -68,8 +87,11 @@ function toScimUser(u, req) {
   const nameParts = (u.name || '').trim().split(/\s+/);
   const givenName  = nameParts[0] || '';
   const familyName = nameParts.slice(1).join(' ') || '';
+  const hasAddress = u.region || u.location;
   return {
-    schemas:    [SCIM_USER_SCHEMA],
+    schemas: hasAddress || u.department
+      ? [SCIM_USER_SCHEMA, SCIM_ENTERPRISE_SCHEMA]
+      : [SCIM_USER_SCHEMA],
     id:         String(u.id),
     externalId: u.scim_external_id || undefined,
     userName:   u.email || u.username || String(u.id),
@@ -79,6 +101,8 @@ function toScimUser(u, req) {
       familyName,
     },
     emails: u.email ? [{ value: u.email, primary: true, type: 'work' }] : [],
+    ...(hasAddress ? { addresses: [{ region: u.region || undefined, locality: u.location || undefined, primary: true, type: 'work' }] } : {}),
+    ...(u.department ? { [SCIM_ENTERPRISE_SCHEMA]: { department: u.department } } : {}),
     active: u.active !== 0,
     meta: {
       resourceType:  'User',
@@ -127,6 +151,11 @@ function applyUpdateToUser(db, id, attrs) {
   if (attrs.externalId !== undefined) {
     updates.push('scim_external_id = ?'); values.push(attrs.externalId);
   }
+  // v2.18.0: department + address (region/locality) from the IdP.
+  const dir = directoryAttrs(attrs);
+  if (dir.department !== undefined) { updates.push('department = ?'); values.push(dir.department); }
+  if (dir.region     !== undefined) { updates.push('region = ?');     values.push(dir.region); }
+  if (dir.location   !== undefined) { updates.push('location = ?');   values.push(dir.location); }
 
   if (updates.length) {
     values.push(id);
@@ -162,7 +191,7 @@ router.get('/ServiceProviderConfig', requireScimToken, (req, res) => {
 router.get('/Schemas', requireScimToken, (req, res) => {
   res.json({
     schemas: ['urn:ietf:params:scim:api:messages:2.0:ListResponse'],
-    totalResults: 1,
+    totalResults: 2,
     Resources: [{
       id: SCIM_USER_SCHEMA,
       name: 'User',
@@ -173,6 +202,16 @@ router.get('/Schemas', requireScimToken, (req, res) => {
         { name: 'emails',    type: 'complex', required: false, multiValued: true },
         { name: 'active',    type: 'boolean', required: false },
         { name: 'externalId', type: 'string', required: false },
+        // v2.18.0: physical address — region (state) + locality (city) are inherited.
+        { name: 'addresses', type: 'complex', required: false, multiValued: true },
+      ],
+    }, {
+      // v2.18.0: enterprise extension — AppCrane reads `department`.
+      id: SCIM_ENTERPRISE_SCHEMA,
+      name: 'EnterpriseUser',
+      description: 'Enterprise User',
+      attributes: [
+        { name: 'department', type: 'string', required: false },
       ],
     }],
   });
@@ -236,11 +275,13 @@ router.post('/Users', requireScimToken, (req, res) => {
   const apiKey  = generateApiKey('dhk_user');
   const keyHash = hashApiKey(apiKey);
   const active  = body.active !== false ? 1 : 0;
+  const dir     = directoryAttrs(body);
 
   const result = db.prepare(`
-    INSERT INTO users (name, email, role, api_key_hash, active, scim_external_id, created_at)
-    VALUES (?, ?, 'user', ?, ?, ?, datetime('now'))
-  `).run(name, email, keyHash, active, body.externalId || null);
+    INSERT INTO users (name, email, role, api_key_hash, active, scim_external_id, department, region, location, created_at)
+    VALUES (?, ?, 'user', ?, ?, ?, ?, ?, ?, datetime('now'))
+  `).run(name, email, keyHash, active, body.externalId || null,
+         dir.department ?? null, dir.region ?? null, dir.location ?? null);
 
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(result.lastInsertRowid);
   log.info(`SCIM: created user "${name}" (${email})`);
@@ -295,9 +336,13 @@ router.patch('/Users/:id', requireScimToken, (req, res) => {
         const attr = op.path.toLowerCase();
         const patch = {};
         if (attr === 'active')   patch.active   = op.value;
-        if (attr === 'username') patch.userName  = op.value;
-        if (attr === 'name')     patch.name      = op.value;
-        if (attr === 'emails')   patch.emails    = op.value;
+        else if (attr === 'username') patch.userName  = op.value;
+        else if (attr === 'name')     patch.name      = op.value;
+        else if (attr === 'emails')   patch.emails    = op.value;
+        // v2.18.0: path-scoped department / address ops (Okta sends these too).
+        else if (attr.includes('enterprise') && attr.endsWith(':department')) patch[SCIM_ENTERPRISE_SCHEMA] = { department: op.value };
+        else if (attr.startsWith('addresses') && attr.endsWith('.region'))    patch.addresses = [{ region: op.value, primary: true }];
+        else if (attr.startsWith('addresses') && attr.endsWith('.locality'))  patch.addresses = [{ locality: op.value, primary: true }];
         applyUpdateToUser(db, id, patch);
       } else if (op.value && typeof op.value === 'object') {
         applyUpdateToUser(db, id, op.value);

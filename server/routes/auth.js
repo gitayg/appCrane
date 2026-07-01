@@ -29,7 +29,17 @@ router.get('/me', requireAuth, (req, res) => {
   }
 
   const can_create_apps = userHasPlatformPermission(req.user, 'platform.create_app');
-  res.json({ user: { id, name, email, role, created_at, can_create_apps }, apps });
+  // v2.18.0: surface the directory attributes inherited from the IdP (SCIM).
+  const dir = db.prepare('SELECT department, region, location FROM users WHERE id = ?').get(id) || {};
+  res.json({
+    user: {
+      id, name, email, role, created_at, can_create_apps,
+      department: dir.department || null,
+      region:     dir.region || null,
+      location:   dir.location || null,
+    },
+    apps,
+  });
 });
 
 export default router;
