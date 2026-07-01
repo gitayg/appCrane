@@ -20,8 +20,6 @@ var cp=Object.defineProperty;var fp=(Se,Be,Ve)=>Be in Se?cp(Se,Be,{enumerable:!0
 }
 .left, .right { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .left { flex: 1; min-width: 0; }
-.brand { font-weight: 700; font-size: .9rem; flex-shrink: 0; }
-.brand span { color: var(--accent, #3b82f6); }
 .icon { width: 22px; height: 22px; border-radius: 4px; object-fit: cover; flex-shrink: 0; }
 .name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 320px; }
 .version {
@@ -70,7 +68,6 @@ button.fold:hover { color: var(--text, #e4e4e7); border-color: var(--accent, #3b
       </div>`:"",g=m?`<button class="btn danger" data-action="evict" title="Tear down this app's shared container">🗑 Evict</button>`:"",S=p?`<a class="btn" href="${Ve(p)}" target="_blank" rel="noreferrer noopener">Open ↗</a>`:"";return`
       <div class="bar">
         <div class="left">
-          <span class="brand">App<span>Crane</span></span>
           ${w}
           <span class="name">${Ve(r)}</span>
           ${d}
