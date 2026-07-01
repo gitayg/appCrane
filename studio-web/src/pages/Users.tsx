@@ -13,6 +13,10 @@ interface User {
   sso_provider: string | null
   kind?: 'human' | 'agent'
   created_at?: string
+  // v2.18.0: directory attributes inherited from the IdP (SCIM) or set by an admin.
+  department?: string | null
+  region?: string | null
+  location?: string | null
 }
 
 interface App {
@@ -348,6 +352,9 @@ export function Users() {
             <th>Email</th>
             <th>Username</th>
             <th>Phone</th>
+            <th>Department</th>
+            <th>Region</th>
+            <th>Location</th>
             <th>Password</th>
             <th>Last login</th>
             <th>Delete</th>
@@ -399,6 +406,30 @@ export function Users() {
                     className="editable"
                     defaultValue={u.phone ?? ''}
                     onBlur={e => updateProfile(u.id, 'phone', e.target.value)}
+                  />
+                </td>
+                <td>
+                  <input
+                    className="editable"
+                    defaultValue={u.department ?? ''}
+                    placeholder={u.sso_provider ? 'from IdP' : ''}
+                    onBlur={e => updateProfile(u.id, 'department', e.target.value)}
+                  />
+                </td>
+                <td>
+                  <input
+                    className="editable"
+                    defaultValue={u.region ?? ''}
+                    placeholder={u.sso_provider ? 'from IdP' : ''}
+                    onBlur={e => updateProfile(u.id, 'region', e.target.value)}
+                  />
+                </td>
+                <td>
+                  <input
+                    className="editable"
+                    defaultValue={u.location ?? ''}
+                    placeholder={u.sso_provider ? 'from IdP' : ''}
+                    onBlur={e => updateProfile(u.id, 'location', e.target.value)}
                   />
                 </td>
                 <td>

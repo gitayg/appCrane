@@ -32,6 +32,7 @@ router.get('/', (req, res) => {
   if (isAdmin(req.user)) {
     const users = db.prepare(`
       SELECT u.id, u.name, u.email, u.username, u.role, u.kind, u.created_at, u.last_login_at,
+        u.department, u.region, u.location,
         CASE WHEN u.password_hash IS NOT NULL THEN 1 ELSE 0 END as has_password,
         CASE WHEN u.saml_name_id IS NOT NULL THEN 'saml' WHEN u.sso_sub IS NOT NULL THEN 'oidc' ELSE NULL END as sso_provider,
         (SELECT GROUP_CONCAT(a.slug, ', ') FROM app_users au JOIN apps a ON a.id = au.app_id WHERE au.user_id = u.id) as assigned_apps
@@ -226,7 +227,7 @@ router.put('/:id/password', requireAdmin, auditMiddleware('user-set-password'), 
  * PUT /api/users/:id/profile - Update user profile (admin only)
  */
 router.put('/:id/profile', requireAdmin, auditMiddleware('user-update-profile'), (req, res) => {
-  const { name, email, username, avatar_url, phone, year_of_birth, preferences } = req.body;
+  const { name, email, username, avatar_url, phone, year_of_birth, preferences, department, region, location } = req.body;
   const db = getDb();
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(parseInt(req.params.id));
   if (!user) throw new AppError('User not found', 404, 'NOT_FOUND');
@@ -240,11 +241,15 @@ router.put('/:id/profile', requireAdmin, auditMiddleware('user-update-profile'),
   if (phone !== undefined) { updates.push('phone = ?'); values.push(phone); }
   if (year_of_birth !== undefined) { updates.push('year_of_birth = ?'); values.push(year_of_birth); }
   if (preferences !== undefined) { updates.push('preferences = ?'); values.push(typeof preferences === 'string' ? preferences : JSON.stringify(preferences)); }
+  // v2.18.0: directory attributes (also auto-synced from the IdP via SCIM).
+  if (department !== undefined) { updates.push('department = ?'); values.push(department); }
+  if (region !== undefined) { updates.push('region = ?'); values.push(region); }
+  if (location !== undefined) { updates.push('location = ?'); values.push(location); }
 
   if (updates.length === 0) return res.json({ message: 'No changes' });
 
   db.prepare(`UPDATE users SET ${updates.join(', ')} WHERE id = ?`).run(...values, user.id);
-  const updated = db.prepare('SELECT id, name, email, username, avatar_url, phone, year_of_birth, preferences FROM users WHERE id = ?').get(user.id);
+  const updated = db.prepare('SELECT id, name, email, username, avatar_url, phone, year_of_birth, preferences, department, region, location FROM users WHERE id = ?').get(user.id);
   res.json({ user: updated });
 });
 
