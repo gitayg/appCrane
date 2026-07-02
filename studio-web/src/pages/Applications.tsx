@@ -30,6 +30,7 @@ interface App {
   auth_bypass_paths?: string[] | null
   domain?: string | null
   owner?: { id: number; name: string; email: string } | null
+  owners?: { id: number; name: string; email: string }[]
   production?: { deploy?: { status?: string; version?: string }; health?: { status: string } }
   sandbox?: { deploy?: { status?: string; version?: string }; health?: { status: string } }
 }
@@ -1094,13 +1095,14 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                   <tr key={`${app.slug}-actions`} className="apps-row-actions">
                     <td colSpan={11} style={{ borderTop: 'none', paddingTop: 0, paddingBottom: 8 }}>
                       <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', paddingLeft: 8, alignItems: 'center' }}>
-                        {app.owner ? (
+                        {(app.owners?.length ? app.owners : app.owner ? [app.owner] : []).length > 0 ? (
                           <span
                             className="badge"
-                            title={`Owner: ${app.owner.name}${app.owner.email ? ` (${app.owner.email})` : ''}`}
+                            title={(app.owners?.length ? app.owners : [app.owner!])
+                              .map(o => `${o.name}${o.email ? ` (${o.email})` : ''}`).join('\n')}
                             style={{ background: 'var(--surface2)', color: 'var(--dim)', fontSize: '.7rem', fontWeight: 500 }}
                           >
-                            👤 {app.owner.name}
+                            👤 {(app.owners?.length ? app.owners : [app.owner!]).map(o => o.name).join(', ')}
                           </span>
                         ) : (
                           <span

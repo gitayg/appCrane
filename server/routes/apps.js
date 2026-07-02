@@ -153,17 +153,17 @@ router.get('/', (req, res) => {
       WHERE au.app_id = ?
     `).all(app.id);
 
-    // The owner of the app — single row from app_user_roles (multiple owners
-    // shouldn't exist by design, but if they do we surface the first by id).
-    // null when the owner record was never created (e.g. apps from before
+    // The app's owners. Usually one, but multiple are allowed — v2.21.0
+    // returns them all (`owners`); `owner` stays as the first for back-compat.
+    // Empty when the owner record was never created (e.g. apps from before
     // migration 048 fixed the latent CHECK bug, or apps whose creator was
     // deleted leaving created_by NULL).
-    const ownerRow = db.prepare(`
+    const ownerRows = db.prepare(`
       SELECT u.id, u.name, u.email FROM users u
       JOIN app_user_roles aur ON aur.user_id = u.id
       WHERE aur.app_id = ? AND aur.app_role = 'owner'
-      ORDER BY u.id LIMIT 1
-    `).get(app.id);
+      ORDER BY u.id
+    `).all(app.id);
 
     const craneDomain = process.env.CRANE_DOMAIN;
     const urls = craneDomain ? {
@@ -184,7 +184,8 @@ router.get('/', (req, res) => {
       // 'admin' / 'owner' / 'user' / 'viewer' / 'none'.
       app_role: userAppRole(app),
       ...(isAdmin(req.user) ? { ports } : {}),
-      owner: ownerRow || null,
+      owner: ownerRows[0] || null,
+      owners: ownerRows,
       urls,
       base_path: { production: `/${app.slug}/`, sandbox: `/${app.slug}-sandbox/` },
       production: {
