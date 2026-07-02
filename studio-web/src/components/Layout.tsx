@@ -11,8 +11,8 @@ interface NavItem { id: string; label: string; href: string; icon: ReactElement;
 interface NavApp {
   slug: string; name: string; category?: string; has_icon?: boolean
   description?: string
-  owner?: { name: string } | null
-  owners?: { name: string }[]
+  owner?: { name: string; email?: string } | null
+  owners?: { name: string; email?: string }[]
   app_role?: 'admin' | 'owner' | 'user' | 'viewer' | 'none'
   visibility?: string
   production?: { health?: { status: string }; deploy?: AppDeploy | null }
@@ -33,9 +33,14 @@ function lastUpdateLine(a: NavApp): string | null {
   return `Updated ${date}${d.version ? ' · v' + d.version : ''}`
 }
 // v2.21.0: list every owner (falls back to the single `owner` for older data).
+function ownersOf(a: NavApp): { name: string; email?: string }[] {
+  return (a.owners?.length ? a.owners : a.owner ? [a.owner] : []).filter(o => o?.name)
+}
+function ownerNamesOf(a: NavApp): string[] {
+  return ownersOf(a).map(o => o.name)
+}
 function ownerLine(a: NavApp): string | null {
-  const names = (a.owners?.length ? a.owners : a.owner ? [a.owner] : [])
-    .map(o => o.name).filter(Boolean)
+  const names = ownerNamesOf(a)
   if (!names.length) return null
   return `${names.length > 1 ? 'Owners' : 'Owner'}: ${names.join(', ')}`
 }
@@ -513,11 +518,13 @@ export function Layout({ children, subItems, activeSub }: Props) {
                       <span className="sidebar-apps-count">{list.length}</span>
                     </button>
                     {!closed && list.map(a => (
-                      <button
+                      <div
                         key={a.slug}
-                        type="button"
+                        role="button"
+                        tabIndex={0}
                         className={'sidebar-app-link' + (location.pathname === `/launch/${a.slug}` ? ' active' : '')}
                         onClick={() => { addTab({ slug: a.slug, name: a.name, hasIcon: a.has_icon }); navigate(`/launch/${a.slug}`) }}
+                        onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); addTab({ slug: a.slug, name: a.name, hasIcon: a.has_icon }); navigate(`/launch/${a.slug}`) } }}
                         title={[a.name, a.description, ownerLine(a), lastUpdateLine(a)].filter(Boolean).join('\n')}
                       >
                         <span className="sidebar-app-ico">
@@ -526,8 +533,26 @@ export function Layout({ children, subItems, activeSub }: Props) {
                             : <span>{appInitials(a.name)}</span>}
                           <span className={appDotClass(a)} />
                         </span>
-                        <span className="sidebar-app-name">{a.name}</span>
-                      </button>
+                        <span className="sidebar-app-text">
+                          <span className="sidebar-app-name">{a.name}</span>
+                          {ownersOf(a).length > 0 && (
+                            <span className="sidebar-app-owner">
+                              by {ownersOf(a).map((o, i) => (
+                                <span key={i}>
+                                  {i > 0 && ', '}
+                                  {o.email
+                                    ? <a
+                                        href={`mailto:${o.email}`}
+                                        onClick={e => e.stopPropagation()}
+                                        title={`Email ${o.name}`}
+                                      >{o.name}</a>
+                                    : o.name}
+                                </span>
+                              ))}
+                            </span>
+                          )}
+                        </span>
+                      </div>
                     ))}
                   </div>
                 )
