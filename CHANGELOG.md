@@ -5,6 +5,7 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.21.0 — Sidebar overhaul: resizable width (drag + persisted), app names wrap instead of truncating, fixed the odd app-row backgrounds, tooltips now show the last-deploy date and all owners; and notifications moved into the sidebar — now owner-scoped, surfacing failing health checks and open requests only for apps you own
 ## 2.20.2 — Fixed app visibility and public_access being able to drift apart (an app could be publicly reachable yet still prompt users to "Request access"): the invariant now lives in one shared helper that both the REST update and the MCP config tools use
 ## 2.20.1 — Daily digest now shows up to 10 requests per app, with a "read more in AppCrane" link (to the Requests page) for the rest
 ## 2.20.0 — Redesigned the daily "requests awaiting action" digest: clean HTML grouped by app, each request collapsed to one readable line (the element-picker noise is summarized), with requester/date and a Review button — plus a plain-text fallback

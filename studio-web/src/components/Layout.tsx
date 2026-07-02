@@ -12,10 +12,32 @@ interface NavApp {
   slug: string; name: string; category?: string; has_icon?: boolean
   description?: string
   owner?: { name: string } | null
+  owners?: { name: string }[]
   app_role?: 'admin' | 'owner' | 'user' | 'viewer' | 'none'
   visibility?: string
-  production?: { health?: { status: string } }
-  sandbox?:    { health?: { status: string } }
+  production?: { health?: { status: string }; deploy?: AppDeploy | null }
+  sandbox?:    { health?: { status: string }; deploy?: AppDeploy | null }
+}
+interface AppDeploy { version?: string; finished_at?: string; status?: string }
+// v2.21.0: most-recent deploy across prod/sandbox, for the sidebar tooltip.
+function lastUpdateLine(a: NavApp): string | null {
+  const cand = [a.production?.deploy, a.sandbox?.deploy]
+    .filter((d): d is AppDeploy => !!d?.finished_at)
+    .sort((x, y) => (y.finished_at! > x.finished_at! ? 1 : -1))
+  const d = cand[0]
+  if (!d) return null
+  const when = new Date(d.finished_at!.includes('T') ? d.finished_at! : d.finished_at!.replace(' ', 'T') + 'Z')
+  const date = isNaN(when.getTime())
+    ? d.finished_at!
+    : when.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
+  return `Updated ${date}${d.version ? ' · v' + d.version : ''}`
+}
+// v2.21.0: list every owner (falls back to the single `owner` for older data).
+function ownerLine(a: NavApp): string | null {
+  const names = (a.owners?.length ? a.owners : a.owner ? [a.owner] : [])
+    .map(o => o.name).filter(Boolean)
+  if (!names.length) return null
+  return `${names.length > 1 ? 'Owners' : 'Owner'}: ${names.join(', ')}`
 }
 function appDotClass(a: NavApp): string {
   const prodOk = a.production?.health?.status === 'healthy'
@@ -64,6 +86,10 @@ export function Layout({ children, subItems, activeSub }: Props) {
   // Application" button (mirrors canCreateApps: admins or a granted tier).
   const [canCreate, setCanCreate] = useState(false)
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem('cc_sb_col') === '1')
+  const [sidebarWidth, setSidebarWidth] = useState(() => {
+    const v = parseInt(localStorage.getItem('cc_sb_w') || '', 10)
+    return v >= 180 && v <= 460 ? v : 220
+  })
   const [mobileOpen, setMobileOpen] = useState(false)
   const [theme, setTheme] = useState(() => localStorage.getItem('cc_theme') || 'dark')
   const [userName, setUserName] = useState('')
@@ -216,22 +242,48 @@ export function Layout({ children, subItems, activeSub }: Props) {
     localStorage.setItem('cc_theme', next)
   }
 
-  const openNotif = useCallback(async () => {
-    const next = !notifOpen
-    setNotifOpen(next)
-    if (next && !notifLoaded) {
+  // v2.21.0: owner-scoped notifications — surface, for apps you OWN only,
+  // (1) failing health checks and (3) open requests awaiting you. The old
+  // build read a.prod_down/sand_down, which /api/apps never returns, so it
+  // was always empty; this reads the real nested health status.
+  const loadNotifs = useCallback(async () => {
+    try {
+      const [appsRes, reqRes] = await Promise.all([
+        adminApi.get<{ apps: any[] }>('/api/apps'),
+        adminApi.get<{ requests: any[] }>('/api/enhancements/owned').catch(() => ({ requests: [] })),
+      ])
+      const owned = (appsRes.apps || []).filter(a => a.app_role === 'owner')
+      const ownedSlugs = new Set(owned.map(a => a.slug))
+      const items: typeof notifItems = []
+      for (const a of owned) {
+        if (a.production?.health?.status === 'down') items.push({ title: `${a.name} (prod)`, sub: 'Health check failing', color: 'var(--red)' })
+        if (a.sandbox?.health?.status === 'down')    items.push({ title: `${a.name} (sandbox)`, sub: 'Health check failing', color: 'var(--orange, #f5a623)' })
+      }
+      const openByApp = new Map<string, number>()
+      for (const r of (reqRes.requests || [])) {
+        if (!ownedSlugs.has(r.app_slug)) continue
+        if (String(r.status || '').toLowerCase() === 'done' || r.validated_at) continue
+        openByApp.set(r.app_slug, (openByApp.get(r.app_slug) || 0) + 1)
+      }
+      for (const [slug, n] of openByApp) {
+        const a = owned.find(x => x.slug === slug)
+        items.push({ title: a?.name || slug, sub: `${n} request${n === 1 ? '' : 's'} awaiting you`, color: 'var(--accent)' })
+      }
+      setNotifItems(items)
       setNotifLoaded(true)
-      try {
-        const data = await adminApi.get<{ apps: any[] }>('/api/apps')
-        const items: typeof notifItems = []
-        for (const a of data.apps || []) {
-          if (a.prod_down) items.push({ title: a.name + ' (prod)', sub: 'Health check failing', color: 'var(--red)' })
-          if (a.sand_down) items.push({ title: a.name + ' (sandbox)', sub: 'Health check failing', color: 'var(--orange)' })
-        }
-        setNotifItems(items)
-      } catch {}
-    }
-  }, [notifOpen, notifLoaded])
+    } catch { /* transient — keep last known */ }
+  }, [])
+
+  // Load once the owned-app list is known, so the badge is accurate without
+  // needing to open the panel first.
+  useEffect(() => {
+    if (navApps.some(a => a.app_role === 'owner')) loadNotifs()
+  }, [navApps, loadNotifs])
+
+  const openNotif = useCallback(() => {
+    setNotifOpen(o => !o)
+    if (!notifLoaded) loadNotifs()
+  }, [notifLoaded, loadNotifs])
 
   // v2.13.0: load the accessible app list for the nav "Apps" section.
   useEffect(() => {
@@ -252,11 +304,36 @@ export function Layout({ children, subItems, activeSub }: Props) {
       .catch(() => {})
   }, [userRole])
 
-  // v2.15.0: keep the persistent app-tabs overlay aligned with the content area
-  // as the sidebar collapses/expands.
+  // v2.15.0 / v2.21.0: drive the sidebar width (and the persistent app-tabs
+  // overlay offset) from the user-set width. --sidebar-w feeds the sidebar +
+  // content margin; --content-left tracks the *effective* left edge (56px
+  // while collapsed) so the app-tabs overlay stays aligned.
   useEffect(() => {
-    document.documentElement.style.setProperty('--content-left', collapsed ? '56px' : '220px')
-  }, [collapsed])
+    const root = document.documentElement.style
+    root.setProperty('--sidebar-w', sidebarWidth + 'px')
+    root.setProperty('--content-left', (collapsed ? 56 : sidebarWidth) + 'px')
+  }, [collapsed, sidebarWidth])
+
+  // Drag-to-resize the sidebar. Persists the final width on mouse-up.
+  const startResize = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    const startX = e.clientX
+    const startW = sidebarWidth
+    let latest = startW
+    document.body.classList.add('resizing-sidebar')
+    const onMove = (ev: MouseEvent) => {
+      latest = Math.min(460, Math.max(180, startW + (ev.clientX - startX)))
+      setSidebarWidth(latest)
+    }
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+      document.body.classList.remove('resizing-sidebar')
+      try { localStorage.setItem('cc_sb_w', String(latest)) } catch (_) { /* private mode */ }
+    }
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+  }, [sidebarWidth])
 
   // v2.13.0: clicking the "update available" pill previews the new version's
   // What's New (current → latest) with an "Upgrade now" action — the same
@@ -441,7 +518,7 @@ export function Layout({ children, subItems, activeSub }: Props) {
                         type="button"
                         className={'sidebar-app-link' + (location.pathname === `/launch/${a.slug}` ? ' active' : '')}
                         onClick={() => { addTab({ slug: a.slug, name: a.name, hasIcon: a.has_icon }); navigate(`/launch/${a.slug}`) }}
-                        title={[a.name, a.description, a.owner?.name ? `Owner: ${a.owner.name}` : null].filter(Boolean).join('\n')}
+                        title={[a.name, a.description, ownerLine(a), lastUpdateLine(a)].filter(Boolean).join('\n')}
                       >
                         <span className="sidebar-app-ico">
                           {a.has_icon
@@ -469,6 +546,31 @@ export function Layout({ children, subItems, activeSub }: Props) {
         <div className="sidebar-footer">
           {!collapsed && userName && <div className="sidebar-user" title={userName}>{userName}</div>}
           <div className="sidebar-footer-row">
+            {/* v2.21.0: notifications live here now (moved from the topbar),
+                owner-scoped — only shown to owners, only about their apps. */}
+            {isOwner && (
+              <div className="notif-wrap" ref={notifRef}>
+                <button className="notif-bell-btn" onClick={openNotif} title="Notifications" aria-label="Notifications">🔔</button>
+                {notifItems.length > 0 && (
+                  <span className="notif-badge show">{notifItems.length}</span>
+                )}
+                <div className={`notif-dropdown${notifOpen ? ' open' : ''}`}>
+                  <div className="notif-dd-hdr">Notifications</div>
+                  {notifItems.length === 0
+                    ? <div className="notif-empty">You're all caught up.</div>
+                    : notifItems.map((n, i) => (
+                      <div key={i} className="notif-row">
+                        <div className="notif-row-dot" style={{ background: n.color }} />
+                        <div>
+                          <div className="notif-row-title">{n.title}</div>
+                          <div className="notif-row-sub">{n.sub}</div>
+                        </div>
+                      </div>
+                    ))
+                  }
+                </div>
+              </div>
+            )}
             <button className="sidebar-signout" onClick={signOut} title="Sign out">
               {collapsed ? '⎋' : 'Sign out'}
             </button>
@@ -487,34 +589,22 @@ export function Layout({ children, subItems, activeSub }: Props) {
         </div>
       </aside>
 
+      {/* v2.21.0: drag handle to resize the sidebar (hidden in the icon rail). */}
+      {!collapsed && (
+        <div
+          className="sidebar-resizer"
+          onMouseDown={startResize}
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize sidebar"
+          title="Drag to resize"
+        />
+      )}
+
       {/* Page content */}
       <main className={`admin-content${collapsed ? ' collapsed' : ''}`}>
         <div className="admin-topbar">
           <span className="admin-topbar-title">{pageTitle}</span>
-          <div className="admin-topbar-right">
-            {/* v2.14.1: AppCrane version + update pill moved to the sidebar. */}
-            <div className="notif-wrap" ref={notifRef}>
-              <button className="notif-bell-btn" onClick={openNotif} title="Notifications">🔔</button>
-              {notifItems.length > 0 && (
-                <span className="notif-badge show">{notifItems.length}</span>
-              )}
-              <div className={`notif-dropdown${notifOpen ? ' open' : ''}`}>
-                <div className="notif-dd-hdr">Notifications</div>
-                {notifItems.length === 0
-                  ? <div className="notif-empty">All systems operational ✓</div>
-                  : notifItems.map((n, i) => (
-                    <div key={i} className="notif-row">
-                      <div className="notif-row-dot" style={{ background: n.color }} />
-                      <div>
-                        <div className="notif-row-title">{n.title}</div>
-                        <div className="notif-row-sub">{n.sub}</div>
-                      </div>
-                    </div>
-                  ))
-                }
-              </div>
-            </div>
-          </div>
         </div>
         {children}
       </main>
