@@ -344,6 +344,7 @@ export function Users() {
         </div>
       )}
 
+      <div className="users-table-wrap">
       <table>
         <thead>
           <tr>
@@ -467,6 +468,7 @@ export function Users() {
           })}
         </tbody>
       </table>
+      </div>
 
       {/* v2.5.21: the wide N×M App Roles matrix moved out of Users in two
           directions:
