@@ -295,9 +295,23 @@ router.get('/callback', async (req, res) => {
       }
     }
 
-    // Sync display name from IdP on every login
-    if (user && displayName && displayName !== user.name) {
-      db.prepare('UPDATE users SET name = ? WHERE id = ?').run(displayName, user.id);
+    // Sync display name — and the email claim — from the IdP on every login,
+    // so IdP-side corrections propagate automatically. `email` here is a real
+    // OIDC claim (not a NameID fallback), so it's safe to sync. Guarded
+    // against the email UNIQUE collision (another user already has it).
+    if (user) {
+      if (displayName && displayName !== user.name) {
+        db.prepare('UPDATE users SET name = ? WHERE id = ?').run(displayName, user.id);
+      }
+      if (email && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) &&
+          email.toLowerCase() !== (user.email || '').toLowerCase()) {
+        try {
+          db.prepare('UPDATE users SET email = ? WHERE id = ?').run(email, user.id);
+          log.info(`OIDC: synced email for sub ${sub} → ${email}`);
+        } catch (e) {
+          log.warn(`OIDC: email sync skipped for sub ${sub} (${email}): ${e.message}`);
+        }
+      }
     }
 
     if (!user && cfg.auto_provision) {
