@@ -379,7 +379,6 @@ export function Layout({ children, subItems, activeSub }: Props) {
   const currentPath = location.pathname
   const activeNav = NAV.find(n => n.href === currentPath)
   const activeNavId = activeNav?.id ?? ''
-  const pageTitle = activeNav?.label ?? ''
 
   // v2.14.3: split the nav — primary items (+ the Apps list) at the top, the
   // admin/config items pinned to the bottom of the rail.
@@ -628,9 +627,6 @@ export function Layout({ children, subItems, activeSub }: Props) {
 
       {/* Page content */}
       <main className={`admin-content${collapsed ? ' collapsed' : ''}`}>
-        <div className="admin-topbar">
-          <span className="admin-topbar-title">{pageTitle}</span>
-        </div>
         {children}
       </main>
       {platformWN && (

@@ -84,45 +84,6 @@ body.resizing-sidebar .admin-sidebar, body.resizing-sidebar .admin-content { tra
 .container { max-width: 1200px; margin: 0 auto; padding: 24px; }
 
 /* ── Desktop topbar ──────────────────────────────── */
-.admin-topbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 10px 24px;
-  background: var(--surface);
-  border-bottom: 1px solid var(--border);
-  position: sticky;
-  top: 0;
-  z-index: 7;
-}
-.admin-topbar-title {
-  font-weight: 600;
-  font-size: 1rem;
-  color: var(--text);
-}
-.admin-topbar-right {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-}
-.admin-topbar-user {
-  font-size: .82rem;
-  color: var(--dim);
-}
-.admin-topbar-signout {
-  background: var(--surface2);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  padding: 5px 12px;
-  font-size: .8rem;
-  cursor: pointer;
-}
-.admin-topbar-signout:hover { border-color: var(--accent); color: var(--accent); }
-@media (max-width: 768px) {
-  .admin-topbar { display: none; }
-}
-
 /* ── Sidebar logo ────────────────────────────────── */
 .sidebar-logo-section {
   padding: 14px 16px 10px;
@@ -1059,7 +1020,7 @@ textarea:focus { border-color: var(--accent); }
 
 /* ── Persistent multi-app tabs (v2.15.0) — overlays the content area ── */
 .persistent-app-tabs {
-  position: fixed; top: 52px; left: var(--content-left, 220px); right: 0; bottom: 0;
+  position: fixed; top: 0; left: var(--content-left, 220px); right: 0; bottom: 0;
   flex-direction: column; background: var(--bg, #0e0e0e); z-index: 5;
 }
 .app-tabs { display: flex; flex-direction: column; height: 100%; min-height: 0; }
@@ -1325,6 +1286,16 @@ code.api-pill { background: var(--surface2); border: 1px solid var(--border); bo
 }
 .editable:focus { border-color: var(--accent); }
 
+/* v2.21.2: the Users table has many columns (id, name, email, username,
+   phone, department, region, location, …). Without this the text inputs
+   crush to a few chars — a full email showed as "rafa". Scroll horizontally
+   and give the text fields sensible min-widths so values are readable. */
+.users-table-wrap { overflow-x: auto; }
+.users-table-wrap table { min-width: 1080px; }
+.users-table-wrap .editable { min-width: 90px; }
+.users-table-wrap td:nth-child(2) .editable { min-width: 150px; }  /* name  */
+.users-table-wrap td:nth-child(3) .editable { min-width: 230px; }  /* email */
+
 /* ── AppStudio ───────────────────────────────────── */
 .filter-row { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
 .req-table-wrap { overflow-x: auto; }
@@ -1587,8 +1558,6 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 /* Per global CLAUDE.md backlog #14: chat panel header 44 → 36, agent
    name 13/bold → 12/medium. Buttons get a touch more padding to
    compensate visually for the smaller font. */
-.admin-topbar { padding: 8px 24px; }
-.admin-topbar-title { font-size: .95rem; font-weight: 600; }
 
 /* Buttons — slightly tighter, consistent height */
 .btn {
