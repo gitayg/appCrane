@@ -228,14 +228,35 @@ export async function createAppRepo(slug, { description = '', autoInit = true } 
   try {
     repo = await apiFetch(path, { method: 'POST', body });
   } catch (e) {
-    // v2.10.5: 403/422 here = the token authenticated but isn't allowed to
-    // create repos (the most common managed-app setup failure). Surface an
-    // actionable message instead of GitHub's raw "Validation Failed" 422.
-    if (e?.status === 403 || e?.status === 422) {
+    // Classify GitHub's rejection precisely. GitHub returns 422 both for a
+    // NAME COLLISION and for permission-ish problems; the old code lumped
+    // every 403/422 into REPO_CREATE_FORBIDDEN, so a duplicate name looked
+    // like a token-permission failure and sent operators chasing scopes.
+    // v2.21.2: a name-already-exists 422 now surfaces as REPO_EXISTS (which
+    // the caller already knows how to recover from), and the forbidden path
+    // echoes GitHub's own error detail so the real reason is visible.
+    const ghErrors = Array.isArray(e?.body?.errors) ? e.body.errors : [];
+    const nameTaken = e?.status === 422 && ghErrors.some(
+      x => x?.field === 'name' && /already exists|taken/i.test(x?.message || '')
+    );
+    if (nameTaken) {
       const err = new Error(
-        `REPO_CREATE_FORBIDDEN: the GitHub service-account token authenticated but cannot create repositories on '${cfg.owner}' (GitHub ${e.status}). ` +
-        `Re-issue the token so it can create repos: a classic PAT with the 'repo' scope, OR a fine-grained PAT with ` +
-        `Administration: Read and write and '${cfg.owner}' as the resource owner. Set it at Settings → GitHub. (GitHub: ${e.message})`
+        `REPO_EXISTS: a repository named '${repoName}' already exists on '${cfg.owner}' ` +
+        `(GitHub 422 — the pre-flight check missed it, usually because the token can't see it). ` +
+        `The app was likely half-created before, or the name is taken. Retry the managed-app ` +
+        `create to reuse it, or pick a different slug.`
+      );
+      err.status = 409;
+      err.body = { code: 'REPO_EXISTS', existing: `${cfg.owner}/${repoName}` };
+      throw err;
+    }
+    if (e?.status === 403 || e?.status === 422) {
+      const detail = ghErrors.map(x => x?.message).filter(Boolean).join('; ');
+      const err = new Error(
+        `REPO_CREATE_FORBIDDEN: GitHub refused to create '${repoName}' on '${cfg.owner}' (GitHub ${e.status}${detail ? ` — ${detail}` : ''}). ` +
+        `The token authenticated but isn't allowed to create this repo. If '${cfg.owner}' is an org, the token must be ` +
+        `SSO-authorized for it and permitted to create repos; a classic PAT needs the 'repo' scope, a fine-grained PAT ` +
+        `needs Administration: Read and write with '${cfg.owner}' as the resource owner. Set/authorize it at Settings → GitHub. (GitHub: ${e.message})`
       );
       err.status = e.status;
       err.body = { code: 'REPO_CREATE_FORBIDDEN' };

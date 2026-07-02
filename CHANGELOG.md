@@ -5,6 +5,7 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.21.2 — Managed-app create now reports a duplicate repo name as REPO_EXISTS (recoverable) instead of the misleading REPO_CREATE_FORBIDDEN, and surfaces GitHub's actual error reason
 ## 2.21.1 — Each sidebar app now shows its owner on a smaller line beneath the name (e.g. "by Len Vo"), and the owner name is a clickable mailto link
 ## 2.21.0 — Sidebar overhaul: resizable width (drag + persisted), app names wrap instead of truncating, fixed the odd app-row backgrounds, tooltips now show the last-deploy date and all owners; and notifications moved into the sidebar — now owner-scoped, surfacing failing health checks and open requests only for apps you own
 ## 2.20.2 — Fixed app visibility and public_access being able to drift apart (an app could be publicly reachable yet still prompt users to "Request access"): the invariant now lives in one shared helper that both the REST update and the MCP config tools use
