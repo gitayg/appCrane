@@ -165,7 +165,13 @@ router.post('/callback', async (req, res) => {
 
     // Extract identity from SAML attributes
     const nameId     = profile.nameID;                              // Okta default: email
-    const email      = profile.email || profile['urn:oid:1.2.840.113549.1.9.1'] || (nameId?.includes('@') ? nameId : null);
+    // v2.21.2: keep a REAL email attribute separate from the NameID fallback.
+    // The NameID is often the Okta login/username (a compound surname gets
+    // shortened, e.g. "rafael.hernandez@…" for rafael.hernandezlopez), so it
+    // must never be synced over the stored mailbox — only an explicit email
+    // attribute may. `email` keeps the old fallback for lookup / provisioning.
+    const assertedEmail = profile.email || profile['urn:oid:1.2.840.113549.1.9.1'] || null;
+    const email      = assertedEmail || (nameId?.includes('@') ? nameId : null);
     const firstName  = profile.firstName || profile['urn:oid:2.5.4.42'] || '';
     const lastName   = profile.lastName  || profile['urn:oid:2.5.4.4']  || '';
     const displayName = [firstName, lastName].filter(Boolean).join(' ') || email || nameId;
@@ -184,9 +190,24 @@ router.post('/callback', async (req, res) => {
       }
     }
 
-    // Sync display name from Okta on every login
-    if (user && displayName && displayName !== user.name) {
-      db.prepare('UPDATE users SET name = ? WHERE id = ?').run(displayName, user.id);
+    // Sync display name — and a REAL email attribute — from Okta on every
+    // login, so IdP-side corrections (e.g. fixing a shortened surname) flow in
+    // automatically. Email syncs ONLY from an explicit attribute, never the
+    // NameID fallback, so a corrected mailbox isn't re-clobbered by the login
+    // form. Guarded against the email UNIQUE collision (another user has it).
+    if (user) {
+      if (displayName && displayName !== user.name) {
+        db.prepare('UPDATE users SET name = ? WHERE id = ?').run(displayName, user.id);
+      }
+      if (assertedEmail && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(assertedEmail) &&
+          assertedEmail.toLowerCase() !== (user.email || '').toLowerCase()) {
+        try {
+          db.prepare('UPDATE users SET email = ? WHERE id = ?').run(assertedEmail, user.id);
+          log.info(`SAML: synced email for nameID ${nameId} → ${assertedEmail}`);
+        } catch (e) {
+          log.warn(`SAML: email sync skipped for ${nameId} (${assertedEmail}): ${e.message}`);
+        }
+      }
     }
 
     if (!user && cfg.auto_provision) {
