@@ -5,6 +5,7 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.21.8 — Per-app resource graphs: AppCrane now samples CPU/memory every 5 minutes into a 7-day history, and Manage has a per-app chart (📈) of CPU and memory over the last 24h for sandbox + production
 ## 2.21.7 — Surfaced webhook auto-deploy in Manage: a per-app "Auto-deploy" modal to enable deploy-on-push for sandbox/production, set the branch, copy the webhook URL, and register the hook on GitHub (the receiver already existed)
 ## 2.21.6 — Licensing reconciled to AGPL-3.0-only across LICENSE/package.json/deployhub.json/README, plus a CONTRIBUTING.md CLA and a COMMERCIAL-LICENSE.md stub that enable the AGPL + commercial dual-licensing model
 ## 2.21.5 — Platform requests: anyone can file a request against AppCrane itself, visible only to platform admins; Manage now shows only apps you own/admin (not the whole catalogue); CPU/memory limits are locked to platform admins across the API, MCP, and dashboard; and the sidebar version pill refreshes instead of showing a stale value after a deploy
