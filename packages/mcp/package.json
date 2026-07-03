@@ -1,5 +1,5 @@
 {
-  "name": "@appcrane/mcp",
+  "name": "appcrane-mcp",
   "version": "0.1.0",
   "description": "Stdio bridge that adds a remote AppCrane server's appcrane_* tools to any MCP client (Claude Code, etc.) via npx or Docker.",
   "type": "module",

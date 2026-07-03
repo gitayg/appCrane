@@ -1,4 +1,4 @@
-# @appcrane/mcp
+# appcrane-mcp
 
 A tiny **stdio ↔ HTTP bridge** that connects any MCP client to a remote
 [AppCrane](https://github.com/gitayg/appCrane) server's `appcrane_*` tools.
@@ -34,7 +34,7 @@ claude mcp add appcrane \
   --env APPCRANE_URL=https://crane.example.com \
   --env APPCRANE_API_KEY=dhk_user_xxxxxxxx \
   --env APPCRANE_GITHUB_TOKEN=ghp_xxxxxxxx \
-  -- npx -y @appcrane/mcp
+  -- npx -y appcrane-mcp
 ```
 
 ## Docker
@@ -64,9 +64,9 @@ docker run -i --rm \
 
 ```bash
 cd packages/mcp
-npm publish --access public          # → @appcrane/mcp on npm
+npm publish                          # → appcrane-mcp on npm (unscoped, public by default)
 docker build -t ghcr.io/gitayg/appcrane-mcp . && docker push ghcr.io/gitayg/appcrane-mcp
 ```
 
 Then list it in an MCP registry (e.g. the community registries) pointing at
-`npx @appcrane/mcp` for discoverability.
+`npx appcrane-mcp` for discoverability.
