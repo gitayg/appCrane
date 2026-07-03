@@ -832,29 +832,55 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       appendLog(`Committed ${distCheck.foundDistAt} validated — index.html references resolve.`);
     }
 
-    const { userProvided } = ensureDockerfile({ releaseDir, manifest, appBasePath, craneUrl, craneInternalUrl });
+    // v2.21.10: an app with no Dockerfile that also isn't a Node app can't use
+    // the Node-only dockerfileGen. Build it with Nixpacks (Python/Go/Ruby/
+    // static/…) if the binary is on the host; otherwise fail with a clear ask.
+    const hasDockerfile = existsSync(join(releaseDir, 'Dockerfile'));
+    const isNodeApp = existsSync(join(releaseDir, 'package.json'));
+    let image;
 
-    if (userProvided) {
-      const expectedPort = manifest?.port || manifest?.be?.port || 3000;
-      const { valid, errors, warnings } = validateDockerfile(releaseDir, { expectedPort });
-      for (const w of warnings) appendLog(`⚠ Dockerfile: ${w}`);
-      if (!valid) throw new Error(`Dockerfile validation failed:\n${errors.map(e => '  • ' + e).join('\n')}`);
-      injectAppBasePathArg(join(releaseDir, 'Dockerfile'));
-      appendLog('Using app-provided Dockerfile (validated)');
+    if (!hasDockerfile && !isNodeApp) {
+      const { nixpacksAvailable, nixpacksBuild } = await import('./nixpacks.js');
+      const { imageTagFor } = await import('./docker.js');
+      if (!(await nixpacksAvailable())) {
+        throw new Error(
+          'NO_BUILD_METHOD: this app ships no Dockerfile and is not a Node app, so AppCrane ' +
+          'cannot auto-build it. Install `nixpacks` on the deploy host ' +
+          '(https://nixpacks.com/docs/install) to build Python/Go/Ruby/static/etc., or add a Dockerfile.'
+        );
+      }
+      appendLog('No Dockerfile + non-Node app → building with Nixpacks…');
+      image = imageTagFor(app.slug, env, commitHash);
+      await nixpacksBuild({
+        releaseDir, tag: image, slug: app.slug, env,
+        onLog: (line) => { if (deployLog.length < 500) appendLog(`  ${line}`); },
+      });
+      appendLog(`Image ready (Nixpacks): ${image}`);
     } else {
-      appendLog('Generated Dockerfile (Node Alpine, non-root)');
-    }
+      const { userProvided } = ensureDockerfile({ releaseDir, manifest, appBasePath, craneUrl, craneInternalUrl });
 
-    appendLog('Building docker image...');
-    const image = await buildImageIfNeeded({
-      slug: app.slug,
-      env,
-      contextDir: releaseDir,
-      commitHash,
-      appBasePath,
-      onLog: (line) => { if (deployLog.length < 500) appendLog(`  ${line}`); },
-    });
-    appendLog(`Image ready: ${image}`);
+      if (userProvided) {
+        const expectedPort = manifest?.port || manifest?.be?.port || 3000;
+        const { valid, errors, warnings } = validateDockerfile(releaseDir, { expectedPort });
+        for (const w of warnings) appendLog(`⚠ Dockerfile: ${w}`);
+        if (!valid) throw new Error(`Dockerfile validation failed:\n${errors.map(e => '  • ' + e).join('\n')}`);
+        injectAppBasePathArg(join(releaseDir, 'Dockerfile'));
+        appendLog('Using app-provided Dockerfile (validated)');
+      } else {
+        appendLog('Generated Dockerfile (Node Alpine, non-root)');
+      }
+
+      appendLog('Building docker image...');
+      image = await buildImageIfNeeded({
+        slug: app.slug,
+        env,
+        contextDir: releaseDir,
+        commitHash,
+        appBasePath,
+        onLog: (line) => { if (deployLog.length < 500) appendLog(`  ${line}`); },
+      });
+      appendLog(`Image ready: ${image}`);
+    }
 
     // v2.6.16: pre-flight entry-exists check. Validate that the entry
     // declared in deployhub.json actually resolves in the built image
