@@ -1,23 +1,30 @@
-# AppCrane — Enterprise AI Applications Platform
+# AppCrane
 
-Self-hosted deployment platform for AI applications. Run on your own server — Docker isolation, enterprise SSO, an AI code pipeline, and real-time team presence. A production-ready alternative to Railway and Coolify with enterprise features neither offers.
+**The self-hosted home for the apps your AI builds and your AI deploys.**
 
-**MCP-first.** AI agents connect once via `claude mcp add ... /api/mcp` and operate the platform through `appcrane_*` tools. No curl, no separate scripts — `appcrane_get_guide(topic="onboarding"|"operations")` returns the latest playbook on demand.
+[![GitHub stars](https://img.shields.io/github/stars/gitayg/appCrane?style=flat)](https://github.com/gitayg/appCrane/stargazers)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
+![Platform: Ubuntu 22.04+](https://img.shields.io/badge/platform-Ubuntu%2022.04%2B-e95420)
+
+Vibe-code an app with Claude Code or Cursor, then have your AI agent deploy it — over MCP — to a server **you** own. AppCrane is a self-hosted, **agent-first** deployment platform with the enterprise guardrails the cloud PaaS crowd skips: Docker isolation per app, SAML/OIDC/SCIM SSO, per-user audit, and a middleware hard-wall so the platform operator can't read your app secrets (your model API keys stay yours). A self-hosted alternative to Heroku, Vercel, and hosted agent-deploy services like AppDeploy.
+
+**MCP-first.** AI agents connect once via `claude mcp add ... /api/mcp` and operate the platform through 35 `appcrane_*` tools. No curl, no separate scripts — `appcrane_get_guide(topic="onboarding"|"operations")` returns the latest playbook on demand.
 
 ## Why AppCrane
 
-| Feature | AppCrane | Railway | Coolify |
+| Feature | AppCrane | Coolify | Dokploy |
 |---|---|---|---|
-| Price | Free (self-hosted) | $5–20 / app / mo | Free (self-hosted) |
-| Data ownership | Your server | Railway cloud | Your server |
-| Docker isolation | ✓ per app | ✓ | ✓ |
-| Enterprise SSO | SAML / OIDC / SCIM | ✗ | ✗ |
-| AI code pipeline | ✓ AppStudio | ✗ | ✗ |
-| Real-time presence | ✓ | ✗ | ✗ |
-| Dual environments | ✓ built-in | Manual | Manual |
-| Zero-downtime deploy | ✓ | ✓ | Partial |
-| Open source | AGPL-3.0 | ✗ | Apache 2 |
-| Vendor lock-in | None | High | None |
+| Agent-first / MCP-native | ✅ | ❌ | ~ add-on |
+| Self-hosted, your infra | ✅ | ✅ | ✅ |
+| Enterprise SSO (SAML/OIDC/SCIM) | ✅ | ~ | ❌ |
+| Secret hard-wall (operator can't read) | ✅ | ❌ | ❌ |
+| Managed repo (no GitHub account) | ✅ | ❌ | ❌ |
+| Docker isolation per app | ✅ | ✅ | ✅ |
+| Dual sandbox/prod environments | ✅ | ~ | ✅ |
+| Zero-downtime deploys | ✅ | ~ | ✅ |
+| Open source | ✅ AGPL-3.0 | ✅ Apache-2.0 | ✅ Apache-2.0 |
+
+**Full matrix** vs AWS Copilot / App Runner / Lightsail / CodeDeploy / Vercel / AppDeploy → **[glick.run/comparison.html](https://glick.run/comparison.html)**
 
 ## Features
 
@@ -36,7 +43,7 @@ Self-hosted deployment platform for AI applications. Run on your own server — 
 - **Encrypted env vars** (AES-256-GCM) — admin cannot read them by design
 - **Health checks** with auto-restart and email notifications
 - **Audit log** for every action
-- **MCP server** at `/api/mcp` exposing 30+ `appcrane_*` tools — agents operate the platform without ever touching curl, gh, or shell
+- **MCP server** at `/api/mcp` exposing 35 `appcrane_*` tools — agents operate the platform without ever touching curl, gh, or shell
 
 ## Quick Start
 
@@ -133,9 +140,10 @@ crane audit --app myapp
 
 ## MCP (for AI agents)
 
-AppCrane is MCP-first. One `claude mcp add` and the agent gets 25+
-`appcrane_*` tools — list apps, deploy, set env, read logs, manage
-access, rotate icons, the lot.
+AppCrane is MCP-first. One `claude mcp add` and the agent gets 35
+`appcrane_*` tools — list apps, deploy, set/get secrets, read logs,
+manage access, rotate icons, the lot. Tool names are AWS-aligned
+(`stage`, `set_secret`/`get_secret`, `cp`).
 
 ```bash
 claude mcp add --transport http appcrane https://crane.example.com/api/mcp \
