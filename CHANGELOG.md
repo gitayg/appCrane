@@ -5,6 +5,7 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.21.14 — The Dashboard is now overview-only: per-app operations (open, env vars, onboard prompt, request enhancement, delete) were removed from it and live solely on the Manage page — the Applications section just links there now
 ## 2.21.13 — Renamed the MCP proxy package from @appcrane/mcp to unscoped appcrane-mcp so it publishes with a plain `npm publish` (no npm org to register); verified the name is free and the package packs cleanly (index.js + README only)
 ## 2.21.12 — Added @appcrane/mcp: a tiny stdio↔HTTP proxy package (npx / Docker) that bridges any MCP client to a remote AppCrane server's appcrane_* tools — for stdio-only clients and an npx/registry install path (direct remote-HTTP connect still works too)
 ## 2.21.11 — Fixed the light theme: it never actually applied because a leftover chat-UI stylesheet's `:root` (loaded after the admin styles) tied on specificity and won on source order, keeping buttons, inputs, and backgrounds dark. The light theme selector now out-specifies it, and the leftover's dark-only variables get light values
