@@ -33,6 +33,9 @@ function imageTag(slug, env, commitHash) {
   return `appcrane-${slug}-${env}:${safe}`;
 }
 
+// v2.21.10: exposed so the Nixpacks path can tag its image identically.
+export function imageTagFor(slug, env, commitHash) { return imageTag(slug, env, commitHash); }
+
 export async function buildImageIfNeeded({ slug, env, contextDir, commitHash, appBasePath, onLog }) {
   const tag = imageTag(slug, env, commitHash);
   if (commitHash && commitHash !== 'unknown') {
