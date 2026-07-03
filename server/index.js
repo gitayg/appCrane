@@ -1020,6 +1020,14 @@ app.listen(PORT, HOST, async () => {
     log.error('Metrics sampler failed to start: ' + e.message);
   }
 
+  // v2.21.9: nightly off-site (S3) backup — no-op until configured in Settings.
+  try {
+    const { startBackupScheduler } = await import('./services/backupScheduler.js');
+    startBackupScheduler();
+  } catch (e) {
+    log.error('Backup scheduler failed to start: ' + e.message);
+  }
+
   // Bulk-redeploy sentinel — written by the upgrade script's cleanup phase
   // when it kills a PM2 daemon, because those apps are now offline and need
   // to be rebuilt as Docker containers. In-process, no API key needed.

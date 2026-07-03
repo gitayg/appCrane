@@ -150,6 +150,27 @@ router.get('/config/export', requireAuth, requirePlatformAdmin, async (req, res)
   res.end(buffer);
 });
 
+// ── Scheduled off-site (S3) backup config — platform_admin only (v2.21.9) ──
+router.get('/backup/s3', requireAuth, requirePlatformAdmin, async (_req, res) => {
+  const { getBackupConfig } = await import('../services/backupScheduler.js');
+  res.json(getBackupConfig());
+});
+
+router.put('/backup/s3', requireAuth, requirePlatformAdmin, async (req, res) => {
+  const { setBackupConfig } = await import('../services/backupScheduler.js');
+  res.json(setBackupConfig(req.body || {}, req.user.id));
+});
+
+router.post('/backup/s3/run', requireAuth, requirePlatformAdmin, async (_req, res) => {
+  const { runS3Backup } = await import('../services/backupScheduler.js');
+  try {
+    const r = await runS3Backup();
+    res.json({ ok: true, ...r });
+  } catch (e) {
+    res.json({ ok: false, error: e.message });
+  }
+});
+
 router.post('/config/import', requireAuth, requirePlatformAdmin, async (req, res) => {
   const multer = (await import('multer')).default;
   const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 200 * 1024 * 1024 } }).single('file');
