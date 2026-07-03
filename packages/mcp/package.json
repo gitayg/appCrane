@@ -1,0 +1,33 @@
+{
+  "name": "@appcrane/mcp",
+  "version": "0.1.0",
+  "description": "Stdio bridge that adds a remote AppCrane server's appcrane_* tools to any MCP client (Claude Code, etc.) via npx or Docker.",
+  "type": "module",
+  "bin": {
+    "appcrane-mcp": "index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "AGPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gitayg/appCrane.git",
+    "directory": "packages/mcp"
+  },
+  "homepage": "https://github.com/gitayg/appCrane/tree/main/packages/mcp",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "modelcontextprotocol",
+    "appcrane",
+    "deploy",
+    "paas",
+    "claude",
+    "stdio"
+  ],
+  "files": [
+    "index.js",
+    "README.md"
+  ]
+}
