@@ -16,7 +16,7 @@ Self-hosted deployment platform for AI applications. Run on your own server — 
 | Real-time presence | ✓ | ✗ | ✗ |
 | Dual environments | ✓ built-in | Manual | Manual |
 | Zero-downtime deploy | ✓ | ✓ | Partial |
-| Open source | MIT | ✗ | Apache 2 |
+| Open source | AGPL-3.0 | ✗ | Apache 2 |
 | Vendor lock-in | None | High | None |
 
 ## Features
@@ -261,7 +261,7 @@ Node.js 20, Express 5, SQLite, Docker, Caddy 2, SAML/OIDC/SCIM, AES-256-GCM, Com
 
 ## License
 
-FSL-1.1-ALv2 (Functional Source License). Free to use, modify, and self-host. The only restriction is offering it as a competing commercial hosted service. Each release converts to Apache 2.0 two years after its release date.
+[GNU AGPL v3](LICENSE). Free and open source — use, modify, and self-host. If you run a modified version as a network service, you must make your source available under the same license. For a commercial license without the AGPL's copyleft terms, contact glick.run.
 
 ## Feedback & Contributions
 
