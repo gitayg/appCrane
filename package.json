@@ -2,7 +2,7 @@
   "name": "appcrane",
   "version": "2.21.4",
   "description": "AppCrane - Self-service app hosting and deployment.",
-  "license": "PolyForm-Noncommercial-1.0.0",
+  "license": "AGPL-3.0-only",
   "type": "module",
   "bin": {
     "crane": "./bin/deployhub.js",
