@@ -98,7 +98,7 @@ export function MyRequests() {
                     </td>
                     <td>
                       {r.app_slug
-                        ? <span className="app-pill" style={{ background: 'var(--surface2)', border: '1px solid var(--border)', borderRadius: 4, padding: '2px 7px', fontSize: '.75rem', color: 'var(--dim)' }}>{r.app_slug}</span>
+                        ? <span className="app-pill" style={{ background: r.app_slug === '_platform' ? 'rgba(59,130,246,.15)' : 'var(--surface2)', border: '1px solid var(--border)', borderRadius: 4, padding: '2px 7px', fontSize: '.75rem', color: r.app_slug === '_platform' ? 'var(--accent)' : 'var(--dim)' }}>{r.app_slug === '_platform' ? 'AppCrane Platform' : r.app_slug}</span>
                         : '—'}
                     </td>
                     <td style={{ fontSize: '.78rem', color: 'var(--dim)', whiteSpace: 'nowrap' }}>{fmtDate(r.created_at)}</td>

@@ -115,3 +115,29 @@ export function notifyAppAdminsOfNewRequest(enhancementId) {
     log.warn(`[request-notify] could not notify app admins for enhancement ${enhancementId}: ${e.message}`);
   }
 }
+
+/**
+ * v2.21.5: email platform admins when someone files a request against the
+ * AppCrane platform itself (app_slug '_platform'). These requests are visible
+ * only to platform admins, so this is how they learn about a new one.
+ */
+export function notifyPlatformAdminsOfPlatformRequest(enhancementId) {
+  try {
+    const db = getDb();
+    const row = db.prepare('SELECT id, user_name, message FROM enhancement_requests WHERE id = ?').get(enhancementId);
+    if (!row) return;
+    const admins = db.prepare("SELECT email, name FROM users WHERE role = 'platform_admin' AND active = 1 AND email IS NOT NULL").all();
+    if (!admins.length) return;
+    const who = row.user_name || 'A user';
+    const msg = String(row.message || '').trim().slice(0, 500);
+    for (const a of admins) {
+      const text = `Hi${a.name ? ' ' + a.name : ''},\n\n` +
+        `${who} submitted a request for the AppCrane platform itself:\n\n  "${msg}"\n\n` +
+        `Review it in AppCrane -> Requests.\n\n— AppCrane`;
+      try { enqueueEmail({ to: a.email, subject: 'New AppCrane platform request', text, source: 'platform-request' }); } catch (_) { /* skip bad recipient */ }
+    }
+    log.info(`[request-notify] notified ${admins.length} platform admin(s) of platform request #${row.id}`);
+  } catch (e) {
+    log.warn(`[request-notify] platform-request notify failed for ${enhancementId}: ${e.message}`);
+  }
+}

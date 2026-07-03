@@ -12,6 +12,7 @@ import { Settings } from './pages/Settings'
 import { Docs } from './pages/Docs'
 import { AppManager } from './pages/AppManager'
 import { MyRequests } from './pages/MyRequests'
+import { PlatformRequestBar } from './components/PlatformRequestBar'
 import { AppTabsProvider } from './components/AppTabsContext'
 import { PersistentAppTabs } from './components/PersistentAppTabs'
 
@@ -97,7 +98,16 @@ function RequestsRoute() {
   }, [me, adminLike])
   const resolving = me === null || isOwner === null
   const triage = adminLike || isOwner === true
-  return <Layout>{resolving ? null : (triage ? <AppStudio tab="requests" /> : <MyRequests />)}</Layout>
+  return (
+    <Layout>
+      {resolving ? null : (
+        <>
+          <PlatformRequestBar />
+          {triage ? <AppStudio tab="requests" /> : <MyRequests />}
+        </>
+      )}
+    </Layout>
+  )
 }
 
 export function AdminApp() {

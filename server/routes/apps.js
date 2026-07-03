@@ -246,9 +246,12 @@ router.post('/', requireAuth, auditMiddleware('app-create'), async (req, res) =>
 
   const slot = getNextSlot(db);
   const ports = getPortsForSlot(slot);
+  // v2.21.5: only platform admins pick CPU/memory. A non-platform-admin
+  // creating an app gets the defaults regardless of what they pass.
+  const platAdmin = req.user.role === 'platform_admin';
   const resourceLimits = JSON.stringify({
-    max_ram_mb: max_ram_mb || 512,
-    max_cpu_percent: max_cpu_percent || 50,
+    max_ram_mb: (platAdmin && max_ram_mb) || 512,
+    max_cpu_percent: (platAdmin && max_cpu_percent) || 50,
   });
 
   const tokenEncrypted = github_token ? encrypt(github_token) : null;
@@ -510,8 +513,10 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
     updates.image_retention = ret;
   }
   if (max_ram_mb !== undefined || max_cpu_percent !== undefined) {
-    if (!isAdmin(req.user)) {
-      throw new AppError('Only admins can change resource limits', 403, 'FORBIDDEN');
+    // v2.21.5: CPU/memory limits are platform-admin only — not app owners,
+    // app-admins, or even tier-2 global admins.
+    if (req.user.role !== 'platform_admin') {
+      throw new AppError('Only platform admins can change CPU/memory limits', 403, 'FORBIDDEN');
     }
     const ram = max_ram_mb !== undefined ? Number(max_ram_mb) : null;
     const cpu = max_cpu_percent !== undefined ? Number(max_cpu_percent) : null;

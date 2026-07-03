@@ -10,7 +10,7 @@ import {
 } from '../services/enhancementComments.js';
 import { BUCKETS, bucketize, applyBucket } from '../services/requestStatus.js';
 import { userHasAppPermission } from '../services/permissions.js';
-import { notifyRequesterFulfilled, notifyAppAdminsOfNewRequest } from '../services/requestNotify.js';
+import { notifyRequesterFulfilled, notifyAppAdminsOfNewRequest, notifyPlatformAdminsOfPlatformRequest } from '../services/requestNotify.js';
 
 const router = Router();
 
@@ -82,7 +82,11 @@ router.post('/', (req, res) => {
 
   res.json({ message: 'Enhancement request submitted. Thank you!', enhancement_id: lastInsertRowid });
 
-  if (app_slug) {
+  // v2.21.5: '_platform' is a reserved slug for requests against AppCrane
+  // itself — no GitHub mirror, notify platform admins instead of app admins.
+  if (app_slug === '_platform') {
+    notifyPlatformAdminsOfPlatformRequest(lastInsertRowid);
+  } else if (app_slug) {
     const app = getAppForMirror(app_slug);
     if (app?.github_url) {
       const row = db.prepare('SELECT id, message, user_name, status, created_at FROM enhancement_requests WHERE id = ?').get(lastInsertRowid);
@@ -189,7 +193,12 @@ router.get('/', requireAuth, requireAdmin, (req, res) => {
   // By default hide requests the user marked as done — they're cleanup
   // clutter on the active list. ?include_done=1 shows everything.
   const includeDone = req.query.include_done === '1' || req.query.include_done === 'true';
-  const where = includeDone ? '' : "WHERE er.status != 'done' OR er.status IS NULL";
+  const conds = [];
+  if (!includeDone) conds.push("(er.status != 'done' OR er.status IS NULL)");
+  // v2.21.5: platform requests ('_platform') are visible only to platform
+  // admins. Tier-2 admins and everyone else never see them in the triage list.
+  if (req.user.role !== 'platform_admin') conds.push("(er.app_slug IS NULL OR er.app_slug != '_platform')");
+  const where = conds.length ? 'WHERE ' + conds.join(' AND ') : '';
   const rows = db.prepare(`
     SELECT
       er.id, er.app_slug, er.user_name, er.message, er.created_at, er.status,
