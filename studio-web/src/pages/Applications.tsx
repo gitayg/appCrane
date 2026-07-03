@@ -31,6 +31,7 @@ interface App {
   domain?: string | null
   owner?: { id: number; name: string; email: string } | null
   owners?: { id: number; name: string; email: string }[]
+  app_role?: 'owner' | 'admin' | 'user' | 'viewer' | 'none'
   production?: { deploy?: { status?: string; version?: string }; health?: { status: string } }
   sandbox?: { deploy?: { status?: string; version?: string }; health?: { status: string } }
 }
@@ -80,6 +81,8 @@ export function Applications() {
   // loads, then resolve to the role-appropriate default. Saved
   // localStorage value still wins. Toggle button stays interactive.
   const adminLike = isAdmin(me)
+  // v2.21.5: CPU/memory limits are platform-admin only.
+  const isPlatformAdmin = me?.user?.role === 'platform_admin'
   // v2.7.0: "+ Add Application" shows for anyone with the create-apps
   // permission (global admins, or a tier a platform admin granted) — in
   // both the Launcher and Manage views, not just admins in Manage.
@@ -751,6 +754,10 @@ STEP 3 - In any terminal run \`claude\`, then paste:
   }
 
   const filtered = apps.filter(a => {
+    // v2.21.5: Manage is scoped to apps you actually own/admin. Global admins
+    // (admin / platform_admin) still see every app; owners/app-admins see only
+    // theirs, not the whole catalogue.
+    if (!adminLike && a.app_role !== 'owner' && a.app_role !== 'admin') return false
     if (filter.vis  && visOf(a) !== filter.vis) return false
     if (filter.tag  && (a.category || '') !== filter.tag) return false
     if (filter.name && !(a.name || '').toLowerCase().includes(filter.name.toLowerCase())) return false
@@ -1045,6 +1052,8 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                       <input
                         className="editable" type="number" min={0} defaultValue={ramVal}
                         onBlur={e => { if (String(e.target.value) !== String(ramVal)) saveRam(app.slug, e.target.value) }}
+                        disabled={!isPlatformAdmin}
+                        title={isPlatformAdmin ? undefined : 'Only platform admins can change CPU/memory limits'}
                         style={{ width: 70 }}
                       />
                     </td>
@@ -1052,6 +1061,8 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                       <input
                         className="editable" type="number" min={0} defaultValue={cpuVal}
                         onBlur={e => { if (String(e.target.value) !== String(cpuVal)) saveCpu(app.slug, e.target.value) }}
+                        disabled={!isPlatformAdmin}
+                        title={isPlatformAdmin ? undefined : 'Only platform admins can change CPU/memory limits'}
                         style={{ width: 60 }}
                       />
                     </td>

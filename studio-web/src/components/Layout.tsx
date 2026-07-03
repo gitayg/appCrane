@@ -376,6 +376,7 @@ export function Layout({ children, subItems, activeSub }: Props) {
 
   const adminLike = userRole === 'admin' || userRole === 'platform_admin'
   const isOwner = navApps.some(a => a.app_role === 'owner')
+  const managesApp = navApps.some(a => a.app_role === 'owner' || a.app_role === 'admin')
   const currentPath = location.pathname
   const activeNav = NAV.find(n => n.href === currentPath)
   const activeNavId = activeNav?.id ?? ''
@@ -388,6 +389,9 @@ export function Layout({ children, subItems, activeSub }: Props) {
     if (p.adminOnly && !adminLike) return false
     if (p.ownerOrAdmin && !adminLike && !isOwner) return false
     if (p.id === 'settings' && !adminLike && !isOwner) return false
+    // v2.21.5: Manage is for app owners/admins (and it now lists only their
+    // apps). Plain users without any owned/admin app don't get a Manage entry.
+    if (p.id === 'applications' && !adminLike && !managesApp) return false
     // v2.16.0: Requests is everyone's home for their own requests, so it's
     // always shown (plain users see + delete their own submissions there).
     return true
@@ -447,7 +451,7 @@ export function Layout({ children, subItems, activeSub }: Props) {
           </a>
           {/* v2.14.1: the version + update pill lives in the sidebar (moved
               from the topbar). Platform-admin only; hidden in the icon rail. */}
-          {isPlatformAdmin && version && !collapsed && (
+          {isPlatformAdmin && (version || updateInfo?.current) && !collapsed && (
             <div className="sidebar-version">
               {updateInfo?.update_available ? (
                 <span
@@ -473,7 +477,7 @@ export function Layout({ children, subItems, activeSub }: Props) {
                     } catch { /* silent */ }
                   }}
                 >
-                  AppCrane {version}
+                  AppCrane {updateInfo?.current ? `v${updateInfo.current}` : version}
                 </span>
               )}
             </div>

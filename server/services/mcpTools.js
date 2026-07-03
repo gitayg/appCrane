@@ -1165,9 +1165,11 @@ const TOOLS = [
 
       const slot = getNextSlot(db);
       const ports = getPortsForSlot(slot);
+      // v2.21.5: only platform admins choose CPU/memory; others get defaults.
+      const platAdmin = user.role === 'platform_admin';
       const resourceLimits = JSON.stringify({
-        max_ram_mb:      args.max_ram_mb      || 512,
-        max_cpu_percent: args.max_cpu_percent || 50,
+        max_ram_mb:      (platAdmin && args.max_ram_mb)      || 512,
+        max_cpu_percent: (platAdmin && args.max_cpu_percent) || 50,
       });
       const tokenEncrypted = args.github_token ? encrypt(args.github_token) : null;
       const branch = args.branch || 'main';
@@ -1321,6 +1323,10 @@ const TOOLS = [
       }
 
       if (args.max_ram_mb !== undefined || args.max_cpu_percent !== undefined) {
+        // v2.21.5: CPU/memory limits are platform-admin only.
+        if (user.role !== 'platform_admin') {
+          throw new Error('Only platform admins can change CPU/memory limits.');
+        }
         let limits = {};
         try { limits = app.resource_limits ? JSON.parse(app.resource_limits) : {}; } catch (_) {}
         if (args.max_ram_mb      !== undefined) limits.max_ram_mb      = args.max_ram_mb;
@@ -1951,9 +1957,11 @@ const TOOLS = [
 
       const slot = getNextSlot(db);
       const ports = getPortsForSlot(slot);
+      // v2.21.5: only platform admins choose CPU/memory; others get defaults.
+      const platAdmin = user.role === 'platform_admin';
       const resourceLimits = JSON.stringify({
-        max_ram_mb:      args.max_ram_mb      || 512,
-        max_cpu_percent: args.max_cpu_percent || 50,
+        max_ram_mb:      (platAdmin && args.max_ram_mb)      || 512,
+        max_cpu_percent: (platAdmin && args.max_cpu_percent) || 50,
       });
       const branch = args.branch || repo.default_branch || 'main';
 

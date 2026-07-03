@@ -345,7 +345,7 @@ function RequestsTab({
                 </td>
                 <td>
                   {e.app_slug
-                    ? <span className="app-pill" style={{ background: 'var(--surface2)', border: '1px solid var(--border)', borderRadius: 4, padding: '2px 7px', fontSize: '.75rem', color: 'var(--dim)' }}>{e.app_slug}</span>
+                    ? <span className="app-pill" style={{ background: e.app_slug === '_platform' ? 'rgba(59,130,246,.15)' : 'var(--surface2)', border: '1px solid var(--border)', borderRadius: 4, padding: '2px 7px', fontSize: '.75rem', color: e.app_slug === '_platform' ? 'var(--accent)' : 'var(--dim)' }}>{e.app_slug === '_platform' ? 'AppCrane Platform' : e.app_slug}</span>
                     : '—'}
                 </td>
                 <td style={{ fontSize: '.82rem', color: 'var(--dim)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={e.user_name ?? undefined}>{e.user_name ?? '—'}</td>
