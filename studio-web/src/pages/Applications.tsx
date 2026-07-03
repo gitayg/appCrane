@@ -68,6 +68,41 @@ interface PromptModal {
 
 type SortKey = 'name' | 'visibility' | 'category' | 'ram' | 'cpu' | 'images'
 
+// v2.21.8: tiny multi-line SVG chart for the per-app resource modal.
+interface Series { label: string; color: string; points: { x: number; v: number }[] }
+function ResourceChart({ title, unit, series }: { title: string; unit: string; series: Series[] }) {
+  const W = 520, H = 130, PL = 44, PR = 12, PT = 12, PB = 22
+  const cw = W - PL - PR, ch = H - PT - PB
+  const xs = series.flatMap(s => s.points.map(p => p.x))
+  const minX = Math.min(...xs, 0), maxX = Math.max(...xs, 1)
+  const maxV = Math.max(...series.flatMap(s => s.points.map(p => p.v)), 1)
+  const xOf = (x: number) => PL + ((x - minX) / (maxX - minX || 1)) * cw
+  const yOf = (v: number) => PT + ch - (v / maxV) * ch
+  const has = series.some(s => s.points.length > 1)
+  return (
+    <div>
+      <div style={{ fontSize: '.8rem', fontWeight: 600, marginBottom: 4 }}>{title}</div>
+      {has ? (
+        <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', display: 'block' }}>
+          <line x1={PL} y1={PT} x2={PL} y2={PT + ch} stroke="var(--border)" />
+          <line x1={PL} y1={PT + ch} x2={W - PR} y2={PT + ch} stroke="var(--border)" />
+          <text x={PL - 5} y={PT + 8} textAnchor="end" fontSize="9" fill="var(--dim)">{Math.round(maxV)}{unit}</text>
+          <text x={PL - 5} y={PT + ch} textAnchor="end" fontSize="9" fill="var(--dim)">0</text>
+          {series.map((s, i) => s.points.length > 1 && (
+            <polyline key={i} fill="none" stroke={s.color} strokeWidth="1.5"
+              points={s.points.map(p => `${xOf(p.x).toFixed(1)},${yOf(p.v).toFixed(1)}`).join(' ')} />
+          ))}
+        </svg>
+      ) : (
+        <div style={{ fontSize: '.78rem', color: 'var(--dim)', padding: '14px 0' }}>No samples yet — collected every 5 minutes while running.</div>
+      )}
+      <div style={{ display: 'flex', gap: 14, fontSize: '.72rem', color: 'var(--dim)', marginTop: 2 }}>
+        {series.map((s, i) => <span key={i}><span style={{ color: s.color }}>●</span> {s.label}</span>)}
+      </div>
+    </div>
+  )
+}
+
 export function Applications() {
   const me = useMe()
   // v2.5.0 role-aware view mode. End users default to launcher (tile
@@ -127,6 +162,10 @@ export function Applications() {
   type HookCfg = { token?: string; auto_deploy_sandbox?: boolean; auto_deploy_prod?: boolean; branch_filter?: string }
   const [hookApp, setHookApp] = useState<App | null>(null)
   const [hookCfg, setHookCfg] = useState<HookCfg | null>(null)
+  // v2.21.8: per-app CPU/memory chart modal.
+  type MetricRow = { env: string; cpu_percent: number; mem_mb: number; recorded_at: string }
+  const [metricsApp, setMetricsApp] = useState<App | null>(null)
+  const [metricsRows, setMetricsRows] = useState<MetricRow[] | null>(null)
   // v2.7.24: client-side filter for the per-app Users modal (name / email).
   // Resets to empty on every close so opening another app doesn't carry over.
   const [usersModalFilter, setUsersModalFilter] = useState('')
@@ -187,6 +226,16 @@ export function Applications() {
     setHookCfg(c => ({ ...(c ?? {}), ...patch }))
     await adminApi.put(`/api/apps/${hookApp.slug}/webhook`, patch).catch(() => {})
   }
+
+  // v2.21.8: load the app's CPU/mem samples when the metrics modal opens.
+  useEffect(() => {
+    if (!metricsApp) { setMetricsRows(null); return }
+    let cancelled = false
+    adminApi.get<{ metrics: MetricRow[] }>(`/api/apps/${metricsApp.slug}/metrics?hours=24`)
+      .then(r => { if (!cancelled) setMetricsRows(r.metrics || []) })
+      .catch(() => { if (!cancelled) setMetricsRows([]) })
+    return () => { cancelled = true }
+  }, [metricsApp])
 
   // Filter / sort state for the table view (v1.27.41).
   const [filter, setFilter] = useState({ vis: '', name: '', tag: '', ramMin: '', cpuMin: '' })
@@ -1191,6 +1240,7 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                             >auto-deploy</button>
                           </>
                         )}
+                        <button className="btn btn-xs" onClick={() => setMetricsApp(app)} title="CPU / memory over time">📈</button>
                         <button className="btn btn-xs btn-red" onClick={() => deleteApp(app.slug, app.name)}>✕</button>
                       </div>
                     </td>
@@ -1282,6 +1332,48 @@ STEP 3 - In any terminal run \`claude\`, then paste:
           each Manage row. Lists every user with a role select for THIS
           app. Replaces the wide N×M App Roles matrix that used to live
           on /settings#users. */}
+      {metricsApp && (() => {
+        const rows = metricsRows ?? []
+        const toX = (s: string) => new Date(s.includes('T') ? s : s.replace(' ', 'T') + 'Z').getTime()
+        const mk = (env: string, field: 'cpu_percent' | 'mem_mb') =>
+          rows.filter(r => r.env === env).map(r => ({ x: toX(r.recorded_at), v: r[field] }))
+        const cpu: Series[] = [
+          { label: 'production', color: '#22c55e', points: mk('production', 'cpu_percent') },
+          { label: 'sandbox', color: '#f5a623', points: mk('sandbox', 'cpu_percent') },
+        ]
+        const mem: Series[] = [
+          { label: 'production', color: '#22c55e', points: mk('production', 'mem_mb') },
+          { label: 'sandbox', color: '#f5a623', points: mk('sandbox', 'mem_mb') },
+        ]
+        return (
+          <div
+            style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.55)', zIndex: 10500, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+            onClick={() => setMetricsApp(null)}
+          >
+            <div
+              style={{ width: 'min(600px, 92vw)', background: 'var(--surface, #1a1a1a)', color: 'var(--text)', border: '1px solid var(--border, #333)', borderRadius: 8, boxShadow: '0 16px 48px rgba(0,0,0,.5)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}
+              onClick={e => e.stopPropagation()}
+              role="dialog"
+              aria-label={`Resource usage for ${metricsApp.name}`}
+            >
+              <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--border, #333)', background: 'var(--surface2, #232323)', display: 'flex', alignItems: 'center', gap: 10 }}>
+                <span style={{ fontWeight: 600, fontSize: '.95rem' }}>Resource usage · {metricsApp.name}</span>
+                <span style={{ fontSize: '.72rem', color: 'var(--dim)' }}>last 24h</span>
+                <button className="btn btn-xs" style={{ marginLeft: 'auto' }} onClick={() => setMetricsApp(null)}>Close</button>
+              </div>
+              <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 18 }}>
+                {metricsRows === null
+                  ? <div style={{ color: 'var(--dim)', fontSize: '.82rem' }}>Loading…</div>
+                  : <>
+                      <ResourceChart title="CPU" unit="%" series={cpu} />
+                      <ResourceChart title="Memory" unit="MB" series={mem} />
+                    </>}
+              </div>
+            </div>
+          </div>
+        )
+      })()}
+
       {hookApp && (
         <div
           style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.55)', zIndex: 10500, display: 'flex', alignItems: 'center', justifyContent: 'center' }}

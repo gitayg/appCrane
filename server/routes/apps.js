@@ -375,6 +375,25 @@ router.get('/:slug', requireAppAccess, (req, res) => {
 });
 
 /**
+ * GET /api/apps/:slug/metrics - CPU/memory time-series for the resource charts.
+ * v2.21.8. Query: env (production|sandbox, optional), hours (1-168, default 24).
+ */
+router.get('/:slug/metrics', requireAppAccess, (req, res) => {
+  const app = req.app;
+  const env = ['production', 'sandbox'].includes(req.query.env) ? req.query.env : null;
+  const hours = Math.min(168, Math.max(1, parseInt(req.query.hours, 10) || 24));
+  const db = getDb();
+  const args = env ? [app.id, env, `-${hours} hours`] : [app.id, `-${hours} hours`];
+  const rows = db.prepare(`
+    SELECT env, cpu_percent, mem_mb, recorded_at
+    FROM metrics_history
+    WHERE app_id = ? ${env ? 'AND env = ?' : ''} AND recorded_at >= datetime('now', ?)
+    ORDER BY recorded_at ASC
+  `).all(...args);
+  res.json({ metrics: rows, hours });
+});
+
+/**
  * PUT /api/apps/:slug - Update app (admin or assigned user)
  */
 router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req, res) => {
