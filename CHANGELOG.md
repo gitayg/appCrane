@@ -5,6 +5,7 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.21.11 — Fixed the light theme: it never actually applied because a leftover chat-UI stylesheet's `:root` (loaded after the admin styles) tied on specificity and won on source order, keeping buttons, inputs, and backgrounds dark. The light theme selector now out-specifies it, and the leftover's dark-only variables get light values
 ## 2.21.10 — Multi-language builds via Nixpacks: apps with no Dockerfile that aren't Node (Python, Go, Ruby, static, …) now build automatically when the `nixpacks` binary is on the deploy host; without it, the deploy fails with a clear "install nixpacks or add a Dockerfile" message. Node and Dockerfile apps are unchanged
 ## 2.21.9 — Scheduled off-site backups: nightly upload of the config backup (DB + secrets + app data) to S3 or any S3-compatible store (R2/MinIO), configured in Settings → Backup, with a "Back up now" button. Self-contained SigV4 signing (no AWS SDK); no-op until credentials are entered
 ## 2.21.8 — Per-app resource graphs: AppCrane now samples CPU/memory every 5 minutes into a 7-day history, and Manage has a per-app chart (📈) of CPU and memory over the last 24h for sandbox + production

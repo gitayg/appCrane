@@ -16,7 +16,12 @@
   --purple: #a78bfa;
 }
 
-[data-theme='light'] {
+/* v2.21.11: MUST out-specify styles.css's `:root` (loaded after admin.css).
+   `[data-theme='light']` and `:root` are equal specificity (0,1,0), so the
+   later-imported styles.css `:root` was winning and the light theme never
+   applied. `:root[data-theme='light']` is (0,2,0) and wins regardless of
+   import order. */
+:root[data-theme='light'] {
   --bg: #f8fafc;
   --surface: #fff;
   --surface2: #f1f5f9;
@@ -29,6 +34,16 @@
   --red: #dc2626;
   --orange: #ea580c;
   --purple: #7c3aed;
+  /* v2.21.11: the legacy styles.css (from the chat/agent UI) still ships its
+     own dark-only palette (--bg-2/--bg-3/--fg/--fg-2) + color-scheme:dark and
+     generic body/button/input rules, which leaked into the admin light theme
+     and left buttons, inputs, and text dark. Give those variables light
+     values so the leaked rules follow the theme. */
+  color-scheme: light;
+  --bg-2: #f1f5f9;
+  --bg-3: #e2e8f0;
+  --fg: #0f172a;
+  --fg-2: #64748b;
 }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
