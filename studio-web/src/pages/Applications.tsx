@@ -123,6 +123,10 @@ export function Applications() {
   // to open a focused modal that lists every user with a role select for
   // this specific app.
   const [usersModalApp, setUsersModalApp] = useState<App | null>(null)
+  // v2.21.7: auto-deploy (webhook) config modal.
+  type HookCfg = { token?: string; auto_deploy_sandbox?: boolean; auto_deploy_prod?: boolean; branch_filter?: string }
+  const [hookApp, setHookApp] = useState<App | null>(null)
+  const [hookCfg, setHookCfg] = useState<HookCfg | null>(null)
   // v2.7.24: client-side filter for the per-app Users modal (name / email).
   // Resets to empty on every close so opening another app doesn't carry over.
   const [usersModalFilter, setUsersModalFilter] = useState('')
@@ -166,6 +170,22 @@ export function Applications() {
       setUsersModalSaving(s => ({ ...s, [userId]: 'error' }))
       alert('Save failed: ' + (e instanceof Error ? e.message : String(e)))
     }
+  }
+
+  // v2.21.7: load the app's webhook/auto-deploy config when the modal opens.
+  useEffect(() => {
+    if (!hookApp) { setHookCfg(null); return }
+    let cancelled = false
+    adminApi.get<HookCfg>(`/api/apps/${hookApp.slug}/webhook`)
+      .then(c => { if (!cancelled) setHookCfg(c || {}) })
+      .catch(() => { if (!cancelled) setHookCfg({}) })
+    return () => { cancelled = true }
+  }, [hookApp])
+
+  async function saveHook(patch: Partial<HookCfg>) {
+    if (!hookApp) return
+    setHookCfg(c => ({ ...(c ?? {}), ...patch }))
+    await adminApi.put(`/api/apps/${hookApp.slug}/webhook`, patch).catch(() => {})
   }
 
   // Filter / sort state for the table view (v1.27.41).
@@ -1166,9 +1186,9 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                             >{checkUpdateText[app.slug] || '↑ updates'}</button>
                             <button
                               className="btn btn-xs"
-                              onClick={() => registerGithubHook(app.slug)}
-                              title="Register GitHub webhook for auto-deploy"
-                            >hook</button>
+                              onClick={() => setHookApp(app)}
+                              title="Auto-deploy on git push (webhook)"
+                            >auto-deploy</button>
                           </>
                         )}
                         <button className="btn btn-xs btn-red" onClick={() => deleteApp(app.slug, app.name)}>✕</button>
@@ -1262,6 +1282,56 @@ STEP 3 - In any terminal run \`claude\`, then paste:
           each Manage row. Lists every user with a role select for THIS
           app. Replaces the wide N×M App Roles matrix that used to live
           on /settings#users. */}
+      {hookApp && (
+        <div
+          style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.55)', zIndex: 10500, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+          onClick={() => setHookApp(null)}
+        >
+          <div
+            style={{ width: 'min(560px, 92vw)', background: 'var(--surface, #1a1a1a)', color: 'var(--text)', border: '1px solid var(--border, #333)', borderRadius: 8, boxShadow: '0 16px 48px rgba(0,0,0,.5)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}
+            onClick={e => e.stopPropagation()}
+            role="dialog"
+            aria-label={`Auto-deploy for ${hookApp.name}`}
+          >
+            <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--border, #333)', background: 'var(--surface2, #232323)', fontWeight: 600, fontSize: '.95rem' }}>
+              Auto-deploy · {hookApp.name}
+            </div>
+            <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 14, fontSize: '.85rem' }}>
+              <p style={{ margin: 0, color: 'var(--dim)' }}>
+                Deploy automatically when GitHub pushes to the tracked branch. AppCrane verifies the webhook signature — enable it below, then register the hook on GitHub (or paste the URL into the repo's webhook settings).
+              </p>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <input type="checkbox" checked={!!hookCfg?.auto_deploy_sandbox} onChange={e => saveHook({ auto_deploy_sandbox: e.target.checked })} />
+                Auto-deploy <strong>sandbox</strong> on push
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <input type="checkbox" checked={!!hookCfg?.auto_deploy_prod} onChange={e => saveHook({ auto_deploy_prod: e.target.checked })} />
+                Auto-deploy <strong>production</strong> on push <span style={{ color: 'var(--red)', fontSize: '.75rem' }}>(use with care)</span>
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                Branch
+                <input className="editable" style={{ width: 140 }} defaultValue={hookCfg?.branch_filter ?? ''} placeholder="main"
+                  onBlur={e => saveHook({ branch_filter: e.target.value.trim() || 'main' })} />
+              </label>
+              <div>
+                <div style={{ color: 'var(--dim)', fontSize: '.75rem', marginBottom: 4 }}>Webhook URL (GitHub payload URL):</div>
+                <input className="editable" readOnly style={{ width: '100%', fontFamily: 'monospace', fontSize: '.75rem' }}
+                  value={hookCfg?.token ? `${window.location.origin}/api/webhooks/${hookCfg.token}` : 'register to generate…'}
+                  onFocus={e => e.currentTarget.select()} />
+              </div>
+              <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                <button className="btn btn-xs" onClick={async () => {
+                  await registerGithubHook(hookApp.slug)
+                  const c = await adminApi.get<HookCfg>(`/api/apps/${hookApp.slug}/webhook`).catch(() => null)
+                  if (c) setHookCfg(c)
+                }}>Register on GitHub</button>
+                <button className="btn btn-xs" onClick={() => setHookApp(null)}>Close</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {usersModalApp && (
         <div
           style={{
