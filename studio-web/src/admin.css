@@ -1104,6 +1104,15 @@ textarea:focus { border-color: var(--accent); }
 .sidebar-app-owner a { color: inherit; text-decoration: none; }
 .sidebar-app-owner a:hover { color: var(--accent, #f5a623); text-decoration: underline; }
 
+/* v2.21.15: collapsed icon-rail — apps as icons only when the sidebar is minimized. */
+.sidebar-apps-rail { display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 8px 0; margin-top: 8px; border-top: 1px solid var(--border); }
+.sidebar-app-rail-link {
+  display: flex; align-items: center; justify-content: center; width: 100%;
+  padding: 5px 0; cursor: pointer; border-left: 2px solid transparent;
+}
+.sidebar-app-rail-link:hover { background: var(--surface2); }
+.sidebar-app-rail-link.active { background: rgba(245,166,35,.12); border-left-color: var(--accent, #f5a623); }
+
 /* v2.6.7: Request-access tile variant. Subtle amber border so it reads
    as "discoverable, action required" rather than "broken". When the
    request has been submitted in this session it locks into a green

@@ -562,6 +562,31 @@ export function Layout({ children, subItems, activeSub }: Props) {
               })}
             </div>
           )}
+
+          {/* v2.21.15: collapsed icon-rail — apps stay reachable as icons when
+              the sidebar is minimized (flattened across categories). */}
+          {collapsed && navApps.length > 0 && (
+            <div className="sidebar-apps-rail">
+              {appGroups.flatMap(([, list]) => list).map(a => (
+                <div
+                  key={a.slug}
+                  role="button"
+                  tabIndex={0}
+                  className={'sidebar-app-rail-link' + (location.pathname === `/launch/${a.slug}` ? ' active' : '')}
+                  onClick={() => { addTab({ slug: a.slug, name: a.name, hasIcon: a.has_icon }); navigate(`/launch/${a.slug}`) }}
+                  onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); addTab({ slug: a.slug, name: a.name, hasIcon: a.has_icon }); navigate(`/launch/${a.slug}`) } }}
+                  title={a.name}
+                >
+                  <span className="sidebar-app-ico">
+                    {a.has_icon
+                      ? <img src={`/api/apps/${a.slug}/icon`} alt="" />
+                      : <span>{appInitials(a.name)}</span>}
+                    <span className={appDotClass(a)} />
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
         </nav>
 
         {/* v2.14.3: admin/config items (Manage, Docs, Settings) pinned to the
