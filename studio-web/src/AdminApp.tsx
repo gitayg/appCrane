@@ -159,7 +159,9 @@ export function AdminApp() {
       <AppTabsProvider>
       <BrowserRouter>
         <Routes>
-          <Route path="/" element={<Navigate to="/dashboard" replace />} />
+          {/* v2.21.16: land on the app picker (/launch shows "Select an app")
+              instead of the Dashboard, so the first screen is choosing an app. */}
+          <Route path="/" element={<Navigate to="/launch" replace />} />
           <Route path="/dashboard" element={<Layout><Dashboard /></Layout>} />
           <Route path="/applications" element={<Layout><Applications /></Layout>} />
           {/* Routes moved to Settings sub-tabs in v1.27.x — keep redirects
@@ -190,7 +192,7 @@ export function AdminApp() {
           <Route path="/settings"    element={<SettingsRoute />} />
           <Route path="/docs"        element={<DocsRoute />} />
           <Route path="/app"         element={<Layout><AppManager /></Layout>} />
-          <Route path="*"            element={<Navigate to="/dashboard" replace />} />
+          <Route path="*"            element={<Navigate to="/launch" replace />} />
         </Routes>
         <PersistentAppTabs />
       </BrowserRouter>
