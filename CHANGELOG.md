@@ -5,6 +5,7 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.21.18 — Friendlier auth wall: when a browser navigation lands on a protected route without a valid session, AppCrane now shows a branded "Your session has expired — Sign in" page (with a button back to login that returns you where you were) instead of dumping the raw `{"error":{"code":"UNAUTHORIZED"...}}` JSON. Programmatic/API callers still get JSON unchanged
 ## 2.21.17 — Pure-MCP large-file push for managed apps: three new MCP tools push big files without any HTTP upload. `appcrane_managed_push_chunk` + `appcrane_managed_assemble` split a large source into small parts (each optionally SHA-256-verified), reassemble server-side, verify the whole, and commit in one commit — so 100+ KB files push reliably without the model emitting them inline. `appcrane_managed_patch` edits an existing file by applying a unified diff (content-matched, so it survives small line drift and fails loudly rather than committing a corrupt file), letting an agent change only the touched hunks
 ## 2.21.16 — Entering the dashboard now lands on the app picker ("Select an app to open") instead of the overview Dashboard; the Dashboard is still one click away in the nav
 ## 2.21.15 — Collapsing the sidebar now keeps the apps reachable as an icon rail (icons only, still clickable, with the status dot) instead of hiding them entirely
