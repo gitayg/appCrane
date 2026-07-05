@@ -2132,6 +2132,223 @@ const TOOLS = [
     },
   },
 
+  // v2.21.17: pure-MCP large-file push. appcrane_push_to_managed_app inlines
+  // whole files, so a 100+ KB source risks silent truncation as the model emits
+  // it (the staged_token path fixes that but needs an HTTP upload). These two
+  // tools push a big file entirely over MCP: split it into small parts, send
+  // each with push_chunk, then assemble. Each part is small enough to emit
+  // reliably, and an optional per-part + final SHA-256 makes corruption fail
+  // loudly instead of committing a broken file.
+  {
+    name: 'appcrane_managed_push_chunk',
+    description:
+      'Stage ONE part of a large file for a managed app, entirely over MCP (no HTTP upload). ' +
+      'Use this + appcrane_managed_assemble when a file is too large to emit reliably inline via appcrane_push_to_managed_app (roughly >64 KB of code). ' +
+      'Workflow: pick an opaque `session` id (any unique string, e.g. "app.tsx-1"), split the file into N parts, and call this once per part with part=1..N and of=N. The parts are held server-side keyed by (session, part); appcrane_managed_assemble then concatenates them in order, verifies the whole, and commits. ' +
+      'Split on any boundary you like (byte or line) — assemble concatenates the decoded bytes verbatim, so the split points do not need to be newlines. Keep each part small (≤ ~48 KB of content) so inline emission stays reliable. ' +
+      'encoding defaults to "utf-8"; use "base64" for binary. If you provide `sha256` (hex SHA-256 of THIS part\'s decoded bytes), the server verifies it on arrival and rejects a corrupted part immediately. Re-sending the same (session, part) overwrites it, so a failed part is safe to retry.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        slug:     { type: 'string', description: 'Managed app slug (repo AMC_<slug>).' },
+        path:     { type: 'string', description: 'Repo-relative destination path (no leading slash, no ".."). Must be identical across every part of a session.' },
+        session:  { type: 'string', description: 'Opaque upload id grouping the parts. Any unique string; reuse the same value for every part of one file.' },
+        part:     { type: 'integer', minimum: 1, description: '1-based part number.' },
+        of:       { type: 'integer', minimum: 1, description: 'Total number of parts. Must be identical across every part of a session.' },
+        content:  { type: 'string', description: 'This part\'s bytes, encoded per `encoding`.' },
+        encoding: { type: 'string', enum: ['utf-8', 'base64'], description: 'Defaults to utf-8. Use base64 for binary files.' },
+        sha256:   { type: 'string', description: 'Optional hex SHA-256 of this part\'s decoded bytes. If given, the server verifies it and rejects a mismatch.' },
+      },
+      required: ['slug', 'path', 'session', 'part', 'of', 'content'],
+      additionalProperties: false,
+    },
+    requiredRole: 'app_admin',
+    handler: async (user, args) => {
+      const app = getAppForUser(user, args.slug);
+      if (!isAppAdmin(user, app)) throw new Error('Forbidden: pushing to a managed repo requires admin or app-admin role');
+      if (app.source_type !== 'managed') {
+        throw new Error(`App '${app.slug}' is source_type='${app.source_type || 'github'}' — appcrane_managed_push_chunk only works for source_type='managed' apps.`);
+      }
+      const { path, session, part, of } = args;
+      if (typeof path !== 'string' || path.includes('..') || path.startsWith('/')) {
+        throw new Error(`invalid file path '${path}': must be repo-relative, no ".." or leading slash`);
+      }
+      if (!Number.isInteger(part) || !Number.isInteger(of) || of < 1 || part < 1 || part > of) {
+        throw new Error(`invalid part/of: part must be an integer in 1..of (got part=${part}, of=${of})`);
+      }
+      const encoding = args.encoding || 'utf-8';
+      const decoded = encoding === 'base64'
+        ? Buffer.from(args.content, 'base64')
+        : Buffer.from(args.content, 'utf-8');
+      const actualSha = crypto.createHash('sha256').update(decoded).digest('hex');
+      if (args.sha256 && args.sha256.toLowerCase() !== actualSha) {
+        throw new Error(`part ${part} SHA-256 mismatch: you declared ${args.sha256} but the received bytes hash to ${actualSha}. The part was corrupted in transit — resend it.`);
+      }
+
+      const db = getDb();
+      // Defensive: sweep upload sessions that were never assembled (>2h old).
+      db.prepare("DELETE FROM managed_push_chunks WHERE created_at < datetime('now', '-2 hours')").run();
+
+      // Enforce consistency across a session: same owner, slug, path, of_total.
+      const existing = db.prepare('SELECT user_id, slug, path, of_total FROM managed_push_chunks WHERE session = ? LIMIT 1').get(session);
+      if (existing) {
+        if (existing.user_id !== user.id) throw new Error(`session '${session}' belongs to a different user`);
+        if (existing.slug !== app.slug)   throw new Error(`session '${session}' is already in use for a different app ('${existing.slug}')`);
+        if (existing.path !== path)        throw new Error(`session '${session}' is already staging a different path ('${existing.path}') — use a distinct session per file`);
+        if (existing.of_total !== of)      throw new Error(`session '${session}' was started with of=${existing.of_total}, not ${of}`);
+      }
+
+      db.prepare(
+        `INSERT INTO managed_push_chunks (session, user_id, slug, path, part, of_total, encoding, content, sha256)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(session, part) DO UPDATE SET
+           encoding = excluded.encoding, content = excluded.content, sha256 = excluded.sha256, created_at = datetime('now')`
+      ).run(session, user.id, app.slug, path, part, of, encoding, args.content, actualSha);
+
+      const have = db.prepare('SELECT part FROM managed_push_chunks WHERE session = ? ORDER BY part').all(session).map(r => r.part);
+      const missing = [];
+      for (let p = 1; p <= of; p++) if (!have.includes(p)) missing.push(p);
+      return {
+        session,
+        path,
+        stored_part: part,
+        of,
+        bytes: decoded.length,
+        sha256: actualSha,
+        received_parts: have.length,
+        missing_parts: missing,
+        next: missing.length === 0
+          ? `All ${of} parts received. Next: appcrane_managed_assemble slug="${app.slug}" session="${session}" path="${path}" to commit.`
+          : `Still need part(s) ${missing.join(', ')}.`,
+      };
+    },
+  },
+
+  {
+    name: 'appcrane_managed_assemble',
+    description:
+      'Finish a chunked upload started with appcrane_managed_push_chunk: concatenate all parts of a `session` in order, verify the whole, and commit the assembled file to the managed app\'s AMC_<slug> repo as a single commit. ' +
+      'Fails if any part is missing. If you pass `sha256` (hex SHA-256 of the ENTIRE original file\'s bytes), the server verifies the reassembled bytes against it and refuses to commit on mismatch — always pass it for large or binary files. On success the staged parts are deleted. Returns the commit sha plus the committed file\'s sha256 and byte length.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        slug:    { type: 'string', description: 'Managed app slug (repo AMC_<slug>).' },
+        session: { type: 'string', description: 'The upload id you used for appcrane_managed_push_chunk.' },
+        path:    { type: 'string', description: 'The destination path; must match what the parts were staged with.' },
+        sha256:  { type: 'string', description: 'Optional hex SHA-256 of the whole original file. If given, the reassembled bytes are verified against it before committing.' },
+        message: { type: 'string', description: 'Commit message. Defaults to "chore: update <path>".' },
+        branch:  { type: 'string', description: 'Target branch. Defaults to the app\'s branch / repo default.' },
+      },
+      required: ['slug', 'session', 'path'],
+      additionalProperties: false,
+    },
+    requiredRole: 'app_admin',
+    handler: async (user, args) => {
+      const app = getAppForUser(user, args.slug);
+      if (!isAppAdmin(user, app)) throw new Error('Forbidden: pushing to a managed repo requires admin or app-admin role');
+      if (app.source_type !== 'managed') {
+        throw new Error(`App '${app.slug}' is source_type='${app.source_type || 'github'}' — appcrane_managed_assemble only works for source_type='managed' apps.`);
+      }
+      const db = getDb();
+      const rows = db.prepare('SELECT * FROM managed_push_chunks WHERE session = ? ORDER BY part').all(args.session);
+      if (rows.length === 0) throw new Error(`no staged parts for session '${args.session}' (unknown, already assembled, or swept)`);
+      const first = rows[0];
+      if (first.user_id !== user.id) throw new Error(`session '${args.session}' belongs to a different user`);
+      if (first.slug !== app.slug)   throw new Error(`session '${args.session}' was staged for app '${first.slug}', not '${app.slug}'`);
+      if (first.path !== args.path)  throw new Error(`session '${args.session}' was staged for path '${first.path}', not '${args.path}'`);
+
+      const of = first.of_total;
+      const seen = new Set(rows.map(r => r.part));
+      const missing = [];
+      for (let p = 1; p <= of; p++) if (!seen.has(p)) missing.push(p);
+      if (missing.length) throw new Error(`cannot assemble session '${args.session}': missing part(s) ${missing.join(', ')} of ${of}`);
+
+      // Concatenate decoded bytes in part order.
+      const buf = Buffer.concat(rows.map(r =>
+        r.encoding === 'base64' ? Buffer.from(r.content, 'base64') : Buffer.from(r.content, 'utf-8')
+      ));
+      const fullSha = crypto.createHash('sha256').update(buf).digest('hex');
+      if (args.sha256 && args.sha256.toLowerCase() !== fullSha) {
+        throw new Error(`assembled file SHA-256 mismatch: you declared ${args.sha256} but the reassembled bytes hash to ${fullSha}. Not committing. Re-check the parts.`);
+      }
+
+      const { pushFilesToManagedRepo } = await import('./githubService.js');
+      const result = await pushFilesToManagedRepo(app.slug, [{ path: args.path, content: buf.toString('base64'), encoding: 'base64' }], {
+        message: args.message || `chore: update ${args.path}`,
+        branch:  args.branch || app.branch,
+      });
+      if (result?.commit?.sha && /^[0-9a-f]{40}$/.test(result.commit.sha)) {
+        db.prepare('UPDATE apps SET last_managed_push_sha = ? WHERE id = ?').run(result.commit.sha, app.id);
+      }
+      db.prepare('DELETE FROM managed_push_chunks WHERE session = ?').run(args.session);
+      log.info(`MCP: assembled ${of}-part upload (${buf.length} bytes) to AMC_${app.slug}:${args.path} (commit ${result.commit.sha.slice(0, 7)}) by user ${user.id}`);
+      return {
+        app:    app.slug,
+        commit: result.commit,
+        branch: result.branch,
+        file:   { path: args.path, bytes: buf.length, sha256: fullSha, ...result.files[0] },
+        next:   `File committed. Next: appcrane_deploy slug="${app.slug}" stage="sandbox" to ship.`,
+      };
+    },
+  },
+
+  {
+    name: 'appcrane_managed_patch',
+    description:
+      'Edit an existing text file in a managed app\'s AMC_<slug> repo by applying a unified diff, entirely over MCP — you emit only the changed hunks, not the whole file. ' +
+      'Ideal for small edits to a large file (avoids re-emitting the whole thing, which is where inline truncation comes from). The server fetches the current file, applies your `unified_diff`, and commits the result as a single commit. ' +
+      'The diff must be a standard unified diff (as from `git diff` / `diff -u`): `@@ -old,len +new,len @@` hunk headers, lines prefixed with " " (context), "-" (remove), "+" (add). Include a few context lines around each change. Hunks are matched by CONTENT (not just line numbers), so small line drift is tolerated — but if a hunk\'s context does not match the current file, the whole patch is rejected and nothing is committed (re-read the file and regenerate the diff). Only single-file diffs are supported; the target is `path`, not the diff\'s ---/+++ headers.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        slug:        { type: 'string', description: 'Managed app slug (repo AMC_<slug>).' },
+        path:        { type: 'string', description: 'Repo-relative path of the file to patch (no leading slash, no "..").' },
+        unified_diff:{ type: 'string', description: 'A standard unified diff to apply to the current contents of `path`.' },
+        message:     { type: 'string', description: 'Commit message. Defaults to "chore: patch <path>".' },
+        branch:      { type: 'string', description: 'Target branch. Defaults to the app\'s branch / repo default.' },
+      },
+      required: ['slug', 'path', 'unified_diff'],
+      additionalProperties: false,
+    },
+    requiredRole: 'app_admin',
+    handler: async (user, args) => {
+      const app = getAppForUser(user, args.slug);
+      if (!isAppAdmin(user, app)) throw new Error('Forbidden: patching a managed repo requires admin or app-admin role');
+      if (app.source_type !== 'managed') {
+        throw new Error(`App '${app.slug}' is source_type='${app.source_type || 'github'}' — appcrane_managed_patch only works for source_type='managed' apps.`);
+      }
+      if (typeof args.path !== 'string' || args.path.includes('..') || args.path.startsWith('/')) {
+        throw new Error(`invalid file path '${args.path}': must be repo-relative, no ".." or leading slash`);
+      }
+      const branch = args.branch || app.branch;
+      const { readManagedRepoFile, pushFilesToManagedRepo } = await import('./githubService.js');
+      const { applyUnifiedDiff } = await import('./unifiedDiff.js');
+
+      const current = await readManagedRepoFile(app.slug, args.path, { branch });
+      const patched = applyUnifiedDiff(current.content, args.unified_diff);
+      if (patched === current.content) {
+        throw new Error(`the unified_diff produced no change to '${args.path}' — it may already be applied, or the diff is empty.`);
+      }
+
+      const db = getDb();
+      const result = await pushFilesToManagedRepo(app.slug, [{ path: args.path, content: patched, encoding: 'utf-8' }], {
+        message: args.message || `chore: patch ${args.path}`,
+        branch,
+      });
+      if (result?.commit?.sha && /^[0-9a-f]{40}$/.test(result.commit.sha)) {
+        db.prepare('UPDATE apps SET last_managed_push_sha = ? WHERE id = ?').run(result.commit.sha, app.id);
+      }
+      log.info(`MCP: patched AMC_${app.slug}:${args.path} (${current.bytes}→${Buffer.byteLength(patched, 'utf-8')} bytes, commit ${result.commit.sha.slice(0, 7)}) by user ${user.id}`);
+      return {
+        app:    app.slug,
+        commit: result.commit,
+        branch: result.branch,
+        file:   { path: args.path, bytes_before: current.bytes, bytes_after: Buffer.byteLength(patched, 'utf-8'), ...result.files[0] },
+        next:   `Patch committed. Next: appcrane_deploy slug="${app.slug}" stage="sandbox" to ship.`,
+      };
+    },
+  },
+
   {
     name: 'appcrane_set_secret',
     description:

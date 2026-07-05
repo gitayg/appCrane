@@ -160,6 +160,44 @@ export function managedRepoNameForSlug(slug) {
 }
 
 /**
+ * Read a single file from a managed app's AMC_<slug> repo via the service
+ * account. Returns { content, sha, encoding, bytes } where `content` is the
+ * decoded UTF-8 text and `sha` is the git blob SHA (needed to overwrite it).
+ * Throws a FILE_NOT_FOUND error (status 404) if the path doesn't exist on the
+ * branch. Used by appcrane_managed_patch to fetch the pre-image before applying
+ * a unified diff.
+ */
+export async function readManagedRepoFile(slug, path, opts = {}) {
+  if (!slug || typeof slug !== 'string') throw new Error('slug is required');
+  if (!path || typeof path !== 'string') throw new Error('path is required');
+  if (path.includes('..') || path.startsWith('/')) {
+    throw new Error(`invalid file path '${path}': must be repo-relative, no ".." or leading slash`);
+  }
+  const cfg = getServiceConfig();
+  if (!cfg.owner) throw new Error('github_service_owner is not configured');
+  const repoName = managedRepoNameForSlug(slug);
+  const ownerRepo = `${encodeURIComponent(cfg.owner)}/${encodeURIComponent(repoName)}`;
+  const encPath = path.split('/').map(encodeURIComponent).join('/');
+  const ref = opts.branch ? `?ref=${encodeURIComponent(opts.branch)}` : '';
+  let res;
+  try {
+    res = await apiFetch(`/repos/${ownerRepo}/contents/${encPath}${ref}`);
+  } catch (e) {
+    if (e?.status === 404) {
+      const err = new Error(`FILE_NOT_FOUND: '${path}' does not exist in ${cfg.owner}/${repoName}${opts.branch ? ` on branch ${opts.branch}` : ''}.`);
+      err.status = 404;
+      throw err;
+    }
+    throw e;
+  }
+  if (Array.isArray(res) || res.type !== 'file') {
+    throw new Error(`'${path}' is not a file (it is a ${res.type || 'directory'})`);
+  }
+  const buf = Buffer.from(res.content || '', res.encoding === 'base64' ? 'base64' : 'utf-8');
+  return { content: buf.toString('utf-8'), sha: res.sha, encoding: res.encoding, bytes: buf.length };
+}
+
+/**
  * Create a repository under the configured service account/org.
  *
  * v2.6.11 changes:

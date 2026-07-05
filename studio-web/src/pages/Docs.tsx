@@ -37,6 +37,9 @@ const TOOL_GROUPS: { cat: string; tools: [string, string][] }[] = [
     ["appcrane_cat", "Print the contents of a file inside a running app container"],
     ["appcrane_push_staged_file", "Move a previously-staged file into a running container under /app or /data"],
     ["appcrane_push_to_managed_app", "Push a batch of files to a managed app's repo via the service-account credential"],
+    ["appcrane_managed_push_chunk", "Stage one part of a large file for a managed app — pure MCP, no HTTP upload"],
+    ["appcrane_managed_assemble", "Reassemble a chunked upload, verify the whole, and commit it to the managed repo"],
+    ["appcrane_managed_patch", "Edit a file in a managed repo by applying a unified diff (only the changed hunks)"],
   ] },
   { cat: "Access control", tools: [
     ["appcrane_list_app_members", "List everyone with access to an app + their per-app role"],
@@ -151,7 +154,7 @@ export function Docs() {
           </p>
 
           <h2 id="connect">Connect an agent</h2>
-          <p>One command wires AppCrane into a local Claude Code session — it then has all 35 tools below (plus a GitHub passthrough if you supply a PAT):</p>
+          <p>One command wires AppCrane into a local Claude Code session — it then has all 38 tools below (plus a GitHub passthrough if you supply a PAT):</p>
           <pre><code>{`claude mcp add --transport http appcrane https://your-host/api/mcp \\
   --header "X-API-Key: <your AppCrane key>" \\
   --header "X-Github-Token: <your GitHub PAT>"`}</code></pre>
