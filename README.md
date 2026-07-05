@@ -8,7 +8,7 @@
 
 Vibe-code an app with Claude Code or Cursor, then have your AI agent deploy it — over MCP — to a server **you** own. AppCrane is a self-hosted, **agent-first** deployment platform with the enterprise guardrails the cloud PaaS crowd skips: Docker isolation per app, SAML/OIDC/SCIM SSO, per-user audit, and a middleware hard-wall so the platform operator can't read your app secrets (your model API keys stay yours). A self-hosted alternative to Heroku, Vercel, and hosted agent-deploy services like AppDeploy.
 
-**MCP-first.** AI agents connect once via `claude mcp add ... /api/mcp` and operate the platform through 35 `appcrane_*` tools. No curl, no separate scripts — `appcrane_get_guide(topic="onboarding"|"operations")` returns the latest playbook on demand.
+**MCP-first.** AI agents connect once via `claude mcp add ... /api/mcp` and operate the platform through 38 `appcrane_*` tools. No curl, no separate scripts — `appcrane_get_guide(topic="onboarding"|"operations")` returns the latest playbook on demand.
 
 ## Why AppCrane
 
@@ -43,7 +43,7 @@ Vibe-code an app with Claude Code or Cursor, then have your AI agent deploy it �
 - **Encrypted env vars** (AES-256-GCM) — admin cannot read them by design
 - **Health checks** with auto-restart and email notifications
 - **Audit log** for every action
-- **MCP server** at `/api/mcp` exposing 35 `appcrane_*` tools — agents operate the platform without ever touching curl, gh, or shell
+- **MCP server** at `/api/mcp` exposing 38 `appcrane_*` tools — agents operate the platform without ever touching curl, gh, or shell
 
 ## Quick Start
 
