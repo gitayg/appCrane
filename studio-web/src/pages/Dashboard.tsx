@@ -156,6 +156,9 @@ export function Dashboard() {
     users: { id: number; name: string; email: string | null; apps: number }[]
   }>({ apps: [], users: [] })
   const [usageSummary, setUsageSummary] = useState<UsageSummary | null>(null)
+  // Users currently active in the system (active accounts with app or platform
+  // activity in the last 15 min). Refreshed with fetchMain every 30s.
+  const [activeUsers, setActiveUsers] = useState<number | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [onboardDismissed, setOnboardDismissed] = useState(!!localStorage.getItem(ONBOARD_KEY))
@@ -184,13 +187,14 @@ export function Dashboard() {
       // works for everyone (server filters by role); /api/server/health
       // works for everyone (status only, no sensitive detail). The
       // admin-only ones now degrade gracefully.
-      const [h, appsRes, usersRes, enhRes, actRes, ldrRes] = await Promise.all([
+      const [h, appsRes, usersRes, enhRes, actRes, ldrRes, activeRes] = await Promise.all([
         adminApi.get<ServerHealth>('/api/server/health').catch(() => null),
         adminApi.get<{ apps: App[] }>('/api/apps'),
         adminApi.get<{ users: User[] }>('/api/users').catch(() => ({ users: [] })),
         adminApi.get<{ requests: Enhancement[] }>('/api/enhancements').catch(() => ({ requests: [] })),
         adminApi.get<{ days: string[]; apps: ActivityApp[] }>('/api/dashboard/app-activity').catch(() => ({ days: [], apps: [] })),
         adminApi.get<typeof leaders>('/api/dashboard/leaderboards?days=7&top=10').catch(() => ({ apps: [], users: [] })),
+        adminApi.get<{ minutes: number; count: number }>('/api/dashboard/active-users').catch(() => null),
       ])
       if (h) setHealth(h)
       setApps(appsRes.apps ?? [])
@@ -198,6 +202,7 @@ export function Dashboard() {
       setEnhancements(enhRes.requests ?? [])
       setLeaders({ apps: ldrRes.apps ?? [], users: ldrRes.users ?? [] })
       setActivity(actRes)
+      if (activeRes) setActiveUsers(activeRes.count)
     } catch (e) {
       setError(String(e))
     } finally {
@@ -378,6 +383,11 @@ export function Dashboard() {
           <div className="label">Users</div>
           <div className="value">{totalUsers}</div>
           <div className="sub">registered accounts</div>
+        </div>
+        <div className="stat" title="Active accounts with app or platform activity in the last 15 minutes">
+          <div className="label">Active Now</div>
+          <div className="value">{activeUsers ?? '—'}</div>
+          <div className="sub">in the last 15 min</div>
         </div>
         <a className="stat" href="/enhancements-page" style={{ cursor: 'pointer' }}>
           <div className="label">Enhancements</div>
