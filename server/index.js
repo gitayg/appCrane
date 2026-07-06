@@ -464,6 +464,40 @@ app.post('/api/self-update', requireAuth, requirePlatformAdmin, async (req, res)
       }
     }
 
+    // "Smart turn toward the upgrade": don't restart out from under a live MCP
+    // agent. If an MCP request is in flight, or one ran very recently (the agent
+    // is likely mid-turn), wait for the connection to go quiet, THEN proceed —
+    // rather than either hard-refusing or cutting the agent off. Only give up
+    // (409) if it never settles within the max wait. ?force=1 skips the wait;
+    // ?wait=<seconds> overrides how long we'll drain (default 45s, max 300s).
+    if (!req.query.force) {
+      const { getMcpActivity } = await import('./services/mcpActivity.js');
+      const IDLE_REQUIRED_MS = 10_000; // MCP is "quiet" after 10s with no calls
+      const MAX_WAIT_MS = Math.min(300, Math.max(0, parseInt(req.query.wait, 10) || 45)) * 1000;
+      const isBusy = (a) => a.inflight > 0 || a.idleMs < IDLE_REQUIRED_MS;
+      const startedAt = Date.now();
+      let act = getMcpActivity();
+      if (isBusy(act)) {
+        log.info(`Self-update: MCP active (inflight=${act.inflight}, idle=${act.idleMs}ms) — draining up to ${MAX_WAIT_MS / 1000}s before upgrade`);
+        while (isBusy(act) && Date.now() - startedAt < MAX_WAIT_MS) {
+          await new Promise((r) => setTimeout(r, 1000));
+          act = getMcpActivity();
+        }
+      }
+      if (isBusy(act)) {
+        return res.status(409).json({
+          error: {
+            code: 'MCP_ACTIVE',
+            message: `Refusing to self-update: an MCP agent is still active (inflight=${act.inflight}, last call ${Math.round(act.idleMs / 1000)}s ago) and didn't go idle within ${MAX_WAIT_MS / 1000}s. Wait for it to finish, retry with a longer ?wait=<seconds>, or POST with ?force=1 to upgrade anyway.`,
+            mcp: { inflight: act.inflight, idle_ms: act.idleMs },
+          },
+        });
+      }
+      if (Date.now() - startedAt > 500) {
+        log.info(`Self-update: MCP drained after ${Math.round((Date.now() - startedAt) / 1000)}s — proceeding`);
+      }
+    }
+
     const { execFileSync, spawn } = await import('child_process');
     const { logAudit } = await import('./middleware/audit.js');
 

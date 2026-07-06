@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { listTools, callTool, getToolCatalog } from '../services/mcpTools.js';
+import { noteMcpStart, noteMcpEnd } from '../services/mcpActivity.js';
 import { getDb } from '../db.js';
 import {
   listToolsForUser as ghListTools,
@@ -86,6 +87,10 @@ router.post('/', requireAuth, async (req, res) => {
     return res.json({ jsonrpc: '2.0', id, error: { code: -32600, message: 'Invalid request — expected jsonrpc 2.0' } });
   }
 
+  // Mark this MCP request in-flight so a concurrent self-update waits for it
+  // to finish before restarting. noteMcpEnd() runs in finally, even on early
+  // return or throw below.
+  noteMcpStart();
   try {
     let result;
     switch (method) {
@@ -162,6 +167,8 @@ router.post('/', requireAuth, async (req, res) => {
   } catch (err) {
     log.warn(`MCP ${method} error: ${err.message}`);
     res.json({ jsonrpc: '2.0', id, error: { code: -32000, message: err.message } });
+  } finally {
+    noteMcpEnd();
   }
 });
 
