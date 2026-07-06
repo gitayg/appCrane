@@ -68,6 +68,16 @@ interface PromptModal {
 
 type SortKey = 'name' | 'visibility' | 'category' | 'ram' | 'cpu' | 'images'
 
+// Human-readable byte size, e.g. 1536 -> "1.5 KB". Used for the per-app
+// persistent-storage (/data) usage shown in the Manage drill-down.
+function fmtBytes(n: number): string {
+  if (!n || n < 1) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let v = n, i = 0
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++ }
+  return `${i > 0 && v < 10 ? v.toFixed(1) : Math.round(v)} ${units[i]}`
+}
+
 // v2.21.8: tiny multi-line SVG chart for the per-app resource modal.
 interface Series { label: string; color: string; points: { x: number; v: number }[] }
 function ResourceChart({ title, unit, series }: { title: string; unit: string; series: Series[] }) {
@@ -248,6 +258,24 @@ export function Applications() {
   // Drill-down state — sandbox + production controls live in an
   // expandable row below each app to keep the table compact (v1.27.47).
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
+
+  // Persistent-storage (/data) usage per app, lazily fetched when a row is
+  // expanded — computing it walks the volume, so we don't do it for every app
+  // on load. slug -> { production, sandbox } bytes | 'loading' | 'error'.
+  type StorageUse = { production: number; sandbox: number }
+  const [storage, setStorage] = useState<Record<string, StorageUse | 'loading' | 'error'>>({})
+  useEffect(() => {
+    for (const slug of Object.keys(expanded)) {
+      if (!expanded[slug]) continue
+      setStorage(prev => {
+        if (prev[slug]) return prev  // already loading / loaded
+        adminApi.get<{ storage: StorageUse }>(`/api/apps/${slug}/storage`)
+          .then(r => setStorage(p => ({ ...p, [slug]: r.storage })))
+          .catch(() => setStorage(p => ({ ...p, [slug]: 'error' })))
+        return { ...prev, [slug]: 'loading' }
+      })
+    }
+  }, [expanded])
 
   const iconInputRefs = useRef<Record<string, HTMLInputElement | null>>({})
 
@@ -1270,6 +1298,18 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                                   )}
                                   <button className="btn btn-xs" onClick={() => toggleEvars(app.slug, env)}>env vars</button>
                                   <button className="btn btn-xs" onClick={() => restartApp(app.slug, env)}>↺ restart</button>
+                                  {(() => {
+                                    const st = storage[app.slug]
+                                    const label = st === 'loading' || st === undefined ? '…'
+                                      : st === 'error' ? 'n/a'
+                                      : fmtBytes(st[env])
+                                    return (
+                                      <span style={{ marginLeft: 'auto', fontSize: '.72rem', color: 'var(--dim)', whiteSpace: 'nowrap' }}
+                                        title="Persistent storage used by this environment's /data volume">
+                                        💾 {label}
+                                      </span>
+                                    )
+                                  })()}
                                 </div>
                               </div>
                             )
