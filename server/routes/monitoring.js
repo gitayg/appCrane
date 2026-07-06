@@ -214,6 +214,32 @@ router.get('/dashboard/leaderboards', requireAdmin, (req, res) => {
 });
 
 /**
+ * GET /api/dashboard/active-users (v2.21.22) — count of users currently active
+ * in the system, i.e. active (non-deactivated) accounts that either opened an
+ * app (app_last_visit, updated on every Caddy forward_auth) or took a platform
+ * action (audit_log) within the last `minutes`. Admin-only, like the other
+ * dashboard rollups. Query: minutes (default 15, 1..1440).
+ */
+router.get('/dashboard/active-users', requireAdmin, (req, res) => {
+  const minutes = Math.min(Math.max(parseInt(req.query.minutes, 10) || 15, 1), 1440);
+  const db = getDb();
+  const { count } = db.prepare(`
+    SELECT COUNT(DISTINCT u.id) AS count
+    FROM users u
+    WHERE u.active = 1 AND (
+      EXISTS (
+        SELECT 1 FROM app_last_visit v
+        WHERE v.user_id = u.id AND v.last_visit_at >= datetime('now', '-' || ? || ' minutes')
+      ) OR EXISTS (
+        SELECT 1 FROM audit_log al
+        WHERE al.user_id = u.id AND al.created_at >= datetime('now', '-' || ? || ' minutes')
+      )
+    )
+  `).get(minutes, minutes);
+  res.json({ minutes, count });
+});
+
+/**
  * GET /api/server/tls-check - ENH-005: HSTS preload + cert validity check
  */
 router.get('/server/tls-check', requireAdmin, async (req, res) => {
