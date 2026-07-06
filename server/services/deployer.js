@@ -1,11 +1,41 @@
 import { execFileSync } from 'child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, unlinkSync, symlinkSync, cpSync, writeFileSync } from 'fs';
-import { join, resolve } from 'path';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, unlinkSync, symlinkSync, cpSync, writeFileSync, readlinkSync } from 'fs';
+import { join, resolve, basename } from 'path';
 import { getDb } from '../db.js';
 import { decrypt } from './encryption.js';
 import log from '../utils/logger.js';
 import { AppError } from '../utils/errors.js';
 import { ensureCodebaseContext } from './appstudio/contextBuilder.js';
+
+// Prune old release checkouts under <appDir>/releases, keeping the newest
+// `keep` plus the currently-live release (the `current` symlink target), which
+// is NEVER deleted even if it isn't among the newest. Release dir names are
+// timestamp-prefixed, so lexicographic sort == chronological. Best-effort:
+// individual rm failures are swallowed so one undeletable dir can't abort a
+// deploy. Runs at the start of every deploy AND in the failure handler, not
+// just on success — a repeatedly-failing app used to accumulate half-cloned
+// `<ts>-git` dirs until the disk filled (ENOSPC on mkdir).
+function pruneOldReleases(releasesDir, appDir, keep = 5, appendLog = () => {}) {
+  let liveBase = null;
+  try {
+    const link = join(appDir, 'current');
+    if (existsSync(link)) liveBase = basename(readlinkSync(link));
+  } catch (_) { /* no/broken symlink — nothing to protect */ }
+
+  let entries;
+  try { entries = readdirSync(releasesDir); } catch (_) { return; }
+  const sorted = entries.sort().reverse(); // newest-first
+  let kept = 0;
+  for (const dir of sorted) {
+    if (dir === liveBase) continue;   // never delete the live release
+    kept++;
+    if (kept <= keep) continue;       // keep the newest `keep` non-live dirs
+    try {
+      rmSync(join(releasesDir, dir), { recursive: true, force: true });
+      appendLog(`Pruned old release: ${dir}`);
+    } catch (_) { /* best-effort */ }
+  }
+}
 
 // v2.7.31: a deploy that hasn't moved past these states in this long is
 // treated as orphaned (process died mid-build without the boot sweep, or a
@@ -531,7 +561,14 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
   // operator chasing "fetch failed" can rule volume permissions in/out.
   if (chownDetail) appendLog(chownDetail);
 
+  // Hoisted so the failure handler can remove this attempt's checkout.
+  let releaseDir;
   try {
+    // Trim any accumulated release backlog BEFORE cloning, so an app whose disk
+    // filled from repeated failed deploys can self-heal on its next attempt
+    // instead of hitting ENOSPC again on mkdir. Never touches the live release.
+    pruneOldReleases(releasesDir, appDir, 5, appendLog);
+
     // 1. Clone or locate release
     const timestamp = Date.now();
     let commitHash = 'unknown';
@@ -541,7 +578,6 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     // dashboard / MCP deploy path left it NULL, so the dialog rendered a
     // version pill with no body.
     let commitMessage = null;
-    let releaseDir;
 
     if (opts.preExtractedDir) {
       releaseDir = resolve(opts.preExtractedDir);
@@ -1160,15 +1196,8 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
         .run(frontendAssets, deployLog.join('\n'), deployId);
     } catch (_) {}
 
-    // Cleanup old releases (keep last 5)
-    try {
-      const allReleases = readdirSync(releasesDir).sort().reverse();
-      for (const dir of allReleases.slice(5)) {
-        const fullPath = join(releasesDir, dir);
-        rmSync(fullPath, { recursive: true, force: true });
-        appendLog(`Cleaned up old release: ${dir}`);
-      }
-    } catch (e) {}
+    // Cleanup old releases (keep last 5, never the live one).
+    pruneOldReleases(releasesDir, appDir, 5, appendLog);
 
     // Send notification
     try {
@@ -1180,6 +1209,23 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
 
   } catch (error) {
     appendLog(`DEPLOY FAILED: ${error.message}`);
+
+    // A failed deploy's checkout is dead weight — the live `current` symlink
+    // still points at the last-good release. Remove this attempt's dir (if it's
+    // under releases/ and isn't the live one) so repeated failures don't fill
+    // the disk, then trim any older backlog. This is what stops the ENOSPC.
+    try {
+      if (releaseDir && resolve(releaseDir).startsWith(resolve(releasesDir))) {
+        const link = join(appDir, 'current');
+        const liveTarget = existsSync(link) ? resolve(readlinkSync(link)) : null;
+        if (resolve(releaseDir) !== liveTarget) {
+          rmSync(releaseDir, { recursive: true, force: true });
+          appendLog(`Removed failed release checkout: ${basename(releaseDir)}`);
+        }
+      }
+    } catch (_) { /* best-effort */ }
+    try { pruneOldReleases(releasesDir, appDir, 5, appendLog); } catch (_) {}
+
     db.prepare(`
       UPDATE deployments SET status = 'failed', finished_at = datetime('now'), log = ?
       WHERE id = ?
