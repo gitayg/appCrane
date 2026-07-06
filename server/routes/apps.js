@@ -394,6 +394,28 @@ router.get('/:slug/metrics', requireAppAccess, (req, res) => {
 });
 
 /**
+ * GET /api/apps/:slug/storage - persistent-storage (/data volume) usage in bytes,
+ * per env. The app's persistent data lives at
+ * <DATA_DIR>/apps/<slug>/<env>/shared/data — the only bytes that survive a
+ * redeploy (release checkouts under releases/ are ephemeral). v2.21.20.
+ */
+router.get('/:slug/storage', requireAppAccess, async (req, res) => {
+  const app = req.app;
+  const { dirSizeBytes } = await import('../services/diskUsage.js');
+  const dataDir = process.env.DATA_DIR || './data';
+  const envs = {};
+  for (const env of ['production', 'sandbox']) {
+    let bytes = 0;
+    try {
+      const dataPath = resolveSafe(dataDir, 'apps', app.slug, env, 'shared', 'data');
+      bytes = dirSizeBytes(dataPath);
+    } catch (_) { bytes = 0; }
+    envs[env] = bytes;
+  }
+  res.json({ slug: app.slug, storage: envs, total_bytes: envs.production + envs.sandbox });
+});
+
+/**
  * PUT /api/apps/:slug - Update app (admin or assigned user)
  */
 router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req, res) => {
