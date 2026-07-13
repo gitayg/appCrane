@@ -99,13 +99,17 @@ function EditableCell({
   display?: (v: string | number) => ReactNode
 }) {
   const [editing, setEditing] = useState(false)
+  const [saved, setSaved] = useState(false)
   const orig = value == null ? '' : String(value)
   if (editing && !disabled) {
     return (
       <input
         className="editable" type={type} autoFocus defaultValue={orig}
         aria-label={ariaLabel} min={min} max={max}
-        onBlur={e => { setEditing(false); if (e.target.value !== orig) onSave(e.target.value) }}
+        onBlur={e => {
+          setEditing(false)
+          if (e.target.value !== orig) { onSave(e.target.value); setSaved(true); window.setTimeout(() => setSaved(false), 1500) }
+        }}
         onKeyDown={e => {
           if (e.key === 'Enter') e.currentTarget.blur()
           else if (e.key === 'Escape') { e.currentTarget.value = orig; e.currentTarget.blur() }
@@ -122,7 +126,10 @@ function EditableCell({
       title={title ?? (disabled ? undefined : 'Click to edit')}
       onClick={() => { if (!disabled) setEditing(true) }}
       style={isEmpty ? { color: 'var(--dim)' } : undefined}
-    >{isEmpty ? placeholder : (display ? display(value) : orig)}</button>
+    >
+      {isEmpty ? placeholder : (display ? display(value) : orig)}
+      {saved && <span aria-label="saved" style={{ color: 'var(--green)', marginLeft: 5, fontWeight: 700 }}>✓</span>}
+    </button>
   )
 }
 
