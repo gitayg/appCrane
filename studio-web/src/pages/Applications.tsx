@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, type CSSProperties, type ReactNode } from 'react'
 import { adminApi } from '../adminApi'
 import { PresenceAvatars } from '../components/runtime-topbar/PresenceAvatars'
 import { JobsButton } from '../components/runtime-topbar/JobsButton'
@@ -66,7 +66,7 @@ interface PromptModal {
   sections?: { label: string; text: string }[]
 }
 
-type SortKey = 'name' | 'visibility' | 'category' | 'ram' | 'cpu' | 'images'
+type SortKey = 'name' | 'visibility' | 'category' | 'ram' | 'cpu' | 'images' | 'storage'
 
 // Human-readable byte size, e.g. 1536 -> "1.5 KB". Used for the per-app
 // persistent-storage (/data) usage shown in the Manage drill-down.
@@ -77,6 +77,71 @@ function fmtBytes(n: number): string {
   while (v >= 1024 && i < units.length - 1) { v /= 1024; i++ }
   return `${i > 0 && v < 10 ? v.toFixed(1) : Math.round(v)} ${units[i]}`
 }
+
+// v2.21.25: click-to-edit table cell. Renders the value as plain text (a
+// keyboard-focusable trigger) until clicked/activated, then swaps to an input —
+// so the Manage table reads as data, not a wall of form fields. Enter commits,
+// Esc reverts, blur commits (only if changed). Disabled cells show text only.
+function EditableCell({
+  value, onSave, type = 'text', placeholder = '—', disabled = false,
+  ariaLabel, title, inputStyle, min, max, display,
+}: {
+  value: string | number
+  onSave: (v: string) => void
+  type?: 'text' | 'number'
+  placeholder?: string
+  disabled?: boolean
+  ariaLabel: string
+  title?: string
+  inputStyle?: CSSProperties
+  min?: number
+  max?: number
+  display?: (v: string | number) => ReactNode
+}) {
+  const [editing, setEditing] = useState(false)
+  const orig = value == null ? '' : String(value)
+  if (editing && !disabled) {
+    return (
+      <input
+        className="editable" type={type} autoFocus defaultValue={orig}
+        aria-label={ariaLabel} min={min} max={max}
+        onBlur={e => { setEditing(false); if (e.target.value !== orig) onSave(e.target.value) }}
+        onKeyDown={e => {
+          if (e.key === 'Enter') e.currentTarget.blur()
+          else if (e.key === 'Escape') { e.currentTarget.value = orig; e.currentTarget.blur() }
+        }}
+        style={inputStyle}
+      />
+    )
+  }
+  const isEmpty = orig === ''
+  return (
+    <button
+      type="button" className="cell-edit-trigger" disabled={disabled}
+      aria-label={disabled ? ariaLabel : `${ariaLabel} — click to edit`}
+      title={title ?? (disabled ? undefined : 'Click to edit')}
+      onClick={() => { if (!disabled) setEditing(true) }}
+      style={isEmpty ? { color: 'var(--dim)' } : undefined}
+    >{isEmpty ? placeholder : (display ? display(value) : orig)}</button>
+  )
+}
+
+// v2.21.25: inline Lucide-style SVG icons (replace the emoji-as-icon action
+// buttons — consistent across OSes, crisp, and colorable via currentColor).
+function svgIcon(children: ReactNode, size = 14) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="1.85" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ display: 'block' }}>
+      {children}
+    </svg>
+  )
+}
+const IconImage = () => svgIcon(<><rect width="18" height="18" x="3" y="3" rx="2" /><circle cx="9" cy="9" r="2" /><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21" /></>)
+const IconUnlock = () => svgIcon(<><rect width="18" height="11" x="3" y="11" rx="2" /><path d="M7 11V7a5 5 0 0 1 9.9-1" /></>)
+const IconGlobe = () => svgIcon(<><circle cx="12" cy="12" r="10" /><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20" /><path d="M2 12h20" /></>)
+const IconActivity = () => svgIcon(<path d="M22 12h-4l-3 9L9 3l-3 9H2" />)
+const IconTrash = () => svgIcon(<><path d="M3 6h18" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /><line x1="10" x2="10" y1="11" y2="17" /><line x1="14" x2="14" y1="11" y2="17" /></>)
+const IconChevron = ({ open }: { open: boolean }) => svgIcon(open ? <path d="m6 9 6 6 6-6" /> : <path d="m9 18 6-6-6-6" />)
 
 // v2.21.8: tiny multi-line SVG chart for the per-app resource modal.
 interface Series { label: string; color: string; points: { x: number; v: number }[] }
@@ -277,6 +342,22 @@ export function Applications() {
     }
   }, [expanded])
 
+  // Total on-disk footprint per app (releases + /data, both envs) for the
+  // sortable Storage column. One bulk call (server walks each app dir), fetched
+  // once on mount — null while loading. This is the number that sums to host
+  // disk usage, unlike the per-env /data figure shown in the drill-down.
+  const [appStorage, setAppStorage] = useState<Record<string, number> | null>(null)
+  // True once the first /api/apps load resolves — before that we show skeleton
+  // rows instead of a misleading "No apps" empty state.
+  const [loaded, setLoaded] = useState(false)
+  // Bulk multi-select: slugs currently checked, for bulk visibility/tag/delete.
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  useEffect(() => {
+    adminApi.get<{ apps: { slug: string; total_bytes: number }[] }>('/api/dashboard/app-storage')
+      .then(r => setAppStorage(Object.fromEntries(r.apps.map(a => [a.slug, a.total_bytes]))))
+      .catch(() => setAppStorage({}))
+  }, [])
+
   const iconInputRefs = useRef<Record<string, HTMLInputElement | null>>({})
 
   async function loadAll() {
@@ -288,6 +369,7 @@ export function Applications() {
       (x.name || '').toLowerCase().localeCompare((y.name || '').toLowerCase()),
     )
     setApps(a)
+    setLoaded(true)
     fetchVersions(a)
     // Prefer the freshly-fetched icon state over what's in `prev` so a
     // newly-uploaded icon (or a deleted one) takes effect immediately.
@@ -849,6 +931,22 @@ STEP 3 - In any terminal run \`claude\`, then paste:
     if (sort.key !== key) return ''
     return sort.dir === 'asc' ? ' ↑' : ' ↓'
   }
+  // Keyboard-accessible sortable header: real button semantics + aria-sort so
+  // screen readers announce the sort state and Enter/Space toggle it.
+  function sortTh(key: SortKey, label: string, hideable = false) {
+    const dir: 'ascending' | 'descending' | 'none' =
+      sort.key === key ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'
+    return (
+      <th
+        className={`th-sort${hideable ? ' apps-col-hideable' : ''}`}
+        role="button" tabIndex={0} aria-sort={dir}
+        onClick={() => toggleSort(key)}
+        onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleSort(key) } }}
+      >{label}{sortArrow(key)}</th>
+    )
+  }
+  const filtersActive = !!(filter.vis || filter.tag || filter.name || filter.ramMin || filter.cpuMin)
+  function clearFilters() { setFilter({ vis: '', name: '', tag: '', ramMin: '', cpuMin: '' }) }
 
   const filtered = apps.filter(a => {
     // v2.21.5: Manage is scoped to apps you actually own/admin. Global admins
@@ -871,9 +969,34 @@ STEP 3 - In any terminal run \`claude\`, then paste:
       case 'ram':        cmp = ramOf(x) - ramOf(y); break
       case 'cpu':        cmp = cpuOf(x) - cpuOf(y); break
       case 'images':     cmp = imgOf(x) - imgOf(y); break
+      case 'storage':    cmp = (appStorage?.[x.slug] ?? -1) - (appStorage?.[y.slug] ?? -1); break
     }
     return sort.dir === 'asc' ? cmp : -cmp
   })
+
+  // Bulk multi-select over the currently-visible (filtered+sorted) rows.
+  const visibleSlugs = sorted.map(a => a.slug)
+  const allVisibleSelected = visibleSlugs.length > 0 && visibleSlugs.every(s => selected.has(s))
+  const someSelected = selected.size > 0
+  function toggleSelect(slug: string) {
+    setSelected(prev => { const n = new Set(prev); if (n.has(slug)) n.delete(slug); else n.add(slug); return n })
+  }
+  function toggleSelectAll() {
+    setSelected(allVisibleSelected ? new Set() : new Set(visibleSlugs))
+  }
+  async function bulkSetVisibility(vis: string) {
+    for (const s of Array.from(selected)) await setVisibility(s, vis)
+  }
+  async function bulkSetTag(cat: string) {
+    for (const s of Array.from(selected)) await saveCategory(s, cat)
+  }
+  async function bulkDelete() {
+    const slugs = Array.from(selected)
+    if (!confirm(`Delete ${slugs.length} app${slugs.length === 1 ? '' : 's'}? This is irreversible.`)) return
+    for (const s of slugs) await adminApi.del(`/api/apps/${s}?confirm=true`).catch(() => {})
+    setSelected(new Set())
+    loadAll()
+  }
 
   // v2.7.2: the "+ Add Application" key/instructions modal, shared by both
   // views. It used to live only in the Manage-view return, so a non-admin in
@@ -969,19 +1092,58 @@ STEP 3 - In any terminal run \`claude\`, then paste:
         />
       </div>
 
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8, fontSize: '.8rem', color: 'var(--dim)' }}>
+        <span aria-live="polite">
+          {loaded ? (filtersActive ? `Showing ${sorted.length} of ${apps.length} apps` : `${apps.length} app${apps.length === 1 ? '' : 's'}`) : 'Loading…'}
+        </span>
+        {filtersActive && (
+          <button className="btn btn-xs" onClick={clearFilters} title="Clear all active filters">Clear filters ✕</button>
+        )}
+      </div>
+
+      {someSelected && (
+        <div className="apps-bulk-bar" role="region" aria-label="Bulk actions">
+          <strong>{selected.size} selected</strong>
+          <select aria-label="Set visibility for selected apps" value=""
+            onChange={e => { if (e.target.value) { bulkSetVisibility(e.target.value); e.currentTarget.value = '' } }}>
+            <option value="">Set visibility…</option>
+            <option value="hidden">hidden</option>
+            <option value="private">private</option>
+            <option value="public">public</option>
+          </select>
+          <select aria-label="Set tag for selected apps" value=""
+            onChange={e => { if (e.target.value) { bulkSetTag(e.target.value === '__none__' ? '' : e.target.value); e.currentTarget.value = '' } }}>
+            <option value="">Set tag…</option>
+            <option value="__none__">— (clear tag)</option>
+            {allTags.map(t => <option key={t} value={t}>{t}</option>)}
+          </select>
+          <button className="btn btn-xs btn-red" onClick={bulkDelete}>Delete selected</button>
+          <button className="btn btn-xs" onClick={() => setSelected(new Set())} style={{ marginLeft: 'auto' }}>Clear selection</button>
+        </div>
+      )}
+
       <div className="apps-table-wrap">
         <table className="apps-table">
           <thead>
             <tr>
+              <th>
+                <input
+                  type="checkbox"
+                  aria-label="Select all visible apps"
+                  checked={allVisibleSelected}
+                  ref={el => { if (el) el.indeterminate = someSelected && !allVisibleSelected }}
+                  onChange={toggleSelectAll}
+                />
+              </th>
               <th></th>
-              <th></th>
-              <th className="th-sort" onClick={() => toggleSort('name')}>Name{sortArrow('name')}</th>
-              <th>Description</th>
-              <th className="th-sort" onClick={() => toggleSort('visibility')}>Visibility{sortArrow('visibility')}</th>
-              <th className="th-sort" onClick={() => toggleSort('category')}>Tag{sortArrow('category')}</th>
-              <th className="th-sort" onClick={() => toggleSort('ram')}>RAM (MB){sortArrow('ram')}</th>
-              <th className="th-sort" onClick={() => toggleSort('cpu')}>CPU (%){sortArrow('cpu')}</th>
-              <th className="th-sort" onClick={() => toggleSort('images')}>Images{sortArrow('images')}</th>
+              {sortTh('name', 'Name')}
+              <th className="apps-col-hideable">Description</th>
+              {sortTh('visibility', 'Visibility', true)}
+              {sortTh('category', 'Tag', true)}
+              {sortTh('ram', 'RAM (MB)', true)}
+              {sortTh('cpu', 'CPU (%)', true)}
+              {sortTh('images', 'Images', true)}
+              {sortTh('storage', 'Storage')}
               <th>Sandbox</th>
               <th>Production</th>
             </tr>
@@ -991,14 +1153,14 @@ STEP 3 - In any terminal run \`claude\`, then paste:
               <th>
                 <input
                   className="apps-filter-input"
-                  type="text" placeholder="filter name…"
+                  type="text" placeholder="filter name…" aria-label="Filter by app name"
                   value={filter.name} onChange={e => setFilter(f => ({ ...f, name: e.target.value }))}
                 />
               </th>
-              <th></th>
-              <th>
+              <th className="apps-col-hideable"></th>
+              <th className="apps-col-hideable">
                 <select
-                  className="apps-filter-input"
+                  className="apps-filter-input" aria-label="Filter by visibility"
                   value={filter.vis} onChange={e => setFilter(f => ({ ...f, vis: e.target.value }))}
                 >
                   <option value="">all</option>
@@ -1007,35 +1169,43 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                   <option value="public">public</option>
                 </select>
               </th>
-              <th>
+              <th className="apps-col-hideable">
                 <select
-                  className="apps-filter-input"
+                  className="apps-filter-input" aria-label="Filter by tag"
                   value={filter.tag} onChange={e => setFilter(f => ({ ...f, tag: e.target.value }))}
                 >
                   <option value="">all</option>
                   {allTags.map(t => <option key={t} value={t}>{t}</option>)}
                 </select>
               </th>
-              <th>
+              <th className="apps-col-hideable">
                 <input
-                  className="apps-filter-input"
+                  className="apps-filter-input" aria-label="Filter by minimum RAM (MB)"
                   type="number" min={0} placeholder="≥"
                   value={filter.ramMin} onChange={e => setFilter(f => ({ ...f, ramMin: e.target.value }))}
                 />
               </th>
-              <th>
+              <th className="apps-col-hideable">
                 <input
-                  className="apps-filter-input"
+                  className="apps-filter-input" aria-label="Filter by minimum CPU (%)"
                   type="number" min={0} placeholder="≥"
                   value={filter.cpuMin} onChange={e => setFilter(f => ({ ...f, cpuMin: e.target.value }))}
                 />
               </th>
+              <th className="apps-col-hideable"></th>
               <th></th>
               <th></th>
               <th></th>
             </tr>
           </thead>
           <tbody>
+            {!loaded && Array.from({ length: 6 }).map((_, i) => (
+              <tr key={`skel-${i}`} aria-hidden="true">
+                <td colSpan={12}>
+                  <span className="apps-skel" style={{ width: `${70 - i * 6}%` }} />
+                </td>
+              </tr>
+            ))}
             {sorted.map(app => {
               const activeEnv = openEvars[app.slug]
               const ramVal = app.resource_limits?.max_ram_mb ?? ''
@@ -1045,14 +1215,24 @@ STEP 3 - In any terminal run \`claude\`, then paste:
               const isExpanded = !!expanded[app.slug]
               return (
                 <>
-                  <tr key={app.slug}>
-                    <td style={{ width: 22 }}>
-                      <button
-                        type="button"
-                        className="apps-row-toggle"
-                        onClick={() => setExpanded(p => ({ ...p, [app.slug]: !p[app.slug] }))}
-                        title={isExpanded ? 'Hide environments' : 'Show sandbox / production'}
-                      >{isExpanded ? '▾' : '▸'}</button>
+                  <tr key={app.slug} className={selected.has(app.slug) ? 'apps-row-selected' : undefined}>
+                    <td style={{ width: 44 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                        <input
+                          type="checkbox"
+                          aria-label={`Select ${app.name}`}
+                          checked={selected.has(app.slug)}
+                          onChange={() => toggleSelect(app.slug)}
+                        />
+                        <button
+                          type="button"
+                          className="apps-row-toggle btn-icon"
+                          aria-expanded={isExpanded}
+                          aria-label={isExpanded ? `Hide details for ${app.name}` : `Show details & actions for ${app.name}`}
+                          onClick={() => setExpanded(p => ({ ...p, [app.slug]: !p[app.slug] }))}
+                          title={isExpanded ? 'Hide details & actions' : 'Show environments, storage & actions'}
+                        ><IconChevron open={isExpanded} /></button>
+                      </div>
                     </td>
                     <td>
                       <div
@@ -1078,10 +1258,11 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                     </td>
                     <td>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                        <input
-                          className="editable" defaultValue={app.name}
-                          onBlur={e => { if (e.target.value !== app.name) saveName(app.slug, e.target.value) }}
-                          style={{ minWidth: 130, flex: 1 }}
+                        <EditableCell
+                          value={app.name}
+                          ariaLabel={`App name for ${app.name}`}
+                          onSave={v => saveName(app.slug, v)}
+                          inputStyle={{ minWidth: 130, flex: 1 }}
                         />
                         {mcpActive[app.slug] && (
                           <span
@@ -1097,19 +1278,21 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                         )}
                       </div>
                     </td>
-                    <td>
-                      <input
-                        className="editable" defaultValue={app.description ?? ''}
+                    <td className="apps-col-hideable">
+                      <EditableCell
+                        value={app.description ?? ''}
+                        ariaLabel={`Description for ${app.name}`}
                         placeholder="—"
-                        onBlur={e => { if (e.target.value !== (app.description ?? '')) saveDescription(app.slug, e.target.value) }}
-                        style={{ minWidth: 180 }}
+                        onSave={v => saveDescription(app.slug, v)}
+                        inputStyle={{ minWidth: 180 }}
                       />
                     </td>
-                    <td>
+                    <td className="apps-col-hideable">
                       <select
                         value={app.visibility ?? 'hidden'}
                         onChange={e => setVisibility(app.slug, e.target.value)}
                         className={visBadgeClass(app.visibility)}
+                        aria-label={`Visibility for ${app.name}`}
                         style={{ fontSize: '.75rem' }}
                       >
                         <option value="hidden">hidden</option>
@@ -1117,11 +1300,11 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                         <option value="public">public</option>
                       </select>
                     </td>
-                    <td>
+                    <td className="apps-col-hideable">
                       {tagDraftVal !== undefined ? (
                         <input
                           className="editable" autoFocus defaultValue={tagDraftVal}
-                          placeholder="new tag…"
+                          placeholder="new tag…" aria-label={`New tag for ${app.name}`}
                           onBlur={e => {
                             saveCategory(app.slug, e.target.value)
                             setTagDraft(d => { const n = { ...d }; delete n[app.slug]; return n })
@@ -1132,6 +1315,7 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                       ) : (
                         <select
                           value={app.category ?? ''}
+                          aria-label={`Tag for ${app.name}`}
                           onChange={e => {
                             const v = e.target.value
                             if (v === '__new__') setTagDraft(d => ({ ...d, [app.slug]: '' }))
@@ -1145,30 +1329,41 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                         </select>
                       )}
                     </td>
-                    <td>
-                      <input
-                        className="editable" type="number" min={0} defaultValue={ramVal}
-                        onBlur={e => { if (String(e.target.value) !== String(ramVal)) saveRam(app.slug, e.target.value) }}
+                    <td className="apps-col-hideable">
+                      <EditableCell
+                        value={ramVal} type="number" min={0}
+                        ariaLabel={`RAM cap in MB for ${app.name}`}
                         disabled={!isPlatformAdmin}
                         title={isPlatformAdmin ? undefined : 'Only platform admins can change CPU/memory limits'}
-                        style={{ width: 70 }}
+                        onSave={v => saveRam(app.slug, v)}
+                        inputStyle={{ width: 70 }}
+                      />
+                    </td>
+                    <td className="apps-col-hideable">
+                      <EditableCell
+                        value={cpuVal} type="number" min={0}
+                        ariaLabel={`CPU cap in percent for ${app.name}`}
+                        disabled={!isPlatformAdmin}
+                        title={isPlatformAdmin ? undefined : 'Only platform admins can change CPU/memory limits'}
+                        onSave={v => saveCpu(app.slug, v)}
+                        inputStyle={{ width: 60 }}
+                      />
+                    </td>
+                    <td className="apps-col-hideable">
+                      <EditableCell
+                        value={imgVal} type="number" min={0} max={50}
+                        ariaLabel={`Image retention count for ${app.name}`}
+                        onSave={v => saveImages(app.slug, v)}
+                        inputStyle={{ width: 60 }}
                       />
                     </td>
                     <td>
-                      <input
-                        className="editable" type="number" min={0} defaultValue={cpuVal}
-                        onBlur={e => { if (String(e.target.value) !== String(cpuVal)) saveCpu(app.slug, e.target.value) }}
-                        disabled={!isPlatformAdmin}
-                        title={isPlatformAdmin ? undefined : 'Only platform admins can change CPU/memory limits'}
-                        style={{ width: 60 }}
-                      />
-                    </td>
-                    <td>
-                      <input
-                        className="editable" type="number" min={0} max={50} defaultValue={imgVal}
-                        onBlur={e => { if (String(e.target.value) !== String(imgVal)) saveImages(app.slug, e.target.value) }}
-                        style={{ width: 60 }}
-                      />
+                      <span
+                        style={{ fontSize: '.78rem', color: 'var(--dim)', whiteSpace: 'nowrap' }}
+                        title="Total on-disk footprint: release checkouts + persistent /data, across sandbox + production"
+                      >
+                        {appStorage == null ? '…' : appStorage[app.slug] != null ? fmtBytes(appStorage[app.slug]) : '—'}
+                      </span>
                     </td>
                     {(['sandbox', 'production'] as const).map(env => {
                       // v2.5.5: live-fetch reads the running app's /api/health
@@ -1200,8 +1395,9 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                       )
                     })}
                   </tr>
+                  {isExpanded && (
                   <tr key={`${app.slug}-actions`} className="apps-row-actions">
-                    <td colSpan={11} style={{ borderTop: 'none', paddingTop: 0, paddingBottom: 8 }}>
+                    <td colSpan={12} style={{ borderTop: 'none', paddingTop: 0, paddingBottom: 8 }}>
                       <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', paddingLeft: 8, alignItems: 'center' }}>
                         {(app.owners?.length ? app.owners : app.owner ? [app.owner] : []).length > 0 ? (
                           <span
@@ -1228,29 +1424,35 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                           title="Manage which users have access to this app and at what role"
                         >Users</button>
                         <button
-                          className="btn btn-xs"
+                          className="btn btn-xs btn-icon"
                           onClick={() => setFrameAncestors(app)}
+                          aria-label={`Allowed embedders for ${app.name}`}
+                          style={app.frame_ancestors ? { color: 'var(--accent)' } : undefined}
                           title={app.frame_ancestors ? `Embedders: ${app.frame_ancestors}` : 'Allowed embedders (default: same origin only)'}
-                        >🖼{app.frame_ancestors ? ' ✓' : ''}</button>
+                        ><IconImage /></button>
                         {(() => {
                           const abp = Array.isArray(app.auth_bypass_paths) ? app.auth_bypass_paths : []
                           return (
                             <button
-                              className="btn btn-xs"
+                              className="btn btn-xs btn-icon"
                               onClick={() => setAuthBypassPaths(app)}
+                              aria-label={`Auth-bypass paths for ${app.name}`}
+                              style={abp.length ? { color: 'var(--accent)' } : undefined}
                               title={abp.length
                                 ? `Auth-bypass paths: ${abp.join(', ')}`
                                 : 'Path prefixes that bypass SSO on this app (advanced — apps must self-authenticate)'}
-                            >🔓{abp.length ? ' ✓' : ''}</button>
+                            ><IconUnlock /></button>
                           )
                         })()}
                         <button
-                          className="btn btn-xs"
+                          className="btn btn-xs btn-icon"
                           onClick={() => setCustomDomain(app)}
+                          aria-label={`Custom domain for ${app.name}`}
+                          style={app.domain ? { color: 'var(--accent)' } : undefined}
                           title={app.domain
                             ? `Custom domain: ${app.domain} (served at root, no SSO/topbar)`
                             : 'Custom domain — serve this app on its own domain, bypassing AppCrane auth'}
-                        >🌐{app.domain ? ' ✓' : ''}</button>
+                        ><IconGlobe /></button>
                         {(app.source_type === 'github' || app.source_type === 'managed' || app.github_url) && (
                           <>
                             {app.github_url && (
@@ -1268,14 +1470,15 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                             >auto-deploy</button>
                           </>
                         )}
-                        <button className="btn btn-xs" onClick={() => setMetricsApp(app)} title="CPU / memory over time">📈</button>
-                        <button className="btn btn-xs btn-red" onClick={() => deleteApp(app.slug, app.name)}>✕</button>
+                        <button className="btn btn-xs btn-icon" onClick={() => setMetricsApp(app)} aria-label={`Resource metrics for ${app.name}`} title="CPU / memory over time"><IconActivity /></button>
+                        <button className="btn btn-xs btn-red btn-icon" onClick={() => deleteApp(app.slug, app.name)} aria-label={`Delete ${app.name}`} title={`Delete ${app.name}`}><IconTrash /></button>
                       </div>
                     </td>
                   </tr>
+                  )}
                   {isExpanded && (
                     <tr key={`${app.slug}-envs`} className="apps-row-drill">
-                      <td colSpan={11}>
+                      <td colSpan={12}>
                         <div className="apps-drill-envs">
                           {(['sandbox', 'production'] as const).map(env => {
                             const liveVer = versions[app.slug]?.[env === 'production' ? 'prod' : 'sand']
@@ -1320,7 +1523,7 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                   )}
                   {isExpanded && activeEnv && (
                     <tr key={`${app.slug}-evars`}>
-                      <td colSpan={11} className="evars-panel">
+                      <td colSpan={12} className="evars-panel">
                         <div style={{ fontWeight: 600, fontSize: '.78rem', marginBottom: 10, textTransform: 'uppercase', letterSpacing: '.5px', color: 'var(--dim)' }}>
                           {activeEnv === 'production' ? 'Production' : 'Sandbox'} Env Vars · {app.name}
                         </div>
@@ -1350,8 +1553,12 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                 </>
               )
             })}
-            {sorted.length === 0 && (
-              <tr><td colSpan={11} style={{ textAlign: 'center', color: 'var(--dim)', padding: 24 }}>No apps match the filters.</td></tr>
+            {loaded && sorted.length === 0 && (
+              <tr><td colSpan={12} style={{ textAlign: 'center', color: 'var(--dim)', padding: 24 }}>
+                {filtersActive ? (
+                  <>No apps match the current filters. <button className="btn btn-xs" onClick={clearFilters} style={{ marginLeft: 6 }}>Clear filters</button></>
+                ) : 'No applications yet.'}
+              </td></tr>
             )}
           </tbody>
         </table>
