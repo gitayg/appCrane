@@ -402,7 +402,16 @@ export async function promoteApp(app, userId) {
 
   // GitHub-sourced apps: fresh production build so the bundler picks up
   // VITE_BASE_PATH=/<slug>/ instead of the sandbox's /<slug>-sandbox/.
-  if (app.source_type === 'github' && app.github_url) {
+  // v2.21.23: managed apps promote via a fresh clone-and-build at the exact
+  // sandbox commit too — same as github. The old managed path copied the
+  // sandbox release tree, and its cpSync filter strips every top-level entry
+  // named `data` (reserved for the runtime volume symlink). That also deleted a
+  // git-tracked `data/` SOURCE dir that an app's Dockerfile `COPY data ./data`
+  // needs at build time — so the prod build failed ("file not found in build
+  // context: stat data") while sandbox (built from a fresh clone) succeeded.
+  // Cloning fresh at the tested commit removes the collision entirely. Only
+  // upload apps (no repo to clone) keep the copy path below.
+  if ((app.source_type === 'github' || app.source_type === 'managed') && app.github_url) {
     const freshResult = db.prepare(`
       INSERT INTO deployments (app_id, env, version, status, commit_hash, deployed_by, log)
       VALUES (?, 'production', ?, 'pending', ?, ?, ?)
@@ -412,14 +421,15 @@ export async function promoteApp(app, userId) {
     // v2.7.12: build production from the EXACT sandbox commit (targetCommit),
     // not the branch tip — production ships precisely what was tested in
     // sandbox. A fresh build (not the sandbox image) is still required so the
-    // bundler bakes the prod base path /<slug>/.
+    // bundler bakes the prod base path /<slug>/. deployApp clones managed repos
+    // with the service-account token, so this works for source_type='managed'.
     deployApp(freshDeployId, app, 'production', prodPorts, { targetCommit: sandboxDeploy.commit_hash }).catch(err => {
       log.error(`Promote build ${freshDeployId} for ${app.slug} failed: ${err.message}`);
     });
     return { deployment_id: freshDeployId, status: 'pending', mode: 'rebuild', version: sandboxDeploy.version, from_sandbox: sandboxDeploy.id };
   }
 
-  // Managed/upload apps: copy the exact sandbox release tree into production.
+  // Upload apps (no git repo): copy the exact sandbox release tree into production.
   if (!sandboxDeploy.release_path || !existsSync(sandboxDeploy.release_path)) {
     throw new AppError('Sandbox release directory missing on disk (pre-promote-support deploy?)', 409, 'NO_RELEASE_PATH');
   }
