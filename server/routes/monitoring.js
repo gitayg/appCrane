@@ -240,6 +240,28 @@ router.get('/dashboard/active-users', requireAdmin, (req, res) => {
 });
 
 /**
+ * GET /api/dashboard/app-storage (v2.21.24) — total on-disk footprint per app:
+ * the whole <DATA_DIR>/apps/<slug> tree (release checkouts + shared /data,
+ * across sandbox + production) — i.e. what the app actually costs on the host
+ * disk, not just its persistent volume. Admin-only. One `du` per app; returns
+ * biggest-first so the Manage "Storage" column can rank disk hogs.
+ */
+router.get('/dashboard/app-storage', requireAdmin, async (req, res) => {
+  const { dirSizeBytes } = await import('../services/diskUsage.js');
+  const { resolveSafe } = await import('../utils/paths.js');
+  const dataDir = process.env.DATA_DIR || './data';
+  const db = getDb();
+  const apps = db.prepare('SELECT slug FROM apps').all();
+  const out = apps.map(({ slug }) => {
+    let total = 0;
+    try { total = dirSizeBytes(resolveSafe(dataDir, 'apps', slug)); } catch (_) { total = 0; }
+    return { slug, total_bytes: total };
+  });
+  out.sort((a, b) => b.total_bytes - a.total_bytes);
+  res.json({ apps: out });
+});
+
+/**
  * GET /api/server/tls-check - ENH-005: HSTS preload + cert validity check
  */
 router.get('/server/tls-check', requireAdmin, async (req, res) => {

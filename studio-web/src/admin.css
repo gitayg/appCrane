@@ -7,7 +7,9 @@
   --surface2: #222536;
   --border: #3d4155;
   --text: #e4e4e7;
-  --dim: #71717a;
+  /* v2.21.25: was #71717a (~3.4:1 on --surface — below WCAG AA). #9ca3af is
+     ~6:1, so version/label/owner/sub text passes for normal-size text. */
+  --dim: #9ca3af;
   --accent: #3b82f6;
   --green: #22c55e;
   --yellow: #eab308;
@@ -651,9 +653,31 @@ textarea:focus { border-color: var(--accent); }
 .apps-filter-row th { background: var(--bg); padding: 4px 8px; }
 .apps-filter-input { width: 100%; min-width: 70px; max-width: 160px; padding: 3px 6px; font-size: .76rem; background: var(--surface); border: 1px solid var(--border); color: var(--text); border-radius: 4px; }
 .apps-table tbody tr:hover { background: var(--surface); }
+.apps-table tbody tr.apps-row-selected > td { background: rgba(59,130,246,.10); }
 .apps-table .editable { background: transparent; border: 1px solid transparent; padding: 3px 5px; font-size: .82rem; color: var(--text); border-radius: 3px; }
 .apps-table .editable:hover { border-color: var(--border); }
 .apps-table .editable:focus { border-color: var(--accent); background: var(--surface); }
+/* v2.21.25: click-to-edit trigger — looks like plain text, hints editability on
+   hover (subtle border + surface), stays keyboard-focusable as a button. */
+.apps-table .cell-edit-trigger {
+  background: none; border: 1px solid transparent; border-radius: 3px;
+  padding: 3px 5px; font: inherit; font-size: .82rem; color: var(--text);
+  text-align: left; cursor: text; max-width: 220px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.apps-table .cell-edit-trigger:hover:not(:disabled) { border-color: var(--border); background: var(--surface2); }
+.apps-table .cell-edit-trigger:disabled { cursor: default; color: var(--dim); }
+/* v2.21.25: square-ish icon buttons (SVG-only actions) + bulk-action bar. */
+.btn-icon { display: inline-flex; align-items: center; justify-content: center; padding: 4px 6px !important; }
+.apps-bulk-bar {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 8px 12px; margin-bottom: 8px; font-size: .82rem;
+  background: var(--surface2); border: 1px solid var(--accent); border-radius: 8px;
+}
+.apps-bulk-bar select {
+  padding: 3px 6px; font-size: .78rem; background: var(--surface);
+  border: 1px solid var(--border); color: var(--text); border-radius: 4px;
+}
 
 /* Compact Status cell — sandbox + production side by side on the
    single-line row. Each env shows: health dot · S/P label · version ·
@@ -674,6 +698,26 @@ textarea:focus { border-color: var(--accent); }
 .apps-drill-env-hdr { font-size: .68rem; font-weight: 600; color: var(--dim); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 6px; }
 .apps-drill-env-body { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
+/* v2.21.25 accessibility: a visible keyboard focus ring on every interactive
+   control in the table (inputs, selects, buttons, sortable headers). Uses
+   :focus-visible so it only shows for keyboard nav, not mouse clicks. */
+.apps-table :is(button, a, input, select, [role="button"]):focus-visible,
+.apps-filter-input:focus-visible,
+.btn:focus-visible, .btn-xs:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-radius: 4px;
+}
+.apps-table th.th-sort:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+/* v2.21.25: skeleton shimmer for the initial table load (reduces the
+   pop-in / layout shift as apps + async columns populate). */
+.apps-skel { display: inline-block; height: 12px; border-radius: 3px;
+  background: linear-gradient(90deg, var(--surface2) 25%, var(--border) 37%, var(--surface2) 63%);
+  background-size: 400% 100%; animation: apps-skel-shimmer 1.4s ease infinite; }
+@keyframes apps-skel-shimmer { 0% { background-position: 100% 0; } 100% { background-position: -100% 0; } }
+@media (prefers-reduced-motion: reduce) { .apps-skel { animation: none; } }
+
 /* ── Applications manage table: mobile ───────────────────────────────
    The manage table is 11 columns wide (toggle, icon, name, description,
    visibility, tag, ram, cpu, images, sandbox, production) — unreadable on a
@@ -684,14 +728,12 @@ textarea:focus { border-color: var(--accent); }
    drills into env detail. colSpan rows (actions / drill / env-vars) have a
    single cell, so the nth-child hides never touch them. */
 @media (max-width: 768px) {
-  .apps-table th:nth-child(4),  .apps-table td:nth-child(4),   /* description */
-  .apps-table th:nth-child(5),  .apps-table td:nth-child(5),   /* visibility  */
-  .apps-table th:nth-child(6),  .apps-table td:nth-child(6),   /* tag         */
-  .apps-table th:nth-child(7),  .apps-table td:nth-child(7),   /* ram         */
-  .apps-table th:nth-child(8),  .apps-table td:nth-child(8),   /* cpu         */
-  .apps-table th:nth-child(9),  .apps-table td:nth-child(9) {  /* images      */
-    display: none;
-  }
+  /* v2.21.25: hide secondary columns by CLASS, not positional nth-child —
+     inserting/reordering a column no longer silently hides the wrong one.
+     Cells carrying `.apps-col-hideable` (description, visibility, tag, ram,
+     cpu, images) collapse; the at-a-glance set (toggle, icon, name, storage,
+     sandbox, production) stays. */
+  .apps-table .apps-col-hideable { display: none; }
   .apps-table { font-size: .78rem; }
   .apps-table th, .apps-table td { padding: 5px 6px; }
   /* Name input was pinned to min-width 130; let it shrink to the column. */
