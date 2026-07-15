@@ -248,7 +248,7 @@ crane init --name admin --email you@example.com</pre>
 // 307'd browser fetches from a deployed app's frontend back into the app's own
 // prefix (request never reached the platform endpoint), making the documented
 // `fetch('/api/me')` pattern unreachable from any per-app browser caller.
-const APPCRANE_PASSTHROUGH = ['/api/identity', '/api/apps', '/api/info', '/api/_crashed', '/api/me', '/api/mcp', '/api/service', '/favicon.svg', '/docs'];
+const APPCRANE_PASSTHROUGH = ['/api/identity', '/api/apps', '/api/info', '/api/_crashed', '/api/me', '/api/directory', '/api/mcp', '/api/service', '/favicon.svg', '/docs'];
 const APPCRANE_PAGE_SLUGS = new Set(['login', 'portal', 'dashboard', 'applications', 'users-page', 'audit-page', 'settings', 'docs', 'app', 'studio', 'appstudio']);
 app.use((req, res, next) => {
   if (req.method === 'OPTIONS') return next();

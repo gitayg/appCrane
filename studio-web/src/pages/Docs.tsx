@@ -30,7 +30,8 @@ const TOOL_GROUPS: { cat: string; tools: [string, string][] }[] = [
     ["appcrane_set_app_icon", "Set the tile icon for an app (Dashboard, Launcher cards, Manage table, frame topbar)"],
   ] },
   { cat: "Env, files & data", tools: [
-    ["appcrane_get_env", "Get all environment variables for an app, decrypted"],
+    ["appcrane_get_secret", "List env vars with MASKED values (preview + fingerprint) — safe for chat"],
+    ["appcrane_reveal_secret", "Reveal one env var's plaintext by key (lands in transcript; audited)"],
     ["appcrane_set_env", "Set or update an environment variable on an app"],
     ["appcrane_set_data_blob", "Write a blob straight to the app's persistent /data volume — no container/GitHub round-trip"],
     ["appcrane_ls", "List files inside a running app container at a path"],
@@ -95,6 +96,7 @@ const REST_FAMILIES: { name: string; rows: [string, string, string][] }[] = [
   ] },
   { name: "Identity", rows: [
     ["GET", "/api/me", "Caller identity + the apps they can see"],
+    ["GET", "/api/directory", "Active users (name+email) for people-pickers / email autocomplete"],
     ["GET", "/api/identity/me", "Current session identity"],
   ] },
   { name: "App email (internal-only)", rows: [
@@ -154,7 +156,7 @@ export function Docs() {
           </p>
 
           <h2 id="connect">Connect an agent</h2>
-          <p>One command wires AppCrane into a local Claude Code session — it then has all 38 tools below (plus a GitHub passthrough if you supply a PAT):</p>
+          <p>One command wires AppCrane into a local Claude Code session — it then has all 39 tools below (plus a GitHub passthrough if you supply a PAT):</p>
           <pre><code>{`claude mcp add --transport http appcrane https://your-host/api/mcp \\
   --header "X-API-Key: <your AppCrane key>" \\
   --header "X-Github-Token: <your GitHub PAT>"`}</code></pre>

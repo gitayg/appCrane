@@ -450,10 +450,12 @@ const TOOLS = [
   {
     name: 'appcrane_get_secret',
     description:
-      'Get all secrets (the app\'s encrypted environment variables) for an app, decrypted. Use this when the user asks about config, secrets, ' +
-      'or when you need to verify what env vars are set. ' +
-      'Defaults to sandbox; pass stage="production" only when the user explicitly says production. ' +
-      'Requires app-admin or AppCrane admin role — non-admin users get a permission error.',
+      'List an app\'s secrets (encrypted env vars) with their values MASKED — safe to show in chat. ' +
+      'For each key you get: is_set, length, a short preview (last 3 chars, rest masked; fully masked for short values), ' +
+      'a sha256 `fingerprint` (compare two envs or detect a changed value without seeing it), and updated_at. ' +
+      'This is what you want for "is X set?", "did the key change?", "which vars exist?". ' +
+      'Does NOT return plaintext — a secret never lands in the transcript. To read one actual value, use appcrane_reveal_secret with a specific key. ' +
+      'Defaults to sandbox; pass env="production" only when the user explicitly says production. App-admin or AppCrane admin only.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -471,18 +473,65 @@ const TOOLS = [
 
       const db = getDb();
       const rows = db
-        .prepare('SELECT key, value_encrypted FROM env_vars WHERE app_id = ? AND env = ? ORDER BY key')
+        .prepare('SELECT key, value_encrypted, updated_at FROM env_vars WHERE app_id = ? AND env = ? ORDER BY key')
         .all(app.id, env);
-      const vars = {};
-      for (const r of rows) {
-        try {
-          vars[r.key] = decrypt(r.value_encrypted);
-        } catch (_) {
-          vars[r.key] = '<<decrypt error>>';
-        }
-      }
-      log.info(`MCP: env vars read for ${app.slug}/${env} by user ${user.id}`);
-      return { app: app.slug, env, vars, count: rows.length };
+      const vars = rows.map((r) => {
+        let plain = null;
+        try { plain = decrypt(r.value_encrypted); } catch (_) { /* below */ }
+        if (plain == null) return { key: r.key, is_set: true, error: 'decrypt_failed', updated_at: r.updated_at };
+        const len = plain.length;
+        // Show last 3 chars only when the value is long enough that 3 chars is
+        // a small fraction; otherwise mask entirely (don't leak short passwords).
+        const preview = len >= 10 ? `${'•'.repeat(Math.min(len - 3, 8))}${plain.slice(-3)}` : '•'.repeat(Math.min(len, 8));
+        const fingerprint = crypto.createHash('sha256').update(plain).digest('hex').slice(0, 8);
+        return { key: r.key, is_set: true, length: len, preview, fingerprint, updated_at: r.updated_at };
+      });
+      log.info(`MCP: env metadata (masked) read for ${app.slug}/${env} by user ${user.id}`);
+      return {
+        app: app.slug, env, count: rows.length, vars,
+        note: 'Values are masked. To see one plaintext value, call appcrane_reveal_secret with the exact key — that value WILL appear in this transcript.',
+      };
+    },
+  },
+
+  {
+    name: 'appcrane_reveal_secret',
+    description:
+      'Reveal the PLAINTEXT of ONE secret by key. Use ONLY when the user explicitly needs the actual value — it will appear in this ' +
+      'conversation transcript, so treat the transcript as sensitive afterward (and consider rotating the secret if the transcript may be stored/shared). ' +
+      'For checking whether a var is set, comparing values, or seeing what exists, use appcrane_get_secret (masked) instead — do NOT reveal just to inspect config. ' +
+      'Single key only — it never dumps the whole env. Every reveal is audit-logged. Defaults to sandbox; env="production" only when the user explicitly asks. App-admin or AppCrane admin only.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        slug: { type: 'string', description: 'App slug, e.g. "mysite"' },
+        env: { type: 'string', enum: ['sandbox', 'production'], default: 'sandbox' },
+        key: { type: 'string', description: 'Exact env var name to reveal (e.g. "RESEND_API_KEY"). One key per call.' },
+      },
+      required: ['slug', 'key'],
+      additionalProperties: false,
+    },
+    requiredRole: 'app_admin', // also gated per-slug inside handler
+    handler: async (user, args) => {
+      const env = args.env === 'production' ? 'production' : 'sandbox';
+      const app = getAppForUser(user, args.slug);
+      if (!isAppAdmin(user, app)) throw new Error('Forbidden: revealing a secret requires admin or app-admin role');
+
+      const db = getDb();
+      const row = db
+        .prepare('SELECT value_encrypted, updated_at FROM env_vars WHERE app_id = ? AND env = ? AND key = ?')
+        .get(app.id, env, args.key);
+      if (!row) throw new Error(`No env var '${args.key}' is set for ${app.slug}/${env}. Use appcrane_get_secret to list the keys that exist.`);
+      let value;
+      try { value = decrypt(row.value_encrypted); } catch (_) { throw new Error(`Failed to decrypt '${args.key}'.`); }
+
+      // A plaintext read is sensitive — record who revealed what, when.
+      try {
+        const { logAudit } = await import('../middleware/audit.js');
+        logAudit(user.id, app.id, 'secret-reveal', { env, key: args.key });
+      } catch (_) { /* audit is best-effort */ }
+      log.warn(`MCP: SECRET REVEAL ${app.slug}/${env}/${args.key} by user ${user.id}`);
+      return { app: app.slug, env, key: args.key, value, updated_at: row.updated_at };
     },
   },
 
