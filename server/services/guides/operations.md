@@ -99,13 +99,18 @@ push, redeploy.
 ## Environment variables
 
 ```
-appcrane_get_env(slug, env, reveal?)   — list, optionally with values
+appcrane_get_secret(slug, env)          — list keys with MASKED values (safe for chat)
+appcrane_reveal_secret(slug, env, key)  — plaintext of ONE key (lands in transcript; audited)
 appcrane_set_env(slug, env, key, value) — upsert a single key
 ```
 
-Values are encrypted at rest (AES-256-GCM). `reveal=true` is admin-gated.
-Setting an env var does not redeploy automatically — call `appcrane_deploy`
-after changes to make them take effect.
+Values are encrypted at rest (AES-256-GCM). `appcrane_get_secret` never returns
+plaintext — you get is_set / length / a last-3-char preview / a sha256 fingerprint,
+which is what you need to check "is X set?" or "did it change?". Only
+`appcrane_reveal_secret` returns a real value, one key at a time, and that value
+appears in the conversation — reveal only when the user explicitly needs it, not
+to inspect config. Setting an env var does not redeploy automatically — call
+`appcrane_deploy` after changes to make them take effect.
 
 ## Per-app access management
 
@@ -224,7 +229,8 @@ Every `appcrane_*` tool, grouped by purpose. The authoritative input schema for 
 
 | Tool | What it does |
 |---|---|
-| `appcrane_get_env` | Get all environment variables for an app, decrypted |
+| `appcrane_get_secret` | List env vars with MASKED values (preview + fingerprint) — safe for chat |
+| `appcrane_reveal_secret` | Reveal ONE env var's plaintext by key (lands in transcript; audited) |
 | `appcrane_set_env` | Set or update an environment variable on an app |
 | `appcrane_set_data_blob` | Write a blob directly to the app's persistent /data volume on the host — single hop, no container round-trip, no GitHub round-trip, no inline size ... |
 | `appcrane_ls` | List files inside a running app container at a specific path |

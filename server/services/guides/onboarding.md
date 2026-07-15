@@ -334,6 +334,12 @@ if (r.ok) {
 }
 ```
 
+**People-picker / email autocomplete:** an app that needs the list of platform
+users (e.g. to autocomplete a colleague's email) can `fetch('/api/directory')`
+the same way — cookie auto-authenticates it. It returns `{ users: [{ name,
+email }], count }` for active users only (the IdP-synced corp directory; name +
+email only, no roles or attributes). Cache it; don't refetch per keystroke.
+
 The user's role is computed server-side from the authenticated identity, not
 from anything the client passes — so a spoofed `Referer` or `?app=` can only
 ask "what's MY role on app X", never escalate to someone else's role.

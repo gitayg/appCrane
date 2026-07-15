@@ -46,23 +46,27 @@ function sessionUserFor(db, token) {
   `).get(hashApiKey(token)) || null;
 }
 
-router.get('/me', (req, res) => {
-  const db = getDb();
-
-  // 1. Cookie (proxied-app default).
+// Resolve the calling platform user from the proxied-app auth precedence:
+// cc_token cookie (what a proxied app's browser has) → Authorization: Bearer →
+// X-API-Key. Returns null if none match. Shared by /me and /directory.
+function authedUser(db, req) {
   let user = sessionUserFor(db, readCookieToken(req));
-  // 2. Bearer fallback (CLI / programmatic).
   if (!user) {
     const bearer = (req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
     if (bearer) user = sessionUserFor(db, bearer);
   }
-  // 3. X-API-Key fallback (admin / agent).
   if (!user) {
     const apiKey = req.headers['x-api-key'];
     if (apiKey) {
       user = db.prepare('SELECT * FROM users WHERE api_key_hash = ? AND active = 1').get(hashApiKey(apiKey)) || null;
     }
   }
+  return user;
+}
+
+router.get('/me', (req, res) => {
+  const db = getDb();
+  const user = authedUser(db, req);
   if (!user) throw new AppError('Authentication required', 401, 'UNAUTHORIZED');
 
   // Per-app role. Resolution order for the app context:
@@ -120,6 +124,28 @@ router.get('/me', (req, res) => {
     },
     ...(appSlugOut !== null && { app: appSlugOut, app_role: appRole }),
   });
+});
+
+/**
+ * GET /api/directory — the platform user directory (name + email of ACTIVE
+ * users) for apps that need a people-picker / email autocomplete. This is the
+ * corp address book, SCIM-synced from the IdP (Okta), so it stays current and
+ * an app needs no IdP credentials of its own.
+ *
+ * Auth: same as /api/me — cc_token cookie (a proxied app frontend can just
+ * `fetch('/api/directory')`), Bearer, or X-API-Key. Any authenticated platform
+ * user may read it. Minimal projection ONLY — name + email, no ids, roles, or
+ * IdP attributes (unlike the admin-only /api/users). Apps should cache the
+ * result rather than refetch on every keystroke.
+ */
+router.get('/directory', (req, res) => {
+  const db = getDb();
+  const user = authedUser(db, req);
+  if (!user) throw new AppError('Authentication required', 401, 'UNAUTHORIZED');
+  const users = db.prepare(
+    "SELECT name, email FROM users WHERE active = 1 AND email IS NOT NULL AND email != '' ORDER BY name"
+  ).all();
+  res.json({ users, count: users.length });
 });
 
 export default router;
