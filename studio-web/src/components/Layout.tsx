@@ -293,7 +293,10 @@ export function Layout({ children, subItems, activeSub }: Props) {
   // v2.13.0: load the accessible app list for the nav "Apps" section.
   useEffect(() => {
     adminApi.get<{ apps: NavApp[] }>('/api/apps')
-      .then(r => setNavApps((r?.apps || []).filter(a => a.app_role !== 'none' && a.visibility !== 'hidden')))
+      // v2.21.30: keep hidden apps in the list; appGroups filters them out for
+      // non-platform-admins at render time (which re-runs once the role loads,
+      // avoiding a fetch-vs-role race). Platform admins see hidden apps + a badge.
+      .then(r => setNavApps((r?.apps || []).filter(a => a.app_role !== 'none')))
       .catch(() => setNavApps([]))
   }, [])
 
@@ -367,6 +370,8 @@ export function Layout({ children, subItems, activeSub }: Props) {
   const appGroups: [string, NavApp[]][] = (() => {
     const m = new Map<string, NavApp[]>()
     for (const a of navApps) {
+      // Hidden apps show in the sidebar only for platform admins (with a badge).
+      if (a.visibility === 'hidden' && !isPlatformAdmin) continue
       const cat = (a.category || '').trim() || 'Uncategorized'
       if (!m.has(cat)) m.set(cat, [])
       m.get(cat)!.push(a)
@@ -537,7 +542,19 @@ export function Layout({ children, subItems, activeSub }: Props) {
                           <span className={appDotClass(a)} />
                         </span>
                         <span className="sidebar-app-text">
-                          <span className="sidebar-app-name">{a.name}</span>
+                          <span className="sidebar-app-name">
+                            {a.name}
+                            {a.visibility === 'hidden' && (
+                              <span className="sidebar-app-hidden" aria-label="Hidden app" title="Hidden — visible to platform admins only">
+                                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                  <path d="M9.88 9.88a3 3 0 1 0 4.24 4.24" />
+                                  <path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68" />
+                                  <path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61" />
+                                  <line x1="2" x2="22" y1="2" y2="22" />
+                                </svg>
+                              </span>
+                            )}
+                          </span>
                           {ownersOf(a).length > 0 && (
                             <span className="sidebar-app-owner">
                               by {ownersOf(a).map((o, i) => (
