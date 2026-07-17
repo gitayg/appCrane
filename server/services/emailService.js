@@ -93,7 +93,12 @@ export async function notifyDeploy(app, env, version, status, errorMsg) {
   }
 
   for (const config of configs) {
-    await sendEmail({ to: config.email, subject, text: body }).catch(e => {
+    // v2.21.29: send as the app's own name ("AgentClub <aimi@opswat.com>").
+    // Without fromName the transport emits no display name and the recipient's
+    // client falls back to the shared mailbox's directory name ("AIMI"), so
+    // every app's notifications looked identical. The address stays
+    // platform-controlled — only the display name is per-app.
+    await sendEmail({ to: config.email, subject, text: body, fromName: app.name }).catch(e => {
       log.error(`Failed to send deploy notification to ${config.email}: ${e.message}`);
     });
   }
@@ -126,7 +131,12 @@ export async function notifyHealthChange(appId, env, status) {
   }
 
   for (const config of configs) {
-    await sendEmail({ to: config.email, subject, text: body }).catch(e => {
+    // v2.21.29: send as the app's own name ("AgentClub <aimi@opswat.com>").
+    // Without fromName the transport emits no display name and the recipient's
+    // client falls back to the shared mailbox's directory name ("AIMI"), so
+    // every app's notifications looked identical. The address stays
+    // platform-controlled — only the display name is per-app.
+    await sendEmail({ to: config.email, subject, text: body, fromName: app.name }).catch(e => {
       log.error(`Failed to send health notification to ${config.email}: ${e.message}`);
     });
   }
