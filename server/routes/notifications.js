@@ -69,6 +69,8 @@ router.post('/:slug/notifications/test', requireAppUser, async (req, res) => {
       to: config.email,
       subject: `[DeployHub] Test notification for ${req.app.name}`,
       text: `This is a test notification from DeployHub for app "${req.app.name}" (${req.app.slug}).\n\nIf you received this, notifications are working correctly.`,
+      // v2.21.29: match the real notifications — send as the app's own name.
+      fromName: req.app.name,
     });
     res.json({ message: `Test email sent to ${config.email}` });
   } catch (e) {
