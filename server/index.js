@@ -348,9 +348,16 @@ app.get('/api/version-check', requireAuth, requirePlatformAdmin, async (req, res
 import { requireAuth, requireAdmin, requirePlatformAdmin } from './middleware/auth.js';
 import { reloadCaddy, generateCaddyfile } from './services/caddy.js';
 
+// v2.21.31: an EXPLICIT admin reload always actually reloads. reloadCaddy()'s
+// skip-if-unchanged compares the generated config to the file on disk, which
+// says nothing about what the running Caddy process has loaded — so a drifted
+// process could never be recovered through this endpoint (it just kept
+// answering `unchanged: true`). Internal callers (deploy, app update) still get
+// the optimization; pass ?force=0 here to opt back into it.
 app.post('/api/caddy/reload', requireAuth, requireAdmin, async (req, res) => {
-  const result = await reloadCaddy();
-  res.json({ ...result, caddyfile: generateCaddyfile() });
+  const force = req.query.force !== '0';
+  const result = await reloadCaddy({ force });
+  res.json({ ...result, forced: force, caddyfile: generateCaddyfile() });
 });
 
 app.get('/api/caddy/config', requireAuth, requireAdmin, (req, res) => {

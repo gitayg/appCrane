@@ -316,7 +316,7 @@ export function generateCaddyfile() {
 /**
  * Push config to Caddy admin API and reload.
  */
-export async function reloadCaddy() {
+export async function reloadCaddy({ force = false } = {}) {
   if (!isLinux()) {
     const config = generateCaddyfile();
     log.info('[Caddy mock] Would write Caddyfile:\n' + config);
@@ -360,7 +360,14 @@ export async function reloadCaddy() {
     const livePath = '/etc/caddy/Caddyfile';
     let prev = '';
     try { prev = readFileSync(livePath, 'utf8'); } catch (_) { /* first run */ }
-    if (prev === caddyfile) {
+    // v2.21.31: `force` bypasses this. The comparison is generated-vs-FILE, which
+    // says nothing about what the RUNNING Caddy process has loaded. A process can
+    // drift from the file (e.g. it was started before a config feature existed, or
+    // an earlier reload silently failed) and then every subsequent call returns
+    // `unchanged: true` and never reloads — leaving the live proxy permanently
+    // stale with no way to recover through the API. That's exactly how a
+    // correct-on-disk `copy_headers` never reached the running process.
+    if (prev === caddyfile && !force) {
       log.info('Caddy config unchanged — skipping reload.');
       return { success: true, unchanged: true };
     }
@@ -368,7 +375,7 @@ export async function reloadCaddy() {
     // Backup-before-overwrite. /etc/caddy/.appcrane-backups/Caddyfile-<ts>.
     // Keeps the last 10; older are pruned. Manual rollback is then a
     // straight `cp` away — no replay of DB state needed.
-    if (prev) {
+    if (prev && prev !== caddyfile) {
       try {
         const backupDir = '/etc/caddy/.appcrane-backups';
         if (!existsSync(backupDir)) mkdirSync(backupDir, { recursive: true });
