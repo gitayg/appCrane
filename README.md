@@ -116,6 +116,12 @@ crane status                              # Server health: CPU, RAM, disk, apps
 crane config --show                       # Show CLI config
 crane config --url http://localhost:5001  # Set API URL
 crane config --key dhk_admin_xxx          # Set API key
+
+# Recover a lost platform-owner API key (run on the box, direct DB).
+# Defaults to the platform_admin; override to target a specific account:
+crane regenerate-key                      # Regenerate the platform owner's key
+crane regenerate-key --email you@ex.com   # ...for a specific user by email
+crane regenerate-key --user-id 1          # ...or by user id
 ```
 
 ### Migrate config between instances

@@ -245,7 +245,7 @@ export function Docs() {
             <li><code>crane setup-https</code> — Caddy + Let's Encrypt</li>
             <li><code>crane caddy</code> — show or reload the generated Caddyfile</li>
             <li><code>crane update</code> — git pull + systemctl restart</li>
-            <li><code>crane regenerate-key</code> — recover a lost admin key</li>
+            <li><code>crane regenerate-key</code> — recover a lost platform-owner API key (targets the <code>platform_admin</code>; add <code>--email &lt;e&gt;</code> or <code>--user-id &lt;n&gt;</code> for a specific account)</li>
             <li><code>crane reconcile</code> — register orphaned filesystem apps into the DB</li>
             <li><code>crane status</code> — server health + app summary</li>
             <li><code>crane config export --out config.json</code> — export platform settings (secrets stay encrypted)</li>
