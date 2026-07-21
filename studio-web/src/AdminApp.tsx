@@ -33,6 +33,7 @@ const SETTINGS_SUB = [
   { id: 'github',     label: 'GitHub',      href: '#github',   platformAdminOnly: true },
   { id: 'mail',       label: 'Mail',        href: '#mail',     platformAdminOnly: true },
   { id: 'backup',     label: 'Backup',      href: '#backup',   platformAdminOnly: true },
+  { id: 'migration',  label: 'Migration',   href: '#migration', platformAdminOnly: true },
   { id: 'branding',   label: 'Style Guide', href: '#branding', platformAdminOnly: true },
   { id: 'audit',      label: 'Audit Log',   href: '#audit',    platformAdminOnly: true },
 ]
@@ -61,7 +62,7 @@ function useHash() {
 
 function SettingsRoute() {
   const hash = useHash()
-  const valid = ['mcp', 'skills', 'security', 'users', 'roles', 'github', 'mail', 'backup', 'branding', 'audit']
+  const valid = ['mcp', 'skills', 'security', 'users', 'roles', 'github', 'mail', 'backup', 'branding', 'audit', 'migration']
   const activeSub = valid.includes(hash) ? hash : 'security'
   return (
     <Layout subItems={SETTINGS_SUB} activeSub={activeSub}>
