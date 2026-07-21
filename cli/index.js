@@ -131,9 +131,12 @@ program
       const apiKey = generateApiKey('dhk_admin');
       const keyHash = hashApiKey(apiKey);
 
+      // The bootstrap user is the platform owner. Seed as platform_admin (not
+      // plain 'admin') — role promotion is itself gated behind platform_admin,
+      // so a fresh box seeded as 'admin' could never get a platform_admin.
       db.prepare(
         'INSERT INTO users (name, email, role, api_key_hash) VALUES (?, ?, ?, ?)'
-      ).run(adminName, adminEmail, 'admin', keyHash);
+      ).run(adminName, adminEmail, 'platform_admin', keyHash);
 
       // Generate and save ENCRYPTION_KEY to .env if not present
       const crypto = await import('crypto');
@@ -153,7 +156,7 @@ program
 
       out.ok('AppCrane initialized!');
       out.header('Admin User');
-      out.keyValue({ Name: adminName, Email: adminEmail, Role: 'admin' });
+      out.keyValue({ Name: adminName, Email: adminEmail, Role: 'platform_admin' });
       console.log('');
       out.warn(`API Key: ${apiKey}`);
       out.warn('Save this key! It will not be shown again.');
@@ -175,7 +178,9 @@ program
 program
   .command('regenerate-key')
   .description('Regenerate admin API key (must run on server)')
-  .action(async () => {
+  .option('--email <email>', 'Regenerate for a specific user by email')
+  .option('--user-id <id>', 'Regenerate for a specific user by id')
+  .action(async (opts) => {
     try {
       const { dirname, join } = await import('path');
       const { fileURLToPath } = await import('url');
@@ -186,17 +191,32 @@ program
       initDb();
       const db = getDb();
 
-      const admin = db.prepare("SELECT * FROM users WHERE role = 'admin' LIMIT 1").get();
-      if (!admin) {
-        out.err('No admin user found. Run: crane init');
-        process.exit(1);
+      // Default: the platform owner (role = 'platform_admin' only — NOT app
+      // admins), oldest id first so it's deterministic (the bootstrap owner).
+      // --email / --user-id override the pick to target a specific account.
+      let admin;
+      if (opts.userId) {
+        admin = db.prepare('SELECT * FROM users WHERE id = ?').get(opts.userId);
+        if (!admin) { out.err(`No user with id ${opts.userId}.`); process.exit(1); }
+      } else if (opts.email) {
+        admin = db.prepare('SELECT * FROM users WHERE email = ?').get(opts.email);
+        if (!admin) { out.err(`No user with email ${opts.email}.`); process.exit(1); }
+      } else {
+        admin = db.prepare(
+          "SELECT * FROM users WHERE role = 'platform_admin' ORDER BY id LIMIT 1"
+        ).get();
+        if (!admin) {
+          out.err('No platform_admin user found.');
+          out.dim('Regenerate for a specific account: crane regenerate-key --email <email>  (or --user-id <id>)');
+          process.exit(1);
+        }
       }
 
       const apiKey = generateApiKey('dhk_admin');
       const keyHash = hashApiKey(apiKey);
       db.prepare('UPDATE users SET api_key_hash = ? WHERE id = ?').run(keyHash, admin.id);
 
-      out.ok(`Admin key regenerated for ${admin.name}`);
+      out.ok(`Admin key regenerated for ${admin.name} (${admin.email}, role: ${admin.role}, id: ${admin.id})`);
       out.warn(`New API Key: ${apiKey}`);
       out.warn('Save this key! The old key no longer works.');
 
