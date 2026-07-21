@@ -47,47 +47,65 @@ Vibe-code an app with Claude Code or Cursor, then have your AI agent deploy it �
 
 ## Quick Start
 
+**One command** on a fresh Ubuntu server installs and wires up *everything* — Node,
+Caddy (with automatic HTTPS), Docker, the systemd service, an encrypted-secrets key,
+and your admin user:
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/gitayg/appCrane/main/install.sh | sudo bash
 ```
 
-Or manually:
+It prompts for just two things — your **domain** and **admin email** — and is safe to
+re-run. When it finishes, point your domain's DNS at the server and you're live.
+
+**Prerequisites:** a fresh Ubuntu server (root / sudo) and a domain whose DNS `A`
+record points at it — Caddy provisions TLS automatically on first request.
+
+**Non-interactive** (CI / automation) — no prompts:
 
 ```bash
-# 1. Clone and install
-git clone https://github.com/gitayg/appCrane.git
-cd appCrane
-npm install
-npm link    # makes 'crane' command available globally
+sudo CRANE_DOMAIN=crane.example.com ADMIN_EMAIL=admin@example.com bash install.sh
+# flags also work: --domain / --admin-email / --admin-name / --tls-cert / --tls-key
+```
 
-# 2. Install and start via systemd
-cp scripts/appcrane.service /etc/systemd/system/appcrane.service
-systemctl daemon-reload
-systemctl enable --now appcrane
+<details>
+<summary><b>What the installer sets up — and why installing by hand isn't recommended</b></summary>
 
-# 2.5. (Optional) Set Anthropic API key for AppStudio
-# Add to the systemd unit so it survives restarts:
-systemctl edit appcrane --force
-# Add under [Service]: Environment="ANTHROPIC_API_KEY=sk-ant-..."
-# Then: systemctl daemon-reload && systemctl restart appcrane
+Everything below is done for you, idempotently, by the one command above:
 
-# 3. Initialize admin (must run on the server)
-crane init --name admin --email admin@example.com
+- **Node.js 20** + AppCrane, with the `crane` CLI linked globally
+- **Caddy** — the reverse proxy that routes `<domain>/<slug>` to each app, runs the
+  SSO auth, injects the `X-AppCrane-*` identity headers, and auto-provisions TLS —
+  **plus** the group, file permissions, and a `sudoers` rule so AppCrane can reload
+  Caddy on every deploy
+- **Docker** + a **systemd** `appcrane` service (`Restart=always` — survives crashes
+  and reboots, and powers one-click self-update)
+- A `.env` with a freshly generated `ENCRYPTION_KEY` — **back this up; losing it makes
+  every stored secret unrecoverable** — and your admin user (`crane init`)
 
-# 4. Create an app
-crane app create \
-  --name "MyApp" \
-  --slug myapp \
-  --domain myapp.example.com \
-  --repo https://github.com/yourorg/myapp
+Installing by hand means reproducing all of that — **especially the Caddy install +
+permissions + sudoers**, which is the most-missed step and later surfaces as
+permission errors or apps that never receive their identity headers. If you must,
+treat [`install.sh`](install.sh) as the source of truth rather than a shortened list.
 
-# 5. Create a user and assign to the app
+> **AppStudio (optional):** to enable AI app-building, set an Anthropic API key —
+> `systemctl edit appcrane --force`, add `Environment="ANTHROPIC_API_KEY=sk-ant-..."`
+> under `[Service]`, then `systemctl daemon-reload && systemctl restart appcrane`.
+
+</details>
+
+### Deploy your first app
+
+The installer already created your admin user, so once DNS points at the box:
+
+```bash
+# Reachable at https://<your-domain>/myapp
+crane app create --name "MyApp" --slug myapp --repo https://github.com/yourorg/myapp
+crane deploy myapp --env sandbox
+
+# Give a teammate access (optional)
 crane user create --name sarah --email sarah@example.com
 crane app assign myapp --email sarah@example.com
-
-# 6. Deploy
-crane config --key dhk_user_the_key_from_step_5
-crane deploy myapp --env sandbox
 ```
 
 ## CLI Reference

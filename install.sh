@@ -127,9 +127,6 @@ chmod 440 "$SUDOERS_FILE"
 visudo -cf "$SUDOERS_FILE" || { rm -f "$SUDOERS_FILE"; warn "sudoers file invalid — Caddy reload will require manual intervention"; }
 log "Sudoers written: $SUDOERS_FILE"
 
-# ---------- Docker + systemd (shared logic, reused by self-update) -------
-# install.sh calls the upgrade script AFTER the repo is cloned so the script is present.
-
 # ---------- clone / install repo -----------------------------------------
 
 if [[ ! -d "$REPO_DIR/.git" ]]; then
@@ -218,8 +215,50 @@ fi
 
 # ---------- Docker + systemd setup (idempotent) --------------------------
 
-log "Running Docker/systemd setup"
-bash "$REPO_DIR/scripts/upgrade-to-docker.sh" full "$REPO_DIR" "$RUN_USER"
+# Docker — apps run as containers, so the runtime needs it + the run user in the
+# docker group. Idempotent.
+if ! command -v docker >/dev/null 2>&1; then
+  log "Installing Docker"
+  apt-get install -y docker.io
+  systemctl enable --now docker
+else
+  log "Docker already present: $(docker --version)"
+fi
+if ! id -nG "$RUN_USER" | tr ' ' '\n' | grep -qx docker; then
+  log "Adding $RUN_USER to docker group"
+  usermod -aG docker "$RUN_USER"
+fi
+
+# systemd service. Restart=always survives crashes/reboots and lets self-update
+# work (the updater exits; systemd re-execs on the new code). The app reads its
+# .env from WorkingDirectory. Matches the unit that provisioned existing hosts.
+log "Writing systemd service"
+NODE_BIN="$(command -v node)"
+cat > /etc/systemd/system/appcrane.service <<UNIT
+[Unit]
+Description=AppCrane — self-hosted deployment manager
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=${RUN_USER}
+WorkingDirectory=${REPO_DIR}
+ExecStart=${NODE_BIN} server/index.js
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+KillSignal=SIGTERM
+TimeoutStopSec=20
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+chmod 644 /etc/systemd/system/appcrane.service
+systemctl daemon-reload
+systemctl enable --now appcrane.service
 
 # Wait for the API to come up.
 for _ in {1..20}; do
