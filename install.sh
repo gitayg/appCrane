@@ -73,7 +73,7 @@ log "Installing base packages"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
 apt-get install -y curl ca-certificates gnupg lsb-release git build-essential \
-  debian-keyring debian-archive-keyring apt-transport-https jq
+  debian-keyring debian-archive-keyring apt-transport-https jq sudo
 
 # ---------- Node.js ------------------------------------------------------
 
@@ -121,6 +121,7 @@ chmod 775 /etc/caddy /etc/caddy/sites
 [[ -f /etc/caddy/Caddyfile ]] && chown root:caddy /etc/caddy/Caddyfile && chmod 664 /etc/caddy/Caddyfile
 
 SUDOERS_FILE="/etc/sudoers.d/appcrane-caddy"
+mkdir -p /etc/sudoers.d   # created by the sudo package, but be defensive on minimal images
 cat > "$SUDOERS_FILE" <<SUDOERS
 # Allow AppCrane runtime user to reload/restart Caddy without a password
 ${RUN_USER} ALL=(ALL) NOPASSWD: /usr/bin/systemctl reload caddy
