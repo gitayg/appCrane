@@ -67,6 +67,20 @@ fi
 log "Install user: $RUN_USER ($RUN_HOME)"
 log "Repo dir:     $REPO_DIR"
 
+# ---------- TLS cert pre-flight ------------------------------------------
+# Manual TLS certs are an operator prerequisite — the installer references the
+# paths you pass, it does not fetch certs. Validate early so a missing/typo'd
+# path fails here with a clear message instead of silently proceeding and
+# leaving Caddy to fail later trying to load a nonexistent cert. Both come as a
+# pair. (No flags = ACME, nothing to check.)
+if [[ -n "${TLS_CERT_FILE:-}" || -n "${TLS_KEY_FILE:-}" ]]; then
+  [[ -n "${TLS_CERT_FILE:-}" ]] || die "TLS_KEY_FILE is set but TLS_CERT_FILE is not — provide both (or neither, to use automatic HTTPS)."
+  [[ -n "${TLS_KEY_FILE:-}"  ]] || die "TLS_CERT_FILE is set but TLS_KEY_FILE is not — provide both (or neither, to use automatic HTTPS)."
+  [[ -f "$TLS_CERT_FILE" ]] || die "TLS_CERT_FILE '$TLS_CERT_FILE' does not exist. Place the certificate there first, then re-run."
+  [[ -f "$TLS_KEY_FILE"  ]] || die "TLS_KEY_FILE '$TLS_KEY_FILE' does not exist. Place the private key there first, then re-run."
+  log "TLS certs found: $TLS_CERT_FILE / $TLS_KEY_FILE"
+fi
+
 # ---------- system packages ----------------------------------------------
 
 log "Installing base packages"
