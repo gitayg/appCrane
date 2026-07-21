@@ -218,19 +218,41 @@ fi
 
 # ---------- Docker + systemd setup (idempotent) --------------------------
 
-# Docker — apps run as containers, so the runtime needs it + the run user in the
-# docker group. Idempotent.
+# Docker — apps run as containers. Install if missing, add the run user to the
+# docker group, and — critically — make sure the daemon is actually RUNNING, not
+# just present. AppCrane's unit has Requires=docker.service, so a wedged Docker
+# means AppCrane never starts. Idempotent.
 if ! command -v docker >/dev/null 2>&1; then
   log "Installing Docker"
   apt-get install -y docker.io
-  systemctl enable --now docker
 else
-  log "Docker already present: $(docker --version)"
+  log "Docker already installed: $(docker --version)"
 fi
 if ! id -nG "$RUN_USER" | tr ' ' '\n' | grep -qx docker; then
   log "Adding $RUN_USER to docker group"
   usermod -aG docker "$RUN_USER"
 fi
+
+# Bring Docker up robustly. dockerd runs with -H fd:// and gets its listener from
+# docker.socket, so the socket must come up FIRST — starting docker.service alone
+# yields "no sockets found via socket activation". Repeated failed starts also
+# leave systemd rate-limiting further attempts, so clear failed state first.
+log "Ensuring Docker daemon is running"
+systemctl reset-failed docker.socket docker.service 2>/dev/null || true
+systemctl enable docker.socket docker.service 2>/dev/null || true
+systemctl start docker.socket 2>/dev/null || true
+systemctl restart docker.service 2>/dev/null || systemctl start docker.service 2>/dev/null || true
+
+# Verify the daemon actually answers before proceeding — a half-up Docker would
+# only surface later as AppCrane's dependency-failed start.
+if ! timeout 45 bash -c 'until docker version >/dev/null 2>&1; do sleep 1; done'; then
+  warn "Docker daemon is not responding after install."
+  warn "  Check:  systemctl status docker.socket docker.service"
+  warn "  A \"hosts\" entry in /etc/docker/daemon.json conflicts with -H fd:// (remove it), and"
+  warn "  both docker.io + docker-ce installed is a package conflict (keep one)."
+  die "Docker must be running before AppCrane can start (AppCrane's unit Requires=docker.service)."
+fi
+log "Docker is running: $(docker --version)"
 
 # systemd service. Restart=always survives crashes/reboots and lets self-update
 # work (the updater exits; systemd re-execs on the new code). ExecStart is
