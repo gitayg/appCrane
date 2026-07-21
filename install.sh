@@ -120,6 +120,21 @@ chown root:caddy /etc/caddy /etc/caddy/sites
 chmod 775 /etc/caddy /etc/caddy/sites
 [[ -f /etc/caddy/Caddyfile ]] && chown root:caddy /etc/caddy/Caddyfile && chmod 664 /etc/caddy/Caddyfile
 
+# Manual TLS certs (--tls-cert/--tls-key) must be readable by the `caddy` user
+# that runs the proxy — AppCrane emits `tls <cert> <key>` into the Caddyfile and
+# Caddy reads those paths at load. A root-owned 600 cert/key (the usual way they
+# land) fails with a permission error. Make them caddy-group-readable (the key
+# stays non-world-readable) and ensure the containing dir is traversable.
+for _crt in "${TLS_CERT_FILE:-}" "${TLS_KEY_FILE:-}"; do
+  [[ -n "$_crt" && -f "$_crt" ]] || continue
+  chown root:caddy "$_crt" 2>/dev/null || true
+  chmod 640 "$_crt"
+  _cdir="$(dirname "$_crt")"
+  chgrp caddy "$_cdir" 2>/dev/null || true
+  chmod g+rx "$_cdir" 2>/dev/null || true
+  log "Made TLS file caddy-readable: $_crt"
+done
+
 SUDOERS_FILE="/etc/sudoers.d/appcrane-caddy"
 mkdir -p /etc/sudoers.d   # created by the sudo package, but be defensive on minimal images
 cat > "$SUDOERS_FILE" <<SUDOERS
