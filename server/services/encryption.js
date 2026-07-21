@@ -30,8 +30,11 @@ function getKey() {
   return _cachedKey;
 }
 
-export function encrypt(plaintext) {
-  const key = getKey();
+// keyOverrideHex (optional): use a specific 32-byte hex key instead of the
+// instance's ENCRYPTION_KEY. Used by config migration to re-encrypt a value
+// from a source instance's key into this instance's key. Omit for normal use.
+export function encrypt(plaintext, keyOverrideHex) {
+  const key = keyOverrideHex ? Buffer.from(keyOverrideHex.slice(0, 64), 'hex') : getKey();
   const iv = crypto.randomBytes(IV_LENGTH);
   const cipher = crypto.createCipheriv(ALGORITHM, key, iv);
   let encrypted = cipher.update(plaintext, 'utf8', 'hex');
@@ -40,8 +43,8 @@ export function encrypt(plaintext) {
   return `${iv.toString('hex')}:${authTag}:${encrypted}`;
 }
 
-export function decrypt(encoded) {
-  const key = getKey();
+export function decrypt(encoded, keyOverrideHex) {
+  const key = keyOverrideHex ? Buffer.from(keyOverrideHex.slice(0, 64), 'hex') : getKey();
   const [ivHex, authTagHex, encryptedHex] = encoded.split(':');
   const iv = Buffer.from(ivHex, 'hex');
   const authTag = Buffer.from(authTagHex, 'hex');

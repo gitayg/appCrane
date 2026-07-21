@@ -118,6 +118,22 @@ crane config --url http://localhost:5001  # Set API URL
 crane config --key dhk_admin_xxx          # Set API key
 ```
 
+### Migrate config between instances
+Move the platform `settings` (including encrypted secrets) to another AppCrane —
+without sharing encryption keys. Export keeps secrets ciphertext; import
+re-encrypts them with the target instance's own key.
+```bash
+# On the SOURCE instance:
+crane config export --out config.json
+
+# Copy config.json to the TARGET, then on the TARGET:
+OLD_ENCRYPTION_KEY=<source ENCRYPTION_KEY> crane config import config.json
+```
+The source `ENCRYPTION_KEY` (from the source's `.env`) is needed only to decrypt
+the secrets during import; it is used transiently, never stored. One-way values
+(e.g. the SCIM token, stored as a hash) can't be migrated — the import lists them
+to regenerate on the target. Delete `config.json` afterward.
+
 ### Apps (admin)
 ```bash
 crane app list

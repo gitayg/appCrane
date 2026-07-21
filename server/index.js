@@ -44,6 +44,7 @@ import monitoringRoutes from './routes/monitoring.js';
 import notificationsRoutes from './routes/notifications.js';
 import identityRoutes from './routes/identity.js';
 import settingsRoutes from './routes/settings.js';
+import configRoutes from './routes/config.js';
 import enhancementsRoutes from './routes/enhancements.js';
 import appstudioRoutes from './routes/appstudio.js';
 import oidcRoutes from './routes/oidc.js';
@@ -657,6 +658,7 @@ app.use('/api/users', usersRoutes);
 app.use('/api/apps', webhooksRoutes);     // /api/apps/:slug/webhook config
 app.use('/api/apps', usersRoutes);        // /api/apps/:slug/roles, /api/apps/:slug/identity/users (admin)
 app.use('/api/settings', settingsRoutes); // General settings (branding, etc.)
+app.use('/api/config', configRoutes);     // Instance config export/import (migration)
 
 // Login page
 // /login + /portal: when the SSO redirect targets an app with custom
