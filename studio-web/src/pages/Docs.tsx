@@ -248,7 +248,20 @@ export function Docs() {
             <li><code>crane regenerate-key</code> — recover a lost admin key</li>
             <li><code>crane reconcile</code> — register orphaned filesystem apps into the DB</li>
             <li><code>crane status</code> — server health + app summary</li>
+            <li><code>crane config export --out config.json</code> — export platform settings (secrets stay encrypted)</li>
+            <li><code>crane config import config.json</code> — import them into another instance</li>
           </ul>
+          <p>
+            <strong>Migrating settings between instances.</strong> Export on the
+            source box, then import on the target. Encrypted values (SMTP
+            password, GitHub tokens, …) are re-encrypted with the target's key
+            during import, so the two instances never share an{' '}
+            <code>ENCRYPTION_KEY</code>. Provide the source key at import time
+            via <code>OLD_ENCRYPTION_KEY=&lt;source-key&gt; crane config import
+            config.json</code> (or <code>--old-key</code>). This is
+            intentionally CLI-only — it needs shell access to the box plus the
+            admin key, and is not exposed in the web UI.
+          </p>
 
           <div className="docs-footer">
             AppCrane — Self-service app hosting and deployment.
