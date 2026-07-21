@@ -230,10 +230,13 @@ if ! id -nG "$RUN_USER" | tr ' ' '\n' | grep -qx docker; then
 fi
 
 # systemd service. Restart=always survives crashes/reboots and lets self-update
-# work (the updater exits; systemd re-execs on the new code). The app reads its
-# .env from WorkingDirectory. Matches the unit that provisioned existing hosts.
+# work (the updater exits; systemd re-execs on the new code). ExecStart is
+# scripts/safe-boot.sh — an out-of-process wrapper around `node server/index.js`
+# that git-resets to the previous SHA if a self-update crashes on boot (a
+# migration can kill node before the in-process rollback runs). The app reads
+# its .env from WorkingDirectory; safe-boot.sh needs `node` on PATH (nodesource
+# installs /usr/bin/node) and jq (installed above).
 log "Writing systemd service"
-NODE_BIN="$(command -v node)"
 cat > /etc/systemd/system/appcrane.service <<UNIT
 [Unit]
 Description=AppCrane — self-hosted deployment manager
@@ -244,7 +247,7 @@ Requires=docker.service
 Type=simple
 User=${RUN_USER}
 WorkingDirectory=${REPO_DIR}
-ExecStart=${NODE_BIN} server/index.js
+ExecStart=${REPO_DIR}/scripts/safe-boot.sh
 Restart=always
 RestartSec=3
 StandardOutput=journal
