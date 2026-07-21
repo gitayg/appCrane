@@ -1066,78 +1066,9 @@ function BackupTab() {
   )
 }
 
-// v2.21.44: platform-admin config export/import (migrate settings + secrets to
-// another AppCrane). Backed by GET /api/config/export + POST /api/config/import.
-function MigrationTab() {
-  const [busy, setBusy] = useState(false)
-  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null)
-  const [oldKey, setOldKey] = useState('')
-  type ImportResult = { imported: number; reencrypted: number; plaintext: number; regenerate: string[]; errors: string[] }
-  const [result, setResult] = useState<ImportResult | null>(null)
-  const fileRef = useRef<HTMLInputElement>(null)
-  const inputStyle = { padding: '7px 10px', border: '1px solid var(--border)', borderRadius: 6, background: 'var(--surface2)', color: 'var(--text)', fontSize: '.85rem' } as const
+type Tab = 'security' | 'users' | 'roles' | 'github' | 'mail' | 'backup' | 'branding' | 'audit' | 'mcp' | 'skills'
 
-  async function doExport() {
-    setBusy(true); setMsg(null)
-    try {
-      const data = await adminApi.get<{ settings: unknown[]; regenerate: string[] }>('/api/config/export')
-      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a'); a.href = url; a.download = 'appcrane-config.json'; document.body.appendChild(a); a.click(); a.remove()
-      URL.revokeObjectURL(url)
-      setMsg({ ok: true, text: `Exported ${data.settings.length} setting(s). Secrets stay encrypted in the file — keep it private and delete it after import.` })
-    } catch (e) { setMsg({ ok: false, text: (e as Error).message }) }
-    finally { setBusy(false) }
-  }
-
-  async function doImport() {
-    const f = fileRef.current?.files?.[0]
-    if (!f) { setMsg({ ok: false, text: 'Choose an exported config.json file first.' }); return }
-    setBusy(true); setMsg(null); setResult(null)
-    try {
-      const config = JSON.parse(await f.text())
-      const res = await adminApi.post<ImportResult>('/api/config/import', { config, old_key: oldKey.trim() })
-      setResult(res)
-      setOldKey('') // clear the source master key from memory
-      const errs = res?.errors?.length ?? 0
-      setMsg({ ok: errs === 0, text: errs === 0 ? 'Import complete.' : `Import finished with ${errs} error(s) — see below.` })
-    } catch (e) { setMsg({ ok: false, text: (e as Error).message }) }
-    finally { setBusy(false) }
-  }
-
-  return (
-    <div>
-      <h2>Config Migration</h2>
-      <p style={{ color: 'var(--dim)' }}>Move this instance's settings — including encrypted secrets — to or from another AppCrane. Secrets are re-encrypted with each instance's own key, so the two never share a key.</p>
-
-      <h3 style={{ marginTop: 18 }}>Export</h3>
-      <p style={{ color: 'var(--dim)', fontSize: '.85rem' }}>Downloads a config file. Secrets stay encrypted inside it (no plaintext).</p>
-      <button className="btn" onClick={doExport} disabled={busy}>Export config…</button>
-
-      <h3 style={{ marginTop: 24 }}>Import</h3>
-      <p style={{ color: 'var(--dim)', fontSize: '.85rem' }}>Apply an export from another instance. Encrypted secrets are re-encrypted with <b>this</b> instance's key — to do that, provide the <b>source</b> instance's ENCRYPTION_KEY (from its <code>.env</code>) so they can be decrypted first.</p>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 10, maxWidth: 540 }}>
-        <input type="file" accept="application/json,.json" ref={fileRef} />
-        <input type="password" autoComplete="off" value={oldKey} onChange={e => setOldKey(e.target.value)} placeholder="Source ENCRYPTION_KEY (64 hex — only for encrypted secrets)" style={inputStyle} />
-        <div style={{ fontSize: '.78rem', color: 'var(--yellow, #eab308)' }}>⚠ This is the source instance's master key. It's used only to decrypt during this import and is never stored. Only paste it over a connection you trust.</div>
-        <button className="btn btn-accent" onClick={doImport} disabled={busy} style={{ alignSelf: 'flex-start' }}>Import config</button>
-      </div>
-
-      {msg && <p style={{ color: msg.ok ? 'var(--green)' : 'var(--red)', marginTop: 14 }}>{msg.text}</p>}
-      {result && (
-        <div style={{ marginTop: 10, fontSize: '.85rem' }}>
-          <div>Imported <b>{result.imported}</b> — {result.reencrypted} secret(s) re-encrypted, {result.plaintext} plaintext.</div>
-          {result.regenerate?.length > 0 && <div style={{ color: 'var(--dim)', marginTop: 4 }}>Regenerate on this instance (one-way, not migratable): {result.regenerate.join(', ')}</div>}
-          {result.errors?.length > 0 && <div style={{ color: 'var(--red)', marginTop: 4 }}>Errors:<ul style={{ margin: '4px 0' }}>{result.errors.map((e, i) => <li key={i}>{e}</li>)}</ul></div>}
-        </div>
-      )}
-    </div>
-  )
-}
-
-type Tab = 'security' | 'users' | 'roles' | 'github' | 'mail' | 'backup' | 'branding' | 'audit' | 'mcp' | 'skills' | 'migration'
-
-const VALID_TABS: Tab[] = ['security', 'users', 'roles', 'github', 'mail', 'backup', 'branding', 'audit', 'mcp', 'skills', 'migration']
+const VALID_TABS: Tab[] = ['security', 'users', 'roles', 'github', 'mail', 'backup', 'branding', 'audit', 'mcp', 'skills']
 
 function getTab(): Tab {
   const hash = window.location.hash.replace('#', '') as Tab
@@ -1200,9 +1131,6 @@ export function Settings() {
       </div>
       <div style={{ display: tab === 'backup' ? 'block' : 'none' }}>
         <BackupTab />
-      </div>
-      <div style={{ display: tab === 'migration' ? 'block' : 'none' }}>
-        <MigrationTab />
       </div>
       {/* v2.6.9: skills tab removed from Settings — now top-level /skills */}
       <div style={{ display: tab === 'branding' ? 'block' : 'none' }}>
