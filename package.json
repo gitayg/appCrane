@@ -1,8 +1,17 @@
 {
   "name": "appcrane",
-  "version": "2.21.31",
+  "version": "2.21.32",
   "description": "AppCrane - Self-service app hosting and deployment.",
   "license": "AGPL-3.0-only",
+  "private": true,
+  "homepage": "https://github.com/gitayg/appCrane#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gitayg/appCrane.git"
+  },
+  "bugs": {
+    "url": "https://github.com/gitayg/appCrane/issues"
+  },
   "type": "module",
   "bin": {
     "crane": "./bin/deployhub.js",
