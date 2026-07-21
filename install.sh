@@ -233,6 +233,30 @@ if ! id -nG "$RUN_USER" | tr ' ' '\n' | grep -qx docker; then
   usermod -aG docker "$RUN_USER"
 fi
 
+# Repair the #1 auto-fixable cause of "no sockets found via socket activation":
+# a "hosts" key in /etc/docker/daemon.json fixes dockerd's listener, which then
+# conflicts with the -H fd:// docker.socket passes → the daemon won't start.
+# Remove that key (back the file up first) so socket activation works. Also flag
+# a daemon.json that isn't valid JSON, since that breaks the daemon on its own.
+DJSON=/etc/docker/daemon.json
+if [[ -f "$DJSON" ]]; then
+  if ! jq empty "$DJSON" >/dev/null 2>&1; then
+    warn "$DJSON is not valid JSON — Docker won't start until it's fixed or removed."
+  elif jq -e 'has("hosts")' "$DJSON" >/dev/null 2>&1; then
+    warn "Removing conflicting \"hosts\" from $DJSON (backed up) — it breaks socket activation"
+    cp "$DJSON" "${DJSON}.appcrane-bak.$(date +%s)"
+    _tmp="$(mktemp)"; jq 'del(.hosts)' "$DJSON" > "$_tmp" && mv "$_tmp" "$DJSON"
+  fi
+fi
+
+# A docker.io + docker-ce mix is a package conflict that leaves a broken service.
+# apt normally refuses both, but a half-migration can leave both units around.
+if dpkg -l 2>/dev/null | awk '$1=="ii"{print $2}' | grep -qx docker.io \
+   && dpkg -l 2>/dev/null | awk '$1=="ii"{print $2}' | grep -qx docker-ce; then
+  warn "Both docker.io and docker-ce are installed — a package conflict. Keep one:"
+  warn "  apt-get remove -y docker-ce docker-ce-cli   # to standardize on docker.io (what this installer uses)"
+fi
+
 # Bring Docker up robustly. dockerd runs with -H fd:// and gets its listener from
 # docker.socket, so the socket must come up FIRST — starting docker.service alone
 # yields "no sockets found via socket activation". Repeated failed starts also
@@ -246,11 +270,10 @@ systemctl restart docker.service 2>/dev/null || systemctl start docker.service 2
 # Verify the daemon actually answers before proceeding — a half-up Docker would
 # only surface later as AppCrane's dependency-failed start.
 if ! timeout 45 bash -c 'until docker version >/dev/null 2>&1; do sleep 1; done'; then
-  warn "Docker daemon is not responding after install."
-  warn "  Check:  systemctl status docker.socket docker.service"
-  warn "  A \"hosts\" entry in /etc/docker/daemon.json conflicts with -H fd:// (remove it), and"
-  warn "  both docker.io + docker-ce installed is a package conflict (keep one)."
-  die "Docker must be running before AppCrane can start (AppCrane's unit Requires=docker.service)."
+  warn "Docker daemon still not responding after repair attempts."
+  warn "  systemctl status docker.socket docker.service   # see the underlying error"
+  warn "  journalctl -u docker -n 30 --no-pager"
+  die "Docker must be running before AppCrane can start (its unit Requires=docker.service)."
 fi
 log "Docker is running: $(docker --version)"
 
