@@ -130,6 +130,33 @@ chmod 440 "$SUDOERS_FILE"
 visudo -cf "$SUDOERS_FILE" || { rm -f "$SUDOERS_FILE"; warn "sudoers file invalid — Caddy reload will require manual intervention"; }
 log "Sudoers written: $SUDOERS_FILE"
 
+# polkit rule: AppCrane's code calls bare `systemctl reload caddy` (not `sudo`).
+# When AppCrane runs as a non-root user (User=${RUN_USER} in the unit), that hits
+# polkit → "Interactive authentication required" and the reload fails silently,
+# so config changes never reach the running proxy (apps then get no identity
+# headers). This grants ${RUN_USER} manage rights on caddy.service only. Ubuntu's
+# polkit (>=0.106) reads JS rules from /etc/polkit-1/rules.d/. Root installs don't
+# need it, but it's harmless there.
+POLKIT_RULE="/etc/polkit-1/rules.d/49-appcrane-caddy.rules"
+if [[ -d /etc/polkit-1/rules.d ]]; then
+  log "Writing polkit rule so $RUN_USER can reload/restart caddy.service"
+  cat > "$POLKIT_RULE" <<POLKIT
+// AppCrane: allow ${RUN_USER} to manage caddy.service without interactive auth.
+polkit.addRule(function(action, subject) {
+  if (action.id == "org.freedesktop.systemd1.manage-units" &&
+      action.lookup("unit") == "caddy.service" &&
+      subject.user == "${RUN_USER}") {
+    return polkit.Result.YES;
+  }
+});
+POLKIT
+  chmod 644 "$POLKIT_RULE"
+  systemctl restart polkit 2>/dev/null || systemctl restart polkit.service 2>/dev/null || true
+  log "polkit rule written: $POLKIT_RULE"
+else
+  warn "/etc/polkit-1/rules.d not found — if AppCrane runs non-root, Caddy reloads may need manual polkit/sudo setup."
+fi
+
 # ---------- clone / install repo -----------------------------------------
 
 if [[ ! -d "$REPO_DIR/.git" ]]; then
