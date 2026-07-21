@@ -249,12 +249,17 @@ if [[ -f "$DJSON" ]]; then
   fi
 fi
 
-# A docker.io + docker-ce mix is a package conflict that leaves a broken service.
-# apt normally refuses both, but a half-migration can leave both units around.
-if dpkg -l 2>/dev/null | awk '$1=="ii"{print $2}' | grep -qx docker.io \
-   && dpkg -l 2>/dev/null | awk '$1=="ii"{print $2}' | grep -qx docker-ce; then
-  warn "Both docker.io and docker-ce are installed — a package conflict. Keep one:"
-  warn "  apt-get remove -y docker-ce docker-ce-cli   # to standardize on docker.io (what this installer uses)"
+# A docker.io + Docker-CE mix is a mixed-source Docker that can wedge the socket.
+# apt refuses docker.io + docker-ce together, but an earlier get.docker.com run
+# leaves CE add-ons (docker-ce-rootless-extras, docker-ce-cli, …) that don't
+# conflict at the package level yet still muddy the runtime — so match any
+# docker-ce* package, not just the exact `docker-ce`.
+_installed="$(dpkg -l 2>/dev/null | awk '$1=="ii"{print $2}')"
+if grep -qx docker.io <<<"$_installed" && grep -qE '^docker-ce' <<<"$_installed"; then
+  warn "docker.io and Docker-CE package(s) are both installed — a mixed-source Docker:"
+  warn "  $(grep -E '^docker-ce' <<<"$_installed" | paste -sd' ')"
+  warn "  Standardize on docker.io (what this installer uses) by removing the CE bits:"
+  warn "  apt-get remove -y '^docker-ce.*'"
 fi
 
 # Bring Docker up robustly. dockerd runs with -H fd:// and gets its listener from
@@ -313,7 +318,7 @@ systemctl enable --now appcrane.service
 
 # Wait for the API to come up.
 for _ in {1..20}; do
-  curl -fsS http://localhost:5001/api/health >/dev/null 2>&1 && break
+  curl -fsS http://localhost:5001/api/info >/dev/null 2>&1 && break
   sleep 0.5
 done
 
