@@ -89,8 +89,11 @@ fi
 
 if ! command -v caddy >/dev/null 2>&1; then
   log "Installing Caddy"
+  # --batch --yes: non-interactive + auto-overwrite. Without them, a keyring
+  # left by an earlier/partial run makes gpg prompt "overwrite?" on /dev/tty,
+  # which fails with no TTY (piped SSH / CI) and breaks the curl pipe.
   curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/gpg.key \
-    | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+    | gpg --dearmor --batch --yes -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
   curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt \
     > /etc/apt/sources.list.d/caddy-stable.list
   apt-get update -y
