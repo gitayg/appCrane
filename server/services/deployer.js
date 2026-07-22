@@ -782,6 +782,13 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       appendLog('WARNING: No deployhub.json found. Using defaults.');
     }
 
+    // Sync the per-tenant DB opt-in from the manifest onto the app row, so the
+    // revoke path (which runs outside a deploy) knows whether to purge tenant
+    // data. Only touch the column when the manifest states it explicitly.
+    if (typeof manifest.multitenant === 'boolean') {
+      db.prepare('UPDATE apps SET multitenant = ? WHERE id = ?').run(manifest.multitenant ? 1 : 0, app.id);
+    }
+
     // v2.7.26: sync the cron declaration from deployhub.json into
     // app_cron_jobs. Removed jobs are dropped, new ones added, existing rows
     // updated. cronScheduler.js's tick loop picks them up on the next minute.
@@ -1001,6 +1008,14 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       runtimeEnvVars.APPCRANE_SERVICE_TOKEN = token;
       runtimeEnvVars.CRANE_INTERNAL_URL = `http://host.docker.internal:${cranePort}`;
       appendLog('Injected APPCRANE_SERVICE_TOKEN + host-gateway CRANE_INTERNAL_URL (email service)');
+    }
+
+    // Per-tenant DB (cooperative model): point the app at its tenant root under
+    // the mounted /data. The app derives <org>/u<userId>/db.sqlite from the
+    // identity headers it already receives. See server/services/tenants.js.
+    if (manifest.multitenant) {
+      runtimeEnvVars.APPCRANE_TENANT_ROOT = '/data/tenants';
+      appendLog('Multitenant: injected APPCRANE_TENANT_ROOT=/data/tenants');
     }
 
     const limits = parseResourceLimits(app.resource_limits);

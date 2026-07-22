@@ -291,6 +291,43 @@ Pick by shape:
 - **The whole app is unauth ingest** → headless app (clean separation, smaller blast radius).
 - **Mostly-auth app with a couple of public endpoints** → keep `authenticated`, gate the public paths at the app's own router.
 
+### 4. Per-tenant DB (multitenancy) — opt in
+
+Opt in with `"multitenant": true` in `deployhub.json` and AppCrane gives each of
+your app's users an isolated SQLite database on the persistent `/data` volume —
+you don't build tenant isolation yourself. A tenant is **(org, user)**, where
+`org` is the user's email domain. This is **fully opt-in**: apps that don't set
+the flag are completely unaffected.
+
+When enabled, AppCrane injects `APPCRANE_TENANT_ROOT=/data/tenants`. Derive the
+tenant DB path per request from the identity headers above (section 1):
+
+```js
+import { mkdirSync } from 'fs'
+import { join } from 'path'
+import Database from 'better-sqlite3'
+
+function tenantDb(req) {
+  const root = process.env.APPCRANE_TENANT_ROOT              // /data/tenants
+  const email = req.get('X-AppCrane-User-Email') || ''
+  const userId = req.get('X-AppCrane-User-Id') || ''
+  const org = (email.toLowerCase().split('@').pop() || '')
+    .replace(/[^a-z0-9.-]/g, '') || 'unknown'
+  const id = String(userId).replace(/[^0-9]/g, '')
+  if (!id) throw new Error('no tenant identity on request')
+  const dir = join(root, org, 'u' + id)
+  mkdirSync(dir, { recursive: true })
+  return new Database(join(dir, 'db.sqlite'))
+}
+```
+
+Files land at `/data/tenants/<org>/u<userId>/db.sqlite`. Always build the path
+via the helper above (never from raw user input) — the identity headers are
+platform-signed. When a user's access is revoked, AppCrane purges that tenant's
+dir automatically. Consumer domains (e.g. `gmail.com`) share an `org` label, but
+isolation is per-user, so data never mixes. A published `@appcrane/tenant`
+helper is planned; until then, copy the snippet above.
+
 ## Permission Model
 
 | Action | Admin | App User |

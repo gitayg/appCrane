@@ -1667,6 +1667,18 @@ const TOOLS = [
       const r1 = db.prepare('DELETE FROM app_user_roles WHERE app_id = ? AND user_id = ?').run(app.id, target.id);
       const r2 = db.prepare('DELETE FROM app_users      WHERE app_id = ? AND user_id = ?').run(app.id, target.id);
 
+      // Purge the revoked user's per-tenant DB dir (multitenant apps only).
+      // Best-effort — never let a purge failure fail the revoke.
+      const mt = db.prepare('SELECT multitenant FROM apps WHERE id = ?').get(app.id);
+      if (mt?.multitenant) {
+        try {
+          const { purgeTenant } = await import('./tenants.js');
+          purgeTenant(app.slug, target.email, target.id);
+        } catch (e) {
+          log.warn(`MCP revoke: tenant purge failed for ${app.slug}/${target.id}: ${e.message}`);
+        }
+      }
+
       log.info(`MCP: revoked access on ${app.slug} from user ${target.id} by ${user.id}`);
       return { app: app.slug, user: { id: target.id, email: target.email }, removed: { roles: r1.changes, members: r2.changes } };
     },
