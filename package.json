@@ -1,6 +1,6 @@
 {
   "name": "appcrane",
-  "version": "2.23.0",
+  "version": "2.24.0",
   "description": "AppCrane - Self-service app hosting and deployment.",
   "license": "AGPL-3.0-only",
   "private": true,
@@ -19,7 +19,8 @@
   },
   "scripts": {
     "start": "node server/index.js",
-    "dev": "node --watch server/index.js"
+    "dev": "node --watch server/index.js",
+    "test": "node --test test/*.test.js packages/tenant/*.test.js"
   },
   "overrides": {
     "follow-redirects": "^1.16.0"
