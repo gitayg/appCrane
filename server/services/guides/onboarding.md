@@ -344,6 +344,56 @@ The user's role is computed server-side from the authenticated identity, not
 from anything the client passes — so a spoofed `Referer` or `?app=` can only
 ask "what's MY role on app X", never escalate to someone else's role.
 
+## Per-tenant databases (multitenancy)
+
+When each *user* needs isolated data — a private notes store, per-user
+documents, a separate SQLite DB per customer — AppCrane provides the isolation
+so you don't build it yourself. **Opt in** with `"multitenant": true` in
+`deployhub.json`. AppCrane then injects `APPCRANE_TENANT_ROOT=/data/tenants`
+and, when a user's access is revoked, purges that user's data automatically.
+
+A tenant is **(org, user)**, where `org` is the user's email domain. Derive the
+tenant's DB from the same identity headers as above — never build the path from
+raw input. Keep the derivation exactly as written; AppCrane's purge-on-revoke
+computes the identical path.
+
+```js
+// lib/tenant.js — drop this helper into the app.
+import { mkdirSync } from 'fs'
+import { join } from 'path'
+import Database from 'better-sqlite3'
+
+export function tenantDb(req) {
+  const root = process.env.APPCRANE_TENANT_ROOT || '/data/tenants'
+  const email = (req.get('X-AppCrane-User-Email') || '').toLowerCase()
+  const org = (email.split('@').pop() || '').replace(/[^a-z0-9.-]/g, '')
+  const safeOrg = (!org || org === '.' || org === '..') ? 'unknown' : org
+  const id = String(req.get('X-AppCrane-User-Id') || '').replace(/[^0-9]/g, '')
+  if (!id) throw new Error('no tenant identity on request')
+  const dir = join(root, safeOrg, 'u' + id)
+  mkdirSync(dir, { recursive: true })
+  return new Database(join(dir, 'db.sqlite'))
+}
+```
+
+```js
+app.get('/api/notes', (req, res) => {
+  const db = tenantDb(req)                     // this caller's own db.sqlite
+  db.exec('CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, body TEXT)')
+  res.json({ notes: db.prepare('SELECT * FROM notes').all() })
+})
+```
+
+- Requires `auth_mode: 'authenticated'` (the default) so the identity headers
+  are present, and `better-sqlite3` in the app's dependencies.
+- Files too, not just a DB: each tenant has a `storage/` dir alongside its DB
+  (`<APPCRANE_TENANT_ROOT>/<org>/u<id>/storage/`) — same isolation, same purge.
+- Optional quota: set `"tenant_quota_mb": <n>` in `deployhub.json`; AppCrane
+  injects `APPCRANE_TENANT_QUOTA_BYTES` for the app to enforce before writes.
+- The full helper (storage + quota functions, tests, a runnable example) lives
+  at `packages/tenant` in the AppCrane repo — copy it instead of the snippet
+  above if you want those extras. It is not published to npm.
+
 ## Pre-build failures (1–2 second deploys)
 
 If `appcrane_deploy` finishes in ~1 second with status `failed`, the
