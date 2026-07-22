@@ -5,6 +5,7 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.21.49 — Repo hygiene: gitignore scip code-index artifacts (`*.typescript.scip`) and `.DS_Store` so they stop showing up as untracked (no runtime change)
 ## 2.21.48 — Document the `crane regenerate-key` platform_admin targeting + `--email` / `--user-id` flags in the in-app Docs → Operator CLI section and the README CLI reference
 ## 2.21.47 — Fix `crane regenerate-key`: it targeted `role='admin'` with a non-deterministic `LIMIT 1`, so it could regenerate a lower-privilege admin's key (or fail with "No admin user found") instead of the platform owner's. It now targets `role='platform_admin'` only, oldest-id first, and adds `--email <e>` / `--user-id <n>` to regenerate a specific account. Also fixed the root cause: `crane init` now seeds the bootstrap user as `platform_admin` (not `admin`) — role promotion is itself gated behind platform_admin, so a fresh box seeded as `admin` could never obtain one. Migration 066 promotes the lone bootstrap admin to platform_admin on already-deployed boxes that have no platform_admin (no-op otherwise)
 ## 2.21.46 — Document `crane config export` / `crane config import` in the in-app Docs → Operator CLI section, with a short "migrating settings between instances" note (re-encrypt-on-import, `OLD_ENCRYPTION_KEY`, why it's CLI-only)

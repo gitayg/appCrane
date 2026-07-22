@@ -10,3 +10,9 @@ data/
 studio-web/src/**/*.js
 studio-web/src/**/*.js.map
 studio-web/src/**/*.d.ts
+
+.squash/
+
+# scip code-index artifacts (emitted by squash/scip indexing) and macOS junk.
+*.typescript.scip
+.DS_Store
