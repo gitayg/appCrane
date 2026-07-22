@@ -1015,7 +1015,13 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     // identity headers it already receives. See server/services/tenants.js.
     if (manifest.multitenant) {
       runtimeEnvVars.APPCRANE_TENANT_ROOT = '/data/tenants';
-      appendLog('Multitenant: injected APPCRANE_TENANT_ROOT=/data/tenants');
+      const quotaMb = Number(manifest.tenant_quota_mb);
+      if (Number.isFinite(quotaMb) && quotaMb > 0) {
+        runtimeEnvVars.APPCRANE_TENANT_QUOTA_BYTES = String(Math.floor(quotaMb * 1024 * 1024));
+        appendLog(`Multitenant: injected APPCRANE_TENANT_ROOT + per-tenant quota ${quotaMb}MB`);
+      } else {
+        appendLog('Multitenant: injected APPCRANE_TENANT_ROOT=/data/tenants');
+      }
     }
 
     const limits = parseResourceLimits(app.resource_limits);

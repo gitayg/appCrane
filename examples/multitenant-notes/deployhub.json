@@ -1,5 +1,6 @@
 {
   "name": "Multitenant Notes",
   "multitenant": true,
+  "tenant_quota_mb": 50,
   "be": { "entry": "node server.js", "health": "/api/health" }
 }

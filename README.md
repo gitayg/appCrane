@@ -313,6 +313,11 @@ app.get('/api/notes', (req, res) => {
 ```
 
 `tenantDbPath(req)` returns just the path if you use a different SQLite driver.
+Each tenant also gets a `storage/` dir (`tenantStorageDir(req)` / `tenantFile(req, name)`)
+for files. Set `"tenant_quota_mb": <n>` in `deployhub.json` to cap per-tenant
+usage — AppCrane injects it and `assertTenantQuota(req)` throws once a tenant is
+full (the quota covers DB + storage).
+
 Always build tenant paths via the helper (never from raw user input) — the
 identity headers are platform-signed and the org slug is sanitised against
 traversal. When a user's access is revoked, AppCrane purges that tenant's dir

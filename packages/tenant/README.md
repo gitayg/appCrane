@@ -37,12 +37,25 @@ app.get('/api/notes', (req, res) => {
 | `tenantDb(req, opts?)` | open `better-sqlite3` handle | needs the peer dep |
 | `tenantDbPath(req, opts?)` | `string` path to `db.sqlite` | dependency-free — use with any SQLite driver |
 | `tenantDir(req, opts?)` | `string` tenant dir (created unless `create:false`) | |
+| `tenantStorageDir(req, opts?)` | `string` `<tenantDir>/storage/` | for blobs/uploads, created unless `create:false` |
+| `tenantFile(req, name, opts?)` | `string` safe path in `storage/` | `name` reduced to a basename; throws on `.`/`..`/empty/NUL |
+| `tenantUsage(req, opts?)` | `number` bytes used (db + storage) | walks the tenant dir |
+| `tenantQuotaBytes()` | `number` | from `APPCRANE_TENANT_QUOTA_BYTES`, `0` = unlimited |
+| `assertTenantQuota(req, opts?)` | — | throws `TENANT_QUOTA_EXCEEDED` if at/over quota; no-op when unlimited |
 | `tenantKey(req)` | `{ org, userId }` | throws if the request has no identity |
 | `orgFromEmail(email)` | `string` org slug | domain, sanitised, `unknown` fallback |
 
 `req` may be an Express request (`req.get`), a Node request (`req.headers`), or a
 plain headers object. `opts`: `{ root?, create? }` — `root` defaults to
 `process.env.APPCRANE_TENANT_ROOT` (`/data/tenants` in an AppCrane container).
+
+### Storage + quota
+
+Each tenant gets a `storage/` dir alongside its DB for files/uploads. Configure
+an optional cap with `"tenant_quota_mb": <n>` in `deployhub.json`; AppCrane
+injects it as `APPCRANE_TENANT_QUOTA_BYTES`, and `assertTenantQuota(req)` (called
+before a write) throws once the tenant is full. The quota covers the DB **and**
+storage, and revoke purges both.
 
 ## Security
 

@@ -2,8 +2,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { tmpdir } from 'os';
 import { join, sep, resolve } from 'path';
-import { rmSync, existsSync } from 'fs';
-import { orgFromEmail, tenantKey, tenantDir, tenantDbPath } from './index.js';
+import { rmSync, existsSync, writeFileSync } from 'fs';
+import {
+  orgFromEmail, tenantKey, tenantDir, tenantDbPath,
+  tenantStorageDir, tenantFile, tenantUsage, tenantQuotaBytes, assertTenantQuota,
+} from './index.js';
 
 // Minimal fake requests in both supported shapes.
 const expressReq = (headers) => ({ get: (n) => headers[n] });
@@ -37,6 +40,47 @@ test('tenantDir / tenantDbPath: correct shape under a custom root', () => {
   assert.equal(dir, join(root, 'acme.com', 'u9'));
   assert.ok(existsSync(dir), 'dir is created by default');
   assert.equal(tenantDbPath(req, { root }), join(root, 'acme.com', 'u9', 'db.sqlite'));
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('tenantStorageDir / tenantFile: storage path + filename safety', () => {
+  const root = join(tmpdir(), 'appcrane-tenant-store-' + process.pid);
+  rmSync(root, { recursive: true, force: true });
+  const req = expressReq({ 'X-AppCrane-User-Email': 'd@acme.com', 'X-AppCrane-User-Id': '3' });
+  assert.equal(tenantStorageDir(req, { root }), join(root, 'acme.com', 'u3', 'storage'));
+  assert.equal(tenantFile(req, 'photo.png', { root }), join(root, 'acme.com', 'u3', 'storage', 'photo.png'));
+  // user-supplied filenames can't traverse
+  assert.equal(tenantFile(req, '../../etc/passwd', { root }), join(root, 'acme.com', 'u3', 'storage', 'passwd'));
+  for (const bad of ['', '.', '..', '/', 'a/../../b']) {
+    // 'a/../../b' -> basename 'b' is fine; the traversal-only ones must throw
+    if (['', '.', '..', '/'].includes(bad)) assert.throws(() => tenantFile(req, bad, { root }), /invalid filename/);
+  }
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('tenantUsage / quota: measures bytes and enforces the limit', () => {
+  const root = join(tmpdir(), 'appcrane-tenant-quota-' + process.pid);
+  rmSync(root, { recursive: true, force: true });
+  const req = expressReq({ 'X-AppCrane-User-Email': 'e@acme.com', 'X-AppCrane-User-Id': '4' });
+  assert.equal(tenantUsage(req, { root }), 0, 'no dir yet -> 0 bytes');
+  writeFileSync(tenantFile(req, 'a.txt', { root }), 'x'.repeat(100));
+  writeFileSync(tenantFile(req, 'b.txt', { root }), 'y'.repeat(50));
+  assert.equal(tenantUsage(req, { root }), 150, 'sums files recursively');
+
+  const prev = process.env.APPCRANE_TENANT_QUOTA_BYTES;
+  try {
+    delete process.env.APPCRANE_TENANT_QUOTA_BYTES;
+    assert.equal(tenantQuotaBytes(), 0);
+    assert.doesNotThrow(() => assertTenantQuota(req, { root }), 'unlimited -> no-op');
+    process.env.APPCRANE_TENANT_QUOTA_BYTES = '1000';
+    assert.equal(tenantQuotaBytes(), 1000);
+    assert.doesNotThrow(() => assertTenantQuota(req, { root }), 'under quota');
+    process.env.APPCRANE_TENANT_QUOTA_BYTES = '100';
+    assert.throws(() => assertTenantQuota(req, { root }), /quota exceeded/);
+  } finally {
+    if (prev === undefined) delete process.env.APPCRANE_TENANT_QUOTA_BYTES;
+    else process.env.APPCRANE_TENANT_QUOTA_BYTES = prev;
+  }
   rmSync(root, { recursive: true, force: true });
 });
 
