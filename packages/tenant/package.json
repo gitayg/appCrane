@@ -1,0 +1,41 @@
+{
+  "name": "appcrane-tenant",
+  "version": "1.0.0",
+  "description": "Cooperative per-tenant SQLite DB helper for apps hosted on AppCrane. Derives an isolated DB path per (org, user) from AppCrane's signed identity headers.",
+  "type": "module",
+  "main": "index.js",
+  "exports": "./index.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "AGPL-3.0-only",
+  "peerDependencies": {
+    "better-sqlite3": ">=8"
+  },
+  "peerDependenciesMeta": {
+    "better-sqlite3": {
+      "optional": true
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gitayg/appCrane.git",
+    "directory": "packages/tenant"
+  },
+  "homepage": "https://github.com/gitayg/appCrane/tree/main/packages/tenant",
+  "keywords": [
+    "appcrane",
+    "multitenancy",
+    "multi-tenant",
+    "sqlite",
+    "tenant",
+    "paas"
+  ],
+  "files": [
+    "index.js",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test"
+  }
+}

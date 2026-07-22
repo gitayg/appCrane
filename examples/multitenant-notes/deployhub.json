@@ -1,0 +1,5 @@
+{
+  "name": "Multitenant Notes",
+  "multitenant": true,
+  "be": { "entry": "node server.js", "health": "/api/health" }
+}
