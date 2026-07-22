@@ -299,34 +299,27 @@ you don't build tenant isolation yourself. A tenant is **(org, user)**, where
 `org` is the user's email domain. This is **fully opt-in**: apps that don't set
 the flag are completely unaffected.
 
-When enabled, AppCrane injects `APPCRANE_TENANT_ROOT=/data/tenants`. Derive the
-tenant DB path per request from the identity headers above (section 1):
+When enabled, AppCrane injects `APPCRANE_TENANT_ROOT=/data/tenants`. Use the
+[`appcrane-tenant`](packages/tenant) helper to derive the tenant DB from the
+identity headers above (section 1) — no path-building by hand:
 
 ```js
-import { mkdirSync } from 'fs'
-import { join } from 'path'
-import Database from 'better-sqlite3'
+import { tenantDb } from 'appcrane-tenant'
 
-function tenantDb(req) {
-  const root = process.env.APPCRANE_TENANT_ROOT              // /data/tenants
-  const email = req.get('X-AppCrane-User-Email') || ''
-  const userId = req.get('X-AppCrane-User-Id') || ''
-  const org = (email.toLowerCase().split('@').pop() || '')
-    .replace(/[^a-z0-9.-]/g, '') || 'unknown'
-  const id = String(userId).replace(/[^0-9]/g, '')
-  if (!id) throw new Error('no tenant identity on request')
-  const dir = join(root, org, 'u' + id)
-  mkdirSync(dir, { recursive: true })
-  return new Database(join(dir, 'db.sqlite'))
-}
+app.get('/api/notes', (req, res) => {
+  const db = tenantDb(req)   // opens /data/tenants/<org>/u<userId>/db.sqlite
+  res.json({ notes: db.prepare('SELECT * FROM notes').all() })
+})
 ```
 
-Files land at `/data/tenants/<org>/u<userId>/db.sqlite`. Always build the path
-via the helper above (never from raw user input) — the identity headers are
-platform-signed. When a user's access is revoked, AppCrane purges that tenant's
-dir automatically. Consumer domains (e.g. `gmail.com`) share an `org` label, but
-isolation is per-user, so data never mixes. A published `@appcrane/tenant`
-helper is planned; until then, copy the snippet above.
+`tenantDbPath(req)` returns just the path if you use a different SQLite driver.
+Always build tenant paths via the helper (never from raw user input) — the
+identity headers are platform-signed and the org slug is sanitised against
+traversal. When a user's access is revoked, AppCrane purges that tenant's dir
+automatically. Consumer domains (e.g. `gmail.com`) share an `org` label, but
+isolation is per-user, so data never mixes. The helper isn't on npm yet — copy
+[`packages/tenant/index.js`](packages/tenant/index.js) or depend on it by path;
+see the [multitenant-notes example](examples/multitenant-notes).
 
 ## Permission Model
 

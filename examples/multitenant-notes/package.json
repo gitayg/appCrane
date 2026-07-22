@@ -1,0 +1,15 @@
+{
+  "name": "multitenant-notes",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Example AppCrane app: a per-tenant notes store using appcrane-tenant.",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.0.0",
+    "express": "^4.19.0",
+    "appcrane-tenant": "file:../../packages/tenant"
+  }
+}
