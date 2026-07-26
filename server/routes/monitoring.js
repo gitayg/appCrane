@@ -183,15 +183,26 @@ router.get('/dashboard/leaderboards', requireAdmin, (req, res) => {
   const days = Math.min(Math.max(parseInt(req.query.days, 10) || 7, 1), 90);
   const top  = Math.min(Math.max(parseInt(req.query.top,  10) || 10, 1), 50);
 
-  // ─ Top apps by distinct active users in the window
+  // ─ Top apps by distinct active users in the window.
+  // Attribute each app to its owner (first owner by id, matching how the
+  // apps detail route resolves `owner`). LEFT JOIN so apps with no owner
+  // record (creator deleted / pre-migration-048) still list, just unattributed.
   const apps = db.prepare(`
     SELECT a.slug, a.name,
            COUNT(DISTINCT v.user_id) AS users,
-           COUNT(*) AS visit_days
+           COUNT(*) AS visit_days,
+           ou.name  AS owner_name,
+           ou.email AS owner_email
     FROM app_visits v
     JOIN apps a ON a.id = v.app_id
+    LEFT JOIN (
+      SELECT app_id, MIN(user_id) AS owner_id
+      FROM app_user_roles WHERE app_role = 'owner'
+      GROUP BY app_id
+    ) o ON o.app_id = a.id
+    LEFT JOIN users ou ON ou.id = o.owner_id
     WHERE v.day >= date('now', '-' || ? || ' days')
-    GROUP BY a.slug, a.name
+    GROUP BY a.id, a.slug, a.name, ou.name, ou.email
     ORDER BY users DESC, visit_days DESC, a.name ASC
     LIMIT ?
   `).all(days, top);

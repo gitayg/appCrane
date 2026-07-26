@@ -1271,6 +1271,10 @@ textarea:focus { border-color: var(--accent); }
 .leaderboard-name {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+.leaderboard-attribution {
+  color: var(--dim); font-weight: 400; font-size: .74rem;
+  margin-left: 6px;
+}
 .leaderboard-count {
   font-family: monospace; font-size: .78rem;
   color: var(--dim);
