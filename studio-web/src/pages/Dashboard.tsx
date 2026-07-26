@@ -152,7 +152,7 @@ export function Dashboard() {
   // and users by distinct apps opened, both over the last 7 days.
   // Source: app_visits table, populated on every Caddy forward_auth.
   const [leaders, setLeaders] = useState<{
-    apps: { slug: string; name: string; users: number }[]
+    apps: { slug: string; name: string; users: number; owner_name?: string | null; owner_email?: string | null }[]
     users: { id: number; name: string; email: string | null; apps: number }[]
   }>({ apps: [], users: [] })
   const [usageSummary, setUsageSummary] = useState<UsageSummary | null>(null)
@@ -455,7 +455,14 @@ export function Dashboard() {
                 {leaders.apps.map((a, i) => (
                   <li key={a.slug}>
                     <span className="leaderboard-rank">{i + 1}</span>
-                    <span className="leaderboard-name">{a.name || a.slug}</span>
+                    <span className="leaderboard-name">
+                      {a.name || a.slug}
+                      {a.owner_name && (
+                        <span className="leaderboard-attribution" title={a.owner_email || ''}>
+                          by {a.owner_name}
+                        </span>
+                      )}
+                    </span>
                     <span className="leaderboard-count">{a.users} {a.users === 1 ? 'user' : 'users'}</span>
                   </li>
                 ))}
