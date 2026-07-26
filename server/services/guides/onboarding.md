@@ -604,5 +604,15 @@ Operator prerequisites:
 - The domain must be unique across apps; it can't be the AppCrane platform
   domain itself.
 
+**Migrating a domain (old links keep working).** AppCrane serves one primary
+custom domain per app, but it owns the whole lifecycle. When you **change** an
+app's domain (say `old.example.com` → `new.example.com`), AppCrane automatically
+keeps the old domain alive as a **301 redirect** to the new one — already-sent
+login links and bookmarks under the old domain keep working, path + query
+preserved, TLS auto-provisioned. No hand-edited Caddy. These redirect **aliases**
+are managed for you (owner/admin) — added automatically on a domain change, and
+add/removable via the 🌐 domain control on the Applications page or the REST
+endpoints `POST`/`DELETE /api/apps/<slug>/domain-aliases`.
+
 Owner/admin only. Maps to production; the sandbox stays at
 `{{HOST}}/<slug>-sandbox`.

@@ -29,6 +29,7 @@ interface App {
   frame_ancestors?: string | null
   auth_bypass_paths?: string[] | null
   domain?: string | null
+  domain_aliases?: { id: number; domain: string; source: string; created_at: string }[]
   owner?: { id: number; name: string; email: string } | null
   owners?: { id: number; name: string; email: string }[]
   app_role?: 'owner' | 'admin' | 'user' | 'viewer' | 'none'
@@ -548,17 +549,63 @@ export function Applications() {
       "The app is served there with NO AppCrane SSO and NO topbar - it does its\n" +
       "own auth. Maps to PRODUCTION. Point the domain's DNS at this host; Caddy\n" +
       "auto-provisions HTTPS. The crane.glick.run/" + app.slug + " path stays for ops.\n\n" +
+      "If you CHANGE the domain, the old one is kept automatically as a 301\n" +
+      "redirect so existing links/bookmarks keep working.\n\n" +
       "Leave blank to remove the custom domain."
     const val = prompt(help, app.domain ?? '')
-    if (val === null) return
+    if (val === null) { await manageDomainAliases(app); return }
     const next = val.trim() || null
-    try {
-      const r = await adminApi.put<{ app?: App; error?: { message?: string } }>(`/api/apps/${app.slug}`, { domain: next })
-      if (r?.error) { alert('Failed: ' + (r.error.message || 'unknown')); return }
-      setApps(prev => prev.map(a => a.slug === app.slug ? { ...a, domain: next } : a))
-    } catch (e) {
-      alert('Failed: ' + (e as Error).message)
+    let updated = app
+    if (next !== (app.domain ?? null)) {
+      try {
+        const r = await adminApi.put<{ app?: App; error?: { message?: string } }>(`/api/apps/${app.slug}`, { domain: next })
+        if (r?.error) { alert('Failed: ' + (r.error.message || 'unknown')); return }
+        updated = { ...app, domain: next, domain_aliases: r?.app?.domain_aliases ?? app.domain_aliases }
+        setApps(prev => prev.map(a => a.slug === app.slug ? updated : a))
+      } catch (e) {
+        alert('Failed: ' + (e as Error).message); return
+      }
     }
+    // Offer redirect-alias management (old domains → this app's primary).
+    await manageDomainAliases(updated)
+  }
+
+  // Old domains that 301-redirect to the app's primary custom domain. Managed
+  // via a lightweight prompt loop, matching the prompt-based domain UI above.
+  async function manageDomainAliases(app: App) {
+    if (!app.domain) return // aliases only redirect to a primary custom domain
+    let aliases = app.domain_aliases ?? []
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const listStr = aliases.length
+        ? aliases.map(a => `  • ${a.domain}${a.source === 'auto' ? '  (auto)' : ''}`).join('\n')
+        : '  (none yet)'
+      const input = prompt(
+        `Redirect aliases for ${app.domain}\nOld domains that 301-redirect here (path preserved):\n\n${listStr}\n\n` +
+        `Type a domain to ADD as a redirect, or "-domain" to REMOVE it.\nLeave blank to finish.`,
+        ''
+      )
+      if (input === null) break
+      const v = input.trim()
+      if (!v) break
+      try {
+        if (v.startsWith('-')) {
+          const dom = v.slice(1).trim().toLowerCase()
+          const row = aliases.find(a => a.domain.toLowerCase() === dom)
+          if (!row) { alert(`No alias "${dom}" on this app.`); continue }
+          await adminApi.del(`/api/apps/${app.slug}/domain-aliases/${row.id}`)
+          aliases = aliases.filter(a => a.id !== row.id)
+        } else {
+          const r = await adminApi.post<{ alias?: { id: number; domain: string; source: string; created_at: string }; error?: { message?: string } }>(
+            `/api/apps/${app.slug}/domain-aliases`, { domain: v })
+          if (r?.error) { alert('Failed: ' + (r.error.message || 'unknown')); continue }
+          if (r?.alias) { const added = r.alias; aliases = [...aliases.filter(a => a.id !== added.id), added] }
+        }
+      } catch (e) {
+        alert('Failed: ' + (e as Error).message)
+      }
+    }
+    setApps(prev => prev.map(a => a.slug === app.slug ? { ...a, domain_aliases: aliases } : a))
   }
 
   async function setAuthBypassPaths(app: App) {

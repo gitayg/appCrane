@@ -197,6 +197,8 @@ router.get('/', (req, res) => {
         deploy: lastDeploySand || null,
       },
       users,
+      // v2.24.4: old domains that 301-redirect to this app's primary domain.
+      domain_aliases: db.prepare('SELECT id, domain, source, created_at FROM app_domain_aliases WHERE app_id = ? ORDER BY created_at, id').all(app.id),
     };
   });
 
@@ -654,6 +656,13 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
 
   db.prepare(`UPDATE apps SET ${setClauses} WHERE id = ?`).run(...values, app.id);
 
+  // v2.24.4: when the custom domain changes, keep the old one alive as a 301
+  // redirect to the new one so already-sent login links / bookmarks don't break.
+  if ('domain' in updates) {
+    const { autoSeedAliasOnDomainChange } = await import('../services/domainAliases.js');
+    autoSeedAliasOnDomainChange(db, app, app.domain, updates.domain);
+  }
+
   // frame_ancestors and auth_mode change the per-app Caddyfile block — reload to apply.
   // auth_mode flips whether forward_auth runs at all; without a reload the new
   // setting wouldn't take effect on the live proxy.
@@ -663,8 +672,51 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
 
   const updated = db.prepare('SELECT * FROM apps WHERE id = ?').get(app.id);
   res.json({
-    app: { ...updated, resource_limits: JSON.parse(updated.resource_limits || '{}'), auth_bypass_paths: parseBypassPathsField(updated.auth_bypass_paths) },
+    app: {
+      ...updated,
+      resource_limits: JSON.parse(updated.resource_limits || '{}'),
+      auth_bypass_paths: parseBypassPathsField(updated.auth_bypass_paths),
+      domain_aliases: db.prepare('SELECT id, domain, source, created_at FROM app_domain_aliases WHERE app_id = ? ORDER BY created_at, id').all(app.id),
+    },
   });
+});
+
+/**
+ * POST /api/apps/:slug/domain-aliases  { domain } — add a redirect alias (v2.24.4).
+ * DELETE /api/apps/:slug/domain-aliases/:aliasId  — remove one.
+ * Owner/admin only (aliases are public exposure, same gate as the custom domain).
+ */
+async function requireDomainAdmin(req) {
+  const app = req.app;
+  const globalAdmin = isAdmin(req.user);
+  const isOwner = roleForUserOnApp(req.user, app) === 'owner';
+  if (!globalAdmin && !isOwner) {
+    throw new AppError('Only the app owner can manage domain aliases.', 403, 'FORBIDDEN');
+  }
+  return app;
+}
+
+router.post('/:slug/domain-aliases', requireAppAccess, auditMiddleware('app-domain-alias-add'), async (req, res) => {
+  const app = await requireDomainAdmin(req);
+  const db = getDb();
+  const { addAlias } = await import('../services/domainAliases.js');
+  let alias;
+  try {
+    alias = addAlias(db, app, (req.body || {}).domain);
+  } catch (e) {
+    throw new AppError(e.message, e.message.includes('already used') ? 409 : 400, 'VALIDATION');
+  }
+  await reloadCaddy().catch(e => log.warn(`Caddy reload after alias add: ${e.message}`));
+  res.json({ alias });
+});
+
+router.delete('/:slug/domain-aliases/:aliasId', requireAppAccess, auditMiddleware('app-domain-alias-remove'), async (req, res) => {
+  const app = await requireDomainAdmin(req);
+  const db = getDb();
+  const { removeAlias } = await import('../services/domainAliases.js');
+  const removed = removeAlias(db, app, parseInt(req.params.aliasId, 10));
+  if (removed) await reloadCaddy().catch(e => log.warn(`Caddy reload after alias remove: ${e.message}`));
+  res.json({ ok: true, removed });
 });
 
 /**
@@ -697,6 +749,7 @@ router.delete('/:slug', requireAppAccess, auditMiddleware('app-delete'), async (
   db.transaction(() => {
     db.prepare('DELETE FROM app_users WHERE app_id = ?').run(appId);
     db.prepare('DELETE FROM app_user_roles WHERE app_id = ?').run(appId);
+    db.prepare('DELETE FROM app_domain_aliases WHERE app_id = ?').run(appId);
     db.prepare('DELETE FROM deployments WHERE app_id = ?').run(appId);
     db.prepare('DELETE FROM env_vars WHERE app_id = ?').run(appId);
     db.prepare('DELETE FROM health_configs WHERE app_id = ?').run(appId);
