@@ -1390,6 +1390,13 @@ const TOOLS = [
       const values    = keys.map(k => updates[k]);
       db.prepare(`UPDATE apps SET ${setClause} WHERE id = ?`).run(...values, app.id);
 
+      // v2.24.4: on a custom-domain change, keep the old domain alive as a 301
+      // redirect to the new one (same as the REST path) so links don't break.
+      if ('domain' in updates) {
+        const { autoSeedAliasOnDomainChange } = await import('./domainAliases.js');
+        autoSeedAliasOnDomainChange(db, app, app.domain, updates.domain);
+      }
+
       log.info(`MCP: app '${slug}' updated by user ${user.id}; fields=${keys.join(',')}`);
 
       // frame_ancestors / auth_bypass_paths / domain change the Caddyfile.

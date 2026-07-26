@@ -310,6 +310,28 @@ export function generateCaddyfile() {
     caddyfile += `}\n`;
   }
 
+  // ── Domain aliases → 301 redirect to the app's primary domain (v2.24.4) ──
+  // A migrated-away domain (old bookmark, already-sent login link) keeps working
+  // by permanently redirecting to the app's current custom domain, path+query
+  // preserved. Emitted only when the primary is itself emitted above (prod live,
+  // valid domain) — otherwise the redirect target would 404. TLS for the alias
+  // is auto-provisioned by Caddy (ACME) as long as its DNS still points here.
+  const primaryByAppId = new Map(apps.map(a => [a.id, (a.domain || '').trim().toLowerCase()]));
+  const aliasRows = db.prepare('SELECT app_id, domain FROM app_domain_aliases').all();
+  for (const r of aliasRows) {
+    const alias = (r.domain || '').trim().toLowerCase();
+    const primary = primaryByAppId.get(r.app_id) || '';
+    if (!alias || !primary || alias === primary) continue;
+    if (!isValidDomainFormat(alias) || !isValidDomainFormat(primary)) continue;
+    if (!liveSet.has(`${r.app_id}:production`)) continue; // primary block not emitted → skip
+    if (emittedDomains.has(alias)) {
+      log.warn(`[caddy] alias domain "${alias}" already used — skipping duplicate`);
+      continue;
+    }
+    emittedDomains.add(alias);
+    caddyfile += `\n${alias} {\n    redir https://${primary}{uri} permanent\n}\n`;
+  }
+
   return caddyfile;
 }
 
