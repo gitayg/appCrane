@@ -619,8 +619,16 @@ Owner/admin only. Maps to production; the sandbox stays at
 
 ## Embedding an app in an iframe (`frame_ancestors`)
 
-To let another site iframe an app that stays behind AppCrane SSO, set the app's
-`frame_ancestors` (admin only) to the CSP source list of allowed embedders:
+**Same-org embedding works out of the box.** By default AppCrane lets any host
+under the platform's own registrable domain (the eTLD+1 of the platform domain,
+e.g. `app.opswat.com` → any `*.opswat.com`) embed apps — including the in-iframe
+SSO login step — with no per-app config. A platform admin can turn this off or
+change the domain in Settings → Security → "App embedding". So to embed an app
+from another host on the same domain, you usually need to do nothing.
+
+To let a host on a **different** domain iframe an app that stays behind AppCrane
+SSO, set the app's `frame_ancestors` (admin only) to the CSP source list of
+allowed embedders — this is added on top of the same-org default:
 
 ```
 appcrane_set_app_meta(slug="my-app",

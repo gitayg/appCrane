@@ -4,6 +4,8 @@ import { requireAuth, requirePlatformAdmin } from '../middleware/auth.js';
 import { PERMISSIONS, getMatrix, setMatrix, resetToDefaults } from '../services/permissions.js';
 import { ssoProviderConfigured } from '../services/authPolicy.js';
 import { encrypt } from '../services/encryption.js';
+import { reloadCaddy } from '../services/caddy.js';
+import { platformEmbedAncestors, platformRegistrableDomain } from '../utils/embed.js';
 
 const router = Router();
 
@@ -193,6 +195,45 @@ router.post('/config/import', requireAuth, requirePlatformAdmin, async (req, res
       res.status(400).json({ error: { code: 'IMPORT_FAILED', message: e.message } });
     }
   });
+});
+
+/**
+ * GET /api/settings/embed/config — same-site iframe embedding policy (v2.25.0).
+ * Apps are embeddable by any host under the platform's own registrable domain
+ * unless this is turned off. Platform-admin only.
+ */
+router.get('/embed/config', requireAuth, requirePlatformAdmin, (req, res) => {
+  const db = getDb();
+  const get = (k) => db.prepare('SELECT value FROM settings WHERE key = ?').get(k)?.value;
+  res.json({
+    enabled: (get('platform_embed_same_site') ?? 'on') !== 'off',
+    domain_override: get('platform_embed_domain') || '',
+    derived_domain: platformRegistrableDomain() || '',
+    effective: platformEmbedAncestors(db) || '',
+  });
+});
+
+/**
+ * PUT /api/settings/embed/config  { enabled, domain_override } — platform-admin.
+ * Reloads Caddy so the change lands on the live per-app frame-ancestors blocks.
+ */
+router.put('/embed/config', requireAuth, requirePlatformAdmin, async (req, res) => {
+  const db = getDb();
+  const { enabled, domain_override } = req.body || {};
+  const upsert = db.prepare(
+    `INSERT INTO settings (key, value, updated_by, updated_at) VALUES (?, ?, ?, datetime('now'))
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_by = excluded.updated_by, updated_at = datetime('now')`
+  );
+  if (enabled !== undefined) upsert.run('platform_embed_same_site', enabled ? 'on' : 'off', req.user.id);
+  if (domain_override !== undefined) {
+    const d = String(domain_override || '').trim().toLowerCase();
+    if (d && !/^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}$/.test(d)) {
+      return res.status(400).json({ error: { code: 'VALIDATION', message: 'domain_override must be a bare hostname like example.com' } });
+    }
+    upsert.run('platform_embed_domain', d, req.user.id);
+  }
+  await reloadCaddy().catch(() => {});
+  res.json({ ok: true, effective: platformEmbedAncestors(db) || '' });
 });
 
 /**

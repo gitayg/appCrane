@@ -4,6 +4,7 @@ import { isLinux } from './platform.js';
 import log from '../utils/logger.js';
 import { parseBypassPaths } from '../utils/authBypassPaths.js';
 import { isValidDomainFormat } from '../utils/customDomain.js';
+import { platformEmbedAncestors, mergeAncestors } from '../utils/embed.js';
 
 const CADDY_ADMIN = process.env.CADDY_ADMIN_URL || 'http://localhost:2019';
 
@@ -79,6 +80,10 @@ export function generateCaddyfile() {
   const liveRows = db.prepare("SELECT app_id, env FROM deployments WHERE status = 'live'").all();
   const liveSet = new Set(liveRows.map(r => `${r.app_id}:${r.env}`));
 
+  // Platform-default embedding allowlist (same registrable domain), merged into
+  // every app's frame-ancestors unless an admin disabled it. v2.25.0.
+  const platformFa = platformEmbedAncestors(db);
+
   // TLS mode: manual cert (DB settings or env vars) or ACME (Caddy default)
   const tlsRows = db.prepare("SELECT key, value FROM settings WHERE key IN ('tls_cert_file','tls_key_file')").all();
   const tlsMap = Object.fromEntries(tlsRows.map(r => [r.key, r.value || '']));
@@ -120,7 +125,7 @@ export function generateCaddyfile() {
     // default-locked iframe headers from any upstream so embedders listed in
     // the policy can iframe this app. Default (NULL) → no override; any
     // headers from the upstream pass through.
-    const fa = app.frame_ancestors;
+    const fa = mergeAncestors(platformFa, app.frame_ancestors);
 
     // Sandbox — longer prefix /${slug}-sandbox* wins over /${slug}* via mutual exclusivity.
     // Pass the full prefix on the verify URL so identity.js can reconstruct the

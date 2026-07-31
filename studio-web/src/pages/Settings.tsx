@@ -45,6 +45,12 @@ function SecurityTab() {
   const [ssoOnlySaved, flashSsoOnlySaved] = useFlash()
   const [ssoOnlyError, setSsoOnlyError] = useState<string | null>(null)
 
+  // v2.25.0: same-site iframe embedding. On by default — any host under the
+  // platform's own registrable domain may embed apps.
+  const [embed, setEmbed] = useState({ enabled: true, domain_override: '', derived_domain: '', effective: '' })
+  const [embedSaved, flashEmbedSaved] = useFlash()
+  const [embedError, setEmbedError] = useState<string | null>(null)
+
   useEffect(() => {
     adminApi.get<{ value?: string }>('/api/settings/tls_cert_file').then(r => { if (r?.value) setCertFile(r.value) }).catch(() => {})
     adminApi.get<{ value?: string }>('/api/settings/tls_key_file').then(r => { if (r?.value) setKeyFile(r.value) }).catch(() => {})
@@ -57,7 +63,19 @@ function SecurityTab() {
     }).catch(() => {})
     adminApi.get<typeof scim>('/api/auth/scim/config').then(r => { if (r) setScim(r) }).catch(() => {})
     adminApi.get<{ value?: string }>('/api/settings/auth_sso_only').then(r => setSsoOnly(r?.value === 'true')).catch(() => {})
+    adminApi.get<typeof embed>('/api/settings/embed/config').then(r => { if (r) setEmbed(r) }).catch(() => {})
   }, [])
+
+  async function saveEmbed(next: { enabled?: boolean; domain_override?: string }) {
+    setEmbedError(null)
+    try {
+      const r = await adminApi.put<{ effective?: string }>('/api/settings/embed/config', next)
+      setEmbed(e => ({ ...e, ...next, effective: r?.effective ?? e.effective }))
+      flashEmbedSaved()
+    } catch (e) {
+      setEmbedError(e instanceof Error ? e.message : 'Save failed')
+    }
+  }
 
   async function saveSsoOnly(next: boolean) {
     setSsoOnlyError(null)
@@ -305,6 +323,55 @@ function SecurityTab() {
         {ssoOnlyError && (
           <div style={{ fontSize: '.82rem', color: 'var(--red)' }}>{ssoOnlyError}</div>
         )}
+      </div>
+
+      <div className="setting-card">
+        <h3>App embedding (iframe)</h3>
+        <p>
+          Allow other sites to embed your apps in an <code>&lt;iframe&gt;</code>. When on, any host under
+          this platform's own registrable domain{' '}
+          <strong>{embed.domain_override || embed.derived_domain || 'your domain'}</strong> may embed apps
+          (a same-org trust boundary) — the in-iframe SSO login step is made frameable too. Per-app
+          <code style={{ fontFamily: 'monospace' }}> frame_ancestors</code> can add specific external
+          embedders on top.
+        </p>
+        <p style={{ fontSize: '.8rem', color: 'var(--dim)' }}>
+          Security: this lets any host under your domain frame an app <em>with the user's live session</em>
+          {' '}(clickjacking surface = your own subdomains, incl. any vulnerable to subdomain takeover). Turn
+          it off to keep apps same-origin-only unless an app opts in explicitly.
+        </p>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+          <input
+            type="checkbox"
+            id="embed-same-site"
+            checked={embed.enabled}
+            onChange={e => saveEmbed({ enabled: e.target.checked })}
+          />
+          <label htmlFor="embed-same-site" style={{ fontSize: '.85rem' }}>
+            Allow embedding from any <strong>{embed.domain_override || embed.derived_domain || 'platform-domain'}</strong> subdomain
+          </label>
+          {embedSaved && <span className="saved-msg">Saved ✓</span>}
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6, opacity: embed.enabled ? 1 : 0.5 }}>
+          <label htmlFor="embed-domain" style={{ fontSize: '.82rem', color: 'var(--dim)', minWidth: 150 }}>
+            Domain override (optional)
+          </label>
+          <input
+            type="text"
+            id="embed-domain"
+            placeholder={embed.derived_domain || 'example.com'}
+            defaultValue={embed.domain_override}
+            disabled={!embed.enabled}
+            onBlur={e => { const v = e.target.value.trim(); if (v !== embed.domain_override) saveEmbed({ domain_override: v }) }}
+            style={{ flex: 1, maxWidth: 280 }}
+          />
+        </div>
+        {embed.effective && (
+          <div style={{ fontSize: '.78rem', color: 'var(--dim)', fontFamily: 'monospace', marginTop: 4 }}>
+            frame-ancestors {embed.effective}
+          </div>
+        )}
+        {embedError && <div style={{ fontSize: '.82rem', color: 'var(--red)' }}>{embedError}</div>}
       </div>
 
       <div className="setting-card">
