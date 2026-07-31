@@ -6,6 +6,7 @@ import { createHash } from 'crypto';
 import { initDb, getDb } from './db.js';
 import { errorHandler, notFound } from './utils/errors.js';
 import log from './utils/logger.js';
+import { platformEmbedAncestors, mergeAncestors } from './utils/embed.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -674,8 +675,12 @@ function frameAncestorsForRedirect(redirectRaw) {
   if (!m) return null;
   const slug = m[1].replace(/-sandbox$/, '');
   try {
-    const row = getDb().prepare('SELECT frame_ancestors FROM apps WHERE slug = ?').get(slug);
-    return row?.frame_ancestors || null;
+    const db = getDb();
+    const row = db.prepare('SELECT frame_ancestors FROM apps WHERE slug = ?').get(slug);
+    if (!row) return null; // redirect isn't a real app → keep the SAMEORIGIN lock
+    // Merge the per-app policy with the platform same-site default (if enabled),
+    // so the in-iframe login step is frameable by exactly what the app content is.
+    return mergeAncestors(platformEmbedAncestors(db), row.frame_ancestors);
   } catch (_) { return null; }
 }
 
