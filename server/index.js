@@ -661,29 +661,45 @@ app.use('/api/settings', settingsRoutes); // General settings (branding, etc.)
 app.use('/api/config', configRoutes);     // Instance config export/import (migration)
 
 // Login page
-// /login + /portal: when the SSO redirect targets an app with custom
-// frame_ancestors, drop the global X-Frame-Options + emit a permissive
-// CSP so the SSO step renders inside that app's allowed embedders.
+// When the in-iframe SSO step targets an app with custom frame_ancestors, drop
+// the global X-Frame-Options + emit a per-app frame-ancestors CSP so the login
+// step renders inside exactly the embedders an admin listed for that app.
+
+// Derive an embeddable app's admin-configured frame_ancestors from a login/SSO
+// `redirect` target (e.g. /snc, /snc-sandbox, /snc/…). Returns the policy
+// string, or null when the redirect doesn't resolve to an app that opted into
+// embedding.
+function frameAncestorsForRedirect(redirectRaw) {
+  const m = String(redirectRaw || '').match(/^\/([a-z][a-z0-9-]*)/);
+  if (!m) return null;
+  const slug = m[1].replace(/-sandbox$/, '');
+  try {
+    const row = getDb().prepare('SELECT frame_ancestors FROM apps WHERE slug = ?').get(slug);
+    return row?.frame_ancestors || null;
+  } catch (_) { return null; }
+}
+
+// Relax the frame headers for an SSO bounce whose redirect targets an
+// embeddable app: drop X-Frame-Options and emit frame-ancestors. Returns true
+// when applied. No-op (false) otherwise, so the global SAMEORIGIN stands for
+// the ordinary dashboard. v2.24.5: the SSO login step now happens in the SPA
+// (/applications), so this must run there too — not just on the legacy login
+// page — or the in-iframe /login → /applications bounce lands on a
+// SAMEORIGIN-locked SPA shell and the frame comes up blank.
+function applyEmbedHeaders(req, res) {
+  const fa = frameAncestorsForRedirect(req.query.redirect);
+  if (!fa) return false;
+  res.removeHeader('X-Frame-Options');
+  res.setHeader('Content-Security-Policy', `${HTML_CSP}; frame-ancestors ${fa}`);
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+  res.setHeader('Pragma', 'no-cache');
+  return true;
+}
+
 function loginHandler(req, res) {
-  const redirect = String(req.query.redirect || '');
-  // Pull the leading path segment and match it against an app slug
-  // (e.g. /snc, /snc-sandbox, /snc/…)
-  const m = redirect.match(/^\/([a-z][a-z0-9-]*)/);
-  if (m) {
-    const candidateSlug = m[1].replace(/-sandbox$/, '');
-    try {
-      const row = getDb().prepare('SELECT frame_ancestors FROM apps WHERE slug = ?').get(candidateSlug);
-      if (row?.frame_ancestors) {
-        res.removeHeader('X-Frame-Options');
-        res.setHeader('Content-Security-Policy',
-          `${HTML_CSP}; frame-ancestors ${row.frame_ancestors}`);
-        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
-        res.setHeader('Pragma', 'no-cache');
-        return res.sendFile(join(__dirname, '..', 'docs', 'login.html'));
-      }
-    } catch (_) {}
-  }
-  sendHtml(res, join(__dirname, '..', 'docs', 'login.html'));
+  const loginPage = join(__dirname, '..', 'docs', 'login.html');
+  if (applyEmbedHeaders(req, res)) return res.sendFile(loginPage);
+  sendHtml(res, loginPage);
 }
 // v2.5.14: collapse the dual-login UX. /login and /portal forward to
 // /applications, which renders the SPA's <Login> when unauthenticated.
@@ -706,8 +722,19 @@ app.get('/login-legacy', loginHandler);
 app.get('/raiseme', (req, res) => sendHtml(res, join(__dirname, '..', 'public', 'raiseme.html')));
 
 const adminSpa = join(__dirname, '..', 'docs', 'admin-app', 'index.html');
+
+// Serve the admin SPA shell, frameable when the request is an SSO bounce whose
+// `redirect` targets an app that opted into embedding (frame_ancestors set).
+// This is the render target of the /login → /applications bounce, so it's where
+// the in-iframe SSO/login step actually paints — it must carry the per-app
+// frame-ancestors, or a cross-origin embed of an SSO-gated app stays blank.
+function sendAdminSpa(req, res) {
+  if (applyEmbedHeaders(req, res)) return res.sendFile(adminSpa);
+  sendHtml(res, adminSpa);
+}
+
 app.get('/dashboard', (req, res) => sendHtml(res, adminSpa));
-app.get('/applications', (req, res) => sendHtml(res, adminSpa));
+app.get('/applications', sendAdminSpa);
 app.get('/users-page', (req, res) => sendHtml(res, adminSpa));
 app.get('/audit-page', (req, res) => sendHtml(res, adminSpa));
 app.get('/enhancements-page', (req, res) => sendHtml(res, adminSpa));

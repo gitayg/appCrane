@@ -616,3 +616,28 @@ endpoints `POST`/`DELETE /api/apps/<slug>/domain-aliases`.
 
 Owner/admin only. Maps to production; the sandbox stays at
 `{{HOST}}/<slug>-sandbox`.
+
+## Embedding an app in an iframe (`frame_ancestors`)
+
+To let another site iframe an app that stays behind AppCrane SSO, set the app's
+`frame_ancestors` (admin only) to the CSP source list of allowed embedders:
+
+```
+appcrane_set_app_meta(slug="my-app",
+  frame_ancestors="'self' https://portal.example.com")
+```
+
+AppCrane then, for that app only: emits `Content-Security-Policy: frame-ancestors
+<list>` and drops `X-Frame-Options` on the app's own responses **and** on the
+in-iframe SSO login step (the `/login` → `/applications` render), so the login
+page paints inside the frame instead of coming up blank. The ordinary dashboard
+keeps `X-Frame-Options: SAMEORIGIN`.
+
+Cookie caveat for cross-**site** embedders: AppCrane's session cookie is
+`SameSite=Lax`, so it's sent when the embedder shares the platform's registrable
+domain and scheme (e.g. `https://portal.opswat.com` embedding
+`https://app.opswat.com` — same `opswat.com`, both https → the SSO session flows
+and login completes in-frame). A truly cross-site embedder (different domain)
+won't receive the `Lax` cookie, so the framed login can't complete there — use a
+same-site https embedder, or make the app `auth_mode: 'headless'`/`visibility:
+'public'` if it doesn't need per-user SSO.
