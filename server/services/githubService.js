@@ -142,6 +142,23 @@ export async function apiFetch(path, { method = 'GET', body, headers = {} } = {}
 }
 
 /**
+ * Liveness probe for the GitHub service-account token (v2.25.2). Hits
+ * `/rate_limit` (cheap, unmetered) so an expired/revoked PAT surfaces as a 401.
+ * Returns `{ ok, skipped?, error? }`; `skipped` when the service account isn't
+ * enabled (nothing to check). Never throws.
+ */
+export async function probeServiceAccount() {
+  const cfg = getServiceConfig();
+  if (!cfg.enabled) return { ok: true, skipped: true };
+  try {
+    await apiFetch('/rate_limit');
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+/**
  * Naming convention for AppCrane-managed repos (v2.6.11+).
  *
  * Every repo created via the service account is prefixed `AMC_` so the

@@ -1079,6 +1079,15 @@ app.listen(PORT, HOST, async () => {
     log.error('Email worker failed to start: ' + e.message);
   }
 
+  // v2.25.2: probe platform integration credentials (Graph mail secret, GitHub
+  // service-account PAT) every 15m and email platform admins when one fails.
+  try {
+    const { startCredentialChecker } = await import('./services/credentialChecker.js');
+    startCredentialChecker();
+  } catch (e) {
+    log.error('Credential checker failed to start: ' + e.message);
+  }
+
   // v2.14.2: daily digest to app owners of requests awaiting their action.
   try {
     const { startRequestDigestScheduler } = await import('./services/requestDigest.js');
