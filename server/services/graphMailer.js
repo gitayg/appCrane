@@ -71,7 +71,7 @@ async function getAccessToken(cfg, nowMs) {
  * mailbox; `fromName` only sets the display name. Throws on non-2xx so the
  * queue's retry/backoff handles transient Graph/network failures.
  */
-export async function sendViaGraph({ to, subject, text, html, fromName, replyTo }) {
+export async function sendViaGraph({ to, subject, text, html, fromName, replyTo, attachments }) {
   const cfg = getGraphConfig();
   if (!cfg) throw new Error('Graph not configured');
   const nowMs = Date.now();
@@ -85,6 +85,16 @@ export async function sendViaGraph({ to, subject, text, html, fromName, replyTo 
     toRecipients: [{ emailAddress: { address: to } }],
     from: { emailAddress: { address: cfg.mailbox, ...(fromName && { name: fromName }) } },
     ...(replyTo && { replyTo: [{ emailAddress: { address: replyTo } }] }),
+    // Inline file attachments (base64 contentBytes). Total size is capped
+    // upstream (emailQueue) to stay within Graph's simple sendMail budget.
+    ...(attachments?.length && {
+      attachments: attachments.map(a => ({
+        '@odata.type': '#microsoft.graph.fileAttachment',
+        name: a.filename,
+        contentType: a.contentType || 'application/octet-stream',
+        contentBytes: a.content,
+      })),
+    }),
   };
 
   const res = await fetch(`https://graph.microsoft.com/v1.0/users/${encodeURIComponent(cfg.mailbox)}/sendMail`, {

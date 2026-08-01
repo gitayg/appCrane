@@ -29,6 +29,48 @@ function getSetting(db, key, fallback) {
   return row?.value ?? fallback;
 }
 
+// Attachment limits. The total cap keeps us within Microsoft Graph's simple
+// sendMail request budget (no upload-session dance) and is comfortably fine
+// for SMTP too.
+const MAX_ATTACH_COUNT = 10;
+const MAX_ATTACH_TOTAL_BYTES = 3 * 1024 * 1024; // 3 MB across all attachments
+const B64_RE = /^[A-Za-z0-9+/]*={0,2}$/;
+
+/**
+ * Validate + normalize an attachments array into the stored/sent shape:
+ * [{ filename, content(base64), contentType }]. Throws on any malformed or
+ * oversized input. Returns [] for null/undefined.
+ */
+export function normalizeAttachments(input) {
+  if (input == null) return [];
+  if (!Array.isArray(input)) throw new Error('attachments must be an array');
+  if (input.length > MAX_ATTACH_COUNT) throw new Error(`too many attachments (max ${MAX_ATTACH_COUNT})`);
+  let total = 0;
+  const out = [];
+  for (const a of input) {
+    if (!a || typeof a !== 'object') throw new Error('each attachment must be an object');
+    const filename = String(a.filename ?? a.name ?? '').trim();
+    if (!filename) throw new Error('each attachment needs a filename');
+    if (/[/\\]/.test(filename) || filename.includes('..')) throw new Error(`invalid attachment filename: ${filename}`);
+    const content = String(a.content ?? '').replace(/\s+/g, '');
+    if (!content) throw new Error(`attachment "${filename}" has no content`);
+    if (!B64_RE.test(content)) throw new Error(`attachment "${filename}" content must be base64`);
+    const bytes = Buffer.from(content, 'base64');
+    if (bytes.length === 0) throw new Error(`attachment "${filename}" decoded to empty`);
+    total += bytes.length;
+    if (total > MAX_ATTACH_TOTAL_BYTES) {
+      throw new Error(`attachments exceed the ${Math.round(MAX_ATTACH_TOTAL_BYTES / 1024 / 1024)} MB total cap`);
+    }
+    const contentType = a.contentType ?? a.content_type;
+    out.push({
+      filename: filename.slice(0, 255),
+      content,
+      contentType: contentType ? String(contentType).slice(0, 128) : 'application/octet-stream',
+    });
+  }
+  return out;
+}
+
 /**
  * Resolve the recipient if and only if it's a known, active platform user
  * (any auth method — SSO, SAML, OIDC, or local). Returns the canonical email
@@ -48,7 +90,8 @@ export function assertValidRecipient(db, to) {
 
 /**
  * Enqueue one message. Validates the recipient against the SSO directory.
- * @param {object} m { appId?, env?, to, subject, text?, html?, replyTo?, fromName?, idempotencyKey?, source? }
+ * @param {object} m { appId?, env?, to, subject, text?, html?, replyTo?, fromName?, idempotencyKey?, source?, attachments? }
+ *   attachments: [{ filename, content(base64), contentType? }] — max 10, 3 MB total.
  * @returns {{ id:number, deduped?:boolean }}
  */
 export function enqueueEmail(m) {
@@ -56,6 +99,7 @@ export function enqueueEmail(m) {
   const to = assertValidRecipient(db, m.to);
   if (!m.subject || !String(m.subject).trim()) throw new Error('subject is required');
   if (!m.text && !m.html) throw new Error('text or html body is required');
+  const attachments = normalizeAttachments(m.attachments);
 
   // Idempotency: a retrying caller with the same key gets the existing row.
   if (m.idempotencyKey && m.appId != null) {
@@ -66,12 +110,13 @@ export function enqueueEmail(m) {
   }
 
   const res = db.prepare(`
-    INSERT INTO email_queue (app_id, env, to_email, from_name, reply_to, subject, body_text, body_html, idempotency_key, source)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO email_queue (app_id, env, to_email, from_name, reply_to, subject, body_text, body_html, idempotency_key, source, attachments)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     m.appId ?? null, m.env ?? null, to, m.fromName ?? null, m.replyTo ?? null,
     String(m.subject), m.text ?? null, m.html ?? null,
-    m.idempotencyKey ?? null, m.source || 'app'
+    m.idempotencyKey ?? null, m.source || 'app',
+    attachments.length ? JSON.stringify(attachments) : null
   );
   return { id: res.lastInsertRowid };
 }
@@ -102,6 +147,9 @@ async function deadLetter(db, row) {
 async function processRow(db, row) {
   db.prepare("UPDATE email_queue SET status='sending' WHERE id = ?").run(row.id);
   try {
+    let attachments;
+    try { attachments = row.attachments ? JSON.parse(row.attachments) : undefined; }
+    catch (_) { attachments = undefined; }
     const result = await sendEmail({
       to: row.to_email,
       subject: row.subject,
@@ -109,8 +157,10 @@ async function processRow(db, row) {
       html: row.body_html || undefined,
       fromName: resolveFromName(db, row),
       replyTo: row.reply_to || undefined,
+      attachments,
     });
-    db.prepare("UPDATE email_queue SET status='sent', sent_at=datetime('now'), message_id=?, attempts=attempts+1 WHERE id = ?")
+    // Clear the attachment blob on success so sent rows don't retain up to 3 MB.
+    db.prepare("UPDATE email_queue SET status='sent', sent_at=datetime('now'), message_id=?, attempts=attempts+1, attachments=NULL WHERE id = ?")
       .run(result?.messageId || (result?.mock ? 'mock' : null), row.id);
     log.info(`[email] sent #${row.id} → ${row.to_email} (${row.source})`);
   } catch (e) {

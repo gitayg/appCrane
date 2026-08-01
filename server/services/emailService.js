@@ -33,12 +33,12 @@ async function getTransporter() {
  * SMTP (if configured) → mock log. `fromName` sets only the display name; the
  * address is always the platform-configured sender. `replyTo` is optional.
  */
-export async function sendEmail({ to, subject, text, html, fromName, replyTo }) {
+export async function sendEmail({ to, subject, text, html, fromName, replyTo, attachments }) {
   // 1. Microsoft Graph — the production transport (sends as the shared mailbox).
   try {
     const { isGraphConfigured, sendViaGraph } = await import('./graphMailer.js');
     if (isGraphConfigured()) {
-      const result = await sendViaGraph({ to, subject, text, html, fromName, replyTo });
+      const result = await sendViaGraph({ to, subject, text, html, fromName, replyTo, attachments });
       log.info(`Email sent to ${to} via Graph: ${subject}`);
       return result;
     }
@@ -63,6 +63,14 @@ export async function sendEmail({ to, subject, text, html, fromName, replyTo }) 
   const result = await transport.sendMail({
     from, to, subject, text, html,
     ...(replyTo && { replyTo }),
+    ...(attachments?.length && {
+      attachments: attachments.map(a => ({
+        filename: a.filename,
+        content: a.content,
+        encoding: 'base64',
+        contentType: a.contentType || 'application/octet-stream',
+      })),
+    }),
   });
   log.info(`Email sent to ${to} via SMTP: ${subject}`);
   return result;
