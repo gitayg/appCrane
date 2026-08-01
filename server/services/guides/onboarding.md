@@ -552,6 +552,9 @@ await fetch(`${process.env.CRANE_INTERNAL_URL}/api/service/email`, {
     html: '<p>Optional HTML body</p>',
     replyTo: 'team@opswat.com',     // optional
     idempotencyKey: 'report-123',   // optional — safe retries, no double-send
+    attachments: [                  // optional — max 10 files, 3 MB total
+      { filename: 'report.pdf', content: pdfBase64, contentType: 'application/pdf' },
+    ],
   }),
 });
 // → 202 { queued: true, queue_id }   (async; a worker delivers it)
@@ -572,6 +575,9 @@ Rules and guarantees:
 - **From identity is platform-controlled.** Address is fixed
   (`aimi@opswat.com`); only the display name is configurable (per-app via
   `email_from_name`, else the Settings default). Apps cannot spoof the sender.
+- **Attachments** (optional) are base64 files — `[{ filename, content,
+  contentType? }]`, max 10 and 3 MB total decoded. Invalid/oversized → `400`,
+  nothing queued.
 
 ## Custom domains — serve an app on its own domain, bypassing AppCrane
 

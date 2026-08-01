@@ -40,19 +40,21 @@ function authApp(req) {
 
 /**
  * POST /api/service/email
- * Body: { to, subject, text?, html?, replyTo?, env?, idempotencyKey? }
+ * Body: { to, subject, text?, html?, replyTo?, env?, idempotencyKey?, fromName?,
+ *         attachments? }
+ *   attachments: [{ filename, content(base64), contentType? }] — max 10, 3 MB total.
  * The recipient must be a registered platform user. Returns 202 + queue id.
  */
 router.post('/email', (req, res) => {
   assertInternal(req);
   const app = authApp(req);
-  const { to, subject, text, html, replyTo, env, idempotencyKey, fromName } = req.body || {};
+  const { to, subject, text, html, replyTo, env, idempotencyKey, fromName, attachments } = req.body || {};
 
   try {
     const { id, deduped } = enqueueEmail({
       appId: app.id,
       env: env === 'production' ? 'production' : 'sandbox',
-      to, subject, text, html, replyTo,
+      to, subject, text, html, replyTo, attachments,
       // Display name: the app decides per-send (fromName in the body), and it
       // defaults to the app's own name — so MarketMind's mail shows
       // "MarketMind <aimi@opswat.com>" with no setup. Only the display name

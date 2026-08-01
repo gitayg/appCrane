@@ -39,6 +39,7 @@ Body fields:
 | `fromName` | no | Sender display name. **Defaults to the app's own name** — MarketMind sends as `MarketMind <aimi@opswat.com>`. Pass this to override per-send (e.g. `"IntelOP"`). The address never changes. |
 | `env` | no | `sandbox` (default) or `production` |
 | `idempotencyKey` | no | Safe retries — the same key never double-sends |
+| `attachments` | no | Array of files: `[{ filename, content, contentType? }]`. `content` is **base64**. Max **10** files, **3 MB** total (decoded). `contentType` defaults to `application/octet-stream`. |
 
 Returns **`202 { queued: true, queue_id }`** immediately. A worker delivers it
 async (5 retries with backoff; on permanent failure the platform admin is
@@ -75,6 +76,36 @@ def notify(to_email, subject, body):
     res.raise_for_status()   # 202 on success
     return res.json()
 ```
+
+## Attachments
+
+Attach files by passing base64-encoded bytes. Max 10 files, 3 MB total decoded
+(the cap keeps sends within Microsoft Graph's single-request budget).
+
+```js
+import { readFileSync } from "fs";
+await fetch(`${process.env.CRANE_INTERNAL_URL}/api/service/email`, {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    "X-AppCrane-Service-Token": process.env.APPCRANE_SERVICE_TOKEN,
+  },
+  body: JSON.stringify({
+    to: userEmail,
+    subject: "Your report",
+    text: "Report attached.",
+    attachments: [
+      { filename: "report.pdf",
+        content: readFileSync("/data/report.pdf").toString("base64"),
+        contentType: "application/pdf" },
+    ],
+  }),
+});
+```
+
+A bad attachment (missing filename, non-base64 `content`, a `filename` with path
+separators or `..`, more than 10 files, or over the 3 MB total) returns `400`
+and nothing is queued.
 
 ## Emailing the logged-in user
 
