@@ -43,6 +43,24 @@ export function isGraphConfigured() {
   return getGraphConfig() !== null;
 }
 
+/**
+ * Liveness probe for the Graph mail credential (v2.25.2). Attempts to obtain an
+ * access token (client-credentials) — the same step every send makes — so an
+ * expired/rotated client secret or bad tenant/client id surfaces. Returns
+ * `{ ok, skipped?, error? }`; `skipped` when Graph isn't configured (nothing to
+ * check). Never throws.
+ */
+export async function probeGraph() {
+  const cfg = getGraphConfig();
+  if (!cfg) return { ok: true, skipped: true };
+  try {
+    await getAccessToken(cfg, Date.now());
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
 async function getAccessToken(cfg, nowMs) {
   if (_token && _token.expiresAt > nowMs + 60_000) return _token.value;
   const url = `https://login.microsoftonline.com/${cfg.tenant}/oauth2/v2.0/token`;
