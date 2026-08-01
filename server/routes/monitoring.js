@@ -1,12 +1,33 @@
 import { Router } from 'express';
 import { getDb } from '../db.js';
-import { requireAuth, requireAdmin, requireAppAccess } from '../middleware/auth.js';
+import { requireAuth, requireAdmin, requirePlatformAdmin, requireAppAccess } from '../middleware/auth.js';
 import { getSystemInfo, formatBytes } from '../services/platform.js';
 import { getPortsForSlot } from '../services/portAllocator.js';
 
 const router = Router();
 
 router.use(requireAuth);
+
+/**
+ * GET /api/credentials/health (v2.25.3) — platform integration credential
+ * status for the dashboard banner. Reads the checker's persisted state
+ * (settings.credcheck_state) and returns any currently-failing credential.
+ * platform_admin only — this is sensitive operational detail (which integration
+ * is down), deliberately NOT surfaced on the public /api/info. Closes the gap
+ * where a dead Graph mail token can't email its own failure alert.
+ */
+router.get('/credentials/health', requirePlatformAdmin, (req, res) => {
+  const db = getDb();
+  let state = {};
+  try {
+    const row = db.prepare("SELECT value FROM settings WHERE key = 'credcheck_state'").get();
+    if (row?.value) state = JSON.parse(row.value);
+  } catch (_) { /* treat unreadable state as "nothing failing" */ }
+  const failing = Object.entries(state)
+    .filter(([, s]) => s && s.ok === false)
+    .map(([name, s]) => ({ name, since: s.since || null, error: s.error || null, fix: s.fix || null }));
+  res.json({ ok: failing.length === 0, failing });
+});
 
 /**
  * GET /api/server/health - Server health overview (admin)

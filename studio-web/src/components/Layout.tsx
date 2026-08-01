@@ -6,6 +6,7 @@ import { adminApi } from '../adminApi'
 import { Icon } from './icons'
 import { WhatsNewModal, type WhatsNewChange } from './WhatsNewModal'
 import { useAppTabs } from './AppTabsContext'
+import { CredentialAlertBanner } from './CredentialAlertBanner'
 
 interface NavItem { id: string; label: string; href: string; icon: ReactElement; external?: boolean; platformAdminOnly?: boolean; adminOnly?: boolean; ownerOrAdmin?: boolean }
 interface NavApp {
@@ -673,6 +674,7 @@ export function Layout({ children, subItems, activeSub }: Props) {
 
       {/* Page content */}
       <main className={`admin-content${collapsed ? ' collapsed' : ''}`}>
+        <CredentialAlertBanner />
         {children}
       </main>
       {platformWN && (
