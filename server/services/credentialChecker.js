@@ -96,7 +96,13 @@ async function runOnce(probes = PROBES) {
           `Fix it in ${probe.fix}. You'll get a recovery notice once it works again.\n`);
         log.error(`[credcheck] ${probe.name} FAILING: ${result.error || '(no detail)'}`);
       }
-      state[probe.name] = { ok: false, since: prev.ok === false ? prev.since : now, lastAlertAt: (firstFailure || staleAlert) ? now : prev.lastAlertAt };
+      state[probe.name] = {
+        ok: false,
+        since: prev.ok === false ? prev.since : now,
+        lastAlertAt: (firstFailure || staleAlert) ? now : prev.lastAlertAt,
+        error: result.error || null,
+        fix: probe.fix,
+      };
     } else {
       if (prev.ok === false) {
         await alertAdmins(db,
