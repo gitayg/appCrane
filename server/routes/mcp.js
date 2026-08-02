@@ -18,6 +18,52 @@ const SERVER_INFO = {
   version: '1.0.0',
 };
 
+/**
+ * Supported MCP protocol revisions, newest first (v2.28.1).
+ *
+ * The server previously answered `initialize` with a hardcoded '2024-11-05' —
+ * the original revision, four behind current. `2026-07-28` is a breaking
+ * revision: it drops the `initialize` handshake and `Mcp-Session-Id` entirely
+ * (the protocol is stateless), adds a mandatory `server/discover`, and removes
+ * `ping`.
+ *
+ * We NEGOTIATE rather than flip. A hard cutover would disconnect every client
+ * still speaking an older revision — which, for a self-hosted platform whose
+ * users point long-lived agents at it, means breaking work already in flight.
+ * So: echo back whichever supported revision the client asks for, keep
+ * `initialize`/`ping` answering for older clients, and serve `server/discover`
+ * for new ones. Both shapes are correct simultaneously because AppCrane's
+ * surface is tools-only — no sessions, subscriptions, sampling or roots, which
+ * is where the breaking changes actually bite.
+ */
+const PROTOCOL_VERSIONS = ['2026-07-28', '2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'];
+const LATEST_PROTOCOL = PROTOCOL_VERSIONS[0];
+const DEFAULT_LEGACY_PROTOCOL = '2024-11-05';
+const PROTOCOL_META_KEY = 'io.modelcontextprotocol/protocolVersion';
+
+const SERVER_CAPABILITIES = { tools: { listChanged: false } };
+
+/**
+ * Resolve which revision to speak for a request. Order of evidence:
+ *   1. `params.protocolVersion` (initialize, older clients)
+ *   2. `params._meta['io.modelcontextprotocol/protocolVersion']` (2026-07-28,
+ *      which carries the version on every request instead of a handshake)
+ *   3. the `MCP-Protocol-Version` header
+ * Unknown/absent → the legacy default, so a client that never states a version
+ * keeps getting exactly what it got before this change.
+ */
+function negotiateProtocol(req, params) {
+  const asked =
+    params?.protocolVersion ||
+    params?._meta?.[PROTOCOL_META_KEY] ||
+    req.get('MCP-Protocol-Version');
+  if (asked && PROTOCOL_VERSIONS.includes(asked)) return asked;
+  // A client asking for something newer than we know gets our newest, per the
+  // spec's negotiation rule (offer the closest supported).
+  if (asked && asked > LATEST_PROTOCOL) return LATEST_PROTOCOL;
+  return asked ? DEFAULT_LEGACY_PROTOCOL : DEFAULT_LEGACY_PROTOCOL;
+}
+
 const SERVER_INSTRUCTIONS = `
 AppCrane is a deploy and lifecycle platform for AI-built apps. This single
 MCP connection exposes BOTH lifecycle and source-code tooling:
@@ -79,13 +125,23 @@ registration.
 
 /**
  * MCP HTTP transport. JSON-RPC 2.0 over POST /api/mcp.
- * Implements: initialize, tools/list, tools/call, ping.
+ *
+ * Implements: server/discover (2026-07-28), initialize + ping (pre-2026-07-28,
+ * kept for compatibility), tools/list, tools/call.
+ *
+ * Protocol revision is negotiated per request (see negotiateProtocol) and
+ * echoed in the MCP-Protocol-Version response header, so old and new clients
+ * can both talk to the same endpoint.
  */
 router.post('/', requireAuth, async (req, res) => {
   const { jsonrpc, id, method, params } = req.body || {};
   if (jsonrpc !== '2.0') {
     return res.json({ jsonrpc: '2.0', id, error: { code: -32600, message: 'Invalid request — expected jsonrpc 2.0' } });
   }
+
+  // Tell the client which revision this response is written to. Harmless to
+  // clients that ignore it; required reading for 2026-07-28 ones.
+  res.set('MCP-Protocol-Version', negotiateProtocol(req, params));
 
   // Mark this MCP request in-flight so a concurrent self-update waits for it
   // to finish before restarting. noteMcpEnd() runs in finally, even on early
@@ -95,9 +151,23 @@ router.post('/', requireAuth, async (req, res) => {
     let result;
     switch (method) {
       case 'initialize':
+        // Retained for pre-2026-07-28 clients. The handshake is gone in the
+        // current revision, but answering it costs nothing and is the only
+        // thing keeping existing agents connected.
         result = {
-          protocolVersion: '2024-11-05',
-          capabilities: { tools: { listChanged: false } },
+          protocolVersion: negotiateProtocol(req, params),
+          capabilities: SERVER_CAPABILITIES,
+          serverInfo: SERVER_INFO,
+          instructions: SERVER_INSTRUCTIONS,
+        };
+        break;
+      // v2.28.1: `server/discover` is the stateless replacement for the
+      // initialize handshake in MCP 2026-07-28 — the client asks what the
+      // server is and can do, without establishing any session.
+      case 'server/discover':
+        result = {
+          protocolVersion: negotiateProtocol(req, params),
+          capabilities: SERVER_CAPABILITIES,
           serverInfo: SERVER_INFO,
           instructions: SERVER_INSTRUCTIONS,
         };
@@ -157,6 +227,8 @@ router.post('/', requireAuth, async (req, res) => {
           }
         }
         break;
+      // Removed in 2026-07-28, still answered: a client that pings and gets
+      // "method not found" concludes the server is broken, not modern.
       case 'ping':
         result = {};
         break;
