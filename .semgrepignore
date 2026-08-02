@@ -1,0 +1,17 @@
+# Build output — not source. Scanning the minified admin bundle produces only
+# false positives (a bundler's RegExp() constructor reads as "ReDoS", React
+# Router's location handling reads as "open redirect"). The real code lives in
+# studio-web/src/, which IS scanned.
+docs/admin-app/
+studio-web/dist/
+
+# Dependencies — covered by OSV-Scanner against package-lock.json, which is the
+# right tool for them. Semgrep on node_modules is noise and very slow.
+node_modules/
+
+# Code-intelligence index artifacts.
+*.scip
+.squash/
+
+# Test fixtures may contain deliberately unsafe patterns as the thing under test.
+test/fixtures/
