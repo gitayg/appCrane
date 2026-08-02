@@ -11,8 +11,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # node + deps are needed by the authz watchdog and the test suite
+      # (better-sqlite3 is a native module the tests open a real DB with).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
       - name: Role-pattern watchdog (platform_admin coverage)
         run: bash scripts/check-role-patterns.sh --strict
 
       - name: Shadow .js detector (Vite resolve safety)
         run: bash scripts/check-no-shadow-js.sh --strict
+
+      # v2.27.0: per-app authorization watchdog. Missing tenant scoping on
+      # :slug routes (IDOR) is one of the two bug classes behind the 2026
+      # disclosure wave against self-hosted PaaS products — it found a real
+      # cross-app read in coder.js the day it was written.
+      - name: Per-app authorization watchdog (IDOR)
+        run: node scripts/check-route-authz.mjs --strict
+
+      - name: Unit tests
+        run: npm test

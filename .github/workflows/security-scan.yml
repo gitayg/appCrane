@@ -20,7 +20,9 @@ jobs:
       image: semgrep/semgrep
     steps:
       - uses: actions/checkout@v4
-      - name: Run Semgrep
+      # Full scan feeds the Security tab; it must not fail the job or the
+      # SARIF never gets uploaded. The blocking decision happens below.
+      - name: Run Semgrep (SARIF for Security tab)
         run: semgrep ci --config=auto --sarif --output=semgrep.sarif
         continue-on-error: true
       - name: Upload SARIF to GitHub Security
@@ -29,6 +31,14 @@ jobs:
         with:
           sarif_file: semgrep.sarif
           category: semgrep
+      # v2.27.0: this used to be advisory only — every finding was
+      # continue-on-error, so nothing ever blocked a merge. Shell injection and
+      # missing tenant authorization are the two bug classes that produced ~55
+      # critical advisories across comparable self-hosted PaaS products in 2026,
+      # so ERROR-severity findings now fail the build. Warnings stay advisory
+      # and remain visible in the Security tab.
+      - name: Gate on ERROR-severity findings
+        run: semgrep ci --config=auto --severity=ERROR
 
   osv-scanner:
     name: OSV-Scanner (Dependencies)

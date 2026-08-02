@@ -528,6 +528,14 @@ app.post('/api/self-update', requireAuth, requirePlatformAdmin, async (req, res)
     // don't tag releases).
     const previousSha = execFileSync('git', ['rev-parse', 'HEAD'], gitOpts).toString().trim();
 
+    // v2.27.0: snapshot the DB + .env BEFORE anything destructive. Code
+    // rollback (maybeAutoRollback) can undo a bad commit; it cannot undo a
+    // damaged database or a clobbered ENCRYPTION_KEY — and losing that key
+    // makes every stored secret permanently unreadable. Non-fatal: a failed
+    // snapshot is reported, not a reason to block the upgrade.
+    const { createPreUpdateSnapshot } = await import('./services/updateSnapshot.js');
+    const snapshot = createPreUpdateSnapshot(cwd, { from: VERSION, sha: previousSha });
+
     execFileSync('git', ['-c', 'credential.helper=', 'fetch', 'origin'], gitOpts);
     const pullOutput = execFileSync('git', ['reset', '--hard', 'origin/main'], gitOpts).toString().trim();
 
@@ -567,10 +575,13 @@ app.post('/api/self-update', requireAuth, requirePlatformAdmin, async (req, res)
       target_version: targetVersion,
       started_at: new Date().toISOString(),
       pid: process.pid,
+      snapshot: snapshot.ok ? { id: snapshot.id, dir: snapshot.dir, files: snapshot.files } : null,
+      snapshot_error: snapshot.ok ? null : snapshot.error,
     }, null, 2));
 
     logAudit(req.user?.id, null, 'self-update-triggered', {
       from: VERSION, to: targetVersion, git: pullOutput,
+      snapshot: snapshot.ok ? snapshot.id : `FAILED: ${snapshot.error}`,
     });
     log.info(`Self-update: ${VERSION} → ${targetVersion} (pulled ${pullOutput})`);
 
@@ -578,6 +589,11 @@ app.post('/api/self-update', requireAuth, requirePlatformAdmin, async (req, res)
       message: 'Update pulled. Restarting...',
       git: pullOutput,
       version: targetVersion,
+      // Report the restore point honestly — including when there ISN'T one, so
+      // an operator is never left assuming a snapshot exists that doesn't.
+      snapshot: snapshot.ok
+        ? { id: snapshot.id, files: snapshot.files, bytes: snapshot.bytes }
+        : { error: snapshot.error, warning: 'Upgrade proceeded WITHOUT a data restore point.' },
     });
 
     // Exit and let systemd Restart=always re-exec us.

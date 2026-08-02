@@ -691,6 +691,15 @@ router.get('/app-updates/:slug', (req, res) => {
   const app = db.prepare('SELECT id, name FROM apps WHERE slug = ?').get(req.params.slug);
   if (!app) throw new AppError('App not found', 404, 'NOT_FOUND');
 
+  // v2.27.0 SECURITY: a valid session proves WHO, not WHAT they may see.
+  // Confirm this user is actually on this app before returning its update
+  // history. Admins/platform admins see every app by design.
+  const viewer = db.prepare('SELECT role FROM users WHERE id = ?').get(session.user_id);
+  if (viewer?.role !== 'admin' && viewer?.role !== 'platform_admin') {
+    const access = db.prepare('SELECT 1 FROM app_users WHERE app_id = ? AND user_id = ?').get(app.id, session.user_id);
+    if (!access) throw new AppError('Access denied', 403, 'FORBIDDEN');
+  }
+
   const lastVisit = db.prepare(
     'SELECT last_visit_at FROM app_last_visit WHERE user_id = ? AND app_id = ?'
   ).get(session.user_id, app.id);

@@ -112,6 +112,13 @@ router.get('/:slug/session', (req, res) => {
 // ── GET /api/coder/:slug/session/:id — get specific session ──────────────
 
 router.get('/:slug/session/:id', (req, res) => {
+  // v2.27.0 SECURITY: getSession only proves the session belongs to this slug —
+  // it says nothing about whether the CALLER may see that app. Without this
+  // getApp() call (which every sibling route makes) any authenticated user
+  // could read another app's coder transcript, i.e. its source-code
+  // conversation. Cross-tenant reads on :slug routes are the exact bug class
+  // behind the 2026 self-hosted-PaaS disclosure wave.
+  getApp(req.params.slug, req.user);
   const session = getSession(req.params.id, req.params.slug);
   const db = getDb();
   const messages = db.prepare(

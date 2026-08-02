@@ -283,7 +283,20 @@ router.get('/jobs', (req, res) => {
 // GET /api/ask/active/:appSlug — is any coder container live for this app?
 // Returns true when an Ask session container OR an AppStudio coding job is running.
 router.get('/active/:appSlug', (req, res) => {
+  // v2.27.0 SECURITY: this had no authentication at all, so an anonymous
+  // caller could probe whether an app slug exists and whether work is running
+  // on it. Require a user, then confirm they may see this app — matching the
+  // POST /:appSlug handler above.
+  const user = resolveUser(req);
+  if (!user) throw new AppError('Authentication required', 401, 'UNAUTHORIZED');
   const slug = req.params.appSlug;
+  const db0 = getDb();
+  const appRow = db0.prepare('SELECT id FROM apps WHERE slug = ?').get(slug);
+  if (!appRow) throw new AppError('App not found', 404, 'NOT_FOUND');
+  if (user.role !== 'admin' && user.role !== 'platform_admin') {
+    const access = db0.prepare('SELECT 1 FROM app_users WHERE app_id = ? AND user_id = ?').get(appRow.id, user.userId);
+    if (!access) throw new AppError('Access denied', 403, 'FORBIDDEN');
+  }
   const askActive = hasActiveContainer(slug);
   if (askActive) return res.json({ active: true });
 
