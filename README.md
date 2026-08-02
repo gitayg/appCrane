@@ -231,6 +231,31 @@ Ubuntu Server
 - **SCIM deprovisioning** — removing a user from your IdP revokes AppCrane access automatically
 - **All actions audited** — who did what, when
 
+### Supply chain — SBOM + build provenance
+
+A deployment self-updates straight from git (`/api/self-update` runs `git fetch`
++ `git reset --hard origin/main`), so the question a reviewer asks is "how do I
+know the source I pulled is the source you published?" Every tagged release
+answers it with four attached artifacts:
+
+| Artifact | What it is |
+|---|---|
+| `appcrane-<tag>-source.tar.gz` | Reproducible `git archive` of the tagged tree (tracked files only) |
+| `appcrane-sbom.cdx.json` | CycloneDX SBOM of the **production** dependency tree |
+| `appcrane-sbom.spdx.json` | Same, SPDX format |
+| `SHA256SUMS.txt` | Checksums for all of the above |
+
+The source archive carries **build provenance and an SBOM attestation** signed
+via sigstore keyless (GitHub artifact attestations) — no long-lived signing key
+exists to be stolen. Verify a downloaded archive with:
+
+```bash
+gh attestation verify appcrane-<tag>-source.tar.gz --repo gitayg/appCrane
+```
+
+Dev dependencies are deliberately excluded from the SBOM — they aren't shipped
+to a deployment, and including them would overstate the real attack surface.
+
 ## Identity contract for deployed apps
 
 Apps deployed on AppCrane never need to implement their own auth. The Caddy proxy verifies every request against `/api/identity/verify` *before* forwarding it to the container, and the result is delivered to the app in three complementary ways. Apps should consume them in this **precedence order**:

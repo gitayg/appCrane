@@ -1,0 +1,130 @@
+name: Release SBOM + provenance
+
+# Supply-chain artifacts for a tagged release (v2.26.0+).
+#
+# AppCrane is distributed from source — a deployment self-updates with
+# `git fetch` + `git reset --hard origin/main` (see /api/self-update). There is
+# no compiled binary to sign, so the reviewable artifacts are:
+#   1. an SBOM of the production dependency tree (CycloneDX + SPDX), and
+#   2. a signed source archive with build provenance, so anyone can verify a
+#      given tarball really came from this repo, at this commit, via this
+#      workflow — the check enterprise reviewers ask for when they see a
+#      `reset --hard` update path.
+#
+# Both are attached to the GitHub release. Provenance uses GitHub artifact
+# attestations (sigstore keyless — no long-lived signing key to leak, which
+# matters: a stolen signing key is worse than no signing at all).
+#
+# EU CRA Art. 14 reporting obligations start 2026-09-11; a machine-readable
+# SBOM covering at least top-level dependencies is the concrete ask there.
+# Formats: CycloneDX >= 1.6 and SPDX >= 3.0 are what BSI TR-03183-2 names.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Tag or SHA to build artifacts for
+        required: true
+
+permissions:
+  contents: write       # upload release assets
+  id-token: write       # sigstore keyless signing
+  attestations: write   # GitHub artifact attestations
+
+jobs:
+  supply-chain:
+    name: SBOM + provenance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # Production tree only — dev dependencies aren't shipped to a deployment,
+      # so including them would overstate the actual attack surface.
+      - name: Install production dependencies
+        run: npm ci --omit=dev
+
+      - name: Generate CycloneDX SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: cyclonedx-json
+          output-file: appcrane-sbom.cdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: spdx-json
+          output-file: appcrane-sbom.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      # The unit a self-updating deployment actually consumes is the source
+      # tree at a commit. git archive gives a reproducible tarball of exactly
+      # that (tracked files only — no node_modules, no local cruft).
+      # SECURITY: the ref reaches the shell through `env:`, never inlined as
+      # ${{ }} into `run:` — an expression is substituted before the shell
+      # parses the line, so an inlined ref containing shell metacharacters
+      # would execute. Same class of bug as the injection gate in CI.
+      # It is also validated against a strict charset before use.
+      - name: Create source archive
+        id: archive
+        env:
+          REF: ${{ github.event.inputs.ref || github.ref_name }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$REF" | grep -Eq '^[A-Za-z0-9._/-]{1,100}$'; then
+            echo "Refusing unsafe ref: $REF" >&2
+            exit 1
+          fi
+          NAME="appcrane-${REF//\//-}-source.tar.gz"
+          git archive --format=tar.gz --prefix="appcrane-${REF//\//-}/" -o "$NAME" HEAD
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          sha256sum "$NAME" appcrane-sbom.cdx.json appcrane-sbom.spdx.json > SHA256SUMS.txt
+
+      - name: Attest build provenance (source archive)
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ steps.archive.outputs.name }}
+
+      - name: Attest SBOM
+        uses: actions/attest-sbom@v2
+        with:
+          subject-path: ${{ steps.archive.outputs.name }}
+          sbom-path: appcrane-sbom.cdx.json
+
+      - name: Attach artifacts to the release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          ARCHIVE: ${{ steps.archive.outputs.name }}
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" \
+            "$ARCHIVE" \
+            appcrane-sbom.cdx.json \
+            appcrane-sbom.spdx.json \
+            SHA256SUMS.txt \
+            --clobber
+
+      # Keep the artifacts reachable for workflow_dispatch runs too, where
+      # there is no release to attach them to.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: supply-chain-artifacts
+          path: |
+            ${{ steps.archive.outputs.name }}
+            appcrane-sbom.cdx.json
+            appcrane-sbom.spdx.json
+            SHA256SUMS.txt
