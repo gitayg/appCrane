@@ -5,6 +5,14 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.28.0 — Agent action audit trail, and a plaintext-secret leak in the audit log.
+
+**Secrets were being written to `audit_log` in plaintext.** `auditMcpCall` stringified MCP arguments verbatim, so `appcrane_set_secret({value})`, `appcrane_create_app({github_token})` and `appcrane_set_app_meta({github_token})` stored the credential in the clear — quietly undoing the AES-256-GCM encryption those same values get everywhere else, and making the audit log the softest place on the box to steal a credential from. New `redactAuditArgs()` masks by key *name* (`…_token`, `…secret`, `password`, `value`, `credential`, `old_key`, …), records size rather than bytes so "rotated" stays distinguishable from "cleared", masks nested/array-nested values, and truncates oversized strings so a file push can't write megabytes per call into SQLite. The REST audit middleware now uses it too, replacing a hand-maintained `delete` list whose own comment warned it "MUST include any future secret-bearing keys" — a rule that fails silently and permanently the first time someone forgets.
+
+**Agent vs human attribution.** `audit_log.actor_kind` (migration 070, backfilled from `users.kind`, denormalized so the trail stays true if a user is later deleted or reclassified) records whether an action came from an AI agent or a person. `GET /api/audit?actor=agent|human` filters on it and the response carries an actor breakdown. With most platform work now arriving over MCP, "what did the agents do here" was previously unanswerable — it's the question auditors and incident responders ask, GitHub's audit log added the same distinction as `actor_is_agent`, and OWASP's Agentic Top 10 (ASI05) asks for every agent-executed command to be attributable.
+
+Covered by `test/audit-redact.test.js` and `test/audit-actor.test.js` (23/23 suite green).
+
 ## 2.27.0 — Upgrade safety + a per-app authorization gate, and the three real access-control bugs the gate found.
 
 **Pre-update data snapshots.** `/api/self-update` already rolled CODE back when a new version wouldn't boot (`previous_sha`), but that does nothing for DATA — the canonical failure in this category is an update that damages persistent state (Coolify's update path once clobbered the key that made every encrypted value readable). AppCrane now snapshots the SQLite database (`VACUUM INTO`, a consistent point-in-time copy of the live DB) and `.env` (which holds `ENCRYPTION_KEY`) into `DATA_DIR/update-snapshots/<ts>/` immediately before `git reset --hard`. Last 5 retained. The API response reports the restore point — and says so explicitly when a snapshot could NOT be taken, so an operator is never left assuming one exists. Restore stays deliberately manual. Covered by `test/update-snapshot.test.js`.
