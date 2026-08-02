@@ -17,6 +17,12 @@ router.get('/audit', requireAdmin, (req, res) => {
   const offset = parseInt(url.searchParams.get('offset')) || 0;
   const appSlug = url.searchParams.get('app');
   const action = url.searchParams.get('action');
+  // v2.28.0: filter by who acted — 'agent' or 'human'. This is the question
+  // auditors and incident responders actually ask once most platform work
+  // arrives over MCP ("what did the agents do?"), and it was previously
+  // unanswerable because only user_id was recorded.
+  const actorRaw = url.searchParams.get('actor');
+  const actor = ['agent', 'human'].includes(actorRaw) ? actorRaw : null;
 
   let sql = `
     SELECT al.*, u.name as user_name, a.slug as app_slug, a.name as app_name
@@ -36,6 +42,12 @@ router.get('/audit', requireAdmin, (req, res) => {
     conditions.push('al.action LIKE ?');
     params.push(`%${action}%`);
   }
+  if (actor) {
+    // Fall back to the user's current kind for rows written before 070 that
+    // the backfill couldn't reach (deleted users stay NULL = unattributed).
+    conditions.push("COALESCE(al.actor_kind, u.kind) = ?");
+    params.push(actor);
+  }
 
   if (conditions.length) sql += ' WHERE ' + conditions.join(' AND ');
   sql += ' ORDER BY al.created_at DESC LIMIT ? OFFSET ?';
@@ -44,7 +56,15 @@ router.get('/audit', requireAdmin, (req, res) => {
   const entries = db.prepare(sql).all(...params);
   const total = db.prepare('SELECT COUNT(*) as count FROM audit_log').get().count;
 
-  res.json({ entries, total, limit, offset });
+  // Actor breakdown so the UI can show "N agent actions / M human" without a
+  // second round-trip.
+  const byActor = db.prepare(`
+    SELECT COALESCE(al.actor_kind, u.kind, 'unknown') AS actor, COUNT(*) AS n
+    FROM audit_log al LEFT JOIN users u ON al.user_id = u.id
+    GROUP BY actor
+  `).all();
+
+  res.json({ entries, total, limit, offset, actor, by_actor: byActor });
 });
 
 /**

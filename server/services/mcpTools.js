@@ -5,6 +5,7 @@ import { userHasAppPermission, userHasPlatformPermission, roleForUserOnApp } fro
 import { isAdmin } from '../utils/roles.js';
 import log from '../utils/logger.js';
 import { validateBypassPaths } from '../utils/authBypassPaths.js';
+import { redactAuditArgs } from '../utils/auditRedact.js';
 import { resolveVisibility } from '../utils/appVisibility.js';
 import { mkdirSync } from 'fs';
 import { join } from 'path';
@@ -152,15 +153,24 @@ function auditMcpCall(user, toolName, args, error) {
     const appId = slug
       ? db.prepare('SELECT id FROM apps WHERE slug = ?').get(slug)?.id ?? null
       : null;
+    // v2.28.0 SECURITY: redact credential-bearing arguments. This used to
+    // stringify `args` verbatim, which wrote set_secret's `value` and
+    // create_app's `github_token` into audit_log in PLAINTEXT — defeating the
+    // AES-256-GCM encryption those same values get everywhere else, and making
+    // the audit log the easiest place on the box to steal a credential.
+    // Also truncates large strings so a file push can't write megabytes/call.
     const detail = JSON.stringify({
       tool: toolName,
-      args: args || {},
+      args: redactAuditArgs(args || {}),
       ok: !error,
       error: error ? String(error.message || error) : null,
     });
+    // v2.28.0: attribute the actor. `kind` is 'agent' for MCP/agent identities
+    // and 'human' otherwise; denormalized onto the row so the trail stays
+    // truthful even if the user is later deleted or reclassified.
     db.prepare(
-      'INSERT INTO audit_log (user_id, app_id, action, detail) VALUES (?, ?, ?, ?)'
-    ).run(user.id, appId, `mcp.${toolName}`, detail);
+      'INSERT INTO audit_log (user_id, app_id, action, detail, actor_kind) VALUES (?, ?, ?, ?, ?)'
+    ).run(user.id, appId, `mcp.${toolName}`, detail, user.kind || 'agent');
   } catch (e) {
     log.warn(`MCP audit log failed: ${e.message}`);
     // Compliance/regulated installs can flip this to fail-closed: any audit

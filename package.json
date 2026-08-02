@@ -1,6 +1,6 @@
 {
   "name": "appcrane",
-  "version": "2.27.0",
+  "version": "2.28.0",
   "description": "AppCrane - Self-service app hosting and deployment.",
   "license": "AGPL-3.0-only",
   "private": true,
