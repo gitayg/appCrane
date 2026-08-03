@@ -83,9 +83,17 @@ function prune() {
  * @param {object} meta {from, to, sha} recorded in the manifest
  * @returns {{ok:boolean, id?:string, dir?:string, files?:string[], bytes?:number, error?:string}}
  */
-export function createPreUpdateSnapshot(cwd, meta = {}) {
+export function createPreUpdateSnapshot(cwd, meta = {}, dbHandle = null) {
   try {
-    const id = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
+    // Ids are second-resolution, and two snapshots can genuinely land in the
+    // same second — a pre-migration snapshot at boot followed by a pre-update
+    // one, or a tight retry. Without a uniquifier they share a directory, and
+    // because `VACUUM INTO` refuses to overwrite an existing file the second
+    // snapshot would silently keep the FIRST one's database while still
+    // reporting success. Suffix until the directory is free.
+    const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
+    let id = stamp;
+    for (let n = 2; existsSync(join(snapshotRoot(), id)); n++) id = `${stamp}-${n}`;
     const dir = join(snapshotRoot(), id);
     // 0700: the contents are a whole database and the ENCRYPTION_KEY. env.backup
     // is chmod 0600 below, but a 0755 directory still lets any local account
@@ -101,11 +109,16 @@ export function createPreUpdateSnapshot(cwd, meta = {}) {
     // Database: VACUUM INTO produces a consistent copy of a LIVE database
     // (a plain file copy can catch a torn write mid-transaction). Requires
     // SQLite >= 3.27, which better-sqlite3 has shipped for years.
+    // dbHandle lets a caller that is still mid-initialisation (db.js, snapshotting
+    // before it applies migrations) pass its own live handle instead of going
+    // through the module singleton, which isn't published yet at that point.
     const dbCopy = join(dir, 'deployhub.db');
+    let dbError = null;
     try {
-      getDb().prepare('VACUUM INTO ?').run(dbCopy);
+      (dbHandle || getDb()).prepare('VACUUM INTO ?').run(dbCopy);
       files.push('deployhub.db');
     } catch (e) {
+      dbError = e.message;
       log.error(`[snapshot] database copy failed: ${e.message}`);
     }
 
@@ -122,9 +135,13 @@ export function createPreUpdateSnapshot(cwd, meta = {}) {
 
     const manifest = {
       created_at: new Date().toISOString(),
+      // 'pre-update' (taken by /api/self-update before the pull) or
+      // 'pre-migration' (taken at boot before schema changes are applied).
+      reason: meta.reason ?? 'pre-update',
       from_version: meta.from ?? null,
       to_version: meta.to ?? null,
       previous_sha: meta.sha ?? null,
+      pending_migrations: meta.pending ?? null,
       files,
       note: 'Pre-update snapshot. Restore is manual and deliberate — stop the service, copy these back, then start it.',
     };
@@ -134,7 +151,18 @@ export function createPreUpdateSnapshot(cwd, meta = {}) {
     for (const f of readdirSync(dir)) bytes += statSync(join(dir, f)).size;
 
     prune();
-    log.info(`[snapshot] pre-update snapshot ${id} (${files.join(', ')}, ${Math.round(bytes / 1024)} KB)`);
+
+    // A snapshot without the database is not a restore point. Reporting ok
+    // here would tell an operator they can roll back when they can't — the
+    // exact "the jobs run but the evidence doesn't" failure this feature
+    // exists to avoid. The .env copy is still kept; it's the harder half to
+    // reconstruct.
+    if (dbError) {
+      log.error(`[snapshot] ${id} has NO database copy — not a usable restore point`);
+      return { ok: false, id, dir, files, bytes, error: `database copy failed: ${dbError}` };
+    }
+
+    log.info(`[snapshot] ${meta.reason ?? 'pre-update'} snapshot ${id} (${files.join(', ')}, ${Math.round(bytes / 1024)} KB)`);
     return { ok: true, id, dir, files, bytes };
   } catch (e) {
     log.error(`[snapshot] pre-update snapshot FAILED: ${e.message}`);
