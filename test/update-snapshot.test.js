@@ -54,14 +54,26 @@ test('snapshot DB is valid, readable, and a point-in-time copy', () => {
   copy.close();
 });
 
-test('a snapshot failure never throws (upgrades must not be blocked)', () => {
-  // An unwritable target is the realistic failure (disk full, permissions).
+test('a snapshot failure never throws (upgrades must not be blocked)', (t) => {
+  // Simulate an uncreatable target by rooting DATA_DIR *inside a regular file*,
+  // so mkdir fails ENOTDIR immediately, on every OS, and regardless of whether
+  // the process runs as root.
+  //
+  // This used to point at `/proc/nonexistent-cannot-create`. That path does not
+  // exist on macOS, so it failed fast locally — but on Linux `mkdirSync(...,
+  // {recursive:true})` under /proc HANGS FOREVER, which is what wedged CI at
+  // the 6-hour ceiling with every assertion passing. Never simulate "can't
+  // write here" with a kernel-virtual filesystem.
+  const blocker = join(mkdtempSync(join(tmpdir(), 'crane-blocked-')), 'a-file');
+  writeFileSync(blocker, 'not a directory');
+
   const prev = process.env.DATA_DIR;
-  process.env.DATA_DIR = '/proc/nonexistent-cannot-create';
+  t.after(() => { process.env.DATA_DIR = prev; });   // restored even if we throw
+  process.env.DATA_DIR = join(blocker, 'nested');
+
   const s = createPreUpdateSnapshot(cwd, { from: 'x' });
   assert.equal(s.ok, false);
   assert.ok(s.error, 'reports why, so the caller can warn "no restore point"');
-  process.env.DATA_DIR = prev;
 });
 
 test('retention keeps only the most recent snapshots', { timeout: 30000 }, async () => {
