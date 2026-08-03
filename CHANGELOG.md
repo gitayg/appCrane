@@ -5,6 +5,13 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.29.2 — Two supply-chain / injection hardenings found by a squash security review.
+
+- **All 14 GitHub Action references pinned to full commit SHAs** (tag kept as a trailing comment so upgrades stay reviewable). Mutable tags were the #1 supply-chain primitive of 2025–26: `tj-actions/changed-files` had every tag v1–v45 retargeted to a malicious commit, and the `trivy-action` compromise force-pushed 76 of 77 tags. Tag repointing is invisible in a diff and, for free-tier orgs, isn't even in the audit log. This was an awkward gap next to v2.26.0's SBOM + provenance work — attesting our own artifacts while trusting eight movable third-party refs.
+- **`preflightCheck.js` no longer interpolates a path into a shell string.** `test -e "${absPath}"` became `sh -c 'test -e "$1"' sh <path>` — the script is constant and the path arrives as a positional parameter. It was not exploitable: `preflightEntryCheck` rejects `[;&|<>$\`]` and the whitespace split blocks newlines, so only `"` could get through and that merely adds an argument to `test`. But the safety lived in a denylist two functions upstream rather than at the call site, which stops holding the moment that regex is relaxed or another caller reaches the helper directly — and unescaped input in a shell string is the single bug class behind most 2026 self-hosted-PaaS RCEs.
+
+Review coverage, for the record: squash `security_domains`, plus taint analysis for `command-exec`, `ssrf-net` and `execFileSync` (no flows), plus manual triage of all 16 shell/exec call sites. Everything else was already sound — `shellQuote()` is the canonical POSIX escape, agent session ids are regex-validated before reaching a shell, `dockerfileGen` uses `JSON.stringify`, and git invocations pass argv arrays rather than shell strings.
+
 ## 2.29.1 — Self-review of 2.26–2.29 with fresh eyes; seven fixes, all in code shipped this session.
 
 - **Self-update reported failure on a successful upgrade.** The `logAudit` call in `/api/self-update` sat unguarded *after* `git reset --hard` and `npm install`. A throw there jumped to the catch, answered `500 UPDATE_FAILED`, and skipped the process exit — leaving new code on disk, old code in memory, no restart, and an operator told the upgrade failed when it had actually applied. Now wrapped: an audit write is never worth inverting the outcome of a completed upgrade.

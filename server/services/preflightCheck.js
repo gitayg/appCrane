@@ -58,9 +58,18 @@ export async function preflightEntryCheck({ image, entry }) {
 
 function imageFileExists(image, absPath) {
   try {
+    // The script passed to `sh -c` is a CONSTANT; the path arrives as a
+    // positional parameter ($1) and is never parsed as code. It used to be
+    // interpolated (`test -e "${absPath}"`), which was safe only because
+    // preflightEntryCheck rejects [;&|<>$`] two functions upstream — safety
+    // living in a denylist far from the call site, which stops holding the
+    // moment that regex is relaxed or another caller reaches this directly.
+    // Unescaped user input in a shell string is the single bug class behind
+    // most of the 2026 self-hosted-PaaS RCEs; don't leave the pattern lying
+    // around just because the current inputs happen to be filtered.
     execFileSync(
       'docker',
-      ['run', '--rm', '--entrypoint', 'sh', image, '-c', `test -e "${absPath}"`],
+      ['run', '--rm', '--entrypoint', 'sh', image, '-c', 'test -e "$1"', 'sh', absPath],
       { stdio: 'pipe', timeout: 15000 },
     );
     return true;
