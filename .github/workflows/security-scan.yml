@@ -37,8 +37,41 @@ jobs:
       # critical advisories across comparable self-hosted PaaS products in 2026,
       # so ERROR-severity findings now fail the build. Warnings stay advisory
       # and remain visible in the Security tab.
+      # Gates on the SARIF the step above already produced, rather than running
+      # a second scan. `semgrep ci` has no --severity flag (that's `semgrep
+      # scan`), so the previous form died on argument parsing every run — a
+      # gate that could never gate, which is worse than no gate because the
+      # red X looks like a finding. Reading the SARIF also halves the job time
+      # and guarantees the gate judges exactly what got uploaded to the
+      # Security tab.
       - name: Gate on ERROR-severity findings
-        run: semgrep ci --config=auto --severity=ERROR
+        run: |
+          python3 - <<'PY'
+          import json, sys, os
+
+          if not os.path.exists('semgrep.sarif'):
+              print('::error::semgrep.sarif missing — the scan did not complete, so nothing was verified')
+              sys.exit(1)
+
+          with open('semgrep.sarif') as f:
+              sarif = json.load(f)
+
+          errors = [r for run in sarif.get('runs', [])
+                      for r in run.get('results', [])
+                      if r.get('level') == 'error']
+
+          for r in errors:
+              loc = (r.get('locations') or [{}])[0].get('physicalLocation', {})
+              uri = loc.get('artifactLocation', {}).get('uri', '?')
+              line = loc.get('region', {}).get('startLine', 1)
+              msg = r.get('message', {}).get('text', '').replace('\n', ' ')[:300]
+              print(f'::error file={uri},line={line}::{r.get("ruleId","?")}: {msg}')
+
+          total = sum(len(run.get('results', [])) for run in sarif.get('runs', []))
+          print(f'{len(errors)} ERROR-severity finding(s) out of {total} total.')
+          print('Warnings stay advisory and are visible in the Security tab.')
+          sys.exit(1 if errors else 0)
+          PY
 
   osv-scanner:
     name: OSV-Scanner (Dependencies)

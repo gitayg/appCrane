@@ -8,6 +8,11 @@ on:
 jobs:
   role-and-shadow-check:
     runs-on: ubuntu-latest
+    # The suite runs in ~10s. A hung test otherwise sits until GitHub's 6-hour
+    # ceiling — which is how a leaked keep-alive socket in the MCP test quietly
+    # burned two full runs before anyone noticed the workflow was never
+    # finishing rather than never starting.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 

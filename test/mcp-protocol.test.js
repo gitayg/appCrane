@@ -34,7 +34,17 @@ const server = await new Promise((resolve) => {
   const s = app.listen(0, () => resolve(s));
 });
 const BASE = `http://127.0.0.1:${server.address().port}`;
-after(() => server.close());
+// `fetch` (undici) pools keep-alive sockets, and `server.close()` only stops
+// NEW connections — it waits for live ones to drain. Those sockets sit idle
+// rather than closing, so the listener never releases and node --test hangs
+// with every test already passed. It happened to drain locally and did not on
+// CI, where the run was killed at the 6-hour limit. Drop the sockets
+// explicitly, and unref so a straggler can't hold the loop open either.
+after(() => {
+  server.closeAllConnections?.();
+  server.unref();
+  server.close();
+});
 
 async function rpc(method, params, headers = {}) {
   const res = await fetch(`${BASE}/api/mcp`, {
