@@ -5,6 +5,16 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.30.0 — Snapshots now protect the upgrade that delivers them.
+
+v2.27.0 snapshotted the database and `.env` inside `/api/self-update` — but that handler runs the code **already running**, so a box on an older build pulls the new one without ever executing the new snapshot logic. The first upgrade onto a build with the feature was precisely the one it couldn't protect, which is the upgrade most worth protecting.
+
+The fix follows from where the risk actually is. `git reset --hard` doesn't touch your data at all: `data/` and `.env` are gitignored, so the pull leaves them alone. What mutates the database is the **migrations applied on first boot of the new code** — and that is new code. So `initDb()` now snapshots before applying migrations. That covers the delivering upgrade, and also covers paths that skip `/api/self-update` entirely: a manual `git pull`, a container rebuild, a restore onto a newer build. Gated on migrations actually being pending, so ordinary restarts don't accumulate snapshots; the manifest records `reason` (`pre-migration` / `pre-update`) and which migrations were pending.
+
+Two bugs found while testing it, both in v2.27.0 code:
+- **Snapshot ids are second-resolution**, so two snapshots in the same second shared a directory — and since `VACUUM INTO` refuses to overwrite, the second silently kept the *first* one's database. Ids are now uniquified.
+- **A snapshot whose database copy failed still reported `ok: true`**, telling an operator they had a restore point that contained no database. It now reports `ok: false` with the reason. A snapshot that isn't a restore point must not claim to be one.
+
 ## 2.29.2 — Two supply-chain / injection hardenings found by a squash security review.
 
 - **All 14 GitHub Action references pinned to full commit SHAs** (tag kept as a trailing comment so upgrades stay reviewable). Mutable tags were the #1 supply-chain primitive of 2025–26: `tj-actions/changed-files` had every tag v1–v45 retargeted to a malicious commit, and the `trivy-action` compromise force-pushed 76 of 77 tags. Tag repointing is invisible in a diff and, for free-tier orgs, isn't even in the audit log. This was an awkward gap next to v2.26.0's SBOM + provenance work — attesting our own artifacts while trusting eight movable third-party refs.
