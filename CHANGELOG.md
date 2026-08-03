@@ -5,6 +5,16 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.30.2 — The real cause of the six-hour CI hang: a test, not the product.
+
+2.30.1 fixed a genuine socket leak in the MCP test, but the hang survived it. `--test-timeout` (added in the same release) then named the culprit: `update-snapshot.test.js`, timing out with **every assertion passing**.
+
+The test simulated "snapshot target can't be created" by pointing `DATA_DIR` at `/proc/nonexistent-cannot-create`. That path doesn't exist on macOS, so it failed fast locally — but on Linux, `mkdirSync(..., { recursive: true })` beneath `/proc` **never returns**. Reproduced in a `node:22` container and isolated to that one call: `existsSync` returned in 0 ms, the loop around it exited in 0 iterations, and `mkdirSync` had to be killed. The product code was never involved.
+
+The unwritable target is now a path rooted *inside a regular file*, which fails `ENOTDIR` immediately on every OS and regardless of whether the process runs as root, and `DATA_DIR` is restored via `t.after()` so a failing assertion can't leak it into the next test. Verified 34/34 on Linux in 6.8 s — the same environment that previously hung for six hours — and unchanged on macOS.
+
+Lesson worth keeping: never simulate "this path can't be written" with a kernel-virtual filesystem.
+
 ## 2.30.1 — CI was broken by the gates added in 2.27.0; both are fixed.
 
 Neither failure was a real finding — both were defects in the checks themselves, which is the worse kind: a red X that looks like a vulnerability, and a gate that could never gate.
