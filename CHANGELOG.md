@@ -5,6 +5,14 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.30.1 — CI was broken by the gates added in 2.27.0; both are fixed.
+
+Neither failure was a real finding — both were defects in the checks themselves, which is the worse kind: a red X that looks like a vulnerability, and a gate that could never gate.
+
+- **Semgrep gate never ran a scan.** It invoked `semgrep ci --severity=ERROR`, but `--severity` belongs to `semgrep scan`, not `semgrep ci` — so every run since 2.27.0 died on argument parsing with exit 2. The gate now parses the SARIF the preceding step already produces: deterministic, no second scan (halving the job), and it judges exactly what gets uploaded to the Security tab. Verified locally against warnings-only (passes), one ERROR (fails, with a file/line annotation) and a missing SARIF (fails — no scan means nothing was verified).
+- **`npm test` hung in CI until GitHub's 6-hour ceiling.** `fetch` (undici) pools keep-alive sockets and `server.close()` only stops *new* connections, so the MCP protocol test's listener never released — every test passing, the process never exiting. It drained locally and didn't on CI. Sockets are now dropped explicitly and the server unref'd.
+- Defence in depth for both: `timeout-minutes: 10` on the watchdog job and `--test-timeout=120000` on the suite, so a future hang fails in minutes rather than silently consuming a six-hour run.
+
 ## 2.30.0 — Snapshots now protect the upgrade that delivers them.
 
 v2.27.0 snapshotted the database and `.env` inside `/api/self-update` — but that handler runs the code **already running**, so a box on an older build pulls the new one without ever executing the new snapshot logic. The first upgrade onto a build with the feature was precisely the one it couldn't protect, which is the upgrade most worth protecting.
