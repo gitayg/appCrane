@@ -49,12 +49,24 @@ router.get('/audit', requireAdmin, (req, res) => {
     params.push(actor);
   }
 
-  if (conditions.length) sql += ' WHERE ' + conditions.join(' AND ');
-  sql += ' ORDER BY al.created_at DESC LIMIT ? OFFSET ?';
+  const where = conditions.length ? ' WHERE ' + conditions.join(' AND ') : '';
+
+  // `total` MUST carry the same filters as `entries` — it drives client
+  // pagination, so counting the whole table while showing a filtered page
+  // offers pages that don't exist. Built before limit/offset are appended to
+  // `params` so the count binds only the filter values.
+  const total = db.prepare(`
+    SELECT COUNT(*) as count
+    FROM audit_log al
+    LEFT JOIN users u ON al.user_id = u.id
+    LEFT JOIN apps a ON al.app_id = a.id
+    ${where}
+  `).get(...params).count;
+
+  sql += where + ' ORDER BY al.created_at DESC LIMIT ? OFFSET ?';
   params.push(limit, offset);
 
   const entries = db.prepare(sql).all(...params);
-  const total = db.prepare('SELECT COUNT(*) as count FROM audit_log').get().count;
 
   // Actor breakdown so the UI can show "N agent actions / M human" without a
   // second round-trip.
