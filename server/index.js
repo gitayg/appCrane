@@ -579,10 +579,19 @@ app.post('/api/self-update', requireAuth, requirePlatformAdmin, async (req, res)
       snapshot_error: snapshot.ok ? null : snapshot.error,
     }, null, 2));
 
-    logAudit(req.user?.id, null, 'self-update-triggered', {
-      from: VERSION, to: targetVersion, git: pullOutput,
-      snapshot: snapshot.ok ? snapshot.id : `FAILED: ${snapshot.error}`,
-    });
+    // v2.29.1: past this point the update has ALREADY been applied (git reset +
+    // npm install are done). An unguarded throw here would jump to the catch,
+    // answer 500 UPDATE_FAILED, and — worse — skip the exit below, leaving new
+    // code on disk, old code in memory, and no restart. An audit write is never
+    // worth inverting the outcome of a completed upgrade, so log and continue.
+    try {
+      logAudit(req.user?.id, null, 'self-update-triggered', {
+        from: VERSION, to: targetVersion, git: pullOutput,
+        snapshot: snapshot.ok ? snapshot.id : `FAILED: ${snapshot.error}`,
+      });
+    } catch (e) {
+      log.error(`Self-update: audit write failed (update still applied): ${e.message}`);
+    }
     log.info(`Self-update: ${VERSION} → ${targetVersion} (pulled ${pullOutput})`);
 
     res.json({

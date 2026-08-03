@@ -21,14 +21,27 @@
  */
 
 import { existsSync, mkdirSync, copyFileSync, writeFileSync, readFileSync, readdirSync, rmSync, statSync, chmodSync } from 'fs';
-import { join, resolve } from 'path';
+import { join, resolve, dirname } from 'path';
+import { fileURLToPath } from 'url';
 import { getDb } from '../db.js';
 import log from '../utils/logger.js';
 
 const KEEP = 5; // retain the last N snapshots; older ones are pruned
 
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+/**
+ * MUST resolve to the same directory as `selfUpdateDataDir()` in index.js —
+ * that function writes the pending-update file that points an operator at the
+ * snapshot they are about to need. A cwd-relative fallback here would drift
+ * apart from index.js's module-relative one whenever DATA_DIR is unset and the
+ * process wasn't started from the repo root, and the split would stay invisible
+ * until a restore was attempted and the snapshot wasn't where the pending file
+ * said it was. This file sits at server/services/, so the repo-root `data` dir
+ * is two levels up.
+ */
 export function dataDir() {
-  return resolve(process.env.DATA_DIR || join(process.cwd(), 'data'));
+  return resolve(process.env.DATA_DIR || join(__dirname, '..', '..', 'data'));
 }
 
 export function snapshotRoot() {
@@ -74,7 +87,15 @@ export function createPreUpdateSnapshot(cwd, meta = {}) {
   try {
     const id = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
     const dir = join(snapshotRoot(), id);
-    mkdirSync(dir, { recursive: true });
+    // 0700: the contents are a whole database and the ENCRYPTION_KEY. env.backup
+    // is chmod 0600 below, but a 0755 directory still lets any local account
+    // enumerate what restore points exist and when an upgrade happened. mkdir's
+    // mode is masked by umask, so the explicit chmod is the part that's load-
+    // bearing; both are best-effort, since no permission problem is worth
+    // losing the snapshot itself over.
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    try { chmodSync(snapshotRoot(), 0o700); } catch (_) {}
+    try { chmodSync(dir, 0o700); } catch (_) {}
     const files = [];
 
     // Database: VACUUM INTO produces a consistent copy of a LIVE database

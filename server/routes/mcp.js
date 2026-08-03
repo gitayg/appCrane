@@ -59,9 +59,13 @@ function negotiateProtocol(req, params) {
     req.get('MCP-Protocol-Version');
   if (asked && PROTOCOL_VERSIONS.includes(asked)) return asked;
   // A client asking for something newer than we know gets our newest, per the
-  // spec's negotiation rule (offer the closest supported).
+  // spec's negotiation rule (offer the closest supported). Revisions are ISO
+  // dates, so lexicographic comparison is chronological.
   if (asked && asked > LATEST_PROTOCOL) return LATEST_PROTOCOL;
-  return asked ? DEFAULT_LEGACY_PROTOCOL : DEFAULT_LEGACY_PROTOCOL;
+  // Absent, or a version we don't recognise: fall back to the legacy default,
+  // so a client that never states one keeps getting exactly what it got before
+  // negotiation existed.
+  return DEFAULT_LEGACY_PROTOCOL;
 }
 
 const SERVER_INSTRUCTIONS = `
@@ -139,9 +143,12 @@ router.post('/', requireAuth, async (req, res) => {
     return res.json({ jsonrpc: '2.0', id, error: { code: -32600, message: 'Invalid request — expected jsonrpc 2.0' } });
   }
 
-  // Tell the client which revision this response is written to. Harmless to
-  // clients that ignore it; required reading for 2026-07-28 ones.
-  res.set('MCP-Protocol-Version', negotiateProtocol(req, params));
+  // Negotiate once per request and reuse — the header and the handshake
+  // responses must agree, and re-deriving it per case invites them to drift.
+  // Harmless to clients that ignore the header; required reading for
+  // 2026-07-28 ones.
+  const protocolVersion = negotiateProtocol(req, params);
+  res.set('MCP-Protocol-Version', protocolVersion);
 
   // Mark this MCP request in-flight so a concurrent self-update waits for it
   // to finish before restarting. noteMcpEnd() runs in finally, even on early
@@ -155,7 +162,7 @@ router.post('/', requireAuth, async (req, res) => {
         // current revision, but answering it costs nothing and is the only
         // thing keeping existing agents connected.
         result = {
-          protocolVersion: negotiateProtocol(req, params),
+          protocolVersion,
           capabilities: SERVER_CAPABILITIES,
           serverInfo: SERVER_INFO,
           instructions: SERVER_INSTRUCTIONS,
@@ -166,7 +173,7 @@ router.post('/', requireAuth, async (req, res) => {
       // server is and can do, without establishing any session.
       case 'server/discover':
         result = {
-          protocolVersion: negotiateProtocol(req, params),
+          protocolVersion,
           capabilities: SERVER_CAPABILITIES,
           serverInfo: SERVER_INFO,
           instructions: SERVER_INSTRUCTIONS,
