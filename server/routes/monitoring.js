@@ -9,6 +9,68 @@ const router = Router();
 router.use(requireAuth);
 
 /**
+ * GET /api/dashboard/app-cpu (v2.31.0) — per-app CPU over the last 7 days,
+ * shaped exactly like /api/dashboard/app-activity so the dashboard can render
+ * it with the same chart.
+ *
+ * Sandbox and production are COMBINED: an app's cost to the box is what both
+ * of its containers burn together, and that is the number worth watching on a
+ * 2-core host where a saturated CPU starves Caddy and takes the site down.
+ *
+ * Aggregation is average-per-env-per-day, then summed across envs — i.e. "the
+ * average total CPU this app was using that day". Averaging the two envs
+ * together instead would halve an app whose sandbox is idle, which is exactly
+ * backwards for spotting a hog.
+ *
+ * Source is metrics_history, sampled every 5 minutes with 7-day retention
+ * (metricsSampler.js), so the window here matches what is actually retained.
+ */
+router.get('/dashboard/app-cpu', requireAdmin, (req, res) => {
+  const db = getDb();
+
+  const days = [];
+  for (let i = 6; i >= 0; i--) {
+    const d = new Date();
+    d.setDate(d.getDate() - i);
+    days.push(d.toISOString().slice(0, 10));
+  }
+
+  const rows = db.prepare(`
+    SELECT slug, name, day, SUM(env_avg) AS cpu
+    FROM (
+      SELECT a.slug              AS slug,
+             a.name              AS name,
+             date(m.recorded_at) AS day,
+             m.env               AS env,
+             AVG(m.cpu_percent)  AS env_avg
+      FROM metrics_history m
+      JOIN apps a ON a.id = m.app_id
+      WHERE m.recorded_at >= date('now', '-6 days')
+      GROUP BY a.id, day, m.env
+    )
+    GROUP BY slug, day
+  `).all();
+
+  const byApp = {};
+  for (const r of rows) {
+    if (!byApp[r.slug]) {
+      byApp[r.slug] = { slug: r.slug, name: r.name, counts: Object.fromEntries(days.map(d => [d, 0])) };
+    }
+    // One decimal: CPU percent is a float, and whole numbers would render
+    // every sub-1% app as a flat zero line.
+    byApp[r.slug].counts[r.day] = Math.round((r.cpu || 0) * 10) / 10;
+  }
+
+  const apps = Object.values(byApp)
+    .map(a => ({ slug: a.slug, name: a.name, counts: days.map(d => a.counts[d] ?? 0) }))
+    // Busiest first, so the legend colours track the lines that matter.
+    .filter(a => a.counts.some(v => v > 0))
+    .sort((x, y) => Math.max(...y.counts) - Math.max(...x.counts));
+
+  res.json({ days, apps });
+});
+
+/**
  * GET /api/credentials/health (v2.25.3) — platform integration credential
  * status for the dashboard banner. Reads the checker's persisted state
  * (settings.credcheck_state) and returns any currently-failing credential.
