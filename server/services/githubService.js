@@ -133,12 +133,55 @@ export async function apiFetch(path, { method = 'GET', body, headers = {} } = {}
 
   if (!res.ok) {
     const msg = data?.message || text || res.statusText;
-    const err = new Error(`github ${method} ${path} → ${res.status}: ${msg}`);
+
+    // SECURITY (v2.31.1): the message that leaves this function reaches app
+    // OWNERS — MCP tool errors propagate verbatim through callTool to the
+    // caller's agent. It used to be `github ${method} ${path} → ...`, and
+    // `path` contains `/repos/<service-account>/AMC_<slug>`, so any owner of
+    // any managed app could read the platform's privileged GitHub identity,
+    // the internal AMC_ naming convention, and the live health of the shared
+    // credential straight out of a failed push. That contradicts the managed-app
+    // premise ("the end user never sees github.com") and hands an attacker the
+    // exact account to target.
+    //
+    // So: the thrown message is owner-safe and actionable, while the full
+    // detail — path included — goes to the server log and rides along on
+    // `err.detail` for platform-admin surfaces that choose to show it.
+    const detail = `github ${method} ${path} → ${res.status}: ${msg}`;
+    log.warn(`[github-service] ${detail}`);
+
+    const err = new Error(publicGithubError(res.status, msg));
     err.status = res.status;
     err.body = data;
+    err.detail = detail;          // server-side only — never return this to a caller
+    err.serviceAccount = true;
     throw err;
   }
   return data;
+}
+
+/**
+ * Owner-safe rendering of a service-account GitHub failure. Says what happened
+ * and who can fix it, without naming the account, the repo, or the convention.
+ */
+function publicGithubError(status, msg) {
+  if (status === 401 || status === 403) {
+    return `AppCrane's managed-repository credential was rejected by GitHub (${status}). ` +
+      'This is a platform-level credential, not yours, and nothing on your side can fix it — ' +
+      'a platform admin needs to refresh it under Settings → GitHub. Staged files are unaffected; ' +
+      'retry the push once it is restored.';
+  }
+  if (status === 404) {
+    return 'The managed repository for this app could not be found (404). A platform admin ' +
+      'should check the app\'s managed repo under Settings → GitHub.';
+  }
+  if (status === 422) {
+    return `GitHub rejected the change as invalid (422): ${msg}`;
+  }
+  if (status === 429 || status === 503) {
+    return `GitHub is rate-limiting or unavailable (${status}). Retry shortly.`;
+  }
+  return `GitHub request failed (${status}). A platform admin can find the detail in the AppCrane server log.`;
 }
 
 /**
@@ -201,7 +244,9 @@ export async function readManagedRepoFile(slug, path, opts = {}) {
     res = await apiFetch(`/repos/${ownerRepo}/contents/${encPath}${ref}`);
   } catch (e) {
     if (e?.status === 404) {
-      const err = new Error(`FILE_NOT_FOUND: '${path}' does not exist in ${cfg.owner}/${repoName}${opts.branch ? ` on branch ${opts.branch}` : ''}.`);
+      // `repoName` is AMC_<slug>, which the caller already knows; `cfg.owner`
+      // is the platform's service-account identity and must not appear.
+      const err = new Error(`FILE_NOT_FOUND: '${path}' does not exist in this app's managed repository${opts.branch ? ` on branch ${opts.branch}` : ''}.`);
       err.status = 404;
       throw err;
     }
@@ -296,22 +341,29 @@ export async function createAppRepo(slug, { description = '', autoInit = true } 
     );
     if (nameTaken) {
       const err = new Error(
-        `REPO_EXISTS: a repository named '${repoName}' already exists on '${cfg.owner}' ` +
+        `REPO_EXISTS: a managed repository named '${repoName}' already exists ` +
         `(GitHub 422 — the pre-flight check missed it, usually because the token can't see it). ` +
         `The app was likely half-created before, or the name is taken. Retry the managed-app ` +
         `create to reuse it, or pick a different slug.`
       );
       err.status = 409;
-      err.body = { code: 'REPO_EXISTS', existing: `${cfg.owner}/${repoName}` };
+      // `existing` is echoed to the caller — repo name only, never the account.
+      err.body = { code: 'REPO_EXISTS', existing: repoName };
       throw err;
     }
     if (e?.status === 403 || e?.status === 422) {
       const detail = ghErrors.map(x => x?.message).filter(Boolean).join('; ');
+      // The remediation is entirely a platform-admin action, so it names the
+      // setting to fix rather than the account — an app creator can't act on
+      // the account name anyway, and it identifies the platform's privileged
+      // GitHub identity to anyone allowed to create an app.
+      log.warn(`[github-service] repo create refused for '${repoName}' on '${cfg.owner}' (${e.status}${detail ? ` — ${detail}` : ''})`);
       const err = new Error(
-        `REPO_CREATE_FORBIDDEN: GitHub refused to create '${repoName}' on '${cfg.owner}' (GitHub ${e.status}${detail ? ` — ${detail}` : ''}). ` +
-        `The token authenticated but isn't allowed to create this repo. If '${cfg.owner}' is an org, the token must be ` +
-        `SSO-authorized for it and permitted to create repos; a classic PAT needs the 'repo' scope, a fine-grained PAT ` +
-        `needs Administration: Read and write with '${cfg.owner}' as the resource owner. Set/authorize it at Settings → GitHub. (GitHub: ${e.message})`
+        `REPO_CREATE_FORBIDDEN: GitHub refused to create the managed repository '${repoName}' (GitHub ${e.status}${detail ? ` — ${detail}` : ''}). ` +
+        `AppCrane's service-account token authenticated but isn't allowed to create repositories. ` +
+        `This is a platform-level setting: a platform admin needs to re-authorize the token at ` +
+        `Settings → GitHub (an org owner must SSO-authorize it; a classic PAT needs the 'repo' scope, ` +
+        `a fine-grained PAT needs Administration: Read and write).`
       );
       err.status = e.status;
       err.body = { code: 'REPO_CREATE_FORBIDDEN' };
@@ -380,7 +432,7 @@ export async function pushFilesToManagedRepo(slug, files, opts = {}) {
     repo = await apiFetch(`/repos/${ownerRepo}`);
   } catch (e) {
     if (e?.status === 404) {
-      const err = new Error(`REPO_NOT_FOUND: ${cfg.owner}/${repoName} doesn't exist on the service account. Did you call appcrane_create_managed_app first?`);
+      const err = new Error(`REPO_NOT_FOUND: the managed repository '${repoName}' doesn't exist yet. Did you call appcrane_create_managed_app first?`);
       err.status = 404;
       throw err;
     }

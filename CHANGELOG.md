@@ -5,6 +5,16 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.31.1 — Stop leaking the GitHub service-account identity to app owners.
+
+An app owner reporting a failed push was able to quote `github GET /repos/<service-account>/AMC_<slug> → 401: Bad credentials` verbatim. That string came straight out of `githubService.apiFetch`, and MCP tool errors propagate through `callTool` to the caller's agent — so every owner of every managed app could read the platform's privileged GitHub identity, the internal `AMC_*` naming convention, and the live health of the shared credential, out of a single failed operation.
+
+Nothing secret was exposed — no token value — but it contradicts the managed-app premise ("the end user never sees github.com") and names the exact account an attacker would target. Four messages carried it: the generic `apiFetch` error, `FILE_NOT_FOUND`, `REPO_EXISTS` (including an `existing: "<owner>/<repo>"` field echoed in the response body), `REPO_CREATE_FORBIDDEN` (three times), and `REPO_NOT_FOUND`.
+
+Thrown messages are now owner-safe and *more* actionable — a 401 says the platform credential was rejected, that nothing on the owner's side can fix it, and that a platform admin should refresh it under Settings → GitHub. The full path and upstream text go to the server log and to `err.detail`, which is never returned. Covered by `test/github-error-redaction.test.js`, which asserts the account name cannot appear in a thrown message while still surviving on `detail` for operators.
+
+**Still exposed, deliberately not changed here:** `appcrane_get_app` returns `config.github_url`, which for a managed app is `https://github.com/<service-account>/AMC_<slug>`, and `appcrane_create_managed_app` returns `repo.html_url` by documented design. Masking those changes a documented response shape that onboarding agents rely on — worth a decision rather than a silent change.
+
 ## 2.31.0 — "CPU — Last 7 Days" on the dashboard, per app, sandbox + production combined.
 
 The same shape as the visitors chart, answering the other question that matters on a small host: *which app is burning the box?* When one workload saturates the cores, Caddy gets nothing and every app goes dark — so "which app is expensive" deserves the same visibility as "which app has users".
