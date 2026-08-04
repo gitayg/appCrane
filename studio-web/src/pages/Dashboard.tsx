@@ -69,11 +69,19 @@ function formatDate(iso: string): string {
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
 }
 
-function TrendChart({ days, apps }: { days: string[]; apps: ActivityApp[] }) {
+// v2.31.0: `emptyText` and `fmt` let this chart serve both the visitor counts
+// (integers) and per-app CPU (a percentage with a decimal) without a second
+// copy of the SVG.
+function TrendChart({ days, apps, emptyText = 'No visitor data yet', fmt = (v: number) => String(v) }: {
+  days: string[]
+  apps: ActivityApp[]
+  emptyText?: string
+  fmt?: (v: number) => string
+}) {
   if (!apps.length || !days.length) {
     return (
       <div style={{ padding: '24px 0', textAlign: 'center', color: 'var(--dim)', fontSize: '.85rem' }}>
-        No visitor data yet
+        {emptyText}
       </div>
     )
   }
@@ -90,7 +98,10 @@ function TrendChart({ days, apps }: { days: string[]; apps: ActivityApp[] }) {
   const yOf = (v: number) => PT + chartH - (v / maxVal) * chartH
 
   const gridLines = 5
-  const gridValues = Array.from({ length: gridLines }, (_, i) => Math.round((maxVal / (gridLines - 1)) * i))
+  // Keep one decimal on the axis when the whole series is sub-integer (a
+  // handful of quiet apps at 0.4% CPU would otherwise share a "0" gridline).
+  const round = (v: number) => (maxVal < 5 ? Math.round(v * 10) / 10 : Math.round(v))
+  const gridValues = Array.from({ length: gridLines }, (_, i) => round((maxVal / (gridLines - 1)) * i))
 
   return (
     <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', display: 'block' }}>
@@ -122,7 +133,7 @@ function TrendChart({ days, apps }: { days: string[]; apps: ActivityApp[] }) {
               <g key={i}>
                 <circle cx={xOf(i)} cy={yOf(v)} r="3" fill={color} />
                 {v > 0 && (
-                  <text x={xOf(i)} y={yOf(v) - 6} textAnchor="middle" fontSize="8" fill={color}>{v}</text>
+                  <text x={xOf(i)} y={yOf(v) - 6} textAnchor="middle" fontSize="8" fill={color}>{fmt(v)}</text>
                 )}
               </g>
             ))}
@@ -148,6 +159,7 @@ export function Dashboard() {
   const [users, setUsers] = useState<User[]>([])
   const [enhancements, setEnhancements] = useState<Enhancement[]>([])
   const [activity, setActivity] = useState<{ days: string[]; apps: ActivityApp[] }>({ days: [], apps: [] })
+  const [cpuTrend, setCpuTrend] = useState<{ days: string[]; apps: ActivityApp[] }>({ days: [], apps: [] })
   // v2.6.10: top-10 leaderboards. Apps by distinct daily active users
   // and users by distinct apps opened, both over the last 7 days.
   // Source: app_visits table, populated on every Caddy forward_auth.
@@ -187,7 +199,7 @@ export function Dashboard() {
       // works for everyone (server filters by role); /api/server/health
       // works for everyone (status only, no sensitive detail). The
       // admin-only ones now degrade gracefully.
-      const [h, appsRes, usersRes, enhRes, actRes, ldrRes, activeRes] = await Promise.all([
+      const [h, appsRes, usersRes, enhRes, actRes, ldrRes, activeRes, cpuRes] = await Promise.all([
         adminApi.get<ServerHealth>('/api/server/health').catch(() => null),
         adminApi.get<{ apps: App[] }>('/api/apps'),
         adminApi.get<{ users: User[] }>('/api/users').catch(() => ({ users: [] })),
@@ -195,6 +207,7 @@ export function Dashboard() {
         adminApi.get<{ days: string[]; apps: ActivityApp[] }>('/api/dashboard/app-activity').catch(() => ({ days: [], apps: [] })),
         adminApi.get<typeof leaders>('/api/dashboard/leaderboards?days=7&top=10').catch(() => ({ apps: [], users: [] })),
         adminApi.get<{ minutes: number; count: number }>('/api/dashboard/active-users').catch(() => null),
+        adminApi.get<{ days: string[]; apps: ActivityApp[] }>('/api/dashboard/app-cpu').catch(() => ({ days: [], apps: [] })),
       ])
       if (h) setHealth(h)
       setApps(appsRes.apps ?? [])
@@ -202,6 +215,7 @@ export function Dashboard() {
       setEnhancements(enhRes.requests ?? [])
       setLeaders({ apps: ldrRes.apps ?? [], users: ldrRes.users ?? [] })
       setActivity(actRes)
+      setCpuTrend(cpuRes)
       if (activeRes) setActiveUsers(activeRes.count)
     } catch (e) {
       setError(String(e))
@@ -440,6 +454,36 @@ export function Dashboard() {
           </div>
         )}
         <TrendChart days={activity.days} apps={activity.apps} />
+      </div>
+
+      {/* v2.31.0: per-app CPU, sandbox + production combined. On a small host
+          a single saturated app starves Caddy and takes every other app down
+          with it, so "which app is burning CPU" is worth the same visibility
+          as "which app has users". */}
+      <h2>CPU — Last 7 Days</h2>
+      <p style={{ color: 'var(--dim)', fontSize: '.82rem', margin: '-6px 0 10px' }}>
+        Average CPU per app, sandbox + production combined. 100% = one full core.
+      </p>
+      <div className="trend-box">
+        {cpuTrend.apps.length > 0 && (
+          <div className="trend-legend">
+            {cpuTrend.apps.map((a, i) => (
+              <span key={a.slug} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                <span style={{
+                  width: 10, height: 10, borderRadius: 2,
+                  background: TREND_PALETTE[i % TREND_PALETTE.length], flexShrink: 0,
+                }} />
+                {a.name ?? a.slug}
+              </span>
+            ))}
+          </div>
+        )}
+        <TrendChart
+          days={cpuTrend.days}
+          apps={cpuTrend.apps}
+          emptyText="No CPU samples yet — the sampler records every 5 minutes."
+          fmt={(v) => `${v}%`}
+        />
       </div>
 
       {/* v2.6.10: top-10 leaderboards. Distinct active users per app,

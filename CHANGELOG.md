@@ -5,6 +5,18 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.31.0 — "CPU — Last 7 Days" on the dashboard, per app, sandbox + production combined.
+
+The same shape as the visitors chart, answering the other question that matters on a small host: *which app is burning the box?* When one workload saturates the cores, Caddy gets nothing and every app goes dark — so "which app is expensive" deserves the same visibility as "which app has users".
+
+No new collection was needed: `metricsSampler` has been recording per-app, per-env CPU every 5 minutes with 7-day retention since v2.21.8 (`metrics_history`), and nothing on the dashboard ever surfaced it. The window matches exactly what is retained.
+
+- New `GET /api/dashboard/app-cpu` (admin), shaped identically to `/api/dashboard/app-activity` so it reuses the existing chart.
+- **Sandbox and production are summed, not averaged** — an app's cost to the box is what both containers burn together, and averaging would halve an app whose sandbox sits idle, which is backwards for spotting a hog. Aggregation is average-per-env-per-day, then summed across envs.
+- Apps are sorted busiest-first so legend colours track the lines worth reading, and apps with no samples are omitted rather than drawn as flat zero lines.
+- Values keep one decimal, and the axis does too when the whole series is sub-integer — otherwise a fleet of quiet 0.4% apps renders as a row of zeroes.
+- `TrendChart` gained optional `emptyText` and `fmt` props instead of being copied.
+
 ## 2.30.2 — The real cause of the six-hour CI hang: a test, not the product.
 
 2.30.1 fixed a genuine socket leak in the MCP test, but the hang survived it. `--test-timeout` (added in the same release) then named the culprit: `update-snapshot.test.js`, timing out with **every assertion passing**.
