@@ -1934,21 +1934,32 @@ function FrameOverlay({ frame, framePanel, setFrame, setFramePanel }: FrameOverl
   // (app.<env>.deploy.version) captured once at open time — so it never
   // changed when toggling Production/Sandbox, and showed a stale/empty value
   // when the production deploy record lagged the live container. Fetch the
-  // live version for the ACTIVE env and write it into the matching attribute;
-  // re-runs on env switch so the pill always reflects what's actually running
-  // in the env you're looking at.
+  // live version and write it into the matching attribute.
+  //
+  // v2.31.2: probe BOTH envs, not only the active one. The topbar shows the
+  // production and sandbox pills together, so refreshing just the active env
+  // left the other pill on the stale deploy record until you clicked its tab —
+  // and then the number changed in front of you, which reads as the UI
+  // contradicting itself rather than catching up.
   useEffect(() => {
     if (!frame.slug) return
-    const env = frame.env ?? 'production'
+    const slug = frame.slug
     let cancelled = false
-    adminApi
-      .get<{ version?: string }>(`/api/apps/${encodeURIComponent(frame.slug)}/live-version/${env}`)
-      .then(r => {
-        if (cancelled || !r?.version) return
-        const field = env === 'sandbox' ? 'sandVersion' : 'prodVersion'
-        setFrame(f => (f.slug === frame.slug && f.open ? { ...f, [field]: r.version } : f))
-      })
-      .catch(() => {})
+
+    const probe = (env: 'production' | 'sandbox') =>
+      adminApi
+        .get<{ version?: string }>(`/api/apps/${encodeURIComponent(slug)}/live-version/${env}`)
+        .then(r => {
+          // No version = that env isn't deployed or isn't answering. Leave the
+          // recorded value rather than blanking a pill that was readable.
+          if (cancelled || !r?.version) return
+          const field = env === 'sandbox' ? 'sandVersion' : 'prodVersion'
+          setFrame(f => (f.slug === slug && f.open ? { ...f, [field]: r.version } : f))
+        })
+        .catch(() => {})
+
+    probe('production')
+    probe('sandbox')
     return () => { cancelled = true }
   }, [frame.slug, frame.env, setFrame])
   // Per-panel last-used width, persisted across open/close so closing

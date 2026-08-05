@@ -110,20 +110,39 @@ export function AppFrame({ slug, active, onClose }: Props) {
     }
   }, [stage?.slug, onClose])
 
-  // Re-check the app's LIVE version on open, env switch, and every refresh.
+  // Re-check the app's LIVE versions on open, env switch, and every refresh.
+  //
+  // v2.31.2: probe BOTH envs, not just the active one. The topbar renders the
+  // production and sandbox version chips side by side, but their initial values
+  // come from the deploy RECORD (`app.*.deploy.version` — what AppCrane last
+  // recorded shipping), which disagrees with what the container is actually
+  // serving after a rollback, a restart onto an older image, or a partly-failed
+  // deploy. Probing only the active env left the other chip showing the stale
+  // record until you clicked its tab — at which point the number visibly
+  // changed, which reads as the UI contradicting itself.
   useEffect(() => {
     if (!stage?.slug) return
     const s = stage.slug
-    const env = stage.env
-    adminApi.get<{ version?: string }>(`/api/apps/${encodeURIComponent(s)}/live-version/${env}`)
-      .then(r => {
-        if (!r?.version) return
-        setStage(prev => {
-          if (!prev || prev.slug !== s) return prev
-          return env === 'sandbox' ? { ...prev, sandVersion: r.version! } : { ...prev, prodVersion: r.version! }
+    let cancelled = false
+
+    const probe = (env: 'production' | 'sandbox') =>
+      adminApi.get<{ version?: string }>(`/api/apps/${encodeURIComponent(s)}/live-version/${env}`)
+        .then(r => {
+          // No version means that env isn't deployed or isn't answering — keep
+          // the recorded value rather than blanking a chip that was readable.
+          if (cancelled || !r?.version) return
+          setStage(prev => {
+            if (!prev || prev.slug !== s) return prev
+            return env === 'sandbox'
+              ? { ...prev, sandVersion: r.version! }
+              : { ...prev, prodVersion: r.version! }
+          })
         })
-      })
-      .catch(() => {})
+        .catch(() => {})
+
+    probe('production')
+    probe('sandbox')
+    return () => { cancelled = true }
   }, [stage?.slug, stage?.env, refreshNonce])
 
   return (

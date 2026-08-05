@@ -5,6 +5,12 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.31.2 — The sandbox version pill showed a stale number that changed when you clicked it.
+
+The app topbar renders the production and sandbox version pills side by side, but only the **active** env's version was ever refreshed against the running container. Both start from the deploy *record* (`app.<env>.deploy.version` — what AppCrane last recorded shipping), which diverges from reality after a rollback, a restart onto an older image, or a partly-failed deploy. So the inactive pill kept showing the stale record until you clicked its tab, at which point the probe finally ran and the number changed in front of you — the UI appearing to contradict itself rather than catch up.
+
+Both envs are now probed on open, on env switch, and on refresh, so each pill reflects what its container is actually serving from the first render. Two independent copies of the same defect are fixed — `AppFrame.tsx` and the frame effect in `Applications.tsx`; the app-list `fetchVersions` already did this correctly. An env that isn't deployed or isn't answering keeps its recorded value rather than blanking a readable pill, and both probes carry a cancellation guard.
+
 ## 2.31.1 — Stop leaking the GitHub service-account identity to app owners.
 
 An app owner reporting a failed push was able to quote `github GET /repos/<service-account>/AMC_<slug> → 401: Bad credentials` verbatim. That string came straight out of `githubService.apiFetch`, and MCP tool errors propagate through `callTool` to the caller's agent — so every owner of every managed app could read the platform's privileged GitHub identity, the internal `AMC_*` naming convention, and the live health of the shared credential, out of a single failed operation.
