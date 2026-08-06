@@ -1075,6 +1075,15 @@ textarea:focus { border-color: var(--accent); }
 .lstage-empty-inner h3 { margin: 0 0 4px; font-size: 1rem; color: var(--text); }
 .lstage-empty-inner p { margin: 0; font-size: .85rem; }
 
+/* v2.32.0: the /launch empty state doubles as an app picker. `.lstage-empty`
+   centres a small block, which is right for a message and wrong for a grid —
+   so this variant aligns to the top, scrolls, and caps its width so tiles stay
+   a readable size instead of stretching across an ultrawide display. */
+.lstage-picker { align-items: flex-start; overflow-y: auto; padding: 32px 24px; }
+.lstage-picker-inner { width: 100%; max-width: 900px; margin: 0 auto; }
+.lstage-picker-inner h3 { margin: 0 0 4px; font-size: 1rem; color: var(--text); }
+.lstage-picker-sub { margin: 0 0 18px; font-size: .85rem; color: var(--dim); }
+
 /* ── Persistent multi-app tabs (v2.15.0) — overlays the content area ── */
 .persistent-app-tabs {
   position: fixed; top: 0; left: var(--content-left, 220px); right: 0; bottom: 0;

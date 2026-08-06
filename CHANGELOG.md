@@ -5,6 +5,16 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.32.0 — With nothing open, `/launch` now shows the apps you can open as tiles.
+
+The empty state was a rocket glyph and "Pick an app from the sidebar" — which assumes you know the sidebar holds apps, and gives someone with exactly one app nothing to click. It now renders that user's openable apps as a tile grid, so the empty state *is* the picker. Clicking a tile opens it exactly as the sidebar does (both go through the same `onSelect` → `/launch/<slug>`).
+
+- Reuses the `.launcher-*` styles orphaned when the standalone Launcher merged into the nav in v2.13.0 — the CSS outlived its component, so this matches the established look instead of inventing a second one, and puts dead CSS back to work.
+- Apps come from `/api/apps`, which is already role-filtered server-side, so the grid shows exactly what this user may open with no client-side filtering to get wrong.
+- Only apps with a **live** deployment in either env are shown — a tile that can only 503 is worse than no tile. Apps exist but none are live, and the message says so rather than implying you have nothing.
+- Renders nothing while loading, so someone with plenty of apps never sees "no apps" flash first.
+- New `.lstage-picker` variant top-aligns and scrolls (the shared `.lstage-empty` centres a small block, which is wrong for a grid) and caps width so tiles stay a readable size on wide displays.
+
 ## 2.31.2 — The sandbox version pill showed a stale number that changed when you clicked it.
 
 The app topbar renders the production and sandbox version pills side by side, but only the **active** env's version was ever refreshed against the running container. Both start from the deploy *record* (`app.<env>.deploy.version` — what AppCrane last recorded shipping), which diverges from reality after a rollback, a restart onto an older image, or a partly-failed deploy. So the inactive pill kept showing the stale record until you clicked its tab, at which point the probe finally ran and the number changed in front of you — the UI appearing to contradict itself rather than catch up.

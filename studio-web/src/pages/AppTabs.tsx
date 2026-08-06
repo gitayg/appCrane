@@ -1,4 +1,5 @@
 import { AppFrame } from './AppFrame'
+import { AppPicker } from '../components/AppPicker'
 
 /**
  * v2.15.0: multi-app tabs. Renders a tab strip plus one <AppFrame> per open app,
@@ -17,16 +18,11 @@ interface Props {
 }
 
 export function AppTabs({ tabs, activeSlug, onSelect, onClose }: Props) {
+  // v2.32.0: with nothing open, show the apps this user can actually open as
+  // tiles instead of telling them to go find the sidebar. `onSelect` already
+  // navigates to /launch/<slug>, which opens the tab.
   if (tabs.length === 0) {
-    return (
-      <div className="lstage-empty">
-        <div className="lstage-empty-inner">
-          <div className="lstage-empty-glyph">🚀</div>
-          <h3>Select an app</h3>
-          <p>Pick an app from the sidebar — it opens here as a tab.</p>
-        </div>
-      </div>
-    )
+    return <AppPicker onOpen={onSelect} />
   }
   return (
     <div className="app-tabs">
