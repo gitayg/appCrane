@@ -5,6 +5,14 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.33.0 — The tile picker is now the home screen.
+
+`/` and unknown routes already landed on `/launch`, so the picker was *almost* home — but signing in didn't go there. Both SSO paths defaulted to `/applications`, and the server bounced `/login` and `/portal` to the same place, so after authenticating you arrived at the Manage table rather than the apps you can open. Three entry points, two destinations, none of them the picker.
+
+All of them now land on `/launch`. It already rendered the SPA's `<Login>` when unauthenticated exactly as `/applications` did, so this changes only where you arrive *after* authenticating.
+
+One interaction had to move with it: v2.24.5 put the per-app frame-ancestors headers on `/applications` because that was where `/login` bounced. With sign-in landing on `/launch`, that route now uses `sendAdminSpa` too — otherwise the in-iframe SSO step this platform supports would have started coming up blank again. The SPA's redirect loop-guard also learned `launch`, so `?redirect=/launch` no longer triggers a pointless extra navigation to the page already rendering.
+
 ## 2.32.1 — A ⋯ menu on each picker tile, and a sandbox-only app no longer opens a dead URL.
 
 Each tile gets a ⋯ control revealing **version** (production and sandbox, whichever exist), **builder** (the app's owner, email on hover), and **open in a new tab** — the last pointing at the env a click would actually land on, so the menu can't offer a URL the frame wouldn't use. The control is a sibling of the tile button rather than a child (nesting interactive elements is invalid), which is what `.launcher-tile-cell` was already built for. It appears on hover to keep a wall of tiles calm, but stays visible on keyboard focus and while its own menu is open; the menu closes on outside click or Escape, and those listeners are only registered while a menu is actually open.
