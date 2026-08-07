@@ -131,16 +131,19 @@ export function AdminApp() {
     } catch (_) { /* SSR / non-browser — fine */ }
   }, [])
 
-  // v2.5.14: when an already-authed user lands at /applications?redirect=/foo
+  // v2.5.14: when an already-authed user lands at <landing>?redirect=/foo
   // (the case where /login was redirected here from forward_auth + the user
   // already had a valid token), forward them to the original target instead
-  // of leaving them stranded on /applications. Skip if the redirect points
-  // back at /login or /applications to avoid a fresh loop.
+  // of leaving them stranded on the landing page. Skip if the redirect points
+  // back at a landing route to avoid a fresh loop.
+  // v2.33.0: `launch` joins the list — sign-in now lands there, so
+  // `?redirect=/launch` would otherwise trigger a pointless extra navigation
+  // back to the page already being rendered.
   if (auth.isAuthed && typeof window !== 'undefined') {
     const params = new URLSearchParams(window.location.search)
     const redirect = params.get('redirect')
     if (redirect && redirect.startsWith('/') &&
-        !/^\/(login|applications)(\/|\?|$)/.test(redirect)) {
+        !/^\/(login|applications|launch)(\/|\?|$)/.test(redirect)) {
       window.location.replace(redirect)
       return null
     }

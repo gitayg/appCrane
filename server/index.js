@@ -739,12 +739,18 @@ function loginHandler(req, res) {
 // loginHandler (above) is kept for any iframe-embedded SSO flow that
 // needs the custom-frame-ancestors CSP — exposed at /login-legacy.
 // Once we confirm SSO works through the SPA, this can be deleted.
-function forwardToApplications(req, res) {
+// v2.33.0: sign-in lands on /launch — the app picker — rather than
+// /applications (the Manage table). /launch already renders the SPA's <Login>
+// when unauthenticated, exactly as /applications did, so this only changes
+// where you arrive AFTER authenticating: the tiles you can open, which is the
+// first thing most users want. Query string is preserved so the SSO
+// ?oidc_token=… / ?redirect=… handoff still works.
+function forwardToLaunch(req, res) {
   const qs = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
-  res.redirect(302, '/applications' + qs);
+  res.redirect(302, '/launch' + qs);
 }
-app.get('/login',  forwardToApplications);
-app.get('/portal', forwardToApplications);
+app.get('/login',  forwardToLaunch);
+app.get('/portal', forwardToLaunch);
 app.get('/login-legacy', loginHandler);
 
 // Admin SPA — all admin routes served by the React admin-app bundle
@@ -787,7 +793,11 @@ app.get('/app', (req, res) => sendHtml(res, adminSpa));
 // v2.13.0: launcher merged into the nav — apps open inline at /launch/:slug,
 // owner self-service at /manage. Serve the SPA on direct nav / refresh / Back
 // (otherwise these single-segment paths fall through to the app-slug proxy).
-app.get('/launch', (req, res) => sendHtml(res, adminSpa));
+// sendAdminSpa (not sendHtml): /launch is now the sign-in landing target, so
+// it must carry the per-app frame-ancestors headers that make the in-iframe
+// SSO step render — the v2.24.5 fix, which previously only had to cover
+// /applications because that was where /login bounced to.
+app.get('/launch', sendAdminSpa);
 app.get('/launch/*splat', (req, res) => sendHtml(res, adminSpa));
 
 // Root redirects to login

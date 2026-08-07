@@ -60,12 +60,12 @@ export function Login() {
 
   function startOidc() {
     const redirect = new URLSearchParams(window.location.search).get('redirect')
-      || window.location.origin + '/applications'
+      || window.location.origin + '/launch'
     window.location.href = '/api/auth/oidc/start?redirect=' + encodeURIComponent(redirect)
   }
   function startSaml() {
     const redirect = new URLSearchParams(window.location.search).get('redirect')
-      || window.location.origin + '/applications'
+      || window.location.origin + '/launch'
     window.location.href = '/api/auth/saml/start?redirect=' + encodeURIComponent(redirect)
   }
 
