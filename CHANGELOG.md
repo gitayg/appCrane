@@ -5,6 +5,12 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.34.0 — **Launch** in the left nav.
+
+`/launch` became the post-login landing page in v2.33.0, but it had no nav entry — you could only get there by clicking an individual app, or by knowing that `/` happens to redirect there. Navigating anywhere else left no way back to the picker short of editing the URL. It now leads the sidebar, above Dashboard, with a new 2×2 grid icon: the conventional launcher glyph, and a deliberate contrast with Dashboard's uneven bento rectangles sitting directly beneath it.
+
+`NavLink` matches descendants, so the entry stays highlighted while you're inside an app at `/launch/<slug>` rather than un-highlighting the moment you open something.
+
 ## 2.33.0 — The tile picker is now the home screen.
 
 `/` and unknown routes already landed on `/launch`, so the picker was *almost* home — but signing in didn't go there. Both SSO paths defaulted to `/applications`, and the server bounced `/login` and `/portal` to the same place, so after authenticating you arrived at the Manage table rather than the apps you can open. Three entry points, two destinations, none of them the picker.

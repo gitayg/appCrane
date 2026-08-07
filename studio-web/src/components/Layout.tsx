@@ -68,6 +68,11 @@ function appInitials(name: string): string {
 // is still platform_admin-only (server-side gate), enforced both in
 // the SkillsTab UI and on the API.
 const NAV: NavItem[] = [
+  // v2.34.0: Launch leads the nav — it's the post-login landing page (v2.33.0)
+  // and the app picker, so it should be reachable by name rather than only by
+  // clicking an individual app or knowing that "/" happens to go there.
+  // NavLink matches descendants, so it stays highlighted on /launch/<slug>.
+  { id: 'launch',       label: 'Launch',       href: '/launch',       icon: <Icon.Grid /> },
   { id: 'dashboard',    label: 'Dashboard',    href: '/dashboard',    icon: <Icon.Dashboard /> },
   { id: 'applications', label: 'Manage',       href: '/applications', icon: <Icon.Layers /> },
   { id: 'requests',     label: 'Requests',     href: '/requests',     icon: <Icon.Lightbulb /> },
