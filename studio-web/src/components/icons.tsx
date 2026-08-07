@@ -40,6 +40,15 @@ function svg(props: IconProps, paths: React.ReactNode) {
 }
 
 export const Icon = {
+  // v2.34.0: the app launcher. A 2×2 grid is the conventional glyph for it and
+  // mirrors the tile picker it opens — deliberately distinct from Dashboard's
+  // uneven bento rectangles, which sit right next to it in the nav.
+  Grid: (p: IconProps = {}) => svg(p, <>
+    <rect width="7" height="7" x="3" y="3" rx="1" />
+    <rect width="7" height="7" x="14" y="3" rx="1" />
+    <rect width="7" height="7" x="3" y="14" rx="1" />
+    <rect width="7" height="7" x="14" y="14" rx="1" />
+  </>),
   Dashboard: (p: IconProps = {}) => svg(p, <>
     <rect width="7" height="9" x="3" y="3" rx="1" />
     <rect width="7" height="5" x="14" y="3" rx="1" />
