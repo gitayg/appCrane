@@ -135,7 +135,35 @@ function apiRateLimit(req, res, next) {
   next();
 }
 
-const HTML_CSP = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: https:; connect-src 'self'; frame-src 'self'; font-src 'self' data: https://fonts.gstatic.com; object-src 'none'; base-uri 'self'";
+/**
+ * v2.36.0: `script-src` no longer allows 'unsafe-inline'.
+ *
+ * With it, a CSP gives almost no XSS protection — injected markup executes just
+ * as happily as first-party code, which is what the scan's "Permissive Content
+ * Security Policy" finding was pointing at. An audit of everything this policy
+ * covers found NO inline scripts: the admin SPA's index.html loads one external
+ * module, raiseme.html has no <script> at all, and the setup/crash pages
+ * generated inline here are style-only. So dropping it costs nothing.
+ *
+ * `style-src` KEEPS 'unsafe-inline' deliberately. The React codebase uses
+ * `style={{…}}` throughout; removing it would require refactoring every inline
+ * style to a class or hashing each one, and the XSS value of blocking inline
+ * *styles* is a small fraction of blocking inline *scripts*. Not worth breaking
+ * the UI for a partial win.
+ *
+ * fonts.googleapis.com / fonts.gstatic.com stay for the webfonts.
+ */
+const HTML_CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: https:; connect-src 'self'; frame-src 'self'; font-src 'self' data: https://fonts.gstatic.com; object-src 'none'; base-uri 'self'";
+
+/**
+ * docs/login.html is the one page that genuinely needs inline script — it
+ * carries ~2,600 lines of it and predates the SPA. It is now only reachable at
+ * /login-legacy (since v2.33.0 both /login and /portal forward to the SPA), so
+ * rather than hold the whole platform's CSP hostage to a legacy page, it gets
+ * its own weaker policy. If /login-legacy is ever deleted — the comment on
+ * loginHandler already contemplates it — this constant goes with it.
+ */
+const LEGACY_LOGIN_CSP = HTML_CSP.replace("script-src 'self'", "script-src 'self' 'unsafe-inline'");
 
 function sendHtml(res, filePath) {
   res.setHeader('Content-Security-Policy', HTML_CSP);
@@ -153,7 +181,12 @@ app.use('/public', express.static(join(__dirname, '..', 'public')));
 app.use('/docs', express.static(join(__dirname, '..', 'docs'), {
   index: false,
   setHeaders(res, filePath) {
-    if (filePath.endsWith('.html')) res.setHeader('Content-Security-Policy', HTML_CSP);
+    // login.html is the sole page with inline script (see LEGACY_LOGIN_CSP);
+    // serving it from here with the hardened policy would blank it.
+    if (filePath.endsWith('.html')) {
+      res.setHeader('Content-Security-Policy',
+        filePath.endsWith('login.html') ? LEGACY_LOGIN_CSP : HTML_CSP);
+    }
   },
 }));
 app.get('/favicon.svg', (req, res) => res.sendFile(join(__dirname, '..', 'public', 'favicon.svg')));
@@ -779,20 +812,29 @@ function frameAncestorsForRedirect(redirectRaw) {
 // (/applications), so this must run there too — not just on the legacy login
 // page — or the in-iframe /login → /applications bounce lands on a
 // SAMEORIGIN-locked SPA shell and the frame comes up blank.
-function applyEmbedHeaders(req, res) {
+// `baseCsp` lets the legacy login page keep its weaker script-src while every
+// other caller gets the hardened default (v2.36.0).
+function applyEmbedHeaders(req, res, baseCsp = HTML_CSP) {
   const fa = frameAncestorsForRedirect(req.query.redirect);
   if (!fa) return false;
   res.removeHeader('X-Frame-Options');
-  res.setHeader('Content-Security-Policy', `${HTML_CSP}; frame-ancestors ${fa}`);
+  res.setHeader('Content-Security-Policy', `${baseCsp}; frame-ancestors ${fa}`);
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
   res.setHeader('Pragma', 'no-cache');
   return true;
 }
 
+// docs/login.html carries a large inline <script>, so it — and only it — is
+// served with LEGACY_LOGIN_CSP. Both branches must use it: the embed path
+// sets the header itself, and the plain path would otherwise inherit the
+// hardened HTML_CSP from sendHtml() and blank the page.
 function loginHandler(req, res) {
   const loginPage = join(__dirname, '..', 'docs', 'login.html');
-  if (applyEmbedHeaders(req, res)) return res.sendFile(loginPage);
-  sendHtml(res, loginPage);
+  if (applyEmbedHeaders(req, res, LEGACY_LOGIN_CSP)) return res.sendFile(loginPage);
+  res.setHeader('Content-Security-Policy', LEGACY_LOGIN_CSP);
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+  res.setHeader('Pragma', 'no-cache');
+  res.sendFile(loginPage);
 }
 // v2.5.14: collapse the dual-login UX. /login and /portal forward to
 // /applications, which renders the SPA's <Login> when unauthenticated.
