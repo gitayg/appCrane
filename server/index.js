@@ -1,5 +1,5 @@
 import express from 'express';
-import { dirname, join, resolve } from 'path';
+import { dirname, join, resolve, sep } from 'path';
 import { fileURLToPath } from 'url';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, openSync, unlinkSync } from 'fs';
 import { createHash } from 'crypto';
@@ -156,14 +156,23 @@ function apiRateLimit(req, res, next) {
 const HTML_CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: https:; connect-src 'self'; frame-src 'self'; font-src 'self' data: https://fonts.gstatic.com; object-src 'none'; base-uri 'self'";
 
 /**
- * docs/login.html is the one page that genuinely needs inline script — it
- * carries ~2,600 lines of it and predates the SPA. It is now only reachable at
- * /login-legacy (since v2.33.0 both /login and /portal forward to the SPA), so
- * rather than hold the whole platform's CSP hostage to a legacy page, it gets
- * its own weaker policy. If /login-legacy is ever deleted — the comment on
- * loginHandler already contemplates it — this constant goes with it.
+ * The pre-SPA pages under docs/ (login.html plus dashboard/applications/
+ * settings/users-page/app/coder/audit-page/enhancements-page/dashboard-new)
+ * are hand-written HTML with large inline <script> blocks and inline on*=
+ * handlers. They predate the React SPA that replaced them and are no longer
+ * routed to — /dashboard, /applications, /settings and friends all serve the
+ * SPA shell now — but express.static still exposes them at their literal
+ * /docs/<name>.html URL.
+ *
+ * They therefore keep the old, weaker policy. The hardened HTML_CSP is for the
+ * SPA, which is what users actually load; holding it hostage to dead pages
+ * would be backwards, and silently blanking those pages would be worse.
+ *
+ * v2.36.0 shipped with this carve-out covering only login.html, which would
+ * have broken the other nine. If these files are deleted — they look dead —
+ * this constant and the branch below go with them.
  */
-const LEGACY_LOGIN_CSP = HTML_CSP.replace("script-src 'self'", "script-src 'self' 'unsafe-inline'");
+const LEGACY_HTML_CSP = HTML_CSP.replace("script-src 'self'", "script-src 'self' 'unsafe-inline'");
 
 function sendHtml(res, filePath) {
   res.setHeader('Content-Security-Policy', HTML_CSP);
@@ -181,11 +190,14 @@ app.use('/public', express.static(join(__dirname, '..', 'public')));
 app.use('/docs', express.static(join(__dirname, '..', 'docs'), {
   index: false,
   setHeaders(res, filePath) {
-    // login.html is the sole page with inline script (see LEGACY_LOGIN_CSP);
-    // serving it from here with the hardened policy would blank it.
+    // Only the built SPA shell gets the hardened policy. Everything else under
+    // docs/ is a pre-SPA page full of inline script (see LEGACY_HTML_CSP) and
+    // would be blanked by script-src 'self'. Allowlisting the SPA rather than
+    // denylisting known-bad filenames means a legacy page added later fails
+    // safe — it keeps working — instead of breaking silently in production.
     if (filePath.endsWith('.html')) {
-      res.setHeader('Content-Security-Policy',
-        filePath.endsWith('login.html') ? LEGACY_LOGIN_CSP : HTML_CSP);
+      const isSpaShell = filePath.includes(`${sep}admin-app${sep}`);
+      res.setHeader('Content-Security-Policy', isSpaShell ? HTML_CSP : LEGACY_HTML_CSP);
     }
   },
 }));
@@ -825,13 +837,13 @@ function applyEmbedHeaders(req, res, baseCsp = HTML_CSP) {
 }
 
 // docs/login.html carries a large inline <script>, so it — and only it — is
-// served with LEGACY_LOGIN_CSP. Both branches must use it: the embed path
+// served with LEGACY_HTML_CSP. Both branches must use it: the embed path
 // sets the header itself, and the plain path would otherwise inherit the
 // hardened HTML_CSP from sendHtml() and blank the page.
 function loginHandler(req, res) {
   const loginPage = join(__dirname, '..', 'docs', 'login.html');
-  if (applyEmbedHeaders(req, res, LEGACY_LOGIN_CSP)) return res.sendFile(loginPage);
-  res.setHeader('Content-Security-Policy', LEGACY_LOGIN_CSP);
+  if (applyEmbedHeaders(req, res, LEGACY_HTML_CSP)) return res.sendFile(loginPage);
+  res.setHeader('Content-Security-Policy', LEGACY_HTML_CSP);
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
   res.setHeader('Pragma', 'no-cache');
   res.sendFile(loginPage);
