@@ -5,6 +5,18 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.36.1 — v2.36.0's carve-out covered one page; nine others needed it.
+
+A deeper audit — prompted by asking the obvious question, "are you *sure* nothing else has inline script?" — found the v2.36.0 check had been shallow. It inspected **2** HTML files. The static routes actually serve **15**, and ten of them carry inline `<script>`: `dashboard.html`, `applications.html`, `settings.html`, `users-page.html`, `app.html`, `coder.html`, `audit-page.html`, `enhancements-page.html`, `dashboard-new.html` and `login.html`. Five also use inline `on*=` handlers — 23 in `app.html`, 14 in `dashboard.html`.
+
+These are pre-SPA pages that nothing routes to any more (`/dashboard`, `/applications` and friends all serve the SPA shell), but `express.static` still exposes them at their literal `/docs/<name>.html` URL — so under v2.36.0's policy they would have rendered blank.
+
+The carve-out now covers all of them, and it **allowlists the SPA shell** rather than denylisting known-bad filenames: anything under `docs/` that isn't the built SPA gets the legacy policy. A legacy page added later therefore fails safe — it keeps working — instead of breaking silently in production. The SPA itself, which is what users actually load, keeps the hardened policy.
+
+The test that missed this now **enumerates** the static trees instead of naming files, checks inline handlers and `javascript:` URLs as well as `<script>` blocks, and asserts the allowlist shape. It reported all ten offenders on its first run.
+
+Worth noting these ten files appear to be dead. Deleting them would let the carve-out and the weaker policy disappear entirely — a good follow-up, but a bigger call than a header fix.
+
 ## 2.36.0 — `script-src` drops `'unsafe-inline'`. The CSP now actually stops XSS.
 
 The scan's "Permissive Content Security Policy" finding (25 instances) was pointing at `script-src 'self' 'unsafe-inline'`. With `'unsafe-inline'` present a CSP gives close to no XSS protection — injected markup executes exactly as readily as first-party code. This was deferred from v2.35.1 as needing a proper audit rather than a blind edit; that audit is done.
