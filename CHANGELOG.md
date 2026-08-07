@@ -5,6 +5,18 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.36.0 — `script-src` drops `'unsafe-inline'`. The CSP now actually stops XSS.
+
+The scan's "Permissive Content Security Policy" finding (25 instances) was pointing at `script-src 'self' 'unsafe-inline'`. With `'unsafe-inline'` present a CSP gives close to no XSS protection — injected markup executes exactly as readily as first-party code. This was deferred from v2.35.1 as needing a proper audit rather than a blind edit; that audit is done.
+
+**Nothing the policy covers uses inline script.** The admin SPA's shell loads a single external module, `raiseme.html` has no `<script>` at all, and the setup/crash pages generated in `index.js` are style-only. So the directive came out at no cost.
+
+**One page genuinely needs it**, and it's legacy: `docs/login.html` carries ~2,600 lines of inline script and predates the SPA. Since v2.33.0 both `/login` and `/portal` forward to the SPA, leaving it reachable only at `/login-legacy` — so rather than hold the platform's CSP hostage to it, it gets its own `LEGACY_LOGIN_CSP`. Both paths that serve it are covered: the embed branch and the static `/docs` route, either of which would have blanked the page under the hardened policy. When `/login-legacy` is eventually deleted, the constant goes with it.
+
+**`style-src` keeps `'unsafe-inline'` on purpose.** The React codebase uses `style={{…}}` throughout; removing it means refactoring every inline style or hashing each one, and blocking inline *styles* is worth a small fraction of blocking inline *scripts*. A partial win isn't worth breaking the UI, and a test documents the choice so it reads as deliberate.
+
+`test/csp-policy.test.js` enforces both halves — the policy stays hardened, *and* the pages it covers stay free of inline scripts and inline event handlers. Adding an inline `<script>` to the SPA now fails in CI instead of silently blanking the app in production.
+
 ## 2.35.1 — `no-store` on API responses. I was wrong that the rest of the scan was noise.
 
 Having called the remaining Low/Info findings "likely proxied-app noise", reading them turned up one that wasn't: **`/api/me` was served with no `Cache-Control` at all**. It returns the caller's id, name, email and role. HTML got `no-store` via `sendHtml()` and SSE routes set their own, but ordinary JSON responses got nothing — so an identity payload was cacheable by the browser and by any intermediary sitting in front of it. The same applied to `/api/apps` and every other authenticated read.
