@@ -5,6 +5,16 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.35.1 — `no-store` on API responses. I was wrong that the rest of the scan was noise.
+
+Having called the remaining Low/Info findings "likely proxied-app noise", reading them turned up one that wasn't: **`/api/me` was served with no `Cache-Control` at all**. It returns the caller's id, name, email and role. HTML got `no-store` via `sendHtml()` and SSE routes set their own, but ordinary JSON responses got nothing — so an identity payload was cacheable by the browser and by any intermediary sitting in front of it. The same applied to `/api/apps` and every other authenticated read.
+
+API responses now default to `no-store`, set before the routes so a handler can still override (SSE keeps `no-cache`). **App icons are deliberately exempt** — public, unchanging, and fetched once per app for every sidebar and tile render; making them uncacheable would be a pure regression for no privacy gain.
+
+The other two were as expected. **PII Fields (6)** are all the login form's `<input placeholder="Email or username">` — the plugin's own Solution field is blank; nothing to fix. **CSP `Report-To` (17)** wants a live reporting endpoint to collect violations; worth having eventually, not worth a stub that reports nowhere.
+
+One genuine item found while reading and deliberately **not** fixed here: the SPA's CSP carries `script-src 'self' 'unsafe-inline'`, which is what the "Permissive Content Security Policy" finding (25) is pointing at. `'unsafe-inline'` materially weakens XSS protection, but removing it needs the inline-script usage audited and probably a nonce — too big to land blind alongside a header fix.
+
 ## 2.35.0 — Open redirect fixed, plus baseline security headers for every proxied app.
 
 From a credentialed Tenable WAS scan of the production host. Of 3 High / 30 Medium / 114 Low, the genuinely exploitable finding was a **Medium** — all three Highs were false positives (they flagged AppCrane's own tool descriptions as "tool poisoning" and `appcrane_get_guide`'s playbook as "prompt injection"; the "unauthenticated MCP server" was a credentialed scanner mistaking its own session for none — every MCP route is `requireAuth`).

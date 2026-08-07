@@ -85,6 +85,26 @@ app.use((req, res, next) => {
   next();
 });
 
+/**
+ * No-store on API responses (v2.35.1).
+ *
+ * A WAS scan found `/api/me` — which returns the caller's id, name, email and
+ * role — served with no Cache-Control at all. HTML got `no-store` via
+ * sendHtml() and SSE routes set their own, but ordinary JSON responses got
+ * nothing, so an identity payload was cacheable by the browser and by any
+ * intermediary between it and Caddy. Same applies to /api/apps (app inventory)
+ * and every other authenticated read.
+ *
+ * Set before the routes so a handler can still override it — SSE routes do,
+ * with `no-cache`. App icons are deliberately exempt: they're public,
+ * unchanging and fetched once per app for every sidebar and tile render, so
+ * making them uncacheable would be a pure regression for no privacy gain.
+ */
+app.use('/api', (req, res, next) => {
+  if (!req.path.endsWith('/icon')) res.setHeader('Cache-Control', 'no-store');
+  next();
+});
+
 // Global API rate limiter: 2000 req/min per authenticated user (or 600/min per IP fallback).
 // The admin SPA fans out ~40 requests per dashboard load (server health, apps, users,
 // enhancements, activity, metrics, plus per-app live-version probes) and auto-refreshes
