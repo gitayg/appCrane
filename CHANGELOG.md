@@ -5,6 +5,22 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.35.0 — Open redirect fixed, plus baseline security headers for every proxied app.
+
+From a credentialed Tenable WAS scan of the production host. Of 3 High / 30 Medium / 114 Low, the genuinely exploitable finding was a **Medium** — all three Highs were false positives (they flagged AppCrane's own tool descriptions as "tool poisoning" and `appcrane_get_guide`'s playbook as "prompt injection"; the "unauthenticated MCP server" was a credentialed scanner mistaking its own session for none — every MCP route is `requireAuth`).
+
+**Open redirect (CWE-601), proven by the scanner.** It requested `/login?redirect=//3dc5a9db-….com` and the browser landed on that host. Three call sites gated on `redirect.startsWith('/')`, which is not a same-origin test: `//attacker.com` starts with a slash and is an absolute cross-origin URL. A phishing link on the real login page could therefore bounce a victim off-platform. New `isSafeRedirect()` rejects `//`, `/\`, absolute URLs, schemes and control characters, and is applied at all three sites; `forwardToLaunch` drops an unsafe target server-side too, so the hostile value never reaches the next URL. A test pins the exact payload from the scan.
+
+**Baseline security headers at the Caddy site level.** AppCrane's own `/api/*` responses already carried HSTS and nosniff; **proxied app** responses carried neither, because Caddy passed the container's headers through untouched. One site-level block now defaults `Strict-Transport-Security`, `X-Content-Type-Options`, `Referrer-Policy`, `X-Permitted-Cross-Domain-Policies` and `Permissions-Policy`, and strips the `X-Powered-By`/`Server` banners the app containers leak — roughly 124 findings from one place. Set with `?` (set-if-absent) so an app that deliberately sets its own value keeps it.
+
+**`X-Frame-Options` is deliberately NOT set globally**, though it would clear another 25 findings: a blanket `SAMEORIGIN` would break the per-app iframe embedding added in v2.24.5/v2.25.0. `frame-ancestors` supersedes it and is emitted per app. A test asserts its absence so nobody "fixes" the scanner finding by breaking a shipped feature.
+
+**RFC 9116 `security.txt`** at `/.well-known/security.txt` — the documented channel for reporting a vulnerability. The contact is configurable (`security_contact` setting or `SECURITY_CONTACT` env), never hardcoded, since AppCrane is self-hosted by whoever runs it; unset serves 404, because a security.txt pointing at an unread address is worse than none. The value is validated as a single-line `mailto:`/`https:`/`tel:` URI so it can't forge extra directives, and `Expires` rolls a year ahead of each request so the file can't go stale.
+
+Also investigated and closed without change: the **v1 UUID** finding is not AppCrane's — the repo has no uuid dependency and uses only `crypto.randomUUID()` (v4), for temp directory names, never tokens.
+
+**Also in this release — Launch picker search and sort.** A search box filters on name, builder, owner email, slug *and* category, because people look for an app by whatever they remember about it, not just its title. A Name/Category toggle switches between one flat grid and a grid per category; the choice persists in `localStorage`, since sort order is a standing preference rather than a per-visit decision.
+
 ## 2.34.0 — **Launch** in the left nav.
 
 `/launch` became the post-login landing page in v2.33.0, but it had no nav entry — you could only get there by clicking an individual app, or by knowing that `/` happens to redirect there. Navigating anywhere else left no way back to the picker short of editing the URL. It now leads the sidebar, above Dashboard, with a new 2×2 grid icon: the conventional launcher glyph, and a deliberate contrast with Dashboard's uneven bento rectangles sitting directly beneath it.

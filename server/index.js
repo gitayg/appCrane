@@ -142,6 +142,49 @@ for (const p of ['/favicon.ico', '/favicon.png', '/logo.svg', '/apple-touch-icon
   app.get(p, (_req, res) => res.redirect(301, '/favicon.svg'));
 }
 
+/**
+ * RFC 9116 security.txt (v2.35.0) — the standard place a researcher looks to
+ * report a vulnerability. Flagged as missing by a WAS scan; more to the point,
+ * without it someone who finds a bug in your platform has no documented channel
+ * and ends up guessing at an address or posting publicly.
+ *
+ * The contact is CONFIGURABLE, not baked in: AppCrane is self-hosted by
+ * whoever runs it, so a hardcoded address would be wrong for every operator but
+ * one. Set `security_contact` in Settings, or SECURITY_CONTACT in the
+ * environment — a mailto:, https: form, or tel: URI per the RFC.
+ *
+ * Unset ⇒ 404. Publishing a security.txt pointing at an address nobody reads is
+ * worse than not publishing one: it looks like a channel and silently isn't.
+ */
+app.get('/.well-known/security.txt', (req, res) => {
+  let contact = process.env.SECURITY_CONTACT || '';
+  if (!contact) {
+    try {
+      contact = getDb().prepare("SELECT value FROM settings WHERE key = 'security_contact'").get()?.value || '';
+    } catch (_) { /* pre-init or unreadable — treat as unset */ }
+  }
+  contact = String(contact).trim();
+  if (!contact) return res.status(404).type('text/plain').send('No security contact configured.\n');
+
+  // Reject anything that isn't a plain single-line URI: the value lands in a
+  // response body, so a newline could forge additional directives.
+  if (!/^(mailto:|https:\/\/|tel:)[^\s<>"]{1,300}$/.test(contact)) {
+    log.warn('[security.txt] security_contact is not a valid mailto:/https:/tel: URI — not serving');
+    return res.status(404).type('text/plain').send('No security contact configured.\n');
+  }
+
+  // RFC 9116 requires Expires. Roll it a year ahead of *now* so the file never
+  // goes stale — a past Expires makes the whole document non-conforming.
+  const expires = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString();
+  const host = req.get('host');
+  res.type('text/plain').send(
+    `Contact: ${contact}\n` +
+    `Expires: ${expires}\n` +
+    'Preferred-Languages: en\n' +
+    (host ? `Canonical: https://${host}/.well-known/security.txt\n` : '')
+  );
+});
+
 // Serve app icons publicly (no auth required — needed by login page and iframe topbar)
 // Raster formats preferred; legacy SVG served with restrictive CSP to block inline scripts.
 const ICON_EXTS = [
@@ -745,9 +788,29 @@ function loginHandler(req, res) {
 // where you arrive AFTER authenticating: the tiles you can open, which is the
 // first thing most users want. Query string is preserved so the SSO
 // ?oidc_token=… / ?redirect=… handoff still works.
+// v2.35.0: strip an unsafe `redirect` before forwarding it. The SPA now
+// validates it too (utils/safeRedirect.ts), but this endpoint is what a
+// phishing link actually targets — `/login?redirect=//attacker.com` — and it
+// should not echo a cross-origin target back into the next URL at all.
+// `//host` and `/\host` are absolute cross-origin URLs that merely begin with
+// a slash, which is what defeated the original startsWith('/') check.
 function forwardToLaunch(req, res) {
   const qs = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
-  res.redirect(302, '/launch' + qs);
+  let out = qs;
+  if (qs) {
+    const params = new URLSearchParams(qs.slice(1));
+    const r = params.get('redirect');
+    // \x7f (DEL) is excluded alongside \x00-\x1f so this matches the client
+    // guard exactly — two validators that disagree on an edge is how one of
+    // them ends up being the hole.
+    if (r !== null && !/^\/(?![/\\])[^\s\x00-\x1f\x7f]*$/.test(r)) {
+      log.warn(`[login] dropped unsafe redirect target: ${r.slice(0, 120)}`);
+      params.delete('redirect');
+      const rest = params.toString();
+      out = rest ? `?${rest}` : '';
+    }
+  }
+  res.redirect(302, '/launch' + out);
 }
 app.get('/login',  forwardToLaunch);
 app.get('/portal', forwardToLaunch);

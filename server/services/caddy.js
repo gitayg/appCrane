@@ -105,6 +105,37 @@ export function generateCaddyfile() {
     caddyfile += `    tls ${certFile} ${keyFile}\n\n`;
   }
 
+  // ── Baseline security headers for every response on this domain (v2.35.0) ──
+  //
+  // AppCrane's own Express routes already set these (server/index.js), but a
+  // PROXIED app response carries only whatever its container emitted — which
+  // for a typical Express app is nothing, plus an X-Powered-By banner. A
+  // credentialed WAS scan flagged exactly that split: /api/* had HSTS and
+  // nosniff, /<slug> had neither. Setting them at the site level covers both
+  // AppCrane and every app it fronts, in one place.
+  //
+  // `?` = set only if absent, so an app that deliberately sets its own value
+  // keeps it and AppCrane's own headers aren't duplicated. `-` strips.
+  //
+  // Deliberately NOT set here: X-Frame-Options. A blanket SAMEORIGIN would
+  // break the per-app embedding built in v2.24.5/v2.25.0 — `frame-ancestors`
+  // supersedes XFO and is emitted per app below, where the policy is actually
+  // known. Clearing a scanner finding by breaking a shipped feature is a bad
+  // trade. Content-Security-Policy is likewise left to each app: forcing a
+  // default-src onto arbitrary customer apps would break them.
+  caddyfile += `    header {\n`;
+  caddyfile += `        ?Strict-Transport-Security "max-age=31536000; includeSubDomains"\n`;
+  caddyfile += `        ?X-Content-Type-Options "nosniff"\n`;
+  caddyfile += `        ?Referrer-Policy "strict-origin-when-cross-origin"\n`;
+  caddyfile += `        ?X-Permitted-Cross-Domain-Policies "none"\n`;
+  // Deny the powerful features no AppCrane-hosted app has asked for. Apps that
+  // need one can override, since `?` yields to a value the app already set.
+  caddyfile += `        ?Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=()"\n`;
+  // Server banners: version/stack disclosure, no upside.
+  caddyfile += `        -X-Powered-By\n`;
+  caddyfile += `        -Server\n`;
+  caddyfile += `    }\n\n`;
+
   for (const app of apps) {
     const ports = getPortsForSlot(app.slot);
     const slug = app.slug;
