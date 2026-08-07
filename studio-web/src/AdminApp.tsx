@@ -15,6 +15,7 @@ import { MyRequests } from './pages/MyRequests'
 import { PlatformRequestBar } from './components/PlatformRequestBar'
 import { AppTabsProvider } from './components/AppTabsContext'
 import { PersistentAppTabs } from './components/PersistentAppTabs'
+import { isSafeRedirect } from './utils/safeRedirect'
 
 // AppStudio top-level nav was collapsed in v1.27.38: Requests + Builders
 // became top-level nav items, Skills + Style Guide (renamed from Branding)
@@ -142,9 +143,11 @@ export function AdminApp() {
   if (auth.isAuthed && typeof window !== 'undefined') {
     const params = new URLSearchParams(window.location.search)
     const redirect = params.get('redirect')
-    if (redirect && redirect.startsWith('/') &&
-        !/^\/(login|applications|launch)(\/|\?|$)/.test(redirect)) {
-      window.location.replace(redirect)
+    // v2.35.0: isSafeRedirect, not startsWith('/') — `//attacker.com` starts
+    // with a slash and is an absolute cross-origin URL. See safeRedirect.ts.
+    if (isSafeRedirect(redirect) &&
+        !/^\/(login|applications|launch)(\/|\?|$)/.test(redirect as string)) {
+      window.location.replace(redirect as string)
       return null
     }
   }

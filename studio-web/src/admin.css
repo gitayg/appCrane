@@ -1084,6 +1084,32 @@ textarea:focus { border-color: var(--accent); }
 .lstage-picker-inner h3 { margin: 0 0 4px; font-size: 1rem; color: var(--text); }
 .lstage-picker-sub { margin: 0 0 18px; font-size: .85rem; color: var(--dim); }
 
+/* Picker search + sort controls (v2.35.0). Wraps on narrow viewports so the
+   toggle drops below the field rather than squeezing it to nothing. */
+.picker-controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 0 0 10px; }
+.picker-search {
+  flex: 1; min-width: 200px;
+  padding: 7px 10px;
+  background: var(--surface, #1a1a1a);
+  border: 1px solid var(--border, #333);
+  border-radius: 6px;
+  color: var(--text); font-family: inherit; font-size: .85rem;
+}
+.picker-search::placeholder { color: var(--dim); }
+.picker-search:focus { outline: none; border-color: var(--accent, #3b82f6); }
+.picker-no-match { color: var(--dim); font-size: .85rem; padding: 18px 0; }
+.picker-group { margin-bottom: 22px; }
+.picker-group-head {
+  display: flex; align-items: center; gap: 8px;
+  margin: 0 0 10px; font-size: .78rem; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .04em; color: var(--dim);
+}
+.picker-group-count {
+  font-size: .7rem; font-weight: 500; letter-spacing: 0;
+  padding: 1px 6px; border-radius: 10px;
+  background: var(--surface2, #232323); color: var(--dim);
+}
+
 /* Per-tile ⋯ menu (version / builder / open in a new tab). The cell is the
    positioning context; the dots sit over the tile's top-right corner without
    being nested inside the tile button. */

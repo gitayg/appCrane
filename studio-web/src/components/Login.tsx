@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useAuth } from '../hooks/useAuth'
+import { isSafeRedirect } from '../utils/safeRedirect'
 
 /**
  * v2.7.8: the cc_token cookie is now httpOnly and set entirely by the
@@ -88,8 +89,9 @@ export function Login() {
       localStorage.setItem('cc_identity_token', oidcToken)
       // cc_token cookie was already set httpOnly by the SSO callback redirect.
       const redirect = params.get('redirect')
-      if (redirect && redirect.startsWith('/')) {
-        window.location.replace(redirect)
+      // v2.35.0: `//attacker.com` passes startsWith('/') — see safeRedirect.ts.
+      if (isSafeRedirect(redirect)) {
+        window.location.replace(redirect as string)
       } else {
         // Strip the SSO-token from the URL before reload so it doesn't
         // sit in the address bar / browser history.
@@ -103,8 +105,8 @@ export function Login() {
 
   function postLoginRedirect() {
     const redirect = new URLSearchParams(window.location.search).get('redirect')
-    if (redirect && redirect.startsWith('/')) {
-      window.location.replace(redirect)
+    if (isSafeRedirect(redirect)) {
+      window.location.replace(redirect as string)
     } else {
       window.location.reload()
     }
