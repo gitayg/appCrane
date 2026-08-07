@@ -1084,6 +1084,43 @@ textarea:focus { border-color: var(--accent); }
 .lstage-picker-inner h3 { margin: 0 0 4px; font-size: 1rem; color: var(--text); }
 .lstage-picker-sub { margin: 0 0 18px; font-size: .85rem; color: var(--dim); }
 
+/* Per-tile ⋯ menu (version / builder / open in a new tab). The cell is the
+   positioning context; the dots sit over the tile's top-right corner without
+   being nested inside the tile button. */
+.picker-cell { position: relative; }
+.picker-dots {
+  position: absolute; top: 6px; right: 6px;
+  width: 24px; height: 24px; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+  background: transparent; border: 1px solid transparent; border-radius: 6px;
+  color: var(--dim); font-size: 1rem; cursor: pointer; font-family: inherit;
+  opacity: 0; transition: opacity .12s ease-out, background .12s ease-out;
+}
+/* Revealed on hover/focus so a wall of tiles isn't peppered with controls —
+   but always present for keyboard users, and pinned open while its menu is. */
+.picker-cell:hover .picker-dots,
+.picker-dots:focus-visible,
+.picker-dots[aria-expanded='true'] { opacity: 1; }
+.picker-dots:hover { background: var(--surface2, #232323); color: var(--text); }
+.picker-menu {
+  position: absolute; top: 32px; right: 6px; z-index: 20;
+  min-width: 190px; padding: 8px;
+  background: var(--surface2, #232323);
+  border: 1px solid var(--border, #333);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .45);
+  text-align: left; cursor: default;
+}
+.picker-menu-row { display: flex; justify-content: space-between; gap: 10px; padding: 3px 4px; font-size: .76rem; }
+.picker-menu-k { color: var(--dim); flex-shrink: 0; }
+.picker-menu-v { color: var(--text); text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.picker-menu-action {
+  display: block; margin-top: 6px; padding: 6px 4px;
+  border-top: 1px solid var(--border, #333);
+  font-size: .78rem; color: var(--accent, #3b82f6); text-decoration: none;
+}
+.picker-menu-action:hover { text-decoration: underline; }
+
 /* ── Persistent multi-app tabs (v2.15.0) — overlays the content area ── */
 .persistent-app-tabs {
   position: fixed; top: 0; left: var(--content-left, 220px); right: 0; bottom: 0;

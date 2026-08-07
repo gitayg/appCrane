@@ -5,6 +5,12 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.32.1 — A ⋯ menu on each picker tile, and a sandbox-only app no longer opens a dead URL.
+
+Each tile gets a ⋯ control revealing **version** (production and sandbox, whichever exist), **builder** (the app's owner, email on hover), and **open in a new tab** — the last pointing at the env a click would actually land on, so the menu can't offer a URL the frame wouldn't use. The control is a sibling of the tile button rather than a child (nesting interactive elements is invalid), which is what `.launcher-tile-cell` was already built for. It appears on hover to keep a wall of tiles calm, but stays visible on keyboard focus and while its own menu is open; the menu closes on outside click or Escape, and those listeners are only registered while a menu is actually open.
+
+**Fixed while answering "are you showing production only?"** — no, and the check surfaced a real defect. `buildStage` chose the env purely on health (`healthy`), but health reads `unknown` for any app without a health-check row, which is the common case. So an app live *only in sandbox* scored `unknown` on both sides, fell through to production, and opened a URL with nothing behind it. Deployment presence now decides first and health only breaks ties: production is preferred, with sandbox used when production has no live deployment at all, or when production is failing while sandbox passes. TypeScript caught the missing `deploy.status` on `AppRow` in the process.
+
 ## 2.32.0 — With nothing open, `/launch` now shows the apps you can open as tiles.
 
 The empty state was a rocket glyph and "Pick an app from the sidebar" — which assumes you know the sidebar holds apps, and gives someone with exactly one app nothing to click. It now renders that user's openable apps as a tile grid, so the empty state *is* the picker. Clicking a tile opens it exactly as the sidebar does (both go through the same `onSelect` → `/launch/<slug>`).

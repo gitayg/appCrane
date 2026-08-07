@@ -17,8 +17,8 @@ interface AppRow {
   name:        string
   has_icon?:   boolean
   github_url?: string
-  production?: { health?: { status: string }; deploy?: { version?: string } }
-  sandbox?:    { health?: { status: string }; deploy?: { version?: string } }
+  production?: { health?: { status: string }; deploy?: { version?: string; status?: string } }
+  sandbox?:    { health?: { status: string }; deploy?: { version?: string; status?: string } }
 }
 
 interface Stage {
@@ -32,7 +32,16 @@ function buildStage(app: AppRow): Stage {
   const sandUrl = `/${app.slug}-sandbox`
   const prodOk = app.production?.health?.status === 'healthy'
   const sandOk = app.sandbox?.health?.status === 'healthy'
-  const useSand = !prodOk && sandOk
+  // v2.32.1: deployment presence decides first, health only breaks ties.
+  // Health is 'unknown' whenever an app has no health-check row — the common
+  // case — so keying solely off `healthy` sent a sandbox-only app to
+  // production (unknown !== healthy on both sides ⇒ production), opening a URL
+  // with nothing behind it. Prefer production, but fall back to sandbox when
+  // production has no live deployment at all, or when production is failing
+  // while sandbox is passing.
+  const prodLive = app.production?.deploy?.status === 'live'
+  const sandLive = app.sandbox?.deploy?.status === 'live'
+  const useSand = sandLive && (!prodLive || (!prodOk && sandOk))
   return {
     slug: app.slug, name: app.name, hasIcon: !!app.has_icon, hasGithub: !!app.github_url,
     env: useSand ? 'sandbox' : 'production',
