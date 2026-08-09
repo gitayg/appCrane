@@ -1,6 +1,13 @@
 # AppCrane Coder — Implementation Spec
 > Self-contained briefing for an AppCrane agent. Read top-to-bottom before touching any file.
 
+> **Superseded in part (v2.37.0).** This spec predates the React SPA and calls
+> for a single-file `docs/coder.html`. That page was deleted along with the other
+> dead pre-SPA HTML — it was unrouted (`/coder` serves the SPA) and its inline
+> `<script>` forced a site-wide CSP carve-out. **Do not recreate it.** The UI
+> sections below (§ "React web UI", steps 7–8) should be read as "build it in
+> `studio-web/`"; the backend design is unaffected.
+
 ---
 
 ## 1. Concept & Design Decisions

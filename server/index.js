@@ -1,5 +1,5 @@
 import express from 'express';
-import { dirname, join, resolve, sep } from 'path';
+import { basename, dirname, join, resolve, sep } from 'path';
 import { fileURLToPath } from 'url';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, openSync, unlinkSync } from 'fs';
 import { createHash } from 'crypto';
@@ -156,23 +156,23 @@ function apiRateLimit(req, res, next) {
 const HTML_CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: https:; connect-src 'self'; frame-src 'self'; font-src 'self' data: https://fonts.gstatic.com; object-src 'none'; base-uri 'self'";
 
 /**
- * The pre-SPA pages under docs/ (login.html plus dashboard/applications/
- * settings/users-page/app/coder/audit-page/enhancements-page/dashboard-new)
- * are hand-written HTML with large inline <script> blocks and inline on*=
- * handlers. They predate the React SPA that replaced them and are no longer
- * routed to — /dashboard, /applications, /settings and friends all serve the
- * SPA shell now — but express.static still exposes them at their literal
- * /docs/<name>.html URL.
+ * docs/login.html is the last hand-written pre-SPA page: ~2600 lines of inline
+ * <script> plus inline on*= handlers, from before the React SPA. script-src
+ * 'self' would blank it, so it keeps the weaker policy.
  *
- * They therefore keep the old, weaker policy. The hardened HTML_CSP is for the
- * SPA, which is what users actually load; holding it hostage to dead pages
- * would be backwards, and silently blanking those pages would be worse.
+ * The other nine pre-SPA pages (dashboard/applications/settings/users-page/
+ * app/coder/audit-page/enhancements-page/dashboard-new) were deleted in
+ * v2.37.0 — every one of those routes had already been serving the SPA shell,
+ * so express.static was exposing dead HTML at /docs/<name>.html and forcing
+ * this carve-out to cover the whole tree.
  *
- * v2.36.0 shipped with this carve-out covering only login.html, which would
- * have broken the other nine. If these files are deleted — they look dead —
- * this constant and the branch below go with them.
+ * login.html survives them because it is the auth fallback, not because it is
+ * maintained. Retiring it means extracting that script to a file; until then
+ * the set below keeps the exception to exactly one known page instead of
+ * "anything that isn't the SPA".
  */
 const LEGACY_HTML_CSP = HTML_CSP.replace("script-src 'self'", "script-src 'self' 'unsafe-inline'");
+const LEGACY_INLINE_PAGES = new Set(['login.html']);
 
 function sendHtml(res, filePath) {
   res.setHeader('Content-Security-Policy', HTML_CSP);
@@ -190,14 +190,18 @@ app.use('/public', express.static(join(__dirname, '..', 'public')));
 app.use('/docs', express.static(join(__dirname, '..', 'docs'), {
   index: false,
   setHeaders(res, filePath) {
-    // Only the built SPA shell gets the hardened policy. Everything else under
-    // docs/ is a pre-SPA page full of inline script (see LEGACY_HTML_CSP) and
-    // would be blanked by script-src 'self'. Allowlisting the SPA rather than
-    // denylisting known-bad filenames means a legacy page added later fails
-    // safe — it keeps working — instead of breaking silently in production.
+    // Hardened by default; login.html is the one remaining exception. v2.36.1
+    // had to invert this — nine pre-SPA pages still carried inline script, so
+    // the SPA shell was allowlisted and everything else got the loose policy.
+    // Deleting those nine (v2.37.0) leaves login.html alone needing it, so the
+    // default flips back to secure: a page added under docs/ from here on is
+    // covered by script-src 'self'. That fails closed, which is only safe
+    // because test/csp-policy.test.js fails CI on inline script in any page
+    // this branch hardens — the break surfaces in review, not in production.
     if (filePath.endsWith('.html')) {
-      const isSpaShell = filePath.includes(`${sep}admin-app${sep}`);
-      res.setHeader('Content-Security-Policy', isSpaShell ? HTML_CSP : LEGACY_HTML_CSP);
+      const needsLegacy = LEGACY_INLINE_PAGES.has(basename(filePath))
+        && !filePath.includes(`${sep}admin-app${sep}`);
+      res.setHeader('Content-Security-Policy', needsLegacy ? LEGACY_HTML_CSP : HTML_CSP);
     }
   },
 }));

@@ -6,25 +6,44 @@
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
 ![Platform: Ubuntu 22.04+](https://img.shields.io/badge/platform-Ubuntu%2022.04%2B-e95420)
 
-Vibe-code an app with Claude Code or Cursor, then have your AI agent deploy it — over MCP — to a server **you** own. AppCrane is a self-hosted, **agent-first** deployment platform with the enterprise guardrails the cloud PaaS crowd skips: Docker isolation per app, SAML/OIDC/SCIM SSO, per-user audit, and a middleware hard-wall so the platform operator can't read your app secrets (your model API keys stay yours). A self-hosted alternative to Heroku, Vercel, and hosted agent-deploy services like AppDeploy.
+Vibe-code an app with Claude Code or Cursor, then have your AI agent deploy it — over MCP — to a server **you** own. Docker isolation per app, SAML/OIDC SSO, per-user audit that distinguishes agents from humans, per-tenant data isolation, and a middleware hard-wall so the platform operator can't read your app secrets.
 
-**MCP-first.** AI agents connect once via `claude mcp add ... /api/mcp` and operate the platform through 39 `appcrane_*` tools. No curl, no separate scripts — `appcrane_get_guide(topic="onboarding"|"operations")` returns the latest playbook on demand.
+**MCP-first.** AI agents connect once via `claude mcp add ... /api/mcp` and operate the platform through 39 `appcrane_*` tools — create, deploy, read logs, set env, **roll back**. No curl, no separate scripts. `appcrane_get_guide(topic="onboarding"|"operations")` returns the current playbook on demand.
 
 ## Why AppCrane
 
+Tools for AI-built internal apps split cleanly along two axes, and one corner is empty:
+
+|  | **Ungoverned** | **Governed** |
+|---|---|---|
+| **Vendor-hosted** | v0, Bolt.new | Lovable, Replit, Retool, Superblocks — SSO and audit, but your app data, DB connections and API keys live on *their* multi-tenant cloud |
+| **Self-hosted** | Coolify, Dokku, CapRover, Dokploy — your infra, but no SSO, no RBAC, no per-user audit, no tenancy model | **AppCrane** |
+
+You can have governance, or you can have your own infrastructure. Every other option makes you pick. That gap is the entire reason this exists — it was built for a company that needed both and found nothing that did both.
+
+**Why it matters now.** Three things changed in 2026:
+
+- **The bottleneck moved from writing software to operating it.** In Anthropic's [Claude Code study](https://www.anthropic.com/research/claude-code-expertise) (~400k sessions), "operating software" — deploying, configuring, running pipelines — grew from 14% to 21% of sessions while fixing broken code fell from 33% to 19%. Non-engineers now ship deployable code within 7 points of professional engineers. The scarce thing isn't the app any more; it's somewhere safe to run it.
+- **Shadow AI became measurable.** The [2026 Verizon DBIR](https://www.verizon.com/business/resources/reports/dbir/) reports shadow-AI detections up 4×, AI use on corporate devices rising 15% → 45% in a year with 67% through non-corporate accounts — and source code as the most commonly submitted data type. Bans make it worse; a sanctioned platform is the answer that works.
+- **Governance-by-console is the failure mode.** Platforms that gate every app behind a human clicking through an approval UI stall once there are hundreds of apps. AppCrane's answer is different in kind: the **agent** drives the governed lifecycle over MCP, and the platform records and constrains it — rather than a person mediating each step.
+
+### Against self-hosted PaaS
+
 | Feature | AppCrane | Coolify | Dokploy |
 |---|---|---|---|
-| Agent-first / MCP-native | ✅ | ❌ | ~ add-on |
-| Self-hosted, your infra | ✅ | ✅ | ✅ |
-| Enterprise SSO (SAML/OIDC/SCIM) | ✅ | ~ | ❌ |
+| Agent-first / MCP-native | ✅ | ~ thin | ~ 508 flat tools |
+| MCP rollback (undo, not just redeploy) | ✅ | ❌ | ✅ |
+| Enterprise SSO (SAML/OIDC/SCIM) | ✅ | ~ | ❌ paid tier |
+| Per-user audit, agent vs human attributed | ✅ | ~ | ❌ |
+| Per-tenant DB + storage isolation | ✅ | ❌ | ❌ |
 | Secret hard-wall (operator can't read) | ✅ | ❌ | ❌ |
-| Managed repo (no GitHub account) | ✅ | ❌ | ❌ |
-| Docker isolation per app | ✅ | ✅ | ✅ |
-| Dual sandbox/prod environments | ✅ | ~ | ✅ |
-| Zero-downtime deploys | ✅ | ~ | ✅ |
+| Managed repo (no GitHub account needed) | ✅ | ❌ | ❌ |
+| Self-hosted, your infra | ✅ | ✅ | ✅ |
 | Open source | ✅ AGPL-3.0 | ✅ Apache-2.0 | ✅ Apache-2.0 |
 
-**Full matrix** vs AWS Copilot / App Runner / Lightsail / CodeDeploy / Vercel / AppDeploy → **[glick.run/comparison.html](https://glick.run/comparison.html)**
+**Honest scope:** Coolify has a far larger template marketplace, a bigger community, and multi-server orchestration. If you want one-click Postgres and 280 app templates, use Coolify. Choose AppCrane when the apps are AI-built, the agent should do the deploying, and you need to prove afterwards who did what.
+
+**Full matrix** vs AWS Copilot / App Runner / Lightsail / CodeDeploy / Vercel → **[glick.run/comparison.html](https://glick.run/comparison.html)**
 
 ## Features
 
