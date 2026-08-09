@@ -5,6 +5,18 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.37.0 — Deleted the nine dead pre-SPA pages; the CSP carve-out is down to one file.
+
+v2.36.1 had to widen the `unsafe-inline` carve-out to the whole `docs/` tree because nine pre-SPA pages still carried inline `<script>`. Those pages were already unreachable — `/dashboard`, `/applications`, `/settings`, `/users-page`, `/app`, `/coder`, `/audit-page`, `/enhancements-page` and `/dashboard-new` have all served the React SPA for several releases — but `express.static` kept exposing them at their literal `/docs/<name>.html` URL. Unrouted, unmaintained, and holding the security policy hostage.
+
+They're gone. The carve-out is now a one-entry set (`LEGACY_INLINE_PAGES`), and the default **flips back to secure**: any HTML added under `docs/` from here on is served with `script-src 'self'`. `guide.html` moved onto the hardened policy as part of the change.
+
+`login.html` is the one exception left. It's ~2600 lines of inline script and it's the auth fallback, so blanking it would lock people out of the box. Retiring it means extracting that script to a file — deliberately not bundled into a release that's otherwise deletions.
+
+Two new tests: one asserts the carve-out stays a single named page (adding to it fails CI), one asserts the nine deleted pages stay deleted. Verified live — `guide.html` and the SPA shell now serve `script-src 'self'`, `login.html` keeps the exception, all nine URLs return 404.
+
+Also: the README now states the positioning directly. Tools for AI-built internal apps split along two axes — vendor-hosted vs self-hosted, governed vs ungoverned — and the self-hosted-and-governed corner is empty. Lovable, Replit, Retool and Superblocks have the SSO and audit but run your app data on their multi-tenant cloud; Coolify, Dokku, CapRover and Dokploy give you the infrastructure and no governance at all. The README says which one AppCrane is, cites why the gap matters now (Anthropic's Claude Code study: "operating software" 14% → 21% of sessions; 2026 Verizon DBIR: shadow-AI detections up 4×, source code the most-submitted data type), and states plainly where Coolify is the better choice.
+
 ## 2.36.1 — v2.36.0's carve-out covered one page; nine others needed it.
 
 A deeper audit — prompted by asking the obvious question, "are you *sure* nothing else has inline script?" — found the v2.36.0 check had been shallow. It inspected **2** HTML files. The static routes actually serve **15**, and ten of them carry inline `<script>`: `dashboard.html`, `applications.html`, `settings.html`, `users-page.html`, `app.html`, `coder.html`, `audit-page.html`, `enhancements-page.html`, `dashboard-new.html` and `login.html`. Five also use inline `on*=` handlers — 23 in `app.html`, 14 in `dashboard.html`.

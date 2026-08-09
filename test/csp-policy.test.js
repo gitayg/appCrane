@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync, existsSync } from 'fs';
 // (readdirSync is used by servedHtml below to enumerate the static trees.)
-import { join, dirname } from 'path';
+import { join, dirname, basename } from 'path';
 import { fileURLToPath } from 'url';
 
 // CSP hardening (v2.36.0). A WAS scan flagged "Permissive Content Security
@@ -61,11 +61,22 @@ function servedHtml(dir, acc = []) {
 
 const ALL_HTML = [...servedHtml('docs'), ...servedHtml('public')];
 
-// Everything under docs/ EXCEPT the built SPA shell is a pre-SPA page served
-// with LEGACY_HTML_CSP, so inline script there is expected and allowed. The
-// hardened policy governs the SPA shell and anything under public/.
-const isLegacy = (p) => p.startsWith('docs') && !p.includes('admin-app');
+// v2.37.0 deleted the nine dead pre-SPA pages, so the carve-out narrowed from
+// "everything under docs/ that isn't the SPA" to one named file. The hardened
+// policy now governs every served page except login.html — mirror that here,
+// and read the exception set from the source so the two can't drift.
+const LEGACY_PAGES = new Set(
+  [...SRC.matchAll(/const LEGACY_INLINE_PAGES = new Set\(\[([^\]]*)\]\)/g)]
+    .flatMap(m => [...m[1].matchAll(/'([^']+)'/g)].map(f => f[1]))
+);
+const isLegacy = (p) => p.startsWith('docs') && LEGACY_PAGES.has(basename(p));
 const HARDENED_HTML = ALL_HTML.filter(p => !isLegacy(p));
+
+test('the legacy carve-out is one named page, not a whole tree', () => {
+  assert.ok(LEGACY_PAGES.size > 0, 'could not parse LEGACY_INLINE_PAGES from server/index.js');
+  assert.deepEqual([...LEGACY_PAGES], ['login.html'],
+    'a page was added to the unsafe-inline carve-out — extract its script instead');
+});
 
 test('every served HTML file is discovered, not assumed', () => {
   assert.ok(ALL_HTML.length >= 3, `expected the static trees to hold HTML, found ${ALL_HTML.length}`);
@@ -98,20 +109,28 @@ test('no page under the hardened policy uses inline event handlers or javascript
 });
 
 test('legacy pages with inline script are carved out, not left to break', () => {
-  // v2.36.0 shipped a carve-out covering only login.html, which would have
-  // blanked the other nine pre-SPA pages. If any legacy page still carries
-  // inline script, the carve-out must exist and both serving paths must use it.
+  // The carve-out must stay wired to every path that serves login.html. It is
+  // the auth fallback, so blanking it locks people out of the box.
   const stillInline = ALL_HTML.filter(isLegacy).some(rel => {
     const html = readFileSync(join(ROOT, rel), 'utf8');
     return (html.match(/<script\b[^>]*>/gi) || []).some(t => !/\ssrc=/i.test(t));
   });
-  if (!stillInline) return;   // legacy pages cleaned up or deleted — carve-out unneeded
+  if (!stillInline) return;   // script extracted or page deleted — carve-out unneeded
 
   assert.match(SRC, /const LEGACY_HTML_CSP =/, 'legacy pages have inline script but no legacy policy');
-  // The static route must allowlist the SPA shell rather than denylist filenames,
-  // so a legacy page added later fails safe instead of blanking in production.
-  assert.match(SRC, /isSpaShell \? HTML_CSP : LEGACY_HTML_CSP/,
-    'static /docs route must serve non-SPA HTML with the legacy policy');
+  assert.match(SRC, /needsLegacy \? LEGACY_HTML_CSP : HTML_CSP/,
+    'static /docs route must serve the named legacy pages with the legacy policy');
   assert.match(SRC, /applyEmbedHeaders\(req, res, LEGACY_HTML_CSP\)/,
     'the embed path must serve login.html with the legacy policy');
+});
+
+test('the deleted pre-SPA pages stay deleted', () => {
+  // Each of these forced the v2.36.1 tree-wide carve-out. They were already
+  // unreachable — their routes serve the SPA shell — so a reappearance means
+  // someone restored dead inline-script surface, not that a page came back.
+  for (const dead of ['dashboard', 'dashboard-new', 'applications', 'settings',
+                      'users-page', 'app', 'coder', 'audit-page', 'enhancements-page']) {
+    assert.ok(!existsSync(join(ROOT, 'docs', `${dead}.html`)),
+      `docs/${dead}.html is back — it is unrouted and would need a CSP carve-out`);
+  }
 });
