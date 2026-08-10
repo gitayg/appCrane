@@ -5,6 +5,30 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.39.0 — Hosted apps no longer receive the visitor's platform session cookie.
+
+Caddy forwards `Cookie` verbatim to app containers. Apps are mounted same-origin at `/<slug>` and `cc_token` is `path=/`, so a logged-in visitor's browser attached the platform session to every request into the app — and `cc_token` is also accepted as a bearer, because `authedUser` runs the same `sessionUserFor()` on the cookie and on `Authorization`. An app's own backend could therefore read the session straight off the request and call the platform API as whoever visited.
+
+Verified end-to-end on a seeded instance before the fix. A lifted `platform_admin` session reached `/api/settings`, `/api/users`, `/api/audit` and the RBAC matrix — everything v2.38.0 had just locked down — because the token *is* the authority; the role checks were working correctly and simply saw an admin. Worse, `?reveal=true` returned the **decrypted** env vars of an app the admin was not assigned to, since `platform_admin` bypasses `requireAppUser` entirely. `auditMiddleware` runs on `PUT`/`DELETE` only, so none of the reads produced a log line, and the session stays valid 24 hours.
+
+The chain: deploy an app (self-service, so any user), get a privileged user to open it once, read their session out of your own request logs, then drain every secret on the box silently.
+
+Fixed at delivery. Every `handle` block that proxies to an app now strips `cc_token` from the `Cookie` header before forwarding — by name, never the whole header, since apps set their own cookies and a blanket removal would sign every user out of every hosted app. The `(^|;\s*)` anchor matters: without it an app cookie named `my_cc_token` would match on the substring and be corrupted.
+
+Applied **unconditionally**, unlike the existing `X-AppCrane-*` strip which sits behind `if (!isHeadless)`. Headless apps skip `forward_auth` and get no identity headers, but a browser still sends them the cookie — they need this most.
+
+Nothing legitimate loses access. Apps read identity from the `X-AppCrane-*` headers, and an app's server reaches the platform over `/api/service` with its own `APPCRANE_SERVICE_TOKEN` off the docker bridge. The documented `fetch('/api/me')` pattern is untouched: that request matches the platform catch-all, not an app block, so the browser still sends the cookie straight to AppCrane.
+
+The rule lives in one module-scope function rather than being pasted per block — the same-origin redirect check and the identity-header list have each already drifted between copies in this codebase.
+
+Validated against real Caddy 2 (`caddy adapt`, exit 0), and the adapted JSON carries both directives as compiled `search_regexp` replacements on all 13 emission points — the rule is proven, not assumed.
+
+**A global role no longer grants access to app data or secrets.** `requireAppUser` — the gate on env vars, backup/restore/copy-data, health config, notifications and webhooks — returned early for `platform_admin` with no assignment check at all. That is what escalated a lifted admin session into every app's plaintext secrets, and it contradicted the rule `envVars.js` states at the top of its own file. Assignment is authoritative for every role now. A platform admin who needs access assigns themselves through the normal member-management route, which is admin-gated and audited — turning a silent, invisible capability into a deliberate, attributable act.
+
+That change also fixes a bug underneath it: the `admin` branch used to run *before* the assignment lookup, so an admin who did exactly what the error message said — assign themselves — stayed blocked. The advice was unreachable. Checking membership first makes it true for both admin tiers.
+
+18 new tests (107 → 125). The Caddy tests assert per-`handle`-block rather than "the string appears somewhere", cover headless and auth-bypass routes, and pin the header semantics: token removed in every position, app cookies preserved byte-for-byte, `my_cc_token` untouched, no leading or doubled separator. The authz tests pin every role/assignment combination plus the *shape* of the fix — that no role check runs ahead of the membership lookup. Both sets are mutation-tested: removing the cookie strip from one block fails and names the exposed routes; reinstating the `platform_admin` early return fails two tests.
+
 ## 2.38.0 — Platform config is admin-only, SSO redirect validated server-side, and the login page works again.
 
 A second credentialed WAS scan reported platform config readable by a low-privilege account, plus the open redirect from the previous round. Triage found the scan was right on both, and three things it could not see.

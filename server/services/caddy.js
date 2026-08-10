@@ -9,6 +9,21 @@ import { platformEmbedAncestors, mergeAncestors } from '../utils/embed.js';
 const CADDY_ADMIN = process.env.CADDY_ADMIN_URL || 'http://localhost:2019';
 
 /**
+ * Remove the platform session cookie from a request before it reaches an app
+ * container. Emitted with 8-space indent for `handle` blocks; see
+ * PLATFORM_COOKIE_STRIP_SITE for the site-level (4-space) variant.
+ *
+ * Defined once, at module scope, deliberately: this is the third security rule
+ * in this codebase that exists in more than one place, and the previous two
+ * (the same-origin redirect check, the identity-header list) both drifted
+ * between copies. One definition, two indentations.
+ */
+function platformCookieStrip(indent) {
+  return `${indent}request_header Cookie "(^|;\\s*)cc_token=[^;]*" ""\n` +
+         `${indent}request_header Cookie "^;\\s*" ""\n`;
+}
+
+/**
  * Generate full Caddy config JSON (path-based routing).
  * Note: the Caddyfile format (generateCaddyfile) is used in production via systemctl reload.
  */
@@ -183,6 +198,39 @@ export function generateCaddyfile() {
       .map(h => `        request_header -${h}\n`).join('');
     const copyFromVerify = `            copy_headers ${IDENTITY_HEADERS.join(' ')}\n`;
 
+    // v2.39.0: the platform session cookie must never reach an app container.
+    //
+    // Caddy forwards Cookie verbatim, apps are mounted same-origin at /<slug>,
+    // and cc_token is `path=/` — so a logged-in visitor's browser attaches it to
+    // every request into the app. cc_token is ALSO accepted as a bearer
+    // (authedUser runs the same sessionUserFor() on the cookie and on
+    // Authorization), so an app's own backend could read it off the request and
+    // call the platform API as whoever visited. Verified end-to-end: a lifted
+    // platform_admin session reached /api/settings, /api/users, /api/audit, and
+    // — because platform_admin then bypassed requireAppUser — the DECRYPTED env
+    // vars of every app on the box via ?reveal=true, for the 24h life of the
+    // session. That bypass is closed too (v2.39.0, middleware/auth.js), but this
+    // strip is the one that stops the token arriving in the first place.
+    //
+    // Nothing legitimate needs it. Apps read identity from the X-AppCrane-*
+    // headers above, and an app's server reaches the platform through
+    // /api/service with its own APPCRANE_SERVICE_TOKEN, off the docker bridge.
+    // The documented `fetch('/api/me')` pattern is unaffected: that request
+    // matches the platform catch-all, not this app block, so the browser still
+    // sends the cookie straight to AppCrane.
+    //
+    // Strip by NAME, never the whole header — apps set their own cookies and a
+    // blanket `-Cookie` would log every user out of every hosted app. Two
+    // passes: the first removes the pair wherever it sits, the second tidies the
+    // separator it can leave at the front. The `(^|;\s*)` anchor is load-bearing
+    // — without it a legitimate app cookie named e.g. `my_cc_token` would match
+    // on the substring and be corrupted.
+    //
+    // UNCONDITIONAL, unlike stripIncoming: headless apps skip forward_auth and
+    // get no identity headers, but the browser still sends them the cookie, so
+    // they need this strip most of all.
+    const stripPlatformCookie = platformCookieStrip('        ');
+
     // v2.7.22: headless apps bypass forward_auth entirely — no identity,
     // no role headers, no per-app verify round-trip. Right tool for pure
     // unauthenticated services (telemetry ingest, public webhooks,
@@ -225,6 +273,7 @@ export function generateCaddyfile() {
     const emitBypass = (mountPrefix, bypassPath, port) => {
       caddyfile += `    handle ${mountPrefix}${bypassPath}* {\n`;
       caddyfile += `        log_skip\n`;
+      caddyfile += stripPlatformCookie;
       caddyfile += stripIncoming;
       caddyfile += `        uri strip_prefix ${mountPrefix}\n`;
       caddyfile += `        reverse_proxy 127.0.0.1:${port} {\n`;
@@ -243,6 +292,7 @@ export function generateCaddyfile() {
 
     caddyfile += `    handle /${slug}-sandbox* {\n`;
     if (liveSet.has(`${app.id}:sandbox`)) {
+      caddyfile += stripPlatformCookie;
       if (!isHeadless) {
         caddyfile += stripIncoming;
         caddyfile += `        forward_auth 127.0.0.1:${cranePort} {\n`;
@@ -264,6 +314,7 @@ export function generateCaddyfile() {
     // Production
     caddyfile += `    handle /${slug}* {\n`;
     if (liveSet.has(`${app.id}:production`)) {
+      caddyfile += stripPlatformCookie;
       if (!isHeadless) {
         caddyfile += stripIncoming;
         caddyfile += `        forward_auth 127.0.0.1:${cranePort} {\n`;
@@ -342,6 +393,11 @@ export function generateCaddyfile() {
     const ports = getPortsForSlot(app.slot);
     caddyfile += `\n${domain} {\n`;
     for (const h of IDENTITY_STRIP) caddyfile += `    request_header -${h}\n`;
+    // Belt-and-braces: cc_token is host-only (no Domain attribute), so a browser
+    // never sends it to a custom domain — this block is a different origin. The
+    // strip costs one line and holds if that cookie ever gains a Domain, or if a
+    // custom domain is ever pointed at a host that does receive it.
+    caddyfile += platformCookieStrip('    ');
     caddyfile += `    reverse_proxy 127.0.0.1:${ports.prod_be}\n`;
     caddyfile += `}\n`;
   }
