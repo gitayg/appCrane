@@ -1,10 +1,13 @@
 import { Router } from 'express';
 import { getDb } from '../db.js';
-// requireAppUser: assigned app users only — admins are explicitly NOT
-// granted access to env-var values (the comment on requireAppUser in
-// middleware/auth.js codifies this rule). The previous use of
-// requireAppUser silently let admin read every app's env via
-// ?reveal=true (security review v1.27.34 H4).
+// requireAppUser: assigned app users only — a global role, on its own, grants
+// no access to env-var values (middleware/auth.js codifies the rule).
+//
+// v1.27.34 H4 established that for `admin`. It did NOT hold for
+// `platform_admin`, which returned early from requireAppUser with no assignment
+// check at all, so ?reveal=true handed a platform admin the plaintext of every
+// app on the box. Closed in v2.39.0 — assignment is now authoritative for every
+// role, and an admin who needs access assigns themselves, which is auditable.
 import { requireAuth, requireAppUser } from '../middleware/auth.js';
 import { auditMiddleware } from '../middleware/audit.js';
 import { encrypt, decrypt } from '../services/encryption.js';

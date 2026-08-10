@@ -185,25 +185,38 @@ export function requireAppUser(req, res, next) {
 
   req.app = app;
 
-  // Platform admin: full access, no assignment needed.
-  if (req.user.role === 'platform_admin') {
-    return next();
-  }
-
-  // Regular admin: blocked from env/data/deploy until they assign
-  // themselves as an app user (intentional guardrail). platform_admin
-  // bypasses this entirely; that's handled at line 205 above.
-  if (req.user.role === 'admin') { // role:platform-admin-skipped
-    return next(new AppError('Admin cannot access app data/env. Assign yourself as an app user first.', 403, 'ADMIN_BLOCKED'));
-  }
-
+  // Assignment is authoritative for EVERY role, including platform_admin.
+  //
+  // v2.39.0. This gate covers env vars (including ?reveal=true plaintext),
+  // backup/restore/copy-data, health config, notifications and webhooks — the
+  // app's own data and secrets, as distinct from platform administration.
+  // platform_admin used to return early here with no assignment at all, which
+  // is what let a single lifted admin session read the DECRYPTED env vars of
+  // every app on the box. The role check was doing the opposite of the rule
+  // envVars.js states at the top of the file: "assigned app users only —
+  // admins are explicitly NOT granted access to env-var values".
+  //
+  // A platform admin who genuinely needs access assigns themselves through the
+  // normal member-management route, which is itself admin-gated and audited.
+  // That turns a silent, invisible capability into a deliberate, attributable
+  // act — the same guardrail `admin` already had.
   const assignment = db.prepare(
     'SELECT 1 FROM app_users WHERE app_id = ? AND user_id = ?'
   ).get(app.id, req.user.id);
 
-  if (!assignment) {
-    return next(new AppError('You are not assigned to this app', 403, 'FORBIDDEN'));
+  if (assignment) return next();
+
+  // Not assigned. Admins get the actionable message.
+  //
+  // The `admin` branch used to sit BEFORE this lookup, so an admin who did
+  // exactly what the error told them — assign themselves — stayed blocked. The
+  // advice was unreachable. Checking assignment first makes it true for both
+  // admin tiers.
+  if (req.user.role === 'admin' || req.user.role === 'platform_admin') { // role:platform-admin-skipped
+    return next(new AppError(
+      `Admin access does not include app data/env. Assign yourself to '${slug}' as an app user first.`,
+      403, 'ADMIN_BLOCKED'));
   }
 
-  next();
+  return next(new AppError('You are not assigned to this app', 403, 'FORBIDDEN'));
 }
