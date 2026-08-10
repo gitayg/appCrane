@@ -61,12 +61,18 @@ export function Login() {
 
   function startOidc() {
     const redirect = new URLSearchParams(window.location.search).get('redirect')
-      || window.location.origin + '/launch'
+      // Relative, not origin-prefixed: v2.38.0 validates this server-side and
+      // an absolute URL — even our own origin — is refused, which silently
+      // dropped the deep link and fell back to /launch anyway.
+      || '/launch'
     window.location.href = '/api/auth/oidc/start?redirect=' + encodeURIComponent(redirect)
   }
   function startSaml() {
     const redirect = new URLSearchParams(window.location.search).get('redirect')
-      || window.location.origin + '/launch'
+      // Relative, not origin-prefixed: v2.38.0 validates this server-side and
+      // an absolute URL — even our own origin — is refused, which silently
+      // dropped the deep link and fell back to /launch anyway.
+      || '/launch'
     window.location.href = '/api/auth/saml/start?redirect=' + encodeURIComponent(redirect)
   }
 
@@ -88,15 +94,28 @@ export function Login() {
     if (oidcToken) {
       localStorage.setItem('cc_identity_token', oidcToken)
       // cc_token cookie was already set httpOnly by the SSO callback redirect.
+      //
+      // Scrub the token from the address bar BEFORE navigating anywhere.
+      // Referrer-Policy is strict-origin-when-cross-origin, so a SAME-ORIGIN
+      // hop sends the FULL current URL as Referer — and tenant apps are served
+      // same-origin at /<slug>. Following a deep link with ?oidc_token= still
+      // in the URL hands that app's container a live platform session token in
+      // its access logs, which an attacker can harvest by deploying an app and
+      // sending victims /login?redirect=/theirapp/.
+      //
+      // This was unreachable until v2.38.0: the SSO callbacks only ever
+      // forwarded absolute `http…` values, which isSafeRedirect rejects, so the
+      // scrubbing else-branch always ran. Restoring relative deep links made
+      // the other branch live, so the scrub has to precede both.
+      const url = new URL(window.location.href)
+      url.searchParams.delete('oidc_token')
+      window.history.replaceState({}, '', url.pathname + url.search + url.hash)
+
       const redirect = params.get('redirect')
       // v2.35.0: `//attacker.com` passes startsWith('/') — see safeRedirect.ts.
       if (isSafeRedirect(redirect)) {
         window.location.replace(redirect as string)
       } else {
-        // Strip the SSO-token from the URL before reload so it doesn't
-        // sit in the address bar / browser history.
-        const url = new URL(window.location.href)
-        url.searchParams.delete('oidc_token')
         url.searchParams.delete('redirect')
         window.location.replace(url.pathname + url.search + url.hash)
       }

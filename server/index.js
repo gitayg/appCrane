@@ -7,6 +7,7 @@ import { initDb, getDb } from './db.js';
 import { errorHandler, notFound } from './utils/errors.js';
 import log from './utils/logger.js';
 import { platformEmbedAncestors, mergeAncestors } from './utils/embed.js';
+import { isSafeRedirect } from './utils/safeRedirect.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -314,7 +315,13 @@ app.use((req, res, next) => {
 // Guard: block everything except public routes until admin is configured
 const PUBLIC_PATHS = ['/api/info', '/favicon.svg', '/favicon.ico', '/favicon.png', '/logo.svg', '/apple-touch-icon.png', '/apple-touch-icon-precomposed.png', '/logo192.png', '/logo512.png', '/login', '/portal', '/api/identity/login', '/api/identity/verify', '/api/identity/logout', '/api/identity/me'];
 app.use((req, res, next) => {
-  // Settings GETs are public (agents read branding); writes go through requireAdmin.
+  // Settings GETs skip the setup guard so the login page of a not-yet-
+  // initialized instance can still fetch auth_sso_only. This is NOT an
+  // authorization decision: as of v2.38.0 the settings router gates every read
+  // itself, per key (server/utils/settingsVisibility.js) — anonymous callers get
+  // auth_sso_only and a 401 for everything else — and every write goes through
+  // requireAuth + requirePlatformAdmin. All this carve-out does is let the
+  // request reach that router before an admin account exists.
   const isPublicSettingsRead = req.method === 'GET' && req.path.startsWith('/api/settings');
   const isCrashPage = req.path.startsWith('/api/_crashed/');
   if (PUBLIC_PATHS.includes(req.path) || req.path.startsWith('/docs/') || isPublicSettingsRead || isCrashPage || req.method === 'OPTIONS') return next();
@@ -776,6 +783,21 @@ app.use('/api/plan', planRoutes);         // Plan panel (Bearer auth)
 app.use('/api/coder', coderRoutes);       // AppCrane Studio (API key + Bearer auth)
 app.use('/api/agents', agentsRoutes);     // AIDE-compatible Studio API
 app.use('/api/mcp', mcpRoutes);          // Model Context Protocol endpoint (JSON-RPC + admin catalog)
+// MUST precede every router mounted at the bare '/api' — userMcpKeysRoutes,
+// logsRoutes and monitoringRoutes each do a pathless `router.use(requireAuth)`,
+// so from their mount point down they 401 any /api/* request that reaches them,
+// whether or not it is theirs. That swallowed GET /api/settings/auth_sso_only,
+// which the login page fetches WITHOUT credentials to decide whether to render
+// the password form: Login.tsx read `value` off the 401 body, got undefined,
+// and left ssoOnly false — so an SSO-only instance still showed the password
+// form. Anonymous settings GETs are also deliberately let past the not-yet-
+// initialized guard above, which is what made the 401 look like a real answer.
+//
+// Safe to hoist ONLY because settingsRoutes now carries its own per-key auth
+// (v2.38.0). Before that, this accidental ordering WAS its protection, and
+// moving it would have made every setting world-readable.
+app.use('/api/settings', settingsRoutes); // General settings (branding, etc.)
+
 // v2.7.17: meRoutes MUST come before userMcpKeysRoutes. userMcpKeys's
 // router.use(requireAuth) runs on every request entering it (including
 // /api/me), and requireAuth only accepts Bearer / X-API-Key — so a
@@ -795,7 +817,6 @@ app.use('/api', monitoringRoutes);       // /api/server/health
 app.use('/api/users', usersRoutes);
 app.use('/api/apps', webhooksRoutes);     // /api/apps/:slug/webhook config
 app.use('/api/apps', usersRoutes);        // /api/apps/:slug/roles, /api/apps/:slug/identity/users (admin)
-app.use('/api/settings', settingsRoutes); // General settings (branding, etc.)
 app.use('/api/config', configRoutes);     // Instance config export/import (migration)
 
 // Login page
@@ -878,10 +899,14 @@ function forwardToLaunch(req, res) {
   if (qs) {
     const params = new URLSearchParams(qs.slice(1));
     const r = params.get('redirect');
-    // \x7f (DEL) is excluded alongside \x00-\x1f so this matches the client
-    // guard exactly — two validators that disagree on an edge is how one of
-    // them ends up being the hole.
-    if (r !== null && !/^\/(?![/\\])[^\s\x00-\x1f\x7f]*$/.test(r)) {
+    // v2.38.0: was an inline regex here — a THIRD copy of the rule, and it had
+    // already drifted: it also rejected \s, so a legitimate deep link containing
+    // a space (`?redirect=/apps/foo?q=a+b`, which Express decodes to a real
+    // space) passed the SSO callbacks and was then silently dropped here and
+    // logged as an attack. Now that the callbacks actually forward deep links
+    // again, that drift is user-visible. Share the module instead — the whole
+    // finding was copies of a check that each looked correct in isolation.
+    if (r !== null && !isSafeRedirect(r)) {
       log.warn(`[login] dropped unsafe redirect target: ${r.slice(0, 120)}`);
       params.delete('redirect');
       const rest = params.toString();

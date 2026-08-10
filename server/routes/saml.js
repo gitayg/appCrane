@@ -4,6 +4,7 @@ import { getDb } from '../db.js';
 import { encrypt, decrypt, generateSessionToken, hashApiKey, generateApiKey } from '../services/encryption.js';
 import { requireAuth, requirePlatformAdmin } from '../middleware/auth.js';
 import { setSessionCookie } from '../utils/sessionCookie.js';
+import { safeRedirectTarget } from '../utils/safeRedirect.js';
 import log from '../utils/logger.js';
 
 const router = Router();
@@ -138,9 +139,12 @@ router.get('/start', async (req, res) => {
   }
   try {
     const saml     = buildSaml(cfg);
-    const redirect  = req.query.redirect || '';
+    // RelayState comes back verbatim in the callback and is echoed to the
+    // browser as /login?redirect=…, so it must be a validated same-origin path
+    // before it ever leaves here. '' means "no deep link". CWE-601.
+    const relayState = safeRedirectTarget(req.query.redirect, '');
     const url = await saml.getAuthorizeUrlAsync(
-      redirect,   // RelayState — passed back verbatim in the callback
+      relayState,
       req.headers.host,
       {}
     );
@@ -229,10 +233,21 @@ router.post('/callback', async (req, res) => {
     // matching block in oidc.js callback for the full rationale.
     setSessionCookie(res, token, req);
 
-    const relayState = req.body.RelayState || '';
-    const p          = new URLSearchParams({ oidc_token: token });
-    if (relayState && relayState.startsWith('http') && !relayState.includes('/login')) {
-      p.set('redirect', relayState);
+    // RelayState arrives on this POST from the browser, unsigned and outside the
+    // SAMLResponse signature — an attacker can supply any value without ever
+    // passing through /start, so validate here regardless of what /start did.
+    // The gate here previously read startsWith('http'), an INVERTED filter: it
+    // forwarded exactly the absolute cross-origin values a browser can POST and
+    // dropped exactly the same-origin paths a real deep link uses. (Unlike OIDC,
+    // where the equivalent value came out of signed `state` that /start built
+    // from a '/'-prefixed input, so it genuinely never matched.) The only reason
+    // it was not exploitable end-to-end was forwardToLaunch in server/index.js,
+    // added in v2.35.0, stripping the absolute target one hop later at /login.
+    // '/login' is excluded so the forward can't bounce back into the login page.
+    const relayTarget = safeRedirectTarget(req.body.RelayState, '');
+    const p           = new URLSearchParams({ oidc_token: token });
+    if (relayTarget && !relayTarget.includes('/login')) {
+      p.set('redirect', relayTarget);
     }
 
     log.info(`SAML login: ${user.name} (${nameId})`);
