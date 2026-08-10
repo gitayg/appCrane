@@ -6,12 +6,17 @@ import { ssoProviderConfigured } from '../services/authPolicy.js';
 import { encrypt } from '../services/encryption.js';
 import { reloadCaddy } from '../services/caddy.js';
 import { platformEmbedAncestors, platformRegistrableDomain } from '../utils/embed.js';
+import { settingVisibility, PUBLIC, AUTHED } from '../utils/settingsVisibility.js';
 
 const router = Router();
 
 /**
  * Keys that must never be returned to any caller, authenticated or not.
  * Includes all hashed credentials, encrypted secrets, and token material.
+ *
+ * This is belt-and-braces on top of settingsVisibility.js: those keys are
+ * already ADMIN-by-default there, and this set means even a platform admin
+ * can't pull the ciphertext back out through the generic settings reader.
  */
 const SENSITIVE_KEYS = new Set([
   'oidc_client_secret_enc',
@@ -20,21 +25,44 @@ const SENSITIVE_KEYS = new Set([
   'scim_token_created_at',
   'github_service_token_enc',
   'graph_client_secret_encrypted',
+  'backup_s3_secret_enc',
 ]);
 
 /**
- * v2.7.8: keys kept OUT of the bulk public dump but still readable via the
- * targeted GET /:key. `auth_sso_only` must stay readable by the
- * unauthenticated login page (it decides whether to hide the password form),
- * so it can't be gated — but it's auth policy, not general branding/config,
- * so we don't enumerate it in the catch-all settings list.
+ * v2.7.8: keys kept out of the bulk dump but still readable via the targeted
+ * GET /:key. `auth_sso_only` is auth policy read by the unauthenticated login
+ * page, not general config, so it doesn't belong in the catch-all list.
  */
 const BULK_EXCLUDED_KEYS = new Set(['auth_sso_only']);
 
 /**
- * GET /api/settings - All non-sensitive settings (public — agents need branding)
+ * Enforce the per-key read visibility from settingsVisibility.js.
+ *
+ * Applied to GET /:key, which previously had NO middleware of its own. The 401
+ * an anonymous caller saw came from logs.js doing `router.use(requireAuth)` on
+ * the broader '/api' mount registered ahead of '/api/settings' — accidental
+ * gating that would evaporate if those two mounts were ever reordered. This
+ * makes the gate explicit and per-key.
  */
-router.get('/', (req, res) => {
+function requireSettingVisibility(req, res, next) {
+  const level = settingVisibility(req.params.key);
+  if (level === PUBLIC) return next();
+  requireAuth(req, res, (err) => {
+    if (err) return next(err);
+    if (level === AUTHED) return next();
+    requirePlatformAdmin(req, res, next);
+  });
+}
+
+/**
+ * GET /api/settings - All non-sensitive settings (platform admin only).
+ *
+ * v2.38.0: was ungated. It dumps every non-denylisted row, so a drifted
+ * denylist turns into a full config disclosure — which is exactly how the S3
+ * backup credentials leaked. Nothing in the SPA, the server, or the agent
+ * pipeline reads the bulk endpoint, so it's admin-only now.
+ */
+router.get('/', requireAuth, requirePlatformAdmin, (req, res) => {
   const db = getDb();
   const rows = db.prepare('SELECT key, value FROM settings').all();
   const settings = {};
@@ -47,16 +75,20 @@ router.get('/', (req, res) => {
 
 // ── Configurable RBAC matrix ───────────────────────────────────────────
 //
-// /api/settings/role-permissions GET (any authed) returns the catalog +
-// current matrix. PUT (admin) bulk-updates. POST /reset (admin) restores
-// the seeded defaults.
+// /api/settings/role-permissions GET returns the catalog + current matrix.
+// PUT (admin) bulk-updates. POST /reset (admin) restores the seeded defaults.
+//
+// v2.38.0: the GET was requireAuth-only, so any authenticated user could read
+// the whole RBAC matrix — a map of which role can do what, i.e. free privilege-
+// escalation reconnaissance. Its only caller is the platform-admin-gated
+// Settings page (studio-web/src/pages/Settings.tsx), so it's admin-only now.
 //
 // IMPORTANT: these routes MUST be registered before the generic /:key
 // handlers below — otherwise PUT /:key captures /role-permissions first
 // and rejects the body with "value required" (the matrix payload has no
 // `value` field).
 
-router.get('/role-permissions/catalog', requireAuth, (req, res) => {
+router.get('/role-permissions/catalog', requireAuth, requirePlatformAdmin, (req, res) => {
   res.json({
     permissions: PERMISSIONS,
     matrix: getMatrix(),
@@ -237,9 +269,13 @@ router.put('/embed/config', requireAuth, requirePlatformAdmin, async (req, res) 
 });
 
 /**
- * GET /api/settings/:key - Single setting (public, sensitive keys blocked)
+ * GET /api/settings/:key - Single setting, gated by its classified visibility
+ * (PUBLIC / AUTHED / ADMIN, defaulting to ADMIN). See settingsVisibility.js.
+ *
+ * The SENSITIVE_KEYS check runs AFTER the gate so an anonymous caller gets a
+ * plain 401 rather than a 403 that confirms the key names a stored secret.
  */
-router.get('/:key', (req, res) => {
+router.get('/:key', requireSettingVisibility, (req, res) => {
   if (SENSITIVE_KEYS.has(req.params.key)) {
     return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Access to this setting is restricted' } });
   }

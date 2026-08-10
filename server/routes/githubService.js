@@ -2,7 +2,8 @@
  * Admin routes for the GitHub service-account integration (v2.3.0+).
  *
  * Backed by server/services/githubService.js. Exposes:
- *   GET  /api/github-service/config — sanitized config (never returns the token)
+ *   GET  /api/github-service/config — sanitized config, platform-admin only
+ *                                     (never returns the token)
  *   PUT  /api/github-service/config — owner/visibility/enabled + optional token rotation
  *   POST /api/github-service/verify — calls /user against GitHub with the stored token
  *                                     and returns { ok, login, scopes } or { ok: false, error }
@@ -20,7 +21,12 @@ const router = Router();
 
 router.use(requireAuth);
 
-router.get('/config', (_req, res) => {
+// v2.38.0: was requireAuth-only, so any authenticated user could learn the
+// service account's GitHub org, default repo visibility, and whether a token is
+// installed. That's targeting information for the account that can create repos
+// on the org, and its only caller is the platform-admin-gated Settings page.
+// Now matches its sibling PUT/POST.
+router.get('/config', requirePlatformAdmin, (_req, res) => {
   res.json(getServiceConfig());
 });
 

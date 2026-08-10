@@ -4,6 +4,7 @@ import { getDb } from '../db.js';
 import { encrypt, decrypt, generateSessionToken, hashApiKey, generateApiKey } from '../services/encryption.js';
 import { requireAuth, requirePlatformAdmin } from '../middleware/auth.js';
 import { setSessionCookie } from '../utils/sessionCookie.js';
+import { safeRedirectTarget } from '../utils/safeRedirect.js';
 import log from '../utils/logger.js';
 
 const router = Router();
@@ -216,8 +217,11 @@ router.get('/start', async (req, res) => {
   try {
     const discovery = await getDiscovery(cfg.discovery_url);
     const redirectUri = craneBaseUrl() + '/api/auth/oidc/callback';
-    const rawRedirect = req.query.redirect || '';
-    const safeRedirect = rawRedirect.startsWith('/') && !rawRedirect.startsWith('//') ? rawRedirect : '';
+    // The old guard here was startsWith('/') && !startsWith('//'), which let
+    // through '/\host' and '/<TAB>/host' — both cross-origin once a browser
+    // normalizes them. '' means "no deep link", so the fallback is empty
+    // rather than the module default. CWE-601.
+    const safeRedirect = safeRedirectTarget(req.query.redirect, '');
     const state = makeState(safeRedirect);
     const params = new URLSearchParams({
       response_type: 'code',
@@ -340,10 +344,17 @@ router.get('/callback', async (req, res) => {
     // it here closes that gap.
     setSessionCookie(res, token, req);
 
-    // Always go through /login so it sets the cookie, then forward to redirect target
+    // Always go through /login so it sets the cookie, then forward to redirect target.
+    // Re-validate rather than trusting `start`: the value round-trips through the
+    // IdP inside `state`, and the deep link must be a same-origin path here too.
+    // (This gate previously read startsWith('http'), which `start` never
+    // produced — so the deep link was always dropped and SSO always landed on
+    // the default page. Restoring it is only safe with the check below.)
+    // '/login' is excluded so the forward can't bounce back into the login page.
+    const target = safeRedirectTarget(stateData.r, '');
     const p = new URLSearchParams({ oidc_token: token });
-    if (stateData.r && stateData.r.startsWith('http') && !stateData.r.includes('/login')) {
-      p.set('redirect', stateData.r);
+    if (target && !target.includes('/login')) {
+      p.set('redirect', target);
     }
     res.redirect(302, `${base}/login?${p.toString()}`);
   } catch (e) {

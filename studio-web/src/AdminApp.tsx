@@ -147,6 +147,13 @@ export function AdminApp() {
     // with a slash and is an absolute cross-origin URL. See safeRedirect.ts.
     if (isSafeRedirect(redirect) &&
         !/^\/(login|applications|launch)(\/|\?|$)/.test(redirect as string)) {
+      // Same Referer concern as Login.tsx: a same-origin hop sends the full
+      // URL, and the deep-link target may be a tenant app served at /<slug>.
+      if (params.has('oidc_token')) {
+        const clean = new URL(window.location.href)
+        clean.searchParams.delete('oidc_token')
+        window.history.replaceState({}, '', clean.pathname + clean.search + clean.hash)
+      }
       window.location.replace(redirect as string)
       return null
     }

@@ -5,6 +5,28 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.38.0 — Platform config is admin-only, SSO redirect validated server-side, and the login page works again.
+
+A second credentialed WAS scan reported platform config readable by a low-privilege account, plus the open redirect from the previous round. Triage found the scan was right on both, and three things it could not see.
+
+**Settings are gated per key, and the gate is now real.** `GET /api/settings` had no auth middleware of its own — the 401 an anonymous caller saw came from an unrelated router (`logs.js` does a pathless `router.use(requireAuth)` and was mounted at the broader `/api` earlier in the chain). Reorder two lines in `server/index.js` and every setting was public. What auth it did get was `requireAuth`, meaning any user or any `dhk_user_*` key.
+
+Protection was a 6-key denylist, and it had already drifted: `backup_s3_secret_enc` (the encrypted S3 backup secret) and `backup_s3_access_key_id` (an AWS access key ID in cleartext) were added by a later feature and never denylisted. That is the failure mode of a denylist, so it is now an allowlist — `server/utils/settingsVisibility.js` classifies each key PUBLIC / AUTHED / ADMIN, **defaulting to ADMIN**. A setting added by a future feature that forgets this file becomes unreadable rather than public.
+
+Bulk `GET /api/settings`, `role-permissions/catalog` (the whole RBAC matrix) and `github-service/config` are platform-admin only. No longer readable by an ordinary user: the S3 backup credentials, `saml_idp_sso_url`, `graph_tenant_id`, `graph_client_id`, `oidc_client_id`, `oidc_discovery_url`, `tls_cert_file`, `tls_key_file`, `scim_enabled`, `credcheck_state`, and the `github_mcp_*` / `platform_embed_*` / `email_from_*` families.
+
+**An SSO-only instance was still showing the password form.** Three routers — `userMcpKeys`, `logs`, `monitoring` — are each mounted at the bare `/api` with a pathless `requireAuth`, so from their mount point down they 401 any `/api/*` request that reaches them, theirs or not. That swallowed the login page's deliberately credential-less fetch of `auth_sso_only`; `Login.tsx` read `value` off the 401 body, got `undefined`, and left `ssoOnly` false. Confirmed against unmodified v2.37.0. `/api/settings` now mounts ahead of all three — safe only because it finally carries its own auth.
+
+**Open redirect, server side.** v2.35.0 fixed the SPA; `/api/auth/oidc/start` still had the same weak check (`startsWith('/') && !startsWith('//')`), which accepts `/\evil.example` and `/%09/evil.example` — Express percent-decodes query values, so `%09` arrives as a real tab and browsers strip it back into `//evil.example`. SAML `start` validated nothing at all. Both now use a shared `server/utils/safeRedirect.js`, and both callbacks re-validate rather than trusting that `start` sanitised anything — SAML RelayState is browser-POSTed and may never have passed through `start`.
+
+**SSO deep-link redirect works again.** Both callbacks gated the forward on `startsWith('http')` — inverted. On the OIDC side `start` could only ever produce a `/`-prefixed value, so the redirect was always dropped and every SSO login landed on the default page. On the SAML side it did the opposite, forwarding exactly the absolute cross-origin values a browser can POST; `forwardToLaunch` was the only thing catching those. Two bugs masking each other: fixing the feature naively would have shipped the open redirect.
+
+**And the bug that fix introduced.** Restoring the forward moved the SPA onto a branch that skips its token scrub, leaving `?oidc_token=` — a live platform bearer — in the URL during a deep-link navigation. With `Referrer-Policy: strict-origin-when-cross-origin` a same-origin hop sends the full URL as Referer, and tenant apps are served same-origin at `/<slug>`, so any app named in a deep link would have received other users' session tokens in its access logs. The scrub now happens before the branch, in `Login.tsx` and `AdminApp.tsx`, and a test asserts it in the built bundle — not just the source, since `docs/admin-app/` is what production serves.
+
+`forwardToLaunch` also held a fourth copy of the same-origin rule, drifted to reject a literal space, so a legitimate `?redirect=/apps/foo?q=a+b` was dropped and logged as an attack. All four copies now share one module.
+
+43 new tests (64 → 107).
+
 ## 2.37.0 — Deleted the nine dead pre-SPA pages; the CSP carve-out is down to one file.
 
 v2.36.1 had to widen the `unsafe-inline` carve-out to the whole `docs/` tree because nine pre-SPA pages still carried inline `<script>`. Those pages were already unreachable — `/dashboard`, `/applications`, `/settings`, `/users-page`, `/app`, `/coder`, `/audit-page`, `/enhancements-page` and `/dashboard-new` have all served the React SPA for several releases — but `express.static` kept exposing them at their literal `/docs/<name>.html` URL. Unrouted, unmaintained, and holding the security policy hostage.
