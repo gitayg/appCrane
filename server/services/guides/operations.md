@@ -126,6 +126,18 @@ access work:
 | `appcrane_approve_access_request(request_id, role)` | Grant + close the request |
 | `appcrane_deny_access_request(request_id, reason)` | Close with audit-trail reason |
 
+The three below are a **different system**: the roles an app defines for itself
+(`approver`, `auditor`…). They confer nothing on AppCrane — no deploy, no env, no
+delete — and are only handed to the app to enforce. Reach for
+`appcrane_grant_app_access` above when you mean platform power, and for these
+when you mean an app's own label. See the onboarding guide for the wire contract.
+
+| Tool | Purpose |
+|---|---|
+| `appcrane_list_app_roles(slug)` | The roles this app defines + which members hold each |
+| `appcrane_create_app_role(slug, key, label, description?)` | Define a role. Grants it to nobody. Owner/admin of the app |
+| `appcrane_set_user_app_roles(slug, user, keys)` | Replace that user's whole set. `keys: []` clears it |
+
 All require platform_admin OR admin/owner of the target app.
 
 ## Tile icons
@@ -248,6 +260,9 @@ Every `appcrane_*` tool, grouped by purpose. The authoritative input schema for 
 | `appcrane_list_access_requests` | List pending access requests — enhancement_requests rows whose message starts with "Access request for app …" (the portal's Request-access button p... |
 | `appcrane_approve_access_request` | Approve a pending access request: grants the requester access to the app at `role` (default "user") and marks the enhancement_request as done |
 | `appcrane_deny_access_request` | Deny a pending access request: marks the enhancement_request as done WITHOUT granting access |
+| `appcrane_list_app_roles` | List the roles an app defines FOR ITSELF (approver, auditor…) and which members hold each. Not AppCrane permissions — the app enforces them |
+| `appcrane_create_app_role` | Define a new app-defined role. Grants it to nobody; confers nothing on the platform. Owner/admin of the app |
+| `appcrane_set_user_app_roles` | Replace the whole set of app-defined roles a user holds on one app. Does not touch their AppCrane per-app tier |
 
 ### Requests & guides
 

@@ -8,7 +8,7 @@
 
 Vibe-code an app with Claude Code or Cursor, then have your AI agent deploy it — over MCP — to a server **you** own. Docker isolation per app, SAML/OIDC SSO, per-user audit that distinguishes agents from humans, per-tenant data isolation, and a middleware hard-wall so the platform operator can't read your app secrets.
 
-**MCP-first.** AI agents connect once via `claude mcp add ... /api/mcp` and operate the platform through 39 `appcrane_*` tools — create, deploy, read logs, set env, **roll back**. No curl, no separate scripts. `appcrane_get_guide(topic="onboarding"|"operations")` returns the current playbook on demand.
+**MCP-first.** AI agents connect once via `claude mcp add ... /api/mcp` and operate the platform through 42 `appcrane_*` tools — create, deploy, read logs, set env, **roll back**. No curl, no separate scripts. `appcrane_get_guide(topic="onboarding"|"operations")` returns the current playbook on demand.
 
 ## Why AppCrane
 
@@ -62,7 +62,7 @@ You can have governance, or you can have your own infrastructure. Every other op
 - **Encrypted env vars** (AES-256-GCM) — admin cannot read them by design
 - **Health checks** with auto-restart and email notifications
 - **Audit log** for every action
-- **MCP server** at `/api/mcp` exposing 39 `appcrane_*` tools — agents operate the platform without ever touching curl, gh, or shell
+- **MCP server** at `/api/mcp` exposing 42 `appcrane_*` tools — agents operate the platform without ever touching curl, gh, or shell
 
 ## Quick Start
 
@@ -199,7 +199,7 @@ crane audit --app myapp
 
 ## MCP (for AI agents)
 
-AppCrane is MCP-first. One `claude mcp add` and the agent gets 35
+AppCrane is MCP-first. One `claude mcp add` and the agent gets 42
 `appcrane_*` tools — list apps, deploy, set/get secrets, read logs,
 manage access, rotate icons, the lot. Tool names are AWS-aligned
 (`stage`, `set_secret`/`get_secret`, `cp`).
@@ -293,6 +293,7 @@ Caddy `copy_headers` the verified identity onto the upstream proxy request. The 
 | `X-AppCrane-User-Role` | `platform_admin` \| `admin` \| `user` | Platform-wide tier, raw token. **Not** a per-app permission. |
 | `X-AppCrane-App-Role` | `owner` \| `admin` \| `user` \| `viewer` | Per-app role — the one to gate on. An explicit `app_user_roles` row wins over the global-admin fallback, so a platform admin who owns the app arrives as `owner`, not `admin`. |
 | `X-AppCrane-Is-Admin` | `1` \| `0` | `1` when the per-app role is `admin` or `owner`. Use it instead of comparing role strings. |
+| `X-AppCrane-App-Roles` | comma-separated keys, e.g. `approver,auditor` | The roles **the app defines for itself** — a different system from `X-AppCrane-App-Role` above. AppCrane stores and issues them; the app enforces them, and no AppCrane authz check ever reads them back. A user may hold several (a union, not a ladder). **Omitted entirely** when they hold none, so `split(',')` can't produce a phantom `''` role. Section 5 below. |
 
 **Trust model:** the Caddy generator wraps the `request_header -X-AppCrane-*` strips and the `forward_auth` block in a `route { … }` so they execute in written order — Caddy's own directive sort would otherwise run the strips *after* `forward_auth` and delete the identity it had just copied. Caddy zeroes out any client-set `X-AppCrane-*` headers first, then `copy_headers` re-injects only what `/verify` returned. The strips are emitted on **every** route that proxies an app, including headless apps and `auth_bypass_paths` prefixes where no `forward_auth` runs at all — a route that verifies nobody must not accept the caller's own `X-AppCrane-Is-Admin`. Header smuggling is impossible — what the app receives is guaranteed platform-issued. Caddy also strips the platform's `cc_token` session cookie out of `Cookie` before it reaches any container (v2.39.0), so an app can't read a visitor's platform session and act as them — **apps must take identity from these headers, never from a cookie**.
 
@@ -381,6 +382,42 @@ automatically. Consumer domains (e.g. `gmail.com`) share an `org` label, but
 isolation is per-user, so data never mixes. The helper isn't on npm yet — copy
 [`packages/tenant/index.js`](packages/tenant/index.js) or depend on it by path;
 see the [multitenant-notes example](examples/multitenant-notes).
+
+### 5. App-defined roles — the app's own vocabulary
+
+An app can define roles of its own — `approver`, `auditor`, `reviewer` — and
+AppCrane hands each user's set to the app on every request. **AppCrane is the
+authority, the app is the enforcer**: the platform stores who holds which key and
+issues it, and has no opinion on what the key permits.
+
+The two are separate systems on purpose, down to separate tables and separate
+wire fields. An app-defined role never confers an AppCrane privilege, and no
+AppCrane authorization check reads one — otherwise an app owner could invent a
+role named `admin`, assign it to themselves, and author their own escalation from
+a settings form. For the same reason `owner`, `admin`, `user`, `viewer`, `none`
+and `platform_admin` are rejected as keys, keys must match
+`/^[a-z][a-z0-9_-]{0,31}$/`, and an app may define at most 16 of them (which also
+bounds the header's length by design rather than by discovery).
+
+- **On the server:** `X-AppCrane-App-Roles`, comma-separated and sorted, absent
+  when the user holds none. A user may hold several — they are a union, so test
+  set membership rather than equality. It is stripped off the client request and
+  re-issued by `/verify` like every other identity header.
+- **In the browser:** `GET /api/me?app=<slug>` returns `app_roles: [...]` beside
+  `app_role` (`[]` when none).
+- **Explicit grants only.** A `platform_admin` holds no app-defined role unless
+  someone granted it, and neither does the app's `owner` — unlike `app_role`,
+  there is no global-admin fallback. Holding an app role while being a plain
+  platform `user` is the normal case, not an edge case.
+- **Managed by** the app's own owner/admin tier, over
+  `/api/apps/<slug>/app-roles` (note: not `/roles`, which is the platform tier) or
+  the `appcrane_list_app_roles` / `appcrane_create_app_role` /
+  `appcrane_set_user_app_roles` MCP tools. Deleting a role cascades its grants.
+
+```js
+const appRoles = new Set((req.get('X-AppCrane-App-Roles') || '').split(',').filter(Boolean))
+if (!appRoles.has('approver')) return res.status(403).json({ error: 'approver role required' })
+```
 
 ## Permission Model
 

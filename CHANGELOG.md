@@ -5,6 +5,26 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.41.0 — Apps can define their own roles, and a person can hold several.
+
+An app declares roles in Manage › Access — `approver`, `auditor`, `dispatcher`, whatever it needs — assigns any number of them to a person, and reads them back from `/api/me` or the `X-AppCrane-App-Roles` header. AppCrane is the role **authority**; the app is the policy **enforcer**. AppCrane never decides what `approver` means.
+
+**The rule the whole design is built around: an app-defined role confers nothing on AppCrane.** If the two systems shared a namespace or a lookup, any app owner could invent a role called `admin`, assign it to themselves, and watch it flow into a platform authorization check — privilege escalation authored through a settings form. So they live in their own tables, arrive on their own wire field, and nothing in `requireAppUser`, `requireAppAccess`, `permissions.js`, `resolveAppRole` or the `is_admin` computation reads them. They are carried, never consulted.
+
+Keys are validated server-side against `/^[a-z][a-z0-9_-]{0,31}$/`, with `owner`, `admin`, `user`, `viewer`, `none` and `platform_admin` reserved, and a cap of 16 roles per app. The charset is not cosmetic — these keys travel in an HTTP header, so anything outside it is a header-injection surface, and the two bounds together mean the header's worst case is known by design rather than discovered in production.
+
+New tables `app_defined_roles` and `app_role_grants` (migration 071). `app_user_roles` — AppCrane's own tier, one row per person per app, governing deploy and env and delete — is untouched. Different question, different table.
+
+`X-AppCrane-App-Roles` joins `IDENTITY_HEADERS`, so it is stripped from the incoming client request on every proxied route and re-issued only by `forward_auth`. Verified against real Caddy across all seven route shapes: 20 app-proxying blocks, 98 invariants, including that the v2.40.0 `route { }` ordering still holds and the `cc_token` strip still runs after `forward_auth`.
+
+**The bug worth recording.** Five independent verifiers found the same one: revoking a person's app access deleted their membership and tier but left their role grants behind. On a **public** app `resolveAppRole` falls back to `viewer` rather than `none`, so the deny gate never fired — the hosted app went on enforcing a role AppCrane believed it had taken away, and re-adding the person silently restored every role with no audit event. The orphaned grant was also invisible (the roster inner-joins members) and unremovable (writes refuse non-members), so an owner could not have cleaned it up.
+
+Fixed at both layers. Every revoke path now clears grants, and — more importantly — `roleKeysForUser` joins `app_users`, so a grant is live only while its holder is still a member. That is the single choke point both `/api/me` and the header read through, which means a future revoke path that forgets the delete cannot reopen the hole. Confirmed end to end: after revocation the header is absent and `/api/me` returns `[]`; re-adding does not resurrect; and an orphaned grant is inert on every surface.
+
+`/api/me` and `/api/identity/verify` had also disagreed about the same question — `/api/me` returned `app_roles` for a user AppCrane denies, while `verify` correctly withheld them. Since the guide tells app authors either surface is valid, an app's choice of read path silently decided whether revocation worked. Both now withhold at the same point.
+
+204 → 277 tests, including a new revocation file that pins all three revoke paths, non-resurrection, and orphan inertness — with a baseline test so the absence-assertions cannot pass vacuously.
+
 ## 2.40.0 — Identity headers actually reach apps now. They never have.
 
 The headline fix is one nobody was looking for. Caddy sorts directives by TYPE, not by source order, and `request_header` sorts **after** `reverse_proxy`. `forward_auth` is a `reverse_proxy` under the hood — so in every app block, the identity strip that reads as "strip the client's headers, then verify, then hand the verified ones to the app" actually compiled to: verify, copy the identity on, **then delete every one of them**, then proxy to the app.

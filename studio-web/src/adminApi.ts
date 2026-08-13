@@ -106,8 +106,10 @@ const post = <T>(path: string, body?: unknown) =>
   req<T>(path, { method: 'POST', body: body !== undefined ? JSON.stringify(body) : undefined })
 const put  = <T>(path: string, body: unknown) =>
   req<T>(path, { method: 'PUT', body: JSON.stringify(body) })
+const patch = <T>(path: string, body: unknown) =>
+  req<T>(path, { method: 'PATCH', body: JSON.stringify(body) })
 const del  = <T>(path: string) => req<T>(path, { method: 'DELETE' })
 const getText = (path: string) =>
   fetch(path, { headers: authHeaders() }).then(r => r.text())
 
-export const adminApi = { get, post, put, del, getText, authHeaders }
+export const adminApi = { get, post, put, patch, del, getText, authHeaders }

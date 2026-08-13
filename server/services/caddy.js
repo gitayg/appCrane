@@ -46,6 +46,12 @@ const IDENTITY_HEADERS = [
   // Apps kept re-deriving it from App-Role with `=== 'admin'` and locking owners
   // — the highest tier — out of their own settings pages.
   'X-AppCrane-Is-Admin',
+  // v2.41.0: the roles the APP defines for itself (approver, auditor...),
+  // comma-separated. AppCrane is the authority that issues them; the app is the
+  // enforcer. Which is exactly why this line matters: the app's own permission
+  // checks read this header, so if a client could send it, every hosted app's
+  // authorization would be self-service. Stripped here, re-issued by /verify.
+  'X-AppCrane-App-Roles',
 ];
 
 /**

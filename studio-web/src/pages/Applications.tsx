@@ -4,6 +4,7 @@ import { PresenceAvatars } from '../components/runtime-topbar/PresenceAvatars'
 import { JobsButton } from '../components/runtime-topbar/JobsButton'
 import { RequestModal } from '../components/runtime-topbar/RequestModal'
 import { WhatsNewModal, type WhatsNewChange } from '../components/WhatsNewModal'
+import { AppAccessModal } from '../components/AppAccessModal'
 import { usePeek, type PeekCtx } from '../hooks/usePeek'
 import { Navigate, useLocation } from 'react-router-dom'
 import { useMe, isAdmin, canCreateApps } from '../hooks/useMe'
@@ -241,6 +242,10 @@ export function Applications() {
   // to open a focused modal that lists every user with a role select for
   // this specific app.
   const [usersModalApp, setUsersModalApp] = useState<App | null>(null)
+  // v2.41.0: per-app Access modal — the app's OWN roles plus who holds them.
+  // Separate from the Users modal on purpose: Users is where membership and
+  // AppCrane's tier are set, Access is where the app's own vocabulary lives.
+  const [accessModalApp, setAccessModalApp] = useState<App | null>(null)
   // v2.21.7: auto-deploy (webhook) config modal.
   type HookCfg = { token?: string; auto_deploy_sandbox?: boolean; auto_deploy_prod?: boolean; branch_filter?: string }
   const [hookApp, setHookApp] = useState<App | null>(null)
@@ -1478,6 +1483,11 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                           title="Manage which users have access to this app and at what role"
                         >Users</button>
                         <button
+                          className="btn btn-xs"
+                          onClick={() => setAccessModalApp(app)}
+                          title="Roles this app defines for itself, and who holds them"
+                        >Access</button>
+                        <button
                           className="btn btn-xs btn-icon"
                           onClick={() => setFrameAncestors(app)}
                           aria-label={`Allowed embedders for ${app.name}`}
@@ -1877,6 +1887,14 @@ STEP 3 - In any terminal run \`claude\`, then paste:
             </div>
           </div>
         </div>
+      )}
+
+      {accessModalApp && (
+        <AppAccessModal
+          slug={accessModalApp.slug}
+          name={accessModalApp.name}
+          onClose={() => setAccessModalApp(null)}
+        />
       )}
     </div>
   )

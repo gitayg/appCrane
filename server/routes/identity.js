@@ -6,6 +6,7 @@ import { verifyPassword, generateSessionToken, hashApiKey, hashPassword } from '
 import { AppError } from '../utils/errors.js';
 import { setSessionCookie, clearSessionCookie } from '../utils/sessionCookie.js';
 import { isSsoOnly } from '../services/authPolicy.js';
+import { roleKeysForUser } from '../services/appDefinedRoles.js';
 import log from '../utils/logger.js';
 
 const ICON_DIR = resolve(process.env.DATA_DIR || './data', 'apps');
@@ -321,6 +322,10 @@ router.get('/verify', (req, res) => {
   const appSlug = url.searchParams.get('app');
   let appRole = null;
   let appName = null;
+  // The app whose context this verify runs in, kept so the app-defined roles
+  // below are read for THAT app and no other. Set alongside appRole so the two
+  // can never disagree about which app was resolved.
+  let appIdForRoles = null;
 
   // v2.7.21: correct role precedence is
   //   explicit per-app row > global-admin short-circuit > public→viewer > none
@@ -342,12 +347,14 @@ router.get('/verify', (req, res) => {
     const appRecord = db.prepare('SELECT * FROM apps WHERE slug = ?').get(appSlug);
     if (appRecord) {
       appName = appRecord.name;
+      appIdForRoles = appRecord.id;
       appRole = resolveAppRole(appRecord, appRecord.id);
     }
   } else if (session.app_id) {
     const appRecord = db.prepare('SELECT * FROM apps WHERE id = ?').get(session.app_id);
     if (appRecord) {
       appName = appRecord.name;
+      appIdForRoles = session.app_id;
       appRole = resolveAppRole(appRecord, session.app_id);
     }
   }
@@ -380,6 +387,7 @@ router.get('/verify', (req, res) => {
   //   X-AppCrane-User-Role  — global role token (platform_admin / admin / user)
   //   X-AppCrane-App-Role   — per-app role (owner / admin / user / viewer)
   //   X-AppCrane-Is-Admin   — '1' / '0', see below
+  //   X-AppCrane-App-Roles  — app-defined role keys, comma-separated; see below
   if (session.user_id !== undefined && session.user_id !== null) {
     res.setHeader('X-AppCrane-User-Id', String(session.user_id));
   }
@@ -433,6 +441,27 @@ router.get('/verify', (req, res) => {
   const isPlatformAdmin = session.crane_role === 'admin' || session.crane_role === 'platform_admin';
   const isAppAdmin = appRole === 'admin' || appRole === 'owner';
   res.setHeader('X-AppCrane-Is-Admin', (appRole ? isAppAdmin : isPlatformAdmin) ? '1' : '0');
+
+  // v2.41.0: X-AppCrane-App-Roles — the roles the APP defines for itself
+  // (approver, auditor, reviewer...), comma-separated. AppCrane stores and
+  // issues them; the app enforces them.
+  //
+  // They are CARRIED, never CONSULTED. Nothing above this line reads them:
+  // resolveAppRole, the Is-Admin computation and every AppCrane authz check are
+  // untouched by what an app owner types into a settings form. That separation
+  // is the whole feature — if these keys could reach a platform decision, an app
+  // owner would author their own escalation by naming a role.
+  //
+  // Read for the resolved app only, and only after the appRole === 'none' denial
+  // above — a person who cannot enter the app is never told what they hold in it.
+  //
+  // OMITTED when the set is empty rather than sent as an empty value. The app's
+  // natural test is `header?.split(',')`, and an empty string splits to [''] —
+  // one phantom role named '' that no app defines. Absence is unambiguous.
+  const appRoleKeys = appIdForRoles ? roleKeysForUser(appIdForRoles, session.user_id) : [];
+  if (appRoleKeys.length > 0) {
+    res.setHeader('X-AppCrane-App-Roles', appRoleKeys.join(','));
+  }
 
   res.json({
     user: {

@@ -432,6 +432,118 @@ The user's role is computed server-side from the authenticated identity, not
 from anything the client passes — so a spoofed `Referer` or `?app=` can only
 ask "what's MY role on app X", never escalate to someone else's role.
 
+## App-defined roles — the vocabulary your app invents for itself
+
+Two headers, one letter apart, two entirely different systems. Confusing them is
+the mistake this section exists to prevent:
+
+| Header | Whose vocabulary | Governs |
+|---|---|---|
+| `X-AppCrane-App-Role` (**singular**) | AppCrane's, fixed | The tier `none` < `viewer` < `user` < `admin` < `owner` — who may deploy this app, read its env vars, delete it, manage its members. Not yours to define, and you cannot add to it. |
+| `X-AppCrane-App-Roles` (**plural**) | **yours**, freely invented | The roles *your app* defined — `approver`, `auditor`, `reviewer`, whatever fits. Governs whatever your code says it governs. |
+
+**AppCrane ships facts, not policy.** AppCrane is the *authority*: it stores who
+holds which key and hands you the answer on every request. Your app is the
+*enforcer*: AppCrane has no idea what an `approver` may do, and never asks.
+
+That split is a security boundary, not a style preference. An app-defined role
+can never confer an AppCrane privilege — no AppCrane authorization check reads
+these keys, ever — which is exactly what makes it safe to let an app owner
+invent them from a form. It is also why `owner`, `admin`, `user`, `viewer`,
+`none` and `platform_admin` are rejected as keys: the two vocabularies stay
+disjoint even in the hypothetical where some future code path mixes them up.
+
+### Reading them on the server
+
+`X-AppCrane-App-Roles: approver,auditor` — comma-separated keys, sorted, no
+spaces. **Absent entirely when the user holds none**, never an empty header, so
+`split(',')` can't hand you a phantom role named `''`.
+
+```js
+// The whole enforcement pattern. A user may hold SEVERAL roles and they are a
+// union — test membership, never equality against "the" role.
+const appRoles = new Set((req.get('X-AppCrane-App-Roles') || '').split(',').filter(Boolean))
+
+if (!appRoles.has('approver')) {
+  return res.status(403).json({ error: 'This action requires the approver role' })
+}
+```
+
+- **Union, not a ladder.** Keys are unordered and independent; holding
+  `approver,auditor` means holding both, fully. If you want a hierarchy
+  (`approver` implies `reviewer`), encode it in your own code — AppCrane won't.
+- Set on `authenticated` requests only, alongside the rest of the identity set,
+  and only for a caller who passed the app's access check — someone who cannot
+  enter the app is never told what they hold in it. On `headless` / `bypass`
+  requests nothing is verified, so a value there is untrusted, same rule as
+  every other `X-AppCrane-*` header.
+- Platform-issued like the rest: Caddy strips any client-supplied copy before
+  `forward_auth` and re-injects only what `/api/identity/verify` returned. This
+  is the header where that matters most — it *is* your authorization input, so a
+  forgeable one would make your app's permissions self-service.
+
+### Reading them in the browser: `/api/me`
+
+`GET /api/me?app=<slug>` gains `app_roles` beside `app_role` — same keys, same
+order, `[]` when the user holds none (JSON has no empty-string ambiguity to
+avoid, so this one is present-but-empty). It appears only when an app slug
+resolved, exactly like `app_role`:
+
+```json
+{
+  "user": { "id": 7, "name": "Alice", "email": "alice@...", "username": null, "role": "user" },
+  "app": "case-analytics",
+  "app_role": "user",
+  "app_roles": ["approver", "auditor"]
+}
+```
+
+That combination — platform `user`, per-app `user`, holding `approver` — is the
+entire point: someone with no AppCrane power whatsoever can be the person your
+app trusts to approve things. As everywhere else, use `/api/me` for browser-side
+display and the headers for server-side authorization.
+
+**A `platform_admin` does NOT implicitly hold your roles.** Grants are explicit,
+always — no global role and no per-app `owner` tier quietly adds a key to that
+list. (Contrast `app_role`, where a global admin *does* fall back to `admin`.)
+Platform staff arrive at your app with `app_roles: []` until someone grants them
+one, deliberately: implicit role collapse is what once had an app deny its own
+owner.
+
+### Defining and granting them
+
+The app's **owner or admin** — AppCrane's tier, the singular header — manages the
+list. A plain member can neither invent a role nor grant themselves one.
+
+| Tool | Does |
+|---|---|
+| `appcrane_list_app_roles(slug)` | The roles this app defines, plus which members hold each |
+| `appcrane_create_app_role(slug, key, label, description)` | Define a role. Grants it to nobody |
+| `appcrane_set_user_app_roles(slug, user, keys)` | Replace that user's whole set. `keys: []` clears it |
+
+Do not reach for `appcrane_grant_app_access` here — that one sets AppCrane's own
+per-app tier (deploy / env / delete), which is the thing app-defined roles are
+carefully *not*. REST equivalents live under `/api/apps/<slug>/app-roles`
+(`GET`, `POST`, `PATCH /:id`, `DELETE /:id`, `GET /members`,
+`PUT /members/:userId`) — `/app-roles`, note, because `/roles` is the platform
+tier.
+
+Key rules, all enforced server-side (the UI is not the gate):
+
+- `/^[a-z][a-z0-9_-]{0,31}$/` — starts with a lowercase letter; no commas (the
+  separator), no spaces, no case ambiguity; 32 characters max.
+- Reserved and rejected: `owner`, `admin`, `user`, `viewer`, `none`,
+  `platform_admin`.
+- **16 roles per app**, maximum. Both bounds exist so the header's length is a
+  design decision rather than a production discovery.
+- The key is **immutable**. Your code compares against it, so a rename would
+  silently re-point every grant at a permission you have never heard of. Delete
+  and recreate instead, which forces the grants to be re-issued deliberately.
+- Deleting a role **cascades its grants** — everyone holding it loses it at once.
+  The API returns `grants_removed` so you can say how many before confirming.
+- A grant requires app membership: `appcrane_grant_app_access` first, roles
+  second. A role on a non-member is unenforceable, since your app never sees them.
+
 ## Platform notices — how you find out the platform changed under you
 
 When a platform release changes something your app depends on, AppCrane

@@ -5,6 +5,7 @@ import { requireAuth, requireAdmin, requirePlatformAdmin, requireAppAccess } fro
 import { auditMiddleware } from '../middleware/audit.js';
 import { AppError } from '../utils/errors.js';
 import { roleForUserOnApp } from '../services/permissions.js';
+import { clearUserRoleGrants } from '../services/appDefinedRoles.js';
 import { isAdmin } from '../utils/roles.js';
 
 const router = Router();
@@ -289,6 +290,12 @@ router.put('/:slug/roles', requireAppAccess, auditMiddleware('app-set-role'), (r
 
   // Keep app_users in sync so API-key based flows also see this user's apps
   db.prepare('INSERT OR IGNORE INTO app_users (app_id, user_id) VALUES (?, ?)').run(app.id, user_id);
+
+  // v2.41.0: 'none' is how this route removes someone, so it must also drop the
+  // roles the APP defined for them. Left behind, those grants come back the
+  // moment the person is re-added at any tier — access restored by one admin
+  // action, in-app powers restored silently along with it.
+  if (app_role === 'none') clearUserRoleGrants(app.id, user_id);
 
   res.json({ message: `Role '${app_role}' set for user ${user_id} on app ${app.slug}` });
 });

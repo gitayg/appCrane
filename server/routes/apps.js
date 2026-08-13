@@ -10,6 +10,7 @@ import { resolveSafe } from '../utils/paths.js';
 import { reloadCaddy } from '../services/caddy.js';
 import { validateBypassPaths } from '../utils/authBypassPaths.js';
 import { resolveVisibility } from '../utils/appVisibility.js';
+import { pruneGrantsForNonMembers } from '../services/appDefinedRoles.js';
 
 // auth_bypass_paths is stored as a JSON string (or NULL). The UI expects an
 // array, so always parse it before returning an app row — a raw string would
@@ -889,6 +890,11 @@ router.put('/:slug/users', requireAppAccess, auditMiddleware('app-assign-users')
     for (const uid of ids) {
       insert.run(appId, uid);
     }
+    // v2.41.0: anyone missing from the new list has just lost access, so the
+    // roles the APP defined for them go too. Otherwise re-adding them later
+    // silently restores every one, with no re-grant and nothing in the audit
+    // log to explain where the powers came back from.
+    pruneGrantsForNonMembers(appId);
   })();
 
   const users = db.prepare(`
