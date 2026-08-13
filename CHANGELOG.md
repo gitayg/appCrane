@@ -5,6 +5,14 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.41.1 — The live-Caddy test now skips where it cannot run, instead of failing CI.
+
+`identity-transparency.test.js` starts a real Caddy container and asserts on what an app container actually *receives* — which needs the container to reach stub upstreams on the host via `--add-host host.docker.internal:host-gateway`. That hop does not route back to the host on a GitHub Actions runner, so Caddy answered 502 for every route and seven assertions failed.
+
+A 502 there says nothing about the config under test. Failing on it is a false negative that reds the gate on every push and teaches people to ignore it — which is exactly what happened: **v2.40.0 and v2.41.0 both shipped with Watchdog red and it went unnoticed**, because only the Security Scan was checked before tagging.
+
+The test gated on Docker being *present*, which was never the right question; the right one is whether the container can reach the host. It now preflights that hop and skips with the reason when it cannot. Locally, where the networking works, all 31 checks still run — the same file's static assertions against the adapted Caddy JSON run everywhere regardless, and cover the same invariants structurally.
+
 ## 2.41.0 — Apps can define their own roles, and a person can hold several.
 
 An app declares roles in Manage › Access — `approver`, `auditor`, `dispatcher`, whatever it needs — assigns any number of them to a person, and reads them back from `/api/me` or the `X-AppCrane-App-Roles` header. AppCrane is the role **authority**; the app is the policy **enforcer**. AppCrane never decides what `approver` means.
