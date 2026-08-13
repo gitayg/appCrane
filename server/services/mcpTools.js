@@ -2,6 +2,10 @@ import { getDb } from '../db.js';
 import { decrypt, encrypt } from './encryption.js';
 import { BUCKETS, bucketize, applyBucket } from './requestStatus.js';
 import { userHasAppPermission, userHasPlatformPermission, roleForUserOnApp } from './permissions.js';
+import {
+  listRoles, createRole, listMembersWithRoles, setUserRoleKeys, clearUserRoleGrants,
+  MAX_ROLES_PER_APP, RESERVED_KEYS,
+} from './appDefinedRoles.js';
 import { isAdmin } from '../utils/roles.js';
 import log from '../utils/logger.js';
 import { validateBypassPaths } from '../utils/authBypassPaths.js';
@@ -126,6 +130,27 @@ function isAppAdmin(user, app) {
   // got "Forbidden" on call. Matters for non-admin onboarding: the app
   // creator is auto-assigned owner.
   return row?.app_role === 'admin' || row?.app_role === 'owner';
+}
+
+/**
+ * Gate for the app-defined-role tools. `manage: true` demands the app's own
+ * owner/admin tier; otherwise plain membership is enough to read the roster.
+ *
+ * Deliberately roleForUserOnApp rather than isAppAdmin: it is the same resolver
+ * the REST routes use, and it gives an AppCrane global admin who is not assigned
+ * to the app no per-app tier at all. So both surfaces answer identically, and an
+ * app's own permission vocabulary is authored by that app's owners rather than
+ * by anyone holding a platform key.
+ */
+function requireAppRoleTier(user, app, { manage }) {
+  const tier = roleForUserOnApp(user, app);
+  if (manage ? (tier !== 'owner' && tier !== 'admin') : !tier) {
+    throw new Error(
+      manage
+        ? `Forbidden: only an owner or admin of ${app.slug} can manage its app-defined roles`
+        : `Forbidden: you are not assigned to ${app.slug}. Assign yourself first (appcrane_grant_app_access) to read its app-defined roles.`
+    );
+  }
 }
 
 /**
@@ -1704,6 +1729,9 @@ const TOOLS = [
 
       const r1 = db.prepare('DELETE FROM app_user_roles WHERE app_id = ? AND user_id = ?').run(app.id, target.id);
       const r2 = db.prepare('DELETE FROM app_users      WHERE app_id = ? AND user_id = ?').run(app.id, target.id);
+      // v2.41.0: and the roles the APP defined for them. Left behind, they come
+      // back in full the moment the user is re-granted bare access.
+      const appRolesRemoved = clearUserRoleGrants(app.id, target.id);
 
       // Purge the revoked user's per-tenant DB dir (multitenant apps only).
       // Best-effort — never let a purge failure fail the revoke.
@@ -1718,7 +1746,117 @@ const TOOLS = [
       }
 
       log.info(`MCP: revoked access on ${app.slug} from user ${target.id} by ${user.id}`);
-      return { app: app.slug, user: { id: target.id, email: target.email }, removed: { roles: r1.changes, members: r2.changes } };
+      return { app: app.slug, user: { id: target.id, email: target.email }, removed: { roles: r1.changes, members: r2.changes, app_defined_roles: appRolesRemoved } };
+    },
+  },
+
+  // --- App-defined roles (v2.41.0) ------------------------------------------
+  //
+  // The three tools below manage the roles an app invents FOR ITSELF. They are a
+  // different system from appcrane_grant_app_access / _list_app_members directly
+  // above, which set AppCrane's own per-app tier (owner/admin/user/viewer —
+  // deploy, env, delete). The descriptions say so in their first two sentences
+  // because an agent picking by name alone would pick the wrong one, and picking
+  // wrong here means handing out real platform power while intending to hand out
+  // an app label.
+  //
+  // Nothing AppCrane decides ever reads these keys back; they are stored so they
+  // can be handed to the app in X-AppCrane-App-Roles and /api/me's app_roles.
+
+  {
+    name: 'appcrane_list_app_roles',
+    description:
+      'List the roles an app defines FOR ITSELF (approver, auditor, reviewer — whatever that app invented), plus which of its members hold each one. ' +
+      'These are NOT AppCrane permissions: they grant nothing on the platform and are only handed to the app, in the X-AppCrane-App-Roles request header and in /api/me\'s app_roles array, for the app\'s own code to enforce. ' +
+      'For AppCrane\'s own per-app tier — owner/admin/user/viewer, i.e. who may deploy, read env vars, or delete the app — use appcrane_list_app_members instead. ' +
+      'Call this before creating a role (to avoid duplicating one) or before setting a user\'s roles (to see the valid keys). Requires being assigned to the app.',
+    inputSchema: {
+      type: 'object',
+      properties: { slug: { type: 'string' } },
+      required: ['slug'],
+      additionalProperties: false,
+    },
+    requiredRole: 'any',
+    handler: async (user, args) => {
+      const app = getAppForUser(user, args.slug);
+      requireAppRoleTier(user, app, { manage: false });
+      return {
+        app: app.slug,
+        roles: listRoles(app.id),
+        members: listMembersWithRoles(app.id),
+      };
+    },
+  },
+
+  {
+    name: 'appcrane_create_app_role',
+    description:
+      'Define a new role for an app to enforce itself — the vocabulary side of app-defined roles. ' +
+      'This does NOT grant AppCrane privileges of any kind, and it does NOT give anyone the role: use appcrane_set_user_app_roles for that. ' +
+      'To change who may deploy / read env / delete, you want appcrane_grant_app_access, not this tool. ' +
+      `key is what the app\'s code compares against and is immutable once created; it must match /^[a-z][a-z0-9_-]{0,31}$/ and may not be one of the AppCrane-reserved words (${RESERVED_KEYS.join(', ')}). ` +
+      `label is the human name shown in the dashboard. An app may define at most ${MAX_ROLES_PER_APP} roles. Owner or admin of the app required.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        slug: { type: 'string' },
+        key: { type: 'string', description: 'Machine key the app matches on, e.g. "approver". Lowercase, immutable.' },
+        label: { type: 'string', description: 'Human-readable name, e.g. "Budget approver"' },
+        description: { type: 'string', description: 'Optional. What the app lets this role do.' },
+      },
+      required: ['slug', 'key', 'label'],
+      additionalProperties: false,
+    },
+    requiredRole: 'any',
+    handler: async (user, args) => {
+      const app = getAppForUser(user, args.slug);
+      requireAppRoleTier(user, app, { manage: true });
+      const role = createRole(
+        app.id,
+        { key: args.key, label: args.label, description: args.description },
+        user.id,
+      );
+      log.info(`MCP: app-defined role '${role.key}' created on ${app.slug} by user ${user.id}`);
+      return { app: app.slug, role };
+    },
+  },
+
+  {
+    name: 'appcrane_set_user_app_roles',
+    description:
+      'Set which app-defined roles a user holds on one app. Replaces their whole set: keys omitted from the list are removed, and keys: [] clears every role they hold. ' +
+      'This changes only what the app itself enforces — it does NOT change the user\'s AppCrane per-app tier, so it can neither grant nor remove deploy / env / delete power. Use appcrane_grant_app_access for that. ' +
+      'Every key must already be defined on this app (appcrane_create_app_role) and the user must already have access to the app (appcrane_grant_app_access) — a role on a non-member is unenforceable, since the app never sees them. ' +
+      'The result is what the app receives in X-AppCrane-App-Roles on the user\'s next request. Owner or admin of the app required.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        slug: { type: 'string' },
+        user: { type: 'string', description: 'User id (numeric string), email, or username' },
+        keys: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'The COMPLETE set of app-defined role keys this user should hold. [] removes all of them.',
+        },
+      },
+      required: ['slug', 'user', 'keys'],
+      additionalProperties: false,
+    },
+    requiredRole: 'any',
+    handler: async (user, args) => {
+      const app = getAppForUser(user, args.slug);
+      requireAppRoleTier(user, app, { manage: true });
+      const db = getDb();
+      const target = db.prepare(`
+        SELECT id, name, email, username FROM users
+        WHERE active = 1 AND (CAST(id AS TEXT) = ? OR email = ? OR username = ?)
+        LIMIT 1
+      `).get(args.user, args.user, args.user);
+      if (!target) throw new Error(`User not found: ${args.user}`);
+
+      const app_roles = setUserRoleKeys(app.id, target.id, args.keys, user.id);
+      log.info(`MCP: app-defined roles on ${app.slug} for user ${target.id} set to [${app_roles.join(',')}] by ${user.id}`);
+      return { app: app.slug, user: { id: target.id, name: target.name, email: target.email }, app_roles };
     },
   },
 

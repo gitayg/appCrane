@@ -49,6 +49,9 @@ const TOOL_GROUPS: { cat: string; tools: [string, string][] }[] = [
     ["appcrane_list_access_requests", "List pending access requests from the portal's Request-access button"],
     ["appcrane_approve_access_request", "Approve a pending access request and grant access at a role"],
     ["appcrane_deny_access_request", "Deny a pending access request without granting access"],
+    ["appcrane_list_app_roles", "List the roles an app defines for ITSELF + who holds each (not AppCrane permissions)"],
+    ["appcrane_create_app_role", "Define an app-defined role. Grants nothing on the platform"],
+    ["appcrane_set_user_app_roles", "Replace the app-defined roles a user holds on one app"],
   ] },
   { cat: "Requests & guides", tools: [
     ["appcrane_list_requests", "List enhancement requests filed against an app via the intake form"],

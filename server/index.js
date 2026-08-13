@@ -44,6 +44,7 @@ import backupsRoutes from './routes/backups.js';
 import logsRoutes from './routes/logs.js';
 import monitoringRoutes from './routes/monitoring.js';
 import notificationsRoutes from './routes/notifications.js';
+import appRolesRoutes from './routes/appRoles.js';
 import identityRoutes from './routes/identity.js';
 import settingsRoutes from './routes/settings.js';
 import configRoutes from './routes/config.js';
@@ -804,6 +805,12 @@ app.use('/api/apps', envVarsRoutes);     // /api/apps/:slug/env/:env
 app.use('/api/apps', healthRoutes);      // /api/apps/:slug/health/:env
 app.use('/api/apps', backupsRoutes);     // /api/apps/:slug/backup/:env
 app.use('/api/apps', notificationsRoutes); // /api/apps/:slug/notifications
+// /api/apps/:slug/app-roles — the roles an app defines for ITSELF. Distinct
+// from /api/apps/:slug/roles (usersRoutes, mounted at line ~854), which sets
+// AppCrane's own per-app tier. Safe anywhere among the /api/apps routers: this
+// one installs no router-level middleware, and no earlier router registers a
+// pattern that would swallow /:slug/app-roles.
+app.use('/api/apps', appRolesRoutes);
 // Mount identity FIRST so its routes don't get caught by other middleware
 app.use('/api/identity', identityRoutes);
 app.use('/api/enhancements', enhancementsRoutes); // Enhancement requests (Bearer auth, must be before logsRoutes)

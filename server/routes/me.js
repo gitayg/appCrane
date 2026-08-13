@@ -26,6 +26,7 @@
 import { Router } from 'express';
 import { getDb } from '../db.js';
 import { hashApiKey } from '../services/encryption.js';
+import { roleKeysForUser } from '../services/appDefinedRoles.js';
 import { AppError } from '../utils/errors.js';
 
 const router = Router();
@@ -97,6 +98,7 @@ router.get('/me', (req, res) => {
   // suffix as a fallback.
   let appRole = null;
   let appSlugOut = null;
+  let appRoles = [];
   if (appSlug) {
     let app = db.prepare('SELECT id, slug, visibility FROM apps WHERE slug = ?').get(appSlug);
     if (!app && appSlug.endsWith('-sandbox')) {
@@ -111,6 +113,19 @@ router.get('/me', (req, res) => {
         const r = db.prepare('SELECT app_role FROM app_user_roles WHERE app_id = ? AND user_id = ?').get(app.id, user.id);
         appRole = r?.app_role || (app.visibility === 'public' ? 'viewer' : 'none');
       }
+      // v2.41.0: the roles the app defines for ITSELF, as keys. Read from their
+      // own tables and never folded into appRole above — an app-defined role
+      // confers nothing on AppCrane, which is why an app owner may invent them
+      // freely. Note there is no admin short-circuit: grants are explicit only,
+      // so a platform admin holds an app's roles only if someone granted them
+      // (implicit role collapse is what once made an app deny its owner).
+      //
+      // Read AFTER appRole and withheld when it is 'none', matching the point
+      // /api/identity/verify emits the header — after its own denial. The two
+      // are one wire contract and apps are told to use either, so a person the
+      // platform denies must not learn their old keys from whichever surface
+      // they happened to call.
+      if (appRole !== 'none') appRoles = roleKeysForUser(app.id, user.id);
     }
   }
 
@@ -122,7 +137,7 @@ router.get('/me', (req, res) => {
       username: user.username,
       role:     user.role,
     },
-    ...(appSlugOut !== null && { app: appSlugOut, app_role: appRole }),
+    ...(appSlugOut !== null && { app: appSlugOut, app_role: appRole, app_roles: appRoles }),
   });
 });
 
