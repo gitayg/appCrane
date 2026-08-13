@@ -19,6 +19,20 @@ function parseBypassPathsField(raw) {
   if (!raw) return [];
   try { const v = JSON.parse(raw); return Array.isArray(v) ? v : []; } catch { return []; }
 }
+
+// auth_mode was settable but never returned — write-only config, so nobody
+// could see which mode an app was in. That blind spot is the root of the
+// recurring "my app receives no X-AppCrane-* identity headers" triage, since a
+// headless app skips forward_auth entirely and never gets identity by design.
+//
+// Report the EFFECTIVE mode rather than the raw column: the value is not
+// validated on write, so a legacy or hand-edited row can hold something like
+// 'forward_auth', which caddy.js treats as authenticated. Mirroring caddy.js
+// (only the literal 'headless' bypasses forward_auth) keeps the answer the API
+// gives identical to the behaviour the proxy actually implements.
+function effectiveAuthMode(raw) {
+  return raw === 'headless' ? 'headless' : 'authenticated';
+}
 import { userHasAppPermission, userHasPlatformPermission, roleForUserOnApp } from '../services/permissions.js';
 import { isAdmin } from '../utils/roles.js';
 import log from '../utils/logger.js';
@@ -175,6 +189,7 @@ router.get('/', (req, res) => {
       ...app,
       resource_limits: JSON.parse(app.resource_limits || '{}'),
       auth_bypass_paths: parseBypassPathsField(app.auth_bypass_paths),
+      auth_mode: effectiveAuthMode(app.auth_mode),
       has_icon: hasIconFile(app.slug),
       // Boolean flags derived from secret-bearing columns so the UI can
       // show "this app has its own X" without ever shipping the secret.
@@ -323,7 +338,7 @@ router.post('/', requireAuth, auditMiddleware('app-create'), async (req, res) =>
   } : null;
 
   res.status(201).json({
-    app: { ...app, resource_limits: JSON.parse(app.resource_limits), auth_bypass_paths: parseBypassPathsField(app.auth_bypass_paths) },
+    app: { ...app, resource_limits: JSON.parse(app.resource_limits), auth_bypass_paths: parseBypassPathsField(app.auth_bypass_paths), auth_mode: effectiveAuthMode(app.auth_mode) },
     urls,
     base_path: { production: `/${slug}/`, sandbox: `/${slug}-sandbox/` },
     webhook_url: `/api/webhooks/${webhookToken}`,
@@ -362,7 +377,7 @@ router.get('/:slug', requireAppAccess, (req, res) => {
   } : null;
 
   res.json({
-    app: { ...app, resource_limits: JSON.parse(app.resource_limits || '{}'), auth_bypass_paths: parseBypassPathsField(app.auth_bypass_paths) },
+    app: { ...app, resource_limits: JSON.parse(app.resource_limits || '{}'), auth_bypass_paths: parseBypassPathsField(app.auth_bypass_paths), auth_mode: effectiveAuthMode(app.auth_mode) },
     urls: urlsDetail,
     base_path: { production: `/${app.slug}/`, sandbox: `/${app.slug}-sandbox/` },
     ...(isAdmin(req.user) ? { ports } : {}),
@@ -644,7 +659,9 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
   }
 
   if (Object.keys(updates).length === 0) {
-    return res.json({ app, message: 'No changes' });
+    // Normalize auth_mode here too: a caller can't tell which branch of this
+    // route answered, so both must report the same effective mode.
+    return res.json({ app: { ...app, auth_mode: effectiveAuthMode(app.auth_mode) }, message: 'No changes' });
   }
 
   const ALLOWED_APP_COLS = new Set(['name','domain','description','category','source_type','github_url','branch','public_access','visibility','github_token_encrypted','resource_limits','runtime','image_retention','frame_ancestors','auth_mode','auth_bypass_paths','email_from_name']);
@@ -676,6 +693,7 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
       ...updated,
       resource_limits: JSON.parse(updated.resource_limits || '{}'),
       auth_bypass_paths: parseBypassPathsField(updated.auth_bypass_paths),
+      auth_mode: effectiveAuthMode(updated.auth_mode),
       domain_aliases: db.prepare('SELECT id, domain, source, created_at FROM app_domain_aliases WHERE app_id = ? ORDER BY created_at, id').all(app.id),
     },
   });

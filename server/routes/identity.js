@@ -379,6 +379,7 @@ router.get('/verify', (req, res) => {
   //   X-AppCrane-User-Name  — display name (URL-encoded for non-Latin-1 safety)
   //   X-AppCrane-User-Role  — global role token (platform_admin / admin / user)
   //   X-AppCrane-App-Role   — per-app role (owner / admin / user / viewer)
+  //   X-AppCrane-Is-Admin   — '1' / '0', see below
   if (session.user_id !== undefined && session.user_id !== null) {
     res.setHeader('X-AppCrane-User-Id', String(session.user_id));
   }
@@ -397,6 +398,41 @@ router.get('/verify', (req, res) => {
   if (appRole) {
     res.setHeader('X-AppCrane-App-Role', appRole);
   }
+
+  // v2.40.0: X-AppCrane-Is-Admin — the platform's own answer to "does this
+  // person hold admin power here?", so an app never has to re-derive it from
+  // two role strings whose ordering it can't see.
+  //
+  // The ordering is none < viewer < user < admin < owner, and 'owner' is where
+  // apps kept getting it wrong: an app comparing App-Role === 'admin' denies the // role:platform-admin-skipped
+  // OWNER of the app — the highest tier — from its own settings page. That is a
+  // real bug we've now debugged more than once, and it is the reason this header
+  // exists rather than more documentation about role ordering.
+  //
+  // When there IS an app context, App-Role is the whole answer — the global role
+  // is deliberately NOT OR-ed in. resolveAppRole() above already folds the
+  // global-admin short-circuit in as a FALLBACK, and lets an explicit
+  // app_user_roles row beat it (v2.7.21). So a platform_admin an app owner has
+  // deliberately seated as 'user' resolves to 'user', and this header must agree:
+  // OR-ing crane_role back in would emit App-Role: user alongside Is-Admin: 1 —
+  // two platform-issued headers contradicting each other about the one question
+  // this header exists to settle, and it would re-grant the per-app power that
+  // the explicit row was written to remove.
+  //
+  // Without an app context (a bare /verify with no ?app=) there is no App-Role
+  // to defer to, and the global role is the only thing left to answer with.
+  //
+  // Always emitted on this path, '0' included: reaching this line means a
+  // session WAS verified, so '0' honestly means "verified, not an admin". On the
+  // headless and per-path-bypass routes /verify is never called at all, so no
+  // value is emitted there — and Caddy strips any the client sent, so the header
+  // is ABSENT rather than fabricated. A '0' would read as "verified, not an
+  // admin" when nothing was verified, which is a worse ambiguity than the one
+  // this fixes. Apps distinguish the two by reading X-AppCrane-Auth-Mode, which
+  // Caddy stamps on every proxied request including those routes.
+  const isPlatformAdmin = session.crane_role === 'admin' || session.crane_role === 'platform_admin';
+  const isAppAdmin = appRole === 'admin' || appRole === 'owner';
+  res.setHeader('X-AppCrane-Is-Admin', (appRole ? isAppAdmin : isPlatformAdmin) ? '1' : '0');
 
   res.json({
     user: {

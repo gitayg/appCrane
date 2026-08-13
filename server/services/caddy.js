@@ -24,6 +24,56 @@ function platformCookieStrip(indent) {
 }
 
 /**
+ * The identity headers /api/identity/verify issues and forward_auth copies onto
+ * the upstream request. Every one of them is stripped off the CLIENT request
+ * first, everywhere an app is proxied — otherwise a curl with
+ * `X-AppCrane-User-Role: platform_admin` would arrive at the app and be trusted.
+ *
+ * Module scope for the same reason platformCookieStrip is: this list previously
+ * existed twice (the crane-domain block and the custom-domain block) and is
+ * exactly the kind of duplicated security rule that drifts. One definition,
+ * several indentations.
+ */
+const IDENTITY_HEADERS = [
+  'X-AppCrane-User',
+  'X-AppCrane-User-Id',
+  'X-AppCrane-User-Email',
+  'X-AppCrane-User-Name',
+  'X-AppCrane-User-Role',
+  'X-AppCrane-App-Role',
+  // v2.40.0: the platform's own answer to "is this person an admin here?",
+  // computed in /api/identity/verify with the correct precedence (owner counts).
+  // Apps kept re-deriving it from App-Role with `=== 'admin'` and locking owners
+  // — the highest tier — out of their own settings pages.
+  'X-AppCrane-Is-Admin',
+];
+
+/**
+ * v2.40.0: X-AppCrane-Auth-Mode — which identity path this route runs.
+ *
+ * "No X-AppCrane-* headers arrived" used to be one symptom with four causes:
+ * headless mode, a path-level auth bypass, a broken forward_auth, or the app not
+ * being proxied by AppCrane at all. An app author had no way to tell them apart,
+ * and four separate debugging sessions this week ended at that ambiguity. This
+ * header is a constant per route, so the app can read it and know immediately
+ * whether identity was ever coming.
+ *
+ * Set (two args), not add — a client's forged value is replaced, not appended
+ * to. The explicit strip in front is belt-and-braces so the invariant survives a
+ * future edit that turns this into an `+` add.
+ */
+const AUTH_MODE_HEADER = 'X-AppCrane-Auth-Mode';
+
+function identityStrip(indent) {
+  return IDENTITY_HEADERS.map(h => `${indent}request_header -${h}\n`).join('');
+}
+
+function authMode(indent, mode) {
+  return `${indent}request_header -${AUTH_MODE_HEADER}\n` +
+         `${indent}request_header ${AUTH_MODE_HEADER} "${mode}"\n`;
+}
+
+/**
  * Generate full Caddy config JSON (path-based routing).
  * Note: the Caddyfile format (generateCaddyfile) is used in production via systemctl reload.
  */
@@ -186,17 +236,54 @@ export function generateCaddyfile() {
     // first — otherwise a curl with `X-AppCrane-User-Role: platform_admin`
     // would arrive at the app and be trusted. The strip + copy_headers
     // pair guarantees what the app receives is platform-issued.
-    const IDENTITY_HEADERS = [
-      'X-AppCrane-User',
-      'X-AppCrane-User-Id',
-      'X-AppCrane-User-Email',
-      'X-AppCrane-User-Name',
-      'X-AppCrane-User-Role',
-      'X-AppCrane-App-Role',
-    ];
-    const stripIncoming = IDENTITY_HEADERS
-      .map(h => `        request_header -${h}\n`).join('');
-    const copyFromVerify = `            copy_headers ${IDENTITY_HEADERS.join(' ')}\n`;
+    //
+    // The strip runs on EVERY route that proxies an app, forward_auth or not.
+    // A headless route verifies nobody, which is exactly why it must not let a
+    // client hand its own X-AppCrane-Is-Admin to the container: "we don't
+    // authenticate" must not degrade into "we accept the caller's word for it".
+    const stripIncoming = identityStrip('        ');
+
+    // v2.40.0: the strip and forward_auth must be wrapped in `route`, and this
+    // is not cosmetic. Caddy sorts directives by its own fixed order, not by the
+    // order they appear in the file, and `forward_auth` sorts AHEAD of
+    // `header`/`request_header`. So a strip written above forward_auth compiles
+    // BELOW it: copy_headers writes the identity onto the request, and the strip
+    // then deletes every one of those headers before the app proxy runs. The
+    // app receives nothing.
+    //
+    // That is not a theory. Adapted with `caddy adapt` and then run against
+    // caddy:2 with a live verify upstream and an echo upstream: in the shape
+    // this file emitted through v2.39.0 the app received ZERO X-AppCrane-*
+    // headers; wrapping the pair in `route` (which preserves written order for
+    // its contents) delivers the platform values and still drops forged ones —
+    // including headers /verify does NOT issue, which copy_headers alone would
+    // leave in place because it only overwrites what it copies.
+    //
+    // This is the most likely real cause of "app X gets no identity headers",
+    // which has been variously blamed on SSO, on the app, and on a stale Caddy
+    // process. `uri strip_prefix` still compiles ahead of forward_auth, so
+    // X-Forwarded-Uri behaviour and the ?prefix= compensation in identity.js are
+    // unchanged.
+    //
+    // The v2.39.0 cc_token strip has to live INSIDE this route, after
+    // forward_auth, and that placement is load-bearing in the other direction.
+    // `request_header` sorts after `forward_auth` but BEFORE `route`, so a
+    // cookie strip left at handle level compiles ahead of the whole route and
+    // /api/identity/verify never sees cc_token. For browser traffic that cookie
+    // is the only session source (identity.js reads it when there is no
+    // Authorization and no X-API-Key), so /verify would take its
+    // `!token && !apiKey` branch and 302 every logged-in visitor to /login —
+    // which then bounces them back, forever. Written order inside the route is
+    // preserved: verify reads the cookie, then it is stripped before the app.
+    const emitForwardAuth = (verifyUri) =>
+      `        route {\n` +
+      identityStrip('            ') +
+      `            forward_auth 127.0.0.1:${cranePort} {\n` +
+      `                uri ${verifyUri}\n` +
+      `                copy_headers ${IDENTITY_HEADERS.join(' ')}\n` +
+      `            }\n` +
+      platformCookieStrip('            ') +
+      `        }\n`;
 
     // v2.39.0: the platform session cookie must never reach an app container.
     //
@@ -226,9 +313,10 @@ export function generateCaddyfile() {
     // — without it a legitimate app cookie named e.g. `my_cc_token` would match
     // on the substring and be corrupted.
     //
-    // UNCONDITIONAL, unlike stripIncoming: headless apps skip forward_auth and
-    // get no identity headers, but the browser still sends them the cookie, so
-    // they need this strip most of all.
+    // UNCONDITIONAL, like stripIncoming: headless apps skip forward_auth and get
+    // no platform identity, but the browser still sends them the cookie, so they
+    // need this strip most of all. On the forward_auth path the strip is emitted
+    // inside the route by emitForwardAuth instead — see the ordering note there.
     const stripPlatformCookie = platformCookieStrip('        ');
 
     // v2.7.22: headless apps bypass forward_auth entirely — no identity,
@@ -237,6 +325,11 @@ export function generateCaddyfile() {
     // status pages). For authenticated apps, the strip + forward_auth +
     // copy_headers pair runs as before.
     const isHeadless = app.auth_mode === 'headless';
+
+    // The mode this app's own /<slug> routes run. Emitted on every proxied
+    // request below, headless included — a headless app is precisely the case
+    // where "I received no identity" needs an explanation on the wire.
+    const stampAuthMode = authMode('        ', isHeadless ? 'headless' : 'authenticated');
 
     // v2.7.27: path-level auth bypass — narrower than headless mode. For
     // each entry in auth_bypass_paths, emit a child `handle` BEFORE the
@@ -249,7 +342,11 @@ export function generateCaddyfile() {
     // SECURITY INVARIANTS we keep on the bypass block:
     //   1. stripIncoming runs on the bypass path too — a curl with
     //      X-AppCrane-User-Role: platform_admin must NOT reach the app
-    //      just because forward_auth is off.
+    //      just because forward_auth is off. Same for the Auth-Mode stamp:
+    //      it is set (not added) to 'bypass' so the app can tell "this
+    //      request took the exempt path" from "forward_auth is broken",
+    //      and so a client cannot claim 'authenticated' on the one route
+    //      where nothing verified it.
     //   2. log_skip suppresses the access log line entirely for these
     //      paths. The token aghook puts in the query string would
     //      otherwise sit in Caddy's log storage. Granular query-param
@@ -275,6 +372,7 @@ export function generateCaddyfile() {
       caddyfile += `        log_skip\n`;
       caddyfile += stripPlatformCookie;
       caddyfile += stripIncoming;
+      caddyfile += authMode('        ', 'bypass');
       caddyfile += `        uri strip_prefix ${mountPrefix}\n`;
       caddyfile += `        reverse_proxy 127.0.0.1:${port} {\n`;
       caddyfile += `            flush_interval -1\n`;
@@ -292,13 +390,12 @@ export function generateCaddyfile() {
 
     caddyfile += `    handle /${slug}-sandbox* {\n`;
     if (liveSet.has(`${app.id}:sandbox`)) {
-      caddyfile += stripPlatformCookie;
-      if (!isHeadless) {
+      caddyfile += stampAuthMode;
+      if (isHeadless) {
+        caddyfile += stripPlatformCookie;
         caddyfile += stripIncoming;
-        caddyfile += `        forward_auth 127.0.0.1:${cranePort} {\n`;
-        caddyfile += `            uri /api/identity/verify?app=${slug}&prefix=/${slug}-sandbox\n`;
-        caddyfile += copyFromVerify;
-        caddyfile += `        }\n`;
+      } else {
+        caddyfile += emitForwardAuth(`/api/identity/verify?app=${slug}&prefix=/${slug}-sandbox`);
       }
       if (fa) {
         caddyfile += `        header Content-Security-Policy "frame-ancestors ${fa}"\n`;
@@ -314,13 +411,12 @@ export function generateCaddyfile() {
     // Production
     caddyfile += `    handle /${slug}* {\n`;
     if (liveSet.has(`${app.id}:production`)) {
-      caddyfile += stripPlatformCookie;
-      if (!isHeadless) {
+      caddyfile += stampAuthMode;
+      if (isHeadless) {
+        caddyfile += stripPlatformCookie;
         caddyfile += stripIncoming;
-        caddyfile += `        forward_auth 127.0.0.1:${cranePort} {\n`;
-        caddyfile += `            uri /api/identity/verify?app=${slug}&prefix=/${slug}\n`;
-        caddyfile += copyFromVerify;
-        caddyfile += `        }\n`;
+      } else {
+        caddyfile += emitForwardAuth(`/api/identity/verify?app=${slug}&prefix=/${slug}`);
       }
       if (fa) {
         caddyfile += `        header Content-Security-Policy "frame-ancestors ${fa}"\n`;
@@ -372,10 +468,14 @@ export function generateCaddyfile() {
   // platform identity into an app that does its own auth. The format is
   // re-validated here so a bad DB value can't produce a broken Caddyfile
   // (Caddy `adapt` would refuse the reload anyway, but better to skip cleanly).
-  const IDENTITY_STRIP = [
-    'X-AppCrane-User', 'X-AppCrane-User-Id', 'X-AppCrane-User-Email',
-    'X-AppCrane-User-Name', 'X-AppCrane-User-Role', 'X-AppCrane-App-Role',
-  ];
+  //
+  // Auth-Mode is stamped 'bypass' here, the same value the per-path exemption
+  // uses: AppCrane is proxying the request but has deliberately not verified
+  // anyone on it. Not 'headless' — that names the app's auth_mode column, and an
+  // sso app on a custom domain still gets full identity on its /<slug> route, so
+  // reporting 'headless' would be a lie about the app's configuration. What the
+  // app learns either way is the thing it needs: identity is not coming on THIS
+  // request, and the absence is deliberate rather than a broken proxy.
   const emittedDomains = new Set([(craneDomain || '').toLowerCase()]);
   for (const app of apps) {
     const domain = (app.domain || '').trim().toLowerCase();
@@ -392,7 +492,8 @@ export function generateCaddyfile() {
     emittedDomains.add(domain);
     const ports = getPortsForSlot(app.slot);
     caddyfile += `\n${domain} {\n`;
-    for (const h of IDENTITY_STRIP) caddyfile += `    request_header -${h}\n`;
+    caddyfile += identityStrip('    ');
+    caddyfile += authMode('    ', 'bypass');
     // Belt-and-braces: cc_token is host-only (no Domain attribute), so a browser
     // never sends it to a custom domain — this block is a different origin. The
     // strip costs one line and holds if that cookie ever gains a Domain, or if a

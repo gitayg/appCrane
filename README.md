@@ -285,24 +285,36 @@ Caddy `copy_headers` the verified identity onto the upstream proxy request. The 
 
 | Header | Value | Notes |
 |---|---|---|
-| `X-AppCrane-User` | email | Backward-compat single identifier. Always set for authenticated requests. |
-| `X-AppCrane-User-Id` | numeric id (string) | Always set. |
+| `X-AppCrane-Auth-Mode` | `authenticated` \| `headless` \| `bypass` | Always present on every proxied request, including ones with no identity. Read it first. |
+| `X-AppCrane-User` | email | Backward-compat single identifier. Set on `authenticated` requests. |
+| `X-AppCrane-User-Id` | numeric id (string) | Set on `authenticated` requests. |
 | `X-AppCrane-User-Email` | email | Granular. May be absent if the user has no email. |
 | `X-AppCrane-User-Name` | display name, `encodeURIComponent`-d | `decodeURIComponent` on read. May be absent. |
-| `X-AppCrane-User-Role` | `platform_admin` \| `admin` \| `user` | Raw token, underscore intact. Always set. |
-| `X-AppCrane-App-Role` | `owner` \| `admin` \| `user` \| `viewer` | Per-app role. Platform admins collapse to `admin` on every app — branch on `X-AppCrane-User-Role` if you specifically need to target platform admins. |
+| `X-AppCrane-User-Role` | `platform_admin` \| `admin` \| `user` | Platform-wide tier, raw token. **Not** a per-app permission. |
+| `X-AppCrane-App-Role` | `owner` \| `admin` \| `user` \| `viewer` | Per-app role — the one to gate on. An explicit `app_user_roles` row wins over the global-admin fallback, so a platform admin who owns the app arrives as `owner`, not `admin`. |
+| `X-AppCrane-Is-Admin` | `1` \| `0` | `1` when the per-app role is `admin` or `owner`. Use it instead of comparing role strings. |
 
-**Trust model:** the Caddy generator emits `request_header -X-AppCrane-*` strip directives *before* the `forward_auth` block in each per-app handler. Caddy zeroes out any client-set `X-AppCrane-*` headers first, then `copy_headers` re-injects only what `/verify` returned. Header smuggling is impossible — what the app receives is guaranteed platform-issued.
+**Trust model:** the Caddy generator wraps the `request_header -X-AppCrane-*` strips and the `forward_auth` block in a `route { … }` so they execute in written order — Caddy's own directive sort would otherwise run the strips *after* `forward_auth` and delete the identity it had just copied. Caddy zeroes out any client-set `X-AppCrane-*` headers first, then `copy_headers` re-injects only what `/verify` returned. The strips are emitted on **every** route that proxies an app, including headless apps and `auth_bypass_paths` prefixes where no `forward_auth` runs at all — a route that verifies nobody must not accept the caller's own `X-AppCrane-Is-Admin`. Header smuggling is impossible — what the app receives is guaranteed platform-issued. Caddy also strips the platform's `cc_token` session cookie out of `Cookie` before it reaches any container (v2.39.0), so an app can't read a visitor's platform session and act as them — **apps must take identity from these headers, never from a cookie**.
 
-**Absence semantics:** if `X-AppCrane-User-Role` isn't on the request, the request was *not* verified (Caddy failed closed at `forward_auth` and you wouldn't receive it). So **presence = trusted**.
+**Identity does not require SSO.** `/api/identity/verify` resolves a session from `X-API-Key` or from `Authorization: Bearer` / the `cc_token` cookie against `identity_sessions`. SSO is one way to create such a session; local password login and API keys are others. An instance with no IdP still injects the full header set for logged-in users.
+
+**Absence semantics:** on an `authenticated` app an unverified visitor never reaches the container at all (Caddy fails closed at `forward_auth` and redirects to `/login`), so **presence = trusted**. Identity legitimately absent means `X-AppCrane-Auth-Mode` is `headless` (whole app opted out) or `bypass` (this path is in `auth_bypass_paths`, **or** the app is served on its own custom domain) — in every case the request is served with no verified identity and the app owns its own authn. No `X-AppCrane-Auth-Mode` at all means the request didn't come through AppCrane's proxy — i.e. direct-to-container. A custom-domain app *is* proxied and does get `X-AppCrane-Auth-Mode: bypass`.
+
+**Role ordering:** `none` < `viewer` < `user` < `admin` < `owner`. `appRole === 'admin'` is a bug — it denies owners.
 
 ```js
 // Express example
+const RANK = { none: 0, viewer: 1, user: 2, admin: 3, owner: 4 }
+const atLeast = (appRole, min) => (RANK[appRole] ?? 0) >= RANK[min]
+
 app.use((req, res, next) => {
-  const role    = req.get('X-AppCrane-User-Role')    // 'platform_admin' | 'admin' | 'user'
-  const appRole = req.get('X-AppCrane-App-Role')     // 'owner' | 'admin' | 'user' | 'viewer'
+  const mode    = req.get('X-AppCrane-Auth-Mode')   // 'authenticated' | 'headless' | 'bypass'
+  const role    = req.get('X-AppCrane-User-Role')   // platform tier
+  const appRole = req.get('X-AppCrane-App-Role')    // 'owner' | 'admin' | 'user' | 'viewer'
   const email   = req.get('X-AppCrane-User-Email') || req.get('X-AppCrane-User')
-  req.user = role ? { id: req.get('X-AppCrane-User-Id'), email, role, appRole } : null
+  req.user = (mode === 'authenticated' && role)
+    ? { id: req.get('X-AppCrane-User-Id'), email, role, appRole, isAppAdmin: atLeast(appRole, 'admin') }
+    : null
   next()
 })
 ```
@@ -329,7 +341,7 @@ App slug resolution:
 
 ### 3. Headless apps — opt out entirely
 
-For services where the *whole app* is meant to be unauthenticated — telemetry ingest, public webhooks, status pages, the squash CLI's `ping`/`stats` — set the app's `auth_mode` to `headless` (owner-only toggle in the Launcher, or `appcrane_set_app_meta slug=<…> auth_mode=headless` via MCP). The Caddy block then skips `forward_auth`, copy_headers, and the strips entirely. No `X-AppCrane-*` headers, no `/api/me`, no `cc_token`. The app's own server takes responsibility for any payload-level authn it needs (HMAC, install-id, IP allowlist, etc.).
+For services where the *whole app* is meant to be unauthenticated — telemetry ingest, public webhooks, status pages, the squash CLI's `ping`/`stats` — set the app's `auth_mode` to `headless` (owner-only toggle in the Launcher, or `appcrane_set_app_meta slug=<…> auth_mode=headless` via MCP). The Caddy block then skips `forward_auth` and `copy_headers`: no identity headers, no `/api/me`, no `cc_token` (that cookie is stripped for every app regardless). The incoming `X-AppCrane-*` strip is **not** skipped — a headless route verifies nobody, so it must not let a caller supply its own identity headers either. `X-AppCrane-Auth-Mode: headless` still arrives, so the app can distinguish "identity is off by design" from a misconfigured proxy. The app's own server takes responsibility for any payload-level authn it needs (HMAC, install-id, IP allowlist, etc.).
 
 Pick by shape:
 - **The whole app is unauth ingest** → headless app (clean separation, smaller blast radius).

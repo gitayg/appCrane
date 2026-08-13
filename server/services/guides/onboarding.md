@@ -231,9 +231,13 @@ For those, set `auth_mode: 'headless'` and AppCrane bypasses `forward_auth`
 on the entire app:
 
 - No SSO redirect to login.
-- No `cc_token` cookie or `X-AppCrane-*` headers.
+- No identity: no `X-AppCrane-User*` / `App-Role` / `Is-Admin` headers, ever.
+  `X-AppCrane-Auth-Mode: headless` still arrives, so the app can *tell* that
+  this is by design rather than a broken proxy.
 - No per-app role check (`visibility` / `app_user_roles` are ignored).
 - One fewer request hop per call (no `/api/identity/verify` round-trip).
+- The `cc_token` cookie is still stripped (that strip is unconditional and
+  applies to headless apps most of all — see the identity section).
 
 **The app's own server is responsible for any payload-level authn** —
 HMAC signature on the request body, install-ID match, IP allowlist, etc.
@@ -254,27 +258,86 @@ headers** so the app reads identity directly off the incoming request.
 
 | Header | Value | Notes |
 |---|---|---|
-| `X-AppCrane-User` | email | Always set for authenticated requests (backward-compat single identifier). |
-| `X-AppCrane-User-Id` | numeric id (string) | Always set. |
+| `X-AppCrane-Auth-Mode` | `authenticated` \| `headless` \| `bypass` | **Always present** on every request AppCrane proxies, including ones that carry no identity. Read this FIRST — it is the only way to tell "not logged in" from "this app/path never gets identity". |
+| `X-AppCrane-User` | email | Set on `authenticated` requests (backward-compat single identifier). |
+| `X-AppCrane-User-Id` | numeric id (string) | Set on `authenticated` requests. |
 | `X-AppCrane-User-Email` | email | Same value as `X-AppCrane-User`; granular header. May be absent if the user has no email. |
 | `X-AppCrane-User-Name` | display name, `encodeURIComponent`-d | `decodeURIComponent` on read. May be absent. |
-| `X-AppCrane-User-Role` | `platform_admin` \| `admin` \| `user` | Raw token, underscore intact. Always set for authenticated requests. |
-| `X-AppCrane-App-Role` | `owner` \| `admin` \| `user` \| `viewer` | Always set when the request is on a per-app prefix. |
+| `X-AppCrane-User-Role` | `platform_admin` \| `admin` \| `user` | The **platform-wide** role. Raw token, underscore intact. Set on `authenticated` requests. Not a per-app permission — see below. |
+| `X-AppCrane-App-Role` | `owner` \| `admin` \| `user` \| `viewer` | The **per-app** role, the one to gate features on. Set when the request is on a per-app prefix. |
+| `X-AppCrane-Is-Admin` | `1` \| `0` | Pre-computed "may administer THIS app" — `1` when `X-AppCrane-App-Role` is `admin` **or** `owner`. Set on `authenticated` requests. Use it instead of hand-rolling role comparisons. |
 
 **Trust model:** Caddy strips any incoming `X-AppCrane-*` from the client *before* `forward_auth` runs and re-injects only what `/api/identity/verify` returned, so what the app sees is guaranteed platform-issued. Header-smuggling is impossible.
 
-**Absence semantics:** if `X-AppCrane-User-Role` isn't on the request, the request was not verified (Caddy would have failed closed at `forward_auth` and you'd never receive it). So **presence = trusted**.
+**Never derive identity from the `cc_token` cookie.** As of v2.39.0 Caddy strips `cc_token` by name out of the `Cookie` header before the request reaches any app container — unconditionally, headless apps included. It was never yours to read: `cc_token` is the *platform* session, accepted as a bearer by AppCrane's own API, so an app backend that lifted it out of `Cookie` could call the platform API **as the visitor** (read every app's decrypted env vars, if the visitor was a platform admin). Identity on the server comes from the `X-AppCrane-*` headers, full stop. Browser-side `fetch('/api/me')` is unaffected — that request matches the platform catch-all, not your app's proxy block, so the browser sends the cookie straight to AppCrane and never through you. If your app currently reads `cc_token`, it is already broken and must move to the headers.
 
-**Platform admin collapse:** a `platform_admin` always reads as `X-AppCrane-App-Role: admin` on every app — same short-circuit `/verify` and `/api/me` use. If the app needs to specifically target platform admins (not just any admin), branch on `X-AppCrane-User-Role === 'platform_admin'`.
+**Identity does NOT require SSO.** `/api/identity/verify` resolves a session from `X-API-Key` (against `users.api_key_hash`) or from `Authorization: Bearer` / the `cc_token` cookie (against `identity_sessions`). SAML/OIDC is only *one* way a row lands in `identity_sessions` — local password login (`POST /api/identity/login`) and API keys are others. An instance with no IdP configured at all still injects the full `X-AppCrane-*` set for logged-in local users. "We don't have SSO" is never the explanation for missing headers; check `auth_mode` instead.
+
+### Absence semantics — why identity might not be there
+
+Missing identity headers are **four different problems with one symptom**, so start from `X-AppCrane-Auth-Mode`, which is always present:
+
+| `X-AppCrane-Auth-Mode` | What it means | What the app should do |
+|---|---|---|
+| `authenticated` | `forward_auth` ran and passed. The identity headers on this request are platform-verified. | Trust them. Gate on `X-AppCrane-App-Role`. |
+| `headless` | The app is `auth_mode: 'headless'`. `forward_auth` is skipped for the WHOLE app, the request is served anyway, and no identity is ever produced. | Do your own payload-level authn (HMAC, install-id, IP allowlist). Treat any `X-AppCrane-User-*` value on such a request as untrusted — nothing verified it. |
+| `bypass` | AppCrane is proxying the request but deliberately verified nobody on it. Two causes: the request hit one of the app's `auth_bypass_paths` prefixes (SSO off for that path only, the rest of the app still gated), or the app is served on its own **custom domain**, where no route is gated and the app does all of its own auth. | Validate the path's own token, or your own session, before doing anything else. Same untrusted-identity rule as `headless`. |
+
+An unauthenticated visitor on an `authenticated` app never reaches you at all — Caddy fails closed at `forward_auth` and 302s them to `/login`. So on an `authenticated` request, **presence = trusted**; and if you expected identity and got none, the answer is in `X-AppCrane-Auth-Mode`, not in your code.
+
+An app on a **custom domain** is served from its own site block with no `forward_auth` and every incoming `X-AppCrane-*` stripped, so it gets no identity — but AppCrane's proxy *is* still in the path, and that block stamps `X-AppCrane-Auth-Mode: bypass` like any other never-verified route. Only one case produces no `X-AppCrane-Auth-Mode` at all: **you're hitting the container directly**, bypassing AppCrane's proxy entirely. That absence is the one reliable signal that AppCrane is not in front of you.
+
+`auth_mode` is set with `appcrane_set_app_meta slug=<slug> auth_mode=<authenticated|headless>` (owner-only) and read back on `appcrane_get_app` — an app that never toggled it reports `authenticated`. Checking that field is the first diagnostic step whenever an app reports "we get no identity headers".
+
+### The canonical role check
+
+Per-app roles are **ordered**: `none` < `viewer` < `user` < `admin` < `owner`. Write the gate as "at least X", never as equality.
+
+```js
+// The ONE role check. Copy this; don't invent a variant.
+const RANK = { none: 0, viewer: 1, user: 2, admin: 3, owner: 4 }
+const atLeast = (appRole, min) => (RANK[appRole] ?? 0) >= RANK[min]
+
+if (atLeast(req.get('X-AppCrane-App-Role'), 'admin')) showAdminUI()   // owner passes too
+// identical, with no table to maintain:
+if (req.get('X-AppCrane-Is-Admin') === '1') showAdminUI()
+```
+
+> **`appRole === 'admin'` is a bug.** It denies the app's OWNER — the single
+> most-privileged user — from every admin surface it guards. This exact
+> comparison is why a real app's Settings page told its own owner "Admin access
+> required". If you catch yourself writing `=== 'admin'`, write
+> `atLeast(appRole, 'admin')` or read `X-AppCrane-Is-Admin` instead.
+
+**`X-AppCrane-User-Role` is not a per-app permission.** It's the platform-wide tier, and platform admins do **not** flatten to `admin` on every app. `resolveAppRole` in `/api/identity/verify` resolves in this order:
+
+1. an explicit `app_user_roles` row for (this app, this user) — **wins outright**, whatever it says;
+2. else, global `admin` / `platform_admin` → `admin` (the fallback short-circuit);
+3. else, app `visibility: public` → `viewer`;
+4. else `none` (request is denied — the user never reaches the app).
+
+So a `platform_admin` who is **owner** of an app arrives as `X-AppCrane-App-Role: owner`, and one carrying an explicit `user` row arrives as `user` — deliberately, so a platform admin can hold a *reduced* role on a specific app. Branch on `X-AppCrane-User-Role === 'platform_admin'` only when you specifically mean "platform staff", never as a stand-in for "can administer this app".
 
 ```js
 // Express example
 app.use((req, res, next) => {
-  const role     = req.get('X-AppCrane-User-Role')      // 'platform_admin' | 'admin' | 'user' | undefined
-  const appRole  = req.get('X-AppCrane-App-Role')       // 'owner' | 'admin' | 'user' | 'viewer' | undefined
+  const mode     = req.get('X-AppCrane-Auth-Mode')      // 'authenticated' | 'headless' | 'bypass' | undefined
+  const role     = req.get('X-AppCrane-User-Role')      // platform tier: 'platform_admin' | 'admin' | 'user'
+  const appRole  = req.get('X-AppCrane-App-Role')       // per-app: 'owner' | 'admin' | 'user' | 'viewer'
   const email    = req.get('X-AppCrane-User-Email') || req.get('X-AppCrane-User')
   const name     = req.get('X-AppCrane-User-Name')
-  req.user = role ? { id: req.get('X-AppCrane-User-Id'), email, name: name && decodeURIComponent(name), role, appRole } : null
+  // Identity only exists on verified requests. On headless/bypass the same
+  // header names may be present but nothing verified them — ignore them.
+  req.user = (mode === 'authenticated' && role)
+    ? {
+        id: req.get('X-AppCrane-User-Id'),
+        email,
+        name: name && decodeURIComponent(name),
+        role,
+        appRole,
+        isAppAdmin: req.get('X-AppCrane-Is-Admin') === '1',
+      }
+    : null
   next()
 })
 ```
@@ -285,9 +348,11 @@ Use `/api/me` (next section) when you need *more* than the basics — full user 
 
 Apps deployed on AppCrane run behind a Caddy proxy that has already
 authenticated the user before forwarding the request (per-app forward_auth
-to `/api/identity/verify`). The container itself receives an anonymous-looking
-HTTP request — no identity headers, no token. To find out who the caller is,
-the app calls `GET /api/me` on the **same origin** the app is served from.
+to `/api/identity/verify`). The server side of the app should read the
+`X-AppCrane-*` headers above — that's zero extra requests. `GET /api/me`, on
+the **same origin** the app is served from, is the complement for cases the
+headers don't cover: **browser** code (which never sees request headers), and
+non-proxied callers (CLI, scripts).
 
 **Endpoint:** `GET /api/me[?app=<slug>]`
 
@@ -317,20 +382,43 @@ app's browser already has, so usually nothing extra is needed):
 - `user.role` is the global role: `platform_admin` / `admin` / `user`.
 - `app_role` (when an app slug resolved) is one of:
   - `owner`  — the user owns this app.
-  - `admin`  — per-app admin (and global admins/platform_admins on every app).
+  - `admin`  — per-app admin.
   - `user`   — assigned member.
   - `viewer` — auto-granted to authenticated users on `visibility: public` apps.
   - `none`   — no access (the proxy would normally have already blocked them,
                so seeing `none` from inside the app is unusual).
+- Same ordering as the headers — `none` < `viewer` < `user` < `admin` < `owner`.
+  Gate with `atLeast(app_role, 'admin')`, never `app_role === 'admin'`.
+
+> **One divergence to know about:** `/api/me` resolves a global `admin` /
+> `platform_admin` to `app_role: 'admin'` **before** checking their explicit
+> per-app row, whereas the `X-AppCrane-App-Role` header checks the explicit row
+> first. For a global admin the two can disagree in a way that a correct
+> `atLeast` check does NOT paper over:
+>
+> - No explicit row: header `admin`, `/api/me` `admin`. Agree.
+> - Explicit `owner` row: header `owner`, `/api/me` `admin`. Both clear
+>   "at least admin"; only an `=== 'owner'` check sees a difference.
+> - Explicit `user` row — a global admin an app owner deliberately demoted:
+>   header `user`, `/api/me` `admin`. These clear the gate **oppositely**.
+>
+> So do not treat the two sources as interchangeable. `X-AppCrane-App-Role`
+> (and `X-AppCrane-Is-Admin`, which is computed from it) is the source of
+> truth for per-app role on the server, and it is the one that honours a
+> deliberate per-app demotion. Use `/api/me` for browser-side display, not
+> for authorization decisions.
 
 **Example — frontend JS:**
 
 ```js
+const RANK = { none: 0, viewer: 1, user: 2, admin: 3, owner: 4 };
+const atLeast = (appRole, min) => (RANK[appRole] ?? 0) >= RANK[min];
+
 const r = await fetch('/api/me');  // cookie auto-sent; slug inferred from Referer
 if (r.ok) {
   const { user, app_role } = await r.json();
   document.getElementById('whoami').textContent = `Hi, ${user.name}`;
-  if (app_role === 'owner' || app_role === 'admin') showAdminUI();
+  if (atLeast(app_role, 'admin')) showAdminUI();   // owner passes too
 }
 ```
 
@@ -343,6 +431,32 @@ email only, no roles or attributes). Cache it; don't refetch per keystroke.
 The user's role is computed server-side from the authenticated identity, not
 from anything the client passes — so a spoofed `Referer` or `?app=` can only
 ask "what's MY role on app X", never escalate to someone else's role.
+
+## Platform notices — how you find out the platform changed under you
+
+When a platform release changes something your app depends on, AppCrane
+publishes a **notice**. This is the channel that did not exist when v2.39.0
+stopped forwarding the `cc_token` cookie: apps that had been reading it simply
+broke, with no warning anywhere.
+
+| Endpoint | Auth | Returns |
+|---|---|---|
+| `GET /api/notices` | none — public | `{ notices: [...] }`, the notices that apply to every app |
+| `GET /api/apps/<slug>/notices` | authenticated **and** must have access to that app | `{ slug, notices: [...] }` — the global ones plus any scoped to that app's configuration |
+| `GET /api/info` | none — public | includes `notices: { url, count }`, a pointer and a count, so a cheap poll can tell whether to fetch the list |
+
+Each notice carries `id`, `severity` (`breaking` / `warning` / `info`),
+`version`, `published_at`, `title` and `body` (plain text, newline-separated).
+
+`/api/notices` is deliberately anonymous — the reader who needs it most is an
+app author whose container just started failing, from inside that container,
+with no platform credentials. The app-scoped route is not anonymous, because a
+scoped notice describes someone's deployment configuration and answering at all
+would confirm a slug exists.
+
+Both are on the platform passthrough list, so an app's own frontend can
+`fetch('/api/notices')` directly to show a banner — the request reaches the
+platform instead of being rewritten back into your `/<slug>` prefix.
 
 ## Per-tenant databases (multitenancy)
 
@@ -494,6 +608,10 @@ What the platform guarantees on bypass paths:
   invariant as on authenticated paths. A curl with a forged
   `X-AppCrane-User-Role: platform_admin` does NOT reach your app just
   because forward_auth is off.
+- **`X-AppCrane-Auth-Mode: bypass`** marks these requests, so the app can
+  distinguish "SSO was skipped for this path" from "SSO ran and the user is
+  anonymous" (which can't happen) or "this whole app is headless". There is
+  no verified identity on a bypass request — nothing ran to produce one.
 - **Access logs suppressed for bypass paths.** Caddy's access log line for
   these requests is skipped entirely so a token in the query string can
   never sit in log storage. Your app is on the hook for whatever auth /

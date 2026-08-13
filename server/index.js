@@ -66,6 +66,8 @@ import githubServiceRoutes from './routes/githubService.js';
 import whatsNewRoutes from './routes/whatsNew.js';
 import platformWhatsNewRoutes from './routes/platformWhatsNew.js';
 import serviceApiRoutes from './routes/serviceApi.js';
+import noticesRoutes from './routes/notices.js';
+import { globalNotices } from './services/platformNotices.js';
 
 const PORT = process.env.PORT || 5001;
 const HOST = process.env.HOST || '0.0.0.0';
@@ -313,7 +315,13 @@ app.use((req, res, next) => {
 });
 
 // Guard: block everything except public routes until admin is configured
-const PUBLIC_PATHS = ['/api/info', '/favicon.svg', '/favicon.ico', '/favicon.png', '/logo.svg', '/apple-touch-icon.png', '/apple-touch-icon-precomposed.png', '/logo192.png', '/logo512.png', '/login', '/portal', '/api/identity/login', '/api/identity/verify', '/api/identity/logout', '/api/identity/me'];
+// '/api/notices' sits here alongside '/api/info' for the same reason: it
+// carries platform-authored release notices that name no app and no user, and a
+// breaking-change channel that goes dark on a box nobody has initialized yet is
+// useless exactly when someone is deciding whether to deploy to it. The
+// app-scoped variant (/api/apps/:slug/notices) is NOT listed — it is
+// authenticated and per-app authorized, and pre-init there are no apps anyway.
+const PUBLIC_PATHS = ['/api/info', '/api/notices', '/favicon.svg', '/favicon.ico', '/favicon.png', '/logo.svg', '/apple-touch-icon.png', '/apple-touch-icon-precomposed.png', '/logo192.png', '/logo512.png', '/login', '/portal', '/api/identity/login', '/api/identity/verify', '/api/identity/logout', '/api/identity/me'];
 app.use((req, res, next) => {
   // Settings GETs skip the setup guard so the login page of a not-yet-
   // initialized instance can still fetch auth_sso_only. This is NOT an
@@ -369,7 +377,11 @@ crane init --name admin --email you@example.com</pre>
 // 307'd browser fetches from a deployed app's frontend back into the app's own
 // prefix (request never reached the platform endpoint), making the documented
 // `fetch('/api/me')` pattern unreachable from any per-app browser caller.
-const APPCRANE_PASSTHROUGH = ['/api/identity', '/api/apps', '/api/info', '/api/_crashed', '/api/me', '/api/directory', '/api/mcp', '/api/service', '/favicon.svg', '/docs'];
+// v2.40.0: '/api/notices' joins the list for the same reason '/api/me' did — an
+// app's own frontend is a legitimate caller ("show a banner when the platform
+// announces a breaking change"), and without the exemption that fetch gets
+// 307'd back into the app's own /{slug} prefix and never reaches the platform.
+const APPCRANE_PASSTHROUGH = ['/api/identity', '/api/apps', '/api/info', '/api/notices', '/api/_crashed', '/api/me', '/api/directory', '/api/mcp', '/api/service', '/favicon.svg', '/docs'];
 const APPCRANE_PAGE_SLUGS = new Set(['login', 'portal', 'dashboard', 'applications', 'users-page', 'audit-page', 'settings', 'docs', 'app', 'studio', 'appstudio']);
 app.use((req, res, next) => {
   if (req.method === 'OPTIONS') return next();
@@ -416,6 +428,17 @@ app.get('/api/info', (req, res) => {
     docs: '/docs',
     dashboard: '/dashboard',
     mcp: '/api/mcp',
+    // v2.40.0: a pointer and a count, not the notices themselves.
+    //
+    // /api/info is the universal poll — the installer's readiness probe, the
+    // CLI's `crane doctor`, deployhub.json's declared health endpoint, the SPA
+    // sidebar on every page load, and the 30-minute version check all hit it,
+    // and every one of them wants a single field. Inlining multi-paragraph
+    // notice bodies would put the full text on all of that traffic forever.
+    // A count is what actually makes a notice discoverable — a poller sees a
+    // non-zero number change without anyone having known to look for a new
+    // endpoint — and costs ~40 bytes. The bodies live one fetch away.
+    notices: { url: '/api/notices', count: globalNotices().length },
     caddy_reload_status: caddyReloadStatus,
     ...(!adminExists && { init: 'POST /api/auth/init -d \'{"name":"admin","email":"you@example.com"}\'' }),
   });
@@ -764,6 +787,17 @@ app.use('/api/auth/oidc', oidcRoutes);
 app.use('/api/auth/saml', samlRoutes);
 app.use('/api/auth/scim', scimAdminRouter);
 app.use('/api/scim/v2', scimRoutes);
+// Platform notices. Mounted at the bare '/api' and BEFORE every router that
+// installs a pathless `router.use(requireAuth)` — appsRoutes (line ~75 of
+// apps.js), userMcpKeysRoutes, logsRoutes, monitoringRoutes. Each of those
+// 401s any /api/* request that merely reaches it, whether or not the path is
+// theirs, and that ordering trap has already broken two anonymous endpoints in
+// this codebase. GET /api/notices must answer without credentials, and
+// GET /api/apps/:slug/notices must reach its own requireAppAccess rather than
+// appsRoutes' blanket auth, so this goes first. noticesRoutes itself installs
+// no router-level middleware, so anything it doesn't match falls straight
+// through to the routers below.
+app.use('/api', noticesRoutes);          // /api/notices, /api/apps/:slug/notices
 app.use('/api/apps', appsRoutes);
 app.use('/api/apps', deployRoutes);     // /api/apps/:slug/deploy/:env
 app.use('/api/apps', envVarsRoutes);     // /api/apps/:slug/env/:env
