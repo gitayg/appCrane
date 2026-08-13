@@ -182,6 +182,19 @@ function auditMcpCall(user, toolName, args, error) {
   }
 }
 
+// appcrane_get_app returned no auth_mode key at all, so an agent debugging
+// "no identity headers" had no way to rule out the most likely cause: a
+// headless app skips forward_auth entirely and its container never sees
+// X-AppCrane-* identity headers, by design.
+//
+// Report the EFFECTIVE mode, not the raw column. The value is not validated on
+// write, so a legacy row can hold something like 'forward_auth'; caddy.js
+// treats only the literal 'headless' as a bypass, and the agent needs the
+// answer that matches proxy behaviour rather than storage.
+function effectiveAuthMode(raw) {
+  return raw === 'headless' ? 'headless' : 'authenticated';
+}
+
 /**
  * Augment an app row with the canonical URLs (production + sandbox) and
  * the most recent live deployment version for each environment. Used by
@@ -261,7 +274,13 @@ const TOOLS = [
     description:
       'Get detailed info for a single app: URLs, current versions per environment, recent deployments, and ' +
       'health state. Use this when the user asks "what\'s the status of <app>", "is <app> deployed", or after a ' +
-      'deploy to confirm what landed. Returns 404-equivalent error if the slug doesn\'t exist or the caller has no access.',
+      'deploy to confirm what landed. Returns 404-equivalent error if the slug doesn\'t exist or the caller has no access. ' +
+      'config.auth_mode tells you whether the app gets identity at all: `authenticated` means routes go through ' +
+      'forward_auth and arrive at the container with X-AppCrane-* headers; `headless` means forward_auth is skipped ' +
+      'for the whole app and those headers NEVER arrive. Check it first when debugging "my app sees no identity headers", ' +
+      'but note it is per-APP, not per-request: an `authenticated` app can still have auth_bypass_paths prefixes that ' +
+      'skip forward_auth, and a custom domain is never gated either. The request itself is authoritative — the app can ' +
+      'read X-AppCrane-Auth-Mode (authenticated / headless / bypass), which AppCrane stamps on every route it proxies.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -326,6 +345,7 @@ const TOOLS = [
           category:       app.category,
           visibility:     app.visibility,
           public_access:  app.public_access,
+          auth_mode:      effectiveAuthMode(app.auth_mode),
           image_retention: app.image_retention,
           frame_ancestors: app.frame_ancestors,
           max_ram_mb:      resourceLimits?.max_ram_mb      ?? null,
@@ -1436,6 +1456,7 @@ const TOOLS = [
           category:       fresh.category,
           visibility:     fresh.visibility,
           public_access:  fresh.public_access,
+          auth_mode:      effectiveAuthMode(fresh.auth_mode),
           image_retention: fresh.image_retention,
           frame_ancestors: fresh.frame_ancestors,
           auth_bypass_paths: (() => { try { return fresh.auth_bypass_paths ? JSON.parse(fresh.auth_bypass_paths) : []; } catch (_) { return []; } })(),
@@ -1552,7 +1573,7 @@ const TOOLS = [
         category: fresh.category,
         visibility: fresh.visibility,
         public_access: fresh.public_access,
-        auth_mode: fresh.auth_mode,
+        auth_mode: effectiveAuthMode(fresh.auth_mode),
         auth_bypass_paths: bypassPaths,
         updated_fields: keys,
       };

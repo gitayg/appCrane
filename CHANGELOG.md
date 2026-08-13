@@ -5,6 +5,30 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.40.0 — Identity headers actually reach apps now. They never have.
+
+The headline fix is one nobody was looking for. Caddy sorts directives by TYPE, not by source order, and `request_header` sorts **after** `reverse_proxy`. `forward_auth` is a `reverse_proxy` under the hood — so in every app block, the identity strip that reads as "strip the client's headers, then verify, then hand the verified ones to the app" actually compiled to: verify, copy the identity on, **then delete every one of them**, then proxy to the app.
+
+Confirmed against real Caddy by adapting the generated Caddyfile and reading the compiled handler order. On v2.39.0 the app upstream is handler 11; the six `DELETE X-AppCrane-*` handlers are 5 through 10, after `forward_auth` at 2. **Hosted apps have never received `X-AppCrane-User`, `-User-Id`, `-User-Email`, `-User-Name`, `-User-Role` or `-App-Role`.** The Caddyfile source looks correct, which is why config inspection never caught it — only the adapted JSON or live traffic shows it.
+
+That single bug explains a week of debugging across two apps: one team concluded identity requires SSO (it does not — `/api/identity/verify` resolves a session from an API key or a `cc_token`/Bearer session, and SSO is merely one way to create one), and an app denied its own owner from Settings because no role header ever arrived. Wrapping the strip and `forward_auth` in a `route { }` block fixes it, because `route` preserves source order.
+
+**Expect apps to behave differently on this deploy.** Apps that currently see no identity will suddenly see all of it. That is the intended outcome, but it is a real behaviour change — watch one app before rolling wide.
+
+**`X-AppCrane-Auth-Mode`** — `authenticated` | `headless` | `bypass`, present on every proxied request including headless. "No identity headers" was one symptom with four causes: headless mode, a path-level auth bypass, a broken forward_auth, or not being proxied at all. An app can now read which. Stripped-then-set, so a forged value never survives.
+
+**`X-AppCrane-Is-Admin`** — `1` | `0`, computed by the platform with the correct precedence: global `admin`/`platform_admin`, **or** per-app `admin`/**`owner`**. Apps kept re-deriving this with `=== 'admin'` and locking out owners, the highest tier. Deliberately **absent** rather than `0` on headless and bypass routes, where nothing is verified — a `0` there would read as "verified, not an admin", which is a worse lie than saying nothing. Branch on `X-AppCrane-Auth-Mode` to tell them apart.
+
+Headless routes now strip incoming `X-AppCrane-*` too. They never did — `stripIncoming` sat behind `if (!isHeadless)` — so a curl could hand a headless app any identity it liked, verbatim. Pre-existing, but shipping a new privilege bit without closing it would have turned a stale-identity nuisance into a forgeable admin flag.
+
+**`auth_mode` is readable.** It was settable via the update route and listed in `ALLOWED_APP_COLS`, but absent from every app payload — write-only configuration. Now returned by the app config view and by `appcrane_get_app`, defaulting to `authenticated` where the column is NULL.
+
+**The identity guide was wrong in ways that caused the bugs above.** It claimed a `platform_admin` "always reads as `X-AppCrane-App-Role: admin` on every app" — false, because `resolveAppRole` returns the explicit per-app row first and the global-admin short-circuit is only a fallback. It also documented absence of the role header as "not verified, so presence = trusted", omitting headless entirely. Both corrected, alongside the canonical role check (ordering `none < viewer < user < admin < owner`, and why `=== 'admin'` is a bug), an explicit "never derive identity from the `cc_token` cookie", and the correction that identity does not require SSO. A test now pins the guide's precedence claim against the real `resolveAppRole`, so the doc fails CI if the code moves under it.
+
+**Platform notices.** v2.39.0 removed the cookie an app was quietly depending on, with no way to warn anyone. `/api/notices` carries platform-authored notices (public — it names no app and no user, same reasoning as `/api/info`), and `/api/apps/:slug/notices` carries app-scoped ones behind `requireAuth` + `requireAppAccess`. Seeded with the v2.39.0 cookie change.
+
+125 → 204 tests.
+
 ## 2.39.0 — Hosted apps no longer receive the visitor's platform session cookie.
 
 Caddy forwards `Cookie` verbatim to app containers. Apps are mounted same-origin at `/<slug>` and `cc_token` is `path=/`, so a logged-in visitor's browser attached the platform session to every request into the app — and `cc_token` is also accepted as a bearer, because `authedUser` runs the same `sessionUserFor()` on the cookie and on `Authorization`. An app's own backend could therefore read the session straight off the request and call the platform API as whoever visited.
