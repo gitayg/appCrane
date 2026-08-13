@@ -468,6 +468,13 @@ test('the read/write split matches between MCP and REST', () => {
   };
   assert.equal(manageFlag('appcrane_list_app_roles'), false,
     'listing an app\'s roles should need membership, not the owner/admin tier');
+  // v2.41.2: the tool still ENTERS on membership, but the roster inside it is
+  // tier-gated at the point of use — a member gets the catalog, an owner/admin
+  // also gets `members`. The manage flag alone therefore no longer describes
+  // what the tool returns, so assert the second gate exists.
+  assert.match(toolSource('appcrane_list_app_roles'), /roleForUserOnApp\(/,
+    'appcrane_list_app_roles no longer checks the tier before returning the roster — ' +
+    'any member can enumerate their colleagues');
   assert.equal(manageFlag('appcrane_create_app_role'), true,
     'a plain member must not be able to invent a role — that is authoring the app\'s permission model');
   assert.equal(manageFlag('appcrane_set_user_app_roles'), true,
@@ -480,12 +487,19 @@ test('the read/write split matches between MCP and REST', () => {
   for (const r of routes) {
     assert.match(r.guards, /requireAppUser/,
       `${r.method.toUpperCase()} ${r.path} is not gated on app membership`);
-    if (r.method !== 'get') {
+    // v2.41.2: the split is no longer "writes gated, reads open". It is
+    // "mutations and ROSTER reads gated; the role catalog open to members".
+    // A roster — names, emails, tiers — is what every other roster read in
+    // AppCrane already gates, and shipping it one level lower here let any
+    // member enumerate their colleagues.
+    const isRoster = r.path.endsWith('/members') || r.path.includes('/members/');
+    if (r.method !== 'get' || isRoster) {
       assert.match(r.guards, /requireAppRoleAdmin/,
-        `${r.method.toUpperCase()} ${r.path} mutates app-defined roles without the owner/admin gate`);
+        `${r.method.toUpperCase()} ${r.path} exposes or mutates app-defined roles without the owner/admin gate`);
     } else {
       assert.ok(!/requireAppRoleAdmin/.test(r.guards),
-        `${r.method.toUpperCase()} ${r.path} demands owner/admin to READ, but the MCP read tool does not`);
+        `${r.method.toUpperCase()} ${r.path} demands owner/admin to read the role catalog. ` +
+        'A member needs the catalog to read their own roles; only the roster is privileged.');
     }
   }
 });

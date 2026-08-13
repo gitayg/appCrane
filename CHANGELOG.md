@@ -5,6 +5,16 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.41.2 — Seeing who holds an app's roles needs the owner/admin tier.
+
+`GET /api/apps/:slug/app-roles/members` and the `members` block of `appcrane_list_app_roles` returned the full roster — name, email, platform tier — to any member of the app, while every other roster read in AppCrane (`GET /:slug/identity/users`, `appcrane_list_app_members`) already required owner/admin. That was an inconsistency rather than a decision, and it let any member enumerate their colleagues.
+
+The **catalog** stays open to members on purpose. Knowing which roles exist is what you need to read your own and to avoid duplicating a key; knowing who holds them is not the same question. So the MCP tool still enters on membership and returns the roles either way — the roster now rides along only for an owner/admin, with a stated reason when it doesn't.
+
+The 403 is worded for what was actually attempted: asking who holds a role no longer gets told you may not "manage" roles, which sends people looking for the wrong problem.
+
+No UI impact — the Access button only renders for apps where the viewer is a global admin or the app's own owner/admin ([Applications.tsx:1014](studio-web/src/pages/Applications.tsx:1014)), exactly the tier the gate now requires.
+
 ## 2.41.1 — The live-Caddy test now skips where it cannot run, instead of failing CI.
 
 `identity-transparency.test.js` starts a real Caddy container and asserts on what an app container actually *receives* — which needs the container to reach stub upstreams on the host via `--add-host host.docker.internal:host-gateway`. That hop does not route back to the host on a GitHub Actions runner, so Caddy answered 502 for every route and seven assertions failed.
