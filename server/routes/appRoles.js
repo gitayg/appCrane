@@ -59,8 +59,13 @@ const router = Router();
 function requireAppRoleAdmin(req, _res, next) {
   const tier = roleForUserOnApp(req.user, req.app);
   if (tier !== 'owner' && tier !== 'admin') {
+    // Word it for what the caller actually attempted. The one read this gate
+    // covers is the roster, and telling someone they may not "manage" roles
+    // when they asked who holds one sends them looking for the wrong problem.
     return next(new AppError(
-      'Only an owner or admin of this app can manage its app-defined roles.',
+      req.method === 'GET'
+        ? 'Only an owner or admin of this app can see who holds its app-defined roles.'
+        : 'Only an owner or admin of this app can manage its app-defined roles.',
       403, 'FORBIDDEN',
     ));
   }
@@ -72,8 +77,19 @@ router.get('/:slug/app-roles', requireAuth, requireAppUser, (req, res) => {
   res.json({ app: req.app.slug, roles: listRoles(req.app.id) });
 });
 
-/** GET /api/apps/:slug/app-roles/members — members with the keys they hold. */
-router.get('/:slug/app-roles/members', requireAuth, requireAppUser, (req, res) => {
+/**
+ * GET /api/apps/:slug/app-roles/members — members with the keys they hold.
+ *
+ * v2.41.2: owner/admin, not bare membership. This is a roster — name, email and
+ * platform tier for every member — and every other roster read in AppCrane
+ * (GET /:slug/identity/users, appcrane_list_app_members) already requires that
+ * tier. Shipping the same data one gate lower here was an inconsistency, not a
+ * decision: it let any member enumerate their colleagues.
+ *
+ * The role CATALOG above stays open to members deliberately. Knowing which roles
+ * exist is what a member needs to read their own; knowing who holds them is not.
+ */
+router.get('/:slug/app-roles/members', requireAuth, requireAppUser, requireAppRoleAdmin, (req, res) => {
   res.json({ app: req.app.slug, members: listMembersWithRoles(req.app.id) });
 });
 

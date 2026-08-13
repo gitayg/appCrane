@@ -1766,7 +1766,7 @@ const TOOLS = [
   {
     name: 'appcrane_list_app_roles',
     description:
-      'List the roles an app defines FOR ITSELF (approver, auditor, reviewer — whatever that app invented), plus which of its members hold each one. ' +
+      'List the roles an app defines FOR ITSELF (approver, auditor, reviewer — whatever that app invented). Any member sees the roles and how many hold each; an owner or admin also gets `members`, the roster of who holds what. ' +
       'These are NOT AppCrane permissions: they grant nothing on the platform and are only handed to the app, in the X-AppCrane-App-Roles request header and in /api/me\'s app_roles array, for the app\'s own code to enforce. ' +
       'For AppCrane\'s own per-app tier — owner/admin/user/viewer, i.e. who may deploy, read env vars, or delete the app — use appcrane_list_app_members instead. ' +
       'Call this before creating a role (to avoid duplicating one) or before setting a user\'s roles (to see the valid keys). Requires being assigned to the app.',
@@ -1780,10 +1780,19 @@ const TOOLS = [
     handler: async (user, args) => {
       const app = getAppForUser(user, args.slug);
       requireAppRoleTier(user, app, { manage: false });
+      // v2.41.2: the roster rides along only for an owner/admin. The catalog is
+      // what a member needs (to read their own roles, to avoid duplicating a
+      // key); who else holds what is a roster, and every other roster read in
+      // AppCrane — appcrane_list_app_members, GET /:slug/identity/users — asks
+      // for the owner/admin tier. Same data, same gate.
+      const tier = roleForUserOnApp(user, app);
+      const canSeeRoster = tier === 'owner' || tier === 'admin';
       return {
         app: app.slug,
         roles: listRoles(app.id),
-        members: listMembersWithRoles(app.id),
+        ...(canSeeRoster
+          ? { members: listMembersWithRoles(app.id) }
+          : { members_omitted: 'Owner or admin of this app required to see who holds each role.' }),
       };
     },
   },
