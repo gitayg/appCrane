@@ -1,0 +1,311 @@
+import { execFile, spawn } from 'child_process';
+import { promisify } from 'util';
+import { getDb } from '../db.js';
+import { publicPortForApp, releasePendingPortAfterRecreate } from './tcpIngress.js';
+import log from '../utils/logger.js';
+
+const execFileAsync = promisify(execFile);
+const CONTAINER_PORT = 3000;
+const APPCRANE_LABEL = 'appcrane=true';
+
+async function dockerExec(args, opts = {}) {
+  try {
+    const { stdout } = await execFileAsync('docker', args, {
+      timeout: 60000,
+      ...opts,
+    });
+    return stdout.trim();
+  } catch (e) {
+    // stderr FIRST. `docker run -d` writes the new container id to stdout even
+    // when the run fails, so a stdout-first pick returned a bare 64-char hex
+    // string and threw away the reason on stderr — "Bind for 0.0.0.0:31000
+    // failed: port is already allocated" became an unreadable id in the deploy
+    // log. v2.42.0's public publish is the first routine way to hit a host-port
+    // collision (loopback ports are slot-derived and effectively never clash),
+    // which is what surfaced it. Matches index.js, spaBuilder.js and
+    // appstudio/worker.js, which all already read stderr first.
+    const output = e.stderr?.toString().trim() || e.stdout?.toString().trim() || e.message;
+    log.debug(`docker ${args[0]} failed: ${output}`);
+    throw new Error(output);
+  }
+}
+
+function containerName(slug, env) {
+  return `appcrane-${slug}-${env}`;
+}
+
+function imageTag(slug, env, commitHash) {
+  const raw = commitHash && commitHash !== 'unknown' ? commitHash : `t${Date.now()}`;
+  const safe = raw.replace(/[^a-zA-Z0-9._-]/g, '-');
+  // Must be env-scoped: Vite/other bundlers bake APP_BASE_PATH into the artifact
+  // at build time, so sandbox (/<slug>-sandbox/) and production (/<slug>/) MUST
+  // have different images even when built from the same commit.
+  return `appcrane-${slug}-${env}:${safe}`;
+}
+
+// v2.21.10: exposed so the Nixpacks path can tag its image identically.
+export function imageTagFor(slug, env, commitHash) { return imageTag(slug, env, commitHash); }
+
+export async function buildImageIfNeeded({ slug, env, contextDir, commitHash, appBasePath, onLog }) {
+  const tag = imageTag(slug, env, commitHash);
+  if (commitHash && commitHash !== 'unknown') {
+    try {
+      await dockerExec(['image', 'inspect', tag, '--format', '{{.Id}}'], { timeout: 5000 });
+      onLog?.(`Using cached image: ${tag} (skipping rebuild)`);
+      return tag;
+    } catch (_) {}
+  }
+  return buildImage({ slug, env, contextDir, commitHash, appBasePath, onLog });
+}
+
+export async function getContainerImage(slug, env) {
+  const name = containerName(slug, env);
+  return dockerExec(['inspect', name, '--format', '{{.Config.Image}}'], { timeout: 5000 });
+}
+
+export async function buildImage({ slug, env, contextDir, commitHash, appBasePath, onLog }) {
+  const tag = imageTag(slug, env, commitHash);
+  const args = ['build', '-t', tag, '--label', APPCRANE_LABEL, '--label', `slug=${slug}`, '--label', `env=${env}`];
+  // Build-time only: bundlers (Vite, CRA, Next) need APP_BASE_PATH to emit
+  // correct asset URLs. Caddy strips this prefix at runtime, so it must NOT
+  // appear in the runtime container env — see bugs/2026-04-26-appcrane-app-base-path-resolution.md
+  if (appBasePath) {
+    args.push('--build-arg', `APP_BASE_PATH=${appBasePath}`);
+    args.push('--build-arg', `PUBLIC_URL=${appBasePath}`);
+    args.push('--build-arg', `VITE_BASE_PATH=${appBasePath}`);
+  }
+  args.push(contextDir);
+
+  return new Promise((resolve, reject) => {
+    const child = spawn('docker', args, { stdio: 'pipe' });
+    let outputBuf = '';
+
+    const emit = (line) => { if (line.trim()) onLog?.(line); };
+    child.stdout.on('data', (c) => {
+      const s = c.toString();
+      outputBuf += s;
+      s.split('\n').forEach(emit);
+    });
+    child.stderr.on('data', (c) => {
+      const s = c.toString();
+      outputBuf += s;
+      s.split('\n').forEach(emit);
+    });
+
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error('docker build timed out after 10 minutes'));
+    }, 600000);
+
+    child.on('error', (err) => { clearTimeout(timer); reject(err); });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (code !== 0) return reject(new Error(`docker build failed: ${outputBuf.slice(-3000)}`));
+      resolve(tag);
+    });
+  });
+}
+
+/**
+ * The 0.0.0.0 port this app publishes in addition to its loopback bind, or
+ * null. Resolved from the database here rather than taken as a parameter: every
+ * container recreation — deploy, rollback, the env-var restart in
+ * routes/deploy.js — funnels through startApp(), and a caller that forgot to
+ * pass it would silently bring a tcp app back loopback-only, taking it off the
+ * network its clients are pinned to with no error anywhere.
+ *
+ * Production only. There is one public_port per app but two containers, so
+ * publishing it for both would make the second `docker run` fail with "port is
+ * already allocated" — and the loser could be production. Sandbox stays
+ * loopback-only and therefore cannot take the port production's clients use.
+ */
+function publishedTcpPort(slug, env) {
+  if (env !== 'production') return null;
+  const app = getDb().prepare('SELECT ingress_type, public_port FROM apps WHERE slug = ?').get(slug);
+  return publicPortForApp(app);
+}
+
+export async function startApp({ slug, env, image, hostPort, envVars = {}, volumes = [], memoryMb = 512, cpus = 0.5, addHostGateway = false }) {
+  const name = containerName(slug, env);
+
+  await stopApp(slug, env).catch(() => {});
+
+  const args = [
+    'run', '-d',
+    '--name', name,
+    '--label', APPCRANE_LABEL,
+    '--label', `slug=${slug}`,
+    '--label', `env=${env}`,
+    '--restart=on-failure:5',
+    `--memory=${memoryMb}m`,
+    `--cpus=${cpus}`,
+    '-p', `127.0.0.1:${hostPort}:${CONTAINER_PORT}`,
+    '--log-opt', 'max-size=10m',
+    '--log-opt', 'max-file=3',
+  ];
+
+  // v2.42.0: a tcp app publishes a SECOND binding on 0.0.0.0 so raw TCP
+  // clients (a CONNECT proxy's tunnel, say) reach the container directly —
+  // Caddy is an HTTP reverse proxy and cannot express a tunnel. The loopback
+  // publish above is deliberately kept: it is what the health probe, the
+  // Caddy vhost and every internal caller still use, so nothing about an
+  // http app's argv changes and a tcp app keeps its private door.
+  //
+  // SECURITY: this bypasses Caddy entirely, so the published port has no
+  // forward_auth, no identity headers, no request audit, no rate limiting, no
+  // security headers and no TLS from AppCrane — the app owns authentication.
+  // AppCrane publishes the port; it does NOT open the host firewall. That is
+  // deliberately a separate operator step so a mis-click in the dashboard
+  // cannot put an app on the internet.
+  const publicPort = publishedTcpPort(slug, env);
+  if (publicPort) {
+    args.push('-p', `0.0.0.0:${publicPort}:${CONTAINER_PORT}`);
+  }
+
+  // v2.8.0: only email-enabled apps need to reach AppCrane from inside the
+  // container (for the email service). host-gateway maps host.docker.internal
+  // to the host so CRANE_INTERNAL_URL resolves. Off by default — every other
+  // container start is unchanged.
+  if (addHostGateway) {
+    args.push('--add-host', 'host.docker.internal:host-gateway');
+  }
+
+  for (const vol of volumes) {
+    args.push('-v', `${vol.host}:${vol.container}`);
+  }
+
+  const runtimeEnv = {
+    ...envVars,
+    PORT: String(CONTAINER_PORT),
+    NODE_ENV: env === 'production' ? 'production' : 'development',
+    DATA_DIR: '/data',  // platform guarantee — every app container has /data mounted
+  };
+  for (const [k, v] of Object.entries(runtimeEnv)) {
+    args.push('-e', `${k}=${v}`);
+  }
+
+  args.push(image);
+  const id = await dockerExec(args);
+  log.info(`docker started: ${name} (${id.slice(0, 12)}) from ${image}`);
+  if (publicPort) {
+    log.info(`[tcp-ingress] ${name} also published on 0.0.0.0:${publicPort} — NOT behind AppCrane auth; restricting it is still the operator's firewall job. On Linux this publish is a DNAT rule evaluated in FORWARD and never in INPUT, so a plain 'ufw deny' does NOT block it — filter in DOCKER-USER or in an upstream security group.`);
+  }
+
+  // v2.42.0: this is where a tcp -> http flip actually takes effect, and so
+  // where the port it left reserved goes back in the pool. The flip cannot
+  // close a port on its own — the publish is an argv flag — so it keeps the
+  // reservation instead of handing a still-bound port to the next app that
+  // asks. The container just created is the proof the old one is gone.
+  if (env === 'production') {
+    const released = releasePendingPortAfterRecreate(getDb(), slug);
+    if (released) {
+      log.info(`[tcp-ingress] ${name} was recreated with no public publish — port ${released} is now closed and back in the allocation pool.`);
+    }
+  }
+  return id;
+}
+
+export async function stopApp(slug, env) {
+  const name = containerName(slug, env);
+  try { await dockerExec(['stop', name], { timeout: 15000 }); } catch (e) {}
+  try { await dockerExec(['rm', '-f', name]); } catch (e) {}
+  log.debug(`docker stopped: ${name}`);
+}
+
+export async function restartApp(slug, env) {
+  const name = containerName(slug, env);
+  try {
+    await dockerExec(['restart', name], { timeout: 20000 });
+    log.info(`docker restarted: ${name}`);
+  } catch (e) {
+    log.warn(`docker restart ${name} failed: ${e.message}`);
+    throw e;
+  }
+}
+
+export async function getProcessMetrics(slug, env) {
+  const name = containerName(slug, env);
+  try {
+    const inspectOut = await dockerExec(['inspect', name, '--format', '{{.State.Status}}|{{.State.Pid}}|{{.State.StartedAt}}|{{.RestartCount}}']);
+    const [status, pid, startedAt, restarts] = inspectOut.split('|');
+    if (status !== 'running') return { status, cpu: 0, memory: 0, pid: Number(pid) || 0, uptime: 0, restarts: Number(restarts) || 0 };
+    const statsOut = await dockerExec(['stats', '--no-stream', '--format', '{{.CPUPerc}}|{{.MemUsage}}', name]);
+    const [cpuPerc, memUsage] = statsOut.split('|');
+    const cpu = parseFloat(cpuPerc.replace('%', '')) || 0;
+    const memory = parseMemoryUsage(memUsage);
+    const uptime = startedAt ? Date.now() - new Date(startedAt).getTime() : 0;
+    return { status: 'online', cpu, memory, pid: Number(pid) || 0, uptime, restarts: Number(restarts) || 0 };
+  } catch (e) {
+    return { status: 'stopped', cpu: 0, memory: 0 };
+  }
+}
+
+function parseMemoryUsage(s) {
+  if (!s) return 0;
+  const m = s.trim().split('/')[0].trim().match(/([\d.]+)\s*(B|KiB|MiB|GiB|KB|MB|GB)/i);
+  if (!m) return 0;
+  const n = parseFloat(m[1]);
+  const unit = m[2].toLowerCase();
+  const mul = { b: 1, kib: 1024, mib: 1024 ** 2, gib: 1024 ** 3, kb: 1000, mb: 1000 ** 2, gb: 1000 ** 3 }[unit] || 1;
+  return Math.round(n * mul);
+}
+
+export async function getAppLogs(slug, env, lines = 100, search = '') {
+  const name = containerName(slug, env);
+  try {
+    const output = await dockerExec(['logs', '--tail', String(lines), name]);
+    const allLines = output.split('\n');
+    if (!search) return allLines;
+    const q = search.toLowerCase();
+    return allLines.filter(l => l.toLowerCase().includes(q));
+  } catch (e) {
+    return [];
+  }
+}
+
+export async function listAll() {
+  try {
+    const format = '{{.Names}}|{{.Label "slug"}}|{{.Label "env"}}|{{.Status}}|{{.ID}}';
+    const output = await dockerExec(['ps', '-a', '--filter', `label=${APPCRANE_LABEL}`, '--format', format]);
+    if (!output) return [];
+    return output.split('\n').map(line => {
+      const [name, slug, env, status, id] = line.split('|');
+      return { name, slug, env, status, id };
+    });
+  } catch (e) {
+    return [];
+  }
+}
+
+export async function pruneOldImages(slug, env, keep = 2) {
+  try {
+    const filters = ['--filter', `label=slug=${slug}`];
+    if (env) filters.push('--filter', `label=env=${env}`);
+    const out = await dockerExec(['images', ...filters, '--format', '{{.ID}} {{.CreatedAt}}']);
+    if (!out) return;
+    const rows = out.split('\n').map(l => {
+      const sp = l.indexOf(' ');
+      return { id: l.slice(0, sp), created: l.slice(sp + 1) };
+    });
+    rows.sort((a, b) => b.created.localeCompare(a.created));
+    for (const row of rows.slice(keep)) {
+      try { await dockerExec(['rmi', '-f', row.id]); } catch (e) {}
+    }
+  } catch (e) {}
+}
+
+// Reclaim dangling/untagged images left behind by failed or interrupted builds.
+// Safe by default — `docker image prune -f` only removes images with no tags
+// AND no descendant tagged images, never touches anything in use by a container.
+export async function pruneDanglingImages() {
+  try { await dockerExec(['image', 'prune', '-f']); } catch (e) {}
+}
+
+export async function dockerAvailable() {
+  try {
+    await execFileAsync('docker', ['version', '--format', '{{.Server.Version}}'], { timeout: 5000 });
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
