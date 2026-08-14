@@ -5,6 +5,14 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.44.1 — The disk-quota test waited for the first mail and asserted two.
+
+`waitFor` returns as soon as its array is non-empty, so the test resumed the moment the owner's alert landed, called `settle()`, and then asserted that both the owner and the platform admin had been mailed. The sends are sequential, so the slower the machine the wider the gap: green on every local run, red on the CI runner, which reported only the owner.
+
+The product was never wrong — recipients are resolved in one synchronous query and mailed in a loop. The test now waits for the full recipient set rather than the first arrival.
+
+The other `waitFor` sites in that file assert exactly one message, where waiting for any and then settling is sound; only this one expected more than it waited for.
+
 ## 2.44.0 — The rest of the security review.
 
 Everything left on the external reviewer's list that was ours to fix, in one upgrade.

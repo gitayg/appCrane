@@ -724,7 +724,15 @@ test('an app over its disk budget produces an audit row and mails owners AND pla
     `the alert fired below the line: ${detail.used_bytes} <= ${detail.quota_bytes}`);
   assert.equal(detail.quota_bytes, QUOTA_MB * 1024 * 1024, 'the app_disk_quota_mb setting was ignored');
 
-  const mails = await waitFor(() => quotaMails(), 'the disk-quota alert mail');
+  // Wait for the FULL recipient set, not merely the first mail. waitFor returns
+  // on any non-empty array, so waiting for "a mail" and then asserting two is a
+  // race: the owner's send lands, settle() runs, and the platform admin's has
+  // not been enqueued yet. It won locally on every run and lost on the CI
+  // runner — the sends are sequential, so the slower the box the wider the gap.
+  const mails = await waitFor(
+    () => (quotaMails().length >= 2 ? quotaMails() : null),
+    'both disk-quota alert mails (owner + platform admin)',
+  );
   await settle();
   assert.equal(quotaMails().length, 2,
     'the quota alert did not reach exactly the owner and the platform admin');
