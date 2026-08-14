@@ -1,5 +1,5 @@
 /**
- * Supply-chain SHA verification (v2.3.6+).
+ * Supply-chain SHA verification (v2.3.6+, made fail-closed in v2.44.0).
  *
  * After a deploy clones the app repo, AppCrane asks GitHub directly what
  * the head SHA of the deploying branch is and compares it to whatever
@@ -17,8 +17,44 @@
  * user's GitHub account. Those need different mitigations (signed
  * commits, branch protection rules).
  *
- * Toggleable via the supply_chain_verify_enabled setting (default '1' on
- * fresh installs; operators on air-gapped or offline boxes flip to '0').
+ * FAIL-CLOSED POLICY (v2.44.0)
+ * ----------------------------
+ * Until v2.44.0 every way of *not getting an answer* — any GitHub non-2xx,
+ * any network error, a 2xx body with no SHA — logged a line and let the
+ * deploy through. That made the check bypassable rather than merely
+ * imperfect: the cheapest attack on a verifier that fails open is to break
+ * the verifier, and for the unauthenticated path (public repos, 60 req/hr
+ * per IP) exhausting the rate limit is enough to turn every subsequent
+ * deploy into a silent skip. So "could not verify" is now the same outcome
+ * as "did not match": the deploy stops.
+ *
+ * Two escape hatches, deliberately different in scope:
+ *
+ *   * supply_chain_verify_enabled='0' (setting) — turn the check off
+ *     entirely. For air-gapped or offline boxes. Legitimate, and unchanged.
+ *   * APPCRANE_REQUIRE_VERIFY=0 (env, on the AppCrane host) — keep checking
+ *     and keep failing on a genuine SHA *mismatch*, but let an
+ *     unreachable/erroring GitHub through with a loud NOT VERIFIED line.
+ *     This is the pre-v2.44.0 behaviour, available for an operator riding
+ *     out a GitHub outage without blinding the mismatch detector too.
+ *
+ * A skip is not the same as a pass. Two cases remain genuine skips because
+ * verification is *inapplicable*, not *failed*: the setting being off, and a
+ * non-github.com repo URL (self-hosted git — there is no second source of
+ * truth to ask). Both return verified:false.
+ *
+ * MANAGED APPS
+ * ------------
+ * source_type='managed' used to compare the clone HEAD against
+ * app.last_managed_push_sha and stop there. That value is one AppCrane
+ * wrote itself at push time, so agreeing with it proves the clone is not
+ * stale and nothing else — it is a freshness gate, not verification, and
+ * calling it "verify OK" overstated what had been checked. As of v2.44.0
+ * managed apps keep that gate and then go on to the same GitHub
+ * cross-check as every other app, so they have a real external source of
+ * truth. The read-after-write race that motivated the shortcut (GitHub's
+ * branch API lags a push by ~1s, so an immediate deploy saw the old SHA)
+ * is handled by retrying a mismatch a few times before believing it.
  */
 
 import { getDb } from '../db.js';
@@ -26,6 +62,13 @@ import { decrypt } from './encryption.js';
 import { getServiceTokenInternal } from './githubService.js';
 import { execFileSync } from 'child_process';
 import log from '../utils/logger.js';
+
+// Attempt delays for the GitHub head-SHA read. Retried on a transient error
+// AND on a SHA disagreement: a disagreement right after a push is far more
+// likely to be GitHub's eventually-consistent branch API than an attack, and
+// now that a mismatch is fatal a false positive costs a failed deploy.
+const RETRY_DELAYS_MS = [0, 1500, 3000];
+const FETCH_TIMEOUT_MS = 8000;
 
 /**
  * Parse a github.com URL into { owner, repo }. Returns null for
@@ -66,19 +109,98 @@ function isVerifyEnabled() {
     const row = getDb().prepare("SELECT value FROM settings WHERE key = 'supply_chain_verify_enabled'").get();
     return (row?.value ?? '1') === '1';
   } catch (_) {
-    return true; // fail-open on settings read failure rather than blocking deploys system-wide
+    // Unreadable settings table => assume enabled. A failed read must not be a
+    // way to switch the check off; the operator turns it off by writing '0',
+    // never by breaking the row.
+    return true;
   }
 }
 
 /**
+ * Whether an *unanswerable* verification still blocks the deploy. Default yes.
+ * Only the exact string '0' relaxes it, so a typo'd value keeps the safe
+ * behaviour rather than silently opting out.
+ */
+function failClosedOnError() {
+  return process.env.APPCRANE_REQUIRE_VERIFY !== '0';
+}
+
+/**
+ * One GitHub branch read. Throws on any outcome that is not a usable 40-char
+ * SHA, tagging HTTP failures with .status so the retry loop can tell a
+ * transient (5xx, rate limit) from a settled answer (404, 401).
+ */
+async function githubHeadSha(url, headers) {
+  const r = await fetch(url, { headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+  if (!r.ok) {
+    const body = await r.text().catch(() => '');
+    const err = new Error(`GitHub returned ${r.status}${body ? ` — ${body.slice(0, 200)}` : ''}`);
+    err.status = r.status;
+    throw err;
+  }
+  const body = await r.json();
+  const sha = body?.commit?.sha;
+  if (!sha || !/^[0-9a-f]{40}$/.test(sha)) {
+    throw new Error('GitHub returned a 200 with no commit SHA for this branch');
+  }
+  return sha;
+}
+
+/**
+ * Read GitHub's head SHA, retrying while it disagrees with the clone or the
+ * call fails transiently. Returns { sha } or { error }.
+ *
+ * 401 and 404 are settled answers, not hiccups — the token is wrong or the
+ * branch/repo is not there — so they stop the loop immediately instead of
+ * spending the full backoff on a result that will not change.
+ */
+async function resolveRemoteSha(url, headers, localSha) {
+  let lastSha = null;
+  let lastError = null;
+
+  for (let i = 0; i < RETRY_DELAYS_MS.length; i++) {
+    if (RETRY_DELAYS_MS[i] > 0) {
+      await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[i]));
+    }
+    try {
+      lastSha = await githubHeadSha(url, headers);
+      lastError = null;
+      if (lastSha === localSha) return { sha: lastSha };
+    } catch (e) {
+      lastSha = null;
+      lastError = e;
+      if (e.status === 401 || e.status === 404) break;
+    }
+  }
+
+  return lastSha ? { sha: lastSha } : { error: lastError };
+}
+
+/**
+ * Verification could not be completed. Blocks the deploy unless the operator
+ * set APPCRANE_REQUIRE_VERIFY=0, in which case it is reported as NOT VERIFIED
+ * (never as OK) and the deploy continues.
+ */
+function unanswered(reason, detail, appendLog, extra) {
+  if (failClosedOnError()) {
+    throw new Error(
+      `Supply-chain verify FAILED: could not confirm the deploying commit — ${detail}. ` +
+      `Refusing to swap container. Verification failure is treated the same as a mismatch because a ` +
+      `verifier that waves through its own errors can be bypassed by breaking it. ` +
+      `To ride out a GitHub outage set APPCRANE_REQUIRE_VERIFY=0 on the AppCrane host (mismatches still fail), ` +
+      `or set supply_chain_verify_enabled='0' in settings to turn the check off entirely.`
+    );
+  }
+  log.warn(`supply-chain verify: NOT VERIFIED (${reason}) — ${detail}; proceeding because APPCRANE_REQUIRE_VERIFY=0`);
+  appendLog?.(`Supply-chain verify: NOT VERIFIED (${detail}). Proceeding because APPCRANE_REQUIRE_VERIFY=0 is set on the host.`);
+  return { skipped: true, verified: false, failOpen: true, reason, ...extra };
+}
+
+/**
  * Verify the cloned working tree's HEAD SHA matches GitHub's claim for
- * the same branch. Throws on mismatch; resolves silently on match or
- * skip. Skip cases:
- *   - setting disabled
- *   - non-github URL (self-hosted git)
- *   - GitHub API call fails (network down, rate-limited) — we log a
- *     warning and proceed; failing-closed on transient network problems
- *     would brick deploys for everyone the moment GitHub has a hiccup.
+ * the same branch. Throws on mismatch and on any failure to obtain an
+ * answer (see FAIL-CLOSED POLICY above). Returns without throwing on a
+ * match, and on the two inapplicable cases (check disabled, non-github URL).
  *
  * Caller (deployer.js) provides:
  *   - app:        full apps row (source_type, github_url, github_token_encrypted)
@@ -88,13 +210,8 @@ function isVerifyEnabled() {
  */
 export async function verifyCommitSha(app, releaseDir, branch, appendLog) {
   if (!isVerifyEnabled()) {
-    appendLog?.('Supply-chain verify: skipped (disabled in settings).');
-    return { skipped: true, reason: 'disabled' };
-  }
-  const parsed = parseGithubUrl(app.github_url);
-  if (!parsed) {
-    appendLog?.('Supply-chain verify: skipped (not a github.com URL).');
-    return { skipped: true, reason: 'non-github' };
+    appendLog?.('Supply-chain verify: skipped (disabled in settings). The deploying commit was NOT verified against GitHub.');
+    return { skipped: true, verified: false, reason: 'disabled' };
   }
 
   // Local SHA from the cloned tree
@@ -109,27 +226,29 @@ export async function verifyCommitSha(app, releaseDir, branch, appendLog) {
     throw new Error(`supply-chain verify: local HEAD '${localSha}' is not a 40-char SHA`);
   }
 
-  // v2.10.2: managed apps — AppCrane authored the commit and pushed it to the
-  // AMC_* mirror, then deploys immediately. GitHub's branch-API HEAD is
-  // eventually-consistent and lags the push ~1s, so comparing the clone HEAD
-  // to a fresh GitHub query is a read-after-write race (false FAIL on the first
-  // deploy after every push). The external-tampering threat model doesn't apply
-  // here, so verify against the SHA we recorded at push time instead — race-free
-  // and still catches a genuinely-stale clone (clone HEAD != what we pushed).
+  // Freshness gate for managed apps. This compares the clone against a SHA
+  // AppCrane itself recorded at push time, so it proves the clone is not
+  // stale — it is NOT verification, and the GitHub cross-check below still
+  // runs. A missing recorded SHA is therefore no longer a reason to skip.
   if (app.source_type === 'managed') {
     const expected = app.last_managed_push_sha;
-    if (!expected || !/^[0-9a-f]{40}$/.test(expected)) {
-      appendLog?.('Supply-chain verify: skipped (managed app, no recorded push SHA to compare).');
-      return { skipped: true, reason: 'managed-no-sha', localSha };
-    }
-    if (expected !== localSha) {
+    if (expected && /^[0-9a-f]{40}$/.test(expected) && expected !== localSha) {
       throw new Error(
         `Supply-chain verify FAILED: managed clone HEAD ${localSha.slice(0, 12)}… does not match the last pushed commit ${expected.slice(0, 12)}…. ` +
         `The clone is stale — re-run the deploy so it fetches the pushed commit.`
       );
     }
-    appendLog?.(`Supply-chain verify: OK (managed clone HEAD matches last pushed commit ${localSha.slice(0, 12)}).`);
-    return { skipped: false, localSha, remoteSha: expected, source: 'managed-pushed-sha' };
+  }
+
+  const parsed = parseGithubUrl(app.github_url);
+  if (!parsed) {
+    // Inapplicable rather than failed: a self-hosted git remote has no second
+    // source of truth to ask. Note that this is also the shape of a bypass —
+    // anyone able to repoint an app's github_url at a non-github host turns
+    // verification off for that app — so it is stated in the deploy log
+    // instead of being logged as a pass.
+    appendLog?.('Supply-chain verify: skipped (not a github.com URL, no second source of truth). The deploying commit was NOT verified.');
+    return { skipped: true, verified: false, reason: 'non-github', localSha };
   }
 
   const branchName = branch || app.branch || 'main';
@@ -142,29 +261,11 @@ export async function verifyCommitSha(app, releaseDir, branch, appendLog) {
   const token = authForApp(app);
   if (token) headers.Authorization = `Bearer ${token}`;
 
-  let remoteSha;
-  try {
-    const r = await fetch(url, { headers, signal: AbortSignal.timeout(8000) });
-    if (!r.ok) {
-      // Network / auth / rate-limit problem. Log + skip rather than
-      // bricking deploys when GitHub is glitchy. Real attacks tend to
-      // produce mismatches, not 503s.
-      const body = await r.text().catch(() => '');
-      log.warn(`supply-chain verify: GitHub returned ${r.status} for ${parsed.owner}/${parsed.repo}@${branchName} — ${body.slice(0, 200)}`);
-      appendLog?.(`Supply-chain verify: skipped (GitHub returned ${r.status}).`);
-      return { skipped: true, reason: `github-${r.status}`, localSha };
-    }
-    const body = await r.json();
-    remoteSha = body?.commit?.sha;
-  } catch (e) {
-    log.warn(`supply-chain verify: network error reaching GitHub: ${e.message}`);
-    appendLog?.(`Supply-chain verify: skipped (network error: ${e.message}).`);
-    return { skipped: true, reason: 'network', localSha };
-  }
+  const { sha: remoteSha, error } = await resolveRemoteSha(url, headers, localSha);
 
-  if (!remoteSha || !/^[0-9a-f]{40}$/.test(remoteSha)) {
-    appendLog?.(`Supply-chain verify: skipped (GitHub returned no SHA for ${branchName}).`);
-    return { skipped: true, reason: 'no-remote-sha', localSha };
+  if (error) {
+    log.warn(`supply-chain verify: could not read ${parsed.owner}/${parsed.repo}@${branchName} — ${error.message}`);
+    return unanswered('github-unreachable', `GitHub head-SHA read for ${parsed.owner}/${parsed.repo}@${branchName} failed: ${error.message}`, appendLog, { localSha });
   }
 
   if (remoteSha !== localSha) {
@@ -176,5 +277,5 @@ export async function verifyCommitSha(app, releaseDir, branch, appendLog) {
   }
 
   appendLog?.(`Supply-chain verify: OK (HEAD ${localSha.slice(0, 12)} matches GitHub ${parsed.owner}/${parsed.repo}@${branchName}).`);
-  return { skipped: false, localSha, remoteSha };
+  return { skipped: false, verified: true, localSha, remoteSha };
 }

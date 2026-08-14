@@ -89,6 +89,47 @@ export function assertValidRecipient(db, to) {
 }
 
 /**
+ * Per-app hourly send budget (v2.44.0).
+ *
+ * The recipient policy bounds WHO an app can mail; nothing bounded HOW MUCH.
+ * Inside the SDP perimeter the reachable population is every registered
+ * platform user, so one app in a loop — buggy or hostile — could put a message
+ * in every colleague's inbox, repeatedly, under a display name of its choosing.
+ *
+ * 100/hour is set above the shape of real usage and below the shape of abuse:
+ * app mail here is per-event notification (a deploy finished, a request needs
+ * review), and the heaviest existing sender fans one event out to a handful of
+ * people. 100/hour still allows ~2400 messages a day per app, so a legitimate
+ * digest app is unaffected, while a runaway loop stops within the hour instead
+ * of after the weekend.
+ *
+ * Operators can raise or lower it with the `email_app_hourly_limit` setting.
+ * A missing or non-positive value falls back to the default rather than
+ * disabling the budget — "0 means unlimited" is the kind of config that reads
+ * as safe and behaves as off.
+ *
+ * Counted from email_queue rows rather than an in-memory bucket so a server
+ * restart does not reset an app's allowance. Only `source = 'app'` rows count:
+ * the caller-controlled path is the one being bounded, and platform notices
+ * (dead-letter alerts, request digests) must never be starved by an app's spam.
+ */
+const APP_HOURLY_LIMIT_DEFAULT = 100;
+
+function assertAppSendBudget(db, appId) {
+  const configured = Number(getSetting(db, 'email_app_hourly_limit', APP_HOURLY_LIMIT_DEFAULT));
+  const limit = Number.isFinite(configured) && configured > 0 ? configured : APP_HOURLY_LIMIT_DEFAULT;
+  const { n } = db.prepare(`
+    SELECT COUNT(*) AS n FROM email_queue
+    WHERE app_id = ? AND source = 'app' AND created_at >= datetime('now', '-1 hour')
+  `).get(appId);
+  if (n >= limit) {
+    const e = new Error(`This app has reached its email limit (${limit} messages per hour). Try again later.`);
+    e.code = 'EMAIL_RATE_LIMITED';
+    throw e;
+  }
+}
+
+/**
  * Enqueue one message. Validates the recipient against the SSO directory.
  * @param {object} m { appId?, env?, to, subject, text?, html?, replyTo?, fromName?, idempotencyKey?, source?, attachments? }
  *   attachments: [{ filename, content(base64), contentType? }] — max 10, 3 MB total.
@@ -109,6 +150,10 @@ export function enqueueEmail(m) {
     if (existing) return { id: existing.id, deduped: true };
   }
 
+  // After the dedupe check, so a caller retrying with an idempotency key gets
+  // its existing row back instead of burning budget on a message already sent.
+  if ((m.source || 'app') === 'app' && m.appId != null) assertAppSendBudget(db, m.appId);
+
   const res = db.prepare(`
     INSERT INTO email_queue (app_id, env, to_email, from_name, reply_to, subject, body_text, body_html, idempotency_key, source, attachments)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -121,10 +166,65 @@ export function enqueueEmail(m) {
   return { id: res.lastInsertRowid };
 }
 
+/**
+ * The app a queued row was sent ON BEHALF OF, or null for platform mail.
+ *
+ * Only `source = 'app'` rows get attributed. Platform notices already announce
+ * themselves with an "[AppCrane]" subject prefix, and tagging them as if an app
+ * had sent them would be a lie in the other direction.
+ */
+function sendingApp(db, row) {
+  if (row.source !== 'app' || row.app_id == null) return null;
+  return db.prepare('SELECT name, slug FROM apps WHERE id = ?').get(row.app_id) || null;
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
+}
+
 function resolveFromName(db, row) {
   // Display name only — the address is platform-controlled and resolved by the
   // transport (the Graph mailbox / SMTP From), never per-app.
-  return row.from_name || getSetting(db, 'email_from_name', 'AIMI');
+  const base = row.from_name || getSetting(db, 'email_from_name', 'AIMI');
+
+  // v2.44.0: attribution the recipient can actually see.
+  //
+  // `from_name` is chosen by the sending app (POST /api/service/email), and the
+  // address is a real corporate mailbox — so an app could put any colleague's or
+  // any team's name on the From line, and the only record of which app really
+  // sent it was a DB column nobody reads. Recipients are bounded to registered
+  // platform users, so this is not an open relay; it is a spoofing problem
+  // aimed at everyone inside the perimeter, which is worse for phishing than a
+  // stranger's mail would be.
+  //
+  // "<chosen name> via <slug>" is the Google Groups convention, and it works
+  // here for the same reason: the app keeps the display name it wants, the true
+  // origin is appended where it cannot be styled away, and it survives the
+  // mobile clients that show the display name and nothing else.
+  const app = sendingApp(db, row);
+  return app ? `${base} via ${app.slug} (AppCrane)`.slice(0, 200) : base;
+}
+
+/**
+ * Footer naming the sending app, appended to the rendered body.
+ *
+ * The From line is the attribution most recipients see, but it is also the part
+ * a forwarded or quoted copy loses first. The footer travels with the text.
+ */
+function attributionFooter(db, row) {
+  const app = sendingApp(db, row);
+  if (!app) return null;
+  const where = row.env ? ` (${row.env})` : '';
+  return {
+    text: `\n\n-- \nSent by the app "${app.name}" [${app.slug}]${where} through AppCrane, at that app's request.\n`
+        + `AppCrane did not write this message. The sender's display name is chosen by the app.\n`,
+    html: `<hr style="margin-top:24px;border:none;border-top:1px solid #ccc">`
+        + `<p style="color:#666;font-size:12px;line-height:1.5">Sent by the app <strong>${escapeHtml(app.name)}</strong>`
+        + ` [${escapeHtml(app.slug)}]${escapeHtml(where)} through AppCrane, at that app's request.<br>`
+        + `AppCrane did not write this message. The sender's display name is chosen by the app.</p>`,
+  };
 }
 
 async function deadLetter(db, row) {
@@ -150,11 +250,14 @@ async function processRow(db, row) {
     let attachments;
     try { attachments = row.attachments ? JSON.parse(row.attachments) : undefined; }
     catch (_) { attachments = undefined; }
+    // Appended at send time, not at enqueue, so the stored row keeps exactly
+    // what the app submitted and the attribution can never be edited out of it.
+    const footer = attributionFooter(db, row);
     const result = await sendEmail({
       to: row.to_email,
       subject: row.subject,
-      text: row.body_text || undefined,
-      html: row.body_html || undefined,
+      text: row.body_text ? row.body_text + (footer?.text || '') : undefined,
+      html: row.body_html ? row.body_html + (footer?.html || '') : undefined,
       fromName: resolveFromName(db, row),
       replyTo: row.reply_to || undefined,
       attachments,

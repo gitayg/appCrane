@@ -1,0 +1,20 @@
+-- v2.44.0: read-only personal MCP keys.
+--
+-- Personal MCP keys were all-or-nothing: a key authenticates AS its issuer, so
+-- any agent holding one could deploy, rewrite secrets, grant app roles and
+-- delete apps — there was no way to hand an agent a key that can look but not
+-- touch. This column is the "read" half of the capability split.
+--
+-- The flag lives on the KEY, not on the user: the same person can hold one
+-- full-access key for their own tooling and a read-only key pasted into a
+-- triage/monitoring agent, and revoking the second changes nothing about the
+-- first.
+--
+-- DEFAULT 0 = full access, so every key issued before this migration keeps
+-- behaving exactly as it did. Read-only is opt-in at issue time.
+--
+-- Enforcement is central, in the MCP dispatcher (services/mcpTools.js
+-- callTool), against a per-tool `readOnly: true` opt-in. A tool that carries no
+-- classification counts as a write tool, so a newly added tool is refused to
+-- read-only keys rather than silently granted to them.
+ALTER TABLE user_mcp_keys ADD COLUMN read_only INTEGER NOT NULL DEFAULT 0;

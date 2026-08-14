@@ -25,6 +25,11 @@ import crypto from 'crypto';
  *   - name, description, inputSchema (read by the LLM via tools/list)
  *   - requiredRole — 'admin' (any AppCrane admin), 'app_admin' (admin OR per-app
  *     admin role), 'app_access' (any user with access to the app), 'any'
+ *   - readOnly — OPTIONAL opt-in marker: true means the tool changes no state
+ *     and is therefore callable by a read-only MCP key (see isReadOnlyKey).
+ *     Absent means "write tool". requiredRole cannot stand in for this: it
+ *     grades WHO may call, not WHETHER the call mutates — appcrane_deploy is
+ *     'any' and appcrane_get_secret is 'app_admin'.
  *   - handler(user, args) → arbitrary JSON returned to the agent
  *
  * v1 surface (5 tools): list apps, read env, deploy, list requests, read logs.
@@ -55,6 +60,43 @@ function mcpScope(user) {
 export function isMcpLockedOut(user) {
   const scope = mcpScope(user);
   return Array.isArray(scope) && scope.length === 0;
+}
+
+/**
+ * v2.44.0: is the calling personal MCP key read-only (user_mcp_keys.read_only)?
+ *
+ * Checked against BOTH views of the caller. read_only is a property of the KEY,
+ * so `userMcpKey` is its natural home — but callTool()'s userMcpKey argument is
+ * optional and defaults to null, so a call site that forgets to forward it
+ * would silently drop the restriction. That is precisely how
+ * users.mcp_app_scope stayed inert until v2.42.1: requireAuth built req.user
+ * for dhk_mcp_* keys from a hand-picked column list that omitted the column, so
+ * the only MCP key type that exists never carried it. requireAuth now stamps
+ * both `req.user.mcp_read_only` and `req.user_mcp_key.read_only`, and either
+ * one alone refuses the write.
+ */
+function isReadOnlyKey(user, userMcpKey) {
+  return !!(userMcpKey?.read_only || user?.mcp_read_only);
+}
+
+/**
+ * The single gate a read-only key passes through. Enforced once, in callTool,
+ * against the per-tool `readOnly` opt-in — never per handler. There are 44
+ * tools; a per-tool check is a check that gets forgotten on the 45th.
+ *
+ * The classification is an opt-IN so the default fails closed: a tool added
+ * without a `readOnly` marker is treated as a write tool and refused to
+ * read-only keys. Getting it wrong that way produces a bug report from an
+ * operator whose read tool is blocked; getting it wrong the other way round
+ * would hand every read-only key a new mutation for free.
+ */
+function assertToolAllowedForKey(user, tool, userMcpKey) {
+  if (!isReadOnlyKey(user, userMcpKey)) return;
+  if (tool.readOnly) return;
+  throw new Error(
+    `Forbidden: ${tool.name} changes state and this MCP key is read-only. ` +
+    'Issue a full-access key to perform writes.'
+  );
 }
 
 function isInMcpScope(user, slug) {
@@ -307,6 +349,7 @@ const TOOLS = [
       additionalProperties: false,
     },
     requiredRole: 'any',
+    readOnly: true,
     handler: async (user) => {
       const db = getDb();
       const slugs = accessibleSlugsForUser(user);
@@ -343,6 +386,7 @@ const TOOLS = [
       additionalProperties: false,
     },
     requiredRole: 'any',
+    readOnly: true,
     handler: async (user, args) => {
       const app = getAppForUser(user, args.slug);
       const db = getDb();
@@ -427,6 +471,7 @@ const TOOLS = [
       additionalProperties: false,
     },
     requiredRole: 'admin',
+    readOnly: true,
     handler: async (_user, args) => {
       const days = Math.min(Math.max(parseInt(args.days, 10) || 7, 1), 90);
       const top  = Math.min(Math.max(parseInt(args.top,  10) || 10, 1), 50);
@@ -459,6 +504,7 @@ const TOOLS = [
       additionalProperties: false,
     },
     requiredRole: 'admin',
+    readOnly: true,
     handler: async (_user, args) => {
       const days = Math.min(Math.max(parseInt(args.days, 10) || 7, 1), 90);
       const top  = Math.min(Math.max(parseInt(args.top,  10) || 10, 1), 50);
@@ -497,6 +543,7 @@ const TOOLS = [
       additionalProperties: false,
     },
     requiredRole: 'any',
+    readOnly: true,
     handler: async (user, args) => {
       const env = args.env === 'production' ? 'production' : 'sandbox';
       const app = getAppForUser(user, args.slug);
@@ -555,6 +602,7 @@ const TOOLS = [
       additionalProperties: false,
     },
     requiredRole: 'app_admin', // also gated per-slug inside handler
+    readOnly: true,
     handler: async (user, args) => {
       const env = args.env === 'production' ? 'production' : 'sandbox';
       const app = getAppForUser(user, args.slug);
@@ -601,6 +649,7 @@ const TOOLS = [
       additionalProperties: false,
     },
     requiredRole: 'app_admin', // also gated per-slug inside handler
+    readOnly: true,
     handler: async (user, args) => {
       const env = args.env === 'production' ? 'production' : 'sandbox';
       const app = getAppForUser(user, args.slug);
@@ -700,6 +749,7 @@ const TOOLS = [
       additionalProperties: false,
     },
     requiredRole: 'any', // gated by app-access via getAppForUser
+    readOnly: true,
     handler: async (user, args) => {
       const env = args.env === 'production' ? 'production' : 'sandbox';
       const app = getAppForUser(user, args.slug);
@@ -809,6 +859,7 @@ const TOOLS = [
       additionalProperties: false,
     },
     requiredRole: 'any',
+    readOnly: true,
     handler: async (user, args) => {
       const db = getDb();
       const limit = Math.min(args.limit || 20, 100);
@@ -909,6 +960,7 @@ const TOOLS = [
       additionalProperties: false,
     },
     requiredRole: 'any',
+    readOnly: true,
     handler: async (user, args) => {
       const env = args.env === 'production' ? 'production' : 'sandbox';
       const app = getAppForUser(user, args.slug);
@@ -943,6 +995,7 @@ const TOOLS = [
       additionalProperties: false,
     },
     requiredRole: 'any',
+    readOnly: true,
     handler: async (user, args) => {
       const env = args.env === 'production' ? 'production' : 'sandbox';
       const app = getAppForUser(user, args.slug);
@@ -1061,6 +1114,7 @@ const TOOLS = [
       additionalProperties: false,
     },
     requiredRole: 'any',
+    readOnly: true,
     handler: async (user, args) => {
       const id = parseInt(args.deployment_id, 10);
       if (!Number.isFinite(id) || id <= 0) throw new Error('deployment_id must be a positive integer');
@@ -1174,6 +1228,7 @@ const TOOLS = [
       additionalProperties: false,
     },
     requiredRole: 'any',
+    readOnly: true,
     handler: async (user, args) => {
       const db = getDb();
       let row;
@@ -1246,6 +1301,7 @@ const TOOLS = [
       additionalProperties: false,
     },
     requiredRole: 'any',
+    readOnly: true,
     handler: async (user, args) => {
       const env = args.env === 'production' ? 'production' : 'sandbox';
       const app = getAppForUser(user, args.slug);
@@ -1653,6 +1709,7 @@ const TOOLS = [
       additionalProperties: false,
     },
     requiredRole: 'any', // gated per-slug by getAppForUser
+    readOnly: true,
     handler: async (user, args) => {
       const app = getAppForUser(user, args.slug);
       const ingressType = effectiveIngressType(app.ingress_type);
@@ -1798,6 +1855,7 @@ const TOOLS = [
       additionalProperties: false,
     },
     requiredRole: 'any',
+    readOnly: true,
     handler: async (user, args) => {
       const app = getAppForUser(user, args.slug);
       if (!isAppAdmin(user, app)) {
@@ -1959,6 +2017,7 @@ const TOOLS = [
       additionalProperties: false,
     },
     requiredRole: 'any',
+    readOnly: true,
     handler: async (user, args) => {
       const app = getAppForUser(user, args.slug);
       requireAppRoleTier(user, app, { manage: false });
@@ -2061,6 +2120,7 @@ const TOOLS = [
       additionalProperties: false,
     },
     requiredRole: 'any',
+    readOnly: true,
     handler: async (user, args) => {
       const db = getDb();
       // Determine which slugs the caller can administer. Global admins get
@@ -2282,6 +2342,7 @@ const TOOLS = [
       additionalProperties: false,
     },
     requiredRole: 'any',
+    readOnly: true,
     handler: async (_user, args) => {
       const topic = ['operations', 'email'].includes(args.topic) ? args.topic : 'onboarding';
       const { readFileSync, existsSync } = await import('fs');
@@ -2911,6 +2972,7 @@ const TOOLS = [
       additionalProperties: false,
     },
     requiredRole: 'app_admin',
+    readOnly: true,
     handler: async (user, args) => {
       const app = getAppForUser(user, args.slug);
       if (!isAppAdmin(user, app)) throw new Error('Forbidden: reading cron jobs requires admin or app-admin role on this app');
@@ -3000,7 +3062,11 @@ export function listTools(user, userMcpKey = null) {
   // Stash userMcpKey on user so canUseTool's helpers (and future custom checks)
   // can see it.
   const userView = userMcpKey ? { ...user, _mcpUserKey: userMcpKey } : user;
-  return TOOLS.filter((t) => canUseTool(userView, t)).map((t) => ({
+  // v2.44.0: a read-only key is advertised only the read tools. This mirrors
+  // the callTool gate rather than replacing it — MCP clients cache the catalogue
+  // at connect and callers may invoke a name they were never shown.
+  const readOnlyKey = isReadOnlyKey(user, userMcpKey);
+  return TOOLS.filter((t) => (!readOnlyKey || t.readOnly) && canUseTool(userView, t)).map((t) => ({
     name: t.name,
     description: t.description,
     inputSchema: stageifySchema(t.inputSchema),
@@ -3013,6 +3079,16 @@ export async function callTool(user, name, args, userMcpKey = null) {
   if (!tool) {
     auditMcpCall(user, name, args, new Error('unknown tool'));
     throw new Error(`Unknown tool: ${name}`);
+  }
+  // v2.44.0: the read-only gate runs before the role gate. It is a property of
+  // the credential rather than of the caller's standing, so a read-only key
+  // must hear "this key is read-only" whatever role its issuer holds — an
+  // admin's read-only key is still read-only.
+  try {
+    assertToolAllowedForKey(user, tool, userMcpKey);
+  } catch (err) {
+    auditMcpCall(user, name, args, err);
+    throw err;
   }
   if (!canUseTool(user, tool)) {
     const err = new Error(`Forbidden: tool ${name} requires ${tool.requiredRole}`);
@@ -3094,5 +3170,6 @@ export function getToolCatalog() {
     description: t.description,
     inputSchema: stageifySchema(t.inputSchema),
     requiredRole: t.requiredRole,
+    readOnly: !!t.readOnly,
   }));
 }

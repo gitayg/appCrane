@@ -47,6 +47,7 @@ export function requireAuth(req, res, next) {
       const keyHash = hashApiKey(apiKey);
       const row = db.prepare(`
         SELECT umk.id AS umk_id, umk.label, umk.expires_at, umk.revoked_at,
+               umk.read_only,
                u.id AS uid, u.name, u.email, u.role, u.active, u.kind, u.username,
                u.mcp_app_scope
         FROM user_mcp_keys umk
@@ -69,12 +70,19 @@ export function requireAuth(req, res, next) {
         // other two auth paths below select the whole users row and were
         // never affected, which is why the restriction appeared to work when
         // tested with an X-API-Key or a portal session.
+        //
+        // v2.44.0: user_mcp_keys.read_only travels the same path and would hit
+        // the same wall, so it is stamped on BOTH views. It is a property of
+        // the key, but callTool()'s userMcpKey argument is optional — a call
+        // site that forgets to pass it would silently lose the restriction.
+        // Either half alone is enough for the dispatcher to refuse a write.
         req.user = {
           id: row.uid, name: row.name, email: row.email,
           role: row.role, active: row.active, kind: row.kind, username: row.username,
           mcp_app_scope: row.mcp_app_scope,
+          mcp_read_only: !!row.read_only,
         };
-        req.user_mcp_key = { id: row.umk_id, label: row.label };
+        req.user_mcp_key = { id: row.umk_id, label: row.label, read_only: !!row.read_only };
         return next();
       }
     }

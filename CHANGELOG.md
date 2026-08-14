@@ -5,6 +5,32 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.44.0 — The rest of the security review.
+
+Everything left on the external reviewer's list that was ours to fix, in one upgrade.
+
+**Auth-bypass routes have an access log again.** A bare `log_skip` suppressed the entire log line for exactly the route class that is deliberately unauthenticated — so the least-protected surface on the platform was also the only one with no record. It existed to keep a token out of Caddy's log storage, and the code comment has named filtered logging as the intended fix since v2.7.28. The whole query string is now redacted rather than the line dropped, keeping method, host, path, status, IP and duration. Redacting everything rather than a named parameter is deliberate: the parameter belongs to the app's own CLI protocol, so a guessed list would silently miss the one that matters.
+
+Access logging is emitted only when a bypass route actually exists, so an install with no exemptions is byte-identical to before.
+
+**Custom-domain sites get the baseline security headers.** HSTS, nosniff, referrer-policy and permissions-policy were emitted once inside the `CRANE_DOMAIN` block, so an app on its own hostname inherited none of them — the apps most likely to be shared externally were the ones without the platform's baseline. Both site blocks now emit one shared constant rather than a second, weaker variant; this file already carries two comments about security rules that drifted when they existed in two copies.
+
+**`frame_ancestors` can finally narrow.** It merged as a union with the platform-wide registrable-domain default, so an app could only ever widen the wildcard — an app that wanted to be embedded nowhere had no way to say so. `'none'` is now an opt-out sentinel. It was chosen because it is the one value with no coherent current meaning to break: an app setting it today gets `frame-ancestors 'self' https://*.example.com 'none'`, and under the CSP3 grammar `'none'` is only admissible as the sole source, so that policy denies nothing at all. Every other value keeps exact union semantics. Applied in `mergeAncestors` rather than the Caddy generator alone, so the in-iframe SSO login step agrees with the app's own policy instead of remaining frameable.
+
+**Plaintext secret reads are throttled and surfaced.** v2.42.1 made them audited; an audit trail nobody reads is forensics, not detection. Owners are now notified, coalesced to one notice per person per app per 30 minutes — fifteen identical emails for one editing session teaches people to filter them.
+
+The throttle numbers come from the real client rather than a guess: the Environment tab re-reveals after every set and delete, so an honest session is 15–20 reveals in minutes, and the limit is 30 per 10 minutes. A throttle that fires during genuine incident response is one an operator demands be removed, and then there is none. The budget counts per user and app across **both** doors — the REST `env-reveal` and the MCP `secret-reveal` — and across sandbox and production, so switching protocol or environment does not buy a fresh allowance. It reads from the audit log rather than process memory, so a restart does not hand an attacker a clean budget.
+
+**App-sent email carries attribution and a rate limit.** The display name was caller-controlled on a real corporate mailbox, the sending app was recorded in the database but never appeared in the rendered message, and nothing was rate-limited. Recipients were already bounded to registered platform users, so this was spoofing and volume rather than an open relay.
+
+**Supply chain: verification fails closed.** The HEAD-SHA check treated any GitHub error or non-2xx as a pass, so a network blip was indistinguishable from a verified commit. Lockfile handling and dependency scanning on tenant builds follow the lenient-default pattern established by `APPCRANE_REQUIRE_NONROOT` — warn by default, operator opts into enforcement — because breaking the next deploy of every lockfile-less app at once is not a security improvement.
+
+**Read-only MCP keys.** Keys were all-or-nothing: any agent holding one could deploy, set env, delete apps and grant roles. A key can now be issued read-only, enforced centrally in the dispatcher rather than per-tool, with an unclassified tool treated as a write by default so tool #45 is safe without anyone remembering. Existing keys are unchanged — absent means full access.
+
+**Tenant disk usage now alerts.** The quota was an injected environment variable with nothing watching it, so an app could fill the host disk and take every app down with it. Real enforcement still needs a project quota or a loopback image; this is the detection half.
+
+461 → 517 tests.
+
 ## 2.43.1 — The container-isolation test compared the fix against itself.
 
 `container-network-isolation.test.js` diffed the generated `docker run` argv against `git show HEAD:server/services/docker.js`. That was meaningful while the fix was uncommitted — HEAD was v2.42.0 — and became self-referential the instant it was committed: HEAD then contained the change, so the diff was empty and the anchor assertion ("HEAD really did start containers with no `--network`") was false. Five tests passed locally and failed on the first push.

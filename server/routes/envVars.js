@@ -13,11 +13,41 @@ import { auditMiddleware, logAudit } from '../middleware/audit.js';
 import log from '../utils/logger.js';
 import { encrypt, decrypt } from '../services/encryption.js';
 import { userHasAppPermission } from '../services/permissions.js';
+import { notifySecretReveal } from '../services/emailService.js';
 import { AppError } from '../utils/errors.js';
 
 const router = Router();
 
 router.use(requireAuth);
+
+// ── Plaintext-reveal throttle (v2.44.0) ──────────────────────────────────────
+//
+// Both numbers are set against the ACTUAL client, not a guess. The admin SPA
+// (studio-web AppManager) loads the Environment tab with ?reveal=true and calls
+// load() again after every set and every delete, so one honest sitting — open
+// the tab, add half a dozen variables, delete a stale one, switch between the
+// sandbox and production tabs — is on the order of 15-20 reveals in a few
+// minutes. 30 per 10 minutes clears that with room to spare, which is the point:
+// a throttle that fires during real incident response is a throttle an operator
+// will demand be removed, and then there is none.
+//
+// Above that line there is no human workflow left. 30 full-environment dumps in
+// 10 minutes is a script, and the caller gets 429 rather than the plaintext.
+//
+// Budget is counted per (user, app) across BOTH envs and across BOTH doors —
+// this route's `env-reveal` and the MCP tool's `secret-reveal` — so a caller
+// cannot get a fresh allowance by switching from HTTP to MCP or from sandbox to
+// production. It is read from the audit log rather than process memory so a
+// restart does not hand an attacker a clean budget.
+const REVEAL_WINDOW_MIN = 10;
+const REVEAL_MAX_PER_WINDOW = 30;
+
+// Coalescing window for the owner notification. Same reasoning inverted: with
+// the SPA re-revealing after every mutation, mailing on each event would put ~15
+// identical notices in an owner's inbox for one editing session, and the third
+// one teaches them to filter the rest. One notice per person per app per 30
+// minutes keeps the signal; the audit log keeps the complete record.
+const REVEAL_NOTICE_COOLDOWN_MIN = 30;
 
 /**
  * GET /api/apps/:slug/env/:env - List env vars
@@ -46,8 +76,34 @@ router.get('/:slug/env/:env', requireAppUser, (req, res) => {
   // the Environment tab, and logging that would bury the reads that matter.
   // Keys only — the values are the thing being protected.
   if (showValues && vars.length) {
+    // Both counts are taken BEFORE this reveal is logged, so "recent" and
+    // "notified" mean strictly prior events and the arithmetic is unambiguous.
+    const countReveals = (minutes) => db.prepare(`
+      SELECT COUNT(*) AS n FROM audit_log
+      WHERE user_id = ? AND app_id = ? AND action IN ('env-reveal', 'secret-reveal')
+        AND created_at >= datetime('now', ?)
+    `).get(req.user.id, req.app.id, `-${minutes} minutes`).n;
+
+    if (countReveals(REVEAL_WINDOW_MIN) >= REVEAL_MAX_PER_WINDOW) {
+      // Logged at error: hitting this ceiling is never routine use.
+      log.error(`SECRET REVEAL THROTTLED ${req.app.slug}/${env} — user ${req.user.id} exceeded ${REVEAL_MAX_PER_WINDOW} reveals in ${REVEAL_WINDOW_MIN}m`);
+      throw new AppError(
+        `Too many secret reveals for this app (${REVEAL_MAX_PER_WINDOW} per ${REVEAL_WINDOW_MIN} minutes). Wait and retry, or ask a platform admin.`,
+        429, 'REVEAL_THROTTLED'
+      );
+    }
+
+    const alreadyNotified = countReveals(REVEAL_NOTICE_COOLDOWN_MIN) > 0;
+
     logAudit(req.user.id, req.app.id, 'env-reveal', { env, keys: vars.map(v => v.key) });
     log.warn(`SECRET REVEAL ${req.app.slug}/${env} (${vars.length} key(s)) by user ${req.user.id}`);
+
+    if (!alreadyNotified) {
+      // Fire-and-forget: the reveal must not block on SMTP, and a mail
+      // transport that is down must not turn a valid read into a 500.
+      notifySecretReveal(req.app, env, req.user, vars.map(v => v.key))
+        .catch(e => log.error(`Secret-reveal notification failed for ${req.app.slug}/${env}: ${e.message}`));
+    }
   }
 
   const result = vars.map(v => ({

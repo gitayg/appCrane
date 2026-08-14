@@ -1,8 +1,14 @@
 import net from 'net';
+import { execFile } from 'child_process';
+import { existsSync } from 'fs';
+import { join, resolve } from 'path';
+import { promisify } from 'util';
 import { getDb } from '../db.js';
 import { getPortsForSlot } from './portAllocator.js';
 import { getIngressForApp } from './tcpIngress.js';
 import log from '../utils/logger.js';
+
+const execFileAsync = promisify(execFile);
 
 const PROBE_TIMEOUT_MS = 5000;
 
@@ -19,6 +25,127 @@ const HEALTHY = 200;
 
 let checkIntervals = new Map();
 
+// ── Disk-quota detection (v2.44.0) ───────────────────────────────────────────
+//
+// The tenant quota deployer.js injects as APPCRANE_TENANT_QUOTA_BYTES is
+// ADVISORY: /data is a plain bind mount with no --storage-opt and no project
+// quota, so the number only binds an app that chooses to honour it. Nothing
+// stops an app from filling a shared host filesystem and taking every other app
+// on the box down with it — a whole-platform outage caused by one app's bug.
+//
+// Enforcement is not something this file can do (see the note below on what it
+// would take). Detection is: measure what each app's /data actually holds and
+// tell a human before the disk runs out, rather than after.
+//
+// Interval: 15 minutes, on its own timer rather than folded into runCheck().
+// The liveness probes run every 30s per app-env and a directory walk is orders
+// of magnitude more expensive than a socket connect; disk usage is also a
+// slow-moving quantity, so probing it 30x more often buys nothing and would
+// make the health checker the heaviest thing on the box.
+const DISK_CHECK_MS = 15 * 60_000;
+
+// Re-alert at most daily per app-env while it stays over. The first crossing is
+// the signal; repeating it every 15 minutes for a week turns the alert into
+// something people filter, which is the failure mode this whole item is about.
+// Held in memory on purpose: a restart re-alerts, and re-stating an unresolved
+// over-quota condition after a restart is correct behaviour, not noise.
+const DISK_ALERT_COOLDOWN_MS = 24 * 60 * 60_000;
+
+// Platform-wide default budget per app-env, overridable with the
+// `app_disk_quota_mb` setting. Chosen as a detection threshold, not a
+// contract — apps on this platform are web services with a SQLite file and
+// uploads, so a 2 GB /data is already unusual enough to be worth a look.
+const DEFAULT_APP_QUOTA_MB = 2048;
+
+let diskTimer = null;
+const diskAlertedAt = new Map();
+
+/**
+ * Bytes held under `dir`, or null if it cannot be measured.
+ *
+ * `du -sk` rather than a JS walk: the case being detected is a directory with
+ * an enormous number of files, which is exactly where a per-entry readdir/stat
+ * loop in the event loop gets slow enough to matter.
+ *
+ * A non-zero exit is not treated as failure on its own. du exits 1 when it
+ * cannot descend into a subdirectory — routine now that containers run
+ * non-root and write their own trees — but still prints the total for
+ * everything it did read. An undercount is a usable lower bound; discarding it
+ * would blind the check on precisely the busiest apps.
+ */
+async function measureDirBytes(dir) {
+  try {
+    const { stdout } = await execFileAsync('du', ['-sk', dir], { timeout: 120_000, maxBuffer: 1 << 20 });
+    const kb = parseInt(String(stdout).trim().split(/\s+/)[0], 10);
+    return Number.isFinite(kb) ? kb * 1024 : null;
+  } catch (e) {
+    const kb = parseInt(String(e.stdout || '').trim().split(/\s+/)[0], 10);
+    if (Number.isFinite(kb)) return kb * 1024;
+    log.warn(`[disk-quota] could not measure ${dir}: ${e.message}`);
+    return null;
+  }
+}
+
+/**
+ * Measure every app's mounted /data and alert on anything over quota.
+ *
+ * WHAT THIS DOES NOT DO: it does not stop the write. Real enforcement needs the
+ * filesystem in the loop — an XFS project quota on the app's data subtree, or a
+ * per-app loopback image mounted at /data (or a Docker volume created with
+ * --storage-opt size=, which needs a quota-capable backing filesystem). All
+ * three are host-provisioning decisions and belong in deployer.js and the
+ * install path, not here. Until one of them lands, an app over budget is
+ * something a human is told about, not something the kernel refuses.
+ */
+async function runDiskChecks() {
+  const db = getDb();
+  const configured = Number(
+    db.prepare("SELECT value FROM settings WHERE key = 'app_disk_quota_mb'").get()?.value
+  );
+  const quotaBytes = (Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_APP_QUOTA_MB) * 1024 * 1024;
+
+  const dataDir = resolve(process.env.DATA_DIR || './data');
+  const apps = db.prepare('SELECT id, name, slug FROM apps').all();
+
+  for (const app of apps) {
+    for (const env of ['production', 'sandbox']) {
+      // Mirrors deployer.js: the container's /data is this host directory.
+      const dir = resolve(join(dataDir, 'apps', app.slug, env, 'shared', 'data'));
+      if (!existsSync(dir)) continue;
+
+      const used = await measureDirBytes(dir);
+      const key = `${app.id}-${env}`;
+
+      if (used == null || used <= quotaBytes) {
+        // Clear the cooldown once back under, so the next crossing alerts again
+        // instead of being swallowed by a stale 24h suppression.
+        diskAlertedAt.delete(key);
+        continue;
+      }
+
+      log.error(`[disk-quota] ${app.slug} ${env} is over budget: ${Math.round(used / 1024 / 1024)} MB used of ${Math.round(quotaBytes / 1024 / 1024)} MB`);
+
+      const lastAlert = diskAlertedAt.get(key) || 0;
+      if (Date.now() - lastAlert < DISK_ALERT_COOLDOWN_MS) continue;
+      diskAlertedAt.set(key, Date.now());
+
+      try {
+        const { logAudit } = await import('../middleware/audit.js');
+        logAudit(null, app.id, 'disk-quota-exceeded', { env, used_bytes: used, quota_bytes: quotaBytes });
+      } catch (e) {
+        log.warn(`[disk-quota] audit write failed for ${app.slug}: ${e.message}`);
+      }
+
+      try {
+        const { notifyDiskQuota } = await import('./emailService.js');
+        await notifyDiskQuota(app, env, used, quotaBytes);
+      } catch (e) {
+        log.error(`[disk-quota] alert for ${app.slug} ${env} failed to send: ${e.message}`);
+      }
+    }
+  }
+}
+
 /**
  * Start health checking for all apps.
  */
@@ -32,6 +159,14 @@ export function startHealthChecker() {
 
   for (const config of configs) {
     scheduleCheck(config);
+  }
+
+  // Deliberately no immediate first run: boot is the busiest moment on the box
+  // and an over-quota disk is not a condition that changes in 15 minutes.
+  if (!diskTimer) {
+    diskTimer = setInterval(() => {
+      runDiskChecks().catch(e => log.error(`[disk-quota] sweep failed: ${e.message}`));
+    }, DISK_CHECK_MS);
   }
 
   log.info(`Health checker started for ${configs.length} endpoints`);
@@ -218,6 +353,7 @@ export function stopHealthChecker() {
     clearInterval(interval);
   }
   checkIntervals.clear();
+  if (diskTimer) { clearInterval(diskTimer); diskTimer = null; }
   log.info('Health checker stopped');
 }
 
