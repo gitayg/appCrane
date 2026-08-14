@@ -283,19 +283,40 @@ router.put('/:slug/roles', requireAppAccess, auditMiddleware('app-set-role'), (r
     }
   }
 
-  db.prepare(`
-    INSERT INTO app_user_roles (app_id, user_id, app_role) VALUES (?, ?, ?)
-    ON CONFLICT(app_id, user_id) DO UPDATE SET app_role = excluded.app_role
-  `).run(app.id, user_id, app_role);
-
-  // Keep app_users in sync so API-key based flows also see this user's apps
-  db.prepare('INSERT OR IGNORE INTO app_users (app_id, user_id) VALUES (?, ?)').run(app.id, user_id);
-
-  // v2.41.0: 'none' is how this route removes someone, so it must also drop the
-  // roles the APP defined for them. Left behind, those grants come back the
-  // moment the person is re-added at any tier — access restored by one admin
-  // action, in-app powers restored silently along with it.
-  if (app_role === 'none') clearUserRoleGrants(app.id, user_id);
+  // v2.42.1: 'none' means REMOVED, so it deletes rather than writes a row.
+  //
+  // This route used to write app_role='none' AND insert an app_users row, which
+  // granted the very access it reads as taking away: requireAppUser checks
+  // app_users, so someone the dashboard showed as 'none' could read DECRYPTED
+  // production env vars via GET /:slug/env/:env?reveal=true, and run
+  // backup/restore/copy-data. Every human-visible signal said no — /api/me
+  // reported 'none' and forward_auth denied them at /<slug> — while the one path
+  // that returns plaintext said yes. That disagreement between the checks WAS
+  // the bug, and it was invisible from the UI.
+  //
+  // Absence is now the only representation of "no role": six different checks
+  // cannot disagree about a row that does not exist. Migration 073 clears the
+  // rows this already created.
+  //
+  // The app-defined roles go too (v2.41.0) — left behind, those grants come back
+  // the moment the person is re-added at any tier, in-app powers restored
+  // silently along with access.
+  if (app_role === 'none') {
+    db.transaction(() => {
+      db.prepare('DELETE FROM app_user_roles WHERE app_id = ? AND user_id = ?').run(app.id, user_id);
+      db.prepare('DELETE FROM app_users WHERE app_id = ? AND user_id = ?').run(app.id, user_id);
+      clearUserRoleGrants(app.id, user_id);
+    })();
+  } else {
+    db.transaction(() => {
+      db.prepare(`
+        INSERT INTO app_user_roles (app_id, user_id, app_role) VALUES (?, ?, ?)
+        ON CONFLICT(app_id, user_id) DO UPDATE SET app_role = excluded.app_role
+      `).run(app.id, user_id, app_role);
+      // Keep app_users in sync so API-key based flows also see this user's apps
+      db.prepare('INSERT OR IGNORE INTO app_users (app_id, user_id) VALUES (?, ?)').run(app.id, user_id);
+    })();
+  }
 
   res.json({ message: `Role '${app_role}' set for user ${user_id} on app ${app.slug}` });
 });

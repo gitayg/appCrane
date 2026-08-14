@@ -5,6 +5,34 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.43.0 — Removing someone was granting them secrets; containers could reach each other.
+
+Four security fixes, shipped together so the fleet takes one upgrade rather than four.
+
+**Removing someone from an app was granting them production secrets.** `PUT /api/apps/:slug/roles` with `app_role: 'none'` — how the admin UI's dropdown *removes* people — wrote a `'none'` row **and unconditionally inserted an `app_users` membership row**. `requireAppUser` reads exactly that table, so the "removed" person gained access they had never had: `?reveal=true` returns **decrypted production environment variables**, with `backup` / `restore` / `copy-data` alongside. Reproduced end to end: a user with no relationship to an app got `403`; an admin set them to `none`; the same request then returned the app's plaintext secrets.
+
+What let it survive is that every human-visible signal disagreed with the one path that mattered. The dashboard showed `none`. `/api/me` reported `none`. Caddy's `forward_auth` denied them at `/<slug>`. Only `requireAppUser` said yes — and that is the gate in front of the plaintext. `'none'` now deletes from both tables; absence is the only representation of "no role", because checks cannot disagree about a row that does not exist. **Migration 073 clears the memberships this already created — every existing `app_role='none'` row is a live grant until it runs.**
+
+**Removal via the Users modal left the platform tier behind.** `PUT /:slug/users` deleted `app_users` and pruned app-defined grants but never touched `app_user_roles`, so `resolveAppRole` still returned the removed member's old tier instead of `none` and `/api/identity/verify` let them back through Caddy. Verify went 200 → 403 after the fix. The same table pair as above, in the opposite direction — fixing one half was not enough.
+
+**Any container could reach any other container.** Containers started with no `--network`, so every app sat on the default `docker0` bridge and could reach every other app on port 3000 directly — bypassing Caddy, `forward_auth`, identity headers, audit and rate limiting. One compromised app reached all of them.
+
+The obvious fix does not survive this platform's size: a user-defined network isolates its members from *other* networks but not from each other, so isolation would mean one network per app, and Docker's default address pools yield only ~16–31 bridge networks before creation fails. At ~57 apps that breaks the platform at around the sixteenth, with an opaque subnet error at deploy time. Instead there is **one shared network with the bridge driver's inter-container communication disabled** (`com.docker.network.bridge.enable_icc=false`) — isolation without the address-pool ceiling, and nothing to tear down when an app is deleted. Verified against live containers: a sibling is unreachable on port 3000 on that network and reachable on an otherwise identical one without the flag, while the published `127.0.0.1` port Caddy uses still works.
+
+Also added, conservatively: `--pids-limit`, `--security-opt no-new-privileges`, `--cap-drop NET_RAW`. Deliberately **not** `--read-only`, which breaks any app writing outside `/data`.
+
+**Non-root containers are now actually checked.** The validator errored only when the *last* `USER` line was literally `USER root` — so `USER 0`, `USER root:root`, and a Dockerfile with **no `USER` line at all** all passed and ran as root. The last of those is the default shape, which is why it mattered. It also read the last `USER` in the file rather than in the final build stage, so a multi-stage Dockerfile setting `USER node` in a builder and nothing afterwards was reported as safe while running as root.
+
+Explicit root is now a hard error (a deliberate act, and the guides already documented the rule). A **missing** `USER` warns on every deploy rather than failing, because turning the common case into an error would fail the next deploy of most apps at once — an outage dressed as a security fix, and it would also block deploying the fix. Operators flip `APPCRANE_REQUIRE_NONROOT=1` once their estate is clean. Nothing about the running fleet changes on upgrade; this makes the problem visible and fixable, not impossible.
+
+**The per-key MCP app scope was silently inert.** `users.mcp_app_scope` exists and `mcpTools.js` reads it, but `requireAuth` built `req.user` for `dhk_mcp_*` keys from a hand-picked column list that omitted it — so every scope an operator set on the only MCP key type that exists was ignored, including `'[]'`. The other two auth paths select the whole row and were never affected, which is why the restriction appeared to work when tested with an API key or a portal session.
+
+**Plaintext secret reads are audited.** Writes were (`env-set`, `env-delete`); reads were not, so the log recorded who *changed* a secret but not who took a copy. `?reveal=true` now emits `env-reveal`. Only the reveal — the masked list is the ordinary Environment-tab render.
+
+Both hardening switches are now documented in `.env.example`. They were not, which is the same inert-config failure as the MCP scope above.
+
+396 → 461 tests.
+
 ## 2.42.0 — Raw TCP ingress: apps that aren't HTTP can be reached directly.
 
 Some apps don't speak HTTP. The motivating case is a forward/CONNECT proxy: a client opens a TCP connection and gets a tunnel back, which no HTTP reverse proxy can express. Those apps now get their container port published straight onto the host, with Caddy entirely out of the layer-4 path.

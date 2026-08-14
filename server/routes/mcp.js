@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { requireAuth, requireAdmin } from '../middleware/auth.js';
-import { listTools, callTool, getToolCatalog } from '../services/mcpTools.js';
+import { listTools, callTool, getToolCatalog, isMcpLockedOut } from '../services/mcpTools.js';
 import { noteMcpStart, noteMcpEnd } from '../services/mcpActivity.js';
 import { getDb } from '../db.js';
 import {
@@ -227,6 +227,16 @@ router.post('/', requireAuth, async (req, res) => {
                   code: -32000,
                   message: `Tool '${params.name}' is not an AppCrane tool. To call GitHub MCP tools, add --header "X-Github-Token: ghp_..." to your AppCrane MCP setup command, then retry.`,
                 },
+              });
+            }
+            // v2.42.1 SECURITY: the empty-scope lockout lives inside callTool,
+            // which this branch never enters — so a key the operator had locked
+            // out of MCP could still drive the GitHub passthrough and make
+            // AppCrane `docker run` a github-mcp-server container on the host.
+            if (isMcpLockedOut(req.user)) {
+              return res.json({
+                jsonrpc: '2.0', id,
+                error: { code: -32000, message: 'Forbidden: this key has an empty MCP scope (locked out)' },
               });
             }
             const upstreamName = stripPrefix(params.name, 'mcp__github__');
