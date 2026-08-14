@@ -203,7 +203,18 @@ async function start(app, extra = {}) {
  * and the only thing that differs between the two argvs is this release's edit.
  */
 const HEAD_MODULE = await (async () => {
-  const src = execFileSync('git', ['show', 'HEAD:server/services/docker.js'], { cwd: ROOT, encoding: 'utf8' });
+  // Sourced from a VENDORED snapshot, not `git show HEAD:` — that was wrong in
+  // two ways at once. HEAD moves: the moment this fix was committed, HEAD
+  // contained it, so the diff compared the change against itself and the anchor
+  // test ("HEAD really did start containers with no --network") became false.
+  // And CI's actions/checkout is shallow with no tags, so neither HEAD~1 nor a
+  // release tag is reachable there — pinning either would have failed on the
+  // runner while passing locally, which is the same shape of bug.
+  //
+  // The snapshot is server/services/docker.js as of v2.42.0, the last release
+  // before container isolation. It is a frozen baseline on purpose: it should
+  // change only if someone deliberately re-baselines this comparison.
+  const src = readFileSync(join(ROOT, 'test/fixtures/docker.pre-isolation.js'), 'utf8');
   const rewritten = src.replace(/from '(\.[^']+)'/g, (_m, spec) => {
     const abs = join(ROOT, 'server/services', spec);
     assert.ok(existsSync(abs), `HEAD docker.js imports ${spec}, which no longer exists at ${abs}`);

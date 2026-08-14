@@ -5,6 +5,14 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.43.1 — The container-isolation test compared the fix against itself.
+
+`container-network-isolation.test.js` diffed the generated `docker run` argv against `git show HEAD:server/services/docker.js`. That was meaningful while the fix was uncommitted — HEAD was v2.42.0 — and became self-referential the instant it was committed: HEAD then contained the change, so the diff was empty and the anchor assertion ("HEAD really did start containers with no `--network`") was false. Five tests passed locally and failed on the first push.
+
+It was also unusable in CI regardless. `actions/checkout` runs shallow with no tags, so `HEAD~1` and release tags are both unreachable on the runner — pinning either would have failed there while passing locally, which is the same defect wearing a different hat.
+
+The baseline is now a vendored snapshot, `test/fixtures/docker.pre-isolation.js`, frozen at v2.42.0. The diff machinery is worth keeping — it catches a reordered publish or a changed bind address, not just a missing flag — so only its source changed.
+
 ## 2.43.0 — Removing someone was granting them secrets; containers could reach each other.
 
 Four security fixes, shipped together so the fleet takes one upgrade rather than four.
