@@ -47,6 +47,16 @@ function mcpScope(user) {
   }
 }
 
+/**
+ * True when mcp_app_scope is set to an empty list, i.e. the operator has locked
+ * this key out of MCP entirely. Exported because the lockout has to hold on
+ * every MCP surface, not just AppCrane's own tools — see server/routes/mcp.js.
+ */
+export function isMcpLockedOut(user) {
+  const scope = mcpScope(user);
+  return Array.isArray(scope) && scope.length === 0;
+}
+
 function isInMcpScope(user, slug) {
   const scope = mcpScope(user);
   if (scope === null) return null; // no opinion — fall through to role checks
@@ -61,15 +71,20 @@ function accessibleSlugsForUser(user) {
   // user's app_user_roles assignments, not from a separate key type.)
   if (user._mcpUserKey) {
     const db = getDb();
-    if (isAdmin(user)) {
-      return db.prepare('SELECT slug FROM apps').all().map(r => r.slug);
-    }
-    return db.prepare(`
-      SELECT DISTINCT a.slug
-      FROM apps a
-      JOIN app_user_roles aur ON aur.app_id = a.id
-      WHERE aur.user_id = ? AND aur.app_role = 'owner'
-    `).all(user.id).map(r => r.slug);
+    const owned = isAdmin(user)
+      ? db.prepare('SELECT slug FROM apps').all().map(r => r.slug)
+      : db.prepare(`
+        SELECT DISTINCT a.slug
+        FROM apps a
+        JOIN app_user_roles aur ON aur.app_id = a.id
+        WHERE aur.user_id = ? AND aur.app_role = 'owner'
+      `).all(user.id).map(r => r.slug);
+    // v2.42.1 SECURITY: an explicit mcp_app_scope is a ceiling over whatever
+    // the role resolves to, including for a personal key. This branch used to
+    // return before reaching the scope, so the restriction only ever applied
+    // to the key types that do not exist in practice.
+    const ceiling = mcpScope(user);
+    return ceiling ? owned.filter(s => ceiling.includes(s)) : owned;
   }
 
   const scope = mcpScope(user);
@@ -94,6 +109,14 @@ function getAppForUser(user, slug) {
   const db = getDb();
   const app = db.prepare('SELECT * FROM apps WHERE slug = ?').get(slug);
   if (!app) throw new Error(`App not found: ${slug}`);
+
+  // v2.42.1 SECURITY: the explicit scope is checked FIRST, above every role
+  // branch, because it is a ceiling and not an alternative to the role checks.
+  // It used to sit below the personal-key branch, which returned early — so a
+  // dhk_mcp_* key ignored the scope entirely.
+  if (isInMcpScope(user, slug) === false) {
+    throw new Error(`Forbidden: app ${slug} is outside this key's MCP scope`);
+  }
 
   // Personal MCP key locks scope to apps the user has access to. AppCrane
   // global admins (admin OR platform_admin) keep their global access;
@@ -2054,6 +2077,15 @@ const TOOLS = [
         if (scopedSlugs.length === 0) return { requests: [], count: 0 };
       }
 
+      // v2.42.1 SECURITY: the admin branch above resolves to "every app", which
+      // walked straight past an explicit mcp_app_scope — a scoped admin key read
+      // pending access requests, with requester names, for the whole platform.
+      const ceiling = mcpScope(user);
+      if (ceiling) {
+        scopedSlugs = scopedSlugs ? scopedSlugs.filter(s => ceiling.includes(s)) : ceiling;
+        if (scopedSlugs.length === 0) return { requests: [], count: 0 };
+      }
+
       let where = "er.status != 'done' AND er.message LIKE 'Access request for app%'";
       const params = [];
       if (args.slug) {
@@ -2960,6 +2992,11 @@ const TOOL_NAME_ALIASES = {
 };
 
 export function listTools(user, userMcpKey = null) {
+  // v2.42.1: a key locked out by an empty scope gets an empty catalogue. The
+  // lockout lived only in callTool, so such a key was refused every call while
+  // tools/list still handed it the whole tool surface — an operator reading
+  // "locked out" would see the key still answering.
+  if (isMcpLockedOut(user)) return [];
   // Stash userMcpKey on user so canUseTool's helpers (and future custom checks)
   // can see it.
   const userView = userMcpKey ? { ...user, _mcpUserKey: userMcpKey } : user;
@@ -2986,6 +3023,18 @@ export async function callTool(user, name, args, userMcpKey = null) {
   const scope = mcpScope(user);
   if (scope && scope.length === 0) {
     const err = new Error('Forbidden: this key has an empty MCP scope (locked out)');
+    auditMcpCall(user, name, args, err);
+    throw err;
+  }
+  // v2.42.1 SECURITY: enforce the scope ceiling on the ARGUMENT, at the one
+  // place every tool passes through, instead of trusting each handler to route
+  // through getAppForUser(). Several do not: appcrane_update_app looks the app
+  // row up itself, so a scoped key that was correctly refused READ access to an
+  // app could still rewrite it — flip its visibility to public, add
+  // auth_bypass_paths that disable SSO forward_auth, or rotate its GitHub PAT.
+  // A ceiling that holds for reads and not for writes is not a ceiling.
+  if (scope && typeof (args || {}).slug === 'string' && !scope.includes(args.slug)) {
+    const err = new Error(`Forbidden: app ${args.slug} is outside this key's MCP scope`);
     auditMcpCall(user, name, args, err);
     throw err;
   }

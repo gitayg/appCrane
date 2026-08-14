@@ -1088,6 +1088,15 @@ router.put('/:slug/users', requireAppAccess, auditMiddleware('app-assign-users')
     // roles the APP defined for them go too. Otherwise re-adding them later
     // silently restores every one, with no re-grant and nothing in the audit
     // log to explain where the powers came back from.
+    // v2.42.1: the platform TIER goes with membership. Deleting only app_users
+    // left the app_user_roles row behind, and resolveAppRole reads that row
+    // FIRST — so a removed member still resolved to their old tier instead of
+    // 'none', passed the /api/identity/verify deny gate, and walked back into
+    // the app through Caddy. AppCrane's own routes denied them (requireAppUser
+    // reads app_users), which is why the dashboard showed removal as complete.
+    db.prepare(
+      'DELETE FROM app_user_roles WHERE app_id = ? AND user_id NOT IN (SELECT user_id FROM app_users WHERE app_id = ?)'
+    ).run(appId, appId);
     pruneGrantsForNonMembers(appId);
   })();
 

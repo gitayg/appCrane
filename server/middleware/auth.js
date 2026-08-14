@@ -47,7 +47,8 @@ export function requireAuth(req, res, next) {
       const keyHash = hashApiKey(apiKey);
       const row = db.prepare(`
         SELECT umk.id AS umk_id, umk.label, umk.expires_at, umk.revoked_at,
-               u.id AS uid, u.name, u.email, u.role, u.active, u.kind, u.username
+               u.id AS uid, u.name, u.email, u.role, u.active, u.kind, u.username,
+               u.mcp_app_scope
         FROM user_mcp_keys umk
         JOIN users u ON u.id = umk.user_id
         WHERE umk.key_hash = ?
@@ -60,9 +61,18 @@ export function requireAuth(req, res, next) {
           return next(new AppError('Personal MCP keys (dhk_mcp_*) are restricted to /api/mcp and /api/files/staged endpoints', 403, 'KEY_SCOPE_RESTRICTED'));
         }
         try { db.prepare("UPDATE user_mcp_keys SET last_used_at = datetime('now') WHERE id = ?").run(row.umk_id); } catch (_) {}
+        // SECURITY: mcp_app_scope must be carried onto req.user. This is a
+        // hand-picked column list rather than `u.*`, and the column was
+        // missing from it — so mcpTools.js read `user.mcp_app_scope` as
+        // undefined and every scope an operator set on a dhk_mcp_* key was
+        // silently ignored, including '[]' (lock out of MCP entirely). The
+        // other two auth paths below select the whole users row and were
+        // never affected, which is why the restriction appeared to work when
+        // tested with an X-API-Key or a portal session.
         req.user = {
           id: row.uid, name: row.name, email: row.email,
           role: row.role, active: row.active, kind: row.kind, username: row.username,
+          mcp_app_scope: row.mcp_app_scope,
         };
         req.user_mcp_key = { id: row.umk_id, label: row.label };
         return next();

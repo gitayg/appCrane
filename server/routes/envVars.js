@@ -9,7 +9,8 @@ import { getDb } from '../db.js';
 // app on the box. Closed in v2.39.0 — assignment is now authoritative for every
 // role, and an admin who needs access assigns themselves, which is auditable.
 import { requireAuth, requireAppUser } from '../middleware/auth.js';
-import { auditMiddleware } from '../middleware/audit.js';
+import { auditMiddleware, logAudit } from '../middleware/audit.js';
+import log from '../utils/logger.js';
 import { encrypt, decrypt } from '../services/encryption.js';
 import { userHasAppPermission } from '../services/permissions.js';
 import { AppError } from '../utils/errors.js';
@@ -34,6 +35,20 @@ router.get('/:slug/env/:env', requireAppUser, (req, res) => {
   const vars = db.prepare(
     'SELECT id, key, value_encrypted, updated_at FROM env_vars WHERE app_id = ? AND env = ? ORDER BY key'
   ).all(req.app.id, env);
+
+  // v2.42.1: a plaintext read is an event worth recording. Writes were audited
+  // (env-set, env-delete) and reads were not, so the log could tell you who
+  // CHANGED a secret but not who took a copy of one — backwards for incident
+  // response, where the question is always "who saw this". The MCP path already
+  // logs secret-reveal; this is the same operation through the other door.
+  //
+  // Only the reveal. The masked list is the ordinary UI render on every visit to
+  // the Environment tab, and logging that would bury the reads that matter.
+  // Keys only — the values are the thing being protected.
+  if (showValues && vars.length) {
+    logAudit(req.user.id, req.app.id, 'env-reveal', { env, keys: vars.map(v => v.key) });
+    log.warn(`SECRET REVEAL ${req.app.slug}/${env} (${vars.length} key(s)) by user ${req.user.id}`);
+  }
 
   const result = vars.map(v => ({
     id: v.id,

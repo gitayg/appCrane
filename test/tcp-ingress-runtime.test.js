@@ -238,7 +238,14 @@ const DOCKER_ARGS = {
   hostPort: 4321, memoryMb: 512, cpus: 0.5,
 };
 
-/** The argv every app has been started with since long before tcp ingress. */
+/**
+ * The argv every app is started with, tcp ingress aside.
+ *
+ * v2.42.1 added the isolation and hardening flags below, so the constant this
+ * file compares against moved with them. What these tests assert is unchanged:
+ * that tcp ingress adds the public publish and NOTHING else, measured against
+ * whatever the current common baseline is.
+ */
 function baselineArgs(slug, env, hostPort) {
   return [
     'run', '-d',
@@ -247,8 +254,12 @@ function baselineArgs(slug, env, hostPort) {
     '--label', `slug=${slug}`,
     '--label', `env=${env}`,
     '--restart=on-failure:5',
+    '--network', 'appcrane-apps',
     '--memory=512m',
     '--cpus=0.5',
+    '--pids-limit=512',
+    '--security-opt', 'no-new-privileges',
+    '--cap-drop', 'NET_RAW',
     '-p', `127.0.0.1:${hostPort}:${CONTAINER_PORT}`,
     '--log-opt', 'max-size=10m',
     '--log-opt', 'max-file=3',
