@@ -9,6 +9,11 @@ import {
 import { isAdmin } from '../utils/roles.js';
 import log from '../utils/logger.js';
 import { validateBypassPaths } from '../utils/authBypassPaths.js';
+import {
+  effectiveIngressType, validateIngressType, publicPortForApp, pendingPortRelease,
+  assignPublicPort,
+  PUBLIC_PORT_MIN, PUBLIC_PORT_MAX,
+} from './tcpIngress.js';
 import { redactAuditArgs } from '../utils/auditRedact.js';
 import { resolveVisibility } from '../utils/appVisibility.js';
 import { mkdirSync } from 'fs';
@@ -371,6 +376,12 @@ const TOOLS = [
           visibility:     app.visibility,
           public_access:  app.public_access,
           auth_mode:      effectiveAuthMode(app.auth_mode),
+          // v2.42.0: reported here as well as on appcrane_get_app_ingress —
+          // "this app also answers on a host port Caddy never sees" is not
+          // something an agent should have to know to ask about.
+          ingress_type:   effectiveIngressType(app.ingress_type),
+          public_port:    publicPortForApp(app),
+          pending_port_release: pendingPortRelease(app),
           image_retention: app.image_retention,
           frame_ancestors: app.frame_ancestors,
           max_ram_mb:      resourceLimits?.max_ram_mb      ?? null,
@@ -1482,6 +1493,9 @@ const TOOLS = [
           visibility:     fresh.visibility,
           public_access:  fresh.public_access,
           auth_mode:      effectiveAuthMode(fresh.auth_mode),
+          ingress_type:   effectiveIngressType(fresh.ingress_type),
+          public_port:    publicPortForApp(fresh),
+          pending_port_release: pendingPortRelease(fresh),
           image_retention: fresh.image_retention,
           frame_ancestors: fresh.frame_ancestors,
           auth_bypass_paths: (() => { try { return fresh.auth_bypass_paths ? JSON.parse(fresh.auth_bypass_paths) : []; } catch (_) { return []; } })(),
@@ -1495,7 +1509,7 @@ const TOOLS = [
   {
     name: 'appcrane_set_app_meta',
     description:
-      'Set an app\'s category, visibility, auth_mode, and/or auth_bypass_paths — the owner self-service fields (same controls the dashboard Launcher exposes to owners). Owner of the app (or global admin) required. visibility is one of public / private / hidden. auth_mode is `authenticated` (default — all routes go through AppCrane SSO) or `headless` (the app bypasses forward_auth ENTIRELY and is reachable without identity — right tool for telemetry ingest, public webhooks, status pages; the app\'s own server is responsible for any payload-level authn). auth_bypass_paths (v2.7.27+) is an array of path prefixes (e.g. ["/ws/local-runner"]) that bypass SSO on this app only — narrower than headless mode; the app authenticates those paths itself (e.g. token in query string). The platform strips incoming X-AppCrane-* headers on bypass paths (forgery defense intact) and suppresses access logging for them (token-in-query never sits in log storage). Owners may only assign an EXISTING category; creating a brand-new category is reserved for global admins. For powerful fields (github_url, branch, token, source_type, resource limits) use appcrane_update_app (admin only).',
+      'Set an app\'s category, visibility, auth_mode, and/or auth_bypass_paths — the owner self-service fields (same controls the dashboard Launcher exposes to owners). Owner of the app (or global admin) required. visibility is one of public / private / hidden. auth_mode is `authenticated` (default — all routes go through AppCrane SSO) or `headless` (the app bypasses forward_auth ENTIRELY and is reachable without identity — right tool for telemetry ingest, public webhooks, status pages; the app\'s own server is responsible for any payload-level authn). A headless app is still served BY CADDY over HTTP — TLS, security headers and access logging all still apply; it is not a raw port. An app that does not speak HTTP at all needs ingress_type=\'tcp\' (appcrane_set_app_ingress, platform admin only), which is a different and far more exposed thing. auth_bypass_paths (v2.7.27+) is an array of path prefixes (e.g. ["/ws/local-runner"]) that bypass SSO on this app only — narrower than headless mode; the app authenticates those paths itself (e.g. token in query string). The platform strips incoming X-AppCrane-* headers on bypass paths (forgery defense intact) and suppresses access logging for them (token-in-query never sits in log storage). Owners may only assign an EXISTING category; creating a brand-new category is reserved for global admins. For powerful fields (github_url, branch, token, source_type, resource limits) use appcrane_update_app (admin only).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1601,6 +1615,151 @@ const TOOLS = [
         auth_mode: effectiveAuthMode(fresh.auth_mode),
         auth_bypass_paths: bypassPaths,
         updated_fields: keys,
+      };
+    },
+  },
+
+  {
+    name: 'appcrane_get_app_ingress',
+    description:
+      'Read HOW an app is reachable. ingress_type is `http` (default — every request goes through Caddy: TLS, AppCrane SSO/forward_auth, X-AppCrane-* identity headers, security headers, access logs) or `tcp` (the container port is published DIRECTLY on the host at public_port, with Caddy not in the path at all — for apps that do not speak HTTP, e.g. a forward/CONNECT proxy handing back a raw tunnel). Read this before debugging "why does my app see no identity headers" or "what port do clients connect to". IMPORTANT — this is NOT auth_mode: auth_mode=`headless` still goes through Caddy and only skips forward_auth, so it keeps TLS, security headers and request logging; ingress_type=`tcp` keeps NONE of that. Requires access to the app.',
+    inputSchema: {
+      type: 'object',
+      properties: { slug: { type: 'string', description: 'App slug.' } },
+      required: ['slug'],
+      additionalProperties: false,
+    },
+    requiredRole: 'any', // gated per-slug by getAppForUser
+    handler: async (user, args) => {
+      const app = getAppForUser(user, args.slug);
+      const ingressType = effectiveIngressType(app.ingress_type);
+      const publicPort = publicPortForApp(app);
+      // A port this app was flipped away from but whose container has not been
+      // recreated yet. Reported on its own key because it is the one state
+      // where ingress_type alone lies about the host: AppCrane publishes
+      // nothing, and the port still answers.
+      const stillBound = pendingPortRelease(app);
+      return {
+        app: app.slug,
+        ingress_type: ingressType,
+        public_port: publicPort,
+        pending_port_release: stillBound,
+        ...(stillBound !== null ? {
+          pending_port_release_note: `This app was switched back to http while a container was running. AppCrane no longer publishes port ${stillBound} and will not give it to another app, but the container that is up right now still binds 0.0.0.0:${stillBound}, so the port stays reachable and unauthenticated until the container is recreated (a deploy, or POST /api/apps/${app.slug}/restart/production). Do not report the exposure as closed before that.`,
+        } : {}),
+        auth_mode: effectiveAuthMode(app.auth_mode),
+        // Spelled out rather than left for the agent to infer: the loss of every
+        // Caddy-side control is the whole meaning of a tcp ingress, and an agent
+        // that reads only the enum will assume the platform still guards the door.
+        exposure: ingressType === 'tcp'
+          ? {
+              published_as: publicPort ? `0.0.0.0:${publicPort} -> container:3000` : 'not published — no public_port allocated yet',
+              behind_appcrane_auth: false,
+              summary: 'This port does NOT pass through Caddy: no forward_auth/SSO, no X-AppCrane-* identity headers, no per-request audit, no rate limiting, no security headers, no TLS from AppCrane. The app authenticates every connection itself. This host is behind SDP, so the port is not internet-facing — it is reachable by everything inside that perimeter. For a forward/CONNECT proxy, a gap in the app\'s own proxy auth is therefore an unaudited egress path out of the perimeter, which AppCrane cannot log because the traffic never touches Caddy. The app can still authenticate callers against AppCrane: /api/me with the user\'s bearer token, or /api/service with its own APPCRANE_SERVICE_TOKEN over the docker bridge.',
+              firewall: 'AppCrane publishes the port; it does not manage host filtering. Do NOT treat the host firewall as an independent second key: a published port is a DNAT rule evaluated in nat/FORWARD and never traverses INPUT, so a plain `ufw deny` or a default-deny INPUT policy does NOT block it. Filter in the DOCKER-USER chain, or upstream of the host. On this deployment the host sits behind SDP, so the boundary is the perimeter rather than the internet — the port is reachable by everything SDP admits.',
+            }
+          : stillBound !== null
+            ? {
+                published_as: null,
+                // Not `true`. AppCrane publishes nothing for this app, but the
+                // container that is up was started when it did, and that port
+                // is still open and still unauthenticated. Answering true here
+                // would be the exact false all-clear this field exists to give
+                // honestly.
+                behind_appcrane_auth: false,
+                summary: `AppCrane publishes no port for this app any more, but the RUNNING container still binds 0.0.0.0:${stillBound} from before the switch, with none of Caddy's controls in front of it. It closes when the container is recreated.`,
+              }
+            : { published_as: null, behind_appcrane_auth: true },
+      };
+    },
+  },
+
+  {
+    name: 'appcrane_set_app_ingress',
+    description:
+      'Switch an app between HTTP ingress and raw TCP ingress, and choose its public host port. PLATFORM ADMIN ONLY — this is not an owner self-service field like auth_mode. ingress_type=`tcp` publishes 0.0.0.0:<public_port> -> the container in ADDITION to the loopback publish every app has, so clients connect straight to the host and Caddy never sees the traffic: no forward_auth/SSO, no identity headers, no per-request audit, no rate limiting, no security headers, no TLS from AppCrane. Every control AppCrane has assumes Caddy is the only door; this adds a second one the platform does not control, and the app then owns authentication completely. Do NOT reach for this to make an app reachable without login — that is auth_mode=`headless`, which still goes through Caddy and keeps TLS, security headers and logging. Use `tcp` ONLY when the app does not speak HTTP at all (a forward/CONNECT proxy tunnels raw bytes; no reverse proxy can express that). Omit public_port to keep the existing allocation, or to have the lowest free port in ' + `${PUBLIC_PORT_MIN}-${PUBLIC_PORT_MAX}` + ' allocated. Switching back to `http` STOPS THE PUBLISH but does not close the port: the publish is a `docker run` flag, so a running container keeps binding it until it is RECREATED (next deploy, or POST /api/apps/<slug>/restart/<env>, which does stop+start). Until then the port stays reachable and unauthenticated, so AppCrane keeps it RESERVED to this app — no other app can be given it, and it goes back in the pool automatically when the container comes back without the publish. Recreate the container to actually close a port, and do not report an exposure as revoked before that; the app reports the number under `pending_port_release` in the meantime. Do NOT treat the host firewall as a second lock holding this shut: on a Linux host Docker\'s publish is a DNAT rule evaluated in FORWARD that never traverses INPUT, so a plain `ufw deny <port>` does NOT block it — filter in DOCKER-USER or upstream. This host also sits behind SDP, so the boundary that exists is the perimeter: publishing makes the port reachable by everything inside it, not by the internet and not by nobody.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        slug: { type: 'string', description: 'App slug.' },
+        ingress_type: { type: 'string', enum: ['http', 'tcp'], description: 'http = through Caddy (default). tcp = published on the host, with no AppCrane authentication in front of it.' },
+        public_port: {
+          type: 'integer',
+          minimum: PUBLIC_PORT_MIN,
+          maximum: PUBLIC_PORT_MAX,
+          description: `Host port to publish, ${PUBLIC_PORT_MIN}-${PUBLIC_PORT_MAX}. Only valid with ingress_type='tcp'. Omit to keep the port the app already holds, or to have one allocated. A port is stored, never derived from the app's slot, so it survives redeploys and renames — clients pinned to it keep working.`,
+        },
+      },
+      required: ['slug', 'ingress_type'],
+      additionalProperties: false,
+    },
+    // 'admin' is the coarsest gate the registry has; the platform_admin check
+    // below is the real one, matching the CPU/memory-limit precedent in
+    // appcrane_update_app and the PUT /api/apps/:slug gate.
+    requiredRole: 'admin',
+    handler: async (user, args) => {
+      if (user.role !== 'platform_admin') {
+        throw new Error('Only platform admins can change ingress_type or public_port — publishing a host port bypasses every control AppCrane has.');
+      }
+      const app = getAppForUser(user, args.slug);
+      validateIngressType(args.ingress_type);
+      if (args.public_port !== undefined && args.ingress_type !== 'tcp') {
+        throw new Error("public_port only applies to an app with ingress_type='tcp'");
+      }
+
+      const db = getDb();
+      const before = {
+        ingress_type: effectiveIngressType(app.ingress_type),
+        public_port: publicPortForApp(app),
+        pending_port_release: pendingPortRelease(app),
+      };
+      const { logAudit } = await import('../middleware/audit.js');
+
+      // The column write, the port allocation and the audit entry are ONE
+      // transaction, matching the REST path. public_port still goes through the
+      // allocator rather than this UPDATE — picking a free port and claiming it
+      // has to be atomic so two admins can't double-book a host port — but a
+      // failed allocation has to roll the ingress_type write back with it.
+      // Committing the type first left a rejected call having permanently
+      // flipped the app to tcp with public_port null and NO 'app-ingress-change'
+      // entry, because the audit write is past the throw: the transition that
+      // actually happened became unrecoverable from the log, which is the one
+      // thing this action is audited to guarantee.
+      const result = db.transaction(() => {
+        db.prepare('UPDATE apps SET ingress_type = ? WHERE id = ?').run(args.ingress_type, app.id);
+        if (args.ingress_type === 'tcp') {
+          assignPublicPort(db, app.id, args.public_port === undefined ? null : args.public_port);
+        }
+        // Switching to http deliberately leaves public_port alone. The publish
+        // is a `docker run` flag, so the container that is up keeps binding the
+        // port; freeing the number here handed a live, still-bound port to the
+        // next app that asked, whose `docker run` then died with "port is
+        // already allocated" while traffic to it kept reaching the OLD app. The
+        // row holds the number as a reservation until docker.js sees the
+        // container come back without the publish. See pendingPortRelease().
+        const after = db.prepare('SELECT ingress_type, public_port FROM apps WHERE id = ?').get(app.id);
+        const out = {
+          ingress_type: effectiveIngressType(after.ingress_type),
+          public_port: publicPortForApp(after),
+          pending_port_release: pendingPortRelease(after),
+        };
+        // Same dedicated audit action the REST path writes. Every MCP call is
+        // audited generically, but "a port was opened on the host" has to be
+        // findable by name regardless of which door the change came through.
+        logAudit(user.id, app.id, 'app-ingress-change', { from: before, to: out });
+        return out;
+      })();
+
+      log.info(`MCP: app '${app.slug}' ingress set to ${result.ingress_type}${result.public_port ? `:${result.public_port}` : ''} by user ${user.id}`);
+      return {
+        app: app.slug,
+        ...result,
+        applies_on: 'the container is next RECREATED — the publish is a `docker run` flag, so it lands on the next deploy or on POST /api/apps/<slug>/restart/<env> (that route does stop+start, not `docker restart`). Nothing changes on a running container. This is true in BOTH directions: switching to http stops the publish at the same moment, and AppCrane holds the port reserved to this app until then rather than reissuing a number a live container still binds.',
+        warning: result.ingress_type === 'tcp'
+          ? `Port ${result.public_port} is NOT behind AppCrane authentication: no forward_auth, no identity headers, no request audit, no rate limiting, no TLS from AppCrane. The app must authenticate every connection itself. Publishing is the exposing act — do not assume a firewall is holding it shut. On a Linux host a plain \`ufw deny\` will NOT block it (Docker's publish is a DNAT rule evaluated in FORWARD, never INPUT); filter in DOCKER-USER or upstream. Behind SDP the port is reachable by everything inside the perimeter.`
+          : result.pending_port_release !== null
+            ? `Port ${result.pending_port_release} is NOT closed yet. AppCrane will not publish it again and no other app can be given it — it stays reserved to '${app.slug}' — but the container running right now still binds it, because the publish is a \`docker run\` flag. Recreate the container (deploy, or POST /api/apps/${app.slug}/restart/production) to actually close the port; AppCrane returns it to the pool at that moment. Do not report the exposure as revoked before then.`
+            : 'This app publishes no host port and holds no reserved one.',
       };
     },
   },

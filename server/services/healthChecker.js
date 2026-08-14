@@ -1,6 +1,21 @@
+import net from 'net';
 import { getDb } from '../db.js';
 import { getPortsForSlot } from './portAllocator.js';
+import { getIngressForApp } from './tcpIngress.js';
 import log from '../utils/logger.js';
+
+const PROBE_TIMEOUT_MS = 5000;
+
+/**
+ * A successful probe records status 200 whatever the protocol was.
+ *
+ * A TCP handshake has no status code, but `runCheck` and every reader of
+ * `health_state.last_status` — the dashboard, the CPU/health panel, the
+ * auto-restart threshold — already treat 200 as "healthy" and anything else as
+ * a failure. Inventing a different success value would render as DOWN
+ * everywhere, so the protocols share one sentinel.
+ */
+const HEALTHY = 200;
 
 let checkIntervals = new Map();
 
@@ -43,30 +58,19 @@ function scheduleCheck(config) {
 }
 
 /**
- * Run a single health check.
+ * HTTP probe: healthy means the endpoint answered 200.
  */
-async function runCheck(config) {
-  const db = getDb();
-  const ports = getPortsForSlot(config.slot);
-  const port = config.env === 'production' ? ports.prod_be : ports.sand_be;
-  const url = `http://localhost:${port}${config.endpoint}`;
-
+async function probeHttp(url) {
   const start = Date.now();
-  let status = 0;
-  let responseMs = 0;
-
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5000);
+    const timeout = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
 
     const response = await fetch(url, { signal: controller.signal });
     clearTimeout(timeout);
 
-    status = response.status;
-    responseMs = Date.now() - start;
+    return { status: response.status, responseMs: Date.now() - start };
   } catch (e) {
-    responseMs = Date.now() - start;
-    status = 0;
     // v2.6.10: surface the underlying cause. Node's fetch wraps the
     // real error as `cause`; without unwrapping it we lost "bad port"
     // (WHATWG block list), "ECONNREFUSED" vs "ETIMEDOUT", etc. — every
@@ -75,7 +79,74 @@ async function runCheck(config) {
     // lockd, blocked by undici). Logged at WARN since healthy apps
     // would generate noise — only fires on failure.
     const cause = e?.cause?.message || e?.cause?.code || e?.message || String(e);
-    log.warn(`[health-probe] ${config.slug} ${config.env} ${url}: ${cause}`);
+    return { status: 0, responseMs: Date.now() - start, error: cause };
+  }
+}
+
+/**
+ * TCP probe: healthy means the container completed a TCP handshake.
+ *
+ * A tcp app is on the platform precisely because it does not speak HTTP — a
+ * CONNECT proxy cannot answer a GET /api/health, so fetch() would fail every
+ * time, trip the auto-restart threshold, and leave the app in a permanent
+ * restart loop. "The listener accepted a connection" is the strongest liveness
+ * signal available without knowing the app's protocol.
+ *
+ * Same v2.6.10 lesson as the HTTP path: report the errno, not "probe failed".
+ * ECONNREFUSED (container exited or never bound), ETIMEDOUT (bound but wedged)
+ * and EHOSTUNREACH send an operator down completely different paths, and a
+ * probe that only said "down" is the silent failure that comment exists to
+ * prevent.
+ */
+function probeTcp(host, port) {
+  return new Promise((resolve) => {
+    const start = Date.now();
+    let settled = false;
+    const socket = net.createConnection({ host, port });
+
+    const done = (result) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve({ ...result, responseMs: Date.now() - start });
+    };
+
+    socket.setTimeout(PROBE_TIMEOUT_MS);
+    socket.once('connect', () => done({ status: HEALTHY }));
+    socket.once('timeout', () => done({ status: 0, error: `ETIMEDOUT (no TCP handshake within ${PROBE_TIMEOUT_MS}ms)` }));
+    socket.once('error', (e) => done({ status: 0, error: e.code || e.message }));
+  });
+}
+
+/**
+ * Run a single health check.
+ */
+async function runCheck(config) {
+  const db = getDb();
+  const ports = getPortsForSlot(config.slot);
+  const port = config.env === 'production' ? ports.prod_be : ports.sand_be;
+
+  // Read the ingress type fresh on every probe instead of from `config`:
+  // scheduleCheck() closes over the row it was created with, so an app flipped
+  // to tcp would keep getting HTTP probes — and failing them into a restart
+  // loop — until the process restarted.
+  const { ingress_type } = getIngressForApp(db, config.app_id);
+  const isTcp = ingress_type === 'tcp';
+
+  // Both protocols probe the LOOPBACK port every container publishes, never
+  // the public one. The probe must work before the operator opens the
+  // firewall, and must not depend on a public_port allocation existing.
+  const target = isTcp
+    ? `tcp://127.0.0.1:${port}`
+    : `http://localhost:${port}${config.endpoint}`;
+
+  const probe = isTcp
+    ? await probeTcp('127.0.0.1', port)
+    : await probeHttp(target);
+
+  const { status, responseMs } = probe;
+  if (probe.error) {
+    log.warn(`[health-probe] ${config.slug} ${config.env} ${target}: ${probe.error}`);
   }
 
   // Get current state
@@ -87,7 +158,7 @@ async function runCheck(config) {
   const wasDown = state.is_down;
   const prevFails = state.consecutive_fails;
 
-  if (status === 200) {
+  if (status === HEALTHY) {
     // Healthy
     db.prepare(`
       UPDATE health_state SET consecutive_fails = 0, last_check_at = datetime('now'),

@@ -11,6 +11,56 @@ import { reloadCaddy } from '../services/caddy.js';
 import { validateBypassPaths } from '../utils/authBypassPaths.js';
 import { resolveVisibility } from '../utils/appVisibility.js';
 import { pruneGrantsForNonMembers } from '../services/appDefinedRoles.js';
+import {
+  effectiveIngressType, publicPortForApp, pendingPortRelease, validateIngressType,
+  assignPublicPort,
+} from '../services/tcpIngress.js';
+
+// v2.42.0: ingress_type and public_port are REPORTED on every app payload, not
+// merely accepted on write. auth_mode spent three versions write-only and that
+// blind spot is what made "my app gets no identity headers" a recurring
+// triage; a port published straight to the host is a bigger thing for an
+// operator to be unable to see. public_port reads back as null on an http app
+// even if a stale value survives in the column, because that is what the
+// runtime does with it.
+//
+// SECURITY: `canSeePort` exists for GET /api/apps, which lists every app on the
+// platform to every authenticated user — including apps whose detail route
+// answers that caller 403. The pre-existing `ports` field is already withheld
+// there unless the caller is an admin, and those are slot-derived LOOPBACK
+// ports; public_port is the port that is reachable with no authentication at
+// all, so it cannot be less guarded than the ports that aren't. Handing it out
+// on the catalog would turn "there is a private app I can't reach" into "here
+// is the unauthenticated port for that private app". ingress_type stays
+// visible — knowing an app is layer-4 is not the same as being told where.
+// Every other caller of this helper is already behind requireAppAccess.
+//
+// pending_port_release is the same secret and is withheld on the same terms: it
+// is a port that may STILL be answering on the host, which is if anything the
+// more useful number to an attacker of the two. It is reported separately from
+// public_port rather than folded into it because the two facts are genuinely
+// different — AppCrane publishes nothing for this app any more (public_port
+// null, and the next `docker run` will carry no public -p), yet the container
+// that is running right now still binds the port. Reporting only public_port
+// would tell an operator a port is closed while it is open.
+function ingressFields(app, canSeePort = true) {
+  return {
+    ingress_type: effectiveIngressType(app.ingress_type),
+    public_port: canSeePort ? publicPortForApp(app) : undefined,
+    pending_port_release: canSeePort ? pendingPortRelease(app) : undefined,
+  };
+}
+
+// The before/after shape of the 'app-ingress-change' audit entry — the same
+// three facts every read surface reports, so a log entry and a GET can be
+// compared without translating between them.
+function ingressAudit(row) {
+  return {
+    ingress_type: effectiveIngressType(row.ingress_type),
+    public_port: publicPortForApp(row),
+    pending_port_release: pendingPortRelease(row),
+  };
+}
 
 // auth_bypass_paths is stored as a JSON string (or NULL). The UI expects an
 // array, so always parse it before returning an app row — a raw string would
@@ -191,6 +241,7 @@ router.get('/', (req, res) => {
       resource_limits: JSON.parse(app.resource_limits || '{}'),
       auth_bypass_paths: parseBypassPathsField(app.auth_bypass_paths),
       auth_mode: effectiveAuthMode(app.auth_mode),
+      ...ingressFields(app, userAppRole(app) !== 'none'),
       has_icon: hasIconFile(app.slug),
       // Boolean flags derived from secret-bearing columns so the UI can
       // show "this app has its own X" without ever shipping the secret.
@@ -339,7 +390,7 @@ router.post('/', requireAuth, auditMiddleware('app-create'), async (req, res) =>
   } : null;
 
   res.status(201).json({
-    app: { ...app, resource_limits: JSON.parse(app.resource_limits), auth_bypass_paths: parseBypassPathsField(app.auth_bypass_paths), auth_mode: effectiveAuthMode(app.auth_mode) },
+    app: { ...app, resource_limits: JSON.parse(app.resource_limits), auth_bypass_paths: parseBypassPathsField(app.auth_bypass_paths), auth_mode: effectiveAuthMode(app.auth_mode), ...ingressFields(app) },
     urls,
     base_path: { production: `/${slug}/`, sandbox: `/${slug}-sandbox/` },
     webhook_url: `/api/webhooks/${webhookToken}`,
@@ -378,7 +429,7 @@ router.get('/:slug', requireAppAccess, (req, res) => {
   } : null;
 
   res.json({
-    app: { ...app, resource_limits: JSON.parse(app.resource_limits || '{}'), auth_bypass_paths: parseBypassPathsField(app.auth_bypass_paths), auth_mode: effectiveAuthMode(app.auth_mode) },
+    app: { ...app, resource_limits: JSON.parse(app.resource_limits || '{}'), auth_bypass_paths: parseBypassPathsField(app.auth_bypass_paths), auth_mode: effectiveAuthMode(app.auth_mode), ...ingressFields(app) },
     urls: urlsDetail,
     base_path: { production: `/${app.slug}/`, sandbox: `/${app.slug}-sandbox/` },
     ...(isAdmin(req.user) ? { ports } : {}),
@@ -439,7 +490,7 @@ router.get('/:slug/storage', requireAppAccess, async (req, res) => {
 router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req, res) => {
   const db = getDb();
   const app = req.app;
-  const { name, domain, description, category, source_type, github_url, branch, github_token, max_ram_mb, max_cpu_percent, public_access, visibility, image_retention, frame_ancestors, auth_mode, auth_bypass_paths, email_from_name } = req.body;
+  const { name, domain, description, category, source_type, github_url, branch, github_token, max_ram_mb, max_cpu_percent, public_access, visibility, image_retention, frame_ancestors, auth_mode, auth_bypass_paths, email_from_name, ingress_type, public_port } = req.body;
 
   // Configurable RBAC: changes to repo-related fields gated by code.modify_repo_settings.
   // Other fields (name, description, category, visibility, etc.) stay open to any
@@ -659,20 +710,148 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
     updates.email_from_name = email_from_name ? String(email_from_name).slice(0, 100) : null;
   }
 
-  if (Object.keys(updates).length === 0) {
-    // Normalize auth_mode here too: a caller can't tell which branch of this
-    // route answered, so both must report the same effective mode.
-    return res.json({ app: { ...app, auth_mode: effectiveAuthMode(app.auth_mode) }, message: 'No changes' });
+  // v2.42.0: TCP ingress. ingress_type='tcp' publishes the container port
+  // straight onto the host (0.0.0.0:<public_port>) with Caddy out of the path,
+  // for apps that aren't HTTP at all — a forward/CONNECT proxy hands back a raw
+  // tunnel that no reverse proxy can express.
+  //
+  // SECURITY: this is not an app-owner setting. auth_mode='headless' says
+  // "AppCrane steps back, the app owns authn" but the request still goes
+  // through Caddy — TLS, security headers, the auth-mode stamp, request
+  // logging. A published TCP port has none of that: no forward_auth, no
+  // identity headers, no audit of traffic, no rate limiting. It is a SECOND
+  // DOOR that AppCrane does not control, so the gate is the PLATFORM tier, not
+  // the app tier.
+  //
+  // Deliberately gated on req.user.role rather than on app assignment. This
+  // route runs under requireAppAccess, and since v2.39.0 assignment is
+  // authoritative for app DATA (requireAppUser) even for platform admins —
+  // that guardrail keeps platform admins out of an app's env vars unless they
+  // step down and join it. Routing this through that gate would invert it:
+  // opening a host port would require a platform admin to first assign
+  // themselves to the app, which hands them the env/data access the guardrail
+  // exists to withhold. So: platform tier for a platform-tier decision, and no
+  // app membership is created as a side effect.
+  //
+  // AppCrane publishes the port; it does NOT open the firewall. That stays an
+  // operator step on purpose — two keys, so a mis-click here cannot put an app
+  // on the internet.
+  //
+  // The branch engages on a CHANGE, not on the mere presence of the fields.
+  // ingressFields() puts ingress_type and public_port on every GET payload, so
+  // any read-modify-write client echoes them back on the next PUT; gating on
+  // presence made an http app's own unmodified payload a 400 (public_port null
+  // with a non-tcp type) and made a non-admin's unrelated edit a 403. Both
+  // silently dropped the rest of the request. A caller that sends the values it
+  // was given is not changing the ingress.
+  const currentType = effectiveIngressType(app.ingress_type);
+  const currentPort = publicPortForApp(app);
+  const wantsTypeChange = ingress_type !== undefined && ingress_type !== currentType;
+  const wantsPortChange = public_port !== undefined && public_port !== currentPort;
+  // A tcp app with no port allocated publishes nothing, so re-sending
+  // ingress_type='tcp' has to be able to finish the job rather than read as
+  // "no change".
+  const needsAllocation = ingress_type === 'tcp' && currentType === 'tcp' && currentPort === null;
+
+  let ingressWork = null;
+  if (wantsTypeChange || wantsPortChange || needsAllocation) {
+    if (req.user.role !== 'platform_admin') {
+      throw new AppError('Only platform admins can change ingress_type or public_port', 403, 'FORBIDDEN');
+    }
+    let nextType = currentType;
+    if (ingress_type !== undefined) {
+      try { validateIngressType(ingress_type); }
+      catch (e) { throw new AppError(e.message, e.status || 400, e.code || 'VALIDATION'); }
+      nextType = ingress_type;
+      updates.ingress_type = ingress_type;
+    }
+    if (public_port !== undefined) {
+      if (nextType !== 'tcp') {
+        throw new AppError("public_port only applies to an app with ingress_type='tcp'", 400, 'VALIDATION');
+      }
+      if (public_port === null) {
+        throw new AppError("A tcp app must keep a public port — set ingress_type='http' to release it", 400, 'VALIDATION');
+      }
+    }
+    if (nextType === 'tcp') {
+      // Automatic allocation: switching an app to tcp with no port set picks
+      // one. An already-allocated port is returned untouched, which is how it
+      // survives redeploys and slot changes — nothing else recomputes it.
+      ingressWork = { kind: 'assign', requested: public_port === undefined ? null : public_port };
+    } else {
+      // Flipping to http stops the PUBLISH and nothing else. It deliberately
+      // does not free the port number: the publish is a `docker run` flag, so
+      // the container that is running right now keeps binding
+      // 0.0.0.0:<public_port> until it is recreated. Freeing it here let the
+      // allocator hand a live, still-bound port to the next app — that app's
+      // `docker run` then died with "port is already allocated" while traffic
+      // to the port kept reaching the OLD app, and every surface reported the
+      // port closed. The row keeps the number as a reservation instead;
+      // docker.js releases it the moment the container comes back without the
+      // publish. See pendingPortRelease().
+      //
+      // Unconditional, not gated on the app currently holding a port: this is
+      // the branch that writes the 'app-ingress-change' entry, and a tcp -> http
+      // flip is exactly the transition an operator reviewing an exposure needs
+      // to find. Skipping it when public_port happened to be NULL left the flip
+      // recorded nowhere.
+      ingressWork = { kind: 'stop-publishing' };
+    }
   }
 
-  const ALLOWED_APP_COLS = new Set(['name','domain','description','category','source_type','github_url','branch','public_access','visibility','github_token_encrypted','resource_limits','runtime','image_retention','frame_ancestors','auth_mode','auth_bypass_paths','email_from_name']);
+  if (Object.keys(updates).length === 0 && !ingressWork) {
+    // Normalize auth_mode here too: a caller can't tell which branch of this
+    // route answered, so both must report the same effective mode.
+    return res.json({ app: { ...app, auth_mode: effectiveAuthMode(app.auth_mode), ...ingressFields(app) }, message: 'No changes' });
+  }
+
+  const ALLOWED_APP_COLS = new Set(['name','domain','description','category','source_type','github_url','branch','public_access','visibility','github_token_encrypted','resource_limits','runtime','image_retention','frame_ancestors','auth_mode','auth_bypass_paths','email_from_name','ingress_type']);
   const invalidKey = Object.keys(updates).find(k => !ALLOWED_APP_COLS.has(k));
   if (invalidKey) throw new AppError(`Invalid field: ${invalidKey}`, 400, 'VALIDATION');
 
-  const setClauses = Object.keys(updates).map(k => `${k} = ?`).join(', ');
-  const values = Object.values(updates);
+  // The column write and the port allocation are ONE transaction. public_port
+  // still goes through the allocator rather than the generic UPDATE — picking
+  // the lowest free port and claiming it has to be atomic, and the partial
+  // unique index is what makes a concurrent second allocation fail instead of
+  // double-booking a host port — but if that allocation throws, the
+  // ingress_type write must roll back with it. Committing the type first left
+  // a rejected request having permanently flipped the app to tcp with
+  // public_port null AND no 'app-ingress-change' entry (the audit write is
+  // past the throw), so the transition that actually happened was
+  // unrecoverable from the log — the one thing this action is audited to
+  // guarantee. Failing atomically means a rejected change leaves no trace
+  // because it left no change.
+  const applyWrites = db.transaction(() => {
+    if (Object.keys(updates).length > 0) {
+      const setClauses = Object.keys(updates).map(k => `${k} = ?`).join(', ');
+      const values = Object.values(updates);
 
-  db.prepare(`UPDATE apps SET ${setClauses} WHERE id = ?`).run(...values, app.id);
+      db.prepare(`UPDATE apps SET ${setClauses} WHERE id = ?`).run(...values, app.id);
+    }
+
+    if (!ingressWork) return;
+
+    const before = ingressAudit(app);
+    if (ingressWork.kind === 'assign') {
+      assignPublicPort(db, app.id, ingressWork.requested);
+    }
+    const after = db.prepare('SELECT ingress_type, public_port FROM apps WHERE id = ?').get(app.id);
+    // Audited on its own action, not folded into the generic 'app-update'
+    // entry: "a port was opened on the host" is the one change here an
+    // operator reviewing the log must be able to find by name.
+    //
+    // public_port is the EFFECTIVE value, matching every read surface, with the
+    // port that is still bound recorded beside it. An entry that said only
+    // `public_port: null` would read as "the port was closed at this timestamp"
+    // — which is the one thing this transition does not do.
+    logAudit(req.user.id, app.id, 'app-ingress-change', { from: before, to: ingressAudit(after) });
+  });
+
+  try { applyWrites(); }
+  catch (e) {
+    if (e instanceof AppError) throw e;
+    throw new AppError(e.message, e.status || 400, e.code || 'VALIDATION');
+  }
 
   // v2.24.4: when the custom domain changes, keep the old one alive as a 301
   // redirect to the new one so already-sent login links / bookmarks don't break.
@@ -684,17 +863,32 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
   // frame_ancestors and auth_mode change the per-app Caddyfile block — reload to apply.
   // auth_mode flips whether forward_auth runs at all; without a reload the new
   // setting wouldn't take effect on the live proxy.
+  // ingress_type is deliberately NOT in this list. The Caddyfile generator does
+  // not read the column — a tcp app still gets its ordinary HTTP vhost, behind
+  // forward_auth, on its loopback port; the published host port is a second
+  // door Caddy never sees. Generating the config with an app flipped either way
+  // produces a byte-identical file, so reloading here would be a no-op that
+  // reads as "Caddy special-cases tcp apps" to the next person.
   if ('frame_ancestors' in updates || 'auth_mode' in updates || 'auth_bypass_paths' in updates || 'domain' in updates) {
     await reloadCaddy().catch(e => log.warn(`Caddy reload after app meta update: ${e.message}`));
   }
 
   const updated = db.prepare('SELECT * FROM apps WHERE id = ?').get(app.id);
+  // A 200 on a tcp -> http flip must not read as "the port is closed". Said in
+  // prose as well as in the pending_port_release field, because the caller that
+  // most needs to hear it is a script or an agent that checked the status code
+  // and moved on to telling someone the exposure is revoked.
+  const stillBound = pendingPortRelease(updated);
   res.json({
+    ...(stillBound !== null && ingressWork ? {
+      ingress_notice: `Port ${stillBound} is NOT closed yet. AppCrane will not publish it again and no other app can be given it, but the container that is running right now still binds 0.0.0.0:${stillBound} — the publish is a \`docker run\` flag. Deploy the app, or POST /api/apps/${app.slug}/restart/production, to recreate the container and actually close the port; AppCrane returns the port to the pool at that moment.`,
+    } : {}),
     app: {
       ...updated,
       resource_limits: JSON.parse(updated.resource_limits || '{}'),
       auth_bypass_paths: parseBypassPathsField(updated.auth_bypass_paths),
       auth_mode: effectiveAuthMode(updated.auth_mode),
+      ...ingressFields(updated),
       domain_aliases: db.prepare('SELECT id, domain, source, created_at FROM app_domain_aliases WHERE app_id = ? ORDER BY created_at, id').all(app.id),
     },
   });

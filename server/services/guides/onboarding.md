@@ -249,6 +249,11 @@ For mixed-auth apps (mostly-authenticated, with a couple of public
 endpoints), keep `authenticated` and gate the unauthenticated paths at
 the app's own router.
 
+Headless is still an **HTTP app behind Caddy** — TLS, security headers,
+request logging and the `X-AppCrane-Auth-Mode` stamp all still apply. An app
+that isn't HTTP at all is a different setting entirely; see
+[TCP (layer-4) ingress](#tcp-layer-4-ingress--apps-that-arent-http).
+
 ## Identity via proxy headers (the easiest path)
 
 For most "what's my user's role on this app" questions, the deployed app
@@ -852,6 +857,276 @@ endpoints `POST`/`DELETE /api/apps/<slug>/domain-aliases`.
 
 Owner/admin only. Maps to production; the sandbox stays at
 `{{HOST}}/<slug>-sandbox`.
+
+## TCP (layer-4) ingress — apps that aren't HTTP
+
+Almost no app needs this. Read the whole section before proposing it.
+
+Everything AppCrane does for an app — the SSO gate, identity headers, TLS,
+per-request audit — happens because Caddy sits in front of the container, and
+Caddy speaks HTTP. If your app speaks HTTP, this setting is not for you. A
+custom domain (above) or `auth_mode: 'headless'` covers "the app does its own
+auth" without giving anything else up.
+
+A few apps genuinely aren't HTTP. The case this exists for is a **forward /
+CONNECT proxy**: the client opens a raw TCP connection and gets a tunnel back.
+No HTTP reverse proxy can express a tunnel, so Caddy cannot front it at all.
+For those, a platform admin sets `ingress_type: 'tcp'` and AppCrane publishes
+the production container's port straight onto the host at
+`0.0.0.0:<public_port>`, with Caddy entirely out of the path.
+
+The container's existing loopback publish (`127.0.0.1:<slot port>:3000`) stays.
+TCP ingress **adds** a door — it does not replace the one you already have.
+
+### What a published port does not get
+
+| Control | `http` app (through Caddy) | `tcp` app (published port) |
+|---|---|---|
+| `forward_auth` SSO gate | yes | **no** — nobody is verified |
+| `X-AppCrane-*` identity headers | yes | **no** — nothing injects them |
+| incoming `X-AppCrane-*` strip | yes | n/a — no header on the wire is platform-issued or stripped |
+| per-request audit / access log | yes | **no** — AppCrane never sees the connection |
+| rate limiting | yes | **no** |
+| security headers (CSP / `X-Frame-Options` / HSTS) | yes | **no** |
+| TLS terminated by AppCrane | yes (Let's Encrypt) | **no** — plaintext unless the app does its own TLS |
+| `cc_token` strip | yes | n/a — no cookies pass through AppCrane |
+
+Every control shipped in v2.35–v2.41 assumes Caddy is the only door. A published
+port is a second door AppCrane does not control, so **the app owns
+authentication completely**. If the app doesn't authenticate the connection,
+nothing does.
+
+### This is not `auth_mode: 'headless'`
+
+|  | `auth_mode: 'headless'` | `ingress_type: 'tcp'` |
+|---|---|---|
+| Caddy in the path | **yes** | **no** |
+| TLS from AppCrane | yes | no |
+| security headers | yes | no |
+| `X-AppCrane-Auth-Mode` stamp | yes (`headless`) | no headers at all |
+| identity headers | no | no |
+| request logging | yes | no |
+| who may set it | the app's owner | **platform admin only** |
+| reached at | `{{HOST}}/<slug>` | `<host>:<public_port>`, raw TCP |
+
+Headless means AppCrane steps back from *authentication*. TCP ingress means
+AppCrane steps out of the *connection*. Don't reach for `tcp` when what you
+wanted was `headless`.
+
+### Turning it on
+
+**Platform admin only.** The owner self-service path can't reach it:
+`appcrane_set_app_meta` (category, visibility, auth_mode, auth_bypass_paths) and
+`appcrane_update_app` do not accept these fields at all.
+
+```
+appcrane_get_app_ingress(slug)                            — read it (any app member)
+appcrane_set_app_ingress(slug, ingress_type="tcp")        — allocate a port
+appcrane_set_app_ingress(slug, ingress_type="tcp", public_port=31005)
+appcrane_set_app_ingress(slug, ingress_type="http")       — release the port
+```
+
+The same thing over REST, if you're not on MCP:
+
+```
+PUT /api/apps/<slug>  { "ingress_type": "tcp" }                        → allocates a port
+PUT /api/apps/<slug>  { "ingress_type": "tcp", "public_port": 31005 }  → pins a specific one
+PUT /api/apps/<slug>  { "public_port": 31007 }                         → moves an already-tcp app
+PUT /api/apps/<slug>  { "ingress_type": "http" }                       → stops publishing the port
+                                                                         (does NOT close it — see below)
+```
+
+`public_port` on an app that isn't (or isn't becoming) `tcp` is a 400, and so is
+`public_port: null` — flipping back to `http` is the one way to release a port,
+so there's a single path to reason about.
+
+- **Takes effect when the container is next recreated.** The second binding is a
+  `docker run` flag, so it lands on the next deploy — or on
+  `POST /api/apps/<slug>/restart/<env>` (the dashboard's ↺ button), which does
+  stop+start and therefore also applies it. Nothing changes on a container that
+  is already running. Until then the app is still loopback-only. The deploy log
+  says `[tcp-ingress] … also published on 0.0.0.0:<port>` when it lands.
+- **Flipping back to `http` does NOT close the port.** It stops AppCrane
+  publishing it; the running container keeps binding `0.0.0.0:<port>` until it is
+  recreated, exactly like turning the ingress on. So the port stays reachable and
+  unauthenticated after the API says `public_port: null`. **Redeploy or restart
+  the app to actually close a port**, and do that before you consider the
+  exposure revoked.
+- **A port that is still bound stays reserved to that app.** Because the flip
+  cannot close anything on its own, AppCrane does not put the number back in the
+  pool at that moment — handing a live, still-bound port to the next app would
+  make *its* `docker run` fail with "port is already allocated" while connections
+  to the port kept reaching the *old* app. The number is held until the container
+  is recreated without the publish, and released automatically then. In the
+  meantime every read surface reports it as `pending_port_release` (alongside
+  `public_port: null`), and `appcrane_get_app_ingress` says in words that the
+  port is still open — so no surface ever claims a port is closed while it is
+  open, and the allocator never issues one a running container still binds.
+- **Production only.** There is one `public_port` per app but two containers, so
+  publishing it for both would make the second `docker run` fail with "port is
+  already allocated" — and the loser could be production. Sandbox stays
+  loopback-only and is reached the usual way, at `{{HOST}}/<slug>-sandbox`.
+- Ports come from a dedicated **31000–31999** range, lowest free first, so the
+  operator's firewall rule is one predictable block instead of a per-app list.
+  Refused: anything outside the range, WHATWG-blocked ports (the same list that
+  makes Node's `fetch` reject a port outright), AppCrane's own listening port,
+  any port the slot allocator could hand a container, and any port another app
+  already holds.
+- The port is **allocated and stored, never derived from the app's slot**. Slots
+  get reassigned; a derived port would silently move under a client pinned to it
+  by MDM or a hardcoded proxy setting. Redeploys, renames and slot changes leave
+  an existing allocation untouched.
+- One app, one port — a partial unique index makes a double-booking impossible.
+- Every change is audited under its own action, **`app-ingress-change`**, with
+  the before/after — not folded into the generic `app-update` entry, because "a
+  port was opened on the host" has to be findable by name.
+- `ingress_type` and `public_port` are returned on every app payload and on
+  `appcrane_get_app`; `public_port` reads back `null` whenever `ingress_type`
+  isn't `tcp`. `appcrane_get_app_ingress` additionally spells out what the
+  exposure means, so a diagnosis doesn't rest on recognising the enum.
+
+### AppCrane publishes the port. Do not assume a firewall is holding it shut.
+
+It is tempting to read this as a pair of locks — AppCrane opens one, an operator
+opens the other — and to relax because you only opened the first. That reading is
+wrong here, for two independent reasons.
+
+The first is mechanical: on Linux a published port is a DNAT rule that a plain
+`ufw deny` does not filter (see below). The second is where this platform runs:
+the host sits behind SDP, so the boundary that actually exists is the perimeter.
+A published port is reachable by everything inside it the moment the app is
+recreated — not by the internet, and not by nobody.
+
+So treat publishing as the exposing act. Say it out loud when you hand the
+change over, keep the range or single port as narrow as you can, and put the
+filtering somewhere that works (`DOCKER-USER`, or upstream of the host).
+
+> **On Linux, `ufw` is not a second key.**
+> Docker implements a published port as a **DNAT rule in the `nat`/`DOCKER`
+> chain**. The packet is then evaluated in **`FORWARD`** (`DOCKER-USER`,
+> `DOCKER-FORWARD`) and **never traverses `INPUT`** — which is the only chain a
+> plain `ufw deny <port>` rule, or a default-deny `INPUT` policy, controls. So on
+> a ufw-protected host the publish is reachable the moment the container is
+> recreated, whatever ufw says. The second key only exists if you put it
+> somewhere Docker's traffic actually goes:
+>
+> - a rule in the **`DOCKER-USER`** chain (evaluated before Docker's own
+>   FORWARD accepts), e.g. `iptables -I DOCKER-USER -p tcp --dport <port> -j DROP`
+>   with an explicit allow for the sources you intend; **or**
+> - a **cloud security group / network ACL upstream of the host**, which is
+>   outside the host's iptables entirely and does still block it.
+>
+> Verify rather than assume: `iptables -t nat -S DOCKER | grep <port>` shows the
+> DNAT rule, and a connect from another machine is the only real proof. Treat the
+> port as reachable by anything that can already reach this host — which on this
+> deployment means everything inside the SDP perimeter, not the internet — from
+> the moment the app is recreated with a `tcp` ingress, until you have checked
+> otherwise.
+
+### If the app is a CONNECT proxy, its 407 path is the critical path
+
+This host sits behind SDP, so a published port is **not** on the internet. That
+removes the open-relay-on-a-public-IP scenario, and it means the port inherits
+SDP's authentication rather than having none — a defensible position. It does not
+make the port unauthenticated-but-safe.
+
+The population that can reach it is everyone SDP admits, plus any compromised
+device inside that perimeter. For a forward proxy with a gap in its proxy
+authentication, that is an **unaudited egress path out of the perimeter**, usable
+by whoever finds it — and AppCrane's audit log shows none of it, because the
+traffic never touched AppCrane. In an organisation whose business is inspecting
+traffic, an unlogged way out is the interesting failure, not a spam relay.
+
+The ingress is not the risky part — the app's `407 Proxy-Authenticate` path is,
+and so is whatever connect logging the app keeps, since AppCrane cannot keep it
+for you. Get both right before anything else:
+
+- Refuse on missing **and** malformed `Proxy-Authorization`, before any connect
+  is attempted.
+- Compare credentials in constant time; no early return that leaks whether the
+  username existed.
+- Constrain `CONNECT` targets: allowlist destination hosts/ports, refuse port 25,
+  and refuse connections back to the host's own private ranges and to
+  `169.254.169.254` (cloud metadata) — an authenticated client should not be
+  able to use the tunnel to reach the box it runs on.
+- Log every accepted tunnel yourself. Nothing else will.
+
+### The app can still authenticate against AppCrane
+
+Nothing arrives on the raw port carrying platform identity, but the app can go
+and ask. Both paths already exist. **Prefer path 2** — it is the app's own
+credential and never leaves the docker bridge.
+
+> **Before you reach for path 1:** a `dhk_user_*` key is the user's *primary*
+> AppCrane credential, not a scoped verification token. It authenticates them
+> across the whole REST API — `GET /api/apps`, every app's env vars, everything
+> their role allows — so if the client is a platform admin, an app holding that
+> key holds the platform. Asking a client to hand it over the raw port
+> compounds that twice: the connection has **no TLS from AppCrane**, so the key
+> crosses the wire in cleartext unless the app terminates its own TLS, and it
+> lands inside an app this very page describes as owning authentication itself
+> (i.e. not something the platform vouches for). Use path 1 only when the app is
+> genuinely gating on *which platform user* is calling, over a connection the
+> app has encrypted, and prefer a credential minted for that app over the user's
+> platform key.
+
+**1. `GET /api/me` — verify a credential the client handed you.** The endpoint
+accepts `Authorization: Bearer <session token>` or `X-API-Key: dhk_*`, so a
+proxy client can present its own AppCrane API key (in `Proxy-Authorization`, for
+example) and the app forwards it for verification. There is no cookie and no
+`Referer` on a raw connection, so pass `?app=<slug>` explicitly — without it the
+response is the lean global-only payload with no `app_role`.
+
+```js
+const r = await fetch(`${process.env.CRANE_INTERNAL_URL}/api/me?app=my-proxy`, {
+  headers: { 'X-API-Key': keyFromClient },
+})
+if (!r.ok) return refuse()                    // 401 → not a platform user
+const { user, app_role } = await r.json()     // gate with atLeast(app_role, 'user')
+```
+
+`CRANE_INTERNAL_URL` (`http://host.docker.internal:5001`) is injected into every
+container along with the host-gateway mapping — no extra configuration.
+
+**2. `POST /api/service/*` — the app's own credential.**
+`APPCRANE_SERVICE_TOKEN` is injected into every container and authenticates the
+**app**, not a user, over the docker bridge. Today it serves one endpoint,
+`POST /api/service/email`. It is server-side only by construction: Caddy 404s
+`/api/service/*` on the public domain, and the handler rejects any request
+carrying `Via` / `X-Forwarded-*`.
+
+### It still has to answer `/api/health` over HTTP
+
+Non-negotiable, and independent of `ingress_type`: the deploy validates the new
+container by polling `http://localhost:<port>/api/health` (or
+`manifest.be.health`) for 30 s and requires **200 with a JSON body containing
+both `status` and `version`** — otherwise the release is rolled back. So a `tcp`
+app's container must serve that one HTTP endpoint on the container port even
+though its real protocol isn't HTTP. For an HTTP CONNECT proxy this is free: it
+is already an HTTP server, so it answers `GET /api/health` on the same listener.
+
+This is a scope limit, not a footnote: an app that speaks **only** a non-HTTP
+protocol (raw SSH, MQTT, a pure SOCKS listener) cannot pass that deploy gate and
+therefore cannot go live at all, whatever `ingress_type` says. `tcp` ingress
+today serves apps that **also** answer HTTP on the container port — which the
+motivating CONNECT proxy does.
+
+Which leads to the part that is easy to miss: **the publish is
+`0.0.0.0:<public_port>:3000` — the whole container port, not a protocol-specific
+channel.** Every HTTP route the app serves on port 3000 is reachable from
+outside, including that mandatory `/api/health` (whose body carries `version`,
+plus whatever else the app put there) and any admin, metrics or debug route the
+app assumed was private because Caddy's SSO sat in front of it. The polling
+examples here say `localhost` only because AppCrane probes over loopback; that
+says nothing about who else can reach the same routes. Audit the app's full HTTP
+surface before flipping the ingress, not just its raw protocol.
+
+Ongoing health checks for a `tcp` app are a **TCP connect** to the container's
+loopback port instead of a fetch — success means the container accepted a
+connection, nothing more, and the health config's `endpoint` is not used. The
+fail counters, auto-restart and dashboard up/down behave exactly as for any
+other app. (Without that, a non-HTTP app would fail every HTTP probe and get
+restart-looped forever.)
 
 ## Embedding an app in an iframe (`frame_ancestors`)
 
