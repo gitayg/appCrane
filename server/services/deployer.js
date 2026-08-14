@@ -1,10 +1,12 @@
 import { execFileSync } from 'child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, unlinkSync, symlinkSync, cpSync, writeFileSync, readlinkSync } from 'fs';
 import { join, resolve, basename } from 'path';
+import net from 'net';
 import { getDb } from '../db.js';
 import { decrypt } from './encryption.js';
 import log from '../utils/logger.js';
 import { AppError } from '../utils/errors.js';
+import { getIngressForApp } from './tcpIngress.js';
 import { ensureCodebaseContext } from './appstudio/contextBuilder.js';
 
 // Prune old release checkouts under <appDir>/releases, keeping the newest
@@ -180,6 +182,67 @@ async function probeHealthEndpoint(url, timeoutMs) {
     detail: lastError
       ? `No healthy response within ${timeoutMs}ms. Last failure: ${lastError}${cls?.hint ? `. ${cls.hint}` : ''}`
       : `No healthy response within ${timeoutMs}ms (last status: ${lastStatus ?? 'no response'}, last body: ${JSON.stringify(lastBodyPreview ?? '')})`,
+  };
+}
+
+/**
+ * Deploy-time TCP probe — the tcp-ingress counterpart of probeHealthEndpoint,
+ * and deliberately the same shape as healthChecker.js's probeTcp so a deploy
+ * and the periodic checker agree on what "up" means for a tcp app: a completed
+ * TCP handshake on the loopback port the container publishes.
+ *
+ * Same retry envelope as the HTTP gate — attempts until `timeoutMs` elapses,
+ * 2s between them — because a container needs the same few seconds to bind
+ * whatever protocol it speaks. Each attempt gets healthChecker's 5s connect
+ * budget, clamped to whatever is left of the envelope so the gate cannot
+ * overrun it.
+ *
+ * The v2.6.10 lesson applies here exactly as it does to the fetch path: report
+ * the errno. ECONNREFUSED (nothing bound), ETIMEDOUT (bound but wedged, or
+ * packets black-holed) and EHOSTUNREACH send an operator down completely
+ * different paths, and a probe that only says "failed" is the silent failure
+ * the classifyFetchError work exists to prevent.
+ */
+const TCP_ATTEMPT_TIMEOUT_MS = 5000;
+
+function tcpConnectOnce(host, port, timeoutMs) {
+  // Named `settle` rather than `resolve`: this module imports path.resolve.
+  return new Promise((settle) => {
+    let settled = false;
+    const socket = net.createConnection({ host, port });
+
+    const done = (result) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      settle(result);
+    };
+
+    socket.setTimeout(timeoutMs);
+    socket.once('connect', () => done({ ok: true }));
+    socket.once('timeout', () => done({ ok: false, code: 'ETIMEDOUT', label: `no TCP handshake within ${timeoutMs}ms` }));
+    socket.once('error', (e) => done({ ok: false, code: e.code || 'UNKNOWN', label: e.message }));
+  });
+}
+
+async function probeTcpListener(host, port, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+
+  while (Date.now() < deadline) {
+    const attemptMs = Math.min(TCP_ATTEMPT_TIMEOUT_MS, deadline - Date.now());
+    const result = await tcpConnectOnce(host, port, attemptMs);
+    if (result.ok) return { ok: true };
+    last = result;
+    await new Promise(r => setTimeout(r, 2000));
+  }
+
+  return {
+    ok: false,
+    reason: 'timeout',
+    errorCode: last?.code || null,
+    detail: `No TCP connection accepted on ${host}:${port} within ${timeoutMs}ms. ` +
+      `Last failure: ${last?.label || 'none recorded'}${last?.code ? ` [${last.code}]` : ''}`,
   };
 }
 
@@ -1045,10 +1108,37 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     // to deploy "successfully" then leave the dashboard's version/health
     // columns blank forever, with no signal to the developer that anything
     // was wrong.
+    //
+    // v2.42.0: the gate is protocol-aware, and the two protocols do NOT prove
+    // the same thing. For an http app nothing changes: 200 + JSON carrying
+    // {status, version} — the app booted far enough to route a request and
+    // report its own identity. A tcp app is on the platform precisely because
+    // it does not speak HTTP (a CONNECT proxy cannot answer GET /api/health),
+    // so the strongest assertion available without knowing its protocol is
+    // that something completed a TCP handshake on the port. That says nothing
+    // about which protocol is bound, which version is running, or whether a
+    // single real request would succeed — a green deploy for a tcp app is a
+    // strictly weaker statement than for an http app, and any operator reading
+    // "Health check passed" on a tcp app should read it that way.
+    //
+    // Ingress type is read fresh from the row, not from the `app` argument:
+    // callers build that object from several different queries (and rollback
+    // re-reads it), so the column is not guaranteed to be on it.
+    const { ingress_type } = getIngressForApp(db, app.id);
+    const isTcpIngress = ingress_type === 'tcp';
+
     const healthPath = manifest.be?.health || '/api/health';
     const healthSource = manifest.be?.health ? `manifest.be.health="${manifest.be.health}"` : `default /api/health (manifest.be.health unset)`;
     const healthUrl = `http://localhost:${bePort}${healthPath}`;
-    appendLog(`Validating new container health at ${healthPath} (30s, ${healthSource})…`);
+    // Both protocols probe the LOOPBACK port every container publishes, never
+    // the public one — same rule as healthChecker.js: the gate must pass before
+    // the operator opens the firewall, and must not depend on a public_port
+    // allocation existing.
+    if (isTcpIngress) {
+      appendLog(`Validating new container health with a TCP connect to 127.0.0.1:${bePort} (30s, ingress_type=tcp — handshake only, no status/version assertion)…`);
+    } else {
+      appendLog(`Validating new container health at ${healthPath} (30s, ${healthSource})…`);
+    }
 
     // v2.6.17: boot-watch races the HTTP probe. If the container
     // exits or restarts within the first 5s, boot-watch wins and we
@@ -1060,7 +1150,9 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     const containerNameForWatch = `appcrane-${app.slug}-${env}`;
     const { watchBootForEarlyCrash } = await import('./bootWatch.js');
 
-    const probePromise = probeHealthEndpoint(healthUrl, 30000);
+    const probePromise = isTcpIngress
+      ? probeTcpListener('127.0.0.1', bePort, 30000)
+      : probeHealthEndpoint(healthUrl, 30000);
     const bootCrashSignal = watchBootForEarlyCrash({ containerName: containerNameForWatch, windowMs: 5000 })
       .then((r) => (r.crashed ? r : new Promise(() => {})));
 
@@ -1137,11 +1229,20 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
         appendLog(`Reverting to previous image: ${prevImage}`);
         await dockerStart({ slug: app.slug, env, image: prevImage, hostPort: bePort, envVars: runtimeEnvVars, volumes: [{ host: resolve(join(sharedDir, 'data')), container: '/data' }], memoryMb: limits.max_ram_mb, cpus: limits.max_cpu_percent / 100 }).catch(() => {});
       }
+      const restoreNote = prevImage
+        ? 'Previous version restored.'
+        : 'Container destroyed (first deploy, no previous version to fall back to). See deploy log above for container output captured before rollback.';
       throw new Error(
-        `New container failed health check at ${healthPath}: ${healthResult.detail}\n` +
-        `Add a route that returns JSON like {"status":"ok","version":"1.0.0"} ` +
-        `(declare the path in deployhub.json as be.health, or use the default /api/health). ` +
-        `${prevImage ? 'Previous version restored.' : 'Container destroyed (first deploy, no previous version to fall back to). See deploy log above for container output captured before rollback.'}`
+        isTcpIngress
+          ? `New container failed TCP health check on 127.0.0.1:${bePort}: ${healthResult.detail}\n` +
+            `A tcp-ingress app only has to accept a TCP connection on the port AppCrane publishes; ` +
+            `nothing accepted one. Make sure the process listens on 0.0.0.0 inside the container ` +
+            `(a listener bound to 127.0.0.1 there is unreachable from the host) and on the port declared in deployhub.json. ` +
+            `${restoreNote}`
+          : `New container failed health check at ${healthPath}: ${healthResult.detail}\n` +
+            `Add a route that returns JSON like {"status":"ok","version":"1.0.0"} ` +
+            `(declare the path in deployhub.json as be.health, or use the default /api/health). ` +
+            `${restoreNote}`
       );
     }
     appendLog('Health check passed');

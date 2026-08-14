@@ -5,6 +5,30 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.42.0 — Raw TCP ingress: apps that aren't HTTP can be reached directly.
+
+Some apps don't speak HTTP. The motivating case is a forward/CONNECT proxy: a client opens a TCP connection and gets a tunnel back, which no HTTP reverse proxy can express. Those apps now get their container port published straight onto the host, with Caddy entirely out of the layer-4 path.
+
+**The actual blocker was never Caddy.** Every container has always been published to `127.0.0.1` only — a deliberate loopback bind, and the reason raw TCP was impossible. So this ships as a direct Docker publish rather than Caddy's `layer4` plugin, which would have meant a custom `xcaddy` build and swapping the binary that fronts every app on the box. That option is recorded in the new `BACKLOG.md` with what it would buy, so the trade doesn't have to be rediscovered.
+
+**The port is pinned, not pooled.** An operator sets it in the app's settings and hands it to clients by hand or by MDM, so it is a stored column — never derived from `slot`, which can be reassigned — allocated once from 31000–31999 and kept. Flipping to `http` stops publishing but the reservation stays with the app that owns it; another app asking for that number is refused, and flipping back returns the same one. Returning it to a shared pool would let a later app be allocated it while clients still point at the old number, which is a silent cross-app redirection — worse than a dead port.
+
+Platform-admin only, and audited. An owner changing their own `auth_mode` is one thing; opening a host port is another.
+
+**Two blockers found by review, both of which would have shipped a broken feature.**
+
+A TCP app could never have deployed. There are two health checks, and making the periodic one protocol-aware wasn't enough: `deployer.js` runs a *mandatory* HTTP probe right after the container starts, and since v2.2.11 failure reverts to the previous image and throws. A CONNECT proxy can't answer an HTTP GET, so the deploy failed the gate and rolled back before the periodic checker ever ran. Both are protocol-aware now — a TCP app's gate proves the listener accepts a connection on the loopback port, so it passes before any firewall step and doesn't depend on an allocation existing. An HTTP app's gate is unchanged: same probe, same 30s envelope, same message, same rollback.
+
+And re-pinning a *live* TCP app to a different port silently freed the old one while the container was still bound to it — the exact cross-app redirection the pinned model exists to prevent, reached by a path the flip logic couldn't see. Now refused with `PORT_STILL_HELD`, but only when the app is genuinely publishing: a port allocated before the first deploy is bound by nothing, and re-pinning then is both safe and the common case.
+
+**A TCP app's green deploy means less than an HTTP app's** — it proves a socket accepted a connection, not that the protocol works. AppCrane can't speak the app's protocol. That's stated at the gate and in the guide rather than left for someone to infer from a green dot.
+
+**What a published port gives up**, stated plainly in the UI, the guide, the README and the MCP tools: no `forward_auth`, no identity headers, no per-request audit, no rate limiting, no security headers, no TLS from AppCrane. Every control shipped since v2.35 assumes Caddy is the only door.
+
+Two claims in that copy were wrong and are corrected. A Docker publish is a DNAT rule evaluated in `FORWARD` that never traverses `INPUT`, so a plain `ufw deny` does **not** filter it — `DOCKER-USER` or upstream. And where the platform runs behind SDP the boundary is the perimeter, not the internet, which makes a proxy-auth gap an unaudited egress path rather than a public open relay. The docs test used to *require* the retracted "two keys" wording; it now requires the accurate version, and the corrected prose is pinned so a revert fails CI.
+
+277 → 391 tests.
+
 ## 2.41.2 — Seeing who holds an app's roles needs the owner/admin tier.
 
 `GET /api/apps/:slug/app-roles/members` and the `members` block of `appcrane_list_app_roles` returned the full roster — name, email, platform tier — to any member of the app, while every other roster read in AppCrane (`GET /:slug/identity/users`, `appcrane_list_app_members`) already required owner/admin. That was an inconsistency rather than a decision, and it let any member enumerate their colleagues.

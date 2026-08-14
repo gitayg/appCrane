@@ -1,5 +1,7 @@
 import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
+import { getDb } from '../db.js';
+import { publicPortForApp, releasePendingPortAfterRecreate } from './tcpIngress.js';
 import log from '../utils/logger.js';
 
 const execFileAsync = promisify(execFile);
@@ -14,7 +16,15 @@ async function dockerExec(args, opts = {}) {
     });
     return stdout.trim();
   } catch (e) {
-    const output = e.stdout?.toString() || e.stderr?.toString() || e.message;
+    // stderr FIRST. `docker run -d` writes the new container id to stdout even
+    // when the run fails, so a stdout-first pick returned a bare 64-char hex
+    // string and threw away the reason on stderr — "Bind for 0.0.0.0:31000
+    // failed: port is already allocated" became an unreadable id in the deploy
+    // log. v2.42.0's public publish is the first routine way to hit a host-port
+    // collision (loopback ports are slot-derived and effectively never clash),
+    // which is what surfaced it. Matches index.js, spaBuilder.js and
+    // appstudio/worker.js, which all already read stderr first.
+    const output = e.stderr?.toString().trim() || e.stdout?.toString().trim() || e.message;
     log.debug(`docker ${args[0]} failed: ${output}`);
     throw new Error(output);
   }
@@ -96,6 +106,25 @@ export async function buildImage({ slug, env, contextDir, commitHash, appBasePat
   });
 }
 
+/**
+ * The 0.0.0.0 port this app publishes in addition to its loopback bind, or
+ * null. Resolved from the database here rather than taken as a parameter: every
+ * container recreation — deploy, rollback, the env-var restart in
+ * routes/deploy.js — funnels through startApp(), and a caller that forgot to
+ * pass it would silently bring a tcp app back loopback-only, taking it off the
+ * network its clients are pinned to with no error anywhere.
+ *
+ * Production only. There is one public_port per app but two containers, so
+ * publishing it for both would make the second `docker run` fail with "port is
+ * already allocated" — and the loser could be production. Sandbox stays
+ * loopback-only and therefore cannot take the port production's clients use.
+ */
+function publishedTcpPort(slug, env) {
+  if (env !== 'production') return null;
+  const app = getDb().prepare('SELECT ingress_type, public_port FROM apps WHERE slug = ?').get(slug);
+  return publicPortForApp(app);
+}
+
 export async function startApp({ slug, env, image, hostPort, envVars = {}, volumes = [], memoryMb = 512, cpus = 0.5, addHostGateway = false }) {
   const name = containerName(slug, env);
 
@@ -114,6 +143,24 @@ export async function startApp({ slug, env, image, hostPort, envVars = {}, volum
     '--log-opt', 'max-size=10m',
     '--log-opt', 'max-file=3',
   ];
+
+  // v2.42.0: a tcp app publishes a SECOND binding on 0.0.0.0 so raw TCP
+  // clients (a CONNECT proxy's tunnel, say) reach the container directly —
+  // Caddy is an HTTP reverse proxy and cannot express a tunnel. The loopback
+  // publish above is deliberately kept: it is what the health probe, the
+  // Caddy vhost and every internal caller still use, so nothing about an
+  // http app's argv changes and a tcp app keeps its private door.
+  //
+  // SECURITY: this bypasses Caddy entirely, so the published port has no
+  // forward_auth, no identity headers, no request audit, no rate limiting, no
+  // security headers and no TLS from AppCrane — the app owns authentication.
+  // AppCrane publishes the port; it does NOT open the host firewall. That is
+  // deliberately a separate operator step so a mis-click in the dashboard
+  // cannot put an app on the internet.
+  const publicPort = publishedTcpPort(slug, env);
+  if (publicPort) {
+    args.push('-p', `0.0.0.0:${publicPort}:${CONTAINER_PORT}`);
+  }
 
   // v2.8.0: only email-enabled apps need to reach AppCrane from inside the
   // container (for the email service). host-gateway maps host.docker.internal
@@ -140,6 +187,21 @@ export async function startApp({ slug, env, image, hostPort, envVars = {}, volum
   args.push(image);
   const id = await dockerExec(args);
   log.info(`docker started: ${name} (${id.slice(0, 12)}) from ${image}`);
+  if (publicPort) {
+    log.info(`[tcp-ingress] ${name} also published on 0.0.0.0:${publicPort} — NOT behind AppCrane auth; restricting it is still the operator's firewall job. On Linux this publish is a DNAT rule evaluated in FORWARD and never in INPUT, so a plain 'ufw deny' does NOT block it — filter in DOCKER-USER or in an upstream security group.`);
+  }
+
+  // v2.42.0: this is where a tcp -> http flip actually takes effect, and so
+  // where the port it left reserved goes back in the pool. The flip cannot
+  // close a port on its own — the publish is an argv flag — so it keeps the
+  // reservation instead of handing a still-bound port to the next app that
+  // asks. The container just created is the proof the old one is gone.
+  if (env === 'production') {
+    const released = releasePendingPortAfterRecreate(getDb(), slug);
+    if (released) {
+      log.info(`[tcp-ingress] ${name} was recreated with no public publish — port ${released} is now closed and back in the allocation pool.`);
+    }
+  }
   return id;
 }
 

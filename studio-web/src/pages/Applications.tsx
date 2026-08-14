@@ -29,6 +29,15 @@ interface App {
   image_retention?: number
   frame_ancestors?: string | null
   auth_bypass_paths?: string[] | null
+  // v2.42.0: layer-4 ingress. 'tcp' means the container's port is published
+  // directly on the host at public_port, with Caddy out of the path entirely.
+  ingress_type?: 'http' | 'tcp'
+  public_port?: number | null
+  // A port the app was switched away from but whose container has not been
+  // recreated yet: AppCrane publishes nothing, the host port is still open.
+  // Reported by the API rather than inferred here — the UI can't know what the
+  // running container was started with.
+  pending_port_release?: number | null
   domain?: string | null
   domain_aliases?: { id: number; domain: string; source: string; created_at: string }[]
   owner?: { id: number; name: string; email: string } | null
@@ -149,6 +158,7 @@ const IconImage = () => svgIcon(<><rect width="18" height="18" x="3" y="3" rx="2
 const IconUnlock = () => svgIcon(<><rect width="18" height="11" x="3" y="11" rx="2" /><path d="M7 11V7a5 5 0 0 1 9.9-1" /></>)
 const IconGlobe = () => svgIcon(<><circle cx="12" cy="12" r="10" /><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20" /><path d="M2 12h20" /></>)
 const IconActivity = () => svgIcon(<path d="M22 12h-4l-3 9L9 3l-3 9H2" />)
+const IconPlug = () => svgIcon(<><path d="M12 22v-5" /><path d="M9 8V2" /><path d="M15 8V2" /><path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z" /></>)
 const IconTrash = () => svgIcon(<><path d="M3 6h18" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /><line x1="10" x2="10" y1="11" y2="17" /><line x1="14" x2="14" y1="11" y2="17" /></>)
 const IconChevron = ({ open }: { open: boolean }) => svgIcon(open ? <path d="m6 9 6 6 6-6" /> : <path d="m9 18 6-6-6-6" />)
 
@@ -254,6 +264,13 @@ export function Applications() {
   type MetricRow = { env: string; cpu_percent: number; mem_mb: number; recorded_at: string }
   const [metricsApp, setMetricsApp] = useState<App | null>(null)
   const [metricsRows, setMetricsRows] = useState<MetricRow[] | null>(null)
+  // v2.42.0: per-app ingress modal. Read-only for everyone except platform
+  // admins — the state has to be visible to whoever runs the app even when
+  // they can't change it, because it tells them their app is reachable on a
+  // port that AppCrane does not guard.
+  const [ingressApp, setIngressApp] = useState<App | null>(null)
+  const [ingressDraft, setIngressDraft] = useState<{ type: 'http' | 'tcp'; port: string }>({ type: 'http', port: '' })
+  const [ingressBusy, setIngressBusy] = useState(false)
   // v2.7.24: client-side filter for the per-app Users modal (name / email).
   // Resets to empty on every close so opening another app doesn't carry over.
   const [usersModalFilter, setUsersModalFilter] = useState('')
@@ -635,6 +652,41 @@ export function Applications() {
     } catch (e) {
       alert('Failed: ' + (e as Error).message)
     }
+  }
+
+  // v2.42.0: change an app's ingress. Sends only what the admin actually
+  // touched: an empty port box on a tcp app means "allocate one for me", which
+  // the server answers by keeping any existing allocation or picking the lowest
+  // free port — so re-saving never silently moves a port clients are pinned to.
+  async function saveIngress(app: App, type: 'http' | 'tcp', portRaw: string) {
+    const body: { ingress_type: 'http' | 'tcp'; public_port?: number } = { ingress_type: type }
+    if (type === 'tcp' && portRaw.trim()) {
+      const n = parseInt(portRaw.trim(), 10)
+      if (!Number.isFinite(n)) { alert('Public port must be a number between 31000 and 31999.'); return }
+      body.public_port = n
+    }
+    setIngressBusy(true)
+    try {
+      const r = await adminApi.put<{ app?: App; error?: { message?: string } }>(`/api/apps/${app.slug}`, body)
+      if (r?.error) { alert('Failed: ' + (r.error.message || 'unknown')); return }
+      const next = {
+        ingress_type: r?.app?.ingress_type ?? type,
+        public_port: r?.app?.public_port ?? null,
+        pending_port_release: r?.app?.pending_port_release ?? null,
+      }
+      setApps(prev => prev.map(a => a.slug === app.slug ? { ...a, ...next } : a))
+      setIngressApp(prev => prev && prev.slug === app.slug ? { ...prev, ...next } : prev)
+      setIngressDraft({ type: next.ingress_type, port: next.public_port ? String(next.public_port) : '' })
+    } catch (e) {
+      alert('Failed: ' + (e as Error).message)
+    } finally {
+      setIngressBusy(false)
+    }
+  }
+
+  function openIngress(app: App) {
+    setIngressDraft({ type: app.ingress_type === 'tcp' ? 'tcp' : 'http', port: app.public_port ? String(app.public_port) : '' })
+    setIngressApp(app)
   }
 
   // v2.6.0: showAppToken removed — it minted a `user_<random>` deployment
@@ -1335,6 +1387,38 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                             }}
                           >MCP ●</span>
                         )}
+                        {app.ingress_type === 'tcp' && (
+                          <button
+                            className="badge"
+                            onClick={() => openIngress(app)}
+                            title={`Raw TCP ingress on host port ${app.public_port ?? '(not allocated)'} — this port does NOT go through AppCrane. No sign-in, no identity headers, no request audit, no TLS from AppCrane. The app authenticates every connection itself.`}
+                            style={{
+                              fontSize: '.65rem', fontWeight: 700, letterSpacing: '.3px',
+                              padding: '2px 6px', borderRadius: 3, cursor: 'pointer',
+                              color: 'var(--red, #ef4444)', background: 'rgba(239,68,68,.12)',
+                              border: '1px solid rgba(239,68,68,.35)',
+                              whiteSpace: 'nowrap', fontFamily: 'monospace',
+                            }}
+                          >TCP :{app.public_port ?? '—'} ⚠</button>
+                        )}
+                        {/* Switched back to http, container not recreated yet: the
+                            port is still open, so the row must still say so. An app
+                            that looked identical to any other http app here is how
+                            "the exposure is closed" gets reported while it isn't. */}
+                        {app.ingress_type !== 'tcp' && !!app.pending_port_release && (
+                          <button
+                            className="badge"
+                            onClick={() => openIngress(app)}
+                            title={`Port ${app.pending_port_release} is still open. Ingress was switched back to http, but the publish is a docker run flag — the container that is running still binds 0.0.0.0:${app.pending_port_release} with no AppCrane authentication in front of it. Redeploy or restart this app to close it. AppCrane keeps the port reserved to this app until then, so no other app can be given it.`}
+                            style={{
+                              fontSize: '.65rem', fontWeight: 700, letterSpacing: '.3px',
+                              padding: '2px 6px', borderRadius: 3, cursor: 'pointer',
+                              color: 'var(--amber, #f59e0b)', background: 'rgba(245,158,11,.12)',
+                              border: '1px solid rgba(245,158,11,.35)',
+                              whiteSpace: 'nowrap', fontFamily: 'monospace',
+                            }}
+                          >:{app.pending_port_release} still open ⚠</button>
+                        )}
                       </div>
                     </td>
                     <td className="apps-col-hideable">
@@ -1510,6 +1594,19 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                         })()}
                         <button
                           className="btn btn-xs btn-icon"
+                          onClick={() => openIngress(app)}
+                          aria-label={`Ingress for ${app.name}`}
+                          style={app.ingress_type === 'tcp'
+                            ? { color: 'var(--red, #ef4444)' }
+                            : app.pending_port_release ? { color: 'var(--amber, #f59e0b)' } : undefined}
+                          title={app.ingress_type === 'tcp'
+                            ? `Ingress: raw TCP on host port ${app.public_port ?? '(not allocated)'} — not behind AppCrane auth`
+                            : app.pending_port_release
+                              ? `Ingress: HTTP through Caddy, but port ${app.pending_port_release} is still open — the running container was started with it and keeps binding it until the app is redeployed or restarted.`
+                              : 'Ingress — HTTP through Caddy (default). Platform admins can publish a raw TCP port instead.'}
+                        ><IconPlug /></button>
+                        <button
+                          className="btn btn-xs btn-icon"
                           onClick={() => setCustomDomain(app)}
                           aria-label={`Custom domain for ${app.name}`}
                           style={app.domain ? { color: 'var(--accent)' } : undefined}
@@ -1679,6 +1776,186 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                       <ResourceChart title="CPU" unit="%" series={cpu} />
                       <ResourceChart title="Memory" unit="MB" series={mem} />
                     </>}
+              </div>
+            </div>
+          </div>
+        )
+      })()}
+
+      {/* v2.42.0: ingress modal. A tcp app is published straight onto the host,
+          so this dialog's job is less "edit a field" than "tell whoever opens it
+          that the app has a second door AppCrane does not guard". The warning is
+          shown to readers as well as editors; only platform admins get controls. */}
+      {ingressApp && (() => {
+        const app = ingressApp
+        const isTcp = app.ingress_type === 'tcp'
+        const dirty = ingressDraft.type !== (isTcp ? 'tcp' : 'http')
+          || (ingressDraft.type === 'tcp' && ingressDraft.port.trim() !== String(app.public_port ?? ''))
+        return (
+          <div
+            style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.55)', zIndex: 10500, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+            onClick={() => setIngressApp(null)}
+          >
+            <div
+              style={{ width: 'min(600px, 92vw)', maxHeight: '85vh', background: 'var(--surface, #1a1a1a)', color: 'var(--text)', border: '1px solid var(--border, #333)', borderRadius: 8, boxShadow: '0 16px 48px rgba(0,0,0,.5)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}
+              onClick={e => e.stopPropagation()}
+              role="dialog"
+              aria-label={`Ingress for ${app.name}`}
+            >
+              <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--border, #333)', background: 'var(--surface2, #232323)', display: 'flex', alignItems: 'center', gap: 10 }}>
+                <span style={{ fontWeight: 600, fontSize: '.95rem' }}>Ingress · {app.name}</span>
+                <button className="btn btn-xs" style={{ marginLeft: 'auto' }} onClick={() => setIngressApp(null)}>Close</button>
+              </div>
+              <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 14, fontSize: '.85rem', overflowY: 'auto' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <span style={{ color: 'var(--dim)' }}>Current</span>
+                  <span style={{ fontFamily: 'monospace', fontWeight: 600 }}>{isTcp ? 'tcp' : 'http'}</span>
+                  {!isTcp && <span style={{ color: 'var(--dim)', fontSize: '.78rem' }}>HTTP through Caddy — SSO, TLS, identity headers, request logging all apply.</span>}
+                </div>
+
+                {isTcp && (
+                  <div style={{ border: '1px solid rgba(239,68,68,.35)', background: 'rgba(239,68,68,.08)', borderRadius: 6, padding: 14, display: 'flex', flexDirection: 'column', gap: 10 }}>
+                    <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' }}>
+                      <span style={{ fontFamily: 'monospace', fontSize: '1.5rem', fontWeight: 700, color: 'var(--red, #ef4444)' }}>
+                        {app.public_port ? `:${app.public_port}` : 'no port allocated'}
+                      </span>
+                      {app.public_port && (
+                        <span style={{ color: 'var(--dim)', fontSize: '.78rem', fontFamily: 'monospace' }}>
+                          0.0.0.0:{app.public_port} → container:3000
+                        </span>
+                      )}
+                    </div>
+                    <p style={{ margin: 0 }}>
+                      <strong>This port is a second door, and AppCrane does not guard it.</strong> Traffic to it never
+                      touches Caddy, so there is <strong>no AppCrane sign-in</strong>, no <code style={{ fontFamily: 'monospace' }}>X-AppCrane-*</code> identity
+                      headers, no per-request audit, no rate limiting, no security headers and no TLS from AppCrane.
+                      Every access control AppCrane has assumes Caddy is the only way in. <strong>The app authenticates
+                      every connection itself</strong> — if its own auth has a gap, anyone who can reach this host is inside it.
+                    </p>
+                    <p style={{ margin: 0, color: 'var(--dim)' }}>
+                      This host sits behind SDP, so the port is not on the internet — the population that can reach it
+                      is everyone SDP admits, plus any compromised device inside that perimeter. For a forward / CONNECT
+                      proxy that means an unaudited egress path out of the perimeter, used by whoever finds it. The app's
+                      407 Proxy-Authenticate path is the critical path here — not the ingress.
+                    </p>
+                    <p style={{ margin: 0, color: 'var(--dim)' }}>
+                      The app can still authenticate against AppCrane: <code style={{ fontFamily: 'monospace' }}>/api/me</code> with
+                      the user's bearer token, or <code style={{ fontFamily: 'monospace' }}>/api/service</code> with its
+                      own <code style={{ fontFamily: 'monospace' }}>APPCRANE_SERVICE_TOKEN</code> over the docker bridge.
+                    </p>
+                    <p style={{ margin: 0, color: 'var(--dim)' }}>
+                      AppCrane <strong>publishes</strong> the port; reaching it from outside this host is governed by SDP
+                      and the host's own filtering. Do not read that as two independent keys — see the Linux caveat below,
+                      which is why a published port is not as contained as it looks.
+                    </p>
+                    <p style={{ margin: 0, color: 'var(--dim)' }}>
+                      <strong>Linux caveat:</strong> a Docker-published port is a DNAT rule evaluated in{' '}
+                      <code style={{ fontFamily: 'monospace' }}>FORWARD</code> and never traverses{' '}
+                      <code style={{ fontFamily: 'monospace' }}>INPUT</code>, so a plain{' '}
+                      <code style={{ fontFamily: 'monospace' }}>ufw deny</code> does <strong>not</strong> block it.
+                      Filter in the <code style={{ fontFamily: 'monospace' }}>DOCKER-USER</code> chain, or in a cloud
+                      security group upstream of this host.
+                    </p>
+                    <p style={{ margin: 0, color: 'var(--dim)' }}>
+                      The publish covers the <strong>whole container port</strong>, not just the app's raw protocol —
+                      every HTTP route it serves on port 3000, including <code style={{ fontFamily: 'monospace' }}>/api/health</code>{' '}
+                      and any admin or metrics route it assumed was behind AppCrane SSO, answers here too.
+                    </p>
+                  </div>
+                )}
+
+                {/* The one state where "Current: http" is not the whole truth.
+                    Shown to readers, not only to the admin who flipped it: the
+                    person who has to act on it is whoever next looks at this app. */}
+                {!isTcp && !!app.pending_port_release && (
+                  <div style={{ border: '1px solid rgba(245,158,11,.4)', background: 'rgba(245,158,11,.08)', borderRadius: 6, padding: 14, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    <div style={{ fontFamily: 'monospace', fontWeight: 700, color: 'var(--amber, #f59e0b)' }}>
+                      port {app.pending_port_release} is still open
+                    </div>
+                    <p style={{ margin: 0 }}>
+                      Ingress is <code style={{ fontFamily: 'monospace' }}>http</code> again, so AppCrane publishes
+                      nothing for this app — but the publish is a <code style={{ fontFamily: 'monospace' }}>docker run</code>{' '}
+                      flag, and the container that is <strong>running right now</strong> was started with it. It keeps
+                      binding <code style={{ fontFamily: 'monospace' }}>0.0.0.0:{app.pending_port_release}</code>, with no
+                      AppCrane sign-in in front of it, until the container is <strong>recreated</strong>.
+                    </p>
+                    <p style={{ margin: 0, color: 'var(--dim)' }}>
+                      <strong>Deploy this app, or press ↺ restart, to actually close the port.</strong> Until then
+                      AppCrane keeps {app.pending_port_release} reserved to this app — no other app can be given a port
+                      something is still bound to — and hands it back to the pool the moment the container returns
+                      without it. The exposure is not revoked before that.
+                    </p>
+                  </div>
+                )}
+
+                {isPlatformAdmin ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 10, borderTop: '1px solid var(--border, #333)', paddingTop: 14 }}>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      Ingress type
+                      <select
+                        value={ingressDraft.type}
+                        aria-label={`Ingress type for ${app.name}`}
+                        onChange={e => setIngressDraft(d => ({ ...d, type: e.target.value as 'http' | 'tcp' }))}
+                        style={{ fontSize: '.8rem' }}
+                      >
+                        <option value="http">http — through Caddy (default)</option>
+                        <option value="tcp">tcp — published on the host, unguarded</option>
+                      </select>
+                    </label>
+                    {ingressDraft.type === 'tcp' && (
+                      <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        Public port
+                        <input
+                          className="editable" type="number" min={31000} max={31999}
+                          aria-label={`Public TCP port for ${app.name}`}
+                          value={ingressDraft.port}
+                          placeholder="auto"
+                          onChange={e => setIngressDraft(d => ({ ...d, port: e.target.value }))}
+                          style={{ width: 110, fontFamily: 'monospace' }}
+                        />
+                        <span style={{ color: 'var(--dim)', fontSize: '.75rem' }}>
+                          31000-31999. Leave blank to keep the current port, or to have one allocated.
+                        </span>
+                      </label>
+                    )}
+                    {ingressDraft.type === 'tcp' && !isTcp && (
+                      <p style={{ margin: 0, color: 'var(--red, #ef4444)', fontSize: '.8rem' }}>
+                        Switching to tcp opens a host port for this app. It will be reachable with no AppCrane
+                        authentication — the app must authenticate every connection itself. The port is a{' '}
+                        <code style={{ fontFamily: 'monospace' }}>docker run</code> flag, so it appears when the
+                        container is next recreated: a deploy, or the ↺ restart button.
+                      </p>
+                    )}
+                    {ingressDraft.type === 'http' && isTcp && (
+                      <p style={{ margin: 0, color: 'var(--red, #ef4444)', fontSize: '.8rem' }}>
+                        This does <strong>not</strong> close port {app.public_port}. It stops AppCrane publishing it —
+                        the running container keeps binding it until the container is <strong>recreated</strong>
+                        {' '}(deploy, or the ↺ restart button), because the publish is a{' '}
+                        <code style={{ fontFamily: 'monospace' }}>docker run</code> flag. Until you do that the port
+                        stays reachable and unauthenticated, so AppCrane keeps it <strong>reserved to this app</strong>:
+                        no other app can be given a number something is still bound to, and it returns to the pool
+                        automatically once the container comes back without it. <strong>Redeploy or restart this app
+                        to actually close the port.</strong>
+                      </p>
+                    )}
+                    <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                      <button
+                        className="btn btn-xs"
+                        disabled={!dirty || ingressBusy}
+                        onClick={() => {
+                          if (ingressDraft.type === 'tcp' && !isTcp
+                            && !confirm(`Publish "${app.name}" on a raw TCP port?\n\nThe port is NOT behind AppCrane authentication. The app owns authn entirely.`)) return
+                          saveIngress(app, ingressDraft.type, ingressDraft.port)
+                        }}
+                      >{ingressBusy ? 'Saving…' : 'Save'}</button>
+                    </div>
+                  </div>
+                ) : (
+                  <p style={{ margin: 0, color: 'var(--dim)', fontSize: '.8rem', borderTop: '1px solid var(--border, #333)', paddingTop: 14 }}>
+                    Only a platform admin can change ingress. Opening a host port bypasses every control AppCrane
+                    has, so it is not a self-service setting — ask a platform admin.
+                  </p>
+                )}
               </div>
             </div>
           </div>

@@ -8,7 +8,7 @@
 
 Vibe-code an app with Claude Code or Cursor, then have your AI agent deploy it — over MCP — to a server **you** own. Docker isolation per app, SAML/OIDC SSO, per-user audit that distinguishes agents from humans, per-tenant data isolation, and a middleware hard-wall so the platform operator can't read your app secrets.
 
-**MCP-first.** AI agents connect once via `claude mcp add ... /api/mcp` and operate the platform through 42 `appcrane_*` tools — create, deploy, read logs, set env, **roll back**. No curl, no separate scripts. `appcrane_get_guide(topic="onboarding"|"operations")` returns the current playbook on demand.
+**MCP-first.** AI agents connect once via `claude mcp add ... /api/mcp` and operate the platform through 44 `appcrane_*` tools — create, deploy, read logs, set env, **roll back**. No curl, no separate scripts. `appcrane_get_guide(topic="onboarding"|"operations")` returns the current playbook on demand.
 
 ## Why AppCrane
 
@@ -52,6 +52,7 @@ You can have governance, or you can have your own infrastructure. Every other op
 - **Identity forwarded to apps as headers** — `X-AppCrane-User-Role`, `X-AppCrane-App-Role`, etc. are injected by the proxy after `forward_auth` verifies the user; deployed apps read identity directly off the request without a callback (oauth2-proxy / IAP pattern)
 - **`/api/me` endpoint** — canonical "who is the caller" for proxied apps; accepts the `cc_token` cookie, Bearer, or `X-API-Key`; returns global role + per-app role (`?app=<slug>` or `Referer`-inferred)
 - **Headless app type** — set `auth_mode: 'headless'` to bypass `forward_auth` entirely on an app; right tool for telemetry ingest, public webhooks, status pages, and single-purpose unauthenticated services
+- **TCP (layer-4) ingress** — for apps that aren't HTTP at all (a forward/CONNECT proxy hands back a raw tunnel no reverse proxy can express), a platform admin can publish the container's port directly on the host, with Caddy out of the path. No SSO, no identity headers, no TLS from AppCrane — the app owns authentication completely
 - **AppStudio AI pipeline** — AI proposes code improvements on a schedule; you review and approve before anything ships
 - **Real-time presence** — see who's active on each app, which environment, and when they last deployed
 - **Dual environments** per app: production + sandbox, always-on, separate ports
@@ -62,7 +63,7 @@ You can have governance, or you can have your own infrastructure. Every other op
 - **Encrypted env vars** (AES-256-GCM) — admin cannot read them by design
 - **Health checks** with auto-restart and email notifications
 - **Audit log** for every action
-- **MCP server** at `/api/mcp` exposing 42 `appcrane_*` tools — agents operate the platform without ever touching curl, gh, or shell
+- **MCP server** at `/api/mcp` exposing 44 `appcrane_*` tools — agents operate the platform without ever touching curl, gh, or shell
 
 ## Quick Start
 
@@ -239,6 +240,12 @@ Ubuntu Server
     ├── production/releases/       (symlink-based, last 5)
     └── sandbox/releases/
 ```
+
+Every container is published to **loopback only** (`127.0.0.1:<port>:3000`), so
+Caddy is the only way in. The one exception is a TCP-ingress app, which
+additionally publishes its container port at `0.0.0.0:<public_port>` — outside
+Caddy, and outside every control Caddy provides. See
+[§6 below](#6-tcp-layer-4-ingress--no-proxy-no-identity).
 
 ## Security
 
@@ -418,6 +425,69 @@ bounds the header's length by design rather than by discovery).
 const appRoles = new Set((req.get('X-AppCrane-App-Roles') || '').split(',').filter(Boolean))
 if (!appRoles.has('approver')) return res.status(403).json({ error: 'approver role required' })
 ```
+
+### 6. TCP (layer-4) ingress — no proxy, no identity
+
+Sections 1–5 all rest on the same assumption: Caddy is in front of the app. Some
+apps aren't HTTP and cannot be proxied at all — the motivating case is a
+forward/**CONNECT** proxy, where the client opens a raw TCP connection and gets a
+tunnel back, which no HTTP reverse proxy can express. For those, a **platform
+admin** (not the app owner) can set `ingress_type: 'tcp'` — `PUT /api/apps/<slug>`
+or `appcrane_set_app_ingress` — and AppCrane publishes the production container's
+port on the host at `0.0.0.0:<public_port>`, from a dedicated 31000–31999 range,
+the next time the container is recreated (a deploy, or the restart route — the
+publish is a `docker run` flag, so nothing changes on a running container). The
+existing loopback publish stays and sandbox is unaffected; this adds a door
+rather than moving one.
+
+**The container must still answer `/api/health` over HTTP**, whatever its
+`ingress_type`: the deploy gate polls it for 30 s and rolls the release back
+without a 200 carrying `status` and `version`. So `tcp` ingress serves apps that
+*also* speak HTTP on the container port — true of the motivating CONNECT proxy —
+and an app speaking **only** a non-HTTP protocol cannot be deployed today. Note
+too that the publish covers the whole container port, so every HTTP route on it,
+including that health endpoint and any admin route, is exposed alongside the raw
+protocol.
+
+That door has **none** of the controls above, and none of the ones AppCrane
+gained in v2.35–v2.41: no `forward_auth`, no `X-AppCrane-*` identity headers
+(nothing injects or strips them), no per-request audit, no rate limiting, no
+security headers, and no TLS terminated by AppCrane. **The app owns
+authentication completely.** It is *not* `auth_mode: 'headless'` — a headless app
+still goes through Caddy and still gets TLS, security headers and the
+`X-AppCrane-Auth-Mode: headless` stamp.
+
+An app on a published port can still authenticate against the platform if it
+chooses to: `GET /api/me?app=<slug>` verifies a `Bearer` token or `X-API-Key: dhk_*`
+the client supplied, and `POST /api/service/*` authenticates the app itself with
+the `APPCRANE_SERVICE_TOKEN` injected into every container. Both go over the
+docker bridge (`CRANE_INTERNAL_URL`), not through Caddy.
+
+`public_port` is allocated and stored per app (never derived from the app's slot,
+which can be reassigned), unique across apps, and every change is written to the
+audit log as `app-ingress-change`. **Treat publishing as the exposing act** — do
+not assume a host firewall is holding the port shut. A Docker publish is a DNAT
+rule evaluated in `FORWARD` that never traverses `INPUT`, so a plain `ufw deny`
+does **not** block it; filter in the `DOCKER-USER` chain or upstream of the host.
+And where the platform runs behind SDP, the boundary that exists is the
+perimeter: a published port is reachable by everything inside it from the moment
+the container is recreated.
+
+Switching back to `http` stops the publish but does **not** close the port: the
+running container keeps the binding until it is recreated, so redeploy or restart
+the app before treating the exposure as revoked. Because that port is still bound,
+AppCrane keeps it **reserved to that app** rather than returning it to the pool —
+no other app can be allocated a number a live container still holds — and releases
+it automatically when the container comes back without the publish. Until then the
+app reports the number as `pending_port_release` on every read surface, so nothing
+claims the port is closed while it is open.
+
+For a CONNECT proxy specifically: a published port is reachable by everything that
+can already reach the host, so on an SDP-fronted deployment that is everyone inside
+the perimeter rather than the internet. A gap in the app's proxy authentication is
+therefore an **unaudited egress path out of the perimeter**, and AppCrane logs none
+of it because the traffic never touches Caddy. The app's `407 Proxy-Authenticate`
+path is the security boundary — the ingress isn't.
 
 ## Permission Model
 
