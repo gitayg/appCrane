@@ -32,6 +32,12 @@ jobs:
       - name: Shadow .js detector (Vite resolve safety)
         run: bash scripts/check-no-shadow-js.sh --strict
 
+      # v2.44.2: four tests in one week passed here and failed on the runner —
+      # a git-derived baseline, docker host-gateway networking, and a wait that
+      # resolved on the first of two results. Each was green locally, twice.
+      - name: Test-portability watchdog (local-only assumptions)
+        run: bash scripts/check-test-portability.sh --strict
+
       # v2.27.0: per-app authorization watchdog. Missing tenant scoping on
       # :slug routes (IDOR) is one of the two bug classes behind the 2026
       # disclosure wave against self-hosted PaaS products — it found a real

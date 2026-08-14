@@ -5,6 +5,20 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.44.2 — Tests for the supply-chain work, and a watchdog for the way they keep failing.
+
+**The supply-chain changes shipped in 2.44.0 with no tests.** The agent that wrote them finished; the agent that was to test them died mid-run, and the cross-check died with the machine, so the gap went out in the release. It is closed now: 11 tests over `verifyCommitSha` and the generated build.
+
+Writing them found that the first draft was worthless. The mock returned GitHub's git-refs shape (`object.sha`) where the code reads the branch shape (`commit.sha`), so every "success" looked like *200 with no commit SHA* — which fails closed. The mismatch tests were therefore passing because the mock was broken, not because a mismatch was detected. Fixing the shape is what actually exercised the escape hatch, which correctly refuses a mismatch even when set: "could not check" is negotiable, "checked and it is wrong" is not.
+
+**A watchdog for local-only test assumptions.** Four tests in one week passed here and failed on the runner, each costing a red release and a patch, and none of them a product bug — the suite was green while being wrong. They had one shape: an assumption true on this machine and not on that one.
+
+`scripts/check-test-portability.sh` now refuses the three that bit us — a baseline read out of git (meaningful only until it is committed, and unreachable anyway under a shallow checkout), docker host-gateway networking without a reachability probe (the runner cannot route it, so everything 502s, and checking that Docker *exists* is not a guard because it does), and a wait that resolves on the first result followed by an assertion of several. It runs in the pre-commit hook and in CI beside the other three watchdogs.
+
+It caught its own first bug: `grep -rn` prefixes `file:line:` before the comment marker, so the comment filter never matched and the checker flagged the comments that exist to warn against this exact practice. Mutation-tested in both directions.
+
+Deliberately narrow — every rule is a mistake this repo actually made, not a style opinion.
+
 ## 2.44.1 — The disk-quota test waited for the first mail and asserted two.
 
 `waitFor` returns as soon as its array is non-empty, so the test resumed the moment the owner's alert landed, called `settle()`, and then asserted that both the owner and the platform admin had been mailed. The sends are sequential, so the slower the machine the wider the gap: green on every local run, red on the CI runner, which reported only the owner.

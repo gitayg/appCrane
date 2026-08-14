@@ -35,6 +35,7 @@ cat > "$HOOK_FILE" <<'HOOK'
 set -e
 bash scripts/check-role-patterns.sh --strict
 bash scripts/check-no-shadow-js.sh --strict
+bash scripts/check-test-portability.sh --strict
 HOOK
 
 chmod +x "$HOOK_FILE"
