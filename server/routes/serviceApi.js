@@ -59,6 +59,11 @@ router.post('/email', (req, res) => {
       // defaults to the app's own name — so MarketMind's mail shows
       // "MarketMind <aimi@opswat.com>" with no setup. Only the display name
       // varies; the address is always the platform mailbox.
+      //
+      // v2.44.0: whatever name lands here, the queue renders it as
+      // "<name> via <slug> (AppCrane)" and appends a footer naming the app.
+      // An app can still choose how it presents itself; it can no longer
+      // choose to present itself as somebody else.
       fromName: (typeof fromName === 'string' && fromName.trim()) ? fromName.trim().slice(0, 100) : app.name,
       idempotencyKey,
       source: 'app',
@@ -66,6 +71,12 @@ router.post('/email', (req, res) => {
     log.info(`[service] email queued #${id} for app ${app.slug} → ${to}${deduped ? ' (deduped)' : ''}`);
     res.status(202).json({ queued: true, queue_id: id, deduped: !!deduped });
   } catch (e) {
+    // A send budget exhausted is not a malformed request — 429 tells a
+    // well-behaved app to back off and retry, where 400 tells it to give up.
+    if (e.code === 'EMAIL_RATE_LIMITED') {
+      log.warn(`[service] email rate limit hit by app ${app.slug}`);
+      throw new AppError(e.message, 429, 'EMAIL_RATE_LIMITED');
+    }
     // Validation failures (bad/disallowed recipient, missing fields) → 400.
     throw new AppError(e.message, 400, 'EMAIL_REJECTED');
   }

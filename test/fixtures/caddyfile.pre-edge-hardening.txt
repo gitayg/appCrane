@@ -1,0 +1,446 @@
+# Managed by AppCrane - do not edit manually
+
+import /etc/caddy/sites/*.caddy
+
+crane.example.com {
+    header {
+        ?Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        ?X-Content-Type-Options "nosniff"
+        ?Referrer-Policy "strict-origin-when-cross-origin"
+        ?X-Permitted-Cross-Domain-Policies "none"
+        ?Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+        -X-Powered-By
+        -Server
+    }
+
+    handle /plain-sandbox* {
+        request_header -X-AppCrane-Auth-Mode
+        request_header X-AppCrane-Auth-Mode "authenticated"
+        route {
+            request_header -X-AppCrane-User
+            request_header -X-AppCrane-User-Id
+            request_header -X-AppCrane-User-Email
+            request_header -X-AppCrane-User-Name
+            request_header -X-AppCrane-User-Role
+            request_header -X-AppCrane-App-Role
+            request_header -X-AppCrane-Is-Admin
+            request_header -X-AppCrane-App-Roles
+            forward_auth 127.0.0.1:5001 {
+                uri /api/identity/verify?app=plain&prefix=/plain-sandbox
+                copy_headers X-AppCrane-User X-AppCrane-User-Id X-AppCrane-User-Email X-AppCrane-User-Name X-AppCrane-User-Role X-AppCrane-App-Role X-AppCrane-Is-Admin X-AppCrane-App-Roles
+            }
+            request_header Cookie "(^|;\s*)cc_token=[^;]*" ""
+            request_header Cookie "^;\s*" ""
+        }
+        header Content-Security-Policy "frame-ancestors 'self' https://*.example.com https://example.com"
+        header -X-Frame-Options
+        uri strip_prefix /plain-sandbox
+        reverse_proxy 127.0.0.1:4002
+    }
+
+    handle /plain* {
+        request_header -X-AppCrane-Auth-Mode
+        request_header X-AppCrane-Auth-Mode "authenticated"
+        route {
+            request_header -X-AppCrane-User
+            request_header -X-AppCrane-User-Id
+            request_header -X-AppCrane-User-Email
+            request_header -X-AppCrane-User-Name
+            request_header -X-AppCrane-User-Role
+            request_header -X-AppCrane-App-Role
+            request_header -X-AppCrane-Is-Admin
+            request_header -X-AppCrane-App-Roles
+            forward_auth 127.0.0.1:5001 {
+                uri /api/identity/verify?app=plain&prefix=/plain
+                copy_headers X-AppCrane-User X-AppCrane-User-Id X-AppCrane-User-Email X-AppCrane-User-Name X-AppCrane-User-Role X-AppCrane-App-Role X-AppCrane-Is-Admin X-AppCrane-App-Roles
+            }
+            request_header Cookie "(^|;\s*)cc_token=[^;]*" ""
+            request_header Cookie "^;\s*" ""
+        }
+        header Content-Security-Policy "frame-ancestors 'self' https://*.example.com https://example.com"
+        header -X-Frame-Options
+        uri strip_prefix /plain
+        reverse_proxy 127.0.0.1:4001
+    }
+
+    handle /headless-sandbox* {
+        respond "Not deployed" 503
+    }
+
+    handle /headless* {
+        request_header -X-AppCrane-Auth-Mode
+        request_header X-AppCrane-Auth-Mode "headless"
+        request_header Cookie "(^|;\s*)cc_token=[^;]*" ""
+        request_header Cookie "^;\s*" ""
+        request_header -X-AppCrane-User
+        request_header -X-AppCrane-User-Id
+        request_header -X-AppCrane-User-Email
+        request_header -X-AppCrane-User-Name
+        request_header -X-AppCrane-User-Role
+        request_header -X-AppCrane-App-Role
+        request_header -X-AppCrane-Is-Admin
+        request_header -X-AppCrane-App-Roles
+        header Content-Security-Policy "frame-ancestors 'self' https://*.example.com https://example.com"
+        header -X-Frame-Options
+        uri strip_prefix /headless
+        reverse_proxy 127.0.0.1:4003
+    }
+
+    handle /bypasser-sandbox/ws/runner* {
+        log_skip
+        request_header Cookie "(^|;\s*)cc_token=[^;]*" ""
+        request_header Cookie "^;\s*" ""
+        request_header -X-AppCrane-User
+        request_header -X-AppCrane-User-Id
+        request_header -X-AppCrane-User-Email
+        request_header -X-AppCrane-User-Name
+        request_header -X-AppCrane-User-Role
+        request_header -X-AppCrane-App-Role
+        request_header -X-AppCrane-Is-Admin
+        request_header -X-AppCrane-App-Roles
+        request_header -X-AppCrane-Auth-Mode
+        request_header X-AppCrane-Auth-Mode "bypass"
+        uri strip_prefix /bypasser-sandbox
+        reverse_proxy 127.0.0.1:4006 {
+            flush_interval -1
+            transport http {
+                read_timeout 0
+                write_timeout 0
+            }
+        }
+    }
+
+    handle /bypasser/ws/runner* {
+        log_skip
+        request_header Cookie "(^|;\s*)cc_token=[^;]*" ""
+        request_header Cookie "^;\s*" ""
+        request_header -X-AppCrane-User
+        request_header -X-AppCrane-User-Id
+        request_header -X-AppCrane-User-Email
+        request_header -X-AppCrane-User-Name
+        request_header -X-AppCrane-User-Role
+        request_header -X-AppCrane-App-Role
+        request_header -X-AppCrane-Is-Admin
+        request_header -X-AppCrane-App-Roles
+        request_header -X-AppCrane-Auth-Mode
+        request_header X-AppCrane-Auth-Mode "bypass"
+        uri strip_prefix /bypasser
+        reverse_proxy 127.0.0.1:4005 {
+            flush_interval -1
+            transport http {
+                read_timeout 0
+                write_timeout 0
+            }
+        }
+    }
+
+    handle /bypasser-sandbox* {
+        request_header -X-AppCrane-Auth-Mode
+        request_header X-AppCrane-Auth-Mode "authenticated"
+        route {
+            request_header -X-AppCrane-User
+            request_header -X-AppCrane-User-Id
+            request_header -X-AppCrane-User-Email
+            request_header -X-AppCrane-User-Name
+            request_header -X-AppCrane-User-Role
+            request_header -X-AppCrane-App-Role
+            request_header -X-AppCrane-Is-Admin
+            request_header -X-AppCrane-App-Roles
+            forward_auth 127.0.0.1:5001 {
+                uri /api/identity/verify?app=bypasser&prefix=/bypasser-sandbox
+                copy_headers X-AppCrane-User X-AppCrane-User-Id X-AppCrane-User-Email X-AppCrane-User-Name X-AppCrane-User-Role X-AppCrane-App-Role X-AppCrane-Is-Admin X-AppCrane-App-Roles
+            }
+            request_header Cookie "(^|;\s*)cc_token=[^;]*" ""
+            request_header Cookie "^;\s*" ""
+        }
+        header Content-Security-Policy "frame-ancestors 'self' https://*.example.com https://example.com"
+        header -X-Frame-Options
+        uri strip_prefix /bypasser-sandbox
+        reverse_proxy 127.0.0.1:4006
+    }
+
+    handle /bypasser* {
+        request_header -X-AppCrane-Auth-Mode
+        request_header X-AppCrane-Auth-Mode "authenticated"
+        route {
+            request_header -X-AppCrane-User
+            request_header -X-AppCrane-User-Id
+            request_header -X-AppCrane-User-Email
+            request_header -X-AppCrane-User-Name
+            request_header -X-AppCrane-User-Role
+            request_header -X-AppCrane-App-Role
+            request_header -X-AppCrane-Is-Admin
+            request_header -X-AppCrane-App-Roles
+            forward_auth 127.0.0.1:5001 {
+                uri /api/identity/verify?app=bypasser&prefix=/bypasser
+                copy_headers X-AppCrane-User X-AppCrane-User-Id X-AppCrane-User-Email X-AppCrane-User-Name X-AppCrane-User-Role X-AppCrane-App-Role X-AppCrane-Is-Admin X-AppCrane-App-Roles
+            }
+            request_header Cookie "(^|;\s*)cc_token=[^;]*" ""
+            request_header Cookie "^;\s*" ""
+        }
+        header Content-Security-Policy "frame-ancestors 'self' https://*.example.com https://example.com"
+        header -X-Frame-Options
+        uri strip_prefix /bypasser
+        reverse_proxy 127.0.0.1:4005
+    }
+
+    handle /custom-sandbox* {
+        respond "Not deployed" 503
+    }
+
+    handle /custom* {
+        request_header -X-AppCrane-Auth-Mode
+        request_header X-AppCrane-Auth-Mode "authenticated"
+        route {
+            request_header -X-AppCrane-User
+            request_header -X-AppCrane-User-Id
+            request_header -X-AppCrane-User-Email
+            request_header -X-AppCrane-User-Name
+            request_header -X-AppCrane-User-Role
+            request_header -X-AppCrane-App-Role
+            request_header -X-AppCrane-Is-Admin
+            request_header -X-AppCrane-App-Roles
+            forward_auth 127.0.0.1:5001 {
+                uri /api/identity/verify?app=custom&prefix=/custom
+                copy_headers X-AppCrane-User X-AppCrane-User-Id X-AppCrane-User-Email X-AppCrane-User-Name X-AppCrane-User-Role X-AppCrane-App-Role X-AppCrane-Is-Admin X-AppCrane-App-Roles
+            }
+            request_header Cookie "(^|;\s*)cc_token=[^;]*" ""
+            request_header Cookie "^;\s*" ""
+        }
+        header Content-Security-Policy "frame-ancestors 'self' https://*.example.com https://example.com"
+        header -X-Frame-Options
+        uri strip_prefix /custom
+        reverse_proxy 127.0.0.1:4007
+    }
+
+    handle /framed-sandbox* {
+        request_header -X-AppCrane-Auth-Mode
+        request_header X-AppCrane-Auth-Mode "authenticated"
+        route {
+            request_header -X-AppCrane-User
+            request_header -X-AppCrane-User-Id
+            request_header -X-AppCrane-User-Email
+            request_header -X-AppCrane-User-Name
+            request_header -X-AppCrane-User-Role
+            request_header -X-AppCrane-App-Role
+            request_header -X-AppCrane-Is-Admin
+            request_header -X-AppCrane-App-Roles
+            forward_auth 127.0.0.1:5001 {
+                uri /api/identity/verify?app=framed&prefix=/framed-sandbox
+                copy_headers X-AppCrane-User X-AppCrane-User-Id X-AppCrane-User-Email X-AppCrane-User-Name X-AppCrane-User-Role X-AppCrane-App-Role X-AppCrane-Is-Admin X-AppCrane-App-Roles
+            }
+            request_header Cookie "(^|;\s*)cc_token=[^;]*" ""
+            request_header Cookie "^;\s*" ""
+        }
+        header Content-Security-Policy "frame-ancestors 'self' https://*.example.com https://example.com https://portal.example.com"
+        header -X-Frame-Options
+        uri strip_prefix /framed-sandbox
+        reverse_proxy 127.0.0.1:4010
+    }
+
+    handle /framed* {
+        request_header -X-AppCrane-Auth-Mode
+        request_header X-AppCrane-Auth-Mode "authenticated"
+        route {
+            request_header -X-AppCrane-User
+            request_header -X-AppCrane-User-Id
+            request_header -X-AppCrane-User-Email
+            request_header -X-AppCrane-User-Name
+            request_header -X-AppCrane-User-Role
+            request_header -X-AppCrane-App-Role
+            request_header -X-AppCrane-Is-Admin
+            request_header -X-AppCrane-App-Roles
+            forward_auth 127.0.0.1:5001 {
+                uri /api/identity/verify?app=framed&prefix=/framed
+                copy_headers X-AppCrane-User X-AppCrane-User-Id X-AppCrane-User-Email X-AppCrane-User-Name X-AppCrane-User-Role X-AppCrane-App-Role X-AppCrane-Is-Admin X-AppCrane-App-Roles
+            }
+            request_header Cookie "(^|;\s*)cc_token=[^;]*" ""
+            request_header Cookie "^;\s*" ""
+        }
+        header Content-Security-Policy "frame-ancestors 'self' https://*.example.com https://example.com https://portal.example.com"
+        header -X-Frame-Options
+        uri strip_prefix /framed
+        reverse_proxy 127.0.0.1:4009
+    }
+
+    handle /denied-sandbox* {
+        request_header -X-AppCrane-Auth-Mode
+        request_header X-AppCrane-Auth-Mode "authenticated"
+        route {
+            request_header -X-AppCrane-User
+            request_header -X-AppCrane-User-Id
+            request_header -X-AppCrane-User-Email
+            request_header -X-AppCrane-User-Name
+            request_header -X-AppCrane-User-Role
+            request_header -X-AppCrane-App-Role
+            request_header -X-AppCrane-Is-Admin
+            request_header -X-AppCrane-App-Roles
+            forward_auth 127.0.0.1:5001 {
+                uri /api/identity/verify?app=denied&prefix=/denied-sandbox
+                copy_headers X-AppCrane-User X-AppCrane-User-Id X-AppCrane-User-Email X-AppCrane-User-Name X-AppCrane-User-Role X-AppCrane-App-Role X-AppCrane-Is-Admin X-AppCrane-App-Roles
+            }
+            request_header Cookie "(^|;\s*)cc_token=[^;]*" ""
+            request_header Cookie "^;\s*" ""
+        }
+        header Content-Security-Policy "frame-ancestors 'self' https://*.example.com https://example.com 'none'"
+        header -X-Frame-Options
+        uri strip_prefix /denied-sandbox
+        reverse_proxy 127.0.0.1:4012
+    }
+
+    handle /denied* {
+        request_header -X-AppCrane-Auth-Mode
+        request_header X-AppCrane-Auth-Mode "authenticated"
+        route {
+            request_header -X-AppCrane-User
+            request_header -X-AppCrane-User-Id
+            request_header -X-AppCrane-User-Email
+            request_header -X-AppCrane-User-Name
+            request_header -X-AppCrane-User-Role
+            request_header -X-AppCrane-App-Role
+            request_header -X-AppCrane-Is-Admin
+            request_header -X-AppCrane-App-Roles
+            forward_auth 127.0.0.1:5001 {
+                uri /api/identity/verify?app=denied&prefix=/denied
+                copy_headers X-AppCrane-User X-AppCrane-User-Id X-AppCrane-User-Email X-AppCrane-User-Name X-AppCrane-User-Role X-AppCrane-App-Role X-AppCrane-Is-Admin X-AppCrane-App-Roles
+            }
+            request_header Cookie "(^|;\s*)cc_token=[^;]*" ""
+            request_header Cookie "^;\s*" ""
+        }
+        header Content-Security-Policy "frame-ancestors 'self' https://*.example.com https://example.com 'none'"
+        header -X-Frame-Options
+        uri strip_prefix /denied
+        reverse_proxy 127.0.0.1:4011
+    }
+
+    handle /narrow-sandbox* {
+        request_header -X-AppCrane-Auth-Mode
+        request_header X-AppCrane-Auth-Mode "authenticated"
+        route {
+            request_header -X-AppCrane-User
+            request_header -X-AppCrane-User-Id
+            request_header -X-AppCrane-User-Email
+            request_header -X-AppCrane-User-Name
+            request_header -X-AppCrane-User-Role
+            request_header -X-AppCrane-App-Role
+            request_header -X-AppCrane-Is-Admin
+            request_header -X-AppCrane-App-Roles
+            forward_auth 127.0.0.1:5001 {
+                uri /api/identity/verify?app=narrow&prefix=/narrow-sandbox
+                copy_headers X-AppCrane-User X-AppCrane-User-Id X-AppCrane-User-Email X-AppCrane-User-Name X-AppCrane-User-Role X-AppCrane-App-Role X-AppCrane-Is-Admin X-AppCrane-App-Roles
+            }
+            request_header Cookie "(^|;\s*)cc_token=[^;]*" ""
+            request_header Cookie "^;\s*" ""
+        }
+        header Content-Security-Policy "frame-ancestors 'self' https://*.example.com https://example.com 'none' https://portal.example.com"
+        header -X-Frame-Options
+        uri strip_prefix /narrow-sandbox
+        reverse_proxy 127.0.0.1:4014
+    }
+
+    handle /narrow* {
+        request_header -X-AppCrane-Auth-Mode
+        request_header X-AppCrane-Auth-Mode "authenticated"
+        route {
+            request_header -X-AppCrane-User
+            request_header -X-AppCrane-User-Id
+            request_header -X-AppCrane-User-Email
+            request_header -X-AppCrane-User-Name
+            request_header -X-AppCrane-User-Role
+            request_header -X-AppCrane-App-Role
+            request_header -X-AppCrane-Is-Admin
+            request_header -X-AppCrane-App-Roles
+            forward_auth 127.0.0.1:5001 {
+                uri /api/identity/verify?app=narrow&prefix=/narrow
+                copy_headers X-AppCrane-User X-AppCrane-User-Id X-AppCrane-User-Email X-AppCrane-User-Name X-AppCrane-User-Role X-AppCrane-App-Role X-AppCrane-Is-Admin X-AppCrane-App-Roles
+            }
+            request_header Cookie "(^|;\s*)cc_token=[^;]*" ""
+            request_header Cookie "^;\s*" ""
+        }
+        header Content-Security-Policy "frame-ancestors 'self' https://*.example.com https://example.com 'none' https://portal.example.com"
+        header -X-Frame-Options
+        uri strip_prefix /narrow
+        reverse_proxy 127.0.0.1:4013
+    }
+
+    handle /oldname-sandbox* {
+        redir /aliased-sandbox{uri} permanent
+    }
+
+    handle /oldname* {
+        redir /aliased{uri} permanent
+    }
+
+    handle /aliased-sandbox* {
+        respond "Not deployed" 503
+    }
+
+    handle /aliased* {
+        request_header -X-AppCrane-Auth-Mode
+        request_header X-AppCrane-Auth-Mode "authenticated"
+        route {
+            request_header -X-AppCrane-User
+            request_header -X-AppCrane-User-Id
+            request_header -X-AppCrane-User-Email
+            request_header -X-AppCrane-User-Name
+            request_header -X-AppCrane-User-Role
+            request_header -X-AppCrane-App-Role
+            request_header -X-AppCrane-Is-Admin
+            request_header -X-AppCrane-App-Roles
+            forward_auth 127.0.0.1:5001 {
+                uri /api/identity/verify?app=aliased&prefix=/aliased
+                copy_headers X-AppCrane-User X-AppCrane-User-Id X-AppCrane-User-Email X-AppCrane-User-Name X-AppCrane-User-Role X-AppCrane-App-Role X-AppCrane-Is-Admin X-AppCrane-App-Roles
+            }
+            request_header Cookie "(^|;\s*)cc_token=[^;]*" ""
+            request_header Cookie "^;\s*" ""
+        }
+        header Content-Security-Policy "frame-ancestors 'self' https://*.example.com https://example.com"
+        header -X-Frame-Options
+        uri strip_prefix /aliased
+        reverse_proxy 127.0.0.1:4015
+    }
+
+    handle /undeployed-sandbox* {
+        respond "Not deployed" 503
+    }
+
+    handle /undeployed* {
+        respond "Not deployed" 503
+    }
+
+    handle /api/service* {
+        respond 404
+    }
+
+    handle {
+        reverse_proxy 127.0.0.1:5001
+    }
+
+    handle_errors {
+        @appdown expression `{err.status_code} in [502, 503, 504]`
+        handle @appdown {
+            rewrite * /api/_crashed{uri}
+            reverse_proxy 127.0.0.1:5001
+        }
+    }
+}
+
+custom.test.local {
+    request_header -X-AppCrane-User
+    request_header -X-AppCrane-User-Id
+    request_header -X-AppCrane-User-Email
+    request_header -X-AppCrane-User-Name
+    request_header -X-AppCrane-User-Role
+    request_header -X-AppCrane-App-Role
+    request_header -X-AppCrane-Is-Admin
+    request_header -X-AppCrane-App-Roles
+    request_header -X-AppCrane-Auth-Mode
+    request_header X-AppCrane-Auth-Mode "bypass"
+    request_header Cookie "(^|;\s*)cc_token=[^;]*" ""
+    request_header Cookie "^;\s*" ""
+    reverse_proxy 127.0.0.1:4007
+}
+
+old.test.local {
+    redir https://custom.test.local{uri} permanent
+}

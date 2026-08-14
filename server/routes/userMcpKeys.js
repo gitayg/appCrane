@@ -27,6 +27,22 @@ function requireSession(req, res, next) {
 }
 
 /**
+ * Parse the optional `read_only` flag off a key-issuing body.
+ *
+ * A read-only key still authenticates as its issuer and reaches the same apps —
+ * it just cannot call any MCP tool that changes state (deploy, set secret,
+ * grant roles, push files). That gate lives in the MCP dispatcher; this is only
+ * the switch. Omitted/false keeps the historical all-or-nothing behaviour, so
+ * nothing changes for callers that never send the field.
+ */
+function parseReadOnly(body) {
+  const v = (body || {}).read_only;
+  if (v == null) return 0;
+  if (typeof v !== 'boolean') throw new AppError('read_only must be a boolean', 400, 'VALIDATION');
+  return v ? 1 : 0;
+}
+
+/**
  * Count of apps this user can reach via a personal MCP key. AppCrane global
  * admins see every app; everyone else only sees apps where they're Owner.
  * Mirrors the resolution in mcpTools.js → accessibleSlugsForUser.
@@ -48,7 +64,7 @@ function accessibleAppCount(user) {
 router.get('/me/mcp-keys', requireSession, (req, res) => {
   const db = getDb();
   const keys = db.prepare(`
-    SELECT id, label, created_at, last_used_at, expires_at, revoked_at
+    SELECT id, label, created_at, last_used_at, expires_at, revoked_at, read_only
     FROM user_mcp_keys
     WHERE user_id = ?
     ORDER BY id DESC
@@ -70,18 +86,22 @@ router.post('/me/mcp-keys', requireSession, auditMiddleware('user-mcp-key-create
   if (expires_at && Number.isNaN(Date.parse(expires_at))) {
     throw new AppError('expires_at must be a valid ISO datetime', 400, 'VALIDATION');
   }
+  const readOnly = parseReadOnly(req.body);
 
   const apiKey = generateApiKey('dhk_mcp');
   const keyHash = hashApiKey(apiKey);
   const db = getDb();
   const result = db.prepare(`
-    INSERT INTO user_mcp_keys (user_id, key_hash, label, expires_at)
-    VALUES (?, ?, ?, ?)
-  `).run(req.user.id, keyHash, label || null, expires_at || null);
+    INSERT INTO user_mcp_keys (user_id, key_hash, label, expires_at, read_only)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(req.user.id, keyHash, label || null, expires_at || null, readOnly);
 
-  log.info(`UserMcpKey: created id=${result.lastInsertRowid} user=${req.user.id}`);
+  log.info(`UserMcpKey: created id=${result.lastInsertRowid} user=${req.user.id} read_only=${readOnly}`);
   res.json({
-    key: { id: result.lastInsertRowid, label: label || null, expires_at: expires_at || null },
+    key: {
+      id: result.lastInsertRowid, label: label || null, expires_at: expires_at || null,
+      read_only: readOnly,
+    },
     api_key: apiKey,
     warning: 'Save this API key — it will not be shown again.',
     accessible_app_count: accessibleAppCount(req.user),
@@ -116,6 +136,8 @@ router.post('/users/:id/mcp-keys', requireAdmin, auditMiddleware('user-mcp-key-c
     throw new AppError('expires_at must be a valid ISO datetime', 400, 'VALIDATION');
   }
 
+  const readOnly = parseReadOnly(req.body);
+
   const db = getDb();
   const target = db.prepare('SELECT id, name, email, active FROM users WHERE id = ?').get(targetId);
   if (!target) throw new AppError('User not found', 404, 'NOT_FOUND');
@@ -124,13 +146,16 @@ router.post('/users/:id/mcp-keys', requireAdmin, auditMiddleware('user-mcp-key-c
   const apiKey = generateApiKey('dhk_mcp');
   const keyHash = hashApiKey(apiKey);
   const result = db.prepare(`
-    INSERT INTO user_mcp_keys (user_id, key_hash, label, expires_at)
-    VALUES (?, ?, ?, ?)
-  `).run(targetId, keyHash, label || `issued-by-admin-${req.user.id}`, expires_at || null);
+    INSERT INTO user_mcp_keys (user_id, key_hash, label, expires_at, read_only)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(targetId, keyHash, label || `issued-by-admin-${req.user.id}`, expires_at || null, readOnly);
 
-  log.info(`UserMcpKey: admin id=${req.user.id} issued key id=${result.lastInsertRowid} for user id=${targetId}`);
+  log.info(`UserMcpKey: admin id=${req.user.id} issued key id=${result.lastInsertRowid} for user id=${targetId} read_only=${readOnly}`);
   res.json({
-    key: { id: result.lastInsertRowid, label: label || null, expires_at: expires_at || null },
+    key: {
+      id: result.lastInsertRowid, label: label || null, expires_at: expires_at || null,
+      read_only: readOnly,
+    },
     api_key: apiKey,
     target: { id: target.id, name: target.name, email: target.email },
     warning: 'Save this API key — it will not be shown again. Send it to the user via a secure channel.',
@@ -140,6 +165,11 @@ router.post('/users/:id/mcp-keys', requireAdmin, auditMiddleware('user-mcp-key-c
 /**
  * POST /api/me/mcp-keys/:id/rotate — issue a new plaintext for an existing key,
  * invalidating the old hash. Useful when a key may have leaked.
+ *
+ * Deliberately does not accept `read_only`: rotation replaces the secret, not
+ * the capability. Widening a read-only key to full access has to be a new key,
+ * so "rotate the key I pasted into that agent" can never quietly hand that
+ * agent deploy and secret-write rights.
  */
 router.post('/me/mcp-keys/:id/rotate', requireSession, auditMiddleware('user-mcp-key-rotate'), (req, res) => {
   const keyId = parseInt(req.params.id, 10);
@@ -154,7 +184,7 @@ router.post('/me/mcp-keys/:id/rotate', requireSession, auditMiddleware('user-mcp
 
   log.info(`UserMcpKey: rotated id=${keyId} user=${req.user.id}`);
   res.json({
-    key: { id: keyId, label: existing.label },
+    key: { id: keyId, label: existing.label, read_only: existing.read_only },
     api_key: apiKey,
     warning: 'Save this API key — it will not be shown again. The previous value is now invalid.',
   });

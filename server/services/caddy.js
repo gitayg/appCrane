@@ -74,6 +74,93 @@ function identityStrip(indent) {
   return IDENTITY_HEADERS.map(h => `${indent}request_header -${h}\n`).join('');
 }
 
+/**
+ * Baseline response-header policy for a site AppCrane fronts (v2.35.0).
+ *
+ * AppCrane's own Express routes already set these (server/index.js), but a
+ * PROXIED app response carries only whatever its container emitted — which for a
+ * typical Express app is nothing, plus an X-Powered-By banner. A credentialed WAS
+ * scan flagged exactly that split: /api/* had HSTS and nosniff, /<slug> had
+ * neither. Setting them at the site level covers both AppCrane and every app it
+ * fronts, in one place.
+ *
+ * `?` = set only if absent, so an app that deliberately sets its own value keeps
+ * it and AppCrane's own headers aren't duplicated. `-` strips.
+ *
+ * Deliberately NOT set here: X-Frame-Options. A blanket SAMEORIGIN would break
+ * the per-app embedding built in v2.24.5/v2.25.0 — `frame-ancestors` supersedes
+ * XFO and is emitted per app below, where the policy is actually known. Clearing
+ * a scanner finding by breaking a shipped feature is a bad trade.
+ * Content-Security-Policy is likewise left to each app: forcing a default-src
+ * onto arbitrary customer apps would break them.
+ *
+ * v2.44.0 — module scope, emitted by BOTH site blocks. This shipped inside the
+ * CRANE_DOMAIN block only, so an app with its own custom domain (a separate
+ * `${domain} { … }` site, which inherits nothing) was served with no HSTS, no
+ * nosniff, no referrer policy and its X-Powered-By intact. The apps with their
+ * own hostname — the ones most likely to be handed to someone outside the
+ * platform — were the ones without the platform's baseline. Same fix shape as
+ * IDENTITY_HEADERS and platformCookieStrip: one definition, both sites.
+ */
+const BASELINE_HEADERS =
+  `    header {\n` +
+  `        ?Strict-Transport-Security "max-age=31536000; includeSubDomains"\n` +
+  `        ?X-Content-Type-Options "nosniff"\n` +
+  `        ?Referrer-Policy "strict-origin-when-cross-origin"\n` +
+  `        ?X-Permitted-Cross-Domain-Policies "none"\n` +
+  // Deny the powerful features no AppCrane-hosted app has asked for. Apps that
+  // need one can override, since `?` yields to a value the app already set.
+  `        ?Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=()"\n` +
+  // Server banners: version/stack disclosure, no upside.
+  `        -X-Powered-By\n` +
+  `        -Server\n` +
+  `    }\n`;
+
+/**
+ * Access log for the crane domain, with every query-string value redacted.
+ *
+ * Emitted only when at least one auth-bypass route exists (see emitBypass).
+ * Through v2.43.1 those routes carried a bare `log_skip`: the ONE route class
+ * that deliberately runs no forward_auth was also the one with no request record
+ * at all. The reason was real — a CLI client authenticates itself with a token in
+ * the query string, and an unfiltered access log would park that token in log
+ * storage — but dropping the whole line was the wrong side of the trade, and the
+ * comment on emitBypass has named filtered logging as the intended fix since
+ * v2.7.28.
+ *
+ * Verified against caddy:2 (`caddy adapt` + a live container), not assumed:
+ *   - the filter survives adaptation as
+ *     fields["request>uri"] = {filter: "regexp", regexp: "\\?.*", value: "?redacted"},
+ *     so it is doing something rather than merely parsing;
+ *   - a real request to /<slug>/ws/runner?token=… is logged as
+ *     "uri":"/<slug>/ws/runner?redacted" — record kept, secret gone;
+ *   - Caddy already logs Cookie and Authorization as "REDACTED" on its own, so
+ *     the query string was the only credential channel left to close.
+ *
+ * The WHOLE query string goes, not a named parameter: `query { replace token … }`
+ * needs the parameter name, and the name belongs to the app's own CLI protocol —
+ * AppCrane does not know it and must not guess. Losing query VALUES platform-wide
+ * is a feature here anyway: the SSO handoff puts tokens in URLs too.
+ *
+ * Access logging in Caddy is host-scoped (server.logs.logger_names is keyed by
+ * host), so it cannot be narrowed to just the exempt paths — enabling it for the
+ * bypass route enables it for the whole crane domain. Custom-domain sites are
+ * unaffected: the adapter emits them into `skip_hosts`, so they stay unlogged
+ * (confirmed in the adapted JSON) rather than falling through to an UNFILTERED
+ * default logger.
+ */
+const BYPASS_ACCESS_LOG =
+  `    # Access log with query strings redacted — an auth-bypass path carries its\n` +
+  `    # token in the query, and this domain's log must not become a token store.\n` +
+  `    log {\n` +
+  `        format filter {\n` +
+  `            wrap json\n` +
+  `            fields {\n` +
+  `                request>uri regexp "\\?.*" "?redacted"\n` +
+  `            }\n` +
+  `        }\n` +
+  `    }\n`;
+
 function authMode(indent, mode) {
   return `${indent}request_header -${AUTH_MODE_HEADER}\n` +
          `${indent}request_header ${AUTH_MODE_HEADER} "${mode}"\n`;
@@ -177,35 +264,29 @@ export function generateCaddyfile() {
   }
 
   // ── Baseline security headers for every response on this domain (v2.35.0) ──
-  //
-  // AppCrane's own Express routes already set these (server/index.js), but a
-  // PROXIED app response carries only whatever its container emitted — which
-  // for a typical Express app is nothing, plus an X-Powered-By banner. A
-  // credentialed WAS scan flagged exactly that split: /api/* had HSTS and
-  // nosniff, /<slug> had neither. Setting them at the site level covers both
-  // AppCrane and every app it fronts, in one place.
-  //
-  // `?` = set only if absent, so an app that deliberately sets its own value
-  // keeps it and AppCrane's own headers aren't duplicated. `-` strips.
-  //
-  // Deliberately NOT set here: X-Frame-Options. A blanket SAMEORIGIN would
-  // break the per-app embedding built in v2.24.5/v2.25.0 — `frame-ancestors`
-  // supersedes XFO and is emitted per app below, where the policy is actually
-  // known. Clearing a scanner finding by breaking a shipped feature is a bad
-  // trade. Content-Security-Policy is likewise left to each app: forcing a
-  // default-src onto arbitrary customer apps would break them.
-  caddyfile += `    header {\n`;
-  caddyfile += `        ?Strict-Transport-Security "max-age=31536000; includeSubDomains"\n`;
-  caddyfile += `        ?X-Content-Type-Options "nosniff"\n`;
-  caddyfile += `        ?Referrer-Policy "strict-origin-when-cross-origin"\n`;
-  caddyfile += `        ?X-Permitted-Cross-Domain-Policies "none"\n`;
-  // Deny the powerful features no AppCrane-hosted app has asked for. Apps that
-  // need one can override, since `?` yields to a value the app already set.
-  caddyfile += `        ?Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=()"\n`;
-  // Server banners: version/stack disclosure, no upside.
-  caddyfile += `        -X-Powered-By\n`;
-  caddyfile += `        -Server\n`;
-  caddyfile += `    }\n\n`;
+  // See BASELINE_HEADERS. The custom-domain site blocks below emit the same
+  // constant — a site block inherits nothing from this one.
+  caddyfile += BASELINE_HEADERS + '\n';
+
+  // Auth-bypass routes are parsed here rather than in the app loop because the
+  // answer is needed twice: once to decide whether this site needs the
+  // query-redacting access log (a site-level directive, so it has to be written
+  // above the loop) and once to emit the routes themselves. parseBypassPaths
+  // warns on a bad entry, and parsing twice would log every warning twice.
+  const bypassByApp = new Map();
+  for (const app of apps) {
+    // v2.7.22: a headless app skips forward_auth for everything, so a per-path
+    // exemption on it is meaningless — same rule the loop applied inline before.
+    const paths = app.auth_mode === 'headless' ? [] : parseBypassPaths(app.auth_bypass_paths, e =>
+      log.warn(`[caddy] app ${app.slug}: bad auth_bypass_paths entry — ${e.message} (ignored)`));
+    bypassByApp.set(app.id, paths);
+  }
+  // Only when a bypass route is actually emitted: an env that isn't live gets no
+  // handle block, and an install with no exemptions keeps its current behaviour
+  // (Caddy logs no access lines at all unless a site asks for them).
+  const anyBypassRoute = apps.some(a => bypassByApp.get(a.id).length > 0 &&
+    (liveSet.has(`${a.id}:sandbox`) || liveSet.has(`${a.id}:production`)));
+  if (anyBypassRoute) caddyfile += BYPASS_ACCESS_LOG + '\n';
 
   for (const app of apps) {
     const ports = getPortsForSlot(app.slot);
@@ -227,7 +308,22 @@ export function generateCaddyfile() {
     // default-locked iframe headers from any upstream so embedders listed in
     // the policy can iframe this app. Default (NULL) → no override; any
     // headers from the upstream pass through.
+    //
+    // v2.44.0: mergeAncestors honours the `'none'` opt-out, so an app's value can
+    // now NARROW the platform default instead of only widening it — see
+    // utils/embed.js.
     const fa = mergeAncestors(platformFa, app.frame_ancestors);
+
+    // Emitted identically on the sandbox and production routes below.
+    //
+    // The `-X-Frame-Options` strip is what lets a listed embedder actually frame
+    // the app: an upstream that sends XFO: SAMEORIGIN would otherwise veto the
+    // CSP we just wrote. A deny-everything policy has no embedder to unlock, so
+    // there the strip would only throw away whatever framing protection the app
+    // set for itself on browsers that still honour XFO. Keep it.
+    const embedHeaders = !fa ? '' :
+      `        header Content-Security-Policy "frame-ancestors ${fa}"\n` +
+      (fa === "'none'" ? '' : `        header -X-Frame-Options\n`);
 
     // Sandbox — longer prefix /${slug}-sandbox* wins over /${slug}* via mutual exclusivity.
     // Pass the full prefix on the verify URL so identity.js can reconstruct the
@@ -353,29 +449,27 @@ export function generateCaddyfile() {
     //      request took the exempt path" from "forward_auth is broken",
     //      and so a client cannot claim 'authenticated' on the one route
     //      where nothing verified it.
-    //   2. log_skip suppresses the access log line entirely for these
-    //      paths. The token aghook puts in the query string would
-    //      otherwise sit in Caddy's log storage. Granular query-param
-    //      redaction in Caddy's `log filter` would be cleaner but
-    //      requires syntax that hasn't been verified against this
-    //      install's caddy `adapt`; the app emits a redacted
-    //      connect-log line on its side as the agreed compensating
-    //      control. v2.7.28+ can swap to filtered logging in place.
+    //   2. v2.44.0: these routes ARE access-logged, with the query string
+    //      redacted by BYPASS_ACCESS_LOG above. They used to carry
+    //      `log_skip` — the token aghook puts in the query string would
+    //      otherwise have sat in Caddy's log storage — which left the one
+    //      deliberately-unauthenticated route class as the only one with no
+    //      request record. The filter syntax the old comment could not
+    //      verify has now been checked against caddy:2 end to end; see
+    //      BYPASS_ACCESS_LOG.
     //   3. flush_interval -1 + transport read/write_timeout 0 keep
     //      long-lived idle WS connections from being cut by AppCrane.
     //      Caddy's default global idle_timeout (5m) is far above
     //      aghook's 25s keepalive and is not overridden here.
     // Skipped entirely when the app is headless (whole app is already
     // open) or the env isn't deployed (the parent block already 503's).
-    const bypassPaths = isHeadless ? [] : parseBypassPaths(app.auth_bypass_paths, e =>
-      log.warn(`[caddy] app ${app.slug}: bad auth_bypass_paths entry — ${e.message} (ignored)`));
+    const bypassPaths = bypassByApp.get(app.id);
     // mountPrefix = the per-env path mount, e.g. "/agentclub-sandbox" or
     // "/agentclub". The bypass path P (e.g. "/ws/local-runner") is appended
     // to form the child handle path; the strip_prefix removes the SAME mount
     // so the app sees its native /ws/local-runner.
     const emitBypass = (mountPrefix, bypassPath, port) => {
       caddyfile += `    handle ${mountPrefix}${bypassPath}* {\n`;
-      caddyfile += `        log_skip\n`;
       caddyfile += stripPlatformCookie;
       caddyfile += stripIncoming;
       caddyfile += authMode('        ', 'bypass');
@@ -403,10 +497,7 @@ export function generateCaddyfile() {
       } else {
         caddyfile += emitForwardAuth(`/api/identity/verify?app=${slug}&prefix=/${slug}-sandbox`);
       }
-      if (fa) {
-        caddyfile += `        header Content-Security-Policy "frame-ancestors ${fa}"\n`;
-        caddyfile += `        header -X-Frame-Options\n`;
-      }
+      caddyfile += embedHeaders;
       caddyfile += `        uri strip_prefix /${slug}-sandbox\n`;
       caddyfile += `        reverse_proxy 127.0.0.1:${ports.sand_be}\n`;
     } else {
@@ -424,10 +515,7 @@ export function generateCaddyfile() {
       } else {
         caddyfile += emitForwardAuth(`/api/identity/verify?app=${slug}&prefix=/${slug}`);
       }
-      if (fa) {
-        caddyfile += `        header Content-Security-Policy "frame-ancestors ${fa}"\n`;
-        caddyfile += `        header -X-Frame-Options\n`;
-      }
+      caddyfile += embedHeaders;
       caddyfile += `        uri strip_prefix /${slug}\n`;
       caddyfile += `        reverse_proxy 127.0.0.1:${ports.prod_be}\n`;
     } else {
@@ -498,6 +586,14 @@ export function generateCaddyfile() {
     emittedDomains.add(domain);
     const ports = getPortsForSlot(app.slot);
     caddyfile += `\n${domain} {\n`;
+    // v2.44.0: the same baseline the crane domain gets. A site block inherits
+    // nothing from another site block, so through v2.43.1 an app on its own
+    // hostname was served with no HSTS, no nosniff, no referrer or permissions
+    // policy, and with its container's X-Powered-By banner intact — while the
+    // same app's /<slug> route under CRANE_DOMAIN had all of it. Caddy holds the
+    // TLS cert for this domain (ACME) and serves it over HTTPS, so HSTS is a
+    // true statement about it.
+    caddyfile += BASELINE_HEADERS;
     caddyfile += identityStrip('    ');
     caddyfile += authMode('    ', 'bypass');
     // Belt-and-braces: cc_token is host-only (no Domain attribute), so a browser
