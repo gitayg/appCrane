@@ -15,4 +15,9 @@ studio-web/src/**/*.d.ts
 
 # scip code-index artifacts (emitted by squash/scip indexing) and macOS junk.
 *.typescript.scip
+*.scip
+# Scratch copies the indexer leaves behind, e.g. docs/login.squash_0.js. They
+# land in docs/, which is SERVED, so an accidental commit publishes a stray
+# duplicate of a real page's script.
+*.squash_*.js
 .DS_Store
