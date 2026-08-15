@@ -293,3 +293,49 @@ test('LIVE: a plain http app gets no public binding at all', { skip: skipReason 
   assert.ok(await awaitAnswer(hostPort, /CONTROL/, { send: 'GET / HTTP/1.0\r\n\r\n' }),
     'the ordinary http path stopped serving');
 });
+
+test('LIVE: a publish configured AFTER the container started reads as NOT applied',
+  { skip: skipReason }, async () => {
+    // The apphub incident, reproduced. An app is running as plain http; ingress
+    // is then set to dual. The row now says 0.0.0.0:<port> -> <data port>, and
+    // the container — created before the change — binds nothing. Every read
+    // surface used to report the row as though it described the world.
+    const [hostPort, publicPort] = [await freePort(), await freePort()];
+    const slug = `drift-${SUFFIX}`;
+    const name = await launch({
+      slug, slot: 605, ingress_type: 'http',
+      public_port: null, data_plane_port: null, hostPort,
+    });
+    await awaitAnswer(hostPort, /CONTROL/, { send: 'GET / HTTP/1.0\r\n\r\n' });
+
+    const db = getDb();
+    db.prepare("UPDATE apps SET ingress_type='dual', public_port=?, data_plane_port=8081 WHERE slug=?")
+      .run(publicPort, slug);
+
+    const { publishedPortsBySlug, invalidatePublishedPortsCache } =
+      await import('../server/services/docker.js');
+    const { ingressDrift } = await import('../server/services/ingressDrift.js');
+    invalidatePublishedPortsCache();
+
+    const app = db.prepare('SELECT * FROM apps WHERE slug = ?').get(slug);
+    const observed = (await publishedPortsBySlug())?.get(slug) ?? null;
+    const verdict = ingressDrift(app, observed);
+
+    assert.equal(verdict.applied, false,
+      `${name}: the container binds nothing public, but the publish read as applied`);
+    assert.equal(verdict.drift.state, 'not_applied');
+    assert.equal(await probe(publicPort).then(r => r.connected), false,
+      'the port really is closed — otherwise this test is asserting the wrong thing');
+
+    // And after a recreate — the fix the message tells the operator to run —
+    // the same comparison must flip.
+    await startApp({
+      slug, env: 'production', image: TAG, hostPort,
+      envVars: { DATA_PLANE_PORT: '8081' }, memoryMb: 256, cpus: 0.5,
+    });
+    const after = ingressDrift(app, (await publishedPortsBySlug())?.get(slug) ?? null);
+    assert.equal(after.applied, true, 'a recreate did not make the publish live');
+    assert.equal(after.drift, null);
+    assert.match(await awaitAnswer(publicPort, /DATAPLANE/), /DATAPLANE/,
+      'the port reports as applied but nothing answers on it');
+  });
