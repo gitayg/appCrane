@@ -492,7 +492,7 @@ test('the REST-gate predicate rejects a version that keeps the message but drops
   const NEAR_MISS = `
   if (wantsTypeChange || wantsPortChange || needsAllocation) {
     if (req.user.role !== 'platform_admin') {
-      throw new AppError('Only platform admins can change ingress_type, public_port or data_plane_port', 403, 'FORBIDDEN');
+      throw new AppError('Only platform admins can change ingress_type, public_port, sandbox_public_port or data_plane_port', 403, 'FORBIDDEN');
     }
     if (data_plane_port !== undefined) { updates.data_plane_port = data_plane_port; }
   }`;
@@ -512,7 +512,7 @@ test('the MCP setter refuses before it reads anything, and both doors say the sa
     'before it runs for a global admin, and this handler\'s later steps allocate ports and ' +
     'write columns.');
 
-  const SHARED = 'Only platform admins can change ingress_type, public_port or data_plane_port';
+  const SHARED = 'Only platform admins can change ingress_type, public_port, sandbox_public_port or data_plane_port';
   assert.ok(MCP_SRC.includes(SHARED),
     'the MCP refusal no longer names data_plane_port, so a caller refused for touching it is ' +
     'told the wrong field is the problem');

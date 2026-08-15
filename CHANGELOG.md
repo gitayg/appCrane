@@ -5,6 +5,22 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.46.0 — A published port per environment: sandbox can have its own.
+
+**The raw data plane existed only in production, so the first time anyone spoke the actual protocol to it was after it went live.** `docker.js` refused outright — `if (env !== 'production') return null` — and the reason on record was "one `public_port` per app but two containers, so the second `docker run` dies with 'port is already allocated'". That argues against **one** port on two containers. It never argued against **two different** ports; sandbox was excluded because there was only one number to go round, and the safe way to allocate one number between two containers is to give it to the one with real clients.
+
+There are two numbers now. `public_port` publishes the production container, `sandbox_public_port` publishes the sandbox one, each on its own host port, both able to run at the same time. The container side stays shared — that is a property of the image, and it is the same image in both environments.
+
+**Why a registry table and not a second column.** The single `UNIQUE` index on `apps(public_port)` was quietly doing real work: no two apps could share a host port. A second column cannot express that, because SQLite cannot enforce uniqueness *across* two columns as one value space — app A's sandbox port could equal app B's production port with every constraint satisfied, and the clash would surface as a failed `docker run` partway through a deploy, naming a port that looks unclaimed in the dashboard. `app_host_ports` is keyed **by the port**, so the invariant stays in the schema where it was. The per-environment columns remain as the fast read path and are written in the same transaction; the registry is the authority.
+
+**Rollout is opt-in, deliberately.** No app gains a sandbox port by upgrading, and none is allocated at deploy time. One appears only when a platform admin sets it. A published port has no forward_auth, no TLS from AppCrane, no identity headers and no audit, and the sandbox container runs the least reviewed code on the platform — handing a second one to every publishing app because the schema changed would open doors nobody asked for, at deploy time, when nobody is watching.
+
+Every guard a production publish passes, a sandbox publish passes identically. A dual app whose `data_plane_port` is the control plane publishes nothing in **either** environment — otherwise sandbox would have been a second route to the exposure v2.45.0 exists to prevent, reached by a path the guard tests never look at.
+
+Available in the ingress panel, on `PUT /api/apps/<slug>`, and through `appcrane_set_app_ingress`. Platform admin only, like the rest of ingress.
+
+Thirty-two tests, each verified failing first. Reverting the collision check to the old single-column query turns four cross-environment tests red — including the case a second column would have allowed. Letting a sandbox publish skip the data-plane guard turns the exposure test red. Dropping the registry delete on release turns three red, because the port leaks out of the pool. And against a real Docker daemon: both containers started at once, each answering on its own host port, each keeping its own loopback control plane — the "port is already allocated" failure the old rule existed to avoid, demonstrated not to happen.
+
 ## 2.45.3 — "Configured" and "actually published" are now two different answers.
 
 **AppCrane reported a port mapping that existed nowhere.** `appcrane_get_app_ingress` answered `published_as: 0.0.0.0:8080 -> container:10800` for an app whose container bound nothing at all — and every other read surface agreed, because all of them described the app ROW. Nothing described the running container. The operator who trusted it spent an afternoon on SDP, DNS and firewall rules for a port that was never opened.

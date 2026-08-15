@@ -282,13 +282,23 @@ export async function buildImage({ slug, env, contextDir, commitHash, appBasePat
  * loopback-only and therefore cannot take the port production's clients use.
  */
 function publicPublishTargets(slug, env) {
-  if (env !== 'production') return null;
+  // v2.46.0: sandbox can publish too, on its OWN port. The old rule was
+  // `env !== 'production' -> null`, justified by "one public_port, two
+  // containers, so the second docker run dies with 'port is already
+  // allocated'". That argued against one port on two containers, never against
+  // two different ports — sandbox was excluded because there was only one
+  // number to go round. There are now two, and the registry in migration 076
+  // makes it impossible for them to be equal.
+  //
+  // Still null for anything that is not a publishable environment, so a future
+  // third env cannot start publishing by accident.
+  if (env !== 'production' && env !== 'sandbox') return null;
   const app = getDb()
-    .prepare('SELECT ingress_type, public_port, data_plane_port FROM apps WHERE slug = ?')
+    .prepare('SELECT ingress_type, public_port, sandbox_public_port, data_plane_port FROM apps WHERE slug = ?')
     .get(slug);
-  const host = publicPortForApp(app);
+  const host = publicPortForApp(app, env);
   if (host === null) return null;
-  return { host, container: dataPlanePortForApp(app) };
+  return { host, container: dataPlanePortForApp(app, env) };
 }
 
 export async function startApp({ slug, env, image, hostPort, envVars = {}, volumes = [], memoryMb = 512, cpus = 0.5, addHostGateway = false }) {
@@ -528,15 +538,18 @@ export async function publishedPortsBySlug() {
   }
   try {
     const out = await dockerExec([
-      'ps', '--filter', `label=${APPCRANE_LABEL}`, '--filter', 'label=env=production',
-      '--format', '{{.Label "slug"}}|{{.Ports}}',
+      'ps', '--filter', `label=${APPCRANE_LABEL}`,
+      '--format', '{{.Label "slug"}}|{{.Label "env"}}|{{.Ports}}',
     ]);
     const map = new Map();
     if (!out) return map;
     for (const line of out.split('\n')) {
-      const [slug, ports] = line.split('|');
-      if (!slug) continue;
-      map.set(slug, { publishes: parsePublishedPorts(ports) });
+      const [slug, env, ports] = line.split('|');
+      if (!slug || !env) continue;
+      // Keyed by slug AND env now that both containers can publish. Reporting
+      // only production would leave a sandbox publish invisible to drift — the
+      // same blind spot, one environment over.
+      map.set(`${slug}:${env}`, { publishes: parsePublishedPorts(ports) });
     }
     publishedPortsCache = { at: Date.now(), map };
     return map;

@@ -11,7 +11,7 @@ import log from '../utils/logger.js';
 import { validateBypassPaths } from '../utils/authBypassPaths.js';
 import {
   effectiveIngressType, validateIngressType, publicPortForApp, pendingPortRelease,
-  assignPublicPort, effectiveDataPlanePort, dataPlanePortForApp, validateDataPlanePort,
+  assignPublicPort, releasePublicPort, effectiveDataPlanePort, dataPlanePortForApp, validateDataPlanePort,
   INGRESS_TYPES, CONTROL_PLANE_PORT,
   PUBLIC_PORT_MIN, PUBLIC_PORT_MAX, AUTO_PORT_MIN, AUTO_PORT_MAX,
 } from './tcpIngress.js';
@@ -1738,7 +1738,7 @@ const TOOLS = [
       const { publishedPortsBySlug } = await import('./docker.js');
       const { ingressDrift } = await import('./ingressDrift.js');
       const observedMap = await publishedPortsBySlug();
-      const observed = observedMap ? (observedMap.get(app.slug) ?? null) : null;
+      const observed = observedMap ? (observedMap.get(`${app.slug}:production`) ?? null) : null;
       const { applied, drift } = ingressDrift(app, observed);
       // One string for both publishing types: the filtering story is a property
       // of a Docker publish, not of why the app asked for one.
@@ -1842,6 +1842,12 @@ const TOOLS = [
           maximum: PUBLIC_PORT_MAX,
           description: `HOST port to publish. Only valid with ingress_type='tcp' or 'dual'. Omit to keep the port the app already holds, or to have one allocated from ${AUTO_PORT_MIN}-${AUTO_PORT_MAX}; name one explicitly and it may be anything in ${PUBLIC_PORT_MIN}-${PUBLIC_PORT_MAX}, which is what makes a client fleet already pinned to e.g. 8080 expressible. A port is stored, never derived from the app's slot, so it survives redeploys and renames — clients pinned to it keep working. Two apps cannot hold the same host port.`,
         },
+        sandbox_public_port: {
+          type: ['integer', 'null'],
+          minimum: PUBLIC_PORT_MIN,
+          maximum: PUBLIC_PORT_MAX,
+          description: `HOST port to publish for the SANDBOX container, so a raw data plane can be exercised before it goes live. Opt-in and independent of public_port — omit it and sandbox publishes nothing, exactly as before. Pass null to drop it. Must not equal any port any other app holds in EITHER environment; the registry enforces that. Only valid with ingress_type='tcp' or 'dual'. SECURITY: this is a SECOND unauthenticated door, on the container running your least-reviewed code — it has no forward_auth, no identity headers, no audit and no TLS from AppCrane, and behind SDP it is reachable by everything inside the perimeter.`,
+        },
         data_plane_port: {
           // null is admitted so the ONE way to drop a pinned data plane is
           // expressible here too: flipping a dual app to 'tcp' is refused while
@@ -1862,7 +1868,7 @@ const TOOLS = [
     requiredRole: 'admin',
     handler: async (user, args) => {
       if (user.role !== 'platform_admin') {
-        throw new Error('Only platform admins can change ingress_type, public_port or data_plane_port — publishing a host port bypasses every control AppCrane has.');
+        throw new Error('Only platform admins can change ingress_type, public_port, sandbox_public_port or data_plane_port — publishing a host port bypasses every control AppCrane has.');
       }
       const app = getAppForUser(user, args.slug);
       validateIngressType(args.ingress_type);
@@ -1875,6 +1881,10 @@ const TOOLS = [
       // same thing, and the two could silently disagree. An explicit null is
       // the exception: it CLEARS a pinned data plane, which is what makes the
       // tcp refusal below escapable.
+      if (args.sandbox_public_port !== undefined && args.sandbox_public_port !== null
+          && args.ingress_type === 'http') {
+        throw new Error("sandbox_public_port only applies to an app with ingress_type='tcp' or 'dual'");
+      }
       if (args.data_plane_port !== undefined && args.data_plane_port !== null && args.ingress_type !== 'dual') {
         throw new Error("data_plane_port only applies to an app with ingress_type='dual'");
       }
@@ -1930,6 +1940,7 @@ const TOOLS = [
       const before = {
         ingress_type: effectiveIngressType(app.ingress_type),
         public_port: publicPortForApp(app),
+        sandbox_public_port: publicPortForApp(app, 'sandbox'),
         data_plane_port: effectiveDataPlanePort(app),
         pending_port_release: pendingPortRelease(app),
       };
@@ -1951,7 +1962,15 @@ const TOOLS = [
           db.prepare('UPDATE apps SET data_plane_port = ? WHERE id = ?').run(args.data_plane_port, app.id);
         }
         if (args.ingress_type !== 'http') {
-          assignPublicPort(db, app.id, args.public_port === undefined ? null : args.public_port);
+          assignPublicPort(db, app.id, args.public_port === undefined ? null : args.public_port, 'production');
+        }
+        // Sandbox is OPT-IN and only ever touched when named. An app that never
+        // asks keeps publishing nothing there — a second unauthenticated port
+        // must not appear because an unrelated ingress field was edited.
+        if (args.sandbox_public_port === null) {
+          releasePublicPort(db, app.id, 'sandbox');
+        } else if (args.sandbox_public_port !== undefined) {
+          assignPublicPort(db, app.id, args.sandbox_public_port, 'sandbox');
         }
         // Switching to http deliberately leaves public_port alone. The publish
         // is a `docker run` flag, so the container that is up keeps binding the
@@ -1960,10 +1979,11 @@ const TOOLS = [
         // already allocated" while traffic to it kept reaching the OLD app. The
         // row holds the number as a reservation until docker.js sees the
         // container come back without the publish. See pendingPortRelease().
-        const after = db.prepare('SELECT ingress_type, public_port, data_plane_port FROM apps WHERE id = ?').get(app.id);
+        const after = db.prepare('SELECT ingress_type, public_port, sandbox_public_port, data_plane_port FROM apps WHERE id = ?').get(app.id);
         const out = {
           ingress_type: effectiveIngressType(after.ingress_type),
           public_port: publicPortForApp(after),
+          sandbox_public_port: publicPortForApp(after, 'sandbox'),
           data_plane_port: effectiveDataPlanePort(after),
           pending_port_release: pendingPortRelease(after),
         };

@@ -14,7 +14,7 @@ import { resolveVisibility } from '../utils/appVisibility.js';
 import { pruneGrantsForNonMembers } from '../services/appDefinedRoles.js';
 import {
   effectiveIngressType, publicPortForApp, pendingPortRelease, validateIngressType,
-  assignPublicPort, effectiveDataPlanePort, validateDataPlanePort, CONTROL_PLANE_PORT,
+  assignPublicPort, releasePublicPort, effectiveDataPlanePort, validateDataPlanePort, CONTROL_PLANE_PORT,
 } from '../services/tcpIngress.js';
 
 // v2.42.0: ingress_type and public_port are REPORTED on every app payload, not
@@ -67,6 +67,10 @@ function ingressFields(app, canSeePort = true, observed = undefined) {
   return {
     ingress_type: effectiveIngressType(app.ingress_type),
     public_port: canSeePort ? publicPortForApp(app) : undefined,
+    // v2.46.0. Reported on the same terms as public_port — it is the other
+    // unauthenticated door, so it cannot be less guarded than the one that is
+    // already withheld from the catalog for callers without access.
+    sandbox_public_port: canSeePort ? publicPortForApp(app, 'sandbox') : undefined,
     data_plane_port: canSeePort ? effectiveDataPlanePort(app) : undefined,
     pending_port_release: canSeePort ? pendingPortRelease(app) : undefined,
     ...(drift ? { publish_applied: drift.applied, publish_drift: drift.drift } : {}),
@@ -80,6 +84,7 @@ function ingressAudit(row) {
   return {
     ingress_type: effectiveIngressType(row.ingress_type),
     public_port: publicPortForApp(row),
+    sandbox_public_port: publicPortForApp(row, 'sandbox'),
     data_plane_port: effectiveDataPlanePort(row),
     pending_port_release: pendingPortRelease(row),
   };
@@ -272,7 +277,7 @@ router.get('/', async (req, res) => {
       auth_bypass_paths: parseBypassPathsField(app.auth_bypass_paths),
       auth_mode: effectiveAuthMode(app.auth_mode),
       ...ingressFields(app, userAppRole(app) !== 'none',
-        observedBySlug ? (observedBySlug.get(app.slug) ?? null) : null),
+        observedBySlug ? (observedBySlug.get(`${app.slug}:production`) ?? null) : null),
       has_icon: hasIconFile(app.slug),
       // Boolean flags derived from secret-bearing columns so the UI can
       // show "this app has its own X" without ever shipping the secret.
@@ -465,7 +470,7 @@ router.get('/:slug', requireAppAccess, async (req, res) => {
   // ingressDrift reports as UNKNOWN rather than as closed.
   const { publishedPortsBySlug } = await import('../services/docker.js');
   const observedMap = await publishedPortsBySlug();
-  const observedDetail = observedMap ? (observedMap.get(app.slug) ?? null) : null;
+  const observedDetail = observedMap ? (observedMap.get(`${app.slug}:production`) ?? null) : null;
 
   res.json({
     app: { ...app, resource_limits: JSON.parse(app.resource_limits || '{}'), auth_bypass_paths: parseBypassPathsField(app.auth_bypass_paths), auth_mode: effectiveAuthMode(app.auth_mode), ...ingressFields(app, true, observedDetail) },
@@ -529,7 +534,7 @@ router.get('/:slug/storage', requireAppAccess, async (req, res) => {
 router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req, res) => {
   const db = getDb();
   const app = req.app;
-  const { name, domain, description, category, source_type, github_url, branch, github_token, max_ram_mb, max_cpu_percent, public_access, visibility, image_retention, frame_ancestors, auth_mode, auth_bypass_paths, email_from_name, ingress_type, public_port, data_plane_port } = req.body;
+  const { name, domain, description, category, source_type, github_url, branch, github_token, max_ram_mb, max_cpu_percent, public_access, visibility, image_retention, frame_ancestors, auth_mode, auth_bypass_paths, email_from_name, ingress_type, public_port, sandbox_public_port, data_plane_port } = req.body;
 
   // Configurable RBAC: changes to repo-related fields gated by code.modify_repo_settings.
   // Other fields (name, description, category, visibility, etc.) stay open to any
@@ -799,6 +804,11 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
   const wantsTypeChange = ingress_type !== undefined && ingress_type !== currentType;
   const wantsPortChange = public_port !== undefined && public_port !== currentPort;
   const wantsDataPlaneChange = data_plane_port !== undefined && data_plane_port !== currentDataPlanePort;
+  // v2.46.0. Same change-not-presence rule as the others, so a read-modify-write
+  // client echoing back the value it was handed is not treated as a change.
+  const currentSandboxPort = publicPortForApp(app, 'sandbox');
+  const wantsSandboxPortChange = sandbox_public_port !== undefined
+    && sandbox_public_port !== currentSandboxPort;
   // A publishing app with no port allocated publishes nothing, so re-sending
   // the same ingress_type has to be able to finish the job rather than read as
   // "no change".
@@ -806,9 +816,9 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
     && currentType !== 'http' && currentPort === null;
 
   let ingressWork = null;
-  if (wantsTypeChange || wantsPortChange || wantsDataPlaneChange || needsAllocation) {
+  if (wantsTypeChange || wantsPortChange || wantsDataPlaneChange || wantsSandboxPortChange || needsAllocation) {
     if (req.user.role !== 'platform_admin') {
-      throw new AppError('Only platform admins can change ingress_type, public_port or data_plane_port', 403, 'FORBIDDEN');
+      throw new AppError('Only platform admins can change ingress_type, public_port, sandbox_public_port or data_plane_port', 403, 'FORBIDDEN');
     }
     let nextType = currentType;
     if (ingress_type !== undefined) {
@@ -816,6 +826,10 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
       catch (e) { throw new AppError(e.message, e.status || 400, e.code || 'VALIDATION'); }
       nextType = ingress_type;
       updates.ingress_type = ingress_type;
+    }
+    if (sandbox_public_port !== undefined && sandbox_public_port !== null && nextType === 'http') {
+      throw new AppError(
+        "sandbox_public_port only applies to an app with ingress_type='tcp' or 'dual'", 400, 'VALIDATION');
     }
     if (public_port !== undefined) {
       if (nextType === 'http') {
@@ -910,7 +924,14 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
       // port set picks one. An already-allocated port is returned untouched,
       // which is how it survives redeploys and slot changes — nothing else
       // recomputes it.
-      ingressWork = { kind: 'assign', requested: public_port === undefined ? null : public_port };
+      ingressWork = {
+        kind: 'assign',
+        requested: public_port === undefined ? null : public_port,
+        // v2.46.0. `undefined` means "leave sandbox exactly as it is" — a
+        // sandbox port is opt-in and must never appear because some other
+        // ingress field was edited. `null` explicitly drops it.
+        sandbox: sandbox_public_port,
+      };
     } else {
       // Flipping to http stops the PUBLISH and nothing else. It deliberately
       // does not free the port number: the publish is a `docker run` flag, so
@@ -966,9 +987,18 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
 
     const before = ingressAudit(app);
     if (ingressWork.kind === 'assign') {
-      assignPublicPort(db, app.id, ingressWork.requested);
+      assignPublicPort(db, app.id, ingressWork.requested, 'production');
+      // Only when named. Opt-in is the whole rollout policy: a published port
+      // has no forward_auth, no TLS from AppCrane, no identity headers and no
+      // audit, so one must not appear on a container because an unrelated
+      // ingress field was edited.
+      if (ingressWork.sandbox === null) {
+        releasePublicPort(db, app.id, 'sandbox');
+      } else if (ingressWork.sandbox !== undefined) {
+        assignPublicPort(db, app.id, ingressWork.sandbox, 'sandbox');
+      }
     }
-    const after = db.prepare('SELECT ingress_type, public_port, data_plane_port FROM apps WHERE id = ?').get(app.id);
+    const after = db.prepare('SELECT ingress_type, public_port, sandbox_public_port, data_plane_port FROM apps WHERE id = ?').get(app.id);
     // Audited on its own action, not folded into the generic 'app-update'
     // entry: "a port was opened on the host" is the one change here an
     // operator reviewing the log must be able to find by name.

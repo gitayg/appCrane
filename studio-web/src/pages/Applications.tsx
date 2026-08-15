@@ -36,6 +36,9 @@ interface App {
   // the same container (data_plane_port) is published raw at public_port.
   ingress_type?: 'http' | 'tcp' | 'dual'
   public_port?: number | null
+  // v2.46.0: the SANDBOX container's own host port. Independent of public_port
+  // and opt-in — null means sandbox publishes nothing, as it always did.
+  sandbox_public_port?: number | null
   // The CONTAINER side of a dual app's raw publish. Null on every other type —
   // a pure-tcp app publishes the whole container, so it has no second number.
   data_plane_port?: number | null
@@ -308,7 +311,7 @@ export function Applications() {
   // they can't change it, because it tells them their app is reachable on a
   // port that AppCrane does not guard.
   const [ingressApp, setIngressApp] = useState<App | null>(null)
-  const [ingressDraft, setIngressDraft] = useState<{ type: IngressType; port: string; dataPort: string }>({ type: 'http', port: '', dataPort: '' })
+  const [ingressDraft, setIngressDraft] = useState<{ type: IngressType; port: string; dataPort: string; sandboxPort: string }>({ type: 'http', port: '', dataPort: '', sandboxPort: '' })
   const [ingressBusy, setIngressBusy] = useState(false)
   // v2.7.24: client-side filter for the per-app Users modal (name / email).
   // Resets to empty on every close so opening another app doesn't carry over.
@@ -701,8 +704,8 @@ export function Applications() {
   // the server refuses it on any other type, because a pure-tcp app publishes
   // the whole container and a second number there would be a second way to say
   // the same thing.
-  async function saveIngress(app: App, type: IngressType, portRaw: string, dataPortRaw: string) {
-    const body: { ingress_type: IngressType; public_port?: number; data_plane_port?: number | null } = { ingress_type: type }
+  async function saveIngress(app: App, type: IngressType, portRaw: string, dataPortRaw: string, sandboxPortRaw: string) {
+    const body: { ingress_type: IngressType; public_port?: number; sandbox_public_port?: number | null; data_plane_port?: number | null } = { ingress_type: type }
     // Leaving 'dual' DROPS the data plane, and the server refuses the flip
     // unless the request says so. That refusal exists because 'tcp' publishes
     // container port 3000: without an explicit null, flipping a dual app to tcp
@@ -733,6 +736,26 @@ export function Applications() {
       }
       body.data_plane_port = n
     }
+    // v2.46.0: the sandbox container's own host port. Sent ONLY when the field
+    // changed — omitted means "leave sandbox alone", and an empty box on an app
+    // that has one means drop it. A second published port is a second door with
+    // no forward_auth, so it must never appear as a side effect of editing
+    // something else in this panel.
+    const sandboxRaw = sandboxPortRaw.trim()
+    const currentSandbox = app.sandbox_public_port ?? null
+    if (publishesPort(type)) {
+      if (!sandboxRaw && currentSandbox !== null) {
+        body.sandbox_public_port = null
+      } else if (sandboxRaw) {
+        const n = parseInt(sandboxRaw, 10)
+        if (!Number.isFinite(n) || n < PUBLIC_PORT_MIN || n > PUBLIC_PORT_MAX) {
+          alert(`Sandbox port must be a number between ${PUBLIC_PORT_MIN} and ${PUBLIC_PORT_MAX}.`); return
+        }
+        if (n !== currentSandbox) body.sandbox_public_port = n
+      }
+    } else if (currentSandbox !== null) {
+      body.sandbox_public_port = null
+    }
     setIngressBusy(true)
     try {
       const r = await adminApi.put<{ app?: App; error?: { message?: string } }>(`/api/apps/${app.slug}`, body)
@@ -741,6 +764,7 @@ export function Applications() {
         ingress_type: r?.app?.ingress_type ?? type,
         public_port: r?.app?.public_port ?? null,
         data_plane_port: r?.app?.data_plane_port ?? null,
+        sandbox_public_port: r?.app?.sandbox_public_port ?? null,
         pending_port_release: r?.app?.pending_port_release ?? null,
       }
       setApps(prev => prev.map(a => a.slug === app.slug ? { ...a, ...next } : a))
@@ -749,6 +773,7 @@ export function Applications() {
         type: next.ingress_type,
         port: next.public_port ? String(next.public_port) : '',
         dataPort: next.data_plane_port ? String(next.data_plane_port) : '',
+        sandboxPort: next.sandbox_public_port ? String(next.sandbox_public_port) : '',
       })
     } catch (e) {
       alert('Failed: ' + (e as Error).message)
@@ -762,6 +787,7 @@ export function Applications() {
       type: publishesPort(app.ingress_type) ? app.ingress_type as IngressType : 'http',
       port: app.public_port ? String(app.public_port) : '',
       dataPort: app.data_plane_port ? String(app.data_plane_port) : '',
+      sandboxPort: app.sandbox_public_port ? String(app.sandbox_public_port) : '',
     })
     setIngressApp(app)
   }
@@ -1896,6 +1922,8 @@ STEP 3 - In any terminal run \`claude\`, then paste:
         const dirty = ingressDraft.type !== curType
           || (publishesPort(ingressDraft.type) && ingressDraft.port.trim() !== String(app.public_port ?? ''))
           || (ingressDraft.type === 'dual' && ingressDraft.dataPort.trim() !== String(app.data_plane_port ?? ''))
+          || (publishesPort(ingressDraft.type)
+              && ingressDraft.sandboxPort.trim() !== String(app.sandbox_public_port ?? ''))
         return (
           <div
             style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.55)', zIndex: 10500, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
@@ -2099,6 +2127,31 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                         </span>
                       </label>
                     )}
+                    {/* v2.46.0: the SANDBOX container's own host port. Optional
+                        and independent — leave it blank and sandbox publishes
+                        nothing, exactly as it always did. It exists so a raw
+                        data plane can be exercised before it goes live, which
+                        was impossible when the publish was production-only. */}
+                    {publishesPort(ingressDraft.type) && (
+                      <label style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                        Sandbox host port <span style={{ color: 'var(--dim)', fontSize: '.75rem' }}>(optional)</span>
+                        <input
+                          className="editable" type="number" min={PUBLIC_PORT_MIN} max={PUBLIC_PORT_MAX}
+                          aria-label={`Sandbox public port for ${app.name}`}
+                          value={ingressDraft.sandboxPort}
+                          placeholder="none"
+                          onChange={e => setIngressDraft(d => ({ ...d, sandboxPort: e.target.value }))}
+                          style={{ width: 110, fontFamily: 'monospace' }}
+                        />
+                        <span style={{ color: 'var(--dim)', fontSize: '.75rem' }}>
+                          Publishes the SANDBOX container on its own host port, so the raw plane can be tried
+                          before it is promoted. Must differ from every port any app holds in either
+                          environment. Leave blank and sandbox publishes nothing. This is a SECOND door with no
+                          sign-in, no TLS from AppCrane and no audit — on the container running your least
+                          reviewed code.
+                        </span>
+                      </label>
+                    )}
                     {ingressDraft.type === 'tcp' && !isTcp && (
                       <p style={{ margin: 0, color: 'var(--red, #ef4444)', fontSize: '.8rem' }}>
                         Switching to tcp opens a host port for this app. It will be reachable with no AppCrane
@@ -2142,7 +2195,7 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                             && !confirm(`Publish "${app.name}" on a raw TCP port?\n\nThe port is NOT behind AppCrane authentication. The app owns authn entirely.`)) return
                           if (ingressDraft.type === 'dual' && !isDual
                             && !confirm(`Publish a raw data plane for "${app.name}"?\n\nHost port ${ingressDraft.port.trim() || '(auto)'} will reach container port ${ingressDraft.dataPort.trim() || '(unset)'} directly. That port is NOT behind AppCrane authentication — the app owns authn on it entirely. The HTTP control plane on container port ${CONTROL_PLANE_PORT} stays behind Caddy, unchanged.`)) return
-                          saveIngress(app, ingressDraft.type, ingressDraft.port, ingressDraft.dataPort)
+                          saveIngress(app, ingressDraft.type, ingressDraft.port, ingressDraft.dataPort, ingressDraft.sandboxPort)
                         }}
                       >{ingressBusy ? 'Saving…' : 'Save'}</button>
                     </div>

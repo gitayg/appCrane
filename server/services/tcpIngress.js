@@ -101,6 +101,31 @@ export const CONTROL_PLANE_PORT = 3000;
  */
 export const INGRESS_TYPES = ['http', 'tcp', 'dual'];
 
+// v2.46.0: a published host port per environment. `env` is validated here
+// rather than by a CHECK constraint, following ingress_type's precedent — see
+// migration 076.
+export const PUBLISHABLE_ENVS = ['production', 'sandbox'];
+
+// The column mirroring the registry for each environment. The registry
+// (app_host_ports) owns the invariant "one owner per host port, across every
+// app and environment"; these columns are the fast read path, so a caller
+// holding an app row does not need a query. Both are written in one
+// transaction by assignPublicPort/releasePublicPort, which are the only writers.
+const PORT_COLUMN = { production: 'public_port', sandbox: 'sandbox_public_port' };
+
+export function assertPublishableEnv(env) {
+  if (!PUBLISHABLE_ENVS.includes(env)) {
+    throw fail(`env must be one of ${PUBLISHABLE_ENVS.join(', ')}`, 400, 'VALIDATION');
+  }
+  return env;
+}
+
+/** The column name for an environment — throws rather than returning undefined. */
+function portColumn(env) {
+  assertPublishableEnv(env);
+  return PORT_COLUMN[env];
+}
+
 /**
  * How far past the highest allocated slot we still treat getPortsForSlot()
  * output as reserved. Mirrors getNextSlot()'s 1000-candidate scan: those are
@@ -164,16 +189,22 @@ export function publishesPublicPort(app) {
  *    this is the same guard at the runtime edge, for a row that got there some
  *    other way.
  */
-function publishTargets(app) {
+function publishTargets(app, env = 'production') {
   if (!publishesPublicPort(app)) return null;
-  if (!Number.isInteger(app?.public_port)) return null;
+  // v2.46.0: which number is read depends on the environment, but every OTHER
+  // rule is shared — the ingress type must publish, and a dual app's container
+  // side must be a real port that is not the control plane. A sandbox publish
+  // that skipped those checks would be a second way to expose the HTTP origin
+  // raw, reached by a code path the guard tests never look at.
+  const host = env === 'sandbox' ? app?.sandbox_public_port : app?.public_port;
+  if (!Number.isInteger(host)) return null;
   // A pure-tcp app has no control plane to protect: the container is told
   // PORT=3000 and the whole of it is the data plane, so the publish targets
   // CONTROL_PLANE_PORT exactly as it did in v2.42.0.
-  if (isTcpApp(app)) return { host: app.public_port, container: CONTROL_PLANE_PORT };
+  if (isTcpApp(app)) return { host, container: CONTROL_PLANE_PORT };
   const container = effectiveDataPlanePort(app);
   if (container === null || container === CONTROL_PLANE_PORT) return null;
-  return { host: app.public_port, container };
+  return { host, container };
 }
 
 /**
@@ -187,8 +218,8 @@ function publishTargets(app) {
  * publicPortForApp() must take the container side from dataPlanePortForApp()
  * rather than assuming CONTROL_PLANE_PORT.
  */
-export function publicPortForApp(app) {
-  return publishTargets(app)?.host ?? null;
+export function publicPortForApp(app, env = 'production') {
+  return publishTargets(app, env)?.host ?? null;
 }
 
 /**
@@ -196,8 +227,8 @@ export function publicPortForApp(app) {
  * publishes nothing. CONTROL_PLANE_PORT for a pure-tcp app, the app's own
  * data_plane_port for a dual one.
  */
-export function dataPlanePortForApp(app) {
-  return publishTargets(app)?.container ?? null;
+export function dataPlanePortForApp(app, env = 'production') {
+  return publishTargets(app, env)?.container ?? null;
 }
 
 /**
@@ -360,7 +391,8 @@ export function slotPortConflict(db, port) {
  * Throw unless `port` is a legal public port for this app. Callers that hand
  * an operator-chosen port straight to the database go through here first.
  */
-export function assertPublicPortAssignable(db, port, appId) {
+export function assertPublicPortAssignable(db, port, appId, env = 'production') {
+  assertPublishableEnv(env);
   if (!Number.isInteger(port)) {
     throw fail('public_port must be an integer', 400, 'VALIDATION');
   }
@@ -383,9 +415,21 @@ export function assertPublicPortAssignable(db, port, appId) {
   if (slotClash) {
     throw fail(`Port ${port} is reserved for app slot ${slotClash.slot} (${slotClash.key})`, 409, 'PORT_RESERVED');
   }
-  const taken = db.prepare('SELECT slug FROM apps WHERE public_port = ? AND id != ?').get(port, appId);
+  // v2.46.0: asked of the REGISTRY rather than of apps.public_port, because the
+  // question is now "does anything own this port" across every app AND every
+  // environment. Checking a single column would let app A's sandbox port equal
+  // app B's production port with every constraint satisfied, and the collision
+  // would surface as a failed `docker run` mid-deploy naming a port that looks
+  // unclaimed in the dashboard.
+  const taken = db.prepare(`
+    SELECT a.slug, p.env FROM app_host_ports p
+    JOIN apps a ON a.id = p.app_id
+    WHERE p.host_port = ? AND NOT (p.app_id = ? AND p.env = ?)
+  `).get(port, appId, env);
   if (taken) {
-    throw fail(`Port ${port} is already published by app "${taken.slug}"`, 409, 'PORT_TAKEN');
+    throw fail(
+      `Port ${port} is already published by app "${taken.slug}" (${taken.env})`,
+      409, 'PORT_TAKEN');
   }
   return port;
 }
@@ -395,13 +439,13 @@ export function assertPublicPortAssignable(db, port, appId) {
  * predictable, so an operator reading `ss -lntp` can tell at a glance which
  * ports are in play.
  */
-export function allocatePublicPort(db, appId) {
+export function allocatePublicPort(db, appId, env = 'production') {
   // The AUTO band, not the full assignable range: an allocated port should land
   // in the predictable block an operator has already opened. Naming a port
   // outside it is an explicit act, and stays one.
   for (let port = AUTO_PORT_MIN; port <= AUTO_PORT_MAX; port++) {
     try {
-      assertPublicPortAssignable(db, port, appId);
+      assertPublicPortAssignable(db, port, appId, env);
       return port;
     } catch (_) {
       continue;
@@ -425,13 +469,24 @@ export function allocatePublicPort(db, appId) {
  * write that claims it cannot interleave with a second admin doing the same;
  * the partial unique index is the backstop if they somehow do.
  */
-export function assignPublicPort(db, appId, requested = null) {
+export function assignPublicPort(db, appId, requested = null, env = 'production') {
+  const col = portColumn(env);
+  // Registry and column are written together, always, by this function and
+  // releasePublicPort — nothing else touches either. The registry carries the
+  // invariant; the column is the read path that keeps /api/apps from querying
+  // once per app.
+  const claim = (port) => {
+    db.prepare('DELETE FROM app_host_ports WHERE app_id = ? AND env = ?').run(appId, env);
+    db.prepare('INSERT INTO app_host_ports (host_port, app_id, env) VALUES (?, ?, ?)')
+      .run(port, appId, env);
+    db.prepare(`UPDATE apps SET ${col} = ? WHERE id = ?`).run(port, appId);
+  };
   return db.transaction(() => {
-    const row = db.prepare('SELECT public_port, ingress_type FROM apps WHERE id = ?').get(appId);
+    const row = db.prepare(`SELECT ${col} AS held, ingress_type FROM apps WHERE id = ?`).get(appId);
     if (requested === null) {
-      if (Number.isInteger(row?.public_port)) return row.public_port;
-      const port = allocatePublicPort(db, appId);
-      db.prepare('UPDATE apps SET public_port = ? WHERE id = ?').run(port, appId);
+      if (Number.isInteger(row?.held)) return row.held;
+      const port = allocatePublicPort(db, appId, env);
+      claim(port);
       return port;
     }
     // Changing an app from one port to another is refused while it still holds
@@ -452,21 +507,25 @@ export function assignPublicPort(db, appId, requested = null) {
     // allocated but never deployed is bound by nothing, so re-pinning before
     // the first deploy — "I just enabled tcp, now set the number I want" — is
     // both safe and the common case.
-    const held = row?.public_port;
+    const held = row?.held;
+    // Asked per environment: a live PRODUCTION deployment does not mean the
+    // sandbox container is bound to the sandbox port, and refusing a sandbox
+    // re-pin because production happens to be up would block the case this
+    // feature exists for — trying a port in sandbox before committing to it.
     const published = Number.isInteger(held) && publishesPublicPort(row)
       && !!db.prepare(
-        "SELECT 1 FROM deployments WHERE app_id = ? AND env = 'production' AND status = 'live' LIMIT 1"
-      ).get(appId);
+        'SELECT 1 FROM deployments WHERE app_id = ? AND env = ? AND status = \'live\' LIMIT 1'
+      ).get(appId, env);
     if (published && held !== requested) {
       const e = new Error(
-        `This app still holds port ${held}. Set ingress_type='http' and redeploy to stop ` +
+        `This app still holds port ${held} in ${env}. Set ingress_type='http' and redeploy to stop ` +
         `publishing it before pinning ${requested} — otherwise ${held} returns to the pool ` +
         `while the running container is still bound to it.`);
       e.status = 409; e.code = 'PORT_STILL_HELD';
       throw e;
     }
-    assertPublicPortAssignable(db, requested, appId);
-    db.prepare('UPDATE apps SET public_port = ? WHERE id = ?').run(requested, appId);
+    assertPublicPortAssignable(db, requested, appId, env);
+    claim(requested);
     return requested;
   })();
 }
@@ -480,8 +539,12 @@ export function assignPublicPort(db, appId, requested = null) {
  * knows when using it is safe. Deleting an app needs no call here: the row
  * goes, and the partial unique index only covers rows that exist.
  */
-export function releasePublicPort(db, appId) {
-  db.prepare('UPDATE apps SET public_port = NULL WHERE id = ?').run(appId);
+export function releasePublicPort(db, appId, env = 'production') {
+  const col = portColumn(env);
+  db.transaction(() => {
+    db.prepare('DELETE FROM app_host_ports WHERE app_id = ? AND env = ?').run(appId, env);
+    db.prepare(`UPDATE apps SET ${col} = NULL WHERE id = ?`).run(appId);
+  })();
 }
 
 /**

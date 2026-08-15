@@ -80,7 +80,7 @@ after(() => { /* temp dir is disposable */ });
 test('a publish the container does not carry is NOT LIVE, in published_as itself', async () => {
   // The container is up and binds only its loopback control plane — the apphub
   // state exactly.
-  dockerReports(`${SLUG}|127.0.0.1:4013->3000/tcp\n`);
+  dockerReports(`${SLUG}|production|127.0.0.1:4013->3000/tcp\n`);
   const out = await read();
 
   assert.equal(out.publish_applied, false);
@@ -93,7 +93,7 @@ test('a publish the container does not carry is NOT LIVE, in published_as itself
 });
 
 test('a publish the container DOES carry leaves published_as clean', async () => {
-  dockerReports(`${SLUG}|127.0.0.1:4013->3000/tcp, 0.0.0.0:${HOST_PORT}->${DATA_PORT}/tcp\n`);
+  dockerReports(`${SLUG}|production|127.0.0.1:4013->3000/tcp, 0.0.0.0:${HOST_PORT}->${DATA_PORT}/tcp\n`);
   const out = await read();
 
   assert.equal(out.publish_applied, true);
@@ -114,7 +114,7 @@ test('an unreadable daemon is unknown — published_as stays clean and applied i
 });
 
 test('a container publishing the OLD port is reported as stale, with both numbers', async () => {
-  dockerReports(`${SLUG}|127.0.0.1:4013->3000/tcp, 0.0.0.0:9999->${DATA_PORT}/tcp\n`);
+  dockerReports(`${SLUG}|production|127.0.0.1:4013->3000/tcp, 0.0.0.0:9999->${DATA_PORT}/tcp\n`);
   const out = await read();
 
   assert.equal(out.publish_applied, false);
