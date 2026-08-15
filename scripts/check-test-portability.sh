@@ -41,7 +41,7 @@ report() {            # report <heading> <body>
 # The comment filter has to strip grep's own "file:line:" prefix first — without
 # that, `^\s*//` never matches and the checker flags the comments that exist to
 # warn against this exact practice. (It did, on its first run.)
-git_baselines=$(grep -rnE "git['\"],\s*\[['\"]show|git show [A-Za-z0-9_^~-]+:" test/ 2>/dev/null \
+git_baselines=$(grep -rInE "git['\"],\s*\[['\"]show|git show [A-Za-z0-9_^~-]+:" test/ 2>/dev/null \
   | grep -vE '^[^:]+:[0-9]+:[[:space:]]*(//|\*|/\*)' \
   | grep -v 'check-test-portability' || true)
 if [[ -n "$git_baselines" ]]; then
@@ -51,7 +51,7 @@ if [[ -n "$git_baselines" ]]; then
 fi
 
 # --- 2. host-gateway without a reachability guard -----------------------------
-for f in $(grep -rlE 'host-gateway' test/ 2>/dev/null || true); do
+for f in $(grep -rIlE 'host-gateway' test/ 2>/dev/null || true); do
   # A guard is any skip/probe that reacts to the container failing to reach the
   # host, rather than to docker being absent.
   if ! grep -qE 'skip|probe|reach|502' "$f"; then

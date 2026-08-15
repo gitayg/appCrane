@@ -13,7 +13,7 @@ import { resolveVisibility } from '../utils/appVisibility.js';
 import { pruneGrantsForNonMembers } from '../services/appDefinedRoles.js';
 import {
   effectiveIngressType, publicPortForApp, pendingPortRelease, validateIngressType,
-  assignPublicPort,
+  assignPublicPort, effectiveDataPlanePort, validateDataPlanePort, CONTROL_PLANE_PORT,
 } from '../services/tcpIngress.js';
 
 // v2.42.0: ingress_type and public_port are REPORTED on every app payload, not
@@ -43,10 +43,18 @@ import {
 // null, and the next `docker run` will carry no public -p), yet the container
 // that is running right now still binds the port. Reporting only public_port
 // would tell an operator a port is closed while it is open.
+//
+// v2.45.0: data_plane_port joins them on the same terms. It is the CONTAINER
+// side of a dual app's publish, so on its own it reaches nothing — but it is
+// half of "0.0.0.0:<public_port> goes to <data_plane_port>", and withholding
+// the pair together is simpler to reason about than deciding which half is the
+// secret. Reported EFFECTIVE, so a number left over from a previous dual
+// configuration reads as null on an app that is no longer dual.
 function ingressFields(app, canSeePort = true) {
   return {
     ingress_type: effectiveIngressType(app.ingress_type),
     public_port: canSeePort ? publicPortForApp(app) : undefined,
+    data_plane_port: canSeePort ? effectiveDataPlanePort(app) : undefined,
     pending_port_release: canSeePort ? pendingPortRelease(app) : undefined,
   };
 }
@@ -58,6 +66,7 @@ function ingressAudit(row) {
   return {
     ingress_type: effectiveIngressType(row.ingress_type),
     public_port: publicPortForApp(row),
+    data_plane_port: effectiveDataPlanePort(row),
     pending_port_release: pendingPortRelease(row),
   };
 }
@@ -490,7 +499,7 @@ router.get('/:slug/storage', requireAppAccess, async (req, res) => {
 router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req, res) => {
   const db = getDb();
   const app = req.app;
-  const { name, domain, description, category, source_type, github_url, branch, github_token, max_ram_mb, max_cpu_percent, public_access, visibility, image_retention, frame_ancestors, auth_mode, auth_bypass_paths, email_from_name, ingress_type, public_port } = req.body;
+  const { name, domain, description, category, source_type, github_url, branch, github_token, max_ram_mb, max_cpu_percent, public_access, visibility, image_retention, frame_ancestors, auth_mode, auth_bypass_paths, email_from_name, ingress_type, public_port, data_plane_port } = req.body;
 
   // Configurable RBAC: changes to repo-related fields gated by code.modify_repo_settings.
   // Other fields (name, description, category, visibility, etc.) stay open to any
@@ -733,9 +742,13 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
   // exists to withhold. So: platform tier for a platform-tier decision, and no
   // app membership is created as a side effect.
   //
-  // AppCrane publishes the port; it does NOT open the firewall. That stays an
-  // operator step on purpose — two keys, so a mis-click here cannot put an app
-  // on the internet.
+  // This gate is the ONLY thing standing between the request and an open host
+  // port. Do not read the operator's firewall as a second key: on Linux a
+  // Docker publish is a DNAT rule evaluated in FORWARD and never in INPUT, so a
+  // plain `ufw deny` does not hold it shut — filtering has to happen in
+  // DOCKER-USER or upstream. An earlier version of this comment claimed the
+  // opposite ("two keys, so a mis-click here cannot put an app on the
+  // internet"); the guide's docs test now forbids that claim by name.
   //
   // The branch engages on a CHANGE, not on the mere presence of the fields.
   // ingressFields() puts ingress_type and public_port on every GET payload, so
@@ -744,19 +757,28 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
   // with a non-tcp type) and made a non-admin's unrelated edit a 403. Both
   // silently dropped the rest of the request. A caller that sends the values it
   // was given is not changing the ingress.
+  //
+  // v2.45.0: ingress_type='dual' is an app with BOTH planes — an HTTP control
+  // plane still served through Caddy on the loopback publish, plus a raw data
+  // plane published at 0.0.0.0:<public_port> -> <data_plane_port> inside the
+  // same container. Same gate, same audit: it opens the same undefended door,
+  // and data_plane_port is the field that decides what is behind it.
   const currentType = effectiveIngressType(app.ingress_type);
   const currentPort = publicPortForApp(app);
+  const currentDataPlanePort = effectiveDataPlanePort(app);
   const wantsTypeChange = ingress_type !== undefined && ingress_type !== currentType;
   const wantsPortChange = public_port !== undefined && public_port !== currentPort;
-  // A tcp app with no port allocated publishes nothing, so re-sending
-  // ingress_type='tcp' has to be able to finish the job rather than read as
+  const wantsDataPlaneChange = data_plane_port !== undefined && data_plane_port !== currentDataPlanePort;
+  // A publishing app with no port allocated publishes nothing, so re-sending
+  // the same ingress_type has to be able to finish the job rather than read as
   // "no change".
-  const needsAllocation = ingress_type === 'tcp' && currentType === 'tcp' && currentPort === null;
+  const needsAllocation = ingress_type !== undefined && ingress_type === currentType
+    && currentType !== 'http' && currentPort === null;
 
   let ingressWork = null;
-  if (wantsTypeChange || wantsPortChange || needsAllocation) {
+  if (wantsTypeChange || wantsPortChange || wantsDataPlaneChange || needsAllocation) {
     if (req.user.role !== 'platform_admin') {
-      throw new AppError('Only platform admins can change ingress_type or public_port', 403, 'FORBIDDEN');
+      throw new AppError('Only platform admins can change ingress_type, public_port or data_plane_port', 403, 'FORBIDDEN');
     }
     let nextType = currentType;
     if (ingress_type !== undefined) {
@@ -766,17 +788,98 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
       updates.ingress_type = ingress_type;
     }
     if (public_port !== undefined) {
-      if (nextType !== 'tcp') {
-        throw new AppError("public_port only applies to an app with ingress_type='tcp'", 400, 'VALIDATION');
+      if (nextType === 'http') {
+        throw new AppError("public_port only applies to an app with ingress_type='tcp' or 'dual'", 400, 'VALIDATION');
       }
       if (public_port === null) {
-        throw new AppError("A tcp app must keep a public port — set ingress_type='http' to release it", 400, 'VALIDATION');
+        throw new AppError("A published app must keep its public port — set ingress_type='http' to release it", 400, 'VALIDATION');
       }
     }
+    if (data_plane_port !== undefined) {
+      if (data_plane_port === null) {
+        // Explicit null CLEARS the pinned data plane. It is the only way to
+        // drop it, which is what makes the tcp refusal below escapable: an
+        // operator who genuinely wants v2.42.0's whole-container publish has to
+        // say so in the same request rather than reach it by a flip that reads
+        // as changing only the type.
+        if (nextType === 'dual') {
+          throw new AppError(
+            "A dual app must keep a data plane port — send ingress_type='http' or 'tcp' together with " +
+            'data_plane_port: null to drop it',
+            400, 'VALIDATION',
+          );
+        }
+        updates.data_plane_port = null;
+      } else {
+        // Only 'dual' has two planes to tell apart. A pure-tcp app IS its data
+        // plane — the container is told PORT=3000 and the whole of it is
+        // published — so a second number there would be a second way to say the
+        // same thing, and the ports would silently disagree.
+        if (nextType !== 'dual') {
+          throw new AppError("data_plane_port only applies to an app with ingress_type='dual'", 400, 'VALIDATION');
+        }
+        try { validateDataPlanePort(data_plane_port); }
+        catch (e) { throw new AppError(e.message, e.status || 400, e.code || 'VALIDATION'); }
+        updates.data_plane_port = data_plane_port;
+      }
+    }
+    // SECURITY: 'tcp' publishes CONTROL_PLANE_PORT itself — correct for an app
+    // whose whole container IS the data plane, and wrong for a row that still
+    // carries a data_plane_port. Flipping such an app to tcp repoints the SAME
+    // pinned host port from the data plane to the HTTP control plane: exactly
+    // the publish validateDataPlanePort refuses outright, reached instead by a
+    // request that named only the type. Clients stay pointed at the port; what
+    // answers them becomes the origin Caddy fronts, stripped of TLS,
+    // forward_auth, identity headers and audit. Refuse unless the same request
+    // drops the data plane, so the exposure change is something the operator
+    // said rather than something the flip did.
     if (nextType === 'tcp') {
-      // Automatic allocation: switching an app to tcp with no port set picks
-      // one. An already-allocated port is returned untouched, which is how it
-      // survives redeploys and slot changes — nothing else recomputes it.
+      const stillPinned = updates.data_plane_port === undefined
+        ? (Number.isInteger(app.data_plane_port) ? app.data_plane_port : null)
+        : updates.data_plane_port;
+      if (stillPinned !== null) {
+        throw new AppError(
+          `This app still has data_plane_port ${stillPinned}. ingress_type='tcp' publishes container port ` +
+          `${CONTROL_PLANE_PORT} — the HTTP control plane — on the host, so the flip would repoint ` +
+          `the published port away from the data plane and onto the origin Caddy fronts, with no TLS, no ` +
+          'forward_auth, no identity headers and no request audit. Send data_plane_port: null in the same ' +
+          'request to drop the data plane deliberately.',
+          400, 'VALIDATION',
+        );
+      }
+    }
+    // SECURITY: 'dual' without a data-plane port is not a half-configured app,
+    // it is a request to publish the control plane raw. The publish has to
+    // target SOME container port, and the only other one in the container is
+    // CONTROL_PLANE_PORT — the HTTP origin Caddy fronts, which would then be
+    // reachable with no TLS, no forward_auth, no identity headers and no audit.
+    // Refuse the flip instead of picking a default. (The runtime refuses such a
+    // row too; this is the error the operator should actually see.)
+    //
+    // Read from the STORED column, not the effective value: like public_port,
+    // the number survives a flip away from dual so that flipping back restores
+    // the port clients are configured for — and the whole point of pinning is
+    // that they do not have to be reconfigured. Revalidated on the way back in
+    // rather than trusted, so a value that became illegal while the app sat on
+    // http (hand-edited, or a rule that moved) cannot be reinstated by a flip.
+    if (nextType === 'dual') {
+      const nextDataPlanePort = updates.data_plane_port
+        ?? (Number.isInteger(app.data_plane_port) ? app.data_plane_port : null);
+      if (nextDataPlanePort === null) {
+        throw new AppError(
+          "ingress_type='dual' requires data_plane_port — the raw publish must target a port INSIDE the " +
+          "container that is not the HTTP control plane, and AppCrane will not guess one",
+          400, 'VALIDATION',
+        );
+      }
+      try { validateDataPlanePort(nextDataPlanePort); }
+      catch (e) { throw new AppError(e.message, e.status || 400, e.code || 'VALIDATION'); }
+    }
+    if (nextType !== 'http') {
+      // Automatic allocation: switching an app to a publishing type with no
+      // port set picks one. An already-allocated port is returned untouched,
+      // which is how it survives redeploys and slot changes — nothing else
+      // recomputes it.
       ingressWork = { kind: 'assign', requested: public_port === undefined ? null : public_port };
     } else {
       // Flipping to http stops the PUBLISH and nothing else. It deliberately
@@ -805,7 +908,7 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
     return res.json({ app: { ...app, auth_mode: effectiveAuthMode(app.auth_mode), ...ingressFields(app) }, message: 'No changes' });
   }
 
-  const ALLOWED_APP_COLS = new Set(['name','domain','description','category','source_type','github_url','branch','public_access','visibility','github_token_encrypted','resource_limits','runtime','image_retention','frame_ancestors','auth_mode','auth_bypass_paths','email_from_name','ingress_type']);
+  const ALLOWED_APP_COLS = new Set(['name','domain','description','category','source_type','github_url','branch','public_access','visibility','github_token_encrypted','resource_limits','runtime','image_retention','frame_ancestors','auth_mode','auth_bypass_paths','email_from_name','ingress_type','data_plane_port']);
   const invalidKey = Object.keys(updates).find(k => !ALLOWED_APP_COLS.has(k));
   if (invalidKey) throw new AppError(`Invalid field: ${invalidKey}`, 400, 'VALIDATION');
 
@@ -835,7 +938,7 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
     if (ingressWork.kind === 'assign') {
       assignPublicPort(db, app.id, ingressWork.requested);
     }
-    const after = db.prepare('SELECT ingress_type, public_port FROM apps WHERE id = ?').get(app.id);
+    const after = db.prepare('SELECT ingress_type, public_port, data_plane_port FROM apps WHERE id = ?').get(app.id);
     // Audited on its own action, not folded into the generic 'app-update'
     // entry: "a port was opened on the host" is the one change here an
     // operator reviewing the log must be able to find by name.

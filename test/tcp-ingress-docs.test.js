@@ -309,8 +309,15 @@ test('every example public_port in onboarding.md is inside the enforced range', 
     `example ports ${JSON.stringify(examples)} are not all within ` +
     `${PUBLIC_PORT_MIN}-${PUBLIC_PORT_MAX} — copying one out of the doc would 400`,
   );
+  // Derived from the constant rather than written out. v2.45.0 widened
+  // PUBLIC_PORT_MAX from 31999 to 65535 and this probe was the literal 30005,
+  // which stopped being out-of-range the moment the range moved — the negative
+  // control went vacuous and this test failed for its own sake, not the guide's.
+  // A probe computed from the bound cannot go stale that way.
+  const probe = [...(`public_port=${PUBLIC_PORT_MAX + 1}`.matchAll(PORT_LITERAL_RE))].map(m => Number(m[1]));
+  assert.equal(probe.length, 1, 'the out-of-range probe no longer matches the detector at all');
   assert.ok(
-    !inRange([...('public_port=30005'.matchAll(PORT_LITERAL_RE))].map(m => Number(m[1]))),
+    !inRange(probe),
     'the example-port detector accepts a port outside the enforced range',
   );
 });

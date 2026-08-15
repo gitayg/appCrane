@@ -5,6 +5,20 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.45.0 — An app can now serve HTTP through Caddy and a raw port at the same time.
+
+**The problem: raw TCP was all-or-nothing.** `ingress_type='tcp'` (2.42.0) publishes the container's port 3000 straight onto the host, which means the app's *only* plane is the unauthenticated one — its web UI comes out on the same raw port, with no TLS, no SSO, no identity headers and no request audit. An app that speaks HTTP to people and a non-HTTP protocol to machines had to give up Caddy entirely to get the second one.
+
+**`ingress_type='dual'` splits the two.** The HTTP control plane stays exactly where it was — container port 3000, bound to loopback, fronted by Caddy with forward_auth, `X-AppCrane-*` identity, security headers and access logs. A second port *inside the same container* — the new per-app `data_plane_port` — is published raw at `0.0.0.0:<public_port>` alongside it. Clients that were already configured for a fixed port (8080, say) reach the data plane directly; browsers keep going through the front door.
+
+**The guard this whole feature rests on: `data_plane_port` can never be 3000.** Pointing the raw publish at the control plane would put the origin Caddy exists to protect onto a public port with no TLS, no forward_auth, no identity and no audit — the precise thing 'dual' was added to avoid. So it is refused twice, independently: at the write boundary (`validateDataPlanePort`, on the REST route and the MCP tool alike) and again at the runtime edge, where a row whose `data_plane_port` is missing or is 3000 publishes *nothing at all* rather than falling back to a default. A hand-edited database row does not get a second chance.
+
+Flipping a dual app to `tcp` is likewise refused while it still has a data-plane port pinned, because that flip would silently repoint the same host port at 3000.
+
+**Nothing changes for an ordinary app.** The 57 apps on plain HTTP ingress get no second `-p` and their `docker run` line is unchanged — asserted against a recorded, vendored copy of the v2.44.2 argv, element for element, so an accidental extra flag fails the build. A pure-tcp app still targets container port 3000. Verified with `caddy adapt` across all six app shapes (http/public/headless/tcp/dual/dual-public): the config compiles, and no compiled upstream anywhere points at a data-plane port.
+
+Platform-admin only, per app, in App Settings and via `appcrane_set_app_ingress`. Host ports are allocated from 31000-31999 or named explicitly, and are checked for collisions against every other app.
+
 ## 2.44.2 — Tests for the supply-chain work, and a watchdog for the way they keep failing.
 
 **The supply-chain changes shipped in 2.44.0 with no tests.** The agent that wrote them finished; the agent that was to test them died mid-run, and the cross-check died with the machine, so the gap went out in the release. It is closed now: 11 tests over `verifyCommitSha` and the generated build.

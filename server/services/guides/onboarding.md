@@ -251,7 +251,8 @@ the app's own router.
 
 Headless is still an **HTTP app behind Caddy** — TLS, security headers,
 request logging and the `X-AppCrane-Auth-Mode` stamp all still apply. An app
-that isn't HTTP at all is a different setting entirely; see
+that isn't HTTP at all — or one that is HTTP *and* needs a second raw port for
+non-HTTP clients — is a different setting entirely; see
 [TCP (layer-4) ingress](#tcp-layer-4-ingress--apps-that-arent-http).
 
 ## Identity via proxy headers (the easiest path)
@@ -878,6 +879,21 @@ the production container's port straight onto the host at
 The container's existing loopback publish (`127.0.0.1:<slot port>:3000`) stays.
 TCP ingress **adds** a door — it does not replace the one you already have.
 
+And a few apps are genuinely **both**: an ordinary HTTP **control plane** that has
+to keep everything Caddy gives it, plus a raw **data plane** on a *different* port
+inside the same container. That is `ingress_type: 'dual'`, added in v2.45.0 — see
+[Dual-plane apps](#dual-plane-apps--one-container-two-doors) below.
+
+| `ingress_type` | what it is |
+|---|---|
+| `http` | The default, and what every app is unless a platform admin changes it. Every request goes through Caddy. Nothing is published on the host. |
+| `tcp` | The container's port 3000 is published raw at `0.0.0.0:<public_port>`. For an app that is entirely non-HTTP — the whole container port is the data plane. |
+| `dual` | Both doors at once. The HTTP control plane stays on container port 3000 behind Caddy, with every control intact; a **second** listener on `data_plane_port` inside the same container is published raw beside it. |
+
+An app that sets nothing is `http` and behaves exactly as it always has. `tcp` and
+`dual` are the two types that put a port on `0.0.0.0`, and everything in the next
+two sections applies to that published port whichever of them opened it.
+
 ### What a published port does not get
 
 | Control | `http` app (through Caddy) | `tcp` app (published port) |
@@ -913,6 +929,126 @@ Headless means AppCrane steps back from *authentication*. TCP ingress means
 AppCrane steps out of the *connection*. Don't reach for `tcp` when what you
 wanted was `headless`.
 
+### Dual-plane apps — one container, two doors
+
+`ingress_type: 'dual'` is for an app that has an ordinary HTTP **control plane**
+*and* a raw **data plane**, in one container. The shape it exists for: an admin UI
+and a REST API that must stay behind AppCrane SSO, alongside a protocol listener
+whose clients were configured — by hand, by MDM, in some product's settings — with
+a host and a port that is not AppCrane's to choose.
+
+Under `tcp` that app could not be expressed. Both publishes targeted the one
+hardcoded container port, so `tcp` could only re-expose the very port Caddy was
+already serving — which is the *control* plane, and publishing it raw is the one
+thing this feature must not do.
+
+```
+                  Caddy (TLS, forward_auth, identity headers, audit)
+                    │
+  {{HOST}}/<slug> ──┘──▶ 127.0.0.1:<slot port> ──▶ container:3000   ← CONTROL plane
+  <host>:<public_port> ─────── raw, no Caddy ────▶ container:<data_plane_port>
+                                                                    ← DATA plane
+```
+
+Two publishes, two ports inside the container, one process:
+
+| | control plane | data plane |
+|---|---|---|
+| container port | `3000` (always — AppCrane sets `PORT=3000`) | `data_plane_port`, chosen per app |
+| host binding | `127.0.0.1:<slot port>` (loopback only) | `0.0.0.0:<public_port>` |
+| Caddy in the path | **yes** | **no** |
+| forward_auth / SSO, identity headers, audit, rate limiting, security headers, TLS | yes, all of it | **none of it** — see the loss table above |
+| who authenticates | AppCrane | **the app**, entirely |
+| what health checks probe | **this one** | never |
+
+The control plane is unchanged in every respect. A dual app's normal URL, SSO,
+identity headers and access logs work exactly as they do for an `http` app —
+`dual` **adds** the raw door, it does not weaken the existing one. The Caddy vhost
+AppCrane generates does not look at `ingress_type` at all.
+
+What the split does **not** buy you: the two planes are the same process in the
+same container. It separates the *doors*, not the trust domains — a flaw reachable
+through the unauthenticated data plane is reachable in the code that serves the
+control plane too, and a data-plane handler that can read the app's database can
+read everything the control plane could.
+
+#### `data_plane_port` may not be 3000
+
+This is refused with a 400, and the reason is the point of the whole feature:
+
+> Port 3000 is the container's HTTP control plane — the port Caddy proxies to.
+> Publishing it raw at `0.0.0.0:<public_port>:3000` is not a data plane at all; it
+> is the app's ordinary HTTP origin re-published with **no TLS, no forward_auth,
+> no identity headers, no rate limiting and not one audit entry**. That is
+> precisely the surface Caddy is in the path to protect, and an operator who typed
+> it would get no signal that they had done it.
+
+So a dual app needs a **second listener**, on its own port inside the container, and
+that port is what gets published. Two related refusals for the same reason:
+
+- `ingress_type: 'dual'` **with no `data_plane_port`** is a 400. That is not a
+  half-finished configuration — the publish has to target *some* container port,
+  and 3000 is the only other one there, so a default would silently be the thing
+  above. AppCrane refuses rather than guessing.
+- `data_plane_port` on an app that is not `dual` is a 400. A `tcp` app *is* its
+  data plane (the container is told `PORT=3000` and the whole of it is published),
+  so a second number there would be a second way to say the same thing, and the
+  two could disagree.
+
+The runtime holds the same line independently: a stored row that says `dual` but
+carries no `data_plane_port`, or carries 3000, publishes **nothing at all** — no
+public `-p` is emitted. A row that reached that state by some path other than the
+API (a hand edit, a restored backup) fails closed rather than publishing the
+control plane. It still *reports* the bad value, so `public_port: null` next to
+`ingress_type: 'dual'` is the visible symptom rather than a silent blanking.
+
+#### Which port has to be unique, and which does not
+
+- **The host port must be globally unique**, and a partial unique index on
+  `apps(public_port)` enforces it. Two containers cannot both bind
+  `0.0.0.0:8080`; the second `docker run` dies with "port is already allocated".
+  Asking for a port another app holds is a 409.
+- **The container port deliberately is not.** Container network namespaces are
+  separate, so two apps each running a data plane on container port 8081 inside
+  their own containers never meet. There is no uniqueness constraint on
+  `data_plane_port` and none should be added — it would forbid a legitimate and
+  probably common configuration for nothing.
+
+#### Health checks follow the control plane
+
+A `tcp` app's health probe is a TCP handshake, because a non-HTTP app cannot answer
+an HTTP one. A **dual** app can: it speaks HTTP on container port 3000. So both the
+deploy gate and the periodic checker keep doing what they do for any `http` app —
+`GET` the health endpoint at `http://localhost:<slot port>`, the loopback publish
+that maps to container port 3000 — and the data plane is never probed. Neither
+probe ever touches `public_port`: the gate has to pass before an operator opens
+anything, and must not depend on an allocation existing.
+
+That is deliberate, and probing the data plane instead would be strictly worse than
+what an ordinary app gets. A raw listener accepts a connection as long as its socket
+is bound, so a handshake there says nothing about whether the app still works: a
+wedged control plane — the plane users actually reach — would read healthy, and a
+broken release would go green. The health signal follows the plane that can
+actually answer a question.
+
+#### Why `dual` is a third type rather than a flag on an `http` app
+
+The alternative was to leave such an app as `ingress_type: 'http'` with a
+`data_plane_port` set. It was rejected: `ingress_type` is the one field an operator,
+an audit entry, an MCP payload and a dashboard row all read to learn what doors an
+app has, and a row that said `http` while the app published a raw unauthenticated
+host port would make that field actively wrong. The exposure has to be *named*, not
+inferred from a second column being non-null.
+
+Compatibility falls out the same way. Code that predates `dual` compares
+`ingress_type === 'tcp'`, gets `false`, and falls through to the HTTP path — which
+is the correct path for a dual app (that is exactly how health checks land on the
+control plane). The unhandled case degrades to the safe one. Under the rejected
+model the unhandled case would have been "an app the row calls `http` is publishing
+a raw host port", which degrades to the dangerous one. A pre-v2.45.0 `tcp` app is
+untouched by all of this: it still publishes `0.0.0.0:<public_port>:3000`, still
+gets a TCP-handshake health check, and still reports `data_plane_port: null`.
+
 ### Turning it on
 
 **Platform admin only.** The owner self-service path can't reach it:
@@ -923,6 +1059,8 @@ wanted was `headless`.
 appcrane_get_app_ingress(slug)                            — read it (any app member)
 appcrane_set_app_ingress(slug, ingress_type="tcp")        — allocate a port
 appcrane_set_app_ingress(slug, ingress_type="tcp", public_port=31005)
+appcrane_set_app_ingress(slug, ingress_type="dual", data_plane_port=8081)
+appcrane_set_app_ingress(slug, ingress_type="dual", data_plane_port=8081, public_port=8080)
 appcrane_set_app_ingress(slug, ingress_type="http")       — release the port
 ```
 
@@ -931,21 +1069,70 @@ The same thing over REST, if you're not on MCP:
 ```
 PUT /api/apps/<slug>  { "ingress_type": "tcp" }                        → allocates a port
 PUT /api/apps/<slug>  { "ingress_type": "tcp", "public_port": 31005 }  → pins a specific one
-PUT /api/apps/<slug>  { "public_port": 31007 }                         → moves an already-tcp app
+PUT /api/apps/<slug>  { "public_port": 31007 }                         → moves a port that is NOT yet deployed
+PUT /api/apps/<slug>  { "ingress_type": "dual", "data_plane_port": 8081 }
+                                                                       → both planes; allocates a host port
+PUT /api/apps/<slug>  { "ingress_type": "dual", "data_plane_port": 8081, "public_port": 8080 }
+                                                                       → both planes, host port pinned
+PUT /api/apps/<slug>  { "ingress_type": "tcp", "data_plane_port": null }
+                                                                       → drops the data plane, then publishes
+                                                                         container port 3000 (see below)
 PUT /api/apps/<slug>  { "ingress_type": "http" }                       → stops publishing the port
                                                                          (does NOT close it — see below)
 ```
 
-`public_port` on an app that isn't (or isn't becoming) `tcp` is a 400, and so is
-`public_port: null` — flipping back to `http` is the one way to release a port,
-so there's a single path to reason about.
+`public_port` on an app that isn't (or isn't becoming) `tcp` or `dual` is a 400, and
+so is `public_port: null` — flipping back to `http` is the one way to release a
+port, so there's a single path to reason about. `data_plane_port` is required when
+the type is `dual` and refused on any other type, with one exception: an explicit
+`null` on `http` or `tcp`, which drops a data plane the app still has pinned.
+
+#### Moving a port an app is already publishing is a 409
+
+Changing `public_port` on an app with a **live production deployment** is refused
+with `409 PORT_STILL_HELD`, not honoured:
+
+```
+This app still holds port 31005. Set ingress_type='http' and redeploy to stop
+publishing it before pinning 8080 — otherwise 31005 returns to the pool while the
+running container is still bound to it.
+```
+
+The reason is in the message: the publish is a `docker run` flag, so the old
+number stays bound until the container is recreated, and letting the row forget it
+would hand a live port to the next app. The three-step way round is the one the
+error names — set `ingress_type: "http"`, **redeploy** (which is what actually
+closes the port), then pin the new number and deploy again. Before the first
+deploy there is nothing bound, so re-pinning is allowed and is the common case:
+turn the type on, then immediately name the port your clients expect.
+
+#### Flipping a dual app to `tcp` is refused while it still has a data plane
+
+`tcp` publishes container port 3000 — the HTTP control plane. On a `dual` app
+that would repoint the *same* host port your clients are pinned to away from the
+data plane and onto the origin Caddy fronts, with no TLS, no SSO, no identity
+headers and no audit: exactly what `data_plane_port: 3000` is refused for, reached
+by a request that mentioned only the type. So it is a 400 unless the same request
+sends `data_plane_port: null`, which drops the data plane deliberately.
+
+Both numbers are **pinned, not recomputed**. They survive a flip away from a
+publishing type — so flipping back restores the exact ports a client fleet is
+already configured for — and they read back as `null` while the app is not
+publishing. On the way back in, `data_plane_port` is re-validated rather than
+trusted. **`public_port` is not**: a held port is returned from the row as-is, so
+a number that became illegal while the app sat on `http` — because the platform
+grew and it now collides with a slot-derived backend port — is reinstated by the
+flip without complaint. If an app has been parked on `http` for a while, re-pin
+its port explicitly rather than relying on the flip to re-check it.
 
 - **Takes effect when the container is next recreated.** The second binding is a
   `docker run` flag, so it lands on the next deploy — or on
   `POST /api/apps/<slug>/restart/<env>` (the dashboard's ↺ button), which does
   stop+start and therefore also applies it. Nothing changes on a container that
   is already running. Until then the app is still loopback-only. The deploy log
-  says `[tcp-ingress] … also published on 0.0.0.0:<port>` when it lands.
+  says `[tcp-ingress] … also published on 0.0.0.0:<public_port> -> container port
+  <n>` when it lands — that second number tells you *which plane* got exposed, and
+  on a dual app it must not be 3000.
 - **Flipping back to `http` does NOT close the port.** It stops AppCrane
   publishing it; the running container keeps binding `0.0.0.0:<port>` until it is
   recreated, exactly like turning the ingress on. So the port stays reachable and
@@ -966,24 +1153,57 @@ so there's a single path to reason about.
   publishing it for both would make the second `docker run` fail with "port is
   already allocated" — and the loser could be production. Sandbox stays
   loopback-only and is reached the usual way, at `{{HOST}}/<slug>-sandbox`.
-- Ports come from a dedicated **31000–31999** range, lowest free first, so the
-  operator's firewall rule is one predictable block instead of a per-app list.
-  Refused: anything outside the range, WHATWG-blocked ports (the same list that
-  makes Node's `fetch` reject a port outright), AppCrane's own listening port,
-  any port the slot allocator could hand a container, and any port another app
-  already holds.
+- **Two different numbers, and conflating them is the easy mistake.** An
+  *allocated* host port — one you did not name — comes from a dedicated band,
+  **31000 through 31999**, lowest free first, so the operator's firewall rule is
+  one predictable block instead of a per-app list. A host port you name
+  **explicitly** may be anything in **1024-65535**. Those are not the same range
+  and were never meant to be: allocation optimises for an operator who does not
+  care what the number is, while naming one exists because sometimes the number
+  is not AppCrane's to choose — clients get configured with a host and a port by
+  hand or by MDM, and when a fleet already points at 8080, "use 31000 instead" is
+  not a platform decision, it is a request to go and reconfigure every client.
+  Naming a port outside the auto band is legal and supported; it just needs its
+  own firewall rule, because the predictable block no longer covers it.
+- **Narrowing the range was never what made this safe**, so widening it takes
+  nothing away. The guards that matter apply at *every* value and are what
+  actually refuse a port: WHATWG-blocked ports (the same list that makes Node's
+  `fetch` reject a port outright), AppCrane's own listening port, Caddy's admin
+  endpoint (2019 — the port every routing reload goes through), any port the slot
+  allocator could hand a container, and any port another app already holds.
+  They matter more at the wider range, not less — on a platform with enough apps
+  a number like 8080 collides with a slot-derived backend port, and that check is
+  what catches it.
+- **The 1024 floor is policy, not a technical limit.** It is tempting to say a
+  container cannot bind a privileged port, and that is not true here: the host
+  side of a `-p` publish is bound by the Docker daemon as root, and inside the
+  container AppCrane drops only `NET_RAW` and sets no `--user`, so the process
+  keeps `CAP_NET_BIND_SERVICE` and binds `:80` quite happily. The floor is there
+  to keep apps off the ports the platform itself depends on — 22, 80 and 443,
+  which Caddy needs. Do not "fix" it by granting a capability; that was never
+  what was in the way.
+- `data_plane_port` — the CONTAINER side of a dual app's publish — takes the same
+  **1024-65535** bounds, for the same policy reason. It is never allocated; a
+  dual app names it or gets a 400. Port 3000 is refused outright (see above).
 - The port is **allocated and stored, never derived from the app's slot**. Slots
   get reassigned; a derived port would silently move under a client pinned to it
   by MDM or a hardcoded proxy setting. Redeploys, renames and slot changes leave
   an existing allocation untouched.
-- One app, one port — a partial unique index makes a double-booking impossible.
+- One app, one **host** port — a partial unique index on `apps(public_port)` makes
+  a double-booking impossible. `data_plane_port` is deliberately *not* unique;
+  container namespaces are separate, so two apps may use the same container-side
+  port (see [Dual-plane apps](#dual-plane-apps--one-container-two-doors)).
 - Every change is audited under its own action, **`app-ingress-change`**, with
   the before/after — not folded into the generic `app-update` entry, because "a
   port was opened on the host" has to be findable by name.
-- `ingress_type` and `public_port` are returned on every app payload and on
-  `appcrane_get_app`; `public_port` reads back `null` whenever `ingress_type`
-  isn't `tcp`. `appcrane_get_app_ingress` additionally spells out what the
-  exposure means, so a diagnosis doesn't rest on recognising the enum.
+- `ingress_type`, `public_port` and `data_plane_port` are returned on every app
+  payload and on `appcrane_get_app`; `public_port` reads back `null` whenever
+  `ingress_type` isn't `tcp` or `dual`, and `data_plane_port` reads back `null`
+  whenever it isn't `dual`. `appcrane_get_app_ingress` additionally spells out
+  what the exposure means, so a diagnosis doesn't rest on recognising the enum —
+  for a dual app it reports `exposure.control_plane` and `exposure.data_plane`
+  separately, because the answer to "is this behind AppCrane auth" is genuinely
+  different for each and one boolean cannot carry both.
 
 ### AppCrane publishes the port. Do not assume a firewall is holding it shut.
 
@@ -1109,9 +1329,11 @@ This is a scope limit, not a footnote: an app that speaks **only** a non-HTTP
 protocol (raw SSH, MQTT, a pure SOCKS listener) cannot pass that deploy gate and
 therefore cannot go live at all, whatever `ingress_type` says. `tcp` ingress
 today serves apps that **also** answer HTTP on the container port — which the
-motivating CONNECT proxy does.
+motivating CONNECT proxy does. A `dual` app meets this by construction: its
+control plane on port 3000 is an ordinary HTTP server, and that is the port
+AppCrane probes.
 
-Which leads to the part that is easy to miss: **the publish is
+Which leads to the part that is easy to miss for a `tcp` app: **the publish is
 `0.0.0.0:<public_port>:3000` — the whole container port, not a protocol-specific
 channel.** Every HTTP route the app serves on port 3000 is reachable from
 outside, including that mandatory `/api/health` (whose body carries `version`,
@@ -1121,12 +1343,31 @@ examples here say `localhost` only because AppCrane probes over loopback; that
 says nothing about who else can reach the same routes. Audit the app's full HTTP
 surface before flipping the ingress, not just its raw protocol.
 
-Ongoing health checks for a `tcp` app are a **TCP connect** to the container's
-loopback port instead of a fetch — success means the container accepted a
-connection, nothing more, and the health config's `endpoint` is not used. The
-fail counters, auto-restart and dashboard up/down behave exactly as for any
-other app. (Without that, a non-HTTP app would fail every HTTP probe and get
-restart-looped forever.)
+**This is exactly what `dual` fixes.** A dual app's publish targets
+`data_plane_port`, not 3000, so the HTTP routes on the control plane stay
+loopback-only and behind Caddy — that is why splitting the two was worth a new
+type rather than reusing `tcp`. What the split does *not* buy you: both planes are
+the same process in the same container, so a flaw reachable through the data plane
+is reachable in the code that serves the control plane too. It separates the
+*doors*, not the trust domains.
+
+Ongoing health checks depend on which plane can answer:
+
+- **`http` and `dual`** — an HTTP `GET` of the health endpoint on the loopback
+  publish (which maps to container port 3000), using the health config's
+  `endpoint`. Identical for both; a dual app's data plane is never probed. See
+  [Health checks follow the control plane](#health-checks-follow-the-control-plane)
+  for why probing the raw port instead would be a worse signal, not an equivalent
+  one.
+- **`tcp`** — a **TCP connect** to the container's loopback port instead of a
+  fetch. Success means the container accepted a connection, nothing more, and the
+  health config's `endpoint` is not used. Without this a non-HTTP app would fail
+  every HTTP probe and get restart-looped forever; it is a weaker statement
+  accepted because nothing stronger is available for an app that cannot speak
+  HTTP.
+
+In all three cases the fail counters, auto-restart and dashboard up/down behave
+exactly as for any other app.
 
 ## Embedding an app in an iframe (`frame_ancestors`)
 

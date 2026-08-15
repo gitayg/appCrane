@@ -53,6 +53,7 @@ You can have governance, or you can have your own infrastructure. Every other op
 - **`/api/me` endpoint** — canonical "who is the caller" for proxied apps; accepts the `cc_token` cookie, Bearer, or `X-API-Key`; returns global role + per-app role (`?app=<slug>` or `Referer`-inferred)
 - **Headless app type** — set `auth_mode: 'headless'` to bypass `forward_auth` entirely on an app; right tool for telemetry ingest, public webhooks, status pages, and single-purpose unauthenticated services
 - **TCP (layer-4) ingress** — for apps that aren't HTTP at all (a forward/CONNECT proxy hands back a raw tunnel no reverse proxy can express), a platform admin can publish the container's port directly on the host, with Caddy out of the path. No SSO, no identity headers, no TLS from AppCrane — the app owns authentication completely
+- **Dual-plane apps** — `ingress_type: 'dual'` for an app that is both: an HTTP **control plane** still served through Caddy on container port 3000 with every control intact, plus a raw **data plane** on a different port inside the same container, published at `0.0.0.0:<public_port>`. The data-plane port may not be 3000 — that would republish the control plane unauthenticated — and health checks keep probing the control plane, the only plane that can actually answer
 - **AppStudio AI pipeline** — AI proposes code improvements on a schedule; you review and approve before anything ships
 - **Real-time presence** — see who's active on each app, which environment, and when they last deployed
 - **Dual environments** per app: production + sandbox, always-on, separate ports
@@ -242,9 +243,11 @@ Ubuntu Server
 ```
 
 Every container is published to **loopback only** (`127.0.0.1:<port>:3000`), so
-Caddy is the only way in. The one exception is a TCP-ingress app, which
-additionally publishes its container port at `0.0.0.0:<public_port>` — outside
-Caddy, and outside every control Caddy provides. See
+Caddy is the only way in. The exception is an app with `ingress_type` `tcp` or
+`dual`, which additionally publishes a port at `0.0.0.0:<public_port>` — outside
+Caddy, and outside every control Caddy provides. A `tcp` app publishes container
+port 3000 itself; a `dual` app publishes a *different* container port and leaves
+3000 loopback-only behind Caddy. See
 [§6 below](#6-tcp-layer-4-ingress--no-proxy-no-identity).
 
 ## Security
@@ -434,11 +437,21 @@ forward/**CONNECT** proxy, where the client opens a raw TCP connection and gets 
 tunnel back, which no HTTP reverse proxy can express. For those, a **platform
 admin** (not the app owner) can set `ingress_type: 'tcp'` — `PUT /api/apps/<slug>`
 or `appcrane_set_app_ingress` — and AppCrane publishes the production container's
-port on the host at `0.0.0.0:<public_port>`, from a dedicated 31000–31999 range,
-the next time the container is recreated (a deploy, or the restart route — the
-publish is a `docker run` flag, so nothing changes on a running container). The
-existing loopback publish stays and sandbox is unaffected; this adds a door
-rather than moving one.
+port on the host at `0.0.0.0:<public_port>`, the next time the container is
+recreated (a deploy, or the restart route — the publish is a `docker run` flag, so
+nothing changes on a running container). The existing loopback publish stays and
+sandbox is unaffected; this adds a door rather than moving one.
+
+**Two port ranges, and they are not the same numbers.** A host port AppCrane
+*allocates* comes from a dedicated band, 31000 through 31999, so an operator
+firewalls one predictable block. A host port named **explicitly** may be anything
+in 1024–65535 — because clients are configured with a port by hand or by MDM, and
+a fleet already pointing at 8080 is not something the platform gets to overrule.
+Narrowing the range was never the safety property: the guards that refuse a port
+apply at every value (WHATWG-blocked ports, AppCrane's own listening port, any
+port the slot allocator could hand a container, and the partial unique index that
+gives one host port to one app). A port outside the auto band just needs its own
+firewall rule.
 
 **The container must still answer `/api/health` over HTTP**, whatever its
 `ingress_type`: the deploy gate polls it for 30 s and rolls the release back
@@ -457,6 +470,53 @@ authentication completely.** It is *not* `auth_mode: 'headless'` — a headless 
 still goes through Caddy and still gets TLS, security headers and the
 `X-AppCrane-Auth-Mode: headless` stamp.
 
+**`ingress_type: 'dual'` — an app with both planes (v2.45.0).** Some apps are
+genuinely both: an HTTP **control plane** (admin UI, REST API) that must keep
+everything Caddy gives it, plus a raw **data plane** whose clients are already
+pinned to a specific host port. Under `tcp` that was inexpressible, because both
+publishes targeted the same hardcoded container port — so `tcp` could only
+re-expose the very port Caddy was already serving. A `dual` app names a second
+port inside its container:
+
+```
+control plane   Caddy → 127.0.0.1:<slot port> → container:3000
+data plane      raw   → 0.0.0.0:<public_port> → container:<data_plane_port>
+```
+
+The control plane is untouched — same URL, same SSO, same identity headers, same
+access logs. Only the data plane is undefended, and the loss table above is what
+it loses. Three rules make that split real:
+
+- **`data_plane_port` may not be 3000**, and a request that sets it is refused
+  with a 400. Port 3000 is the container's HTTP control plane, the port Caddy
+  proxies to; publishing it raw would re-expose the app's ordinary HTTP origin
+  with no TLS, no `forward_auth`, no identity headers and no audit — exactly the
+  surface Caddy is in the path to protect, with no signal to the operator that
+  they had done it. `dual` with **no** `data_plane_port` is refused for the same
+  reason: the publish must target *some* container port, 3000 is the only other
+  one there, and AppCrane will not guess. The runtime refuses such a row too — it
+  emits no public `-p` at all rather than falling back to 3000.
+- **Health checks follow the control plane.** A `tcp` app gets a TCP handshake
+  because it cannot answer an HTTP probe; a dual app can, so it keeps the ordinary
+  HTTP health check on container port 3000 and its data plane is never probed. A
+  handshake on a raw listener succeeds as long as the socket is bound, so probing
+  the data plane would let a wedged control plane — the plane users actually reach
+  — report healthy and a broken release go green.
+- **The host port is unique; the container port deliberately is not.** The partial
+  unique index on `apps(public_port)` still gives one host port to one app.
+  `data_plane_port` has no such constraint and should not gain one: container
+  network namespaces are separate, so two apps can each run a data plane on
+  container port 8081 without ever meeting.
+
+`dual` is a third enum value rather than a flag on an `http` app because
+`ingress_type` is the field an operator, an audit entry and an MCP payload all read
+to learn what doors an app has — a row saying `http` while the app published a raw
+port would make that field actively wrong. It also fails safe: code that predates
+`dual` compares `=== 'tcp'`, gets `false`, and takes the HTTP path, which is the
+correct one for a dual app. An app that sets nothing is still `http` and behaves
+exactly as before; a pre-v2.45.0 `tcp` app still publishes container port 3000 and
+still gets its handshake health check.
+
 An app on a published port can still authenticate against the platform if it
 chooses to: `GET /api/me?app=<slug>` verifies a `Bearer` token or `X-API-Key: dhk_*`
 the client supplied, and `POST /api/service/*` authenticates the app itself with
@@ -464,8 +524,18 @@ the `APPCRANE_SERVICE_TOKEN` injected into every container. Both go over the
 docker bridge (`CRANE_INTERNAL_URL`), not through Caddy.
 
 `public_port` is allocated and stored per app (never derived from the app's slot,
-which can be reassigned), unique across apps, and every change is written to the
-audit log as `app-ingress-change`. **Treat publishing as the exposing act** — do
+which can be reassigned), unique across apps, and every change — including
+`data_plane_port` — is written to the audit log as `app-ingress-change`. Both
+numbers are pinned: they survive a flip back to `http` so that flipping forward
+restores the ports a client fleet is already configured for, and they read back as
+`null` while the app is not publishing. On the way back in `data_plane_port` is
+re-validated; `public_port` is not — a held number is reinstated as-is, so re-pin
+it explicitly if the app has been parked on `http` while the platform grew.
+Flipping a `dual` app to `tcp` is refused while it still holds a
+`data_plane_port`, because `tcp` publishes container port 3000 and the flip would
+silently repoint the same host port onto the control plane; send
+`data_plane_port: null` in the same request to drop the data plane on purpose.
+**Treat publishing as the exposing act** — do
 not assume a host firewall is holding the port shut. A Docker publish is a DNAT
 rule evaluated in `FORWARD` that never traverses `INPUT`, so a plain `ufw deny`
 does **not** block it; filter in the `DOCKER-USER` chain or upstream of the host.
