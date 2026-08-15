@@ -39,6 +39,10 @@ interface App {
   // The CONTAINER side of a dual app's raw publish. Null on every other type —
   // a pure-tcp app publishes the whole container, so it has no second number.
   data_plane_port?: number | null
+  // v2.45.3: whether the RUNNING container actually carries the configured
+  // publish. null = could not be read, which is NOT the same as "closed".
+  publish_applied?: boolean | null
+  publish_drift?: { state: string; message: string } | null
   // A port the app was switched away from but whose container has not been
   // recreated yet: AppCrane publishes nothing, the host port is still open.
   // Reported by the API rather than inferred here — the UI can't know what the
@@ -1678,10 +1682,17 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                           className="btn btn-xs btn-icon"
                           onClick={() => openIngress(app)}
                           aria-label={`Ingress for ${app.name}`}
-                          style={publishesPort(app.ingress_type)
+                          style={app.publish_drift && app.publish_applied === false
+                            // A configured publish that is NOT live outranks the
+                            // red "this app is exposed" colour: red says a port
+                            // is open, and here the point is that it is not.
+                            ? { color: 'var(--amber, #f59e0b)' }
+                            : publishesPort(app.ingress_type)
                             ? { color: 'var(--red, #ef4444)' }
                             : app.pending_port_release ? { color: 'var(--amber, #f59e0b)' } : undefined}
-                          title={app.ingress_type === 'dual'
+                          title={app.publish_drift && app.publish_applied === false
+                            ? `Ingress: ${app.publish_drift.message}`
+                            : app.ingress_type === 'dual'
                             ? `Ingress: dual — HTTP control plane through Caddy (SSO, TLS, identity headers, logging), plus a raw data plane on host port ${app.public_port ?? '(not allocated)'} → container port ${app.data_plane_port ?? '(not set)'} that is not behind AppCrane auth`
                             : app.ingress_type === 'tcp'
                             ? `Ingress: raw TCP on host port ${app.public_port ?? '(not allocated)'} — not behind AppCrane auth`

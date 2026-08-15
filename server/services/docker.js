@@ -397,6 +397,7 @@ export async function startApp({ slug, env, image, hostPort, envVars = {}, volum
 
   args.push(image);
   const id = await dockerExec(args);
+  invalidatePublishedPortsCache();   // the bindings just changed
   log.info(`docker started: ${name} (${id.slice(0, 12)}) from ${image}`);
   if (publish) {
     // The container port is in the line because it is the one fact that says
@@ -423,6 +424,7 @@ export async function stopApp(slug, env) {
   const name = containerName(slug, env);
   try { await dockerExec(['stop', name], { timeout: 15000 }); } catch (e) {}
   try { await dockerExec(['rm', '-f', name]); } catch (e) {}
+  invalidatePublishedPortsCache();
   log.debug(`docker stopped: ${name}`);
 }
 
@@ -489,6 +491,81 @@ export async function listAll() {
   } catch (e) {
     return [];
   }
+}
+
+/**
+ * Every NON-LOOPBACK port binding, per app slug, in ONE `docker ps` call.
+ *
+ * Feeds ingressDrift(), which answers "is the configured publish actually
+ * live". Deliberately a single invocation rather than an inspect per app: the
+ * catalog endpoint lists every app on the platform, and a subprocess spawn per
+ * app there is exactly the shape of cost that made Settings slow.
+ *
+ * Only RUNNING containers, and only production — a stopped container publishes
+ * nothing, and the public port is production's alone (see publicPublishTargets).
+ *
+ * Returns a Map<slug, { publishes: [{hostIp, hostPort, containerPort}] }>, with
+ * an entry for every running production container INCLUDING those that publish
+ * nothing (an empty array is the meaningful answer "it is up and binds no public
+ * port"). A slug absent from the map has no running production container, which
+ * the caller must report as unknown rather than as unpublished.
+ *
+ * Null on failure — never an empty map, which would read as "nothing is
+ * published anywhere" and turn a Docker outage into a wall of false drift.
+ */
+// /api/apps is one of the hottest endpoints on the platform, so this cannot
+// spawn a subprocess on every call. Bindings only change when a container is
+// created or destroyed, and both of those paths invalidate below — the TTL is
+// just a backstop for a container changed by something other than AppCrane.
+const PUBLISHED_PORTS_TTL_MS = 5000;
+let publishedPortsCache = null;   // { at, map }
+
+export function invalidatePublishedPortsCache() { publishedPortsCache = null; }
+
+export async function publishedPortsBySlug() {
+  if (publishedPortsCache && Date.now() - publishedPortsCache.at < PUBLISHED_PORTS_TTL_MS) {
+    return publishedPortsCache.map;
+  }
+  try {
+    const out = await dockerExec([
+      'ps', '--filter', `label=${APPCRANE_LABEL}`, '--filter', 'label=env=production',
+      '--format', '{{.Label "slug"}}|{{.Ports}}',
+    ]);
+    const map = new Map();
+    if (!out) return map;
+    for (const line of out.split('\n')) {
+      const [slug, ports] = line.split('|');
+      if (!slug) continue;
+      map.set(slug, { publishes: parsePublishedPorts(ports) });
+    }
+    publishedPortsCache = { at: Date.now(), map };
+    return map;
+  } catch (e) {
+    log.warn(`[ingress] could not read published ports: ${e.message}`);
+    return null;   // never cached — a Docker blip must not pin "unknown" for the TTL
+  }
+}
+
+/**
+ * Parse the `{{.Ports}}` column, e.g.
+ *   "127.0.0.1:4013->3000/tcp, 0.0.0.0:8080->10800/tcp, 9229/tcp"
+ *
+ * Loopback bindings are dropped: 127.0.0.1:<slot>->3000 is the control-plane
+ * publish every app has and is not reachable off the host, so reporting it as a
+ * public port would make every app look like it drifted. Entries with no host
+ * side at all (an EXPOSE with no publish) are not bindings and are dropped too.
+ */
+export function parsePublishedPorts(ports) {
+  if (!ports) return [];
+  const out = [];
+  for (const part of ports.split(',')) {
+    const m = part.trim().match(/^(\[[^\]]+\]|[^:]+):(\d+)->(\d+)\/\w+$/);
+    if (!m) continue;
+    const hostIp = m[1];
+    if (hostIp === '127.0.0.1' || hostIp === '[::1]') continue;
+    out.push({ hostIp, hostPort: Number(m[2]), containerPort: Number(m[3]) });
+  }
+  return out;
 }
 
 export async function pruneOldImages(slug, env, keep = 2) {

@@ -1731,8 +1731,29 @@ const TOOLS = [
       // where ingress_type alone lies about the host: AppCrane publishes
       // nothing, and the port still answers.
       const stillBound = pendingPortRelease(app);
+      // v2.45.3: what the RUNNING container actually binds. Everything above is
+      // the app row — intent — and reporting intent as fact is what sent an
+      // operator chasing SDP and firewall rules for a port whose container had
+      // simply never been recreated. The publish is a docker run flag.
+      const { publishedPortsBySlug } = await import('./docker.js');
+      const { ingressDrift } = await import('./ingressDrift.js');
+      const observedMap = await publishedPortsBySlug();
+      const observed = observedMap ? (observedMap.get(app.slug) ?? null) : null;
+      const { applied, drift } = ingressDrift(app, observed);
       // One string for both publishing types: the filtering story is a property
       // of a Docker publish, not of why the app asked for one.
+      // published_as used to be built purely from the row, so it asserted a
+      // mapping that might not exist anywhere. It now carries the verdict with
+      // it — an agent reading only this one string must not come away believing
+      // a port is live when it is not.
+      // Only annotated when the container was actually READ and found not to
+      // carry the publish. An unreadable container leaves the string clean and
+      // says so in publish_applied: null — appending "could not verify" to every
+      // read on a host where Docker is unreachable would put noise on the common
+      // case to describe a state that already has its own field, and would make
+      // the string harder to parse for the exact readers it exists to inform.
+      const withReality = (intent) =>
+        applied === false && drift ? `${intent} — CONFIGURED BUT NOT LIVE: ${drift.message}` : intent;
       const FIREWALL_NOTE = 'AppCrane publishes the port; it does not manage host filtering. Do NOT treat the host firewall as an independent second key: a published port is a DNAT rule evaluated in nat/FORWARD and never traverses INPUT, so a plain `ufw deny` or a default-deny INPUT policy does NOT block it. Filter in the DOCKER-USER chain, or upstream of the host. On this deployment the host sits behind SDP, so the boundary is the perimeter rather than the internet — the port is reachable by everything SDP admits.';
       return {
         app: app.slug,
@@ -1740,6 +1761,10 @@ const TOOLS = [
         public_port: publicPort,
         data_plane_port: effectiveDataPlanePort(app),
         pending_port_release: stillBound,
+        // The row says what SHOULD be published; these say what IS. null means
+        // the container could not be read — not that the port is closed.
+        publish_applied: applied,
+        ...(drift ? { publish_drift: drift } : {}),
         ...(stillBound !== null ? {
           pending_port_release_note: `This app was switched back to http while a container was running. AppCrane no longer publishes port ${stillBound} and will not give it to another app, but the container that is up right now still binds 0.0.0.0:${stillBound}, so the port stays reachable and unauthenticated until the container is recreated (a deploy, or POST /api/apps/${app.slug}/restart/production). Do not report the exposure as closed before that.`,
         } : {}),
@@ -1750,7 +1775,7 @@ const TOOLS = [
         // the door.
         exposure: ingressType === 'tcp'
           ? {
-              published_as: publicPort ? `0.0.0.0:${publicPort} -> container:${containerPort}` : 'not published — no public_port allocated yet',
+              published_as: withReality(publicPort ? `0.0.0.0:${publicPort} -> container:${containerPort}` : 'not published — no public_port allocated yet'),
               behind_appcrane_auth: false,
               summary: 'This port does NOT pass through Caddy: no forward_auth/SSO, no X-AppCrane-* identity headers, no per-request audit, no rate limiting, no security headers, no TLS from AppCrane. The app authenticates every connection itself. This host is behind SDP, so the port is not internet-facing — it is reachable by everything inside that perimeter. For a forward/CONNECT proxy, a gap in the app\'s own proxy auth is therefore an unaudited egress path out of the perimeter, which AppCrane cannot log because the traffic never touches Caddy. The app can still authenticate callers against AppCrane: /api/me with the user\'s bearer token, or /api/service with its own APPCRANE_SERVICE_TOKEN over the docker bridge.',
               firewall: FIREWALL_NOTE,
@@ -1763,11 +1788,11 @@ const TOOLS = [
           // planes are then reported separately.
           : ingressType === 'dual'
           ? {
-              published_as: publicPort && containerPort
+              published_as: withReality(publicPort && containerPort
                 ? `0.0.0.0:${publicPort} -> container:${containerPort}`
                 : (publicPort === null
                     ? 'not published — no public_port allocated yet'
-                    : `not published — data_plane_port is missing or is the control plane (${CONTROL_PLANE_PORT}), so AppCrane refuses to publish anything for this app`),
+                    : `not published — data_plane_port is missing or is the control plane (${CONTROL_PLANE_PORT}), so AppCrane refuses to publish anything for this app`)),
               behind_appcrane_auth: false,
               summary: `This app has TWO planes with different security properties. CONTROL plane: ordinary HTTP on container port ${CONTROL_PLANE_PORT}, served through Caddy exactly like any http app — TLS, AppCrane SSO/forward_auth, X-AppCrane-* identity headers, security headers and access logs all still apply, and that is the plane its health check probes. DATA plane: container port ${containerPort ?? app.data_plane_port} published raw at 0.0.0.0:${publicPort ?? '<unallocated>'}, with Caddy nowhere in the path — no forward_auth/SSO, no identity headers, no per-request audit, no rate limiting, no security headers, no TLS from AppCrane. The app authenticates every connection on the data plane itself. This host is behind SDP, so the published port is not internet-facing — it is reachable by everything inside that perimeter. Note what the split does NOT protect: the two planes are the same process in the same container, so a flaw reachable on the data plane is reachable in the code that serves the control plane too.`,
               control_plane: {

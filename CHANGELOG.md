@@ -5,6 +5,29 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.45.3 — "Configured" and "actually published" are now two different answers.
+
+**AppCrane reported a port mapping that existed nowhere.** `appcrane_get_app_ingress` answered `published_as: 0.0.0.0:8080 -> container:10800` for an app whose container bound nothing at all — and every other read surface agreed, because all of them described the app ROW. Nothing described the running container. The operator who trusted it spent an afternoon on SDP, DNS and firewall rules for a port that was never opened.
+
+The cause is structural rather than a bug: a port publish is a `docker run` argument. Setting ingress on an app that is already running changes the row and nothing else — the container keeps the command line it was created with until it is **recreated**.
+
+Underneath that sits a trap worth naming on its own: **not every restart recreates.** The health checker's automatic restart is `docker restart`, which reuses the existing container and therefore its bindings, so an app can bounce all day and never publish. Only a path through `startApp()` applies it — `POST /api/apps/<slug>/restart/<env>`, a deploy, or a rollback.
+
+**Every ingress read now compares the row against the container.** `publish_applied` is `true`, `false`, or `null`, and `publish_drift` carries a state and a remedy:
+
+- `not_applied` — configured, container binds nothing. The message says to recreate, and says a plain `docker restart` will not do it.
+- `stale` — the container publishes a *different* mapping, naming both what clients reach now and what was configured.
+- `orphan` — the row publishes nothing but the container still binds a port. `pending_port_release` covers this when AppCrane made the change; this catches a row edited directly or restored from a backup.
+- `unknown` — the container could not be read. Reported as `applied: null`, **never** as "not published": answering "closed" because we failed to look would be the same class of wrong answer this change removes.
+
+`published_as` now carries the verdict inline — `— CONFIGURED BUT NOT LIVE: …` — because an agent reading that one string was the reader that got misled. It is annotated **only** when the container was read and found lacking; an unreadable daemon leaves the string clean and says so in `publish_applied`.
+
+In the dashboard the ingress icon turns **amber** for a configured-but-not-live publish, outranking the red "this app is exposed" colour: red means a port is open, and the whole point here is that it is not.
+
+**Cost control:** one `docker ps` for the entire catalog, cached briefly and invalidated whenever a container is created or destroyed — not an inspect per app, which would have put a subprocess spawn per app on the platform's hottest endpoint.
+
+Twenty-four tests, each verified failing first. Making the comparison always report "applied" turns the live reproduction red; counting the loopback control-plane publish as a public port turns the parser tests red; restoring the old always-report-intent string turns the payload tests red. The live test reproduces the incident exactly — start an app as plain http, set it to dual, confirm it reads NOT applied and the port really is refused, then recreate and confirm both flip.
+
 ## 2.45.2 — Opening Settings made 48 API calls to show one tab. Now it makes 15.
 
 **Measured, before and after, in a browser against a real instance with 12 apps:** 48 requests → 15. `/api/apps` went from 5 to 1.

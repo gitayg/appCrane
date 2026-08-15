@@ -9,6 +9,7 @@ import { AppError } from '../utils/errors.js';
 import { resolveSafe } from '../utils/paths.js';
 import { reloadCaddy } from '../services/caddy.js';
 import { validateBypassPaths } from '../utils/authBypassPaths.js';
+import { ingressDrift } from '../services/ingressDrift.js';
 import { resolveVisibility } from '../utils/appVisibility.js';
 import { pruneGrantsForNonMembers } from '../services/appDefinedRoles.js';
 import {
@@ -50,12 +51,25 @@ import {
 // the pair together is simpler to reason about than deciding which half is the
 // secret. Reported EFFECTIVE, so a number left over from a previous dual
 // configuration reads as null on an app that is no longer dual.
-function ingressFields(app, canSeePort = true) {
+//
+// v2.45.3: `observed` carries what the RUNNING container actually binds, so a
+// reader can tell a configured publish from a live one. Everything above this
+// point is the app ROW — intent — and a port publish is a `docker run` flag, so
+// setting ingress on a running app changes the row and nothing else until the
+// container is recreated. Reporting intent as fact is what turned a stale
+// container into an afternoon of firewall and VPN debugging.
+//
+// Optional, and `undefined` when not supplied rather than `false`: a caller that
+// did not look must not be made to say the port is closed. Gated behind the same
+// canSeePort check as the ports themselves — the drift message names them.
+function ingressFields(app, canSeePort = true, observed = undefined) {
+  const drift = canSeePort && observed !== undefined ? ingressDrift(app, observed) : null;
   return {
     ingress_type: effectiveIngressType(app.ingress_type),
     public_port: canSeePort ? publicPortForApp(app) : undefined,
     data_plane_port: canSeePort ? effectiveDataPlanePort(app) : undefined,
     pending_port_release: canSeePort ? pendingPortRelease(app) : undefined,
+    ...(drift ? { publish_applied: drift.applied, publish_drift: drift.drift } : {}),
   };
 }
 
@@ -169,7 +183,7 @@ router.use(requireAuth);
  *
  * Hidden apps still stay invisible to non-admins.
  */
-router.get('/', (req, res) => {
+router.get('/', async (req, res) => {
   const db = getDb();
   let apps;
 
@@ -188,6 +202,13 @@ router.get('/', (req, res) => {
   // access. Batch-fetched up front to avoid N+1 query per app row.
   // For admins, role is implicitly 'admin' on every app via the global
   // gate — we still surface it so the SPA doesn't have to special-case.
+  // v2.45.3: one `docker ps` for the whole catalog, cached for a few seconds and
+  // invalidated whenever a container is created or destroyed. Per-app inspects
+  // here would put one subprocess spawn per app on the platform's hottest
+  // endpoint — the same cost shape that made Settings slow.
+  const { publishedPortsBySlug } = await import('../services/docker.js');
+  const observedBySlug = await publishedPortsBySlug();
+
   const userRolesBySlug = new Map();
   if (!isAdmin(req.user)) {
     const rows = db.prepare(`
@@ -250,7 +271,8 @@ router.get('/', (req, res) => {
       resource_limits: JSON.parse(app.resource_limits || '{}'),
       auth_bypass_paths: parseBypassPathsField(app.auth_bypass_paths),
       auth_mode: effectiveAuthMode(app.auth_mode),
-      ...ingressFields(app, userAppRole(app) !== 'none'),
+      ...ingressFields(app, userAppRole(app) !== 'none',
+        observedBySlug ? (observedBySlug.get(app.slug) ?? null) : null),
       has_icon: hasIconFile(app.slug),
       // Boolean flags derived from secret-bearing columns so the UI can
       // show "this app has its own X" without ever shipping the secret.
@@ -410,7 +432,7 @@ router.post('/', requireAuth, auditMiddleware('app-create'), async (req, res) =>
 /**
  * GET /api/apps/:slug - App detail
  */
-router.get('/:slug', requireAppAccess, (req, res) => {
+router.get('/:slug', requireAppAccess, async (req, res) => {
   const db = getDb();
   const app = req.app;
   const ports = getPortsForSlot(app.slot);
@@ -437,8 +459,16 @@ router.get('/:slug', requireAppAccess, (req, res) => {
     sandbox: `https://${craneDomainDetail}/${app.slug}-sandbox`,
   } : null;
 
+  // What the production container actually binds, so the payload can say whether
+  // the configured publish is live. `null` from the reader (Docker unreachable)
+  // and a slug with no running container both resolve to null, which
+  // ingressDrift reports as UNKNOWN rather than as closed.
+  const { publishedPortsBySlug } = await import('../services/docker.js');
+  const observedMap = await publishedPortsBySlug();
+  const observedDetail = observedMap ? (observedMap.get(app.slug) ?? null) : null;
+
   res.json({
-    app: { ...app, resource_limits: JSON.parse(app.resource_limits || '{}'), auth_bypass_paths: parseBypassPathsField(app.auth_bypass_paths), auth_mode: effectiveAuthMode(app.auth_mode), ...ingressFields(app) },
+    app: { ...app, resource_limits: JSON.parse(app.resource_limits || '{}'), auth_bypass_paths: parseBypassPathsField(app.auth_bypass_paths), auth_mode: effectiveAuthMode(app.auth_mode), ...ingressFields(app, true, observedDetail) },
     urls: urlsDetail,
     base_path: { production: `/${app.slug}/`, sandbox: `/${app.slug}-sandbox/` },
     ...(isAdmin(req.user) ? { ports } : {}),
