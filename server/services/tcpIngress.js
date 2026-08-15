@@ -7,6 +7,12 @@
  * forward/CONNECT proxy speaks raw TCP and no HTTP reverse proxy can express
  * a tunnel.
  *
+ * v2.45.0 adds a THIRD type, 'dual', for an app that is both at once: an
+ * ordinary HTTP control plane served through Caddy on CONTROL_PLANE_PORT, plus
+ * a raw data plane published at 0.0.0.0:<public_port> -> <data_plane_port>
+ * inside the same container. See INGRESS_TYPES for why this is a type rather
+ * than "an http app that happens to hold a port".
+ *
  * SECURITY: a directly-published port has no forward_auth, no identity
  * headers, no per-request audit, no rate limiting, no security headers and no
  * TLS from AppCrane. Those controls all live in Caddy, so they simply do not
@@ -19,15 +25,81 @@ import { getPortsForSlot } from './portAllocator.js';
 import { isPortSafe } from './blockedPorts.js';
 
 /**
- * Dedicated range so the operator's firewall rule is one predictable block
- * instead of a per-app list. Nothing in the WHATWG bad-ports list falls in
- * here, but every candidate is still run through isPortSafe() rather than
- * assumed safe — the list is external and can grow.
+ * Two different questions, conflated until v2.45.0 and now separated.
+ *
+ * AUTO_* is the band an ALLOCATED port comes from: a dedicated block so the
+ * operator's firewall rule is one predictable range instead of a per-app list.
+ * That property is worth keeping for the common case, where nobody cares what
+ * the number is.
+ *
+ * PUBLIC_PORT_* is the range an operator may explicitly NAME, and it is wide,
+ * because the number is not always ours to choose. Clients get configured with
+ * a host and a port — by hand, by MDM, in a product's own settings — and when
+ * they already point at 8080, "use 31000 instead" is not a platform decision,
+ * it is a request to go and reconfigure a fleet of clients. Refusing that is
+ * how a platform gets worked around rather than used.
+ *
+ * Narrowing the range was never what made this safe. The real guards are in
+ * assertPublicPortAssignable and apply to every port whatever its value: the
+ * WHATWG blocked list, AppCrane's own listening port, Caddy's admin endpoint, a
+ * collision with any slot-derived backend port, and the partial unique index
+ * that stops two apps holding one number. Those matter MORE now the range is
+ * wide, not less — on a platform with enough apps a number like 8080 lands on a
+ * slot-derived backend port, and slotPortConflict is what catches it.
+ *
+ * Privileged ports stay out as POLICY, not because they would fail. The host
+ * side of a `-p` publish is bound by the Docker daemon as root, so
+ * `-p 0.0.0.0:81:3000` starts perfectly well (measured). The floor is here to
+ * keep apps off the ports the platform itself depends on — 22, 80 and 443,
+ * which Caddy needs — and stating a capability reason instead would invite a
+ * future reader to "fix" it by granting a capability that was never the issue.
  */
-export const PUBLIC_PORT_MIN = 31000;
-export const PUBLIC_PORT_MAX = 31999;
+export const AUTO_PORT_MIN = 31000;
+export const AUTO_PORT_MAX = 31999;
+export const PUBLIC_PORT_MIN = 1024;
+export const PUBLIC_PORT_MAX = 65535;
 
-export const INGRESS_TYPES = ['http', 'tcp'];
+/**
+ * The container port every app's CONTROL plane listens on: AppCrane sets
+ * PORT=3000 in the container and publishes 127.0.0.1:<slot port>:3000, which is
+ * the binding Caddy proxies to and the health probe checks.
+ *
+ * Mirrors docker.js's CONTAINER_PORT, and lives here because the dependency
+ * already runs docker.js -> tcpIngress.js: this module has to know the number to
+ * refuse it as a data-plane port, and importing it the other way would be a
+ * cycle.
+ */
+export const CONTROL_PLANE_PORT = 3000;
+
+/**
+ * 'dual' is a third TYPE rather than "an http app that also holds a port".
+ *
+ * An app can genuinely have both planes: an HTTP control plane that must keep
+ * everything Caddy gives it (TLS, forward_auth, identity headers, audit) and a
+ * raw data plane whose clients are already configured for a specific host port
+ * and a DIFFERENT port inside the container. Stock Caddy cannot carry the second
+ * one — raw TCP needs the layer4 plugin and a custom xcaddy build (BACKLOG.md) —
+ * so a direct Docker publish is the passthrough.
+ *
+ * Modelling that as an http app with a data_plane_port set was the alternative,
+ * and it was rejected for one reason: the row would say 'http' while the app
+ * published a raw, unauthenticated host port. ingress_type is the field an
+ * operator (and every audit entry, MCP payload and dashboard row) reads to learn
+ * what doors an app has, so it has to NAME the exposure rather than leave it to
+ * be inferred from a second column being non-null.
+ *
+ * Compatibility, both directions:
+ *  - An app that sets nothing is 'http' — the column default, and effectively
+ *    'http' for every pre-072 row. Nothing about it changes.
+ *  - A v2.42.0 pure-tcp app keeps working unchanged: it has no control plane, so
+ *    its publish still targets CONTROL_PLANE_PORT, which is where PORT=3000 tells
+ *    the container to listen.
+ *  - Runtime code that has not learned about 'dual' compares === 'tcp' and gets
+ *    false, so a dual app falls back to the HTTP behaviour — an HTTP health
+ *    probe on the control plane, which is the correct signal for it (see
+ *    dataPlanePortForApp). The unhandled case degrades to the safe one.
+ */
+export const INGRESS_TYPES = ['http', 'tcp', 'dual'];
 
 /**
  * How far past the highest allocated slot we still treat getPortsForSlot()
@@ -47,16 +119,16 @@ function fail(message, status, code) {
  * Report the EFFECTIVE type rather than the raw column, mirroring
  * effectiveAuthMode(): the value is validated on write, but a legacy row
  * (every row that existed before migration 072) or a hand-edited one must
- * still read back as the behaviour the runtime actually implements — only the
- * literal 'tcp' gets a published host port.
+ * still read back as the behaviour the runtime actually implements — only a
+ * literal member of the vocabulary gets a published host port.
  */
 export function effectiveIngressType(raw) {
-  return raw === 'tcp' ? 'tcp' : 'http';
+  return INGRESS_TYPES.includes(raw) ? raw : 'http';
 }
 
 export function validateIngressType(value) {
   if (!INGRESS_TYPES.includes(value)) {
-    throw fail("ingress_type must be 'http' or 'tcp'", 400, 'VALIDATION');
+    throw fail(`ingress_type must be one of ${INGRESS_TYPES.join(', ')}`, 400, 'VALIDATION');
   }
   return value;
 }
@@ -66,17 +138,121 @@ export function isTcpApp(app) {
 }
 
 /**
- * The host port to publish for this app row, or null when there is nothing to
- * publish. Both conditions matter: an http app never publishes, and a tcp app
- * whose allocation has not landed yet must not publish port `null`.
+ * Does this app's TYPE put a port on 0.0.0.0? True for the two publishing
+ * types and nothing else. Separate from publicPortForApp() because the type is
+ * what decides whether a held port is a live reservation or a leftover.
+ */
+export function publishesPublicPort(app) {
+  const type = effectiveIngressType(app?.ingress_type);
+  return type === 'tcp' || type === 'dual';
+}
+
+/**
+ * The two ends of the public publish — `{ host, container }` — or null when
+ * this app publishes nothing.
  *
- * This is the one call the runtime (docker.js, healthChecker.js) needs — it
- * answers "is this app tcp, and on what public port" from an app row that has
- * already been read, with no second query.
+ * Every condition here is a refusal to publish something half-specified, because
+ * the failure mode of guessing is a raw port on the host:
+ *  - an http app never publishes;
+ *  - a publishing app whose allocation has not landed yet must not publish port
+ *    `null`;
+ *  - a 'dual' row whose data_plane_port is missing or is CONTROL_PLANE_PORT
+ *    publishes NOTHING. Defaulting it to the control-plane port would put the
+ *    HTTP origin Caddy fronts onto a public port with no TLS, no forward_auth,
+ *    no identity headers and no audit — the exact surface Caddy exists to
+ *    protect. The write path already rejects that value (validateDataPlanePort);
+ *    this is the same guard at the runtime edge, for a row that got there some
+ *    other way.
+ */
+function publishTargets(app) {
+  if (!publishesPublicPort(app)) return null;
+  if (!Number.isInteger(app?.public_port)) return null;
+  // A pure-tcp app has no control plane to protect: the container is told
+  // PORT=3000 and the whole of it is the data plane, so the publish targets
+  // CONTROL_PLANE_PORT exactly as it did in v2.42.0.
+  if (isTcpApp(app)) return { host: app.public_port, container: CONTROL_PLANE_PORT };
+  const container = effectiveDataPlanePort(app);
+  if (container === null || container === CONTROL_PLANE_PORT) return null;
+  return { host: app.public_port, container };
+}
+
+/**
+ * The host port to publish for this app row, or null when there is nothing to
+ * publish.
+ *
+ * This and dataPlanePortForApp() are the pair the runtime (docker.js,
+ * healthChecker.js) needs — together they answer "does this app publish, on
+ * what host port, and to what port inside the container" from an app row that
+ * has already been read, with no second query. A caller that publishes
+ * publicPortForApp() must take the container side from dataPlanePortForApp()
+ * rather than assuming CONTROL_PLANE_PORT.
  */
 export function publicPortForApp(app) {
-  if (!isTcpApp(app)) return null;
-  return Number.isInteger(app?.public_port) ? app.public_port : null;
+  return publishTargets(app)?.host ?? null;
+}
+
+/**
+ * The CONTAINER port the public publish targets, or null when this app
+ * publishes nothing. CONTROL_PLANE_PORT for a pure-tcp app, the app's own
+ * data_plane_port for a dual one.
+ */
+export function dataPlanePortForApp(app) {
+  return publishTargets(app)?.container ?? null;
+}
+
+/**
+ * The data-plane port as CONFIGURED — what every read surface reports.
+ *
+ * Null unless the app is 'dual', on the same terms as publicPortForApp(): the
+ * stored number survives a flip away from dual (so flipping back restores the
+ * port clients are configured for) but must not read back as if it were in
+ * effect. Unlike dataPlanePortForApp() this does not require a host-port
+ * allocation to exist — a dual app between "type set" and "port allocated" has
+ * a real configured data-plane port to show.
+ */
+export function effectiveDataPlanePort(app) {
+  if (effectiveIngressType(app?.ingress_type) !== 'dual') return null;
+  return Number.isInteger(app?.data_plane_port) ? app.data_plane_port : null;
+}
+
+/**
+ * Throw unless `port` is a legal data-plane port.
+ *
+ * SECURITY: CONTROL_PLANE_PORT is refused. A data plane published at
+ * 0.0.0.0:<public_port>:3000 is not a data plane at all — it is the app's HTTP
+ * control plane re-published raw, without TLS, forward_auth, identity headers,
+ * rate limiting or a single audit entry, and the operator who typed it would
+ * have no signal that they had done it. That is precisely what Caddy is in the
+ * path for.
+ *
+ * The lower bound IS a policy choice, and the numbers are PUBLIC_PORT_MIN/MAX
+ * only because they happen to coincide. A container process here can bind a
+ * privileged port perfectly well — AppCrane drops only NET_RAW and passes no
+ * --user, so the root process inside keeps CAP_NET_BIND_SERVICE (measured: a
+ * container under these exact flags binds :80). The floor exists so a data
+ * plane cannot be pointed at the ports the platform's own conventions reserve.
+ *
+ * The WHATWG blocked list deliberately does NOT apply: it exists because Node's
+ * fetch() refuses those ports, and nothing fetches the data plane — the health
+ * probe stays on the control plane, and the clients are not undici.
+ */
+export function validateDataPlanePort(value) {
+  if (!Number.isInteger(value)) {
+    throw fail('data_plane_port must be an integer', 400, 'VALIDATION');
+  }
+  if (value < PUBLIC_PORT_MIN || value > PUBLIC_PORT_MAX) {
+    throw fail(`data_plane_port must be between ${PUBLIC_PORT_MIN} and ${PUBLIC_PORT_MAX}`, 400, 'VALIDATION');
+  }
+  if (value === CONTROL_PLANE_PORT) {
+    throw fail(
+      `data_plane_port cannot be ${CONTROL_PLANE_PORT}: that is the container's HTTP control plane, ` +
+      'the port Caddy proxies to. Publishing it raw on the host would expose the app\'s ordinary ' +
+      'HTTP origin with no TLS, no forward_auth, no identity headers and no request audit. Give the ' +
+      'data plane its own listener on another port inside the container.',
+      400, 'VALIDATION',
+    );
+  }
+  return value;
 }
 
 /**
@@ -100,13 +276,24 @@ export function publicPortForApp(app) {
  * publishes nothing, and the host port may still answer.
  */
 export function pendingPortRelease(app) {
-  if (isTcpApp(app)) return null;
+  // Keyed on the TYPE, not on publishTargets(): an app whose type still
+  // publishes is holding its port on purpose, even in an intermediate state
+  // where nothing is published yet (allocation not landed, dual without a data
+  // plane port). Only a flip to http makes the number a leftover.
+  if (publishesPublicPort(app)) return null;
   return Number.isInteger(app?.public_port) ? app.public_port : null;
 }
 
-/** Same answer for callers that hold only an app id. */
+/**
+ * Same answer for callers that hold only an app id.
+ *
+ * data_plane_port is in the SELECT because publicPortForApp() routes through
+ * publishTargets(), which needs it to answer for a 'dual' row: without the
+ * column every dual app read through here reported public_port null while it
+ * was in fact publishing, so this was not the same answer at all.
+ */
 export function getIngressForApp(db, appId) {
-  const row = db.prepare('SELECT ingress_type, public_port FROM apps WHERE id = ?').get(appId);
+  const row = db.prepare('SELECT ingress_type, public_port, data_plane_port FROM apps WHERE id = ?').get(appId);
   return {
     ingress_type: effectiveIngressType(row?.ingress_type),
     public_port: publicPortForApp(row),
@@ -115,6 +302,28 @@ export function getIngressForApp(db, appId) {
 
 function cranePort() {
   return Number(process.env.PORT || 5001);
+}
+
+/**
+ * Caddy's admin endpoint, the port reloadCaddy() POSTs the new config to. Same
+ * default and same env var as caddy.js, so the two cannot disagree about which
+ * port that is.
+ *
+ * SECURITY / AVAILABILITY: this became reachable in v2.45.0. While an explicit
+ * public_port had to come from 31000-31999 the number was structurally out of
+ * play; the widened 1024-65535 range put it back on the table, and none of the
+ * other guards catch it — 2019 is not on the WHATWG list, and slotPortConflict
+ * skips it because both slot offsets are negative. On Linux a `docker run -p
+ * 0.0.0.0:2019` cannot bind while Caddy holds 127.0.0.1:2019 (measured: EADDRINUSE),
+ * so the app's deploy dies with "port is already allocated" — and if the
+ * container wins the race instead, Caddy's admin API cannot bind on restart and
+ * every reloadCaddy() fails afterwards, for every app on the platform, with
+ * nothing pointing at the cause.
+ */
+function caddyAdminPort() {
+  const url = process.env.CADDY_ADMIN_URL || 'http://localhost:2019';
+  const parsed = Number(new URL(url).port);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : 2019;
 }
 
 /**
@@ -164,6 +373,12 @@ export function assertPublicPortAssignable(db, port, appId) {
   if (port === cranePort()) {
     throw fail(`Port ${port} is AppCrane's own listening port`, 409, 'PORT_RESERVED');
   }
+  if (port === caddyAdminPort()) {
+    throw fail(
+      `Port ${port} is Caddy's admin endpoint — the port AppCrane reloads every app's routing through`,
+      409, 'PORT_RESERVED',
+    );
+  }
   const slotClash = slotPortConflict(db, port);
   if (slotClash) {
     throw fail(`Port ${port} is reserved for app slot ${slotClash.slot} (${slotClash.key})`, 409, 'PORT_RESERVED');
@@ -181,7 +396,10 @@ export function assertPublicPortAssignable(db, port, appId) {
  * ports are in play.
  */
 export function allocatePublicPort(db, appId) {
-  for (let port = PUBLIC_PORT_MIN; port <= PUBLIC_PORT_MAX; port++) {
+  // The AUTO band, not the full assignable range: an allocated port should land
+  // in the predictable block an operator has already opened. Naming a port
+  // outside it is an explicit act, and stays one.
+  for (let port = AUTO_PORT_MIN; port <= AUTO_PORT_MAX; port++) {
     try {
       assertPublicPortAssignable(db, port, appId);
       return port;
@@ -190,7 +408,8 @@ export function allocatePublicPort(db, appId) {
     }
   }
   throw fail(
-    `No free public port in ${PUBLIC_PORT_MIN}-${PUBLIC_PORT_MAX}. Release a TCP app's port or widen the range.`,
+    `No free public port in the auto range ${AUTO_PORT_MIN}-${AUTO_PORT_MAX}. Release a published app's ` +
+    `port, or name a port explicitly — an operator may choose any port in ${PUBLIC_PORT_MIN}-${PUBLIC_PORT_MAX}.`,
     409, 'NO_PUBLIC_PORT',
   );
 }
@@ -234,7 +453,7 @@ export function assignPublicPort(db, appId, requested = null) {
     // the first deploy — "I just enabled tcp, now set the number I want" — is
     // both safe and the common case.
     const held = row?.public_port;
-    const published = Number.isInteger(held) && effectiveIngressType(row?.ingress_type) === 'tcp'
+    const published = Number.isInteger(held) && publishesPublicPort(row)
       && !!db.prepare(
         "SELECT 1 FROM deployments WHERE app_id = ? AND env = 'production' AND status = 'live' LIMIT 1"
       ).get(appId);

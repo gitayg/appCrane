@@ -1,0 +1,38 @@
+-- v2.45.0: a per-app DATA-PLANE container port, for an app with two planes.
+--
+-- Until now both publishes targeted the one hardcoded container port
+-- (docker.js CONTAINER_PORT = 3000), so ingress_type='tcp' could only
+-- re-expose the very port Caddy already serves. That fits an app that is
+-- entirely non-HTTP and nothing else. An app with a CONTROL plane (ordinary
+-- HTTP through Caddy: TLS, security headers, forward_auth, audit) AND a raw
+-- DATA plane on a different port inside the same container could not be
+-- expressed at all.
+--
+-- ingress_type='dual' (see tcpIngress.js) is that app. Its publish becomes
+--   -p 0.0.0.0:<public_port>:<data_plane_port>
+-- while the loopback publish stays :3000, so Caddy keeps serving the control
+-- plane exactly as before.
+--
+-- SECURITY: data_plane_port must never be 3000. That value would publish the
+-- HTTP control plane raw on a host port — no TLS, no forward_auth, no identity
+-- headers, no audit — which is the surface Caddy is in the path to protect, and
+-- the operator would get no signal that they had done it. Enforced in code
+-- (validateDataPlanePort) and again at the runtime edge (publishTargets refuses
+-- to publish such a row at all), for the same reason the ingress_type enum is
+-- validated in code: SQLite cannot ALTER a CHECK, so a constraint here would
+-- force a full table rebuild the next time the rule moves.
+--
+-- Range 1024-65535, as policy rather than capability: AppCrane drops only
+-- NET_RAW and passes no --user, so a container process here keeps
+-- CAP_NET_BIND_SERVICE and CAN bind a privileged port. The floor is to keep a
+-- data plane off the ports the platform's own conventions reserve.
+ALTER TABLE apps ADD COLUMN data_plane_port INTEGER;
+
+-- DELIBERATELY NOT UNIQUE, and this is the interesting half of "prevent
+-- duplication". The port that must be globally unique is the HOST port, and
+-- apps(public_port) already carries a partial unique index (migration 072) that
+-- enforces it — that index is what stops two containers fighting for one host
+-- port. This column is the CONTAINER side, and container network namespaces are
+-- separate: two apps both running their data plane on 8081 inside their own
+-- containers never meet. A unique index here would forbid a legitimate and
+-- likely-common configuration for no gain.

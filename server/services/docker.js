@@ -1,11 +1,18 @@
 import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
 import { getDb } from '../db.js';
-import { publicPortForApp, releasePendingPortAfterRecreate } from './tcpIngress.js';
+import {
+  publicPortForApp, dataPlanePortForApp, releasePendingPortAfterRecreate, CONTROL_PLANE_PORT,
+} from './tcpIngress.js';
 import log from '../utils/logger.js';
 
 const execFileAsync = promisify(execFile);
-const CONTAINER_PORT = 3000;
+// Imported rather than re-declared as 3000. v2.45.0's data-plane guard is
+// "data_plane_port must not be the control-plane port", and tcpIngress.js is
+// where that comparison happens — if the two constants ever drifted, the guard
+// would compare against a number this file no longer publishes and the control
+// plane could be exposed raw with every check still passing.
+const CONTAINER_PORT = CONTROL_PLANE_PORT;
 const APPCRANE_LABEL = 'appcrane=true';
 
 // v2.42.1 SECURITY. Every app container used to be started with no --network at
@@ -246,22 +253,42 @@ export async function buildImage({ slug, env, contextDir, commitHash, appBasePat
 }
 
 /**
- * The 0.0.0.0 port this app publishes in addition to its loopback bind, or
- * null. Resolved from the database here rather than taken as a parameter: every
- * container recreation — deploy, rollback, the env-var restart in
- * routes/deploy.js — funnels through startApp(), and a caller that forgot to
+ * BOTH ends of this app's 0.0.0.0 publish — `{ host, container }` — or null when
+ * it publishes nothing. Resolved from the database here rather than taken as a
+ * parameter: every container recreation — deploy, rollback, the env-var restart
+ * in routes/deploy.js — funnels through startApp(), and a caller that forgot to
  * pass it would silently bring a tcp app back loopback-only, taking it off the
  * network its clients are pinned to with no error anywhere.
+ *
+ * v2.45.0: the container side is no longer assumed to be CONTAINER_PORT. A
+ * 'dual' app's data plane listens on its OWN port inside the container, and
+ * publishing CONTAINER_PORT for it would put the HTTP control plane — the origin
+ * Caddy fronts — on a public port with no TLS, forward_auth, identity headers or
+ * audit. tcpIngress owns that decision for both types: it answers CONTAINER_PORT
+ * for a pure-tcp app (whose whole container IS the data plane, since PORT=3000 is
+ * all it is told), and null for any row it considers unsafe or half-specified.
+ * data_plane_port must therefore be in the SELECT — omitting it would make every
+ * dual app read as unconfigured and silently stop publishing.
+ *
+ * The two calls are one decision, not two: tcpIngress derives both ends from the
+ * same check, so a row it refuses reports null for BOTH. Measured, not assumed —
+ * a 'dual' row hand-edited to data_plane_port=3000, and one with no data-plane
+ * port at all, each return a null HOST port here and so publish nothing, which is
+ * why the host being non-null is the only condition this function needs.
  *
  * Production only. There is one public_port per app but two containers, so
  * publishing it for both would make the second `docker run` fail with "port is
  * already allocated" — and the loser could be production. Sandbox stays
  * loopback-only and therefore cannot take the port production's clients use.
  */
-function publishedTcpPort(slug, env) {
+function publicPublishTargets(slug, env) {
   if (env !== 'production') return null;
-  const app = getDb().prepare('SELECT ingress_type, public_port FROM apps WHERE slug = ?').get(slug);
-  return publicPortForApp(app);
+  const app = getDb()
+    .prepare('SELECT ingress_type, public_port, data_plane_port FROM apps WHERE slug = ?')
+    .get(slug);
+  const host = publicPortForApp(app);
+  if (host === null) return null;
+  return { host, container: dataPlanePortForApp(app) };
 }
 
 export async function startApp({ slug, env, image, hostPort, envVars = {}, volumes = [], memoryMb = 512, cpus = 0.5, addHostGateway = false }) {
@@ -328,15 +355,22 @@ export async function startApp({ slug, env, image, hostPort, envVars = {}, volum
   // Caddy vhost and every internal caller still use, so nothing about an
   // http app's argv changes and a tcp app keeps its private door.
   //
+  // v2.45.0 widens that to a 'dual' app, where the loopback publish is not just
+  // kept but load-bearing: 127.0.0.1:<hostPort>:3000 carries the CONTROL plane
+  // through Caddy untouched, while this publish carries the DATA plane to a
+  // different port inside the same container. Only the container side moved —
+  // for an http app there is still no second -p at all, and for a pure-tcp app
+  // the container side is still CONTAINER_PORT, so both argvs are unchanged.
+  //
   // SECURITY: this bypasses Caddy entirely, so the published port has no
   // forward_auth, no identity headers, no request audit, no rate limiting, no
   // security headers and no TLS from AppCrane — the app owns authentication.
   // AppCrane publishes the port; it does NOT open the host firewall. That is
   // deliberately a separate operator step so a mis-click in the dashboard
   // cannot put an app on the internet.
-  const publicPort = publishedTcpPort(slug, env);
-  if (publicPort) {
-    args.push('-p', `0.0.0.0:${publicPort}:${CONTAINER_PORT}`);
+  const publish = publicPublishTargets(slug, env);
+  if (publish) {
+    args.push('-p', `0.0.0.0:${publish.host}:${publish.container}`);
   }
 
   // v2.8.0: only email-enabled apps need to reach AppCrane from inside the
@@ -364,8 +398,11 @@ export async function startApp({ slug, env, image, hostPort, envVars = {}, volum
   args.push(image);
   const id = await dockerExec(args);
   log.info(`docker started: ${name} (${id.slice(0, 12)}) from ${image}`);
-  if (publicPort) {
-    log.info(`[tcp-ingress] ${name} also published on 0.0.0.0:${publicPort} — NOT behind AppCrane auth; restricting it is still the operator's firewall job. On Linux this publish is a DNAT rule evaluated in FORWARD and never in INPUT, so a plain 'ufw deny' does NOT block it — filter in DOCKER-USER or in an upstream security group.`);
+  if (publish) {
+    // The container port is in the line because it is the one fact that says
+    // WHICH plane got exposed. `-> 3000` is the control plane and is only ever
+    // correct for a pure-tcp app; on a dual app it would mean the guard failed.
+    log.info(`[tcp-ingress] ${name} also published on 0.0.0.0:${publish.host} -> container port ${publish.container} — NOT behind AppCrane auth; restricting it is still the operator's firewall job. On Linux this publish is a DNAT rule evaluated in FORWARD and never in INPUT, so a plain 'ufw deny' does NOT block it — filter in DOCKER-USER or in an upstream security group.`);
   }
 
   // v2.42.0: this is where a tcp -> http flip actually takes effect, and so

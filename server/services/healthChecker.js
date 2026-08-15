@@ -265,6 +265,19 @@ async function runCheck(config) {
   // scheduleCheck() closes over the row it was created with, so an app flipped
   // to tcp would keep getting HTTP probes — and failing them into a restart
   // loop — until the process restarted.
+  //
+  // v2.45.0: 'dual' takes the HTTP branch on purpose. Both branches probe the
+  // SAME loopback port — the choice is only handshake vs HTTP — and a handshake
+  // is strictly the weaker of the two: it proves a socket is bound and nothing
+  // else. That is all a pure-tcp app can offer. A dual app has a real HTTP
+  // control plane on this port, so giving it the handshake would be a pure
+  // downgrade: measured, a listener that accepts connections and never answers
+  // reads HEALTHY under the tcp branch and DOWN under the http one, so a wedged
+  // control plane — the plane Caddy actually serves users from — would look fine
+  // and never reach the auto-restart below. So the condition is === 'tcp' and
+  // must not be widened to !== 'http' when a publishing type is added:
+  // publishing a raw port and being unable to speak HTTP are different facts,
+  // and only the second one earns the weaker probe.
   const { ingress_type } = getIngressForApp(db, config.app_id);
   const isTcp = ingress_type === 'tcp';
 

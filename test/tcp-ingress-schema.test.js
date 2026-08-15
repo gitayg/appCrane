@@ -40,7 +40,7 @@ initDb();
 const db = getDb();
 
 const {
-  PUBLIC_PORT_MIN, PUBLIC_PORT_MAX, INGRESS_TYPES,
+  PUBLIC_PORT_MIN, PUBLIC_PORT_MAX, AUTO_PORT_MIN, AUTO_PORT_MAX, INGRESS_TYPES,
   effectiveIngressType, validateIngressType, isTcpApp, publicPortForApp,
   getIngressForApp, slotPortConflict, assertPublicPortAssignable,
   allocatePublicPort, assignPublicPort, releasePublicPort,
@@ -202,9 +202,12 @@ test('an existing http app is completely unaffected by 072', () => {
 // ingress_type vocabulary
 // ---------------------------------------------------------------------------
 
-test("ingress_type accepts only 'http' and 'tcp'", () => {
-  assert.deepEqual(INGRESS_TYPES, ['http', 'tcp']);
-  for (const ok of ['http', 'tcp']) {
+test("ingress_type accepts only 'http', 'tcp' and 'dual'", () => {
+  // v2.45.0: 'dual' is an app with BOTH planes — an HTTP control plane still
+  // served through Caddy, plus a raw data plane published on the host at a
+  // DIFFERENT container port.
+  assert.deepEqual(INGRESS_TYPES, ['http', 'tcp', 'dual']);
+  for (const ok of ['http', 'tcp', 'dual']) {
     assert.equal(validateIngressType(ok), ok);
   }
 });
@@ -245,19 +248,24 @@ test('a tcp app with no allocation yet publishes nothing rather than port null',
 // ---------------------------------------------------------------------------
 
 test('allocation stays inside the dedicated 31000-31999 range', () => {
+  // v2.45.0 split one conflated idea in two. The AUTO band is where an
+  // ALLOCATED port comes from, so the operator's firewall rule stays one
+  // predictable block; PUBLIC_PORT_* is the far wider range an operator may
+  // EXPLICITLY name, because a fleet of clients already configured for 8080 is
+  // not a number AppCrane gets to choose. Allocation is still the narrow one.
   clearAllPorts();
-  assert.equal(PUBLIC_PORT_MIN, 31000);
-  assert.equal(PUBLIC_PORT_MAX, 31999);
+  assert.equal(AUTO_PORT_MIN, 31000);
+  assert.equal(AUTO_PORT_MAX, 31999);
   const port = allocatePublicPort(db, APP_A);
   assert.ok(Number.isInteger(port));
-  assert.ok(port >= PUBLIC_PORT_MIN && port <= PUBLIC_PORT_MAX,
+  assert.ok(port >= AUTO_PORT_MIN && port <= AUTO_PORT_MAX,
     `allocated ${port}, outside the range the operator's single firewall rule covers`);
   clearAllPorts();
 });
 
 test('allocation is lowest-free-first', () => {
   clearAllPorts();
-  assert.equal(allocatePublicPort(db, APP_A), PUBLIC_PORT_MIN);
+  assert.equal(allocatePublicPort(db, APP_A), AUTO_PORT_MIN);
   clearAllPorts();
 });
 
@@ -308,9 +316,11 @@ test('an allocated port is never one getPortsForSlot() could produce', () => {
 });
 
 test('every port in the range is checked against the WHATWG blocked list, not assumed clear', () => {
-  // Nothing in 31000-31999 is blocked today, but the list is external and can
-  // grow; a blocked port here would mean a health probe that silently never
-  // connects, which is exactly the slot-23 -> 4045 outage all over again.
+  // The whole assignable range, not just the auto band. Nothing in 31000-31999
+  // is blocked today, but an operator naming a port explicitly can land on 6000
+  // or 10080, and a blocked port means a health probe that silently never
+  // connects — exactly the slot-23 -> 4045 outage all over again. Narrowing was
+  // never the guard; this check is.
   for (let p = PUBLIC_PORT_MIN; p <= PUBLIC_PORT_MAX; p++) {
     if (!isPortSafe(p)) {
       assert.throws(() => assertPublicPortAssignable(db, p, APP_A),
@@ -383,8 +393,8 @@ test('slotPortConflict flags a port belonging to a slot the allocator could stil
   const reachable = getPortsForSlot(maxSlot + 1).prod_be;
   assert.ok(slotPortConflict(db, reachable),
     `port ${reachable} belongs to the very next slot getNextSlot() will issue`);
-  assert.equal(slotPortConflict(db, PUBLIC_PORT_MIN), null,
-    'the public range must be clear of the slot scheme at ordinary slot counts');
+  assert.equal(slotPortConflict(db, AUTO_PORT_MIN), null,
+    'the auto range must be clear of the slot scheme at ordinary slot counts');
 });
 
 test('releasePublicPort puts the port back in the pool', () => {
@@ -514,8 +524,14 @@ test('a platform admin can name a specific port, and a bad one is rejected on it
   assert.equal(ok.status, 200, JSON.stringify(ok.body));
   assert.equal(ok.body.app.public_port, 31900);
 
-  const outOfRange = await req(platformAdmin, 'PUT', '/api/apps/tcp-gate', { public_port: 8080 });
-  assert.equal(outOfRange.status, 400, JSON.stringify(outOfRange.body));
+  // 6667, not 8080. Since v2.45.0 an operator may name any port in
+  // PUBLIC_PORT_MIN-PUBLIC_PORT_MAX — 8080 is exactly the case the widening
+  // exists for, because clients get configured with a port by hand or by MDM
+  // and that number is not AppCrane's to choose. So the refusal has to come
+  // from a real guard rather than from the range: 6667 is on the WHATWG blocked
+  // list, which every value goes through whatever the range.
+  const blocked = await req(platformAdmin, 'PUT', '/api/apps/tcp-gate', { public_port: 6667 });
+  assert.equal(blocked.status, 400, JSON.stringify(blocked.body));
   assert.equal(rowOf(APP_GATE).public_port, 31900, 'a rejected port change was applied anyway');
 });
 

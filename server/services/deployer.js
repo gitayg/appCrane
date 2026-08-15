@@ -1121,6 +1121,17 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     // strictly weaker statement than for an http app, and any operator reading
     // "Health check passed" on a tcp app should read it that way.
     //
+    // v2.45.0: HEALTH FOLLOWS THE CONTROL PLANE, so a 'dual' app takes the HTTP
+    // branch — deliberately, not by oversight. Note both branches probe the same
+    // LOOPBACK port; the choice is handshake vs HTTP, and the handshake proves
+    // only that a socket is bound. That is the most a pure-tcp app can offer. A
+    // dual app does speak HTTP on that port, so handing it the handshake would
+    // be a pure downgrade: a container that accepts connections and answers
+    // nothing passes the handshake, so a dual app whose control plane is wedged
+    // would deploy GREEN and be promoted over a working previous image. Hence
+    // === 'tcp', never !== 'http' — publishing a raw port and being unable to
+    // speak HTTP are different facts, and only the second earns the weaker gate.
+    //
     // Ingress type is read fresh from the row, not from the `app` argument:
     // callers build that object from several different queries (and rollback
     // re-reads it), so the column is not guaranteed to be on it.
