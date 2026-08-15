@@ -5,6 +5,24 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.45.1 — The dual data plane, measured against a real Docker daemon.
+
+**2.45.0 shipped with the live behaviour verified by hand and nothing in the suite holding it.** The existing tests prove the *argv* — via a `docker` shim that records what it was called with — which is the right test for "did we build the command line we meant to" and the wrong one for "does that command line do what we think", because a shim agrees with whatever the code says. `test/data-plane-e2e.test.js` starts real containers and connects real sockets.
+
+Four tests: one container answering on both planes with a distinct marker on each, so a pass cannot come from reaching the wrong one; the data plane refusing to be an HTTP server; a dual row **written straight into the database** with `data_plane_port = 3000` publishing nothing at all; and a plain HTTP app still getting exactly one loopback binding and no other.
+
+The guard test writes its row directly on purpose. A write-boundary validator cannot see a restored backup, a migration, or a hand-edited row — those are precisely the cases where the runtime edge is the only thing standing between the HTTP origin and a public port with no TLS, forward_auth, identity or audit.
+
+**Two things the writing of it found, both now load-bearing:**
+
+*Docker's userland proxy accepts before the container listens.* The first draft waited for the port to accept, then asserted on the body — so it connected instantly, read nothing, and failed. Worse, it means "read nothing" cannot distinguish a port that was never published from one that was published but unbacked. The guard test therefore asserts on `connected` — the kernel refusing — and never on an empty read.
+
+*A key-shape assertion passes while the origin is exposed.* When the guard is removed, the leaked publish lands under the **same** `3000/tcp` key as the loopback one, because both target container port 3000. `Object.keys(bindings)` still reads `['3000/tcp']`. The assertion is now "no binding anywhere has a non-loopback host IP", which names the actual danger and catches it head-on.
+
+All four were mutation-tested rather than trusted green: removing the runtime 3000 guard turns the security test red; pointing the publish at `CONTAINER_PORT` turns the two-plane tests red; adding one stray `-p` turns the regression test red. Ports are allocated, never literals — a hand-written port number was tried and an unrelated listener on the same number answered the probe instead of the container, which is a test that measures the wrong process and can pass while the feature is broken.
+
+Skips with a reason when no Docker daemon answers, verified both ways (binary absent, and binary present with the daemon unreachable).
+
 ## 2.45.0 — An app can now serve HTTP through Caddy and a raw port at the same time.
 
 **The problem: raw TCP was all-or-nothing.** `ingress_type='tcp'` (2.42.0) publishes the container's port 3000 straight onto the host, which means the app's *only* plane is the unauthenticated one — its web UI comes out on the same raw port, with no TLS, no SSO, no identity headers and no request audit. An app that speaks HTTP to people and a non-HTTP protocol to machines had to give up Caddy entirely to get the second one.
