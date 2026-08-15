@@ -355,8 +355,26 @@ router.get('/dashboard/app-storage', requireAdmin, async (req, res) => {
   res.json({ apps: out });
 });
 
+// v2.45.2: the answer is cached, and the two probes below run together.
+//
+// This route reaches OUT to the internet twice — hstspreload.org, and the
+// platform's own domain to see what its certificate looks like from outside.
+// Both were awaited in series behind an 8s timeout each, and nothing cached the
+// result, so every visit to Settings could spend up to 16 seconds on it. What it
+// measures is DNS, a certificate and a public preload list; none of those change
+// between two page loads a minute apart.
+//
+// Keyed on what the answer actually depends on, so switching TLS mode in the UI
+// is reflected on the next read instead of up to the TTL later.
+const TLS_CHECK_TTL_MS = 10 * 60 * 1000;
+const TLS_PROBE_TIMEOUT_MS = 8000;
+let tlsCheckCache = null;   // { key, at, payload }
+
 /**
  * GET /api/server/tls-check - ENH-005: HSTS preload + cert validity check
+ *
+ * `?refresh=1` forces a re-probe — the button next to the panel needs to be able
+ * to mean "check again now", which a cache that cannot be bypassed would break.
  */
 router.get('/server/tls-check', requireAdmin, async (req, res) => {
   const domain = process.env.CRANE_DOMAIN;
@@ -370,46 +388,53 @@ router.get('/server/tls-check', requireAdmin, async (req, res) => {
     (tlsMap.tls_key_file  || process.env.TLS_KEY_FILE)
   );
 
+  const cacheKey = `${domain}|${manualTls}`;
+  const fresh = req.query.refresh === '1';
+  if (!fresh && tlsCheckCache && tlsCheckCache.key === cacheKey
+      && Date.now() - tlsCheckCache.at < TLS_CHECK_TTL_MS) {
+    return res.json({ ...tlsCheckCache.payload, cached: true });
+  }
+
   const warnings = [];
   let hstsPreloaded = false;
   let certValid = null;
 
-  // HSTS preload check
-  try {
-    const r = await fetch(`https://hstspreload.org/api/v2/status?domain=${encodeURIComponent(domain)}`, {
-      signal: AbortSignal.timeout(8000),
-    });
-    if (r.ok) {
-      const data = await r.json();
-      hstsPreloaded = data.status === 'preloaded';
-      if (hstsPreloaded && !manualTls) {
-        warnings.push({
-          level: 'error',
-          code: 'HSTS_PRELOADED_ACME',
-          message: `${domain} is HSTS-preloaded. ACME (Let's Encrypt) requires port 80 for HTTP challenges, which HSTS-preloaded browsers will refuse. Provide a manual TLS certificate instead.`,
-        });
-      }
+  // Independent probes of different hosts — there is no reason for the second
+  // to wait on the first, and in series their timeouts add up.
+  const [hsts, cert] = await Promise.allSettled([
+    fetch(`https://hstspreload.org/api/v2/status?domain=${encodeURIComponent(domain)}`, {
+      signal: AbortSignal.timeout(TLS_PROBE_TIMEOUT_MS),
+    }).then(r => (r.ok ? r.json() : null)),
+    fetch(`https://${domain}/api/info`, {
+      signal: AbortSignal.timeout(TLS_PROBE_TIMEOUT_MS),
+    }),
+  ]);
+
+  // HSTS preload check — hstspreload.org unreachable just means no answer.
+  if (hsts.status === 'fulfilled' && hsts.value) {
+    hstsPreloaded = hsts.value.status === 'preloaded';
+    if (hstsPreloaded && !manualTls) {
+      warnings.push({
+        level: 'error',
+        code: 'HSTS_PRELOADED_ACME',
+        message: `${domain} is HSTS-preloaded. ACME (Let's Encrypt) requires port 80 for HTTP challenges, which HSTS-preloaded browsers will refuse. Provide a manual TLS certificate instead.`,
+      });
     }
-  } catch (_) {
-    // hstspreload.org unreachable — skip check
   }
 
-  // Cert validity — try to fetch the domain's HTTPS endpoint
-  try {
-    const r = await fetch(`https://${domain}/api/info`, {
-      signal: AbortSignal.timeout(8000),
-    });
-    certValid = r.ok || r.status < 500;
-  } catch (e) {
+  // Cert validity — what the domain's HTTPS endpoint looks like from outside.
+  if (cert.status === 'fulfilled') {
+    certValid = cert.value.ok || cert.value.status < 500;
+  } else {
     certValid = false;
-    const msg = e.message || '';
+    const msg = cert.reason?.message || '';
     if (/cert|ssl|tls|self.signed|UNABLE_TO_VERIFY/i.test(msg)) {
       warnings.push({
         level: 'error',
         code: 'CERT_INVALID',
         message: `TLS certificate for ${domain} is invalid or self-signed: ${msg}`,
       });
-    } else if (/ECONNREFUSED|ETIMEDOUT|ENOTFOUND/i.test(msg)) {
+    } else if (/ECONNREFUSED|ETIMEDOUT|ENOTFOUND|abort|timeout/i.test(msg)) {
       warnings.push({
         level: 'warn',
         code: 'DOMAIN_UNREACHABLE',
@@ -418,13 +443,15 @@ router.get('/server/tls-check', requireAdmin, async (req, res) => {
     }
   }
 
-  res.json({
+  const payload = {
     domain,
     tls_mode: manualTls ? 'manual' : 'acme',
     hsts_preloaded: hstsPreloaded,
     cert_valid: certValid,
     warnings,
-  });
+  };
+  tlsCheckCache = { key: cacheKey, at: Date.now(), payload };
+  res.json({ ...payload, cached: false });
 });
 
 export default router;

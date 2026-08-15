@@ -101,7 +101,33 @@ async function req<T = unknown>(path: string, init?: RequestInit): Promise<T> {
   return data as T
 }
 
-const get  = <T>(path: string) => req<T>(path)
+// v2.45.2: coalesce GETs that are already in flight.
+//
+// Settings mounts several panels at once and three of them independently ask
+// for /api/apps in the same tick, so the server built the same payload three
+// times per visit — on an instance with dozens of apps that is the single most
+// expensive thing the page does.
+//
+// Deliberately NOT a cache with a TTL: entries live only for the duration of
+// the request itself, so the second caller shares a response it would have
+// waited for anyway and nobody can ever read a stale one. A GET issued after
+// the first settles goes to the network exactly as before.
+const inFlightGets = new Map<string, Promise<unknown>>()
+
+const get = <T>(path: string): Promise<T> => {
+  const shared = inFlightGets.get(path)
+  if (shared) return shared as Promise<T>
+  const p = req<T>(path)
+  // The stored promise must be the one handed to every caller, including the
+  // first — chaining .finally() produces a NEW promise, so storing one and
+  // returning the other would let the map outlive the request it tracks.
+  const tracked = p.finally(() => { inFlightGets.delete(path) })
+  // A shared rejection would otherwise be unhandled for however many callers
+  // never attached a catch; each caller attaches its own below.
+  tracked.catch(() => {})
+  inFlightGets.set(path, tracked)
+  return tracked as Promise<T>
+}
 const post = <T>(path: string, body?: unknown) =>
   req<T>(path, { method: 'POST', body: body !== undefined ? JSON.stringify(body) : undefined })
 const put  = <T>(path: string, body: unknown) =>

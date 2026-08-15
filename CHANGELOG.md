@@ -5,6 +5,20 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.45.2 — Opening Settings made 48 API calls to show one tab. Now it makes 15.
+
+**Measured, before and after, in a browser against a real instance with 12 apps:** 48 requests → 15. `/api/apps` went from 5 to 1.
+
+**Every tab was mounted on arrival.** The ten panels under Settings were only hidden with `display: none`, so opening the page ran the fetches for all of them — Users, Audit, GitHub, Mail, Backup, Branding, Roles, Skills and MCP all loaded to show you Security. Tabs are now mounted the first time they are shown and kept mounted afterwards, so a half-filled form still survives switching away and back; the cost is just paid per tab actually opened, once each.
+
+The worst of it was invisible from the code: the Users panel fetches `/api/apps/<slug>/identity/users` **once per app**. On the 12-app test instance that was 12 extra requests nobody asked for; on a 57-app instance it is 57. Not mounting the tab removes the whole fan-out.
+
+**`/api/server/tls-check` no longer runs on every visit.** It reaches out to the internet twice — hstspreload.org, and the platform's own domain to see its certificate from outside — and both calls were awaited *in series* behind an 8-second timeout each, with nothing cached. Up to 16 seconds, for an answer made of DNS, a certificate and a public preload list. The two probes now run together, and the result is cached for 10 minutes, keyed on the domain and the TLS mode so uploading a certificate is reflected immediately rather than up to the TTL later. `?refresh=1` forces a re-probe, which is what the panel uses after saving.
+
+**GETs already in flight are shared.** Three panels asked for `/api/apps` independently in the same tick and the server built that payload three times. Entries live only for the duration of the request, so a second caller shares a response it would have waited for anyway — deliberately not a TTL cache, so no one can read a stale one.
+
+Five tests cover the tls-check behaviour, each verified failing first: re-serialising the probes, disabling the cache, and dropping the TLS mode from the cache key each turn the expected test red. One of them was found to be vacuous while doing this — the fixture produced an empty `warnings` array either way, so a build that dropped warnings from the cached payload passed it. The fixture now emits a real warning, and the test asserts the fixture still does.
+
 ## 2.45.1 — The dual data plane, measured against a real Docker daemon.
 
 **2.45.0 shipped with the live behaviour verified by hand and nothing in the suite holding it.** The existing tests prove the *argv* — via a `docker` shim that records what it was called with — which is the right test for "did we build the command line we meant to" and the wrong one for "does that command line do what we think", because a shim agrees with whatever the code says. `test/data-plane-e2e.test.js` starts real containers and connects real sockets.

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, type ReactNode } from 'react'
 import { adminApi, authHeaders } from '../adminApi'
 import { useFlash, FocusInput, FocusTextarea } from '../components/formHelpers'
 import { Users } from './Users'
@@ -94,7 +94,11 @@ function SecurityTab() {
       adminApi.put('/api/settings/tls_key_file', { value: keyFile }),
     ]).catch(() => {})
     flashTlsSaved()
-    adminApi.get<typeof tlsCheck>('/api/server/tls-check').then(setTlsCheck).catch(() => {})
+    // refresh=1: the TLS settings just changed, so the point of this read is to
+    // see the effect. The cache key covers manual-vs-ACME, but re-saving with
+    // certs already configured leaves the key identical and would otherwise
+    // answer from before the save.
+    adminApi.get<typeof tlsCheck>('/api/server/tls-check?refresh=1').then(setTlsCheck).catch(() => {})
   }
 
   async function testOidc() {
@@ -1154,6 +1158,23 @@ export function Settings() {
     return () => window.removeEventListener('hashchange', handler)
   }, [])
 
+  // v2.45.2: mount a tab the first time it is shown, and keep it mounted after.
+  //
+  // Every panel used to mount on arrival and only be hidden with display:none,
+  // so opening Settings fired the fetches for ALL of them — around 25 requests
+  // to render one tab, including three separate /api/apps calls and one
+  // /api/server/tls-check that reaches out to the internet twice.
+  //
+  // Switching to plain conditional rendering would have fixed the burst and
+  // broken something real: a half-filled form would be thrown away every time
+  // the user looked at another tab and came back. Keeping visited tabs mounted
+  // preserves that exactly as before — the cost is only paid for tabs actually
+  // opened, and only once each.
+  const [visited, setVisited] = useState<Set<Tab>>(() => new Set<Tab>([getTab()]))
+  useEffect(() => {
+    setVisited(prev => (prev.has(tab) ? prev : new Set(prev).add(tab)))
+  }, [tab])
+
   // v2.13.0: MCP moved under Settings, reachable by app-owners too. The other
   // tabs are platform-admin-only — and since every tab mounts (display-toggled),
   // rendering them for a non-platform-admin would fire their admin-only fetches
@@ -1173,39 +1194,26 @@ export function Settings() {
     )
   }
 
+  // Rendered through one helper so a tab added later cannot quietly go back to
+  // mounting on arrival — the visited check is not something to remember to
+  // repeat by hand ten times.
+  const panel = (key: Tab, node: ReactNode) => visited.has(key) && (
+    <div style={{ display: tab === key ? 'block' : 'none' }}>{node}</div>
+  )
+
   return (
     <div className="container">
-      <div style={{ display: tab === 'mcp' ? 'block' : 'none' }}>
-        <Mcp />
-      </div>
-      <div style={{ display: tab === 'skills' ? 'block' : 'none' }}>
-        <SkillsTab />
-      </div>
-      <div style={{ display: tab === 'security' ? 'block' : 'none' }}>
-        <SecurityTab />
-      </div>
-      <div style={{ display: tab === 'users' ? 'block' : 'none' }}>
-        <Users />
-      </div>
-      <div style={{ display: tab === 'roles' ? 'block' : 'none' }}>
-        <RolesTab />
-      </div>
-      <div style={{ display: tab === 'github' ? 'block' : 'none' }}>
-        <GithubTab />
-      </div>
-      <div style={{ display: tab === 'mail' ? 'block' : 'none' }}>
-        <MailTab />
-      </div>
-      <div style={{ display: tab === 'backup' ? 'block' : 'none' }}>
-        <BackupTab />
-      </div>
+      {panel('mcp', <Mcp />)}
+      {panel('skills', <SkillsTab />)}
+      {panel('security', <SecurityTab />)}
+      {panel('users', <Users />)}
+      {panel('roles', <RolesTab />)}
+      {panel('github', <GithubTab />)}
+      {panel('mail', <MailTab />)}
+      {panel('backup', <BackupTab />)}
       {/* v2.6.9: skills tab removed from Settings — now top-level /skills */}
-      <div style={{ display: tab === 'branding' ? 'block' : 'none' }}>
-        <BrandingTab />
-      </div>
-      <div style={{ display: tab === 'audit' ? 'block' : 'none' }}>
-        <AuditLog />
-      </div>
+      {panel('branding', <BrandingTab />)}
+      {panel('audit', <AuditLog />)}
     </div>
   )
 }
