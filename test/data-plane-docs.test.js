@@ -398,7 +398,10 @@ function stubDb(taken = new Set()) {
         all: () => [],
         get: (...args) => {
           if (/MAX\(slot\)/.test(sql)) return { max_slot: 0 };
-          if (/public_port = \?/.test(sql)) return taken.has(args[0]) ? { slug: 'other-app' } : undefined;
+          // v2.46.0: collisions are asked of the app_host_ports REGISTRY, not of
+          // apps.public_port — the question is now "does anything own this port"
+          // across every app AND environment.
+          if (/host_port = \?/.test(sql)) return taken.has(args[0]) ? { slug: 'other-app', env: 'production' } : undefined;
           return undefined;
         },
       };

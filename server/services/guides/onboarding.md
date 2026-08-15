@@ -1004,15 +1004,46 @@ control plane. It still *reports* the bad value, so `public_port: null` next to
 
 #### Which port has to be unique, and which does not
 
-- **The host port must be globally unique**, and a partial unique index on
-  `apps(public_port)` enforces it. Two containers cannot both bind
-  `0.0.0.0:8080`; the second `docker run` dies with "port is already allocated".
-  Asking for a port another app holds is a 409.
+- **The host port must be globally unique**, and the `app_host_ports` registry
+  enforces it — one row per port, keyed BY the port, across every app *and*
+  every environment. Two containers cannot both bind `0.0.0.0:8080`; the second
+  `docker run` dies with "port is already allocated". Asking for a port another
+  app holds — in either environment — is a 409 that names the holder and which
+  of its containers has it.
 - **The container port deliberately is not.** Container network namespaces are
   separate, so two apps each running a data plane on container port 8081 inside
   their own containers never meet. There is no uniqueness constraint on
   `data_plane_port` and none should be added — it would forbid a legitimate and
   probably common configuration for nothing.
+
+#### A port per environment (v2.46.0)
+
+Until v2.46.0 the publish was **production only**: `public_port` was one number
+per app, and the sandbox container was refused outright. The reason was that one
+number cannot be shared by two containers — the second `docker run` dies. That
+argued against one port on two containers, never against two different ones, so
+the raw plane could not be exercised until after it went live.
+
+An app can now hold a **separate host port per environment**:
+
+| field | container | published |
+|---|---|---|
+| `public_port` | `appcrane-<slug>-production` | `0.0.0.0:<public_port>` |
+| `sandbox_public_port` | `appcrane-<slug>-sandbox` | `0.0.0.0:<sandbox_public_port>` |
+
+Both target the same container-side port (`data_plane_port` for a dual app,
+3000 for a pure-tcp one) — that is a property of the image, and it is the same
+image in both environments.
+
+**It is opt-in.** No app gains a sandbox port by upgrading, and none is
+allocated on deploy. One appears only when a platform admin sets it, because a
+published port has no forward_auth, no TLS from AppCrane, no identity headers
+and no audit — and the sandbox container runs the least reviewed code you have.
+Leave `sandbox_public_port` unset and sandbox publishes nothing, exactly as
+before.
+
+The two numbers must differ from each other and from every port any other app
+holds in either environment; the registry above is what enforces it.
 
 #### Health checks follow the control plane
 

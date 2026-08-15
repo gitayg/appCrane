@@ -318,7 +318,7 @@ test('LIVE: a publish configured AFTER the container started reads as NOT applie
     invalidatePublishedPortsCache();
 
     const app = db.prepare('SELECT * FROM apps WHERE slug = ?').get(slug);
-    const observed = (await publishedPortsBySlug())?.get(slug) ?? null;
+    const observed = (await publishedPortsBySlug())?.get(`${slug}:production`) ?? null;
     const verdict = ingressDrift(app, observed);
 
     assert.equal(verdict.applied, false,
@@ -333,9 +333,57 @@ test('LIVE: a publish configured AFTER the container started reads as NOT applie
       slug, env: 'production', image: TAG, hostPort,
       envVars: { DATA_PLANE_PORT: '8081' }, memoryMb: 256, cpus: 0.5,
     });
-    const after = ingressDrift(app, (await publishedPortsBySlug())?.get(slug) ?? null);
+    const after = ingressDrift(app, (await publishedPortsBySlug())?.get(`${slug}:production`) ?? null);
     assert.equal(after.applied, true, 'a recreate did not make the publish live');
     assert.equal(after.drift, null);
     assert.match(await awaitAnswer(publicPort, /DATAPLANE/), /DATAPLANE/,
       'the port reports as applied but nothing answers on it');
+  });
+
+test('LIVE: sandbox publishes its OWN port, and both containers run at once',
+  { skip: skipReason }, async () => {
+    // The capability v2.46.0 adds, against a real daemon. Before this, sandbox
+    // was refused outright (`env !== 'production' -> null`), so the first time
+    // anyone spoke the raw protocol to a data plane was after it went live.
+    //
+    // Both containers up SIMULTANEOUSLY is the part worth proving: the old
+    // rationale for refusing sandbox was that the second `docker run` would die
+    // with "port is already allocated". It does not, because the two host ports
+    // are different and the registry makes it impossible for them to be equal.
+    const [prodHost, sandHost] = [await freePort(), await freePort()];
+    const [prodPublic, sandPublic] = [await freePort(), await freePort()];
+    const slug = `envports-${SUFFIX}`;
+    const db = getDb();
+    const id = db.prepare(
+      `INSERT INTO apps (name, slug, slot, source_type, ingress_type, public_port, sandbox_public_port, data_plane_port)
+       VALUES (?, ?, 606, 'managed', 'dual', ?, ?, 8081)`
+    ).run(slug, slug, prodPublic, sandPublic).lastInsertRowid;
+    for (const env of ['production', 'sandbox']) {
+      db.prepare("INSERT INTO deployments (app_id, env, status, version) VALUES (?, ?, 'live', '1.0.0')")
+        .run(id, env);
+      started.push(`appcrane-${slug}-${env}`);
+    }
+
+    await startApp({ slug, env: 'production', image: TAG, hostPort: prodHost,
+      envVars: { DATA_PLANE_PORT: '8081' }, memoryMb: 256, cpus: 0.5 });
+    // If this throws "port is already allocated", the two publishes collided —
+    // the exact failure the old production-only rule existed to avoid.
+    await startApp({ slug, env: 'sandbox', image: TAG, hostPort: sandHost,
+      envVars: { DATA_PLANE_PORT: '8081' }, memoryMb: 256, cpus: 0.5 });
+
+    const prodBind = await bindings(`appcrane-${slug}-production`);
+    const sandBind = await bindings(`appcrane-${slug}-sandbox`);
+    assert.deepEqual(prodBind['8081/tcp'], [{ HostIp: '0.0.0.0', HostPort: String(prodPublic) }]);
+    assert.deepEqual(sandBind['8081/tcp'], [{ HostIp: '0.0.0.0', HostPort: String(sandPublic) }],
+      'the sandbox container carries no public binding — sandbox is still refused');
+    assert.notEqual(prodPublic, sandPublic);
+
+    // Both answering at the same time, on different host ports, from different
+    // containers. Each also keeps its own loopback control plane.
+    assert.match(await awaitAnswer(prodPublic, /DATAPLANE/), /DATAPLANE/);
+    assert.match(await awaitAnswer(sandPublic, /DATAPLANE/), /DATAPLANE/);
+    assert.deepEqual(prodBind['3000/tcp'], [{ HostIp: '127.0.0.1', HostPort: String(prodHost) }],
+      'the production control plane must stay on loopback behind Caddy');
+    assert.deepEqual(sandBind['3000/tcp'], [{ HostIp: '127.0.0.1', HostPort: String(sandHost) }],
+      'and so must the sandbox one');
   });
