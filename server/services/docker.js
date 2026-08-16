@@ -421,11 +421,16 @@ export async function startApp({ slug, env, image, hostPort, envVars = {}, volum
   // close a port on its own — the publish is an argv flag — so it keeps the
   // reservation instead of handing a still-bound port to the next app that
   // asks. The container just created is the proof the old one is gone.
-  if (env === 'production') {
-    const released = releasePendingPortAfterRecreate(getDb(), slug);
-    if (released) {
-      log.info(`[tcp-ingress] ${name} was recreated with no public publish — port ${released} is now closed and back in the allocation pool.`);
-    }
+  //
+  // v2.47.0: both environments, and both reasons. A re-pin leaves the OLD port
+  // draining — still reserved so nobody else can be given it while the previous
+  // container answers on it — and this is the moment that container is proven
+  // gone. Without the sandbox half, a sandbox re-pin would hold its old number
+  // reserved forever.
+  const released = releasePendingPortAfterRecreate(getDb(), slug, env);
+  if (released) {
+    log.info(`[tcp-ingress] ${name} was recreated without ${released.join(', ')} — ` +
+      `${released.length > 1 ? 'those ports are' : 'that port is'} now closed and back in the allocation pool.`);
   }
   return id;
 }

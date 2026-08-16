@@ -14,7 +14,7 @@ import { resolveVisibility } from '../utils/appVisibility.js';
 import { pruneGrantsForNonMembers } from '../services/appDefinedRoles.js';
 import {
   effectiveIngressType, publicPortForApp, pendingPortRelease, validateIngressType,
-  assignPublicPort, releasePublicPort, effectiveDataPlanePort, validateDataPlanePort, CONTROL_PLANE_PORT,
+  assignPublicPort, releasePublicPort, drainingPorts, effectiveDataPlanePort, validateDataPlanePort, CONTROL_PLANE_PORT,
 } from '../services/tcpIngress.js';
 
 // v2.42.0: ingress_type and public_port are REPORTED on every app payload, not
@@ -62,7 +62,15 @@ import {
 // Optional, and `undefined` when not supplied rather than `false`: a caller that
 // did not look must not be made to say the port is closed. Gated behind the same
 // canSeePort check as the ports themselves — the drift message names them.
-function ingressFields(app, canSeePort = true, observed = undefined) {
+//
+// v2.47.0: `draining` is the list of ports this app still has RESERVED but no
+// longer publishes — a number a running container is bound to after a re-pin,
+// held so nobody else can be given it and released on the next recreate.
+// Reported so no surface ever calls a port closed while it answers.
+//
+// Passed in rather than queried here: this helper runs once per app on the
+// catalog endpoint, and a lookup inside it would be one query per app.
+function ingressFields(app, canSeePort = true, observed = undefined, draining = undefined) {
   const drift = canSeePort && observed !== undefined ? ingressDrift(app, observed) : null;
   return {
     ingress_type: effectiveIngressType(app.ingress_type),
@@ -74,7 +82,22 @@ function ingressFields(app, canSeePort = true, observed = undefined) {
     data_plane_port: canSeePort ? effectiveDataPlanePort(app) : undefined,
     pending_port_release: canSeePort ? pendingPortRelease(app) : undefined,
     ...(drift ? { publish_applied: drift.applied, publish_drift: drift.drift } : {}),
+    ...(canSeePort && draining !== undefined && draining.length
+      ? { draining_ports: draining }
+      : {}),
   };
+}
+
+/** Every draining row on the platform, grouped by app — ONE query for the catalog. */
+function drainingByApp(db) {
+  const out = new Map();
+  for (const r of db.prepare(
+    "SELECT app_id, host_port, env FROM app_host_ports WHERE state = 'draining' ORDER BY host_port"
+  ).all()) {
+    if (!out.has(r.app_id)) out.set(r.app_id, []);
+    out.get(r.app_id).push({ host_port: r.host_port, env: r.env });
+  }
+  return out;
 }
 
 // The before/after shape of the 'app-ingress-change' audit entry — the same
@@ -213,6 +236,7 @@ router.get('/', async (req, res) => {
   // endpoint — the same cost shape that made Settings slow.
   const { publishedPortsBySlug } = await import('../services/docker.js');
   const observedBySlug = await publishedPortsBySlug();
+  const drainingMap = drainingByApp(db);
 
   const userRolesBySlug = new Map();
   if (!isAdmin(req.user)) {
@@ -277,7 +301,8 @@ router.get('/', async (req, res) => {
       auth_bypass_paths: parseBypassPathsField(app.auth_bypass_paths),
       auth_mode: effectiveAuthMode(app.auth_mode),
       ...ingressFields(app, userAppRole(app) !== 'none',
-        observedBySlug ? (observedBySlug.get(`${app.slug}:production`) ?? null) : null),
+        observedBySlug ? (observedBySlug.get(`${app.slug}:production`) ?? null) : null,
+        drainingMap.get(app.id) ?? []),
       has_icon: hasIconFile(app.slug),
       // Boolean flags derived from secret-bearing columns so the UI can
       // show "this app has its own X" without ever shipping the secret.
@@ -473,7 +498,7 @@ router.get('/:slug', requireAppAccess, async (req, res) => {
   const observedDetail = observedMap ? (observedMap.get(`${app.slug}:production`) ?? null) : null;
 
   res.json({
-    app: { ...app, resource_limits: JSON.parse(app.resource_limits || '{}'), auth_bypass_paths: parseBypassPathsField(app.auth_bypass_paths), auth_mode: effectiveAuthMode(app.auth_mode), ...ingressFields(app, true, observedDetail) },
+    app: { ...app, resource_limits: JSON.parse(app.resource_limits || '{}'), auth_bypass_paths: parseBypassPathsField(app.auth_bypass_paths), auth_mode: effectiveAuthMode(app.auth_mode), ...ingressFields(app, true, observedDetail, drainingPorts(db, app.id)) },
     urls: urlsDetail,
     base_path: { production: `/${app.slug}/`, sandbox: `/${app.slug}-sandbox/` },
     ...(isAdmin(req.user) ? { ports } : {}),

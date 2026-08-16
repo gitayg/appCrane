@@ -11,7 +11,7 @@ import log from '../utils/logger.js';
 import { validateBypassPaths } from '../utils/authBypassPaths.js';
 import {
   effectiveIngressType, validateIngressType, publicPortForApp, pendingPortRelease,
-  assignPublicPort, releasePublicPort, effectiveDataPlanePort, dataPlanePortForApp, validateDataPlanePort,
+  assignPublicPort, releasePublicPort, drainingPorts, effectiveDataPlanePort, dataPlanePortForApp, validateDataPlanePort,
   INGRESS_TYPES, CONTROL_PLANE_PORT,
   PUBLIC_PORT_MIN, PUBLIC_PORT_MAX, AUTO_PORT_MIN, AUTO_PORT_MAX,
 } from './tcpIngress.js';
@@ -1737,6 +1737,7 @@ const TOOLS = [
       // simply never been recreated. The publish is a docker run flag.
       const { publishedPortsBySlug } = await import('./docker.js');
       const { ingressDrift } = await import('./ingressDrift.js');
+      const draining = drainingPorts(getDb(), app.id);
       const observedMap = await publishedPortsBySlug();
       const observed = observedMap ? (observedMap.get(`${app.slug}:production`) ?? null) : null;
       const { applied, drift } = ingressDrift(app, observed);
@@ -1761,6 +1762,18 @@ const TOOLS = [
         public_port: publicPort,
         data_plane_port: effectiveDataPlanePort(app),
         pending_port_release: stillBound,
+        // v2.47.0: ports this app still has RESERVED after a re-pin. A running
+        // container is bound to them; AppCrane holds them so nobody else is
+        // given them, and frees them on the next recreate. Reported so an agent
+        // is never told a port is closed while it answers.
+        ...(draining.length ? {
+          draining_ports: draining,
+          draining_note: `Still bound: ${draining.map(d => `${d.host_port} (${d.env})`).join(', ')}. ` +
+            'The publish is a `docker run` flag, so a re-pin cannot close the old port on its own — ' +
+            'the container that is up keeps binding it until it is RECREATED, and AppCrane keeps the ' +
+            'number reserved to this app until then rather than reissuing one a live container holds. ' +
+            'Do not report these as closed.',
+        } : {}),
         // The row says what SHOULD be published; these say what IS. null means
         // the container could not be read — not that the port is closed.
         publish_applied: applied,

@@ -5,6 +5,26 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.47.0 — Changing a published port is one step again, not three.
+
+**Moving a port an app was already publishing was refused outright**, with a message telling the operator to set `ingress_type='http'`, redeploy, then pin the new number and deploy again. Four actions to change one integer.
+
+The hazard behind the refusal was real, and it still is. The pin is the only thing reserving a number: overwrite it and the old port returns to the pool while a live container is still bound to it, so the allocator can hand it to another app — whose `docker run` dies with "port is already allocated" while traffic to that port keeps reaching the *original* app. Silent cross-app redirection.
+
+But the refusal was a workaround, and the code said so:
+
+> Refused rather than tracked: recording "still bound to X while pinned to Y" needs a second column, and the two-step below reuses the release path that is already audited and tested.
+
+v2.46.0 built that second store. So the state is now recorded instead of refused: the old number moves to **draining** — still owned, still impossible to hand to anyone else, but no longer the app's pinned port — and the existing release-on-recreate hook drops it the moment the container binding it is replaced. Set the new port, redeploy, done.
+
+`host_port` remains the registry's primary key, so a draining port is still an owner and the global "one app per port" invariant is untouched. What changed is `UNIQUE (app_id, env)`, now a **partial** index over `state='pinned'`: an app mid-move legitimately holds two ports for one environment — the one it is moving to, and the one its container still answers on. Exactly one may be pinned.
+
+Re-pin twice before redeploying and both old numbers drain. AppCrane cannot tell which one the running container holds, and reserving one it does not need is strictly safer than reissuing one it does.
+
+The release hook is now per-environment, so a sandbox re-pin frees its own old port on a sandbox recreate — without that half it would have stayed reserved forever, since the hook only ever ran for production.
+
+Twenty-three tests over the registry, eight of them on draining, each verified failing first: deleting the old row instead of draining it (the pre-2.47 hazard, restored) turns five red including the one asserting another app cannot take the port; letting `claim()` wipe draining rows turns the same five red; and skipping the drain on recreate leaks the number out of the pool. The rewritten `PORT_STILL_HELD` test keeps its original safety assertion word for word — a live container's port is still never handed to another app — while now asserting the move succeeds.
+
 ## 2.46.0 — A published port per environment: sandbox can have its own.
 
 **The raw data plane existed only in production, so the first time anyone spoke the actual protocol to it was after it went live.** `docker.js` refused outright — `if (env !== 'production') return null` — and the reason on record was "one `public_port` per app but two containers, so the second `docker run` dies with 'port is already allocated'". That argues against **one** port on two containers. It never argued against **two different** ports; sandbox was excluded because there was only one number to go round, and the safe way to allocate one number between two containers is to give it to the one with real clients.

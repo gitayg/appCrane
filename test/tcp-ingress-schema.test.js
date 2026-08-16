@@ -36,6 +36,7 @@ process.env.LOG_LEVEL = 'error';
 
 const { initDb, getDb } = await import('../server/db.js');
 const { generateApiKey, hashApiKey } = await import('../server/services/encryption.js');
+const { releasePendingPortAfterRecreate } = await import('../server/services/tcpIngress.js');
 initDb();
 const db = getDb();
 
@@ -602,12 +603,19 @@ test('the reserved port is NOT handed to another app', async () => {
     'two apps now hold one host port — the second deploy would die on "port is already allocated"');
 });
 
-test('re-pinning a live tcp app to a different port is refused', async () => {
-  // The gap the flip tests missed. Overwriting public_port in place drops the
-  // old number from the row, and the row is the ONLY thing reserving it — so
-  // the allocator hands a still-bound port to the next app and clients pinned
-  // to it reach someone else. pendingPortRelease() cannot see this path: it
-  // reports only on an app already flipped to http.
+test('re-pinning a live tcp app MOVES it, and keeps the old port reserved', async () => {
+  // v2.47.0 replaced a refusal with a transfer. Until then this returned 409 and
+  // the operator was sent through flip-to-http, redeploy, re-pin — three steps
+  // to change a number.
+  //
+  // The hazard that justified the refusal has NOT gone away and is asserted
+  // below: overwriting the pin used to drop the old number from the row, and the
+  // row was the only thing reserving it, so the allocator could hand a
+  // still-bound port to the next app and clients pinned to it would reach
+  // someone else. What changed is that the old number is now recorded as
+  // DRAINING instead of being forgotten — still owned, still un-allocatable,
+  // until the container binding it is replaced.
+  //
   // Its own app: the shared fixtures are flipped back and forth by neighbouring
   // tests, and this one has to add a live deployment, which would leak into them.
   const APP_REPIN = mkApp('tcp-repin');
@@ -616,21 +624,45 @@ test('re-pinning a live tcp app to a different port is refused', async () => {
   const held = rowOf(APP_REPIN).public_port;
   assert.ok(Number.isInteger(held), 'the app did not end up pinned');
 
-  // The guard is deliberately scoped to an app that is actually PUBLISHING:
-  // a port allocated before the first deploy is bound by nothing, so re-pinning
-  // it then is safe and is the common case. Establish the dangerous state.
+  // The dangerous state: a container is actually publishing that port.
   db.prepare("INSERT INTO deployments (app_id, env, status) VALUES (?, 'production', 'live')").run(APP_REPIN);
 
   const r = await req(platformAdmin, 'PUT', '/api/apps/tcp-repin', { ingress_type: 'tcp', public_port: held + 7 });
-  assert.equal(r.status, 409, JSON.stringify(r.body));
-  assert.equal(r.body.error.code, 'PORT_STILL_HELD');
-  assert.equal(rowOf(APP_REPIN).public_port, held, 'the app moved off a port it still binds');
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(rowOf(APP_REPIN).public_port, held + 7, 'the re-pin did not take effect');
 
-  // And the old number must not have become allocatable in the attempt.
+  // THE SAFETY PROPERTY, unchanged from when this was a refusal: the old number
+  // is still owned. A live container answers on it, so handing it out would
+  // point another app's clients at this one.
   const other = mkApp('tcp-repin-other');
   const taken = await req(platformAdmin, 'PUT', '/api/apps/tcp-repin-other', { ingress_type: 'tcp', public_port: held });
-  assert.equal(taken.status, 409, 'the still-held port was handed to another app');
+  assert.equal(taken.status, 409, 'a port a live container is still bound to was handed to another app');
   assert.notEqual(rowOf(other).public_port, held);
+
+  // And it is recorded as draining rather than merely absent, so every read
+  // surface can say "still bound until recreate" instead of "closed".
+  const draining = db.prepare(
+    "SELECT host_port, state FROM app_host_ports WHERE app_id = ? AND state = 'draining'"
+  ).all(APP_REPIN);
+  assert.deepEqual(draining, [{ host_port: held, state: 'draining' }],
+    'the old port vanished instead of draining — nothing reserves it now');
+});
+
+test('a recreate frees the drained port, completing the move in one step', async () => {
+  const APP_DRAIN = mkApp('tcp-drain');
+  await req(platformAdmin, 'PUT', '/api/apps/tcp-drain', { ingress_type: 'tcp' });
+  const held = rowOf(APP_DRAIN).public_port;
+  db.prepare("INSERT INTO deployments (app_id, env, status) VALUES (?, 'production', 'live')").run(APP_DRAIN);
+  await req(platformAdmin, 'PUT', '/api/apps/tcp-drain', { ingress_type: 'tcp', public_port: held + 11 });
+
+  // What startApp() calls once the replacement container exists.
+  const freed = releasePendingPortAfterRecreate(db, 'tcp-drain', 'production');
+  assert.deepEqual(freed, [held], 'the recreate did not return the drained port to the pool');
+
+  const other = mkApp('tcp-drain-other');
+  const now = await req(platformAdmin, 'PUT', '/api/apps/tcp-drain-other', { ingress_type: 'tcp', public_port: held });
+  assert.equal(now.status, 200,
+    'the old port is still reserved after the container that bound it was replaced — it has leaked out of the pool');
 });
 
 test('flipping back to tcp returns the same port, not a new one', async () => {

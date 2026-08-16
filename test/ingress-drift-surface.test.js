@@ -122,3 +122,41 @@ test('a container publishing the OLD port is reported as stale, with both number
   assert.match(out.exposure.published_as, /9999/, 'what clients reach right now');
   assert.match(out.exposure.published_as, new RegExp(String(HOST_PORT)), 'and what was configured');
 });
+
+// ---------------------------------------------------------------------------
+// Draining ports are REPORTED (v2.47.0)
+// ---------------------------------------------------------------------------
+//
+// The guide says "no surface ever reports a port closed while a container still
+// answers on it". That sentence was written before the wiring existed, and was
+// briefly false — drainingPorts() was exported and read by nobody. This is the
+// test that keeps it true.
+
+test('a re-pinned app reports the port its container is still bound to', async () => {
+  const { assignPublicPort } = await import('../server/services/tcpIngress.js');
+  const appId = db.prepare('SELECT id FROM apps WHERE slug = ?').get(SLUG).id;
+  db.prepare("INSERT INTO deployments (app_id, env, status, version) VALUES (?, 'production', 'live', '1')")
+    .run(appId);
+
+  // Move production off the port a live container holds.
+  assignPublicPort(db, appId, 24000, 'production');
+  dockerReports(`${SLUG}|production|127.0.0.1:4013->3000/tcp\n`);
+
+  const out = await read();
+  assert.deepEqual(out.draining_ports, [{ host_port: HOST_PORT, env: 'production' }],
+    `the old port ${HOST_PORT} is bound by a running container and is reported nowhere — ` +
+    'an operator reading this payload would believe it is closed');
+  assert.match(out.draining_note, /RECREATED/,
+    'the note has to say what actually frees it; a plain restart does not');
+  assert.match(out.draining_note, /Do not report these as closed/);
+});
+
+test('an app with nothing draining carries no draining keys at all', async () => {
+  const { releasePendingPortAfterRecreate } = await import('../server/services/tcpIngress.js');
+  releasePendingPortAfterRecreate(db, SLUG, 'production');
+
+  const out = await read();
+  assert.equal(out.draining_ports, undefined,
+    'an empty draining list still emitted the key — every app payload would carry noise');
+  assert.equal(out.draining_note, undefined);
+});
