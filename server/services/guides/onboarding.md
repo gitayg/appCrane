@@ -1118,24 +1118,40 @@ port, so there's a single path to reason about. `data_plane_port` is required wh
 the type is `dual` and refused on any other type, with one exception: an explicit
 `null` on `http` or `tcp`, which drops a data plane the app still has pinned.
 
-#### Moving a port an app is already publishing is a 409
+#### Moving a port an app is already publishing (v2.47.0)
 
-Changing `public_port` on an app with a **live production deployment** is refused
-with `409 PORT_STILL_HELD`, not honoured:
+Change `public_port` (or `sandbox_public_port`) on an app whose container is live,
+and the move is **accepted in one step**. Set the new number, redeploy, done.
+
+Through v2.46.0 this was a `409 PORT_STILL_HELD` and the operator was sent through
+three steps — flip to `http`, redeploy, pin the new number, deploy again. The
+hazard behind that refusal is real and has not gone away: the publish is a
+`docker run` flag, so the old number stays bound until the container is recreated,
+and if the row simply forgot it the allocator could hand a **live** port to the
+next app — whose `docker run` then fails while traffic to that port keeps reaching
+the original app.
+
+What changed is that AppCrane now records the state instead of refusing it. The
+old number moves to **draining**: still owned, still impossible for any other app
+to be given, but no longer this app's pinned port. The next recreate — the moment
+the container binding it is proven gone — returns it to the pool automatically.
 
 ```
-This app still holds port 31005. Set ingress_type='http' and redeploy to stop
-publishing it before pinning 8080 — otherwise 31005 returns to the pool while the
-running container is still bound to it.
+sandbox_public_port: 10800  ──re-pin──▶  pinned 31000, draining 10800
+                                              │
+                                         redeploy sandbox
+                                              ▼
+                                    pinned 31000, 10800 released
 ```
 
-The reason is in the message: the publish is a `docker run` flag, so the old
-number stays bound until the container is recreated, and letting the row forget it
-would hand a live port to the next app. The three-step way round is the one the
-error names — set `ingress_type: "http"`, **redeploy** (which is what actually
-closes the port), then pin the new number and deploy again. Before the first
-deploy there is nothing bound, so re-pinning is allowed and is the common case:
-turn the type on, then immediately name the port your clients expect.
+Both numbers are visible the whole time, so no surface ever reports a port closed
+while a container still answers on it. Re-pin twice before redeploying and both
+old numbers drain — AppCrane cannot tell which one the running container holds,
+and reserving one it does not need is strictly safer than reissuing one it does.
+
+Before the first deploy nothing is bound, so a re-pin drains nothing at all. That
+is still the common case: turn the type on, then immediately name the port your
+clients expect.
 
 #### Flipping a dual app to `tcp` is refused while it still has a data plane
 

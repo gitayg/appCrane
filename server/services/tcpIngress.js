@@ -306,6 +306,25 @@ export function validateDataPlanePort(value) {
  * separately from public_port precisely because the two facts differ — AppCrane
  * publishes nothing, and the host port may still answer.
  */
+/**
+ * Every port this app still has RESERVED but no longer publishes, per
+ * environment — the numbers a running container is bound to that AppCrane will
+ * hand back once it is recreated. v2.47.0.
+ *
+ * Two ways to get here, and they are the same state:
+ *   - flipped to http, so the type no longer publishes anything (the original
+ *     pendingPortRelease case), and
+ *   - re-pinned to a different number, which leaves the old one draining.
+ *
+ * Reported so an operator is never told a port is closed while it answers.
+ */
+export function drainingPorts(db, appId, env = null) {
+  const rows = env
+    ? db.prepare("SELECT host_port, env FROM app_host_ports WHERE app_id = ? AND env = ? AND state = 'draining' ORDER BY host_port").all(appId, env)
+    : db.prepare("SELECT host_port, env FROM app_host_ports WHERE app_id = ? AND state = 'draining' ORDER BY host_port").all(appId);
+  return rows;
+}
+
 export function pendingPortRelease(app) {
   // Keyed on the TYPE, not on publishTargets(): an app whose type still
   // publishes is holding its port on purpose, even in an intermediate state
@@ -475,9 +494,14 @@ export function assignPublicPort(db, appId, requested = null, env = 'production'
   // releasePublicPort — nothing else touches either. The registry carries the
   // invariant; the column is the read path that keeps /api/apps from querying
   // once per app.
+  // Only the PINNED row is replaced. A draining row is a port a live container
+  // is still bound to; deleting it here would return that number to the pool
+  // while it is answering, which is the whole hazard this mechanism exists to
+  // avoid.
   const claim = (port) => {
-    db.prepare('DELETE FROM app_host_ports WHERE app_id = ? AND env = ?').run(appId, env);
-    db.prepare('INSERT INTO app_host_ports (host_port, app_id, env) VALUES (?, ?, ?)')
+    db.prepare("DELETE FROM app_host_ports WHERE app_id = ? AND env = ? AND state = 'pinned'")
+      .run(appId, env);
+    db.prepare("INSERT INTO app_host_ports (host_port, app_id, env, state) VALUES (?, ?, ?, 'pinned')")
       .run(port, appId, env);
     db.prepare(`UPDATE apps SET ${col} = ? WHERE id = ?`).run(port, appId);
   };
@@ -517,12 +541,26 @@ export function assignPublicPort(db, appId, requested = null, env = 'production'
         'SELECT 1 FROM deployments WHERE app_id = ? AND env = ? AND status = \'live\' LIMIT 1'
       ).get(appId, env);
     if (published && held !== requested) {
-      const e = new Error(
-        `This app still holds port ${held} in ${env}. Set ingress_type='http' and redeploy to stop ` +
-        `publishing it before pinning ${requested} — otherwise ${held} returns to the pool ` +
-        `while the running container is still bound to it.`);
-      e.status = 409; e.code = 'PORT_STILL_HELD';
-      throw e;
+      // v2.47.0: tracked, not refused. The old number stays OWNED — moved to
+      // 'draining' rather than deleted — so the allocator still cannot give it
+      // to anyone while the running container answers on it, and the existing
+      // release-on-recreate hook drops it the moment that container is gone.
+      // Until v2.46.0 there was nowhere to record this, which is why an
+      // operator was sent through flip-to-http, redeploy, re-pin instead.
+      const moved = db.prepare(
+        "UPDATE app_host_ports SET state = 'draining' WHERE app_id = ? AND env = ? AND state = 'pinned'"
+      ).run(appId, env).changes;
+      if (moved === 0) {
+        // The COLUMN held a port the registry never recorded. `held` was read
+        // from the column, so this is reachable whenever the two disagree — a
+        // row written directly, a restored backup, a value that predates the
+        // registry. Updating nothing and carrying on would forget the number
+        // entirely, which is precisely the hazard: a live container answers on
+        // it and the allocator is free to hand it to someone else. Reserve it.
+        db.prepare(
+          "INSERT OR IGNORE INTO app_host_ports (host_port, app_id, env, state) VALUES (?, ?, ?, 'draining')"
+        ).run(held, appId, env);
+      }
     }
     assertPublicPortAssignable(db, requested, appId, env);
     claim(requested);
@@ -558,10 +596,31 @@ export function releasePublicPort(db, appId, env = 'production') {
  * duplicate --name and this runs after it succeeded. Until then the allocator
  * must keep treating the port as taken, however plainly the row says http.
  */
-export function releasePendingPortAfterRecreate(db, slug) {
+export function releasePendingPortAfterRecreate(db, slug, env = 'production') {
   const row = db.prepare('SELECT id, ingress_type, public_port FROM apps WHERE slug = ?').get(slug);
-  const port = pendingPortRelease(row);
-  if (port === null) return null;
-  releasePublicPort(db, row.id);
-  return port;
+  if (!row) return null;
+  const freed = [];
+
+  // v2.47.0: draining rows first. The container that was binding them has just
+  // been replaced by one that is not, so the reservation has done its job and
+  // the numbers go back in the pool. This is the half that makes a re-pin a
+  // single step — the operator changes the number, redeploys, and the old one
+  // frees itself.
+  const draining = drainingPorts(db, row.id, env);
+  if (draining.length) {
+    db.prepare("DELETE FROM app_host_ports WHERE app_id = ? AND env = ? AND state = 'draining'")
+      .run(row.id, env);
+    freed.push(...draining.map(d => d.host_port));
+  }
+
+  // The original case: flipped to http, so the pinned number is a leftover too.
+  // Production-only, as before — pendingPortRelease reads apps.public_port.
+  if (env === 'production') {
+    const port = pendingPortRelease(row);
+    if (port !== null) {
+      releasePublicPort(db, row.id, 'production');
+      freed.push(port);
+    }
+  }
+  return freed.length ? freed : null;
 }

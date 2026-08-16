@@ -223,3 +223,112 @@ test('an http app publishes in neither environment even holding numbers', () => 
   assert.equal(publicPortForApp(row(id), 'sandbox'), null,
     'ingress_type still decides whether anything is published at all');
 });
+
+// ---------------------------------------------------------------------------
+// Draining: changing a port a live container is still bound to (v2.47.0)
+// ---------------------------------------------------------------------------
+//
+// Target ports are deliberately BELOW the 31000-31999 auto band: another test
+// in this file auto-allocates and legitimately takes 31000, and a hardcoded
+// number inside the band makes this section fail depending on test order.
+//
+// This used to be refused, and the operator was told to flip to http, redeploy,
+// then pin the new number. The hazard was real — the pin is the only thing
+// reserving a number, so overwriting it returns a still-answering port to the
+// pool — but the refusal was a workaround for having nowhere to record
+// "bound to X, pinned to Y". The registry is that place.
+
+const { drainingPorts, releasePendingPortAfterRecreate } =
+  await import('../server/services/tcpIngress.js');
+
+const live = (appId, env) =>
+  db.prepare("INSERT INTO deployments (app_id, env, status, version) VALUES (?, ?, 'live', '1.0.0')")
+    .run(appId, env);
+
+test('re-pinning a published sandbox port moves the pin and drains the old one', () => {
+  const id = makeApp('drain-basic');
+  assignPublicPort(db, id, 10800, 'sandbox');
+  live(id, 'sandbox');
+
+  assert.equal(assignPublicPort(db, id, 12000, 'sandbox'), 12000,
+    'the re-pin was refused — this is the three-step dance the feature removes');
+  assert.equal(publicPortForApp(row(id), 'sandbox'), 12000);
+  assert.deepEqual(drainingPorts(db, id, 'sandbox').map(d => d.host_port), [10800]);
+});
+
+test('THE HAZARD: a draining port cannot be given to another app', () => {
+  const a = makeApp('drain-holder');
+  const b = makeApp('drain-thief');
+  assignPublicPort(db, a, 10900, 'sandbox');
+  live(a, 'sandbox');
+  assignPublicPort(db, a, 12100, 'sandbox');
+
+  assert.throws(
+    () => assignPublicPort(db, b, 10900, 'production'),
+    e => e.code === 'PORT_TAKEN',
+    'a port a live container still answers on was handed to another app — its clients would ' +
+    'now reach a different app entirely, which is exactly what the old refusal prevented',
+  );
+});
+
+test('the recreate frees it, and only then', () => {
+  const id = makeApp('drain-release');
+  assignPublicPort(db, id, 11000, 'sandbox');
+  live(id, 'sandbox');
+  assignPublicPort(db, id, 12200, 'sandbox');
+
+  const freed = releasePendingPortAfterRecreate(db, 'drain-release', 'sandbox');
+  assert.deepEqual(freed, [11000]);
+  assert.deepEqual(drainingPorts(db, id, 'sandbox'), []);
+
+  const other = makeApp('drain-taker');
+  assert.equal(assignPublicPort(db, other, 11000, 'production'), 11000,
+    'the port never came back to the pool — it has leaked');
+});
+
+test('recreating the OTHER environment does not free this one\'s drained port', () => {
+  const id = makeApp('drain-envscope');
+  assignPublicPort(db, id, 11100, 'sandbox');
+  live(id, 'sandbox');
+  assignPublicPort(db, id, 12300, 'sandbox');
+
+  assert.equal(releasePendingPortAfterRecreate(db, 'drain-envscope', 'production'), null,
+    'a production recreate freed a port the SANDBOX container is still bound to');
+  assert.deepEqual(drainingPorts(db, id, 'sandbox').map(d => d.host_port), [11100]);
+});
+
+test('a port allocated but never deployed is re-pinned with nothing left draining', () => {
+  // No live deployment, so nothing is bound and there is nothing to reserve.
+  // This is the common case — "I just enabled tcp, now set the number I want".
+  const id = makeApp('drain-none');
+  assignPublicPort(db, id, 11200, 'sandbox');
+  assert.equal(assignPublicPort(db, id, 12400, 'sandbox'), 12400);
+  assert.deepEqual(drainingPorts(db, id, 'sandbox'), [],
+    'a port nothing was ever bound to was reserved anyway, wasting it until a recreate');
+});
+
+test('re-pinning twice before a recreate drains BOTH old ports', () => {
+  const id = makeApp('drain-twice');
+  assignPublicPort(db, id, 11300, 'sandbox');
+  live(id, 'sandbox');
+  assignPublicPort(db, id, 11301, 'sandbox');
+  assignPublicPort(db, id, 11302, 'sandbox');
+
+  // Only one of them is actually bound, but AppCrane cannot tell which, and
+  // holding a number it does not need is strictly safer than reissuing one a
+  // container answers on. Both come back on the next recreate.
+  assert.deepEqual(drainingPorts(db, id, 'sandbox').map(d => d.host_port), [11300, 11301]);
+  assert.equal(publicPortForApp(row(id), 'sandbox'), 11302);
+  assert.deepEqual(releasePendingPortAfterRecreate(db, 'drain-twice', 'sandbox').sort(), [11300, 11301]);
+});
+
+test('the schema still refuses two PINNED ports for one app and environment', () => {
+  const id = makeApp('drain-onepin');
+  assignPublicPort(db, id, 11400, 'sandbox');
+  live(id, 'sandbox');
+  assignPublicPort(db, id, 12500, 'sandbox');
+  const pinned = db.prepare(
+    "SELECT COUNT(*) c FROM app_host_ports WHERE app_id = ? AND env = 'sandbox' AND state = 'pinned'"
+  ).get(id).c;
+  assert.equal(pinned, 1, 'draining rows are unconstrained, but there must be exactly one pin');
+});
