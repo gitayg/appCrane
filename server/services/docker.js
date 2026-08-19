@@ -408,6 +408,7 @@ export async function startApp({ slug, env, image, hostPort, envVars = {}, volum
   args.push(image);
   const id = await dockerExec(args);
   invalidatePublishedPortsCache();   // the bindings just changed
+  invalidateResourcesCache();        // and so did the applied limits
   log.info(`docker started: ${name} (${id.slice(0, 12)}) from ${image}`);
   if (publish) {
     // The container port is in the line because it is the one fact that says
@@ -440,6 +441,7 @@ export async function stopApp(slug, env) {
   try { await dockerExec(['stop', name], { timeout: 15000 }); } catch (e) {}
   try { await dockerExec(['rm', '-f', name]); } catch (e) {}
   invalidatePublishedPortsCache();
+  invalidateResourcesCache();
   log.debug(`docker stopped: ${name}`);
 }
 
@@ -584,6 +586,75 @@ export function parsePublishedPorts(ports) {
     out.push({ hostIp, hostPort: Number(m[2]), containerPort: Number(m[3]) });
   }
   return out;
+}
+
+/**
+ * The resource limits ACTUALLY applied to every AppCrane container, in two
+ * `docker` calls for the whole fleet.
+ *
+ * `--memory` and `--cpus` are `docker run` arguments, exactly like a port
+ * publish: changing max_ram_mb on a running app rewrites the row and nothing
+ * else until the container is RECREATED. Every AppCrane surface reported the
+ * configured number, so a container running with no memory limit at all looked
+ * identical to one running with 512 MB.
+ *
+ * That is not hypothetical. An August 2026 incident had clamd OOM-killed at
+ * 992 MB anonymous RSS on an app configured for 512 MB — figures that cannot
+ * both be true, because a 512 MB cgroup limit kills the process at 512 MB. The
+ * limit was not in force, and no surface could have said so.
+ *
+ * Two calls rather than one inspect per app: `docker inspect` takes many
+ * containers at once but needs their ids, and `docker ps` cannot report
+ * HostConfig. Cached and invalidated on the same events as the port reader.
+ *
+ * Returns Map<"slug:env", { memoryBytes, nanoCpus, restartPolicy, running }>,
+ * or null when Docker could not be read — never an empty map, which would read
+ * as "no app has limits" and turn an outage into a wall of false findings.
+ */
+const RESOURCES_TTL_MS = 5000;
+let resourcesCache = null;
+
+export function invalidateResourcesCache() { resourcesCache = null; }
+
+export async function containerResourcesBySlug() {
+  if (resourcesCache && Date.now() - resourcesCache.at < RESOURCES_TTL_MS) return resourcesCache.map;
+  try {
+    const listed = await dockerExec([
+      'ps', '-a', '--filter', `label=${APPCRANE_LABEL}`,
+      '--format', '{{.ID}}|{{.Label "slug"}}|{{.Label "env"}}',
+    ]);
+    const map = new Map();
+    if (!listed) { resourcesCache = { at: Date.now(), map }; return map; }
+
+    const rows = listed.split('\n').map(l => l.split('|')).filter(r => r[0] && r[1] && r[2]);
+    if (!rows.length) { resourcesCache = { at: Date.now(), map }; return map; }
+
+    const inspected = await dockerExec([
+      'inspect', ...rows.map(r => r[0]),
+      '--format', '{{.Id}}|{{.HostConfig.Memory}}|{{.HostConfig.NanoCpus}}|{{.HostConfig.RestartPolicy.Name}}|{{.State.Running}}',
+    ]);
+    const byId = new Map();
+    for (const line of (inspected || '').split('\n')) {
+      const [id, mem, cpus, restart, running] = line.split('|');
+      if (!id) continue;
+      byId.set(id, {
+        memoryBytes: Number(mem) || 0,
+        nanoCpus: Number(cpus) || 0,
+        restartPolicy: restart || '',
+        running: running === 'true',
+      });
+    }
+    for (const [id, slug, env] of rows) {
+      // `docker ps` truncates ids; inspect echoes them in full.
+      const full = [...byId.keys()].find(k => k.startsWith(id));
+      if (full) map.set(`${slug}:${env}`, byId.get(full));
+    }
+    resourcesCache = { at: Date.now(), map };
+    return map;
+  } catch (e) {
+    log.warn(`[resources] could not read container limits: ${e.message}`);
+    return null;
+  }
 }
 
 export async function pruneOldImages(slug, env, keep = 2) {
