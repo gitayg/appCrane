@@ -3200,6 +3200,241 @@ const TOOLS = [
       return { app: app.slug, env, name: job.name, ...result };
     },
   },
+  {
+    name: 'appcrane_check_resource_limits',
+    description:
+      'Which containers are NOT running with the CPU/RAM limits AppCrane has configured for them? Compares every app row against the limits actually in force on its container and reports only the mismatches. `--memory` and `--cpus` are `docker run` flags, so changing a limit rewrites the database and nothing else until the container is RECREATED — a container created before the limit was set keeps running without it, and every other AppCrane surface reports the CONFIGURED number, so the two are indistinguishable without this. `memory state=not_applied` means NO limit at all: that container can take the whole host, and on a host with no swap that ends as a global OOM kill of whatever the kernel judges largest. Answers `applied: null` (unknown) rather than guessing when Docker cannot be read. ADMIN ONLY.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        slug: { type: 'string', description: 'Check one app instead of the whole fleet.' },
+        include_ok: { type: 'boolean', default: false, description: 'Also list containers whose limits ARE applied. Default false — the point is the exceptions.' },
+      },
+      additionalProperties: false,
+    },
+    requiredRole: 'admin',
+    readOnly: true,
+    handler: async (user, args) => {
+      const { containerResourcesBySlug } = await import('./docker.js');
+      const { resourceDrift } = await import('./resourceDrift.js');
+      const db = getDb();
+
+      const apps = args.slug
+        ? [getAppForUser(user, args.slug)]
+        : db.prepare('SELECT id, slug, max_ram_mb, max_cpu_percent FROM apps ORDER BY slug').all();
+
+      const observedMap = await containerResourcesBySlug();
+      if (observedMap === null) {
+        return {
+          checked: 0, unknown: true,
+          summary: 'Docker could not be read, so whether any limit is in force is UNKNOWN. This is not a report that limits are missing.',
+        };
+      }
+
+      const rows = [];
+      for (const app of apps) {
+        for (const env of ['production', 'sandbox']) {
+          const observed = observedMap.get(`${app.slug}:${env}`) ?? null;
+          if (observed === null) continue;   // no container for this env — nothing to compare
+          const d = resourceDrift(app, observed);
+          if (d.applied && !args.include_ok) continue;
+          rows.push({
+            app: app.slug, env,
+            running: observed.running,
+            applied: d.applied,
+            configured: d.expected,
+            actual: d.actual,
+            findings: d.findings,
+          });
+        }
+      }
+
+      const unlimited = rows.filter(r => r.findings.some(f => f.state === 'not_applied'));
+      return {
+        checked: apps.length,
+        mismatches: rows.length,
+        containers_with_no_limit: unlimited.length,
+        rows,
+        summary: rows.length === 0
+          ? 'Every container is running with the limits AppCrane has configured for it.'
+          : `${rows.length} container(s) differ from their configured limits` +
+            (unlimited.length ? `, and ${unlimited.length} are running with NO limit on at least one resource — those can take the whole host.` : '.') +
+            ' A limit is a `docker run` flag: recreate the container (a deploy, or POST /api/apps/<slug>/restart/<env>) to apply it. `docker restart` reuses the existing container and will NOT.',
+      };
+    },
+  },
+  // ── Off-site backup (v2.48.0) ───────────────────────────────────────────
+  //
+  // AppCrane has had scheduled S3/R2 backup since v2.21.9, and its whole
+  // configuration — the SQLite DB, .env, icons, appdata — goes up in one zip.
+  // It is a no-op until an operator fills in a bucket and credentials, and
+  // there was no way to ASK whether that had happened except by opening
+  // Settings. An August 2026 incident review consequently recorded "no SQLite
+  // backup exists" as an open risk, when the truth was "the feature exists and
+  // nobody enabled it" — a settings task filed as a missing capability.
+  //
+  // These three answer it from an agent: is it configured, make it so, run it
+  // now. Platform admin only, checked as the FIRST statement in every handler,
+  // matching appcrane_set_app_ingress: a backup destination is where a copy of
+  // every secret on the platform gets written, so it is not an app-owner field.
+  {
+    name: 'appcrane_get_backup_status',
+    description:
+      'Is off-site backup actually working? Reports the scheduled S3/R2 backup config together with a verdict — `configured`, `enabled`, `healthy`, when it last ran and what is missing — so "are we backed up" is one call rather than an inference from raw settings. The backup covers the SQLite database (apps, users, settings, encrypted env vars), .env, icons and appdata, uploaded nightly as one zip. NEVER returns the secret access key; `has_secret` reports only whether one is stored. Read the `summary` first: a config can be fully populated and still not be running (enabled=false), and it can be enabled and failing every night (see last_error). PLATFORM ADMIN ONLY.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    requiredRole: 'admin',
+    readOnly: true,
+    handler: async (user) => {
+      if (user.role !== 'platform_admin') {
+        throw new Error('Only platform admins can read the backup configuration — it names the destination every platform secret is copied to.');
+      }
+      const { getBackupConfig } = await import('./backupScheduler.js');
+      const cfg = getBackupConfig();
+      const configured = !!(cfg.bucket && cfg.access_key_id && cfg.has_secret);
+
+      // Staleness is measured, not assumed from `enabled`. A nightly job that
+      // has not run in three days is the case an operator most needs told, and
+      // it looks identical to a healthy one if you only read the config.
+      const lastRunMs = cfg.last_run ? Date.parse(cfg.last_run) : NaN;
+      const hoursSince = Number.isFinite(lastRunMs)
+        ? Math.floor((Date.now() - lastRunMs) / 3600000)
+        : null;
+      const overdue = hoursSince !== null && hoursSince > 36;
+      const healthy = configured && cfg.enabled && !cfg.last_error && hoursSince !== null && !overdue;
+
+      const missing = [];
+      if (!cfg.bucket) missing.push('bucket');
+      if (!cfg.access_key_id) missing.push('access_key_id');
+      if (!cfg.has_secret) missing.push('secret_access_key');
+
+      let summary;
+      if (!configured) {
+        summary = `NOT CONFIGURED — no off-site backup is being taken. Missing: ${missing.join(', ')}. ` +
+          'Everything AppCrane knows lives in one SQLite file on this host; until this is set there is no copy of it anywhere else.';
+      } else if (!cfg.enabled) {
+        summary = 'CONFIGURED BUT DISABLED — credentials are stored and nothing is being uploaded. Set enabled=true to start the nightly schedule.';
+      } else if (cfg.last_error) {
+        summary = `ENABLED BUT FAILING — the last attempt errored: ${cfg.last_error}`;
+      } else if (hoursSince === null) {
+        summary = 'ENABLED, NEVER RUN — the schedule is on but no upload has completed yet. Use appcrane_run_backup_now to prove it works rather than waiting for tonight.';
+      } else if (overdue) {
+        summary = `ENABLED BUT OVERDUE — last successful upload was ${hoursSince}h ago, and this runs nightly. Something is stopping it.`;
+      } else {
+        summary = `Healthy — last uploaded ${hoursSince}h ago to s3://${cfg.bucket}/${cfg.prefix || ''}`;
+      }
+
+      return {
+        ...cfg,
+        configured,
+        healthy,
+        missing,
+        hours_since_last_run: hoursSince,
+        summary,
+        covers: ['deployhub.db (apps, users, settings, encrypted env vars)', '.env', 'icons', 'appdata'],
+      };
+    },
+  },
+  {
+    name: 'appcrane_set_backup_config',
+    description:
+      'Configure the scheduled off-site (S3 / S3-compatible, e.g. Cloudflare R2) backup. Every field is optional — only what you pass is changed. Enabling is REFUSED unless bucket, access_key_id and a stored secret are all present, because an enabled-but-unconfigured backup fails silently every night while every status surface reads "enabled", which is worse than being plainly off. SECURITY: `secret_access_key` is write-only — AppCrane encrypts it and never returns it — but passing it here means the plaintext value travels through this conversation and whatever logs it. Prefer Settings → Backup in the dashboard for the secret itself, and use this tool for the rest. PLATFORM ADMIN ONLY: this names the destination a copy of every secret on the platform is written to, so pointing it at the wrong bucket is an exfiltration path, not a misconfiguration.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        enabled:           { type: 'boolean', description: 'Turn the nightly schedule on or off. Refused with enabled=true unless bucket, access_key_id and a stored secret all exist.' },
+        bucket:            { type: 'string',  description: 'Destination bucket name.' },
+        region:            { type: 'string',  description: 'Region, e.g. us-east-1. Defaults to us-east-1.' },
+        prefix:            { type: 'string',  description: 'Key prefix inside the bucket, e.g. "appcrane/". Optional.' },
+        endpoint:          { type: 'string',  description: 'Custom S3 endpoint for a non-AWS provider (Cloudflare R2, MinIO). Leave empty for AWS.' },
+        access_key_id:     { type: 'string',  description: 'Access key id. Not a secret on its own; stored in the clear.' },
+        secret_access_key: { type: 'string',  description: 'Secret access key. Write-only: encrypted at rest, never returned by any read surface. NOTE: passing it here puts the plaintext in this conversation — the dashboard is the better place for it.' },
+        hour:              { type: 'integer', minimum: 0, maximum: 23, description: 'Hour of day (server local time) to run. Default 3.' },
+      },
+      additionalProperties: false,
+    },
+    requiredRole: 'admin',
+    handler: async (user, args) => {
+      if (user.role !== 'platform_admin') {
+        throw new Error('Only platform admins can change the backup configuration — it names the destination every platform secret is copied to.');
+      }
+      const { getBackupConfig, setBackupConfig } = await import('./backupScheduler.js');
+      const before = getBackupConfig();
+
+      // Refuse to enable a backup that cannot run. The scheduler would throw
+      // "not fully configured" nightly into the log while every status surface
+      // reported enabled:true — the reassuring-but-false state this whole tool
+      // exists to make visible.
+      if (args.enabled === true) {
+        const bucket = args.bucket ?? before.bucket;
+        const keyId  = args.access_key_id ?? before.access_key_id;
+        const secret = args.secret_access_key ? true : before.has_secret;
+        const missing = [];
+        if (!bucket) missing.push('bucket');
+        if (!keyId) missing.push('access_key_id');
+        if (!secret) missing.push('secret_access_key');
+        if (missing.length) {
+          throw new Error(
+            `Cannot enable backup — still missing: ${missing.join(', ')}. An enabled backup with no destination ` +
+            'fails every night while reporting itself enabled. Supply the missing fields in this same call, or set ' +
+            'them first and enable afterwards.');
+        }
+      }
+
+      const after = setBackupConfig(args, user.id);
+
+      // Audited under its own action. A generic MCP call entry records that a
+      // tool ran; an operator reviewing where platform secrets are shipped to
+      // needs to find the destination change by name. The secret is recorded
+      // as a fact, never as a value.
+      const { logAudit } = await import('../middleware/audit.js');
+      const changed = {};
+      for (const k of ['enabled', 'bucket', 'region', 'prefix', 'endpoint', 'access_key_id', 'hour']) {
+        if (args[k] !== undefined && before[k] !== after[k]) changed[k] = { from: before[k], to: after[k] };
+      }
+      if (args.secret_access_key) changed.secret_access_key = { from: '(redacted)', to: '(redacted, replaced)' };
+      logAudit(user.id, null, 'backup-config-change', { changed });
+
+      return {
+        ...after,
+        changed_fields: Object.keys(changed),
+        next: after.enabled
+          ? 'Enabled. Run appcrane_run_backup_now to prove the credentials work rather than finding out at 03:00.'
+          : 'Saved but NOT enabled — nothing is being uploaded yet. Set enabled=true when ready.',
+      };
+    },
+  },
+  {
+    name: 'appcrane_run_backup_now',
+    description:
+      'Run the off-site backup immediately and report what was uploaded. Use this to PROVE a new configuration works instead of waiting for the nightly run to fail quietly — it exercises the real credentials, the real bucket and the real upload path, and records the result in last_run / last_error exactly as the scheduled job does. Works whether or not the schedule is enabled, so a configuration can be verified before turning it on. Uploads a zip of the SQLite database, .env, icons and appdata. PLATFORM ADMIN ONLY.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    requiredRole: 'admin',
+    handler: async (user) => {
+      if (user.role !== 'platform_admin') {
+        throw new Error('Only platform admins can run a backup — it writes a copy of every platform secret to the configured destination.');
+      }
+      const { runS3Backup, getBackupConfig } = await import('./backupScheduler.js');
+      const { logAudit } = await import('../middleware/audit.js');
+      const cfg = getBackupConfig();
+      try {
+        const r = await runS3Backup();
+        logAudit(user.id, null, 'backup-run', { ok: true, bucket: cfg.bucket, key: r.key, size: r.size });
+        return {
+          ok: true,
+          ...r,
+          bucket: cfg.bucket,
+          note: `Uploaded ${r.size} bytes to s3://${cfg.bucket}/${r.key}. This is a full copy of the platform's secrets — treat the bucket as such.`,
+        };
+      } catch (e) {
+        // Returned rather than thrown: a failed backup is an ANSWER to "does
+        // this work", and the message (bad credentials, wrong region, no such
+        // bucket) is the useful part. last_error is already recorded by the
+        // service, so this is visible to every other surface too.
+        logAudit(user.id, null, 'backup-run', { ok: false, bucket: cfg.bucket, error: String(e.message).slice(0, 300) });
+        return { ok: false, error: e.message, bucket: cfg.bucket, configured: !!(cfg.bucket && cfg.access_key_id && cfg.has_secret) };
+      }
+    },
+  },
 ];
 
 // v2.11.0: AWS-friendly naming. The catalog the LLM sees presents the

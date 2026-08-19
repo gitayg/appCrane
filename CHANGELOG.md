@@ -5,6 +5,22 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.48.0 — Backup and resource limits are answerable from an agent.
+
+**An incident review recorded "no SQLite backup exists" as an open risk.** AppCrane has shipped scheduled S3/R2 backup since v2.21.9, and the nightly zip covers `deployhub.db`, `.env`, icons and appdata. It is a no-op until a bucket and credentials are entered — and there was no way to ASK whether that had happened except by opening Settings. A five-minute settings task got filed as a missing capability.
+
+Three tools make it answerable. `appcrane_get_backup_status` returns a verdict rather than raw settings, because the states that matter look alike from the config alone: configured-but-disabled, enabled-but-never-run, enabled-but-failing, and enabled-but-**overdue** (a nightly job whose last success was three days ago reads identically to a healthy one unless someone measures). `appcrane_run_backup_now` proves the credentials work instead of finding out at 03:00. `appcrane_set_backup_config` sets the rest, and **refuses to enable an incomplete configuration** — an enabled backup with no destination fails silently every night while every surface reports it enabled, which is worse than being plainly off.
+
+All three are platform-admin only, checked as the first statement in each handler: the destination bucket receives a copy of every secret AppCrane holds, so pointing it elsewhere is an exfiltration path, not a misconfiguration. The secret access key is write-only — encrypted at rest, never returned by any read surface, and recorded in the audit log as a fact rather than a value.
+
+**And the same blind spot, one subsystem over.** `--memory` and `--cpus` are `docker run` flags, exactly like a port publish: changing a limit rewrites the row and nothing else until the container is **recreated**. Every surface reported the configured number, so a container running with *no* memory limit was indistinguishable from one running at 512 MB.
+
+That is not theoretical. The same review examined an app configured `max_ram_mb: 512` whose clamd was OOM-killed at 992 MB RSS — figures that cannot both be true — and no AppCrane surface could say which. Settling it took an `ssh` and a `docker inspect`. (It turned out the limit *was* applied, and the real story was `--memory-swap=1g` against a host with zero swap; the point stands that nothing could tell you either way.)
+
+`appcrane_check_resource_limits` compares every app row against the limits actually in force, fleet-wide, in two `docker` calls. `state: not_applied` on memory means no limit at all — that container can take the whole host. Unreadable Docker answers `unknown`, never "unlimited".
+
+Twenty-five tests, each verified failing first: treating "no limit" as applied turns the headline case red; reporting an unreadable container as unlimited turns the honesty test red; dropping the float tolerance on NanoCpus turns a healthy container into a false positive; leaking the S3 secret into the status payload, allowing a non-platform admin, and enabling an unconfigured backup each turn their own test red.
+
 ## 2.47.0 — Changing a published port is one step again, not three.
 
 **Moving a port an app was already publishing was refused outright**, with a message telling the operator to set `ingress_type='http'`, redeploy, then pin the new number and deploy again. Four actions to change one integer.

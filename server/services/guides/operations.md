@@ -226,6 +226,31 @@ Every `appcrane_*` tool, grouped by purpose. The authoritative input schema for 
 | `appcrane_promote` | Promote the current live SANDBOX release to production — the gated sandbox→prod path |
 | `appcrane_list_cron` | List the scheduled jobs declared in an app's deployhub.json `cron` array (after the most recent deploy) |
 | `appcrane_run_cron_now` | Trigger a scheduled cron job RIGHT NOW, regardless of its schedule |
+| `appcrane_check_resource_limits` | Which containers are NOT running with their configured CPU/RAM? Admin only |
+
+### Platform operations (platform admin)
+
+`--memory`, `--cpus` and a port publish are all `docker run` flags: changing one
+rewrites the database row and nothing else until the container is **recreated**.
+A container created before the change keeps running without it, and every other
+surface reports the *configured* value. `appcrane_check_resource_limits` is what
+tells the two apart — `state: not_applied` on memory means no limit at all, so
+that container can take the whole host.
+
+Off-site backup has existed since v2.21.9 and is a no-op until a bucket and
+credentials are entered, which made it easy to believe there was no backup
+feature at all. These make the state answerable without opening Settings:
+
+| Tool | What it does |
+|---|---|
+| `appcrane_get_backup_status` | Is off-site backup configured, enabled, and when did it last actually run? Never returns the secret |
+| `appcrane_set_backup_config` | Set bucket / region / prefix / endpoint / key / schedule. Refuses to enable an incomplete config |
+| `appcrane_run_backup_now` | Run it immediately to prove the credentials work, rather than finding out at 03:00 |
+
+The backup covers `deployhub.db`, `.env`, icons and appdata — a copy of every
+secret AppCrane holds. Treat the destination bucket accordingly; that is why all
+three are platform-admin only, and why the secret access key is write-only and
+better entered in Settings → Backup than passed through an agent.
 
 ### App management
 
