@@ -18,6 +18,37 @@
 // observed container state, knowing nothing about how that state was read.
 
 const MB = 1024 * 1024;
+
+/**
+ * The limits an app row CONFIGURES, however that row happens to carry them.
+ *
+ * They live in `apps.resource_limits`, a JSON TEXT column — there is no
+ * `max_ram_mb` column and never was. v2.48.0 shipped a caller that selected one
+ * by name; the query threw, and the unit tests did not notice because they
+ * passed hand-built `{ max_ram_mb: 512 }` objects instead of a database row.
+ * A fixture shaped to match the code cannot catch the code being wrong about
+ * the schema. Reading through one helper means a caller can hand this module a
+ * raw row and get the right answer.
+ */
+export function configuredLimits(app) {
+  let parsed = null;
+  if (app && typeof app.resource_limits === 'string') {
+    try { parsed = JSON.parse(app.resource_limits); } catch (_) { parsed = null; }
+  } else if (app && app.resource_limits && typeof app.resource_limits === 'object') {
+    parsed = app.resource_limits;
+  }
+  const pick = (jsonKey, direct, fallback) => {
+    const fromJson = Number(parsed?.[jsonKey]);
+    if (Number.isFinite(fromJson) && fromJson > 0) return fromJson;
+    const fromRow = Number(app?.[direct]);
+    if (Number.isFinite(fromRow) && fromRow > 0) return fromRow;
+    return fallback;
+  };
+  return {
+    max_ram_mb: pick('max_ram_mb', 'max_ram_mb', 512),
+    max_cpu_percent: pick('max_cpu_percent', 'max_cpu_percent', 50),
+  };
+}
 const NANO = 1e9;
 
 /** Docker rounds nothing here, but be tolerant of float dust in NanoCpus. */
@@ -34,8 +65,7 @@ const cpusClose = (a, b) => Math.abs(a - b) < 1e6;   // 0.001 of a CPU
  * @returns {{ applied: boolean|null, findings: object[] }}
  */
 export function resourceDrift(app, observed) {
-  const wantMb = Number(app?.max_ram_mb) || 512;
-  const wantPct = Number(app?.max_cpu_percent) || 50;
+  const { max_ram_mb: wantMb, max_cpu_percent: wantPct } = configuredLimits(app);
   const expected = { memory_mb: wantMb, cpu_percent: wantPct };
 
   if (observed === null || observed === undefined) {

@@ -106,3 +106,80 @@ test('an app with no explicit limits is judged against the platform defaults', (
   assert.equal(d.expected.memory_mb, 512);
   assert.equal(d.expected.cpu_percent, 50);
 });
+
+// ---------------------------------------------------------------------------
+// Against a REAL database row (v2.48.1)
+// ---------------------------------------------------------------------------
+//
+// Everything above passes hand-built objects like { max_ram_mb: 512 }. v2.48.0
+// shipped with a caller that did `SELECT id, slug, max_ram_mb ... FROM apps`,
+// and there is no such column — limits live in `apps.resource_limits`, a JSON
+// TEXT column. The query threw on every call, and none of the tests above
+// noticed, because a fixture shaped to match the code cannot catch the code
+// being wrong about the schema.
+//
+// These use rows that came out of the database.
+
+const { initDb, getDb } = await import('../server/db.js');
+initDb();
+const rdb = getDb();
+const { configuredLimits } = await import('../server/services/resourceDrift.js');
+
+const insertApp = (slug, limits) => {
+  rdb.prepare(
+    "INSERT INTO apps (name, slug, slot, source_type, resource_limits) VALUES (?, ?, ?, 'managed', ?)"
+  ).run(slug, slug, Math.floor(Math.random() * 1e6) + 500, limits);
+  return rdb.prepare('SELECT * FROM apps WHERE slug = ?').get(slug);
+};
+
+test('a real row carries its limits in resource_limits JSON, and they are read', () => {
+  const row = insertApp('real-limits', JSON.stringify({ max_ram_mb: 1024, max_cpu_percent: 25 }));
+  assert.equal(row.max_ram_mb, undefined,
+    'precondition: there is no max_ram_mb COLUMN — if this ever becomes defined the bug class is gone');
+  assert.deepEqual(configuredLimits(row), { max_ram_mb: 1024, max_cpu_percent: 25 });
+});
+
+test('drift against a real row compares the CONFIGURED limit, not the default', () => {
+  const row = insertApp('real-drift', JSON.stringify({ max_ram_mb: 1024, max_cpu_percent: 25 }));
+  // Container carrying the platform DEFAULTS while the app asks for 1024/25.
+  const d = resourceDrift(row, { memoryBytes: 512 * MB, nanoCpus: 0.5e9, running: true });
+  assert.equal(d.applied, false,
+    'a container running 512 MB for an app configured 1024 MB read as applied — the row was ' +
+    'parsed as having no limits, so everything was compared against the 512/50 defaults');
+  assert.equal(d.expected.memory_mb, 1024);
+  assert.equal(d.findings.find(f => f.resource === 'memory').state, 'stale');
+});
+
+test('the default resource_limits a fresh app gets are read correctly', () => {
+  // 001-initial.sql defaults the column to {"max_ram_mb":512,"max_cpu_percent":50}.
+  const row = rdb.prepare(
+    "INSERT INTO apps (name, slug, slot, source_type) VALUES ('Fresh','fresh-app',999001,'managed') RETURNING *"
+  ).get();
+  assert.deepEqual(configuredLimits(row), { max_ram_mb: 512, max_cpu_percent: 50 });
+});
+
+test('a null or corrupt resource_limits falls back to the platform defaults', () => {
+  assert.deepEqual(configuredLimits(insertApp('null-limits', null)), { max_ram_mb: 512, max_cpu_percent: 50 });
+  assert.deepEqual(configuredLimits(insertApp('bad-limits', '{not json')), { max_ram_mb: 512, max_cpu_percent: 50 });
+});
+
+test('THE v2.48.0 BUG: the fleet-wide tool actually RUNS against the real schema', async () => {
+  // A first draft of this test asserted the query STRING — one typed into the
+  // test, not the one the tool issues. Restoring the exact shipped bug left it
+  // green, which is the identical mistake one layer up: a fixture shaped to
+  // match the code cannot catch the code being wrong. So call the tool.
+  const { callTool } = await import('../server/services/mcpTools.js');
+  const { generateApiKey, hashApiKey } = await import('../server/services/encryption.js');
+  const uid = rdb.prepare(
+    "INSERT INTO users (name,email,role,api_key_hash,active,kind) VALUES ('A','rd@x.io','platform_admin',?,1,'human')"
+  ).run(hashApiKey(generateApiKey('dhk_admin'))).lastInsertRowid;
+  const admin = rdb.prepare('SELECT * FROM users WHERE id = ?').get(uid);
+
+  const r = await callTool(admin, 'appcrane_check_resource_limits', {});
+  const out = typeof r === 'string' ? JSON.parse(r) : (r?.content ? JSON.parse(r.content[0].text) : r);
+  assert.ok(out && typeof out === 'object',
+    'appcrane_check_resource_limits did not return a result — in v2.48.0 it threw ' +
+    '"no such column: max_ram_mb" on every single call, because limits live in ' +
+    'apps.resource_limits and there is no max_ram_mb column');
+  assert.ok('summary' in out, 'the tool returned something, but not its documented shape');
+});

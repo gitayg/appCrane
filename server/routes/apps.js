@@ -12,6 +12,7 @@ import { validateBypassPaths } from '../utils/authBypassPaths.js';
 import { ingressDrift } from '../services/ingressDrift.js';
 import { resolveVisibility } from '../utils/appVisibility.js';
 import { pruneGrantsForNonMembers } from '../services/appDefinedRoles.js';
+import { assessMemoryChange } from '../services/memoryBudget.js';
 import {
   effectiveIngressType, publicPortForApp, pendingPortRelease, validateIngressType,
   assignPublicPort, releasePublicPort, drainingPorts, effectiveDataPlanePort, validateDataPlanePort, CONTROL_PLANE_PORT,
@@ -691,6 +692,7 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
     }
     updates.image_retention = ret;
   }
+  let memoryBudgetReport = null;
   if (max_ram_mb !== undefined || max_cpu_percent !== undefined) {
     // v2.21.5: CPU/memory limits are platform-admin only — not app owners,
     // app-admins, or even tier-2 global admins.
@@ -706,10 +708,24 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
       throw new AppError('max_cpu_percent must be between 5 and 800', 400, 'VALIDATION');
     }
     const current = JSON.parse(app.resource_limits || '{}');
+    const nextRam = ram ?? current.max_ram_mb ?? 512;
     updates.resource_limits = JSON.stringify({
-      max_ram_mb: ram ?? current.max_ram_mb ?? 512,
+      max_ram_mb: nextRam,
       max_cpu_percent: cpu ?? current.max_cpu_percent ?? 50,
     });
+    // v2.49.0: REPORT, DO NOT BLOCK. The August 2026 incident was a number that
+    // read as a guarantee and was not one — a container promised 512 MB of swap
+    // on a host with none. The fleet-wide version of the same thing is ~25 GB of
+    // per-container ceilings committed against a 7.6 GB host, and nothing on
+    // this route ever said so. It says so now, on the 200, rather than at the
+    // next cold start.
+    //
+    // Deliberately not a gate: the fleet is ALREADY ~3x over, so a refusal would
+    // reject every ordinary edit from the moment it shipped, including the edits
+    // that REDUCE the total. Assessed against the PROPOSED limit and before the
+    // write, so `level` describes the change the caller asked for rather than
+    // the state they have already been left in.
+    memoryBudgetReport = assessMemoryChange(db, app.id, nextRam);
   }
 
   if (frame_ancestors !== undefined) {
@@ -1068,6 +1084,10 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
   // and moved on to telling someone the exposure is revoked.
   const stillBound = pendingPortRelease(updated);
   res.json({
+    // Present only on a request that actually touched the limits — the whole
+    // fleet is summed to produce it, and an unrelated field edit should not pay
+    // for that, nor read as though it moved the total.
+    ...(memoryBudgetReport ? { memory_budget: memoryBudgetReport } : {}),
     ...(stillBound !== null && ingressWork ? {
       ingress_notice: `Port ${stillBound} is NOT closed yet. AppCrane will not publish it again and no other app can be given it, but the container that is running right now still binds 0.0.0.0:${stillBound} — the publish is a \`docker run\` flag. Deploy the app, or POST /api/apps/${app.slug}/restart/production, to recreate the container and actually close the port; AppCrane returns the port to the pool at that moment.`,
     } : {}),

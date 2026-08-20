@@ -317,9 +317,34 @@ export async function startApp({ slug, env, image, hostPort, envVars = {}, volum
     '--label', APPCRANE_LABEL,
     '--label', `slug=${slug}`,
     '--label', `env=${env}`,
-    '--restart=on-failure:5',
+    // v2.48.0: on-failure:2, down from 5. The direction was right and the count
+    // was not. A process that OOMs under load OOMs again on the way back up, so
+    // five attempts re-pressure a host that has no memory left to give, five
+    // times, at the exact moment the fleet is already over-committed (~25 GB of
+    // per-container limits against 7.6 GB of RAM). Two tries covers the restart
+    // that actually helps — a transient crash — and stops before the loop turns
+    // one app's OOM into the host's.
+    '--restart=on-failure:2',
     '--network', network,
     `--memory=${memoryMb}m`,
+    // Equal to --memory, which is Docker's spelling for "no swap at all": the
+    // flag is the combined memory+swap ceiling, so swap budget = memory-swap -
+    // memory = 0. Omitting it does NOT mean no swap — Docker then defaults to
+    // 2x memory, silently doubling the real ceiling on any host that has swap.
+    //
+    // Measured against a real daemon, not read off the docs: `--memory=512m`
+    // alone inspects as MemorySwap=1073741824 and gives the container
+    // memory.swap.max=536870912 in its cgroup — half a gigabyte of swap nobody
+    // asked for. With `--memory-swap=512m` the same container gets
+    // memory.swap.max=0. See test/docker-resource-flags.test.js, which runs both.
+    //
+    // The August 2026 OOM review: a container ran --memory=512m --memory-swap=1g
+    // and so read as having 512 MB of swap to fall back on. The host had zero
+    // swap configured, so the kernel enforced 512 MB of RAM and nothing else,
+    // and the extra 512 MB was a contract nothing could deliver. Pinning the two
+    // together removes the question — the configured number IS the ceiling, on a
+    // host with swap and on a host without, and it means the same thing on both.
+    `--memory-swap=${memoryMb}m`,
     `--cpus=${cpus}`,
     `--pids-limit=${PIDS_LIMIT}`,
     // Blocks the setuid/setgid escalation path: a process in the container can

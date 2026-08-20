@@ -241,10 +241,12 @@ const DOCKER_ARGS = {
 /**
  * The argv every app is started with, tcp ingress aside.
  *
- * v2.42.1 added the isolation and hardening flags below, so the constant this
- * file compares against moved with them. What these tests assert is unchanged:
- * that tcp ingress adds the public publish and NOTHING else, measured against
- * whatever the current common baseline is.
+ * v2.42.1 added the isolation and hardening flags below, and v2.48.0 changed
+ * the two resource flags (--restart=on-failure:5 -> :2, and --memory-swap
+ * pinned to --memory), so the constant this file compares against moved with
+ * them. What these tests assert is unchanged: that tcp ingress adds the public
+ * publish and NOTHING else, measured against whatever the current common
+ * baseline is.
  */
 function baselineArgs(slug, env, hostPort) {
   return [
@@ -253,9 +255,10 @@ function baselineArgs(slug, env, hostPort) {
     '--label', 'appcrane=true',
     '--label', `slug=${slug}`,
     '--label', `env=${env}`,
-    '--restart=on-failure:5',
+    '--restart=on-failure:2',
     '--network', 'appcrane-apps',
     '--memory=512m',
+    '--memory-swap=512m',
     '--cpus=0.5',
     '--pids-limit=512',
     '--security-opt', 'no-new-privileges',
