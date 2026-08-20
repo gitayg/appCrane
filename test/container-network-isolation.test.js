@@ -235,9 +235,10 @@ async function startAtHead(app, extra = {}) {
 
 /**
  * The flags v2.42.1 adds, as the token runs they appear in. Removing exactly
- * these from the new argv must leave HEAD's argv untouched — which is a much
- * stronger statement than "the new flags are present": it also catches a
- * removed flag, a reordered publish or a changed bind address.
+ * these — and undoing v2.48.0's resource-flag change, below — must leave HEAD's
+ * argv untouched, which is a much stronger statement than "the new flags are
+ * present": it also catches a removed flag, a reordered publish or a changed
+ * bind address.
  */
 const ADDED = [
   ['--network', NETWORK],
@@ -256,6 +257,41 @@ function stripAdded(args) {
   return out;
 }
 
+/**
+ * The SECOND deliberate difference from the frozen v2.42.0 snapshot: v2.48.0's
+ * resource-flag change. Undone here rather than re-baselining the fixture,
+ * because the fixture's whole job is to be a frozen recording of what shipped —
+ * editing it to match today's argv would delete the evidence these tests are
+ * built on.
+ *
+ * Undone by ASSERTING the exact new tokens and reversing them, not by filtering
+ * out anything that looks resource-ish. --memory-swap has to be the token
+ * immediately after --memory (a value that disagreed with --memory, or one that
+ * had drifted to the far end of the argv, fails here), and the restart token has
+ * to be exactly on-failure:2 before it is turned back into the :5 the snapshot
+ * carries. So this normalises one known change and still fails on a third one.
+ */
+function undoV248ResourceFlags(args) {
+  const out = [...args];
+
+  const mem = out.findIndex(a => a.startsWith('--memory='));
+  assert.notEqual(mem, -1, `no --memory in the argv: ${JSON.stringify(args)}`);
+  assert.equal(out[mem + 1], `--memory-swap=${out[mem].slice('--memory='.length)}`,
+    `--memory-swap must follow --memory with the same value: ${JSON.stringify(args)}`);
+  out.splice(mem + 1, 1);
+
+  const restart = out.indexOf('--restart=on-failure:2');
+  assert.notEqual(restart, -1,
+    `expected --restart=on-failure:2 in the argv: ${JSON.stringify(args)}`);
+  out[restart] = '--restart=on-failure:5';
+
+  return out;
+}
+
+function stripDeliberate(args) {
+  return undoV248ResourceFlags(stripAdded(args));
+}
+
 // ===========================================================================
 // The argv every existing app is started with
 // ===========================================================================
@@ -268,30 +304,36 @@ test('HEAD really did start containers with no --network — the hole being clos
     'HEAD passed a --network; this release is not the fix it claims to be');
   assert.ok(!head.includes('--pids-limit=512'));
   assert.ok(!head.includes('no-new-privileges'));
+  // Same anchor for v2.48.0: the snapshot must still carry the OLD resource
+  // flags, or undoV248ResourceFlags() is reversing a change that is not there.
+  assert.ok(head.includes('--restart=on-failure:5'),
+    'the frozen snapshot no longer restarts 5 times; the v2.48.0 diff measures nothing');
+  assert.ok(!head.some(a => a.startsWith('--memory-swap=')),
+    'the frozen snapshot already sets --memory-swap; the v2.48.0 diff measures nothing');
 });
 
 test('an http app differs from HEAD by the added flags and NOTHING else', async () => {
   const head = await startAtHead(HTTP_APP);
   const now = await start(HTTP_APP);
-  assert.deepEqual(stripAdded(now), head);
+  assert.deepEqual(stripDeliberate(now), head);
 });
 
 test('a sandbox http app differs from HEAD by the same flags and nothing else', async () => {
   const head = await startAtHead(HTTP_APP, { env: 'sandbox', hostPort: 4322 });
   const now = await start(HTTP_APP, { env: 'sandbox', hostPort: 4322 });
-  assert.deepEqual(stripAdded(now), head);
+  assert.deepEqual(stripDeliberate(now), head);
 });
 
 test('an email-enabled app (--add-host) differs from HEAD by the same flags and nothing else', async () => {
   const head = await startAtHead(HTTP_APP, { addHostGateway: true });
   const now = await start(HTTP_APP, { addHostGateway: true });
-  assert.deepEqual(stripAdded(now), head);
+  assert.deepEqual(stripDeliberate(now), head);
 });
 
 test('a tcp-ingress app differs from HEAD by the same flags and nothing else', async () => {
   const head = await startAtHead(TCP_APP);
   const now = await start(TCP_APP);
-  assert.deepEqual(stripAdded(now), head);
+  assert.deepEqual(stripDeliberate(now), head);
 });
 
 test('Caddy keeps its door: the loopback publish is still a -p value, unchanged', async () => {

@@ -5,6 +5,18 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.49.0 — The three AppCrane-owned items from the August incident review.
+
+**`--memory-swap` is now pinned to `--memory`.** A container started with only `--memory=512m` gets a combined ceiling of *twice* that by Docker's default, so the configured number was an understatement of what the container could take. The review's own case ran `--memory=512m --memory-swap=1g` and so read as having 512 MB of swap to fall back on; the host had zero swap, the kernel enforced 512 MB of RAM and nothing else, and the extra 512 MB was a contract nothing could deliver. Pinning the two makes the configured number the real ceiling. Measured against a live daemon rather than read off the docs: `--memory=512m` alone yields `memory.swap.max=536870912` inside the container, and adding `--memory-swap=512m` yields `0`.
+
+**Restart retries drop from 5 to 2.** The policy direction was already right — `on-failure`, not `unless-stopped`, contrary to the review's first draft. Five consecutive restarts of a process that OOMs under load re-pressure a host that has no memory to give, five times.
+
+**A memory budget, reported and never enforced.** `appcrane_memory_budget` answers what the platform has committed against what the host has: 50+ apps at the 512 MB default commit roughly 25 GB on a 7.6 GB box. `PUT /api/apps/:slug` now returns a `memory_budget` assessment when a limit changes. It does **not** block, deliberately — the fleet is already about 3x over-committed, so a gate would reject every ordinary edit from the moment it shipped, including edits that *reduce* the total. A control you must disable to get work done is not a control. The numbers are configured ceilings, not measured usage, and every surface says so.
+
+**And a fix for a bug v2.48.0 shipped yesterday.** `appcrane_check_resource_limits` ran `SELECT id, slug, max_ram_mb, max_cpu_percent FROM apps`. There is no such column — limits live in `apps.resource_limits`, a JSON TEXT column — so the tool threw `no such column: max_ram_mb` on every call. Its tests passed because they handed the comparison hand-built `{ max_ram_mb: 512 }` objects and never a database row: a fixture shaped to match the code cannot catch the code being wrong about the schema. Limits are now read through one helper that parses the column, and the regression test calls the tool against a real database. The first version of *that* test asserted the query string instead of running the tool, and stayed green against the restored bug — the same mistake one layer up.
+
+723 tests. The three implementation items were built by parallel agents with disjoint file ownership and each checked by an adversarial verifier; every claim relayed here was re-run independently before release.
+
 ## 2.48.0 — Backup and resource limits are answerable from an agent.
 
 **An incident review recorded "no SQLite backup exists" as an open risk.** AppCrane has shipped scheduled S3/R2 backup since v2.21.9, and the nightly zip covers `deployhub.db`, `.env`, icons and appdata. It is a no-op until a bucket and credentials are entered — and there was no way to ASK whether that had happened except by opening Settings. A five-minute settings task got filed as a missing capability.

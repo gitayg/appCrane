@@ -3221,7 +3221,7 @@ const TOOLS = [
 
       const apps = args.slug
         ? [getAppForUser(user, args.slug)]
-        : db.prepare('SELECT id, slug, max_ram_mb, max_cpu_percent FROM apps ORDER BY slug').all();
+        : db.prepare('SELECT id, slug, resource_limits FROM apps ORDER BY slug').all();
 
       const observedMap = await containerResourcesBySlug();
       if (observedMap === null) {
@@ -3433,6 +3433,57 @@ const TOOLS = [
         logAudit(user.id, null, 'backup-run', { ok: false, bucket: cfg.bucket, error: String(e.message).slice(0, 300) });
         return { ok: false, error: e.message, bucket: cfg.bucket, configured: !!(cfg.bucket && cfg.access_key_id && cfg.has_secret) };
       }
+    },
+  },
+  // ── Fleet memory budget (v2.49.0) ───────────────────────────────────────
+  //
+  // From the same August 2026 review as the backup tools. A container was
+  // OOM-killed on a swapless host while its configuration promised it 512 MB of
+  // swap; separately, the fleet's per-container ceilings sum to roughly 25 GB on
+  // a 7.6 GB host. Both are the same defect — a number that reads as a guarantee
+  // and is not one — and neither was answerable without adding up 50 app rows by
+  // hand.
+  //
+  // The single most important thing about this tool is what its numbers are NOT.
+  // `committed_mb` is the sum of CONFIGURED ceilings; it is not, and cannot be,
+  // a measurement of memory in use. An agent that reads "25 GB committed" and
+  // reports "the host is using 25 GB" has invented an outage. That distinction
+  // is stated in the description, restated in the summary, and carried in the
+  // field names, because it is the only way this tool can be read wrong.
+  {
+    name: 'appcrane_memory_budget',
+    description:
+      'Does the sum of every app\'s CONFIGURED memory ceiling fit in this host\'s RAM? Adds up the per-container `--memory` limits AppCrane has on file and compares the total against total host memory. THESE ARE CONFIGURED CEILINGS, NOT MEASURED USAGE: a report of "25 GB committed on a 7.6 GB host" does NOT mean the host is using 25 GB, and must never be relayed as one — it means the limits promise more than the host can deliver if the containers ever ask for it at once. Nothing here reads a running container; for what is actually in force on the containers use appcrane_check_resource_limits, and for live consumption read the host. Over-commitment is normal and is not by itself a fault (containers idle far below their ceilings) — it matters because it means there is no headroom guarantee, so a correlated event such as a post-reboot cold start, when every container loads at once, is resolved by the kernel\'s global OOM killer. Counts both stages of every app, which is exactly what a cold start brings up. ADMIN ONLY.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    requiredRole: 'admin',
+    readOnly: true,
+    handler: async () => {
+      const { memoryBudget } = await import('./memoryBudget.js');
+      const b = memoryBudget();
+      const gb = (mb) => (mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${mb} MB`);
+      const pct = Math.round(b.ratio * 100);
+
+      // Every branch says "configured" before it says a number. An operator
+      // skimming one line is the reader this is written for, and the one
+      // misreading available is the one that turns a headroom report into a
+      // phantom outage.
+      const summary = b.over_committed
+        ? `OVER-COMMITTED: ${b.app_count} app(s) have configured memory ceilings totalling ${gb(b.committed_mb)} ` +
+          `on a host with ${gb(b.host_mb)} of RAM — ${pct}% of it. This is a sum of LIMITS, not a measurement: ` +
+          'the host is almost certainly not using anywhere near that, because containers idle far below their ' +
+          'ceilings. What it does mean is that there is no headroom guarantee — if enough containers claim their ' +
+          'limit at the same time (a post-reboot cold start is the realistic case) the kernel resolves it with the ' +
+          'global OOM killer, which picks the largest process and not the guilty one.'
+        : `Configured memory ceilings total ${gb(b.committed_mb)} across ${b.app_count} app(s), within this host's ` +
+          `${gb(b.host_mb)} of RAM (${pct}%), leaving ${gb(b.headroom_mb)} uncommitted. This is a sum of LIMITS, ` +
+          'not a measurement of memory in use.';
+
+      return {
+        ...b,
+        measures: 'configured per-container memory limits (docker --memory), summed across both stages of every app',
+        does_not_measure: 'actual memory usage — nothing here reads a running container',
+        summary,
+      };
     },
   },
 ];

@@ -21,6 +21,17 @@
  * What it is for: the platform has ~57 apps and every one of them is this
  * shape. v2.45.0 must not move a single byte of their container start, so the
  * dual-plane tests measure themselves against the argv that actually shipped.
+ *
+ * AMENDED at v2.48.0, and the amendment is listed here rather than folded in
+ * silently, because the value of this file is that you can tell what moved and
+ * when. Exactly two elements are no longer what v2.44.2 recorded:
+ *   '--restart=on-failure:5'  ->  '--restart=on-failure:2'
+ *   (new, immediately after --memory)  '--memory-swap=512m'
+ * Both are the deliberate resource-flag change from the August 2026 OOM review;
+ * see the comments at the argv in server/services/docker.js. Every other
+ * element is still the recorded v2.44.2 token, and the tests still compare the
+ * whole list element for element — so a third change would show up here as a
+ * failure, which is the only reason this baseline exists.
  */
 export const HTTP_BASELINE_V2_44_2 = [
   'run',
@@ -33,10 +44,11 @@ export const HTTP_BASELINE_V2_44_2 = [
   'slug=dp-http',
   '--label',
   'env=production',
-  '--restart=on-failure:5',
+  '--restart=on-failure:2',
   '--network',
   'appcrane-apps',
   '--memory=512m',
+  '--memory-swap=512m',
   '--cpus=0.5',
   '--pids-limit=512',
   '--security-opt',
