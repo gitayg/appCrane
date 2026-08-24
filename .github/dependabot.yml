@@ -1,0 +1,64 @@
+# Dependabot version updates (v2.49.2).
+#
+# Seven advisories sat in this tree for six to nine weeks with every CI run
+# green. Two things were missing and only one of them is this file:
+#
+#   1. Dependabot ALERTS were disabled on the repository, so GitHub never said
+#      a fix existed. That is a repo setting, not something a committed file can
+#      turn on — see the note at the bottom.
+#   2. Nothing opened the upgrade PR. That part is this file.
+#
+# The scan gate added in v2.49.1 catches a bad tree at push time, which is the
+# last line of defence. This is the first: be told a fix exists before the gate
+# has to stop the build.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: America/New_York
+    # Grouped deliberately. Ungrouped, ~40 direct and transitive packages
+    # produce a PR each and the queue becomes noise nobody reads — which is the
+    # failure mode this is meant to fix, arriving by a different route.
+    groups:
+      production-dependencies:
+        dependency-type: production
+        update-types: [minor, patch]
+      development-dependencies:
+        dependency-type: development
+        update-types: [minor, patch]
+    # Majors stay ungrouped and arrive one at a time: nodemailer 8 -> 9 was a
+    # major with a behaviour change nothing in the suite exercises, and it
+    # deserved its own review rather than a line in a batch of thirty.
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"
+      include: scope
+
+  # The workflows pin every action by full SHA, which is right for supply-chain
+  # reasons and means a human has to look up each new SHA by hand. Nobody does
+  # that on a schedule, so pinned actions rot at whatever commit they were
+  # pinned to. Dependabot rewrites the SHA and the trailing version comment
+  # together.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      github-actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"
+
+# STILL REQUIRED, and not expressible here — Dependabot ALERTS and SECURITY
+# UPDATES are repository settings:
+#
+#   gh api -X PUT repos/gitayg/appCrane/vulnerability-alerts
+#   gh api -X PUT repos/gitayg/appCrane/automated-security-fixes
+#
+# Without the first, GitHub does not tell you a CVE affects you at all. Without
+# the second, it tells you but does not open the fix PR. Both were off while the
+# seven advisories accumulated.

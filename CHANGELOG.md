@@ -5,6 +5,14 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.49.2 — Be told a fix exists, before the gate has to stop the build.
+
+v2.49.1 made the dependency scan blocking, which is the last line of defence. This is the first: `.github/dependabot.yml`, opening upgrade PRs weekly for npm and monthly for GitHub Actions.
+
+Grouped on purpose. Ungrouped, ~40 direct and transitive packages produce a PR each and the queue becomes noise nobody reads — the same failure this is meant to fix, arriving by a different route. Majors stay ungrouped and arrive one at a time: nodemailer 8 → 9 was a major with a behaviour change nothing in the suite exercises, and it deserved its own review rather than a line in a batch of thirty. Actions are included because every workflow pins by full SHA, which is correct for supply-chain reasons and means the pins rot unless something rewrites them.
+
+**The file is only half the fix, and the smaller half.** Dependabot **alerts are disabled on the repository** — `GET /vulnerability-alerts` returns 404 and `automated-security-fixes` reads `{"enabled": false}`. That is why nothing was said for nine weeks: GitHub was never going to mention the CVEs at all. No committed file can turn that on; it is two API calls, recorded at the bottom of the new config.
+
 ## 2.49.1 — Seven dependency advisories, and the reason nobody saw them.
 
 **`npm audit` reported seven advisories. CI had been green on every push.** The scan step ran OSV-Scanner with `continue-on-error: true` and there was no gate after it, so the job reported "Security Scan: success" regardless of what it found, and the results went to the GitHub Security tab where nobody was looking.
