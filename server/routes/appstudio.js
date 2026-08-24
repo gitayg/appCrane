@@ -398,13 +398,11 @@ router.put('/anthropic-key', requireAdmin, auditMiddleware('appstudio.set-anthro
   const trimmed = key.trim();
   writeEnvKey('ANTHROPIC_API_KEY', trimmed);
   process.env.ANTHROPIC_API_KEY = trimmed;
-  // Drop appAnalyzer's cached Anthropic client so the next analyze call uses
-  // the freshly-rotated key. (POST /chat instantiates per-request and POST /chat
-  // is the only other SDK consumer, so no other caches need busting.)
-  try {
-    const { resetClient } = await import('../services/appAnalyzer.js');
-    resetClient();
-  } catch (_) {}
+  // No SDK client to invalidate. v2.49.3 removed appAnalyzer.js — the last
+  // @anthropic-ai/sdk consumer, whose only function had no callers — so nothing
+  // caches an Anthropic client any more. Every AI path here hands the key to the
+  // Claude Code CLI, which reads it per invocation, so a rotated key is picked
+  // up by the next run without anything to bust.
   try {
     const { startWorker } = await import('../services/appstudio/worker.js');
     startWorker();

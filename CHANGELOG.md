@@ -5,6 +5,22 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.49.3 — Deleting a dependency instead of upgrading it 98 versions.
+
+Dependabot opened a PR to take `@anthropic-ai/sdk` from 0.39.0 to 0.120.0 — 98 releases, about 18 months. Before reviewing that, the question worth asking was what the SDK is for.
+
+**One import in the entire repository**, in `server/services/appAnalyzer.js`, added in v1.10.0 for an "AI-powered Add from GitHub wizard" that analysed a repo and pre-filled app config. The wizard is gone: `analyzeGithubRepo` — the only function that touches the SDK — has **no callers anywhere**. No route exposes it, no dynamic import reaches it, and no "analyze" UI survives in the SPA.
+
+The one surviving reference was `resetClient()`, called on API-key rotation to invalidate a cached client that nothing had created for some time. Its comment justified itself with *"POST /chat is the only other SDK consumer"* — and there is no `/chat` route. That comment had been describing a system that no longer existed.
+
+Every real AI path in AppCrane hands `ANTHROPIC_API_KEY` to the **Claude Code CLI** (`generator.js` installs `@anthropic-ai/claude-code` into containers) and reads it per invocation. `ask.js`, `coder.js` and `agents.js` all check the key; none of them imports the SDK.
+
+So the safest upgrade was removal: `appAnalyzer.js` deleted (166 lines), `@anthropic-ai/sdk` dropped from `package.json`, the `resetClient()` block replaced by a note explaining why nothing needs invalidating. PR #1 closed rather than merged.
+
+How it got orphaned is worth recording, because the same move could do it again: `2dc0a27` (v1.27.7) deleted a dormant `oneShot.js` and *rerouted* key-rotation reset into `appAnalyzer`. Cleaning up one dead module wired the survivor to a second dead one, which left `appAnalyzer` looking referenced while its only real function had none.
+
+Verified by the path that actually touched the deleted code: `PUT /api/appstudio/anthropic-key` returns 200 and the rotated key reaches `process.env`. Suite 723/723, and one fewer outbound-network-capable dependency for the scanner to track.
+
 ## 2.49.2 — Be told a fix exists, before the gate has to stop the build.
 
 v2.49.1 made the dependency scan blocking, which is the last line of defence. This is the first: `.github/dependabot.yml`, opening upgrade PRs weekly for npm and monthly for GitHub Actions.
