@@ -86,6 +86,9 @@ jobs:
             --format=sarif
             --output=osv.sarif
             --recursive
+        # Non-failing on purpose, same as the semgrep scan above: the SARIF must
+        # reach the Security tab even when there are findings. The blocking
+        # decision is the separate gate below.
         continue-on-error: true
       - name: Upload SARIF to GitHub Security
         if: always()
@@ -93,3 +96,48 @@ jobs:
         with:
           sarif_file: osv.sarif
           category: osv-scanner
+      # v2.49.1: dependency findings now BLOCK, mirroring the semgrep gate.
+      #
+      # Until now this job had a scan that could not fail and no gate after it,
+      # so it reported success on every push while the tree carried seven
+      # advisories — among them a high-severity adm-zip DoS whose fix had been
+      # published six weeks earlier and which was reachable from an ordinary
+      # app-user upload, extracted in the AppCrane server process on a host with
+      # no swap. Results went to the Security tab, which nobody opened. A check
+      # that cannot fail is a dashboard, not a check.
+      #
+      # Turned on at the moment `npm audit` reported zero, which is the only
+      # cheap time to do it. When a finding has no fix available, do NOT switch
+      # the gate off — add that advisory ID to IGNORED below with a reason and a
+      # date, so the exception is one reviewable line instead of a silent hole.
+      - name: Gate on dependency findings
+        run: |
+          python3 - <<'PY'
+          import json, sys, os
+
+          # Advisory IDs accepted for now. Each needs a reason and a date.
+          #   'GHSA-xxxx-xxxx-xxxx': 'no fix published as of 2026-08-19; <impact>'
+          IGNORED = {}
+
+          if not os.path.exists('osv.sarif'):
+              print('::error::osv.sarif missing — the scan did not complete, so no dependency was verified')
+              sys.exit(1)
+
+          with open('osv.sarif') as f:
+              sarif = json.load(f)
+
+          findings, ignored = [], []
+          for run in sarif.get('runs', []):
+              for r in run.get('results', []):
+                  rid = r.get('ruleId', '?')
+                  (ignored if rid in IGNORED else findings).append((rid, r))
+
+          for rid, r in findings:
+              msg = r.get('message', {}).get('text', '').replace('\n', ' ')[:300]
+              print(f'::error::{rid}: {msg}')
+          for rid, _ in ignored:
+              print(f'::notice::{rid} ignored — {IGNORED[rid]}')
+
+          print(f'{len(findings)} blocking dependency finding(s), {len(ignored)} ignored.')
+          sys.exit(1 if findings else 0)
+          PY

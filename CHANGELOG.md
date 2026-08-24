@@ -5,6 +5,27 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.49.1 — Seven dependency advisories, and the reason nobody saw them.
+
+**`npm audit` reported seven advisories. CI had been green on every push.** The scan step ran OSV-Scanner with `continue-on-error: true` and there was no gate after it, so the job reported "Security Scan: success" regardless of what it found, and the results went to the GitHub Security tab where nobody was looking.
+
+The two that were raised directly:
+
+| Package | Was | Now | Fix available since |
+|---|---|---|---|
+| adm-zip | 0.5.17 | **0.6.0** | 2026-07-10 — six weeks |
+| nodemailer | 8.0.5 | **9.0.5** | 2026-06-17 (9.0.1) — nine weeks |
+
+The adm-zip one deserves its severity here rather than in the abstract. A crafted ZIP triggers a 4 GB allocation, and `POST /api/apps/:slug/deploy/upload` is gated on `requireAppAccess` — any user with access to any app, not a platform admin. The extraction runs in the **AppCrane server process**, which no `--memory` flag constrains, on a host with **zero swap**. That is the same mechanism as the August OOM incident, reachable on request.
+
+The nodemailer `raw`-option bypass is *not* reachable — the transport is plain SMTP with no `raw` and no `jsonTransport` — but the upgrade also clears a CRLF injection in `List-*` headers and an OAuth2 TLS validation flaw, and there was no reason to stay behind.
+
+Five more went with them, four transitive and one direct: `@xmldom/xmldom`, `form-data`, `qs`, `body-parser`, and `multer` 2.1.1 → 2.2.0. `npm audit` now reports zero. Full suite green on the upgraded tree.
+
+**And the gate is real now.** The OSV job gained a blocking step that mirrors the one Semgrep has had since v2.27.0: the scan stays non-failing so the SARIF always reaches the Security tab, and a separate step fails the build on any finding. Turned on at the moment the count hit zero, which is the only cheap time to do it. An advisory with no fix goes in a named `IGNORED` map with a reason and a date — one reviewable line — rather than switching the gate off again.
+
+A check that cannot fail is a dashboard, not a check.
+
 ## 2.49.0 — The three AppCrane-owned items from the August incident review.
 
 **`--memory-swap` is now pinned to `--memory`.** A container started with only `--memory=512m` gets a combined ceiling of *twice* that by Docker's default, so the configured number was an understatement of what the container could take. The review's own case ran `--memory=512m --memory-swap=1g` and so read as having 512 MB of swap to fall back on; the host had zero swap, the kernel enforced 512 MB of RAM and nothing else, and the extra 512 MB was a contract nothing could deliver. Pinning the two makes the configured number the real ceiling. Measured against a live daemon rather than read off the docs: `--memory=512m` alone yields `memory.swap.max=536870912` inside the container, and adding `--memory-swap=512m` yields `0`.
