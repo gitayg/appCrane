@@ -79,3 +79,31 @@ test('README states the same requirement operators will read', () => {
   assert.doesNotMatch(readme, /Node\.js 20/,
     'README still tells operators to install Node 20, which is below the floor and out of support');
 });
+
+// ---------------------------------------------------------------------------
+// The runtime is reportable (v2.50.1)
+// ---------------------------------------------------------------------------
+//
+// v2.50.0 raised the floor and warned at boot, and the very next question was
+// "what is the production host actually running?" — which nothing could answer.
+// getSystemInfo() reported CPU, memory and disk but not the runtime, so the one
+// fact needed to decide whether a dependency upgrade was safe was reachable
+// only over ssh. A floor you cannot check against is a floor on paper.
+
+const { getSystemInfo } = await import('../server/services/platform.js');
+
+test('getSystemInfo reports the Node version it is running on', () => {
+  const info = getSystemInfo();
+  assert.equal(info.node_version, process.versions.node,
+    'the health payload does not report the runtime, so "is this host above the floor?" ' +
+    'cannot be answered without shell access to the box');
+  assert.equal(info.node_major, Number(process.versions.node.split('.')[0]));
+});
+
+test('the reported major is a number, so a caller can compare it to the floor', () => {
+  const info = getSystemInfo();
+  assert.equal(typeof info.node_major, 'number',
+    'a string major would make `info.node_major < NODE_FLOOR` compare lexically and quietly ' +
+    'report a modern host as out of date');
+  assert.ok(info.node_major >= 18 && info.node_major < 100, `implausible major: ${info.node_major}`);
+});
