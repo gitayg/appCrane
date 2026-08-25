@@ -43,6 +43,16 @@ export function getSystemInfo() {
 
   return {
     hostname: hostname(),
+    // v2.50.1: the runtime this process is actually executing on.
+    //
+    // v2.50.0 raised the supported Node floor to 22 and warned at boot when a
+    // host was below it — but that warning goes to the startup log, and the
+    // first question afterwards was "what is apphub running?", which no API
+    // could answer. Reporting CPU, memory and disk while omitting the runtime
+    // left the one fact needed to decide whether an upgrade was safe reachable
+    // only over ssh.
+    node_version: process.versions.node,
+    node_major: Number(process.versions.node.split('.')[0]),
     platform: platform(),
     isLinux: isLinux(),
     cpu: { model: cpuModel, count: cpuCount, percent: Math.min(cpuPercent, 100) },

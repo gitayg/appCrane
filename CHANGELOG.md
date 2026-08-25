@@ -5,6 +5,14 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.50.1 — Report the runtime, so the floor can actually be checked.
+
+v2.50.0 raised the supported Node floor to 22 and warned at boot when a host was below it. The very next question — *what is the production host running?* — turned out to be unanswerable: `getSystemInfo()` reported hostname, CPU, memory and disk, and not the runtime. The boot warning goes to the startup log, so the only way to check a live host was shell access.
+
+`GET /api/server/health` now includes `node_version` and `node_major`. `node_major` is a number, deliberately: a string would make `node_major < NODE_FLOOR` compare lexically and quietly report a modern host as out of date.
+
+A floor nothing can be checked against is a floor on paper.
+
 ## 2.50.0 — The Node floor moves to 22, and three files now have to agree about it.
 
 Two Dependabot PRs — chalk 6 and better-sqlite3 13 — both declare `engines.node >= 22`. `install.sh` provisioned **Node 20**. Neither PR could be merged safely, and the reason had nothing to do with either dependency.
