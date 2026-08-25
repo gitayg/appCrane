@@ -5,6 +5,24 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.50.0 — The Node floor moves to 22, and three files now have to agree about it.
+
+Two Dependabot PRs — chalk 6 and better-sqlite3 13 — both declare `engines.node >= 22`. `install.sh` provisioned **Node 20**. Neither PR could be merged safely, and the reason had nothing to do with either dependency.
+
+Nothing was positioned to catch it:
+
+- **CI runs on Node 22**, so every check was green on a runtime no production host was guaranteed to have.
+- **`package.json` declared no `engines` field at all**, so npm never warned that a dependency wanted a newer runtime.
+- **`install.sh` only upgrades a host that is BELOW its baseline**, and self-update is `git reset --hard` + `npm install`, which never touches the runtime. A box installed when the floor was 20 stays on 20 through every update, silently.
+
+Node 20 left long-term support in April 2026, so the move was overdue independently of these two PRs.
+
+The floor is now 22 in `install.sh`, in `package.json` `engines`, and in a `NODE_FLOOR` constant that warns at boot. Six tests assert all three agree, plus that the README tells operators the same number and that CI never runs *older* than the floor — drift in any one of the four turns a test red, verified by drifting each.
+
+**The boot check warns; it does not exit.** Refusing to start would take a running platform down during an upgrade, which is a worse failure than the mismatch it reports. It prints on every boot, with the upgrade command, until someone fixes it deliberately.
+
+**This does not upgrade any existing host.** It changes what a *fresh* install provisions and makes an out-of-date runtime loud. A host already on Node 20 needs `curl -fsSL https://deb.nodesource.com/setup_22.x | sudo bash - && sudo apt-get install -y nodejs` before it should take chalk 6 or better-sqlite3 13.
+
 ## 2.49.3 — Deleting a dependency instead of upgrading it 98 versions.
 
 Dependabot opened a PR to take `@anthropic-ai/sdk` from 0.39.0 to 0.120.0 — 98 releases, about 18 months. Before reviewing that, the question worth asking was what the SDK is for.

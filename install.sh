@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-NODE_MAJOR=20
+NODE_MAJOR=22
 REPO_URL="https://github.com/gitayg/appCrane.git"
 
 log()  { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
