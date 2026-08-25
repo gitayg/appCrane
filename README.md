@@ -94,7 +94,7 @@ sudo CRANE_DOMAIN=crane.example.com ADMIN_EMAIL=admin@example.com bash install.s
 
 Everything below is done for you, idempotently, by the one command above:
 
-- **Node.js 20** + AppCrane, with the `crane` CLI linked globally
+- **Node.js 22** + AppCrane, with the `crane` CLI linked globally
 - **Caddy** — the reverse proxy that routes `<domain>/<slug>` to each app, runs the
   SSO auth, injects the `X-AppCrane-*` identity headers, and auto-provisions TLS —
   **plus** the group, file permissions, and a `sudoers` rule so AppCrane can reload
@@ -573,7 +573,7 @@ path is the security boundary — the ingress isn't.
 
 ## Tech Stack
 
-Node.js 20, Express 5, SQLite, Docker, Caddy 2, SAML/OIDC/SCIM, AES-256-GCM, Commander.js, Ubuntu 22.04+
+Node.js 22, Express 5, SQLite, Docker, Caddy 2, SAML/OIDC/SCIM, AES-256-GCM, Commander.js, Ubuntu 22.04+
 
 ## License
 

@@ -1083,6 +1083,10 @@ code{background:#0f1117;border:1px solid #2a2d3a;border-radius:4px;padding:2px 6
 app.use(notFound);
 app.use(errorHandler);
 
+// The lowest Node major AppCrane supports. Kept in step with package.json's
+// `engines` field and install.sh's NODE_MAJOR — all three say the same number.
+const NODE_FLOOR = 22;
+
 // Start server
 app.listen(PORT, HOST, async () => {
   log.info('');
@@ -1091,6 +1095,28 @@ app.listen(PORT, HOST, async () => {
   log.info(`  Dashboard: http://${HOST}:${PORT}/dashboard`);
   log.info(`  Docs:      http://${HOST}:${PORT}/docs`);
   log.info('');
+
+  // v2.50.0: the platform's Node floor, checked where an operator will see it.
+  //
+  // install.sh provisions the baseline, but it only upgrades a host that is
+  // BELOW it — and self-update is `git reset --hard` + `npm install`, which
+  // never touches the runtime. So a box installed when the floor was 20 stays
+  // on 20 through every update, and nothing said so: package.json declared no
+  // `engines` at all, so npm did not even warn when a dependency needed 22.
+  //
+  // A warning, not an exit. Refusing to boot would take a running platform down
+  // on upgrade, which is a worse failure than the mismatch it reports — and the
+  // mismatch is usually harmless right up until the moment it is not. Loud, on
+  // every boot, is enough to get it fixed on purpose rather than at 3am.
+  const nodeMajor = Number(process.versions.node.split('.')[0]);
+  if (nodeMajor < NODE_FLOOR) {
+    log.warn(`  ⚠ Node ${process.versions.node} is below AppCrane's supported floor (>=${NODE_FLOOR}).`);
+    log.warn(`    Dependencies now declare engines.node >=${NODE_FLOOR}; npm will install them anyway and they may`);
+    log.warn('    fail at runtime rather than at install. Upgrade the host runtime:');
+    log.warn(`      curl -fsSL https://deb.nodesource.com/setup_${NODE_FLOOR}.x | sudo bash - && sudo apt-get install -y nodejs`);
+    log.warn('    Node 20 left long-term support in April 2026 and receives no security patches.');
+    log.warn('');
+  }
 
   // Boot sentinel — confirms this process actually started with this version.
   // Also reconciles any pending self-update left by a previous process exit.
