@@ -1348,6 +1348,27 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       await notifyDeploy(app, env, manifest.version || 'unknown', 'success');
     } catch (e) {}
 
+    // 11. Dependency CVE scan (v2.52.0). REPORT-ONLY, and deliberately the
+    // last thing that happens: the container is live, the symlink is flipped,
+    // the deployment row already says 'live' and the success notification has
+    // already gone out. Nothing below this point can change the deploy's
+    // outcome, which is the property that matters — these apps belong to other
+    // teams who did not choose this control, and a scanner that can fail
+    // someone else's deploy over a transitive advisory is a blocking gate
+    // wearing a reporting label.
+    //
+    // scanApp does not throw by contract; the catch is here anyway because the
+    // contract is the thing most likely to be broken by a future edit, and the
+    // cost of being wrong about it is a deploy that reports failure after
+    // having fully succeeded.
+    try {
+      const { scanApp } = await import('./appScan.js');
+      const scan = await scanApp(db, app, env, 'deploy');
+      appendLog(`Dependency scan: ${scan.status}${scan.package_count ? ` (${scan.package_count} packages)` : ''}`);
+    } catch (e) {
+      log.warn(`[appScan] post-deploy scan failed for ${app.slug}/${env}: ${e.message}`);
+    }
+
     return { success: true, version: manifest.version };
 
   } catch (error) {

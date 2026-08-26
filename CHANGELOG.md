@@ -5,6 +5,24 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.52.0 — Every app gets a CVE scan, and the report arrives without being asked for.
+
+AppCrane knew what its own dependencies looked like and nothing about the apps it deploys. A deployed app could be carrying a critical CVE for months with no surface anywhere that said so.
+
+Now every deploy scans the release's dependency manifests against OSV, and a scheduler rescans the fleet daily — advisories are published after a deploy, so scanning only at deploy time goes stale by design. Findings are **reported, never blocking**: a scan that fails a deploy turns a security signal into an outage, and the first time it does, someone disables it.
+
+A daily digest goes to the platform admin and to each app's owner, covering only their apps. Scanning covers npm, Go, Rust, RubyGems and PyPI — six manifest formats — with the ecosystem carried per package rather than assumed, because OSV's answer depends on it.
+
+Three false-clean bugs were found and fixed before this shipped, all the same shape — a scan that reports nothing wrong because it looked at nothing:
+
+- Aliased npm dependencies (`"mylodash": "npm:lodash@4.17.15"`) were queried under the alias, which matches no advisory.
+- The fleet report in `appcrane_scan_report` ignored the caller's app scope.
+- The digest's date came from a UTC clock while its hour gate used local time, so on the first day after a restart a timezone behind UTC could scan twice or not at all.
+
+A manifest that cannot be parsed now fails the whole scan rather than quietly contributing nothing to one that reports `ok`.
+
+Also here: two platform policy levers — ban public apps, and require security scans — enforced on **both** the create and update paths, since a policy enforced on one write path is not a policy.
+
 ## 2.51.1 — The floor now survives a version jump.
 
 v2.51.0 put the runtime check in self-update, and that protects **only hosts already running v2.51.0**. The updater that executes is always the code you are upgrading *from*, never the code you are upgrading *to* — so a host on an older release that jumps straight to a version whose dependencies need Node 22 runs its own updater, which knows nothing about any floor, and installs them anyway. The guard was real and reached almost nobody.

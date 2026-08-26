@@ -11,6 +11,9 @@ import { reloadCaddy } from '../services/caddy.js';
 import { validateBypassPaths } from '../utils/authBypassPaths.js';
 import { ingressDrift } from '../services/ingressDrift.js';
 import { resolveVisibility } from '../utils/appVisibility.js';
+import {
+  getPolicy, setPolicy, assertVisibilityAllowed, policyViolations,
+} from '../services/platformPolicy.js';
 import { pruneGrantsForNonMembers } from '../services/appDefinedRoles.js';
 import { assessMemoryChange } from '../services/memoryBudget.js';
 import {
@@ -347,7 +350,7 @@ router.post('/', requireAuth, auditMiddleware('app-create'), async (req, res) =>
     throw new AppError('You do not have permission to create apps.', 403, 'FORBIDDEN');
   }
 
-  const { name, slug, domain, description, category, source_type, github_url, branch, github_token, max_ram_mb, max_cpu_percent } = req.body;
+  const { name, slug, domain, description, category, source_type, github_url, branch, github_token, max_ram_mb, max_cpu_percent, visibility, public_access } = req.body;
 
   if (!name || !slug) throw new AppError('Name and slug are required', 400, 'VALIDATION');
   if (!/^[a-z0-9][a-z0-9-]*$/.test(slug)) throw new AppError('Slug must be lowercase alphanumeric with dashes', 400, 'VALIDATION');
@@ -369,6 +372,22 @@ router.post('/', requireAuth, auditMiddleware('app-create'), async (req, res) =>
   }
 
   const db = getDb();
+
+  // v2.52.0: the platform policy gate, on CREATE as well as on PUT. A policy
+  // enforced on one of the two write paths is not a policy — an owner refused
+  // at PUT would simply pass the field to POST instead.
+  //
+  // This route does not persist visibility (the column takes its 'private'
+  // default and a later PUT sets it), so the assert catches a request that ASKS
+  // for a public app rather than one that makes one. Refusing beats the silent
+  // drop: a caller that sent visibility='public' and got a 201 believes the app
+  // is public, and under a ban that is the one belief nobody should be left with.
+  let wantedVisibility;
+  try { wantedVisibility = resolveVisibility({ visibility, public_access }).visibility; }
+  catch { /* An unparseable value was ignored here before the policy existed and
+             still is. Turning it into a 400 now would make a lever that is OFF
+             change what this route does, which is the one thing it must not. */ }
+  if (wantedVisibility !== undefined) assertVisibilityAllowed(db, wantedVisibility);
 
   // Check uniqueness
   if (db.prepare('SELECT id FROM apps WHERE slug = ?').get(slug)) {
@@ -458,6 +477,52 @@ router.post('/', requireAuth, auditMiddleware('app-create'), async (req, res) =>
     webhook_url: `/api/webhooks/${webhookToken}`,
     message: `App '${name}' created. Assign users with PUT /api/apps/${slug}/users`,
   });
+});
+
+/**
+ * GET /api/apps/platform-policy — the two platform levers plus the apps that
+ * violate them right now. PUT to change them. Platform admin only.
+ *
+ * Registered ABOVE `/:slug` on purpose: Express matches in registration order,
+ * so the parameterised app route would otherwise swallow this path (and answer
+ * 404/403 for a policy read) if an app were ever slugged 'platform-policy'.
+ *
+ * Platform admin, matching the ingress gate in PUT below rather than plain
+ * requireAdmin: a tier-2 global admin administers apps, and a lever that
+ * constrains what every app owner on the box may do is a platform-tier control.
+ *
+ * The violations list ships with the GET rather than behind its own endpoint
+ * because the two are one question. An admin turning ban_public_apps on needs
+ * to see in the same response that the switch does NOT convert the four public
+ * apps already on the platform — policy is not retroactive, and a settings
+ * toggle with no such list reads as though it were.
+ */
+router.get('/platform-policy', (req, res) => {
+  if (req.user.role !== 'platform_admin') {
+    throw new AppError('Only platform admins can read platform policy', 403, 'FORBIDDEN');
+  }
+  const db = getDb();
+  res.json({ policy: getPolicy(db), violations: policyViolations(db) });
+});
+
+router.put('/platform-policy', (req, res) => {
+  if (req.user.role !== 'platform_admin') {
+    throw new AppError('Only platform admins can change platform policy', 403, 'FORBIDDEN');
+  }
+  const db = getDb();
+  const { ban_public_apps, mandate_security_scans } = req.body || {};
+  if (ban_public_apps === undefined && mandate_security_scans === undefined) {
+    throw new AppError(
+      'Supply ban_public_apps and/or mandate_security_scans', 400, 'VALIDATION');
+  }
+  const before = getPolicy(db);
+  const policy = setPolicy(db, { ban_public_apps, mandate_security_scans }, req.user.id);
+  // Audited by hand rather than via auditMiddleware: this route has no :slug, so
+  // there is no app_id to attribute the entry to, and the middleware's whole
+  // shape is per-app. Recorded from/to because "who turned the ban off" is the
+  // question this log answers.
+  logAudit(req.user.id, null, 'platform-policy-change', { from: before, to: policy });
+  res.json({ policy, violations: policyViolations(db) });
 });
 
 /**
@@ -679,6 +744,25 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
     if (!globalAdmin && !isOwner) {
       throw new AppError('Only the app owner can change visibility.', 403, 'FORBIDDEN');
     }
+  }
+  // v2.52.0: the platform policy gate, after the authz check above so a caller
+  // who may not touch visibility at all is told that, rather than being told
+  // what the platform's policy is.
+  //
+  // Checked on the RESOLVED value, not on req.body.visibility. `public_access:
+  // true` is the second way to reach visibility='public' (resolveVisibility maps
+  // it), so a check on the named field alone would leave the older of the two
+  // fields as an open route around the ban.
+  //
+  // Change-not-presence, the same rule the owner check above and the ingress
+  // gate below already use. The policy is deliberately not retroactive: an app
+  // that was public before the lever went on stays public and is REPORTED by
+  // policyViolations, so a read-modify-write client echoing back the value it
+  // was handed while editing a description must not be refused. What is refused
+  // is a write that makes an app public that was not.
+  if (visibilityUpdates.visibility !== undefined
+      && visibilityUpdates.visibility !== (app.visibility || 'hidden')) {
+    assertVisibilityAllowed(db, visibilityUpdates.visibility);
   }
   Object.assign(updates, visibilityUpdates);
   if (github_token !== undefined) updates.github_token_encrypted = encrypt(github_token);

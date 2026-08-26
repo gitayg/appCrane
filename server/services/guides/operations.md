@@ -60,6 +60,24 @@ container never started. Two log surfaces, two tools:
 | Need to inspect a file inside the running container | `appcrane_ls(slug, env, path)` + `appcrane_cat(slug, env, path)` | Validates what actually shipped (e.g. `/app/dist/assets/`). Paths must start with `/app` or `/data`. |
 | Need to push a file >256KB into a container | `appcrane_push_staged_file(slug, env, token, dest)` after uploading via `POST /api/files/staged` | Large files can't go through JSON-RPC tool args. |
 
+### Vulnerability scanning
+
+Every deploy scans the release's dependency manifests against OSV, and a daily
+pass rescans the fleet — advisories get published after a deploy, so scanning
+only at deploy time goes stale on its own. `package-lock.json`, `go.sum`,
+`Cargo.lock`, `Gemfile.lock`, `poetry.lock` and `Pipfile.lock` are read, with
+the ecosystem tracked per package (OSV's answer depends on it).
+
+Findings are **reported, never blocking**. A scan that fails a deploy turns a
+security signal into an outage, and the first time it does someone switches it
+off. A manifest that cannot be *parsed*, however, fails the whole scan rather
+than contributing nothing to one that then reports `ok` — a scan that looked at
+nothing must not look like a clean scan.
+
+Owners get a daily digest for their own apps; platform admins get the fleet.
+`appcrane_scan_report` answers the same question on demand and is scoped to what
+the caller can see.
+
 Fast deploy failure (<5s) almost always means the build never started.
 **Always start with `appcrane_get_deploy_log` for fast failures**, not
 `appcrane_get_logs`.
@@ -273,6 +291,9 @@ better entered in Settings → Backup than passed through an agent.
 | `appcrane_ls` | List files inside a running app container at a specific path |
 | `appcrane_cat` | Print the contents of a file inside a running app container |
 | `appcrane_push_staged_file` | Move a previously-staged file (uploaded via POST /api/files/staged) into a running container at a path under /app or /data |
+| `appcrane_scan_report` | CVE findings for an app, or across the fleet (scoped to apps you can see) |
+| `appcrane_scan_app` | Scan one app's dependency manifests against OSV now, instead of waiting for the daily pass |
+| `appcrane_platform_policy` | Read or set the platform levers: ban public apps, require security scans (platform admin) |
 | `appcrane_push_to_managed_app` | Push a batch of files to a managed app's AMC_<slug> repo, authenticated server-side via AppCrane's service-account credential |
 
 ### Access control
