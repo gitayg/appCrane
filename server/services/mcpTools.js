@@ -16,6 +16,7 @@ import {
   PUBLIC_PORT_MIN, PUBLIC_PORT_MAX, AUTO_PORT_MIN, AUTO_PORT_MAX,
 } from './tcpIngress.js';
 import { redactAuditArgs } from '../utils/auditRedact.js';
+import { assertFinding } from './scanShapes.js';
 import { resolveVisibility } from '../utils/appVisibility.js';
 import { mkdirSync } from 'fs';
 import { join } from 'path';
@@ -333,6 +334,35 @@ function enrichAppRow(db, app) {
       production: lastLiveProd?.finished_at ?? null,
       sandbox: lastLiveSand?.finished_at ?? null,
     },
+  };
+}
+
+// Findings come off a scan row as JSON some other process wrote, and they are
+// ASSERTED on the way out rather than read defensively. v2.52.0's scanner
+// stored { name, version, ids } while the digest's brief described
+// { package, id, fixed_version }; the mail rendered only because its author
+// wrote `f.name ?? f.package`. That read is the bug, not the safety net — it
+// turns a broken contract into a payload that quietly says less than it
+// should. A reshape has to stop a test run rather than reach an agent as
+// `undefined`.
+//
+// `ecosystem` on the row is the ONE manifest that scan read. A release can hold
+// several — a go.mod beside a package-lock.json — and AppCrane reads one per
+// row, so an app is only ever covered for the manifest named here; an unread Go
+// service sitting next to a scanned npm frontend is a false clean at the app
+// level even when every finding on the row is correct. findings_json is dropped
+// on the way out because a raw copy beside the asserted list is a second,
+// unchecked path to the same data.
+function projectScanRow(row, where) {
+  const raw = row.findings ?? (row.findings_json ? JSON.parse(row.findings_json) : []);
+  const { findings_json, findings, ...rest } = row;
+  return {
+    ...rest,
+    manifest: row.ecosystem || null,
+    findings: (Array.isArray(raw) ? raw : []).map((f, i) => {
+      const { name, version, ecosystem, ids, fixed } = assertFinding(f, `${where} findings[${i}]`);
+      return { name, version, ecosystem, ids, fixed };
+    }),
   };
 }
 
@@ -3483,6 +3513,290 @@ const TOOLS = [
         measures: 'configured per-container memory limits (docker --memory), summed across both stages of every app',
         does_not_measure: 'actual memory usage — nothing here reads a running container',
         summary,
+      };
+    },
+  },
+  // ── Hosted-app vulnerability scanning and platform policy (v2.52.0) ─────
+  //
+  // AppCrane has scanned its own dependency tree since v2.49.1 and has never
+  // looked at the apps it hosts, whose lockfiles are already on disk at deploy
+  // time. These tools make that scan — and the two platform levers beside it —
+  // operable from an agent.
+  //
+  // Two properties are load-bearing, stated in every description here and
+  // repeated in every payload, because an agent that misreads either does real
+  // damage with it:
+  //
+  //   1. The scan REPORTS, it never blocks. These apps belong to other teams
+  //      who did not choose this control and cannot fix a transitive advisory
+  //      on someone else's schedule. A finding must never be relayed as a
+  //      deploy failure, because no deploy has ever failed for one.
+  //   2. 'skipped' and 'error' are NOT "no vulnerabilities". A missing lockfile
+  //      and an unreachable OSV both leave a row with no findings on it, which
+  //      reads exactly like a clean scan to anything that only counts findings.
+  //      So `assurance` and `unscanned` travel beside the counts, and every
+  //      summary names the missing coverage before it names a number.
+  //
+  // Each handler checks that `app_vuln_scans` exists before reading it, for the
+  // same reason policyViolations() does: the table arrives with the scanner's
+  // migration, an admin can call these on a box whose migrations have not
+  // reached it, and a SQLITE_ERROR there would be indistinguishable from a
+  // quiet fleet. No table means nothing has ever been scanned, and that is what
+  // gets reported.
+  {
+    name: 'appcrane_scan_report',
+    description:
+      'Which hosted apps have known-vulnerable dependencies? Reports the recorded CVE scan state for the whole fleet, or for one app with `slug`. REPORT ONLY: this scan has never blocked a deploy and cannot — the apps belong to other teams who did not choose the control, so findings are recorded and mailed and the deploy proceeds either way. Never relay a finding as a deploy failure. READ `status` BEFORE READING COUNTS. It is four-valued: `ok` (scanned, nothing found) and `findings` (scanned, something found) are results; `skipped` (no lockfile AppCrane can read) and `error` (OSV unreachable, unparseable lockfile) mean the app was NOT SCANNED, as does having no scan row at all. Those two carry no findings for the same reason an unopened box is empty, and an agent that reports such an app as clean has stated the opposite of what is known — "no vulnerabilities found" is only ever true of an app whose status is `ok`. `assurance` (none / partial / complete), `unscanned_count` and `unscanned_by_status` say how much of the fleet the numbers actually cover; read them before the findings. EVERY FINDING CARRIES `ecosystem` AND `fixed` beside `name`, `version` and `ids`. `fixed` is the version that resolves those advisories, or null when OSV PUBLISHED NO FIXED VERSION — a null means there is nothing to upgrade to yet, NEVER that no fix is needed and never that AppCrane did not look, so a null-`fixed` finding is not a harmless one. `manifests_scanned` says WHICH manifests were actually read, because coverage is per manifest and not per app: one scan row reads ONE manifest — the ecosystem named on it — so an app whose Go service was never read appears here beside its scanned npm frontend with an empty findings list, and that emptiness is evidence about the frontend only. Scans run at deploy AND daily, and the daily run is the one that matters, because it catches an advisory published against code that was already deployed and has not changed since. ADMIN ONLY.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        slug: { type: 'string', description: 'Report one app (both stages) instead of the whole fleet.' },
+      },
+      additionalProperties: false,
+    },
+    requiredRole: 'admin',
+    readOnly: true,
+    handler: async (user, args) => {
+      const db = getDb();
+      const haveHistory = !!db.prepare(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'app_vuln_scans'"
+      ).get();
+
+      // A scan that COMPLETED is the only thing that counts as coverage, and
+      // finding something is a completed scan. Everything else — skipped,
+      // error, no row — goes in one bucket, because the distinction this tool
+      // exists to hold open is scanned vs not, not which flavour of not.
+      const isScanned = (r) => r?.status === 'ok' || r?.status === 'findings';
+      const REPORT_ONLY = 'Report-only: a finding here has never blocked and cannot block a deploy.';
+
+      if (args.slug) {
+        const app = getAppForUser(user, args.slug);
+        const scans = { production: null, sandbox: null };
+        if (haveHistory) {
+          const { latestScan } = await import('./appScan.js');
+          for (const env of ['production', 'sandbox']) scans[env] = latestScan(db, app.id, env) ?? null;
+        }
+        const stages = ['production', 'sandbox'];
+        for (const env of stages) {
+          if (scans[env]) scans[env] = projectScanRow(scans[env], `${app.slug}/${env}`);
+        }
+        const unscanned = stages.filter((e) => !isScanned(scans[e]));
+        const vulnerable = stages.filter((e) => scans[e]?.status === 'findings');
+        const readManifests = stages.filter((e) => isScanned(scans[e]) && scans[e].manifest);
+        return {
+          app: app.slug,
+          scans,
+          scanned: unscanned.length === 0,
+          unscanned,
+          vulnerable_stages: vulnerable,
+          manifests_scanned: [...new Set(readManifests.map((e) => scans[e].manifest))],
+          manifests_by_stage: Object.fromEntries(stages.map((e) => [e, isScanned(scans[e]) ? scans[e].manifest : null])),
+          assurance: unscanned.length === 2 ? 'none' : unscanned.length ? 'partial' : 'complete',
+          enforcement: 'report-only',
+          summary: [
+            unscanned.length
+              ? `NOT SCANNED: ${unscanned.map((e) => `${e} (${scans[e]?.status ?? 'no scan on record'})`).join(', ')}. ` +
+                `Nothing is known about ${app.slug}'s dependencies in ${unscanned.length === 2 ? 'either stage' : 'that stage'} — ` +
+                'that is an absence of evidence and must not be reported as a clean result. Use appcrane_scan_app to scan it now.'
+              : null,
+            vulnerable.length
+              ? `Known-vulnerable dependencies in: ${vulnerable.join(', ')}.`
+              : null,
+            !unscanned.length && !vulnerable.length
+              ? `Both stages of ${app.slug} were scanned and nothing was found.`
+              : null,
+            readManifests.length
+              ? `Manifests read: ${readManifests.map((e) => `${e} (${scans[e].manifest})`).join(', ')}. ` +
+                'Coverage is per manifest, not per app: any other manifest in the release — a go.mod, a ' +
+                'requirements.txt, a second service\'s lockfile — was never read, so the findings above ' +
+                'cover only the manifests named here.'
+              : `No manifest was read in either stage, so no dependency of ${app.slug} has been looked at.`,
+            REPORT_ONLY,
+          ].filter(Boolean).join(' '),
+        };
+      }
+
+      if (!haveHistory) {
+        return {
+          scanned: false,
+          assurance: 'none',
+          row_count: 0,
+          unscanned_count: null,
+          apps: [],
+          enforcement: 'report-only',
+          summary:
+            'NEVER SCANNED — this deployment has no scan history at all, so there is nothing to report about any hosted app. ' +
+            'This is NOT a clean fleet: no findings here means no evidence. Use appcrane_scan_app to scan one now; deploys ' +
+            'and the daily job fill this in from then on.',
+        };
+      }
+
+      const { fleetScanSummary } = await import('./appScan.js');
+      // SECURITY: the ceiling has to hold on BOTH paths. callTool enforces
+      // mcp_app_scope on `args.slug`, so the per-app branch above is covered —
+      // but this branch takes no slug, and fleetScanSummary() is an unfiltered
+      // SELECT over apps. Without this filter a key scoped to one app received
+      // the slug, name, status and full findings list of every app on the
+      // platform: other teams' CVE inventories, from a key explicitly denied
+      // access to them. Same shape as the v2.42.1 note further up this file —
+      // a ceiling that holds on one path and not another is not a ceiling.
+      // appcrane_list_apps already routes through this helper; so does this now.
+      const visible = new Set(accessibleSlugsForUser(user));
+      const rows = fleetScanSummary(db)
+        .filter((r) => visible.has(r.slug))
+        .map((r) => projectScanRow(r, `${r.slug}/${r.env}`));
+      const unscanned = rows.filter((r) => !isScanned(r));
+      const vulnerable = rows.filter((r) => r.status === 'findings');
+      const byStatus = {};
+      for (const r of unscanned) {
+        const k = r.status ?? 'no scan on record';
+        byStatus[k] = (byStatus[k] ?? 0) + 1;
+      }
+      const manifests = {};
+      for (const r of rows) {
+        if (!isScanned(r)) continue;
+        const m = r.manifest ?? 'unrecorded';
+        manifests[m] = (manifests[m] ?? 0) + 1;
+      }
+      const manifestsRead = Object.entries(manifests);
+      return {
+        scanned: unscanned.length === 0,
+        assurance: unscanned.length === 0 ? 'complete' : unscanned.length === rows.length ? 'none' : 'partial',
+        row_count: rows.length,
+        unscanned_count: unscanned.length,
+        unscanned_by_status: byStatus,
+        vulnerable_count: vulnerable.length,
+        manifests_scanned: manifests,
+        apps: rows,
+        enforcement: 'report-only',
+        summary: [
+          unscanned.length
+            ? `${unscanned.length} of ${rows.length} app/stage row(s) have NO usable scan result ` +
+              `(${Object.entries(byStatus).map(([k, n]) => `${k}: ${n}`).join(', ')}). Those are UNKNOWN, not clean — ` +
+              'their dependencies were never read, so the absence of findings beside them is the absence of a scan.'
+            : `All ${rows.length} app/stage row(s) were scanned, so the findings below are the whole of what is known.`,
+          vulnerable.length
+            ? `${vulnerable.length} scanned row(s) have known-vulnerable dependencies.`
+            : 'No scanned row has known-vulnerable dependencies.',
+          manifestsRead.length
+            ? `Manifests read: ${manifestsRead.map(([m, n]) => `${m}: ${n} row(s)`).join(', ')}. ` +
+              'Coverage is per manifest, not per app: one row reads ONE manifest, so a go.mod or a ' +
+              'requirements.txt beside a scanned lockfile was never read and cannot appear above.'
+            : 'NO MANIFEST WAS READ in any row, so no dependency of any app here has been looked at.',
+          REPORT_ONLY,
+        ].join(' '),
+      };
+    },
+  },
+  {
+    name: 'appcrane_scan_app',
+    description:
+      'Scan one app\'s dependencies against OSV right now and record the result, instead of waiting for its next deploy or the nightly run. Use it after fixing a lockfile to confirm a finding is gone, or on an app whose last result was `skipped` or `error` to find out what it actually contains. REPORT ONLY — it records a row and feeds the daily digest; it never blocks, fails or rolls back anything, and running it cannot disturb the app. It does not throw on a failed scan either: an unreachable OSV or a missing lockfile comes back as `ok: false` with status `error` or `skipped`, meaning the app was NOT scanned and is NOT known to be clean. `ok: true` with status `findings` is the opposite case — the scan worked and found something. Reads the LIVE release through the same `current` symlink the running container was built from. Defaults to the PRODUCTION stage: most AppCrane tools default to sandbox, but the code an advisory applies to is the code that is serving. ADMIN ONLY.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        slug: { type: 'string', description: 'App to scan.' },
+        env:  { type: 'string', enum: ['sandbox', 'production'], default: 'production', description: 'Stage to scan. Defaults to production — that is the deployed code an advisory applies to.' },
+      },
+      required: ['slug'],
+      additionalProperties: false,
+    },
+    requiredRole: 'admin',
+    handler: async (user, args) => {
+      const app = getAppForUser(user, args.slug);
+      const env = args.env === 'sandbox' ? 'sandbox' : 'production';
+      const db = getDb();
+      const haveHistory = !!db.prepare(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'app_vuln_scans'"
+      ).get();
+
+      // Returned as a failed scan rather than thrown, for the same reason the
+      // service records an 'error' row instead of throwing: "the scan did not
+      // happen" is the answer to the question, and it is not the same answer
+      // as "nothing was found".
+      if (!haveHistory) {
+        return {
+          ok: false,
+          app: app.slug,
+          env,
+          status: 'unavailable',
+          error: 'This deployment has no scan history table yet, so a scan has nowhere to be recorded.',
+          note: `${app.slug}/${env} was NOT scanned. This is not a clean result.`,
+        };
+      }
+
+      const { scanApp } = await import('./appScan.js');
+      // 'manual' rather than 'deploy' or 'scheduled': source exists to say what
+      // a row is attributable to, and an on-demand scan is attributable to the
+      // person who asked for it — not to a change, and not to the advisory feed.
+      const row = await scanApp(db, app, env, 'manual');
+      // Same projection the report uses: this is the other place a finding
+      // reaches an agent, and handing back the raw row would leave the shape
+      // unchecked on exactly the path that produced it.
+      const scan = projectScanRow(row, `${app.slug}/${env}`);
+      const ok = scan.status === 'ok' || scan.status === 'findings';
+      return {
+        ok,
+        app: app.slug,
+        env,
+        scan,
+        note: !ok
+          ? `Status "${scan.status}" means ${app.slug}/${env} was NOT scanned — its dependencies were never read` +
+            (scan.error ? ` (${scan.error})` : '') +
+            ', so this result says nothing about whether it is vulnerable. Report-only either way: no deploy was affected.'
+          : scan.status === 'findings'
+            ? `Scanned ${scan.package_count} package(s) from the ${scan.manifest} manifest and found known-vulnerable dependencies. ` +
+              'A finding with `fixed: null` has no published fix to upgrade to; it is not a harmless one. ' +
+              'Report-only: nothing was blocked or rolled back.'
+            : `Scanned ${scan.package_count} package(s) from the ${scan.manifest} manifest, nothing found — that covers ` +
+              'that manifest only, not any other language in the release. Report-only: nothing was blocked or rolled back.',
+      };
+    },
+  },
+  {
+    name: 'appcrane_platform_policy',
+    description:
+      'Read or set the two platform-wide policy levers, and list the apps currently in violation. `ban_public_apps` refuses visibility=public on every write path; `mandate_security_scans` reports every app without a completed scan in the last 48h. Both default OFF, so an upgrade enforces nothing until an admin turns one on. Call with no arguments to read the current policy plus violations; pass either boolean to change it. POLICY IS NOT RETROACTIVE: turning a lever on refuses the NEXT write and REPORTS what is already in violation — it does not reach into the database and change existing apps, and the violations it lists keep working exactly as they did. That is deliberate: silently making live public apps private would break their URLs with no warning to their owners and no record of what changed, so the list exists for an admin to work through deliberately. Never describe enabling a lever as having fixed the apps it reports; nothing about them has changed. PLATFORM ADMIN ONLY.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ban_public_apps:        { type: 'boolean', description: 'Refuse visibility=public everywhere. Existing public apps keep serving and are reported as violations.' },
+        mandate_security_scans: { type: 'boolean', description: 'Report every app with no completed dependency scan in the last 48h (two missed daily runs).' },
+      },
+      additionalProperties: false,
+    },
+    requiredRole: 'admin',
+    handler: async (user, args) => {
+      if (user.role !== 'platform_admin') {
+        throw new Error('Only platform admins can read or change platform policy — it overrides what every app owner on this platform is allowed to set.');
+      }
+      const db = getDb();
+      const { getPolicy, setPolicy, policyViolations } = await import('./platformPolicy.js');
+
+      const patch = {};
+      for (const k of ['ban_public_apps', 'mandate_security_scans']) {
+        if (typeof args[k] === 'boolean') patch[k] = args[k];
+      }
+      const before = getPolicy(db);
+      const changed = Object.keys(patch).filter((k) => before[k] !== patch[k]);
+      const policy = Object.keys(patch).length ? setPolicy(db, patch, user.id) : before;
+      const violations = policyViolations(db);
+      const byPolicy = {};
+      for (const v of violations) byPolicy[v.policy] = (byPolicy[v.policy] ?? 0) + 1;
+
+      return {
+        policy,
+        changed_fields: changed,
+        retroactive: false,
+        violations,
+        violation_count: violations.length,
+        violations_by_policy: byPolicy,
+        summary:
+          (changed.length ? `Changed: ${changed.join(', ')}. ` : 'Read only — no lever was changed. ') +
+          (violations.length
+            ? `${violations.length} app(s) violate the policy as it now stands. They were NOT changed and keep working exactly as before — ` +
+              'policy applies to the next write, never to rows already in the database. Each has to be converted deliberately by its owner or an admin.'
+            : 'No app currently violates the policy.'),
       };
     },
   },

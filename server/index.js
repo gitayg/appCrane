@@ -1440,6 +1440,17 @@ app.listen(PORT, HOST, async () => {
     log.error('Backup scheduler failed to start: ' + e.message);
   }
 
+  // v2.52.0: daily dependency scan of every hosted app, then the digest email.
+  // Report-only — it never blocks a deploy — and the daily pass is the half
+  // that matters: it catches an advisory published for code that was already
+  // deployed and has not changed since.
+  try {
+    const { startVulnScheduler } = await import('./services/vulnDigest.js');
+    startVulnScheduler();
+  } catch (e) {
+    log.error('Vulnerability scan scheduler failed to start: ' + e.message);
+  }
+
   // Bulk-redeploy sentinel — written by the upgrade script's cleanup phase
   // when it kills a PM2 daemon, because those apps are now offline and need
   // to be rebuilt as Docker containers. In-process, no API key needed.
