@@ -49,55 +49,35 @@ router.post('/:slug/deploy/upload', requireAppAccess, auditMiddleware('deploy-up
       return res.status(400).json({ error: { code: 'VALIDATION', message: 'env must be production or sandbox' } });
     }
 
-    const commitSha = (req.body?.commit_sha || '').slice(0, 40) || null;
+    const declaredSha = (req.body?.commit_sha || '').slice(0, 40) || null;
     const commitMessage = (req.body?.commit_message || '').slice(0, 200) || null;
 
-    // Extract bundle to a timestamped release dir
-    const timestamp = Date.now();
-    const releaseDir = resolve(join(dataDir, 'apps', app.slug, env, 'releases', `${timestamp}-upload`));
-    if (!releaseDir.startsWith(dataDir)) {
-      try { unlinkSync(req.file.path); } catch (_) {}
-      return res.status(500).json({ error: { code: 'PATH_TRAVERSAL', message: 'Security error' } });
-    }
-
-    mkdirSync(releaseDir, { recursive: true });
-
+    // services/artifactDeploy.js owns the digest, the extract and the deploy
+    // handoff. It is shared with the MCP tool, which is the only route an agent
+    // holding a dhk_mcp_* key can take.
+    let out;
     try {
-      // SECURITY: see server/utils/safeExtract.js — validates every
-      // archive entry against zip-slip / tar-slip before writing.
-      // Replaces the prior raw `unzip -o` / `tar -xzf` calls (security
-      // review v1.27.34 H5).
-      const { safeExtract } = await import('../utils/safeExtract.js');
-      await safeExtract(req.file.path, releaseDir, req.file.originalname);
-    } catch (e) {
-      try { unlinkSync(req.file.path); } catch (_) {}
-      return res.status(500).json({ error: { code: 'EXTRACT_FAILED', message: e.message } });
-    }
-    try { unlinkSync(req.file.path); } catch (_) {}
-
-    const db = getDb();
-    const ports = getPortsForSlot(app.slot);
-
-    const result = db.prepare(`
-      INSERT INTO deployments (app_id, env, status, commit_hash, commit_message, deployed_by, log)
-      VALUES (?, ?, 'pending', ?, ?, ?, 'Triggered by artifact upload')
-    `).run(app.id, env, commitSha || 'unknown', commitMessage, req.user.id);
-
-    const deployId = result.lastInsertRowid;
-
-    try {
-      const { deployApp } = await import('../services/deployer.js');
-      deployApp(deployId, app, env, ports, { preExtractedDir: releaseDir, commitHash: commitSha }).catch(err => {
-        log.error(`Upload deploy ${deployId} failed: ${err.message}`);
+      const { deployArtifact } = await import('../services/artifactDeploy.js');
+      out = await deployArtifact({
+        app, env, filePath: req.file.path, filename: req.file.originalname,
+        declaredSha, commitMessage, userId: req.user.id,
       });
     } catch (e) {
-      db.prepare("UPDATE deployments SET status = 'failed', log = ?, finished_at = datetime('now') WHERE id = ?")
-        .run(`Deploy service error: ${e.message}`, deployId);
+      return res.status(400).json({ error: { code: 'UPLOAD_DEPLOY_FAILED', message: e.message } });
     }
 
     res.json({
-      deployment: { id: deployId, app: app.slug, env, status: 'pending' },
-      message: `Deployment #${deployId} started. Check status with GET /api/apps/${app.slug}/deployments/${env}`,
+      deployment: { id: out.deployId, app: app.slug, env, status: 'pending' },
+      // Echoed so the uploader can compare against the digest it computed
+      // locally — the only way for the client to confirm the bytes AppCrane
+      // deployed are the bytes it meant to send.
+      artifact: {
+        sha256: out.artifact.sha256,
+        bytes: out.artifact.bytes,
+        filename: out.artifact.filename,
+        declared_commit_sha: out.artifact.declared_commit_sha,
+      },
+      message: `Deployment #${out.deployId} started. Check status with GET /api/apps/${app.slug}/deployments/${env}`,
     });
   });
 });

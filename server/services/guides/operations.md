@@ -13,10 +13,14 @@ If you're onboarding a brand-new app, call
 
 - **Apps** are containerized workloads behind one of two URLs:
   `{{HOST}}/<slug>` (production) and `{{HOST}}/<slug>-sandbox`.
-- Each app has a **GitHub source of truth** — either a user repo
+- Most apps have a **GitHub source of truth** — either a user repo
   (`source_type='github'`) or an AppCrane-managed repo on a service account
-  (`source_type='managed'`). Upload-based apps existed pre-v2.3.1; if you
-  encounter one, treat it as needing migration before further work.
+  (`source_type='managed'`). An app can also be **upload-only**
+  (`source_type='upload'`, v2.53.0): no repo, releases arrive as bundles. That
+  is a deliberate mode, not a broken one — do not "fix" it by attaching a repo.
+- `source_type='managed_legacy'` is different and DOES need migration: it marks
+  pre-v2.3.1 upload apps, which redeploy an old release directory and cannot
+  accept new bundles.
 - **Deploys** are git-clone → build container → swap. They run sandbox-only
   by default; promotion to production is a separate step.
 - **Identity** has two tiers globally (`platform_admin`, `admin`, `user`) and
@@ -59,6 +63,7 @@ container never started. Two log surfaces, two tools:
 | Health endpoint returns 5xx | `appcrane_get_health(slug, env)` | Server-side fetch of the app's `/api/health` from the internal port — bypasses Caddy auth, gives you the real status code + body. |
 | Need to inspect a file inside the running container | `appcrane_ls(slug, env, path)` + `appcrane_cat(slug, env, path)` | Validates what actually shipped (e.g. `/app/dist/assets/`). Paths must start with `/app` or `/data`. |
 | Need to push a file >256KB into a container | `appcrane_push_staged_file(slug, env, token, dest)` after uploading via `POST /api/files/staged` | Large files can't go through JSON-RPC tool args. |
+| Need to deploy but the repo path is unavailable | `appcrane_deploy_artifact(slug, env, token)` after uploading the bundle via `POST /api/files/staged` | Deploys from bytes, touching GitHub not at all. This is the fallback when the service-account PAT returns 401 and every managed-repo write fails — and the only deploy path a `dhk_mcp_*` key can take, since dhk_app_* keys were removed in v2.2.12. |
 
 ### Vulnerability scanning
 
@@ -291,6 +296,7 @@ better entered in Settings → Backup than passed through an agent.
 | `appcrane_ls` | List files inside a running app container at a specific path |
 | `appcrane_cat` | Print the contents of a file inside a running app container |
 | `appcrane_push_staged_file` | Move a previously-staged file (uploaded via POST /api/files/staged) into a running container at a path under /app or /data |
+| `appcrane_deploy_artifact` | Deploy a release from a staged bundle (.zip/.tar.gz/.tgz) instead of from git. Identified by a SHA-256 AppCrane computes over the bytes, recorded as `commit_hash = sha256:<digest>` |
 | `appcrane_scan_report` | CVE findings for an app, or across the fleet (scoped to apps you can see) |
 | `appcrane_scan_app` | Scan one app's dependency manifests against OSV now, instead of waiting for the daily pass |
 | `appcrane_platform_policy` | Read or set the platform levers: ban public apps, require security scans (platform admin) |

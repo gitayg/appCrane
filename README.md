@@ -180,6 +180,30 @@ crane rollback myapp --env production
 crane promote myapp                       # sandbox → production, zero downtime
 ```
 
+#### Deploying without GitHub
+
+An app does not need a repo. Create it with `source_type: "upload"` and ship
+releases as bundles (`.zip`, `.tar.gz`, `.tgz`):
+
+```bash
+curl -F file=@dist.zip -F env=sandbox \
+     -H "X-API-Key: $CRANE_KEY" \
+     https://<your-domain>/api/apps/myapp/deploy/upload
+```
+
+The response carries `artifact.sha256` — AppCrane computes it over the bytes it
+received, before extraction, and records it as the release identity
+(`commit_hash = sha256:<digest>`). Compare it against the digest you computed
+locally to confirm what was deployed is what you sent. Any `commit_sha` you pass
+is stored alongside as context and is explicitly *not* trusted as the identity.
+
+Agents hold personal MCP keys (`dhk_mcp_*`), which are allow-listed to
+`/api/mcp` and `/api/files/staged` only, so they take the same path in two
+steps: `POST /api/files/staged` to upload the bytes, then
+`appcrane_deploy_artifact(slug, env, token)`. This is also the deploy route that
+still works when a repo-based path is broken — an expired service-account PAT
+returns 401 on every managed-repo write, and this one never contacts GitHub.
+
 ### Env Vars (app user — admin cannot access)
 ```bash
 crane env set myapp --env sandbox DATABASE_URL=postgres://... API_KEY=sk-test
@@ -284,6 +308,13 @@ gh attestation verify appcrane-<tag>-source.tar.gz --repo gitayg/appCrane
 
 Dev dependencies are deliberately excluded from the SBOM — they aren't shipped
 to a deployment, and including them would overstate the real attack surface.
+
+**Uploaded releases** get the equivalent of a commit SHA rather than being
+exempt from the question. AppCrane hashes the bundle server-side, before
+extraction, and stores that digest as the release identity — so "is what is
+running what was reviewed?" has an answer for an app with no repo. Before
+v2.53.0 it did not: `commit_hash` held whatever the uploader typed, or the
+literal string `unknown`, and two unrelated bundles could claim one SHA.
 
 ## Identity contract for deployed apps
 

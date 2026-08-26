@@ -415,6 +415,19 @@ export async function rollbackApp(app, env, deploymentId, userId) {
   `).run(app.id, env, target.version, target.commit_hash, releaseDir, userId, `Rollback to deployment #${target.id}`);
   const newId = rollbackInsert.lastInsertRowid;
 
+  // v2.53.0: provenance travels with the rollback. Without this the restored
+  // deployment row carries the original commit_hash but none of the artifact
+  // identity, so the release that is actually running looks less traceable than
+  // the one it replaced — the wrong direction for a recovery action.
+  db.prepare(`
+    UPDATE deployments
+       SET artifact_sha256 = ?, artifact_bytes = ?, artifact_filename = ?, declared_commit_sha = ?
+     WHERE id = ?
+  `).run(
+    target.artifact_sha256 ?? null, target.artifact_bytes ?? null,
+    target.artifact_filename ?? null, target.declared_commit_sha ?? null, newId,
+  );
+
   // Mark the previously-live deployment as rolled_back.
   db.prepare("UPDATE deployments SET status = 'rolled_back' WHERE app_id = ? AND env = ? AND status = 'live' AND id != ?")
     .run(app.id, env, newId);
@@ -422,7 +435,11 @@ export async function rollbackApp(app, env, deploymentId, userId) {
   const { getPortsForSlot } = await import('./portAllocator.js');
   const fullApp = db.prepare('SELECT * FROM apps WHERE id = ?').get(app.id);
   const ports = getPortsForSlot(fullApp.slot);
-  await deployApp(newId, fullApp, env, ports, { preExtractedDir: releaseDir, commitHash: target.commit_hash });
+  await deployApp(newId, fullApp, env, ports, {
+    preExtractedDir: releaseDir,
+    commitHash: target.commit_hash,
+    expectTreeSha: target.tree_sha256 || null,
+  });
 
   log.info(`Rollback: ${app.slug}/${env} → deployment #${target.id} (v${target.version || '?'}) by user ${userId}`);
   return { deployment_id: newId, rollback_to: target.id, version: target.version, commit_hash: target.commit_hash };
@@ -657,6 +674,62 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       if (!releaseDir.startsWith(dataDir)) throw new Error('Security: preExtractedDir is outside data directory');
       commitHash = opts.commitHash || 'unknown';
       appendLog(`Using pre-extracted release: ${releaseDir.split('/').pop()}`);
+
+      // v2.53.0: the upload path never reached verifyCommitSha — it lives in
+      // the clone branch below — so an uploaded release was deployed with no
+      // provenance statement in the log at all. Silence read as "nothing to
+      // report" when the truth was "nothing was checked".
+      //
+      // What IS checkable here: the bundle is already gone (unlinked right
+      // after extraction), but the release directory it produced is on disk and
+      // its digest is re-computable. Record it now; on a rollback or re-deploy
+      // of this same directory, compare it and say so either way.
+      try {
+        const { digestTree, isArtifactHash } = await import('./artifactDigest.js');
+        const tree = digestTree(releaseDir);
+        const prior = opts.expectTreeSha || null;
+
+        if (isArtifactHash(commitHash)) {
+          const art = db.prepare(
+            'SELECT artifact_filename, artifact_bytes, declared_commit_sha FROM deployments WHERE id = ?'
+          ).get(deployId) || {};
+          appendLog(
+            `Release identity: ${commitHash} (SHA-256 of the uploaded bundle, computed by AppCrane`
+            + `${art.artifact_filename ? `: ${art.artifact_filename}` : ''}`
+            + `${art.artifact_bytes ? `, ${art.artifact_bytes} bytes` : ''}).`,
+          );
+          if (art.declared_commit_sha) {
+            appendLog(
+              `Uploader declared commit_sha ${art.declared_commit_sha} — recorded as context, NOT verified. `
+              + `The identity above is the one computed from the bytes.`,
+            );
+          }
+        } else {
+          appendLog(
+            `Release identity: ${commitHash} — NOT a content digest. This release pre-dates artifact `
+            + `hashing (or was recorded as 'unknown'), so nothing ties it to a specific set of bytes.`,
+          );
+        }
+
+        if (prior && prior !== tree.sha256) {
+          appendLog(
+            `Release tree DRIFTED: recorded ${prior.slice(0, 12)}…, on disk now ${tree.sha256.slice(0, 12)}… `
+            + `over ${tree.files} files. The directory changed since it was deployed. This is REPORTED, not `
+            + `blocked — an app that writes logs or a database under its own release path drifts by running `
+            + `normally, and failing a rollback on that would break recovery during the incident it is for. `
+            + `If this app does not write into its release directory, treat the drift as unexplained.`,
+          );
+        } else if (prior) {
+          appendLog(`Release tree verified: ${tree.sha256.slice(0, 12)}… unchanged across ${tree.files} files.`);
+        } else {
+          appendLog(`Release tree recorded: ${tree.sha256.slice(0, 12)}… over ${tree.files} files.`);
+        }
+        db.prepare('UPDATE deployments SET tree_sha256 = ? WHERE id = ?').run(tree.sha256, deployId);
+      } catch (e) {
+        // Digesting a tree is a reporting step. It must not be able to fail a
+        // deploy that is otherwise fine.
+        appendLog(`Release tree digest unavailable: ${e.message}. Provenance NOT recorded for this deploy.`);
+      }
     } else if ((app.source_type === 'github' || app.source_type === 'managed') && app.github_url) {
       // v2.6.14: 'github' and 'managed' clone the same way; only the token
       // source differs. github = per-app PAT stored encrypted on the app

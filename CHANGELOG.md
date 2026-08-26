@@ -5,6 +5,20 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.53.0 — An uploaded release finally has an identity, and a door an agent can open.
+
+Two problems, one root. An app without a GitHub repo could already be deployed by uploading a bundle — but the release it produced was anonymous, and the endpoint was unreachable with the credential agents actually hold.
+
+**Anonymous.** `deployments.commit_hash` was set to `req.body.commit_sha || 'unknown'` — a value the uploader supplied, checked against nothing. Two unrelated bundles could claim one SHA, and the honest caller (no git repo, so no SHA to send) recorded the literal string `unknown`. Rollback, audit and supply-chain verify all ask the same question — *is what is running what was reviewed?* — and for these apps there was nothing on record to answer it with. That is why `source_type: 'upload'` was removed in v2.3.1.
+
+It comes back on a different basis: AppCrane hashes the bundle itself, over the bytes it received, before extraction, and stores `commit_hash = sha256:<digest>`. The uploader's `commit_sha` is still recorded — it is often a genuine SHA from the build machine — but as context, labelled unverified in the deploy log, never as the identity. The digest is echoed in the response so a client can compare it with the one it computed locally.
+
+**Unreachable.** Personal MCP keys (`dhk_mcp_*`) are allow-listed to `/api/mcp` and `/api/files/staged`, and `dhk_app_*` keys were removed in v2.2.12 — so the upload endpoint was closed to agents. Fine while the managed-repo path works; not fine when it doesn't. An expired service-account PAT returns 401 on every repo write, and the fallback was refused by key scope: both doors shut, with a valid bundle on disk.
+
+`appcrane_deploy_artifact` is the door that opens with the key an agent has. Stage the bytes on the one permitted endpoint, then deploy by token. It re-hashes the staged file rather than trusting the recorded digest, and refuses if the bytes changed after staging.
+
+Also here: `source_type: 'upload'` is a first-class mode again, distinct from `managed` (conflating them leaves every surface unable to tell *deliberately upload-only* from *repo not configured yet*, and the second reads as broken); rollback carries artifact provenance forward instead of dropping it; and the extracted release directory is digested at deploy and re-checked at rollback. That last one is **reported, not enforced** — an app that writes a log or a database under its own release path drifts by running normally, and failing a rollback on that would break recovery during the incident it exists for.
+
 ## 2.52.0 — Every app gets a CVE scan, and the report arrives without being asked for.
 
 AppCrane knew what its own dependencies looked like and nothing about the apps it deploys. A deployed app could be carrying a critical CVE for months with no surface anywhere that said so.
