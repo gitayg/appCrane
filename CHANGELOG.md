@@ -5,6 +5,25 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.51.1 — The floor now survives a version jump.
+
+v2.51.0 put the runtime check in self-update, and that protects **only hosts already running v2.51.0**. The updater that executes is always the code you are upgrading *from*, never the code you are upgrading *to* — so a host on an older release that jumps straight to a version whose dependencies need Node 22 runs its own updater, which knows nothing about any floor, and installs them anyway. The guard was real and reached almost nobody.
+
+`.npmrc` with `engine-strict=true` does not have that problem. `git reset --hard origin/main` puts it in the working tree **before** `npm install` runs, so every updater reads it — including ones written before the floor existed.
+
+Measured on the real dependency tree, in containers:
+
+| | `engines` only | `engines` + `engine-strict` |
+|---|---|---|
+| Node 20 | **exit 0, installed anyway** | `notsup … Required: {"node":">=22"}`, no `node_modules` |
+| Node 22 | installs | installs |
+
+That first cell is the whole point: the `engines` field added in v2.50.0 was advisory, and npm honoured it by printing nothing and carrying on.
+
+The failure is the safe one. npm exits non-zero, the updater's `execFileSync` throws, self-update aborts, and the rollback sentinel restores the previous SHA — the host keeps serving the release it already had, rather than starting one whose native modules were built for a runtime it does not have.
+
+Also: the README's competitive positioning now credits Replit Enterprise's governance accurately — SCIM, IdP-group RBAC, SIEM audit streaming and dependency CVE scanning — rather than implying it is thin. The claim that separates AppCrane is infrastructure, not governance, and conceding the former makes the latter land harder.
+
 ## 2.51.0 — Self-update brings the runtime with it, or refuses to proceed.
 
 `install.sh` has always installed Node when a host is below the floor. The updater never did — it ran `git reset --hard`, `npm install --omit=dev`, rebuild, restart, and nothing touching the runtime. So a box provisioned under an older floor stayed there through **every** update, indefinitely, and the only signal was a line in the boot log.
