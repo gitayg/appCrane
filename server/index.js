@@ -509,6 +509,10 @@ app.get('/api/caddy/config', requireAuth, requireAdmin, (req, res) => {
   res.type('text/plain').send(generateCaddyfile());
 });
 
+// The lowest Node major AppCrane supports. Kept in step with package.json's
+// `engines` field and install.sh's NODE_MAJOR — all three say the same number.
+const NODE_FLOOR = 22;
+
 function selfUpdateDataDir() {
   return resolve(process.env.DATA_DIR || join(__dirname, '..', 'data'));
 }
@@ -681,6 +685,66 @@ app.post('/api/self-update', requireAuth, requirePlatformAdmin, async (req, res)
 
     execFileSync('git', ['-c', 'credential.helper=', 'fetch', 'origin'], gitOpts);
     const pullOutput = execFileSync('git', ['reset', '--hard', 'origin/main'], gitOpts).toString().trim();
+
+    // v2.51.0: bring the RUNTIME up before installing anything against it.
+    //
+    // install.sh has always installed Node when the host is below the floor;
+    // the updater never did, so a box provisioned under an older floor stayed
+    // there through every update. Cosmetic until dependencies began declaring
+    // `engines.node >= 22`: `npm install --omit=dev` installs them regardless,
+    // and the failure surfaces later, at whatever code path first touches a
+    // newer feature, on a host running dozens of apps.
+    //
+    // Deliberately NOT on the auto-rollback path above. That reinstalls the
+    // PREVIOUS release, which by definition ran on this runtime — blocking it
+    // would strand a host mid-failure with no way back.
+    //
+    // Deciding is separated from doing (services/nodeUpgrade.js) so the policy
+    // — when is it safe to touch system packages on a live host? — is testable
+    // without apt.
+    {
+      const { planNodeUpgrade, verifyUpgrade } = await import('./services/nodeUpgrade.js');
+      const which = (bin) => {
+        try {
+          return execFileSync('/bin/sh', ['-c', `command -v ${bin}`], { stdio: 'pipe' }).toString().trim();
+        } catch (_) { return ''; }
+      };
+      const plan = planNodeUpgrade({
+        currentMajor: Number(process.versions.node.split('.')[0]),
+        floor: NODE_FLOOR,
+        platform: process.platform,
+        isRoot: typeof process.getuid === 'function' && process.getuid() === 0,
+        hasApt: !!which('apt-get'),
+        nodePath: which('node'),
+        skipEnv: process.env.APPCRANE_SKIP_NODE_UPGRADE,
+      });
+
+      if (plan.upgrade) {
+        log.info(`[self-update] ${plan.message}`);
+        for (const [bin, args] of plan.commands) {
+          execFileSync(bin, args, {
+            cwd, stdio: 'pipe', timeout: 300000,
+            env: { ...process.env, DEBIAN_FRONTEND: 'noninteractive' },
+          });
+        }
+        // Asked of the node now on PATH, not of this process: it keeps running
+        // the binary it started with and would report the old version whatever
+        // apt did.
+        const installed = Number(execFileSync('node', ['-v'], { stdio: 'pipe' })
+          .toString().trim().replace(/^v/, '').split('.')[0]);
+        const verdict = verifyUpgrade(installed, NODE_FLOOR);
+        if (!verdict.ok) throw new Error(`Self-update aborted: ${verdict.message}`);
+        log.info(`[self-update] ${verdict.message}`);
+      } else if (plan.blocking) {
+        // Refused, not warned. A host left on the previous release is in better
+        // shape than one that installed dependencies its runtime cannot run —
+        // and the rollback sentinel cannot undo an npm install that left
+        // node_modules unusable.
+        throw new Error(`Self-update aborted: ${plan.message}`);
+      } else {
+        log.debug(`[self-update] ${plan.message}`);
+      }
+    }
 
     execFileSync('npm', ['install', '--omit=dev', '--prefer-offline'], {
       cwd, stdio: 'pipe', timeout: 120000,
@@ -1082,10 +1146,6 @@ code{background:#0f1117;border:1px solid #2a2d3a;border-radius:4px;padding:2px 6
 // Error handling
 app.use(notFound);
 app.use(errorHandler);
-
-// The lowest Node major AppCrane supports. Kept in step with package.json's
-// `engines` field and install.sh's NODE_MAJOR — all three say the same number.
-const NODE_FLOOR = 22;
 
 // Start server
 app.listen(PORT, HOST, async () => {
