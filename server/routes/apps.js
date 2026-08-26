@@ -363,7 +363,17 @@ router.post('/', requireAuth, auditMiddleware('app-create'), async (req, res) =>
   // 'managed' (service-account-owned repo) are valid for new apps.
   // 'managed_legacy' is the deprecation marker for existing upload apps;
   // it can't be set via API.
-  const VALID_SOURCE_TYPES = new Set(['github', 'managed']);
+  // v2.53.0: 'upload' is a deliberate mode again, not the deprecated
+  // 'managed_legacy' marker. v2.3.1 removed it because an uploaded release had
+  // no provenance — commit_hash was whatever the uploader typed, or 'unknown'.
+  // That objection is answered rather than reversed: an upload now records a
+  // SHA-256 over the bytes received (services/artifactDigest.js), so the release
+  // has an identity AppCrane computed instead of one it was handed.
+  //
+  // Kept distinct from 'managed' on purpose. An upload-only app has no repo, and
+  // conflating the two leaves every surface unable to tell "deliberately
+  // upload-only" from "repo not configured yet" — the second reads as broken.
+  const VALID_SOURCE_TYPES = new Set(['github', 'managed', 'upload']);
   if (source_type && !VALID_SOURCE_TYPES.has(source_type)) {
     throw new AppError(
       `source_type must be 'github' or 'managed' — '${source_type}' is no longer supported`,
@@ -644,7 +654,7 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
   // and 'managed'. Existing 'managed_legacy' apps can stay or be promoted
   // to 'github' / 'managed' once their files are pushed to a real repo.
   if (source_type !== undefined) {
-    const VALID_SOURCE_TYPES = new Set(['github', 'managed']);
+    const VALID_SOURCE_TYPES = new Set(['github', 'managed', 'upload']);
     if (!VALID_SOURCE_TYPES.has(source_type)) {
       throw new AppError(
         `source_type must be 'github' or 'managed' — '${source_type}' is no longer supported`,

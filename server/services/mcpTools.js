@@ -1069,6 +1069,91 @@ const TOOLS = [
   },
 
   {
+    name: 'appcrane_deploy_artifact',
+    description:
+      'Deploy a release from an uploaded BUNDLE instead of from git. For an app with no GitHub repo, and the '
+      + 'fallback when the repo path is unavailable — an expired service-account PAT blocks every managed-repo '
+      + 'write, and this route does not touch GitHub at all. '
+      + 'Two steps: (1) upload the bundle with '
+      + '`' + 'curl -F file=@dist.zip -H "X-API-Key: <your dhk_mcp_ key>" https://<host>/api/files/staged' + '`' + ' '
+      + '— your MCP key IS allowed on that endpoint; it returns { token, sha256, size_bytes }. (2) Call this tool '
+      + 'with that token. Accepts .zip, .tar.gz, .tgz, up to the staged-file limit. '
+      + 'The release is identified by a SHA-256 AppCrane computes over the bytes, recorded as commit_hash '
+      + '"sha256:<digest>"; the tool re-hashes the staged bytes and refuses if they no longer match what was '
+      + 'staged. Returns that digest — compare it against the one you computed locally. '
+      + 'Deploys to sandbox unless env=production.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        slug:           { type: 'string', description: 'Target app slug' },
+        env:            { type: 'string', enum: ['sandbox', 'production'], default: 'sandbox' },
+        token:          { type: 'string', description: 'Token returned by POST /api/files/staged' },
+        commit_message: { type: 'string', description: 'Optional release note, shown in the deploy history' },
+        commit_sha:     { type: 'string', description: 'Optional git SHA from the machine that BUILT the bundle. Recorded as context only — it is not verified and does not become the release identity.' },
+      },
+      required: ['slug', 'token'],
+      additionalProperties: false,
+    },
+    requiredRole: 'any',
+    handler: async (user, args) => {
+      const env = args.env === 'production' ? 'production' : 'sandbox';
+      const app = getAppForUser(user, args.slug);
+
+      const db = getDb();
+      const row = db.prepare('SELECT * FROM staged_files WHERE token = ?').get(args.token);
+      if (!row)                    throw new Error('staged file not found (token unknown or already swept)');
+      if (row.user_id !== user.id) throw new Error('staged file is owned by a different user');
+      if (row.pushed_at)           throw new Error('staged file was already consumed');
+      const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
+      if (row.expires_at < now)    throw new Error(`staged file expired at ${row.expires_at}`);
+
+      // Re-hash rather than trust the stored value. The staged blob sits on
+      // disk between the upload and this call, and the digest that becomes the
+      // release identity has to be taken from the bytes about to be deployed —
+      // reading it out of the row would record a digest for one set of bytes
+      // while deploying another, which is the exact failure the digest exists
+      // to make impossible.
+      const { digestFile } = await import('./artifactDigest.js');
+      const actual = await digestFile(row.scratch_path);
+      if (actual !== row.sha256) {
+        throw new Error(
+          `staged file no longer matches what was uploaded (staged ${row.sha256.slice(0, 12)}…, `
+          + `on disk ${actual.slice(0, 12)}…) — refusing to deploy it`,
+        );
+      }
+
+      const { deployArtifact } = await import('./artifactDeploy.js');
+      const out = await deployArtifact({
+        app,
+        env,
+        filePath: row.scratch_path,
+        filename: row.filename,
+        declaredSha: (args.commit_sha || '').slice(0, 40) || null,
+        commitMessage: (args.commit_message || '').slice(0, 200) || null,
+        userId: user.id,
+        // The staged store owns these bytes and sweeps them itself; deleting
+        // them here would pull the file out from under its own bookkeeping.
+        keepSource: true,
+      });
+      db.prepare("UPDATE staged_files SET pushed_at = datetime('now') WHERE token = ?").run(row.token);
+
+      return {
+        deployment_id: out.deployId,
+        app: app.slug,
+        env,
+        status: 'pending',
+        commit_hash: out.artifact.commit_hash,
+        artifact: {
+          sha256: out.artifact.sha256,
+          bytes: out.artifact.bytes,
+          filename: out.artifact.filename,
+          declared_commit_sha: out.artifact.declared_commit_sha,
+        },
+        note: 'Deploy runs asynchronously. Poll appcrane_wait_deploy or appcrane_get_app for the result.',
+      };
+    },
+  },
+  {
     name: 'appcrane_push_staged_file',
     description:
       'Move a previously-staged file into a running container at a path under /app or /data. THE WAY TO GET LARGE BINARIES (DMGs, datasets, bundles) into a container when they\'re too big to inline through appcrane_cp. ' +
