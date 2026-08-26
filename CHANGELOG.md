@@ -5,6 +5,31 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.51.0 — Self-update brings the runtime with it, or refuses to proceed.
+
+`install.sh` has always installed Node when a host is below the floor. The updater never did — it ran `git reset --hard`, `npm install --omit=dev`, rebuild, restart, and nothing touching the runtime. So a box provisioned under an older floor stayed there through **every** update, indefinitely, and the only signal was a line in the boot log.
+
+That was cosmetic until dependencies began declaring `engines.node >= 22`. `npm install --omit=dev` installs them regardless of what is running, and the failure lands later — in whatever code path first touches a newer feature, on a host serving dozens of apps.
+
+Self-update now checks `process.versions.node` against `NODE_FLOOR` **before** installing anything. Below the floor on a root Linux host with apt, it installs Node from the same nodesource script `install.sh` uses, so a self-updated host ends up identical to a freshly provisioned one — then verifies against the `node` on PATH, not against itself (this process keeps the binary it started with and would report the old version whatever apt did).
+
+**When it cannot upgrade, it refuses the update rather than warning.** Not Linux, not root, no apt, an nvm/asdf-managed Node, or `APPCRANE_SKIP_NODE_UPGRADE=1` — each aborts with a message naming the floor and what to do. A host left on the previous release is in better shape than one that installed dependencies its runtime cannot run, and the rollback sentinel cannot undo an `npm install` that left `node_modules` unusable.
+
+Two decisions worth stating:
+
+- **Opting out is not the same as being supported.** `APPCRANE_SKIP_NODE_UPGRADE=1` means "do not touch my runtime", not "my runtime is fine" — it still blocks.
+- **An nvm or asdf Node is refused, not upgraded.** `apt-get` would install a *second* Node beside it that PATH may never prefer, so the upgrade would report success and change nothing this process runs.
+
+The **auto-rollback path is deliberately left unguarded**: it reinstalls the previous release, which by definition ran on this runtime. Blocking it would strand a host mid-failure with no way back. A test asserts the guard sits before the update's `npm install` and after the rollback's.
+
+**Verified against a real host, not just unit-tested.** A Debian container was built on Node 20 via nodesource, then run through the commands the planner itself emits: **20.20.2 → 22.23.2**, upgraded in place (`Unpacking nodejs (22.23.2) over (20.20.2-1nodesource1)`), path unchanged at `/usr/bin/node`. `verifyUpgrade` then returned ok, and a second planning pass returned `at_or_above_floor` — idempotent, a compliant host is left alone.
+
+**That exercise found a bug worth the trip.** The failure path did not work the way it was described. `curl -fsSL <404> | bash -` exits **0**: a pipeline reports the LAST command's status, and bash exits 0 on empty stdin. So an unreachable nodesource looked like a successful setup, and the `apt-get install -y nodejs` after it would install whatever the base repos carried instead. `verifyUpgrade` still caught the outcome, so the platform was never at risk — but the failure surfaced two steps from its cause. The emitted command now sets `set -o pipefail`; measured in the same container, a bad URL goes from exit 0 to exit 22 while a good one stays 0.
+
+`install.sh` was suspected of the same flaw and does **not** have it — `set -euo pipefail` at line 27 covers every pipeline in the file, confirmed by running an install.sh-shaped script against a failing download (exit 22, next line never reached). It is unchanged. The difference is real: a shell script gets file-scope options, while a command run through `execFileSync` has no surrounding shell and must set its own. A test now asserts install.sh keeps those options, and keeps them before the pipeline they protect.
+
+Twelve tests, each verified failing first: turning refusals into warnings, treating nvm paths as system packages, accepting an upgrade that changed nothing, moving the guard after `npm install`, dropping `pipefail`, and weakening install.sh's shell options each turn the expected test red.
+
 ## 2.50.1 — Report the runtime, so the floor can actually be checked.
 
 v2.50.0 raised the supported Node floor to 22 and warned at boot when a host was below it. The very next question — *what is the production host running?* — turned out to be unanswerable: `getSystemInfo()` reported hostname, CPU, memory and disk, and not the runtime. The boot warning goes to the startup log, so the only way to check a live host was shell access.
