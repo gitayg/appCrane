@@ -107,3 +107,28 @@ test('the reported major is a number, so a caller can compare it to the floor', 
     'report a modern host as out of date');
   assert.ok(info.node_major >= 18 && info.node_major < 100, `implausible major: ${info.node_major}`);
 });
+
+// ---------------------------------------------------------------------------
+// The floor must survive a version JUMP (v2.51.1)
+// ---------------------------------------------------------------------------
+//
+// v2.51.0 put the runtime check in self-update, and that only protects hosts
+// already running v2.51.0 — the updater that executes is always the code you
+// are upgrading FROM. A host that jumps from an older release straight to one
+// needing Node 22 runs its own updater, which knows nothing, and installs
+// anyway. .npmrc is read from the working tree that `git reset --hard` just
+// produced, so it binds every updater, including ones written before the floor.
+
+test('.npmrc enforces the engines declaration', () => {
+  const npmrc = read('.npmrc');
+  assert.match(npmrc, /^engine-strict\s*=\s*true$/m,
+    'engine-strict is gone. `engines` alone is advisory — measured on Node 20 with engines >=22 ' +
+    'and no engine-strict, npm install exits 0 and installs the package regardless. Without this ' +
+    'line a host jumping versions installs dependencies its runtime cannot run.');
+});
+
+test('the enforcement and the declaration agree', () => {
+  // engine-strict enforces whatever engines says; if engines were dropped the
+  // strict flag would enforce nothing at all.
+  assert.ok(pkg.engines?.node, 'engine-strict is set but package.json declares no engines to enforce');
+});

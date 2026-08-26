@@ -16,7 +16,7 @@ Tools for AI-built internal apps split cleanly along two axes, and one corner is
 
 |  | **Ungoverned** | **Governed** |
 |---|---|---|
-| **Vendor-hosted** | v0, Bolt.new | Lovable, Replit, Retool, Superblocks — SSO and audit, but your app data, DB connections and API keys live on *their* multi-tenant cloud |
+| **Vendor-hosted** | v0, Bolt.new | Lovable, Replit, Retool, Superblocks — mature governance (Replit Enterprise ships SCIM, IdP-group RBAC, SIEM audit streaming and dependency CVE scanning), but your app data, DB connections and API keys run on *their* infrastructure, not yours |
 | **Self-hosted** | Coolify, Dokku, CapRover, Dokploy — your infra, but no SSO, no RBAC, no per-user audit, no tenancy model | **AppCrane** |
 
 You can have governance, or you can have your own infrastructure. Every other option makes you pick. That gap is the entire reason this exists — it was built for a company that needed both and found nothing that did both.
