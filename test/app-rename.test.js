@@ -122,9 +122,9 @@ test('the database write happens before containers and disk are touched', () => 
   // reachable in-process any more — the FK that used to cause it is carried
   // correctly now — but the ordering is the reason a FUTURE constraint cannot
   // strand an app the same way, and nothing else records that.
-  const src = readFileSync(new URL('../server/routes/apps.js', import.meta.url), 'utf8');
-  const start = src.indexOf("router.post('/:slug/rename'");
-  const body = src.slice(start, src.indexOf('\nrouter.', start + 10));
+  // v2.54.0: the logic moved to services/appRename.js so the MCP tool and the
+  // REST route share one implementation. Same property, new home.
+  const body = readFileSync(new URL('../server/services/appRename.js', import.meta.url), 'utf8');
 
   const dbWrite = body.indexOf('UPDATE apps SET slug');
   const stop = body.indexOf('stopApp(');

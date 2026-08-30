@@ -1288,117 +1288,16 @@ router.delete('/:slug', requireAppAccess, auditMiddleware('app-delete'), async (
  * Stops containers, renames data dir, updates DB, reloads Caddy, redeploys.
  */
 router.post('/:slug/rename', requireAdmin, requireAppAccess, auditMiddleware('app-rename'), async (req, res) => {
-  const { new_slug, redirect = true } = req.body;
-
-  if (!new_slug) throw new AppError('new_slug is required', 400, 'VALIDATION');
-  if (!/^[a-z0-9][a-z0-9-]*$/.test(new_slug)) {
-    throw new AppError('Slug must be lowercase alphanumeric with dashes', 400, 'VALIDATION');
-  }
-
-  const db = getDb();
-  const app = req.app;
-  const oldSlug = app.slug;
-
-  if (new_slug === oldSlug) throw new AppError('New slug is the same as current slug', 400, 'VALIDATION');
-  if (db.prepare('SELECT id FROM apps WHERE slug = ?').get(new_slug)) {
-    throw new AppError(`Slug '${new_slug}' is already in use`, 409, 'DUPLICATE');
-  }
-
-  // Build updated slug_aliases (append old slug for redirect)
-  let aliases = [];
-  try { aliases = JSON.parse(app.slug_aliases || '[]'); } catch (_) {}
-  if (redirect && !aliases.includes(oldSlug)) aliases.push(oldSlug);
-
-  // v2.53.2: the database write comes FIRST, and carries app_skills with it.
-  //
-  // app_skills.app_slug references apps.slug — by slug, not by app_id, and with
-  // ON UPDATE NO ACTION — so with foreign_keys ON, `UPDATE apps SET slug` raises
-  // SQLITE_CONSTRAINT_FOREIGNKEY for any app that has a skill attached. This
-  // used to run last, after the containers were stopped and the data directory
-  // had already been moved, so that constraint failure left the app stopped,
-  // its data at the new path, and the row still naming the old slug. Renaming
-  // one of these apps broke it, and the operator's next move — retry — failed
-  // the same way against a directory that was no longer where it started.
-  //
-  // One transaction so the two rows can never disagree, and before any external
-  // state so a constraint that fails costs nothing. app_skills is updated first:
-  // the child has to stop pointing at a slug before that slug stops existing.
-  // defer_foreign_keys, because neither order works without it: updating
-  // app_skills first points it at a slug that does not exist yet, and updating
-  // apps first orphans the child — both raise FOREIGN KEY constraint failed
-  // immediately. Deferring moves the check to COMMIT, where the two rows agree.
-  // It is a connection pragma that SQLite resets when the transaction ends, so
-  // this does not weaken enforcement for anything else.
-  const applyRename = db.transaction(() => {
-    db.pragma('defer_foreign_keys = ON');
-    db.prepare('UPDATE app_skills SET app_slug = ? WHERE app_slug = ?').run(new_slug, oldSlug);
-    db.prepare('UPDATE apps SET slug = ?, slug_aliases = ? WHERE id = ?')
-      .run(new_slug, aliases.length ? JSON.stringify(aliases) : null, app.id);
+  // Logic lives in services/appRename.js so appcrane_rename_app can call the
+  // same code — REST is unreachable for the dhk_mcp_* keys agents hold.
+  const { renameApp } = await import('../services/appRename.js');
+  const out = await renameApp({
+    app: req.app,
+    newSlug: req.body?.new_slug,
+    redirect: req.body?.redirect !== false,
+    userId: req.user.id,
   });
-  applyRename();
-
-  // Stop old containers
-  try {
-    const { stopApp } = await import('../services/docker.js');
-    await stopApp(oldSlug, 'production').catch(() => {});
-    await stopApp(oldSlug, 'sandbox').catch(() => {});
-  } catch (_) {}
-
-  // Rename data directory. The database already says `new_slug`, so a failure
-  // here is the inconsistency in the other direction — the row names a path
-  // that does not exist, and every later deploy reads the wrong directory.
-  // Put the row back rather than leave that.
-  const dataDir = process.env.DATA_DIR || './data';
-  const appsBase = join(dataDir, 'apps');
-  const oldDir = resolveSafe(appsBase, oldSlug);
-  const newDir = resolveSafe(appsBase, new_slug);
-  if (existsSync(oldDir)) {
-    try {
-      renameSync(oldDir, newDir);
-    } catch (e) {
-      db.transaction(() => {
-        db.pragma('defer_foreign_keys = ON');
-        db.prepare('UPDATE app_skills SET app_slug = ? WHERE app_slug = ?').run(oldSlug, new_slug);
-        db.prepare('UPDATE apps SET slug = ?, slug_aliases = ? WHERE id = ?')
-          .run(oldSlug, app.slug_aliases, app.id);
-      })();
-      throw new AppError(
-        `Could not move the app's data directory (${e.message}). The rename was rolled back; `
-        + `the app is still '${oldSlug}' and its containers have been stopped — redeploy it.`,
-        500, 'RENAME_FAILED',
-      );
-    }
-  }
-
-  // Reload Caddy with new routes (+ redirect if requested)
-  await reloadCaddy().catch(e => log.warn(`Caddy reload after rename: ${e.message}`));
-
-  // Redeploy live environments so containers get the updated APP_BASE_PATH and new name
-  const liveEnvs = db.prepare("SELECT env FROM deployments WHERE app_id = ? AND status = 'live'").all(app.id);
-  const updatedApp = db.prepare('SELECT * FROM apps WHERE id = ?').get(app.id);
-  const ports = getPortsForSlot(updatedApp.slot);
-
-  for (const { env } of liveEnvs) {
-    try {
-      const result = db.prepare(
-        "INSERT INTO deployments (app_id, env, status, deployed_by) VALUES (?, ?, 'pending', ?)"
-      ).run(app.id, env, req.user.id);
-      const { deployApp } = await import('../services/deployer.js');
-      deployApp(result.lastInsertRowid, updatedApp, env, ports).catch(err => {
-        log.error(`Rename redeploy failed (${env}): ${err.message}`);
-      });
-    } catch (e) {
-      log.warn(`Could not queue rename redeploy for ${env}: ${e.message}`);
-    }
-  }
-
-  res.json({
-    message: `App renamed from '${oldSlug}' to '${new_slug}'`,
-    old_slug: oldSlug,
-    new_slug,
-    redirect,
-    redeploying: liveEnvs.map(r => r.env),
-  });
+  res.json({ message: `App renamed from '${out.old_slug}' to '${out.new_slug}'`, ...out });
 });
 
 /**
