@@ -21,6 +21,77 @@ import log from '../utils/logger.js';
 
 const CALL_TIMEOUT_MS = parseInt(process.env.APPCRANE_GH_MCP_CALL_TIMEOUT_MS || '30000', 10);
 
+// Must match APP_NETWORK in services/docker.js. Deliberately duplicated rather
+// than imported: docker.js pulls in the deploy path, and this module is loaded
+// by the MCP request path. test/mcp-bridge-secret-argv.test.js asserts the two
+// strings are still equal, so drift fails a test instead of silently putting
+// this container back on the default bridge.
+const APP_NETWORK = 'appcrane-apps';
+
+/**
+ * Build the `docker run` argv and the environment to spawn it with.
+ *
+ * SECRETS ARE NOT ARGUMENTS. This used to interpolate `-e NAME=value` straight
+ * into argv, which put a user's GitHub PAT into the docker process's command
+ * line — readable from the host process list by any local user, and retained in
+ * `docker inspect` for the life of the container. Docker's `-e NAME` form (no
+ * `=`) reads the value from the CLI's own environment instead, so the token
+ * reaches the container through the env block and never appears in argv.
+ *
+ * The environment handed to spawn is built from scratch rather than inherited.
+ * AppCrane's process env holds ENCRYPTION_KEY — the master key for every stored
+ * secret on the instance — and there is no reason for it to be one `docker
+ * inspect` or one compromised entrypoint away from a container running someone
+ * else's MCP server image.
+ *
+ * Exported for the test: the property under test is "this string is absent from
+ * that array", and proving it through a real container would skip everywhere
+ * Docker is not installed, which is exactly where a regression would land.
+ */
+export function buildDockerArgs({ image, env = {}, label = 'gh-mcp', extraDockerArgs = [] }) {
+  const names = Object.keys(env);
+
+  const args = [
+    'run', '-i', '--rm',
+    '--label', 'appcrane.gh-mcp=1',
+    `--label`, `appcrane.label=${label}`,
+
+    // Same isolation the app containers get (v2.42.1). Without --network this
+    // container landed on Docker's default bridge, where inter-container
+    // connectivity is ON — the one thing that change exists to prevent. The
+    // shared network still allows egress, which this image needs to reach the
+    // GitHub API.
+    '--network', APP_NETWORK,
+
+    // A container spawned on demand by an authenticated user, with no cap on
+    // anything, is a denial-of-service primitive against every app on the box.
+    '--memory', '512m', '--memory-swap', '512m',
+    '--cpus', '1',
+    '--pids-limit', '256',
+
+    // It talks JSON-RPC over stdio to an HTTP API. It needs no capabilities,
+    // and nothing it runs should be able to acquire more than it started with.
+    '--cap-drop', 'ALL',
+    '--security-opt', 'no-new-privileges',
+
+    // Name only — the value travels in the env block below, not in argv.
+    ...names.flatMap((k) => ['-e', k]),
+    ...extraDockerArgs,
+    image,
+  ];
+
+  // The docker CLI needs enough to find the daemon and its own config, and
+  // nothing else. DOCKER_* is forwarded when set so a non-default socket or
+  // context keeps working.
+  const spawnEnv = { PATH: process.env.PATH, HOME: process.env.HOME };
+  for (const k of ['DOCKER_HOST', 'DOCKER_CONFIG', 'DOCKER_CONTEXT', 'DOCKER_CERT_PATH', 'DOCKER_TLS_VERIFY']) {
+    if (process.env[k] !== undefined) spawnEnv[k] = process.env[k];
+  }
+  Object.assign(spawnEnv, env);
+
+  return { args, env: spawnEnv };
+}
+
 export class StdioMcpClient {
   constructor({ image, env = {}, label = 'gh-mcp', extraDockerArgs = [] }) {
     this.image = image;
@@ -42,20 +113,8 @@ export class StdioMcpClient {
    * binary, bad env vars).
    */
   async start() {
-    const dockerEnv = [];
-    for (const [k, v] of Object.entries(this.env)) {
-      dockerEnv.push('-e', `${k}=${v}`);
-    }
-    const args = [
-      'run', '-i', '--rm',
-      '--label', 'appcrane.gh-mcp=1',
-      '--label', `appcrane.label=${this.label}`,
-      ...dockerEnv,
-      ...this.extraDockerArgs,
-      this.image,
-    ];
-
-    this.proc = spawn('docker', args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    const { args, env } = buildDockerArgs(this);
+    this.proc = spawn('docker', args, { stdio: ['pipe', 'pipe', 'pipe'], env });
     this.startedAt = Date.now();
 
     this.proc.stdout.on('data', (d) => this._onStdout(d));
