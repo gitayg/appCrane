@@ -1069,6 +1069,178 @@ const TOOLS = [
   },
 
   {
+    name: 'appcrane_stage_chunk',
+    description:
+      'Upload one part of a file to AppCrane over MCP. Together with appcrane_stage_assemble this is the '
+      + 'MCP-native way to get BYTES onto the server — no curl, no /api/files/staged. '
+      + 'Split the file into parts small enough for a tool call (~256KB of base64 each is comfortable), send '
+      + 'each with the same `session` and `of`, then call appcrane_stage_assemble. Parts may be sent in any '
+      + 'order and re-sent to replace a corrupted one; the reply lists which parts are still missing. '
+      + 'Use encoding="base64" for anything binary. Pass sha256 of THIS part to have it verified on arrival.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        session:  { type: 'string', description: 'Opaque id grouping the parts of one file. Any unique string; reuse it for every part.' },
+        part:     { type: 'integer', minimum: 1, description: '1-based part number.' },
+        of:       { type: 'integer', minimum: 1, description: 'Total number of parts. Identical across every part of a session.' },
+        content:  { type: 'string', description: "This part's bytes, encoded per `encoding`." },
+        encoding: { type: 'string', enum: ['utf-8', 'base64'], description: 'Defaults to utf-8. Use base64 for binary.' },
+        sha256:   { type: 'string', description: 'Optional hex SHA-256 of this part, verified on arrival.' },
+      },
+      required: ['session', 'part', 'of', 'content'],
+      additionalProperties: false,
+    },
+    requiredRole: 'any',
+    handler: async (user, args) => {
+      const { session, part, of } = args;
+      const encoding = args.encoding || 'utf-8';
+      if (!Number.isInteger(part) || !Number.isInteger(of) || of < 1 || part < 1 || part > of) {
+        throw new Error(`invalid part/of: part must be an integer in 1..of (got part=${part}, of=${of})`);
+      }
+      const bytes = Buffer.from(args.content, encoding === 'base64' ? 'base64' : 'utf-8');
+      const { createHash } = await import('crypto');
+      const actual = createHash('sha256').update(bytes).digest('hex');
+      if (args.sha256 && args.sha256 !== actual) {
+        throw new Error(
+          `part ${part} SHA-256 mismatch: you declared ${args.sha256} but the received bytes hash to ${actual}. `
+          + 'The part was corrupted in transit — resend it.',
+        );
+      }
+
+      const db = getDb();
+      db.prepare("DELETE FROM stage_chunks WHERE created_at < datetime('now', '-2 hours')").run();
+
+      const existing = db.prepare('SELECT user_id, of_total FROM stage_chunks WHERE session = ? LIMIT 1').get(session);
+      if (existing) {
+        if (existing.user_id !== user.id) throw new Error(`session '${session}' belongs to a different user`);
+        if (existing.of_total !== of) throw new Error(`session '${session}' was started with of=${existing.of_total}, not ${of}`);
+      }
+
+      db.prepare(
+        `INSERT INTO stage_chunks (session, user_id, part, of_total, content, sha256)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(session, part) DO UPDATE SET
+           content = excluded.content, sha256 = excluded.sha256, created_at = datetime('now')`
+      ).run(session, user.id, part, of, args.content, actual);
+
+      const have = db.prepare('SELECT part FROM stage_chunks WHERE session = ? ORDER BY part').all(session).map((r) => r.part);
+      const missing = [];
+      for (let p = 1; p <= of; p++) if (!have.includes(p)) missing.push(p);
+      return { session, part, of, received_bytes: bytes.length, sha256: actual, missing_parts: missing, complete: missing.length === 0 };
+    },
+  },
+  {
+    name: 'appcrane_stage_assemble',
+    description:
+      'Join the parts pushed with appcrane_stage_chunk into one staged file and return its token. '
+      + 'Hand that token to appcrane_deploy_artifact to deploy it — that pair is a complete, MCP-native '
+      + 'deploy for an app with no repo, and it does not touch GitHub. '
+      + 'Pass sha256 of the WHOLE original file to have the reassembled bytes verified before the token is issued; '
+      + 'without it you are trusting that every part arrived intact.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        session:  { type: 'string', description: 'The session id used for the parts.' },
+        filename: { type: 'string', description: 'Name for the assembled file. For a deploy it must end in .zip, .tar.gz or .tgz.' },
+        sha256:   { type: 'string', description: 'Optional hex SHA-256 of the whole original file, verified before the token is issued.' },
+      },
+      required: ['session', 'filename'],
+      additionalProperties: false,
+    },
+    requiredRole: 'any',
+    handler: async (user, args) => {
+      const db = getDb();
+      const rows = db.prepare('SELECT * FROM stage_chunks WHERE session = ? ORDER BY part').all(args.session);
+      if (!rows.length) throw new Error(`no parts staged for session '${args.session}' (unknown id, or swept after 2 hours)`);
+      if (rows[0].user_id !== user.id) throw new Error(`session '${args.session}' belongs to a different user`);
+
+      const of = rows[0].of_total;
+      const missing = [];
+      for (let p = 1; p <= of; p++) if (!rows.some((r) => r.part === p)) missing.push(p);
+      if (missing.length) throw new Error(`cannot assemble: parts ${missing.join(', ')} of ${of} are missing`);
+
+      const { createHash, randomBytes } = await import('crypto');
+      const { mkdtempSync, writeFileSync } = await import('fs');
+      const { join } = await import('path');
+
+      const buf = Buffer.concat(rows.map((r) => Buffer.from(r.content, 'base64')));
+      const actual = createHash('sha256').update(buf).digest('hex');
+      if (args.sha256 && args.sha256 !== actual) {
+        throw new Error(
+          `assembled file SHA-256 mismatch: you declared ${args.sha256}, the joined parts hash to ${actual}. `
+          + 'Re-push the parts rather than deploying bytes that are not what you built.',
+        );
+      }
+
+      // Same store the curl upload writes to, so appcrane_deploy_artifact and
+      // appcrane_push_staged_file consume this with no special case.
+      const dataDir = process.env.DATA_DIR || './data';
+      const stagedRoot = join(dataDir, 'staged');
+      const { mkdirSync } = await import('fs');
+      mkdirSync(stagedRoot, { recursive: true });
+      const scratch = mkdtempSync(join(stagedRoot, 'mcp-'));
+      const safeName = String(args.filename).replace(/[^A-Za-z0-9._-]/g, '_');
+      const scratchPath = join(scratch, safeName);
+      writeFileSync(scratchPath, buf);
+
+      const token = randomBytes(16).toString('base64url');
+      const expiresAt = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString().slice(0, 19).replace('T', ' ');
+      db.prepare(`
+        INSERT INTO staged_files (token, user_id, filename, size_bytes, sha256, scratch_path, expires_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(token, user.id, safeName, buf.length, actual, scratchPath, expiresAt);
+      db.prepare('DELETE FROM stage_chunks WHERE session = ?').run(args.session);
+
+      return {
+        token,
+        filename: safeName,
+        size_bytes: buf.length,
+        sha256: actual,
+        expires_at: expiresAt,
+        note: 'Deploy it with appcrane_deploy_artifact { slug, env, token }.',
+      };
+    },
+  },
+  {
+    name: 'appcrane_rename_app',
+    description:
+      'Rename an app\'s slug. The slug is its URL, its container name and its data directory, so this '
+      + 'changes all three — but it is NOT destructive: deploy history, env vars, ports, per-app roles and '
+      + 'grants are keyed on the app id, not the slug, and survive untouched. The old slug is kept as a '
+      + 'redirect unless redirect=false. Platform admin. '
+      + 'Use this instead of recreating an app under a new name, which is what loses the history. '
+      + 'To free a slug held by an app you no longer want, rename THAT app out of the way with '
+      + 'redirect=false rather than deleting it — deleting clears the database rows but leaves '
+      + 'data/apps/<slug> on disk, and the rename then refuses because the directory is still there.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        slug:     { type: 'string', description: 'Current app slug.' },
+        new_slug: { type: 'string', description: 'New slug: lowercase letters, digits and dashes, starting with a letter or digit.' },
+        redirect: { type: 'boolean', default: true, description: 'Keep the old slug redirecting to the new one. Pass false when you are freeing the old slug for another app to take.' },
+      },
+      required: ['slug', 'new_slug'],
+      additionalProperties: false,
+    },
+    requiredRole: 'platform_admin',
+    handler: async (user, args) => {
+      const app = getAppForUser(user, args.slug);
+      const { renameApp } = await import('./appRename.js');
+      const out = await renameApp({
+        app,
+        newSlug: args.new_slug,
+        redirect: args.redirect !== false,
+        userId: user.id,
+      });
+      return {
+        ...out,
+        note: out.redeploying.length
+          ? `Redeploying ${out.redeploying.join(' and ')} so the containers pick up the new name. Poll appcrane_get_app.`
+          : 'No live environment to redeploy.',
+      };
+    },
+  },
+  {
     name: 'appcrane_deploy_artifact',
     description:
       'Deploy a release from an uploaded BUNDLE instead of from git. For an app with no GitHub repo, and the '

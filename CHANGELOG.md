@@ -5,6 +5,18 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.54.0 — The whole flow works over MCP: bytes in, deploy, rename.
+
+An agent holds a `dhk_mcp_*` key, which reaches `/api/mcp` and `/api/files/staged` and nothing else. Two things it needed were therefore out of reach, and both had workarounds that were worse than the operation.
+
+**Getting bytes to the server.** `appcrane_deploy_artifact` (v2.53.0) took a staged token, but the only way to create one was `curl -F file=@... /api/files/staged` — an HTTP call outside MCP, so "MCP-native deploy" still needed a shell. `appcrane_cat` is capped at 256KB and mangles binary; `appcrane_cp` only writes *into* a container. `appcrane_stage_chunk` and `appcrane_stage_assemble` close it: base64 parts over JSON-RPC, each verifiable on arrival, joined server-side into the same staged-file store the curl upload writes to. Pass the whole-file SHA-256 to `assemble` and the bytes are checked against it before a token is issued — that digest is what ties the deployed artifact to the one you built, and it becomes the release identity.
+
+**Renaming an app.** `POST /api/apps/<slug>/rename` is `requireAdmin` REST, so the supported way to change an app's identity was closed to agents, and the reachable alternative — recreate the app under the new name — is exactly what loses deploy history. `appcrane_rename_app` runs the same code as the route, which now lives in `services/appRename.js` so there is one implementation behind both doors.
+
+Renaming also gets a check it should always have had: the target directory must be free, not just the target slug. Deleting an app clears its database rows and stops its containers but leaves `data/apps/<slug>` on disk, and a directory rename only succeeds onto an empty target — so renaming onto a slug freed by a delete used to get as far as stopping the containers before failing on `ENOTEMPTY`. It is now refused up front, with the reason.
+
+Which points at a better move than deleting: to take a slug another app is holding, rename that app out of the way with `redirect: false` and then take it. That frees the slug *and* the directory, it is reversible, and nothing is destroyed. The guide now leads with it.
+
 ## 2.53.3 — An uploaded app can be redeployed from the release it is already running.
 
 v2.53.0 made `upload` a real source type, and only ever exercised the deploy path with a bundle in hand. Every other way in arrives without one — `appcrane_deploy`, an ordinary redeploy, and the rename endpoint, which queues a redeploy for each live environment after moving the app. All of them fell past every branch to the final `else` and threw:

@@ -67,9 +67,10 @@ container never started. Two log surfaces, two tools:
 
 ### Renaming an app
 
-`POST /api/apps/<slug>/rename` with `{ "new_slug": "..." }` (platform admin).
-There is **no MCP tool for this** — `appcrane_update_app` can change name,
-domain and source, but not the slug. It is a REST call or nothing.
+`appcrane_rename_app(slug, new_slug, redirect?)` (platform admin), or
+`POST /api/apps/<slug>/rename` for the same thing over REST. Both run the same
+code. `appcrane_update_app` cannot do it — that tool changes name, domain and
+source, never the slug.
 
 The rename is **not destructive**. Deploy history, env vars, ports, per-app
 roles and grants all key off `apps.id`, not the slug, so they survive untouched.
@@ -82,13 +83,38 @@ diverge permanently), and any external DNS pointing at the old URL is yours to
 re-point. It does not touch `domain` either — a custom domain already on the app
 carries over untouched.
 
-**Renaming onto a slug you just freed by deleting an app?** `DELETE
-/api/apps/<slug>` clears the database rows and stops the containers but leaves
-`data/apps/<slug>` on disk. The rename moves a directory with a single
-`renameSync`, which succeeds onto an empty target and fails with `ENOTEMPTY`
-onto one that still has anything in it. Remove the leftover directory on the
-server first. (The rename rolls the database back on that failure, so it is safe
-to retry — but it will keep failing until the directory is gone.)
+**Need a slug another app is holding?** Do not delete that app — rename it out
+of the way with `redirect: false`, then take the slug:
+
+```
+appcrane_rename_app slug="wanted"  new_slug="wanted-retired" redirect=false
+appcrane_rename_app slug="realapp" new_slug="wanted"
+```
+
+`redirect: false` matters: without it the retired app keeps an alias claiming
+the slug you are freeing. This frees the data directory too, which deleting does
+not — `DELETE /api/apps/<slug>` clears the rows and stops the containers but
+leaves `data/apps/<slug>` on disk, and a rename onto a slug whose directory
+still exists is refused (a directory rename only succeeds onto an empty target).
+Renaming the squatter is non-destructive and reversible; deleting is neither.
+
+### Deploying without a repo, entirely over MCP
+
+For an app with no GitHub repo — or when the repo path is broken — bytes reach
+AppCrane over MCP with no curl:
+
+```
+appcrane_stage_chunk    session="s1" part=1 of=N content=<base64> encoding="base64"
+...one call per part, any order...
+appcrane_stage_assemble session="s1" filename="dist.zip" sha256=<whole-file digest>
+appcrane_deploy_artifact slug="myapp" env="production" token=<from assemble>
+```
+
+Pass the whole-file `sha256` to `assemble` — it is what ties the deployed
+artifact to the one you built, and without it you are trusting that every part
+arrived intact. The release is then identified by that digest
+(`commit_hash = sha256:<digest>`). An upload app can also be redeployed from the
+release it is already running, with no new bundle, via `appcrane_deploy`.
 
 ### Vulnerability scanning
 
@@ -322,6 +348,9 @@ better entered in Settings → Backup than passed through an agent.
 | `appcrane_cat` | Print the contents of a file inside a running app container |
 | `appcrane_push_staged_file` | Move a previously-staged file (uploaded via POST /api/files/staged) into a running container at a path under /app or /data |
 | `appcrane_deploy_artifact` | Deploy a release from a staged bundle (.zip/.tar.gz/.tgz) instead of from git. Identified by a SHA-256 AppCrane computes over the bytes, recorded as `commit_hash = sha256:<digest>` |
+| `appcrane_stage_chunk` | Upload one part of a file over MCP. No curl, no /api/files/staged |
+| `appcrane_stage_assemble` | Join the parts into a staged file and return its token, verifying the whole-file SHA-256 |
+| `appcrane_rename_app` | Rename an app's slug. Not destructive — history, env vars, ports and grants key off the app id |
 | `appcrane_scan_report` | CVE findings for an app, or across the fleet (scoped to apps you can see) |
 | `appcrane_scan_app` | Scan one app's dependency manifests against OSV now, instead of waiting for the daily pass |
 | `appcrane_platform_policy` | Read or set the platform levers: ban public apps, require security scans (platform admin) |
