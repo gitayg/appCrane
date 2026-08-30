@@ -5,6 +5,18 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.53.3 — An uploaded app can be redeployed from the release it is already running.
+
+v2.53.0 made `upload` a real source type, and only ever exercised the deploy path with a bundle in hand. Every other way in arrives without one — `appcrane_deploy`, an ordinary redeploy, and the rename endpoint, which queues a redeploy for each live environment after moving the app. All of them fell past every branch to the final `else` and threw:
+
+> App '<slug>' has source_type='upload' which is not deployable on this AppCrane install.
+
+That is false. The release is on disk and the app is serving from it. The rename case was the damaging one: the throw arrives *after* the containers have been stopped, so the app goes down and stays down until somebody re-uploads a bundle by hand — the half-migrated state the previous release existed to prevent, reached through a different door.
+
+An `upload` app now redeploys by replaying its newest release, the same move `managed_legacy` makes without the deprecation. For an app with no repository, the last artifact is the source of truth. With no release on disk at all, the error says so and names both ways to supply one.
+
+Also documented, because it turns a rename into a puzzle: deleting an app clears its database rows and stops its containers but leaves `data/apps/<slug>` on disk. Renaming onto that freed slug then fails with `ENOTEMPTY`, since a directory rename only succeeds onto an empty target. The rename rolls the database back and is safe to retry, but it keeps failing until the leftover directory is removed. The guide now says so, along with the fact that a rename does not touch `domain`.
+
 ## 2.53.2 — Renaming an app no longer strands it half-renamed.
 
 `POST /api/apps/<slug>/rename` stopped both containers and moved `data/apps/<slug>` on disk **before** writing the new slug to the database. That ordering was safe only while the write could not fail, and it could.

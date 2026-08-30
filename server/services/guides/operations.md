@@ -79,7 +79,16 @@ directory is moved, Caddy is reloaded, and every live environment is redeployed.
 Two things it does **not** do: a managed app's `AMC_<slug>` GitHub repo keeps
 its original name (the stored `github_url` keeps clones working, but the names
 diverge permanently), and any external DNS pointing at the old URL is yours to
-re-point.
+re-point. It does not touch `domain` either — a custom domain already on the app
+carries over untouched.
+
+**Renaming onto a slug you just freed by deleting an app?** `DELETE
+/api/apps/<slug>` clears the database rows and stops the containers but leaves
+`data/apps/<slug>` on disk. The rename moves a directory with a single
+`renameSync`, which succeeds onto an empty target and fails with `ENOTEMPTY`
+onto one that still has anything in it. Remove the leftover directory on the
+server first. (The rename rolls the database back on that failure, so it is safe
+to retry — but it will keep failing until the directory is gone.)
 
 ### Vulnerability scanning
 
