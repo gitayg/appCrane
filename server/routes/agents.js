@@ -33,8 +33,17 @@ const router = Router();
 
 router.use((req, res, next) => {
   const db = getDb();
-  if (req.query.api_key && !req.headers['x-api-key']) req.headers['x-api-key'] = req.query.api_key;
-  if (req.query.token && !req.headers.authorization) req.headers.authorization = `Bearer ${req.query.token}`;
+  // A credential in the query string is written to the proxy access log, kept in
+  // browser history, and sent in the Referer of anything the page then loads.
+  // EventSource cannot set headers, so for SSE there is no alternative — but
+  // that argument covers exactly one endpoint per router, and this promotion
+  // used to run for all of them, including POSTs that ship code and evict
+  // containers. Those are called with fetch(), which sets headers fine.
+  const isSseRequest = req.method === 'GET' && /\/events\/?$/.test(req.path);
+  if (isSseRequest) {
+    if (req.query.api_key && !req.headers['x-api-key']) req.headers['x-api-key'] = req.query.api_key;
+    if (req.query.token && !req.headers.authorization) req.headers.authorization = `Bearer ${req.query.token}`;
+  }
 
   const apiKey = req.headers['x-api-key'];
   if (apiKey) {

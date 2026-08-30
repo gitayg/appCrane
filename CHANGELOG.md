@@ -5,6 +5,22 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.53.1 — Five findings from a full security scan, including one the root audit could not see.
+
+`npm audit` at the repo root reported zero vulnerabilities, and it was right about what it looked at. It does not read `studio-web/package-lock.json`, so the admin SPA's dependencies were invisible to it — and that is where all 14 open Dependabot alerts lived, **six of them runtime scope**, not dev. A clean top-level audit was standing in for a clean project.
+
+**react-router 7.14.2 → 7.18.3.** Seven advisories. Most target SSR and RSC modes that a client-only Vite build never enters; the one that lands is an open redirect via backslash in `<Link>`/`useNavigate` — the same class the platform fixed in its own code in v2.35.0, reintroduced a layer below. Clearing the rest required vite 5 → 8 and `@vitejs/plugin-react` 4 → 6; `tsc -b`, both bundles and a from-scratch `npm ci` all verified after.
+
+**A user's GitHub PAT was a command-line argument.** The per-user MCP bridge spawned `docker run … -e GITHUB_PERSONAL_ACCESS_TOKEN=<pat>`, putting a live token in process argv — readable from the host process list, and retained in `docker inspect`. It now uses Docker's name-only `-e` form so the value travels in the environment block, and the spawn environment is built from scratch rather than inherited, which also stops `ENCRYPTION_KEY` from riding along into a container that has no business holding it.
+
+**AppCrane exempted its own image from its own rule.** `packages/mcp/Dockerfile` had no `USER` line and ran as root, while `dockerfileValidator.js` flags exactly that in app-provided Dockerfiles. It also spawned with no `--network`, landing on Docker's default bridge where inter-container connectivity is on — the single thing v2.42.1 exists to prevent everywhere else. Now non-root on node 22, on the isolated shared network, with memory, CPU and pid caps, `--cap-drop ALL` and `no-new-privileges`.
+
+**AES-GCM accepted truncated authentication tags.** `decrypt()` built its decipher without `authTagLength` and passed whatever tag the stored blob carried. Measured: a 4-byte tag decrypts successfully, dropping forgery cost from 2^-128 to 2^-32. Every caller reads from the database, so this needed write access to exploit — hardening, not an open door, and the round-trip succeeded identically either way, which is why no existing test could see it.
+
+**Credentials in query strings, narrowed to where the browser forces it.** `?api_key=` / `?token=` were promoted to headers on every route of two routers; EventSource cannot set headers, but that argument covers one endpoint each. A URL carrying a live credential reaches the access log, browser history and `Referer` — so it is now `GET` on the SSE path only, and `POST …/ship` and `…/evict` require a header like everything else.
+
+Also audited: all 233 routes, and every one of the 77 that are app-scoped is correctly authorized — 59 by middleware, 18 by in-handler checks. No authorization gaps found.
+
 ## 2.53.0 — An uploaded release finally has an identity, and a door an agent can open.
 
 Two problems, one root. An app without a GitHub repo could already be deployed by uploading a bundle — but the release it produced was anonymous, and the endpoint was unreachable with the credential agents actually hold.

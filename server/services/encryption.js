@@ -2,6 +2,7 @@ import crypto from 'crypto';
 
 const ALGORITHM = 'aes-256-gcm';
 const IV_LENGTH = 16;
+const AUTH_TAG_LENGTH = 16; // GCM's full tag. Anything shorter is a weakened tag, not a valid one.
 const TAG_LENGTH = 16;
 
 let _cachedKey = null;
@@ -48,7 +49,23 @@ export function decrypt(encoded, keyOverrideHex) {
   const [ivHex, authTagHex, encryptedHex] = encoded.split(':');
   const iv = Buffer.from(ivHex, 'hex');
   const authTag = Buffer.from(authTagHex, 'hex');
-  const decipher = crypto.createDecipheriv(ALGORITHM, key, iv);
+  // authTagLength pinned to 16, and the parsed tag length checked before it is
+  // handed over. Without both, GCM accepts a 4, 8, 12, 13, 14 or 15-byte tag —
+  // measured on this Node, a 4-byte tag decrypts successfully — which drops the
+  // cost of forging a ciphertext from 2^-128 to 2^-32. The round-trip works
+  // identically either way, so no existing test could see the difference; see
+  // test/encryption-authtag.test.js.
+  //
+  // The explicit length check is not redundant with authTagLength. createDecipheriv
+  // enforces it at setAuthTag time, but the error it raises names an "unsupported
+  // state" rather than the actual problem, and a stored blob truncated by anything
+  // other than an attacker (a botched migration, a CHAR column) should say so.
+  if (authTag.length !== AUTH_TAG_LENGTH) {
+    throw new Error(
+      `decrypt: authentication tag is ${authTag.length} bytes, expected ${AUTH_TAG_LENGTH}`,
+    );
+  }
+  const decipher = crypto.createDecipheriv(ALGORITHM, key, iv, { authTagLength: AUTH_TAG_LENGTH });
   decipher.setAuthTag(authTag);
   let decrypted = decipher.update(encryptedHex, 'hex', 'utf8');
   decrypted += decipher.final('utf8');
