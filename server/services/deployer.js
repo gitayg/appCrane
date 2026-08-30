@@ -827,6 +827,36 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
         // formatted a clear error; just rethrow.
         throw e;
       }
+    } else if (app.source_type === 'upload') {
+      // v2.53.2: redeploy an upload app from the release it is already running.
+      //
+      // v2.53.0 made 'upload' a real source type but only ever reached the
+      // deploy path with opts.preExtractedDir set — a bundle in hand. Every
+      // other trigger arrives without one: `appcrane_deploy`, a restart-style
+      // redeploy, and the rename endpoint, which queues a redeploy for each live
+      // environment after moving the app. All of them fell through to the final
+      // `else` and threw "not deployable on this AppCrane install", which was
+      // false — the release is right there on disk — and in the rename case it
+      // ran after the containers had already been stopped, so the app went down
+      // and stayed down until someone re-uploaded.
+      //
+      // Replaying the newest release is what these callers mean. It is the same
+      // move managed_legacy makes, minus the deprecation: for an app with no
+      // repo, the last artifact IS the source of truth.
+      const releases = readdirSync(releasesDir)
+        .filter(d => d.includes('upload'))
+        .sort()
+        .reverse();
+
+      if (releases.length === 0) {
+        throw new Error(
+          `App '${app.slug}' has source_type='upload' but no release on disk to redeploy. ` +
+          `Upload a bundle: POST /api/apps/${app.slug}/deploy/upload, or appcrane_deploy_artifact with a staged token.`
+        );
+      }
+
+      releaseDir = resolve(join(releasesDir, releases[0]));
+      appendLog(`Redeploying the current uploaded release: ${releases[0]}`);
     } else if (app.source_type === 'managed_legacy') {
       // v2.3.1: deprecation branch — replays the last upload-time release
       // dir for apps that pre-date the service-account model. Upload as a
