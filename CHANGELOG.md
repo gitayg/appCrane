@@ -5,6 +5,18 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.53.2 — Renaming an app no longer strands it half-renamed.
+
+`POST /api/apps/<slug>/rename` stopped both containers and moved `data/apps/<slug>` on disk **before** writing the new slug to the database. That ordering was safe only while the write could not fail, and it could.
+
+`app_skills.app_slug` references `apps.slug` — by slug rather than by id, with `ON UPDATE NO ACTION` — so for any app with a skill attached, `UPDATE apps SET slug` raised a foreign-key error. Measured: the rename succeeds with no skills attached and is blocked with one. The block arrived after the containers were down and the directory had already moved, leaving the app stopped, its data at the new path, and the row still naming the old slug. Retrying — the obvious next move — then failed against a directory that was no longer where it started.
+
+Both halves are fixed. `app_skills` now travels with the app in the same transaction, and that transaction runs first, so a constraint that still fails costs nothing but an error. The transaction sets `defer_foreign_keys`, because neither order works without it: updating the child first points it at a slug that does not exist yet, and updating the parent first orphans the child. Deferring moves the check to COMMIT, where the two rows agree. If the directory move fails afterwards, the database is put back rather than left naming a path that is not there.
+
+Worth stating plainly, since the assumption that it was destructive is what kept it unused: a rename is **not**. Deploy history, env vars, ports, per-app roles and grants all key off `apps.id`, so a slug change does not touch them. The old slug keeps redirecting via `slug_aliases`.
+
+Also here: `appcrane_update_app` advertised `source_type` as one of github / managed / managed_legacy, so the REST route accepted `upload` — added in v2.53.0 — while the MCP tool rejected it. The two now agree.
+
 ## 2.53.1 — Five findings from a full security scan, including one the root audit could not see.
 
 `npm audit` at the repo root reported zero vulnerabilities, and it was right about what it looked at. It does not read `studio-web/package-lock.json`, so the admin SPA's dependencies were invisible to it — and that is where all 14 open Dependabot alerts lived, **six of them runtime scope**, not dev. A clean top-level audit was standing in for a clean project.

@@ -1554,7 +1554,11 @@ const TOOLS = [
         description:    { type: 'string' },
         category:       { type: 'string' },
         domain:         { type: 'string' },
-        source_type:    { type: 'string', enum: ['github', 'managed', 'managed_legacy'] },
+        // 'upload' added in v2.53.0 with the artifact-deploy flow; this enum was
+        // missed, so the REST route accepted a source type the MCP tool rejected.
+        // 'managed_legacy' stays readable but is not offered as a destination —
+        // it marks pre-v2.3.1 rows that replay an old release directory.
+        source_type:    { type: 'string', enum: ['github', 'managed', 'upload'] },
         github_url:     { type: 'string', description: 'github.com URL of the source repo. Pass empty string to clear.' },
         branch:         { type: 'string' },
         github_token:   { type: 'string', description: 'PAT for private clones. Stored encrypted (AES-256-GCM). Omit to leave the existing token alone; pass empty string to clear it; pass a value to rotate.' },

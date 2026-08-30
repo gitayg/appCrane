@@ -65,6 +65,22 @@ container never started. Two log surfaces, two tools:
 | Need to push a file >256KB into a container | `appcrane_push_staged_file(slug, env, token, dest)` after uploading via `POST /api/files/staged` | Large files can't go through JSON-RPC tool args. |
 | Need to deploy but the repo path is unavailable | `appcrane_deploy_artifact(slug, env, token)` after uploading the bundle via `POST /api/files/staged` | Deploys from bytes, touching GitHub not at all. This is the fallback when the service-account PAT returns 401 and every managed-repo write fails — and the only deploy path a `dhk_mcp_*` key can take, since dhk_app_* keys were removed in v2.2.12. |
 
+### Renaming an app
+
+`POST /api/apps/<slug>/rename` with `{ "new_slug": "..." }` (platform admin).
+There is **no MCP tool for this** — `appcrane_update_app` can change name,
+domain and source, but not the slug. It is a REST call or nothing.
+
+The rename is **not destructive**. Deploy history, env vars, ports, per-app
+roles and grants all key off `apps.id`, not the slug, so they survive untouched.
+The old slug is recorded in `slug_aliases` and keeps redirecting, the data
+directory is moved, Caddy is reloaded, and every live environment is redeployed.
+
+Two things it does **not** do: a managed app's `AMC_<slug>` GitHub repo keeps
+its original name (the stored `github_url` keeps clones working, but the names
+diverge permanently), and any external DNS pointing at the old URL is yours to
+re-point.
+
 ### Vulnerability scanning
 
 Every deploy scans the release's dependency manifests against OSV, and a daily
