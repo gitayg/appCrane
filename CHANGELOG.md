@@ -5,6 +5,21 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.54.1 — Rename worked on exactly one kind of install, and it was not the default one.
+
+v2.54.0 moved the rename into a service and, in the move, replaced `utils/paths.js` `resolveSafe()` with a hand-rolled containment check:
+
+```js
+const dir = resolve(join(appsBase, slug));
+if (dir !== join(appsBase, slug)) throw new AppError('Invalid slug path');
+```
+
+`resolve()` returns an absolute path; `join()` does not. They are equal only when `appsBase` is already absolute — and `DATA_DIR` defaults to `./data`. So on a normal install that condition was true for **every** slug, and every rename failed with `Invalid slug path`: a message pointing straight at the slug, for a bug that had nothing to do with the slug. The first operator to hit it reasonably went looking at their slug shape and at leftover directories, neither of which was the cause.
+
+`resolveSafe()` resolves the base before comparing, which is why it was right and the replacement was not. It is used again.
+
+The reason this shipped is worth recording: every test in the repo sets `DATA_DIR` to an absolute `mkdtemp` path, so the entire suite was blind to the one configuration production actually runs. There is now a test that runs with a relative `DATA_DIR`. Against v2.54.0 it fails with the same `Invalid slug path`; the absolute-path tests pass either way.
+
 ## 2.54.0 — The whole flow works over MCP: bytes in, deploy, rename.
 
 An agent holds a `dhk_mcp_*` key, which reaches `/api/mcp` and `/api/files/staged` and nothing else. Two things it needed were therefore out of reach, and both had workarounds that were worse than the operation.
