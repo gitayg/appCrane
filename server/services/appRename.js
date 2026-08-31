@@ -1,7 +1,8 @@
 import { existsSync, renameSync } from 'fs';
-import { join, resolve } from 'path';
+import { join } from 'path';
 import { getDb } from '../db.js';
 import { getPortsForSlot } from './portAllocator.js';
+import { resolveSafe } from '../utils/paths.js';
 import { reloadCaddy } from './caddy.js';
 import { AppError } from '../utils/errors.js';
 import log from '../utils/logger.js';
@@ -14,13 +15,6 @@ import log from '../utils/logger.js';
 // moves an app's whole identity was the one an agent could not perform, and the
 // workaround people reached for instead was recreating the app, which loses
 // the history a rename preserves.
-
-/** `data/apps/<slug>`, refusing anything that escapes the apps directory. */
-function appDir(appsBase, slug) {
-  const dir = resolve(join(appsBase, slug));
-  if (dir !== join(appsBase, slug)) throw new AppError('Invalid slug path', 400, 'VALIDATION');
-  return dir;
-}
 
 /**
  * Rename an app in place.
@@ -49,9 +43,16 @@ export async function renameApp({ app, newSlug, redirect = true, userId }) {
   // disk. renameSync onto a non-empty directory fails with ENOTEMPTY, and it
   // would fail below — after the containers were stopped — instead of here,
   // before anything has been touched.
+  // resolveSafe, not a hand-rolled comparison. v2.54.0 shipped one that read
+  //   resolve(join(base, slug)) !== join(base, slug)
+  // which is only ever equal when DATA_DIR is already absolute. The default is
+  // './data', so on a normal install that test was true for every slug and
+  // every rename failed with "Invalid slug path" — a message about the slug,
+  // for a bug that had nothing to do with it. Every test used an absolute
+  // mkdtemp DATA_DIR, so the suite could not see it.
   const appsBase = join(process.env.DATA_DIR || './data', 'apps');
-  const oldDir = appDir(appsBase, oldSlug);
-  const newDir = appDir(appsBase, newSlug);
+  const oldDir = resolveSafe(appsBase, oldSlug);
+  const newDir = resolveSafe(appsBase, newSlug);
   if (existsSync(newDir)) {
     throw new AppError(
       `'${newSlug}' is free as a slug but data/apps/${newSlug} still exists on disk — most likely `
