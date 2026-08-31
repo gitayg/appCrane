@@ -1069,10 +1069,74 @@ const TOOLS = [
   },
 
   {
+    name: 'appcrane_stage_from_url',
+    description:
+      'Stage a file by having AppCrane DOWNLOAD it, and return its token. '
+      + 'THE CHEAPEST WAY to get a large artifact in: the bytes go host-to-host and never pass through '
+      + 'your context, so a 600KB bundle costs the same handful of tokens as a 6KB one. Prefer this over '
+      + 'appcrane_stage_chunk for anything bigger than a small text file. '
+      + 'Give it a URL your build already produces — a GitHub release asset, an S3/R2 presigned URL, any '
+      + 'https link the server can reach. Pass sha256 to have the downloaded bytes verified before a token '
+      + 'is issued. Then deploy with appcrane_deploy_artifact. '
+      + 'https only; redirects are not followed; private and link-local addresses are refused.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        url:      { type: 'string', description: 'Direct https URL to the file. Must not redirect — give the final URL.' },
+        filename: { type: 'string', description: 'Name to stage it under. For a deploy it must end in .zip, .tar.gz or .tgz. Defaults to the last path segment.' },
+        sha256:   { type: 'string', description: 'Optional hex SHA-256 of the file, verified before the token is issued.' },
+      },
+      required: ['url'],
+      additionalProperties: false,
+    },
+    requiredRole: 'any',
+    handler: async (user, args) => {
+      const { fetchToBuffer } = await import('./remoteFetch.js');
+      const buf = await fetchToBuffer(args.url);
+
+      const { createHash, randomBytes } = await import('crypto');
+      const actual = createHash('sha256').update(buf).digest('hex');
+      if (args.sha256 && args.sha256 !== actual) {
+        throw new Error(
+          `downloaded file SHA-256 mismatch: you declared ${args.sha256}, the bytes hash to ${actual}. `
+          + 'Refusing to stage something other than what you asked for.',
+        );
+      }
+
+      const { mkdirSync, mkdtempSync, writeFileSync } = await import('fs');
+      const { join } = await import('path');
+      const stagedRoot = join(process.env.DATA_DIR || './data', 'staged');
+      mkdirSync(stagedRoot, { recursive: true });
+      const scratch = mkdtempSync(join(stagedRoot, 'url-'));
+      const fallback = decodeURIComponent(new URL(args.url).pathname.split('/').pop() || 'download');
+      const safeName = String(args.filename || fallback).replace(/[^A-Za-z0-9._-]/g, '_');
+      const scratchPath = join(scratch, safeName);
+      writeFileSync(scratchPath, buf);
+
+      const db = getDb();
+      const token = randomBytes(16).toString('base64url');
+      const expiresAt = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString().slice(0, 19).replace('T', ' ');
+      db.prepare(`
+        INSERT INTO staged_files (token, user_id, filename, size_bytes, sha256, scratch_path, expires_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(token, user.id, safeName, buf.length, actual, scratchPath, expiresAt);
+
+      return {
+        token,
+        filename: safeName,
+        size_bytes: buf.length,
+        sha256: actual,
+        expires_at: expiresAt,
+        note: 'Deploy it with appcrane_deploy_artifact { slug, env, token }.',
+      };
+    },
+  },
+  {
     name: 'appcrane_stage_chunk',
     description:
-      'Upload one part of a file to AppCrane over MCP. Together with appcrane_stage_assemble this is the '
-      + 'MCP-native way to get BYTES onto the server — no curl, no /api/files/staged. '
+      'Upload one part of a SMALL file to AppCrane over MCP. For anything bigger than a few KB use '
+      + 'appcrane_stage_from_url instead — the bytes here are emitted by the model, so they cost output '
+      + 'tokens per character and fail on a single typo. Capped at 8 parts for that reason. '
       + 'Split the file into parts small enough for a tool call (~256KB of base64 each is comfortable), send '
       + 'each with the same `session` and `of`, then call appcrane_stage_assemble. Parts may be sent in any '
       + 'order and re-sent to replace a corrupted one; the reply lists which parts are still missing. '
@@ -1097,6 +1161,26 @@ const TOOLS = [
       if (!Number.isInteger(part) || !Number.isInteger(of) || of < 1 || part < 1 || part > of) {
         throw new Error(`invalid part/of: part must be an integer in 1..of (got part=${part}, of=${of})`);
       }
+      // A guardrail, not a limit of the transport.
+      //
+      // Every byte pushed this way has to be EMITTED by the model, one base64
+      // character at a time. A 600KB bundle is ~800KB of base64 across dozens of
+      // calls — expensive per character, and a single wrong character fails the
+      // digest at the end, after all of it has been paid for. There are two ways
+      // in that cost nothing per byte, and an agent that has started down this
+      // road for a large file should be told about them before part 4 of 40, not
+      // after.
+      if (of > 8) {
+        throw new Error(
+          `${of} parts is too many for this tool — it is for small text files, not bulk data. `
+          + 'Every byte here is emitted by the model, so a large file costs output tokens per character '
+          + 'and fails on a single typo. Instead: appcrane_stage_from_url { url, sha256 } has AppCrane '
+          + 'download it (bytes never touch your context), or, if you have a shell, '
+          + '`curl -F file=@<file> -H "X-API-Key: <your dhk_mcp_ key>" https://<host>/api/files/staged` '
+          + '— that endpoint accepts MCP keys. Both return a token for appcrane_deploy_artifact.',
+        );
+      }
+
       const bytes = Buffer.from(args.content, encoding === 'base64' ? 'base64' : 'utf-8');
       const { createHash } = await import('crypto');
       const actual = createHash('sha256').update(bytes).digest('hex');

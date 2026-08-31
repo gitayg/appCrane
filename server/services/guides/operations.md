@@ -103,18 +103,35 @@ Renaming the squatter is non-destructive and reversible; deleting is neither.
 For an app with no GitHub repo — or when the repo path is broken — bytes reach
 AppCrane over MCP with no curl:
 
+**Pick by where the bytes are, not by habit.** All three end in a staged token
+for `appcrane_deploy_artifact`; they differ enormously in cost.
+
+1. **The file is reachable at a URL** (release asset, S3/R2 presigned link) —
+   `appcrane_stage_from_url { url, sha256 }`. AppCrane downloads it. Costs the
+   same few dozen tokens whatever the size. Prefer this.
+2. **You have a shell** —
+   `curl -F file=@dist.zip -H "X-API-Key: <your dhk_mcp_ key>" https://<host>/api/files/staged`.
+   That endpoint accepts MCP keys, so this is not a workaround around key scope;
+   it is the supported upload channel, and the bytes never enter the agent's
+   context.
+3. **Neither, and the file is small** — `appcrane_stage_chunk` +
+   `appcrane_stage_assemble`. Capped at 8 parts on purpose: every byte here is
+   emitted by the model, one base64 character at a time, so a large file costs
+   output tokens per character and fails the digest on a single typo.
+
 ```
-appcrane_stage_chunk    session="s1" part=1 of=N content=<base64> encoding="base64"
-...one call per part, any order...
-appcrane_stage_assemble session="s1" filename="dist.zip" sha256=<whole-file digest>
-appcrane_deploy_artifact slug="myapp" env="production" token=<from assemble>
+appcrane_stage_from_url  url="https://.../dist.zip" sha256=<digest>
+appcrane_deploy_artifact slug="myapp" env="production" token=<from staging>
 ```
 
-Pass the whole-file `sha256` to `assemble` — it is what ties the deployed
-artifact to the one you built, and without it you are trusting that every part
-arrived intact. The release is then identified by that digest
+Pass the whole-file `sha256` wherever you stage — it is what ties the deployed
+artifact to the one you built, and it becomes the release identity
 (`commit_hash = sha256:<digest>`). An upload app can also be redeployed from the
 release it is already running, with no new bundle, via `appcrane_deploy`.
+
+`stage_from_url` is https-only, does not follow redirects, and refuses hosts
+that resolve to private or link-local addresses — a server that fetches URLs on
+request is one prompt away from being a proxy into its own network.
 
 ### Vulnerability scanning
 
@@ -348,7 +365,8 @@ better entered in Settings → Backup than passed through an agent.
 | `appcrane_cat` | Print the contents of a file inside a running app container |
 | `appcrane_push_staged_file` | Move a previously-staged file (uploaded via POST /api/files/staged) into a running container at a path under /app or /data |
 | `appcrane_deploy_artifact` | Deploy a release from a staged bundle (.zip/.tar.gz/.tgz) instead of from git. Identified by a SHA-256 AppCrane computes over the bytes, recorded as `commit_hash = sha256:<digest>` |
-| `appcrane_stage_chunk` | Upload one part of a file over MCP. No curl, no /api/files/staged |
+| `appcrane_stage_from_url` | Have AppCrane download a file and stage it. The cheap path for artifacts — bytes never enter the agent's context |
+| `appcrane_stage_chunk` | Upload one part of a SMALL file over MCP. Max 8 parts; the model emits every byte |
 | `appcrane_stage_assemble` | Join the parts into a staged file and return its token, verifying the whole-file SHA-256 |
 | `appcrane_rename_app` | Rename an app's slug. Not destructive — history, env vars, ports and grants key off the app id |
 | `appcrane_scan_report` | CVE findings for an app, or across the fleet (scoped to apps you can see) |

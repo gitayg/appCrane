@@ -5,6 +5,16 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.55.0 — Staging a bundle should not cost tokens by the character.
+
+`appcrane_stage_chunk` (v2.54.0) made the model the data pipe. Every byte is emitted as base64 inside a tool call, so a 600KB artifact is roughly 800KB of characters the model has to reproduce exactly — expensive per character, and a single wrong one fails the digest at the end, after all of it has been paid for. That is a reasonable transport for a config file and the wrong one for an artifact, and shipping it without saying so sent the first real user down it with a 598KB tarball.
+
+`appcrane_stage_from_url { url, sha256 }` costs the same few dozen tokens whatever the file size, because AppCrane does the download. Point it at whatever your build already produces — a release asset, a presigned S3/R2 link — and the bytes go host to host without passing through anyone's context.
+
+The hazard that buys is SSRF, and it is not hypothetical here: this process sits next to Docker's socket, Caddy's admin API on 2019, its own API on 5001, and on a cloud host the metadata service on 169.254.169.254. So the destination is resolved and checked against private, loopback, link-local, CGNAT and multicast ranges — including IPv4 addresses wearing an IPv6 hat — **before** the request, and redirects are refused outright rather than followed, since a check on the URL you were given says nothing about where a 302 leads.
+
+`appcrane_stage_chunk` now refuses more than 8 parts and names the two paths that cost nothing per byte. One of them needed no new code at all: `/api/files/staged` has always accepted `dhk_mcp_*` keys, so `curl -F file=@... ` there was never blocked by key scope — it is the supported upload channel, and the bytes never enter the agent's context either.
+
 ## 2.54.1 — Rename worked on exactly one kind of install, and it was not the default one.
 
 v2.54.0 moved the rename into a service and, in the move, replaced `utils/paths.js` `resolveSafe()` with a hand-rolled containment check:
