@@ -5,6 +5,14 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.55.2 — The updater stops moving the tree before it knows the host can run it.
+
+The Node check ran *after* `git reset --hard origin/main`. When it refused — a host below the floor that cannot be upgraded automatically — the working tree had already been moved to the new release while `node_modules` stayed on the old one. Worse, the pending-update file the boot sentinel reads for auto-rollback is written further down, past the `npm install` that never ran, so there was no record to roll back from either. A refusal left the host on new code, with old dependencies, one restart away from a boot it might not survive. The check meant to protect the host was doing its damage first and refusing second.
+
+It now runs before the reset. Nothing destructive happens until the runtime is known to support what is about to be installed, so a refusal costs nothing.
+
+That reordering also fixes a question the updater was asking wrongly. It sized the runtime against `NODE_FLOOR`, a constant compiled into the release being **replaced** — so an upgrade that raised the floor would check against the old value, upgrade Node to the old floor, and then fail `npm install` against the new one. The floor is now read from the incoming release with `git show origin/main:package.json`, which answers from the fetched ref while the working tree is still untouched. An unreadable or malformed incoming manifest degrades to the known floor rather than aborting an update that may be fine.
+
 ## 2.55.1 — A host stuck below the Node floor now fixes itself on restart.
 
 A self-update on a host running Node 20 fails with `EBADENGINE`, and that is the floor guard working: `.npmrc` sets `engine-strict=true`, so npm refuses to install Node-22 dependencies rather than installing them and failing later at runtime. What it does not do is get the host unstuck.

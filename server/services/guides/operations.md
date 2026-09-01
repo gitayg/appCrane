@@ -150,6 +150,11 @@ older than v2.51.0 has an updater with no Node step. Its `git reset --hard`
 succeeds and the `npm install` after it does not, so the tree ends up ahead of
 `node_modules` and the update stops.
 
+From v2.55.2 the updater reconciles the runtime *before* it moves the tree, and
+reads the floor from the release it is about to install rather than the one it
+is replacing — so a refusal on a newer updater is a clean no-op. The stranded
+state above only arises on hosts whose updater predates that.
+
 **The fix is a restart, not a repair.** systemd's `ExecStart` is
 `scripts/safe-boot.sh`, a file inside that tree — so the reset that failed to
 finish still delivered a new boot wrapper. On the next start it raises Node to
