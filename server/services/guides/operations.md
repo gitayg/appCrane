@@ -133,6 +133,37 @@ release it is already running, with no new bundle, via `appcrane_deploy`.
 that resolve to private or link-local addresses — a server that fetches URLs on
 request is one prompt away from being a proxy into its own network.
 
+### A self-update that fails on EBADENGINE
+
+```
+npm error code EBADENGINE
+npm error notsup Required: {"node":">=22"}  Actual: {"node":"v20.20.2"}
+```
+
+This is the floor guard working, not a bug: `.npmrc` sets `engine-strict=true`, so
+npm refuses to install Node-22 dependencies onto Node 20 rather than installing
+them and failing later at runtime.
+
+It happens on hosts provisioned below the current floor, because the updater
+that runs is always the version being upgraded **from** — a box on a release
+older than v2.51.0 has an updater with no Node step. Its `git reset --hard`
+succeeds and the `npm install` after it does not, so the tree ends up ahead of
+`node_modules` and the update stops.
+
+**The fix is a restart, not a repair.** systemd's `ExecStart` is
+`scripts/safe-boot.sh`, a file inside that tree — so the reset that failed to
+finish still delivered a new boot wrapper. On the next start it raises Node to
+the floor and runs the install the update could not:
+
+```bash
+sudo systemctl restart appcrane
+```
+
+`Restart=always` means a reboot or a crash does the same thing unattended. If
+the host does not permit an automatic upgrade (no apt, or no root and no
+passwordless sudo) the wrapper still boots and logs the two commands to run —
+check `journalctl -u appcrane | grep safe-boot`.
+
 ### Vulnerability scanning
 
 Every deploy scans the release's dependency manifests against OSV, and a daily

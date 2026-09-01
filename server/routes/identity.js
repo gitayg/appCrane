@@ -19,8 +19,9 @@ const SESSION_DURATION_HOURS = parseInt(process.env.SESSION_DURATION_HOURS) || 2
 
 // In-memory rate limiter for login attempts: 5 per minute per IP
 const _loginAttempts = new Map();
-function checkLoginRateLimit(ip) {
-  const now = Date.now();
+// `now` is injectable so a test can prove the window closes and the sweep
+// collects, without sleeping through a real 60 seconds.
+export function checkLoginRateLimit(ip, now = Date.now()) {
   const rec = _loginAttempts.get(ip);
   if (!rec || now > rec.resetAt) {
     _loginAttempts.set(ip, { count: 1, resetAt: now + 60_000 });
@@ -30,6 +31,36 @@ function checkLoginRateLimit(ip) {
   rec.count++;
   return true;
 }
+
+// v2.55.1: sweep expired buckets.
+//
+// An entry is only ever replaced when THAT IP comes back after its window
+// closes, so an address that logs in once and never returns keeps its bucket
+// for the life of the process. Every distinct source IP that ever touches
+// /api/identity/login costs a permanent Map entry — and the endpoint an
+// attacker hits from many addresses is exactly this one, so the growth is
+// fastest under the attack the limiter exists to blunt.
+//
+// index.js already does this for _apiRateMap; the login limiter was written
+// without it. Same 5-minute cadence, deliberately: a bucket lives 60s, so this
+// only ever removes entries that are already expired and can never evict one
+// that is still counting.
+//
+// Exported so a test can run the sweep on demand rather than waiting five
+// minutes, and so the timer and the tested code are the same function — two
+// copies of this loop would be free to drift apart.
+export function _sweepLoginAttempts(now = Date.now()) {
+  for (const [ip, rec] of _loginAttempts) {
+    if (now > rec.resetAt) _loginAttempts.delete(ip);
+  }
+  return _loginAttempts.size;
+}
+
+// unref() so the timer does not hold the event loop open. This module is
+// imported directly by route tests, and a bare setInterval would keep
+// `node --test` running after the assertions finish.
+const _loginSweeper = setInterval(_sweepLoginAttempts, 5 * 60_000);
+_loginSweeper.unref?.();
 
 /**
  * POST /api/identity/login
