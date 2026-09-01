@@ -853,6 +853,72 @@ app.post('/api/self-update', requireAuth, requirePlatformAdmin, async (req, res)
 });
 
 // Self-update status — lets clients poll whether a triggered update actually landed.
+/**
+ * POST /api/self-update/restart — exit so systemd re-execs on the code on disk.
+ *
+ * The escape hatch for a host whose update landed the files but could not
+ * finish. That state is reachable and self-inflicted: the updater lives inside
+ * this process, so a box below the Node floor runs an updater with no runtime
+ * step, its `git reset --hard` succeeds, and `npm install` is refused by
+ * engine-strict. New code on disk, old code in memory.
+ *
+ * scripts/safe-boot.sh reconciles the runtime on the way up (v2.55.1), so the
+ * only thing standing between that host and a working install is a restart —
+ * and until now the only way to get one was ssh and `systemctl restart`, or
+ * POSTing a config import, which restarts as a side effect of REPLACING THE
+ * DATABASE. Neither is a restart button.
+ *
+ * Nothing is written and nothing is fetched. It exits 0; `Restart=always`
+ * brings the process back, which is the entire mechanism. If AppCrane is not
+ * running under a supervisor that restarts it, this stops the server — hence
+ * the explicit confirm parameter rather than a bare POST.
+ */
+app.post('/api/self-update/restart', requireAuth, requirePlatformAdmin, async (req, res) => {
+  if (req.query.confirm !== '1') {
+    return res.status(400).json({
+      error: {
+        code: 'CONFIRM_REQUIRED',
+        message: 'This exits the process and relies on systemd (Restart=always) to bring it back. '
+          + 'If AppCrane is not supervised, it will stay down. Repeat with ?confirm=1.',
+      },
+    });
+  }
+
+  // Same guard the self-update uses: a container mid-build does not survive the
+  // build process being killed, and leaves dangling layers behind.
+  if (!req.query.force) {
+    const db = getDb();
+    const inflight = db.prepare(
+      "SELECT id, app_id, env FROM deployments WHERE status IN ('pending','building','deploying') LIMIT 5"
+    ).all();
+    if (inflight.length > 0) {
+      return res.status(409).json({
+        error: {
+          code: 'BUILDS_IN_FLIGHT',
+          message: `Refusing to restart: ${inflight.length} deployment(s) currently building. Wait, or repeat with ?force=1.`,
+          in_flight: inflight,
+        },
+      });
+    }
+  }
+
+  try {
+    const { logAudit } = await import('./middleware/audit.js');
+    logAudit(req.user?.id, null, 'server-restart', { from_version: VERSION });
+  } catch (_) { /* an audit write is never a reason to refuse the restart */ }
+
+  log.warn(`[restart] platform admin ${req.user?.email || req.user?.id} requested a process restart`);
+  res.json({
+    message: 'Restarting. The process exits now and the supervisor re-execs it on the code currently on disk.',
+    from_version: VERSION,
+  });
+  // Delay so the response flushes before the process goes away.
+  setTimeout(() => {
+    log.warn('[restart] exiting for supervisor restart');
+    process.exit(0);
+  }, 1200);
+});
+
 app.get('/api/self-update/status', requireAuth, requireAdmin, (req, res) => {
   const pending = pendingUpdateFile();
   if (!existsSync(pending)) {
