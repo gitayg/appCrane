@@ -5,6 +5,18 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.56.0 — A restart button, so recovering a stalled host does not need ssh.
+
+v2.55.1 taught `scripts/safe-boot.sh` to raise the Node runtime and finish a stalled install on the way up. That closed the repair, and left the trigger: the wrapper only runs when the process restarts, and there was no supported way to ask for one.
+
+There was an *unsupported* way, which is the reason this is a release of its own. `POST /api/settings/config/import` exits the process — as a side effect of replacing the database. It is the only endpoint that restarts AppCrane, and anyone hunting for a restart button under time pressure could find it. That is a catastrophe with a plausible motive.
+
+`POST /api/self-update/restart?confirm=1` is the boring version. Platform admin, writes nothing, fetches nothing, touches no git tree: it responds, then exits, and the supervisor re-execs on whatever is already on disk. The confirm parameter is required because a host not running under a supervisor will simply stop, and the same in-flight-build guard as the self-update applies, with the same `?force=1` override — killing the process mid-build orphans the container and leaves dangling layers.
+
+This is the last piece of recovering a host that updated its files but could not finish: the update lands the code, the restart endpoint reboots the process, and the boot wrapper reconciles the runtime. No shell.
+
+Hosts whose *running* version predates this endpoint still need `systemctl restart appcrane` once — an endpoint cannot be called on a version that does not have it.
+
 ## 2.55.2 — The updater stops moving the tree before it knows the host can run it.
 
 The Node check ran *after* `git reset --hard origin/main`. When it refused — a host below the floor that cannot be upgraded automatically — the working tree had already been moved to the new release while `node_modules` stayed on the old one. Worse, the pending-update file the boot sentinel reads for auto-rollback is written further down, past the `npm install` that never ran, so there was no record to roll back from either. A refusal left the host on new code, with old dependencies, one restart away from a boot it might not survive. The check meant to protect the host was doing its damage first and refusing second.

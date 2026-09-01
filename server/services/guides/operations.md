@@ -158,7 +158,16 @@ state above only arises on hosts whose updater predates that.
 **The fix is a restart, not a repair.** systemd's `ExecStart` is
 `scripts/safe-boot.sh`, a file inside that tree — so the reset that failed to
 finish still delivered a new boot wrapper. On the next start it raises Node to
-the floor and runs the install the update could not:
+the floor and runs the install the update could not.
+
+From v2.56.0 a platform admin can trigger that without ssh:
+
+```
+POST /api/self-update/restart?confirm=1
+```
+
+It writes nothing and fetches nothing — it exits so the supervisor re-execs on
+the code already on disk. Older hosts need the shell:
 
 ```bash
 sudo systemctl restart appcrane
