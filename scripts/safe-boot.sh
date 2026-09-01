@@ -137,6 +137,97 @@ attempt_rollback() {
   return 0
 }
 
+# ---------------------------------------------------------------------------
+# Runtime reconciliation (v2.55.1)
+# ---------------------------------------------------------------------------
+#
+# THIS IS THE ONLY NEW CODE A STUCK HOST WILL RUN.
+#
+# The self-update endpoint lives inside server/index.js, so the updater that
+# executes is always the version being upgraded FROM. A host provisioned below
+# the current Node floor runs an updater with no Node step: it does `git reset
+# --hard origin/main` (which succeeds), then `npm install`, which .npmrc's
+# engine-strict correctly refuses — leaving the working tree ahead of
+# node_modules and the update dead. Measured: npm enforces engine-strict BEFORE
+# any lifecycle script, so a preinstall hook cannot rescue it either.
+#
+# But the reset DID land, and systemd's ExecStart is this file, from that tree.
+# So the next restart runs the NEW wrapper even though the node process was old.
+# That makes this the one place a fix can reach a host that is already stuck.
+#
+# Everything here fails open. A boot wrapper that refuses to boot is worse than
+# the problem it is solving, so every branch ends by spawning node anyway.
+
+node_major() { node -p "process.versions.node.split('.')[0]" 2>/dev/null || echo ""; }
+
+required_node_major() {
+  node -p "((((require('${APPCRANE_DIR}/package.json').engines)||{}).node)||'').match(/(\\d+)/)?.[1]||''" 2>/dev/null || echo ""
+}
+
+# apt + nodesource, as root directly or via passwordless sudo. Anything else
+# (no apt, no root, sudo wants a password) is not an error here — it is a host
+# this script cannot fix, and it gets told exactly what to run.
+upgrade_node() {
+  local want="$1" sudo_cmd=""
+  if [ "$(id -u)" -ne 0 ]; then
+    if sudo -n true 2>/dev/null; then sudo_cmd="sudo -n"; else return 1; fi
+  fi
+  command -v apt-get >/dev/null 2>&1 || return 1
+  log "upgrading Node to ${want}.x via nodesource"
+  # shellcheck disable=SC2086
+  curl -fsSL "https://deb.nodesource.com/setup_${want}.x" | $sudo_cmd bash - >&2 || return 1
+  # shellcheck disable=SC2086
+  $sudo_cmd apt-get install -y nodejs >&2 || return 1
+  return 0
+}
+
+reconcile_runtime() {
+  local have want
+  have="$(node_major)"; want="$(required_node_major)"
+  if [ -z "$have" ] || [ -z "$want" ]; then
+    log "runtime check skipped (node=${have:-?}, required=${want:-?})"
+    return 0
+  fi
+  if [ "$have" -ge "$want" ]; then
+    # Still install if a previous update reset the tree but never got to npm.
+    if [ ! -d "$APPCRANE_DIR/node_modules" ]; then
+      log "node_modules missing — installing"
+      npm install --omit=dev --prefer-offline 2>&1 | sed 's/^/[safe-boot] npm: /' >&2 || true
+    fi
+    return 0
+  fi
+
+  log "Node v${have} is below this release's floor of v${want} — a self-update cannot install dependencies until this is fixed"
+  if upgrade_node "$want"; then
+    log "Node is now $(node -v 2>/dev/null) — installing dependencies the blocked update could not"
+    if npm install --omit=dev --prefer-offline 2>&1 | sed 's/^/[safe-boot] npm: /' >&2; then
+      log "runtime reconciled; the stalled update is complete"
+    else
+      log "npm install still failed after the Node upgrade — booting anyway on the existing node_modules"
+    fi
+  else
+    log "cannot upgrade Node automatically (needs root or passwordless sudo, and apt-get). Run on this host:"
+    log "    curl -fsSL https://deb.nodesource.com/setup_${want}.x | sudo -E bash -"
+    log "    sudo apt-get install -y nodejs && sudo systemctl restart appcrane"
+  fi
+  return 0
+}
+
+# --check-runtime prints the decision and exits, so the logic is testable
+# without booting AppCrane or touching apt.
+if [ "${1:-}" = "--check-runtime" ]; then
+  have="$(node_major)"; want="$(required_node_major)"
+  echo "have=${have:-?} want=${want:-?}"
+  if [ -n "$have" ] && [ -n "$want" ] && [ "$have" -lt "$want" ]; then
+    echo "decision=upgrade"
+  else
+    echo "decision=ok"
+  fi
+  exit 0
+fi
+
+reconcile_runtime
+
 while true; do
   start_time=$(date +%s)
   log "spawning node server/index.js"

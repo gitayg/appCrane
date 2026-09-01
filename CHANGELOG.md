@@ -5,6 +5,18 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.55.1 — A host stuck below the Node floor now fixes itself on restart.
+
+A self-update on a host running Node 20 fails with `EBADENGINE`, and that is the floor guard working: `.npmrc` sets `engine-strict=true`, so npm refuses to install Node-22 dependencies rather than installing them and failing later at runtime. What it does not do is get the host unstuck.
+
+The reason is the shape of the updater. It lives inside `server/index.js`, so the code that runs is always the version being upgraded **from** — a box on anything older than v2.51.0 has an updater with no Node step at all. Its `git reset --hard origin/main` succeeds, the `npm install` after it is refused, and the tree is left ahead of `node_modules` with the update dead. An npm `preinstall` hook cannot rescue it either: measured, npm enforces `engine-strict` before running any lifecycle script.
+
+But the reset landed, and systemd's `ExecStart` is `scripts/safe-boot.sh` — a file inside the tree that was just updated. So the failed update still delivered a new boot wrapper, and the next restart runs it even though the node process is old. That is the only channel into a host that is already stuck, and it is now where the runtime is reconciled: the wrapper compares the running Node major against `engines.node`, raises it through nodesource when the host allows it, and runs the install the update could not finish. `Restart=always` means a reboot or a crash is enough; nobody has to edit anything.
+
+It fails open in every branch. A host with no apt, or no root and no passwordless sudo, still boots — and logs the two commands to run. A boot wrapper that refuses to boot would be worse than the problem it is solving.
+
+Also fixed: the login rate limiter leaked a `Map` entry per source IP. A bucket was only ever replaced when that same address came back after its window closed, so every distinct IP that ever reached `/api/identity/login` cost permanent memory — growing fastest under exactly the distributed attack the limiter exists to blunt. `index.js` has swept `_apiRateMap` on an interval since it was written; the login limiter was built without one. It now sweeps on the same cadence, `unref()`d so it cannot hold the process open, and the sweep can never evict a window that is still counting — otherwise an attacker could clear their own limit by waiting for it.
+
 ## 2.55.0 — Staging a bundle should not cost tokens by the character.
 
 `appcrane_stage_chunk` (v2.54.0) made the model the data pipe. Every byte is emitted as base64 inside a tool call, so a 600KB artifact is roughly 800KB of characters the model has to reproduce exactly — expensive per character, and a single wrong one fails the digest at the end, after all of it has been paid for. That is a reasonable transport for a config file and the wrong one for an artifact, and shipping it without saying so sent the first real user down it with a 598KB tarball.
