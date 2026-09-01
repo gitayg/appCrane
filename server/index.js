@@ -684,9 +684,33 @@ app.post('/api/self-update', requireAuth, requirePlatformAdmin, async (req, res)
     const snapshot = createPreUpdateSnapshot(cwd, { from: VERSION, sha: previousSha });
 
     execFileSync('git', ['-c', 'credential.helper=', 'fetch', 'origin'], gitOpts);
-    const pullOutput = execFileSync('git', ['reset', '--hard', 'origin/main'], gitOpts).toString().trim();
+
+    // v2.55.2: the floor of the release being INSTALLED, read without checking
+    // it out. NODE_FLOOR is a constant compiled into the running version, so
+    // using it here asks the wrong question twice: it is the floor of the
+    // release being replaced, and on a host whose updater predates the floor
+    // entirely it does not exist at all. `git show origin/main:package.json`
+    // answers from the incoming tree while the working tree is still untouched.
+    let incomingFloor = NODE_FLOOR;
+    try {
+      const incomingPkg = JSON.parse(
+        execFileSync('git', ['show', 'origin/main:package.json'], gitOpts).toString(),
+      );
+      const m = String(incomingPkg?.engines?.node || '').match(/(\d+)/);
+      if (m) incomingFloor = Number(m[1]);
+    } catch (e) {
+      log.warn(`[self-update] could not read the incoming Node floor (${e.message}); using this release's floor of ${NODE_FLOOR}`);
+    }
 
     // v2.51.0: bring the RUNTIME up before installing anything against it.
+    // v2.55.2: and before the `git reset --hard` below, not after it.
+    //
+    // Refusing after the reset left the working tree ahead of node_modules with
+    // no rollback record — the pending-update file that the boot sentinel reads
+    // is written further down, past the npm install that never ran. So a host
+    // that declined the upgrade was moved to the new code anyway and left one
+    // restart away from booting it against the old dependencies. Ordered this
+    // way, a refusal costs nothing: nothing has been touched yet.
     //
     // install.sh has always installed Node when the host is below the floor;
     // the updater never did, so a box provisioned under an older floor stayed
@@ -711,7 +735,7 @@ app.post('/api/self-update', requireAuth, requirePlatformAdmin, async (req, res)
       };
       const plan = planNodeUpgrade({
         currentMajor: Number(process.versions.node.split('.')[0]),
-        floor: NODE_FLOOR,
+        floor: incomingFloor,
         platform: process.platform,
         isRoot: typeof process.getuid === 'function' && process.getuid() === 0,
         hasApt: !!which('apt-get'),
@@ -732,7 +756,7 @@ app.post('/api/self-update', requireAuth, requirePlatformAdmin, async (req, res)
         // apt did.
         const installed = Number(execFileSync('node', ['-v'], { stdio: 'pipe' })
           .toString().trim().replace(/^v/, '').split('.')[0]);
-        const verdict = verifyUpgrade(installed, NODE_FLOOR);
+        const verdict = verifyUpgrade(installed, incomingFloor);
         if (!verdict.ok) throw new Error(`Self-update aborted: ${verdict.message}`);
         log.info(`[self-update] ${verdict.message}`);
       } else if (plan.blocking) {
@@ -745,6 +769,11 @@ app.post('/api/self-update', requireAuth, requirePlatformAdmin, async (req, res)
         log.debug(`[self-update] ${plan.message}`);
       }
     }
+
+    // Only now is the working tree moved. Everything above is either read-only
+    // or repairs the host; the first destructive step comes after the runtime
+    // is known to support what is about to be installed.
+    const pullOutput = execFileSync('git', ['reset', '--hard', 'origin/main'], gitOpts).toString().trim();
 
     execFileSync('npm', ['install', '--omit=dev', '--prefer-offline'], {
       cwd, stdio: 'pipe', timeout: 120000,
