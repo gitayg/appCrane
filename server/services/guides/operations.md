@@ -183,6 +183,32 @@ the host does not permit an automatic upgrade (no apt, or no root and no
 passwordless sudo) the wrapper still boots and logs the two commands to run —
 check `journalctl -u appcrane | grep safe-boot`.
 
+### A crash loop after a Node upgrade
+
+```
+The module '.../better_sqlite3.node' was compiled against a different
+Node.js version using NODE_MODULE_VERSION 115. This version requires 127.
+```
+
+better-sqlite3 is a V8-ABI addon, not N-API, so **any** Node major change breaks
+it — including one `unattended-upgrades` applies with no AppCrane update at all.
+The process then dies on every boot.
+
+`scripts/safe-boot.sh` repairs this on the way up (v2.58.0): it probes the addon
+before starting the app and runs `npm rebuild better-sqlite3` when it fails. A
+restart is enough. Two things worth knowing if you are diagnosing it by hand:
+
+- **`require("better-sqlite3")` succeeds on a mismatched ABI.** The addon loads
+  lazily, on the first `new Database()`. Any health check that only requires the
+  module will report a host healthy seconds before it crash-loops.
+- **`npm install` does not fix it.** npm treats node_modules as satisfied and
+  skips the addon. Only `npm rebuild` recompiles against the new ABI.
+
+Pinning Node in apt (`/etc/apt/preferences.d/`) stops unattended-upgrades moving
+the major version, at the cost of also holding back Node security updates. It is
+a reasonable belt-and-braces measure; the rebuild is the one that reaches hosts
+you have not pinned yet.
+
 ### Vulnerability scanning
 
 Every deploy scans the release's dependency manifests against OSV, and a daily

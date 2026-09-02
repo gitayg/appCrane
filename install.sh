@@ -360,6 +360,15 @@ WorkingDirectory=${REPO_DIR}
 ExecStart=${REPO_DIR}/scripts/safe-boot.sh
 Restart=always
 RestartSec=3
+# v2.58.0: stop an unfixable crash from restarting forever. A Node major upgrade
+# that broke better-sqlite3's ABI produced 10,394 restarts before anyone noticed
+# — eight hours of a 3-second loop, filling the journal while the service was
+# down the whole time. safe-boot.sh now repairs that specific case on the way
+# up, but a genuinely broken release should stop and stay stopped rather than
+# churn: the service is equally unavailable either way, and a stopped unit is
+# visible where a looping one hides in the logs.
+StartLimitIntervalSec=300
+StartLimitBurst=10
 StandardOutput=journal
 StandardError=journal
 KillSignal=SIGTERM

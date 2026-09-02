@@ -5,6 +5,21 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.58.0 — A Node upgrade no longer breaks the database driver, and a crash loop no longer runs for eight hours.
+
+`unattended-upgrades` moved a production host from Node 20 to 22 with no AppCrane update involved. better-sqlite3 is a V8-ABI addon, not N-API — its binary declares `MODULE_VERSION 115` and Node 22 demands 127 — so the driver stopped loading instantly. The process died on every boot, and with `Restart=always`, `RestartSec=3` and no start limit, systemd restarted it **10,394 times** before anyone noticed. Eight hours of a three-second loop, service down throughout, the failure buried in the journal.
+
+`scripts/safe-boot.sh` now probes the addon before starting the app and rebuilds it when the ABI does not match. That needs no update to trigger it — a restart is enough, and unattended-upgrades is exactly the case that arrives without one.
+
+Two measurements shaped this, and **both correct claims made in v2.57.0's own release notes**, which said the addon loaded fine across the upgrade and nothing needed rebuilding:
+
+- **`require("better-sqlite3")` succeeds on a mismatched ABI.** The addon is loaded lazily, on the first `new Database()`. The v2.57.0 check was a bare `require`, it returned OK, and it was measuring nothing. The probe now constructs a database and runs a statement — the same operation the app performs on its first query.
+- **`npm install --omit=dev --prefer-offline` does not repair it.** npm treats node_modules as satisfied and skips the addon entirely. Only `npm rebuild` recompiles against the new ABI. That matters beyond the diagnosis: the install is what safe-boot.sh ran after raising Node, so v2.57.0's self-heal path would have upgraded the runtime and then crash-looped in precisely this way.
+
+Verified end to end in containers with the real script — node:20 build, node:22 runtime — where it logs the mismatch, rebuilds, and the addon loads.
+
+The unit now also sets `StartLimitIntervalSec=300` and `StartLimitBurst=10`. A release that genuinely cannot boot should stop and stay stopped: the service is equally unavailable either way, and a stopped unit is visible where a looping one is not. Existing hosts keep their current unit file until reinstalled — the rebuild is what reaches them.
+
 ## 2.57.0 — A host below the Node floor now updates itself, with nobody logging in.
 
 `engine-strict` is removed from `.npmrc`. That reverses v2.51.1, and the reason is that the guard was solving the wrong half of the problem.
