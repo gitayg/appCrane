@@ -5,6 +5,20 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.57.0 — A host below the Node floor now updates itself, with nobody logging in.
+
+`engine-strict` is removed from `.npmrc`. That reverses v2.51.1, and the reason is that the guard was solving the wrong half of the problem.
+
+It was right about the mechanism. The updater that runs is always the code you are upgrading *from*, so a host below the floor executes an updater that knows nothing about the floor — and `.npmrc` was the one thing that reached it, because `git reset --hard` puts it in the tree before `npm install` reads it. What it could not do is fix anything. It converted "installs dependencies the runtime cannot run" into "cannot update at all, ever, until someone ssh's in", and a host in that state re-runs the update and fails identically. That is not hypothetical: three consecutive releases landed their files on a Node 20 host and none could complete, each one blocked by the guard at the exact step that would have let the old updater reach its own restart.
+
+Because it does end in a restart. The old updater finishes with `process.exit(0)` so systemd re-execs it — it just never got there. Measured on `node:20.20.2` against the real dependency tree: without `engine-strict`, `npm install --omit=dev` exits 0 and installs 123 packages. So the update completes, the process exits, systemd brings it back, and `scripts/safe-boot.sh` — already delivered by the same failed-then-successful reset — raises Node to the floor before the app starts. Also measured: better-sqlite3 built under Node 20 loads cleanly under Node 22, because N-API is ABI-stable, so nothing needs rebuilding across the upgrade.
+
+The whole sequence is now unattended, on a host whose updater predates every part of it.
+
+What is given up is a window of one boot, where dependencies installed under Node 20 also run under Node 20. If the runtime cannot be raised — no apt, or no root and no passwordless sudo — and the new release genuinely cannot run on the old one, the boot crashes and the sentinel rolls back to the previous SHA. That is the same protection `engine-strict` provided, reached without stranding every host that only needed a newer Node.
+
+`engines.node` stays in package.json: it is what safe-boot.sh reads to learn the floor, and npm still warns.
+
 ## 2.56.0 — A restart button, so recovering a stalled host does not need ssh.
 
 v2.55.1 taught `scripts/safe-boot.sh` to raise the Node runtime and finish a stalled install on the way up. That closed the repair, and left the trigger: the wrapper only runs when the process restarts, and there was no supported way to ask for one.

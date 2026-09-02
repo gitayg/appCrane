@@ -12,10 +12,11 @@ import { fileURLToPath } from 'url';
 // The self-update endpoint lives inside server/index.js, so the updater that
 // runs is always the version being upgraded FROM. A host below the current Node
 // floor runs an updater with no Node step: `git reset --hard origin/main`
-// succeeds, then `npm install` is refused by .npmrc's engine-strict, and the
-// update dies with the tree ahead of node_modules. Measured separately: npm
-// enforces engine-strict BEFORE lifecycle scripts, so a preinstall hook cannot
-// rescue it.
+// succeeds, and before v2.57.0 the `npm install` after it was refused by
+// .npmrc's engine-strict, leaving the tree ahead of node_modules. That guard is
+// gone now precisely because it could only refuse — but the wrapper's job is
+// unchanged and matters more: it is what raises the runtime after the old
+// updater completes and restarts itself.
 //
 // systemd's ExecStart is scripts/safe-boot.sh — a file inside that tree — so
 // the reset that failed to finish still delivered a new wrapper. On the next
@@ -59,8 +60,8 @@ test('a host BELOW the floor is identified for upgrade — the app.opswat.com ca
   assert.equal(r.have, String(CURRENT));
   assert.equal(r.want, String(CURRENT + 2));
   assert.equal(r.decision, 'upgrade',
-    'this is the box that cannot self-update: engine-strict refuses npm install, and nothing ' +
-    'in the old node process knows to raise the runtime first');
+    'nothing in the old node process knows to raise the runtime; this wrapper is the only thing ' +
+    'that runs from the updated tree before the app starts');
 });
 
 test('the floor is read from the engines range, not guessed', () => {
