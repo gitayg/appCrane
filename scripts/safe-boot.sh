@@ -213,6 +213,46 @@ reconcile_runtime() {
   return 0
 }
 
+# ---------------------------------------------------------------------------
+# Native addon ABI (v2.58.0)
+# ---------------------------------------------------------------------------
+#
+# better-sqlite3 is a V8-ABI addon, not N-API: a binary built for Node 20
+# declares MODULE_VERSION 115 and Node 22 demands 127. So ANY Node major change
+# breaks it instantly — and the break is not at startup, it is at the first
+# `new Database()`, which is why a bare `require()` succeeds and tells you
+# nothing.
+#
+# This does not need an AppCrane update to happen. unattended-upgrades moving
+# Node 20 -> 22 on its own is enough, and did it: the addon stopped loading, the
+# process died on every boot, and with `Restart=always RestartSec=3` and no
+# start limit systemd restarted it 10,394 times before anyone noticed.
+#
+# Measured on the real dependency tree (node:20 build, node:22 runtime):
+#   npm install --omit=dev --prefer-offline  -> STILL BROKEN
+#   npm rebuild better-sqlite3               -> FIXED
+# The install is not enough because npm sees node_modules as satisfied and skips
+# the addon entirely; only an explicit rebuild recompiles against the new ABI.
+#
+# Probed rather than inferred from a version stamp: the probe is the same
+# operation the app performs on its first query, so it cannot disagree with
+# reality the way a stamp can after a manual npm install or a restored backup.
+
+NATIVE_PROBE='const D=require("better-sqlite3"); new D(":memory:").prepare("select 1").get();'
+
+native_ok() { node -e "$NATIVE_PROBE" >/dev/null 2>&1; }
+
+reconcile_native() {
+  if native_ok; then return 0; fi
+  log "better-sqlite3 does not load under $(node -v 2>/dev/null) — its ABI does not match this runtime. Rebuilding."
+  if npm rebuild better-sqlite3 2>&1 | sed 's/^/[safe-boot] rebuild: /' >&2 && native_ok; then
+    log "native addon rebuilt against $(node -v 2>/dev/null) and loading"
+  else
+    log "rebuild did not fix better-sqlite3 — the app will crash on its first query."
+    log "    build tools may be missing: apt-get install -y python3 make g++"
+  fi
+}
+
 # --check-runtime prints the decision and exits, so the logic is testable
 # without booting AppCrane or touching apt.
 if [ "${1:-}" = "--check-runtime" ]; then
@@ -223,10 +263,12 @@ if [ "${1:-}" = "--check-runtime" ]; then
   else
     echo "decision=ok"
   fi
+  if native_ok; then echo "native=ok"; else echo "native=broken"; fi
   exit 0
 fi
 
 reconcile_runtime
+reconcile_native
 
 while true; do
   start_time=$(date +%s)
