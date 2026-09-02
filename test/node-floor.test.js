@@ -119,16 +119,27 @@ test('the reported major is a number, so a caller can compare it to the floor', 
 // anyway. .npmrc is read from the working tree that `git reset --hard` just
 // produced, so it binds every updater, including ones written before the floor.
 
-test('.npmrc enforces the engines declaration', () => {
-  const npmrc = read('.npmrc');
-  assert.match(npmrc, /^engine-strict\s*=\s*true$/m,
-    'engine-strict is gone. `engines` alone is advisory — measured on Node 20 with engines >=22 ' +
-    'and no engine-strict, npm install exits 0 and installs the package regardless. Without this ' +
-    'line a host jumping versions installs dependencies its runtime cannot run.');
+test('.npmrc does NOT set engine-strict — the guard moved (v2.57.0)', () => {
+  // Reversed deliberately. engine-strict reached every updater, including ones
+  // written before the floor existed, but it could only REFUSE. It turned
+  // "installs dependencies the runtime cannot run" into "cannot update at all
+  // until someone ssh's in", and a host in that state re-runs the update and
+  // fails identically. That happened in production across three releases.
+  //
+  // scripts/safe-boot.sh now raises the runtime on every boot, which repairs
+  // instead of refusing — and lets the old updater complete and restart itself,
+  // at which point the reconciliation runs. Measured on node:20.20.2 against
+  // the real tree: npm install --omit=dev exits 0 with 123 packages.
+  const active = read('.npmrc').split('\n').filter((l) => l.trim() && !l.trim().startsWith('#'));
+  assert.deepEqual(active, [],
+    'engine-strict (or any other setting) is back in .npmrc. If it is engine-strict, it will ' +
+    'strand every host below the floor: the install fails, the old updater never reaches its ' +
+    'process.exit(0), and safe-boot.sh — the thing that would fix the runtime — never runs.');
 });
 
-test('the enforcement and the declaration agree', () => {
-  // engine-strict enforces whatever engines says; if engines were dropped the
-  // strict flag would enforce nothing at all.
-  assert.ok(pkg.engines?.node, 'engine-strict is set but package.json declares no engines to enforce');
+test('engines.node is still declared — safe-boot.sh reads it to learn the floor', () => {
+  assert.ok(pkg.engines?.node,
+    'safe-boot.sh derives the Node floor from engines.node; without it the boot wrapper has ' +
+    'nothing to compare against and skips the runtime check entirely');
+  assert.match(pkg.engines.node, /\d+/);
 });

@@ -140,9 +140,8 @@ npm error code EBADENGINE
 npm error notsup Required: {"node":">=22"}  Actual: {"node":"v20.20.2"}
 ```
 
-This is the floor guard working, not a bug: `.npmrc` sets `engine-strict=true`, so
-npm refuses to install Node-22 dependencies onto Node 20 rather than installing
-them and failing later at runtime.
+Seen on AppCrane **older than v2.57.0**, where `.npmrc` set `engine-strict=true`
+and npm refused to install Node-22 dependencies onto Node 20.
 
 It happens on hosts provisioned below the current floor, because the updater
 that runs is always the version being upgraded **from** — a box on a release
@@ -152,8 +151,14 @@ succeeds and the `npm install` after it does not, so the tree ends up ahead of
 
 From v2.55.2 the updater reconciles the runtime *before* it moves the tree, and
 reads the floor from the release it is about to install rather than the one it
-is replacing — so a refusal on a newer updater is a clean no-op. The stranded
-state above only arises on hosts whose updater predates that.
+is replacing — so a refusal on a newer updater is a clean no-op.
+
+From v2.57.0 the stall does not happen at all. `engine-strict` is gone, so the
+install completes on the old runtime and the old updater reaches its own
+`process.exit(0)`; systemd re-execs, and `scripts/safe-boot.sh` raises Node to
+the floor before the app starts. Nothing to do by hand. If the runtime cannot be
+raised and the new release genuinely cannot run, the boot crashes and the
+sentinel rolls back to the previous SHA.
 
 **The fix is a restart, not a repair.** systemd's `ExecStart` is
 `scripts/safe-boot.sh`, a file inside that tree — so the reset that failed to
