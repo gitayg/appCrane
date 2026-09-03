@@ -78,11 +78,16 @@ test('git show reads the incoming tree without checking it out', () => {
   writeFileSync(join(dir, 'package.json'), JSON.stringify({ engines: { node: '>=99' } }));
   git('add', 'package.json');
   git('commit', '-qm', 'v2');
+  const branch = git('rev-parse', '--abbrev-ref', 'HEAD').trim();
   git('checkout', '-q', 'HEAD~1');
 
-  const shown = JSON.parse(git('show', 'main:package.json').trim().length
-    ? git('show', 'main:package.json')
-    : git('show', 'master:package.json'));
+  // Ask git what the branch is called rather than guessing. `git init` produces
+  // `main` on a machine with init.defaultBranch set and `master` on one without
+  // — this repo's CI runner is the latter, and the earlier version of this test
+  // hardcoded 'main' with a fallback that could never fire: execFileSync throws
+  // on a non-zero exit, so the failing call raised before the ternary chose the
+  // alternative. It passed locally and failed on every CI run for five releases.
+  const shown = JSON.parse(git('show', `${branch}:package.json`));
   assert.equal(shown.engines.node, '>=99', 'git show must read the newer ref');
 
   const onDisk = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
