@@ -5,6 +5,16 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.58.1 — CI had been red for five releases, and nobody was reading it.
+
+Two failures, found by actually opening the workflow logs instead of trusting a release that had been reported as green.
+
+**A test that could only pass on the author's machine.** `test/self-update-ordering.test.js` builds a throwaway repo with `git init` and then reads a file out of it with `git show main:package.json`. `git init` produces `main` where `init.defaultBranch` is set and `master` where it is not — this project's CI runner is the latter. The test carried a fallback to `master`, and the fallback could never run: `execFileSync` throws on a non-zero exit, so the failing call raised before the ternary had a chance to choose the alternative. It now asks git what the branch is called. Reproduced locally by forcing `init.defaultBranch=master`, where the old version fails and the new one passes.
+
+That test landed in v2.55.2 and has failed every CI run since. v2.55.2, v2.56.0, v2.57.0 and v2.58.0 were each announced as shipped on the strength of a workflow list checked too early or not at all — the release job is fast and goes green, the test job is slower and did not. The lesson is not about the branch name.
+
+**qs 6.15.3 → 6.16.0.** Two CVEs — GHSA-4mjr-xmp4-gh2g and GHSA-x5fp-wj9c-mxmx — reached through express 5.2.1 and body-parser, and the OSV gate was correctly blocking on them. `npm audit --omit=dev` now reports zero, and express stays on 5.2.1.
+
 ## 2.58.0 — A Node upgrade no longer breaks the database driver, and a crash loop no longer runs for eight hours.
 
 `unattended-upgrades` moved a production host from Node 20 to 22 with no AppCrane update involved. better-sqlite3 is a V8-ABI addon, not N-API — its binary declares `MODULE_VERSION 115` and Node 22 demands 127 — so the driver stopped loading instantly. The process died on every boot, and with `Restart=always`, `RestartSec=3` and no start limit, systemd restarted it **10,394 times** before anyone noticed. Eight hours of a three-second loop, service down throughout, the failure buried in the journal.
