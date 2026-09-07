@@ -3,7 +3,7 @@
 **Component:** AppCrane / AppStudio
 **Severity:** Medium (UX — forever-spinner)
 **Status:** Implemented 2026-04-26 (v1.17.1)
-**Reporter:** [redacted]@[redacted].com
+**Reporter:** maintainer@example.com
 
 ## Symptom
 

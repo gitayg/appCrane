@@ -2,7 +2,7 @@
 
 **Component:** AppCrane
 **Status:** Implemented 2026-04-26 (v1.17.0)
-**Decision owner:** [redacted]@[redacted].com
+**Decision owner:** maintainer@example.com
 
 ## Decision
 

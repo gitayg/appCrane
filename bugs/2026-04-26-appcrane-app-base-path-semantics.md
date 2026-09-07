@@ -2,7 +2,7 @@
 
 **Component:** AppCrane
 **Severity:** Medium (cause of frequent user error, not a runtime crash)
-**Reporter:** [redacted]@[redacted].com
+**Reporter:** maintainer@example.com
 **Date:** 2026-04-26
 
 ## Summary

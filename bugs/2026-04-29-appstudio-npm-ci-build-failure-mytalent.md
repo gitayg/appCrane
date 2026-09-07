@@ -2,7 +2,7 @@
 
 **Component:** AppStudio — build phase
 **Severity:** High (blocks every AppStudio deployment on mytalent)
-**Reporter:** [redacted]@[redacted].com
+**Reporter:** maintainer@example.com
 **Date:** 2026-04-29
 **Enhancement request:** #48 (mytalent — category filter on table header)
 
