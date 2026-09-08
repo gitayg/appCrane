@@ -111,7 +111,25 @@ const ENGINES = {
     containerPort: 3306,
     dataPath: '/var/lib/mysql',
     passwordEnv: 'MARIADB_ROOT_PASSWORD',
-    memoryMb: Number(process.env.MANAGED_DB_MARIADB_MEMORY_MB) || 512,
+    // 1024, not the 512 this shipped with (v2.65.7).
+    //
+    // The ceiling is enforced with --memory-swap set equal to it, which is
+    // Docker's spelling for "no swap at all", so this is a hard wall rather than
+    // a point where the kernel starts paging: MariaDB does not get slow at the
+    // limit, it gets killed. mariadb:11.4's resident set at rest is already in
+    // the mid-hundreds of MB before the InnoDB buffer pool, the log buffer and
+    // per-connection buffers are counted, so 512 left almost no headroom and the
+    // first real workload takes the process out. Postgres stays at 512: the
+    // alpine image's baseline is a fraction of MariaDB's, and nothing has been
+    // observed pressing against it.
+    //
+    // Honest about the evidence: this is not confirmed to be what failed on the
+    // instance that prompted it — the container was found RUNNING, so an OOM
+    // kill was never observed, only a restart in the right window. The change is
+    // made because a hard 512MB wall with no swap under a general-purpose
+    // database is a bad default on its own terms, not because it is a diagnosed
+    // fix. If a provision still fails at 1024, the cause is elsewhere.
+    memoryMb: Number(process.env.MANAGED_DB_MARIADB_MEMORY_MB) || 1024,
     scheme: 'mysql',
   },
 };
