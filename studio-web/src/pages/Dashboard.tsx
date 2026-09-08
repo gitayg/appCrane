@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { Fragment, useState, useEffect, useRef, useCallback } from 'react'
 import { Navigate, Link } from 'react-router-dom'
 import { adminApi } from '../adminApi'
 import { useMe, isAdmin } from '../hooks/useMe'
@@ -44,6 +44,26 @@ interface ServerHealth {
     disk: { percent: number }
     disk_formatted: { used: string; total: string }
   }
+}
+
+// GET /api/managed-db/servers — always exactly two entries (postgres,
+// mariadb). `configured: false` means the engine has never been used: no
+// container exists and every docker-sourced field is null.
+interface ManagedDbServer {
+  engine: string
+  container: string
+  image: string
+  configured: boolean
+  state: string | null
+  running: boolean
+  host_port: number | null
+  memory_mb: number | null
+  databases: number
+  restart_count: number | null
+  last_exit_code: number | null
+  oom_killed: boolean
+  started_at: string | null
+  error: string | null
 }
 
 interface UsageSummary {
@@ -144,6 +164,21 @@ function TrendChart({ days, apps, emptyText = 'No visitor data yet', fmt = (v: n
   )
 }
 
+// Three states, not two: a platform that has never used MariaDB is healthy,
+// so "not created" must read as neutral (grey, like badge-pending) and never
+// as a failure. Only a container that exists and isn't running is red.
+function dbStatus(sv: ManagedDbServer): { cls: string; text: string } {
+  if (!sv.configured) return { cls: 'badge badge-pending', text: 'not created' }
+  if (sv.running) return { cls: 'badge badge-live', text: 'running' }
+  return { cls: 'badge badge-failed', text: 'stopped' }
+}
+
+// MANAGED_DB_POSTGRES_MEMORY_MB / MANAGED_DB_MARIADB_MEMORY_MB — the knob that
+// raises the ceiling the OOM killer just enforced.
+function dbMemoryEnvVar(engine: string): string {
+  return `MANAGED_DB_${engine.toUpperCase()}_MEMORY_MB`
+}
+
 const ONBOARD_KEY = 'cc_onboard_dismissed'
 
 export function Dashboard() {
@@ -168,6 +203,10 @@ export function Dashboard() {
     users: { id: number; name: string; email: string | null; apps: number }[]
   }>({ apps: [], users: [] })
   const [usageSummary, setUsageSummary] = useState<UsageSummary | null>(null)
+  // null = never answered (403 for a non-platform-admin, endpoint absent, or
+  // request failed). The section renders nothing at all in that case — a
+  // broken card is worse than no card.
+  const [dbServers, setDbServers] = useState<ManagedDbServer[] | null>(null)
   // Users currently active in the system (active accounts with app or platform
   // activity in the last 15 min). Refreshed with fetchMain every 30s.
   const [activeUsers, setActiveUsers] = useState<number | null>(null)
@@ -199,7 +238,7 @@ export function Dashboard() {
       // works for everyone (server filters by role); /api/server/health
       // works for everyone (status only, no sensitive detail). The
       // admin-only ones now degrade gracefully.
-      const [h, appsRes, usersRes, enhRes, actRes, ldrRes, activeRes, cpuRes] = await Promise.all([
+      const [h, appsRes, usersRes, enhRes, actRes, ldrRes, activeRes, cpuRes, dbRes] = await Promise.all([
         adminApi.get<ServerHealth>('/api/server/health').catch(() => null),
         adminApi.get<{ apps: App[] }>('/api/apps'),
         adminApi.get<{ users: User[] }>('/api/users').catch(() => ({ users: [] })),
@@ -208,6 +247,9 @@ export function Dashboard() {
         adminApi.get<typeof leaders>('/api/dashboard/leaderboards?days=7&top=10').catch(() => ({ apps: [], users: [] })),
         adminApi.get<{ minutes: number; count: number }>('/api/dashboard/active-users').catch(() => null),
         adminApi.get<{ days: string[]; apps: ActivityApp[] }>('/api/dashboard/app-cpu').catch(() => ({ days: [], apps: [] })),
+        // Platform-admin only; a 403 (or an older server without the route)
+        // must leave the rest of the dashboard untouched.
+        adminApi.get<{ servers: ManagedDbServer[] }>('/api/managed-db/servers').catch(() => null),
       ])
       if (h) setHealth(h)
       setApps(appsRes.apps ?? [])
@@ -217,6 +259,7 @@ export function Dashboard() {
       setActivity(actRes)
       setCpuTrend(cpuRes)
       if (activeRes) setActiveUsers(activeRes.count)
+      setDbServers(Array.isArray(dbRes?.servers) ? dbRes.servers : null)
     } catch (e) {
       setError(String(e))
     } finally {
@@ -409,6 +452,76 @@ export function Dashboard() {
           <div className="sub">all time requests</div>
         </a>
       </div>
+
+      {/* Shared Postgres / MariaDB servers. Rendered only when the
+          platform-admin endpoint actually answered — a 403 leaves dbServers
+          null and this whole block disappears rather than showing a broken
+          or empty card to a user who is not allowed to see it. Refreshes on
+          the dashboard's existing 30s fetchMain interval; no timer of its own. */}
+      {dbServers && dbServers.length > 0 && (
+        <>
+          <h2>Managed Databases</h2>
+          <table style={{ marginBottom: 24 }}>
+            <thead>
+              <tr>
+                <th>Engine</th>
+                <th>Status</th>
+                <th>Host port</th>
+                <th>Memory limit</th>
+                <th>App databases</th>
+                <th>Restarts</th>
+              </tr>
+            </thead>
+            <tbody>
+              {dbServers.map(sv => {
+                const st = dbStatus(sv)
+                return (
+                  <Fragment key={sv.engine}>
+                    <tr>
+                      <td>
+                        <div style={{ fontWeight: 600 }}>{sv.engine}</div>
+                        <div style={{ color: 'var(--dim)', fontSize: '.78rem' }}>{sv.image}</div>
+                      </td>
+                      <td>
+                        <span className={st.cls}>{st.text}</span>
+                        {sv.configured && !sv.running && sv.state && (
+                          <span style={{ marginLeft: 6, color: 'var(--dim)', fontSize: '.78rem' }}>{sv.state}</span>
+                        )}
+                        {!sv.configured && (
+                          <div style={{ color: 'var(--dim)', fontSize: '.78rem', marginTop: 2 }}>
+                            never used — no container yet
+                          </div>
+                        )}
+                      </td>
+                      <td>{sv.host_port ?? '—'}</td>
+                      <td>{sv.memory_mb != null ? `${sv.memory_mb} MB` : '—'}</td>
+                      <td>{sv.databases}</td>
+                      <td style={{ color: sv.restart_count ? 'var(--orange)' : 'var(--dim)' }}>
+                        {sv.restart_count && sv.restart_count > 0 ? sv.restart_count : '—'}
+                      </td>
+                    </tr>
+                    {sv.oom_killed && (
+                      <tr>
+                        <td colSpan={6} style={{ background: '#ef444414', color: 'var(--red)', fontSize: '.82rem' }}>
+                          <strong>Out of memory.</strong> The {sv.engine} container was killed for exceeding its
+                          memory ceiling{sv.memory_mb != null ? ` of ${sv.memory_mb} MB` : ''}. Raise it by setting{' '}
+                          <code>{dbMemoryEnvVar(sv.engine)}</code> and restarting AppCrane — deploys against this
+                          engine will keep failing until then.
+                        </td>
+                      </tr>
+                    )}
+                    {sv.error && (
+                      <tr>
+                        <td colSpan={6} style={{ color: 'var(--red)', fontSize: '.82rem' }}>{sv.error}</td>
+                      </tr>
+                    )}
+                  </Fragment>
+                )
+              })}
+            </tbody>
+          </table>
+        </>
+      )}
 
       {usageSummary && (
         <>

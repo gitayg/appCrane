@@ -158,6 +158,21 @@ const MAX_IDENT_BYTES = 31;
 // container was left behind for every later call to trip over.
 const ADDR_UNAVAILABLE = /can(?:no|')t assign requested address|address not available|ports are not available/i;
 
+/**
+ * Remove a known secret from a message so it can be logged.
+ *
+ * Takes the secret as an argument rather than pattern-matching for
+ * password-shaped strings: generated passwords are base64url, which is the same
+ * alphabet as container ids, image digests and identifiers, so a shape-based
+ * redactor would mangle every useful error while still missing an
+ * operator-supplied password that happened to look different.
+ */
+function redactSecret(message, secret) {
+  const text = String(message ?? '');
+  if (!secret) return text;
+  return text.split(secret).join('[redacted]');
+}
+
 async function dockerExec(args, opts = {}) {
   try {
     const { stdout } = await execFileAsync('docker', args, { timeout: 60000, ...opts });
@@ -574,6 +589,122 @@ export async function stopServer(engine) {
 }
 
 // ---------------------------------------------------------------------------
+// Read-only status
+// ---------------------------------------------------------------------------
+
+/**
+ * One `docker inspect` per engine, in one call, with the five facts the
+ * dashboard needs. Several `-f` invocations would be several round trips to the
+ * daemon per engine per poll, and this endpoint is polled.
+ *
+ * The template is an EXPLICIT field list and must stay one. `{{json .}}` would
+ * be shorter and would put .Config.Env — which carries POSTGRES_PASSWORD /
+ * MARIADB_ROOT_PASSWORD, the superuser credential — into a string this module
+ * hands to an HTTP response.
+ *
+ * '|' as the separator is safe against every value in the list: Docker's status
+ * vocabulary is created/running/paused/restarting/removing/exited/dead, the
+ * three numeric/boolean fields cannot contain one, and StartedAt is RFC3339.
+ */
+const STATUS_FIELDS = [
+  '{{.State.Status}}',
+  '{{.RestartCount}}',
+  '{{.State.ExitCode}}',
+  '{{.State.OOMKilled}}',
+  '{{.State.StartedAt}}',
+];
+const STATUS_SEP = '|';
+const STATUS_FORMAT = STATUS_FIELDS.join(STATUS_SEP);
+
+// "the container is not there", which is a STATE to report, not an error to
+// report. Anything else from inspect — daemon unreachable, docker not
+// installed, permission denied — is a genuine failure and belongs in `error`.
+const NO_SUCH_CONTAINER = /no such (?:object|container)/i;
+
+// Docker's zero value for a container that has never run.
+const ZERO_TIME = '0001-01-01T00:00:00Z';
+
+function intOrNull(s) {
+  if (s === undefined || s === '') return null;
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * The shared servers, as the platform dashboard sees them. READ ONLY.
+ *
+ * This function must never start, create or provision anything — in particular
+ * it must never call ensureServer(). It exists to be POLLED by a dashboard, and
+ * lazily standing up a Postgres container because somebody opened a browser tab
+ * is not a side effect an admin can consent to. `docker inspect` is the only
+ * command it issues.
+ *
+ * It also never decrypts. managed_db_servers carries admin_password_enc; the
+ * SELECT below names its columns rather than spreading the row, so the
+ * superuser credential cannot reach a caller through a careless `...row`.
+ *
+ * An engine with no managed_db_servers row has simply never been used. It is
+ * still reported — the dashboard needs to say "Postgres: not provisioned"
+ * rather than omit it — with what the config says it WOULD be, `databases: 0`,
+ * and null docker facts.
+ */
+export async function serverStatus() {
+  const db = getDb();
+  const counts = new Map(
+    db.prepare('SELECT engine, COUNT(*) AS n FROM managed_databases GROUP BY engine')
+      .all().map(r => [r.engine, r.n])
+  );
+  const rows = new Map(
+    db.prepare('SELECT engine, container_name, image, host_port FROM managed_db_servers')
+      .all().map(r => [r.engine, r])
+  );
+
+  return Promise.all(SUPPORTED_ENGINES.map(async (engine) => {
+    const cfg = ENGINES[engine];
+    const row = rows.get(engine) || null;
+    // The recorded container/image win over the config: they are what actually
+    // exists on the host, and are what inspect has to be pointed at. A config
+    // change (a new image pin, a renamed prefix) must not make a running server
+    // read as absent.
+    const container = row?.container_name || cfg.container;
+
+    const out = {
+      engine,
+      container,
+      image: row?.image || cfg.image,
+      configured: Boolean(row),
+      state: null,
+      running: false,
+      host_port: row?.host_port ?? cfg.defaultPort,
+      memory_mb: cfg.memoryMb,
+      databases: counts.get(engine) || 0,
+      restart_count: null,
+      last_exit_code: null,
+      oom_killed: null,
+      started_at: null,
+      error: null,
+    };
+
+    let raw;
+    try {
+      raw = await dockerExec(['inspect', '-f', STATUS_FORMAT, container], { timeout: 10000 });
+    } catch (e) {
+      if (!NO_SUCH_CONTAINER.test(e.message)) out.error = e.message;
+      return out;
+    }
+
+    const [state, restarts, exitCode, oom, startedAt] = raw.split(STATUS_SEP);
+    out.state = state || null;
+    out.running = state === 'running';
+    out.restart_count = intOrNull(restarts);
+    out.last_exit_code = intOrNull(exitCode);
+    out.oom_killed = oom === 'true';
+    out.started_at = startedAt && startedAt !== ZERO_TIME ? startedAt : null;
+    return out;
+  }));
+}
+
+// ---------------------------------------------------------------------------
 // Admin SQL
 // ---------------------------------------------------------------------------
 
@@ -758,7 +889,17 @@ export async function provision(scope, engine) {
     db.prepare('DELETE FROM managed_databases WHERE app_id = ? AND tenant = ? AND engine = ?')
       .run(appId, tenant, engine);
     await dropInEngine(engine, database, username).catch(() => {});
-    throw new Error(`managedDb: provisioning ${engine} database failed: ${e.message}`);
+    // Redacted HERE, where the password is in scope, rather than by the route.
+    //
+    // The engine can echo a failing statement back in its error, and
+    // provisionSql embeds the generated password in CREATE ROLE / CREATE USER.
+    // Scrubbing it at the throw is what makes this message safe to log, and
+    // until now nothing logged it at all: routes/managedDb.js replaced it with a
+    // fixed 502 string and did not even import a logger, so a failed provision
+    // left no record of its cause anywhere. Three separate wrong theories were
+    // argued about one such failure before anyone noticed the reason was simply
+    // never written down.
+    throw new Error(`managedDb: provisioning ${engine} database failed: ${redactSecret(e.message, password)}`);
   }
 
   log.info(`managedDb: provisioned ${engine} database ${database} for app ${appId}${tenant ? ` tenant ${tenant}` : ''}`);

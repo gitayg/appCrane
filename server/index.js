@@ -41,7 +41,7 @@ import envVarsRoutes from './routes/envVars.js';
 import healthRoutes from './routes/health.js';
 import webhooksRoutes from './routes/webhooks.js';
 import backupsRoutes from './routes/backups.js';
-import managedDbRoutes from './routes/managedDb.js';
+import managedDbRoutes, { serversRouter as managedDbServersRouter } from './routes/managedDb.js';
 import logsRoutes from './routes/logs.js';
 import monitoringRoutes from './routes/monitoring.js';
 import notificationsRoutes from './routes/notifications.js';
@@ -956,6 +956,13 @@ app.use('/api/auth/oidc', oidcRoutes);
 app.use('/api/auth/saml', samlRoutes);
 app.use('/api/auth/scim', scimAdminRouter);
 app.use('/api/scim/v2', scimRoutes);
+// GET /api/managed-db/servers — platform-wide status of the shared Postgres /
+// MariaDB servers. Its own prefix and its own router on purpose: the managed-db
+// default export is mounted at /api/apps below, where `/:slug/database` would
+// read 'servers' as an app slug. Mounted HERE, above every router that installs
+// a pathless requireAuth at the bare '/api', for the reason the note under
+// noticesRoutes spells out.
+app.use('/api/managed-db', managedDbServersRouter);
 // Platform notices. Mounted at the bare '/api' and BEFORE every router that
 // installs a pathless `router.use(requireAuth)` — appsRoutes (line ~75 of
 // apps.js), userMcpKeysRoutes, logsRoutes, monitoringRoutes. Each of those

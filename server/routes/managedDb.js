@@ -1,7 +1,8 @@
 import { Router } from 'express';
-import { requireAuth, requireAppUser, requireAppAccess } from '../middleware/auth.js';
+import { requireAuth, requireAppUser, requireAppAccess, requirePlatformAdmin } from '../middleware/auth.js';
 import { auditMiddleware } from '../middleware/audit.js';
 import { AppError } from '../utils/errors.js';
+import log from '../utils/logger.js';
 
 /**
  * Managed databases — the HTTP surface.
@@ -171,6 +172,12 @@ function listPublic(svc, app) {
  */
 function rethrowEngineError(err) {
   if (err instanceof AppError) throw err;
+  // Opaque to the CALLER, never to the operator. Withholding the detail from an
+  // HTTP response is the right call; withholding it from the server's own log
+  // was not, and it is why a failed provision used to be undiagnosable from
+  // either side. managedDb.js redacts the generated password at the throw site,
+  // so what lands here is safe to write down.
+  log.error(`managed database engine error: ${err.message}`);
   throw new AppError(
     'The managed database engine failed to complete the request',
     502, 'MANAGED_DB_ENGINE_ERROR'
@@ -310,6 +317,41 @@ router.delete('/:slug/database', requireAppUser, auditMiddleware('managed-db-dep
       ? 'Database and user removed. The app will lose its connection on the next deploy.'
       : `No ${engine} database was provisioned for this app.`,
   });
+});
+
+/**
+ * GET /api/managed-db/servers — are the shared engines up?
+ *
+ * A SEPARATE, NAMED router, mounted at /api/managed-db. The default export
+ * above is mounted at /api/apps, where its `/:slug/database` pattern would
+ * match `/servers/...`-shaped paths and, worse, treat "servers" as a slug. This
+ * is not an app-scoped resource: there is one Postgres and one MariaDB for the
+ * whole platform, so it is gated by the platform-admin tier and has no :slug at
+ * all.
+ *
+ * READ ONLY, AND IT MUST STAY THAT WAY. The engine's serverStatus() issues
+ * `docker inspect` and nothing else — deliberately not ensureServer(), which
+ * would docker-run a database container. A dashboard polls this endpoint; an
+ * endpoint that provisions infrastructure as a side effect of being looked at
+ * is a footgun, not a status check.
+ *
+ * NO CREDENTIAL APPEARS HERE. managed_db_servers stores the superuser password
+ * encrypted; serverStatus() selects columns by name and never decrypts. The
+ * same rule as publicView() above: nothing password-shaped, in any form.
+ */
+export const serversRouter = Router();
+
+serversRouter.get('/servers', requireAuth, requirePlatformAdmin, async (_req, res) => {
+  const svc = await engineModule();
+
+  let servers;
+  try {
+    servers = await svc.serverStatus();
+  } catch (err) {
+    rethrowEngineError(err);
+  }
+
+  res.json({ servers });
 });
 
 export default router;
