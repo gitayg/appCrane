@@ -117,7 +117,18 @@ jobs:
 
           # Advisory IDs accepted for now. Each needs a reason and a date.
           #   'GHSA-xxxx-xxxx-xxxx': 'no fix published as of 2026-08-19; <impact>'
-          IGNORED = {}
+          IGNORED = {
+              'GHSA-vwc7-r8mq-g2x9':
+                  'adm-zip CWE-59, no fix published as of 2026-09-08 — the advisory '
+                  'lists first_patched_version: null and 0.6.0 IS the latest release, '
+                  'so there is nothing to upgrade to (upstream PR #575 is open, '
+                  'unmerged, and not on master). Mitigated in AppCrane instead: '
+                  'safeExtractZip refuses a destination containing a symlink and '
+                  'realpath-sweeps the tree afterwards (server/utils/safeExtract.js), '
+                  'and adm-zip cannot plant the symlink itself because it never calls '
+                  'symlinkSync. Covered by test/adm-zip-symlink-destination.test.js. '
+                  'Re-check when adm-zip publishes past 0.6.0.',
+          }
 
           if not os.path.exists('osv.sarif'):
               print('::error::osv.sarif missing — the scan did not complete, so no dependency was verified')

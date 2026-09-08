@@ -39,9 +39,58 @@ export async function safeExtractZip(zipPath, destDir) {
       throw new Error(`zip-slip: entry "${name}" resolves outside ${dest}`);
     }
   }
+  // CVE-2026-76845 / GHSA-vwc7-r8mq-g2x9 (CWE-59), v2.65.5. There is nothing to
+  // upgrade to: the advisory's first_patched_version is null and 0.6.0 IS the
+  // latest published adm-zip.
+  //
+  // adm-zip's Utils.writeFileTo opens the computed destination with
+  // fs.openSync(path, 'w') — no O_NOFOLLOW, no lstat — so a symlink ALREADY
+  // SITTING at the destination is followed and the entry is written through it,
+  // outside the extraction root. The entry-name scan above cannot see that, and
+  // neither could a stricter version of it: the archive entry is named
+  // `config.js` and is entirely legitimate. The advisory is explicit that the
+  // write happens "without any traversal sequence appearing in the archive".
+  //
+  // A malicious archive cannot plant the symlink itself — adm-zip never calls
+  // symlinkSync, so a symlink ENTRY is written out as a regular file holding the
+  // link text. The attacker needs separate write access to the destination
+  // before extraction. So the defence is to refuse a destination that already
+  // contains one, which also costs nothing on the normal path: callers extract
+  // into a directory they created moments earlier and which is therefore empty.
+  assertNoSymlinks(dest);
+
   // adm-zip's extractAllTo writes entries by resolved name. Pre-validation
   // above caught traversal attempts; this is the actual write phase.
   zip.extractAllTo(dest, /* overwrite */ true);
+
+  // The same realpath sweep the tar path has always run. The zip path never had
+  // one, and that asymmetry is why this class of bug had no coverage here.
+  //
+  // What it adds over the pre-check is the TOCTOU window: assertNoSymlinks looks
+  // at the destination, and extractAllTo writes to it a moment later. An
+  // attacker who can write to that directory can plant the link in between. The
+  // sweep does not prevent that write, but it fails the deploy loudly instead of
+  // letting it report success. test/adm-zip-symlink-destination.test.js does NOT
+  // cover this line — the race is not deterministically reproducible — so it is
+  // deliberate defence-in-depth, not something the suite is proving.
+  assertTreeContained(dest);
+}
+
+/**
+ * Refuse a destination that contains a symlink at any depth.
+ *
+ * Dirent.isSymbolicLink() reflects lstat, so this does not follow the link it is
+ * looking for. Empty or missing directory: nothing to reject.
+ */
+function assertNoSymlinks(dir) {
+  if (!existsSync(dir)) return;
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, e.name);
+    if (e.isSymbolicLink()) {
+      throw new Error(`unsafe extraction destination: "${full}" is a symlink`);
+    }
+    if (e.isDirectory()) assertNoSymlinks(full);
+  }
 }
 
 /**
@@ -65,7 +114,23 @@ export function safeExtractTarGz(tarPath, destDir) {
   // Post-walk: every file's real path must be inside dest. This catches
   // symlink shenanigans where the tar entry itself looked safe but
   // pointed at a previously-extracted symlink.
-  walkAndAssertContained(dest, dest);
+  assertTreeContained(dest);
+}
+
+/**
+ * Containment must be judged in REAL-PATH space on BOTH sides.
+ *
+ * walkAndAssertContained realpaths each entry but was handed the raw dest as
+ * its root, so wherever the destination itself sits under a symlinked path the
+ * two strings can never match and every legitimate extraction is rejected. On
+ * macOS that is any temp dir — /var is a symlink to /private/var — which is why
+ * the tar branch's post-walk had never been exercised: it is Linux-only in
+ * practice and DATA_DIR there happens to be a real path. Resolving the root
+ * once here fixes the zip caller and the tar caller together.
+ */
+function assertTreeContained(dir) {
+  const root = existsSync(dir) ? realpathSync(dir) : resolve(dir);
+  walkAndAssertContained(dir, root);
 }
 
 function walkAndAssertContained(current, root) {
@@ -76,7 +141,7 @@ function walkAndAssertContained(current, root) {
     let real;
     try { real = realpathSync(full); } catch (_) { continue; }
     if (!real.startsWith(root + sep) && real !== root) {
-      throw new Error(`tar-slip: extracted entry resolves outside ${root}: ${full} -> ${real}`);
+      throw new Error(`archive-slip: extracted entry resolves outside ${root}: ${full} -> ${real}`);
     }
     if (e.isDirectory()) walkAndAssertContained(full, root);
   }
