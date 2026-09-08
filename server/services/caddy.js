@@ -631,6 +631,25 @@ export function generateCaddyfile() {
 }
 
 /**
+ * Run a command WITHOUT blocking the event loop.
+ *
+ * Every call below used to be execFileSync. The reload path spends most of a
+ * second inside them — `systemctl reload` and, when it escalates, `systemctl
+ * restart` — and with execFileSync that is the whole of Node's single thread
+ * stopped: AppCrane answered nothing at all for that window, including the
+ * health checks that decide whether an app is up, and including the response
+ * of the very request that asked for the reload.
+ *
+ * The rejection carries `.stderr` and `.message` the same way execFileSync's
+ * throw did, which is all the callers below read off it.
+ */
+async function run(file, args, opts) {
+  const { execFile } = await import('child_process');
+  const { promisify } = await import('util');
+  return promisify(execFile)(file, args, opts);
+}
+
+/**
  * Push config to Caddy admin API and reload.
  */
 export async function reloadCaddy({ force = false } = {}) {
@@ -643,7 +662,6 @@ export async function reloadCaddy({ force = false } = {}) {
   // Write Caddyfile and reload via systemctl (most reliable)
   try {
     const { writeFileSync, readFileSync, existsSync, mkdirSync, readdirSync, unlinkSync } = await import('fs');
-    const { execFileSync } = await import('child_process');
     const caddyfile = generateCaddyfile();
 
     // Pre-apply validation: write to a tmp path, run `caddy adapt` against
@@ -662,8 +680,8 @@ export async function reloadCaddy({ force = false } = {}) {
     const tmpPath = '/tmp/Caddyfile.appcrane-validate';
     writeFileSync(tmpPath, caddyfile);
     try {
-      execFileSync('caddy', ['adapt', '--config', tmpPath, '--adapter', 'caddyfile'], {
-        timeout: 8000, stdio: 'pipe',
+      await run('caddy', ['adapt', '--config', tmpPath, '--adapter', 'caddyfile'], {
+        timeout: 8000,
       });
     } catch (validateErr) {
       const detail = validateErr.stderr?.toString().trim() || validateErr.message;
@@ -709,7 +727,7 @@ export async function reloadCaddy({ force = false } = {}) {
     }
 
     writeFileSync(livePath, caddyfile);
-    execFileSync('systemctl', ['reload', 'caddy'], { timeout: 10000, stdio: 'pipe' });
+    await run('systemctl', ['reload', 'caddy'], { timeout: 10000 });
 
     // Post-reload verification. systemctl reload returns 0 even when Caddy
     // logs the reload but rejects the config internally. Hit the admin API
@@ -725,7 +743,7 @@ export async function reloadCaddy({ force = false } = {}) {
     if (!adminOk) {
       log.warn('Caddy admin API not responsive after reload — escalating to restart.');
       try {
-        execFileSync('systemctl', ['restart', 'caddy'], { timeout: 15000, stdio: 'pipe' });
+        await run('systemctl', ['restart', 'caddy'], { timeout: 15000 });
         log.info('Caddy restarted after unresponsive reload.');
         return { success: true, restarted: true };
       } catch (restartErr) {
@@ -740,8 +758,7 @@ export async function reloadCaddy({ force = false } = {}) {
     log.error(`Caddy reload failed: ${e.message}`);
     // Try restart instead of reload
     try {
-      const { execFileSync } = await import('child_process');
-      execFileSync('systemctl', ['restart', 'caddy'], { timeout: 15000, stdio: 'pipe' });
+      await run('systemctl', ['restart', 'caddy'], { timeout: 15000 });
       log.info('Caddy restarted (reload failed)');
       return { success: true, restarted: true };
     } catch (e2) {

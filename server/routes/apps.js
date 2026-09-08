@@ -149,6 +149,39 @@ import { parseImageRef } from '../services/imageSource.js';
 
 const router = Router();
 
+/**
+ * Reload Caddy AFTER this response has gone out, never before it (v2.65.4).
+ *
+ * reloadCaddy() cycles the proxy the response has to travel back THROUGH, and
+ * it escalates to `systemctl restart caddy` whenever the admin API does not
+ * answer after a reload (services/caddy.js). A restart destroys every
+ * connection Caddy holds, this one included, so the client never receives its
+ * 201/200 — it sees a socket closed with no response bytes and re-sends. The
+ * re-send finds the work already done, and the route answers it honestly and
+ * uselessly: a create comes back 409 DUPLICATE for a slug the caller had just
+ * successfully created, a delete comes back 404 NOT_FOUND for an app it had
+ * just successfully deleted.
+ *
+ * That is not hypothetical. On a fresh random slug that had never existed:
+ *   CREATE cadtest-veppu 409 660ms | row exists? true
+ *   DELETE cadtest-veppu 404 648ms | row exists? false
+ * An operator reading those answers increments the slug and tries again, which
+ * is how one instance accumulated six orphaned `bookstack`..`bookstack-6` rows,
+ * every one of them created by a request that reported a conflict.
+ *
+ * 'finish' fires once the response has been handed to the socket, so the bytes
+ * are out before Caddy is touched. The reload still happens, still logs, and
+ * still cannot fail the request — which is correct: routing config is not what
+ * the caller asked about, and it is reconciled on boot and by reconcile.js.
+ */
+export function reloadCaddyAfterResponse(res, label, reload = reloadCaddy) {
+  res.once('finish', () => {
+    reload()
+      .then(r => { if (!r.success) log.warn(`Caddy reload after ${label} failed: ${r.error}`); })
+      .catch(e => log.warn(`Caddy reload after ${label}: ${e.message}`));
+  });
+}
+
 // Owners we know can't be real GitHub accounts. Catches the placeholder
 // patterns (e.g. github.com/local/foo) the 2026-05-02 triage flagged on
 // `healthchampion`.
@@ -654,11 +687,8 @@ router.post('/', requireAuth, auditMiddleware('app-create'), async (req, res) =>
 
   const app = db.prepare('SELECT * FROM apps WHERE id = ?').get(appId);
 
-  // Update Caddy reverse proxy config
-  const caddyResult = await reloadCaddy();
-  if (!caddyResult.success) {
-    log.warn(`Caddy reload failed after app create: ${caddyResult.error}`);
-  }
+  // Update Caddy reverse proxy config — after the 201 is on the wire.
+  reloadCaddyAfterResponse(res, 'app create');
 
   // Start health checks for the new app
   try {
@@ -1562,8 +1592,8 @@ router.delete('/:slug', requireAppAccess, auditMiddleware('app-delete'), async (
     db.prepare('DELETE FROM apps WHERE id = ?').run(appId);
   })();
 
-  // Update Caddy config (removes app routes)
-  await reloadCaddy().catch(e => log.warn(`Caddy reload after delete: ${e.message}`));
+  // Update Caddy config (removes app routes) — after the 200 is on the wire.
+  reloadCaddyAfterResponse(res, 'app delete');
 
   res.json({
     message: `App '${slug}' deleted`,
