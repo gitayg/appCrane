@@ -8,6 +8,7 @@ import { Login } from './components/Login'
 import { Dashboard } from './pages/Dashboard'
 import { Applications } from './pages/Applications'
 import { Catalog } from './pages/Catalog'
+import { Audit } from './pages/Audit'
 import { AppStudio } from './pages/AppStudio'
 import { Settings } from './pages/Settings'
 import { Docs } from './pages/Docs'
@@ -182,6 +183,10 @@ export function AdminApp() {
               every logged-in user browses it, and only the deploy button is
               conditioned on `platform.create_app` (reported by the payload). */}
           <Route path="/catalog"     element={<Layout><Catalog /></Layout>} />
+          {/* Cross-app audit log. No client-side gate: /api/audit is
+              permission-scoped server-side and returns an empty list — not a
+              403 — to a caller with no auditable apps. */}
+          <Route path="/audit"       element={<Layout><Audit /></Layout>} />
           {/* Routes moved to Settings sub-tabs in v1.27.x — keep redirects
               so old bookmarks still work. */}
           <Route path="/users-page"  element={<Navigate to="/settings#users" replace />} />

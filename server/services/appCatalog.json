@@ -8,6 +8,7 @@
     "home": "https://akaunting.com",
     "license": "NOASSERTION",
     "short": "Small-business accounting and invoicing",
+    "port": 80,
     "needs": {
       "engine": "mariadb",
       "required": true,
@@ -77,6 +78,7 @@
     "home": "https://lightdash.com",
     "license": "NOASSERTION",
     "short": "BI layered directly on your dbt models",
+    "port": 8080,
     "needs": {
       "engine": "postgres",
       "required": true,
@@ -99,6 +101,7 @@
     "home": "https://metabase.com",
     "license": "NOASSERTION",
     "short": "Ask questions of your data without SQL",
+    "port": 3000,
     "needs": {
       "engine": "postgres",
       "required": false,
@@ -122,6 +125,7 @@
     "home": "http://redash.io/",
     "license": "BSD-2-Clause",
     "short": "Query many data sources and chart the results",
+    "port": 5000,
     "needs": {
       "engine": "postgres",
       "required": true,
@@ -138,6 +142,8 @@
     "home": "https://superset.apache.org/",
     "license": "Apache-2.0",
     "short": "Dashboards and exploration at data-warehouse scale",
+    "port": 8088,
+    "health": "/health",
     "needs": {
       "engine": "postgres",
       "required": false,
@@ -161,6 +167,7 @@
     "home": "https://www.espocrm.com",
     "license": "AGPL-3.0",
     "short": "Lightweight PHP CRM, easy to self-host",
+    "port": 80,
     "needs": {
       "engine": "mariadb",
       "required": true,
@@ -183,7 +190,8 @@
     "image": "webkul/krayin",
     "home": "https://krayincrm.com",
     "license": "MIT",
-    "short": "Laravel CRM for small sales teams"
+    "short": "Laravel CRM for small sales teams",
+    "port": 80
   },
   {
     "name": "Twenty",
@@ -210,6 +218,7 @@
     "home": "https://bagisto.com",
     "license": "MIT",
     "short": "Laravel e-commerce with multi-vendor support",
+    "port": 80,
     "needs": {
       "engine": "mariadb",
       "required": false,
@@ -274,7 +283,9 @@
     "image": "vectorim/element-web",
     "home": "https://element.io",
     "license": "AGPL-3.0",
-    "short": "Matrix client for federated, encrypted chat"
+    "short": "Matrix client for federated, encrypted chat",
+    "port": 80,
+    "health": "/config.json"
   },
   {
     "name": "Mattermost",
@@ -285,6 +296,8 @@
     "home": "https://mattermost.com",
     "license": "NOASSERTION",
     "short": "Secure team messaging, Slack alternative",
+    "port": 8065,
+    "health": "/api/v4/system/ping",
     "needs": {
       "engine": "postgres",
       "required": true,
@@ -302,6 +315,8 @@
     "home": "https://rocket.chat/",
     "license": "NOASSERTION",
     "short": "Team chat with compliance controls",
+    "port": 3000,
+    "url_env": "ROOT_URL",
     "needs": {
       "engine": "mongo",
       "required": true,
@@ -319,6 +334,7 @@
     "home": "https://zulip.com",
     "license": "Apache-2.0",
     "short": "Threaded team chat organised by topic",
+    "port": 80,
     "needs": {
       "engine": "postgres",
       "required": true,
@@ -342,6 +358,7 @@
     "home": "https://www.mayan-edms.com",
     "license": "NOASSERTION",
     "short": "Document management with workflows and metadata",
+    "port": 8000,
     "needs": {
       "engine": "postgres",
       "required": true,
@@ -359,6 +376,8 @@
     "home": "http://docs.paperless-ngx.com/",
     "license": "GPL-3.0",
     "short": "Scan, OCR and archive paper documents",
+    "port": 8000,
+    "health": "/",
     "needs": {
       "engine": "postgres",
       "required": false,
@@ -382,6 +401,7 @@
     "home": "https://papermerge.com",
     "license": "Apache-2.0",
     "short": "Document archive with OCR and tagging",
+    "port": 8000,
     "needs": {
       "engine": "postgres",
       "required": false,
@@ -405,6 +425,7 @@
     "home": "https://affine.pro",
     "license": "NOASSERTION",
     "short": "Docs, whiteboard and database in one canvas",
+    "port": 3010,
     "needs": {
       "engine": "postgres",
       "required": true,
@@ -422,6 +443,18 @@
     "home": "https://codeberg.org/bookstack/bookstack",
     "license": "MIT",
     "short": "Structured documentation in books and chapters",
+    "port": 80,
+    "health": "/status",
+    "url_env": "APP_URL",
+    "secrets": [
+      {
+        "env": "APP_KEY",
+        "bytes": 32,
+        "encoding": "base64",
+        "prefix": "base64:",
+        "label": "Laravel application key"
+      }
+    ],
     "needs": {
       "engine": "mariadb",
       "required": true,
@@ -444,6 +477,16 @@
     "home": "https://docmost.com",
     "license": "AGPL-3.0",
     "short": "Collaborative docs and wiki, real-time editing",
+    "port": 3000,
+    "url_env": "APP_URL",
+    "secrets": [
+      {
+        "env": "APP_SECRET",
+        "bytes": 32,
+        "encoding": "hex",
+        "label": "Application secret"
+      }
+    ],
     "needs": {
       "engine": "postgres",
       "required": true,
@@ -460,6 +503,23 @@
     "home": "https://www.getoutline.com",
     "license": "NOASSERTION",
     "short": "Team wiki and knowledge base, fast search",
+    "port": 3000,
+    "health": "/_health",
+    "url_env": "URL",
+    "secrets": [
+      {
+        "env": "SECRET_KEY",
+        "bytes": 32,
+        "encoding": "hex",
+        "label": "Data encryption key"
+      },
+      {
+        "env": "UTILS_SECRET",
+        "bytes": 32,
+        "encoding": "hex",
+        "label": "Internal utilities key"
+      }
+    ],
     "needs": {
       "engine": "postgres",
       "required": true,
@@ -476,6 +536,8 @@
     "home": "https://js.wiki",
     "license": "AGPL-3.0",
     "short": "Modern wiki with many auth backends",
+    "port": 3000,
+    "health": "/healthz",
     "needs": {
       "engine": "postgres",
       "required": true,
@@ -509,6 +571,7 @@
     "home": "http://axelor.com",
     "license": "NOASSERTION",
     "short": "Low-code ERP with a visual process builder",
+    "port": 8080,
     "needs": {
       "engine": "postgres",
       "required": true,
@@ -532,6 +595,8 @@
     "home": "https://www.dolibarr.org",
     "license": "GPL-3.0",
     "short": "ERP and CRM aimed at small firms and freelancers",
+    "port": 80,
+    "url_env": "DOLI_URL_ROOT",
     "needs": {
       "engine": "mariadb",
       "required": true,
@@ -565,6 +630,7 @@
     "home": "https://www.odoo.com",
     "license": "NOASSERTION",
     "short": "Full business suite \u2014 sales, stock, accounting, HR",
+    "port": 8069,
     "needs": {
       "engine": "postgres",
       "required": true,
@@ -588,6 +654,7 @@
     "home": "https://code.tryton.org/tryton",
     "license": "NOASSERTION",
     "short": "Modular ERP, three-tier, heavily customisable",
+    "port": 8000,
     "needs": {
       "engine": "postgres",
       "required": true,
@@ -628,6 +695,7 @@
     "home": "https://www.opensignlabs.com",
     "license": "NOASSERTION",
     "short": "Digital signing with audit trails",
+    "port": 3000,
     "needs": {
       "engine": "mongo",
       "required": true,
@@ -644,6 +712,31 @@
     "home": "https://formbricks.com",
     "license": "NOASSERTION",
     "short": "Surveys and in-product feedback",
+    "port": 3000,
+    "url_env": [
+      "WEBAPP_URL",
+      "NEXTAUTH_URL"
+    ],
+    "secrets": [
+      {
+        "env": "ENCRYPTION_KEY",
+        "bytes": 32,
+        "encoding": "hex",
+        "label": "Field encryption key"
+      },
+      {
+        "env": "NEXTAUTH_SECRET",
+        "bytes": 32,
+        "encoding": "hex",
+        "label": "NextAuth session secret"
+      },
+      {
+        "env": "CRON_SECRET",
+        "bytes": 32,
+        "encoding": "hex",
+        "label": "Cron endpoint secret"
+      }
+    ],
     "needs": {
       "engine": "postgres",
       "required": true,
@@ -660,6 +753,7 @@
     "home": "https://www.limesurvey.org",
     "license": "NOASSERTION",
     "short": "Long-form surveys with complex branching",
+    "port": 8080,
     "needs": {
       "engine": "mariadb",
       "required": true,
@@ -693,6 +787,8 @@
     "home": "https://www.horilla.com/",
     "license": "LGPL-2.1",
     "short": "Django HR suite with payroll and onboarding",
+    "port": 8000,
+    "health": "/health/",
     "needs": {
       "engine": "postgres",
       "required": true,
@@ -716,6 +812,7 @@
     "home": "https://www.orangehrm.com",
     "license": "GPL-3.0",
     "short": "HR management \u2014 leave, time, recruitment",
+    "port": 80,
     "needs": {
       "engine": "mariadb",
       "required": true,
@@ -733,6 +830,17 @@
     "home": "https://www.chatwoot.com/help-center",
     "license": "NOASSERTION",
     "short": "Customer support inbox across chat and email",
+    "port": 3000,
+    "health": "/health",
+    "url_env": "FRONTEND_URL",
+    "secrets": [
+      {
+        "env": "SECRET_KEY_BASE",
+        "bytes": 64,
+        "encoding": "hex",
+        "label": "Rails secret key base"
+      }
+    ],
     "needs": {
       "engine": "postgres",
       "required": true,
@@ -755,6 +863,7 @@
     "home": "https://freescout.net",
     "license": "AGPL-3.0",
     "short": "Shared inbox helpdesk, Help Scout alternative",
+    "port": 80,
     "needs": {
       "engine": "mariadb",
       "required": true,
@@ -778,6 +887,7 @@
     "home": "https://www.uvdesk.com",
     "license": "OSL-3.0",
     "short": "Symfony helpdesk with a ticket workflow engine",
+    "port": 80,
     "needs": {
       "engine": "mariadb",
       "required": false,
@@ -817,6 +927,7 @@
     "home": "https://docs.inventree.org",
     "license": "MIT",
     "short": "Parts and stock control with a REST API",
+    "port": 8000,
     "needs": {
       "engine": "postgres",
       "required": true,
@@ -840,6 +951,17 @@
     "home": "https://snipeitapp.com",
     "license": "AGPL-3.0",
     "short": "IT asset tracking \u2014 who has which laptop",
+    "port": 80,
+    "url_env": "APP_URL",
+    "secrets": [
+      {
+        "env": "APP_KEY",
+        "bytes": 32,
+        "encoding": "base64",
+        "prefix": "base64:",
+        "label": "Laravel application key"
+      }
+    ],
     "needs": {
       "engine": "mariadb",
       "required": true,
@@ -862,7 +984,8 @@
     "image": "senaite/senaite:2.x",
     "home": "https://senaite.com",
     "license": "GPL-2.0",
-    "short": "Lab information management for testing labs"
+    "short": "Lab information management for testing labs",
+    "port": 8080
   },
   {
     "name": "Appsmith",
@@ -873,6 +996,8 @@
     "home": "https://www.appsmith.com",
     "license": "Apache-2.0",
     "short": "Build internal tools and admin panels visually",
+    "port": 80,
+    "health": "/",
     "needs": {
       "engine": "postgres",
       "required": false,
@@ -890,6 +1015,8 @@
     "home": "https://baserow.io",
     "license": "NOASSERTION",
     "short": "Airtable-style database, no-code",
+    "port": 80,
+    "health": "/api/_health/",
     "needs": {
       "engine": "postgres",
       "required": true,
@@ -911,7 +1038,8 @@
     "image": "budibase/budibase",
     "home": "https://budibase.com",
     "license": "NOASSERTION",
-    "short": "Internal apps, forms and automations"
+    "short": "Internal apps, forms and automations",
+    "port": 80
   },
   {
     "name": "NocoDB",
@@ -922,6 +1050,7 @@
     "home": "https://nocodb.com",
     "license": "NOASSERTION",
     "short": "Turn any database into a spreadsheet UI",
+    "port": 8080,
     "needs": {
       "engine": "postgres",
       "required": false,
@@ -939,6 +1068,7 @@
     "home": "https://teable.ai",
     "license": "NOASSERTION",
     "short": "Spreadsheet-database hybrid on Postgres",
+    "port": 3000,
     "needs": {
       "engine": "postgres",
       "required": true,
@@ -979,6 +1109,8 @@
     "home": "https://listmonk.app",
     "license": "AGPL-3.0",
     "short": "Newsletters and mailing lists, very fast",
+    "port": 9000,
+    "health": "/health",
     "needs": {
       "engine": "postgres",
       "required": true,
@@ -1002,6 +1134,7 @@
     "home": "https://www.mautic.org",
     "license": "NOASSERTION",
     "short": "Marketing automation and campaign journeys",
+    "port": 80,
     "needs": {
       "engine": "mariadb",
       "required": true,
@@ -1023,7 +1156,9 @@
     "image": "grafana/loki",
     "home": "https://grafana.com/oss/loki",
     "license": "AGPL-3.0",
-    "short": "Log aggregation, queried the way Prometheus queries metrics"
+    "short": "Log aggregation, queried the way Prometheus queries metrics",
+    "port": 3100,
+    "health": "/ready"
   },
   {
     "name": "Focalboard",
@@ -1033,7 +1168,8 @@
     "image": "mattermost/focalboard",
     "home": "https://www.focalboard.com",
     "license": "NOASSERTION",
-    "short": "Kanban boards \u2014 Trello alternative"
+    "short": "Kanban boards \u2014 Trello alternative",
+    "port": 8000
   },
   {
     "name": "Kanboard",
@@ -1044,6 +1180,8 @@
     "home": "https://kanboard.org",
     "license": "MIT",
     "short": "Minimal kanban, very light to run",
+    "port": 80,
+    "health": "/healthcheck.php",
     "needs": {
       "engine": "postgres",
       "required": false,
@@ -1061,6 +1199,8 @@
     "home": "https://leantime.io",
     "license": "AGPL-3.0",
     "short": "Project management aimed at non-project managers",
+    "port": 8080,
+    "health": "/",
     "needs": {
       "engine": "mariadb",
       "required": true,
@@ -1084,6 +1224,7 @@
     "home": "https://www.openproject.org",
     "license": "GPL-3.0",
     "short": "Classic project management with Gantt charts",
+    "port": 80,
     "needs": {
       "engine": "postgres",
       "required": true,
@@ -1101,6 +1242,8 @@
     "home": "https://vikunja.io",
     "license": "AGPL-3.0",
     "short": "To-do and project lists, list or kanban view",
+    "port": 3456,
+    "health": "/health",
     "needs": {
       "engine": "postgres",
       "required": false,
@@ -1124,6 +1267,7 @@
     "home": "https://wekan.fi",
     "license": "MIT",
     "short": "Open kanban board, Meteor-based",
+    "port": 8080,
     "needs": {
       "engine": "mongo",
       "required": true,
@@ -1140,6 +1284,9 @@
     "home": "https://cal.diy",
     "license": "MIT",
     "short": "Scheduling and booking pages \u2014 Calendly alternative",
+    "port": 3000,
+    "health": "/",
+    "url_env": "NEXT_PUBLIC_WEBAPP_URL",
     "needs": {
       "engine": "postgres",
       "required": true,
@@ -1157,6 +1304,8 @@
     "home": "https://easyappointments.org",
     "license": "GPL-3.0",
     "short": "Appointment booking for service businesses",
+    "port": 80,
+    "url_env": "BASE_URL",
     "needs": {
       "engine": "mariadb",
       "required": true,
@@ -1180,6 +1329,8 @@
     "home": "https://rallly.co",
     "license": "AGPL-3.0",
     "short": "Group meeting polls, no account needed",
+    "port": 3000,
+    "health": "/api/status",
     "needs": {
       "engine": "postgres",
       "required": true,
@@ -1196,6 +1347,8 @@
     "home": "https://dependencytrack.org",
     "license": "Apache-2.0",
     "short": "SBOM analysis and supply-chain risk",
+    "port": 8080,
+    "health": "/health",
     "needs": {
       "engine": "postgres",
       "env": {
@@ -1226,6 +1379,8 @@
     "home": "https://www.simplerisk.com",
     "license": "MPL-2.0",
     "short": "Risk management and assessment tracking",
+    "port": 80,
+    "health": "/",
     "needs": {
       "engine": "mariadb",
       "env": {

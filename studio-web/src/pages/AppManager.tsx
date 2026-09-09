@@ -803,7 +803,15 @@ function LogDrawer({ open, slug, env, tab, deployId, onClose, onTabChange }: Log
 
   const fetchRuntime = useCallback(async () => {
     try {
-      const d = await adminApi.get<RuntimeLogsResp>(`/api/apps/${slug}/logs/${env}?lines=${lineCount}`)
+      // /api/<slug>/logs/<env>, NOT /api/apps/<slug>/... — logs.js is mounted at
+      // the bare '/api' (server/index.js), so its `/:slug/logs/:env` route lives
+      // one segment higher than every /api/apps router. This read
+      // /api/apps/... and had therefore been 404ing for as long as it existed;
+      // the drawer's catch rendered "Error loading logs", which reads as "your
+      // app produced no logs" rather than "this URL does not exist". Measured
+      // against production: /api/apps/<slug>/logs/sandbox → 404 NOT_FOUND,
+      // /api/<slug>/logs/sandbox → 200 with the container's output.
+      const d = await adminApi.get<RuntimeLogsResp>(`/api/${slug}/logs/${env}?lines=${lineCount}`)
       setLines(d.logs || [])
       setError(null)
     } catch {

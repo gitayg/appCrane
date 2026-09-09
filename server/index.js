@@ -1030,7 +1030,7 @@ app.use('/api/github-service', githubServiceRoutes); // service-account config +
 app.use('/api/apps', whatsNewRoutes);     // /api/apps/:slug/whats-new — per-user version dialog state
 app.use('/api/whats-new', platformWhatsNewRoutes); // /api/whats-new/platform — AppCrane update dialog (platform admins)
 
-app.use('/api', logsRoutes);             // /api/audit, /api/apps/:slug/audit
+app.use('/api', logsRoutes);             // /api/audit, /api/:slug/audit, /api/:slug/logs/:env
 app.use('/api', monitoringRoutes);       // /api/server/health
 app.use('/api/users', usersRoutes);
 app.use('/api/apps', webhooksRoutes);     // /api/apps/:slug/webhook config
@@ -1175,6 +1175,10 @@ app.get('/settings', (req, res) => sendHtml(res, adminSpa));
 // SPA route. test/spa-routes.test.js now fails when a route is added to the SPA
 // and not to this list.
 app.get('/catalog', (req, res) => sendHtml(res, adminSpa));
+// v2.66.0: /audit is the permission-scoped audit view — no longer admin-only,
+// so it is reachable (and shareable as a link) by anyone holding
+// app.audit.view on at least one app. Same rule as every entry in this block.
+app.get('/audit', (req, res) => sendHtml(res, adminSpa));
 // Found by the same test: /skills is a client-side redirect to /settings#skills,
 // but a direct load never reaches React to be redirected.
 app.get('/skills', (req, res) => sendHtml(res, adminSpa));

@@ -61,6 +61,16 @@ export const PERMISSIONS = [
     label: 'View app requests',
     description: 'See the enhancement/bug requests filed against this app on the Requests page (and the sidebar badge). Owners can always see their own app\'s requests; flip this on for Admin or User to widen the triage view.',
   },
+  {
+    key: 'app.logs.view',
+    label: 'View runtime logs',
+    description: 'Read the container logs for this app\'s environments. Runtime logs routinely contain bearer tokens, e-mail addresses and full request paths, so this is deliberately narrower than app membership (default: Owner only).',
+  },
+  {
+    key: 'app.audit.view',
+    label: 'View the audit trail',
+    description: 'Read the audit log for this app — who deployed, who changed env vars, who was granted access. Also scopes what this person sees on the platform-wide audit page.',
+  },
 ];
 
 const PERMISSION_KEYS = new Set(PERMISSIONS.map(p => p.key));
@@ -196,6 +206,8 @@ export function resetToDefaults(permissionKeys = null) {
     'code.modify_repo_settings': { user: 0, admin: 0, owner: 1, platform_admin: 1 },
     'app.delete':                { user: 0, admin: 0, owner: 1, platform_admin: 1 },
     'request.view_app':          { user: 0, admin: 0, owner: 1, platform_admin: 1 },
+    'app.logs.view':             { user: 0, admin: 0, owner: 1, platform_admin: 1 },
+    'app.audit.view':            { user: 0, admin: 1, owner: 1, platform_admin: 1 },
   };
   const subset = {};
   const keys = permissionKeys || Object.keys(DEFAULTS);

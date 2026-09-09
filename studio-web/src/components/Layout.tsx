@@ -95,6 +95,14 @@ const NAV: NavItem[] = [
   // may browse it; only the per-row Deploy button is conditioned on
   // `platform.create_app`, which the page learns from GET /api/catalog.
   { id: 'catalog',      label: 'Catalogue',    href: '/catalog',      icon: <StoreIcon /> },
+  // The cross-app audit log. Deliberately ungated, like Catalogue above:
+  // GET /api/audit is permission-scoped server-side (platform admins see
+  // everything, everyone else sees the apps where they hold
+  // `app.audit.view`) and answers a caller with no such apps with an empty
+  // list, not a 403. Since that permission is configurable in Settings, no
+  // client-side role test can predict who it will answer usefully — the page
+  // says "no audit entries you can see" instead.
+  { id: 'audit',        label: 'Audit',        href: '/audit',        icon: <Icon.ShieldCheck /> },
   { id: 'docs',         label: 'Docs',         href: '/docs',         icon: <Icon.Book /> },
   { id: 'settings',     label: 'Settings',     href: '/settings',     icon: <Icon.Settings /> },
 ]
@@ -437,7 +445,7 @@ export function Layout({ children, subItems, activeSub }: Props) {
 
   // v2.14.3: split the nav — primary items (+ the Apps list) at the top, the
   // admin/config items pinned to the bottom of the rail.
-  const BOTTOM_NAV = new Set(['applications', 'docs', 'settings'])
+  const BOTTOM_NAV = new Set(['applications', 'audit', 'docs', 'settings'])
   const gatedNav = NAV.filter(p => {
     if (p.platformAdminOnly && userRole !== 'platform_admin') return false
     if (p.adminOnly && !adminLike) return false

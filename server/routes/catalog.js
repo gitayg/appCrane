@@ -25,6 +25,42 @@ import {
 // second authorization surface to keep in sync with the first, and the pair
 // would drift the first time one of them gained a check. The page posts to the
 // existing endpoint.
+//
+// INSTALL HINTS. Beyond `needs` (the database wiring), a manifest entry may
+// carry four optional fields, all served verbatim by GET / below because the
+// whole entry is spread into the response:
+//
+//   port    number    the port the image actually listens on. AppCrane defaults
+//                     to 3000, which is what its OWN builds listen on; a
+//                     third-party image rarely agrees, and BookStack needed 80.
+//   health  string    a path that answers 200 on a healthy container. The
+//                     default /api/health is AppCrane's own convention and
+//                     almost no third-party image serves it, so the probe 404s
+//                     and a working container is torn down as unhealthy.
+//   url_env string|[] variable(s) that must hold the app's OWN base URL. Same
+//                     idiom as needs.url_env one level up: that one names the
+//                     variable a DATABASE url goes in, this one names the
+//                     variable the APP's url goes in. Only the browser can fill
+//                     it — the value depends on the routing chosen in the
+//                     install dialog, which the server has no part in.
+//   secrets array     per-install secrets the app cannot boot without, e.g.
+//                     Laravel's APP_KEY.
+//
+// A `secrets` entry is a DECLARATION AND NEVER A VALUE — {env, bytes, encoding,
+// prefix, label} and nothing more. Nothing on this route generates, stores or
+// returns a secret, and that is deliberate rather than incidental: this
+// endpoint is readable by EVERY logged-in user (requireAuth, not requireAdmin —
+// read is not deploy), so a generated value passing through it would be a
+// session-encryption key on a widely-readable response. The bytes are drawn in
+// the installing operator's browser with crypto.getRandomValues and posted
+// straight to PUT /api/apps/:slug/env/production, which encrypts them at rest.
+// See studio-web/src/pages/Catalog.tsx generateSecret().
+//
+// Every one of the four is OPTIONAL and allowed to be null. Null means "not
+// established from evidence", which is a real answer and a deliberately common
+// one: a wrong port produces a deploy that fails its health check and destroys
+// the container, which is strictly worse than a blank field the operator fills
+// in. Do not populate one of these from a plausible guess.
 
 const router = Router();
 router.use(requireAuth);

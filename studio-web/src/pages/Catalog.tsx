@@ -55,9 +55,35 @@ interface CatalogEntry {
   license?: string
   short?: string
   needs?: NeedsField            // absent = the app runs standalone
+  // The four things the catalogue used to know nothing about. All OPTIONAL and
+  // all allowed to be null: "we could not establish this from evidence" is a
+  // real answer, and a null leaves the operator to fill the field in rather
+  // than handing them a wrong value that fails the health check and destroys
+  // the container. See the block above normalizeInstallHints().
+  port?: number | null          // the port the IMAGE listens on, not 3000
+  health?: string | null        // a path that answers 200 on a healthy container
+  url_env?: string | string[] | null   // env var(s) that must hold the app's OWN url
+  secrets?: CatalogSecret[] | null     // per-install secrets, generated in THIS browser
   enrichment?: Enrichment | null
   installed?: InstalledRef[]
   is_installed?: boolean
+}
+
+/**
+ * One secret the app cannot boot without and that must be different for every
+ * install — BookStack's Laravel APP_KEY is the type case: without it the
+ * container prints "The application key is missing, halting init!" and dies.
+ *
+ * A declaration, never a value. The manifest says what shape of random string
+ * the app needs; the bytes themselves are drawn in the operator's browser (see
+ * generateSecret) and go straight to the encrypting env-var route.
+ */
+interface CatalogSecret {
+  env?: string                  // the variable name, e.g. 'APP_KEY'
+  bytes?: number                // how many random bytes before encoding
+  encoding?: string             // 'base64' | 'base64url' | 'hex'
+  prefix?: string               // literal prefix the app expects, e.g. 'base64:'
+  label?: string                // what it is, for the dialog
 }
 
 interface EnrichmentStatus {
@@ -297,6 +323,130 @@ function normalizeNeeds(raw: unknown): DbRequirement | null {
     extras: named.filter((_, i) => i !== idx).map(i => prettyEngine(i.engine as string)),
     note: typeof primary.note === 'string' && primary.note.trim() ? primary.note.trim() : undefined,
   }
+}
+
+// ---------------------------------------------------------------------------
+// Install hints: port, health, url_env, secrets
+// ---------------------------------------------------------------------------
+//
+// Installing BookStack needed four settings the catalogue could not supply, and
+// every one of them was a failed deploy first: container_port 80 (AppCrane
+// defaults to 3000, every linuxserver/* image serves nginx on 80), health_path
+// /status (AppCrane defaults to /api/health, which is AppCrane's own convention
+// and which almost no third-party image serves), APP_KEY (Laravel will not boot
+// without one) and APP_URL (or BookStack builds absolute links against the
+// wrong base behind the stripped path prefix). A catalogue whose user has to
+// know the app better than the catalogue does is not doing its job.
+//
+// Read defensively for the same reason `needs` is: these are hand-written into
+// the manifest, and this page must degrade to "the operator fills it in", never
+// to a crash or to a value that is confidently wrong.
+//
+// WHY url_env AND NOT A SECOND IDIOM. `needs.url_env` already means "this app
+// wants one variable holding a whole URL, and here is what it calls it" — the
+// deployer writes the managed database's URL there (server/services/deployer.js
+// buildManagedDbEnv). The app's own base URL is the same shape of fact about a
+// different URL, so it is the same field name one level up: entry.url_env. A
+// list is accepted because some apps split the fact across two variables that
+// must agree — Formbricks documents NEXTAUTH_URL as "should be the same as
+// WEBAPP_URL", and setting one without the other is a half-configured app.
+
+const SECRET_ENCODINGS = new Set(['base64', 'base64url', 'hex'])
+// 16 bytes is 128 bits, the floor for anything worth generating; 256 is far
+// past every documented requirement in the manifest and is here to stop a typo
+// in `bytes` asking the browser for a megabyte of entropy.
+const SECRET_MIN_BYTES = 16
+const SECRET_MAX_BYTES = 256
+
+interface SecretSpec { env: string; bytes: number; encoding: string; prefix: string; label: string }
+
+/** The manifest's `secrets`, filtered to the entries this page can honour. */
+function normalizeSecrets(raw: unknown): SecretSpec[] {
+  if (!Array.isArray(raw)) return []
+  const out: SecretSpec[] = []
+  const seen = new Set<string>()
+  for (const v of raw) {
+    if (!v || typeof v !== 'object') continue
+    const s = v as CatalogSecret
+    const env = typeof s.env === 'string' ? s.env.trim() : ''
+    // Same gate as the database variable names: PUT /api/apps/:slug/env/:env
+    // rejects a key that is not an identifier, and a manifest typo must not
+    // become a 400 the operator cannot act on.
+    if (!ENV_KEY_RE.test(env) || seen.has(env)) continue
+    const bytes = typeof s.bytes === 'number' && Number.isInteger(s.bytes)
+      && s.bytes >= SECRET_MIN_BYTES && s.bytes <= SECRET_MAX_BYTES ? s.bytes : 32
+    const encoding = typeof s.encoding === 'string' && SECRET_ENCODINGS.has(s.encoding) ? s.encoding : 'hex'
+    seen.add(env)
+    out.push({
+      env,
+      bytes,
+      encoding,
+      prefix: typeof s.prefix === 'string' ? s.prefix : '',
+      label: typeof s.label === 'string' && s.label.trim() ? s.label.trim() : env,
+    })
+  }
+  return out
+}
+
+/** The manifest's `url_env`, as a list of variable names. */
+function normalizeUrlEnv(raw: unknown): string[] {
+  const list = Array.isArray(raw) ? raw : raw === null || raw === undefined ? [] : [raw]
+  const out: string[] = []
+  for (const v of list) {
+    if (typeof v !== 'string') continue
+    const name = v.trim()
+    if (ENV_KEY_RE.test(name) && !out.includes(name)) out.push(name)
+  }
+  return out
+}
+
+/**
+ * One secret's value, drawn HERE, in the operator's browser.
+ *
+ * Deliberately not on the server and deliberately not through the catalogue
+ * API. The catalogue endpoint is readable by every logged-in user (see
+ * server/routes/catalog.js — read is not deploy), so a generated value passing
+ * through it would be a secret on a widely-readable response. Generating it in
+ * the page means the value exists in exactly two places: this tab, for as long
+ * as submit() runs, and the app's own encrypted environment.
+ *
+ * crypto.getRandomValues, never Math.random: this is a session-encryption key.
+ */
+function generateSecret(spec: SecretSpec): string {
+  const buf = new Uint8Array(spec.bytes)
+  crypto.getRandomValues(buf)
+  let body: string
+  if (spec.encoding === 'hex') {
+    body = Array.from(buf, b => b.toString(16).padStart(2, '0')).join('')
+  } else {
+    let bin = ''
+    for (const b of buf) bin += String.fromCharCode(b)
+    body = btoa(bin)
+    // base64url is base64's URL-safe alphabet with the padding dropped — some
+    // apps read the value straight into a URL or a cookie name.
+    if (spec.encoding === 'base64url') body = body.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+  }
+  return spec.prefix + body
+}
+
+/**
+ * The URL this app will actually be reached at, which is the only thing an
+ * APP_URL-shaped variable can correctly hold and the one fact that is not
+ * knowable until the operator has chosen the routing in this dialog.
+ *
+ * No trailing slash: every app in the manifest that documents one of these
+ * documents it without (BookStack's own README: `https://bookstack.mydomain.com`),
+ * and an app that wants one appends it.
+ */
+function appBaseUrl(routing: RoutingChoice, domain: string, slug: string): string {
+  if (routing === 'domain' && domain.trim()) {
+    const d = domain.trim().replace(/\/+$/, '')
+    return /^https?:\/\//i.test(d) ? d : 'https://' + d
+  }
+  // The AppCrane path: Caddy serves the app at /<slug>/ on this origin and
+  // strips the prefix, so the container never sees the prefix and cannot
+  // work it out — which is precisely why it has to be told.
+  return window.location.origin.replace(/\/+$/, '') + '/' + slug
 }
 
 /** A slug POST /api/apps will accept: ^[a-z0-9][a-z0-9-]*$ */
@@ -850,6 +1000,9 @@ function InstallDialog({ entry, onClose, onCreated }: {
   const need = useMemo(() => normalizeNeeds(entry.needs), [entry.needs])
   const canProvision = need?.engine != null
 
+  const secretSpecs = useMemo(() => normalizeSecrets(entry.secrets), [entry.secrets])
+  const urlEnvs = useMemo(() => normalizeUrlEnv(entry.url_env), [entry.url_env])
+
   const [source, setSource] = useState<SourceChoice>(hasImage ? 'image' : 'github')
   const [name, setName] = useState(entry.name)
   const [slug, setSlug] = useState(slugify(entry.slug || entry.name))
@@ -859,8 +1012,19 @@ function InstallDialog({ entry, onClose, onCreated }: {
   const [routing, setRouting] = useState<RoutingChoice>('appcrane')
   const [domain, setDomain] = useState('')
   const [authMode, setAuthMode] = useState<'authenticated' | 'headless'>('authenticated')
-  const [containerPort, setContainerPort] = useState('')
-  const [healthPath, setHealthPath] = useState('')
+  // PREFILLED FROM THE MANIFEST, still editable. A blank here means AppCrane's
+  // own defaults — 3000 and /api/health — which are right for an app AppCrane
+  // builds and wrong for very nearly every third-party image. Where the
+  // catalogue knows the real answer it is the starting value, and where it does
+  // not (see the nulls in appCatalog.json) the field starts blank exactly as
+  // before, because a confident wrong port fails the health check and destroys
+  // the container, which is worse than asking.
+  const [containerPort, setContainerPort] = useState(
+    typeof entry.port === 'number' && Number.isInteger(entry.port) ? String(entry.port) : '',
+  )
+  const [healthPath, setHealthPath] = useState(
+    typeof entry.health === 'string' && entry.health.startsWith('/') ? entry.health : '',
+  )
   const [ack, setAck] = useState(false)
 
   // "Provision one for me" is the default because it is the option that cannot
@@ -884,7 +1048,7 @@ function InstallDialog({ entry, onClose, onCreated }: {
   const [takenSlug, setTakenSlug] = useState<string | null>(null)
   const [warning, setWarning] = useState<string | null>(null)
   const [done, setDone] = useState<
-    { slug: string; name: string; deploying: boolean; provisioned: boolean; injectedEnv: string[] } | null
+    { slug: string; name: string; deploying: boolean; provisioned: boolean; injectedEnv: string[]; wroteEnv: string[] } | null
   >(null)
 
   const navigate = useNavigate()
@@ -968,6 +1132,12 @@ function InstallDialog({ entry, onClose, onCreated }: {
     setError(null)
     setTakenSlug(null)
     setWarning(null)
+    // Variable NAMES this page wrote itself — the generated secrets and the
+    // app's own URL. Names only: a generated secret is never rendered, logged
+    // or put in a message. Declared here rather than beside the write because
+    // the early-return paths below report it too, and an empty list there is
+    // the true answer (nothing was written yet).
+    let wroteEnv: string[] = []
     // WHICH CATALOGUE ENTRY THIS APP CAME FROM, recorded on the app row.
     //
     // Nothing else on that row identifies the entry, and the deployer needs the
@@ -1064,7 +1234,7 @@ function InstallDialog({ entry, onClose, onCreated }: {
           'The app was created on a retry after a sign-in check, but its database was NOT provisioned and its ' +
           'first deploy was NOT started. Open it under Manage to finish setting it up.',
         )
-        setDone({ slug, name: name.trim(), deploying: false, provisioned: false, injectedEnv: [] })
+        setDone({ slug, name: name.trim(), deploying: false, provisioned: false, injectedEnv: [], wroteEnv })
       } catch (err) {
         setError('Creating the app failed: ' + (err instanceof Error ? err.message : String(err)))
       }
@@ -1144,39 +1314,72 @@ function InstallDialog({ entry, onClose, onCreated }: {
           '. The first deploy was NOT started, because ' + entry.name + ' cannot serve a page without a ' +
           'database. Retry from Manage, or deploy it against a database you run yourself.',
         )
-        setDone({ slug, name: name.trim(), deploying: false, provisioned: false, injectedEnv: [] })
+        setDone({ slug, name: name.trim(), deploying: false, provisioned: false, injectedEnv: [], wroteEnv })
         setSubmitting(false)
         return
       }
     }
 
-    // A database the operator already runs is wired in as environment variables,
+    // Everything this app cannot boot without, written as environment variables
     // through the route that encrypts them at rest, BEFORE the first deploy —
     // a container started without them is the blank page this whole change
     // exists to stop. So if the write fails the deploy is not attempted: an app
     // that has not started yet is a far better state to hand back than one that
     // has started and cannot serve a page.
+    //
+    // ONE WRITE, not three. A database the operator already runs, the generated
+    // secrets and the app's own URL are all just variables the container needs
+    // before it starts; splitting them into separate PUTs would give the deploy
+    // three chances to be half-configured instead of one.
+    const vars: Record<string, string> = {}
+    const whatFailed: string[] = []
+
     if (need && dbMode === 'external') {
       const port = dbPort.trim() || (need.defaultPort ? String(need.defaultPort) : '')
-      const vars: Record<string, string> = {
-        [need.env.host]: dbHost.trim(),
-        [need.env.name]: dbName.trim(),
-        [need.env.user]: dbUser.trim(),
-        [need.env.password]: dbPassword,
-      }
+      vars[need.env.host] = dbHost.trim()
+      vars[need.env.name] = dbName.trim()
+      vars[need.env.user] = dbUser.trim()
+      vars[need.env.password] = dbPassword
       // An empty port variable is worse than an absent one: a client library
       // that would have used its own default reads '' and fails to parse it.
       if (port) vars[need.env.port] = port
+      whatFailed.push('its database connection')
+    }
+
+    // Generated HERE, in this browser, and held only long enough to be posted
+    // to the encrypting route — see generateSecret. There is no server-side
+    // generation and no round trip through the catalogue API, so the only
+    // copies that ever exist are this tab's and the app's encrypted env.
+    const generated: string[] = []
+    for (const spec of secretSpecs) {
+      vars[spec.env] = generateSecret(spec)
+      generated.push(spec.env)
+    }
+    if (generated.length) whatFailed.push('the ' + generated.join(' and ') + ' it needs to boot')
+
+    // The one fact the manifest cannot hold, because it is not a property of
+    // the app: where THIS install will answer. Behind AppCrane's Caddy the
+    // prefix is stripped before the container sees it, so an app that builds
+    // absolute links has no way to work it out and gets them all wrong.
+    const written: string[] = [...generated]
+    if (urlEnvs.length) {
+      const url = appBaseUrl(routing, domain, slug)
+      for (const v of urlEnvs) { vars[v] = url; written.push(v) }
+      whatFailed.push('its own base URL')
+    }
+
+    if (Object.keys(vars).length > 0) {
       try {
         await adminApi.put('/api/apps/' + slug + '/env/production', { vars })
+        wroteEnv = written
       } catch (err) {
         setWarning(
-          'The app was created, but writing its database connection into the environment failed: ' +
+          'The app was created, but writing ' + whatFailed.join(', ') + ' into the environment failed: ' +
           (err instanceof Error ? err.message : String(err)) +
-          '. The first deploy was NOT started, because ' + entry.name + ' cannot serve a page without a ' +
-          'database. Set the variables under Manage → Environment, then deploy from there.',
+          '. The first deploy was NOT started, because ' + entry.name + ' cannot serve a page without ' +
+          'those variables. Set them under Manage → Environment, then deploy from there.',
         )
-        setDone({ slug, name: name.trim(), deploying: false, provisioned: false, injectedEnv })
+        setDone({ slug, name: name.trim(), deploying: false, provisioned: false, injectedEnv, wroteEnv })
         setSubmitting(false)
         return
       }
@@ -1203,7 +1406,7 @@ function InstallDialog({ entry, onClose, onCreated }: {
         '. Open it under Manage and deploy from there — nothing needs setting up again.',
       )
     }
-    setDone({ slug, name: name.trim(), deploying, provisioned: provisionedEngine !== '', injectedEnv })
+    setDone({ slug, name: name.trim(), deploying, provisioned: provisionedEngine !== '', injectedEnv, wroteEnv })
     setSubmitting(false)
   }
 
@@ -1251,6 +1454,14 @@ function InstallDialog({ entry, onClose, onCreated }: {
                           <code style={{ fontFamily: 'monospace' }}>{done.injectedEnv.join(', ')}</code>.</>
                       : <>The deploy injects the connection under the variable names this app reads.</>}
                     {' '}The password stays on the server, encrypted — it was never sent to this page.
+                  </div>
+                )}
+                {done.wroteEnv.length > 0 && (
+                  <div style={{ marginTop: 8 }}>
+                    Written to its environment before the deploy:{' '}
+                    <code style={{ fontFamily: 'monospace' }}>{done.wroteEnv.join(', ')}</code>.
+                    {' '}Any generated value was drawn in this browser and stored encrypted — it was never
+                    sent to the catalogue and is not recoverable from this page.
                   </div>
                 )}
               </div>
@@ -1654,6 +1865,47 @@ function InstallDialog({ entry, onClose, onCreated }: {
                   </div>
                 )}
               </fieldset>
+
+              {/* What this page will write into the app's environment before the
+                  first deploy, said BEFORE the button rather than discovered
+                  after it — same rule as the database block above. Placed after
+                  routing because the URL depends on the choice made there. */}
+              {(secretSpecs.length > 0 || urlEnvs.length > 0) && (
+                <fieldset style={{ border: '1px solid var(--border)', borderRadius: 6, padding: 12, margin: 0, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  <legend style={label}>Required configuration</legend>
+                  {secretSpecs.length > 0 && (
+                    <div style={{ lineHeight: 1.5 }}>
+                      <strong>{entry.name} will not start without a per-install secret.</strong>{' '}
+                      {secretSpecs.map(s => s.env).join(', ')} {secretSpecs.length === 1 ? 'is' : 'are'} generated
+                      in this browser with <code style={{ fontFamily: 'monospace' }}>crypto.getRandomValues</code>{' '}
+                      and written straight to the app's encrypted environment. The value never reaches the
+                      catalogue and is not shown here.
+                      <ul style={{ margin: '6px 0 0', paddingLeft: 18, color: 'var(--dim)', fontSize: '.78rem' }}>
+                        {secretSpecs.map(s => (
+                          <li key={s.env}>
+                            <code style={{ fontFamily: 'monospace' }}>{s.env}</code> — {s.label},{' '}
+                            {s.bytes} random bytes, {s.encoding}
+                            {s.prefix ? <> prefixed <code style={{ fontFamily: 'monospace' }}>{s.prefix}</code></> : null}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {urlEnvs.length > 0 && (
+                    <div style={{ lineHeight: 1.5 }}>
+                      <strong>It builds absolute links, so it has to be told where it lives.</strong>{' '}
+                      <code style={{ fontFamily: 'monospace' }}>{urlEnvs.join(', ')}</code>{' '}
+                      {urlEnvs.length === 1 ? 'is' : 'are'} set to{' '}
+                      <code style={{ fontFamily: 'monospace' }}>{appBaseUrl(routing, domain, slug || '<slug>')}</code>.
+                      {routing === 'appcrane' && (
+                        <> Caddy strips the <code style={{ fontFamily: 'monospace' }}>/{slug || '<slug>'}/</code>{' '}
+                          prefix before the container sees it, so the app cannot work this out for itself — every
+                          link it generates would point at the wrong base.</>
+                      )}
+                    </div>
+                  )}
+                </fieldset>
+              )}
 
               {/* A 409 used to arrive here as "App slug 'bookstack' already
                   exists", which reads to someone re-installing an app as though
