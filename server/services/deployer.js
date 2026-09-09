@@ -252,7 +252,30 @@ function classifyFetchError(e) {
   }
 }
 
-async function probeHealthEndpoint(url, timeoutMs) {
+/**
+ * `strict` is false for source_type='image' apps, and that is not a relaxation
+ * of a safety property — it is the removal of a contract those apps never
+ * agreed to (v2.66.2).
+ *
+ * The {status, version} shape is AppCrane's own convention, and it is a fair
+ * thing to demand of an app AppCrane BUILDS: that app declares be.health in
+ * deployhub.json and its author is writing the route. A third-party image has
+ * never heard of AppCrane. Enforcing the shape there does not detect unhealthy
+ * containers, it destroys healthy ones.
+ *
+ * Measured, not theorised. BookStack answered its /status endpoint with
+ * 200 and {"database":true,"cache":true,"session":true} — database connected,
+ * cache up, session store working, which is a RICHER health signal than
+ * {status, version} — and AppCrane tore the container down for missing two
+ * field names. Nothing the operator could have set would have passed: BookStack
+ * has no endpoint anywhere that returns AppCrane's shape, so the app was simply
+ * undeployable, and so is most of the catalogue behind it.
+ *
+ * What still holds for an image app: it must answer 200 at the health path
+ * within the window. A container that never listens, crashes on boot, or 500s
+ * fails exactly as before.
+ */
+async function probeHealthEndpoint(url, timeoutMs, { strict = true } = {}) {
   const deadline = Date.now() + timeoutMs;
   let lastError = null;
   let lastErrorClass = null;
@@ -266,6 +289,8 @@ async function probeHealthEndpoint(url, timeoutMs) {
       if (res.ok) {
         const text = await res.text();
         lastBodyPreview = text.slice(0, 200);
+        // A third-party image owes us a 200 and nothing more.
+        if (!strict) return { ok: true };
         let body;
         try {
           body = JSON.parse(text);
@@ -1594,9 +1619,12 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     const containerNameForWatch = `appcrane-${app.slug}-${env}`;
     const { watchBootForEarlyCrash } = await import('./bootWatch.js');
 
+    // Third-party images are held to "answers 200", not to AppCrane's own
+    // {status, version} body contract — see probeHealthEndpoint.
+    const strictHealth = app.source_type !== 'image';
     const probePromise = isTcpIngress
       ? probeTcpListener('127.0.0.1', bePort, 30000)
-      : probeHealthEndpoint(healthUrl, 30000);
+      : probeHealthEndpoint(healthUrl, 30000, { strict: strictHealth });
     const bootCrashSignal = watchBootForEarlyCrash({ containerName: containerNameForWatch, windowMs: 5000 })
       .then((r) => (r.crashed ? r : new Promise(() => {})));
 
@@ -1850,3 +1878,10 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     throw error;
   }
 }
+
+// Test seam. probeHealthEndpoint decides whether a container lives or is
+// destroyed, and its two modes differ only in what they accept as a BODY — a
+// difference no deploy-level test can observe without a real container. Exported
+// so test/image-health-contract.test.js can drive it against real HTTP servers
+// returning real BookStack-shaped payloads, rather than asserting on source text.
+export const __testables = { probeHealthEndpoint };
