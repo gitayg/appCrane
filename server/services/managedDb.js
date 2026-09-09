@@ -612,6 +612,16 @@ const STATUS_FIELDS = [
   '{{.State.ExitCode}}',
   '{{.State.OOMKilled}}',
   '{{.State.StartedAt}}',
+  // The cap the RUNNING container actually has, in bytes (0 = unlimited).
+  //
+  // Reported alongside the configured value rather than instead of it because a
+  // container's memory limit is fixed when it is CREATED. Raising
+  // MANAGED_DB_*_MEMORY_MB changes what the next container would get and does
+  // nothing to the one already running, so a dashboard that showed only the
+  // config would tell an operator their raise had taken effect while the live
+  // cgroup was unchanged -- and it would say so most confidently in the one
+  // situation where it matters, someone reading this page right after an OOM.
+  '{{.HostConfig.Memory}}',
 ];
 const STATUS_SEP = '|';
 const STATUS_FORMAT = STATUS_FIELDS.join(STATUS_SEP);
@@ -676,7 +686,8 @@ export async function serverStatus() {
       state: null,
       running: false,
       host_port: row?.host_port ?? cfg.defaultPort,
-      memory_mb: cfg.memoryMb,
+      memory_mb: null,
+      configured_memory_mb: cfg.memoryMb,
       databases: counts.get(engine) || 0,
       restart_count: null,
       last_exit_code: null,
@@ -693,13 +704,17 @@ export async function serverStatus() {
       return out;
     }
 
-    const [state, restarts, exitCode, oom, startedAt] = raw.split(STATUS_SEP);
+    const [state, restarts, exitCode, oom, startedAt, memBytes] = raw.split(STATUS_SEP);
     out.state = state || null;
     out.running = state === 'running';
     out.restart_count = intOrNull(restarts);
     out.last_exit_code = intOrNull(exitCode);
     out.oom_killed = oom === 'true';
     out.started_at = startedAt && startedAt !== ZERO_TIME ? startedAt : null;
+    // 0 is Docker's "no limit", which is a different fact from "unknown" and
+    // must not be rounded into 0 MB.
+    const bytes = intOrNull(memBytes);
+    out.memory_mb = bytes === null || bytes === 0 ? null : Math.round(bytes / (1024 * 1024));
     return out;
   }));
 }

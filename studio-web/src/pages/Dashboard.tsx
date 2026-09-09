@@ -57,7 +57,11 @@ interface ManagedDbServer {
   state: string | null
   running: boolean
   host_port: number | null
+  // The cap the RUNNING container has. null when no container exists, or when
+  // it runs unlimited. `configured_memory_mb` is what the NEXT container would
+  // get — the two differ until the container is recreated.
   memory_mb: number | null
+  configured_memory_mb: number | null
   databases: number
   restart_count: number | null
   last_exit_code: number | null
@@ -494,7 +498,18 @@ export function Dashboard() {
                         )}
                       </td>
                       <td>{sv.host_port ?? '—'}</td>
-                      <td>{sv.memory_mb != null ? `${sv.memory_mb} MB` : '—'}</td>
+                      <td>
+                        {sv.memory_mb != null ? `${sv.memory_mb} MB` : (sv.configured_memory_mb != null ? `${sv.configured_memory_mb} MB` : '—')}
+                        {sv.memory_mb != null && sv.configured_memory_mb != null
+                          && sv.memory_mb !== sv.configured_memory_mb && (
+                          <div style={{ color: 'var(--orange)', fontSize: '.75rem', marginTop: 2 }}>
+                            config says {sv.configured_memory_mb} MB — recreate the container to apply
+                          </div>
+                        )}
+                        {sv.memory_mb == null && sv.configured_memory_mb != null && sv.running && (
+                          <div style={{ color: 'var(--dim)', fontSize: '.75rem', marginTop: 2 }}>unlimited</div>
+                        )}
+                      </td>
                       <td>{sv.databases}</td>
                       <td style={{ color: sv.restart_count ? 'var(--orange)' : 'var(--dim)' }}>
                         {sv.restart_count && sv.restart_count > 0 ? sv.restart_count : '—'}

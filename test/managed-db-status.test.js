@@ -59,6 +59,8 @@ writeFileSync(
   + 'case "$last" in\n'
   + '  *-postgres) [ -n "$CRANE_TEST_PG_INSPECT" ] || { printf \'Error: No such object: %s\\n\' "$last" >&2; exit 1; }\n'
   + '              printf \'%s\\n\' "$CRANE_TEST_PG_INSPECT"; exit 0 ;;\n'
+  + '  *-mariadb)  [ -n "$CRANE_TEST_MARIA_INSPECT" ] || { printf \'Error: No such object: %s\\n\' "$last" >&2; exit 1; }\n'
+  + '              printf \'%s\\n\' "$CRANE_TEST_MARIA_INSPECT"; exit 0 ;;\n'
   + '  *) printf \'Error: No such object: %s\\n\' "$last" >&2; exit 1 ;;\n'
   + 'esac\n',
   { mode: 0o755 },
@@ -76,7 +78,11 @@ function clearDockerCalls() {
 }
 
 // A container that is up: status | restarts | exit code | oom | started at
-const RUNNING = 'running|0|0|false|2026-09-08T21:40:00.123456789Z';
+// Six fields now: the template also asks for {{.HostConfig.Memory}}, the cap
+// the RUNNING container actually has. 536870912 = 512 MB, deliberately NOT the
+// 1024 MB the config carries — a container keeps the limit it was created with,
+// and reporting the config as though it were live is the bug this field fixes.
+const RUNNING = 'running|0|0|false|2026-09-08T21:40:00.123456789Z|536870912';
 
 // ── Fixtures ───────────────────────────────────────────────────────────────
 
@@ -236,6 +242,13 @@ test('the inspect template never asks docker for the container environment', asy
     const fmt = argv[argv.indexOf('-f') + 1] || '';
     assert.ok(!fmt.includes('json .'), 'the template must not dump the whole inspect object');
     assert.ok(!/Env/i.test(fmt), 'the template must not read the container environment');
+    // ...and it must ASK for the real memory cap. The shim echoes a fixture and
+    // ignores the template, so nothing else in this file can tell that the
+    // field was dropped: removing it leaves every value assertion green while
+    // the dashboard silently goes back to reporting the config as though it
+    // were the live limit. This is the only assertion that sees the template.
+    assert.ok(fmt.includes('{{.HostConfig.Memory}}'),
+      'the template must read the container\'s actual memory limit');
   }
 });
 
@@ -247,7 +260,7 @@ test('a running container reports its docker facts', async () => {
   });
   seedDatabase(APP_A, 'postgres', 'crane_a1');
   seedDatabase(APP_B, 'postgres', 'crane_a2');
-  process.env.CRANE_TEST_PG_INSPECT = 'running|3|0|false|2026-09-08T21:40:00Z';
+  process.env.CRANE_TEST_PG_INSPECT = 'running|3|0|false|2026-09-08T21:40:00Z|536870912';
 
   const [pg] = await svc.serverStatus();
   assert.deepEqual(pg, {
@@ -258,7 +271,9 @@ test('a running container reports its docker facts', async () => {
     state: 'running',
     running: true,
     host_port: 45432,
+    // The container's REAL cap, from {{.HostConfig.Memory}} — not the config.
     memory_mb: 512,
+    configured_memory_mb: 512,
     databases: 2,
     restart_count: 3,
     last_exit_code: 0,
@@ -272,7 +287,7 @@ test('an OOM-killed exited container is reported as such', async () => {
   seedServerRow('postgres', {
     container: 'crane-test-mdbstatus-postgres', image: 'postgres:16-alpine', port: 45432,
   });
-  process.env.CRANE_TEST_PG_INSPECT = 'exited|7|137|true|2026-09-08T20:00:00Z';
+  process.env.CRANE_TEST_PG_INSPECT = 'exited|7|137|true|2026-09-08T20:00:00Z|536870912';
 
   const [pg] = await svc.serverStatus();
   assert.equal(pg.state, 'exited');
@@ -290,7 +305,7 @@ test("a created-but-never-started container reports started_at:null", async () =
   seedServerRow('postgres', {
     container: 'crane-test-mdbstatus-postgres', image: 'postgres:16-alpine', port: 45432,
   });
-  process.env.CRANE_TEST_PG_INSPECT = 'created|0|0|false|0001-01-01T00:00:00Z';
+  process.env.CRANE_TEST_PG_INSPECT = 'created|0|0|false|0001-01-01T00:00:00Z|536870912';
   const [pg] = await svc.serverStatus();
   assert.equal(pg.state, 'created');
   assert.equal(pg.running, false);
@@ -316,7 +331,12 @@ test('an engine with no managed_db_servers row still appears, configured:false',
     assert.ok(s.image.length > 0);
     assert.equal(typeof s.host_port, 'number');
     assert.ok(s.host_port > 0);
-    assert.ok(s.memory_mb > 0);
+    // No container, so there is no real cap to report. The config value is
+    // carried separately so the row can still say what the engine WOULD get —
+    // reporting it as `memory_mb` would be claiming a live limit that no
+    // running process has.
+    assert.equal(s.memory_mb, null, 'an absent container has no actual memory cap');
+    assert.ok(s.configured_memory_mb > 0);
   }
   assert.equal(body.servers[0].host_port, 45432, 'the postgres config default');
   assert.equal(body.servers[1].host_port, 43306, 'the mariadb config default');
@@ -422,4 +442,45 @@ test('services/managedDb.js exports serverStatus() and the route calls it', asyn
     'the route must go through the engine module, not re-implement the query');
   assert.ok(!/serversRouter[\s\S]*ensureServer/.test(src),
     'the status router must not reach ensureServer');
+});
+
+// ── 6. Configured vs actual memory ─────────────────────────────────────────
+
+test('the memory a container HAS is reported, not the memory config wants', async () => {
+  // The bug this covers shipped and was caught on the first real page load: the
+  // row read `memory_mb` straight off the ENGINES config, so raising
+  // MANAGED_DB_MARIADB_MEMORY_MB from 512 to 1024 made the dashboard claim
+  // 1024 MB while the live container was still capped at 512. A container's
+  // memory limit is fixed when it is CREATED; changing the config changes what
+  // the NEXT one gets. The dashboard said the raise had landed, most
+  // confidently to someone reading the page straight after an OOM.
+  //
+  // mariadb's configured default is 1024 and the fixture container was created
+  // at 512, so this is exactly that drift.
+  process.env.CRANE_TEST_MARIA_INSPECT = 'running|0|0|false|2026-09-08T21:40:00Z|536870912';
+  seedServerRow('mariadb', {
+    container: 'crane-test-mdbstatus-mariadb', image: 'mariadb:11.4', port: 43306,
+  });
+  const { body } = await call('/api/managed-db/servers', PLATFORM);
+  delete process.env.CRANE_TEST_MARIA_INSPECT;
+
+  const maria = body.servers.find(s => s.engine === 'mariadb');
+  assert.equal(maria.memory_mb, 512, 'must report the cap the container actually has');
+  assert.equal(maria.configured_memory_mb, 1024, 'and separately what config would give the next one');
+  assert.notEqual(maria.memory_mb, maria.configured_memory_mb,
+    'the two must be distinguishable — collapsing them is the bug');
+});
+
+test('an unlimited container reports null rather than 0 MB', async () => {
+  // Docker writes 0 for "no limit". Rounding that to "0 MB" would read as a
+  // container throttled to nothing, which is the opposite of the truth.
+  process.env.CRANE_TEST_MARIA_INSPECT = 'running|0|0|false|2026-09-08T21:40:00Z|0';
+  seedServerRow('mariadb', {
+    container: 'crane-test-mdbstatus-mariadb', image: 'mariadb:11.4', port: 43306,
+  });
+  const { body } = await call('/api/managed-db/servers', PLATFORM);
+  delete process.env.CRANE_TEST_MARIA_INSPECT;
+
+  const maria = body.servers.find(s => s.engine === 'mariadb');
+  assert.equal(maria.memory_mb, null, '0 bytes means unlimited, not zero');
 });
