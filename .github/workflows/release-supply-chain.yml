@@ -107,7 +107,14 @@ jobs:
         if: github.event_name == 'release'
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+          # Must mirror the checkout and build steps above. On a release event
+          # github.ref_name IS the tag, so this was right for every run this
+          # workflow had ever had; under workflow_dispatch it is the branch the
+          # dispatch was made on (main), so the build produced correct artifacts
+          # for the requested tag and then tried to upload them to a release
+          # called "main". The dispatch path had never been exercised, which is
+          # the only reason it shipped.
+          TAG: ${{ github.event.inputs.ref || github.ref_name }}
           ARCHIVE: ${{ steps.archive.outputs.name }}
         run: |
           set -euo pipefail
