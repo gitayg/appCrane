@@ -104,16 +104,28 @@ jobs:
           sbom-path: appcrane-sbom.cdx.json
 
       - name: Attach artifacts to the release
-        if: github.event_name == 'release'
+        # Dispatch used to be a dry run: build, attest, publish to
+        # upload-artifact, touch no release. That is a reasonable thing to want,
+        # but it made the workflow unable to REGENERATE a published release's
+        # artifacts — which is exactly what a history rewrite requires, since
+        # every tag now resolves to a different commit. Uploading when the
+        # dispatch names a ref keeps the dry run available (dispatch with no ref
+        # is not possible: the input is required) while making regeneration
+        # possible. A ref that has no release fails loudly at `gh release
+        # upload`, which is the right outcome for a typo'd tag.
+        if: github.event_name == 'release' || github.event.inputs.ref != ''
         env:
           GH_TOKEN: ${{ github.token }}
           # Must mirror the checkout and build steps above. On a release event
-          # github.ref_name IS the tag, so this was right for every run this
-          # workflow had ever had; under workflow_dispatch it is the branch the
-          # dispatch was made on (main), so the build produced correct artifacts
-          # for the requested tag and then tried to upload them to a release
-          # called "main". The dispatch path had never been exercised, which is
-          # the only reason it shipped.
+          # github.ref_name IS the tag; under workflow_dispatch it is the branch
+          # the dispatch was made on, so without the input fallback this would
+          # target a release named after the branch.
+          #
+          # v2.66.3 described this as a bug that "uploaded to a release called
+          # main". That was wrong and is corrected here: the step above was
+          # gated to release events only, so on dispatch it never ran at all.
+          # The mismatch was real and worth fixing, but it had never had the
+          # chance to misfire.
           TAG: ${{ github.event.inputs.ref || github.ref_name }}
           ARCHIVE: ${{ steps.archive.outputs.name }}
         run: |
