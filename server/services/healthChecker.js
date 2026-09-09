@@ -152,7 +152,7 @@ async function runDiskChecks() {
 export function startHealthChecker() {
   const db = getDb();
   const configs = db.prepare(`
-    SELECT hc.*, a.slug, a.slot FROM health_configs hc
+    SELECT hc.*, a.slug, a.slot, a.health_path FROM health_configs hc
     JOIN apps a ON a.id = hc.app_id
     WHERE hc.enabled = 1
   `).all();
@@ -195,6 +195,34 @@ function scheduleCheck(config) {
 /**
  * HTTP probe: healthy means the endpoint answered 200.
  */
+/**
+ * Which path this monitor probes (v2.67.1).
+ *
+ * AppCrane had TWO sources of truth for an app's health path and they never
+ * spoke: apps.health_path, which the catalogue and the Deploy dialog write and
+ * which deployer.js validates a new container against, and
+ * health_configs.endpoint, which defaults to '/api/health' (migration 001) and
+ * is what THIS monitor has always probed. Setting one did not touch the other.
+ *
+ * The result was an app that deployed green and then sat permanently red.
+ * Measured on BookStack: deploy validated /status and passed, the monitor kept
+ * probing /api/health, got a fast 404, and marked both environments down while
+ * the app served pages normally. Nothing in the UI could explain it, because
+ * the field the operator had set was not the field being used.
+ *
+ * health_configs.endpoint stays authoritative when an operator has actually
+ * chosen it — that route exists (routes/health.js) and overriding it must keep
+ * working. But a row still carrying the DEFAULT has expressed no preference,
+ * and deferring to apps.health_path there is what makes a catalogue install
+ * monitor the path it was installed with. No migration: this resolves at probe
+ * time, so every already-broken app corrects itself on its next check.
+ */
+function effectiveEndpoint(config) {
+  const DEFAULT_ENDPOINT = '/api/health';
+  if (config.endpoint === DEFAULT_ENDPOINT && config.health_path) return config.health_path;
+  return config.endpoint;
+}
+
 async function probeHttp(url) {
   const start = Date.now();
   try {
@@ -286,7 +314,7 @@ async function runCheck(config) {
   // firewall, and must not depend on a public_port allocation existing.
   const target = isTcp
     ? `tcp://127.0.0.1:${port}`
-    : `http://localhost:${port}${config.endpoint}`;
+    : `http://localhost:${port}${effectiveEndpoint(config)}`;
 
   const probe = isTcp
     ? await probeTcp('127.0.0.1', port)
@@ -376,7 +404,7 @@ export function stopHealthChecker() {
 export function refreshAppChecks(appId) {
   const db = getDb();
   const configs = db.prepare(`
-    SELECT hc.*, a.slug, a.slot FROM health_configs hc
+    SELECT hc.*, a.slug, a.slot, a.health_path FROM health_configs hc
     JOIN apps a ON a.id = hc.app_id
     WHERE hc.app_id = ? AND hc.enabled = 1
   `).all(appId);
