@@ -294,6 +294,7 @@ port 3000 itself; a `dual` app publishes a *different* container port and leaves
 - **Webhook HMAC** verification for GitHub
 - **SCIM deprovisioning** — removing a user from your IdP revokes AppCrane access automatically
 - **All actions audited** — who did what, when
+- **Vulnerability scanning of the apps you host, not just the platform** — every deploy scans what it just shipped and records the result against that deployment. Source apps are read from their lockfiles and queried against [OSV](https://osv.dev): `package-lock.json`, `yarn.lock` (classic and Berry), `pnpm-lock.yaml` (9.x), `composer.lock`, `go.sum`, `Cargo.lock`, `Gemfile.lock`, `poetry.lock`, `Pipfile.lock`. Apps deployed from an image are scanned with a pinned Trivy against the **resolved digest** — `name@sha256:…`, the bytes actually running, not whatever the tag points at today. The scan **reports and never blocks**: a scanner that is missing, slow or wrong cannot fail your deploy.
 
 ### Supply chain — SBOM + build provenance
 

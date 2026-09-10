@@ -225,7 +225,7 @@ api.use('/api/apps', envVarsRoutes);
 api.use('/api/service', serviceApiRoutes);
 api.use(errorHandler);
 
-const server = await new Promise((res) => { const s = api.listen(0, () => res(s)); });
+const server = await new Promise((res) => { const s = api.listen(0, '127.0.0.1', () => res(s)); });
 const BASE = `http://127.0.0.1:${server.address().port}`;
 
 startEmailWorker();

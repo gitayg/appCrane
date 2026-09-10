@@ -33,15 +33,22 @@ import { basename } from 'path';
 import { assertPackage } from './scanShapes.js';
 
 /**
- * Ordered: the first entry whose file exists in a release wins, so the most
- * specific and most common manifest comes first.
+ * Grouped by language, most common first. Order is presentation only: the
+ * scanner reads EVERY manifest it finds, so a repo holding both a
+ * package-lock.json and a yarn.lock is read twice and deduped by OSV's own
+ * answer rather than one file shadowing the other.
  *
- * `ecosystem` is spelled as OSV spells it — 'crates.io' and 'RubyGems' are
- * case- and punctuation-sensitive in the API, and a near miss returns an empty
- * result set rather than an error.
+ * `ecosystem` is spelled as OSV spells it — 'crates.io', 'RubyGems' and
+ * 'Packagist' are case- and punctuation-sensitive in the API, and a near miss
+ * returns an empty result set rather than an error. Measured, not assumed:
+ * symfony/http-kernel 5.4.10 under 'Packagist' returns GHSA-h7vf-5wrv-9fhv,
+ * and under 'packagist' returns nothing at all.
  */
 export const MANIFESTS = [
   { file: 'package-lock.json', ecosystem: 'npm',        parse: parseNpmLock },
+  { file: 'yarn.lock',         ecosystem: 'npm',        parse: parseYarnLock },
+  { file: 'pnpm-lock.yaml',    ecosystem: 'npm',        parse: parsePnpmLock },
+  { file: 'composer.lock',     ecosystem: 'Packagist',  parse: parseComposerLock },
   { file: 'go.sum',            ecosystem: 'Go',         parse: parseGoSum },
   { file: 'Cargo.lock',        ecosystem: 'crates.io',  parse: parseCargoLock },
   { file: 'Gemfile.lock',      ecosystem: 'RubyGems',   parse: parseGemfileLock },
@@ -376,5 +383,406 @@ function parsePipfileLock(text, ecosystem) {
       packages.push({ name, version: entry.version.slice(2), ecosystem });
     }
   }
+  return dedupe(packages);
+}
+
+// --- PHP -------------------------------------------------------------------
+
+/**
+ * Composer writes the git TAG into `version`, and more than half of Packagist
+ * tags carry a leading v — 64 of BookStack's 113 runtime packages do. OSV does
+ * not: its Packagist advisories spell every boundary and every enumerated
+ * version bare (guzzlehttp/guzzle's version list runs "6.5.7", "6.5.8", and
+ * GHSA-cwxw-98qj-8qjx opens at fixed "7.12.1"), because Packagist itself
+ * normalises the tag away. So the v is a tag prefix, not part of the version.
+ *
+ * Measured against the live API before deciding, because the reasoning cuts the
+ * other way for Go: guzzlehttp/guzzle answers 11 advisories for both "6.5.7"
+ * and "v6.5.7", and 9 for both "6.5.8" and "v6.5.8", so the query endpoint
+ * normalises it today and neither spelling is currently wrong. The strip is
+ * chosen anyway because it matches the spelling OSV's own DATA uses, and the
+ * data is what the endpoint's normalisation is a convenience over. This is the
+ * exact mirror of the Go rule above: +incompatible is KEPT because it appears
+ * inside OSV's Go ranges, and the v is DROPPED because it appears nowhere in
+ * OSV's Packagist ranges.
+ *
+ * Only ever removed in front of a digit. A Composer release version is numeric;
+ * the non-numeric forms are branch pins, and those never reach here.
+ */
+function stripComposerTagPrefix(version) {
+  return /^v\d/.test(version) ? version.slice(1) : version;
+}
+
+function parseComposerLock(text, ecosystem) {
+  const lock = JSON.parse(text);
+
+  // `packages` is runtime, `packages-dev` is require-dev. A file with neither
+  // is not a composer.lock, whatever it is called. `platform` and
+  // `platform-dev` are separate top-level keys holding php and ext-* entries,
+  // which are interpreter and extension constraints rather than Packagist
+  // packages; they are not read, and must not be.
+  if (!Array.isArray(lock.packages) && !Array.isArray(lock['packages-dev'])) {
+    throw new Error('no "packages" or "packages-dev" array');
+  }
+
+  const packages = [];
+  for (const section of ['packages', 'packages-dev']) {
+    if (lock[section] === undefined) continue;
+    if (!Array.isArray(lock[section])) {
+      throw new Error(`"${section}" is not an array`);
+    }
+
+    for (const entry of lock[section]) {
+      const name = entry?.name;
+      if (typeof name !== 'string' || !name) {
+        throw new Error(`an entry in ${section} has no name`);
+      }
+      const version = entry?.version;
+      if (typeof version !== 'string' || !version) {
+        throw new Error(`"${name}" in ${section} has no version`);
+      }
+
+      // dev-main, dev-master, 1.0.x-dev: Composer's spelling for "whatever that
+      // branch points at today". There is no release to ask about — OSV returns
+      // nothing for "dev-main" — and picking the branch alias instead would be
+      // the requirements.txt mistake. Skipped for the same reason a Pipfile git
+      // requirement is.
+      if (version.startsWith('dev-') || version.endsWith('-dev')) continue;
+
+      packages.push({ name, version: stripComposerTagPrefix(version), ecosystem });
+    }
+  }
+  return dedupe(packages);
+}
+
+// --- yarn -------------------------------------------------------------------
+
+/**
+ * A range that names a protocol is not a registry range.
+ *
+ * file:, link:, portal:, workspace:, git+ssh:, https:, github: — all resolve to
+ * something whose version is whatever the checkout declares, which need not
+ * correspond to any published release. A semver range never contains a colon
+ * or a slash, so this cannot swallow one; `^7.0.0`, `>=1 <2`, `1.x`, `*` and
+ * `latest` all pass through.
+ */
+const NON_REGISTRY_RANGE = /^[a-z][a-z0-9+.-]*:|\//;
+
+function parseYarnLock(text, ecosystem) {
+  // TWO INCOMPATIBLE FORMATS UNDER ONE FILENAME. Classic (yarn 1) is a bespoke
+  // text format writing `version "1.2.3"`; Berry (yarn 2+) is YAML writing
+  // `version: 1.2.3` alongside an authoritative `resolution:`. Reading one with
+  // the other's rules finds no versions at all, which is a clean scan for a
+  // file nothing understood — so the format is identified from its own marker
+  // and an unmarked file is refused rather than guessed at.
+  if (/^__metadata:/m.test(text)) return parseYarnBerry(text, ecosystem);
+  if (/^#\s*yarn lockfile v1\s*$/m.test(text)) return parseYarnClassic(text, ecosystem);
+  throw new Error(
+    'no "# yarn lockfile v1" header and no "__metadata:" block — cannot tell yarn ' +
+    'classic from yarn berry, and the two spell every version differently'
+  );
+}
+
+/**
+ * The package a yarn-classic `resolved` URL names, or null if the URL is not a
+ * registry tarball.
+ *
+ * This is the authority, and the entry's own descriptors are only the fallback,
+ * because classic has no `name` field and its key is what the DEPENDENT called
+ * the package. Measured across 11 real lockfiles / 10221 entries: `resolved` is
+ * present on every single one, and disagrees with the descriptor once —
+ * `ansi-html@0.0.7, ansi-html@^0.0.7, "ansi-html@https://registry.yarnpkg.com/
+ * ansi-html-community/-/ansi-html-community-0.0.8.tgz"`, a `resolutions`
+ * override that swaps in a different package under the old name. Read from the
+ * descriptor that entry reports ansi-html 0.0.8, a version ansi-html has never
+ * published; read from the URL it reports the ansi-html-community 0.0.8 that is
+ * actually installed.
+ *
+ * A registry tarball is `<registry>/<name>/-/<file>.tgz`, and the name is taken
+ * from the segments immediately before `/-/` rather than immediately after the
+ * host — an Artifactory or Nexus mirror serves the same layout under a path
+ * prefix (`/api/npm/npm-remote/lodash/-/lodash-4.17.21.tgz`), where counting
+ * from the host yields "api".
+ */
+function yarnClassicResolvedName(url) {
+  const cut = url.indexOf('/-/');
+  if (cut === -1) return null;
+  const segments = url.slice(0, cut).split('/');
+  const last = segments[segments.length - 1];
+  const scope = segments[segments.length - 2];
+  if (!last) return null;
+  return scope && scope.startsWith('@') ? `${scope}/${last}` : last;
+}
+
+/**
+ * The package a yarn-classic descriptor names, or null when it names something
+ * that is not on the registry. Used when `resolved` is absent or is not a
+ * registry tarball — an offline mirror rewrites it to a bare filename.
+ *
+ * The separator is the FIRST @ after position 0, not the last. Both ends of
+ * that matter: a scoped name opens with an @ that is not a separator, and a git
+ * range closes with one (`foo@git+ssh://git@github.com/x/y.git`) that is not
+ * either. Taking the last @ reads that descriptor as a package called
+ * "foo@git+ssh://git" — a name no registry has, so OSV answers clean.
+ */
+function yarnClassicName(descriptor) {
+  const d = unquote(descriptor.trim());
+  const at = d.indexOf('@', d.startsWith('@') ? 1 : 0);
+  if (at <= 0) throw new Error(`cannot read ${JSON.stringify(d)} as a yarn descriptor`);
+
+  const range = d.slice(at + 1);
+
+  // ALIASES: `yarn add mylodash@npm:lodash@4.17.15` keys the entry by the
+  // ALIAS. Asking OSV about "mylodash" records a lodash with known advisories
+  // as clean.
+  if (range.startsWith('npm:')) {
+    const inner = range.slice('npm:'.length);
+    const iat = inner.indexOf('@', inner.startsWith('@') ? 1 : 0);
+    return iat > 0 ? inner.slice(0, iat) : inner;
+  }
+
+  if (NON_REGISTRY_RANGE.test(range)) return null;
+  return d.slice(0, at);
+}
+
+function parseYarnClassic(text, ecosystem) {
+  const packages = [];
+  let descriptors = null;
+  let version = null;
+  let resolved = null;
+  let headerLine = 0;
+  let lineNo = 0;
+
+  const flush = () => {
+    if (!descriptors) return;
+    if (!version) {
+      throw new Error(`the entry at line ${headerLine} has no version`);
+    }
+
+    const fromUrl = resolved && yarnClassicResolvedName(resolved);
+    if (fromUrl) {
+      packages.push({ name: fromUrl, version, ecosystem });
+    } else {
+      // Several descriptors can share one entry when they resolved to the same
+      // release; they name the same package, so at most one survives dedupe.
+      for (const d of descriptors) {
+        const name = yarnClassicName(d);
+        if (name) packages.push({ name, version, ecosystem });
+      }
+    }
+
+    descriptors = null;
+    version = null;
+    resolved = null;
+  };
+
+  for (const raw of text.split('\n')) {
+    lineNo++;
+    if (!raw.trim() || raw.trimStart().startsWith('#')) continue;
+
+    // An entry header sits flush left and may carry several comma-separated
+    // descriptors that resolved to the same release.
+    if (!/^\s/.test(raw)) {
+      flush();
+      const head = raw.trim();
+      if (!head.endsWith(':')) {
+        throw new Error(`line ${lineNo}: expected an entry header ending in ":", got ${JSON.stringify(head)}`);
+      }
+      headerLine = lineNo;
+      descriptors = head.slice(0, -1).split(/,\s+/);
+      continue;
+    }
+
+    let m = /^\s+version\s+"([^"]+)"\s*$/.exec(raw);
+    if (m) { version = m[1]; continue; }
+    m = /^\s+resolved\s+"([^"]+)"\s*$/.exec(raw);
+    if (m) resolved = m[1];
+  }
+  flush();
+
+  return dedupe(packages);
+}
+
+/**
+ * The package a Berry `resolution:` names, or null when it is not a registry
+ * package.
+ *
+ * A resolution is `<ident>@<protocol>:<selector>`, and the ident is what the
+ * package IS rather than what the dependent called it — which is why Berry is
+ * read from `resolution` and not from the entry key. `esbuild@npm:esbuild-wasm@
+ * ^0.23.0` is keyed under esbuild and resolves to esbuild-wasm; docusaurus
+ * ships `react-loadable@npm:@docusaurus/react-loadable@6.0.0`, an unscoped
+ * alias of a scoped package. Both are real lines from yarn's own lockfile.
+ *
+ * The protocol is found from the FIRST @ after position 0 for the same reason
+ * the classic reader uses the first: a patch resolution embeds a second, whole
+ * descriptor after its own protocol
+ * (`fsevents@patch:fsevents@npm%3A2.3.2#optional!builtin`), so the last @ lands
+ * in the middle of it.
+ */
+function yarnBerryName(resolution) {
+  const m = /^(.+?)@([a-z][a-z0-9+.-]*):/.exec(resolution);
+  if (!m) throw new Error(`cannot read ${JSON.stringify(resolution)} as a yarn resolution`);
+  const [, ident, protocol] = m;
+
+  // patch: is a local diff applied over a registry release. The ident and the
+  // `version:` field are both the upstream ones, and so are the advisories —
+  // dropping it would hide a finding on a package that is genuinely installed.
+  if (protocol === 'npm' || protocol === 'patch') return ident;
+
+  // workspace:, portal:, link:, file:, exec:, https:, git*: — published
+  // nowhere, or published at a version the checkout invented.
+  return null;
+}
+
+function parseYarnBerry(text, ecosystem) {
+  const packages = [];
+  let open = false;
+  let version = null;
+  let resolution = null;
+  let entryLine = 0;
+  let lineNo = 0;
+
+  const flush = () => {
+    if (!open) return;
+    if (!version) throw new Error(`the entry at line ${entryLine} has no "version:"`);
+    if (!resolution) throw new Error(`the entry at line ${entryLine} has no "resolution:"`);
+    const name = yarnBerryName(resolution);
+    if (name) packages.push({ name, version, ecosystem });
+    open = false;
+    version = null;
+    resolution = null;
+  };
+
+  for (const raw of text.split('\n')) {
+    lineNo++;
+    if (!raw.trim() || raw.trimStart().startsWith('#')) continue;
+
+    if (!/^\s/.test(raw)) {
+      flush();
+      const head = raw.trim();
+      if (!head.endsWith(':')) {
+        throw new Error(`line ${lineNo}: expected an entry header ending in ":", got ${JSON.stringify(head)}`);
+      }
+      entryLine = lineNo;
+      // __metadata carries the lockfile version and cache key, not a package.
+      // Its `version: 10` would otherwise be read as a release of a package
+      // called __metadata.
+      open = unquote(head.slice(0, -1)) !== '__metadata';
+      continue;
+    }
+    if (!open) continue;
+
+    // Anchored at EXACTLY two spaces. Berry nests `dependencies:` and
+    // `peerDependencies:` maps one level deeper, and a dependency whose name is
+    // literally `version` or `resolution` is a legal npm package.
+    let m = /^ {2}version:\s*(.+?)\s*$/.exec(raw);
+    if (m) { version = unquote(m[1]); continue; }
+    m = /^ {2}resolution:\s*(.+?)\s*$/.exec(raw);
+    if (m) resolution = unquote(m[1]);
+  }
+  flush();
+
+  return dedupe(packages);
+}
+
+// --- pnpm -------------------------------------------------------------------
+
+// pnpm has rewritten its key format twice, and each spelling parses cleanly as
+// the others' garbage rather than failing:
+//
+//   5.x   /typescript/4.7.4              /react-dom/17.0.2_react@17.0.2
+//   6.x   /typescript@4.7.4              /react-dom@17.0.2(react@17.0.2)
+//   9.x   typescript@4.7.4               react-dom@17.0.2
+//
+// Read as 9.x, a 5.x key yields the package "/typescript/4" at version "7.4" —
+// a name no registry has, and therefore a clean answer. Only 9.x is read, and
+// the rest are refused BY VERSION and by name. That is a deliberate trade: an
+// 'error' with a fix in it is visible, and the 5.x and 6.x peer-dependency
+// suffixes have never been measured against a real file here.
+//
+// Written by pnpm 9 (March 2024) and pnpm 10, which still writes '9.0'.
+const PNPM_SUPPORTED_LOCKFILE = /^9(\.|$)/;
+
+/**
+ * A 9.x `packages:` key is `name@version`. The separator is taken as the LAST @
+ * because that is the rule the format states, but measured across 4165 real
+ * keys in three lockfiles, the last @ and the first-after-the-scope are the
+ * SAME @ every time — the paren cut below is what keeps it that way, and
+ * without it neither spelling is right. So this line is not where a scoped name
+ * is won or lost; the cut is.
+ */
+function pnpmPackage(key, ecosystem) {
+  // Peer-dependency variants live in `snapshots:` rather than here — measured
+  // at 0 of 745 and 0 of 1719 keys across two real 9.0 lockfiles — but a key is
+  // cut at its first paren anyway, because a name cannot contain one and a
+  // suffix left on would be read as part of the version.
+  const paren = key.indexOf('(');
+  const bare = paren === -1 ? key : key.slice(0, paren);
+
+  const at = bare.lastIndexOf('@');
+  if (at <= 0) throw new Error(`cannot read ${JSON.stringify(key)} as "name@version"`);
+
+  const version = bare.slice(at + 1);
+
+  // A tarball, git or file dependency is keyed by its URL where the version
+  // goes. There is no registry release behind it to ask about, and the URL is
+  // not one.
+  if (!/^\d/.test(version)) return null;
+
+  return { name: bare.slice(0, at), version, ecosystem };
+}
+
+function parsePnpmLock(text, ecosystem) {
+  const declared = /^lockfileVersion:\s*(.+?)\s*$/m.exec(text);
+  if (!declared) throw new Error('no lockfileVersion — this is not a pnpm-lock.yaml');
+
+  const lockfileVersion = unquote(declared[1]);
+  if (!PNPM_SUPPORTED_LOCKFILE.test(lockfileVersion)) {
+    throw new Error(
+      `lockfileVersion ${JSON.stringify(lockfileVersion)} is not read — only 9.x is. ` +
+      '5.x keys packages as "/name/version" and 6.x as "/name@version", each with its ' +
+      'own peer-dependency suffix; regenerate the lockfile with pnpm 9 or later'
+    );
+  }
+
+  // Only the keys of `packages:` are needed, and they are one flat run of
+  // exactly-two-space lines under a flush-left header — so this reads that run
+  // rather than the file. No YAML library is a dependency of this platform and
+  // none is added for a shape this narrow, the same call the TOML block reader
+  // above already makes for Cargo.lock and poetry.lock.
+  const packages = [];
+  let inPackages = false;
+  let sawPackages = false;
+  let lineNo = 0;
+
+  for (const raw of text.split('\n')) {
+    lineNo++;
+    if (!raw.trim()) continue;
+
+    if (!/^\s/.test(raw)) {
+      inPackages = raw.trimEnd() === 'packages:';
+      if (inPackages) sawPackages = true;
+      continue;
+    }
+    if (!inPackages) continue;
+
+    // Four-space lines are the entry's own fields — resolution, engines, cpu,
+    // os, deprecated, hasBin. Only the two-space keys are packages.
+    if (!/^ {2}\S/.test(raw)) continue;
+
+    const head = raw.trim();
+    if (!head.endsWith(':')) {
+      throw new Error(`line ${lineNo}: expected a "name@version:" key, got ${JSON.stringify(head)}`);
+    }
+    const pkg = pnpmPackage(unquote(head.slice(0, -1)), ecosystem);
+    if (pkg) packages.push(pkg);
+  }
+
+  // snapshots: without packages: is a truncated file, and an importers-only
+  // lockfile describes a workspace with nothing installed. Either way nothing
+  // was read, and nothing-read must not be recorded as nothing-vulnerable.
+  if (!sawPackages) throw new Error('no "packages:" section');
+
   return dedupe(packages);
 }

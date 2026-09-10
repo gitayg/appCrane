@@ -43,7 +43,7 @@ const monitoring = (await import('../server/routes/monitoring.js')).default;
 const app = express();
 app.use(express.json());
 app.use('/api', monitoring);
-const server = await new Promise((r) => { const s = app.listen(0, () => r(s)); });
+const server = await new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
 after(() => { server.closeAllConnections?.(); server.unref(); server.close(); });
 
 const BASE = `http://127.0.0.1:${server.address().port}`;

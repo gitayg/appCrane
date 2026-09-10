@@ -54,7 +54,7 @@ api.use('/api/apps', appsRoutes);
 api.use(errorHandler);
 
 const server = await new Promise((resolve) => {
-  const s = api.listen(0, () => resolve(s));
+  const s = api.listen(0, '127.0.0.1', () => resolve(s));
 });
 const BASE = `http://127.0.0.1:${server.address().port}`;
 

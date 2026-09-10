@@ -69,7 +69,7 @@ app.use('/api/settings', settingsRouter);
 app.use('/api/github-service', githubServiceRouter);
 app.use(errorHandler);
 
-const server = await new Promise((res) => { const s = app.listen(0, () => res(s)); });
+const server = await new Promise((res) => { const s = app.listen(0, '127.0.0.1', () => res(s)); });
 after(() => { server.closeAllConnections?.(); server.unref(); server.close(); });
 const BASE = `http://127.0.0.1:${server.address().port}`;
 

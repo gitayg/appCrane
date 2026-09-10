@@ -145,15 +145,28 @@ export function parseLockfile(lockPath, ecosystem, entry = null) {
 
 // Ordering for version strings across ecosystems, which is why this is not
 // `semver`: OSV hands back Go's "v1.2.3", PyPI's "1.0.0rc1" and npm's semver
-// through the same field. Numeric segments compare numerically, and a version
+// through the same field — and imageScan.js needs the same ordering for the
+// Debian and Alpine versions Trivy hands back, which is why this is exported
+// rather than duplicated: two comparators would eventually disagree about
+// which of two fixed versions is the newer, in an email nobody re-reads.
+// Numeric segments compare numerically, and a version
 // that runs out of segments where the other continues with a NUMBER is the
 // smaller one (1.2 < 1.2.1) while one that continues with a WORD is the larger
 // (1.2.0 > 1.2.0-rc1). It is not a full semver implementation and does not need
 // to be: it only ever orders fixed versions of one package against each other,
 // and a wrong answer picks a different real fixed version rather than inventing
 // one.
-function compareVersions(a, b) {
-  const segs = (v) => String(v).replace(/^v/i, '').split(/[.+_-]/).filter(Boolean);
+export function compareVersions(a, b) {
+  // '~' is a separator too, for the distro versions the image scanner feeds in.
+  // Measured on a real Trivy report: ca-certificates carried two fixes,
+  // '20230311+deb12u1~deb11u1' and '20250419~deb12u1~deb11u1'. Without '~' the
+  // second is ONE non-numeric segment, so it sorted BELOW the first and the
+  // digest named the older fix — a version that does not resolve the advisory
+  // it was offered for. With '~' both split to ['<date>','deb12u1','deb11u1']
+  // and the dates compare numerically. It also happens to give Debian's own
+  // meaning for '~' (1.0~rc1 < 1.0) for free, via the existing rule that a
+  // version running out of segments against a WORD is the larger one.
+  const segs = (v) => String(v).replace(/^v/i, '').split(/[.+_~-]/).filter(Boolean);
   const A = segs(a);
   const B = segs(b);
   const num = (s) => /^\d+$/.test(s);
@@ -317,71 +330,104 @@ export async function queryOsv(packages) {
  * Scan one app/env and record the result. Never throws: a failed scan is a
  * recorded 'error' row, because a scanner that can break a deploy is a blocking
  * control wearing a reporting label.
+ *
+ * TWO SCANNERS, ONE ROW. An app that AppCrane builds has a release tree with
+ * lockfiles in it; an app that AppCrane pulls has an image and no tree at all,
+ * and used to record 'skipped — no recognised manifest' forever. The dispatch
+ * is here, on source_type, rather than at the three call sites (deploy,
+ * scheduled, manual) so that all three get image coverage and neither scanner
+ * owns its own INSERT — 078's whole shape depends on there being exactly one
+ * row per scan, in one place, whichever scanner produced it.
+ *
  * @returns {Promise<object>} the recorded scan row
  */
 export async function scanApp(db, app, env, source = 'deploy') {
-  // Scans read the LIVE release, via the same `current` symlink the running
-  // container was built from, rather than a release path passed in by a
-  // caller. A deploy-time scan that read the directory the deploy just built
-  // would report on a release that a late failure could still have prevented
-  // from going live.
-  const dataDir = resolve(process.env.DATA_DIR || './data');
-  const releaseDir = join(dataDir, 'apps', app.slug, env, 'current');
-
   let ecosystem = null;
   let packageCount = 0;
   let status, findingsJson = null, error = null;
 
-  try {
-    const manifests = findLockfiles(releaseDir);
-    if (manifests.length === 0) {
-      // Nothing AppCrane can read is not a failure — a static site has no
-      // manifest and never will. It is recorded so the fleet view can
-      // distinguish "clean" from "never looked at", which an absent row could
-      // not.
-      status = 'skipped';
-      error = 'no recognised manifest in the live release';
-    } else {
-      // Every ecosystem present, comma-joined, so a mixed repo is not recorded
-      // as whichever manifest happened to sort first. The column takes it
-      // as-is: 078 left ecosystem free of a CHECK precisely because this list
-      // was always going to grow.
-      ecosystem = [...new Set(manifests.map((m) => m.ecosystem))].sort().join(',');
+  if (app.source_type === 'image') {
+    try {
+      // Dynamic so the lockfile path never loads the image scanner, and so the
+      // two modules can share compareVersions without a static import cycle.
+      const { scanImage } = await import('./imageScan.js');
+      // A deploy-time scan does not pull the scanner image: obtaining ~150 MB
+      // of platform tooling inside somebody else's deploy is the same surprise
+      // as making the scan blocking. The scheduled and manual paths do pull,
+      // and neither of them is inside anyone's deploy.
+      const result = await scanImage(db, app, env, { allowPull: source !== 'deploy' });
+      status = result.status;
+      ecosystem = result.ecosystem;
+      packageCount = result.packageCount;
+      findingsJson = result.findings.length > 0 ? JSON.stringify(result.findings) : null;
+      error = result.error;
+    } catch (e) {
+      // scanImage does not throw by contract. The catch is here for the
+      // contract being broken by a later edit, because the alternative is this
+      // function throwing — and its own contract is that it never does.
+      status = 'error';
+      error = e.message;
+    }
+  } else {
+    // Scans read the LIVE release, via the same `current` symlink the running
+    // container was built from, rather than a release path passed in by a
+    // caller. A deploy-time scan that read the directory the deploy just built
+    // would report on a release that a late failure could still have prevented
+    // from going live.
+    const dataDir = resolve(process.env.DATA_DIR || './data');
+    const releaseDir = join(dataDir, 'apps', app.slug, env, 'current');
 
-      // One package can appear in two manifests of the same ecosystem (a
-      // monorepo's frontend and its admin app both pin lodash). The key
-      // includes the ecosystem because npm's `crypto` and PyPI's `crypto` are
-      // different packages with different advisories.
-      const packages = [];
-      const seen = new Set();
-      for (const manifest of manifests) {
-        // A manifest that cannot be parsed fails the WHOLE scan rather than
-        // contributing nothing to a scan that otherwise reports 'ok'. Partial
-        // results recorded as a completed scan are the false clean again: the
-        // app looks scanned, and the file nothing could read is invisible.
-        for (const pkg of parseLockfile(manifest.path, manifest.ecosystem, manifest.entry)) {
-          const key = `${pkg.ecosystem}:${pkg.name}@${pkg.version}`;
-          if (seen.has(key)) continue;
-          seen.add(key);
-          packages.push(pkg);
+    try {
+      const manifests = findLockfiles(releaseDir);
+      if (manifests.length === 0) {
+        // Nothing AppCrane can read is not a failure — a static site has no
+        // manifest and never will. It is recorded so the fleet view can
+        // distinguish "clean" from "never looked at", which an absent row could
+        // not.
+        status = 'skipped';
+        error = 'no recognised manifest in the live release';
+      } else {
+        // Every ecosystem present, comma-joined, so a mixed repo is not recorded
+        // as whichever manifest happened to sort first. The column takes it
+        // as-is: 078 left ecosystem free of a CHECK precisely because this list
+        // was always going to grow.
+        ecosystem = [...new Set(manifests.map((m) => m.ecosystem))].sort().join(',');
+
+        // One package can appear in two manifests of the same ecosystem (a
+        // monorepo's frontend and its admin app both pin lodash). The key
+        // includes the ecosystem because npm's `crypto` and PyPI's `crypto` are
+        // different packages with different advisories.
+        const packages = [];
+        const seen = new Set();
+        for (const manifest of manifests) {
+          // A manifest that cannot be parsed fails the WHOLE scan rather than
+          // contributing nothing to a scan that otherwise reports 'ok'. Partial
+          // results recorded as a completed scan are the false clean again: the
+          // app looks scanned, and the file nothing could read is invisible.
+          for (const pkg of parseLockfile(manifest.path, manifest.ecosystem, manifest.entry)) {
+            const key = `${pkg.ecosystem}:${pkg.name}@${pkg.version}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            packages.push(pkg);
+          }
+        }
+        packageCount = packages.length;
+
+        const osv = await queryOsv(packages);
+        if (!osv.ok) {
+          status = 'error';
+          error = osv.error;
+        } else if (osv.findings.length > 0) {
+          status = 'findings';
+          findingsJson = JSON.stringify(osv.findings);
+        } else {
+          status = 'ok';
         }
       }
-      packageCount = packages.length;
-
-      const osv = await queryOsv(packages);
-      if (!osv.ok) {
-        status = 'error';
-        error = osv.error;
-      } else if (osv.findings.length > 0) {
-        status = 'findings';
-        findingsJson = JSON.stringify(osv.findings);
-      } else {
-        status = 'ok';
-      }
+    } catch (e) {
+      status = 'error';
+      error = e.message;
     }
-  } catch (e) {
-    status = 'error';
-    error = e.message;
   }
 
   const info = db.prepare(`

@@ -60,7 +60,7 @@ const api = express();
 api.use(express.json());
 api.use('/api/catalog', catalogRoutes);
 api.use(errorHandler);
-const server = await new Promise((r) => { const s = api.listen(0, () => r(s)); });
+const server = await new Promise((r) => { const s = api.listen(0, '127.0.0.1', () => r(s)); });
 const BASE = `http://127.0.0.1:${server.address().port}`;
 
 after(() => {

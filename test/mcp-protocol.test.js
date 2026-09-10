@@ -31,7 +31,7 @@ app.use(express.json());
 app.use('/api/mcp', mcpRouter);
 
 const server = await new Promise((resolve) => {
-  const s = app.listen(0, () => resolve(s));
+  const s = app.listen(0, '127.0.0.1', () => resolve(s));
 });
 const BASE = `http://127.0.0.1:${server.address().port}`;
 // `fetch` (undici) pools keep-alive sockets, and `server.close()` only stops

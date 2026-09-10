@@ -102,7 +102,7 @@ function mkServer(jsonOpts) {
 const PROD_PARSER = prodParser();
 const WIDE_PARSER = { limit: '50mb', type: ['application/json', 'application/scim+json'] };
 
-const listen = async (app) => new Promise((r) => { const s = app.listen(0, () => r(s)); });
+const listen = async (app) => new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
 const prodServer = await listen(mkServer(PROD_PARSER));
 const wideServer = await listen(mkServer(WIDE_PARSER));
 after(() => {

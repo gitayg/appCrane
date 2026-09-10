@@ -77,7 +77,7 @@ const deployRouter = (await import('../server/routes/deploy.js')).default;
 const server = await new Promise((res) => {
   const api = express();
   api.use('/api/apps', deployRouter);
-  const s = api.listen(0, () => res(s));
+  const s = api.listen(0, '127.0.0.1', () => res(s));
 });
 after(() => { server.closeAllConnections?.(); server.unref(); server.close(); });
 const BASE = `http://127.0.0.1:${server.address().port}`;

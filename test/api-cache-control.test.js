@@ -27,7 +27,7 @@ app.get('/api/apps/:slug/icon', (_q, r) => r.type('image/png').send('png'));
 app.get('/api/events', (_q, r) => { r.setHeader('Cache-Control', 'no-cache'); r.json({ ok: true }); });
 app.get('/notapi', (_q, r) => r.send('hi'));
 
-const server = await new Promise((res) => { const s = app.listen(0, () => res(s)); });
+const server = await new Promise((res) => { const s = app.listen(0, '127.0.0.1', () => res(s)); });
 after(() => { server.closeAllConnections?.(); server.unref(); server.close(); });
 const BASE = `http://127.0.0.1:${server.address().port}`;
 const cc = async (p) => (await fetch(`${BASE}${p}`)).headers.get('cache-control');

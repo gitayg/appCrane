@@ -207,7 +207,9 @@
       "required": true,
       "env": null,
       "url_env": "PG_DATABASE_URL"
-    }
+    },
+    "port": 3000,
+    "health": "/healthz"
   },
   {
     "name": "Bagisto",
@@ -254,7 +256,7 @@
     "slug": "spree",
     "category": "Commerce",
     "repo": "spree/spree",
-    "image": "spreecommerce/spree",
+    "image": "ghcr.io/spree/spree",
     "home": "https://spreecommerce.org",
     "license": "BSD-3-Clause",
     "short": "Rails commerce platform, long-established",
@@ -263,7 +265,9 @@
       "required": true,
       "env": null,
       "url_env": "DATABASE_URL"
-    }
+    },
+    "port": 3000,
+    "health": "/up"
   },
   {
     "name": "Vendure",
@@ -560,7 +564,9 @@
     "image": "ghcr.io/apache/ofbiz",
     "home": "https://ofbiz.apache.org/",
     "license": "Apache-2.0",
-    "short": "Java ERP framework for building bespoke systems"
+    "short": "Java ERP framework for building bespoke systems",
+    "port": 8080,
+    "health": "/images/favicon.ico"
   },
   {
     "name": "Axelor",
@@ -629,7 +635,7 @@
     "image": "odoo",
     "home": "https://www.odoo.com",
     "license": "NOASSERTION",
-    "short": "Full business suite \u2014 sales, stock, accounting, HR",
+    "short": "Full business suite — sales, stock, accounting, HR",
     "port": 8069,
     "needs": {
       "engine": "postgres",
@@ -677,14 +683,16 @@
     "image": "documenso/documenso",
     "home": "https://documenso.com",
     "license": "AGPL-3.0",
-    "short": "E-signatures \u2014 DocuSign alternative",
+    "short": "E-signatures — DocuSign alternative",
     "needs": {
       "engine": "postgres",
       "required": true,
       "env": null,
       "url_env": "NEXT_PRIVATE_DATABASE_URL",
       "note": "NEXT_PRIVATE_DIRECT_DATABASE_URL may be set to the same value when no connection pooler is in front."
-    }
+    },
+    "port": 3000,
+    "health": "/api/health"
   },
   {
     "name": "OpenSign",
@@ -811,7 +819,7 @@
     "image": "orangehrm/orangehrm",
     "home": "https://www.orangehrm.com",
     "license": "GPL-3.0",
-    "short": "HR management \u2014 leave, time, recruitment",
+    "short": "HR management — leave, time, recruitment",
     "port": 80,
     "needs": {
       "engine": "mariadb",
@@ -950,7 +958,7 @@
     "image": "snipe/snipe-it",
     "home": "https://snipeitapp.com",
     "license": "AGPL-3.0",
-    "short": "IT asset tracking \u2014 who has which laptop",
+    "short": "IT asset tracking — who has which laptop",
     "port": 80,
     "url_env": "APP_URL",
     "secrets": [
@@ -1168,7 +1176,7 @@
     "image": "mattermost/focalboard",
     "home": "https://www.focalboard.com",
     "license": "NOASSERTION",
-    "short": "Kanban boards \u2014 Trello alternative",
+    "short": "Kanban boards — Trello alternative",
     "port": 8000
   },
   {
@@ -1283,7 +1291,7 @@
     "image": "calcom/cal.com",
     "home": "https://cal.diy",
     "license": "MIT",
-    "short": "Scheduling and booking pages \u2014 Calendly alternative",
+    "short": "Scheduling and booking pages — Calendly alternative",
     "port": 3000,
     "health": "/",
     "url_env": "NEXT_PUBLIC_WEBAPP_URL",
@@ -1368,7 +1376,9 @@
     "image": "owasp/threat-dragon:stable",
     "home": "https://owasp.org/www-project-threat-dragon/",
     "license": "Apache-2.0",
-    "short": "Threat modelling with data-flow diagrams"
+    "short": "Threat modelling with data-flow diagrams",
+    "port": 3000,
+    "health": "/healthz"
   },
   {
     "name": "SimpleRisk",

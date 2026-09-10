@@ -1837,8 +1837,19 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     // having fully succeeded.
     try {
       const { scanApp } = await import('./appScan.js');
+      // scanApp dispatches on source_type: a tree-based app has its lockfiles
+      // read, and a source_type='image' app has the DIGEST recorded against
+      // this deployment scanned by a containerised Trivy. Both land as one row
+      // in app_vuln_scans and neither can change the outcome above.
       const scan = await scanApp(db, app, env, 'deploy');
-      appendLog(`Dependency scan: ${scan.status}${scan.package_count ? ` (${scan.package_count} packages)` : ''}`);
+      // The reason is logged, not just the status. 'skipped' with no
+      // explanation is the line an operator cannot act on, and it is the line
+      // an image app produces when the scanner is not installed on the box.
+      appendLog(
+        `Dependency scan: ${scan.status}`
+        + `${scan.package_count ? ` (${scan.package_count} packages)` : ''}`
+        + `${scan.error ? ` — ${scan.error}` : ''}`,
+      );
     } catch (e) {
       log.warn(`[appScan] post-deploy scan failed for ${app.slug}/${env}: ${e.message}`);
     }

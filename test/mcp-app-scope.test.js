@@ -90,7 +90,7 @@ httpApp.use('/api/mcp', mcpRouter);
 httpApp.use((err, _req, res, _next) => res.status(err.status || 500).json({ error: err.message, code: err.code }));
 
 const server = await new Promise((resolve) => {
-  const s = httpApp.listen(0, () => resolve(s));
+  const s = httpApp.listen(0, '127.0.0.1', () => resolve(s));
 });
 const BASE = `http://127.0.0.1:${server.address().port}`;
 

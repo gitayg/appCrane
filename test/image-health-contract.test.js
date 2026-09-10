@@ -21,7 +21,7 @@ const probe = __testables?.probeHealthEndpoint;
 
 async function serve(handler) {
   const s = createServer(handler);
-  await new Promise(r => s.listen(0, r));
+  await new Promise(r => s.listen(0, '127.0.0.1', r));
   return { url: `http://127.0.0.1:${s.address().port}/health`, close: () => s.close() };
 }
 

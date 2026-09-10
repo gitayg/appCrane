@@ -42,11 +42,14 @@ const idsOf = (pkgs) => pkgs.map(p => `${p.name}@${p.version}`).sort();
 // the table
 // ---------------------------------------------------------------------------
 
-test('the table maps six manifests onto OSV ecosystem names', () => {
+test('the table maps nine manifests onto OSV ecosystem names', () => {
   assert.deepEqual(
     MANIFESTS.map(m => [m.file, m.ecosystem]),
     [
       ['package-lock.json', 'npm'],
+      ['yarn.lock', 'npm'],
+      ['pnpm-lock.yaml', 'npm'],
+      ['composer.lock', 'Packagist'],
       ['go.sum', 'Go'],
       ['Cargo.lock', 'crates.io'],
       ['Gemfile.lock', 'RubyGems'],
@@ -59,11 +62,29 @@ test('the table maps six manifests onto OSV ecosystem names', () => {
   for (const m of MANIFESTS) assert.equal(typeof m.parse, 'function', `${m.file} has no parser`);
 });
 
-test('two manifests may share one ecosystem', () => {
-  // poetry.lock and Pipfile.lock are both PyPI. The table is keyed by FILE, not
-  // by ecosystem, which is what lets a second Python packaging tool be one row.
-  const pypi = MANIFESTS.filter(m => m.ecosystem === 'PyPI').map(m => m.file);
-  assert.deepEqual(pypi, ['poetry.lock', 'Pipfile.lock']);
+test('PHP is Packagist, capital P, and nothing else', () => {
+  // Measured against the live API rather than read off a list:
+  //   {name: symfony/http-kernel, ecosystem: Packagist, version: 5.4.10} -> GHSA-h7vf-5wrv-9fhv
+  //   {name: symfony/http-kernel, ecosystem: packagist, version: 5.4.10} -> {} (no vulns key)
+  // The lowercase spelling is not an error, it is an empty answer, so every PHP
+  // app on the box would be recorded clean. 'Packagist' is also the spelling in
+  // the OSV schema's own defined-ecosystems list.
+  const php = MANIFESTS.find(m => m.file === 'composer.lock');
+  assert.equal(php.ecosystem, 'Packagist');
+});
+
+test('three manifests share the npm ecosystem, and two share PyPI', () => {
+  // The table is keyed by FILE, not by ecosystem, which is what lets a second
+  // and third JavaScript package manager be one row each. Order is
+  // presentation only — appScan reads every manifest it finds, so a repo
+  // holding both a package-lock.json and a yarn.lock is read twice rather than
+  // one shadowing the other.
+  assert.deepEqual(
+    MANIFESTS.filter(m => m.ecosystem === 'npm').map(m => m.file),
+    ['package-lock.json', 'yarn.lock', 'pnpm-lock.yaml']);
+  assert.deepEqual(
+    MANIFESTS.filter(m => m.ecosystem === 'PyPI').map(m => m.file),
+    ['poetry.lock', 'Pipfile.lock']);
 });
 
 test('parseManifest dispatches on the filename when no row is passed', () => {
@@ -556,6 +577,570 @@ test('a JSON file with no default or develop section is not a Pipfile.lock', () 
 });
 
 // ---------------------------------------------------------------------------
+// PHP — composer
+// ---------------------------------------------------------------------------
+//
+// Shaped on BookStack's own composer.lock, which is the case this row exists
+// for: 151 packages across `packages` and `packages-dev`, 64 of them carrying a
+// leading v on the version. `platform` and `platform-dev` sit alongside them
+// holding php and ext-* entries, which are not Packagist packages at all.
+const COMPOSER_LOCK = JSON.stringify({
+  _readme: ['This file locks the dependencies of your project to a known state'],
+  'content-hash': '3a0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e',
+  packages: [
+    {
+      name: 'guzzlehttp/guzzle',
+      version: '7.5.0',
+      source: { type: 'git', url: 'https://github.com/guzzle/guzzle.git', reference: 'b50a2a1251152e43f6a37f0fa053e730a67d25ba' },
+      dist: { type: 'zip', url: 'https://api.github.com/repos/guzzle/guzzle/zipball/b50a2a12', reference: 'b50a2a12', shasum: '' },
+      require: { php: '^7.2.5 || ^8.0' },
+      type: 'library',
+    },
+    {
+      name: 'laravel/framework',
+      version: 'v9.52.4',
+      source: { type: 'git', url: 'https://github.com/laravel/framework.git', reference: 'f2b9c0d0e0f0a0b0c0d0e0f0a0b0c0d0e0f0a0b0' },
+      dist: { type: 'zip', url: 'https://api.github.com/repos/laravel/framework/zipball/f2b9c0d0', reference: 'f2b9c0d0', shasum: '' },
+      type: 'library',
+    },
+    {
+      name: 'symfony/polyfill-intl-idn',
+      version: 'v1.27.0',
+      source: { type: 'git', url: 'https://github.com/symfony/polyfill-intl-idn.git', reference: '639084e360537a19f9ee352433b84ce831f3d2da' },
+      type: 'library',
+    },
+    {
+      name: 'acme/nightly-widget',
+      version: 'dev-main',
+      source: { type: 'git', url: 'https://github.com/acme/nightly-widget.git', reference: '0f0e0d0c0b0a09080706050403020100f0e0d0c0' },
+      type: 'library',
+    },
+    {
+      name: 'acme/branch-aliased',
+      version: '3.4.x-dev',
+      source: { type: 'git', url: 'https://github.com/acme/branch-aliased.git', reference: '1a2b3c4d5e6f70819283a4b5c6d7e8f901234567' },
+      type: 'library',
+    },
+  ],
+  'packages-dev': [
+    {
+      name: 'phpunit/phpunit',
+      version: '9.6.3',
+      source: { type: 'git', url: 'https://github.com/sebastianbergmann/phpunit.git', reference: 'e7bdf4c6ae0d4ba9c1e0d0b0a0908070605040302' },
+      type: 'library',
+    },
+  ],
+  aliases: [],
+  'minimum-stability': 'stable',
+  platform: { php: '^8.0.2', 'ext-json': '*', 'ext-mbstring': '*' },
+  'platform-dev': [],
+  'plugin-api-version': '2.3.0',
+}, null, 2);
+
+test('composer.lock covers packages and packages-dev', () => {
+  const pkgs = parse(fixture('composer.lock', COMPOSER_LOCK));
+  assert.deepEqual(idsOf(pkgs), [
+    'guzzlehttp/guzzle@7.5.0',
+    'laravel/framework@9.52.4',
+    'phpunit/phpunit@9.6.3',
+    'symfony/polyfill-intl-idn@1.27.0',
+  ], 'require-dev packages run in CI and ship in dev images; leaving them out is the ' +
+     'under-report this feature exists to prevent');
+});
+
+test('the leading v on a Composer tag is not part of the version', () => {
+  // Composer writes the git TAG. OSV does not: its Packagist advisories spell
+  // every boundary and every enumerated version bare — guzzlehttp/guzzle's
+  // version list runs "6.5.7", "6.5.8", and GHSA-cwxw-98qj-8qjx opens at fixed
+  // "7.12.1" — because Packagist normalises the tag prefix away itself.
+  //
+  // Measured before deciding, and reported honestly: the OSV /v1/query endpoint
+  // normalises the v too, so "v9.52.4" and "9.52.4" return the same 4
+  // advisories for laravel/framework today, as do all eleven v-prefixed
+  // packages in BookStack v23.02 that have findings. The strip is a
+  // data-hygiene choice, NOT a fix for a measured miss: it makes the recorded
+  // version match the spelling OSV's own data and its `fixed` field use, so a
+  // digest never reports "v6.0.19 — fixed in 6.0.20". The mirror of the Go rule
+  // above, which KEEPS +incompatible precisely because that suffix does appear
+  // inside OSV's Go ranges.
+  const byName = Object.fromEntries(parse(fixture('composer.lock', COMPOSER_LOCK))
+    .map(p => [p.name, p.version]));
+  assert.equal(byName['laravel/framework'], '9.52.4');
+  assert.equal(byName['symfony/polyfill-intl-idn'], '1.27.0');
+  assert.equal(byName['guzzlehttp/guzzle'], '7.5.0', 'a version with no v prefix was altered');
+});
+
+test('a Composer branch pin is not a release and is left out', () => {
+  // dev-main and 3.4.x-dev mean "whatever that branch points at today". OSV
+  // returns nothing for either string, and picking the branch alias instead
+  // would be the requirements.txt mistake — a confident answer about a version
+  // that may not be installed.
+  const pkgs = parse(fixture('composer.lock', COMPOSER_LOCK));
+  assert.ok(!pkgs.some(p => p.name === 'acme/nightly-widget'), 'dev-main was queried as a version');
+  assert.ok(!pkgs.some(p => p.name === 'acme/branch-aliased'), '3.4.x-dev was queried as a version');
+  assert.ok(!pkgs.some(p => /dev/.test(p.version)), 'a branch pin reached the query set');
+});
+
+test('platform requirements are not Packagist packages', () => {
+  // `platform` holds php and ext-* — the interpreter and its extensions.
+  // Querying Packagist for "php" at "^8.0.2" spends a slot on a constraint, and
+  // "ext-json" is not a package anyone publishes.
+  const pkgs = parse(fixture('composer.lock', COMPOSER_LOCK));
+  assert.ok(!pkgs.some(p => p.name === 'php' || p.name.startsWith('ext-')),
+    'a platform requirement was read as a Packagist package');
+});
+
+test('a composer.lock entry with no version throws rather than being dropped', () => {
+  const path = fixture('composer.lock',
+    JSON.stringify({ packages: [{ name: 'guzzlehttp/guzzle', type: 'library' }] }));
+  assert.throws(() => parseManifest(path), /"guzzlehttp\/guzzle" in packages has no version/);
+});
+
+test('a JSON file with no packages array is not a composer.lock', () => {
+  const path = fixture('composer.lock', JSON.stringify({ 'content-hash': 'abc', platform: {} }));
+  assert.throws(() => parseManifest(path), /no "packages" or "packages-dev" array/,
+    'an unrecognised JSON file parsed to zero packages — a clean scan for a file ' +
+    'nothing understood');
+});
+
+// ---------------------------------------------------------------------------
+// yarn — classic (v1)
+// ---------------------------------------------------------------------------
+//
+// Every line below is a shape lifted from real v1 lockfiles. The ansi-html
+// entry is verbatim from one: a `resolutions` override that keeps the old name
+// in the key and swaps a different package in behind it. The Artifactory URL is
+// the mirror layout, where the registry serves the same /-/ path under a prefix.
+const YARN_V1 = `# THIS IS AN AUTOGENERATED FILE. DO NOT EDIT THIS FILE DIRECTLY.
+# yarn lockfile v1
+
+
+"@babel/code-frame@^7.0.0", "@babel/code-frame@^7.12.13", "@babel/code-frame@^7.18.6":
+  version "7.18.6"
+  resolved "https://registry.yarnpkg.com/@babel/code-frame/-/code-frame-7.18.6.tgz#3b25d38c89600baa2dcc219edfa88a74eb2c427a"
+  integrity sha512-TDCmlK5eOvH+eH7cdAFlNXeVJqWIQ7gW9tY1GJIpUtFb6CmjVyq2VM3u71bOyR8CRihcCgMUYoDNyLXao3+70Q==
+  dependencies:
+    "@babel/highlight" "^7.18.6"
+
+"@company/ui@^1.0.0":
+  version "1.2.0"
+  resolved "https://artifactory.example.com/api/npm/npm-remote/@company/ui/-/ui-1.2.0.tgz#a0b0c0d0e0f0a0b0c0d0e0f0a0b0c0d0e0f0a0b0"
+
+ansi-html@0.0.7, ansi-html@^0.0.7, "ansi-html@https://registry.yarnpkg.com/ansi-html-community/-/ansi-html-community-0.0.8.tgz#69fbc4d6ccbe383f9736934ae34c3f8290f1bf41":
+  version "0.0.8"
+  resolved "https://registry.yarnpkg.com/ansi-html-community/-/ansi-html-community-0.0.8.tgz#69fbc4d6ccbe383f9736934ae34c3f8290f1bf41"
+
+lodash@^3.10.1:
+  version "3.10.1"
+  resolved "https://registry.yarnpkg.com/lodash/-/lodash-3.10.1.tgz#5bf45e8e49ba4189e17d482789dfd15bd140b7b6"
+  integrity sha1-W/Rejkm6QYnhfUgnid/RW9FAt7Y=
+
+"mylodash@npm:lodash@4.17.15":
+  version "4.17.15"
+  resolved "https://registry.yarnpkg.com/lodash/-/lodash-4.17.15.tgz#b447f6670a0455bbfeedd11392eff330ea097548"
+
+"xlsx@https://cdn.sheetjs.com/xlsx-0.20.2/xlsx-0.20.2.tgz":
+  version "0.20.2"
+  resolved "https://cdn.sheetjs.com/xlsx-0.20.2/xlsx-0.20.2.tgz#0f64eeed3f1a46e6479d3e78c1a1b3f0ff6a4a4e"
+
+"local-engine@file:../engines/billing":
+  version "0.1.0"
+
+"myminimist@npm:minimist@1.2.6":
+  version "1.2.6"
+`;
+
+test('a yarn v1 lockfile yields the published packages under their real names', () => {
+  const pkgs = parse(fixture('yarn.lock', YARN_V1));
+  assert.deepEqual(idsOf(pkgs), [
+    '@babel/code-frame@7.18.6',
+    '@company/ui@1.2.0',
+    'ansi-html-community@0.0.8',
+    'lodash@3.10.1',
+    'lodash@4.17.15',
+    'minimist@1.2.6',
+  ], 'the query set is not the installed registry set');
+});
+
+test('a scoped yarn v1 package round-trips with its scope intact', () => {
+  // The descriptor opens with an @ that is NOT the name/range separator. A
+  // reader that splits on the first @ at position 0 emits a package called ""
+  // at version "babel/code-frame@^7.0.0"; one that splits on the LAST @ is
+  // right here and wrong for a git range, which ends in one.
+  const pkgs = parse(fixture('yarn.lock', YARN_V1));
+  assert.ok(pkgs.some(p => p.name === '@babel/code-frame' && p.version === '7.18.6'),
+    'the scope was lost or the range was read as the version');
+  assert.ok(pkgs.some(p => p.name === '@company/ui' && p.version === '1.2.0'),
+    'a scoped package behind a registry mirror lost its scope — the name is taken from ' +
+    'the segments before /-/, not the ones after the host, or the mirror yields "api"');
+});
+
+test('several yarn v1 descriptors sharing one entry are one package', () => {
+  // "@babel/code-frame@^7.0.0", "^7.12.13" and "^7.18.6" all resolved to
+  // 7.18.6. Three query slots for one answer, and three identical rows in a
+  // report a human reads.
+  const pkgs = parse(fixture('yarn.lock', YARN_V1));
+  assert.equal(pkgs.filter(p => p.name === '@babel/code-frame').length, 1);
+});
+
+test('a yarn v1 alias is queried under the package name, not the alias', () => {
+  const pkgs = parse(fixture('yarn.lock', YARN_V1));
+  assert.ok(pkgs.some(p => p.name === 'lodash' && p.version === '4.17.15'),
+    'the aliased lodash@4.17.15 was not queried under the name lodash');
+  assert.ok(!pkgs.some(p => p.name === 'mylodash'),
+    'the alias "mylodash" was sent to OSV — no registry has it, so the answer is a ' +
+    'guaranteed false clean');
+});
+
+test('an alias with no resolved line still resolves through the descriptor', () => {
+  // `myminimist` carries no `resolved`, so the URL authority has nothing to say
+  // and the descriptor rules decide. This is the only path on which the
+  // name/range split matters: read with the LAST @ the descriptor
+  // "myminimist@npm:minimist@1.2.6" yields a package called
+  // "myminimist@npm:minimist", which no registry has. Read with the first @
+  // after the scope it yields the minimist that is installed.
+  const pkgs = parse(fixture('yarn.lock', YARN_V1));
+  assert.ok(pkgs.some(p => p.name === 'minimist' && p.version === '1.2.6'),
+    'the fallback path lost the aliased package');
+  assert.ok(!pkgs.some(p => p.name.includes('npm:')),
+    'an alias protocol leaked into a package name');
+});
+
+test('a yarn v1 resolutions override is named for what is installed', () => {
+  // Verbatim from a real lockfile. The entry is keyed ansi-html and installs
+  // ansi-html-community 0.0.8. Read from the key it reports ansi-html 0.0.8 —
+  // a version ansi-html has never published, so OSV answers clean for a
+  // package that is genuinely on disk. This is why `resolved` is the authority
+  // and the descriptors are only the fallback: across 11 real v1 lockfiles and
+  // 10221 entries, `resolved` was present on every one and disagreed with the
+  // descriptor exactly here.
+  const pkgs = parse(fixture('yarn.lock', YARN_V1));
+  assert.ok(pkgs.some(p => p.name === 'ansi-html-community' && p.version === '0.0.8'),
+    'the override was read from the entry key instead of the resolved tarball');
+  assert.ok(!pkgs.some(p => p.name === 'ansi-html'),
+    'ansi-html 0.0.8 was queried — that release does not exist, so it answers clean');
+});
+
+test('a yarn v1 tarball or file dependency has no registry release to ask about', () => {
+  const pkgs = parse(fixture('yarn.lock', YARN_V1));
+  assert.ok(!pkgs.some(p => p.name === 'xlsx'),
+    'a CDN tarball was queried against the npm registry, where its version need not ' +
+    'correspond to any published release');
+  assert.ok(!pkgs.some(p => p.name === 'local-engine'),
+    'a file: dependency is local to the app and is published nowhere');
+});
+
+test('a yarn v1 entry with no version throws rather than being dropped', () => {
+  const path = fixture('yarn.lock',
+    '# yarn lockfile v1\n\nlodash@^3.10.1:\n  resolved "https://registry.yarnpkg.com/lodash/-/lodash-3.10.1.tgz#5bf4"\n');
+  assert.throws(() => parseManifest(path), /yarn\.lock: the entry at line 3 has no version/,
+    'a versionless entry was skipped, so the package is never queried, which is ' +
+    'indistinguishable from the package being clean');
+});
+
+// ---------------------------------------------------------------------------
+// yarn — berry (v2+)
+// ---------------------------------------------------------------------------
+//
+// Every entry below is a real shape from yarn's own lockfile: an alias whose
+// target is scoped (react-loadable -> @docusaurus/react-loadable), a patched
+// registry package, a workspace member, and a git resolution. Berry is YAML,
+// classic is not, and the two spell every version differently.
+const YARN_BERRY = `# This file is generated by running "yarn install" inside your project.
+# Manual changes might be lost - proceed with caution!
+
+__metadata:
+  version: 10
+  cacheKey: 10
+
+"@algolia/autocomplete-core@npm:1.17.9":
+  version: 1.17.9
+  resolution: "@algolia/autocomplete-core@npm:1.17.9"
+  dependencies:
+    "@algolia/autocomplete-shared": "npm:1.17.9"
+  checksum: 10/cf4f0f1d9e0ca4e7f1ea25291b270e47315385cbda4a01bbc0c56c3659d21f23
+  languageName: node
+  linkType: hard
+
+"esbuild@npm:esbuild-wasm@^0.23.0":
+  version: 0.23.0
+  resolution: "esbuild-wasm@npm:0.23.0"
+  bin:
+    esbuild: bin/esbuild
+  checksum: 10/a0b0c0d0e0f0a0b0c0d0e0f0a0b0c0d0e0f0a0b0c0d0e0f0a0b0c0d0e0f0a0b0
+  languageName: node
+  linkType: hard
+
+"react-loadable@npm:@docusaurus/react-loadable@6.0.0":
+  version: 6.0.0
+  resolution: "@docusaurus/react-loadable@npm:6.0.0"
+  dependencies:
+    "@types/react": "npm:*"
+  peerDependencies:
+    react: "*"
+  checksum: 10/b0c0d0e0f0a0b0c0d0e0f0a0b0c0d0e0f0a0b0c0d0e0f0a0b0c0d0e0f0a0b0c0
+  languageName: node
+  linkType: hard
+
+"fsevents@patch:fsevents@npm%3A^2.3.2#optional!builtin<compat/fsevents>, fsevents@patch:fsevents@npm%3A~2.3.2#optional!builtin<compat/fsevents>":
+  version: 2.3.2
+  resolution: "fsevents@patch:fsevents@npm%3A2.3.2#optional!builtin<compat/fsevents>::version=2.3.2&hash=df0bf1"
+  dependencies:
+    node-gyp: "npm:latest"
+  conditions: os=darwin
+  languageName: node
+  linkType: hard
+
+"pem@https://github.com/dexus/pem.git#commit=71dae3346801dafb5a8bcebcd4c7267fd182666f":
+  version: 1.14.8
+  resolution: "pem@https://github.com/dexus/pem.git#commit=71dae3346801dafb5a8bcebcd4c7267fd182666f"
+  languageName: node
+  linkType: hard
+
+"@fixture/builder@workspace:packages/fixture-builder":
+  version: 0.0.0-use.local
+  resolution: "@fixture/builder@workspace:packages/fixture-builder"
+  dependencies:
+    "@types/semver": "npm:^7.1.0"
+  languageName: unknown
+  linkType: soft
+`;
+
+test('a yarn berry lockfile is read from resolution, not from the entry key', () => {
+  const pkgs = parse(fixture('yarn.lock', YARN_BERRY));
+  assert.deepEqual(idsOf(pkgs), [
+    '@algolia/autocomplete-core@1.17.9',
+    '@docusaurus/react-loadable@6.0.0',
+    'esbuild-wasm@0.23.0',
+    'fsevents@2.3.2',
+  ], 'the query set is not the installed registry set');
+});
+
+test('a berry alias resolves to the real package, scope and all', () => {
+  // Both lines are real: docusaurus ships an UNSCOPED alias of a SCOPED
+  // package, and esbuild-wasm arrives keyed as esbuild. Read from the entry key
+  // both are names npm has never published at those versions, so OSV answers
+  // clean twice.
+  const pkgs = parse(fixture('yarn.lock', YARN_BERRY));
+  assert.ok(pkgs.some(p => p.name === '@docusaurus/react-loadable' && p.version === '6.0.0'),
+    'an unscoped alias of a scoped package kept the alias name');
+  assert.ok(!pkgs.some(p => p.name === 'react-loadable'), 'the alias reached the query set');
+  assert.ok(!pkgs.some(p => p.name === 'esbuild'), 'esbuild-wasm was queried as esbuild');
+});
+
+test('a patched berry package keeps its upstream identity and advisories', () => {
+  // patch: is a local diff over a registry release. The ident and the version
+  // are both the upstream ones, so the advisories still apply — dropping the
+  // entry would hide a finding on a package that is genuinely installed. Its
+  // resolution embeds a whole second descriptor after the protocol
+  // (fsevents@patch:fsevents@npm%3A2.3.2#...), so a reader that splits on the
+  // LAST @ names it "fsevents@patch:fsevents".
+  const pkgs = parse(fixture('yarn.lock', YARN_BERRY));
+  assert.ok(pkgs.some(p => p.name === 'fsevents' && p.version === '2.3.2'),
+    'a patched registry package was dropped or misnamed');
+  assert.ok(!pkgs.some(p => p.name.includes('patch')), 'a patch protocol leaked into a name');
+});
+
+test('berry workspace members and git resolutions are not registry packages', () => {
+  const pkgs = parse(fixture('yarn.lock', YARN_BERRY));
+  assert.ok(!pkgs.some(p => p.name === '@fixture/builder'),
+    'a workspace member is published nowhere, and its 0.0.0-use.local is not a release');
+  assert.ok(!pkgs.some(p => p.version.includes('use.local')));
+  assert.ok(!pkgs.some(p => p.name === 'pem'),
+    'a git resolution was queried against npm, where its version need not correspond ' +
+    'to any published release');
+});
+
+test('__metadata is the lockfile header, not a package', () => {
+  // It carries `version: 10` — the LOCKFILE version — at exactly the
+  // indentation a package's own version sits at.
+  const pkgs = parse(fixture('yarn.lock', YARN_BERRY));
+  assert.ok(!pkgs.some(p => p.name === '__metadata'), '__metadata was reported as a package');
+  assert.ok(!pkgs.some(p => p.version === '10'), 'the lockfile version was read as a release');
+});
+
+test('a berry entry with no resolution throws rather than being dropped', () => {
+  const path = fixture('yarn.lock',
+    '__metadata:\n  version: 10\n\n"lodash@npm:^4.17.21":\n  version: 4.17.21\n  linkType: hard\n');
+  assert.throws(() => parseManifest(path), /yarn\.lock: the entry at line 4 has no "resolution:"/,
+    'an entry with no resolution was skipped, and resolution is the only field that ' +
+    'says what the package actually IS');
+});
+
+test('a yarn.lock in neither format is refused, loudly', () => {
+  // Reading berry with classic rules finds no `version "x"` lines at all and
+  // returns nothing — a clean scan for a file nothing understood. The format is
+  // identified from its own marker instead, and an unmarked file is an error.
+  const path = fixture('yarn.lock', 'lodash@^4.17.21:\n  version "4.17.21"\n');
+  assert.throws(() => parseManifest(path),
+    /no "# yarn lockfile v1" header and no "__metadata:" block/);
+});
+
+test('an empty yarn v1 lockfile is legal and is not an error', () => {
+  // A real one on this machine: a project whose package.json has no
+  // dependencies still gets the two header comments and nothing else. Zero
+  // packages here means zero dependencies, which is a true answer.
+  const pkgs = parse(fixture('yarn.lock',
+    '# THIS IS AN AUTOGENERATED FILE. DO NOT EDIT THIS FILE DIRECTLY.\n# yarn lockfile v1\n\n\n'));
+  assert.deepEqual(pkgs, []);
+});
+
+// ---------------------------------------------------------------------------
+// pnpm
+// ---------------------------------------------------------------------------
+//
+// lockfileVersion 9.0, the format pnpm 9 and pnpm 10 both write. Shaped on
+// three real 9.0 lockfiles (745, 1701 and 1719 package keys). Two traps are
+// load-bearing and both are in here: `importers:` and `snapshots:` repeat
+// package-shaped keys either side of `packages:`, and snapshots keys carry the
+// peer-dependency suffix that packages keys do not. The node@runtime:26.8.1
+// entry is verbatim from pnpm's own lockfile.
+const PNPM_LOCK_9 = `lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    dependencies:
+      react:
+        specifier: ^18.3.1
+        version: 18.3.1
+      react-dom:
+        specifier: ^18.3.1
+        version: 18.3.1(react@18.3.1)
+      '@fixture/contracts':
+        specifier: workspace:*
+        version: link:../packages/contracts
+
+packages:
+
+  '@babel/code-frame@7.29.7':
+    resolution: {integrity: sha512-Aup7aUOfpbAUg2ROOJN6Iw5f9DMBlzu0mIkm/malLQFN/YQgO48wCj0Kxa3sEHJvPVFg7siR+qRInwXd2qhQKw==}
+    engines: {node: '>=6.9.0'}
+
+  esbuild@0.21.5:
+    resolution: {integrity: sha512-mg3OPMV4hXywwpoDxu3Qda5xCKQi+vCTZq8S9J/EpkhB2HzKXq4SNFZE3+NK93JYxc8VMSep+lOUSC/RVKaBqw==}
+    engines: {node: '>=12'}
+    hasBin: true
+
+  node@runtime:26.8.1:
+    resolution: {integrity: sha512-0000000000000000000000000000000000000000000000000000000000000000000000000000000000000A==}
+
+  react-dom@18.3.1:
+    resolution: {integrity: sha512-5m4nQKp+rZRb09LNH59GM4BxTh9251/ylbKIbpe7TpGxfJ+9kv6BLkLBXIjjspbgbnIBNqlI23tRnTWT0snUIw==}
+    peerDependencies:
+      react: ^18.3.1
+
+  react@18.3.1:
+    resolution: {integrity: sha512-wS+hAgJShR0KhEvPJArfuPVN1+Hz1t0Y6n5jLrGQbkb4urgPE/0Rve+1kMB1v/oWgHgm4WIcV+i7F2pTVj+2iQ==}
+    engines: {node: '>=0.10.0'}
+
+snapshots:
+
+  '@babel/code-frame@7.29.7': {}
+
+  esbuild@0.21.5: {}
+
+  react-dom@18.3.1(react@18.3.1):
+    dependencies:
+      react: 18.3.1
+
+  react@18.3.1: {}
+`;
+
+test('a pnpm 9 lockfile reports the packages section and nothing else', () => {
+  const pkgs = parse(fixture('pnpm-lock.yaml', PNPM_LOCK_9));
+  assert.deepEqual(idsOf(pkgs), [
+    '@babel/code-frame@7.29.7',
+    'esbuild@0.21.5',
+    'react-dom@18.3.1',
+    'react@18.3.1',
+  ], 'the query set is not the resolved registry set');
+});
+
+test('a scoped pnpm package round-trips with its scope intact', () => {
+  // The key is name@version, so the separator is the LAST @ — the opposite of
+  // yarn, where the range can contain one. A reader that splits on the first @
+  // emits a package called "" at version "babel/code-frame@7.29.7".
+  const pkgs = parse(fixture('pnpm-lock.yaml', PNPM_LOCK_9));
+  assert.ok(pkgs.some(p => p.name === '@babel/code-frame' && p.version === '7.29.7'),
+    'the scope was lost or the version absorbed part of the name');
+});
+
+test('importers and snapshots are not the packages section', () => {
+  // Both sit at the same indentation and both hold package-shaped keys.
+  // `importers:` lists the app's OWN workspaces and their specifiers, and
+  // `snapshots:` repeats every package with a peer-dependency suffix —
+  // react-dom@18.3.1(react@18.3.1) read as a package is a version string that
+  // matches no range, and a duplicate query slot for one already asked.
+  const pkgs = parse(fixture('pnpm-lock.yaml', PNPM_LOCK_9));
+  assert.equal(pkgs.filter(p => p.name === 'react-dom').length, 1,
+    'the snapshots entry was counted as a second react-dom');
+  assert.ok(!pkgs.some(p => /[()]/.test(p.version)),
+    'a peer-dependency suffix was read as part of the version');
+  assert.ok(!pkgs.some(p => p.name === '.' || p.name.includes('specifier')),
+    'the importers section was read as packages');
+});
+
+test('a pnpm key that is not name@<version> has no registry release behind it', () => {
+  // node@runtime:26.8.1 is verbatim from pnpm's own lockfile — the runtime:
+  // protocol, one of 1701 keys and the only non-registry one. Tarball and git
+  // dependencies key the same way, with a URL where the version goes. A version
+  // that does not begin with a digit is not a version.
+  const pkgs = parse(fixture('pnpm-lock.yaml', PNPM_LOCK_9));
+  assert.ok(!pkgs.some(p => p.name === 'node'), 'the node runtime was queried as an npm package');
+  assert.ok(!pkgs.some(p => p.version.includes(':')), 'a protocol reached a version string');
+});
+
+test('a peer-dependency suffix is cut off, wherever it turns up', () => {
+  // Measured at 0 of 4165 keys across three real 9.0 lockfiles: `packages:`
+  // holds the deduplicated set and the peer variants live in `snapshots:`. But
+  // the suffixed spelling IS real, it is in the same file a few hundred lines
+  // down, and it is what a section-detection slip would feed in here — so the
+  // cut is pinned by a test rather than left as untested defence. Uncut, the
+  // last @ lands inside the parens: react-dom becomes a package named
+  // "react-dom@18.3.1(react" at version "18.3.1)".
+  const pkgs = parse(fixture('pnpm-lock.yaml',
+    "lockfileVersion: '9.0'\n\npackages:\n\n  react-dom@18.3.1(react@18.3.1):\n    resolution: {integrity: sha512-abc}\n"));
+  assert.deepEqual(idsOf(pkgs), ['react-dom@18.3.1']);
+});
+
+test('a pnpm lockfile older than 9.x is refused by version, not read wrongly', () => {
+  // Real lockfileVersion 5.4 content. 5.x keys packages as /name/version, so
+  // read as 9.x it yields the package "/typescript/4" at version "7.4" — a name
+  // no registry has, and therefore a clean answer for every dependency in the
+  // app. An error names the file and says how to fix it; a silent empty list
+  // does not.
+  const path = fixture('pnpm-lock.yaml',
+    `lockfileVersion: 5.4\n\nspecifiers:\n  typescript: ^4.6.2\n\ndevDependencies:\n  typescript: 4.7.4\n\npackages:\n\n  /typescript/4.7.4:\n    resolution: {integrity: sha512-C0WQT0gezHuw6AdY1M2jxUO83Rjf0HP7Sk1DtXj6j1EwkQNZrHAg2XPWlq62oqEhYvONq5pkC2Y9oPljWToLmQ==}\n    engines: {node: '>=4.2.0'}\n    hasBin: true\n    dev: true\n`);
+  assert.throws(() => parseManifest(path), /lockfileVersion "5\.4" is not read — only 9\.x is/,
+    'a 5.x lockfile was parsed on a best-effort basis instead of being refused');
+});
+
+test('a pnpm 6.x lockfile is refused too', () => {
+  const path = fixture('pnpm-lock.yaml',
+    "lockfileVersion: '6.0'\n\npackages:\n\n  /typescript@4.7.4:\n    resolution: {integrity: sha512-abc}\n");
+  assert.throws(() => parseManifest(path), /lockfileVersion "6\.0" is not read/);
+});
+
+test('a YAML file with no lockfileVersion is not a pnpm-lock.yaml', () => {
+  const path = fixture('pnpm-lock.yaml', 'packages:\n\n  lodash@4.17.21:\n    resolution: {}\n');
+  assert.throws(() => parseManifest(path), /no lockfileVersion/,
+    'an unrecognised YAML file parsed to a package list without ever establishing ' +
+    'which key format it was in');
+});
+
+test('a pnpm lockfile with no packages section throws', () => {
+  const path = fixture('pnpm-lock.yaml',
+    "lockfileVersion: '9.0'\n\nimporters:\n\n  .:\n    dependencies:\n      react:\n        specifier: ^18.3.1\n        version: 18.3.1\n");
+  assert.throws(() => parseManifest(path), /no "packages:" section/,
+    'nothing was read, and nothing-read must not be recorded as nothing-vulnerable');
+});
+
+// ---------------------------------------------------------------------------
 // the shape contract, across every parser
 // ---------------------------------------------------------------------------
 
@@ -565,6 +1150,10 @@ test('every package from every parser carries its table row ecosystem', () => {
   // parser that forgets it emits a package the asserter rejects.
   const cases = [
     ['package-lock.json', NPM_LOCK, 'npm'],
+    ['yarn.lock', YARN_V1, 'npm'],
+    ['yarn.lock', YARN_BERRY, 'npm'],
+    ['pnpm-lock.yaml', PNPM_LOCK_9, 'npm'],
+    ['composer.lock', COMPOSER_LOCK, 'Packagist'],
     ['go.sum', GO_SUM, 'Go'],
     ['Cargo.lock', CARGO_LOCK, 'crates.io'],
     ['Gemfile.lock', GEMFILE_LOCK, 'RubyGems'],

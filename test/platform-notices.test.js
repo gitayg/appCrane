@@ -94,7 +94,7 @@ api.use('/api', logsRoutes);
 api.use('/api', monitoringRoutes);
 api.use(errorHandler);
 
-const server = await new Promise((res) => { const s = api.listen(0, () => res(s)); });
+const server = await new Promise((res) => { const s = api.listen(0, '127.0.0.1', () => res(s)); });
 after(() => { server.closeAllConnections?.(); server.unref(); server.close(); });
 const BASE = `http://127.0.0.1:${server.address().port}`;
 

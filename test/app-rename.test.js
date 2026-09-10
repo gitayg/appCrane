@@ -56,7 +56,7 @@ before(async () => {
     if (!err.status || err.status >= 500) console.error('ROUTE ERROR:', err.message);
     res.status(err.status || 500).json({ error: { code: err.code, message: err.message } });
   });
-  server = await new Promise((r) => { const s = api.listen(0, () => r(s)); });
+  server = await new Promise((r) => { const s = api.listen(0, '127.0.0.1', () => r(s)); });
   BASE = `http://127.0.0.1:${server.address().port}`;
 });
 after(() => { server?.closeAllConnections?.(); server?.unref(); server?.close(); });

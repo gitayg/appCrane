@@ -71,7 +71,7 @@ app.use('/api/auth/scim', scim.scimAdminRouter);
 // handler, so the test needs one too or a 403 arrives as a 500.
 app.use((err, _req, res, _next) => res.status(err.status || 500).json({ error: err.message, code: err.code }));
 
-const server = await new Promise((r) => { const s = app.listen(0, () => r(s)); });
+const server = await new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
 after(() => { server.closeAllConnections?.(); server.unref(); server.close(); });
 const BASE = `http://127.0.0.1:${server.address().port}`;
 
