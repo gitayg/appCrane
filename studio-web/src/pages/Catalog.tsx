@@ -237,7 +237,7 @@ type NeedsField = string | CatalogNeed | Array<string | CatalogNeed> | null
 type DbField = 'host' | 'port' | 'name' | 'user' | 'password'
 type DbEnvNames = Record<DbField, string>
 
-type DbEngine = 'postgres' | 'mariadb'
+type DbEngine = 'postgres' | 'mariadb' | 'mongo' | 'redis'
 
 interface DbRequirement {
   /** What AppCrane would provision. null = the manifest named something else. */
@@ -253,15 +253,28 @@ interface DbRequirement {
   note?: string
 }
 
-// One shared PostgreSQL server and one shared MariaDB server serve the whole
-// platform. These are the two tokens POST /api/apps/:slug/database accepts
-// (routes/managedDb.js ENGINES), so 'mysql' in the manifest canonicalises to
-// 'mariadb' — MariaDB is the MySQL-compatible server this platform runs, and
-// the dialog says so rather than quietly substituting one for the other.
+// The tokens POST /api/apps/:slug/database accepts, which is managedDb.js
+// SUPPORTED_ENGINES. 'mysql' canonicalises to 'mariadb' — MariaDB is the
+// MySQL-compatible server this platform runs, and the dialog says so rather
+// than quietly substituting one for the other.
+//
+// Mongo and Redis were added to the platform before this list, and the gap was
+// invisible from the server: provisioning worked over the API and MCP while the
+// Catalog dialog silently declined to offer it, because canonicalEngine
+// returned null and the entry fell through to "named something else". The three
+// mongo entries — rocketchat, opensign, wekan — installed from the UI with no
+// database at all, which looks exactly like the app being broken.
+//
+// Postgres and MariaDB are one shared server each. Redis is a container per
+// scope (its ACLs cannot scope to a numbered database), and mongo is shared —
+// but that distinction lives in managedDb.js and does not change what the
+// dialog offers.
 function canonicalEngine(raw: string): DbEngine | null {
   const s = raw.trim().toLowerCase()
   if (s === 'postgres' || s === 'postgresql' || s === 'pgsql' || s === 'pg') return 'postgres'
   if (s === 'mysql' || s === 'mariadb' || s === 'maria') return 'mariadb'
+  if (s === 'mongo' || s === 'mongodb') return 'mongo'
+  if (s === 'redis') return 'redis'
   return null
 }
 
@@ -271,11 +284,13 @@ function prettyEngine(raw: string): string {
   if (s === 'postgres' || s === 'postgresql' || s === 'pgsql' || s === 'pg') return 'PostgreSQL'
   if (s === 'mysql') return 'MySQL'
   if (s === 'mariadb' || s === 'maria') return 'MariaDB'
+  if (s === 'mongo' || s === 'mongodb') return 'MongoDB'
+  if (s === 'redis') return 'Redis'
   return raw.trim()
 }
 
-const ENGINE_LABEL: Record<DbEngine, string> = { postgres: 'PostgreSQL', mariadb: 'MariaDB' }
-const ENGINE_PORT: Record<DbEngine, number> = { postgres: 5432, mariadb: 3306 }
+const ENGINE_LABEL: Record<DbEngine, string> = { postgres: 'PostgreSQL', mariadb: 'MariaDB', mongo: 'MongoDB', redis: 'Redis' }
+const ENGINE_PORT: Record<DbEngine, number> = { postgres: 5432, mariadb: 3306, mongo: 27017, redis: 6379 }
 
 const DEFAULT_DB_ENV: DbEnvNames = {
   host: 'DB_HOST', port: 'DB_PORT', name: 'DB_NAME', user: 'DB_USER', password: 'DB_PASSWORD',

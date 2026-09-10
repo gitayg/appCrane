@@ -139,7 +139,7 @@ test('the host-port index catches a reused port and leaves the SQL engines alone
 test('redis is a supported engine, and is NOT a shared-server one', () => {
   assert.ok(mdb.SUPPORTED_ENGINES.includes('redis'));
   assert.ok(!mdb.SHARED_SERVER_ENGINES.includes('redis'));
-  assert.deepEqual(mdb.SHARED_SERVER_ENGINES, ['postgres', 'mariadb']);
+  assert.deepEqual(mdb.SHARED_SERVER_ENGINES, ['postgres', 'mariadb', 'mongo']);
   assert.equal(mdb.isPerScopeEngine('redis'), true);
   assert.equal(mdb.isPerScopeEngine('postgres'), false);
 });

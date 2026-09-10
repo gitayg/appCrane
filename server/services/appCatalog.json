@@ -308,7 +308,14 @@
       "env": null,
       "url_env": "MM_SQLSETTINGS_DATASOURCE",
       "note": "MM_SQLSETTINGS_DRIVERNAME must also be set (postgres or mysql) and must agree with the DSN scheme."
-    }
+    },
+    "volume_paths": [
+      "/mattermost/client/plugins",
+      "/mattermost/config",
+      "/mattermost/data",
+      "/mattermost/logs",
+      "/mattermost/plugins"
+    ]
   },
   {
     "name": "Rocket.Chat",
@@ -327,7 +334,10 @@
       "env": null,
       "url_env": "MONGO_URL",
       "note": "MONGO_OPLOG_URL is also read and must point at the 'local' database of the same replica set."
-    }
+    },
+    "volume_paths": [
+      "/app/uploads"
+    ]
   },
   {
     "name": "Zulip",
@@ -369,7 +379,10 @@
       "env": null,
       "url_env": null,
       "note": "NOT WIRABLE FROM DISCRETE FIELDS: the container reads a single MAYAN_DATABASES variable holding a Django DATABASES dict literal. The MAYAN_DATABASE_HOST/NAME/USER/PASSWORD/PORT names in upstream's .env are compose-level substitutions into that string and are UNVERIFIED as container variables."
-    }
+    },
+    "volume_paths": [
+      "/var/lib/mayan"
+    ]
   },
   {
     "name": "Paperless-ngx",
@@ -394,7 +407,13 @@
       },
       "url_env": null,
       "note": "Defaults to SQLite when PAPERLESS_DBHOST is unset. PAPERLESS_DBENGINE selects postgresql or mariadb."
-    }
+    },
+    "volume_paths": [
+      "/usr/src/paperless/consume",
+      "/usr/src/paperless/data",
+      "/usr/src/paperless/export",
+      "/usr/src/paperless/media"
+    ]
   },
   {
     "name": "Papermerge",
@@ -470,7 +489,10 @@
         "password": "DB_PASSWORD"
       },
       "url_env": null
-    }
+    },
+    "volume_paths": [
+      "/config"
+    ]
   },
   {
     "name": "Docmost",
@@ -496,7 +518,10 @@
       "required": true,
       "env": null,
       "url_env": "DATABASE_URL"
-    }
+    },
+    "volume_paths": [
+      "/app/data/storage"
+    ]
   },
   {
     "name": "Outline",
@@ -529,7 +554,10 @@
       "required": true,
       "env": null,
       "url_env": "DATABASE_URL"
-    }
+    },
+    "volume_paths": [
+      "/var/lib/outline/data"
+    ]
   },
   {
     "name": "Wiki.js",
@@ -554,7 +582,10 @@
       },
       "url_env": null,
       "note": "DB_TYPE selects the engine: postgres (upstream default), mysql, mariadb, mssql or sqlite."
-    }
+    },
+    "volume_paths": [
+      "/wiki/data/content"
+    ]
   },
   {
     "name": "Apache OFBiz",
@@ -566,7 +597,13 @@
     "license": "Apache-2.0",
     "short": "Java ERP framework for building bespoke systems",
     "port": 8080,
-    "health": "/images/favicon.ico"
+    "health": "/images/favicon.ico",
+    "volume_paths": [
+      "/docker-entrypoint-hooks",
+      "/ofbiz/config",
+      "/ofbiz/lib-extra",
+      "/ofbiz/runtime"
+    ]
   },
   {
     "name": "Axelor",
@@ -615,7 +652,11 @@
       },
       "url_env": null,
       "note": "Note the port variable is DOLI_DB_HOST_PORT. DOLI_DB_TYPE selects mysqli (default) or pgsql."
-    }
+    },
+    "volume_paths": [
+      "/var/www/documents",
+      "/var/www/html/custom"
+    ]
   },
   {
     "name": "ERPNext",
@@ -625,7 +666,11 @@
     "image": "frappe/erpnext",
     "home": "https://frappe.io/erpnext",
     "license": "GPL-3.0",
-    "short": "All-in-one ERP on the Frappe framework"
+    "short": "All-in-one ERP on the Frappe framework",
+    "volume_paths": [
+      "/home/frappe/frappe-bench/logs",
+      "/home/frappe/frappe-bench/sites"
+    ]
   },
   {
     "name": "Odoo",
@@ -649,7 +694,11 @@
       },
       "url_env": null,
       "note": "Variable names are the bare words HOST/PORT/USER/PASSWORD. There is NO database-name variable: Odoo creates and selects databases itself through its web database manager, so its role needs CREATEDB rather than rights on one pre-made database."
-    }
+    },
+    "volume_paths": [
+      "/mnt/extra-addons",
+      "/var/lib/odoo"
+    ]
   },
   {
     "name": "Tryton",
@@ -673,7 +722,10 @@
       },
       "url_env": "TRYTOND_DATABASE_URI",
       "note": "Verified from /entrypoint.sh in tryton/tryton:latest, which builds TRYTOND_DATABASE_URI from DB_HOSTNAME/DB_PORT/DB_USER/DB_PASSWORD. The database NAME is not read from the environment by the server: upstream passes it to trytond-admin -d, so the database must be created and initialised out of band."
-    }
+    },
+    "volume_paths": [
+      "/var/lib/trytond/db"
+    ]
   },
   {
     "name": "Documenso",
@@ -750,7 +802,11 @@
       "required": true,
       "env": null,
       "url_env": "DATABASE_URL"
-    }
+    },
+    "volume_paths": [
+      "/home/nextjs/apps/web/saml-connection",
+      "/home/nextjs/apps/web/uploads"
+    ]
   },
   {
     "name": "LimeSurvey",
@@ -784,7 +840,11 @@
     "image": "frappe/erpnext",
     "home": "https://frappe.io/hr",
     "license": "GPL-3.0",
-    "short": "HR and payroll built on ERPNext"
+    "short": "HR and payroll built on ERPNext",
+    "volume_paths": [
+      "/home/frappe/frappe-bench/logs",
+      "/home/frappe/frappe-bench/sites"
+    ]
   },
   {
     "name": "Horilla",
@@ -827,7 +887,10 @@
       "env": null,
       "url_env": null,
       "note": "NOT WIRABLE: the image is plain PHP+Apache and declares no database variables; the host, name, user and password are typed into OrangeHRM's own web installer on first run. Provision the database and surface the credentials to the user."
-    }
+    },
+    "volume_paths": [
+      "/var/www/html"
+    ]
   },
   {
     "name": "Chatwoot",
@@ -982,7 +1045,10 @@
       },
       "url_env": null,
       "note": "DB_CONNECTION should be mariadb."
-    }
+    },
+    "volume_paths": [
+      "/var/lib/snipeit"
+    ]
   },
   {
     "name": "SENAITE",
@@ -1012,7 +1078,10 @@
       "env": null,
       "url_env": "APPSMITH_DB_URL",
       "note": "Appsmith CE embeds its database in the container and runs standalone. APPSMITH_DB_URL points it at an external one; the entrypoint branches on whether the URL is postgres, and older builds took a mongodb:// URL in this same variable, so confirm against the tag being deployed."
-    }
+    },
+    "volume_paths": [
+      "/appsmith-stacks"
+    ]
   },
   {
     "name": "Baserow",
@@ -1154,7 +1223,13 @@
         "password": "MAUTIC_DB_PASSWORD"
       },
       "url_env": null
-    }
+    },
+    "volume_paths": [
+      "/var/www/html/config",
+      "/var/www/html/docroot/media/files",
+      "/var/www/html/docroot/media/images",
+      "/var/www/html/var/logs"
+    ]
   },
   {
     "name": "Grafana Loki",
@@ -1177,7 +1252,10 @@
     "home": "https://www.focalboard.com",
     "license": "NOASSERTION",
     "short": "Kanban boards — Trello alternative",
-    "port": 8000
+    "port": 8000,
+    "volume_paths": [
+      "/opt/focalboard/data"
+    ]
   },
   {
     "name": "Kanboard",
@@ -1196,7 +1274,12 @@
       "env": null,
       "url_env": "DATABASE_URL",
       "note": "Defaults to SQLite and runs standalone. DATABASE_URL takes either postgres://... or mysql://...; upstream ships a compose example for each."
-    }
+    },
+    "volume_paths": [
+      "/etc/nginx/ssl",
+      "/var/www/app/data",
+      "/var/www/app/plugins"
+    ]
   },
   {
     "name": "Leantime",
@@ -1239,7 +1322,11 @@
       "env": null,
       "url_env": "DATABASE_URL",
       "note": "The DB_* names in the upstream compose are shell substitutions into DATABASE_URL; the container itself reads only DATABASE_URL."
-    }
+    },
+    "volume_paths": [
+      "/var/openproject/assets",
+      "/var/openproject/pgdata"
+    ]
   },
   {
     "name": "Vikunja",
@@ -1400,6 +1487,14 @@
         "user": "SIMPLERISK_DB_USERNAME",
         "password": "SIMPLERISK_DB_PASSWORD"
       }
-    }
+    },
+    "volume_paths": [
+      "/configurations",
+      "/etc/apache2/ssl",
+      "/passwords",
+      "/var/lib/mysql",
+      "/var/log",
+      "/var/www/simplerisk"
+    ]
   }
 ]

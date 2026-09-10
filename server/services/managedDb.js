@@ -1,7 +1,14 @@
 /**
- * Managed databases — one shared Postgres and one shared MariaDB for the whole
- * platform, with a database and a login role per scope inside each; plus Redis,
- * which is one small container PER SCOPE.
+ * Managed databases — one shared Postgres, one shared MariaDB and one shared
+ * MongoDB for the whole platform, with a database and a login role per scope
+ * inside each; plus Redis, which is one small container PER SCOPE.
+ *
+ * Mongo is on the shared side because it earns it: it has real per-database
+ * users, and a credential scoped to one database is refused by the engine on
+ * every other one — measured, with the transcript in services/managedMongo.js,
+ * which also explains the two things it needs that no other engine does (a
+ * single-node replica set, and a host port that mirrors the container port so
+ * the replica set config names one address that is correct from both sides).
  *
  * =========================================================================
  * WHY REDIS BREAKS THE SHARED-SERVER SHAPE
@@ -99,13 +106,14 @@ import { getDb } from '../db.js';
 import { encrypt, decrypt } from './encryption.js';
 import log from '../utils/logger.js';
 import * as redis from './managedRedis.js';
+import * as mongo from './managedMongo.js';
 
 const execFileAsync = promisify(execFile);
 
 /** The hostname an app container uses. Same convention as CRANE_INTERNAL_URL. */
 export const DB_HOST_FOR_CONTAINERS = 'host.docker.internal';
 
-export const SUPPORTED_ENGINES = ['postgres', 'mariadb', 'redis'];
+export const SUPPORTED_ENGINES = ['postgres', 'mariadb', 'mongo', 'redis'];
 
 /**
  * The engines served by ONE shared container for the whole platform.
@@ -120,7 +128,7 @@ export const SUPPORTED_ENGINES = ['postgres', 'mariadb', 'redis'];
  * redis. ensureServer(), stopServer() and the managed_db_servers table are for
  * this list and only this list.
  */
-export const SHARED_SERVER_ENGINES = ['postgres', 'mariadb'];
+export const SHARED_SERVER_ENGINES = ['postgres', 'mariadb', 'mongo'];
 
 /** True for engines whose container is created once per (app, tenant). */
 export function isPerScopeEngine(engine) {
@@ -175,6 +183,29 @@ const ENGINES = {
     // fix. If a provision still fails at 1024, the cause is elsewhere.
     memoryMb: Number(process.env.MANAGED_DB_MARIADB_MEMORY_MB) || 1024,
     scheme: 'mysql',
+  },
+  // Mongo is a SHARED server, like the two above and unlike Redis: it has real
+  // per-database users whose grants the engine enforces, so one container
+  // serves the platform. services/managedMongo.js carries the transcript, and
+  // the two entries here that no other engine has are explained there:
+  //
+  //   portMirrors  the host port and the container port are the SAME number.
+  //                Everything else maps 45432->5432; this maps 47017->47017,
+  //                because a replica set config names one host:port that has to
+  //                mean the same thing inside the container and outside it.
+  //   extraRunArgs --add-host, mapping that same name to 127.0.0.1 INSIDE this
+  //                container so mongod recognises the member address as itself
+  //                without a NAT hairpin.
+  mongo: {
+    image: mongo.MONGO_IMAGE,
+    container: `${CONTAINER_PREFIX}-mongo`,
+    defaultPort: mongo.MONGO_PORT,
+    containerPort: mongo.MONGO_PORT,
+    portMirrors: true,
+    dataPath: mongo.MONGO_DATA_PATH,
+    passwordEnv: mongo.MONGO_PASSWORD_ENV,
+    memoryMb: mongo.MONGO_MEMORY_MB,
+    scheme: mongo.MONGO_SCHEME,
   },
   // Per-scope, so there is no `container` and no `defaultPort` here: both are
   // allocated per instance and stored on the managed_databases row (migration
@@ -435,16 +466,29 @@ function upsertServerRow(engine, cfg, port, adminPassword) {
  * inside the container is the check that cannot pass early, because TCP is
  * exactly what the temporary server does not offer.
  *
- * NEITHER probe carries a credential. pg_isready needs none, and mariadb-admin
- * is given a username that does not exist: once the server is up it answers
- * "Access denied", which proves the server is accepting and authenticating TCP
- * connections just as well as a successful ping would — without putting the
- * superuser password in the host's process table on every poll.
+ * MONGO'S image has the same two-phase init — docker-entrypoint.sh forces the
+ * temporary server onto `--bind_ip 127.0.0.1 --port 27017` — so probing the
+ * container's LOOPBACK would go green mid-init for the same reason. Its probe
+ * targets the container's ROUTABLE address on the REAL port instead, which the
+ * temporary server offers on neither count. Measured, polling both once a
+ * second from container start:
+ *
+ *   t=1s  tempmongod(127.0.0.1:27017)=[up]     realport(routableIP:47021)=[MongoNetworkError]
+ *   t=3s  tempmongod(127.0.0.1:27017)=[gone]   realport(routableIP:47021)=[up]
+ *
+ * NO probe carries a credential. pg_isready needs none, mongosh's `hello` is
+ * answerable before authentication, and mariadb-admin is given a username that
+ * does not exist: once the server is up it answers "Access denied", which
+ * proves the server is accepting and authenticating TCP connections just as
+ * well as a successful ping would — without putting the superuser password in
+ * the host's process table on every poll.
  */
-async function waitReady(engine, timeoutMs = 120000) {
+async function waitReady(engine, port, timeoutMs = 120000) {
   const cfg = ENGINES[engine];
   const probe = engine === 'postgres'
     ? ['exec', cfg.container, 'pg_isready', '-q', '-h', '127.0.0.1', '-p', String(cfg.containerPort), '-U', 'postgres']
+    : engine === 'mongo'
+    ? mongo.readyProbeArgs(cfg.container, port)
     : ['exec', cfg.container, 'mariadb-admin', 'ping', '--protocol=tcp', '-h', '127.0.0.1',
        '-P', String(cfg.containerPort), '-u', 'appcrane_readiness_probe'];
   const upAnyway = /access denied|using password/i;
@@ -452,8 +496,13 @@ async function waitReady(engine, timeoutMs = 120000) {
   let last = '';
   while (Date.now() < deadline) {
     try {
-      await dockerExec(probe, { timeout: 15000 });
-      return;
+      const out = await dockerExec(probe, { timeout: 20000 });
+      // mongosh exits 0 even when it cannot reach the server on some paths, so
+      // the probe asserts on what it PRINTED rather than on the exit code.
+      if (engine !== 'mongo' || /MONGO_READY 1/.test(out)) return;
+      last = out;
+      await new Promise(r => setTimeout(r, 1000));
+      continue;
     } catch (e) {
       if (engine === 'mariadb' && upAnyway.test(e.message)) return;
       last = e.message;
@@ -513,9 +562,9 @@ export async function ensureServer(engine) {
     await createServerContainer(engine, cfg, port, adminPassword);
   }
 
-  await waitReady(engine);
+  await waitReady(engine, port);
   await ensureAdminCredentialFile(engine, adminPassword);
-  await hardenServer(engine);
+  await hardenServer(engine, port, adminPassword);
   return { engine, host: DB_HOST_FOR_CONTAINERS, port, container: cfg.container };
 }
 
@@ -540,8 +589,18 @@ async function createServerContainer(engine, cfg, port, adminPassword) {
   // it. It is still visible in `docker inspect` — that is unavoidable for an
   // image that takes its init credential from the environment, and reading it
   // needs docker socket access, which is already root-equivalent.
+  //
+  // MONGO NEEDS THREE VARIABLES, not one: the image's two init variables plus
+  // the replica set's internal-auth key, which is derived from this same
+  // password rather than stored separately (services/managedMongo.js explains
+  // why). The run command materialises the key file from it inside the
+  // container, so the key never touches the host's process table either.
   const envFile = join(dir, '.init-env');
-  writeFileSync(envFile, `${cfg.passwordEnv}=${adminPassword}\n`, { mode: 0o600 });
+  writeFileSync(
+    envFile,
+    engine === 'mongo' ? mongo.envFileBody(adminPassword) : `${cfg.passwordEnv}=${adminPassword}\n`,
+    { mode: 0o600 },
+  );
 
   const args = [
     'run', '-d',
@@ -560,15 +619,21 @@ async function createServerContainer(engine, cfg, port, adminPassword) {
     '--log-opt', 'max-file=3',
     '--env-file', envFile,
     '-v', `${dir}:${cfg.dataPath}`,
+    ...(engine === 'mongo' ? mongo.extraRunArgs(DB_HOST_FOR_CONTAINERS) : []),
   ];
   // NOT `--network appcrane-apps`: see the header. On that bridge the
   // app -> gateway -> database hop is a same-bridge hairpin, which
   // enable_icc=false drops. The default bridge makes it a cross-bridge hop,
   // which is the one that was measured working.
+  // `portMirrors` engines listen on the SAME number the host publishes, so the
+  // one address in a replica set config is correct from both sides. Everything
+  // else maps a distinct host port onto the image's default.
+  const containerPort = cfg.portMirrors ? port : cfg.containerPort;
   for (const addr of await bindAddresses()) {
-    args.push('-p', `${addr}:${port}:${cfg.containerPort}`);
+    args.push('-p', `${addr}:${port}:${containerPort}`);
   }
   args.push(cfg.image);
+  if (engine === 'mongo') args.push(...mongo.serverCommand(port));
 
   try {
     await dockerExec(args, { timeout: 180000 });
@@ -642,8 +707,23 @@ async function ensureAdminCredentialFile(engine, adminPassword) {
  *
  * MariaDB needs no equivalent: its privileges are per-database from the start
  * and a user with no grant on a database cannot USE it.
+ *
+ * MONGO'S equivalent is not a revoke, it is the replica set. Bringing the set
+ * up belongs here for exactly the reason the revokes do: it must be re-asserted
+ * on EVERY ensure, so a container recreated after `docker rm` or a data
+ * directory restored by hand comes back configured rather than sitting
+ * uninitialised until the first app fails to connect. The script is idempotent
+ * and refuses loudly if the set is configured for an address that is not the
+ * one apps are handed — see managedMongo.initiateScript().
  */
-async function hardenServer(engine) {
+async function hardenServer(engine, port, adminPassword) {
+  if (engine === 'mongo') {
+    await runAdminMongo(
+      mongo.initiateScript({ adminPassword, memberHost: `${DB_HOST_FOR_CONTAINERS}:${port}` }),
+      { port, adminPassword },
+    );
+    return;
+  }
   if (engine !== 'postgres') return;
   await runAdminSql('postgres', [
     'REVOKE CONNECT ON DATABASE postgres FROM PUBLIC;',
@@ -1050,6 +1130,44 @@ async function runAdminSql(engine, sql, { database } = {}) {
   return dockerExecStdin(args, sql, { timeout: 60000 });
 }
 
+/**
+ * The superuser coordinates for a shared server, read back from the row.
+ *
+ * Mongo's administrative path needs the password in a way the SQL engines do
+ * not: psql authenticates over the unix socket with `local all all trust` and
+ * MariaDB reads the credential file ensureAdminCredentialFile() plants, but
+ * mongosh has neither, so every script carries `db.getSiblingDB('admin').auth`
+ * as its first line. The value travels on STDIN, never in argv.
+ */
+function adminCoordsFor(engine) {
+  const row = serverRow(engine);
+  if (!row) throw new Error(`managedDb: ${engine} has no server row; ensureServer() has never run`);
+  return { port: row.host_port, adminPassword: decrypt(row.admin_password_enc) };
+}
+
+/**
+ * Run an administrative mongosh script, redacting the superuser password from
+ * anything it throws.
+ *
+ * The redaction is not decorative. mongosh echoes the offending SOURCE LINE
+ * back on a syntax error, and the first line of every script this module builds
+ * is the auth call — so an unredacted failure would put the platform's mongo
+ * superuser password into a log line. Generated per-app passwords are redacted
+ * by the caller, where they are in scope.
+ */
+async function runAdminMongo(script, coords) {
+  const { port, adminPassword } = coords || adminCoordsFor('mongo');
+  try {
+    return await dockerExecStdin(
+      mongo.adminShellArgs(ENGINES.mongo.container, port),
+      script,
+      { timeout: 60000 },
+    );
+  } catch (e) {
+    throw new Error(redactSecret(e.message, adminPassword));
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Provisioning
 // ---------------------------------------------------------------------------
@@ -1137,6 +1255,31 @@ function provisionSql(engine, database, username, password) {
   };
 }
 
+/**
+ * Create a scope's database objects, whichever engine it is.
+ *
+ * ONE function, for the same reason dropRow() is one: the create and the drop
+ * paths must never disagree about which engines they handle, and a missing
+ * branch on this side is a provision that writes a SQLite row pointing at
+ * nothing.
+ */
+async function createInEngine(engine, database, username, password) {
+  if (engine === 'mongo') {
+    // No CREATE DATABASE: mongo creates one lazily on first write, and
+    // createUser against a database that does not exist yet succeeds.
+    await runAdminMongo(mongo.createUserScript({
+      ...adminCoordsFor('mongo'),
+      database: assertIdent(database),
+      username: assertIdent(username),
+      password: assertPassword(password),
+    }));
+    return;
+  }
+  const sql = provisionSql(engine, database, username, password);
+  await runAdminSql(engine, sql.onServer);
+  if (sql.onDatabase) await runAdminSql(engine, sql.onDatabase, { database });
+}
+
 function rowFor(scope, engine) {
   const { appId, tenant } = normalizeScope(scope);
   return getDb().prepare(
@@ -1156,6 +1299,23 @@ function connectionFor(row, port) {
   // guard is computed over. It is never sent to Redis. Returning it here would
   // put REDIS_DB=crane_a42 into an app's environment and every client would
   // fail parsing it as an index.
+  // Mongo's URL is built by its own module for the same reason Redis's is: the
+  // shape is an engine fact. It is deliberately query-free — see
+  // managedMongo.mongoUrl() — and the generic branch below would produce the
+  // same string today, which is exactly why the intent has to be written down
+  // somewhere a future `?authSource=` cannot be quietly appended.
+  if (row.engine === 'mongo') {
+    return {
+      engine: 'mongo',
+      host: DB_HOST_FOR_CONTAINERS,
+      port,
+      database: row.db_name,
+      username: row.db_user,
+      password,
+      url: mongo.mongoUrl({ username: row.db_user, password, host: DB_HOST_FOR_CONTAINERS, port, database: row.db_name }),
+    };
+  }
+
   if (row.engine === 'redis') {
     return {
       engine: 'redis',
@@ -1221,10 +1381,8 @@ export async function provision(scope, engine) {
     throw e;
   }
 
-  const sql = provisionSql(engine, database, username, password);
   try {
-    await runAdminSql(engine, sql.onServer);
-    if (sql.onDatabase) await runAdminSql(engine, sql.onDatabase, { database });
+    await createInEngine(engine, database, username, password);
   } catch (e) {
     // Engine-side failure with a row already written would leave AppCrane
     // believing in a database that does not exist. Roll both back.
@@ -1364,6 +1522,10 @@ export function listForApp(appId) {
 async function dropInEngine(engine, database, username) {
   assertIdent(database);
   assertIdent(username);
+  if (engine === 'mongo') {
+    await runAdminMongo(mongo.dropScript({ ...adminCoordsFor('mongo'), database, username }));
+    return;
+  }
   if (engine === 'postgres') {
     // WITH (FORCE) terminates any session the app still holds — without it a
     // container that has not shut down yet keeps the database undroppable, and

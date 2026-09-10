@@ -278,6 +278,26 @@ const isUnderneath = (child, parent) => child === parent || child.startsWith(par
  *
  * @returns {{ mounts: {host: string, container: string}[], skipped: {path: string, coveredBy: string}[] }}
  */
+/**
+ * Which paths this app persists: the row if it has decided, else its catalogue
+ * entry.
+ *
+ * NULL on the row is "nobody has decided", not "nothing". That distinction is
+ * the whole point: an app installed BEFORE its catalogue entry declared any
+ * paths carries NULL forever, and reading NULL as "no volumes" would leave
+ * every existing bookstack losing /config on every redeploy — the exact problem
+ * the declarations were measured for.
+ *
+ * An EMPTY ARRAY is a decision. An operator saying "this app persists nothing"
+ * must beat the entry, so this tests for null rather than falsiness; `[] ||
+ * entry` would silently re-add paths the operator removed.
+ */
+export function declaredVolumePathsFor({ app, entry }) {
+  const rowValue = app?.volume_paths;
+  if (rowValue === null || rowValue === undefined) return parseVolumePaths(entry?.volume_paths ?? null);
+  return parseVolumePaths(rowValue);
+}
+
 export function resolveVolumeMounts({ sharedDir, paths = [] }) {
   const base = resolve(sharedDir);
   const mounts = [{ host: resolve(join(base, 'data')), container: DEFAULT_CONTAINER_PATH }];

@@ -10,7 +10,7 @@ import { getIngressForApp } from './tcpIngress.js';
 import { ensureCodebaseContext } from './appstudio/contextBuilder.js';
 import { findEntry } from './catalogService.js';
 import { credentialsFor } from './managedDb.js';
-import { parseContainerCommand, parseVolumePaths, resolveVolumeMounts } from './containerRuntimeSpec.js';
+import { parseContainerCommand, parseVolumePaths, resolveVolumeMounts, declaredVolumePathsFor } from './containerRuntimeSpec.js';
 import { resolveHealthProbe } from './healthProbeTarget.js';
 
 // ---------------------------------------------------------------------------
@@ -869,7 +869,17 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
   // have to exist and be owned correctly before the container is created. The
   // <shared>/data mkdir that used to stand alone above is now the first
   // iteration of the loop below — same path, same recursive create.
-  const declaredVolumePaths = parseVolumePaths(app.volume_paths);
+  // v2.70.3: the catalogue entry is the FALLBACK, not the source. NULL on the
+  // row means nobody has decided, so the entry's measured paths apply — which
+  // is what fixes an app that was ALREADY INSTALLED before its entry declared
+  // any. Copying the paths only at install time would have left every existing
+  // bookstack and odoo losing /config and /var/lib/odoo on every redeploy,
+  // which is the entire problem this feature exists to solve.
+  //
+  // An empty array on the row is NOT null: it is an operator saying "this app
+  // persists nothing", and it must beat the entry rather than being read as
+  // absence. That is why this checks for null rather than falsiness.
+  const declaredVolumePaths = declaredVolumePathsFor({ app, entry: findEntry(app.catalog_slug) });
   const { mounts: containerVolumes, skipped: skippedVolumePaths } =
     resolveVolumeMounts({ sharedDir, paths: declaredVolumePaths });
   for (const vol of containerVolumes) mkdirSync(vol.host, { recursive: true });
@@ -1569,6 +1579,32 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
         appendLog('Multitenant: injected APPCRANE_TENANT_ROOT=/data/tenants');
       }
     }
+
+    // v2.70.3: give a brand-new bind mount the one thing a named volume has
+    // and a bind mount does not — the image's own content at that path.
+    //
+    // Measured: a bind mount of an empty host directory over a path the image
+    // seeds MASKS it (ls -A = 0), while a named volume over the same path is
+    // populated from the image (ls -A = 1). So declaring '/config' on bookstack
+    // or '/var/lib/odoo' on odoo — the whole point of the volume_paths column —
+    // would have handed the first boot an empty directory where the image had
+    // put its default configuration. For several catalogue images that is a
+    // first-run re-initialisation; for some it is a container that never starts.
+    //
+    // Here rather than at the mkdir above, because seeding needs the IMAGE, and
+    // the image is not resolved (pulled, digest-pinned, or built) until now. It
+    // is still before the container is created, which is the only ordering that
+    // matters: after the mkdir the mount exists, after this it is populated,
+    // and only then does anything run against it.
+    //
+    // Seeds ONCE, keyed on the host directory being empty. A mount with content
+    // is the app's live state and is never written to — see volumeSeeder.js for
+    // why the gate is the disk itself and not a flag. A failure throws, on
+    // purpose: an empty mount that reports a successful deploy is the same
+    // outcome this exists to prevent.
+    const { seedNewVolumeMounts } = await import('./volumeSeeder.js');
+    const seedResult = await seedNewVolumeMounts({ image, volumes: containerVolumes });
+    for (const line of seedResult.log) appendLog(line);
 
     const limits = parseResourceLimits(app.resource_limits);
     await dockerStart({

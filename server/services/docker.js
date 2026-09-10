@@ -1,4 +1,5 @@
 import { execFile, spawn } from 'child_process';
+import { randomBytes } from 'crypto';
 import { promisify } from 'util';
 import { getDb } from '../db.js';
 import {
@@ -251,6 +252,102 @@ export async function buildImage({ slug, env, contextDir, commitHash, appBasePat
       resolve(tag);
     });
   });
+}
+
+// --------------------------------------------------------------------------
+// Reading content OUT of an image, without running it
+// --------------------------------------------------------------------------
+
+// Label on the throwaway containers below, so an operator (or a future sweeper)
+// can tell one that leaked from an app container.
+const SEED_CONTAINER_LABEL = 'appcrane-seed=true';
+
+// The daemon's way of saying "the image has nothing at that path", which is NOT
+// an error here — an image that ships no /config simply has nothing to seed.
+// Measured against Docker 29.6.1 rather than guessed, because the whole failure
+// policy hinges on telling this apart from a real failure:
+//
+//   docker cp c:/nope/.         -> Error response from daemon: Could not find
+//                                  the file /nope/. in container <name>
+//   docker cp c:/etc/hostname/. -> Error response from daemon: lstat
+//                                  /etc/hostname/.: not a directory
+//
+// Everything else the command can fail with names the DESTINATION, not the
+// source ("invalid output path: directory ... does not exist", "cannot copy
+// directory"), so none of it can be mistaken for an empty image path and
+// silently turned into "nothing to seed".
+const IMAGE_PATH_ABSENT = /Could not find the file .* in container|No such container:path|lstat .*: not a directory/i;
+
+/**
+ * Copy directories out of an IMAGE onto the host, without starting it.
+ *
+ * `docker create` materialises the image's filesystem as a container that never
+ * runs; `docker cp` reads out of it; `docker rm -fv` disposes of it. No
+ * `docker run` and no `docker pull` is issued — `--pull never` makes the second
+ * of those a guarantee rather than a hope, so a caller that has already pulled
+ * and pinned a digest cannot be surprised by a second registry round-trip
+ * resolving to different bytes.
+ *
+ * The `-v` on the rm is load-bearing and was measured: an image that declares
+ * VOLUME gets an ANONYMOUS volume at `docker create` time, and `docker rm -f`
+ * leaves it behind. Volume count on this box across create + `rm -f` went
+ * 103 -> 104 -> 104; across create + `rm -fv` it went 104 -> 105 -> 104. Without
+ * the flag every seeded app leaks one dangling volume per deploy.
+ *
+ * One container serves every copy, because `docker create` is the expensive part
+ * (~55 ms measured) and an app with four declared mounts should not pay it four
+ * times.
+ *
+ * @param {{image: string, copies: {containerPath: string, destDir: string}[]}} args
+ * @returns {Promise<{containerPath: string, destDir: string, found: boolean, reason?: string}[]>}
+ *   found=false means the image has nothing at that path. Anything else throws.
+ */
+export async function copyFromImage({ image, copies = [] }) {
+  if (!copies.length) return [];
+
+  // The same argv-build boundary the -v loop in startApp applies, for the same
+  // reason: `docker cp` takes `CONTAINER:PATH`, so a colon on either side does
+  // not break the argument, it re-splits it into a different valid one — a
+  // destination carrying a colon would be read as a CONTAINER reference and the
+  // copy would go somewhere nobody chose.
+  for (const c of copies) {
+    if (typeof c?.containerPath !== 'string' || typeof c?.destDir !== 'string' || !c.containerPath || !c.destDir) {
+      throw new Error('copyFromImage entries must be { containerPath, destDir } with non-empty string paths');
+    }
+    if (c.containerPath.includes(':') || c.destDir.includes(':')) {
+      throw new Error(
+        `copy '${c.containerPath}' -> '${c.destDir}' contains ':' in a path — that is the field ` +
+        'separator in a docker cp argument and would silently change which side is read or written',
+      );
+    }
+  }
+
+  const name = `appcrane-seed-${randomBytes(9).toString('hex')}`;
+  await dockerExec(['create', '--pull', 'never', '--name', name, '--label', SEED_CONTAINER_LABEL, image]);
+  try {
+    const out = [];
+    for (const c of copies) {
+      // The trailing '/.' copies the CONTENTS of the directory into destDir
+      // rather than the directory itself — without it '/config' would land as
+      // '<dest>/config' and every seeded file would be one level too deep.
+      try {
+        await dockerExec(['cp', `${name}:${c.containerPath}/.`, c.destDir], { timeout: 600000 });
+        out.push({ containerPath: c.containerPath, destDir: c.destDir, found: true });
+      } catch (e) {
+        const msg = String(e?.message || '');
+        if (IMAGE_PATH_ABSENT.test(msg)) {
+          out.push({ containerPath: c.containerPath, destDir: c.destDir, found: false, reason: msg });
+          continue;
+        }
+        throw e;
+      }
+    }
+    return out;
+  } finally {
+    await dockerExec(['rm', '-fv', name]).catch((e) => {
+      log.warn(`could not remove image-extract container ${name}: ${e.message}`);
+    });
+  }
 }
 
 /**

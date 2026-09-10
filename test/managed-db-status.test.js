@@ -171,7 +171,7 @@ test('a platform admin gets every engine back, in SUPPORTED_ENGINES order', asyn
   const { status, body } = await call('/api/managed-db/servers', PLATFORM);
   assert.equal(status, 200);
   assert.deepEqual(body.servers.map(s => s.engine), svc.SUPPORTED_ENGINES);
-  assert.deepEqual(body.servers.map(s => s.engine), ['postgres', 'mariadb', 'redis']);
+  assert.deepEqual(body.servers.map(s => s.engine), ['postgres', 'mariadb', 'mongo', 'redis']);
 });
 
 test('an anonymous caller is refused', async () => {
@@ -224,7 +224,7 @@ test('ONE inspect per engine, not one per field', async () => {
   process.env.CRANE_TEST_PG_INSPECT = RUNNING;
   await svc.serverStatus();
   const inspects = dockerCalls().filter(a => a[0] === 'inspect');
-  assert.equal(inspects.length, 2, 'two engines, two inspects');
+  assert.equal(inspects.length, 3, 'three shared-server engines, three inspects');
   // The five facts come out of a single -f template.
   const fmt = inspects[0][inspects[0].indexOf('-f') + 1];
   for (const field of ['.State.Status', '.RestartCount', '.State.ExitCode',
@@ -316,7 +316,7 @@ test('an engine with no managed_db_servers row still appears, configured:false',
   // Nothing seeded at all: neither engine has ever been used.
   const { status, body } = await call('/api/managed-db/servers', PLATFORM);
   assert.equal(status, 200);
-  assert.equal(body.servers.length, 3);
+  assert.equal(body.servers.length, 4);
   // Redis is a container PER SCOPE: with nothing provisioned it has no
   // container and no host port, and carries null for both. The shared engines
   // are the ones this block is about.
