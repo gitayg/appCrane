@@ -331,6 +331,8 @@ literal string `unknown`, and two unrelated bundles could claim one SHA.
 
 Apps deployed on AppCrane never need to implement their own auth. The Caddy proxy verifies every request against `/api/identity/verify` *before* forwarding it to the container, and the result is delivered to the app in three complementary ways. Apps should consume them in this **precedence order**:
 
+> Maintain an existing open-source app and want to know what deeper integration buys you? [SKIFF.md](SKIFF.md) is the maintainer-facing guide — identity, app-defined roles, managed databases, email, health and per-tenant data, level by level, with the contract for each.
+
 ### 1. Request headers (zero-fetch, recommended)
 
 Caddy `copy_headers` the verified identity onto the upstream proxy request. The app reads them directly:
