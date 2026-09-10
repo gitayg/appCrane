@@ -30,19 +30,29 @@
 
 import { existsSync, mkdirSync, readdirSync, rmSync } from 'fs';
 import { join } from 'path';
-import { execFileSync } from 'child_process';
-import { copyFromImage } from './docker.js';
+import { copyFromImage, chownTreeAsRoot } from './docker.js';
 import log from '../utils/logger.js';
 
 /** The ownership every mount gets, matching the chown deployer.js already
  *  applies to the mount directories themselves. Seeded FILES need it too: a
  *  bind mount inherits host ownership, `docker cp` writes as the user running
- *  AppCrane (measured: uid 502 on this box, not the image's uid), and an image
- *  that drops to a non-root user then cannot write what was just seeded for it.
+ *  AppCrane (measured: uid 502 on macOS here, uid 1001 on the CI runner, never
+ *  the image's uid), and an image that drops to a non-root user then cannot
+ *  write what was just seeded for it.
  *
  *  Measured on a real Linux filesystem, with the control: a uid-1000 container
  *  writing into a directory of root-owned seeded files gets "Permission denied";
- *  after `chown -R 1000:1000` the same write succeeds. */
+ *  after `chown -R 1000:1000` the same write succeeds.
+ *
+ *  v2.71.1: applying it is no longer a bare `chown` that may quietly fail.
+ *  chown TO ANOTHER UID NEEDS ROOT, and AppCrane is not root on a CI runner or
+ *  on any non-root install -- so the call failed, the line was logged as a
+ *  warning nobody read, and the seeded tree stayed owned by the AppCrane user
+ *  with the app unable to write it. macOS never showed it: Docker Desktop
+ *  remaps bind-mount ownership to the invoking user, so uid 502 owning the
+ *  files looked identical to uid 1000 owning them from inside the container.
+ *  docker.js:chownTreeAsRoot now falls back to a throwaway container, which is
+ *  root in its own namespace and can chown the bind mount regardless. */
 export const MOUNT_OWNER = '1000:1000';
 
 /**
@@ -156,13 +166,21 @@ export async function seedNewVolumeMounts({ image, volumes = [], copy = copyFrom
     // chowned this directory before the image existed, when it was empty, so
     // that pass could not have covered anything in it.
     try {
-      execFileSync('chown', ['-R', MOUNT_OWNER, vol.host], { stdio: 'pipe', timeout: 30000 });
-      lines.push(`Volume seed: ${r.containerPath} populated from the image, chown ${MOUNT_OWNER} → ok`);
+      // `image` is the one being seeded FROM, so it is already on this host and
+      // the fallback container cannot turn into a registry round-trip.
+      const how = await chownTreeAsRoot({ hostDir: vol.host, owner: MOUNT_OWNER, image });
+      lines.push(
+        `Volume seed: ${r.containerPath} populated from the image, chown ${MOUNT_OWNER} → ok` +
+        (how === 'container' ? ' (via a throwaway container: AppCrane is not root here)' : ''),
+      );
     } catch (e) {
+      // Both mechanisms are gone. Say so at ERROR, not in a log line the deploy
+      // output buries: the app IS going to hit EACCES on its own data.
+      log.error(`volume seed: could not give ${vol.host} to ${MOUNT_OWNER}: ${e.message}`);
       lines.push(
         `Volume seed: ${r.containerPath} populated from the image, but chown ${MOUNT_OWNER} failed ` +
-        `(${e?.stderr?.toString().trim() || e.message}). An image that runs as a non-root user may ` +
-        `hit EACCES writing ${r.containerPath}.`,
+        `(${e.message}). An image that runs as a non-root user WILL hit EACCES writing ` +
+        `${r.containerPath}.`,
       );
     }
   }

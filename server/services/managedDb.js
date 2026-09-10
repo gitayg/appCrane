@@ -105,6 +105,7 @@ import { mkdirSync, writeFileSync, rmSync } from 'fs';
 import { getDb } from '../db.js';
 import { encrypt, decrypt } from './encryption.js';
 import log from '../utils/logger.js';
+import { removeTreeAsRoot } from './docker.js';
 import * as redis from './managedRedis.js';
 import * as mongo from './managedMongo.js';
 
@@ -405,9 +406,12 @@ function generatePassword() {
 // The shared server containers
 // ---------------------------------------------------------------------------
 
+function managedDbRoot() {
+  return join(resolve(process.env.DATA_DIR || './data'), 'managed-db');
+}
+
 function dataDirFor(engine) {
-  const root = resolve(process.env.DATA_DIR || './data');
-  return join(root, 'managed-db', engine);
+  return join(managedDbRoot(), engine);
 }
 
 /**
@@ -595,7 +599,7 @@ async function createServerContainer(engine, cfg, port, adminPassword) {
   // password rather than stored separately (services/managedMongo.js explains
   // why). The run command materialises the key file from it inside the
   // container, so the key never touches the host's process table either.
-  const envFile = join(dir, '.init-env');
+  const envFile = envFileFor(engine);
   writeFileSync(
     envFile,
     engine === 'mongo' ? mongo.envFileBody(adminPassword) : `${cfg.passwordEnv}=${adminPassword}\n`,
@@ -765,6 +769,43 @@ function redisDataDir(dbName) {
 }
 
 /**
+ * Where an --env-file lives: OUTSIDE the directory the container mounts.
+ *
+ * v2.71.1. It used to be written into the data directory itself, which is
+ * wrong twice over.
+ *
+ * The failure that surfaced it is Linux-only, which is why macOS never showed
+ * it: the data directory is bind-mounted as the database's own volume, the
+ * server writes into it as ITS uid (redis is 999, postgres 999, mongo 999), and
+ * the next provision then cannot rewrite `.init-env` in a directory it no
+ * longer owns -- `EACCES: permission denied`. Docker Desktop's file sharing
+ * remaps ownership to the invoking user, so the same code passed locally and
+ * failed on the first real Linux runner.
+ *
+ * The other half is worse and was silent on both platforms: a file holding the
+ * superuser password sat inside the volume the database mounts, so the database
+ * process could read its own init credential back off `/data/.init-env` for the
+ * lifetime of the container. Nothing needed it there -- `docker run --env-file`
+ * reads it on the HOST, before the container exists.
+ *
+ * So env files live in a sibling `_env` directory, 0700, never mounted.
+ */
+function envFileFor(engine, dbName = null) {
+  // A SIBLING of dataDirFor(engine), never a child of it. `dataDirFor` IS the
+  // bind-mounted volume for the three shared engines -- createServerContainer
+  // passes that exact directory to `-v ${dir}:${cfg.dataPath}` -- so a `_env`
+  // subdirectory would land inside the volume and reproduce both halves of the
+  // bug on postgres, mariadb and mongo while looking fixed on redis.
+  //
+  // It is also outside every per-scope instance directory, which is what makes
+  // the Linux EACCES go away: the server takes ownership of what it mounts, and
+  // nothing AppCrane has to rewrite may live in there.
+  const dir = join(managedDbRoot(), '_env', engine);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  return join(dir, dbName === null ? 'server.env' : `${assertIdent(dbName)}.env`);
+}
+
+/**
  * Start (or restart) one scope's Redis and put its ACL user back.
  *
  * Idempotent and self-healing, in the same spirit as ensureServer(): a
@@ -813,7 +854,7 @@ async function createRedisContainer({ container, dbName, password, port }) {
   // Same --env-file reasoning as createServerContainer(): the credential must
   // not appear in the host's process table, and `docker run ... -e X=secret`
   // puts it there for every local user to read.
-  const envFile = join(dir, '.init-env');
+  const envFile = envFileFor('redis', dbName);
   writeFileSync(envFile, `${redis.REDIS_PASSWORD_ENV}=${password}\n`, { mode: 0o600 });
 
   const memoryMb = ENGINES.redis.memoryMb;
@@ -1493,9 +1534,45 @@ async function provisionPerScope(scope, engine) {
  */
 async function destroyRedisInstance(container, dbName) {
   if (container) await dockerExec(['rm', '-f', container], { timeout: 60000 }).catch(() => {});
-  if (dbName) {
-    try { rmSync(redisDataDir(dbName), { recursive: true, force: true }); } catch (e) {
-      log.warn(`managedDb: could not remove the data directory for redis instance ${container}: ${e.message}`);
+  if (dbName) await removeInstanceData(redisDataDir(dbName), container);
+}
+
+/**
+ * Remove an instance's data directory, which a CONTAINER owns.
+ *
+ * v2.71.1. `rmSync` alone is not enough on Linux and only ever looked like it
+ * was on macOS. The redis image's entrypoint chowns its data directory to uid
+ * 999, and a plain unprivileged `rm -rf` cannot unlink inside a directory it has
+ * no write bit on:
+ *
+ *   the data directory survived deprovision:
+ *   /tmp/crane-mrds-AQcB3l/managed-db/redis/crane_a1
+ *
+ * Docker Desktop remaps bind-mount ownership to the invoking user, so on a Mac
+ * the directory stayed owned by uid 502 and the same `rm -rf` succeeded. The
+ * fallback is a throwaway container, which is root in its own namespace; it uses
+ * the redis image, which is on this host by definition because the instance
+ * being destroyed was running it.
+ *
+ * THE DIRECTORY MUST GO. Leaving it would hand a later scope that derived the
+ * same identifier a stranger's keyspace, so a surviving directory is reported at
+ * ERROR rather than as a warning in passing.
+ */
+async function removeInstanceData(dir, container) {
+  try {
+    rmSync(dir, { recursive: true, force: true });
+    return;
+  } catch (hostErr) {
+    try {
+      await removeTreeAsRoot({ hostPath: dir, image: redis.REDIS_IMAGE });
+      return;
+    } catch (e) {
+      log.error(
+        `managedDb: the data directory for redis instance ${container} SURVIVED deprovision ` +
+        `(${dir}). rm failed on the host (${hostErr.message}) and in a throwaway ` +
+        `${redis.REDIS_IMAGE} container (${e.message}). A later scope deriving the same ` +
+        'identifier would inherit this keyspace: remove it by hand.',
+      );
     }
   }
 }

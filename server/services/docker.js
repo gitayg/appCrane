@@ -1,6 +1,7 @@
 import { execFile, spawn } from 'child_process';
 import { randomBytes } from 'crypto';
 import { promisify } from 'util';
+import { basename, dirname, isAbsolute } from 'path';
 import { getDb } from '../db.js';
 import {
   publicPortForApp, dataPlanePortForApp, releasePendingPortAfterRecreate, CONTROL_PLANE_PORT,
@@ -348,6 +349,123 @@ export async function copyFromImage({ image, copies = [] }) {
       log.warn(`could not remove image-extract container ${name}: ${e.message}`);
     });
   }
+}
+
+// --------------------------------------------------------------------------
+// Acting on a bind-mounted tree that a CONTAINER owns
+// --------------------------------------------------------------------------
+
+// v2.71.1. Both callers below exist because of one platform difference that hid
+// three bugs until the first real Linux runner: Docker Desktop's file sharing
+// remaps bind-mount ownership to the invoking user, and native Linux does not.
+// On Linux a directory a container has written to is owned by the CONTAINER's
+// uid -- 999 for redis, 1000 for a non-root app image -- and the AppCrane
+// process, which is not root on a CI runner or on any non-root install, then
+// cannot chown it, and cannot remove what is inside it.
+//
+// A throwaway container is root in its own user namespace, so it can chown and
+// unlink on that bind mount whichever host user AppCrane happens to be. That is
+// the ONLY mechanism available to a non-root AppCrane; the alternatives were
+// considered and rejected:
+//
+//   * `docker cp --archive` cannot help: the CLI extracts the tar client-side,
+//     as the invoking user, and setting another uid needs CAP_CHOWN.
+//   * `chmod -R a+rwX` needs no root and would make the app able to write, but
+//     it makes an app's data volume world-writable on the host to buy it.
+//   * doing nothing is the shipped bug.
+//
+// Both callers try the plain host syscall FIRST, so a root install -- which is
+// how AppCrane is deployed (systemd, /root/appCrane) -- issues no extra
+// container at all and this path is dead code there.
+const ROOT_HELPER_LABEL = 'appcrane-roothelper=true';
+
+/** Refuse a path that would re-split a `-v` argument or escape the tree the
+ *  caller thinks it named. Both callers build these from identifiers this
+ *  codebase derived, never from request input, so a failure here is a
+ *  programming error and is meant to be loud. */
+function assertMountablePath(p, what) {
+  if (typeof p !== 'string' || !p || !isAbsolute(p)) {
+    throw new Error(`${what} must be an absolute path, got ${JSON.stringify(p)}`);
+  }
+  if (p.includes(':')) {
+    throw new Error(`${what} contains ':', which is the field separator in a docker -v argument: ${p}`);
+  }
+}
+
+/**
+ * Run one command as root against a host directory, inside a throwaway
+ * container, and return its stdout.
+ *
+ * `--pull never` is a guarantee, not a hope: this box (and CI) hit Docker Hub's
+ * 100/hour anonymous limit repeatedly, and a helper that pulled would turn a
+ * rate-limit into an unrelated-looking deploy failure. Callers therefore pass
+ * an image they KNOW is on the host -- the one they just seeded from, or the
+ * one the instance they are destroying was running.
+ *
+ * `--entrypoint` rather than a trailing command, because most images have one
+ * and it would swallow or reinterpret the arguments.
+ */
+async function runRootHelper({ image, hostDir, mountAt = '/target', entrypoint, args, timeout = 120000 }) {
+  assertMountablePath(hostDir, 'the bind-mounted host directory');
+  if (typeof image !== 'string' || !image) throw new Error('runRootHelper needs an image already on this host');
+  return dockerExec([
+    'run', '--rm',
+    '--pull', 'never',
+    '--user', '0:0',
+    '--network', 'none',
+    '--label', ROOT_HELPER_LABEL,
+    '--security-opt', 'no-new-privileges',
+    '--entrypoint', entrypoint,
+    '-v', `${hostDir}:${mountAt}`,
+    image,
+    ...args,
+  ], { timeout });
+}
+
+/**
+ * `chown -R <owner> <hostDir>`, whether or not AppCrane is root.
+ *
+ * Returns how it succeeded so the caller can say so in the deploy log, or
+ * throws with BOTH failures attached -- the host errno alone reads as "you are
+ * not root" and hides the reason the container attempt did not save it.
+ */
+export async function chownTreeAsRoot({ hostDir, owner, image }) {
+  assertMountablePath(hostDir, 'the directory to chown');
+  try {
+    await execFileAsync('chown', ['-R', owner, hostDir], { timeout: 30000 });
+    return 'host';
+  } catch (hostErr) {
+    const hostMsg = (hostErr?.stderr?.toString() || hostErr.message).trim();
+    try {
+      await runRootHelper({ image, hostDir, entrypoint: 'chown', args: ['-R', owner, '/target'] });
+      return 'container';
+    } catch (e) {
+      const err = new Error(
+        `chown -R ${owner} failed on the host (${hostMsg}) and in a throwaway ${image} container ` +
+        `(${e.message})`,
+      );
+      err.hostMessage = hostMsg;
+      throw err;
+    }
+  }
+}
+
+/**
+ * Delete one directory tree, whether or not AppCrane owns what is inside it.
+ *
+ * The PARENT is what gets bind-mounted, never the tree itself: a mount point
+ * cannot be unlinked from inside the container, so mounting the target would
+ * empty it and leave the directory standing -- which reads as success and is
+ * exactly the failure this replaces.
+ */
+export async function removeTreeAsRoot({ hostPath, image }) {
+  assertMountablePath(hostPath, 'the directory to remove');
+  const parent = dirname(hostPath);
+  const leaf = basename(hostPath);
+  if (!leaf || leaf === '.' || leaf === '..' || parent === hostPath) {
+    throw new Error(`refusing to remove ${hostPath}: it has no name to delete inside its parent`);
+  }
+  await runRootHelper({ image, hostDir: parent, entrypoint: 'rm', args: ['-rf', `/target/${leaf}`] });
 }
 
 /**
