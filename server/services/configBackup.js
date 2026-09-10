@@ -11,13 +11,24 @@
  *                      the DB's encrypted env_vars / secrets can't be decrypted,
  *                      so a backup that omitted it would be useless on restore.
  *   - icons/<slug>/  — per-app tile icons (not stored in the DB).
+ *   - appdata/<slug>/<env>/     — the app's /data mount.
+ *   - appvolumes/<slug>/<env>/  — every OTHER mount the app declares, laid out
+ *                      mirroring the container ('/var/lib/odoo' ->
+ *                      volumes/var/lib/odoo). Added v2.70.2 with declared
+ *                      volumes; before that an app kept its real state here and
+ *                      the backup captured none of it while reporting success.
  *   - appcrane-backup.json — manifest (version, timestamp, counts).
  *
  * SECURITY: the bundle contains the ENCRYPTION_KEY and every encrypted secret.
  * Treat it as a crown-jewel artifact. The routes are platform_admin-only.
  *
- * NOT in the bundle: per-app /data volumes (that's app DATA, often huge — this
- * is a CONFIG backup) and the Caddyfile (regenerated from the DB on boot).
+ * NOT in the bundle: app code and build artifacts (the `releases/` dirs —
+ * redeployable from GitHub) and the Caddyfile (regenerated from the DB on boot).
+ *
+ * This header used to say per-app /data volumes were NOT in the bundle. They
+ * always were — section 3 has added them since v2.9.0 — so the sentence
+ * described a backup nobody was taking, in the one file where being wrong about
+ * what is backed up is worst.
  */
 
 import AdmZip from 'adm-zip';
@@ -78,11 +89,24 @@ export function exportConfig(version) {
         if (ICON_RE.test(f)) zip.addLocalFile(join(appDir, f), `icons/${slug}`);
       }
       // The container's /data is mounted from <slug>/<env>/shared/data.
+      //
+      // v2.70.2: and every OTHER declared mount from <slug>/<env>/shared/volumes,
+      // whose layout mirrors the container's ('/var/lib/odoo' ->
+      // shared/volumes/var/lib/odoo). Before this, an app that declared a volume
+      // kept its real state there and a config backup silently captured none of
+      // it -- the backup completed, reported success, and restored an app to an
+      // empty data directory. The whole tree is taken rather than a list of
+      // declared paths, so a path removed from apps.volume_paths after the data
+      // was written is still backed up.
       for (const env of ['sandbox', 'production']) {
         const dataPath = join(appDir, env, 'shared', 'data');
         if (existsSync(dataPath)) {
           zip.addLocalFolder(dataPath, `appdata/${slug}/${env}`);
           dataApps++;
+        }
+        const volPath = join(appDir, env, 'shared', 'volumes');
+        if (existsSync(volPath)) {
+          zip.addLocalFolder(volPath, `appvolumes/${slug}/${env}`);
         }
       }
     }
@@ -98,7 +122,7 @@ export function exportConfig(version) {
     version: version || 'unknown',
     exported_at: new Date().toISOString(),
     crane_domain: process.env.CRANE_DOMAIN || null,
-    includes: ['deployhub.db', ...(hasEnv ? ['.env'] : []), 'icons', 'appdata'],
+    includes: ['deployhub.db', ...(hasEnv ? ['.env'] : []), 'icons', 'appdata', 'appvolumes'],
     counts,
   };
   zip.addFile(MANIFEST, Buffer.from(JSON.stringify(manifest, null, 2)));
@@ -160,7 +184,8 @@ export function importConfig(buffer, opts = {}) {
 
   // Restore everything under DATA_DIR/apps, with path-traversal guards:
   //   icons/<slug>/<file>            -> apps/<slug>/<file>
-  //   appdata/<slug>/<env>/<path...> -> apps/<slug>/<env>/shared/data/<path...>
+  //   appdata/<slug>/<env>/<path...>    -> apps/<slug>/<env>/shared/data/<path...>
+  //   appvolumes/<slug>/<env>/<path...> -> apps/<slug>/<env>/shared/volumes/<path...>
   const appsRoot = resolve(join(dataDir(), 'apps'));
   const writeUnderApps = (relParts, data) => {
     const dest = resolve(join(appsRoot, ...relParts));
@@ -170,7 +195,7 @@ export function importConfig(buffer, opts = {}) {
     return true;
   };
 
-  let icons = 0, dataFiles = 0;
+  let icons = 0, dataFiles = 0, volumeFiles = 0;
   for (const e of zip.getEntries()) {
     if (e.isDirectory) continue;
     const name = e.entryName;
@@ -184,9 +209,15 @@ export function importConfig(buffer, opts = {}) {
       const [slug, env, ...rest] = segs;
       if (env !== 'sandbox' && env !== 'production') continue;
       if (writeUnderApps([slug, env, 'shared', 'data', ...rest], e.getData())) dataFiles++;
+    } else if (name.startsWith('appvolumes/')) {
+      const segs = name.slice('appvolumes/'.length).split('/').filter(Boolean);
+      if (segs.length < 3) continue;                       // need slug / env / file
+      const [slug, env, ...rest] = segs;
+      if (env !== 'sandbox' && env !== 'production') continue;
+      if (writeUnderApps([slug, env, 'shared', 'volumes', ...rest], e.getData())) volumeFiles++;
     }
   }
 
-  log.warn(`[config-backup] IMPORTED backup from ${manifest.exported_at} (env=${envRestored}, icons=${icons}, data-files=${dataFiles}). Restart required. Pre-import copy at ${preDir}`);
-  return { manifest, envRestored, icons, dataFiles, preImportDir: preDir };
+  log.warn(`[config-backup] IMPORTED backup from ${manifest.exported_at} (env=${envRestored}, icons=${icons}, data-files=${dataFiles}, volume-files=${volumeFiles}). Restart required. Pre-import copy at ${preDir}`);
+  return { manifest, envRestored, icons, dataFiles, volumeFiles, preImportDir: preDir };
 }

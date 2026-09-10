@@ -422,7 +422,16 @@ describe('LIVE', { skip: liveSkip }, () => {
   test('the daemon binds the declared path to the app\'s own directory, read-write', async (t) => {
     if (imageProblem) return t.skip(imageProblem);
     const binds = JSON.parse(await dk(['inspect', NAME, '--format', '{{json .HostConfig.Binds}}']));
-    assert.deepEqual(binds, [`${mounts[0].host}:/data`, `${mounts[1].host}:/config`]);
+    // Compared as a SET. The daemon does not promise to report Binds in the
+    // order they were passed, and it demonstrably does not: this assertion
+    // failed intermittently against a container whose mounts were both correct,
+    // purely because /config came back ahead of /data. Asserting an order the
+    // daemon never guaranteed makes the suite flaky without testing anything —
+    // what matters is that exactly these two binds exist and no third one does.
+    assert.deepEqual(
+      [...binds].sort(),
+      [`${mounts[0].host}:/data`, `${mounts[1].host}:/config`].sort(),
+    );
     const mnt = JSON.parse(await dk(['inspect', NAME, '--format', '{{json .Mounts}}']))
       .find((m) => m.Destination === '/config');
     assert.equal(mnt.Type, 'bind');
