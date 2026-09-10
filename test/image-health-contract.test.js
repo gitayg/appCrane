@@ -57,10 +57,21 @@ test('relaxing the body contract does not relax the status contract', async () =
   } finally { s.close(); }
 });
 
-test('the deployer chooses strictness by source_type, not by guesswork', () => {
+test('the deployer chooses strictness by a rule, not by guesswork', () => {
+  // The rule moved into healthProbeTarget.js when generated PHP builds joined
+  // images as "third-party" (v2.70.1) -- a Laravel app AppCrane containerised
+  // never agreed to the {status, version} shape either. What this test protects
+  // is unchanged: the decision is a rule keyed on what built the release, and
+  // the deploy path actually passes the result through instead of hardcoding it.
+  const rule = readFileSync(new URL('../server/services/healthProbeTarget.js', import.meta.url), 'utf8');
+  assert.match(rule, /source_type\s*!==\s*'image'/,
+    'an image is third-party, anything else AppCrane built');
+  assert.match(rule, /runtime\s*!==\s*'php'/,
+    'a generated PHP build is third-party in the same sense');
+
   const src = readFileSync(new URL('../server/services/deployer.js', import.meta.url), 'utf8');
-  assert.match(src, /strictHealth\s*=\s*app\.source_type\s*!==\s*'image'/,
-    'strictness must key on source_type: an image is third-party, anything else AppCrane built');
+  assert.match(src, /strictHealth\s*=\s*probeTarget\.strict/,
+    'the deploy path must take strictness from the rule, not recompute it');
   assert.match(src, /probeHealthEndpoint\(healthUrl,\s*30000,\s*\{\s*strict:\s*strictHealth\s*\}\)/,
     'the deploy path must actually pass the flag through');
 });

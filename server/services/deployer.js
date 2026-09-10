@@ -11,6 +11,7 @@ import { ensureCodebaseContext } from './appstudio/contextBuilder.js';
 import { findEntry } from './catalogService.js';
 import { credentialsFor } from './managedDb.js';
 import { parseContainerCommand, parseVolumePaths, resolveVolumeMounts } from './containerRuntimeSpec.js';
+import { resolveHealthProbe } from './healthProbeTarget.js';
 
 // ---------------------------------------------------------------------------
 // Managed database credentials -> container environment
@@ -1370,6 +1371,9 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     if (!await dockerAvailable()) throw new Error('Docker daemon is not available on this host');
 
     let image;
+    // Which generator built this release, needed 200 lines below to pick the
+    // health probe. Null for an image deploy, which never reaches the generator.
+    let buildRuntime = null;
 
     if (isImageDeploy) {
       // Nothing to build and nothing to validate a build against: the artifact
@@ -1424,6 +1428,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       appendLog(`Image ready (Nixpacks): ${image}`);
     } else {
       const { userProvided, runtime } = ensureDockerfile({ releaseDir, manifest, appBasePath, craneUrl, craneInternalUrl });
+      buildRuntime = runtime ?? null;
 
       if (userProvided) {
         const expectedPort = manifest?.port || manifest?.be?.port || 3000;
@@ -1644,12 +1649,9 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     // AppCrane-build convention a stock image has no reason to serve — probing
     // it would 404 and mark a working container unhealthy. The column is NULL
     // for every tree-based app, so their behaviour is unchanged.
-    const healthPath = manifest.be?.health || app.health_path || '/api/health';
-    const healthSource = manifest.be?.health
-      ? `manifest.be.health="${manifest.be.health}"`
-      : app.health_path
-        ? `apps.health_path="${app.health_path}"`
-        : `default /api/health (manifest.be.health unset)`;
+    const probeTarget = resolveHealthProbe({ manifest, app, runtime: buildRuntime });
+    const healthPath = probeTarget.path;
+    const healthSource = probeTarget.source;
     const healthUrl = `http://localhost:${bePort}${healthPath}`;
     // Both protocols probe the LOOPBACK port every container publishes, never
     // the public one — same rule as healthChecker.js: the gate must pass before
@@ -1671,9 +1673,10 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     const containerNameForWatch = `appcrane-${app.slug}-${env}`;
     const { watchBootForEarlyCrash } = await import('./bootWatch.js');
 
-    // Third-party images are held to "answers 200", not to AppCrane's own
-    // {status, version} body contract — see probeHealthEndpoint.
-    const strictHealth = app.source_type !== 'image';
+    // Third-party images and generated PHP builds are held to "answers 200",
+    // not to AppCrane's own {status, version} body contract — see
+    // probeHealthEndpoint and resolveHealthProbe.
+    const strictHealth = probeTarget.strict;
     const probePromise = isTcpIngress
       ? probeTcpListener('127.0.0.1', bePort, 30000)
       : probeHealthEndpoint(healthUrl, 30000, { strict: strictHealth });
