@@ -1,6 +1,29 @@
 /**
  * Managed databases — one shared Postgres and one shared MariaDB for the whole
- * platform, with a database and a login role per scope inside each.
+ * platform, with a database and a login role per scope inside each; plus Redis,
+ * which is one small container PER SCOPE.
+ *
+ * =========================================================================
+ * WHY REDIS BREAKS THE SHARED-SERVER SHAPE
+ * =========================================================================
+ * Everything below rests on isolation being enforceable INSIDE the engine: a
+ * credential reaches one database and the engine refuses the rest. Redis has no
+ * such mechanism. Measured, not assumed — ACL key patterns do not scope to a
+ * numbered database, `COPY ... DB n` and `MOVE key n` write across it even for
+ * a user pinned to one index, and Redis 8's core modules refuse to run outside
+ * database 0. services/managedRedis.js carries the verbatim transcript.
+ *
+ * So the Redis boundary is a PROCESS: one container per (app, tenant), its own
+ * port, its own volume, its own password, database 0, the full command set.
+ * That is affordable for Redis (measured: ~6 MiB resident at rest) and was
+ * never affordable for Postgres, which is why the two shapes differ. See
+ * SHARED_SERVER_ENGINES below — the split has a name so nothing has to
+ * special-case 'redis' by string.
+ *
+ * The reachability and publishing notes that follow apply to BOTH shapes: a
+ * per-scope Redis is published on the same addresses, on the same host-gateway
+ * route, with the same "any container can open a socket, the credential is the
+ * boundary" consequence.
  *
  * =========================================================================
  * WHY APPS REACH THE DATABASE THROUGH THE HOST GATEWAY, AND NOT THE NETWORK
@@ -75,13 +98,34 @@ import { mkdirSync, writeFileSync, rmSync } from 'fs';
 import { getDb } from '../db.js';
 import { encrypt, decrypt } from './encryption.js';
 import log from '../utils/logger.js';
+import * as redis from './managedRedis.js';
 
 const execFileAsync = promisify(execFile);
 
 /** The hostname an app container uses. Same convention as CRANE_INTERNAL_URL. */
 export const DB_HOST_FOR_CONTAINERS = 'host.docker.internal';
 
-export const SUPPORTED_ENGINES = ['postgres', 'mariadb'];
+export const SUPPORTED_ENGINES = ['postgres', 'mariadb', 'redis'];
+
+/**
+ * The engines served by ONE shared container for the whole platform.
+ *
+ * Redis is deliberately not one of them: it gets a container PER SCOPE, because
+ * Redis has no in-engine boundary to enforce isolation with — ACL key patterns
+ * do not scope to a numbered database, two commands carry a destination
+ * database of their own, and the modules refuse to run outside database 0. All
+ * three were measured; services/managedRedis.js carries the transcript.
+ *
+ * This split exists so nothing has to ask "is this engine shared?" by naming
+ * redis. ensureServer(), stopServer() and the managed_db_servers table are for
+ * this list and only this list.
+ */
+export const SHARED_SERVER_ENGINES = ['postgres', 'mariadb'];
+
+/** True for engines whose container is created once per (app, tenant). */
+export function isPerScopeEngine(engine) {
+  return engine === 'redis';
+}
 
 // Ports sit well clear of tcpIngress.js's 31000-31999 auto-allocation range and
 // of the 3000 control plane, so an app can never be handed a port a database is
@@ -131,6 +175,22 @@ const ENGINES = {
     // fix. If a provision still fails at 1024, the cause is elsewhere.
     memoryMb: Number(process.env.MANAGED_DB_MARIADB_MEMORY_MB) || 1024,
     scheme: 'mysql',
+  },
+  // Per-scope, so there is no `container` and no `defaultPort` here: both are
+  // allocated per instance and stored on the managed_databases row (migration
+  // 089). Everything engine-specific lives in services/managedRedis.js; this
+  // entry exists so ENGINES[engine] stays the one place that answers "is this a
+  // real engine, and what is its URL scheme".
+  redis: {
+    image: redis.REDIS_IMAGE,
+    container: null,
+    defaultPort: null,
+    containerPort: redis.REDIS_CONTAINER_PORT,
+    dataPath: redis.REDIS_DATA_PATH,
+    passwordEnv: redis.REDIS_PASSWORD_ENV,
+    memoryMb: redis.REDIS_MEMORY_MB,
+    scheme: 'redis',
+    perScope: true,
   },
 };
 
@@ -412,6 +472,16 @@ async function waitReady(engine, timeoutMs = 120000) {
 export async function ensureServer(engine) {
   const cfg = ENGINES[engine];
   if (!cfg) throw new Error(`managedDb: unknown engine '${engine}' (supported: ${SUPPORTED_ENGINES.join(', ')})`);
+  if (cfg.perScope) {
+    // Not a "not implemented" — there is no such object to ensure. A caller
+    // that reaches here is holding an engine-shaped assumption that does not
+    // apply, and silently returning something would let it hand an app a port
+    // that belongs to nothing.
+    throw new Error(
+      `managedDb: '${engine}' has no shared server — it runs one container per scope. ` +
+      `Use provision(scope, '${engine}') instead of ensureServer('${engine}').`
+    );
+  }
 
   let row = serverRow(engine);
   const port = row?.host_port || cfg.defaultPort;
@@ -585,7 +655,161 @@ async function hardenServer(engine) {
 export async function stopServer(engine) {
   const cfg = ENGINES[engine];
   if (!cfg) throw new Error(`managedDb: unknown engine '${engine}'`);
+  if (cfg.perScope) {
+    // Every instance this platform knows about. Same contract as the shared
+    // case: the containers go, the volumes under DATA_DIR stay, so a later
+    // provision() finds its data where it left it.
+    for (const row of getDb().prepare(
+      'SELECT container_name FROM managed_databases WHERE engine = ? AND container_name IS NOT NULL'
+    ).all(engine)) {
+      await dockerExec(['rm', '-f', row.container_name], { timeout: 60000 }).catch(() => {});
+    }
+    return;
+  }
   await dockerExec(['rm', '-f', cfg.container], { timeout: 60000 }).catch(() => {});
+}
+
+// ---------------------------------------------------------------------------
+// Redis: one container per scope
+// ---------------------------------------------------------------------------
+//
+// The SQL half of this file provisions INSIDE a server that is already running.
+// Redis provisions the server itself, so the two halves of "create the thing"
+// and "create the credential" collapse into one function — but the ordering
+// discipline is identical: the SQLite row is written first, and a failure after
+// it rolls both back.
+
+/** Each instance keeps its snapshot in its own directory under DATA_DIR. */
+function redisDataDir(dbName) {
+  return join(dataDirFor('redis'), assertIdent(dbName));
+}
+
+/**
+ * Start (or restart) one scope's Redis and put its ACL user back.
+ *
+ * Idempotent and self-healing, in the same spirit as ensureServer(): a
+ * container that exists but is stopped is started, one that has been removed is
+ * recreated against its recorded port, and the ACL user is re-applied every
+ * time because Redis holds ACLs in memory only — there is no aclfile, so a
+ * restart drops every user except `default`.
+ */
+async function ensureRedisInstance({ container, dbName, username, password, port }) {
+  assertIdent(dbName);
+  assertIdent(username);
+  assertPassword(password);
+
+  const state = await containerState(container);
+  if (state && state !== 'running') {
+    try {
+      await dockerExec(['start', container], { timeout: 60000 });
+    } catch (e) {
+      // Same recreate-on-unbindable-address branch the shared servers carry:
+      // a container CREATED against a host address the daemon cannot provide
+      // never starts, and retrying `docker start` repeats the error forever.
+      if (!ADDR_UNAVAILABLE.test(e.message)) throw e;
+      log.info(`managedDb: ${container} cannot start on its recorded bindings; recreating`);
+      await dockerExec(['rm', '-f', container], { timeout: 60000 }).catch(() => {});
+      await createRedisContainer({ container, dbName, password, port });
+    }
+  } else if (!state) {
+    await createRedisContainer({ container, dbName, password, port });
+  }
+
+  await waitRedisReady(container);
+  // Redacted at the throw: ACL SETUSER carries the password, and redis-cli
+  // echoes the failing command back on an error.
+  try {
+    await dockerExecStdin(['exec', '-i', container, 'redis-cli'], redis.aclScript(username, password), { timeout: 30000 });
+  } catch (e) {
+    throw new Error(redactSecret(e.message, password));
+  }
+  return { engine: 'redis', host: DB_HOST_FOR_CONTAINERS, port, container };
+}
+
+async function createRedisContainer({ container, dbName, password, port }) {
+  const dir = redisDataDir(dbName);
+  mkdirSync(dir, { recursive: true });
+
+  // Same --env-file reasoning as createServerContainer(): the credential must
+  // not appear in the host's process table, and `docker run ... -e X=secret`
+  // puts it there for every local user to read.
+  const envFile = join(dir, '.init-env');
+  writeFileSync(envFile, `${redis.REDIS_PASSWORD_ENV}=${password}\n`, { mode: 0o600 });
+
+  const memoryMb = ENGINES.redis.memoryMb;
+  const args = [
+    'run', '-d',
+    '--name', container,
+    '--label', 'appcrane=true',
+    '--label', 'appcrane-db=redis',
+    '--label', `appcrane-db-name=${dbName}`,
+    '--restart=on-failure:2',
+    `--memory=${memoryMb}m`,
+    `--memory-swap=${memoryMb}m`,
+    '--security-opt', 'no-new-privileges',
+    '--cap-drop', 'NET_RAW',
+    '--log-opt', 'max-size=10m',
+    '--log-opt', 'max-file=3',
+    '--env-file', envFile,
+    '-v', `${dir}:${ENGINES.redis.dataPath}`,
+  ];
+  // NOT `--network appcrane-apps` — see this file's header. Same publish
+  // matrix, same best-effort bridge-gateway address.
+  for (const addr of await bindAddresses()) {
+    args.push('-p', `${addr}:${port}:${redis.REDIS_CONTAINER_PORT}`);
+  }
+  args.push(ENGINES.redis.image, ...redis.serverCommand(redis.maxmemoryMbFor(memoryMb)));
+
+  try {
+    await dockerExec(args, { timeout: 180000 });
+  } catch (e) {
+    if (ADDR_UNAVAILABLE.test(e.message)) {
+      log.info(`managedDb: bridge-gateway publish unavailable for ${container}; publishing on loopback only`);
+      const loopbackOnly = [];
+      for (let i = 0; i < args.length; i++) {
+        if (args[i] === '-p' && !args[i + 1].startsWith('127.0.0.1')) { i++; continue; }
+        loopbackOnly.push(args[i]);
+      }
+      await dockerExec(['rm', '-f', container], { timeout: 60000 }).catch(() => {});
+      await dockerExec(loopbackOnly, { timeout: 180000 });
+    } else {
+      throw e;
+    }
+  } finally {
+    try { rmSync(envFile, { force: true }); } catch (_) {}
+  }
+  log.info(`managedDb: started redis instance ${container} on 127.0.0.1:${port}`);
+}
+
+/**
+ * Wait until the instance answers PING.
+ *
+ * Unlike the SQL images there is no two-phase init to outrun — Redis binds TCP
+ * once and stays bound — so a plain PING is a real readiness signal. It carries
+ * no credential in argv: redis-cli authenticates from REDISCLI_AUTH, which the
+ * container already has in its environment.
+ */
+async function waitRedisReady(container, timeoutMs = 60000) {
+  const deadline = Date.now() + timeoutMs;
+  let last = '';
+  while (Date.now() < deadline) {
+    try {
+      const out = await dockerExec(redis.readyProbeArgs(container), { timeout: 15000 });
+      if (/PONG/.test(out)) return;
+      last = out;
+    } catch (e) {
+      last = e.message;
+    }
+    await new Promise(r => setTimeout(r, 500));
+  }
+  throw new Error(`managedDb: redis instance ${container} did not become ready within ${timeoutMs}ms (last probe: ${last})`);
+}
+
+/** Ports this platform has already handed to a Redis instance. */
+function usedRedisPorts() {
+  return getDb().prepare(
+    'SELECT host_port FROM managed_databases WHERE host_port IS NOT NULL'
+  ).all().map(r => Number(r.host_port));
 }
 
 // ---------------------------------------------------------------------------
@@ -657,7 +881,92 @@ function intOrNull(s) {
  * still reported — the dashboard needs to say "Postgres: not provisioned"
  * rather than omit it — with what the config says it WOULD be, `databases: 0`,
  * and null docker facts.
+ *
+ * REDIS IS REPORTED AS ONE ROW WITH AN `instances` ARRAY, because it is one
+ * container per app and there is no single server to inspect. The row keeps the
+ * same field names so a dashboard written against the shared engines does not
+ * have to special-case it; `container` and `host_port` are null on it, which is
+ * the truth rather than a placeholder. The aggregate `running` is "there is at
+ * least one instance and every one of them is up" — a fleet where one app's
+ * Redis is dead must not read as green.
  */
+
+/**
+ * One `docker inspect` for one container, parsed. Null when there is no such
+ * container, which is a STATE to report and not an error.
+ */
+async function inspectFacts(container) {
+  let raw;
+  try {
+    raw = await dockerExec(['inspect', '-f', STATUS_FORMAT, container], { timeout: 10000 });
+  } catch (e) {
+    if (NO_SUCH_CONTAINER.test(e.message)) return { absent: true, error: null };
+    return { absent: true, error: e.message };
+  }
+  const [state, restarts, exitCode, oom, startedAt, memBytes] = raw.split(STATUS_SEP);
+  const bytes = intOrNull(memBytes);
+  return {
+    absent: false,
+    error: null,
+    state: state || null,
+    running: state === 'running',
+    restart_count: intOrNull(restarts),
+    last_exit_code: intOrNull(exitCode),
+    oom_killed: oom === 'true',
+    started_at: startedAt && startedAt !== ZERO_TIME ? startedAt : null,
+    // 0 is Docker's "no limit", which is a different fact from "unknown" and
+    // must not be rounded into 0 MB.
+    memory_mb: bytes === null || bytes === 0 ? null : Math.round(bytes / (1024 * 1024)),
+  };
+}
+
+async function perScopeStatus(engine, cfg, count) {
+  const rows = getDb().prepare(
+    'SELECT app_id, tenant, db_name, container_name, host_port FROM managed_databases WHERE engine = ? ORDER BY id'
+  ).all(engine);
+
+  const instances = await Promise.all(rows.map(async (r) => {
+    const facts = await inspectFacts(r.container_name);
+    return {
+      container: r.container_name,
+      database: r.db_name,
+      host_port: r.host_port,
+      scope: { app_id: r.app_id, tenant: r.tenant || null },
+      state: facts.absent ? null : facts.state,
+      running: facts.absent ? false : facts.running,
+      restart_count: facts.absent ? null : facts.restart_count,
+      last_exit_code: facts.absent ? null : facts.last_exit_code,
+      oom_killed: facts.absent ? null : facts.oom_killed,
+      started_at: facts.absent ? null : facts.started_at,
+      memory_mb: facts.absent ? null : facts.memory_mb,
+      error: facts.error,
+    };
+  }));
+
+  const firstError = instances.find(i => i.error)?.error || null;
+  return {
+    engine,
+    container: null,
+    image: cfg.image,
+    configured: instances.length > 0,
+    state: null,
+    running: instances.length > 0 && instances.every(i => i.running),
+    host_port: null,
+    memory_mb: null,
+    configured_memory_mb: cfg.memoryMb,
+    databases: count,
+    // Aggregated across instances rather than invented: the maximum restart
+    // count and "did ANY of them get OOM-killed", which is the question an
+    // operator is actually asking when they open this page.
+    restart_count: instances.length ? Math.max(...instances.map(i => i.restart_count ?? 0)) : null,
+    last_exit_code: null,
+    oom_killed: instances.length ? instances.some(i => i.oom_killed === true) : null,
+    started_at: null,
+    error: firstError,
+    instances,
+  };
+}
+
 export async function serverStatus() {
   const db = getDb();
   const counts = new Map(
@@ -671,6 +980,9 @@ export async function serverStatus() {
 
   return Promise.all(SUPPORTED_ENGINES.map(async (engine) => {
     const cfg = ENGINES[engine];
+    const count = counts.get(engine) || 0;
+    if (cfg.perScope) return perScopeStatus(engine, cfg, count);
+
     const row = rows.get(engine) || null;
     // The recorded container/image win over the config: they are what actually
     // exists on the host, and are what inspect has to be pointed at. A config
@@ -688,7 +1000,7 @@ export async function serverStatus() {
       host_port: row?.host_port ?? cfg.defaultPort,
       memory_mb: null,
       configured_memory_mb: cfg.memoryMb,
-      databases: counts.get(engine) || 0,
+      databases: count,
       restart_count: null,
       last_exit_code: null,
       oom_killed: null,
@@ -696,25 +1008,18 @@ export async function serverStatus() {
       error: null,
     };
 
-    let raw;
-    try {
-      raw = await dockerExec(['inspect', '-f', STATUS_FORMAT, container], { timeout: 10000 });
-    } catch (e) {
-      if (!NO_SUCH_CONTAINER.test(e.message)) out.error = e.message;
+    const facts = await inspectFacts(container);
+    if (facts.absent) {
+      out.error = facts.error;
       return out;
     }
-
-    const [state, restarts, exitCode, oom, startedAt, memBytes] = raw.split(STATUS_SEP);
-    out.state = state || null;
-    out.running = state === 'running';
-    out.restart_count = intOrNull(restarts);
-    out.last_exit_code = intOrNull(exitCode);
-    out.oom_killed = oom === 'true';
-    out.started_at = startedAt && startedAt !== ZERO_TIME ? startedAt : null;
-    // 0 is Docker's "no limit", which is a different fact from "unknown" and
-    // must not be rounded into 0 MB.
-    const bytes = intOrNull(memBytes);
-    out.memory_mb = bytes === null || bytes === 0 ? null : Math.round(bytes / (1024 * 1024));
+    out.state = facts.state;
+    out.running = facts.running;
+    out.restart_count = facts.restart_count;
+    out.last_exit_code = facts.last_exit_code;
+    out.oom_killed = facts.oom_killed;
+    out.started_at = facts.started_at;
+    out.memory_mb = facts.memory_mb;
     return out;
   }));
 }
@@ -842,6 +1147,27 @@ function rowFor(scope, engine) {
 function connectionFor(row, port) {
   const password = decrypt(row.password_enc);
   const scheme = ENGINES[row.engine].scheme;
+
+  // REDIS HAS NO DATABASE NAME, and the one thing a Redis client can do with a
+  // `database` field is SELECT an integer — so that is what it gets.
+  //
+  // `row.db_name` is AppCrane's own handle: it names the container and the
+  // volume and it is what migration 085's UNIQUE (engine, db_name) collision
+  // guard is computed over. It is never sent to Redis. Returning it here would
+  // put REDIS_DB=crane_a42 into an app's environment and every client would
+  // fail parsing it as an index.
+  if (row.engine === 'redis') {
+    return {
+      engine: 'redis',
+      host: DB_HOST_FOR_CONTAINERS,
+      port,
+      database: redis.REDIS_DB_INDEX,
+      username: row.db_user,
+      password,
+      url: redis.redisUrl({ username: row.db_user, password, host: DB_HOST_FOR_CONTAINERS, port }),
+    };
+  }
+
   return {
     engine: row.engine,
     host: DB_HOST_FOR_CONTAINERS,
@@ -862,6 +1188,7 @@ function connectionFor(row, port) {
  */
 export async function provision(scope, engine) {
   if (!ENGINES[engine]) throw new Error(`managedDb: unknown engine '${engine}' (supported: ${SUPPORTED_ENGINES.join(', ')})`);
+  if (ENGINES[engine].perScope) return provisionPerScope(scope, engine);
   const { appId, tenant } = normalizeScope(scope);
 
   const server = await ensureServer(engine);
@@ -921,10 +1248,108 @@ export async function provision(scope, engine) {
   return connectionFor(rowFor(scope, engine), server.port);
 }
 
+/**
+ * Provision a scope's OWN server — today, Redis.
+ *
+ * The row is written FIRST, exactly as the shared path does and for a stronger
+ * reason: the row is where the port and the container name are ALLOCATED, so
+ * two concurrent deploys of the same app race on migration 089's UNIQUE index
+ * rather than on `docker run --name`, which would leave one of them holding a
+ * half-created container nothing points at.
+ *
+ * A row that already exists is not re-created — it is ensured. That covers the
+ * ordinary case (a redeploy) and the interesting one (the host rebooted, or an
+ * operator ran `docker rm`): the container comes back on its recorded port with
+ * its recorded volume, and the app's credential keeps working.
+ */
+async function provisionPerScope(scope, engine) {
+  const { appId, tenant } = normalizeScope(scope);
+  const { database, username } = namesForScope(scope);
+  const db = getDb();
+
+  const existing = rowFor(scope, engine);
+  if (existing) {
+    await ensureRedisInstance({
+      container: existing.container_name,
+      dbName: existing.db_name,
+      username: existing.db_user,
+      password: decrypt(existing.password_enc),
+      port: existing.host_port,
+    });
+    return connectionFor(existing, existing.host_port);
+  }
+
+  const password = generatePassword();
+  const container = redis.containerNameFor(CONTAINER_PREFIX, database);
+  const port = redis.pickPort(usedRedisPorts());
+
+  try {
+    db.prepare(`
+      INSERT INTO managed_databases (app_id, tenant, engine, db_name, db_user, password_enc, host_port, container_name)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(appId, tenant, engine, database, username, encrypt(password), port, container);
+  } catch (e) {
+    if (/UNIQUE constraint/i.test(e.message)) {
+      const raced = rowFor(scope, engine);
+      if (raced) {
+        await ensureRedisInstance({
+          container: raced.container_name,
+          dbName: raced.db_name,
+          username: raced.db_user,
+          password: decrypt(raced.password_enc),
+          port: raced.host_port,
+        });
+        return connectionFor(raced, raced.host_port);
+      }
+      throw new Error(
+        `managedDb: identifier '${database}' is already provisioned on ${engine} for a different scope. ` +
+        `This is a name-derivation collision and provisioning is refusing rather than handing over ` +
+        `another scope's database.`
+      );
+    }
+    throw e;
+  }
+
+  try {
+    await ensureRedisInstance({ container, dbName: database, username, password, port });
+  } catch (e) {
+    db.prepare('DELETE FROM managed_databases WHERE app_id = ? AND tenant = ? AND engine = ?')
+      .run(appId, tenant, engine);
+    await destroyRedisInstance(container, database).catch(() => {});
+    throw new Error(`managedDb: provisioning ${engine} database failed: ${redactSecret(e.message, password)}`);
+  }
+
+  log.info(`managedDb: provisioned redis instance ${container} for app ${appId}${tenant ? ` tenant ${tenant}` : ''}`);
+  return connectionFor(rowFor(scope, engine), port);
+}
+
+/**
+ * Destroy an instance and its data.
+ *
+ * THE VOLUME GOES TOO, which is the opposite of stopServer(). Deprovisioning is
+ * the destructive call — routes/managedDb.js makes the caller confirm with the
+ * app's slug — and leaving the RDB snapshot behind would mean a later app that
+ * happened to derive the same name inherited a stranger's keyspace. The
+ * directory is under DATA_DIR/managed-db/redis and is named by an assertIdent'd
+ * identifier this module derived, never by anything a caller supplied.
+ */
+async function destroyRedisInstance(container, dbName) {
+  if (container) await dockerExec(['rm', '-f', container], { timeout: 60000 }).catch(() => {});
+  if (dbName) {
+    try { rmSync(redisDataDir(dbName), { recursive: true, force: true }); } catch (e) {
+      log.warn(`managedDb: could not remove the data directory for redis instance ${container}: ${e.message}`);
+    }
+  }
+}
+
 /** Existing credentials for a scope, or null. Does not start a server. */
 export function credentialsFor(scope, engine) {
   const row = rowFor(scope, engine);
   if (!row) return null;
+  // A per-scope engine carries its port on the ROW: there is no server row to
+  // read it from, and ENGINES[engine].defaultPort is deliberately null so a
+  // missed branch here fails loudly rather than handing out port `null`.
+  if (ENGINES[engine].perScope) return connectionFor(row, row.host_port);
   const server = serverRow(engine);
   return connectionFor(row, server?.host_port || ENGINES[engine].defaultPort);
 }
@@ -963,11 +1388,36 @@ async function dropInEngine(engine, database, username) {
 export async function deprovision(scope, engine) {
   const row = rowFor(scope, engine);
   if (!row) return false;
-  await ensureServer(engine);
-  await dropInEngine(engine, row.db_name, row.db_user);
+  await dropRow(row);
   getDb().prepare('DELETE FROM managed_databases WHERE id = ?').run(row.id);
   log.info(`managedDb: deprovisioned ${engine} database ${row.db_name}`);
   return true;
+}
+
+/**
+ * Remove one row's engine-side objects, whichever engine it is.
+ *
+ * ONE function, so the two teardown callers below cannot drift into handling
+ * different engine sets — which is precisely how an orphaned container holding
+ * a deleted app's data would happen.
+ */
+async function dropRow(row) {
+  if (ENGINES[row.engine]?.perScope) {
+    // Best-effort ACL drop BEFORE the container goes, so that a container this
+    // module fails to remove — a daemon hiccup, a `docker rm` that hangs — is
+    // at least no longer answering to the credential AppCrane just forgot.
+    if (row.container_name) {
+      await dockerExecStdin(
+        ['exec', '-i', row.container_name, 'redis-cli'],
+        redis.aclDropScript(assertIdent(row.db_user)),
+        { timeout: 15000 },
+      ).catch(() => {});
+    }
+    await destroyRedisInstance(row.container_name, row.db_name);
+    return;
+  }
+  await ensureServer(row.engine);
+  await dropInEngine(row.engine, row.db_name, row.db_user);
 }
 
 /**
@@ -984,8 +1434,7 @@ export async function deprovisionApp(appId) {
   let dropped = 0;
   for (const row of rows) {
     try {
-      await ensureServer(row.engine);
-      await dropInEngine(row.engine, row.db_name, row.db_user);
+      await dropRow(row);
       getDb().prepare('DELETE FROM managed_databases WHERE id = ?').run(row.id);
       dropped++;
     } catch (e) {

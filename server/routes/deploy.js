@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { existsSync, unlinkSync, symlinkSync, cpSync, writeFileSync, readFileSync } from 'fs';
+import { existsSync, unlinkSync, symlinkSync, cpSync, writeFileSync, readFileSync, mkdirSync } from 'fs';
 import { resolve, join } from 'path';
 import { getDb } from '../db.js';
 import { requireAuth, requireAppAccess } from '../middleware/auth.js';
@@ -9,6 +9,7 @@ import { getPortsForSlot } from '../services/portAllocator.js';
 import { userHasAppPermission, roleForUserOnApp } from '../services/permissions.js';
 import { isAdmin } from '../utils/roles.js';
 import log from '../utils/logger.js';
+import { parseContainerCommand, parseVolumePaths, resolveVolumeMounts } from '../services/containerRuntimeSpec.js';
 
 const router = Router();
 
@@ -312,14 +313,24 @@ router.post('/:slug/restart/:env', requireAppAccess, auditMiddleware('restart'),
 
   // Recreate: stop + start with fresh env
   const { startApp: dockerStart, stopApp: dockerStop } = await import('../services/docker.js');
+  // v2.70.0: the same mounts and command the deploy path resolves. Restarting
+  // with the hardcoded single /data mount and no command silently un-did both:
+  // an app with a declared volume came back with an empty directory where its
+  // state had been, and an app that needs a command came back exiting 0 — from
+  // an action whose entire contract is "same app, fresh env vars".
+  const { mounts: containerVolumes } =
+    resolveVolumeMounts({ sharedDir, paths: parseVolumePaths(app.volume_paths) });
+  for (const vol of containerVolumes) mkdirSync(vol.host, { recursive: true });
   await dockerStop(app.slug, env).catch(() => {});
   await dockerStart({
     slug: app.slug,
     env,
     image,
     hostPort: bePort,
+    containerPort: app.container_port,
+    command: parseContainerCommand(app.container_command),
     envVars: runtimeEnvVars,
-    volumes: [{ host: resolve(join(sharedDir, 'data')), container: '/data' }],
+    volumes: containerVolumes,
     memoryMb: limits.max_ram_mb,
     cpus: limits.max_cpu_percent / 100,
     addHostGateway: true,

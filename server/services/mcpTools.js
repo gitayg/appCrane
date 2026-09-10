@@ -4426,7 +4426,7 @@ const TOOLS = [
         slug: { type: 'string', description: 'App slug the database belongs to, e.g. "bookstack".' },
         engine: {
           type: 'string',
-          enum: ['postgres', 'mariadb'],
+          enum: ['postgres', 'mariadb', 'redis'],
           description: 'Which shared engine to create the database in. Required — an app may hold one of each, and this is not guessed for you.',
         },
       },

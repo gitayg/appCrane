@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import log from '../utils/logger.js';
+import { detectPhpApp, ensurePhpDockerfile } from './dockerfileGenPhp.js';
 
 const SUPPORTED_NODE = new Set(['18', '20', '22']);
 const DEFAULT_NODE = '20';
@@ -230,6 +231,17 @@ export function ensureDockerfile({ releaseDir, manifest, appBasePath, craneUrl, 
     return { path: existing, userProvided: true, warnings };
   }
 
+  // A PHP release is built from php:8.3-apache by dockerfileGenPhp.js. The
+  // precedence rule (composer.json wins unless package.json declares a start
+  // script or main) lives with detectPhpApp(); everything below this line is
+  // the Node path and is reached by exactly the releases that reached it
+  // before.
+  if (detectPhpApp(releaseDir)) {
+    const php = ensurePhpDockerfile({ releaseDir, manifest, dockerfilePath: existing });
+    for (const w of php.warnings) warnings.push(w);
+    return { path: php.path, warnings, runtime: 'php' };
+  }
+
   const node = pickNodeVersion(manifest);
 
   const beWorkdir = manifest?.be?.workdir ? safeRel(manifest.be.workdir) : null;
@@ -353,7 +365,7 @@ export function ensureDockerfile({ releaseDir, manifest, appBasePath, craneUrl, 
   );
 
   writeFileSync(existing, lines.join('\n'));
-  return { path: existing, warnings };
+  return { path: existing, warnings, runtime: 'node' };
 }
 
 /**

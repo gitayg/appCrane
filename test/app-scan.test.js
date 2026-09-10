@@ -410,7 +410,7 @@ test('fleetScanSummary reports one row per app+env, newest only', async () => {
 // The scanner cannot reach the deploy's outcome
 // ---------------------------------------------------------------------------
 
-test('a scanner that throws is caught before it can reach the deploy result', () => {
+test('a scanner that throws is caught before it can reach the deploy result', async () => {
   // scanApp is contractually non-throwing, but the DB insert is the one part
   // that can still throw (a locked or migrated-away table), so the deployer's
   // guard is load-bearing rather than decorative. Prove it can throw...
@@ -418,7 +418,7 @@ test('a scanner that throws is caught before it can reach the deploy result', ()
   writeLock('throws', { '': { name: 'a', version: '1.0.0' }, 'node_modules/x': { version: '1.0.0' } });
   const brokenDb = { prepare() { throw new Error('database is locked'); } };
   osvReplies({});
-  assert.rejects(() => scanApp(brokenDb, app, 'production'), /database is locked/);
+  await assert.rejects(() => scanApp(brokenDb, app, 'production'), /database is locked/);
   restoreFetch();
 
   // ...and that the deploy path wraps the call so it cannot propagate. The

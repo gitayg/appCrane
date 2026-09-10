@@ -4,6 +4,7 @@ import { getDb } from '../db.js';
 import {
   publicPortForApp, dataPlanePortForApp, releasePendingPortAfterRecreate, CONTROL_PLANE_PORT,
 } from './tcpIngress.js';
+import { assertRunnableCommand } from './containerRuntimeSpec.js';
 import log from '../utils/logger.js';
 
 const execFileAsync = promisify(execFile);
@@ -329,8 +330,27 @@ function publicPublishTargets(slug, env, containerPort) {
 //
 // Optional, defaulting to CONTAINER_PORT, so every existing caller (deployer.js,
 // routes/deploy.js, healthChecker.js) is byte-for-byte unchanged.
-export async function startApp({ slug, env, image, hostPort, envVars = {}, volumes = [], memoryMb = 512, cpus = 0.5, addHostGateway = false, containerPort = CONTAINER_PORT }) {
+//
+// v2.70.0: the command is a parameter too, for the same reason and with the
+// same shape of failure. There was no way to say what a container should be
+// STARTED with, so an image whose ENTRYPOINT needs a subcommand ran its usage
+// banner and exited 0 — a deploy that reports success and never serves.
+// Measured: `docker run --rm quay.io/keycloak/keycloak:26.0` with no argv exits
+// 0 having printed help; with `start-dev` it reaches state=running and answers
+// on 8080. Optional and null by default, so every existing caller's argv is
+// unchanged to the byte.
+export async function startApp({ slug, env, image, hostPort, envVars = {}, volumes = [], memoryMb = 512, cpus = 0.5, addHostGateway = false, containerPort = CONTAINER_PORT, command = null }) {
   const name = containerName(slug, env);
+
+  // The argv-build boundary for the command (services/containerRuntimeSpec.js
+  // holds the rules and the reasoning). Validated BEFORE the old container is
+  // torn down, so a malformed command leaves the running app alone instead of
+  // stopping it for a start that was never going to happen — the same ordering
+  // ensureAppNetwork() below is placed for.
+  //
+  // Throws rather than dropping the command: starting the container without it
+  // reproduces exactly the silent exit-0 this parameter exists to fix.
+  const runCommand = assertRunnableCommand(command);
 
   // apps.container_port is nullable and NULL MEANS the 3000 default (migration
   // 083). A default parameter only fires on `undefined`, so a caller reading the
@@ -452,7 +472,24 @@ export async function startApp({ slug, env, image, hostPort, envVars = {}, volum
     args.push('--add-host', 'host.docker.internal:host-gateway');
   }
 
+  // v2.70.0: the second argv-build boundary. `-v` takes a COLON-SEPARATED
+  // triple (host:container:options), so a colon inside either half does not
+  // produce a broken mount — it produces a DIFFERENT, valid one. A container
+  // path of '/config:ro' silently mounts read-only; a host path carrying a
+  // colon re-splits the whole argument and can name a source AppCrane never
+  // chose. containerRuntimeSpec.validateVolumePaths refuses colons where the
+  // paths are stored; this refuses them where the argument is assembled, so a
+  // caller that built its own list gets the same answer.
   for (const vol of volumes) {
+    if (typeof vol?.host !== 'string' || typeof vol?.container !== 'string' || !vol.host || !vol.container) {
+      throw new Error('volume entries must be { host, container } with non-empty string paths');
+    }
+    if (vol.host.includes(':') || vol.container.includes(':')) {
+      throw new Error(
+        `volume '${vol.host}:${vol.container}' contains ':' in a path — that is the field ` +
+        'separator in a docker -v argument and would silently change which mount is created',
+      );
+    }
     args.push('-v', `${vol.host}:${vol.container}`);
   }
 
@@ -473,10 +510,32 @@ export async function startApp({ slug, env, image, hostPort, envVars = {}, volum
   }
 
   args.push(image);
+
+  // Everything from here on is the CONTAINER's argv, not docker's.
+  //
+  // `docker run` stops parsing its own options at the first non-option argument
+  // — the image — so no element appended after this point can turn into a
+  // docker flag no matter how it is spelled. Measured against the daemon rather
+  // than read off the docs: a command of ['--privileged'] is delivered to the
+  // container's entrypoint as the literal string and the container inspects
+  // with Privileged=false. test/container-command.test.js runs that case.
+  //
+  // That is the property which makes a stored, operator-supplied command safe
+  // here: it can influence what the app runs INSIDE its own container (which is
+  // the point) and cannot influence how the container is created.
+  if (runCommand) args.push(...runCommand);
+
   const id = await dockerExec(args);
   invalidatePublishedPortsCache();   // the bindings just changed
   invalidateResourcesCache();        // and so did the applied limits
-  log.info(`docker started: ${name} (${id.slice(0, 12)}) from ${image}`);
+  log.info(
+    `docker started: ${name} (${id.slice(0, 12)}) from ${image}` +
+    // JSON, not a space-joined string. The elements are the argv as given, and
+    // joining them with spaces would render ['-c', 'a b'] identically to
+    // ['-c', 'a', 'b'] — a log line that cannot be read back as what ran.
+    (runCommand ? ` command=${JSON.stringify(runCommand)}` : '') +
+    (volumes.length > 1 ? ` mounts=${volumes.map((v) => v.container).join(',')}` : ''),
+  );
   if (publish) {
     // The container port is in the line because it is the one fact that says
     // WHICH plane got exposed. `-> 3000` is the control plane and is only ever

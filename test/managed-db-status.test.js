@@ -167,11 +167,11 @@ beforeEach(() => {
 
 // ── 1. Authorization ───────────────────────────────────────────────────────
 
-test('a platform admin gets both engines back, in SUPPORTED_ENGINES order', async () => {
+test('a platform admin gets every engine back, in SUPPORTED_ENGINES order', async () => {
   const { status, body } = await call('/api/managed-db/servers', PLATFORM);
   assert.equal(status, 200);
   assert.deepEqual(body.servers.map(s => s.engine), svc.SUPPORTED_ENGINES);
-  assert.deepEqual(body.servers.map(s => s.engine), ['postgres', 'mariadb']);
+  assert.deepEqual(body.servers.map(s => s.engine), ['postgres', 'mariadb', 'redis']);
 });
 
 test('an anonymous caller is refused', async () => {
@@ -316,8 +316,11 @@ test('an engine with no managed_db_servers row still appears, configured:false',
   // Nothing seeded at all: neither engine has ever been used.
   const { status, body } = await call('/api/managed-db/servers', PLATFORM);
   assert.equal(status, 200);
-  assert.equal(body.servers.length, 2);
-  for (const s of body.servers) {
+  assert.equal(body.servers.length, 3);
+  // Redis is a container PER SCOPE: with nothing provisioned it has no
+  // container and no host port, and carries null for both. The shared engines
+  // are the ones this block is about.
+  for (const s of body.servers.filter(x => svc.SHARED_SERVER_ENGINES.includes(x.engine))) {
     assert.equal(s.configured, false, `${s.engine} has no row and must say so`);
     assert.equal(s.databases, 0);
     assert.equal(s.state, null);
@@ -363,7 +366,9 @@ test('the database count is per engine, across all apps', async () => {
 test('a docker failure that is NOT "no such container" lands in error', async () => {
   process.env.CRANE_TEST_DOCKER_FAIL = 'Cannot connect to the Docker daemon at unix:///var/run/docker.sock.';
   const servers = await svc.serverStatus();
-  for (const s of servers) {
+  // Redis with no instances issues no `docker inspect`, so there is no daemon
+  // failure for it to report.
+  for (const s of servers.filter(x => svc.SHARED_SERVER_ENGINES.includes(x.engine))) {
     assert.match(s.error, /Cannot connect to the Docker daemon/);
     assert.equal(s.state, null);
     assert.equal(s.running, false);

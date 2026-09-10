@@ -186,7 +186,7 @@ test('both tools are advertised, and only the read one is marked readOnly', () =
 
   // The engine is required rather than guessed: an app may hold one of each.
   assert.deepEqual(provision.inputSchema.required, ['slug', 'engine']);
-  assert.deepEqual(provision.inputSchema.properties.engine.enum, ['postgres', 'mariadb']);
+  assert.deepEqual(provision.inputSchema.properties.engine.enum, ['postgres', 'mariadb', 'redis']);
   assert.equal(provision.inputSchema.additionalProperties, false);
 
   // The schema must not accept a tenant: namesForScope() hashes one into the
@@ -350,7 +350,7 @@ test('listing reads real rows through the real module and returns no secret colu
   assert.equal(out.databases[0].database, 'crane_areal');
   assert.equal(out.databases[0].username, 'crane_areal_u');
   assert.deepEqual(out.databases[0].scope, { app: 'bookstack', tenant: null });
-  assert.deepEqual(out.engines, ['postgres', 'mariadb']);
+  assert.deepEqual(out.engines, ['postgres', 'mariadb', 'redis']);
   assert.ok(!text.includes(PASSWORD));
   assert.ok(!text.includes('password_enc'));
 
@@ -366,7 +366,7 @@ test('the real engine module still exports everything the handlers call', async 
   }
   assert.equal(typeof real.provision, 'function');
   assert.equal(typeof real.listForApp, 'function');
-  assert.deepEqual(real.SUPPORTED_ENGINES, ['postgres', 'mariadb']);
+  assert.deepEqual(real.SUPPORTED_ENGINES, ['postgres', 'mariadb', 'redis']);
 });
 
 // ── Visibility ──────────────────────────────────────────────────────────────

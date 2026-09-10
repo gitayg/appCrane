@@ -10,6 +10,7 @@ import { getIngressForApp } from './tcpIngress.js';
 import { ensureCodebaseContext } from './appstudio/contextBuilder.js';
 import { findEntry } from './catalogService.js';
 import { credentialsFor } from './managedDb.js';
+import { parseContainerCommand, parseVolumePaths, resolveVolumeMounts } from './containerRuntimeSpec.js';
 
 // ---------------------------------------------------------------------------
 // Managed database credentials -> container environment
@@ -856,8 +857,21 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
   }
 
   mkdirSync(releasesDir, { recursive: true });
-  const sharedData = join(sharedDir, 'data');
-  mkdirSync(sharedData, { recursive: true });
+
+  // v2.70.0: the mounts this app actually gets. Always /data first (unchanged,
+  // and unreachable from any declared value), then whatever paths the app
+  // declared it persists. An app that declares nothing produces a
+  // single-element array identical to the literal that used to be inlined at
+  // the dockerStart call below, so its argv does not move.
+  //
+  // Resolved HERE rather than at the call site because the host directories
+  // have to exist and be owned correctly before the container is created. The
+  // <shared>/data mkdir that used to stand alone above is now the first
+  // iteration of the loop below — same path, same recursive create.
+  const declaredVolumePaths = parseVolumePaths(app.volume_paths);
+  const { mounts: containerVolumes, skipped: skippedVolumePaths } =
+    resolveVolumeMounts({ sharedDir, paths: declaredVolumePaths });
+  for (const vol of containerVolumes) mkdirSync(vol.host, { recursive: true });
 
   // Bind-mounted volumes inherit host ownership, not container ownership.
   // Our Dockerfile runs as the `node` user (UID 1000 in node:*-alpine), so
@@ -867,13 +881,27 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
   // suspected first-deploy permissions issue (sub-bug C in the deploy
   // #178 report). Successful chown logs at info; failure logs the
   // underlying error so the operator can see EACCES / no-such-user.
-  let chownDetail = null;
-  try {
-    execFileSync('chown', ['-R', '1000:1000', sharedData], { stdio: 'pipe', timeout: 30000 });
-    chownDetail = `chown 1000:1000 ${sharedData} → ok`;
-  } catch (e) {
-    chownDetail = `chown 1000:1000 ${sharedData} → failed (${e?.stderr?.toString().trim() || e.message}). App may hit EACCES on /data writes if its container runs as a non-root user.`;
+  //
+  // v2.70.0: every mount, not only /data. A declared volume gets a
+  // freshly-created host directory owned by whoever AppCrane runs as, and an
+  // image that drops to a non-root user cannot write it — which for these apps
+  // means a crash at boot, not a degraded feature. The chown is per-mount and
+  // each failure is reported with the path it applies to, because "the app
+  // cannot write /config" and "the app cannot write /data" have different
+  // causes and different fixes.
+  const chownDetails = [];
+  for (const vol of containerVolumes) {
+    try {
+      execFileSync('chown', ['-R', '1000:1000', vol.host], { stdio: 'pipe', timeout: 30000 });
+      chownDetails.push(`chown 1000:1000 ${vol.host} (${vol.container}) → ok`);
+    } catch (e) {
+      chownDetails.push(
+        `chown 1000:1000 ${vol.host} (${vol.container}) → failed (${e?.stderr?.toString().trim() || e.message}). ` +
+        `App may hit EACCES on ${vol.container} writes if its container runs as a non-root user.`,
+      );
+    }
   }
+  const chownDetail = chownDetails.join('\n');
 
   const deployLog = [];
   let deployFinished = false;
@@ -1371,7 +1399,11 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     // the Node-only dockerfileGen. Build it with Nixpacks (Python/Go/Ruby/
     // static/…) if the binary is on the host; otherwise fail with a clear ask.
     const hasDockerfile = existsSync(join(releaseDir, 'Dockerfile'));
-    const isNodeApp = existsSync(join(releaseDir, 'package.json'));
+    // A PHP release is built by dockerfileGenPhp.js, which ensureDockerfile
+    // dispatches to. Without composer.json here a PHP app with no package.json
+    // never reaches the generator at all and falls through to Nixpacks.
+    const isNodeApp = existsSync(join(releaseDir, 'package.json'))
+      || existsSync(join(releaseDir, 'composer.json'));
 
     if (!hasDockerfile && !isNodeApp) {
       const { nixpacksAvailable, nixpacksBuild } = await import('./nixpacks.js');
@@ -1391,7 +1423,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       });
       appendLog(`Image ready (Nixpacks): ${image}`);
     } else {
-      const { userProvided } = ensureDockerfile({ releaseDir, manifest, appBasePath, craneUrl, craneInternalUrl });
+      const { userProvided, runtime } = ensureDockerfile({ releaseDir, manifest, appBasePath, craneUrl, craneInternalUrl });
 
       if (userProvided) {
         const expectedPort = manifest?.port || manifest?.be?.port || 3000;
@@ -1401,7 +1433,9 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
         injectAppBasePathArg(join(releaseDir, 'Dockerfile'));
         appendLog('Using app-provided Dockerfile (validated)');
       } else {
-        appendLog('Generated Dockerfile (Node Alpine, non-root)');
+        appendLog(runtime === 'php'
+          ? 'Generated Dockerfile (php:8.3-apache, non-root)'
+          : 'Generated Dockerfile (Node Alpine, non-root)');
       }
 
       appendLog('Building docker image...');
@@ -1542,13 +1576,31 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       // is 80), so an image app declares its own. Passed straight from the
       // column, NULL included — startApp normalises NULL to the 3000 default.
       containerPort: app.container_port,
+      // What the image is started WITH. NULL for every app that has not
+      // declared one, which is every app that exists today, and NULL means
+      // "run the image's own ENTRYPOINT/CMD" — the behaviour before this
+      // parameter existed. An image whose entrypoint needs a subcommand
+      // (keycloak `start-dev`, minio `server /data`) previously printed its
+      // usage banner, exited 0, and failed the health probe as if the app were
+      // broken.
+      command: parseContainerCommand(app.container_command),
       envVars: runtimeEnvVars,
-      volumes: [{ host: resolve(join(sharedDir, 'data')), container: '/data' }],
+      volumes: containerVolumes,
       memoryMb: limits.max_ram_mb,
       cpus: limits.max_cpu_percent / 100,
       addHostGateway: true,
     });
     appendLog(`Container started: appcrane-${app.slug}-${env} (host port ${bePort})`);
+    if (containerVolumes.length > 1) {
+      appendLog(
+        `Persistent mounts: ${containerVolumes.map((v) => v.container).join(', ')} ` +
+        '(bind-mounted from this app\'s shared directory, so they survive the ' +
+        'rm -f + recreate every redeploy performs)',
+      );
+    }
+    for (const s of skippedVolumePaths) {
+      appendLog(`Volume path ${s.path} not mounted separately — it is already inside the ${s.coveredBy} mount.`);
+    }
 
     // Health-validate the new container; revert to previous image on failure (Feature 9).
     // v2.2.11: health check is now mandatory. If manifest.be.health is unset
@@ -1699,7 +1751,12 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       await dockerStop(app.slug, env).catch(() => {});
       if (prevImage) {
         appendLog(`Reverting to previous image: ${prevImage}`);
-        await dockerStart({ slug: app.slug, env, image: prevImage, hostPort: bePort, containerPort: app.container_port, envVars: runtimeEnvVars, volumes: [{ host: resolve(join(sharedDir, 'data')), container: '/data' }], memoryMb: limits.max_ram_mb, cpus: limits.max_cpu_percent / 100 }).catch(() => {});
+        // Same command and same mounts as the forward start. A rollback that
+        // dropped either would bring the app back in a shape it has never run
+        // in — no command means the previous image now exits 0, and fewer
+        // mounts means the recovery container cannot see the state the failed
+        // one was writing.
+        await dockerStart({ slug: app.slug, env, image: prevImage, hostPort: bePort, containerPort: app.container_port, command: parseContainerCommand(app.container_command), envVars: runtimeEnvVars, volumes: containerVolumes, memoryMb: limits.max_ram_mb, cpus: limits.max_cpu_percent / 100 }).catch(() => {});
       }
       const restoreNote = prevImage
         ? 'Previous version restored.'

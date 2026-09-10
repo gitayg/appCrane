@@ -59,6 +59,9 @@ CapRover and Dokku are in one column because their access model is the same shap
 ## Features
 
 - **Docker container isolation** — every app runs in its own container; no shared dependencies, no runaway processes
+- **Managed databases** — Postgres, MariaDB and Redis provisioned per app (and per tenant), with credentials injected under whatever env-var names the app actually reads. Postgres and MariaDB share one server per engine with isolation enforced by grants; Redis gets a container per scope, because its ACLs cannot scope to a numbered database
+- **Per-app container command and volumes** — an app can declare the argv its image needs (`["start-dev"]`) and the paths it actually persists. Commands are argv arrays, never shell strings, so nothing in a stored command can become a second token; declared paths survive the stop-and-recreate that every redeploy performs
+- **Auto-generated Dockerfiles for Node and PHP** — an app with no Dockerfile is built from `node:*-alpine`, or from `php:8.3-apache` when it ships a `composer.json`. Both run non-root and honour the port AppCrane assigns; Nixpacks still covers everything else
 - **Enterprise SSO** — SAML 2.0, OIDC, and SCIM provisioning; connect to Okta, Azure AD, Google Workspace
 - **Identity forwarded to apps as headers** — `X-AppCrane-User-Role`, `X-AppCrane-App-Role`, etc. are injected by the proxy after `forward_auth` verifies the user; deployed apps read identity directly off the request without a callback (oauth2-proxy / IAP pattern)
 - **`/api/me` endpoint** — canonical "who is the caller" for proxied apps; accepts the `cc_token` cookie, Bearer, or `X-API-Key`; returns global role + per-app role (`?app=<slug>` or `Referer`-inferred)

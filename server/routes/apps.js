@@ -146,6 +146,7 @@ import { existsSync, mkdirSync, renameSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { reconcileOrphanedApps } from '../services/reconcile.js';
 import { parseImageRef } from '../services/imageSource.js';
+import { validateContainerCommand, validateVolumePaths } from '../services/containerRuntimeSpec.js';
 
 const router = Router();
 
@@ -857,7 +858,7 @@ router.get('/:slug/storage', requireAppAccess, async (req, res) => {
 router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req, res) => {
   const db = getDb();
   const app = req.app;
-  const { name, domain, description, category, source_type, github_url, branch, github_token, max_ram_mb, max_cpu_percent, public_access, visibility, image_retention, frame_ancestors, auth_mode, auth_bypass_paths, email_from_name, ingress_type, public_port, sandbox_public_port, data_plane_port, image_ref, container_port, health_path } = req.body;
+  const { name, domain, description, category, source_type, github_url, branch, github_token, max_ram_mb, max_cpu_percent, public_access, visibility, image_retention, frame_ancestors, auth_mode, auth_bypass_paths, email_from_name, ingress_type, public_port, sandbox_public_port, data_plane_port, image_ref, container_port, health_path, container_command, volume_paths } = req.body;
 
   // Adopt an app into the catalogue: allowed ONLY while catalog_slug is NULL.
   // An app created before 086 has no link, so the deployer cannot resolve which
@@ -998,6 +999,11 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
       if (clash) throw new AppError(`Domain "${updates.domain}" is already used by app "${clash.slug}"`, 409, 'DOMAIN_TAKEN');
     }
   }
+  // Stored as JSON TEXT; validated just below with the rest of the column
+  // set, so an invalid value is a 400 rather than a row the deploy path has
+  // to degrade around.
+  if (container_command !== undefined) updates.container_command = container_command;
+  if (volume_paths !== undefined) updates.volume_paths = volume_paths;
   if (description !== undefined) updates.description = description;
   if (category !== undefined) updates.category = category ? String(category).trim() : null;
   if (source_type !== undefined) updates.source_type = source_type;
@@ -1380,9 +1386,27 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
     return res.json({ app: { ...app, auth_mode: effectiveAuthMode(app.auth_mode), ...ingressFields(app) }, message: 'No changes' });
   }
 
-  const ALLOWED_APP_COLS = new Set(['name','domain','description','category','source_type','github_url','branch','public_access','visibility','github_token_encrypted','resource_limits','runtime','image_retention','frame_ancestors','auth_mode','auth_bypass_paths','email_from_name','ingress_type','data_plane_port','image_ref','container_port','health_path','catalog_slug']);
+  const ALLOWED_APP_COLS = new Set(['name','domain','description','category','source_type','github_url','branch','public_access','visibility','github_token_encrypted','resource_limits','runtime','image_retention','frame_ancestors','auth_mode','auth_bypass_paths','email_from_name','ingress_type','data_plane_port','image_ref','container_port','health_path','catalog_slug','container_command','volume_paths']);
   const invalidKey = Object.keys(updates).find(k => !ALLOWED_APP_COLS.has(k));
   if (invalidKey) throw new AppError(`Invalid field: ${invalidKey}`, 400, 'VALIDATION');
+
+  // Both columns are stored as JSON TEXT and are re-validated on the way OUT
+  // (parseContainerCommand / parseVolumePaths) so a bad row degrades instead of
+  // making an app undeployable. Validating here as well is what keeps a bad
+  // value from being stored in the first place, so the degrade path stays a
+  // safety net rather than the normal case.
+  for (const [col, validate] of [
+    ['container_command', validateContainerCommand],
+    ['volume_paths', validateVolumePaths],
+  ]) {
+    if (!(col in updates)) continue;
+    if (updates[col] === null) continue;
+    try {
+      updates[col] = JSON.stringify(validate(updates[col]));
+    } catch (e) {
+      throw new AppError(e.message, 400, 'VALIDATION');
+    }
+  }
 
   // The column write and the port allocation are ONE transaction. public_port
   // still goes through the allocator rather than the generic UPDATE — picking

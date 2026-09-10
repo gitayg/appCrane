@@ -137,30 +137,36 @@ test('086 ran and apps.catalog_slug is a nullable TEXT column with no default', 
   assert.equal(rowFor('cs-bare-row').catalog_slug, null);
 });
 
-test('the rebuild kept every column, and 086 is now the migration that describes apps', () => {
-  // Read the expected set out of 086 itself rather than hardcoding it, so this
-  // fails when the migration's CREATE TABLE and the live table disagree — the
-  // specific way a rebuild loses a column without erroring.
-  const sql = readFileSync(new URL('../server/migrations/086-app-catalog-slug.sql', import.meta.url), 'utf8');
-  const created = [...sql.matchAll(/^ {2}([a-z_]+) +(?:INTEGER|TEXT)/gm)].map((m) => m[1]);
-  const live = columns().map((c) => c.name);
-
-  assert.ok(created.length >= 36, `parsed only ${created.length} columns out of 086`);
-  for (const col of created) {
-    assert.ok(live.includes(col), `column '${col}' is created by 086 but missing from the live table`);
-  }
-  assert.equal(live.length, created.length,
-    'the live table and 086 disagree on the column count — one of them is out of date, and if it ' +
-    'is the migration then the next rebuild drops whatever it does not know about');
-
-  // 086 must also be the NEWEST rebuild, or the invariant the guard rests on
-  // ("the highest-numbered CREATE TABLE apps_new describes the live schema")
-  // now points at a file that predates catalog_slug.
+test('the rebuild kept every column, and the NEWEST rebuild describes apps', () => {
+  // The newest rebuild is discovered, not hardcoded. Pinning a filename here
+  // means every future rebuild lands as a failure in this file rather than in
+  // the migration that actually changed, and the reflex fix is to bump the
+  // constant -- which is the one edit that silently retires the guard.
   const dir = new URL('../server/migrations/', import.meta.url);
   const rebuilds = readdirSync(dir)
     .filter((f) => f.endsWith('.sql') && readFileSync(new URL(f, dir), 'utf8').includes('CREATE TABLE apps_new'))
     .sort();
-  assert.equal(rebuilds[rebuilds.length - 1], '086-app-catalog-slug.sql');
+  const newest = rebuilds[rebuilds.length - 1];
+
+  const sql = readFileSync(new URL(newest, dir), 'utf8');
+  const created = [...sql.matchAll(/^ {2}([a-z_]+) +(?:INTEGER|TEXT)/gm)].map((m) => m[1]);
+  const live = columns().map((c) => c.name);
+
+  assert.ok(created.length >= 36, `parsed only ${created.length} columns out of ${newest}`);
+  for (const col of created) {
+    assert.ok(live.includes(col), `column '${col}' is created by ${newest} but missing from the live table`);
+  }
+  assert.equal(live.length, created.length,
+    `the live table and ${newest} disagree on the column count -- one of them is out of date, and if ` +
+    'it is the migration then the next rebuild drops whatever it does not know about');
+
+  // Every column 086 introduced must still be present. That is the half the
+  // dynamic lookup above cannot check: a rebuild that silently drops
+  // catalog_slug would still agree with itself.
+  const s086 = readFileSync(new URL('086-app-catalog-slug.sql', dir), 'utf8');
+  for (const col of [...s086.matchAll(/^ {2}([a-z_]+) +(?:INTEGER|TEXT)/gm)].map((m) => m[1])) {
+    assert.ok(live.includes(col), `column '${col}' was created by 086 but is missing after ${newest}`);
+  }
 });
 
 test('086 preserves every column 083 restated — nothing was dropped in passing', () => {
