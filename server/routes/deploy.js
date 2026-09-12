@@ -10,10 +10,60 @@ import { userHasAppPermission, roleForUserOnApp } from '../services/permissions.
 import { isAdmin } from '../utils/roles.js';
 import log from '../utils/logger.js';
 import { parseContainerCommand, parseVolumePaths, resolveVolumeMounts } from '../services/containerRuntimeSpec.js';
+import { assessRedeployRisk, ACK_PARAM } from '../services/redeployRisk.js';
 
 const router = Router();
 
 router.use(requireAuth);
+
+/**
+ * Did the caller say, explicitly, that it accepts the loss?
+ *
+ * Read from the body in both of its shapes, because the two REST deploy entry
+ * points do not share a parser: `POST /deploy/:env` arrives as JSON (a real
+ * boolean) and `POST /deploy/upload` arrives through multer as a multipart
+ * field (always a string).
+ *
+ * NOT read from req.query, and that is not a style choice. requireAppAccess
+ * assigns the app row to `req.app`, shadowing Express's own `req.app`; Express
+ * 4 implements `req.query` as a getter that calls `this.app.get('query parser
+ * fn')`, so touching req.query anywhere downstream of that middleware throws
+ * `this.app.get is not a function`. Measured — the first version of this
+ * function did exactly that and turned every refusal into a 500.
+ *
+ * ONLY the exact affirmatives count. Anything else — absent, '', 'no', 'false',
+ * an object — is "not acknowledged". A guard written as `if (!ack)` would be
+ * satisfied by the string 'false'.
+ */
+function acknowledgedDataLoss(req) {
+  const raw = req.body?.[ACK_PARAM];
+  return raw === true || raw === 'true';
+}
+
+/**
+ * The gate itself. Returns null when the deploy may proceed, or the 409 body to
+ * send when it may not.
+ *
+ * FAILS CLOSED, and the failure is loud rather than generic: an API or MCP
+ * caller cannot be shown a dialog, so the refusal has to carry everything the
+ * decision needs — which paths die, which survive, and the exact parameter that
+ * says "go ahead". An error that only says "confirmation required" would make
+ * an agent guess, and an agent that guesses parameter names eventually guesses
+ * one that works for the wrong reason.
+ */
+async function refuseUnacknowledgedDataLoss(req, app, env) {
+  const risk = await assessRedeployRisk({ db: getDb(), app, env });
+  if (!risk.at_risk || acknowledgedDataLoss(req)) return null;
+  return {
+    error: {
+      code: 'DATA_LOSS_NOT_ACKNOWLEDGED',
+      message:
+        `${risk.summary} This deploy was refused because it was not acknowledged. Re-send it with ` +
+        `"${ACK_PARAM}": true in the request body to proceed.`,
+      risk,
+    },
+  };
+}
 
 /**
  * POST /api/apps/:slug/deploy/upload - Upload artifact and deploy in one step
@@ -48,6 +98,14 @@ router.post('/:slug/deploy/upload', requireAppAccess, auditMiddleware('deploy-up
     if (!['production', 'sandbox'].includes(env)) {
       try { unlinkSync(req.file.path); } catch (_) {}
       return res.status(400).json({ error: { code: 'VALIDATION', message: 'env must be production or sandbox' } });
+    }
+
+    // Same gate as POST /deploy/:env. An uploaded artifact reaches the same
+    // stopApp + startApp pair, so it destroys the same container.
+    const refusal = await refuseUnacknowledgedDataLoss(req, app, env);
+    if (refusal) {
+      try { unlinkSync(req.file.path); } catch (_) {}
+      return res.status(409).json(refusal);
     }
 
     const declaredSha = (req.body?.commit_sha || '').slice(0, 40) || null;
@@ -106,6 +164,12 @@ router.post('/:slug/deploy/:env', requireAppAccess, auditMiddleware('deploy'), a
   const { assertNoInflightDeploy } = await import('../services/deployer.js');
   assertNoInflightDeploy(db, app.id, env, app.slug);
 
+  // v2.72.0: a redeploy that destroys state needs the caller to have SAID so.
+  // Placed after the in-flight guard and before the deployments INSERT, so a
+  // refused deploy leaves no row behind and no deploy-storm window open.
+  const refusal = await refuseUnacknowledgedDataLoss(req, app, env);
+  if (refusal) return res.status(409).json(refusal);
+
   // Create deployment record
   const result = db.prepare(`
     INSERT INTO deployments (app_id, env, status, deployed_by)
@@ -130,6 +194,25 @@ router.post('/:slug/deploy/:env', requireAppAccess, auditMiddleware('deploy'), a
     deployment: { id: deployId, app: app.slug, env, status: 'pending' },
     message: `Deployment #${deployId} started. Check status with GET /api/apps/${app.slug}/deployments/${env}`,
   });
+});
+
+/**
+ * GET /api/apps/:slug/deploy/:env/risk - What a redeploy would destroy.
+ *
+ * Exists so the dashboard's second confirmation can NAME the paths instead of
+ * asking "are you sure?". A confirmation that carries no information is one
+ * people learn to click through, which is worse than no confirmation, so the
+ * UI is given the same verdict object the 409 carries and renders it.
+ *
+ * Read-only and side-effect free: it inspects a container and returns what it
+ * found. Behind requireAppAccess like every other per-app route here.
+ */
+router.get('/:slug/deploy/:env/risk', requireAppAccess, async (req, res) => {
+  const { env } = req.params;
+  if (!['production', 'sandbox'].includes(env)) {
+    throw new AppError('env must be production or sandbox', 400, 'VALIDATION');
+  }
+  res.json({ risk: await assessRedeployRisk({ db: getDb(), app: req.app, env }) });
 });
 
 /**

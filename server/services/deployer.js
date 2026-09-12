@@ -979,8 +979,50 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       const { parseImageRef, pullImage, resolveDigest } = await import('./imageSource.js');
       const parsed = parseImageRef(requestedRef);
 
+      // PULL FIRST, ALWAYS. A tag is a moving pointer on purpose, so
+      // redeploying 'odoo:19' has to keep picking up patch releases; preferring
+      // a local copy whenever one exists would silently pin every app to
+      // whatever it first ran. The registry stays the source of truth.
+      //
+      // v2.72.0: but a pull FAILURE is no longer fatal when the bytes are
+      // already here. A restore onto a bare host is exactly the case where the
+      // registry is unreachable or the publisher has deleted the image --
+      // measured this year on bitnami/*, medusajs/medusa, vendureio/vendure and
+      // crater/crater, all now 404 -- and refusing to start bytes we hold would
+      // make the image archive pointless: it would restore the data and then
+      // decline to run the app.
+      //
+      // The archive tag is what makes this work on a classic overlay2 store,
+      // where `docker load` does NOT restore RepoDigests, so the digest ref
+      // resolves on Docker Desktop and fails on a real Linux server. See
+      // imageArchive.js.
       appendLog(`Pulling image ${requestedRef} …`);
-      await pullImage(requestedRef);
+      let pullError = null;
+      try {
+        await pullImage(requestedRef);
+      } catch (e) {
+        pullError = e;
+        const { restoreTagFor } = await import('./imageArchive.js');
+        const { inspectImages } = await import('./docker.js');
+        const prior = db.prepare(
+          "SELECT image_ref FROM deployments WHERE app_id = ? AND env = ? AND image_ref IS NOT NULL"
+          + " ORDER BY id DESC LIMIT 1",
+        ).get(app.id, env);
+        const candidates = [
+          requestedRef,
+          ...(prior?.image_ref ? [prior.image_ref, restoreTagFor(prior.image_ref)] : []),
+        ].filter(Boolean);
+        const present = await inspectImages(candidates);
+        const localRef = candidates.find((c) => present.has(c));
+        if (!localRef) throw e;
+        appendLog(`Pull failed (${e.message.split('\n')[0]}) — using the copy already on this host: ${localRef}`);
+        log.warn(`[deploy] ${app.slug}/${env}: registry unreachable, running archived image ${localRef}`);
+        pinnedImageRef = prior?.image_ref || localRef;
+        commitHash = parseImageRef(pinnedImageRef).digest || localRef;
+      }
+      if (pullError) {
+        appendLog(`Image ready (from local archive, registry unavailable): ${pinnedImageRef}`);
+      }
 
       // A tag is a moving pointer on purpose — re-deploying 'odoo:19' is how
       // you pick up a patch release. That makes the tag useless as a record of
@@ -989,18 +1031,26 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       // the tag would be a false record: the publisher can move the tag between
       // this inspect and the `docker run` below, and the deployment row would
       // then name bytes that were never started.
-      const digest = await resolveDigest(requestedRef);
-      pinnedImageRef = `${parsed.registry ? `${parsed.registry}/` : ''}${parsed.name}@${digest}`;
-      commitHash = digest;
-
-      appendLog(`Resolved ${requestedRef} → ${pinnedImageRef}`);
+      let digest = null;
+      if (!pullError) {
+        digest = await resolveDigest(requestedRef);
+        pinnedImageRef = `${parsed.registry ? `${parsed.registry}/` : ''}${parsed.name}@${digest}`;
+        commitHash = digest;
+        appendLog(`Resolved ${requestedRef} → ${pinnedImageRef}`);
+      } else {
+        // pinnedImageRef and commitHash were set from the archived copy above.
+        // resolveDigest is a REGISTRY lookup, so calling it here would fail for
+        // the same reason the pull did.
+        digest = parseImageRef(pinnedImageRef).digest;
+      }
       db.prepare('UPDATE deployments SET image_ref = ? WHERE id = ?').run(pinnedImageRef, deployId);
 
       // deployments.version has to say something and there is no package.json
       // to read it out of. The tag is the only human-meaningful version an
       // image carries; a digest-only ref has no tag, so it falls back to the
       // short digest rather than the literal 'unknown'.
-      imageVersion = parsed.tag || digest.slice('sha256:'.length, 'sha256:'.length + 12);
+      imageVersion = parsed.tag
+        || (digest ? digest.slice('sha256:'.length, 'sha256:'.length + 12) : 'archived');
     } else if (opts.preExtractedDir) {
       releaseDir = resolve(opts.preExtractedDir);
       if (!releaseDir.startsWith(dataDir)) throw new Error('Security: preExtractedDir is outside data directory');

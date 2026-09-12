@@ -149,6 +149,31 @@ function accessibleSlugsForUser(user) {
     .map(r => r.slug);
 }
 
+/**
+ * The MCP half of the redeploy data-loss guard (v2.72.0).
+ *
+ * An agent cannot be shown a dialog, and most deploys on this platform arrive
+ * through MCP — so a UI-only confirmation would guard the minority of them. The
+ * gate here is a parameter and it FAILS CLOSED: without acknowledge_data_loss
+ * the call is refused, and the refusal is the message the agent has to relay.
+ *
+ * The thrown text carries the paths, because that is the only channel an MCP
+ * error has. A model told "confirmation required" will retry with whatever
+ * parameter it can invent; a model told "/config and /var/lib/odoo will be
+ * destroyed, /data survives, pass acknowledge_data_loss=true" has something to
+ * put in front of a human. Making the summary the error is the design, not
+ * verbosity.
+ */
+async function refuseUnacknowledgedDataLoss({ db, app, env, args }) {
+  const { assessRedeployRisk, ACK_PARAM } = await import('./redeployRisk.js');
+  const risk = await assessRedeployRisk({ db, app, env });
+  if (!risk.at_risk || args?.[ACK_PARAM] === true) return risk;
+  throw new Error(
+    `DATA_LOSS_NOT_ACKNOWLEDGED: ${risk.summary} ` +
+    `Tell the user exactly this, and re-call with ${ACK_PARAM}=true only if they accept it.`,
+  );
+}
+
 function getAppForUser(user, slug) {
   const db = getDb();
   const app = db.prepare('SELECT * FROM apps WHERE slug = ?').get(slug);
@@ -893,12 +918,23 @@ const TOOLS = [
       'image, and swaps in a new container. Use it whenever the user says things like "update sandbox to the ' +
       'latest", "deploy the newest version", "pull my latest github changes", or "redeploy". Returns a ' +
       'deployment ID; use appcrane_get_logs to monitor progress. ' +
-      'Defaults to sandbox; production requires explicit confirmation from the user.',
+      'Defaults to sandbox; production requires explicit confirmation from the user. ' +
+      'DATA LOSS: a deploy destroys and recreates the container, so any path the app persists that AppCrane is ' +
+      'not mounting is lost. When that is the case this tool REFUSES and its error names the exact paths; ' +
+      'show them to the user, get a real answer, and only then retry with acknowledge_data_loss=true. ' +
+      'Do not set acknowledge_data_loss pre-emptively.',
     inputSchema: {
       type: 'object',
       properties: {
         slug: { type: 'string', description: 'App slug to deploy' },
         env: { type: 'string', enum: ['sandbox', 'production'], default: 'sandbox' },
+        acknowledge_data_loss: {
+          type: 'boolean',
+          description:
+            'Confirms that the state at the paths named in this tool\'s DATA_LOSS_NOT_ACKNOWLEDGED error may be '
+            + 'destroyed. Only set it after the error has told you which paths those are AND the user has agreed '
+            + 'to lose them. Ignored when nothing is at risk.',
+        },
       },
       required: ['slug'],
       additionalProperties: false,
@@ -921,6 +957,8 @@ const TOOLS = [
       const { getPortsForSlot } = await import('./portAllocator.js');
       const { deployApp, assertNoInflightDeploy } = await import('./deployer.js');
       assertNoInflightDeploy(db, app.id, env, app.slug);
+
+      await refuseUnacknowledgedDataLoss({ db, app, env, args });
 
       const result = db
         .prepare("INSERT INTO deployments (app_id, env, status, deployed_by) VALUES (?, ?, 'pending', ?)")
@@ -1512,7 +1550,10 @@ const TOOLS = [
       + 'The release is identified by a SHA-256 AppCrane computes over the bytes, recorded as commit_hash '
       + '"sha256:<digest>"; the tool re-hashes the staged bytes and refuses if they no longer match what was '
       + 'staged. Returns that digest — compare it against the one you computed locally. '
-      + 'Deploys to sandbox unless env=production.',
+      + 'Deploys to sandbox unless env=production. '
+      + 'DATA LOSS: like appcrane_deploy, this replaces the container. If the app persists paths AppCrane is not '
+      + 'mounting, the tool refuses and names them; retry with acknowledge_data_loss=true only after the user has '
+      + 'agreed to lose exactly those paths.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1521,6 +1562,12 @@ const TOOLS = [
         token:          { type: 'string', description: 'Token returned by POST /api/files/staged' },
         commit_message: { type: 'string', description: 'Optional release note, shown in the deploy history' },
         commit_sha:     { type: 'string', description: 'Optional git SHA from the machine that BUILT the bundle. Recorded as context only — it is not verified and does not become the release identity.' },
+        acknowledge_data_loss: {
+          type: 'boolean',
+          description:
+            'Confirms that the state at the paths named in this tool\'s DATA_LOSS_NOT_ACKNOWLEDGED error may be '
+            + 'destroyed. Set it only after the error has named those paths and the user has agreed.',
+        },
       },
       required: ['slug', 'token'],
       additionalProperties: false,
@@ -1552,6 +1599,12 @@ const TOOLS = [
           + `on disk ${actual.slice(0, 12)}…) — refusing to deploy it`,
         );
       }
+
+      // After the token is proven good, so a caller holding a stale token is
+      // told THAT rather than being asked to acknowledge a loss it cannot
+      // cause. Refusing here leaves pushed_at unset, so the same token still
+      // works on the acknowledged retry.
+      await refuseUnacknowledgedDataLoss({ db, app, env, args });
 
       const { deployArtifact } = await import('./artifactDeploy.js');
       const out = await deployArtifact({

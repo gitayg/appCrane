@@ -23,7 +23,12 @@
  * Treat it as a crown-jewel artifact. The routes are platform_admin-only.
  *
  * NOT in the bundle: app code and build artifacts (the `releases/` dirs —
- * redeployable from GitHub) and the Caddyfile (regenerated from the DB on boot).
+ * redeployable from GitHub), the Caddyfile (regenerated from the DB on boot),
+ * and THE CONTAINER IMAGES. The images are deliberately a separate artifact —
+ * 5-30 GB for a real box, against a zip this file builds entirely in memory and
+ * returns as a Buffer. See services/imageArchive.js. The manifest's `image_set`
+ * names the archive this zip belongs with, so the two can be checked as a pair
+ * (v2.72.0).
  *
  * This header used to say per-app /data volumes were NOT in the bundle. They
  * always were — section 3 has added them since v2.9.0 — so the sentence
@@ -38,6 +43,7 @@ import {
 } from 'fs';
 import { join, resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { liveDeploymentImages, imageSetFingerprint } from './imageArchive.js';
 import log from '../utils/logger.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -117,6 +123,24 @@ export function exportConfig(version) {
   for (const t of ['apps', 'users', 'settings', 'env_vars', 'role_permissions']) {
     try { counts[t] = db.prepare(`SELECT COUNT(*) c FROM ${t}`).get().c; } catch (_) {}
   }
+  // v2.72.0: which image archive this zip belongs with. Derived from the DB
+  // rather than from a token minted at export time, so a zip and an archive
+  // taken minutes apart with no deploy in between agree — they ARE
+  // interchangeable — while one taken across a deploy does not. Never fatal to
+  // compute: a host with no Docker still produces a valid config backup.
+  let imageSet = null;
+  try {
+    const entries = liveDeploymentImages('live').filter((e) => e.archive_tag);
+    imageSet = {
+      scope: 'live',
+      count: entries.length,
+      fingerprint: imageSetFingerprint(entries.map((e) => e.archive_tag)),
+      images: entries.map((e) => ({ slug: e.slug, env: e.env, ref: e.ref, archive_tag: e.archive_tag })),
+    };
+  } catch (e) {
+    log.warn(`[config-backup] could not record the image set: ${e.message}`);
+  }
+
   const manifest = {
     kind: 'appcrane-config-backup',
     version: version || 'unknown',
@@ -124,6 +148,7 @@ export function exportConfig(version) {
     crane_domain: process.env.CRANE_DOMAIN || null,
     includes: ['deployhub.db', ...(hasEnv ? ['.env'] : []), 'icons', 'appdata', 'appvolumes'],
     counts,
+    image_set: imageSet,
   };
   zip.addFile(MANIFEST, Buffer.from(JSON.stringify(manifest, null, 2)));
 
@@ -218,6 +243,23 @@ export function importConfig(buffer, opts = {}) {
     }
   }
 
+  // v2.72.0: say plainly whether the image half of this backup is on the host.
+  // A config import that restores 40 apps whose images are not here has not
+  // restored anything runnable, and the failure would otherwise surface one app
+  // at a time as a deploy that cannot pull.
+  const imageSet = manifest.image_set
+    ? {
+      expected_fingerprint: manifest.image_set.fingerprint,
+      expected_count: manifest.image_set.count,
+      note:
+        `This backup pairs with image archive appcrane-images-${String(manifest.image_set.fingerprint).slice(0, 12)}-*.tar. ` +
+        'Load it with POST /api/settings/images/import, then check GET /api/settings/images/verify.',
+    }
+    : { expected_fingerprint: null, expected_count: 0, note: 'This backup predates image archives and names no image set.' };
+  if (imageSet.expected_count) {
+    log.warn(`[config-backup] this backup expects ${imageSet.expected_count} image(s), archive fingerprint ${String(imageSet.expected_fingerprint).slice(0, 12)}`);
+  }
+
   log.warn(`[config-backup] IMPORTED backup from ${manifest.exported_at} (env=${envRestored}, icons=${icons}, data-files=${dataFiles}, volume-files=${volumeFiles}). Restart required. Pre-import copy at ${preDir}`);
-  return { manifest, envRestored, icons, dataFiles, volumeFiles, preImportDir: preDir };
+  return { manifest, envRestored, icons, dataFiles, volumeFiles, preImportDir: preDir, imageSet };
 }

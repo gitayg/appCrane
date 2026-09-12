@@ -1108,3 +1108,111 @@ export async function dockerAvailable() {
     return false;
   }
 }
+
+// ── Offline image archive primitives (v2.72.0) ─────────────────────────
+//
+// `docker save` / `docker load` for disaster recovery, so a restore does not
+// depend on the original registry still serving the bytes. That dependency is
+// not theoretical: every bitnami/* image 404s after their registry change, and
+// medusajs/medusa, vendureio/vendure and crater/crater 404 today. A restore
+// that re-pulls by digest simply fails for those.
+//
+// Policy (which deployments, sizing, pairing) lives in imageArchive.js. This
+// file keeps its usual job: being the one place that shells out to Docker.
+
+// A save of the whole fleet is 5-30 GB and is legitimately slow. Finite anyway,
+// so a wedged daemon surfaces as an error instead of a job that never ends.
+const SAVE_TIMEOUT_MS = 6 * 60 * 60 * 1000;
+const LOAD_TIMEOUT_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * `docker save <refs...> -o <destPath>`.
+ *
+ * -o rather than piping the stream through Node ON PURPOSE. The bytes are
+ * 5-30 GB for a real box; the existing config backup builds its zip in memory
+ * and hands it back as a Buffer, and that is exactly what must not happen here.
+ * With -o the CLI writes the file itself and no image byte is ever resident in
+ * this process.
+ *
+ * Progress is not reported through a callback because there is nothing to
+ * report from: watch the destination file's size instead — it is the real
+ * measurement, and it works from another process.
+ */
+export async function saveImagesTo(refs, destPath, opts = {}) {
+  if (!Array.isArray(refs) || refs.length === 0) throw new Error('saveImagesTo: no image references given');
+  if (!isAbsolute(destPath)) throw new Error('saveImagesTo: destPath must be absolute');
+  return new Promise((resolve, reject) => {
+    const child = spawn('docker', ['save', ...refs, '-o', destPath], { stdio: ['ignore', 'ignore', 'pipe'] });
+    let stderr = '';
+    child.stderr.on('data', (d) => { stderr += d.toString(); if (stderr.length > 65536) stderr = stderr.slice(-65536); });
+    const timer = setTimeout(() => { child.kill('SIGKILL'); }, opts.timeout || SAVE_TIMEOUT_MS);
+    child.on('error', (e) => { clearTimeout(timer); reject(e); });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (code === 0) return resolve({ path: destPath });
+      reject(new Error(`docker save failed (exit ${code}): ${stderr.trim() || 'no output'}`));
+    });
+  });
+}
+
+/**
+ * `docker load -i <path>`, returning the references Docker says it loaded.
+ *
+ * Docker prints one 'Loaded image: <ref>' per named image, and
+ * 'Loaded image ID: sha256:...' for an image the archive carries with no
+ * repository name. The second form is reported separately because it is a
+ * defect signal, not a success: an image loaded by id alone cannot be started
+ * by any name, which is what a save-by-digest produces.
+ */
+export async function loadImagesFrom(path, opts = {}) {
+  if (!isAbsolute(path)) throw new Error('loadImagesFrom: path must be absolute');
+  const out = await dockerExec(['load', '-i', path], { timeout: opts.timeout || LOAD_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024 });
+  const loaded = [];
+  const unnamed = [];
+  for (const line of out.split('\n')) {
+    const named = line.match(/^Loaded image:\s*(\S+)/);
+    if (named) { loaded.push(named[1]); continue; }
+    const byId = line.match(/^Loaded image ID:\s*(\S+)/);
+    if (byId) unnamed.push(byId[1]);
+  }
+  return { loaded, unnamed, raw: out };
+}
+
+/** `docker tag`. Idempotent — retagging the same image to the same name is a no-op. */
+export async function tagImage(from, to) {
+  await dockerExec(['tag', from, to], { timeout: 30000 });
+}
+
+/**
+ * Per-reference `docker image inspect`, tolerating absence.
+ *
+ * Returns a Map ref -> { present, id, size, layers } where `layers` is
+ * RootFS.Layers — the diff-ids. Sizing needs them: two images that share a base
+ * share those layers, and `docker save` writes each layer once, so summing
+ * .Size across images overstates the archive by the shared part.
+ */
+export async function inspectImages(refs) {
+  const out = new Map();
+  for (const ref of refs) {
+    try {
+      // Three fields on one line rather than a JSON object: Go's text/template
+      // has no `dict` and Docker does not add one (verified against 29.6.1 and
+      // 27.5.1 -- both answer 'function "dict" not defined'), so a JSON object
+      // has to be assembled by hand and a pipe-joined line is the honest way.
+      const line = await dockerExec(
+        ['image', 'inspect', ref, '--format', '{{.Id}}|{{.Size}}|{{json .RootFS.Layers}}'],
+        { timeout: 30000 },
+      );
+      const [id, size, layersJson] = line.split('|');
+      out.set(ref, {
+        present: true,
+        id,
+        size: Number(size) || 0,
+        layers: JSON.parse(layersJson || '[]') || [],
+      });
+    } catch (_) {
+      out.set(ref, { present: false, id: null, size: 0, layers: [] });
+    }
+  }
+  return out;
+}

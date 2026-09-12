@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { adminApi } from '../adminApi'
+import { RedeployWarning, fetchRedeployRisk, type RedeployRisk } from '../components/RedeployWarning'
 
 const PAGE_CSS = `
 .app-manager .breadcrumb{font-size:.78rem;color:var(--dim);padding:7px 24px;background:var(--surface);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:5px;margin:-24px -24px 16px;}
@@ -934,6 +935,10 @@ export function AppManager() {
   const [logTab, setLogTab] = useState<LogTab>('runtime')
   const [logDeployId, setLogDeployId] = useState<string | number | null>(null)
 
+  // The verdict for a deploy the operator has already said yes to once. Non-null
+  // means the second confirmation is on screen and nothing has been POSTed.
+  const [pendingRisk, setPendingRisk] = useState<RedeployRisk | null>(null)
+
   const msgTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const showMsg = useCallback((m: MsgState) => {
@@ -998,17 +1003,53 @@ export function AppManager() {
     setSearchParams({ slug })
   }
 
-  async function deploy() {
-    if (!currentApp) return
-    if (!confirm('Deploy ' + currentApp + ' to ' + currentEnv + '?')) return
+  /** The POST itself. `acknowledged` is forwarded verbatim — the server decides
+   *  whether it was needed, and sends 409 DATA_LOSS_NOT_ACKNOWLEDGED if it was
+   *  and this is false. Nothing here can wave that through. */
+  async function sendDeploy(acknowledged: boolean) {
     showMsg({ text: 'Deploying...', ok: true })
     try {
-      const data = await adminApi.post<{ message?: string }>(`/api/apps/${currentApp}/deploy/${currentEnv}`)
+      const data = await adminApi.post<{ message?: string }>(
+        `/api/apps/${currentApp}/deploy/${currentEnv}`,
+        acknowledged ? { acknowledge_data_loss: true } : {},
+      )
       showMsg({ text: data.message || 'Deploy triggered', ok: true })
       setTimeout(() => setReloadCounter(c => c + 1), 3000)
     } catch (e) {
       showMsg({ text: (e as Error).message, ok: false })
     }
+  }
+
+  /**
+   * Confirmation one: which app, which environment. Confirmation two, and only
+   * when the server says state is genuinely at risk: the RedeployWarning modal,
+   * which names the paths and will not arm until the slug is typed.
+   *
+   * An app with nothing at risk gets one confirmation, exactly as before. That
+   * is the whole reason the risk is computed instead of assumed — a warning
+   * that fires on the safe apps is the one people stop reading before they
+   * reach the app where it was true.
+   */
+  async function deploy() {
+    if (!currentApp) return
+    if (!confirm('Deploy ' + currentApp + ' to ' + currentEnv + '?')) return
+    const risk = await fetchRedeployRisk(adminApi, currentApp, currentEnv)
+    if (risk === null) {
+      // The endpoint could not be reached. NOT read as "safe": ask again in
+      // words, and let the server's own gate refuse the POST if it must.
+      if (!confirm(
+        `AppCrane could not check what redeploying ${currentApp} (${currentEnv}) would destroy.\n\n` +
+        'Deploying replaces the container, and any path this app persists that AppCrane is not ' +
+        'mounting is lost. Proceed anyway?'
+      )) return
+      await sendDeploy(false)
+      return
+    }
+    if (!risk.at_risk) {
+      await sendDeploy(false)
+      return
+    }
+    setPendingRisk(risk)
   }
 
   async function promote() {
@@ -1151,6 +1192,14 @@ export function AppManager() {
           </>
         )}
       </div>
+
+      {pendingRisk && (
+        <RedeployWarning
+          risk={pendingRisk}
+          onCancel={() => setPendingRisk(null)}
+          onConfirm={() => { setPendingRisk(null); void sendDeploy(true) }}
+        />
+      )}
 
       {showMain && (
         <LogDrawer

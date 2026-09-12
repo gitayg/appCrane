@@ -178,10 +178,147 @@ router.get('/config/export', requireAuth, requirePlatformAdmin, async (req, res)
   const { buffer, manifest } = exportConfig();
   const host = (process.env.CRANE_DOMAIN || 'appcrane').replace(/[^a-z0-9.-]/gi, '');
   const date = manifest.exported_at.slice(0, 10);
+  // v2.72.0: the image-set fingerprint goes in the filename so the config zip
+  // and its image archive (appcrane-images-<same 12>-<date>.tar) are visibly a
+  // pair on a directory listing, not just inside their manifests.
+  const fp = manifest.image_set?.fingerprint ? `-${manifest.image_set.fingerprint.slice(0, 12)}` : '';
   res.setHeader('Content-Type', 'application/zip');
-  res.setHeader('Content-Disposition', `attachment; filename="appcrane-backup-${host}-${date}.zip"`);
+  res.setHeader('Content-Disposition', `attachment; filename="appcrane-backup-${host}${fp}-${date}.zip"`);
   res.setHeader('Content-Length', buffer.length);
   res.end(buffer);
+});
+
+// ── Offline image archive (v2.72.0) — platform_admin only ──────────────
+//
+// The config zip above restores configuration and data. It does NOT contain the
+// container images, and a restore that re-pulls them fails outright when the
+// publisher has removed the image — bitnami/* 404 since their registry change,
+// and medusajs/medusa, vendureio/vendure and crater/crater 404 today. These
+// routes save the bytes the live deployments actually ran.
+//
+// The archive is 5-30 GB on a real box, so nothing here streams image bytes
+// through Express: the export writes a file with `docker save -o` and answers
+// with its path, and the import reads a path on the host. Copy the file with
+// scp/rsync, which is the right tool for that size; a 30 GB browser download
+// through Caddy is not.
+
+// In-flight exports. Opaque ids (never Date.now() or a counter) and the job
+// is looked up only by a platform admin who was handed the id.
+const imageExportJobs = new Map();
+
+router.get('/images/plan', requireAuth, requirePlatformAdmin, async (req, res) => {
+  const { planImageArchive } = await import('../services/imageArchive.js');
+  try {
+    res.json(await planImageArchive(req.query.scope || 'live'));
+  } catch (e) {
+    res.status(400).json({ error: { code: 'PLAN_FAILED', message: e.message } });
+  }
+});
+
+// Starts the save and returns immediately. A 30 GB `docker save` outlives any
+// sane HTTP timeout, so the response is a job id rather than a result; poll
+// GET /images/export/:id, whose progress is the destination file's size on disk
+// — a real measurement, not a guess from the writer.
+router.post('/images/export', requireAuth, requirePlatformAdmin, async (req, res) => {
+  const { planImageArchive, exportImageArchive } = await import('../services/imageArchive.js');
+  const scope = (req.body || {}).scope || 'live';
+  let plan;
+  try {
+    plan = await planImageArchive(scope);
+  } catch (e) {
+    return res.status(400).json({ error: { code: 'PLAN_FAILED', message: e.message } });
+  }
+
+  const { randomBytes } = await import('crypto');
+  const { archiveFileName, archiveDir } = await import('../services/imageArchive.js');
+  const { join } = await import('path');
+  const id = randomBytes(16).toString('base64url');
+  // One timestamp for the whole job. The filename carries a date, so deriving
+  // it twice would name two different files either side of a UTC midnight and
+  // the progress poll would stat one that is never written.
+  const at = new Date();
+  const destPath = join(archiveDir(), archiveFileName(plan.fingerprint, at));
+  const job = { id, scope, state: 'running', started_at: at.toISOString(), dest_path: destPath, plan, result: null, error: null };
+  imageExportJobs.set(id, job);
+
+  exportImageArchive({ scope, at, force: !!(req.body || {}).force })
+    .then((r) => { job.result = r; job.state = 'done'; job.finished_at = new Date().toISOString(); })
+    .catch((e) => { job.error = e.message; job.state = 'failed'; job.finished_at = new Date().toISOString(); });
+
+  res.status(202).json({
+    job_id: id, state: 'running', scope,
+    estimated_bytes: plan.estimated_bytes, required_bytes: plan.required_bytes, free_bytes: plan.free_bytes,
+    images: plan.included, missing: plan.missing.length, fingerprint: plan.fingerprint,
+    expected_path: destPath,
+  });
+});
+
+router.get('/images/export/:id', requireAuth, requirePlatformAdmin, async (req, res) => {
+  const job = imageExportJobs.get(req.params.id);
+  if (!job) return res.status(404).json({ error: { code: 'NO_SUCH_JOB', message: 'Unknown export job' } });
+  // Progress is the destination file's real size, not a number the writer
+  // reports about itself — `docker save -o` writes the file directly and this
+  // process never sees a byte of it.
+  let bytesWritten = null;
+  if (job.state === 'running') {
+    const { statSync } = await import('fs');
+    try { bytesWritten = statSync(job.dest_path).size; } catch (_) { bytesWritten = 0; }
+  }
+  res.json({
+    job_id: job.id, state: job.state, scope: job.scope, path: job.dest_path,
+    started_at: job.started_at, finished_at: job.finished_at || null,
+    estimated_bytes: job.plan.estimated_bytes,
+    bytes_written: bytesWritten,
+    result: job.result, error: job.error,
+  });
+});
+
+// Load an archive that is already on this host. Takes a PATH, not an upload:
+// multer's memoryStorage would put the whole archive in this process's heap,
+// which is the exact failure the separate artifact exists to avoid. The path is
+// confined to the backups directory so an admin cannot make the daemon read an
+// arbitrary file through this route.
+router.post('/images/import', requireAuth, requirePlatformAdmin, async (req, res) => {
+  const { importImageArchive, archiveDir, verifyImageSet } = await import('../services/imageArchive.js');
+  const { resolve, join, basename } = await import('path');
+  const raw = String((req.body || {}).path || '').trim();
+  if (!raw) return res.status(400).json({ error: { code: 'VALIDATION', message: 'path required (the .tar on this host)' } });
+
+  const dir = resolve(archiveDir());
+  const abs = resolve(raw.includes('/') ? raw : join(dir, raw));
+  if (abs !== dir && !abs.startsWith(dir + '/')) {
+    return res.status(400).json({
+      error: { code: 'VALIDATION', message: `archive must be inside ${dir} (got ${basename(abs)} elsewhere)` },
+    });
+  }
+  try {
+    const loadResult = await importImageArchive(abs);
+    const verification = await verifyImageSet('live');
+    res.json({
+      ...loadResult,
+      verification: {
+        checked: verification.checked,
+        restorable: verification.restorable,
+        unrestorable: verification.unrestorable,
+        expected_fingerprint: verification.expected_fingerprint,
+        present_fingerprint: verification.present_fingerprint,
+        matched: verification.expected_fingerprint === verification.present_fingerprint,
+      },
+    });
+  } catch (e) {
+    res.status(400).json({ error: { code: 'IMPORT_FAILED', message: e.message } });
+  }
+});
+
+// Does this host hold what the restored DB says is running? The pair check.
+router.get('/images/verify', requireAuth, requirePlatformAdmin, async (req, res) => {
+  const { verifyImageSet } = await import('../services/imageArchive.js');
+  try {
+    const v = await verifyImageSet(req.query.scope || 'live');
+    res.json({ ...v, matched: v.expected_fingerprint === v.present_fingerprint });
+  } catch (e) {
+    res.status(400).json({ error: { code: 'VERIFY_FAILED', message: e.message } });
+  }
 });
 
 // ── Scheduled off-site (S3) backup config — platform_admin only (v2.21.9) ──
