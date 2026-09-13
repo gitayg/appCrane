@@ -41,12 +41,13 @@ const REC = `{ for a in "$@"; do printf '%s\\037' "$a"; done; printf '\\n'; } >>
 writeFileSync(join(SHIM, 'git'), `#!/bin/sh
 LOGFILE="$GIT_SHIM_LOG"
 ${REC}
+[ -n "$GIT_SHIM_ENV_LOG" ] && printf '%s\\037%s\\037%s\\037\\n' "$1" "$GIT_CONFIG_KEY_0" "$GIT_CONFIG_VALUE_0" >> "$GIT_SHIM_ENV_LOG"
 if [ "$1" = clone ]; then
   for a in "$@"; do last="$a"; case "$a" in https://*) url="$a" ;; esac; done
   # Real git's text for an unreachable remote, measured on git 2.50 and 2.39:
-  # git itself strips the credential from the URL it prints. The token still
-  # reaches the error, through Node's "Command failed: git clone ... <url>"
-  # line, because the token is in argv. That is the leak under test.
+  # git itself strips the credential from the URL it prints. The token used to
+  # reach the error anyway, through Node's "Command failed: git clone ... <url>"
+  # line, because it was in argv; it now travels in the environment instead.
   if [ -n "$GIT_SHIM_CLONE_FAIL" ]; then
     anon=$(printf '%s' "$url" | sed 's#^https://[^@]*@#https://#')
     echo "fatal: unable to access '$anon/': Could not resolve host: github.com" >&2; exit 128
@@ -87,6 +88,9 @@ esac
 exit 0
 `, { mode: 0o755 });
 process.env.PATH = `${SHIM}:${process.env.PATH}`;
+const GIT_ENV_LOG = join(ROOT, 'git-env.log');
+process.env.GIT_SHIM_ENV_LOG = GIT_ENV_LOG;
+const basicFor = (t) => `Authorization: Basic ${Buffer.from(`x-access-token:${t}`).toString('base64')}`;
 process.env.GIT_SHIM_LOG = GIT_LOG;
 process.env.DOCKER_SHIM_LOG = DOCKER_LOG;
 process.env.ASK_CAPTURE = ASK_CAPTURE;
@@ -258,9 +262,10 @@ test('repair of a GitHub-backed app re-provisions ON GITHUB, keeps the marker NU
   assert.equal(row.github_url, `https://github.com/${OWNER}/AMC_gh-repair`);
 });
 
-test('deploy: token-in-URL shallow clone from GitHub, pin fetch, and the GitHub SHA check', async () => {
+test('deploy: shallow clone from GitHub with the token in git\'s environment, pin fetch, and the GitHub SHA check', async () => {
   const app = legacyManagedApp('gh-deploy');
   rmSync(GIT_LOG, { force: true });
+  rmSync(GIT_ENV_LOG, { force: true });
   calls.length = 0;
   branchSha = CLONE_SHA;
   const target = CLONE_SHA;
@@ -274,7 +279,17 @@ test('deploy: token-in-URL shallow clone from GitHub, pin fetch, and the GitHub 
   assert.ok(clone, `no clone ran: ${log}`);
   const releaseDir = clone[clone.length - 1];
   assert.match(releaseDir, new RegExp(`/apps/gh-deploy/sandbox/releases/\\d+-git$`));
-  assert.deepEqual(clone, ['clone', '--depth', '1', '--branch', 'main', `https://${TOKEN}@github.com/${OWNER}/AMC_gh-deploy`, releaseDir]);
+  // The URL carries no credential: in argv it was visible to `ps`, and git
+  // wrote it into the release's .git/config, where it stayed on disk.
+  assert.deepEqual(clone, ['clone', '--depth', '1', '--branch', 'main', `https://github.com/${OWNER}/AMC_gh-deploy`, releaseDir]);
+  assert.equal(JSON.stringify(argv).includes(TOKEN), false, 'the service token reached git argv');
+  const envs = readLog(GIT_ENV_LOG);
+  for (const verb of ['clone', '-C']) {
+    const e = envs.find((a) => a[0] === verb);
+    assert.ok(e, `no environment recorded for git ${verb}`);
+    assert.equal(e[1], 'http.https://github.com/.extraHeader', `git ${verb} was not given the credential for github.com`);
+    assert.equal(e[2], basicFor(TOKEN), `git ${verb} did not get the service token`);
+  }
   assert.deepEqual(argv.find((a) => a[0] === '-C' && a[2] === 'fetch'), ['-C', releaseDir, 'fetch', '--depth', '1', 'origin', target]);
   assert.deepEqual(argv.find((a) => a[0] === '-C' && a[2] === 'checkout'), ['-C', releaseDir, 'checkout', '--detach', target]);
 
@@ -322,17 +337,13 @@ test('a failing GitHub clone never puts the service token in the error, the depl
   } finally {
     delete process.env.GIT_SHIM_CLONE_FAIL;
   }
-  // CONTROL: the failure really is the token-bearing one. The argv git got
-  // holds the token, and the raw error git printed would have echoed it.
+  // CONTROL: the failing clone really did carry the service credential, so a
+  // clean error below means it was kept out, not that it was never there.
   const clone = readLog(GIT_LOG).reverse().find((a) => a[0] === 'clone');
-  assert.ok(clone.some((a) => a.includes(TOKEN)), 'control: the clone argv carried no token, so this test proves nothing');
-  // CONTROL, the raw form: Node's own error for this exact argv. If this does
-  // not contain the token, a clean deploy log below would prove nothing.
-  const { execFileSync } = await import('child_process');
-  let raw = '';
-  process.env.GIT_SHIM_CLONE_FAIL = '1';
-  try { execFileSync('git', clone.slice(0, -1).concat(join(ROOT, 'raw-control')), { stdio: 'pipe' }); } catch (e) { raw = e.message; } finally { delete process.env.GIT_SHIM_CLONE_FAIL; }
-  assert.ok(raw.includes(TOKEN), `control: the unscrubbed error has no token: ${raw.replaceAll(TOKEN, '<TOKEN>')}`);
+  assert.ok(clone, 'control: no clone ran');
+  const cloneEnv = readLog(GIT_ENV_LOG).reverse().find((a) => a[0] === 'clone');
+  assert.equal(cloneEnv?.[2], basicFor(TOKEN), 'control: the failing clone was not given the service token, so this test proves nothing');
+  assert.equal(clone.some((a) => a.includes(TOKEN)), false, 'the service token reached git argv');
 
   assert.equal(r.row.status, 'failed');
   assert.match(r.row.log, /DEPLOY FAILED: [\s\S]*Could not resolve host: github\.com/, `the clone failure did not surface: ${r.row.log}`);

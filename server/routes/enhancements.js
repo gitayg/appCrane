@@ -99,13 +99,15 @@ router.post('/', (req, res) => {
 
 /**
  * GET /api/enhancements/my
- * Get the current user's own enhancement requests. Requires Bearer token.
+ * Get the current user's own enhancement requests.
+ *
+ * Accepts every credential requireAuth accepts. It used to take only a Bearer
+ * session, so a dashboard signed in with an API key got a 401 here — and the
+ * dashboard treats any 401 from a session-gated route as a lapsed session and
+ * signs the user out, which it did on every page load.
  */
-router.get('/my', (req, res) => {
-  const authHeader = req.headers.authorization || '';
-  const token = authHeader.replace(/^Bearer\s+/i, '').trim();
-  const session = getUserFromBearer(token);
-  if (!session) throw new AppError('Authentication required', 401, 'UNAUTHORIZED');
+router.get('/my', requireAuth, (req, res) => {
+  const session = { user_id: req.user.id };
 
   const db = getDb();
   const rows = db.prepare(`

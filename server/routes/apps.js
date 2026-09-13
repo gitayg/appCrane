@@ -16,6 +16,7 @@ import {
 } from '../services/platformPolicy.js';
 import { pruneGrantsForNonMembers } from '../services/appDefinedRoles.js';
 import { assessMemoryChange } from '../services/memoryBudget.js';
+import { attachedInstallationIds, codeSourceFields } from '../services/codeSource.js';
 import {
   effectiveIngressType, publicPortForApp, pendingPortRelease, validateIngressType,
   assignPublicPort, releasePublicPort, drainingPorts, effectiveDataPlanePort, validateDataPlanePort, CONTROL_PLANE_PORT,
@@ -147,6 +148,18 @@ import { join } from 'path';
 import { reconcileOrphanedApps } from '../services/reconcile.js';
 import { parseImageRef } from '../services/imageSource.js';
 import { validateContainerCommand, validateVolumePaths } from '../services/containerRuntimeSpec.js';
+
+/**
+ * An app row as it may leave the server: every `*_encrypted` column removed.
+ * Responses used to spread the whole row, so the encrypted GitHub token and
+ * Claude credentials went to every signed-in user who could list the app. The
+ * UI only ever needs the has_* booleans derived from them.
+ */
+function withoutSecretColumns(app) {
+  const out = {};
+  for (const [k, v] of Object.entries(app || {})) if (!k.endsWith('_encrypted')) out[k] = v;
+  return out;
+}
 
 const router = Router();
 
@@ -411,6 +424,7 @@ router.get('/', async (req, res) => {
   const { publishedPortsBySlug } = await import('../services/docker.js');
   const observedBySlug = await publishedPortsBySlug();
   const drainingMap = drainingByApp(db);
+  const installedAppIds = attachedInstallationIds(apps.map(a => a.id));
 
   const userRolesBySlug = new Map();
   if (!isAdmin(req.user)) {
@@ -470,7 +484,7 @@ router.get('/', async (req, res) => {
     } : null;
 
     return {
-      ...app,
+      ...withoutSecretColumns(app),
       resource_limits: JSON.parse(app.resource_limits || '{}'),
       auth_bypass_paths: parseBypassPathsField(app.auth_bypass_paths),
       auth_mode: effectiveAuthMode(app.auth_mode),
@@ -482,6 +496,7 @@ router.get('/', async (req, res) => {
       // show "this app has its own X" without ever shipping the secret.
       has_claude_credentials: !!app.claude_credentials_encrypted,
       has_github_token:       !!app.github_token_encrypted,
+      ...codeSourceFields(app, installedAppIds),
       // v2.6.7: per-user role on this app from the caller's perspective.
       // 'admin' / 'owner' / 'user' / 'viewer' / 'none'.
       app_role: userAppRole(app),
@@ -704,7 +719,7 @@ router.post('/', requireAuth, auditMiddleware('app-create'), async (req, res) =>
   } : null;
 
   res.status(201).json({
-    app: { ...app, resource_limits: JSON.parse(app.resource_limits), auth_bypass_paths: parseBypassPathsField(app.auth_bypass_paths), auth_mode: effectiveAuthMode(app.auth_mode), ...ingressFields(app) },
+    app: { ...withoutSecretColumns(app), resource_limits: JSON.parse(app.resource_limits), auth_bypass_paths: parseBypassPathsField(app.auth_bypass_paths), auth_mode: effectiveAuthMode(app.auth_mode), ...ingressFields(app) },
     urls,
     base_path: { production: `/${slug}/`, sandbox: `/${slug}-sandbox/` },
     webhook_url: `/api/webhooks/${webhookToken}`,
@@ -797,7 +812,7 @@ router.get('/:slug', requireAppAccess, async (req, res) => {
   const observedDetail = observedMap ? (observedMap.get(`${app.slug}:production`) ?? null) : null;
 
   res.json({
-    app: { ...app, resource_limits: JSON.parse(app.resource_limits || '{}'), auth_bypass_paths: parseBypassPathsField(app.auth_bypass_paths), auth_mode: effectiveAuthMode(app.auth_mode), ...ingressFields(app, true, observedDetail, drainingPorts(db, app.id)) },
+    app: { ...withoutSecretColumns(app), resource_limits: JSON.parse(app.resource_limits || '{}'), auth_bypass_paths: parseBypassPathsField(app.auth_bypass_paths), auth_mode: effectiveAuthMode(app.auth_mode), ...ingressFields(app, true, observedDetail, drainingPorts(db, app.id)), ...codeSourceFields(app, attachedInstallationIds([app.id])) },
     urls: urlsDetail,
     base_path: { production: `/${app.slug}/`, sandbox: `/${app.slug}-sandbox/` },
     ...(isAdmin(req.user) ? { ports } : {}),
@@ -1383,7 +1398,7 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
   if (Object.keys(updates).length === 0 && !ingressWork) {
     // Normalize auth_mode here too: a caller can't tell which branch of this
     // route answered, so both must report the same effective mode.
-    return res.json({ app: { ...app, auth_mode: effectiveAuthMode(app.auth_mode), ...ingressFields(app) }, message: 'No changes' });
+    return res.json({ app: { ...withoutSecretColumns(app), auth_mode: effectiveAuthMode(app.auth_mode), ...ingressFields(app) }, message: 'No changes' });
   }
 
   const ALLOWED_APP_COLS = new Set(['name','domain','description','category','source_type','github_url','branch','public_access','visibility','github_token_encrypted','resource_limits','runtime','image_retention','frame_ancestors','auth_mode','auth_bypass_paths','email_from_name','ingress_type','data_plane_port','image_ref','container_port','health_path','catalog_slug','container_command','volume_paths']);
@@ -1496,7 +1511,7 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
       ingress_notice: `Port ${stillBound} is NOT closed yet. AppCrane will not publish it again and no other app can be given it, but the container that is running right now still binds 0.0.0.0:${stillBound} — the publish is a \`docker run\` flag. Deploy the app, or POST /api/apps/${app.slug}/restart/production, to recreate the container and actually close the port; AppCrane returns the port to the pool at that moment.`,
     } : {}),
     app: {
-      ...updated,
+      ...withoutSecretColumns(updated),
       resource_limits: JSON.parse(updated.resource_limits || '{}'),
       auth_bypass_paths: parseBypassPathsField(updated.auth_bypass_paths),
       auth_mode: effectiveAuthMode(updated.auth_mode),

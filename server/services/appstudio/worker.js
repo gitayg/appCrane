@@ -3,6 +3,7 @@ import { join, resolve } from 'path';
 import { execFileSync } from 'child_process';
 import { getDb } from '../../db.js';
 import { decrypt } from '../encryption.js';
+import { tokenGitEnv } from '../githubGitAuth.js';
 import { planEnhancement } from './planner.js';
 import { generateCode, cloneForBuild, cleanupWorkspace } from './generator.js';
 import { ensureCodebaseContext } from './contextBuilder.js';
@@ -450,8 +451,18 @@ async function handleCode(job) {
     // same branch between clone and push) is rare; treat it as a
     // re-plan signal so the operator can re-evaluate, NOT silently
     // overwrite the conflicting commits.
+    // The workspace's origin is the plain URL (cloneForCode keeps the token
+    // out of .git/config), so the credential rides in the push's env.
+    let pushToken = null;
+    let pushEnv = null;
+    if (app.github_token_encrypted) {
+      try {
+        pushToken = decrypt(app.github_token_encrypted);
+        pushEnv = tokenGitEnv(app.github_url, pushToken);
+      } catch (_) { pushEnv = null; }
+    }
     try {
-      git(['push', '-u', 'origin', branchName], { timeout: 60000 });
+      git(['push', '-u', 'origin', branchName], { timeout: 60000, ...(pushEnv ? { env: pushEnv } : {}) });
       onLog(`[studio:git] Branch ${branchName} pushed`);
     } catch (_) {
       pushConflict = true;

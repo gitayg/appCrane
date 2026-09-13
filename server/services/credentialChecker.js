@@ -24,6 +24,7 @@ import { getDb } from '../db.js';
 import { sendEmail } from './emailService.js';
 import { probeGraph } from './graphMailer.js';
 import { probeServiceAccount } from './githubService.js';
+import { probeGitHubApp } from './githubApp.js';
 import { repoBackendOf, REPO_BACKEND_LOCAL } from './managedRepo.js';
 import log from '../utils/logger.js';
 
@@ -40,6 +41,7 @@ let timer = null;
 export const PROBES = [
   { name: 'Microsoft Graph (email)', fix: 'Settings → Mail',   href: '/settings#mail',   run: probeGraph },
   { name: 'GitHub service account',  fix: 'Settings → GitHub', href: '/settings#github', run: probeGithubServiceAccount },
+  { name: 'GitHub App',              fix: 'Settings → GitHub', href: '/settings#github', run: probeGitHubApp },
 ];
 
 /**

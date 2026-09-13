@@ -22,7 +22,6 @@
  */
 
 import { getDb } from '../db.js';
-import { decrypt } from './encryption.js';
 import { applyBucket, bucketize } from './requestStatus.js';
 import log from '../utils/logger.js';
 
@@ -38,25 +37,35 @@ function parseRepo(url) {
   return { owner: m[1], repo: m[2] };
 }
 
-function ghHeaders(token) {
+function ghHeaders(token, scheme = 'token') {
   const h = {
     'Accept': 'application/vnd.github+json',
     'User-Agent': 'AppCrane-PRPoller',
   };
-  if (token) h.Authorization = `token ${token}`;
+  if (token) h.Authorization = `${scheme} ${token}`;
   return h;
 }
 
 async function fetchRecentPRs(app) {
   const repo = parseRepo(app.github_url);
   if (!repo) return [];
+  // v2.75.0: a GitHub App installation token when the app has one attached,
+  // the stored PAT otherwise. A failure on the installation path is reported
+  // and the app is skipped for this tick — it is NEVER retried with the PAT.
   let token = null;
-  if (app.github_token_encrypted) {
-    try { token = decrypt(app.github_token_encrypted); } catch (_) { token = null; }
+  let scheme = 'token';
+  try {
+    const { resolveGitHubCredential } = await import('./githubCredential.js');
+    const cred = await resolveGitHubCredential(app);
+    token = cred.token;
+    if (cred.source === 'installation') scheme = 'Bearer';
+  } catch (e) {
+    log.warn(`PR poller: ${app.slug} skipped — GitHub App credential unavailable: ${e.message}`);
+    return [];
   }
   const url = `https://api.github.com/repos/${repo.owner}/${repo.repo}/pulls?state=all&sort=updated&direction=desc&per_page=${PER_PAGE}`;
   try {
-    const res = await fetch(url, { headers: ghHeaders(token), signal: AbortSignal.timeout(12000) });
+    const res = await fetch(url, { headers: ghHeaders(token, scheme), signal: AbortSignal.timeout(12000) });
     if (!res.ok) {
       log.warn(`PR poller: ${app.slug} GET pulls → HTTP ${res.status}`);
       return [];
@@ -114,7 +123,7 @@ async function processApp(app) {
 
 async function tick() {
   const db = getDb();
-  const apps = db.prepare("SELECT slug, github_url, github_token_encrypted FROM apps WHERE github_url IS NOT NULL AND github_url != ''").all();
+  const apps = db.prepare("SELECT id, slug, source_type, github_url, github_token_encrypted FROM apps WHERE github_url IS NOT NULL AND github_url != ''").all();
   for (const app of apps) {
     try { await processApp(app); }
     catch (e) { log.warn(`PR poller: ${app.slug} processing error: ${e.message}`); }

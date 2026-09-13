@@ -2,6 +2,7 @@ import { execFileSync } from 'child_process';
 import { mkdirSync, chmodSync, existsSync, rmSync } from 'fs';
 import { join, resolve } from 'path';
 import { decrypt } from '../encryption.js';
+import { tokenGitEnv, scrubToken } from '../githubGitAuth.js';
 import { ensureStudioImage } from '../appstudio/generator.js';
 import { writeSnapshot } from '../github/snapshot.js';
 import { prepareSkillsMount } from '../skills.js';
@@ -77,23 +78,25 @@ function cloneWorkspace(app, onLog) {
   mkdirSync(workspaceDir, { recursive: true });
   chmodSync(workspaceDir, 0o777);
 
-  let cloneUrl = app.github_url;
+  // Token in the git child's env, not the URL: this workspace is chown'd to
+  // the container user and mounted into the builder container, so a tokenized
+  // remote in .git/config would hand the container the credential.
+  let token = null;
+  let gitEnv = null;
   if (app.github_token_encrypted) {
     try {
-      const token = decrypt(app.github_token_encrypted);
-      const url = new URL(app.github_url);
-      url.username = token;
-      cloneUrl = url.toString();
-    } catch (_) {}
+      token = decrypt(app.github_token_encrypted);
+      gitEnv = tokenGitEnv(app.github_url, token);
+    } catch (_) { gitEnv = null; }
   }
 
   onLog?.(`[appContainer:git] Cloning ${app.github_url} (${app.branch || 'main'})…`);
   try {
-    execFileSync('git', ['clone', '--depth', '1', '--branch', app.branch || 'main', cloneUrl, workspaceDir], {
-      stdio: 'pipe', timeout: 120000,
+    execFileSync('git', ['clone', '--depth', '1', '--branch', app.branch || 'main', app.github_url, workspaceDir], {
+      stdio: 'pipe', timeout: 120000, ...(gitEnv ? { env: gitEnv } : {}),
     });
   } catch (err) {
-    throw new Error(err.message.replaceAll(cloneUrl, app.github_url));
+    throw new Error(scrubToken(err.message, token));
   }
 
   execFileSync('git', ['-C', workspaceDir, 'config', 'user.email', 'builder@appcrane.local'], { stdio: 'pipe' });
@@ -259,7 +262,7 @@ setInterval(() => {
     if (c.lastActivityAt > threshold) continue;
     evict(slug, 'idle');
   }
-}, SWEEP_MS);
+}, SWEEP_MS).unref();
 
 /**
  * Called once on AppCrane startup. Kills any leftover app containers from a

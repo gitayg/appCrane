@@ -8,6 +8,7 @@ import { Mcp } from './Mcp'
 import { SkillsTab } from '../components/SkillsTab'
 import { ScimGroupMapping } from '../components/ScimGroupMapping'
 import { useMe, isAdmin } from '../hooks/useMe'
+import { GithubAppCard } from '../components/GithubAppCard'
 
 function SecurityTab() {
   const [certFile, setCertFile] = useState('')
@@ -801,6 +802,8 @@ function GithubTab() {
         )}
       </div>
 
+      <GithubAppCard />
+
       <div className="setting-card">
         <h3>Service-account — AppCrane-managed repos</h3>
         <p>
@@ -1175,6 +1178,11 @@ type Tab = 'security' | 'users' | 'roles' | 'github' | 'mail' | 'backup' | 'bran
 const VALID_TABS: Tab[] = ['security', 'users', 'roles', 'github', 'mail', 'backup', 'branding', 'audit', 'mcp', 'skills']
 
 function getTab(): Tab {
+  // GitHub's App-manifest redirect lands on /settings?code=…&state=…, and its
+  // post-install setup URL on /settings?installation_id=… — both belong to the
+  // GitHub tab.
+  const q = new URLSearchParams(window.location.search)
+  if ((q.get('code') && q.get('state')) || q.get('installation_id')) return 'github'
   const hash = window.location.hash.replace('#', '') as Tab
   return VALID_TABS.includes(hash) ? hash : 'security'
 }

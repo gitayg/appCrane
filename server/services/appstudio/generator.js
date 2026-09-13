@@ -2,6 +2,7 @@ import { execFileSync, spawn } from 'child_process';
 import { mkdirSync, existsSync, readFileSync, rmSync, writeFileSync, chmodSync } from 'fs';
 import { join, resolve } from 'path';
 import { decrypt } from '../encryption.js';
+import { tokenGitEnv, scrubToken } from '../githubGitAuth.js';
 import { assertCapacity } from '../containerLimit.js';
 import { runAgentNew } from '../llm/runAgent.js';
 import { writeSnapshot } from '../github/snapshot.js';
@@ -19,14 +20,14 @@ const STUDIO_IMAGE    = process.env.APPSTUDIO_IMAGE || 'appcrane-studio:latest';
  * failure as "doesn't exist" so coding still attempts the normal path
  * and fails loudly via the clone instead).
  */
-function checkRemoteBranchExists(cloneUrl, branch, onLog) {
+function checkRemoteBranchExists(repoUrl, gitEnv, token, branch, onLog) {
   try {
-    const out = execFileSync('git', ['ls-remote', '--heads', cloneUrl, branch], {
-      stdio: 'pipe', timeout: 30000,
+    const out = execFileSync('git', ['ls-remote', '--heads', repoUrl, branch], {
+      stdio: 'pipe', timeout: 30000, ...(gitEnv ? { env: gitEnv } : {}),
     }).toString().trim();
     return out.length > 0;
   } catch (err) {
-    onLog?.(`[studio:git] ls-remote check failed (treating as no-branch): ${(err.stderr?.toString() || err.message).slice(0, 120)}`);
+    onLog?.(`[studio:git] ls-remote check failed (treating as no-branch): ${scrubToken(err.stderr?.toString() || err.message, token).slice(0, 120)}`);
     return false;
   }
 }
@@ -162,15 +163,16 @@ async function cloneForCode(dir, app, baseBranch, branchName, onLog) {
   mkdirSync(workspaceDir, { recursive: true });
   chmodSync(workspaceDir, 0o777); // explicit chmod — mkdirSync mode is clipped by umask
 
-  let cloneUrl = app.github_url;
+  // The token travels in the git child's environment as an http.extraHeader,
+  // never in the URL: a tokenized URL lands in argv and in the workspace's
+  // .git/config, and this workspace is mounted into the coding container.
   let token = null;
+  let gitEnv = null;
   if (app.github_token_encrypted) {
     try {
       token = decrypt(app.github_token_encrypted);
-      const url = new URL(app.github_url);
-      url.username = token;
-      cloneUrl = url.toString();
-    } catch (_) {}
+      gitEnv = tokenGitEnv(app.github_url, token);
+    } catch (_) { gitEnv = null; }
   }
 
   // Detect whether the branch already exists on the remote — happens when a
@@ -186,7 +188,7 @@ async function cloneForCode(dir, app, baseBranch, branchName, onLog) {
   //      new branch (original behavior).
   // Avoids the previous bug where every re-coding attempt force-pushed and
   // wiped out the prior coder's commits (and any open PR's history).
-  const remoteBranchExists = checkRemoteBranchExists(cloneUrl, branchName, onLog);
+  const remoteBranchExists = checkRemoteBranchExists(app.github_url, gitEnv, token, branchName, onLog);
   let cloneFromBranch = baseBranch;
   let isContinuation  = false;
   if (remoteBranchExists) {
@@ -205,11 +207,11 @@ async function cloneForCode(dir, app, baseBranch, branchName, onLog) {
 
   onLog?.(`[studio:git] Cloning ${app.github_url} (${cloneFromBranch})…`);
   try {
-    execFileSync('git', ['clone', '--depth', '1', '--branch', cloneFromBranch, cloneUrl, workspaceDir], {
-      timeout: 120000, stdio: 'pipe',
+    execFileSync('git', ['clone', '--depth', '1', '--branch', cloneFromBranch, app.github_url, workspaceDir], {
+      timeout: 120000, stdio: 'pipe', ...(gitEnv ? { env: gitEnv } : {}),
     });
   } catch (err) {
-    throw new Error(err.message.replaceAll(cloneUrl, app.github_url));
+    throw new Error(scrubToken(err.message, token));
   }
 
   execFileSync('git', ['-C', workspaceDir, 'config', 'user.email', 'appstudio@appcrane.local'], { stdio: 'pipe' });
@@ -337,22 +339,21 @@ export function cloneForBuild(jobId, app, branch) {
   if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
   mkdirSync(dir, { recursive: true });
 
-  let cloneUrl = app.github_url;
+  let token = null;
+  let gitEnv = null;
   if (app.github_token_encrypted) {
     try {
-      const token = decrypt(app.github_token_encrypted);
-      const url = new URL(app.github_url);
-      url.username = token;
-      cloneUrl = url.toString();
-    } catch (_) {}
+      token = decrypt(app.github_token_encrypted);
+      gitEnv = tokenGitEnv(app.github_url, token);
+    } catch (_) { gitEnv = null; }
   }
 
   try {
-    execFileSync('git', ['clone', '--depth', '1', '--branch', branch, cloneUrl, dir], {
-      timeout: 120000, stdio: 'pipe',
+    execFileSync('git', ['clone', '--depth', '1', '--branch', branch, app.github_url, dir], {
+      timeout: 120000, stdio: 'pipe', ...(gitEnv ? { env: gitEnv } : {}),
     });
   } catch (err) {
-    throw new Error(err.message.replaceAll(cloneUrl, app.github_url));
+    throw new Error(scrubToken(err.message, token));
   }
   log.info(`AppStudio: cloned branch ${branch} for build into ${dir}`);
   return dir;

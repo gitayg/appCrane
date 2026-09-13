@@ -80,7 +80,6 @@
  */
 
 import { getDb } from '../db.js';
-import { decrypt } from './encryption.js';
 import { getServiceTokenInternal } from './githubService.js';
 import { usesLocalRepo, localBranchHeadSha } from './managedRepo.js';
 import { execFileSync } from 'child_process';
@@ -117,14 +116,18 @@ function parseGithubUrl(url) {
  *   - source_type='github' apps with a stored PAT use that
  *   - public repos can verify unauthenticated (60 req/hr/IP)
  */
-function authForApp(app) {
+async function authForApp(app) {
   if (app.source_type === 'managed') {
     return getServiceTokenInternal();
   }
-  if (app.github_token_encrypted) {
-    try { return decrypt(app.github_token_encrypted); } catch (_) { return null; }
-  }
-  return null;
+  // v2.75.0: connected apps go through the one resolver, which returns a
+  // GitHub App installation token when one is attached and the decrypted PAT
+  // otherwise. An undecryptable PAT still reads as "no token" here, exactly as
+  // it did before — but a broken installation THROWS, because verifying with a
+  // credential the operator is retiring is worse than not verifying at all.
+  const { resolveGitHubCredential } = await import('./githubCredential.js');
+  const cred = await resolveGitHubCredential(app);
+  return cred.token;
 }
 
 function isVerifyEnabled() {
@@ -314,7 +317,7 @@ export async function verifyCommitSha(app, releaseDir, branch, appendLog) {
     'X-GitHub-Api-Version': '2022-11-28',
     'User-Agent': 'appcrane-supply-chain-verify',
   };
-  const token = authForApp(app);
+  const token = await authForApp(app);
   if (token) headers.Authorization = `Bearer ${token}`;
 
   const { sha: remoteSha, error } = await resolveRemoteSha(url, headers, localSha);

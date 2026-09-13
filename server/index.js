@@ -65,6 +65,8 @@ import userMcpKeysRoutes from './routes/userMcpKeys.js';
 import meRoutes from './routes/me.js';
 import filesRoutes, { sweepStagedFiles } from './routes/files.js';
 import githubServiceRoutes from './routes/githubService.js';
+import githubAppRoutes from './routes/githubApp.js';
+import appGithubAppRoutes from './routes/appGithubApp.js';
 import whatsNewRoutes from './routes/whatsNew.js';
 import platformWhatsNewRoutes from './routes/platformWhatsNew.js';
 import serviceApiRoutes from './routes/serviceApi.js';
@@ -1027,6 +1029,8 @@ app.use('/api', meRoutes);               // /api/me — proxied-app identity end
 app.use('/api', userMcpKeysRoutes);      // /api/me/mcp-keys — personal MCP keys
 app.use('/api/files', filesRoutes);      // /api/files/staged — staged uploads for MCP-E
 app.use('/api/github-service', githubServiceRoutes); // service-account config + verify (admin)
+app.use('/api/github-app', githubAppRoutes);         // per-instance GitHub App: manifest flow + status (platform admin)
+app.use('/api/apps', appGithubAppRoutes);           // /api/apps/:slug/github-app — attach an app to an installation
 app.use('/api/apps', whatsNewRoutes);     // /api/apps/:slug/whats-new — per-user version dialog state
 app.use('/api/whats-new', platformWhatsNewRoutes); // /api/whats-new/platform — AppCrane update dialog (platform admins)
 
@@ -1283,6 +1287,16 @@ try {
   await migrateManagedReposAtBoot();
 } catch (e) {
   log.error(`[repo-migration] could not run, boot continues: ${e.message}`);
+}
+
+// Earlier versions cloned with the GitHub token in the URL, which git keeps in
+// each working copy's .git/config. Remove what is already on disk; the clone
+// paths no longer write it.
+try {
+  const { scrubGitCredentialsAtBoot } = await import('./services/gitCredentialScrub.js');
+  scrubGitCredentialsAtBoot();
+} catch (e) {
+  log.error(`[git-credential-scrub] could not run, boot continues: ${e.message}`);
 }
 
 // Start server

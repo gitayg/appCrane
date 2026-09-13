@@ -6,6 +6,7 @@ import { getDb } from '../db.js';
 import { decrypt } from './encryption.js';
 import log from '../utils/logger.js';
 import { usesLocalRepo } from './managedRepo.js';
+import { scrubToken } from './githubGitAuth.js';
 import { AppError } from '../utils/errors.js';
 import { getIngressForApp } from './tcpIngress.js';
 import { ensureCodebaseContext } from './appstudio/contextBuilder.js';
@@ -1158,6 +1159,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
         }
       } else {
         let token = null;
+        let installationToken = null;
         if (isManaged) {
           const { getServiceTokenInternal } = await import('./githubService.js');
           token = getServiceTokenInternal();
@@ -1167,25 +1169,53 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
               `A platform_admin needs to set it at Settings → GitHub → "Service-account — AppCrane-managed repos" before managed apps can deploy.`
             );
           }
-        } else if (app.github_token_encrypted) {
-          token = decrypt(app.github_token_encrypted);
+        } else {
+          // v2.75.0: one resolver decides between a GitHub App installation
+          // token and the app's stored PAT. It THROWS rather than falling back
+          // when an installation is configured and the token cannot be issued —
+          // the PAT the operator is retiring must not come back silently. With
+          // no installation attached this is the same decrypt() the line it
+          // replaced did, errors and all.
+          const { resolveGitHubCredential } = await import('./githubCredential.js');
+          const cred = await resolveGitHubCredential(app, { patErrors: 'throw' });
+          if (cred.source === 'installation') installationToken = cred.token;
+          else token = cred.token;
         }
 
-        let cloneUrl = app.github_url;
-        if (token) {
-          const url = new URL(app.github_url);
-          url.username = token;
-          cloneUrl = url.toString();
+        // The clone URL never carries a credential. It used to be
+        // https://<token>@github.com/..., which put the token in argv, in error
+        // text, and in the remote URL git writes into the release's .git/config,
+        // where it stayed in plain text for as long as the release existed.
+        const cloneUrl = app.github_url;
+
+        // An installation token is short-lived and must not outlive this
+        // process: it travels in the git child's environment (same mechanism as
+        // services/localGit.js), so it is never in argv, in an error string, or
+        // in the .git/config git writes into the release directory.
+        let gitEnv = null;
+        if (installationToken) {
+          const { installationGitEnv } = await import('./githubGitAuth.js');
+          gitEnv = installationGitEnv(app.github_url, installationToken);
+          appendLog('Authenticating as this instance\'s GitHub App (installation token, expires within the hour, never written to disk).');
+        } else if (token) {
+          // A stored PAT or the managed-app service-account token: same
+          // mechanism, so it is never in argv or .git/config either.
+          const { tokenGitEnv } = await import('./githubGitAuth.js');
+          gitEnv = tokenGitEnv(app.github_url, token);
         }
+        const gitOpts = (ms) => (gitEnv
+          ? { timeout: ms, stdio: 'pipe', env: gitEnv }
+          : { timeout: ms, stdio: 'pipe' });
+        const scrubGit = (msg) => scrubToken(scrubToken(String(msg), installationToken), token);
 
         try {
           execFileSync('git', [
             'clone', '--depth', '1',
             '--branch', app.branch || 'main',
             cloneUrl, releaseDir,
-          ], { timeout: 120000, stdio: 'pipe' });
+          ], gitOpts(120000));
         } catch (err) {
-          throw new Error(err.message.replaceAll(cloneUrl, app.github_url));
+          throw new Error(scrubGit(err.message));
         }
 
         // v2.7.12: pin to an exact commit when asked (promote ships the EXACT
@@ -1197,18 +1227,18 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
           appendLog(`Pinning to commit ${opts.targetCommit} (exact sandbox release)…`);
           let fetched = false;
           try {
-            execFileSync('git', ['-C', releaseDir, 'fetch', '--depth', '1', 'origin', opts.targetCommit], { timeout: 120000, stdio: 'pipe' });
+            execFileSync('git', ['-C', releaseDir, 'fetch', '--depth', '1', 'origin', opts.targetCommit], gitOpts(120000));
             fetched = true;
           } catch (_) { /* abbreviated SHA or not directly fetchable — deepen below */ }
           if (!fetched) {
             try {
-              execFileSync('git', ['-C', releaseDir, 'fetch', '--depth', '200', 'origin', app.branch || 'main'], { timeout: 120000, stdio: 'pipe' });
+              execFileSync('git', ['-C', releaseDir, 'fetch', '--depth', '200', 'origin', app.branch || 'main'], gitOpts(120000));
             } catch (_) { /* best effort; checkout will surface a clear error if the commit is unreachable */ }
           }
           try {
-            execFileSync('git', ['-C', releaseDir, 'checkout', '--detach', opts.targetCommit], { timeout: 30000, stdio: 'pipe' });
+            execFileSync('git', ['-C', releaseDir, 'checkout', '--detach', opts.targetCommit], gitOpts(30000));
           } catch (err) {
-            throw new Error(`Failed to check out commit ${opts.targetCommit} for promotion (is it on branch '${app.branch || 'main'}' within the last 200 commits?): ${String(err.message).replaceAll(cloneUrl, app.github_url)}`);
+            throw new Error(`Failed to check out commit ${opts.targetCommit} for promotion (is it on branch '${app.branch || 'main'}' within the last 200 commits?): ${scrubGit(err.message)}`);
           }
         }
       }

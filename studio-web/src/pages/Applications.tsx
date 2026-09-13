@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, type CSSProperties, type ReactNode } from 'react'
 import { adminApi } from '../adminApi'
+import { GithubAppModal } from '../components/GithubAppModal'
 import { PresenceAvatars } from '../components/runtime-topbar/PresenceAvatars'
 import { JobsButton } from '../components/runtime-topbar/JobsButton'
 import { RequestModal } from '../components/runtime-topbar/RequestModal'
@@ -15,6 +16,16 @@ import '../topbar-element/jsx.d.ts'
 
 defineCraneAppTopbar()
 
+type CodeSource = 'crane_hosted' | 'managed_github' | 'github_app' | 'github_token' | 'github_public'
+
+const CODE_SOURCE_BADGE: Record<CodeSource, { label: string; title: string; color: string; bg: string; border: string }> = {
+  crane_hosted:   { label: 'Crane-hosted',     title: 'Code is stored in a git repository on this AppCrane host', color: 'var(--green, #22c55e)', bg: 'rgba(34,197,94,.12)', border: 'rgba(34,197,94,.3)' },
+  managed_github: { label: 'Managed (GitHub)', title: "Managed app whose repository lives on GitHub under the platform's service account (not yet moved to this host)", color: 'var(--accent)', bg: 'rgba(59,130,246,.12)', border: 'rgba(59,130,246,.3)' },
+  github_app:     { label: 'GitHub App',       title: "Deploys use short-lived tokens from this instance's GitHub App installation", color: 'var(--purple, #a78bfa)', bg: 'rgba(167,139,250,.12)', border: 'rgba(167,139,250,.3)' },
+  github_token:   { label: 'GitHub token',     title: 'Deploys use a personal access token stored for this app', color: 'var(--amber, #f59e0b)', bg: 'rgba(245,158,11,.12)', border: 'rgba(245,158,11,.35)' },
+  github_public:  { label: 'Public GitHub',    title: 'Connected GitHub repository with no stored credential; only works while the repository is public', color: 'var(--dim, #9ca3af)', bg: 'rgba(156,163,175,.12)', border: 'rgba(156,163,175,.3)' },
+}
+
 interface App {
   slug: string
   name: string
@@ -25,6 +36,9 @@ interface App {
   source_type?: string
   has_icon?: boolean
   has_github_token?: boolean
+  repo_backend?: string | null
+  github_app_attached?: boolean
+  code_source?: CodeSource | null
   resource_limits?: { max_ram_mb?: number; max_cpu_percent?: number }
   image_retention?: number
   frame_ancestors?: string | null
@@ -301,6 +315,7 @@ export function Applications() {
   // v2.21.7: auto-deploy (webhook) config modal.
   type HookCfg = { token?: string; auto_deploy_sandbox?: boolean; auto_deploy_prod?: boolean; branch_filter?: string }
   const [hookApp, setHookApp] = useState<App | null>(null)
+  const [ghAppFor, setGhAppFor] = useState<App | null>(null)
   const [hookCfg, setHookCfg] = useState<HookCfg | null>(null)
   // v2.21.8: per-app CPU/memory chart modal.
   type MetricRow = { env: string; cpu_percent: number; mem_mb: number; recorded_at: string }
@@ -1478,6 +1493,19 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                           onSave={v => saveName(app.slug, v)}
                           inputStyle={{ minWidth: 130, flex: 1 }}
                         />
+                        {app.code_source && CODE_SOURCE_BADGE[app.code_source] && (
+                          <span
+                            title={CODE_SOURCE_BADGE[app.code_source].title}
+                            style={{
+                              fontSize: '.65rem', fontWeight: 600, letterSpacing: '.3px',
+                              padding: '2px 6px', borderRadius: 3,
+                              color: CODE_SOURCE_BADGE[app.code_source].color,
+                              background: CODE_SOURCE_BADGE[app.code_source].bg,
+                              border: `1px solid ${CODE_SOURCE_BADGE[app.code_source].border}`,
+                              whiteSpace: 'nowrap',
+                            }}
+                          >{CODE_SOURCE_BADGE[app.code_source].label}</span>
+                        )}
                         {mcpActive[app.slug] && (
                           <span
                             title={`MCP active — ${mcpActive[app.slug].calls} call(s) in last 5min, latest ${new Date(mcpActive[app.slug].last_at).toLocaleTimeString()}`}
@@ -1750,6 +1778,13 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                               onClick={() => setHookApp(app)}
                               title="Auto-deploy on git push (webhook)"
                             >auto-deploy</button>
+                            {app.source_type === 'github' && (
+                              <button
+                                className="btn btn-xs"
+                                onClick={() => setGhAppFor(app)}
+                                title="Authenticate with this instance's GitHub App instead of a personal access token"
+                              >gh app</button>
+                            )}
                           </>
                         )}
                         <button className="btn btn-xs btn-icon" onClick={() => setMetricsApp(app)} aria-label={`Resource metrics for ${app.name}`} title="CPU / memory over time"><IconActivity /></button>
@@ -2211,6 +2246,8 @@ STEP 3 - In any terminal run \`claude\`, then paste:
           </div>
         )
       })()}
+
+      {ghAppFor && <GithubAppModal slug={ghAppFor.slug} name={ghAppFor.name} onClose={() => setGhAppFor(null)} />}
 
       {hookApp && (
         <div

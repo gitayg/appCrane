@@ -1,6 +1,22 @@
 import { execFileSync } from 'child_process';
 import { existsSync } from 'fs';
+import { getDb } from '../../db.js';
+import { decrypt } from '../encryption.js';
+import { tokenGitEnv, scrubToken } from '../githubGitAuth.js';
 import log from '../../utils/logger.js';
+
+/**
+ * The app behind a coder/studio session workspace. Both callers (routes/coder.js
+ * and routes/agents.js) pass session.workspace_dir, so the session row names the
+ * app whose credential the push needs -- the workspace's origin is the plain URL.
+ */
+function appForWorkspace(workspaceDir) {
+  return getDb().prepare(`
+    SELECT a.github_url, a.github_token_encrypted FROM coder_sessions s
+    JOIN apps a ON a.slug = s.app_slug
+    WHERE s.workspace_dir = ? LIMIT 1
+  `).get(workspaceDir);
+}
 
 /**
  * Stage all changes, commit, regenerate package-lock if needed, and push.
@@ -47,7 +63,20 @@ export async function commitAndPush({ workspaceDir, branchName, commitMsg, onLog
   // exists) so the push fast-forwards. If push still fails here, it
   // means the branch genuinely diverged — surface the error instead of
   // overwriting.
-  git(['push', '-u', 'origin', branchName]);
+  const app = appForWorkspace(workspaceDir);
+  let token = null;
+  let pushEnv = null;
+  if (app?.github_url && app.github_token_encrypted) {
+    try {
+      token = decrypt(app.github_token_encrypted);
+      pushEnv = tokenGitEnv(app.github_url, token);
+    } catch (_) { pushEnv = null; }
+  }
+  try {
+    git(['push', '-u', 'origin', branchName], pushEnv ? { env: pushEnv } : {});
+  } catch (err) {
+    throw new Error(scrubToken(err.message, token));
+  }
   onLog?.(`[builder:git] Branch ${branchName} pushed`);
   log.info(`Coder: pushed branch ${branchName}`);
   return { pushed: true };

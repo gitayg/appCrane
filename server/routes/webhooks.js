@@ -8,6 +8,7 @@ import { AppError } from '../utils/errors.js';
 import log from '../utils/logger.js';
 import { evaluatePush, recordDelivery, triggerAutoDeploys } from '../services/deployTrigger.js';
 import { usesLocalRepo, localBranchHeadSha } from '../services/managedRepo.js';
+import { resolveGitHubCredential, getInstallation } from '../services/githubCredential.js';
 
 function parseGithubUrl(url) {
   const m = url.match(/github\.com[/:]([^/]+)\/([^/]+?)(?:\.git)?(?:\/.*)?$/);
@@ -220,14 +221,23 @@ router.get('/:slug/updates', requireAuth, requireAppAccess, async (req, res) => 
   const { owner, repo } = parsed;
   const branch = app.branch || 'main';
 
+  // v2.75.0: the one credential resolver — a GitHub App installation token
+  // when this app has an installation attached, the stored PAT otherwise. A
+  // failure on the installation path is reported as the reason; it is never
+  // retried with the PAT.
   let token = null;
-  if (app.github_token_encrypted) {
-    try { token = decrypt(app.github_token_encrypted); } catch (_) {}
+  let scheme = 'token';
+  try {
+    const cred = await resolveGitHubCredential(app);
+    token = cred.token;
+    if (cred.source === 'installation') scheme = 'Bearer';
+  } catch (e) {
+    return res.json({ available: false, reason: e.message });
   }
 
   try {
     const headers = { Accept: 'application/vnd.github.v3+json', 'User-Agent': 'AppCrane' };
-    if (token) headers.Authorization = `token ${token}`;
+    if (token) headers.Authorization = `${scheme} ${token}`;
 
     const r = await fetch(`https://api.github.com/repos/${owner}/${repo}/commits/${branch}`, { headers });
     if (!r.ok) {
@@ -301,6 +311,20 @@ router.post('/:slug/webhook/register-github', requireAuth, requireAppAccess, asy
   const parsed = parseGithubUrl(app.github_url);
   if (!parsed) return res.status(400).json({ error: 'Could not parse GitHub URL' });
   const { owner, repo } = parsed;
+
+  // v2.75.0: registering a webhook is a WRITE (GitHub lists POST
+  // /repos/{owner}/{repo}/hooks under "Repository permissions for Webhooks" at
+  // write). The App this instance registers asks for read-only Contents,
+  // Metadata and Pull requests and nothing else, so it cannot do this — and
+  // quietly using the PAT instead would be the silent fallback this feature
+  // exists to remove. Say so instead.
+  if (getInstallation(app.id)) {
+    return res.status(400).json({
+      error: 'This app authenticates with the instance GitHub App, which is read-only (contents, metadata, pull requests). '
+        + 'It cannot create a repository webhook. Add the payload URL and secret to the repository\'s webhook settings on GitHub by hand, '
+        + 'or detach the GitHub App installation for this app to use a personal access token.',
+    });
+  }
 
   if (!app.github_token_encrypted) {
     return res.status(400).json({ error: `No GitHub token. Add via: PUT /api/apps/${app.slug} {"github_token":"ghp_..."}` });
