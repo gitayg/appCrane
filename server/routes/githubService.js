@@ -95,4 +95,20 @@ router.post('/verify', requirePlatformAdmin, async (_req, res) => {
   }
 });
 
+/**
+ * Per-app outcome of the boot-time move from GitHub to local repos
+ * (services/repoMigration.js). Read-only. Error text is scrubbed of the service
+ * token when recorded, and the route adds nothing sensitive beyond slugs and
+ * SHAs, which a platform admin can already see.
+ */
+router.get('/repo-migration', requirePlatformAdmin, async (_req, res) => {
+  try {
+    const { getDb } = await import('../db.js');
+    const { getRepoMigrationStatus } = await import('../services/repoMigration.js');
+    res.json(getRepoMigrationStatus(getDb()));
+  } catch (e) {
+    res.status(500).json({ error: { code: 'REPO_MIGRATION_STATUS', message: e.message } });
+  }
+});
+
 export default router;

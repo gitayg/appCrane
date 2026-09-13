@@ -5,6 +5,7 @@ import net from 'net';
 import { getDb } from '../db.js';
 import { decrypt } from './encryption.js';
 import log from '../utils/logger.js';
+import { usesLocalRepo } from './managedRepo.js';
 import { AppError } from '../utils/errors.js';
 import { getIngressForApp } from './tcpIngress.js';
 import { ensureCodebaseContext } from './appstudio/contextBuilder.js';
@@ -725,7 +726,10 @@ export async function promoteApp(app, userId) {
   // context: stat data") while sandbox (built from a fresh clone) succeeded.
   // Cloning fresh at the tested commit removes the collision entirely. Only
   // upload apps (no repo to clone) keep the copy path below.
-  if ((app.source_type === 'github' || app.source_type === 'managed') && app.github_url) {
+  // A local-backed managed app has no github_url (its repo is on this host), so
+  // it is selected by its marker, and FIRST: an unknown marker throws here
+  // instead of a github_url that happens to be set deciding the path.
+  if (usesLocalRepo(app) || ((app.source_type === 'github' || app.source_type === 'managed') && app.github_url)) {
     const freshResult = db.prepare(`
       INSERT INTO deployments (app_id, env, version, status, commit_hash, deployed_by, log)
       VALUES (?, 'production', ?, 'pending', ?, ?, ?)
@@ -1112,71 +1116,100 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
         // deploy that is otherwise fine.
         appendLog(`Release tree digest unavailable: ${e.message}. Provenance NOT recorded for this deploy.`);
       }
-    } else if ((app.source_type === 'github' || app.source_type === 'managed') && app.github_url) {
+    } else if (usesLocalRepo(app) || ((app.source_type === 'github' || app.source_type === 'managed') && app.github_url)) {
       // v2.6.14: 'github' and 'managed' clone the same way; only the token
       // source differs. github = per-app PAT stored encrypted on the app
       // row. managed = the platform-wide service-account PAT in settings
       // (the same one appcrane_create_managed_app used to create the
       // AMC_<slug> repo). Pre-v2.6.14 the deployer only handled 'github'
       // and managed apps fell through to the "not deployable" error.
+      //
+      // Phase 2 of moving managed repos off GitHub: a managed app whose
+      // apps.repo_backend is 'local' clones from <DATA_DIR>/repos on this host
+      // instead (services/managedRepo.js decides, from the column alone). Every
+      // other app — including every managed app with repo_backend NULL — takes
+      // the GitHub branch below, unchanged.
       const isManaged = app.source_type === 'managed';
-      appendLog(`Cloning ${isManaged ? 'managed repo ' : ''}${app.github_url} (branch: ${app.branch || 'main'})...`);
+      const localRepo = usesLocalRepo(app);
+      appendLog(localRepo
+        ? `Cloning managed repo AMC_${app.slug} from this host's repository store (branch: ${app.branch || 'main'})...`
+        : `Cloning ${isManaged ? 'managed repo ' : ''}${app.github_url} (branch: ${app.branch || 'main'})...`);
 
       releaseDir = resolve(join(releasesDir, `${timestamp}-git`));
       mkdirSync(releaseDir, { recursive: true });
 
-      let token = null;
-      if (isManaged) {
-        const { getServiceTokenInternal } = await import('./githubService.js');
-        token = getServiceTokenInternal();
-        if (!token) {
-          throw new Error(
-            `App '${app.slug}' is source_type='managed' but the GitHub service-account token is not configured on this AppCrane install. ` +
-            `A platform_admin needs to set it at Settings → GitHub → "Service-account — AppCrane-managed repos" before managed apps can deploy.`
-          );
-        }
-      } else if (app.github_token_encrypted) {
-        token = decrypt(app.github_token_encrypted);
-      }
-
-      let cloneUrl = app.github_url;
-      if (token) {
-        const url = new URL(app.github_url);
-        url.username = token;
-        cloneUrl = url.toString();
-      }
-
-      try {
-        execFileSync('git', [
-          'clone', '--depth', '1',
-          '--branch', app.branch || 'main',
-          cloneUrl, releaseDir,
-        ], { timeout: 120000, stdio: 'pipe' });
-      } catch (err) {
-        throw new Error(err.message.replaceAll(cloneUrl, app.github_url));
-      }
-
-      // v2.7.12: pin to an exact commit when asked (promote ships the EXACT
-      // release tested in sandbox, not the branch tip which may have moved).
-      // GitHub serves reachable full SHAs directly; fall back to deepening the
-      // branch history so an abbreviated SHA (deployments.commit_hash is short)
-      // still resolves, then check it out detached.
-      if (opts.targetCommit && opts.targetCommit !== 'unknown') {
-        appendLog(`Pinning to commit ${opts.targetCommit} (exact sandbox release)…`);
-        let fetched = false;
-        try {
-          execFileSync('git', ['-C', releaseDir, 'fetch', '--depth', '1', 'origin', opts.targetCommit], { timeout: 120000, stdio: 'pipe' });
-          fetched = true;
-        } catch (_) { /* abbreviated SHA or not directly fetchable — deepen below */ }
-        if (!fetched) {
+      if (localRepo) {
+        // Same two steps as GitHub — shallow clone of the branch, then (for a
+        // promote) fetch and detach at the exact tested commit — run by
+        // localGit.js with the host's git config, hooks and credential helpers
+        // cut off. That isolation matters for a clone: a hooksPath in
+        // ~/.gitconfig or GIT_CONFIG_* runs post-checkout on a plain clone
+        // (measured). The GitHub branch below still runs git with the ambient
+        // environment, exactly as before.
+        const { cloneLocalRepoForDeploy, pinLocalDeployClone } = await import('./managedRepo.js');
+        await cloneLocalRepoForDeploy(app, releaseDir, app.branch || 'main');
+        if (opts.targetCommit && opts.targetCommit !== 'unknown') {
+          appendLog(`Pinning to commit ${opts.targetCommit} (exact sandbox release)…`);
           try {
-            execFileSync('git', ['-C', releaseDir, 'fetch', '--depth', '200', 'origin', app.branch || 'main'], { timeout: 120000, stdio: 'pipe' });
-          } catch (_) { /* best effort; checkout will surface a clear error if the commit is unreachable */ }
+            await pinLocalDeployClone(app, releaseDir, opts.targetCommit, app.branch || 'main');
+          } catch (err) {
+            throw new Error(`Failed to check out commit ${opts.targetCommit} for promotion (is it on branch '${app.branch || 'main'}' within the last 200 commits?): ${err.message}`);
+          }
         }
+      } else {
+        let token = null;
+        if (isManaged) {
+          const { getServiceTokenInternal } = await import('./githubService.js');
+          token = getServiceTokenInternal();
+          if (!token) {
+            throw new Error(
+              `App '${app.slug}' is source_type='managed' but the GitHub service-account token is not configured on this AppCrane install. ` +
+              `A platform_admin needs to set it at Settings → GitHub → "Service-account — AppCrane-managed repos" before managed apps can deploy.`
+            );
+          }
+        } else if (app.github_token_encrypted) {
+          token = decrypt(app.github_token_encrypted);
+        }
+
+        let cloneUrl = app.github_url;
+        if (token) {
+          const url = new URL(app.github_url);
+          url.username = token;
+          cloneUrl = url.toString();
+        }
+
         try {
-          execFileSync('git', ['-C', releaseDir, 'checkout', '--detach', opts.targetCommit], { timeout: 30000, stdio: 'pipe' });
+          execFileSync('git', [
+            'clone', '--depth', '1',
+            '--branch', app.branch || 'main',
+            cloneUrl, releaseDir,
+          ], { timeout: 120000, stdio: 'pipe' });
         } catch (err) {
-          throw new Error(`Failed to check out commit ${opts.targetCommit} for promotion (is it on branch '${app.branch || 'main'}' within the last 200 commits?): ${String(err.message).replaceAll(cloneUrl, app.github_url)}`);
+          throw new Error(err.message.replaceAll(cloneUrl, app.github_url));
+        }
+
+        // v2.7.12: pin to an exact commit when asked (promote ships the EXACT
+        // release tested in sandbox, not the branch tip which may have moved).
+        // GitHub serves reachable full SHAs directly; fall back to deepening the
+        // branch history so an abbreviated SHA (deployments.commit_hash is short)
+        // still resolves, then check it out detached.
+        if (opts.targetCommit && opts.targetCommit !== 'unknown') {
+          appendLog(`Pinning to commit ${opts.targetCommit} (exact sandbox release)…`);
+          let fetched = false;
+          try {
+            execFileSync('git', ['-C', releaseDir, 'fetch', '--depth', '1', 'origin', opts.targetCommit], { timeout: 120000, stdio: 'pipe' });
+            fetched = true;
+          } catch (_) { /* abbreviated SHA or not directly fetchable — deepen below */ }
+          if (!fetched) {
+            try {
+              execFileSync('git', ['-C', releaseDir, 'fetch', '--depth', '200', 'origin', app.branch || 'main'], { timeout: 120000, stdio: 'pipe' });
+            } catch (_) { /* best effort; checkout will surface a clear error if the commit is unreachable */ }
+          }
+          try {
+            execFileSync('git', ['-C', releaseDir, 'checkout', '--detach', opts.targetCommit], { timeout: 30000, stdio: 'pipe' });
+          } catch (err) {
+            throw new Error(`Failed to check out commit ${opts.targetCommit} for promotion (is it on branch '${app.branch || 'main'}' within the last 200 commits?): ${String(err.message).replaceAll(cloneUrl, app.github_url)}`);
+          }
         }
       }
 

@@ -8,6 +8,9 @@ import { generateCode, cloneForBuild, cleanupWorkspace } from './generator.js';
 import { ensureCodebaseContext } from './contextBuilder.js';
 import { enqueue as enqueueWork, PRIORITY } from '../builder/appQueue.js';
 import { formatToolBreadcrumb } from './toolBreadcrumb.js';
+import {
+  usesLocalRepo, refuseLocalRepoPhase, checkoutForAnalysis, removeAnalysisCheckout, recordAnalysisAsRequest,
+} from './localAnalysis.js';
 import log from '../../utils/logger.js';
 
 const POLL_MS          = parseInt(process.env.APPSTUDIO_POLL_MS || '5000', 10);
@@ -185,7 +188,11 @@ async function handlePlan(job) {
   if (!enh) throw new Error(`Enhancement ${job.enhancement_id} not found`);
   const app = enh.app_slug ? getApp(enh.app_slug) : null;
 
-  const repoDir = app ? getRepoDir(app) : null;
+  // A local-repo app is analyzed from its branch tip, not from a deployed
+  // release, and the result becomes a new request (./localAnalysis.js).
+  const local = app && usesLocalRepo(app) ? await checkoutForAnalysis(app, job.id) : null;
+
+  const repoDir = local ? local.dir : (app ? getRepoDir(app) : null);
   if (!repoDir) {
     throw new Error(
       `No deployed code found for ${enh.app_slug}. Expected a directory at production/current ` +
@@ -225,17 +232,28 @@ async function handlePlan(job) {
     db.prepare('UPDATE enhancement_jobs SET cost_tokens = ? WHERE id = ?').run(total, job.id);
   };
 
-  const result = await planEnhancement({
-    appSlug:       enh.app_slug,
-    enhancementId: enh.id,
-    request:       enh.message,
-    repoDir,
-    agentContext,
-    priorComments,
-    onChunk,
-    onTokens,
-    onTool,
-  });
+  let result;
+  try {
+    result = await planEnhancement({
+      appSlug:       enh.app_slug,
+      enhancementId: enh.id,
+      request:       enh.message,
+      repoDir,
+      agentContext,
+      priorComments,
+      onChunk,
+      onTokens,
+      onTool,
+    });
+  } finally {
+    if (local) removeAnalysisCheckout(local.dir);
+  }
+
+  if (local) {
+    const newId = recordAnalysisAsRequest({ job, enh, app, result, head: local.head, branch: local.branch });
+    log.info(`AppStudio: enh #${enh.id} for local-repo app ${app.slug} analyzed and filed as request #${newId} ($${result.costUsd.toFixed(4)})`);
+    return;
+  }
 
   const costCents = Math.ceil(result.costUsd * 100);
   db.transaction(() => {
@@ -269,6 +287,7 @@ async function handleCode(job) {
   if (!enh) throw new Error(`Enhancement ${job.enhancement_id} not found`);
   const app = enh.app_slug ? getApp(enh.app_slug) : null;
   if (!app) throw new Error(`App ${enh.app_slug} not found`);
+  refuseLocalRepoPhase(app, 'code');
 
   const plan = JSON.parse(enh.ai_plan_json || 'null');
   if (!plan) throw new Error('No approved plan');
@@ -546,6 +565,7 @@ async function handleBuild(job) {
   if (!enh) throw new Error(`Enhancement ${job.enhancement_id} not found`);
   const app = enh.app_slug ? getApp(enh.app_slug) : null;
   if (!app) throw new Error(`App ${enh.app_slug} not found`);
+  refuseLocalRepoPhase(app, 'build');
 
   const branchName = enh.branch_name;
   if (!branchName) throw new Error('No branch from code phase');
@@ -594,6 +614,7 @@ async function handleOpenPr(job) {
   const enh = getEnhancement(job.enhancement_id);
   if (!enh) throw new Error(`Enhancement ${job.enhancement_id} not found`);
   const app = enh.app_slug ? getApp(enh.app_slug) : null;
+  if (app) refuseLocalRepoPhase(app, 'open_pr');
   if (!app?.github_url || !enh.branch_name) throw new Error('Missing GitHub URL or branch');
 
   // Capture logs into the job's output_json so the UI detail panel shows PR and deploy progress.

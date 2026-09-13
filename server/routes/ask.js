@@ -6,6 +6,7 @@ import { getDb } from '../db.js';
 import { hashApiKey } from '../services/encryption.js';
 import { AppError } from '../utils/errors.js';
 import { runAskJob, hasActiveContainer } from '../services/askClaude.js';
+import { usesLocalRepo } from '../services/managedRepo.js';
 import { ensureCodebaseContext } from '../services/appstudio/contextBuilder.js';
 import { mirrorAsk } from '../services/github/issuesMirror.js';
 import log from '../utils/logger.js';
@@ -60,7 +61,8 @@ router.post('/:appSlug', async (req, res) => {
   const db = getDb();
   const app = db.prepare('SELECT * FROM apps WHERE slug = ?').get(req.params.appSlug);
   if (!app) throw new AppError('App not found', 404, 'NOT_FOUND');
-  if (!app.github_url) throw new AppError('App has no GitHub repository — Ask Claude requires source code access', 400, 'NO_REPO');
+  // A local-backed managed app has no github_url; its source is on this host.
+  if (!app.github_url && !usesLocalRepo(app)) throw new AppError('App has no GitHub repository — Ask Claude requires source code access', 400, 'NO_REPO');
 
   if (user.role !== 'admin' && user.role !== 'platform_admin') {
     const access = db.prepare('SELECT 1 FROM app_users WHERE app_id = ? AND user_id = ?').get(app.id, user.userId);
@@ -118,7 +120,7 @@ router.post('/:appSlug', async (req, res) => {
     db.prepare("UPDATE ask_sessions SET updated_at = datetime('now') WHERE id = ?").run(sessionId);
     jobState.done = true; jobState.answer = answer;
     for (const c of jobState.clients) { c.write(`data: ${JSON.stringify({ type: 'done', answer, session_id: sessionId })}\n\n`); c.end(); }
-    setTimeout(() => pendingJobs.delete(jobId), 120000);
+    setTimeout(() => pendingJobs.delete(jobId), 120000).unref();
 
     if (app.github_url) {
       mirrorAsk(app, { question: question.trim(), answer, userName: user.userName, sessionId }).catch(() => {});
@@ -127,7 +129,7 @@ router.post('/:appSlug', async (req, res) => {
     log.error(`Ask job ${jobId} failed: ${err.message}`);
     jobState.done = true; jobState.error = err.message;
     for (const c of jobState.clients) { c.write(`data: ${JSON.stringify({ type: 'error', message: err.message })}\n\n`); c.end(); }
-    setTimeout(() => pendingJobs.delete(jobId), 120000);
+    setTimeout(() => pendingJobs.delete(jobId), 120000).unref();
   });
 
   res.json({ session_id: sessionId, job_id: jobId });

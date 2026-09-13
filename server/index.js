@@ -6,7 +6,7 @@ import { createHash } from 'crypto';
 import { initDb, getDb } from './db.js';
 import { errorHandler, notFound } from './utils/errors.js';
 import log from './utils/logger.js';
-import { platformEmbedAncestors, mergeAncestors } from './utils/embed.js';
+import { frameAncestorsForRedirect as frameAncestorsForRedirectFor } from './utils/embed.js';
 import { isSafeRedirect } from './utils/safeRedirect.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -1047,17 +1047,7 @@ app.use('/api/config', configRoutes);     // Instance config export/import (migr
 // string, or null when the redirect doesn't resolve to an app that opted into
 // embedding.
 function frameAncestorsForRedirect(redirectRaw) {
-  const m = String(redirectRaw || '').match(/^\/([a-z][a-z0-9-]*)/);
-  if (!m) return null;
-  const slug = m[1].replace(/-sandbox$/, '');
-  try {
-    const db = getDb();
-    const row = db.prepare('SELECT frame_ancestors FROM apps WHERE slug = ?').get(slug);
-    if (!row) return null; // redirect isn't a real app → keep the SAMEORIGIN lock
-    // Merge the per-app policy with the platform same-site default (if enabled),
-    // so the in-iframe login step is frameable by exactly what the app content is.
-    return mergeAncestors(platformEmbedAncestors(db), row.frame_ancestors);
-  } catch (_) { return null; }
+  try { return frameAncestorsForRedirectFor(getDb(), redirectRaw); } catch (_) { return null; }
 }
 
 // Relax the frame headers for an SSO bounce whose redirect targets an
@@ -1131,6 +1121,14 @@ function forwardToLaunch(req, res) {
       out = rest ? `?${rest}` : '';
     }
   }
+  // The 302 hop carries the same relaxation as /launch when the redirect names
+  // an embeddable app. Whether a browser enforces X-Frame-Options on a
+  // redirect response inside an iframe is not something this code should have
+  // to depend on, and the policy is identical to the one /launch then serves,
+  // so relaxing it here adds no exposure. An unsafe redirect was already
+  // removed above, and frameAncestorsForRedirect only matches `^/<slug>`, so a
+  // dropped absolute target cannot relax anything.
+  applyEmbedHeaders(req, res);
   res.redirect(302, '/launch' + out);
 }
 app.get('/login',  forwardToLaunch);
@@ -1275,6 +1273,17 @@ code{background:#0f1117;border:1px solid #2a2d3a;border-radius:4px;padding:2px 6
 // Error handling
 app.use(notFound);
 app.use(errorHandler);
+
+// Phase 3: move GitHub-backed managed apps onto this host BEFORE listening, one
+// at a time (services/repoMigration.js). It cannot reject and is bounded by its
+// per-app timeout and total budget; the dynamic import sits inside the try so
+// even a module that fails to load leaves boot going.
+try {
+  const { migrateManagedReposAtBoot } = await import('./services/repoMigration.js');
+  await migrateManagedReposAtBoot();
+} catch (e) {
+  log.error(`[repo-migration] could not run, boot continues: ${e.message}`);
+}
 
 // Start server
 app.listen(PORT, HOST, async () => {

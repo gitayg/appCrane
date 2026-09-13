@@ -23,6 +23,25 @@ import { join } from 'path';
 import crypto from 'crypto';
 
 /**
+ * The commit part of a managed-push response. A GitHub commit carries its web
+ * URL and is returned exactly as before. A local repository has no web host, so
+ * its commit is just { sha } — never `html_url: null`, which an agent reads as
+ * "the push did not really land". When a racing push was displaced (localGit's
+ * newest-wins rule) the agent is told, in words, instead of being handed a ref
+ * name it cannot use.
+ */
+function managedCommitView(result) {
+  const view = { commit: result.commit.html_url ? result.commit : { sha: result.commit.sha } };
+  if (Array.isArray(result.dropped) && result.dropped.length) {
+    view.displaced = result.dropped.map((d) => d.sha);
+    view.displaced_note = 'Another push landed on this branch while yours was being built. Yours is now the branch tip; ' +
+      'the displaced commit(s) listed here are kept on the server but are no longer on the branch. If they carried ' +
+      'changes you still need, push those files again.';
+  }
+  return view;
+}
+
+/**
  * MCP tool registry. Each tool:
  *   - name, description, inputSchema (read by the LLM via tools/list)
  *   - requiredRole — 'admin' (any AppCrane admin), 'app_admin' (admin OR per-app
@@ -667,6 +686,11 @@ const TOOLS = [
         config: {
           source_type:    app.source_type,
           github_url:     app.github_url,
+          // Where a managed app's repository lives. A local one has github_url
+          // null by design, and without this an agent reads that as "repo not
+          // configured". Raw column value for anything but NULL, so an
+          // unrecognised marker is visible rather than masked as 'github'.
+          repo_backend:   app.source_type === 'managed' ? (app.repo_backend ?? 'github') : null,
           branch:         app.branch,
           token_set:      !!app.github_token_encrypted,
           domain:         app.domain,
@@ -3210,7 +3234,7 @@ const TOOLS = [
   {
     name: 'appcrane_create_managed_app',
     description:
-      'Create a new app using AppCrane\'s GitHub service-account — the platform creates a repo on the configured org/user, owns it, and the agent works against it through github_* tools without the end user ever needing their own PAT. Use this when the user does not have a GitHub account or does not want to deal with GitHub at all. Requires the platform admin to have configured the service-account in Settings → GitHub. Returns the same shape as appcrane_create_app, plus the auto-created repo metadata. IDEMPOTENT RECOVERY: if the slug already exists as a managed app but its AMC_ repo was never created (a half-created app from an earlier failure — push then returns REPO_NOT_FOUND), calling this again re-provisions the missing repo and returns { repaired: true } instead of erroring. So if a create attempt half-failed, just call it again with the same slug. Owner-or-admin to repair an existing one.',
+      'Create a new managed app — AppCrane creates and owns its git repository, and the agent works against it through appcrane_push_to_managed_app / appcrane_managed_* tools without the end user ever needing a GitHub account or PAT. New managed apps are hosted on this AppCrane server: there is no GitHub repo and no web URL, so github_* tools cannot reach it (managed apps created before this keep their GitHub repo and work as before). Use this when the user does not have a GitHub account or does not want to deal with GitHub at all. Returns the same shape as appcrane_create_app, plus the repo metadata. IDEMPOTENT RECOVERY: if the slug already exists as a managed app but its AMC_ repo was never created (a half-created app from an earlier failure — push then returns REPO_NOT_FOUND), calling this again re-provisions the missing repo where that app\'s repo belongs and returns { repaired: true } instead of erroring. So if a create attempt half-failed, just call it again with the same slug. Owner-or-admin to repair an existing one.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -3235,10 +3259,38 @@ const TOOLS = [
       }
 
       const db = getDb();
-      const { createAppRepo, getServiceConfig } = await import('./githubService.js');
-      const cfg = getServiceConfig();
-      if (!cfg.enabled) throw new Error('GitHub service-account is disabled. Enable it in Settings → GitHub before using managed mode.');
-      if (!cfg.configured) throw new Error('GitHub service-account has no token. Configure it in Settings → GitHub before using managed mode.');
+      const {
+        createManagedRepo, repoBackendOf, NEW_MANAGED_APP_REPO_BACKEND, REPO_BACKEND_GITHUB,
+      } = await import('./managedRepo.js');
+      // The GitHub service account is a prerequisite only for a repo that lives
+      // on GitHub — repairing an existing GitHub-backed app. A new app's repo is
+      // local and needs no GitHub credential at all.
+      const requireServiceAccount = async () => {
+        const { getServiceConfig } = await import('./githubService.js');
+        const cfg = getServiceConfig();
+        if (!cfg.enabled) throw new Error('GitHub service-account is disabled. Enable it in Settings → GitHub before using managed mode.');
+        if (!cfg.configured) throw new Error('GitHub service-account has no token. Configure it in Settings → GitHub before using managed mode.');
+      };
+      // What an agent is told about the repo. GitHub: exactly the fields it got
+      // before. Local: no html_url / clone_url keys at all — the clone "URL" is
+      // an absolute path on the AppCrane host, useless to the agent and not its
+      // business, and a null web URL reads as a failed create.
+      const repoView = (backend, r) => (backend === REPO_BACKEND_GITHUB
+        ? {
+            full_name:      r.full_name,
+            html_url:       r.html_url,
+            clone_url:      r.clone_url,
+            default_branch: r.default_branch,
+            private:        r.private,
+            owner_type:     r.owner_type,
+          }
+        : {
+            full_name:      r.full_name,
+            backend:        backend,
+            default_branch: r.default_branch,
+            private:        r.private,
+            hosted_on:      'this AppCrane server (no web URL; use the appcrane_* managed-app tools)',
+          });
 
       // v2.10.4: self-heal a half-created managed app. If an earlier attempt
       // wrote the app row but never landed the AMC_ repo (e.g. it died on a
@@ -3254,22 +3306,38 @@ const TOOLS = [
         if (!isAdmin(user) && roleForUserOnApp(user, existing) !== 'owner') {
           throw new Error(`App slug '${slug}' already exists and you are not its owner.`);
         }
+        // Repair where THIS app's repo belongs, per its marker — never
+        // NEW_MANAGED_APP_REPO_BACKEND. Re-provisioning a GitHub-backed app
+        // locally would silently move it off GitHub.
+        const backend = repoBackendOf(existing);
+        if (backend === REPO_BACKEND_GITHUB) await requireServiceAccount();
         let repaired;
         try {
-          repaired = await createAppRepo(slug, { description: args.description || existing.description || '' });
+          repaired = await createManagedRepo(backend, slug, { description: args.description || existing.description || '' });
         } catch (e) {
           if (/REPO_EXISTS/.test(e.message)) {
             throw new Error(`App '${slug}' already exists and its AMC_ repo is provisioned — nothing to repair. Use appcrane_push_to_managed_app + appcrane_deploy.`);
           }
           throw new Error(`Failed to re-provision repo for '${slug}': ${e.message}`);
         }
-        db.prepare("UPDATE apps SET github_url = ?, branch = COALESCE(NULLIF(branch, ''), ?), source_type = 'managed' WHERE id = ?")
-          .run(repaired.html_url, repaired.default_branch || 'main', existing.id);
-        log.info(`MCP: repaired half-created managed app '${slug}' — re-provisioned ${repaired.full_name || repaired.name} by user ${user.id}`);
+        if (backend === REPO_BACKEND_GITHUB) {
+          db.prepare("UPDATE apps SET github_url = ?, branch = COALESCE(NULLIF(branch, ''), ?), source_type = 'managed' WHERE id = ?")
+            .run(repaired.html_url, repaired.default_branch || 'main', existing.id);
+        } else {
+          db.prepare("UPDATE apps SET branch = COALESCE(NULLIF(branch, ''), ?) WHERE id = ?")
+            .run(repaired.default_branch || 'main', existing.id);
+        }
+        // `name` used to read repaired.name, which neither backend returns, so
+        // it was always undefined. The repo NAME is the last segment of
+        // full_name ('<owner>/AMC_<slug>' on GitHub, 'AMC_<slug>' locally).
+        const repairedName = String(repaired.full_name || '').split('/').pop();
+        log.info(`MCP: repaired half-created managed app '${slug}' — re-provisioned ${repaired.full_name} (${backend}) by user ${user.id}`);
         return {
           app: slug,
           repaired: true,
-          repo: { name: repaired.name, html_url: repaired.html_url, default_branch: repaired.default_branch },
+          repo: backend === REPO_BACKEND_GITHUB
+            ? { name: repairedName, html_url: repaired.html_url, default_branch: repaired.default_branch }
+            : { name: repairedName, backend, default_branch: repaired.default_branch },
           next: `Repo (re)provisioned. Next: appcrane_push_to_managed_app slug="${slug}" files=[…], then appcrane_deploy slug="${slug}" stage="sandbox".`,
         };
       }
@@ -3278,9 +3346,11 @@ const TOOLS = [
       // owner is wrong, slug collides), bail before touching the DB so we
       // don't leave half-baked apps behind.
 
+      const backend = NEW_MANAGED_APP_REPO_BACKEND;
+      if (backend === REPO_BACKEND_GITHUB) await requireServiceAccount();
       let repo;
       try {
-        repo = await createAppRepo(slug, { description: args.description || '' });
+        repo = await createManagedRepo(backend, slug, { description: args.description || '' });
       } catch (e) {
         throw new Error(`Failed to create managed repo for '${slug}': ${e.message}`);
       }
@@ -3299,9 +3369,10 @@ const TOOLS = [
       const branch = args.branch || repo.default_branch || 'main';
 
       const result = db.prepare(`
-        INSERT INTO apps (name, slug, slot, domain, description, category, source_type, github_url, branch, github_token_encrypted, resource_limits, created_by)
-        VALUES (?, ?, ?, ?, ?, ?, 'managed', ?, ?, NULL, ?, ?)
-      `).run(name, slug, slot, args.domain || null, args.description || null, null, repo.html_url, branch, resourceLimits, user.id);
+        INSERT INTO apps (name, slug, slot, domain, description, category, source_type, github_url, branch, github_token_encrypted, resource_limits, created_by, repo_backend)
+        VALUES (?, ?, ?, ?, ?, ?, 'managed', ?, ?, NULL, ?, ?, ?)
+      `).run(name, slug, slot, args.domain || null, args.description || null, null, repo.html_url, branch, resourceLimits, user.id,
+        backend === REPO_BACKEND_GITHUB ? null : backend);
       const appId = result.lastInsertRowid;
 
       for (const env of ['production', 'sandbox']) {
@@ -3336,22 +3407,24 @@ const TOOLS = [
         refreshAppChecks(appId);
       } catch (_) {}
 
-      log.info(`MCP: managed app '${slug}' created by user ${user.id}; repo=${repo.full_name}`);
+      log.info(`MCP: managed app '${slug}' created by user ${user.id}; repo=${repo.full_name} (${backend})`);
       const craneDomain = process.env.CRANE_DOMAIN;
       const urls = craneDomain ? {
         production: `https://${craneDomain}/${slug}`,
         sandbox:    `https://${craneDomain}/${slug}-sandbox`,
       } : null;
+      if (backend !== REPO_BACKEND_GITHUB) {
+        return {
+          app: { slug, name, branch, source_type: 'managed', repo_backend: backend },
+          repo: repoView(backend, repo),
+          ports,
+          urls,
+          next: `Push scaffolding via appcrane_push_to_managed_app slug="${slug}" files=[…], then appcrane_deploy slug="${slug}" stage="sandbox". This app's repository is hosted on this AppCrane server, not GitHub — read and change it only through appcrane_push_to_managed_app / appcrane_managed_push_chunk / appcrane_managed_assemble / appcrane_managed_patch. github_* tools cannot reach it.`,
+        };
+      }
       return {
         app: { slug, name, github_url: repo.html_url, branch, source_type: 'managed' },
-        repo: {
-          full_name:      repo.full_name,
-          html_url:       repo.html_url,
-          clone_url:      repo.clone_url,
-          default_branch: repo.default_branch,
-          private:        repo.private,
-          owner_type:     repo.owner_type,
-        },
+        repo: repoView(backend, repo),
         ports,
         urls,
         next: `Push scaffolding via appcrane_push_to_managed_app slug="${slug}" files=[…], then appcrane_deploy slug="${slug}" stage="sandbox". Do NOT use github_push_files for this repo — that's authed with the user's PAT and has zero access to the service account.`,
@@ -3432,10 +3505,12 @@ const TOOLS = [
         });
       }
 
-      const { pushFilesToManagedRepo } = await import('./githubService.js');
-      const result = await pushFilesToManagedRepo(app.slug, resolvedFiles, {
+      const { pushFilesToManagedRepo } = await import('./managedRepo.js');
+      const { pushDeployView } = await import('./deployTrigger.js');
+      const result = await pushFilesToManagedRepo(app, resolvedFiles, {
         message: args.message,
         branch:  args.branch || app.branch,
+        actorId: user.id,
       });
       // v2.10.2: record the SHA we just authored+pushed so the next deploy's
       // supply-chain verify can compare the clone HEAD to THIS, not to GitHub's
@@ -3456,11 +3531,11 @@ const TOOLS = [
       log.info(`MCP: pushed ${result.files.length} file(s) to managed repo AMC_${app.slug} (commit ${result.commit.sha.slice(0, 7)}) by user ${user.id}${consumedTokens.length ? ` [${consumedTokens.length} staged]` : ''}`);
       return {
         app:     app.slug,
-        commit:  result.commit,
+        ...managedCommitView(result),
         branch:  result.branch,
         files:   result.files,
         message: result.message,
-        next:    `Files pushed. Next: appcrane_deploy slug="${app.slug}" stage="sandbox" to ship.`,
+        ...pushDeployView(app.slug, result, `Files pushed. Next: appcrane_deploy slug="${app.slug}" stage="sandbox" to ship.`),
       };
     },
   },
@@ -3605,10 +3680,12 @@ const TOOLS = [
         throw new Error(`assembled file SHA-256 mismatch: you declared ${args.sha256} but the reassembled bytes hash to ${fullSha}. Not committing. Re-check the parts.`);
       }
 
-      const { pushFilesToManagedRepo } = await import('./githubService.js');
-      const result = await pushFilesToManagedRepo(app.slug, [{ path: args.path, content: buf.toString('base64'), encoding: 'base64' }], {
+      const { pushFilesToManagedRepo } = await import('./managedRepo.js');
+      const { pushDeployView } = await import('./deployTrigger.js');
+      const result = await pushFilesToManagedRepo(app, [{ path: args.path, content: buf.toString('base64'), encoding: 'base64' }], {
         message: args.message || `chore: update ${args.path}`,
         branch:  args.branch || app.branch,
+        actorId: user.id,
       });
       if (result?.commit?.sha && /^[0-9a-f]{40}$/.test(result.commit.sha)) {
         db.prepare('UPDATE apps SET last_managed_push_sha = ? WHERE id = ?').run(result.commit.sha, app.id);
@@ -3617,10 +3694,10 @@ const TOOLS = [
       log.info(`MCP: assembled ${of}-part upload (${buf.length} bytes) to AMC_${app.slug}:${args.path} (commit ${result.commit.sha.slice(0, 7)}) by user ${user.id}`);
       return {
         app:    app.slug,
-        commit: result.commit,
+        ...managedCommitView(result),
         branch: result.branch,
         file:   { path: args.path, bytes: buf.length, sha256: fullSha, ...result.files[0] },
-        next:   `File committed. Next: appcrane_deploy slug="${app.slug}" stage="sandbox" to ship.`,
+        ...pushDeployView(app.slug, result, `File committed. Next: appcrane_deploy slug="${app.slug}" stage="sandbox" to ship.`),
       };
     },
   },
@@ -3654,19 +3731,21 @@ const TOOLS = [
         throw new Error(`invalid file path '${args.path}': must be repo-relative, no ".." or leading slash`);
       }
       const branch = args.branch || app.branch;
-      const { readManagedRepoFile, pushFilesToManagedRepo } = await import('./githubService.js');
+      const { readManagedRepoFile, pushFilesToManagedRepo } = await import('./managedRepo.js');
+      const { pushDeployView } = await import('./deployTrigger.js');
       const { applyUnifiedDiff } = await import('./unifiedDiff.js');
 
-      const current = await readManagedRepoFile(app.slug, args.path, { branch });
+      const current = await readManagedRepoFile(app, args.path, { branch });
       const patched = applyUnifiedDiff(current.content, args.unified_diff);
       if (patched === current.content) {
         throw new Error(`the unified_diff produced no change to '${args.path}' — it may already be applied, or the diff is empty.`);
       }
 
       const db = getDb();
-      const result = await pushFilesToManagedRepo(app.slug, [{ path: args.path, content: patched, encoding: 'utf-8' }], {
+      const result = await pushFilesToManagedRepo(app, [{ path: args.path, content: patched, encoding: 'utf-8' }], {
         message: args.message || `chore: patch ${args.path}`,
         branch,
+        actorId: user.id,
       });
       if (result?.commit?.sha && /^[0-9a-f]{40}$/.test(result.commit.sha)) {
         db.prepare('UPDATE apps SET last_managed_push_sha = ? WHERE id = ?').run(result.commit.sha, app.id);
@@ -3674,10 +3753,10 @@ const TOOLS = [
       log.info(`MCP: patched AMC_${app.slug}:${args.path} (${current.bytes}→${Buffer.byteLength(patched, 'utf-8')} bytes, commit ${result.commit.sha.slice(0, 7)}) by user ${user.id}`);
       return {
         app:    app.slug,
-        commit: result.commit,
+        ...managedCommitView(result),
         branch: result.branch,
         file:   { path: args.path, bytes_before: current.bytes, bytes_after: Buffer.byteLength(patched, 'utf-8'), ...result.files[0] },
-        next:   `Patch committed. Next: appcrane_deploy slug="${app.slug}" stage="sandbox" to ship.`,
+        ...pushDeployView(app.slug, result, `Patch committed. Next: appcrane_deploy slug="${app.slug}" stage="sandbox" to ship.`),
       };
     },
   },

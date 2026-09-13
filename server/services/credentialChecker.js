@@ -24,6 +24,7 @@ import { getDb } from '../db.js';
 import { sendEmail } from './emailService.js';
 import { probeGraph } from './graphMailer.js';
 import { probeServiceAccount } from './githubService.js';
+import { repoBackendOf, REPO_BACKEND_LOCAL } from './managedRepo.js';
 import log from '../utils/logger.js';
 
 const CHECK_INTERVAL_MS = 15 * 60_000;
@@ -38,8 +39,38 @@ let timer = null;
 // VALID_TABS). Both are kept: dropping `fix` would blank the banner.
 export const PROBES = [
   { name: 'Microsoft Graph (email)', fix: 'Settings → Mail',   href: '/settings#mail',   run: probeGraph },
-  { name: 'GitHub service account',  fix: 'Settings → GitHub', href: '/settings#github', run: probeServiceAccount },
+  { name: 'GitHub service account',  fix: 'Settings → GitHub', href: '/settings#github', run: probeGithubServiceAccount },
 ];
+
+/**
+ * The service-account token is used only by managed apps whose repository is
+ * on GitHub (apps.repo_backend NULL). New managed apps are local, so a box can
+ * reach a state where nothing uses the token: alerting every admin daily that
+ * an unused credential failed is noise, and it trains people to ignore the
+ * alert that matters. So the probe runs while at least one managed app is
+ * GitHub-backed and skips otherwise — the same { ok, skipped } a disabled
+ * service account already returns.
+ *
+ * The backend is read through managedRepo.js, the one place that decides it. A
+ * row it cannot classify (unknown marker), or a DB that cannot be read, counts
+ * as GitHub-backed: the failure direction is "probe", never "go quiet".
+ */
+export function hasGithubBackedManagedApp() {
+  let rows;
+  try {
+    rows = getDb().prepare("SELECT slug, source_type, repo_backend FROM apps WHERE source_type = 'managed'").all();
+  } catch (_) {
+    return true;
+  }
+  return rows.some((r) => {
+    try { return repoBackendOf(r) !== REPO_BACKEND_LOCAL; } catch (_) { return true; }
+  });
+}
+
+async function probeGithubServiceAccount() {
+  if (!hasGithubBackedManagedApp()) return { ok: true, skipped: true };
+  return probeServiceAccount();
+}
 
 /** Breadcrumb + in-app path for a probe name, for callers holding only the name. */
 export function probeLink(name) {

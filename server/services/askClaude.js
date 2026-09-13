@@ -8,6 +8,8 @@ import { runAgentExec } from './llm/runAgent.js';
 import { prepareSkillsMount } from './skills.js';
 import { prepareClaudeCredentialsMount } from './claudeCredentials.js';
 import log from '../utils/logger.js';
+import { usesLocalRepo } from './managedRepo.js';
+import { runLocalAskJob } from './askLocalRepo.js';
 
 const ASK_IMAGE      = process.env.APPSTUDIO_IMAGE || 'appcrane-studio:latest';
 const ASK_MODEL      = process.env.APPSTUDIO_CODER_MODEL || 'claude-sonnet-4-6';
@@ -167,6 +169,13 @@ async function ensureSessionContainer(sessionId, app, onLog) {
 }
 
 export async function runAskJob({ sessionId, app, question, history, agentContext, contextDoc, onLog, onTokens }) {
+  // A local-backed managed app is answered from its repository on this host
+  // by a direct Messages API call with read-only git tools — no container.
+  // Every other app, including a managed app with repo_backend NULL, takes the
+  // container path below unchanged.
+  if (usesLocalRepo(app)) {
+    return runLocalAskJob({ app, question, history, agentContext, contextDoc, onLog, onTokens, model: ASK_MODEL });
+  }
   const session = await ensureSessionContainer(sessionId, app, onLog);
   const prompt = buildPrompt({ contextDoc, agentContext, history, question });
 

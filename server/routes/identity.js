@@ -8,6 +8,8 @@ import { setSessionCookie, clearSessionCookie } from '../utils/sessionCookie.js'
 import { isSsoOnly } from '../services/authPolicy.js';
 import { roleKeysForUser } from '../services/appDefinedRoles.js';
 import log from '../utils/logger.js';
+import { isSafeRedirect } from '../utils/safeRedirect.js';
+import { frameAncestorsForRedirect } from '../utils/embed.js';
 
 const ICON_DIR = resolve(process.env.DATA_DIR || './data', 'apps');
 const ICON_EXTS = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg'];
@@ -285,8 +287,42 @@ router.get('/verify', (req, res) => {
     return unwrapNestedRedirect(rawUrl);
   }
 
+  // The deep link travels as a same-host PATH, not an absolute URL.
+  //
+  // It used to be `https://<host>/<slug>`, and every consumer downstream only
+  // accepts a path: /login's forwardToLaunch runs isSafeRedirect, which refuses
+  // any absolute URL (correctly — it is the open-redirect guard), so the target
+  // was logged as "dropped unsafe redirect target" and discarded. Two measured
+  // consequences: every signed-out visitor to an app landed on /launch instead
+  // of the app they asked for, and an app embedded in an iframe on a sibling
+  // host stayed blank, because the frame-ancestors relaxation for the sign-in
+  // step keys on `?redirect=/<slug>` and never saw one.
+  //
+  // Only when the request arrived on the platform's own host. forward_auth is
+  // only emitted under that host today, but a request from any other host keeps
+  // the absolute form, so it is never silently re-pointed at a same-named path
+  // here. A path that is not itself a safe redirect is dropped rather than sent.
+  function redirectTargetFor(orig) {
+    if (!orig) return '';
+    try {
+      const u = new URL(orig);
+      if (u.host !== new URL(craneUrl).host) return orig;
+      const path = u.pathname + u.search + u.hash;
+      return isSafeRedirect(path) ? path : '';
+    } catch (_) {
+      return '';
+    }
+  }
+
   function loginRedirect(extra = {}) {
-    const orig = originalUrl();
+    const orig = redirectTargetFor(originalUrl());
+    // This 302 is the first hop an embedded frame sees, so it carries the same
+    // relaxation as /login and /launch rather than the global SAMEORIGIN.
+    const fa = frameAncestorsForRedirect(getDb(), orig);
+    if (fa) {
+      res.removeHeader('X-Frame-Options');
+      res.setHeader('Content-Security-Policy', `frame-ancestors ${fa}`);
+    }
     const p = new URLSearchParams({ ...(orig && { redirect: orig }), ...extra });
     const qs = p.toString() ? '?' + p.toString() : '';
     return res.redirect(302, `${craneUrl}/login${qs}`);

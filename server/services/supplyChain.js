@@ -55,11 +55,34 @@
  * truth. The read-after-write race that motivated the shortcut (GitHub's
  * branch API lags a push by ~1s, so an immediate deploy saw the old SHA)
  * is handled by retrying a mismatch a few times before believing it.
+ *
+ * LOCAL MANAGED REPOS (a WEAKER witness — read this before relying on it)
+ * -----------------------------------------------------------------------
+ * A managed app with apps.repo_backend='local' keeps its repository on this
+ * AppCrane host (services/localGit.js). Its clone HEAD is compared against
+ * that repository's branch tip, read with the host's git config cut off.
+ *
+ * That is NOT equivalent to the GitHub check. GitHub is a second party: the
+ * writer (an agent's push) and the verifier (this function) are on different
+ * machines, so tampering with the bytes between them has to get past GitHub.
+ * Here the repository, the clone and the verifier share one host and one
+ * DATA_DIR. What the check still proves: the build is the commit the local
+ * repository names for the branch — not a stale clone, a different ref, or a
+ * release directory altered between clone and verify. What it cannot prove:
+ * that the repository itself was not rewritten by something with write access
+ * to DATA_DIR; anything able to do that can move the branch tip too. The log
+ * line says "same-host witness" so nobody reads it as the GitHub guarantee.
+ *
+ * No retries for local: a ref update is visible the moment update-ref returns
+ * (there is no replica to lag), so a disagreement is an answer, not a race.
+ * Failing to read the repository is handled like an unreachable GitHub —
+ * fail-closed unless APPCRANE_REQUIRE_VERIFY=0.
  */
 
 import { getDb } from '../db.js';
 import { decrypt } from './encryption.js';
 import { getServiceTokenInternal } from './githubService.js';
+import { usesLocalRepo, localBranchHeadSha } from './managedRepo.js';
 import { execFileSync } from 'child_process';
 import log from '../utils/logger.js';
 
@@ -197,6 +220,33 @@ function unanswered(reason, detail, appendLog, extra) {
 }
 
 /**
+ * The local-repo counterpart of the GitHub comparison. One read, no retries,
+ * and a same-host witness — see LOCAL MANAGED REPOS at the top of this file.
+ */
+async function verifyAgainstLocalRepo(app, localSha, branchName, appendLog) {
+  const repo = `AMC_${app.slug}@${branchName}`;
+  let tip;
+  try {
+    tip = await localBranchHeadSha(app, branchName);
+  } catch (e) {
+    log.warn(`supply-chain verify: could not read local managed repository ${repo} — ${e.message}`);
+    return unanswered('local-repo-unreadable', `reading the local managed repository ${repo} failed: ${e.message}`, appendLog, { localSha });
+  }
+  if (tip !== localSha) {
+    throw new Error(
+      `Supply-chain verify FAILED: local HEAD ${localSha.slice(0, 12)}… does not match the local managed repository ${repo} ${tip.slice(0, 12)}…. ` +
+      `Refusing to swap container.`
+    );
+  }
+  appendLog(
+    `Supply-chain verify: OK (HEAD ${localSha.slice(0, 12)} matches the local managed repository ${repo}). ` +
+    `Same-host witness: the repository and this check share one AppCrane host, so this proves the build is the ` +
+    `commit the repository names, not that the repository itself is untampered.`
+  );
+  return { skipped: false, verified: true, witness: 'local', localSha, remoteSha: tip };
+}
+
+/**
  * Verify the cloned working tree's HEAD SHA matches GitHub's claim for
  * the same branch. Throws on mismatch and on any failure to obtain an
  * answer (see FAIL-CLOSED POLICY above). Returns without throwing on a
@@ -238,6 +288,12 @@ export async function verifyCommitSha(app, releaseDir, branch, appendLog) {
         `The clone is stale — re-run the deploy so it fetches the pushed commit.`
       );
     }
+  }
+
+  // Before the github_url parse: a local-backed app has no github_url, and the
+  // "not a github.com URL" skip below must never be how it gets through.
+  if (usesLocalRepo(app)) {
+    return verifyAgainstLocalRepo(app, localSha, branch || app.branch || 'main', appendLog);
   }
 
   const parsed = parseGithubUrl(app.github_url);

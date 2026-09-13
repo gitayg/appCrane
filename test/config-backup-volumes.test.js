@@ -27,7 +27,7 @@ process.env.LOG_LEVEL = 'error';
 
 const { initDb } = await import('../server/db.js');
 initDb();
-const { exportConfig, importConfig } = await import('../server/services/configBackup.js');
+const { exportDataArchive, importDataArchive } = await import('../server/services/configBackup.js');
 
 const SLUG = 'odoo';
 const ENV = 'production';
@@ -50,9 +50,9 @@ before(() => {
 
 after(() => { try { rmSync(ROOT, { recursive: true, force: true }); } catch (_) {} });
 
-test('a declared volume survives an export/import round trip', () => {
-  const { buffer: zip, manifest } = exportConfig('2.70.2');
-  assert.ok(Buffer.isBuffer(zip) && zip.length > 0, 'export produced no bundle');
+test('a declared volume survives an export/import round trip', async () => {
+  const { path: zip, bytes, manifest } = await exportDataArchive({ version: '2.70.2' });
+  assert.ok(bytes > 0, 'export produced no archive');
   assert.ok(manifest.includes.includes('appvolumes'),
     'the manifest must declare the volume prefix, or a reader cannot tell an old ' +
     'bundle (no volumes captured) from a new one');
@@ -62,7 +62,7 @@ test('a declared volume survives an export/import round trip', () => {
   rmSync(join(sharedDir, 'volumes'), { recursive: true, force: true });
   assert.equal(existsSync(volFile), false, 'precondition: the volume tree is gone');
 
-  const result = importConfig(zip, { restoreEnv: false });
+  const result = await importDataArchive(zip, { restoreEnv: false });
 
   assert.equal(existsSync(dataFile), true, '/data did not come back');
   assert.equal(readFileSync(dataFile, 'utf8'), 'DATA-PAYLOAD');
@@ -89,38 +89,21 @@ test('the container path is reconstructed exactly, not flattened', () => {
     'the volume tree was flattened on restore');
 });
 
-test('an app with no declared volumes is unaffected', () => {
+test('an app with no declared volumes is unaffected', async () => {
   const plain = join(ROOT, 'apps', 'plainapp', 'sandbox', 'shared', 'data');
   mkdirSync(plain, { recursive: true });
   writeFileSync(join(plain, 'only.txt'), 'ONLY-DATA');
 
-  const { buffer: zip } = exportConfig('2.70.2');
+  const { path: zip } = await exportDataArchive({ version: '2.70.2' });
   rmSync(join(ROOT, 'apps', 'plainapp'), { recursive: true, force: true });
-  importConfig(zip, { restoreEnv: false });
+  await importDataArchive(zip, { restoreEnv: false });
 
   assert.equal(readFileSync(join(plain, 'only.txt'), 'utf8'), 'ONLY-DATA',
     'adding volume support must not disturb the pre-existing /data path');
 });
 
-// PATH TRAVERSAL: NOT PROVEN HERE, and the reason is worth recording.
-//
-// The import path has two independent guards — `name.includes('..')` skips the
-// entry, and writeUnderApps() resolves the destination and range-checks it
-// against the apps root. Removing EITHER one, or BOTH together, leaves this
-// file green and writes nothing outside the tree. That is not defence in depth
-// working; it is the test never reaching the code.
-//
-// Measured cause: adm-zip normalises traversal names in its WRITER.
-//
-//   z.addFile('appvolumes/../../../../../../tmp/crane-escaped.txt', ...)
-//   -> stored entry name: "tmp/crane-escaped.txt"
-//
-// The '..' segments are collapsed before the bytes hit the archive, so the
-// entry no longer carries the 'appvolumes/' prefix and the import loop ignores
-// it. A hostile bundle built with adm-zip therefore CANNOT express this attack,
-// and no test written with adm-zip can exercise either guard.
-//
-// Proving them needs a hand-assembled archive with a raw filename in the local
-// file header — worth doing, not done here. Until then both guards are
-// unexercised by any test, for the `appdata/` prefix as much as the new
-// `appvolumes/` one.
+// PATH TRAVERSAL is proven in test/data-archive.test.js, against archives
+// assembled byte by byte (tar headers, and zip names patched after adm-zip
+// wrote them) so the hostile names actually reach the import guards. adm-zip
+// normalises '..' out of names in its writer, so no archive built with it here
+// could exercise them.

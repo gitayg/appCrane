@@ -8,7 +8,9 @@
  */
 import { getDb } from '../db.js';
 import { encrypt, decrypt } from './encryption.js';
-import { exportConfig } from './configBackup.js';
+import { readFile, rm } from 'fs/promises';
+import { join } from 'path';
+import { exportDataArchive } from './configBackup.js';
 import { s3PutObject } from './s3.js';
 import log from '../utils/logger.js';
 
@@ -62,16 +64,27 @@ export async function runS3Backup() {
     throw new Error('S3 backup is not fully configured (needs bucket, access key, and secret).');
   }
   const secret = decrypt(get(db, K.secretEnc));
-  const { buffer, manifest } = exportConfig();
+  // s3PutObject signs a buffered payload, so the finished archive is read back
+  // for the upload; the export itself is streamed to a temp file.
+  const { newWorkDir } = await import('./backupFiles.js');
+  const work = await newWorkDir('s3');
+  let buffer, manifest;
+  try {
+    const out = await exportDataArchive({ dest: join(work, 'backup.tar.gz') });
+    manifest = out.manifest;
+    buffer = await readFile(out.path);
+  } finally {
+    await rm(work, { recursive: true, force: true });
+  }
   const host = (process.env.CRANE_DOMAIN || 'appcrane').replace(/[^a-z0-9.-]/gi, '');
   const stamp = manifest.exported_at.replace(/[:.]/g, '-');
   const prefix = cfg.prefix ? cfg.prefix.replace(/^\/+|\/+$/g, '') + '/' : '';
-  const key = `${prefix}appcrane-backup-${host}-${stamp}.zip`;
+  const key = `${prefix}appcrane-backup-${host}-${stamp}.tar.gz`;
   try {
     const r = await s3PutObject({
       bucket: cfg.bucket, region: cfg.region, endpoint: cfg.endpoint || undefined,
       accessKeyId: cfg.access_key_id, secretAccessKey: secret,
-      key, body: buffer, contentType: 'application/zip',
+      key, body: buffer, contentType: 'application/gzip',
     });
     set(db, K.lastRun, new Date().toISOString());
     set(db, K.lastError, '');

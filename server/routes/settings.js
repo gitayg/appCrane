@@ -166,26 +166,136 @@ router.post('/mail/test', requireAuth, requirePlatformAdmin, async (req, res) =>
   res.json({ message: `Test email queued to ${req.user.email} (queue #${id}). Check your inbox shortly.`, queue_id: id });
 });
 
-// ── Config backup / restore (v2.9.0) — platform_admin only ──────────────
+// ── Data backup / restore (v2.9.0, streamed since v2.74.0) — platform_admin only
 //
-// Export the whole-system config (DB + .env + icons) as one zip, and import
-// it back onto a fresh host. The bundle contains the ENCRYPTION_KEY and every
-// encrypted secret, so both routes are platform-admin-gated. Registered before
-// the generic /:key handlers.
+// The data archive (DB + .env + icons + /data + declared volumes) contains the
+// ENCRYPTION_KEY and every encrypted secret, so every route is
+// platform-admin-gated. Registered before the generic /:key handlers.
+//
+// Nothing here holds an archive in memory: exports are written to disk by a
+// spawned tar, downloads are piped from that file, uploads are streamed to disk
+// by multer's diskStorage, and imports read the file. See services/configBackup.js.
 
+// In-flight backup jobs (data and repo exports). Opaque ids; looked up only by
+// a platform admin who was handed the id.
+const backupJobs = new Map();
+
+async function newBackupJob(kind, fields) {
+  const { randomBytes } = await import('crypto');
+  const id = randomBytes(16).toString('base64url');
+  const job = { id, kind, state: 'running', started_at: new Date().toISOString(), result: null, error: null, ...fields };
+  backupJobs.set(id, job);
+  return job;
+}
+
+const finishJob = (job, p) => p
+  .then((r) => { job.result = r; job.state = 'done'; job.finished_at = new Date().toISOString(); })
+  .catch((e) => { job.error = e.message; job.state = 'failed'; job.finished_at = new Date().toISOString(); });
+
+// Browser download (the Settings page). Written to a private temp file, piped
+// to the response, deleted when the response ends — the backups directory is
+// not left holding a key-bearing file nobody asked to keep.
 router.get('/config/export', requireAuth, requirePlatformAdmin, async (req, res) => {
-  const { exportConfig } = await import('../services/configBackup.js');
-  const { buffer, manifest } = exportConfig();
-  const host = (process.env.CRANE_DOMAIN || 'appcrane').replace(/[^a-z0-9.-]/gi, '');
-  const date = manifest.exported_at.slice(0, 10);
-  // v2.72.0: the image-set fingerprint goes in the filename so the config zip
-  // and its image archive (appcrane-images-<same 12>-<date>.tar) are visibly a
-  // pair on a directory listing, not just inside their manifests.
-  const fp = manifest.image_set?.fingerprint ? `-${manifest.image_set.fingerprint.slice(0, 12)}` : '';
-  res.setHeader('Content-Type', 'application/zip');
-  res.setHeader('Content-Disposition', `attachment; filename="appcrane-backup-${host}${fp}-${date}.zip"`);
-  res.setHeader('Content-Length', buffer.length);
-  res.end(buffer);
+  const { exportDataArchive } = await import('../services/configBackup.js');
+  const { newWorkDir } = await import('../services/backupFiles.js');
+  const { createReadStream } = await import('fs');
+  const { rm } = await import('fs/promises');
+  const { join } = await import('path');
+  const work = await newWorkDir('download');
+  const cleanup = () => rm(work, { recursive: true, force: true }).catch(() => {});
+  let out;
+  try {
+    const at = new Date();
+    const { dataArchiveFileName } = await import('../services/configBackup.js');
+    out = await exportDataArchive({ at, dest: join(work, 'export.tar.gz') });
+    const host = (process.env.CRANE_DOMAIN || 'appcrane').replace(/[^a-z0-9.-]/gi, '');
+    out.file = dataArchiveFileName(host, out.manifest.image_set?.fingerprint, at);
+  } catch (e) {
+    await cleanup();
+    return res.status(e.status || 500).json({ error: { code: 'EXPORT_FAILED', message: e.message } });
+  }
+  res.setHeader('Content-Type', 'application/gzip');
+  res.setHeader('Content-Disposition', `attachment; filename="${out.file}"`);
+  res.setHeader('Content-Length', out.bytes);
+  const stream = createReadStream(out.path);
+  res.on('close', () => { stream.destroy(); cleanup(); });
+  stream.pipe(res);
+});
+
+// On-host export, kept in DATA_DIR/backups. Returns a job; poll GET /config/export/:id.
+router.post('/config/export', requireAuth, requirePlatformAdmin, async (req, res) => {
+  const { exportDataArchive } = await import('../services/configBackup.js');
+  const job = await newBackupJob('data-export', {});
+  finishJob(job, exportDataArchive({ force: !!(req.body || {}).force }));
+  res.status(202).json({ job_id: job.id, state: job.state });
+});
+
+router.get('/config/export/:id', requireAuth, requirePlatformAdmin, (req, res) => {
+  const job = backupJobs.get(req.params.id);
+  if (!job || job.kind !== 'data-export') return res.status(404).json({ error: { code: 'NO_SUCH_JOB', message: 'Unknown export job' } });
+  const r = job.result ? { path: job.result.path, file: job.result.file, bytes: job.result.bytes, warnings: job.result.warnings, manifest: job.result.manifest } : null;
+  res.json({ job_id: job.id, state: job.state, started_at: job.started_at, finished_at: job.finished_at || null, result: r, error: job.error });
+});
+
+// ── Managed-app repository archives (v2.74.0) — platform_admin only ─────
+//
+// One archive per host-local repo, written to DATA_DIR/backups and restored
+// from a path confined there, one repo at a time. See services/repoArchive.js.
+
+router.get('/repos/plan', requireAuth, requirePlatformAdmin, async (req, res) => {
+  const { planRepoArchives } = await import('../services/repoArchive.js');
+  try {
+    res.json(await planRepoArchives());
+  } catch (e) {
+    res.status(400).json({ error: { code: 'PLAN_FAILED', message: e.message } });
+  }
+});
+
+router.post('/repos/export', requireAuth, requirePlatformAdmin, async (req, res) => {
+  const { exportRepoArchives } = await import('../services/repoArchive.js');
+  const { SLUG_RE } = await import('../services/backupFiles.js');
+  const body = req.body || {};
+  let slugs;
+  if (body.slugs !== undefined) {
+    if (!Array.isArray(body.slugs) || !body.slugs.every((s) => typeof s === 'string' && SLUG_RE.test(s))) {
+      return res.status(400).json({ error: { code: 'VALIDATION', message: 'slugs must be an array of app slugs' } });
+    }
+    slugs = body.slugs;
+  }
+  const job = await newBackupJob('repo-export', { progress: null });
+  finishJob(job, exportRepoArchives({ slugs, onProgress: (p) => { job.progress = p; } }));
+  res.status(202).json({ job_id: job.id, state: job.state });
+});
+
+router.get('/repos/export/:id', requireAuth, requirePlatformAdmin, (req, res) => {
+  const job = backupJobs.get(req.params.id);
+  if (!job || job.kind !== 'repo-export') return res.status(404).json({ error: { code: 'NO_SUCH_JOB', message: 'Unknown export job' } });
+  res.json({ job_id: job.id, state: job.state, started_at: job.started_at, finished_at: job.finished_at || null, progress: job.progress, result: job.result, error: job.error });
+});
+
+// Restore ONE repo. `slug` is required and must match the archive, so an
+// archive cannot be restored over a different app by mistake.
+router.post('/repos/import', requireAuth, requirePlatformAdmin, async (req, res) => {
+  const { importRepoArchive } = await import('../services/repoArchive.js');
+  const { SLUG_RE } = await import('../services/backupFiles.js');
+  const { path, slug } = req.body || {};
+  if (typeof slug !== 'string' || !SLUG_RE.test(slug)) {
+    return res.status(400).json({ error: { code: 'VALIDATION', message: 'slug required (the app whose repository this archive restores)' } });
+  }
+  try {
+    res.json(await importRepoArchive(path, { slug }));
+  } catch (e) {
+    res.status(e.status || 400).json({ error: { code: 'IMPORT_FAILED', message: e.message } });
+  }
+});
+
+router.get('/repos/verify', requireAuth, requirePlatformAdmin, async (req, res) => {
+  const { verifyRepoSet } = await import('../services/repoArchive.js');
+  try {
+    res.json(await verifyRepoSet());
+  } catch (e) {
+    res.status(400).json({ error: { code: 'VERIFY_FAILED', message: e.message } });
+  }
 });
 
 // ── Offline image archive (v2.72.0) — platform_admin only ──────────────
@@ -342,27 +452,73 @@ router.post('/backup/s3/run', requireAuth, requirePlatformAdmin, async (_req, re
   }
 });
 
+// Restore a data archive. Two ways in:
+//   - multipart upload (field `file`, the Settings page): streamed to a private
+//     file under DATA_DIR/backups by multer's diskStorage, imported, deleted.
+//   - JSON { path }: an archive already in DATA_DIR/backups (scp'd there),
+//     confined to that directory.
+//
+// v2.74.0: the 200 MB cap is gone. It existed because the upload was held in
+// memory; it now goes to disk, so the limit that matters is disk. The upload
+// is refused up front when Content-Length exceeds free space minus a reserve,
+// and multer's fileSize is set to that same figure so a request that lies
+// about its length (or is chunked) is cut off before it fills the disk.
+export const UPLOAD_DISK_RESERVE = 1024 * 1024 * 1024;
+
 router.post('/config/import', requireAuth, requirePlatformAdmin, async (req, res) => {
-  const multer = (await import('multer')).default;
-  const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 200 * 1024 * 1024 } }).single('file');
-  upload(req, res, async (err) => {
-    if (err) return res.status(400).json({ error: { code: 'UPLOAD_ERROR', message: err.message } });
-    if (!req.file) return res.status(400).json({ error: { code: 'NO_FILE', message: 'No backup file uploaded (field name: file)' } });
+  const { importDataArchive } = await import('../services/configBackup.js');
+  const { ensureBackupsDir, freeBytes, confineToBackups } = await import('../services/backupFiles.js');
+  const { rm } = await import('fs/promises');
+  const restoreEnv = req.query.restore_env !== '0' && (req.body || {}).restore_env !== false;
+
+  // The uploaded copy is removed BEFORE answering, so a client that sees the
+  // response never sees a key-bearing temp file still on disk.
+  const runImport = async (path, cleanup) => {
+    let result;
+    let error;
     try {
-      const { importConfig } = await import('../services/configBackup.js');
-      const restoreEnv = req.query.restore_env !== '0';
-      const result = importConfig(req.file.buffer, { restoreEnv });
-      res.json({
-        message: 'Backup imported. The server will restart now to load the restored database.',
-        ...result,
-      });
-      // better-sqlite3 holds the old DB open; restart so the imported one
-      // takes effect. systemd brings the process back up. Delay so the
-      // response flushes first.
-      setTimeout(() => process.exit(0), 1200);
+      result = await importDataArchive(path, { restoreEnv });
     } catch (e) {
-      res.status(400).json({ error: { code: 'IMPORT_FAILED', message: e.message } });
+      error = e;
     }
+    if (cleanup) await rm(path, { force: true }).catch(() => {});
+    if (error) return res.status(error.status || 400).json({ error: { code: 'IMPORT_FAILED', message: error.message } });
+    res.json({ message: 'Backup imported. The server will restart now to load the restored database.', ...result });
+    // better-sqlite3 holds the old DB open; restart so the imported one
+    // takes effect. systemd brings the process back up. Delay so the
+    // response flushes first.
+    if (!process.env.APPCRANE_NO_RESTART_AFTER_IMPORT) setTimeout(() => process.exit(0), 1200);
+  };
+
+  if (!req.is('multipart/form-data')) {
+    let abs;
+    try { abs = await confineToBackups((req.body || {}).path); } catch (e) {
+      return res.status(e.status || 400).json({ error: { code: 'VALIDATION', message: e.message } });
+    }
+    return runImport(abs, false);
+  }
+
+  const dir = await ensureBackupsDir();
+  const free = freeBytes(dir);
+  const allowed = free === null ? Infinity : Math.max(0, free - UPLOAD_DISK_RESERVE);
+  const declared = Number(req.headers['content-length']);
+  if (Number.isFinite(declared) && declared > allowed) {
+    return res.status(507).json({ error: { code: 'INSUFFICIENT_STORAGE', message: `Upload of ${declared} bytes does not fit: ${free} bytes free in ${dir}, ${UPLOAD_DISK_RESERVE} kept in reserve.` } });
+  }
+  const multer = (await import('multer')).default;
+  const { randomBytes } = await import('crypto');
+  const storage = multer.diskStorage({
+    destination: (_r, _f, cb) => cb(null, dir),
+    filename: (_r, _f, cb) => cb(null, `.upload-${randomBytes(12).toString('hex')}.part`),
+  });
+  const upload = multer({ storage, limits: { fileSize: Number.isFinite(allowed) ? allowed : undefined, files: 1 } }).single('file');
+  upload(req, res, async (err) => {
+    if (err) {
+      if (req.file?.path) await rm(req.file.path, { force: true }).catch(() => {});
+      return res.status(err.code === 'LIMIT_FILE_SIZE' ? 507 : 400).json({ error: { code: 'UPLOAD_ERROR', message: err.message } });
+    }
+    if (!req.file) return res.status(400).json({ error: { code: 'NO_FILE', message: 'No backup file uploaded (field name: file)' } });
+    return runImport(req.file.path, true);
   });
 });
 

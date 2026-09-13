@@ -3,9 +3,11 @@ import crypto from 'crypto';
 import { getDb } from '../db.js';
 import { decrypt } from '../services/encryption.js';
 import { requireAuth, requireAppUser, requireAppAccess } from '../middleware/auth.js';
-import { auditMiddleware, logAudit } from '../middleware/audit.js';
+import { auditMiddleware } from '../middleware/audit.js';
 import { AppError } from '../utils/errors.js';
 import log from '../utils/logger.js';
+import { evaluatePush, recordDelivery, triggerAutoDeploys } from '../services/deployTrigger.js';
+import { usesLocalRepo, localBranchHeadSha } from '../services/managedRepo.js';
 
 function parseGithubUrl(url) {
   const m = url.match(/github\.com[/:]([^/]+)\/([^/]+?)(?:\.git)?(?:\/.*)?$/);
@@ -65,27 +67,10 @@ router.post('/:token', async (req, res) => {
   // One row per triggered deployment; one row for every rejection/skip.
   // Retain last 100 rows per app to keep diagnostic data without unbounded growth.
   function logDelivery({ sigValid, actionTaken, branch = null, commitSha = null, deployId = null }) {
-    try {
-      db.prepare(`
-        INSERT INTO webhook_deliveries
-          (app_id, event, delivery_id, payload_hash, branch, commit_hash,
-           sig_valid, action_taken, deploy_id, result)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        config.app_id, event, deliveryId, payloadHash,
-        branch, commitSha, sigValid ? 1 : 0, actionTaken, deployId ?? null,
-        actionTaken, // keep legacy `result` column in sync
-      );
-      // Trim to last 100 per app (runs fast — table is tiny)
-      db.prepare(`
-        DELETE FROM webhook_deliveries
-        WHERE app_id = ? AND id NOT IN (
-          SELECT id FROM webhook_deliveries WHERE app_id = ? ORDER BY id DESC LIMIT 100
-        )
-      `).run(config.app_id, config.app_id);
-    } catch (e) {
-      log.warn(`Webhook delivery log failed: ${e.message}`);
-    }
+    recordDelivery({
+      appId: config.app_id, event, deliveryId, payloadHash,
+      sigValid, actionTaken, branch, commitSha, deployId,
+    });
   }
 
   // Verify GitHub HMAC signature — REQUIRED (anyone with the token could fire
@@ -112,69 +97,26 @@ router.post('/:token', async (req, res) => {
   // Check branch filter
   const ref = req.body?.ref || '';
   const branch = ref.replace('refs/heads/', '');
-  const filterBranch = config.branch_filter || config.app_branch || 'main';
   const commitSha = req.body?.after?.slice(0, 8) || null;
+  const gate = evaluatePush(config, branch);
 
-  if (branch !== filterBranch) {
+  if (gate.action === 'skipped_branch') {
     logDelivery({ sigValid: true, actionTaken: 'skipped_branch', branch, commitSha });
-    return res.json({ message: `Ignored push to branch ${branch} (filter: ${filterBranch})` });
+    return res.json({ message: `Ignored push to branch ${branch} (filter: ${gate.filterBranch})` });
   }
 
-  if (!config.auto_deploy_sandbox && !config.auto_deploy_prod) {
+  if (gate.action === 'skipped_no_auto') {
     logDelivery({ sigValid: true, actionTaken: 'skipped_no_auto', branch, commitSha });
     return res.json({ message: `Webhook received for ${config.slug} but no auto-deploy configured` });
   }
 
   // Trigger deploys — one delivery log row per environment triggered
-  const triggered = [];
-
-  if (config.auto_deploy_sandbox) {
-    const deployResult = db.prepare(`
-      INSERT INTO deployments (app_id, env, status, commit_hash, commit_message, log)
-      VALUES (?, 'sandbox', 'pending', ?, ?, 'Triggered by webhook')
-    `).run(config.app_id, commitSha, req.body?.head_commit?.message?.slice(0, 200));
-
-    logDelivery({ sigValid: true, actionTaken: 'deploy_triggered', branch, commitSha, deployId: deployResult.lastInsertRowid });
-    logAudit(null, config.app_id, 'webhook-deploy', { env: 'sandbox', commit: commitSha });
-    triggered.push('sandbox');
-    log.info(`Webhook triggered sandbox deploy for ${config.slug}`);
-
-    try {
-      const { deployApp } = await import('../services/deployer.js');
-      const { getPortsForSlot } = await import('../services/portAllocator.js');
-      const app = db.prepare('SELECT * FROM apps WHERE id = ?').get(config.app_id);
-      const ports = getPortsForSlot(app.slot);
-      deployApp(deployResult.lastInsertRowid, app, 'sandbox', ports).catch(err => {
-        log.error(`Webhook deploy failed: ${err.message}`);
-      });
-    } catch (e) {
-      log.warn('Deploy service not available for webhook trigger');
-    }
-  }
-
-  if (config.auto_deploy_prod) {
-    const deployResult = db.prepare(`
-      INSERT INTO deployments (app_id, env, status, commit_hash, commit_message, log)
-      VALUES (?, 'production', 'pending', ?, ?, 'Triggered by webhook')
-    `).run(config.app_id, commitSha, req.body?.head_commit?.message?.slice(0, 200));
-
-    logDelivery({ sigValid: true, actionTaken: 'deploy_triggered', branch, commitSha, deployId: deployResult.lastInsertRowid });
-    logAudit(null, config.app_id, 'webhook-deploy', { env: 'production', commit: commitSha });
-    triggered.push('production');
-    log.info(`Webhook triggered production deploy for ${config.slug}`);
-
-    try {
-      const { deployApp } = await import('../services/deployer.js');
-      const { getPortsForSlot } = await import('../services/portAllocator.js');
-      const app = db.prepare('SELECT * FROM apps WHERE id = ?').get(config.app_id);
-      const ports = getPortsForSlot(app.slot);
-      deployApp(deployResult.lastInsertRowid, app, 'production', ports).catch(err => {
-        log.error(`Webhook prod deploy failed: ${err.message}`);
-      });
-    } catch (e) {
-      log.warn('Deploy service not available for webhook prod trigger');
-    }
-  }
+  // (services/deployTrigger.js; a push to a local managed repo runs the same code).
+  const triggered = (await triggerAutoDeploys({
+    config, branch, commitSha,
+    commitMessage: req.body?.head_commit?.message?.slice(0, 200),
+    logDelivery: (d) => logDelivery({ sigValid: true, ...d }),
+  })).map((t) => t.env);
 
   res.json({ message: `Webhook processed for ${config.slug}`, triggered });
 });
@@ -246,6 +188,31 @@ router.get('/:slug/webhook/deliveries', requireAuth, requireAppAccess, (req, res
  */
 router.get('/:slug/updates', requireAuth, requireAppAccess, async (req, res) => {
   const app = req.app;
+
+  // A managed app whose repository is on this host has no GitHub URL; its
+  // "latest" is the branch tip of the local repo. Same response shape, so the
+  // dashboard's update banner and its Deploy Now (a normal deploy, which
+  // clones that repo) need no change. An unknown repo_backend marker is
+  // reported, not guessed at.
+  let localRepo;
+  try { localRepo = usesLocalRepo(app); } catch (e) { return res.json({ available: false, reason: e.message }); }
+  if (localRepo) {
+    try {
+      const latestSha = await localBranchHeadSha(app, app.branch || 'main');
+      const cmp = compareDeployments(app.id, latestSha);
+      return res.json({
+        available: cmp.available,
+        latest_sha: latestSha.slice(0, 8),
+        latest_message: null,
+        latest_date: null,
+        production: cmp.production,
+        sandbox: cmp.sandbox,
+      });
+    } catch (e) {
+      return res.json({ available: false, reason: e.message });
+    }
+  }
+
   if (!app.github_url) return res.json({ available: false, not_applicable: true, reason: 'No GitHub URL configured' });
 
   const parsed = parseGithubUrl(app.github_url);
@@ -272,44 +239,56 @@ router.get('/:slug/updates', requireAuth, requireAppAccess, async (req, res) => 
     const latestMessage = data.commit?.message?.split('\n')[0] || '';
     const latestDate = data.commit?.committer?.date || null;
 
-    const db = getDb();
-    // Get most recent live deployment; fall back to any completed deployment
-    // in case status never reached 'live' (e.g. first deploy still in progress).
-    const latestDeploy = (env) =>
-      db.prepare(
-        "SELECT commit_hash FROM deployments WHERE app_id = ? AND env = ? AND status = 'live' ORDER BY id DESC LIMIT 1"
-      ).get(app.id, env)
-      || db.prepare(
-        "SELECT commit_hash FROM deployments WHERE app_id = ? AND env = ? ORDER BY id DESC LIMIT 1"
-      ).get(app.id, env);
-
-    const prod = latestDeploy('production');
-    const sand = latestDeploy('sandbox');
-
-    // Returns true when sha is unknown/missing (can't confirm up-to-date → assume update available)
-    // or when the stored hash genuinely differs from the latest GitHub SHA.
-    const differs = (sha) => {
-      if (!sha || sha === 'unknown') return true;
-      return !latestSha.startsWith(sha) && !sha.startsWith(latestSha.slice(0, sha.length));
-    };
-
-    // Only report "up to date" when at least one env has a known hash AND it matches.
-    const prodDiffers = prod ? differs(prod.commit_hash) : null;
-    const sandDiffers = sand ? differs(sand.commit_hash) : null;
-    const available = !!(prodDiffers || sandDiffers);
+    const cmp = compareDeployments(app.id, latestSha);
 
     res.json({
-      available,
+      available: cmp.available,
       latest_sha: latestSha.slice(0, 8),
       latest_message: latestMessage,
       latest_date: latestDate,
-      production: { deployed_sha: prod?.commit_hash || null, update_available: prodDiffers },
-      sandbox:    { deployed_sha: sand?.commit_hash || null, update_available: sandDiffers },
+      production: cmp.production,
+      sandbox:    cmp.sandbox,
     });
   } catch (e) {
     res.json({ available: false, reason: e.message });
   }
 });
+
+/**
+ * The deployed-vs-latest comparison /updates reports, for any source of
+ * `latestSha` (a full 40-hex commit).
+ */
+function compareDeployments(appId, latestSha) {
+  const db = getDb();
+  // Get most recent live deployment; fall back to any completed deployment
+  // in case status never reached 'live' (e.g. first deploy still in progress).
+  const latestDeploy = (env) =>
+    db.prepare(
+      "SELECT commit_hash FROM deployments WHERE app_id = ? AND env = ? AND status = 'live' ORDER BY id DESC LIMIT 1"
+    ).get(appId, env)
+    || db.prepare(
+      "SELECT commit_hash FROM deployments WHERE app_id = ? AND env = ? ORDER BY id DESC LIMIT 1"
+    ).get(appId, env);
+
+  const prod = latestDeploy('production');
+  const sand = latestDeploy('sandbox');
+
+  // Returns true when sha is unknown/missing (can't confirm up-to-date → assume update available)
+  // or when the stored hash genuinely differs from the latest SHA.
+  const differs = (sha) => {
+    if (!sha || sha === 'unknown') return true;
+    return !latestSha.startsWith(sha) && !sha.startsWith(latestSha.slice(0, sha.length));
+  };
+
+  // Only report "up to date" when at least one env has a known hash AND it matches.
+  const prodDiffers = prod ? differs(prod.commit_hash) : null;
+  const sandDiffers = sand ? differs(sand.commit_hash) : null;
+  return {
+    available: !!(prodDiffers || sandDiffers),
+    production: { deployed_sha: prod?.commit_hash || null, update_available: prodDiffers },
+    sandbox:    { deployed_sha: sand?.commit_hash || null, update_available: sandDiffers },
+  };
+}
 
 /**
  * POST /api/apps/:slug/webhook/register-github - Register AppCrane webhook on the GitHub repo

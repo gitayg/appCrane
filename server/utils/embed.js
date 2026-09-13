@@ -88,3 +88,21 @@ export function mergeAncestors(platformDefault, appPolicy) {
   const toks = [...new Set([...tokenize(platformDefault), ...app])];
   return toks.length ? toks.join(' ') : null;
 }
+
+/**
+ * frame-ancestors for a sign-in step whose `redirect` names an app (`/snc`,
+ * `/snc-sandbox`, `/snc/...`), or null when it names no app. Shared by every hop
+ * of the sign-in chain: /api/identity/verify's 302, /login's 302, and the
+ * /launch page. A hop that keeps X-Frame-Options blanks an embedded frame
+ * whether or not the others were relaxed.
+ */
+export function frameAncestorsForRedirect(db, redirectRaw) {
+  const m = String(redirectRaw || '').match(/^\/([a-z][a-z0-9-]*)/);
+  if (!m) return null;
+  const slug = m[1].replace(/-sandbox$/, '');
+  try {
+    const row = db.prepare('SELECT frame_ancestors FROM apps WHERE slug = ?').get(slug);
+    if (!row) return null; // not a real app: keep the SAMEORIGIN lock
+    return mergeAncestors(platformEmbedAncestors(db), row.frame_ancestors);
+  } catch (_) { return null; }
+}

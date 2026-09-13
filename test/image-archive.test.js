@@ -52,7 +52,7 @@ const {
   exportImageArchive, importImageArchive, verifyImageSet, archiveFileName,
   RESTORE_TAG_PREFIX,
 } = await import('../server/services/imageArchive.js');
-const { exportConfig } = await import('../server/services/configBackup.js');
+const { exportDataArchive } = await import('../server/services/configBackup.js');
 
 // A daemon that RESPONDS, not a binary that exists — `docker` is installed on
 // the GitHub runner, so testing for the CLI would run the round trip everywhere
@@ -158,8 +158,8 @@ test('a deployment with nothing to archive says why instead of guessing', () => 
   assert.ok(row.skip_reason, 'silently falling back to apps.image_ref would archive bytes nobody ran');
 });
 
-test('the config zip names the image archive it belongs with, and stops naming it when the fleet changes', () => {
-  const before = exportConfig('2.72.0').manifest;
+test('the config zip names the image archive it belongs with, and stops naming it when the fleet changes', async () => {
+  const before = (await exportDataArchive({ version: '2.72.0' })).manifest;
   assert.ok(before.image_set, 'a zip that names no image set cannot be paired with one');
   assert.equal(
     before.image_set.fingerprint,
@@ -169,7 +169,7 @@ test('the config zip names the image archive it belongs with, and stops naming i
   // A deploy happens. A zip taken now must NOT claim the earlier archive.
   const app = imageApp('sel-pair', 'redis:8');
   deployment(app, 'production', 'live', { imageRef: 'redis@sha256:' + '7'.repeat(64) });
-  const afterManifest = exportConfig('2.72.0').manifest;
+  const afterManifest = (await exportDataArchive({ version: '2.72.0' })).manifest;
   assert.notEqual(afterManifest.image_set.fingerprint, before.image_set.fingerprint,
     'a mismatched pair must be detectable, or a restore half-applies');
 

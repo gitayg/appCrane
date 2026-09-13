@@ -2,7 +2,8 @@
  * Host-local git storage for managed apps (phase 1 of moving AMC_<slug> repos
  * off GitHub). Bare repositories live at <DATA_DIR>/repos/<slug>.git.
  *
- * NOTHING CALLS THIS YET. It exists so phase 2 is a transport swap: the three
+ * Callers reach it through services/managedRepo.js, which picks this module or
+ * githubService.js from apps.repo_backend. It began as a transport swap: the three
  * GitHub functions a managed app uses are exported here under the SAME names,
  * with the same arguments, the same return shape and the same error codes
  * (REPO_EXISTS 409, REPO_NOT_FOUND 404, FILE_NOT_FOUND 404) — changing the
@@ -41,7 +42,7 @@
  * never be delivered or belong to anyone.
  */
 
-import { execFile, execFileSync } from 'child_process';
+import { execFile, execFileSync, spawn } from 'child_process';
 import { createHash, randomBytes } from 'crypto';
 import {
   existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, statSync, writeFileSync, readdirSync, readFileSync,
@@ -463,6 +464,78 @@ export async function getBranchHeadSha(slug, branch) {
 }
 
 // ---------------------------------------------------------------------------
+// Deploy clones (phase 2)
+// ---------------------------------------------------------------------------
+
+/**
+ * git for a deploy's working tree. Same isolation as every other call here,
+ * because the ambient environment is not harmless for a clone: measured, a
+ * plain `git clone` with core.hooksPath set in ~/.gitconfig or in
+ * GIT_CONFIG_COUNT/KEY/VALUE runs that directory's post-checkout hook. The
+ * source repo's own config and hooks/ are NOT consulted by the clone (also
+ * measured), but the host's are — so the host's are cut off.
+ *
+ * `protocol.file.allow=always` re-opens only the file transport that the
+ * shared base (`protocol.allow=never`) closes; later `-c` wins for that one
+ * protocol, every other transport stays refused.
+ */
+function deployGitSync(label, args, slug) {
+  ensureGitVersion();
+  try {
+    return execFileSync('git', gitArgs(null, ['-c', 'protocol.file.allow=always', ...args]), {
+      env: gitEnv(), input: '', maxBuffer: 64 * 1024 * 1024, timeout: 120000, stdio: ['pipe', 'pipe', 'pipe'],
+    });
+  } catch (err) {
+    // The deploy log is read by app owners; the host's DATA_DIR layout is not
+    // theirs to see. Name the repo the way every other message does.
+    const detail = String(err.stderr || err.message).trim().replaceAll(repoPath(slug), `${MANAGED_REPO_PREFIX}${slug}`);
+    const e = new Error(`git ${label} failed: ${detail}`);
+    e.exitCode = err.status;
+    throw e;
+  }
+}
+
+/**
+ * Shallow single-branch clone of <slug>.git into `destDir` (empty or absent).
+ *
+ * `--no-local` with a plain path, not a bare path and not a file:// URL:
+ * measured, a plain-path clone IGNORES --depth ("--depth is ignored in local
+ * clones") and hardlinks the live repo's objects into the release directory;
+ * `--no-local` goes through upload-pack like a remote clone, honours --depth,
+ * and needs no URL-encoding of DATA_DIR. `--template=` copies no hooks into
+ * the new clone.
+ */
+export function cloneForDeploySync(slug, destDir, branch) {
+  if (!localRepoExists(slug)) {
+    throw fail('REPO_NOT_FOUND', 404, `the managed repository '${MANAGED_REPO_PREFIX}${slug}' does not exist on this host.`);
+  }
+  const b = assertBranch(branch || DEFAULT_BRANCH);
+  deployGitSync('clone', ['clone', '--quiet', '--no-local', '--template=', '--depth', '1', '--branch', b, '--', repoPath(slug), destDir], slug);
+}
+
+/**
+ * Check a deploy clone out at `commit` (full or abbreviated SHA), the same
+ * sequence deployer.js runs against GitHub: fetch that exact commit; if that
+ * fails (an abbreviated SHA cannot be fetched by name), deepen the branch to
+ * 200 commits; then detach at it. Throws if the commit is unreachable.
+ */
+export function pinDeployCloneSync(slug, workTree, commit, branch) {
+  if (typeof commit !== 'string' || !/^[0-9a-f]{4,40}$/.test(commit)) {
+    throw new Error(`invalid commit ${JSON.stringify(commit)}: expected a hex SHA`);
+  }
+  const b = assertBranch(branch || DEFAULT_BRANCH);
+  let fetched = false;
+  try {
+    deployGitSync('fetch', ['-C', workTree, 'fetch', '--quiet', '--depth', '1', 'origin', commit], slug);
+    fetched = true;
+  } catch (_) { /* abbreviated SHA: deepen below */ }
+  if (!fetched) {
+    try { deployGitSync('fetch', ['-C', workTree, 'fetch', '--quiet', '--depth', '200', 'origin', b], slug); } catch (_) { /* checkout reports it */ }
+  }
+  deployGitSync('checkout', ['-C', workTree, 'checkout', '--quiet', '--detach', commit], slug);
+}
+
+// ---------------------------------------------------------------------------
 // Backup (synchronous: configBackup.js builds its zip synchronously)
 // ---------------------------------------------------------------------------
 
@@ -567,4 +640,278 @@ export function newImportStageDir() {
   const dir = join(reposRoot(), `.import-${Date.now()}-${randomBytes(4).toString('hex')}`);
   mkdirSync(dir, { recursive: true });
   return dir;
+}
+
+// ---------------------------------------------------------------------------
+// Bounded reads (Ask Claude on a local repo)
+// ---------------------------------------------------------------------------
+
+// Plumbing that only reads. `grep` is git's own tree search, not the shell's.
+const READ_ONLY_SUBCOMMANDS = new Set(['ls-tree', 'cat-file', 'grep', 'rev-parse']);
+
+/**
+ * Run one read-only git command against <slug>.git with the same isolation as
+ * every other call here, keeping at most `maxBytes` of stdout. Past the cap the
+ * process is killed, so a huge blob or a grep matching everything costs at most
+ * `maxBytes` of memory — gitAsync buffers up to 512 MiB and cannot promise that.
+ * Resolves { stdout, truncated, exitCode, timedOut }; never rejects on a git
+ * failure (grep exits 1 for "no match"), only on a refused subcommand.
+ */
+export function gitReadCapped(slug, args, { maxBytes, timeoutMs = 15000 } = {}) {
+  if (!Array.isArray(args) || !READ_ONLY_SUBCOMMANDS.has(args[0])) {
+    throw new Error(`localGit: ${JSON.stringify(args?.[0])} is not a read-only subcommand`);
+  }
+  if (!Number.isInteger(maxBytes) || maxBytes <= 0) throw new Error('localGit: maxBytes is required');
+  ensureGitVersion();
+  const gitDir = repoPath(slug);
+  return new Promise((resolveP) => {
+    const child = spawn('git', gitArgs(gitDir, args), { env: gitEnv(), stdio: ['ignore', 'pipe', 'ignore'] });
+    const chunks = [];
+    let kept = 0;
+    let truncated = false;
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, timeoutMs);
+    child.stdout.on('data', (chunk) => {
+      if (truncated) return;
+      const room = maxBytes - kept;
+      if (chunk.length > room) {
+        chunks.push(chunk.subarray(0, room));
+        kept = maxBytes;
+        truncated = true;
+        child.kill('SIGKILL');
+        return;
+      }
+      chunks.push(chunk);
+      kept += chunk.length;
+    });
+    child.on('error', () => {});
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      resolveP({ stdout: Buffer.concat(chunks, kept), truncated, exitCode: code, timedOut });
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Moving a GitHub-backed repo onto this host (phase 3, services/repoMigration.js)
+// ---------------------------------------------------------------------------
+
+/**
+ * Where an app's repo is assembled before it is moved into place. One fixed
+ * name per slug, so a process that died mid-migration leaves exactly one
+ * directory behind, and the next attempt removes it before starting. It starts
+ * with "." so listLocalRepoSlugs (and so the config backup) never sees it.
+ */
+export function migrationStagingPath(slug) {
+  return join(reposRoot(), `.migrating-${assertSlug(slug)}.git`);
+}
+
+/**
+ * Remote git with a hard wall-clock deadline and the credential kept out of
+ * every place that outlives the process or is visible to other users:
+ *   - not in the URL (so not in argv, `ps`, FETCH_HEAD, reflogs or error text);
+ *   - not in any config file: it travels as GIT_CONFIG_COUNT/KEY/VALUE in the
+ *     child's environment, which only the same uid (or root) can read;
+ *   - scoped to the remote's origin (`http.<origin>/.extraHeader`) with
+ *     redirects refused, so it is never sent to a host GitHub redirects to.
+ * The allowed transport is only the URL's own scheme; everything else stays
+ * refused by the shared `protocol.allow=never`.
+ *
+ * Resolves stdout; rejects with .code 'GIT_TIMEOUT' when the deadline kills it,
+ * or 'GIT_FAILED'. Every message has the token removed before it leaves here.
+ */
+function migrationGit(gitDir, args, { url, token, deadline, allowedSchemes = ['https'] } = {}) {
+  ensureGitVersion();
+  const extra = ['-c', 'http.followRedirects=false', '-c', 'credential.helper='];
+  const env = {};
+  if (url) {
+    const u = new URL(url);
+    const scheme = u.protocol.replace(/:$/, '');
+    if (!allowedSchemes.includes(scheme)) {
+      return Promise.reject(Object.assign(new Error(`transport '${scheme}' is not allowed for a repo migration`), { code: 'BAD_REMOTE' }));
+    }
+    if (u.username || u.password) {
+      return Promise.reject(Object.assign(new Error('remote URL must not carry credentials'), { code: 'BAD_REMOTE' }));
+    }
+    extra.push('-c', `protocol.${scheme}.allow=always`);
+    if (token && (scheme === 'https' || scheme === 'http')) {
+      env.GIT_CONFIG_COUNT = '1';
+      env.GIT_CONFIG_KEY_0 = `http.${u.origin}/.extraHeader`;
+      env.GIT_CONFIG_VALUE_0 = `Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}`;
+    }
+  }
+  const scrub = (s) => {
+    let out = String(s);
+    if (token) {
+      out = out.replaceAll(token, '[redacted]')
+        .replaceAll(Buffer.from(`x-access-token:${token}`).toString('base64'), '[redacted]');
+    }
+    return out;
+  };
+  const remaining = deadline - Date.now();
+  if (!(remaining > 0)) {
+    return Promise.reject(Object.assign(new Error(`git ${args[0]} not started: migration deadline already passed`), { code: 'GIT_TIMEOUT' }));
+  }
+  // Measured: SIGKILL on `git` alone leaves its `git remote-http` helpers
+  // running (reparented to init) with the stdout/stderr pipes still open, so
+  // 'close' never fires while the remote stays silent and the deadline bounds
+  // nothing. git therefore runs as its own process group, the whole group is
+  // killed, and a timed-out call settles on 'exit' without waiting for 'close'.
+  return new Promise((resolveP, reject) => {
+    const child = spawn('git', gitArgs(gitDir, [...extra, ...args]), { env: gitEnv(env), stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+    const out = [];
+    let err = '';
+    let timedOut = false;
+    let settled = false;
+    const settle = (fn) => { if (!settled) { settled = true; fn(); } };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try { process.kill(-child.pid, 'SIGKILL'); } catch (_) { try { child.kill('SIGKILL'); } catch (_) { /* already gone */ } }
+    }, remaining);
+    const timeoutError = () => Object.assign(new Error(`git ${args[0]} killed after ${remaining}ms (migration deadline)`), { code: 'GIT_TIMEOUT' });
+    child.stdout.on('data', (c) => out.push(c));
+    child.stderr.on('data', (c) => { if (err.length < 8192) err += c.toString('utf8'); });
+    child.on('error', (e) => { clearTimeout(timer); settle(() => reject(Object.assign(new Error(scrub(`git ${args[0]}: ${e.message}`)), { code: 'GIT_FAILED' }))); });
+    child.on('exit', () => {
+      if (!timedOut) return;
+      clearTimeout(timer);
+      child.stdout.destroy();
+      child.stderr.destroy();
+      settle(() => reject(timeoutError()));
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (settled) return;
+      settled = true;
+      if (timedOut) {
+        return reject(timeoutError());
+      }
+      if (code !== 0) {
+        return reject(Object.assign(new Error(scrub(`git ${args[0]} failed (exit ${code}): ${err.trim()}`)), { code: 'GIT_FAILED' }));
+      }
+      resolveP(Buffer.concat(out).toString('utf8'));
+    });
+  });
+}
+
+function parseRefLines(textOut) {
+  const refs = {};
+  for (const line of textOut.split('\n')) {
+    const m = /^([0-9a-f]{40})[\t ](refs\/\S+)$/.exec(line.trim());
+    if (m) refs[m[2]] = m[1];
+  }
+  return refs;
+}
+
+/**
+ * Fresh bare repo at `stagingDir` holding GitHub's branches and tags, and
+ * nothing else. The fetch names the URL directly with explicit refspecs, so no
+ * remote is ever configured, refs/pull/* and other hosting refs are never
+ * requested, and --no-write-fetch-head keeps the URL out of FETCH_HEAD.
+ */
+export async function fetchMirrorIntoStaging(stagingDir, { url, token, branch, deadline, allowedSchemes }) {
+  assertBranch(branch);
+  rmSync(stagingDir, { recursive: true, force: true });
+  initBareSync(stagingDir, branch);
+  await migrationGit(stagingDir, [
+    'fetch', '--quiet', '--no-tags', '--no-write-fetch-head', '--no-recurse-submodules', '--no-auto-gc',
+    '--', url, '+refs/heads/*:refs/heads/*', '+refs/tags/*:refs/tags/*',
+  ], { url, token, deadline, allowedSchemes });
+}
+
+/** GitHub's branches and tags as { ref: sha } (tag objects, not peeled). */
+export async function listRemoteHeadsAndTags({ url, token, deadline, allowedSchemes }) {
+  const outText = await migrationGit(null, ['ls-remote', '--heads', '--tags', '--refs', '--', url],
+    { url, token, deadline, allowedSchemes });
+  return parseRefLines(outText);
+}
+
+/** The staged repo's branches and tags as { ref: sha }, same shape as the remote listing. */
+export async function listStagedHeadsAndTags(stagingDir, { deadline }) {
+  const outText = await migrationGit(stagingDir,
+    ['for-each-ref', '--format=%(objectname) %(refname)', 'refs/heads', 'refs/tags'], { deadline });
+  return parseRefLines(outText);
+}
+
+/**
+ * Violations that make a staged repo differ from what createAppRepo builds:
+ * any remote or http config, any ref outside refs/heads and refs/tags, a
+ * FETCH_HEAD, or a HEAD that is not refs/heads/<branch> at a commit.
+ * Returns [] for a clean repo.
+ */
+export async function inspectMigratedRepoShape(gitDir, { branch, deadline }) {
+  assertBranch(branch);
+  const problems = [];
+  let cfg = '';
+  try {
+    cfg = await migrationGit(gitDir, ['config', '--file', join(gitDir, 'config'), '--name-only', '--get-regexp', '^(remote|http|credential|url)\\.'], { deadline });
+  } catch (e) {
+    if (e.code === 'GIT_TIMEOUT') throw e;
+    // exit 1 = no matching key, the clean case
+  }
+  if (cfg.trim()) problems.push(`config keys that must not exist: ${cfg.trim().split('\n').join(', ')}`);
+  const refs = (await migrationGit(gitDir, ['for-each-ref', '--format=%(refname)'], { deadline })).split('\n').filter(Boolean);
+  const stray = refs.filter((r) => !r.startsWith('refs/heads/') && !r.startsWith('refs/tags/'));
+  if (stray.length) problems.push(`refs outside heads/tags: ${stray.join(', ')}`);
+  if (existsSync(join(gitDir, 'FETCH_HEAD'))) problems.push('FETCH_HEAD present');
+  let head = '';
+  try { head = (await migrationGit(gitDir, ['symbolic-ref', '--quiet', 'HEAD'], { deadline })).trim(); } catch (e) { if (e.code === 'GIT_TIMEOUT') throw e; }
+  if (head !== `refs/heads/${branch}`) problems.push(`HEAD is ${JSON.stringify(head)}, expected refs/heads/${branch}`);
+  else {
+    try { await migrationGit(gitDir, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}^{commit}`], { deadline }); } catch (e) {
+      if (e.code === 'GIT_TIMEOUT') throw e;
+      problems.push(`branch ${branch} does not resolve to a commit`);
+    }
+  }
+  return problems;
+}
+
+/**
+ * Bring a staged repo to the shape createAppRepo produces, then refuse it if
+ * anything is still off. Removes every remote.* section, deletes refs outside
+ * heads/tags, drops FETCH_HEAD, points HEAD at the app's branch, and checks the
+ * object graph is connected. Throws (.code 'SHAPE') on a remaining violation.
+ */
+export async function finalizeStagedMirror(stagingDir, { branch, deadline }) {
+  assertBranch(branch);
+  let names = '';
+  try {
+    names = await migrationGit(stagingDir, ['config', '--file', join(stagingDir, 'config'), '--name-only', '--get-regexp', '^remote\\.'], { deadline });
+  } catch (e) { if (e.code === 'GIT_TIMEOUT') throw e; }
+  const sections = new Set(names.split('\n').filter(Boolean).map((n) => n.slice(0, n.lastIndexOf('.'))));
+  for (const section of sections) {
+    await migrationGit(stagingDir, ['config', '--file', join(stagingDir, 'config'), '--remove-section', section], { deadline });
+  }
+  const refs = (await migrationGit(stagingDir, ['for-each-ref', '--format=%(refname)'], { deadline })).split('\n').filter(Boolean);
+  const stray = refs.filter((r) => !r.startsWith('refs/heads/') && !r.startsWith('refs/tags/'));
+  for (const ref of stray) {
+    await migrationGit(stagingDir, ['update-ref', '--no-deref', '-d', ref], { deadline });
+  }
+  rmSync(join(stagingDir, 'FETCH_HEAD'), { force: true });
+  await migrationGit(stagingDir, ['symbolic-ref', 'HEAD', `refs/heads/${branch}`], { deadline });
+  await migrationGit(stagingDir, ['fsck', '--connectivity-only', '--no-progress'], { deadline });
+  const problems = await inspectMigratedRepoShape(stagingDir, { branch, deadline });
+  if (problems.length) {
+    throw Object.assign(new Error(`staged repo is not clean: ${problems.join('; ')}`), { code: 'SHAPE' });
+  }
+}
+
+/**
+ * Move a verified staged repo to repoPath(slug). Never replaces anything: an
+ * existing path (repo or not) is refused with .code 'LOCAL_REPO_EXISTS'.
+ */
+export function installMigratedRepo(slug, stagingDir) {
+  const final = repoPath(slug);
+  if (existsSync(final)) {
+    throw Object.assign(new Error(`a local repository for '${slug}' already exists; not overwriting it`), { code: 'LOCAL_REPO_EXISTS' });
+  }
+  try {
+    renameSync(stagingDir, final);
+  } catch (e) {
+    if (['EEXIST', 'ENOTEMPTY', 'EISDIR', 'ENOTDIR'].includes(e.code)) {
+      throw Object.assign(new Error(`a local repository for '${slug}' appeared during install; not overwriting it`), { code: 'LOCAL_REPO_EXISTS' });
+    }
+    throw e;
+  }
+  return final;
 }
