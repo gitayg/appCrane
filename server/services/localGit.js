@@ -308,11 +308,27 @@ export async function createAppRepo(slug, { description = '', autoInit = true } 
  * One call = one commit whose parent is the branch tip. Like GitHub there is no
  * way to express a deletion, and mode is always 100644.
  *
- * Compare-and-swap: GitHub moves the ref with force:false, so a push that raced
- * another one fails instead of discarding it. Here the ref is moved with
- * `update-ref <ref> <new> <old>`, which refuses unless the branch is still at
- * the parent this commit was built on — BRANCH_MOVED, status 409.
+ * RACES: THE NEWEST PUSH WINS, AND WHAT IT DISPLACES IS KEPT.
+ *
+ * Decided by the owner: when two pushes race, drop the oldest. The ref is still
+ * moved with compare-and-swap (`update-ref <ref> <new> <old>`), so nothing is
+ * ever overwritten by accident — but when the swap finds the branch has moved,
+ * this push parks whatever landed first under
+ * `refs/dropped/<branch>/<ms>-<displaced12>-by-<this12>` and then takes the tip.
+ *
+ * "Whole push" on purpose: this commit was built from the tree as it stood
+ * before the other push landed, so taking the tip also removes files only the
+ * other push changed. That is the accepted cost. The displaced commit is not
+ * lost: it stays reachable from its refs/dropped ref, travels in the config
+ * backup (bundles carry every ref), and is reported to the caller in `dropped`
+ * so the drop is never silent.
+ *
+ * A push can therefore report success and later be displaced by a newer one.
+ * That is what "newest wins" means; the refs/dropped ref is the record.
  */
+/** How many times one push may displace a moving tip before giving up. */
+const MAX_TAKEOVER_ATTEMPTS = 10;
+
 export async function pushFilesToManagedRepo(slug, files, opts = {}) {
   if (!slug || typeof slug !== 'string') throw new Error('slug is required');
   if (!Array.isArray(files) || files.length === 0) throw new Error('files must be a non-empty array');
@@ -367,11 +383,29 @@ export async function pushFilesToManagedRepo(slug, files, opts = {}) {
     rmSync(idxDir, { recursive: true, force: true });
   }
 
-  try {
-    await gitAsync(gitDir, ['update-ref', '-m', 'push', `refs/heads/${branch}`, commit, parent]);
-  } catch (e) {
-    throw fail('BRANCH_MOVED', 409,
-      `branch '${branch}' moved while this push was being built (another push landed first). Nothing was committed; re-read and retry. ${e.stderr || ''}`.trim());
+  const dropped = [];
+  let expected = parent;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await gitAsync(gitDir, ['update-ref', '-m', 'push', `refs/heads/${branch}`, commit, expected]);
+      break;
+    } catch (e) {
+      const tip = await resolveBranchCommit(gitDir, branch);
+      if (!tip) {
+        throw fail('BRANCH_NOT_FOUND', 404, `branch '${branch}' was deleted while this push was being built.`);
+      }
+      if (attempt >= MAX_TAKEOVER_ATTEMPTS) {
+        throw fail('BRANCH_MOVED', 409,
+          `branch '${branch}' kept moving under ${MAX_TAKEOVER_ATTEMPTS} takeover attempts; nothing was committed. ${e.stderr || ''}`.trim());
+      }
+      // Park the displaced tip BEFORE taking the branch, so there is no moment
+      // at which it is reachable from nothing. Created with the zero SHA as the
+      // old value: an existing ref of that name is refused, never overwritten.
+      const ref = `refs/dropped/${branch}/${Date.now()}-${tip.slice(0, 12)}-by-${commit.slice(0, 12)}`;
+      await gitAsync(gitDir, ['update-ref', '-m', `dropped by ${commit}`, ref, tip, ZERO_SHA]);
+      dropped.push({ sha: tip, ref });
+      expected = tip;
+    }
   }
 
   return {
@@ -379,6 +413,7 @@ export async function pushFilesToManagedRepo(slug, files, opts = {}) {
     branch,
     files: blobs,
     message,
+    dropped,
   };
 }
 

@@ -122,27 +122,47 @@ test('untrusted slugs never become a path', async () => {
   assert.equal(existsSync(resolve(ROOT, '..', 'evil.git')), false);
 });
 
-test('concurrent pushes: a push that lost the race fails, none is silently discarded', async () => {
+test('concurrent pushes: the newest wins, and every displaced push is parked and reported', async () => {
+  // Owner's rule: drop the oldest. Every racer succeeds; the last to take the
+  // branch is the tip; each commit it displaced must stay reachable from a
+  // refs/dropped ref AND be named in the displacing push's `dropped`. A commit
+  // that reported success and is reachable from nothing is the failure — that
+  // is silent loss, which "drop the oldest" never permitted.
   await createAppRepo('racer');
   const dir = repoPath('racer');
   let raced = false;
   for (let round = 0; round < 10 && !raced; round++) {
     const results = await Promise.allSettled(Array.from({ length: 6 }, (_, i) =>
       pushFilesToManagedRepo('racer', [{ path: `r${round}/f${i}.txt`, content: `${round}-${i}` }], { message: `r${round} p${i}` })));
-    const tip = git(dir, 'rev-parse', 'refs/heads/main');
-    const reachable = new Set(git(dir, 'rev-list', tip).split('\n'));
+
     for (const r of results) {
-      if (r.status === 'fulfilled') {
-        assert.ok(reachable.has(r.value.commit.sha),
-          `push ${r.value.commit.sha} reported success but is not reachable from the branch — it was overwritten`);
-      } else {
-        assert.equal(r.reason.code, 'BRANCH_MOVED', r.reason.message);
-        assert.equal(r.reason.status, 409);
-        raced = true;
+      assert.equal(r.status, 'fulfilled', `a racing push was rejected: ${r.reason?.code} ${r.reason?.message}`);
+    }
+
+    const tip = git(dir, 'rev-parse', 'refs/heads/main');
+    const droppedRefs = git(dir, 'for-each-ref', '--format=%(refname) %(objectname)', 'refs/dropped/')
+      .split('\n').filter(Boolean).map((l) => l.split(' '));
+    const parkedShas = new Set(droppedRefs.map(([, sha]) => sha));
+
+    const reportedDropped = new Map();
+    for (const r of results) for (const d of r.value.dropped) reportedDropped.set(d.sha, d.ref);
+
+    const reachable = new Set(git(dir, 'rev-list', tip, ...droppedRefs.map(([ref]) => ref)).split('\n'));
+    for (const r of results) {
+      const sha = r.value.commit.sha;
+      assert.ok(reachable.has(sha),
+        `push ${sha} reported success but is reachable from neither the branch nor refs/dropped — silently lost`);
+      if (sha !== tip && !git(dir, 'rev-list', tip).split('\n').includes(sha)) {
+        assert.ok(parkedShas.has(sha), `displaced push ${sha} has no refs/dropped ref`);
+        assert.ok(reportedDropped.has(sha), `displaced push ${sha} was parked but no push reported dropping it`);
       }
     }
+    for (const [sha, ref] of reportedDropped) {
+      assert.equal(git(dir, 'rev-parse', ref), sha, `reported drop ${ref} does not point at ${sha}`);
+    }
+    if (reportedDropped.size > 0) raced = true;
   }
-  assert.ok(raced, 'the race never happened in 10 rounds, so compare-and-swap was not exercised');
+  assert.ok(raced, 'the race never happened in 10 rounds, so the takeover was not exercised');
   execFileSync('git', [`--git-dir=${dir}`, 'fsck', '--full'], { env: CLEAN_ENV, stdio: 'pipe' });
 });
 
