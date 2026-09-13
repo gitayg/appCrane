@@ -1,3 +1,4 @@
+import { handleUnauthorized } from './sessionExpiry'
 import type { Agent, AppCraneApp, Message, SessionStatus, ShipResult } from './types'
 
 function authHeaders(): Record<string, string> {
@@ -26,6 +27,15 @@ async function j<T>(path: string, init?: RequestInit): Promise<T> {
       ...(init?.headers || {}),
     },
   })
+  // v2.73.0: a 401 here used to throw a raw `401 Unauthorized: ...` string and
+  // nothing else -- no cleared credential, no redirect. These two callers
+  // (App.tsx, ChatPanel.tsx) were the only ones not going through adminApi, so
+  // an expired session left AppStudio's agent chat showing an error string on a
+  // stale screen while the rest of the SPA recovered correctly.
+  if (r.status === 401) {
+    const message = await handleUnauthorized(r, path)
+    throw new Error(message ? `Unauthorized: ${message}` : 'Unauthorized')
+  }
   if (!r.ok) throw new Error(`${r.status} ${r.statusText}: ${await r.text()}`)
   if (r.status === 204) return undefined as T
   return r.json() as Promise<T>

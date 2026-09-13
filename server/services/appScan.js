@@ -22,6 +22,85 @@ import { assertFinding, assertPackage } from './scanShapes.js';
 
 const OSV_BATCH_URL = 'https://api.osv.dev/v1/querybatch';
 
+// TWO ENDPOINTS, BECAUSE ONE OF THEM ANSWERS HALF THE QUESTION.
+//
+// querybatch is the cheap way to learn WHICH packages are affected, and it is
+// the only sane way to ask about 500 of them at once. What it does not return
+// is the advisory. Measured, verbatim, against the live endpoint:
+//
+//   POST /v1/querybatch {"queries":[{"package":{"name":"react-router-dom",
+//                                    "ecosystem":"npm"},"version":"6.30.3"}]}
+//     -> {"results":[{"vulns":[{"id":"GHSA-jjmj-jmhj-qwj2",
+//                               "modified":"2026-09-08T15:15:05.351463Z"}]}]}
+//     keys on each vuln: ['id', 'modified'].  has .affected?  false
+//
+//   GET  /v1/vulns/GHSA-jjmj-jmhj-qwj2
+//     -> HTTP 200, full record.  react-router-dom fixed events: ['6.30.6']
+//
+// fixedVersionFor walks affected[].ranges[].events[].fixed. Handed a querybatch
+// result it walks an absent list, finds nothing, and returns null — for EVERY
+// finding, always. The live fleet report was 280 findings, 280 of them null, 0
+// with a value, while react-router-dom@6.30.3's fix was a patch bump away. The
+// algorithm was never wrong; its input was starved.
+//
+// So discovery stays on querybatch and the advisories are hydrated from
+// /v1/vulns/<id> afterwards. The cost is bounded by DISTINCT advisory ids, not
+// by packages: across the whole live fleet those 280 findings cited only 122
+// distinct ids, because packages share advisories and apps share packages.
+const OSV_VULN_URL = 'https://api.osv.dev/v1/vulns/';
+
+// Hydration is a fan-out, not a queue: 122 sequential 370 ms round trips is 45
+// seconds inside a deploy's promise, and the whole point of the batch endpoint
+// was to stop doing one request per package. Eight at a time is well inside
+// what OSV serves without complaint and turns the fleet's worst case into a
+// few seconds.
+const OSV_HYDRATE_CONCURRENCY = 8;
+
+// A transient 429 or 502 must not be allowed to cost an app its scan (see
+// below — a failed hydration fails the whole scan on purpose). Retried only
+// where a retry can change the answer: a 404 or a 400 will say the same thing
+// the second time.
+const OSV_HYDRATE_ATTEMPTS = 3;
+const OSV_HYDRATE_RETRY_MS = 250;
+
+// Advisories are cached ACROSS calls, not just within one, because the reuse
+// that matters is between apps: the daily run scans every app in one pass, and
+// the same GHSA turns up in a dozen lockfiles. A per-call cache would only
+// catch the duplicates inside a single app.
+//
+// The TTL exists because an advisory is not immutable — a fix published on a
+// new branch appears in `affected` later — and a day-long cache would report
+// yesterday's answer. Six hours keeps one daily fleet pass hot and still
+// re-reads before the next one.
+const OSV_ADVISORY_TTL_MS = 6 * 60 * 60 * 1000;
+const OSV_ADVISORY_CACHE_MAX = 4000;
+const advisoryCache = new Map();
+
+/** Drop every cached advisory. Exported so a test starts from a known state. */
+export function clearAdvisoryCache() {
+  advisoryCache.clear();
+}
+
+function cachedAdvisory(id) {
+  const hit = advisoryCache.get(id);
+  if (!hit) return null;
+  if (Date.now() - hit.at > OSV_ADVISORY_TTL_MS) {
+    advisoryCache.delete(id);
+    return null;
+  }
+  return hit.record;
+}
+
+function cacheAdvisory(id, record) {
+  // Map preserves insertion order, so the first key is the oldest insertion.
+  // A cap rather than an eviction policy: this holds advisory JSON for one
+  // fleet's worth of findings, and the TTL is what actually bounds staleness.
+  if (advisoryCache.size >= OSV_ADVISORY_CACHE_MAX) {
+    advisoryCache.delete(advisoryCache.keys().next().value);
+  }
+  advisoryCache.set(id, { at: Date.now(), record });
+}
+
 // Measured against the live endpoint, not inferred: 1000 queries returns 200,
 // 1001 returns `400 {"code":3,"message":"too many queries"}`. Chunking at 500
 // keeps a comfortable margin under a limit the API does not document in its
@@ -207,6 +286,10 @@ function affectedMatchesPackage(affected, pkg) {
  * is what left the digest able to name a problem but never the remedy, which
  * costs every reader a separate investigation.
  *
+ * `vulns` must be HYDRATED advisory records — the full documents from
+ * /v1/vulns/<id>. The stubs querybatch returns carry an id and a timestamp and
+ * nothing else, and handing those in returns null for every package on earth.
+ *
  * The choice, when there is one: within a single advisory take the LOWEST fixed
  * version above the installed one, because an advisory patched on several
  * branches lists them all (4.17.16 and 5.0.1) and the smaller upgrade is the
@@ -245,15 +328,102 @@ function fixedVersionFor(vulns, pkg) {
 }
 
 /**
- * Ask OSV about these packages. Network call; must never throw for a network
- * problem — an unreachable OSV is 'error', not 'no vulnerabilities'.
+ * One advisory, in full. Retries only what a retry can fix.
+ * @returns {Promise<{ ok: true, record: object } | { ok: false, error: string }>}
+ */
+async function fetchAdvisory(id) {
+  let lastError = 'no attempt made';
+  for (let attempt = 1; attempt <= OSV_HYDRATE_ATTEMPTS; attempt++) {
+    try {
+      const res = await fetch(OSV_VULN_URL + encodeURIComponent(id), {
+        headers: { Accept: 'application/json' },
+        signal: AbortSignal.timeout(OSV_TIMEOUT_MS),
+      });
+      if (res.ok) {
+        const record = await res.json();
+        // A 200 whose body is not an advisory is not an advisory. Accepting it
+        // would hand fixedVersionFor an object with no `affected` — which is
+        // precisely the starved input this whole change exists to remove, and
+        // it would be indistinguishable from an advisory that publishes no fix.
+        if (!record || typeof record !== 'object' || Array.isArray(record)) {
+          return { ok: false, error: 'HTTP 200 with a body that is not an advisory record' };
+        }
+        return { ok: true, record };
+      }
+      lastError = `HTTP ${res.status}`;
+      // 429 and 5xx are worth asking again about. A 404 or a 400 is the same
+      // answer every time, and three of them is three times the wait.
+      if (res.status !== 429 && res.status < 500) break;
+    } catch (e) {
+      lastError = e.message;
+    }
+    if (attempt < OSV_HYDRATE_ATTEMPTS) {
+      await new Promise((r) => setTimeout(r, OSV_HYDRATE_RETRY_MS * attempt));
+    }
+  }
+  return { ok: false, error: lastError };
+}
+
+/**
+ * Fetch every advisory in `ids`, deduplicated and cached, at bounded
+ * concurrency.
+ *
+ * @returns {Promise<{ records: Map<string, object>, failures: Map<string, string> }>}
+ *   `records` holds one entry per id that resolved; `failures` one per id that
+ *   did not. The records are returned rather than read back out of the cache by
+ *   the caller, so a TTL expiring mid-scan cannot turn a hydrated advisory into
+ *   a silent miss between here and fixedVersionFor.
+ */
+async function hydrateAdvisories(ids) {
+  const records = new Map();
+  const failures = new Map();
+
+  const misses = [];
+  for (const id of ids) {
+    const hit = cachedAdvisory(id);
+    if (hit) records.set(id, hit);
+    else misses.push(id);
+  }
+
+  let next = 0;
+  const worker = async () => {
+    while (next < misses.length) {
+      const id = misses[next++];
+      const r = await fetchAdvisory(id);
+      if (r.ok) {
+        cacheAdvisory(id, r.record);
+        records.set(id, r.record);
+      } else {
+        failures.set(id, r.error);
+      }
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(OSV_HYDRATE_CONCURRENCY, misses.length) }, worker),
+  );
+
+  return { records, failures };
+}
+
+/**
+ * Ask OSV about these packages, in two passes: querybatch to find out WHICH are
+ * affected, then /v1/vulns/<id> for the advisories that say what to upgrade to.
+ *
+ * Network call; must never throw for a network problem — an unreachable OSV is
+ * 'error', not 'no vulnerabilities'. That holds for both passes: a finding
+ * whose advisory could not be read is reported as a scan that did not complete,
+ * never as a finding with no published fix.
+ *
  * @returns {Promise<{ ok: boolean, findings: Array<object>, error?: string }>}
  */
 export async function queryOsv(packages) {
   if (!packages || packages.length === 0) return { ok: true, findings: [] };
   packages.forEach((p, i) => assertPackage(p, `queryOsv packages[${i}]`));
 
-  const findings = [];
+  // PASS 1 — discovery. Which packages are affected, and by which advisory
+  // ids. Nothing here can answer "what do I upgrade to": see OSV_VULN_URL.
+  const hits = [];
+  const wantedIds = new Set();
   for (let i = 0; i < packages.length; i += OSV_MAX_QUERIES_PER_BATCH) {
     const chunk = packages.slice(i, i + OSV_MAX_QUERIES_PER_BATCH);
     // The ecosystem travels on the package. querybatch takes a different
@@ -302,6 +472,17 @@ export async function queryOsv(packages) {
       const vulns = results[n]?.vulns;
       if (!vulns || vulns.length === 0) continue;
       const ids = vulns.map((v) => v.id).filter(Boolean);
+      if (ids.some((id) => typeof id !== 'string')) {
+        // Checked before the id reaches a URL rather than only at assertFinding
+        // on the way out: hydration would otherwise ask /v1/vulns/<whatever
+        // this is>, get a 404, and report "the advisory lookup failed" for
+        // something that is not an advisory id at all.
+        return {
+          ok: false,
+          findings: [],
+          error: `OSV returned a non-string advisory id for ${chunk[n].name}@${chunk[n].version}`,
+        };
+      }
       if (ids.length === 0) {
         // OSV said this package is vulnerable but named nothing. Recording it
         // with an empty id list would render as a finding nobody can look up;
@@ -313,15 +494,59 @@ export async function queryOsv(packages) {
           error: `OSV returned ${vulns.length} vulnerabilities with no id for ${chunk[n].name}@${chunk[n].version}`,
         };
       }
-      findings.push(assertFinding({
-        name: chunk[n].name,
-        version: chunk[n].version,
-        ecosystem: chunk[n].ecosystem,
-        ids,
-        fixed: fixedVersionFor(vulns, chunk[n]),
-      }, `queryOsv finding for ${chunk[n].name}`));
+      hits.push({ pkg: chunk[n], ids });
+      for (const id of ids) wantedIds.add(id);
     }
   }
+
+  if (hits.length === 0) return { ok: true, findings: [] };
+
+  // PASS 2 — hydration. Distinct ids, so two packages sharing an advisory cost
+  // one request and the second app to meet it costs none.
+  const { records, failures } = await hydrateAdvisories([...wantedIds]);
+
+  // A HYDRATION FAILURE IS NOT A null.
+  //
+  // That substitution is the exact shape of the bug this replaces: "we could
+  // not find out" rendered as "there is nothing to upgrade to". `fixed: null`
+  // is a claim — scanShapes.js freezes it as "OSV published no fixed version",
+  // vulnDigest.js mails it as "no fixed version published", and the MCP tool
+  // tells agents a null "means there is nothing to upgrade to yet, NEVER that
+  // AppCrane did not look". None of that may be asserted about an advisory
+  // nobody read.
+  //
+  // So the scan does not complete. 'error' is the recorded status for exactly
+  // this — 078 defines it as "the scan did not complete (OSV unreachable...)",
+  // and an unreachable /v1/vulns is the same outage as an unreachable
+  // /v1/querybatch one line up, which has always failed the scan whole. The
+  // alternative — a third state on `fixed` — would have to travel through
+  // scanShapes, vulnDigest, the MCP projection and its tool description before
+  // it meant anything, and until every one of them understood it, it would
+  // arrive at a reader as the null it is replacing.
+  //
+  // It under-reports, and that is the direction to fail in: 'error' reads as
+  // "go look" on the dashboard and in the digest's absence, while a finding
+  // whose fix column says "none published" reads as nothing to do. The retries
+  // above are what keep this rare. The deploy is untouched either way — scanApp
+  // records the row and returns.
+  if (failures.size > 0) {
+    const sample = [...failures].slice(0, 3).map(([id, e]) => `${id} (${e})`).join(', ');
+    return {
+      ok: false,
+      findings: [],
+      error: `OSV advisory lookup failed for ${failures.size} of ${wantedIds.size} ` +
+        `advisories, so the fixed version for ${hits.length} affected package(s) is ` +
+        `unknown rather than absent: ${sample}`,
+    };
+  }
+
+  const findings = hits.map(({ pkg, ids }) => assertFinding({
+    name: pkg.name,
+    version: pkg.version,
+    ecosystem: pkg.ecosystem,
+    ids,
+    fixed: fixedVersionFor(ids.map((id) => records.get(id)), pkg),
+  }, `queryOsv finding for ${pkg.name}`));
 
   return { ok: true, findings };
 }

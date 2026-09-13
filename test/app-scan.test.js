@@ -31,6 +31,7 @@ const db = getDb();
 
 const {
   findLockfiles, parseLockfile, queryOsv, scanApp, latestScan, fleetScanSummary,
+  clearAdvisoryCache,
 } = await import('../server/services/appScan.js');
 
 let slot = 100;
@@ -58,28 +59,70 @@ function writeLock(slug, packages, env = 'production', extra = {}) {
 // --- network stub -----------------------------------------------------------
 // Records every request so batching can be asserted on the wire rather than
 // inferred from a return value.
+//
+// TWO ROUTES, BECAUSE OSV HAS TWO. The scanner asks querybatch which packages
+// are affected and then asks /v1/vulns/<id> what to upgrade to, and the whole
+// reason it has to is that querybatch's answer is
+//
+//     {"vulns":[{"id":"GHSA-jjmj-jmhj-qwj2","modified":"2026-09-08T..."}]}
+//
+// and nothing else — no `affected`, so no ranges, so no fixed events. Measured
+// against the live endpoint, September 2026.
+//
+// The previous stub answered querybatch with WHOLE ADVISORY RECORDS, a payload
+// the real endpoint has never produced, and that fixture is why a suite of
+// green tests sat on top of a scanner that reported "no fixed version
+// published" for all 280 findings on the live fleet. A fixture that cannot
+// occur in production proves nothing about production, so querybatch here
+// strips every vuln to { id, modified } on the way out, exactly as the real one
+// does, and the advisory body is only ever available from the second route.
 const realFetch = globalThis.fetch;
-let calls = [];
-function stubOsv(handler) {
+let calls = [];        // POSTs to /v1/querybatch
+let advisoryCalls = []; // GETs to /v1/vulns/<id>, in order, one entry per request
+
+// `advisoryHandler` receives the bare id. Its default 404s: a test that lets an
+// advisory be discovered without saying what is in it has not decided what the
+// fixed version should be, and the scanner must not invent one.
+function stubOsv(batchHandler, advisoryHandler = () => ({ ok: false, status: 404, json: async () => ({}) })) {
   calls = [];
-  globalThis.fetch = async (url, opts) => {
+  advisoryCalls = [];
+  // The scanner caches advisories across calls on purpose (the daily pass meets
+  // the same GHSA in a dozen lockfiles). Left warm between tests it would make
+  // request counts depend on test order.
+  clearAdvisoryCache();
+  globalThis.fetch = async (url, opts = {}) => {
+    const u = String(url);
+    if (u.includes('/v1/vulns/')) {
+      const id = decodeURIComponent(u.slice(u.indexOf('/v1/vulns/') + '/v1/vulns/'.length));
+      advisoryCalls.push(id);
+      return advisoryHandler(id);
+    }
     const body = JSON.parse(opts.body);
-    calls.push({ url, queries: body.queries });
-    return handler(body);
+    calls.push({ url: u, queries: body.queries });
+    return batchHandler(body);
   };
 }
+
+// querybatch stripped to what it really returns, plus advisories that hydrate
+// cleanly and publish NO fix. `fixed` is null for these findings for the reason
+// the shape permits — OSV published no fixed event — not because nothing was
+// read.
 function osvReplies(vulnsByNameVersion) {
-  stubOsv((body) => ({
-    ok: true,
-    status: 200,
-    json: async () => ({
-      results: body.queries.map(q => {
-        const ids = vulnsByNameVersion[`${q.package.name}@${q.version}`];
-        return ids ? { vulns: ids.map(id => ({ id })) } : {};
+  stubOsv(
+    (body) => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        results: body.queries.map(q => {
+          const ids = vulnsByNameVersion[`${q.package.name}@${q.version}`];
+          return ids ? { vulns: ids.map(id => ({ id, modified: MODIFIED })) } : {};
+        }),
       }),
     }),
-  }));
+    (id) => ({ ok: true, status: 200, json: async () => ({ id, affected: [] }) }),
+  );
 }
+const MODIFIED = '2026-09-08T15:15:05.351463Z';
 const restoreFetch = () => { globalThis.fetch = realFetch; };
 
 // ---------------------------------------------------------------------------
@@ -626,21 +669,38 @@ test('a package with no ecosystem is refused, not guessed at', async () => {
 // fixed — the upgrade, which is the actionable half of a finding
 // ---------------------------------------------------------------------------
 //
-// OSV puts it at affected[].ranges[].events[].fixed. It was discarded, so the
-// digest could name a problem but never the remedy. null is a real answer here
-// ("OSV published no fixed version") and must never mean "we did not look".
+// OSV puts it at affected[].ranges[].events[].fixed — in the ADVISORY, which
+// only /v1/vulns/<id> returns. null is a real answer here ("OSV published no
+// fixed version") and must never mean "we did not look".
+//
+// These fixtures take whole advisory records, and then serve them the way the
+// live API does: querybatch sees only the id, and the record itself comes back
+// from the advisory route. Every test below therefore fails against a scanner
+// that reads `affected` off a querybatch result — which is what shipped.
 
 function osvVulns(byNameVersion) {
-  stubOsv((body) => ({
-    ok: true,
-    status: 200,
-    json: async () => ({
-      results: body.queries.map((q) => {
-        const vulns = byNameVersion[`${q.package.name}@${q.version}`];
-        return vulns ? { vulns } : {};
+  const advisories = new Map();
+  for (const vulns of Object.values(byNameVersion)) {
+    for (const v of vulns) if (typeof v.id === 'string' && v.id) advisories.set(v.id, v);
+  }
+  stubOsv(
+    (body) => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        results: body.queries.map((q) => {
+          const vulns = byNameVersion[`${q.package.name}@${q.version}`];
+          // STRIPPED, deliberately: the live endpoint returns these two fields
+          // and no more. Passing `vulns` through whole is the fixture that let
+          // this bug ship.
+          return vulns ? { vulns: vulns.map((v) => ({ id: v.id, modified: MODIFIED })) } : {};
+        }),
       }),
     }),
-  }));
+    (id) => (advisories.has(id)
+      ? { ok: true, status: 200, json: async () => advisories.get(id) }
+      : { ok: false, status: 404, json: async () => ({}) }),
+  );
 }
 const npmPkg = (name, version) => ({ name, version, ecosystem: 'npm' });
 const range = (...events) => ({ type: 'SEMVER', events });

@@ -35,6 +35,14 @@ export function assertPackage(p, where = 'package') {
  * never "we did not look". Discarding it was the single most actionable field
  * missing from the digest: an email that names a problem without naming the
  * upgrade costs the reader a separate investigation.
+ *
+ * Nothing in this signature can tell those two apart — null is null — so the
+ * distinction is kept by the PRODUCER, and it has been broken here before.
+ * v2.52.0 computed `fixed` from OSV's querybatch results, which carry no
+ * `affected` list at all, so every finding on the fleet came out null and the
+ * digest asserted 280 times over that 280 packages had nothing to upgrade to.
+ * A producer that cannot read the advisory must record the SCAN as 'error'
+ * rather than the finding as null; see queryOsv's second pass in appScan.js.
  */
 export function assertFinding(f, where = 'finding') {
   const bad = (m) => { throw new Error(`${where}: ${m} — got ${JSON.stringify(f)}`); };

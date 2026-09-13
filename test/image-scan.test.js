@@ -636,7 +636,28 @@ test('a source app still goes down the lockfile path and never invokes Docker', 
   }));
 
   const realFetch = globalThis.fetch;
-  globalThis.fetch = async (_url, opts) => {
+  // TWO endpoints, because the scanner uses two. querybatch answers which
+  // packages are affected and returns {id, modified} stubs with no `affected`;
+  // the fixed version can only come from GET /v1/vulns/<id>. A stub that served
+  // only the first would make every finding record `fixed: null` — which is the
+  // production bug this shape exists to prevent, and a stub that cannot
+  // reproduce the real exchange would have kept it green.
+  globalThis.fetch = async (url, opts) => {
+    const u = String(url);
+    if (u.includes('/v1/vulns/')) {
+      const id = u.split('/v1/vulns/')[1];
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          id,
+          affected: [{
+            package: { name: 'lodash', ecosystem: 'npm' },
+            ranges: [{ type: 'SEMVER', events: [{ introduced: '0' }, { fixed: '4.17.21' }] }],
+          }],
+        }),
+      };
+    }
     const body = JSON.parse(opts.body);
     return {
       ok: true,
@@ -654,7 +675,12 @@ test('a source app still goes down the lockfile path and never invokes Docker', 
   assert.equal(row.status, 'findings');
   assert.equal(row.ecosystem, 'npm');
   assert.equal(row.package_count, 1);
-  assertFindings(JSON.parse(row.findings_json), 'lockfile findings');
+  const found = JSON.parse(row.findings_json);
+  assertFindings(found, 'lockfile findings');
+  assert.equal(found[0].fixed, '4.17.21',
+    'the fixed version must survive the two-endpoint exchange. querybatch cannot supply it, so a ' +
+    'null here means the advisory was never hydrated — the defect that reported all 280 findings ' +
+    'across the live fleet as "no fixed version published"');
   assert.equal(dockerCalls().length, 0, 'the lockfile scanner must not touch Docker');
 });
 

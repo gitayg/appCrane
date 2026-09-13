@@ -1,3 +1,4 @@
+import { sessionStillValid } from '../sessionExpiry'
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import type { Agent, AppCraneApp, Message, SessionStatus } from '../types'
@@ -29,15 +30,42 @@ export function ChatPanel({ agent, app, onSessionUpdate }: Props) {
   useEffect(() => {
     api.messages(agent.id).then(setMessages).catch(console.error)
     const sessionStatus = agent.sessionStatus || 'idle'
-    const es = api.events(agent.id, setMessages, setStatus)
+    // v2.73.0: an EventSource error carries NO status code, so a lapsed session
+    // and a dropped connection look identical here. This used to reconnect
+    // unconditionally, with no delay, and never closed the replacement -- so an
+    // expired session became a tight loop spawning EventSources forever, with
+    // no error surfaced and nothing on screen to notice. Now the session is
+    // probed before reconnecting, and a lapsed one bounces to sign-in instead.
+    let current: EventSource | null = api.events(agent.id, setMessages, setStatus)
+    let stopped = false
+    let attempt = 0
+    let timer: ReturnType<typeof setTimeout> | null = null
+
     const reconnect = () => {
-      if (!['shipped', 'error'].includes(sessionStatus)) {
-        const es2 = api.events(agent.id, setMessages, setStatus)
-        es2.onerror = reconnect
-      }
+      if (stopped || ['shipped', 'error'].includes(sessionStatus)) return
+      current?.close()
+      current = null
+      // Ask a channel that CAN report a status. False means a bounce is under
+      // way, so stop rather than racing the redirect with another connection.
+      void sessionStillValid().then((ok) => {
+        if (!ok || stopped) { stopped = true; return }
+        // Backoff, capped. The old version retried as fast as the browser
+        // would allow, which turned any sustained outage into a hot loop.
+        const delay = Math.min(1000 * 2 ** attempt++, 30000)
+        timer = setTimeout(() => {
+          if (stopped) return
+          current = api.events(agent.id, setMessages, setStatus)
+          current.onerror = reconnect
+        }, delay)
+      })
     }
-    es.onerror = reconnect
-    return () => es.close()
+    current.onerror = reconnect
+
+    return () => {
+      stopped = true
+      if (timer) clearTimeout(timer)
+      current?.close()
+    }
   }, [agent.id, agent.sessionStatus])
 
   useEffect(() => {
