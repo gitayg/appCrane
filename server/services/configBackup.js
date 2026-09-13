@@ -17,13 +17,19 @@
  *                      volumes/var/lib/odoo). Added v2.70.2 with declared
  *                      volumes; before that an app kept its real state here and
  *                      the backup captured none of it while reporting success.
+ *   - repos/<slug>.bundle + repos/<slug>.HEAD — managed apps' host-local git
+ *                      repositories (DATA_DIR/repos, services/localGit.js), one
+ *                      git bundle of every ref plus HEAD's target. Source code
+ *                      that used to live on GitHub has no other copy once it
+ *                      lives on this box, so it is in the backup from the same
+ *                      change that created the store.
  *   - appcrane-backup.json — manifest (version, timestamp, counts).
  *
  * SECURITY: the bundle contains the ENCRYPTION_KEY and every encrypted secret.
  * Treat it as a crown-jewel artifact. The routes are platform_admin-only.
  *
- * NOT in the bundle: app code and build artifacts (the `releases/` dirs —
- * redeployable from GitHub), the Caddyfile (regenerated from the DB on boot),
+ * NOT in the bundle: build artifacts (the `releases/` dirs — redeployable from
+ * the app's repository), the Caddyfile (regenerated from the DB on boot),
  * and THE CONTAINER IMAGES. The images are deliberately a separate artifact —
  * 5-30 GB for a real box, against a zip this file builds entirely in memory and
  * returns as a Buffer. See services/imageArchive.js. The manifest's `image_set`
@@ -39,11 +45,14 @@
 import AdmZip from 'adm-zip';
 import { getDb } from '../db.js';
 import {
-  existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync, copyFileSync, unlinkSync, renameSync,
+  existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync, copyFileSync, unlinkSync, renameSync, rmSync,
 } from 'fs';
 import { join, resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { liveDeploymentImages, imageSetFingerprint } from './imageArchive.js';
+import {
+  listLocalRepoSlugs, bundleRepoSync, stageRepoFromBundleSync, installStagedReposSync, newImportStageDir,
+} from './localGit.js';
 import log from '../utils/logger.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -118,6 +127,16 @@ export function exportConfig(version) {
     }
   }
 
+  // 3b. Host-local managed-app git repos. A repo that cannot be bundled fails
+  //     the export: a backup that silently leaves out an app's only copy of
+  //     its source is the failure this section exists to prevent.
+  const repoSlugs = listLocalRepoSlugs();
+  for (const slug of repoSlugs) {
+    const { head, bundle } = bundleRepoSync(slug);
+    zip.addFile(`repos/${slug}.HEAD`, Buffer.from(`${head}\n`));
+    if (bundle) zip.addFile(`repos/${slug}.bundle`, bundle);
+  }
+
   // 4. Manifest.
   const counts = {};
   for (const t of ['apps', 'users', 'settings', 'env_vars', 'role_permissions']) {
@@ -146,13 +165,14 @@ export function exportConfig(version) {
     version: version || 'unknown',
     exported_at: new Date().toISOString(),
     crane_domain: process.env.CRANE_DOMAIN || null,
-    includes: ['deployhub.db', ...(hasEnv ? ['.env'] : []), 'icons', 'appdata', 'appvolumes'],
+    includes: ['deployhub.db', ...(hasEnv ? ['.env'] : []), 'icons', 'appdata', 'appvolumes', 'repos'],
     counts,
+    repos: repoSlugs.length,
     image_set: imageSet,
   };
   zip.addFile(MANIFEST, Buffer.from(JSON.stringify(manifest, null, 2)));
 
-  log.info(`[config-backup] exported (apps=${counts.apps}, users=${counts.users}, env=${hasEnv}, data-volumes=${dataApps})`);
+  log.info(`[config-backup] exported (apps=${counts.apps}, users=${counts.users}, env=${hasEnv}, data-volumes=${dataApps}, repos=${repoSlugs.length})`);
   return { buffer: zip.toBuffer(), manifest };
 }
 
@@ -187,6 +207,37 @@ export function importConfig(buffer, opts = {}) {
   // Check the 15 printable bytes to refuse a non-SQLite payload.
   if (dbData.subarray(0, 15).toString('latin1') !== 'SQLite format 3') {
     throw new Error('Backup deployhub.db is not a valid SQLite file');
+  }
+
+  // Managed-app repos are rebuilt and fsck'd in a staging dir BEFORE anything
+  // live is replaced, so a truncated or corrupt bundle refuses the whole import
+  // instead of restoring a DB whose apps point at source that did not come back.
+  //   repos/<slug>.HEAD   -> HEAD's target (required for every repo)
+  //   repos/<slug>.bundle -> every ref (absent for a repo that had none)
+  // Only those exact names are read; the slug is validated again by localGit.
+  const repoParts = new Map();
+  for (const e of zip.getEntries()) {
+    if (e.isDirectory) continue;
+    const m = /^repos\/([a-z0-9][a-z0-9-]{0,99})\.(HEAD|bundle)$/.exec(e.entryName);
+    if (!m) continue;
+    const part = repoParts.get(m[1]) || {};
+    if (m[2] === 'HEAD') part.head = e.getData().toString('utf8').trim();
+    else part.bundle = e.getData();
+    repoParts.set(m[1], part);
+  }
+  let repoStage = null;
+  const stagedRepos = [];
+  if (repoParts.size) {
+    repoStage = newImportStageDir();
+    try {
+      for (const [slug, part] of repoParts) {
+        if (!part.head) throw new Error(`repos/${slug}.bundle has no repos/${slug}.HEAD`);
+        stagedRepos.push(stageRepoFromBundleSync(repoStage, slug, part.head, part.bundle || null));
+      }
+    } catch (e) {
+      rmSync(repoStage, { recursive: true, force: true });
+      throw new Error(`Backup managed-app repository failed verification, nothing was restored: ${e.message}`);
+    }
   }
 
   const stamp = Date.now();
@@ -243,6 +294,17 @@ export function importConfig(buffer, opts = {}) {
     }
   }
 
+  // Staged repos go live now that the DB has been swapped. A repo this host
+  // already had is moved into the pre-import dir, not deleted.
+  let repos = 0;
+  if (repoStage) {
+    try {
+      repos = installStagedReposSync(repoStage, stagedRepos.map((r) => r.slug), preDir).length;
+    } finally {
+      rmSync(repoStage, { recursive: true, force: true });
+    }
+  }
+
   // v2.72.0: say plainly whether the image half of this backup is on the host.
   // A config import that restores 40 apps whose images are not here has not
   // restored anything runnable, and the failure would otherwise surface one app
@@ -260,6 +322,10 @@ export function importConfig(buffer, opts = {}) {
     log.warn(`[config-backup] this backup expects ${imageSet.expected_count} image(s), archive fingerprint ${String(imageSet.expected_fingerprint).slice(0, 12)}`);
   }
 
-  log.warn(`[config-backup] IMPORTED backup from ${manifest.exported_at} (env=${envRestored}, icons=${icons}, data-files=${dataFiles}, volume-files=${volumeFiles}). Restart required. Pre-import copy at ${preDir}`);
-  return { manifest, envRestored, icons, dataFiles, volumeFiles, preImportDir: preDir, imageSet };
+  log.warn(`[config-backup] IMPORTED backup from ${manifest.exported_at} (env=${envRestored}, icons=${icons}, data-files=${dataFiles}, volume-files=${volumeFiles}, repos=${repos}). Restart required. Pre-import copy at ${preDir}`);
+  return {
+    manifest, envRestored, icons, dataFiles, volumeFiles, preImportDir: preDir, imageSet,
+    repos,
+    repoHeads: stagedRepos.map(({ slug, head, headSha }) => ({ slug, head, headSha })),
+  };
 }
