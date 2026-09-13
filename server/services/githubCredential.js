@@ -28,6 +28,9 @@ import { decrypt } from './encryption.js';
 import {
   getAppConfig, getInstallationToken, findInstallationForRepo, githubWebBase,
 } from './githubApp.js';
+import {
+  installationBlockedReason, getInstallationStatus, setInstallationStatus, clearReposRemoved,
+} from './githubAppWebhookState.js';
 
 /**
  * owner/repo from a github_url. Host-checked against the configured GitHub web
@@ -82,6 +85,11 @@ export async function attachInstallation(app, userId = null) {
       repo_full_name = excluded.repo_full_name, attached_by = excluded.attached_by,
       attached_at = datetime('now')
   `).run(app.id, app.slug, installationId, parsed.fullName, userId);
+  // GitHub just confirmed this installation covers this repository, so an
+  // earlier "uninstalled" / "repository removed" report no longer applies.
+  // A suspension is left alone: a suspended installation can still be listed.
+  if (getInstallationStatus(installationId)?.status === 'deleted') setInstallationStatus(installationId, null);
+  clearReposRemoved(installationId, [parsed.fullName]);
   return { installation_id: installationId, repo_full_name: parsed.fullName, account };
 }
 
@@ -97,6 +105,23 @@ export function listAttachedApps() {
   } catch (_) {
     return [];
   }
+}
+
+/**
+ * Why an app may NOT use the installation row it is attached to: its github_url
+ * no longer parses, or names a different repository than the one attached.
+ * null when they match (owner/repo compared case-insensitively).
+ */
+export function installationRepoMismatch(app, inst) {
+  const parsed = parseGithubRepo(app?.github_url);
+  if (!parsed) {
+    return `App '${app?.slug}' is attached to a GitHub App installation but its github_url is not a GitHub repository URL.`;
+  }
+  if (parsed.fullName.toLowerCase() !== String(inst.repo_full_name).toLowerCase()) {
+    return `App '${app.slug}' now points at ${parsed.fullName}, but its GitHub App installation was attached to ${inst.repo_full_name}. ` +
+      'Re-attach the installation for the new repository (Applications → GitHub App) before deploying.';
+  }
+  return null;
 }
 
 /**
@@ -126,16 +151,12 @@ export async function resolveGitHubCredential(app, { patErrors = 'null', nowMs }
     );
   }
 
+  const mismatch = installationRepoMismatch(app, inst);
+  if (mismatch) throw new Error(mismatch);
   const parsed = parseGithubRepo(app.github_url);
-  if (!parsed) {
-    throw new Error(`App '${app.slug}' is attached to a GitHub App installation but its github_url is not a GitHub repository URL.`);
-  }
-  if (parsed.fullName.toLowerCase() !== String(inst.repo_full_name).toLowerCase()) {
-    throw new Error(
-      `App '${app.slug}' now points at ${parsed.fullName}, but its GitHub App installation was attached to ${inst.repo_full_name}. ` +
-      'Re-attach the installation for the new repository (Applications → GitHub App) before deploying.',
-    );
-  }
+
+  const blocked = installationBlockedReason(app.slug, inst.installation_id, inst.repo_full_name);
+  if (blocked) throw new Error(blocked);
 
   const token = await getInstallationToken(inst.installation_id, { repositories: [parsed.repo], nowMs });
   return {

@@ -100,6 +100,10 @@ export function getAppConfig() {
     html_url: row.html_url,
     client_id: row.client_id,
     created_at: row.created_at,
+    webhook_url: row.webhook_url || null,
+    webhook_config_synced_at: row.webhook_config_synced_at || null,
+    webhook_active_at_creation: row.webhook_active_at_creation == null ? null : !!row.webhook_active_at_creation,
+    webhook_secret_stored: !!row.webhook_secret_enc,
     install_url: row.html_url ? `${row.html_url.replace(/\/+$/, '')}/installations/new` : null,
   };
 }
@@ -122,7 +126,7 @@ export function getWebhookSecret() {
  * Persist a manifest conversion response. Every secret in it (pem, webhook
  * secret, client secret) is encrypted before it reaches the database.
  */
-export function saveAppConfig(conversion, userId = null) {
+export function saveAppConfig(conversion, userId = null, { webhookActive = false } = {}) {
   if (!conversion?.id || !conversion?.pem) {
     throw new Error('GitHub returned no app id / private key for this manifest code.');
   }
@@ -130,14 +134,17 @@ export function saveAppConfig(conversion, userId = null) {
   db.prepare(`
     INSERT INTO github_app_config
       (id, github_app_id, slug, name, owner_login, html_url, client_id,
-       client_secret_enc, webhook_secret_enc, private_key_enc, created_by)
-    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       client_secret_enc, webhook_secret_enc, private_key_enc, created_by,
+       webhook_url, webhook_config_synced_at, webhook_active_at_creation)
+    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
     ON CONFLICT(id) DO UPDATE SET
       github_app_id = excluded.github_app_id, slug = excluded.slug, name = excluded.name,
       owner_login = excluded.owner_login, html_url = excluded.html_url,
       client_id = excluded.client_id, client_secret_enc = excluded.client_secret_enc,
       webhook_secret_enc = excluded.webhook_secret_enc,
-      private_key_enc = excluded.private_key_enc, created_by = excluded.created_by
+      private_key_enc = excluded.private_key_enc, created_by = excluded.created_by,
+      webhook_url = excluded.webhook_url, webhook_config_synced_at = NULL,
+      webhook_active_at_creation = excluded.webhook_active_at_creation
   `).run(
     conversion.id,
     conversion.slug || '',
@@ -149,6 +156,8 @@ export function saveAppConfig(conversion, userId = null) {
     conversion.webhook_secret ? encrypt(conversion.webhook_secret) : null,
     encrypt(conversion.pem),
     userId,
+    webhookActive ? webhookReceiverUrl() : null,
+    webhookActive ? 1 : 0,
   );
   clearTokenCache();
   return getAppConfig();
@@ -291,19 +300,62 @@ export async function probeGitHubApp() {
  * Deliberately NOT requested: webhooks (write) -- so "Register on GitHub" stays
  * a PAT-only action -- issues, and anything write-shaped. A read-only App
  * cannot push, open a PR, or change repository settings.
+ *
+ * Webhook: GitHub's manifest `hook_attributes.active` "defaults to true" and
+ * `default_events` is "The list of events the GitHub App subscribes to". The App
+ * subscribes to `push` ("a GitHub App must have at least read-level access for
+ * the 'Contents' repository permission", which it has). `installation` and
+ * `installation_repositories` are not listed: "All GitHub Apps receive this
+ * event by default. You cannot manually subscribe to this event."
+ * Delivery is only switched on when CRANE_DOMAIN is set -- without it the
+ * receiver URL is a localhost/BASE_URL address GitHub cannot reach.
  */
-export function buildManifest({ baseUrl, name }) {
+export function buildManifest({ baseUrl, name, webhooksActive = false }) {
   const base = baseUrl.replace(/\/+$/, '');
   return {
     name,
     url: base,
-    hook_attributes: { url: `${base}/api/github-app/webhook`, active: false },
+    hook_attributes: { url: `${base}/api/github-app/webhook`, active: !!webhooksActive },
     redirect_url: `${base}/settings`,
     setup_url: `${base}/settings`,
     public: false,
     default_permissions: { contents: 'read', metadata: 'read', pull_requests: 'read' },
-    default_events: [],
+    default_events: ['push'],
   };
+}
+
+/** The public receiver URL, or null when CRANE_DOMAIN is unset (GitHub could not reach it). */
+export function webhookReceiverUrl() {
+  const domain = process.env.CRANE_DOMAIN;
+  return domain ? `https://${domain}/api/github-app/webhook` : null;
+}
+
+/**
+ * Point the EXISTING App's webhook at this instance: PATCH /app/hook/config
+ * (JWT auth) with url, content_type json and the secret. GitHub's endpoint takes
+ * url, content_type, secret and insecure_ssl only -- it cannot tick "Active" or
+ * subscribe to events; those stay clicks on GitHub.
+ *
+ * The stored secret is reused; one is generated only when none is stored, and it
+ * is saved (encrypted) only after GitHub accepted it.
+ */
+export async function syncWebhookConfig() {
+  if (!getAppConfig()) throw new Error('No GitHub App is configured on this AppCrane instance.');
+  const url = webhookReceiverUrl();
+  if (!url) throw new Error('CRANE_DOMAIN is not set, so this instance has no public URL GitHub could deliver webhooks to.');
+  const existing = getWebhookSecret();
+  const secret = existing || crypto.randomBytes(32).toString('hex');
+  const data = await githubJson('/app/hook/config', {
+    method: 'PATCH',
+    auth: `Bearer ${createAppJwt()}`,
+    body: { url, content_type: 'json', secret, insecure_ssl: '0' },
+  });
+  getDb().prepare(`
+    UPDATE github_app_config
+    SET webhook_secret_enc = ?, webhook_url = ?, webhook_config_synced_at = datetime('now')
+    WHERE id = 1
+  `).run(encrypt(secret), url);
+  return { url: data?.url || url, content_type: data?.content_type || 'json', secret_generated: !existing };
 }
 
 /** Where the manifest form is POSTed: a user account, or an organization. */

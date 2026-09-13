@@ -66,6 +66,7 @@ import meRoutes from './routes/me.js';
 import filesRoutes, { sweepStagedFiles } from './routes/files.js';
 import githubServiceRoutes from './routes/githubService.js';
 import githubAppRoutes from './routes/githubApp.js';
+import githubAppWebhookRoutes, { rawWebhookBody } from './routes/githubAppWebhook.js';
 import appGithubAppRoutes from './routes/appGithubApp.js';
 import whatsNewRoutes from './routes/whatsNew.js';
 import platformWhatsNewRoutes from './routes/platformWhatsNew.js';
@@ -297,6 +298,10 @@ app.get('/api/apps/:slug/icon', (req, res) => {
 // req.body arrived as {} and every provisioning write was refused as malformed.
 // The list is exact on purpose: no `*/*` and no `application/*+json` wildcard, so
 // nothing that is rejected today starts being parsed.
+// GitHub App webhook: the signature covers the body exactly as sent, so it is
+// read raw HERE, before express.json() can consume it (body-parser skips a
+// stream that is already read). The handler itself is mounted with the routes.
+app.use('/api/github-app/webhook', rawWebhookBody);
 app.use(express.json({ limit: '50mb', type: ['application/json', 'application/scim+json'] }));
 app.use(express.urlencoded({ extended: true }));
 
@@ -1029,6 +1034,7 @@ app.use('/api', meRoutes);               // /api/me — proxied-app identity end
 app.use('/api', userMcpKeysRoutes);      // /api/me/mcp-keys — personal MCP keys
 app.use('/api/files', filesRoutes);      // /api/files/staged — staged uploads for MCP-E
 app.use('/api/github-service', githubServiceRoutes); // service-account config + verify (admin)
+app.use('/api/github-app/webhook', githubAppWebhookRoutes); // GitHub App webhook receiver (no auth: X-Hub-Signature-256 only) — must precede the admin router below
 app.use('/api/github-app', githubAppRoutes);         // per-instance GitHub App: manifest flow + status (platform admin)
 app.use('/api/apps', appGithubAppRoutes);           // /api/apps/:slug/github-app — attach an app to an installation
 app.use('/api/apps', whatsNewRoutes);     // /api/apps/:slug/whats-new — per-user version dialog state
@@ -1287,6 +1293,17 @@ try {
   await migrateManagedReposAtBoot();
 } catch (e) {
   log.error(`[repo-migration] could not run, boot continues: ${e.message}`);
+}
+
+// Uploaded apps become Crane-hosted (a local repo built from the release each
+// environment runs), AFTER the repo migration and BEFORE listening, one at a
+// time (services/uploadConversion.js). Same shape and bounds as above: it cannot
+// reject, and a module that fails to load leaves boot going.
+try {
+  const { convertUploadedAppsAtBoot } = await import('./services/uploadConversion.js');
+  await convertUploadedAppsAtBoot();
+} catch (e) {
+  log.error(`[upload-conversion] could not run, boot continues: ${e.message}`);
 }
 
 // Earlier versions cloned with the GitHub token in the URL, which git keeps in

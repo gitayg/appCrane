@@ -7,6 +7,11 @@
  *                                       and the manifest to POST)
  *   POST   /api/github-app/exchange   — finish it: code + state -> stored App
  *   DELETE /api/github-app            — forget the App locally
+ *   POST   /api/github-app/webhook-config — PATCH /app/hook/config on GitHub
+ *
+ * The webhook RECEIVER (POST /api/github-app/webhook) is NOT in this router:
+ * everything here requires a platform admin, and GitHub sends no credential.
+ * It lives in routes/githubAppWebhook.js and is mounted ahead of this router.
  *
  * The callback is a browser redirect from GitHub and therefore carries no API
  * credential, so it lands on the SPA, which posts `code` and `state` back here
@@ -21,8 +26,10 @@ import { auditMiddleware, logAudit } from '../middleware/audit.js';
 import {
   getAppConfig, saveAppConfig, deleteAppConfig, exchangeManifestCode,
   buildManifest, manifestFormUrl, createManifestState, consumeManifestState,
+  webhookReceiverUrl, syncWebhookConfig,
 } from '../services/githubApp.js';
 import { listAttachedApps, detachInstallation } from '../services/githubCredential.js';
+import { lastDeliveryAt } from '../services/githubAppWebhookState.js';
 import log from '../utils/logger.js';
 
 const router = Router();
@@ -46,13 +53,77 @@ function sessionFingerprint(req) {
   return raw ? createHash('sha256').update(String(raw)).digest('hex') : 'none';
 }
 
+// GitHub's REST API cannot change these (PATCH /app/hook/config takes url,
+// content_type, secret and insecure_ssl only), so the admin clicks them.
+const MANUAL_WEBHOOK_STEPS = (slug) => [
+  `On GitHub open the App's settings: your account (or organization) Settings → Developer settings → GitHub Apps → ${slug} → Edit.`,
+  'Under "Webhook", tick "Active".',
+  'Under "Subscribe to events", tick "Push".',
+  'Click "Save changes".',
+];
+
+function webhookStatus(cfg) {
+  if (!cfg) return null;
+  const receiverUrl = webhookReceiverUrl();
+  const lastDelivery = lastDeliveryAt();
+  let state;
+  let reason = null;
+  if (!receiverUrl) {
+    state = 'unavailable';
+    reason = 'CRANE_DOMAIN is not set, so this instance has no public URL for GitHub to deliver to. '
+      + 'Webhooks stay off; deploys from App-backed repositories need a manual deploy or the per-app webhook.';
+  } else if (lastDelivery) {
+    state = 'receiving';
+  } else if (cfg.webhook_active_at_creation || cfg.webhook_config_synced_at) {
+    state = 'configured';
+  } else {
+    state = 'not_configured';
+  }
+  const needsClicks = !!receiverUrl && !lastDelivery && !cfg.webhook_active_at_creation;
+  return {
+    state,
+    reason,
+    receiver_url: receiverUrl,
+    secret_stored: cfg.webhook_secret_stored,
+    active_at_creation: cfg.webhook_active_at_creation,
+    config_synced_at: cfg.webhook_config_synced_at,
+    last_delivery_at: lastDelivery,
+    can_sync: !!receiverUrl,
+    manual_steps: needsClicks ? MANUAL_WEBHOOK_STEPS(cfg.slug) : [],
+    polling_note: 'The PR poller keeps running every 5 minutes whether or not webhooks arrive.',
+  };
+}
+
 router.get('/', (_req, res) => {
   const cfg = getAppConfig();
   res.json({
     ...(cfg || { configured: false }),
     attached_apps: listAttachedApps(),
     base_url: baseUrl(),
+    webhook: webhookStatus(cfg),
   });
+});
+
+/**
+ * Point an existing App's webhook at this instance (url, content_type json,
+ * secret) with PATCH /app/hook/config. Activation and the Push subscription are
+ * not settable by API; the response repeats the clicks still needed.
+ */
+router.post('/webhook-config', auditMiddleware('github-app-webhook-config'), async (_req, res) => {
+  const cfg = getAppConfig();
+  if (!cfg) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'No GitHub App is configured.' } });
+  if (!webhookReceiverUrl()) {
+    return res.status(409).json({ error: { code: 'NO_CRANE_DOMAIN', message: webhookStatus(cfg).reason } });
+  }
+  try {
+    const synced = await syncWebhookConfig();
+    log.info(`[github-app] webhook config sent to GitHub for ${cfg.slug}`);
+    const fresh = getAppConfig();
+    res.json({ synced: true, url: synced.url, content_type: synced.content_type, secret_generated: synced.secret_generated,
+      manual_steps: MANUAL_WEBHOOK_STEPS(cfg.slug), webhook: webhookStatus(fresh) });
+  } catch (e) {
+    res.status(502).json({ error: { code: 'GITHUB_HOOK_CONFIG_FAILED', message: e.message } });
+  }
 });
 
 /**
@@ -67,7 +138,7 @@ router.post('/manifest', (req, res) => {
   const base = baseUrl();
   let host;
   try { host = new URL(base).host; } catch (_) { host = 'local'; }
-  const manifest = buildManifest({ baseUrl: base, name: `AppCrane (${host})` });
+  const manifest = buildManifest({ baseUrl: base, name: `AppCrane (${host})`, webhooksActive: !!webhookReceiverUrl() });
   const state = createManifestState(req.user.id, sessionFingerprint(req));
   res.json({ action: manifestFormUrl(org || null), state, manifest });
 });
@@ -85,7 +156,7 @@ router.post('/exchange', auditMiddleware('github-app-create'), async (req, res) 
   }
   try {
     const conversion = await exchangeManifestCode(code);
-    const cfg = saveAppConfig(conversion, req.user.id);
+    const cfg = saveAppConfig(conversion, req.user.id, { webhookActive: !!webhookReceiverUrl() });
     log.info(`[github-app] registered app ${cfg.slug} (id ${cfg.github_app_id})`);
     res.json(cfg);
   } catch (e) {

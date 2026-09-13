@@ -915,3 +915,26 @@ export function installMigratedRepo(slug, stagingDir) {
   }
   return final;
 }
+
+// ---------------------------------------------------------------------------
+// Upload conversion (services/uploadConversion.js)
+// ---------------------------------------------------------------------------
+
+/**
+ * Where an uploaded app's repo is assembled before it is renamed into place.
+ * Same rules as migrationStagingPath: one fixed name per slug, starts with "."
+ * so listLocalRepoSlugs and the config backup never see it.
+ */
+export function conversionStagingPath(slug) {
+  return join(reposRoot(), `.converting-${assertSlug(slug)}.git`);
+}
+
+/** The isolated environment every git in this module runs with (no host config, fixed identity). */
+export function isolatedGitEnv(extra = {}) {
+  return gitEnv(extra);
+}
+
+/** The isolated argv prefix (no hooks, no fsmonitor, no signing, no gc, no transports). */
+export function isolatedGitArgs(gitDir, args) {
+  return gitArgs(gitDir, args);
+}

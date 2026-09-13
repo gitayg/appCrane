@@ -43,6 +43,15 @@ export const LOCAL_PUSH_SOURCE = Object.freeze({
   unavailableMsg: (env) => `Deploy service not available for push-triggered ${env} deploy`,
 });
 
+/** A push delivered to this instance's GitHub App webhook (routes/githubAppWebhook.js). */
+export const GITHUB_APP_PUSH_SOURCE = Object.freeze({
+  deploymentLog: 'Triggered by GitHub App push webhook',
+  auditAction: 'github-app-push-deploy',
+  triggeredMsg: (env, slug) => `GitHub App push triggered ${env} deploy for ${slug}`,
+  failedMsg: (env) => `GitHub App push-triggered ${env} deploy failed`,
+  unavailableMsg: (env) => `Deploy service not available for GitHub App push-triggered ${env} deploy`,
+});
+
 const ENVIRONMENTS = [
   { env: 'sandbox', flag: 'auto_deploy_sandbox' },
   { env: 'production', flag: 'auto_deploy_prod' },

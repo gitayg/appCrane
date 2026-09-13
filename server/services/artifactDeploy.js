@@ -49,6 +49,14 @@ export async function deployArtifact({
     drop();
     throw new Error('env must be production or sandbox');
   }
+  // An app converted to a Crane-hosted repository deploys from that repository;
+  // a bundle deployed on top of it would run code the repository does not hold.
+  const { conversionRefusal } = await import('./uploadConversion.js');
+  const refusal = conversionRefusal(getDb(), app);
+  if (refusal) {
+    drop();
+    throw Object.assign(new Error(refusal.message), { code: refusal.code, status: refusal.status });
+  }
   if (!isAllowedArtifactName(filename)) {
     drop();
     throw new Error(`Only ${ALLOWED_EXT.join(', ')} files allowed — got '${filename}'`);

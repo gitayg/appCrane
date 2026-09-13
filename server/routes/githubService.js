@@ -111,4 +111,19 @@ router.get('/repo-migration', requirePlatformAdmin, async (_req, res) => {
   }
 });
 
+/**
+ * Per-app outcome of the boot-time conversion of uploaded apps into Crane-hosted
+ * ones (services/uploadConversion.js). Read-only: key names, paths, commit SHAs
+ * and reasons — never an env var value, which is never recorded.
+ */
+router.get('/upload-conversion', requirePlatformAdmin, async (_req, res) => {
+  try {
+    const { getDb } = await import('../db.js');
+    const { getUploadConversionStatus } = await import('../services/uploadConversion.js');
+    res.json(getUploadConversionStatus(getDb()));
+  } catch (e) {
+    res.status(500).json({ error: { code: 'UPLOAD_CONVERSION_STATUS', message: e.message } });
+  }
+});
+
 export default router;

@@ -1157,6 +1157,13 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
             throw new Error(`Failed to check out commit ${opts.targetCommit} for promotion (is it on branch '${app.branch || 'main'}' within the last 200 commits?): ${err.message}`);
           }
         }
+        // .env files kept OUTSIDE the repository (stored encrypted when an
+        // uploaded app was converted, services/envFileStore.js) go back into
+        // THIS environment's clone before anything reads or builds it, with this
+        // environment's env vars layered on. Paths and key names only in the log.
+        const { restoreStoredEnvFiles, describeRestoredEnvFiles } = await import('./envFileStore.js');
+        const restoredEnvFiles = restoreStoredEnvFiles(db, app, env, releaseDir);
+        if (restoredEnvFiles.files.length) appendLog(describeRestoredEnvFiles(restoredEnvFiles));
       } else {
         let token = null;
         let installationToken = null;

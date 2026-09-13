@@ -72,6 +72,10 @@ async function refuseUnacknowledgedDataLoss(req, app, env) {
  */
 router.post('/:slug/deploy/upload', requireAppAccess, auditMiddleware('deploy-upload'), async (req, res) => {
   const app = req.app;
+  // Refused before the body is read: a converted app deploys from its repository.
+  const { conversionRefusal } = await import('../services/uploadConversion.js');
+  const refusal = conversionRefusal(getDb(), app);
+  if (refusal) return res.status(refusal.status).json({ error: { code: refusal.code, message: refusal.message } });
   const dataDir = resolve(process.env.DATA_DIR || './data');
   const { mkdirSync, unlinkSync } = await import('fs');
   const { execFileSync } = await import('child_process');

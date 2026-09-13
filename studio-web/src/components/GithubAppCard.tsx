@@ -18,6 +18,22 @@ interface GithubAppStatus {
   install_url?: string | null
   created_at?: string
   attached_apps: { app_id: number; slug: string; installation_id: number; repo_full_name: string }[]
+  webhook?: {
+    state: 'unavailable' | 'receiving' | 'configured' | 'not_configured'
+    reason: string | null
+    receiver_url: string | null
+    last_delivery_at: string | null
+    config_synced_at: string | null
+    can_sync: boolean
+    manual_steps: string[]
+  } | null
+}
+
+const WEBHOOK_LABEL: Record<string, string> = {
+  unavailable: 'off',
+  receiving: 'receiving deliveries',
+  configured: 'configured — no delivery received yet',
+  not_configured: 'not configured on GitHub',
 }
 
 interface ManifestStart {
@@ -71,6 +87,20 @@ export function GithubAppCard() {
       form.submit()
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
+      setBusy(false)
+    }
+  }
+
+  async function syncWebhook() {
+    if (busy) return
+    setBusy(true)
+    setError(null)
+    try {
+      await adminApi.post('/api/github-app/webhook-config', {})
+      load()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
       setBusy(false)
     }
   }
@@ -132,6 +162,29 @@ export function GithubAppCard() {
               ? <span style={{ color: 'var(--dim)' }}>none yet — attach from Applications → gh app</span>
               : status.attached_apps.map(a => `${a.slug} (${a.repo_full_name})`).join(', ')}
           </span>
+          {status.webhook && <>
+            <span style={{ color: 'var(--dim)', alignSelf: 'start' }}>Webhook</span>
+            <span>
+              {WEBHOOK_LABEL[status.webhook.state] || status.webhook.state}
+              {status.webhook.last_delivery_at && <span style={{ color: 'var(--dim)' }}> · last {status.webhook.last_delivery_at} UTC</span>}
+              {status.webhook.receiver_url && <div style={{ color: 'var(--dim)' }}><code style={{ fontFamily: 'monospace' }}>{status.webhook.receiver_url}</code></div>}
+              {status.webhook.reason && <div style={{ color: 'var(--dim)' }}>{status.webhook.reason}</div>}
+              {status.webhook.can_sync && status.webhook.state !== 'receiving' && (
+                <div style={{ marginTop: 6 }}>
+                  <button className="btn btn-xs" disabled={busy} onClick={syncWebhook}>Send webhook settings to GitHub</button>
+                  {status.webhook.config_synced_at && <span style={{ color: 'var(--dim)' }}> · sent {status.webhook.config_synced_at} UTC</span>}
+                </div>
+              )}
+              {status.webhook.manual_steps.length > 0 && (
+                <div style={{ color: 'var(--dim)', marginTop: 6 }}>
+                  GitHub's API cannot switch delivery on or subscribe to events. Then, on GitHub:
+                  <ol style={{ margin: '4px 0 0 18px', padding: 0 }}>
+                    {status.webhook.manual_steps.map(s => <li key={s}>{s}</li>)}
+                  </ol>
+                </div>
+              )}
+            </span>
+          </>}
           <span />
           <span><button className="btn btn-xs btn-red" disabled={busy} onClick={disconnect}>Disconnect</button></span>
         </div>
