@@ -16,6 +16,8 @@ import {
   PUBLIC_PORT_MIN, PUBLIC_PORT_MAX, AUTO_PORT_MIN, AUTO_PORT_MAX,
 } from './tcpIngress.js';
 import { redactAuditArgs } from '../utils/auditRedact.js';
+import { usesLocalRepo } from './managedRepo.js';
+import { refuseEnvFilePaths, redactEnvFileContentInArgs } from './envFilePushGuard.js';
 import { assertFinding } from './scanShapes.js';
 import { resolveVisibility } from '../utils/appVisibility.js';
 import { mkdirSync } from 'fs';
@@ -372,7 +374,7 @@ function auditMcpCall(user, toolName, args, error) {
     // Also truncates large strings so a file push can't write megabytes/call.
     const detail = JSON.stringify({
       tool: toolName,
-      args: redactAuditArgs(args || {}),
+      args: redactAuditArgs(redactEnvFileContentInArgs(args || {})),
       ok: !error,
       error: error ? String(error.message || error) : null,
     });
@@ -3581,6 +3583,10 @@ const TOOLS = [
       if (typeof path !== 'string' || path.includes('..') || path.startsWith('/')) {
         throw new Error(`invalid file path '${path}': must be repo-relative, no ".." or leading slash`);
       }
+      // Refused at the first part, not at assemble, so an agent does not upload
+      // megabytes before hearing no. assemble goes through the same rule again
+      // (managedRepo.pushFilesToManagedRepo) for a session staged before this.
+      if (usesLocalRepo(app)) refuseEnvFilePaths(app.slug, [path]);
       if (!Number.isInteger(part) || !Number.isInteger(of) || of < 1 || part < 1 || part > of) {
         throw new Error(`invalid part/of: part must be an integer in 1..of (got part=${part}, of=${of})`);
       }
@@ -3730,6 +3736,9 @@ const TOOLS = [
       if (typeof args.path !== 'string' || args.path.includes('..') || args.path.startsWith('/')) {
         throw new Error(`invalid file path '${args.path}': must be repo-relative, no ".." or leading slash`);
       }
+      // Before the current file is read, so a refusal never depends on (or
+      // returns anything about) a .env file already in the repository.
+      if (usesLocalRepo(app)) refuseEnvFilePaths(app.slug, [args.path]);
       const branch = args.branch || app.branch;
       const { readManagedRepoFile, pushFilesToManagedRepo } = await import('./managedRepo.js');
       const { pushDeployView } = await import('./deployTrigger.js');

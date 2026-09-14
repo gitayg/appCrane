@@ -38,6 +38,7 @@ import appsRoutes from './routes/apps.js';
 import usersRoutes from './routes/users.js';
 import deployRoutes from './routes/deploy.js';
 import envVarsRoutes from './routes/envVars.js';
+import envFilesRoutes from './routes/envFiles.js';
 import healthRoutes from './routes/health.js';
 import webhooksRoutes from './routes/webhooks.js';
 import backupsRoutes from './routes/backups.js';
@@ -984,6 +985,7 @@ app.use('/api', noticesRoutes);          // /api/notices, /api/apps/:slug/notice
 app.use('/api/apps', appsRoutes);
 app.use('/api/apps', deployRoutes);     // /api/apps/:slug/deploy/:env
 app.use('/api/apps', envVarsRoutes);     // /api/apps/:slug/env/:env
+app.use('/api/apps', envFilesRoutes);    // /api/apps/:slug/env-files — stored .env files of a Crane-hosted app
 app.use('/api/apps', healthRoutes);      // /api/apps/:slug/health/:env
 app.use('/api/apps', backupsRoutes);     // /api/apps/:slug/backup/:env
 app.use('/api/apps', managedDbRoutes);   // /api/apps/:slug/database — shared Postgres/MariaDB, one DB + one user per app

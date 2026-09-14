@@ -75,6 +75,12 @@ export async function createManagedRepo(backend, slug, opts) {
  */
 export async function pushFilesToManagedRepo(app, files, opts = {}) {
   const { actorId = null, ...backendOpts } = opts;
+  // Before the backend is touched, so a refused push writes no blob and no ref:
+  // the whole push is refused, never committed in part (envFilePushGuard.js).
+  if (usesLocalRepo(app) && Array.isArray(files)) {
+    const { refuseEnvFilePaths } = await import('./envFilePushGuard.js');
+    refuseEnvFilePaths(app.slug, files.map((f) => f?.path));
+  }
   const result = await (await backendModule(repoBackendOf(app))).pushFilesToManagedRepo(app.slug, files, backendOpts);
   if (usesLocalRepo(app)) {
     // Record the pushed commit BEFORE its deploy starts. The supply-chain check

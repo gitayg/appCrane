@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { adminApi } from '../adminApi'
 import { RedeployWarning, fetchRedeployRisk, type RedeployRisk } from '../components/RedeployWarning'
+import { StoredEnvFilesCard } from '../components/StoredEnvFilesCard'
 
 const PAGE_CSS = `
 .app-manager .breadcrumb{font-size:.78rem;color:var(--dim);padding:7px 24px;background:var(--surface);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:5px;margin:-24px -24px 16px;}
@@ -1173,6 +1174,13 @@ export function AppManager() {
               onMsg={showMsg}
               onDeploy={deploy}
               onChanged={() => { /* banner shown internally */ }}
+            />
+            <StoredEnvFilesCard
+              slug={currentApp}
+              env={currentEnv}
+              reload={reloadCounter}
+              onMsg={showMsg}
+              onDeploy={deploy}
             />
             <DeployHistoryCard
               slug={currentApp}

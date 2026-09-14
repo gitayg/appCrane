@@ -1,8 +1,12 @@
 /**
  * Convert every UPLOADED app into a CRANE-HOSTED one, at boot.
  *
- * For each app with source_type='upload', one at a time, after the GitHub repo
- * migration and before AppCrane listens:
+ * For each app with source_type='upload' or 'managed_legacy' (052 renamed every
+ * pre-v2.3.1 upload app to that; deployer.js still redeploys it from the same
+ * <ts>-upload release directories), one at a time, after the GitHub repo
+ * migration and before AppCrane listens. A legacy app that carries a github_url
+ * is skipped (legacy_has_github_url): the owner named a repository, and whether
+ * that repo or a Crane-hosted one should become its source is theirs to decide.
  *   1. pick, per environment, the release that environment is running: the live
  *      deployment's release directory, else the newest *upload* release on disk
  *   2. scan it (uploadConversionScan.js): every .env* entry, node_modules and
@@ -21,15 +25,16 @@
  *      first commit on main, sandbox's (when different) a second commit on top;
  *      git fsck, check the refs
  *   5. record 'installing' + the tip, rename into <repos>/<slug>.git (never over
- *      an existing path), then in ONE transaction guarded by
- *      source_type='upload' AND repo_backend IS NULL: flip the app to
+ *      an existing path), then in ONE transaction guarded by the source_type
+ *      the app had when it was selected AND repo_backend IS NULL: flip the app to
  *      managed/local/main, point each live deployment's commit_hash at the
  *      commit holding its release, store each env's .env files encrypted, and
  *      import bundled .env values as encrypted env vars — a key the app already
  *      has in AppCrane is never overwritten.
  *
  * Nothing is deployed and no container is touched. Upload release directories
- * stay on disk. Revert: UPDATE apps SET source_type='upload', repo_backend=NULL
+ * stay on disk. Revert: UPDATE apps SET source_type=<detail_json.original_source_type
+ * — 'upload' or 'managed_legacy'; the status route's revert.source_type>, repo_backend=NULL
  * (and restore deployments.commit_hash from commits_json.previous_commit_hash);
  * with <slug>.git left in place the next boot records local_repo_exists and does
  * not convert it again.
@@ -72,6 +77,7 @@ export const DEFAULT_MAX_BYTES = 512 * 1024 * 1024;
 export const DEFAULT_MAX_FILES = 100000;
 export const ENVS = ['production', 'sandbox'];
 const RECOVERABLE = ['installing', 'flip_failed'];
+export const CONVERTIBLE_SOURCE_TYPES = ['upload', 'managed_legacy'];
 
 function positiveNumber(envName, fallback, scale = 1) {
   const n = Number(process.env[envName]);
@@ -87,13 +93,13 @@ export function conversionDisabledReason(db) {
 }
 
 export function candidateApps(db) {
-  return db.prepare("SELECT * FROM apps WHERE source_type = 'upload' ORDER BY id").all();
+  return db.prepare("SELECT * FROM apps WHERE source_type IN ('upload', 'managed_legacy') ORDER BY id").all();
 }
 
 /**
  * The refusal an upload endpoint returns for an app this module converted, or
  * null. Keyed on the recorded conversion AND the app still being managed, so a
- * reverted app (source_type back to 'upload') accepts uploads again.
+ * reverted app (source_type back to 'upload' or 'managed_legacy') is not refused.
  */
 export function conversionRefusal(db, app) {
   if (!app || app.source_type !== 'managed') return null;
@@ -303,6 +309,12 @@ async function verifyRepo(lg, gitDir, tip, deadline) {
 // ---------------------------------------------------------------------------
 
 export async function convertOneApp(db, app, opts = {}) {
+  // The flip is guarded by this value, so it must be one of the two types this
+  // module converts; anything else would let the UPDATE match a non-upload app.
+  const originalType = app?.source_type;
+  if (!CONVERTIBLE_SOURCE_TYPES.includes(originalType)) {
+    return { slug: app?.slug, status: 'skipped', error_code: 'not_an_upload_app', error: `source_type is ${JSON.stringify(originalType)}; not converted`, tip: null, duration_ms: 0 };
+  }
   const lg = opts.localGit || await import('./localGit.js');
   const startedMs = Date.now();
   const startedAt = new Date(startedMs).toISOString();
@@ -319,6 +331,7 @@ export async function convertOneApp(db, app, opts = {}) {
     excluded: acc.excluded, skipped_files: acc.skipped_files, warnings: acc.warnings,
     invalid_keys: Object.keys(acc.invalid_keys).length ? acc.invalid_keys : null, tracked_bytes: acc.tracked_bytes,
     ...extra,
+    detail: { original_source_type: originalType, ...(extra?.detail || {}) },
   });
   const logOutcome = (f) => {
     const imported = Object.values(f.imported_keys || {}).reduce((n, a) => n + a.length, 0);
@@ -337,10 +350,16 @@ export async function convertOneApp(db, app, opts = {}) {
 
   try {
     const recovering = prior && RECOVERABLE.includes(prior.status) && /^[0-9a-f]{40}$/.test(prior.tip || '');
-    if (!recovering) record(db, app, { status: 'running', attempts, started_at: startedAt });
+    if (!recovering) record(db, app, { status: 'running', attempts, started_at: startedAt, detail: { original_source_type: originalType } });
 
     if (app.repo_backend !== null && app.repo_backend !== undefined) {
-      return finish('skipped', { error_code: 'unsupported_repo_backend', error: `source_type is 'upload' but repo_backend is ${JSON.stringify(app.repo_backend)}; left untouched` });
+      return finish('skipped', { error_code: 'unsupported_repo_backend', error: `source_type is '${originalType}' but repo_backend is ${JSON.stringify(app.repo_backend)}; left untouched` });
+    }
+    if (originalType === 'managed_legacy' && String(app.github_url ?? '').trim()) {
+      return finish('skipped', {
+        error_code: 'legacy_has_github_url',
+        error: "legacy upload app has a github_url; left untouched. Promote it to source_type='github' to deploy from that repository, or clear github_url to allow conversion to a Crane-hosted one.",
+      });
     }
 
     const plans = ENVS.map((env) => planEnv(db, app, env));
@@ -432,14 +451,14 @@ export async function convertOneApp(db, app, opts = {}) {
       if (!recovering) {
         return finish('skipped', {
           error_code: 'local_repo_exists',
-          error: `a repository already exists at repos/${app.slug}.git while the app is still an upload app; left untouched. Remove or move it to allow conversion, or keep it to stop conversion.`,
+          error: `a repository already exists at repos/${app.slug}.git while the app is still '${originalType}'; left untouched. Remove or move it to allow conversion, or keep it to stop conversion.`,
         });
       }
       const priorCommits = JSON.parse(prior.commits_json || '{}');
       const same = Object.keys(priorCommits).sort().join() === present.map((p) => p.env).sort().join()
         && present.every((p) => priorCommits[p.env]?.identity === p.identity && /^[0-9a-f]{40}$/.test(priorCommits[p.env]?.commit || ''));
       if (!same) {
-        return finish('failed', { error_code: 'RECOVERY_MISMATCH', error: 'the releases on disk no longer match the conversion recorded before the interruption; repository left in place, app left as upload', tip: prior.tip, commits: priorCommits });
+        return finish('failed', { error_code: 'RECOVERY_MISMATCH', error: `the releases on disk no longer match the conversion recorded before the interruption; repository left in place, app left as ${originalType}`, tip: prior.tip, commits: priorCommits });
       }
       await verifyRepo(lg, lg.repoPath(app.slug), prior.tip, deadline);
       tip = prior.tip;
@@ -477,9 +496,9 @@ export async function convertOneApp(db, app, opts = {}) {
     try {
       outcome = db.transaction(() => {
         const changed = db.prepare(
-          "UPDATE apps SET source_type = 'managed', repo_backend = 'local', branch = 'main', last_managed_push_sha = ? WHERE id = ? AND source_type = 'upload' AND repo_backend IS NULL",
-        ).run(tip, app.id).changes;
-        if (changed !== 1) throw Object.assign(new Error('the app is no longer an upload app with no repo_backend; nothing flipped'), { code: 'FLIP_GUARD' });
+          "UPDATE apps SET source_type = 'managed', repo_backend = 'local', branch = 'main', last_managed_push_sha = ? WHERE id = ? AND source_type = ? AND repo_backend IS NULL",
+        ).run(tip, app.id, originalType).changes;
+        if (changed !== 1) throw Object.assign(new Error(`the app is no longer '${originalType}' with no repo_backend; nothing flipped`), { code: 'FLIP_GUARD' });
         for (const p of present) {
           if (p.deploymentId) db.prepare('UPDATE deployments SET commit_hash = ? WHERE id = ? AND app_id = ?').run(commitByEnv[p.env], p.deploymentId, app.id);
         }
@@ -542,7 +561,7 @@ export async function convertUploadedApps(opts = {}) {
     const budgetMs = opts.budgetMs ?? positiveNumber(BUDGET_ENV, DEFAULT_BUDGET_MS, 1000);
     const appTimeoutMs = opts.appTimeoutMs ?? positiveNumber(APP_TIMEOUT_ENV, DEFAULT_APP_TIMEOUT_MS, 1000);
     const budgetDeadline = startedMs + budgetMs;
-    log.info(`[upload-conversion] ${apps.length} uploaded app(s); converting to Crane-hosted repositories one at a time (per-app limit ${Math.round(appTimeoutMs / 1000)}s, total ${Math.round(budgetMs / 1000)}s)`);
+    log.info(`[upload-conversion] ${apps.length} uploaded app(s) (${apps.filter((a) => a.source_type === 'managed_legacy').length} legacy); converting to Crane-hosted repositories one at a time (per-app limit ${Math.round(appTimeoutMs / 1000)}s, total ${Math.round(budgetMs / 1000)}s)`);
 
     const results = [];
     for (const app of apps) {
@@ -550,7 +569,7 @@ export async function convertUploadedApps(opts = {}) {
         try {
           const prev = db.prepare('SELECT status, attempts FROM upload_conversions WHERE app_id = ?').get(app.id);
           if (!prev || !RECOVERABLE.includes(prev.status)) {
-            record(db, app, { status: 'deferred', attempts: prev?.attempts || 0, error_code: 'BUDGET_EXHAUSTED', error: 'boot conversion budget used up before this app; retried next boot', finished_at: new Date().toISOString() });
+            record(db, app, { status: 'deferred', attempts: prev?.attempts || 0, error_code: 'BUDGET_EXHAUSTED', error: 'boot conversion budget used up before this app; retried next boot', finished_at: new Date().toISOString(), detail: { original_source_type: app.source_type } });
           }
         } catch (e) { log.error(`[upload-conversion] ${app.slug}: could not record deferral: ${e.message}`); }
         results.push({ slug: app.slug, status: 'deferred', error_code: 'BUDGET_EXHAUSTED' });
@@ -584,23 +603,29 @@ export async function convertUploadedAppsAtBoot(opts = {}) {
 
 const parse = (s) => (s ? JSON.parse(s) : null);
 
-/** Per-app outcome for the admin status route. Key names and paths only (stored_env_files: paths, never contents). */
+/**
+ * Per-app outcome for the admin status route. Key names and paths only (stored_env_files: paths, never contents).
+ * original_source_type: what the app was before conversion; a row written before it was recorded can only
+ * be an 'upload' app, the one type converted then. revert: the apps columns that undo a conversion.
+ */
 export function getUploadConversionStatus(db) {
   const apps = db.prepare(`
     SELECT c.*, a.source_type, a.repo_backend, (a.id IS NULL) AS app_deleted
       FROM upload_conversions c LEFT JOIN apps a ON a.id = c.app_id
      ORDER BY c.app_id
-  `).all().map((r) => ({
+  `).all().map((r) => ({ r, detail: parse(r.detail_json) })).map(({ r, detail }) => ({
     app_id: r.app_id, slug: r.slug, status: r.status, attempts: r.attempts,
     skip_reason: r.status === 'skipped' ? r.error_code : null,
     error_code: r.error_code, error: r.error, tip: r.tip,
     commits: parse(r.commits_json),
     imported_keys: parse(r.imported_keys_json), kept_existing: parse(r.kept_existing_json), invalid_keys: parse(r.invalid_keys_json),
     excluded: { count: r.excluded_count ?? 0, paths: parse(r.excluded_json) || [], capped_at: EXCLUDED_CAP },
-    skipped_files: parse(r.skipped_files_json) || [], warnings: parse(r.warnings_json) || [], detail: parse(r.detail_json),
+    skipped_files: parse(r.skipped_files_json) || [], warnings: parse(r.warnings_json) || [], detail,
     tracked_bytes: r.tracked_bytes, started_at: r.started_at, finished_at: r.finished_at, duration_ms: r.duration_ms,
     stored_env_files: storedEnvFilePaths(db, r.app_id),
     source_type: r.source_type, repo_backend: r.repo_backend, app_deleted: !!r.app_deleted,
+    original_source_type: detail?.original_source_type || 'upload',
+    revert: r.status === 'converted' ? { source_type: detail?.original_source_type || 'upload', repo_backend: null } : null,
   }));
   return { disabled: conversionDisabledReason(db), pending: candidateApps(db).map((a) => a.slug), apps };
 }

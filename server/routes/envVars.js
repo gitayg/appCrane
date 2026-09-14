@@ -80,7 +80,7 @@ router.get('/:slug/env/:env', requireAppUser, (req, res) => {
     // "notified" mean strictly prior events and the arithmetic is unambiguous.
     const countReveals = (minutes) => db.prepare(`
       SELECT COUNT(*) AS n FROM audit_log
-      WHERE user_id = ? AND app_id = ? AND action IN ('env-reveal', 'secret-reveal')
+      WHERE user_id = ? AND app_id = ? AND action IN ('env-reveal', 'secret-reveal', 'env_file.reveal')
         AND created_at >= datetime('now', ?)
     `).get(req.user.id, req.app.id, `-${minutes} minutes`).n;
 

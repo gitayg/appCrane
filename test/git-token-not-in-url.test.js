@@ -48,7 +48,14 @@ execFileSync(REAL_GIT, ['-C', BARE, 'config', 'http.receivepack', 'true']);
   g('commit', '-qm', 'seed');
   g('push', '-q', BARE, 'main');
 }
-const bareGit = (...a) => execFileSync(REAL_GIT, ['-C', BARE, ...a], { stdio: 'pipe' }).toString().trim();
+// A fixed identity for commits made straight into the bare repo. Without it
+// commit-tree takes the machine's own git identity, which a developer laptop has
+// and a CI runner does not ("Author identity unknown" failed CI on v2.75.0).
+const FIXTURE_IDENTITY = {
+  GIT_AUTHOR_NAME: 'fixture', GIT_AUTHOR_EMAIL: 'fixture@example.com',
+  GIT_COMMITTER_NAME: 'fixture', GIT_COMMITTER_EMAIL: 'fixture@example.com',
+};
+const bareGit = (...a) => execFileSync(REAL_GIT, ['-C', BARE, ...a], { stdio: 'pipe', env: { ...process.env, ...FIXTURE_IDENTITY } }).toString().trim();
 
 const AUTH_LOG = join(ROOT, 'git-auth.jsonl');
 writeFileSync(AUTH_LOG, '');

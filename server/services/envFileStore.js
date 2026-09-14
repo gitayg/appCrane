@@ -16,6 +16,10 @@
  * directory, and a destination that exists as anything but a regular file, and
  * opens the file with O_NOFOLLOW.
  *
+ * manage:  an app owner lists, reveals, replaces or deletes one stored file
+ *          (routes/envFiles.js). This module stays the only one that touches
+ *          app_env_files.
+ *
  * Contents never leave this module except encrypted (capture returns them to the
  * caller for encryption) or into the release file itself. Errors and return
  * values carry paths only.
@@ -28,6 +32,7 @@ import { join, sep } from 'path';
 import { decrypt, encrypt } from './encryption.js';
 import { readNoFollow } from './uploadConversionScan.js';
 import { APPEND_KEY_RE, appendDotenvText, isLoadableEnvName, mergeDotenvText } from './dotenvMerge.js';
+import { parseDotenv } from './dotenvParse.js';
 
 export const ENV_FILE_MAX_BYTES = 1024 * 1024;
 export const ENVS = ['production', 'sandbox'];
@@ -260,4 +265,85 @@ export function describeRestoredEnvFiles({ files, undecryptable }) {
   let line = `Restored ${files.length} stored .env file(s) into the release, outside the repository: ${parts.join(', ')}`;
   if (undecryptable.length) line += `. Env vars not layered (could not decrypt): ${undecryptable.join(', ')}`;
   return line;
+}
+
+// ---------------------------------------------------------------------------
+// Owner management (routes/envFiles.js): list, read, replace, delete one file.
+// ---------------------------------------------------------------------------
+
+export const ENV_FILE_DEFAULT_MODE = 0o600;
+
+function contentRefused(why, status = 400) {
+  return Object.assign(new Error(`refusing stored env file content: ${why}`), { code: 'ENV_FILE_CONTENT_REFUSED', status });
+}
+
+/**
+ * Validate new content for a stored file. `text` is what the caller sent, or a
+ * Buffer. Returns the bytes to store. Messages carry a size, a line number and
+ * a reason — never any part of the content, not even a key name.
+ */
+export function assertEnvFileContent(input) {
+  let bytes;
+  if (Buffer.isBuffer(input)) {
+    bytes = input;
+    if (bytes.length > ENV_FILE_MAX_BYTES) throw contentRefused(`larger than ${ENV_FILE_MAX_BYTES} bytes`, 413);
+    try { new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch (_) { throw contentRefused('not valid UTF-8'); }
+  } else if (typeof input === 'string') {
+    bytes = Buffer.from(input, 'utf8');
+    if (bytes.length > ENV_FILE_MAX_BYTES) throw contentRefused(`larger than ${ENV_FILE_MAX_BYTES} bytes`, 413);
+    if (bytes.toString('utf8') !== input) throw contentRefused('not valid UTF-8');
+  } else {
+    throw contentRefused('content must be a string');
+  }
+  const { errors } = parseDotenv(bytes);
+  if (errors.length) {
+    const e = errors[0];
+    throw contentRefused(`does not parse as dotenv: line ${e.line}: ${e.reason}${errors.length > 1 ? ` (and ${errors.length - 1} more)` : ''}`);
+  }
+  return bytes;
+}
+
+/** Every stored file of an app. Metadata only — no content column is selected. */
+export function listStoredEnvFiles(db, appId) {
+  return db.prepare('SELECT env, rel_path AS path, mode, bytes, source, created_at, updated_at FROM app_env_files WHERE app_id = ? ORDER BY env, rel_path').all(appId);
+}
+
+/** One stored file's decrypted bytes, or null. */
+export function readStoredEnvFile(db, appId, env, relPath) {
+  if (!ENVS.includes(env)) throw new Error(`invalid env ${JSON.stringify(env)}`);
+  assertEnvRelPath(relPath);
+  const row = db.prepare('SELECT mode, bytes, updated_at, content_encrypted FROM app_env_files WHERE app_id = ? AND env = ? AND rel_path = ?').get(appId, env, relPath);
+  if (!row) return null;
+  return { mode: row.mode, bytes: row.bytes, updated_at: row.updated_at, content: Buffer.from(decrypt(row.content_encrypted), 'base64') };
+}
+
+/**
+ * Create or replace one stored file. Mode is 0600 on create and kept on
+ * replace. `content` is validated here (assertEnvFileContent), so no caller can
+ * store bytes the restore merge would refuse to parse.
+ */
+export function putStoredEnvFile(db, appId, env, relPath, content) {
+  if (!ENVS.includes(env)) throw new Error(`invalid env ${JSON.stringify(env)}`);
+  assertEnvRelPath(relPath);
+  const bytes = assertEnvFileContent(content);
+  const enc = encrypt(bytes.toString('base64'));
+  return db.transaction(() => {
+    const existing = db.prepare('SELECT mode FROM app_env_files WHERE app_id = ? AND env = ? AND rel_path = ?').get(appId, env, relPath);
+    if (existing) {
+      db.prepare(`UPDATE app_env_files SET bytes = ?, content_encrypted = ?, source = 'owner', updated_at = datetime('now')
+                  WHERE app_id = ? AND env = ? AND rel_path = ?`).run(bytes.length, enc, appId, env, relPath);
+    } else {
+      db.prepare(`INSERT INTO app_env_files (app_id, env, rel_path, mode, bytes, content_encrypted, source)
+                  VALUES (?, ?, ?, ?, ?, ?, 'owner')`).run(appId, env, relPath, ENV_FILE_DEFAULT_MODE, bytes.length, enc);
+    }
+    const row = db.prepare('SELECT mode, bytes, updated_at FROM app_env_files WHERE app_id = ? AND env = ? AND rel_path = ?').get(appId, env, relPath);
+    return { created: !existing, mode: row.mode, bytes: row.bytes, updated_at: row.updated_at };
+  })();
+}
+
+/** Delete one stored file. Returns true when a row was removed. */
+export function deleteStoredEnvFile(db, appId, env, relPath) {
+  if (!ENVS.includes(env)) throw new Error(`invalid env ${JSON.stringify(env)}`);
+  assertEnvRelPath(relPath);
+  return db.prepare('DELETE FROM app_env_files WHERE app_id = ? AND env = ? AND rel_path = ?').run(appId, env, relPath).changes > 0;
 }
