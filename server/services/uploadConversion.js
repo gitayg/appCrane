@@ -365,11 +365,18 @@ export async function convertOneApp(db, app, opts = {}) {
     const plans = ENVS.map((env) => planEnv(db, app, env));
     for (const p of plans) acc.warnings.push(...p.warnings);
     const missing = plans.filter((p) => p.missing).map((p) => p.env);
-    if (missing.length) {
-      return finish('skipped', { error_code: 'releases_missing', error: `live deployment with no uploaded release on disk: ${missing.join(', ')}`, detail: { envs: missing } });
-    }
     const present = plans.filter((p) => p.releaseDir);
-    if (present.length === 0) return finish('skipped', { error_code: 'releases_missing', error: 'no uploaded release on disk for either environment' });
+    if (present.length === 0) {
+      return missing.length
+        ? finish('skipped', { error_code: 'releases_missing', error: `live deployment with no uploaded release on disk: ${missing.join(', ')}`, detail: { envs: missing } })
+        : finish('skipped', { error_code: 'releases_missing', error: 'no uploaded release on disk for either environment' });
+    }
+    // An environment whose release is gone (for example sandbox after its last
+    // uploads failed) does not block the other one. It follows the normal
+    // Crane-hosted path from then on: its next deploy builds the repository's
+    // newest commit, which is the other environment's release. Its deployment
+    // row is left as it was, since no commit corresponds to what it last ran.
+    for (const env of missing) acc.warnings.push({ env, reason: 'no_release_on_disk_deploys_from_repo' });
 
     let budgetLeft = maxBytes;
     for (const p of present) {

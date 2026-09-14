@@ -363,6 +363,26 @@ test('converts: app Dockerfile that installs, with node_modules bundled', async 
   assert.equal((await convert(id)).status, 'converted');
 });
 
+test('converts from production alone when sandbox has a live deployment but no release on disk', async () => {
+  // Measured on a real instance: production had five upload releases, sandbox's
+  // recorded release was gone, and the whole app was skipped as releases_missing.
+  const id = makeApp('prod-only');
+  const prodDep = live(id, 'production', release('prod-only', 'production', '5-upload', { ...BASE, '.env': 'PROD_KEY=1\n' }), A64);
+  const sbDep = live(id, 'sandbox', join(ROOT, 'apps', 'prod-only', 'sandbox', 'releases', '9-upload'), 'sha256:' + 'b'.repeat(64));
+  const r = await convert(id);
+  assert.equal(r.status, 'converted', JSON.stringify(r));
+  const app = appRow(id);
+  assert.equal(app.source_type, 'managed');
+  assert.equal(app.repo_backend, 'local');
+  const gitDir = lg.repoPath('prod-only');
+  assert.equal(g(gitDir, ['rev-list', '--count', 'main']).trim(), '1', 'only production has a release, so one commit');
+  assert.equal(db.prepare('SELECT commit_hash FROM deployments WHERE id = ?').get(prodDep).commit_hash, g(gitDir, ['rev-parse', 'main']).trim());
+  assert.equal(db.prepare('SELECT commit_hash FROM deployments WHERE id = ?').get(sbDep).commit_hash, 'sha256:' + 'b'.repeat(64), 'sandbox ran no commit in this repo; its row is left as it was');
+  const warnings = JSON.parse(outcome(id).warnings_json).map((w) => `${w.env}:${w.reason}`);
+  assert.ok(warnings.includes('sandbox:no_release_on_disk_deploys_from_repo'), JSON.stringify(warnings));
+  assert.deepEqual(envVars(id, 'sandbox'), {}, 'nothing is imported for the environment with no release');
+});
+
 test('skip: live deployment whose release is gone, and an app with no releases at all', async () => {
   const id = makeApp('gone');
   live(id, 'production', join(ROOT, 'apps', 'gone', 'production', 'releases', '9-upload'), A64);
