@@ -268,7 +268,9 @@ test('oidc callback re-validates the redirect carried in state', () => {
   // `state` is HMAC-signed, but its payload round-trips through the IdP, so the
   // callback validates rather than trusting what /start stored.
   assert.match(OIDC_SRC, /safeRedirectTarget\(\s*stateData\.r\s*,\s*''\s*\)/);
-  assert.match(OIDC_SRC, /const state = makeState\(safeRedirect\)/);
+  // The second argument is the popup-mode flag (server/utils/ssoPopup.js); the
+  // redirect in state must still be the validated one.
+  assert.match(OIDC_SRC, /const state = makeState\(safeRedirect[,)]/);
   assert.match(OIDC_SRC, /safeRedirectTarget\(\s*req\.query\.redirect\s*,\s*''\s*\)/);
 });
 

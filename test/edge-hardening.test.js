@@ -103,6 +103,66 @@ function innerBlocks(body) {
   return out;
 }
 
+/**
+ * A handle block with its per-app embedding policy removed.
+ *
+ * v2.77.0 changed how that policy is emitted: two flat lines (`header
+ * Content-Security-Policy "frame-ancestors …"` + `header -X-Frame-Options`)
+ * became a deferred `header { … }` block, because the flat form never actually
+ * overrode the app's own CSP — Caddy applied it before the proxy and the
+ * upstream's policy was ADDED alongside, leaving the app's `frame-ancestors
+ * 'none'` enforced. See test/caddy-embed-csp-override.test.js for the measured
+ * before/after.
+ *
+ * That region therefore differs from the v2.43.1 snapshot on EVERY embeddable
+ * route, which would drown out the diffs these comparisons exist to catch. The
+ * fixture is NOT regenerated: it is a record of what v2.43.1 emitted, and the
+ * tests below still read the old bytes out of it. Normalise the one region that
+ * changed on purpose; everything else — routing, the identity strips,
+ * forward_auth, strip_prefix, the upstream port — is still compared byte for
+ * byte, which is what these tests were written to protect.
+ */
+function withoutEmbedPolicy(text) {
+  if (text == null) return text;
+  const lines = text.split('\n');
+  const out = [];
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].trim();
+    // v2.77.0: a `header { … }` block carrying CSP ops. Collected first so the
+    // site-level BASELINE header block — which carries no CSP — is never eaten.
+    if (t === 'header {') {
+      const blk = [];
+      let depth = 1;
+      let j = i + 1;
+      for (; j < lines.length && depth > 0; j++) {
+        depth += (lines[j].match(/\{/g) || []).length - (lines[j].match(/\}/g) || []).length;
+        if (depth > 0) blk.push(lines[j]);
+      }
+      if (blk.some(l => l.includes('Content-Security-Policy'))) { i = j - 1; continue; }
+      out.push(lines[i]);
+      continue;
+    }
+    // v2.43.1: the two flat lines.
+    if (/^header Content-Security-Policy "frame-ancestors /.test(t)) continue;
+    if (t === 'header -X-Frame-Options') continue;
+    out.push(lines[i]);
+  }
+  return out.join('\n');
+}
+
+test('the embed-policy normaliser removes a region that is really there', () => {
+  // Without this, every "byte-identical" assertion below could be passing
+  // because the normaliser silently ate the whole block on both sides.
+  const raw = CF.split('handle /framed* {')[1];
+  assert.match(raw, /Content-Security-Policy/, 'the generated framed route has no embed policy at all');
+  assert.ok(!withoutEmbedPolicy(raw).includes('Content-Security-Policy'),
+    'the normaliser left CSP lines behind');
+  assert.ok(withoutEmbedPolicy(raw).includes('uri strip_prefix /framed'),
+    'the normaliser ate more than the embed policy');
+  assert.match(BEFORE, /header Content-Security-Policy "frame-ancestors /,
+    'the v2.43.1 snapshot no longer contains the flat form this normaliser exists to strip');
+});
+
 const siteNow = siteBlocks(CF);
 const siteWas = siteBlocks(BEFORE);
 for (const [label, m] of [['generated', siteNow], ['snapshot', siteWas]]) {
@@ -130,26 +190,37 @@ test('the fixture and the live generator describe the same site set', () => {
 test('an app with no special config produces a byte-identical site block', () => {
   for (const key of ['handle /plain-sandbox*', 'handle /plain*']) {
     assert.ok(craneNow.has(key), `${key} vanished from the generated Caddyfile`);
-    assert.equal(craneNow.get(key), craneWas.get(key),
-      `${key} changed; a plain app must not notice this release`);
+    assert.equal(withoutEmbedPolicy(craneNow.get(key)), withoutEmbedPolicy(craneWas.get(key)),
+      `${key} changed outside the embed policy; a plain app must not notice this release`);
   }
 });
 
-test('only the three intended blocks differ from v2.43.1', () => {
+test('outside the embed policy, only the bypass blocks differ from v2.43.1', () => {
   // The whole-file version of the assertion above. Anything that changed and is
   // not on this list is collateral damage from an edge fix, which is exactly the
   // class of regression a per-app spot check misses.
+  //
+  // The 'denied' and 'narrow' blocks were on this list until v2.77.0: their
+  // v2.44.0 change was the emitted frame-ancestors VALUE, which lives entirely
+  // inside the region withoutEmbedPolicy now strips. That value is still pinned
+  // — by name, per app — in section 3 below.
   const expected = new Set([
     'handle /bypasser-sandbox/ws/runner*',  // log_skip removed
     'handle /bypasser/ws/runner*',          // log_skip removed
-    'handle /denied-sandbox*',              // 'none' now denies
-    'handle /denied*',
-    'handle /narrow-sandbox*',              // 'none' + origin now narrows
-    'handle /narrow*',
   ]);
   const changed = [...craneNow.keys()]
-    .filter(k => craneWas.has(k) && craneNow.get(k) !== craneWas.get(k));
+    .filter(k => craneWas.has(k) &&
+      withoutEmbedPolicy(craneNow.get(k)) !== withoutEmbedPolicy(craneWas.get(k)));
   assert.deepEqual(new Set(changed), expected);
+  // v2.77.0 rewrote the embed region on every embeddable route, deliberately.
+  // Asserting it is non-empty keeps an over-eager normaliser from making this
+  // whole test vacuous by stripping both sides down to nothing.
+  const embedChanged = [...craneNow.keys()]
+    .filter(k => craneWas.has(k) && craneNow.get(k) !== craneWas.get(k));
+  for (const k of ['handle /plain*', 'handle /framed*', 'handle /denied*', 'handle /narrow*']) {
+    assert.ok(embedChanged.includes(k),
+      `${k} did not change at all — the v2.77.0 CSP override never reached this route`);
+  }
   // The log block is additive, so it shows up as a new key rather than a diff.
   assert.deepEqual(
     [...craneNow.keys()].filter(k => !craneWas.has(k)), ['log'],
@@ -161,7 +232,8 @@ test('the untouched apps keep their exact routing, headless and aliases included
   for (const key of ['handle /headless*', 'handle /framed*', 'handle /framed-sandbox*',
                      'handle /aliased*', 'handle /oldname*', 'handle /undeployed*',
                      'handle /api/service*', 'handle', 'handle_errors']) {
-    assert.equal(craneNow.get(key), craneWas.get(key), `${key} changed unexpectedly`);
+    assert.equal(withoutEmbedPolicy(craneNow.get(key)), withoutEmbedPolicy(craneWas.get(key)),
+      `${key} changed outside the embed policy`);
   }
   assert.equal(siteNow.get('old.test.local'), siteWas.get('old.test.local'));
 });
@@ -240,32 +312,40 @@ test('the platform default is actually active in this fixture', () => {
   assert.equal(PLATFORM_FA, "'self' https://*.example.com https://example.com");
 });
 
+// The policy AppCrane adds for a route, read off the `+Content-Security-Policy`
+// line. v2.77.0 also emits a replacement whose find-pattern mentions
+// frame-ancestors, so a looser match would read the regex rather than the value.
+const addedFa = (slug) =>
+  craneNow.get(`handle /${slug}*`).match(/\+Content-Security-Policy "frame-ancestors ([^"]+)"/)?.[1] ?? null;
+
 test('an app that set a value before the change still behaves exactly as it did', () => {
-  const csp = (slug) => craneNow.get(`handle /${slug}*`).match(/frame-ancestors ([^"]+)"/)[1];
-  assert.equal(csp('framed'), `${PLATFORM_FA} https://portal.example.com`);
+  assert.equal(addedFa('framed'), `${PLATFORM_FA} https://portal.example.com`);
   // The real regression test is the byte comparison: 'framed' is a pre-existing
-  // union app and its blocks are in the untouched set above.
-  assert.equal(craneNow.get('handle /framed*'), craneWas.get('handle /framed*'));
-  assert.match(craneNow.get('handle /framed*'), /header -X-Frame-Options/);
+  // union app and its blocks are in the untouched set above. Only the embed
+  // region moved in v2.77.0; the policy VALUE for this app is unchanged, and the
+  // line below proves the snapshot carried the same one.
+  assert.equal(withoutEmbedPolicy(craneNow.get('handle /framed*')), withoutEmbedPolicy(craneWas.get('handle /framed*')));
+  assert.equal(craneWas.get('handle /framed*').match(/frame-ancestors ([^"]+)"/)[1], addedFa('framed'));
+  assert.match(craneNow.get('handle /framed*'), /^\s+-X-Frame-Options$/m);
 });
 
 test("the 'none' sentinel narrows to a single origin", () => {
   const blk = craneNow.get('handle /narrow*');
-  assert.match(blk, /header Content-Security-Policy "frame-ancestors https:\/\/portal\.example\.com"/);
+  assert.equal(addedFa('narrow'), 'https://portal.example.com');
   assert.ok(!blk.includes('*.example.com'),
     'the platform wildcard survived an explicit opt-out — the app is still embeddable org-wide');
   // Narrowing to a real origin still needs the XFO strip: an upstream sending
   // SAMEORIGIN would otherwise veto the CSP and the listed embedder gets nothing.
-  assert.match(blk, /header -X-Frame-Options/);
+  assert.match(blk, /^\s+-X-Frame-Options$/m);
 });
 
 test("the 'none' sentinel alone denies embedding, and keeps the app's own XFO", () => {
   const blk = craneNow.get('handle /denied*');
-  assert.match(blk, /header Content-Security-Policy "frame-ancestors 'none'"/);
+  assert.equal(addedFa('denied'), "'none'");
   assert.ok(!blk.includes('example.com"'), 'a deny policy must not carry any allowed origin');
   // A deny policy has no embedder to unlock, so stripping the app's own
   // X-Frame-Options would only discard legacy protection for pre-CSP2 browsers.
-  assert.ok(!/header -X-Frame-Options/.test(blk),
+  assert.ok(!/X-Frame-Options/.test(blk),
     'X-Frame-Options is stripped on a deny-everything policy, weakening old browsers for nothing');
   // What the old code emitted, for the record: a wildcard allowlist with an
   // inert 'none' glued on the end.

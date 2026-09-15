@@ -5,6 +5,7 @@ import { encrypt, decrypt, generateSessionToken, hashApiKey, generateApiKey } fr
 import { requireAuth, requirePlatformAdmin } from '../middleware/auth.js';
 import { setSessionCookie } from '../utils/sessionCookie.js';
 import { safeRedirectTarget } from '../utils/safeRedirect.js';
+import { POPUP_MODE, requestedMode, makePopupRelayState, isPopupRelayState, sendPopupComplete } from '../utils/ssoPopup.js';
 import log from '../utils/logger.js';
 
 const router = Router();
@@ -143,8 +144,11 @@ router.get('/start', async (req, res) => {
     // browser as /login?redirect=…, so it must be a validated same-origin path
     // before it ever leaves here. '' means "no deep link". CWE-601.
     const relayState = safeRedirectTarget(req.query.redirect, '');
+    // Popup mode travels as a signed RelayState; a popup never forwards to a
+    // deep link (the framed page reloads itself), so none is carried.
+    const popup = requestedMode(req.query) === POPUP_MODE;
     const url = await saml.getAuthorizeUrlAsync(
-      relayState,
+      popup ? makePopupRelayState() : relayState,
       req.headers.host,
       {}
     );
@@ -251,6 +255,9 @@ router.post('/callback', async (req, res) => {
     }
 
     log.info(`SAML login: ${user.name} (${nameId})`);
+    // Only a RelayState signed by /start selects popup mode; a forged one is
+    // just an unsafe redirect that safeRedirectTarget above already dropped.
+    if (isPopupRelayState(req.body.RelayState)) return sendPopupComplete(res);
     res.redirect(302, `${base}/login?${p.toString()}`);
   } catch (e) {
     log.error('SAML callback error: ' + e.message);

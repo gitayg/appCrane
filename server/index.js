@@ -54,6 +54,7 @@ import enhancementsRoutes from './routes/enhancements.js';
 import appstudioRoutes from './routes/appstudio.js';
 import oidcRoutes from './routes/oidc.js';
 import samlRoutes from './routes/saml.js';
+import ssoPopupRoutes from './routes/ssoPopup.js';
 import scimRoutes, { scimAdminRouter } from './routes/scim.js';
 import presenceRoutes from './routes/presence.js';
 import askRoutes from './routes/ask.js';
@@ -962,6 +963,7 @@ app.use('/api', apiRateLimit);
 app.use('/api/auth', authRoutes);
 app.use('/api/auth/oidc', oidcRoutes);
 app.use('/api/auth/saml', samlRoutes);
+app.use('/api/auth/popup', ssoPopupRoutes); // popup sign-in completion script (framed sign-in)
 app.use('/api/auth/scim', scimAdminRouter);
 app.use('/api/scim/v2', scimRoutes);
 // GET /api/managed-db/servers — platform-wide status of the shared Postgres /

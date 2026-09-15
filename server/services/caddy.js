@@ -167,6 +167,80 @@ function authMode(indent, mode) {
 }
 
 /**
+ * Matches the `frame-ancestors` directive inside a Content-Security-Policy value.
+ *
+ * Anchored to a directive boundary — start of value or a `;` — and NOT the bare
+ * string, because the bare string also matches inside another directive's VALUE.
+ * Measured against caddy:2 with `default-src 'self'; report-uri
+ * https://r.example.com/frame-ancestors/x; frame-ancestors 'none'`: the
+ * unanchored form rewrote the report-uri path and swallowed the rest of that
+ * directive, the anchored form left it alone.
+ *
+ * The boundary — `;` and the spacing that follows it — is captured, not
+ * consumed, and `${1}` puts it back. So the app's own separator survives byte
+ * for byte: a policy whose FIRST directive is frame-ancestors does not gain a
+ * leading `;` or a leading space, and one written `…;  frame-ancestors` keeps
+ * its two spaces. Same shape as the cookie strip above.
+ */
+const CSP_FRAME_ANCESTORS = '(?i)(^\\s*|;\\s*)frame-ancestors[^;]*';
+
+/**
+ * Make AppCrane's embedding policy the one the browser actually enforces
+ * (v2.77.0), overriding whatever `frame-ancestors` the app sends for itself.
+ *
+ * Until now this was two flat lines — `header Content-Security-Policy
+ * "frame-ancestors <policy>"` plus `header -X-Frame-Options` — and the first of
+ * them did NOT do what it reads like. A plain `header` set is applied before the
+ * proxy runs, and reverse_proxy then ADDS the upstream's own CSP alongside it. An
+ * app sending `…; frame-ancestors 'none'; …` produced a response carrying TWO
+ * CSP headers, and a browser enforces every policy it is given: the intersection
+ * is empty and the app-viewer frame stayed blocked no matter what the platform
+ * or the app admin configured. Measured through caddy:2, not reasoned:
+ *
+ *   upstream: CSP "…; frame-ancestors 'none'; …"
+ *   response: CSP: frame-ancestors <ours>          <- AppCrane's
+ *             CSP: …; frame-ancestors 'none'; …    <- the app's, still enforced
+ *
+ * What this emits instead, and why each op is there:
+ *
+ *   - a REPLACEMENT of the app's own frame-ancestors with the platform policy.
+ *     Everything else in the app's CSP — script-src and its nonce, connect-src,
+ *     object-src, form-action — is carried through untouched, which a `>` set
+ *     (the obvious alternative) would have destroyed: measured, `header
+ *     >Content-Security-Policy "frame-ancestors …"` replaces the WHOLE header and
+ *     the app loses its own protections along with its framing rule.
+ *   - an ADDED header carrying only `frame-ancestors <policy>`, because a
+ *     replacement cannot create what is not there: an app whose CSP has no
+ *     frame-ancestors, and an app that sends no CSP at all, must still END UP
+ *     with the platform's. It is the same value the replacement just wrote, so
+ *     the two policies intersect to exactly that and the added header restricts
+ *     nothing else (it carries no other directive, not even default-src).
+ *   - `defer`, which is the load-bearing word. A header replacement is NOT
+ *     deferred by default: measured, `header Content-Security-Policy <find>
+ *     <replace>` on its own ran before the proxy, saw no upstream header, and
+ *     changed nothing at all. The old two-line form accidentally deferred its
+ *     sibling ops because a bare `-Field` delete adapts to `deferred: true` — so
+ *     dropping the X-Frame-Options strip (which is what a `'none'` policy does)
+ *     silently un-deferred the rest. Stating `defer` removes that coupling.
+ *
+ * Content-Security-Policy-Report-Only is deliberately left alone: it blocks
+ * nothing, so an app's report-only frame-ancestors cannot veto the platform's
+ * policy, and rewriting it would corrupt the app's own violation reports.
+ */
+function embedHeaderBlock(fa, indent) {
+  const inner = indent + '    ';
+  return `${indent}header {\n` +
+         `${inner}Content-Security-Policy "${CSP_FRAME_ANCESTORS}" "\${1}frame-ancestors ${fa}"\n` +
+         `${inner}+Content-Security-Policy "frame-ancestors ${fa}"\n` +
+         // A deny-everything policy has no embedder to unlock, so stripping the
+         // app's own X-Frame-Options would only discard legacy protection for
+         // browsers predating CSP2's frame-ancestors.
+         (fa === "'none'" ? '' : `${inner}-X-Frame-Options\n`) +
+         `${inner}defer\n` +
+         `${indent}}\n`;
+}
+
+/**
  * Generate full Caddy config JSON (path-based routing).
  * Note: the Caddyfile format (generateCaddyfile) is used in production via systemctl reload.
  */
@@ -314,16 +388,9 @@ export function generateCaddyfile() {
     // utils/embed.js.
     const fa = mergeAncestors(platformFa, app.frame_ancestors);
 
-    // Emitted identically on the sandbox and production routes below.
-    //
-    // The `-X-Frame-Options` strip is what lets a listed embedder actually frame
-    // the app: an upstream that sends XFO: SAMEORIGIN would otherwise veto the
-    // CSP we just wrote. A deny-everything policy has no embedder to unlock, so
-    // there the strip would only throw away whatever framing protection the app
-    // set for itself on browsers that still honour XFO. Keep it.
-    const embedHeaders = !fa ? '' :
-      `        header Content-Security-Policy "frame-ancestors ${fa}"\n` +
-      (fa === "'none'" ? '' : `        header -X-Frame-Options\n`);
+    // Emitted identically on the sandbox and production routes below. The ops
+    // and the reason each one is there: see embedHeaderBlock.
+    const embedHeaders = !fa ? '' : embedHeaderBlock(fa, '        ');
 
     // Sandbox — longer prefix /${slug}-sandbox* wins over /${slug}* via mutual exclusivity.
     // Pass the full prefix on the verify URL so identity.js can reconstruct the

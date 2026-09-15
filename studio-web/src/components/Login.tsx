@@ -1,6 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useAuth } from '../hooks/useAuth'
 import { isSafeRedirect } from '../utils/safeRedirect'
+import {
+  POPUP_FEATURES, POPUP_NAME, browserWaitDeps, isFramed, popupStartUrl,
+  reloadTargetAfterSignIn, signInPlan, waitForPopupSignIn, type SsoProvider,
+} from '../utils/popupSignIn'
 
 /**
  * v2.7.8: the cc_token cookie is now httpOnly and set entirely by the
@@ -23,8 +27,13 @@ import { isSafeRedirect } from '../utils/safeRedirect'
  *     + go to ?redirect= or /applications
  *   - ?sso_error=… / ?saml_error=… → render inline
  *   - ?redirect=… → preserved and used after successful password login
+ *
+ * Inside an iframe (an embedded app's sign-in step) the IdP refuses to be
+ * framed, so SSO opens in a top-level popup instead — see utils/popupSignIn.ts.
+ * Password sign-in stays in the frame.
  */
 interface SsoCfg { enabled?: boolean; provider_name?: string }
+type PopupState = 'idle' | 'waiting' | 'blocked' | 'timeout'
 
 export function Login() {
   const { setKey } = useAuth()
@@ -49,6 +58,11 @@ export function Login() {
   // flashes the username/password screen until the fetch resolves. While
   // null we render a tiny loading line instead.
   const [ssoOnly, setSsoOnly] = useState<boolean | null>(null)
+  const [popupState, setPopupState] = useState<PopupState>('idle')
+  const [popupHref, setPopupHref] = useState('')
+  const waitRef = useRef<{ cancel: () => void } | null>(null)
+
+  const plan = signInPlan({ framed: isFramed(window), ssoEnabled: !!(oidc.enabled || saml.enabled), ssoOnly: !!ssoOnly })
 
   useEffect(() => {
     fetch('/api/auth/oidc/config').then(r => r.json()).then(setOidc).catch(() => {})
@@ -58,6 +72,8 @@ export function Login() {
       .then(d => setSsoOnly(d?.value === 'true'))
       .catch(() => setSsoOnly(false))
   }, [])
+
+  useEffect(() => () => waitRef.current?.cancel(), [])
 
   function startOidc() {
     const redirect = new URLSearchParams(window.location.search).get('redirect')
@@ -74,6 +90,32 @@ export function Login() {
       // dropped the deep link and fell back to /launch anyway.
       || '/launch'
     window.location.href = '/api/auth/saml/start?redirect=' + encodeURIComponent(redirect)
+  }
+
+  // Framed: listen for the popup finishing, then reload the frame into the
+  // validated redirect target (the app), or in place when there is none.
+  function listenForPopup() {
+    waitRef.current?.cancel()
+    setPopupState('waiting')
+    const wait = waitForPopupSignIn(browserWaitDeps())
+    waitRef.current = wait
+    wait.done.then(result => {
+      if (result === 'signed-in') {
+        const target = reloadTargetAfterSignIn(window.location.search, isSafeRedirect)
+        if (target) window.location.replace(target)
+        else window.location.reload()
+      } else if (result === 'timeout') {
+        setPopupState('timeout')
+      }
+    })
+  }
+  function startPopup(provider: SsoProvider) {
+    const redirect = new URLSearchParams(window.location.search).get('redirect') || '/launch'
+    const href = popupStartUrl(provider, redirect)
+    setPopupHref(href)
+    const win = window.open(href, POPUP_NAME, POPUP_FEATURES)
+    if (!win) { setPopupState('blocked'); return }
+    listenForPopup()
   }
 
   // Read SSO callback / redirect query params on mount. Both providers
@@ -154,6 +196,9 @@ export function Login() {
     } catch { setError('Connection failed') }
   }
 
+  const singleProvider = !(oidc.enabled && saml.enabled)
+  const popupLabel = (name: string) => (ssoOnly && singleProvider ? 'Sign in' : `Sign in with ${name}`)
+
   return (
     <div className="login-wrap">
       <div className="login-box">
@@ -169,7 +214,7 @@ export function Login() {
         </p>
         {error && <div className="login-error">{error}</div>}
 
-        {!ssoOnly && (
+        {plan.showPassword && (
           <>
             <input
               type="text"
@@ -193,7 +238,7 @@ export function Login() {
           </>
         )}
 
-        {(oidc.enabled || saml.enabled) && (
+        {plan.sso !== 'none' && (
           <div style={{ marginTop: ssoOnly ? 0 : 14, display: 'flex', flexDirection: 'column', gap: 8 }}>
             {!ssoOnly && (
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--dim)', fontSize: '.74rem' }}>
@@ -202,21 +247,59 @@ export function Login() {
                 <span style={{ flex: 1, height: 1, background: 'var(--border, #333)' }} />
               </div>
             )}
-            {oidc.enabled && (
-              <button
-                type="button"
-                className="btn"
-                onClick={startOidc}
-                style={{ width: '100%', padding: 10 }}
-              >Sign in with {oidc.provider_name || 'SSO'}</button>
-            )}
-            {saml.enabled && (
-              <button
-                type="button"
-                className="btn"
-                onClick={startSaml}
-                style={{ width: '100%', padding: 10 }}
-              >Sign in with {saml.provider_name || 'Okta'}</button>
+            {plan.sso === 'popup' ? (
+              <>
+                {oidc.enabled && (
+                  <button
+                    type="button"
+                    className="btn btn-accent"
+                    onClick={() => startPopup('oidc')}
+                    disabled={popupState === 'waiting'}
+                    style={{ width: '100%', padding: 10 }}
+                  >{popupLabel(oidc.provider_name || 'SSO')}</button>
+                )}
+                {saml.enabled && (
+                  <button
+                    type="button"
+                    className="btn btn-accent"
+                    onClick={() => startPopup('saml')}
+                    disabled={popupState === 'waiting'}
+                    style={{ width: '100%', padding: 10 }}
+                  >{popupLabel(saml.provider_name || 'Okta')}</button>
+                )}
+                <p style={{ margin: 0, color: 'var(--dim)', fontSize: '.78rem', textAlign: 'center' }}>
+                  {popupState === 'waiting' ? 'Finish signing in in the new window.'
+                    : popupState === 'timeout' ? 'The sign-in window did not finish. Try again.'
+                    : 'Sign-in opens in a new window'}
+                </p>
+                {popupHref && (popupState === 'blocked' || popupState === 'waiting') && (
+                  <p style={{ margin: 0, fontSize: '.78rem', textAlign: 'center' }}>
+                    {popupState === 'blocked' && <span style={{ color: 'var(--dim)' }}>The window was blocked. </span>}
+                    <a href={popupHref} target="_blank" rel="noopener" onClick={() => { if (popupState === 'blocked') listenForPopup() }}>
+                      Open sign-in in a new tab
+                    </a>
+                  </p>
+                )}
+              </>
+            ) : (
+              <>
+                {oidc.enabled && (
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={startOidc}
+                    style={{ width: '100%', padding: 10 }}
+                  >Sign in with {oidc.provider_name || 'SSO'}</button>
+                )}
+                {saml.enabled && (
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={startSaml}
+                    style={{ width: '100%', padding: 10 }}
+                  >Sign in with {saml.provider_name || 'Okta'}</button>
+                )}
+              </>
             )}
           </div>
         )}

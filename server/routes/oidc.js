@@ -5,6 +5,7 @@ import { encrypt, decrypt, generateSessionToken, hashApiKey, generateApiKey } fr
 import { requireAuth, requirePlatformAdmin } from '../middleware/auth.js';
 import { setSessionCookie } from '../utils/sessionCookie.js';
 import { safeRedirectTarget } from '../utils/safeRedirect.js';
+import { POPUP_MODE, requestedMode, sendPopupComplete } from '../utils/ssoPopup.js';
 import log from '../utils/logger.js';
 
 const router = Router();
@@ -107,9 +108,9 @@ function craneBaseUrl() {
     : 'http://localhost:' + (process.env.PORT || 5001);
 }
 
-// HMAC-signed state prevents CSRF. Payload: { r: redirect, n: nonce, t: timestamp }
-function makeState(redirect) {
-  const payload = Buffer.from(JSON.stringify({ r: redirect || '', n: crypto.randomBytes(8).toString('hex'), t: Date.now() })).toString('base64url');
+// HMAC-signed state prevents CSRF. Payload: { r: redirect, n: nonce, t: timestamp, m?: 'popup' }
+function makeState(redirect, mode) {
+  const payload = Buffer.from(JSON.stringify({ r: redirect || '', n: crypto.randomBytes(8).toString('hex'), t: Date.now(), ...(mode === POPUP_MODE && { m: POPUP_MODE }) })).toString('base64url');
   const sig = crypto.createHmac('sha256', process.env.ENCRYPTION_KEY).update(payload).digest('base64url');
   return payload + '.' + sig;
 }
@@ -222,7 +223,7 @@ router.get('/start', async (req, res) => {
     // normalizes them. '' means "no deep link", so the fallback is empty
     // rather than the module default. CWE-601.
     const safeRedirect = safeRedirectTarget(req.query.redirect, '');
-    const state = makeState(safeRedirect);
+    const state = makeState(safeRedirect, requestedMode(req.query));
     const params = new URLSearchParams({
       response_type: 'code',
       client_id:     cfg.client_id,
@@ -343,6 +344,9 @@ router.get('/callback', async (req, res) => {
     // navigates straight into a per-app route after callback). Setting
     // it here closes that gap.
     setSessionCookie(res, token, req);
+
+    // Popup mode comes from the signed state only, never from this request's query.
+    if (stateData.m === POPUP_MODE) return sendPopupComplete(res);
 
     // Always go through /login so it sets the cookie, then forward to redirect target.
     // Re-validate rather than trusting `start`: the value round-trips through the
