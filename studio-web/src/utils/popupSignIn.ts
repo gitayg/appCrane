@@ -5,8 +5,16 @@
  * shows "refused to connect". In a frame, SSO opens in a top-level popup
  * instead; password sign-in stays in the frame. The popup's completion page
  * (server/utils/ssoPopup.js) posts { type: 'signed-in' } on SSO_CHANNEL and
- * closes. The frame also polls /api/me (cookie) in case BroadcastChannel is
+ * closes; a failed sign-in posts { type: 'sign-in-failed' } and stays open to
+ * show why. The frame also polls /api/me (cookie) in case BroadcastChannel is
  * unavailable, bounded by POLL_MAX_MS.
+ *
+ * The popup handle's `closed` is NOT used to notice the user closing the
+ * window. Measured in Chrome 153: once the popup navigates to an IdP sending
+ * Cross-Origin-Opener-Policy: same-origin, the opener's handle reports
+ * closed === true within ~50 ms while the popup is still open, and never
+ * changes after that. A closed window therefore only ends the wait through the
+ * POLL_MAX_MS bound; the Sign in button stays usable meanwhile.
  *
  * Kept free of imports and non-erasable TypeScript so node:test can load it
  * directly.
@@ -61,6 +69,10 @@ export function isSignedInMessage(data: unknown): boolean {
   return typeof data === 'object' && data !== null && (data as { type?: unknown }).type === 'signed-in'
 }
 
+export function isSignInFailedMessage(data: unknown): boolean {
+  return typeof data === 'object' && data !== null && (data as { type?: unknown }).type === 'sign-in-failed'
+}
+
 export interface ChannelLike {
   listen: (fn: (data: unknown) => void) => void
   close: () => void
@@ -76,7 +88,7 @@ export interface WaitDeps {
   clearTimeout: (h: unknown) => void
 }
 
-export type WaitResult = 'signed-in' | 'timeout' | 'cancelled'
+export type WaitResult = 'signed-in' | 'failed' | 'timeout' | 'cancelled'
 
 export function waitForPopupSignIn(
   deps: WaitDeps,
@@ -100,12 +112,24 @@ export function waitForPopupSignIn(
     resolveDone(result)
   }
 
-  channel = deps.openChannel(SSO_CHANNEL)
-  if (channel) channel.listen((data) => { if (isSignedInMessage(data)) finish('signed-in') })
-
   // The poll only counts once a baseline check said "not signed in"; a session
   // that already existed must not be mistaken for this sign-in finishing.
   let pollArmed = false
+  let failing = false
+
+  channel = deps.openChannel(SSO_CHANNEL)
+  if (channel) channel.listen((data) => {
+    if (isSignedInMessage(data)) finish('signed-in')
+    else if (isSignInFailedMessage(data) && !failing) {
+      // One last session check, so a sign-in that did land (another window,
+      // a retry) wins over a failure page from an earlier attempt.
+      failing = true
+      const fail = () => finish('failed')
+      if (!pollArmed) return fail()
+      deps.checkSession().then((ok) => finish(ok ? 'signed-in' : 'failed'), fail)
+    }
+  })
+
   deps.checkSession().then((ok) => { if (!ok) pollArmed = true }, () => { pollArmed = true })
   interval = deps.setInterval(() => {
     if (!pollArmed || settled) return

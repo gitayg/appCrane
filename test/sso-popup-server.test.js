@@ -40,10 +40,14 @@ async function freePort() {
 const { privateKey: oidcKey, publicKey: oidcPub } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
 const jwk = { ...oidcPub.export({ format: 'jwk' }), kid: 'k1', alg: 'RS256', use: 'sig' };
 
+// Switched per test: a failing token endpoint, or an IdP user with no AppCrane account.
+const RAW_IDP_TEXT = '<img src=x onerror=alert(1)>RAW-IDP-TEXT-7f3a';
+const idpBehaviour = { tokenFails: false, user: { sub: 'alice-sub', email: 'alice@example.com', name: 'Alice Example' } };
+
 function idToken(issuer) {
   const enc = (o) => Buffer.from(JSON.stringify(o)).toString('base64url');
   const h = enc({ alg: 'RS256', kid: 'k1', typ: 'JWT' });
-  const p = enc({ iss: issuer, aud: CLIENT_ID, sub: 'alice-sub', email: 'alice@example.com', name: 'Alice Example', exp: Math.floor(Date.now() / 1000) + 300 });
+  const p = enc({ iss: issuer, aud: CLIENT_ID, ...idpBehaviour.user, exp: Math.floor(Date.now() / 1000) + 300 });
   return `${h}.${p}.${crypto.sign('sha256', Buffer.from(`${h}.${p}`), oidcKey).toString('base64url')}`;
 }
 
@@ -58,6 +62,9 @@ function startIdp() {
       if (url.pathname === '/jwks') return json({ keys: [jwk] });
       if (url.pathname === '/token' && req.method === 'POST') {
         req.resume();
+        if (idpBehaviour.tokenFails) {
+          return req.on('end', () => { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid_grant', error_description: RAW_IDP_TEXT })); });
+        }
         return req.on('end', () => json({ id_token: idToken(idpBase), access_token: 'at', token_type: 'Bearer' }));
       }
       res.writeHead(404); res.end();
@@ -336,4 +343,180 @@ test('the completion script broadcasts only { type: "signed-in" } and closes the
   assert.deepEqual(posted, [{ name: SSO_CHANNEL, m: { type: 'signed-in' } }],
     'the popup must post exactly { type: "signed-in" } on the channel the SPA listens to, and nothing else');
   assert.equal(closed, 1, 'the popup does not close itself');
+});
+
+// ---------------------------------------------------------------------------
+// Failure in popup mode
+//
+// A popup whose sign-in fails must tell the frame { type: 'sign-in-failed' }
+// and show a fixed, generic reason with a Close button, under the same
+// top-level-only headers as the completion page. Popup mode comes only from
+// AppCrane-signed state (expired still counts, modified or missing does not);
+// every non-popup failure keeps the /login?sso_error redirect.
+// ---------------------------------------------------------------------------
+
+async function assertPopupFailed(r, label, reasonCode) {
+  assert.equal(r.status, 200, `${label}: expected the failure page, got ${r.status} ${r.headers.get('location')}`);
+  assert.equal(r.headers.get('location'), null, `${label}: failure page redirected`);
+  assert.match(r.headers.get('content-type') || '', /text\/html/);
+  assert.equal(ccToken(r), null, `${label}: failure page set a session cookie`);
+  assert.equal(frameAncestors(r), "'none'", `${label}: failure page is frameable`);
+  assert.equal(r.headers.get('x-frame-options'), 'DENY', `${label}: failure page lacks X-Frame-Options DENY`);
+  assert.equal(r.headers.get('cache-control'), 'no-store', `${label}: failure page is cacheable`);
+  assert.match(r.headers.get('content-security-policy') || '', /script-src 'self'/);
+  const body = await r.text();
+  assert.match(body, /<script src="\/api\/auth\/popup\/failed\.js"><\/script>/, `${label}: failure script missing`);
+  assert.equal((body.match(/<script/g) || []).length, 1, `${label}: more than the one external script`);
+  assert.match(body, /<button type="button" id="close">Close<\/button>/, `${label}: no Close button`);
+  assert.ok(body.includes(ssoPopup.POPUP_FAILURE_REASONS[reasonCode]), `${label}: expected the "${reasonCode}" reason`);
+  for (const raw of ['RAW-IDP-TEXT', '<img', 'onerror', 'Token exchange', 'signature', 'State ', 'nobody@example.com']) {
+    assert.ok(!body.includes(raw), `${label}: failure page reflects "${raw}"`);
+  }
+  return body;
+}
+
+const assertLoginError = (r, label, param = 'sso_error') => {
+  assert.equal(r.status, 302, `${label}: expected the /login redirect, got ${r.status}`);
+  const loc = new URL(r.headers.get('location'));
+  assert.equal(loc.pathname, '/login', label);
+  assert.ok(loc.searchParams.get(param), `${label}: no ${param}`);
+  assert.equal(ccToken(r), null, `${label}: set a session cookie`);
+};
+
+function signState(data) {
+  const payload = Buffer.from(JSON.stringify(data)).toString('base64url');
+  return payload + '.' + crypto.createHmac('sha256', ENCRYPTION_KEY).update(payload).digest('base64url');
+}
+
+test('oidc popup: IdP error=access_denied serves the failure page without reflecting the IdP text', async () => {
+  const { state } = await oidcStart({ redirect: '/product-roadmap-v2', mode: 'popup' });
+  const n0 = sessionCount();
+  const r = await noFollow(`${base}/api/auth/oidc/callback?${new URLSearchParams({ error: 'access_denied', error_description: RAW_IDP_TEXT, state })}`);
+  await assertPopupFailed(r, 'oidc access_denied', 'denied');
+  assert.equal(sessionCount(), n0);
+
+  const other = await noFollow(`${base}/api/auth/oidc/callback?${new URLSearchParams({ error: 'server_error', error_description: RAW_IDP_TEXT, state })}`);
+  await assertPopupFailed(other, 'oidc server_error', 'failed');
+});
+
+test('oidc popup: an expired but genuine popup state serves the failure page', async () => {
+  const expired = signState({ r: '', n: 'aa', t: Date.now() - 11 * 60 * 1000, m: 'popup' });
+  await assertPopupFailed(await oidcCallback(expired), 'oidc expired state', 'expired');
+});
+
+test('oidc popup: token exchange failure serves the failure page', async (t) => {
+  idpBehaviour.tokenFails = true;
+  t.after(() => { idpBehaviour.tokenFails = false; });
+  const { state } = await oidcStart({ redirect: '/product-roadmap-v2', mode: 'popup' });
+  await assertPopupFailed(await oidcCallback(state), 'oidc token exchange', 'failed');
+  const normal = await oidcStart({ redirect: '/product-roadmap-v2' });
+  assertLoginError(await oidcCallback(normal.state), 'oidc token exchange, not popup');
+});
+
+test('oidc popup: a user with no account serves the failure page', async (t) => {
+  const alice = idpBehaviour.user;
+  idpBehaviour.user = { sub: 'nobody-sub', email: 'nobody@example.com', name: 'Nobody' };
+  t.after(() => { idpBehaviour.user = alice; });
+  const { state } = await oidcStart({ mode: 'popup' });
+  await assertPopupFailed(await oidcCallback(state), 'oidc no account', 'no_account');
+  const normal = await oidcStart({});
+  const r = await oidcCallback(normal.state);
+  assert.equal(r.status, 302);
+  assert.equal(new URL(r.headers.get('location')).searchParams.get('sso_error'), 'no_account');
+});
+
+test('oidc: failures that are not provably popup mode keep the /login redirect, whatever the query says', async () => {
+  const normal = await oidcStart({ redirect: '/product-roadmap-v2' });
+  const cb = (q) => noFollow(`${base}/api/auth/oidc/callback?${new URLSearchParams(q)}`);
+  assertLoginError(await cb({ error: 'access_denied', state: normal.state }), 'non-popup access_denied');
+  assertLoginError(await cb({ error: 'access_denied', state: normal.state, mode: 'popup' }), 'mode=popup on the callback query');
+  assertLoginError(await cb({ error: 'access_denied', mode: 'popup' }), 'no state');
+  assertLoginError(await cb({ error: 'access_denied', state: 'garbage', mode: 'popup' }), 'garbled state');
+
+  const popup = await oidcStart({ redirect: '/x', mode: 'popup' });
+  const data = statePayload(popup.state);
+  const modified = Buffer.from(JSON.stringify({ ...data, r: '/y' })).toString('base64url') + popup.state.slice(popup.state.lastIndexOf('.'));
+  assertLoginError(await cb({ code: 'c1', state: modified }), 'popup state modified after signing');
+  const otherKey = crypto.createHmac('sha256', 'f'.repeat(64)).update(popup.state.slice(0, popup.state.lastIndexOf('.'))).digest('base64url');
+  assertLoginError(await cb({ error: 'access_denied', state: popup.state.slice(0, popup.state.lastIndexOf('.') + 1) + otherKey }), 'popup state signed by another key');
+
+  const r = await cb({ error: 'access_denied', error_description: 'plain text', state: normal.state });
+  assert.equal(new URL(r.headers.get('location')).searchParams.get('sso_error'), 'plain text', 'the non-popup error text changed');
+});
+
+const tamperedSamlResponse = () => Buffer.from(Buffer.from(samlResponse(), 'base64').toString().replace(
+  '<saml:NameID Format="urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress">alice@example.com',
+  '<saml:NameID Format="urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress">nobody@example.com')).toString('base64');
+const samlPost = (fields, path = '/api/auth/saml/callback') => noFollow(`${base}${path}`, {
+  method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(fields),
+});
+
+test('saml popup: a signature failure serves the failure page; without popup RelayState it keeps the redirect', async () => {
+  const bad = tamperedSamlResponse();
+  assert.ok(Buffer.from(bad, 'base64').toString().includes('nobody@example.com'), 'tampering did not apply');
+  const relay = await samlStart({ mode: 'popup' });
+  const n0 = sessionCount();
+  await assertPopupFailed(await samlPost({ SAMLResponse: bad, RelayState: relay }), 'saml bad signature', 'failed');
+  assert.equal(sessionCount(), n0);
+
+  assertLoginError(await samlPost({ SAMLResponse: bad, RelayState: '/product-roadmap-v2' }), 'saml bad signature, not popup', 'saml_error');
+  assertLoginError(await samlPost({ SAMLResponse: bad, RelayState: relay.slice(0, -1) + (relay.endsWith('A') ? 'B' : 'A') }), 'saml forged popup RelayState', 'saml_error');
+  assertLoginError(await samlPost({ SAMLResponse: bad, mode: 'popup' }, '/api/auth/saml/callback?mode=popup'), 'saml mode=popup in query and body', 'saml_error');
+});
+
+test('saml popup: an expired but genuine popup RelayState still gets the failure page, never a session', async (t) => {
+  const realNow = Date.now;
+  t.after(() => { Date.now = realNow; });
+  Date.now = () => realNow() - 11 * 60 * 1000;
+  const old = ssoPopup.makePopupRelayState();
+  Date.now = realNow;
+  assert.equal(ssoPopup.isPopupRelayState(old), false);
+  assert.equal(ssoPopup.isPopupRelayState(old, { allowExpired: true }), true);
+  await assertPopupFailed(await samlPost({ SAMLResponse: tamperedSamlResponse(), RelayState: old }), 'saml expired relay', 'failed');
+});
+
+test('sendPopupFailed only ever renders a reason from the fixed table', () => {
+  const sent = [];
+  const res = { headers: {}, setHeader(k, v) { this.headers[k] = v; }, status() { return this; }, type() { return this; }, send(b) { sent.push(b); } };
+  for (const code of ['<script>alert(1)</script>', 'toString', '__proto__', undefined]) {
+    res.headers = {};
+    ssoPopup.sendPopupFailed(res, code);
+    // Checked on the function itself: the server also sends no-store on /api, which
+    // would hide a failure page that stopped setting it.
+    assert.equal(res.headers['Cache-Control'], 'no-store');
+    assert.equal(res.headers['X-Frame-Options'], 'DENY');
+    assert.match(res.headers['Content-Security-Policy'], /frame-ancestors 'none'/);
+    assert.equal(res.headers['Referrer-Policy'], 'no-referrer');
+    const body = sent.pop();
+    assert.ok(body.includes(ssoPopup.POPUP_FAILURE_REASONS.failed), `code ${code} did not fall back to the generic reason`);
+    assert.doesNotMatch(body, /alert\(1\)|function|\[object/);
+  }
+});
+
+test('the failure script broadcasts only { type: "sign-in-failed" } and closes only when Close is clicked', async () => {
+  const r = await fetch(`${base}/api/auth/popup/failed.js`);
+  assert.equal(r.status, 200);
+  assert.match(r.headers.get('content-type') || '', /javascript/);
+  const src = await r.text();
+
+  const posted = [];
+  let closed = 0;
+  let onClick = null;
+  class FakeChannel {
+    constructor(name) { this.name = name; }
+    postMessage(m) { posted.push({ name: this.name, m: structuredClone(m) }); }
+    close() {}
+  }
+  const button = { addEventListener: (ev, fn) => { if (ev === 'click') onClick = fn; } };
+  const document = { getElementById: (id) => (id === 'close' ? button : null) };
+  const timers = [];
+  vm.runInNewContext(src, { BroadcastChannel: FakeChannel, document, window: { close: () => { closed++; } }, setTimeout: (fn) => timers.push(fn) });
+  for (const fn of timers) fn();
+
+  const { SSO_CHANNEL } = await import('../studio-web/src/utils/popupSignIn.ts');
+  assert.deepEqual(posted, [{ name: SSO_CHANNEL, m: { type: 'sign-in-failed' } }]);
+  assert.equal(closed, 0, 'the failure page closed itself before the user could read it');
+  assert.equal(typeof onClick, 'function', 'Close button not wired');
+  onClick();
+  assert.equal(closed, 1);
 });

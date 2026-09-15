@@ -4,7 +4,7 @@ import { readFileSync, readdirSync } from 'fs';
 import { isSafeRedirect } from '../server/utils/safeRedirect.js';
 import {
   isFramed, signInPlan, shouldUsePopupSignIn, popupStartUrl, reloadTargetAfterSignIn,
-  isSignedInMessage, waitForPopupSignIn, POLL_INTERVAL_MS, POLL_MAX_MS, SSO_CHANNEL,
+  isSignedInMessage, isSignInFailedMessage, waitForPopupSignIn, POLL_INTERVAL_MS, POLL_MAX_MS, SSO_CHANNEL,
 } from '../studio-web/src/utils/popupSignIn.ts';
 
 // The framed sign-in decision and the listener that learns the popup finished.
@@ -139,7 +139,59 @@ test('listener: bounded — times out at POLL_MAX_MS (<= 5 min) and stops pollin
   assert.equal(f.checks, before);
 });
 
+test('isSignInFailedMessage accepts only the failure shape', () => {
+  assert.equal(isSignInFailedMessage({ type: 'sign-in-failed' }), true);
+  for (const m of [null, 'sign-in-failed', { type: 'signed-in' }, {}, undefined]) assert.equal(isSignInFailedMessage(m), false);
+});
+
+test('listener: sign-in-failed stops the wait at once after one final session check, and tears down', async () => {
+  const f = fakes({ sessions: [false, false] });
+  const w = waitForPopupSignIn(f.deps);
+  await flush();
+  let result = null;
+  w.done.then((r) => { result = r; });
+  f.channels[0].fn({ type: 'sign-in-failed' });
+  await flush();
+  assert.equal(result, 'failed');
+  assert.equal(f.checks, 2, 'expected the baseline plus exactly one final check');
+  assert.equal(f.channels[0].closed, true);
+  assert.equal(f.intervals.size, 0, 'poll interval left running after failure');
+  assert.equal(f.timeouts.size, 0, 'timeout left running after failure');
+});
+
+test('listener: a sign-in that landed wins over a failure page', async () => {
+  const f = fakes({ sessions: [false, true] });
+  const w = waitForPopupSignIn(f.deps);
+  await flush();
+  f.channels[0].fn({ type: 'sign-in-failed' });
+  assert.equal(await w.done, 'signed-in');
+
+  const g = fakes({ sessions: [false, false] });
+  const w2 = waitForPopupSignIn(g.deps);
+  await flush();
+  g.channels[0].fn({ type: 'sign-in-failed' });
+  g.channels[0].fn({ type: 'signed-in' });
+  assert.equal(await w2.done, 'signed-in', 'a signed-in message arriving with a failure lost to it');
+});
+
+test('listener: a failure with a pre-existing session is still a failure, not a reload loop', async () => {
+  const f = fakes({ sessions: [true] });
+  const w = waitForPopupSignIn(f.deps);
+  await flush();
+  f.channels[0].fn({ type: 'sign-in-failed' });
+  assert.equal(await w.done, 'failed');
+});
+
 // ---- Login.tsx wiring -----------------------------------------------------
+test('Login.tsx shows the failure, keeps Sign in usable while waiting, and never reads popup.closed', () => {
+  assert.match(LOGIN, /result === 'failed'\) \{\s*setPopupState\('failed'\)/);
+  assert.match(LOGIN, /popupState === 'failed' \? "Sign-in didn't complete\. Try again\."/);
+  assert.doesNotMatch(LOGIN, /disabled=\{popupState/, 'Sign in is disabled while waiting, but a closed popup cannot be detected');
+  // Measured in Chrome 153: behind a COOP IdP the handle reports closed within ~50 ms
+  // while the popup is still open, so any .closed check would end a sign-in in progress.
+  assert.doesNotMatch(LOGIN, /\.closed\b/, 'Login.tsx reads popup.closed');
+});
+
 test('Login.tsx decides from isFramed(window) and signInPlan, and gates the password form on the plan only', () => {
   assert.match(LOGIN, /signInPlan\(\{\s*framed:\s*isFramed\(window\)/);
   assert.match(LOGIN, /\{plan\.showPassword && \(/, 'password form is no longer gated on plan.showPassword');
@@ -159,4 +211,6 @@ test('the shipped SPA bundle carries popup sign-in', () => {
   const joined = readdirSync(dir).filter((f) => f.endsWith('.js')).map((f) => readFileSync(new URL(f, dir), 'utf8')).join('\n');
   assert.match(joined, /appcrane-sso/, 'docs/admin-app is stale: rebuild studio-web');
   assert.match(joined, /Sign-in opens in a new window/);
+  assert.match(joined, /sign-in-failed/, 'docs/admin-app is stale: rebuild studio-web');
+  assert.match(joined, /Sign-in didn't complete\. Try again\./);
 });

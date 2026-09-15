@@ -18,6 +18,19 @@ import { PlatformRequestBar } from './components/PlatformRequestBar'
 import { AppTabsProvider } from './components/AppTabsContext'
 import { PersistentAppTabs } from './components/PersistentAppTabs'
 import { isSafeRedirect } from './utils/safeRedirect'
+import {
+  afterCheck, checkSession, clearRedirectAttempts, initialLanding, readLandingIntent,
+  type AttemptStore, type Landing,
+} from './utils/landingRedirect'
+import { AccessDenied, CheckingSession, SignInStuck } from './components/LandingScreens'
+
+function attemptStore(): AttemptStore | null {
+  try { return window.sessionStorage } catch { return null }
+}
+
+function storedCredential(name: string): string {
+  try { return localStorage.getItem(name) || '' } catch { return '' }
+}
 
 // AppStudio top-level nav was collapsed in v1.27.38: Requests + Builders
 // became top-level nav items, Skills + Style Guide (renamed from Branding)
@@ -134,31 +147,60 @@ export function AdminApp() {
     } catch (_) { /* SSR / non-browser — fine */ }
   }, [])
 
-  // v2.5.14: when an already-authed user lands at <landing>?redirect=/foo
-  // (the case where /login was redirected here from forward_auth + the user
-  // already had a valid token), forward them to the original target instead
-  // of leaving them stranded on the landing page. Skip if the redirect points
-  // back at a landing route to avoid a fresh loop.
-  // v2.33.0: `launch` joins the list — sign-in now lands there, so
-  // `?redirect=/launch` would otherwise trigger a pointless extra navigation
-  // back to the page already being rendered.
-  if (auth.isAuthed && typeof window !== 'undefined') {
-    const params = new URLSearchParams(window.location.search)
-    const redirect = params.get('redirect')
-    // v2.35.0: isSafeRedirect, not startsWith('/') — `//attacker.com` starts
-    // with a slash and is an absolute cross-origin URL. See safeRedirect.ts.
-    if (isSafeRedirect(redirect) &&
-        !/^\/(login|applications|launch)(\/|\?|$)/.test(redirect as string)) {
-      // Same Referer concern as Login.tsx: a same-origin hop sends the full
-      // URL, and the deep-link target may be a tenant app served at /<slug>.
-      if (params.has('oidc_token')) {
+  // v2.5.14: when an already-authed user lands at <landing>?redirect=/foo,
+  // forward them to the original target instead of leaving them on the landing
+  // page. The decision lives in utils/landingRedirect.ts: it used to forward on
+  // a token merely being present, which looped forever whenever forward_auth
+  // had refused (dead session, missing cookie, no role on the app).
+  const { forget } = auth
+  const [landing, setLanding] = useState<Landing>(() =>
+    initialLanding(readLandingIntent(window.location.search, isSafeRedirect), auth.isAuthed))
+
+  useEffect(() => {
+    if (landing.kind !== 'checking') return
+    let cancelled = false
+    checkSession({
+      token: storedCredential('cc_identity_token'),
+      apiKey: storedCredential('cc_api_key'),
+      fetch: (url, init) => fetch(url, init),
+    }).then(check => {
+      if (cancelled) return
+      const next = afterCheck(landing.target, check, attemptStore(), Date.now())
+      // The refused credential goes, and the sign-in screen renders in place. No
+      // navigation: an ?oidc_token= in this URL is then absorbed by Login.
+      if (next.kind === 'stale') forget(false)
+      if (next.kind === 'go') {
+        // Same Referer concern as Login.tsx: a same-origin hop sends the full
+        // URL, and the deep-link target may be a tenant app served at /<slug>.
         const clean = new URL(window.location.href)
-        clean.searchParams.delete('oidc_token')
-        window.history.replaceState({}, '', clean.pathname + clean.search + clean.hash)
+        if (clean.searchParams.has('oidc_token')) {
+          clean.searchParams.delete('oidc_token')
+          window.history.replaceState({}, '', clean.pathname + clean.search + clean.hash)
+        }
+        window.location.replace(next.target)
       }
-      window.location.replace(redirect as string)
-      return null
-    }
+      setLanding(next)
+    })
+    return () => { cancelled = true }
+  }, [landing, forget])
+
+  // Back to the sign-in screen, keeping the deep link, without navigating: the
+  // frame stays on this embeddable URL and nothing can bounce it.
+  const restartSignIn = (target: string | null) => {
+    forget(true)
+    if (target) clearRedirectAttempts(attemptStore(), target)
+    window.history.replaceState({}, '', '/launch' + (target ? '?redirect=' + encodeURIComponent(target) : ''))
+    setLanding({ kind: 'none' })
+  }
+
+  if (landing.kind === 'denied') {
+    return <AccessDenied appName={landing.appName} onSwitchUser={() => restartSignIn(landing.target)} />
+  }
+  if (landing.kind === 'loop') {
+    return <SignInStuck onRetry={() => restartSignIn(landing.target)} />
+  }
+  if (landing.kind === 'checking' || landing.kind === 'go') {
+    return <CheckingSession />
   }
 
   if (!auth.isAuthed) {

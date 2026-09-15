@@ -8,6 +8,8 @@ interface AuthCtx {
   setKey: (k: string) => void
   isAuthed: boolean
   signOut: () => void
+  /** Drop stored credentials WITHOUT navigating; endSession also ends the server session. */
+  forget: (endSession: boolean) => void
 }
 
 export const AuthContext = createContext<AuthCtx>({
@@ -15,6 +17,7 @@ export const AuthContext = createContext<AuthCtx>({
   setKey: () => {},
   isAuthed: false,
   signOut: () => {},
+  forget: () => {},
 })
 
 export function useAuth() {
@@ -51,6 +54,23 @@ export function useAuthState(): AuthCtx {
       setKeyState('')
       localStorage.removeItem(KEY_STORE)
     }
+  }, [])
+
+  // The sign-in landing page uses this instead of signOut: signOut navigates to
+  // /dashboard, which an embedded frame is not allowed to show, and a landing
+  // page that navigates on a refused credential is how the redirect loop began.
+  const forget = useCallback((endSession: boolean) => {
+    const bearer = localStorage.getItem(TOKEN_STORE)
+    if (endSession && bearer) {
+      try {
+        navigator.sendBeacon?.('/api/identity/logout-beacon',
+          new Blob([JSON.stringify({ token: bearer })], { type: 'application/json' }))
+      } catch (_) {}
+    }
+    localStorage.removeItem(KEY_STORE)
+    localStorage.removeItem(TOKEN_STORE)
+    setKeyState('')
+    setIdentityToken('')
   }, [])
 
   const signOut = useCallback(() => {
@@ -137,5 +157,5 @@ export function useAuthState(): AuthCtx {
 
   const isAuthed = key.length > 5 || identityToken.length > 5
 
-  return { key, setKey, isAuthed, signOut }
+  return { key, setKey, isAuthed, signOut, forget }
 }

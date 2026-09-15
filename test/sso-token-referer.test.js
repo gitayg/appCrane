@@ -47,7 +47,7 @@ test('the scrub is committed to the address bar, not just to a local object', ()
 });
 
 test('AdminApp.tsx scrubs oidc_token before its own deep-link replace', () => {
-  const replace = ADMIN_APP.indexOf('window.location.replace(redirect');
+  const replace = ADMIN_APP.indexOf('window.location.replace(next.target');
   assert.notEqual(replace, -1, 'AdminApp deep-link navigation moved — re-check this guard');
   const before = ADMIN_APP.slice(0, replace);
   assert.match(before, /searchParams\.delete\('oidc_token'\)/,

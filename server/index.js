@@ -2,12 +2,13 @@ import express from 'express';
 import { basename, dirname, join, resolve, sep } from 'path';
 import { fileURLToPath } from 'url';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, openSync, unlinkSync } from 'fs';
-import { createHash } from 'crypto';
 import { initDb, getDb } from './db.js';
 import { errorHandler, notFound } from './utils/errors.js';
 import log from './utils/logger.js';
 import { frameAncestorsForRedirect as frameAncestorsForRedirectFor } from './utils/embed.js';
 import { isSafeRedirect } from './utils/safeRedirect.js';
+import { configureTrustProxy } from './utils/clientIp.js';
+import { createApiRateLimit } from './middleware/apiRateLimit.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -85,6 +86,9 @@ initDb();
 
 const app = express();
 
+// req.ip is the real client only behind a trusted local proxy — see utils/clientIp.js.
+configureTrustProxy(app, process.env.TRUST_PROXY, (msg) => log.warn(msg));
+
 // Security hardening
 app.disable('x-powered-by');
 app.use((req, res, next) => {
@@ -116,35 +120,13 @@ app.use('/api', (req, res, next) => {
   next();
 });
 
-// Global API rate limiter: 2000 req/min per authenticated user (or 600/min per IP fallback).
-// The admin SPA fans out ~40 requests per dashboard load (server health, apps, users,
-// enhancements, activity, metrics, plus per-app live-version probes) and auto-refreshes
-// every 30s, so the limit needs headroom for that plus normal navigation.
-const _apiRateMap = new Map();
-setInterval(() => { const now = Date.now(); for (const [k, rec] of _apiRateMap) { if (now > rec.resetAt) _apiRateMap.delete(k); } }, 5 * 60_000);
+// Global API rate limiter — see middleware/apiRateLimit.js.
+const apiRateLimit = createApiRateLimit();
 
 // MCP-E (v2.2.18): reap expired staged_files rows + their scratch dirs every
 // 5 minutes. Idempotent; safe across server restarts (the row's expires_at
 // is the source of truth, not in-memory state).
 setInterval(() => { try { sweepStagedFiles(); } catch (_) {} }, 5 * 60_000);
-function apiRateLimit(req, res, next) {
-  const bearer = (req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
-  const apiKey = req.headers['x-api-key'] || '';
-  const isAuthed = Boolean(bearer || apiKey);
-  // Hash the credential before using it as the bucket key — keeping plaintext
-  // keys in process memory (the rate-limit Map persists for up to 5 min beyond
-  // request lifetime) was unnecessary residue. SHA-256 is enough; keys are
-  // already 192-bit random so collision risk is nil.
-  const credHash = (s) => createHash('sha256').update(s).digest('hex').slice(0, 32);
-  const key = bearer ? `t:${credHash(bearer)}` : apiKey ? `k:${credHash(apiKey)}` : `ip:${req.ip || req.socket?.remoteAddress || 'unknown'}`;
-  const limit = isAuthed ? 2000 : 600;
-  const now = Date.now();
-  const rec = _apiRateMap.get(key);
-  if (!rec || now > rec.resetAt) { _apiRateMap.set(key, { count: 1, resetAt: now + 60_000 }); return next(); }
-  if (rec.count >= limit) return res.status(429).json({ error: { message: 'Too many requests', code: 'RATE_LIMITED' } });
-  rec.count++;
-  next();
-}
 
 /**
  * v2.36.0: `script-src` no longer allows 'unsafe-inline'.

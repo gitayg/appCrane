@@ -5,7 +5,7 @@ import { encrypt, decrypt, generateSessionToken, hashApiKey, generateApiKey } fr
 import { requireAuth, requirePlatformAdmin } from '../middleware/auth.js';
 import { setSessionCookie } from '../utils/sessionCookie.js';
 import { safeRedirectTarget } from '../utils/safeRedirect.js';
-import { POPUP_MODE, requestedMode, sendPopupComplete } from '../utils/ssoPopup.js';
+import { POPUP_MODE, requestedMode, sendPopupComplete, sendPopupFailed, popupFailure, idpErrorCode } from '../utils/ssoPopup.js';
 import log from '../utils/logger.js';
 
 const router = Router();
@@ -125,8 +125,26 @@ function parseState(state) {
     throw new Error('State signature mismatch — possible CSRF');
   }
   const data = JSON.parse(Buffer.from(payload, 'base64url').toString());
-  if (Date.now() - data.t > 10 * 60 * 1000) throw new Error('State expired (> 10 min)');
+  if (Date.now() - data.t > 10 * 60 * 1000) throw popupFailure('expired', 'State expired (> 10 min)');
   return data;
+}
+
+// The mode inside a state whose signature verifies, ignoring its age: a failed
+// callback uses it to answer a popup with the failure page. '' when the state
+// is missing, garbled or not signed by this instance.
+function signedStateMode(state) {
+  try {
+    if (typeof state !== 'string') return '';
+    const dot = state.lastIndexOf('.');
+    if (dot === -1) return '';
+    const payload = state.slice(0, dot);
+    const sig = Buffer.from(state.slice(dot + 1), 'base64url');
+    const expected = crypto.createHmac('sha256', process.env.ENCRYPTION_KEY).update(payload).digest();
+    if (sig.length !== expected.length || !crypto.timingSafeEqual(sig, expected)) return '';
+    return JSON.parse(Buffer.from(payload, 'base64url').toString()).m === POPUP_MODE ? POPUP_MODE : '';
+  } catch {
+    return '';
+  }
 }
 
 function createIdentitySession(userId) {
@@ -234,6 +252,7 @@ router.get('/start', async (req, res) => {
     res.redirect(302, discovery.authorization_endpoint + '?' + params.toString());
   } catch (e) {
     log.error('OIDC start error: ' + e.message);
+    if (requestedMode(req.query) === POPUP_MODE) return sendPopupFailed(res, 'unavailable');
     res.redirect(302, craneBaseUrl() + '/login?sso_error=' + encodeURIComponent(e.message));
   }
 });
@@ -243,9 +262,11 @@ router.get('/start', async (req, res) => {
  */
 router.get('/callback', async (req, res) => {
   const base = craneBaseUrl();
+  // Decided before anything can fail, from the signed state only; see ssoPopup.js.
+  const popup = signedStateMode(req.query.state) === POPUP_MODE;
   try {
     const { code, state, error, error_description } = req.query;
-    if (error) throw new Error(error_description || error);
+    if (error) throw popupFailure(idpErrorCode(error), error_description || error);
     if (!code || !state) throw new Error('Missing code or state in callback');
 
     const stateData = parseState(state);
@@ -330,6 +351,7 @@ router.get('/callback', async (req, res) => {
 
     if (!user) {
       log.warn(`OIDC: no account for sub=${sub} email=${email}, auto-provision disabled`);
+      if (popup) return sendPopupFailed(res, 'no_account');
       return res.redirect(302, base + '/login?sso_error=no_account');
     }
 
@@ -363,6 +385,7 @@ router.get('/callback', async (req, res) => {
     res.redirect(302, `${base}/login?${p.toString()}`);
   } catch (e) {
     log.error('OIDC callback error: ' + e.message);
+    if (popup) return sendPopupFailed(res, e.popupCode || 'failed');
     res.redirect(302, base + '/login?sso_error=' + encodeURIComponent(e.message));
   }
 });

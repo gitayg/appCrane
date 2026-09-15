@@ -5,7 +5,7 @@ import { encrypt, decrypt, generateSessionToken, hashApiKey, generateApiKey } fr
 import { requireAuth, requirePlatformAdmin } from '../middleware/auth.js';
 import { setSessionCookie } from '../utils/sessionCookie.js';
 import { safeRedirectTarget } from '../utils/safeRedirect.js';
-import { POPUP_MODE, requestedMode, makePopupRelayState, isPopupRelayState, sendPopupComplete } from '../utils/ssoPopup.js';
+import { POPUP_MODE, requestedMode, makePopupRelayState, isPopupRelayState, sendPopupComplete, sendPopupFailed } from '../utils/ssoPopup.js';
 import log from '../utils/logger.js';
 
 const router = Router();
@@ -155,6 +155,7 @@ router.get('/start', async (req, res) => {
     res.redirect(url);
   } catch (e) {
     log.error('SAML start error: ' + e.message);
+    if (requestedMode(req.query) === POPUP_MODE) return sendPopupFailed(res, 'unavailable');
     res.redirect(302, craneBaseUrl() + '/login?saml_error=' + encodeURIComponent(e.message));
   }
 });
@@ -164,6 +165,10 @@ router.get('/start', async (req, res) => {
  */
 router.post('/callback', async (req, res) => {
   const base = craneBaseUrl();
+  // A failure page only needs to know this is a popup, so an expired but
+  // genuine RelayState counts here; the success path below still requires a
+  // fresh one. See ssoPopup.js.
+  const popupFailing = isPopupRelayState(req.body?.RelayState, { allowExpired: true });
   try {
     const cfg = getSamlConfig();
     if (!cfg.enabled) throw new Error('SAML not enabled');
@@ -229,6 +234,7 @@ router.post('/callback', async (req, res) => {
 
     if (!user) {
       log.warn(`SAML: no account for nameID=${nameId}, auto-provision disabled`);
+      if (popupFailing) return sendPopupFailed(res, 'no_account');
       return res.redirect(302, base + '/login?saml_error=no_account');
     }
 
@@ -261,6 +267,7 @@ router.post('/callback', async (req, res) => {
     res.redirect(302, `${base}/login?${p.toString()}`);
   } catch (e) {
     log.error('SAML callback error: ' + e.message);
+    if (popupFailing) return sendPopupFailed(res, 'failed');
     res.redirect(302, base + '/login?saml_error=' + encodeURIComponent(e.message));
   }
 });

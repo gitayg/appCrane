@@ -51,6 +51,7 @@ import { Worker } from 'worker_threads';
 import { createRequire } from 'module';
 import { liveDeploymentImages, imageSetFingerprint } from './imageArchive.js';
 import { runRepoTask, currentRepoSet, recordExpectedRepoSet, verifyRepoSet } from './repoArchive.js';
+import { withMainCheckpointsDeferred } from './dbCheckpoint.js';
 import {
   SLUG_RE, repoRoot, dataDir, backupsDir, ensureBackupsDir, newWorkDir, freeBytes,
   createTar, extractTar, walk, treeBytes, readHead, privateFile, readZipDirectory, extractZipEntry,
@@ -157,7 +158,13 @@ async function collectAppTrees() {
  *   version  — override the recorded AppCrane version
  * @returns {{ path, file, bytes, manifest, warnings }}
  */
-export async function exportDataArchive(opts = {}) {
+export function exportDataArchive(opts = {}) {
+  // The main connection must not checkpoint while the export loads the disk:
+  // see dbCheckpoint.js for the measured fsync stall this prevents.
+  return withMainCheckpointsDeferred(() => writeDataArchive(opts));
+}
+
+async function writeDataArchive(opts) {
   const at = opts.at || new Date();
   const version = opts.version || await craneVersion();
   const db = getDb();

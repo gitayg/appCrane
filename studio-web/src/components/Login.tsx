@@ -33,7 +33,7 @@ import {
  * Password sign-in stays in the frame.
  */
 interface SsoCfg { enabled?: boolean; provider_name?: string }
-type PopupState = 'idle' | 'waiting' | 'blocked' | 'timeout'
+type PopupState = 'idle' | 'waiting' | 'blocked' | 'failed' | 'timeout'
 
 export function Login() {
   const { setKey } = useAuth()
@@ -104,6 +104,8 @@ export function Login() {
         const target = reloadTargetAfterSignIn(window.location.search, isSafeRedirect)
         if (target) window.location.replace(target)
         else window.location.reload()
+      } else if (result === 'failed') {
+        setPopupState('failed')
       } else if (result === 'timeout') {
         setPopupState('timeout')
       }
@@ -254,7 +256,6 @@ export function Login() {
                     type="button"
                     className="btn btn-accent"
                     onClick={() => startPopup('oidc')}
-                    disabled={popupState === 'waiting'}
                     style={{ width: '100%', padding: 10 }}
                   >{popupLabel(oidc.provider_name || 'SSO')}</button>
                 )}
@@ -263,12 +264,15 @@ export function Login() {
                     type="button"
                     className="btn btn-accent"
                     onClick={() => startPopup('saml')}
-                    disabled={popupState === 'waiting'}
                     style={{ width: '100%', padding: 10 }}
                   >{popupLabel(saml.provider_name || 'Okta')}</button>
                 )}
+                {/* The buttons stay enabled while waiting: a popup the user closed
+                    cannot be detected (see utils/popupSignIn.ts), so starting
+                    again must stay possible. */}
                 <p style={{ margin: 0, color: 'var(--dim)', fontSize: '.78rem', textAlign: 'center' }}>
                   {popupState === 'waiting' ? 'Finish signing in in the new window.'
+                    : popupState === 'failed' ? "Sign-in didn't complete. Try again."
                     : popupState === 'timeout' ? 'The sign-in window did not finish. Try again.'
                     : 'Sign-in opens in a new window'}
                 </p>
