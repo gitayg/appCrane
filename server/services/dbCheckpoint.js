@@ -28,14 +28,19 @@ import { Worker } from 'worker_threads';
 import { createRequire } from 'module';
 import { getDb } from '../db.js';
 import log from '../utils/logger.js';
+import { traceBackup } from './backupTrace.js';
 
 const requireCjs = createRequire(import.meta.url);
 const CHECKPOINT_WORKER = `
 const { parentPort, workerData } = require('worker_threads');
 try {
   const Database = require(workerData.driver);
+  const t0 = performance.timeOrigin + performance.now();
   const d = new Database(workerData.src, { fileMustExist: true });
-  try { parentPort.postMessage({ ok: true, result: d.pragma('wal_checkpoint(PASSIVE)')[0] }); } finally { d.close(); }
+  try {
+    const result = d.pragma('wal_checkpoint(PASSIVE)')[0];
+    parentPort.postMessage({ ok: true, result, t0, t1: performance.timeOrigin + performance.now() });
+  } finally { d.close(); }
 } catch (e) {
   parentPort.postMessage({ ok: false, message: e.message });
 }
@@ -47,7 +52,11 @@ export function checkpointInWorker(src) {
   return new Promise((resolveP, reject) => {
     const w = new Worker(CHECKPOINT_WORKER, { eval: true, workerData: { driver, src } });
     let settled = false;
-    w.once('message', (m) => { settled = true; m.ok ? resolveP(m.result) : reject(new Error(`checkpoint failed: ${m.message}`)); });
+    w.once('message', (m) => {
+      settled = true;
+      if (m.ok) traceBackup('checkpoint:passive-in-worker', { start: m.t0, end: m.t1, result: m.result });
+      m.ok ? resolveP(m.result) : reject(new Error(`checkpoint failed: ${m.message}`));
+    });
     w.once('error', (e) => { if (!settled) { settled = true; reject(e); } });
     w.once('exit', (code) => { if (!settled) reject(new Error(`checkpoint worker exited with ${code}`)); });
   });
@@ -62,20 +71,24 @@ export async function withMainCheckpointsDeferred(fn) {
   if (holders++ === 0) {
     saved = db.pragma('wal_autocheckpoint', { simple: true });
     db.pragma('wal_autocheckpoint = 0');
+    traceBackup('defer:start');
   }
   try {
     return await fn();
   } finally {
     if (holders === 1) {
+      traceBackup('checkpoint:start');
       try {
         await checkpointInWorker(db.name);
       } catch (e) {
         log.warn(`[backup] deferred WAL checkpoint failed, the main connection will checkpoint on its own: ${e.message}`);
       }
+      traceBackup('checkpoint:end');
     }
     if (--holders === 0) {
       db.pragma(`wal_autocheckpoint = ${Number(saved)}`);
       saved = null;
+      traceBackup('defer:end');
     }
   }
 }

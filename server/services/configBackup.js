@@ -7,10 +7,11 @@
  *                      image_set, repo_set). First member, so it is read
  *                      before anything else is extracted.
  *   - deployhub.db   — the SQLite DB (apps, users, settings, env_vars [encrypted],
- *                      role_permissions, deployments metadata, …), taken with
- *                      VACUUM INTO on a separate read-only connection in a
- *                      worker thread: one WAL read transaction, so a consistent
- *                      point-in-time copy while the server keeps writing.
+ *                      role_permissions, deployments metadata, …), copied with
+ *                      SQLite's backup API on a separate read-only connection in
+ *                      a worker thread, paced to the disk (dbSnapshot.js): one
+ *                      WAL read transaction, so a consistent point-in-time copy
+ *                      while the server keeps writing.
  *   - .env           — platform env, crucially the ENCRYPTION_KEY. Without it
  *                      the DB's encrypted env_vars / secrets can't be decrypted.
  *   - apps/<slug>/icon.*                    — per-app tile icons.
@@ -47,11 +48,11 @@ import {
 } from 'fs/promises';
 import { join, resolve, dirname, basename } from 'path';
 import { randomBytes } from 'crypto';
-import { Worker } from 'worker_threads';
-import { createRequire } from 'module';
 import { liveDeploymentImages, imageSetFingerprint } from './imageArchive.js';
 import { runRepoTask, currentRepoSet, recordExpectedRepoSet, verifyRepoSet } from './repoArchive.js';
 import { withMainCheckpointsDeferred } from './dbCheckpoint.js';
+import { traceBackup } from './backupTrace.js';
+import { snapshotDatabasePaced } from './dbSnapshot.js';
 import {
   SLUG_RE, repoRoot, dataDir, backupsDir, ensureBackupsDir, newWorkDir, freeBytes,
   createTar, extractTar, walk, treeBytes, readHead, privateFile, readZipDirectory, extractZipEntry,
@@ -66,39 +67,16 @@ const ICON_RE = /^icon\.(png|svg|webp|jpg|jpeg|gif)$/i;
 const ENVS = ['sandbox', 'production'];
 
 /**
- * Point-in-time copy of the live DB to `dest`, off the event loop.
- *
- * Not better-sqlite3's backup API, although it is async: it copies pages on
- * the MAIN thread between event-loop turns, and those page writes stall under
- * Linux dirty-page throttling. Measured on node:22-bookworm, 512 MB DB with
- * concurrent writes: event-loop delay 127-129 ms on a clean page cache and
- * 246-406 ms after 1 GB of recent writes. The same copy made by VACUUM INTO on
- * a read-only connection in a worker: 7.7-7.9 ms in both conditions (macOS
- * 6.3-7.1 ms). A read-only WAL reader holds one read transaction for the whole
- * statement, so the copy is consistent while the main connection keeps writing.
+ * Point-in-time copy of the live DB to `dest`, off the event loop and paced to
+ * the disk. See dbSnapshot.js: the page copying and fsyncs happen in a worker,
+ * one read transaction pins the snapshot while the main connection keeps
+ * writing, and the copy cannot flood the page cache (which is what made the
+ * main thread's own writes wait in the kernel during v2.77.1 exports).
  */
-const requireCjs = createRequire(import.meta.url);
-const SNAPSHOT_WORKER = `
-const { parentPort, workerData } = require('worker_threads');
-try {
-  const Database = require(workerData.driver);
-  const d = new Database(workerData.src, { readonly: true, fileMustExist: true });
-  try { d.exec("VACUUM INTO '" + workerData.dest.replace(/'/g, "''") + "'"); } finally { d.close(); }
-  parentPort.postMessage({ ok: true });
-} catch (e) {
-  parentPort.postMessage({ ok: false, message: e.message });
-}
-`;
-
-export function snapshotDatabase(dest) {
-  const driver = requireCjs.resolve('better-sqlite3');
-  return new Promise((resolveP, reject) => {
-    const w = new Worker(SNAPSHOT_WORKER, { eval: true, workerData: { driver, src: dbPath(), dest } });
-    let settled = false;
-    w.once('message', (m) => { settled = true; m.ok ? resolveP() : reject(new Error(`database snapshot failed: ${m.message}`)); });
-    w.once('error', (e) => { if (!settled) { settled = true; reject(e); } });
-    w.once('exit', (code) => { if (!settled) reject(new Error(`database snapshot worker exited with ${code}`)); });
-  });
+export async function snapshotDatabase(dest) {
+  traceBackup('snapshot:worker-spawn');
+  const s = await snapshotDatabasePaced(dbPath(), dest);
+  traceBackup('snapshot:copy-in-worker', { start: s.t0, end: s.t1, result: { steps: s.steps, syncs: s.syncs } });
 }
 
 async function craneVersion() {
@@ -173,15 +151,22 @@ async function writeDataArchive(opts) {
   try {
     // 1. DB: a point-in-time copy made in a worker (see snapshotDatabase).
     const stagedDb = join(stage, 'deployhub.db');
+    traceBackup('snapshot:start');
     await snapshotDatabase(stagedDb);
+    traceBackup('snapshot:end');
     const dbBytes = (await stat(stagedDb)).size;
 
     const hasEnv = existsSync(envPath());
     const envBytes = hasEnv ? (await stat(envPath())).size : 0;
+    traceBackup('trees:start');
     const trees = await collectAppTrees();
+    traceBackup('trees:end');
 
+    traceBackup('repos:start');
     const repoSet = await currentRepoSet();
+    traceBackup('repos:end');
 
+    traceBackup('manifest:start');
     const counts = {};
     for (const t of ['apps', 'users', 'settings', 'env_vars', 'role_permissions']) {
       try { counts[t] = db.prepare(`SELECT COUNT(*) c FROM ${t}`).get().c; } catch (_) {}
@@ -225,17 +210,20 @@ async function writeDataArchive(opts) {
       image_set: imageSet,
     };
     await writeFile(join(stage, MANIFEST), JSON.stringify(manifest, null, 2), { mode: 0o600 });
+    traceBackup('manifest:end');
 
     const file = opts.dest ? basename(opts.dest) : dataArchiveFileName(hostLabel(), imageSet?.fingerprint, at);
     const dest = opts.dest ? resolve(opts.dest) : join(backupsDir(), file);
     const partial = `${dest}.partial-${randomBytes(4).toString('hex')}`;
     let warnings;
     try {
+      traceBackup('tar:start');
       ({ warnings } = await createTar(partial, [
         { cwd: stage, paths: [MANIFEST, 'deployhub.db'] },
         ...(hasEnv ? [{ cwd: repoRoot, paths: ['.env'] }] : []),
         { cwd: dataDir(), paths: trees.members },
       ], { gzip: true }));
+      traceBackup('tar:end');
       await privateFile(partial);
       await rename(partial, dest);
     } catch (e) {
@@ -246,7 +234,9 @@ async function writeDataArchive(opts) {
     log.info(`[config-backup] exported data archive (apps=${counts.apps}, users=${counts.users}, env=${hasEnv}, data-volumes=${trees.dataVolumes}, repos-recorded=${repoSet.count}, ${bytes} bytes)`);
     return { path: dest, file, bytes, manifest, warnings, skipped: trees.skipped };
   } finally {
+    traceBackup('cleanup:start');
     await rm(stage, { recursive: true, force: true });
+    traceBackup('cleanup:end');
   }
 }
 

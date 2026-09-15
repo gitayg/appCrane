@@ -29,6 +29,7 @@ const http = require('http');
 const url = process.argv[1];
 let phase = 'warmup';
 const during = [];
+let worstAt = null;
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', (d) => { if (d.includes('start')) phase = 'during'; if (d.includes('stop')) phase = 'stop'; });
 (async () => {
@@ -36,10 +37,14 @@ process.stdin.on('data', (d) => { if (d.includes('start')) phase = 'during'; if 
     const counted = phase === 'during';
     const t0 = performance.now();
     await new Promise((r) => http.get(url, (res) => { res.resume(); res.on('end', r); }).on('error', r));
-    if (counted) during.push(performance.now() - t0);
+    if (counted) {
+      const ms = performance.now() - t0;
+      if (!during.length || ms > Math.max(...during)) worstAt = performance.timeOrigin + t0;
+      during.push(ms);
+    }
     await new Promise((r) => setTimeout(r, 20));
   }
-  process.stdout.write(JSON.stringify({ during: during.length, max: during.length ? Math.max(...during) : null }));
+  process.stdout.write(JSON.stringify({ during: during.length, max: during.length ? Math.max(...during) : null, worstAt }));
 })();
 `;
 
@@ -66,6 +71,13 @@ const { initDb, getDb } = await import('../server/db.js');
 initDb();
 const db = getDb();
 const { exportDataArchive } = await import('../server/services/configBackup.js');
+const { startBackupTrace, stopBackupTrace, nowAbs } = await import('../server/services/backupTrace.js');
+const { startLoopDiagnostics, summarize, hostFacts } = await import('./backup-loop-diag.mjs');
+
+// Set BACKUP_LOOP_DIAG=1 to print the diagnostics report on a passing run too.
+// A failing run always prints it: it is how a stall on the CI runner, where no
+// profiler can be attached, gets explained by the log alone.
+const ALWAYS_DIAG = process.env.BACKUP_LOOP_DIAG === '1';
 
 after(() => { try { rmSync(ROOT, { recursive: true, force: true }); } catch (_) {} });
 
@@ -114,26 +126,41 @@ test(`export of a ${DB_MB} MB DB + ${DATA_MB} MB /data keeps the event loop and 
   prober.stdout.on('data', (d) => { proberOut += d; });
   const proberDone = new Promise((r) => prober.on('close', r));
   await new Promise((r) => setTimeout(r, 400));
-  const writer = setInterval(() => write(), 5);
+  const diag = startLoopDiagnostics();
+  const writer = setInterval(() => diag.timeWrite(write), 5);
 
   const h = monitorEventLoopDelay({ resolution: 10 });
   prober.stdin.write('start\n');
   h.enable();
-  const t0 = performance.now();
+  startBackupTrace();
+  const exportStart = nowAbs();
   const out = await exportDataArchive({ version: 'loop-test' });
-  const elapsed = performance.now() - t0;
+  const exportEnd = nowAbs();
+  const elapsed = exportEnd - exportStart;
+  const marks = stopBackupTrace();
   h.disable();
   clearInterval(writer);
+  const raw = diag.stop();
   prober.stdin.end('stop\n');
   await proberDone;
   server.close();
   const rowsAtEnd = next - 1;
-  const { max: httpMax, during } = JSON.parse(proberOut);
+  const { max: httpMax, during, worstAt } = JSON.parse(proberOut);
 
   const loopMax = h.max / 1e6;
   console.log(`# control: synchronous VACUUM INTO of the same DB blocks ${controlMs.toFixed(0)} ms -> loop bound ${loopBound.toFixed(0)} ms, HTTP bound ${httpBound.toFixed(0)} ms`);
   console.log(`# export ${elapsed.toFixed(0)} ms, archive ${out.bytes} bytes; event-loop delay max=${loopMax.toFixed(1)} ms p99=${(h.percentile(99) / 1e6).toFixed(1)} ms; ` +
     `HTTP probes during export (out of process)=${during} max=${httpMax.toFixed(1)} ms; ledger rows start=${rowsAtStart} end=${rowsAtEnd}`);
+  if (ALWAYS_DIAG || loopMax >= loopBound || httpMax >= httpBound) {
+    const { report, human } = summarize(raw, {
+      marks, exportStart, exportEnd,
+      facts: hostFacts(ROOT),
+      bounds: { controlMs: Math.round(controlMs), loopBound: Math.round(loopBound), httpBound: Math.round(httpBound), loopMax: Math.round(loopMax * 10) / 10, httpMax: Math.round(httpMax * 10) / 10 },
+      probe: { max: httpMax, worstAt },
+    });
+    for (const l of human) console.log(`# diag: ${l}`);
+    console.log(`# backup-diag ${JSON.stringify(report)}`);
+  }
   assert.ok(loopMax < loopBound, `event loop blocked for ${loopMax.toFixed(1)} ms during export (bound ${loopBound.toFixed(0)} ms: a third of the ${controlMs.toFixed(0)} ms synchronous control)`);
   assert.ok(during >= 5, `only ${during} HTTP probes were sent during a ${elapsed.toFixed(0)} ms export`);
   assert.ok(httpMax < httpBound, `a lightweight route took ${httpMax.toFixed(1)} ms to answer during export (bound ${httpBound.toFixed(0)} ms: half of the ${controlMs.toFixed(0)} ms synchronous control)`);
