@@ -246,6 +246,15 @@ visibility, resource limits, etc.) DO NOT delete and re-create the app. Use:
   omitted fields are left alone; `github_token` semantics: omit = keep,
   `""` = clear, value = rotate (encrypted at rest).
 
+`image_retention` counts the PREVIOUS per-commit images kept per environment,
+on top of the one that is running. It defaults to **1**, so the previous
+release's image stays on the host and `appcrane_rollback` to that release
+restarts it instead of rebuilding — which is what makes a rollback fast in the
+incident it exists for. Rolling back FURTHER than one release, or rolling back
+an app whose `image_retention` is 0, rebuilds the target commit first. Raise it
+on apps that get rolled back deeper; set it to 0 only to reclaim disk, and
+expect every rollback on that app to rebuild.
+
 ## App health endpoint contract — required, server-enforced
 
 Every deployable app MUST expose an HTTP endpoint that returns JSON with

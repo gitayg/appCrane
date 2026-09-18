@@ -20,6 +20,7 @@ import { usesLocalRepo } from './managedRepo.js';
 import { refuseEnvFilePaths, redactEnvFileContentInArgs } from './envFilePushGuard.js';
 import { assertFinding } from './scanShapes.js';
 import { resolveVisibility } from '../utils/appVisibility.js';
+import { DEFAULT_IMAGE_RETENTION } from './imageRetention.js';
 import { mkdirSync } from 'fs';
 import { join } from 'path';
 import crypto from 'crypto';
@@ -1047,7 +1048,7 @@ const TOOLS = [
   {
     name: 'appcrane_rollback',
     description:
-      'Roll an env back to a prior release. Pass deployment_id (from appcrane_list_releases) to target a specific release, or omit it to roll back to the immediately previous one. Re-runs that release from its recorded build (re-uses the cached per-commit image — no rebuild when it is still retained) and health-checks it. Records a NEW deployment and marks the previous live one rolled_back. Owner-only (or global admin).',
+      'Roll an env back to a prior release. Pass deployment_id (from appcrane_list_releases) to target a specific release, or omit it to roll back to the immediately previous one. Re-runs that release from its recorded build and health-checks it. A rollback to the IMMEDIATELY PREVIOUS release restarts the cached per-commit image without rebuilding, because image_retention defaults to 1 (the running image plus the one behind it); rolling back further, or on an app whose image_retention is 0, rebuilds that commit first. Records a NEW deployment and marks the previous live one rolled_back. Owner-only (or global admin).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2024,11 +2025,12 @@ const TOOLS = [
       const branch = args.branch || 'main';
 
       const result = db.prepare(`
-        INSERT INTO apps (name, slug, slot, domain, description, category, source_type, github_url, branch, github_token_encrypted, resource_limits, created_by, image_ref, container_port, health_path)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO apps (name, slug, slot, domain, description, category, source_type, github_url, branch, github_token_encrypted, resource_limits, created_by, image_ref, container_port, health_path, image_retention)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(name, slug, slot, args.domain || null, args.description || null, null, sourceType,
         github_url || null, branch, tokenEncrypted, resourceLimits, user.id,
-        image.image_ref ?? null, image.container_port ?? null, image.health_path ?? null);
+        image.image_ref ?? null, image.container_port ?? null, image.health_path ?? null,
+        DEFAULT_IMAGE_RETENTION);
       const appId = result.lastInsertRowid;
 
       for (const env of ['production', 'sandbox']) {
@@ -2114,7 +2116,10 @@ const TOOLS = [
         github_token:   { type: 'string', description: 'PAT for private clones. Stored encrypted (AES-256-GCM). Omit to leave the existing token alone; pass empty string to clear it; pass a value to rotate.' },
         visibility:     { type: 'string', enum: ['public', 'private', 'hidden'] },
         public_access:  { type: 'integer', enum: [0, 1] },
-        image_retention: { type: 'integer', minimum: 0, maximum: 50 },
+        image_retention: {
+          type: 'integer', minimum: 0, maximum: 50,
+          description: 'How many PREVIOUS per-commit images to keep per environment, on top of the running one. Default 1: the previous release\'s image stays on disk, so rolling back to it restarts instead of rebuilding. Raise it to make older rollback targets fast too (each extra image costs roughly the app\'s own layers, tens of kB when only source changed between deploys, tens of MB when dependencies did). 0 keeps only the running image and makes every rollback rebuild.',
+        },
         frame_ancestors: { type: 'string' },
         auth_bypass_paths: {
           type: 'array',
@@ -3371,10 +3376,10 @@ const TOOLS = [
       const branch = args.branch || repo.default_branch || 'main';
 
       const result = db.prepare(`
-        INSERT INTO apps (name, slug, slot, domain, description, category, source_type, github_url, branch, github_token_encrypted, resource_limits, created_by, repo_backend)
-        VALUES (?, ?, ?, ?, ?, ?, 'managed', ?, ?, NULL, ?, ?, ?)
+        INSERT INTO apps (name, slug, slot, domain, description, category, source_type, github_url, branch, github_token_encrypted, resource_limits, created_by, repo_backend, image_retention)
+        VALUES (?, ?, ?, ?, ?, ?, 'managed', ?, ?, NULL, ?, ?, ?, ?)
       `).run(name, slug, slot, args.domain || null, args.description || null, null, repo.html_url, branch, resourceLimits, user.id,
-        backend === REPO_BACKEND_GITHUB ? null : backend);
+        backend === REPO_BACKEND_GITHUB ? null : backend, DEFAULT_IMAGE_RETENTION);
       const appId = result.lastInsertRowid;
 
       for (const env of ['production', 'sandbox']) {

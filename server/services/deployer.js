@@ -14,6 +14,7 @@ import { findEntry } from './catalogService.js';
 import { credentialsFor } from './managedDb.js';
 import { parseContainerCommand, parseVolumePaths, resolveVolumeMounts, declaredVolumePathsFor } from './containerRuntimeSpec.js';
 import { resolveHealthProbe } from './healthProbeTarget.js';
+import { imagesToKeep } from './imageRetention.js';
 
 // ---------------------------------------------------------------------------
 // Managed database credentials -> container environment
@@ -1935,7 +1936,10 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     }
     appendLog('Health check passed');
 
-    pruneOldImages(app.slug, env, (app.image_retention ?? 0) + 1);
+    // keep = retention + 1: the image just started, plus the ones behind it.
+    // At the default (1) that leaves the PREVIOUS commit's image on the host,
+    // which is what lets a rollback to it restart rather than rebuild.
+    pruneOldImages(app.slug, env, imagesToKeep(app));
     // Reclaim dangling layers from failed/interrupted prior builds (safe — never touches in-use images).
     pruneDanglingImages();
 

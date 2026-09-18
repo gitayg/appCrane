@@ -1,0 +1,51 @@
+-- v2.78.0: keep the PREVIOUS container image, so a rollback restarts instead of rebuilding.
+--
+-- 031 added `image_retention INTEGER NOT NULL DEFAULT 0`, and every rebuild of
+-- apps since (052, 081, 083, 086, 090) restated that default verbatim. So every
+-- row on every install holds a literal 0, and deployer.js's
+-- `pruneOldImages(slug, env, image_retention + 1)` ran with keep = 1: at the end
+-- of each successful deploy the PREVIOUS commit's image was deleted.
+--
+-- That is the image a rollback needs. rollbackApp re-runs deployApp with the
+-- target deployment's commit_hash, and docker.js:buildImageIfNeeded skips the
+-- build only while an image tagged for that (slug, env, commit) is still on the
+-- host. Pruned, the rollback rebuilds — during the incident the rollback exists
+-- for. appcrane_rollback's own description has promised "re-uses the cached
+-- per-commit image" since it shipped; at the default it never could.
+--
+-- RAISING EXISTING ROWS IS THE WHOLE MIGRATION. A row set to 0 today is not an
+-- operator decision: 0 is what the column default wrote, and the API path that
+-- can set this (routes/apps.js, admin only) is the only way a row ever held
+-- anything else. Rows an operator DID set -- anything non-zero -- are left
+-- exactly as they are, including the 5s and 10s on busy apps.
+--
+-- 0 keeps its meaning. This runs once, keyed on the file name in _migrations;
+-- an operator who sets 0 after it has been applied keeps the old behaviour and
+-- nothing re-raises it.
+--
+-- WHY THE COLUMN DEFAULT IS NOT CHANGED HERE.
+--   SQLite cannot ALTER a column default, so the only two ways to move it are a
+--   full table rebuild or PRAGMA writable_schema. writable_schema is
+--   unavailable in this codebase -- better-sqlite3 opens the database without
+--   `unsafeMode` (server/db.js) and rejects `UPDATE sqlite_master` with "table
+--   sqlite_master may not be modified"; 046's history comment and 083's header
+--   both record the same finding, and it was re-measured before this migration
+--   was written. That leaves a rebuild of the 39-column table 090 defines, with
+--   its CHECK constraints and its three partial unique port indexes, to move one DEFAULT
+--   by one -- blast radius wildly out of proportion to the change, on the one
+--   table whose rebuilds three test files exist to police.
+--
+--   Instead every app-creation path names the column explicitly and passes
+--   services/imageRetention.js:DEFAULT_IMAGE_RETENTION: routes/apps.js (the
+--   dashboard and catalogue installs), mcpTools.js appcrane_create_app and
+--   appcrane_create_managed_app, and services/reconcile.js. This is also the
+--   MORE durable half of the choice: a future rebuild of apps would copy the
+--   `DEFAULT 0` text out of the newest existing rebuild and silently undo a
+--   changed default, while an explicit INSERT column keeps working.
+--
+--   A future rebuild that wants the column default to agree should write
+--   `image_retention INTEGER NOT NULL DEFAULT 1` in its new table. Nothing
+--   breaks if it does not -- test/image-retention-default.test.js asserts the
+--   creation paths, not the stored default, and would stay green either way.
+
+UPDATE apps SET image_retention = 1 WHERE image_retention = 0;

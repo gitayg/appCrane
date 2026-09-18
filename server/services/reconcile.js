@@ -6,6 +6,7 @@ import { getDb } from '../db.js';
 import { getPortsForSlot } from './portAllocator.js';
 import { reloadCaddy } from './caddy.js';
 import log from '../utils/logger.js';
+import { DEFAULT_IMAGE_RETENTION } from './imageRetention.js';
 
 const ENVS = ['production', 'sandbox'];
 
@@ -94,12 +95,13 @@ export async function reconcileOrphanedApps({ dryRun = false, dataDir } = {}) {
   // ── Register each orphaned app ────────────────────────────────────────────
   const registerApp = db.transaction((slug, slot, meta) => {
     const result = db.prepare(`
-      INSERT INTO apps (name, slug, slot, source_type, github_url, branch, description, resource_limits)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO apps (name, slug, slot, source_type, github_url, branch, description, resource_limits, image_retention)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       meta.name, slug, slot,
       meta.source_type, meta.github_url, meta.branch, meta.description,
-      JSON.stringify({ max_ram_mb: 512, max_cpu_percent: 50 })
+      JSON.stringify({ max_ram_mb: 512, max_cpu_percent: 50 }),
+      DEFAULT_IMAGE_RETENTION,
     );
     const appId = result.lastInsertRowid;
     for (const env of ENVS) {

@@ -148,6 +148,7 @@ import { join } from 'path';
 import { reconcileOrphanedApps } from '../services/reconcile.js';
 import { parseImageRef } from '../services/imageSource.js';
 import { validateContainerCommand, validateVolumePaths } from '../services/containerRuntimeSpec.js';
+import { DEFAULT_IMAGE_RETENTION } from '../services/imageRetention.js';
 
 /**
  * An app row as it may leave the server: every `*_encrypted` column removed.
@@ -661,9 +662,9 @@ router.post('/', requireAuth, auditMiddleware('app-create'), async (req, res) =>
   const appDomain = domain || null;
 
   const result = db.prepare(`
-    INSERT INTO apps (name, slug, slot, domain, description, category, source_type, github_url, branch, github_token_encrypted, resource_limits, created_by, image_ref, container_port, health_path, catalog_slug)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(name, slug, slot, appDomain, description || null, category || null, source_type || 'github', github_url || null, branch || 'main', tokenEncrypted, resourceLimits, req.user.id, imageRefValue, containerPortValue, healthPathValue, catalogSlugValue);
+    INSERT INTO apps (name, slug, slot, domain, description, category, source_type, github_url, branch, github_token_encrypted, resource_limits, created_by, image_ref, container_port, health_path, catalog_slug, image_retention)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(name, slug, slot, appDomain, description || null, category || null, source_type || 'github', github_url || null, branch || 'main', tokenEncrypted, resourceLimits, req.user.id, imageRefValue, containerPortValue, healthPathValue, catalogSlugValue, DEFAULT_IMAGE_RETENTION);
 
   const appId = result.lastInsertRowid;
 
