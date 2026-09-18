@@ -5,6 +5,16 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
+## 2.78.1 — The README documented a CLI that was removed 72 releases ago.
+
+`## CLI Reference` and the quick start taught `crane app create`, `crane deploy`, `crane env set`, `crane rollback`, `crane promote`, `crane user create`, `crane health`, `crane webhook`, `crane backup`, `crane logs` and `crane audit`. None of them exist: v2.6.0 retired the agent-facing CLI surface and the docs never followed, so a new user's first command failed. The real CLI is nine platform commands (`config`, `init`, `regenerate-key`, `update`, `caddy`, `setup-https`, `me`, `status`, `reconcile`), six of which had never been documented at all.
+
+App operations are MCP-first, with REST as the scripting path — every replacement in the new section is traced to a tool in `mcpTools.js` or a route in `server/routes/`, not inferred. `crane webhook --auto-sandbox` was removed with no successor named, because none could be traced; that gap is real and still open.
+
+**The MCP tool count was wrong in five places** — 57 against an actual 59 (`mcpTools.js`, `mcpCatalog.snapshot.json` and the connector's `catalog.json` all agree on 59). Only AppCrane's own cell in the comparison table changed; competitor figures were left untouched and unverified.
+
+This file had not been updated since 2.58.1, so the entries between it and here are missing rather than empty.
+
 ## 2.58.1 — CI had been red for five releases, and nobody was reading it.
 
 Two failures, found by actually opening the workflow logs instead of trusting a release that had been reported as green.

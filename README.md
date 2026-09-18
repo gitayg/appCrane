@@ -6,7 +6,7 @@
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
 ![Platform: Ubuntu 22.04+](https://img.shields.io/badge/platform-Ubuntu%2022.04%2B-e95420)
 
-AppCrane runs the internal apps your team builds with Claude Code or Cursor, on a server you own. An agent creates the app, deploys it, reads the logs and rolls it back through 57 MCP tools — no browser, no curl — while the platform enforces SSO and per-app roles, records every action against the actor that took it (tagged **agent** or **human**), and keeps app secrets out of reach of the person administering the box.
+AppCrane runs the internal apps your team builds with Claude Code or Cursor, on a server you own. An agent creates the app, deploys it, reads the logs and rolls it back through 59 MCP tools — no browser, no curl — while the platform enforces SSO and per-app roles, records every action against the actor that took it (tagged **agent** or **human**), and keeps app secrets out of reach of the person administering the box.
 
 It is for teams that have to self-host — data residency, a customer contract, an internal-only network — and still have to answer *who deployed this, what was in it, and can we undo it?*
 
@@ -16,7 +16,7 @@ Self-hosted PaaS caught up on governance during 2026. Coolify shipped structured
 
 **1. Governance is in the open-source build, not behind a license key.** SAML 2.0, OIDC, SCIM provisioning, per-app roles and the audit log are all in the AGPL-3.0 build with nothing to activate. Dokploy ships the same category of capability as [Enterprise](https://docs.dokploy.com/docs/core/enterprise), gated on a license key. Coolify's are free, but its changelog lists OIDC and audit logging without SAML or SCIM. Komodo's are free too — GPL-3.0, with per-resource permissions and an audit trail in the box — but its [documented sign-on](https://komo.do/docs/intro) is username/password and OAuth (GitHub, Google, generic OIDC), with no SAML or SCIM in the docs. So the free-versus-paid line is really only Dokploy's; against Coolify and Komodo the difference is which enterprise-directory protocols are covered, not what you have to pay to turn them on.
 
-**2. The built-in agent interface can change things.** Coolify's instance-level MCP server is deliberately **read-only** — ten list/get tools. AppCrane's 57 include `appcrane_deploy`, `appcrane_rollback`, `appcrane_promote`, `appcrane_set_secret` and `appcrane_grant_app_access`. Dokploy's official MCP package is write-capable too, and far larger (508 tools across 49 categories) — AppCrane's surface is smaller by choice, not by capability, and is paired with `appcrane_get_guide(topic="onboarding"|"operations")`, which serves the current playbook from the server so the agent reads the procedure instead of inferring it from a tool list. Komodo ships no MCP server of its own; neither its [repo](https://github.com/moghtech/komodo) nor its docs contain one, and the several that exist are third-party wrappers over its REST API.
+**2. The built-in agent interface can change things.** Coolify's instance-level MCP server is deliberately **read-only** — ten list/get tools. AppCrane's 59 include `appcrane_deploy`, `appcrane_rollback`, `appcrane_promote`, `appcrane_set_secret` and `appcrane_grant_app_access`. Dokploy's official MCP package is write-capable too, and far larger (508 tools across 49 categories) — AppCrane's surface is smaller by choice, not by capability, and is paired with `appcrane_get_guide(topic="onboarding"|"operations")`, which serves the current playbook from the server so the agent reads the procedure instead of inferring it from a tool list. Komodo ships no MCP server of its own; neither its [repo](https://github.com/moghtech/komodo) nor its docs contain one, and the several that exist are third-party wrappers over its REST API.
 
 **3. The audit log tells an agent from a person.** Every row carries `actor_kind`, so "what did the agents do on this box last week" is one query. The others record a user identity — Komodo's trail records "who made it and when" ([intro](https://komo.do/docs/intro)) — but none of their docs describe separating automated actors from humans.
 
@@ -31,7 +31,7 @@ Versus vendor-hosted governed platforms (Replit, Lovable, Retool, Superblocks), 
 | | AppCrane | Coolify | Dokploy | Komodo | CapRover / Dokku |
 |---|---|---|---|---|---|
 | Multi-host / fleet deploys | **no — single host** | yes (experimental) | yes, remote servers | yes, agent per host | Swarm cluster (CapRover) |
-| Built-in MCP that can deploy | 57 tools, incl. rollback | 10 tools, **read-only** | 508 tools (official package), incl. rollback | community projects only | community projects only |
+| Built-in MCP that can deploy | 59 tools, incl. rollback | 10 tools, **read-only** | 508 tools (official package), incl. rollback | community projects only | community projects only |
 | SAML 2.0 | yes | not in changelog | Enterprise | not documented | no |
 | OIDC | yes | yes (v4.4-rc.1) | Enterprise | yes, generic OIDC | no |
 | SCIM provisioning | yes | not in changelog | Enterprise | not documented | no |
@@ -85,7 +85,7 @@ CapRover and Dokku are in one column because their access model is the same shap
 - **Encrypted env vars** (AES-256-GCM) — admin cannot read them by design
 - **Health checks** with auto-restart and email notifications
 - **Audit log** for every action
-- **MCP server** at `/api/mcp` exposing 57 `appcrane_*` tools — agents operate the platform without ever touching curl, gh, or shell
+- **MCP server** at `/api/mcp` exposing 59 `appcrane_*` tools — agents operate the platform without ever touching curl, gh, or shell
 
 ## Quick Start
 
@@ -138,32 +138,76 @@ treat [`install.sh`](install.sh) as the source of truth rather than a shortened 
 
 ### Deploy your first app
 
-The installer already created your admin user, so once DNS points at the box:
+**Apps are created and deployed by an agent over MCP, not from the CLI.** The
+installer ran `crane init`, which printed your `dhk_admin_*` key and wrote it to
+the CLI config (`crane config --show` to read it back; `crane regenerate-key` on
+the box if it is lost). Point Claude Code at the instance once:
 
 ```bash
-# Reachable at https://<your-domain>/myapp
-crane app create --name "MyApp" --slug myapp --repo https://github.com/yourorg/myapp
-crane deploy myapp --env sandbox
-
-# Give a teammate access (optional)
-crane user create --name sarah --email sarah@example.com
-crane app assign myapp --email sarah@example.com
+claude mcp add --transport http appcrane https://<your-domain>/api/mcp \
+  --header "X-API-Key: dhk_admin_xxxxxxxxxxxxx" \
+  --header "X-Github-Token: ghp_your_github_pat"
 ```
+
+Then ask for the app in a Claude Code session:
+
+> Onboard a new app on AppCrane. Start by calling `appcrane_get_guide` with
+> `topic="onboarding"` for the playbook. It is MyApp at slug `myapp`, from
+> https://github.com/yourorg/myapp. Deploy it to sandbox and give
+> sarah@example.com access.
+
+The agent calls `appcrane_create_app`, then `appcrane_deploy`, then
+`appcrane_grant_app_access` — and the app is reachable at
+`https://<your-domain>/myapp`. The dashboard's **Add Application** button hands
+you the same prompt, pre-filled with this instance's URL and your key.
+
+Prefer to drive it yourself? The dashboard at `https://<your-domain>` creates and
+deploys apps through the same routes, and the REST API underneath them
+(`POST /api/apps`, `POST /api/apps/:slug/deploy/:env`) takes the same
+`X-API-Key`. See [Deploying without GitHub](#deploying-without-github) for the
+repo-less path.
 
 ## CLI Reference
 
-### Server
+**`crane` is the platform operator's tool, not the app owner's.** It installs the
+box, terminates TLS, moves instance config, recovers a lost key, reloads Caddy and
+repairs drift — nine commands, listed in full below. App operations (create,
+deploy, roll back, promote, secrets, logs, access) are **not** in the CLI: the
+agent-facing surface was retired in v2.6.0 and lives on the MCP server and the
+REST API. See [App operations](#app-operations-mcp-or-rest) below.
+
+### Install and first run
 ```bash
-crane status                              # Server health: CPU, RAM, disk, apps
+crane init --email admin@example.com          # First run: create the admin directly in the DB
+                                              # (--name defaults to "admin"); prints the dhk_admin_* key
+crane setup-https --domain crane.example.com  # Install Caddy, configure HTTPS, set up the firewall
+crane update                                  # Pull latest code from GitHub and restart AppCrane
+```
+
+### Connection and identity
+```bash
+crane status                              # Server health and all apps
+crane me                                  # Show current user info
 crane config --show                       # Show CLI config
 crane config --url http://localhost:5001  # Set API URL
 crane config --key dhk_admin_xxx          # Set API key
+```
 
-# Recover a lost platform-owner API key (run on the box, direct DB).
-# Defaults to the platform_admin; override to target a specific account:
+### Recover a lost API key
+Run on the box — it writes the database directly. Defaults to the platform
+admin; override to target a specific account:
+```bash
 crane regenerate-key                      # Regenerate the platform owner's key
 crane regenerate-key --email you@ex.com   # ...for a specific user by email
 crane regenerate-key --user-id 1          # ...or by user id
+```
+
+### Proxy and drift repair
+```bash
+crane caddy --show                        # Show the current generated Caddyfile
+crane caddy --reload                      # Regenerate and reload Caddy config
+crane reconcile --dry-run                 # Preview orphaned filesystem apps
+crane reconcile                           # Register them into the DB and reload Caddy
 ```
 
 ### Migrate config between instances
@@ -182,26 +226,34 @@ the secrets during import; it is used transiently, never stored. One-way values
 (e.g. the SCIM token, stored as a hash) can't be migrated — the import lists them
 to regenerate on the target. Delete `config.json` afterward.
 
-### Apps (admin)
-```bash
-crane app list
-crane app create --name X --slug x --domain x.example.com --repo https://github.com/...
-crane app info myapp
-crane app delete myapp --confirm
-crane app assign myapp --email user@example.com
-```
+## App operations (MCP or REST)
 
-### Deploy (app user)
-```bash
-crane deploy myapp --env sandbox
-crane deploy myapp --env production
-crane deploy:history myapp --env prod
-crane deploy:log myapp --id 5
-crane rollback myapp --env production
-crane promote myapp                       # sandbox → production, zero downtime
-```
+Everything an app owner does runs over MCP — the primary door, documented in
+[MCP (for AI agents)](#mcp-for-ai-agents) — or over the REST routes underneath,
+which take the same `X-API-Key`. Both are audited identically and both enforce
+the same per-app roles.
 
-#### Deploying without GitHub
+| Operation | MCP tool | REST |
+|---|---|---|
+| Create an app | `appcrane_create_app` | `POST /api/apps` |
+| List / inspect | `appcrane_list_apps`, `appcrane_get_app` | `GET /api/apps`, `GET /api/apps/:slug` |
+| Deploy | `appcrane_deploy` | `POST /api/apps/:slug/deploy/:env` |
+| Deploy history / log | `appcrane_list_releases`, `appcrane_get_deploy_log` | `GET /api/apps/:slug/deployments/:env`, `…/:id/log` |
+| Roll back | `appcrane_rollback` | `POST /api/apps/:slug/rollback/:env` |
+| Promote sandbox → production | `appcrane_promote` | `POST /api/apps/:slug/promote` |
+| Env vars / secrets | `appcrane_set_secret`, `appcrane_get_secret`, `appcrane_reveal_secret` | `GET` / `PUT /api/apps/:slug/env/:env`, `DELETE …/:key` |
+| Grant access | `appcrane_grant_app_access` | `PUT /api/apps/:slug/users` |
+| Health | `appcrane_get_health` | `GET` / `PUT /api/apps/:slug/health/:env` |
+| Backups | `appcrane_run_backup_now`, `appcrane_get_backup_status` | `POST /api/apps/:slug/backup/:env`, `GET /api/apps/:slug/backups` |
+| Runtime logs | `appcrane_get_logs` | `GET /api/:slug/logs/:env` |
+| Audit log | — (read it in the dashboard) | `GET /api/audit`, `GET /api/:slug/audit` |
+
+Deploying to **production** needs the `deploy.production` permission on the app;
+sandbox is the default everywhere. A deploy that would destroy unmounted state
+refuses until it is passed `acknowledge_data_loss` — see the redeploy warning in
+[Features](#features).
+
+### Deploying without GitHub
 
 An app does not need a repo. Create it with `source_type: "upload"` and ship
 releases as bundles (`.zip`, `.tar.gz`, `.tgz`):
@@ -225,28 +277,9 @@ steps: `POST /api/files/staged` to upload the bytes, then
 still works when a repo-based path is broken — an expired service-account PAT
 returns 401 on every managed-repo write, and this one never contacts GitHub.
 
-### Env Vars (app user — admin cannot access)
-```bash
-crane env set myapp --env sandbox DATABASE_URL=postgres://... API_KEY=sk-test
-crane env list myapp --env production
-crane env list myapp --env sandbox --reveal
-crane env delete myapp API_KEY --env sandbox
-```
-
-### Health, Webhooks, Backups
-```bash
-crane health status myapp
-crane health config myapp --env prod --endpoint /api/health --interval 30
-crane webhook myapp --auto-sandbox on
-crane backup create myapp --env prod
-crane backup list myapp
-crane logs myapp --env production
-crane audit --app myapp
-```
-
 ## MCP (for AI agents)
 
-AppCrane is MCP-first. One `claude mcp add` and the agent gets 57
+AppCrane is MCP-first. One `claude mcp add` and the agent gets 59
 `appcrane_*` tools — list apps, deploy, roll back, set/get secrets, read
 logs, manage access, scan for vulnerable dependencies, the lot. Tool
 names are AWS-aligned (`stage`, `set_secret`/`get_secret`, `cp`).
