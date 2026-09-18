@@ -18,6 +18,59 @@ const execFileAsync = promisify(execFile);
 const CONTAINER_PORT = CONTROL_PLANE_PORT;
 const APPCRANE_LABEL = 'appcrane=true';
 
+/**
+ * The environment every image build is spawned with (v2.78.2).
+ *
+ * Until now AppCrane set nothing, so the builder was whatever the host's docker
+ * CLI happened to default to: BuildKit on a modern Docker Desktop, the classic
+ * builder on an older Linux daemon. Two operators running the same AppCrane
+ * release got two different builders, two different build-log formats and two
+ * different build times, and neither of them chose it. That is an inherited
+ * default masquerading as a decision.
+ *
+ * The decision is BuildKit ON. Measured on Docker 29.6.1 / buildx v0.35.0
+ * (macOS, Apple silicon) against a ~126 MB Node image — Vite + React + express,
+ * `npm ci` over a 9-dependency lockfile, then `vite build` — three runs each:
+ *
+ *              cold (no build cache)              warm (unchanged context)
+ *   BUILDKIT=1 13.95 / 22.31 / 19.66s  (~18.6s)   0.35 / 0.37 / 0.31s
+ *   BUILDKIT=0 28.13 / 33.34 / 25.41s  (~29.0s)   0.20 / 0.38 / 0.18s
+ *
+ *   image size 126,402,975 vs 126,402,527 bytes — the same image either way.
+ *
+ * So: ~36% off a cold build, no size cost, and a warm rebuild is sub-second on
+ * both (the ~0.1s the classic builder wins there is below this measurement's
+ * own noise). The tiebreaker is not the stopwatch anyway — Docker 29.6.1 prints
+ * "DEPRECATED: The legacy builder is deprecated and will be removed in a future
+ * release" on every DOCKER_BUILDKIT=0 build. Pinning AppCrane to a builder
+ * Docker has announced the removal of would be choosing the option with an
+ * expiry date.
+ *
+ * Safe to switch because nothing reads build output for meaning: docker.js
+ * streams stdout and stderr into the deploy log verbatim and keeps the tail
+ * only for the failure message. BuildKit's `#3 [internal] load .dockerignore`
+ * progress lines are cosmetically different from the classic builder's
+ * `Step 3/20 : WORKDIR /app`, and that is the whole of the difference.
+ * test/deploy-critical-path.test.js pins that no parsing creeps back in.
+ *
+ * APPCRANE_DOCKER_BUILDKIT on the AppCrane host overrides the value verbatim —
+ * set it to '0' to go back to the classic builder while it still exists, for a
+ * daemon where BuildKit misbehaves.
+ *
+ * NOT done here: `--mount=type=cache` on the `npm ci` layer, which is where the
+ * rest of the cold-build time is. It would persist ~/.npm across builds so a
+ * dependency change re-downloads only the diff instead of the whole tree —
+ * worth several seconds of the ~18.6s above on every deploy whose lockfile
+ * moved. It needs BuildKit (which is now guaranteed) AND a
+ * `# syntax=docker/dockerfile:1` line plus the mount flag in the generated
+ * Dockerfile, i.e. a change in services/dockerfileGen.js and its PHP twin, so
+ * it is a separate piece of work.
+ */
+export function dockerBuildEnv() {
+  const override = process.env.APPCRANE_DOCKER_BUILDKIT;
+  return { ...process.env, DOCKER_BUILDKIT: override === undefined ? '1' : override };
+}
+
 // v2.42.1 SECURITY. Every app container used to be started with no --network at
 // all, which put all of them on Docker's default `bridge`. Containers there can
 // route to each other freely, so any one app could open
@@ -226,7 +279,8 @@ export async function buildImage({ slug, env, contextDir, commitHash, appBasePat
   args.push(contextDir);
 
   return new Promise((resolve, reject) => {
-    const child = spawn('docker', args, { stdio: 'pipe' });
+    // Explicitly chosen, never inherited — see dockerBuildEnv().
+    const child = spawn('docker', args, { stdio: 'pipe', env: dockerBuildEnv() });
     let outputBuf = '';
 
     const emit = (line) => { if (line.trim()) onLog?.(line); };

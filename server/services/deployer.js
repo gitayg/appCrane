@@ -940,6 +940,11 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
 
   // Hoisted so the failure handler can remove this attempt's checkout.
   let releaseDir;
+  // The in-flight supply-chain verification (services/supplyChainGate.js).
+  // Started right after the clone, awaited before anything runs a container.
+  // Hoisted so the failure handler can still flush its deploy-log lines when
+  // the BUILD is what failed. Stays null for source types that never clone.
+  let supplyChainGate = null;
   try {
     // Trim any accumulated release backlog BEFORE cloning, so an app whose disk
     // filled from repeated failed deploys can self-heal on its next attempt
@@ -1272,14 +1277,20 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       // branch. Mismatch = refuse deploy. supplyChain.authForApp already
       // handles both 'github' (per-app PAT) and 'managed' (service token),
       // so no change needed here for the managed addition.
-      try {
-        const { verifyCommitSha } = await import('./supplyChain.js');
-        await verifyCommitSha(app, releaseDir, app.branch || 'main', appendLog);
-      } catch (e) {
-        // Genuine mismatch — abort the deploy. The verifier already
-        // formatted a clear error; just rethrow.
-        throw e;
-      }
+      //
+      // v2.78.2: STARTED here, AWAITED at the container gate ~300 lines below.
+      // It is a GitHub round trip (up to 3 attempts, 8s timeout each, 4.5s of
+      // backoff between them) and nothing in the build reads its answer — only
+      // the decision to start a container does. Awaiting it here made every
+      // deploy pay for it before `docker build` was even spawned. The failure
+      // behaviour is unchanged: gate.settle() rethrows the verifier's own Error
+      // before preflightEntryCheck, dockerStop or dockerStart, so a failed
+      // verification still leaves the previous container running and nothing
+      // new started. See services/supplyChainGate.js.
+      const { startCommitVerification } = await import('./supplyChainGate.js');
+      supplyChainGate = startCommitVerification({
+        app, releaseDir, branch: app.branch || 'main', appendLog,
+      });
     } else if (app.source_type === 'upload') {
       // v2.53.2: redeploy an upload app from the release it is already running.
       //
@@ -1586,6 +1597,23 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       appendLog(`Image ready: ${image}`);
     }
     }
+
+    // v2.78.2: THE CONTAINER GATE. The supply-chain verification started right
+    // after the clone and has been running alongside everything since — the
+    // manifest read, the dist check, the Dockerfile generation and the build.
+    // This is the first point where its answer is needed, and it is deliberately
+    // ahead of all three things that run a container:
+    //
+    //   preflightEntryCheck  `docker run --rm` against the built image
+    //   dockerStop           tears down the version currently serving traffic
+    //   dockerStart          starts the new one
+    //
+    // settle() rethrows the verifier's error unchanged, so a mismatch — or an
+    // unanswerable check under the default fail-closed policy — aborts with the
+    // same message, the same 'failed' deployment status and the same audit trail
+    // it produced when this was awaited at the clone. Nothing has been stopped
+    // and nothing has been started at this point.
+    if (supplyChainGate) await supplyChainGate.settle();
 
     // v2.6.16: pre-flight entry-exists check. Validate that the entry
     // declared in deployhub.json actually resolves in the built image
@@ -2077,6 +2105,11 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     return { success: true, version: manifest.version };
 
   } catch (error) {
+    // The verification may still be in flight, or may have finished while the
+    // BUILD was the thing that failed. Either way its deploy-log lines belong in
+    // the log, in front of the failure, exactly where they appeared when it was
+    // awaited at the clone. flush() never throws, so it cannot mask `error`.
+    if (supplyChainGate) await supplyChainGate.flush();
     appendLog(`DEPLOY FAILED: ${error.message}`);
 
     // A failed deploy's checkout is dead weight — the live `current` symlink

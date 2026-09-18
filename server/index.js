@@ -1595,6 +1595,29 @@ app.listen(PORT, HOST, async () => {
     log.error('Backup scheduler failed to start: ' + e.message);
   }
 
+  // v2.79.0: nightly LOCAL backup of deployhub.db + .env — ON BY DEFAULT.
+  // The off-site schedule above does nothing until someone enters credentials,
+  // and on a measured production instance nobody had: no copy of the database
+  // existed anywhere. This one needs no destination and no decision, and it
+  // covers the failure that needs neither — the single SQLite file being
+  // corrupted, deleted or replaced by a bad restore. It is not a substitute for
+  // off-site, which is why every status surface keeps saying so.
+  try {
+    const { startLocalBackupScheduler } = await import('./services/localBackup.js');
+    startLocalBackupScheduler();
+    // AppCrane has no setup wizard — boot IS first run. So the state gets said
+    // once, in the log every new install reads, rather than waiting for someone
+    // to open Settings → Backup. One line per boot, not a standing banner: the
+    // fix is a deliberate decision about where secrets may be copied to, and a
+    // permanent nag on every page trains admins to ignore the one alert that
+    // matters.
+    const { offSiteState } = await import('./services/backupScheduler.js');
+    const offSite = offSiteState();
+    if (offSite.notice) log.warn(`[backup] ${offSite.notice} Configure a destination in Settings → Backup.`);
+  } catch (e) {
+    log.error('Local backup scheduler failed to start: ' + e.message);
+  }
+
   // v2.52.0: daily dependency scan of every hosted app, then the digest email.
   // Report-only — it never blocks a deploy — and the daily pass is the half
   // that matters: it catches an advisory published for code that was already

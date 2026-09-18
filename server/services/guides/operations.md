@@ -227,6 +227,17 @@ Owners get a daily digest for their own apps; platform admins get the fleet.
 `appcrane_scan_report` answers the same question on demand and is scoped to what
 the caller can see.
 
+**Read `coverage` before the findings.** The report opens with the arithmetic —
+`COVERAGE: 30 of 99 app/stage rows have a usable scan result (30%) — 69 do not:
+67 skipped, 2 never scanned` — because the one-word verdict cannot carry it.
+`assurance` is still `none` / `partial` / `complete` and still means what it
+always did, but `partial` is true of 30 of 99 and of 98 of 99 alike: it is not a
+synonym for "mostly covered", and relaying it without the counts is how a fleet
+that is under a third scanned gets reported as broadly covered. `skip_reasons`
+and `error_reasons` name WHY rows are uncovered, counted and most-common first,
+from the reason each row recorded — quote them instead of "67 skipped", because
+most skips share one cause and it is usually fixable.
+
 Fast deploy failure (<5s) almost always means the build never started.
 **Always start with `appcrane_get_deploy_log` for fast failures**, not
 `appcrane_get_logs`.
@@ -417,16 +428,32 @@ Off-site backup has existed since v2.21.9 and is a no-op until a bucket and
 credentials are entered, which made it easy to believe there was no backup
 feature at all. These make the state answerable without opening Settings:
 
+**Two schedules, and they answer different questions.** The LOCAL one is on by
+default: every night it writes `deployhub.db` and `.env` to
+`DATA_DIR/backups/local` and keeps the newest seven. It covers a corrupted,
+deleted or badly-restored database — not app icons, per-app `/data`, declared
+volumes, repositories or images, and not the loss of the host, because it sits
+on the same disk. The OFF-SITE one is the only thing that survives the host, and
+it uploads nothing until someone configures it. So `appcrane_get_backup_status`
+reports `off_site.has_off_site_copy` first, and when it is false every surface
+says **"No off-site copy — everything AppCrane knows lives on this host."**
+Relay that sentence; do not summarise it away, and never present the local
+archive as the copy. A stored bucket with the schedule off, and an enabled
+schedule that has never finished, are both `has_off_site_copy: false`.
+
 | Tool | What it does |
 |---|---|
 | `appcrane_get_backup_status` | Is off-site backup configured, enabled, and when did it last actually run? Never returns the secret |
 | `appcrane_set_backup_config` | Set bucket / region / prefix / endpoint / key / schedule. Refuses to enable an incomplete config |
 | `appcrane_run_backup_now` | Run it immediately to prove the credentials work, rather than finding out at 03:00 |
 
-The backup covers `deployhub.db`, `.env`, icons and appdata — a copy of every
-secret AppCrane holds. Treat the destination bucket accordingly; that is why all
-three are platform-admin only, and why the secret access key is write-only and
-better entered in Settings → Backup than passed through an agent.
+The off-site upload covers `deployhub.db`, `.env`, icons and appdata; the local
+nightly archive covers `deployhub.db` and `.env` only. Either one is a copy of
+every secret AppCrane holds. Treat the destination bucket accordingly — and the
+local archives too, which is why `GET/PUT /api/settings/backup/local` and
+`POST /api/settings/backup/local/run` are platform-admin only, like all three
+tools above, and why the secret access key is write-only and better entered in
+Settings → Backup than passed through an agent.
 
 ### App management
 

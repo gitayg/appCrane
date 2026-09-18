@@ -432,14 +432,23 @@ router.get('/images/verify', requireAuth, requirePlatformAdmin, async (req, res)
 });
 
 // ── Scheduled off-site (S3) backup config — platform_admin only (v2.21.9) ──
+//
+// v2.79.0: the payload carries `off_site` beside the raw config. The fields
+// were always enough to WORK OUT that nothing is being uploaded — bucket empty,
+// last_run null — and the dashboard rendered neither, so the honest state was
+// derivable and invisible. It is now a sentence the API states, so the SPA
+// renders the same words the MCP status tool returns instead of composing its
+// own. The existing flat fields are untouched: they are what the Settings form
+// binds to.
 router.get('/backup/s3', requireAuth, requirePlatformAdmin, async (_req, res) => {
-  const { getBackupConfig } = await import('../services/backupScheduler.js');
-  res.json(getBackupConfig());
+  const { getBackupConfig, offSiteState } = await import('../services/backupScheduler.js');
+  res.json({ ...getBackupConfig(), off_site: offSiteState() });
 });
 
 router.put('/backup/s3', requireAuth, requirePlatformAdmin, async (req, res) => {
-  const { setBackupConfig } = await import('../services/backupScheduler.js');
-  res.json(setBackupConfig(req.body || {}, req.user.id));
+  const { setBackupConfig, offSiteState } = await import('../services/backupScheduler.js');
+  const cfg = setBackupConfig(req.body || {}, req.user.id);
+  res.json({ ...cfg, off_site: offSiteState() });
 });
 
 router.post('/backup/s3/run', requireAuth, requirePlatformAdmin, async (_req, res) => {
@@ -447,6 +456,35 @@ router.post('/backup/s3/run', requireAuth, requirePlatformAdmin, async (_req, re
   try {
     const r = await runS3Backup();
     res.json({ ok: true, ...r });
+  } catch (e) {
+    res.json({ ok: false, error: e.message });
+  }
+});
+
+// ── Scheduled LOCAL backup — platform_admin only (v2.79.0) ─────────────────
+//
+// On by default, unlike the off-site schedule, which is a no-op until someone
+// enters credentials. Same gate as the off-site config: a local archive holds
+// the ENCRYPTION_KEY and every encrypted secret, so listing and triggering it
+// is not an app-owner operation.
+router.get('/backup/local', requireAuth, requirePlatformAdmin, async (_req, res) => {
+  const { getLocalBackupConfig, listLocalBackups } = await import('../services/localBackup.js');
+  const { offSiteState } = await import('../services/backupScheduler.js');
+  res.json({ ...getLocalBackupConfig(), archives: await listLocalBackups(), off_site: offSiteState() });
+});
+
+router.put('/backup/local', requireAuth, requirePlatformAdmin, async (req, res) => {
+  const { setLocalBackupConfig, listLocalBackups } = await import('../services/localBackup.js');
+  const { offSiteState } = await import('../services/backupScheduler.js');
+  const cfg = setLocalBackupConfig(req.body || {}, req.user.id);
+  res.json({ ...cfg, archives: await listLocalBackups(), off_site: offSiteState() });
+});
+
+router.post('/backup/local/run', requireAuth, requirePlatformAdmin, async (_req, res) => {
+  const { runLocalBackup, listLocalBackups } = await import('../services/localBackup.js');
+  try {
+    const r = await runLocalBackup();
+    res.json({ ok: true, ...r, archives: await listLocalBackups() });
   } catch (e) {
     res.json({ ok: false, error: e.message });
   }

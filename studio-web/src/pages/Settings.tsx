@@ -1037,11 +1037,47 @@ function BackupTab() {
   const fileRef = useRef<HTMLInputElement>(null)
 
   // v2.21.9: scheduled off-site (S3) backup config.
-  type S3Cfg = { enabled?: boolean; bucket?: string; region?: string; prefix?: string; endpoint?: string; access_key_id?: string; has_secret?: boolean; hour?: number; last_run?: string | null; last_error?: string | null }
+  // v2.79.0: `off_site` travels with it — the honest state in the server's own
+  // words, so this tab and the MCP status tool cannot drift into saying two
+  // different things about the same host.
+  type OffSite = { configured?: boolean; has_off_site_copy?: boolean; notice?: string | null; missing?: string[] }
+  type S3Cfg = { enabled?: boolean; bucket?: string; region?: string; prefix?: string; endpoint?: string; access_key_id?: string; has_secret?: boolean; hour?: number; last_run?: string | null; last_error?: string | null; off_site?: OffSite }
   const [s3, setS3] = useState<S3Cfg>({})
   const [s3Secret, setS3Secret] = useState('')
   const [s3Busy, setS3Busy] = useState(false)
   useEffect(() => { adminApi.get<S3Cfg>('/api/settings/backup/s3').then(setS3).catch(() => {}) }, [])
+
+  // v2.79.0: scheduled LOCAL backup — on by default, db + .env only.
+  type LocalArchive = { file: string; bytes: number; modified_at: string }
+  type LocalCfg = {
+    enabled?: boolean; keep?: number; hour?: number; last_run?: string | null; last_error?: string | null
+    last_file?: string | null; last_bytes?: number | null; directory?: string
+    contents?: string[]; excludes?: string[]; archives?: LocalArchive[]
+  }
+  const [local, setLocal] = useState<LocalCfg>({})
+  const [localBusy, setLocalBusy] = useState(false)
+  const loadLocal = () => adminApi.get<LocalCfg>('/api/settings/backup/local').then(setLocal).catch(() => {})
+  useEffect(() => { loadLocal() }, [])
+
+  async function saveLocal(patch: LocalCfg) {
+    setLocalBusy(true); setMsg(null)
+    try {
+      const next = await adminApi.put<LocalCfg>('/api/settings/backup/local', patch)
+      setLocal(next)
+      setMsg({ ok: true, text: 'Local backup schedule saved.' })
+    } catch (e) { setMsg({ ok: false, text: (e as Error).message }) }
+    finally { setLocalBusy(false) }
+  }
+  async function runLocalNow() {
+    setLocalBusy(true); setMsg(null)
+    try {
+      const r = await adminApi.post<{ ok: boolean; file?: string; bytes?: number; error?: string }>('/api/settings/backup/local/run', {})
+      if (!r.ok) throw new Error(r.error || 'Local backup failed')
+      setMsg({ ok: true, text: `Wrote ${r.file} (${Math.round((r.bytes || 0) / 1024)} KB).` })
+      loadLocal()
+    } catch (e) { setMsg({ ok: false, text: (e as Error).message }) }
+    finally { setLocalBusy(false) }
+  }
 
   async function saveS3() {
     setS3Busy(true); setMsg(null)
@@ -1110,6 +1146,19 @@ function BackupTab() {
   return (
     <div className="settings-section">
       <h2>Backup &amp; Restore</h2>
+      {/* The honest state, first thing on the tab and in the server's own
+          words. It used to be derivable from an empty bucket field and a blank
+          "Last off-site backup" line at the bottom of the page — which is to
+          say it was invisible. */}
+      {s3.off_site?.notice && (
+        <p style={{
+          margin: '8px 0 14px', padding: '10px 12px', borderRadius: 6,
+          border: '1px solid var(--red)', background: 'color-mix(in srgb, var(--red) 12%, transparent)',
+          fontWeight: 600,
+        }}>
+          {s3.off_site.notice}
+        </p>
+      )}
       <p className="settings-hint">
         Package the whole AppCrane setup into one zip: the database (apps, users,
         settings, encrypted env vars, roles), the <code>.env</code> (including the
@@ -1142,6 +1191,35 @@ function BackupTab() {
         onClick={() => fileRef.current?.click()} disabled={importing}>
         {importing ? 'Importing…' : '⬆ Import backup (replaces config + restarts)'}
       </button>
+
+      <h3 style={{ marginTop: 24 }}>Scheduled local backup (on by default)</h3>
+      <p className="settings-hint">
+        Every night AppCrane writes a copy of <code>deployhub.db</code> and <code>.env</code> to{' '}
+        <code>{local.directory || 'DATA_DIR/backups/local'}</code> and keeps the newest {local.keep ?? 7}.
+        That covers a corrupted, deleted or badly-restored database — <b>not</b> the loss of this host,
+        and <b>not</b> app icons, per-app <code>/data</code>, declared volumes, managed-app repositories
+        or container images. Those are in the full export above and the off-site upload below.
+      </p>
+      <label style={{ display: 'block', margin: '6px 0' }}>
+        <input type="checkbox" checked={local.enabled !== false}
+          onChange={e => saveLocal({ enabled: e.target.checked })} />
+        {' '}Keep a nightly local copy of the database
+      </label>
+      <div style={{ display: 'grid', gridTemplateColumns: '110px 1fr', gap: 8, maxWidth: 540, alignItems: 'center', margin: '8px 0' }}>
+        <label>Keep</label><input className="editable" type="number" min={1} max={60} value={local.keep ?? 7}
+          onChange={e => setLocal(l => ({ ...l, keep: Number(e.target.value) }))}
+          onBlur={e => saveLocal({ keep: Number(e.target.value) })} style={{ width: 90 }} />
+        <label>Hour (0–23)</label><input className="editable" type="number" min={0} max={23} value={local.hour ?? 4}
+          onChange={e => setLocal(l => ({ ...l, hour: Number(e.target.value) }))}
+          onBlur={e => saveLocal({ hour: Number(e.target.value) })} style={{ width: 90 }} />
+      </div>
+      <button className="btn" onClick={runLocalNow} disabled={localBusy}>{localBusy ? '…' : 'Back up locally now'}</button>
+      <p className="settings-hint" style={{ marginTop: 6 }}>
+        {local.last_run
+          ? `Last local backup: ${new Date(local.last_run).toLocaleString()}${local.last_file ? ` (${local.last_file})` : ''} — ${local.archives?.length ?? 0} archive(s) on disk.`
+          : 'No local backup has been written yet.'}
+      </p>
+      {local.last_error && <p style={{ color: 'var(--red)', fontSize: '.8rem' }}>Last error: {local.last_error}</p>}
 
       <h3 style={{ marginTop: 24 }}>Scheduled off-site backup (S3)</h3>
       <p className="settings-hint">

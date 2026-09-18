@@ -122,7 +122,10 @@ test('an app whose newest scan errored reads as NOT SCANNED, even after an older
     'the newest production row errored, so production is unknown — an older clean scan is not current evidence');
   assert.equal(r.scanned, false);
   assert.equal(r.assurance, 'partial');
-  assert.match(r.summary, /NOT SCANNED: production \(error\)/);
+  // v2.79.0: the status word now carries the row's own recorded reason with it.
+  // "error" sends the reader somewhere else to find out what happened; the
+  // sentence the scanner already wrote is the answer.
+  assert.match(r.summary, /NOT SCANNED: production \(error: OSV unreachable: fetch failed\)/);
   assert.match(r.summary, /must not be reported as a clean result/i);
 });
 

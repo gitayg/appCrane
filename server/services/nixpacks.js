@@ -13,6 +13,7 @@
  */
 import { spawn, execFile } from 'child_process';
 import { promisify } from 'util';
+import { dockerBuildEnv } from './docker.js';
 
 const execFileP = promisify(execFile);
 
@@ -31,7 +32,10 @@ export function nixpacksBuild({ releaseDir, tag, slug, env, onLog }) {
       'build', releaseDir, '--name', tag,
       '--label', 'appcrane=true', '--label', `slug=${slug}`, '--label', `env=${env}`,
     ];
-    const child = spawn('nixpacks', args, { stdio: 'pipe' });
+    // nixpacks shells out to `docker build`, so it inherits the builder choice
+    // from its own environment. Without this, the two build paths on one host
+    // could use two different builders — see docker.js:dockerBuildEnv().
+    const child = spawn('nixpacks', args, { stdio: 'pipe', env: dockerBuildEnv() });
     let buf = '';
     const emit = (chunk) => {
       buf += chunk;

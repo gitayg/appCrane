@@ -19,6 +19,7 @@ import { redactAuditArgs } from '../utils/auditRedact.js';
 import { usesLocalRepo } from './managedRepo.js';
 import { refuseEnvFilePaths, redactEnvFileContentInArgs } from './envFilePushGuard.js';
 import { assertFinding } from './scanShapes.js';
+import { coverageOf, coverageSentence, assuranceNote, reasonCounts, isScannedRow, normalizeReason } from './scanCoverage.js';
 import { resolveVisibility } from '../utils/appVisibility.js';
 import { DEFAULT_IMAGE_RETENTION } from './imageRetention.js';
 import { mkdirSync } from 'fs';
@@ -4029,7 +4030,7 @@ const TOOLS = [
   {
     name: 'appcrane_get_backup_status',
     description:
-      'Is off-site backup actually working? Reports the scheduled S3/R2 backup config together with a verdict — `configured`, `enabled`, `healthy`, when it last ran and what is missing — so "are we backed up" is one call rather than an inference from raw settings. The backup covers the SQLite database (apps, users, settings, encrypted env vars), .env, icons and appdata, uploaded nightly as one zip. NEVER returns the secret access key; `has_secret` reports only whether one is stored. Read the `summary` first: a config can be fully populated and still not be running (enabled=false), and it can be enabled and failing every night (see last_error). PLATFORM ADMIN ONLY.',
+      'Is backup actually working? Reports BOTH schedules — the off-site S3/R2 upload and the local nightly archive — with a verdict for each, so "are we backed up" is one call rather than an inference from raw settings. READ `off_site.has_off_site_copy` BEFORE ANY OTHER FIELD. It is true only when a destination is configured AND an upload has actually completed; a stored bucket with the schedule off, and a schedule that is on and has never finished, both produce NO copy off this host and both report false. When it is false, `off_site.notice` says so in words ("No off-site copy — everything AppCrane knows lives on this host.") and that sentence must be relayed, not summarised away: a local archive is not a substitute, because losing the host loses both copies. The LOCAL schedule (`local`) is ON BY DEFAULT and writes deployhub.db + .env ONLY, to DATA_DIR/backups/local, keeping `local.keep` copies — it covers a corrupted, deleted or badly-restored database, and nothing else: NOT app icons, NOT per-app /data, NOT declared volumes, NOT managed-app repositories, NOT images. The off-site upload covers the database, .env, icons and appdata. NEVER returns the secret access key; `has_secret` reports only whether one is stored. A config can be fully populated and still not be running (enabled=false), and it can be enabled and failing every night (see last_error). PLATFORM ADMIN ONLY.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     requiredRole: 'admin',
     readOnly: true,
@@ -4037,8 +4038,12 @@ const TOOLS = [
       if (user.role !== 'platform_admin') {
         throw new Error('Only platform admins can read the backup configuration — it names the destination every platform secret is copied to.');
       }
-      const { getBackupConfig } = await import('./backupScheduler.js');
+      const { getBackupConfig, offSiteState } = await import('./backupScheduler.js');
+      const { getLocalBackupConfig, listLocalBackups } = await import('./localBackup.js');
       const cfg = getBackupConfig();
+      const offSite = offSiteState();
+      const local = getLocalBackupConfig();
+      const localArchives = await listLocalBackups();
       const configured = !!(cfg.bucket && cfg.access_key_id && cfg.has_secret);
 
       // Staleness is measured, not assumed from `enabled`. A nightly job that
@@ -4072,14 +4077,32 @@ const TOOLS = [
         summary = `Healthy — last uploaded ${hoursSince}h ago to s3://${cfg.bucket}/${cfg.prefix || ''}`;
       }
 
+      // The off-site verdict above is about the SCHEDULE. This sentence is
+      // about the FACT, and it goes first: an agent that reads only the head of
+      // the summary must not come away believing a copy exists somewhere else.
+      // The local schedule is named in the same breath so the reply cannot be
+      // read as "there is no backup at all" either — that misreading is what
+      // put "no SQLite backup exists" in an incident review while the feature
+      // sat there switched off.
+      const localLine = local.enabled
+        ? (local.last_run
+          ? `Local nightly archive: ON, last written ${local.last_run} (${localArchives.length} kept in ${local.directory}).`
+          : `Local nightly archive: ON but nothing written yet${local.last_error ? ` — last attempt failed: ${local.last_error}` : ''} (runs at ${String(local.hour).padStart(2, '0')}:00).`)
+        : 'Local nightly archive: OFF — this host keeps no scheduled copy of its own database either.';
+      const localScope = 'A local archive holds deployhub.db and .env only, on this same host: it covers a corrupted or deleted database, never the loss of the host.';
+      summary = [offSite.notice, summary, localLine, localScope].filter(Boolean).join(' ');
+
       return {
         ...cfg,
         configured,
         healthy,
         missing,
         hours_since_last_run: hoursSince,
+        off_site: offSite,
+        local: { ...local, archive_count: localArchives.length, archives: localArchives.slice(0, 10) },
         summary,
         covers: ['deployhub.db (apps, users, settings, encrypted env vars)', '.env', 'icons', 'appdata'],
+        local_covers: ['deployhub.db (apps, users, settings, encrypted env vars)', '.env'],
       };
     },
   },
@@ -4265,7 +4288,7 @@ const TOOLS = [
   {
     name: 'appcrane_scan_report',
     description:
-      'Which hosted apps have known-vulnerable dependencies? Reports the recorded CVE scan state for the whole fleet, or for one app with `slug`. REPORT ONLY: this scan has never blocked a deploy and cannot — the apps belong to other teams who did not choose the control, so findings are recorded and mailed and the deploy proceeds either way. Never relay a finding as a deploy failure. READ `status` BEFORE READING COUNTS. It is four-valued: `ok` (scanned, nothing found) and `findings` (scanned, something found) are results; `skipped` (no lockfile AppCrane can read) and `error` (OSV unreachable, unparseable lockfile) mean the app was NOT SCANNED, as does having no scan row at all. Those two carry no findings for the same reason an unopened box is empty, and an agent that reports such an app as clean has stated the opposite of what is known — "no vulnerabilities found" is only ever true of an app whose status is `ok`. `assurance` (none / partial / complete), `unscanned_count` and `unscanned_by_status` say how much of the fleet the numbers actually cover; read them before the findings. EVERY FINDING CARRIES `ecosystem` AND `fixed` beside `name`, `version` and `ids`. `fixed` is the version that resolves those advisories, or null when OSV PUBLISHED NO FIXED VERSION — a null means there is nothing to upgrade to yet, NEVER that no fix is needed and never that AppCrane did not look, so a null-`fixed` finding is not a harmless one. `manifests_scanned` says WHICH manifests were actually read, because coverage is per manifest and not per app: one scan row reads ONE manifest — the ecosystem named on it — so an app whose Go service was never read appears here beside its scanned npm frontend with an empty findings list, and that emptiness is evidence about the frontend only. Scans run at deploy AND daily, and the daily run is the one that matters, because it catches an advisory published against code that was already deployed and has not changed since. ADMIN ONLY.',
+      'Which hosted apps have known-vulnerable dependencies? Reports the recorded CVE scan state for the whole fleet, or for one app with `slug`. REPORT ONLY: this scan has never blocked a deploy and cannot — the apps belong to other teams who did not choose the control, so findings are recorded and mailed and the deploy proceeds either way. Never relay a finding as a deploy failure. READ `status` BEFORE READING COUNTS. It is four-valued: `ok` (scanned, nothing found) and `findings` (scanned, something found) are results; `skipped` (no lockfile AppCrane can read) and `error` (OSV unreachable, unparseable lockfile) mean the app was NOT SCANNED, as does having no scan row at all. Those two carry no findings for the same reason an unopened box is empty, and an agent that reports such an app as clean has stated the opposite of what is known — "no vulnerabilities found" is only ever true of an app whose status is `ok`. READ `coverage` BEFORE THE FINDINGS AND BEFORE `assurance`. It is the explicit arithmetic — `{ rows, covered, not_covered, skipped, errored, never_scanned, percent }` — where `percent` is covered/rows floored, and it is the only field that says how much of the fleet these numbers describe. `assurance` is still none / partial / complete and still means exactly that, but `partial` spans 1% to 99%: 30 covered rows out of 99 is `partial` and so is 98 out of 99, so NEVER relay `partial` as "mostly covered" or relay it without the counts beside it (`assurance_note` states this too). `skip_reasons` and `error_reasons` name WHY rows are uncovered, counted and most-common first, from the reason each row recorded — quote them instead of reporting a bare "67 skipped". `unscanned_count` and `unscanned_by_status` are unchanged. EVERY FINDING CARRIES `ecosystem` AND `fixed` beside `name`, `version` and `ids`. `fixed` is the version that resolves those advisories, or null when OSV PUBLISHED NO FIXED VERSION — a null means there is nothing to upgrade to yet, NEVER that no fix is needed and never that AppCrane did not look, so a null-`fixed` finding is not a harmless one. `manifests_scanned` says WHICH manifests were actually read, because coverage is per manifest and not per app: one scan row reads ONE manifest — the ecosystem named on it — so an app whose Go service was never read appears here beside its scanned npm frontend with an empty findings list, and that emptiness is evidence about the frontend only. Scans run at deploy AND daily, and the daily run is the one that matters, because it catches an advisory published against code that was already deployed and has not changed since. ADMIN ONLY.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -4284,8 +4307,10 @@ const TOOLS = [
       // A scan that COMPLETED is the only thing that counts as coverage, and
       // finding something is a completed scan. Everything else — skipped,
       // error, no row — goes in one bucket, because the distinction this tool
-      // exists to hold open is scanned vs not, not which flavour of not.
-      const isScanned = (r) => r?.status === 'ok' || r?.status === 'findings';
+      // exists to hold open is scanned vs not, not which flavour of not. The
+      // definition lives in scanCoverage.js so the counts, the percentage and
+      // this branch cannot disagree about what "covered" means.
+      const isScanned = isScannedRow;
       const REPORT_ONLY = 'Report-only: a finding here has never blocked and cannot block a deploy.';
 
       if (args.slug) {
@@ -4302,19 +4327,30 @@ const TOOLS = [
         const unscanned = stages.filter((e) => !isScanned(scans[e]));
         const vulnerable = stages.filter((e) => scans[e]?.status === 'findings');
         const readManifests = stages.filter((e) => isScanned(scans[e]) && scans[e].manifest);
+        const coverage = coverageOf(stages.map((e) => scans[e] ?? {}));
+        // The stage's own recorded reason, not just its status word. "skipped"
+        // alone sends the reader to the dashboard; "no recognised manifest in
+        // the live release" is the whole answer.
+        const reasons = Object.fromEntries(unscanned.map((e) => [
+          e, scans[e]?.status ? normalizeReason(scans[e].error) : 'no scan on record',
+        ]));
         return {
           app: app.slug,
           scans,
           scanned: unscanned.length === 0,
           unscanned,
+          unscanned_reasons: reasons,
+          coverage,
           vulnerable_stages: vulnerable,
           manifests_scanned: [...new Set(readManifests.map((e) => scans[e].manifest))],
           manifests_by_stage: Object.fromEntries(stages.map((e) => [e, isScanned(scans[e]) ? scans[e].manifest : null])),
           assurance: unscanned.length === 2 ? 'none' : unscanned.length ? 'partial' : 'complete',
+          assurance_note: assuranceNote(coverage),
           enforcement: 'report-only',
           summary: [
+            coverageSentence(coverage, 'stage'),
             unscanned.length
-              ? `NOT SCANNED: ${unscanned.map((e) => `${e} (${scans[e]?.status ?? 'no scan on record'})`).join(', ')}. ` +
+              ? `NOT SCANNED: ${unscanned.map((e) => `${e} (${scans[e]?.status ?? 'no scan on record'}: ${reasons[e]})`).join(', ')}. ` +
                 `Nothing is known about ${app.slug}'s dependencies in ${unscanned.length === 2 ? 'either stage' : 'that stage'} — ` +
                 'that is an absence of evidence and must not be reported as a clean result. Use appcrane_scan_app to scan it now.'
               : null,
@@ -4339,6 +4375,10 @@ const TOOLS = [
         return {
           scanned: false,
           assurance: 'none',
+          assurance_note: assuranceNote(coverageOf([])),
+          coverage: coverageOf([]),
+          skip_reasons: [],
+          error_reasons: [],
           row_count: 0,
           unscanned_count: null,
           apps: [],
@@ -4378,9 +4418,16 @@ const TOOLS = [
         manifests[m] = (manifests[m] ?? 0) + 1;
       }
       const manifestsRead = Object.entries(manifests);
+      const coverage = coverageOf(rows);
+      const skipReasons = reasonCounts(rows.filter((r) => r.status === 'skipped'));
+      const errorReasons = reasonCounts(rows.filter((r) => r.status === 'error'));
       return {
         scanned: unscanned.length === 0,
         assurance: unscanned.length === 0 ? 'complete' : unscanned.length === rows.length ? 'none' : 'partial',
+        assurance_note: assuranceNote(coverage),
+        coverage,
+        skip_reasons: skipReasons,
+        error_reasons: errorReasons,
         row_count: rows.length,
         unscanned_count: unscanned.length,
         unscanned_by_status: byStatus,
@@ -4389,6 +4436,13 @@ const TOOLS = [
         apps: rows,
         enforcement: 'report-only',
         summary: [
+          coverageSentence(coverage),
+          skipReasons.length
+            ? `Why rows were skipped: ${skipReasons.map((s) => `${s.reason} (${s.rows})`).join('; ')}.`
+            : null,
+          errorReasons.length
+            ? `Why rows errored: ${errorReasons.map((s) => `${s.reason} (${s.rows})`).join('; ')}.`
+            : null,
           unscanned.length
             ? `${unscanned.length} of ${rows.length} app/stage row(s) have NO usable scan result ` +
               `(${Object.entries(byStatus).map(([k, n]) => `${k}: ${n}`).join(', ')}). Those are UNKNOWN, not clean — ` +
@@ -4402,8 +4456,9 @@ const TOOLS = [
               'Coverage is per manifest, not per app: one row reads ONE manifest, so a go.mod or a ' +
               'requirements.txt beside a scanned lockfile was never read and cannot appear above.'
             : 'NO MANIFEST WAS READ in any row, so no dependency of any app here has been looked at.',
+          assuranceNote(coverage),
           REPORT_ONLY,
-        ].join(' '),
+        ].filter(Boolean).join(' '),
       };
     },
   },

@@ -28,6 +28,49 @@ function set(db, k, v, userId) {
     .run(k, String(v ?? ''), userId ?? null);
 }
 
+/**
+ * The one sentence every surface says when this host holds the only copy.
+ *
+ * It is a constant, exported and reused by the settings API, the MCP status
+ * tool and (through the API payload) the dashboard, because the failure being
+ * described is a single fact and three hand-written variants of it drift: one
+ * gets softened, one gets dropped in a refactor, and the surface that still
+ * says it is the one nobody reads. Tests assert this exact string on every
+ * surface, so removing it from any of them fails the suite.
+ */
+export const NO_OFFSITE_NOTICE = 'No off-site copy — everything AppCrane knows lives on this host.';
+
+/**
+ * Measured off-site state, from the config and the recorded last run.
+ *
+ * `has_off_site_copy` is deliberately not `enabled`: a schedule that is on and
+ * has never completed has produced no copy, and a stored bucket with the
+ * schedule switched off has produced none either. Only a recorded successful
+ * upload means bytes left this host.
+ */
+export function offSiteState() {
+  const cfg = getBackupConfig();
+  const missing = [];
+  if (!cfg.bucket) missing.push('bucket');
+  if (!cfg.access_key_id) missing.push('access_key_id');
+  if (!cfg.has_secret) missing.push('secret_access_key');
+  const configured = missing.length === 0;
+  const hasCopy = configured && !!cfg.last_run;
+  let reason = null;
+  if (!configured) reason = `No off-site destination is configured (missing: ${missing.join(', ')}).`;
+  else if (!cfg.last_run && !cfg.enabled) reason = 'A destination is stored, but the nightly upload is switched off and has never run.';
+  else if (!cfg.last_run) reason = 'The nightly upload is switched on but has never completed.';
+  return {
+    configured,
+    enabled: cfg.enabled,
+    missing,
+    last_run: cfg.last_run,
+    last_error: cfg.last_error,
+    has_off_site_copy: hasCopy,
+    notice: hasCopy ? null : `${NO_OFFSITE_NOTICE} ${reason}`,
+  };
+}
+
 export function getBackupConfig() {
   const db = getDb();
   return {

@@ -1,6 +1,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'fs';
+import { execFileSync } from 'child_process';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
@@ -429,4 +430,259 @@ test('heredoc CONTENT is not parsed as instructions', () => {
   ].join('\n') + '\n');
   assert.equal(after.valid, true);
   assert.deepEqual(userWarnings(after), []);
+});
+
+// ---------------------------------------------------------------------------
+// Ownership is established by construction, not by a recursive walk.
+//
+// The generator used to end every image with `RUN chown -R node:node /app`,
+// placed AFTER the install and the build — so `npm ci`, the lifecycle scripts
+// and `npm run build` all ran as root, produced a root-owned tree, and the
+// chown then rewrote every one of those inodes into a fresh layer to hand them
+// to uid 1000.
+//
+// Both halves of that were measured on real images before this change, with
+// the control in each case being the identical Dockerfile minus the chown:
+//
+//   * CORRECTNESS. A non-root app that opens a SQLite file in its own workdir
+//     fails without the chown -- `SQLITE_FAIL ERR_SQLITE_ERROR unable to open
+//     database file`, exit 3, `/app` owned root:root -- and succeeds with the
+//     shape asserted below, exit 0, `/app` owned node:node. So the chown was
+//     never decorative, and deleting it outright would have broken these apps.
+//     A postinstall-created directory behaves the same way: EACCES then, ok
+//     now. (The docker-gated test at the bottom re-runs the SQLite half
+//     against a real image, break and fix.)
+//   * COST. 81 MB / 9,462 files under /app, 3 `--no-cache` builds each:
+//     the recursive chown took 5.40 / 4.80 / 5.30 s of a 12.1 / 10.8 / 13.0 s
+//     build and left a 451 MB image. The non-recursive form takes 0.10 s flat
+//     and leaves 356 MB -- the 95 MB being the recursive chown copying every
+//     file it touched into a new layer above the one already holding it.
+//
+// So the rule is: chown the ONE directory the image itself creates, drop to
+// `node` before anything the app brings runs, and let `COPY --chown` carry the
+// ownership of everything else.
+
+const RECURSIVE_CHOWN = /chown\s+(-[a-zA-Z]*R[a-zA-Z]*\s+|--recursive\s+)/;
+
+function genSource(setup) {
+  return generatedDockerfile(setup).source;
+}
+
+const flatApp = (d) => {
+  writeFileSync(join(d, 'package.json'), JSON.stringify({
+    name: 'demo', scripts: { start: 'node server.js', build: 'node build.js' },
+  }));
+  writeFileSync(join(d, 'package-lock.json'), JSON.stringify({ name: 'demo', lockfileVersion: 3 }));
+  return {};
+};
+
+const monoApp = (d) => {
+  mkdirSync(join(d, 'server'));
+  mkdirSync(join(d, 'client'));
+  writeFileSync(join(d, 'server', 'package.json'), JSON.stringify({ name: 'be', scripts: { start: 'node index.js' } }));
+  writeFileSync(join(d, 'client', 'package.json'), JSON.stringify({
+    name: 'fe', scripts: { build: 'vite build' }, devDependencies: { vite: '^5' },
+  }));
+  return { be: { workdir: 'server' }, fe: { workdir: 'client' } };
+};
+
+const LAYOUTS = [['flat', flatApp], ['monorepo', monoApp]];
+
+test('the generated Dockerfile contains no recursive chown, in either layout', () => {
+  // Control first: the regex must be able to MATCH, or "no recursive chown" is
+  // satisfied by a pattern that never fires and asserts nothing at all.
+  assert.match('RUN chown -R node:node /app', RECURSIVE_CHOWN);
+  assert.match('RUN chown --recursive node:node /app', RECURSIVE_CHOWN);
+  assert.doesNotMatch('RUN chown node:node /app', RECURSIVE_CHOWN, 'the non-recursive form must NOT match');
+
+  for (const [name, setup] of LAYOUTS) {
+    assert.doesNotMatch(genSource(setup), RECURSIVE_CHOWN, `${name}: a recursive chown is back`);
+  }
+});
+
+test('/app itself is chowned to node — the app must be able to create files in its own workdir', () => {
+  // This is the line the SQLite app depends on. WORKDIR creates /app as root;
+  // without it uid 1000 cannot create data.db there, and no amount of
+  // COPY --chown helps, because the failure is on the DIRECTORY not the files.
+  for (const [name, setup] of LAYOUTS) {
+    assert.match(genSource(setup), /^RUN chown node:node \/app$/m, `${name}: /app ownership is not established`);
+  }
+});
+
+test('USER node comes before every install, lifecycle script and build step', () => {
+  // The property that makes the recursive chown unnecessary: nothing the app
+  // brings runs as root, so nothing it creates is root-owned to begin with.
+  for (const [name, setup] of LAYOUTS) {
+    const lines = genSource(setup).split('\n');
+    const userAt = lines.findIndex((l) => /^USER\s+node$/.test(l));
+    assert.notEqual(userAt, -1, `${name}: no USER node line`);
+
+    const appRuns = lines
+      .map((l, i) => [l, i])
+      .filter(([l]) => /^RUN /.test(l) && !/^RUN (apk|apt-get|chown) /.test(l));
+    assert.ok(appRuns.length > 0, `${name}: no app RUN steps found — the assertion would be vacuous`);
+    for (const [line, i] of appRuns) {
+      assert.ok(i > userAt, `${name}: still runs as root: ${line.slice(0, 70)}`);
+    }
+
+    // ...and exactly one USER line, so the drop cannot be undone later.
+    assert.equal(lines.filter((l) => /^USER\s/.test(l)).length, 1, `${name}: more than one USER line`);
+  }
+});
+
+test('apk stays root — package installation still happens before the drop', () => {
+  for (const [name, setup] of LAYOUTS) {
+    const lines = genSource(setup).split('\n');
+    const apkAt = lines.findIndex((l) => /^RUN apk /.test(l));
+    const userAt = lines.findIndex((l) => /^USER\s/.test(l));
+    assert.notEqual(apkAt, -1, `${name}: the apk step vanished`);
+    assert.ok(apkAt < userAt, `${name}: apk would run unprivileged and fail`);
+  }
+});
+
+test('every COPY carries --chown=node:node, so copied trees are never root-owned', () => {
+  for (const [name, setup] of LAYOUTS) {
+    const copies = genSource(setup).split('\n').filter((l) => /^COPY /.test(l));
+    assert.ok(copies.length >= 2, `${name}: expected at least two COPY lines, got ${copies.length}`);
+    for (const c of copies) assert.match(c, /^COPY --chown=node:node /, `${name}: unowned copy: ${c}`);
+  }
+});
+
+test('npm global installs still work after the drop (NPM_CONFIG_PREFIX)', () => {
+  // Measured: as `node`, `npm i -g left-pad` fails EACCES with npm rc=243,
+  // because /usr/local/lib/node_modules is root-owned in the official image;
+  // with the prefix pointed at the node user's own HOME it returns rc=0. A
+  // manifest-supplied install command may legitimately open with
+  // `npm i -g pnpm && pnpm i`, so without this the privilege drop would turn
+  // into a build failure for those apps.
+  for (const [name, setup] of LAYOUTS) {
+    const lines = genSource(setup).split('\n');
+    const prefixAt = lines.indexOf('ENV NPM_CONFIG_PREFIX=/home/node/.npm-global');
+    const pathAt = lines.indexOf('ENV PATH=/home/node/.npm-global/bin:$PATH');
+    const userAt = lines.findIndex((l) => /^USER\s/.test(l));
+    assert.notEqual(prefixAt, -1, `${name}: no NPM_CONFIG_PREFIX`);
+    assert.notEqual(pathAt, -1, `${name}: the global bin dir is not on PATH`);
+    assert.ok(prefixAt < userAt && pathAt < userAt, `${name}: the prefix must be set before the drop`);
+  }
+});
+
+test('the runtime workdir is unchanged by the reorder', () => {
+  // Moving USER and the chown to the top must not change where the container
+  // actually starts.
+  assert.match(genSource(monoApp), /^WORKDIR \/app\/server$/m);
+  assert.match(genSource(flatApp), /^WORKDIR \/app$/m);
+});
+
+test('an app-provided Dockerfile is still used byte-for-byte, untouched by any of this', () => {
+  // The ownership rules are the GENERATOR's. An app that ships its own
+  // Dockerfile owns its own build and must come back unmodified — including
+  // its own recursive chown. We do not rewrite other people's builds.
+  const dir = scratch('crane-dfown-');
+  const authored = [
+    'FROM node:20-alpine',
+    'WORKDIR /app',
+    'COPY . .',
+    'RUN chown -R node:node /app',
+    'USER node',
+    'EXPOSE 3000',
+    'CMD ["node", "server.js"]',
+  ].join('\n') + '\n';
+  writeFileSync(join(dir, 'Dockerfile'), authored);
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'own' }));
+  writeFileSync(join(dir, 'package-lock.json'), JSON.stringify({ name: 'own', lockfileVersion: 3 }));
+
+  const res = ensureDockerfile({
+    releaseDir: dir,
+    manifest: {},
+    appBasePath: '/apps/demo',
+    craneUrl: 'https://crane.example',
+    craneInternalUrl: 'http://127.0.0.1:3000',
+  });
+
+  assert.equal(res.userProvided, true, 'the generator must not have overwritten it');
+  assert.equal(readFileSync(res.path, 'utf8'), authored, 'an authored Dockerfile must come back byte-identical');
+  assert.match(readFileSync(res.path, 'utf8'), RECURSIVE_CHOWN);
+});
+
+// --- the real thing ------------------------------------------------------
+
+test('a real image: the non-root app can write a SQLite file in /app, and cannot without the chown', {
+  skip: process.env.APPCRANE_DOCKERFILE_DOCKER_TEST === '1'
+    ? false
+    : 'set APPCRANE_DOCKERFILE_DOCKER_TEST=1 (needs docker + network)',
+}, () => {
+  // Break-and-fix in one test. The CONTROL is this generator's own output with
+  // the /app chown deleted — the ownership mistake the recursive chown used to
+  // paper over — and it must FAIL, or the passing half proves nothing.
+  const dir = scratch('crane-dfsqlite-');
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({
+    name: 'sqlite-probe', version: '1.0.0', private: true, scripts: { start: 'node server.js' },
+  }));
+  writeFileSync(join(dir, 'package-lock.json'), JSON.stringify({
+    name: 'sqlite-probe', version: '1.0.0', lockfileVersion: 3, requires: true,
+    packages: { '': { name: 'sqlite-probe', version: '1.0.0' } },
+  }));
+  writeFileSync(join(dir, 'server.js'), [
+    "const { DatabaseSync } = require('node:sqlite');",
+    "console.log('uid=' + process.getuid());",
+    'try {',
+    "  const db = new DatabaseSync('./data.db');",
+    "  db.exec('CREATE TABLE IF NOT EXISTS t (v TEXT)');",
+    "  db.prepare('INSERT INTO t (v) VALUES (?)').run('hello');",
+    "  console.log('SQLITE_OK ' + JSON.stringify(db.prepare('SELECT v FROM t').get()));",
+    '} catch (e) {',
+    "  console.log('SQLITE_FAIL ' + e.message);",
+    '  process.exit(3);',
+    '}',
+  ].join('\n') + '\n');
+
+  // node:sqlite is built in from Node 22; the generator honours node_version.
+  ensureDockerfile({
+    releaseDir: dir,
+    manifest: { node_version: '22' },
+    appBasePath: '/apps/demo',
+    craneUrl: 'https://crane.example',
+    craneInternalUrl: 'http://127.0.0.1:3000',
+  });
+  const generated = readFileSync(join(dir, 'Dockerfile'), 'utf8');
+  assert.match(generated, /^RUN chown node:node \/app$/m, 'the line under test must be present to be removable');
+
+  const sh = (cmd, args) => execFileSync(cmd, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  const tag = `appcrane-own-suite-${process.pid}`;
+  const brokenTag = `${tag}-broken`;
+  const run = (t) => {
+    try { return { out: sh('docker', ['run', '--rm', t]), code: 0 }; } catch (e) {
+      return { out: `${e.stdout || ''}${e.stderr || ''}`, code: e.status };
+    }
+  };
+
+  try {
+    // 1. The control: same Dockerfile, /app left root-owned.
+    writeFileSync(join(dir, 'Dockerfile'), generated.replace(/^RUN chown node:node \/app\n/m, ''));
+    sh('docker', ['build', '-q', '-t', brokenTag, dir]);
+    const broken = run(brokenTag);
+    assert.match(broken.out, /SQLITE_FAIL/, 'without the /app chown the write must FAIL — it did not, so the fix is untested');
+    assert.equal(broken.code, 3);
+
+    // 2. The generator's actual output.
+    writeFileSync(join(dir, 'Dockerfile'), generated);
+    sh('docker', ['build', '-q', '-t', tag, dir]);
+    const fixed = run(tag);
+    assert.match(fixed.out, /SQLITE_OK/, 'the generated image must be able to write in its own workdir');
+    assert.match(fixed.out, /uid=1000/, 'and must still be running as non-root while doing it');
+    assert.equal(fixed.code, 0);
+
+    // 3. Nothing under /app is root-owned, which is the property the recursive
+    //    chown used to buy and this shape must provide without it.
+    //    (busybox find has no -printf, so this just lists the offending paths.)
+    const owners = sh('docker', ['run', '--rm', '--entrypoint', 'find', tag, '/app', '-not', '-user', 'node']);
+    assert.equal(owners.trim(), '', `not owned by node under /app: ${owners}`);
+
+    // Control for that find: it must be able to REPORT something, or an empty
+    // result would pass for a broken invocation rather than a clean tree.
+    const control = sh('docker', ['run', '--rm', '--entrypoint', 'find', tag, '/app', '-not', '-user', 'root']);
+    assert.notEqual(control.trim(), '', 'the ownership probe found nothing at all — it is not working');
+  } finally {
+    for (const t of [tag, brokenTag]) { try { sh('docker', ['rmi', '-f', t]); } catch (_) {} }
+  }
 });

@@ -134,6 +134,18 @@ async function collectAppTrees() {
  *   at       — Date used for the name and manifest
  *   force    — write even if the free-space check fails
  *   version  — override the recorded AppCrane version
+ *   contents — 'full' (default: db + .env + icons + appdata + appvolumes) or
+ *              'platform' (db + .env only). The scheduled LOCAL backup uses
+ *              'platform': it runs unattended every night on the same disk it
+ *              is protecting, and a per-app /data tree is unbounded — seven
+ *              nightly copies of the whole fleet's volumes is how a backup
+ *              takes a host down. The database and the ENCRYPTION_KEY are the
+ *              part that cannot be rebuilt from anywhere else, so that is what
+ *              the unattended job keeps. A 'platform' archive states its own
+ *              scope in the manifest (`contents`, and `includes` without the
+ *              app members) and restores through the same importer — the app
+ *              trees are simply absent, which the import result reports as
+ *              zero icons/data/volume files.
  * @returns {{ path, file, bytes, manifest, warnings }}
  */
 export function exportDataArchive(opts = {}) {
@@ -144,6 +156,7 @@ export function exportDataArchive(opts = {}) {
 
 async function writeDataArchive(opts) {
   const at = opts.at || new Date();
+  const platformOnly = opts.contents === 'platform';
   const version = opts.version || await craneVersion();
   const db = getDb();
   await ensureBackupsDir();
@@ -159,7 +172,9 @@ async function writeDataArchive(opts) {
     const hasEnv = existsSync(envPath());
     const envBytes = hasEnv ? (await stat(envPath())).size : 0;
     traceBackup('trees:start');
-    const trees = await collectAppTrees();
+    const trees = platformOnly
+      ? { members: [], skipped: [], bytes: 0, dataVolumes: 0 }
+      : await collectAppTrees();
     traceBackup('trees:end');
 
     traceBackup('repos:start');
@@ -202,7 +217,8 @@ async function writeDataArchive(opts) {
       version,
       exported_at: at.toISOString(),
       crane_domain: process.env.CRANE_DOMAIN || null,
-      includes: ['deployhub.db', ...(hasEnv ? ['.env'] : []), 'icons', 'appdata', 'appvolumes'],
+      includes: ['deployhub.db', ...(hasEnv ? ['.env'] : []), ...(platformOnly ? [] : ['icons', 'appdata', 'appvolumes'])],
+      contents: platformOnly ? 'platform' : 'full',
       counts,
       bytes: { db: dbBytes, env: envBytes, apps: trees.bytes, total: totalBytes },
       repos_included: false,
