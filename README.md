@@ -210,6 +210,12 @@ crane reconcile --dry-run                 # Preview orphaned filesystem apps
 crane reconcile                           # Register them into the DB and reload Caddy
 ```
 
+`regenerate-key` and `reconcile` open the database **without migrating it** —
+the server owns migrations and applies them on boot. If the code on disk is
+newer than the schema, both refuse with the number of pending migrations rather
+than altering the database under a running server. `crane init` is the one
+command that does migrate: it is the bootstrap, and there is no server yet.
+
 ### Migrate config between instances
 Move the platform `settings` (including encrypted secrets) to another AppCrane —
 without sharing encryption keys. Export keeps secrets ciphertext; import
@@ -481,7 +487,9 @@ full (the quota covers DB + storage).
 Always build tenant paths via the helper (never from raw user input) — the
 identity headers are platform-signed and the org slug is sanitised against
 traversal. When a user's access is revoked, AppCrane purges that tenant's dir
-automatically. Consumer domains (e.g. `gmail.com`) share an `org` label, but
+automatically — using this very helper's `orgFromEmail`, which the platform
+imports rather than copies, so the path it deletes is the path your app wrote.
+Consumer domains (e.g. `gmail.com`) share an `org` label, but
 isolation is per-user, so data never mixes. The helper isn't on npm yet — copy
 [`packages/tenant/index.js`](packages/tenant/index.js) or depend on it by path;
 see the [multitenant-notes example](examples/multitenant-notes).

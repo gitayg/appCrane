@@ -18,7 +18,21 @@ export function getDb() {
   return db;
 }
 
-export function initDb(dataDir) {
+/**
+ * Open the database and publish the handle, applying NOTHING.
+ *
+ * initDb() was the only way to get a handle, so every caller that wanted to
+ * read one row also migrated the schema as a side effect — including
+ * `crane regenerate-key` and `crane reconcile`, two commands whose names
+ * promise nothing of the sort. Normally harmless (a booted server has already
+ * migrated, so there is nothing pending), it bites in one window: code on disk
+ * newer than the running process, where the CLI would migrate the schema under
+ * an older server still serving requests.
+ *
+ * A caller that opens this way is responsible for deciding what to do about a
+ * schema behind its code — see pendingMigrationNames().
+ */
+export function openDb(dataDir) {
   const dbDir = dataDir || process.env.DATA_DIR || join(__dirname, '..', 'data');
   if (!existsSync(dbDir)) mkdirSync(dbDir, { recursive: true });
 
@@ -28,7 +42,25 @@ export function initDb(dataDir) {
   db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
+  return db;
+}
 
+/**
+ * Migration files this database has not applied, newest-last. Reads only: an
+ * absent _migrations table means an empty database, so every file is pending,
+ * and the table is NOT created here — a question about the schema must not
+ * write to it.
+ */
+export function pendingMigrationNames() {
+  const table = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = '_migrations'").get();
+  if (!table) return migrationFiles();
+  const applied = new Set(db.prepare('SELECT name FROM _migrations').all().map(r => r.name));
+  return migrationFiles().filter(f => !applied.has(f));
+}
+
+/** Open the database AND bring the schema up to this code. */
+export function initDb(dataDir) {
+  openDb(dataDir);
   snapshotBeforeMigrations();
   runMigrations();
   return db;

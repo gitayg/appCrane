@@ -5,6 +5,11 @@ import { homedir } from 'os';
 const CONFIG_DIR = join(homedir(), '.cloudcrane');
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json');
 
+// What to print when telling the operator where the key landed. Exported so no
+// caller hand-writes the path: `crane init` and `crane regenerate-key` both
+// claimed '~/.appcrane/config.json', a directory this file has never written.
+export const CONFIG_FILE_DISPLAY = CONFIG_FILE.replace(homedir(), '~');
+
 const DEFAULTS = {
   api_url: 'http://localhost:5001',
   api_key: '',

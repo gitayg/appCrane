@@ -1,28 +1,28 @@
 import { rmSync } from 'fs';
 import { join, resolve, sep } from 'path';
 import log from '../utils/logger.js';
+import { orgFromEmail } from '../../packages/tenant/index.js';
 
 // Cooperative per-tenant DB model. A tenant is (org, user); org is derived from
 // the user's email domain. THIS DERIVATION IS THE PUBLIC CONTRACT — the
 // app-side helper must compute the identical tenant path from the signed
 // identity headers (X-AppCrane-User-Email + X-AppCrane-User-Id), or purge and
-// the app would disagree on which file is whose. Keep the two in lockstep.
+// the app would disagree on which file is whose.
+//
+// They no longer have to be kept in lockstep by hand: this module imports the
+// derivation from packages/tenant and re-exports it, so there is one function.
+// The direction matters — packages/tenant ships to the apps and must not import
+// anything server-side, so the dependency only ever points this way.
 
 export const TENANT_ROOT = 'tenants';
 
 /**
  * org slug from an email address: the domain after the last '@', lowercased and
- * restricted to [a-z0-9.-]. Missing/malformed email → 'unknown'.
+ * restricted to [a-z0-9.-]. Missing/malformed email → 'unknown'. Defined in
+ * packages/tenant so the app side and this side cannot diverge; re-exported
+ * here because callers have always imported it from this module.
  */
-export function orgFromEmail(email) {
-  const parts = String(email || '').toLowerCase().split('@');
-  const domain = parts.length > 1 ? parts.pop() : '';
-  const slug = domain.replace(/[^a-z0-9.-]/g, '');
-  // '.' and '..' are path-traversal segments (a@.. → join(base,'..') escapes the
-  // tenant root). No real domain is pure dots, so reject them.
-  if (!slug || slug === '.' || slug === '..') return 'unknown';
-  return slug;
-}
+export { orgFromEmail };
 
 /** Relative tenant dir under an app's /data, e.g. tenants/acme.com/u42 */
 export function tenantDirRel(org, userId) {

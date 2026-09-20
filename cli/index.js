@@ -1,8 +1,24 @@
 import { Command } from 'commander';
-import { getApiUrl, getApiKey, saveConfig, getConfig } from './config.js';
+import { getApiUrl, getApiKey, saveConfig, getConfig, CONFIG_FILE_DISPLAY } from './config.js';
 import * as out from './output.js';
 
 const program = new Command();
+
+/**
+ * Stop a command that would otherwise operate on a schema older than its code.
+ *
+ * These commands open the database without migrating it (server/db.js
+ * openDb), so a mismatch has to be named rather than silently repaired: the
+ * server owns migrations, and applying them from the CLI can move the schema
+ * underneath a running older process.
+ */
+function refuseIfBehind(pending) {
+  if (!pending.length) return;
+  out.err(`The database is ${pending.length} migration(s) behind this code.`);
+  out.dim(`First pending: ${pending[0]}`);
+  out.dim('Start AppCrane to apply them (the server migrates on boot). This command does not.');
+  process.exit(1);
+}
 
 // HTTP helper
 async function api(method, path, body) {
@@ -166,7 +182,7 @@ program
       config.api_key = apiKey;
       saveConfig(config);
       console.log('');
-      out.ok('API key auto-saved to ~/.appcrane/config.json');
+      out.ok(`API key auto-saved to ${CONFIG_FILE_DISPLAY}`);
     } catch (e) {
       out.err(`Init failed: ${e.message}`);
       out.dim('Make sure you run this from the appCrane directory.');
@@ -185,10 +201,14 @@ program
       const { dirname, join } = await import('path');
       const { fileURLToPath } = await import('url');
       const __dirname = dirname(fileURLToPath(import.meta.url));
-      const { initDb, getDb } = await import(join(__dirname, '..', 'server', 'db.js'));
+      const { openDb, getDb, pendingMigrationNames } = await import(join(__dirname, '..', 'server', 'db.js'));
       const { generateApiKey, hashApiKey } = await import(join(__dirname, '..', 'server', 'services', 'encryption.js'));
 
-      initDb();
+      // Open without migrating: rotating a key must not alter the schema, least
+      // of all under a server still running the older code. refuseIfBehind
+      // turns a schema mismatch into a sentence instead of a failing query.
+      openDb();
+      refuseIfBehind(pendingMigrationNames());
       const db = getDb();
 
       // Default: the platform owner (role = 'platform_admin' only — NOT app
@@ -224,7 +244,7 @@ program
       const config = getConfig();
       config.api_key = apiKey;
       saveConfig(config);
-      out.ok('API key auto-saved to ~/.appcrane/config.json');
+      out.ok(`API key auto-saved to ${CONFIG_FILE_DISPLAY}`);
     } catch (e) {
       out.err(`Failed: ${e.message}`);
       out.dim('Make sure you run this from the appCrane directory.');
@@ -548,8 +568,9 @@ program
       const { fileURLToPath } = await import('url');
       const __dirname = dirname(fileURLToPath(import.meta.url));
 
-      const { initDb } = await import(join(__dirname, '..', 'server', 'db.js'));
-      initDb();
+      const { openDb, pendingMigrationNames } = await import(join(__dirname, '..', 'server', 'db.js'));
+      openDb();
+      refuseIfBehind(pendingMigrationNames());
 
       const { reconcileOrphanedApps } = await import(join(__dirname, '..', 'server', 'services', 'reconcile.js'));
 

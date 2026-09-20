@@ -2,8 +2,11 @@ import { handleUnauthorized } from './sessionExpiry'
 
 // Admin API — all fetch helpers for the admin SPA AND for the shared
 // React panels (Ask / Request / Bug) when mounted in the portal page.
-// Auth precedence: X-API-Key (admin SPA stores in cc_api_key) →
-// Bearer token (portal stores its identity session in cc_identity_token).
+// Auth precedence: the identity session first (cc_identity_token, what the
+// portal signs a person in with), then an API key (cc_api_key, what the admin
+// SPA stores). api.ts resolves them in this same order — the two used to
+// disagree, so a browser holding both authenticated as a different principal
+// depending on which helper a component imported.
 // This lets the same panels work in both contexts without bundling a
 // separate fetch helper for portal.
 
@@ -19,17 +22,17 @@ function asciiOnly(s: string): string {
 }
 
 export function authHeaders(): Record<string, string> {
-  const key = asciiOnly(localStorage.getItem('cc_api_key') || '')
-  if (key) return { 'X-API-Key': key }
   const bearer = asciiOnly(localStorage.getItem('cc_identity_token') || '')
   if (bearer) return { 'Authorization': 'Bearer ' + bearer }
+  const key = asciiOnly(localStorage.getItem('cc_api_key') || '')
+  if (key) return { 'X-API-Key': key }
   return {}
 }
 
 /** Token used for SSE EventSource ?token= query (no header support). */
 export function authTokenForSSE(): string {
-  return localStorage.getItem('cc_api_key')
-      || localStorage.getItem('cc_identity_token')
+  return localStorage.getItem('cc_identity_token')
+      || localStorage.getItem('cc_api_key')
       || ''
 }
 
