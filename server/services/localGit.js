@@ -306,8 +306,14 @@ export async function createAppRepo(slug, { description = '', autoInit = true } 
  * `files: [{ path, content, encoding? }]` (utf-8 | base64), same options
  * ({ branch, message }), same return
  *   { commit: { sha, html_url }, branch, files: [{ path, sha, sha256, bytes, encoding }], message }.
- * One call = one commit whose parent is the branch tip. Like GitHub there is no
- * way to express a deletion, and mode is always 100644.
+ * One call = one commit whose parent is the branch tip; mode is always 100644.
+ *
+ * DELETIONS (`opts.deletions`, repo-relative paths) are applied to the SAME
+ * index as the additions, so one call is still one commit. They are removed
+ * with `update-index --index-info` and a mode of 0 — NOT `--force-remove`,
+ * which git refuses outright in a bare repository ("this operation must be run
+ * in a work tree"). Removing a path git does not have is a silent no-op at the
+ * plumbing level, so a typo is caught here first and refused by name.
  *
  * RACES: THE NEWEST PUSH WINS, AND WHAT IT DISPLACES IS KEPT.
  *
@@ -332,7 +338,12 @@ const MAX_TAKEOVER_ATTEMPTS = 10;
 
 export async function pushFilesToManagedRepo(slug, files, opts = {}) {
   if (!slug || typeof slug !== 'string') throw new Error('slug is required');
-  if (!Array.isArray(files) || files.length === 0) throw new Error('files must be a non-empty array');
+  const deletions = opts.deletions === undefined || opts.deletions === null ? [] : opts.deletions;
+  if (!Array.isArray(deletions)) throw new Error('deletions must be an array of repo-relative paths');
+  if (!Array.isArray(files)) throw new Error('files must be a non-empty array');
+  // A push with neither an addition nor a deletion is the same empty commit it
+  // always was; only the pairing of the two arrays is new.
+  if (files.length === 0 && deletions.length === 0) throw new Error('files must be a non-empty array');
   for (const f of files) {
     if (!f || typeof f.path !== 'string' || typeof f.content !== 'string') {
       throw new Error('each file needs { path: string, content: string }');
@@ -341,6 +352,22 @@ export async function pushFilesToManagedRepo(slug, files, opts = {}) {
     if (f.encoding && !['utf-8', 'base64'].includes(f.encoding)) {
       throw new Error(`invalid encoding '${f.encoding}': must be 'utf-8' or 'base64'`);
     }
+  }
+  for (const p of deletions) {
+    if (typeof p !== 'string') throw new Error('each deletion must be a repo-relative path string');
+    assertRepoFilePath(p);
+  }
+  // Two entries for one path make the outcome depend on ordering, which is not
+  // something a caller can reason about. Refuse instead of picking a winner.
+  const filePaths = files.map((f) => f.path);
+  const repeated = (list) => [...new Set(list.filter((v, i) => list.indexOf(v) !== i))];
+  const dupFiles = repeated(filePaths);
+  if (dupFiles.length) throw new Error(`duplicate path(s) in files: ${dupFiles.map((v) => JSON.stringify(v)).join(', ')}`);
+  const dupDeletions = repeated(deletions);
+  if (dupDeletions.length) throw new Error(`duplicate path(s) in deletions: ${dupDeletions.map((v) => JSON.stringify(v)).join(', ')}`);
+  const both = [...new Set(deletions.filter((p) => filePaths.includes(p)))];
+  if (both.length) {
+    throw new Error(`path(s) in both files and deletions: ${both.map((v) => JSON.stringify(v)).join(', ')}. Write it or delete it, not both.`);
   }
 
   const gitDir = repoPath(slug);
@@ -355,6 +382,19 @@ export async function pushFilesToManagedRepo(slug, files, opts = {}) {
   const parent = await resolveBranchCommit(gitDir, branch);
   if (!parent) {
     throw fail('BRANCH_NOT_FOUND', 404, `branch '${branch}' does not exist in the managed repository '${repoName}'.`);
+  }
+
+  // Before hash-object writes anything: a deletion of a path the parent commit
+  // does not have would otherwise be a no-op git never complains about, and the
+  // push would report success having deleted nothing.
+  if (deletions.length) {
+    const listing = (await gitAsync(gitDir, ['ls-tree', '-r', '-z', '--full-tree', '--name-only', parent])).toString('utf8');
+    const present = new Set(listing.split('\0').filter(Boolean));
+    const missing = deletions.filter((p) => !present.has(p));
+    if (missing.length) {
+      throw fail('DELETE_PATH_NOT_FOUND', 404,
+        `cannot delete ${missing.map((p) => JSON.stringify(p)).join(', ')} from '${repoName}': not in branch '${branch}' at ${parent.slice(0, 12)}. Nothing was committed.`);
+    }
   }
 
   const blobs = [];
@@ -376,9 +416,25 @@ export async function pushFilesToManagedRepo(slug, files, opts = {}) {
   try {
     const env = { GIT_INDEX_FILE: join(idxDir, 'index') };
     await gitAsync(gitDir, ['read-tree', `${parent}^{tree}`], { env });
-    const entries = blobs.map((b) => `100644 blob ${b.sha}\t${b.path}\0`).join('');
-    await gitAsync(gitDir, ['update-index', '-z', '--index-info'], { env, input: entries });
+    if (blobs.length) {
+      const entries = blobs.map((b) => `100644 blob ${b.sha}\t${b.path}\0`).join('');
+      await gitAsync(gitDir, ['update-index', '-z', '--index-info'], { env, input: entries });
+    }
+    if (deletions.length) {
+      // Mode 0 with the zero SHA is --index-info's "remove this entry". It is
+      // the only removal that works without a worktree; see the header comment.
+      const removals = deletions.map((p) => `0 ${ZERO_SHA}\t${p}\0`).join('');
+      await gitAsync(gitDir, ['update-index', '-z', '--index-info'], { env, input: removals });
+    }
     const tree = text(await gitAsync(gitDir, ['write-tree'], { env }));
+    // A commit with no files at all is not a state any caller means to reach,
+    // and it is the one a wrong deletion list produces. Checked by listing the
+    // tree rather than against a hardcoded empty-tree SHA, which is hash-algo
+    // specific.
+    if (text(await gitAsync(gitDir, ['ls-tree', '-z', '--full-tree', tree])) === '') {
+      throw fail('EMPTY_TREE', 422,
+        `refusing to commit an empty tree to '${repoName}': this push deletes every remaining file from branch '${branch}'. Nothing was committed.`);
+    }
     commit = text(await gitAsync(gitDir, ['commit-tree', '--no-gpg-sign', tree, '-p', parent], { input: message }));
   } finally {
     rmSync(idxDir, { recursive: true, force: true });
@@ -413,6 +469,7 @@ export async function pushFilesToManagedRepo(slug, files, opts = {}) {
     commit: { sha: commit, html_url: null },
     branch,
     files: blobs,
+    deleted: [...deletions],
     message,
     dropped,
   };

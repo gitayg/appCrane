@@ -484,7 +484,7 @@ Settings → Backup than passed through an agent.
 | `appcrane_scan_report` | CVE findings for an app, or across the fleet (scoped to apps you can see) |
 | `appcrane_scan_app` | Scan one app's dependency manifests against OSV now, instead of waiting for the daily pass |
 | `appcrane_platform_policy` | Read or set the platform levers: ban public apps, require security scans (platform admin) |
-| `appcrane_push_to_managed_app` | Push a batch of files to a managed app's AMC_<slug> repo, authenticated server-side via AppCrane's service-account credential |
+| `appcrane_push_to_managed_app` | Push a batch of files to a managed app's AMC_<slug> repo, authenticated server-side via AppCrane's service-account credential. `deletions: [path]` removes files in the same commit (Crane-hosted repos only) |
 
 ### Access control
 

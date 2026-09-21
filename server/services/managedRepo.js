@@ -75,11 +75,26 @@ export async function createManagedRepo(backend, slug, opts) {
  */
 export async function pushFilesToManagedRepo(app, files, opts = {}) {
   const { actorId = null, ...backendOpts } = opts;
+  const deletions = Array.isArray(backendOpts.deletions) ? backendOpts.deletions : [];
+  // Deletion is a local-backend capability only. GitHub's contents API has no
+  // way to express one, so rather than let a caller believe a path was removed
+  // from an AMC_ repo on GitHub, refuse here and name the reason.
+  if (deletions.length > 0 && repoBackendOf(app) === REPO_BACKEND_GITHUB) {
+    throw new Error(
+      `Deleting files is not supported for GitHub-backed managed apps: '${app?.slug}' keeps its source on GitHub, whose contents API cannot express a deletion. Nothing was committed. Remove the file(s) on GitHub directly.`,
+    );
+  }
   // Before the backend is touched, so a refused push writes no blob and no ref:
   // the whole push is refused, never committed in part (envFilePushGuard.js).
-  if (usesLocalRepo(app) && Array.isArray(files)) {
+  // Deleted paths are guarded too: a .env* the guard keeps out of git is a file
+  // git should never have had, so a push naming one is wrong either way, and
+  // letting DELETE through would be a second spelling of the same request.
+  if (usesLocalRepo(app)) {
     const { refuseEnvFilePaths } = await import('./envFilePushGuard.js');
-    refuseEnvFilePaths(app.slug, files.map((f) => f?.path));
+    refuseEnvFilePaths(app.slug, [
+      ...(Array.isArray(files) ? files.map((f) => f?.path) : []),
+      ...deletions,
+    ]);
   }
   const result = await (await backendModule(repoBackendOf(app))).pushFilesToManagedRepo(app.slug, files, backendOpts);
   if (usesLocalRepo(app)) {

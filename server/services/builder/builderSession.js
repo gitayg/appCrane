@@ -20,7 +20,15 @@ import {
   aheadOf,
   PRIORITY,
 } from './appQueue.js';
+import { usesLocalRepo } from '../managedRepo.js';
 import log from '../../utils/logger.js';
+
+// usesLocalRepo throws on an unrecognised repo_backend. That is right at a
+// push or a clone; it is not right in the intro bubble, where the only cost of
+// not knowing is which sentence to print.
+function craneHosted(app) {
+  try { return usesLocalRepo(app); } catch (_) { return false; }
+}
 
 const STUDIO_IMAGE  = process.env.APPSTUDIO_IMAGE || 'appcrane-studio:latest';
 const BUILDER_MODEL = process.env.APPSTUDIO_CODER_MODEL || 'claude-sonnet-4-6';
@@ -56,7 +64,12 @@ function buildIntroMessage(app, workspaceDir, branchName, containerId, skillsMou
   const lines = [];
   lines.push(`👋 AppCrane Builder for ${app.name} (${app.slug})`);
   lines.push('');
-  lines.push('I read and edit the code in your repo, run shell commands, and ship branches back to GitHub. You can ask me to add features, fix bugs, refactor, or explain how something works.');
+  // A Crane-hosted app has no GitHub remote, so promising to ship branches
+  // back to GitHub would be describing something the ship path refuses
+  // (gitOps.commitAndPush, LOCAL_REPO_NO_PUSH).
+  lines.push(craneHosted(app)
+    ? 'I read and edit the code in your Crane-hosted repo and run shell commands. You can ask me to add features, fix bugs, refactor, or explain how something works. Shipping this session back to the app is not available yet — changes stay in the workspace.'
+    : 'I read and edit the code in your repo, run shell commands, and ship branches back to GitHub. You can ask me to add features, fix bugs, refactor, or explain how something works.');
   lines.push('');
 
   lines.push('── Runtime ──');

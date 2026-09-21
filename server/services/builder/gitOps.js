@@ -3,6 +3,7 @@ import { existsSync } from 'fs';
 import { getDb } from '../../db.js';
 import { decrypt } from '../encryption.js';
 import { tokenGitEnv, scrubToken } from '../githubGitAuth.js';
+import { usesLocalRepo } from '../managedRepo.js';
 import log from '../../utils/logger.js';
 
 /**
@@ -12,7 +13,8 @@ import log from '../../utils/logger.js';
  */
 function appForWorkspace(workspaceDir) {
   return getDb().prepare(`
-    SELECT a.github_url, a.github_token_encrypted FROM coder_sessions s
+    SELECT a.slug, a.source_type, a.repo_backend, a.github_url, a.github_token_encrypted
+    FROM coder_sessions s
     JOIN apps a ON a.slug = s.app_slug
     WHERE s.workspace_dir = ? LIMIT 1
   `).get(workspaceDir);
@@ -23,6 +25,22 @@ function appForWorkspace(workspaceDir) {
  * Returns { pushed: true } or { pushed: false, reason } if nothing to commit.
  */
 export async function commitAndPush({ workspaceDir, branchName, commitMsg, onLog }) {
+  // Hard gate (Phase 1): a Crane-hosted app's source lives in a bare repo on
+  // this host, not behind a GitHub `origin`. Everything below this line is the
+  // GitHub push path -- credential lookup by github_url, `git push origin`.
+  // Refuse BEFORE staging, so a refused ship leaves no commit in the workspace
+  // for a later run to push by accident. Releasing a Crane-hosted session to
+  // sandbox is Phase 4; until it lands there is nothing honest to do here.
+  const sessionApp = appForWorkspace(workspaceDir);
+  if (sessionApp && usesLocalRepo(sessionApp)) {
+    const err = new Error(
+      `'${sessionApp.slug}' is a Crane-hosted app: its source lives on this host, not on GitHub, so there is no remote to push to. Nothing was committed. Shipping a Crane-hosted Builder session is not available yet.`,
+    );
+    err.status = 400;
+    err.code = 'LOCAL_REPO_NO_PUSH';
+    throw err;
+  }
+
   const git = (args, opts = {}) =>
     execFileSync('git', ['-c', `safe.directory=${workspaceDir}`, '-C', workspaceDir, ...args], {
       stdio: 'pipe', timeout: 60000, ...opts,
@@ -63,13 +81,12 @@ export async function commitAndPush({ workspaceDir, branchName, commitMsg, onLog
   // exists) so the push fast-forwards. If push still fails here, it
   // means the branch genuinely diverged — surface the error instead of
   // overwriting.
-  const app = appForWorkspace(workspaceDir);
   let token = null;
   let pushEnv = null;
-  if (app?.github_url && app.github_token_encrypted) {
+  if (sessionApp?.github_url && sessionApp.github_token_encrypted) {
     try {
-      token = decrypt(app.github_token_encrypted);
-      pushEnv = tokenGitEnv(app.github_url, token);
+      token = decrypt(sessionApp.github_token_encrypted);
+      pushEnv = tokenGitEnv(sessionApp.github_url, token);
     } catch (_) { pushEnv = null; }
   }
   try {

@@ -178,6 +178,14 @@ wrote without asking.
    ```
    All files land as a single commit. For binary files (e.g. `public/icon.png`),
    base64-encode the content and add `encoding: "base64"` to that file.
+
+   To REMOVE a file, pass `deletions: ["src/old.js"]` alongside (or instead of)
+   `files` — one commit either way. Deleting is Crane-hosted only: a
+   GitHub-backed managed app refuses it. A path that is not already in the
+   branch is refused by name rather than silently ignored, a path may not appear
+   in both `files` and `deletions`, and a push that would empty the repository is
+   refused. Renaming is a write of the new path plus a deletion of the old one in
+   the same call.
 4. `appcrane_set_env` (only if user has secrets)
 5. `appcrane_deploy(slug, "sandbox")`
 6. `appcrane_get_logs` — confirm health green. If red and you need to fix a

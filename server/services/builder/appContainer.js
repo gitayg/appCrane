@@ -3,6 +3,7 @@ import { mkdirSync, chmodSync, existsSync, rmSync } from 'fs';
 import { join, resolve } from 'path';
 import { decrypt } from '../encryption.js';
 import { tokenGitEnv, scrubToken } from '../githubGitAuth.js';
+import { usesLocalRepo, cloneLocalRepoForDeploy } from '../managedRepo.js';
 import { ensureStudioImage } from '../appstudio/generator.js';
 import { writeSnapshot } from '../github/snapshot.js';
 import { prepareSkillsMount } from '../skills.js';
@@ -69,7 +70,7 @@ export function setClaudeSessionId(slug, id) {
   if (c?.ready && id && c.claudeSessionId !== id) c.claudeSessionId = id;
 }
 
-function cloneWorkspace(app, onLog) {
+async function cloneWorkspace(app, onLog) {
   const workspaceDir = workspaceDirFor(app.slug);
   // No workspace caching — start fresh every time the container is created
   if (existsSync(workspaceDir)) {
@@ -78,25 +79,36 @@ function cloneWorkspace(app, onLog) {
   mkdirSync(workspaceDir, { recursive: true });
   chmodSync(workspaceDir, 0o777);
 
-  // Token in the git child's env, not the URL: this workspace is chown'd to
-  // the container user and mounted into the builder container, so a tokenized
-  // remote in .git/config would hand the container the credential.
-  let token = null;
-  let gitEnv = null;
-  if (app.github_token_encrypted) {
-    try {
-      token = decrypt(app.github_token_encrypted);
-      gitEnv = tokenGitEnv(app.github_url, token);
-    } catch (_) { gitEnv = null; }
-  }
+  if (usesLocalRepo(app)) {
+    // Crane-hosted source: the repo is a bare repo on this host, reached by
+    // path. There is no remote, so there is no credential — none of the token
+    // machinery below may run on this path, and app.github_url is NULL by
+    // design (reading it here is what used to make Builder refuse the app).
+    // localGit's clone runs git with the host's config, hooks and credential
+    // helpers cut off, exactly as a deploy clone does.
+    onLog?.(`[appContainer:git] Cloning Crane-hosted repo for ${app.slug} (${app.branch || 'main'})…`);
+    await cloneLocalRepoForDeploy(app, workspaceDir, app.branch || 'main');
+  } else {
+    // Token in the git child's env, not the URL: this workspace is chown'd to
+    // the container user and mounted into the builder container, so a tokenized
+    // remote in .git/config would hand the container the credential.
+    let token = null;
+    let gitEnv = null;
+    if (app.github_token_encrypted) {
+      try {
+        token = decrypt(app.github_token_encrypted);
+        gitEnv = tokenGitEnv(app.github_url, token);
+      } catch (_) { gitEnv = null; }
+    }
 
-  onLog?.(`[appContainer:git] Cloning ${app.github_url} (${app.branch || 'main'})…`);
-  try {
-    execFileSync('git', ['clone', '--depth', '1', '--branch', app.branch || 'main', app.github_url, workspaceDir], {
-      stdio: 'pipe', timeout: 120000, ...(gitEnv ? { env: gitEnv } : {}),
-    });
-  } catch (err) {
-    throw new Error(scrubToken(err.message, token));
+    onLog?.(`[appContainer:git] Cloning ${app.github_url} (${app.branch || 'main'})…`);
+    try {
+      execFileSync('git', ['clone', '--depth', '1', '--branch', app.branch || 'main', app.github_url, workspaceDir], {
+        stdio: 'pipe', timeout: 120000, ...(gitEnv ? { env: gitEnv } : {}),
+      });
+    } catch (err) {
+      throw new Error(scrubToken(err.message, token));
+    }
   }
 
   execFileSync('git', ['-C', workspaceDir, 'config', 'user.email', 'builder@appcrane.local'], { stdio: 'pipe' });
@@ -182,7 +194,7 @@ export async function getOrCreate(app, onLog) {
   const branchName = `builder/${slug}`;
   const promise = (async () => {
     await ensureStudioImage(onLog);
-    const workspaceDir = cloneWorkspace(app, onLog);
+    const workspaceDir = await cloneWorkspace(app, onLog);
     try {
       await writeSnapshot(app, workspaceDir, onLog);
     } catch (err) {

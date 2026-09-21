@@ -13,6 +13,7 @@ import {
   evictApp,
 } from '../services/builder/builderSession.js';
 import { getContainer } from '../services/builder/appContainer.js';
+import { usesLocalRepo } from '../services/managedRepo.js';
 import { getQueueState, subscribeQueue } from '../services/builder/appQueue.js';
 import { fetchReleasesAndChangelog, renderReleasesPage } from '../services/github/releases.js';
 import log from '../utils/logger.js';
@@ -69,6 +70,20 @@ function getApp(slug, user) {
   return app;
 }
 
+// Builder needs a source repository it can clone. There are exactly two:
+// a connected GitHub repo, or a Crane-hosted (managed, repo_backend='local')
+// repo on this host. The second has github_url NULL by design, so a bare
+// `!app.github_url` check refused it -- that check was the whole reason
+// Builder was unavailable for Crane-hosted apps.
+function assertHasSource(app) {
+  if (app.github_url || usesLocalRepo(app)) return;
+  throw new AppError(
+    'Builder needs source code to work on: connect a GitHub repository to this app, or use a Crane-hosted app.',
+    400,
+    'NO_REPO',
+  );
+}
+
 function getSession(sessionId, slug) {
   const db = getDb();
   const s = db.prepare('SELECT * FROM coder_sessions WHERE id = ?').get(sessionId);
@@ -84,9 +99,7 @@ router.post('/:slug/session', auditMiddleware('coder.start'), async (req, res) =
   if (!process.env.ANTHROPIC_API_KEY) {
     throw new AppError('ANTHROPIC_API_KEY not configured', 503, 'NOT_CONFIGURED');
   }
-  if (!app.github_url) {
-    throw new AppError('App must have a GitHub URL configured to use Coder', 400, 'NO_GITHUB');
-  }
+  assertHasSource(app);
 
   const logs = [];
   const onLog = (msg) => {
@@ -256,6 +269,20 @@ router.get('/:slug/container', (req, res) => {
   });
 });
 
+// The release feed a Crane-hosted app has: none. Same shape
+// fetchReleasesAndChangelog returns, so both the JSON consumer and
+// renderReleasesPage (which already handles zero releases and an `error`
+// banner) need no special case.
+function craneHostedReleaseFeed() {
+  return {
+    repo: null,
+    releases: [],
+    changelog: null,
+    fetchedAt: new Date().toISOString(),
+    error: 'This app is Crane-hosted — its source lives on AppCrane, not GitHub, so there are no GitHub releases to show.',
+  };
+}
+
 // ── GET /api/coder/:slug/releases — JSON release feed ───────────────────
 //
 // Returns { repo, releases, changelog, fetchedAt }. Pulls GitHub Releases
@@ -264,10 +291,13 @@ router.get('/:slug/container', (req, res) => {
 router.get('/:slug/releases', async (req, res, next) => {
   try {
     const app = getApp(req.params.slug, req.user);
-    if (!app.github_url) {
+    if (!app.github_url && !usesLocalRepo(app)) {
       return res.status(400).json({ error: 'App has no GitHub repository connected.' });
     }
-    const data = await fetchReleasesAndChangelog(app);
+    // A Crane-hosted app has no GitHub releases to fetch, and asking GitHub
+    // about a repo that is not there is a request with no possible answer.
+    // An empty feed says so without turning the panel into an error.
+    const data = usesLocalRepo(app) ? craneHostedReleaseFeed() : await fetchReleasesAndChangelog(app);
     res.json({ ...data, app: { slug: app.slug, name: app.name, github_url: app.github_url } });
   } catch (err) { next(err); }
 });
@@ -280,11 +310,11 @@ router.get('/:slug/releases', async (req, res, next) => {
 router.get('/:slug/releases/view', async (req, res, next) => {
   try {
     const app = getApp(req.params.slug, req.user);
-    if (!app.github_url) {
+    if (!app.github_url && !usesLocalRepo(app)) {
       res.set('Content-Type', 'text/html; charset=utf-8');
       return res.status(400).send('<p style="color:#fca5a5;font-family:sans-serif;padding:20px">App has no GitHub repository connected.</p>');
     }
-    const data = await fetchReleasesAndChangelog(app);
+    const data = usesLocalRepo(app) ? craneHostedReleaseFeed() : await fetchReleasesAndChangelog(app);
     const html = renderReleasesPage({ app, ...data });
     res.set('Content-Type', 'text/html; charset=utf-8');
     res.set('X-Content-Type-Options', 'nosniff');

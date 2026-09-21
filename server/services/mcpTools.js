@@ -3444,14 +3444,15 @@ const TOOLS = [
     name: 'appcrane_push_to_managed_app',
     description:
       'Push a batch of files to a managed app\'s AMC_<slug> repo, authenticated server-side via AppCrane\'s service-account credential. Use this — NOT github_push_files — for managed apps, because github_* tools authenticate with the caller\'s personal PAT, which has zero access to the service account\'s repos. Multiple files become a single commit. files: [{ path, content, encoding? }] where encoding defaults to "utf-8" (use "base64" for binaries like icons). Requires the app to already exist via appcrane_create_managed_app. v2.7.22: response now includes per-file `sha256` (hex) and decoded `bytes` length so you can verify integrity — compute the SHA-256 of the bytes you sent, compare to the server\'s echo, and fail loudly if they differ. Essential for binary files where inline-string truncation or trailing-byte issues would otherwise produce a silently-broken commit. ' +
-      'v2.10.7: for a large CODE file, do NOT inline it — upload the bytes over HTTP and commit by token. (1) ' + '`' + 'curl -F file=@big.js -H "X-API-Key: <your dhk_mcp_ key>" https://<host>/api/files/staged' + '`' + ' returns { token, sha256, size_bytes }. (2) Pass that file as { path, staged_token } instead of { path, content }. The server reads the staged bytes and commits them verbatim, so 100+ KB sources push reliably without the model having to emit the content (which is where inline truncation comes from). Per file, provide exactly one of content or staged_token. Staged tokens are owner-scoped and expiring.',
+      'v2.10.7: for a large CODE file, do NOT inline it — upload the bytes over HTTP and commit by token. (1) ' + '`' + 'curl -F file=@big.js -H "X-API-Key: <your dhk_mcp_ key>" https://<host>/api/files/staged' + '`' + ' returns { token, sha256, size_bytes }. (2) Pass that file as { path, staged_token } instead of { path, content }. The server reads the staged bytes and commits them verbatim, so 100+ KB sources push reliably without the model having to emit the content (which is where inline truncation comes from). Per file, provide exactly one of content or staged_token. Staged tokens are owner-scoped and expiring. ' +
+      'DELETIONS: pass `deletions: ["old/path.js", ...]` to remove files in the SAME commit as the writes. Crane-hosted apps only (a GitHub-backed managed app is refused — GitHub\'s contents API cannot express a deletion). For a pure deletion send files: []. Every deleted path must already exist on the branch (a typo is refused by name, never a silent no-op), no path may appear in both files and deletions, and a push that would leave the repository with no files at all is refused. The response echoes what was removed as `deleted`.',
     inputSchema: {
       type: 'object',
       properties: {
         slug:    { type: 'string', description: 'Managed app slug. Repo name resolved as AMC_<slug>.' },
         files:   {
           type: 'array',
-          minItems: 1,
+          minItems: 0,
           maxItems: 200,
           items: {
             type: 'object',
@@ -3464,6 +3465,12 @@ const TOOLS = [
             required: ['path'],
             additionalProperties: false,
           },
+        },
+        deletions: {
+          type: 'array',
+          maxItems: 200,
+          items: { type: 'string', description: 'Repo-relative path to delete (no leading slash, no ..). Must already exist on the branch.' },
+          description: 'Paths to remove in this same commit. Crane-hosted (repo_backend=local) apps only. Combine with files, or send files: [] for a pure deletion.',
         },
         message: { type: 'string', description: 'Commit message. Defaults to "chore: scaffolding for <slug>".' },
         branch:  { type: 'string', description: 'Target branch. Defaults to the repo\'s default branch (usually "main").' },
@@ -3491,10 +3498,14 @@ const TOOLS = [
       const db = getDb();
       const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
       const consumedTokens = [];
-      let resolvedFiles = args.files;
-      if (args.files.some((f) => typeof f.staged_token === 'string' && f.staged_token)) {
+      // files may be [] when this push is only deletions; managedRepo refuses a
+      // push that is empty on both counts.
+      const inputFiles = Array.isArray(args.files) ? args.files : [];
+      const deletions = Array.isArray(args.deletions) ? args.deletions : [];
+      let resolvedFiles = inputFiles;
+      if (inputFiles.some((f) => typeof f.staged_token === 'string' && f.staged_token)) {
         const { readFileSync } = await import('fs');
-        resolvedFiles = args.files.map((f) => {
+        resolvedFiles = inputFiles.map((f) => {
           const hasInline = typeof f.content === 'string';
           const hasStaged = typeof f.staged_token === 'string' && f.staged_token.length > 0;
           if (hasStaged && hasInline) throw new Error(`File '${f.path}': provide either content or staged_token, not both`);
@@ -3518,6 +3529,7 @@ const TOOLS = [
       const result = await pushFilesToManagedRepo(app, resolvedFiles, {
         message: args.message,
         branch:  args.branch || app.branch,
+        deletions,
         actorId: user.id,
       });
       // v2.10.2: record the SHA we just authored+pushed so the next deploy's
@@ -3536,12 +3548,13 @@ const TOOLS = [
           try { db.prepare("UPDATE staged_files SET pushed_at = datetime('now') WHERE token = ?").run(row.token); } catch (_) {}
         }
       }
-      log.info(`MCP: pushed ${result.files.length} file(s) to managed repo AMC_${app.slug} (commit ${result.commit.sha.slice(0, 7)}) by user ${user.id}${consumedTokens.length ? ` [${consumedTokens.length} staged]` : ''}`);
+      log.info(`MCP: pushed ${result.files.length} file(s)${result.deleted?.length ? ` and deleted ${result.deleted.length}` : ''} to managed repo AMC_${app.slug} (commit ${result.commit.sha.slice(0, 7)}) by user ${user.id}${consumedTokens.length ? ` [${consumedTokens.length} staged]` : ''}`);
       return {
         app:     app.slug,
         ...managedCommitView(result),
         branch:  result.branch,
         files:   result.files,
+        ...(result.deleted ? { deleted: result.deleted } : {}),
         message: result.message,
         ...pushDeployView(app.slug, result, `Files pushed. Next: appcrane_deploy slug="${app.slug}" stage="sandbox" to ship.`),
       };
