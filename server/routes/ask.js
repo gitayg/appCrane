@@ -6,6 +6,7 @@ import { getDb } from '../db.js';
 import { hashApiKey } from '../services/encryption.js';
 import { AppError } from '../utils/errors.js';
 import { runAskJob, hasActiveContainer } from '../services/askClaude.js';
+import { agentCredentialKind, NO_CREDENTIAL_MESSAGE } from '../services/llm/runAgent.js';
 import { usesLocalRepo } from '../services/managedRepo.js';
 import { ensureCodebaseContext } from '../services/appstudio/contextBuilder.js';
 import { mirrorAsk } from '../services/github/issuesMirror.js';
@@ -54,10 +55,6 @@ router.post('/:appSlug', async (req, res) => {
   const user = resolveUser(req);
   if (!user) throw new AppError('Authentication required', 401, 'UNAUTHORIZED');
 
-  if (!process.env.ANTHROPIC_API_KEY) {
-    throw new AppError('ANTHROPIC_API_KEY not configured', 503, 'NOT_CONFIGURED');
-  }
-
   const db = getDb();
   const app = db.prepare('SELECT * FROM apps WHERE slug = ?').get(req.params.appSlug);
   if (!app) throw new AppError('App not found', 404, 'NOT_FOUND');
@@ -67,6 +64,16 @@ router.post('/:appSlug', async (req, res) => {
   if (user.role !== 'admin' && user.role !== 'platform_admin') {
     const access = db.prepare('SELECT 1 FROM app_users WHERE app_id = ? AND user_id = ?').get(app.id, user.userId);
     if (!access) throw new AppError('Access denied', 403, 'FORBIDDEN');
+  }
+
+  // A dispatch needs exactly ONE credential and there are three sources:
+  // the caller's own Claude subscription token, the app's uploaded
+  // credentials.json, or the platform ANTHROPIC_API_KEY. This used to gate on
+  // the platform key alone, which refused callers who had one of the other two.
+  // Checked AFTER the access check so a caller with no access to the app
+  // learns nothing about how the platform is credentialed.
+  if (agentCredentialKind({ actingUserId: user.userId, appSlug: app.slug }) === 'none') {
+    throw new AppError(NO_CREDENTIAL_MESSAGE, 503, 'NOT_CONFIGURED');
   }
 
   const { question, session_id } = req.body || {};

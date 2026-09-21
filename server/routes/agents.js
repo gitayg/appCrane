@@ -13,6 +13,7 @@ import { execFileSync } from 'child_process';
 import { getDb } from '../db.js';
 import { hashApiKey } from '../services/encryption.js';
 import { AppError } from '../utils/errors.js';
+import { agentCredentialKind, NO_CREDENTIAL_MESSAGE } from '../services/llm/runAgent.js';
 import { auditMiddleware } from '../middleware/audit.js';
 import { commitAndPush } from '../services/builder/gitOps.js';
 import { credentialsInfo } from '../services/claudeCredentials.js';
@@ -268,10 +269,17 @@ router.get('/apps', (req, res) => {
 router.post('/', auditMiddleware('agents.create'), async (req, res) => {
   const { name: appSlug } = req.body || {};
   if (!appSlug?.trim()) throw new AppError('name (app slug) is required', 400, 'VALIDATION');
-  if (!process.env.ANTHROPIC_API_KEY) throw new AppError('ANTHROPIC_API_KEY not configured', 503, 'NOT_CONFIGURED');
-
   const app = getAppForSlug(appSlug.trim());
   requireAppAccess(app, req.user);
+  // A dispatch needs exactly ONE credential and there are three sources:
+  // the caller's own Claude subscription token, the app's uploaded
+  // credentials.json, or the platform ANTHROPIC_API_KEY. This used to gate on
+  // the platform key alone, which refused callers who had one of the other two.
+  // Checked AFTER requireAppAccess so a caller with no access to the app
+  // learns nothing about how the platform is credentialed.
+  if (agentCredentialKind({ actingUserId: req.user.id, appSlug: app.slug }) === 'none') {
+    throw new AppError(NO_CREDENTIAL_MESSAGE, 503, 'NOT_CONFIGURED');
+  }
   if (!app.github_url) throw new AppError('App must have a GitHub URL to use Studio', 400, 'NO_GITHUB');
 
   const logs = [];

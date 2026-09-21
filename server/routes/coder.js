@@ -13,6 +13,7 @@ import {
   evictApp,
 } from '../services/builder/builderSession.js';
 import { getContainer } from '../services/builder/appContainer.js';
+import { agentCredentialKind, NO_CREDENTIAL_MESSAGE } from '../services/llm/runAgent.js';
 import { usesLocalRepo } from '../services/managedRepo.js';
 import { getQueueState, subscribeQueue } from '../services/builder/appQueue.js';
 import { fetchReleasesAndChangelog, renderReleasesPage } from '../services/github/releases.js';
@@ -96,8 +97,12 @@ function getSession(sessionId, slug) {
 
 router.post('/:slug/session', auditMiddleware('coder.start'), async (req, res) => {
   const app = getApp(req.params.slug, req.user);
-  if (!process.env.ANTHROPIC_API_KEY) {
-    throw new AppError('ANTHROPIC_API_KEY not configured', 503, 'NOT_CONFIGURED');
+  // A dispatch needs exactly ONE credential and there are three sources:
+  // the caller's own Claude subscription token, the app's uploaded
+  // credentials.json, or the platform ANTHROPIC_API_KEY. This used to gate on
+  // the platform key alone, which refused callers who had one of the other two.
+  if (agentCredentialKind({ actingUserId: req.user.id, appSlug: app.slug }) === 'none') {
+    throw new AppError(NO_CREDENTIAL_MESSAGE, 503, 'NOT_CONFIGURED');
   }
   assertHasSource(app);
 

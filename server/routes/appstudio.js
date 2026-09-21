@@ -6,6 +6,7 @@ import { decrypt } from '../services/encryption.js';
 import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { auditMiddleware } from '../middleware/audit.js';
 import { AppError } from '../utils/errors.js';
+import { agentCredentialKind, NO_CREDENTIAL_MESSAGE } from '../services/llm/runAgent.js';
 import log from '../utils/logger.js';
 
 /**
@@ -104,8 +105,18 @@ router.post('/:id/plan', requireAdmin, auditMiddleware('appstudio.plan'), (req, 
   const enh = db.prepare('SELECT * FROM enhancement_requests WHERE id = ?').get(req.params.id);
   if (!enh) throw new AppError('Enhancement not found', 404, 'NOT_FOUND');
 
-  if (!process.env.ANTHROPIC_API_KEY) {
-    throw new AppError('ANTHROPIC_API_KEY not configured. Add it to .env and restart.', 503, 'NOT_CONFIGURED');
+  // A dispatch needs exactly ONE credential and there are three sources:
+  // the caller's own Claude subscription token, the app's uploaded
+  // credentials.json, or the platform ANTHROPIC_API_KEY. This used to gate on
+  // the platform key alone, which refused callers who had one of the other two.
+  //
+  // CAVEAT (v2.81.0): the enhancement worker in server/index.js still starts
+  // only when ANTHROPIC_API_KEY is set, because at boot there is no acting user
+  // to look a token up for. On a platform with no API key this route now
+  // ACCEPTS the job and the worker is not running to drain it. See the worker
+  // start gate in server/index.js.
+  if (agentCredentialKind({ actingUserId: req.user.id, appSlug: enh.app_slug }) === 'none') {
+    throw new AppError(NO_CREDENTIAL_MESSAGE, 503, 'NOT_CONFIGURED');
   }
 
   db.prepare("UPDATE enhancement_requests SET mode = 'auto', status = 'planning' WHERE id = ?")

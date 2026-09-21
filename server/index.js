@@ -1014,8 +1014,9 @@ app.use('/api/settings', settingsRoutes); // General settings (branding, etc.)
 // /api/me), and requireAuth only accepts Bearer / X-API-Key — so a
 // cookie-only request to /api/me was 401'd before me.js's cookie handler
 // could run. Mounting meRoutes first lets GET /api/me match meRoutes,
-// and /api/me/mcp-keys/* still falls through to userMcpKeysRoutes
-// (meRoutes only matches GET /me).
+// and /api/me/mcp-keys/* still falls through to userMcpKeysRoutes: meRoutes
+// matches GET /me and the three /me/claude-token methods, none of which
+// collide with /me/mcp-keys/*.
 app.use('/api', meRoutes);               // /api/me — proxied-app identity endpoint (cookie/Bearer/X-API-Key)
 app.use('/api', userMcpKeysRoutes);      // /api/me/mcp-keys — personal MCP keys
 app.use('/api/files', filesRoutes);      // /api/files/staged — staged uploads for MCP-E
@@ -1491,6 +1492,16 @@ app.listen(PORT, HOST, async () => {
     const { startHealthChecker } = await import('./services/healthChecker.js');
     startHealthChecker();
 
+    // Deliberately still keyed on the platform API key (v2.81.0). Every other
+    // AI entry point now accepts the acting user's own Claude subscription
+    // token, but this is a background queue: at boot there is no acting user,
+    // and a per-user token that appears (or is revoked) after boot would not
+    // move a gate that is only read once. Starting the worker on "some user
+    // somewhere has a token" would be a guess, not a check — so the honest
+    // state is that an enhancement queued against a user token alone sits
+    // unprocessed on a platform with no ANTHROPIC_API_KEY. Fixing it properly
+    // means the worker resolving a credential PER JOB (from
+    // enhancement_requests.user_id) and starting unconditionally.
     if (process.env.ANTHROPIC_API_KEY) {
       const { startWorker } = await import('./services/appstudio/worker.js');
       startWorker();

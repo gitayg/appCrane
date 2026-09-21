@@ -416,12 +416,18 @@ async function runBuilderTurn(sessionId, state, prompt) {
   }
 
   return new Promise((resolveRun) => {
+    // actingUserId is what lets this turn run on the session owner's own Claude
+    // subscription: runAgentExec resolves user token -> app credentials -> platform
+    // key and sends exactly one of them. Without it the stored token is never
+    // reached and every turn falls back to the platform key.
+    const ownerId = getDb().prepare('SELECT user_id FROM coder_sessions WHERE id = ?').get(sessionId)?.user_id ?? null;
     const runner = runAgentExec({
       containerId:  c.containerId,
       prompt:       augmentedPrompt,
       apiKey:       process.env.ANTHROPIC_API_KEY,
       resume:       c.claudeSessionId || undefined,
       hasAppCredentials: !!c.credsCleanup,
+      actingUserId: ownerId,
     });
     state.runner = runner;
 

@@ -18,11 +18,131 @@ import { spawn } from 'child_process';
 import { EventEmitter } from 'events';
 import { parseLine } from '../builder/streamJsonParser.js';
 import { prepareSkillsMount } from '../skills.js';
-import { prepareClaudeCredentialsMount } from '../claudeCredentials.js';
+import { prepareClaudeCredentialsMount, credentialsInfo } from '../claudeCredentials.js';
+import { getUserClaudeToken, userClaudeTokenMeta } from '../userClaudeToken.js';
 import log from '../../utils/logger.js';
 
 const DEFAULT_MODEL   = process.env.APPSTUDIO_CODER_MODEL || 'claude-sonnet-4-6';
 const DEFAULT_TIMEOUT = parseInt(process.env.CODER_TIMEOUT_MS || '1800000', 10);
+
+// ── credential precedence ───────────────────────────────────────────────────
+//
+// Anthropic documents Claude Code's auth precedence, highest first:
+//   (2) ANTHROPIC_AUTH_TOKEN  (3) ANTHROPIC_API_KEY  (4) apiKeyHelper
+//   (5) CLAUDE_CODE_OAUTH_TOKEN  (7) subscription OAuth from `claude /login`
+//   — https://code.claude.com/docs/en/authentication
+//
+// So CLAUDE_CODE_OAUTH_TOKEN ranks BELOW ANTHROPIC_API_KEY. A container handed
+// both uses the API key and silently ignores the user's subscription — the same
+// failure the credentials.json mount already documents in runAgentNew ("Credit
+// balance is too low" billed against the wrong account). The only safe rule is
+// therefore: exactly one credential reaches the container, chosen here, once,
+// for every caller.
+//
+// AppCrane's order, highest first:
+//   1. 'user_oauth'       — the acting user's Claude subscription token, passed
+//                           as CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`)
+//   2. 'app_credentials'  — the app's uploaded credentials.json, bind-mounted
+//   3. 'api_key'          — the platform ANTHROPIC_API_KEY
+//   4. 'none'             — nothing usable; callers refuse the request
+export const CREDENTIAL_KINDS = ['user_oauth', 'app_credentials', 'api_key', 'none'];
+
+/**
+ * What every caller says when agentCredentialKind() comes back 'none'. One
+ * string so the three ways out are always listed together — before v2.81.0
+ * each gate named only ANTHROPIC_API_KEY and refused callers who had a
+ * perfectly good credential of their own.
+ */
+export const NO_CREDENTIAL_MESSAGE =
+  'No Claude credential available. Connect your Claude subscription on your profile, '
+  + 'upload credentials.json for this app, or configure ANTHROPIC_API_KEY on the platform.';
+
+function platformApiKey(apiKey) {
+  // `undefined` means "caller didn't say" → fall back to the platform key.
+  // An explicit '' or null means "deliberately no key".
+  return (apiKey === undefined ? process.env.ANTHROPIC_API_KEY : apiKey) || '';
+}
+
+// A credential lookup must never turn a dispatch into a 500. If the store is
+// unreadable we fall through to the next credential instead, and say so. These
+// messages are about the STORE (missing table, bad ENCRYPTION_KEY) and never
+// carry the secret itself.
+function probe(what, fn) {
+  try { return fn(); } catch (err) {
+    log.warn(`[agent] ${what} unavailable: ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * Which credential a dispatch will use — decided from PRESENCE only, so this is
+ * safe to call from a route gate: it reads no secret value.
+ *
+ * `deps` is the injection point (also used by the tests) for the two presence
+ * lookups; production callers pass nothing.
+ */
+export function agentCredentialKind({
+  actingUserId      = null,
+  appSlug           = null,
+  oauthToken        = null,
+  hasAppCredentials = null,   // exec-mode callers already know; null = look it up
+  apiKey            = undefined,
+} = {}, deps = {}) {
+  const tokenMeta = deps.userClaudeTokenMeta || userClaudeTokenMeta;
+  const appCreds  = deps.credentialsInfo     || credentialsInfo;
+
+  if (oauthToken) return 'user_oauth';
+  if (actingUserId !== null && actingUserId !== undefined) {
+    if (probe('user Claude token', () => tokenMeta(actingUserId))?.present) return 'user_oauth';
+  }
+  if (hasAppCredentials === true) return 'app_credentials';
+  if (hasAppCredentials === null && appSlug) {
+    if (probe(`app credentials for ${appSlug}`, () => appCreds(appSlug))?.present) return 'app_credentials';
+  }
+  if (platformApiKey(apiKey)) return 'api_key';
+  return 'none';
+}
+
+/**
+ * The same decision, plus the secret it needs:
+ *   { kind: 'user_oauth',      oauthToken }
+ *   { kind: 'app_credentials' }            — the value is a bind-mounted file
+ *   { kind: 'api_key',         apiKey }
+ *   { kind: 'none' }
+ *
+ * Never log the return value.
+ */
+export function resolveAgentCredential(opts = {}, deps = {}) {
+  const kind = agentCredentialKind(opts, deps);
+  if (kind === 'user_oauth') {
+    const read = deps.getUserClaudeToken || getUserClaudeToken;
+    const token = opts.oauthToken
+      || probe('user Claude token', () => read(opts.actingUserId));
+    if (token) return { kind, oauthToken: token };
+    // Presence said yes and the read came back empty (rotated out mid-flight,
+    // unreadable ciphertext). Decide again without it rather than dispatch a
+    // container with no credential at all.
+    return resolveAgentCredential({ ...opts, actingUserId: null, oauthToken: null }, deps);
+  }
+  if (kind === 'app_credentials') return { kind };
+  if (kind === 'api_key') return { kind, apiKey: platformApiKey(opts.apiKey) };
+  return { kind: 'none' };
+}
+
+/**
+ * Remove secret values from anything on its way to a log line, an Error or a
+ * stream event. Split/join rather than a RegExp so no escaping of the secret is
+ * needed. Callers scrub whole LINES (never raw chunks) so a value can't survive
+ * by straddling a chunk boundary.
+ */
+function scrubSecrets(text, secrets) {
+  let out = String(text);
+  if (!secrets?.length) return out;
+  for (const s of secrets) {
+    if (s) out = out.split(s).join('[redacted]');
+  }
+  return out;
+}
 
 function shellQuote(str) {
   // Single-quote for sh -c, escaping any embedded single quotes.
@@ -126,38 +246,57 @@ function buildClaudeCmd({ prompt, model, resume, addDir = '/workspace', systemPr
 }
 
 // Common stdout pipeline: line-buffer NDJSON, parse each line, emit events.
+//
+// Both streams are scrubbed a WHOLE LINE AT A TIME. A credential can't contain
+// a newline, so line-at-a-time is the granularity at which a replace is
+// guaranteed to see the value intact — scrubbing raw chunks would miss a token
+// that happened to straddle two reads, and neither an agent's stdout (it can
+// run `env`) nor its stderr is trusted to keep the value to itself.
 function attachStdoutParser(child, emitter) {
+  const secrets = emitter._secrets || [];
   let buf = '';
   child.stdout.on('data', (chunk) => {
     buf += chunk.toString();
     const lines = buf.split('\n');
     buf = lines.pop(); // keep partial line
     for (const line of lines) {
-      const ev = parseLine(line);
+      const ev = parseLine(scrubSecrets(line, secrets));
       if (!ev) continue;
       if (ev.type === 'system') emitter.emit('system', ev);
       else if (ev.type === 'result') emitter.emit('result', ev);
       else emitter.emit('data', ev);
     }
   });
-  child.stderr.on('data', (chunk) => {
-    const t = chunk.toString().trim();
+
+  // Capture the last few stderr lines on the emitter so the exit handler can
+  // surface them in error messages (e.g. exit-125 → image missing).
+  const takeStderrLine = (raw) => {
+    const t = scrubSecrets(raw, secrets).trim();
     if (!t) return;
     log.debug(`[agent] stderr: ${t}`);
-    // Capture last few stderr lines on the emitter so the exit handler
-    // can surface them in error messages (e.g. exit-125 → image missing).
     if (Array.isArray(emitter._stderrTail)) {
-      for (const line of t.split('\n')) {
-        emitter._stderrTail.push(line);
-        if (emitter._stderrTail.length > 20) emitter._stderrTail.shift();
-      }
+      emitter._stderrTail.push(t);
+      if (emitter._stderrTail.length > 20) emitter._stderrTail.shift();
     }
+  };
+  let errBuf = '';
+  child.stderr.on('data', (chunk) => {
+    errBuf += chunk.toString();
+    const lines = errBuf.split('\n');
+    errBuf = lines.pop();
+    for (const line of lines) takeStderrLine(line);
+  });
+  child.stderr.on('end', () => {
+    if (errBuf) { takeStderrLine(errBuf); errBuf = ''; }
   });
 }
 
 class Agent extends EventEmitter {
-  constructor(dockerArgs, timeoutMs) {
+  constructor(dockerArgs, timeoutMs, secrets = []) {
     super();
+    // Values that must not reach a log line, an Error, a stream event or the
+    // stderr tail. Today that is the caller's CLAUDE_CODE_OAUTH_TOKEN.
+    this._secrets    = secrets.filter(Boolean);
     this._dockerArgs = dockerArgs;
     this._timeoutMs  = timeoutMs;
     this._child      = null;
@@ -169,7 +308,13 @@ class Agent extends EventEmitter {
   }
 
   /** Last ~20 lines of docker/agent stderr — useful for diagnosing nonzero exit codes. */
-  getStderrTail() { return this._stderrTail.slice(); }
+  getStderrTail() { return this._stderrTail.map((l) => scrubSecrets(l, this._secrets)); }
+
+  /**
+   * The argv this agent will hand to docker. It CONTAINS the credential, so
+   * this is for tests and in-process assertions only — never log it.
+   */
+  getDockerArgs() { return this._dockerArgs.slice(); }
 
   // Register a cleanup callback that runs exactly once on exit/error/stop.
   // Used by skills mount preparation to remove the per-call symlink dir.
@@ -233,23 +378,32 @@ export function runAgentExec({
   timeoutMs    = DEFAULT_TIMEOUT,
   hasAppCredentials = false,  // when true, omit ANTHROPIC_API_KEY so the
                               // mounted ~/.claude/credentials.json wins
+  actingUserId = null,        // whose subscription this dispatch bills to
+  oauthToken   = null,        // an already-resolved CLAUDE_CODE_OAUTH_TOKEN
+  credentialDeps = {},        // injection point for resolveAgentCredential
 }) {
+  // One decision, shared with runAgentNew — see the precedence block above.
+  const cred = resolveAgentCredential(
+    { actingUserId, oauthToken, hasAppCredentials, apiKey }, credentialDeps,
+  );
   const args = [
     'exec', '-i',
     '--workdir', workdir,
     '-e', `HOME=${homeDir}`,
   ];
-  // Same precedence rule as runAgentNew — see comment there. Passing the
-  // env var makes Claude CLI prefer the API key over the OAuth file.
-  if (!hasAppCredentials) {
-    args.push('-e', `ANTHROPIC_API_KEY=${apiKey}`);
+  if (cred.kind === 'user_oauth') {
+    // ANTHROPIC_API_KEY deliberately absent: it outranks CLAUDE_CODE_OAUTH_TOKEN,
+    // so setting both would bill the platform key and ignore the subscription.
+    args.push('-e', `CLAUDE_CODE_OAUTH_TOKEN=${cred.oauthToken}`);
+  } else if (cred.kind !== 'app_credentials') {
+    args.push('-e', `ANTHROPIC_API_KEY=${cred.apiKey || ''}`);
   }
   // Preflight what we expect to be mounted in the container that was
   // started by appContainer.startContainer. This catches mode/uid issues
   // (umask-stripped perms, wrong owner) before claude swallows EACCES
   // and emits a misleading "Not logged in" / generic auth error.
   const preflight = [{ path: workdir, mode: 'dw', label: 'Workspace' }];
-  if (hasAppCredentials) {
+  if (cred.kind === 'app_credentials') {
     preflight.push({ path: `${homeDir}/.claude/credentials.json`, mode: 'rw', label: 'Claude credentials' });
   }
   args.push(
@@ -257,7 +411,7 @@ export function runAgentExec({
     'sh', '-c',
     buildClaudeCmd({ prompt, model, resume, addDir, systemPrompt, preflight }),
   );
-  return new Agent(args, timeoutMs);
+  return new Agent(args, timeoutMs, [cred.oauthToken]);
 }
 
 // ── run mode — used by enhancement coder + Ask (fresh container per job) ──
@@ -282,6 +436,9 @@ export function runAgentNew({
   addDir        = '/workspace',
   homeDir       = '/home/studio',
   appSlug,                               // scopes which skills get bind-mounted; required for skill loading
+  actingUserId  = null,                  // whose subscription this dispatch bills to
+  oauthToken    = null,                  // an already-resolved CLAUDE_CODE_OAUTH_TOKEN
+  credentialDeps = {},                   // injection point for resolveAgentCredential
 }) {
   if (!image) throw new Error('runAgentNew: image required');
   if (!workspaceDir) throw new Error('runAgentNew: workspaceDir required');
@@ -307,22 +464,31 @@ export function runAgentNew({
   const preflight = [
     { path: workdir, mode: workspaceMode === 'ro' ? 'd' : 'dw', label: 'Workspace' },
   ];
-  // If the app has its own Claude OAuth credentials, mount the file AND
-  // suppress ANTHROPIC_API_KEY entirely — Claude Code's auth precedence
-  // is API key > credentials.json, so leaving the env var set means the
-  // global key wins and the operator's per-app subscription is ignored
+  // One decision, shared with runAgentExec — see the precedence block above.
+  // Whichever credential wins, the other two are left off the container:
+  // Claude Code's auth precedence is API key > credentials.json > OAuth token,
+  // so any second credential silently outranks the one the caller meant to use
   // (manifested as "Credit balance is too low" against the wrong account).
-  const credsMount = prepareClaudeCredentialsMount(appSlug);
-  if (credsMount) {
-    // Mount at BOTH the legacy ~/.claude/credentials.json AND the
-    // newer dot-prefixed ~/.claude/.credentials.json — recent Claude
-    // Code releases switched paths and we don't want a CLI version
-    // upgrade in the studio image to silently break auth.
-    args.push('-v', `${credsMount.tmpFile}:${homeDir}/.claude/credentials.json`);
-    args.push('-v', `${credsMount.tmpFile}:${homeDir}/.claude/.credentials.json`);
-    preflight.push({ path: `${homeDir}/.claude/credentials.json`, mode: 'rw', label: 'Claude credentials' });
+  const cred = resolveAgentCredential({ actingUserId, oauthToken, appSlug, apiKey }, credentialDeps);
+  let credsMount = null;
+  if (cred.kind === 'user_oauth') {
+    args.push('-e', `CLAUDE_CODE_OAUTH_TOKEN=${cred.oauthToken}`);
   } else {
-    args.push('-e', `ANTHROPIC_API_KEY=${apiKey || ''}`);
+    credsMount = cred.kind === 'app_credentials' ? prepareClaudeCredentialsMount(appSlug) : null;
+    if (credsMount) {
+      // Mount at BOTH the legacy ~/.claude/credentials.json AND the
+      // newer dot-prefixed ~/.claude/.credentials.json — recent Claude
+      // Code releases switched paths and we don't want a CLI version
+      // upgrade in the studio image to silently break auth.
+      args.push('-v', `${credsMount.tmpFile}:${homeDir}/.claude/credentials.json`);
+      args.push('-v', `${credsMount.tmpFile}:${homeDir}/.claude/.credentials.json`);
+      preflight.push({ path: `${homeDir}/.claude/credentials.json`, mode: 'rw', label: 'Claude credentials' });
+    } else {
+      // Includes the 'app_credentials' row that turned out to be unreadable —
+      // prepareClaudeCredentialsMount logs and returns null, and the platform
+      // key is still better than dispatching with nothing.
+      args.push('-e', `ANTHROPIC_API_KEY=${platformApiKey(apiKey)}`);
+    }
   }
   for (const [k, v] of Object.entries(envVars)) args.push('-e', `${k}=${v}`);
   args.push('-v', `${workspaceDir}:/workspace${workspaceMode === 'ro' ? ':ro' : ''}`);
@@ -343,7 +509,7 @@ export function runAgentNew({
   }
 
   args.push(image, 'sh', '-c', buildClaudeCmd({ prompt, model, resume, addDir, systemPrompt, preflight }));
-  const agent = new Agent(args, timeoutMs);
+  const agent = new Agent(args, timeoutMs, [cred.oauthToken]);
   if (credsMount)  agent.registerCleanup(credsMount.cleanup);
   if (skillsMount) agent.registerCleanup(skillsMount.cleanup);
   return agent;

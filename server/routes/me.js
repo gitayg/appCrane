@@ -28,6 +28,13 @@ import { getDb } from '../db.js';
 import { hashApiKey } from '../services/encryption.js';
 import { roleKeysForUser } from '../services/appDefinedRoles.js';
 import { AppError } from '../utils/errors.js';
+import { auditMiddleware } from '../middleware/audit.js';
+import {
+  userClaudeTokenMeta,
+  setUserClaudeToken,
+  clearUserClaudeToken,
+  validateUserClaudeToken,
+} from '../services/userClaudeToken.js';
 
 const router = Router();
 
@@ -161,6 +168,60 @@ router.get('/directory', (req, res) => {
     "SELECT name, email FROM users WHERE active = 1 AND email IS NOT NULL AND email != '' ORDER BY name"
   ).all();
   res.json({ users, count: users.length });
+});
+
+/**
+ * /api/me/claude-token — the caller's own Claude subscription token.
+ *
+ * Anthropic's `claude setup-token` prints a one-year OAuth token and stores it
+ * nowhere; it is consumed as CLAUDE_CODE_OAUTH_TOKEN. Holding one per user is
+ * what lets an agent session bill the subscription of the person who started
+ * it instead of a platform-wide API key.
+ *
+ * THE WHOLE SECURITY MODEL IS ONE LINE: every handler below passes
+ * `req.user.id` and nothing else to the store. There is deliberately no
+ * `:userId` path parameter, no `user_id` body field and no `?user=` query — an
+ * unused parameter is a parameter someone wires up later. A platform admin has
+ * no route here either: this is a personal credential to a THIRD PARTY's
+ * subscription, not platform data, and an admin who could read it could spend
+ * someone's Max plan and, on Anthropic's side, act as them. Admin power over
+ * this token stops at deleting the user, which cascades the row away (097).
+ *
+ * Write-only. GET answers `{ present, expiresAt }`; no route returns the token
+ * and nothing here logs it — auditMiddleware redacts any key named `token`
+ * (utils/auditRedact.js) and the 400 messages never quote what was rejected.
+ */
+
+// Resolve the caller the same way /me does (cookie -> Bearer -> X-API-Key) and
+// publish them as req.user so auditMiddleware attributes the entry. 401 before
+// any body is looked at.
+function requireMe(req, res, next) {
+  const user = authedUser(getDb(), req);
+  if (!user) throw new AppError('Authentication required', 401, 'UNAUTHORIZED');
+  req.user = user;
+  next();
+}
+
+router.get('/me/claude-token', requireMe, (req, res) => {
+  res.json(userClaudeTokenMeta(req.user.id));
+});
+
+router.put('/me/claude-token', requireMe, auditMiddleware('user-claude-token-set'), (req, res) => {
+  const token = req.body?.token;
+  // Checked here so the caller gets a 400 with the reason rather than the
+  // store's 500, and checked AGAIN inside setUserClaudeToken so no other
+  // caller can bypass it. The reason string is built from the shape of the
+  // value, never from its bytes.
+  const reason = validateUserClaudeToken(token);
+  if (reason) throw new AppError(reason, 400, 'INVALID_TOKEN');
+
+  const meta = setUserClaudeToken(req.user.id, token, req.body?.expires_at ?? null);
+  res.json(meta);
+});
+
+router.delete('/me/claude-token', requireMe, auditMiddleware('user-claude-token-clear'), (req, res) => {
+  const removed = clearUserClaudeToken(req.user.id);
+  res.json({ removed, present: false, expiresAt: null });
 });
 
 export default router;

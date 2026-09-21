@@ -130,9 +130,21 @@ permissions + sudoers**, which is the most-missed step and later surfaces as
 permission errors or apps that never receive their identity headers. If you must,
 treat [`install.sh`](install.sh) as the source of truth rather than a shortened list.
 
-> **AppStudio (optional):** to enable AI app-building, set an Anthropic API key —
-> `systemctl edit appcrane --force`, add `Environment="ANTHROPIC_API_KEY=sk-ant-..."`
-> under `[Service]`, then `systemctl daemon-reload && systemctl restart appcrane`.
+> **AI sessions (optional).** A coder session runs on whichever credential is
+> available, in this order: **the signed-in user's own Claude subscription**, then
+> the app's stored credentials, then a platform API key. Exactly one is ever sent
+> to the container — Anthropic ranks an API key above a subscription token, so
+> sending both would silently bill the wrong account.
+>
+> For the first, each person generates their own one-year token with
+> `claude setup-token` (Pro, Max, Team or Enterprise plan) and saves it under their
+> own settings; nobody else, platform admins included, can read, replace or clear
+> it. The token does not refresh — it expires a year after it is generated and
+> regenerating needs a browser, so AppCrane stores the expiry and shows it.
+>
+> For a platform-wide key instead: `systemctl edit appcrane --force`, add
+> `Environment="ANTHROPIC_API_KEY=sk-ant-..."` under `[Service]`, then
+> `systemctl daemon-reload && systemctl restart appcrane`.
 
 </details>
 
