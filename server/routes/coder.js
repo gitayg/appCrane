@@ -3,7 +3,12 @@ import { getDb } from '../db.js';
 import { hashApiKey } from '../services/encryption.js';
 import { AppError } from '../utils/errors.js';
 import { auditMiddleware } from '../middleware/audit.js';
-import { commitAndPush } from '../services/builder/gitOps.js';
+import {
+  commitAndPush,
+  listWorkspaceChanges,
+  readWorkspaceFileForRelease,
+  markReleasedInWorkspace,
+} from '../services/builder/gitOps.js';
 import {
   createSession,
   resumeSession,
@@ -14,7 +19,7 @@ import {
 } from '../services/builder/builderSession.js';
 import { getContainer } from '../services/builder/appContainer.js';
 import { agentCredentialKind, NO_CREDENTIAL_MESSAGE } from '../services/llm/runAgent.js';
-import { usesLocalRepo } from '../services/managedRepo.js';
+import { usesLocalRepo, pushFilesToManagedRepo } from '../services/managedRepo.js';
 import { getQueueState, subscribeQueue } from '../services/builder/appQueue.js';
 import { fetchReleasesAndChangelog, renderReleasesPage } from '../services/github/releases.js';
 import log from '../utils/logger.js';
@@ -245,6 +250,138 @@ router.post('/:slug/session/:id/ship', auditMiddleware('coder.ship'), async (req
     .catch(err => log.error(`Coder ship deploy failed for ${app.slug}: ${err.message}`));
 
   res.json({ message: 'Shipped to sandbox', deploy_id: deployRow.id, branch: session.branch_name });
+});
+
+// ── GET /api/coder/:slug/session/:id/changes — what the agent changed ────
+//
+// Working-tree changes in the session workspace against its base commit
+// (HEAD), untracked files included. This is the menu POST .../release picks
+// from: a path it does not list is refused there.
+
+router.get('/:slug/session/:id/changes', (req, res) => {
+  getApp(req.params.slug, req.user);
+  const session = getSession(req.params.id, req.params.slug);
+  if (!session.workspace_dir) {
+    throw new AppError('Workspace not found — session may have been evicted', 400, 'NO_WORKSPACE');
+  }
+  res.json({ files: listWorkspaceChanges(session.workspace_dir) });
+});
+
+// ── POST /api/coder/:slug/session/:id/release — release selected changes ─
+//
+// The Crane-hosted counterpart of /ship. /ship pushes a branch to a GitHub
+// remote and then deploys FROM THE WORKSPACE (preExtractedDir), so the
+// deployed tree and the repository can differ. A Crane-hosted app has no
+// remote at all, and its source of truth is the managed repository — so this
+// route commits the selected files THROUGH that repository and lets the
+// existing deploy-on-push (deployTrigger.deployAfterLocalPush, reached from
+// managedRepo.pushFilesToManagedRepo) start the sandbox deploy. No deployments
+// row is written here and deployApp is never called from here: one push, one
+// commit, one deploy, all through the path every other managed push takes.
+
+/**
+ * The bar appcrane_push_to_managed_app enforces (mcpTools.isAppAdmin): an
+ * AppCrane admin, or admin/owner on this app. Deliberately stricter than the
+ * getApp() assignment check the chat routes use — being able to talk to the
+ * agent is not being able to commit its work and start a deploy.
+ */
+function requireAppAdmin(app, user, action) {
+  if (user.role === 'admin' || user.role === 'platform_admin') return;
+  const row = getDb()
+    .prepare('SELECT app_role FROM app_user_roles WHERE app_id = ? AND user_id = ?')
+    .get(app.id, user.id);
+  if (row?.app_role === 'admin' || row?.app_role === 'owner') return;
+  throw new AppError(
+    `Forbidden: ${action} requires admin or app-admin role on '${app.slug}'`,
+    403,
+    'FORBIDDEN',
+  );
+}
+
+router.post('/:slug/session/:id/release', auditMiddleware('coder.release'), async (req, res) => {
+  const app = getApp(req.params.slug, req.user);
+  requireAppAdmin(app, req.user, 'releasing changes');
+  if (!usesLocalRepo(app)) {
+    throw new AppError(
+      `'${app.slug}' is not a Crane-hosted app: its source lives on GitHub, so there is no managed repository to release into. Use /ship.`,
+      400,
+      'NOT_CRANE_HOSTED',
+    );
+  }
+
+  const session = getSession(req.params.id, req.params.slug);
+  if (!['idle', 'paused'].includes(session.status)) {
+    throw new AppError(`Session is '${session.status}', stop the current run before releasing`, 400, 'WRONG_STATUS');
+  }
+  if (!session.workspace_dir) {
+    throw new AppError('Workspace not found — session may have been evicted', 400, 'NO_WORKSPACE');
+  }
+
+  const paths = req.body?.paths;
+  if (!Array.isArray(paths) || paths.length === 0 || paths.some((p) => typeof p !== 'string' || !p)) {
+    throw new AppError('paths must be a non-empty array of repo-relative path strings', 400, 'VALIDATION');
+  }
+  const duplicates = [...new Set(paths.filter((p, i) => paths.indexOf(p) !== i))];
+  if (duplicates.length) {
+    throw new AppError(`duplicate path(s): ${duplicates.map((p) => JSON.stringify(p)).join(', ')}`, 400, 'VALIDATION');
+  }
+
+  // The change set is authority for what MAY be released. A path outside it is
+  // a caller working from a stale listing (or naming a file the agent never
+  // touched), and committing it would ship something nobody chose.
+  const changes = listWorkspaceChanges(session.workspace_dir);
+  const byPath = new Map(changes.map((c) => [c.path, c]));
+  const unknown = paths.filter((p) => !byPath.has(p));
+  if (unknown.length) {
+    throw new AppError(
+      `not in this session's change set: ${unknown.map((p) => JSON.stringify(p)).join(', ')}. Nothing was released. GET .../changes lists what can be.`,
+      400,
+      'NOT_CHANGED',
+    );
+  }
+
+  const summaryMsg = req.body?.message?.trim() || `coder session ${session.id.slice(0, 8)}`;
+  const commitMsg = `coder: ${summaryMsg.slice(0, 72)}`;
+
+  const files = [];
+  const deletions = [];
+  try {
+    for (const p of paths) {
+      if (byPath.get(p).status === 'deleted') deletions.push(p);
+      else files.push(readWorkspaceFileForRelease(session.workspace_dir, p));
+    }
+  } catch (err) {
+    throw new AppError(`${err.message} Nothing was released.`, 400, 'UNREADABLE_CHANGE');
+  }
+
+  let result;
+  try {
+    result = await pushFilesToManagedRepo(app, files, {
+      deletions,
+      message: commitMsg,
+      actorId: req.user.id,
+    });
+  } catch (err) {
+    // The push refuses for reasons the caller can act on and names them: a
+    // .env path (ENV_FILE_IN_PUSH, 422), a deleted path that is not on the
+    // branch (DELETE_PATH_NOT_FOUND, 404), an empty resulting tree
+    // (EMPTY_TREE, 422). Those carry their own status/code and must reach the
+    // caller as themselves rather than as a 500. Everything else the push
+    // validates is a refusal too, so it becomes a 400 rather than an
+    // "internal error" the caller cannot read.
+    if (err.status) throw err;
+    throw new AppError(err.message, 400, 'RELEASE_REFUSED');
+  }
+
+  markReleasedInWorkspace(session.workspace_dir, paths, commitMsg);
+  log.info(`Coder release: ${app.slug} ${result.commit.sha.slice(0, 12)} (${files.length} file(s), ${deletions.length} deletion(s))`);
+
+  res.json({
+    commit: { sha: result.commit.sha },
+    released: files.map((f) => f.path),
+    deleted: [...deletions],
+    deploy: result.auto_deploy ?? null,
+  });
 });
 
 // ── POST /api/coder/:slug/evict — manual app-container teardown ──────────
