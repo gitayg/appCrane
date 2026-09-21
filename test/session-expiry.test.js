@@ -21,10 +21,13 @@ import { readFileSync } from 'fs';
 //    screen's own answer, not a lapsed session, so the login routes are
 //    excluded — redirecting there is a loop nobody can type a password through.
 //
-// 2. api.ts HAD NO 401 HANDLING AT ALL. Its two callers are AppStudio's agent
+// 2. api.ts HAD NO 401 HANDLING AT ALL. Its two callers were AppStudio's agent
 //    chat, the only files not going through adminApi, so an expired session
 //    threw a raw `401 Unauthorized: ...` string and left the dead credential in
-//    place.
+//    place. That file was the client for /api/agents and went with it in
+//    v2.83.0, so adminApi is now the only fetch helper in the SPA and (1) is
+//    the whole of the fetch story. The assertions that read api.ts are gone
+//    with it; nothing else covered it.
 //
 // 3. THE SSE LOOP, which is the one that truly went unnoticed. EventSource
 //    reports errors with NO status code, and ChatPanel wired `onerror` straight
@@ -38,8 +41,13 @@ import { readFileSync } from 'fs';
 const read = (p) => readFileSync(new URL(`../studio-web/src/${p}`, import.meta.url), 'utf8');
 const expiry = read('sessionExpiry.ts');
 const adminApi = read('adminApi.ts');
-const api = read('api.ts');
-const chat = read('components/ChatPanel.tsx');
+// ChatPanel moved OUT of src/ in v2.83.0: it was written against api.ts, the
+// /api/agents client, and neither survived that router. It is kept verbatim as
+// salvage for the chat UI coming to /api/coder, and (3) below is kept pointed
+// at it for exactly that reason — the port should start from a file that has
+// the SSE hygiene already, not from one that quietly lost it while nothing was
+// watching.
+const chat = readFileSync(new URL('../studio-web/salvage/ChatPanel.tsx', import.meta.url), 'utf8');
 
 // ---------------------------------------------------------------------------
 // Polarity
@@ -49,7 +57,7 @@ test('no surface gates the redirect on an allowlist of server messages', () => {
   // The regression that matters. Any reappearance of a message set that the
   // redirect depends on re-opens the exact hole: a message nobody listed means
   // an expired session goes silent.
-  for (const [name, src] of [['sessionExpiry', expiry], ['adminApi', adminApi], ['api', api]]) {
+  for (const [name, src] of [['sessionExpiry', expiry], ['adminApi', adminApi]]) {
     assert.doesNotMatch(src, /PROVEN_BAD_CREDENTIAL_MESSAGES/,
       `${name} still gates on a known-bad message list; the server has twelve 401 messages and ` +
       'anything missing from the list fails open — which is how `Token expired` went unnoticed');
@@ -66,31 +74,15 @@ test('the login routes are excluded, so a wrong password cannot loop', () => {
     'the exclusion has to gate the redirect, not merely exist');
 });
 
-test('both fetch helpers pass the request path so the exclusion can apply', () => {
+test('the fetch helper passes the request path so the exclusion can apply', () => {
   // handleUnauthorized cannot exclude the login route unless it is told which
   // route answered. A call that drops the url silently loses the exclusion.
   assert.match(adminApi, /handleUnauthorized\(r, path\)/,
     'adminApi must pass the path, or the login-route exclusion cannot fire');
-  assert.match(api, /handleUnauthorized\(r, path\)/,
-    'api.ts must pass the path too');
 });
 
 // ---------------------------------------------------------------------------
-// The surface that had nothing
-// ---------------------------------------------------------------------------
-
-test('api.ts handles 401 at all', () => {
-  assert.match(api, /if \(r\.status === 401\)/,
-    'api.ts had no 401 branch whatsoever — an expired session threw a raw string and left the ' +
-    'dead credential in localStorage');
-  const guard = api.indexOf('r.status === 401');
-  const generic = api.indexOf('if (!r.ok)');
-  assert.ok(guard > 0 && guard < generic,
-    'the 401 branch must come BEFORE the generic !r.ok throw, or the generic one swallows it');
-});
-
-// ---------------------------------------------------------------------------
-// The silent loop
+// The silent loop (guarding the salvaged ChatPanel, see the note above)
 // ---------------------------------------------------------------------------
 
 test('an SSE error probes the session before reconnecting', () => {

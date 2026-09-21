@@ -330,3 +330,52 @@ test('the transcript directory gets the workspace treatment, not looser', async 
   assert.equal(dir.startsWith(join(ROOT, 'app-containers', 'ev-perms') + '/'), true, dir);
   appContainer.evict('ev-perms', 'idle');
 });
+
+// ---------------------------------------------------------------------------
+// 3. Transcript persistence across an AppCrane RESTART
+// ---------------------------------------------------------------------------
+//
+// recoverOrphans() runs once on boot and clears the on-disk workspaces, because
+// nothing is cached across a restart. It used to wipe the whole app-containers
+// root, which took every app's `claude-projects` with it: the transcript
+// survived a 30-minute idle eviction (section 2 above) and then died silently at
+// the next `systemctl restart appcrane`, while coder_sessions.claude_session_id
+// still pointed at it — so `claude -p --resume <id>` failed on an id the
+// database swore existed.
+//
+// MUST BE LAST IN THIS FILE: recoverOrphans reaches across every app under the
+// root, not just its own.
+
+test('an AppCrane restart clears workspaces but keeps every app transcript', async () => {
+  const a = await craneApp('ev-restart-a');
+  const b = await craneApp('ev-restart-b');
+  const ca = await appContainer.getOrCreate(a);
+  const cb = await appContainer.getOrCreate(b);
+
+  // What the CLI wrote into the bind-mounted transcript dir of each app.
+  const transcripts = [ca, cb].map((c, i) => {
+    const slug = i === 0 ? 'ev-restart-a' : 'ev-restart-b';
+    const dir = join(appContainer.transcriptDirFor(slug), '-workspace');
+    mkdirSync(dir, { recursive: true });
+    const f = join(dir, `2222222${i}-2222-2222-2222-22222222222${i}.jsonl`);
+    writeFileSync(f, `{"type":"user","sessionId":"transcript-${slug}"}\n`);
+    return { slug, file: f, workspace: c.workspaceDir };
+  });
+
+  // A non-transcript sibling under the same per-app directory, to prove the
+  // sweep still removes everything it is supposed to.
+  const stray = join(ROOT, 'app-containers', 'ev-restart-a', 'stale-scratch');
+  mkdirSync(stray, { recursive: true });
+  writeFileSync(join(stray, 'junk.txt'), 'left over from the last process\n');
+
+  for (const t of transcripts) assert.equal(existsSync(t.workspace), true, `${t.slug} has no workspace to clear`);
+
+  appContainer.recoverOrphans();
+
+  for (const t of transcripts) {
+    assert.equal(existsSync(t.workspace), false, `${t.slug}: the workspace survived the restart sweep`);
+    assert.equal(existsSync(t.file), true, `${t.slug}: the restart sweep destroyed the conversation transcript`);
+    assert.match(readFileSync(t.file, 'utf8'), new RegExp(`transcript-${t.slug}`));
+  }
+  assert.equal(existsSync(stray), false, 'the restart sweep stopped clearing non-transcript state');
+});

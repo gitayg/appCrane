@@ -4,7 +4,6 @@ import { hashApiKey } from '../services/encryption.js';
 import { AppError } from '../utils/errors.js';
 import { auditMiddleware } from '../middleware/audit.js';
 import {
-  commitAndPush,
   listWorkspaceChanges,
   readWorkspaceFileForRelease,
   markReleasedInWorkspace,
@@ -20,7 +19,7 @@ import {
 import { getContainer } from '../services/builder/appContainer.js';
 import { agentCredentialKind, NO_CREDENTIAL_MESSAGE } from '../services/llm/runAgent.js';
 import { usesLocalRepo, pushFilesToManagedRepo } from '../services/managedRepo.js';
-import { getQueueState, subscribeQueue } from '../services/builder/appQueue.js';
+import { getQueueState } from '../services/builder/appQueue.js';
 import { fetchReleasesAndChangelog, renderReleasesPage } from '../services/github/releases.js';
 import log from '../utils/logger.js';
 
@@ -76,17 +75,33 @@ function getApp(slug, user) {
   return app;
 }
 
-// Builder needs a source repository it can clone. There are exactly two:
-// a connected GitHub repo, or a Crane-hosted (managed, repo_backend='local')
-// repo on this host. The second has github_url NULL by design, so a bare
-// `!app.github_url` check refused it -- that check was the whole reason
-// Builder was unavailable for Crane-hosted apps.
-function assertHasSource(app) {
-  if (app.github_url || usesLocalRepo(app)) return;
+// The coder works on Crane-hosted apps only: source_type='managed' with
+// repo_backend='local', i.e. a bare repo on this host.
+//
+// v2.80.0 widened this to "a GitHub URL OR a Crane-hosted app" so a managed app
+// (github_url NULL by design) would stop being refused. That let a GitHub-backed
+// app in as well, and the only thing it could then do with its work was
+// `git push` to a remote — the path /changes + /release replaced. A session
+// whose release path does not exist is worse than a refusal, so the gate is the
+// same shape as /release's: Crane-hosted, or a named reason.
+//
+// The two refusals are kept apart on purpose. NO_REPO means "there is no source
+// at all, connect one"; NOT_CRANE_HOSTED means "there is source, it is just not
+// somewhere this tool works" — different problems with different fixes, and a
+// UI that wants to offer a migration can branch on the second.
+function assertCraneHosted(app) {
+  if (usesLocalRepo(app)) return;
+  if (!app.github_url) {
+    throw new AppError(
+      'Builder needs source code to work on: this app has none. Create a Crane-hosted app.',
+      400,
+      'NO_REPO',
+    );
+  }
   throw new AppError(
-    'Builder needs source code to work on: connect a GitHub repository to this app, or use a Crane-hosted app.',
+    `'${app.slug}' keeps its source on GitHub. Builder works on Crane-hosted apps only — apps whose repository lives on AppCrane itself.`,
     400,
-    'NO_REPO',
+    'NOT_CRANE_HOSTED',
   );
 }
 
@@ -109,7 +124,7 @@ router.post('/:slug/session', auditMiddleware('coder.start'), async (req, res) =
   if (agentCredentialKind({ actingUserId: req.user.id, appSlug: app.slug }) === 'none') {
     throw new AppError(NO_CREDENTIAL_MESSAGE, 503, 'NOT_CONFIGURED');
   }
-  assertHasSource(app);
+  assertCraneHosted(app);
 
   const logs = [];
   const onLog = (msg) => {
@@ -186,7 +201,14 @@ router.post('/:slug/session/:id/stop', (req, res) => {
 // ── POST /api/coder/:slug/session/:id/resume — re-start evicted session ──
 
 router.post('/:slug/session/:id/resume', auditMiddleware('coder.resume'), async (req, res) => {
-  getApp(req.params.slug, req.user);
+  // Gated for the same reason /session is, and it is the door that was left
+  // open: resume needs only a row in status 'paused', and builderSession's
+  // restart recovery pauses every live session. So a row left behind by the
+  // retired /api/agents -- or by /api/coder before v2.82.0 narrowed its gate --
+  // could resume a GitHub-backed app into a clone path this tool no longer
+  // supports, and the session would have no way to release its work.
+  const app = getApp(req.params.slug, req.user);
+  assertCraneHosted(app);
   const session = getSession(req.params.id, req.params.slug);
   if (session.status !== 'paused') {
     throw new AppError(`Session is '${session.status}', must be paused to resume`, 400, 'WRONG_STATUS');
@@ -204,53 +226,23 @@ router.post('/:slug/session/:id/resume', auditMiddleware('coder.resume'), async 
   res.json({ message: 'Session resumed', log: logs });
 });
 
-// ── POST /api/coder/:slug/session/:id/ship — commit, push, deploy sandbox
-
-router.post('/:slug/session/:id/ship', auditMiddleware('coder.ship'), async (req, res) => {
-  const app = getApp(req.params.slug, req.user);
-  const session = getSession(req.params.id, req.params.slug);
-  if (!['idle', 'paused'].includes(session.status)) {
-    throw new AppError(`Session is '${session.status}', stop the current run before shipping`, 400, 'WRONG_STATUS');
-  }
-  if (!session.workspace_dir) {
-    throw new AppError('Workspace not found — session may have been evicted', 400, 'NO_WORKSPACE');
-  }
-
-  const db = getDb();
-  const { getPortsForSlot } = await import('../services/portAllocator.js');
-  const { deployApp } = await import('../services/deployer.js');
-
-  const summaryMsg = req.body?.message?.trim() || `coder session ${session.id.slice(0, 8)}`;
-  const commitMsg  = `coder: ${summaryMsg.slice(0, 72)}`;
-
-  const logs = [];
-  const onLog = (msg) => { logs.push(msg); log.info(`[builder:ship] ${msg}`); };
-
-  const { pushed, reason } = await commitAndPush({
-    workspaceDir: session.workspace_dir,
-    branchName: session.branch_name,
-    commitMsg,
-    onLog,
-  });
-
-  if (!pushed) {
-    return res.json({ message: `Nothing to ship (${reason})`, deployed: false });
-  }
-
-  const deployRow = db.prepare(
-    "INSERT INTO deployments (app_id, env, status, log) VALUES (?, 'sandbox', 'pending', ?) RETURNING id"
-  ).get(app.id, `Coder ship: ${summaryMsg}`);
-
-  const ports = getPortsForSlot(app.slot);
-
-  db.prepare("UPDATE coder_sessions SET status = 'shipped', shipped_at = datetime('now') WHERE id = ?")
-    .run(session.id);
-
-  deployApp(deployRow.id, app, 'sandbox', ports, { preExtractedDir: session.workspace_dir })
-    .catch(err => log.error(`Coder ship deploy failed for ${app.slug}: ${err.message}`));
-
-  res.json({ message: 'Shipped to sandbox', deploy_id: deployRow.id, branch: session.branch_name });
-});
+// POST /:slug/session/:id/ship is GONE (Crane-hosted-only coder).
+//
+// It committed the workspace and `git push`ed it to a GitHub remote, then
+// deployed from the workspace. Every app this router now serves is Crane-hosted
+// and has no remote, so the route could only ever answer 400. /changes +
+// /release replaced it: selected
+// files, committed THROUGH the managed repository, deploy started by the same
+// deploy-on-push every other managed push goes through.
+//
+// Removed rather than left to 400, because a mounted route is code that gets
+// maintained and security-patched, and this one still carried a real defect
+// (it read `git status` with the default core.fileMode, so a chmod-777
+// workspace made every ship commit a whole-repo mode flip).
+//
+// v2.83.0: the GitHub ship path is gone entirely. /api/agents — the second,
+// GitHub-only coder surface that was its last reachable caller — was retired,
+// and gitOps.commitAndPush went with it.
 
 // ── GET /api/coder/:slug/session/:id/changes — what the agent changed ────
 //

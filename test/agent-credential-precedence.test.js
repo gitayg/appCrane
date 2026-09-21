@@ -398,8 +398,12 @@ test('every AI entry point gates on agentCredentialKind, not on the platform key
   // queue immediately after the gate. What matters is that no gate is left
   // reading process.env.ANTHROPIC_API_KEY directly — that is the exact line
   // that refused a caller holding their own subscription.
+  //
+  // 'agents.js' was the fourth. It was retired with /api/agents in v2.83.0 —
+  // a second, GitHub-only coder surface with no reachable client — so there are
+  // three entry points left to hold to the rule.
   const { readFileSync } = await import('fs');
-  for (const f of ['coder.js', 'ask.js', 'appstudio.js', 'agents.js']) {
+  for (const f of ['coder.js', 'ask.js', 'appstudio.js']) {
     const src = readFileSync(new URL(`../server/routes/${f}`, import.meta.url), 'utf8');
     assert.ok(src.includes('agentCredentialKind('), `${f} does not consult agentCredentialKind`);
     assert.ok(

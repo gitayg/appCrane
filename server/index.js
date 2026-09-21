@@ -61,7 +61,6 @@ import presenceRoutes from './routes/presence.js';
 import askRoutes from './routes/ask.js';
 import planRoutes from './routes/plan.js';
 import coderRoutes from './routes/coder.js';
-import agentsRoutes from './routes/agents.js';
 import skillsRoutes from './routes/skills.js';
 import mcpRoutes from './routes/mcp.js';
 import userMcpKeysRoutes from './routes/userMcpKeys.js';
@@ -992,7 +991,12 @@ app.use('/api/presence', presenceRoutes); // Bearer auth (identity) — must be 
 app.use('/api/ask', askRoutes);           // Ask Claude (Bearer auth)
 app.use('/api/plan', planRoutes);         // Plan panel (Bearer auth)
 app.use('/api/coder', coderRoutes);       // AppCrane Studio (API key + Bearer auth)
-app.use('/api/agents', agentsRoutes);     // AIDE-compatible Studio API
+// '/api/agents' is gone (v2.83.0). It was a second coder surface, wire-
+// compatible with AIDE, and GitHub-only: its ship route pushed a branch to a
+// remote, which the Crane-hosted apps /api/coder now serves do not have. It had
+// no reachable client either — studio-web/src/api.ts was the only caller, and
+// nothing rendered the App.tsx that imported it. AIDE talks this shape to its
+// own server, not to AppCrane. /api/coder is the coder surface.
 app.use('/api/mcp', mcpRoutes);          // Model Context Protocol endpoint (JSON-RPC + admin catalog)
 // MUST precede every router mounted at the bare '/api' — userMcpKeysRoutes,
 // logsRoutes and monitoringRoutes each do a pathless `router.use(requireAuth)`,

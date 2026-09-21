@@ -119,7 +119,6 @@ const { encrypt } = await import('../server/services/encryption.js');
 const { cloneForBuild } = await import('../server/services/appstudio/generator.js');
 const { startWorker, stopWorker } = await import('../server/services/appstudio/worker.js');
 const appContainer = await import('../server/services/builder/appContainer.js');
-const { commitAndPush } = await import('../server/services/builder/gitOps.js');
 
 global.fetch = async () => ({ ok: false, status: 404, json: async () => ({}), text: async () => '' });
 
@@ -129,7 +128,6 @@ after(() => {
   try { rmSync(ROOT, { recursive: true, force: true }); } catch (_) {}
 });
 
-const uid = db.prepare("INSERT INTO users (name,email,role,api_key_hash,active,kind) VALUES ('a','a@example.com','platform_admin','h',1,'human')").run().lastInsertRowid;
 let slot = 950;
 function mkApp(slug, { token = TOKEN } = {}) {
   const id = db.prepare("INSERT INTO apps (name,slug,slot,source_type,github_url,branch,github_token_encrypted) VALUES (?,?,?,'github',?,'main',?)")
@@ -254,7 +252,15 @@ test('AppStudio code phase: clone, container view, and push all without a tokeni
   assertNoTokenAnywhere('AppStudio code phase');
 });
 
-test('builder container + coder ship: workspace origin is plain, push authenticates', async () => {
+// The ship half of this test went with gitOps.commitAndPush in v2.83.0: it
+// existed only for POST /api/agents/:id/ship-sandbox, and no path left in the
+// repo pushes a builder workspace to a GitHub remote. What is still live is the
+// clone — appContainer.cloneWorkspace keeps its GitHub branch, because a paused
+// coder_sessions row for a GitHub-backed app resumes straight into it — so the
+// property that matters is unchanged: the credential reaches git as an env
+// header, never as part of the URL the container can read back out of
+// .git/config.
+test('builder container: workspace origin is plain, clone authenticates by header', async () => {
   const app = mkApp('tu-builder');
   writeFileSync(AUTH_LOG, '');
   const c = await appContainer.getOrCreate(app, () => {});
@@ -265,35 +271,7 @@ test('builder container + coder ship: workspace origin is plain, push authentica
     const clone = argvLines().filter((a) => a[1] === 'clone' && a.includes(c.workspaceDir));
     assert.equal(clone.length, 1);
     assert.equal(clone[0][0], 'CFG=1');
-
-    db.prepare("INSERT INTO coder_sessions (id, app_slug, user_id, branch_name, workspace_dir, status) VALUES ('s-tu', ?, ?, ?, ?, 'idle')")
-      .run(app.slug, uid, c.branchName, c.workspaceDir);
-    execFileSync(REAL_GIT, ['-C', c.workspaceDir, 'config', 'user.email', 'b@example.com']);
-    writeFileSync(join(c.workspaceDir, 'SHIP.txt'), 'ship\n');
-    writeFileSync(AUTH_LOG, '');
-    const res = await commitAndPush({ workspaceDir: c.workspaceDir, branchName: c.branchName, commitMsg: 'ship', onLog: () => {} });
-    assert.equal(res.pushed, true);
-    assert.equal(bareGit('rev-parse', `refs/heads/${c.branchName}`), execFileSync(REAL_GIT, ['-C', c.workspaceDir, 'rev-parse', 'HEAD']).toString().trim());
-    assert.ok(authSeen().some((x) => x.auth === EXPECTED_AUTH && /git-receive-pack/.test(x.url)), 'no authenticated push');
-    const push = argvLines().filter((a) => a.includes('push') && a.includes(c.workspaceDir));
-    assert.equal(push.at(-1)[0], 'CFG=1');
-
-    // Diverge the remote so the next push is rejected after talking to the server.
-    const other = bareGit('commit-tree', `${c.branchName}^{tree}`, '-p', c.branchName, '-m', 'someone else');
-    bareGit('update-ref', `refs/heads/${c.branchName}`, other);
-    execFileSync(REAL_GIT, ['-C', c.workspaceDir, 'commit', '--allow-empty', '-qm', 'second']);
-    writeFileSync(join(c.workspaceDir, 'SHIP2.txt'), 'x\n');
-    let msg = '';
-    process.env.GIT_TRACE_CURL = '1';
-    process.env.GIT_TRACE_REDACT = '0';
-    try {
-      await commitAndPush({ workspaceDir: c.workspaceDir, branchName: c.branchName, commitMsg: 'ship2', onLog: () => {} });
-    } catch (err) { msg = err.message; } finally {
-      delete process.env.GIT_TRACE_CURL; delete process.env.GIT_TRACE_REDACT;
-    }
-    assert.ok(msg.length > 0, 'expected the diverged push to fail');
-    assert.ok(/Authorization|\[redacted\]/.test(msg), `trace did not reach the error text: ${msg.slice(0, 300)}`);
-    assert.ok(!msg.includes(TOKEN) && !msg.includes(B64), 'token escaped in push error text');
+    assert.ok(authSeen().some((x) => x.auth === EXPECTED_AUTH), 'server never saw the header for the builder clone');
     assertNoTokenAnywhere('builder');
   } finally {
     appContainer.evict(app.slug, 'test');

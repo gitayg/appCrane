@@ -4,18 +4,19 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 import { fileURLToPath } from 'url';
 
-// The admin SPA ships two fetch helpers, and they resolved credentials in
-// OPPOSITE order: adminApi.ts read cc_api_key first, api.ts read
+// The admin SPA used to ship two fetch helpers, and they resolved credentials
+// in OPPOSITE order: adminApi.ts read cc_api_key first, api.ts read
 // cc_identity_token first. A browser holding both — an operator who signed in
 // through the portal and also pasted an API key — authenticated as a different
 // principal depending on which helper the component happened to import, with
 // nothing on screen to say which one answered.
 //
-// The identity session wins everywhere now: it is the credential the person
-// actually signed in with, it carries their roles, and it expires. Both the
-// header helper and the SSE query-parameter helper follow the same order,
-// because SSE can't send headers and would otherwise be the one path that
-// still preferred the key.
+// api.ts was the client for /api/agents and was deleted with that router in
+// v2.83.0, so there is one helper left and the two can no longer disagree. The
+// order it has to keep is still the point: the identity session wins, because
+// it is the credential the person actually signed in with, it carries their
+// roles, and it expires. A second helper added later must come back into this
+// list rather than pick its own order.
 const SRC = join(fileURLToPath(new URL('../studio-web/src', import.meta.url)));
 const TOKEN = 'cc_identity_token';
 const KEY = 'cc_api_key';
@@ -37,7 +38,7 @@ function credentialFunctions(src) {
   return out;
 }
 
-for (const file of ['adminApi.ts', 'api.ts']) {
+for (const file of ['adminApi.ts']) {
   test(`${file} reads the identity session before the API key`, () => {
     const src = readFileSync(join(SRC, file), 'utf8');
     const fns = credentialFunctions(src);
@@ -45,7 +46,7 @@ for (const file of ['adminApi.ts', 'api.ts']) {
     for (const [name, body] of fns) {
       assert.ok(
         body.indexOf(TOKEN) < body.indexOf(KEY),
-        `${file}: ${name}() reads ${KEY} before ${TOKEN} — the two helpers disagree on who the caller is`,
+        `${file}: ${name}() reads ${KEY} before ${TOKEN} — an operator holding both credentials would authenticate as the wrong principal`,
       );
     }
   });

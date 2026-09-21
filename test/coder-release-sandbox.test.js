@@ -122,8 +122,10 @@ const deployAppRow = await craneApp(DEPLOYING, { autoDeploy: true });
 // The member can chat (app_users assignment) but holds no app-admin role.
 db.prepare('INSERT INTO app_users (app_id, user_id) VALUES (?, ?)').run(craneAppRow.id, memberId);
 
-// A GitHub-backed app whose "remote" is a bare repo on disk: /ship must behave
-// exactly as it did, push included.
+// A GitHub-backed app whose "remote" is a bare repo on disk. It used to get a
+// session and ship to that remote; the coder is Crane-hosted-only now, so what
+// it gets is a refusal — and the bare repo below is what proves nothing was
+// pushed to it anyway.
 const GH_BARE = join(ROOT, 'gh', 'widget.git');
 mkdirSync(join(ROOT, 'gh'), { recursive: true });
 execFileSync(REAL_GIT, ['init', '--bare', '-q', '-b', 'main', GH_BARE]);
@@ -166,7 +168,10 @@ async function startSession(slug) {
 
 const sessions = {};
 const workspaces = {};
-for (const slug of [CRANE, DEPLOYING, 'ghrel']) {
+// 'ghrel' is deliberately absent: the coder is Crane-hosted-only, so a
+// GitHub-backed app cannot open a session at all. That refusal is what the
+// last test in this file asserts.
+for (const slug of [CRANE, DEPLOYING]) {
   sessions[slug] = await startSession(slug);
   workspaces[slug] = sessions[slug].workspace_dir;
   assert.ok(workspaces[slug], `no workspace_dir for ${slug}`);
@@ -374,39 +379,32 @@ test('release: the sandbox deploy comes from the push, not from a direct deployA
   assert.equal(s.status, 'idle');
 });
 
-test('a GitHub-backed app is untouched: /release refuses it and /ship behaves as before', async () => {
+test('a GitHub-backed app gets no coder session at all, and its remote is untouched', async () => {
   const gh = 'ghrel';
-  const rel = await json(await release(gh, { paths: ['package.json'] }));
-  assert.equal(rel.status, 400, JSON.stringify(rel.body));
-  assert.equal(rel.body.error.code, 'NOT_CRANE_HOSTED');
 
-  writeFileSync(ws(gh, 'app.js'), 'console.log("shipped");\n');
-  const { status, body } = await json(await call('POST', `/api/coder/${gh}/session/${sessions[gh].id}/ship`, { message: 'gh ship' }));
-  assert.equal(status, 200, JSON.stringify(body));
-  assert.equal(body.message, 'Shipped to sandbox');
-  assert.equal(body.branch, `builder/${gh}`);
+  // The gate, before anything is built. NOT_CRANE_HOSTED rather than NO_REPO:
+  // this app has source, it is simply not somewhere the coder works.
+  const { status, body } = await json(await call('POST', `/api/coder/${gh}/session`));
+  assert.equal(status, 400, `a GitHub-backed app was served a coder session: ${JSON.stringify(body)}`);
+  assert.equal(body.error.code, 'NOT_CRANE_HOSTED', JSON.stringify(body.error));
 
-  // The branch really reached the "remote", with the file on it.
-  const remote = execFileSync(REAL_GIT, [`--git-dir=${GH_BARE}`, 'show', `builder/${gh}:app.js`], { env: CLEAN })
-    .toString('utf8');
-  assert.equal(remote, 'console.log("shipped");\n');
+  // Nothing downstream ran: no session row, no workspace, no deploy.
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM coder_sessions WHERE app_slug = ?').get(gh).n, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM deployments WHERE app_id = ?').get(ghAppRow.id).n, 0);
 
-  // /ship's own deployments row, unchanged: one row, sandbox, no commit pin and
-  // no push delivery — it deploys the workspace directory, not a commit.
-  const rows = db.prepare('SELECT * FROM deployments WHERE app_id = ?').all(ghAppRow.id);
-  assert.equal(rows.length, 1, `expected exactly one deployment row, got ${rows.length}`);
-  const row = rows[0];
-  assert.equal(row.id, body.deploy_id);
-  assert.equal(row.env, 'sandbox');
-  assert.equal(row.commit_hash, null);
-  assert.equal(row.commit_message, null);
-  assert.equal(db.prepare("SELECT COUNT(*) n FROM webhook_deliveries WHERE app_id = ?").get(ghAppRow.id).n, 0,
-    'the GitHub ship path went through deploy-on-push');
-  assert.equal(db.prepare('SELECT status FROM coder_sessions WHERE id = ?').get(sessions[gh].id).status, 'shipped');
+  // …and the "GitHub remote" still has exactly the seed branch. The coder's own
+  // ship route is gone (/api/coder no longer mounts one), so there is no longer
+  // a path from this router to a `git push`.
+  const refs = execFileSync(REAL_GIT, [`--git-dir=${GH_BARE}`, 'for-each-ref', '--format=%(refname)'], { env: CLEAN })
+    .toString('utf8').split('\n').filter(Boolean);
+  assert.deepEqual(refs, ['refs/heads/main'], `the coder pushed to a GitHub remote: ${refs.join(', ')}`);
+
+  const ship = await call('POST', `/api/coder/${gh}/session/whatever/ship`, { message: 'gh ship' });
+  assert.equal(ship.status, 404, `the GitHub ship route is still mounted on /api/coder (got ${ship.status})`);
 });
 
 after(() => {
-  for (const slug of [CRANE, DEPLOYING, 'ghrel']) {
+  for (const slug of [CRANE, DEPLOYING]) {
     try { appContainer.evict(slug, 'test'); } catch (_) {}
   }
 });

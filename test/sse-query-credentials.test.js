@@ -5,9 +5,11 @@ import { readFileSync } from 'fs';
 // Credentials in the query string, only where the browser leaves no choice
 // (v2.53.1).
 //
-// coder.js and agents.js promote `?api_key=` / `?token=` into headers so
-// EventSource can authenticate — it cannot set headers, so for SSE there is no
-// alternative short of a separate ticket endpoint. That much is forced.
+// coder.js promotes `?api_key=` / `?token=` into headers so EventSource can
+// authenticate — it cannot set headers, so for SSE there is no alternative
+// short of a separate ticket endpoint. That much is forced. (agents.js carried
+// the same middleware and the same guard; it was retired with /api/agents in
+// v2.83.0, so only one router is left to hold to the rule.)
 //
 // What was not forced: the promotion ran for EVERY route on both routers. A URL
 // carrying a live credential is written to the proxy access log, kept in browser
@@ -22,7 +24,6 @@ import { readFileSync } from 'fs';
 
 const FILES = {
   'server/routes/coder.js': '/:slug/session/:id/events',
-  'server/routes/agents.js': '/:id/events',
 };
 
 for (const [file, sseRoute] of Object.entries(FILES)) {

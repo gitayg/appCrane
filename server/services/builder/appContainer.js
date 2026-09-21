@@ -1,5 +1,5 @@
 import { execFileSync } from 'child_process';
-import { mkdirSync, chmodSync, existsSync, rmSync } from 'fs';
+import { mkdirSync, chmodSync, existsSync, rmSync, readdirSync } from 'fs';
 import { join, resolve } from 'path';
 import { getDb } from '../../db.js';
 import { decrypt } from '../encryption.js';
@@ -148,6 +148,18 @@ async function cloneWorkspace(app, onLog) {
     onLog?.(`[appContainer:git] Cloning Crane-hosted repo for ${app.slug} (${app.branch || 'main'})…`);
     await cloneLocalRepoForDeploy(app, workspaceDir, app.branch || 'main');
   } else {
+    // A GitHub-backed app can still land here after /api/agents was retired in
+    // v2.83.0, which is why this branch survives the retirement. POST
+    // /api/coder/:slug/session runs assertCraneHosted, but POST
+    // /api/coder/:slug/session/:id/resume does NOT — it only requires a
+    // coder_sessions row in status 'paused', and every session on the box
+    // becomes paused on the next restart (builderSession.recoverOrphans). So a
+    // row left by /api/agents, or by /api/coder before v2.82.0 narrowed its
+    // gate, resumes straight into this clone. Removing it would turn that
+    // resume into "not a git repository" two statements down instead of a
+    // clone. What such a session can no longer do is push: gitOps has no ship
+    // path any more.
+    //
     // Token in the git child's env, not the URL: this workspace is chown'd to
     // the container user and mounted into the builder container, so a tokenized
     // remote in .git/config would hand the container the credential.
@@ -365,8 +377,10 @@ export function assertPreserveBranchSafe(branch, app) {
  * So `git status` calls every file in the repo modified, and without this a
  * preserve commit would carry a mode flip for the entire tree and "no
  * uncommitted changes" would never be true. Set per invocation rather than in
- * the workspace's config, so the only git that sees it is this one — the
- * GitHub ship path (builder/gitOps.js) keeps exactly the behaviour it has.
+ * the workspace's config, so the only git that sees it is this one. The one
+ * other reader of worktree state left sets it the same way, per invocation
+ * (builder/gitOps.js: workspaceGit). The third — the GitHub ship path's own
+ * helper — went with /api/agents in v2.83.0.
  *
  * The cost: a file the agent newly creates is recorded 100644 even if it made
  * it executable. A rescue commit that has to have its `chmod +x` redone is a
@@ -534,8 +548,16 @@ setInterval(() => {
 
 /**
  * Called once on AppCrane startup. Kills any leftover app containers from a
- * previous process and clears the on-disk workspace root (no caching across
- * restart).
+ * previous process and clears the on-disk workspaces (no caching across
+ * restart) -- but KEEPS every app's `claude-projects` transcripts.
+ *
+ * Wiping the whole root was what made transcripts survive an idle eviction and
+ * die on `systemctl restart appcrane`: the mount was preserved for 30 minutes
+ * and then silently lost at the next deploy of AppCrane itself, so `--resume`
+ * failed on an id the database still held. Transcripts are retained
+ * indefinitely by decision -- there is no retention limit yet, so this
+ * directory grows without bound and is a GC question to answer later, not an
+ * oversight.
  */
 export function recoverOrphans() {
   try {
@@ -552,6 +574,16 @@ export function recoverOrphans() {
   } catch (_) {}
   try {
     const root = rootDir();
-    if (existsSync(root)) rmSync(root, { recursive: true, force: true });
+    if (!existsSync(root)) return;
+    // Per app, remove everything except the transcripts.
+    for (const slug of readdirSync(root)) {
+      const dir = join(root, slug);
+      let entries = [];
+      try { entries = readdirSync(dir); } catch (_) { continue; }
+      for (const entry of entries) {
+        if (entry === 'claude-projects') continue;
+        try { rmSync(join(dir, entry), { recursive: true, force: true }); } catch (_) {}
+      }
+    }
   } catch (_) {}
 }

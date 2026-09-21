@@ -60,7 +60,6 @@ const { encrypt, hashApiKey } = await import('../server/services/encryption.js')
 const { errorHandler } = await import('../server/utils/errors.js');
 const lg = await import('../server/services/localGit.js');
 const appContainer = await import('../server/services/builder/appContainer.js');
-const { commitAndPush } = await import('../server/services/builder/gitOps.js');
 const coderRoutes = (await import('../server/routes/coder.js')).default;
 
 let fetchCalls = 0;
@@ -206,7 +205,7 @@ test('workspace: no GitHub token, and no GitHub URL, anywhere on the local path'
   }
 });
 
-test('ship: a Crane-hosted session refuses instead of pushing, and commits nothing', async () => {
+test('ship: the GitHub ship route is gone from /api/coder, and nothing is committed', async () => {
   const c = appContainer.getContainer(LOCAL_SLUG);
   const session = db.prepare('SELECT * FROM coder_sessions WHERE app_slug = ? ORDER BY created_at DESC LIMIT 1').get(LOCAL_SLUG);
   assert.ok(session?.workspace_dir, 'session row has no workspace_dir');
@@ -215,30 +214,57 @@ test('ship: a Crane-hosted session refuses instead of pushing, and commits nothi
   const headBefore = gitIn(c.workspaceDir, 'rev-parse', 'HEAD');
   const refsBefore = bareRefs(LOCAL_SLUG);
 
-  await assert.rejects(
-    () => commitAndPush({ workspaceDir: c.workspaceDir, branchName: c.branchName, commitMsg: 'x', onLog: () => {} }),
-    (err) => {
-      assert.equal(err.code, 'LOCAL_REPO_NO_PUSH', `wrong error code: ${err.code} / ${err.message}`);
-      assert.equal(err.status, 400);
-      return true;
-    },
-  );
-
-  assert.equal(gitIn(c.workspaceDir, 'rev-parse', 'HEAD'), headBefore, 'a refused ship still committed');
-  assert.equal(bareRefs(LOCAL_SLUG), refsBefore, 'a refused ship still wrote a ref to the bare repo');
+  // The route is gone, and so is what it called. /api/coder only ever serves a
+  // Crane-hosted app now, and /ship existed solely to `git push` to a GitHub
+  // remote that such an app does not have — so it could only ever answer 400.
+  // /changes + /release is the path that actually works. gitOps.commitAndPush,
+  // the function behind it, was retired outright in v2.83.0 with /api/agents,
+  // whose POST /:id/ship-sandbox was its last reachable caller.
+  //
+  // The workspace is dirty when the call is made, so "nothing was committed or
+  // pushed" is a claim about this request rather than about an idle tree.
+  const res = await call('POST', `/api/coder/${LOCAL_SLUG}/session/${session.id}/ship`, { message: 'x' });
+  assert.equal(gitIn(c.workspaceDir, 'rev-parse', 'HEAD'), headBefore, 'the removed ship route still committed');
+  assert.equal(bareRefs(LOCAL_SLUG), refsBefore, 'the removed ship route still wrote a ref to the bare repo');
   assert.ok(!bareRefs(LOCAL_SLUG).includes(`builder/${LOCAL_SLUG}`), 'the builder branch reached the bare repo');
-  // `git push -u origin <branch>` is the one command commitAndPush runs against
-  // a remote. (A bare `push` match would also catch the `update-ref -m push`
-  // localGit uses to seed the fixture.)
+  // (A bare `push` match would also catch the `update-ref -m push` localGit
+  // uses to seed the fixture.)
   const pushes = gitLines().filter((a) => a.includes('push') && a.includes('origin'));
   assert.equal(pushes.length, 0, `git push ran for a Crane-hosted app: ${JSON.stringify(pushes)}`);
 
-  const res = await call('POST', `/api/coder/${LOCAL_SLUG}/session/${session.id}/ship`, { message: 'x' });
-  const body = await res.json();
-  assert.equal(res.status, 400, `ship should be refused, got ${res.status} ${JSON.stringify(body)}`);
-  assert.equal(body.error.code, 'LOCAL_REPO_NO_PUSH');
+  assert.equal(res.status, 404, `the GitHub ship route is still mounted on /api/coder (got ${res.status})`);
   assert.equal(db.prepare('SELECT COUNT(*) n FROM deployments WHERE app_id = ?').get(localApp.id).n, 0,
-    'a refused ship still queued a deploy');
+    'the removed ship route still queued a deploy');
+  assert.equal(
+    db.prepare('SELECT status FROM coder_sessions WHERE id = ?').get(session.id).status, 'idle',
+    'the removed ship route still marked the session shipped',
+  );
+});
+
+// /api/agents was a second coder surface, wire-compatible with AIDE and
+// GitHub-only: its ship route pushed a branch to a remote the Crane-hosted apps
+// /api/coder serves do not have, and its only client (studio-web/src/api.ts)
+// was reached from an App.tsx nothing rendered. Asserted against the source,
+// because booting index.js here would start the email worker, the health
+// checker and the credential checker.
+test('/api/agents is gone — no router file, no import, no mount', () => {
+  assert.equal(
+    existsSync(new URL('../server/routes/agents.js', import.meta.url)), false,
+    'server/routes/agents.js is back',
+  );
+
+  const index = readFileSync(new URL('../server/index.js', import.meta.url), 'utf8');
+  const code = index.split('\n').filter((l) => !l.trim().startsWith('//')).join('\n');
+  assert.ok(!/routes\/agents\.js/.test(code), 'server/index.js still imports the agents router');
+  assert.ok(!/app\.use\(\s*['"`]\/api\/agents/.test(code), 'server/index.js still mounts /api/agents');
+});
+
+test('gitOps exports no push path at all any more', async () => {
+  const gitOps = await import('../server/services/builder/gitOps.js');
+  assert.deepEqual(
+    Object.keys(gitOps).filter((k) => /push|ship|commitAnd/i.test(k)), [],
+    `a workspace-to-remote push path is back in gitOps: ${Object.keys(gitOps).join(', ')}`,
+  );
 });
 
 test('intro: the Crane-hosted bubble does not promise to ship branches to GitHub', () => {
@@ -249,6 +275,11 @@ test('intro: the Crane-hosted bubble does not promise to ship branches to GitHub
   assert.ok(intro, 'no intro message was written');
   assert.ok(!/ship branches back to GitHub/.test(intro), `the intro promises a GitHub push the ship path refuses:\n${intro}`);
   assert.ok(/Crane-hosted/.test(intro), 'the intro does not say the app is Crane-hosted');
+  // …and it no longer tells the user their work is stuck. /changes + /release
+  // is the release path and it exists, so "not available yet" is the opposite
+  // of true for the only kind of app that can open a session at all.
+  assert.ok(!/not available yet/.test(intro), `the intro still says releasing is unavailable:\n${intro}`);
+  assert.ok(/release/i.test(intro), `the intro does not tell the user how work gets released:\n${intro}`);
 });
 
 test('releases: a Crane-hosted app gets an empty feed, not a 400', async () => {
@@ -270,6 +301,28 @@ test('an app with neither a GitHub repo nor a Crane-hosted one is still refused'
 
   const rel = await call('GET', '/api/coder/nosource/releases');
   assert.equal(rel.status, 400, 'the releases feed stopped refusing a source-less app');
+});
+
+// The coder is Crane-hosted-only. A GitHub-backed app has a clonable source, so
+// the old gate let it through and it got a session whose only release path was
+// a `git push` — which is not what this tool is for any more. It must be told
+// so by a code the UI can branch on, not quietly served.
+test('a GitHub-backed app is refused a coder session with NOT_CRANE_HOSTED', async () => {
+  assert.ok(ghApp.github_url, 'fixture is wrong: this app must have a GitHub URL');
+  const sessionsBefore = db.prepare('SELECT COUNT(*) n FROM coder_sessions WHERE app_slug = ?').get(ghApp.slug).n;
+
+  const r = await call('POST', `/api/coder/${ghApp.slug}/session`);
+  const body = await r.json();
+  assert.equal(r.status, 400, `a GitHub-backed app was served a coder session: ${r.status} ${JSON.stringify(body)}`);
+  assert.equal(body.error.code, 'NOT_CRANE_HOSTED', `wrong code: ${JSON.stringify(body.error)}`);
+  assert.match(body.error.message, /Crane-hosted/, `the refusal does not say why: ${body.error.message}`);
+
+  // Refused before anything was built: no session row, no container, no clone.
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM coder_sessions WHERE app_slug = ?').get(ghApp.slug).n,
+    sessionsBefore, 'a refused GitHub-backed app still got a coder_sessions row');
+  assert.equal(appContainer.getContainer(ghApp.slug), null, 'a refused GitHub-backed app still got a container');
+  assert.equal(existsSync(join(ROOT, 'app-containers', ghApp.slug, 'workspace')), false,
+    'a refused GitHub-backed app still got a workspace clone');
 });
 
 test('GitHub-backed apps take the old clone path, unchanged', async () => {
@@ -297,3 +350,26 @@ test('GitHub-backed apps with a stored token still get the credential env', asyn
     ['clone', '--depth', '1', '--branch', 'main', 'https://127.0.0.1:1/acme/widget.git', dir]);
   assert.ok(!readFileSync(GIT_LOG, 'utf8').includes(TOKEN), 'token in git argv');
 });
+
+// The Crane-hosted gate was on /session but not on /session/:id/resume, and
+// resume needs only a row in status 'paused' — which builderSession's own
+// restart recovery puts every live session into. So a session row left by the
+// retired /api/agents, or by /api/coder before v2.82.0 narrowed its gate,
+// resumed a GitHub-backed app straight back into the clone path the product
+// decision retired. The gate belongs on both doors.
+test('resume refuses a GitHub-backed app, not just session start', async () => {
+  const db = getDb();
+  const ghSlug = 'gh-resume-legacy';
+  db.prepare(`INSERT INTO apps (name, slug, slot, source_type, github_url, branch)
+              VALUES ('GH Legacy', ?, 981, 'github', 'https://github.com/example/legacy', 'main')`).run(ghSlug);
+  db.prepare(`INSERT INTO coder_sessions (id, app_slug, user_id, branch_name, status, workspace_dir)
+              VALUES ('legacy-paused', ?, ?, 'builder/gh-resume-legacy', 'paused', '/nonexistent')`)
+    .run(ghSlug, uid);
+
+  const res = await call('POST', `/api/coder/${ghSlug}/session/legacy-paused/resume`, {});
+  const text = await res.text();
+  assert.equal(res.status, 400, `a paused GitHub-backed session resumed: ${res.status} ${text}`);
+  let body = null; try { body = JSON.parse(text); } catch (_) { /* not json */ }
+  assert.equal(body?.error?.code, 'NOT_CRANE_HOSTED', `unexpected refusal: ${text}`);
+});
+

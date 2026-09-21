@@ -1,3 +1,21 @@
+// SALVAGE — not part of the build, and deliberately outside `src/`.
+//
+// tsconfig.json compiles `include: ["src"]`, so a file left in src/components
+// is type-checked whether anything imports it or not. This one cannot be: it
+// was written against `src/api.ts`, the client for `/api/agents`, which was
+// retired with that router. Every call it makes — messages, dispatch, events,
+// shipSandbox, promoteProd, gitStatus, gitDiff — is an endpoint that no longer
+// exists.
+//
+// It is kept verbatim because the chat UI coming to `/api/coder` wants the
+// shape of it: the SSE reconnect-with-backoff around `sessionStillValid`, the
+// bubble rendering, the composer, the changed-files drawer. Porting it means
+// repointing those calls at /api/coder/:slug/session/:id/* and replacing
+// ship/promote with /changes + /release. Until then it compiles against
+// nothing, which is why it lives here.
+//
+// Its `../sessionExpiry` and `../types` imports refer to studio-web/src/.
+
 import { sessionStillValid } from '../sessionExpiry'
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
