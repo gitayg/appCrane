@@ -90,7 +90,7 @@ exit $rc
 writeFileSync(join(SHIM, 'docker'), `#!/bin/sh
 case "$1" in
   ps|rm|stop|inspect) exit 0 ;;
-  image) echo 3; exit 0 ;;
+  image) echo 4; exit 0 ;;
   build) exit 0 ;;
   run)
     kind=""; ws=""; prev=""

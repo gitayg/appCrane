@@ -92,7 +92,7 @@ export function cleanupWorkspace(jobId) {
   try { rmSync(jobDir(jobId), { recursive: true, force: true }); } catch (_) {}
 }
 
-const STUDIO_IMAGE_VERSION = '3'; // bump to force image rebuild
+const STUDIO_IMAGE_VERSION = '4'; // bump to force image rebuild (4: bash — the agent had no working shell without it)
 // v3 (2026-05-03): rebuild to pull latest @anthropic-ai/claude-code in
 // case a cached older CLI looks at a different credentials.json path
 // than what AppCrane mounts. Symptom: "Not logged in · Please run /login"
@@ -128,11 +128,12 @@ export async function ensureStudioImage(onLog) {
   } else {
     onLog?.('[studio] infra/studio.Dockerfile missing — using inline recipe');
     writeFileSync(buildDockerfile, [
-      'ARG STUDIO_IMAGE_VERSION=3',
+      'ARG STUDIO_IMAGE_VERSION=4',
       'FROM node:20-alpine',
       'ARG STUDIO_IMAGE_VERSION',
       'LABEL appcrane.studio.version="${STUDIO_IMAGE_VERSION}"',
-      'RUN apk add --no-cache git',
+      // bash: alpine has none, and Claude Code's Bash tool spawns bash.
+      'RUN apk add --no-cache git bash',
       'RUN npm install -g @anthropic-ai/claude-code',
       'RUN addgroup -S studio && adduser -S -G studio studio \\',
       '    && mkdir -p /home/studio /workspace \\',

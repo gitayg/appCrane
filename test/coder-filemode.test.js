@@ -47,7 +47,7 @@ writeFileSync(GIT_LOG, '');
 writeFileSync(join(BIN, 'docker'), `#!/bin/sh
 case "$1" in
   run)     echo c0ffee000000c0ffee000000c0ffee000000c0ffee000000c0ffee000000c0ff ;;
-  image)   echo 3 ;;
+  image)   echo 4 ;;
   inspect) echo true ;;
 esac
 exit 0

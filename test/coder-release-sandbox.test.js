@@ -38,9 +38,19 @@ const REAL_GIT = execFileSync('which', ['git']).toString().trim();
 // --- shims -------------------------------------------------------------------
 const SHIM = join(ROOT, 'bin');
 mkdirSync(SHIM, { recursive: true });
+// The label the shim reports must be the CURRENT STUDIO_IMAGE_VERSION, read
+// from the source rather than hardcoded. ensureStudioImage rebuilds whenever
+// the label and the constant disagree, so a hardcoded '3' turned the v4 bump
+// (bash, which the agent had no working shell without) into a REAL docker
+// build inside this test — which then failed with `docker build failed (exit 1)`
+// against the shim, in a file about releasing to sandbox. Seven sibling files
+// carry the same hardcoded label and will break the same way on the next bump.
+const STUDIO_VERSION = /STUDIO_IMAGE_VERSION = '(\d+)'/
+  .exec(readFileSync(new URL('../server/services/appstudio/generator.js', import.meta.url), 'utf8'))?.[1];
+if (!STUDIO_VERSION) throw new Error('could not read STUDIO_IMAGE_VERSION from generator.js');
 writeFileSync(join(SHIM, 'docker'), `#!/bin/sh
 case "$1" in
-  image)   echo 3; exit 0 ;;
+  image)   echo ${STUDIO_VERSION}; exit 0 ;;
   inspect) echo true; exit 0 ;;
   run)     echo 0123456789abcdef0123456789abcdef; exit 0 ;;
   rm)      exit 0 ;;
