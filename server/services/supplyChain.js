@@ -286,9 +286,41 @@ export async function verifyCommitSha(app, releaseDir, branch, appendLog) {
   if (app.source_type === 'managed') {
     const expected = app.last_managed_push_sha;
     if (expected && /^[0-9a-f]{40}$/.test(expected) && expected !== localSha) {
+      // The mismatch has two directions and they need different advice. The
+      // message used to call every mismatch "stale — re-run the deploy", which
+      // is wrong half the time and wastes the operator's next move:
+      //
+      //   clone BEHIND the recorded push  -> genuinely stale, re-deploying fetches it
+      //   clone AHEAD of the recorded push -> a commit reached the repository
+      //     without going through pushFilesToManagedRepo (the one place that
+      //     records the SHA), so re-deploying changes nothing and will fail
+      //     identically. Measured: a push made with localGit directly instead
+      //     of the managedRepo facade produces exactly this, and the "stale"
+      //     advice sends the operator in a circle.
+      //
+      // Which direction it is, is answerable: the repository is on this host,
+      // so ask git whether the recorded commit is an ancestor of the clone.
+      let aheadOfRecord = null;
+      try {
+        const { repoPath } = await import('./localGit.js');
+        execFileSync('git', ['--git-dir', repoPath(app.slug), 'merge-base', '--is-ancestor', expected, localSha], { stdio: 'pipe' });
+        aheadOfRecord = true;
+      } catch (err) {
+        // Exit 1 is a clean "not an ancestor"; anything else (no such object,
+        // no repo) leaves the direction genuinely unknown rather than 'behind'.
+        aheadOfRecord = err?.status === 1 ? false : null;
+      }
+
+      const head = `${localSha.slice(0, 12)}…`;
+      const rec  = `${expected.slice(0, 12)}…`;
+      const advice = aheadOfRecord === true
+        ? `The clone is AHEAD of the last recorded push: ${rec} is an ancestor of ${head}, so a commit reached the repository without going through AppCrane's managed-push path, which is what records the SHA. Re-deploying will fail the same way. Push through AppCrane (appcrane_push_to_managed_app or the coder's release), or record the current commit deliberately.`
+        : aheadOfRecord === false
+          ? `The clone is stale — re-run the deploy so it fetches the pushed commit.`
+          : `Could not determine which side moved (the recorded commit is not readable in the repository). Check the repository state before re-deploying.`;
+
       throw new Error(
-        `Supply-chain verify FAILED: managed clone HEAD ${localSha.slice(0, 12)}… does not match the last pushed commit ${expected.slice(0, 12)}…. ` +
-        `The clone is stale — re-run the deploy so it fetches the pushed commit.`
+        `Supply-chain verify FAILED: managed clone HEAD ${head} does not match the last pushed commit ${rec}. ${advice}`
       );
     }
   }

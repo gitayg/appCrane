@@ -4,7 +4,7 @@ import { join, resolve } from 'path';
 import { randomUUID } from 'crypto';
 import { getDb } from '../../db.js';
 import { ensureCodebaseContext } from '../appstudio/contextBuilder.js';
-import { runAgentExec } from '../llm/runAgent.js';
+import { runAgentExec, agentCredentialKind, NO_CREDENTIAL_MESSAGE } from '../llm/runAgent.js';
 import {
   getOrCreate as ensureAppContainer,
   getContainer,
@@ -180,8 +180,23 @@ function existingOwnSessionForApp(slug, userId) {
 }
 
 export async function createSession(app, userId, onLog) {
-  if (!process.env.ANTHROPIC_API_KEY) {
-    throw new Error('ANTHROPIC_API_KEY not configured');
+  // The SECOND gate, and the one that made the per-user subscription unusable.
+  //
+  // v2.81.0 relaxed the route gates (coder.js, ask.js, appstudio.js) to "any
+  // credential resolves", so a caller with their own Claude token got past
+  // them -- and then hit this unconditional platform-key check inside the
+  // service and was refused anyway. Measured on a real box with a real stored
+  // token and no ANTHROPIC_API_KEY: POST /api/coder/<slug>/session answered
+  // `{"error":{"code":"INTERNAL_ERROR","message":"ANTHROPIC_API_KEY not
+  // configured"}}`. No test caught it because they all either set the env var
+  // or stub at the runAgent layer, below this line.
+  //
+  // Same question as the route asks, so the two cannot disagree again.
+  if (agentCredentialKind({ actingUserId: userId, appSlug: app.slug }) === 'none') {
+    const err = new Error(NO_CREDENTIAL_MESSAGE);
+    err.code = 'NOT_CONFIGURED';
+    err.status = 503;
+    throw err;
   }
 
   const blocking = activeOtherSessionForApp(app.slug, userId);

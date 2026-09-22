@@ -1,4 +1,4 @@
-import { execFile, spawn } from 'child_process';
+import { execFile, execFileSync, spawn } from 'child_process';
 import { randomBytes } from 'crypto';
 import { promisify } from 'util';
 import { basename, dirname, isAbsolute } from 'path';
@@ -66,9 +66,52 @@ const APPCRANE_LABEL = 'appcrane=true';
  * Dockerfile, i.e. a change in services/dockerfileGen.js and its PHP twin, so
  * it is a separate piece of work.
  */
+/**
+ * Whether `docker buildx` is actually installed, cached for the process.
+ *
+ * BuildKit needs the buildx CLI plugin, and it is NOT part of every Docker
+ * install: Ubuntu's `docker.io` package ships the daemon without it (buildx is
+ * the separate `docker-buildx` package). Forcing DOCKER_BUILDKIT=1 there makes
+ * EVERY deploy fail at the build step, measured on Ubuntu 26.04 with Docker
+ * 29.1.3:
+ *
+ *     ERROR: BuildKit is enabled but the buildx component is missing or broken.
+ *     DEPLOY FAILED: docker build failed
+ *
+ * and the message points at Docker's install docs, never at the one-line
+ * override that fixes it — so a self-hoster on a stock Ubuntu box had a
+ * platform that could not deploy anything, with no path out of it in the error.
+ * Falling back to the classic builder is strictly better than that: it is what
+ * AppCrane used before v2.79.0, it still works, and the only cost is the ~36%
+ * cold-build speedup measured above.
+ */
+let buildxProbe = null;
+export function hasBuildx() {
+  if (buildxProbe !== null) return buildxProbe;
+  try {
+    execFileSync('docker', ['buildx', 'version'], { stdio: 'pipe', timeout: 10000 });
+    buildxProbe = true;
+  } catch (_) {
+    buildxProbe = false;
+  }
+  return buildxProbe;
+}
+
+/** Test seam: forget the cached probe. */
+export function resetBuildxProbe() { buildxProbe = null; }
+
 export function dockerBuildEnv() {
   const override = process.env.APPCRANE_DOCKER_BUILDKIT;
-  return { ...process.env, DOCKER_BUILDKIT: override === undefined ? '1' : override };
+  // An explicit override always wins, in either direction — an operator who
+  // sets '1' on a box without buildx gets the failure they asked for.
+  if (override !== undefined) return { ...process.env, DOCKER_BUILDKIT: override };
+  if (hasBuildx()) return { ...process.env, DOCKER_BUILDKIT: '1' };
+  log.warn(
+    '[docker] BuildKit wanted but `docker buildx` is not installed — falling back to the classic builder. '
+    + 'Install the buildx plugin (on Debian/Ubuntu: the docker-buildx package) for faster cold builds, '
+    + 'or set APPCRANE_DOCKER_BUILDKIT to pin the choice.'
+  );
+  return { ...process.env, DOCKER_BUILDKIT: '0' };
 }
 
 // v2.42.1 SECURITY. Every app container used to be started with no --network at

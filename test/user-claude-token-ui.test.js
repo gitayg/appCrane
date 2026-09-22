@@ -42,7 +42,10 @@ test('the card calls all three routes the server exposes', () => {
 test('PUT sends the body field the route reads', () => {
   assert.match(meRoute, /const token = req\.body\?\.token/,
     'the route changed its field name — the card below has to follow');
-  assert.match(card, /'\/api\/me\/claude-token', \{ token \}/,
+  // The KEY is what the route reads; the value may be a variable (it is the
+  // whitespace-stripped copy). Matching the literal `{ token }` pinned the
+  // variable name, not the contract, and broke the moment the value was named.
+  assert.match(card, /'\/api\/me\/claude-token', \{ token(:| )/,
     'a body keyed anything but `token` is a 400 and the save just looks broken');
 });
 
@@ -79,13 +82,28 @@ test('the input is masked and kept out of autofill', () => {
 
 // ------------------------------------------------------------- the paste
 
-test('the card sends the paste verbatim and shows the server\'s rejection', () => {
-  // The server refuses whitespace, CR/LF, NUL and >4096 chars. A client that
-  // trims or strips stores a token that differs from the one Anthropic issued,
-  // and the failure moves from this form to a container spawn months later.
-  assert.match(card, /\{ token \}/);
-  assert.doesNotMatch(card, /token\.trim\(\)|token\.replace\(/,
-    'the card repairs the paste before sending — the server must be the one to judge it');
+test('the card strips whitespace, says so, and leaves every other judgement to the server', () => {
+  // `claude setup-token` prints to a terminal, so a copy arrives with a
+  // trailing newline and sometimes a break mid-token. A token is printable
+  // ASCII with no spaces BY DEFINITION, so stripping whitespace cannot change
+  // what Anthropic issued -- but doing it silently would hide a paste the
+  // person never checked, so the count is reported back.
+  assert.match(card, /function stripWhitespace/, 'no whitespace normalisation at all');
+  assert.match(card, /replace\(\/\\s\+\/g, ''\)/,
+    'the strip must cover every whitespace char, not just the ends — a wrapped copy breaks mid-token');
+  assert.match(card, /token: clean/, 'the stripped value is not what gets sent');
+  assert.match(card, /onPaste=/, 'paste is not normalised at entry, so the field shows something else than is stored');
+  assert.match(card, /Removed \$\{removed\} whitespace character/,
+    'the strip is silent — the person cannot tell their paste was altered');
+
+  // Everything ELSE still belongs to the server. Checked against the card with
+  // comments STRIPPED: the first version of this assertion read the whole file
+  // and was tripped by its own doc comment explaining why the rule exists --
+  // the same way a migration comment containing `CREATE TABLE` once failed a
+  // schema guard in this repo. A guard that reads prose tests the prose.
+  const cardCode = card.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+  assert.doesNotMatch(cardCode, /NUL|printable ASCII|4096/,
+    'the card is re-implementing the server validator; it must relay, not judge');
   assert.match(card, /e instanceof Error \? e\.message : 'Save failed'/,
     'the rejection shown must be the server\'s own message');
   assert.match(store, /token must be printable ASCII with no spaces/,

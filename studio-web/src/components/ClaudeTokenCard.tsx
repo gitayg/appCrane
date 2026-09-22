@@ -21,8 +21,18 @@ import { FocusInput } from './formHelpers'
  *    the failure mode is an opaque auth error months later, on a session the
  *    person did not connect to a credential they pasted once.
  *
- * Rejections are the SERVER's message, shown verbatim. The value is not
- * trimmed, stripped or otherwise repaired on the way out: the rules exist
+ * Rejections are the SERVER's message, shown verbatim.
+ *
+ * WHITESPACE IS STRIPPED, AND THE STRIP IS ANNOUNCED. `claude setup-token`
+ * prints the token to a terminal, so copying it picks up a trailing newline
+ * and, in a narrow window, line breaks mid-token. A token is printable ASCII
+ * with no spaces by definition, so no whitespace anywhere is ever part of the
+ * value and removing it cannot change what Anthropic issued. What would be
+ * wrong is doing it silently, so the card says what it removed. Anything else
+ * the server refuses stays refused, in the server's own words: the strip
+ * handles copy mechanics, not validity.
+ *
+ * Nothing else is repaired on the way out: the rules exist
  * because the token ends up in a container's environment block, and a client
  * that quietly "fixes" a paste stores a token that differs from the one
  * Anthropic issued — which fails at spawn time instead of here.
@@ -53,6 +63,16 @@ function fmtDate(iso: string | null): string {
 
 const labelStyle: React.CSSProperties = { fontSize: '.78rem', color: 'var(--dim)', marginBottom: 4, display: 'block' }
 
+
+/**
+ * Every space, tab, CR and LF removed — not just the ends. A terminal that
+ * wrapped the token puts a newline in the middle of it, and `\s` covers the
+ * non-breaking space a copy through a rich-text field can introduce too.
+ */
+function stripWhitespace(v: string): string {
+  return v.replace(/\s+/g, '')
+}
+
 export function ClaudeTokenCard() {
   const [meta, setMeta]     = useState<TokenMeta | null>(null)
   const [loadErr, setLoadErr] = useState<string | null>(null)
@@ -67,18 +87,22 @@ export function ClaudeTokenCard() {
   }, [])
 
   async function save() {
-    if (!token || busy) return
+    const clean = stripWhitespace(token)
+    if (!clean || busy) return
     setBusy(true)
     setMsg(null)
     try {
-      // `token` goes over the wire exactly as pasted — no trim(). A leading or
-      // trailing space is a real rejection (the server refuses whitespace), and
-      // silently removing it would store something the person never saw.
-      const next = await adminApi.put<TokenMeta>('/api/me/claude-token', { token })
+      const next = await adminApi.put<TokenMeta>('/api/me/claude-token', { token: clean })
       setMeta(next)
       // Cleared on success and not echoed anywhere. Nothing can read it back.
       setToken('')
-      setMsg({ ok: true, text: 'Token saved.' })
+      const removed = token.length - clean.length
+      setMsg({
+        ok: true,
+        text: removed > 0
+          ? `Token saved. Removed ${removed} whitespace character${removed === 1 ? '' : 's'} from the paste.`
+          : 'Token saved.',
+      })
     } catch (e) {
       setMsg({ ok: false, text: e instanceof Error ? e.message : 'Save failed' })
     } finally {
@@ -143,6 +167,16 @@ export function ClaudeTokenCard() {
           type="password"
           value={token}
           onChange={e => setToken(e.target.value)}
+          onPaste={e => {
+            // Normalise at paste time as well as at save, so a newline the
+            // terminal added never reaches the field and the length the person
+            // sees is the length that gets stored.
+            const text = e.clipboardData?.getData('text')
+            if (text && /\s/.test(text)) {
+              e.preventDefault()
+              setToken(stripWhitespace(text))
+            }
+          }}
           placeholder={meta?.present ? 'Paste a new token to replace the stored one' : 'sk-ant-oat01-…'}
           autoComplete="off"
           spellCheck={false}
