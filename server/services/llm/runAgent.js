@@ -20,10 +20,15 @@ import { parseLine } from '../builder/streamJsonParser.js';
 import { prepareSkillsMount } from '../skills.js';
 import { prepareClaudeCredentialsMount, credentialsInfo } from '../claudeCredentials.js';
 import { getUserClaudeToken, userClaudeTokenMeta } from '../userClaudeToken.js';
+import { defaultCoderModel } from './coderModels.js';
 import log from '../../utils/logger.js';
 
-const DEFAULT_MODEL   = process.env.APPSTUDIO_CODER_MODEL || 'claude-sonnet-4-6';
 const DEFAULT_TIMEOUT = parseInt(process.env.CODER_TIMEOUT_MS || '1800000', 10);
+
+// Read per call, not captured at import: a test (and an operator restarting
+// with a different APPSTUDIO_CODER_MODEL) must not be answered from a value
+// frozen when this module first loaded.
+const DEFAULT_MODEL = () => defaultCoderModel();
 
 // ── credential precedence ───────────────────────────────────────────────────
 //
@@ -215,7 +220,11 @@ function buildPreflightShell(checks) {
 function buildClaudeCmd({ prompt, model, resume, addDir = '/workspace', systemPrompt, preflight = [] }) {
   const parts = [
     `claude -p ${shellQuote(prompt)}`,
-    `--model ${model}`,
+    // SECURITY: quoted since v2.85.0, when the browser gained a model picker.
+    // The route validates against the coderModels allowlist first; this is the
+    // second, independent defence, so a list someone edits later is not the
+    // only thing between a request body and `sh -c`.
+    `--model ${shellQuote(String(model))}`,
     `--dangerously-skip-permissions`,
     `--output-format stream-json --verbose`,
     `--add-dir ${addDir}`,
@@ -369,7 +378,7 @@ export function runAgentExec({
   containerId,
   prompt,
   apiKey,
-  model        = DEFAULT_MODEL,
+  model        = DEFAULT_MODEL(),
   resume,
   systemPrompt,
   workdir      = '/workspace',
@@ -421,7 +430,7 @@ export function runAgentNew({
   containerName,
   prompt,
   apiKey,
-  model         = DEFAULT_MODEL,
+  model         = DEFAULT_MODEL(),
   resume,
   systemPrompt,                          // appends to claude's default system prompt
   workspaceDir,                          // host path → mounted as /workspace

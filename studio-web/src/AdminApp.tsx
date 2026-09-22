@@ -40,6 +40,10 @@ function storedCredential(name: string): string {
 // silently fell through to Security). Removed from the nav in v2.5.10
 // so users don't click a dead link. Old bookmarks still hit Security.
 const SETTINGS_SUB = [
+  // Deliberately ungated — the only tab here that configures the CALLER rather
+  // than the platform (their own Claude subscription token). A role flag would
+  // hide a personal credential page from the people whose credential it is.
+  { id: 'account',    label: 'Account',     href: '#account' },
   // v2.13.0: MCP moved under Settings; visible to app-owners + platform-admins.
   { id: 'mcp',        label: 'MCP',         href: '#mcp',      ownerOrAdmin: true },
   { id: 'skills',     label: 'Skills',      href: '#skills',   adminOnly: true },
@@ -77,7 +81,7 @@ function useHash() {
 
 function SettingsRoute() {
   const hash = useHash()
-  const valid = ['mcp', 'skills', 'security', 'users', 'roles', 'github', 'mail', 'backup', 'branding', 'audit']
+  const valid = ['account', 'mcp', 'skills', 'security', 'users', 'roles', 'github', 'mail', 'backup', 'branding', 'audit']
   const activeSub = valid.includes(hash) ? hash : 'security'
   return (
     <Layout subItems={SETTINGS_SUB} activeSub={activeSub}>

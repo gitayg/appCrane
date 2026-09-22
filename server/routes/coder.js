@@ -15,9 +15,16 @@ import {
   stopDispatch,
   subscribe,
   evictApp,
+  listFollowups,
+  cancelFollowup,
 } from '../services/builder/builderSession.js';
 import { getContainer } from '../services/builder/appContainer.js';
 import { agentCredentialKind, NO_CREDENTIAL_MESSAGE } from '../services/llm/runAgent.js';
+import {
+  coderModelChoices,
+  defaultCoderModel,
+  isAllowedCoderModel,
+} from '../services/llm/coderModels.js';
 import { usesLocalRepo, pushFilesToManagedRepo } from '../services/managedRepo.js';
 import { getQueueState } from '../services/builder/appQueue.js';
 import { fetchReleasesAndChangelog, renderReleasesPage } from '../services/github/releases.js';
@@ -113,6 +120,20 @@ function getSession(sessionId, slug) {
   return s;
 }
 
+// ── GET /api/coder/models — what a dispatch may ask for ──────────────────
+//
+// The list is served rather than hardcoded in the SPA because the two would
+// drift, and they would drift ASYMMETRICALLY: a picker offering a value the
+// allowlist rejects is a 400 on send, and a picker missing the value an
+// operator configured hides the only model the deployment actually runs. Same
+// array here and in the validator below, by construction.
+//
+// Declared before any '/:slug' route: Express matches in order, and a bare
+// GET '/models' must not be read as a slug named "models".
+router.get('/models', (req, res) => {
+  res.json({ models: coderModelChoices(), default: defaultCoderModel() });
+});
+
 // ── POST /api/coder/:slug/session — start a new session ─────────────────
 
 router.post('/:slug/session', auditMiddleware('coder.start'), async (req, res) => {
@@ -170,7 +191,10 @@ router.get('/:slug/session/:id', (req, res) => {
   const messages = db.prepare(
     "SELECT * FROM coder_session_messages WHERE session_id = ? AND role IN ('user','assistant') ORDER BY id DESC LIMIT 100"
   ).all(session.id).reverse();
-  res.json({ session, messages });
+  // Pending follow-ups ride along with the transcript: this is the call the
+  // chat makes on every (re)connect, so it is what makes a typed-ahead message
+  // survive F5.
+  res.json({ session, messages, followups: listFollowups(session.id) });
 });
 
 // ── POST /api/coder/:slug/session/:id/dispatch — send a message ──────────
@@ -178,15 +202,59 @@ router.get('/:slug/session/:id', (req, res) => {
 router.post('/:slug/session/:id/dispatch', async (req, res) => {
   getApp(req.params.slug, req.user);
   const session = getSession(req.params.id, req.params.slug);
-  if (!['idle', 'active'].includes(session.status)) {
+  // 'active' and 'queued' are accepted because a message typed while a turn is
+  // running is queued as a follow-up rather than refused (v2.85.0).
+  if (!['idle', 'active', 'queued'].includes(session.status)) {
     throw new AppError(`Session is '${session.status}', must be idle to dispatch`, 400, 'WRONG_STATUS');
   }
 
-  const { prompt } = req.body || {};
+  const { prompt, model } = req.body || {};
   if (!prompt?.trim()) throw new AppError('prompt is required', 400, 'VALIDATION');
 
-  await dispatch(req.params.id, prompt.trim());
-  res.json({ message: 'Dispatch started' });
+  // SECURITY — the whole reason this field is dangerous: `model` ends up in a
+  // shell string built for `sh -c` inside the app container (runAgent.js
+  // buildClaudeCmd). An ALLOWLIST OF EXACT STRINGS, not a pattern over
+  // characters that look harmless: `sonnet; touch /tmp/pwned` passes any
+  // "reasonable" regex someone writes six months from now. The quoting in
+  // buildClaudeCmd is the second, independent defence.
+  if (model !== undefined && model !== null && model !== '' && !isAllowedCoderModel(model)) {
+    throw new AppError(
+      `Unsupported model. GET /api/coder/models lists what this deployment accepts.`,
+      400,
+      'VALIDATION',
+    );
+  }
+
+  const r = await dispatch(req.params.id, prompt.trim(), { model, userId: req.user.id });
+  if (r?.queued) {
+    return res.json({ message: 'Queued as a follow-up', queued: true, followup: r.followup });
+  }
+  res.json({ message: 'Dispatch started', queued: false });
+});
+
+// ── follow-up queue (typed-ahead messages for THIS session) ──────────────
+//
+// Distinct from GET /:slug/queue, which is the per-APP work queue (Improve
+// jobs and builder turns competing for one container). These are messages the
+// user typed while their own turn was still running; none of them has been
+// sent to the model.
+
+router.get('/:slug/session/:id/followups', (req, res) => {
+  getApp(req.params.slug, req.user);
+  getSession(req.params.id, req.params.slug);
+  res.json({ followups: listFollowups(req.params.id) });
+});
+
+router.delete('/:slug/session/:id/followups/:followupId', (req, res) => {
+  getApp(req.params.slug, req.user);
+  getSession(req.params.id, req.params.slug);
+  const id = Number(req.params.followupId);
+  if (!Number.isInteger(id)) throw new AppError('followupId must be an integer', 400, 'VALIDATION');
+  const cancelled = cancelFollowup(req.params.id, id);
+  if (!cancelled) {
+    throw new AppError('No pending follow-up with that id — it may have already started', 404, 'NOT_FOUND');
+  }
+  res.json({ cancelled: true, followups: listFollowups(req.params.id) });
 });
 
 // ── POST /api/coder/:slug/session/:id/stop — stop current dispatch ───────
@@ -495,6 +563,7 @@ router.get('/:slug/session/:id/events', (req, res) => {
 
   // Send current status
   send({ type: 'status', status: session.status });
+  send({ type: 'followups', items: listFollowups(session.id) });
 
   const unsub = subscribe(req.params.id, send);
 

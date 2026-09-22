@@ -9,6 +9,7 @@ import { SkillsTab } from '../components/SkillsTab'
 import { ScimGroupMapping } from '../components/ScimGroupMapping'
 import { useMe, isAdmin } from '../hooks/useMe'
 import { GithubAppCard } from '../components/GithubAppCard'
+import { ClaudeTokenCard } from '../components/ClaudeTokenCard'
 
 function SecurityTab() {
   const [certFile, setCertFile] = useState('')
@@ -1251,9 +1252,19 @@ function BackupTab() {
   )
 }
 
-type Tab = 'security' | 'users' | 'roles' | 'github' | 'mail' | 'backup' | 'branding' | 'audit' | 'mcp' | 'skills'
+/**
+ * The caller's OWN settings, as opposed to the platform's. Every other tab on
+ * this page configures AppCrane for everyone; this one configures nothing but
+ * the signed-in person's credentials, which is why it is the only tab with no
+ * role gate — a plain user reaches it exactly as a platform admin does.
+ */
+function AccountTab() {
+  return <ClaudeTokenCard />
+}
 
-const VALID_TABS: Tab[] = ['security', 'users', 'roles', 'github', 'mail', 'backup', 'branding', 'audit', 'mcp', 'skills']
+type Tab = 'account' | 'security' | 'users' | 'roles' | 'github' | 'mail' | 'backup' | 'branding' | 'audit' | 'mcp' | 'skills'
+
+const VALID_TABS: Tab[] = ['account', 'security', 'users', 'roles', 'github', 'mail', 'backup', 'branding', 'audit', 'mcp', 'skills']
 
 function getTab(): Tab {
   // GitHub's App-manifest redirect lands on /settings?code=…&state=…, and its
@@ -1304,11 +1315,16 @@ export function Settings() {
   if (!isPlatformAdmin) {
     // Owners get MCP only; admins also get Skills — tab-switched. The other
     // platform-admin tabs are not mounted here (they'd fire admin-only fetches).
-    const showSkills = tab === 'skills' && adminLike
+    // Account is ungated, so it must render on this branch too — otherwise a
+    // non-platform-admin clicking the sub-nav entry lands on MCP and the token
+    // field simply is not there.
+    const showAccount = tab === 'account'
+    const showSkills  = tab === 'skills' && adminLike
     return (
       <div className="container">
-        {adminLike && <div style={{ display: showSkills ? 'block' : 'none' }}><SkillsTab /></div>}
-        <div style={{ display: showSkills ? 'none' : 'block' }}><Mcp /></div>
+        {showAccount && <AccountTab />}
+        {adminLike && <div style={{ display: !showAccount && showSkills ? 'block' : 'none' }}><SkillsTab /></div>}
+        <div style={{ display: !showAccount && !showSkills ? 'block' : 'none' }}><Mcp /></div>
       </div>
     )
   }
@@ -1322,6 +1338,7 @@ export function Settings() {
 
   return (
     <div className="container">
+      {panel('account', <AccountTab />)}
       {panel('mcp', <Mcp />)}
       {panel('skills', <SkillsTab />)}
       {panel('security', <SecurityTab />)}

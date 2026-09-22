@@ -29,6 +29,29 @@ export interface CoderMessage {
   session_id: string
   role:       'user' | 'assistant'
   content:    string
+  /** Which model produced (or was asked for) this turn. Null on pre-v2.85.0 rows. */
+  model:      string | null
+  created_at: string
+}
+
+/** One entry of GET /api/coder/models — the server's allowlist, verbatim. */
+export interface CoderModel {
+  id:         string
+  kind:       'alias' | 'pinned'
+  label:      string
+  is_default: boolean
+}
+
+/**
+ * A message typed while a turn was running. It has NOT been sent to the model.
+ * Server-side (coder_session_followups) rather than a client array, so it
+ * survives a reload and is visible to everyone watching the session.
+ */
+export interface CoderFollowup {
+  id:         number
+  prompt:     string
+  model:      string | null
+  user_id:    number | null
   created_at: string
 }
 
@@ -77,6 +100,9 @@ export type StreamEvent =
 export type CoderEvent =
   | { type: 'stream'; event: StreamEvent }
   | { type: 'status'; status: CoderStatus; ahead?: number; exitCode?: number; reason?: string }
+  | { type: 'turn';   model: string }
+  | { type: 'followups'; items: CoderFollowup[] }
+  | { type: 'note';   message: string }
   | { type: 'queue';  ahead: number; depth: number; running?: unknown }
   | { type: 'cost';   inputTokens: number; outputTokens: number; costUsdCents: number }
   | { type: 'error';  message: string }
@@ -95,11 +121,30 @@ export const coderApi = {
     adminApi.post<{ session_id: string; log: string[] }>(`${base(slug)}/session`),
 
   session: (slug: string, id: string) =>
-    adminApi.get<{ session: CoderSession; messages: CoderMessage[] }>(
+    adminApi.get<{ session: CoderSession; messages: CoderMessage[]; followups: CoderFollowup[] }>(
       `${base(slug)}/session/${enc(id)}`),
 
-  dispatch: (slug: string, id: string, prompt: string) =>
-    adminApi.post<{ message: string }>(`${base(slug)}/session/${enc(id)}/dispatch`, { prompt }),
+  /** The allowlist the dispatch validator enforces. Not app-scoped. */
+  models: () =>
+    adminApi.get<{ models: CoderModel[]; default: string }>('/api/coder/models'),
+
+  /**
+   * `model` must be one of coderApi.models() — anything else is a 400
+   * VALIDATION, because the value reaches a shell command in the container.
+   * When a turn is already running the route QUEUES this as a follow-up and
+   * answers `{ queued: true, followup }` rather than refusing.
+   */
+  dispatch: (slug: string, id: string, prompt: string, model?: string) =>
+    adminApi.post<{ message: string; queued?: boolean; followup?: CoderFollowup }>(
+      `${base(slug)}/session/${enc(id)}/dispatch`,
+      model ? { prompt, model } : { prompt }),
+
+  followups: (slug: string, id: string) =>
+    adminApi.get<{ followups: CoderFollowup[] }>(`${base(slug)}/session/${enc(id)}/followups`),
+
+  cancelFollowup: (slug: string, id: string, followupId: number) =>
+    adminApi.del<{ cancelled: boolean; followups: CoderFollowup[] }>(
+      `${base(slug)}/session/${enc(id)}/followups/${followupId}`),
 
   stop: (slug: string, id: string) =>
     adminApi.post<{ message: string }>(`${base(slug)}/session/${enc(id)}/stop`),

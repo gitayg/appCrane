@@ -20,10 +20,10 @@ import {
   aheadOf,
   PRIORITY,
 } from './appQueue.js';
+import { defaultCoderModel, isAllowedCoderModel } from '../llm/coderModels.js';
 import log from '../../utils/logger.js';
 
 const STUDIO_IMAGE  = process.env.APPSTUDIO_IMAGE || 'appcrane-studio:latest';
-const BUILDER_MODEL = process.env.APPSTUDIO_CODER_MODEL || 'claude-sonnet-4-6';
 
 /** In-memory map of active sessions { sessionId → SessionState } */
 const sessions = new Map();
@@ -66,7 +66,7 @@ function buildIntroMessage(app, workspaceDir, branchName, containerId, skillsMou
   lines.push('');
 
   lines.push('── Runtime ──');
-  lines.push(`Model:      ${BUILDER_MODEL}`);
+  lines.push(`Model:      ${defaultCoderModel()} (default — pick another per message in the composer)`);
   lines.push(`Container:  ${containerId.slice(0, 12)}  (image ${STUDIO_IMAGE}, shared per app)`);
   lines.push('Substrate:  Claude Code CLI (claude -p … --resume) — single conversation per app, shared across users');
   lines.push('');
@@ -107,11 +107,11 @@ function buildIntroMessage(app, workspaceDir, branchName, containerId, skillsMou
   return lines.join('\n');
 }
 
-function appendMessage(sessionId, role, content, tokens) {
+function appendMessage(sessionId, role, content, tokens, model) {
   const db = getDb();
   const row = db.prepare(
-    'INSERT INTO coder_session_messages (session_id, role, content, tokens) VALUES (?, ?, ?, ?) RETURNING id'
-  ).get(sessionId, role, content, tokens ?? null);
+    'INSERT INTO coder_session_messages (session_id, role, content, tokens, model) VALUES (?, ?, ?, ?, ?) RETURNING id'
+  ).get(sessionId, role, content, tokens ?? null, model ?? null);
   return row?.id;
 }
 
@@ -319,16 +319,143 @@ async function loadDispatchContext(appSlug, workspaceDir) {
   return { contextDoc, agentContext };
 }
 
-export async function dispatch(sessionId, prompt) {
+// ── typed-ahead follow-ups ────────────────────────────────────────────────
+//
+// TWO QUEUES, DELIBERATELY SEPARATE.
+//
+// appQueue (enqueueWork / aheadOf / PRIORITY) is per-APP and is about other
+// work competing for the same container: an Improve job, another app-level
+// turn. `ahead` in the chat means "N jobs are using this app's container
+// before yours". BUILDER_OCCUPIED is a third thing again — a different USER
+// already holds the one interactive session for this app.
+//
+// This queue is per-SESSION and holds only what THIS user typed while THIS
+// session's turn was still running. It never touches appQueue: a follow-up
+// enters appQueue exactly when it is dispatched, through the same
+// enqueueWork() path any first message takes, and can then report its own
+// `ahead`. So there is still at most one appQueue item per session at a time,
+// which is the invariant the `aheadOf(...) - 1` arithmetic below depends on.
+//
+// It lives in SQLite rather than in the browser or in `state` because a typed-
+// ahead message has to survive a page reload and be visible to anyone else
+// watching the session — a client-side array loses both, and an in-memory one
+// loses the reload.
+
+function pendingFollowups(sessionId) {
+  return getDb().prepare(
+    "SELECT id, prompt, model, user_id, created_at FROM coder_session_followups "
+    + "WHERE session_id = ? AND status = 'pending' ORDER BY id ASC"
+  ).all(sessionId);
+}
+
+function publishFollowups(sessionId) {
+  publish(sessionId, { type: 'followups', items: pendingFollowups(sessionId) });
+}
+
+/** Queue a message the user typed while a turn was in flight. */
+function enqueueFollowup(sessionId, prompt, model, userId) {
+  const row = getDb().prepare(
+    'INSERT INTO coder_session_followups (session_id, prompt, model, user_id) '
+    + 'VALUES (?, ?, ?, ?) RETURNING id, prompt, model, user_id, created_at'
+  ).get(sessionId, prompt, model ?? null, userId ?? null);
+  publishFollowups(sessionId);
+  return row;
+}
+
+/** Cancel one pending follow-up. Returns false if it already ran or is gone. */
+export function cancelFollowup(sessionId, followupId) {
+  const info = getDb().prepare(
+    "UPDATE coder_session_followups SET status = 'cancelled', resolved_at = datetime('now') "
+    + "WHERE id = ? AND session_id = ? AND status = 'pending'"
+  ).run(followupId, sessionId);
+  if (!info.changes) return false;
+  publishFollowups(sessionId);
+  return true;
+}
+
+export function listFollowups(sessionId) {
+  return pendingFollowups(sessionId);
+}
+
+/**
+ * STOP CLEARS THE QUEUE.
+ *
+ * Stop means "stop what I asked for". The pending messages were written as
+ * continuations of a turn the user has just abandoned — running them next
+ * would apply instructions that assume work which was interrupted halfway, to
+ * a workspace in a state nobody chose, and file edits are the one thing here
+ * that is not cheap to undo. Cancelling is the recoverable direction, and the
+ * cancelled text is published back into the transcript as a note so it can be
+ * read and re-sent rather than silently lost.
+ */
+function cancelAllPending(sessionId, reason) {
+  const rows = pendingFollowups(sessionId);
+  if (!rows.length) return [];
+  getDb().prepare(
+    "UPDATE coder_session_followups SET status = 'cancelled', resolved_at = datetime('now') "
+    + "WHERE session_id = ? AND status = 'pending'"
+  ).run(sessionId);
+  publishFollowups(sessionId);
+  publish(sessionId, {
+    type: 'note',
+    message: `${rows.length} pending follow-up${rows.length === 1 ? '' : 's'} cancelled (${reason}): `
+      + rows.map((r) => JSON.stringify(r.prompt.slice(0, 60))).join(', '),
+  });
+  return rows;
+}
+
+/**
+ * Called once a turn is completely done. Takes the oldest pending follow-up
+ * and dispatches it as an ordinary turn — same path, same appQueue entry, same
+ * events — so order is preserved and nothing about a follow-up turn is special
+ * once it starts running.
+ */
+async function drainNextFollowup(sessionId) {
+  const state = sessions.get(sessionId);
+  if (!state || state.runner || state.queued) return;
+  const next = pendingFollowups(sessionId)[0];
+  if (!next) return;
+  const claimed = getDb().prepare(
+    "UPDATE coder_session_followups SET status = 'dispatched', resolved_at = datetime('now') "
+    + "WHERE id = ? AND status = 'pending'"
+  ).run(next.id);
+  if (!claimed.changes) return;   // cancelled between the read and the claim
+  publishFollowups(sessionId);
+  try {
+    await dispatch(sessionId, next.prompt, { model: next.model, userId: next.user_id });
+  } catch (err) {
+    publish(sessionId, { type: 'error', message: `Queued follow-up could not start: ${err.message}` });
+  }
+}
+
+/**
+ * Start a turn, or queue it behind the one already running.
+ *
+ * Returns { started: true } or { queued: true, followup }. It no longer throws
+ * "A dispatch is already running": typing the next instruction while the
+ * current one works is the point of the feature.
+ */
+export async function dispatch(sessionId, prompt, { model, userId } = {}) {
   const state = sessions.get(sessionId);
   if (!state) throw new Error('Session not active (start or resume first)');
-  if (state.runner || state.queued) throw new Error('A dispatch is already running');
+
+  // Never let an unvalidated string reach the shell-command builder. The route
+  // validates first; this is the same allowlist, applied again at the last
+  // point that still knows it is a model, because dispatch() is also reached
+  // from drainNextFollowup() with a value that was persisted by an earlier
+  // request.
+  const chosen = model == null || model === '' ? defaultCoderModel() : String(model);
+  if (!isAllowedCoderModel(chosen)) throw new Error(`Unsupported model '${chosen}'`);
+
+  if (state.runner || state.queued) {
+    return { queued: true, followup: enqueueFollowup(sessionId, prompt, chosen, userId) };
+  }
 
   const c0 = getContainer(state.appSlug);
   if (!c0) throw new Error('App container is no longer available — resume the session first');
 
   touchActivity(sessionId);
-  appendMessage(sessionId, 'user', prompt);
+  appendMessage(sessionId, 'user', prompt, null, chosen);
 
   // Mark queued. If anything is ahead of us — running Improve, or another
   // queued Builder turn (shouldn't normally happen since "no takeover" caps
@@ -363,20 +490,29 @@ export async function dispatch(sessionId, prompt) {
     sourceType: 'builder',
     sourceId:   sessionId,
     label:      `Builder turn (${prompt.slice(0, 60)})`,
-    run: () => runBuilderTurn(sessionId, state, prompt),
+    run: () => runBuilderTurn(sessionId, state, prompt, chosen),
   }).finally(() => {
     state.queued = false;
     try { unsubQueue(); } catch (_) {}
+    // The one moment at which the session is provably free: the appQueue item
+    // is gone and no runner is attached. Draining here rather than from the
+    // 'exit' handler avoids racing the queue's own bookkeeping.
+    if (state.drainFollowups) void drainNextFollowup(sessionId);
   });
+
+  return { started: true };
 }
 
-async function runBuilderTurn(sessionId, state, prompt) {
+async function runBuilderTurn(sessionId, state, prompt, model) {
+  state.drainFollowups = false;
   const c = getContainer(state.appSlug);
   if (!c) {
     publish(sessionId, { type: 'error', message: 'App container vanished while waiting in queue' });
     publish(sessionId, { type: 'status', status: 'paused' });
     return;
   }
+  // Which model is answering, for the bubble the stream is about to fill.
+  publish(sessionId, { type: 'turn', model });
 
   setContainerBusy(state.appSlug, true);
   if (state.status !== 'active') {
@@ -417,6 +553,7 @@ async function runBuilderTurn(sessionId, state, prompt) {
     const runner = runAgentExec({
       containerId:  c.containerId,
       prompt:       augmentedPrompt,
+      model,
       apiKey:       process.env.ANTHROPIC_API_KEY,
       resume:       c.claudeSessionId || undefined,
       hasAppCredentials: !!c.credsCleanup,
@@ -426,7 +563,19 @@ async function runBuilderTurn(sessionId, state, prompt) {
 
     let assistantBuf = '';
     let settled = false;
-    const settle = () => { if (!settled) { settled = true; resolveRun(); } };
+    const settle = () => {
+      if (settled) return;
+      settled = true;
+      state.settleTurn = null;
+      resolveRun();
+    };
+    // Agent.stop() sets _stopped, which SUPPRESSES the 'exit' event — so a
+    // stopped turn never reached settle() and its appQueue item stayed
+    // `running` forever (the timeout that would have rescued it is cleared by
+    // stop() too). Before v2.85.0 that wedged the session behind "A dispatch
+    // is already running"; now it would wedge the follow-up queue, which must
+    // drain. stopDispatch settles through this handle.
+    state.settleTurn = settle;
 
     runner.on('system', (ev) => {
       const sid = ev?.data?.session_id;
@@ -470,7 +619,10 @@ async function runBuilderTurn(sessionId, state, prompt) {
     });
 
     runner.on('exit', (code) => {
-      if (assistantBuf) appendMessage(sessionId, 'assistant', assistantBuf);
+      if (assistantBuf) appendMessage(sessionId, 'assistant', assistantBuf, null, model);
+      // The turn completed — a nonzero code is a bad ANSWER, not a broken
+      // substrate, so the queued follow-up still gets its go.
+      state.drainFollowups = true;
       state.runner = null;
       state.status = 'idle';
       updateDb(sessionId, { status: 'idle' });
@@ -480,6 +632,11 @@ async function runBuilderTurn(sessionId, state, prompt) {
     });
 
     runner.on('error', (err) => {
+      // A timeout or a failed spawn says the substrate is wrong, not the
+      // prompt. Feeding the queue into it would multiply one failure by
+      // however many messages were typed ahead, so the follow-ups stay
+      // pending and the user decides.
+      state.drainFollowups = false;
       state.runner = null;
       state.status = 'idle';
       updateDb(sessionId, { status: 'idle' });
@@ -495,13 +652,21 @@ async function runBuilderTurn(sessionId, state, prompt) {
 
 export function stopDispatch(sessionId) {
   const state = sessions.get(sessionId);
+  // Clear the queue even when nothing is running: a user who hits Stop has
+  // said they do not want what is coming, and a Stop that left the typed-ahead
+  // messages to fire anyway is the worst possible reading of the button.
+  cancelAllPending(sessionId, 'turn stopped');
   if (!state?.runner) return;
+  state.drainFollowups = false;
   state.runner.stop();
   state.runner = null;
   state.status = 'idle';
   setContainerBusy(state.appSlug, false);
   updateDb(sessionId, { status: 'idle' });
   publish(sessionId, { type: 'status', status: 'idle' });
+  // Release the appQueue slot. Without this the stopped turn is still the
+  // queue's `running` item and nothing for this app ever runs again.
+  state.settleTurn?.();
 }
 
 /**

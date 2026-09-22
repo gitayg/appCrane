@@ -63,7 +63,10 @@ export function CoderPanel(props: Props) {
 
   if (!open) return null
 
-  const canSend = !!s.sessionId && !s.streaming && s.status !== 'paused'
+  // A running turn no longer disables the composer: the message is queued
+  // server-side and dispatched when the turn ends. Only a paused session (its
+  // container is gone) has nowhere to put the text.
+  const canSend = !!s.sessionId && s.status !== 'paused'
   const send = () => {
     const text = draft.trim()
     if (!text || !canSend) return
@@ -146,6 +149,24 @@ export function CoderPanel(props: Props) {
 
             {s.entries.map(e => <Bubble key={e.key} e={e} />)}
 
+            {s.followups.map(f => (
+              <div key={`f${f.id}`} className="coder-msg coder-msg-user" style={{ opacity: 0.62, borderStyle: 'dashed' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                  <span style={{ fontSize: 10, letterSpacing: '0.06em', textTransform: 'uppercase', opacity: 0.85 }}>
+                    Pending{f.model ? ` · ${f.model}` : ''}
+                  </span>
+                  <span className="coder-spacer" />
+                  <button
+                    type="button"
+                    className="coder-btn coder-btn-xs"
+                    title="Cancel this queued message before it starts"
+                    onClick={() => void s.cancelFollowup(f.id)}
+                  >Cancel</button>
+                </div>
+                {f.prompt}
+              </div>
+            ))}
+
             {s.status === 'paused' && (
               <div className="coder-paused">
                 This session is paused — its container was evicted.
@@ -164,7 +185,9 @@ export function CoderPanel(props: Props) {
                 className="coder-textarea"
                 rows={3}
                 value={draft}
-                placeholder="Describe the change… (↩ send · ⇧↩ newline)"
+                placeholder={s.streaming
+                  ? 'Type the next instruction — it runs when this turn ends…'
+                  : 'Describe the change… (↩ send · ⇧↩ newline)'}
                 onChange={e => setDraft(e.target.value)}
                 onKeyDown={e => {
                   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() }
@@ -178,15 +201,34 @@ export function CoderPanel(props: Props) {
                   onClick={() => (props.peekActive ? props.onPickStop() : props.onPickStart())}
                   title="Point at an element in the app to attach its context"
                 >{props.peekActive ? 'Pick…' : 'Point at element'}</button>
+                {s.models.length > 0 && (
+                  <select
+                    className="coder-btn coder-btn-xs"
+                    aria-label="Model"
+                    title="Which model answers the next message"
+                    value={s.model}
+                    onChange={e => s.setModel(e.target.value)}
+                  >
+                    {s.models.map(m => (
+                      <option key={m.id} value={m.id}>
+                        {m.label}{m.is_default ? ' · default' : ''}
+                      </option>
+                    ))}
+                  </select>
+                )}
                 <span className="coder-spacer" />
-                {s.streaming
-                  ? <button type="button" className="coder-btn coder-btn-danger" onClick={() => void s.stop()}>Stop</button>
-                  : <button
-                      type="button"
-                      className="coder-btn coder-btn-primary"
-                      disabled={!draft.trim() || !canSend}
-                      onClick={send}
-                    >Send</button>}
+                {/* Stop stays beside Send while a turn runs, rather than
+                    replacing it — the whole point is being able to type the
+                    next instruction without waiting. */}
+                {s.streaming && (
+                  <button type="button" className="coder-btn coder-btn-danger" onClick={() => void s.stop()}>Stop</button>
+                )}
+                <button
+                  type="button"
+                  className="coder-btn coder-btn-primary"
+                  disabled={!draft.trim() || !canSend}
+                  onClick={send}
+                >{s.streaming ? 'Queue' : 'Send'}</button>
               </div>
             </div>
           )}
@@ -207,5 +249,12 @@ function Bubble({ e }: { e: Entry }) {
   }
   if (e.kind === 'note')  return <div className="coder-note">{e.text}</div>
   if (e.kind === 'error') return <div className="coder-error">{e.text}</div>
-  return <div className={`coder-msg coder-msg-${e.kind}`}>{e.text}</div>
+  return (
+    <div className={`coder-msg coder-msg-${e.kind}`}>
+      {e.kind === 'assistant' && e.model && (
+        <div style={{ fontSize: 10, opacity: 0.6, marginBottom: 3, letterSpacing: '0.04em' }}>{e.model}</div>
+      )}
+      {e.text}
+    </div>
+  )
 }

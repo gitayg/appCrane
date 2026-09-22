@@ -3,7 +3,8 @@ import { ApiError } from '../../adminApi'
 import { sessionStillValid } from '../../sessionExpiry'
 import {
   coderApi, isLiveStatus,
-  type CoderEvent, type CoderSession, type CoderStatus, type StreamEvent,
+  type CoderEvent, type CoderFollowup, type CoderModel, type CoderSession,
+  type CoderStatus, type StreamEvent,
 } from './api'
 
 export interface Entry {
@@ -11,6 +12,9 @@ export interface Entry {
   kind:  'user' | 'assistant' | 'tool' | 'note' | 'error'
   text:  string
   tool?: string
+  /** Which model answered. Shown on assistant bubbles; a transcript where you
+   *  cannot tell which model produced a turn is worse than no picker. */
+  model?: string | null
 }
 
 let seq = 0
@@ -62,9 +66,31 @@ export function useCoderSession(slug: string, open: boolean) {
   const [starting,  setStarting]  = useState(false)
   const [error,     setError]     = useState<ApiError | Error | null>(null)
   const [startLog,  setStartLog]  = useState<string[]>([])
+  const [models,    setModels]    = useState<CoderModel[]>([])
+  const [model,     setModel]     = useState<string>('')
+  const [followups, setFollowups] = useState<CoderFollowup[]>([])
 
   const esRef      = useRef<EventSource | null>(null)
   const stoppedRef = useRef(false)
+  /** Model of the turn currently streaming, stamped onto its assistant bubble. */
+  const turnModel  = useRef<string | null>(null)
+
+  // ── the allowlist the server enforces ─────────────────────────────────
+  // Fetched, never hardcoded: a hardcoded list drifts from the validator and
+  // the drift shows up as a 400 on send (or as a configured model nobody can
+  // pick), not as a build failure.
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    coderApi.models()
+      .then(r => {
+        if (cancelled) return
+        setModels(r.models)
+        setModel(m => m || r.default)
+      })
+      .catch(() => { /* picker stays empty; the server still applies its default */ })
+    return () => { cancelled = true }
+  }, [open])
 
   // ── discover the app's current session ────────────────────────────────
   useEffect(() => {
@@ -113,6 +139,12 @@ export function useCoderSession(slug: string, open: boolean) {
       // "queued · 0 ahead" for its whole duration. Only a positive number is
       // a queue position worth showing.
       if (ev.type === 'queue') { setQueueAhead(ev.ahead > 0 ? ev.ahead : null); return }
+      if (ev.type === 'followups') { setFollowups(ev.items); return }
+      if (ev.type === 'turn') { turnModel.current = ev.model; return }
+      if (ev.type === 'note') {
+        setLive(p => [...p, { key: key(), kind: 'note', text: ev.message }])
+        return
+      }
       if (ev.type === 'cost')  { setCostCents(c => c + (ev.costUsdCents || 0)); return }
       if (ev.type === 'error') {
         setLive(p => [...p, { key: key(), kind: 'error', text: ev.message }])
@@ -132,7 +164,7 @@ export function useCoderSession(slug: string, open: boolean) {
         if (last && last.kind === 'assistant') {
           return [...p.slice(0, -1), { ...last, text: last.text + se.text }]
         }
-        return [...p, { key: key(), kind: 'assistant', text: se.text }]
+        return [...p, { key: key(), kind: 'assistant', text: se.text, model: turnModel.current }]
       })
     }
 
@@ -150,7 +182,11 @@ export function useCoderSession(slug: string, open: boolean) {
           key: `h${m.id}`,
           kind: m.role === 'user' ? 'user' : 'assistant',
           text: m.content,
+          model: m.model,
         })))
+        // Survives F5: the pending queue comes back with the transcript, from
+        // the DB, on every connect.
+        setFollowups(d.followups || [])
       } catch (e) {
         if (!stoppedRef.current) setError(e as Error)
         return
@@ -209,15 +245,44 @@ export function useCoderSession(slug: string, open: boolean) {
     }
   }, [slug])
 
-  const send = useCallback(async (text: string) => {
+  /**
+   * Send, or queue behind the turn in flight. The BROWSER does not decide
+   * which: it posts, and the route answers `queued` when a turn is running.
+   * A client-side "am I busy" check would be wrong the moment a second viewer
+   * is watching the same session.
+   */
+  const send = useCallback(async (text: string, chosen?: string) => {
     if (!sessionId || !text.trim()) return
-    setLive(p => [...p, { key: key(), kind: 'user', text }])
-    setStatus('active')
+    const wasStreaming = status === 'active' || status === 'queued'
+    if (!wasStreaming) {
+      setLive(p => [...p, { key: key(), kind: 'user', text }])
+      setStatus('active')
+    }
     try {
-      await coderApi.dispatch(slug, sessionId, text)
+      const r = await coderApi.dispatch(slug, sessionId, text, chosen || model || undefined)
+      // The same row arrives TWICE: once as this response, once on the SSE
+      // `followups` event the enqueue publishes. The SSE copy is the whole
+      // list and usually wins the race, so a blind append renders the newest
+      // follow-up twice (observed in the browser — no test that skips React
+      // can see it). Merge by id: the chip still appears immediately if the
+      // stream is momentarily disconnected, and never doubles when it is not.
+      if (r.queued && r.followup) {
+        const added = r.followup
+        setFollowups(p => (p.some(f => f.id === added.id) ? p : [...p, added]))
+      }
     } catch (e) {
       setLive(p => [...p, { key: key(), kind: 'error', text: (e as Error).message }])
-      setStatus('idle')
+      if (!wasStreaming) setStatus('idle')
+    }
+  }, [slug, sessionId, model, status])
+
+  const cancelFollowup = useCallback(async (id: number) => {
+    if (!sessionId) return
+    try {
+      const r = await coderApi.cancelFollowup(slug, sessionId, id)
+      setFollowups(r.followups || [])
+    } catch (e) {
+      setLive(p => [...p, { key: key(), kind: 'error', text: (e as Error).message }])
     }
   }, [slug, sessionId])
 
@@ -244,6 +309,8 @@ export function useCoderSession(slug: string, open: boolean) {
     phase, session, sessionId, status, streaming, queueAhead, costCents,
     entries: [...history, ...live],
     starting, error, startLog,
+    models, model, setModel,
+    followups, cancelFollowup,
     start, send, stop, resume,
   }
 }

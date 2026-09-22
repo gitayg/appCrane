@@ -25,12 +25,88 @@ const css          = web('admin.css');
 // The request bodies
 // ---------------------------------------------------------------------------
 
-test('dispatch sends `prompt`, which is the only field the route reads', () => {
-  assert.match(coderRoute, /const \{ prompt \} = req\.body/,
-    'the route changed its field name — the client below has to follow');
-  assert.match(api, /dispatch:[\s\S]{0,300}?\{ prompt \}/,
-    'a dispatch body keyed anything but `prompt` is answered 400 VALIDATION, and the ' +
+test('dispatch sends `prompt` (+ the optional `model`), the fields the route reads', () => {
+  assert.match(coderRoute, /const \{ prompt, model \} = req\.body/,
+    'the route changed its field names — the client below has to follow');
+  assert.match(api, /dispatch:[\s\S]{0,600}?\{ prompt, model \}[\s\S]{0,40}\{ prompt \}/,
+    'a dispatch body keyed anything but `prompt`/`model` is answered 400 VALIDATION, and the ' +
     'chat just looks broken: the message leaves the composer and no turn ever starts');
+});
+
+// ---------------------------------------------------------------------------
+// Model selection (v2.85.0)
+// ---------------------------------------------------------------------------
+
+test('the picker reads its options from the server, not from a copy in the SPA', () => {
+  // A hardcoded client list and a server allowlist drift ASYMMETRICALLY: an
+  // extra client entry is a 400 on send, a missing one hides the only model
+  // the deployment configured. Neither shows up in tsc or in a build.
+  assert.match(coderRoute, /router\.get\('\/models'/,
+    'the server stopped publishing the list the client reads');
+  assert.match(api, /models: \(\) =>[\s\S]{0,200}?'\/api\/coder\/models'/,
+    'the client must fetch the list rather than embed one');
+  assert.match(useSession, /coderApi\.models\(\)/,
+    'the hook must actually call it, or the picker is empty and the default is invisible');
+  for (const src of [panel, api, useSession]) {
+    assert.doesNotMatch(src, /\[\s*'claude-[a-z0-9-]+'\s*,/,
+      'a hardcoded model list appeared in the SPA — it will drift from the allowlist');
+  }
+});
+
+test('the model the route accepts is an allowlist, and the shell arg is quoted anyway', () => {
+  // Both halves, because each one alone is a single edit from being wrong.
+  assert.match(coderRoute, /isAllowedCoderModel\(model\)/,
+    'the route stopped validating `model` — it reaches sh -c inside the container');
+  assert.match(srv('services/llm/runAgent.js'), /--model \$\{shellQuote\(String\(model\)\)\}/,
+    'the model is interpolated into the shell string unquoted again');
+});
+
+test('a turn says which model answered it', () => {
+  assert.match(srv('services/builder/builderSession.js'),
+    /appendMessage\(sessionId, 'assistant', assistantBuf, null, model\)/,
+    'the answering model is no longer persisted with the turn');
+  assert.match(panel, /e\.kind === 'assistant' && e\.model/,
+    'the transcript stopped showing which model produced a bubble');
+});
+
+// ---------------------------------------------------------------------------
+// Follow-ups while a turn is running (v2.85.0)
+// ---------------------------------------------------------------------------
+
+test('the composer is not disabled while a turn runs', () => {
+  assert.match(panel, /const canSend = !!s\.sessionId && s\.status !== 'paused'/,
+    'the composer is gated on !streaming again — typing ahead is the feature');
+});
+
+test('the typed-ahead queue is server-side, and the client renders it as PENDING', () => {
+  // A browser-side array loses the queue on reload and hides it from anyone
+  // else watching the same session.
+  assert.match(coderRoute, /session\/:id\/followups/,
+    'the server no longer exposes the pending queue');
+  assert.match(coderRoute, /followups: listFollowups\(session\.id\)/,
+    'GET /session/:id must carry the queue, or an F5 loses it');
+  assert.match(useSession, /setFollowups\(d\.followups \|\| \[\]\)/,
+    'the hook must restore the queue on every (re)connect');
+  assert.match(panel, /Pending/,
+    'a queued message must be visibly pending, not rendered as a sent turn');
+  assert.match(panel, /s\.cancelFollowup\(f\.id\)/,
+    'a pending follow-up must be cancellable before it starts');
+});
+
+test('the queued row is merged by id, not appended blindly', () => {
+  // The same follow-up arrives twice — as the dispatch RESPONSE and on the SSE
+  // `followups` event the enqueue publishes — and the SSE copy usually wins
+  // the race. Appending both rendered the newest follow-up as two chips, the
+  // second of which 404s on Cancel. Found by opening the panel; no test that
+  // skips React can see it.
+  assert.match(useSession, /p\.some\(f => f\.id === added\.id\) \? p : \[\.\.\.p, added\]/,
+    'the optimistic follow-up is appended without checking whether the stream already delivered it');
+});
+
+test('Stop clears the pending queue, and says so', () => {
+  const bs = srv('services/builder/builderSession.js');
+  assert.match(bs, /export function stopDispatch[\s\S]{0,400}?cancelAllPending\(sessionId/,
+    'Stop must do something DEFINED with the queue; leaving it to fire is the worst reading of the button');
 });
 
 test('release posts `paths` (and an optional `message`)', () => {

@@ -2219,8 +2219,18 @@ function _onPlanInputChange() {
 // CSS variable), so the dedicated plan-panel handle isn't needed.
 
 // Request panel — backed by <crane-request-panel> Custom Element since
-// v1.27.61. The React component handles the form, plan SSE, refine,
-// build, and 🎯 element-pick. Post-build job state lives in 📋 Jobs.
+// v1.27.61. The React component handles the form, the 🎯 element-pick,
+// and the POST to /api/enhancements; it confirms the request was filed
+// and stops there.
+//
+// It no longer streams a plan or offers Build (v2.85.0). POST
+// /api/enhancements stopped queueing a plan job in v2.1.1 — a request
+// lands in triage for an owner or an MCP-connected agent — so the
+// panel's EventSource on /api/plan/:id/stream sat on "waiting for
+// worker" forever and the Build button could never appear. The plan
+// cluster further down this file is NOT dead: openPlanById() is still
+// reached from 📋 Jobs for a request in 'pending_user_review_plan',
+// which the AppStudio worker sets when the platform runs one.
 function openPlanPanel() {
   if (!currentAppSlug) return;
   var el = document.getElementById('planPanel');
