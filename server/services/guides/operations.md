@@ -485,6 +485,9 @@ Settings → Backup than passed through an agent.
 | `appcrane_scan_app` | Scan one app's dependency manifests against OSV now, instead of waiting for the daily pass |
 | `appcrane_platform_policy` | Read or set the platform levers: ban public apps, require security scans (platform admin) |
 | `appcrane_push_to_managed_app` | Push a batch of files to a managed app's AMC_<slug> repo, authenticated server-side via AppCrane's service-account credential. `deletions: [path]` removes files in the same commit (Crane-hosted repos only) |
+| `appcrane_get_app_context` | Read the operator notes injected into every coder dispatch for an app (app admin/owner) |
+| `appcrane_append_app_context` | Add a note to those operator notes — the default, because it cannot destroy what someone else wrote |
+| `appcrane_set_app_context` | REPLACE those notes wholesale; reports how many bytes it discarded |
 
 ### Access control
 

@@ -1,6 +1,11 @@
 {
-  "count": 59,
+  "count": 62,
   "tools": [
+    {
+      "name": "appcrane_append_app_context",
+      "requiredRole": "app_admin",
+      "readOnly": false
+    },
     {
       "name": "appcrane_approve_access_request",
       "requiredRole": "any",
@@ -54,6 +59,11 @@
     {
       "name": "appcrane_get_app",
       "requiredRole": "any",
+      "readOnly": true
+    },
+    {
+      "name": "appcrane_get_app_context",
+      "requiredRole": "app_admin",
       "readOnly": true
     },
     {
@@ -225,6 +235,11 @@
       "name": "appcrane_scan_report",
       "requiredRole": "admin",
       "readOnly": true
+    },
+    {
+      "name": "appcrane_set_app_context",
+      "requiredRole": "app_admin",
+      "readOnly": false
     },
     {
       "name": "appcrane_set_app_icon",

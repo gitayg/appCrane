@@ -22,8 +22,8 @@ import { assertFinding } from './scanShapes.js';
 import { coverageOf, coverageSentence, assuranceNote, reasonCounts, isScannedRow, normalizeReason } from './scanCoverage.js';
 import { resolveVisibility } from '../utils/appVisibility.js';
 import { DEFAULT_IMAGE_RETENTION } from './imageRetention.js';
-import { mkdirSync } from 'fs';
-import { join } from 'path';
+import { mkdirSync, existsSync, readFileSync, writeFileSync } from 'fs';
+import { join, resolve, dirname } from 'path';
 import crypto from 'crypto';
 
 /**
@@ -234,6 +234,51 @@ function getAppForUser(user, slug) {
     db.prepare('SELECT 1 FROM app_user_roles WHERE app_id = ? AND user_id = ?').get(app.id, user.id);
   if (!hasAccess) throw new Error(`Forbidden: no access to app ${slug}`);
   return app;
+}
+
+/**
+ * Per-app agent context: the operator notes injected into every coder dispatch.
+ *
+ * The slug is NOT trusted to build this path even though getAppForUser has
+ * already resolved it from the database — the same defence localGit applies to
+ * repo paths. A path that escapes DATA_DIR/apps is refused rather than written,
+ * because the one caller that ever gets this wrong writes an attacker's file
+ * somewhere else on the host.
+ */
+const AGENT_CONTEXT_MAX_BYTES = 256 * 1024;
+
+function agentContextPathFor(slug) {
+  const root = resolve(join(process.env.DATA_DIR || './data', 'apps'));
+  const p = resolve(join(root, String(slug), 'agent-context.md'));
+  if (!p.startsWith(`${root}/`)) throw new Error(`refusing agent-context path for ${JSON.stringify(slug)}`);
+  return p;
+}
+
+function readAgentContext(slug) {
+  const p = agentContextPathFor(slug);
+  try { return existsSync(p) ? readFileSync(p, 'utf8') : ''; } catch (_) { return ''; }
+}
+
+function writeAgentContext(slug, content) {
+  const p = agentContextPathFor(slug);
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, content, 'utf8');
+}
+
+/**
+ * A cap, because this file is prepended to EVERY dispatch for the app. An agent
+ * that appends on every turn otherwise grows a document that silently eats the
+ * context window it was meant to help, and the symptom appears as the model
+ * getting worse rather than as an error.
+ */
+function assertAgentContextSize(text) {
+  const bytes = Buffer.byteLength(String(text), 'utf8');
+  if (bytes > AGENT_CONTEXT_MAX_BYTES) {
+    throw new Error(
+      `agent context would be ${bytes} bytes, over the ${AGENT_CONTEXT_MAX_BYTES}-byte cap. `
+      + 'It is prepended to every coder dispatch, so it has to stay small — summarise or prune it.'
+    );
+  }
 }
 
 function isAppAdmin(user, app) {
@@ -2276,6 +2321,105 @@ const TOOLS = [
           max_ram_mb:      resourceLimits?.max_ram_mb      ?? null,
           max_cpu_percent: resourceLimits?.max_cpu_percent ?? null,
         },
+      };
+    },
+  },
+
+  // ── Per-app agent context ───────────────────────────────────────────────
+  //
+  // DATA_DIR/apps/<slug>/agent-context.md is read into EVERY coder dispatch as
+  // "# Per-app context from the operator" (builderSession.loadDispatchContext).
+  // The file and the REST routes already existed; what did not was any way for
+  // an MCP client to reach them, so a local agent that learned something about
+  // an app had nowhere to put it where the in-platform coder would see it.
+  //
+  // Deliberately NOT a transcript channel. A raw conversation log makes the
+  // agent's context bigger, not better, couples two Claude Code versions'
+  // .jsonl formats, and ships everything the local session ever read to the
+  // server. A written summary is smaller, reviewable by a human, and survives
+  // a CLI upgrade.
+  {
+    name: 'appcrane_get_app_context',
+    description:
+      "Read an app's agent context — the operator notes at DATA_DIR/apps/<slug>/agent-context.md that are injected into every AppCrane coder dispatch for that app. Use this before writing, so an append or a replace is an informed one. Returns an empty string when no context has been written yet. App admin or owner (or global admin) required, because these notes routinely contain internal detail about how an app is built and operated.",
+    inputSchema: {
+      type: 'object',
+      properties: { slug: { type: 'string', description: 'App slug.' } },
+      required: ['slug'],
+      additionalProperties: false,
+    },
+    requiredRole: 'app_admin',
+    readOnly: true,
+    handler: async (user, args) => {
+      const app = getAppForUser(user, args.slug);
+      if (!isAppAdmin(user, app)) throw new Error(`Forbidden: app admin or owner required for '${app.slug}'.`);
+      const content = readAgentContext(app.slug);
+      return { slug: app.slug, content, bytes: Buffer.byteLength(content, 'utf8') };
+    },
+  },
+
+  {
+    name: 'appcrane_append_app_context',
+    description:
+      "Append a note to an app's agent context, so the AppCrane coder knows what you just learned. This is the tool to reach for by default: it cannot destroy what someone else wrote, which appcrane_set_app_context can. The note is added under a timestamped heading. Write what would be expensive for the next agent to rediscover — a constraint, a gotcha, why something is the way it is — not a transcript of what you did. App admin or owner required.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        slug: { type: 'string', description: 'App slug.' },
+        note: { type: 'string', description: 'Markdown to append. Written under a heading naming who added it and when.' },
+        heading: { type: 'string', description: 'Optional short title for this note, e.g. "Deploy gotcha". Defaults to a timestamp alone.' },
+      },
+      required: ['slug', 'note'],
+      additionalProperties: false,
+    },
+    requiredRole: 'app_admin',
+    handler: async (user, args) => {
+      const app = getAppForUser(user, args.slug);
+      if (!isAppAdmin(user, app)) throw new Error(`Forbidden: app admin or owner required for '${app.slug}'.`);
+      const note = String(args.note ?? '');
+      if (!note.trim()) throw new Error('note is empty — nothing to append.');
+      assertAgentContextSize(note);
+
+      const existing = readAgentContext(app.slug);
+      const who = user?.name || user?.email || `user ${user?.id}`;
+      const title = args.heading ? String(args.heading).trim().slice(0, 120) : '';
+      const stamp = new Date().toISOString().replace('T', ' ').slice(0, 16);
+      const block = `${existing && !existing.endsWith('\n') ? '\n' : ''}\n## ${title ? `${title} — ` : ''}${stamp} (${who})\n\n${note.trim()}\n`;
+      const next = existing + block;
+      assertAgentContextSize(next);
+      writeAgentContext(app.slug, next);
+      return { slug: app.slug, appended_bytes: Buffer.byteLength(block, 'utf8'), total_bytes: Buffer.byteLength(next, 'utf8') };
+    },
+  },
+
+  {
+    name: 'appcrane_set_app_context',
+    description:
+      "REPLACE an app's entire agent context. Destructive: whatever a human or another agent wrote is gone. Prefer appcrane_append_app_context unless you are deliberately rewriting the whole document — and read it first with appcrane_get_app_context so you know what you are discarding. Pass an empty string to clear it. App admin or owner required.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        slug: { type: 'string', description: 'App slug.' },
+        content: { type: 'string', description: 'The full new content. Replaces everything. Empty string clears the context.' },
+      },
+      required: ['slug', 'content'],
+      additionalProperties: false,
+    },
+    requiredRole: 'app_admin',
+    handler: async (user, args) => {
+      const app = getAppForUser(user, args.slug);
+      if (!isAppAdmin(user, app)) throw new Error(`Forbidden: app admin or owner required for '${app.slug}'.`);
+      const content = String(args.content ?? '');
+      assertAgentContextSize(content);
+      const previous = readAgentContext(app.slug);
+      writeAgentContext(app.slug, content);
+      // The caller is told what it destroyed, in bytes. A silent replace is how
+      // an agent quietly deletes a human's notes and nobody finds out.
+      return {
+        slug: app.slug,
+        bytes: Buffer.byteLength(content, 'utf8'),
+        replaced_bytes: Buffer.byteLength(previous, 'utf8'),
+        warning: previous && !content ? 'Context cleared.' : undefined,
       };
     },
   },
