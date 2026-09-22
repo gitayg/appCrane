@@ -140,8 +140,16 @@ export class CraneAppTopbar extends HTMLElement {
   connectedCallback() { this.render() }
   attributeChangedCallback() { if (this.isConnected) this.render() }
 
-  private emit(name: string, detail?: Record<string, unknown>) {
-    this.dispatchEvent(new CustomEvent(name, { bubbles: true, composed: true, detail }))
+  /**
+   * Returns false when a listener called preventDefault, which is how the host
+   * says "I handled this". Only crane-env-menu reads it: the bar must keep the
+   * browser's own context menu for a viewer the host offers no menu to, and it
+   * cannot know who that is. `cancelable` is new here and inert for the other
+   * events -- nothing calls preventDefault on them, and dispatchEvent returns
+   * true for an event nobody cancelled.
+   */
+  private emit(name: string, detail?: Record<string, unknown>): boolean {
+    return !this.dispatchEvent(new CustomEvent(name, { bubbles: true, composed: true, cancelable: true, detail }))
   }
 
   private toggleFold = () => {
@@ -167,6 +175,22 @@ export class CraneAppTopbar extends HTMLElement {
         case 'env-prod': this.emit('crane-env-change', { env: 'production' }); break
         case 'env-sand': this.emit('crane-env-change', { env: 'sandbox' }); break
       }
+    })
+
+    // Right-click on an environment pill asks the host for a menu: redeploy
+    // either environment, or promote sandbox to production. The element does
+    // not know who the viewer is or what they may do, and must not guess --
+    // it reports the gesture and the host decides whether to render anything.
+    // Nothing is suppressed until the host says it handled it, so a viewer
+    // with no menu keeps the browser's own context menu.
+    this.root.addEventListener('contextmenu', (e) => {
+      const target = e.target as HTMLElement | null
+      const action = target?.closest('[data-action]')?.getAttribute('data-action')
+      const env = action === 'env-prod' ? 'production' : action === 'env-sand' ? 'sandbox' : null
+      if (!env) return
+      const ev = e as MouseEvent
+      const handled = this.emit('crane-env-menu', { env, x: ev.clientX, y: ev.clientY })
+      if (handled) e.preventDefault()
     })
   }
 

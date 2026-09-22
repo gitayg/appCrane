@@ -41,13 +41,13 @@ import { readFileSync } from 'fs';
 const read = (p) => readFileSync(new URL(`../studio-web/src/${p}`, import.meta.url), 'utf8');
 const expiry = read('sessionExpiry.ts');
 const adminApi = read('adminApi.ts');
-// ChatPanel moved OUT of src/ in v2.83.0: it was written against api.ts, the
-// /api/agents client, and neither survived that router. It is kept verbatim as
-// salvage for the chat UI coming to /api/coder, and (3) below is kept pointed
-// at it for exactly that reason — the port should start from a file that has
-// the SSE hygiene already, not from one that quietly lost it while nothing was
-// watching.
-const chat = readFileSync(new URL('../studio-web/salvage/ChatPanel.tsx', import.meta.url), 'utf8');
+// The salvaged ChatPanel was the /api/agents chat UI, kept outside src/ after
+// that router was retired so the SSE hygiene below would survive the port. The
+// port happened in v2.84.0 (components/coder/useCoderSession.ts) and the
+// salvage was deleted, so (3) now guards the live file. That is the point of
+// these three: the hygiene has to be in whatever code actually opens an
+// EventSource, not in a museum piece nobody runs.
+const chat = read('components/coder/useCoderSession.ts');
 
 // ---------------------------------------------------------------------------
 // Polarity
@@ -82,7 +82,7 @@ test('the fetch helper passes the request path so the exclusion can apply', () =
 });
 
 // ---------------------------------------------------------------------------
-// The silent loop (guarding the salvaged ChatPanel, see the note above)
+// The silent loop (guarding the live coder stream, see the note above)
 // ---------------------------------------------------------------------------
 
 test('an SSE error probes the session before reconnecting', () => {
@@ -92,7 +92,7 @@ test('an SSE error probes the session before reconnecting', () => {
 });
 
 test('the reconnect stops when the session is gone', () => {
-  assert.match(chat, /if \(!ok \|\| stopped\)/,
+  assert.match(chat, /if \(!ok \|\| stopped/,
     'a false answer means a bounce is under way — reconnecting then races the redirect');
 });
 

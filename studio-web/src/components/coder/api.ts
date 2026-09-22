@@ -1,0 +1,133 @@
+// Client for /api/coder — the Crane-hosted coder surface (server/routes/coder.js).
+//
+// Every shape here was read off that router rather than guessed; the two that
+// most easily go wrong are marked:
+//   • dispatch takes `{ prompt }`, not `{ text }`.
+//   • the SSE stream carries TWO encodings of the same thing — see CoderEvent.
+
+import { adminApi, authParamsForSSE } from '../../adminApi'
+
+export type CoderStatus =
+  | 'starting' | 'idle' | 'active' | 'queued' | 'paused' | 'shipped' | 'error'
+
+export interface CoderSession {
+  id:                 string
+  app_slug:           string
+  user_id:            number
+  branch_name:        string
+  container_id:       string | null
+  workspace_dir:      string | null
+  status:             CoderStatus
+  claude_session_id:  string | null
+  cost_tokens:        number
+  cost_usd_cents:     number
+  created_at:         string
+}
+
+export interface CoderMessage {
+  id:         number
+  session_id: string
+  role:       'user' | 'assistant'
+  content:    string
+  created_at: string
+}
+
+export interface ChangedFile {
+  path:   string
+  status: 'added' | 'modified' | 'deleted'
+  diff:   string
+}
+
+export interface DeployInfo {
+  action:    string | null
+  branch?:   string
+  commit?:   string
+  triggered: { env: string; deployment_id: number }[]
+}
+
+export interface ReleaseResult {
+  commit:   { sha: string }
+  released: string[]
+  deleted:  string[]
+  deploy:   DeployInfo | null
+}
+
+// GET /:slug/queue is deliberately NOT wired. The only thing the chat needs
+// from the queue is this session's position, and builderSession already pushes
+// that down the stream it is already subscribed to (`{type:'queue', ahead}`) —
+// live, rather than as a poll that is stale the moment it lands.
+
+/** One parsed line of the agent's stream-json (server/services/builder/streamJsonParser.js). */
+export type StreamEvent =
+  | { type: 'text';   text: string }
+  | { type: 'tool';   name: string; input?: unknown }
+  | { type: 'result'; inputTokens: number; outputTokens: number; costUsdCents: number }
+  | { type: 'system'; subtype: string; data?: unknown }
+
+/**
+ * What arrives on the SSE channel.
+ *
+ * The route replays buffered `role='system'` rows by sending the stored event
+ * VERBATIM — `{"type":"text",…}` — while live events from builderSession are
+ * published WRAPPED as `{ type:'stream', event:{…} }`. So the same text block
+ * has two encodings on one channel depending on whether you are catching up or
+ * caught up, and a reader that handles only the wrapped form silently drops
+ * the entire replayed transcript.
+ */
+export type CoderEvent =
+  | { type: 'stream'; event: StreamEvent }
+  | { type: 'status'; status: CoderStatus; ahead?: number; exitCode?: number; reason?: string }
+  | { type: 'queue';  ahead: number; depth: number; running?: unknown }
+  | { type: 'cost';   inputTokens: number; outputTokens: number; costUsdCents: number }
+  | { type: 'error';  message: string }
+  | StreamEvent
+
+const enc = encodeURIComponent
+const base = (slug: string) => `/api/coder/${enc(slug)}`
+
+export const coderApi = {
+  /** Latest session for this app, or null. */
+  latestSession: (slug: string) =>
+    adminApi.get<{ session: CoderSession | null }>(`${base(slug)}/session`),
+
+  /** 201 { session_id, log[] }. Refuses with NOT_CRANE_HOSTED / NO_REPO / NOT_CONFIGURED / BUILDER_OCCUPIED. */
+  startSession: (slug: string) =>
+    adminApi.post<{ session_id: string; log: string[] }>(`${base(slug)}/session`),
+
+  session: (slug: string, id: string) =>
+    adminApi.get<{ session: CoderSession; messages: CoderMessage[] }>(
+      `${base(slug)}/session/${enc(id)}`),
+
+  dispatch: (slug: string, id: string, prompt: string) =>
+    adminApi.post<{ message: string }>(`${base(slug)}/session/${enc(id)}/dispatch`, { prompt }),
+
+  stop: (slug: string, id: string) =>
+    adminApi.post<{ message: string }>(`${base(slug)}/session/${enc(id)}/stop`),
+
+  resume: (slug: string, id: string) =>
+    adminApi.post<{ message: string; log: string[] }>(`${base(slug)}/session/${enc(id)}/resume`),
+
+  changes: (slug: string, id: string) =>
+    adminApi.get<{ files: ChangedFile[] }>(`${base(slug)}/session/${enc(id)}/changes`),
+
+  release: (slug: string, id: string, paths: string[], message?: string) =>
+    adminApi.post<ReleaseResult>(`${base(slug)}/session/${enc(id)}/release`,
+      message ? { paths, message } : { paths }),
+
+  /**
+   * EventSource cannot set headers, so the credential travels as a query
+   * param under the name the route resolves it by.
+   * `after` is a coder_session_messages id: the route replays buffered system
+   * rows with id > after, which is how a reconnect avoids re-rendering
+   * everything already on screen.
+   */
+  eventsUrl(slug: string, id: string, after: number): string {
+    const qs = new URLSearchParams({ after: String(after), ...authParamsForSSE() })
+    return `${base(slug)}/session/${enc(id)}/events?${qs.toString()}`
+  },
+}
+
+/** Statuses a session can still be talked to in. Anything else needs a new one. */
+export function isLiveStatus(s: CoderStatus | undefined | null): boolean {
+  return s === 'idle' || s === 'active' || s === 'queued' || s === 'paused' || s === 'starting'
+}

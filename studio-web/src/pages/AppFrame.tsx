@@ -2,7 +2,9 @@ import { useEffect, useRef, useState } from 'react'
 import { adminApi } from '../adminApi'
 import { usePeek, type PeekCtx } from '../hooks/usePeek'
 import { RequestModal } from '../components/runtime-topbar/RequestModal'
+import { CoderPanel } from '../components/coder/CoderPanel'
 import { Icon } from '../components/icons'
+import { EnvActionMenu, type EnvMenuState } from '../components/EnvActionMenu'
 
 /**
  * One app rendered inline, hosted by the <crane-app-topbar> element (env switch,
@@ -13,16 +15,32 @@ import { Icon } from '../components/icons'
  */
 
 interface AppRow {
-  slug:        string
-  name:        string
-  has_icon?:   boolean
-  github_url?: string
+  slug:         string
+  name:         string
+  has_icon?:    boolean
+  github_url?:  string
+  // Where this app's code lives. /api/apps serves both columns verbatim —
+  // withoutSecretColumns strips only *_encrypted — so the coder's eligibility
+  // is decided from the app list the frame already loads, with no second call.
+  source_type?:  string | null
+  repo_backend?: string | null
+  /** This caller's role on this app: 'admin' | 'owner' | 'user' | 'viewer' | 'none'. */
+  app_role?:     string
   production?: { health?: { status: string }; deploy?: { version?: string; status?: string } }
   sandbox?:    { health?: { status: string }; deploy?: { version?: string; status?: string } }
 }
 
 interface Stage {
   slug: string; name: string; hasIcon: boolean; hasGithub: boolean
+  /** managed + repo_backend 'local' — the only shape /api/coder will accept. */
+  craneHosted: boolean
+  /** admin/owner here, i.e. the bar coder.js's requireAppAdmin enforces on release. */
+  canRelease: boolean
+  /** The app-scoped half of who may promote. The server's rule is
+   *  `isAdmin(user) || roleForUserOnApp(...) === 'owner'` (deploy.js:287), so a
+   *  platform admin qualifies too — that half is `platformAdmin` below, fetched
+   *  once from /api/me, because the app payload carries no global role. */
+  isOwner: boolean
   env: 'production' | 'sandbox'
   url: string; prodUrl: string; sandUrl: string; prodVersion: string; sandVersion: string
 }
@@ -44,6 +62,11 @@ function buildStage(app: AppRow): Stage {
   const useSand = sandLive && (!prodLive || (!prodOk && sandOk))
   return {
     slug: app.slug, name: app.name, hasIcon: !!app.has_icon, hasGithub: !!app.github_url,
+    // Same predicate as server/services/managedRepo.js usesLocalRepo(): a NULL
+    // repo_backend on a managed app means its repo is on GitHub, not here.
+    craneHosted: app.source_type === 'managed' && app.repo_backend === 'local',
+    canRelease: app.app_role === 'admin' || app.app_role === 'owner',
+    isOwner: app.app_role === 'owner',
     env: useSand ? 'sandbox' : 'production',
     url: useSand ? sandUrl : prodUrl,
     prodUrl, sandUrl,
@@ -62,15 +85,46 @@ export function AppFrame({ slug, active, onClose }: Props) {
   const [stage, setStage] = useState<Stage | null>(null)
   const [status, setStatus] = useState<'loading' | 'ready' | 'notfound'>('loading')
   const [folded, setFolded] = useState(false)
+  const [envMenu, setEnvMenu] = useState<EnvMenuState | null>(null)
+  // Mirrors deploy.js's isAdmin() half. Without it a platform admin — who the
+  // server WILL let promote — is shown no menu at all.
+  const [platformAdmin, setPlatformAdmin] = useState(false)
+  const [envNotice, setEnvNotice] = useState<string | null>(null)
+
+  useEffect(() => {
+    let alive = true
+    adminApi.get<{ user?: { role?: string } }>('/api/me')
+      .then(r => { if (alive) setPlatformAdmin(r?.user?.role === 'admin' || r?.user?.role === 'platform_admin') })
+      .catch(() => { /* not fatal: the menu just stays hidden */ })
+    return () => { alive = false }
+  }, [])
   const [refreshNonce, setRefreshNonce] = useState(0)
   const topbarRef = useRef<HTMLElement>(null)
   const iframeRef = useRef<HTMLIFrameElement>(null)
 
+  // One picker, two consumers. usePeek has a single `ctx`, so whoever started
+  // the pick has to be recorded — otherwise a pick meant for the coder prompt
+  // also pops the Request modal.
   const peek = usePeek(iframeRef)
+  const [peekFor, setPeekFor] = useState<'request' | 'coder'>('request')
   const [requestCtx, setRequestCtx] = useState<PeekCtx | null>(null)
+  const [coderCtx, setCoderCtx] = useState<PeekCtx | null>(null)
+  const [coderOpen, setCoderOpen] = useState(false)
   useEffect(() => {
-    if (peek.ctx) { setRequestCtx(peek.ctx); peek.clear() }
+    if (!peek.ctx) return
+    if (peekFor === 'coder') setCoderCtx(peek.ctx)
+    else setRequestCtx(peek.ctx)
+    peek.clear()
   }, [peek.ctx]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const startRequestPick = () => { setPeekFor('request'); peek.start() }
+  const startCoderPick   = () => { setPeekFor('coder');   peek.start() }
+
+  // The panel is docked, not overlaid: the iframe shrinks by exactly this many
+  // pixels (--frame-dock-width) so the app stays visible and usable while the
+  // conversation is about it.
+  const CODER_DOCK_WIDTH = 460
+  const dockWidth = coderOpen ? CODER_DOCK_WIDTH : 0
 
   useEffect(() => {
     let cancelled = false
@@ -106,18 +160,29 @@ export function AppFrame({ slug, active, onClose }: Props) {
       setStage(s => (s ? { ...s, env, url: env === 'sandbox' ? s.sandUrl : s.prodUrl } : s))
     }
     const onFold = (e: Event) => setFolded((e as CustomEvent<{ folded: boolean }>).detail.folded)
+    // preventDefault is the element's signal that we rendered a menu; without
+    // it the bar leaves the browser's own context menu alone, which is what a
+    // non-owner should still get.
+    const onEnvMenu = (e: Event) => {
+      const ev = e as CustomEvent<{ env: 'production' | 'sandbox'; x: number; y: number }>
+      if (!stage?.isOwner && !platformAdmin) return
+      ev.preventDefault()
+      setEnvMenu({ env: ev.detail.env, x: ev.detail.x, y: ev.detail.y })
+    }
 
     el.addEventListener('crane-back',        onBack)
     el.addEventListener('crane-refresh',     onRefresh)
     el.addEventListener('crane-env-change',  onEnv)
     el.addEventListener('crane-fold-toggle', onFold)
+    el.addEventListener('crane-env-menu',    onEnvMenu)
     return () => {
       el.removeEventListener('crane-back',        onBack)
       el.removeEventListener('crane-refresh',     onRefresh)
       el.removeEventListener('crane-env-change',  onEnv)
       el.removeEventListener('crane-fold-toggle', onFold)
+      el.removeEventListener('crane-env-menu',    onEnvMenu)
     }
-  }, [stage?.slug, onClose])
+  }, [stage?.slug, stage?.isOwner, platformAdmin, onClose])
 
   // Re-check the app's LIVE versions on open, env switch, and every refresh.
   //
@@ -155,7 +220,13 @@ export function AppFrame({ slug, active, onClose }: Props) {
   }, [stage?.slug, stage?.env, refreshNonce])
 
   return (
-    <div className="lstage-frame" style={{ display: active ? 'flex' : 'none' }}>
+    <div
+      className="lstage-frame"
+      style={{
+        display: active ? 'flex' : 'none',
+        ['--frame-dock-width' as string]: `${dockWidth}px`,
+      } as React.CSSProperties}
+    >
       {status === 'ready' && stage ? (
         <>
           <crane-app-topbar
@@ -175,22 +246,66 @@ export function AppFrame({ slug, active, onClose }: Props) {
               {stage.hasGithub && (
                 <button
                   type="button"
-                  className={'crane-topbar-btn' + (peek.active || requestCtx ? ' active' : '')}
+                  className={'crane-topbar-btn' + ((peek.active && peekFor === 'request') || requestCtx ? ' active' : '')}
                   onClick={() => {
                     if (requestCtx) { setRequestCtx(null); return }
                     if (peek.active) { peek.stop(); return }
-                    peek.start()
+                    startRequestPick()
                   }}
                   title={peek.active
                     ? 'Click an element in the app, then describe the change. Esc to cancel.'
                     : 'Point at an element to request an enhancement'}
-                ><Icon.Lightbulb size={14} /> {peek.active ? 'Pick…' : 'Request'}</button>
+                ><Icon.Lightbulb size={14} /> {peek.active && peekFor === 'request' ? 'Pick…' : 'Request'}</button>
+              )}
+              {/* Crane-hosted only. /api/coder refuses anything else with
+                  NOT_CRANE_HOSTED or NO_REPO, and a button whose only possible
+                  outcome is a refusal is not a feature. */}
+              {stage.craneHosted && (
+                <button
+                  type="button"
+                  className={'crane-topbar-btn' + (coderOpen ? ' active' : '')}
+                  onClick={() => setCoderOpen(o => !o)}
+                  title="Open the coder — change this app by describing what you want"
+                ><Icon.Sparkles size={14} /> Coder</button>
               )}
             </span>
           </crane-app-topbar>
           {stage.url && <iframe key={stage.url} ref={iframeRef} className="lstage-iframe" src={stage.url} title={stage.name} />}
+          {active && envMenu && (stage.isOwner || platformAdmin) && (
+            <EnvActionMenu
+              slug={stage.slug}
+              state={envMenu}
+              onClose={() => setEnvMenu(null)}
+              onStarted={(msg) => {
+                setEnvNotice(msg)
+                // The deploy is asynchronous; re-probe both envs shortly so the
+                // version pills catch up without the user reloading.
+                setTimeout(() => setRefreshNonce(n => n + 1), 4000)
+                setTimeout(() => setEnvNotice(null), 8000)
+              }}
+            />
+          )}
+          {active && envNotice && (
+            <div className="env-notice" role="status">{envNotice}</div>
+          )}
           {active && requestCtx && (
             <RequestModal slug={stage.slug} appName={stage.name} peekCtx={requestCtx} onClose={() => setRequestCtx(null)} />
+          )}
+          {stage.craneHosted && (
+            <CoderPanel
+              slug={stage.slug}
+              appName={stage.name}
+              open={coderOpen}
+              onClose={() => setCoderOpen(false)}
+              top={folded ? 22 : 44}
+              width={CODER_DOCK_WIDTH}
+              canRelease={stage.canRelease}
+              peekActive={peek.active && peekFor === 'coder'}
+              peekCtx={coderCtx}
+              onPickStart={startCoderPick}
+              onPickStop={peek.stop}
+              onPeekConsumed={() => setCoderCtx(null)}
+            />
           )}
         </>
       ) : (

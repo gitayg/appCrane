@@ -36,6 +36,48 @@ export function authTokenForSSE(): string {
       || ''
 }
 
+/**
+ * Query params that authenticate an EventSource, named the way the route
+ * expects them.
+ *
+ * authTokenForSSE() returns "whichever credential this browser holds" and
+ * loses which KIND it is. /api/ask can live with that — it looks the ?token=
+ * value up against BOTH identity_sessions and users.api_key_hash. /api/coder
+ * does not: it promotes ?token= to `Authorization: Bearer` and ?api_key= to
+ * `X-API-Key`, and those are two different lookups. An admin-SPA browser
+ * holding only cc_api_key therefore 401s if its key is sent as ?token=.
+ * This returns the credential under the name that resolves it, mirroring
+ * authHeaders()' precedence exactly.
+ */
+export function authParamsForSSE(): Record<string, string> {
+  const bearer = asciiOnly(localStorage.getItem('cc_identity_token') || '')
+  if (bearer) return { token: bearer }
+  const key = asciiOnly(localStorage.getItem('cc_api_key') || '')
+  if (key) return { api_key: key }
+  return {}
+}
+
+/**
+ * An HTTP failure that kept its status and error code.
+ *
+ * The routes answer refusals with `{ error: { code, message } }` and a
+ * meaningful status — NOT_CRANE_HOSTED, NOT_CONFIGURED, BUILDER_OCCUPIED,
+ * ENV_FILE_IN_PUSH are each a different thing for the user to do. Flattening
+ * them to `new Error(message)` (what req() did for everything) leaves a caller
+ * no way to branch, so it renders every refusal as the same red box.
+ * Extends Error, so existing `e.message` / `String(e)` callers are unaffected.
+ */
+export class ApiError extends Error {
+  status: number
+  code: string
+  constructor(message: string, status: number, code: string) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+    this.code = code
+  }
+}
+
 async function req<T = unknown>(path: string, init?: RequestInit): Promise<T> {
   const r = await fetch(path, {
     ...init,
@@ -55,8 +97,8 @@ async function req<T = unknown>(path: string, init?: RequestInit): Promise<T> {
   }
   if (!r.ok) {
     const body = await r.json().catch(() => ({}))
-    const msg = (body as { error?: { message?: string } })?.error?.message || `HTTP ${r.status}`
-    throw new Error(msg)
+    const err = (body as { error?: { message?: string; code?: string } })?.error
+    throw new ApiError(err?.message || `HTTP ${r.status}`, r.status, err?.code || 'HTTP_ERROR')
   }
   const data = await r.json().catch(() => ({}))
   return data as T
