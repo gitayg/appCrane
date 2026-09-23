@@ -74,7 +74,7 @@ test('a turn says which model answered it', () => {
 // ---------------------------------------------------------------------------
 
 test('the composer is not disabled while a turn runs', () => {
-  assert.match(panel, /const canSend = !!s\.sessionId && s\.status !== 'paused'/,
+  assert.match(panel, /const canSend = !!s\.sessionId && !s\.resumingSince/,
     'the composer is gated on !streaming again — typing ahead is the feature');
 });
 

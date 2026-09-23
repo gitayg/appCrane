@@ -319,6 +319,11 @@ router.post('/:slug/session/:id/dispatch', async (req, res) => {
   const session = getSession(req.params.id, req.params.slug);
   // 'active' and 'queued' are accepted because a message typed while a turn is
   // running is queued as a follow-up rather than refused (v2.85.0).
+  // A paused session gets its own code so the panel can resume and retry the
+  // same message, rather than show an error next to a pill that says idle.
+  if (session.status === 'paused') {
+    throw new AppError('This session is paused (its container was stopped). Resume it to continue.', 409, 'SESSION_PAUSED');
+  }
   if (!['idle', 'active', 'queued'].includes(session.status)) {
     throw new AppError(`Session is '${session.status}', must be idle to dispatch`, 400, 'WRONG_STATUS');
   }
@@ -340,7 +345,13 @@ router.post('/:slug/session/:id/dispatch', async (req, res) => {
     );
   }
 
-  const r = await dispatch(req.params.id, prompt.trim(), { model, userId: req.user.id });
+  let r;
+  try {
+    r = await dispatch(req.params.id, prompt.trim(), { model, userId: req.user.id });
+  } catch (err) {
+    if (err.code === 'SESSION_PAUSED') throw new AppError(err.message, 409, 'SESSION_PAUSED');
+    throw err;
+  }
   if (r?.queued) {
     return res.json({ message: 'Queued as a follow-up', queued: true, followup: r.followup });
   }

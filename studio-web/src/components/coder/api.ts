@@ -105,7 +105,7 @@ export type CoderEvent =
   | { type: 'note';   message: string }
   | { type: 'queue';  ahead: number; depth: number; running?: unknown }
   | { type: 'cost';   inputTokens: number; outputTokens: number; costUsdCents: number }
-  | { type: 'error';  message: string }
+  | { type: 'error';  message: string; turnFailed?: boolean }
   | StreamEvent
 
 /**

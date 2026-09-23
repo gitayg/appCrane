@@ -151,7 +151,14 @@ export function useCoderSession(slug: string, open: boolean) {
       }
       if (ev.type === 'cost')  { setCostCents(c => c + (ev.costUsdCents || 0)); return }
       if (ev.type === 'error') {
-        setLive(p => [...p, { key: key(), kind: 'error', text: ev.message }])
+        // A failed turn streamed its failure as reply text ("Failed to
+        // authenticate…"). Replace that bubble, so the failure is not left
+        // looking like the coder's answer; the error already quotes it.
+        setLive(p => {
+          const last = p[p.length - 1]
+          const rest = ev.turnFailed && last?.kind === 'assistant' ? p.slice(0, -1) : p
+          return [...rest, { key: key(), kind: 'error', text: ev.message }]
+        })
         return
       }
       const se = asStreamEvent(ev)
@@ -255,14 +262,45 @@ export function useCoderSession(slug: string, open: boolean) {
    * A client-side "am I busy" check would be wrong the moment a second viewer
    * is watching the same session.
    */
-  const send = useCallback(async (text: string, chosen?: string) => {
-    if (!sessionId || !text.trim()) return
-    const wasStreaming = status === 'active' || status === 'queued'
-    if (!wasStreaming) {
-      setLive(p => [...p, { key: key(), kind: 'user', text }])
-      setStatus('active')
-    }
+  // Shared by the Resume button and by send(): true once the container is back.
+  const resumeNow = useCallback(async (): Promise<boolean> => {
+    if (!sessionId) return false
+    setError(null)
+    setResumingSince(Date.now())
     try {
+      // Bounded: the request has no timeout of its own, so a server that
+      // stalls would leave the counter running forever. Ten minutes is well
+      // past the slowest image rebuild; past it, say so rather than wait on.
+      const r = await Promise.race([
+        coderApi.resume(slug, sessionId),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error(
+          'Resume did not finish within 10 minutes. The container may still be starting on the server — '
+          + 'reload in a minute, and if the session is still paused, this is worth reporting.',
+        )), 10 * 60 * 1000)),
+      ])
+      setStartLog(r.log || [])
+      setStatus('idle')
+      return true
+    } catch (e) {
+      setError(e as Error)
+      setStatus('paused')
+      return false
+    } finally {
+      setResumingSince(null)
+    }
+  }, [slug, sessionId])
+
+  const send = useCallback(async (text: string, chosen?: string) => {
+    if (!sessionId || !text.trim() || resumingSince) return
+    const wasStreaming = status === 'active' || status === 'queued'
+    if (!wasStreaming) setLive(p => [...p, { key: key(), kind: 'user', text }])
+
+    // A message sent into a paused session used to fail with an error while the
+    // pill still said "idle" — the user saw nothing happen. Now it resumes the
+    // container first and then runs the message, whether the page already knew
+    // the session was paused or only learns it from the server's 409.
+    const dispatchOnce = async () => {
+      if (!wasStreaming) setStatus('active')
       const r = await coderApi.dispatch(slug, sessionId, text, chosen || model || undefined)
       // The same row arrives TWICE: once as this response, once on the SSE
       // `followups` event the enqueue publishes. The SSE copy is the whole
@@ -274,11 +312,29 @@ export function useCoderSession(slug: string, open: boolean) {
         const added = r.followup
         setFollowups(p => (p.some(f => f.id === added.id) ? p : [...p, added]))
       }
+    }
+    const resumeThenDispatch = async () => {
+      setStatus('paused')
+      if (!(await resumeNow())) {
+        setLive(p => [...p, { key: key(), kind: 'error',
+          text: 'Your message was not run: the session is paused and resuming it failed (details below). '
+            + 'Fix that, then press Resume and send it again.' }])
+        return
+      }
+      await dispatchOnce()
+    }
+
+    try {
+      if (status === 'paused') await resumeThenDispatch()
+      else await dispatchOnce()
     } catch (e) {
+      if (e instanceof ApiError && e.code === 'SESSION_PAUSED') {
+        try { await resumeThenDispatch(); return } catch (e2) { e = e2 }
+      }
       setLive(p => [...p, { key: key(), kind: 'error', text: (e as Error).message }])
       if (!wasStreaming) setStatus('idle')
     }
-  }, [slug, sessionId, model, status])
+  }, [slug, sessionId, model, status, resumingSince, resumeNow])
 
   const cancelFollowup = useCallback(async (id: number) => {
     if (!sessionId) return
@@ -298,28 +354,9 @@ export function useCoderSession(slug: string, open: boolean) {
   }, [slug, sessionId])
 
   const resume = useCallback(async () => {
-    if (!sessionId || resumingSince) return
-    setError(null)
-    setResumingSince(Date.now())
-    try {
-      // Bounded: the request has no timeout of its own, so a server that
-      // stalls would leave the counter running forever. Ten minutes is well
-      // past the slowest image rebuild; past it, say so rather than wait on.
-      const r = await Promise.race([
-        coderApi.resume(slug, sessionId),
-        new Promise<never>((_, reject) => setTimeout(() => reject(new Error(
-          'Resume did not finish within 10 minutes. The container may still be starting on the server — '
-          + 'reload in a minute, and if the session is still paused, this is worth reporting.',
-        )), 10 * 60 * 1000)),
-      ])
-      setStartLog(r.log || [])
-      setStatus('idle')
-    } catch (e) {
-      setError(e as Error)
-    } finally {
-      setResumingSince(null)
-    }
-  }, [slug, sessionId, resumingSince])
+    if (resumingSince) return
+    await resumeNow()
+  }, [resumingSince, resumeNow])
 
   const streaming = status === 'active' || status === 'queued' || status === 'starting'
 

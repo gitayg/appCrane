@@ -79,9 +79,10 @@ export function CoderPanel(props: Props) {
   if (!open) return null
 
   // A running turn no longer disables the composer: the message is queued
-  // server-side and dispatched when the turn ends. Only a paused session (its
-  // container is gone) has nowhere to put the text.
-  const canSend = !!s.sessionId && s.status !== 'paused'
+  // server-side and dispatched when the turn ends. A paused session accepts it
+  // too — send() resumes the container first, then runs it. Only an in-flight
+  // resume blocks the composer.
+  const canSend = !!s.sessionId && !s.resumingSince
   const send = () => {
     const text = draft.trim()
     if (!text || !canSend) return
@@ -195,7 +196,7 @@ export function CoderPanel(props: Props) {
                 ? <ResumeProgress since={s.resumingSince} />
                 : (
                   <div className="coder-paused">
-                    This session is paused — its container was evicted.
+                    This session is paused — its container was stopped. Resume it, or just send a message and it will resume first.
                     <button type="button" className="coder-btn coder-btn-xs" onClick={() => void s.resume()}>
                       Resume
                     </button>
@@ -214,7 +215,9 @@ export function CoderPanel(props: Props) {
                 value={draft}
                 placeholder={s.streaming
                   ? 'Type the next instruction — it runs when this turn ends…'
-                  : 'Describe the change… (↩ send · ⇧↩ newline)'}
+                  : s.status === 'paused'
+                    ? 'Type an instruction — the session resumes first, then runs it'
+                    : 'Describe the change… (↩ send · ⇧↩ newline)'}
                 onChange={e => setDraft(e.target.value)}
                 onKeyDown={e => {
                   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() }

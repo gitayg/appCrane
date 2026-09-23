@@ -552,6 +552,15 @@ export function runAgentOneShot(opts) {
       costUsd = (ev.costUsdCents || 0) / 100;
       opts.onTokens?.(ev.inputTokens + ev.outputTokens);
     });
+    // The CLI retries a rejected credential ten times over about three minutes
+    // (measured: api_retry x10, error_status 401). It never recovers, so stop
+    // at the first one instead of making every caller wait out the loop.
+    runner.on('system', (ev) => {
+      const d = ev?.data;
+      if (d?.subtype !== 'api_retry' || (d.error_status !== 401 && d.error_status !== 403)) return;
+      runner.stop();
+      reject(new Error(`Claude rejected the credential (HTTP ${d.error_status}, ${d.error || 'authentication failed'}); stopped instead of retrying`));
+    });
     runner.on('error', reject);
     runner.on('exit', (code) => {
       if (code === 0) return resolve({ text, usage, costUsd });

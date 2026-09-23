@@ -21,6 +21,7 @@ import {
   PRIORITY,
 } from './appQueue.js';
 import { defaultCoderModel, isAllowedCoderModel } from '../llm/coderModels.js';
+import { explainTurnFailure, isAuthFailure } from './turnFailure.js';
 import log from '../../utils/logger.js';
 
 const STUDIO_IMAGE  = process.env.APPSTUDIO_IMAGE || 'appcrane-studio:latest';
@@ -318,13 +319,31 @@ function buildChatPrompt({ contextDoc, agentContext, userMessage, includeSnapsho
   return parts.join('\n');
 }
 
-async function loadDispatchContext(appSlug, workspaceDir) {
+// The codebase summary is only sent on a thread's first turn, so a resumed
+// thread skips building it. The first build can take minutes, and it used to
+// happen with nothing on screen: say so after a moment, and say so again if it
+// fails rather than continuing silently.
+const CONTEXT_NOTE_AFTER_MS = 2000;
+
+async function loadDispatchContext(appSlug, workspaceDir, { withCodebase = true, sessionId = null } = {}) {
   let contextDoc = '';
-  try {
-    const r = await ensureCodebaseContext(appSlug, workspaceDir);
-    contextDoc = r?.contextDoc || '';
-  } catch (err) {
-    log.warn(`Builder: ensureCodebaseContext failed for ${appSlug}: ${err.message}`);
+  if (withCodebase) {
+    const slow = sessionId && setTimeout(() => publish(sessionId, {
+      type: 'note',
+      message: 'Reading the codebase before your first message, so the coder knows the app. This takes a minute or two on a fresh container.',
+    }), CONTEXT_NOTE_AFTER_MS);
+    try {
+      const r = await ensureCodebaseContext(appSlug, workspaceDir);
+      contextDoc = r?.contextDoc || '';
+    } catch (err) {
+      log.warn(`Builder: ensureCodebaseContext failed for ${appSlug}: ${err.message}`);
+      if (sessionId) publish(sessionId, {
+        type: 'note',
+        message: `Could not prepare the codebase summary (${err.message}). Continuing without it.`,
+      });
+    } finally {
+      if (slow) clearTimeout(slow);
+    }
   }
   let agentContext = '';
   try {
@@ -450,9 +469,24 @@ async function drainNextFollowup(sessionId) {
  * "A dispatch is already running": typing the next instruction while the
  * current one works is the point of the feature.
  */
+/**
+ * One refusal for "this session has no running container": the row is marked
+ * paused and the panel is told, so the UI can resume and retry instead of
+ * sitting on "idle" next to an error it cannot act on.
+ */
+function sessionPaused(sessionId) {
+  try { updateDb(sessionId, { status: 'paused' }); } catch (_) {}
+  const live = sessions.get(sessionId);
+  if (live) live.status = 'paused';
+  publish(sessionId, { type: 'status', status: 'paused' });
+  const err = new Error('This session is paused (its container was stopped). Resume it to continue.');
+  err.code = 'SESSION_PAUSED';
+  return err;
+}
+
 export async function dispatch(sessionId, prompt, { model, userId } = {}) {
   const state = sessions.get(sessionId);
-  if (!state) throw new Error('Session not active (start or resume first)');
+  if (!state) throw sessionPaused(sessionId);
 
   // Never let an unvalidated string reach the shell-command builder. The route
   // validates first; this is the same allowlist, applied again at the last
@@ -467,7 +501,7 @@ export async function dispatch(sessionId, prompt, { model, userId } = {}) {
   }
 
   const c0 = getContainer(state.appSlug);
-  if (!c0) throw new Error('App container is no longer available — resume the session first');
+  if (!c0) throw sessionPaused(sessionId);
 
   touchActivity(sessionId);
   appendMessage(sessionId, 'user', prompt, null, chosen);
@@ -543,7 +577,7 @@ async function runBuilderTurn(sessionId, state, prompt, model) {
   let augmentedPrompt = prompt;
   if (state.appSlug) {
     try {
-      const { contextDoc, agentContext } = await loadDispatchContext(state.appSlug, c.workspaceDir);
+      const { contextDoc, agentContext } = await loadDispatchContext(state.appSlug, c.workspaceDir, { withCodebase: !isResume, sessionId });
       const shouldBundle = (!isResume && (contextDoc || agentContext)) ||
                            (isResume && agentContext);
       if (shouldBundle) {
@@ -565,6 +599,9 @@ async function runBuilderTurn(sessionId, state, prompt, model) {
     // key and sends exactly one of them. Without it the stored token is never
     // reached and every turn falls back to the platform key.
     const ownerId = getDb().prepare('SELECT user_id FROM coder_sessions WHERE id = ?').get(sessionId)?.user_id ?? null;
+    const credentialKind = agentCredentialKind({
+      actingUserId: ownerId, hasAppCredentials: !!c.credsCleanup, apiKey: process.env.ANTHROPIC_API_KEY,
+    });
     const runner = runAgentExec({
       containerId:  c.containerId,
       prompt:       augmentedPrompt,
@@ -577,6 +614,7 @@ async function runBuilderTurn(sessionId, state, prompt, model) {
     state.runner = runner;
 
     let assistantBuf = '';
+    let resultIsError = false;
     let settled = false;
     const settle = () => {
       if (settled) return;
@@ -593,6 +631,23 @@ async function runBuilderTurn(sessionId, state, prompt, model) {
     state.settleTurn = settle;
 
     runner.on('system', (ev) => {
+      // The CLI retries a rejected credential ten times over about three
+      // minutes before giving up (measured: api_retry x10, error_status 401,
+      // then is_error). A rejected key does not start working on attempt
+      // seven, so end the turn at the first one and say what to fix.
+      if (ev?.data?.subtype === 'api_retry') {
+        const status = ev.data.error_status;
+        if (status === 401 || status === 403) {
+          resultIsError = true;
+          if (!assistantBuf) assistantBuf = `API Error: ${status} (${ev.data.error || 'authentication failed'})`;
+          runner.stop();
+          finish(1);
+          return;
+        }
+        if (ev.data.attempt === 1) {
+          publish(sessionId, { type: 'note', message: `The Claude API returned ${status || 'an error'}; retrying (up to ${ev.data.max_retries || 'several'} attempts).` });
+        }
+      }
       const sid = ev?.data?.session_id;
       // SECURITY: session_id flows back into a `sh -c` --resume arg next
       // time. Validate before storing so a poisoned event from a
@@ -624,6 +679,7 @@ async function runBuilderTurn(sessionId, state, prompt, model) {
     });
 
     runner.on('result', (ev) => {
+      if (ev.isError) resultIsError = true;
       const db = getDb();
       const newTokens = (db.prepare('SELECT cost_tokens FROM coder_sessions WHERE id = ?').get(sessionId)?.cost_tokens || 0)
         + ev.inputTokens + ev.outputTokens;
@@ -633,18 +689,34 @@ async function runBuilderTurn(sessionId, state, prompt, model) {
       publish(sessionId, { type: 'cost', inputTokens: ev.inputTokens, outputTokens: ev.outputTokens, costUsdCents: ev.costUsdCents });
     });
 
-    runner.on('exit', (code) => {
-      if (assistantBuf) appendMessage(sessionId, 'assistant', assistantBuf, null, model);
+    let finished = false;
+    const finish = (code) => {
+      if (finished) return;
+      finished = true;
+      // A rejected credential arrives as ordinary assistant text. Record and
+      // show what to fix instead, so it does not read like the coder's answer.
+      const failure = explainTurnFailure({
+        text: assistantBuf, isError: resultIsError, code, kind: credentialKind,
+        stderrTail: runner.getStderrTail?.() || [],
+      });
+      if (failure) {
+        appendMessage(sessionId, 'assistant', failure, null, model);
+        publish(sessionId, { type: 'error', message: failure, turnFailed: true });
+      } else if (assistantBuf) {
+        appendMessage(sessionId, 'assistant', assistantBuf, null, model);
+      }
       // The turn completed — a nonzero code is a bad ANSWER, not a broken
-      // substrate, so the queued follow-up still gets its go.
-      state.drainFollowups = true;
+      // substrate, so the queued follow-up still gets its go. Except a
+      // rejected credential: every follow-up would be rejected the same way.
+      state.drainFollowups = !(failure && isAuthFailure(failure));
       state.runner = null;
       state.status = 'idle';
       updateDb(sessionId, { status: 'idle' });
       setContainerBusy(state.appSlug, false);
       publish(sessionId, { type: 'status', status: 'idle', exitCode: code });
       settle();
-    });
+    };
+    runner.on('exit', finish);
 
     runner.on('error', (err) => {
       // A timeout or a failed spawn says the substrate is wrong, not the

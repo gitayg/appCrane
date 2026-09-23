@@ -5,7 +5,7 @@
  * Event shapes emitted:
  *   { type: 'text',   text }
  *   { type: 'tool',   name, input }
- *   { type: 'result', inputTokens, outputTokens, costUsdCents }
+ *   { type: 'result', inputTokens, outputTokens, costUsdCents, isError }
  *   { type: 'system', subtype, data }   — everything else (message_start, etc.)
  */
 export function parseLine(line) {
@@ -39,7 +39,7 @@ export function parseLine(line) {
     const outputTok = usage.output_tokens || 0;
     // Rough cost: sonnet-4.6 pricing (3/15 per million input/output)
     const cents = Math.round(((inputTok * 3 + outputTok * 15) / 1_000_000) * 100);
-    return { type: 'result', inputTokens: inputTok, outputTokens: outputTok, costUsdCents: cents };
+    return { type: 'result', inputTokens: inputTok, outputTokens: outputTok, costUsdCents: cents, isError: obj.is_error === true };
   }
 
   // text delta from content_block_delta
