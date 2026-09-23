@@ -244,7 +244,7 @@ export async function createSession(app, userId, onLog) {
       log.warn(`Builder: intro message generation failed: ${err.message}`);
     }
 
-    ensureCodebaseContext(app.slug, c.workspaceDir).catch(err =>
+    ensureCodebaseContext(app.slug, c.workspaceDir, { actingUserId: userId }).catch(err =>
       log.warn(`Builder: context pre-warm failed for ${app.slug}: ${err.message}`)
     );
 
@@ -325,7 +325,7 @@ function buildChatPrompt({ contextDoc, agentContext, userMessage, includeSnapsho
 // fails rather than continuing silently.
 const CONTEXT_NOTE_AFTER_MS = 2000;
 
-async function loadDispatchContext(appSlug, workspaceDir, { withCodebase = true, sessionId = null } = {}) {
+async function loadDispatchContext(appSlug, workspaceDir, { withCodebase = true, sessionId = null, actingUserId = null } = {}) {
   let contextDoc = '';
   if (withCodebase) {
     const slow = sessionId && setTimeout(() => publish(sessionId, {
@@ -333,7 +333,7 @@ async function loadDispatchContext(appSlug, workspaceDir, { withCodebase = true,
       message: 'Reading the codebase before your first message, so the coder knows the app. This takes a minute or two on a fresh container.',
     }), CONTEXT_NOTE_AFTER_MS);
     try {
-      const r = await ensureCodebaseContext(appSlug, workspaceDir);
+      const r = await ensureCodebaseContext(appSlug, workspaceDir, { actingUserId });
       contextDoc = r?.contextDoc || '';
     } catch (err) {
       log.warn(`Builder: ensureCodebaseContext failed for ${appSlug}: ${err.message}`);
@@ -577,7 +577,8 @@ async function runBuilderTurn(sessionId, state, prompt, model) {
   let augmentedPrompt = prompt;
   if (state.appSlug) {
     try {
-      const { contextDoc, agentContext } = await loadDispatchContext(state.appSlug, c.workspaceDir, { withCodebase: !isResume, sessionId });
+      const actingUserId = getDb().prepare('SELECT user_id FROM coder_sessions WHERE id = ?').get(sessionId)?.user_id ?? null;
+      const { contextDoc, agentContext } = await loadDispatchContext(state.appSlug, c.workspaceDir, { withCodebase: !isResume, sessionId, actingUserId });
       const shouldBundle = (!isResume && (contextDoc || agentContext)) ||
                            (isResume && agentContext);
       if (shouldBundle) {

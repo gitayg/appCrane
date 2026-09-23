@@ -51,7 +51,7 @@ test('the turn records and shows the explanation instead of the raw failure text
 });
 
 test('the codebase summary is not rebuilt for a resumed thread, and its build is announced', () => {
-  assert.match(session, /loadDispatchContext\(state\.appSlug, c\.workspaceDir, \{ withCodebase: !isResume, sessionId \}\)/,
+  assert.match(session, /loadDispatchContext\(state\.appSlug, c\.workspaceDir, \{ withCodebase: !isResume, sessionId, actingUserId \}\)/,
     'every turn rebuilds a summary only the first turn sends');
   assert.match(session, /Reading the codebase before your first message/, 'the build runs with nothing on screen');
   assert.match(session, /Could not prepare the codebase summary \(\$\{err\.message\}\)/, 'a failed build is silent');

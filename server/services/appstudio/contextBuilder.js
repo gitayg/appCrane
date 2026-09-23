@@ -9,9 +9,13 @@ import { ensureStudioImage } from './generator.js';
 const MODEL        = process.env.APPSTUDIO_PLANNER_MODEL || 'claude-sonnet-4-6';
 const STUDIO_IMAGE = process.env.APPSTUDIO_IMAGE || 'appcrane-studio:latest';
 
+// A coder workspace is written by the container's user, so to the host's git
+// it has "dubious ownership" and every read failed quietly: the summary was
+// built with no commit (so it was never cached) and an empty file tree.
+// Measured on a real instance: `context BUILD for tiny-barons @ undefined`.
 function getGitHash(repoDir) {
   try {
-    return execFileSync('git', ['rev-parse', 'HEAD'], {
+    return execFileSync('git', ['-c', `safe.directory=${repoDir}`, 'rev-parse', 'HEAD'], {
       cwd: repoDir, encoding: 'utf8', timeout: 5000, stdio: 'pipe',
     }).trim();
   } catch (_) { return null; }
@@ -19,7 +23,7 @@ function getGitHash(repoDir) {
 
 function getFileTree(repoDir) {
   try {
-    return execFileSync('git', ['ls-tree', '-r', '--name-only', 'HEAD'], {
+    return execFileSync('git', ['-c', `safe.directory=${repoDir}`, 'ls-tree', '-r', '--name-only', 'HEAD'], {
       cwd: repoDir, encoding: 'utf8', timeout: 10000, stdio: 'pipe',
     }).trim();
   } catch (_) { return ''; }
@@ -66,7 +70,7 @@ function collectKeyFiles(repoDir, fileTree) {
   return result;
 }
 
-async function callClaude(prompt, repoDir, appSlug) {
+async function callClaude(prompt, repoDir, appSlug, actingUserId = null) {
   // Make sure the studio image exists before spawning — without this,
   // a fresh prod fails contextBuilder with exit-125 (no image to run).
   await ensureStudioImage((m) => log.info(`[contextBuilder] ${m}`));
@@ -79,12 +83,15 @@ async function callClaude(prompt, repoDir, appSlug) {
     model:         MODEL,
     timeoutMs:     parseInt(process.env.APPSTUDIO_CONTEXT_TIMEOUT_MS || '300000', 10),
     appSlug,
+    // Same credential as the turn it prepares: without this a user on their
+    // own subscription had the summary built on the platform key instead.
+    actingUserId,
     labels:        { 'appcrane.container.type': 'context' },
   });
   return text;
 }
 
-async function buildContextDoc(repoDir, fileTree, keyFiles, appSlug) {
+async function buildContextDoc(repoDir, fileTree, keyFiles, appSlug, actingUserId = null) {
   const filesSection = keyFiles
     .map(f => `### ${f.path}\n\`\`\`\n${f.content}\n\`\`\``)
     .join('\n\n');
@@ -112,10 +119,10 @@ Write a structured technical reference document that covers:
 
 Be concise (aim for ~500-800 words). Focus on what an AI needs to make precise surgical changes without breaking things. Do not include generic advice — only facts specific to this codebase.`;
 
-  return callClaude(prompt, repoDir, appSlug);
+  return callClaude(prompt, repoDir, appSlug, actingUserId);
 }
 
-async function updateContextDoc(existingDoc, changedFiles, repoDir, appSlug) {
+async function updateContextDoc(existingDoc, changedFiles, repoDir, appSlug, actingUserId = null) {
   if (!changedFiles.length) return existingDoc;
 
   const diffs = changedFiles.slice(0, 10).map(({ status, path, newPath }) => {
@@ -136,12 +143,12 @@ ${diffs}
 
 Update the context document to reflect these changes. Update only the sections affected by the changes. Preserve the structure and everything that is still accurate. Return the full updated document.`;
 
-  return callClaude(prompt, repoDir, appSlug);
+  return callClaude(prompt, repoDir, appSlug, actingUserId);
 }
 
 function getChangedFiles(repoDir, oldHash, newHash) {
   try {
-    const out = execFileSync('git', ['diff', '--name-status', oldHash, newHash], {
+    const out = execFileSync('git', ['-c', `safe.directory=${repoDir}`, 'diff', '--name-status', oldHash, newHash], {
       cwd: repoDir, encoding: 'utf8', timeout: 10000, stdio: 'pipe',
     }).trim();
     return out.split('\n').filter(Boolean).map(line => {
@@ -169,7 +176,7 @@ function saveContext(appSlug, gitHash, fileTree, contextDoc) {
  * Returns the cached context document for this app, building or updating it as needed.
  * Returns { contextDoc, fileTree, gitHash, fromCache }
  */
-export async function ensureCodebaseContext(appSlug, repoDir) {
+export async function ensureCodebaseContext(appSlug, repoDir, { actingUserId = null } = {}) {
   if (!existsSync(repoDir)) return { contextDoc: null, fileTree: '', gitHash: null, fromCache: false };
 
   const db = getDb();
@@ -190,7 +197,7 @@ export async function ensureCodebaseContext(appSlug, repoDir) {
     const changedFiles = getChangedFiles(repoDir, cached.git_hash, gitHash);
 
     if (changedFiles !== null) {
-      const updatedDoc = await updateContextDoc(cached.context_doc, changedFiles, repoDir, appSlug);
+      const updatedDoc = await updateContextDoc(cached.context_doc, changedFiles, repoDir, appSlug, actingUserId);
       saveContext(appSlug, gitHash, fileTree, updatedDoc);
       return { contextDoc: updatedDoc, fileTree, gitHash, fromCache: false, builtAt: new Date().toISOString() };
     }
@@ -200,7 +207,7 @@ export async function ensureCodebaseContext(appSlug, repoDir) {
   // No cache or unreachable old hash — full build
   log.info(`AppStudio context BUILD for ${appSlug} @ ${gitHash?.slice(0, 8)}`);
   const keyFiles = collectKeyFiles(repoDir, fileTree);
-  const contextDoc = await buildContextDoc(repoDir, fileTree, keyFiles, appSlug);
+  const contextDoc = await buildContextDoc(repoDir, fileTree, keyFiles, appSlug, actingUserId);
   if (gitHash) saveContext(appSlug, gitHash, fileTree, contextDoc);
 
   return { contextDoc, fileTree, gitHash, fromCache: false, builtAt: new Date().toISOString() };

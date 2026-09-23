@@ -219,7 +219,7 @@ function buildPreflightShell(checks) {
 
 function buildClaudeCmd({ prompt, model, resume, addDir = '/workspace', systemPrompt, preflight = [] }) {
   const parts = [
-    `claude -p ${shellQuote(prompt)}`,
+    `claude -p`,
     // SECURITY: quoted since v2.85.0, when the browser gained a model picker.
     // The route validates against the coderModels allowlist first; this is the
     // second, independent defence, so a list someone edits later is not the
@@ -239,6 +239,13 @@ function buildClaudeCmd({ prompt, model, resume, addDir = '/workspace', systemPr
     }
     parts.push(`--resume ${resume}`);
   }
+  // The prompt goes LAST, after `--`. Before v2.90.2 it followed `-p` directly,
+  // so a message starting with a dash was parsed as a flag: the element
+  // picker's "--- Pointed element ---" prefix failed every turn with
+  // `error: unknown option`, and a message like `--mcp-config …` would have been
+  // read as a real option. Shell quoting cannot help there; the CLI's own
+  // argument parser is the one that reads it.
+  parts.push(`-- ${shellQuote(prompt)}`);
   const preflightSh = buildPreflightShell(preflight);
   // Optional one-line diagnostic to stderr — set APPCRANE_DEBUG_CREDS=1
   // on AppCrane to investigate "Not logged in" issues. Output is captured
@@ -575,7 +582,11 @@ export function runAgentOneShot(opts) {
           `Agent could not start: docker run exited 125 (image '${opts.image}' missing, pull denied, or daemon down). Build/pull the image on this host before retrying.${detail}`
         ));
       }
-      const detail = tail ? ` — ${tail.split('\n').slice(-3).join(' | ')}` : '';
+      // The CLI reports most failures (a key with no credit, a bad model, not
+      // logged in) as its reply on stdout, not on stderr, so a bare exit code
+      // told the user nothing. Say what it said.
+      const said = text.trim().split('\n').slice(-3).join(' | ').slice(-400);
+      const detail = tail ? ` — ${tail.split('\n').slice(-3).join(' | ')}` : (said ? ` — ${said}` : '');
       return reject(new Error(`Agent exited with code ${code}${detail}`));
     });
 
