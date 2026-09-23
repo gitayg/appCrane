@@ -1,6 +1,6 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'fs';
+import { mkdtempSync, mkdirSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import express from 'express';
@@ -18,6 +18,20 @@ process.env.DATA_DIR = ROOT;
 process.env.ENCRYPTION_KEY = 'e'.repeat(64);
 process.env.LOG_LEVEL = 'error';
 delete process.env.ANTHROPIC_API_KEY;
+
+// This file must never touch the host's real Docker. The drift test below
+// calls POST /session for an app the gate ACCEPTS, and accepting means the
+// session starts creating a container. Locally, with Docker Desktop off, that
+// failed fast and the test passed in seconds. On a CI runner, where Docker is
+// real, it began BUILDING the studio image (npm install -g @anthropic-ai/
+// claude-code) and the file hit its 120s timeout. What this file asserts is
+// only whether the GATE refuses, so a docker that fails instantly is exactly
+// the right fake: an accepted request answers 500 from the container step,
+// which is "not refused on a gap", on every host alike.
+const SHIM = join(ROOT, 'bin');
+mkdirSync(SHIM, { recursive: true });
+writeFileSync(join(SHIM, 'docker'), '#!/bin/sh\necho "docker disabled in this test" >&2\nexit 1\n', { mode: 0o755 });
+process.env.PATH = `${SHIM}:${process.env.PATH}`;
 
 const { initDb, getDb } = await import('../server/db.js');
 const { hashApiKey } = await import('../server/services/encryption.js');
