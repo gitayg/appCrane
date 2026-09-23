@@ -96,6 +96,109 @@ function getApp(slug, user) {
 // at all, connect one"; NOT_CRANE_HOSTED means "there is source, it is just not
 // somewhere this tool works" — different problems with different fixes, and a
 // UI that wants to offer a migration can branch on the second.
+/**
+ * Every reason the coder is unavailable for THIS user on THIS app, all at once.
+ *
+ * The UI used to hide the Coder button unless the app was Crane-hosted, so a
+ * user on any other app never learned the feature existed, let alone what it
+ * would take. And the gates below report the FIRST failure only: fix the
+ * source and you meet the credential gap next, one refusal at a time.
+ *
+ * So this returns the whole list, from the same predicates the gates use. The
+ * test in test/coder-availability.test.js pins that the two cannot disagree:
+ * availability says unavailable exactly when session start refuses.
+ *
+ * `fix` is written for the person reading it, not for the code that raised it.
+ */
+export function coderGaps(app, user) {
+  const gaps = [];
+  const source = String(app.source_type || '');
+
+  // repoBackendOf throws on a value it does not recognise, rather than guess
+  // where the source lives. Correct for a write path; wrong here, where the
+  // contract is "always answerable". A corrupt row becomes a gap the user can
+  // report, not a 500 that hides the Coder button's explanation entirely.
+  let hosted;
+  try {
+    hosted = usesLocalRepo(app);
+  } catch (err) {
+    gaps.push({
+      code: 'UNKNOWN_SOURCE',
+      title: "AppCrane can't tell where this app's code lives",
+      detail: err.message,
+      fix: 'Ask a platform admin to correct the app\'s repository settings.',
+    });
+    hosted = true; // the source question is answered (badly); still check the credential
+  }
+
+  if (!hosted) {
+    if (source === 'managed') {
+      gaps.push({
+        code: 'REPO_NOT_MIGRATED',
+        title: "This app's repository hasn't moved onto AppCrane yet",
+        detail: 'AppCrane moves managed repositories onto this server automatically when it starts. '
+          + 'This one was left on GitHub — usually because a branch or tag did not match exactly.',
+        fix: 'Ask a platform admin to check the repository migration report, resolve the mismatch, '
+          + 'and restart AppCrane so the migration runs again.',
+      });
+    } else if (source === 'upload' || source === 'managed_legacy') {
+      gaps.push({
+        code: 'NOT_CONVERTED',
+        title: 'This app is still an uploaded archive',
+        detail: 'AppCrane converts uploaded apps into repositories it hosts when it starts. '
+          + (app.github_url
+            ? 'This one names a GitHub repository, so which source it should use is left to its owner.'
+            : 'This one was skipped.'),
+        fix: 'Ask a platform admin to check the upload conversion report and restart AppCrane once it is resolved.',
+      });
+    } else if (source === 'image') {
+      gaps.push({
+        code: 'NO_SOURCE',
+        title: 'This app runs from a container image',
+        detail: 'It is deployed from a published image, so there is no source code behind it for the coder to edit.',
+        fix: 'Create a Crane-hosted app from its source code to use the coder.',
+      });
+    } else if (app.github_url) {
+      gaps.push({
+        code: 'NOT_CRANE_HOSTED',
+        title: "This app's code lives in your GitHub repository",
+        detail: 'The coder edits code AppCrane hosts itself, so it can release changes straight to sandbox. '
+          + 'It cannot edit a repository on GitHub.',
+        fix: 'Create a Crane-hosted app to use the coder. Keep working on this one with your own tools.',
+      });
+    } else {
+      gaps.push({
+        code: 'NO_REPO',
+        title: 'This app has no source code yet',
+        detail: 'There is no repository behind it for the coder to edit.',
+        fix: 'Create a Crane-hosted app to use the coder.',
+      });
+    }
+  }
+
+  if (agentCredentialKind({ actingUserId: user.id, appSlug: app.slug }) === 'none') {
+    gaps.push({
+      code: 'NO_CREDENTIAL',
+      title: "You haven't connected a Claude account",
+      detail: "The coder runs on your own Claude subscription, this app's stored credentials, or a platform-wide "
+        + 'key. None of them is set up for you.',
+      fix: 'Run `claude setup-token` and save the token in Settings → Account — or ask a platform admin to set a platform key.',
+      href: '/settings#account',
+    });
+  }
+
+  return gaps;
+}
+
+/** Whether `user` may release on `app` — the predicate requireAppAdmin enforces. */
+function canReleaseOn(app, user) {
+  if (user.role === 'admin' || user.role === 'platform_admin') return true;
+  const row = getDb()
+    .prepare('SELECT app_role FROM app_user_roles WHERE app_id = ? AND user_id = ?')
+    .get(app.id, user.id);
+  return row?.app_role === 'admin' || row?.app_role === 'owner';
+}
+
 function assertCraneHosted(app) {
   if (usesLocalRepo(app)) return;
   if (!app.github_url) {
@@ -132,6 +235,18 @@ function getSession(sessionId, slug) {
 // GET '/models' must not be read as a slug named "models".
 router.get('/models', (req, res) => {
   res.json({ models: coderModelChoices(), default: defaultCoderModel() });
+});
+
+// ── GET /api/coder/:slug/availability — can this user use the coder here? ──
+//
+// Always answerable, never a refusal: the point is that a user on an app where
+// the coder does not work still learns what it would take. can_release is
+// reported too, so the UI can say "you can chat, but not release" up front
+// rather than hiding a button that would 403.
+router.get('/:slug/availability', (req, res) => {
+  const app = getApp(req.params.slug, req.user);
+  const gaps = coderGaps(app, req.user);
+  res.json({ available: gaps.length === 0, can_release: canReleaseOn(app, req.user), gaps });
 });
 
 // ── POST /api/coder/:slug/session — start a new session ─────────────────

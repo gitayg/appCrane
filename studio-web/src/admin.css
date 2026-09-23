@@ -2028,3 +2028,73 @@ input[type='email'], select, textarea {
   color: var(--text, #e4e4ef);
   box-shadow: 0 8px 24px rgba(0, 0, 0, .4);
 }
+
+/* ── Coder: always-visible pill, and the "what it would take" view ─────────
+   Muted, not disabled: it still opens, because opening is how a user learns
+   what stands in the way. A dashed border says "not ready" without looking
+   broken, and it keeps the same hover so it reads as clickable. */
+.crane-topbar-btn--muted {
+  opacity: .62;
+  border-style: dashed;
+}
+.crane-topbar-btn--muted:hover { opacity: 1; }
+
+.coder-pill-unavailable {
+  color: var(--dim, #8a8a9a);
+  border: 1px dashed var(--border2, #2a2a3e);
+  background: transparent;
+}
+
+.coder-unavailable {
+  padding: 14px 16px 18px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.coder-unavailable-lead {
+  font-size: .85rem;
+  line-height: 1.6;
+  color: var(--text, #e4e4ef);
+  margin: 0;
+}
+.coder-gaps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  counter-reset: gap;
+}
+/* Numbered because the order is real: the source gap comes first, and fixing
+   it is what makes the credential gap worth fixing. */
+.coder-gap {
+  counter-increment: gap;
+  border: 1px solid var(--border2, #2a2a3e);
+  border-radius: 8px;
+  padding: 11px 13px 11px 38px;
+  position: relative;
+  background: rgba(255, 255, 255, .02);
+}
+.coder-gap::before {
+  content: counter(gap);
+  position: absolute;
+  left: 12px;
+  top: 11px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: .7rem;
+  font-weight: 700;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+}
+.coder-gap-title { font-size: .83rem; font-weight: 600; color: var(--text, #e4e4ef); margin-bottom: 5px; }
+.coder-gap-detail { font-size: .79rem; line-height: 1.55; color: var(--dim, #8a8a9a); margin: 0 0 7px; }
+.coder-gap-fix { font-size: .79rem; line-height: 1.55; margin: 0; color: var(--text, #e4e4ef); }
+.coder-gap-fix a { color: var(--accent); text-decoration: none; border-bottom: 1px solid transparent; }
+.coder-gap-fix a:hover { border-bottom-color: var(--accent); }
+.coder-gap-fix a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }

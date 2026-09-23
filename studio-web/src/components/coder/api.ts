@@ -108,10 +108,37 @@ export type CoderEvent =
   | { type: 'error';  message: string }
   | StreamEvent
 
+/**
+ * One reason the coder is unavailable here, as the server explains it.
+ * `fix` is written for the person reading it; `href` is where that fix lives,
+ * when it lives somewhere in AppCrane.
+ */
+export interface CoderGap {
+  code: string
+  title: string
+  detail: string
+  fix: string
+  href?: string
+}
+
+export interface CoderAvailability {
+  available: boolean
+  can_release: boolean
+  gaps: CoderGap[]
+}
+
 const enc = encodeURIComponent
 const base = (slug: string) => `/api/coder/${enc(slug)}`
 
 export const coderApi = {
+  /**
+   * Every reason the coder would refuse this user on this app, all at once.
+   * Always answers — the point is that someone on an app where the coder does
+   * not work still learns what it would take.
+   */
+  availability: (slug: string) =>
+    adminApi.get<CoderAvailability>(`${base(slug)}/availability`),
+
   /** Latest session for this app, or null. */
   latestSession: (slug: string) =>
     adminApi.get<{ session: CoderSession | null }>(`${base(slug)}/session`),

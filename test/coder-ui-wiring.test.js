@@ -171,17 +171,28 @@ test('the SSE credential is sent under the name /api/coder resolves it by', () =
 // Who gets the button, and who gets the release control
 // ---------------------------------------------------------------------------
 
-test('the coder button appears only for Crane-hosted apps', () => {
-  // /api/coder refuses everything else (NOT_CRANE_HOSTED / NO_REPO), so a
-  // button on a GitHub-backed app can only ever produce a refusal.
-  assert.match(appFrame, /craneHosted: app\.source_type === 'managed' && app\.repo_backend === 'local'/,
-    'the gate must be the same predicate as managedRepo.usesLocalRepo()');
-  assert.match(appFrame, /\{stage\.craneHosted && \([\s\S]{0,400}?Coder<\/button>/,
-    'the topbar button must be gated on craneHosted');
-  // And the server-side predicate it mirrors has not moved.
-  assert.match(srv('services/managedRepo.js'),
-    /usesLocalRepo\(app\) \{\s*\n\s*return app\?\.source_type === 'managed' && repoBackendOf\(app\) === REPO_BACKEND_LOCAL/,
-    'usesLocalRepo changed shape — the client mirror in AppFrame must follow');
+test('the coder button is ALWAYS shown, and explains itself when it cannot run', () => {
+  // It used to render only for Crane-hosted apps. The reasoning was sound —
+  // everything else is refused — but a hidden button teaches nothing: users on
+  // any other app never learned the coder existed, let alone what it would
+  // take. Now it always renders, is muted when unavailable, and opens an
+  // explanation of every gap instead of a chat.
+  const btn = /<button[\s\S]{0,700}?<Icon\.Sparkles size=\{14\} \/> Coder<\/button>/.exec(appFrame);
+  assert.ok(btn, 'the Coder button is gone');
+  const before = appFrame.slice(Math.max(0, btn.index - 400), btn.index);
+  assert.doesNotMatch(before, /\{stage\.craneHosted && \($/m,
+    'the Coder button is hidden behind craneHosted again — users on other apps never learn what it would take');
+  assert.match(btn[0], /crane-topbar-btn--muted/, 'an unavailable coder is not visually distinguished');
+
+  // The verdict comes from the SERVER, not a client guess: the credential half
+  // depends on the signed-in user's own token, which the app row cannot know.
+  assert.match(appFrame, /coderApi\.availability\(stage\.slug\)/, 'availability is not fetched from the server');
+  assert.match(appFrame, /availability=\{coderAvail\}/, 'the panel is not told whether it can run');
+
+  // And the panel does not start a session the server already said it would refuse.
+  assert.match(panel, /useCoderSession\(slug, open && usable\)/,
+    'the panel starts a session regardless of availability — the user sees a refusal instead of the explanation');
+  assert.match(panel, /<CoderUnavailable gaps=\{availability\.gaps\}/, 'the gaps are not shown');
 });
 
 test('release is offered only to an app admin, because the route requires one', () => {

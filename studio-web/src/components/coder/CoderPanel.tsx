@@ -3,6 +3,8 @@ import { peekToPromptPrefix, type PeekCtx } from '../../hooks/usePeek'
 import { Icon } from '../icons'
 import { CoderChanges } from './CoderChanges'
 import { CoderRefusal } from './CoderRefusal'
+import { CoderUnavailable } from './CoderUnavailable'
+import type { CoderAvailability } from './api'
 import { useCoderSession, type Entry } from './useCoderSession'
 
 interface Props {
@@ -15,6 +17,12 @@ interface Props {
   width?:     number
   /** admin/owner on this app: the bar POST .../release enforces. */
   canRelease: boolean
+  /**
+   * The server's answer to "can this user use the coder here?", or null while
+   * it is loading. When it says no, the panel explains why instead of starting
+   * a session the server has already told us it would refuse.
+   */
+  availability: CoderAvailability | null
   /** Picker state, owned by AppFrame so there is exactly one usePeek. */
   peekActive:    boolean
   peekCtx:       PeekCtx | null
@@ -32,8 +40,15 @@ interface Props {
  * Applications.tsx docks BugPanel.
  */
 export function CoderPanel(props: Props) {
-  const { slug, appName, open, onClose, top, width = 460, canRelease } = props
-  const s = useCoderSession(slug, open)
+  const { slug, appName, open, onClose, top, width = 460, availability } = props
+  // Unknown until availability loads, then the server's verdict. Starting a
+  // session before we know would just produce the refusal we are about to
+  // explain better, so the session hook stays inert until the answer is yes.
+  const usable = availability?.available === true
+  // The server's can_release is the truth; the role-derived prop is only a
+  // placeholder for the moment before availability arrives.
+  const canRelease = availability ? availability.can_release : props.canRelease
+  const s = useCoderSession(slug, open && usable)
   const [tab, setTab]   = useState<'chat' | 'changes'>('chat')
   const [draft, setDraft] = useState('')
   const [refreshKey, setRefreshKey] = useState(0)
@@ -81,15 +96,23 @@ export function CoderPanel(props: Props) {
         <span className="coder-title">Coder</span>
         <span className="coder-app">{appName}</span>
         <span className="coder-head-right">
-          <span className={`coder-pill coder-pill-${s.status}`}>
-            {s.streaming && <i className="coder-dot" />}
-            {s.queueAhead ? `queued · ${s.queueAhead} ahead` : s.status}
-          </span>
+          {availability && !usable ? (
+            <span className="coder-pill coder-pill-unavailable">unavailable</span>
+          ) : (
+            <span className={`coder-pill coder-pill-${s.status}`}>
+              {s.streaming && <i className="coder-dot" />}
+              {s.queueAhead ? `queued · ${s.queueAhead} ahead` : s.status}
+            </span>
+          )}
           <button type="button" className="coder-close" onClick={onClose} title="Close">×</button>
         </span>
       </header>
 
-      {s.sessionId && (
+      {availability && !usable && (
+        <CoderUnavailable gaps={availability.gaps} appName={appName} />
+      )}
+
+      {usable && s.sessionId && (
         <nav className="coder-tabs">
           <button
             type="button"
@@ -107,7 +130,7 @@ export function CoderPanel(props: Props) {
         </nav>
       )}
 
-      {tab === 'changes' && s.sessionId ? (
+      {!usable ? null : tab === 'changes' && s.sessionId ? (
         <div className="coder-body">
           <CoderChanges
             slug={slug}

@@ -3,6 +3,7 @@ import { adminApi } from '../adminApi'
 import { usePeek, type PeekCtx } from '../hooks/usePeek'
 import { RequestModal } from '../components/runtime-topbar/RequestModal'
 import { CoderPanel } from '../components/coder/CoderPanel'
+import { coderApi, type CoderAvailability } from '../components/coder/api'
 import { Icon } from '../components/icons'
 import { EnvActionMenu, type EnvMenuState } from '../components/EnvActionMenu'
 
@@ -90,6 +91,33 @@ export function AppFrame({ slug, active, onClose }: Props) {
   // server WILL let promote — is shown no menu at all.
   const [platformAdmin, setPlatformAdmin] = useState(false)
   const [envNotice, setEnvNotice] = useState<string | null>(null)
+  // Whether the coder can run here, and if not, every reason why. Fetched per
+  // app rather than inferred from the app row: the credential half depends on
+  // the SIGNED-IN user's own Claude token, which the app row cannot know.
+  const [coderAvail, setCoderAvail] = useState<CoderAvailability | null>(null)
+
+  useEffect(() => {
+    if (!stage?.slug) return
+    let alive = true
+    setCoderAvail(null)
+    coderApi.availability(stage.slug)
+      .then(a => { if (alive) setCoderAvail(a) })
+      // An unanswerable availability check must not look like "available":
+      // report it as a gap, so the panel still explains rather than starting a
+      // session blind.
+      .catch(e => {
+        if (alive) setCoderAvail({
+          available: false, can_release: false,
+          gaps: [{
+            code: 'AVAILABILITY_UNKNOWN',
+            title: "Couldn't check whether the coder can run here",
+            detail: e instanceof Error ? e.message : String(e),
+            fix: 'Reload the page. If it keeps happening, this is worth reporting.',
+          }],
+        })
+      })
+    return () => { alive = false }
+  }, [stage?.slug])
 
   useEffect(() => {
     let alive = true
@@ -257,17 +285,20 @@ export function AppFrame({ slug, active, onClose }: Props) {
                     : 'Point at an element to request an enhancement'}
                 ><Icon.Lightbulb size={14} /> {peek.active && peekFor === 'request' ? 'Pick…' : 'Request'}</button>
               )}
-              {/* Crane-hosted only. /api/coder refuses anything else with
-                  NOT_CRANE_HOSTED or NO_REPO, and a button whose only possible
-                  outcome is a refusal is not a feature. */}
-              {stage.craneHosted && (
-                <button
-                  type="button"
-                  className={'crane-topbar-btn' + (coderOpen ? ' active' : '')}
-                  onClick={() => setCoderOpen(o => !o)}
-                  title="Open the coder — change this app by describing what you want"
-                ><Icon.Sparkles size={14} /> Coder</button>
-              )}
+              {/* ALWAYS shown. It used to render only for Crane-hosted apps,
+                  so everyone else never learned the coder existed, let alone
+                  what it would take. Unavailable, it is muted and opens an
+                  explanation of every gap instead of a chat. */}
+              <button
+                type="button"
+                className={'crane-topbar-btn'
+                  + (coderOpen ? ' active' : '')
+                  + (coderAvail && !coderAvail.available ? ' crane-topbar-btn--muted' : '')}
+                onClick={() => setCoderOpen(o => !o)}
+                title={coderAvail && !coderAvail.available
+                  ? `Coder isn't available here yet: ${coderAvail.gaps[0]?.title ?? 'see why'} — click for what it takes`
+                  : 'Open the coder — change this app by describing what you want'}
+              ><Icon.Sparkles size={14} /> Coder</button>
             </span>
           </crane-app-topbar>
           {stage.url && <iframe key={stage.url} ref={iframeRef} className="lstage-iframe" src={stage.url} title={stage.name} />}
@@ -291,7 +322,7 @@ export function AppFrame({ slug, active, onClose }: Props) {
           {active && requestCtx && (
             <RequestModal slug={stage.slug} appName={stage.name} peekCtx={requestCtx} onClose={() => setRequestCtx(null)} />
           )}
-          {stage.craneHosted && (
+          {(
             <CoderPanel
               slug={stage.slug}
               appName={stage.name}
@@ -300,6 +331,7 @@ export function AppFrame({ slug, active, onClose }: Props) {
               top={folded ? 22 : 44}
               width={CODER_DOCK_WIDTH}
               canRelease={stage.canRelease}
+              availability={coderAvail}
               peekActive={peek.active && peekFor === 'coder'}
               peekCtx={coderCtx}
               onPickStart={startCoderPick}
