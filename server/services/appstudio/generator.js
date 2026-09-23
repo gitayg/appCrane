@@ -149,11 +149,29 @@ export async function ensureStudioImage(onLog) {
       '-t', STUDIO_IMAGE,
       buildDir,
     ], { stdio: 'pipe' });
-    const emit = (l) => { if (l.trim()) onLog?.(`[build] ${l}`); };
+    // The last lines of build output travel WITH the failure. "docker build
+    // failed (exit 1)" was the whole message, and it read identically whether
+    // npm could not reach the registry, the disk was full, or the base image
+    // pull was refused -- so the one error a user sees when the coder will not
+    // start gave them nothing to act on, or to ask anyone about.
+    const tail = [];
+    const emit = (l) => {
+      if (!l.trim()) return;
+      onLog?.(`[build] ${l}`);
+      tail.push(l.trim());
+      if (tail.length > 12) tail.shift();
+    };
     build.stdout.on('data', (c) => c.toString().split('\n').forEach(emit));
     build.stderr.on('data', (c) => c.toString().split('\n').forEach(emit));
     build.on('error', rej);
-    build.on('close', (code) => code === 0 ? res() : rej(new Error(`docker build failed (exit ${code})`)));
+    build.on('close', (code) => {
+      if (code === 0) return res();
+      const why = tail.slice(-6).join('\n');
+      rej(new Error(
+        `Could not build the coder's agent image (docker build exited ${code}).`
+        + (why ? `\nLast output:\n${why}` : ' Docker produced no output.'),
+      ));
+    });
   });
 
   onLog?.('[studio] Studio image ready');

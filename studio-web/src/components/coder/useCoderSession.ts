@@ -64,6 +64,10 @@ export function useCoderSession(slug: string, open: boolean) {
   const [queueAhead, setQueueAhead] = useState<number | null>(null)
   const [costCents, setCostCents] = useState(0)
   const [starting,  setStarting]  = useState(false)
+  // Set while POST .../resume is in flight. Resume recreates the container and,
+  // after an upgrade, REBUILDS the agent image first -- a minute or more -- and
+  // with no state for it the Resume button looked exactly like a dead button.
+  const [resumingSince, setResumingSince] = useState<number | null>(null)
   const [error,     setError]     = useState<ApiError | Error | null>(null)
   const [startLog,  setStartLog]  = useState<string[]>([])
   const [models,    setModels]    = useState<CoderModel[]>([])
@@ -294,21 +298,35 @@ export function useCoderSession(slug: string, open: boolean) {
   }, [slug, sessionId])
 
   const resume = useCallback(async () => {
-    if (!sessionId) return
+    if (!sessionId || resumingSince) return
     setError(null)
+    setResumingSince(Date.now())
     try {
-      const r = await coderApi.resume(slug, sessionId)
+      // Bounded: the request has no timeout of its own, so a server that
+      // stalls would leave the counter running forever. Ten minutes is well
+      // past the slowest image rebuild; past it, say so rather than wait on.
+      const r = await Promise.race([
+        coderApi.resume(slug, sessionId),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error(
+          'Resume did not finish within 10 minutes. The container may still be starting on the server — '
+          + 'reload in a minute, and if the session is still paused, this is worth reporting.',
+        )), 10 * 60 * 1000)),
+      ])
       setStartLog(r.log || [])
       setStatus('idle')
-    } catch (e) { setError(e as Error) }
-  }, [slug, sessionId])
+    } catch (e) {
+      setError(e as Error)
+    } finally {
+      setResumingSince(null)
+    }
+  }, [slug, sessionId, resumingSince])
 
   const streaming = status === 'active' || status === 'queued' || status === 'starting'
 
   return {
     phase, session, sessionId, status, streaming, queueAhead, costCents,
     entries: [...history, ...live],
-    starting, error, startLog,
+    starting, error, startLog, resumingSince,
     models, model, setModel,
     followups, cancelFollowup,
     start, send, stop, resume,

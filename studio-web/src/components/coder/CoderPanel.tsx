@@ -191,12 +191,16 @@ export function CoderPanel(props: Props) {
             ))}
 
             {s.status === 'paused' && (
-              <div className="coder-paused">
-                This session is paused — its container was evicted.
-                <button type="button" className="coder-btn coder-btn-xs" onClick={() => void s.resume()}>
-                  Resume
-                </button>
-              </div>
+              s.resumingSince
+                ? <ResumeProgress since={s.resumingSince} />
+                : (
+                  <div className="coder-paused">
+                    This session is paused — its container was evicted.
+                    <button type="button" className="coder-btn coder-btn-xs" onClick={() => void s.resume()}>
+                      Resume
+                    </button>
+                  </div>
+                )
             )}
             {s.phase === 'ready' && s.error && <CoderRefusal error={s.error} />}
           </div>
@@ -278,6 +282,35 @@ function Bubble({ e }: { e: Entry }) {
         <div style={{ fontSize: 10, opacity: 0.6, marginBottom: 3, letterSpacing: '0.04em' }}>{e.model}</div>
       )}
       {e.text}
+    </div>
+  )
+}
+
+
+/**
+ * Resume can take a while and must say so. It recreates the container, and the
+ * first time after an upgrade it rebuilds the agent image before that. The
+ * elapsed counter is the point: a number that keeps moving is the difference
+ * between "working" and "broken" when nothing else on screen changes.
+ */
+function ResumeProgress({ since }: { since: number }) {
+  const [now, setNow] = useState(Date.now())
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(t)
+  }, [])
+  const secs = Math.max(0, Math.round((now - since) / 1000))
+  return (
+    <div className="coder-paused coder-resuming" role="status" aria-live="polite">
+      <span className="coder-resuming-line">
+        <i className="coder-dot" /> Resuming — starting a fresh container… <b>{secs}s</b>
+      </span>
+      {secs >= 15 && (
+        <span className="coder-resuming-note">
+          Still going. The first resume after an AppCrane upgrade rebuilds the agent image, which can take a
+          couple of minutes. If it fails you'll see why here.
+        </span>
+      )}
     </div>
   )
 }
