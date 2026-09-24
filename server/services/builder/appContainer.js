@@ -62,6 +62,14 @@ export const CONTAINER_CLAUDE_PROJECTS_DIR = '/home/studio/.claude/projects';
 export function transcriptDirFor(slug) { return join(appDir(slug), 'claude-projects'); }
 
 /**
+ * Files a user attached to coder messages, per session. Kept across restarts
+ * like the transcripts, because a queued follow-up or a resumed session still
+ * refers to them. Never inside the workspace: an attachment is not a change to
+ * the app, and must not appear in the Changes tab or be released.
+ */
+export function attachmentsDirFor(slug, sessionId) { return join(appDir(slug), 'attachments', sessionId); }
+
+/**
  * Exactly the treatment the workspace gets, for the same reason: this directory
  * holds a record of the source the agent read and wrote, so it is no less
  * sensitive than /workspace and gets no weaker containment — same per-app
@@ -582,13 +590,13 @@ export function recoverOrphans() {
   try {
     const root = rootDir();
     if (!existsSync(root)) return;
-    // Per app, remove everything except the transcripts.
+    // Per app, remove everything except the transcripts and attachments.
     for (const slug of readdirSync(root)) {
       const dir = join(root, slug);
       let entries = [];
       try { entries = readdirSync(dir); } catch (_) { continue; }
       for (const entry of entries) {
-        if (entry === 'claude-projects') continue;
+        if (entry === 'claude-projects' || entry === 'attachments') continue;
         try { rmSync(join(dir, entry), { recursive: true, force: true }); } catch (_) {}
       }
     }

@@ -31,7 +31,27 @@ export interface CoderMessage {
   content:    string
   /** Which model produced (or was asked for) this turn. Null on pre-v2.85.0 rows. */
   model:      string | null
+  /** Which coder mode the turn ran in. Null on pre-v2.91.0 rows (Auto). */
+  mode?:      string | null
+  /** JSON list of CoderAttachment, or null. */
+  attachments?: string | null
   created_at: string
+}
+
+/** A file attached to a coder message, as the server stored it. */
+export interface CoderAttachment {
+  id:       string
+  name:     string
+  size?:    number
+  is_image: boolean
+}
+
+/** One coder mode (Auto / Edits only / Plan), as the server's allowlist serves it. */
+export interface CoderMode {
+  id:          string
+  label:       string
+  description: string
+  is_default:  boolean
 }
 
 /** One entry of GET /api/coder/models — the server's allowlist, verbatim. */
@@ -51,6 +71,9 @@ export interface CoderFollowup {
   id:         number
   prompt:     string
   model:      string | null
+  mode?:      string | null
+  /** JSON list of CoderAttachment, or null. */
+  attachments?: string | null
   user_id:    number | null
   created_at: string
 }
@@ -100,7 +123,7 @@ export type StreamEvent =
 export type CoderEvent =
   | { type: 'stream'; event: StreamEvent }
   | { type: 'status'; status: CoderStatus; ahead?: number; exitCode?: number; reason?: string }
-  | { type: 'turn';   model: string }
+  | { type: 'turn';   model: string; mode?: string }
   | { type: 'followups'; items: CoderFollowup[] }
   | { type: 'note';   message: string }
   | { type: 'queue';  ahead: number; depth: number; running?: unknown }
@@ -153,7 +176,7 @@ export const coderApi = {
 
   /** The allowlist the dispatch validator enforces. Not app-scoped. */
   models: () =>
-    adminApi.get<{ models: CoderModel[]; default: string }>('/api/coder/models'),
+    adminApi.get<{ models: CoderModel[]; default: string; modes?: CoderMode[]; default_mode?: string }>('/api/coder/models'),
 
   /**
    * `model` must be one of coderApi.models() — anything else is a 400
@@ -161,10 +184,14 @@ export const coderApi = {
    * When a turn is already running the route QUEUES this as a follow-up and
    * answers `{ queued: true, followup }` rather than refusing.
    */
-  dispatch: (slug: string, id: string, prompt: string, model?: string) =>
+  dispatch: (slug: string, id: string, prompt: string, model?: string, mode?: string, attachments?: string[]) =>
     adminApi.post<{ message: string; queued?: boolean; followup?: CoderFollowup }>(
       `${base(slug)}/session/${enc(id)}/dispatch`,
-      model ? { prompt, model } : { prompt }),
+      { prompt, ...(model ? { model } : {}), ...(mode ? { mode } : {}), ...(attachments?.length ? { attachments } : {}) }),
+
+  /** Upload one file for the next message; `data` is base64 without the data: prefix. */
+  uploadAttachment: (slug: string, id: string, name: string, data: string) =>
+    adminApi.post<{ attachment: CoderAttachment }>(`${base(slug)}/session/${enc(id)}/attachments`, { name, data }),
 
   followups: (slug: string, id: string) =>
     adminApi.get<{ followups: CoderFollowup[] }>(`${base(slug)}/session/${enc(id)}/followups`),

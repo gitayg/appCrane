@@ -25,6 +25,8 @@ import {
   defaultCoderModel,
   isAllowedCoderModel,
 } from '../services/llm/coderModels.js';
+import { coderModeChoices, isAllowedCoderMode, DEFAULT_CODER_MODE } from '../services/llm/coderModes.js';
+import { saveAttachment, resolveAttachments } from '../services/builder/coderAttachments.js';
 import { usesLocalRepo, pushFilesToManagedRepo } from '../services/managedRepo.js';
 import { getQueueState } from '../services/builder/appQueue.js';
 import { fetchReleasesAndChangelog, renderReleasesPage } from '../services/github/releases.js';
@@ -234,7 +236,11 @@ function getSession(sessionId, slug) {
 // Declared before any '/:slug' route: Express matches in order, and a bare
 // GET '/models' must not be read as a slug named "models".
 router.get('/models', (req, res) => {
-  res.json({ models: coderModelChoices(), default: defaultCoderModel() });
+  // Modes ride along: same reason, same array as the validator below.
+  res.json({
+    models: coderModelChoices(), default: defaultCoderModel(),
+    modes: coderModeChoices(), default_mode: DEFAULT_CODER_MODE,
+  });
 });
 
 // ── GET /api/coder/:slug/availability — can this user use the coder here? ──
@@ -312,6 +318,27 @@ router.get('/:slug/session/:id', (req, res) => {
   res.json({ session, messages, followups: listFollowups(session.id) });
 });
 
+// ── POST /api/coder/:slug/session/:id/attachments — upload one file ─────
+//
+// Body: { name, data } with data as base64 (the app-wide JSON limit is 50 MB;
+// the per-file limit is enforced in coderAttachments). Answers
+// { attachment: { id, name, size, is_image } }; the id goes into the next
+// dispatch's `attachments` list. Same access as sending a message.
+function asAppError(fn) {
+  try { return fn(); } catch (err) {
+    if (err.status) throw new AppError(err.message, err.status, err.code || 'VALIDATION');
+    throw err;
+  }
+}
+
+router.post('/:slug/session/:id/attachments', (req, res) => {
+  getApp(req.params.slug, req.user);
+  getSession(req.params.id, req.params.slug);
+  const { name, data } = req.body || {};
+  const attachment = asAppError(() => saveAttachment(req.params.slug, req.params.id, { name, data }));
+  res.status(201).json({ attachment });
+});
+
 // ── POST /api/coder/:slug/session/:id/dispatch — send a message ──────────
 
 router.post('/:slug/session/:id/dispatch', async (req, res) => {
@@ -328,7 +355,7 @@ router.post('/:slug/session/:id/dispatch', async (req, res) => {
     throw new AppError(`Session is '${session.status}', must be idle to dispatch`, 400, 'WRONG_STATUS');
   }
 
-  const { prompt, model } = req.body || {};
+  const { prompt, model, mode, attachments: attachmentIds } = req.body || {};
   if (!prompt?.trim()) throw new AppError('prompt is required', 400, 'VALIDATION');
 
   // SECURITY — the whole reason this field is dangerous: `model` ends up in a
@@ -345,9 +372,15 @@ router.post('/:slug/session/:id/dispatch', async (req, res) => {
     );
   }
 
+  if (mode !== undefined && mode !== null && mode !== '' && !isAllowedCoderMode(mode)) {
+    throw new AppError('Unsupported mode. GET /api/coder/models lists the modes this deployment accepts.', 400, 'VALIDATION');
+  }
+
+  const attachments = asAppError(() => resolveAttachments(req.params.slug, req.params.id, attachmentIds));
+
   let r;
   try {
-    r = await dispatch(req.params.id, prompt.trim(), { model, userId: req.user.id });
+    r = await dispatch(req.params.id, prompt.trim(), { model, mode, userId: req.user.id, attachments });
   } catch (err) {
     if (err.code === 'SESSION_PAUSED') throw new AppError(err.message, 409, 'SESSION_PAUSED');
     throw err;

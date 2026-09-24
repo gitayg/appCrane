@@ -25,10 +25,10 @@ const css          = web('admin.css');
 // The request bodies
 // ---------------------------------------------------------------------------
 
-test('dispatch sends `prompt` (+ the optional `model`), the fields the route reads', () => {
-  assert.match(coderRoute, /const \{ prompt, model \} = req\.body/,
+test('dispatch sends `prompt` (+ the optional `model` and `mode`), the fields the route reads', () => {
+  assert.match(coderRoute, /const \{ prompt, model, mode, attachments: attachmentIds \} = req\.body/,
     'the route changed its field names — the client below has to follow');
-  assert.match(api, /dispatch:[\s\S]{0,600}?\{ prompt, model \}[\s\S]{0,40}\{ prompt \}/,
+  assert.match(api, /dispatch:[\s\S]{0,600}?\{ prompt, \.\.\.\(model \? \{ model \} : \{\}\), \.\.\.\(mode \? \{ mode \} : \{\}\), \.\.\.\(attachments\?\.length \? \{ attachments \} : \{\}\) \}/,
     'a dispatch body keyed anything but `prompt`/`model` is answered 400 VALIDATION, and the ' +
     'chat just looks broken: the message leaves the composer and no turn ever starts');
 });
@@ -63,7 +63,7 @@ test('the model the route accepts is an allowlist, and the shell arg is quoted a
 
 test('a turn says which model answered it', () => {
   assert.match(srv('services/builder/builderSession.js'),
-    /appendMessage\(sessionId, 'assistant', assistantBuf, null, model\)/,
+    /appendMessage\(sessionId, 'assistant', assistantBuf, null, model, mode\)/,
     'the answering model is no longer persisted with the turn');
   assert.match(panel, /e\.kind === 'assistant' && e\.model/,
     'the transcript stopped showing which model produced a bubble');

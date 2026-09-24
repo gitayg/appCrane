@@ -5,7 +5,7 @@ import { CoderChanges } from './CoderChanges'
 import { CoderRefusal } from './CoderRefusal'
 import { CoderUnavailable } from './CoderUnavailable'
 import type { CoderAvailability } from './api'
-import { useCoderSession, type Entry } from './useCoderSession'
+import { fileToDataUrl, useCoderSession, type Entry } from './useCoderSession'
 
 interface Props {
   slug:       string
@@ -51,6 +51,10 @@ export function CoderPanel(props: Props) {
   const s = useCoderSession(slug, open && usable)
   const [tab, setTab]   = useState<'chat' | 'changes'>('chat')
   const [draft, setDraft] = useState('')
+  // Files waiting to go with the next message: pasted, dropped or picked.
+  const [files, setFiles] = useState<File[]>([])
+  const [fileNote, setFileNote] = useState<string | null>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
   const [refreshKey, setRefreshKey] = useState(0)
   const scrollRef = useRef<HTMLDivElement>(null)
   const wasStreaming = useRef(false)
@@ -86,8 +90,22 @@ export function CoderPanel(props: Props) {
   const send = () => {
     const text = draft.trim()
     if (!text || !canSend) return
-    void s.send(text)
+    void s.send(text, undefined, files)
     setDraft('')
+    setFiles([])
+    setFileNote(null)
+  }
+  // Checked here as well as on the server so the reason shows before sending.
+  const addFiles = (incoming: File[]) => {
+    if (!incoming.length) return
+    const tooBig = incoming.filter(f => f.size > MAX_FILE_BYTES)
+    const ok = incoming.filter(f => f.size <= MAX_FILE_BYTES)
+    const room = MAX_FILES - files.length
+    const notes: string[] = []
+    if (tooBig.length) notes.push(`${tooBig.map(f => f.name).join(', ')}: over ${MAX_FILE_BYTES / 1048576} MB`)
+    if (ok.length > room) notes.push(`at most ${MAX_FILES} files per message`)
+    setFileNote(notes.length ? `Not attached — ${notes.join('; ')}.` : null)
+    setFiles(prev => [...prev, ...ok.slice(0, Math.max(0, room))])
   }
 
   return (
@@ -177,7 +195,7 @@ export function CoderPanel(props: Props) {
               <div key={`f${f.id}`} className="coder-msg coder-msg-user" style={{ opacity: 0.62, borderStyle: 'dashed' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
                   <span style={{ fontSize: 10, letterSpacing: '0.06em', textTransform: 'uppercase', opacity: 0.85 }}>
-                    Pending{f.model ? ` · ${f.model}` : ''}
+                    Pending{f.model ? ` · ${f.model}` : ''}{f.mode && f.mode !== 'auto' ? ` · ${modeLabel(s.modes, f.mode)}` : ''}{fileCount(f.attachments) ? ` · ${fileCount(f.attachments)} file${fileCount(f.attachments) === 1 ? '' : 's'}` : ''}
                   </span>
                   <span className="coder-spacer" />
                   <button
@@ -207,7 +225,23 @@ export function CoderPanel(props: Props) {
           </div>
 
           {s.sessionId && (
-            <div className="coder-composer">
+            <div
+              className="coder-composer"
+              onDragOver={e => { if (e.dataTransfer.types.includes('Files')) e.preventDefault() }}
+              onDrop={e => {
+                if (!e.dataTransfer.files.length) return
+                e.preventDefault()
+                addFiles(Array.from(e.dataTransfer.files))
+              }}
+            >
+              {files.length > 0 && (
+                <div className="coder-attachments">
+                  {files.map((f, i) => (
+                    <AttachmentChip key={`${f.name}-${i}`} file={f} onRemove={() => setFiles(prev => prev.filter((_, j) => j !== i))} />
+                  ))}
+                </div>
+              )}
+              {fileNote && <div className="coder-note">{fileNote}</div>}
               <textarea
                 ref={taRef}
                 className="coder-textarea"
@@ -219,6 +253,14 @@ export function CoderPanel(props: Props) {
                     ? 'Type an instruction — the session resumes first, then runs it'
                     : 'Describe the change… (↩ send · ⇧↩ newline)'}
                 onChange={e => setDraft(e.target.value)}
+                onPaste={e => {
+                  // Screenshots and copied files arrive as clipboard files;
+                  // plain text keeps the browser's own paste.
+                  const pasted = Array.from(e.clipboardData.files)
+                  if (!pasted.length) return
+                  e.preventDefault()
+                  addFiles(pasted)
+                }}
                 onKeyDown={e => {
                   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() }
                 }}
@@ -231,6 +273,20 @@ export function CoderPanel(props: Props) {
                   onClick={() => (props.peekActive ? props.onPickStop() : props.onPickStart())}
                   title="Point at an element in the app to attach its context"
                 >{props.peekActive ? 'Pick…' : 'Point at element'}</button>
+                <button
+                  type="button"
+                  className="coder-btn coder-btn-xs"
+                  onClick={() => fileInputRef.current?.click()}
+                  title="Attach a file or image (or paste / drop one into the message)"
+                  aria-label="Attach file"
+                >Attach</button>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  multiple
+                  hidden
+                  onChange={e => { addFiles(Array.from(e.target.files || [])); e.target.value = '' }}
+                />
                 {s.models.length > 0 && (
                   <select
                     className="coder-btn coder-btn-xs"
@@ -243,6 +299,19 @@ export function CoderPanel(props: Props) {
                       <option key={m.id} value={m.id}>
                         {m.label}{m.is_default ? ' · default' : ''}
                       </option>
+                    ))}
+                  </select>
+                )}
+                {s.modes.length > 0 && (
+                  <select
+                    className="coder-btn coder-btn-xs"
+                    aria-label="Mode"
+                    title={s.modes.find(m => m.id === s.mode)?.description || 'How much the coder may do on its own'}
+                    value={s.mode}
+                    onChange={e => s.setMode(e.target.value)}
+                  >
+                    {s.modes.map(m => (
+                      <option key={m.id} value={m.id} title={m.description}>{m.label}</option>
                     ))}
                   </select>
                 )}
@@ -282,9 +351,20 @@ function Bubble({ e }: { e: Entry }) {
   return (
     <div className={`coder-msg coder-msg-${e.kind}`}>
       {e.kind === 'assistant' && e.model && (
-        <div style={{ fontSize: 10, opacity: 0.6, marginBottom: 3, letterSpacing: '0.04em' }}>{e.model}</div>
+        <div style={{ fontSize: 10, opacity: 0.6, marginBottom: 3, letterSpacing: '0.04em' }}>
+          {e.model}{e.mode && e.mode !== 'auto' ? ` · ${e.mode === 'edits' ? 'Edits only' : e.mode === 'plan' ? 'Plan' : e.mode}` : ''}
+        </div>
       )}
       {e.text}
+      {e.files && e.files.length > 0 && (
+        <div className="coder-attachments coder-attachments-sent">
+          {e.files.map((f, i) => (
+            f.preview
+              ? <img key={i} className="coder-attachment-thumb" src={f.preview} alt={f.name} title={f.name} />
+              : <span key={i} className="coder-attachment-chip" title={f.name}>{f.is_image ? 'Image' : 'File'} · {f.name}</span>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
@@ -316,4 +396,35 @@ function ResumeProgress({ since }: { since: number }) {
       )}
     </div>
   )
+}
+
+function modeLabel(modes: { id: string; label: string }[], id: string) {
+  return modes.find(m => m.id === id)?.label || id
+}
+
+const MAX_FILE_BYTES = 10 * 1024 * 1024
+const MAX_FILES = 10
+
+function AttachmentChip({ file, onRemove }: { file: File; onRemove: () => void }) {
+  const isImage = file.type.startsWith('image/')
+  const [url, setUrl] = useState<string | null>(null)
+  // data: URL — the admin CSP blocks blob: images.
+  useEffect(() => {
+    if (!isImage) return
+    let live = true
+    fileToDataUrl(file).then(u => { if (live) setUrl(u) }).catch(() => {})
+    return () => { live = false }
+  }, [file, isImage])
+  return (
+    <span className="coder-attachment-chip" title={file.name}>
+      {url && <img className="coder-attachment-thumb" src={url} alt="" />}
+      <span className="coder-attachment-name">{file.name}</span>
+      <button type="button" className="coder-attachment-remove" onClick={onRemove} aria-label={`Remove ${file.name}`}>×</button>
+    </span>
+  )
+}
+
+function fileCount(raw?: string | null) {
+  if (!raw) return 0
+  try { return (JSON.parse(raw) as unknown[]).length } catch { return 0 }
 }

@@ -65,7 +65,7 @@ test('resume is bounded, so a stalled server becomes a visible failure', () => {
 
 test('a double-click cannot start two resumes', () => {
   assert.match(hook, /const resume = useCallback\(async \(\) => \{\s*if \(resumingSince\) return/, 'a second click fires a second resume');
-  assert.match(hook, /const send = useCallback\(async \(text: string, chosen\?: string\) => \{\s*if \(!sessionId \|\| !text\.trim\(\) \|\| resumingSince\) return/,
+  assert.match(hook, /const send = useCallback\(async \(text: string, chosen\?: string, files: File\[\] = \[\]\) => \{\s*if \(!sessionId \|\| !text\.trim\(\) \|\| resumingSince\) return/,
     'a message sent during a resume starts a second one');
 });
 

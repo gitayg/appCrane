@@ -21,7 +21,9 @@ import {
   PRIORITY,
 } from './appQueue.js';
 import { defaultCoderModel, isAllowedCoderModel } from '../llm/coderModels.js';
+import { DEFAULT_CODER_MODE, isAllowedCoderMode, permissionModeFor } from '../llm/coderModes.js';
 import { explainTurnFailure, isAuthFailure } from './turnFailure.js';
+import { copyAttachmentsIntoContainer, attachmentsPromptSection, resolveAttachments } from './coderAttachments.js';
 import log from '../../utils/logger.js';
 
 const STUDIO_IMAGE  = process.env.APPSTUDIO_IMAGE || 'appcrane-studio:latest';
@@ -108,11 +110,17 @@ function buildIntroMessage(app, workspaceDir, branchName, containerId, skillsMou
   return lines.join('\n');
 }
 
-function appendMessage(sessionId, role, content, tokens, model) {
+// Only {id, name, is_image} is stored: the host file name is resolved again
+// from the id when needed, never trusted from a row.
+const attachmentsJson = (list) => (list?.length
+  ? JSON.stringify(list.map(({ id, name, is_image }) => ({ id, name, is_image: !!is_image })))
+  : null);
+
+function appendMessage(sessionId, role, content, tokens, model, mode, attachments) {
   const db = getDb();
   const row = db.prepare(
-    'INSERT INTO coder_session_messages (session_id, role, content, tokens, model) VALUES (?, ?, ?, ?, ?) RETURNING id'
-  ).get(sessionId, role, content, tokens ?? null, model ?? null);
+    'INSERT INTO coder_session_messages (session_id, role, content, tokens, model, mode, attachments) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id'
+  ).get(sessionId, role, content, tokens ?? null, model ?? null, mode ?? null, attachmentsJson(attachments));
   return row?.id;
 }
 
@@ -377,7 +385,7 @@ async function loadDispatchContext(appSlug, workspaceDir, { withCodebase = true,
 
 function pendingFollowups(sessionId) {
   return getDb().prepare(
-    "SELECT id, prompt, model, user_id, created_at FROM coder_session_followups "
+    "SELECT id, prompt, model, mode, attachments, user_id, created_at FROM coder_session_followups "
     + "WHERE session_id = ? AND status = 'pending' ORDER BY id ASC"
   ).all(sessionId);
 }
@@ -387,11 +395,11 @@ function publishFollowups(sessionId) {
 }
 
 /** Queue a message the user typed while a turn was in flight. */
-function enqueueFollowup(sessionId, prompt, model, userId) {
+function enqueueFollowup(sessionId, prompt, model, userId, mode, attachments) {
   const row = getDb().prepare(
-    'INSERT INTO coder_session_followups (session_id, prompt, model, user_id) '
-    + 'VALUES (?, ?, ?, ?) RETURNING id, prompt, model, user_id, created_at'
-  ).get(sessionId, prompt, model ?? null, userId ?? null);
+    'INSERT INTO coder_session_followups (session_id, prompt, model, mode, attachments, user_id) '
+    + 'VALUES (?, ?, ?, ?, ?, ?) RETURNING id, prompt, model, mode, attachments, user_id, created_at'
+  ).get(sessionId, prompt, model ?? null, mode ?? null, attachmentsJson(attachments), userId ?? null);
   publishFollowups(sessionId);
   return row;
 }
@@ -456,7 +464,11 @@ async function drainNextFollowup(sessionId) {
   if (!claimed.changes) return;   // cancelled between the read and the claim
   publishFollowups(sessionId);
   try {
-    await dispatch(sessionId, next.prompt, { model: next.model, userId: next.user_id });
+    // A follow-up stores ids only; resolve them again so a file that is gone
+    // fails this turn with a reason instead of running without it.
+    const ids = next.attachments ? JSON.parse(next.attachments).map((a) => a.id) : [];
+    const attachments = ids.length ? resolveAttachments(state.appSlug, sessionId, ids) : [];
+    await dispatch(sessionId, next.prompt, { model: next.model, mode: next.mode, userId: next.user_id, attachments });
   } catch (err) {
     publish(sessionId, { type: 'error', message: `Queued follow-up could not start: ${err.message}` });
   }
@@ -484,7 +496,7 @@ function sessionPaused(sessionId) {
   return err;
 }
 
-export async function dispatch(sessionId, prompt, { model, userId } = {}) {
+export async function dispatch(sessionId, prompt, { model, mode, userId, attachments = [] } = {}) {
   const state = sessions.get(sessionId);
   if (!state) throw sessionPaused(sessionId);
 
@@ -495,16 +507,19 @@ export async function dispatch(sessionId, prompt, { model, userId } = {}) {
   // request.
   const chosen = model == null || model === '' ? defaultCoderModel() : String(model);
   if (!isAllowedCoderModel(chosen)) throw new Error(`Unsupported model '${chosen}'`);
+  // Same allowlist the route applies, again here for the persisted follow-up path.
+  const chosenMode = mode == null || mode === '' ? DEFAULT_CODER_MODE : String(mode);
+  if (!isAllowedCoderMode(chosenMode)) throw new Error(`Unsupported mode '${chosenMode}'`);
 
   if (state.runner || state.queued) {
-    return { queued: true, followup: enqueueFollowup(sessionId, prompt, chosen, userId) };
+    return { queued: true, followup: enqueueFollowup(sessionId, prompt, chosen, userId, chosenMode, attachments) };
   }
 
   const c0 = getContainer(state.appSlug);
   if (!c0) throw sessionPaused(sessionId);
 
   touchActivity(sessionId);
-  appendMessage(sessionId, 'user', prompt, null, chosen);
+  appendMessage(sessionId, 'user', prompt, null, chosen, chosenMode, attachments);
 
   // Mark queued. If anything is ahead of us — running Improve, or another
   // queued Builder turn (shouldn't normally happen since "no takeover" caps
@@ -539,7 +554,7 @@ export async function dispatch(sessionId, prompt, { model, userId } = {}) {
     sourceType: 'builder',
     sourceId:   sessionId,
     label:      `Builder turn (${prompt.slice(0, 60)})`,
-    run: () => runBuilderTurn(sessionId, state, prompt, chosen),
+    run: () => runBuilderTurn(sessionId, state, prompt, chosen, chosenMode, attachments),
   }).finally(() => {
     state.queued = false;
     try { unsubQueue(); } catch (_) {}
@@ -552,7 +567,7 @@ export async function dispatch(sessionId, prompt, { model, userId } = {}) {
   return { started: true };
 }
 
-async function runBuilderTurn(sessionId, state, prompt, model) {
+async function runBuilderTurn(sessionId, state, prompt, model, mode = DEFAULT_CODER_MODE, attachments = []) {
   state.drainFollowups = false;
   const c = getContainer(state.appSlug);
   if (!c) {
@@ -561,7 +576,7 @@ async function runBuilderTurn(sessionId, state, prompt, model) {
     return;
   }
   // Which model is answering, for the bubble the stream is about to fill.
-  publish(sessionId, { type: 'turn', model });
+  publish(sessionId, { type: 'turn', model, mode });
 
   setContainerBusy(state.appSlug, true);
   if (state.status !== 'active') {
@@ -594,6 +609,25 @@ async function runBuilderTurn(sessionId, state, prompt, model) {
     }
   }
 
+  // Attached files go into the container before the turn starts, and the
+  // prompt names their paths. A copy that fails ends the turn with the reason:
+  // running without the screenshot the user pointed at would answer a
+  // different question than the one asked.
+  if (attachments?.length) {
+    try {
+      const copied = copyAttachmentsIntoContainer(c.containerId, state.appSlug, sessionId, attachments);
+      augmentedPrompt += attachmentsPromptSection(copied);
+    } catch (err) {
+      log.warn(`Builder: could not copy attachments for ${state.appSlug}: ${err.message}`);
+      state.status = 'idle';
+      updateDb(sessionId, { status: 'idle' });
+      setContainerBusy(state.appSlug, false);
+      publish(sessionId, { type: 'error', message: `Your message was not run: the attached files could not be copied into the coder's container (${err.message}).` });
+      publish(sessionId, { type: 'status', status: 'idle' });
+      return;
+    }
+  }
+
   return new Promise((resolveRun) => {
     // actingUserId is what lets this turn run on the session owner's own Claude
     // subscription: runAgentExec resolves user token -> app credentials -> platform
@@ -611,6 +645,7 @@ async function runBuilderTurn(sessionId, state, prompt, model) {
       resume:       c.claudeSessionId || undefined,
       hasAppCredentials: !!c.credsCleanup,
       actingUserId: ownerId,
+      permissionMode: permissionModeFor(mode),
     });
     state.runner = runner;
 
@@ -701,10 +736,10 @@ async function runBuilderTurn(sessionId, state, prompt, model) {
         stderrTail: runner.getStderrTail?.() || [],
       });
       if (failure) {
-        appendMessage(sessionId, 'assistant', failure, null, model);
+        appendMessage(sessionId, 'assistant', failure, null, model, mode);
         publish(sessionId, { type: 'error', message: failure, turnFailed: true });
       } else if (assistantBuf) {
-        appendMessage(sessionId, 'assistant', assistantBuf, null, model);
+        appendMessage(sessionId, 'assistant', assistantBuf, null, model, mode);
       }
       // The turn completed — a nonzero code is a bad ANSWER, not a broken
       // substrate, so the queued follow-up still gets its go. Except a

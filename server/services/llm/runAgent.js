@@ -217,7 +217,14 @@ function buildPreflightShell(checks) {
   return lines.join('; ') + '; ';
 }
 
-function buildClaudeCmd({ prompt, model, resume, addDir = '/workspace', systemPrompt, preflight = [] }) {
+// The only permission modes a caller may ask for. Anything else is refused
+// here, independently of coderModes.js, because the value reaches `sh -c`.
+const PERMISSION_MODES = new Set(['bypassPermissions', 'acceptEdits', 'plan']);
+
+function buildClaudeCmd({ prompt, model, resume, addDir = '/workspace', systemPrompt, preflight = [], permissionMode }) {
+  if (permissionMode != null && !PERMISSION_MODES.has(permissionMode)) {
+    throw new Error(`Refusing unsupported permission mode '${permissionMode}'`);
+  }
   const parts = [
     `claude -p`,
     // SECURITY: quoted since v2.85.0, when the browser gained a model picker.
@@ -225,7 +232,12 @@ function buildClaudeCmd({ prompt, model, resume, addDir = '/workspace', systemPr
     // second, independent defence, so a list someone edits later is not the
     // only thing between a request body and `sh -c`.
     `--model ${shellQuote(String(model))}`,
-    `--dangerously-skip-permissions`,
+    // Auto (and every caller that does not choose) keeps the flag it always
+    // had; Edits only and Plan hand the CLI a mode, and with no terminal to
+    // answer prompts, whatever that mode would ask about is refused.
+    !permissionMode || permissionMode === 'bypassPermissions'
+      ? `--dangerously-skip-permissions`
+      : `--permission-mode ${shellQuote(permissionMode)}`,
     `--output-format stream-json --verbose`,
     `--add-dir ${addDir}`,
   ];
@@ -397,6 +409,7 @@ export function runAgentExec({
   actingUserId = null,        // whose subscription this dispatch bills to
   oauthToken   = null,        // an already-resolved CLAUDE_CODE_OAUTH_TOKEN
   credentialDeps = {},        // injection point for resolveAgentCredential
+  permissionMode = null,      // coderModes.permissionModeFor(); null = skip permissions (Auto)
 }) {
   // One decision, shared with runAgentNew — see the precedence block above.
   const cred = resolveAgentCredential(
@@ -425,7 +438,7 @@ export function runAgentExec({
   args.push(
     containerId,
     'sh', '-c',
-    buildClaudeCmd({ prompt, model, resume, addDir, systemPrompt, preflight }),
+    buildClaudeCmd({ prompt, model, resume, addDir, systemPrompt, preflight, permissionMode }),
   );
   return new Agent(args, timeoutMs, [cred.oauthToken]);
 }

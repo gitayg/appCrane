@@ -1928,7 +1928,9 @@ input[type='email'], select, textarea {
 .coder-textarea { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: .82rem; padding: 7px 10px; resize: none; font-family: inherit; line-height: 1.45; width: 100%; box-sizing: border-box; }
 .coder-textarea:focus { outline: none; border-color: var(--accent); }
 .coder-textarea:disabled { opacity: .55; }
-.coder-composer-row { display: flex; align-items: center; gap: 8px; }
+.coder-composer-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; row-gap: 6px; }
+/* Pickers shrink before Send is pushed out of the panel. */
+.coder-composer-row select { min-width: 0; max-width: 11rem; text-overflow: ellipsis; }
 .coder-spacer { flex: 1; }
 
 .coder-btn { background: var(--surface2); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 13px; cursor: pointer; font-size: .78rem; font-family: inherit; font-weight: 500; white-space: nowrap; transition: border-color .15s, color .15s; }
@@ -2109,3 +2111,14 @@ input[type='email'], select, textarea {
    "npm ERR! code ENOTFOUND npm ERR! network request…" is unreadable; kept as
    lines, it is the answer to "why won't the coder start". */
 .coder-refusal-body { white-space: pre-wrap; word-break: break-word; }
+
+/* Files attached to a coder message: pasted, dropped or picked. */
+.coder-attachments { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 6px; margin-bottom: 6px; }
+.coder-attachments-sent { margin: 6px 0 0; }
+.coder-attachment-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 3px 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface2); font-size: .72rem; }
+.coder-attachment-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 12rem; }
+.coder-attachment-thumb { width: 36px; height: 36px; object-fit: cover; border-radius: 4px; display: block; }
+.coder-attachments-sent .coder-attachment-thumb { width: 72px; height: 72px; }
+.coder-attachment-remove { background: none; border: 0; color: inherit; cursor: pointer; font-size: .9rem; line-height: 1; padding: 0 2px; opacity: .7; }
+.coder-attachment-remove:hover, .coder-attachment-remove:focus-visible { opacity: 1; }
+.coder-attachment-remove:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 3px; }

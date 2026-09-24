@@ -3,7 +3,7 @@ import { ApiError } from '../../adminApi'
 import { sessionStillValid } from '../../sessionExpiry'
 import {
   coderApi, isLiveStatus,
-  type CoderEvent, type CoderFollowup, type CoderModel, type CoderSession,
+  type CoderEvent, type CoderFollowup, type CoderMode, type CoderModel, type CoderSession,
   type CoderStatus, type StreamEvent,
 } from './api'
 
@@ -15,6 +15,10 @@ export interface Entry {
   /** Which model answered. Shown on assistant bubbles; a transcript where you
    *  cannot tell which model produced a turn is worse than no picker. */
   model?: string | null
+  /** Coder mode of the turn, shown when it is not Auto. */
+  mode?: string | null
+  /** Files attached to a user message: name, and a local preview for images. */
+  files?: { name: string; is_image: boolean; preview?: string }[]
 }
 
 let seq = 0
@@ -72,12 +76,15 @@ export function useCoderSession(slug: string, open: boolean) {
   const [startLog,  setStartLog]  = useState<string[]>([])
   const [models,    setModels]    = useState<CoderModel[]>([])
   const [model,     setModel]     = useState<string>('')
+  const [modes,     setModes]     = useState<CoderMode[]>([])
+  const [mode,      setMode]      = useState<string>('')
   const [followups, setFollowups] = useState<CoderFollowup[]>([])
 
   const esRef      = useRef<EventSource | null>(null)
   const stoppedRef = useRef(false)
   /** Model of the turn currently streaming, stamped onto its assistant bubble. */
   const turnModel  = useRef<string | null>(null)
+  const turnMode   = useRef<string | null>(null)
 
   // ── the allowlist the server enforces ─────────────────────────────────
   // Fetched, never hardcoded: a hardcoded list drifts from the validator and
@@ -91,6 +98,8 @@ export function useCoderSession(slug: string, open: boolean) {
         if (cancelled) return
         setModels(r.models)
         setModel(m => m || r.default)
+        setModes(r.modes || [])
+        setMode(m => m || r.default_mode || '')
       })
       .catch(() => { /* picker stays empty; the server still applies its default */ })
     return () => { cancelled = true }
@@ -144,7 +153,7 @@ export function useCoderSession(slug: string, open: boolean) {
       // a queue position worth showing.
       if (ev.type === 'queue') { setQueueAhead(ev.ahead > 0 ? ev.ahead : null); return }
       if (ev.type === 'followups') { setFollowups(ev.items); return }
-      if (ev.type === 'turn') { turnModel.current = ev.model; return }
+      if (ev.type === 'turn') { turnModel.current = ev.model; turnMode.current = ev.mode ?? null; return }
       if (ev.type === 'note') {
         setLive(p => [...p, { key: key(), kind: 'note', text: ev.message }])
         return
@@ -175,7 +184,7 @@ export function useCoderSession(slug: string, open: boolean) {
         if (last && last.kind === 'assistant') {
           return [...p.slice(0, -1), { ...last, text: last.text + se.text }]
         }
-        return [...p, { key: key(), kind: 'assistant', text: se.text, model: turnModel.current }]
+        return [...p, { key: key(), kind: 'assistant', text: se.text, model: turnModel.current, mode: turnMode.current }]
       })
     }
 
@@ -194,6 +203,8 @@ export function useCoderSession(slug: string, open: boolean) {
           kind: m.role === 'user' ? 'user' : 'assistant',
           text: m.content,
           model: m.model,
+          mode: m.mode,
+          files: parseAttachments(m.attachments),
         })))
         // Survives F5: the pending queue comes back with the transcript, from
         // the DB, on every connect.
@@ -290,10 +301,30 @@ export function useCoderSession(slug: string, open: boolean) {
     }
   }, [slug, sessionId])
 
-  const send = useCallback(async (text: string, chosen?: string) => {
+  const send = useCallback(async (text: string, chosen?: string, files: File[] = []) => {
     if (!sessionId || !text.trim() || resumingSince) return
     const wasStreaming = status === 'active' || status === 'queued'
-    if (!wasStreaming) setLive(p => [...p, { key: key(), kind: 'user', text }])
+    if (!wasStreaming) {
+      // data: URLs, not blob: — the admin CSP allows `img-src 'self' data:`
+      // and blocks blob:, which rendered every preview as a broken image.
+      const previews = await Promise.all(files.map(f =>
+        f.type.startsWith('image/') ? fileToDataUrl(f).catch(() => undefined) : Promise.resolve(undefined)))
+      setLive(p => [...p, {
+        key: key(), kind: 'user', text,
+        files: files.map((f, i) => ({ name: f.name, is_image: f.type.startsWith('image/'), preview: previews[i] })),
+      }])
+    }
+
+    // Upload first: the ids go on the dispatch. A file that will not upload
+    // stops the message here, with the reason, rather than sending it without.
+    let attachmentIds: string[] = []
+    try {
+      attachmentIds = await Promise.all(files.map(async f =>
+        (await coderApi.uploadAttachment(slug, sessionId, f.name, await fileToBase64(f))).attachment.id))
+    } catch (e) {
+      setLive(p => [...p, { key: key(), kind: 'error', text: `Your message was not sent: a file could not be attached (${(e as Error).message}).` }])
+      return
+    }
 
     // A message sent into a paused session used to fail with an error while the
     // pill still said "idle" — the user saw nothing happen. Now it resumes the
@@ -301,7 +332,7 @@ export function useCoderSession(slug: string, open: boolean) {
     // the session was paused or only learns it from the server's 409.
     const dispatchOnce = async () => {
       if (!wasStreaming) setStatus('active')
-      const r = await coderApi.dispatch(slug, sessionId, text, chosen || model || undefined)
+      const r = await coderApi.dispatch(slug, sessionId, text, chosen || model || undefined, mode || undefined, attachmentIds)
       // The same row arrives TWICE: once as this response, once on the SSE
       // `followups` event the enqueue publishes. The SSE copy is the whole
       // list and usually wins the race, so a blind append renders the newest
@@ -334,7 +365,7 @@ export function useCoderSession(slug: string, open: boolean) {
       setLive(p => [...p, { key: key(), kind: 'error', text: (e as Error).message }])
       if (!wasStreaming) setStatus('idle')
     }
-  }, [slug, sessionId, model, status, resumingSince, resumeNow])
+  }, [slug, sessionId, model, mode, status, resumingSince, resumeNow])
 
   const cancelFollowup = useCallback(async (id: number) => {
     if (!sessionId) return
@@ -365,7 +396,29 @@ export function useCoderSession(slug: string, open: boolean) {
     entries: [...history, ...live],
     starting, error, startLog, resumingSince,
     models, model, setModel,
+    modes, mode, setMode,
     followups, cancelFollowup,
     start, send, stop, resume,
   }
+}
+
+function parseAttachments(raw?: string | null): Entry['files'] {
+  if (!raw) return undefined
+  try {
+    const list = JSON.parse(raw) as { name: string; is_image: boolean }[]
+    return list.map(a => ({ name: a.name, is_image: !!a.is_image }))
+  } catch { return undefined }
+}
+
+export function fileToDataUrl(f: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader()
+    r.onload = () => resolve(String(r.result))
+    r.onerror = () => reject(r.error || new Error(`Could not read ${f.name}`))
+    r.readAsDataURL(f)
+  })
+}
+
+async function fileToBase64(f: File): Promise<string> {
+  return (await fileToDataUrl(f)).replace(/^data:[^,]*,/, '')
 }
