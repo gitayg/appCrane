@@ -160,6 +160,39 @@ attempt_rollback() {
 
 node_major() { node -p "process.versions.node.split('.')[0]" 2>/dev/null || echo ""; }
 
+# A Node AppCrane downloaded for itself (v2.92.0, server/services/bundledNode.js)
+# lives here. It is used only when the system Node is below the floor, so a
+# host whose administrator later upgrades the system Node goes back to it.
+BUNDLED_BIN="${APPCRANE_DIR}/.runtime/current/bin"
+
+bundled_major() {
+  [ -x "$BUNDLED_BIN/node" ] || { echo ""; return; }
+  "$BUNDLED_BIN/node" -p "process.versions.node.split('.')[0]" 2>/dev/null || echo ""
+}
+
+# Put the bundled Node first on PATH when the system one is below the floor
+# and the bundled one meets it. Returns 0 when it did.
+use_bundled_node() {
+  local want="$1" have bundled
+  have="$(node_major)"; bundled="$(bundled_major)"
+  [ -n "$bundled" ] && [ -n "$want" ] || return 1
+  [ "$bundled" -ge "$want" ] || return 1
+  if [ -n "$have" ] && [ "$have" -ge "$want" ] && [ "$BUNDLED_BIN/node" != "$(command -v node)" ]; then
+    return 1
+  fi
+  case ":$PATH:" in *":$BUNDLED_BIN:"*) ;; *) export PATH="$BUNDLED_BIN:$PATH" ;; esac
+  return 0
+}
+
+# No root: download the official build into ${APPCRANE_DIR}/.runtime with the
+# Node that is already here (any Node with fetch, 18+), then use it.
+install_bundled_node() {
+  local want="$1"
+  log "downloading the official Node ${want} build into ${APPCRANE_DIR}/.runtime (no root needed)"
+  APPCRANE_DIR="$APPCRANE_DIR" node "$APPCRANE_DIR/server/services/bundledNode.js" "$want" >/dev/null || return 1
+  use_bundled_node "$want"
+}
+
 required_node_major() {
   node -p "((((require('${APPCRANE_DIR}/package.json').engines)||{}).node)||'').match(/(\\d+)/)?.[1]||''" 2>/dev/null || echo ""
 }
@@ -183,7 +216,11 @@ upgrade_node() {
 
 reconcile_runtime() {
   local have want
-  have="$(node_major)"; want="$(required_node_major)"
+  want="$(required_node_major)"
+  if [ -n "$want" ] && use_bundled_node "$want"; then
+    log "using AppCrane's own Node $(node -v 2>/dev/null) from ${BUNDLED_BIN} (the system Node is below v${want})"
+  fi
+  have="$(node_major)"
   if [ -z "$have" ] || [ -z "$want" ]; then
     log "runtime check skipped (node=${have:-?}, required=${want:-?})"
     return 0
@@ -198,7 +235,7 @@ reconcile_runtime() {
   fi
 
   log "Node v${have} is below this release's floor of v${want} — a self-update cannot install dependencies until this is fixed"
-  if upgrade_node "$want"; then
+  if upgrade_node "$want" || install_bundled_node "$want"; then
     log "Node is now $(node -v 2>/dev/null) — installing dependencies the blocked update could not"
     if npm install --omit=dev --prefer-offline 2>&1 | sed 's/^/[safe-boot] npm: /' >&2; then
       log "runtime reconciled; the stalled update is complete"
@@ -206,7 +243,7 @@ reconcile_runtime() {
       log "npm install still failed after the Node upgrade — booting anyway on the existing node_modules"
     fi
   else
-    log "cannot upgrade Node automatically (needs root or passwordless sudo, and apt-get). Run on this host:"
+    log "cannot upgrade Node automatically (no root or passwordless sudo with apt-get, and the official build could not be downloaded). Run on this host:"
     log "    curl -fsSL https://deb.nodesource.com/setup_${want}.x | sudo -E bash -"
     log "    sudo apt-get install -y nodejs && sudo systemctl restart appcrane"
   fi
@@ -256,7 +293,9 @@ reconcile_native() {
 # --check-runtime prints the decision and exits, so the logic is testable
 # without booting AppCrane or touching apt.
 if [ "${1:-}" = "--check-runtime" ]; then
-  have="$(node_major)"; want="$(required_node_major)"
+  want="$(required_node_major)"
+  [ -n "$want" ] && use_bundled_node "$want" || true
+  have="$(node_major)"
   echo "have=${have:-?} want=${want:-?}"
   if [ -n "$have" ] && [ -n "$want" ] && [ "$have" -lt "$want" ]; then
     echo "decision=upgrade"
@@ -264,11 +303,16 @@ if [ "${1:-}" = "--check-runtime" ]; then
     echo "decision=ok"
   fi
   if native_ok; then echo "native=ok"; else echo "native=broken"; fi
+  echo "node_path=$(command -v node)"
   exit 0
 fi
 
 reconcile_runtime
 reconcile_native
+
+# Tells the server's self-update that this wrapper started it, so it may
+# install a bundled Node: this is what puts that Node on PATH at the restart.
+export APPCRANE_SAFE_BOOT=1
 
 while true; do
   start_time=$(date +%s)

@@ -740,9 +740,28 @@ app.post('/api/self-update', requireAuth, requirePlatformAdmin, async (req, res)
         hasApt: !!which('apt-get'),
         nodePath: which('node'),
         skipEnv: process.env.APPCRANE_SKIP_NODE_UPGRADE,
+        arch: process.arch,
+        underSafeBoot: process.env.APPCRANE_SAFE_BOOT === '1',
       });
 
-      if (plan.upgrade) {
+      if (plan.upgrade && plan.method === 'bundled') {
+        // v2.92.0: no root, so no apt. Download the official build into the
+        // AppCrane directory, then put it first on PATH for the rest of this
+        // update, so npm install and the SPA build run on the runtime the new
+        // release needs. safe-boot.sh puts the same directory on PATH at the
+        // restart.
+        log.info(`[self-update] ${plan.message}`);
+        const { installBundledNode } = await import('./services/bundledNode.js');
+        const { version, binDir } = await installBundledNode({
+          major: incomingFloor, appcraneDir: cwd, log: (m) => log.info(`[self-update] ${m}`),
+        });
+        process.env.PATH = `${binDir}:${process.env.PATH}`;
+        const installed = Number(execFileSync('node', ['-v'], { stdio: 'pipe' })
+          .toString().trim().replace(/^v/, '').split('.')[0]);
+        const verdict = verifyUpgrade(installed, incomingFloor);
+        if (!verdict.ok) throw new Error(`Self-update aborted: ${verdict.message}`);
+        log.info(`[self-update] Node ${version} is on PATH for this update and every boot after it.`);
+      } else if (plan.upgrade) {
         log.info(`[self-update] ${plan.message}`);
         for (const [bin, args] of plan.commands) {
           execFileSync(bin, args, {

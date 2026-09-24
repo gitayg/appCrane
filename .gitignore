@@ -24,3 +24,4 @@ studio-web/src/**/*.d.ts
 
 # Productizer hygiene pattern list — names private strings, must never be committed.
 .claude/productizer/hygiene-local.txt
+/.runtime/

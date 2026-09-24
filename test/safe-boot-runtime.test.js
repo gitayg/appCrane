@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, mkdirSync } from 'fs';
+import { mkdtempSync, writeFileSync, mkdirSync, readFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { execFileSync } from 'child_process';
@@ -85,4 +85,57 @@ test('the real package.json declares a floor this can act on', () => {
   assert.match(pkg.engines?.node || '', /\d+/, 'package.json must declare engines.node');
   const r = decide(pkg.engines);
   assert.notEqual(r.want, '?', 'the wrapper must be able to parse the real floor');
+});
+
+// v2.92.0: the Node AppCrane downloads for itself (<appcrane>/.runtime/current)
+// is what boots when the system Node is below the floor, and only then.
+// Fake `node` binaries report a chosen major and hand everything else to the
+// real node, so the wrapper's own checks run unchanged.
+import { chmodSync } from 'fs';
+const REAL_NODE = process.execPath;
+function fakeNode(dir, major) {
+  mkdirSync(dir, { recursive: true });
+  const p = join(dir, 'node');
+  writeFileSync(p, `#!/bin/sh\ncase "$*" in *process.versions.node*) echo ${major}; exit 0 ;; esac\nexec "${REAL_NODE}" "$@"\n`);
+  chmodSync(p, 0o755);
+  return p;
+}
+function decideWith({ system, bundled, floor = 22 }) {
+  const dir = mkdtempSync(join(tmpdir(), 'sb-bundled-'));
+  mkdirSync(join(dir, 'data'), { recursive: true });
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'appcrane', version: '9.9.9', engines: { node: `>=${floor}` } }));
+  const sysBin = join(dir, 'sysbin');
+  fakeNode(sysBin, system);
+  let bundledNode = null;
+  if (bundled) bundledNode = fakeNode(join(dir, '.runtime', 'current', 'bin'), bundled);
+  const out = execFileSync('bash', [SCRIPT, '--check-runtime'], {
+    env: { ...process.env, PATH: `${sysBin}:${process.env.PATH}`, APPCRANE_DIR: dir, DATA_DIR: join(dir, 'data') },
+    encoding: 'utf8',
+  });
+  return { ...Object.fromEntries(out.trim().split(/\s+/).map((kv) => kv.split('='))), bundledNode, sysNode: join(sysBin, 'node') };
+}
+
+test("the system Node is below the floor and AppCrane's own meets it: boot on AppCrane's own", () => {
+  const r = decideWith({ system: 20, bundled: 22 });
+  assert.equal(r.have, '22');
+  assert.equal(r.decision, 'ok');
+  assert.equal(r.node_path, r.bundledNode, 'the wrapper still boots the system Node 20');
+});
+
+test('a system Node that meets the floor wins over the bundled one', () => {
+  const r = decideWith({ system: 22, bundled: 22 });
+  assert.equal(r.node_path, r.sysNode, 'an administrator who upgraded the system Node is overridden by an old download');
+});
+
+test('no bundled Node and a system Node below the floor is still flagged for upgrade', () => {
+  const r = decideWith({ system: 20 });
+  assert.equal(r.decision, 'upgrade');
+});
+
+test('the wrapper tells the server it was started by safe-boot.sh', () => {
+  const src = readFileSync(SCRIPT, 'utf8');
+  assert.ok(src.indexOf('export APPCRANE_SAFE_BOOT=1') < src.indexOf('node server/index.js &'),
+    'the flag is set after node starts, so self-update would never offer a bundled Node');
+  assert.match(src, /upgrade_node "\$want" \|\| install_bundled_node "\$want"/,
+    'a stuck host without root never tries the download');
 });

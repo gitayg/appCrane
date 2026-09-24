@@ -16,6 +16,8 @@
 // to touch system packages on a live host?) testable without apt, which is the
 // part worth getting right.
 
+import { nodeDistArch } from './bundledNode.js';
+
 /** Every reason the upgrade is skipped, so a caller can log the specific one. */
 export const SKIP = {
   AT_FLOOR:     'at_or_above_floor',
@@ -37,6 +39,8 @@ export const SKIP = {
  *   hasApt       {boolean} apt-get resolvable on PATH
  *   nodePath     {string}  the resolved `node` binary path
  *   skipEnv      {string=} APPCRANE_SKIP_NODE_UPGRADE
+ *   arch         {string=} process.arch
+ *   underSafeBoot {boolean=} started by scripts/safe-boot.sh (APPCRANE_SAFE_BOOT=1)
  * @returns {{ upgrade: boolean, blocking: boolean, reason: string, message: string, commands?: string[][] }}
  *   `blocking` means: do NOT continue the update. Installing dependencies that
  *   declare a newer engine onto this runtime is how a working platform becomes
@@ -45,6 +49,7 @@ export const SKIP = {
  */
 export function planNodeUpgrade({
   currentMajor, floor, platform, isRoot, hasApt, nodePath = '', skipEnv,
+  arch = null, underSafeBoot = false,
 }) {
   if (currentMajor >= floor) {
     return { upgrade: false, blocking: false, reason: SKIP.AT_FLOOR,
@@ -66,26 +71,39 @@ export function planNodeUpgrade({
       message: `Node ${currentMajor} is below the floor (${floor}) and this host is ${platform}, ` +
         'where AppCrane does not manage system packages. Upgrade the runtime yourself.' };
   }
-  if (!isRoot) {
-    return { upgrade: false, blocking: true, reason: SKIP.NOT_ROOT,
-      message: `Node ${currentMajor} is below the floor (${floor}) and this process is not root, ` +
-        'so it cannot install packages. Upgrade the runtime, or run the updater as root.' };
-  }
-  if (!hasApt) {
-    return { upgrade: false, blocking: true, reason: SKIP.NO_APT,
-      message: `Node ${currentMajor} is below the floor (${floor}) and apt-get is unavailable, ` +
-        'so AppCrane cannot upgrade it. Upgrade the runtime yourself.' };
-  }
+  // v2.92.0: where the system package manager is out of reach — not root, no
+  // apt, or a Node that apt would not replace — AppCrane downloads the
+  // official build into its own directory (services/bundledNode.js) instead of
+  // refusing. It needs safe-boot.sh to put that runtime on PATH at the next
+  // start, so a host whose service runs `node server/index.js` directly still
+  // blocks, with the reason.
+  const bundled = (reason, why) => {
+    if (underSafeBoot && nodeDistArch(arch)) {
+      return {
+        upgrade: true, blocking: false, reason: 'bundling', method: 'bundled',
+        message: `Node ${currentMajor} is below the floor (${floor}) and ${why}, so AppCrane is ` +
+          `downloading the official Node ${floor} build into its own directory instead.`,
+      };
+    }
+    const cannot = !nodeDistArch(arch)
+      ? `no official Node build is used for this CPU (${arch || 'unknown'})`
+      : 'the service does not start through scripts/safe-boot.sh, which is what would put it on PATH';
+    return { upgrade: false, blocking: true, reason,
+      message: `Node ${currentMajor} is below the floor (${floor}) and ${why}, and AppCrane cannot ` +
+        `bring its own Node either: ${cannot}. Upgrade the runtime, or run the updater as root.` };
+  };
+
+  if (!isRoot) return bundled(SKIP.NOT_ROOT, 'this process is not root, so it cannot install packages');
+  if (!hasApt) return bundled(SKIP.NO_APT, 'apt-get is unavailable');
 
   // Node from nvm/asdf/a tarball lives outside the system prefixes, and
   // apt-get would install a SECOND node that PATH may never reach — the
   // upgrade would report success while this process kept running the old one.
   // Refuse rather than create two runtimes and a confusing outcome.
   if (nodePath && !/^\/usr\/(bin|local\/bin)\/node$/.test(nodePath)) {
-    return { upgrade: false, blocking: true, reason: SKIP.NOT_SYSTEM,
-      message: `Node ${currentMajor} is below the floor (${floor}) but its binary is at ${nodePath}, ` +
-        'which is not a system package path (nvm, asdf or a manual install). apt-get would add a ' +
-        'second Node that PATH may not prefer. Upgrade it through whatever installed it.' };
+    const p = bundled(SKIP.NOT_SYSTEM, `its binary is at ${nodePath}, which is not a system package path ` +
+      '(nvm, asdf or a manual install), and apt-get would add a second Node that PATH may not prefer');
+    return p;
   }
 
   return {

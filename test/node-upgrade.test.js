@@ -198,3 +198,54 @@ test('install.sh keeps the shell options that protect its piped installs', () =>
   assert.ok(sh.indexOf('set -euo pipefail') < sh.indexOf('deb.nodesource.com'),
     'the shell options are set after the nodesource pipeline they are supposed to guard');
 });
+
+// ---------------------------------------------------------------------------
+// v2.92.0: no root is no longer a dead end
+// ---------------------------------------------------------------------------
+//
+// apphub.opswat.com refused every update with "Node 20 is below the floor (22)
+// and this process is not root". Where apt is out of reach, a host started by
+// safe-boot.sh now gets AppCrane's own Node instead of a refusal.
+
+test('a non-root host started by safe-boot.sh gets a bundled Node instead of a refusal', () => {
+  for (const [label, over] of [
+    ['not root', { isRoot: false }],
+    ['no apt', { hasApt: false }],
+    ['nvm node', { nodePath: '/home/x/.nvm/versions/node/v20.1.0/bin/node' }],
+  ]) {
+    const p = plan({ ...over, underSafeBoot: true, arch: 'x64' });
+    assert.equal(p.upgrade, true, `${label}: still refused`);
+    assert.equal(p.method, 'bundled', `${label}: planned ${p.method || 'apt'} without root`);
+    assert.equal(p.blocking, false);
+    assert.equal(p.commands, undefined, `${label}: handed apt commands it cannot run`);
+  }
+  assert.equal(plan({ isRoot: false, underSafeBoot: true, arch: 'arm64' }).method, 'bundled');
+});
+
+test('without safe-boot.sh, or on a CPU with no official build, it still blocks and says why', () => {
+  const noWrapper = plan({ isRoot: false, underSafeBoot: false, arch: 'x64' });
+  assert.equal(noWrapper.blocking, true);
+  assert.match(noWrapper.message, /safe-boot\.sh/, 'the refusal does not say what would make it work');
+  const oddCpu = plan({ isRoot: false, underSafeBoot: true, arch: 'ppc64' });
+  assert.equal(oddCpu.blocking, true);
+  assert.match(oddCpu.message, /ppc64/);
+});
+
+test('root with apt still uses the system package, and the opt-out and non-Linux still block', () => {
+  assert.equal(plan({ underSafeBoot: true, arch: 'x64' }).method, undefined, 'a root host stopped using apt');
+  assert.equal(plan({ isRoot: false, underSafeBoot: true, arch: 'x64', skipEnv: '1' }).blocking, true);
+  assert.equal(plan({ isRoot: false, underSafeBoot: true, arch: 'x64', platform: 'darwin' }).blocking, true);
+});
+
+test('self-update installs the bundled Node and puts it on PATH before npm install', () => {
+  const idx = readFileSync(new URL('../server/index.js', import.meta.url), 'utf8');
+  assert.match(idx, /underSafeBoot: process\.env\.APPCRANE_SAFE_BOOT === '1'/);
+  const bundled = idx.indexOf("plan.method === 'bundled'");
+  const pathSet = idx.indexOf('process.env.PATH = `${binDir}:${process.env.PATH}`');
+  // The next npm install after the bundled branch is the update's (an earlier
+  // one belongs to the auto-rollback path, which reinstalls the old release).
+  const npmInstall = idx.indexOf("execFileSync('npm', ['install', '--omit=dev'", bundled);
+  const reset = idx.indexOf("execFileSync('git', ['reset', '--hard', 'origin/main']", bundled);
+  assert.ok(bundled > 0 && pathSet > bundled && reset > pathSet && npmInstall > reset,
+    'npm install can run before the bundled Node is on PATH, installing against the old runtime');
+});
