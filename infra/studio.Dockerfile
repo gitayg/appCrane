@@ -11,7 +11,7 @@
 # or directly:
 #   docker build -t appcrane-studio:latest -f infra/studio.Dockerfile infra/
 
-ARG STUDIO_IMAGE_VERSION=4
+ARG STUDIO_IMAGE_VERSION=5
 
 FROM node:20-alpine
 ARG STUDIO_IMAGE_VERSION
@@ -30,7 +30,15 @@ LABEL appcrane.studio.version="${STUDIO_IMAGE_VERSION}"
 # Measured in this exact image before the fix.
 RUN apk add --no-cache git bash
 RUN npm install -g @anthropic-ai/claude-code
-RUN addgroup -S studio && adduser -S -G studio studio \
-    && mkdir -p /home/studio /workspace \
-    && chown studio:studio /home/studio /workspace
+# uid/gid pinned: appContainer.js chowns the mounted transcripts to exactly
+# this pair (STUDIO_UID/STUDIO_GID), so they cannot drift apart.
+#
+# ~/.claude is created here, owned by studio, because the transcripts are
+# bind-mounted at ~/.claude/projects: without it Docker creates the parent as
+# root, and Claude cannot write its own state there. Measured on a real
+# instance: `mkdir ~/.claude/shell-snapshots: Permission denied`, and the agent
+# told the user "Bash is blocked by an environment permission issue".
+RUN addgroup -S -g 101 studio && adduser -S -u 100 -G studio studio \
+    && mkdir -p /home/studio/.claude /workspace \
+    && chown -R studio:studio /home/studio /workspace
 USER studio

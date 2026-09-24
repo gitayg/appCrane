@@ -25,7 +25,7 @@ const ARGV = join(ROOT, 'docker-argv');
 mkdirSync(BIN, { recursive: true });
 writeFileSync(join(BIN, 'docker'), `#!/bin/sh
 case "$1" in
-  image) echo 4 ; exit 0 ;;
+  image) echo 5 ; exit 0 ;;
   run)
     { for a in "$@"; do printf '%s\\037' "$a"; done; } > "${ARGV}"
     printf '%s\\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"Your credit balance is too low to access the Anthropic API."}]}}'

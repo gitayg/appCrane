@@ -66,20 +66,27 @@ export function transcriptDirFor(slug) { return join(appDir(slug), 'claude-proje
  * holds a record of the source the agent read and wrote, so it is no less
  * sensitive than /workspace and gets no weaker containment — same per-app
  * parent under DATA_DIR (0755, owned by the AppCrane process), same 0777 on the
- * directory itself, same best-effort chown to 1000:1000.
+ * directory itself.
  *
- * On the 0777: it is what actually makes the mount writable. The studio user is
- * uid 100 in this image (measured: `id studio` -> uid=100(studio) gid=101), not
- * 1000, and the chown is best-effort anyway (it fails outright when AppCrane
- * does not run as root). 0777 is therefore load-bearing and the chown is
- * cosmetic — stated plainly rather than implied, because the workspace has the
- * same pair and the chown there reads as if it were doing the work.
+ * The chown is to the image's studio user, pinned to 100:101 in
+ * infra/studio.Dockerfile. Before v2.90.4 it was `chown -R 1000:1000`, which is
+ * not that user: Claude writes its transcripts mode 0600, so every container
+ * start handed the agent's own conversation to a uid it does not run as.
+ * Measured on a real instance: the transcript `-rw------- node node`, the
+ * agent `uid=100(studio)`, and `cat` of it refused. Every turn after that
+ * resumed a conversation it could not read or extend. Recursive, so a
+ * directory already re-owned by an older release is repaired on the next
+ * start. Best-effort: it fails when AppCrane does not run as root, and then the
+ * files are already owned by the uid the container wrote them as.
  */
+export const STUDIO_UID = 100;
+export const STUDIO_GID = 101;
+
 function prepareTranscriptDir(slug) {
   const dir = transcriptDirFor(slug);
   mkdirSync(dir, { recursive: true });
   chmodSync(dir, 0o777);
-  try { execFileSync('chown', ['-R', '1000:1000', dir], { stdio: 'pipe' }); } catch (_) {}
+  try { execFileSync('chown', ['-R', `${STUDIO_UID}:${STUDIO_GID}`, dir], { stdio: 'pipe' }); } catch (_) {}
   return dir;
 }
 

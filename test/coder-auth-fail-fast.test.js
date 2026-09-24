@@ -25,7 +25,7 @@ const SHIM = join(ROOT, 'bin');
 mkdirSync(SHIM, { recursive: true });
 writeFileSync(join(SHIM, 'docker'), `#!/bin/sh
 case "$1" in
-  image)   echo 4 ;;
+  image)   echo 5 ;;
   inspect) echo true ;;
   run)     echo 0123456789abcdef0123456789abcdef ;;
   exec)

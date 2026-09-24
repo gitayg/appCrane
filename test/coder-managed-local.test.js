@@ -45,7 +45,7 @@ exec "${REAL_GIT}" "$@"
 writeFileSync(join(SHIM, 'docker'), `#!/bin/sh
 { for a in "$@"; do printf '%s\\037' "$a"; done; printf '\\n'; } >> "${DOCKER_LOG}"
 case "$1" in
-  image)   echo 4 ;;
+  image)   echo 5 ;;
   inspect) echo true ;;
   run)     echo 0123456789abcdef0123456789abcdef ;;
 esac
