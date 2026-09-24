@@ -568,6 +568,7 @@ export async function ensureServer(engine) {
 
   await waitReady(engine, port);
   await ensureAdminCredentialFile(engine, adminPassword);
+  await verifyAdminLogin(engine, { adopted: state === 'running' });
   await hardenServer(engine, port, adminPassword);
   return { engine, host: DB_HOST_FOR_CONTAINERS, port, container: cfg.container };
 }
@@ -697,6 +698,45 @@ async function ensureAdminCredentialFile(engine, adminPassword) {
     body,
     { timeout: 30000 }
   );
+}
+
+/**
+ * Prove the root password on record opens this server, before anything uses it.
+ *
+ * ensureServer() adopts a container that is already running under the expected
+ * name, and MariaDB takes its root password from the environment only when its
+ * data directory is initialised for the first time. So the password in the row
+ * and the one the server accepts can disagree: a container of that name started
+ * by something else (another AppCrane on the same Docker host, a test run, a
+ * hand-run `docker run`), or a data directory initialised by another install.
+ * Before v2.92.3 that surfaced later, mid-provision, as a bare
+ * "ERROR 1045 (28000): Access denied for user 'root'@'localhost'", with
+ * nothing saying which server or why. Measured with a mariadb:11.4 container
+ * of the expected name already running under a different password.
+ *
+ * Postgres needs no check: its admin path is the unix socket with `trust`, so
+ * the password is not consulted. Mongo authenticates in every admin script and
+ * reports its own failure there.
+ */
+async function verifyAdminLogin(engine, { adopted }) {
+  if (engine !== 'mariadb') return;
+  const { container } = ENGINES.mariadb;
+  try {
+    await runAdminSql('mariadb', 'SELECT 1;');
+  } catch (e) {
+    if (!/Access denied|ERROR 1045/i.test(e.message)) throw e;
+    throw new Error(
+      `managedDb: the MariaDB server in container '${container}' refuses the root password AppCrane has on record, ` +
+      'so AppCrane will not use it. ' +
+      (adopted
+        ? `That container was already running when AppCrane looked for it, and AppCrane did not start it with this password: ` +
+          'another AppCrane on the same Docker host, a test run or a manual `docker run` may be using the same name. '
+        : `Its data directory (${dataDirFor('mariadb')}) was initialised with a different root password, ` +
+          'for example restored from another install; MariaDB ignores the password given at start once data exists. ') +
+      `To fix: stop or rename that container if it is not AppCrane's, or restore the database row that matches its data, ` +
+      `then retry. (${e.message.trim().split('\n').pop()})`,
+    );
+  }
 }
 
 /**

@@ -92,3 +92,65 @@ export async function withMainCheckpointsDeferred(fn) {
     }
   }
 }
+
+// ── Routine checkpoints, off the main thread (v2.92.3) ────────────────────
+//
+// The export path above defers checkpoints for one reason: the COMMIT that
+// crosses wal_autocheckpoint runs the checkpoint, fsync included, inside the
+// synchronous better-sqlite3 call, on the event loop. That is not special to
+// exports. Any disk contention makes that fsync slow, and it lands on
+// whichever request happened to commit. Measured on node:22-bookworm
+// (--cpus=2, disk throttled to 120 MB/s and 400 IOPS, two background writers
+// rewriting 256 MB files with fsync), 20 s of 4 KB commits every 5 ms:
+//
+//   autocheckpoint on the main thread (today)   worst commit 3512-5886 ms, 4-6 over 100 ms
+//   synchronous = NORMAL, autocheckpoint on     worst 3554-5254 ms (no better)
+//   autocheckpoint off, PASSIVE in a worker     worst 1.9-2.4 ms, none over 100 ms
+//
+// The per-commit WAL sync (synchronous = FULL) cost nothing measurable
+// (p99 0.1 ms), so it stays: durability is unchanged, only WHERE the
+// checkpoint's fsync runs moves. PASSIVE never takes the write lock, so the
+// main connection keeps committing while the worker copies frames.
+const BACKGROUND_WORKER = `
+const { parentPort, workerData } = require('worker_threads');
+const Database = require(workerData.driver);
+const tick = () => {
+  try {
+    const d = new Database(workerData.src, { fileMustExist: true });
+    try { d.pragma('wal_checkpoint(PASSIVE)'); } finally { d.close(); }
+  } catch (e) {
+    parentPort.postMessage({ ok: false, message: e.message });
+  }
+};
+setInterval(tick, workerData.intervalMs);
+`;
+
+let background = null;
+
+/**
+ * Turn the main connection's auto-checkpoint off for good and checkpoint from a
+ * worker thread every `intervalMs`. The server calls this once at boot; the CLI
+ * does not, and keeps SQLite's default. Returns a stop function.
+ */
+export function startBackgroundCheckpoints({ intervalMs = 2000 } = {}) {
+  if (background) return background.stop;
+  const db = getDb();
+  const driver = requireCjs.resolve('better-sqlite3');
+  const w = new Worker(BACKGROUND_WORKER, { eval: true, workerData: { driver, src: db.name, intervalMs } });
+  let warned = false;
+  w.on('message', (m) => {
+    if (!m.ok && !warned) { warned = true; log.warn(`[db] background WAL checkpoint failed: ${m.message}`); }
+  });
+  w.on('error', (e) => log.warn(`[db] background checkpoint worker stopped: ${e.message}`));
+  w.unref();
+  db.pragma('wal_autocheckpoint = 0');
+  const stop = () => {
+    if (!background) return;
+    background = null;
+    w.terminate();
+    // Hand checkpointing back to SQLite rather than leave the WAL to grow.
+    try { db.pragma('wal_autocheckpoint = 1000'); } catch (_) {}
+  };
+  background = { stop };
+  return stop;
+}

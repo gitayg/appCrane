@@ -82,6 +82,12 @@ const HOST = process.env.HOST || '0.0.0.0';
 
 // Initialize database
 initDb();
+// Checkpoint the WAL from a worker thread instead of inside whichever request
+// commits past the threshold (services/dbCheckpoint.js has the measurements).
+{
+  const { startBackgroundCheckpoints } = await import('./services/dbCheckpoint.js');
+  startBackgroundCheckpoints();
+}
 
 const app = express();
 
