@@ -18,8 +18,7 @@ process.env.DATA_DIR = ROOT;
 process.env.ENCRYPTION_KEY = 'a'.repeat(64);
 process.env.LOG_LEVEL = 'error';
 process.env.ANTHROPIC_API_KEY = 'sk-ant-platform-key-for-test';
-// git's own switch for "this repository belongs to someone else".
-process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER = '1';
+const REAL_GIT = execFileSync('which', ['git']).toString().trim();
 
 const BIN = join(ROOT, 'bin');
 const ARGV = join(ROOT, 'docker-argv');
@@ -35,6 +34,17 @@ case "$1" in
 esac
 exit 0
 `, { mode: 0o755 });
+// git plays a workspace owned by another user, the way a host git sees one the
+// container wrote: it refuses unless the caller names it in safe.directory.
+// A shim rather than GIT_TEST_ASSUME_DIFFERENT_OWNER: Apple's git honours that
+// switch, the CI runner's does not, and the test then proved nothing there.
+writeFileSync(join(BIN, 'git'), `#!/bin/sh
+case "$*" in
+  *safe.directory=*) exec "${REAL_GIT}" "$@" ;;
+esac
+echo "fatal: detected dubious ownership in repository" >&2
+exit 128
+`, { mode: 0o755 });
 process.env.PATH = `${BIN}:${process.env.PATH}`;
 
 const { initDb, getDb } = await import('../server/db.js');
@@ -49,14 +59,14 @@ const USER_TOKEN = 'sk-ant-oat01-' + 'x'.repeat(95);
 setUserClaudeToken(userId, USER_TOKEN);
 
 const repo = mkdtempSync(join(ROOT, 'ws-'));
-const git = (...a) => execFileSync('git', ['-c', `safe.directory=${repo}`, '-C', repo, ...a], { stdio: 'pipe' });
+const git = (...a) => execFileSync(REAL_GIT, ['-C', repo, ...a], { stdio: 'pipe' });
 git('init', '-q');
 writeFileSync(join(repo, 'server.js'), 'console.log(1)\n');
 git('add', '.');
 git('-c', 'user.email=a@b', '-c', 'user.name=a', 'commit', '-q', '-m', 'seed');
 
 test('the codebase summary reads a container-owned workspace, runs as the user, and says why it failed', async () => {
-  assert.throws(() => execFileSync('git', ['-C', repo, 'rev-parse', 'HEAD'], { stdio: 'pipe' }), /dubious ownership/,
+  assert.throws(() => execFileSync('git', ['-C', repo, 'rev-parse', 'HEAD'], { stdio: 'pipe', env: process.env }), /dubious ownership/,
     'the fixture does not reproduce the ownership refusal, so this test would prove nothing');
 
   const err = await ensureCodebaseContext('ctxapp', repo, { actingUserId: userId }).then(() => null, (e) => e);
