@@ -77,25 +77,21 @@ after(async () => {
 const CLEAN = { PATH: process.env.PATH, LC_ALL: 'C', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' };
 
 /**
- * A GitHub-backed app whose "GitHub" remote is a bare repo on disk. Seeded with
- * two tracked files that the agent will NOT touch — they are what a mode-only
+ * A Crane-hosted app (the only kind the coder serves since v2.83.0), seeded
+ * with two tracked files the agent will NOT touch — they are what a mode-only
  * diff would drag into the change list.
  */
-const SLUG = 'fm-github';
-const REMOTE = join(ROOT, `${SLUG}-remote.git`);
+const SLUG = 'fm-crane';
 {
-  execFileSync(REAL_GIT, ['init', '--bare', '-b', 'main', '-q', REMOTE], { env: CLEAN });
-  const seed = join(ROOT, `${SLUG}-seed`);
-  execFileSync(REAL_GIT, ['init', '-q', '-b', 'main', seed], { env: CLEAN });
-  writeFileSync(join(seed, 'README.md'), '# untouched\n');
-  mkdirSync(join(seed, 'src'), { recursive: true });
-  writeFileSync(join(seed, 'src', 'a.js'), 'export const a = 1;\n');
-  execFileSync(REAL_GIT, ['-C', seed, 'add', '.'], { env: CLEAN });
-  execFileSync(REAL_GIT, ['-C', seed, '-c', 'user.email=a@b', '-c', 'user.name=a', 'commit', '-q', '-m', 'seed'], { env: CLEAN });
-  execFileSync(REAL_GIT, ['-C', seed, 'push', '-q', REMOTE, 'main'], { env: CLEAN });
+  const lg = await import('../server/services/localGit.js');
+  await lg.createAppRepo(SLUG);
+  await lg.pushFilesToManagedRepo(SLUG, [
+    { path: 'README.md', content: '# untouched\n' },
+    { path: 'src/a.js', content: 'export const a = 1;\n' },
+  ], { message: 'seed' });
 }
-db.prepare("INSERT INTO apps (name, slug, slot, source_type, repo_backend, branch, github_url) VALUES (?,?,?, 'github', NULL, 'main', ?)")
-  .run(SLUG, SLUG, getNextSlot(db), REMOTE);
+db.prepare("INSERT INTO apps (name, slug, slot, source_type, repo_backend, branch) VALUES (?,?,?, 'managed', 'local', 'main')")
+  .run(SLUG, SLUG, getNextSlot(db));
 const app = db.prepare('SELECT * FROM apps WHERE slug = ?').get(SLUG);
 
 const uid = db.prepare(

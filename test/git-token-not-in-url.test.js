@@ -252,46 +252,24 @@ test('AppStudio code phase: clone, container view, and push all without a tokeni
   assertNoTokenAnywhere('AppStudio code phase');
 });
 
-// The ship half of this test went with gitOps.commitAndPush in v2.83.0: it
-// existed only for POST /api/agents/:id/ship-sandbox, and no path left in the
-// repo pushes a builder workspace to a GitHub remote. What is still live is the
-// clone — appContainer.cloneWorkspace keeps its GitHub branch, because a paused
-// coder_sessions row for a GitHub-backed app resumes straight into it — so the
-// property that matters is unchanged: the credential reaches git as an env
-// header, never as part of the URL the container can read back out of
-// .git/config.
-test('builder container: workspace origin is plain, clone authenticates by header', async () => {
+// The builder container's GitHub clone branch was removed in v2.92.1: both
+// routes that create a container require a Crane-hosted app (v2.83.0), so it
+// was unreachable. What is left to prove is that a GitHub-backed app handed to
+// the container code anyway is refused before git or the token is touched.
+test('builder container: a GitHub-backed app is refused before any clone or token use', async () => {
   const app = mkApp('tu-builder');
   writeFileSync(AUTH_LOG, '');
-  const c = await appContainer.getOrCreate(app, () => {});
+  const before = argvLines().length;
+  const err = await appContainer.getOrCreate(app, () => {}).then(() => null, (e) => e);
   try {
-    assert.equal(originOf(c.workspaceDir), REPO_URL);
-    const container = readFileSync(join(CAPTURE, 'app-container-gitconfig'), 'utf8');
-    assert.ok(container.includes(REPO_URL) && !container.includes(TOKEN) && !container.includes(B64), 'builder container could read the token');
-    const clone = argvLines().filter((a) => a[1] === 'clone' && a.includes(c.workspaceDir));
-    assert.equal(clone.length, 1);
-    assert.equal(clone[0][0], 'CFG=1');
-    assert.ok(authSeen().some((x) => x.auth === EXPECTED_AUTH), 'server never saw the header for the builder clone');
-    assertNoTokenAnywhere('builder');
+    assert.ok(err, 'a GitHub-backed app got a coder container');
+    assert.match(err.message, /Crane-hosted apps only/);
+    assert.equal(argvLines().slice(before).filter((a) => a[1] === 'clone').length, 0, 'a clone ran anyway');
+    assert.equal(authSeen().length, 0, 'the token was sent to the git server');
+    assertNoTokenAnywhere('builder refusal');
   } finally {
     appContainer.evict(app.slug, 'test');
   }
-});
-
-test('builder clone failure: error text is scrubbed even when git traces the header', async () => {
-  const app = mkApp('tu-builder-err');
-  db.prepare("UPDATE apps SET branch = 'no-such-branch' WHERE id = ?").run(app.id);
-  let msg = '';
-  process.env.GIT_TRACE_CURL = '1';
-  process.env.GIT_TRACE_REDACT = '0';
-  try {
-    await appContainer.getOrCreate({ ...app, branch: 'no-such-branch' }, () => {});
-  } catch (err) { msg = err.message; } finally {
-    delete process.env.GIT_TRACE_CURL; delete process.env.GIT_TRACE_REDACT;
-  }
-  assert.ok(msg.length > 0, 'expected the clone to fail');
-  assert.ok(/Authorization|\[redacted\]/.test(msg), `trace did not reach the error text: ${msg.slice(0, 300)}`);
-  assert.ok(!msg.includes(TOKEN) && !msg.includes(B64), 'token escaped in builder clone error text');
 });
 
 test('AppStudio clone failure: the job error recorded in the DB is scrubbed', async () => {

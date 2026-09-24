@@ -14,10 +14,17 @@
 // set in .env (the server reads .env itself; systemd does not pass it on).
 // `git reset --hard` leaves it alone: it is untracked and gitignored.
 //
-// Integrity: the tarball's SHA-256 must match the line for it in the release's
-// SHASUMS256.txt, both fetched from nodejs.org over TLS. The unpacked binary
-// must then run and report the requested major; that also catches a host whose
-// glibc is too old for the official build, before anything depends on it.
+// Integrity, in three steps:
+//   1. SHASUMS256.txt carries a GPG signature (SHASUMS256.txt.sig) from one of
+//      Node's release keys, checked with gpgv against infra/node-release-keys.gpg,
+//      which ships in this repository (scripts/update-node-release-keys.sh
+//      refreshes it from github.com/nodejs/release-keys). So a nodejs.org that
+//      served a different tarball AND a matching checksum list is still caught.
+//   2. The tarball's SHA-256 must match its line in that signed list.
+//   3. The unpacked binary must run and report the requested major, which also
+//      catches a host whose glibc is too old for the official build.
+// gpgv is present wherever apt is (apt depends on it). A host without it is
+// refused unless APPCRANE_NODE_ALLOW_UNSIGNED=1 says to settle for step 2.
 //
 // Also runnable as a script, which is how safe-boot.sh reaches it on a host
 // that is already stuck below the floor:
@@ -27,9 +34,40 @@ import { execFileSync } from 'child_process';
 import { createHash, randomBytes } from 'crypto';
 import { mkdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import { dirname, join, resolve } from 'path';
+import { tmpdir } from 'os';
+import { mkdtempSync } from 'fs';
 import { fileURLToPath, pathToFileURL } from 'url';
 
 export const NODE_DIST = 'https://nodejs.org/dist';
+export const NODE_RELEASE_KEYRING = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'infra', 'node-release-keys.gpg');
+
+/**
+ * Check the release's detached signature over SHASUMS256.txt with gpgv.
+ * GNUPGHOME is a throwaway directory, so nothing the host has configured or
+ * trusts takes part: only the keys in `keyring` can make this pass.
+ */
+function verifySignature({ sums, sig, keyring, gpgv, allowUnsigned, log }) {
+  const dir = mkdtempSync(join(tmpdir(), 'appcrane-nodesig-'));
+  try {
+    writeFileSync(join(dir, 'SHASUMS256.txt'), sums);
+    writeFileSync(join(dir, 'SHASUMS256.txt.sig'), sig);
+    try {
+      execFileSync(gpgv, ['--keyring', keyring, join(dir, 'SHASUMS256.txt.sig'), join(dir, 'SHASUMS256.txt')], {
+        stdio: 'pipe', timeout: 30000, env: { ...process.env, GNUPGHOME: dir },
+      });
+      log('SHASUMS256.txt signature verified against Node\'s release keys');
+    } catch (err) {
+      if (err.code === 'ENOENT') {
+        if (allowUnsigned) { log('gpgv is not installed; APPCRANE_NODE_ALLOW_UNSIGNED=1, so relying on the checksum alone'); return; }
+        throw new Error('gpgv is not installed, so the Node release signature cannot be checked. Install gpgv, or set APPCRANE_NODE_ALLOW_UNSIGNED=1 to rely on the SHA-256 checksum alone.');
+      }
+      const why = (err.stderr || err.message).toString().trim().split('\n').slice(-2).join(' ');
+      throw new Error(`the signature on SHASUMS256.txt did not verify against Node's release keys (${why}). Not installing it.`);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
 
 const DIST_ARCH = { x64: 'x64', arm64: 'arm64' };
 
@@ -67,6 +105,9 @@ export async function installBundledNode({
   baseUrl = NODE_DIST,
   fetchImpl = globalThis.fetch,
   log = () => {},
+  keyring = NODE_RELEASE_KEYRING,
+  gpgv = 'gpgv',
+  allowUnsigned = process.env.APPCRANE_NODE_ALLOW_UNSIGNED === '1',
 }) {
   if (platform !== 'linux') throw new Error(`a bundled Node is only installed on Linux (this host is ${platform})`);
   const distArch = nodeDistArch(arch);
@@ -95,6 +136,8 @@ export async function installBundledNode({
 
   const file = `node-${version}-linux-${distArch}.tar.gz`;
   const sums = await fetchOk(fetchImpl, `${baseUrl}/${version}/SHASUMS256.txt`, 'text');
+  const sig = await fetchOk(fetchImpl, `${baseUrl}/${version}/SHASUMS256.txt.sig`, 'buffer');
+  verifySignature({ sums, sig, keyring, gpgv, allowUnsigned, log });
   const line = sums.split('\n').find((l) => l.trim().endsWith(`  ${file}`));
   const expected = line?.trim().split(/\s+/)[0];
   if (!expected || !/^[0-9a-f]{64}$/.test(expected)) throw new Error(`SHASUMS256.txt has no checksum for ${file}`);

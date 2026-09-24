@@ -250,19 +250,16 @@ test('an evict whose auto-commit fails still evicts and does not throw', async (
   assert.equal(appContainer.getContainer('ev-broken'), null, 'the container was not dropped from the registry');
 });
 
-test('a GitHub-backed app is unchanged by an evict', async () => {
+test('a GitHub-backed app gets no container, so an evict has nothing to push', async () => {
+  // Since v2.92.1 the container code refuses a GitHub-backed app outright
+  // (the routes already did, since v2.83.0). The property this test guarded,
+  // that an evict never pushes to a GitHub remote, now holds because there is
+  // no workspace to evict.
   const { app, remote } = githubApp('ev-github');
-  const c = await appContainer.getOrCreate(app);
-  const uid = userRow();
-  session(app, c, uid);
-  writeFileSync(join(c.workspaceDir, 'NEW.js'), 'x\n');
-
   const refsBefore = refsIn(remote);
-  assert.equal(appContainer.evict('ev-github', 'idle'), true);
-
-  assert.deepEqual(refsIn(remote), refsBefore, 'the evict pushed to a GitHub-backed app');
-  assert.equal(refsIn(remote).some((r) => r.startsWith('refs/heads/agent/')), false);
-  assert.equal(existsSync(c.workspaceDir), false);
+  await assert.rejects(appContainer.getOrCreate(app), /Crane-hosted apps only/);
+  assert.equal(appContainer.evict('ev-github', 'idle'), false, 'an evict found a container that should not exist');
+  assert.deepEqual(refsIn(remote), refsBefore, 'something was pushed to the GitHub-backed app');
 });
 
 test('a .env* change is left out of the preserve commit, and the rest is still saved', async () => {

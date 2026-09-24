@@ -2,8 +2,6 @@ import { execFileSync } from 'child_process';
 import { mkdirSync, chmodSync, existsSync, rmSync, readdirSync } from 'fs';
 import { join, resolve } from 'path';
 import { getDb } from '../../db.js';
-import { decrypt } from '../encryption.js';
-import { tokenGitEnv, scrubToken } from '../githubGitAuth.js';
 import { usesLocalRepo, cloneLocalRepoForDeploy } from '../managedRepo.js';
 import { isEnvFilePath } from '../envFilePushGuard.js';
 import { ensureStudioImage } from '../appstudio/generator.js';
@@ -153,49 +151,21 @@ async function cloneWorkspace(app, onLog) {
   mkdirSync(workspaceDir, { recursive: true });
   chmodSync(workspaceDir, 0o777);
 
-  if (usesLocalRepo(app)) {
-    // Crane-hosted source: the repo is a bare repo on this host, reached by
-    // path. There is no remote, so there is no credential — none of the token
-    // machinery below may run on this path, and app.github_url is NULL by
-    // design (reading it here is what used to make Builder refuse the app).
-    // localGit's clone runs git with the host's config, hooks and credential
-    // helpers cut off, exactly as a deploy clone does.
-    onLog?.(`[appContainer:git] Cloning Crane-hosted repo for ${app.slug} (${app.branch || 'main'})…`);
-    await cloneLocalRepoForDeploy(app, workspaceDir, app.branch || 'main');
-  } else {
-    // A GitHub-backed app can still land here after /api/agents was retired in
-    // v2.83.0, which is why this branch survives the retirement. POST
-    // /api/coder/:slug/session runs assertCraneHosted, but POST
-    // /api/coder/:slug/session/:id/resume does NOT — it only requires a
-    // coder_sessions row in status 'paused', and every session on the box
-    // becomes paused on the next restart (builderSession.recoverOrphans). So a
-    // row left by /api/agents, or by /api/coder before v2.82.0 narrowed its
-    // gate, resumes straight into this clone. Removing it would turn that
-    // resume into "not a git repository" two statements down instead of a
-    // clone. What such a session can no longer do is push: gitOps has no ship
-    // path any more.
-    //
-    // Token in the git child's env, not the URL: this workspace is chown'd to
-    // the container user and mounted into the builder container, so a tokenized
-    // remote in .git/config would hand the container the credential.
-    let token = null;
-    let gitEnv = null;
-    if (app.github_token_encrypted) {
-      try {
-        token = decrypt(app.github_token_encrypted);
-        gitEnv = tokenGitEnv(app.github_url, token);
-      } catch (_) { gitEnv = null; }
-    }
-
-    onLog?.(`[appContainer:git] Cloning ${app.github_url} (${app.branch || 'main'})…`);
-    try {
-      execFileSync('git', ['clone', '--depth', '1', '--branch', app.branch || 'main', app.github_url, workspaceDir], {
-        stdio: 'pipe', timeout: 120000, ...(gitEnv ? { env: gitEnv } : {}),
-      });
-    } catch (err) {
-      throw new Error(scrubToken(err.message, token));
-    }
+  // The coder works on Crane-hosted apps only. Both routes that create a
+  // container (POST /api/coder/:slug/session and .../resume) run
+  // assertCraneHosted first, so a GitHub-backed app cannot get here; this is
+  // the second check, not the first. The GitHub clone branch that stood here
+  // (and the token handling it needed) was removed in v2.92.1: v2.83.0
+  // retired /api/agents and gated resume, which left it unreachable.
+  if (!usesLocalRepo(app)) {
+    throw new Error(`The coder works on Crane-hosted apps only, and ${app.slug} is not one.`);
   }
+  // Crane-hosted source: the repo is a bare repo on this host, reached by
+  // path. There is no remote, so there is no credential. localGit's clone runs
+  // git with the host's config, hooks and credential helpers cut off, exactly
+  // as a deploy clone does.
+  onLog?.(`[appContainer:git] Cloning Crane-hosted repo for ${app.slug} (${app.branch || 'main'})…`);
+  await cloneLocalRepoForDeploy(app, workspaceDir, app.branch || 'main');
 
   execFileSync('git', ['-C', workspaceDir, 'config', 'user.email', 'builder@appcrane.local'], { stdio: 'pipe' });
   execFileSync('git', ['-C', workspaceDir, 'config', 'user.name', 'AppCrane Builder'], { stdio: 'pipe' });

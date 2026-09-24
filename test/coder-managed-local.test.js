@@ -325,29 +325,15 @@ test('a GitHub-backed app is refused a coder session with NOT_CRANE_HOSTED', asy
     'a refused GitHub-backed app still got a workspace clone');
 });
 
-test('GitHub-backed apps take the old clone path, unchanged', async () => {
-  const c = await appContainer.getOrCreate(ghApp, () => {});
-  try {
-    assert.equal(gitIn(c.workspaceDir, 'config', '--get', 'remote.origin.url'), GH_BARE);
-    assert.ok(existsSync(join(c.workspaceDir, 'package.json')));
-    const clone = clonesInto(c.workspaceDir);
-    assert.equal(clone.length, 1);
-    // Exactly the argv the GitHub path has always produced.
-    assert.deepEqual(clone[0].slice(1), ['clone', '--depth', '1', '--branch', 'main', GH_BARE, c.workspaceDir]);
-    assert.equal(clone[0][0], 'CFG=none', 'a credential env appeared for a token-less GitHub app');
-  } finally {
-    appContainer.evict(ghApp.slug, 'test');
+test('GitHub-backed apps, with or without a stored token, are refused before any clone', async () => {
+  // The GitHub clone branch was removed in v2.92.1: both routes into it had
+  // required a Crane-hosted app since v2.83.0. The container code now refuses
+  // one outright, so no clone runs and no credential env is ever built.
+  for (const app of [ghApp, ghTokenApp]) {
+    await assert.rejects(appContainer.getOrCreate(app, () => {}), /Crane-hosted apps only/, app.slug);
+    const dir = join(ROOT, 'app-containers', app.slug, 'workspace');
+    assert.equal(clonesInto(dir).length, 0, `${app.slug}: a clone ran anyway`);
   }
-});
-
-test('GitHub-backed apps with a stored token still get the credential env', async () => {
-  await assert.rejects(() => appContainer.getOrCreate(ghTokenApp, () => {}));
-  const dir = join(ROOT, 'app-containers', ghTokenApp.slug, 'workspace');
-  const clone = clonesInto(dir);
-  assert.equal(clone.length, 1, `expected one clone attempt, got ${clone.length}`);
-  assert.equal(clone[0][0], 'CFG=1', 'the GitHub token env stopped being built');
-  assert.deepEqual(clone[0].slice(1),
-    ['clone', '--depth', '1', '--branch', 'main', 'https://127.0.0.1:1/acme/widget.git', dir]);
   assert.ok(!readFileSync(GIT_LOG, 'utf8').includes(TOKEN), 'token in git argv');
 });
 
