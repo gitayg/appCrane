@@ -1,6 +1,6 @@
 {
   "name": "appcrane",
-  "version": "2.92.1",
+  "version": "2.92.2",
   "engines": {
     "node": ">=22"
   },
@@ -24,6 +24,7 @@
     "start": "node server/index.js",
     "dev": "node --watch server/index.js",
     "test": "node --test --test-timeout=120000 test/*.test.js packages/tenant/*.test.js",
+    "test:serial": "node --test --test-concurrency=1 --test-timeout=300000 test/serial/*.test.js",
     "gen:mcp-snapshot": "node scripts/gen-mcp-snapshot.mjs"
   },
   "overrides": {

@@ -5,6 +5,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { execFile, execFileSync } from 'child_process';
 import { promisify } from 'util';
+import crypto from 'crypto';
 import express from 'express';
 
 // apps.catalog_slug (migration 086) and the deprovision-on-delete wiring.
@@ -35,17 +36,27 @@ import express from 'express';
 //    same probe reporting the database and the role present. A probe that
 //    always answers "absent" would pass an unpaired test.
 
-const PREFIX = 'appcrane-cslugtest';
+const SUFFIX = crypto.randomBytes(4).toString('hex');
+const PREFIX = `appcrane-cslugtest-${SUFFIX}`;
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'crane-cslug-'));
 process.env.ENCRYPTION_KEY = 'c'.repeat(64);
 process.env.CRANE_DOMAIN = 'crane.test.local';
 process.env.LOG_LEVEL = 'error';
-// Distinct container names and ports from every other suite: `node --test` runs
-// files in parallel, and adopting another run's server would let this file's
-// teardown delete databases it does not own.
+// A per-RUN unique prefix and ports, not fixed ones — distinct from every other
+// suite AND from another run of this same file. The fixed 'appcrane-cslugtest'
+// name made the mariadb case flaky: ensureServer() adopts any RUNNING container
+// with its name, then writes THIS run's freshly generated root password into
+// /root/.my.cnf, which the other run's server never had. Measured: with a
+// mariadb:11.4 container of that name already up under a different
+// MARIADB_ROOT_PASSWORD, the delete test fails with exactly the error seen in the
+// full suite — "ERROR 1045 (28000): Access denied for user 'root'@'localhost'
+// (using password: YES)". Two concurrent runs of this file failed 2 and 3
+// tests (name conflict, "role already exists", a server deleted mid-test by the
+// other run's teardown). Ports are per-run for the same reason: a second run
+// cannot bind the first's host port.
 process.env.MANAGED_DB_CONTAINER_PREFIX = PREFIX;
-process.env.MANAGED_DB_POSTGRES_PORT = '45597';
-process.env.MANAGED_DB_MARIADB_PORT = '43397';
+process.env.MANAGED_DB_POSTGRES_PORT = String(45600 + (parseInt(SUFFIX, 16) % 300));
+process.env.MANAGED_DB_MARIADB_PORT = String(43400 + (parseInt(SUFFIX, 16) % 300));
 
 const execFileAsync = promisify(execFile);
 

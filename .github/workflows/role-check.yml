@@ -47,3 +47,8 @@ jobs:
 
       - name: Unit tests
         run: npm test
+
+      # Timing tests that must not share the runner's disk with the parallel
+      # suite (test/serial/backup-event-loop-strict.test.js explains why).
+      - name: Serial timing tests (alone on the runner)
+        run: npm run test:serial

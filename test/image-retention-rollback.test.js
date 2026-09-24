@@ -45,13 +45,21 @@ writeFileSync(STORE, JSON.stringify({ seq: 0, images: [] }));
 writeFileSync(
   join(SHIM_DIR, 'docker'),
   `#!/usr/bin/env node
-const { readFileSync, writeFileSync, appendFileSync } = require('fs');
+const { readFileSync, writeFileSync, appendFileSync, renameSync } = require('fs');
 const STORE = ${JSON.stringify(STORE)};
 const LOG = ${JSON.stringify(CALL_LOG)};
 const argv = process.argv.slice(2);
 appendFileSync(LOG, argv.map(a => a + '\\n').join('') + '\\0');
 const read = () => JSON.parse(readFileSync(STORE, 'utf8'));
-const write = (s) => writeFileSync(STORE, JSON.stringify(s));
+// Temp file + rename, never writeFileSync(STORE) in place: that truncates
+// first, and the test's tagsFor() polls this file while the UNAWAITED prune's
+// \`rmi\` rewrites it. Reading in that gap is JSON.parse('') — 'Unexpected end
+// of JSON input', 1 in 96 runs under load, 3 of 3 with a 300ms gap injected.
+const write = (s) => {
+  const tmp = STORE + '.' + process.pid;
+  writeFileSync(tmp, JSON.stringify(s));
+  renameSync(tmp, STORE);
+};
 const ok = (out = '') => { process.stdout.write(out); process.exit(0); };
 const nope = (msg) => { process.stderr.write(msg + '\\n'); process.exit(1); };
 const flagValue = (name) => { const i = argv.indexOf(name); return i >= 0 ? argv[i + 1] : null; };

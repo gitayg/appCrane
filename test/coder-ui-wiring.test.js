@@ -171,12 +171,17 @@ test('the SSE credential is sent under the name /api/coder resolves it by', () =
 // Who gets the button, and who gets the release control
 // ---------------------------------------------------------------------------
 
-test('the coder button is ALWAYS shown, and explains itself when it cannot run', () => {
+test('the coder button is shown on the Sandbox tab, on every app, and explains itself when it cannot run', () => {
   // It used to render only for Crane-hosted apps. The reasoning was sound —
   // everything else is refused — but a hidden button teaches nothing: users on
   // any other app never learned the coder existed, let alone what it would
-  // take. Now it always renders, is muted when unavailable, and opens an
-  // explanation of every gap instead of a chat.
+  // take. So it renders on every app, muted when unavailable, opening an
+  // explanation of every gap instead of a chat. Since v2.92.2 it renders on
+  // the Sandbox tab only: the coder's work is reviewed and released there.
+  const gate = /\{stage\.env === 'sandbox' && \(\s*<button[\s\S]{0,700}?<Icon\.Sparkles size=\{14\} \/> Coder<\/button>/.exec(appFrame);
+  assert.ok(gate, 'the Coder button is not limited to the Sandbox tab');
+  assert.match(appFrame, /if \(env !== 'sandbox'\) setCoderOpen\(false\)/,
+    'switching to Production leaves the coder panel open over the production app');
   const btn = /<button[\s\S]{0,700}?<Icon\.Sparkles size=\{14\} \/> Coder<\/button>/.exec(appFrame);
   assert.ok(btn, 'the Coder button is gone');
   const before = appFrame.slice(Math.max(0, btn.index - 400), btn.index);

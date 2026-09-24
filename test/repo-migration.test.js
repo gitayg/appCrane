@@ -152,7 +152,10 @@ const remoteFor = (slug) => async () => ({ url: `${BASE}/example-owner/AMC_${slu
 const optsFor = (resolveRemote, extra = {}) => ({ db, resolveRemote, allowedSchemes: ['http'], appTimeoutMs: 60000, budgetMs: 120000, ...extra });
 
 function addApp(slug, { backend = null, branch = 'main', source = 'managed' } = {}) {
-  const slot = 5000 + db.prepare('SELECT COUNT(*) AS n FROM apps').get().n + Math.floor(Math.random() * 1000);
+  // apps.slot is UNIQUE. COUNT + random(0..999) collided whenever two draws
+  // differed by exactly their row gap (~0.1% per pair; 8/2000 runs of the
+  // three-app "never throws" test died on it). MAX+1 cannot collide.
+  const slot = db.prepare('SELECT COALESCE(MAX(slot), 4999) + 1 AS s FROM apps').get().s;
   return db.prepare('INSERT INTO apps (name, slug, slot, source_type, github_url, branch, repo_backend) VALUES (?,?,?,?,?,?,?)')
     .run(slug, slug, slot, source, `https://github.com/example-owner/AMC_${slug}`, branch, backend).lastInsertRowid;
 }

@@ -1,6 +1,6 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import net from 'net';
@@ -58,15 +58,26 @@ process.env.CADDY_HTTP_PORT = '9';
 // protocols. Every other `inspect` exits non-zero, which is what bootWatch
 // treats as "no state yet" — so boot-watch never wins the race and the probe
 // is always the thing that decides, which is the point of the file.
+//
+// One FILE per call, not one shared log. The two "nothing is listening"
+// deploys run concurrently and roll back at the same instant, so their shims
+// run at the same time; appending a record as one printf per argument let
+// those writes interleave. Measured: under 24 CPU burners, 3 of 84 runs split
+// a revert `run` record in two — the other app's `rm -f` landed inside it, its
+// image ended up in an orphaned tail — and failed "did not revert to the
+// previous image" though deployApp had issued the revert. mktemp gives every
+// call its own file, so there is nothing to interleave: 0 of 84 under the same
+// load.
 
 const SHIM_DIR = join(process.env.DATA_DIR, 'bin');
-const ARGV_LOG = join(process.env.DATA_DIR, 'docker-argv.log');
+const ARGV_DIR = join(process.env.DATA_DIR, 'docker-argv');
 const PREV_IMAGE = 'appcrane-previous:deadbeef';
 mkdirSync(SHIM_DIR, { recursive: true });
+mkdirSync(ARGV_DIR, { recursive: true });
 writeFileSync(
   join(SHIM_DIR, 'docker'),
   '#!/bin/sh\n' +
-  '{ for a in "$@"; do printf \'%s\\n\' "$a"; done; printf \'\\0\'; } >> "$CRANE_TEST_DOCKER_LOG"\n' +
+  'printf \'%s\\n\' "$@" > "$(mktemp "$CRANE_TEST_DOCKER_ARGV_DIR/call.XXXXXX")"\n' +
   'case "$1" in\n' +
   '  version) echo "24.0.7" ;;\n' +
   '  build)   echo "Successfully built" ;;\n' +
@@ -77,13 +88,12 @@ writeFileSync(
   'esac\n',
   { mode: 0o755 },
 );
-process.env.CRANE_TEST_DOCKER_LOG = ARGV_LOG;
+process.env.CRANE_TEST_DOCKER_ARGV_DIR = ARGV_DIR;
 process.env.PATH = `${SHIM_DIR}:${process.env.PATH}`;
 
 function dockerCalls() {
-  if (!existsSync(ARGV_LOG)) return [];
-  return readFileSync(ARGV_LOG, 'utf8')
-    .split('\0')
+  return readdirSync(ARGV_DIR)
+    .map(f => readFileSync(join(ARGV_DIR, f), 'utf8'))
     .filter(rec => rec.trim() !== '')
     .map(rec => rec.split('\n').filter(l => l !== ''));
 }
@@ -119,15 +129,31 @@ function listen(server, port, host = '127.0.0.1') {
 }
 
 /**
- * A port nothing is listening on. Bound and released so "nothing is listening"
- * is a proven fact rather than a hopeful guess — the one case that cannot be
- * held open, since holding it would defeat the test.
+ * A port nothing is listening on, and that stays that way for the whole 30s
+ * gate. It is the local end of an open connection that was explicitly bound
+ * (bind(127.0.0.1:0), then connect), so it is taken but not listening.
+ *
+ * Binding a port and releasing it, as this used to, only proves it was free
+ * for an instant: the OS hands a released port straight back out. Measured:
+ * a released port came back 1 time in 20000 listen(0) calls on macOS (its
+ * allocator is sequential, so only after a full wrap), 3 in 20000 on Linux,
+ * and 186-400 of 500 on Linux with a 21-port range; a port held this way came
+ * back 0 times in every one of those runs.
+ * So a test file running in parallel cannot be handed it by listen(0) and turn
+ * this deploy green. A connect to it is refused — measured ECONNREFUSED 20/20
+ * on macOS and Linux. (An explicit listen() on that exact number still
+ * succeeds on both; that needs a parallel test to pick the same number.)
  */
+const deadPortHolders = [];
 async function deadPort() {
-  const s = net.createServer();
-  await new Promise(r => s.listen(0, '127.0.0.1', r));
-  const port = s.address().port;
-  await new Promise(r => s.close(r));
+  const holder = net.createServer();
+  await new Promise(r => holder.listen(0, '127.0.0.1', r));
+  const accepted = new Promise(r => holder.once('connection', r));
+  const sock = net.connect({ host: '127.0.0.1', port: holder.address().port, localAddress: '127.0.0.1' });
+  await new Promise((resolve, reject) => { sock.once('connect', resolve); sock.once('error', reject); });
+  deadPortHolders.push(sock, await accepted);
+  holder.close();   // stop listening; the accepted end keeps the connection up
+  const port = sock.localPort;
   assert.ok(isPortSafe(port), `ephemeral port ${port} is on the WHATWG blocklist`);
   return port;
 }
@@ -185,6 +211,7 @@ async function runDeploy(app, port) {
 }
 
 after(() => {
+  for (const s of deadPortHolders) s.destroy();
   for (const s of openServers) s.close();
   try { rmSync(process.env.DATA_DIR, { recursive: true, force: true }); } catch (_) {}
 });

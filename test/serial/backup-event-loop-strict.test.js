@@ -9,17 +9,29 @@ import { monitorEventLoopDelay } from 'perf_hooks';
 import http from 'http';
 import Database from 'better-sqlite3';
 
+// THE STRICT VERSION, run ALONE (`npm run test:serial`, its own CI step after
+// the parallel suite). It is test/backup-event-loop.test.js as it stood before
+// v2.92.2, unchanged apart from paths.
+//
+// Why two versions. Under the parallel suite this one failed CI twice (386 ms,
+// 250.5 ms against a 250 ms bound), and the diagnostics showed why: the stall
+// was the test's OWN SQLite commit waiting on a disk the rest of the suite was
+// saturating (74.7% and 78.4% iowait), not the export. The main-suite version
+// now counts stalls net of the test's own writes, which is stable but cannot
+// tell a commit held up by other tests from one held up by the export
+// flooding the disk: the v2.77.2 bug. Measured with per-step syncing turned
+// off on a 1.5 GB host: this version failed 3/3, the net one 0/2. So this one
+// keeps that coverage, and runs where nothing else is writing to disk.
+
 // A data export must not freeze AppCrane. While it runs, the same process
 // answers the SSO forward_auth check every signed-in hosted app waits on, so a
 // synchronous export is an outage for every app for its duration.
 //
 // Property, measured on a fixture of a few hundred MB (DB + /data):
-//   - event-loop delay stays under a bound for the whole export;
+//   - event-loop delay (perf_hooks) stays under a bound for the whole export;
 //   - a lightweight HTTP route in the same process, probed from ANOTHER
 //     process, keeps answering promptly (this is the one that catches a
 //     blocking snapshot; the in-process histogram measurably does not);
-//   - both are charged net of the test's own concurrent writes, which wait on
-//     the disk whether or not an export runs (measured below);
 //   - both bounds are fractions of a synchronous snapshot of the same DB timed
 //     on the same host, so the test can fail wherever it runs;
 //   - writes continue during the export, and the DB copy in the archive is a
@@ -31,6 +43,7 @@ const http = require('http');
 const url = process.argv[1];
 let phase = 'warmup';
 const during = [];
+let worstAt = null;
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', (d) => { if (d.includes('start')) phase = 'during'; if (d.includes('stop')) phase = 'stop'; });
 (async () => {
@@ -38,10 +51,14 @@ process.stdin.on('data', (d) => { if (d.includes('start')) phase = 'during'; if 
     const counted = phase === 'during';
     const t0 = performance.now();
     await new Promise((r) => http.get(url, (res) => { res.resume(); res.on('end', r); }).on('error', r));
-    if (counted) during.push([performance.timeOrigin + t0, performance.now() - t0]);
+    if (counted) {
+      const ms = performance.now() - t0;
+      if (!during.length || ms > Math.max(...during)) worstAt = performance.timeOrigin + t0;
+      during.push(ms);
+    }
     await new Promise((r) => setTimeout(r, 20));
   }
-  process.stdout.write(JSON.stringify({ probes: during }));
+  process.stdout.write(JSON.stringify({ during: during.length, max: during.length ? Math.max(...during) : null, worstAt }));
 })();
 `;
 
@@ -64,15 +81,12 @@ process.env.DATA_DIR = ROOT;
 process.env.ENCRYPTION_KEY = '9'.repeat(64);
 process.env.LOG_LEVEL = 'error';
 
-const { initDb, getDb } = await import('../server/db.js');
+const { initDb, getDb } = await import('../../server/db.js');
 initDb();
 const db = getDb();
-// A lock wait inside the test's writer must not hide as disk time (see the
-// writer below): with no busy timeout a write the export locked out throws.
-db.pragma('busy_timeout = 0');
-const { exportDataArchive } = await import('../server/services/configBackup.js');
-const { startBackupTrace, stopBackupTrace, nowAbs } = await import('../server/services/backupTrace.js');
-const { startLoopDiagnostics, summarize, hostFacts } = await import('./backup-loop-diag.mjs');
+const { exportDataArchive } = await import('../../server/services/configBackup.js');
+const { startBackupTrace, stopBackupTrace, nowAbs } = await import('../../server/services/backupTrace.js');
+const { startLoopDiagnostics, summarize, hostFacts } = await import('../backup-loop-diag.mjs');
 
 // Set BACKUP_LOOP_DIAG=1 to print the diagnostics report on a passing run too.
 // A failing run always prints it: it is how a stall on the CI runner, where no
@@ -127,8 +141,7 @@ test(`export of a ${DB_MB} MB DB + ${DATA_MB} MB /data keeps the event loop and 
   const proberDone = new Promise((r) => prober.on('close', r));
   await new Promise((r) => setTimeout(r, 400));
   const diag = startLoopDiagnostics();
-  const writeErrors = [];
-  const writer = setInterval(() => { try { diag.timeWrite(write); } catch (e) { writeErrors.push(e.code || e.message); } }, 5);
+  const writer = setInterval(() => diag.timeWrite(write), 5);
 
   const h = monitorEventLoopDelay({ resolution: 10 });
   prober.stdin.write('start\n');
@@ -146,45 +159,12 @@ test(`export of a ${DB_MB} MB DB + ${DATA_MB} MB /data keeps the event loop and 
   await proberDone;
   server.close();
   const rowsAtEnd = next - 1;
-  const { probes } = JSON.parse(proberOut);
+  const { max: httpMax, during, worstAt } = JSON.parse(proberOut);
 
-  // What the export blocks, net of the test's own writer. Every write() is a
-  // main-thread commit, and a commit fsyncs the WAL (synchronous=FULL, the
-  // default), so it waits as long as the disk makes it wait, export or not. On
-  // the CI runner (4 vCPU, the whole suite sharing one disk) that was the
-  // whole failure: the worst stalls were 381.7 and 244.9 ms, each inside one
-  // write, main thread OFF CPU, machine iowait 75-78%, run-queue wait 0 (no
-  // CPU starvation). Same fixture and writer on node:22-bookworm (disk capped
-  // at 120 MB/s and 400 IOPS, two other processes writing and fsyncing), NO
-  // export, auto-checkpoint off as during one: single writes of 398-525 ms in
-  // 3 of 3 20 s windows. With the export and no other disk load the writer's
-  // worst is 1-3 ms (1.5 GB memory limit, 150 MB/s, 3 runs): the stall is the
-  // runner's disk, not the export. So a loop stall or a probe is charged only
-  // for the time the loop was NOT inside one of the test's writes. A write
-  // held up by a lock the export took cannot hide there: busy_timeout is 0,
-  // so it throws.
-  const inWrites = (s, e) => raw.writes.reduce((n, w) => n + Math.max(0, Math.min(e, w.t + w.ms) - Math.max(s, w.t)), 0);
-  let loopMax = 0;
-  let loopRawMax = 0;
-  for (const { t, lag } of raw.ticks) {
-    const s = t - lag - 10; // backup-loop-diag.mjs ticks every 10 ms
-    if (t < exportStart || s > exportEnd) continue;
-    loopMax = Math.max(loopMax, lag - inWrites(s, t));
-    loopRawMax = Math.max(loopRawMax, lag);
-  }
-  const during = probes.length;
-  let httpMax = 0;
-  let httpRawMax = 0;
-  let worstAt = null;
-  for (const [s, ms] of probes) {
-    httpRawMax = Math.max(httpRawMax, ms);
-    const net = ms - inWrites(s, s + ms);
-    if (net >= httpMax) { httpMax = net; worstAt = s; }
-  }
+  const loopMax = h.max / 1e6;
   console.log(`# control: synchronous VACUUM INTO of the same DB blocks ${controlMs.toFixed(0)} ms -> loop bound ${loopBound.toFixed(0)} ms, HTTP bound ${httpBound.toFixed(0)} ms`);
-  console.log(`# export ${elapsed.toFixed(0)} ms, archive ${out.bytes} bytes; event-loop stall net of the test's writes max=${loopMax.toFixed(1)} ms ` +
-    `(with them ${loopRawMax.toFixed(1)} ms; monitorEventLoopDelay max=${(h.max / 1e6).toFixed(1)} p99=${(h.percentile(99) / 1e6).toFixed(1)} ms); ` +
-    `HTTP probes during export (out of process)=${during} max net=${httpMax.toFixed(1)} ms (raw ${httpRawMax.toFixed(1)} ms); ledger rows start=${rowsAtStart} end=${rowsAtEnd}`);
+  console.log(`# export ${elapsed.toFixed(0)} ms, archive ${out.bytes} bytes; event-loop delay max=${loopMax.toFixed(1)} ms p99=${(h.percentile(99) / 1e6).toFixed(1)} ms; ` +
+    `HTTP probes during export (out of process)=${during} max=${httpMax.toFixed(1)} ms; ledger rows start=${rowsAtStart} end=${rowsAtEnd}`);
   if (ALWAYS_DIAG || loopMax >= loopBound || httpMax >= httpBound) {
     const { report, human } = summarize(raw, {
       marks, exportStart, exportEnd,
@@ -195,7 +175,6 @@ test(`export of a ${DB_MB} MB DB + ${DATA_MB} MB /data keeps the event loop and 
     for (const l of human) console.log(`# diag: ${l}`);
     console.log(`# backup-diag ${JSON.stringify(report)}`);
   }
-  assert.deepEqual(writeErrors, [], 'the export locked the main connection out of writing');
   assert.ok(loopMax < loopBound, `event loop blocked for ${loopMax.toFixed(1)} ms during export (bound ${loopBound.toFixed(0)} ms: a third of the ${controlMs.toFixed(0)} ms synchronous control)`);
   assert.ok(during >= 5, `only ${during} HTTP probes were sent during a ${elapsed.toFixed(0)} ms export`);
   assert.ok(httpMax < httpBound, `a lightweight route took ${httpMax.toFixed(1)} ms to answer during export (bound ${httpBound.toFixed(0)} ms: half of the ${controlMs.toFixed(0)} ms synchronous control)`);

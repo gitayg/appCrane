@@ -186,6 +186,9 @@ export function AppFrame({ slug, active, onClose }: Props) {
     const onEnv = (e: Event) => {
       const env = (e as CustomEvent<{ env: 'production' | 'sandbox' }>).detail.env
       setStage(s => (s ? { ...s, env, url: env === 'sandbox' ? s.sandUrl : s.prodUrl } : s))
+      // The coder lives on the Sandbox tab. Leaving it closes the panel; a turn
+      // in progress keeps running on the server and is there when you return.
+      if (env !== 'sandbox') setCoderOpen(false)
     }
     const onFold = (e: Event) => setFolded((e as CustomEvent<{ folded: boolean }>).detail.folded)
     // preventDefault is the element's signal that we rendered a menu; without
@@ -285,10 +288,12 @@ export function AppFrame({ slug, active, onClose }: Props) {
                     : 'Point at an element to request an enhancement'}
                 ><Icon.Lightbulb size={14} /> {peek.active && peekFor === 'request' ? 'Pick…' : 'Request'}</button>
               )}
-              {/* ALWAYS shown. It used to render only for Crane-hosted apps,
-                  so everyone else never learned the coder existed, let alone
-                  what it would take. Unavailable, it is muted and opens an
-                  explanation of every gap instead of a chat. */}
+              {/* Shown on the Sandbox tab only: the coder's work is reviewed and
+                  released there, never on production. On every app, not only
+                  Crane-hosted ones, so users learn it exists and what it would
+                  take; unavailable, it is muted and opens an explanation of
+                  every gap instead of a chat. */}
+              {stage.env === 'sandbox' && (
               <button
                 type="button"
                 className={'crane-topbar-btn'
@@ -299,6 +304,7 @@ export function AppFrame({ slug, active, onClose }: Props) {
                   ? `Coder isn't available here yet: ${coderAvail.gaps[0]?.title ?? 'see why'} — click for what it takes`
                   : 'Open the coder — change this app by describing what you want'}
               ><Icon.Sparkles size={14} /> Coder</button>
+              )}
             </span>
           </crane-app-topbar>
           {stage.url && <iframe key={stage.url} ref={iframeRef} className="lstage-iframe" src={stage.url} title={stage.name} />}
