@@ -14,13 +14,15 @@ interface Props {
   canRelease: boolean
   /** Bumped by the panel when a turn finishes, so the list re-reads itself. */
   refreshKey: number
+  /** How each release's sandbox deploy ended, from the session stream. */
+  deploys?: Record<number, { status: string; version?: string | null }>
 }
 
 const STATUS_LABEL: Record<ChangedFile['status'], string> = {
   added: 'A', modified: 'M', deleted: 'D',
 }
 
-export function CoderChanges({ slug, sessionId, canRelease, refreshKey }: Props) {
+export function CoderChanges({ slug, sessionId, canRelease, refreshKey, deploys = {} }: Props) {
   const [files,    setFiles]    = useState<ChangedFile[] | null>(null)
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [openDiff, setOpenDiff] = useState<string | null>(null)
@@ -120,7 +122,7 @@ export function CoderChanges({ slug, sessionId, canRelease, refreshKey }: Props)
           {!!result.deleted.length && (
             <div className="coder-release-line">{result.deleted.length} file(s) deleted</div>
           )}
-          <div className="coder-release-line">{describeDeploy(result)}</div>
+          <div className="coder-release-line">{describeDeploy(result, deploys)}</div>
         </div>
       )}
 
@@ -157,11 +159,18 @@ export function CoderChanges({ slug, sessionId, canRelease, refreshKey }: Props)
 }
 
 /** Turn deployTrigger's `{action, triggered[]}` into one readable sentence. */
-function describeDeploy(r: ReleaseResult): string {
+function describeDeploy(r: ReleaseResult, deploys: Record<number, { status: string; version?: string | null }>): string {
   const d = r.deploy
   if (!d) return 'No deploy was triggered.'
   if (d.action === 'deploy_triggered' && d.triggered?.length) {
-    return `Deploying: ${d.triggered.map(t => `${t.env} #${t.deployment_id}`).join(', ')}`
+    // Updated in place as the deploy finishes, instead of "Deploying" forever.
+    return d.triggered.map(t => {
+      const done = deploys[t.deployment_id]
+      if (!done) return `Deploying to ${t.env} (#${t.deployment_id})…`
+      if (done.status === 'live') return `Live on ${t.env}${done.version ? ` as v${done.version}` : ''} (#${t.deployment_id})`
+      if (done.status === 'failed') return `${t.env} deploy #${t.deployment_id} failed. The log went to the coder to fix; see Chat.`
+      return `${t.env} deploy #${t.deployment_id} was rolled back.`
+    }).join(' · ')
   }
   if (d.action === 'skipped_no_config' || d.action === 'skipped_no_auto') {
     return 'Committed. Deploy-on-push is off for this app, so nothing was deployed.'

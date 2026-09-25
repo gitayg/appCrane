@@ -88,6 +88,12 @@ initDb();
   const { startBackgroundCheckpoints } = await import('./services/dbCheckpoint.js');
   startBackgroundCheckpoints();
 }
+// Anonymous daily install check-in: counts and versions only, opt out with
+// APPCRANE_CHECKIN=off (services/installCheckin.js lists every field).
+{
+  const { startInstallCheckin } = await import('./services/installCheckin.js');
+  startInstallCheckin({ version: VERSION });
+}
 
 const app = express();
 

@@ -129,6 +129,8 @@ export type CoderEvent =
   | { type: 'queue';  ahead: number; depth: number; running?: unknown }
   | { type: 'cost';   inputTokens: number; outputTokens: number; costUsdCents: number }
   | { type: 'error';  message: string; turnFailed?: boolean }
+  /** How a released commit's sandbox deploy ended (releaseWatch.js). */
+  | { type: 'deploy'; status: 'live' | 'failed' | 'rolled_back'; deployment_id: number; version?: string | null; message: string; log_excerpt?: string }
   | StreamEvent
 
 /**

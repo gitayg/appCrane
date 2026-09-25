@@ -77,6 +77,8 @@ export function useCoderSession(slug: string, open: boolean) {
   const [models,    setModels]    = useState<CoderModel[]>([])
   const [model,     setModel]     = useState<string>('')
   const [modes,     setModes]     = useState<CoderMode[]>([])
+  /** How each released commit's sandbox deploy ended, by deployment id. */
+  const [deploys,   setDeploys]   = useState<Record<number, { status: string; version?: string | null }>>({})
   const [mode,      setMode]      = useState<string>('')
   const [followups, setFollowups] = useState<CoderFollowup[]>([])
 
@@ -159,6 +161,12 @@ export function useCoderSession(slug: string, open: boolean) {
         return
       }
       if (ev.type === 'cost')  { setCostCents(c => c + (ev.costUsdCents || 0)); return }
+      if (ev.type === 'deploy') {
+        setDeploys(d => ({ ...d, [ev.deployment_id]: { status: ev.status, version: ev.version } }))
+        const text = ev.log_excerpt ? `${ev.message}\n\n${ev.log_excerpt}` : ev.message
+        setLive(p => [...p, { key: key(), kind: ev.status === 'failed' ? 'error' : 'note', text }])
+        return
+      }
       if (ev.type === 'error') {
         // A failed turn streamed its failure as reply text ("Failed to
         // authenticate…"). Replace that bubble, so the failure is not left
@@ -397,6 +405,7 @@ export function useCoderSession(slug: string, open: boolean) {
     starting, error, startLog, resumingSince,
     models, model, setModel,
     modes, mode, setMode,
+    deploys,
     followups, cancelFollowup,
     start, send, stop, resume,
   }

@@ -39,6 +39,22 @@ function publish(sessionId, event) {
   if (subs) for (const fn of subs) fn(event);
 }
 
+/**
+ * Post an event into a session's live stream, and optionally record a line in
+ * its transcript, from outside a turn (the release watcher, v2.93.0).
+ */
+export function notifySession(sessionId, event, { record = null } = {}) {
+  if (record) {
+    try { appendMessage(sessionId, 'assistant', record); } catch (_) {}
+  }
+  publish(sessionId, event);
+}
+
+/** True when the session has a live container right now. */
+export function isSessionLive(sessionId) {
+  return sessions.has(sessionId);
+}
+
 export function subscribe(sessionId, fn) {
   if (!subscribers.has(sessionId)) subscribers.set(sessionId, new Set());
   subscribers.get(sessionId).add(fn);

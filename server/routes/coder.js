@@ -27,6 +27,7 @@ import {
 } from '../services/llm/coderModels.js';
 import { coderModeChoices, isAllowedCoderMode, DEFAULT_CODER_MODE } from '../services/llm/coderModes.js';
 import { saveAttachment, resolveAttachments } from '../services/builder/coderAttachments.js';
+import { watchReleaseDeploy } from '../services/builder/releaseWatch.js';
 import { usesLocalRepo, pushFilesToManagedRepo } from '../services/managedRepo.js';
 import { getQueueState } from '../services/builder/appQueue.js';
 import { fetchReleasesAndChangelog, renderReleasesPage } from '../services/github/releases.js';
@@ -594,6 +595,14 @@ router.post('/:slug/session/:id/release', auditMiddleware('coder.release'), asyn
 
   markReleasedInWorkspace(session.workspace_dir, paths, commitMsg);
   log.info(`Coder release: ${app.slug} ${result.commit.sha.slice(0, 12)} (${files.length} file(s), ${deletions.length} deletion(s))`);
+
+  // Follow the sandbox deploy this release started, so the session hears how
+  // it ended and a failed build goes back to the coder on its own
+  // (services/builder/releaseWatch.js).
+  for (const t of result.auto_deploy?.triggered || []) {
+    if (t.env !== 'sandbox' || !t.deployment_id) continue;
+    void watchReleaseDeploy({ sessionId: session.id, deploymentId: t.deployment_id, commit: result.commit.sha, userId: req.user.id });
+  }
 
   res.json({
     commit: { sha: result.commit.sha },

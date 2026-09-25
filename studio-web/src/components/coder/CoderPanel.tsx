@@ -156,6 +156,7 @@ export function CoderPanel(props: Props) {
             sessionId={s.sessionId}
             canRelease={canRelease}
             refreshKey={refreshKey}
+            deploys={s.deploys}
           />
         </div>
       ) : (
