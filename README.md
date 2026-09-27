@@ -5,8 +5,11 @@
 [![GitHub stars](https://img.shields.io/github/stars/gitayg/appCrane?style=flat)](https://github.com/gitayg/appCrane/stargazers)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
 ![Platform: Ubuntu 22.04+](https://img.shields.io/badge/platform-Ubuntu%2022.04%2B-e95420)
+[![npm: appcrane-mcp](https://img.shields.io/npm/v/appcrane-mcp?label=npm%20appcrane-mcp)](https://www.npmjs.com/package/appcrane-mcp)
 
-AppCrane runs the internal apps your team builds with Claude Code or Cursor, on a server you own. An agent creates the app, deploys it, reads the logs and rolls it back through 59 MCP tools — no browser, no curl — while the platform enforces SSO and per-app roles, records every action against the actor that took it (tagged **agent** or **human**), and keeps app secrets out of reach of the person administering the box.
+**[appcrane.dev](https://appcrane.dev)** · [How it compares](https://appcrane.dev/comparison.html) · [Deploy from Claude](https://appcrane.dev/deploy-from-claude.html) · [MCP connector](https://github.com/gitayg/appcrane-mcp) · [Changelog](https://appcrane.dev/changelog.html)
+
+AppCrane runs the internal apps your team builds with Claude Code or Cursor, on a server you own. An agent creates the app, deploys it, reads the logs and rolls it back through 62 MCP tools — no browser, no curl — while the platform enforces SSO and per-app roles, records every action against the actor that took it (tagged **agent** or **human**), and keeps app secrets out of reach of the person administering the box.
 
 It is for teams that have to self-host — data residency, a customer contract, an internal-only network — and still have to answer *who deployed this, what was in it, and can we undo it?*
 
@@ -31,7 +34,7 @@ Versus vendor-hosted governed platforms (Replit, Lovable, Retool, Superblocks), 
 | | AppCrane | Coolify | Dokploy | Komodo | CapRover / Dokku |
 |---|---|---|---|---|---|
 | Multi-host / fleet deploys | **no — single host** | yes (experimental) | yes, remote servers | yes, agent per host | Swarm cluster (CapRover) |
-| Built-in MCP that can deploy | 59 tools, incl. rollback | 10 tools, **read-only** | 508 tools (official package), incl. rollback | community projects only | community projects only |
+| Built-in MCP that can deploy | 62 tools, incl. rollback | 10 tools, **read-only** | 508 tools (official package), incl. rollback | community projects only | community projects only |
 | SAML 2.0 | yes | not in changelog | Enterprise | not documented | no |
 | OIDC | yes | yes (v4.4-rc.1) | Enterprise | yes, generic OIDC | no |
 | SCIM provisioning | yes | not in changelog | Enterprise | not documented | no |
