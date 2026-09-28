@@ -107,10 +107,13 @@ export async function withMainCheckpointsDeferred(fn) {
 //   synchronous = NORMAL, autocheckpoint on     worst 3554-5254 ms (no better)
 //   autocheckpoint off, PASSIVE in a worker     worst 1.9-2.4 ms, none over 100 ms
 //
-// The per-commit WAL sync (synchronous = FULL) cost nothing measurable
-// (p99 0.1 ms), so it stays: durability is unchanged, only WHERE the
-// checkpoint's fsync runs moves. PASSIVE never takes the write lock, so the
-// main connection keeps committing while the worker copies frames.
+// The per-commit WAL sync cost nothing measurable (p99 0.1-0.2 ms) at either
+// level, so the synchronous setting is left as it was: better-sqlite3 opens a
+// database that is already in WAL mode at NORMAL (its build sets
+// SQLITE_DEFAULT_WAL_SYNCHRONOUS=1; measured: a fresh connection to AppCrane's
+// database reports synchronous = 1). Only WHERE the checkpoint's fsync runs moves.
+// PASSIVE never takes the write lock, so the main connection keeps committing
+// while the worker copies frames.
 const BACKGROUND_WORKER = `
 const { parentPort, workerData } = require('worker_threads');
 const Database = require(workerData.driver);
