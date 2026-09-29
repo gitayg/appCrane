@@ -10,11 +10,10 @@
  *   POST /api/whats-new/platform/seen
  *     → marks the running version seen for the caller. Idempotent.
  *
- * Change notes come from GitHub: AppCrane's own commit subjects on
- * gitayg/appCrane are written as user-facing release notes ("vX.Y.Z: …"),
- * so we parse the version-tagged commits and return those between the
- * caller's last-seen version and the running version. Public-repo API, no
- * token; cached 5 min to stay well under the unauthenticated rate limit.
+ * Change notes are AppCrane's own commit subjects, written as user-facing
+ * release notes ("vX.Y.Z: …"), read from this install's git checkout after a
+ * fetch of origin (services/releaseNotes.js). Those between the caller's
+ * last-seen version and the running version are returned.
  */
 
 import { Router } from 'express';
@@ -23,6 +22,7 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { getDb } from '../db.js';
 import { requireAuth, requirePlatformAdmin } from '../middleware/auth.js';
+import { getVersionNotes } from '../services/releaseNotes.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const VERSION = JSON.parse(readFileSync(join(__dirname, '..', '..', 'package.json'), 'utf8')).version;
@@ -38,73 +38,6 @@ function cmp(a, b) {
     if ((pa[i] || 0) < (pb[i] || 0)) return -1;
   }
   return 0;
-}
-
-let _commitsCache = null;
-let _commitsCacheAt = 0;
-async function fetchVersionCommits() {
-  const now = Date.now();
-  if (_commitsCache && now - _commitsCacheAt < 5 * 60 * 1000) return _commitsCache;
-  try {
-    const r = await fetch('https://api.github.com/repos/gitayg/appCrane/commits?per_page=50', {
-      headers: { 'User-Agent': 'AppCrane', 'Accept': 'application/vnd.github+json' },
-      signal: AbortSignal.timeout(6000),
-    });
-    if (!r.ok) return _commitsCache || [];
-    const data = await r.json();
-    const parsed = [];
-    for (const c of Array.isArray(data) ? data : []) {
-      const firstLine = String(c.commit?.message || '').split('\n')[0];
-      const m = firstLine.match(/^v(\d+\.\d+\.\d+)[:\s-]\s*(.*)$/);
-      if (!m) continue;
-      parsed.push({
-        version: m[1],
-        commit_message: (m[2] || '').trim() || firstLine,
-        commit_hash: c.sha || null,
-        finished_at: c.commit?.author?.date || c.commit?.committer?.date || null,
-      });
-    }
-    _commitsCache = parsed;
-    _commitsCacheAt = now;
-    return parsed;
-  } catch (_) {
-    return _commitsCache || [];
-  }
-}
-
-let _changelogCache = null;
-let _changelogCacheAt = 0;
-// Preferred notes source: CHANGELOG.md over raw.githubusercontent — the same
-// host version-check reaches successfully, so it works even where api.github.com
-// is blocked or rate-limited. Format: one line per release, `## <version> — <summary>`.
-async function fetchChangelogNotes() {
-  const now = Date.now();
-  if (_changelogCache && now - _changelogCacheAt < 5 * 60 * 1000) return _changelogCache;
-  try {
-    const r = await fetch('https://raw.githubusercontent.com/gitayg/appCrane/main/CHANGELOG.md', {
-      headers: { 'User-Agent': 'AppCrane' },
-      signal: AbortSignal.timeout(6000),
-    });
-    if (!r.ok) return _changelogCache || [];
-    const text = await r.text();
-    const parsed = [];
-    const re = /^##\s+v?(\d+\.\d+\.\d+)\s*[—:-]\s*(.+)$/gm;
-    let m;
-    while ((m = re.exec(text)) !== null) {
-      parsed.push({ version: m[1], commit_message: m[2].trim(), commit_hash: null, finished_at: null });
-    }
-    _changelogCache = parsed;
-    _changelogCacheAt = now;
-    return parsed;
-  } catch (_) {
-    return _changelogCache || [];
-  }
-}
-
-// CHANGELOG.md first (reliable host + curated wording); commit subjects fallback.
-async function getVersionNotes() {
-  const notes = await fetchChangelogNotes();
-  return notes.length ? notes : fetchVersionCommits();
 }
 
 router.use(requireAuth, requirePlatformAdmin);

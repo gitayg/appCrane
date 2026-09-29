@@ -33,7 +33,7 @@ interface AppRow {
 }
 
 interface Stage {
-  slug: string; name: string; hasIcon: boolean; hasGithub: boolean
+  slug: string; name: string; hasIcon: boolean
   /** managed + repo_backend 'local' — the only shape /api/coder will accept. */
   craneHosted: boolean
   /** admin/owner here, i.e. the bar coder.js's requireAppAdmin enforces on release. */
@@ -63,7 +63,7 @@ function buildStage(app: AppRow): Stage {
   const sandLive = app.sandbox?.deploy?.status === 'live'
   const useSand = sandLive && (!prodLive || (!prodOk && sandOk))
   return {
-    slug: app.slug, name: app.name, hasIcon: !!app.has_icon, hasGithub: !!app.github_url,
+    slug: app.slug, name: app.name, hasIcon: !!app.has_icon,
     // Same predicate as server/services/managedRepo.js usesLocalRepo(): a NULL
     // repo_backend on a managed app means its repo is on GitHub, not here.
     craneHosted: app.source_type === 'managed' && app.repo_backend === 'local',
@@ -295,20 +295,20 @@ export function AppFrame({ slug, active, onClose }: Props) {
             {...(folded ? { folded: '' } : {})}
           >
             <span slot="actions" style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-              {stage.hasGithub && (
-                <button
-                  type="button"
-                  className={'crane-topbar-btn' + ((peek.active && peekFor === 'request') || requestCtx ? ' active' : '')}
-                  onClick={() => {
-                    if (requestCtx) { setRequestCtx(null); return }
-                    if (peek.active) { peek.stop(); return }
-                    startRequestPick()
-                  }}
-                  title={peek.active
-                    ? 'Click an element in the app, then describe the change. Esc to cancel.'
-                    : 'Point at an element to request an enhancement'}
-                ><Icon.Lightbulb size={14} /> {peek.active && peekFor === 'request' ? 'Pick…' : 'Request'}</button>
-              )}
+              {/* On every app: requests are stored by AppCrane, and only mirrored
+                  to GitHub as an issue when the app has a github_url. */}
+              <button
+                type="button"
+                className={'crane-topbar-btn' + ((peek.active && peekFor === 'request') || requestCtx ? ' active' : '')}
+                onClick={() => {
+                  if (requestCtx) { setRequestCtx(null); return }
+                  if (peek.active) { peek.stop(); return }
+                  startRequestPick()
+                }}
+                title={peek.active
+                  ? 'Click an element in the app, then describe the change. Esc to cancel.'
+                  : 'Point at an element to request an enhancement'}
+              ><Icon.Lightbulb size={14} /> {peek.active && peekFor === 'request' ? 'Pick…' : 'Request'}</button>
               {/* Shown on the Sandbox tab only: the coder's work is reviewed and
                   released there, never on production. On every app, not only
                   Crane-hosted ones, so users learn it exists and what it would
