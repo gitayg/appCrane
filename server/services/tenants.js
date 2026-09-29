@@ -61,3 +61,22 @@ export function purgeTenant(slug, email, userId) {
   }
   if (removed) log.info(`purgeTenant: purged ${rel} for app ${slug} (${removed} env(s))`);
 }
+
+/**
+ * Purge a user's tenant data on each multitenant app in `appIds`, which the
+ * caller has just removed their access to. Every path that removes access
+ * calls this after its own writes: the dashboard's role 'none', deleting the
+ * user, and SCIM group removal (the MCP revoke tool purges inline). An app
+ * that never opted in is left alone. Never throws into the caller.
+ */
+export function purgeRevokedTenants(db, userId, email, appIds) {
+  for (const appId of appIds) {
+    try {
+      const app = db.prepare('SELECT slug, multitenant FROM apps WHERE id = ?').get(appId);
+      if (!app?.multitenant) continue;
+      purgeTenant(app.slug, email, userId);
+    } catch (e) {
+      log.warn(`purgeRevokedTenants: app ${appId} user ${userId}: ${e.message}`);
+    }
+  }
+}

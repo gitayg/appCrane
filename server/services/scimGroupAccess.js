@@ -1,3 +1,5 @@
+import { purgeRevokedTenants } from './tenants.js';
+
 /**
  * SCIM group -> app access reconciler.
  *
@@ -56,12 +58,13 @@ export function reconcileGroupAccess(db) {
   const setLedger = db.prepare(`UPDATE scim_group_access
     SET app_role = ?, updated_at = datetime('now') WHERE app_id = ? AND user_id = ?`);
 
+  const revoked = [];
   db.transaction(() => {
     for (const l of ledger) {
       if (desired.has(`${l.app_id}:${l.user_id}`)) continue;
       // Revoke: undo exactly what was created, and nothing that was not.
       if (l.created_role)       delRole.run(l.app_id, l.user_id);
-      if (l.created_membership) delMember.run(l.app_id, l.user_id);
+      if (l.created_membership) { delMember.run(l.app_id, l.user_id); revoked.push(l); }
       delLedger.run(l.app_id, l.user_id);
     }
 
@@ -80,4 +83,7 @@ export function reconcileGroupAccess(db) {
       }
     }
   })();
+
+  const emailOf = db.prepare('SELECT email FROM users WHERE id = ?');
+  for (const l of revoked) purgeRevokedTenants(db, l.user_id, emailOf.get(l.user_id)?.email, [l.app_id]);
 }

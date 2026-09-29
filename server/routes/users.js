@@ -7,6 +7,7 @@ import { AppError } from '../utils/errors.js';
 import { roleForUserOnApp } from '../services/permissions.js';
 import { clearUserRoleGrants } from '../services/appDefinedRoles.js';
 import { isAdmin } from '../utils/roles.js';
+import { purgeRevokedTenants } from '../services/tenants.js';
 
 const router = Router();
 
@@ -119,6 +120,8 @@ router.delete('/:id', requireAdmin, auditMiddleware('user-delete'), (req, res) =
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
   if (!user) throw new AppError('User not found', 404, 'NOT_FOUND');
 
+  const memberOf = db.prepare('SELECT app_id FROM app_users WHERE user_id = ?').all(userId).map(r => r.app_id);
+
   // Delete related records first to avoid FK constraint failures
   db.transaction(() => {
     // NULL out non-cascading FK references to this user
@@ -134,6 +137,7 @@ router.delete('/:id', requireAdmin, auditMiddleware('user-delete'), (req, res) =
     db.prepare('DELETE FROM notification_configs WHERE user_id = ?').run(userId);
     db.prepare('DELETE FROM users WHERE id = ?').run(userId);
   })();
+  purgeRevokedTenants(db, userId, user.email, memberOf);
   res.json({ message: `User '${user.name}' deleted` });
 });
 
@@ -307,6 +311,8 @@ router.put('/:slug/roles', requireAppAccess, auditMiddleware('app-set-role'), (r
       db.prepare('DELETE FROM app_users WHERE app_id = ? AND user_id = ?').run(app.id, user_id);
       clearUserRoleGrants(app.id, user_id);
     })();
+    const target = db.prepare('SELECT email FROM users WHERE id = ?').get(user_id);
+    purgeRevokedTenants(db, user_id, target?.email, [app.id]);
   } else {
     db.transaction(() => {
       db.prepare(`
