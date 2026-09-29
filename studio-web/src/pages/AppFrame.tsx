@@ -6,6 +6,7 @@ import { CoderPanel } from '../components/coder/CoderPanel'
 import { coderApi, type CoderAvailability } from '../components/coder/api'
 import { Icon } from '../components/icons'
 import { EnvActionMenu, type EnvMenuState } from '../components/EnvActionMenu'
+import { WhatsNewModal, type WhatsNewChange } from '../components/WhatsNewModal'
 
 /**
  * One app rendered inline, hosted by the <crane-app-topbar> element (env switch,
@@ -126,6 +127,26 @@ export function AppFrame({ slug, active, onClose }: Props) {
       .catch(() => { /* not fatal: the menu just stays hidden */ })
     return () => { alive = false }
   }, [])
+  // What's New: each time this tab is shown, ask whether production has
+  // shipped versions this user hasn't acknowledged. Same contract as
+  // FrameOverlay in Applications.tsx; the server stays silent on a first visit.
+  const [whatsNew, setWhatsNew] = useState<{ currentVersion: string | null; changes: WhatsNewChange[] } | null>(null)
+  useEffect(() => {
+    if (!active || !slug) return
+    let cancelled = false
+    adminApi
+      .get<{ current_version: string | null; changes: WhatsNewChange[]; first_time: boolean }>(
+        `/api/apps/${encodeURIComponent(slug)}/whats-new`,
+      )
+      .then(r => {
+        if (cancelled || !r) return
+        if (!r.first_time && r.changes && r.changes.length > 0) {
+          setWhatsNew({ currentVersion: r.current_version, changes: r.changes })
+        }
+      })
+      .catch(() => { /* a nice-to-have, never a blocker */ })
+    return () => { cancelled = true }
+  }, [slug, active])
   const [refreshNonce, setRefreshNonce] = useState(0)
   const topbarRef = useRef<HTMLElement>(null)
   const iframeRef = useRef<HTMLIFrameElement>(null)
@@ -324,6 +345,15 @@ export function AppFrame({ slug, active, onClose }: Props) {
           )}
           {active && envNotice && (
             <div className="env-notice" role="status">{envNotice}</div>
+          )}
+          {active && whatsNew && (
+            <WhatsNewModal
+              slug={stage.slug}
+              appName={stage.name}
+              currentVersion={whatsNew.currentVersion}
+              changes={whatsNew.changes}
+              onClose={() => setWhatsNew(null)}
+            />
           )}
           {active && requestCtx && (
             <RequestModal slug={stage.slug} appName={stage.name} peekCtx={requestCtx} onClose={() => setRequestCtx(null)} />
