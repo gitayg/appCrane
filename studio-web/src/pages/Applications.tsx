@@ -91,7 +91,6 @@ interface FrameState {
   prodVersion?: string
   sandVersion?: string
   hasIcon?: boolean
-  hasGithub?: boolean
 }
 
 interface PromptModal {
@@ -1097,7 +1096,6 @@ STEP 3 - In any terminal run \`claude\`, then paste:
       prodVersion: app.production?.deploy?.version || '',
       sandVersion: app.sandbox?.deploy?.version    || '',
       hasIcon:     iconUrls[app.slug] != null,
-      hasGithub:   !!app.github_url,
     })
   }
 
@@ -2645,39 +2643,36 @@ function FrameOverlay({ frame, framePanel, setFrame, setFramePanel }: FrameOverl
       >
         <span slot="actions" style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
           <PresenceAvatars slug={frame.slug ?? null} />
-          {frame.hasGithub && (
-            <>
-              {/* v2.7.25: 📋 Jobs button. The component existed since the
-                  AppStudio request flow shipped, multiple panels' copy points
-                  users at the "📋 Jobs panel" to track progress — but the
-                  button was never actually slotted into the topbar. Reporter
-                  bug #158 ("Jobs panel button does nothing") was real: it did
-                  nothing because it wasn't there. Gated on frame.hasGithub
-                  (same as Request/Bug) — Jobs only exist for github apps. */}
-              <JobsButton slug={frame.slug ?? null} />
-              <button
-                type="button"
-                className={'crane-topbar-btn' + (peek.active || requestCtx ? ' active' : '')}
-                onClick={() => {
-                  // v2.3.2 flow: click → immediately enter pick mode → on
-                  // capture, the useEffect above opens the floating modal
-                  // anchored to the picked element. No drawer.
-                  if (requestCtx) { setRequestCtx(null); return }
-                  if (peek.active) { peek.stop(); return }
-                  peek.start()
-                }}
-                title={peek.active
-                  ? 'Click an element in the app, then describe the change. Esc to cancel.'
-                  : 'Point at an element to request an enhancement'}
-              ><Icon.Lightbulb size={14} /> {peek.active ? 'Pick…' : 'Request'}</button>
-              <button
-                type="button"
-                className={'crane-topbar-btn' + (framePanel === 'bug' ? ' active' : '')}
-                onClick={() => setFramePanel(p => p === 'bug' ? null : 'bug')}
-                title="Report a bug"
-              ><Icon.Bug size={14} /> Bug</button>
-            </>
-          )}
+          {/* v2.7.25: 📋 Jobs button. The component existed since the
+              AppStudio request flow shipped, multiple panels' copy points
+              users at the "📋 Jobs panel" to track progress — but the
+              button was never actually slotted into the topbar. Reporter
+              bug #158 ("Jobs panel button does nothing") was real: it did
+              nothing because it wasn't there. Jobs, Request and Bug are
+              shown on every app: all three use /api/enhancements, which
+              mirrors to GitHub only when the app has a github_url. */}
+          <JobsButton slug={frame.slug ?? null} />
+          <button
+            type="button"
+            className={'crane-topbar-btn' + (peek.active || requestCtx ? ' active' : '')}
+            onClick={() => {
+              // v2.3.2 flow: click → immediately enter pick mode → on
+              // capture, the useEffect above opens the floating modal
+              // anchored to the picked element. No drawer.
+              if (requestCtx) { setRequestCtx(null); return }
+              if (peek.active) { peek.stop(); return }
+              peek.start()
+            }}
+            title={peek.active
+              ? 'Click an element in the app, then describe the change. Esc to cancel.'
+              : 'Point at an element to request an enhancement'}
+          ><Icon.Lightbulb size={14} /> {peek.active ? 'Pick…' : 'Request'}</button>
+          <button
+            type="button"
+            className={'crane-topbar-btn' + (framePanel === 'bug' ? ' active' : '')}
+            onClick={() => setFramePanel(p => p === 'bug' ? null : 'bug')}
+            title="Report a bug"
+          ><Icon.Bug size={14} /> Bug</button>
         </span>
       </crane-app-topbar>
 
