@@ -105,8 +105,7 @@ function mkApp(slug, { token = PAT, url = `https://github.com/acme/${slug}` } = 
   return db.prepare('SELECT * FROM apps WHERE id = ?').get(id);
 }
 const assign = (appId, userId, role) => {
-  db.prepare('INSERT OR IGNORE INTO app_users (app_id,user_id) VALUES (?,?)').run(appId, userId);
-  if (role) db.prepare('INSERT OR REPLACE INTO app_user_roles (app_id,user_id,app_role) VALUES (?,?,?)').run(appId, userId, role);
+  db.prepare('INSERT OR REPLACE INTO app_user_roles (app_id,user_id,app_role) VALUES (?,?,?)').run(appId, userId, role || 'user');
 };
 
 const ex = express();
@@ -357,7 +356,7 @@ test('the per-app routes are gated on access to THAT app, not merely on being si
 test('attaching needs the same role permission as changing the repo URL', async () => {
   const app = mkApp('roles');
   const member = mkUser('user', 'dhk_member_key');
-  assign(app.id, member.id);                    // plain assignment, no app role
+  assign(app.id, member.id);                    // plain assignment ('user' role)
   assert.equal((await call('GET', '/api/apps/roles/github-app', member.key)).status, 200);
   const denied = await call('PUT', '/api/apps/roles/github-app', member.key, {});
   assert.equal(denied.status, 403);

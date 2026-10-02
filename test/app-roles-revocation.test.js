@@ -55,7 +55,6 @@ function mkUser(craneRole) {
 }
 
 const seat = (appId, uid, tier) => {
-  db.prepare('INSERT OR IGNORE INTO app_users (app_id,user_id) VALUES (?,?)').run(appId, uid);
   db.prepare(`INSERT INTO app_user_roles (app_id,user_id,app_role) VALUES (?,?,?)
               ON CONFLICT(app_id,user_id) DO UPDATE SET app_role = excluded.app_role`).run(appId, uid, tier);
 };
@@ -187,7 +186,7 @@ test('a grant whose holder is not a member is inert on every surface', async () 
   await grant('rv-priv', ['approver']);
   assert.equal(await headerFor('rv-priv'), 'approver', 'fixture premise broken');
 
-  db.prepare('DELETE FROM app_users WHERE app_id = ? AND user_id = ?').run(PRIV, VICTIM.uid);
+  db.prepare('DELETE FROM app_user_roles WHERE app_id = ? AND user_id = ?').run(PRIV, VICTIM.uid);
   assert.ok(grantRows() > 0, 'test premise broken: the orphan grant is gone already');
 
   assert.deepEqual(svc.roleKeysForUser(PRIV, VICTIM.uid), [],
@@ -204,7 +203,7 @@ test('an orphan grant is not counted as a holder', async () => {
   // instead, the two would disagree and the operator would be shown a number
   // nobody on screen accounts for.
   await grant('rv-priv', ['approver']);
-  db.prepare('DELETE FROM app_users WHERE app_id = ? AND user_id = ?').run(PRIV, VICTIM.uid);
+  db.prepare('DELETE FROM app_user_roles WHERE app_id = ? AND user_id = ?').run(PRIV, VICTIM.uid);
 
   const roles = (await call(OWNER, 'GET', '/api/apps/rv-priv/app-roles')).body.roles;
   const approver = roles.find(r => r.key === 'approver');

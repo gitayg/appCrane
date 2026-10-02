@@ -51,7 +51,7 @@ function mkUser(role, { assignTo = null } = {}) {
   const id = db.prepare(
     'INSERT INTO users (name,email,role,api_key_hash,active,kind) VALUES (?,?,?,?,1,?)'
   ).run(`u${n}`, `u${n}@t.test`, role, hashApiKey(key), 'human').lastInsertRowid;
-  if (assignTo) db.prepare('INSERT INTO app_users (app_id,user_id) VALUES (?,?)').run(assignTo, id);
+  if (assignTo) db.prepare("INSERT INTO app_user_roles (app_id,user_id,app_role) VALUES (?,?,'user')").run(assignTo, id);
   return key;
 }
 

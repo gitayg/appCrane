@@ -88,8 +88,7 @@ function user(role, grants = []) {
   const key = generateApiKey('dhk_user');
   const id = db.prepare('INSERT INTO users (name,email,role,api_key_hash,active,kind) VALUES (?,?,?,?,1,?)').run(`ef${n}`, `ef${n}@example.com`, role, hashApiKey(key), 'human').lastInsertRowid;
   for (const [app, appRole] of grants) {
-    db.prepare('INSERT INTO app_users (app_id, user_id) VALUES (?, ?)').run(app.id, id);
-    if (appRole) db.prepare('INSERT INTO app_user_roles (app_id, user_id, app_role) VALUES (?, ?, ?)').run(app.id, id, appRole);
+    db.prepare('INSERT INTO app_user_roles (app_id, user_id, app_role) VALUES (?, ?, ?)').run(app.id, id, appRole || 'user');
   }
   return { id, key };
 }

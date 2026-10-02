@@ -329,7 +329,6 @@ function reset() {
   db.prepare('DELETE FROM scim_group_members').run();
   db.prepare('DELETE FROM scim_groups').run();
   db.prepare('DELETE FROM scim_group_access').run();
-  db.prepare('DELETE FROM app_users').run();
   db.prepare('DELETE FROM app_user_roles').run();
 }
 

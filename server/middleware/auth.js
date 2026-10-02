@@ -189,8 +189,9 @@ export function requireAppAccess(req, res, next) {
  * env vars. To do that they must "step down" by assigning themselves
  * to the app as a regular user.
  *
- * Platform admins (`role: 'platform_admin'`) bypass that guardrail
- * entirely. They're the platform owner — universal access is the point.
+ * Platform admins are held to the same rule since v2.39.0: they must be
+ * assigned too (see the comment in the body). Assignment means a role row
+ * in app_user_roles; app_users is a read-only view of it since v2.94.0.
  */
 export function requireAppUser(req, res, next) {
   const { slug } = req.params;

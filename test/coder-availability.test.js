@@ -50,7 +50,7 @@ async function mkApp(slug, fields) {
   const keys = Object.keys(cols);
   db.prepare(`INSERT INTO apps (${keys.join(',')}) VALUES (${keys.map(() => '?').join(',')})`).run(...keys.map((k) => cols[k]));
   const id = db.prepare('SELECT id FROM apps WHERE slug = ?').get(slug).id;
-  db.prepare('INSERT INTO app_users (app_id,user_id) VALUES (?,?)').run(id, userId);
+  db.prepare("INSERT INTO app_user_roles (app_id,user_id,app_role) VALUES (?,?,'user')").run(id, userId);
   if (fields.repo_backend === 'local') await lg.createAppRepo(slug, { description: 'avail' });
   return id;
 }
@@ -158,7 +158,7 @@ test('a corrupt repo setting is reported as a gap, never a 500', async () => {
   db.prepare(`INSERT INTO apps (name,slug,slot,source_type,repo_backend,branch)
               VALUES ('broken','broken',590,'managed','nonsense','main')`).run();
   const id = db.prepare("SELECT id FROM apps WHERE slug = 'broken'").get().id;
-  db.prepare('INSERT INTO app_users (app_id,user_id) VALUES (?,?)').run(id, userId);
+  db.prepare("INSERT INTO app_user_roles (app_id,user_id,app_role) VALUES (?,?,'user')").run(id, userId);
   const { status, body } = await get(KEY_USER, '/api/coder/broken/availability');
   assert.equal(status, 200, `availability 500'd on a corrupt row: ${JSON.stringify(body).slice(0, 200)}`);
   assert.ok(body.gaps.some((g) => g.code === 'UNKNOWN_SOURCE'), JSON.stringify(body.gaps.map((g) => g.code)));

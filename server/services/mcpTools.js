@@ -229,9 +229,9 @@ function getAppForUser(user, slug) {
 
   // No explicit scope: fall back to role/assignment check
   if (isAdmin(user)) return app;
-  const hasAccess =
-    db.prepare('SELECT 1 FROM app_users WHERE app_id = ? AND user_id = ?').get(app.id, user.id) ||
-    db.prepare('SELECT 1 FROM app_user_roles WHERE app_id = ? AND user_id = ?').get(app.id, user.id);
+  // app_users is the view of role rows that grant access (v2.94.0), so a
+  // stored 'none' grants nothing here either.
+  const hasAccess = db.prepare('SELECT 1 FROM app_users WHERE app_id = ? AND user_id = ?').get(app.id, user.id);
   if (!hasAccess) throw new Error(`Forbidden: no access to app ${slug}`);
   return app;
 }
@@ -2083,11 +2083,8 @@ const TOOLS = [
         db.prepare('INSERT INTO health_configs (app_id, env) VALUES (?, ?)').run(appId, env);
         db.prepare('INSERT INTO health_state (app_id, env) VALUES (?, ?)').run(appId, env);
       }
-      // Auto-assign creator as both member and owner. The app_user_roles
-      // owner row is what makes "⚠ No owner" go away on /applications and
-      // gives this user per-app authz boundaries (e.g. the appcrane_*
-      // access-management tools). Forgetting it was the v2.5.12 bug.
-      db.prepare('INSERT OR IGNORE INTO app_users (app_id, user_id) VALUES (?, ?)').run(appId, user.id);
+      // The creator owns the app. The role row is also their access: since
+      // v2.94.0 app_users is a read-only view of app_user_roles.
       db.prepare(`
         INSERT INTO app_user_roles (app_id, user_id, app_role) VALUES (?, ?, 'owner')
         ON CONFLICT(app_id, user_id) DO UPDATE SET app_role = 'owner'
@@ -2927,9 +2924,7 @@ const TOOLS = [
       `).get(args.user, args.user, args.user);
       if (!target) throw new Error(`User not found: ${args.user}`);
 
-      // Both tables: app_users (membership) + app_user_roles (role).
-      // getAppForUser walks both, so we keep them in sync.
-      db.prepare('INSERT OR IGNORE INTO app_users (app_id, user_id) VALUES (?, ?)').run(app.id, target.id);
+      // The role row IS the access (v2.94.0: app_users is a view of it).
       db.prepare(`
         INSERT INTO app_user_roles (app_id, user_id, app_role) VALUES (?, ?, ?)
         ON CONFLICT(app_id, user_id) DO UPDATE SET app_role = excluded.app_role
@@ -2979,7 +2974,6 @@ const TOOLS = [
       }
 
       const r1 = db.prepare('DELETE FROM app_user_roles WHERE app_id = ? AND user_id = ?').run(app.id, target.id);
-      const r2 = db.prepare('DELETE FROM app_users      WHERE app_id = ? AND user_id = ?').run(app.id, target.id);
       // v2.41.0: and the roles the APP defined for them. Left behind, they come
       // back in full the moment the user is re-granted bare access.
       const appRolesRemoved = clearUserRoleGrants(app.id, target.id);
@@ -2997,7 +2991,7 @@ const TOOLS = [
       }
 
       log.info(`MCP: revoked access on ${app.slug} from user ${target.id} by ${user.id}`);
-      return { app: app.slug, user: { id: target.id, email: target.email }, removed: { roles: r1.changes, members: r2.changes, app_defined_roles: appRolesRemoved } };
+      return { app: app.slug, user: { id: target.id, email: target.email }, removed: { roles: r1.changes, members: r1.changes, app_defined_roles: appRolesRemoved } };
     },
   },
 
@@ -3211,7 +3205,6 @@ const TOOLS = [
       }
 
       const role = args.role || 'user';
-      db.prepare('INSERT OR IGNORE INTO app_users (app_id, user_id) VALUES (?, ?)').run(app.id, req.user_id);
       db.prepare(`
         INSERT INTO app_user_roles (app_id, user_id, app_role) VALUES (?, ?, ?)
         ON CONFLICT(app_id, user_id) DO UPDATE SET app_role = excluded.app_role
@@ -3531,11 +3524,8 @@ const TOOLS = [
         db.prepare('INSERT INTO health_configs (app_id, env) VALUES (?, ?)').run(appId, env);
         db.prepare('INSERT INTO health_state (app_id, env) VALUES (?, ?)').run(appId, env);
       }
-      // Auto-assign creator as both member and owner. The app_user_roles
-      // owner row is what makes "⚠ No owner" go away on /applications and
-      // gives this user per-app authz boundaries (e.g. the appcrane_*
-      // access-management tools). Forgetting it was the v2.5.12 bug.
-      db.prepare('INSERT OR IGNORE INTO app_users (app_id, user_id) VALUES (?, ?)').run(appId, user.id);
+      // The creator owns the app. The role row is also their access: since
+      // v2.94.0 app_users is a read-only view of app_user_roles.
       db.prepare(`
         INSERT INTO app_user_roles (app_id, user_id, app_role) VALUES (?, ?, 'owner')
         ON CONFLICT(app_id, user_id) DO UPDATE SET app_role = 'owner'

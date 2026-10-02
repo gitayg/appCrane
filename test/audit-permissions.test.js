@@ -79,12 +79,9 @@ function mkApp(slug) {
 }
 
 function assign(appId, user, appRole) {
-  db.prepare('INSERT OR IGNORE INTO app_users (app_id, user_id) VALUES (?, ?)').run(appId, user.id);
-  if (appRole) {
-    db.prepare(
-      'INSERT OR REPLACE INTO app_user_roles (app_id, user_id, app_role) VALUES (?, ?, ?)'
-    ).run(appId, user.id, appRole);
-  }
+  db.prepare(
+    'INSERT OR REPLACE INTO app_user_roles (app_id, user_id, app_role) VALUES (?, ?, ?)'
+  ).run(appId, user.id, appRole || 'user');
 }
 
 const platformAdmin = mkUser('apadmin', 'platform_admin');

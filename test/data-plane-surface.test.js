@@ -424,7 +424,6 @@ let nextSlot = 300;
 function mkApp(slug) {
   const id = db.prepare('INSERT INTO apps (name,slug,slot,source_type) VALUES (?,?,?,?)')
     .run(slug, slug, ++nextSlot, 'managed').lastInsertRowid;
-  db.prepare('INSERT INTO app_users (app_id,user_id) VALUES (?,?)').run(id, owner.id);
   db.prepare("INSERT INTO app_user_roles (app_id,user_id,app_role) VALUES (?,?,'owner')")
     .run(id, owner.id);
   return id;

@@ -135,7 +135,7 @@ function legacyManagedApp(slug) {
     db.prepare('INSERT INTO health_configs (app_id, env) VALUES (?, ?)').run(id, env);
     db.prepare('INSERT INTO health_state (app_id, env) VALUES (?, ?)').run(id, env);
   }
-  db.prepare('INSERT OR IGNORE INTO app_users (app_id, user_id) VALUES (?, ?)').run(id, adminId);
+  db.prepare("INSERT OR IGNORE INTO app_user_roles (app_id, user_id, app_role) VALUES (?, ?, 'user')").run(id, adminId);
   // The stray directory. Shaped like a bare repo (HEAD, objects/, refs/) so
   // anything that probed the disk would take it for one.
   const stray = join(ROOT, 'repos', `${slug}.git`);

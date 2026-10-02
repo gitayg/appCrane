@@ -84,7 +84,6 @@ const grantRole = (appId, roleId, uid) =>
     .run(roleId, uid, appId);
 
 const seatOnApp = (appId, uid, appRole) => {
-  db.prepare('INSERT OR IGNORE INTO app_users (app_id,user_id) VALUES (?,?)').run(appId, uid);
   db.prepare('INSERT INTO app_user_roles (app_id,user_id,app_role) VALUES (?,?,?)').run(appId, uid, appRole);
 };
 
@@ -120,11 +119,11 @@ const PADMIN = mkUser('platform_admin');
 
 // A platform_admin who WAS explicitly granted one role — proves the empty result
 // above is a missing grant, not a blanket exclusion of admins. Seated on the app
-// with bare membership because that is the precondition the grant API enforces:
-// a grant is only live while its holder is a member, so a grant row without an
-// app_users row is a state no caller can reach.
+// with a plain 'user' role row because that is the precondition the grant API
+// enforces: a grant is only live while its holder is a member, and membership
+// is an app_user_roles row (app_users is a view over it since v2.94.0).
 const PADMIN_GRANTED = mkUser('platform_admin');
-db.prepare('INSERT OR IGNORE INTO app_users (app_id,user_id) VALUES (?,?)').run(APP_A, PADMIN_GRANTED.uid);
+seatOnApp(APP_A, PADMIN_GRANTED.uid, 'user');
 grantRole(APP_A, A_APPROVER, PADMIN_GRANTED.uid);
 
 // Holds a role on app B only — the mirror of MULTI, so a leak in either

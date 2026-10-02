@@ -116,7 +116,6 @@ const rowsFor = (appId, userId) => ({
 function resetState() {
   db.prepare('DELETE FROM scim_groups').run();
   db.prepare('DELETE FROM scim_group_access').run();
-  db.prepare('DELETE FROM app_users').run();
   db.prepare('DELETE FROM app_user_roles').run();
 }
 
@@ -535,7 +534,6 @@ test('deleting the group withdraws the access it was holding open', async () => 
 test('the reconciler never revokes a grant an admin made directly', async () => {
   resetState();
   // Cara was assigned to the app by hand, before any group existed.
-  db.prepare('INSERT INTO app_users (app_id,user_id) VALUES (?,?)').run(APP_ID, CARA.id);
   db.prepare('INSERT INTO app_user_roles (app_id,user_id,app_role) VALUES (?,?,?)').run(APP_ID, CARA.id, 'owner');
 
   const { body: g } = await createGroup('Legal Team', [CARA.id]);

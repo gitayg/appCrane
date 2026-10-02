@@ -131,7 +131,6 @@ router.delete('/:id', requireAdmin, auditMiddleware('user-delete'), (req, res) =
     db.prepare('UPDATE backups SET created_by = NULL WHERE created_by = ?').run(userId);
     db.prepare('UPDATE audit_log SET user_id = NULL WHERE user_id = ?').run(userId);
     // Delete cascading FK records
-    db.prepare('DELETE FROM app_users WHERE user_id = ?').run(userId);
     db.prepare('DELETE FROM app_user_roles WHERE user_id = ?').run(userId);
     db.prepare('DELETE FROM identity_sessions WHERE user_id = ?').run(userId);
     db.prepare('DELETE FROM notification_configs WHERE user_id = ?').run(userId);
@@ -308,7 +307,6 @@ router.put('/:slug/roles', requireAppAccess, auditMiddleware('app-set-role'), (r
   if (app_role === 'none') {
     db.transaction(() => {
       db.prepare('DELETE FROM app_user_roles WHERE app_id = ? AND user_id = ?').run(app.id, user_id);
-      db.prepare('DELETE FROM app_users WHERE app_id = ? AND user_id = ?').run(app.id, user_id);
       clearUserRoleGrants(app.id, user_id);
     })();
     const target = db.prepare('SELECT email FROM users WHERE id = ?').get(user_id);
@@ -319,8 +317,6 @@ router.put('/:slug/roles', requireAppAccess, auditMiddleware('app-set-role'), (r
         INSERT INTO app_user_roles (app_id, user_id, app_role) VALUES (?, ?, ?)
         ON CONFLICT(app_id, user_id) DO UPDATE SET app_role = excluded.app_role
       `).run(app.id, user_id, app_role);
-      // Keep app_users in sync so API-key based flows also see this user's apps
-      db.prepare('INSERT OR IGNORE INTO app_users (app_id, user_id) VALUES (?, ?)').run(app.id, user_id);
     })();
   }
 

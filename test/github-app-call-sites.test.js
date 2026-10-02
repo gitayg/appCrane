@@ -162,7 +162,7 @@ function mkApp(slug, url) {
     db.prepare('INSERT INTO health_configs (app_id, env) VALUES (?, ?)').run(id, env);
     db.prepare('INSERT INTO health_state (app_id, env) VALUES (?, ?)').run(id, env);
   }
-  db.prepare('INSERT INTO app_users (app_id,user_id) VALUES (?,?)').run(id, uid);
+  db.prepare("INSERT INTO app_user_roles (app_id,user_id,app_role) VALUES (?,?,'user')").run(id, uid);
   db.prepare("INSERT INTO webhook_configs (app_id, token, secret) VALUES (?, ?, 'sec')").run(id, `wh-${slug}`);
   db.prepare('INSERT INTO app_github_installations (app_id, slug, installation_id, repo_full_name) VALUES (?,?,?,?)')
     .run(id, slug, INSTALLATION_ID, `acme/${slug}`);

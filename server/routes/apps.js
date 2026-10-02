@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { purgeRevokedTenants } from '../services/tenants.js';
 import crypto from 'crypto';
 import { getDb } from '../db.js';
 import { requireAuth, requireAdmin, requireAppAccess } from '../middleware/auth.js';
@@ -674,15 +675,8 @@ router.post('/', requireAuth, auditMiddleware('app-create'), async (req, res) =>
     db.prepare('INSERT INTO health_state (app_id, env) VALUES (?, ?)').run(appId, env);
   }
 
-  // Auto-assign creator to the app — both as a member (app_users) and as
-  // the owner (app_user_roles). Two tables because they predate each other:
-  // - app_users: bare "this user has access" rows
-  // - app_user_roles: per-app role (none/user/admin/owner)
-  // Forgetting the second was the v2.5.12 "⚠ No owner" bug — apps would
-  // be created without anyone to administer them per-app, and only global
-  // admins could touch them. Both inserts are idempotent (INSERT OR IGNORE
-  // / ON CONFLICT) so re-running this code path is safe.
-  db.prepare('INSERT OR IGNORE INTO app_users (app_id, user_id) VALUES (?, ?)').run(appId, req.user.id);
+  // The creator owns the app. The role row is also their access: since
+  // v2.94.0 app_users is a read-only view of app_user_roles.
   db.prepare(`
     INSERT INTO app_user_roles (app_id, user_id, app_role) VALUES (?, ?, 'owner')
     ON CONFLICT(app_id, user_id) DO UPDATE SET app_role = 'owner'
@@ -1617,7 +1611,6 @@ router.delete('/:slug', requireAppAccess, auditMiddleware('app-delete'), async (
   // Delete related records first to avoid FK constraint failures
   const appId = req.app.id;
   db.transaction(() => {
-    db.prepare('DELETE FROM app_users WHERE app_id = ?').run(appId);
     db.prepare('DELETE FROM app_user_roles WHERE app_id = ?').run(appId);
     db.prepare('DELETE FROM app_domain_aliases WHERE app_id = ?').run(appId);
     db.prepare('DELETE FROM deployments WHERE app_id = ?').run(appId);
@@ -1677,28 +1670,27 @@ router.put('/:slug/users', requireAppAccess, auditMiddleware('app-assign-users')
     }
   }
 
-  // Replace all assignments
+  // Replace all assignments. A role row is membership (v2.94.0), so someone
+  // already on the app keeps their tier, someone new joins as 'user', and
+  // everyone left out loses their row below.
+  const before = db.prepare('SELECT user_id FROM app_user_roles WHERE app_id = ?').all(appId).map(r => r.user_id);
   db.transaction(() => {
-    db.prepare('DELETE FROM app_users WHERE app_id = ?').run(appId);
-    const insert = db.prepare('INSERT OR IGNORE INTO app_users (app_id, user_id) VALUES (?, ?)');
+    const insert = db.prepare("INSERT OR IGNORE INTO app_user_roles (app_id, user_id, app_role) VALUES (?, ?, 'user')");
     for (const uid of ids) {
       insert.run(appId, uid);
     }
+    const keep = new Set(ids.map(Number));
+    const drop = db.prepare('DELETE FROM app_user_roles WHERE app_id = ? AND user_id = ?');
+    for (const uid of before) if (!keep.has(uid)) drop.run(appId, uid);
     // v2.41.0: anyone missing from the new list has just lost access, so the
     // roles the APP defined for them go too. Otherwise re-adding them later
     // silently restores every one, with no re-grant and nothing in the audit
     // log to explain where the powers came back from.
-    // v2.42.1: the platform TIER goes with membership. Deleting only app_users
-    // left the app_user_roles row behind, and resolveAppRole reads that row
-    // FIRST — so a removed member still resolved to their old tier instead of
-    // 'none', passed the /api/identity/verify deny gate, and walked back into
-    // the app through Caddy. AppCrane's own routes denied them (requireAppUser
-    // reads app_users), which is why the dashboard showed removal as complete.
-    db.prepare(
-      'DELETE FROM app_user_roles WHERE app_id = ? AND user_id NOT IN (SELECT user_id FROM app_users WHERE app_id = ?)'
-    ).run(appId, appId);
     pruneGrantsForNonMembers(appId);
   })();
+  const keep = new Set(ids.map(Number));
+  const emailOf = db.prepare('SELECT email FROM users WHERE id = ?');
+  for (const uid of before) if (!keep.has(uid)) purgeRevokedTenants(db, uid, emailOf.get(uid)?.email, [appId]);
 
   const users = db.prepare(`
     SELECT u.id, u.name, u.email FROM users u

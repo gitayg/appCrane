@@ -45,12 +45,13 @@ export function reconcileGroupAccess(db) {
 
   const ledger = db.prepare('SELECT * FROM scim_group_access').all();
 
+  // Since v2.94.0 the role row IS the access (app_users is a view of it), so
+  // there is one row to create or remove. The ledger keeps both flags: rows
+  // written before v2.94.0 can say "SCIM created the role, but the person was
+  // already a member by hand", and that person must keep plain access.
   const delRole   = db.prepare('DELETE FROM app_user_roles WHERE app_id = ? AND user_id = ?');
-  const delMember = db.prepare('DELETE FROM app_users      WHERE app_id = ? AND user_id = ?');
   const delLedger = db.prepare('DELETE FROM scim_group_access WHERE app_id = ? AND user_id = ?');
-  const hasMember = db.prepare('SELECT 1 FROM app_users      WHERE app_id = ? AND user_id = ?');
   const hasRole   = db.prepare('SELECT 1 FROM app_user_roles WHERE app_id = ? AND user_id = ?');
-  const addMember = db.prepare('INSERT INTO app_users (app_id, user_id) VALUES (?, ?)');
   const addRole   = db.prepare('INSERT INTO app_user_roles (app_id, user_id, app_role) VALUES (?, ?, ?)');
   const setRole   = db.prepare('UPDATE app_user_roles SET app_role = ? WHERE app_id = ? AND user_id = ?');
   const addLedger = db.prepare(`INSERT INTO scim_group_access
@@ -63,8 +64,13 @@ export function reconcileGroupAccess(db) {
     for (const l of ledger) {
       if (desired.has(`${l.app_id}:${l.user_id}`)) continue;
       // Revoke: undo exactly what was created, and nothing that was not.
-      if (l.created_role)       delRole.run(l.app_id, l.user_id);
-      if (l.created_membership) { delMember.run(l.app_id, l.user_id); revoked.push(l); }
+      if (l.created_role && l.created_membership) {
+        delRole.run(l.app_id, l.user_id);
+        revoked.push(l);
+      } else if (l.created_role) {
+        // Access was granted by hand before the group; only the tier was SCIM's.
+        setRole.run('user', l.app_id, l.user_id);
+      }
       delLedger.run(l.app_id, l.user_id);
     }
 
@@ -72,11 +78,9 @@ export function reconcileGroupAccess(db) {
     for (const [key, d] of desired) {
       const l = byKey.get(key);
       if (!l) {
-        const hadMembership = !!hasMember.get(d.app_id, d.user_id);
-        const hadRole       = !!hasRole.get(d.app_id, d.user_id);
-        if (!hadMembership) addMember.run(d.app_id, d.user_id);
-        if (!hadRole)       addRole.run(d.app_id, d.user_id, d.app_role);
-        addLedger.run(d.app_id, d.user_id, d.app_role, hadMembership ? 0 : 1, hadRole ? 0 : 1);
+        const hadRole = !!hasRole.get(d.app_id, d.user_id);
+        if (!hadRole) addRole.run(d.app_id, d.user_id, d.app_role);
+        addLedger.run(d.app_id, d.user_id, d.app_role, hadRole ? 0 : 1, hadRole ? 0 : 1);
       } else if (l.app_role !== d.app_role) {
         if (l.created_role) setRole.run(d.app_role, d.app_id, d.user_id);
         setLedger.run(d.app_role, d.app_id, d.user_id);

@@ -34,10 +34,8 @@ const mkApp = (slug, slot, multitenant) => db.prepare(
   "INSERT INTO apps (name,slug,slot,source_type,branch,multitenant) VALUES (?,?,?,'managed','main',?)"
 ).run(slug, slug, slot, multitenant ? 1 : 0).lastInsertRowid;
 
-const grant = (appId, userId) => {
-  db.prepare('INSERT OR IGNORE INTO app_users (app_id,user_id) VALUES (?,?)').run(appId, userId);
+const grant = (appId, userId) =>
   db.prepare("INSERT OR IGNORE INTO app_user_roles (app_id,user_id,app_role) VALUES (?,?,'user')").run(appId, userId);
-};
 
 /** Write a tenant DB where the app would, and return its path. */
 function seedTenant(slug, user) {

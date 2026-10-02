@@ -47,8 +47,8 @@ const bystander = mkUser('Bystander', 'user');
 const SLUG = 'ctxapp';
 const appId = db.prepare(`INSERT INTO apps (name,slug,slot,source_type,repo_backend,branch)
                           VALUES ('Ctx App', ?, 401, 'managed', 'local', 'main') RETURNING id`).get(SLUG).id;
-for (const u of [owner, bystander]) db.prepare('INSERT INTO app_users (app_id,user_id) VALUES (?,?)').run(appId, u.id);
 db.prepare("INSERT INTO app_user_roles (app_id,user_id,app_role) VALUES (?,?,'owner')").run(appId, owner.id);
+db.prepare("INSERT INTO app_user_roles (app_id,user_id,app_role) VALUES (?,?,'user')").run(appId, bystander.id);
 
 const ctxFile = () => resolve(join(process.env.DATA_DIR, 'apps', SLUG, 'agent-context.md'));
 const onDisk = () => (existsSync(ctxFile()) ? readFileSync(ctxFile(), 'utf8') : '');

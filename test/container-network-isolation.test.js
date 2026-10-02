@@ -567,7 +567,7 @@ test('deleting an app removes its containers and leaves the shared network alone
   const uid = db.prepare('INSERT INTO users (name,email,role,active,api_key_hash) VALUES (?,?,?,1,?)')
     .run('ni-admin', 'ni-admin@t.test', 'admin', hashApiKey(key)).lastInsertRowid;
   const doomed = mkApp('ni-doomed');
-  db.prepare('INSERT INTO app_users (app_id,user_id) VALUES (?,?)').run(doomed.id, uid);
+  db.prepare("INSERT INTO app_user_roles (app_id,user_id,app_role) VALUES (?,?,'user')").run(doomed.id, uid);
 
   const appsRouter = (await import('../server/routes/apps.js')).default;
   const { errorHandler } = await import('../server/utils/errors.js');

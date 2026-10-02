@@ -83,12 +83,12 @@ const APP_B = mkApp('tcp-alloc-b');
 const APP_C = mkApp('tcp-alloc-c');
 
 for (const uid of [owner.id, member.id]) {
-  db.prepare('INSERT INTO app_users (app_id,user_id) VALUES (?,?)').run(APP_GATE, uid);
-  db.prepare('INSERT INTO app_users (app_id,user_id) VALUES (?,?)').run(APP_FLIP, uid);
+  db.prepare("INSERT INTO app_user_roles (app_id,user_id,app_role) VALUES (?,?,'user')").run(APP_GATE, uid);
+  db.prepare("INSERT INTO app_user_roles (app_id,user_id,app_role) VALUES (?,?,'user')").run(APP_FLIP, uid);
 }
-db.prepare("INSERT INTO app_user_roles (app_id,user_id,app_role) VALUES (?,?,'owner')")
+db.prepare("INSERT OR REPLACE INTO app_user_roles (app_id,user_id,app_role) VALUES (?,?,'owner')")
   .run(APP_GATE, owner.id);
-db.prepare("INSERT INTO app_user_roles (app_id,user_id,app_role) VALUES (?,?,'owner')")
+db.prepare("INSERT OR REPLACE INTO app_user_roles (app_id,user_id,app_role) VALUES (?,?,'owner')")
   .run(APP_FLIP, owner.id);
 
 const appsRoutes = (await import('../server/routes/apps.js')).default;

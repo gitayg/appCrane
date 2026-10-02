@@ -231,7 +231,6 @@ const APP_GATE = mkApp('surface-gate');
 const APP_READ = mkApp('surface-read');
 
 for (const appId of [APP_GATE, APP_READ]) {
-  db.prepare('INSERT INTO app_users (app_id,user_id) VALUES (?,?)').run(appId, owner.id);
   db.prepare("INSERT INTO app_user_roles (app_id,user_id,app_role) VALUES (?,?,'owner')")
     .run(appId, owner.id);
 }

@@ -60,7 +60,6 @@ function mkApp(slug, visibility = 'private') {
   const id = db.prepare(
     'INSERT INTO apps (name,slug,slot,source_type,visibility,public_access) VALUES (?,?,?,?,?,?)'
   ).run(slug, slug, ++nextSlot, 'managed', visibility, visibility === 'public' ? 1 : 0).lastInsertRowid;
-  db.prepare('INSERT INTO app_users (app_id,user_id) VALUES (?,?)').run(id, owner.id);
   db.prepare("INSERT INTO app_user_roles (app_id,user_id,app_role) VALUES (?,?,'owner')")
     .run(id, owner.id);
   return id;

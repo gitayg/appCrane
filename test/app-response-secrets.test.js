@@ -35,7 +35,7 @@ const userId = db.prepare("INSERT INTO users (name,email,role,api_key_hash,activ
 
 const appId = db.prepare('INSERT INTO apps (name,slug,slot,source_type,github_url,github_token_encrypted,claude_credentials_encrypted) VALUES (?,?,?,?,?,?,?)')
   .run('Secret', 'secret-app', 1, 'github', 'https://github.com/example/secret-app', encrypt('ghp_' + 'z'.repeat(36)), encrypt('{"oauth":"x"}')).lastInsertRowid;
-db.prepare("INSERT INTO app_users (app_id, user_id) VALUES (?, ?)").run(appId, userId);
+db.prepare("INSERT INTO app_user_roles (app_id, user_id, app_role) VALUES (?, ?, 'user')").run(appId, userId);
 
 const SESSION = 'sess_' + 'q'.repeat(40);
 db.prepare("INSERT INTO identity_sessions (user_id, token_hash, expires_at) VALUES (?, ?, datetime('now', '+1 hour'))")

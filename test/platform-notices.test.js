@@ -76,7 +76,7 @@ mkUser('Notices Outsider', 'notices-outsider@example.test', 'user', KEY_OUTSIDER
 // The member is assigned to both apps, so a difference in what they get back is
 // a difference in SCOPING, never a difference in access.
 for (const appId of [HEADLESS_ID, VERIFIED_ID]) {
-  db.prepare('INSERT INTO app_users (app_id,user_id) VALUES (?,?)').run(appId, MEMBER_ID);
+  db.prepare("INSERT INTO app_user_roles (app_id,user_id,app_role) VALUES (?,?,'user')").run(appId, MEMBER_ID);
 }
 
 // ── The harness reproduces the mount ORDER from server/index.js ─────────────

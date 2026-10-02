@@ -39,7 +39,7 @@ function mkUser(role) {
   ).run(`u${n}`, `u${n}@t.test`, role, `hash${n}`).lastInsertRowid;
 }
 const assign = (uid) =>
-  db.prepare('INSERT INTO app_users (app_id,user_id) VALUES (?,?)').run(appId, uid);
+  db.prepare("INSERT INTO app_user_roles (app_id,user_id,app_role) VALUES (?,?,'user')").run(appId, uid);
 
 const { requireAppUser } = await import('../server/middleware/auth.js');
 

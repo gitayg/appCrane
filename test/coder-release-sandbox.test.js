@@ -129,8 +129,8 @@ const DEPLOYING = 'cranedeploy';
 const craneAppRow = await craneApp(CRANE);
 const deployAppRow = await craneApp(DEPLOYING, { autoDeploy: true });
 
-// The member can chat (app_users assignment) but holds no app-admin role.
-db.prepare('INSERT INTO app_users (app_id, user_id) VALUES (?, ?)').run(craneAppRow.id, memberId);
+// The member can chat (a 'user' role row) but holds no app-admin role.
+db.prepare("INSERT INTO app_user_roles (app_id, user_id, app_role) VALUES (?, ?, 'user')").run(craneAppRow.id, memberId);
 
 // A GitHub-backed app whose "remote" is a bare repo on disk. It used to get a
 // session and ship to that remote; the coder is Crane-hosted-only now, so what
@@ -301,7 +301,7 @@ test('release: a chat-capable user who is not an app admin is refused', async ()
 
   // Promoted to app-admin, the same call goes through: the gate is the role,
   // not "platform admin only".
-  db.prepare("INSERT INTO app_user_roles (app_id, user_id, app_role) VALUES (?, ?, 'admin')").run(craneAppRow.id, memberId);
+  db.prepare("INSERT OR REPLACE INTO app_user_roles (app_id, user_id, app_role) VALUES (?, ?, 'admin')").run(craneAppRow.id, memberId);
   const ok = await json(await release(CRANE, { paths: ['src/keep.js'] }, MEMBER_KEY));
   assert.equal(ok.status, 200, JSON.stringify(ok.body));
   assert.equal(blobOf(CRANE, 'src/keep.js').toString('utf8'), 'export const keep = 2;\n');

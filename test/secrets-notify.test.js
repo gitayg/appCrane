@@ -145,7 +145,7 @@ const mkUser = (name, email, role, key) => db.prepare(
 ).run(name, email, role, hashApiKey(key || `no-api-key-for-${email}`)).lastInsertRowid;
 
 const assign = (appId, userId, appRole) => {
-  db.prepare('INSERT OR IGNORE INTO app_users (app_id,user_id) VALUES (?,?)').run(appId, userId);
+  db.prepare("INSERT OR IGNORE INTO app_user_roles (app_id,user_id,app_role) VALUES (?,?,'user')").run(appId, userId);
   if (appRole) {
     db.prepare('INSERT OR REPLACE INTO app_user_roles (app_id,user_id,app_role) VALUES (?,?,?)')
       .run(appId, userId, appRole);

@@ -447,9 +447,9 @@ test('POST /api/ask/:slug accepts a local app with no github_url and streams the
     .run(hashApiKey(userKey)).lastInsertRowid;
   db.prepare("INSERT INTO users (name,email,role,api_key_hash,active,kind) VALUES ('o','o@x.test','user',?,1,'human')")
     .run(hashApiKey(outsiderKey));
-  db.prepare('INSERT INTO app_users (app_id, user_id) VALUES (?, ?)').run(localApp.id, uid);
+  db.prepare("INSERT INTO app_user_roles (app_id, user_id, app_role) VALUES (?, ?, 'user')").run(localApp.id, uid);
   const noRepo = db.prepare("SELECT id FROM apps WHERE slug = 'ask-norepo'").get();
-  db.prepare('INSERT INTO app_users (app_id, user_id) VALUES (?, ?)').run(noRepo.id, uid);
+  db.prepare("INSERT INTO app_user_roles (app_id, user_id, app_role) VALUES (?, ?, 'user')").run(noRepo.id, uid);
 
   const app = express();
   app.use(express.json());

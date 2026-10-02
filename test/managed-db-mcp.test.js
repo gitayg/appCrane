@@ -60,10 +60,9 @@ const OTHER_APP_ID = mkApp('someone-elses-app');
 
 let seq = 0;
 /**
- * `assignTo` writes app_users — the membership row requireAppUser reads.
- * `roleOn` writes app_user_roles — the per-app ROLE row. They are separate
- * tables and the difference is load-bearing here: the write tier keys on
- * app_users alone, exactly as the HTTP middleware does.
+ * `assignTo` writes a 'user' row in app_user_roles — what the app_users view
+ * (and so requireAppUser) reads. `roleOn` upserts the per-app ROLE on that
+ * same table; since v2.94.0 there is no separate membership table.
  */
 function mkUser({ role = 'user', assignTo = null, roleOn = null, appRole = 'owner', scope = null } = {}) {
   const n = ++seq;
@@ -71,9 +70,9 @@ function mkUser({ role = 'user', assignTo = null, roleOn = null, appRole = 'owne
   const id = db.prepare(
     'INSERT INTO users (name,email,role,api_key_hash,active,kind,mcp_app_scope) VALUES (?,?,?,?,1,?,?)'
   ).run(`u${n}`, `u${n}@t.test`, role, hashApiKey(key), 'human', scope).lastInsertRowid;
-  if (assignTo) db.prepare('INSERT INTO app_users (app_id,user_id) VALUES (?,?)').run(assignTo, id);
+  if (assignTo) db.prepare("INSERT INTO app_user_roles (app_id,user_id,app_role) VALUES (?,?,'user')").run(assignTo, id);
   if (roleOn) {
-    db.prepare('INSERT INTO app_user_roles (app_id,user_id,app_role) VALUES (?,?,?)').run(roleOn, id, appRole);
+    db.prepare('INSERT OR REPLACE INTO app_user_roles (app_id,user_id,app_role) VALUES (?,?,?)').run(roleOn, id, appRole);
   }
   return db.prepare('SELECT * FROM users WHERE id = ?').get(id);
 }
@@ -83,7 +82,8 @@ const OUTSIDER        = mkUser({ assignTo: OTHER_APP_ID });                 // a
 const ADMIN           = mkUser({ role: 'admin' });                          // unassigned
 const PLATFORM        = mkUser({ role: 'platform_admin' });                 // unassigned
 const ASSIGNED_ADMIN  = mkUser({ role: 'admin', assignTo: APP_ID });        // admin who did the audited step
-const ROLE_ONLY       = mkUser({ roleOn: APP_ID, appRole: 'owner' });       // app_user_roles but no app_users
+const ROLE_ONLY       = mkUser({ roleOn: APP_ID, appRole: 'owner' });       // an owner of record
+const NONE_ROW        = mkUser({ roleOn: APP_ID, appRole: 'none' });        // a stored 'none': no access
 const SCOPED_OUT      = mkUser({ assignTo: APP_ID, scope: JSON.stringify(['someone-elses-app']) });
 
 // ── The engine double ───────────────────────────────────────────────────────
@@ -237,19 +237,19 @@ test('an UNASSIGNED admin or platform_admin cannot provision, and is told how to
   assert.equal(out.database.engine, 'postgres');
 });
 
-test('the write tier keys on the membership row, not on a per-app role', async () => {
-  // ROLE_ONLY holds app_user_roles owner but no app_users row. requireAppUser
-  // reads app_users alone, so the HTTP route refuses this state and so must the
-  // tool. In practice both tables are written together (grant_app_access,
-  // create_app); this pins the tier so the two surfaces cannot drift apart.
-  const msg = await refusal(ROLE_ONLY, 'appcrane_provision_database', { slug: 'bookstack', engine: 'mariadb' });
-  assert.match(msg, /Forbidden/);
-  assert.deepEqual(calls.filter((c) => c[0] === 'provision'), []);
+test('an owner of record passes both tiers, and a stored none passes neither', async () => {
+  // v2.94.0: the role row IS the membership (app_users is a view of it). This
+  // test used to pin the opposite: an owner row without a membership row was
+  // refused the write tier, which is how owners were locked out of their own
+  // app's env vars. Both surfaces read the same view, so they cannot drift.
+  const out = jsonOf(await callTool(ROLE_ONLY, 'appcrane_provision_database', { slug: 'bookstack', engine: 'mariadb' }));
+  assert.equal(out.database.engine, 'mariadb');
+  assert.equal(jsonOf(await callTool(ROLE_ONLY, 'appcrane_list_databases', { slug: 'bookstack' })).app, 'bookstack');
 
-  // ...but that same user CAN read, which is the app-access tier the GET route
-  // uses. A refusal on both would make the test above meaningless.
-  const out = jsonOf(await callTool(ROLE_ONLY, 'appcrane_list_databases', { slug: 'bookstack' }));
-  assert.equal(out.app, 'bookstack');
+  const before = calls.length;
+  assert.match(await refusal(NONE_ROW, 'appcrane_provision_database', { slug: 'bookstack', engine: 'postgres' }), /Forbidden/);
+  assert.match(await refusal(NONE_ROW, 'appcrane_list_databases', { slug: 'bookstack' }), /Forbidden/);
+  assert.equal(calls.length, before);
 });
 
 test('a read-only MCP key may list but may not provision', async () => {

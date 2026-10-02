@@ -40,7 +40,6 @@ const APP = db.prepare(
   "INSERT INTO apps (name,slug,slot,source_type,auth_mode,branch) VALUES (?,?,?,'managed','forward_auth','main')"
 ).run('Legal', 'legal', 1).lastInsertRowid;
 
-db.prepare('INSERT INTO app_users (app_id,user_id) VALUES (?,?)').run(APP, OWNER);
 db.prepare('INSERT INTO app_user_roles (app_id,user_id,app_role) VALUES (?,?,?)').run(APP, OWNER, 'owner');
 
 const { roleForUserOnApp } = await import('../server/services/permissions.js');
@@ -60,12 +59,10 @@ function setRole(app_role) {
   // assertion at the bottom, which fails if the route stops deleting.
   if (app_role === 'none') {
     db.prepare('DELETE FROM app_user_roles WHERE app_id = ? AND user_id = ?').run(APP, TARGET);
-    db.prepare('DELETE FROM app_users WHERE app_id = ? AND user_id = ?').run(APP, TARGET);
   } else {
     db.prepare(`INSERT INTO app_user_roles (app_id,user_id,app_role) VALUES (?,?,?)
                 ON CONFLICT(app_id,user_id) DO UPDATE SET app_role = excluded.app_role`)
       .run(APP, TARGET, app_role);
-    db.prepare('INSERT OR IGNORE INTO app_users (app_id,user_id) VALUES (?,?)').run(APP, TARGET);
   }
 }
 
@@ -93,6 +90,20 @@ test("every gate agrees after 'none' — the disagreement WAS the bug", () => {
   assert.notEqual(roleForUserOnApp({ id: TARGET, role: 'user' }, { id: APP }), 'user');
 });
 
+test("a stored 'none' row is never a grant, even if some writer leaves one", () => {
+  // The two-table disagreement this file was written for cannot be built any
+  // more (app_users is a view over app_user_roles). The closest surviving
+  // invariant: a raw 'none' row, written directly, must not open any gate.
+  db.prepare(`INSERT INTO app_user_roles (app_id,user_id,app_role) VALUES (?,?,'none')
+              ON CONFLICT(app_id,user_id) DO UPDATE SET app_role = 'none'`).run(APP, TARGET);
+  const m = db.prepare('SELECT COUNT(*) c FROM app_users WHERE app_id=? AND user_id=?').get(APP, TARGET).c;
+  assert.equal(m, 0, "app_users view surfaces a 'none' row as membership");
+  assert.equal(gate(requireAppUser, TARGET, 'user'), 'FORBIDDEN');
+  assert.equal(gate(requireAppAccess, TARGET, 'user'), 'FORBIDDEN');
+  assert.notEqual(roleForUserOnApp({ id: TARGET, role: 'user' }, { id: APP }), 'user');
+  setRole('none');
+});
+
 test("re-adding after 'none' works — removal is not a tombstone", () => {
   setRole('none');
   setRole('admin');
@@ -107,7 +118,12 @@ test("the route deletes on 'none' rather than writing a row", () => {
   const users = readFileSync('server/routes/users.js', 'utf8');
   const at = users.indexOf("if (app_role === 'none')");
   assert.ok(at > 0, "the 'none' branch is gone from PUT /:slug/roles");
-  assert.match(users.slice(at, at + 600), /DELETE FROM app_users/,
-    "PUT /:slug/roles no longer deletes the membership row on 'none' — a removed " +
+  // Since v2.94.0 app_users is a view over app_user_roles, so the role row IS
+  // the membership: deleting it is what removes access.
+  const branch = users.slice(at, users.indexOf('} else {', at));
+  assert.match(branch, /DELETE FROM app_user_roles/,
+    "PUT /:slug/roles no longer deletes the role row on 'none' — a removed " +
     'user regains access to decrypted production secrets');
+  assert.doesNotMatch(branch, /INSERT/,
+    "PUT /:slug/roles writes a row on 'none' — absence must be the only representation");
 });
