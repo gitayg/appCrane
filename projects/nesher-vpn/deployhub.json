@@ -1,6 +1,0 @@
-{
-  "name": "Nesher VPN",
-  "description": "Ad-hoc WireGuard passes that exit through the Nesher device.",
-  "be": { "entry": "node server.js", "health": "/api/health" },
-  "data_dirs": ["data/"]
-}

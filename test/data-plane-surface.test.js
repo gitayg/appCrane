@@ -511,7 +511,7 @@ test('the MCP setter refuses before it reads anything, and both doors say the sa
     'before it runs for a global admin, and this handler\'s later steps allocate ports and ' +
     'write columns.');
 
-  const SHARED = 'Only platform admins can change ingress_type, public_port, sandbox_public_port or data_plane_port';
+  const SHARED = 'Only platform admins can change ingress_type, public_port, sandbox_public_port, data_plane_port or data_plane_protocol';
   assert.ok(MCP_SRC.includes(SHARED),
     'the MCP refusal no longer names data_plane_port, so a caller refused for touching it is ' +
     'told the wrong field is the problem');

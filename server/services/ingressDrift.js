@@ -1,4 +1,4 @@
-import { publicPortForApp, dataPlanePortForApp } from './tcpIngress.js';
+import { publicPortForApp, dataPlanePortForApp, effectiveDataPlaneProtocol } from './tcpIngress.js';
 
 // Does the RUNNING container actually publish what the app row says it does?
 //
@@ -31,7 +31,7 @@ import { publicPortForApp, dataPlanePortForApp } from './tcpIngress.js';
 export function intendedPublish(app) {
   const host = publicPortForApp(app);
   if (host === null) return null;
-  return { host, container: dataPlanePortForApp(app) };
+  return { host, container: dataPlanePortForApp(app), protocol: effectiveDataPlaneProtocol(app) };
 }
 
 /**
@@ -86,11 +86,14 @@ export function ingressDrift(app, observed) {
     };
   }
 
+  // A publish observed without a protocol (an older reader) is taken as tcp,
+  // docker's default — the only transport there was before data_plane_protocol.
   const match = publishes.find(p =>
-    p.hostPort === expected.host && p.containerPort === expected.container);
+    p.hostPort === expected.host && p.containerPort === expected.container
+    && (p.protocol || 'tcp') === expected.protocol);
   if (match) return { applied: true, drift: null };
 
-  const wanted = `0.0.0.0:${expected.host} -> container:${expected.container}`;
+  const wanted = `0.0.0.0:${expected.host} -> container:${expected.container}/${expected.protocol}`;
 
   if (publishes.length === 0) {
     return {
@@ -116,7 +119,7 @@ export function ingressDrift(app, observed) {
       expected,
       actual: publishes,
       message: `The running container publishes ${publishes.map(p =>
-        `${p.hostIp}:${p.hostPort} -> container:${p.containerPort}`).join(', ')}, but the configuration ` +
+        `${p.hostIp}:${p.hostPort} -> container:${p.containerPort}/${p.protocol || 'tcp'}`).join(', ')}, but the configuration ` +
         `asks for ${wanted}. The container predates the change — restart the app to apply it. Clients ` +
         `are currently reaching the OLD mapping.`,
     },

@@ -20,7 +20,7 @@ import { assessMemoryChange } from '../services/memoryBudget.js';
 import { attachedInstallationIds, codeSourceFields } from '../services/codeSource.js';
 import {
   effectiveIngressType, publicPortForApp, pendingPortRelease, validateIngressType,
-  assignPublicPort, releasePublicPort, drainingPorts, effectiveDataPlanePort, validateDataPlanePort, CONTROL_PLANE_PORT,
+  assignPublicPort, releasePublicPort, drainingPorts, effectiveDataPlanePort, validateDataPlanePort, effectiveDataPlaneProtocol, validateDataPlaneProtocol, CONTROL_PLANE_PORT,
 } from '../services/tcpIngress.js';
 
 // v2.42.0: ingress_type and public_port are REPORTED on every app payload, not
@@ -86,6 +86,7 @@ function ingressFields(app, canSeePort = true, observed = undefined, draining = 
     // already withheld from the catalog for callers without access.
     sandbox_public_port: canSeePort ? publicPortForApp(app, 'sandbox') : undefined,
     data_plane_port: canSeePort ? effectiveDataPlanePort(app) : undefined,
+    data_plane_protocol: canSeePort ? effectiveDataPlaneProtocol(app) : undefined,
     pending_port_release: canSeePort ? pendingPortRelease(app) : undefined,
     ...(drift ? { publish_applied: drift.applied, publish_drift: drift.drift } : {}),
     ...(canSeePort && draining !== undefined && draining.length
@@ -115,6 +116,7 @@ function ingressAudit(row) {
     public_port: publicPortForApp(row),
     sandbox_public_port: publicPortForApp(row, 'sandbox'),
     data_plane_port: effectiveDataPlanePort(row),
+    data_plane_protocol: effectiveDataPlaneProtocol(row),
     pending_port_release: pendingPortRelease(row),
   };
 }
@@ -868,7 +870,7 @@ router.get('/:slug/storage', requireAppAccess, async (req, res) => {
 router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req, res) => {
   const db = getDb();
   const app = req.app;
-  const { name, domain, description, category, source_type, github_url, branch, github_token, max_ram_mb, max_cpu_percent, public_access, visibility, image_retention, frame_ancestors, auth_mode, auth_bypass_paths, email_from_name, ingress_type, public_port, sandbox_public_port, data_plane_port, image_ref, container_port, health_path, container_command, volume_paths } = req.body;
+  const { name, domain, description, category, source_type, github_url, branch, github_token, max_ram_mb, max_cpu_percent, public_access, visibility, image_retention, frame_ancestors, auth_mode, auth_bypass_paths, email_from_name, ingress_type, public_port, sandbox_public_port, data_plane_port, data_plane_protocol, image_ref, container_port, health_path, container_command, volume_paths } = req.body;
 
   // Adopt an app into the catalogue: allowed ONLY while catalog_slug is NULL.
   // An app created before 086 has no link, so the deployer cannot resolve which
@@ -1240,7 +1242,8 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
   const currentDataPlanePort = effectiveDataPlanePort(app);
   const wantsTypeChange = ingress_type !== undefined && ingress_type !== currentType;
   const wantsPortChange = public_port !== undefined && public_port !== currentPort;
-  const wantsDataPlaneChange = data_plane_port !== undefined && data_plane_port !== currentDataPlanePort;
+  const wantsDataPlaneChange = (data_plane_port !== undefined && data_plane_port !== currentDataPlanePort)
+    || (data_plane_protocol !== undefined && data_plane_protocol !== effectiveDataPlaneProtocol(app));
   // v2.46.0. Same change-not-presence rule as the others, so a read-modify-write
   // client echoing back the value it was handed is not treated as a change.
   const currentSandboxPort = publicPortForApp(app, 'sandbox');
@@ -1255,7 +1258,7 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
   let ingressWork = null;
   if (wantsTypeChange || wantsPortChange || wantsDataPlaneChange || wantsSandboxPortChange || needsAllocation) {
     if (req.user.role !== 'platform_admin') {
-      throw new AppError('Only platform admins can change ingress_type, public_port, sandbox_public_port or data_plane_port', 403, 'FORBIDDEN');
+      throw new AppError('Only platform admins can change ingress_type, public_port, sandbox_public_port, data_plane_port or data_plane_protocol', 403, 'FORBIDDEN');
     }
     let nextType = currentType;
     if (ingress_type !== undefined) {
@@ -1303,6 +1306,16 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
         catch (e) { throw new AppError(e.message, e.status || 400, e.code || 'VALIDATION'); }
         updates.data_plane_port = data_plane_port;
       }
+    }
+    if (data_plane_protocol !== undefined) {
+      // A pure-tcp app's published port is its HTTP container port, which the
+      // health probe must reach over TCP — only a dual data plane can be UDP.
+      if (nextType !== 'dual') {
+        throw new AppError("data_plane_protocol only applies to an app with ingress_type='dual'", 400, 'VALIDATION');
+      }
+      try { validateDataPlaneProtocol(data_plane_protocol); }
+      catch (e) { throw new AppError(e.message, e.status || 400, e.code || 'VALIDATION'); }
+      updates.data_plane_protocol = data_plane_protocol;
     }
     // SECURITY: 'tcp' publishes CONTROL_PLANE_PORT itself — correct for an app
     // whose whole container IS the data plane, and wrong for a row that still
@@ -1396,7 +1409,7 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
     return res.json({ app: { ...withoutSecretColumns(app), auth_mode: effectiveAuthMode(app.auth_mode), ...ingressFields(app) }, message: 'No changes' });
   }
 
-  const ALLOWED_APP_COLS = new Set(['name','domain','description','category','source_type','github_url','branch','public_access','visibility','github_token_encrypted','resource_limits','runtime','image_retention','frame_ancestors','auth_mode','auth_bypass_paths','email_from_name','ingress_type','data_plane_port','image_ref','container_port','health_path','catalog_slug','container_command','volume_paths']);
+  const ALLOWED_APP_COLS = new Set(['name','domain','description','category','source_type','github_url','branch','public_access','visibility','github_token_encrypted','resource_limits','runtime','image_retention','frame_ancestors','auth_mode','auth_bypass_paths','email_from_name','ingress_type','data_plane_port','data_plane_protocol','image_ref','container_port','health_path','catalog_slug','container_command','volume_paths']);
   const invalidKey = Object.keys(updates).find(k => !ALLOWED_APP_COLS.has(k));
   if (invalidKey) throw new AppError(`Invalid field: ${invalidKey}`, 400, 'VALIDATION');
 
@@ -1453,7 +1466,7 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
         assignPublicPort(db, app.id, ingressWork.sandbox, 'sandbox');
       }
     }
-    const after = db.prepare('SELECT ingress_type, public_port, sandbox_public_port, data_plane_port FROM apps WHERE id = ?').get(app.id);
+    const after = db.prepare('SELECT ingress_type, public_port, sandbox_public_port, data_plane_port, data_plane_protocol FROM apps WHERE id = ?').get(app.id);
     // Audited on its own action, not folded into the generic 'app-update'
     // entry: "a port was opened on the host" is the one change here an
     // operator reviewing the log must be able to find by name.
