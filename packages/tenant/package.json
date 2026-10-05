@@ -1,6 +1,6 @@
 {
   "name": "appcrane-tenant",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Cooperative per-tenant SQLite DB helper for apps hosted on AppCrane. Derives an isolated DB path per (org, user) from AppCrane's signed identity headers.",
   "type": "module",
   "main": "index.js",

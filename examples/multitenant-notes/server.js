@@ -10,11 +10,15 @@ import { tenantDb, tenantFile, assertTenantQuota } from 'appcrane-tenant';
 const app = express();
 app.use(express.json());
 
-// Open (and lazily create) the caller's own notes DB from the request identity.
+// Schema steps, in order. Append new ones; never edit or remove a shipped one.
+// Each tenant's file is upgraded the first time it is opened after a deploy.
+const migrations = [
+  'CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)',
+];
+
+// Open the caller's own notes DB from the request identity, upgraded if behind.
 function db(req) {
-  const d = tenantDb(req);
-  d.exec('CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, body TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)');
-  return d;
+  return tenantDb(req, { migrations });
 }
 
 app.get('/api/health', (_req, res) => res.json({ status: 'ok', version: '1.0.0' }));
