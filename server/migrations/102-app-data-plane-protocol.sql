@@ -1,3 +1,9 @@
+-- migration:no-transaction
+--
+-- (Required: SQLite ignores PRAGMA foreign_keys inside a transaction, so a
+-- wrapped rebuild would run DROP TABLE apps with foreign keys ON and cascade-
+-- delete every child row -- deployments, roles, env. Same as 081-090.)
+--
 -- apps.data_plane_protocol -- the transport of a 'dual' app's raw data plane.
 --
 -- Until now every public publish was `-p 0.0.0.0:<public_port>:<container>`,
