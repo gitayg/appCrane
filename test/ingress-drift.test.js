@@ -41,7 +41,7 @@ const http = { ingress_type: 'http', public_port: null,  data_plane_port: null }
 
 test('the loopback control-plane publish is not a public port', () => {
   const parsed = parsePublishedPorts('127.0.0.1:4013->3000/tcp, 0.0.0.0:8080->10800/tcp');
-  assert.deepEqual(parsed, [{ hostIp: '0.0.0.0', hostPort: 8080, containerPort: 10800 }],
+  assert.deepEqual(parsed, [{ hostIp: '0.0.0.0', hostPort: 8080, containerPort: 10800, protocol: 'tcp' }],
     'every app has the 127.0.0.1 publish — counting it would make every app look drifted');
 });
 
@@ -61,7 +61,7 @@ test('empty and absent port columns are handled', () => {
 
 test('IPv6 bindings parse, and IPv6 loopback is excluded like IPv4', () => {
   assert.deepEqual(parsePublishedPorts('[::]:8080->10800/tcp'),
-    [{ hostIp: '[::]', hostPort: 8080, containerPort: 10800 }]);
+    [{ hostIp: '[::]', hostPort: 8080, containerPort: 10800, protocol: 'tcp' }]);
   assert.deepEqual(parsePublishedPorts('[::1]:4013->3000/tcp'), []);
 });
 
@@ -103,7 +103,7 @@ test('the host port matching is not enough — the container side must match too
 });
 
 test('a pure-tcp app is judged against container port 3000', () => {
-  assert.deepEqual(intendedPublish(tcp), { host: 31005, container: 3000 });
+  assert.deepEqual(intendedPublish(tcp), { host: 31005, container: 3000, protocol: 'tcp' });
   assert.equal(ingressDrift(tcp, { publishes: [{ hostIp: '0.0.0.0', hostPort: 31005, containerPort: 3000 }] }).applied, true);
   assert.equal(ingressDrift(tcp, { publishes: [] }).drift.state, 'not_applied');
 });
@@ -142,4 +142,27 @@ test('an unreadable container on an app that publishes nothing raises nothing', 
   const r = ingressDrift(http, null);
   assert.equal(r.applied, null);
   assert.equal(r.drift, null, 'there is no publish to be uncertain about');
+});
+
+// ---------------------------------------------------------------------------
+// data_plane_protocol: a UDP data plane (e.g. a WireGuard relay)
+// ---------------------------------------------------------------------------
+
+test('a UDP publish parses with its protocol', () => {
+  assert.deepEqual(parsePublishedPorts('127.0.0.1:4013->3000/tcp, 0.0.0.0:51820->51820/udp'),
+    [{ hostIp: '0.0.0.0', hostPort: 51820, containerPort: 51820, protocol: 'udp' }]);
+});
+
+test('a udp dual app is applied only when the container publishes UDP', () => {
+  const udp = { ...dual, data_plane_protocol: 'udp' };
+  assert.deepEqual(intendedPublish(udp), { host: 8080, container: 10800, protocol: 'udp' });
+  assert.equal(ingressDrift(udp, { publishes: [{ hostIp: '0.0.0.0', hostPort: 8080, containerPort: 10800, protocol: 'udp' }] }).applied, true);
+  const stale = ingressDrift(udp, { publishes: [{ hostIp: '0.0.0.0', hostPort: 8080, containerPort: 10800, protocol: 'tcp' }] });
+  assert.equal(stale.drift.state, 'stale', 'the right port on the wrong transport reaches no client');
+});
+
+test('data_plane_protocol is ignored outside dual, and a publish with no protocol reads as tcp', () => {
+  assert.equal(intendedPublish({ ...tcp, data_plane_protocol: 'udp' }).protocol, 'tcp',
+    "a pure-tcp app's publish is its HTTP port, which the health probe needs over TCP");
+  assert.equal(ingressDrift(dual, { publishes: [{ hostIp: '0.0.0.0', hostPort: 8080, containerPort: 10800 }] }).applied, true);
 });

@@ -11,7 +11,7 @@ import log from '../utils/logger.js';
 import { validateBypassPaths } from '../utils/authBypassPaths.js';
 import {
   effectiveIngressType, validateIngressType, publicPortForApp, pendingPortRelease,
-  assignPublicPort, releasePublicPort, drainingPorts, effectiveDataPlanePort, dataPlanePortForApp, validateDataPlanePort,
+  assignPublicPort, releasePublicPort, drainingPorts, effectiveDataPlanePort, dataPlanePortForApp, validateDataPlanePort, effectiveDataPlaneProtocol, validateDataPlaneProtocol,
   INGRESS_TYPES, CONTROL_PLANE_PORT,
   PUBLIC_PORT_MIN, PUBLIC_PORT_MAX, AUTO_PORT_MIN, AUTO_PORT_MAX,
 } from './tcpIngress.js';
@@ -2590,6 +2590,7 @@ const TOOLS = [
         ingress_type: ingressType,
         public_port: publicPort,
         data_plane_port: effectiveDataPlanePort(app),
+        data_plane_protocol: effectiveDataPlaneProtocol(app),
         pending_port_release: stillBound,
         // v2.47.0: ports this app still has RESERVED after a re-pin. A running
         // container is bound to them; AppCrane holds them so nobody else is
@@ -2700,6 +2701,11 @@ const TOOLS = [
           maximum: PUBLIC_PORT_MAX,
           description: `CONTAINER port the raw publish targets, ${PUBLIC_PORT_MIN}-${PUBLIC_PORT_MAX}. REQUIRED with ingress_type='dual'. On any other type the only accepted value is null, which DROPS a data plane the app still has pinned — required to flip a dual app to 'tcp', since that publishes container port ${CONTROL_PLANE_PORT} instead. Must NOT be ${CONTROL_PLANE_PORT}: that is the app's HTTP control plane, the port Caddy proxies to, and publishing it raw would expose the ordinary HTTP origin with no TLS, no forward_auth, no identity headers and no request audit. Give the data plane its own listener on another port inside the container. Unlike public_port this is not globally unique — container network namespaces are separate, so two apps may each use the same container-side port.`,
         },
+        data_plane_protocol: {
+          type: 'string',
+          enum: ['tcp', 'udp'],
+          description: "Transport of the raw data plane. Only valid with ingress_type='dual' (a pure-tcp app's published port is its HTTP port, which the health probe reaches over TCP). Default tcp. Use udp for UDP-only protocols — e.g. a WireGuard relay, whose clients speak nothing else. Omit to keep the current value.",
+        },
       },
       required: ['slug', 'ingress_type'],
       additionalProperties: false,
@@ -2710,7 +2716,7 @@ const TOOLS = [
     requiredRole: 'admin',
     handler: async (user, args) => {
       if (user.role !== 'platform_admin') {
-        throw new Error('Only platform admins can change ingress_type, public_port, sandbox_public_port or data_plane_port — publishing a host port bypasses every control AppCrane has.');
+        throw new Error('Only platform admins can change ingress_type, public_port, sandbox_public_port, data_plane_port or data_plane_protocol — publishing a host port bypasses every control AppCrane has.');
       }
       const app = getAppForUser(user, args.slug);
       validateIngressType(args.ingress_type);
@@ -2729,6 +2735,17 @@ const TOOLS = [
       }
       if (args.data_plane_port !== undefined && args.data_plane_port !== null && args.ingress_type !== 'dual') {
         throw new Error("data_plane_port only applies to an app with ingress_type='dual'");
+      }
+      // An echo of what get-ingress reported is not a request (see the REST
+      // route): only a protocol other than 'tcp' and the app's current one is
+      // refused on a non-dual app, and nothing is written for it.
+      const echoedProtocol = args.data_plane_protocol !== undefined && args.ingress_type !== 'dual';
+      if (echoedProtocol) {
+        if (args.data_plane_protocol !== 'tcp' && args.data_plane_protocol !== effectiveDataPlaneProtocol(app)) {
+          throw new Error("data_plane_protocol only applies to an app with ingress_type='dual'");
+        }
+      } else if (args.data_plane_protocol !== undefined) {
+        validateDataPlaneProtocol(args.data_plane_protocol);
       }
       if (args.data_plane_port === null && args.ingress_type === 'dual') {
         throw new Error(
@@ -2784,6 +2801,7 @@ const TOOLS = [
         public_port: publicPortForApp(app),
         sandbox_public_port: publicPortForApp(app, 'sandbox'),
         data_plane_port: effectiveDataPlanePort(app),
+        data_plane_protocol: effectiveDataPlaneProtocol(app),
         pending_port_release: pendingPortRelease(app),
       };
       const { logAudit } = await import('../middleware/audit.js');
@@ -2803,6 +2821,9 @@ const TOOLS = [
         if (args.data_plane_port !== undefined) {
           db.prepare('UPDATE apps SET data_plane_port = ? WHERE id = ?').run(args.data_plane_port, app.id);
         }
+        if (args.data_plane_protocol !== undefined && !echoedProtocol) {
+          db.prepare('UPDATE apps SET data_plane_protocol = ? WHERE id = ?').run(args.data_plane_protocol, app.id);
+        }
         if (args.ingress_type !== 'http') {
           assignPublicPort(db, app.id, args.public_port === undefined ? null : args.public_port, 'production');
         }
@@ -2821,12 +2842,13 @@ const TOOLS = [
         // already allocated" while traffic to it kept reaching the OLD app. The
         // row holds the number as a reservation until docker.js sees the
         // container come back without the publish. See pendingPortRelease().
-        const after = db.prepare('SELECT ingress_type, public_port, sandbox_public_port, data_plane_port FROM apps WHERE id = ?').get(app.id);
+        const after = db.prepare('SELECT ingress_type, public_port, sandbox_public_port, data_plane_port, data_plane_protocol FROM apps WHERE id = ?').get(app.id);
         const out = {
           ingress_type: effectiveIngressType(after.ingress_type),
           public_port: publicPortForApp(after),
           sandbox_public_port: publicPortForApp(after, 'sandbox'),
           data_plane_port: effectiveDataPlanePort(after),
+          data_plane_protocol: effectiveDataPlaneProtocol(after),
           pending_port_release: pendingPortRelease(after),
         };
         // Same dedicated audit action the REST path writes. Every MCP call is
@@ -2844,7 +2866,7 @@ const TOOLS = [
         warning: result.ingress_type === 'tcp'
           ? `Port ${result.public_port} is NOT behind AppCrane authentication: no forward_auth, no identity headers, no request audit, no rate limiting, no TLS from AppCrane. The app must authenticate every connection itself. Publishing is the exposing act — do not assume a firewall is holding it shut. On a Linux host a plain \`ufw deny\` will NOT block it (Docker's publish is a DNAT rule evaluated in FORWARD, never INPUT); filter in DOCKER-USER or upstream. Behind SDP the port is reachable by everything inside the perimeter.`
           : result.ingress_type === 'dual'
-          ? `Host port ${result.public_port} -> container port ${result.data_plane_port} is NOT behind AppCrane authentication: no forward_auth, no identity headers, no request audit, no rate limiting, no TLS from AppCrane. The app must authenticate every connection on that plane itself. The app's HTTP control plane on container port ${CONTROL_PLANE_PORT} is unaffected and still served through Caddy with every control intact — including the health check, which still probes the control plane because a TCP handshake on the data port would read healthy while the plane users actually reach was wedged. Publishing is the exposing act — do not assume a firewall is holding it shut. On a Linux host a plain \`ufw deny\` will NOT block it (Docker's publish is a DNAT rule evaluated in FORWARD, never INPUT); filter in DOCKER-USER or upstream, and remember ${result.public_port} needs its own rule if it is outside the ${AUTO_PORT_MIN}-${AUTO_PORT_MAX} block. Behind SDP the port is reachable by everything inside the perimeter.`
+          ? `Host port ${result.public_port} -> container port ${result.data_plane_port} is NOT behind AppCrane authentication: no forward_auth, no identity headers, no request audit, no rate limiting, no TLS from AppCrane. The app must authenticate every connection on that plane itself. The app's HTTP control plane on container port ${CONTROL_PLANE_PORT} is unaffected and still served through Caddy with every control intact — including the health check, which still probes the control plane because a TCP handshake on the data port would read healthy while the plane users actually reach was wedged. Publishing is the exposing act — do not assume a firewall is holding it shut. On a Linux host a plain \`ufw deny\` will NOT block it (Docker's publish is a DNAT rule evaluated in FORWARD, never INPUT); filter in DOCKER-USER (\`iptables -I DOCKER-USER -p ${result.data_plane_protocol} --dport ${result.public_port} -j DROP\`, plus an allow for the sources you intend — the data plane is ${result.data_plane_protocol.toUpperCase()}, so a ${result.data_plane_protocol === 'udp' ? 'tcp' : 'udp'} rule does not cover it) or upstream, and remember ${result.public_port} needs its own rule if it is outside the ${AUTO_PORT_MIN}-${AUTO_PORT_MAX} block. Behind SDP the port is reachable by everything inside the perimeter.`
           : result.pending_port_release !== null
             ? `Port ${result.pending_port_release} is NOT closed yet. AppCrane will not publish it again and no other app can be given it — it stays reserved to '${app.slug}' — but the container running right now still binds it, because the publish is a \`docker run\` flag. Recreate the container (deploy, or POST /api/apps/${app.slug}/restart/production) to actually close the port; AppCrane returns it to the pool at that moment. Do not report the exposure as revoked before then.`
             : 'This app publishes no host port and holds no reserved one.',

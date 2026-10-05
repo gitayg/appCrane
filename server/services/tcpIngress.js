@@ -287,6 +287,29 @@ export function validateDataPlanePort(value) {
 }
 
 /**
+ * The transport of the data plane as CONFIGURED: 'udp' only for a dual app whose
+ * row says so, 'tcp' for everything else.
+ *
+ * A pure-tcp app is never UDP: its published port is the container's HTTP port,
+ * and the deploy gate's health probe has to reach that over TCP. Only a dual app
+ * has a data plane separate from the control plane, so only there can the two
+ * use different transports.
+ */
+export function effectiveDataPlaneProtocol(app) {
+  if (effectiveIngressType(app?.ingress_type) !== 'dual') return 'tcp';
+  return app?.data_plane_protocol === 'udp' ? 'udp' : 'tcp';
+}
+
+export const DATA_PLANE_PROTOCOLS = Object.freeze(['tcp', 'udp']);
+
+export function validateDataPlaneProtocol(value) {
+  if (!DATA_PLANE_PROTOCOLS.includes(value)) {
+    throw fail(`data_plane_protocol must be one of ${DATA_PLANE_PROTOCOLS.join(', ')}`, 400, 'VALIDATION');
+  }
+  return value;
+}
+
+/**
  * The port this app still HOLDS but no longer publishes, or null.
  *
  * The publish is a `docker run` flag, so flipping an app from tcp back to http

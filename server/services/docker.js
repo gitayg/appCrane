@@ -4,7 +4,7 @@ import { promisify } from 'util';
 import { basename, dirname, isAbsolute } from 'path';
 import { getDb } from '../db.js';
 import {
-  publicPortForApp, dataPlanePortForApp, releasePendingPortAfterRecreate, CONTROL_PLANE_PORT,
+  publicPortForApp, dataPlanePortForApp, effectiveDataPlaneProtocol, releasePendingPortAfterRecreate, CONTROL_PLANE_PORT,
 } from './tcpIngress.js';
 import { assertRunnableCommand } from './containerRuntimeSpec.js';
 import log from '../utils/logger.js';
@@ -607,11 +607,14 @@ function publicPublishTargets(slug, env, containerPort) {
   // third env cannot start publishing by accident.
   if (env !== 'production' && env !== 'sandbox') return null;
   const app = getDb()
-    .prepare('SELECT ingress_type, public_port, sandbox_public_port, data_plane_port FROM apps WHERE slug = ?')
+    .prepare('SELECT ingress_type, public_port, sandbox_public_port, data_plane_port, data_plane_protocol FROM apps WHERE slug = ?')
     .get(slug);
   const host = publicPortForApp(app, env);
   if (host === null) return null;
   const container = dataPlanePortForApp(app, env);
+  // 'udp' only ever comes back for a dual app, whose data plane is never the
+  // control plane — so the rewrite below (pure-tcp only) never sees it.
+  const protocol = effectiveDataPlaneProtocol(app);
   // tcpIngress answers CONTROL_PLANE_PORT for a pure-tcp app because "the whole
   // container is the data plane, and it is told PORT=3000". That premise is a
   // property of an image AppCrane built. A pulled image listens where its
@@ -626,9 +629,9 @@ function publicPublishTargets(slug, env, containerPort) {
   // operator configured it. With the default containerPort this is a no-op, so
   // no existing app's argv moves.
   if (container === CONTAINER_PORT && containerPort !== CONTAINER_PORT) {
-    return { host, container: containerPort };
+    return { host, container: containerPort, protocol };
   }
-  return { host, container };
+  return { host, container, protocol };
 }
 
 // v2.59.0: the port inside the container is a parameter, not a constant.
@@ -773,7 +776,8 @@ export async function startApp({ slug, env, image, hostPort, envVars = {}, volum
   // cannot put an app on the internet.
   const publish = publicPublishTargets(slug, env, port);
   if (publish) {
-    args.push('-p', `0.0.0.0:${publish.host}:${publish.container}`);
+    // No suffix for tcp, so every existing argv is unchanged byte for byte.
+    args.push('-p', `0.0.0.0:${publish.host}:${publish.container}${publish.protocol === 'udp' ? '/udp' : ''}`);
   }
 
   // v2.8.0: only email-enabled apps need to reach AppCrane from inside the
@@ -852,7 +856,7 @@ export async function startApp({ slug, env, image, hostPort, envVars = {}, volum
     // The container port is in the line because it is the one fact that says
     // WHICH plane got exposed. `-> 3000` is the control plane and is only ever
     // correct for a pure-tcp app; on a dual app it would mean the guard failed.
-    log.info(`[tcp-ingress] ${name} also published on 0.0.0.0:${publish.host} -> container port ${publish.container} — NOT behind AppCrane auth; restricting it is still the operator's firewall job. On Linux this publish is a DNAT rule evaluated in FORWARD and never in INPUT, so a plain 'ufw deny' does NOT block it — filter in DOCKER-USER or in an upstream security group.`);
+    log.info(`[tcp-ingress] ${name} also published on 0.0.0.0:${publish.host} -> container port ${publish.container}/${publish.protocol} — NOT behind AppCrane auth; restricting it is still the operator's firewall job. On Linux this publish is a DNAT rule evaluated in FORWARD and never in INPUT, so a plain 'ufw deny' does NOT block it — filter in DOCKER-USER or in an upstream security group.`);
   }
 
   // v2.42.0: this is where a tcp -> http flip actually takes effect, and so
@@ -1017,11 +1021,11 @@ export function parsePublishedPorts(ports) {
   if (!ports) return [];
   const out = [];
   for (const part of ports.split(',')) {
-    const m = part.trim().match(/^(\[[^\]]+\]|[^:]+):(\d+)->(\d+)\/\w+$/);
+    const m = part.trim().match(/^(\[[^\]]+\]|[^:]+):(\d+)->(\d+)\/(\w+)$/);
     if (!m) continue;
     const hostIp = m[1];
     if (hostIp === '127.0.0.1' || hostIp === '[::1]') continue;
-    out.push({ hostIp, hostPort: Number(m[2]), containerPort: Number(m[3]) });
+    out.push({ hostIp, hostPort: Number(m[2]), containerPort: Number(m[3]), protocol: m[4] });
   }
   return out;
 }

@@ -391,6 +391,23 @@ test('the data-plane publish is the ONLY difference from the v2.44.2 argv', asyn
   assert.deepEqual(withoutPublic, httpBaselineFor('dp-dual', 'production', 4321));
 });
 
+test('a udp dual app publishes its data plane with /udp, and the control plane stays tcp', async () => {
+  // The WireGuard-relay case: clients speak only UDP, so a TCP publish of the
+  // right port would reach none of them.
+  const app = mkApp('dp-dual-udp', { ingress_type: 'dual', public_port: 8084, data_plane_port: 51820 });
+  db.prepare("UPDATE apps SET data_plane_protocol = 'udp' WHERE id = ?").run(app.id);
+  const args = await start(app);
+  assert.deepEqual(publishes(args), [`127.0.0.1:4321:${CONTROL_PLANE_PORT}`, '0.0.0.0:8084:51820/udp'],
+    'the health probe and Caddy need the loopback control plane on tcp; only the data plane moves');
+});
+
+test('data_plane_protocol=udp on a pure-tcp app is ignored', async () => {
+  const app = mkApp('dp-tcp-udp', { ingress_type: 'tcp', public_port: 31077 });
+  db.prepare("UPDATE apps SET data_plane_protocol = 'udp' WHERE id = ?").run(app.id);
+  const args = await start(app);
+  assert.ok(publishes(args).includes(`0.0.0.0:31077:${CONTROL_PLANE_PORT}`), JSON.stringify(publishes(args)));
+});
+
 test('a v2.42.0-shaped pure-tcp app still publishes exactly as it did', async () => {
   // Backwards compatibility for the apps this feature already shipped for. A
   // pure-tcp app has no control plane to protect: the container is told
