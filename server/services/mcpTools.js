@@ -11,7 +11,7 @@ import log from '../utils/logger.js';
 import { validateBypassPaths } from '../utils/authBypassPaths.js';
 import {
   effectiveIngressType, validateIngressType, publicPortForApp, pendingPortRelease,
-  assignPublicPort, releasePublicPort, drainingPorts, effectiveDataPlanePort, dataPlanePortForApp, validateDataPlanePort, effectiveDataPlaneProtocol, validateDataPlaneProtocol,
+  assignPublicPort, releasePublicPort, drainingPorts, effectiveDataPlanePort, dataPlanePortForApp, validateDataPlanePort, storedDataPlaneProtocol, validateDataPlaneProtocol,
   INGRESS_TYPES, CONTROL_PLANE_PORT,
   PUBLIC_PORT_MIN, PUBLIC_PORT_MAX, AUTO_PORT_MIN, AUTO_PORT_MAX,
 } from './tcpIngress.js';
@@ -2590,7 +2590,7 @@ const TOOLS = [
         ingress_type: ingressType,
         public_port: publicPort,
         data_plane_port: effectiveDataPlanePort(app),
-        data_plane_protocol: effectiveDataPlaneProtocol(app),
+        data_plane_protocol: storedDataPlaneProtocol(app),
         pending_port_release: stillBound,
         // v2.47.0: ports this app still has RESERVED after a re-pin. A running
         // container is bound to them; AppCrane holds them so nobody else is
@@ -2741,7 +2741,7 @@ const TOOLS = [
       // refused on a non-dual app, and nothing is written for it.
       const echoedProtocol = args.data_plane_protocol !== undefined && args.ingress_type !== 'dual';
       if (echoedProtocol) {
-        if (args.data_plane_protocol !== 'tcp' && args.data_plane_protocol !== effectiveDataPlaneProtocol(app)) {
+        if (args.data_plane_protocol !== 'tcp' && args.data_plane_protocol !== storedDataPlaneProtocol(app)) {
           throw new Error("data_plane_protocol only applies to an app with ingress_type='dual'");
         }
       } else if (args.data_plane_protocol !== undefined) {
@@ -2801,7 +2801,7 @@ const TOOLS = [
         public_port: publicPortForApp(app),
         sandbox_public_port: publicPortForApp(app, 'sandbox'),
         data_plane_port: effectiveDataPlanePort(app),
-        data_plane_protocol: effectiveDataPlaneProtocol(app),
+        data_plane_protocol: storedDataPlaneProtocol(app),
         pending_port_release: pendingPortRelease(app),
       };
       const { logAudit } = await import('../middleware/audit.js');
@@ -2848,7 +2848,7 @@ const TOOLS = [
           public_port: publicPortForApp(after),
           sandbox_public_port: publicPortForApp(after, 'sandbox'),
           data_plane_port: effectiveDataPlanePort(after),
-          data_plane_protocol: effectiveDataPlaneProtocol(after),
+          data_plane_protocol: storedDataPlaneProtocol(after),
           pending_port_release: pendingPortRelease(after),
         };
         // Same dedicated audit action the REST path writes. Every MCP call is

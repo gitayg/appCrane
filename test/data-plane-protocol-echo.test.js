@@ -76,3 +76,36 @@ test('MCP: a UDP data plane is told to filter UDP, not TCP', async () => {
   assert.match(out.warning, /-p udp/, 'the warning gives no UDP filter, so a copied TCP rule leaves the port open');
   assert.doesNotMatch(out.warning, /-p tcp/);
 });
+
+// Bugbot, PR #14: a UDP app switched away from dual reported 'tcp', so a client
+// switching it back and echoing what it read silently turned the relay into TCP.
+// Reads now report the stored protocol; the publish of a non-dual app is TCP regardless.
+const findProtocol = (o) => {
+  if (!o || typeof o !== 'object') return undefined;
+  if ('data_plane_protocol' in o) return o.data_plane_protocol;
+  for (const v of Object.values(o)) { const f = findProtocol(v); if (f !== undefined) return f; }
+  return undefined;
+};
+
+test('a UDP app switched to http and back, echoing what it read, stays UDP (MCP)', async () => {
+  db.prepare("INSERT INTO apps (name,slug,slot,source_type,branch) VALUES ('Relay2','relay2',3,'managed','main')").run();
+  await tool('appcrane_set_app_ingress', { slug: 'relay2', ingress_type: 'dual', public_port: 8091, data_plane_port: 51821, data_plane_protocol: 'udp' });
+  await tool('appcrane_set_app_ingress', { slug: 'relay2', ingress_type: 'http' });
+  const read = await tool('appcrane_get_app_ingress', { slug: 'relay2' });
+  const echoed = findProtocol(read);
+  assert.equal(echoed, 'udp', 'a parked UDP data plane is reported as tcp, so an echo will overwrite it');
+  const back = await tool('appcrane_set_app_ingress', { slug: 'relay2', ingress_type: 'dual', data_plane_port: 51821, data_plane_protocol: echoed });
+  assert.equal(back.data_plane_protocol, 'udp');
+});
+
+test('the same round trip over REST stays UDP', async () => {
+  db.prepare("INSERT INTO apps (name,slug,slot,source_type,branch) VALUES ('Relay3','relay3',4,'managed','main')").run();
+  await tool('appcrane_set_app_ingress', { slug: 'relay3', ingress_type: 'dual', public_port: 8092, data_plane_port: 51822, data_plane_protocol: 'udp' });
+  assert.equal((await put('relay3', { ingress_type: 'http' })).status, 200);
+  const got = await (await fetch(`${base}/api/apps/relay3`, { headers: { 'x-api-key': KEY } })).json();
+  const echoed = findProtocol(got);
+  assert.equal(echoed, 'udp');
+  const r = await put('relay3', { ingress_type: 'dual', data_plane_port: 51822, data_plane_protocol: echoed });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(db.prepare("SELECT data_plane_protocol p FROM apps WHERE slug='relay3'").get().p, 'udp');
+});

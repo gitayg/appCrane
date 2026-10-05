@@ -300,6 +300,17 @@ export function effectiveDataPlaneProtocol(app) {
   return app?.data_plane_protocol === 'udp' ? 'udp' : 'tcp';
 }
 
+/**
+ * The protocol as stored and REPORTED (v2.96.1). A UDP data plane switched
+ * away from 'dual' keeps its setting, parked, and reads must say so: reporting
+ * the effective 'tcp' meant a client switching the app back to dual and echoing
+ * what it had read silently turned a UDP relay into a TCP one. What is actually
+ * PUBLISHED is effectiveDataPlaneProtocol — a non-dual app is TCP regardless.
+ */
+export function storedDataPlaneProtocol(app) {
+  return app?.data_plane_protocol === 'udp' ? 'udp' : 'tcp';
+}
+
 export const DATA_PLANE_PROTOCOLS = Object.freeze(['tcp', 'udp']);
 
 export function validateDataPlaneProtocol(value) {
