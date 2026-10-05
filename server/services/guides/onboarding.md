@@ -1292,7 +1292,9 @@ filtering somewhere that works (`DOCKER-USER`, or upstream of the host).
 >
 > - a rule in the **`DOCKER-USER`** chain (evaluated before Docker's own
 >   FORWARD accepts), e.g. `iptables -I DOCKER-USER -p tcp --dport <port> -j DROP`
->   with an explicit allow for the sources you intend; **or**
+>   with an explicit allow for the sources you intend. A `dual` app whose
+>   `data_plane_protocol` is `udp` needs `-p udp` instead: a TCP rule does not
+>   touch a UDP publish; **or**
 > - a **cloud security group / network ACL upstream of the host**, which is
 >   outside the host's iptables entirely and does still block it.
 >

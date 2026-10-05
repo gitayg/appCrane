@@ -1310,12 +1310,18 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
     if (data_plane_protocol !== undefined) {
       // A pure-tcp app's published port is its HTTP container port, which the
       // health probe must reach over TCP — only a dual data plane can be UDP.
+      // GET reports a protocol for every app, so a client sending back what it
+      // read (with or without an ingress change) is echoing, not asking: only a
+      // value that differs from both 'tcp' and the app's current one is refused.
       if (nextType !== 'dual') {
-        throw new AppError("data_plane_protocol only applies to an app with ingress_type='dual'", 400, 'VALIDATION');
+        if (data_plane_protocol !== 'tcp' && data_plane_protocol !== effectiveDataPlaneProtocol(app)) {
+          throw new AppError("data_plane_protocol only applies to an app with ingress_type='dual'", 400, 'VALIDATION');
+        }
+      } else {
+        try { validateDataPlaneProtocol(data_plane_protocol); }
+        catch (e) { throw new AppError(e.message, e.status || 400, e.code || 'VALIDATION'); }
+        updates.data_plane_protocol = data_plane_protocol;
       }
-      try { validateDataPlaneProtocol(data_plane_protocol); }
-      catch (e) { throw new AppError(e.message, e.status || 400, e.code || 'VALIDATION'); }
-      updates.data_plane_protocol = data_plane_protocol;
     }
     // SECURITY: 'tcp' publishes CONTROL_PLANE_PORT itself — correct for an app
     // whose whole container IS the data plane, and wrong for a row that still

@@ -2736,10 +2736,15 @@ const TOOLS = [
       if (args.data_plane_port !== undefined && args.data_plane_port !== null && args.ingress_type !== 'dual') {
         throw new Error("data_plane_port only applies to an app with ingress_type='dual'");
       }
-      if (args.data_plane_protocol !== undefined) {
-        if (args.ingress_type !== 'dual') {
+      // An echo of what get-ingress reported is not a request (see the REST
+      // route): only a protocol other than 'tcp' and the app's current one is
+      // refused on a non-dual app, and nothing is written for it.
+      const echoedProtocol = args.data_plane_protocol !== undefined && args.ingress_type !== 'dual';
+      if (echoedProtocol) {
+        if (args.data_plane_protocol !== 'tcp' && args.data_plane_protocol !== effectiveDataPlaneProtocol(app)) {
           throw new Error("data_plane_protocol only applies to an app with ingress_type='dual'");
         }
+      } else if (args.data_plane_protocol !== undefined) {
         validateDataPlaneProtocol(args.data_plane_protocol);
       }
       if (args.data_plane_port === null && args.ingress_type === 'dual') {
@@ -2816,7 +2821,7 @@ const TOOLS = [
         if (args.data_plane_port !== undefined) {
           db.prepare('UPDATE apps SET data_plane_port = ? WHERE id = ?').run(args.data_plane_port, app.id);
         }
-        if (args.data_plane_protocol !== undefined) {
+        if (args.data_plane_protocol !== undefined && !echoedProtocol) {
           db.prepare('UPDATE apps SET data_plane_protocol = ? WHERE id = ?').run(args.data_plane_protocol, app.id);
         }
         if (args.ingress_type !== 'http') {
@@ -2861,7 +2866,7 @@ const TOOLS = [
         warning: result.ingress_type === 'tcp'
           ? `Port ${result.public_port} is NOT behind AppCrane authentication: no forward_auth, no identity headers, no request audit, no rate limiting, no TLS from AppCrane. The app must authenticate every connection itself. Publishing is the exposing act — do not assume a firewall is holding it shut. On a Linux host a plain \`ufw deny\` will NOT block it (Docker's publish is a DNAT rule evaluated in FORWARD, never INPUT); filter in DOCKER-USER or upstream. Behind SDP the port is reachable by everything inside the perimeter.`
           : result.ingress_type === 'dual'
-          ? `Host port ${result.public_port} -> container port ${result.data_plane_port} is NOT behind AppCrane authentication: no forward_auth, no identity headers, no request audit, no rate limiting, no TLS from AppCrane. The app must authenticate every connection on that plane itself. The app's HTTP control plane on container port ${CONTROL_PLANE_PORT} is unaffected and still served through Caddy with every control intact — including the health check, which still probes the control plane because a TCP handshake on the data port would read healthy while the plane users actually reach was wedged. Publishing is the exposing act — do not assume a firewall is holding it shut. On a Linux host a plain \`ufw deny\` will NOT block it (Docker's publish is a DNAT rule evaluated in FORWARD, never INPUT); filter in DOCKER-USER or upstream, and remember ${result.public_port} needs its own rule if it is outside the ${AUTO_PORT_MIN}-${AUTO_PORT_MAX} block. Behind SDP the port is reachable by everything inside the perimeter.`
+          ? `Host port ${result.public_port} -> container port ${result.data_plane_port} is NOT behind AppCrane authentication: no forward_auth, no identity headers, no request audit, no rate limiting, no TLS from AppCrane. The app must authenticate every connection on that plane itself. The app's HTTP control plane on container port ${CONTROL_PLANE_PORT} is unaffected and still served through Caddy with every control intact — including the health check, which still probes the control plane because a TCP handshake on the data port would read healthy while the plane users actually reach was wedged. Publishing is the exposing act — do not assume a firewall is holding it shut. On a Linux host a plain \`ufw deny\` will NOT block it (Docker's publish is a DNAT rule evaluated in FORWARD, never INPUT); filter in DOCKER-USER (\`iptables -I DOCKER-USER -p ${result.data_plane_protocol} --dport ${result.public_port} -j DROP\`, plus an allow for the sources you intend — the data plane is ${result.data_plane_protocol.toUpperCase()}, so a ${result.data_plane_protocol === 'udp' ? 'tcp' : 'udp'} rule does not cover it) or upstream, and remember ${result.public_port} needs its own rule if it is outside the ${AUTO_PORT_MIN}-${AUTO_PORT_MAX} block. Behind SDP the port is reachable by everything inside the perimeter.`
           : result.pending_port_release !== null
             ? `Port ${result.pending_port_release} is NOT closed yet. AppCrane will not publish it again and no other app can be given it — it stays reserved to '${app.slug}' — but the container running right now still binds it, because the publish is a \`docker run\` flag. Recreate the container (deploy, or POST /api/apps/${app.slug}/restart/production) to actually close the port; AppCrane returns it to the pool at that moment. Do not report the exposure as revoked before then.`
             : 'This app publishes no host port and holds no reserved one.',
