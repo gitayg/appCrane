@@ -65,8 +65,18 @@ export function tenantDbPath(req, opts) {
  * Open the tenant's SQLite DB with better-sqlite3 (an optional peer dependency).
  * better-sqlite3 is required lazily, so apps that only need tenantDbPath() (or
  * use a different SQLite driver) don't have to install a native module.
+ *
+ * `opts.migrations` (1.1.0): an ordered list of schema steps, each a SQL string
+ * or a function given the open database. The file is upgraded lazily, on the
+ * first open after a deploy, keyed on PRAGMA user_version: step i runs only if
+ * user_version <= i, all pending steps run in one IMMEDIATE transaction, and
+ * user_version is set to the list's length. So with thousands of tenant files
+ * none is upgraded twice, none is left half-upgraded, and two requests opening
+ * the same file at once upgrade it once. Append steps; never edit or remove one
+ * that has shipped. A file whose user_version is ahead of the list (code rolled
+ * back) is opened unchanged.
  */
-export function tenantDb(req, opts) {
+export function tenantDb(req, opts = {}) {
   let Database;
   try {
     Database = createRequire(import.meta.url)('better-sqlite3');
@@ -76,7 +86,33 @@ export function tenantDb(req, opts) {
       'Run `npm i better-sqlite3`, or call tenantDbPath() for a dependency-free path.'
     );
   }
-  return new Database(tenantDbPath(req, opts));
+  const db = new Database(tenantDbPath(req, opts));
+  if (opts.migrations?.length) {
+    try {
+      migrate(db, opts.migrations);
+    } catch (err) {
+      db.close();
+      throw err;
+    }
+  }
+  return db;
+}
+
+function migrate(db, steps) {
+  const version = () => db.pragma('user_version', { simple: true });
+  if (version() >= steps.length) return;
+  // Another connection may be upgrading this file right now: wait for its lock
+  // rather than failing with SQLITE_BUSY.
+  db.pragma('busy_timeout = 10000');
+  db.transaction(() => {
+    // Re-read under the write lock: whoever held it before us may have upgraded.
+    for (let i = version(); i < steps.length; i++) {
+      const step = steps[i];
+      if (typeof step === 'function') step(db);
+      else db.exec(step);
+    }
+    db.pragma(`user_version = ${steps.length}`);
+  }).immediate();
 }
 
 // ── Per-tenant file storage ────────────────────────────────────────────────

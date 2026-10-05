@@ -624,6 +624,11 @@ app.get('/api/notes', (req, res) => {
 })
 ```
 
+- Schema changes: with the full helper (`packages/tenant`, 1.1.0+) pass
+  `tenantDb(req, { migrations: [step1, step2, ...] })` and each tenant's file is
+  upgraded lazily on open, keyed on `PRAGMA user_version`, in one transaction.
+  Append steps; never edit a shipped one.
+
 - Requires `auth_mode: 'authenticated'` (the default) so the identity headers
   are present, and `better-sqlite3` in the app's dependencies.
 - Files too, not just a DB: each tenant has a `storage/` dir alongside its DB

@@ -110,7 +110,15 @@ const INSPECT_TIMEOUT_MS = 15000;
 // only difference observed at all was the ORDER of the entries (overlay2 put the
 // mount point first, containerd put it after /tmp), which is why nothing in
 // classifyWrittenPaths depends on input order.
-const DIFF_TIMEOUT_MS = 10000;
+//
+// 60 s, not 10 s (v2.94.1). Those timings are quiet machines. On crane.glick.run
+// (Docker 29.1.3, containerd snapshotter, 23 running containers), `docker diff`
+// on the moorai containers took 10.3, 6.2, 4.3, 7.9 and 4.1 s while reporting
+// ZERO changed paths: the time goes into walking the container's filesystem, not
+// into the size of the answer. At 10 s the slow runs were killed, reported as
+// "Command failed", and every redeploy of a clean app asked for a data-loss
+// acknowledgement. A confirmation dialog can wait a minute.
+const DIFF_TIMEOUT_MS = 60000;
 
 // 3.74 MB at 100k entries, i.e. ~37 bytes per entry. The 4 MB the inspect calls
 // use would have overflowed on a container only a third larger than the one
@@ -527,7 +535,7 @@ export function classifyWrittenPaths({ diff = [], mountDestinations = [] } = {})
  *                    diff?: {kind: string, path: string}[], diffError?: string,
  *                    error?: string}>}
  */
-export async function inspectContainerState(name) {
+export async function inspectContainerState(name, { diffTimeoutMs = DIFF_TIMEOUT_MS } = {}) {
   const fmt = async (template) => {
     const { stdout } = await execFileAsync(
       'docker', ['inspect', name, '--format', template],
@@ -584,7 +592,7 @@ export async function inspectContainerState(name) {
   try {
     const { stdout } = await execFileAsync(
       'docker', ['diff', name],
-      { timeout: DIFF_TIMEOUT_MS, maxBuffer: DIFF_MAX_BUFFER },
+      { timeout: diffTimeoutMs, maxBuffer: DIFF_MAX_BUFFER },
     );
     diff = parseDockerDiff(stdout);
   } catch (err) {
@@ -594,7 +602,12 @@ export async function inspectContainerState(name) {
     // diff would all otherwise parse as "few or no written paths" — which reads
     // as a clean bill of health for the exact container that was too big to
     // read. Carried through as diffError and surfaced as writable_layer_unknown.
-    diffError = String(err.stderr || err.message || err).trim().split('\n')[0].slice(0, 300);
+    // A timeout kill carries no stderr, so its message was a bare "Command
+    // failed: docker diff <name>", indistinguishable from a refusal. Say what
+    // happened.
+    diffError = err.killed && err.signal
+      ? `docker diff did not finish within ${Math.round(diffTimeoutMs / 1000)} s`
+      : String(err.stderr || err.message || err).trim().split('\n')[0].slice(0, 300);
   }
 
   return { present: true, imageVolumes, bindDestinations, mountDestinations, diff, diffError };

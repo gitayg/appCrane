@@ -23,12 +23,34 @@ on it by path (`"appcrane-tenant": "file:../path/to/packages/tenant"`).
 ```js
 import { tenantDb } from 'appcrane-tenant'
 
+// Schema steps, in order. Append new ones; never edit or remove a shipped one.
+const migrations = [
+  'CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT)',
+  'ALTER TABLE notes ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0',
+]
+
 app.get('/api/notes', (req, res) => {
-  const db = tenantDb(req)   // opens this user's own db.sqlite
-  db.exec('CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, body TEXT)')
+  const db = tenantDb(req, { migrations })   // this user's own db.sqlite, upgraded if behind
   res.json({ notes: db.prepare('SELECT * FROM notes').all() })
 })
 ```
+
+### Schema migrations across thousands of files
+
+One file per user means one schema per file, and the trap is drift: some files
+upgraded, some not. Pass `migrations` and each file is upgraded **lazily**, the
+first time it is opened after a deploy:
+
+- keyed on `PRAGMA user_version`: step *i* runs only if the file has not had it;
+- every pending step runs in one `IMMEDIATE` transaction, so a failing step rolls
+  the whole upgrade back and the file stays on its old version (the open throws);
+- two requests opening the same file at once upgrade it once (the second waits
+  for the lock, then re-reads the version);
+- a step may be a SQL string or a function given the open database;
+- a file already ahead of the list (code rolled back) is opened unchanged.
+
+A user who never comes back is never upgraded, which costs nothing: their file is
+upgraded the day they return.
 
 ## API
 
@@ -46,7 +68,8 @@ app.get('/api/notes', (req, res) => {
 | `orgFromEmail(email)` | `string` org slug | domain, sanitised, `unknown` fallback |
 
 `req` may be an Express request (`req.get`), a Node request (`req.headers`), or a
-plain headers object. `opts`: `{ root?, create? }` — `root` defaults to
+plain headers object. `opts`: `{ root?, create?, migrations? }` (`migrations` is
+`tenantDb` only, see above) — `root` defaults to
 `process.env.APPCRANE_TENANT_ROOT` (`/data/tenants` in an AppCrane container).
 
 ### Storage + quota
