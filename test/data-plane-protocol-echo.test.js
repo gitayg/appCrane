@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import express from 'express';
 
 // Two review findings on the UDP data plane (PR #14):
-//   1. GET reports data_plane_protocol='tcp' for every app, so a client that
+//   1. Older reads reported data_plane_protocol='tcp' for every app, so a client that
 //      sends back what it read must not be refused for echoing it.
 //   2. A UDP data plane's firewall advice must say UDP: an operator who copies
 //      a `-p tcp` DOCKER-USER rule leaves the UDP port open.
@@ -75,4 +75,42 @@ test('MCP: a UDP data plane is told to filter UDP, not TCP', async () => {
   assert.equal(out.data_plane_protocol, 'udp');
   assert.match(out.warning, /-p udp/, 'the warning gives no UDP filter, so a copied TCP rule leaves the port open');
   assert.doesNotMatch(out.warning, /-p tcp/);
+});
+
+// Third finding: reads reported the EFFECTIVE protocol, 'tcp', on every non-dual
+// app even while the column still held 'udp'. A client that flipped a UDP app
+// away from dual and back, sending what it read, wrote 'tcp' and silently lost
+// the UDP data plane. Reads now report null outside dual, and null is "keep".
+const get = async (slug) => (await (await fetch(`${base}/api/apps/${slug}`, { headers: { 'x-api-key': KEY } })).json()).app;
+const stored = (slug) => db.prepare('SELECT data_plane_protocol FROM apps WHERE slug = ?').get(slug).data_plane_protocol;
+
+test('REST: a read-modify-write flip away from dual and back keeps udp', async () => {
+  db.prepare("INSERT INTO apps (name,slug,slot,source_type,branch) VALUES ('Wg','wg-rmw',3,'managed','main')").run();
+  assert.equal((await put('wg-rmw', { ingress_type: 'dual', public_port: 8091, data_plane_port: 51820, data_plane_protocol: 'udp' })).status, 200);
+
+  const asDual = await get('wg-rmw');
+  assert.equal(asDual.data_plane_protocol, 'udp');
+  assert.equal((await put('wg-rmw', { ingress_type: 'http', data_plane_protocol: asDual.data_plane_protocol, data_plane_port: null })).status, 200);
+
+  const asHttp = await get('wg-rmw');
+  assert.equal(asHttp.data_plane_protocol, null, 'outside dual the protocol reads null, like data_plane_port');
+  assert.equal(stored('wg-rmw'), 'udp', 'the stored value survives the flip');
+
+  const back = await put('wg-rmw', { ingress_type: 'dual', data_plane_port: 51820, data_plane_protocol: asHttp.data_plane_protocol });
+  assert.equal(back.status, 200, JSON.stringify(back.body));
+  assert.equal(stored('wg-rmw'), 'udp', 'echoing the null it read wrote tcp over the stored udp');
+  assert.equal((await get('wg-rmw')).data_plane_protocol, 'udp');
+});
+
+test('MCP: echoing null from get-ingress on the flip back keeps udp; an explicit tcp still switches', async () => {
+  db.prepare("INSERT INTO apps (name,slug,slot,source_type,branch) VALUES ('Wg2','wg-mcp',4,'managed','main')").run();
+  await tool('appcrane_set_app_ingress', { slug: 'wg-mcp', ingress_type: 'dual', public_port: 8092, data_plane_port: 51821, data_plane_protocol: 'udp' });
+  const away = await tool('appcrane_set_app_ingress', { slug: 'wg-mcp', ingress_type: 'http', data_plane_port: null });
+  assert.equal(away.data_plane_protocol, null);
+  const read = await tool('appcrane_get_app_ingress', { slug: 'wg-mcp' });
+  assert.equal(read.data_plane_protocol, null);
+  const back = await tool('appcrane_set_app_ingress', { slug: 'wg-mcp', ingress_type: 'dual', data_plane_port: 51821, data_plane_protocol: read.data_plane_protocol });
+  assert.equal(back.data_plane_protocol, 'udp');
+  const tcp = await tool('appcrane_set_app_ingress', { slug: 'wg-mcp', ingress_type: 'dual', data_plane_port: 51821, data_plane_protocol: 'tcp' });
+  assert.equal(tcp.data_plane_protocol, 'tcp', 'an explicit value on a dual app is still honoured');
 });

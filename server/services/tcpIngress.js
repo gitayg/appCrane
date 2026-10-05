@@ -300,6 +300,18 @@ export function effectiveDataPlaneProtocol(app) {
   return app?.data_plane_protocol === 'udp' ? 'udp' : 'tcp';
 }
 
+/**
+ * The data-plane protocol as REPORTED to clients: the effective value on a dual
+ * app, null on every other type — the same terms as effectiveDataPlanePort().
+ * Reporting the effective 'tcp' outside dual made a read-modify-write client
+ * that flipped a UDP app away from dual and back send 'tcp' with the flip,
+ * which is indistinguishable from asking for tcp and silently dropped the
+ * stored 'udp'. A null it sends back is "not specified", so the column survives.
+ */
+export function reportedDataPlaneProtocol(app) {
+  return effectiveIngressType(app?.ingress_type) === 'dual' ? effectiveDataPlaneProtocol(app) : null;
+}
+
 export const DATA_PLANE_PROTOCOLS = Object.freeze(['tcp', 'udp']);
 
 export function validateDataPlaneProtocol(value) {

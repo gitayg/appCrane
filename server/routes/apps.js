@@ -20,7 +20,7 @@ import { assessMemoryChange } from '../services/memoryBudget.js';
 import { attachedInstallationIds, codeSourceFields } from '../services/codeSource.js';
 import {
   effectiveIngressType, publicPortForApp, pendingPortRelease, validateIngressType,
-  assignPublicPort, releasePublicPort, drainingPorts, effectiveDataPlanePort, validateDataPlanePort, effectiveDataPlaneProtocol, validateDataPlaneProtocol, CONTROL_PLANE_PORT,
+  assignPublicPort, releasePublicPort, drainingPorts, effectiveDataPlanePort, validateDataPlanePort, effectiveDataPlaneProtocol, reportedDataPlaneProtocol, validateDataPlaneProtocol, CONTROL_PLANE_PORT,
 } from '../services/tcpIngress.js';
 
 // v2.42.0: ingress_type and public_port are REPORTED on every app payload, not
@@ -86,7 +86,7 @@ function ingressFields(app, canSeePort = true, observed = undefined, draining = 
     // already withheld from the catalog for callers without access.
     sandbox_public_port: canSeePort ? publicPortForApp(app, 'sandbox') : undefined,
     data_plane_port: canSeePort ? effectiveDataPlanePort(app) : undefined,
-    data_plane_protocol: canSeePort ? effectiveDataPlaneProtocol(app) : undefined,
+    data_plane_protocol: canSeePort ? reportedDataPlaneProtocol(app) : undefined,
     pending_port_release: canSeePort ? pendingPortRelease(app) : undefined,
     ...(drift ? { publish_applied: drift.applied, publish_drift: drift.drift } : {}),
     ...(canSeePort && draining !== undefined && draining.length
@@ -116,7 +116,7 @@ function ingressAudit(row) {
     public_port: publicPortForApp(row),
     sandbox_public_port: publicPortForApp(row, 'sandbox'),
     data_plane_port: effectiveDataPlanePort(row),
-    data_plane_protocol: effectiveDataPlaneProtocol(row),
+    data_plane_protocol: reportedDataPlaneProtocol(row),
     pending_port_release: pendingPortRelease(row),
   };
 }
@@ -1243,7 +1243,7 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
   const wantsTypeChange = ingress_type !== undefined && ingress_type !== currentType;
   const wantsPortChange = public_port !== undefined && public_port !== currentPort;
   const wantsDataPlaneChange = (data_plane_port !== undefined && data_plane_port !== currentDataPlanePort)
-    || (data_plane_protocol !== undefined && data_plane_protocol !== effectiveDataPlaneProtocol(app));
+    || (data_plane_protocol != null && data_plane_protocol !== effectiveDataPlaneProtocol(app));
   // v2.46.0. Same change-not-presence rule as the others, so a read-modify-write
   // client echoing back the value it was handed is not treated as a change.
   const currentSandboxPort = publicPortForApp(app, 'sandbox');
@@ -1307,12 +1307,15 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
         updates.data_plane_port = data_plane_port;
       }
     }
-    if (data_plane_protocol !== undefined) {
+    // null is "not specified": GET reports null outside dual
+    // (reportedDataPlaneProtocol), so a client flipping a UDP app away and back
+    // sends null and the stored 'udp' must survive.
+    if (data_plane_protocol != null) {
       // A pure-tcp app's published port is its HTTP container port, which the
       // health probe must reach over TCP — only a dual data plane can be UDP.
-      // GET reports a protocol for every app, so a client sending back what it
-      // read (with or without an ingress change) is echoing, not asking: only a
-      // value that differs from both 'tcp' and the app's current one is refused.
+      // A client holding an older read may still echo 'tcp' (or the app's
+      // current value) on a non-dual app: accepted and not written; any other
+      // value is refused.
       if (nextType !== 'dual') {
         if (data_plane_protocol !== 'tcp' && data_plane_protocol !== effectiveDataPlaneProtocol(app)) {
           throw new AppError("data_plane_protocol only applies to an app with ingress_type='dual'", 400, 'VALIDATION');
