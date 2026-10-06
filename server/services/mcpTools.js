@@ -1649,6 +1649,10 @@ const TOOLS = [
     handler: async (user, args) => {
       const env = args.env === 'production' ? 'production' : 'sandbox';
       const app = getAppForUser(user, args.slug);
+      // Security audit 2026-10-06, H3: the same gate appcrane_deploy enforces.
+      if (env === 'production' && !userHasAppPermission(user, app, 'deploy.production')) {
+        throw new Error('Forbidden: changing production requires the deploy.production permission for this app.');
+      }
 
       const db = getDb();
       const row = db.prepare('SELECT * FROM staged_files WHERE token = ?').get(args.token);
@@ -1731,6 +1735,10 @@ const TOOLS = [
     handler: async (user, args) => {
       const env = args.env === 'production' ? 'production' : 'sandbox';
       const app = getAppForUser(user, args.slug);
+      // Security audit 2026-10-06, H3: the same gate appcrane_deploy enforces.
+      if (env === 'production' && !userHasAppPermission(user, app, 'deploy.production')) {
+        throw new Error('Forbidden: changing production requires the deploy.production permission for this app.');
+      }
       const safeDest = validateContainerPath(args.dest);
 
       const db = getDb();
@@ -4007,26 +4015,23 @@ const TOOLS = [
       const app = getAppForUser(user, args.slug);
       if (!isAppAdmin(user, app)) throw new Error('Forbidden: writing to /data requires admin or app-admin role on this app');
 
-      // Path validation — repo-relative, no traversal, no absolute. resolveSafe
-      // verifies the final path is within the shared/data root after symlink
-      // expansion (same primitive deployer.js uses).
+      // Path validation — repo-relative, no traversal, no absolute. Symbolic
+      // links the app planted are handled by writeAppData (security audit
+      // 2026-10-06, H1): into the running container via docker cp, or on the
+      // host with every segment lstat'ed and links refused.
       const rel = String(args.path || '').trim();
       if (!rel) throw new Error('path is required');
       if (rel.startsWith('/')) throw new Error('path must NOT start with "/" — it is relative to /data');
       if (rel.split('/').some(seg => seg === '..' || seg === '.')) {
         throw new Error('path must not contain "." or ".." segments');
       }
-
-      const { mkdirSync, writeFileSync } = await import('fs');
-      const { resolve, join, dirname } = await import('path');
-      const { createHash } = await import('crypto');
-
-      const dataDir = resolve(process.env.DATA_DIR || './data');
-      const sharedRoot = resolve(join(dataDir, 'apps', app.slug, env, 'shared', 'data'));
-      const targetPath = resolve(join(sharedRoot, rel));
-      if (!targetPath.startsWith(sharedRoot + '/') && targetPath !== sharedRoot) {
-        throw new Error('Security: resolved path escapes shared/data');
+      if (rel.split('/').some(seg => seg.startsWith('-'))) {
+        throw new Error('path segments must not start with "-"');
       }
+
+      const { resolve } = await import('path');
+      const { createHash } = await import('crypto');
+      const { writeAppData } = await import('./appDataWrite.js');
 
       // Decode content. utf-8 string passthrough or base64 → buffer.
       const encoding = args.encoding === 'base64' ? 'base64' : 'utf-8';
@@ -4034,12 +4039,7 @@ const TOOLS = [
         ? Buffer.from(String(args.content), 'base64')
         : Buffer.from(String(args.content), 'utf-8');
 
-      mkdirSync(dirname(targetPath), { recursive: true });
-      // Atomic write: write to .tmp, rename. Readers never see a partial file.
-      const tmpPath = targetPath + '.tmp-' + Date.now();
-      writeFileSync(tmpPath, buf);
-      const { renameSync } = await import('fs');
-      renameSync(tmpPath, targetPath);
+      const { via } = await writeAppData({ dataDir: resolve(process.env.DATA_DIR || './data'), slug: app.slug, env, rel, buf });
 
       const sha256 = createHash('sha256').update(buf).digest('hex');
       log.info(`MCP: /data write ${app.slug}/${env}/${rel} ← ${buf.length} bytes (sha256=${sha256.slice(0, 12)}) by user ${user.id}`);
@@ -4051,7 +4051,8 @@ const TOOLS = [
         sha256,
         encoding,
         container_path: '/data/' + rel,
-        host_path: targetPath,
+        container_path: `/data/${rel}`,
+        written_via: via,
       };
     },
   },

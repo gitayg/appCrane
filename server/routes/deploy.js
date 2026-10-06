@@ -103,6 +103,12 @@ router.post('/:slug/deploy/upload', requireAppAccess, auditMiddleware('deploy-up
       try { unlinkSync(req.file.path); } catch (_) {}
       return res.status(400).json({ error: { code: 'VALIDATION', message: 'env must be production or sandbox' } });
     }
+    // Security audit 2026-10-06, H3: the deploy.production gate POST
+    // /deploy/:env enforces. Without it any member uploaded straight to prod.
+    if (env === 'production' && !userHasAppPermission(req.user, app, 'deploy.production')) {
+      try { unlinkSync(req.file.path); } catch (_) {}
+      return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Production deploys are not permitted by your role on this app' } });
+    }
 
     // Same gate as POST /deploy/:env. An uploaded artifact reaches the same
     // stopApp + startApp pair, so it destroys the same container.

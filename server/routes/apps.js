@@ -1675,6 +1675,11 @@ router.post('/:slug/rename', requireAdmin, requireAppAccess, auditMiddleware('ap
  * PUT /api/apps/:slug/users - Assign users to app (admin or assigned user)
  */
 router.put('/:slug/users', requireAppAccess, auditMiddleware('app-assign-users'), (req, res) => {
+  // Security audit 2026-10-06, H4: replacing the whole member list is the
+  // owner's call, as on PUT /:slug/roles. Any member could evict the owners.
+  if (!isAdmin(req.user) && roleForUserOnApp(req.user, req.app) !== 'owner') {
+    throw new AppError('Only the app owner can replace the member list.', 403, 'FORBIDDEN');
+  }
   const { user_ids, user_emails } = req.body;
   const db = getDb();
   const appId = req.app.id;
@@ -1694,6 +1699,13 @@ router.put('/:slug/users', requireAppAccess, auditMiddleware('app-assign-users')
   // already on the app keeps their tier, someone new joins as 'user', and
   // everyone left out loses their row below.
   const before = db.prepare('SELECT user_id FROM app_user_roles WHERE app_id = ?').all(appId).map(r => r.user_id);
+  {
+    const keepIds = new Set(ids.map(Number));
+    const owners = db.prepare("SELECT user_id FROM app_user_roles WHERE app_id = ? AND app_role = 'owner'").all(appId).map(r => r.user_id);
+    if (owners.length && !owners.some(u => keepIds.has(u))) {
+      throw new AppError('Cannot remove every owner of the app. Keep at least one owner in the list.', 400, 'LAST_OWNER');
+    }
+  }
   db.transaction(() => {
     const insert = db.prepare("INSERT OR IGNORE INTO app_user_roles (app_id, user_id, app_role) VALUES (?, ?, 'user')");
     for (const uid of ids) {

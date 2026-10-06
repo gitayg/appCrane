@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { userHasAppPermission } from '../services/permissions.js';
 import crypto from 'crypto';
 import { getDb } from '../db.js';
 import { decrypt } from '../services/encryption.js';
@@ -147,6 +148,19 @@ router.get('/:slug/webhook', requireAuth, requireAppAccess, (req, res) => {
 router.put('/:slug/webhook', requireAuth, requireAppUser, auditMiddleware('webhook-config'), (req, res) => {
   const { auto_deploy_sandbox, auto_deploy_prod, branch_filter } = req.body;
   const db = getDb();
+  // Security audit 2026-10-06, H3: automatic production deploys are deploys to
+  // production on every push, so turning them ON, or choosing which branch
+  // they follow while they are on, needs deploy.production. Turning them off,
+  // echoing the current value and the sandbox switch stay open to members.
+  {
+    const cur = db.prepare('SELECT auto_deploy_prod, branch_filter FROM webhook_configs WHERE app_id = ?').get(req.app.id) || {};
+    const prodOnAfter = auto_deploy_prod !== undefined ? !!auto_deploy_prod : !!cur.auto_deploy_prod;
+    const enablingProd = auto_deploy_prod !== undefined && !!auto_deploy_prod && !cur.auto_deploy_prod;
+    const retargeting = branch_filter !== undefined && (branch_filter || null) !== (cur.branch_filter || null) && prodOnAfter;
+    if ((enablingProd || retargeting) && !userHasAppPermission(req.user, req.app, 'deploy.production')) {
+      throw new AppError('Automatic production deploys (and which branch they follow) need the deploy.production permission on this app', 403, 'FORBIDDEN');
+    }
+  }
 
   const updates = [];
   const values = [];
