@@ -105,7 +105,7 @@ router.post('/', requireAdmin, auditMiddleware('user-create'), (req, res) => {
 /**
  * DELETE /api/users/:id - Delete user (admin only)
  */
-router.delete('/:id', requireAdmin, auditMiddleware('user-delete'), (req, res) => {
+router.delete('/:id', requireAdmin, auditMiddleware('user-delete'), async (req, res) => {
   const db = getDb();
   const userId = parseInt(req.params.id);
 
@@ -136,7 +136,7 @@ router.delete('/:id', requireAdmin, auditMiddleware('user-delete'), (req, res) =
     db.prepare('DELETE FROM notification_configs WHERE user_id = ?').run(userId);
     db.prepare('DELETE FROM users WHERE id = ?').run(userId);
   })();
-  purgeRevokedTenants(db, userId, user.email, memberOf);
+  await purgeRevokedTenants(db, userId, user.email, memberOf);
   res.json({ message: `User '${user.name}' deleted` });
 });
 
@@ -267,7 +267,7 @@ router.put('/:id/profile', requireAdmin, auditMiddleware('user-update-profile'),
  * 'owner' (co-owners), but a last-owner guard prevents removing the final
  * owner so an app can't be left ownerless.
  */
-router.put('/:slug/roles', requireAppAccess, auditMiddleware('app-set-role'), (req, res) => {
+router.put('/:slug/roles', requireAppAccess, auditMiddleware('app-set-role'), async (req, res) => {
   const app = req.app; // set by requireAppAccess
   if (!isAdmin(req.user) && roleForUserOnApp(req.user, app) !== 'owner') {
     throw new AppError('Only the app owner can manage users on this app.', 403, 'FORBIDDEN');
@@ -312,7 +312,7 @@ router.put('/:slug/roles', requireAppAccess, auditMiddleware('app-set-role'), (r
       clearUserRoleGrants(app.id, user_id);
     })();
     const target = db.prepare('SELECT email FROM users WHERE id = ?').get(user_id);
-    purgeRevokedTenants(db, user_id, target?.email, [app.id]);
+    await purgeRevokedTenants(db, user_id, target?.email, [app.id]);
   } else {
     db.transaction(() => {
       db.prepare(`

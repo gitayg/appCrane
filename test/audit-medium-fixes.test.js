@@ -112,6 +112,6 @@ test('M3: tenant purge refuses a symbolic link in the path and deletes nothing o
   mkdirSync(mine, { recursive: true });
   // Planted by the attacker's own app code, relative so it needs no DATA_DIR.
   symlinkSync('../../../../../victim/production/shared/data/tenants/acme.test', join(mine, 'acme.test'));
-  purgeTenant('mfix', 'someone@acme.test', 5);
+  await purgeTenant('mfix', 'someone@acme.test', 5);
   assert.ok(existsSync(join(victim, 'db.sqlite')), 'purge followed the link and deleted another app\'s tenant data');
 });

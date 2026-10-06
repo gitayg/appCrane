@@ -1,5 +1,9 @@
 import { rmSync } from 'fs';
 import { confinedHostPath } from './appDataWrite.js';
+import { removeInsideAppData } from './docker.js';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
+const run = promisify(execFile);
 import { join, resolve, sep } from 'path';
 import log from '../utils/logger.js';
 import { orgFromEmail } from '../../packages/tenant/index.js';
@@ -43,7 +47,18 @@ function orgSlug(org) {
  * idempotent — a non-existent dir (non-multitenant app, or a tenant that never
  * wrote anything) is a no-op. Never throws into the caller.
  */
-export function purgeTenant(slug, email, userId) {
+/** The image of the app's container for `env`, or null when it has none. */
+async function containerImage(name) {
+  try {
+    const { stdout } = await run('docker', ['inspect', '-f', '{{.Config.Image}}', name], { timeout: 10000 });
+    return stdout.trim() || null;
+  } catch (e) {
+    if (/no such (object|container)/i.test(String(e.stderr || e.message))) return null;
+    throw e;
+  }
+}
+
+export async function purgeTenant(slug, email, userId) {
   const dataDir = resolve(process.env.DATA_DIR || './data');
   const org = orgFromEmail(email);
   const rel = tenantDirRel(org, userId);
@@ -53,21 +68,29 @@ export function purgeTenant(slug, email, userId) {
     const target = resolve(join(base, rel));
     // Path-traversal guard: target must stay strictly within the app's data root.
     if (target !== base && !target.startsWith(base + sep)) continue;
-    // Security audit 2026-10-06, M3: the tenants/ tree is app-writable, so a
-    // planted link at tenants/<org> redirected this delete into another app.
-    // Walk it with lstat: any link on the way and nothing is deleted.
-    let safe;
     try {
-      safe = confinedHostPath(base, rel);
-    } catch (e) {
-      if (/symbolic link/.test(e.message)) log.warn(`purgeTenant: ${slug}/${env}: ${e.message}; nothing deleted`);
-      continue;
-    }
-    try {
-      rmSync(safe, { recursive: true, force: true });
+      // The app's code can change its own tenants/ tree while this runs (a
+      // purge happens on revoke, usually with the app up), so a host-side
+      // check-then-delete can be redirected by a link swapped in between.
+      // With a container, the delete runs inside a confined helper instead
+      // (security review of v2.97.2); with none, nothing can race, and the
+      // host path is still walked with lstat and refused on any link (M3).
+      const image = await containerImage(`appcrane-${slug}-${env}`);
+      if (image) {
+        await removeInsideAppData({ image, dataRoot: base, relPath: rel.split(sep).join('/') });
+      } else {
+        let safe;
+        try {
+          safe = confinedHostPath(base, rel);
+        } catch (e) {
+          if (/symbolic link/.test(e.message)) log.warn(`purgeTenant: ${slug}/${env}: ${e.message}; nothing deleted`);
+          continue;
+        }
+        rmSync(safe, { recursive: true, force: true });
+      }
       removed++;
     } catch (e) {
-      log.warn(`purgeTenant: failed to remove ${target}: ${e.message}`);
+      log.warn(`purgeTenant: ${slug}/${env}: tenant ${rel} NOT purged (${e.message}); remove it by hand`);
     }
   }
   if (removed) log.info(`purgeTenant: purged ${rel} for app ${slug} (${removed} env(s))`);
@@ -80,12 +103,12 @@ export function purgeTenant(slug, email, userId) {
  * user, and SCIM group removal (the MCP revoke tool purges inline). An app
  * that never opted in is left alone. Never throws into the caller.
  */
-export function purgeRevokedTenants(db, userId, email, appIds) {
+export async function purgeRevokedTenants(db, userId, email, appIds) {
   for (const appId of appIds) {
     try {
       const app = db.prepare('SELECT slug, multitenant FROM apps WHERE id = ?').get(appId);
       if (!app?.multitenant) continue;
-      purgeTenant(app.slug, email, userId);
+      await purgeTenant(app.slug, email, userId);
     } catch (e) {
       log.warn(`purgeRevokedTenants: app ${appId} user ${userId}: ${e.message}`);
     }

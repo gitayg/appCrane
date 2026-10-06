@@ -89,5 +89,7 @@ export function reconcileGroupAccess(db) {
   })();
 
   const emailOf = db.prepare('SELECT email FROM users WHERE id = ?');
-  for (const l of revoked) purgeRevokedTenants(db, l.user_id, emailOf.get(l.user_id)?.email, [l.app_id]);
+  // Returned so a caller (or a test) can wait for the purges; reconcile itself
+  // is synchronous and its many callers need not.
+  return Promise.all(revoked.map(l => purgeRevokedTenants(db, l.user_id, emailOf.get(l.user_id)?.email, [l.app_id])));
 }

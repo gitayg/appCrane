@@ -3018,7 +3018,7 @@ const TOOLS = [
       if (mt?.multitenant) {
         try {
           const { purgeTenant } = await import('./tenants.js');
-          purgeTenant(app.slug, target.email, target.id);
+          await purgeTenant(app.slug, target.email, target.id);
         } catch (e) {
           log.warn(`MCP revoke: tenant purge failed for ${app.slug}/${target.id}: ${e.message}`);
         }

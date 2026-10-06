@@ -566,6 +566,24 @@ export async function removeTreeAsRoot({ hostPath, image }) {
 }
 
 /**
+ * `rm -rf` a path INSIDE an app's data directory, resolved inside a throwaway
+ * container that mounts only that directory (security review of v2.97.2).
+ *
+ * The data tree is app-writable, so a host-side delete can be redirected by a
+ * symbolic link the app swaps in between any check and the unlink. Here the
+ * path is resolved in the helper's own mount namespace: a link can only lead
+ * to the helper's (throwaway) filesystem, never another app's files.
+ * `relPath` is validated, and passed after "--" so it is never an option.
+ */
+export async function removeInsideAppData({ image, dataRoot, relPath }) {
+  const segs = String(relPath).split('/');
+  if (!relPath || segs.some(s => !s || s === '.' || s === '..' || s.startsWith('-'))) {
+    throw new Error(`refusing to remove ${JSON.stringify(relPath)}: not a clean relative path`);
+  }
+  await runRootHelper({ image, hostDir: dataRoot, entrypoint: 'rm', args: ['-rf', '--', `/target/${relPath}`] });
+}
+
+/**
  * BOTH ends of this app's 0.0.0.0 publish — `{ host, container }` — or null when
  * it publishes nothing. Resolved from the database here rather than taken as a
  * parameter: every container recreation — deploy, rollback, the env-var restart

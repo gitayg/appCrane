@@ -1674,7 +1674,7 @@ router.post('/:slug/rename', requireAdmin, requireAppAccess, auditMiddleware('ap
 /**
  * PUT /api/apps/:slug/users - Assign users to app (admin or assigned user)
  */
-router.put('/:slug/users', requireAppAccess, auditMiddleware('app-assign-users'), (req, res) => {
+router.put('/:slug/users', requireAppAccess, auditMiddleware('app-assign-users'), async (req, res) => {
   // Security audit 2026-10-06, H4: replacing the whole member list is the
   // owner's call, as on PUT /:slug/roles. Any member could evict the owners.
   if (!isAdmin(req.user) && roleForUserOnApp(req.user, req.app) !== 'owner') {
@@ -1722,7 +1722,7 @@ router.put('/:slug/users', requireAppAccess, auditMiddleware('app-assign-users')
   })();
   const keep = new Set(ids.map(Number));
   const emailOf = db.prepare('SELECT email FROM users WHERE id = ?');
-  for (const uid of before) if (!keep.has(uid)) purgeRevokedTenants(db, uid, emailOf.get(uid)?.email, [appId]);
+  for (const uid of before) if (!keep.has(uid)) await purgeRevokedTenants(db, uid, emailOf.get(uid)?.email, [appId]);
 
   const users = db.prepare(`
     SELECT u.id, u.name, u.email FROM users u

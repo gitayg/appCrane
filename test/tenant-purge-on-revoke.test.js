@@ -118,7 +118,7 @@ test('SCIM group removal purges, but only when it actually removed access', asyn
   const dirHand = seedTenant('board', alsoByHand);
 
   db.prepare('DELETE FROM scim_group_members WHERE group_id = ?').run(g);
-  reconcileGroupAccess(db);
+  await reconcileGroupAccess(db);
 
   assert.ok(!existsSync(dirGroup), 'tenant dir still on disk after SCIM removed access');
   assert.ok(existsSync(dirHand), 'purged a user who still has hand-granted access');
