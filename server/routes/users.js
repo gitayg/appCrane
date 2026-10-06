@@ -212,7 +212,9 @@ router.post('/:id/regenerate-key', requireAdmin, auditMiddleware('user-regen-key
 /**
  * PUT /api/users/:id/password - Set/change password (admin only)
  */
-router.put('/:id/password', requireAdmin, auditMiddleware('user-set-password'), (req, res) => {
+// Security audit 2026-10-06, M1: platform admins only. A global admin could
+// reset a platform admin's password and sign in as them.
+router.put('/:id/password', requirePlatformAdmin, auditMiddleware('user-set-password'), (req, res) => {
   const { password } = req.body;
   if (!password || password.length < 12) throw new AppError('Password must be at least 12 characters', 400, 'VALIDATION');
 

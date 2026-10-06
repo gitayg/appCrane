@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { isAppOwnerOrPlatformAdmin } from '../services/permissions.js';
 import { requireAuth, requireAppUser, requireAppAccess, requirePlatformAdmin } from '../middleware/auth.js';
 import { auditMiddleware } from '../middleware/audit.js';
 import { AppError } from '../utils/errors.js';
@@ -286,6 +287,11 @@ router.get('/:slug/database', requireAppAccess, async (req, res) => {
  * guessing which one to destroy is not a thing this endpoint should do.
  */
 router.delete('/:slug/database', requireAppUser, auditMiddleware('managed-db-deprovision'), async (req, res) => {
+  // Security audit 2026-10-06, M2: the database is shared by sandbox and
+  // production, so dropping it destroys production data.
+  if (!isAppOwnerOrPlatformAdmin(req.user, req.app)) {
+    throw new AppError('Only the app owner or a platform admin can drop the app database', 403, 'FORBIDDEN');
+  }
   const svc = await engineModule();
 
   // Express 5's req.query getter reads through `this.app` — and the app-access

@@ -12,7 +12,7 @@ import { requireAuth, requireAppUser } from '../middleware/auth.js';
 import { auditMiddleware, logAudit } from '../middleware/audit.js';
 import log from '../utils/logger.js';
 import { encrypt, decrypt } from '../services/encryption.js';
-import { userHasAppPermission } from '../services/permissions.js';
+import { userHasAppPermission, isAppOwnerOrPlatformAdmin } from '../services/permissions.js';
 import { notifySecretReveal } from '../services/emailService.js';
 import { AppError } from '../utils/errors.js';
 
@@ -178,6 +178,12 @@ router.put('/:slug/env/:env', requireAppUser, auditMiddleware('env-set'), (req, 
  */
 router.delete('/:slug/env/:env/:key', requireAppUser, auditMiddleware('env-delete'), (req, res) => {
   const { env, key } = req.params;
+  if (!['production', 'sandbox'].includes(env)) throw new AppError('env must be production or sandbox', 400, 'VALIDATION');
+  // Security audit 2026-10-06, M2: deleting a production variable (a database
+  // URL, a session secret) is the owner's or a platform admin's call.
+  if (env === 'production' && !isAppOwnerOrPlatformAdmin(req.user, req.app)) {
+    throw new AppError('Only the app owner or a platform admin can delete production env vars', 403, 'FORBIDDEN');
+  }
   const db = getDb();
 
   const result = db.prepare(

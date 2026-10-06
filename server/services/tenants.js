@@ -1,4 +1,5 @@
 import { rmSync } from 'fs';
+import { confinedHostPath } from './appDataWrite.js';
 import { join, resolve, sep } from 'path';
 import log from '../utils/logger.js';
 import { orgFromEmail } from '../../packages/tenant/index.js';
@@ -52,8 +53,18 @@ export function purgeTenant(slug, email, userId) {
     const target = resolve(join(base, rel));
     // Path-traversal guard: target must stay strictly within the app's data root.
     if (target !== base && !target.startsWith(base + sep)) continue;
+    // Security audit 2026-10-06, M3: the tenants/ tree is app-writable, so a
+    // planted link at tenants/<org> redirected this delete into another app.
+    // Walk it with lstat: any link on the way and nothing is deleted.
+    let safe;
     try {
-      rmSync(target, { recursive: true, force: true });
+      safe = confinedHostPath(base, rel);
+    } catch (e) {
+      if (/symbolic link/.test(e.message)) log.warn(`purgeTenant: ${slug}/${env}: ${e.message}; nothing deleted`);
+      continue;
+    }
+    try {
+      rmSync(safe, { recursive: true, force: true });
       removed++;
     } catch (e) {
       log.warn(`purgeTenant: failed to remove ${target}: ${e.message}`);

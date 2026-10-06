@@ -45,17 +45,19 @@ const APP_ID = mkApp('bookstack');
 const OTHER_APP_ID = mkApp('someone-elses-app');
 
 let seq = 0;
-function mkUser(role, { assignTo = null } = {}) {
+function mkUser(role, { assignTo = null, appRole = 'user' } = {}) {
   const n = ++seq;
   const key = generateApiKey('dhk_user');
   const id = db.prepare(
     'INSERT INTO users (name,email,role,api_key_hash,active,kind) VALUES (?,?,?,?,1,?)'
   ).run(`u${n}`, `u${n}@t.test`, role, hashApiKey(key), 'human').lastInsertRowid;
-  if (assignTo) db.prepare("INSERT INTO app_user_roles (app_id,user_id,app_role) VALUES (?,?,'user')").run(assignTo, id);
+  if (assignTo) db.prepare('INSERT INTO app_user_roles (app_id,user_id,app_role) VALUES (?,?,?)').run(assignTo, id, appRole);
   return key;
 }
 
-const OWNER = mkUser('user', { assignTo: APP_ID });          // assigned to bookstack
+// The app's owner: since v2.97.2 dropping the database is the owner's or a
+// platform admin's call, which this fixture's name always implied.
+const OWNER = mkUser('user', { assignTo: APP_ID, appRole: 'owner' }); // owns bookstack
 const OUTSIDER = mkUser('user', { assignTo: OTHER_APP_ID }); // assigned, but elsewhere
 const ADMIN = mkUser('admin');                               // unassigned
 const PLATFORM = mkUser('platform_admin');                   // unassigned

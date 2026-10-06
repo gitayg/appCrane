@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { findOrLinkSsoUser } from '../services/ssoLink.js';
 import { SAML } from '@node-saml/node-saml';
 import { getDb } from '../db.js';
 import { encrypt, decrypt, generateSessionToken, hashApiKey, generateApiKey } from '../services/encryption.js';
@@ -193,15 +194,10 @@ router.post('/callback', async (req, res) => {
 
     // Find or create user
     const db = getDb();
-    let user = db.prepare('SELECT * FROM users WHERE saml_name_id = ?').get(nameId);
-
-    if (!user && email) {
-      user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
-      if (user) {
-        db.prepare('UPDATE users SET saml_name_id = ? WHERE id = ?').run(nameId, user.id);
-        log.info(`SAML: linked ${email} to nameID ${nameId}`);
-      }
-    }
+    // Security audit 2026-10-06, M4: never move an account already bound to
+    // another NameID. The assertion is IdP-signed, so its e-mail counts as
+    // verified for a first link.
+    let user = findOrLinkSsoUser(db, { column: 'saml_name_id', subject: nameId, email, emailVerified: true });
 
     // Sync display name — and a REAL email attribute — from Okta on every
     // login, so IdP-side corrections (e.g. fixing a shortened surname) flow in

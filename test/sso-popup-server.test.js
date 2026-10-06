@@ -42,7 +42,9 @@ const jwk = { ...oidcPub.export({ format: 'jwk' }), kid: 'k1', alg: 'RS256', use
 
 // Switched per test: a failing token endpoint, or an IdP user with no AppCrane account.
 const RAW_IDP_TEXT = '<img src=x onerror=alert(1)>RAW-IDP-TEXT-7f3a';
-const idpBehaviour = { tokenFails: false, user: { sub: 'alice-sub', email: 'alice@example.com', name: 'Alice Example' } };
+// email_verified: true, as Okta and other real IdPs send it. Since v2.97.2 an
+// existing account is linked by e-mail only when the IdP verified it.
+const idpBehaviour = { tokenFails: false, user: { sub: 'alice-sub', email: 'alice@example.com', email_verified: true, name: 'Alice Example' } };
 
 function idToken(issuer) {
   const enc = (o) => Buffer.from(JSON.stringify(o)).toString('base64url');

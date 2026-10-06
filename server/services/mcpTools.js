@@ -1,7 +1,7 @@
 import { getDb } from '../db.js';
 import { decrypt, encrypt } from './encryption.js';
 import { BUCKETS, bucketize, applyBucket } from './requestStatus.js';
-import { userHasAppPermission, userHasPlatformPermission, roleForUserOnApp } from './permissions.js';
+import { userHasAppPermission, userHasPlatformPermission, roleForUserOnApp, isAppOwnerOrPlatformAdmin } from './permissions.js';
 import {
   listRoles, createRole, listMembersWithRoles, setUserRoleKeys, clearUserRoleGrants,
   MAX_ROLES_PER_APP, RESERVED_KEYS,
@@ -1991,6 +1991,10 @@ const TOOLS = [
     handler: async (user, args) => {
       const env = args.env === 'production' ? 'production' : 'sandbox';
       const app = getAppForUser(user, args.slug);
+      // Security audit 2026-10-06, M5: the same rule as REST /logs.
+      if (!isAppOwnerOrPlatformAdmin(user, app)) {
+        throw new Error('Forbidden: runtime logs are visible to the app owner or a platform admin only');
+      }
       const lines = Math.min(args.lines || 100, 1000);
       const { getAppLogs } = await import('./docker.js');
       const logLines = await getAppLogs(app.slug, env, lines, args.search || '');

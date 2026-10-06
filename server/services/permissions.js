@@ -216,3 +216,15 @@ export function resetToDefaults(permissionKeys = null) {
   }
   setMatrix(subset);
 }
+
+/**
+ * The app's owner, or a platform admin — and nobody else: not a global
+ * 'admin', not an app-level admin. For the operations the operator reserved
+ * after the 2026-10-06 security audit (M2, M5): destroying or replacing
+ * production state, and reading unredacted runtime logs.
+ */
+export function isAppOwnerOrPlatformAdmin(user, app) {
+  if (!user || !app) return false;
+  if (user.role === 'platform_admin') return true;
+  return roleForUserOnApp(user, app) === 'owner';
+}

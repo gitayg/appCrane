@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { isAppOwnerOrPlatformAdmin } from '../services/permissions.js';
 import { getDb } from '../db.js';
 import { requireAuth, requireAppUser, requireAppAccess } from '../middleware/auth.js';
 import { auditMiddleware } from '../middleware/audit.js';
@@ -84,6 +85,10 @@ router.post('/:slug/restore/:id', requireAppUser, auditMiddleware('backup-restor
     .get(parseInt(req.params.id), req.app.id);
 
   if (!backup) throw new AppError('Backup not found', 404, 'NOT_FOUND');
+  // Security audit 2026-10-06, M2: restoring overwrites that environment's data.
+  if (backup.env === 'production' && !isAppOwnerOrPlatformAdmin(req.user, req.app)) {
+    throw new AppError('Only the app owner or a platform admin can restore production data', 403, 'FORBIDDEN');
+  }
   if (!existsSync(backup.file_path)) throw new AppError('Backup file missing from disk', 404, 'FILE_MISSING');
 
   const dataDir = process.env.DATA_DIR || './data';
@@ -105,6 +110,11 @@ router.post('/:slug/restore/:id', requireAppUser, auditMiddleware('backup-restor
  * POST /api/apps/:slug/copy-data - Copy prod data to sandbox
  */
 router.post('/:slug/copy-data', requireAppUser, auditMiddleware('copy-data'), (req, res) => {
+  // Security audit 2026-10-06, M2: this copies production data into sandbox,
+  // which members can deploy code to and so read.
+  if (!isAppOwnerOrPlatformAdmin(req.user, req.app)) {
+    throw new AppError('Only the app owner or a platform admin can copy production data to sandbox', 403, 'FORBIDDEN');
+  }
   const dataDir = process.env.DATA_DIR || './data';
   const prodData = join(dataDir, 'apps', req.app.slug, 'production', 'shared', 'data');
   const sandData = join(dataDir, 'apps', req.app.slug, 'sandbox', 'shared', 'data');

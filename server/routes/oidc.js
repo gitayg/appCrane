@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { findOrLinkSsoUser } from '../services/ssoLink.js';
 import crypto from 'crypto';
 import { getDb } from '../db.js';
 import { encrypt, decrypt, generateSessionToken, hashApiKey, generateApiKey } from '../services/encryption.js';
@@ -310,16 +311,13 @@ router.get('/callback', async (req, res) => {
 
     // Find or create user
     const db = getDb();
-    let user = db.prepare('SELECT * FROM users WHERE sso_sub = ?').get(sub);
-
-    if (!user && email) {
-      // Link to existing account by email
-      user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
-      if (user) {
-        db.prepare('UPDATE users SET sso_sub = ? WHERE id = ?').run(sub, user.id);
-        log.info(`OIDC: linked ${email} to sub ${sub}`);
-      }
-    }
+    // Security audit 2026-10-06, M4: link by e-mail only when the IdP verified
+    // it, and never move an account already bound to another sub.
+    const emailVerified = claims.email_verified === true || claims.email_verified === 'true';
+    let user = findOrLinkSsoUser(db, {
+      column: 'sso_sub', subject: sub, email, emailVerified,
+      allowUnverified: process.env.OIDC_ALLOW_UNVERIFIED_EMAIL_LINK === '1',
+    });
 
     // Sync display name — and the email claim — from the IdP on every login,
     // so IdP-side corrections propagate automatically. `email` here is a real
@@ -329,7 +327,7 @@ router.get('/callback', async (req, res) => {
       if (displayName && displayName !== user.name) {
         db.prepare('UPDATE users SET name = ? WHERE id = ?').run(displayName, user.id);
       }
-      if (email && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) &&
+      if (email && emailVerified && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) &&
           email.toLowerCase() !== (user.email || '').toLowerCase()) {
         try {
           db.prepare('UPDATE users SET email = ? WHERE id = ?').run(email, user.id);

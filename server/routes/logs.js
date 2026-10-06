@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { getDb } from '../db.js';
 import { requireAuth, requireAppAccess } from '../middleware/auth.js';
 import { isAdmin } from '../utils/roles.js';
-import { userHasAppPermission } from '../services/permissions.js';
+import { userHasAppPermission, isAppOwnerOrPlatformAdmin } from '../services/permissions.js';
 import { AppError } from '../utils/errors.js';
 
 const router = Router();
@@ -170,8 +170,9 @@ router.get('/:slug/audit', requireAppAccess, (req, res) => {
  * paths and stack traces all end up there.
  */
 router.get('/:slug/logs/:env', requireAppAccess, async (req, res) => {
-  if (!userHasAppPermission(req.user, req.app, 'app.logs.view')) {
-    throw new AppError('Viewing runtime logs for this app is not permitted by your role', 403, 'FORBIDDEN');
+  // Security audit 2026-10-06, M5: the app owner or a platform admin only.
+  if (!isAppOwnerOrPlatformAdmin(req.user, req.app)) {
+    throw new AppError('Runtime logs are visible to the app owner or a platform admin only', 403, 'FORBIDDEN');
   }
   const { env } = req.params;
   const url3 = new URL(req.url, `http://${req.headers.host}`);
