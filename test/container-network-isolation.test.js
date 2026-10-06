@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'url';
 import { execFile, execFileSync } from 'child_process';
 import { promisify } from 'util';
 import net from 'net';
+import http from 'http';
 import express from 'express';
 
 const execFileAsync = promisify(execFile);
@@ -688,6 +689,55 @@ test('LIVE: a sibling container cannot reach another app, and CAN without the op
   assert.equal(await reachFrom(ctl, `http://${LIVE}-victim-ctl:${CONTAINER_PORT}/`), 'PWNED');
   assert.equal(await reachFrom(iso, `http://${LIVE}-victim-iso:${CONTAINER_PORT}/`), null,
     'the container-name route around the isolation is open');
+});
+
+test('LIVE: a sibling cannot reach another app through the host via its loopback publish', { skip: noDocker }, async (t) => {
+  // Docker Desktop (macOS/Windows) forwards host.docker.internal to the host's
+  // 127.0.0.1, so there this route IS open (measured). AppCrane's supported
+  // target is a Linux server, where it is blocked; on Desktop the defence is
+  // the signed identity headers (v2.97.0): an app that checks them with
+  // appcrane-tenant verifyIdentity() rejects whatever arrives this way.
+  const os = await dk(['info', '--format', '{{.OperatingSystem}}']).catch(() => '');
+  if (/Docker Desktop/i.test(os)) {
+    t.todo('Docker Desktop forwards the host loopback into containers; signed identity headers are the defence there');
+  }
+  // The other way around Caddy (v2.96.2). Every app is published on
+  // 127.0.0.1:<hostPort> for Caddy; a compromised sibling asking the HOST for
+  // that port, through host.docker.internal / the bridge gateway, would reach
+  // the app with forged X-AppCrane-* headers and no forward_auth. Checked by
+  // hand on crane.glick.run (Docker 29.1.3): blocked. This keeps it checked.
+  const iso = await liveNetwork(`${LIVE}-hostpath`, true);
+  const port = await freePort();
+  const victim = `${LIVE}-victim-loop`;
+  await liveContainer(victim, ['--network', iso, '-p', `127.0.0.1:${port}:${CONTAINER_PORT}`], SERVE('PWNED'));
+
+  // Caddy's door must work, or "blocked" below could just mean "not serving".
+  let viaLoopback = null;
+  for (let i = 0; i < 20 && viaLoopback !== 'PWNED'; i++) {
+    viaLoopback = await fetch(`http://127.0.0.1:${port}/`).then(r => r.text()).catch(() => null);
+    if (viaLoopback !== 'PWNED') await new Promise(r => setTimeout(r, 250));
+  }
+  assert.equal(viaLoopback, 'PWNED', 'the victim is not answering on its loopback publish, so the test proves nothing');
+
+  // The attacker must be able to reach the HOST over this route, or a blocked
+  // result is a broken attacker: a host listener on all interfaces must answer.
+  const hostSrv = http.createServer((_q, s) => s.end('HOST'));
+  await new Promise(r => hostSrv.listen(0, '0.0.0.0', r));
+  const hostPort = hostSrv.address().port;
+  const attack = async (url) => {
+    try {
+      return await dk(['run', '--rm', '--network', iso, '--add-host', 'host.docker.internal:host-gateway',
+        'alpine:latest', 'wget', '-T', '4', '-q', '-O', '-', url], 60000);
+    } catch (_) { return null; }
+  };
+  try {
+    assert.equal(await attack(`http://host.docker.internal:${hostPort}/`), 'HOST',
+      'the sibling cannot reach the host at all, so a blocked result below would prove nothing');
+    assert.equal(await attack(`http://host.docker.internal:${port}/`), null,
+      'a sibling reached another app through the host\'s loopback publish, around Caddy');
+  } finally {
+    hostSrv.close();
+  }
 });
 
 test('LIVE: the argv AppCrane actually emits produces a working, hardened container', { skip: noDocker }, async () => {

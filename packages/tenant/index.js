@@ -13,6 +13,7 @@
 import { mkdirSync, statSync, readdirSync } from 'fs';
 import { join, basename } from 'path';
 import { createRequire } from 'module';
+import { createHmac, timingSafeEqual } from 'crypto';
 
 // Read a header from an Express req (req.get), a Node req (req.headers), or a
 // plain headers object — so the helper works regardless of the app's framework.
@@ -38,8 +39,65 @@ export function orgFromEmail(email) {
   return slug;
 }
 
-/** { org, userId } for the request. Throws if the request carries no identity. */
+// ── Signed identity (1.2.0) ────────────────────────────────────────────────
+//
+// AppCrane's proxy strips client-sent X-AppCrane-* headers, but only traffic
+// that goes THROUGH the proxy is covered: a raw tcp/dual port, or (measured on
+// Docker Desktop) a sibling container reaching this app's loopback publish via
+// host.docker.internal, arrives with whatever headers the sender chose. So
+// /api/identity/verify signs what it issues with a secret only this app holds,
+// injected as APPCRANE_IDENTITY_SECRET, and verifyIdentity() rejects anything
+// it did not sign. AppCrane's server imports these same functions, so the two
+// sides cannot disagree about what is signed.
+
+/** The headers covered by the signature, in signing order. */
+export const IDENTITY_SIGNED_HEADERS = Object.freeze([
+  'X-AppCrane-User', 'X-AppCrane-User-Id', 'X-AppCrane-User-Email', 'X-AppCrane-User-Name',
+  'X-AppCrane-User-Role', 'X-AppCrane-App-Role', 'X-AppCrane-Is-Admin', 'X-AppCrane-App-Roles',
+]);
+export const IDENTITY_MAX_AGE_SEC = 300;
+
+/** base64url HMAC-SHA256 over the version, timestamp and every signed header (absent = empty). */
+export function signIdentity(secret, ts, get) {
+  const lines = ['appcrane-identity-v1', String(ts),
+    ...IDENTITY_SIGNED_HEADERS.map((h) => `${h.toLowerCase()}:${get(h) ?? ''}`)];
+  return createHmac('sha256', secret).update(lines.join('\n')).digest('base64url');
+}
+
+/**
+ * Check the request's identity headers against APPCRANE_IDENTITY_SECRET (or
+ * opts.secret) and return { userId, email, org }. Throws on a missing,
+ * forged, altered or expired signature. A request whose headers came from
+ * anywhere but this app's own /verify call cannot pass.
+ */
+export function verifyIdentity(req, { secret = process.env.APPCRANE_IDENTITY_SECRET, maxAgeSec = IDENTITY_MAX_AGE_SEC, now = Date.now() } = {}) {
+  if (!secret) throw new Error('appcrane-tenant: no APPCRANE_IDENTITY_SECRET to verify the identity signature with');
+  const get = (h) => { const v = header(req, h); return v === '' ? undefined : String(v); };
+  const sig = get('X-AppCrane-Identity-Sig');
+  const ts = get('X-AppCrane-Identity-Ts');
+  if (!sig || !ts || !/^\d+$/.test(ts)) throw new Error('appcrane-tenant: identity signature missing');
+  const expected = Buffer.from(signIdentity(secret, ts, get));
+  const given = Buffer.from(sig);
+  if (expected.length !== given.length || !timingSafeEqual(expected, given)) {
+    throw new Error('appcrane-tenant: identity signature does not match');
+  }
+  const age = Math.floor(now / 1000) - Number(ts);
+  if (age > maxAgeSec || age < -60) throw new Error(`appcrane-tenant: identity signature expired (${age}s old)`);
+  const email = get('X-AppCrane-User-Email') || '';
+  return { userId: String(get('X-AppCrane-User-Id') || '').replace(/[^0-9]/g, ''), email, org: orgFromEmail(email) };
+}
+
+/**
+ * { org, userId } for the request. Throws if the request carries no identity.
+ * When APPCRANE_IDENTITY_SECRET is set (AppCrane 2.97.0+ injects it), the
+ * identity must also carry a valid signature: forged headers throw.
+ */
 export function tenantKey(req) {
+  if (process.env.APPCRANE_IDENTITY_SECRET) {
+    const { org, userId } = verifyIdentity(req);
+    if (!userId) throw new Error('appcrane-tenant: no tenant identity on request (missing X-AppCrane-User-Id)');
+    return { org, userId };
+  }
   const email = header(req, 'X-AppCrane-User-Email');
   const userId = String(header(req, 'X-AppCrane-User-Id')).replace(/[^0-9]/g, '');
   if (!userId) {

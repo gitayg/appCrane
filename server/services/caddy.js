@@ -52,6 +52,11 @@ const IDENTITY_HEADERS = [
   // checks read this header, so if a client could send it, every hosted app's
   // authorization would be self-service. Stripped here, re-issued by /verify.
   'X-AppCrane-App-Roles',
+  // v2.97.0: the signature over all of the above, keyed per app, so an app can
+  // reject identity that did not come through here. A client-sent pair would
+  // be rejected by a verifying app anyway; stripping it keeps the rule simple.
+  'X-AppCrane-Identity-Ts',
+  'X-AppCrane-Identity-Sig',
 ];
 
 /**

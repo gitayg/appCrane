@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { identitySecretFor, signIdentity } from '../services/identitySignature.js';
 import { existsSync } from 'fs';
 import { join, resolve } from 'path';
 import { getDb } from '../db.js';
@@ -528,6 +529,23 @@ router.get('/verify', (req, res) => {
   const appRoleKeys = appIdForRoles ? roleKeysForUser(appIdForRoles, session.user_id) : [];
   if (appRoleKeys.length > 0) {
     res.setHeader('X-AppCrane-App-Roles', appRoleKeys.join(','));
+  }
+
+  // v2.97.0: sign everything above with the app's own secret, LAST, so the
+  // signature covers exactly the values Caddy is about to copy. The app checks
+  // it with appcrane-tenant verifyIdentity() and so can reject headers that
+  // reached it some way other than through this proxy.
+  if (appIdForRoles) {
+    const ts = Math.floor(Date.now() / 1000);
+    // Caddy sets this URL, not the client: the sandbox route passes
+    // prefix=/<slug>-sandbox. Each environment signs with its own secret.
+    const signEnv = appSlug && req.query.prefix === `/${appSlug}-sandbox` ? 'sandbox' : 'production';
+    const secret = identitySecretFor(db, appIdForRoles, signEnv);
+    res.setHeader('X-AppCrane-Identity-Ts', String(ts));
+    res.setHeader('X-AppCrane-Identity-Sig', signIdentity(secret, ts, (h) => {
+      const v = res.getHeader(h);
+      return v === undefined ? undefined : String(v);
+    }));
   }
 
   res.json({

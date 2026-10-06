@@ -1631,6 +1631,7 @@ router.delete('/:slug', requireAppAccess, auditMiddleware('app-delete'), async (
   const appId = req.app.id;
   db.transaction(() => {
     db.prepare('DELETE FROM app_user_roles WHERE app_id = ?').run(appId);
+    db.prepare('DELETE FROM app_identity_secrets WHERE app_id = ?').run(appId);
     db.prepare('DELETE FROM app_domain_aliases WHERE app_id = ?').run(appId);
     db.prepare('DELETE FROM deployments WHERE app_id = ?').run(appId);
     db.prepare('DELETE FROM env_vars WHERE app_id = ?').run(appId);

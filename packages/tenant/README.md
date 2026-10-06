@@ -64,7 +64,8 @@ upgraded the day they return.
 | `tenantUsage(req, opts?)` | `number` bytes used (db + storage) | walks the tenant dir |
 | `tenantQuotaBytes()` | `number` | from `APPCRANE_TENANT_QUOTA_BYTES`, `0` = unlimited |
 | `assertTenantQuota(req, opts?)` | — | throws `TENANT_QUOTA_EXCEEDED` if at/over quota; no-op when unlimited |
-| `tenantKey(req)` | `{ org, userId }` | throws if the request has no identity |
+| `tenantKey(req)` | `{ org, userId }` | throws if the request has no identity, or (with `APPCRANE_IDENTITY_SECRET` set) no valid signature |
+| `verifyIdentity(req, opts?)` | `{ userId, email, org }` | throws on a missing, forged, altered or >5 min old signature; `opts`: `{ secret?, maxAgeSec? }` |
 | `orgFromEmail(email)` | `string` org slug | domain, sanitised, `unknown` fallback |
 
 `req` may be an Express request (`req.get`), a Node request (`req.headers`), or a
@@ -83,7 +84,10 @@ storage, and revoke purges both.
 ## Security
 
 Always build tenant paths through this helper, never from raw user input — the
-`X-AppCrane-*` identity headers are platform-signed, and the org slug is
+`X-AppCrane-*` identity headers are platform-signed (1.2.0+: `verifyIdentity(req)`
+checks `X-AppCrane-Identity-Sig` against `APPCRANE_IDENTITY_SECRET`, and
+`tenantKey()`/`tenantDb()` do so automatically when that variable is set, so a
+forged `X-AppCrane-User-Id` cannot choose someone else's folder), and the org slug is
 sanitised so a hostile email can't traverse out of the tenant root. Consumer
 domains (e.g. `gmail.com`) share an `org` label, but isolation is per-user, so
 data never mixes.

@@ -122,6 +122,22 @@ function innerBlocks(body) {
  * forward_auth, strip_prefix, the upstream port — is still compared byte for
  * byte, which is what these tests were written to protect.
  */
+/**
+ * v2.97.0 added two identity headers, X-AppCrane-Identity-Ts and -Sig, to the
+ * list every app route strips from the client and copies from /verify. That is
+ * two strip lines plus two names on copy_headers, on every proxied route, and
+ * nothing else. Removed here so the comparisons keep checking everything else
+ * byte for byte; the test below proves this removes lines that are really there.
+ */
+const SIGNATURE_HEADERS = ['X-AppCrane-Identity-Ts', 'X-AppCrane-Identity-Sig'];
+function withoutIdentitySignature(text) {
+  if (text == null) return text;
+  return text.split('\n')
+    .filter(l => !SIGNATURE_HEADERS.some(h => l.trim() === `request_header -${h}`))
+    .map(l => /^\s*copy_headers /.test(l) ? SIGNATURE_HEADERS.reduce((a, h) => a.replace(` ${h}`, ''), l) : l)
+    .join('\n');
+}
+
 function withoutEmbedPolicy(text) {
   if (text == null) return text;
   const lines = text.split('\n');
@@ -147,8 +163,20 @@ function withoutEmbedPolicy(text) {
     if (t === 'header -X-Frame-Options') continue;
     out.push(lines[i]);
   }
-  return out.join('\n');
+  return withoutIdentitySignature(out.join('\n'));
 }
+
+test('the v2.97.0 signature normaliser removes lines that are really there', () => {
+  const raw = CF.split('handle /plain* {')[1];
+  for (const h of SIGNATURE_HEADERS) {
+    assert.ok(raw.includes(`request_header -${h}`), `the generated plain route does not strip ${h}`);
+    assert.match(raw, new RegExp(`copy_headers [^\\n]*${h}`), `the generated plain route does not copy ${h}`);
+    assert.ok(!withoutIdentitySignature(raw).includes(h), `the normaliser left ${h} behind`);
+    assert.ok(!BEFORE.includes(h), `the v2.43.1 snapshot already mentions ${h}; this normaliser is hiding nothing`);
+  }
+  assert.ok(withoutIdentitySignature(raw).includes('request_header -X-AppCrane-User-Id'),
+    'the normaliser ate the identity strips it was meant to leave alone');
+});
 
 test('the embed-policy normaliser removes a region that is really there', () => {
   // Without this, every "byte-identical" assertion below could be passing
@@ -241,7 +269,8 @@ test('the untouched apps keep their exact routing, headless and aliases included
 test('the bypass block changed by exactly one removed line', () => {
   for (const key of ['handle /bypasser-sandbox/ws/runner*', 'handle /bypasser/ws/runner*']) {
     const was = craneWas.get(key).split('\n');
-    const now = craneNow.get(key).split('\n');
+    // v2.97.0's two signature-header strips are the only other difference.
+    const now = withoutIdentitySignature(craneNow.get(key)).split('\n');
     assert.deepEqual(was.filter(l => l.trim() !== 'log_skip'), now,
       `${key}: something other than log_skip changed on the bypass route`);
     assert.ok(was.some(l => l.trim() === 'log_skip'), 'snapshot should still contain log_skip');

@@ -329,6 +329,22 @@ router.post('/:slug/restart/:env', requireAppAccess, auditMiddleware('restart'),
     throw new AppError(`Container ${containerName} not found. Run a deploy first.`, 400, 'NO_CONTAINER');
   }
 
+  // Platform variables a deploy derived from the release's deployhub.json,
+  // which restart cannot re-read: carried over from the container being
+  // replaced, by exact name only, so nothing else the old container had leaks
+  // forward. Before this, a restart dropped them and a multitenant app lost its
+  // tenant root and per-user quota until the next deploy.
+  const CARRIED_FROM_DEPLOY = ['APPCRANE_TENANT_ROOT', 'APPCRANE_TENANT_QUOTA_BYTES'];
+  const carried = {};
+  try {
+    const { stdout } = await execFileAsync('docker', ['inspect', containerName, '--format', '{{json .Config.Env}}'], { timeout: 10000 });
+    for (const kv of JSON.parse(stdout.trim() || '[]')) {
+      const i = kv.indexOf('=');
+      if (i > 0 && CARRIED_FROM_DEPLOY.includes(kv.slice(0, i))) carried[kv.slice(0, i)] = kv.slice(i + 1);
+    }
+  } catch (_) { /* unreadable: fall back to the multitenant flag below */ }
+  if (app.multitenant && !carried.APPCRANE_TENANT_ROOT) carried.APPCRANE_TENANT_ROOT = '/data/tenants';
+
   // Rebuild runtime env vars from DB
   const envVars = db.prepare(
     'SELECT key, value_encrypted FROM env_vars WHERE app_id = ? AND env = ?'
@@ -382,6 +398,16 @@ router.post('/:slug/restart/:env', requireAppAccess, auditMiddleware('restart'),
     const token = getServiceTokenPlaintext(app) || issueServiceToken(app.id);
     runtimeEnvVars.APPCRANE_SERVICE_TOKEN = token;
     runtimeEnvVars.CRANE_INTERNAL_URL = `http://host.docker.internal:${cranePort}`;
+  }
+
+  Object.assign(runtimeEnvVars, carried);
+
+  // v2.97.0: the identity-signing secret, for THIS environment, exactly as the
+  // deploy path injects it. Restart rebuilds the whole environment, so leaving
+  // it out here would silently turn signature checking off in a restarted app.
+  {
+    const { identitySecretFor } = await import('../services/identitySignature.js');
+    runtimeEnvVars.APPCRANE_IDENTITY_SECRET = identitySecretFor(db, app.id, env);
   }
 
   const dataDir = resolve(process.env.DATA_DIR || './data');

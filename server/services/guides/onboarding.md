@@ -281,7 +281,14 @@ headers** so the app reads identity directly off the incoming request.
 | `X-AppCrane-App-Role` | `owner` \| `admin` \| `user` \| `viewer` | The **per-app** role, the one to gate features on. Set when the request is on a per-app prefix. |
 | `X-AppCrane-Is-Admin` | `1` \| `0` | Pre-computed "may administer THIS app" — `1` when `X-AppCrane-App-Role` is `admin` **or** `owner`. Set on `authenticated` requests. Use it instead of hand-rolling role comparisons. |
 
-**Trust model:** Caddy strips any incoming `X-AppCrane-*` from the client *before* `forward_auth` runs and re-injects only what `/api/identity/verify` returned, so what the app sees is guaranteed platform-issued. Header-smuggling is impossible.
+**Trust model:** Caddy strips any incoming `X-AppCrane-*` from the client *before* `forward_auth` runs and re-injects only what `/api/identity/verify` returned, so what arrives *through the proxy* is platform-issued. Two ways around the proxy exist: a raw `tcp`/`dual` data-plane port, and on Docker Desktop (not Linux, measured) another container reaching your app's loopback port via `host.docker.internal`. So since v2.97.0 the identity is also **signed**: `X-AppCrane-Identity-Ts` and `X-AppCrane-Identity-Sig` (HMAC-SHA256 with a secret only this app and environment holds, injected as `APPCRANE_IDENTITY_SECRET`). Check it and reject anything else:
+
+```js
+import { verifyIdentity } from 'appcrane-tenant'   // packages/tenant, 1.2.0+
+const { userId, email } = verifyIdentity(req)        // throws on missing, forged, altered or >5 min old
+```
+
+`tenantKey()` / `tenantDb()` check it automatically whenever `APPCRANE_IDENTITY_SECRET` is set. Without the check, a forged header from one of those two routes is believed.
 
 **Never derive identity from the `cc_token` cookie.** As of v2.39.0 Caddy strips `cc_token` by name out of the `Cookie` header before the request reaches any app container — unconditionally, headless apps included. It was never yours to read: `cc_token` is the *platform* session, accepted as a bearer by AppCrane's own API, so an app backend that lifted it out of `Cookie` could call the platform API **as the visitor** (read every app's decrypted env vars, if the visitor was a platform admin). Identity on the server comes from the `X-AppCrane-*` headers, full stop. Browser-side `fetch('/api/me')` is unaffected — that request matches the platform catch-all, not your app's proxy block, so the browser sends the cookie straight to AppCrane and never through you. If your app currently reads `cc_token`, it is already broken and must move to the headers.
 

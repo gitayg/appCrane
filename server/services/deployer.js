@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, unlinkSync, s
 import { join, resolve, basename } from 'path';
 import net from 'net';
 import { getDb } from '../db.js';
+import { identitySecretFor } from './identitySignature.js';
 import { decrypt } from './encryption.js';
 import log from '../utils/logger.js';
 import { usesLocalRepo } from './managedRepo.js';
@@ -1714,6 +1715,12 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       runtimeEnvVars.CRANE_INTERNAL_URL = `http://host.docker.internal:${cranePort}`;
       appendLog('Injected APPCRANE_SERVICE_TOKEN + host-gateway CRANE_INTERNAL_URL (email service)');
     }
+
+    // v2.97.0: the key the app checks its identity headers with (appcrane-tenant
+    // verifyIdentity). Every app, multitenant or not: forged identity is a
+    // risk for any app that reads X-AppCrane-* headers.
+    runtimeEnvVars.APPCRANE_IDENTITY_SECRET = identitySecretFor(getDb(), app.id, env);
+    appendLog('Injected APPCRANE_IDENTITY_SECRET (verifies X-AppCrane-* identity headers)');
 
     // Per-tenant DB (cooperative model): point the app at its tenant root under
     // the mounted /data. The app derives <org>/u<userId>/db.sqlite from the
