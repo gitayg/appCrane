@@ -26,6 +26,7 @@
  */
 
 import { Router } from 'express';
+import { logAudit } from '../middleware/audit.js';
 import { requireAuth } from '../middleware/auth.js';
 import { getDb } from '../db.js';
 import { existsSync, mkdirSync, readFileSync, unlinkSync, rmSync } from 'fs';
@@ -104,6 +105,7 @@ router.post('/staged', async (req, res) => {
         INSERT INTO staged_files (token, user_id, filename, size_bytes, sha256, scratch_path, expires_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)
       `).run(token, req.user.id, req.file.filename, req.file.size, sha256, req.file.path, expiresAt);
+      logAudit(req.user.id, null, 'file-stage', { bytes: req.file.size, sha256 });
     } catch (e) {
       try { rmSync(scratch, { recursive: true, force: true }); } catch (_) {}
       return res.status(500).json({ error: { code: 'DB_INSERT_FAILED', message: e.message } });

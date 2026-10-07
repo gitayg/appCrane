@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { getDb } from '../db.js';
 import { hashApiKey } from '../services/encryption.js';
 import { AppError } from '../utils/errors.js';
-import { auditMiddleware } from '../middleware/audit.js';
+import { auditMiddleware, logAudit } from '../middleware/audit.js';
 import {
   listWorkspaceChanges,
   readWorkspaceFileForRelease,
@@ -343,7 +343,7 @@ router.post('/:slug/session/:id/attachments', (req, res) => {
 // ── POST /api/coder/:slug/session/:id/dispatch — send a message ──────────
 
 router.post('/:slug/session/:id/dispatch', async (req, res) => {
-  getApp(req.params.slug, req.user);
+  const dispatchAppId = getApp(req.params.slug, req.user)?.id ?? null;
   const session = getSession(req.params.id, req.params.slug);
   // 'active' and 'queued' are accepted because a message typed while a turn is
   // running is queued as a follow-up rather than refused (v2.85.0).
@@ -382,6 +382,9 @@ router.post('/:slug/session/:id/dispatch', async (req, res) => {
   let r;
   try {
     r = await dispatch(req.params.id, prompt.trim(), { model, mode, userId: req.user.id, attachments });
+    // Length only: the prompt is the user's own text and can contain anything.
+    logAudit(req.user.id, dispatchAppId, 'coder-dispatch',
+      { session: req.params.id, mode: mode || null, model: model || null, prompt_chars: prompt.trim().length, attachments: (attachments || []).length });
   } catch (err) {
     if (err.code === 'SESSION_PAUSED') throw new AppError(err.message, 409, 'SESSION_PAUSED');
     throw err;

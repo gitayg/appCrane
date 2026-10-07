@@ -9,6 +9,17 @@ import log from '../utils/logger.js';
  * "what did agents do here" is answerable. When the caller doesn't pass it
  * explicitly, it is resolved from users.kind in the same statement.
  */
+/**
+ * One audit row per sign-in attempt (squash scan 2026-10-06: authentication
+ * was not audited at all). action 'login' or 'login-failed'; detail carries
+ * the method, the reason and the client IP, never a password or token.
+ */
+export function auditLogin(userId, outcome, detail) {
+  try {
+    logAudit(userId ?? null, null, outcome === 'ok' ? 'login' : 'login-failed', detail);
+  } catch (_) { /* auditing must never break a login */ }
+}
+
 export function logAudit(userId, appId, action, detail, actorKind = null) {
   const db = getDb();
   db.prepare(`

@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { logAudit } from '../middleware/audit.js';
 import { readFileSync, existsSync } from 'fs';
 import { join, resolve } from 'path';
 import { randomBytes } from 'crypto';
@@ -78,6 +79,8 @@ router.post('/:appSlug', async (req, res) => {
 
   const { question, session_id } = req.body || {};
   if (!question?.trim()) throw new AppError('question is required', 400, 'VALIDATION');
+  // Length only: a question can contain anything, including secrets.
+  logAudit(user.id, app.id, 'ask', { question_chars: question.trim().length });
 
   let sessionId = session_id ? Number(session_id) : null;
   if (sessionId) {

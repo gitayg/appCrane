@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { auditLogin } from '../middleware/audit.js';
 import { findOrLinkSsoUser } from '../services/ssoLink.js';
 import crypto from 'crypto';
 import { getDb } from '../db.js';
@@ -349,12 +350,14 @@ router.get('/callback', async (req, res) => {
 
     if (!user) {
       log.warn(`OIDC: no account for sub=${sub} email=${email}, auto-provision disabled`);
+      auditLogin(null, 'failed', { method: 'oidc', reason: 'no_account', email: email || null, ip: req.ip });
       if (popup) return sendPopupFailed(res, 'no_account');
       return res.redirect(302, base + '/login?sso_error=no_account');
     }
 
     // Create session and hand token back to the browser via login page JS
     const token = createIdentitySession(user.id);
+    auditLogin(user.id, 'ok', { method: 'oidc', ip: req.ip });
     log.info(`OIDC login: ${user.name} (${email || sub})`);
 
     // v2.6.18: set cc_token cookie server-side on the redirect response.
@@ -383,6 +386,7 @@ router.get('/callback', async (req, res) => {
     res.redirect(302, `${base}/login?${p.toString()}`);
   } catch (e) {
     log.error('OIDC callback error: ' + e.message);
+    auditLogin(null, 'failed', { method: 'oidc', reason: e.popupCode || 'error', message: String(e.message).slice(0, 200), ip: req.ip });
     if (popup) return sendPopupFailed(res, e.popupCode || 'failed');
     res.redirect(302, base + '/login?sso_error=' + encodeURIComponent(e.message));
   }

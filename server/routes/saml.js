@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { auditLogin } from '../middleware/audit.js';
 import { findOrLinkSsoUser } from '../services/ssoLink.js';
 import { SAML } from '@node-saml/node-saml';
 import { getDb } from '../db.js';
@@ -230,11 +231,13 @@ router.post('/callback', async (req, res) => {
 
     if (!user) {
       log.warn(`SAML: no account for nameID=${nameId}, auto-provision disabled`);
+      auditLogin(null, 'failed', { method: 'saml', reason: 'no_account', email: email || null, ip: req.ip });
       if (popupFailing) return sendPopupFailed(res, 'no_account');
       return res.redirect(302, base + '/login?saml_error=no_account');
     }
 
     const token      = createIdentitySession(user.id);
+    auditLogin(user.id, 'ok', { method: 'saml', ip: req.ip });
     // v2.6.18: set cc_token cookie server-side on the redirect — see
     // matching block in oidc.js callback for the full rationale.
     setSessionCookie(res, token, req);
@@ -263,6 +266,7 @@ router.post('/callback', async (req, res) => {
     res.redirect(302, `${base}/login?${p.toString()}`);
   } catch (e) {
     log.error('SAML callback error: ' + e.message);
+    auditLogin(null, 'failed', { method: 'saml', reason: e.popupCode || 'error', message: String(e.message).slice(0, 200), ip: req.ip });
     if (popupFailing) return sendPopupFailed(res, 'failed');
     res.redirect(302, base + '/login?saml_error=' + encodeURIComponent(e.message));
   }

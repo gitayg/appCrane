@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { auditLogin } from '../middleware/audit.js';
 import { identitySecretFor, signIdentity } from '../services/identitySignature.js';
 import { existsSync } from 'fs';
 import { join, resolve } from 'path';
@@ -98,20 +99,25 @@ router.post('/login', (req, res) => {
     'SELECT * FROM users WHERE email = ? OR username = ?'
   ).get(login, login);
 
+  const failed = (reason) => auditLogin(user?.id, 'failed', { method: 'password', reason, login: String(login).slice(0, 200), ip });
   if (!user) {
+    failed('unknown_user');
     throw new AppError('Invalid credentials', 401, 'INVALID_CREDENTIALS');
   }
 
   if (user.active === 0) {
+    failed('deactivated');
     throw new AppError('Account is deactivated. Contact your administrator.', 403, 'DEACTIVATED');
   }
 
   if (!user.password_hash) {
+    failed('no_password');
     throw new AppError('Password not set for this user. Contact admin.', 401, 'NO_PASSWORD');
   }
 
   if (!verifyPassword(password, user.password_hash)) {
     log.warn(`Failed login for "${login}" from ${ip}`);
+    failed('bad_password');
     throw new AppError('Invalid credentials', 401, 'INVALID_CREDENTIALS');
   }
 
@@ -176,6 +182,7 @@ router.post('/login', (req, res) => {
   // (direct nav, new tab, browser restart) or had wrong attributes
   // (path / SameSite), which blocked Caddy forward_auth on per-app
   // routes and bounced users to /applications.
+  auditLogin(user.id, 'ok', { method: 'password', ip });
   setSessionCookie(res, token, req);
 
   res.json({
