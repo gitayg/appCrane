@@ -349,8 +349,8 @@ function LimitsCard({ slug, reload, onMsg }: LimitsCardProps) {
   async function save() {
     if (ram < 128 || cpu < 5) { onMsg({ text: 'Invalid limits', ok: false }); return }
     try {
-      await adminApi.put(`/api/apps/${slug}`, { resource_limits: { max_ram_mb: ram, max_cpu_percent: cpu } })
-      onMsg({ text: 'Resource limits saved. Redeploy to apply.', ok: true })
+      await adminApi.put(`/api/apps/${slug}`, { max_ram_mb: ram, max_cpu_percent: cpu })
+      onMsg({ text: 'Resource limits saved. They apply when the container is next created: redeploy or restart.', ok: true })
     } catch (e) {
       onMsg({ text: (e as Error).message, ok: false })
     }
@@ -386,9 +386,9 @@ function LimitsCard({ slug, reload, onMsg }: LimitsCardProps) {
             style={{ width: 80 }}
           />
         </div>
-        <button className="btn btn-sm" onClick={save}>Save &amp; Redeploy</button>
+        <button className="btn btn-sm" onClick={save}>Save</button>
       </div>
-      <div style={{ fontSize: '.75rem', color: 'var(--dim)', marginTop: 6 }}>Changes take effect on next deploy.</div>
+      <div style={{ fontSize: '.75rem', color: 'var(--dim)', marginTop: 6 }}>Platform admins only. Applies on the next deploy or restart.</div>
     </div>
   )
 }

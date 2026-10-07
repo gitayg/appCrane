@@ -870,6 +870,14 @@ router.get('/:slug/storage', requireAppAccess, async (req, res) => {
 router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req, res) => {
   const db = getDb();
   const app = req.app;
+  // The app page's Resource Limits card sent the limits nested, and this route
+  // read only the top-level fields: the change was silently dropped while the
+  // card said "saved". Accept the nested form as an alias for the top-level one.
+  if (req.body?.resource_limits && typeof req.body.resource_limits === 'object') {
+    const rl = req.body.resource_limits;
+    if (req.body.max_ram_mb === undefined && rl.max_ram_mb !== undefined) req.body.max_ram_mb = rl.max_ram_mb;
+    if (req.body.max_cpu_percent === undefined && rl.max_cpu_percent !== undefined) req.body.max_cpu_percent = rl.max_cpu_percent;
+  }
   const { name, domain, description, category, source_type, github_url, branch, github_token, max_ram_mb, max_cpu_percent, public_access, visibility, image_retention, frame_ancestors, auth_mode, auth_bypass_paths, email_from_name, ingress_type, public_port, sandbox_public_port, data_plane_port, data_plane_protocol, image_ref, container_port, health_path, container_command, volume_paths } = req.body;
 
   // Adopt an app into the catalogue: allowed ONLY while catalog_slug is NULL.
