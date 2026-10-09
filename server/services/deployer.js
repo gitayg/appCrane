@@ -946,6 +946,11 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
   // Hoisted so the failure handler can still flush its deploy-log lines when
   // the BUILD is what failed. Stays null for source types that never clone.
   let supplyChainGate = null;
+  // The image this attempt BUILT (null when it reused a cached one or pulled).
+  // Pruning only runs after a passing health check, so without this a failed
+  // deploy's image stayed on disk forever, and as the newest image it outranked
+  // the last good one in the next keep-N-newest prune.
+  let attemptImage = null;
   try {
     // Trim any accumulated release backlog BEFORE cloning, so an app whose disk
     // filled from repeated failed deploys can self-heal on its next attempt
@@ -1506,7 +1511,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
 
     db.prepare("UPDATE deployments SET status = 'deploying' WHERE id = ?").run(deployId);
 
-    const { dockerAvailable, buildImageIfNeeded, getContainerImage, startApp: dockerStart, stopApp: dockerStop, pruneOldImages, pruneDanglingImages } = await import('./docker.js');
+    const { dockerAvailable, buildImageIfNeeded, getContainerImage, startApp: dockerStart, stopApp: dockerStop, pruneOldImages, pruneDanglingImages, imageExists, imageTagFor } = await import('./docker.js');
     const { ensureDockerfile, injectAppBasePathArg } = await import('./dockerfileGen.js');
     const { validateDockerfile } = await import('./dockerfileValidator.js');
     const { validateDistConsistency } = await import('./distValidator.js');
@@ -1587,6 +1592,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       }
 
       appendLog('Building docker image...');
+      const wasCached = await imageExists(imageTagFor(app.slug, env, commitHash));
       image = await buildImageIfNeeded({
         slug: app.slug,
         env,
@@ -1596,6 +1602,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
         onLog: (line) => { if (deployLog.length < 500) appendLog(`  ${line}`); },
       });
       appendLog(`Image ready: ${image}`);
+      if (!wasCached) attemptImage = image;
     }
     }
 
@@ -2134,6 +2141,11 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       }
     } catch (_) { /* best-effort */ }
     try { pruneOldReleases(releasesDir, appDir, 5, appendLog); } catch (_) {}
+
+    if (attemptImage) {
+      const { discardImage } = await import('./docker.js');
+      if (await discardImage(attemptImage)) appendLog(`Removed failed deploy image: ${attemptImage}`);
+    }
 
     db.prepare(`
       UPDATE deployments SET status = 'failed', finished_at = datetime('now'), log = ?

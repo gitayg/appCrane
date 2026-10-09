@@ -303,6 +303,30 @@ export async function buildImageIfNeeded({ slug, env, contextDir, commitHash, ap
   return buildImage({ slug, env, contextDir, commitHash, appBasePath, onLog });
 }
 
+/** Whether an image with this ref is on the host. */
+export async function imageExists(ref) {
+  try {
+    await dockerExec(['image', 'inspect', ref, '--format', '{{.Id}}'], { timeout: 5000 });
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
+ * Remove one image a failed deploy built. No -f on purpose: docker refuses to
+ * remove an image any container (running or stopped) still uses, so this can
+ * never take out what is serving.
+ */
+export async function discardImage(ref) {
+  try {
+    await dockerExec(['rmi', ref]);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
 export async function getContainerImage(slug, env) {
   const name = containerName(slug, env);
   return dockerExec(['inspect', name, '--format', '{{.Config.Image}}'], { timeout: 5000 });
