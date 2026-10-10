@@ -1236,6 +1236,30 @@ async function pruneOldPulledImages(slug, keep) {
   }
 }
 
+/**
+ * Remove the images of an app being deleted: only images it provably owns.
+ *
+ * Built images carry `label=slug=<slug>`, so they are this app's alone. Pulled
+ * images live in a repository other apps may share ('odoo:19'), so the
+ * repository-wide pass is NOT used here: with keep = 0 it would delete another
+ * app's retained rollback image. Instead each digest-pinned ref this app's own
+ * deployments recorded is removed, unless another app's deployments or its
+ * apps.image_ref name it, and without -f, so an image any container uses stays.
+ */
+export async function removeAppImages(appId, slug) {
+  await pruneOldBuiltImages(slug, null, 0).catch(() => {});
+  const db = getDb();
+  const refs = db.prepare(`
+    SELECT DISTINCT d.image_ref AS ref FROM deployments d
+    WHERE d.app_id = ? AND d.image_ref IS NOT NULL AND d.image_ref != ''
+      AND NOT EXISTS (SELECT 1 FROM deployments o WHERE o.app_id != ? AND o.image_ref = d.image_ref)
+      AND NOT EXISTS (SELECT 1 FROM apps a WHERE a.id != ? AND a.image_ref = d.image_ref)
+  `).all(appId, appId, appId).map(r => r.ref);
+  for (const ref of refs) {
+    try { await dockerExec(['rmi', ref]); } catch (_) {}
+  }
+}
+
 // Reclaim dangling/untagged images left behind by failed or interrupted builds.
 // Safe by default — `docker image prune -f` only removes images with no tags
 // AND no descendant tagged images, never touches anything in use by a container.

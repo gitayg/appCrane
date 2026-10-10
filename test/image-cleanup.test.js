@@ -36,7 +36,16 @@ initDb();
 const db = getDb();
 const key = generateApiKey('dhk_user');
 db.prepare("INSERT INTO users (name,email,role,active,api_key_hash) VALUES ('p','p@t.test','platform_admin',1,?)").run(hashApiKey(key));
-db.prepare("INSERT INTO apps (name,slug,slot,source_type,branch) VALUES ('G','gone',1,'managed','main')").run();
+const goneId = db.prepare("INSERT INTO apps (name,slug,slot,source_type,branch) VALUES ('G','gone',1,'managed','main')").run().lastInsertRowid;
+// Two image apps on one repository. Deleting 'pulled' must remove only the
+// digest it alone deployed, never 'neighbour''s (its rollback image).
+const pulledId = db.prepare("INSERT INTO apps (name,slug,slot,source_type,image_ref) VALUES ('P','pulled',2,'image','odoo:19')").run().lastInsertRowid;
+const neighbourId = db.prepare("INSERT INTO apps (name,slug,slot,source_type,image_ref) VALUES ('N','neighbour',3,'image','odoo:19')").run().lastInsertRowid;
+const dep = (appId, ref) => db.prepare("INSERT INTO deployments (app_id, env, status, image_ref) VALUES (?, 'production', 'live', ?)").run(appId, ref);
+dep(pulledId, 'odoo@sha256:mine');
+dep(pulledId, 'odoo@sha256:shared');
+dep(neighbourId, 'odoo@sha256:shared');
+dep(neighbourId, 'odoo@sha256:neighbours-rollback');
 
 const apps = (await import('../server/routes/apps.js')).default;
 const { errorHandler } = await import('../server/utils/errors.js');
@@ -54,6 +63,16 @@ test('deleting an app removes its images, both environments', async () => {
   assert.ok(!listing.includes('label=env=production') && !listing.includes('label=env=sandbox'), 'only one environment\'s images were listed');
   const removed = calls().filter(a => a[0] === 'rmi').map(a => a.at(-1));
   assert.deepEqual(removed.sort(), ['sha256:aaa', 'sha256:bbb']);
+});
+
+test('deleting an image app removes only the digests it alone deployed, never a shared repository\'s images', async () => {
+  const before = calls().length;
+  const r = await fetch(`http://127.0.0.1:${server.address().port}/api/apps/pulled?confirm=true`, { method: 'DELETE', headers: { 'x-api-key': key } });
+  assert.equal(r.status, 200);
+  const mine = calls().slice(before);
+  assert.ok(!mine.some(a => a[0] === 'images' && a.includes('odoo')), 'the repository-wide pass ran, which deletes other apps\' images');
+  const removed = mine.filter(a => a[0] === 'rmi');
+  assert.deepEqual(removed, [['rmi', 'odoo@sha256:mine']], 'removed something another app deployed, or forced it');
 });
 
 test('a failed deploy\'s image is removed without -f, so an in-use image is refused', async () => {

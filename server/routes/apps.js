@@ -1604,11 +1604,10 @@ router.delete('/:slug', requireAppAccess, auditMiddleware('app-delete'), async (
     const { stopApp } = await import('../services/docker.js');
     await stopApp(slug, 'production').catch(() => {});
     await stopApp(slug, 'sandbox').catch(() => {});
-    // Keep none: nothing pruned the images of a deleted app, so every delete
-    // left them on disk forever. Before the row goes, because the pulled-image
-    // pass reads it. An image another app's container uses is skipped.
-    const { pruneOldImages } = await import('../services/docker.js');
-    await pruneOldImages(slug, null, 0).catch(() => {});
+    // Nothing removed a deleted app's images, so every delete left them on
+    // disk forever. Before the rows go: it reads this app's deployments.
+    const { removeAppImages } = await import('../services/docker.js');
+    await removeAppImages(req.app.id, slug).catch(() => {});
   } catch (e) {}
 
   // v2.65.0: drop the app's managed databases BEFORE the row goes away.
