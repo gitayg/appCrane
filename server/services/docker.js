@@ -1171,18 +1171,24 @@ export async function pruneOldImages(slug, env, keep = 2) {
 }
 
 /** Keep-N-newest over the images buildImage() tagged and labelled for this app. */
+//
+// Scoped by the repository name buildImage() tags with as well as the labels:
+// a label is whatever an image's author wrote, so a pulled image can carry
+// `slug=<another app>` and be swept by that app's prune. The repository name
+// `appcrane-<slug>-<env>` is only ever written by imageTag().
 async function pruneOldBuiltImages(slug, env, keep) {
-  const filters = ['--filter', `label=slug=${slug}`];
-  if (env) filters.push('--filter', `label=env=${env}`);
-  const out = await dockerExec(['images', ...filters, '--format', '{{.ID}} {{.CreatedAt}}']);
-  if (!out) return;
-  const rows = out.split('\n').map(l => {
-    const sp = l.indexOf(' ');
-    return { id: l.slice(0, sp), created: l.slice(sp + 1) };
-  });
-  rows.sort((a, b) => b.created.localeCompare(a.created));
-  for (const row of rows.slice(keep)) {
-    try { await dockerExec(['rmi', '-f', row.id]); } catch (e) {}
+  for (const e of env ? [env] : ['production', 'sandbox']) {
+    const filters = ['--filter', `label=slug=${slug}`, '--filter', `label=env=${e}`, '--filter', `reference=appcrane-${slug}-${e}`];
+    const out = await dockerExec(['images', ...filters, '--format', '{{.ID}} {{.CreatedAt}}']);
+    if (!out) continue;
+    const rows = out.split('\n').map(l => {
+      const sp = l.indexOf(' ');
+      return { id: l.slice(0, sp), created: l.slice(sp + 1) };
+    });
+    rows.sort((a, b) => b.created.localeCompare(a.created));
+    for (const row of rows.slice(keep)) {
+      try { await dockerExec(['rmi', '-f', row.id]); } catch (_) {}
+    }
   }
 }
 
@@ -1239,23 +1245,37 @@ async function pruneOldPulledImages(slug, keep) {
 /**
  * Remove the images of an app being deleted: only images it provably owns.
  *
- * Built images carry `label=slug=<slug>`, so they are this app's alone. Pulled
- * images live in a repository other apps may share ('odoo:19'), so the
- * repository-wide pass is NOT used here: with keep = 0 it would delete another
- * app's retained rollback image. Instead each digest-pinned ref this app's own
- * deployments recorded is removed, unless another app's deployments or its
- * apps.image_ref name it, and without -f, so an image any container uses stays.
+ * Built images: the `appcrane-<slug>-<env>` repositories (pruneOldBuiltImages).
+ * Pulled images live in repositories other apps may share ('odoo:19'), so the
+ * repository-wide pass is NOT used: with keep = 0 it deletes another app's
+ * retained rollback image. Each digest ref this app's deployments recorded is
+ * removed only if its image ID is not the ID of any ref another app deployed
+ * or names. IDs, not strings: 'odoo@sha256:x' and
+ * 'docker.io/library/odoo@sha256:x' are one image to Docker, and a text
+ * comparison let one app's delete remove another's image. No -f, so an image
+ * any container uses stays.
  */
 export async function removeAppImages(appId, slug) {
   await pruneOldBuiltImages(slug, null, 0).catch(() => {});
   const db = getDb();
-  const refs = db.prepare(`
-    SELECT DISTINCT d.image_ref AS ref FROM deployments d
-    WHERE d.app_id = ? AND d.image_ref IS NOT NULL AND d.image_ref != ''
-      AND NOT EXISTS (SELECT 1 FROM deployments o WHERE o.app_id != ? AND o.image_ref = d.image_ref)
-      AND NOT EXISTS (SELECT 1 FROM apps a WHERE a.id != ? AND a.image_ref = d.image_ref)
-  `).all(appId, appId, appId).map(r => r.ref);
-  for (const ref of refs) {
+  const own = db.prepare("SELECT DISTINCT image_ref AS ref FROM deployments WHERE app_id = ? AND image_ref IS NOT NULL AND image_ref != ''")
+    .all(appId).map(r => r.ref);
+  if (!own.length) return;
+  const others = db.prepare(`
+    SELECT image_ref AS ref FROM deployments WHERE app_id != ? AND image_ref IS NOT NULL AND image_ref != ''
+    UNION SELECT image_ref FROM apps WHERE id != ? AND image_ref IS NOT NULL AND image_ref != ''
+  `).all(appId, appId).map(r => r.ref);
+  const idOf = async (ref) => {
+    try { return await dockerExec(['image', 'inspect', ref, '--format', '{{.Id}}'], { timeout: 5000 }); } catch (_) { return null; }
+  };
+  const taken = new Set();
+  for (const ref of others) {
+    const id = await idOf(ref);
+    if (id) taken.add(id);
+  }
+  for (const ref of own) {
+    const id = await idOf(ref);
+    if (!id || taken.has(id)) continue;
     try { await dockerExec(['rmi', ref]); } catch (_) {}
   }
 }

@@ -5,6 +5,7 @@ import { getPortsForSlot } from './portAllocator.js';
 import { resolveSafe } from '../utils/paths.js';
 import { reloadCaddy } from './caddy.js';
 import { AppError } from '../utils/errors.js';
+import { slugRefusal } from '../utils/slugPolicy.js';
 import log from '../utils/logger.js';
 
 // Renaming an app, for both front doors.
@@ -30,9 +31,8 @@ export async function renameApp({ app, newSlug, redirect = true, userId }) {
   const oldSlug = app.slug;
 
   if (!newSlug) throw new AppError('new_slug is required', 400, 'VALIDATION');
-  if (!/^[a-z0-9][a-z0-9-]*$/.test(newSlug)) {
-    throw new AppError('Slug must be lowercase alphanumeric with dashes', 400, 'VALIDATION');
-  }
+  const slugProblem = slugRefusal(newSlug);
+  if (slugProblem) throw new AppError(slugProblem, 400, 'VALIDATION');
   if (newSlug === oldSlug) throw new AppError('New slug is the same as current slug', 400, 'VALIDATION');
   if (db.prepare('SELECT id FROM apps WHERE slug = ?').get(newSlug)) {
     throw new AppError(`Slug '${newSlug}' is already in use`, 409, 'DUPLICATE');

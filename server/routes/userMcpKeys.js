@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { getDb } from '../db.js';
 import { generateApiKey, hashApiKey } from '../services/encryption.js';
-import { requireAuth, requireAdmin } from '../middleware/auth.js';
+import { requireAuth, requirePlatformAdmin } from '../middleware/auth.js';
 import { auditMiddleware } from '../middleware/audit.js';
 import { AppError } from '../utils/errors.js';
 import { isAdmin } from '../utils/roles.js';
@@ -118,10 +118,13 @@ router.post('/me/mcp-keys', requireSession, auditMiddleware('user-mcp-key-create
  * server resolves it to that user's apps + role, exactly the same as if
  * the user had created it themselves via /api/me/mcp-keys.
  *
- * Auth: requireAuth + requireAdmin (enforced via the middleware imports).
+ * Auth: platform admin only. The key authenticates AS the target user, so a
+ * global admin who could issue one for a platform admin would hold platform
+ * admin powers (security audit 2026-10-09, H6). Same rule as resetting
+ * another user's password (PUT /api/users/:id/password).
  * Body: { label?, expires_at? } — same shape as the self-issue endpoint.
  */
-router.post('/users/:id/mcp-keys', requireAdmin, auditMiddleware('user-mcp-key-create-admin'), (req, res) => {
+router.post('/users/:id/mcp-keys', requirePlatformAdmin, auditMiddleware('user-mcp-key-create-admin'), (req, res) => {
   if (req.user_mcp_key) {
     throw new AppError('Issuing keys for other users requires a session, not an MCP key', 403, 'KEY_FORBIDDEN');
   }

@@ -7,6 +7,7 @@ import { auditMiddleware, logAudit } from '../middleware/audit.js';
 import { getNextSlot, getPortsForSlot } from '../services/portAllocator.js';
 import { encrypt, generateApiKey, hashApiKey } from '../services/encryption.js';
 import { AppError } from '../utils/errors.js';
+import { slugRefusal } from '../utils/slugPolicy.js';
 import { resolveSafe } from '../utils/paths.js';
 import { reloadCaddy } from '../services/caddy.js';
 import { validateBypassPaths } from '../utils/authBypassPaths.js';
@@ -542,7 +543,8 @@ router.post('/', requireAuth, auditMiddleware('app-create'), async (req, res) =>
   const { name, slug, domain, description, category, source_type, github_url, branch, github_token, max_ram_mb, max_cpu_percent, visibility, public_access, image_ref, container_port, health_path, catalog_slug } = req.body;
 
   if (!name || !slug) throw new AppError('Name and slug are required', 400, 'VALIDATION');
-  if (!/^[a-z0-9][a-z0-9-]*$/.test(slug)) throw new AppError('Slug must be lowercase alphanumeric with dashes', 400, 'VALIDATION');
+  const slugProblem = slugRefusal(slug);
+  if (slugProblem) throw new AppError(slugProblem, 400, 'VALIDATION');
   if (github_url) validateGithubUrl(github_url);
   // SECURITY: same regex as PUT — branch flows into `sh -c` calls.
   if (branch && !/^[A-Za-z0-9._/\-]{1,200}$/.test(branch)) {

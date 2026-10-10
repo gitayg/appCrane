@@ -2,6 +2,7 @@ import { execFileSync } from 'child_process';
 import { lstatSync, readFileSync } from 'fs';
 import { join, resolve } from 'path';
 import log from '../../utils/logger.js';
+import { assertSafeWorkspaceGit, HARDENED_GIT_ARGS } from './workspaceGitGuard.js';
 
 // ---------------------------------------------------------------------------
 // Releasing selected workspace changes (Phase 4a)
@@ -48,12 +49,20 @@ const EXCLUDED_PREFIXES = ['.appcrane/'];
 // the caller picks from — would be every file in the repo. The managed push
 // writes mode 100644 unconditionally (services/localGit.js), so a mode is not
 // releasable information in the first place.
+//
+// The workspace is also the agent's to rewrite, .git/ included: every call
+// first checks its config against an allowlist and carries HARDENED_GIT_ARGS
+// (builder/workspaceGitGuard.js), because safe.directory alone would make this
+// host run whatever command the agent planted in .git/config.
 function workspaceGit(workspaceDir) {
-  return (args, opts = {}) => execFileSync(
-    'git',
-    ['-c', `safe.directory=${workspaceDir}`, '-c', 'core.fileMode=false', '-C', workspaceDir, ...args],
-    { stdio: 'pipe', timeout: 60000, maxBuffer: 64 * 1024 * 1024, ...opts },
-  );
+  return (args, opts = {}) => {
+    assertSafeWorkspaceGit(workspaceDir);
+    return execFileSync(
+      'git',
+      ['-c', `safe.directory=${workspaceDir}`, '-c', 'core.fileMode=false', ...HARDENED_GIT_ARGS, '-C', workspaceDir, ...args],
+      { stdio: 'pipe', timeout: 60000, maxBuffer: 64 * 1024 * 1024, ...opts },
+    );
+  };
 }
 
 /** Absolute path of a repo-relative path, or null if it escapes the workspace. */
@@ -126,8 +135,8 @@ export function listWorkspaceChanges(workspaceDir) {
     }
 
     const diff = tracked
-      ? diffText(git, ['diff', '--no-color', '--no-ext-diff', 'HEAD', '--', path])
-      : diffText(git, ['diff', '--no-color', '--no-ext-diff', '--no-index', '--', '/dev/null', path]);
+      ? diffText(git, ['diff', '--no-color', '--no-ext-diff', '--no-textconv', 'HEAD', '--', path])
+      : diffText(git, ['diff', '--no-color', '--no-ext-diff', '--no-textconv', '--no-index', '--', '/dev/null', path]);
 
     out.push({ path, status, diff });
   }

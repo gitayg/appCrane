@@ -25,6 +25,7 @@ import { DEFAULT_IMAGE_RETENTION } from './imageRetention.js';
 import { mkdirSync, existsSync, readFileSync, writeFileSync } from 'fs';
 import { join, resolve, dirname } from 'path';
 import crypto from 'crypto';
+import { slugRefusal } from '../utils/slugPolicy.js';
 
 /**
  * The commit part of a managed-push response. A GitHub commit carries its web
@@ -2044,7 +2045,7 @@ const TOOLS = [
       // Mirror server/routes/apps.js POST / validation rules
       const { name, slug, github_url } = args;
       if (!name || !slug) throw new Error('name and slug are required');
-      if (!/^[a-z0-9][a-z0-9-]*$/.test(slug)) throw new Error('slug must be lowercase alphanumeric with dashes');
+      { const slugProblem = slugRefusal(slug); if (slugProblem) throw new Error(slugProblem); }
       if (args.branch && !/^[A-Za-z0-9._/\-]{1,200}$/.test(args.branch)) {
         throw new Error('branch must be alphanumeric with . _ / - (max 200 chars)');
       }
@@ -3432,7 +3433,7 @@ const TOOLS = [
     handler: async (user, args) => {
       const { name, slug } = args;
       if (!name || !slug) throw new Error('name and slug are required');
-      if (!/^[a-z0-9][a-z0-9-]*$/.test(slug)) throw new Error('slug must be lowercase alphanumeric with dashes');
+      { const slugProblem = slugRefusal(slug); if (slugProblem) throw new Error(slugProblem); }
       if (args.branch && !/^[A-Za-z0-9._/\-]{1,200}$/.test(args.branch)) {
         throw new Error('branch must be alphanumeric with . _ / - (max 200 chars)');
       }

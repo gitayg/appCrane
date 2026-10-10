@@ -24,6 +24,12 @@ fs.appendFileSync(${JSON.stringify(LOG)}, JSON.stringify(args) + '\\n');
 if (args[0] === 'images' && args.includes('label=slug=gone')) {
   process.stdout.write('sha256:aaa 2026-10-01 10:00:00 +0000 UTC\\nsha256:bbb 2026-09-01 10:00:00 +0000 UTC\\n');
 }
+if (args[0] === 'image' && args[1] === 'inspect') {
+  // Docker's own normalisation: the docker.io/library/ spelling is the same image.
+  const ref = args[2].replace('docker.io/library/', '');
+  if (ref.startsWith('odoo@')) { process.stdout.write('sha256:id-' + ref.slice(5) + '\\n'); process.exit(0); }
+  process.stderr.write('Error: No such image\\n'); process.exit(1);
+}
 if (args[0] === 'rmi' && args[1] === 'in-use:tag') { process.stderr.write('conflict: image is being used by container\\n'); process.exit(1); }
 process.exit(0);
 `, { mode: 0o755 });
@@ -46,6 +52,8 @@ dep(pulledId, 'odoo@sha256:mine');
 dep(pulledId, 'odoo@sha256:shared');
 dep(neighbourId, 'odoo@sha256:shared');
 dep(neighbourId, 'odoo@sha256:neighbours-rollback');
+// The same image as neighbour's rollback, spelt the way Docker also accepts.
+dep(pulledId, 'docker.io/library/odoo@sha256:neighbours-rollback');
 
 const apps = (await import('../server/routes/apps.js')).default;
 const { errorHandler } = await import('../server/utils/errors.js');
@@ -58,11 +66,14 @@ after(() => { server.closeAllConnections?.(); server.close(); });
 test('deleting an app removes its images, both environments', async () => {
   const r = await fetch(`http://127.0.0.1:${server.address().port}/api/apps/gone?confirm=true`, { method: 'DELETE', headers: { 'x-api-key': key } });
   assert.equal(r.status, 200);
-  const listing = calls().find(a => a[0] === 'images' && a.includes('label=slug=gone'));
-  assert.ok(listing, 'the deleted app\'s images were never listed');
-  assert.ok(!listing.includes('label=env=production') && !listing.includes('label=env=sandbox'), 'only one environment\'s images were listed');
+  const listings = calls().filter(a => a[0] === 'images' && a.includes('label=slug=gone'));
+  assert.deepEqual(listings.map(a => a[a.indexOf('label=env=production') >= 0 ? a.indexOf('label=env=production') : a.indexOf('label=env=sandbox')]).sort(),
+    ['label=env=production', 'label=env=sandbox'], 'both environments\' images were not listed');
+  for (const l of listings) {
+    assert.ok(l.some(x => /^reference=appcrane-gone-(production|sandbox)$/.test(x)), `listed by label alone, which any pulled image can carry: ${l.join(' ')}`);
+  }
   const removed = calls().filter(a => a[0] === 'rmi').map(a => a.at(-1));
-  assert.deepEqual(removed.sort(), ['sha256:aaa', 'sha256:bbb']);
+  assert.deepEqual([...new Set(removed)].sort(), ['sha256:aaa', 'sha256:bbb']);
 });
 
 test('deleting an image app removes only the digests it alone deployed, never a shared repository\'s images', async () => {

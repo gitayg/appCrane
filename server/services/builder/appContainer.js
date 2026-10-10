@@ -4,6 +4,8 @@ import { join, resolve } from 'path';
 import { getDb } from '../../db.js';
 import { usesLocalRepo, cloneLocalRepoForDeploy } from '../managedRepo.js';
 import { isEnvFilePath } from '../envFilePushGuard.js';
+import { repoPath } from '../localGit.js';
+import { assertSafeWorkspaceGit, HARDENED_GIT_ARGS } from './workspaceGitGuard.js';
 import { ensureStudioImage } from '../appstudio/generator.js';
 import { writeSnapshot } from '../github/snapshot.js';
 import { prepareSkillsMount } from '../skills.js';
@@ -371,14 +373,21 @@ export function assertPreserveBranchSafe(branch, app) {
  * it executable. A rescue commit that has to have its `chmod +x` redone is a
  * far better outcome than no rescue commit.
  */
-function gitIn(dir, args) {
-  return execFileSync('git', ['-c', `safe.directory=${dir}`, '-c', 'core.fileMode=false', '-C', dir, ...args], {
+//
+// The workspace is the agent's to rewrite, .git/ included, so its config is
+// checked against an allowlist before EVERY call and HARDENED_GIT_ARGS cut off
+// hooks, fsmonitor and network transports on top (builder/workspaceGitGuard.js).
+// safe.directory alone would make this host honour whatever command the agent
+// planted in .git/config.
+export function gitIn(dir, args) {
+  assertSafeWorkspaceGit(dir);
+  return execFileSync('git', ['-c', `safe.directory=${dir}`, '-c', 'core.fileMode=false', ...HARDENED_GIT_ARGS, '-C', dir, ...args], {
     stdio: 'pipe', timeout: 60000,
   }).toString();
 }
 
 function stagedPaths(dir) {
-  return gitIn(dir, ['diff', '--cached', '--name-only', '-z']).split('\0').filter(Boolean);
+  return gitIn(dir, ['diff', '--cached', '--no-ext-diff', '--no-textconv', '--name-only', '-z']).split('\0').filter(Boolean);
 }
 
 /**
@@ -451,11 +460,15 @@ function preserveWorkspace(slug, workspaceDir) {
   // three slash-separated segments, so the deploy-branch guard applies to each.
   // Bounded: after ten rescues for one session, something is wrong and silently
   // creating refs forever is not the answer.
+  // Pushed to the managed repo by its path, not to `origin`: remote.origin.url
+  // is in the agent-writable .git/config, and a rewritten one would make this
+  // host write the rescue branch into some other repository.
+  const pushTarget = repoPath(slug);
   const targets = [branch, ...Array.from({ length: 9 }, (_, i) => `${branch}.${i + 2}`)];
   let lastErr = null;
   for (const target of targets) {
     try {
-      gitIn(workspaceDir, ['push', 'origin', `HEAD:refs/heads/${assertPreserveBranchSafe(target, app)}`]);
+      gitIn(workspaceDir, ['push', pushTarget, `HEAD:refs/heads/${assertPreserveBranchSafe(target, app)}`]);
       return { preserved: true, branch: target, commit: head, files: staged.length, skippedEnvFiles };
     } catch (err) {
       lastErr = err;

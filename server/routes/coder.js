@@ -226,6 +226,18 @@ function getSession(sessionId, slug) {
   return s;
 }
 
+// A session is one user's: every turn in it runs on its OWNER's personal Claude
+// token (builderSession.js resolves actingUserId from coder_sessions.user_id).
+// getSession only proves the session is this app's, so any member could send
+// turns, attachments or a resume into a colleague's session and spend their
+// subscription (security audit 2026-10-09, H3). Anything that feeds or restarts
+// a session is the owner's alone, platform admins included.
+function assertSessionOwner(session, user) {
+  if (session.user_id !== user.id) {
+    throw new AppError('This coder session belongs to another user. Start your own session.', 403, 'NOT_SESSION_OWNER');
+  }
+}
+
 // ── GET /api/coder/models — what a dispatch may ask for ──────────────────
 //
 // The list is served rather than hardcoded in the SPA because the two would
@@ -334,7 +346,7 @@ function asAppError(fn) {
 
 router.post('/:slug/session/:id/attachments', (req, res) => {
   getApp(req.params.slug, req.user);
-  getSession(req.params.id, req.params.slug);
+  assertSessionOwner(getSession(req.params.id, req.params.slug), req.user);
   const { name, data } = req.body || {};
   const attachment = asAppError(() => saveAttachment(req.params.slug, req.params.id, { name, data }));
   res.status(201).json({ attachment });
@@ -345,6 +357,7 @@ router.post('/:slug/session/:id/attachments', (req, res) => {
 router.post('/:slug/session/:id/dispatch', async (req, res) => {
   const dispatchAppId = getApp(req.params.slug, req.user)?.id ?? null;
   const session = getSession(req.params.id, req.params.slug);
+  assertSessionOwner(session, req.user);
   // 'active' and 'queued' are accepted because a message typed while a turn is
   // running is queued as a follow-up rather than refused (v2.85.0).
   // A paused session gets its own code so the panel can resume and retry the
@@ -410,7 +423,7 @@ router.get('/:slug/session/:id/followups', (req, res) => {
 
 router.delete('/:slug/session/:id/followups/:followupId', (req, res) => {
   getApp(req.params.slug, req.user);
-  getSession(req.params.id, req.params.slug);
+  assertSessionOwner(getSession(req.params.id, req.params.slug), req.user);
   const id = Number(req.params.followupId);
   if (!Number.isInteger(id)) throw new AppError('followupId must be an integer', 400, 'VALIDATION');
   const cancelled = cancelFollowup(req.params.id, id);
@@ -423,8 +436,10 @@ router.delete('/:slug/session/:id/followups/:followupId', (req, res) => {
 // ── POST /api/coder/:slug/session/:id/stop — stop current dispatch ───────
 
 router.post('/:slug/session/:id/stop', (req, res) => {
-  getApp(req.params.slug, req.user);
-  getSession(req.params.id, req.params.slug);
+  const app = getApp(req.params.slug, req.user);
+  const session = getSession(req.params.id, req.params.slug);
+  // Stopping spends nothing, so an app admin may stop a colleague's runaway turn.
+  if (session.user_id !== req.user.id && !canReleaseOn(app, req.user)) assertSessionOwner(session, req.user);
   stopDispatch(req.params.id);
   res.json({ message: 'Stopped' });
 });
@@ -441,6 +456,7 @@ router.post('/:slug/session/:id/resume', auditMiddleware('coder.resume'), async 
   const app = getApp(req.params.slug, req.user);
   assertCraneHosted(app);
   const session = getSession(req.params.id, req.params.slug);
+  assertSessionOwner(session, req.user);
   if (session.status !== 'paused') {
     throw new AppError(`Session is '${session.status}', must be paused to resume`, 400, 'WRONG_STATUS');
   }
