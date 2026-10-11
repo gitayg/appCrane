@@ -38,9 +38,10 @@ const IN_HANDLER_MARKERS = [
   'requireAppAccess', 'getAppForUser', 'roleForUserOnApp', 'userHasAppPermission',
   'FROM app_users', 'FROM app_user_roles', 'isAppAdmin', 'appForServiceToken',
   'requireDomainAdmin',
-  // An explicit admin-only gate inside the handler is also sufficient: a
-  // platform/global admin is authorized on every app by design.
-  "role !== 'admin'", 'role !== "admin"',
+  // An explicit platform-admin-only gate inside the handler is also
+  // sufficient: a platform admin is authorized on every app by design. (This
+  // matched role !== 'admin' until the global admin role was retired, v2.98.0.)
+  "role !== 'platform_admin'", 'role !== "platform_admin"',
 ];
 
 // Routes that are intentionally unauthenticated, with the reason they're safe.

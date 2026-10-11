@@ -79,9 +79,9 @@ function mkUser({ role = 'user', assignTo = null, roleOn = null, appRole = 'owne
 
 const MEMBER          = mkUser({ assignTo: APP_ID });                       // assigned to bookstack
 const OUTSIDER        = mkUser({ assignTo: OTHER_APP_ID });                 // assigned, but elsewhere
-const ADMIN           = mkUser({ role: 'admin' });                          // unassigned
+const ADMIN           = mkUser({ role: 'user' });                           // ex global admin (tier retired, migration 105), unassigned
 const PLATFORM        = mkUser({ role: 'platform_admin' });                 // unassigned
-const ASSIGNED_ADMIN  = mkUser({ role: 'admin', assignTo: APP_ID });        // admin who did the audited step
+const ASSIGNED_ADMIN  = mkUser({ role: 'platform_admin', assignTo: APP_ID }); // admin who did the audited step
 const ROLE_ONLY       = mkUser({ roleOn: APP_ID, appRole: 'owner' });       // an owner of record
 const NONE_ROW        = mkUser({ roleOn: APP_ID, appRole: 'none' });        // a stored 'none': no access
 const SCOPED_OUT      = mkUser({ assignTo: APP_ID, scope: JSON.stringify(['someone-elses-app']) });
@@ -218,12 +218,15 @@ test('a user with no relationship to the app cannot provision against it', async
   assert.equal(db.prepare('SELECT COUNT(*) c FROM managed_databases').get().c, 0);
 });
 
-test('an UNASSIGNED admin or platform_admin cannot provision, and is told how to proceed', async () => {
-  // The v2.39.0 guardrail, applied to a new resource. Both admin tiers get past
+test('an UNASSIGNED platform_admin cannot provision, and is told how to proceed', async () => {
+  // The v2.39.0 guardrail, applied to a new resource. A platform admin gets past
   // getAppForUser (they can see every app) and must still be refused here — this
   // is the case where the MCP surface would silently become looser than the
-  // HTTP one.
-  for (const [label, user] of [['admin', ADMIN], ['platform_admin', PLATFORM]]) {
+  // HTTP one. (There used to be a second, global 'admin' tier here too; it was
+  // retired in migration 105 and its holders became plain users — refused below.)
+  assert.match(await refusal(ADMIN, 'appcrane_provision_database', { slug: 'bookstack', engine: 'postgres' }),
+    /Forbidden|not found|access/i, 'an ex global admin was not refused');
+  for (const [label, user] of [['platform_admin', PLATFORM]]) {
     const msg = await refusal(user, 'appcrane_provision_database', { slug: 'bookstack', engine: 'postgres' });
     assert.match(msg, /Forbidden/, `${label} was not refused`);
     assert.match(msg, /Assign yourself to 'bookstack'/, `${label} got no actionable message`);

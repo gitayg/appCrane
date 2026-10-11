@@ -18,6 +18,9 @@
 //   env             — 'production' | 'sandbox' (which is current)
 //   current-url     — what "open in new tab" links at (only http(s) or path)
 //   show-evict      — boolean: render the 🗑 evict button
+//   sand-hidden     — boolean: the app hides Sandbox from its users. Set only
+//                     for viewers who still get the switch (owner / admins), so
+//                     they can tell; a member is simply given no sand-url.
 //   folded          — boolean: collapse to a thin strip with brand + chevron
 //
 // Events (CustomEvent, bubbles + composed):
@@ -77,6 +80,7 @@ const STYLES = `
 .env button.active-prod { background: rgba(34,197,94,.15);  color: #22c55e; border-color: rgba(34,197,94,.4); }
 .env button.active-sand { background: rgba(249,115,22,.15); color: #f97316; border-color: rgba(249,115,22,.4); }
 .env button .ev { font-family: monospace; opacity: .7; font-weight: 400; margin-left: 5px; }
+.env button .hid { opacity: .7; font-weight: 400; font-size: .85em; margin-left: 5px; font-style: italic; }
 button.btn, a.btn {
   background: transparent; color: var(--dim, #a1a1aa);
   border: 1px solid var(--border, #2a2d3a); border-radius: 5px;
@@ -99,6 +103,10 @@ button.fold:hover { color: var(--text, #e4e4e7); border-color: var(--accent, #3b
 :host([folded]) .right > .btn { display: none; }
 :host([folded]) .bar { padding: 0 8px; }
 `
+
+// Visibility only, and the hint says so: an owner who hides Sandbox must not
+// read it as having locked the sandbox URL.
+export const SAND_HIDDEN_HINT = "Users won't see Sandbox in the launcher; the sandbox URL still works for anyone with access"
 
 function esc(s: string | null | undefined): string {
   if (s == null) return ''
@@ -125,7 +133,7 @@ export class CraneAppTopbar extends HTMLElement {
       'app-name', 'app-icon-url', 'app-slug',
       'prod-version', 'sand-version',
       'prod-url', 'sand-url', 'env',
-      'current-url', 'show-evict', 'folded',
+      'current-url', 'show-evict', 'folded', 'sand-hidden',
     ]
   }
 
@@ -205,6 +213,7 @@ export class CraneAppTopbar extends HTMLElement {
     const sandUrl     = this.getAttribute('sand-url') || ''
     const currentUrl  = safeUrl(this.getAttribute('current-url'))
     const showEvict   = this.hasAttribute('show-evict')
+    const sandHidden  = this.hasAttribute('sand-hidden')
     const version     = env === 'sandbox' ? sandVersion : prodVersion
     const showSwitch  = !!(prodUrl && sandUrl)
 
@@ -233,7 +242,7 @@ export class CraneAppTopbar extends HTMLElement {
     const envHtml = showSwitch ? `
       <div class="env">
         <button data-action="env-prod" class="${env === 'production' ? 'active-prod' : ''}">Production${verLabel(prodVersion)}</button>
-        <button data-action="env-sand" class="${env === 'sandbox'    ? 'active-sand' : ''}">Sandbox${verLabel(sandVersion)}</button>
+        <button data-action="env-sand" class="${env === 'sandbox'    ? 'active-sand' : ''}"${sandHidden ? ` title="${esc(SAND_HIDDEN_HINT)}"` : ''}>Sandbox${verLabel(sandVersion)}${sandHidden ? '<span class="hid">hidden from users</span>' : ''}</button>
       </div>` : ''
     const evictHtml = showEvict
       ? `<button class="btn danger" data-action="evict" title="Tear down this app's shared container">🗑 Evict</button>`

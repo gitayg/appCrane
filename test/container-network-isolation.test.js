@@ -566,7 +566,7 @@ test('deleting an app removes its containers and leaves the shared network alone
   // single app's delete would detach every other app on the platform.
   const key = generateApiKey('dhk_user');
   const uid = db.prepare('INSERT INTO users (name,email,role,active,api_key_hash) VALUES (?,?,?,1,?)')
-    .run('ni-admin', 'ni-admin@t.test', 'admin', hashApiKey(key)).lastInsertRowid;
+    .run('ni-admin', 'ni-admin@t.test', 'platform_admin', hashApiKey(key)).lastInsertRowid;
   const doomed = mkApp('ni-doomed');
   db.prepare("INSERT INTO app_user_roles (app_id,user_id,app_role) VALUES (?,?,'user')").run(doomed.id, uid);
 

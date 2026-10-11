@@ -59,7 +59,7 @@ function mkUser(role, { assignTo = null, appRole = 'user' } = {}) {
 // platform admin's call, which this fixture's name always implied.
 const OWNER = mkUser('user', { assignTo: APP_ID, appRole: 'owner' }); // owns bookstack
 const OUTSIDER = mkUser('user', { assignTo: OTHER_APP_ID }); // assigned, but elsewhere
-const ADMIN = mkUser('admin');                               // unassigned
+const ADMIN = mkUser('user');                                // ex global admin (tier retired, migration 105), unassigned
 const PLATFORM = mkUser('platform_admin');                   // unassigned
 
 // ── The engine double ──────────────────────────────────────────────────────
@@ -181,12 +181,13 @@ test('an outsider cannot DEPROVISION another app\'s database', async () => {
   assert.deepEqual(calls, [], 'authorization must run before the destructive call');
 });
 
-test('an UNASSIGNED admin is blocked from provisioning', async () => {
+test('an UNASSIGNED former global admin is blocked from provisioning', async () => {
   // Same guardrail env vars and backups get (requireAppUser, v2.39.0): a
   // credential injected into the app is app data, not platform administration.
+  // The global admin tier is retired, so this is now a plain user's refusal.
   const { status, body } = await provision(ADMIN);
   assert.equal(status, 403);
-  assert.equal(body.error.code, 'ADMIN_BLOCKED');
+  assert.equal(body.error.code, 'FORBIDDEN');
   assert.deepEqual(calls, []);
 });
 

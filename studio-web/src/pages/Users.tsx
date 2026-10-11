@@ -5,7 +5,7 @@ interface User {
   id: number
   name: string
   email: string
-  role: 'platform_admin' | 'admin' | 'user'
+  role: 'platform_admin' | 'user'
   username: string | null
   phone: string | null
   has_password: boolean

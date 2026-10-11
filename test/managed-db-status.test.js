@@ -111,7 +111,7 @@ function mkUser(role) {
 }
 
 const PLATFORM = mkUser('platform_admin');
-const ADMIN = mkUser('admin');
+const ADMIN = mkUser('user'); // what a global admin became (tier retired, migration 105)
 const USER = mkUser('user');
 
 // The real superuser password, stored the way ensureServer() stores it.
@@ -188,7 +188,7 @@ test('a plain user is refused', async () => {
 });
 
 test('a non-platform ADMIN is refused — this is platform infrastructure', async () => {
-  // requireAdmin would let this through. Container states, host ports and
+  // A former global admin, now a plain user. Container states, host ports and
   // restart counts of the platform's own database servers are not app-team
   // information, so the gate is the platform tier.
   const { status, body } = await call('/api/managed-db/servers', ADMIN);

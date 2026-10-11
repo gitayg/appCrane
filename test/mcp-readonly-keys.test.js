@@ -100,7 +100,7 @@ function mkUser({ role = 'user' } = {}) {
   return { id: uid, bearer, ro: issue(true), full: issue(false), legacy: legacy() };
 }
 
-const admin = mkUser({ role: 'admin' });
+const admin = mkUser({ role: 'platform_admin' });
 const plain = mkUser({ role: 'user' });
 
 // --- HTTP surface -----------------------------------------------------------
@@ -227,7 +227,7 @@ test('the read-only gate runs BEFORE the role gate', async () => {
   // gate) and a normal user's would be explained by different rules.
   const msg = await setDescription(hdr(plain.ro), 'nope');
   assert.match(msg, RO_REFUSAL);
-  assert.doesNotMatch(msg, /requires admin/);
+  assert.doesNotMatch(msg, /requires (platform )?admin/);
 });
 
 // --- 3. reads still work -----------------------------------------------------

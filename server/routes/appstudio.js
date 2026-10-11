@@ -75,7 +75,7 @@ function isAppAdmin(userId, appSlug) {
  * See feedback memory: "Per-app authz on every per-app resource".
  */
 export function ensureAppAccessForEnh(req, enh) {
-  if (req.user?.role === 'admin' || req.user?.role === 'platform_admin') return;
+  if (req.user?.role === 'platform_admin') return;
   if (!enh?.app_slug) {
     // Enhancement with no app_slug: only admin can touch it. Refuse all
     // non-admin reads/writes rather than guessing intent.
@@ -133,7 +133,7 @@ router.post('/:id/approve-plan', auditMiddleware('appstudio.approve-plan'), (req
   const db = getDb();
   const enh = db.prepare('SELECT * FROM enhancement_requests WHERE id = ?').get(req.params.id);
   if (!enh) throw new AppError('Enhancement not found', 404, 'NOT_FOUND');
-  if (req.user.role !== 'admin' && req.user.role !== 'platform_admin' && !isAppAdmin(req.user.id, enh.app_slug)) {
+  if (req.user.role !== 'platform_admin' && !isAppAdmin(req.user.id, enh.app_slug)) {
     throw new AppError('Forbidden', 403, 'FORBIDDEN');
   }
   if (!enh.ai_plan_json) throw new AppError('No plan to approve', 400, 'NO_PLAN');
@@ -156,7 +156,7 @@ router.post('/:id/plan-feedback', auditMiddleware('appstudio.plan-feedback'), (r
   if (!enh) throw new AppError('Enhancement not found', 404, 'NOT_FOUND');
   ensureAppAccessForEnh(req, enh); // v1.27.34 H8
 
-  const isAdmin = req.user?.role === 'admin' || req.user?.role === 'platform_admin';
+  const isAdmin = req.user?.role === 'platform_admin';
   const existing = isAdmin ? (enh.admin_comments || '') : (enh.user_comments || '');
   const updated = existing + `\n[${new Date().toISOString()}] ${comment.trim()}`;
 
@@ -187,7 +187,7 @@ router.post('/:id/redo', auditMiddleware('appstudio.redo'), (req, res) => {
   const db = getDb();
   const enh = db.prepare('SELECT * FROM enhancement_requests WHERE id = ?').get(req.params.id);
   if (!enh) throw new AppError('Enhancement not found', 404, 'NOT_FOUND');
-  if (req.user.role !== 'admin' && req.user.role !== 'platform_admin' && !isAppAdmin(req.user.id, enh.app_slug)) {
+  if (req.user.role !== 'platform_admin' && !isAppAdmin(req.user.id, enh.app_slug)) {
     throw new AppError('Forbidden', 403, 'FORBIDDEN');
   }
 
@@ -237,7 +237,7 @@ router.post('/:id/recode', auditMiddleware('appstudio.recode'), async (req, res)
   const db = getDb();
   const enh = db.prepare('SELECT * FROM enhancement_requests WHERE id = ?').get(req.params.id);
   if (!enh) throw new AppError('Enhancement not found', 404, 'NOT_FOUND');
-  if (req.user.role !== 'admin' && req.user.role !== 'platform_admin' && !isAppAdmin(req.user.id, enh.app_slug)) {
+  if (req.user.role !== 'platform_admin' && !isAppAdmin(req.user.id, enh.app_slug)) {
     throw new AppError('Forbidden', 403, 'FORBIDDEN');
   }
   if (!enh.ai_plan_json) throw new AppError('No plan to re-code from — run /redo to plan first', 400, 'NO_PLAN');
@@ -281,7 +281,7 @@ router.post('/:id/mark-done', auditMiddleware('appstudio.mark-done'), (req, res)
   const db = getDb();
   const enh = db.prepare('SELECT * FROM enhancement_requests WHERE id = ?').get(req.params.id);
   if (!enh) throw new AppError('Enhancement not found', 404, 'NOT_FOUND');
-  if (req.user.role !== 'admin' && req.user.role !== 'platform_admin' && !isAppAdmin(req.user.id, enh.app_slug)) {
+  if (req.user.role !== 'platform_admin' && !isAppAdmin(req.user.id, enh.app_slug)) {
     throw new AppError('Forbidden', 403, 'FORBIDDEN');
   }
   db.prepare(`
@@ -300,7 +300,7 @@ router.post('/:id/approve-sandbox', auditMiddleware('appstudio.approve-sandbox')
   const db = getDb();
   const enh = db.prepare('SELECT * FROM enhancement_requests WHERE id = ?').get(req.params.id);
   if (!enh) throw new AppError('Enhancement not found', 404, 'NOT_FOUND');
-  if (req.user.role !== 'admin' && req.user.role !== 'platform_admin' && !isAppAdmin(req.user.id, enh.app_slug)) {
+  if (req.user.role !== 'platform_admin' && !isAppAdmin(req.user.id, enh.app_slug)) {
     throw new AppError('Forbidden', 403, 'FORBIDDEN');
   }
 
@@ -328,7 +328,7 @@ router.post('/:id/reject', auditMiddleware('appstudio.reject'), (req, res) => {
   const db = getDb();
   const enh = db.prepare('SELECT * FROM enhancement_requests WHERE id = ?').get(req.params.id);
   if (!enh) throw new AppError('Enhancement not found', 404, 'NOT_FOUND');
-  if (req.user.role !== 'admin' && req.user.role !== 'platform_admin' && !isAppAdmin(req.user.id, enh.app_slug)) {
+  if (req.user.role !== 'platform_admin' && !isAppAdmin(req.user.id, enh.app_slug)) {
     throw new AppError('Forbidden', 403, 'FORBIDDEN');
   }
 
@@ -537,7 +537,7 @@ router.get('/context/:slug', (req, res) => {
   // operators wrote for their own apps. Restrict to admin or assigned
   // app users; previously any authenticated portal user could read any
   // app's context.
-  if (req.user?.role !== 'admin' && req.user?.role !== 'platform_admin') {
+  if (req.user?.role !== 'platform_admin') {
     const db = getDb();
     const app = db.prepare('SELECT id FROM apps WHERE slug = ?').get(req.params.slug);
     if (!app) throw new AppError('App not found', 404, 'NOT_FOUND');

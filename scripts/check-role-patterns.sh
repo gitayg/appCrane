@@ -1,39 +1,28 @@
 #!/usr/bin/env bash
 #
-# check-role-patterns.sh — flag global-role checks that don't account for
-# platform_admin.
+# check-role-patterns.sh — flag any check of the GLOBAL role against 'admin'.
 #
-# Why this exists: v2.1.3 introduced platform_admin alongside admin as a
-# global-role tier. Every `user.role === 'admin'` (or `!== 'admin'`) check
-# in the codebase that meant "global admin" silently locked platform_admin
-# out of the protected path. v2.1.5, v2.2.6, and v2.2.9 each shipped fixes
-# for the same class of bug, hitting different files. This script flags
-# any new instances introduced going forward so the next platform-level
-# tier doesn't take three releases to land cleanly.
+# Why this exists: the global 'admin' tier (users.role = 'admin') was retired
+# in migration 105 — it made a person admin on every app without assignment,
+# and the database now refuses that value. Any code that still compares a
+# global role to 'admin' is either dead or, worse, a grant waiting for a row
+# the trigger was meant to stop. Before the retirement this script enforced
+# the opposite (every `=== 'admin'` had to be paired with platform_admin);
+# that pairing is now exactly what it flags.
 #
 # Usage:
 #   bash scripts/check-role-patterns.sh                # run interactively
 #   bash scripts/check-role-patterns.sh --strict       # exit 1 if any found
 #
-# False positives this script intentionally tolerates:
-#   - `app_role === 'admin'` — per-app role tier, NOT global. Different
-#     concept.
-#   - `role === 'admin' ? 'admin' : ...` inside a string-literal context
-#     where the value is a role name being assigned, not a check on
-#     the caller. Manually reviewed.
+# Not flagged:
+#   - `app_role === 'admin'` / appRole — the per-app tier, which still exists.
+#   - lines marked `// role:platform-admin-skipped` — manually reviewed
+#     (e.g. a role NAME in a reserved-word list, not a check on a caller).
 #
-# True positives look like one of:
-#   - `user.role === 'admin'`     (allow check)
-#   - `user.role !== 'admin'`     (deny check)
-#   - `req.user.role === 'admin'`
-#   - `session.role === 'admin'`
-#   - `auth.role === 'admin'`
-#   - `crane_role === 'admin'`
-#   - `target.role === 'admin'`
-#
-# When this script flags a hit, replace with one of:
-#   - inline:  `(user.role === 'admin' || user.role === 'platform_admin')`
+# When this script flags a hit, replace it with one of:
 #   - helper:  import { isAdmin } from '../utils/roles.js'; isAdmin(user)
+#              (true for platform_admin only)
+#   - inline:  user.role === 'platform_admin'
 #
 # Exits 0 on no hits, 1 on hits with --strict.
 
@@ -54,15 +43,13 @@ STRICT=0
 #
 # Filter out:
 #   - app_role (per-app tier — different concept, correct as-is)
-#   - lines that already include platform_admin nearby
 #   - lines marked `// role:platform-admin-skipped` (intentional)
 #   - vendored / generated output
 HITS=$(
   grep -rnE "(\.|\b)((user|session|caller|target)?[Rr]ole|crane_role)\s*[!=]==\s*['\"]admin['\"]" \
     server/ \
     --include="*.js" 2>/dev/null \
-  | grep -vE "app_role" \
-  | grep -vE "platform_admin" \
+  | grep -vE "app_role|appRole" \
   | grep -vE "role:platform-admin-skipped" \
   | grep -vE "node_modules|/dist/|docs/admin-app/" \
   | grep -vE "server/utils/roles\.js" \
@@ -70,21 +57,19 @@ HITS=$(
 )
 
 if [[ -z "$HITS" ]]; then
-  echo "[check-role-patterns] OK — no untreated role==='admin' checks found."
+  echo "[check-role-patterns] OK — no checks of the retired global 'admin' role found."
   exit 0
 fi
 
-echo "[check-role-patterns] FOUND role==='admin' checks that may need platform_admin coverage:"
+echo "[check-role-patterns] FOUND checks of the retired global 'admin' role:"
 echo
 echo "$HITS"
 echo
-echo "Each hit is either a real bug (platform_admin gets the deny path) or a"
-echo "false positive that should be re-reviewed. To fix a real bug, replace with"
-echo "one of:"
-echo "  inline:  (user.role === 'admin' || user.role === 'platform_admin')"
+echo "users.role can no longer be 'admin' (migration 105). Replace with one of:"
 echo "  helper:  import { isAdmin } from '../utils/roles.js'; isAdmin(user)"
-echo
-echo "Once fixed, this script should report OK on the same files."
+echo "  inline:  user.role === 'platform_admin'"
+echo "If the hit is a per-app role or a role NAME rather than a caller check,"
+echo "mark the line with // role:platform-admin-skipped."
 
 [[ $STRICT -eq 1 ]] && exit 1
 exit 0

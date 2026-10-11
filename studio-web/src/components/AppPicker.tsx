@@ -25,7 +25,12 @@ interface PickerApp {
   owner?: { name?: string; email?: string } | null
   production?: { deploy?: { status?: string; version?: string } }
   sandbox?: { deploy?: { status?: string; version?: string } }
+  /** Server-computed: false when the app hides Sandbox from this caller. */
+  sandbox_visible?: boolean
 }
+
+// Absent on an older server's payload, which hid nothing.
+const sandboxOffered = (a: PickerApp) => a.sandbox_visible !== false
 
 const UNCATEGORIZED = 'Uncategorized'
 
@@ -51,7 +56,7 @@ function initials(name: string): string {
 // An app is openable once either env has a live deployment. Showing a tile for
 // something that can only 503 is worse than not showing it.
 function isLive(a: PickerApp): boolean {
-  return a.production?.deploy?.status === 'live' || a.sandbox?.deploy?.status === 'live'
+  return a.production?.deploy?.status === 'live' || (sandboxOffered(a) && a.sandbox?.deploy?.status === 'live')
 }
 
 export function AppPicker({ onOpen }: { onOpen: (slug: string) => void }) {
@@ -135,11 +140,11 @@ export function AppPicker({ onOpen }: { onOpen: (slug: string) => void }) {
 
   const renderTile = (a: PickerApp) => {
             const prodV = a.production?.deploy?.version
-            const sandV = a.sandbox?.deploy?.version
+            const sandV = sandboxOffered(a) ? a.sandbox?.deploy?.version : undefined
             // Which env a click actually lands on — mirrors buildStage in
             // AppFrame, so the menu can't promise an env the frame won't open.
             const prodLive = a.production?.deploy?.status === 'live'
-            const opensIn = prodLive ? 'production' : 'sandbox'
+            const opensIn = prodLive || !sandboxOffered(a) ? 'production' : 'sandbox'
             const directUrl = opensIn === 'production' ? `/${a.slug}` : `/${a.slug}-sandbox`
 
             return (

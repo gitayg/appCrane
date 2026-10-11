@@ -1,9 +1,11 @@
 /**
  * Configurable RBAC for the per-app role tiers (user / admin / owner).
  *
- * AppCrane admin (users.role = 'admin') always has every permission — that's
- * a hardcoded escape hatch so an admin can never lock themselves out by
- * tweaking the matrix.
+ * A platform admin (users.role = 'platform_admin') always has every
+ * permission — a hardcoded escape hatch so an admin can never lock themselves
+ * out by tweaking the matrix. (The global 'admin' tier that used to share this
+ * bypass was retired in migration 105; the matrix's 'admin' column is the
+ * per-app admin tier.)
  *
  * The matrix in role_permissions only governs a handful of "high-stakes"
  * operations (production deploys, marking requests shipped, etc.) where
@@ -121,7 +123,7 @@ export function userHasAppPermission(user, app, permission) {
     throw new Error(`Unknown permission: ${permission}`);
   }
   if (!user) return false;
-  if (user.role === 'admin' || user.role === 'platform_admin') return true;
+  if (user.role === 'platform_admin') return true;
 
   const role = roleForUserOnApp(user, app);
   if (!role) return false;
@@ -146,7 +148,7 @@ export function userHasPlatformPermission(user, permission) {
     throw new Error(`Unknown platform permission: ${permission}`);
   }
   if (!user) return false;
-  if (user.role === 'admin' || user.role === 'platform_admin') return true;
+  if (user.role === 'platform_admin') return true;
 
   const db = getDb();
   const row = db.prepare(

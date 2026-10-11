@@ -46,7 +46,7 @@ const REVEAL_NOTICE_COOLDOWN_MIN = 30;
 const TAKES_EFFECT = 'Takes effect on the next deploy of this environment.';
 
 function requireOwner(req, _res, next) {
-  const globalAdmin = req.user.role === 'admin' || req.user.role === 'platform_admin';
+  const globalAdmin = req.user.role === 'platform_admin';
   if (globalAdmin || roleForUserOnApp(req.user, req.app) === 'owner') return next();
   return next(new AppError('Managing stored .env files requires the owner role on this app', 403, 'FORBIDDEN'));
 }

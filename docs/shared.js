@@ -272,7 +272,7 @@ async function loadUserInfo() {
 }
 
 function isAdmin() {
-  return window.currentUser && window.currentUser.role === 'admin';
+  return window.currentUser && window.currentUser.role === 'platform_admin';
 }
 
 function showPromptModal(title, prompt) {

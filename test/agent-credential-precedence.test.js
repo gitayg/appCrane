@@ -85,7 +85,7 @@ function mkApp(slug, { creds = false } = {}) {
 }
 
 let uid = 0;
-function mkUser(role = 'admin') {
+function mkUser(role = 'platform_admin') {
   const n = ++uid;
   return db.prepare('INSERT INTO users (name,email,role,active,api_key_hash) VALUES (?,?,?,1,?)')
     .run(`u${n}`, `u${n}@t.test`, role, `hash${n}`).lastInsertRowid;
@@ -345,12 +345,12 @@ async function outcome(handler, req) {
 test('the Builder gate refuses only when there is NO credential at all', async () => {
   const coder = (await import('../server/routes/coder.js')).default;
   const handler = handlerFor(coder, 'post', '/:slug/session');
-  const user = mkUser('admin');
+  const user = mkUser('platform_admin');
 
   // Nothing configured: a real refusal, with a message that names all three
   // ways out rather than only ANTHROPIC_API_KEY.
   const bare = mkApp('gate-none');
-  const req = { params: { slug: bare }, user: { id: user, role: 'admin' }, body: {} };
+  const req = { params: { slug: bare }, user: { id: user, role: 'platform_admin' }, body: {} };
   assert.equal(await outcome(handler, req), 'NOT_CONFIGURED');
   await handler(req, {}).catch((e) => {
     assert.equal(e.message, NO_CREDENTIAL_MESSAGE);
@@ -362,7 +362,7 @@ test('the Builder gate refuses only when there is NO credential at all', async (
   // NO_REPO is the NEXT check in the handler — reaching it is the pass.
   const withCreds = mkApp('gate-appcreds', { creds: true });
   assert.equal(
-    await outcome(handler, { params: { slug: withCreds }, user: { id: user, role: 'admin' }, body: {} }),
+    await outcome(handler, { params: { slug: withCreds }, user: { id: user, role: 'platform_admin' }, body: {} }),
     'NO_REPO',
   );
 
@@ -372,7 +372,7 @@ test('the Builder gate refuses only when there is NO credential at all', async (
   setUserClaudeToken(user, USER_TOKEN);
   try {
     assert.equal(
-      await outcome(handler, { params: { slug: bare }, user: { id: user, role: 'admin' }, body: {} }),
+      await outcome(handler, { params: { slug: bare }, user: { id: user, role: 'platform_admin' }, body: {} }),
       'NO_REPO',
     );
   } finally {
@@ -385,7 +385,7 @@ test('the Builder gate refuses only when there is NO credential at all', async (
   process.env.ANTHROPIC_API_KEY = API_KEY;
   try {
     assert.equal(
-      await outcome(handler, { params: { slug: bare }, user: { id: user, role: 'admin' }, body: {} }),
+      await outcome(handler, { params: { slug: bare }, user: { id: user, role: 'platform_admin' }, body: {} }),
       'NO_REPO',
     );
   } finally {

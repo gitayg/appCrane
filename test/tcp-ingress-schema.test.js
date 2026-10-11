@@ -62,9 +62,9 @@ function mkUser(name, role) {
 }
 
 const platformAdmin = mkUser('platformadmin', 'platform_admin');
-// A global admin is the interesting near-miss: requireAppAccess lets this tier
-// through, so only the ingress gate itself stands between them and an open port.
-const globalAdmin = mkUser('globaladmin', 'admin');
+// A global admin was the interesting near-miss: requireAppAccess let that tier
+// through. The tier is retired (migration 105); its holders became plain users.
+const globalAdmin = mkUser('globaladmin', 'user');
 const owner = mkUser('appowner', 'user');
 const member = mkUser('appmember', 'user');
 const outsider = mkUser('outsider', 'user');
@@ -418,9 +418,7 @@ test('releasePublicPort puts the port back in the pool', () => {
 const NON_PLATFORM = [
   ['the app owner', () => owner],
   ['a plain assigned member', () => member],
-  // requireAppAccess waves this tier straight through to the handler, so the
-  // ingress gate is the only thing standing between them and an open port.
-  ['a global admin who is not a platform admin', () => globalAdmin],
+  ['a former global admin, now a plain user', () => globalAdmin],
 ];
 
 for (const [label, who] of NON_PLATFORM) {

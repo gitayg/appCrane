@@ -30,7 +30,8 @@ const mkUser = (name, email, role) => {
 };
 
 const PLATFORM_KEY = mkUser('P', 'p@x.io', 'platform_admin');
-const ADMIN_KEY = mkUser('A', 'a@x.io', 'admin');
+// What a global admin became when that tier was retired (migration 105).
+const ADMIN_KEY = mkUser('A', 'a@x.io', 'user');
 const USER_KEY = mkUser('U', 'u@x.io', 'user');
 
 function setState(state) {
@@ -67,7 +68,7 @@ test('anonymous callers cannot read which integrations are failing', async () =>
     'the 401 body must not leak the failing probe name');
 });
 
-test('a plain admin is refused — platform_admin only', async () => {
+test('a former global admin (now a user) is refused — platform_admin only', async () => {
   const { status, body } = await get(ADMIN_KEY);
   assert.equal(status, 403);
   assert.ok(!JSON.stringify(body ?? '').includes('bad creds'));

@@ -144,7 +144,8 @@ function parseBypassPathsField(raw) {
 function effectiveAuthMode(raw) {
   return raw === 'headless' ? 'headless' : 'authenticated';
 }
-import { userHasAppPermission, userHasPlatformPermission, roleForUserOnApp } from '../services/permissions.js';
+import { userHasAppPermission, userHasPlatformPermission, roleForUserOnApp, isAppOwnerOrPlatformAdmin } from '../services/permissions.js';
+import { getShowSandbox, showSandboxByAppId, setShowSandbox, sandboxVisibleFor, parseShowSandbox } from '../services/sandboxVisibility.js';
 import { isAdmin } from '../utils/roles.js';
 import log from '../utils/logger.js';
 import { existsSync, mkdirSync, renameSync, unlinkSync } from 'fs';
@@ -420,8 +421,8 @@ router.get('/', async (req, res) => {
   // v2.6.7: per-user role on every returned app, so the Launcher can
   // decide whether the user can open the app or needs to request
   // access. Batch-fetched up front to avoid N+1 query per app row.
-  // For admins, role is implicitly 'admin' on every app via the global
-  // gate — we still surface it so the SPA doesn't have to special-case.
+  // For platform admins, role is implicitly 'admin' on every app via the
+  // global gate — we still surface it so the SPA doesn't have to special-case.
   // v2.45.3: one `docker ps` for the whole catalog, cached for a few seconds and
   // invalidated whenever a container is created or destroyed. Per-app inspects
   // here would put one subprocess spawn per app on the platform's hottest
@@ -430,6 +431,7 @@ router.get('/', async (req, res) => {
   const observedBySlug = await publishedPortsBySlug();
   const drainingMap = drainingByApp(db);
   const installedAppIds = attachedInstallationIds(apps.map(a => a.id));
+  const showSandboxMap = showSandboxByAppId(db);
 
   const userRolesBySlug = new Map();
   if (!isAdmin(req.user)) {
@@ -442,7 +444,7 @@ router.get('/', async (req, res) => {
     for (const r of rows) userRolesBySlug.set(r.slug, r.app_role);
   }
   function userAppRole(app) {
-    if (isAdmin(req.user)) return 'admin';                       // global admins everywhere
+    if (isAdmin(req.user)) return 'admin';                       // platform admins everywhere
     const explicit = userRolesBySlug.get(app.slug);
     if (explicit && explicit !== 'none') return explicit;         // 'user' / 'admin' / 'owner'
     if (app.visibility === 'public') return 'viewer';             // public apps openable by anyone
@@ -505,6 +507,11 @@ router.get('/', async (req, res) => {
       // v2.6.7: per-user role on this app from the caller's perspective.
       // 'admin' / 'owner' / 'user' / 'viewer' / 'none'.
       app_role: userAppRole(app),
+      // The setting, and whether THIS caller is offered Sandbox on the launch
+      // surfaces. Computed here so a member's SPA is told "no" rather than
+      // trusted to work it out from app_role.
+      show_sandbox: showSandboxMap.get(app.id) ?? true,
+      sandbox_visible: sandboxVisibleFor(req.user, userAppRole(app), showSandboxMap.get(app.id) ?? true),
       ...(isAdmin(req.user) ? { ports } : {}),
       owner: ownerRows[0] || null,
       owners: ownerRows,
@@ -809,9 +816,16 @@ router.get('/:slug', requireAppAccess, async (req, res) => {
   const { publishedPortsBySlug } = await import('../services/docker.js');
   const observedMap = await publishedPortsBySlug();
   const observedDetail = observedMap ? (observedMap.get(`${app.slug}:production`) ?? null) : null;
+  const showSandbox = getShowSandbox(db, app.id);
 
   res.json({
-    app: { ...withoutSecretColumns(app), resource_limits: JSON.parse(app.resource_limits || '{}'), auth_bypass_paths: parseBypassPathsField(app.auth_bypass_paths), auth_mode: effectiveAuthMode(app.auth_mode), ...ingressFields(app, true, observedDetail, drainingPorts(db, app.id)), ...codeSourceFields(app, attachedInstallationIds([app.id])) },
+    app: {
+      ...withoutSecretColumns(app), resource_limits: JSON.parse(app.resource_limits || '{}'), auth_bypass_paths: parseBypassPathsField(app.auth_bypass_paths), auth_mode: effectiveAuthMode(app.auth_mode), ...ingressFields(app, true, observedDetail, drainingPorts(db, app.id)), ...codeSourceFields(app, attachedInstallationIds([app.id])),
+      show_sandbox: showSandbox,
+      sandbox_visible: sandboxVisibleFor(req.user, roleForUserOnApp(req.user, app), showSandbox),
+      // Lets the app page show the toggle only to the people PUT will accept.
+      can_change_show_sandbox: isAppOwnerOrPlatformAdmin(req.user, app),
+    },
     urls: urlsDetail,
     base_path: { production: `/${app.slug}/`, sandbox: `/${app.slug}-sandbox/` },
     ...(isAdmin(req.user) ? { ports } : {}),
@@ -899,6 +913,20 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
       );
     }
     adoptCatalogSlug = validateCatalogSlug(req.body.catalog_slug);
+  }
+
+  // Show Sandbox to users: not an apps column (migration 104), so it is pulled
+  // out here and written in the same transaction as the column updates. The
+  // operator reserved it for the owner and platform admins: app admins and
+  // global admins administer the app, but who it is presented to is the owner's
+  // call.
+  let showSandboxValue;
+  if (req.body.show_sandbox !== undefined) {
+    if (!isAppOwnerOrPlatformAdmin(req.user, app)) {
+      throw new AppError('Only the app owner or a platform admin can change whether Sandbox is shown to users.', 403, 'FORBIDDEN');
+    }
+    showSandboxValue = parseShowSandbox(req.body.show_sandbox);
+    if (showSandboxValue === undefined) throw new AppError('show_sandbox must be true or false', 400, 'VALIDATION');
   }
 
   // Configurable RBAC: changes to repo-related fields gated by code.modify_repo_settings.
@@ -1419,7 +1447,7 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
     }
   }
 
-  if (Object.keys(updates).length === 0 && !ingressWork) {
+  if (Object.keys(updates).length === 0 && !ingressWork && showSandboxValue === undefined) {
     // Normalize auth_mode here too: a caller can't tell which branch of this
     // route answered, so both must report the same effective mode.
     return res.json({ app: { ...withoutSecretColumns(app), auth_mode: effectiveAuthMode(app.auth_mode), ...ingressFields(app) }, message: 'No changes' });
@@ -1460,6 +1488,7 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
   // guarantee. Failing atomically means a rejected change leaves no trace
   // because it left no change.
   const applyWrites = db.transaction(() => {
+    if (showSandboxValue !== undefined) setShowSandbox(db, app.id, showSandboxValue);
     if (Object.keys(updates).length > 0) {
       const setClauses = Object.keys(updates).map(k => `${k} = ?`).join(', ');
       const values = Object.values(updates);
@@ -1540,6 +1569,7 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
       auth_bypass_paths: parseBypassPathsField(updated.auth_bypass_paths),
       auth_mode: effectiveAuthMode(updated.auth_mode),
       ...ingressFields(updated),
+      show_sandbox: getShowSandbox(db, app.id),
       domain_aliases: db.prepare('SELECT id, domain, source, created_at FROM app_domain_aliases WHERE app_id = ? ORDER BY created_at, id').all(app.id),
     },
   });
@@ -1646,6 +1676,7 @@ router.delete('/:slug', requireAppAccess, auditMiddleware('app-delete'), async (
   db.transaction(() => {
     db.prepare('DELETE FROM app_user_roles WHERE app_id = ?').run(appId);
     db.prepare('DELETE FROM app_identity_secrets WHERE app_id = ?').run(appId);
+    db.prepare('DELETE FROM app_settings WHERE app_id = ?').run(appId);
     db.prepare('DELETE FROM app_domain_aliases WHERE app_id = ?').run(appId);
     db.prepare('DELETE FROM deployments WHERE app_id = ?').run(appId);
     db.prepare('DELETE FROM env_vars WHERE app_id = ?').run(appId);

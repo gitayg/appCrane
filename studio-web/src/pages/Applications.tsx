@@ -11,6 +11,7 @@ import { Navigate, useLocation } from 'react-router-dom'
 import { useMe, isAdmin, canCreateApps } from '../hooks/useMe'
 import { BugPanel } from '../components/runtime-topbar/BugPanel'
 import { defineCraneAppTopbar } from '../topbar-element/entry'
+import { SAND_HIDDEN_HINT } from '../topbar-element/CraneAppTopbar'
 import { Icon } from '../components/icons'
 import '../topbar-element/jsx.d.ts'
 
@@ -72,6 +73,10 @@ interface App {
   app_role?: 'owner' | 'admin' | 'user' | 'viewer' | 'none'
   production?: { deploy?: { status?: string; version?: string }; health?: { status: string } }
   sandbox?: { deploy?: { status?: string; version?: string }; health?: { status: string } }
+  /** The app's "Show Sandbox to users" setting. */
+  show_sandbox?: boolean
+  /** Server-computed: whether THIS caller is offered Sandbox. Absent = yes. */
+  sandbox_visible?: boolean
 }
 
 interface EnvVar {
@@ -91,6 +96,8 @@ interface FrameState {
   prodVersion?: string
   sandVersion?: string
   hasIcon?: boolean
+  /** Sandbox is hidden from users but this viewer still gets it: show the hint. */
+  sandHidden?: boolean
 }
 
 interface PromptModal {
@@ -1081,9 +1088,13 @@ STEP 3 - In any terminal run \`claude\`, then paste:
     }))
   }
 
-  function openAppFrame(app: App, env: 'production' | 'sandbox') {
+  function openAppFrame(app: App, requested: 'production' | 'sandbox') {
+    // A member of an app that hides Sandbox is given no sandbox URL, which
+    // also removes the topbar's env switch. Visibility only: the route works.
+    const sandboxOffered = app.sandbox_visible !== false
+    const env = sandboxOffered ? requested : 'production'
     const prodUrl = `/${app.slug}`
-    const sandUrl = `/${app.slug}-sandbox`
+    const sandUrl = sandboxOffered ? `/${app.slug}-sandbox` : ''
     setFrame({
       open:        true,
       url:         env === 'production' ? prodUrl : sandUrl,
@@ -1094,8 +1105,9 @@ STEP 3 - In any terminal run \`claude\`, then paste:
       prodUrl,
       sandUrl,
       prodVersion: app.production?.deploy?.version || '',
-      sandVersion: app.sandbox?.deploy?.version    || '',
+      sandVersion: sandboxOffered ? (app.sandbox?.deploy?.version || '') : '',
       hasIcon:     iconUrls[app.slug] != null,
+      sandHidden:  sandboxOffered && app.show_sandbox === false,
     })
   }
 
@@ -1647,6 +1659,13 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                       </span>
                     </td>
                     {(['sandbox', 'production'] as const).map(env => {
+                      if (env === 'sandbox' && app.sandbox_visible === false) {
+                        return (
+                          <td key={env}>
+                            <span className="apps-status-ver" style={{ color: 'var(--dim)' }} title="The app owner does not show Sandbox to users">—</span>
+                          </td>
+                        )
+                      }
                       // v2.5.5: live-fetch reads the running app's /api/health
                       // body.version. Most user apps don't expose that field,
                       // so the cell was permanently '—'. Fall back to the
@@ -1670,6 +1689,9 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                                 onClick={e => { e.preventDefault(); openAppFrame(app, env) }}
                                 title={`Open ${env}`}
                               >↗</a>
+                            )}
+                            {env === 'sandbox' && app.show_sandbox === false && (
+                              <span style={{ fontSize: '.7rem', color: 'var(--dim)', fontStyle: 'italic' }} title={SAND_HIDDEN_HINT}>hidden from users</span>
                             )}
                           </span>
                         </td>
@@ -2539,9 +2561,9 @@ function FrameOverlay({ frame, framePanel, setFrame, setFramePanel }: FrameOverl
         .catch(() => {})
 
     probe('production')
-    probe('sandbox')
+    if (frame.sandUrl) probe('sandbox')
     return () => { cancelled = true }
-  }, [frame.slug, frame.env, setFrame])
+  }, [frame.slug, frame.env, frame.sandUrl, setFrame])
   // Per-panel last-used width, persisted across open/close so closing
   // and reopening Request keeps the user's chosen width.
   const [widths, setWidths] = useState<Record<'ask' | 'request' | 'bug', number>>({
@@ -2637,6 +2659,7 @@ function FrameOverlay({ frame, framePanel, setFrame, setFramePanel }: FrameOverl
         sand-version={frame.sandVersion ?? ''}
         prod-url={frame.prodUrl ?? ''}
         sand-url={frame.sandUrl ?? ''}
+        {...(frame.sandHidden ? { 'sand-hidden': '' } : {})}
         env={frame.env ?? 'production'}
         current-url={frame.url}
         {...(folded ? { folded: '' } : {})}

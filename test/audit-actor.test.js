@@ -19,7 +19,7 @@ const humanId = db.prepare(
   "INSERT INTO users (name,email,role,api_key_hash,active,kind) VALUES ('H','h@x.io','platform_admin','h1',1,'human')"
 ).run().lastInsertRowid;
 const agentId = db.prepare(
-  "INSERT INTO users (name,email,role,api_key_hash,active,kind) VALUES ('A','a@x.io','admin','h2',1,'agent')"
+  "INSERT INTO users (name,email,role,api_key_hash,active,kind) VALUES ('A','a@x.io','user','h2',1,'agent')"
 ).run().lastInsertRowid;
 
 const kindOf = (id) =>

@@ -45,7 +45,7 @@ function mkUser(role, email) {
   ).run(role, email, role, hashApiKey(generateApiKey('dhk_user'))).lastInsertRowid;
   return db.prepare('SELECT * FROM users WHERE id = ?').get(id);
 }
-const admin = mkUser('admin', 'admin@example.com');
+const admin = mkUser('platform_admin', 'admin@example.com');
 
 let slot = 0;
 const mkApp = (slug) => db.prepare('INSERT INTO apps (name,slug,slot,source_type,visibility) VALUES (?,?,?,?,?)')

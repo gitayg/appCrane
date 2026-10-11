@@ -66,16 +66,16 @@ test('an ASSIGNED platform_admin is allowed — the guardrail is not a lockout',
   assert.equal(attempt(uid, 'platform_admin'), 'allowed');
 });
 
-test('an UNASSIGNED admin is blocked', () => {
-  const uid = mkUser('admin');
-  assert.equal(attempt(uid, 'admin'), 'ADMIN_BLOCKED');
+// The global 'admin' tier was retired (migration 105) and the DB refuses it,
+// so these hold a user row with a leftover 'admin' in memory. It must behave
+// exactly like a plain user: no admin-only message, and assignment still works.
+test('an UNASSIGNED leftover admin role is refused like a plain user', () => {
+  const uid = mkUser('user');
+  assert.equal(attempt(uid, 'admin'), 'FORBIDDEN');
 });
 
-test("an ASSIGNED admin is allowed — the error's own advice now works", () => {
-  // Pre-v2.39.0 the admin branch preceded the assignment lookup, so this
-  // returned ADMIN_BLOCKED and the message telling them to self-assign was a
-  // dead end. Assignment is checked first now, so following the advice works.
-  const uid = mkUser('admin');
+test('an ASSIGNED leftover admin role is allowed, by its assignment', () => {
+  const uid = mkUser('user');
   assign(uid);
   assert.equal(attempt(uid, 'admin'), 'allowed');
 });

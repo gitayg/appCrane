@@ -138,6 +138,8 @@ interface AppData {
     name?: string
     description?: string
     resource_limits?: { max_ram_mb?: number; max_cpu_percent?: number }
+    show_sandbox?: boolean
+    can_change_show_sandbox?: boolean
   }
 }
 
@@ -393,6 +395,67 @@ function LimitsCard({ slug, reload, onMsg }: LimitsCardProps) {
   )
 }
 
+interface SandboxVisibilityCardProps {
+  slug: string
+  reload: number
+  onMsg: (m: MsgState) => void
+}
+
+// Shown only to the app owner and platform admins, the two the server accepts
+// (can_change_show_sandbox mirrors isAppOwnerOrPlatformAdmin). Everyone else
+// gets nothing rather than a toggle that answers 403.
+function SandboxVisibilityCard({ slug, reload, onMsg }: SandboxVisibilityCardProps) {
+  const [show, setShow] = useState<boolean | null>(null)
+  const [canChange, setCanChange] = useState(false)
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    adminApi.get<AppData>(`/api/apps/${slug}`)
+      .then(d => {
+        if (cancelled) return
+        setShow(d.app.show_sandbox !== false)
+        setCanChange(!!d.app.can_change_show_sandbox)
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [slug, reload])
+
+  async function toggle(next: boolean) {
+    setBusy(true)
+    try {
+      await adminApi.put(`/api/apps/${slug}`, { show_sandbox: next })
+      setShow(next)
+      onMsg({ text: next ? 'Sandbox is shown to users again.' : 'Sandbox is now hidden from users.', ok: true })
+    } catch (e) {
+      onMsg({ text: (e as Error).message, ok: false })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (!canChange || show === null) return null
+  return (
+    <div className="am-card">
+      <h3 style={{ marginBottom: 10 }}>Sandbox visibility</h3>
+      <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: busy ? 'wait' : 'pointer' }}>
+        <input
+          type="checkbox"
+          checked={show}
+          disabled={busy}
+          onChange={e => toggle(e.target.checked)}
+        />
+        Show Sandbox to users
+      </label>
+      <div style={{ fontSize: '.75rem', color: 'var(--dim)', marginTop: 6 }}>
+        {show
+          ? 'Members and viewers can pick Sandbox in the launcher and the app frame.'
+          : "Users won't see Sandbox in the launcher; the sandbox URL still works for anyone with access. Owners and admins still see it."}
+        {' '}Owner or platform admin only.
+      </div>
+    </div>
+  )
+}
 
 interface DeployCardProps {
   slug: string
@@ -990,13 +1053,12 @@ export function AppManager() {
     setLogDeployId(null)
   }, [currentApp, currentEnv])
 
-  // v2.6.4: was `me?.user.role === 'admin'` — the recurring bug that
-  // excluded platform_admin from admin-tier UI. Hits the same surface
-  // as feedback_things_to_not_forget.md item #5/#12. Inlined here
-  // because the centralized isAdmin helper imports adminApi and would
-  // create a circular import in this page; the check is one line.
+  // Platform admin only: the global 'admin' tier was retired (migration
+  // 105). Inlined here because the centralized isAdmin helper imports
+  // adminApi and would create a circular import in this page; the check is
+  // one line.
   const role = me?.user.role
-  const isAdminUser = role === 'admin' || role === 'platform_admin'
+  const isAdminUser = role === 'platform_admin'
 
   function selectApp(slug: string) {
     setCurrentApp(slug)
@@ -1159,6 +1221,7 @@ export function AppManager() {
             <HealthCard slug={currentApp} env={currentEnv} reload={reloadCounter} onMsg={showMsg} />
             <MetricsCard slug={currentApp} env={currentEnv} />
             {isAdminUser && <LimitsCard slug={currentApp} reload={reloadCounter} onMsg={showMsg} />}
+            <SandboxVisibilityCard slug={currentApp} reload={reloadCounter} onMsg={showMsg} />
             <DeployCard
               slug={currentApp}
               env={currentEnv}

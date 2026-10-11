@@ -37,7 +37,7 @@ Use `github_*` for ALL code-level GitHub work. Do NOT shell out to `gh` or
 ## Prerequisite — the create-apps permission
 
 Creating an app is gated by the `platform.create_app` permission. AppCrane
-global admins always have it; any other user needs a platform admin to grant
+platform admins always have it; any other user needs a platform admin to grant
 their tier at **Settings → Roles** (flip the `user` cell on the **Create apps**
 row). The gate is enforced both on `POST /api/apps` and on the MCP tools.
 
@@ -52,7 +52,7 @@ for that app.
 **Ownership follows the connecting key's identity.** Whichever identity the
 MCP key resolves to becomes the app's owner at creation. Onboard with a
 **personal** MCP key (the "+ Add Application" button issues one for the
-logged-in user) — NOT a shared global-admin key. If a shared admin key
+logged-in user) — NOT a shared platform-admin key. If a shared admin key
 creates the app, the admin identity owns it and the human's personal key
 (scope-restricted to apps they own) won't see it. If that already happened,
 a platform admin can fix it at Settings → Users → the app's Users modal by
@@ -277,7 +277,7 @@ headers** so the app reads identity directly off the incoming request.
 | `X-AppCrane-User-Id` | numeric id (string) | Set on `authenticated` requests. |
 | `X-AppCrane-User-Email` | email | Same value as `X-AppCrane-User`; granular header. May be absent if the user has no email. |
 | `X-AppCrane-User-Name` | display name, `encodeURIComponent`-d | `decodeURIComponent` on read. May be absent. |
-| `X-AppCrane-User-Role` | `platform_admin` \| `admin` \| `user` | The **platform-wide** role. Raw token, underscore intact. Set on `authenticated` requests. Not a per-app permission — see below. |
+| `X-AppCrane-User-Role` | `platform_admin` \| `user` | The **platform-wide** role (the global `admin` tier was retired). Raw token, underscore intact. Set on `authenticated` requests. Not a per-app permission — see below. |
 | `X-AppCrane-App-Role` | `owner` \| `admin` \| `user` \| `viewer` | The **per-app** role, the one to gate features on. Set when the request is on a per-app prefix. |
 | `X-AppCrane-Is-Admin` | `1` \| `0` | Pre-computed "may administer THIS app" — `1` when `X-AppCrane-App-Role` is `admin` **or** `owner`. Set on `authenticated` requests. Use it instead of hand-rolling role comparisons. |
 
@@ -333,7 +333,7 @@ if (req.get('X-AppCrane-Is-Admin') === '1') showAdminUI()
 **`X-AppCrane-User-Role` is not a per-app permission.** It's the platform-wide tier, and platform admins do **not** flatten to `admin` on every app. `resolveAppRole` in `/api/identity/verify` resolves in this order:
 
 1. an explicit `app_user_roles` row for (this app, this user) — **wins outright**, whatever it says;
-2. else, global `admin` / `platform_admin` → `admin` (the fallback short-circuit);
+2. else, global `platform_admin` → `admin` (the fallback short-circuit);
 3. else, app `visibility: public` → `viewer`;
 4. else `none` (request is denied — the user never reaches the app).
 
@@ -343,7 +343,7 @@ So a `platform_admin` who is **owner** of an app arrives as `X-AppCrane-App-Role
 // Express example
 app.use((req, res, next) => {
   const mode     = req.get('X-AppCrane-Auth-Mode')      // 'authenticated' | 'headless' | 'bypass' | undefined
-  const role     = req.get('X-AppCrane-User-Role')      // platform tier: 'platform_admin' | 'admin' | 'user'
+  const role     = req.get('X-AppCrane-User-Role')      // platform tier: 'platform_admin' | 'user'
   const appRole  = req.get('X-AppCrane-App-Role')       // per-app: 'owner' | 'admin' | 'user' | 'viewer'
   const email    = req.get('X-AppCrane-User-Email') || req.get('X-AppCrane-User')
   const name     = req.get('X-AppCrane-User-Name')
@@ -411,16 +411,16 @@ app's browser already has, so usually nothing extra is needed):
 - Same ordering as the headers — `none` < `viewer` < `user` < `admin` < `owner`.
   Gate with `atLeast(app_role, 'admin')`, never `app_role === 'admin'`.
 
-> **One divergence to know about:** `/api/me` resolves a global `admin` /
-> `platform_admin` to `app_role: 'admin'` **before** checking their explicit
-> per-app row, whereas the `X-AppCrane-App-Role` header checks the explicit row
-> first. For a global admin the two can disagree in a way that a correct
+> **One divergence to know about:** `/api/me` resolves a `platform_admin` to
+> `app_role: 'admin'` **before** checking their explicit per-app row, whereas
+> the `X-AppCrane-App-Role` header checks the explicit row first. For a
+> platform admin the two can disagree in a way that a correct
 > `atLeast` check does NOT paper over:
 >
 > - No explicit row: header `admin`, `/api/me` `admin`. Agree.
 > - Explicit `owner` row: header `owner`, `/api/me` `admin`. Both clear
 >   "at least admin"; only an `=== 'owner'` check sees a difference.
-> - Explicit `user` row — a global admin an app owner deliberately demoted:
+> - Explicit `user` row — a platform admin an app owner deliberately demoted:
 >   header `user`, `/api/me` `admin`. These clear the gate **oppositely**.
 >
 > So do not treat the two sources as interchangeable. `X-AppCrane-App-Role`
@@ -526,7 +526,7 @@ display and the headers for server-side authorization.
 
 **A `platform_admin` does NOT implicitly hold your roles.** Grants are explicit,
 always — no global role and no per-app `owner` tier quietly adds a key to that
-list. (Contrast `app_role`, where a global admin *does* fall back to `admin`.)
+list. (Contrast `app_role`, where a platform admin *does* fall back to `admin`.)
 Platform staff arrive at your app with `app_roles: []` until someone grants them
 one, deliberately: implicit role collapse is what once had an app deny its own
 owner.

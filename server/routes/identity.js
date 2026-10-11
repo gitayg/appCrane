@@ -153,7 +153,7 @@ router.post('/login', (req, res) => {
   // platform_admin counts as admin everywhere — same blast radius, same
   // capabilities. This block was the source of the v2.2.6 follow-up bug
   // where platform_admin saw the "request access" screen for private apps.
-  const isAdmin = user.role === 'admin' || user.role === 'platform_admin';
+  const isAdmin = user.role === 'platform_admin';
   const apps = db.prepare(`
     SELECT a.slug, a.name, a.domain, a.description, a.public_access, a.visibility, a.category,
       -- v2.7.21: explicit per-app role wins; public-→-viewer is only the
@@ -413,7 +413,7 @@ router.get('/verify', (req, res) => {
       'SELECT app_role FROM app_user_roles WHERE app_id = ? AND user_id = ?'
     ).get(lookupAppId, session.user_id);
     if (roleRecord?.app_role) return roleRecord.app_role;          // explicit wins
-    if (session.crane_role === 'admin' || session.crane_role === 'platform_admin') return 'admin';
+    if (session.crane_role === 'platform_admin') return 'admin';
     if (appRecord.visibility === 'public') return 'viewer';        // public fallback
     return 'none';
   };
@@ -513,7 +513,7 @@ router.get('/verify', (req, res) => {
   // admin" when nothing was verified, which is a worse ambiguity than the one
   // this fixes. Apps distinguish the two by reading X-AppCrane-Auth-Mode, which
   // Caddy stamps on every proxied request including those routes.
-  const isPlatformAdmin = session.crane_role === 'admin' || session.crane_role === 'platform_admin';
+  const isPlatformAdmin = session.crane_role === 'platform_admin';
   const isAppAdmin = appRole === 'admin' || appRole === 'owner';
   res.setHeader('X-AppCrane-Is-Admin', (appRole ? isAppAdmin : isPlatformAdmin) ? '1' : '0');
 
@@ -666,7 +666,7 @@ router.get('/me', (req, res) => {
   // Get all apps with roles, health state, and current version. Same
   // platform_admin treatment as above — global admins of either tier
   // bypass per-app role restrictions.
-  const isAdmin = session.role === 'admin' || session.role === 'platform_admin';
+  const isAdmin = session.role === 'platform_admin';
   const apps = db.prepare(`
     SELECT a.slug, a.name, a.domain, a.description, a.public_access, a.visibility, a.category,
       -- v2.7.21: same precedence fix as above — explicit role wins.
@@ -795,13 +795,13 @@ router.get('/preview-as/:userId', (req, res) => {
   `).get(tokenHash);
 
   if (!session) throw new AppError('Invalid or expired token', 401, 'INVALID_TOKEN');
-  if (session.role !== 'admin' && session.role !== 'platform_admin') throw new AppError('Admin only', 403, 'FORBIDDEN');
+  if (session.role !== 'platform_admin') throw new AppError('Admin only', 403, 'FORBIDDEN');
 
   const targetId = Number(req.params.userId);
   const target = db.prepare('SELECT id, name, email, username, avatar_url, role FROM users WHERE id = ?').get(targetId);
   if (!target) throw new AppError('User not found', 404, 'NOT_FOUND');
 
-  const isTargetAdmin = target.role === 'admin' || target.role === 'platform_admin';
+  const isTargetAdmin = target.role === 'platform_admin';
   const apps = db.prepare(`
     SELECT a.slug, a.name, a.domain, a.description, a.public_access, a.visibility, a.category,
       -- v2.7.21: explicit per-app role wins; public-→-viewer is only the
@@ -852,7 +852,7 @@ router.get('/app-updates/:slug', (req, res) => {
   // Confirm this user is actually on this app before returning its update
   // history. Admins/platform admins see every app by design.
   const viewer = db.prepare('SELECT role FROM users WHERE id = ?').get(session.user_id);
-  if (viewer?.role !== 'admin' && viewer?.role !== 'platform_admin') {
+  if (viewer?.role !== 'platform_admin') {
     const access = db.prepare('SELECT 1 FROM app_users WHERE app_id = ? AND user_id = ?').get(app.id, session.user_id);
     if (!access) throw new AppError('Access denied', 403, 'FORBIDDEN');
   }

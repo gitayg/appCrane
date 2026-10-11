@@ -213,12 +213,12 @@ function mkUser(name, role) {
   return { id, name, role };
 }
 
-// A GLOBAL admin is the near-miss that matters: the MCP registry's coarsest
-// gate is 'admin', so this user passes canUseTool and reaches the handler. Only
-// the explicit platform_admin check inside it stands between them and an open
-// host port.
+// A GLOBAL admin was the near-miss that mattered: it passed the registry's
+// coarsest gate and reached the handler. That tier is retired (migration 105)
+// and the DB refuses it, so this is a user row carrying a leftover 'admin' in
+// memory — it must still be refused before any host port opens.
 const platformAdmin = mkUser('surface-platformadmin', 'platform_admin');
-const globalAdmin = mkUser('surface-globaladmin', 'admin'); // role:platform-admin-skipped
+const globalAdmin = { ...mkUser('surface-globaladmin', 'user'), role: 'admin' }; // role:platform-admin-skipped
 const owner = mkUser('surface-owner', 'user');
 const outsider = mkUser('surface-outsider', 'user');
 

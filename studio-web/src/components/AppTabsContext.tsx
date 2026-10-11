@@ -10,6 +10,7 @@ interface Ctx {
   openTabs: OpenApp[]
   addTab: (app: OpenApp) => void
   removeTab: (slug: string) => void
+  updateTab: (slug: string, patch: Partial<Omit<OpenApp, 'slug'>>) => void
 }
 
 const AppTabsContext = createContext<Ctx | null>(null)
@@ -20,8 +21,10 @@ export function AppTabsProvider({ children }: { children: ReactNode }) {
     setOpenTabs(t => (t.some(x => x.slug === app.slug) ? t : [...t, app]))
   const removeTab = (slug: string) =>
     setOpenTabs(t => t.filter(x => x.slug !== slug))
+  const updateTab = (slug: string, patch: Partial<Omit<OpenApp, 'slug'>>) =>
+    setOpenTabs(t => t.map(x => (x.slug === slug ? { ...x, ...patch } : x)))
   return (
-    <AppTabsContext.Provider value={{ openTabs, addTab, removeTab }}>
+    <AppTabsContext.Provider value={{ openTabs, addTab, removeTab, updateTab }}>
       {children}
     </AppTabsContext.Provider>
   )

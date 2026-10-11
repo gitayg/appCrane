@@ -347,7 +347,7 @@ app.use((req, res, next) => {
   if (PUBLIC_PATHS.includes(req.path) || req.path.startsWith('/docs/') || isPublicSettingsRead || isCrashPage || req.method === 'OPTIONS') return next();
 
   const db = getDb();
-  const adminExists = db.prepare("SELECT COUNT(*) as count FROM users WHERE role IN ('admin', 'platform_admin')").get().count > 0;
+  const adminExists = db.prepare("SELECT COUNT(*) as count FROM users WHERE role = 'platform_admin'").get().count > 0;
   if (!adminExists) {
     const accept = req.headers.accept || '';
     if (accept.includes('text/html')) {
@@ -427,7 +427,7 @@ let caddyReloadStatus = { ok: null, at: null, error: null, restarted: false, unc
 // Public API endpoints (no auth)
 app.get('/api/info', (req, res) => {
   const db = getDb();
-  const adminExists = db.prepare("SELECT COUNT(*) as count FROM users WHERE role IN ('admin', 'platform_admin')").get().count > 0;
+  const adminExists = db.prepare("SELECT COUNT(*) as count FROM users WHERE role = 'platform_admin'").get().count > 0;
   // Version is no longer auth-gated. It already leaks through
   // /api/version-check, bundle filenames, GitHub releases, and the
   // sidebar's first /api/info call (which can race auth-state setup).

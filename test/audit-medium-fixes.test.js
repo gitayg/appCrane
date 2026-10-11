@@ -30,7 +30,9 @@ const APP = db.prepare("INSERT INTO apps (name,slug,slot,source_type,branch) VAL
 const OWNER = mkUser('owner');
 const APPADMIN = mkUser('appadmin');
 const MEMBER = mkUser('member');
-const GLOBALADMIN = mkUser('gadmin', 'admin');
+// Was a global 'admin' until that tier was retired (migration 105); now what
+// such a holder became — a plain user, assigned here — and still refused.
+const GLOBALADMIN = mkUser('gadmin');
 const PLATFORM = mkUser('platform', 'platform_admin');
 for (const [u, r] of [[OWNER, 'owner'], [APPADMIN, 'admin'], [MEMBER, 'user'], [GLOBALADMIN, 'user'], [PLATFORM, 'user']]) {
   db.prepare('INSERT INTO app_user_roles (app_id,user_id,app_role) VALUES (?,?,?)').run(APP, u.id, r);

@@ -6,7 +6,7 @@ import { auditMiddleware } from '../middleware/audit.js';
 import { AppError } from '../utils/errors.js';
 import { roleForUserOnApp } from '../services/permissions.js';
 import { clearUserRoleGrants } from '../services/appDefinedRoles.js';
-import { isAdmin } from '../utils/roles.js';
+import { isAdmin, refuseRetiredAdminRole } from '../utils/roles.js';
 import { purgeRevokedTenants } from '../services/tenants.js';
 
 const router = Router();
@@ -60,19 +60,21 @@ router.post('/', requireAdmin, auditMiddleware('user-create'), (req, res) => {
 
   // Role assignment rules:
   //   - 'platform_admin' can only be assigned by an existing platform_admin (no privilege escalation)
-  //   - 'admin' can be assigned by admin or platform_admin
+  //   - 'admin' is refused: the global admin tier was retired (migration 105)
+  //     because it granted admin on every app without assignment. Refusing
+  //     loudly beats the old silent fallback to 'user', which would hand the
+  //     caller a different account than the one they asked for.
   //   - anything else falls back to 'user'
+  refuseRetiredAdminRole(role);
   let userRole = 'user';
   if (role === 'platform_admin') {
     if (req.user.role !== 'platform_admin') {
       throw new AppError('Only platform admins can create platform admins', 403, 'FORBIDDEN_PLATFORM_ADMIN');
     }
     userRole = 'platform_admin';
-  } else if (role === 'admin') { // role:platform-admin-skipped — assigning role STRING from req.body, not a caller-role check
-    userRole = 'admin';
   }
   const userKind = kind === 'agent' ? 'agent' : 'human';
-  const prefix = (userRole === 'admin' || userRole === 'platform_admin') ? 'dhk_admin' : 'dhk_user';
+  const prefix = (userRole === 'platform_admin') ? 'dhk_admin' : 'dhk_user';
   const apiKey = generateApiKey(prefix);
   const keyHash = hashApiKey(apiKey);
   const pwHash = password ? hashPassword(password) : null;
@@ -143,7 +145,7 @@ router.delete('/:id', requireAdmin, auditMiddleware('user-delete'), async (req, 
 /**
  * PUT /api/users/:id/role - Change a user's role (platform_admin only).
  *
- * Body: { role: 'platform_admin' | 'admin' | 'user' }
+ * Body: { role: 'platform_admin' | 'user' }  ('admin' is refused — retired tier)
  *
  * Only platform_admin can call this. Guarded against demoting the last
  * platform_admin (would lock the org out of role-assignment forever) and
@@ -154,8 +156,9 @@ router.put('/:id/role', requirePlatformAdmin, auditMiddleware('user-set-role'), 
   const userId = parseInt(req.params.id);
   const { role } = req.body || {};
 
-  if (!['platform_admin', 'admin', 'user'].includes(role)) {
-    throw new AppError("role must be 'platform_admin', 'admin', or 'user'", 400, 'VALIDATION');
+  refuseRetiredAdminRole(role);
+  if (!['platform_admin', 'user'].includes(role)) {
+    throw new AppError("role must be 'platform_admin' or 'user'", 400, 'VALIDATION');
   }
 
   const user = db.prepare('SELECT id, role FROM users WHERE id = ?').get(userId);
@@ -191,11 +194,11 @@ router.post('/:id/regenerate-key', requireAdmin, auditMiddleware('user-regen-key
   if (!user) throw new AppError('User not found', 404, 'NOT_FOUND');
 
   // Block admin/platform_admin key regeneration via API -- use crane regenerate-key on server
-  if (user.role === 'admin' || user.role === 'platform_admin') {
+  if (user.role === 'platform_admin') {
     throw new AppError('Admin keys cannot be regenerated via API. Run: crane regenerate-key --on the server.', 403, 'ADMIN_KEY_PROTECTED');
   }
 
-  const prefix = (user.role === 'admin' || user.role === 'platform_admin') ? 'dhk_admin' : 'dhk_user';
+  const prefix = (user.role === 'platform_admin') ? 'dhk_admin' : 'dhk_user';
   const apiKey = generateApiKey(prefix);
   const keyHash = hashApiKey(apiKey);
 
@@ -327,7 +330,7 @@ router.put('/:slug/roles', requireAppAccess, auditMiddleware('app-set-role'), as
 
 /**
  * GET /api/apps/:slug/identity/users - List all users + roles for an app.
- * v2.7.9: global admins OR an owner of this app.
+ * v2.7.9: platform admins OR an owner of this app.
  */
 router.get('/:slug/identity/users', requireAppAccess, (req, res) => {
   const app = req.app; // set by requireAppAccess
@@ -341,7 +344,7 @@ router.get('/:slug/identity/users', requireAppAccess, (req, res) => {
       COALESCE(aur.app_role, 'none') as app_role
     FROM users u
     LEFT JOIN app_user_roles aur ON u.id = aur.user_id AND aur.app_id = ?
-    WHERE u.role NOT IN ('admin', 'platform_admin')
+    WHERE u.role != 'platform_admin'
     ORDER BY u.name
   `).all(app.id);
 

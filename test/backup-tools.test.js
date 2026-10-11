@@ -16,8 +16,8 @@ import { join } from 'path';
 //   1. The secret NEVER comes back out. The destination bucket receives a copy
 //      of every secret AppCrane holds, so the credential to that bucket is the
 //      most sensitive value in the system.
-//   2. Only a platform admin can read or change it. A global 'admin' is not
-//      enough — pointing the destination at another bucket is an exfiltration
+//   2. Only a platform admin can read or change it. A global 'admin' was
+//      never enough (and that tier is now retired, migration 105) — pointing the destination at another bucket is an exfiltration
 //      path, not a misconfiguration.
 //   3. Enabling a backup that cannot run is REFUSED. An enabled-but-broken
 //      backup reports itself enabled while uploading nothing, which is worse
@@ -42,7 +42,9 @@ function mkUser(role, email) {
   return db.prepare('SELECT * FROM users WHERE id = ?').get(id);
 }
 const platformAdmin = mkUser('platform_admin', 'pa@x.io');
-const plainAdmin    = mkUser('admin', 'admin@x.io');
+// The DB no longer admits role 'admin' (migration 105), so this is a user row
+// carrying a leftover 'admin' in memory — it must still be refused.
+const plainAdmin    = { ...mkUser('user', 'admin@x.io'), role: 'admin' };
 const owner         = mkUser('user', 'user@x.io');
 
 const call = (u, name, args = {}) => callTool(u, name, args);

@@ -733,7 +733,7 @@ function showApps(data) {
   list.textContent = '';
 
   // Admin: inject "View as" bar
-  if (data.user.role === 'admin') {
+  if (data.user.role === 'platform_admin') {
     setupViewAsBar(list, data.user);
   }
 
@@ -960,7 +960,7 @@ function showApps(data) {
   });
 
   loadMyEnhancements();
-  if (data.user.role === 'admin') loadAdminEnhancements();
+  if (data.user.role === 'platform_admin') loadAdminEnhancements();
   loadMcpKeys();
 
   // Catalog — apps the user can see but can't access yet

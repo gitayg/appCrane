@@ -28,7 +28,7 @@ const mk = (name, role = 'user') => {
   return { id, key };
 };
 const APP = db.prepare("INSERT INTO apps (name,slot,slug,source_type,repo_backend,branch) VALUES ('S',1,'sess','managed','local','main')").run().lastInsertRowid;
-const OWNER = mk('owner'), MEMBER = mk('member'), APPADMIN = mk('appadmin'), PLATFORM = mk('platform', 'platform_admin'), GADMIN = mk('gadmin', 'admin');
+const OWNER = mk('owner'), MEMBER = mk('member'), APPADMIN = mk('appadmin'), PLATFORM = mk('platform', 'platform_admin'), GADMIN = mk('gadmin'); // an ex global admin: that tier is retired (migration 105), holders became 'user'
 for (const [u, r] of [[OWNER, 'user'], [MEMBER, 'user'], [APPADMIN, 'admin']]) {
   db.prepare('INSERT INTO app_user_roles (app_id,user_id,app_role) VALUES (?,?,?)').run(APP, u.id, r);
 }

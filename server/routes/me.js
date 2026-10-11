@@ -98,7 +98,7 @@ router.get('/me', (req, res) => {
     }
   }
 
-  // Global admins/platform_admins are 'admin' on every app (matches /verify).
+  // Platform admins are 'admin' on every app (matches /verify).
   // Public apps grant 'viewer' to any authenticated user without an explicit
   // per-app role. Sandbox URLs run at /<slug>-sandbox/* but app_user_roles
   // is keyed to the base slug — try the exact slug first, then strip the
@@ -114,7 +114,7 @@ router.get('/me', (req, res) => {
     }
     if (app) {
       appSlugOut = app.slug;
-      if (user.role === 'admin' || user.role === 'platform_admin') {
+      if (user.role === 'platform_admin') {
         appRole = 'admin';
       } else {
         const r = db.prepare('SELECT app_role FROM app_user_roles WHERE app_id = ? AND user_id = ?').get(app.id, user.id);

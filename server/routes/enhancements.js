@@ -244,7 +244,7 @@ router.put('/:id/bucket', requireAuth, (req, res) => {
   ).get(id);
   if (!row) throw new AppError('Not found', 404, 'NOT_FOUND');
 
-  if (req.user.role !== 'admin' && req.user.role !== 'platform_admin') {
+  if (req.user.role !== 'platform_admin') {
     if (!row.app_slug) throw new AppError('Forbidden', 403, 'FORBIDDEN');
     const app = db.prepare('SELECT * FROM apps WHERE slug = ?').get(row.app_slug);
     const ar = db.prepare('SELECT app_role FROM app_user_roles WHERE app_id = ? AND user_id = ?').get(app?.id, req.user.id);
@@ -310,7 +310,7 @@ router.get('/portal', (req, res) => {
   const token = authHeader.replace(/^Bearer\s+/i, '').trim();
   const session = getUserFromBearer(token);
   if (!session) throw new AppError('Authentication required', 401, 'UNAUTHORIZED');
-  if (session.role !== 'admin' && session.role !== 'platform_admin') throw new AppError('Admin access required', 403, 'FORBIDDEN');
+  if (session.role !== 'platform_admin') throw new AppError('Admin access required', 403, 'FORBIDDEN');
 
   const db = getDb();
   const rows = db.prepare(`
@@ -357,7 +357,7 @@ router.post('/:id/delete', (req, res) => {
   const row = db.prepare('SELECT id, user_id FROM enhancement_requests WHERE id = ?').get(id);
   if (!row) throw new AppError('Not found', 404, 'NOT_FOUND');
 
-  const isAdmin = userRole === 'admin' || userRole === 'platform_admin';
+  const isAdmin = userRole === 'platform_admin';
   const isOwner = row.user_id && row.user_id === userId;
   if (!isAdmin && !isOwner) throw new AppError('You can only delete your own requests', 403, 'FORBIDDEN');
 
@@ -406,7 +406,7 @@ function loadEnhOr404(id) {
  * import cycle between routes files).
  */
 function ensureAppAccessForEnh(auth, enh) {
-  if (auth?.role === 'admin' || auth?.role === 'platform_admin') return;
+  if (auth?.role === 'platform_admin') return;
   if (!enh?.app_slug) throw new AppError('Forbidden', 403, 'FORBIDDEN');
   const db = getDb();
   const app = db.prepare('SELECT id FROM apps WHERE slug = ?').get(enh.app_slug);
@@ -468,7 +468,7 @@ router.delete('/:id/comments/:cid', (req, res) => {
   if (!existing) throw new AppError('comment not found', 404, 'NOT_FOUND');
   // Author can delete their own; admins (admin or platform_admin) can delete anyone's.
   const isAuthor = existing.author_user_id === auth.userId;
-  if (!isAuthor && auth.role !== 'admin' && auth.role !== 'platform_admin') {
+  if (!isAuthor && auth.role !== 'platform_admin') {
     throw new AppError('Forbidden', 403, 'FORBIDDEN');
   }
   deleteComment(enhId, cid);

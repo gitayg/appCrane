@@ -410,11 +410,12 @@ function mkUser(name, role) {
   return { id, name, role };
 }
 
-// A GLOBAL admin is the near-miss that matters: 'admin' is the coarsest gate the
-// MCP registry has, so this user passes canUseTool and reaches the handler. Only
-// the explicit platform_admin check stands between them and a published port.
+// A GLOBAL admin was the near-miss that mattered: it passed the registry's
+// coarsest gate and reached the handler. That tier is retired (migration 105)
+// and the DB refuses it, so this is a user row carrying a leftover 'admin' in
+// memory — it must still be refused before any port is published.
 const platformAdmin = mkUser('dp-platformadmin', 'platform_admin');
-const globalAdmin = mkUser('dp-globaladmin', 'admin'); // role:platform-admin-skipped
+const globalAdmin = { ...mkUser('dp-globaladmin', 'user'), role: 'admin' }; // role:platform-admin-skipped
 const owner = mkUser('dp-owner', 'user');
 
 // Low slots on purpose: getPortsForSlot() is unbounded (sand_fe = 3000 + 2N), so

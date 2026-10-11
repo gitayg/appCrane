@@ -58,7 +58,7 @@ const platformAdmin = mkUser('platformadmin', 'platform_admin');
 // The near-miss: requireAppAccess lets a global admin through, so the
 // platform-tier check inside the limit block is the only thing between them and
 // the fleet's memory ceilings.
-const globalAdmin = mkUser('globaladmin', 'admin');
+const globalAdmin = mkUser('globaladmin', 'user'); // what a global admin became (tier retired, migration 105)
 const plainUser = mkUser('plainuser', 'user');
 
 let nextSlot = 0;
@@ -182,7 +182,7 @@ test('an edit that does not touch the limits carries no memory_budget', async ()
     'every app edit now sums the whole fleet and reports a budget move that did not happen');
 });
 
-test('reporting did not widen the gate: a global admin still cannot change a limit', async () => {
+test('reporting did not widen the gate: a former global admin still cannot change a limit', async () => {
   const r = await req(globalAdmin, 'PUT', '/api/apps/mem-subject', { max_ram_mb: 2048 });
   assert.equal(r.status, 403, JSON.stringify(r.body));
   assert.equal(ramOf(SUBJECT), 1024, 'the refused change was applied anyway');

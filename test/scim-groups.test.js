@@ -46,7 +46,7 @@ const ALICE = mkUser('alice', 'user');
 const BOB   = mkUser('bob', 'user');
 const CARA  = mkUser('cara', 'user');
 const PLATFORM = mkUser('platform', 'platform_admin');
-const PLAIN_ADMIN = mkUser('padmin', 'admin');
+const PLAIN_ADMIN = mkUser('padmin', 'user'); // what a global admin became (tier retired, migration 105)
 
 const APP_ID = db.prepare(
   "INSERT INTO apps (name,slug,slot,source_type,branch) VALUES (?,?,?,'managed','main')"
@@ -594,7 +594,7 @@ test('the group -> app mapping is unreachable with the SCIM token', async () => 
   assert.equal((await adminReq('PUT', `/groups/${g.id}/apps`, { key: ALICE.key, body: { apps: [] } })).status, 403,
     'a plain user is refused');
   assert.equal((await adminReq('PUT', `/groups/${g.id}/apps`, { key: PLAIN_ADMIN.key, body: { apps: [] } })).status, 403,
-    'a plain admin is refused — platform_admin only');
+    'a former global admin is refused — platform_admin only');
   assert.deepEqual(rowsFor(APP_ID, ALICE.id), { member: false, role: null });
 });
 

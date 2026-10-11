@@ -52,7 +52,7 @@ function mkUser(name, role) {
 const platformAdmin = mkUser('policyplatformadmin', 'platform_admin');
 // The interesting near-miss: a tier-2 global admin passes requireAppAccess and
 // isAdmin(), so only the platform_admin check itself keeps them off the lever.
-const globalAdmin = mkUser('policyglobaladmin', 'admin');
+const globalAdmin = mkUser('policyglobaladmin', 'user'); // what a global admin became (tier retired, migration 105)
 const owner = mkUser('policyowner', 'user');
 
 let nextSlot = 0;

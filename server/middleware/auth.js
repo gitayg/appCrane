@@ -122,15 +122,14 @@ export function requireAuth(req, res, next) {
 }
 
 /**
- * Require admin or platform_admin role. Both tiers can hit any endpoint
- * gated by this middleware — the role-permissions matrix governs the
- * fine-grained per-app capabilities, and a separate requirePlatformAdmin
- * exists for the small set of operations that must stay platform-only
- * (e.g. assigning the platform_admin role itself).
+ * Require platform_admin. The global 'admin' tier was retired (migration 105):
+ * it granted admin on every app without assignment. A leftover role = 'admin'
+ * user object is refused here rather than trusted, so nothing depends on the
+ * migration having caught every row.
  */
 export function requireAdmin(req, res, next) {
   const role = req.user?.role;
-  if (!req.user || (role !== 'admin' && role !== 'platform_admin')) {
+  if (!req.user || role !== 'platform_admin') {
     return next(new AppError('Admin access required', 403, 'FORBIDDEN'));
   }
   next();
@@ -162,7 +161,7 @@ export function requireAppAccess(req, res, next) {
 
   req.app = app;
 
-  // Admin / platform_admin can access app info (env/data still gated below)
+  // Platform admins can access app info (env/data still gated below)
   if (isAdmin(req.user)) {
     return next();
   }
@@ -183,13 +182,12 @@ export function requireAppAccess(req, res, next) {
  * Require app user (or platform_admin) — for env vars, data, deploy
  * operations.
  *
- * The "admin cannot access app data/env" guardrail still applies to
- * regular admins (`role: 'admin'`): they're responsible for hub-level
- * config and shouldn't accidentally tamper with a specific app's prod
- * env vars. To do that they must "step down" by assigning themselves
- * to the app as a regular user.
+ * The "admin cannot access app data/env" guardrail applies to platform
+ * admins: they're responsible for hub-level config and shouldn't
+ * accidentally tamper with a specific app's prod env vars. To do that they
+ * must "step down" by assigning themselves to the app as a regular user.
  *
- * Platform admins are held to the same rule since v2.39.0: they must be
+ * Platform admins have been held to this rule since v2.39.0: they must be
  * assigned too (see the comment in the body). Assignment means a role row
  * in app_user_roles; app_users is a read-only view of it since v2.94.0.
  */
@@ -225,13 +223,12 @@ export function requireAppUser(req, res, next) {
 
   if (assignment) return next();
 
-  // Not assigned. Admins get the actionable message.
+  // Not assigned. Platform admins get the actionable message.
   //
-  // The `admin` branch used to sit BEFORE this lookup, so an admin who did
+  // The admin branch used to sit BEFORE this lookup, so an admin who did
   // exactly what the error told them — assign themselves — stayed blocked. The
-  // advice was unreachable. Checking assignment first makes it true for both
-  // admin tiers.
-  if (req.user.role === 'admin' || req.user.role === 'platform_admin') { // role:platform-admin-skipped
+  // advice was unreachable. Checking assignment first makes it true.
+  if (req.user.role === 'platform_admin') {
     return next(new AppError(
       `Admin access does not include app data/env. Assign yourself to '${slug}' as an app user first.`,
       403, 'ADMIN_BLOCKED'));

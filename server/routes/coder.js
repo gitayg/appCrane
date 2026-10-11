@@ -78,7 +78,7 @@ function getApp(slug, user) {
   const db = getDb();
   const app = db.prepare('SELECT * FROM apps WHERE slug = ?').get(slug);
   if (!app) throw new AppError(`App '${slug}' not found`, 404, 'NOT_FOUND');
-  if (user.role !== 'admin' && user.role !== 'platform_admin') {
+  if (user.role !== 'platform_admin') {
     const assigned = db.prepare('SELECT 1 FROM app_users WHERE app_id = ? AND user_id = ?').get(app.id, user.id);
     if (!assigned) throw new AppError('You do not have access to this app', 403, 'FORBIDDEN');
   }
@@ -195,7 +195,7 @@ export function coderGaps(app, user) {
 
 /** Whether `user` may release on `app` — the predicate requireAppAdmin enforces. */
 function canReleaseOn(app, user) {
-  if (user.role === 'admin' || user.role === 'platform_admin') return true;
+  if (user.role === 'platform_admin') return true;
   const row = getDb()
     .prepare('SELECT app_role FROM app_user_roles WHERE app_id = ? AND user_id = ?')
     .get(app.id, user.id);
@@ -525,7 +525,7 @@ router.get('/:slug/session/:id/changes', (req, res) => {
  * agent is not being able to commit its work and start a deploy.
  */
 function requireAppAdmin(app, user, action) {
-  if (user.role === 'admin' || user.role === 'platform_admin') return;
+  if (user.role === 'platform_admin') return;
   const row = getDb()
     .prepare('SELECT app_role FROM app_user_roles WHERE app_id = ? AND user_id = ?')
     .get(app.id, user.id);

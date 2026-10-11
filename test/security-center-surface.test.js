@@ -49,7 +49,12 @@ function mkUser(role, email) {
   return db.prepare('SELECT * FROM users WHERE id = ?').get(id);
 }
 const platformAdmin = mkUser('platform_admin', 'pa@x.io');
-const plainAdmin    = mkUser('admin', 'admin@x.io');
+// The scan tools' requiredRole is 'admin', which means platform admin now that
+// the global admin tier is retired (migration 105) — so the routine caller of
+// those tools is a platform admin. leftoverAdmin is a user row carrying a stray
+// 'admin' in memory, which must get nothing.
+const plainAdmin    = mkUser('platform_admin', 'admin@x.io');
+const leftoverAdmin = { ...mkUser('user', 'leftover@x.io'), role: 'admin' };
 const owner         = mkUser('user', 'user@x.io');
 
 let slot = 0;
@@ -468,7 +473,7 @@ test('an ordinary user is refused all three tools by the dispatcher', async () =
   }
 });
 
-test('a plain admin may read and run scans — fleet CVE state is an admin question', async () => {
+test('an admin may read and run scans — fleet CVE state is an admin question', async () => {
   // The positive half of the gate: a control nobody can call is not a control.
   assert.equal(byName.get('appcrane_scan_report').requiredRole, 'admin');
   assert.equal(byName.get('appcrane_scan_app').requiredRole, 'admin');
@@ -476,10 +481,10 @@ test('a plain admin may read and run scans — fleet CVE state is an admin quest
   assert.equal(typeof r.assurance, 'string');
 });
 
-test('a plain admin cannot read or change platform policy', async () => {
-  await assert.rejects(() => call(plainAdmin, 'appcrane_platform_policy'), /platform admin/i,
+test('a leftover global admin role cannot read or change platform policy', async () => {
+  await assert.rejects(() => call(leftoverAdmin, 'appcrane_platform_policy'), /platform admin/i,
     'a global admin could read the levers that override every app owner on the platform');
-  await assert.rejects(() => call(plainAdmin, 'appcrane_platform_policy', { ban_public_apps: true }), /platform admin/i,
+  await assert.rejects(() => call(leftoverAdmin, 'appcrane_platform_policy', { ban_public_apps: true }), /platform admin/i,
     'a global admin could set platform policy');
   assert.equal(unwrap(await call(platformAdmin, 'appcrane_platform_policy')).policy.ban_public_apps, false,
     'the refused write took effect anyway');
@@ -579,7 +584,7 @@ test('the policy description says policy is not retroactive and defaults off', (
 
 test('SECURITY: fleet mode does not leak apps outside the key\'s MCP scope', async () => {
   const scopedId = db.prepare(
-    "INSERT INTO users (name,email,role,api_key_hash,active,kind,mcp_app_scope) VALUES ('S','s@x.io','admin',?,1,'human',?)"
+    "INSERT INTO users (name,email,role,api_key_hash,active,kind,mcp_app_scope) VALUES ('S','s@x.io','platform_admin',?,1,'human',?)"
   ).run(hashApiKey(generateApiKey('dhk_mcp')), JSON.stringify(['scoped-mine'])).lastInsertRowid;
   const scoped = db.prepare('SELECT * FROM users WHERE id = ?').get(scopedId);
 

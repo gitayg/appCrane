@@ -43,15 +43,15 @@ export function useMe(): Me | null {
 }
 
 /**
- * Recurring bug: `role === 'admin'` checks across the codebase forgot
- * about platform_admin (added v2.1.5+). Server-side has a centralized
- * helper at server/utils/roles.js; this is the SPA mirror. ANY caller
- * asking "is this user an admin" should go through here so a future
- * admin tier doesn't require touching every call site.
+ * SPA mirror of server/utils/roles.js isAdmin: true for platform_admin
+ * only. The global 'admin' tier was retired (migration 105) because it
+ * granted admin on every app without assignment; per-app admin is
+ * app_role, not this. ANY caller asking "is this user an admin" should go
+ * through here so a future change to the tiers touches one place.
  */
 export function isAdmin(me: Me | null): boolean {
   const r = me?.user?.role
-  return r === 'admin' || r === 'platform_admin'
+  return r === 'platform_admin'
 }
 
 /**

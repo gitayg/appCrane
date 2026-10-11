@@ -30,6 +30,10 @@ interface AppRow {
   app_role?:     string
   production?: { health?: { status: string }; deploy?: { version?: string; status?: string } }
   sandbox?:    { health?: { status: string }; deploy?: { version?: string; status?: string } }
+  /** The app's "Show Sandbox to users" setting. */
+  show_sandbox?: boolean
+  /** Server-computed: whether THIS caller is offered Sandbox. Absent = yes. */
+  sandbox_visible?: boolean
 }
 
 interface Stage {
@@ -45,11 +49,17 @@ interface Stage {
   isOwner: boolean
   env: 'production' | 'sandbox'
   url: string; prodUrl: string; sandUrl: string; prodVersion: string; sandVersion: string
+  /** Sandbox is hidden from users but this viewer still gets it: show the hint. */
+  sandHidden: boolean
 }
 
 function buildStage(app: AppRow): Stage {
   const prodUrl = `/${app.slug}`
-  const sandUrl = `/${app.slug}-sandbox`
+  // A member of an app that hides Sandbox gets no sandbox URL at all, which is
+  // what removes the topbar's env switch and stops a sandbox-only app from
+  // opening there. The route itself still works; this is the launcher.
+  const sandboxOffered = app.sandbox_visible !== false
+  const sandUrl = sandboxOffered ? `/${app.slug}-sandbox` : ''
   const prodOk = app.production?.health?.status === 'healthy'
   const sandOk = app.sandbox?.health?.status === 'healthy'
   // v2.32.1: deployment presence decides first, health only breaks ties.
@@ -60,7 +70,7 @@ function buildStage(app: AppRow): Stage {
   // production has no live deployment at all, or when production is failing
   // while sandbox is passing.
   const prodLive = app.production?.deploy?.status === 'live'
-  const sandLive = app.sandbox?.deploy?.status === 'live'
+  const sandLive = sandboxOffered && app.sandbox?.deploy?.status === 'live'
   const useSand = sandLive && (!prodLive || (!prodOk && sandOk))
   return {
     slug: app.slug, name: app.name, hasIcon: !!app.has_icon,
@@ -73,7 +83,8 @@ function buildStage(app: AppRow): Stage {
     url: useSand ? sandUrl : prodUrl,
     prodUrl, sandUrl,
     prodVersion: app.production?.deploy?.version || '',
-    sandVersion: app.sandbox?.deploy?.version || '',
+    sandVersion: sandboxOffered ? (app.sandbox?.deploy?.version || '') : '',
+    sandHidden: sandboxOffered && app.show_sandbox === false,
   }
 }
 
@@ -123,7 +134,7 @@ export function AppFrame({ slug, active, onClose }: Props) {
   useEffect(() => {
     let alive = true
     adminApi.get<{ user?: { role?: string } }>('/api/me')
-      .then(r => { if (alive) setPlatformAdmin(r?.user?.role === 'admin' || r?.user?.role === 'platform_admin') })
+      .then(r => { if (alive) setPlatformAdmin(r?.user?.role === 'platform_admin') })
       .catch(() => { /* not fatal: the menu just stays hidden */ })
     return () => { alive = false }
   }, [])
@@ -267,9 +278,10 @@ export function AppFrame({ slug, active, onClose }: Props) {
         .catch(() => {})
 
     probe('production')
-    probe('sandbox')
+    // Not for a viewer the app hides Sandbox from: there is no chip to fill.
+    if (stage.sandUrl) probe('sandbox')
     return () => { cancelled = true }
-  }, [stage?.slug, stage?.env, refreshNonce])
+  }, [stage?.slug, stage?.env, stage?.sandUrl, refreshNonce])
 
   return (
     <div
@@ -290,6 +302,7 @@ export function AppFrame({ slug, active, onClose }: Props) {
             sand-version={stage.sandVersion}
             prod-url={stage.prodUrl}
             sand-url={stage.sandUrl}
+            {...(stage.sandHidden ? { 'sand-hidden': '' } : {})}
             env={stage.env}
             current-url={stage.url}
             {...(folded ? { folded: '' } : {})}

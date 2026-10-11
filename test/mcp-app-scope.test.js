@@ -74,7 +74,7 @@ function mkUser({ role = 'user', scope = null } = {}) {
 const scoped      = mkUser({ scope: JSON.stringify([IN_SCOPE]) });
 const unscoped    = mkUser({ scope: null });
 const lockedOut   = mkUser({ scope: '[]' });
-const scopedAdmin = mkUser({ role: 'admin', scope: JSON.stringify([IN_SCOPE]) });
+const scopedAdmin = mkUser({ role: 'platform_admin', scope: JSON.stringify([IN_SCOPE]) });
 
 // --- HTTP surface -----------------------------------------------------------
 // Mount the MCP router alone. Booting server/index.js would start the email

@@ -183,7 +183,7 @@ export function Layout({ children, subItems, activeSub }: Props) {
         const who = d.user.email || d.user.name || ''
         setUserName(who ? (roleLabel ? `${who} (${roleLabel})` : who) : '')
         setUserRole(role)
-        setCanCreate(role === 'admin' || role === 'platform_admin' || d.user.can_create_apps === true)
+        setCanCreate(role === 'platform_admin' || d.user.can_create_apps === true)
       })
       .catch(() => {})
     // Version display is platform-admin only (gated by isPlatformAdmin
@@ -239,7 +239,7 @@ export function Layout({ children, subItems, activeSub }: Props) {
   useEffect(() => {
     if (!isAuthed) return
     const TERM = new Set(['done', 'merged', 'closed', 'failed', 'cancelled'])
-    const adminLikeNow = userRole === 'admin' || userRole === 'platform_admin'
+    const adminLikeNow = userRole === 'platform_admin'
     const ownerNow = navApps.some(a => a.app_role === 'owner')
     const endpoint = adminLikeNow ? '/api/enhancements'
       : ownerNow ? '/api/enhancements/owned'
@@ -425,7 +425,7 @@ export function Layout({ children, subItems, activeSub }: Props) {
     return [...m.entries()].sort(([a], [b]) => a === 'Uncategorized' ? 1 : b === 'Uncategorized' ? -1 : a.localeCompare(b))
   })()
 
-  const adminLike = userRole === 'admin' || userRole === 'platform_admin'
+  const adminLike = userRole === 'platform_admin'
   const isOwner = navApps.some(a => a.app_role === 'owner')
   const managesApp = navApps.some(a => a.app_role === 'owner' || a.app_role === 'admin')
   const currentPath = location.pathname

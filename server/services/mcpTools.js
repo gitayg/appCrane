@@ -2,6 +2,7 @@ import { getDb } from '../db.js';
 import { decrypt, encrypt } from './encryption.js';
 import { BUCKETS, bucketize, applyBucket } from './requestStatus.js';
 import { userHasAppPermission, userHasPlatformPermission, roleForUserOnApp, isAppOwnerOrPlatformAdmin } from './permissions.js';
+import { getShowSandbox, setShowSandbox, parseShowSandbox } from './sandboxVisibility.js';
 import {
   listRoles, createRole, listMembersWithRoles, setUserRoleKeys, clearUserRoleGrants,
   MAX_ROLES_PER_APP, RESERVED_KEYS,
@@ -49,7 +50,7 @@ function managedCommitView(result) {
 /**
  * MCP tool registry. Each tool:
  *   - name, description, inputSchema (read by the LLM via tools/list)
- *   - requiredRole — 'admin' (any AppCrane admin), 'app_admin' (admin OR per-app
+ *   - requiredRole — 'admin' (platform admin; the global admin tier is retired), 'app_admin' (platform admin OR per-app
  *     admin role), 'app_access' (any user with access to the app), 'any'
  *   - readOnly — OPTIONAL opt-in marker: true means the tool changes no state
  *     and is therefore callable by a read-only MCP key (see isReadOnlyKey).
@@ -133,7 +134,7 @@ function isInMcpScope(user, slug) {
 
 function accessibleSlugsForUser(user) {
   // Personal MCP key — dynamically resolves to apps where the user has access.
-  // AppCrane global admins (admin OR platform_admin) see every app; everyone
+  // AppCrane platform admins see every app; everyone
   // else sees apps they own. Role changes take effect on the next call.
   // (App-scoped keys removed in v2.2.12 — per-app scoping comes from the
   // user's app_user_roles assignments, not from a separate key type.)
@@ -212,7 +213,7 @@ function getAppForUser(user, slug) {
   }
 
   // Personal MCP key locks scope to apps the user has access to. AppCrane
-  // global admins (admin OR platform_admin) keep their global access;
+  // platform admins keep their global access;
   // everyone else is restricted to apps where they're explicitly Owner.
   if (user._mcpUserKey) {
     if (isAdmin(user)) return app;
@@ -284,7 +285,7 @@ function assertAgentContextSize(text) {
 
 function isAppAdmin(user, app) {
   // MCP scope only restricts WHICH apps; if the user has the slug in scope
-  // and is a global admin (admin or platform_admin), they're still an
+  // and is a platform admin, they're still an
   // app-admin for it.
   if (isAdmin(user)) return true;
   const db = getDb();
@@ -303,7 +304,7 @@ function isAppAdmin(user, app) {
  * owner/admin tier; otherwise plain membership is enough to read the roster.
  *
  * Deliberately roleForUserOnApp rather than isAppAdmin: it is the same resolver
- * the REST routes use, and it gives an AppCrane global admin who is not assigned
+ * the REST routes use, and it gives an AppCrane platform admin who is not assigned
  * to the app no per-app tier at all. So both surfaces answer identically, and an
  * app's own permission vocabulary is authored by that app's owners rather than
  * by anyone holding a platform key.
@@ -763,6 +764,7 @@ const TOOLS = [
           frame_ancestors: app.frame_ancestors,
           max_ram_mb:      resourceLimits?.max_ram_mb      ?? null,
           max_cpu_percent: resourceLimits?.max_cpu_percent ?? null,
+          show_sandbox:    getShowSandbox(db, app.id),
         },
       };
     },
@@ -1095,7 +1097,7 @@ const TOOLS = [
   {
     name: 'appcrane_rollback',
     description:
-      'Roll an env back to a prior release. Pass deployment_id (from appcrane_list_releases) to target a specific release, or omit it to roll back to the immediately previous one. Re-runs that release from its recorded build and health-checks it. A rollback to the IMMEDIATELY PREVIOUS release restarts the cached per-commit image without rebuilding, because image_retention defaults to 1 (the running image plus the one behind it); rolling back further, or on an app whose image_retention is 0, rebuilds that commit first. Records a NEW deployment and marks the previous live one rolled_back. Owner-only (or global admin).',
+      'Roll an env back to a prior release. Pass deployment_id (from appcrane_list_releases) to target a specific release, or omit it to roll back to the immediately previous one. Re-runs that release from its recorded build and health-checks it. A rollback to the IMMEDIATELY PREVIOUS release restarts the cached per-commit image without rebuilding, because image_retention defaults to 1 (the running image plus the one behind it); rolling back further, or on an app whose image_retention is 0, rebuilds that commit first. Records a NEW deployment and marks the previous live one rolled_back. Owner-only (or platform admin).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1106,11 +1108,11 @@ const TOOLS = [
       required: ['slug'],
       additionalProperties: false,
     },
-    requiredRole: 'any', // gated per-slug in handler (owner of the app, or global admin)
+    requiredRole: 'any', // gated per-slug in handler (owner of the app, or platform admin)
     handler: async (user, args) => {
       const env = args.env === 'production' ? 'production' : 'sandbox';
       const app = getAppForUser(user, args.slug);
-      // v2.7.13: rollback is owner-only (or global admin), same gate as promote.
+      // v2.7.13: rollback is owner-only (or platform admin), same gate as promote.
       if (!isAdmin(user) && roleForUserOnApp(user, app) !== 'owner') {
         throw new Error('Forbidden: only the app owner can roll back this app.');
       }
@@ -1131,7 +1133,7 @@ const TOOLS = [
   {
     name: 'appcrane_promote',
     description:
-      'Promote the current live SANDBOX release to production — the gated sandbox→prod path. Refuses unless sandbox is live AND currently healthy (you do not ship a broken sandbox to prod), and the promoted prod release is health-checked with auto-revert. For github apps this rebuilds production from the EXACT sandbox commit; for managed/upload apps it copies the exact tested sandbox release. Owner-only (or global admin).',
+      'Promote the current live SANDBOX release to production — the gated sandbox→prod path. Refuses unless sandbox is live AND currently healthy (you do not ship a broken sandbox to prod), and the promoted prod release is health-checked with auto-revert. For github apps this rebuilds production from the EXACT sandbox commit; for managed/upload apps it copies the exact tested sandbox release. Owner-only (or platform admin).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1140,10 +1142,10 @@ const TOOLS = [
       required: ['slug'],
       additionalProperties: false,
     },
-    requiredRole: 'any', // gated per-slug in handler (owner of the app, or global admin)
+    requiredRole: 'any', // gated per-slug in handler (owner of the app, or platform admin)
     handler: async (user, args) => {
       const app = getAppForUser(user, args.slug);
-      // v2.7.12: promotion is owner-only (or global admin).
+      // v2.7.12: promotion is owner-only (or platform admin).
       if (!isAdmin(user) && roleForUserOnApp(user, app) !== 'owner') {
         throw new Error('Forbidden: only the app owner can promote to production.');
       }
@@ -2013,7 +2015,7 @@ const TOOLS = [
       'After this returns, call appcrane_set_secret to set any required secrets, then appcrane_deploy to ship the first build. ' +
       'For an image app there is nothing to build: the deploy pulls image_ref and starts it, so also pass ' +
       'container_port and health_path unless the image happens to match AppCrane\'s own 3000 + /api/health defaults. ' +
-      'Requires the create-apps permission (global admins, or any role a platform admin granted at Settings → Roles).',
+      'Requires the create-apps permission (platform admins, or any role a platform admin granted at Settings → Roles).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2185,6 +2187,7 @@ const TOOLS = [
         },
         max_ram_mb:      { type: 'number', description: 'Per-container memory cap.' },
         max_cpu_percent: { type: 'number', description: 'Per-container CPU cap (0-100).' },
+        show_sandbox:    { type: 'boolean', description: 'Offer the Sandbox deployment to members and viewers on the launch surfaces (default true). false hides it from them; owners, app admins and platform admins still see it, and the sandbox URL keeps working. App owner or platform admin only.' },
       },
       required: ['slug'],
       additionalProperties: false,
@@ -2274,12 +2277,30 @@ const TOOLS = [
         updates.resource_limits = JSON.stringify(limits);
       }
 
-      const keys = Object.keys(updates);
-      if (keys.length === 0) throw new Error('No fields to update — pass at least one field besides slug.');
+      // Not an apps column (migration 104). Same gate as PUT /api/apps/:slug.
+      // Only platform admins pass this tool's requiredRole today (the global
+      // admin tier it also admitted was retired), but the owner check stays so
+      // the rule does not hinge on that.
+      let showSandbox;
+      if (args.show_sandbox !== undefined) {
+        if (!isAppOwnerOrPlatformAdmin(user, app)) {
+          throw new Error('Only the app owner or a platform admin can change whether Sandbox is shown to users.');
+        }
+        showSandbox = parseShowSandbox(args.show_sandbox);
+        if (showSandbox === undefined) throw new Error('show_sandbox must be true or false');
+      }
 
-      const setClause = keys.map(k => `${k} = ?`).join(', ');
-      const values    = keys.map(k => updates[k]);
-      db.prepare(`UPDATE apps SET ${setClause} WHERE id = ?`).run(...values, app.id);
+      const keys = Object.keys(updates);
+      if (keys.length === 0 && showSandbox === undefined) throw new Error('No fields to update — pass at least one field besides slug.');
+
+      db.transaction(() => {
+        if (showSandbox !== undefined) setShowSandbox(db, app.id, showSandbox);
+        if (keys.length === 0) return;
+        const setClause = keys.map(k => `${k} = ?`).join(', ');
+        const values    = keys.map(k => updates[k]);
+        db.prepare(`UPDATE apps SET ${setClause} WHERE id = ?`).run(...values, app.id);
+      })();
+      if (showSandbox !== undefined) keys.push('show_sandbox');
 
       // v2.24.4: on a custom-domain change, keep the old domain alive as a 301
       // redirect to the new one (same as the REST path) so links don't break.
@@ -2330,6 +2351,7 @@ const TOOLS = [
           auth_bypass_paths: (() => { try { return fresh.auth_bypass_paths ? JSON.parse(fresh.auth_bypass_paths) : []; } catch (_) { return []; } })(),
           max_ram_mb:      resourceLimits?.max_ram_mb      ?? null,
           max_cpu_percent: resourceLimits?.max_cpu_percent ?? null,
+          show_sandbox:    getShowSandbox(db, app.id),
         },
       };
     },
@@ -2351,7 +2373,7 @@ const TOOLS = [
   {
     name: 'appcrane_get_app_context',
     description:
-      "Read an app's agent context — the operator notes at DATA_DIR/apps/<slug>/agent-context.md that are injected into every AppCrane coder dispatch for that app. Use this before writing, so an append or a replace is an informed one. Returns an empty string when no context has been written yet. App admin or owner (or global admin) required, because these notes routinely contain internal detail about how an app is built and operated.",
+      "Read an app's agent context — the operator notes at DATA_DIR/apps/<slug>/agent-context.md that are injected into every AppCrane coder dispatch for that app. Use this before writing, so an append or a replace is an informed one. Returns an empty string when no context has been written yet. App admin or owner (or platform admin) required, because these notes routinely contain internal detail about how an app is built and operated.",
     inputSchema: {
       type: 'object',
       properties: { slug: { type: 'string', description: 'App slug.' } },
@@ -2437,7 +2459,7 @@ const TOOLS = [
   {
     name: 'appcrane_set_app_meta',
     description:
-      'Set an app\'s category, visibility, auth_mode, and/or auth_bypass_paths — the owner self-service fields (same controls the dashboard Launcher exposes to owners). Owner of the app (or global admin) required. visibility is one of public / private / hidden. auth_mode is `authenticated` (default — all routes go through AppCrane SSO) or `headless` (the app bypasses forward_auth ENTIRELY and is reachable without identity — right tool for telemetry ingest, public webhooks, status pages; the app\'s own server is responsible for any payload-level authn). A headless app is still served BY CADDY over HTTP — TLS, security headers and access logging all still apply; it is not a raw port. An app that does not speak HTTP at all needs ingress_type=\'tcp\', and an app that speaks HTTP AND needs a second raw port for non-HTTP clients needs ingress_type=\'dual\' (both via appcrane_set_app_ingress, platform admin only) — different and far more exposed things. auth_bypass_paths (v2.7.27+) is an array of path prefixes (e.g. ["/ws/local-runner"]) that bypass SSO on this app only — narrower than headless mode; the app authenticates those paths itself (e.g. token in query string). The platform strips incoming X-AppCrane-* headers on bypass paths (forgery defense intact) and suppresses access logging for them (token-in-query never sits in log storage). Owners may only assign an EXISTING category; creating a brand-new category is reserved for global admins. For powerful fields (github_url, branch, token, source_type, resource limits) use appcrane_update_app (admin only).',
+      'Set an app\'s category, visibility, auth_mode, and/or auth_bypass_paths — the owner self-service fields (same controls the dashboard Launcher exposes to owners). Owner of the app (or platform admin) required. visibility is one of public / private / hidden. auth_mode is `authenticated` (default — all routes go through AppCrane SSO) or `headless` (the app bypasses forward_auth ENTIRELY and is reachable without identity — right tool for telemetry ingest, public webhooks, status pages; the app\'s own server is responsible for any payload-level authn). A headless app is still served BY CADDY over HTTP — TLS, security headers and access logging all still apply; it is not a raw port. An app that does not speak HTTP at all needs ingress_type=\'tcp\', and an app that speaks HTTP AND needs a second raw port for non-HTTP clients needs ingress_type=\'dual\' (both via appcrane_set_app_ingress, platform admin only) — different and far more exposed things. auth_bypass_paths (v2.7.27+) is an array of path prefixes (e.g. ["/ws/local-runner"]) that bypass SSO on this app only — narrower than headless mode; the app authenticates those paths itself (e.g. token in query string). The platform strips incoming X-AppCrane-* headers on bypass paths (forgery defense intact) and suppresses access logging for them (token-in-query never sits in log storage). Owners may only assign an EXISTING category; creating a brand-new category is reserved for platform admins. For powerful fields (github_url, branch, token, source_type, resource limits) use appcrane_update_app (admin only).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2464,7 +2486,7 @@ const TOOLS = [
       const app = getAppForUser(user, args.slug);
       const globalAdmin = isAdmin(user);
       if (!globalAdmin && roleForUserOnApp(user, app) !== 'owner') {
-        throw new Error('Forbidden: only the app owner (or a global admin) can change category/visibility/auth_mode/auth_bypass_paths/domain.');
+        throw new Error('Forbidden: only the app owner (or a platform admin) can change category/visibility/auth_mode/auth_bypass_paths/domain.');
       }
       if (args.category === undefined && args.visibility === undefined && args.auth_mode === undefined && args.auth_bypass_paths === undefined && args.domain === undefined) {
         throw new Error('Pass at least one of category, visibility, auth_mode, auth_bypass_paths, or domain.');
@@ -2890,7 +2912,7 @@ const TOOLS = [
   {
     name: 'appcrane_list_app_members',
     description:
-      'List every user who has access to an app, with their per-app role (owner / admin / user / viewer / none). Use this before granting or revoking to see who is already in. Returns email + name + role for each member. App-admin or owner of the app required (or global admin / platform_admin).',
+      'List every user who has access to an app, with their per-app role (owner / admin / user / viewer / none). Use this before granting or revoking to see who is already in. Returns email + name + role for each member. App-admin or owner of the app required (or platform admin).',
     inputSchema: {
       type: 'object',
       properties: { slug: { type: 'string' } },
@@ -2928,7 +2950,7 @@ const TOOLS = [
   {
     name: 'appcrane_grant_app_access',
     description:
-      'Grant a user access to an app at a specific per-app role. `user` accepts a numeric user id, an email, or a username — first match wins. role defaults to "user". Idempotent: existing rows are upgraded/downgraded to the new role. App-admin or owner of the app required (or global admin).',
+      'Grant a user access to an app at a specific per-app role. `user` accepts a numeric user id, an email, or a username — first match wins. role defaults to "user". Idempotent: existing rows are upgraded/downgraded to the new role. App-admin or owner of the app required (or platform admin).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2973,7 +2995,7 @@ const TOOLS = [
   {
     name: 'appcrane_revoke_app_access',
     description:
-      'Remove a user\'s access from an app entirely. Idempotent: returns ok even if the user had no access. App-admin or owner of the app required (or global admin). Refuses to remove the only remaining owner.',
+      'Remove a user\'s access from an app entirely. Idempotent: returns ok even if the user had no access. App-admin or owner of the app required (or platform admin). Refuses to remove the only remaining owner.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -3153,7 +3175,7 @@ const TOOLS = [
   {
     name: 'appcrane_list_access_requests',
     description:
-      'List pending access requests — enhancement_requests rows whose message starts with "Access request for app …" (the portal\'s Request-access button posts these). With slug, scopes to one app; without, returns access requests across every app the caller can administer. App-admin / owner / global admin required.',
+      'List pending access requests — enhancement_requests rows whose message starts with "Access request for app …" (the portal\'s Request-access button posts these). With slug, scopes to one app; without, returns access requests across every app the caller can administer. App-admin / owner / platform admin required.',
     inputSchema: {
       type: 'object',
       properties: { slug: { type: 'string', description: 'Optional. Limit to one app.' } },
@@ -3163,7 +3185,7 @@ const TOOLS = [
     readOnly: true,
     handler: async (user, args) => {
       const db = getDb();
-      // Determine which slugs the caller can administer. Global admins get
+      // Determine which slugs the caller can administer. Platform admins get
       // every slug; otherwise only slugs where they are owner / admin.
       let scopedSlugs;
       if (isAdmin(user)) {
@@ -3213,7 +3235,7 @@ const TOOLS = [
   {
     name: 'appcrane_approve_access_request',
     description:
-      'Approve a pending access request: grants the requester access to the app at `role` (default "user") and marks the enhancement_request as done. Verifies the request is actually an access request before acting. App-admin / owner / global admin required.',
+      'Approve a pending access request: grants the requester access to the app at `role` (default "user") and marks the enhancement_request as done. Verifies the request is actually an access request before acting. App-admin / owner / platform admin required.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -3260,7 +3282,7 @@ const TOOLS = [
   {
     name: 'appcrane_deny_access_request',
     description:
-      'Deny a pending access request: marks the enhancement_request as done WITHOUT granting access. Optionally appends a reason to the original message so the requester (and the audit trail) sees why. App-admin / owner / global admin required.',
+      'Deny a pending access request: marks the enhancement_request as done WITHOUT granting access. Optionally appends a reason to the original message so the requester (and the audit trail) sees why. App-admin / owner / platform admin required.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -3301,7 +3323,7 @@ const TOOLS = [
     description:
       'Set the tile icon for an app (shown on the Dashboard, the Launcher cards, the Manage table, and the frame topbar). Accepts a base64-encoded image in PNG / SVG / WEBP / JPEG / GIF. ' +
       'For repo-tracked icons prefer committing public/icon.png to the repo — AppCrane picks it up automatically on each deploy. Use this MCP tool when the icon needs to change without a redeploy, or when the source isn\'t in the repo. ' +
-      'Replaces any existing icon. App-admin or owner required (or global admin).',
+      'Replaces any existing icon. App-admin or owner required (or platform admin).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -4995,7 +5017,10 @@ export async function callTool(user, name, args, userMcpKey = null) {
     throw err;
   }
   if (!canUseTool(user, tool)) {
-    const err = new Error(`Forbidden: tool ${name} requires ${tool.requiredRole}`);
+    // requiredRole 'admin' means platform admin since the global admin tier was
+    // retired (migration 105); say so, rather than name a role nobody can hold.
+    const needs = tool.requiredRole === 'admin' ? 'platform admin' : tool.requiredRole;
+    const err = new Error(`Forbidden: tool ${name} requires ${needs}`);
     auditMcpCall(user, name, args, err);
     throw err;
   }
@@ -5041,7 +5066,7 @@ export async function callTool(user, name, args, userMcpKey = null) {
 function canUseTool(user, tool) {
   if (tool.requiredRole === 'admin') return isAdmin(user);
   // v2.7.0: app-creation tools gated by the configurable platform.create_app
-  // permission — global admins always, plus any role a platform admin
+  // permission — platform admins always, plus any role a platform admin
   // granted at /settings#roles. Mirrors POST /api/apps.
   if (tool.requiredRole === 'create_app') return userHasPlatformPermission(user, 'platform.create_app');
   if (tool.requiredRole === 'app_admin') {
