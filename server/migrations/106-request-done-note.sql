@@ -1,0 +1,11 @@
+-- What was done (or why it won't be), written by whoever closes a request.
+--
+-- The request-completed email used to quote the request and the fix version but
+-- never said what changed, so the requester had to go and find out. The note is
+-- set at the transition to done / won't-do and kept afterwards, so the requester
+-- can read it again in My Requests, not only in the email.
+--
+-- A plain ADD COLUMN: enhancement_requests has no rebuild guard (the schema
+-- guard in test/app-catalog-slug.test.js covers apps only), and NULL means "no
+-- note", which is what every existing row has.
+ALTER TABLE enhancement_requests ADD COLUMN done_note TEXT;

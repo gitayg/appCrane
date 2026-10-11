@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { adminApi } from '../adminApi'
+import { ShipNoteModal } from '../components/ShipNoteModal'
 
 type Bucket = 'triage' | 'in_progress' | 'shipped' | 'validated'
 
@@ -205,9 +206,25 @@ export function AppStudio({ tab: forcedTab }: AppStudioProps = {}) {
       : String(bv).localeCompare(String(av))
   })
 
+  // Shipping goes through ShipNoteModal so the closer can say what was done;
+  // the note lands in the requester's completion email. Other moves stay one click.
+  const [shipping, setShipping] = useState<Enhancement | null>(null)
+
   async function setBucket(id: number, bucket: Bucket) {
+    if (bucket === 'shipped') {
+      setShipping(allEnhancements.find(e => e.id === id) ?? null)
+      return
+    }
     await adminApi.put(`/api/enhancements/${id}/bucket`, { bucket }).catch(() => {})
     setAllEnhancements(prev => prev.map(e => e.id === id ? { ...e, bucket } : e))
+  }
+
+  // Unlike the other moves this one reports failure: a rejected note (too long)
+  // must not look like a successful ship.
+  async function ship(id: number, note: string) {
+    await adminApi.put(`/api/enhancements/${id}/bucket`, note ? { bucket: 'shipped', note } : { bucket: 'shipped' })
+    setAllEnhancements(prev => prev.map(e => e.id === id ? { ...e, bucket: 'shipped' } : e))
+    setShipping(null)
   }
 
   async function deleteEnhancement(id: number) {
@@ -245,6 +262,14 @@ export function AppStudio({ tab: forcedTab }: AppStudioProps = {}) {
           onSetBucket={setBucket}
           onDelete={deleteEnhancement}
           total={sortedFiltered.length}
+        />
+      )}
+      {shipping && (
+        <ShipNoteModal
+          requestId={shipping.id}
+          message={shipping.message}
+          onCancel={() => setShipping(null)}
+          onShip={note => ship(shipping.id, note)}
         />
       )}
     </div>

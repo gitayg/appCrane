@@ -7,12 +7,13 @@
 import { getDb } from '../db.js';
 import { enqueueEmail } from './emailQueue.js';
 import log from '../utils/logger.js';
+import { stripNoteControls, DONE_NOTE_MAX } from './requestDoneNote.js';
 
 export function notifyRequesterFulfilled(enhancementId, actorUserId) {
   try {
     const db = getDb();
     const row = db.prepare(
-      'SELECT id, app_slug, user_id, message, fix_version, status FROM enhancement_requests WHERE id = ?'
+      'SELECT id, app_slug, user_id, message, fix_version, status, done_note FROM enhancement_requests WHERE id = ?'
     ).get(enhancementId);
     if (!row || !row.user_id) return;
 
@@ -35,6 +36,13 @@ export function notifyRequesterFulfilled(enhancementId, actorUserId) {
     const wontDo = row.status === 'no_changes_needed';
     const verPart = row.fix_version ? ` in v${row.fix_version}` : '';
     const requestText = String(row.message || '').slice(0, 500);
+    // The note was cleaned when it was written; clean and cap it again here
+    // because this reads whatever is in the column, whoever wrote it. Indented
+    // like the quoted request so it reads as one block in plain text.
+    const note = row.done_note ? stripNoteControls(row.done_note).trim().slice(0, DONE_NOTE_MAX) : '';
+    const noteBlock = note
+      ? `${wontDo ? 'Note:' : 'What was done:'}\n${note.split('\n').map((l) => '  ' + l).join('\n')}\n\n`
+      : '';
     const subject = wontDo
       ? `Update on your request for ${appName}`
       : `Your request for ${appName} was completed`;
@@ -53,15 +61,18 @@ export function notifyRequesterFulfilled(enhancementId, actorUserId) {
           ? `Hi${user.name ? ' ' + user.name : ''},\n\n` +
             `After review, this request won't be actioned (no change needed / out of scope):\n\n` +
             `  "${requestText}"\n\n` +
+            noteBlock +
             `If you think that's a mistake, reply to your app admin.\n\n— ${signer}`
           : `Hi${user.name ? ' ' + user.name : ''},\n\n` +
             `Good news — a request you submitted for ${appName} has been completed${verPart}:\n\n` +
             `  "${requestText}"\n\n` +
+            noteBlock +
             `You'll see it the next time you open the app.\n\n— ${signer}`;
       } else {
         text =
           `Request #${row.id} from ${user.name || user.email} for ${appName} was ` +
-          `${wontDo ? "closed as won't-do" : 'completed'} by ${signer}.\n\n  "${requestText}"\n\n— ${signer}`;
+          `${wontDo ? "closed as won't-do" : 'completed'} by ${signer}.\n\n  "${requestText}"\n\n` +
+          noteBlock + `— ${signer}`;
       }
       try { enqueueEmail({ to, subject, text, source: 'request-fulfilled' }); } catch (_) { /* skip bad recipient */ }
     }

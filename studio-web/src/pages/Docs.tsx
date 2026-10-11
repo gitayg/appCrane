@@ -95,7 +95,7 @@ const REST_FAMILIES: { name: string; rows: [string, string, string][] }[] = [
     ["POST", "/api/enhancements", "File an enhancement request"],
     ["GET", "/api/enhancements", "All requests (admin)"],
     ["GET", "/api/enhancements/owned", "Requests for apps you own/admin"],
-    ["PUT", "/api/enhancements/:id/bucket", "Move lifecycle: triage/in_progress/shipped/validated"],
+    ["PUT", "/api/enhancements/:id/bucket", "Move lifecycle: triage/in_progress/shipped/validated (optional note on shipped)"],
   ] },
   { name: "Identity", rows: [
     ["GET", "/api/me", "Caller identity + the apps they can see"],

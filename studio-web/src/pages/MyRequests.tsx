@@ -14,6 +14,7 @@ interface MyRequest {
   message: string
   created_at: string
   status: string | null
+  done_note?: string | null
 }
 
 const IN_PROGRESS = new Set([
@@ -102,7 +103,19 @@ export function MyRequests() {
                         : '—'}
                     </td>
                     <td style={{ fontSize: '.78rem', color: 'var(--dim)', whiteSpace: 'nowrap' }}>{fmtDate(r.created_at)}</td>
-                    <td style={{ fontSize: '.82rem', wordBreak: 'break-word' }}>{r.message}</td>
+                    <td style={{ fontSize: '.82rem', wordBreak: 'break-word' }}>
+                      {r.message}
+                      {/* The closer's note, also sent in the completion email. Only
+                          shown once the request is closed, so a note left from an
+                          earlier round does not sit on a reopened request. Rendered
+                          as text (React escapes it); pre-wrap keeps its newlines. */}
+                      {r.done_note && (r.status === 'done' || r.status === 'no_changes_needed') && (
+                        <div style={{ marginTop: 6, padding: '6px 8px', borderLeft: '2px solid var(--border)', color: 'var(--dim)', whiteSpace: 'pre-wrap' }}>
+                          <span style={{ fontWeight: 600 }}>{r.status === 'no_changes_needed' ? 'Note: ' : 'What was done: '}</span>
+                          {r.done_note}
+                        </div>
+                      )}
+                    </td>
                     <td>
                       <span style={{ fontSize: '.72rem', fontWeight: 600, padding: '2px 8px', borderRadius: 4, color: pill.fg, background: pill.bg, border: `1px solid ${pill.border}`, whiteSpace: 'nowrap' }}>
                         {pill.label}

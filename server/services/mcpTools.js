@@ -1,6 +1,7 @@
 import { getDb } from '../db.js';
 import { decrypt, encrypt } from './encryption.js';
 import { BUCKETS, bucketize, applyBucket } from './requestStatus.js';
+import { cleanDoneNote } from './requestDoneNote.js';
 import { userHasAppPermission, userHasPlatformPermission, roleForUserOnApp, isAppOwnerOrPlatformAdmin } from './permissions.js';
 import { getShowSandbox, setShowSandbox, parseShowSandbox } from './sandboxVisibility.js';
 import {
@@ -1233,6 +1234,14 @@ const TOOLS = [
           enum: ['triage', 'in_progress', 'shipped', 'validated'],
           description: 'Target bucket.',
         },
+        note: {
+          type: 'string',
+          maxLength: 2000,
+          description:
+            'Optional, used with bucket=shipped. A short plain-language summary, for the person who filed the ' +
+            'request, of what you changed and how it affects them. It is emailed to them and shown in their ' +
+            'My Requests list. No code, diffs, file paths, credentials or other secrets. Max 2000 characters.',
+        },
       },
       required: ['id', 'bucket'],
       additionalProperties: false,
@@ -1240,6 +1249,7 @@ const TOOLS = [
     requiredRole: 'app_admin',
     handler: async (user, args) => {
       if (!BUCKETS.includes(args.bucket)) throw new Error(`Unknown bucket: ${args.bucket}`);
+      const note = cleanDoneNote(args.note);
       const db = getDb();
       const row = db.prepare(
         'SELECT id, app_slug, status, validated_at FROM enhancement_requests WHERE id = ?'
@@ -1264,7 +1274,7 @@ const TOOLS = [
         }
       }
 
-      applyBucket(db, args.id, args.bucket, user.id);
+      applyBucket(db, args.id, args.bucket, user.id, note);
       log.info(`MCP: request ${args.id} → bucket=${args.bucket} (user ${user.id})`);
       return { id: args.id, bucket: args.bucket };
     },

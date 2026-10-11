@@ -11,12 +11,17 @@ for any deployed box is its `git remote -v` — you don't pull from a separate d
 channel.
 
 ## Releasing: regenerate the MCP connector catalogue
-When an `appcrane_*` MCP tool is **added, renamed or removed**, two things must be
-regenerated before the release is published:
+When an `appcrane_*` MCP tool is **added, renamed or removed**, or its **input schema
+changes** (a new or renamed argument), two things must be regenerated before the
+release is published:
 
 1. `npm run gen:mcp-snapshot` — in this repo, re-records `server/services/mcpCatalog.snapshot.json`.
 2. `npm run gen:catalog && npm run build` — in the **separate `appcrane-mcp` checkout**,
    which reparses this repo's tool definitions into the connector it ships.
+
+Step 1 records tool names and roles only, so an argument change shows no diff there;
+step 2 still matters, because the connector ships each tool's full input schema with
+`additionalProperties: false` and silently refuses an argument it does not list.
 
 Step 2 is the one that gets skipped. The connector ships an **offline** copy of the tool
 catalogue so `tools/list` answers with no configuration, and the two repos share no CI —

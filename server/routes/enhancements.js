@@ -10,11 +10,19 @@ import {
 } from '../services/enhancementComments.js';
 import { BUCKETS, bucketize, applyBucket } from '../services/requestStatus.js';
 import { userHasAppPermission } from '../services/permissions.js';
+import { cleanDoneNote, writeDoneNote, NoteError } from '../services/requestDoneNote.js';
 import { notifyRequesterFulfilled, notifyAppAdminsOfNewRequest, notifyPlatformAdminsOfPlatformRequest } from '../services/requestNotify.js';
 
 const router = Router();
 
 const VALID_STATUSES = ['new', 'selected', 'planning', 'in_progress', 'done', 'no_changes_needed'];
+
+function noteFromBody(body) {
+  try { return cleanDoneNote(body?.note); } catch (e) {
+    if (e instanceof NoteError) throw new AppError(e.message, 400, 'VALIDATION');
+    throw e;
+  }
+}
 
 /**
  * Resolve an identity Bearer token to a user row.
@@ -111,7 +119,7 @@ router.get('/my', requireAuth, (req, res) => {
 
   const db = getDb();
   const rows = db.prepare(`
-    SELECT id, app_slug, message, created_at, status
+    SELECT id, app_slug, message, created_at, status, done_note
     FROM enhancement_requests
     WHERE user_id = ?
     ORDER BY created_at DESC
@@ -228,7 +236,8 @@ router.get('/', requireAuth, requireAdmin, (req, res) => {
  * PUT /api/enhancements/:id/bucket
  * Move a request through the simplified lifecycle:
  *   triage → in_progress → shipped → validated
- * Body: { bucket: 'triage' | 'in_progress' | 'shipped' | 'validated' }
+ * Body: { bucket: 'triage' | 'in_progress' | 'shipped' | 'validated', note?: string }
+ * `note` (shipped only) says what was done; it goes into the requester's email.
  *
  * App-admins or AppCrane admins only. Mirrors back to GitHub on shipped.
  */
@@ -237,6 +246,7 @@ router.put('/:id/bucket', requireAuth, (req, res) => {
   if (!BUCKETS.includes(bucket)) {
     throw new AppError(`bucket must be one of: ${BUCKETS.join(', ')}`, 400, 'VALIDATION');
   }
+  const note = noteFromBody(req.body);
   const db = getDb();
   const id = parseInt(req.params.id, 10);
   const row = db.prepare(
@@ -257,7 +267,7 @@ router.put('/:id/bucket', requireAuth, (req, res) => {
     }
   }
 
-  applyBucket(db, id, bucket, req.user.id);
+  applyBucket(db, id, bucket, req.user.id, note);
   res.json({ bucket });
 
   if (bucket === 'shipped' && row.app_slug) {
@@ -271,18 +281,22 @@ router.put('/:id/bucket', requireAuth, (req, res) => {
 /**
  * POST /api/enhancements/:id/set-status
  * Set status for an enhancement request. Requires admin.
- * Body: { status: 'consideration' | 'in_progress' | 'done' }
+ * Body: { status: 'consideration' | 'in_progress' | 'done', note?: string }
+ * `note` (done / no_changes_needed only) says what was done or why not.
  */
 router.post('/:id/set-status', requireAuth, requireAdmin, (req, res) => {
   const { status } = req.body || {};
   if (!VALID_STATUSES.includes(status)) {
     throw new AppError(`status must be one of: ${VALID_STATUSES.join(', ')}`, 400, 'VALIDATION');
   }
+  const note = noteFromBody(req.body);
   const db = getDb();
   const id = parseInt(req.params.id, 10);
   const row = db.prepare('SELECT id, app_slug, message, user_name, pr_url, status FROM enhancement_requests WHERE id = ?').get(id);
   if (!row) throw new AppError('Not found', 404, 'NOT_FOUND');
   db.prepare('UPDATE enhancement_requests SET status = ? WHERE id = ?').run(status, id);
+  // Before the notify below: the email reads the note back from the row.
+  writeDoneNote(db, id, row.status, status, note);
   res.json({ status });
 
   // v2.14.1/2: on first transition to a terminal state (done or won't-do),

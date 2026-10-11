@@ -12,6 +12,7 @@
  */
 
 import { notifyRequesterFulfilled } from './requestNotify.js';
+import { writeDoneNote } from './requestDoneNote.js';
 
 const SHIPPED_STATUSES = new Set([
   'merged', 'done', 'sandbox_ready', 'no_changes_needed',
@@ -55,8 +56,10 @@ export function bucketToStatus(bucket) {
 /**
  * Apply a bucket transition to a single row. Caller must ensure auth.
  * Returns the new bucket label (or throws on bad input).
+ * `doneNote` is an already-cleaned note (cleanDoneNote) or null; it is only
+ * stored for the shipped bucket, and must be written before the email reads it.
  */
-export function applyBucket(db, id, bucket, userId) {
+export function applyBucket(db, id, bucket, userId, doneNote = null) {
   if (!BUCKETS.includes(bucket)) throw new Error(`Invalid bucket: ${bucket}`);
   const { status, clearValidated } = bucketToStatus(bucket);
   const prev = db.prepare('SELECT status FROM enhancement_requests WHERE id = ?').get(id);
@@ -74,6 +77,8 @@ export function applyBucket(db, id, bucket, userId) {
       db.prepare('UPDATE enhancement_requests SET status = ? WHERE id = ?').run(status, id);
     }
   }
+
+  if (bucket === 'shipped') writeDoneNote(db, id, prev?.status, status, doneNote);
 
   // v2.14.1: first time a request reaches the shipped bucket, email the requester.
   // v2.19.0: pass the actor so the reply is signed by whoever shipped it.
