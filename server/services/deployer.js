@@ -14,7 +14,7 @@ import { ensureCodebaseContext } from './appstudio/contextBuilder.js';
 import { findEntry } from './catalogService.js';
 import { credentialsFor } from './managedDb.js';
 import { parseManifestDatabase, ensureManifestDatabase } from './manifestDatabase.js';
-import { managedDbScopeFor } from './sandboxDb.js';
+import { managedDbScopeFor, SANDBOX_TENANT } from './sandboxDb.js';
 import { parseContainerCommand, parseVolumePaths, resolveVolumeMounts, declaredVolumePathsFor } from './containerRuntimeSpec.js';
 import { resolveHealthProbe } from './healthProbeTarget.js';
 import { imagesToKeep } from './imageRetention.js';
@@ -193,8 +193,17 @@ export async function injectManagedDbForEnv({
   app, env, runtimeEnvVars, claimedKeys = [], manifestNeeds = null,
   appendLog = () => {}, isRestart = false, provision,
 }) {
-  const scope = managedDbScopeFor(getDb(), app, env);
   const resolved = resolveManagedDbNeeds(app, manifestNeeds);
+  // A database the app's own deployhub.json declares is ALWAYS separate in
+  // sandbox, whatever separate_sandbox_db says. Sandbox code is deployable by
+  // members who may not deploy production (deploy.production is off for the
+  // 'user' tier), so handing sandbox the shared database meant any of them
+  // could ship a few lines that read or rewrite production's data. The
+  // setting keeps its meaning for catalogue apps, whose code members do not
+  // write.
+  const scope = env === 'sandbox' && resolved.source === 'manifest'
+    ? { appId: app.id, tenant: SANDBOX_TENANT }
+    : managedDbScopeFor(getDb(), app, env);
   const separateSandbox = Boolean(scope.tenant);
   if (resolved.needs && (separateSandbox || (resolved.source === 'manifest' && !isRestart))) {
     await ensureManifestDatabase(app, resolved.needs, {

@@ -2200,7 +2200,7 @@ const TOOLS = [
         max_ram_mb:      { type: 'number', description: 'Per-container memory cap.' },
         max_cpu_percent: { type: 'number', description: 'Per-container CPU cap (0-100).' },
         show_sandbox:    { type: 'boolean', description: 'Offer the Sandbox deployment to members and viewers on the launch surfaces (default true). false hides it from them; owners, app admins and platform admins still see it, and the sandbox URL keeps working. App owner or platform admin only.' },
-        separate_sandbox_db: { type: 'boolean', description: 'Give the sandbox its own managed database instead of sharing production\'s (default false). true: the next sandbox deploy or restart provisions a new EMPTY database with its own login for each engine the app uses and injects it under the same variable names; production\'s database is unchanged. false: sandbox goes back to the shared database on its next deploy or restart, and the sandbox database is NOT deleted (drop it from the dashboard). App owner, app admin or platform admin.' },
+        separate_sandbox_db: { type: 'boolean', description: 'Catalogue apps only (a database declared in deployhub.json is always separate per stage): give the sandbox its own managed database instead of sharing production\'s (default false). true: the next sandbox deploy or restart provisions a new EMPTY database with its own login for each engine the app uses and injects it under the same variable names; production\'s database is unchanged. false: sandbox goes back to the shared database on its next deploy or restart, and the sandbox database is NOT deleted (drop it from the dashboard). App owner, app admin or platform admin.' },
       },
       required: ['slug'],
       additionalProperties: false,

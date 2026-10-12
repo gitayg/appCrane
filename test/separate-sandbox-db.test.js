@@ -8,6 +8,10 @@ import express from 'express';
 
 // Per-app "Separate sandbox database" (migration 107).
 //
+// The setting governs CATALOGUE apps (the fixture is installed as metabase,
+// whose entry injects MB_DB_CONNECTION_URI). A database an app declares in its
+// own deployhub.json is always separate in sandbox — see the last tests here.
+//
 // Off (default): sandbox and production share the app's one database per
 // engine, exactly as before. On: production keeps that database (same name,
 // same login, same password) and sandbox gets its own, scoped
@@ -36,7 +40,7 @@ const { errorHandler } = await import('../server/utils/errors.js');
 
 // ── fixtures ────────────────────────────────────────────────────────────────
 const appId = db.prepare(
-  "INSERT INTO apps (name,slug,slot,source_type,branch,image_ref) VALUES ('Supply','supply',1,'image','main','nginx:1')"
+  "INSERT INTO apps (name,slug,slot,source_type,branch,image_ref,catalog_slug) VALUES ('Supply','supply',1,'image','main','nginx:1','metabase')"
 ).run().lastInsertRowid;
 const app = db.prepare('SELECT * FROM apps WHERE id = ?').get(appId);
 const NEEDS = parseManifestDatabase({ engine: 'postgres' });
@@ -78,9 +82,9 @@ async function fakeProvision(scope, engine) {
 async function envFor(env, { isRestart = false } = {}) {
   const vars = {};
   const r = await injectManagedDbForEnv({
-    app, env, runtimeEnvVars: vars, manifestNeeds: NEEDS, isRestart, provision: fakeProvision,
+    app, env, runtimeEnvVars: vars, manifestNeeds: null, isRestart, provision: fakeProvision,
   });
-  return { url: vars.DATABASE_URL, r };
+  return { url: vars.MB_DB_CONNECTION_URI, r };
 }
 const parse = (u) => { const x = new URL(u); return { user: x.username, pass: x.password, db: x.pathname.slice(1) }; };
 
@@ -248,4 +252,40 @@ test('turned on with no sandbox database yet, a sandbox RESTART provisions it ra
   assert.equal(provisioned.at(-1).tenant, SANDBOX_TENANT);
   assert.notEqual(parse(restarted.url).user, prodBefore.user);
   assert.notEqual(parse(restarted.url).db, prodBefore.db);
+});
+
+// ── deployhub.json databases: sandbox never gets production's ───────────────
+// Sandbox is deployable by members who may not deploy production, and its code
+// is theirs to write. A shared database would let them read or rewrite
+// production's data from sandbox, so a manifest-declared database is separate
+// in sandbox whatever the setting says.
+const mAppId = db.prepare(
+  "INSERT INTO apps (name,slug,slot,source_type,branch) VALUES ('Own','owndb',2,'managed','main')"
+).run().lastInsertRowid;
+const mApp = db.prepare('SELECT * FROM apps WHERE id = ?').get(mAppId);
+{
+  const { database, username } = namesForScope({ appId: mAppId });
+  db.prepare(`INSERT INTO managed_databases (app_id, tenant, engine, db_name, db_user, password_enc)
+              VALUES (?, '', 'postgres', ?, ?, ?)`).run(mAppId, database, username, encrypt(PROD_PASSWORD));
+}
+const manifestEnv = async (env, opts = {}) => {
+  const vars = {};
+  await injectManagedDbForEnv({ app: mApp, env, runtimeEnvVars: vars, manifestNeeds: NEEDS, provision: fakeProvision, ...opts });
+  return vars.DATABASE_URL;
+};
+
+test('deployhub.json database, setting OFF: sandbox gets its own database, never production\'s', async () => {
+  assert.equal(getSeparateSandboxDb(db, mAppId), false);
+  const prod = parse(await manifestEnv('production'));
+  const sand = parse(await manifestEnv('sandbox'));
+  assert.equal(prod.pass, PROD_PASSWORD, 'production lost its database');
+  assert.notEqual(sand.user, prod.user, 'sandbox was handed production\'s login');
+  assert.notEqual(sand.db, prod.db, 'sandbox was handed production\'s database');
+  assert.notEqual(sand.pass, PROD_PASSWORD, 'sandbox received production\'s password');
+  assert.ok(provisioned.some(p => p.tenant === SANDBOX_TENANT), 'no sandbox database was provisioned');
+});
+
+test('deployhub.json database: a sandbox restart never falls back to production\'s', async () => {
+  const sand = parse(await manifestEnv('sandbox', { isRestart: true }));
+  assert.notEqual(sand.pass, PROD_PASSWORD);
 });

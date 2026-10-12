@@ -388,11 +388,11 @@ container starts:
   (`{ "engine": "postgres" }` at minimum, injecting `DATABASE_URL`); the deploy
   then provisions the database if it does not exist. A catalogue entry's
   `needs` win over that block.
-- Sandbox and production share that database unless the app's owner, an app
-  admin or a platform admin turns on **Separate sandbox database**: then the
-  sandbox's deploys and restarts get their own database and login
-  (`crane_a<id>_sandbox`, provisioned on the first one) under the same variable
-  names, and production's is untouched. Read your config the same way in both;
+- Sandbox always gets its own database and login for a deployhub.json
+  database (`crane_a<id>_sandbox`, provisioned on its first deploy or restart)
+  under the same variable names; production's is untouched, and sandbox never
+  receives production's credentials. (For catalogue apps, the owner/app admin
+  setting **Separate sandbox database** decides.) Read your config the same way in both;
   just don't assume sandbox starts with production's data.
 
 ```js

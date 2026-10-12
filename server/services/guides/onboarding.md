@@ -712,17 +712,18 @@ other names, or to get discrete variables too:
 - An invalid block fails the deploy before the build, naming the field. A failed
   provision fails the deploy with the reason.
 - An env var you set on the app yourself wins over the injected one.
-- By default, one database per app and engine, shared by sandbox and
-  production — sandbox writes land in the same database production reads.
-- To separate them, turn on **Separate sandbox database** on the app page's
-  Managed databases card (or `"separate_sandbox_db": true` on
+- A database declared in deployhub.json is ALWAYS separate per stage:
+  production gets the app's database, sandbox gets its own empty
+  `crane_a<id>_sandbox` database and login, provisioned on its first deploy or
+  restart and injected under the same variable names. Sandbox never receives
+  production's credentials: members who may not deploy production can still
+  deploy sandbox code, so a shared database would hand them production's data.
+- For catalogue apps the **Separate sandbox database** setting decides (app
+  page's Managed databases card, `"separate_sandbox_db": true` on
   `PUT /api/apps/<slug>`, or `appcrane_update_app`; owner, app admin or platform
-  admin). Production keeps its database untouched; the next sandbox deploy or
-  restart provisions an empty `crane_a<id>_sandbox` database with its own login
-  and injects it under the same variable names. Nothing changes until that
-  deploy or restart. Turning it off sends sandbox back to the shared database and
-  does not delete the sandbox database; the owner or a platform admin can drop it
-  from the card.
+  admin). Off, sandbox and production share one database; on, sandbox gets its
+  own on its next deploy or restart. Turning it off does not delete the sandbox
+  database; the owner or a platform admin can drop it from the card.
 - The password is never shown, by any tool. The deploy log lists variable names
   only.
 - Catalogue apps ignore this block: their catalogue entry names the variables.
