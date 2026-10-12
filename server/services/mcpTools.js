@@ -2,7 +2,8 @@ import { getDb } from '../db.js';
 import { decrypt, encrypt } from './encryption.js';
 import { BUCKETS, bucketize, applyBucket } from './requestStatus.js';
 import { cleanDoneNote } from './requestDoneNote.js';
-import { userHasAppPermission, userHasPlatformPermission, roleForUserOnApp, isAppOwnerOrPlatformAdmin } from './permissions.js';
+import { userHasAppPermission, userHasPlatformPermission, roleForUserOnApp, isAppOwnerOrPlatformAdmin, isAppOwnerAdminOrPlatformAdmin } from './permissions.js';
+import { getSeparateSandboxDb, setSeparateSandboxDb, parseSeparateSandboxDb, envForTenant, SEPARATE_SANDBOX_DB_NOTE } from './sandboxDb.js';
 import { getShowSandbox, setShowSandbox, parseShowSandbox } from './sandboxVisibility.js';
 import {
   listRoles, createRole, listMembersWithRoles, setUserRoleKeys, clearUserRoleGrants,
@@ -766,6 +767,7 @@ const TOOLS = [
           max_ram_mb:      resourceLimits?.max_ram_mb      ?? null,
           max_cpu_percent: resourceLimits?.max_cpu_percent ?? null,
           show_sandbox:    getShowSandbox(db, app.id),
+          separate_sandbox_db: getSeparateSandboxDb(db, app.id),
         },
       };
     },
@@ -2198,6 +2200,7 @@ const TOOLS = [
         max_ram_mb:      { type: 'number', description: 'Per-container memory cap.' },
         max_cpu_percent: { type: 'number', description: 'Per-container CPU cap (0-100).' },
         show_sandbox:    { type: 'boolean', description: 'Offer the Sandbox deployment to members and viewers on the launch surfaces (default true). false hides it from them; owners, app admins and platform admins still see it, and the sandbox URL keeps working. App owner or platform admin only.' },
+        separate_sandbox_db: { type: 'boolean', description: 'Give the sandbox its own managed database instead of sharing production\'s (default false). true: the next sandbox deploy or restart provisions a new EMPTY database with its own login for each engine the app uses and injects it under the same variable names; production\'s database is unchanged. false: sandbox goes back to the shared database on its next deploy or restart, and the sandbox database is NOT deleted (drop it from the dashboard). App owner, app admin or platform admin.' },
       },
       required: ['slug'],
       additionalProperties: false,
@@ -2300,17 +2303,30 @@ const TOOLS = [
         if (showSandbox === undefined) throw new Error('show_sandbox must be true or false');
       }
 
+      // Not an apps column either (migration 107). Same gate as PUT
+      // /api/apps/:slug: owner, app admin or platform admin.
+      let separateSandboxDb;
+      if (args.separate_sandbox_db !== undefined) {
+        if (!isAppOwnerAdminOrPlatformAdmin(user, app)) {
+          throw new Error('Only the app owner, an app admin or a platform admin can change Separate sandbox database.');
+        }
+        separateSandboxDb = parseSeparateSandboxDb(args.separate_sandbox_db);
+        if (separateSandboxDb === undefined) throw new Error('separate_sandbox_db must be true or false');
+      }
+
       const keys = Object.keys(updates);
-      if (keys.length === 0 && showSandbox === undefined) throw new Error('No fields to update — pass at least one field besides slug.');
+      if (keys.length === 0 && showSandbox === undefined && separateSandboxDb === undefined) throw new Error('No fields to update — pass at least one field besides slug.');
 
       db.transaction(() => {
         if (showSandbox !== undefined) setShowSandbox(db, app.id, showSandbox);
+        if (separateSandboxDb !== undefined) setSeparateSandboxDb(db, app.id, separateSandboxDb);
         if (keys.length === 0) return;
         const setClause = keys.map(k => `${k} = ?`).join(', ');
         const values    = keys.map(k => updates[k]);
         db.prepare(`UPDATE apps SET ${setClause} WHERE id = ?`).run(...values, app.id);
       })();
       if (showSandbox !== undefined) keys.push('show_sandbox');
+      if (separateSandboxDb !== undefined) keys.push('separate_sandbox_db');
 
       // v2.24.4: on a custom-domain change, keep the old domain alive as a 301
       // redirect to the new one (same as the REST path) so links don't break.
@@ -2339,6 +2355,7 @@ const TOOLS = [
       return {
         ...enriched,
         updated_fields: keys,
+        ...(separateSandboxDb !== undefined ? { separate_sandbox_db_notice: SEPARATE_SANDBOX_DB_NOTE } : {}),
         config: {
           source_type:    fresh.source_type,
           github_url:     fresh.github_url,
@@ -2362,6 +2379,7 @@ const TOOLS = [
           max_ram_mb:      resourceLimits?.max_ram_mb      ?? null,
           max_cpu_percent: resourceLimits?.max_cpu_percent ?? null,
           show_sandbox:    getShowSandbox(db, app.id),
+          separate_sandbox_db: getSeparateSandboxDb(db, app.id),
         },
       };
     },
@@ -4826,7 +4844,10 @@ const TOOLS = [
       + 'the dashboard, not to an agent recovering from a 503. '
       + 'You must name the engine: pass the one the image documents (BookStack and most linuxserver.io images want mariadb; Postgres-native apps want postgres). '
       + 'Guessing wrong is not destructive but does not help either — it leaves an unused empty database and the app keeps 503ing. An app may hold one of each. '
-      + 'ACCESS: requires an app-user assignment on that app, the same tier as env vars and backups. Being an AppCrane admin is NOT enough on its own — assign '
+      + 'A CUSTOM (non-catalogue) APP can instead declare "database": { "engine": "postgres" } in its deployhub.json: the next deploy provisions the database if '
+      + 'it does not exist and injects DATABASE_URL (MONGODB_URI for mongo, REDIS_URL for redis; url_env and env rename or add variables), so no call to this tool is needed. '
+      + 'A catalogue app keeps using its catalogue entry\'s variable names. '
+      + 'ACCESS: requires an app-user assignment on that app, the same tier as env vars and backups. Being a platform admin is NOT enough on its own — assign '
       + 'yourself with appcrane_grant_app_access first, which is the audited step the dashboard also requires.',
     inputSchema: {
       type: 'object',
@@ -4904,7 +4925,9 @@ const TOOLS = [
       + 'NEVER returns a password, a connection URL, a host or a port — no AppCrane surface hands the credential out, because the deployer injects it into the '
       + 'container environment and nothing asks a human or an agent to hold it. What is here is identity, not access. '
       + 'It reports what AppCrane has on file; it does not connect to the engine, so it cannot tell you whether the server is up or whether the app\'s own '
-      + 'connection is working. ACCESS: requires access to the app.',
+      + 'connection is working. Each database carries env: "production" for the app\'s own database (which sandbox shares by default) or "sandbox" for the '
+      + 'sandbox\'s own database under the Separate sandbox database setting; by_env says which database each environment\'s next deploy or restart uses. '
+      + 'ACCESS: requires access to the app.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -4923,11 +4946,19 @@ const TOOLS = [
       const svc = await managedDbModule();
       const app = getAppForUser(user, args.slug);
       const databases = svc.listForApp(app.id).map((row) => publicManagedDbView(row, app));
+      const separate = getSeparateSandboxDb(getDb(), app.id);
+      const shared = databases.filter((d) => d.env === 'production').map((d) => d.database);
       return {
         app: app.slug,
         count: databases.length,
         databases,
         engines: svc.SUPPORTED_ENGINES,
+        // Which databases each environment's next deploy or restart connects to.
+        separate_sandbox_db: separate,
+        by_env: {
+          production: shared,
+          sandbox: separate ? databases.filter((d) => d.env === 'sandbox').map((d) => d.database) : shared,
+        },
         note: databases.length
           ? 'Credentials are stored encrypted and injected into the container at deploy time; they are deliberately not returned here.'
           : `No managed database is provisioned for ${app.slug}. If it needs one, appcrane_provision_database creates it.`,
@@ -4950,12 +4981,14 @@ const TOOLS = [
  * injects them.
  */
 function publicManagedDbView(row, app) {
+  const env = envForTenant(row.tenant);
   return {
     engine: row.engine,
     database: row.db_name,
     username: row.db_user,
     created_at: row.created_at,
-    scope: { app: app.slug, tenant: row.tenant || null },
+    env,
+    scope: { app: app.slug, tenant: env ? null : (row.tenant || null) },
   };
 }
 

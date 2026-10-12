@@ -289,8 +289,10 @@ test('the result handed to the logger carries key NAMES only, never a value', ()
 test('both call sites log only key names, and both defer to the app\'s own vars', () => {
   for (const file of ['server/services/deployer.js', 'server/routes/deploy.js']) {
     const src = readFileSync(file, 'utf8');
+    // Both go through deployer.injectManagedDbForEnv (one place decides which
+    // scope a container gets), with the decrypt failures as the claimed keys.
     assert.ok(
-      /applyManagedDbEnv\(app, runtimeEnvVars, decryptFailures\)/.test(src),
+      /injectManagedDbForEnv\(\{[^}]*claimedKeys: decryptFailures/.test(src),
       `${file} must inject managed db credentials the same way, with the same claimed-key set`
     );
     // A log line built from .injected/.deferred is names; one built from the env
@@ -298,4 +300,9 @@ test('both call sites log only key names, and both defer to the app\'s own vars'
     assert.equal(/mdbEnv\.(injected|deferred)\.join/.test(src), true, `${file} logs names`);
     assert.equal(/runtimeEnvVars\[[^\]]*\]\}/.test(src), false, `${file} must not interpolate an env VALUE into a log`);
   }
+  assert.match(
+    readFileSync('server/services/deployer.js', 'utf8'),
+    /applyManagedDbEnv\(app, runtimeEnvVars, claimedKeys, manifestNeeds, scope\)/,
+    'the shared helper passes the claimed keys through to applyManagedDbEnv',
+  );
 });

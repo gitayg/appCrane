@@ -230,3 +230,17 @@ export function isAppOwnerOrPlatformAdmin(user, app) {
   if (user.role === 'platform_admin') return true;
   return roleForUserOnApp(user, app) === 'owner';
 }
+
+/**
+ * The app's owner, an app admin (app_user_roles 'admin'), or a platform admin.
+ * For per-app settings the people who build and release the app may change but
+ * plain members and viewers may not — "Separate sandbox database" (107) first.
+ * Deliberately not a matrix permission: the operator fixed this set, and a
+ * matrix key would let it be widened from the settings page.
+ */
+export function isAppOwnerAdminOrPlatformAdmin(user, app) {
+  if (!user || !app) return false;
+  if (user.role === 'platform_admin') return true;
+  const role = roleForUserOnApp(user, app);
+  return role === 'owner' || role === 'admin'; // role:platform-admin-skipped (per-app role from roleForUserOnApp)
+}

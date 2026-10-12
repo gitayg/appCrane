@@ -1,0 +1,11 @@
+-- Per-app "Separate sandbox database".
+--
+-- A managed database is scoped (app, tenant), so sandbox and production of one
+-- app have always shared ONE database per engine. An app whose sandbox must not
+-- touch production data needs the sandbox on its own database.
+--
+-- On app_settings (104) rather than apps, for the same reason 104 gave: an apps
+-- column means an apps rebuild. Default 0 and "no row" both mean shared, which
+-- is the behaviour every existing app has, so nothing is backfilled and nothing
+-- changes until an owner opts in.
+ALTER TABLE app_settings ADD COLUMN separate_sandbox_db INTEGER NOT NULL DEFAULT 0 CHECK(separate_sandbox_db IN (0, 1));

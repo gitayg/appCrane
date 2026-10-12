@@ -144,7 +144,8 @@ function parseBypassPathsField(raw) {
 function effectiveAuthMode(raw) {
   return raw === 'headless' ? 'headless' : 'authenticated';
 }
-import { userHasAppPermission, userHasPlatformPermission, roleForUserOnApp, isAppOwnerOrPlatformAdmin } from '../services/permissions.js';
+import { userHasAppPermission, userHasPlatformPermission, roleForUserOnApp, isAppOwnerOrPlatformAdmin, isAppOwnerAdminOrPlatformAdmin } from '../services/permissions.js';
+import { getSeparateSandboxDb, setSeparateSandboxDb, parseSeparateSandboxDb, SEPARATE_SANDBOX_DB_NOTE } from '../services/sandboxDb.js';
 import { getShowSandbox, showSandboxByAppId, setShowSandbox, sandboxVisibleFor, parseShowSandbox } from '../services/sandboxVisibility.js';
 import { isAdmin } from '../utils/roles.js';
 import log from '../utils/logger.js';
@@ -825,6 +826,8 @@ router.get('/:slug', requireAppAccess, async (req, res) => {
       sandbox_visible: sandboxVisibleFor(req.user, roleForUserOnApp(req.user, app), showSandbox),
       // Lets the app page show the toggle only to the people PUT will accept.
       can_change_show_sandbox: isAppOwnerOrPlatformAdmin(req.user, app),
+      separate_sandbox_db: getSeparateSandboxDb(db, app.id),
+      can_change_separate_sandbox_db: isAppOwnerAdminOrPlatformAdmin(req.user, app),
     },
     urls: urlsDetail,
     base_path: { production: `/${app.slug}/`, sandbox: `/${app.slug}-sandbox/` },
@@ -927,6 +930,19 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
     }
     showSandboxValue = parseShowSandbox(req.body.show_sandbox);
     if (showSandboxValue === undefined) throw new AppError('show_sandbox must be true or false', 400, 'VALIDATION');
+  }
+
+  // Separate sandbox database (migration 107). Owner, app admin or platform
+  // admin: it decides which data the sandbox runs against, which the people who
+  // build and release the app own, but not members or viewers. Takes effect on
+  // the next sandbox deploy or restart; nothing is dropped when it goes off.
+  let separateSandboxDbValue;
+  if (req.body.separate_sandbox_db !== undefined) {
+    if (!isAppOwnerAdminOrPlatformAdmin(req.user, app)) {
+      throw new AppError('Only the app owner, an app admin or a platform admin can change Separate sandbox database.', 403, 'FORBIDDEN');
+    }
+    separateSandboxDbValue = parseSeparateSandboxDb(req.body.separate_sandbox_db);
+    if (separateSandboxDbValue === undefined) throw new AppError('separate_sandbox_db must be true or false', 400, 'VALIDATION');
   }
 
   // Configurable RBAC: changes to repo-related fields gated by code.modify_repo_settings.
@@ -1447,7 +1463,7 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
     }
   }
 
-  if (Object.keys(updates).length === 0 && !ingressWork && showSandboxValue === undefined) {
+  if (Object.keys(updates).length === 0 && !ingressWork && showSandboxValue === undefined && separateSandboxDbValue === undefined) {
     // Normalize auth_mode here too: a caller can't tell which branch of this
     // route answered, so both must report the same effective mode.
     return res.json({ app: { ...withoutSecretColumns(app), auth_mode: effectiveAuthMode(app.auth_mode), ...ingressFields(app) }, message: 'No changes' });
@@ -1489,6 +1505,7 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
   // because it left no change.
   const applyWrites = db.transaction(() => {
     if (showSandboxValue !== undefined) setShowSandbox(db, app.id, showSandboxValue);
+    if (separateSandboxDbValue !== undefined) setSeparateSandboxDb(db, app.id, separateSandboxDbValue);
     if (Object.keys(updates).length > 0) {
       const setClauses = Object.keys(updates).map(k => `${k} = ?`).join(', ');
       const values = Object.values(updates);
@@ -1563,6 +1580,7 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
     ...(stillBound !== null && ingressWork ? {
       ingress_notice: `Port ${stillBound} is NOT closed yet. AppCrane will not publish it again and no other app can be given it, but the container that is running right now still binds 0.0.0.0:${stillBound} — the publish is a \`docker run\` flag. Deploy the app, or POST /api/apps/${app.slug}/restart/production, to recreate the container and actually close the port; AppCrane returns the port to the pool at that moment.`,
     } : {}),
+    ...(separateSandboxDbValue !== undefined ? { separate_sandbox_db_notice: SEPARATE_SANDBOX_DB_NOTE } : {}),
     app: {
       ...withoutSecretColumns(updated),
       resource_limits: JSON.parse(updated.resource_limits || '{}'),
@@ -1570,6 +1588,7 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
       auth_mode: effectiveAuthMode(updated.auth_mode),
       ...ingressFields(updated),
       show_sandbox: getShowSandbox(db, app.id),
+      separate_sandbox_db: getSeparateSandboxDb(db, app.id),
       domain_aliases: db.prepare('SELECT id, domain, source, created_at FROM app_domain_aliases WHERE app_id = ? ORDER BY created_at, id').all(app.id),
     },
   });

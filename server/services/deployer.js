@@ -13,6 +13,8 @@ import { getIngressForApp } from './tcpIngress.js';
 import { ensureCodebaseContext } from './appstudio/contextBuilder.js';
 import { findEntry } from './catalogService.js';
 import { credentialsFor } from './managedDb.js';
+import { parseManifestDatabase, ensureManifestDatabase } from './manifestDatabase.js';
+import { managedDbScopeFor } from './sandboxDb.js';
 import { parseContainerCommand, parseVolumePaths, resolveVolumeMounts, declaredVolumePathsFor } from './containerRuntimeSpec.js';
 import { resolveHealthProbe } from './healthProbeTarget.js';
 import { imagesToKeep } from './imageRetention.js';
@@ -33,9 +35,15 @@ import { imagesToKeep } from './imageRetention.js';
 // rejected: a user can edit either after creation, and a wrong match sets
 // ANOTHER app's variable names.
 //
-// This module never provisions. If the app has no provisioned database the
-// deploy proceeds with nothing injected — a deploy path that quietly creates
-// infrastructure is a surprise, and provisioning is an explicit action.
+// A custom app has no catalogue entry, so it declares the same `needs` shape in
+// deployhub.json's `database` block instead (services/manifestDatabase.js). The
+// catalogue entry wins when both exist: it is curated for that image, and the
+// manifest of an installed catalogue app is not the app author's to change.
+//
+// The catalogue path never provisions: a deploy path that quietly creates
+// infrastructure is a surprise there, and provisioning is an explicit action.
+// A manifest `database` block IS that explicit action — the author asked for a
+// database in the file they deploy — so the deploy provisions it (deployApp).
 
 /**
  * Connection URL for a managed database, in the `scheme://user:pass@host:port/db`
@@ -90,7 +98,9 @@ export function buildManagedDbEnv(needs, creds) {
 
 /**
  * Inject an app's managed-database credentials into a runtime env map, under the
- * variable names its catalogue entry declares.
+ * variable names its catalogue entry declares — or, when it has no catalogue
+ * `needs`, the names its validated deployhub.json `database` block declares
+ * (`manifestNeeds`, from parseManifestDatabase).
  *
  * PRECEDENCE — the app's OWN env var always wins. Someone who set DB_HOST by
  * hand is pointing the app at a database they chose, very possibly one holding
@@ -103,25 +113,52 @@ export function buildManagedDbEnv(needs, creds) {
  * Mutates `runtimeEnvVars`. Returns key NAMES only — the caller logs this, and
  * a password must never reach a log line.
  */
-export function applyManagedDbEnv(app, runtimeEnvVars, claimedKeys = []) {
-  const result = { engine: null, injected: [], deferred: [], reason: null };
-
+export function resolveManagedDbNeeds(app, manifestNeeds = null) {
   const catalogSlug = app?.catalog_slug;
-  if (!catalogSlug) { result.reason = 'app was not installed from the catalogue'; return result; }
+  if (catalogSlug) {
+    const entry = findEntry(catalogSlug);
+    if (entry?.needs?.engine) {
+      return { needs: entry.needs, source: 'catalogue', manifestIgnored: Boolean(manifestNeeds), reason: null };
+    }
+    if (!manifestNeeds) {
+      return {
+        needs: null, source: null, manifestIgnored: false,
+        reason: entry ? `catalogue entry '${catalogSlug}' needs no database` : `no catalogue entry '${catalogSlug}'`,
+      };
+    }
+  }
+  if (manifestNeeds) return { needs: manifestNeeds, source: 'manifest', manifestIgnored: false, reason: null };
+  return { needs: null, source: null, manifestIgnored: false, reason: 'app was not installed from the catalogue' };
+}
 
-  const entry = findEntry(catalogSlug);
-  if (!entry) { result.reason = `no catalogue entry '${catalogSlug}'`; return result; }
-  const needs = entry.needs;
-  if (!needs?.engine) { result.reason = `catalogue entry '${catalogSlug}' needs no database`; return result; }
+export function applyManagedDbEnv(app, runtimeEnvVars, claimedKeys = [], manifestNeeds = null, scope = null) {
+  const result = { engine: null, injected: [], deferred: [], reason: null, source: null, manifestIgnored: false };
+
+  const resolved = resolveManagedDbNeeds(app, manifestNeeds);
+  result.source = resolved.source;
+  result.manifestIgnored = resolved.manifestIgnored;
+  if (!resolved.needs) { result.reason = resolved.reason; return result; }
+  const needs = resolved.needs;
   result.engine = needs.engine;
 
   // No provisioned database (never provisioned, or an engine managedDb does not
   // support — several entries name mongo, which it does not). Inject nothing and
   // let the app fail exactly the way it does today.
   let creds = null;
-  try { creds = credentialsFor({ appId: app.id }, needs.engine); }
+  // `scope` is which of the app's databases this container gets: the shared
+  // one by default, the sandbox's own under "Separate sandbox database". It
+  // NEVER falls back from the sandbox scope to the shared one — a sandbox that
+  // silently landed on production's data is the failure the setting exists to
+  // prevent, so a missing sandbox database injects nothing instead.
+  const dbScope = scope || { appId: app.id, tenant: null };
+  try { creds = credentialsFor(dbScope, needs.engine); }
   catch (_) { creds = null; }
-  if (!creds) { result.reason = `no provisioned ${needs.engine} database for this app`; return result; }
+  if (!creds) {
+    result.reason = dbScope.tenant
+      ? `no provisioned ${needs.engine} sandbox database for this app`
+      : `no provisioned ${needs.engine} database for this app`;
+    return result;
+  }
 
   const claimed = new Set([...Object.keys(runtimeEnvVars), ...claimedKeys]);
   for (const [key, value] of Object.entries(buildManagedDbEnv(needs, creds))) {
@@ -130,6 +167,44 @@ export function applyManagedDbEnv(app, runtimeEnvVars, claimedKeys = []) {
     result.injected.push(key);
   }
   return result;
+}
+
+/**
+ * Resolve, provision when needed, and inject the managed database for ONE
+ * environment's container. The deploy and the restart both come through here,
+ * so the two cannot disagree about which database a sandbox container gets.
+ *
+ * Which database: managedDbScopeFor() — production always gets the app's
+ * shared database; sandbox gets its own only while "Separate sandbox database"
+ * is on (services/sandboxDb.js).
+ *
+ * When it is provisioned:
+ *   - a deployhub.json `database` block: on deploy (the author asked for it in
+ *     the file they deploy), never on restart — unchanged from before.
+ *   - the separate sandbox database: on a sandbox deploy AND a sandbox restart.
+ *     Turning the setting on is the explicit request, and the UI promises it
+ *     takes effect on the next deploy or restart; a restart that injected
+ *     nothing would strip the sandbox of a database it was just promised.
+ *     Catalogue apps included, for the same reason.
+ * A provisioning failure throws: starting a sandbox with no database, or with
+ * production's, is worse than a failed deploy.
+ */
+export async function injectManagedDbForEnv({
+  app, env, runtimeEnvVars, claimedKeys = [], manifestNeeds = null,
+  appendLog = () => {}, isRestart = false, provision,
+}) {
+  const scope = managedDbScopeFor(getDb(), app, env);
+  const resolved = resolveManagedDbNeeds(app, manifestNeeds);
+  const separateSandbox = Boolean(scope.tenant);
+  if (resolved.needs && (separateSandbox || (resolved.source === 'manifest' && !isRestart))) {
+    await ensureManifestDatabase(app, resolved.needs, {
+      appendLog,
+      scope,
+      ...(provision ? { provision } : {}),
+    });
+  }
+  const mdbEnv = applyManagedDbEnv(app, runtimeEnvVars, claimedKeys, manifestNeeds, scope);
+  return { ...mdbEnv, separateSandbox, manifestIgnored: resolved.manifestIgnored };
 }
 
 // Prune old release checkouts under <appDir>/releases, keeping the newest
@@ -1430,6 +1505,11 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       appendLog('WARNING: No deployhub.json found. Using defaults.');
     }
 
+    // Validate the `database` block now, before any build work, so a typo fails
+    // the deploy in seconds with the field named instead of after a full build —
+    // or, worse, deploying an app with no database and no error.
+    const manifestDbNeeds = parseManifestDatabase(manifest.database);
+
     // Sync the per-tenant DB opt-in from the manifest onto the app row, so the
     // revoke path (which runs outside a deploy) knows whether to purge tenant
     // data. Only touch the column when the manifest states it explicitly.
@@ -1678,13 +1758,31 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     }
 
     // v2.65.0: managed database credentials, under the variable names THIS app's
-    // catalogue entry declares (apps.catalog_slug -> appCatalog.json `needs`).
+    // catalogue entry declares (apps.catalog_slug -> appCatalog.json `needs`),
+    // or, for a custom app, its deployhub.json `database` block.
     // Runs AFTER the app's own env vars are in the map and reads from it, so an
     // env var the user set by hand wins over the injected credential — see
     // applyManagedDbEnv. Key names only in the log; the password is a value and
     // never appears.
     {
-      const mdbEnv = applyManagedDbEnv(app, runtimeEnvVars, decryptFailures);
+      // A manifest-declared database is provisioned here when it does not exist
+      // yet. Only when the manifest is the source: a catalogue entry's database
+      // stays an explicit action. A failure throws and fails the deploy, which is
+      // better than starting an app that was told it has a database and doesn't.
+      // Under "Separate sandbox database" a sandbox deploy provisions and
+      // injects the sandbox's own database instead — see injectManagedDbForEnv.
+      const mdbEnv = await injectManagedDbForEnv({
+        app, env, runtimeEnvVars, claimedKeys: decryptFailures, manifestNeeds: manifestDbNeeds, appendLog,
+      });
+      if (mdbEnv.manifestIgnored) {
+        appendLog(
+          `Managed database: the deployhub.json "database" block was ignored — this app's ` +
+          `catalogue entry '${app.catalog_slug}' declares its database and wins.`
+        );
+      }
+      if (mdbEnv.separateSandbox && mdbEnv.engine) {
+        appendLog(`Managed ${mdbEnv.engine} database: this sandbox uses its own database (Separate sandbox database is on).`);
+      }
       if (mdbEnv.injected.length) {
         appendLog(
           `Managed ${mdbEnv.engine} database: injected ${mdbEnv.injected.length} ` +
@@ -1697,7 +1795,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
           `${mdbEnv.deferred.join(', ')} (an env var you set wins over the injected credential).`
         );
       }
-      if (!mdbEnv.injected.length && !mdbEnv.deferred.length && mdbEnv.reason && app.catalog_slug) {
+      if (!mdbEnv.injected.length && !mdbEnv.deferred.length && mdbEnv.reason && (app.catalog_slug || manifestDbNeeds)) {
         appendLog(`Managed database: nothing injected (${mdbEnv.reason}).`);
       }
     }

@@ -301,7 +301,7 @@ test('the provision result carries no password, no URL, and no host', async () =
   assert.ok(!/mysql:\/\/|postgresql:\/\//.test(text), 'a connection URL appeared in the tool result');
 
   const out = jsonOf(result);
-  assert.deepEqual(Object.keys(out.database).sort(), ['created_at', 'database', 'engine', 'scope', 'username']);
+  assert.deepEqual(Object.keys(out.database).sort(), ['created_at', 'database', 'engine', 'env', 'scope', 'username']);
   assert.match(out.next, /appcrane_deploy/);
 });
 

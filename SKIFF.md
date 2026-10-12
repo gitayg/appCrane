@@ -350,7 +350,7 @@ variable names *your app already reads*. No compose file, no credential
 handling, no init container.
 
 **The contract.** The platform runs one shared Postgres and one shared MariaDB
-(`SUPPORTED_ENGINES = ['postgres', 'mariadb']`). Provisioning is explicit —
+(`SUPPORTED_ENGINES = ['postgres', 'mariadb', 'mongo', 'redis']`). Provisioning is explicit —
 `POST /api/apps/<slug>/database`, or the button in the dashboard — and creates
 **one database and one login role per app**. Isolation is enforced *inside the
 engine* by grants (`REVOKE ALL ON DATABASE … FROM PUBLIC`, `REVOKE ALL ON SCHEMA
@@ -383,8 +383,17 @@ container starts:
   is pointing the app at a database they chose; overriding it would repoint a
   live app at an empty one and look like data loss.
 - The link from the app back to your manifest entry is `apps.catalog_slug`,
-  written at install. An app not installed from the catalogue gets nothing
-  injected, and the deploy log says so.
+  written at install. An app not installed from the catalogue can declare the
+  same shape as a `database` block in its own `deployhub.json`
+  (`{ "engine": "postgres" }` at minimum, injecting `DATABASE_URL`); the deploy
+  then provisions the database if it does not exist. A catalogue entry's
+  `needs` win over that block.
+- Sandbox and production share that database unless the app's owner, an app
+  admin or a platform admin turns on **Separate sandbox database**: then the
+  sandbox's deploys and restarts get their own database and login
+  (`crane_a<id>_sandbox`, provisioned on the first one) under the same variable
+  names, and production's is untouched. Read your config the same way in both;
+  just don't assume sandbox starts with production's data.
 
 ```js
 // Read them like any other config; they are present before your process starts.

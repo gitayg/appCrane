@@ -677,6 +677,56 @@ No GitHub commit, no container round-trip, no inline-tool-arg ceiling. The
 response echoes the SHA-256 + byte count so the agent can verify integrity
 against its locally-computed hash.
 
+## Managed database — `database` in `deployhub.json`
+
+A custom app that needs Postgres, MariaDB, MongoDB or Redis declares it in
+`deployhub.json`; it does not call `appcrane_provision_database` or handle a
+password:
+
+```json
+{ "database": { "engine": "postgres" } }
+```
+
+On deploy, AppCrane provisions the app's database if it does not exist yet
+(deploy log: "Provisioned a managed postgres database for this app") and injects
+the connection URL before the container starts. Defaults: `DATABASE_URL` for
+postgres and mariadb, `MONGODB_URI` for mongo, `REDIS_URL` for redis. To use
+other names, or to get discrete variables too:
+
+```json
+{
+  "database": {
+    "engine": "postgres",
+    "url_env": "DATABASE_URL",
+    "env": { "host": "DB_HOST", "port": "DB_PORT", "name": "DB_NAME", "user": "DB_USER", "password": "DB_PASSWORD" }
+  }
+}
+```
+
+- `engine` is required: `postgres`, `mariadb`, `mongo` or `redis`.
+- `env` keys are only `host`, `port`, `name`, `user`, `password`; omit the ones
+  the app does not read. `"url_env": null` drops the URL variable.
+- Variable names must match `^[A-Z_][A-Z0-9_]*$` and may not be one AppCrane
+  sets itself (`PORT`, `NODE_ENV`, `DATA_DIR`, `FE_PORT`, `APP_BASE_PATH`,
+  `CRANE_URL`, `CRANE_INTERNAL_URL`, anything starting `APPCRANE_`).
+- An invalid block fails the deploy before the build, naming the field. A failed
+  provision fails the deploy with the reason.
+- An env var you set on the app yourself wins over the injected one.
+- By default, one database per app and engine, shared by sandbox and
+  production — sandbox writes land in the same database production reads.
+- To separate them, turn on **Separate sandbox database** on the app page's
+  Managed databases card (or `"separate_sandbox_db": true` on
+  `PUT /api/apps/<slug>`, or `appcrane_update_app`; owner, app admin or platform
+  admin). Production keeps its database untouched; the next sandbox deploy or
+  restart provisions an empty `crane_a<id>_sandbox` database with its own login
+  and injects it under the same variable names. Nothing changes until that
+  deploy or restart. Turning it off sends sandbox back to the shared database and
+  does not delete the sandbox database; the owner or a platform admin can drop it
+  from the card.
+- The password is never shown, by any tool. The deploy log lists variable names
+  only.
+- Catalogue apps ignore this block: their catalogue entry names the variables.
+
 ## Scheduled jobs — `cron` in `deployhub.json`
 
 Declare periodic work in `deployhub.json` and AppCrane runs it host-side via

@@ -1,5 +1,7 @@
 import { Router } from 'express';
-import { isAppOwnerOrPlatformAdmin } from '../services/permissions.js';
+import { isAppOwnerOrPlatformAdmin, isAppOwnerAdminOrPlatformAdmin } from '../services/permissions.js';
+import { getDb } from '../db.js';
+import { SANDBOX_TENANT, getSeparateSandboxDb, envForTenant, SEPARATE_SANDBOX_DB_NOTE } from '../services/sandboxDb.js';
 import { requireAuth, requireAppUser, requireAppAccess, requirePlatformAdmin } from '../middleware/auth.js';
 import { auditMiddleware } from '../middleware/audit.js';
 import { AppError } from '../utils/errors.js';
@@ -147,18 +149,45 @@ function assertNoTenantScope(tenant) {
  * database, which user — exactly what is here.
  */
 function publicView(row, app) {
+  const env = envForTenant(row.tenant);
   return {
     engine: row.engine,
     database: row.db_name,
     username: row.db_user,
     created_at: row.created_at,
-    scope: { app: app.slug, tenant: row.tenant || null },
+    // 'production' for the app's own database (which sandbox shares unless
+    // "Separate sandbox database" is on), 'sandbox' for the sandbox's own.
+    env,
+    scope: { app: app.slug, tenant: env ? null : (row.tenant || null) },
   };
 }
 
 /** This app's managed databases, across engines and (later) tenants. */
 function listPublic(svc, app) {
   return svc.listForApp(app.id).map((row) => publicView(row, app));
+}
+
+/**
+ * Which database each environment's NEXT deploy or restart connects to, by
+ * name. Sandbox reads the shared database unless the setting is on; a sandbox
+ * database left over from turning it off is listed in `databases` but appears
+ * here under neither env, which is how the card tells the owner it is unused.
+ */
+function databasesByEnv(databases, separate) {
+  const shared = databases.filter((d) => d.env === 'production').map((d) => d.database);
+  const own = databases.filter((d) => d.env === 'sandbox').map((d) => d.database);
+  return { production: shared, sandbox: separate ? own : shared };
+}
+
+function sandboxDbFields(req, databases) {
+  const separate = getSeparateSandboxDb(getDb(), req.app.id);
+  return {
+    separate_sandbox_db: separate,
+    can_change_separate_sandbox_db: isAppOwnerAdminOrPlatformAdmin(req.user, req.app),
+    can_drop_database: isAppOwnerOrPlatformAdmin(req.user, req.app),
+    by_env: databasesByEnv(databases, separate),
+    separate_sandbox_db_note: SEPARATE_SANDBOX_DB_NOTE,
+  };
 }
 
 /**
@@ -274,11 +303,17 @@ router.get('/:slug/database', requireAppAccess, async (req, res) => {
     rethrowEngineError(err);
   }
 
-  res.json({ databases, engines: svc.SUPPORTED_ENGINES });
+  res.json({ databases, engines: svc.SUPPORTED_ENGINES, ...sandboxDbFields(req, databases) });
 });
 
 /**
- * DELETE /api/apps/:slug/database?engine=<engine>&confirm=<slug>
+ * DELETE /api/apps/:slug/database?engine=<engine>&confirm=<slug>[&env=sandbox]
+ *
+ * `env=sandbox` targets the sandbox's own database ("Separate sandbox
+ * database"), which turning the setting off deliberately leaves in place.
+ * Without it the app's shared database is the target, as before. The same
+ * owner-or-platform-admin rule covers both: the sandbox database is the app's
+ * data too, and the 2026-10-06 rule is about who may destroy data.
  *
  * Drops the database and its login role. Destructive and unrecoverable, so it
  * takes an explicit confirmation in addition to authorization — a DELETE
@@ -308,7 +343,12 @@ router.delete('/:slug/database', requireAppUser, auditMiddleware('managed-db-dep
     );
   }
 
-  const scope = scopeFor(req.app);
+  const envParam = q.get('env');
+  if (envParam !== null && envParam !== 'production' && envParam !== 'sandbox') {
+    throw new AppError('env must be production or sandbox', 400, 'VALIDATION');
+  }
+  const sandboxTarget = envParam === 'sandbox';
+  const scope = sandboxTarget ? { appId: req.app.id, tenant: SANDBOX_TENANT } : scopeFor(req.app);
   let removed;
   try {
     removed = await svc.deprovision(scope, engine);
@@ -320,8 +360,10 @@ router.delete('/:slug/database', requireAppUser, auditMiddleware('managed-db-dep
     removed: Boolean(removed),
     databases: listPublic(svc, req.app),
     message: removed
-      ? 'Database and user removed. The app will lose its connection on the next deploy.'
-      : `No ${engine} database was provisioned for this app.`,
+      ? (sandboxTarget
+        ? 'Sandbox database and user removed. If Separate sandbox database is still on, the next sandbox deploy or restart creates a new empty one.'
+        : 'Database and user removed. The app will lose its connection on the next deploy.')
+      : `No ${engine} ${sandboxTarget ? 'sandbox ' : ''}database was provisioned for this app.`,
   });
 });
 

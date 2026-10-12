@@ -108,6 +108,7 @@ import log from '../utils/logger.js';
 import { removeTreeAsRoot } from './docker.js';
 import * as redis from './managedRedis.js';
 import * as mongo from './managedMongo.js';
+import { SANDBOX_TENANT } from './sandboxDb.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -339,6 +340,8 @@ export function normalizeScope(scope) {
  *   app-scoped     { appId: 42 }                     -> crane_a42       / crane_a42_u
  *   tenant-scoped  { appId: 42, tenant: 'acme.com/u7' } -> crane_a42_t3f9a1c2b7e0
  *                                                       / crane_a42_t3f9a1c2b7e0_u
+ *   sandbox        { appId: 42, tenant: SANDBOX_TENANT } -> crane_a42_sandbox
+ *                                                       / crane_a42_sandbox_u
  *
  * THE TENANT IS HASHED, NOT SLUGGED, and so is anything else variable-length.
  * The tempting version builds the name from the app slug and the tenant string
@@ -358,7 +361,14 @@ export function normalizeScope(scope) {
 export function namesForScope(scope) {
   const { appId, tenant } = normalizeScope(scope);
   let base = `crane_a${appId}`;
-  if (tenant) {
+  if (tenant === SANDBOX_TENANT) {
+    // A readable name rather than the tenant hash: an operator reading the
+    // app's database card or `\l` must see at a glance which database is the
+    // sandbox's. Cannot collide with a hashed tenant (`_t<hex>`) or with
+    // another app (the app id comes first and is unique), and the UNIQUE
+    // (engine, db_name) index still backs that up.
+    base += '_sandbox';
+  } else if (tenant) {
     const h = crypto.createHash('sha256').update(tenant).digest('hex').slice(0, 12);
     base += `_t${h}`;
   }

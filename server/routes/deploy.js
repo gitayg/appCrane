@@ -369,15 +369,28 @@ router.post('/:slug/restart/:env', requireAppAccess, auditMiddleware('restart'),
   }
 
   // v2.65.0: managed database credentials, same rule as the deploy path — the
-  // app's catalogue entry names the variables, and an env var the app itself
+  // app's catalogue entry (or a custom app's deployhub.json) names the variables, and an env var the app itself
   // carries wins over the injected credential. Restart rebuilds the container's
   // whole environment from scratch, so skipping this here would silently strip
   // the database credentials off a restarted app that had them at deploy.
   // Deliberately placed BEFORE the CRANE_URL/DATA_DIR block below for the same
   // reason as in the deployer: those are platform vars that always win.
   {
-    const { applyManagedDbEnv } = await import('../services/deployer.js');
-    const mdbEnv = applyManagedDbEnv(app, runtimeEnvVars, decryptFailures);
+    const { injectManagedDbForEnv } = await import('../services/deployer.js');
+    // A custom app's database is declared in its release's deployhub.json.
+    const { readReleaseManifestDatabase } = await import('../services/manifestDatabase.js');
+    const appEnvDir = resolve(join(resolve(process.env.DATA_DIR || './data'), 'apps', app.slug, env));
+    const releaseDb = readReleaseManifestDatabase(appEnvDir);
+    if (releaseDb.error) log.warn(`Restart ${containerName}: ignoring the release's deployhub.json database block: ${releaseDb.error}`);
+    // Same helper as the deploy, so a sandbox restart under "Separate sandbox
+    // database" re-injects the SANDBOX's credentials (provisioning them if the
+    // setting was turned on since the last deploy), and goes back to the shared
+    // database once it is turned off.
+    const mdbEnv = await injectManagedDbForEnv({
+      app, env, runtimeEnvVars, claimedKeys: decryptFailures, manifestNeeds: releaseDb.needs,
+      isRestart: true,
+      appendLog: (line) => log.info(`Restart ${containerName}: ${line}`),
+    });
     if (mdbEnv.injected.length) {
       // Key names only. The values include a database password.
       log.info(`Restart ${containerName}: injected managed ${mdbEnv.engine} database var(s): ${mdbEnv.injected.join(', ')}`);
