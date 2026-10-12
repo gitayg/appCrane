@@ -1675,6 +1675,16 @@ app.listen(PORT, HOST, async () => {
     log.error('Vulnerability scan scheduler failed to start: ' + e.message);
   }
 
+  // Failed-login alerts for the managed databases: reads the shared servers'
+  // own logs every few minutes and alerts platform admins when one login keeps
+  // failing (services/dbAuthAlerts.js). Reads logs only; starts nothing.
+  try {
+    const { startDbAuthAlertScheduler } = await import('./services/dbAuthAlerts.js');
+    startDbAuthAlertScheduler();
+  } catch (e) {
+    log.error('Managed database login-alert scheduler failed to start: ' + e.message);
+  }
+
   // Bulk-redeploy sentinel — written by the upgrade script's cleanup phase
   // when it kills a PM2 daemon, because those apps are now offline and need
   // to be rebuilt as Docker containers. In-process, no API key needed.

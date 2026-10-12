@@ -71,6 +71,10 @@ const PROD_PASSWORD = crypto.randomBytes(18).toString('base64url');
 // The provision() double: what managedDb.provision does to the table, without
 // the engine. Records every scope it was asked for.
 const provisioned = [];
+// The TLS/limits step (managedDb.secureLogin) talks to a real engine, and this
+// file has no Docker and sets no container prefix — so it is replaced too.
+// Its own behaviour is covered by test/managed-db-tls.test.js.
+const fakeSecureLogin = async () => ({ applied: false, certRequired: false, mounts: [], tls: null });
 async function fakeProvision(scope, engine) {
   provisioned.push({ tenant: scope.tenant ?? null, engine });
   const { database, username } = namesForScope(scope);
@@ -82,7 +86,7 @@ async function fakeProvision(scope, engine) {
 async function envFor(env, { isRestart = false } = {}) {
   const vars = {};
   const r = await injectManagedDbForEnv({
-    app, env, runtimeEnvVars: vars, manifestNeeds: null, isRestart, provision: fakeProvision,
+    app, env, runtimeEnvVars: vars, manifestNeeds: null, isRestart, provision: fakeProvision, secureLogin: fakeSecureLogin,
   });
   return { url: vars.MB_DB_CONNECTION_URI, r };
 }
@@ -270,7 +274,7 @@ const mApp = db.prepare('SELECT * FROM apps WHERE id = ?').get(mAppId);
 }
 const manifestEnv = async (env, opts = {}) => {
   const vars = {};
-  await injectManagedDbForEnv({ app: mApp, env, runtimeEnvVars: vars, manifestNeeds: NEEDS, provision: fakeProvision, ...opts });
+  await injectManagedDbForEnv({ app: mApp, env, runtimeEnvVars: vars, manifestNeeds: NEEDS, provision: fakeProvision, secureLogin: fakeSecureLogin, ...opts });
   return vars.DATABASE_URL;
 };
 

@@ -708,7 +708,9 @@ other names, or to get discrete variables too:
   the app does not read. `"url_env": null` drops the URL variable.
 - Variable names must match `^[A-Z_][A-Z0-9_]*$` and may not be one AppCrane
   sets itself (`PORT`, `NODE_ENV`, `DATA_DIR`, `FE_PORT`, `APP_BASE_PATH`,
-  `CRANE_URL`, `CRANE_INTERNAL_URL`, anything starting `APPCRANE_`).
+  `CRANE_URL`, `CRANE_INTERNAL_URL`, the TLS file variables `DB_CA_FILE`,
+  `DB_CERT_FILE`, `DB_KEY_FILE`, `DB_CERT_KEY_FILE`, `PGSSLMODE`,
+  `PGSSLROOTCERT`, `PGSSLCERT`, `PGSSLKEY`, anything starting `APPCRANE_`).
 - An invalid block fails the deploy before the build, naming the field. A failed
   provision fails the deploy with the reason.
 - An env var you set on the app yourself wins over the injected one.
@@ -727,6 +729,108 @@ other names, or to get discrete variables too:
 - The password is never shown, by any tool. The deploy log lists variable names
   only.
 - Catalogue apps ignore this block: their catalogue entry names the variables.
+
+### TLS and the app's own client certificate (required)
+
+A database declared here is reachable ONLY over TLS, and only by a client that
+presents this app's own certificate AND the password. Apps are not told apart by
+network address (every connection arrives from the Docker bridge gateway), so
+the identity is the certificate: it is issued by AppCrane's private CA with
+`CN = <database login>`, one per stage (production and sandbox each have their
+own), and mounted read-only into that one container:
+
+| File | Path in the container |
+|---|---|
+| CA certificate | `/run/appcrane/db/ca.crt` (`DB_CA_FILE`) |
+| Client certificate | `/run/appcrane/db/client.crt` (`DB_CERT_FILE`) |
+| Client key | `/run/appcrane/db/client.key` (`DB_KEY_FILE`) |
+| Certificate + key in one file | `/run/appcrane/db/client.pem` (`DB_CERT_KEY_FILE`) |
+
+The injected URL already carries the TLS parameters. What each driver reads
+from it, measured against the real engines:
+
+**node-postgres (`pg` 8.x)** reads `sslmode`, `sslrootcert`, `sslcert` and
+`sslkey` from the connection string, so `new Client({ connectionString:
+process.env.DATABASE_URL })` works unchanged. If you build the config from
+discrete fields instead, pass the files yourself:
+
+```js
+import fs from 'node:fs'
+import pg from 'pg'
+const client = new pg.Client({
+  host: process.env.DB_HOST, port: Number(process.env.DB_PORT),
+  user: process.env.DB_USER, password: process.env.DB_PASSWORD, database: process.env.DB_NAME,
+  ssl: {
+    ca: fs.readFileSync(process.env.DB_CA_FILE),
+    cert: fs.readFileSync(process.env.DB_CERT_FILE),
+    key: fs.readFileSync(process.env.DB_KEY_FILE),
+  },
+})
+```
+
+`psql` and other libpq clients also read `PGSSLMODE`/`PGSSLROOTCERT`/`PGSSLCERT`/
+`PGSSLKEY`, which are injected when your `env` map uses `PG*` names. libpq
+refuses a key file other users can read; on a production AppCrane (which runs
+as root) the key is `0400` and owned by your image's user.
+
+**mysql2** does NOT read TLS options from the URL (it ignores `ssl-ca` etc. and
+prints a warning), so the URL alone is refused. Pass them explicitly:
+
+```js
+import fs from 'node:fs'
+import mysql from 'mysql2/promise'
+const u = new URL(process.env.DATABASE_URL)
+const conn = await mysql.createConnection({
+  host: u.hostname, port: Number(u.port), user: decodeURIComponent(u.username),
+  password: decodeURIComponent(u.password), database: u.pathname.slice(1),
+  ssl: {
+    ca: fs.readFileSync(process.env.DB_CA_FILE),
+    cert: fs.readFileSync(process.env.DB_CERT_FILE),
+    key: fs.readFileSync(process.env.DB_KEY_FILE),
+  },
+})
+```
+
+**mongodb (Node driver 6.x)** reads `tls`, `tlsCAFile`, `tlsCertificateKeyFile`
+and `authMechanism=MONGODB-X509` from the URI, so `new
+MongoClient(process.env.MONGODB_URI)` works unchanged. A Mongo login declared
+here authenticates by certificate only: there is no password user for it (the
+`password` field, if mapped, is not used).
+
+**ioredis** turns `rediss://` into TLS but cannot take the files from the URL,
+so the URL alone is refused. Pass them:
+
+```js
+import fs from 'node:fs'
+import Redis from 'ioredis'
+const redis = new Redis(process.env.REDIS_URL, {
+  tls: {
+    ca: fs.readFileSync(process.env.DB_CA_FILE),
+    cert: fs.readFileSync(process.env.DB_CERT_FILE),
+    key: fs.readFileSync(process.env.DB_KEY_FILE),
+    servername: 'host.docker.internal',
+  },
+})
+```
+
+Notes:
+
+- Existing databases declared here before this was introduced are converted on
+  the app's next deploy or restart: the certificate is issued and mounted, and
+  from then on the plain-text connection string stops working. Update the
+  connection code (above) in the same deploy.
+- Certificates last two years and are renewed automatically when fewer than 30
+  days are left; the new files are written before the old ones expire and the
+  next deploy or restart picks them up, so a running app is never cut off.
+- Per-login limits apply to every managed Postgres and MariaDB login: at most 25
+  connections and a 5-minute statement timeout by default (platform admins can
+  change both). Size your connection pool below the limit. Mongo and Redis have
+  no per-login connection cap.
+- Repeated failed logins are reported to platform admins with the login and the
+  database it tried — a login that keeps failing against a database it does not
+  own identifies the app doing it.
+- Catalogue apps keep working without TLS: the servers offer TLS to anyone who
+  asks, but only logins declared in `deployhub.json` are required to use it.
 
 ## Scheduled jobs — `cron` in `deployhub.json`
 

@@ -227,6 +227,30 @@ for (const engine of ['postgres', 'mariadb']) {
       assert.equal(n, 1);
     });
 
+    await t.test('a new login is put under the per-login limits at provision', async () => {
+      // Read from the admin side, so the number is the engine's own record of
+      // the limit, not what AppCrane believes it asked for.
+      const sql = engine === 'postgres'
+        ? `SELECT rolconnlimit || '|' || array_to_string(rolconfig, ',') FROM pg_roles WHERE rolname = '${a.username}';`
+        : `SELECT CONCAT(max_user_connections, '|', max_statement_time) FROM mysql.user WHERE user = '${a.username}';`;
+      const args = engine === 'postgres'
+        ? ['exec', '-u', 'postgres', `${PREFIX}-postgres`, 'psql', '-X', '-q', '-t', '-A', '-c', sql]
+        : ['exec', `${PREFIX}-mariadb`, 'mariadb', '--batch', '--skip-column-names', '-e', sql];
+      const { stdout } = await execFileAsync('docker', args, { timeout: 60000 });
+      assert.equal(stdout.trim(), engine === 'postgres' ? '25|statement_timeout=300s' : '25|300.000000');
+    });
+
+    await t.test('the server offers TLS, and a catalogue-style login still connects in plain text', async () => {
+      const conninfoOk = await asUser(engine, { ...a, sql: engine === 'postgres'
+        ? 'SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()'
+        : "SHOW SESSION STATUS LIKE 'Ssl_cipher'" });
+      assert.ok(conninfoOk.ok, conninfoOk.out);
+      const { stdout } = await execFileAsync('docker', engine === 'postgres'
+        ? ['exec', '-u', 'postgres', `${PREFIX}-postgres`, 'psql', '-X', '-q', '-t', '-A', '-c', 'SHOW ssl']
+        : ['exec', `${PREFIX}-mariadb`, 'mariadb', '--batch', '--skip-column-names', '-e', "SELECT @@have_ssl"], { timeout: 60000 });
+      assert.equal(stdout.trim(), engine === 'postgres' ? 'on' : 'YES');
+    });
+
     // ---- CONTROL. Without this, every denial below could be a broken client.
     await t.test('CONTROL: each app can use its own database', async () => {
       const mk = await asUser(engine, { ...b, sql: 'CREATE TABLE secrets (v text)' });

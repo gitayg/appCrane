@@ -394,6 +394,20 @@ container starts:
   receives production's credentials. (For catalogue apps, the owner/app admin
   setting **Separate sandbox database** decides.) Read your config the same way in both;
   just don't assume sandbox starts with production's data.
+- **Transport and identity.** Every managed server speaks TLS with a
+  certificate from AppCrane's private CA. For a catalogue app TLS is
+  *offered*: your login works in plain text too, because many images cannot be
+  configured for database TLS. A `deployhub.json` database is different: its
+  login must use TLS **and** present that app's own client certificate (CN = the
+  login, mounted read-only at `/run/appcrane/db/`, paths in `DB_CA_FILE` /
+  `DB_CERT_FILE` / `DB_KEY_FILE`) as well as the password — the engine refuses
+  anything less. Mongo logins of that kind authenticate by certificate alone
+  (x509); Redis checks that the certificate is AppCrane-issued, not which app it
+  names. The onboarding guide has the per-driver snippets.
+- **Limits.** Every Postgres and MariaDB login is capped at 25 connections with
+  a 5-minute statement timeout by default (platform-configurable). Keep your
+  pool under the cap. Repeated failed logins are reported to the platform
+  admins by login and target database.
 
 ```js
 // Read them like any other config; they are present before your process starts.

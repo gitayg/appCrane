@@ -425,3 +425,60 @@ test('the double returns the same field names the real engine does', async () =>
   assert.ok(!select.includes('password'),
     'listForApp must not select the password column — it is the router\'s safe read path');
 });
+
+// ── Managed-database TLS: transport security on the read, and the platform limits ──────
+
+test('GET /:slug/database reports tls / cert expiry / limits, and never key material or paths', async () => {
+  const eng = makeEngine();
+  eng.tlsView = (row) => ({
+    tls: 'required', client_cert_expires_at: '2028-10-11T00:00:00.000Z', connection_limit: 25, statement_timeout_s: 300,
+    // Fields a careless engine might add. The router must pick, not spread.
+    key_pem: '-----BEGIN PRIVATE KEY-----', host_dir: '/srv/data/managed-db/_tls/client/x',
+  });
+  routes.__setEngineForTests(eng);
+  await provision(OWNER);
+  const { status, body, text } = await call('GET', '/api/apps/bookstack/database', { key: OWNER });
+  assert.equal(status, 200);
+  const d = body.databases[0];
+  assert.equal(d.tls, 'required');
+  assert.equal(d.client_cert_expires_at, '2028-10-11T00:00:00.000Z');
+  assert.equal(d.connection_limit, 25);
+  assert.equal(d.statement_timeout_s, 300);
+  assert.ok(!text.includes('PRIVATE KEY'));
+  assert.ok(!text.includes('_tls'));
+});
+
+test('platform limits: only a platform admin can read or change them, and values are validated', async () => {
+  const api2 = express();
+  api2.use(express.json());
+  api2.use('/api/managed-db', routes.serversRouter);
+  api2.use(errorHandler);
+  const s2 = await new Promise((r) => { const s = api2.listen(0, '127.0.0.1', () => r(s)); });
+  const B2 = `http://127.0.0.1:${s2.address().port}`;
+  const req = async (method, key, body) => {
+    const res = await fetch(`${B2}/api/managed-db/settings`, {
+      method, headers: { 'X-API-Key': key, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    return { status: res.status, body: await res.json().catch(() => null) };
+  };
+  try {
+    assert.equal((await req('GET', OWNER)).status, 403);
+    assert.equal((await req('PUT', OWNER, { conn_limit: 5 })).status, 403);
+    const got = await req('GET', PLATFORM);
+    assert.equal(got.status, 200);
+    assert.equal(got.body.settings.conn_limit, 25);
+    const bad = await req('PUT', PLATFORM, { conn_limit: 0 });
+    assert.equal(bad.status, 400);
+    const ok = await req('PUT', PLATFORM, { conn_limit: 40, pg_max_connections: 400 });
+    assert.equal(ok.status, 200);
+    assert.equal(ok.body.settings.conn_limit, 40);
+    assert.equal(ok.body.settings.pg_max_connections, 400);
+    assert.match(ok.body.note, /next deploy or restart/);
+    const audit = db.prepare("SELECT detail FROM audit_log WHERE action = 'managed-db-settings-change' ORDER BY id DESC LIMIT 1").get();
+    assert.ok(audit && JSON.parse(audit.detail).to.conn_limit === 40);
+    await req('PUT', PLATFORM, { conn_limit: 25, pg_max_connections: 300 });
+  } finally {
+    s2.closeAllConnections?.(); s2.close();
+  }
+});

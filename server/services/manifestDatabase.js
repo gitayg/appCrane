@@ -45,6 +45,11 @@ export const DEFAULT_URL_ENV = {
 export const RESERVED_ENV_NAMES = [
   'PORT', 'FE_PORT', 'NODE_ENV', 'DATA_DIR', 'APP_BASE_PATH',
   'CRANE_URL', 'CRANE_INTERNAL_URL',
+  // The client-certificate paths deployer.tlsFileEnv() injects for a login
+  // that requires TLS. Mapping a field onto one of these would overwrite (or be
+  // overwritten by) a path the driver needs.
+  'DB_CA_FILE', 'DB_CERT_FILE', 'DB_KEY_FILE', 'DB_CERT_KEY_FILE',
+  'PGSSLMODE', 'PGSSLROOTCERT', 'PGSSLCERT', 'PGSSLKEY',
 ];
 export const RESERVED_ENV_PREFIX = 'APPCRANE_';
 

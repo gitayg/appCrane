@@ -12,7 +12,7 @@ import { AppError } from '../utils/errors.js';
 import { getIngressForApp } from './tcpIngress.js';
 import { ensureCodebaseContext } from './appstudio/contextBuilder.js';
 import { findEntry } from './catalogService.js';
-import { credentialsFor } from './managedDb.js';
+import { credentialsFor, secureLogin as defaultSecureLogin, tlsUrl } from './managedDb.js';
 import { parseManifestDatabase, ensureManifestDatabase } from './manifestDatabase.js';
 import { managedDbScopeFor, SANDBOX_TENANT } from './sandboxDb.js';
 import { parseContainerCommand, parseVolumePaths, resolveVolumeMounts, declaredVolumePathsFor } from './containerRuntimeSpec.js';
@@ -57,6 +57,10 @@ import { imagesToKeep } from './imageRetention.js';
  * Encoding costs nothing and removes the failure mode.
  */
 export function managedDbUrl(creds) {
+  // A login that must present its client certificate gets the TLS parameters
+  // in its URL (managedDb.tlsUrl names them per engine). Same percent-encoding
+  // of the credential as below.
+  if (creds.tls) return tlsUrl(creds, creds.tls);
   const scheme = String(creds.url || '').split('://')[0]
     || (creds.engine === 'mariadb' ? 'mysql' : 'postgresql');
   const auth = `${encodeURIComponent(creds.username)}:${encodeURIComponent(creds.password)}`;
@@ -92,6 +96,46 @@ export function buildManagedDbEnv(needs, creds) {
   }
   if (typeof needs.url_env === 'string' && needs.url_env) {
     out[needs.url_env] = managedDbUrl(creds);
+  }
+  Object.assign(out, tlsFileEnv(needs, creds));
+  return out;
+}
+
+/**
+ * The certificate PATHS (never contents) for a login that requires its client
+ * certificate, under names a driver can be pointed at when it ignores URL
+ * parameters — mysql2, ioredis and node-postgres given discrete fields all
+ * need ssl/tls options built from files (onboarding.md has the snippets).
+ *
+ *   DB_CA_FILE / DB_CERT_FILE / DB_KEY_FILE   always, for any engine
+ *   DB_CERT_KEY_FILE                          certificate + key in one file,
+ *                                             the shape Mongo's
+ *                                             tlsCertificateKeyFile wants
+ *   PGSSLMODE / PGSSLROOTCERT / PGSSLCERT / PGSSLKEY
+ *                                             Postgres only, and only when the
+ *                                             app's env map already speaks
+ *                                             libpq's PG* names — libpq reads
+ *                                             these from the environment with
+ *                                             no code at all
+ */
+export function tlsFileEnv(needs, creds) {
+  const tls = creds?.tls;
+  if (!tls) return {};
+  const out = {
+    DB_CA_FILE: tls.ca,
+    DB_CERT_FILE: tls.cert,
+    DB_KEY_FILE: tls.key,
+    DB_CERT_KEY_FILE: tls.pem,
+  };
+  const speaksPg = creds.engine === 'postgres'
+    && Object.values(needs?.env || {}).some((v) => typeof v === 'string' && v.startsWith('PG'));
+  if (speaksPg) {
+    Object.assign(out, {
+      PGSSLMODE: 'verify-full',
+      PGSSLROOTCERT: tls.ca,
+      PGSSLCERT: tls.cert,
+      PGSSLKEY: tls.key,
+    });
   }
   return out;
 }
@@ -192,6 +236,7 @@ export function applyManagedDbEnv(app, runtimeEnvVars, claimedKeys = [], manifes
 export async function injectManagedDbForEnv({
   app, env, runtimeEnvVars, claimedKeys = [], manifestNeeds = null,
   appendLog = () => {}, isRestart = false, provision,
+  image = null, secureLogin = defaultSecureLogin,
 }) {
   const resolved = resolveManagedDbNeeds(app, manifestNeeds);
   // A database the app's own deployhub.json declares is ALWAYS separate in
@@ -212,8 +257,39 @@ export async function injectManagedDbForEnv({
       ...(provision ? { provision } : {}),
     });
   }
+  // TLS, the client certificate and the per-login limits — on EVERY deploy
+  // and restart, which is what converts a deployhub.json login provisioned
+  // before this existed, and what carries a changed platform limit to every
+  // existing login.
+  //
+  // certRequired follows the SOURCE: a database the app's own deployhub.json
+  // declares (production and its always-separate sandbox scope) must use TLS
+  // and that app's own certificate. A catalogue app's third-party image often
+  // cannot be configured for database TLS, so its login only gets the limits.
+  //
+  // Fail closed for a manifest login: a deploy whose certificate step failed
+  // must not start the app as though it had one. A catalogue login's limits
+  // are best-effort — a database server that is briefly down must not take a
+  // catalogue app's restart down with it, when nothing about its credential
+  // changed.
+  let mounts = [];
+  let tls = null;
+  if (resolved.needs) {
+    const certRequired = resolved.source === 'manifest';
+    try {
+      const secured = await secureLogin(scope, resolved.needs.engine, { certRequired, image });
+      mounts = secured.mounts || [];
+      tls = secured.tls || null;
+      if (secured.applied && secured.certRequired) {
+        appendLog(`Managed ${resolved.needs.engine} database: TLS and this app's own client certificate are required; mounted read-only at ${mounts[0]?.container || '(none)'}`);
+      }
+    } catch (e) {
+      if (certRequired) throw new Error(`Securing the managed ${resolved.needs.engine} database login failed: ${e.message}`);
+      appendLog(`Managed ${resolved.needs.engine} database: could not apply the per-login limits this time (${e.message}); the login works as before.`);
+    }
+  }
   const mdbEnv = applyManagedDbEnv(app, runtimeEnvVars, claimedKeys, manifestNeeds, scope);
-  return { ...mdbEnv, separateSandbox, manifestIgnored: resolved.manifestIgnored };
+  return { ...mdbEnv, separateSandbox, manifestIgnored: resolved.manifestIgnored, mounts, tls };
 }
 
 // Prune old release checkouts under <appDir>/releases, keeping the newest
@@ -1737,6 +1813,8 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     // Capture old image tag so we can revert if health check fails (Feature 9)
     let prevImage = null;
     try { prevImage = await getContainerImage(app.slug, env); } catch (_) {}
+    // Set by the managed-database block below; the rollback start reuses it.
+    let dbCertMounts = [];
 
     await dockerStop(app.slug, env).catch(() => {});
 
@@ -1781,8 +1859,12 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       // Under "Separate sandbox database" a sandbox deploy provisions and
       // injects the sandbox's own database instead — see injectManagedDbForEnv.
       const mdbEnv = await injectManagedDbForEnv({
-        app, env, runtimeEnvVars, claimedKeys: decryptFailures, manifestNeeds: manifestDbNeeds, appendLog,
+        app, env, runtimeEnvVars, claimedKeys: decryptFailures, manifestNeeds: manifestDbNeeds, appendLog, image,
       });
+      // The client certificate directory, read-only, for THIS container only.
+      // Kept apart from containerVolumes so the volume seeder never treats it
+      // as an app data mount.
+      dbCertMounts = mdbEnv.mounts || [];
       if (mdbEnv.manifestIgnored) {
         appendLog(
           `Managed database: the deployhub.json "database" block was ignored — this app's ` +
@@ -1896,7 +1978,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       // broken.
       command: parseContainerCommand(app.container_command),
       envVars: runtimeEnvVars,
-      volumes: containerVolumes,
+      volumes: [...containerVolumes, ...dbCertMounts],
       memoryMb: limits.max_ram_mb,
       cpus: limits.max_cpu_percent / 100,
       addHostGateway: true,
@@ -2065,7 +2147,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
         // in — no command means the previous image now exits 0, and fewer
         // mounts means the recovery container cannot see the state the failed
         // one was writing.
-        await dockerStart({ slug: app.slug, env, image: prevImage, hostPort: bePort, containerPort: app.container_port, command: parseContainerCommand(app.container_command), envVars: runtimeEnvVars, volumes: containerVolumes, memoryMb: limits.max_ram_mb, cpus: limits.max_cpu_percent / 100 }).catch(() => {});
+        await dockerStart({ slug: app.slug, env, image: prevImage, hostPort: bePort, containerPort: app.container_port, command: parseContainerCommand(app.container_command), envVars: runtimeEnvVars, volumes: [...containerVolumes, ...dbCertMounts], memoryMb: limits.max_ram_mb, cpus: limits.max_cpu_percent / 100 }).catch(() => {});
       }
       const restoreNote = prevImage
         ? 'Previous version restored.'

@@ -170,6 +170,9 @@
  * friction for "start deleting my data when full".
  */
 
+import { installSnippet } from './managedDbTls.js';
+import { SERVER_RUNTIME_PATH } from './dbCerts.js';
+
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
@@ -299,27 +302,74 @@ export function pickPort(usedPorts) {
  * table. docker-entrypoint.sh is called explicitly so the image's module
  * loading still happens (see the header).
  */
-export function serverCommand(maxmemoryMb) {
+export function serverCommand(maxmemoryMb, { tls = false } = {}) {
   const mb = Number(maxmemoryMb);
   if (!Number.isInteger(mb) || mb <= 0) {
     throw new Error(`managedRedis: maxmemory must be a positive integer of MB, got ${JSON.stringify(maxmemoryMb)}`);
   }
   return [
     'sh', '-c',
-    'exec docker-entrypoint.sh redis-server'
+    (tls ? `${installSnippet('redis')} && ` : '')
+    + 'exec docker-entrypoint.sh redis-server'
     + ` --requirepass "$${REDIS_PASSWORD_ENV}"`
     + ` --maxmemory ${mb}mb`
     + ' --maxmemory-policy noeviction'
     // Loud rather than silent when the snapshot cannot be written. The default
     // is already yes; pinning it means a future image default cannot quietly
     // turn "the disk is full" into "the queue is being written to /dev/null".
-    + ' --stop-writes-on-bgsave-error yes',
+    + ' --stop-writes-on-bgsave-error yes'
+    + (tls ? ` ${tlsServerFlags().join(' ')}` : ''),
+  ];
+}
+
+/**
+ * TLS for a per-scope Redis whose login comes from a deployhub.json: the plain
+ * port is CLOSED (--port 0) and the instance's one port speaks TLS only, with
+ * tls-auth-clients yes so a client without a CA-signed certificate is refused
+ * at the handshake, before AUTH. The password (ACL user) is still required on
+ * top.
+ *
+ * GAP, stated: Redis checks that the client certificate is signed by the CA,
+ * not WHICH login it names. tls-auth-clients-user (Redis 8) would map a cert's
+ * CN to an ACL user, but it AUTHENTICATES on a match rather than refusing on a
+ * mismatch, so it cannot express "this cert and only this cert". What binds an
+ * instance to its app is that it is the app's own container with its own
+ * password; the certificate adds "and an AppCrane-issued client certificate".
+ *
+ * Catalogue instances are unchanged — plain only. A per-scope Redis publishes
+ * one port, and Redis cannot speak TLS and plain on one port, so "offered but
+ * not required" is not expressible without a second published port per
+ * instance.
+ */
+export function tlsServerFlags() {
+  return [
+    '--port', '0',
+    '--tls-port', String(REDIS_CONTAINER_PORT),
+    '--tls-cert-file', `${SERVER_RUNTIME_PATH}/server.crt`,
+    '--tls-key-file', `${SERVER_RUNTIME_PATH}/server.key`,
+    '--tls-ca-cert-file', `${SERVER_RUNTIME_PATH}/ca.crt`,
+    '--tls-auth-clients', 'yes',
+  ];
+}
+
+/**
+ * redis-cli inside the instance's own container. With TLS on, it connects with
+ * the SERVER's certificate as its client certificate (issued with clientAuth
+ * for exactly this) — the files are already in the container, so nothing new
+ * crosses into it. Carries no password: REDISCLI_AUTH is in the environment.
+ */
+export function cliArgs(container, { tls = false, interactive = false } = {}) {
+  return [
+    'exec', ...(interactive ? ['-i'] : []), container, 'redis-cli',
+    '-h', '127.0.0.1', '-p', String(REDIS_CONTAINER_PORT),
+    ...(tls ? ['--tls', '--cacert', `${SERVER_RUNTIME_PATH}/ca.crt`,
+      '--cert', `${SERVER_RUNTIME_PATH}/server.crt`, '--key', `${SERVER_RUNTIME_PATH}/server.key`] : []),
   ];
 }
 
 /** `docker exec` argv for the readiness probe. Carries no credential. */
-export function readyProbeArgs(container) {
-  return ['exec', container, 'redis-cli', '-h', '127.0.0.1', '-p', String(REDIS_CONTAINER_PORT), 'PING'];
+export function readyProbeArgs(container, { tls = false } = {}) {
+  return [...cliArgs(container, { tls }), 'PING'];
 }
 
 /**

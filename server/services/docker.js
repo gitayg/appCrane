@@ -848,7 +848,10 @@ export async function startApp({ slug, env, image, hostPort, envVars = {}, volum
         'separator in a docker -v argument and would silently change which mount is created',
       );
     }
-    args.push('-v', `${vol.host}:${vol.container}`);
+    // `readOnly` is AppCrane's own mounts only (a managed database client
+    // certificate, services/dbCerts.js): the third field is a fixed literal,
+    // never a caller-supplied string, so the colon check above still holds.
+    args.push('-v', vol.readOnly === true ? `${vol.host}:${vol.container}:ro` : `${vol.host}:${vol.container}`);
   }
 
   const runtimeEnv = {

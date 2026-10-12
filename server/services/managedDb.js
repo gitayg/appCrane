@@ -55,6 +55,14 @@
  * in this file is enforced INSIDE THE ENGINE, by grants — a credential reaches
  * exactly one database and nothing else. See provisionSql() below.
  *
+ * And because docker-proxy rewrites the source of every connection to the
+ * bridge gateway (measured), the engine cannot tell WHICH app is connecting
+ * either. So a login whose database the app's own deployhub.json declares also
+ * has to present that app's client certificate over TLS, as well as its
+ * password: the certificate key is mounted into that one container only.
+ * services/managedDbTls.js has the per-engine detail, services/dbCerts.js the
+ * storage and mount design, and secureLogin() below the conversion.
+ *
  * =========================================================================
  * WHERE THE PORT IS PUBLISHED — MEASURED, NOT REASONED
  * =========================================================================
@@ -109,6 +117,9 @@ import { removeTreeAsRoot } from './docker.js';
 import * as redis from './managedRedis.js';
 import * as mongo from './managedMongo.js';
 import { SANDBOX_TENANT } from './sandboxDb.js';
+import * as certs from './dbCerts.js';
+import * as tlsCfg from './managedDbTls.js';
+import { getManagedDbSettings } from './managedDbSettings.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -155,7 +166,18 @@ const ENGINES = {
     // Honoured only on first init of an empty data dir — see migration 085 for
     // why the value is stored rather than regenerated.
     passwordEnv: 'POSTGRES_PASSWORD',
-    memoryMb: Number(process.env.MANAGED_DB_POSTGRES_MEMORY_MB) || 512,
+    // 1024, up from 512 when managed-database TLS shipped, because max_connections went from 100 to
+    // 300 (platform setting, managedDbSettings.js). Measured on
+    // postgres:16-alpine with max_connections=300, shared_buffers=128MB,
+    // work_mem=4MB under a 512m cap: 28.9 MiB at rest, 266.4 MiB with 100
+    // idle sessions open (about 2.4 MiB per session, client included). At 300
+    // sessions that is ~750 MiB before a single sort uses work_mem, and this
+    // cap is a kill, not a slowdown (--memory-swap equals it) — one OOM takes
+    // every app's database down at once. The per-login cap (25) means 300 is
+    // reached only by 12+ busy apps, but the ceiling should not be the thing
+    // that decides when that happens. Applies when the container is next
+    // created, which the TLS change does once anyway.
+    memoryMb: Number(process.env.MANAGED_DB_POSTGRES_MEMORY_MB) || 1024,
     scheme: 'postgresql',
   },
   mariadb: {
@@ -173,9 +195,9 @@ const ENGINES = {
     // limit, it gets killed. mariadb:11.4's resident set at rest is already in
     // the mid-hundreds of MB before the InnoDB buffer pool, the log buffer and
     // per-connection buffers are counted, so 512 left almost no headroom and the
-    // first real workload takes the process out. Postgres stays at 512: the
-    // alpine image's baseline is a fraction of MariaDB's, and nothing has been
-    // observed pressing against it.
+    // first real workload takes the process out. (Postgres stayed at 512 then —
+    // the alpine image's baseline is a fraction of MariaDB's — until managed-database TLS
+    // tripled its max_connections; see its own entry above.)
     //
     // Honest about the evidence: this is not confirmed to be what failed on the
     // instance that prompted it — the container was found RUNNING, so an OOM
@@ -456,6 +478,109 @@ async function containerState(name) {
   }
 }
 
+/**
+ * State plus the two labels ensureServer() decides on: whether the container
+ * is AppCrane's at all (`appcrane-db`), and which server configuration it was
+ * created with (`appcrane-db-config`). A missing label reads as ''.
+ */
+async function containerFacts(name) {
+  try {
+    const out = await dockerExec(
+      ['inspect', '-f', '{{.State.Status}}|{{index .Config.Labels "appcrane-db"}}|{{index .Config.Labels "appcrane-db-config"}}', name],
+      { timeout: 10000 },
+    );
+    const [state, owner, config] = out.split('|');
+    return { state: state || null, owner: owner || '', config: config || '' };
+  } catch (_) {
+    return { state: null, owner: '', config: '' };
+  }
+}
+
+/**
+ * One ensure at a time per server. Before TLS this was merely wasteful when two
+ * deploys raced; now ensureServer() can RECREATE a container (a configuration
+ * change), and two concurrent recreates would `rm -f` each other's fresh
+ * container. In-process only — one AppCrane owns a DATA_DIR.
+ */
+const locks = new Map();
+function withLock(key, fn) {
+  const prev = locks.get(key) || Promise.resolve();
+  const run = prev.catch(() => {}).then(fn);
+  locks.set(key, run.catch(() => {}));
+  return run;
+}
+
+// ---------------------------------------------------------------------------
+// TLS for the servers
+// ---------------------------------------------------------------------------
+
+/**
+ * The configuration a server container is created with, as a short label
+ * value. ensureServer() recreates an AppCrane container whose label differs —
+ * which is how every server that exists before this release gets TLS (its
+ * label is empty), and how a new max_connections reaches Postgres (it is a
+ * start-time parameter; ALTER SYSTEM would also need a restart).
+ *
+ * Deliberately NOT included: memoryMb. A memory change has never recreated a
+ * running server (serverStatus() reports the live cgroup next to the configured
+ * value for exactly that reason), and folding it in here would turn an env
+ * tweak into a surprise restart of every app's database.
+ */
+function serverConfigLabel(engine) {
+  const parts = { tls: tlsCfg.TLS_CONFIG_VERSION };
+  if (engine === 'postgres') parts.maxConnections = getManagedDbSettings(getDb()).pg_max_connections;
+  return crypto.createHash('sha256').update(JSON.stringify(parts)).digest('hex').slice(0, 12);
+}
+
+/**
+ * Issue (or renew) the server certificate and write the files the container
+ * mounts. SANs: the name apps dial (host.docker.internal), loopback, and every
+ * address the server is published on — the bridge gateway is what
+ * host.docker.internal resolves to on Linux, and a client that verifies the
+ * hostname (sslmode=verify-full) checks the name, not the address, but a tool
+ * dialling the IP directly should verify too.
+ */
+async function prepareServerTls(engine, addrs) {
+  const cert = certs.ensureServerCert(engine, {
+    dnsNames: [DB_HOST_FOR_CONTAINERS, 'localhost'],
+    ips: [...new Set(['127.0.0.1', ...addrs.filter(a => /^\d+\.\d+\.\d+\.\d+$/.test(a))])],
+    // mongod and redis-cli present the server certificate as a CLIENT too.
+    bothUsages: engine === 'mongo' || engine === 'redis',
+  });
+  const extra = engine === 'postgres' ? { 'pg_hba.conf': tlsCfg.pgHbaConf() } : {};
+  const dir = certs.writeServerFiles(engine, cert, extra);
+  return { dir, renewed: cert.renewed };
+}
+
+/**
+ * Make a RUNNING server pick up renewed certificate files: copy them into its
+ * private directory again (same fixed snippet the start command runs), then
+ * ask the engine to reload. Applied connections keep their session; new ones
+ * get the new certificate. A failure is logged, not thrown — the old
+ * certificate is still valid for at least RENEW_BEFORE_DAYS, and the next
+ * recreate picks the files up regardless.
+ */
+async function reloadServerTls(engine, container, coords = null) {
+  try {
+    await dockerExec(['exec', container, 'sh', '-c', tlsCfg.installSnippet(engine)], { timeout: 30000 });
+    if (engine === 'postgres' || engine === 'mariadb') {
+      await runAdminSql(engine, tlsCfg.RELOAD_STATEMENT[engine]);
+    } else if (engine === 'mongo') {
+      const { adminPassword } = coords || adminCoordsFor('mongo');
+      await runAdminMongo(
+        `db.getSiblingDB('admin').auth('${mongo.MONGO_ADMIN_USER}', '${assertPassword(adminPassword)}');\n`
+        + 'const r = db.adminCommand({ rotateCertificates: 1 }); if (!r.ok) throw new Error(JSON.stringify(r));\n',
+        coords || undefined,
+      );
+    } else if (engine === 'redis') {
+      await dockerExec([...redis.cliArgs(container, { tls: true }), 'CONFIG', 'SET', 'tls-cert-file', `${certs.SERVER_RUNTIME_PATH}/server.crt`], { timeout: 15000 });
+    }
+    log.info(`managedDb: ${container} reloaded its renewed TLS certificate`);
+  } catch (e) {
+    log.warn(`managedDb: ${container} could not reload its renewed TLS certificate (${e.message}); it will use it after its next restart`);
+  }
+}
+
 function serverRow(engine) {
   return getDb().prepare('SELECT * FROM managed_db_servers WHERE engine = ?').get(engine) || null;
 }
@@ -504,7 +629,7 @@ async function waitReady(engine, port, timeoutMs = 120000) {
     : engine === 'mongo'
     ? mongo.readyProbeArgs(cfg.container, port)
     : ['exec', cfg.container, 'mariadb-admin', 'ping', '--protocol=tcp', '-h', '127.0.0.1',
-       '-P', String(cfg.containerPort), '-u', 'appcrane_readiness_probe'];
+       '-P', String(cfg.containerPort), '-u', 'appcrane_readiness_probe', '--skip-ssl'];
   const upAnyway = /access denied|using password/i;
   const deadline = Date.now() + timeoutMs;
   let last = '';
@@ -545,7 +670,10 @@ export async function ensureServer(engine) {
       `Use provision(scope, '${engine}') instead of ensureServer('${engine}').`
     );
   }
+  return withLock(`server:${engine}`, () => ensureServerLocked(engine, cfg));
+}
 
+async function ensureServerLocked(engine, cfg) {
   let row = serverRow(engine);
   const port = row?.host_port || cfg.defaultPort;
   const adminPassword = row ? decrypt(row.admin_password_enc) : generatePassword();
@@ -554,7 +682,34 @@ export async function ensureServer(engine) {
     row = serverRow(engine);
   }
 
-  const state = await containerState(cfg.container);
+  // Certificate files first: a container about to be created mounts them, and
+  // one that is running may need to reload them.
+  const addrs = await bindAddresses();
+  const tls = await prepareServerTls(engine, addrs);
+  const wantConfig = serverConfigLabel(engine);
+
+  const facts = await containerFacts(cfg.container);
+  let state = facts.state;
+  const ours = facts.owner === engine;
+
+  // An AppCrane container created with a different configuration — no TLS
+  // (every server before this release) or another max_connections — is
+  // recreated. The data is in the volume, not the container. The connections
+  // open at that moment drop and reconnect; that is the one-time cost of
+  // turning TLS on, and it is logged so it is never a mystery.
+  //
+  // ONLY containers carrying AppCrane's own `appcrane-db` label. A foreign
+  // container of the same name (another AppCrane on this Docker host, a test
+  // run, a hand-run `docker run`) is never removed here — it falls through to
+  // verifyAdminLogin(), which refuses it by name, and to the check below.
+  if (state && ours && facts.config !== wantConfig) {
+    log.info(
+      `managedDb: ${cfg.container} was created with a different server configuration ` +
+      `(${facts.config || 'no TLS'} -> ${wantConfig}); recreating it on its existing data volume`,
+    );
+    await dockerExec(['rm', '-f', cfg.container], { timeout: 60000 }).catch(() => {});
+    state = null;
+  }
 
   if (state && state !== 'running') {
     // exited / created / paused: the volume is intact and the password matches
@@ -570,17 +725,47 @@ export async function ensureServer(engine) {
       if (!ADDR_UNAVAILABLE.test(e.message)) throw e;
       log.info(`managedDb: ${cfg.container} cannot start on its recorded bindings; recreating`);
       await dockerExec(['rm', '-f', cfg.container], { timeout: 60000 }).catch(() => {});
-      await createServerContainer(engine, cfg, port, adminPassword);
+      await createServerContainer(engine, cfg, port, adminPassword, tls.dir);
     }
   } else if (!state) {
-    await createServerContainer(engine, cfg, port, adminPassword);
+    await createServerContainer(engine, cfg, port, adminPassword, tls.dir);
   }
 
   await waitReady(engine, port);
   await ensureAdminCredentialFile(engine, adminPassword);
   await verifyAdminLogin(engine, { adopted: state === 'running' });
+  if (state && !ours) {
+    // Reached only for a foreign container the admin check did not already
+    // refuse (Postgres's admin path is the unix socket and checks no
+    // password). It has none of the TLS configuration below, so a login that
+    // must present a client certificate could never connect to it.
+    throw new Error(
+      `managedDb: the container '${cfg.container}' is not one AppCrane created (it has no appcrane-db=${engine} label), ` +
+      'so AppCrane will not configure TLS on it or hand its databases to apps. ' +
+      'Stop or rename that container if it is not AppCrane\'s, then retry.',
+    );
+  }
+  if (tls.renewed && facts.state === 'running' && facts.config === wantConfig) {
+    await reloadServerTls(engine, cfg.container, engine === 'mongo' ? { port, adminPassword } : null);
+  }
   await hardenServer(engine, port, adminPassword);
   return { engine, host: DB_HOST_FOR_CONTAINERS, port, container: cfg.container };
+}
+
+/**
+ * The container argv after the image: the fixed TLS install snippet, then the
+ * image's own entrypoint with the server flags as separate argv elements
+ * ("$@"), so no flag value is ever parsed by a shell. docker-entrypoint.sh is
+ * invoked explicitly for the same reason managedMongo/managedRedis do it: it
+ * is what initialises an empty data directory, and both SQL images also run a
+ * temporary init server that receives these same flags.
+ */
+function serverCommandFor(engine, port) {
+  if (engine === 'mongo') return mongo.serverCommand(port, { tls: true });
+  const flags = engine === 'postgres'
+    ? tlsCfg.pgServerArgs({ maxConnections: getManagedDbSettings(getDb()).pg_max_connections })
+    : tlsCfg.mariadbServerArgs();
+  return ['sh', '-c', `${tlsCfg.installSnippet(engine)} && exec docker-entrypoint.sh "$@"`, 'sh', ...flags];
 }
 
 /**
@@ -595,7 +780,7 @@ export async function ensureServer(engine) {
  * ADDR_UNAVAILABLE matches both. A miss here is not silent: it surfaces as a
  * failed provision, not as a database quietly published somewhere else.
  */
-async function createServerContainer(engine, cfg, port, adminPassword) {
+async function createServerContainer(engine, cfg, port, adminPassword, tlsDir) {
   const dir = dataDirFor(engine);
   mkdirSync(dir, { recursive: true });
 
@@ -622,6 +807,7 @@ async function createServerContainer(engine, cfg, port, adminPassword) {
     '--name', cfg.container,
     '--label', 'appcrane=true',
     '--label', `appcrane-db=${engine}`,
+    '--label', `appcrane-db-config=${serverConfigLabel(engine)}`,
     '--restart=on-failure:2',
     `--memory=${cfg.memoryMb}m`,
     // Equal to --memory: Docker's spelling for "no swap at all". Omitting it
@@ -634,6 +820,10 @@ async function createServerContainer(engine, cfg, port, adminPassword) {
     '--log-opt', 'max-file=3',
     '--env-file', envFile,
     '-v', `${dir}:${cfg.dataPath}`,
+    // The certificate files, read-only, from outside the data volume
+    // (services/dbCerts.js explains both halves). The start command copies
+    // them to a private directory owned by the engine user.
+    '-v', tlsCfg.serverMountArg(tlsDir),
     ...(engine === 'mongo' ? mongo.extraRunArgs(DB_HOST_FOR_CONTAINERS) : []),
   ];
   // NOT `--network appcrane-apps`: see the header. On that bridge the
@@ -648,7 +838,7 @@ async function createServerContainer(engine, cfg, port, adminPassword) {
     args.push('-p', `${addr}:${port}:${containerPort}`);
   }
   args.push(cfg.image);
-  if (engine === 'mongo') args.push(...mongo.serverCommand(port));
+  args.push(...serverCommandFor(engine, port));
 
   try {
     await dockerExec(args, { timeout: 180000 });
@@ -782,6 +972,9 @@ async function hardenServer(engine, port, adminPassword) {
   await runAdminSql('postgres', [
     'REVOKE CONNECT ON DATABASE postgres FROM PUBLIC;',
     'REVOKE CONNECT ON DATABASE template1 FROM PUBLIC;',
+    // The group pg_hba keys "TLS + client certificate + password" on. Created
+    // here, idempotently, so it exists before any login is granted into it.
+    tlsCfg.pgCertGroupSql(),
   ].join('\n'));
 }
 
@@ -864,12 +1057,26 @@ function envFileFor(engine, dbName = null) {
  * time because Redis holds ACLs in memory only — there is no aclfile, so a
  * restart drops every user except `default`.
  */
-async function ensureRedisInstance({ container, dbName, username, password, port }) {
+async function ensureRedisInstance({ container, dbName, username, password, port, tls = false }) {
   assertIdent(dbName);
   assertIdent(username);
   assertPassword(password);
 
-  const state = await containerState(container);
+  // A TLS instance (a deployhub.json login) mounts the shared Redis server
+  // certificate. A catalogue instance stays plain — see managedRedis.tlsServerFlags.
+  const tlsFiles = tls ? await prepareServerTls('redis', await bindAddresses()) : null;
+  const wantConfig = tls ? tlsCfg.TLS_CONFIG_VERSION : '';
+  const facts = await containerFacts(container);
+  let state = facts.state;
+  // Converting an existing plain instance to TLS is a recreate: the port mode
+  // is a start-time flag. Same volume, same port, same password. Only ever in
+  // the plain -> TLS direction for an AppCrane container; a TLS instance is
+  // never turned back into a plain one by this check.
+  if (state && facts.owner === 'redis' && facts.config !== wantConfig && tls) {
+    log.info(`managedDb: ${container} is being recreated with TLS required (its login now needs a client certificate)`);
+    await dockerExec(['rm', '-f', container], { timeout: 60000 }).catch(() => {});
+    state = null;
+  }
   if (state && state !== 'running') {
     try {
       await dockerExec(['start', container], { timeout: 60000 });
@@ -880,24 +1087,27 @@ async function ensureRedisInstance({ container, dbName, username, password, port
       if (!ADDR_UNAVAILABLE.test(e.message)) throw e;
       log.info(`managedDb: ${container} cannot start on its recorded bindings; recreating`);
       await dockerExec(['rm', '-f', container], { timeout: 60000 }).catch(() => {});
-      await createRedisContainer({ container, dbName, password, port });
+      await createRedisContainer({ container, dbName, password, port, tlsDir: tlsFiles?.dir || null });
     }
   } else if (!state) {
-    await createRedisContainer({ container, dbName, password, port });
+    await createRedisContainer({ container, dbName, password, port, tlsDir: tlsFiles?.dir || null });
   }
 
-  await waitRedisReady(container);
+  await waitRedisReady(container, { tls });
+  if (tlsFiles?.renewed && facts.state === 'running' && facts.config === wantConfig) {
+    await reloadServerTls('redis', container);
+  }
   // Redacted at the throw: ACL SETUSER carries the password, and redis-cli
   // echoes the failing command back on an error.
   try {
-    await dockerExecStdin(['exec', '-i', container, 'redis-cli'], redis.aclScript(username, password), { timeout: 30000 });
+    await dockerExecStdin(redis.cliArgs(container, { tls, interactive: true }), redis.aclScript(username, password), { timeout: 30000 });
   } catch (e) {
     throw new Error(redactSecret(e.message, password));
   }
   return { engine: 'redis', host: DB_HOST_FOR_CONTAINERS, port, container };
 }
 
-async function createRedisContainer({ container, dbName, password, port }) {
+async function createRedisContainer({ container, dbName, password, port, tlsDir = null }) {
   const dir = redisDataDir(dbName);
   mkdirSync(dir, { recursive: true });
 
@@ -914,6 +1124,7 @@ async function createRedisContainer({ container, dbName, password, port }) {
     '--label', 'appcrane=true',
     '--label', 'appcrane-db=redis',
     '--label', `appcrane-db-name=${dbName}`,
+    '--label', `appcrane-db-config=${tlsDir ? tlsCfg.TLS_CONFIG_VERSION : ''}`,
     '--restart=on-failure:2',
     `--memory=${memoryMb}m`,
     `--memory-swap=${memoryMb}m`,
@@ -923,13 +1134,14 @@ async function createRedisContainer({ container, dbName, password, port }) {
     '--log-opt', 'max-file=3',
     '--env-file', envFile,
     '-v', `${dir}:${ENGINES.redis.dataPath}`,
+    ...(tlsDir ? ['-v', tlsCfg.serverMountArg(tlsDir)] : []),
   ];
   // NOT `--network appcrane-apps` — see this file's header. Same publish
   // matrix, same best-effort bridge-gateway address.
   for (const addr of await bindAddresses()) {
     args.push('-p', `${addr}:${port}:${redis.REDIS_CONTAINER_PORT}`);
   }
-  args.push(ENGINES.redis.image, ...redis.serverCommand(redis.maxmemoryMbFor(memoryMb)));
+  args.push(ENGINES.redis.image, ...redis.serverCommand(redis.maxmemoryMbFor(memoryMb), { tls: Boolean(tlsDir) }));
 
   try {
     await dockerExec(args, { timeout: 180000 });
@@ -960,12 +1172,12 @@ async function createRedisContainer({ container, dbName, password, port }) {
  * no credential in argv: redis-cli authenticates from REDISCLI_AUTH, which the
  * container already has in its environment.
  */
-async function waitRedisReady(container, timeoutMs = 60000) {
+async function waitRedisReady(container, { tls = false, timeoutMs = 60000 } = {}) {
   const deadline = Date.now() + timeoutMs;
   let last = '';
   while (Date.now() < deadline) {
     try {
-      const out = await dockerExec(redis.readyProbeArgs(container), { timeout: 15000 });
+      const out = await dockerExec(redis.readyProbeArgs(container, { tls }), { timeout: 15000 });
       if (/PONG/.test(out)) return;
       last = out;
     } catch (e) {
@@ -1369,6 +1581,16 @@ async function createInEngine(engine, database, username, password) {
   const sql = provisionSql(engine, database, username, password);
   await runAdminSql(engine, sql.onServer);
   if (sql.onDatabase) await runAdminSql(engine, sql.onDatabase, { database });
+  // Per-login limits from the first moment the login exists (platform
+  // settings; services/managedDbSettings.js). Without a certificate
+  // requirement: that is secureLogin()'s decision, made by the deployer for a
+  // deployhub.json database, and this path also serves catalogue apps.
+  const settings = getManagedDbSettings(getDb());
+  await runAdminSql(engine, tlsCfg.loginPolicySql(engine, username, {
+    certRequired: false,
+    connLimit: settings.conn_limit,
+    statementTimeoutS: settings.statement_timeout_s,
+  }));
 }
 
 function rowFor(scope, engine) {
@@ -1378,7 +1600,65 @@ function rowFor(scope, engine) {
   ).get(appId, tenant, engine) || null;
 }
 
+/**
+ * TLS facts for a login, as the container sees them: the paths under the
+ * client mount, or null for a login that does not require a certificate.
+ * `x509` marks Mongo, whose converted logins authenticate by certificate
+ * alone (managedMongo.x509UserScript) and must not send a password.
+ */
+function tlsFor(row) {
+  if (row.client_cert_required !== 1) return null;
+  const base = certs.CLIENT_MOUNT_PATH;
+  return {
+    required: true,
+    x509: row.engine === 'mongo',
+    ca: `${base}/ca.crt`,
+    cert: `${base}/client.crt`,
+    key: `${base}/client.key`,
+    pem: `${base}/client.pem`,
+  };
+}
+
 function connectionFor(row, port) {
+  const conn = connectionWithoutTls(row, port);
+  const tls = tlsFor(row);
+  if (!tls) return conn;
+  // The URL a caller of connectionFor() reads directly carries the TLS
+  // parameters too; deployer.managedDbUrl() rebuilds it the same way.
+  return { ...conn, tls, url: tlsUrl(conn, tls) };
+}
+
+/**
+ * The connection URL for a certificate-required login. One function, so the
+ * engine's own `url` and deployer.managedDbUrl() cannot disagree on spelling.
+ *
+ *   postgres  sslmode=verify-full + sslrootcert/sslcert/sslkey (libpq names;
+ *             node-postgres's connection-string parser reads the same keys)
+ *   mariadb   ssl-mode=VERIFY_IDENTITY + ssl-ca/ssl-cert/ssl-key (the MariaDB
+ *             and MySQL client option names; mysql2 does NOT read them from a
+ *             URL — the docs give the explicit ssl:{} snippet)
+ *   mongo     tls=true + tlsCAFile/tlsCertificateKeyFile + MONGODB-X509 from
+ *             $external, and NO user:password — an x509 login has no password
+ *   redis     rediss:// (TLS); the files come from DB_*_FILE, as no Redis URL
+ *             convention carries them
+ */
+export function tlsUrl(conn, tls) {
+  const enc = encodeURIComponent;
+  const hostPart = `${conn.host}:${conn.port}`;
+  if (conn.engine === 'mongo') {
+    return `mongodb://${hostPart}/${conn.database}?tls=true&tlsCAFile=${enc(tls.ca)}`
+      + `&tlsCertificateKeyFile=${enc(tls.pem)}&authMechanism=MONGODB-X509&authSource=${enc('$external')}`;
+  }
+  const auth = `${enc(conn.username)}:${enc(conn.password)}`;
+  if (conn.engine === 'redis') return `rediss://${auth}@${hostPart}/${conn.database}`;
+  const scheme = ENGINES[conn.engine].scheme;
+  const q = conn.engine === 'postgres'
+    ? `sslmode=verify-full&sslrootcert=${enc(tls.ca)}&sslcert=${enc(tls.cert)}&sslkey=${enc(tls.key)}`
+    : `ssl-mode=VERIFY_IDENTITY&ssl-ca=${enc(tls.ca)}&ssl-cert=${enc(tls.cert)}&ssl-key=${enc(tls.key)}`;
+  return `${scheme}://${auth}@${hostPart}/${conn.database}?${q}`;
+}
+
+function connectionWithoutTls(row, port) {
   const password = decrypt(row.password_enc);
   const scheme = ENGINES[row.engine].scheme;
 
@@ -1394,7 +1674,9 @@ function connectionFor(row, port) {
   // shape is an engine fact. It is deliberately query-free — see
   // managedMongo.mongoUrl() — and the generic branch below would produce the
   // same string today, which is exactly why the intent has to be written down
-  // somewhere a future `?authSource=` cannot be quietly appended.
+  // somewhere a future `?authSource=` cannot be quietly appended. The one
+  // exception is a certificate login (connectionFor -> tlsUrl), whose query
+  // string deployer.managedDbUrl() rebuilds through the same tlsUrl().
   if (row.engine === 'mongo') {
     return {
       engine: 'mongo',
@@ -1524,6 +1806,7 @@ async function provisionPerScope(scope, engine) {
       username: existing.db_user,
       password: decrypt(existing.password_enc),
       port: existing.host_port,
+      tls: existing.client_cert_required === 1,
     });
     return connectionFor(existing, existing.host_port);
   }
@@ -1547,6 +1830,7 @@ async function provisionPerScope(scope, engine) {
           username: raced.db_user,
           password: decrypt(raced.password_enc),
           port: raced.host_port,
+          tls: raced.client_cert_required === 1,
         });
         return connectionFor(raced, raced.host_port);
       }
@@ -1642,8 +1926,126 @@ export function credentialsFor(scope, engine) {
 /** Rows for an app, without decrypting anything. Safe to hand to an API. */
 export function listForApp(appId) {
   return getDb().prepare(
-    'SELECT id, app_id, tenant, engine, db_name, db_user, created_at FROM managed_databases WHERE app_id = ?'
+    'SELECT id, app_id, tenant, engine, db_name, db_user, client_cert_required, created_at FROM managed_databases WHERE app_id = ?'
   ).all(Number(appId));
+}
+
+/**
+ * What the API may say about a login's transport security. Never a key, never
+ * a path on the host — the certificate's expiry and the limits only.
+ *
+ *   tls          'required'  a client certificate AND TLS are enforced by the
+ *                            engine (deployhub.json logins)
+ *                'offered'   the server speaks TLS, the login may use plain
+ *                            (catalogue logins on the shared servers)
+ *                'none'      the instance does not speak TLS (a catalogue
+ *                            per-scope Redis; see managedRedis.tlsServerFlags)
+ *   client_cert_expires_at   ISO time, or null
+ *   connection_limit         the per-login cap, or null where the engine has
+ *                            none (Mongo, Redis — stated in the docs)
+ */
+export function tlsView(row) {
+  const required = row.client_cert_required === 1;
+  const settings = getManagedDbSettings(getDb());
+  return {
+    tls: required ? 'required' : (ENGINES[row.engine]?.perScope ? 'none' : 'offered'),
+    client_cert_expires_at: required ? (certs.clientCertInfo(row.db_user)?.not_after || null) : null,
+    connection_limit: tlsCfg.POLICY_ENGINES.includes(row.engine) ? settings.conn_limit : null,
+    statement_timeout_s: tlsCfg.POLICY_ENGINES.includes(row.engine) ? settings.statement_timeout_s : null,
+  };
+}
+
+/**
+ * Put a scope's login under policy, and — for a login whose database comes
+ * from the app's own deployhub.json — convert it to TLS + its own client
+ * certificate + its password. Called by the deployer on EVERY deploy and
+ * restart (deployer.injectManagedDbForEnv), which is what makes it the upgrade
+ * path too: a manifest login provisioned before this release is converted the
+ * first time its app is deployed or restarted, and a changed platform limit
+ * reaches every existing login the same way.
+ *
+ * Returns what the container needs: the bind mount (read-only, this login's
+ * directory only) and the TLS paths. NEVER the key itself.
+ *
+ * ORDER, for a conversion:
+ *   1. issue (or renew) the client certificate and write its files — so the
+ *      container about to start has them;
+ *   2. tell the engine to require it;
+ *   3. mark the row (sticky).
+ * A failure at 2 throws and fails the deploy rather than starting an app with
+ * a certificate the engine was never told to demand.
+ *
+ * `image` is the image the container will run, used to chown the key to its
+ * runtime uid (services/dbCerts.js). `resolveOwner` and `ops` are test seams:
+ * `ops` replaces the four engine-touching calls so the SQLite, certificate
+ * and mount logic can be tested without a daemon. Production never passes it.
+ */
+export async function secureLogin(scope, engine, { certRequired = false, image = null, resolveOwner = certs.resolveImageOwner, ops = null } = {}) {
+  const { ensureServer: ensure, runAdminSql: sql, runAdminMongo: mongoScript, ensureRedisInstance: ensureRedis } = ops || {
+    ensureServer, runAdminSql, runAdminMongo, ensureRedisInstance,
+  };
+  const row = rowFor(scope, engine);
+  if (!row) return { applied: false, certRequired: false, mounts: [], tls: null };
+  const requireCert = certRequired || row.client_cert_required === 1;
+  const settings = getManagedDbSettings(getDb());
+
+  let files = null;
+  if (requireCert) {
+    const cert = certs.ensureClientCert(row.db_user);
+    const owner = await resolveOwner(image);
+    files = certs.writeClientFiles(row.db_user, cert, owner);
+  }
+
+  if (ENGINES[engine].perScope) {
+    // Redis: the requirement is the instance's own start flags.
+    if (requireCert) {
+      await ensureRedis({
+        container: row.container_name,
+        dbName: row.db_name,
+        username: row.db_user,
+        password: decrypt(row.password_enc),
+        port: row.host_port,
+        tls: true,
+      });
+    }
+  } else if (engine === 'mongo') {
+    if (requireCert) {
+      await ensure('mongo');
+      await mongoScript(mongo.x509UserScript({
+        ...adminCoordsFor('mongo'),
+        database: assertIdent(row.db_name),
+        username: assertIdent(row.db_user),
+      }));
+    }
+  } else {
+    await ensure(engine);
+    await sql(engine, tlsCfg.loginPolicySql(engine, assertIdent(row.db_user), {
+      certRequired: requireCert,
+      connLimit: settings.conn_limit,
+      statementTimeoutS: settings.statement_timeout_s,
+    }));
+  }
+
+  if (requireCert && row.client_cert_required !== 1) {
+    getDb().prepare('UPDATE managed_databases SET client_cert_required = 1 WHERE id = ?').run(row.id);
+    log.info(`managedDb: ${engine} login ${row.db_user} now requires TLS and its client certificate`);
+  }
+  const fresh = rowFor(scope, engine);
+  return {
+    applied: true,
+    certRequired: requireCert,
+    tls: requireCert ? tlsFor(fresh) : null,
+    mounts: files ? [clientMountFor(fresh, files.hostDir)] : [],
+  };
+}
+
+/**
+ * The ONE bind mount a login's container gets: that login's own directory,
+ * read-only. Never the parent `_tls/client` (every app's keys) and never
+ * another login's directory — test/managed-db-tls.test.js asserts both.
+ */
+export function clientMountFor(row, hostDir = certs.clientTlsDir(row.db_user)) {
+  return { host: hostDir, container: certs.CLIENT_MOUNT_PATH, readOnly: true };
 }
 
 async function dropInEngine(engine, database, username) {
@@ -1679,6 +2081,7 @@ export async function deprovision(scope, engine) {
   if (!row) return false;
   await dropRow(row);
   getDb().prepare('DELETE FROM managed_databases WHERE id = ?').run(row.id);
+  certs.dropClientCert(row.db_user);
   log.info(`managedDb: deprovisioned ${engine} database ${row.db_name}`);
   return true;
 }
@@ -1697,7 +2100,7 @@ async function dropRow(row) {
     // at least no longer answering to the credential AppCrane just forgot.
     if (row.container_name) {
       await dockerExecStdin(
-        ['exec', '-i', row.container_name, 'redis-cli'],
+        redis.cliArgs(row.container_name, { tls: row.client_cert_required === 1, interactive: true }),
         redis.aclDropScript(assertIdent(row.db_user)),
         { timeout: 15000 },
       ).catch(() => {});
@@ -1725,6 +2128,7 @@ export async function deprovisionApp(appId) {
     try {
       await dropRow(row);
       getDb().prepare('DELETE FROM managed_databases WHERE id = ?').run(row.id);
+      certs.dropClientCert(row.db_user);
       dropped++;
     } catch (e) {
       // Never block an app delete on a database server that is down: report it

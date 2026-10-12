@@ -3,7 +3,7 @@ import { isAppOwnerOrPlatformAdmin, isAppOwnerAdminOrPlatformAdmin } from '../se
 import { getDb } from '../db.js';
 import { SANDBOX_TENANT, getSeparateSandboxDb, envForTenant, SEPARATE_SANDBOX_DB_NOTE } from '../services/sandboxDb.js';
 import { requireAuth, requireAppUser, requireAppAccess, requirePlatformAdmin } from '../middleware/auth.js';
-import { auditMiddleware } from '../middleware/audit.js';
+import { auditMiddleware, logAudit } from '../middleware/audit.js';
 import { AppError } from '../utils/errors.js';
 import log from '../utils/logger.js';
 
@@ -148,7 +148,7 @@ function assertNoTenantScope(tenant) {
  * injects them. What a human wants from this endpoint is which engine, which
  * database, which user — exactly what is here.
  */
-function publicView(row, app) {
+function publicView(row, app, tls = null) {
   const env = envForTenant(row.tenant);
   return {
     engine: row.engine,
@@ -159,12 +159,21 @@ function publicView(row, app) {
     // "Separate sandbox database" is on), 'sandbox' for the sandbox's own.
     env,
     scope: { app: app.slug, tenant: env ? null : (row.tenant || null) },
+    // Transport security, by name and date only (managedDb.tlsView): whether
+    // TLS + a client certificate is required or merely offered, when the
+    // certificate expires, and the per-login limits. Picked field by field
+    // for the same reason as everything above — no key, no file path, no
+    // certificate body ever reaches a response.
+    tls: tls?.tls ?? null,
+    client_cert_expires_at: tls?.client_cert_expires_at ?? null,
+    connection_limit: tls?.connection_limit ?? null,
+    statement_timeout_s: tls?.statement_timeout_s ?? null,
   };
 }
 
 /** This app's managed databases, across engines and (later) tenants. */
 function listPublic(svc, app) {
-  return svc.listForApp(app.id).map((row) => publicView(row, app));
+  return svc.listForApp(app.id).map((row) => publicView(row, app, typeof svc.tlsView === 'function' ? svc.tlsView(row) : null));
 }
 
 /**
@@ -388,6 +397,48 @@ router.delete('/:slug/database', requireAppUser, auditMiddleware('managed-db-dep
  * same rule as publicView() above: nothing password-shaped, in any form.
  */
 export const serversRouter = Router();
+
+/**
+ * GET/PUT /api/managed-db/settings — the platform-wide limits
+ * (services/managedDbSettings.js): per-login connection cap, Postgres
+ * max_connections, per-login statement timeout, and the failed-login alert
+ * threshold. Platform admin only: one value applies to every app's login.
+ *
+ * The write takes effect on each login's next deploy or restart (that is when
+ * secureLogin() re-applies the policy), and max_connections when the engine
+ * next recreates the shared Postgres container — the response says so, because a settings page that
+ * reads as instant would be lying about both.
+ */
+serversRouter.get('/settings', requireAuth, requirePlatformAdmin, async (_req, res) => {
+  const { getManagedDbSettings, SETTINGS_SPEC } = await import('../services/managedDbSettings.js');
+  res.json({ settings: getManagedDbSettings(getDb()), spec: SETTINGS_SPEC });
+});
+
+serversRouter.put('/settings', requireAuth, requirePlatformAdmin, async (req, res) => {
+  const { getManagedDbSettings, setManagedDbSettings, SETTINGS_SPEC } = await import('../services/managedDbSettings.js');
+  const db = getDb();
+  const body = req.body || {};
+  const patch = {};
+  for (const k of Object.keys(SETTINGS_SPEC)) if (body[k] !== undefined) patch[k] = body[k];
+  if (!Object.keys(patch).length) {
+    throw new AppError(`Supply at least one of: ${Object.keys(SETTINGS_SPEC).join(', ')}`, 400, 'VALIDATION');
+  }
+  const before = getManagedDbSettings(db);
+  let settings;
+  try {
+    settings = setManagedDbSettings(db, patch, req.user.id);
+  } catch (e) {
+    throw new AppError(e.message, 400, 'VALIDATION');
+  }
+  logAudit(req.user.id, null, 'managed-db-settings-change', { from: before, to: settings });
+  res.json({
+    settings,
+    spec: SETTINGS_SPEC,
+    note: 'Per-login limits reach each login on its app\'s next deploy or restart. '
+      + 'A new Postgres max_connections takes effect when the shared Postgres is next recreated, '
+      + 'which AppCrane does on the next provision, deploy or restart that needs it.',
+  });
+});
 
 serversRouter.get('/servers', requireAuth, requirePlatformAdmin, async (_req, res) => {
   const svc = await engineModule();

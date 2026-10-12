@@ -218,6 +218,8 @@
  */
 
 import { createHash } from 'crypto';
+import { installSnippet } from './managedDbTls.js';
+import { SERVER_RUNTIME_PATH } from './dbCerts.js';
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -377,7 +379,7 @@ export function extraRunArgs(host) {
  * on an empty data directory. Running mongod directly would start a server with
  * no root user and no way to provision anything.
  */
-export function serverCommand(port) {
+export function serverCommand(port, { tls = false } = {}) {
   const p = Number(port);
   if (!Number.isInteger(p) || p <= 0 || p > 65535) {
     throw new Error(`managedMongo: port must be a valid TCP port, got ${JSON.stringify(port)}`);
@@ -387,11 +389,42 @@ export function serverCommand(port) {
     `printf '%s' "$${MONGO_KEYFILE_ENV}" > ${MONGO_KEYFILE_PATH}`
     + ` && chmod 400 ${MONGO_KEYFILE_PATH}`
     + ` && chown mongodb ${MONGO_KEYFILE_PATH}`
+    + (tls ? ` && ${installSnippet('mongo')}` : '')
     + ' && exec docker-entrypoint.sh mongod'
     + ` --keyFile ${MONGO_KEYFILE_PATH}`
     + ` --replSet ${MONGO_REPLICA_SET}`
     + ` --port ${p}`
-    + ' --bind_ip_all',
+    + ' --bind_ip_all'
+    + (tls ? ` ${tlsServerFlags().join(' ')}` : ''),
+  ];
+}
+
+/**
+ * TLS for the shared mongod: OFFERED, not required — and that is a server-wide
+ * choice Mongo forces.
+ *
+ * MongoDB 8.0 Community has no per-user "this user must use TLS" setting.
+ * net.tls.mode is per server (disabled / allowTLS / preferTLS / requireTLS),
+ * and the only per-user restriction (authenticationRestrictions) matches
+ * client and server ADDRESSES — useless here, where every connection arrives
+ * from the bridge gateway. requireTLS server-wide would break every catalogue
+ * image that connects in plain text (rocketchat, wekan, opensign), so the
+ * server runs preferTLS, accepting both, and accepts TLS clients that present
+ * no certificate.
+ *
+ * Manifest logins are made TLS-and-certificate-only a different way: they are
+ * x509 users in `$external` (x509UserScript), and MONGODB-X509 authentication
+ * cannot happen over a plain connection or without the certificate. The
+ * residual gap, stated: an x509 user has NO password — the certificate is the
+ * whole credential, so Mongo does not get the "password AND certificate"
+ * combination Postgres and MariaDB enforce.
+ */
+export function tlsServerFlags() {
+  return [
+    '--tlsMode', 'preferTLS',
+    '--tlsCertificateKeyFile', `${SERVER_RUNTIME_PATH}/server.pem`,
+    '--tlsCAFile', `${SERVER_RUNTIME_PATH}/ca.crt`,
+    '--tlsAllowConnectionsWithoutCertificates',
   ];
 }
 
@@ -520,6 +553,12 @@ export function dropScript({ adminPassword, database, username }) {
     `const target = db.getSiblingDB(${JSON.stringify(database)});`,
     `try { target.dropUser(${JSON.stringify(username)}); }`,
     'catch (e) { if (!/UserNotFound/.test(String(e.message))) throw e; }',
+    // The x509 user a manifest login was converted to (x509UserScript).
+    // mongo:8.0 words a missing $external user as "User 'CN=x@$external' not
+    // found" rather than UserNotFound (measured), so both spellings are the
+    // state we wanted.
+    `try { db.getSiblingDB('$external').dropUser(${JSON.stringify(x509Subject(username))}); }`,
+    'catch (e) { if (!/UserNotFound|not found/.test(String(e.message))) throw e; }',
     'target.dropDatabase();',
     'print("MONGO_DROPPED");',
   ].join('\n') + '\n';
@@ -538,4 +577,39 @@ export function dropScript({ adminPassword, database, username }) {
  */
 export function mongoUrl({ username, password, host, port, database }) {
   return `${MONGO_SCHEME}://${username}:${password}@${host}:${port}/${database}`;
+}
+
+/** The RFC 2253 subject Mongo derives from a client certificate with CN=login. */
+export function x509Subject(username) {
+  return `CN=${username}`;
+}
+
+/**
+ * Convert a manifest login to certificate authentication. Idempotent.
+ *
+ * Creates the `$external` user named by the certificate subject, with the SAME
+ * two roles on the SAME database the SCRAM user had (readWrite + dbAdmin), and
+ * then drops the SCRAM user — which is the step that makes a plain-text or
+ * password-only connection for this login impossible, because there is no
+ * longer any password user to authenticate as. The database (and its data)
+ * belong to the database, not the user, so nothing is lost.
+ *
+ * Order matters: the x509 user exists before the password user goes, so an
+ * interruption between the two leaves an extra credential, never none.
+ */
+export function x509UserScript({ adminPassword, database, username }) {
+  const subject = x509Subject(username);
+  return [
+    authLine(adminPassword),
+    "const ext = db.getSiblingDB('$external');",
+    `if (!ext.getUser(${JSON.stringify(subject)})) {`,
+    '  ext.createUser({',
+    `    user: ${JSON.stringify(subject)},`,
+    `    roles: [{ role: 'readWrite', db: ${JSON.stringify(database)} }, { role: 'dbAdmin', db: ${JSON.stringify(database)} }],`,
+    '  });',
+    '}',
+    `const own = db.getSiblingDB(${JSON.stringify(database)});`,
+    `if (own.getUser(${JSON.stringify(username)})) own.dropUser(${JSON.stringify(username)});`,
+    'print("MONGO_X509_OK");',
+  ].join('\n') + '\n';
 }

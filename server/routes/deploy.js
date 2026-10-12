@@ -375,6 +375,9 @@ router.post('/:slug/restart/:env', requireAppAccess, auditMiddleware('restart'),
   // the database credentials off a restarted app that had them at deploy.
   // Deliberately placed BEFORE the CRANE_URL/DATA_DIR block below for the same
   // reason as in the deployer: those are platform vars that always win.
+  // The managed database's client certificate mount (read-only, this
+  // container only), when its login requires one. Same as the deploy path.
+  let dbCertMounts = [];
   {
     const { injectManagedDbForEnv } = await import('../services/deployer.js');
     // A custom app's database is declared in its release's deployhub.json.
@@ -389,8 +392,10 @@ router.post('/:slug/restart/:env', requireAppAccess, auditMiddleware('restart'),
     const mdbEnv = await injectManagedDbForEnv({
       app, env, runtimeEnvVars, claimedKeys: decryptFailures, manifestNeeds: releaseDb.needs,
       isRestart: true,
+      image,
       appendLog: (line) => log.info(`Restart ${containerName}: ${line}`),
     });
+    dbCertMounts = mdbEnv.mounts || [];
     if (mdbEnv.injected.length) {
       // Key names only. The values include a database password.
       log.info(`Restart ${containerName}: injected managed ${mdbEnv.engine} database var(s): ${mdbEnv.injected.join(', ')}`);
@@ -462,7 +467,7 @@ router.post('/:slug/restart/:env', requireAppAccess, auditMiddleware('restart'),
     containerPort: app.container_port,
     command: parseContainerCommand(app.container_command),
     envVars: runtimeEnvVars,
-    volumes: containerVolumes,
+    volumes: [...containerVolumes, ...dbCertMounts],
     memoryMb: limits.max_ram_mb,
     cpus: limits.max_cpu_percent / 100,
     addHostGateway: true,

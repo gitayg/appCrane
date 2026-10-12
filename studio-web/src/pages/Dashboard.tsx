@@ -2,6 +2,7 @@ import { Fragment, useState, useEffect, useRef, useCallback } from 'react'
 import { Navigate, Link } from 'react-router-dom'
 import { adminApi } from '../adminApi'
 import { useMe, isAdmin } from '../hooks/useMe'
+import { ManagedDbSettingsCard } from '../components/ManagedDbSettingsCard'
 
 interface App {
   slug: string
@@ -535,6 +536,7 @@ export function Dashboard() {
               })}
             </tbody>
           </table>
+          <ManagedDbSettingsCard />
         </>
       )}
 

@@ -9,7 +9,16 @@ import { adminApi } from '../adminApi'
 // can_drop_database) so this card shows only the controls the request would
 // accept, rather than re-deriving the rule from a role string.
 
-interface Db { engine: string; database: string; username: string; env: 'production' | 'sandbox' | null; created_at: string }
+interface Db {
+  engine: string; database: string; username: string; env: 'production' | 'sandbox' | null; created_at: string
+  // Transport security (managed-database TLS). 'required' = TLS + this app's own client
+  // certificate + password (deployhub.json databases); 'offered' = TLS
+  // available, plain allowed (catalogue apps); 'none' = the instance has no
+  // TLS (a catalogue app's Redis).
+  tls?: 'required' | 'offered' | 'none' | null
+  client_cert_expires_at?: string | null
+  connection_limit?: number | null
+}
 interface DbResp {
   databases: Db[]
   separate_sandbox_db: boolean
@@ -81,13 +90,19 @@ export function ManagedDatabaseCard({ slug, reload, onMsg }: Props) {
     return '-'
   }
 
+  const tlsTitle = (d: Db) => d.tls === 'required'
+    ? 'The engine refuses this login unless it uses TLS and presents this app\'s own client certificate (mounted read-only at /run/appcrane/db) as well as its password.'
+    : d.tls === 'offered'
+      ? 'The server speaks TLS; this login may also connect in plain text (catalogue images often cannot be configured for TLS).'
+      : d.tls === 'none' ? 'This instance does not speak TLS.' : ''
+
   return (
     <div className="am-card">
       <h3 style={{ marginBottom: 10 }}>Managed databases</h3>
       {data.databases.length > 0 && (
         <table style={{ width: '100%', fontSize: '.8rem', marginBottom: 10 }}>
           <thead>
-            <tr><th style={{ textAlign: 'left' }}>Engine</th><th style={{ textAlign: 'left' }}>Database</th><th style={{ textAlign: 'left' }}>User</th><th style={{ textAlign: 'left' }}>Used by</th><th /></tr>
+            <tr><th style={{ textAlign: 'left' }}>Engine</th><th style={{ textAlign: 'left' }}>Database</th><th style={{ textAlign: 'left' }}>User</th><th style={{ textAlign: 'left' }}>Used by</th><th style={{ textAlign: 'left' }}>TLS</th><th style={{ textAlign: 'left' }}>Connections</th><th /></tr>
           </thead>
           <tbody>
             {data.databases.map(d => (
@@ -96,6 +111,13 @@ export function ManagedDatabaseCard({ slug, reload, onMsg }: Props) {
                 <td className="am-mono">{d.database}</td>
                 <td className="am-mono">{d.username}</td>
                 <td>{usedBy(d)}</td>
+                <td title={tlsTitle(d)}>
+                  {d.tls === 'required' ? 'Required + client cert' : d.tls === 'offered' ? 'Offered' : d.tls === 'none' ? 'No' : '-'}
+                  {d.client_cert_expires_at && (
+                    <div style={{ fontSize: '.7rem', color: 'var(--dim)' }}>cert until {d.client_cert_expires_at.slice(0, 10)}</div>
+                  )}
+                </td>
+                <td>{d.connection_limit != null ? `max ${d.connection_limit}` : '-'}</td>
                 <td style={{ textAlign: 'right' }}>
                   {d.env === 'sandbox' && data.can_drop_database && (
                     <button className="btn btn-sm btn-red" disabled={busy} onClick={() => dropSandbox(d.engine)}>Drop</button>

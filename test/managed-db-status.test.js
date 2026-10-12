@@ -273,7 +273,10 @@ test('a running container reports its docker facts', async () => {
     host_port: 45432,
     // The container's REAL cap, from {{.HostConfig.Memory}} — not the config.
     memory_mb: 512,
-    configured_memory_mb: 512,
+    // The Postgres default went to 1024 with managed-database TLS (max_connections 100 ->
+    // 300); a container created before keeps its 512 until recreated, which
+    // is exactly the live-vs-configured split this field exists to show.
+    configured_memory_mb: 1024,
     databases: 2,
     restart_count: 3,
     last_exit_code: 0,
