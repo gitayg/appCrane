@@ -94,6 +94,10 @@ const NAV: NavItem[] = [
   { id: 'dashboard',    label: 'Dashboard',    href: '/dashboard',    icon: <Icon.Dashboard /> },
   { id: 'applications', label: 'Manage',       href: '/applications', icon: <Icon.Layers /> },
   { id: 'requests',     label: 'Requests',     href: '/requests',     icon: <Icon.Lightbulb /> },
+  // v2.105.0: Crew — the platform-wide agent hub. Ungated: every person can
+  // own agents, and the API scopes every row to the caller (the roster is
+  // platform-wide by design, decisions and blocks are the caller's own).
+  { id: 'crew',         label: 'Crew',         href: '/crew',         icon: <Icon.Users /> },
   // v2.59.x: the app catalogue. Deliberately ungated — every logged-in user
   // may browse it; only the per-row Deploy button is conditioned on
   // `platform.create_app`, which the page learns from GET /api/catalog.

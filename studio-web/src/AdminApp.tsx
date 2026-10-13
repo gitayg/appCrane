@@ -14,6 +14,7 @@ import { Settings } from './pages/Settings'
 import { Docs } from './pages/Docs'
 import { AppManager } from './pages/AppManager'
 import { MyRequests } from './pages/MyRequests'
+import { Crew } from './pages/Crew'
 import { PlatformRequestBar } from './components/PlatformRequestBar'
 import { AppTabsProvider } from './components/AppTabsContext'
 import { PersistentAppTabs } from './components/PersistentAppTabs'
@@ -233,6 +234,10 @@ export function AdminApp() {
               permission-scoped server-side and returns an empty list — not a
               403 — to a caller with no auditable apps. */}
           <Route path="/audit"       element={<Layout><Audit /></Layout>} />
+          {/* v2.105.0: Crew, the agent hub. Tabs are hash-addressed (#roster,
+              #log, #agents, #rules) so the first-contact e-mail can link
+              straight to the Crew log. */}
+          <Route path="/crew"        element={<Layout><Crew /></Layout>} />
           {/* Routes moved to Settings sub-tabs in v1.27.x — keep redirects
               so old bookmarks still work. */}
           <Route path="/users-page"  element={<Navigate to="/settings#users" replace />} />

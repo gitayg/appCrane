@@ -9,7 +9,7 @@
 
 **[appcrane.dev](https://appcrane.dev)** · [How it compares](https://appcrane.dev/comparison.html) · [Deploy from Claude](https://appcrane.dev/deploy-from-claude.html) · [MCP connector](https://github.com/gitayg/appcrane-mcp) · [Changelog](https://appcrane.dev/changelog.html)
 
-AppCrane runs the internal apps your team builds with Claude Code or Cursor, on a server you own. An agent creates the app, deploys it, reads the logs and rolls it back through 62 MCP tools — no browser, no curl — while the platform enforces SSO and per-app roles, records every action against the actor that took it (tagged **agent** or **human**), and keeps app secrets out of reach of the person administering the box.
+AppCrane runs the internal apps your team builds with Claude Code or Cursor, on a server you own. An agent creates the app, deploys it, reads the logs and rolls it back through 68 MCP tools — no browser, no curl — while the platform enforces SSO and per-app roles, records every action against the actor that took it (tagged **agent** or **human**), and keeps app secrets out of reach of the person administering the box.
 
 It is for teams that have to self-host — data residency, a customer contract, an internal-only network — and still have to answer *who deployed this, what was in it, and can we undo it?*
 
@@ -61,6 +61,7 @@ CapRover and Dokku are in one column because their access model is the same shap
 
 ## Features
 
+- **Crew: agents find each other and hand off work, with their owners in the loop** — a new top-level **Crew** page and six MCP tools (`appcrane_crew_register`, `_roster`, `_who_is_on`, `_send`, `_inbox`, `_reply`). An agent registers once, owned by the person whose key it uses, and can never act as anyone else's agent (platform admins included). Agents of the same person talk freely. The first time another person's agent sends work to yours, the task is held and you get one e-mail; you decide in Crew → Crew log: **Allow**, **Allow once**, **Refuse** or **Block**. After that, everything is in the dashboard, never e-mail. Blocked and refused agents are rejected silently. Messages are scanned for credentials and refused if they carry one; agents are limited to 60 tasks and 300 messages an hour; task history is deleted after 30 days, while audit rows (tagged agent or human, never holding a title or message) stay. Hosted agents are registered from a pasted Agent Card; AppCrane does not fetch card URLs. Standing rules and approvals routed to people come in a later release. An app can no longer be named `crew` (or `cr`, `cre`): the dashboard owns `/crew`.
 - **Docker container isolation** — every app runs in its own container; no shared dependencies, no runaway processes
 - **Managed databases** — PostgreSQL, MariaDB, MongoDB and Redis provisioned per app, with credentials injected under whatever env-var names the app actually reads. Postgres, MariaDB and Mongo share one server per engine with isolation enforced inside the engine — a Mongo user is scoped to its own database and `listDatabases` returns only that one, which is stricter than Postgres, where `pg_database` leaks every database name. Redis instead gets a container per scope, because its ACLs cannot scope to a numbered database: a user pinned to db 1 can still reach db 2 with `COPY ... DB` and `MOVE`. Mongo runs as a single-node replica set, so change streams and transactions work
 - **Per-app container command and volumes** — an app can declare the argv its image needs (`["start-dev"]`) and the paths it actually persists. Commands are argv arrays, never shell strings, so nothing in a stored command can become a second token. Declared paths survive the stop-and-recreate every redeploy performs, and 23 catalogue entries carry paths measured from their own images — so an app that was already installed starts keeping its state without anyone editing it. A newly created mount is seeded from the image's content first, because a bind mount (unlike a named volume) masks what the image ships there: without seeding, declaring `/var/www/html` would hand the app an empty directory where its 7,747 files used to be
@@ -351,7 +352,7 @@ returns 401 on every managed-repo write, and this one never contacts GitHub.
 
 ## MCP (for AI agents)
 
-AppCrane is MCP-first. One `claude mcp add` and the agent gets 59
+AppCrane is MCP-first. One `claude mcp add` and the agent gets 68
 `appcrane_*` tools — list apps, deploy, roll back, set/get secrets, read
 logs, manage access, scan for vulnerable dependencies, the lot. Tool
 names are AWS-aligned (`stage`, `set_secret`/`get_secret`, `cp`).

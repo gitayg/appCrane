@@ -75,6 +75,7 @@ import platformWhatsNewRoutes from './routes/platformWhatsNew.js';
 import serviceApiRoutes from './routes/serviceApi.js';
 import noticesRoutes from './routes/notices.js';
 import catalogRoutes from './routes/catalog.js';
+import crewRoutes from './routes/crew.js';
 import { globalNotices } from './services/platformNotices.js';
 
 const PORT = process.env.PORT || 5001;
@@ -996,6 +997,7 @@ app.use('/api/apps', notificationsRoutes); // /api/apps/:slug/notifications
 // pattern that would swallow /:slug/app-roles.
 app.use('/api/apps', appRolesRoutes);
 app.use('/api/catalog', catalogRoutes);  // Curated self-hostable app catalogue (requireAuth — every logged-in user)
+app.use('/api/crew', crewRoutes);        // Crew: platform-wide agent hub (requireAuth; per-row ownership in services/crew.js)
 // Mount identity FIRST so its routes don't get caught by other middleware
 app.use('/api/identity', identityRoutes);
 app.use('/api/enhancements', enhancementsRoutes); // Enhancement requests (Bearer auth, must be before logsRoutes)
@@ -1194,6 +1196,8 @@ app.get('/catalog', (req, res) => sendHtml(res, adminSpa));
 // so it is reachable (and shareable as a link) by anyone holding
 // app.audit.view on at least one app. Same rule as every entry in this block.
 app.get('/audit', (req, res) => sendHtml(res, adminSpa));
+// v2.105.0: Crew, the agent hub. The first-contact e-mail links to /crew#log.
+app.get('/crew', (req, res) => sendHtml(res, adminSpa));
 // Found by the same test: /skills is a client-side redirect to /settings#skills,
 // but a direct load never reaches React to be redirected.
 app.get('/skills', (req, res) => sendHtml(res, adminSpa));
@@ -1663,6 +1667,15 @@ app.listen(PORT, HOST, async () => {
   // Failed-login alerts for the managed databases: reads the shared servers'
   // own logs every few minutes and alerts platform admins when one login keeps
   // failing (services/dbAuthAlerts.js). Reads logs only; starts nothing.
+  // Crew (v2.105.0): delete agent-to-agent task history older than 30 days,
+  // once a day. Audit rows are kept; they never held message bodies.
+  try {
+    const { startCrewRetentionScheduler } = await import('./services/crew.js');
+    startCrewRetentionScheduler();
+  } catch (e) {
+    log.error('Crew retention scheduler failed to start: ' + e.message);
+  }
+
   try {
     const { startDbAuthAlertScheduler } = await import('./services/dbAuthAlerts.js');
     startDbAuthAlertScheduler();

@@ -1,5 +1,5 @@
 {
-  "count": 62,
+  "count": 68,
   "tools": [
     {
       "name": "appcrane_append_app_context",
@@ -40,6 +40,36 @@
       "name": "appcrane_create_managed_app",
       "requiredRole": "create_app",
       "readOnly": false
+    },
+    {
+      "name": "appcrane_crew_inbox",
+      "requiredRole": "any",
+      "readOnly": true
+    },
+    {
+      "name": "appcrane_crew_register",
+      "requiredRole": "any",
+      "readOnly": false
+    },
+    {
+      "name": "appcrane_crew_reply",
+      "requiredRole": "any",
+      "readOnly": false
+    },
+    {
+      "name": "appcrane_crew_roster",
+      "requiredRole": "any",
+      "readOnly": true
+    },
+    {
+      "name": "appcrane_crew_send",
+      "requiredRole": "any",
+      "readOnly": false
+    },
+    {
+      "name": "appcrane_crew_who_is_on",
+      "requiredRole": "any",
+      "readOnly": true
     },
     {
       "name": "appcrane_deny_access_request",
