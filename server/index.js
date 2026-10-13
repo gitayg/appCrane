@@ -618,20 +618,12 @@ app.post('/api/self-update', requireAuth, requirePlatformAdmin, async (req, res)
     // Refuse to restart while builds are in flight — interrupting docker build mid-stream
     // leaves orphan dangling layers that pruneOldImages can't clean up. Caller can pass
     // ?force=1 to override (e.g. if a build is genuinely stuck).
+    // A row in flight longer than STALE_INFLIGHT_MINUTES is reported, not obeyed:
+    // one hung build used to block every update until someone forced it.
     if (!req.query.force) {
-      const db = getDb();
-      const inflight = db.prepare(
-        "SELECT id, app_id, env FROM deployments WHERE status IN ('pending','building','deploying') LIMIT 5"
-      ).all();
-      if (inflight.length > 0) {
-        return res.status(409).json({
-          error: {
-            code: 'BUILDS_IN_FLIGHT',
-            message: `Refusing to self-update: ${inflight.length} deployment(s) currently building. Wait for them to finish or POST again with ?force=1.`,
-            in_flight: inflight,
-          },
-        });
-      }
+      const { inflightRefusal } = await import('./services/inflightDeploys.js');
+      const refusal = inflightRefusal(getDb(), 'self-update');
+      if (refusal) return res.status(409).json(refusal);
     }
 
     // "Smart turn toward the upgrade": don't restart out from under a live MCP
@@ -920,19 +912,9 @@ app.post('/api/self-update/restart', requireAuth, requirePlatformAdmin, async (r
   // Same guard the self-update uses: a container mid-build does not survive the
   // build process being killed, and leaves dangling layers behind.
   if (!req.query.force) {
-    const db = getDb();
-    const inflight = db.prepare(
-      "SELECT id, app_id, env FROM deployments WHERE status IN ('pending','building','deploying') LIMIT 5"
-    ).all();
-    if (inflight.length > 0) {
-      return res.status(409).json({
-        error: {
-          code: 'BUILDS_IN_FLIGHT',
-          message: `Refusing to restart: ${inflight.length} deployment(s) currently building. Wait, or repeat with ?force=1.`,
-          in_flight: inflight,
-        },
-      });
-    }
+    const { inflightRefusal } = await import('./services/inflightDeploys.js');
+    const refusal = inflightRefusal(getDb(), 'restart');
+    if (refusal) return res.status(409).json(refusal);
   }
 
   try {

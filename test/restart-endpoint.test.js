@@ -34,9 +34,10 @@ test('it refuses without an explicit confirm', () => {
 });
 
 test('it refuses while a build is in flight, with the same escape hatch as self-update', () => {
-  assert.match(H, /status IN \('pending','building','deploying'\)/,
+  // The query and the BUILDS_IN_FLIGHT body live in services/inflightDeploys.js
+  // (shared with self-update, stale rows excluded — see self-update-inflight.test.js).
+  assert.match(H, /inflightRefusal\(getDb\(\), 'restart'\)/,
     'killing the process mid-build orphans the container and leaves dangling layers');
-  assert.match(H, /BUILDS_IN_FLIGHT/);
   assert.match(H, /req\.query\.force/, 'a genuinely stuck build has to be overridable');
 });
 

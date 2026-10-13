@@ -70,11 +70,15 @@ export function authParamsForSSE(): Record<string, string> {
 export class ApiError extends Error {
   status: number
   code: string
-  constructor(message: string, status: number, code: string) {
+  // The whole `error` object, for refusals that carry more than a message
+  // (BUILDS_IN_FLIGHT lists the deployments it is waiting on).
+  details: Record<string, unknown>
+  constructor(message: string, status: number, code: string, details: Record<string, unknown> = {}) {
     super(message)
     this.name = 'ApiError'
     this.status = status
     this.code = code
+    this.details = details
   }
 }
 
@@ -97,8 +101,8 @@ async function req<T = unknown>(path: string, init?: RequestInit): Promise<T> {
   }
   if (!r.ok) {
     const body = await r.json().catch(() => ({}))
-    const err = (body as { error?: { message?: string; code?: string } })?.error
-    throw new ApiError(err?.message || `HTTP ${r.status}`, r.status, err?.code || 'HTTP_ERROR')
+    const err = (body as { error?: { message?: string; code?: string } & Record<string, unknown> })?.error
+    throw new ApiError(err?.message || `HTTP ${r.status}`, r.status, err?.code || 'HTTP_ERROR', err || {})
   }
   const data = await r.json().catch(() => ({}))
   return data as T

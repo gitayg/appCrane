@@ -7,6 +7,8 @@ import { Icon } from './icons'
 import { WhatsNewModal, type WhatsNewChange } from './WhatsNewModal'
 import { useAppTabs } from './AppTabsContext'
 import { CredentialAlertBanner } from './CredentialAlertBanner'
+import { UpdateBlockedDialog } from './UpdateBlockedDialog'
+import { buildsInFlightOf, isConnectionDrop, waitForNewVersion, type BuildsInFlight } from './selfUpdateFlow'
 
 interface NavItem { id: string; label: string; href: string; icon: ReactElement; external?: boolean; platformAdminOnly?: boolean; adminOnly?: boolean; ownerOrAdmin?: boolean }
 interface NavApp {
@@ -165,6 +167,11 @@ export function Layout({ children, subItems, activeSub }: Props) {
   // the self-update flow (uses updateInfo state, not DOM manipulation).
   const [updateInfo, setUpdateInfo] = useState<{ current: string; latest: string | null; update_available: boolean } | null>(null)
   const [updating, setUpdating] = useState(false)
+  // What the pill says while an update is under way, and the deployments a
+  // BUILDS_IN_FLIGHT refusal is waiting on (drives UpdateBlockedDialog).
+  const [updatePhase, setUpdatePhase] = useState<'running' | 'reconnecting' | 'waiting'>('running')
+  const [updateBlocked, setUpdateBlocked] = useState<BuildsInFlight | null>(null)
+  const waitTimer = useRef<ReturnType<typeof setInterval> | null>(null)
   const notifRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -215,19 +222,83 @@ export function Layout({ children, subItems, activeSub }: Props) {
     return () => { cancelled = true; clearInterval(t) }
   }, [isAuthed, isPlatformAdmin])
 
-  async function runSelfUpdate(skipConfirm = false) {
-    if (!updateInfo?.update_available || updating) return
-    if (!skipConfirm && !confirm(`Update AppCrane from v${updateInfo.current} to v${updateInfo.latest}?\n\nThe server will rebuild the SPA and restart. Active deploys are checked first; the update aborts if any are in flight.`)) return
+  useEffect(() => () => { if (waitTimer.current) clearInterval(waitTimer.current) }, [])
+
+  function stopWaiting() {
+    if (waitTimer.current) clearInterval(waitTimer.current)
+    waitTimer.current = null
+  }
+
+  // One POST to /api/self-update and what each outcome means. Returns
+  // 'blocked' when deployments are still running so the caller decides
+  // whether to show the dialog (first try) or keep waiting quietly (re-check).
+  async function attemptSelfUpdate(force: boolean, quiet = false): Promise<'blocked' | 'done'> {
+    const from = updateInfo?.current || ''
     setUpdating(true)
+    setUpdatePhase('running')
     try {
-      await adminApi.post('/api/self-update', {})
-      // Self-update kicks off async; the server restarts a few seconds
-      // later. Reload to pick up the new bundle.
-      setTimeout(() => window.location.reload(), 5000)
+      await adminApi.post(`/api/self-update${force ? '?force=1' : ''}`, {})
     } catch (err) {
-      alert('Self-update failed: ' + (err instanceof Error ? err.message : String(err)))
+      const blocked = buildsInFlightOf(err)
+      if (blocked) {
+        if (!quiet) setUpdateBlocked(blocked)
+        return 'blocked'
+      }
+      // The request runs for minutes and the server exits at the end, so a
+      // dropped connection most likely means the update is landing. Treat it
+      // as "reconnecting" and let /api/info settle it, instead of an alert
+      // claiming a failure that did not happen.
+      if (!isConnectionDrop(err)) {
+        alert('Self-update failed: ' + (err instanceof Error ? err.message : String(err)))
+        setUpdating(false)
+        return 'done'
+      }
+    }
+    stopWaiting()
+    setUpdatePhase('reconnecting')
+    const next = await waitForNewVersion(from)
+    if (next) {
+      window.location.reload()
+    } else {
+      alert(`AppCrane is still reporting v${from}. The update may have failed — check the server log, or reload to see the current state.`)
       setUpdating(false)
     }
+    return 'done'
+  }
+
+  async function runSelfUpdate(skipConfirm = false) {
+    if (!updateInfo?.update_available || updating) return
+    if (!skipConfirm && !confirm(`Update AppCrane from v${updateInfo.current} to v${updateInfo.latest}?\n\nThe server will rebuild the SPA and restart. Active deploys are checked first; you can wait for them or force the update.`)) return
+    if (await attemptSelfUpdate(false) === 'blocked') setUpdating(false)
+  }
+
+  function forceSelfUpdate() {
+    stopWaiting()
+    setUpdateBlocked(null)
+    void attemptSelfUpdate(true)
+  }
+
+  // "Wait": close the dialog and retry every 30 s; the first retry that is not
+  // refused for in-flight builds starts the update.
+  function waitThenUpdate() {
+    setUpdateBlocked(null)
+    setUpdating(true)
+    setUpdatePhase('waiting')
+    stopWaiting()
+    let busy = false
+    waitTimer.current = setInterval(async () => {
+      if (busy) return
+      busy = true
+      const r = await attemptSelfUpdate(false, true)
+      if (r === 'blocked') setUpdatePhase('waiting')
+      busy = false
+    }, 30_000)
+  }
+
+  function cancelUpdateBlocked() {
+    stopWaiting()
+    setUpdateBlocked(null)
+    setUpdating(false)
   }
 
   // Open-requests counter for the Requests nav badge. v2.16.0: the Requests
@@ -393,6 +464,10 @@ export function Layout({ children, subItems, activeSub }: Props) {
   // What's New (current → latest) with an "Upgrade now" action — the same
   // dialog as the post-login one, just forward-looking.
   async function openUpgradeWhatsNew() {
+    if (updating && updatePhase === 'waiting' && waitTimer.current) {
+      if (confirm('Stop waiting for deployments and cancel the pending update?')) cancelUpdateBlocked()
+      return
+    }
     if (!updateInfo?.update_available || !updateInfo.latest || updating) return
     let changes: WhatsNewChange[] = []
     try {
@@ -523,7 +598,9 @@ export function Layout({ children, subItems, activeSub }: Props) {
                   onClick={openUpgradeWhatsNew}
                 >
                   {updating
-                    ? '⏳ updating…'
+                    ? (updatePhase === 'reconnecting' ? '⏳ updating — reconnecting…'
+                      : updatePhase === 'waiting' ? '⏳ update waiting on deployments…'
+                      : '⏳ updating…')
                     : <>↑ AppCrane v{updateInfo.latest}<span className="topbar-version-pill-current"> (now v{updateInfo.current})</span></>}
                 </span>
               ) : (
@@ -743,6 +820,14 @@ export function Layout({ children, subItems, activeSub }: Props) {
           primaryLabel={platformWN.primaryLabel}
           onPrimary={platformWN.onPrimary}
           onClose={() => setPlatformWN(null)}
+        />
+      )}
+      {updateBlocked && (
+        <UpdateBlockedDialog
+          blocked={updateBlocked}
+          onWait={waitThenUpdate}
+          onForce={forceSelfUpdate}
+          onClose={cancelUpdateBlocked}
         />
       )}
     </div>
