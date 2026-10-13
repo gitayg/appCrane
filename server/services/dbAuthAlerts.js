@@ -234,12 +234,20 @@ export function recordRedisAclEntries(db, { container, dbName }, entries, { now 
  */
 function ownerCache(db) {
   const known = new Set();
+  const dbs = new Set();
   for (const r of db.prepare('SELECT db_user, db_name FROM managed_databases').all()) {
     if (r.db_user) known.add(r.db_user);
-    if (r.db_name) known.add(`default@${r.db_name}`);
+    if (r.db_name) { known.add(`default@${r.db_name}`); dbs.add(r.db_name); }
   }
-  return (login) => known.has(login);
+  const isReal = (login) => known.has(login);
+  isReal.dbName = (name) => (name == null || dbs.has(name) ? name : OTHER_DATABASE);
+  return isReal;
 }
+
+// The database named in a log line is the caller's choice too: pairing one real
+// login with endless invented database names would create unlimited groups for a
+// "real" login. Any name that is not a managed database becomes this one value.
+export const OTHER_DATABASE = '(not a managed database)';
 
 // A log read is capped at 32 MiB, but a parse of it could still yield hundreds
 // of thousands of failures. Real logins' failures are ALWAYS grouped in full
@@ -266,7 +274,10 @@ export function recordFailures(db, engine, failures) {
   const owner = ownerCache(db);
   const realFailures = [];
   const inventedFailures = [];
-  for (const f of failures) (owner(f.login) ? realFailures : inventedFailures).push(f);
+  for (const f0 of failures) {
+    const f = { ...f0, database: owner.dbName(f0.database) };
+    (owner(f.login) ? realFailures : inventedFailures).push(f);
+  }
   const overflow = Math.max(0, inventedFailures.length - MAX_FAILURES_PER_SCAN);
   const lastOverflowAt = overflow ? inventedFailures.reduce((m, f) => (f.at > m ? f.at : m), inventedFailures[0].at) : null;
   failures = realFailures.concat(overflow ? inventedFailures.slice(0, MAX_FAILURES_PER_SCAN) : inventedFailures);

@@ -260,3 +260,17 @@ test('SUPPRESSION: a real login logged AFTER 100,000+ invented failures still ge
   const raised = alerts.evaluateAlerts(db, { now, sendMail: () => {}, audit: () => {} });
   assert.ok(raised.some(r => r.login === 'supp_u0'), 'no alert for the real login');
 });
+
+test('BOUND: a real login paired with endless invented database names stays one group', () => {
+  const db = getDb();
+  db.prepare('DELETE FROM managed_db_auth_failures').run();
+  const at = new Date(Date.now() - 60e3).toISOString();
+  const failures = [];
+  for (let i = 0; i < 5000; i++) failures.push({ login: 'supp_u0', database: `fake_db_${i}`, reason: 'database-denied', at });
+  failures.push({ login: 'supp_u0', database: 'supp_db1', reason: 'database-denied', at });
+  alerts.recordFailures(db, 'postgres', failures);
+  const rows = db.prepare("SELECT database_name, SUM(count) c FROM managed_db_auth_failures WHERE login = 'supp_u0' GROUP BY database_name ORDER BY database_name").all();
+  assert.equal(rows.length, 2, `${rows.length} groups for one real login`);
+  assert.deepEqual(rows.map(r => r.database_name).sort(), [alerts.OTHER_DATABASE, 'supp_db1'].sort(), 'a real managed database lost its own group');
+  assert.equal(rows.find(r => r.database_name === alerts.OTHER_DATABASE).c, 5000);
+});
