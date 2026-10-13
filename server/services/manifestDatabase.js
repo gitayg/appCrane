@@ -203,6 +203,11 @@ export async function ensureManifestDatabase(app, needs, {
   provision = defaultProvision,
   credentialsFor = defaultCredentialsFor,
   scope = null,
+  // Set by a PRODUCTION deploy that provisions the sandbox database only so
+  // it can hand production that database's URL (deployhub.json
+  // sandbox_url_env). The log then says that, not that the sandbox
+  // setting is on: nothing about the sandbox's own deploy happened.
+  forSandboxUrlEnv = null,
 } = {}) {
   const dbScope = scope?.tenant ? scope : { appId: app.id };
   const what = dbScope.tenant ? `sandbox ${needs.engine} database` : `${needs.engine} database declared in deployhub.json`;
@@ -217,7 +222,9 @@ export async function ensureManifestDatabase(app, needs, {
     // message is safe to put in the deploy log.
     throw new Error(`Provisioning the managed ${what} failed: ${err.message}`);
   }
-  appendLog(dbScope.tenant
+  appendLog(dbScope.tenant && forSandboxUrlEnv
+    ? `Provisioned the ${what} so production can reach it via ${forSandboxUrlEnv}`
+    : dbScope.tenant
     ? `Provisioned a separate managed ${what} for this app (Separate sandbox database is on)`
     : `Provisioned a managed ${needs.engine} database for this app (declared in deployhub.json)`);
   return { provisioned: true };

@@ -390,7 +390,9 @@ export async function injectManagedDbForEnv({
       if (env === 'production' && needs.sandbox_url_env) {
         const sandboxScope = { appId: app.id, tenant: SANDBOX_TENANT };
         if (!isRestart) {
-          await ensureManifestDatabase(app, needs, { appendLog, scope: sandboxScope, ...(provision ? { provision } : {}) });
+          await ensureManifestDatabase(app, needs, {
+            appendLog, scope: sandboxScope, forSandboxUrlEnv: needs.sandbox_url_env, ...(provision ? { provision } : {}),
+          });
         }
         const peer = await sandboxPeerAccess(app.id, engine, { image });
         if (peer) {

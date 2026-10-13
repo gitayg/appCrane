@@ -261,6 +261,35 @@ test('restore re-applies the login policy (cert group, limits, grants) from the 
   }
 });
 
+test('mariadb restore ends the _app login\'s open sessions too, before the database is dropped', async () => {
+  // Measured on mariadb:11.4: an `_app` session opened before the restore
+  // survived it (ACCOUNT LOCK refuses only NEW connections), so it could read
+  // the database while it was being reloaded.
+  const appUser = `${nA.username}_app`;
+  db.prepare("UPDATE managed_databases SET app_user = ?, app_password_enc = ? WHERE app_id = ? AND tenant = '' AND engine = 'mariadb'")
+    .run(appUser, encrypt(APP_PW), A);
+  try {
+    const file = join(process.env.DATA_DIR, 'm.dump');
+    writeFileSync(file, 'DUMP');
+    const o = recorder();
+    o.runAdminSql = async (e, sql, opt) => {
+      calls.push(['sql', e, sql, opt?.database || null]);
+      if (sql.includes(`USER = '${nA.username}'`)) return 'ID\n11';
+      if (sql.includes(`USER = '${appUser}'`)) return 'ID\n22\n23';
+      return '';
+    };
+    await bk.restoreDatabase({ appId: A, tenant: '', engine: 'mariadb', expectDbName: nA.database }, file, { ops: o });
+    const sql = calls.filter((c) => c[0] === 'sql').map((c) => c[2]);
+    const dropAt = sql.findIndex((s) => s.includes(`DROP DATABASE IF EXISTS \`${nA.database}\``));
+    const killed = sql.slice(0, dropAt).join('\n');
+    assert.match(killed, /KILL CONNECTION 11;/, 'the owner login\'s session is ended');
+    assert.match(killed, /KILL CONNECTION 22;/, 'the _app login\'s sessions are ended too');
+    assert.match(killed, /KILL CONNECTION 23;/);
+  } finally {
+    db.prepare("UPDATE managed_databases SET app_user = NULL, app_password_enc = NULL WHERE app_id = ? AND tenant = '' AND engine = 'mariadb'").run(A);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Routes: per-app backups, restore gate
 // ---------------------------------------------------------------------------

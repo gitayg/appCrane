@@ -219,6 +219,12 @@ test('production: DATABASE_URL (owner), APP_DATABASE_URL (its own _app login) an
   assert.match(onDb, /appcrane_stats\.app_stat_statements/);
   assert.ok(sqlLog.some((s) => s.sql.includes(`GRANT appcrane_cert_required TO "${prodNames.username}_app";`)), 'app login must require its certificate');
   assert.ok(PROD.log.some((l) => /not loaded it yet/.test(l)), 'the deploy log says the preload is off');
+  // Production provisioned the sandbox database for SANDBOX_DATABASE_URL; the
+  // log says that, not "Separate sandbox database is on" (a setting this
+  // deploy never looked at).
+  assert.ok(PROD.log.includes('Provisioned the sandbox postgres database so production can reach it via SANDBOX_DATABASE_URL'),
+    `production's sandbox provisioning line: ${JSON.stringify(PROD.log)}`);
+  assert.ok(!PROD.log.some((l) => /Separate sandbox database is on/.test(l)));
 
   const row = mdb.credentialsFor({ appId }, 'postgres');
   assert.ok(row, 'production row');

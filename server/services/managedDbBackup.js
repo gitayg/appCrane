@@ -436,8 +436,15 @@ async function restoreMariadb(row, file, o) {
   if (appActive) await o.runAdminSql('mariadb', cmd.mariadbLockSql(row.app_user, true));
   let unlocked = false;
   try {
-    const sessions = await o.runAdminSql('mariadb', cmd.mariadbSessionsSql(row.db_user));
-    const kill = cmd.mariadbKillSql(String(sessions || '').split(/\s+/));
+    // Both logins' open sessions: ACCOUNT LOCK refuses only NEW connections,
+    // and an `_app` session left open was measured reading the database
+    // across the reload. A disabled `_app` login (no password on the row) is
+    // included: a session from before it was disabled is still open.
+    const ids = [];
+    for (const user of [row.db_user, ...(row.app_user ? [row.app_user] : [])]) {
+      ids.push(...String(await o.runAdminSql('mariadb', cmd.mariadbSessionsSql(user)) || '').split(/\s+/));
+    }
+    const kill = cmd.mariadbKillSql(ids);
     if (kill) await o.runAdminSql('mariadb', kill).catch(() => {});
     await o.runAdminSql('mariadb', cmd.mariadbRecreateSql(row.db_name));
     await o.runAdminSql('mariadb', cmd.mariadbGrantSql(row.db_name, row.db_user));
