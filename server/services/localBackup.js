@@ -25,7 +25,9 @@
  *     export and the off-site upload. An unattended nightly job that copies
  *     every hosted app's data onto the same disk it is protecting is unbounded
  *     in size and is how a backup takes a host down; the database and the
- *     ENCRYPTION_KEY are the part nothing else can rebuild.
+ *     ENCRYPTION_KEY are the part nothing else can rebuild. Managed databases
+ *     (v2.102.0) are excluded for the same reason — they are in the full
+ *     export and the off-site upload, and in per-app backups.
  *   - DISK COST: KEEP_DEFAULT (7) copies of a gzipped SQLite database plus a
  *     .env. For a 62-app instance that is single-digit MB per copy — the whole
  *     schedule costs less than one container image. exportDataArchive's own
@@ -100,7 +102,7 @@ export function getLocalBackupConfig() {
     last_bytes: Number.isFinite(lastBytes) ? lastBytes : null,
     directory: localBackupsDir(),
     contents: ['deployhub.db', '.env'],
-    excludes: ['app icons', 'per-app /data', 'declared volumes', 'managed-app repositories', 'container images'],
+    excludes: ['app icons', 'per-app /data', 'declared volumes', 'managed databases', 'managed-app repositories', 'container images'],
   };
 }
 

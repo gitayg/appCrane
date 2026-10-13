@@ -254,18 +254,61 @@ export function clientFilesCurrent(login) {
 /**
  * The uid:gid an image's process runs as, so its key can be chowned to it.
  *
- * `docker run --entrypoint id` with the image's OWN configured user (no
- * --user), no network, removed on exit. Null when the image has no `id`
- * (distroless), which lands on the 0444 fallback rather than failing a deploy.
- * argv only, nothing interpolated into a shell.
+ * Read from the image, never by RUNNING it. This used `docker run --entrypoint
+ * id <image>`, and the image is the app author's: its `id` can be any program,
+ * and it ran on every deploy outside the app container's own limits (no memory,
+ * CPU or pids cap, default capabilities). Now: `docker image inspect` gives
+ * Config.User; a numeric uid[:gid] is used as is; a name is looked up in the
+ * image's /etc/passwd and /etc/group, copied out of a container that is CREATED
+ * but never started (`docker create` + `docker cp`), then removed. No user set
+ * means root. Null when it cannot be worked out (the 0444 fallback, never a
+ * failed deploy). argv only, nothing interpolated into a shell.
  */
 export async function resolveImageOwner(image, { exec = execFileAsync } = {}) {
   if (!image) return null;
   try {
-    const { stdout } = await exec('docker', ['run', '--rm', '--network', 'none', '--entrypoint', 'id', image], { timeout: 60000 });
-    const m = /uid=(\d+)\S*\s+gid=(\d+)/.exec(String(stdout));
-    return m ? { uid: Number(m[1]), gid: Number(m[2]) } : null;
+    const { stdout } = await exec('docker', ['image', 'inspect', '--format', '{{.Config.User}}', image], { timeout: 30000 });
+    const spec = String(stdout).trim();
+    if (!spec) return { uid: 0, gid: 0 };
+    const [u, g] = spec.split(':');
+    const isNum = (v) => /^\d+$/.test(v || '');
+    if (isNum(u) && isNum(g)) return { uid: Number(u), gid: Number(g) };
+
+    const passwd = await readImageFile(image, '/etc/passwd', exec);
+    const group = g && !isNum(g) ? await readImageFile(image, '/etc/group', exec) : '';
+    const pw = (passwd || '').split('\n').map(l => l.split(':')).find(f => f.length >= 4 && (isNum(u) ? f[2] === u : f[0] === u));
+    const uid = isNum(u) ? Number(u) : (pw ? Number(pw[2]) : NaN);
+    let gid;
+    if (isNum(g)) gid = Number(g);
+    else if (g) {
+      const gr = group.split('\n').map(l => l.split(':')).find(f => f.length >= 3 && f[0] === g);
+      gid = gr ? Number(gr[2]) : NaN;
+    } else gid = pw ? Number(pw[3]) : 0;
+    return Number.isInteger(uid) && Number.isInteger(gid) ? { uid, gid } : null;
   } catch (_) {
     return null;
   }
+}
+
+/** One file out of an image, through a created-but-never-started container. */
+async function readImageFile(image, path, exec) {
+  let id = null;
+  try {
+    // The trailing `true` only satisfies images with no CMD; create never runs it.
+    ({ stdout: id } = await exec('docker', ['create', '--network', 'none', image, 'true'], { timeout: 30000 }));
+    id = String(id).trim();
+    const { stdout } = await exec('docker', ['cp', `${id}:${path}`, '-'], { timeout: 30000, encoding: 'buffer', maxBuffer: 4 * 1024 * 1024 });
+    return untarFirst(Buffer.isBuffer(stdout) ? stdout : Buffer.from(String(stdout), 'binary'));
+  } catch (_) {
+    return '';
+  } finally {
+    if (id) await exec('docker', ['rm', '-f', id], { timeout: 30000 }).catch(() => {});
+  }
+}
+
+/** The first regular file's contents from a tar stream (`docker cp ... -`). */
+function untarFirst(buf) {
+  if (buf.length < 512) return '';
+  const size = parseInt(buf.subarray(124, 136).toString('ascii').replace(/\0.*$/, '').trim() || '0', 8);
+  return buf.subarray(512, 512 + size).toString('utf8');
 }

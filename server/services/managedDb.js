@@ -2138,3 +2138,36 @@ export async function deprovisionApp(appId) {
   }
   return { requested: rows.length, dropped };
 }
+
+/**
+ * The engine handles services/managedDbBackup.js needs, and nothing more.
+ *
+ * Backups live in their own module (this file is already the provisioning
+ * engine and the isolation boundary, and a dump/restore path is a different
+ * job), but a dump has to reach the SAME admin path provisioning uses — the
+ * unix-socket psql, the planted /root/.my.cnf, the mongosh auth line read from
+ * the server row — or it would need a second copy of the superuser credential
+ * handling, which is exactly the kind of drift that leaks one. So the module
+ * gets these functions by reference instead of re-implementing them.
+ *
+ * Frozen so a caller cannot swap one out for everyone; tests pass their own
+ * object to managedDbBackup's `ops` parameter instead.
+ */
+export const backupAccess = Object.freeze({
+  ensureServer,
+  runAdminSql,
+  runAdminMongo,
+  adminCoordsFor,
+  ensureRedisInstance,
+  rowFor,
+  containerFor: (engine) => ENGINES[engine]?.container || null,
+  redisDataDir,
+  redisImage: redis.REDIS_IMAGE,
+  assertIdent,
+  assertPassword,
+  redactSecret,
+  decrypt,
+  // A restore loads the dump AS the app login, which for a certificate-required
+  // login means presenting that login's own client certificate.
+  clientCert: (login) => certs.ensureClientCert(assertIdent(login)),
+});

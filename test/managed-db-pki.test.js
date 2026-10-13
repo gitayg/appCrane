@@ -199,12 +199,26 @@ test('dropClientCert removes the row and the files', () => {
   assert.equal(certs.clientCertInfo('crane_a6_u'), null);
 });
 
-test('resolveImageOwner parses `id`, and a missing `id` falls back to null (0444 path)', async () => {
-  const ok = await certs.resolveImageOwner('img', { exec: async () => ({ stdout: 'uid=1000(node) gid=1000(node) groups=1000(node)\n' }) });
-  assert.deepEqual(ok, { uid: 1000, gid: 1000 });
-  const none = await certs.resolveImageOwner('img', { exec: async () => { throw new Error('exec: "id": executable file not found'); } });
-  assert.equal(none, null);
-  let argv;
-  await certs.resolveImageOwner('img:1', { exec: async (_c, a) => { argv = a; return { stdout: '' }; } });
-  assert.deepEqual(argv, ['run', '--rm', '--network', 'none', '--entrypoint', 'id', 'img:1'], 'argv only, no shell, no network');
+test('resolveImageOwner reads the image user without ever running the image', async () => {
+  // A fake docker: inspect returns Config.User, cp returns a tar of the file.
+  const tar = (body) => { const h = Buffer.alloc(512); h.write((body.length).toString(8).padStart(11, '0') + '\0', 124, 'ascii'); const b = Buffer.from(body); return Buffer.concat([h, b, Buffer.alloc(512 - (b.length % 512 || 512))]); };
+  const files = { '/etc/passwd': 'root:x:0:0::/root:/bin/sh\nnode:x:1000:1000::/home/node:/bin/sh\n', '/etc/group': 'root:x:0:\nstaff:x:50:\n' };
+  const fake = (user, calls) => async (_c, a) => {
+    calls.push(a);
+    if (a[0] === 'image') return { stdout: user + '\n' };
+    if (a[0] === 'create') return { stdout: 'cid123\n' };
+    if (a[0] === 'cp') return { stdout: tar(files[a[1].split(':')[1]]) };
+    return { stdout: '' };
+  };
+  const run = async (user) => { const calls = []; const r = await certs.resolveImageOwner('img:1', { exec: fake(user, calls) }); return { r, calls }; };
+
+  assert.deepEqual((await run('')).r, { uid: 0, gid: 0 }, 'no user set means root');
+  assert.deepEqual((await run('1001:1002')).r, { uid: 1001, gid: 1002 });
+  assert.deepEqual((await run('node')).r, { uid: 1000, gid: 1000 }, 'name resolved from the image /etc/passwd');
+  assert.deepEqual((await run('node:staff')).r, { uid: 1000, gid: 50 });
+  assert.equal((await run('ghost')).r, null, 'an unknown user falls back to null (0444 path)');
+
+  const { calls } = await run('node');
+  assert.ok(!calls.some(a => a[0] === 'run' || a[0] === 'start' || a[0] === 'exec'), `the image was executed: ${JSON.stringify(calls)}`);
+  assert.ok(calls.some(a => a[0] === 'rm' && a.includes('cid123')), 'the created container was not removed');
 });

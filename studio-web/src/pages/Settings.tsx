@@ -1054,6 +1054,7 @@ function BackupTab() {
     enabled?: boolean; keep?: number; hour?: number; last_run?: string | null; last_error?: string | null
     last_file?: string | null; last_bytes?: number | null; directory?: string
     contents?: string[]; excludes?: string[]; archives?: LocalArchive[]
+    managed_databases?: { count: number; included_in: string[]; excluded_from: string[]; point_in_time_recovery: boolean }
   }
   const [local, setLocal] = useState<LocalCfg>({})
   const [localBusy, setLocalBusy] = useState(false)
@@ -1193,12 +1194,24 @@ function BackupTab() {
         {importing ? 'Importing…' : '⬆ Import backup (replaces config + restarts)'}
       </button>
 
+      <h3 style={{ marginTop: 24 }}>Managed databases</h3>
+      <p className="settings-hint">
+        {local.managed_databases
+          ? <>{local.managed_databases.count} managed database{local.managed_databases.count === 1 ? '' : 's'} on this host. </>
+          : null}
+        Each is backed up as a logical dump (pg_dump, mariadb-dump, mongodump, Redis RDB) in the full export above,
+        the nightly off-site upload below, and that app's own per-app backups. They are <b>not</b> in the local
+        nightly archive. There is no point-in-time recovery: a restore returns the database to the moment its
+        dump was taken. App owners restore their own database from the app's Backups card; a platform admin can
+        restore one app's database from an export archive with <code>POST /api/settings/backup/restore-database</code>.
+      </p>
+
       <h3 style={{ marginTop: 24 }}>Scheduled local backup (on by default)</h3>
       <p className="settings-hint">
         Every night AppCrane writes a copy of <code>deployhub.db</code> and <code>.env</code> to{' '}
         <code>{local.directory || 'DATA_DIR/backups/local'}</code> and keeps the newest {local.keep ?? 7}.
         That covers a corrupted, deleted or badly-restored database — <b>not</b> the loss of this host,
-        and <b>not</b> app icons, per-app <code>/data</code>, declared volumes, managed-app repositories
+        and <b>not</b> app icons, per-app <code>/data</code>, declared volumes, managed databases, managed-app repositories
         or container images. Those are in the full export above and the off-site upload below.
       </p>
       <label style={{ display: 'block', margin: '6px 0' }}>

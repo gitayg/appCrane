@@ -18,6 +18,15 @@
  *   - apps/<slug>/<env>/shared/data/…       — the app's /data mount.
  *   - apps/<slug>/<env>/shared/volumes/…    — every OTHER declared mount,
  *                      mirroring the container path (v2.70.2).
+ *   - managed-db/<engine>/<db>.dump          — a logical dump of every managed
+ *                      database (v2.102.0; contents 'full', option managedDb):
+ *                      pg_dump -Fc / mariadb-dump / mongodump --archive --gzip /
+ *                      the Redis RDB, one file per database, made by
+ *                      managedDbBackup.dumpAll(). NOT restored by
+ *                      importDataArchive — a whole-system import swaps the
+ *                      SQLite file and restarts, while a database restore
+ *                      needs the engine running; one database is restored
+ *                      from an archive with POST /api/settings/backup/restore-database.
  *
  * NOT in it:
  *   - managed-app git repositories — one archive per repo, see
@@ -65,6 +74,8 @@ const envPath = () => join(repoRoot, '.env');
 export const MANIFEST = 'appcrane-backup.json';
 const ICON_RE = /^icon\.(png|svg|webp|jpg|jpeg|gif)$/i;
 const ENVS = ['sandbox', 'production'];
+const MANAGED_DB_ENGINES = ['postgres', 'mariadb', 'mongo', 'redis'];
+const MANAGED_DB_MEMBER_RE = /^[a-z][a-z0-9_]{0,62}\.dump$/;
 
 /**
  * Point-in-time copy of the live DB to `dest`, off the event loop and paced to
@@ -146,6 +157,13 @@ async function collectAppTrees() {
  *              app members) and restores through the same importer — the app
  *              trees are simply absent, which the import result reports as
  *              zero icons/data/volume files.
+ *   managedDb — include managed-db/<engine>/<db>.dump for every managed
+ *              database. Default: on for 'full', off for 'platform' (the
+ *              local nightly job — same unbounded-size reasoning as app /data).
+ *              A database that cannot be dumped is recorded in the manifest's
+ *              managed_db.failed and does NOT fail the export: the archive
+ *              also carries deployhub.db and the ENCRYPTION_KEY, and one
+ *              stopped database server must not cost the platform its backup.
  * @returns {{ path, file, bytes, manifest, warnings }}
  */
 export function exportDataArchive(opts = {}) {
@@ -157,6 +175,7 @@ export function exportDataArchive(opts = {}) {
 async function writeDataArchive(opts) {
   const at = opts.at || new Date();
   const platformOnly = opts.contents === 'platform';
+  const withManagedDb = opts.managedDb === undefined ? !platformOnly : Boolean(opts.managedDb);
   const version = opts.version || await craneVersion();
   const db = getDb();
   await ensureBackupsDir();
@@ -176,6 +195,16 @@ async function writeDataArchive(opts) {
       ? { members: [], skipped: [], bytes: 0, dataVolumes: 0 }
       : await collectAppTrees();
     traceBackup('trees:end');
+
+    // Managed databases, dumped into the stage so tar packs them with the
+    // rest. Before the free-space check, so their real size is counted.
+    let managedDb = { databases: [], failed: [], bytes: 0 };
+    if (withManagedDb) {
+      traceBackup('managed-db:start');
+      const { dumpAll } = await import('./managedDbBackup.js');
+      managedDb = await dumpAll(stage, { ops: opts.managedDbOps || null });
+      traceBackup('managed-db:end');
+    }
 
     traceBackup('repos:start');
     const repoSet = await currentRepoSet();
@@ -200,7 +229,7 @@ async function writeDataArchive(opts) {
       log.warn(`[config-backup] could not record the image set: ${e.message}`);
     }
 
-    const totalBytes = dbBytes + envBytes + trees.bytes;
+    const totalBytes = dbBytes + envBytes + trees.bytes + managedDb.bytes;
     const dir = opts.dest ? dirname(resolve(opts.dest)) : backupsDir();
     const free = freeBytes(dir);
     // Uncompressed total is the ceiling for a gzip archive, plus the DB copy
@@ -217,10 +246,21 @@ async function writeDataArchive(opts) {
       version,
       exported_at: at.toISOString(),
       crane_domain: process.env.CRANE_DOMAIN || null,
-      includes: ['deployhub.db', ...(hasEnv ? ['.env'] : []), ...(platformOnly ? [] : ['icons', 'appdata', 'appvolumes'])],
+      includes: [
+        'deployhub.db', ...(hasEnv ? ['.env'] : []), ...(platformOnly ? [] : ['icons', 'appdata', 'appvolumes']),
+        ...(withManagedDb && managedDb.databases.length ? ['managed-db'] : []),
+      ],
       contents: platformOnly ? 'platform' : 'full',
       counts,
-      bytes: { db: dbBytes, env: envBytes, apps: trees.bytes, total: totalBytes },
+      bytes: { db: dbBytes, env: envBytes, apps: trees.bytes, managed_db: managedDb.bytes, total: totalBytes },
+      // Which managed databases are in managed-db/, and which could not be
+      // dumped. `included: false` means the option was off (a 'platform'
+      // archive), which is different from "there were none".
+      managed_db: {
+        included: withManagedDb,
+        databases: managedDb.databases.map(({ engine, db_name, app_id, tenant, member, bytes }) => ({ engine, db_name, app_id, tenant, member, bytes })),
+        failed: managedDb.failed,
+      },
       repos_included: false,
       repo_set: repoSet,
       image_set: imageSet,
@@ -235,7 +275,7 @@ async function writeDataArchive(opts) {
     try {
       traceBackup('tar:start');
       ({ warnings } = await createTar(partial, [
-        { cwd: stage, paths: [MANIFEST, 'deployhub.db'] },
+        { cwd: stage, paths: [MANIFEST, 'deployhub.db', ...(managedDb.databases.length ? ['managed-db'] : [])] },
         ...(hasEnv ? [{ cwd: repoRoot, paths: ['.env'] }] : []),
         { cwd: dataDir(), paths: trees.members },
       ], { gzip: true }));
@@ -247,8 +287,9 @@ async function writeDataArchive(opts) {
       throw e;
     }
     const bytes = (await stat(dest)).size;
-    log.info(`[config-backup] exported data archive (apps=${counts.apps}, users=${counts.users}, env=${hasEnv}, data-volumes=${trees.dataVolumes}, repos-recorded=${repoSet.count}, ${bytes} bytes)`);
-    return { path: dest, file, bytes, manifest, warnings, skipped: trees.skipped };
+    log.info(`[config-backup] exported data archive (apps=${counts.apps}, users=${counts.users}, env=${hasEnv}, data-volumes=${trees.dataVolumes}, managed-dbs=${managedDb.databases.length}${managedDb.failed.length ? ` (${managedDb.failed.length} FAILED)` : ''}, repos-recorded=${repoSet.count}, ${bytes} bytes)`);
+    const dbWarnings = managedDb.failed.map((f) => `managed database ${f.engine}/${f.db_name} was not dumped: ${f.error}`);
+    return { path: dest, file, bytes, manifest, warnings: [...(warnings || []), ...dbWarnings], skipped: trees.skipped };
   } finally {
     traceBackup('cleanup:start');
     await rm(stage, { recursive: true, force: true });
@@ -286,6 +327,15 @@ function legacyTarget(name) {
 function allowedStaged(rel, type) {
   if (rel === MANIFEST || rel === 'deployhub.db' || rel === '.env') return type === 'file';
   const s = rel.split('/');
+  // managed-db/<engine>/<db>.dump (v2.102.0). Accepted so a new archive still
+  // imports, then left in the stage: databases are restored one at a time
+  // (restore-database), never by the whole-system import.
+  if (s[0] === 'managed-db') {
+    if (s.length === 1) return type === 'dir';
+    if (!MANAGED_DB_ENGINES.includes(s[1])) return false;
+    if (s.length === 2) return type === 'dir';
+    return s.length === 3 && MANAGED_DB_MEMBER_RE.test(s[2]) && type === 'file';
+  }
   if (s[0] === 'legacy-repos') return s.length === 1 ? type === 'dir' : (s.length === 2 && type === 'file');
   if (s[0] !== 'apps') return false;
   if (s.length === 1) return type === 'dir';
@@ -511,6 +561,11 @@ export async function importDataArchive(archivePath, opts = {}) {
       manifest, format: isZip ? 'legacy-zip' : 'tar.gz',
       envRestored, icons, dataFiles, volumeFiles, refused, preImportDir: preDir, imageSet, repoSet,
       repos,
+      // Present in the archive, deliberately not applied (see allowedStaged).
+      managedDb: {
+        dumps: Array.isArray(manifest.managed_db?.databases) ? manifest.managed_db.databases.length : 0,
+        note: 'Managed databases are not restored by a whole-system import. Restore one database from this archive with POST /api/settings/backup/restore-database once the server is back up.',
+      },
       repoHeads: stagedRepos.map(({ slug, head, headSha }) => ({ slug, head, headSha })),
     };
   } finally {

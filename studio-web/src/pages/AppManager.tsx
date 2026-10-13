@@ -4,6 +4,7 @@ import { adminApi } from '../adminApi'
 import { RedeployWarning, fetchRedeployRisk, type RedeployRisk } from '../components/RedeployWarning'
 import { StoredEnvFilesCard } from '../components/StoredEnvFilesCard'
 import { ManagedDatabaseCard } from '../components/ManagedDatabaseCard'
+import { BackupsCard } from '../components/BackupsCard'
 
 const PAGE_CSS = `
 .app-manager .breadcrumb{font-size:.78rem;color:var(--dim);padding:7px 24px;background:var(--surface);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:5px;margin:-24px -24px 16px;}
@@ -1224,6 +1225,7 @@ export function AppManager() {
             {isAdminUser && <LimitsCard slug={currentApp} reload={reloadCounter} onMsg={showMsg} />}
             <SandboxVisibilityCard slug={currentApp} reload={reloadCounter} onMsg={showMsg} />
             <ManagedDatabaseCard slug={currentApp} reload={reloadCounter} onMsg={showMsg} />
+            <BackupsCard slug={currentApp} env={currentEnv} reload={reloadCounter} onMsg={showMsg} />
             <DeployCard
               slug={currentApp}
               env={currentEnv}

@@ -1,0 +1,19 @@
+-- Per-app backups carry the app's managed-database dumps (v2.102.0).
+--
+-- databases: JSON array, one entry per dumped database, written by
+-- routes/backups.js from managedDbBackup.dumpScope():
+--   [{ "engine": "postgres", "tenant": "", "db_name": "crane_a42",
+--      "file": "<DATA_DIR>/backups/<slug>/<env>-<stamp>.postgres.dump",
+--      "size_bytes": 12345 }]
+-- NULL (every backup taken before this release, and a backup of an app with
+-- no managed database) means "no database in this backup", and restore then
+-- behaves exactly as it always did.
+--
+-- In the SAME row as the /data archive rather than a linked table on purpose:
+-- the two were taken together and are restored together, the existing
+-- (app_id) scoping of every backups query covers both, and the app-delete
+-- path (routes/apps.js DELETE FROM backups) removes both with no second
+-- statement to forget. `tenant` is recorded because it names WHICH database
+-- of the app was dumped (production/shared '' or the separate sandbox
+-- database 'env:sandbox'), and restore goes back to that one.
+ALTER TABLE backups ADD COLUMN databases TEXT;

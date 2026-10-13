@@ -442,6 +442,9 @@ router.get('/images/verify', requireAuth, requirePlatformAdmin, async (req, res)
 // binds to.
 router.get('/backup/s3', requireAuth, requirePlatformAdmin, async (_req, res) => {
   const { getBackupConfig, offSiteState } = await import('../services/backupScheduler.js');
+  // Managed-database coverage is on GET /backup/local (which Settings → Backup
+  // also loads), not here: this payload is pinned to the form's fields plus
+  // off_site by test/backup-honesty.test.js.
   res.json({ ...getBackupConfig(), off_site: offSiteState() });
 });
 
@@ -470,7 +473,8 @@ router.post('/backup/s3/run', requireAuth, requirePlatformAdmin, async (_req, re
 router.get('/backup/local', requireAuth, requirePlatformAdmin, async (_req, res) => {
   const { getLocalBackupConfig, listLocalBackups } = await import('../services/localBackup.js');
   const { offSiteState } = await import('../services/backupScheduler.js');
-  res.json({ ...getLocalBackupConfig(), archives: await listLocalBackups(), off_site: offSiteState() });
+  const { managedDbBackupCoverage } = await import('../services/managedDbBackup.js');
+  res.json({ ...getLocalBackupConfig(), archives: await listLocalBackups(), off_site: offSiteState(), managed_databases: managedDbBackupCoverage() });
 });
 
 router.put('/backup/local', requireAuth, requirePlatformAdmin, async (req, res) => {
@@ -487,6 +491,52 @@ router.post('/backup/local/run', requireAuth, requirePlatformAdmin, async (_req,
     res.json({ ok: true, ...r, archives: await listLocalBackups() });
   } catch (e) {
     res.json({ ok: false, error: e.message });
+  }
+});
+
+// ── Managed databases in backups (v2.102.0) ────────────────────────────────
+//
+// Restore ONE app's managed database from a whole-system export archive (the
+// on-demand export, a local archive or a downloaded off-site copy placed in
+// DATA_DIR/backups). Platform admin only: the archive holds every app's
+// database, and choosing one to load into a live app is not an app owner's
+// operation — app owners restore their own databases from per-app backups.
+// The archive member is derived from the TARGET app's own row
+// (managedDbBackup.restoreFromExport), so this cannot load app Y's dump into
+// app X whatever the body says.
+let restoreDbOps = null;
+export function __setRestoreDbOpsForTests(ops) { restoreDbOps = ops; }
+
+router.post('/backup/restore-database', requireAuth, requirePlatformAdmin, async (req, res) => {
+  const { confineToBackups } = await import('../services/backupFiles.js');
+  const { localBackupsDir } = await import('../services/localBackup.js');
+  const { restoreFromExport } = await import('../services/managedDbBackup.js');
+  const { logAudit } = await import('../middleware/audit.js');
+  const { join } = await import('path');
+  const { archive, app: slug, env, engine } = req.body || {};
+  if (!['postgres', 'mariadb', 'mongo', 'redis'].includes(engine)) {
+    return res.status(400).json({ error: { code: 'VALIDATION', message: 'engine must be postgres, mariadb, mongo or redis' } });
+  }
+  const app = getDb().prepare('SELECT id, slug FROM apps WHERE slug = ?').get(String(slug || ''));
+  if (!app) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'No such app' } });
+  let abs;
+  try {
+    abs = await confineToBackups(archive);
+  } catch (e) {
+    // A bare name may also be a local nightly archive (DATA_DIR/backups/local).
+    if (e.status !== 404 || String(archive || '').includes('/')) {
+      return res.status(e.status || 400).json({ error: { code: 'VALIDATION', message: e.message } });
+    }
+    try { abs = await confineToBackups(join(localBackupsDir(), String(archive))); } catch (e2) {
+      return res.status(e2.status || 400).json({ error: { code: 'VALIDATION', message: e2.message } });
+    }
+  }
+  try {
+    const r = await restoreFromExport({ archivePath: abs, appId: app.id, env, engine }, { ops: restoreDbOps });
+    logAudit(req.user.id, app.id, 'managed-db-restore', { engine, env, archive: String(archive).split('/').pop(), db_name: r.db_name });
+    res.json({ ok: true, message: `Restored the ${engine} database of ${app.slug} (${env}) from ${String(archive).split('/').pop()}`, ...r });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: { code: e.code || 'RESTORE_FAILED', message: e.message } });
   }
 });
 

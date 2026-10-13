@@ -832,6 +832,38 @@ Notes:
 - Catalogue apps keep working without TLS: the servers offer TLS to anyone who
   asks, but only logins declared in `deployhub.json` are required to use it.
 
+### Backups and restore
+
+- **What is backed up:** a logical dump of each database, taken inside its
+  engine container: `pg_dump` (custom format), `mariadb-dump`
+  (`--single-transaction --routines --triggers`), `mongodump --archive --gzip`,
+  and the Redis RDB after a `BGSAVE`. One dump per database; a backup of this
+  app never contains another app's database.
+- **When:** a per-app backup (app page → Backups → Back up now, or
+  `POST /api/apps/<slug>/backup/<env>`) dumps the databases that environment
+  uses — production's, or the separate sandbox database; a sandbox that shares
+  production's database backs up that shared one. Per-app backups are taken on
+  demand only. Every night, if the platform's off-site upload is configured,
+  every managed database is included in it; the local nightly archive does
+  NOT include databases.
+- **Retention:** per-app backups have no automatic expiry. Off-site copies are
+  kept for as long as the bucket keeps them (AppCrane deletes none).
+- **No point-in-time recovery.** A restore returns the database to the moment
+  its dump was taken; anything written since is lost.
+- **Restore** one backup: Backups → Restore. "Also restore the database" is on
+  by default when the backup has one (`include_database: false` to skip it). It
+  replaces the database's contents: Postgres restores into a staging copy and
+  swaps it in only if the whole dump loaded; MariaDB and Mongo empty the
+  database and load the dump; Redis is restarted on the backed-up RDB. Open
+  connections are closed. The app's login, password, certificate requirement
+  and limits are unchanged — they are re-applied after every restore.
+- **Who:** restoring production, or a sandbox backup whose database is the one
+  production uses, needs the app owner or a platform admin. A backup can only
+  be restored into the app and database it was taken from.
+- A platform admin can also restore one app's database from a whole-platform
+  export archive (`POST /api/settings/backup/restore-database` with
+  `archive`, `app`, `env`, `engine`).
+
 ## Scheduled jobs — `cron` in `deployhub.json`
 
 Declare periodic work in `deployhub.json` and AppCrane runs it host-side via

@@ -106,7 +106,7 @@ const REST_FAMILIES: { name: string; rows: [string, string, string][] }[] = [
     ["POST", "/api/service/email", "Send email from an app's server (service-token auth)"],
   ] },
   { name: "Backups", rows: [
-    ["POST", "/api/apps/:slug/backup/:env", "Snapshot the /data volume"],
+    ["POST", "/api/apps/:slug/backup/:env", "Snapshot /data and the managed databases it uses"],
     ["GET", "/api/apps/:slug/backups", "List snapshots"],
     ["POST", "/api/apps/:slug/restore/:id", "Restore a snapshot"],
   ] },
