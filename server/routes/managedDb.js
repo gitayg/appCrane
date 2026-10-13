@@ -440,6 +440,68 @@ serversRouter.put('/settings', requireAuth, requirePlatformAdmin, async (req, re
   });
 });
 
+/**
+ * MariaDB data-at-rest encryption (services/managedDbEncryption.js). Platform
+ * admin only: there is one MariaDB server and one key for every app's data.
+ *
+ *   GET  /encryption              state + live progress (read-only; never
+ *                                 starts the server; never returns the key)
+ *   PUT  /encryption              { enabled: true } | { enabled: false, confirm: true }
+ *                                 recreates the running server once
+ *   POST /encryption/unload-key   { delete_key?: boolean } — refused (409)
+ *                                 unless the RUNNING server reports nothing
+ *                                 encrypted; the engine enforces it, not this
+ *                                 router
+ */
+function rethrowEncryptionError(err) {
+  if (err?.code === 'CONFIRM_REQUIRED') throw new AppError(err.message, 400, 'CONFIRM_REQUIRED');
+  if (err?.code === 'ENCRYPTION_IN_USE') throw new AppError(err.message, 409, 'ENCRYPTION_IN_USE');
+  rethrowEngineError(err);
+}
+
+serversRouter.get('/encryption', requireAuth, requirePlatformAdmin, async (_req, res) => {
+  const svc = await engineModule();
+  try {
+    res.json(await svc.mariadbEncryptionStatus());
+  } catch (err) {
+    rethrowEncryptionError(err);
+  }
+});
+
+serversRouter.put('/encryption', requireAuth, requirePlatformAdmin, async (req, res) => {
+  const body = req.body || {};
+  if (typeof body.enabled !== 'boolean') throw new AppError('enabled (boolean) is required', 400, 'VALIDATION');
+  const svc = await engineModule();
+  let result;
+  try {
+    result = await svc.setMariadbEncryption(body.enabled, { confirm: body.confirm === true, userId: req.user.id });
+  } catch (err) {
+    rethrowEncryptionError(err);
+  }
+  logAudit(req.user.id, null, 'managed-db-encryption-change', { engine: 'mariadb', enabled: body.enabled, restarted: result.restarted });
+  res.json({
+    ...result.status,
+    restarted: result.restarted,
+    note: result.restarted
+      ? 'The MariaDB server was restarted on its existing data; connections open at that moment dropped once. '
+        + (body.enabled ? 'Existing tables are being encrypted in the background.' : 'Tables are being decrypted in the background; the key stays loaded until that is finished.')
+      : 'Saved. It applies when the MariaDB server is next created.',
+  });
+});
+
+serversRouter.post('/encryption/unload-key', requireAuth, requirePlatformAdmin, async (req, res) => {
+  const deleteKey = req.body?.delete_key === true;
+  const svc = await engineModule();
+  let status;
+  try {
+    status = await svc.unloadMariadbEncryptionKey({ deleteKey, userId: req.user.id });
+  } catch (err) {
+    rethrowEncryptionError(err);
+  }
+  logAudit(req.user.id, null, 'managed-db-encryption-key-unload', { engine: 'mariadb', deleted: deleteKey });
+  res.json(status);
+});
+
 serversRouter.get('/servers', requireAuth, requirePlatformAdmin, async (_req, res) => {
   const svc = await engineModule();
 

@@ -393,7 +393,10 @@ crane init --name admin --email you@example.com</pre>
 // app's own frontend is a legitimate caller ("show a banner when the platform
 // announces a breaking change"), and without the exemption that fetch gets
 // 307'd back into the app's own /{slug} prefix and never reaches the platform.
-const APPCRANE_PASSTHROUGH = ['/api/identity', '/api/apps', '/api/info', '/api/notices', '/api/_crashed', '/api/me', '/api/directory', '/api/mcp', '/api/service', '/favicon.svg', '/docs'];
+// v2.103.0: '/api/enhancements' — an app's own "send feedback" button posts
+// there from inside its page, and the fallback 307'd it into the app, which
+// answered 404: requests filed from inside an app never reached the queue.
+const APPCRANE_PASSTHROUGH = ['/api/identity', '/api/apps', '/api/info', '/api/notices', '/api/_crashed', '/api/me', '/api/directory', '/api/mcp', '/api/service', '/api/enhancements', '/favicon.svg', '/docs'];
 const APPCRANE_PAGE_SLUGS = new Set(['login', 'portal', 'dashboard', 'applications', 'users-page', 'audit-page', 'settings', 'docs', 'app', 'studio', 'appstudio']);
 app.use((req, res, next) => {
   if (req.method === 'OPTIONS') return next();
@@ -1683,6 +1686,17 @@ app.listen(PORT, HOST, async () => {
     startDbAuthAlertScheduler();
   } catch (e) {
     log.error('Managed database login-alert scheduler failed to start: ' + e.message);
+  }
+
+  // MariaDB data-at-rest encryption: rewrite the (wrapped) key file from the
+  // copy in deployhub.db, so a host restored from a backup has it before
+  // anything starts MariaDB again (services/managedDbEncryption.js). Files
+  // only; starts nothing.
+  try {
+    const { syncKeyFileAtBoot } = await import('./services/managedDbEncryption.js');
+    if (syncKeyFileAtBoot(getDb())) log.info('Managed MariaDB encryption key file written');
+  } catch (e) {
+    log.error('Managed MariaDB encryption key file could not be written: ' + e.message);
   }
 
   // Bulk-redeploy sentinel — written by the upgrade script's cleanup phase

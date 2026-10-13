@@ -26,8 +26,11 @@
  *     every hosted app's data onto the same disk it is protecting is unbounded
  *     in size and is how a backup takes a host down; the database and the
  *     ENCRYPTION_KEY are the part nothing else can rebuild. Managed databases
- *     (v2.102.0) are excluded for the same reason — they are in the full
- *     export and the off-site upload, and in per-app backups.
+ *     ARE included (managed-db/<engine>/<db>.dump, since v2.103.0): logical
+ *     dumps are compact next to app trees, and without them a host with no
+ *     off-site upload configured had no scheduled copy of any app's database
+ *     at all. The free-space check below still refuses a run that would not
+ *     fit, rather than filling the disk.
  *   - DISK COST: KEEP_DEFAULT (7) copies of a gzipped SQLite database plus a
  *     .env. For a 62-app instance that is single-digit MB per copy — the whole
  *     schedule costs less than one container image. exportDataArchive's own
@@ -101,8 +104,8 @@ export function getLocalBackupConfig() {
     last_file: get(db, K.lastFile) || null,
     last_bytes: Number.isFinite(lastBytes) ? lastBytes : null,
     directory: localBackupsDir(),
-    contents: ['deployhub.db', '.env'],
-    excludes: ['app icons', 'per-app /data', 'declared volumes', 'managed databases', 'managed-app repositories', 'container images'],
+    contents: ['deployhub.db', '.env', 'managed databases'],
+    excludes: ['app icons', 'per-app /data', 'declared volumes', 'managed-app repositories', 'container images'],
   };
 }
 
@@ -170,7 +173,7 @@ export async function runLocalBackup() {
   await mkdir(dir, { recursive: true, mode: 0o700 });
   const file = localFileName(at);
   try {
-    const out = await exportDataArchive({ dest: join(dir, file), at, contents: 'platform' });
+    const out = await exportDataArchive({ dest: join(dir, file), at, contents: 'platform', managedDb: true });
     const removed = await pruneLocalBackups(cfg.keep);
     set(db, K.lastRun, at.toISOString());
     set(db, K.lastError, '');

@@ -120,6 +120,7 @@ import { SANDBOX_TENANT } from './sandboxDb.js';
 import * as certs from './dbCerts.js';
 import * as tlsCfg from './managedDbTls.js';
 import { getManagedDbSettings } from './managedDbSettings.js';
+import * as tde from './managedDbEncryption.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -529,6 +530,15 @@ function withLock(key, fn) {
 function serverConfigLabel(engine) {
   const parts = { tls: tlsCfg.TLS_CONFIG_VERSION };
   if (engine === 'postgres') parts.maxConnections = getManagedDbSettings(getDb()).pg_max_connections;
+  // MariaDB data-at-rest encryption (managedDbEncryption.js): the mode, plus a
+  // one-way tag of the key file's wrapping secret so a changed ENCRYPTION_KEY
+  // recreates a container still holding the old secret. ONLY when the key is
+  // loaded: a server that never turned encryption on keeps the label it has,
+  // so this release recreates nothing by itself.
+  if (engine === 'mariadb') {
+    const mode = tde.modeFor(tde.getState(getDb()));
+    if (mode !== 'none') parts.tde = `${mode}:${tde.fileKeyFingerprint()}`;
+  }
   return crypto.createHash('sha256').update(JSON.stringify(parts)).digest('hex').slice(0, 12);
 }
 
@@ -579,6 +589,171 @@ async function reloadServerTls(engine, container, coords = null) {
   } catch (e) {
     log.warn(`managedDb: ${container} could not reload its renewed TLS certificate (${e.message}); it will use it after its next restart`);
   }
+}
+
+// ---------------------------------------------------------------------------
+// MariaDB data-at-rest encryption (state, key and flags: managedDbEncryption.js)
+// ---------------------------------------------------------------------------
+
+/**
+ * Put the key file where the container expects it, or take it away. Returns
+ * the mode the container is (re)created with. The key directory must never be
+ * the data volume or inside it — checked against THIS module's idea of the
+ * volume too, so the two files cannot drift apart silently.
+ */
+function prepareServerEncryption() {
+  const mode = tde.modeFor(tde.getState(getDb()));
+  if (resolve(tde.dataVolumeDir()) !== resolve(dataDirFor('mariadb'))) {
+    throw new Error('managedDb: managedDbEncryption.dataVolumeDir() disagrees with the MariaDB data directory');
+  }
+  if (mode === 'none') tde.removeKeyFile();
+  else tde.writeKeyFile(getDb());
+  return mode;
+}
+
+/** Error with a code the router maps to an HTTP status. */
+function encryptionError(message, code) {
+  const e = new Error(message);
+  e.code = code;
+  return e;
+}
+
+/** Live tablespace counts and settings, or null when the server is not running. */
+async function readEncryptionLive() {
+  const facts = await containerFacts(ENGINES.mariadb.container);
+  if (facts.state !== 'running' || facts.owner !== 'mariadb') return null;
+  return tde.parseStatus(await runAdminSql('mariadb', tde.STATUS_SQL));
+}
+
+async function scanAriaEncryption() {
+  const out = await dockerExec(['exec', ENGINES.mariadb.container, 'sh', '-c', tde.ARIA_SCAN_SNIPPET], { timeout: 300000 });
+  return tde.parseAriaScan(out);
+}
+
+/**
+ * GET /api/managed-db/encryption. READ ONLY, like serverStatus(): it reads the
+ * running server (one SELECT over the admin socket) and never ensures,
+ * recreates or starts anything. Never returns key material.
+ */
+export async function mariadbEncryptionStatus() {
+  const state = tde.getState(getDb());
+  let live = null;
+  let error = null;
+  try {
+    if (serverRow('mariadb')) live = await readEncryptionLive();
+  } catch (e) {
+    error = e.message;
+  }
+  return {
+    engine: 'mariadb',
+    enabled: state.enabled,
+    key_loaded: state.keyLoaded,
+    key_exists: state.keyExists,
+    phase: tde.phaseFor(state, live),
+    server_provisioned: Boolean(serverRow('mariadb')),
+    server_running: Boolean(live),
+    tablespaces: live ? { total: live.total, encrypted: live.encrypted, plain: live.plain, in_progress: live.in_progress } : null,
+    live: live ? live.live : null,
+    error,
+    caveat: tde.CAVEAT,
+  };
+}
+
+/**
+ * Turn encryption on or off. ON generates the key once and recreates the
+ * running server with the plugin and every *_encrypt_* setting on; the
+ * encryption threads then encrypt existing tablespaces in the background. OFF
+ * needs `confirm` and only switches the settings off — the key stays loaded,
+ * and the threads decrypt; unloadMariadbEncryptionKey() is the only way out of
+ * that state. Either way the server is recreated once on its existing data
+ * volume, so connections open at that moment drop.
+ *
+ * A platform whose MariaDB was never created just records the choice: the
+ * server is then initialised with it on first use.
+ */
+export async function setMariadbEncryption(enabled, { confirm = false, userId = null } = {}) {
+  return withLock('tde:mariadb', async () => {
+    const db = getDb();
+    const before = tde.getState(db);
+    if (enabled) {
+      tde.enable(db, userId);
+    } else {
+      if (!confirm) {
+        throw encryptionError(
+          'Turning MariaDB encryption off restarts the server and decrypts every tablespace in the background. Send confirm: true to proceed.',
+          'CONFIRM_REQUIRED',
+        );
+      }
+      tde.disable(db, userId);
+      // Never ran here: nothing can have been encrypted with this key, so there
+      // is no decrypt phase to wait for.
+      if (!serverRow('mariadb') && before.keyLoaded) tde.markKeyUnloaded(db, userId);
+    }
+    const after = tde.getState(db);
+    const changed = tde.modeFor(before) !== tde.modeFor(after);
+    if (changed && serverRow('mariadb')) {
+      log.info(`managedDb: MariaDB encryption ${enabled ? 'on' : 'off'}; recreating the MariaDB server on its existing data volume`);
+      await ensureServer('mariadb');
+    }
+    return { restarted: changed && Boolean(serverRow('mariadb')), status: await mariadbEncryptionStatus() };
+  });
+}
+
+/**
+ * Stop loading the key once nothing is encrypted with it — and optionally
+ * delete it. THE SERVER-SIDE SAFETY RULE: tde.unloadRefusal() over what the
+ * RUNNING server reports right now (InnoDB tablespaces, live settings, an
+ * aria_chk pass over every Aria table). Any reason -> refused, nothing changes.
+ *
+ * After the restart without the plugin the tablespaces are read once more: an
+ * app could have created a table with ENCRYPTED=YES between the check and the
+ * restart. If anything reads as encrypted then, or the server will not start,
+ * the key is loaded again and nothing is deleted.
+ */
+export async function unloadMariadbEncryptionKey({ deleteKey = false, userId = null } = {}) {
+  return withLock('tde:mariadb', async () => {
+    const db = getDb();
+    let state = tde.getState(db);
+    if (state.enabled) throw encryptionError('Encryption is on. Turn it off first and wait for decryption to finish.', 'ENCRYPTION_IN_USE');
+    if (state.keyLoaded) {
+      const live = await readEncryptionLive();
+      let aria = null;
+      if (live && !tde.unloadRefusal({ state, status: live, aria: { complete: true, encrypted: [], unreadable: [] } })) {
+        // InnoDB is plain and the server runs in decrypt mode: only now is a
+        // rebuild of an encrypted Aria table guaranteed to come out plain.
+        aria = await scanAriaEncryption();
+        const { sql } = tde.ariaRebuildSql(aria.encrypted);
+        if (sql.length) {
+          log.info(`managedDb: rebuilding ${sql.length} encrypted Aria table(s) without encryption before unloading the MariaDB key`);
+          await runAdminSql('mariadb', sql.join('\n'));
+          aria = await scanAriaEncryption();
+        }
+      }
+      const refusal = tde.unloadRefusal({ state, status: live, aria });
+      if (refusal) throw encryptionError(refusal, 'ENCRYPTION_IN_USE');
+
+      tde.markKeyUnloaded(db, userId);
+      let reason = null;
+      try {
+        await ensureServer('mariadb');
+        const after = tde.parseStatus(await runAdminSql('mariadb', tde.STATUS_SQL));
+        if (after.plain !== after.total) reason = `${after.total - after.plain} tablespace(s) read as encrypted after the restart`;
+      } catch (e) {
+        reason = `MariaDB did not start without the key (${e.message})`;
+      }
+      if (reason) {
+        tde.markKeyLoaded(db, userId);
+        await ensureServer('mariadb').catch((e) => log.error(`managedDb: could not reload the MariaDB key: ${e.message}`));
+        throw encryptionError(`${reason}. The key was loaded again and nothing was deleted.`, 'ENCRYPTION_IN_USE');
+      }
+      state = tde.getState(db);
+    }
+    if (deleteKey && state.keyExists) {
+      tde.deleteKey(db);
+      tde.removeKeyFile();
+    }
+    return mariadbEncryptionStatus();
+  });
 }
 
 function serverRow(engine) {
@@ -686,6 +861,11 @@ async function ensureServerLocked(engine, cfg) {
   // one that is running may need to reload them.
   const addrs = await bindAddresses();
   const tls = await prepareServerTls(engine, addrs);
+  // The MariaDB key file, rewritten from SQLite BEFORE anything can start or
+  // create the container — including the plain `docker start` below, which
+  // reuses the existing mount. This is what lets a restored host (deployhub.db
+  // back, DATA_DIR/managed-db/_tde gone) open its encrypted data.
+  const tdeMode = engine === 'mariadb' ? prepareServerEncryption() : 'none';
   const wantConfig = serverConfigLabel(engine);
 
   const facts = await containerFacts(cfg.container);
@@ -734,6 +914,12 @@ async function ensureServerLocked(engine, cfg) {
   await waitReady(engine, port);
   await ensureAdminCredentialFile(engine, adminPassword);
   await verifyAdminLogin(engine, { adopted: state === 'running' });
+  if (tdeMode === 'decrypt' && ours) {
+    // Starting with innodb_encrypt_tables=OFF does not start decryption; the
+    // statement on the running server does (measured; see DECRYPT_KICK_SQL).
+    // Idempotent, so it is issued on every ensure while decrypting.
+    await runAdminSql('mariadb', tde.DECRYPT_KICK_SQL);
+  }
   if (state && !ours) {
     // Reached only for a foreign container the admin check did not already
     // refuse (Postgres's admin path is the unix socket and checks no
@@ -762,10 +948,18 @@ async function ensureServerLocked(engine, cfg) {
  */
 function serverCommandFor(engine, port) {
   if (engine === 'mongo') return mongo.serverCommand(port, { tls: true });
-  const flags = engine === 'postgres'
-    ? tlsCfg.pgServerArgs({ maxConnections: getManagedDbSettings(getDb()).pg_max_connections })
-    : tlsCfg.mariadbServerArgs();
-  return ['sh', '-c', `${tlsCfg.installSnippet(engine)} && exec docker-entrypoint.sh "$@"`, 'sh', ...flags];
+  if (engine === 'postgres') {
+    const flags = tlsCfg.pgServerArgs({ maxConnections: getManagedDbSettings(getDb()).pg_max_connections });
+    return ['sh', '-c', `${tlsCfg.installSnippet(engine)} && exec docker-entrypoint.sh "$@"`, 'sh', ...flags];
+  }
+  // MariaDB: the TLS flags, plus the encryption flags and the key install
+  // snippet when the key is loaded (both fixed literals; see
+  // managedDbEncryption.js).
+  const mode = tde.modeFor(tde.getState(getDb()));
+  const snippet = mode === 'none'
+    ? tlsCfg.installSnippet(engine)
+    : `${tlsCfg.installSnippet(engine)} && ${tde.installSnippet()}`;
+  return ['sh', '-c', `${snippet} && exec docker-entrypoint.sh "$@"`, 'sh', ...tlsCfg.mariadbServerArgs(), ...tde.serverArgs(mode)];
 }
 
 /**
@@ -795,10 +989,18 @@ async function createServerContainer(engine, cfg, port, adminPassword, tlsDir) {
   // password rather than stored separately (services/managedMongo.js explains
   // why). The run command materialises the key file from it inside the
   // container, so the key never touches the host's process table either.
+  //
+  // MARIADB WITH ENCRYPTION carries one more: the key file's wrapping secret,
+  // which the start command moves to a tmpfs and unsets before the server
+  // starts (managedDbEncryption.js). Same lifetime as the root password: in
+  // this file for the one `docker run`, then deleted.
+  const tdeMode = engine === 'mariadb' ? tde.modeFor(tde.getState(getDb())) : 'none';
   const envFile = envFileFor(engine);
   writeFileSync(
     envFile,
-    engine === 'mongo' ? mongo.envFileBody(adminPassword) : `${cfg.passwordEnv}=${adminPassword}\n`,
+    engine === 'mongo'
+      ? mongo.envFileBody(adminPassword)
+      : `${cfg.passwordEnv}=${adminPassword}\n${tdeMode === 'none' ? '' : tde.envFileLine()}`,
     { mode: 0o600 },
   );
 
@@ -824,6 +1026,10 @@ async function createServerContainer(engine, cfg, port, adminPassword, tlsDir) {
     // (services/dbCerts.js explains both halves). The start command copies
     // them to a private directory owned by the engine user.
     '-v', tlsCfg.serverMountArg(tlsDir),
+    // The wrapped MariaDB key file: read-only, from DATA_DIR/managed-db/_tde,
+    // a sibling of the data volume above and never inside it; plus the tmpfs
+    // the start command copies it into.
+    ...(tdeMode === 'none' ? [] : tde.runArgs(tde.keyDir())),
     ...(engine === 'mongo' ? mongo.extraRunArgs(DB_HOST_FOR_CONTAINERS) : []),
   ];
   // NOT `--network appcrane-apps`: see the header. On that bridge the

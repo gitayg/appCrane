@@ -72,6 +72,16 @@ export function decrypt(encoded, keyOverrideHex) {
   return decrypted;
 }
 
+// A secret derived from ENCRYPTION_KEY for one named purpose (HMAC-SHA256 of
+// the label, hex). Used where a secret must be reproducible from the instance
+// key without being stored anywhere, and must not BE the instance key: the
+// MariaDB key file's wrapping secret (managedDbEncryption.js) is handed to a
+// container, and a container must never hold the key that decrypts every
+// other secret in SQLite. Changing the label changes the secret.
+export function deriveSecret(label) {
+  return crypto.createHmac('sha256', getKey()).update(String(label)).digest('hex');
+}
+
 export function hashApiKey(key) {
   return crypto.createHash('sha256').update(key).digest('hex');
 }

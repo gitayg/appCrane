@@ -864,6 +864,25 @@ Notes:
   export archive (`POST /api/settings/backup/restore-database` with
   `archive`, `app`, `env`, `engine`).
 
+### Encryption at rest (MariaDB, platform setting)
+
+- A platform admin can turn on **Encrypt MariaDB data at rest** (Dashboard →
+  Database limits, or `PUT /api/managed-db/encryption`). Nothing changes for
+  your app: same credentials, same SQL. The shared MariaDB restarts once when
+  it is turned on or off, so **your open connections drop once** — reconnect
+  on error, as you already should.
+- What is encrypted on disk: InnoDB tables (the default engine), the redo log,
+  temporary tablespaces and temporary files, and Aria tables created while it
+  is on. Aria tables that existed before stay readable as they were.
+- Avoid `ENCRYPTED=YES` / `ENCRYPTED=NO` table options: the platform decides.
+  A table pinned with `ENCRYPTED=YES` blocks the platform from ever turning
+  encryption off until it is altered back.
+- It protects copied database files, dumps of the data volume and stray
+  snapshots, not someone holding the whole server: the key is stored on the
+  same machine. Postgres, Mongo and Redis have no equivalent setting.
+- Backups are logical dumps (SQL), so they are readable without the key and
+  are encrypted again when restored into an encrypted server.
+
 ## Scheduled jobs — `cron` in `deployhub.json`
 
 Declare periodic work in `deployhub.json` and AppCrane runs it host-side via

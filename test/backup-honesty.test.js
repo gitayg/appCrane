@@ -97,7 +97,7 @@ test('a fresh instance has the local backup ON, with no setting written at all',
   assert.equal(cfg.keep, KEEP_DEFAULT);
   assert.equal(cfg.hour, HOUR_DEFAULT);
   assert.equal(cfg.directory, join(ROOT, 'backups', 'local'));
-  assert.deepEqual(cfg.contents, ['deployhub.db', '.env']);
+  assert.deepEqual(cfg.contents, ['deployhub.db', '.env', 'managed databases']);
   assert.equal(cfg.last_run, null);
 });
 
@@ -284,6 +284,10 @@ test('the archive declares its own partial scope, so a restore cannot mistake it
   assert.ok(!manifest.includes.includes('appdata'), 'includes must not claim appdata');
   assert.ok(!manifest.includes.includes('appvolumes'));
   assert.ok(manifest.includes.includes('deployhub.db'));
+  // v2.103.0: the nightly asks for managed-database dumps (with none provisioned
+  // the list is empty, but the option must be on, or a host without off-site
+  // backup has no scheduled copy of any app database).
+  assert.equal(manifest.managed_db?.included, true, 'the local nightly does not dump managed databases');
 });
 
 test('retention keeps the newest N and deletes nothing else', async () => {

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { adminApi } from '../adminApi'
+import { ManagedDbEncryptionCard } from './ManagedDbEncryptionCard'
 
 // Platform-wide limits for the managed databases (GET/PUT
 // /api/managed-db/settings, platform admin only). Rendered under the
@@ -82,6 +83,7 @@ export function ManagedDbSettingsCard() {
       </div>
       <button className="btn btn-sm" style={{ marginTop: 10 }} disabled={busy} onClick={save}>Save limits</button>
       {msg && <div style={{ marginTop: 6, fontSize: '.8rem', color: msg.ok ? 'var(--dim)' : 'var(--red)' }}>{msg.text}</div>}
+      <ManagedDbEncryptionCard />
     </div>
   )
 }

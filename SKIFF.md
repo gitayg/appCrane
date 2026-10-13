@@ -408,6 +408,13 @@ container starts:
   a 5-minute statement timeout by default (platform-configurable). Keep your
   pool under the cap. Repeated failed logins are reported to the platform
   admins by login and target database.
+- **Encryption at rest (MariaDB only).** A platform admin can encrypt the
+  shared MariaDB's data on disk (InnoDB tables, redo log, temporary files, new
+  Aria tables) with MariaDB's own file_key_management plugin. Turning it on or
+  off restarts the server once, so connections drop once; nothing else changes
+  for the app. Do not set `ENCRYPTED=` table options yourself. The key sits on
+  the same host as the data, so this covers copied files and snapshots, not a
+  stolen machine. Community Postgres has no equivalent.
 
 ```js
 // Read them like any other config; they are present before your process starts.

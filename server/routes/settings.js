@@ -7,6 +7,7 @@ import { encrypt } from '../services/encryption.js';
 import { reloadCaddy } from '../services/caddy.js';
 import { platformEmbedAncestors, platformRegistrableDomain } from '../utils/embed.js';
 import { settingVisibility, PUBLIC, AUTHED } from '../utils/settingsVisibility.js';
+import { RESERVED_SETTING_PREFIX as MARIADB_ENCRYPTION_PREFIX } from '../services/managedDbEncryption.js';
 
 const router = Router();
 
@@ -26,6 +27,10 @@ const SENSITIVE_KEYS = new Set([
   'github_service_token_enc',
   'graph_client_secret_encrypted',
   'backup_s3_secret_enc',
+  // The MariaDB data-at-rest key (managedDbEncryption.js SETTING_KEYS.keyEnc),
+  // encrypted. A literal: test/settings-visibility.test.js reads this set
+  // from the source.
+  'managed_db_mariadb_encryption_key_enc',
 ]);
 
 /**
@@ -671,6 +676,13 @@ router.get('/:key', requireSettingVisibility, (req, res) => {
 router.put('/:key', requireAuth, requirePlatformAdmin, (req, res) => {
   const { value } = req.body;
   if (value === undefined) return res.status(400).json({ error: { code: 'VALIDATION', message: 'value required' } });
+  // The MariaDB encryption state and key are written ONLY through
+  // /api/managed-db/encryption. Overwriting the key row here would make the
+  // encrypted data unreadable, and writing key_loaded=0 would skip the check
+  // that nothing is still encrypted with it.
+  if (req.params.key.startsWith(MARIADB_ENCRYPTION_PREFIX)) {
+    return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Use /api/managed-db/encryption to change MariaDB encryption' } });
+  }
   const db = getDb();
 
   // v2.7.0: guard SSO-only so it can't lock the org out. Refuse to turn it
