@@ -38,7 +38,7 @@ function buildFilesMap(repoDir, fileTree) {
     try {
       const size = statSync(abs).size;
       if (size > MAX_FILE_BYTES || totalBytes + size > MAX_TOTAL_BYTES) continue;
-      map[p] = readFileSync(abs, 'utf8');
+      map[p] = readFileSync(abs, 'utf8'); // host-read-ok: no caller passes a coder workspace (no caller at all as of v2.104.0)
       totalBytes += size;
     } catch (_) {}
   }
@@ -131,7 +131,7 @@ export function refreshCache(appSlug, repoDir) {
             const abs = join(repoDir, filePath); // nosemgrep: path-join-resolve-traversal — filePath from git diff output
             if (existsSync(abs)) {
               try {
-                const content = readFileSync(abs, 'utf8');
+                const content = readFileSync(abs, 'utf8'); // host-read-ok: no caller passes a coder workspace (no caller at all as of v2.104.0)
                 if (content.length <= MAX_FILE_BYTES) filesMap[filePath] = content;
               } catch (_) {}
             }
@@ -142,7 +142,7 @@ export function refreshCache(appSlug, repoDir) {
             const abs = join(repoDir, filePath); // nosemgrep: path-join-resolve-traversal — filePath from git diff output
             if (existsSync(abs)) {
               try {
-                const content = readFileSync(abs, 'utf8');
+                const content = readFileSync(abs, 'utf8'); // host-read-ok: no caller passes a coder workspace (no caller at all as of v2.104.0)
                 if (content.length <= MAX_FILE_BYTES) filesMap[filePath] = content;
                 else delete filesMap[filePath]; // file grew too large — evict
               } catch (_) {}

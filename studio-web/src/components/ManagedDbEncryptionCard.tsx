@@ -20,6 +20,10 @@ interface Status {
   server_provisioned: boolean
   server_running: boolean
   tablespaces: { total: number; encrypted: number; plain: number; in_progress: number } | null
+  // Encrypt mode only: MariaDB cannot encrypt the Aria transaction log.
+  aria_log: { encryptable: false; note: string; live: { purge_type: string; checkpoint_interval: number; log_file_size: number } | null } | null
+  // Last pass that moved app Aria/MyISAM tables to InnoDB (null = never ran).
+  conversion: { at: string; converted_total: number; converted_last: string[]; failed_count: number; failed: { name: string; engine: string; error: string }[] } | null
   error: string | null
   caveat: string
   note?: string
@@ -96,6 +100,19 @@ export function ManagedDbEncryptionCard() {
       <div style={{ fontSize: '.82rem' }}>
         <div><strong>Status:</strong> {PHASE_LABEL[status.phase]}</div>
         {status.key_loaded && <div style={{ color: 'var(--dim)', marginTop: 2 }}>{progress}</div>}
+        {status.aria_log && <div style={{ color: 'var(--dim)', marginTop: 2 }}>{status.aria_log.note}</div>}
+        {status.enabled && status.conversion && (
+          <div style={{ color: 'var(--dim)', marginTop: 2 }}>
+            App Aria/MyISAM tables moved to encrypted InnoDB: {status.conversion.converted_total}
+            {status.conversion.converted_last.length > 0 && ` (last pass: ${status.conversion.converted_last.join(', ')})`}
+            {status.conversion.failed_count > 0 && (
+              <div style={{ color: 'var(--red)' }}>
+                {status.conversion.failed_count} table(s) left unconverted (not encrypted):
+                {status.conversion.failed.map(f => <div key={f.name}><code>{f.name}</code> ({f.engine}): {f.error}</div>)}
+              </div>
+            )}
+          </div>
+        )}
         {status.error && <div style={{ color: 'var(--red)', marginTop: 2 }}>Could not read progress: {status.error}</div>}
       </div>
       <div style={{ color: 'var(--dim)', fontSize: '.72rem', margin: '6px 0' }}>

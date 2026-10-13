@@ -532,7 +532,7 @@ function preserveWorkspace(slug, workspaceDir) {
 function bundleWorkspace(workspaceDir, upstream) {
   const dir = mkdtempSync(join(tmpdir(), 'appcrane-rescue-'));
   const file = join(dir, 'rescue.bundle');
-  const fd = openSync(file, 'w', 0o600);
+  const fd = openSync(file, 'w', 0o600); // host-read-ok: a write fd in AppCrane's own mkdtemp dir, not the workspace
   try {
     gitIn(workspaceDir, ['bundle', 'create', '-', 'HEAD', ...(upstream ? ['--not', upstream] : [])], {
       stdout: fd, timeout: 300000,

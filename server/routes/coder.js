@@ -5,7 +5,7 @@ import { AppError } from '../utils/errors.js';
 import { auditMiddleware, logAudit } from '../middleware/audit.js';
 import {
   listWorkspaceChanges,
-  readWorkspaceFileForRelease,
+  readWorkspaceFilesForRelease,
   markReleasedInWorkspace,
 } from '../services/builder/gitOps.js';
 import {
@@ -582,13 +582,12 @@ router.post('/:slug/session/:id/release', auditMiddleware('coder.release'), asyn
   const summaryMsg = req.body?.message?.trim() || `coder session ${session.id.slice(0, 8)}`;
   const commitMsg = `coder: ${summaryMsg.slice(0, 72)}`;
 
-  const files = [];
-  const deletions = [];
+  const deletions = paths.filter((p) => byPath.get(p).status === 'deleted');
+  const toRead = paths.filter((p) => byPath.get(p).status !== 'deleted');
+  let files;
   try {
-    for (const p of paths) {
-      if (byPath.get(p).status === 'deleted') deletions.push(p);
-      else files.push(readWorkspaceFileForRelease(session.workspace_dir, p));
-    }
+    // One container round trip for every selected file (gitOps.js).
+    files = toRead.length ? readWorkspaceFilesForRelease(session.workspace_dir, toRead) : [];
   } catch (err) {
     throw new AppError(`${err.message} Nothing was released.`, 400, 'UNREADABLE_CHANGE');
   }

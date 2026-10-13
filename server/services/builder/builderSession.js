@@ -372,7 +372,7 @@ async function loadDispatchContext(appSlug, workspaceDir, { withCodebase = true,
   let agentContext = '';
   try {
     const notesPath = join(resolve(process.env.DATA_DIR || './data'), 'apps', appSlug, 'agent-context.md');
-    if (existsSync(notesPath)) agentContext = readFileSync(notesPath, 'utf8');
+    if (existsSync(notesPath)) agentContext = readFileSync(notesPath, 'utf8'); // host-read-ok: DATA_DIR/apps/<slug>/agent-context.md, never mounted into a container
   } catch (_) {}
   return { contextDoc, agentContext };
 }

@@ -412,9 +412,15 @@ container starts:
   shared MariaDB's data on disk (InnoDB tables, redo log, temporary files, new
   Aria tables) with MariaDB's own file_key_management plugin. Turning it on or
   off restarts the server once, so connections drop once; nothing else changes
-  for the app. Do not set `ENCRYPTED=` table options yourself. The key sits on
-  the same host as the data, so this covers copied files and snapshots, not a
-  stolen machine. Community Postgres has no equivalent.
+  for the app. Do not set `ENCRYPTED=` table options yourself. While it is on,
+  the platform converts your Aria/MyISAM tables to InnoDB so they are
+  encrypted (a table InnoDB refuses is left as is and listed for the admin);
+  create tables as InnoDB, the default. MariaDB cannot encrypt its Aria
+  transaction log, which carries changes to its own system tables (logins,
+  grants); the platform keeps it small (8 MiB files, purged at each 30 s
+  checkpoint), but the current file stays plaintext. The key sits on the same
+  host as the data, so this covers copied files and snapshots, not a stolen
+  machine. Community Postgres has no equivalent.
 
 ```js
 // Read them like any other config; they are present before your process starts.

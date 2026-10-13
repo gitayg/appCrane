@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { adminApi } from '../adminApi'
+import { serverDate } from '../utils/serverDate'
 
 interface User {
   id: number
@@ -28,7 +29,7 @@ type AppRole = 'none' | 'user' | 'admin' | 'owner'
 
 function relativeTime(iso: string | null): { rel: string; abs: string } {
   if (!iso) return { rel: 'never', abs: '' }
-  const d = new Date(iso)
+  const d = serverDate(iso)
   const abs = d.toLocaleString()
   const diff = (Date.now() - d.getTime()) / 1000
   if (diff < 60) return { rel: 'just now', abs }

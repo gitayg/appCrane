@@ -364,7 +364,178 @@ export function serverArgs(mode) {
     `--aria-encrypt-tables=${v}`,
     '--innodb-encryption-threads=4',
     '--innodb-encryption-rotate-key-age=1',
+    ...(mode === 'encrypt' ? ariaLogArgs() : []),
   ];
+}
+
+// ---------------------------------------------------------------------------
+// The Aria transaction log — the one thing MariaDB cannot encrypt
+// ---------------------------------------------------------------------------
+
+/**
+ * MariaDB does not encrypt the Aria transaction log (aria_log.NNNNNNNN in the
+ * data directory): its docs say "Only Aria tables are encrypted. The Aria log
+ * is not yet encrypted." (MDEV-8587, open). Every change to an Aria table goes
+ * through it in plain text — MariaDB's own system tables (mysql.global_priv:
+ * logins and password hashes, mysql.db grants, ...) and any app table created
+ * as Aria. Nothing here can encrypt it; what CAN be done is keep it small and
+ * short-lived, so a copy of the data directory carries as little history as
+ * possible, and move app tables out of Aria/MyISAM (conversionPlan below).
+ *
+ * Checked against mariadb:11.4 (`mariadbd --verbose --help` and a running
+ * server):
+ *   aria_log_purge_type=immediate   already the 11.4 default; set explicitly so
+ *       a changed default or a my.cnf in a future image cannot turn it into
+ *       'external' (files kept until someone runs PURGE) or 'at_flush'.
+ *       'immediate' deletes a log file as soon as a checkpoint no longer needs
+ *       it.
+ *   aria_checkpoint_interval=30     seconds between automatic checkpoints; also
+ *       the 11.4 default, set explicitly for the same reason (0 would mean "no
+ *       automatic checkpoints", i.e. nothing is ever purged).
+ *   aria_log_file_size=8388608      8 MiB, the server's minimum (measured: a
+ *       smaller value is "adjusted to 8388608" with a warning). The default is
+ *       1 GiB, and purging works per FILE: the file holding the current end of
+ *       the log is never deleted, so with the default a gigabyte of plaintext
+ *       history could sit in one file. At 8 MiB a file is closed and becomes
+ *       purgeable after 8 MiB of Aria writes.
+ * What stays: the CURRENT log file (up to 8 MiB) and whatever it holds since it
+ * was opened — on a quiet server that can be the last password change for a
+ * long time. MEASURED on mariadb:11.4: a row written to an Aria app table and
+ * then converted to InnoDB (conversionPlan) was gone from the table's files
+ * (the new .ibd read encrypted) but still in aria_log.00000001 — 4.9 MB, not
+ * yet rolled over — after a clean shutdown. That is the residual.
+ */
+export const ARIA_LOG = Object.freeze({ purgeType: 'immediate', checkpointIntervalSec: 30, fileSizeBytes: 8388608 });
+
+/** Bumped when ariaLogArgs() changes, so encrypted servers are recreated once
+ *  to pick the new flags up (managedDb.serverConfigLabel). */
+export const ARIA_LOG_CONFIG_VERSION = 1;
+
+export function ariaLogArgs() {
+  return [
+    `--aria-log-purge-type=${ARIA_LOG.purgeType}`,
+    `--aria-checkpoint-interval=${ARIA_LOG.checkpointIntervalSec}`,
+    `--aria-log-file-size=${ARIA_LOG.fileSizeBytes}`,
+  ];
+}
+
+/** Shown on the card next to the conversion summary (operator-approved wording). */
+export const ARIA_LOG_NOTE = `Aria log: not encryptable by MariaDB; kept short (purged at each checkpoint, every ${ARIA_LOG.checkpointIntervalSec} s)`;
+
+/** One statement, one row: the live Aria log settings. */
+export const ARIA_LOG_SQL = 'SELECT @@aria_log_purge_type, @@aria_checkpoint_interval, @@aria_log_file_size;';
+
+/** Parse `mariadb --batch` output of ARIA_LOG_SQL; null when it is not that. */
+export function parseAriaLog(out) {
+  const lines = String(out || '').trim().split('\n').filter(Boolean);
+  const v = lines[1]?.split('\t') || [];
+  if (lines.length !== 2 || v.length !== 3 || !/^\d+$/.test(v[1]) || !/^\d+$/.test(v[2])) return null;
+  return { purge_type: v[0], checkpoint_interval: Number(v[1]), log_file_size: Number(v[2]) };
+}
+
+/**
+ * Schemas whose tables are never converted: MariaDB's own. mysql.* is the
+ * server's privilege and system data, whose engine MariaDB chooses (changing
+ * it is unsupported), and the other three are views or virtual. Excluded
+ * twice — in the listing query and again in conversionPlan() — so neither a
+ * query edit nor a managed database that happened to carry one of these names
+ * can reach them.
+ */
+export const SYSTEM_SCHEMAS = Object.freeze(['mysql', 'sys', 'performance_schema', 'information_schema']);
+
+/** Engines whose files InnoDB encryption does not cover. */
+export const CONVERT_ENGINES = Object.freeze(['Aria', 'MyISAM']);
+
+/**
+ * Every Aria/MyISAM base table outside the system schemas. A FIXED literal: no
+ * name is interpolated into it. Which of these are APP tables (in a database
+ * AppCrane provisioned) is decided in conversionPlan(), against the names in
+ * AppCrane's own database rather than anything the server reports.
+ */
+export const CONVERT_LIST_SQL = [
+  'SELECT TABLE_SCHEMA, TABLE_NAME, ENGINE FROM information_schema.TABLES',
+  " WHERE TABLE_TYPE = 'BASE TABLE'",
+  `  AND ENGINE IN (${CONVERT_ENGINES.map(e => `'${e}'`).join(', ')})`,
+  `  AND TABLE_SCHEMA NOT IN (${SYSTEM_SCHEMAS.map(s => `'${s}'`).join(', ')})`,
+  ' ORDER BY TABLE_SCHEMA, TABLE_NAME;',
+].join('\n');
+
+/**
+ * A table name that may go into SQL between backticks: the characters MariaDB
+ * allows unquoted, nothing else. App tables can be named anything; one with a
+ * space, a dash, a backtick or a non-ASCII character is REPORTED rather than
+ * escaped — `mariadb --batch` itself escapes tabs, newlines and backslashes in
+ * its output, so the name read back is not reliably the name on the server,
+ * and guessing at an identifier is how a conversion ALTERs the wrong table.
+ */
+const TABLE_NAME = /^[A-Za-z0-9_$]{1,64}$/;
+
+/** Parse `mariadb --batch` output of CONVERT_LIST_SQL (no rows = no output). */
+export function parseConvertList(out) {
+  const lines = String(out || '').split('\n').filter(Boolean);
+  if (!lines.length) return [];
+  if (lines[0] !== 'TABLE_SCHEMA\tTABLE_NAME\tENGINE') throw new Error('managedDbEncryption: unexpected table list output');
+  return lines.slice(1).map((l) => {
+    const [schema, table, engine] = l.split('\t');
+    return { schema, table, engine };
+  });
+}
+
+/**
+ * Which listed tables to convert, and the statement for each.
+ *   databases     the managed MariaDB database names from AppCrane's own
+ *                 records — only tables in these are app tables.
+ *   assertIdent   managedDb's identifier check, applied to each schema name
+ *                 before it reaches SQL (throws on anything unsafe).
+ * Returns { convert: [{ name, engine, sql }], skipped: [{ name, engine, error }] }.
+ * Tables in other, non-system databases are ignored silently: they are not
+ * AppCrane's to rebuild.
+ */
+export function conversionPlan(rows, { databases, assertIdent }) {
+  const managed = new Set(databases);
+  const convert = [];
+  const skipped = [];
+  for (const r of rows) {
+    if (SYSTEM_SCHEMAS.includes(String(r.schema).toLowerCase())) continue;
+    if (!managed.has(r.schema)) continue;
+    if (!CONVERT_ENGINES.includes(r.engine)) continue;
+    const name = `${r.schema}.${r.table}`;
+    if (!TABLE_NAME.test(r.table || '')) {
+      skipped.push({ name, engine: r.engine, error: 'table name has characters AppCrane does not put into SQL; convert it by hand (ALTER TABLE ... ENGINE=InnoDB)' });
+      continue;
+    }
+    const schema = assertIdent(r.schema);
+    convert.push({ name, engine: r.engine, sql: `ALTER TABLE \`${schema}\`.\`${r.table}\` ENGINE=InnoDB;` });
+  }
+  return { convert, skipped };
+}
+
+const CONVERSION_KEY = `${RESERVED_SETTING_PREFIX}_aria_conversion`;
+const LIST_CAP = 50;
+
+/**
+ * Record one conversion pass. `converted_total` accumulates across passes (a
+ * later pass finds nothing left and would otherwise read "converted 0");
+ * `failed` is THIS pass's list — a table that converts on a later pass drops
+ * off it. Under the reserved prefix, so the generic settings PUT cannot write it.
+ */
+export function recordConversion(db, { converted, failed }, at = new Date().toISOString()) {
+  const prev = getConversion(db);
+  const summary = {
+    at,
+    converted_total: (prev?.converted_total || 0) + converted.length,
+    converted_last: converted.slice(0, LIST_CAP),
+    failed_count: failed.length,
+    failed: failed.slice(0, LIST_CAP),
+  };
+  writeRaw(db, CONVERSION_KEY, JSON.stringify(summary));
+  return summary;
+}
+
+export function getConversion(db) {
+  const raw = readRaw(db, CONVERSION_KEY);
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch (_) { return null; }
 }
 
 /**

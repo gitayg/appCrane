@@ -9,6 +9,7 @@ import { useAppTabs } from './AppTabsContext'
 import { CredentialAlertBanner } from './CredentialAlertBanner'
 import { UpdateBlockedDialog } from './UpdateBlockedDialog'
 import { buildsInFlightOf, isConnectionDrop, waitForNewVersion, type BuildsInFlight } from './selfUpdateFlow'
+import { serverDate } from '../utils/serverDate'
 
 interface NavItem { id: string; label: string; href: string; icon: ReactElement; external?: boolean; platformAdminOnly?: boolean; adminOnly?: boolean; ownerOrAdmin?: boolean }
 interface NavApp {
@@ -29,7 +30,7 @@ function lastUpdateLine(a: NavApp): string | null {
     .sort((x, y) => (y.finished_at! > x.finished_at! ? 1 : -1))
   const d = cand[0]
   if (!d) return null
-  const when = new Date(d.finished_at!.includes('T') ? d.finished_at! : d.finished_at!.replace(' ', 'T') + 'Z')
+  const when = serverDate(d.finished_at!)
   const date = isNaN(when.getTime())
     ? d.finished_at!
     : when.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })

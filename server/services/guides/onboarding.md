@@ -900,7 +900,17 @@ Notes:
   on error, as you already should.
 - What is encrypted on disk: InnoDB tables (the default engine), the redo log,
   temporary tablespaces and temporary files, and Aria tables created while it
-  is on. Aria tables that existed before stay readable as they were.
+  is on. While it is on, the platform also converts every Aria or MyISAM table
+  in your database to InnoDB (`ALTER TABLE ... ENGINE=InnoDB`, on each deploy
+  or restart), so its rows land in an encrypted tablespace. A table InnoDB
+  refuses (for example a row wider than InnoDB's page allows) is left as it
+  is, unencrypted, and listed for the platform admin. Create tables as InnoDB.
+- What is NOT encrypted: MariaDB's Aria transaction log (`aria_log.*`, MDEV-8587).
+  It records changes to Aria tables, which after the conversion means mainly
+  MariaDB's own system tables (logins and password hashes, grants). The
+  platform keeps it as small and short-lived as MariaDB allows (8 MiB files,
+  purged at each checkpoint every 30 s), but the current file and what it
+  holds stay in plain text until it fills.
 - Avoid `ENCRYPTED=YES` / `ENCRYPTED=NO` table options: the platform decides.
   A table pinned with `ENCRYPTED=YES` blocks the platform from ever turning
   encryption off until it is altered back.

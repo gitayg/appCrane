@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { adminApi } from '../adminApi'
 import { useAppTabs } from '../components/AppTabsContext'
+import { serverDate } from '../utils/serverDate'
 
 // v2.59.x: the app catalogue — 76 curated self-hostable business apps, readable
 // by EVERY logged-in user and deployable by whoever holds `platform.create_app`.
@@ -694,7 +695,7 @@ export function Catalog() {
             : status.degraded
             ? 'No live figures cached yet — GitHub and Docker Hub are unreachable or rate-limiting. Names, descriptions and deploy paths still work.'
             : status.fetched_at
-              ? `Live figures cached ${new Date(status.fetched_at).toLocaleString()}${status.refreshing ? ' · refreshing in the background' : status.stale ? ' · stale, refresh queued' : ''}`
+              ? `Live figures cached ${serverDate(status.fetched_at).toLocaleString()}${status.refreshing ? ' · refreshing in the background' : status.stale ? ' · stale, refresh queued' : ''}`
               : status.refreshing
                 ? 'Fetching live figures in the background — reload in a moment.'
                 : 'Live figures have not been fetched yet.'}
@@ -923,7 +924,7 @@ function CatalogRow({ entry, expanded, onToggle, canCreate, onInstall, onOpen }:
                       : <span style={{ color: 'var(--dim)' }}>{absenceReason(en?.sources?.image, 'image')}</span>}
                   </div>
                   <div style={{ color: 'var(--dim)', fontSize: '.75rem' }}>
-                    {en?.fetched_at ? `Fetched ${new Date(en.fetched_at).toLocaleString()}` : 'Not fetched yet'}
+                    {en?.fetched_at ? `Fetched ${serverDate(en.fetched_at).toLocaleString()}` : 'Not fetched yet'}
                   </div>
                 </div>
               </div>
@@ -970,7 +971,7 @@ function VersionCell({ entry }: { entry: CatalogEntry }) {
       {v?.value ? (
         <span style={{ fontFamily: 'monospace' }} title={
           [v.kind === 'tag' ? 'Git tag — this project cuts no GitHub Release' : kindHint,
-           v.published_at ? `Published ${new Date(v.published_at).toLocaleDateString()}` : null]
+           v.published_at ? `Published ${serverDate(v.published_at).toLocaleDateString()}` : null]
             .filter(Boolean).join('\n')
         }>
           {v.value}

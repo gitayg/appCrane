@@ -169,7 +169,22 @@ export function Audit() {
                 <td style={{ whiteSpace: 'nowrap', color: 'var(--dim)', fontFamily: 'monospace', fontSize: '.8rem' }}>
                   {formatWhen(e.created_at)}
                 </td>
-                <td>{e.user_name || 'Unattributed'}</td>
+                <td>
+                  {e.user_name || 'Unattributed'}
+                  {/* Who acted is half the story: an agent over MCP or a person in
+                      the dashboard. Recorded since v2.28.0, shown since v2.104.1. */}
+                  {(e.actor_kind === 'agent' || e.actor_kind === 'human') && (
+                    <span
+                      title={e.actor_kind === 'agent' ? 'Done by an AI agent' : 'Done by a person'}
+                      style={{
+                        marginLeft: 6, padding: '1px 6px', borderRadius: 3, fontSize: '.62rem', fontWeight: 600,
+                        letterSpacing: '.3px', textTransform: 'uppercase', verticalAlign: 1,
+                        color: e.actor_kind === 'agent' ? 'var(--accent)' : 'var(--dim)',
+                        border: `1px solid ${e.actor_kind === 'agent' ? 'var(--accent)' : 'var(--border)'}`,
+                      }}
+                    >{e.actor_kind}</span>
+                  )}
+                </td>
                 <td><span className="tag">{e.action}</span></td>
                 <td style={{ fontFamily: 'monospace', fontSize: '.8rem' }}>
                   {e.app_slug || (e.app_id == null ? 'platform' : '-')}

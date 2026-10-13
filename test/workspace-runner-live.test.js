@@ -152,3 +152,72 @@ test('end to end: real coder container, change list by exec, eviction rescue via
   const main = execFileSync('git', [`--git-dir=${bare}`, 'ls-tree', '-r', '--name-only', 'main'], { env: CLEAN }).toString('utf8').trim();
   assert.equal(main, 'README.md', 'the rescue moved main');
 });
+
+/**
+ * The release's file read, against a real container that races it. v2.104.0
+ * and earlier lstat'ed a changed file on the HOST and then readFileSync'd it;
+ * a container loop swapping that file for a symlink to a host-only path got
+ * the host file's bytes into the release (see "AppCrane no longer reads a
+ * workspace file on the host" in README.md for the before-numbers). Now the
+ * bytes come from
+ * workspaceReader inside the container: through the agent's container by
+ * exec, and through a helper. The host marker must never appear in any record,
+ * and both kinds (F and L) must be seen, or the loop was not live.
+ */
+test('a file swapped for a symlink mid-release never puts a host file into the release', { skip, timeout: 300000 }, async () => {
+  const { readWorkspaceFiles } = await import('../server/services/builder/workspaceReader.js');
+  const { readWorkspaceFilesForRelease } = await import('../server/services/builder/gitOps.js');
+
+  const ws = join(ROOT, 'reader-race');
+  const hostOnly = join(ROOT, 'reader-host-only'); // never mounted into any container
+  mkdirSync(ws, { recursive: true });
+  mkdirSync(hostOnly, { recursive: true });
+  const MARKER = `HOST-ONLY-${process.pid}-${Date.now()}`;
+  const secret = join(hostOnly, 'secret.env');
+  writeFileSync(secret, `ENCRYPTION_KEY=${MARKER}\n`);
+  execFileSync('git', ['init', '-q', '-b', 'main', ws], { env: CLEAN });
+  writeFileSync(join(ws, 'reg.txt'), 'regular content\n');
+  mkdirSync(join(ws, 'confdir'));
+  writeFileSync(join(ws, 'confdir', 'secret.env'), 'decoy\n');
+  execFileSync('chmod', ['-R', '777', ws]);
+
+  // Settled first: a plain symlink comes back as a symlink, never its target.
+  const { symlinkSync, unlinkSync } = await import('fs');
+  symlinkSync(secret, join(ws, 'secret-link'));
+  const settled = readWorkspaceFiles(ws, ['secret-link'], { maxFileBytes: 1 << 20, maxBatchBytes: 1 << 20 });
+  assert.deepEqual(settled.get('secret-link'), { kind: 'L', size: Buffer.byteLength(secret), target: secret });
+  assert.throws(() => readWorkspaceFilesForRelease(ws, ['secret-link']), /'secret-link' is a symlink/);
+  unlinkSync(join(ws, 'secret-link'));
+
+  const name = `appcrane-wslive-reader-${process.pid}`;
+  CONTAINERS.push(name);
+  // secret-link flips file <-> symlink-to-the-host-path; conf flips dir <-> symlink-to-the-host-dir.
+  // The loop ends itself after 180 s, so a run killed before after() (the
+  // suite's per-file timeout) does not leave it behind: --rm then removes it.
+  execFileSync('docker', ['run', '-d', '--rm', '--name', name, '-v', `${ws}:/workspace`, 'appcrane-studio:latest', 'sh', '-c',
+    `cd /workspace && end=$(( $(date +%s) + 180 )) && while [ "$(date +%s)" -lt "$end" ]; do
+       cp reg.txt .f && mv -f .f secret-link; ln -sfn ${secret} .l && mv -f .l secret-link;
+       rm -rf conf; cp -r confdir conf; rm -rf conf; ln -sfn ${hostOnly} conf;
+     done`], { stdio: 'pipe' });
+
+  const seen = { F: 0, L: 0, other: 0 };
+  let releases = 0;
+  const check = (text) => assert.ok(!text.includes(MARKER), `the host file reached a release after ${releases} read(s)`);
+  // 25 rounds x 4 reads: enough to see both kinds many times, at ~20 s.
+  for (let i = 0; i < 25; i++) {
+    for (const container of [name, null]) {
+      const recs = readWorkspaceFiles(ws, ['secret-link', 'conf/secret.env'], { container, maxFileBytes: 1 << 20, maxBatchBytes: 1 << 20 });
+      releases++;
+      for (const r of recs.values()) {
+        check(r.body ? r.body.toString('latin1') : (r.target || ''));
+        seen[r.kind === 'F' || r.kind === 'L' ? r.kind : 'other']++;
+      }
+      try {
+        check(JSON.stringify(readWorkspaceFilesForRelease(ws, ['secret-link'])));
+      } catch (e) { check(e.message); }
+      releases++;
+    }
+  }
+  assert.ok(seen.F > 0 && seen.L > 0, `the swap loop was not live: ${JSON.stringify(seen)}`);
+  console.log(`reader race: ${releases} release reads, kinds seen ${JSON.stringify(seen)}, host marker never present`);
+});

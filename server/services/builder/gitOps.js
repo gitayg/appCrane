@@ -1,7 +1,8 @@
-import { lstatSync, readFileSync } from 'fs';
+import { lstatSync } from 'fs';
 import { join, resolve } from 'path';
 import log from '../../utils/logger.js';
 import { runWorkspaceGit, runWorkspaceScript } from './workspaceRunner.js';
+import { readWorkspaceFiles } from './workspaceReader.js';
 import { liveContainerNameFor } from './appContainer.js';
 
 // ---------------------------------------------------------------------------
@@ -32,6 +33,14 @@ const MAX_DIFF_BYTES = 64 * 1024;
 
 /** One released file is read into memory whole, so there is a ceiling on it. */
 export const MAX_RELEASE_FILE_BYTES = 5 * 1024 * 1024;
+
+/**
+ * All the files of one release travel back through one container's stdout
+ * into one buffer, under runInWorkspace's 64 MiB default maxBuffer. 48 MiB
+ * leaves that headroom for the record headers, and is still nine files at the
+ * per-file ceiling — far past any coder change a human picks from a list.
+ */
+export const MAX_RELEASE_BATCH_BYTES = 48 * 1024 * 1024;
 
 /**
  * Paths AppCrane itself writes into every workspace (services/github/snapshot.js).
@@ -140,11 +149,11 @@ function batchDiffs(git, wanted) {
  * included. Returns [{ path, status: 'added'|'modified'|'deleted', diff }],
  * sorted by path.
  *
- * Only regular files appear. A symlink is skipped deliberately: the agent owns
- * this workspace, the release path reads a selected path with readFileSync, and
- * a symlink to somewhere on the host would commit that file's bytes into the
- * app's repository. Skipping it here is what makes a release naming it fail the
- * "not in the change set" check instead.
+ * Only regular files appear. A symlink is skipped deliberately: a release must
+ * never commit the bytes of whatever a link points at, so a release naming one
+ * fails the "not in the change set" check here — and if it became a link after
+ * this listing, the in-container reader reports it as one and the release is
+ * refused there (readWorkspaceFilesForRelease).
  */
 export function listWorkspaceChanges(workspaceDir) {
   const git = workspaceGit(workspaceDir);
@@ -160,6 +169,10 @@ export function listWorkspaceChanges(workspaceDir) {
     const abs = insideWorkspace(workspaceDir, path);
     if (!abs) continue;
 
+    // host-read-ok: metadata only — decides whether a path is offered, never
+    // reads a byte of it. A parent swapped for a link here can at most make a
+    // path appear or vanish from the list; its content is read in the
+    // container, which reports the link instead of following it.
     let st = null;
     try { st = lstatSync(abs); } catch (_) { st = null; }
     if (st && !st.isFile()) continue;
@@ -183,30 +196,61 @@ export function listWorkspaceChanges(workspaceDir) {
 }
 
 /**
- * One changed file, in the shape the managed push takes:
- * { path, content, encoding: 'utf-8' | 'base64' }.
+ * The selected changed files, in the shape the managed push takes:
+ * [{ path, content, encoding: 'utf-8' | 'base64' }], in the order given.
+ *
+ * Read INSIDE the container (builder/workspaceReader.js), in one round trip
+ * for the whole release. This used to lstat each path on the host and then
+ * readFileSync it: the agent's container runs throughout, so a symlink — or a
+ * parent directory swapped for one — landing between the two made the host
+ * read any file AppCrane can (DATA_DIR/.env, deployhub.db) and commit it into
+ * the app's repository. The host now never opens a workspace path.
+ *
+ * A symlink is refused, as it always was: the change list skips symlinks and
+ * the managed push writes every file as a 100644 blob (services/localGit.js),
+ * so a release has never carried a link — and it must not carry the bytes of
+ * whatever the link points at either. The reader reports the link (its target
+ * string) instead of following it, and that is what the refusal names.
  *
  * Anything that does not survive a utf-8 round trip is sent as base64 rather
  * than as a lossy string — reading an image or a compiled binary as utf-8 would
  * replace every invalid byte with U+FFFD and commit a corrupted file that still
  * looks like a successful release.
  */
-export function readWorkspaceFileForRelease(workspaceDir, path) {
-  const abs = insideWorkspace(workspaceDir, path);
-  if (!abs) throw new Error(`'${path}' is outside the session workspace`);
-  const st = lstatSync(abs);
-  if (!st.isFile()) throw new Error(`'${path}' is not a regular file, so it cannot be released`);
-  if (st.size > MAX_RELEASE_FILE_BYTES) {
-    throw new Error(
-      `'${path}' is ${st.size} bytes, over the ${MAX_RELEASE_FILE_BYTES}-byte limit for one released file. Nothing was committed.`,
-    );
-  }
-  const buf = readFileSync(abs);
-  const asText = buf.toString('utf8');
-  const utf8Clean = !buf.includes(0) && Buffer.compare(Buffer.from(asText, 'utf8'), buf) === 0;
-  return utf8Clean
-    ? { path, content: asText, encoding: 'utf-8' }
-    : { path, content: buf.toString('base64'), encoding: 'base64' };
+export function readWorkspaceFilesForRelease(workspaceDir, paths) {
+  const recs = readWorkspaceFiles(workspaceDir, paths, {
+    source: 'worktree',
+    maxFileBytes: MAX_RELEASE_FILE_BYTES,
+    maxBatchBytes: MAX_RELEASE_BATCH_BYTES,
+    container: liveContainerNameFor(workspaceDir),
+  });
+  return paths.map((path) => {
+    const r = recs.get(path);
+    switch (r.kind) {
+      case 'F': {
+        const buf = r.body;
+        const asText = buf.toString('utf8');
+        const utf8Clean = !buf.includes(0) && Buffer.compare(Buffer.from(asText, 'utf8'), buf) === 0;
+        return utf8Clean
+          ? { path, content: asText, encoding: 'utf-8' }
+          : { path, content: buf.toString('base64'), encoding: 'base64' };
+      }
+      case 'L':
+        throw new Error(`'${path}' is a symlink (to ${JSON.stringify(r.target)}), not a regular file, so it cannot be released.`);
+      case 'B':
+        throw new Error(
+          `'${path}' is ${r.size} bytes, over the ${MAX_RELEASE_FILE_BYTES}-byte limit for one released file. Nothing was committed.`,
+        );
+      case 'T':
+        throw new Error(
+          `the selected files are over the ${MAX_RELEASE_BATCH_BYTES}-byte limit for one release (reached at '${path}'). Release them in smaller groups. Nothing was committed.`,
+        );
+      case 'M':
+        throw new Error(`'${path}' no longer exists in the workspace.`);
+      default:
+        throw new Error(`'${path}' is not a regular file, so it cannot be released.`);
+    }
+  });
 }
 
 /**

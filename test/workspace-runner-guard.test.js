@@ -16,7 +16,12 @@ import { join } from 'path';
  *      the marked, justified ones (pre-mount clones, AppCrane's own repos);
  *   2. the helper container's confinement and its single mount;
  *   3. the rescue leaves the workspace as a bundle the HOST unbundles into
- *      the managed bare repo — no `git push` from the workspace.
+ *      the managed bare repo — no `git push` from the workspace;
+ *   4. no host CONTENT read (readFileSync, openSync, createReadStream, ...)
+ *      in the coder and AppStudio services except the marked, justified ones —
+ *      file bytes leave a workspace through builder/workspaceReader.js, read
+ *      inside the container (test/workspace-reader.test.js covers its
+ *      behaviour).
  * test/workspace-runner-live.test.js proves it against real Docker.
  */
 
@@ -79,6 +84,18 @@ const ALLOWED_HOST_GIT = {
 
 const HOST_PROC_RE = /\b(execFileSync|execFile|spawnSync|spawn|execSync|exec)\(\s*['"`](git|npm|npx)['"`]/;
 
+/**
+ * A line marked `// in-container: <reason>` is code that only ever runs INSIDE
+ * a workspace container — the text of a fixed script handed to `node -e`. It
+ * is neither a host git nor a host read, and is counted here so a new one is a
+ * decision too. workspaceReader.js's are additionally pinned to readerMain.
+ */
+const IN_CONTAINER_RE = /\/\/ in-container: \S/;
+const ALLOWED_IN_CONTAINER = {
+  'server/services/builder/workspaceReader.js': 5, // readerMain: stdin, readlink, open O_NOFOLLOW, /proc/self/fd, git ls-tree
+  'server/services/appstudio/workspacePush.js': 3,  // BUILD_DIRS_SCRIPT / SYNC_VERSION_SCRIPT package.json reads
+};
+
 test('no unmarked host git or npm call remains in the coder / AppStudio services', () => {
   const offenders = [];
   const counts = {};
@@ -86,7 +103,7 @@ test('no unmarked host git or npm call remains in the coder / AppStudio services
     const lines = read(rel).split('\n');
     lines.forEach((line, i) => {
       const m = HOST_PROC_RE.exec(line);
-      if (!m) return;
+      if (!m || IN_CONTAINER_RE.test(line)) return;
       if (m[2] !== 'git' || !/\/\/ host-git-ok: \S/.test(line)) {
         offenders.push(`${rel}:${i + 1}: ${line.trim().slice(0, 140)}`);
         return;
@@ -108,6 +125,85 @@ test('the workspace git wrappers route through the container runner', () => {
   assert.doesNotMatch(appContainer, /gitIn\([^)]*\['push'/);
   assert.match(appContainer, /importWorkspaceBundleSync\(/);
   assert.match(appContainer, /'bundle', 'create', '-', 'HEAD'/);
+});
+
+// ---------------------------------------------------------------------------
+// 1b. Static: where the host may still read a FILE's content
+// ---------------------------------------------------------------------------
+//
+// Reading a workspace file on the host is a check-then-act the agent can race:
+// lstat says "regular file", a symlink (or a parent directory swapped for one)
+// lands, and readFileSync returns DATA_DIR/.env into a release or an LLM
+// prompt. Every content read left in the coder and AppStudio services must say
+// why it is not a workspace path, in a `host-read-ok:` comment on the call.
+// Metadata (existsSync/statSync/lstatSync/readdirSync) is not counted: it can
+// decide what is listed, not leak bytes — see README.md ("AppCrane no longer reads a workspace file on the host").
+
+const READ_SCANNED = [
+  ...readdirSync(new URL('../server/services/builder/', import.meta.url)).filter((f) => f.endsWith('.js')).map((f) => `server/services/builder/${f}`),
+  ...readdirSync(new URL('../server/services/appstudio/', import.meta.url)).filter((f) => f.endsWith('.js')).map((f) => `server/services/appstudio/${f}`),
+];
+
+const HOST_READ_RE = /\b(readFileSync|readFile|createReadStream|openSync|readlinkSync|readlink)\s*\(/;
+
+const ALLOWED_HOST_READS = {
+  'server/services/builder/appContainer.js': 1,     // write fd for the rescue bundle, AppCrane's mkdtemp
+  'server/services/builder/builderSession.js': 1,   // DATA_DIR/apps/<slug>/agent-context.md
+  'server/services/builder/coderAttachments.js': 1, // AppCrane's attachments dir, copied into the container
+  'server/services/appstudio/contextBuilder.js': 1, // release dirs only; coder workspaces go through workspaceReader
+  'server/services/appstudio/codebaseCache.js': 3,  // no caller passes a coder workspace
+  'server/services/appstudio/generator.js': 1,      // infra/studio.Dockerfile
+  'server/services/appstudio/planner.js': 1,        // production/current
+  'server/services/appstudio/worker.js': 2,         // agent-context.md, production/current/package.json
+  'server/services/appstudio/workspacePush.js': 2,  // AppCrane's own temp bundle file
+};
+
+test('no unmarked host content read remains in the coder / AppStudio services', () => {
+  const offenders = [];
+  const host = {};
+  const inside = {};
+  for (const rel of READ_SCANNED) {
+    read(rel).split('\n').forEach((line, i) => {
+      if (!HOST_READ_RE.test(line)) return;
+      if (IN_CONTAINER_RE.test(line)) { inside[rel] = (inside[rel] || 0) + 1; return; }
+      if (/\/\/ host-read-ok: \S/.test(line)) { host[rel] = (host[rel] || 0) + 1; return; }
+      offenders.push(`${rel}:${i + 1}: ${line.trim().slice(0, 140)}`);
+    });
+  }
+  assert.deepEqual(offenders, [], `host read of what may be a workspace path:\n${offenders.join('\n')}`);
+  assert.deepEqual(host, ALLOWED_HOST_READS, 'the set of justified host reads changed — review it and update ALLOWED_HOST_READS');
+  // Every in-container line, git or read, is accounted for.
+  const allInside = {};
+  for (const rel of READ_SCANNED) {
+    const n = read(rel).split('\n').filter((l) => IN_CONTAINER_RE.test(l)).length;
+    if (n) allInside[rel] = n;
+  }
+  assert.deepEqual(allInside, ALLOWED_IN_CONTAINER, 'the set of in-container script lines changed — review it and update ALLOWED_IN_CONTAINER');
+  assert.ok(Object.keys(inside).every((k) => k in ALLOWED_IN_CONTAINER));
+});
+
+test("the reader's in-container lines all sit inside readerMain, which is shipped stringified", async () => {
+  const src = read('server/services/builder/workspaceReader.js');
+  const start = src.indexOf('function readerMain() {');
+  const end = src.indexOf('export const READER_SCRIPT = `(${readerMain.toString()})();`;');
+  assert.ok(start > 0 && end > start, 'readerMain / READER_SCRIPT moved');
+  src.split('\n').forEach((line, i) => {
+    if (!IN_CONTAINER_RE.test(line)) return;
+    const at = src.split('\n').slice(0, i).join('\n').length;
+    assert.ok(at > start && at < end, `workspaceReader.js:${i + 1} is marked in-container but is not in readerMain`);
+  });
+  // And the file has no host fs import at all: it only ever hands READER_SCRIPT to the runner.
+  assert.doesNotMatch(src, /from 'fs'|from 'node:fs'/);
+});
+
+test('the release and the context builder read workspace files through workspaceReader, not the host', () => {
+  const gitOps = read('server/services/builder/gitOps.js');
+  const ctx = read('server/services/appstudio/contextBuilder.js');
+  // lstat (metadata, for the change list) is the only fs call gitOps.js may make.
+  assert.deepEqual(gitOps.match(/^import .* from '(node:)?fs(\/promises)?';$/gm), ["import { lstatSync } from 'fs';"], 'gitOps.js imports a host file reader again');
+  assert.match(gitOps, /readWorkspaceFiles\(workspaceDir, paths, \{\s+source: 'worktree'/);
+  assert.match(ctx, /if \(!isCoderWorkspace\(repoDir\)\) \{/);
+  assert.match(ctx, /readWorkspaceFiles\(repoDir, paths, \{\s+source: 'commit'/);
 });
 
 // ---------------------------------------------------------------------------

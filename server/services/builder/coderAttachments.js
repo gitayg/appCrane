@@ -78,7 +78,7 @@ export function resolveAttachments(slug, sessionId, ids) {
     const file = entries.find((e) => e.startsWith(`${id}__`));
     if (!file) throw Object.assign(new Error('Attachment not found for this session. Attach the file again.'), { code: 'NOT_FOUND', status: 404 });
     const name = file.slice(id.length + 2);
-    return { id, name, file, is_image: isImage(readFileSync(join(dir, file)).subarray(0, 12)) };
+    return { id, name, file, is_image: isImage(readFileSync(join(dir, file)).subarray(0, 12)) }; // host-read-ok: AppCrane's attachments dir (appDir/attachments), copied INTO the container, never mounted
   });
 }
 

@@ -14,6 +14,7 @@ import { defineCraneAppTopbar } from '../topbar-element/entry'
 import { SAND_HIDDEN_HINT } from '../topbar-element/CraneAppTopbar'
 import { Icon } from '../components/icons'
 import '../topbar-element/jsx.d.ts'
+import { serverDate } from '../utils/serverDate'
 
 defineCraneAppTopbar()
 
@@ -1518,7 +1519,7 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                         )}
                         {mcpActive[app.slug] && (
                           <span
-                            title={`MCP active — ${mcpActive[app.slug].calls} call(s) in last 5min, latest ${new Date(mcpActive[app.slug].last_at).toLocaleTimeString()}`}
+                            title={`MCP active — ${mcpActive[app.slug].calls} call(s) in last 5min, latest ${serverDate(mcpActive[app.slug].last_at).toLocaleTimeString()}`}
                             style={{
                               fontSize: '.65rem', fontWeight: 600, letterSpacing: '.3px',
                               padding: '2px 6px', borderRadius: 3,

@@ -97,7 +97,7 @@ for (const d of process.argv.slice(1)) {
   try {
     const st = fs.lstatSync(d + '/package.json');
     if (!st.isFile()) continue;
-    const pkg = JSON.parse(fs.readFileSync(d + '/package.json', 'utf8'));
+    const pkg = JSON.parse(fs.readFileSync(d + '/package.json', 'utf8')); // in-container: this script runs in a helper
     if (pkg && pkg.scripts && pkg.scripts.build) process.stdout.write(d + '\\0');
   } catch (_) {}
 }`;
@@ -117,8 +117,8 @@ const SYNC_VERSION_SCRIPT = `
 const fs = require('fs');
 const reg = (p) => { try { return fs.lstatSync(p).isFile(); } catch (_) { return false; } };
 if (reg('package.json') && reg('deployhub.json')) {
-  const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-  const dh = JSON.parse(fs.readFileSync('deployhub.json', 'utf8'));
+  const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8')); // in-container: this script runs in a helper
+  const dh = JSON.parse(fs.readFileSync('deployhub.json', 'utf8')); // in-container: this script runs in a helper
   if (pkg && pkg.version && dh.version !== pkg.version) {
     const before = dh.version;
     dh.version = pkg.version;
@@ -149,7 +149,7 @@ const HOST_GIT_BASE = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=f
 
 /** Prerequisite commits named in a v2 bundle header ("-<sha> <comment>" lines before the blank line). */
 export function bundlePrerequisites(file) {
-  const fd = openSync(file, 'r');
+  const fd = openSync(file, 'r'); // host-read-ok: the bundle in AppCrane's own mkdtemp dir, written from the container's stdout
   try {
     const buf = Buffer.alloc(64 * 1024);
     const n = readSync(fd, buf, 0, buf.length, 0);
@@ -181,7 +181,7 @@ export function pushWorkspaceCommits({ workspaceDir, url, branchName, gitEnv = n
   const dir = mkdtempSync(join(tmpdir(), 'appcrane-studio-push-'));
   try {
     const file = join(dir, 'work.bundle');
-    const fd = openSync(file, 'w', 0o600);
+    const fd = openSync(file, 'w', 0o600); // host-read-ok: a write fd in AppCrane's own mkdtemp dir
     try {
       // Only what the agent added on top of what it cloned.
       studioGit(workspaceDir, ['bundle', 'create', '-', 'HEAD', '--not', '--remotes=origin'], { stdout: fd, timeout: 300000 });

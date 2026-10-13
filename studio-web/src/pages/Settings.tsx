@@ -10,6 +10,7 @@ import { ScimGroupMapping } from '../components/ScimGroupMapping'
 import { useMe, isAdmin } from '../hooks/useMe'
 import { GithubAppCard } from '../components/GithubAppCard'
 import { ClaudeTokenCard } from '../components/ClaudeTokenCard'
+import { serverDate } from '../utils/serverDate'
 
 function SecurityTab() {
   const [certFile, setCertFile] = useState('')
@@ -429,7 +430,7 @@ function SecurityTab() {
         )}
         <p style={{ fontSize: '.84rem', color: 'var(--dim)', marginBottom: 12 }}>
           {scim.token_created_at
-            ? `Bearer token last generated: ${new Date(scim.token_created_at).toLocaleString()}`
+            ? `Bearer token last generated: ${serverDate(scim.token_created_at).toLocaleString()}`
             : 'No bearer token generated yet.'}
         </p>
         {scimToken && (
@@ -787,8 +788,8 @@ function GithubTab() {
               {containers.map(c => (
                 <tr key={c.user_id}>
                   <td style={{ padding: '4px 8px', fontFamily: 'monospace' }}>{c.user_id}</td>
-                  <td style={{ padding: '4px 8px', color: 'var(--dim)' }}>{new Date(c.started_at).toLocaleTimeString()}</td>
-                  <td style={{ padding: '4px 8px', color: 'var(--dim)' }}>{new Date(c.last_active_at).toLocaleTimeString()}</td>
+                  <td style={{ padding: '4px 8px', color: 'var(--dim)' }}>{serverDate(c.started_at).toLocaleTimeString()}</td>
+                  <td style={{ padding: '4px 8px', color: 'var(--dim)' }}>{serverDate(c.last_active_at).toLocaleTimeString()}</td>
                   <td style={{ padding: '4px 8px', color: c.idle_seconds > idleTimeout / 2 ? 'var(--yellow)' : 'var(--dim)' }}>
                     {c.idle_seconds < 60 ? `${c.idle_seconds}s` : `${Math.floor(c.idle_seconds / 60)}m ${c.idle_seconds % 60}s`}
                   </td>

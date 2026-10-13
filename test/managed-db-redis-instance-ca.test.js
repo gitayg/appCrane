@@ -247,7 +247,9 @@ test('deprovision removes the instance CA, its certificates and only the redis-c
   assert.ok(!existsSync(join(dirB, 'redis-client.crt')));
   assert.ok(existsSync(join(dirB, 'client.crt')));
   const src = readFileSync(new URL('../server/services/managedDb.js', import.meta.url), 'utf8');
-  assert.equal((src.match(/certs\.dropRedisCerts\(row\.db_name, row\.db_user\)/g) || []).length, 2, 'deprovision + deprovisionApp');
+  // Both teardown paths release certificates through the one function that
+  // routes a Redis row to dropRedisCerts (test/managed-db-cert-release.test.js).
+  assert.equal((src.match(/certs\.releaseClientCerts\(row\)/g) || []).length, 2, 'deprovision + deprovisionApp');
 });
 
 // ---------------------------------------------------------------------------

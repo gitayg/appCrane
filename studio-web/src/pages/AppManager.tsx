@@ -5,6 +5,7 @@ import { RedeployWarning, fetchRedeployRisk, type RedeployRisk } from '../compon
 import { StoredEnvFilesCard } from '../components/StoredEnvFilesCard'
 import { ManagedDatabaseCard } from '../components/ManagedDatabaseCard'
 import { BackupsCard } from '../components/BackupsCard'
+import { serverDate } from '../utils/serverDate'
 
 const PAGE_CSS = `
 .app-manager .breadcrumb{font-size:.78rem;color:var(--dim);padding:7px 24px;background:var(--surface);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:5px;margin:-24px -24px 16px;}
@@ -173,14 +174,14 @@ function fmtUptime(ms?: number) {
 
 function fmtDur(s?: string, f?: string) {
   if (!s || !f) return ''
-  const sec = Math.round((new Date(f).getTime() - new Date(s).getTime()) / 1000)
+  const sec = Math.round((serverDate(f).getTime() - serverDate(s).getTime()) / 1000)
   if (sec < 60) return sec + 's'
   return Math.floor(sec / 60) + 'm ' + (sec % 60) + 's'
 }
 
 function relTime(iso?: string) {
   if (!iso) return ''
-  const diff = Date.now() - new Date(iso).getTime()
+  const diff = Date.now() - serverDate(iso).getTime()
   const s = Math.floor(diff / 1000)
   if (s < 60) return 'just now'
   if (s < 3600) return Math.floor(s / 60) + 'm ago'

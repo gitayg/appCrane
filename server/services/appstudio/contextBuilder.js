@@ -6,6 +6,7 @@ import log from '../../utils/logger.js';
 import { runAgentOneShot } from '../llm/runAgent.js';
 import { ensureStudioImage } from './generator.js';
 import { runWorkspaceGit } from '../builder/workspaceRunner.js';
+import { readWorkspaceFiles } from '../builder/workspaceReader.js';
 import { isCoderWorkspace, liveContainerNameFor } from '../builder/appContainer.js';
 
 const MODEL        = process.env.APPSTUDIO_PLANNER_MODEL || 'claude-sonnet-4-6';
@@ -43,44 +44,115 @@ function getFileTree(repoDir) {
   } catch (_) { return ''; }
 }
 
-function readKeySafe(path, max = 8000) {
+/** What one key file contributes to the prompt, in characters. */
+const KEY_FILE_MAX_CHARS = 8000;
+
+/**
+ * Bytes read per key file. A utf-8 character is at most 4 bytes, so a 32 KiB
+ * prefix always holds the first KEY_FILE_MAX_CHARS characters whole — the
+ * truncated text is the same one reading the whole file would give.
+ */
+const KEY_FILE_READ_BYTES = 4 * KEY_FILE_MAX_CHARS + 768;
+
+/** Ceiling on everything one context build reads (18 key files at most). */
+const KEY_FILES_BATCH_BYTES = 2 * 1024 * 1024;
+
+function clip(c) {
+  return c.length > KEY_FILE_MAX_CHARS ? c.slice(0, KEY_FILE_MAX_CHARS) + '\n...(truncated)' : c;
+}
+
+function readKeySafe(path) {
   try {
-    const c = readFileSync(path, 'utf8');
-    return c.length > max ? c.slice(0, max) + '\n...(truncated)' : c;
+    return clip(readFileSync(path, 'utf8')); // host-read-ok: release directory only — readKeyFiles never calls this for a coder workspace
   } catch (_) { return null; }
 }
 
-function collectKeyFiles(repoDir, fileTree) {
+/**
+ * The text of `paths` (repo-relative), as Map<path, string|null>; null means
+ * absent, unreadable, or not a regular file.
+ *
+ * A coder workspace is the agent's to rewrite while its container runs, and
+ * builderSession calls this on every first turn: the host reading a path in it
+ * could be raced into reading a host file (a symlink, or a parent directory
+ * swapped for one, between the check and the read) and the bytes would go
+ * straight into an LLM prompt. So for a coder workspace the files are read
+ * INSIDE the container (builder/workspaceReader.js), in one round trip, from
+ * git's object store at the commit the document is cached under — not the
+ * working tree. That is also the right content: the cache key is that hash,
+ * and the file tree beside it is `ls-tree` of the same commit. A symlink comes
+ * back as a symlink and is shown as one; its target is never read.
+ *
+ * Every other caller passes production/current, a release directory AppCrane
+ * cloned and no agent has mounted, which keeps the host read.
+ */
+function readKeyFiles(repoDir, paths, commit) {
+  const out = new Map();
+  if (!paths.length) return out;
+  if (!isCoderWorkspace(repoDir)) {
+    for (const p of paths) {
+      const abs = join(repoDir, p); // nosemgrep: path-join-resolve-traversal — p is a hardcoded name or from git ls-tree/diff output
+      out.set(p, existsSync(abs) ? readKeySafe(abs) : null); // host-read-ok: release directory only (see above)
+    }
+    return out;
+  }
+  // No commit means rev-parse already failed in this workspace: there is
+  // nothing to read at, and another round trip would only fail the same way.
+  if (!commit) return out;
+  let recs;
+  try {
+    recs = readWorkspaceFiles(repoDir, paths, {
+      source: 'commit', commit, truncate: true,
+      maxFileBytes: KEY_FILE_READ_BYTES, maxBatchBytes: KEY_FILES_BATCH_BYTES,
+      // The same budget as the ls-tree beside it.
+      container: liveContainerNameFor(repoDir), timeout: 10000,
+    });
+  } catch (err) {
+    log.warn(`[contextBuilder] reading key files from the workspace failed: ${err.message}`);
+    return out;
+  }
+  for (const p of paths) {
+    const r = recs.get(p);
+    if (r?.kind === 'F' || r?.kind === 'P') out.set(p, clip(r.body.toString('utf8')));
+    else if (r?.kind === 'L') out.set(p, `(symlink to ${JSON.stringify(r.target)} — not followed)`);
+    else out.set(p, null);
+  }
+  return out;
+}
+
+/** git paths here come from the agent's repository: only plain relative ones are asked for. */
+function plainPath(p) {
+  return typeof p === 'string' && p && !p.startsWith('/') && !p.includes('\0')
+    && !p.split('/').some((s) => s === '' || s === '.' || s === '..');
+}
+
+function collectKeyFiles(repoDir, fileTree, commit) {
   const priority = [
     'README.md', 'package.json', 'crane.yaml', 'deployhub.json',
     'server/index.js', 'src/index.js', 'src/main.js', 'src/app.js',
     'app.js', 'index.js', 'main.py', 'app.py',
   ];
   const lines = fileTree.split('\n').filter(Boolean);
-  const result = [];
-  const seen = new Set();
-
-  for (const p of priority) {
-    const abs = join(repoDir, p); // nosemgrep: path-join-resolve-traversal — p is a hardcoded filename list
-    if (existsSync(abs)) {
-      const content = readKeySafe(abs);
-      if (content) { result.push({ path: p, content }); seen.add(p); }
-    }
-  }
+  const seen = new Set(priority);
 
   // Add up to 6 more files: entry points, routes, DB schemas
   const extras = lines.filter(f =>
-    !seen.has(f) &&
+    !seen.has(f) && plainPath(f) &&
     /\.(js|ts|py|go|sql)$/.test(f) &&
     !f.includes('node_modules') && !f.includes('.git') &&
     (/route|model|schema|controller|service|store|api|App\.[jt]sx?$|\/pages\/|\/views\/|\/screens\//i.test(f))
   ).slice(0, 6);
 
-  for (const p of extras) {
-    const content = readKeySafe(join(repoDir, p)); // nosemgrep: path-join-resolve-traversal — p from git ls-tree output
-    if (content) { result.push({ path: p, content }); seen.add(p); }
+  // One read for all of them — for a coder workspace, one container round
+  // trip, and only for paths in the tree: it reads that commit's objects, so
+  // anything else would come back missing anyway.
+  const inTree = new Set(lines);
+  const wanted = [...priority, ...extras].filter((p) => !isCoderWorkspace(repoDir) || inTree.has(p));
+  const texts = readKeyFiles(repoDir, wanted, commit);
+  const result = [];
+  for (const p of wanted) {
+    const content = texts.get(p);
+    if (content) result.push({ path: p, content });
   }
-
   return result;
 }
 
@@ -136,13 +208,16 @@ Be concise (aim for ~500-800 words). Focus on what an AI needs to make precise s
   return callClaude(prompt, repoDir, appSlug, actingUserId);
 }
 
-async function updateContextDoc(existingDoc, changedFiles, repoDir, appSlug, actingUserId = null) {
+async function updateContextDoc(existingDoc, changedFiles, repoDir, appSlug, actingUserId = null, newHash = null) {
   if (!changedFiles.length) return existingDoc;
 
-  const diffs = changedFiles.slice(0, 10).map(({ status, path, newPath }) => {
+  const shown = changedFiles.slice(0, 10);
+  const wanted = [...new Set(shown.filter((f) => f.status !== 'D').map((f) => f.newPath || f.path).filter(plainPath))];
+  const texts = readKeyFiles(repoDir, wanted, newHash);
+  const diffs = shown.map(({ status, path, newPath }) => {
     if (status === 'D') return `DELETED: ${path}`;
     const target = newPath || path;
-    const content = readKeySafe(join(repoDir, target)); // nosemgrep: path-join-resolve-traversal — target from git diff output
+    const content = texts.get(target) || null;
     const prefix = status.startsWith('R') ? `RENAMED ${path} → ${target}` : `MODIFIED: ${target}`;
     return content ? `${prefix}\n\`\`\`\n${content}\n\`\`\`` : `${prefix} (unreadable)`;
   }).join('\n\n');
@@ -189,6 +264,7 @@ function saveContext(appSlug, gitHash, fileTree, contextDoc) {
  * Returns { contextDoc, fileTree, gitHash, fromCache }
  */
 export async function ensureCodebaseContext(appSlug, repoDir, { actingUserId = null } = {}) {
+  // host-read-ok: metadata only — the workspace directory itself, which AppCrane creates and the agent cannot replace (its parent is AppCrane's)
   if (!existsSync(repoDir)) return { contextDoc: null, fileTree: '', gitHash: null, fromCache: false };
 
   const db = getDb();
@@ -209,7 +285,7 @@ export async function ensureCodebaseContext(appSlug, repoDir, { actingUserId = n
     const changedFiles = getChangedFiles(repoDir, cached.git_hash, gitHash);
 
     if (changedFiles !== null) {
-      const updatedDoc = await updateContextDoc(cached.context_doc, changedFiles, repoDir, appSlug, actingUserId);
+      const updatedDoc = await updateContextDoc(cached.context_doc, changedFiles, repoDir, appSlug, actingUserId, gitHash);
       saveContext(appSlug, gitHash, fileTree, updatedDoc);
       return { contextDoc: updatedDoc, fileTree, gitHash, fromCache: false, builtAt: new Date().toISOString() };
     }
@@ -218,7 +294,7 @@ export async function ensureCodebaseContext(appSlug, repoDir, { actingUserId = n
 
   // No cache or unreachable old hash — full build
   log.info(`AppStudio context BUILD for ${appSlug} @ ${gitHash?.slice(0, 8)}`);
-  const keyFiles = collectKeyFiles(repoDir, fileTree);
+  const keyFiles = collectKeyFiles(repoDir, fileTree, gitHash);
   const contextDoc = await buildContextDoc(repoDir, fileTree, keyFiles, appSlug, actingUserId);
   if (gitHash) saveContext(appSlug, gitHash, fileTree, contextDoc);
 

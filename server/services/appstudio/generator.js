@@ -120,7 +120,7 @@ export async function ensureStudioImage(onLog) {
   const checkedInDockerfile = resolve(import.meta.dirname, '..', '..', '..', 'infra', 'studio.Dockerfile');
   const buildDockerfile = join(buildDir, 'Dockerfile');
   if (existsSync(checkedInDockerfile)) {
-    writeFileSync(buildDockerfile, readFileSync(checkedInDockerfile, 'utf8'));
+    writeFileSync(buildDockerfile, readFileSync(checkedInDockerfile, 'utf8')); // host-read-ok: AppCrane's own infra/studio.Dockerfile
   } else {
     onLog?.('[studio] infra/studio.Dockerfile missing — using inline recipe');
     writeFileSync(buildDockerfile, [

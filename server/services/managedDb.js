@@ -538,6 +538,10 @@ function serverConfigLabel(engine) {
   if (engine === 'mariadb') {
     const mode = tde.modeFor(tde.getState(getDb()));
     if (mode !== 'none') parts.tde = `${mode}:${tde.fileKeyFingerprint()}`;
+    // The Aria log flags (tde.ariaLogArgs) come with encrypt mode only. A
+    // separate part so a server already encrypting before they existed is
+    // recreated once to get them, and a decrypt/none server is left alone.
+    if (mode === 'encrypt') parts.ariaLog = tde.ARIA_LOG_CONFIG_VERSION;
   }
   return crypto.createHash('sha256').update(JSON.stringify(parts)).digest('hex').slice(0, 12);
 }
@@ -650,6 +654,47 @@ async function readEncryptionLive() {
   return tde.parseStatus(await runAdminSql('mariadb', tde.STATUS_SQL));
 }
 
+/**
+ * Move app tables out of Aria and MyISAM into InnoDB while encryption is on,
+ * so their rows live in encrypted tablespaces instead of files (and, for Aria,
+ * a transaction log) MariaDB does not encrypt. Runs on every ensure in encrypt
+ * mode: the listing is one SELECT, and an app can create a new Aria table at
+ * any time. Only tables in databases AppCrane provisioned (managed_databases),
+ * never the system schemas (tde.conversionPlan).
+ *
+ * One ALTER per table, each on its own: InnoDB rejects some tables (a row too
+ * wide for its page size, an index longer than its limit), and one refusal
+ * must neither stop the others nor fail the ensure that runs this. A refused
+ * table stays as it is, its error goes to the platform log and the status
+ * card, and it is tried again on the next ensure — the app may have changed
+ * it. The ALTER copies the table and holds a lock on it meanwhile; ten minutes
+ * per table is the ceiling, after which it is reported as failed.
+ */
+async function convertAppTablesToInnodb() {
+  const databases = getDb().prepare(
+    "SELECT db_name FROM managed_databases WHERE engine = 'mariadb' AND db_name IS NOT NULL"
+  ).all().map(r => r.db_name);
+  const rows = tde.parseConvertList(await runAdminSql('mariadb', tde.CONVERT_LIST_SQL));
+  const { convert, skipped } = tde.conversionPlan(rows, { databases, assertIdent });
+  const converted = [];
+  const failed = [...skipped];
+  for (const t of convert) {
+    try {
+      await runAdminSql('mariadb', t.sql, { timeout: 600000 });
+      converted.push(t.name);
+      log.info(`managedDb: MariaDB encryption: converted ${t.engine} table ${t.name} to InnoDB`);
+    } catch (e) {
+      // The client echoes the statement above its error; keep the ERROR line.
+      const msg = String(e.message || e);
+      const error = (msg.match(/ERROR \d+[^\n]*/)?.[0] || msg).slice(0, 300);
+      failed.push({ name: t.name, engine: t.engine, error });
+      log.warn(`managedDb: MariaDB encryption: could not convert ${t.engine} table ${t.name} to InnoDB; left as it is (${error})`);
+    }
+  }
+  for (const f of skipped) log.warn(`managedDb: MariaDB encryption: not converting ${f.engine} table ${f.name}: ${f.error}`);
+  return tde.recordConversion(getDb(), { converted, failed });
+}
+
 async function scanAriaEncryption() {
   const out = await dockerExec(['exec', ENGINES.mariadb.container, 'sh', '-c', tde.ARIA_SCAN_SNIPPET], { timeout: 300000 });
   return tde.parseAriaScan(out);
@@ -664,11 +709,14 @@ export async function mariadbEncryptionStatus() {
   const state = tde.getState(getDb());
   let live = null;
   let error = null;
+  let ariaLive = null;
   try {
     if (serverRow('mariadb')) live = await readEncryptionLive();
+    if (live) ariaLive = tde.parseAriaLog(await runAdminSql('mariadb', tde.ARIA_LOG_SQL));
   } catch (e) {
     error = e.message;
   }
+  const encrypting = tde.modeFor(state) === 'encrypt';
   return {
     engine: 'mariadb',
     enabled: state.enabled,
@@ -679,6 +727,9 @@ export async function mariadbEncryptionStatus() {
     server_running: Boolean(live),
     tablespaces: live ? { total: live.total, encrypted: live.encrypted, plain: live.plain, in_progress: live.in_progress } : null,
     live: live ? live.live : null,
+    // What MariaDB cannot encrypt, and what is done about it (encrypt mode).
+    aria_log: encrypting ? { encryptable: false, note: tde.ARIA_LOG_NOTE, live: ariaLive } : null,
+    conversion: tde.getConversion(getDb()),
     error,
     caveat: tde.CAVEAT,
   };
@@ -960,6 +1011,11 @@ async function ensureServerLocked(engine, cfg) {
     await reloadServerTls(engine, cfg.container, engine === 'mongo' ? { port, adminPassword } : null);
   }
   await hardenServer(engine, port, adminPassword);
+  if (tdeMode === 'encrypt' && ours) {
+    // Logged, never thrown: a conversion problem must not stop a deploy from
+    // getting its database. The summary (and any failures) is on the card.
+    await convertAppTablesToInnodb().catch((e) => log.warn(`managedDb: MariaDB encryption: Aria/MyISAM conversion did not run (${e.message})`));
+  }
   return { engine, host: DB_HOST_FOR_CONTAINERS, port, container: cfg.container };
 }
 
@@ -1652,19 +1708,19 @@ export async function serverStatus() {
  * driver) and passwords are interpolated as literals from an alphabet with no
  * quoting characters in it (assertPassword). Neither ever reaches a shell.
  */
-async function runAdminSql(engine, sql, { database } = {}) {
+async function runAdminSql(engine, sql, { database, timeout = 60000 } = {}) {
   const cfg = ENGINES[engine];
   if (engine === 'postgres') {
     return dockerExecStdin(
       ['exec', '-u', 'postgres', '-i', cfg.container,
         'psql', '-X', '-q', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres', '-d', database ? assertIdent(database) : 'postgres', '-f', '-'],
       sql,
-      { timeout: 60000 }
+      { timeout }
     );
   }
   const args = ['exec', '-i', cfg.container, 'mariadb', '--batch'];
   if (database) args.push(assertIdent(database));
-  return dockerExecStdin(args, sql, { timeout: 60000 });
+  return dockerExecStdin(args, sql, { timeout });
 }
 
 /**
@@ -2317,8 +2373,7 @@ export async function deprovision(scope, engine) {
   if (!row) return false;
   await dropRow(row);
   getDb().prepare('DELETE FROM managed_databases WHERE id = ?').run(row.id);
-  certs.dropClientCert(row.db_user);
-  if (row.engine === 'redis') certs.dropRedisCerts(row.db_name, row.db_user);
+  certs.releaseClientCerts(row);
   log.info(`managedDb: deprovisioned ${engine} database ${row.db_name}`);
   return true;
 }
@@ -2365,8 +2420,7 @@ export async function deprovisionApp(appId) {
     try {
       await dropRow(row);
       getDb().prepare('DELETE FROM managed_databases WHERE id = ?').run(row.id);
-      certs.dropClientCert(row.db_user);
-      if (row.engine === 'redis') certs.dropRedisCerts(row.db_name, row.db_user);
+      certs.releaseClientCerts(row);
       dropped++;
     } catch (e) {
       // Never block an app delete on a database server that is down: report it

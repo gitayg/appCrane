@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { adminApi } from '../adminApi'
+import { serverDate } from '../utils/serverDate'
 
 type McpTool = {
   name: string
@@ -226,9 +227,9 @@ function PersonalKeyCard({ endpoint }: { endpoint: string }) {
               return (
                 <tr key={k.id} style={{ opacity: revoked ? 0.5 : 1 }}>
                   <td style={{ padding: '4px 8px' }}>{k.label || <span style={{ color: 'var(--dim)' }}>(no label)</span>}</td>
-                  <td style={{ padding: '4px 8px', color: 'var(--dim)', fontSize: '.78rem' }}>{new Date(k.created_at).toLocaleDateString()}</td>
+                  <td style={{ padding: '4px 8px', color: 'var(--dim)', fontSize: '.78rem' }}>{serverDate(k.created_at).toLocaleDateString()}</td>
                   <td style={{ padding: '4px 8px', color: 'var(--dim)', fontSize: '.78rem' }}>
-                    {k.last_used_at ? new Date(k.last_used_at).toLocaleString() : 'never'}
+                    {k.last_used_at ? serverDate(k.last_used_at).toLocaleString() : 'never'}
                   </td>
                   <td style={{ padding: '4px 8px', fontSize: '.78rem' }}>
                     {revoked ? <span style={{ color: 'var(--red)' }}>revoked</span> : <span style={{ color: 'var(--green)' }}>active</span>}

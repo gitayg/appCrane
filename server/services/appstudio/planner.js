@@ -88,7 +88,7 @@ function grepRelevantFiles(repoDir, fileTree, keywords, maxFiles = 6) {
 
 function readFileSafe(absPath, maxBytes = 20000) {
   try {
-    const c = readFileSync(absPath, 'utf8');
+    const c = readFileSync(absPath, 'utf8'); // host-read-ok: worker passes production/current (getRepoDir), a release dir no agent mounts
     return c.length > maxBytes ? c.slice(0, maxBytes) + '\n...(truncated)' : c;
   } catch (_) { return '(could not read file)'; }
 }

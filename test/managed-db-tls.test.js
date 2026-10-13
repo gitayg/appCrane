@@ -403,5 +403,7 @@ test('deprovision removes the login certificate and its files', async () => {
   certs.dropClientCert(username);
   assert.ok(!existsSync(dir));
   const src = readFileSync(new URL('../server/services/managedDb.js', import.meta.url), 'utf8');
-  assert.equal((src.match(/certs\.dropClientCert\(row\.db_user\)/g) || []).length, 2, 'deprovision + deprovisionApp');
+  // Through releaseClientCerts, which drops client.* only once no other
+  // non-Redis database of the login remains (test/managed-db-cert-release.test.js).
+  assert.equal((src.match(/certs\.releaseClientCerts\(row\)/g) || []).length, 2, 'deprovision + deprovisionApp');
 });

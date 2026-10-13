@@ -153,7 +153,7 @@ function getApp(slug) {
 function getAgentContext(slug) {
   const dataDir = resolve(process.env.DATA_DIR || './data');
   const ctxPath = join(dataDir, 'apps', slug, 'agent-context.md'); // nosemgrep: path-join-resolve-traversal — slug is DB-validated regex ^[a-z0-9][a-z0-9-]*$
-  return existsSync(ctxPath) ? readFileSync(ctxPath, 'utf8') : '';
+  return existsSync(ctxPath) ? readFileSync(ctxPath, 'utf8') : ''; // host-read-ok: DATA_DIR/apps/<slug>/agent-context.md, never mounted
 }
 
 function getRepoDir(app) {
@@ -770,7 +770,7 @@ async function handleOpenPr(job) {
     try {
       const pkgPath = join(resolve(process.env.DATA_DIR || './data'), 'apps', app.slug, 'production', 'current', 'package.json');
       if (existsSync(pkgPath)) {
-        const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
+        const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')); // host-read-ok: production/current, a release dir AppCrane deployed
         if (pkg.version) {
           releasedVersion = `v${pkg.version}`;
           db.prepare('UPDATE enhancement_requests SET fix_version = ? WHERE id = ?').run(releasedVersion, enh.id);

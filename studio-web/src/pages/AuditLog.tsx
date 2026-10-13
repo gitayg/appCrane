@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { adminApi } from '../adminApi'
+import { serverDate } from '../utils/serverDate'
 
 interface AuditEntry {
   created_at: string
@@ -118,7 +119,7 @@ export function AuditLog() {
               {entries.map((e, i) => (
                 <tr key={i}>
                   <td style={{ whiteSpace: 'nowrap', color: 'var(--dim)', fontFamily: 'monospace', fontSize: '0.8rem' }}>
-                    {new Date(e.created_at).toLocaleString()}
+                    {serverDate(e.created_at).toLocaleString()}
                   </td>
                   <td>{e.user_name}</td>
                   <td>{e.app_slug || '-'}</td>

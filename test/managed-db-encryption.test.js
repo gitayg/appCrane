@@ -62,6 +62,13 @@ const main = () => {
     if (argv.includes('mariadb')) {
       fs.appendFileSync(path.join(S, 'sql.log'), stdin + '\\n--\\n');
       if (stdin.includes('INNODB_TABLESPACES_ENCRYPTION')) return done(read('status'));
+      // The Aria/MyISAM conversion: the listing, then one ALTER per table; a
+      // table named in 'fail_table' is refused the way InnoDB refuses one.
+      if (stdin.includes('information_schema.TABLES')) return done(read('tables'));
+      if (stdin.includes('ENGINE=InnoDB') && read('fail_table') && stdin.includes(read('fail_table'))) {
+        return done('', 1, 'ERROR 1118 (42000) at line 1: Row size too large');
+      }
+      if (stdin.includes('@@aria_log_purge_type')) return done('a\\tb\\tc\\nimmediate\\t30\\t8388608');
       // An Aria rebuild under aria_encrypt_tables=OFF leaves the table plain.
       if (stdin.includes('ENGINE=Aria')) fs.writeFileSync(path.join(S, 'aria'), 'ARIA_SCAN_DONE');
       return done();
@@ -100,11 +107,12 @@ after(() => {
 });
 
 function resetShim() {
-  for (const f of ['container', 'run.json', 'status', 'aria', 'events', 'argv.log', 'sql.log']) rmSync(join(STATE, f), { force: true });
+  for (const f of ['container', 'run.json', 'status', 'aria', 'events', 'argv.log', 'sql.log', 'tables', 'fail_table']) rmSync(join(STATE, f), { force: true });
 }
 function resetState() {
   db.prepare("DELETE FROM settings WHERE key LIKE 'managed_db_mariadb_encryption%'").run();
   db.prepare("DELETE FROM managed_db_servers WHERE engine = 'mariadb'").run();
+  db.prepare('DELETE FROM managed_databases').run();
   tde.removeKeyFile();
   resetShim();
 }
@@ -148,6 +156,53 @@ test('server flags: encrypt turns every *_encrypt_* on with the plugin forced; d
   assert.ok(off.includes('--innodb-encryption-threads=4'), 'threads decrypt in the background');
   assert.deepEqual(tde.serverArgs('none'), []);
   assert.throws(() => tde.serverArgs('maybe'));
+});
+
+test('Aria log: encrypt mode keeps it short (immediate purge, 30 s checkpoints, 8 MiB files); decrypt and none leave it alone', () => {
+  const on = tde.serverArgs('encrypt');
+  for (const f of ['--aria-log-purge-type=immediate', '--aria-checkpoint-interval=30', '--aria-log-file-size=8388608']) {
+    assert.ok(on.includes(f), `encrypt mode must pass ${f}`);
+  }
+  for (const m of ['decrypt', 'none']) {
+    assert.ok(!tde.serverArgs(m).some(a => a.startsWith('--aria-log') || a.startsWith('--aria-checkpoint')), `${m} mode adds no Aria log flags`);
+  }
+  assert.equal(tde.ARIA_LOG_NOTE, 'Aria log: not encryptable by MariaDB; kept short (purged at each checkpoint, every 30 s)');
+  assert.deepEqual(tde.parseAriaLog('a\tb\tc\nimmediate\t30\t8388608\n'), { purge_type: 'immediate', checkpoint_interval: 30, log_file_size: 8388608 });
+  assert.equal(tde.parseAriaLog(''), null);
+});
+
+// managedDb's assertIdent, as far as these tests need it (the real one is
+// exercised end to end below).
+const assertIdentLike = (n) => { if (!/^[a-z][a-z0-9_]{0,62}$/.test(n)) throw new Error(`refusing ${n}`); return n; };
+
+test('conversion plan: only app tables in AppCrane-managed databases, never the system schemas, only plain names reach SQL', () => {
+  for (const sch of ['mysql', 'sys', 'performance_schema', 'information_schema']) {
+    assert.match(tde.CONVERT_LIST_SQL, new RegExp(`'${sch}'`), `listing excludes ${sch}`);
+  }
+  assert.match(tde.CONVERT_LIST_SQL, /ENGINE IN \('Aria', 'MyISAM'\)/);
+  const rows = tde.parseConvertList([
+    'TABLE_SCHEMA\tTABLE_NAME\tENGINE',
+    'crane_a1\tsessions\tAria',
+    'crane_a1\tLegacy_Log\tMyISAM',
+    'crane_a1\tweird-name\tAria',
+    'mysql\tglobal_priv\tAria',
+    'MYSQL\tdb\tAria',
+    'sys\tsys_config\tAria',
+    'other_db\tt\tAria',
+    'crane_a1\tok\tInnoDB',
+  ].join('\n'));
+  // 'mysql' and 'sys' listed as managed on purpose: the system-schema rule
+  // must hold on its own, not only because they are not app databases.
+  const plan = tde.conversionPlan(rows, { databases: ['crane_a1', 'mysql', 'sys'], assertIdent: assertIdentLike });
+  assert.deepEqual(plan.convert.map(c => c.sql), [
+    'ALTER TABLE `crane_a1`.`sessions` ENGINE=InnoDB;',
+    'ALTER TABLE `crane_a1`.`Legacy_Log` ENGINE=InnoDB;',
+  ]);
+  assert.deepEqual(plan.skipped.map(x => x.name), ['crane_a1.weird-name'], 'an odd name is reported, never quoted by guesswork');
+  assert.deepEqual(tde.parseConvertList(''), [], 'no rows prints nothing');
+  assert.throws(() => tde.parseConvertList('garbage\nx'), /unexpected/);
+  // The schema goes through the identifier check before it reaches SQL.
+  assert.throws(() => tde.conversionPlan([{ schema: 'Bad`db', table: 't', engine: 'Aria' }], { databases: ['Bad`db'], assertIdent: assertIdentLike }), /refusing/);
 });
 
 test('the install snippet is a fixed literal: the wrapping secret comes from the environment and is unset before the server starts', () => {
@@ -360,6 +415,46 @@ test('a server that never existed: ON is recorded and applies at creation; OFF n
   db.prepare("DELETE FROM managed_db_servers WHERE engine = 'mariadb'").run();
   await mdb.setMariadbEncryption(false, { confirm: true });
   assert.equal(tde.getState(db).keyLoaded, false);
+});
+
+test('ON converts app Aria/MyISAM tables to InnoDB on each ensure, reports refusals, and never fails the ensure', async () => {
+  const appId = db.prepare("INSERT INTO apps (name,slug,slot,source_type,branch) VALUES ('tdeconv','tdeconv',1,'managed','main')").run().lastInsertRowid;
+  db.prepare("INSERT INTO managed_databases (app_id, tenant, engine, db_name, db_user, password_enc) VALUES (?, '', 'mariadb', 'crane_a7', 'crane_a7_u', 'x')").run(appId);
+  writeFileSync(join(STATE, 'tables'), [
+    'TABLE_SCHEMA\tTABLE_NAME\tENGINE',
+    'crane_a7\tsessions\tAria',
+    'crane_a7\twide\tMyISAM',
+    'mysql\tglobal_priv\tAria',
+    'crane_other\tt\tAria',
+  ].join('\n'));
+  writeFileSync(join(STATE, 'fail_table'), '`wide`');
+  await serverRunning();
+  assert.ok(!existsSync(join(STATE, 'sql.log')) || !readFileSync(join(STATE, 'sql.log'), 'utf8').includes('ENGINE=InnoDB'), 'encryption off: nothing converted');
+
+  await mdb.setMariadbEncryption(true);
+  const sqlLog = readFileSync(join(STATE, 'sql.log'), 'utf8');
+  assert.match(sqlLog, /ALTER TABLE `crane_a7`\.`sessions` ENGINE=InnoDB;/);
+  assert.ok(!/`mysql`|crane_other/.test(sqlLog.split('information_schema.TABLES').slice(-1)[0]), 'system schema and unmanaged database untouched');
+  assert.ok(shimRun().argv.includes('--aria-log-purge-type=immediate'), 'recreated with the Aria log flags');
+
+  writeFileSync(join(STATE, 'status'), STATUS_ON);
+  const st = await mdb.mariadbEncryptionStatus();
+  assert.equal(st.conversion.converted_total, 1);
+  assert.deepEqual(st.conversion.converted_last, ['crane_a7.sessions']);
+  assert.equal(st.conversion.failed_count, 1);
+  assert.equal(st.conversion.failed[0].name, 'crane_a7.wide');
+  assert.match(st.conversion.failed[0].error, /Row size too large/);
+  assert.equal(st.aria_log.encryptable, false);
+  assert.equal(st.aria_log.note, tde.ARIA_LOG_NOTE);
+  assert.deepEqual(st.aria_log.live, { purge_type: 'immediate', checkpoint_interval: 30, log_file_size: 8388608 }, 'live values read from the server');
+
+  // A later ensure: 'sessions' is InnoDB now, 'wide' is tried again.
+  writeFileSync(join(STATE, 'tables'), 'TABLE_SCHEMA\tTABLE_NAME\tENGINE\ncrane_a7\twide\tMyISAM');
+  rmSync(join(STATE, 'fail_table'));
+  await mdb.ensureServer('mariadb');
+  const again = tde.getConversion(db);
+  assert.equal(again.converted_total, 2, 'total accumulates across passes');
+  assert.equal(again.failed_count, 0, 'a table that converts later drops off the failure list');
 });
 
 // ── HTTP: platform admin only, and the generic settings writer is closed ──

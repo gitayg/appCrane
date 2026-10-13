@@ -76,7 +76,7 @@ import crypto from 'crypto';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { join, resolve } from 'path';
-import { mkdirSync, writeFileSync, renameSync, chmodSync, chownSync, rmSync, existsSync, readFileSync } from 'fs';
+import { mkdirSync, writeFileSync, renameSync, chmodSync, chownSync, rmSync, existsSync, readFileSync, lstatSync, readdirSync, unlinkSync, rmdirSync } from 'fs';
 import { getDb } from '../db.js';
 import { encrypt, decrypt } from './encryption.js';
 import * as pki from './dbPki.js';
@@ -93,6 +93,9 @@ export const CLIENT_MOUNT_PATH = '/run/appcrane/db';
  */
 export const REDIS_CLIENT_PREFIX = 'redis-';
 const REDIS_CLIENT_FILES = ['redis-client.crt', 'redis-client.key', 'redis-client.pem'];
+/** The SQL/Mongo login's files: one certificate per login, shared by every
+ *  non-Redis engine that login has (ensureClientCert is keyed by login). */
+const SQL_CLIENT_FILES = ['client.crt', 'client.key', 'client.pem'];
 
 /** Container paths of a login's files. ca.crt is shared: it verifies the SERVER. */
 export function clientFilePaths(prefix = '') {
@@ -327,9 +330,7 @@ export function dropRedisCerts(dbName, login) {
   const del = getDb().prepare('DELETE FROM managed_db_certs WHERE name = ?');
   for (const n of [`redis-ca:${dbName}`, `redis-client:${dbName}`, `redis-admin:${dbName}`]) del.run(n);
   rmSync(join(tlsRoot(), 'redis', dbName), { recursive: true, force: true });
-  if (login && SAFE_LOGIN.test(login)) {
-    for (const f of REDIS_CLIENT_FILES) rmSync(join(tlsRoot(), 'client', login, f), { force: true });
-  }
+  if (login && SAFE_LOGIN.test(login)) removeClientFiles(login, REDIS_CLIENT_FILES);
 }
 
 /** Expiry only — for the API. Never decrypts. */
@@ -338,12 +339,75 @@ export function clientCertInfo(login) {
   return row ? { not_after: row.not_after } : null;
 }
 
-/** Forget a login's certificate and remove its files (deprovision). */
+/**
+ * Forget a login's SQL/Mongo certificate and remove ITS files (deprovision):
+ * client.crt/.key/.pem only. The directory also holds the same login's
+ * redis-client.* (a Redis the app still has) and the shared ca.crt; removing
+ * the whole directory — what this did before — left that Redis refusing the
+ * app until its next deploy re-issued the files. The caller decides WHEN: the
+ * certificate is per login, so it goes only once no Postgres/MariaDB/Mongo
+ * database of that login remains (releaseClientCerts).
+ */
 export function dropClientCert(login) {
   if (!SAFE_LOGIN.test(login)) return;
   getDb().prepare('DELETE FROM managed_db_certs WHERE name = ?').run(`client:${login}`);
+  removeClientFiles(login, SQL_CLIENT_FILES);
+}
+
+/**
+ * Remove the client certificate files of ONE deprovisioned database, never the
+ * login's other engines'. Called right after its managed_databases row is
+ * deleted (managedDb.deprovision / deprovisionApp).
+ *
+ * The login name is the same for every engine of a scope (namesForScope), and
+ * so is its client directory: Redis's certificate is redis-client.* (per
+ * instance), the SQL/Mongo one is client.* — ONE certificate per login, shared
+ * by its Postgres, MariaDB and Mongo. So dropping Redis removes redis-client.*
+ * only, and client.* goes only when the last non-Redis database of that login
+ * does. The directory itself goes once nothing is left in it.
+ */
+export function releaseClientCerts(row) {
+  if (row.engine === 'redis') {
+    dropRedisCerts(row.db_name, row.db_user);
+    return;
+  }
+  const stillUsed = getDb().prepare(
+    "SELECT 1 FROM managed_databases WHERE db_user = ? AND engine <> 'redis' LIMIT 1"
+  ).get(row.db_user);
+  if (!stillUsed) dropClientCert(row.db_user);
+}
+
+/**
+ * Remove the named files from a login's client directory, then the directory
+ * itself once no certificate is left in it. Nothing is ever followed:
+ *   - the directory is lstat'ed and left alone unless it is a real directory
+ *     (a symlink planted at _tls/client/<login> would otherwise turn
+ *     "delete this login's files" into deleting files wherever it points);
+ *   - each entry is lstat'ed and only a regular file or a symlink is
+ *     unlinked — unlink removes a link, never its target; a directory there
+ *     is not ours and stays.
+ * ca.crt is shared by both certificates (it verifies the SERVER), so it goes
+ * with the last of them; the directory is removed with rmdir, which fails on
+ * anything else still in it rather than deleting what this code did not write.
+ */
+function removeClientFiles(login, names) {
   const dir = join(tlsRoot(), 'client', login);
-  rmSync(dir, { recursive: true, force: true });
+  if (!isRealDir(dir)) return;
+  for (const n of names) unlinkIfFile(join(dir, n));
+  const left = readdirSync(dir);
+  if (left.some(n => SQL_CLIENT_FILES.includes(n) || REDIS_CLIENT_FILES.includes(n))) return;
+  unlinkIfFile(join(dir, 'ca.crt'));
+  try { rmdirSync(dir); } catch (e) { if (e.code !== 'ENOTEMPTY' && e.code !== 'EEXIST' && e.code !== 'ENOENT') throw e; }
+}
+
+function isRealDir(p) {
+  try { return lstatSync(p).isDirectory(); } catch (_) { return false; }
+}
+
+function unlinkIfFile(p) {
+  let st;
+  try { st = lstatSync(p); } catch (_) { return; }
+  if (st.isFile() || st.isSymbolicLink()) unlinkSync(p);
 }
 
 // ---------------------------------------------------------------------------
