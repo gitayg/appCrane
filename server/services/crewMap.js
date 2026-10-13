@@ -75,7 +75,9 @@ export function crewMap(user) {
     }
     e.total += r.n;
     e.states[r.state] += r.n;
-    if (r.held) e.pending_first_contact += r.n;
+    // A held task its sender cancelled stays held (never released) but is no
+    // longer waiting on anyone.
+    if (r.held && r.state === 'submitted') e.pending_first_contact += r.n;
     if (!e.last_activity || r.last_at > e.last_activity) e.last_activity = r.last_at;
     if (to.owner_user_id === user.id) {
       if (myBlocks.has(from.id)) e.blocked = true;

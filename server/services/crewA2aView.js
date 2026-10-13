@@ -128,7 +128,7 @@ export function toTask(task, { historyLength, includeArtifacts = true } = {}) {
     title: task.title,
     fromAgent: task.from_agent,
     toAgent: task.to_agent,
-    ...(task.held ? { waitingForApproval: true } : {}),
+    ...(task.held && task.state === 'submitted' ? { waitingForApproval: true } : {}),
   };
   return out;
 }

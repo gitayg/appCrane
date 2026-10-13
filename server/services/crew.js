@@ -81,6 +81,15 @@
  *     (mcp_app_scope) gets no Crew over MCP or A2A, and an agent identity
  *     (users.kind = 'agent') cannot own or act as a crew agent anywhere — a
  *     crew agent must belong to a person who can answer a first contact.
+ *
+ * ── Security fixes after phase 2 (review of v2.106.0) ───────────────────────
+ *   - held = 1 means "never released": a sender cancelling its held task no
+ *     longer clears it, so the receiver's agents never see the withdrawn
+ *     request, and no decision releases a cancelled task.
+ *   - While held, the sender may only cancel: no messages or artifacts that
+ *     "Allow once" would release unseen.
+ *   - Block and Refuse reject every OPEN task of that agent with the person,
+ *     not only held ones, so an earlier Allow cannot outlive a block.
  */
 import crypto from 'crypto';
 import { EventEmitter } from 'events';
@@ -728,7 +737,7 @@ export function inbox(user, { as_agent }, { touch = true } = {}) {
     WHERE t.from_agent_id = ? ORDER BY t.updated_at DESC LIMIT 20`).all(agent.id)
     .map((t) => ({
       task_id: t.id, title: t.title, state: t.state, to_agent: t.to_agent, to_owner: t.to_owner,
-      waiting_for_approval: !!t.held, created_at: t.created_at, updated_at: t.updated_at,
+      waiting_for_approval: !!t.held && t.state === 'submitted', created_at: t.created_at, updated_at: t.updated_at,
       messages: t.state === 'rejected' ? [] : messagesFor(db, t.id),
     }));
   return { agent: agent.name, received, sent };
@@ -819,6 +828,13 @@ export function reply(user, { as_agent, task_id, message, state, artifact, messa
   // Same answer for "no such task" and "not yours": task ids must not be probeable.
   if (!isReceiver && !isSender) fail(404, 'NOT_FOUND', `No task ${oneLine(task_id, 40)} for agent ${agent.name}.`);
   if (TERMINAL_STATES.includes(task.state)) fail(409, 'TASK_CLOSED', `Task is already ${task.state}; start a new task instead.`);
+  // SECURITY FIX (review of v2.106.0): a held task is a request the receiving
+  // person has not agreed to receive, and "Allow once" releases it as it stood
+  // when they decided. So while it is held the sender may only withdraw it: a
+  // message or artifact added now would ride out on a decision made without it.
+  if (isSender && task.held && (String(state ?? '') !== 'canceled' || String(message ?? '').trim() || artifact != null)) {
+    fail(409, 'HELD', 'This task is still waiting for the receiving person\'s approval. Until they decide, the only change you can make is to cancel it (state "canceled", no message).');
+  }
 
   let nextState = null;
   if (state != null && state !== '') {
@@ -848,8 +864,13 @@ export function reply(user, { as_agent, task_id, message, state, artifact, messa
       db.prepare('INSERT INTO crew_messages (task_id, from_agent_id, body, artifact_name, artifact_body, message_id, state_after) VALUES (?, ?, ?, ?, ?, ?, ?)')
         .run(task.id, agent.id, body, art?.name ?? null, art?.body ?? null, message_id || null, nextState || task.state);
     }
-    db.prepare(`UPDATE crew_tasks SET state = COALESCE(?, state), held = CASE WHEN ? = 'canceled' THEN 0 ELSE held END, updated_at = datetime('now') WHERE id = ?`)
-      .run(nextState, nextState, task.id);
+    // held is left as it is. SECURITY FIX (review of v2.106.0): cancelling a
+    // held task used to clear held, and taskVisibleTo() then showed the
+    // never-approved title and body to the receiver's agents (A2A GetTask /
+    // ListTasks): a sender could get any text past first contact by sending
+    // and cancelling. held = 1 means "never released", whatever the state.
+    db.prepare(`UPDATE crew_tasks SET state = COALESCE(?, state), updated_at = datetime('now') WHERE id = ?`)
+      .run(nextState, task.id);
     touchAgent(db, agent.id);
   })();
 
@@ -895,7 +916,9 @@ export function crewLog(user, { limit = 100 } = {}) {
       created_at: t.created_at, updated_at: t.updated_at,
       awaiting_your_decision: false,
     };
-    if (t.held) {
+    // A held task the sender cancelled stays held (never released) but waits
+    // for nobody: offering a decision on it would release a withdrawn request.
+    if (t.held && t.state === 'submitted') {
       entry.waiting_for_approval = true;
       if (mineReceived && !mineSent) {
         const c = connStmt.get(t.from_agent_id, user.id);
@@ -909,6 +932,17 @@ export function crewLog(user, { limit = 100 } = {}) {
 const DECISIONS = ['allow', 'allow_once', 'refuse', 'block'];
 
 /**
+ * SECURITY FIX (review of v2.106.0): "a block wins over an allow". Block and
+ * Refuse used to reject only HELD tasks, so a sender that had been allowed
+ * kept every task it already had open with this person and went on writing
+ * into them through reply() (up to 300 messages an hour) after being blocked.
+ * Now every OPEN task from that agent to the person's agents is rejected too:
+ * the sender sees 'rejected' (no reason, as for any block) and reply() refuses
+ * a closed task. Finished tasks are history and are left alone.
+ */
+const OPEN_FROM_SENDER = `state IN ('submitted', 'working', 'input_required')`;
+
+/**
  * The receiving person's decision on a first contact. Only that person may
  * decide — not the sender, not a platform admin (an admin deciding would be
  * acting for someone else).
@@ -920,28 +954,36 @@ export function decideConnection(user, connectionId, decision, { task_id } = {})
   const conn = Number.isFinite(id) ? db.prepare('SELECT * FROM crew_connections WHERE id = ?').get(id) : null;
   if (!conn || conn.to_owner_id !== user.id) fail(404, 'NOT_FOUND', 'No such first-contact request for you.');
   const myAgentIds = `SELECT id FROM crew_agents WHERE owner_user_id = ?`;
+  // Only a task still waiting (held AND submitted) can be released: a held
+  // task its sender cancelled was withdrawn, and releasing it would show the
+  // receiver's agents a request nobody now stands behind.
+  const WAITING = `held = 1 AND state = 'submitted'`;
 
-  const heldIds = db.prepare(`SELECT id FROM crew_tasks WHERE held = 1 AND from_agent_id = ? AND to_agent_id IN (${myAgentIds})`).all(conn.from_agent_id, user.id).map((r) => r.id);
+  const affectedIds = decision.startsWith('allow')
+    ? db.prepare(`SELECT id FROM crew_tasks WHERE ${WAITING} AND from_agent_id = ? AND to_agent_id IN (${myAgentIds})`).all(conn.from_agent_id, user.id).map((r) => r.id)
+    : db.prepare(`SELECT id FROM crew_tasks WHERE ${OPEN_FROM_SENDER} AND from_agent_id = ? AND to_agent_id IN (${myAgentIds})`).all(conn.from_agent_id, user.id).map((r) => r.id);
   const result = db.transaction(() => {
     if (decision === 'allow') {
       db.prepare("UPDATE crew_connections SET state = 'allowed', decided_at = datetime('now') WHERE id = ?").run(conn.id);
       const r = db.prepare(`UPDATE crew_tasks SET held = 0, updated_at = datetime('now')
-                            WHERE held = 1 AND from_agent_id = ? AND to_agent_id IN (${myAgentIds})`).run(conn.from_agent_id, user.id);
+                            WHERE ${WAITING} AND from_agent_id = ? AND to_agent_id IN (${myAgentIds})`).run(conn.from_agent_id, user.id);
       return { state: 'allowed', released: r.changes };
     }
     if (decision === 'allow_once') {
       if (conn.state !== 'pending') fail(409, 'NOT_PENDING', `This connection is ${conn.state}; "allow once" applies to a pending request.`);
       const task = task_id
-        ? db.prepare(`SELECT id FROM crew_tasks WHERE id = ? AND held = 1 AND from_agent_id = ? AND to_agent_id IN (${myAgentIds})`).get(String(task_id), conn.from_agent_id, user.id)
-        : db.prepare(`SELECT id FROM crew_tasks WHERE held = 1 AND from_agent_id = ? AND to_agent_id IN (${myAgentIds}) ORDER BY created_at ASC LIMIT 1`).get(conn.from_agent_id, user.id);
+        ? db.prepare(`SELECT id FROM crew_tasks WHERE id = ? AND ${WAITING} AND from_agent_id = ? AND to_agent_id IN (${myAgentIds})`).get(String(task_id), conn.from_agent_id, user.id)
+        : db.prepare(`SELECT id FROM crew_tasks WHERE ${WAITING} AND from_agent_id = ? AND to_agent_id IN (${myAgentIds}) ORDER BY created_at ASC LIMIT 1`).get(conn.from_agent_id, user.id);
       if (!task) fail(404, 'NOT_FOUND', 'No held task to allow on this request.');
       db.prepare("UPDATE crew_tasks SET held = 0, updated_at = datetime('now') WHERE id = ?").run(task.id);
       return { state: 'pending', released: 1, task_id: task.id };
     }
-    // refuse and block both reject what is waiting, silently.
+    // refuse and block both reject, silently, everything of the sender's that
+    // is still open with this person — held or already released (see
+    // OPEN_FROM_SENDER).
     db.prepare("UPDATE crew_connections SET state = 'refused', decided_at = datetime('now') WHERE id = ?").run(conn.id);
     const r = db.prepare(`UPDATE crew_tasks SET held = 0, state = 'rejected', updated_at = datetime('now')
-                          WHERE held = 1 AND from_agent_id = ? AND to_agent_id IN (${myAgentIds})`).run(conn.from_agent_id, user.id);
+                          WHERE ${OPEN_FROM_SENDER} AND from_agent_id = ? AND to_agent_id IN (${myAgentIds})`).run(conn.from_agent_id, user.id);
     if (decision === 'block') {
       db.prepare('INSERT OR IGNORE INTO crew_blocks (owner_user_id, blocked_agent_id) VALUES (?, ?)').run(user.id, conn.from_agent_id);
     }
@@ -949,7 +991,7 @@ export function decideConnection(user, connectionId, decision, { task_id } = {})
   })();
 
   audit(user, `crew.connection.${decision}`, { connection_id: conn.id, from_agent_id: conn.from_agent_id, ...result }, 'human');
-  announce(decision === 'allow_once' ? result.task_id : heldIds, decision.startsWith('allow') ? 'released' : 'status');
+  announce(decision === 'allow_once' ? result.task_id : affectedIds, decision.startsWith('allow') ? 'released' : 'status');
   return { connection_id: conn.id, decision, ...result };
 }
 
@@ -960,14 +1002,14 @@ export function blockAgent(user, rawName) {
   const agent = agentByName(db, name);
   if (!agent) fail(404, 'NOT_FOUND', `No agent named "${name}" is registered.`);
   if (agent.owner_user_id === user.id) fail(400, 'VALIDATION', 'You cannot block your own agent; remove it instead.');
-  const heldIds = db.prepare(`SELECT id FROM crew_tasks WHERE held = 1 AND from_agent_id = ? AND to_agent_id IN (SELECT id FROM crew_agents WHERE owner_user_id = ?)`).all(agent.id, user.id).map((r) => r.id);
+  const openIds = db.prepare(`SELECT id FROM crew_tasks WHERE ${OPEN_FROM_SENDER} AND from_agent_id = ? AND to_agent_id IN (SELECT id FROM crew_agents WHERE owner_user_id = ?)`).all(agent.id, user.id).map((r) => r.id);
   const rejected = db.transaction(() => {
     db.prepare('INSERT OR IGNORE INTO crew_blocks (owner_user_id, blocked_agent_id) VALUES (?, ?)').run(user.id, agent.id);
     return db.prepare(`UPDATE crew_tasks SET held = 0, state = 'rejected', updated_at = datetime('now')
-                       WHERE held = 1 AND from_agent_id = ? AND to_agent_id IN (SELECT id FROM crew_agents WHERE owner_user_id = ?)`).run(agent.id, user.id).changes;
+                       WHERE ${OPEN_FROM_SENDER} AND from_agent_id = ? AND to_agent_id IN (SELECT id FROM crew_agents WHERE owner_user_id = ?)`).run(agent.id, user.id).changes;
   })();
   audit(user, 'crew.block', { agent_id: agent.id, rejected }, 'human');
-  announce(heldIds, 'status');
+  announce(openIds, 'status');
   return { blocked: agent.name };
 }
 
