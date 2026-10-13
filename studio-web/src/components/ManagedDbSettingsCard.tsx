@@ -16,6 +16,7 @@ interface Settings {
   pg_max_connections: number
   statement_timeout_s: number
   auth_alert_threshold: number
+  pg_stat_statements: number
 }
 type Spec = Record<keyof Settings, { default: number; min: number; max: number }>
 
@@ -24,6 +25,7 @@ const FIELDS: { key: keyof Settings; label: string; hint: string }[] = [
   { key: 'pg_max_connections', label: 'Postgres max_connections', hint: 'Server-wide. Applied when the shared Postgres is next recreated.' },
   { key: 'statement_timeout_s', label: 'Statement timeout (seconds)', hint: 'Per login. 0 = none.' },
   { key: 'auth_alert_threshold', label: 'Failed-login alert threshold', hint: 'Platform admins are e-mailed when one login fails more often than this in 10 minutes (at most once an hour per login).' },
+  { key: 'pg_stat_statements', label: 'Postgres pg_stat_statements (0 = off, 1 = on)', hint: 'Loads the module into the shared Postgres. Changing it recreates the shared Postgres once: data is kept, open connections drop. Apps still see only their own database\'s statements, and only if their deployhub.json asks for it.' },
 ]
 
 export function ManagedDbSettingsCard() {

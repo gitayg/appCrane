@@ -17,6 +17,8 @@
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { SUPPORTED_ENGINES, provision as defaultProvision, credentialsFor as defaultCredentialsFor } from './managedDb.js';
+import { APP_LOGIN_ENGINES, DEFAULT_APP_URL_ENV } from './managedDbAppLogin.js';
+import { SUPPORTED_EXTENSIONS } from './managedDbStats.js';
 
 const ENV_NAME_RE = /^[A-Z_][A-Z0-9_]*$/;
 
@@ -24,7 +26,12 @@ const ENV_NAME_RE = /^[A-Z_][A-Z0-9_]*$/;
 // and then never injected, which is the silent failure the strictness prevents.
 export const DATABASE_ENV_FIELDS = ['host', 'port', 'name', 'user', 'password'];
 
-const ALLOWED_KEYS = ['engine', 'url_env', 'env'];
+const ALLOWED_KEYS = ['engine', 'url_env', 'env', 'app_login', 'app_url_env', 'sandbox_url_env', 'extensions'];
+
+// Engines whose logins take the per-login policy (TLS + certificate + limits)
+// the sandbox URL relies on; Mongo's and Redis's sandbox access would need a
+// different design and is refused rather than half-done.
+const SANDBOX_URL_ENGINES = ['postgres', 'mariadb'];
 
 // URL variable used when the manifest names only the engine: the name each
 // engine's ecosystem reads by default, so the minimal block works unchanged for
@@ -51,6 +58,10 @@ export const RESERVED_ENV_NAMES = [
   'DB_CA_FILE', 'DB_CERT_FILE', 'DB_KEY_FILE', 'DB_CERT_KEY_FILE',
   'PGSSLMODE', 'PGSSLROOTCERT', 'PGSSLCERT', 'PGSSLKEY',
   'REDIS_TLS_CA_FILE', 'REDIS_TLS_CERT_FILE', 'REDIS_TLS_KEY_FILE',
+  // The same paths for the second login (app_login) and for production's
+  // sandbox URL (sandbox_url_env): deployer.peerTlsFileEnv().
+  'APP_DB_CA_FILE', 'APP_DB_CERT_FILE', 'APP_DB_KEY_FILE',
+  'SANDBOX_DB_CA_FILE', 'SANDBOX_DB_CERT_FILE', 'SANDBOX_DB_KEY_FILE',
 ];
 export const RESERVED_ENV_PREFIX = 'APPCRANE_';
 
@@ -114,8 +125,63 @@ export function parseManifestDatabase(block) {
   if (dup) fail('database', `env var "${dup}" is mapped more than once`);
   if (!names.length) fail('database', 'declares no variable to inject (url_env is null and env is empty)');
 
+  // app_login: a second, DML-only login per stage (managedDbAppLogin.js).
+  if (block.app_login !== undefined && typeof block.app_login !== 'boolean') {
+    fail('database.app_login', `must be true or false (got ${JSON.stringify(block.app_login)})`);
+  }
+  const wantsAppLogin = block.app_login === true;
+  if (wantsAppLogin && !APP_LOGIN_ENGINES.includes(engine)) {
+    fail('database.app_login', `is supported for ${APP_LOGIN_ENGINES.join(' and ')} only (engine is ${engine})`);
+  }
+  let appUrlEnv = null;
+  if (block.app_url_env !== undefined) {
+    if (!wantsAppLogin) fail('database.app_url_env', 'only applies with "app_login": true');
+    checkVarName('database.app_url_env', block.app_url_env);
+    appUrlEnv = block.app_url_env;
+  } else if (wantsAppLogin) {
+    appUrlEnv = DEFAULT_APP_URL_ENV;
+  }
+
+  // sandbox_url_env: PRODUCTION gets the sandbox database's URL under this
+  // name (the deployer never gives it to sandbox). Its presence is the
+  // opt-in, so there is no default.
+  let sandboxUrlEnv = null;
+  if (block.sandbox_url_env !== undefined) {
+    if (!SANDBOX_URL_ENGINES.includes(engine)) {
+      fail('database.sandbox_url_env', `is supported for ${SANDBOX_URL_ENGINES.join(' and ')} only (engine is ${engine})`);
+    }
+    checkVarName('database.sandbox_url_env', block.sandbox_url_env);
+    sandboxUrlEnv = block.sandbox_url_env;
+  }
+
+  // extensions: installed by AppCrane as the superuser, because the app login
+  // cannot. A closed list: anything else would be refused by the engine at
+  // deploy time, or worse, accepted and never wired up.
+  let extensions = [];
+  if (block.extensions !== undefined) {
+    const allowed = SUPPORTED_EXTENSIONS[engine] || [];
+    if (!Array.isArray(block.extensions)) fail('database.extensions', 'must be an array like ["pg_stat_statements"]');
+    for (const ext of block.extensions) {
+      if (!allowed.includes(ext)) {
+        fail('database.extensions', `${JSON.stringify(ext)} is not one AppCrane installs for ${engine} `
+          + `(supported: ${allowed.length ? allowed.join(', ') : 'none'}). Trusted extensions such as pgcrypto `
+          + 'need no entry here: the owner login can CREATE EXTENSION them itself.');
+      }
+    }
+    extensions = [...new Set(block.extensions)];
+  }
+
+  // Two fields under one name would inject whichever is written last and drop
+  // the other with no signal.
+  const allNames = [...names, ...(appUrlEnv ? [appUrlEnv] : []), ...(sandboxUrlEnv ? [sandboxUrlEnv] : [])];
+  const dup2 = allNames.find((n, i) => allNames.indexOf(n) !== i);
+  if (dup2) fail('database', `env var "${dup2}" is mapped more than once`);
+
   const needs = { engine, env };
   if (urlEnv) needs.url_env = urlEnv;
+  if (appUrlEnv) needs.app_url_env = appUrlEnv;
+  if (sandboxUrlEnv) needs.sandbox_url_env = sandboxUrlEnv;
+  if (extensions.length) needs.extensions = extensions;
   return needs;
 }
 

@@ -33,6 +33,18 @@
  * part carrying a `filename` (an artifact). The public card declares this as
  * extension CREW_RELAY_EXTENSION (not required: plain A2A clients that only
  * send and poll never need it).
+ *
+ * ── People in the loop (phase 3) ────────────────────────────────────────────
+ * Carried in message.metadata, the spec's place for "optional metadata for
+ * extensions" (a2a.proto Message.metadata, a google.protobuf.Struct):
+ *   - action, scope: on a NEW task, what it will do and where; on an
+ *     INPUT_REQUIRED report, what the question asks to approve. A standing
+ *     rule matches only when both are present.
+ *   - ask: with taskState = TASK_STATE_INPUT_REQUIRED, whose decision it is:
+ *     "sender_owner" (default) or "my_owner". The question goes to that person
+ *     in the AppCrane dashboard; their answer comes back as a ROLE_USER message
+ *     (metadata.actorKind = "human") and the task returns to
+ *     TASK_STATE_WORKING, or ends TASK_STATE_REJECTED if they decline.
  */
 import crypto from 'crypto';
 import {
@@ -189,6 +201,18 @@ function readMessage(m) {
   return { messageId, text, artifact, metadata, taskId: m.taskId, contextId: m.contextId };
 }
 
+/** Phase 3 metadata fields, strings only; anything else is invalid params. */
+function metaStrings(metadata, keys) {
+  const out = {};
+  for (const k of keys) {
+    const v = metadata[k];
+    if (v == null) continue;
+    if (typeof v !== 'string' || v.length > 128) throw invalid(`message.metadata.${k}`, `message.metadata.${k} must be a string`);
+    out[k] = v;
+  }
+  return out;
+}
+
 // ── Blocking SendMessage ────────────────────────────────────────────────────
 
 /**
@@ -265,6 +289,7 @@ function doSendMessage(ctx, params) {
     try {
       reply(ctx.owner, {
         as_agent: ctx.agent.name, task_id: taskId, message: msg.text, state, artifact: msg.artifact || undefined, message_id: msg.messageId,
+        ...metaStrings(msg.metadata, ['ask', 'action', 'scope']),
       }, { actorKind: 'agent' });
     } catch (e) { throw fromCrewError(e, { taskId }); }
   } else {
@@ -286,6 +311,7 @@ function doSendMessage(ctx, params) {
     try {
       out = sendTask(ctx.owner, {
         as_agent: ctx.agent.name, to_agent: tenant, title, message: msg.text, context_id: contextId, message_id: msg.messageId,
+        ...metaStrings(msg.metadata, ['action', 'scope']),
       }, { actorKind: 'agent' });
     } catch (e) { throw fromCrewError(e); }
     taskId = out.task_id;
@@ -496,7 +522,7 @@ function capabilities() {
     extendedAgentCard: true,
     extensions: [{
       uri: CREW_RELAY_EXTENSION,
-      description: 'Crew relays tasks between agents. The agent a task was sent to reports on it with SendMessage on that task: message.metadata.taskState = TASK_STATE_WORKING | INPUT_REQUIRED | COMPLETED | FAILED, and a result as a part with a filename. message.metadata.title sets a new task\'s title.',
+      description: 'Crew relays tasks between agents. The agent a task was sent to reports on it with SendMessage on that task: message.metadata.taskState = TASK_STATE_WORKING | INPUT_REQUIRED | COMPLETED | FAILED, and a result as a part with a filename. message.metadata.title sets a new task\'s title. message.metadata.action / .scope declare what a task (or an INPUT_REQUIRED question) wants approved; with INPUT_REQUIRED, message.metadata.ask = "sender_owner" | "my_owner" routes the question to that person. Production and deletions always ask a person.',
       required: false,
     }],
   };

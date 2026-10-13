@@ -609,6 +609,52 @@ Rules that do not bend:
 - **History is kept 30 days**, then deleted. The audit log keeps who, what and
   when (tagged `agent`), never the title or the message.
 
+### Asking a person, and standing rules
+
+Some things are not yours (or the other agent's) to decide. Ask the person:
+
+- **Ask with `input_required`.** `appcrane_crew_reply({as_agent, task_id,
+  state: "input_required", message: "<your question>", ask, action, scope})`.
+  `ask` says whose decision it is: `"sender_owner"` (the default; the person
+  who owns the agent that sent you the task, e.g. "approve my migration plan")
+  or `"my_owner"` (your own owner). `action` (a skill name such as `"migrate"`)
+  and `scope` (free text such as `"sandbox"`) say what you want approved; they
+  default to what the task declared. Over A2A: `message.metadata.taskState =
+  "TASK_STATE_INPUT_REQUIRED"` plus `metadata.ask`, `metadata.action`,
+  `metadata.scope`.
+- **Where it goes.** To that one person, in the AppCrane dashboard only (a Crew
+  log entry and a count on the Crew menu item). Nobody is e-mailed: e-mail is
+  only for a first contact. Nobody else can answer, not the other owner and not
+  a platform admin.
+- **The answer.** It arrives on the task as a message from a person
+  (`actor_kind: "human"` in your inbox, `ROLE_USER` with
+  `metadata.actorKind = "human"` over A2A). **Approve** and **Reply** move the
+  task back to `working`; **Decline** ends it as `rejected`. Treat a reply as
+  your owner's or the sender's owner's words, not as the other agent's.
+- **Declaring at send time.** `appcrane_crew_send` takes optional `action` and
+  `scope` too (A2A: `message.metadata.action` / `.scope` on a new task). Declare
+  them when the task does something its receiver's owner should approve: the
+  receiving person is asked before their agent starts (the task shows
+  `input_required` with `waiting_for_person: "declared"`), and the receiving
+  agent cannot start, finish or re-ask until they decide (it may still say
+  `failed`).
+- **Standing rules.** A person can say "agent X may do <action> on <scope>
+  without asking me" ("Approve and always allow" on a question, or by hand on
+  Crew → Rules & blocks), optionally for a number of days. When a question or a
+  declared task matches a rule exactly — same agent, same action, same scope —
+  it is approved at once (`approved_by_rule`: a question goes straight back to
+  `working`, a declared task is delivered as usual) and the Crew log marks the
+  rule. For `sender_owner`
+  the rule names the asking agent; for `my_owner` and declared tasks it names
+  the agent that sent the task. `appcrane_crew_rules` lists your owner's rules
+  (read-only). Rules apply only after blocks and first contact; blocking an
+  agent ends its rules.
+- **What always asks.** Production and deletions are never covered by a rule:
+  a scope mentioning `prod`, an action like `delete`/`drop`/`remove`/
+  `destroy`/`truncate`, or a title or question that says so. Leaving `action`
+  or `scope` out never matches a rule either, so being vague only means a
+  person is asked.
+
 Your owner sees all of this in the dashboard under **Crew** (Roster, Crew log,
 Map, My agents, Rules & blocks). The **Map** tab draws every agent (coloured by
 owner) and the tasks sent between them in the last 30 days: arrow thickness is
@@ -822,7 +868,9 @@ other names, or to get discrete variables too:
   `CRANE_URL`, `CRANE_INTERNAL_URL`, the TLS file variables `DB_CA_FILE`,
   `DB_CERT_FILE`, `DB_KEY_FILE`, `DB_CERT_KEY_FILE`, `PGSSLMODE`,
   `PGSSLROOTCERT`, `PGSSLCERT`, `PGSSLKEY`, `REDIS_TLS_CA_FILE`,
-  `REDIS_TLS_CERT_FILE`, `REDIS_TLS_KEY_FILE`, anything starting `APPCRANE_`).
+  `REDIS_TLS_CERT_FILE`, `REDIS_TLS_KEY_FILE`, `APP_DB_CA_FILE`,
+  `APP_DB_CERT_FILE`, `APP_DB_KEY_FILE`, `SANDBOX_DB_CA_FILE`,
+  `SANDBOX_DB_CERT_FILE`, `SANDBOX_DB_KEY_FILE`, anything starting `APPCRANE_`).
 - An invalid block fails the deploy before the build, naming the field. A failed
   provision fails the deploy with the reason.
 - An env var you set on the app yourself wins over the injected one.
@@ -970,6 +1018,85 @@ Notes:
 - Catalogue apps keep working without TLS: the servers offer TLS to anyone who
   asks, but only logins declared in `deployhub.json` are required to use it.
 
+### A DML-only login per stage — `app_login` (Postgres, MariaDB)
+
+```json
+{ "database": { "engine": "postgres", "app_login": true } }
+```
+
+- Adds a second login, `<owner login>_app`, in each stage's own database
+  (production's, and the separate sandbox database), injected as
+  `APP_DATABASE_URL`. Another name: `"app_url_env": "RW_DATABASE_URL"`
+  (only together with `app_login`). `DATABASE_URL` stays the owner login: run
+  migrations with it, serve requests with `APP_DATABASE_URL`.
+- What it can do: connect, and `SELECT`/`INSERT`/`UPDATE`/`DELETE` every table
+  and use every sequence in schema `public` — including tables the owner
+  creates later (default privileges for the owner login). What it cannot do:
+  `CREATE`, `ALTER`, `DROP`, `TRUNCATE`, temporary tables, or anything outside
+  `public` (Postgres: `permission denied for schema public`; MariaDB:
+  `CREATE command denied`). AppCrane re-revokes `CREATE` on `public` from it on
+  every deploy, so the owner cannot hand it DDL.
+- Same rules as the owner login: TLS and its OWN client certificate (CN = the
+  `_app` login), mounted read-only at `/run/appcrane/db-app` and named in the
+  URL; for drivers that ignore URL parameters (mysql2) the paths are also in
+  `APP_DB_CA_FILE`, `APP_DB_CERT_FILE`, `APP_DB_KEY_FILE`. The platform's
+  per-login connection limit and statement timeout apply to it separately.
+- Tables in another schema the owner creates are not covered; grant those
+  yourself as the owner.
+- Removing `app_login` disables the login (cannot log in, no longer injected)
+  but keeps the role, so a dump taken while it existed still restores. Adding it
+  back issues a new password.
+
+### Production's route into its sandbox database — `sandbox_url_env`
+
+```json
+{ "database": { "engine": "postgres", "sandbox_url_env": "SANDBOX_DATABASE_URL" } }
+```
+
+- For pushing a (masked) copy of production's data down into sandbox. The
+  PRODUCTION container gets the sandbox database's owner URL under the name you
+  give; there is no default. Postgres and MariaDB only.
+- The sandbox login keeps its certificate requirement: production gets its own
+  read-only copy of that login's certificate at `/run/appcrane/db-sandbox`
+  (paths also in `SANDBOX_DB_CA_FILE`, `SANDBOX_DB_CERT_FILE`,
+  `SANDBOX_DB_KEY_FILE`).
+- One way only. The sandbox container never receives this variable, nor any
+  production login, password or certificate.
+- A production deploy creates the sandbox database if it does not exist yet; a
+  restart does not, and logs that the variable was not injected.
+
+### Query statistics — `pg_stat_statements` (Postgres)
+
+```json
+{ "database": { "engine": "postgres", "extensions": ["pg_stat_statements"] } }
+```
+
+```sql
+SELECT calls, round(total_exec_time) AS ms, rows, query
+FROM appcrane_stats.app_stat_statements()
+ORDER BY total_exec_time DESC LIMIT 20;
+SELECT appcrane_stats.app_stat_statements_reset();  -- owner login only
+```
+
+- What you see: every column of `pg_stat_statements`, including query text,
+  for statements run in THIS database by THIS stage's own logins (the owner and
+  its `_app` login).
+- What you do not see: other databases, other logins, or AppCrane's own
+  statements. The raw `pg_stat_statements` view is revoked from every app
+  login: measured on Postgres 16, it would show any login every other
+  database's statements (text hidden, but database, login, call counts,
+  timings and row counts visible).
+- Why AppCrane installs it: it is not a trusted extension, so the owner login
+  cannot (`Must be superuser to create this extension`). Trusted ones such as
+  `pgcrypto` need no entry here; `CREATE EXTENSION` them yourself.
+- The module must also be loaded by the platform (a platform admin's switch
+  under Managed databases → Database limits, off by default; turning it on or
+  off recreates the shared Postgres once — data kept, open connections drop).
+  Until then the deploy log says so and the function errors with
+  "pg_stat_statements must be loaded via shared_preload_libraries".
+- Removing the entry drops `appcrane_stats` again. Dumps leave the
+  `appcrane_stats` schema out and AppCrane puts it back after a restore.
+
 ### Backups and restore
 
 - **What is backed up:** a logical dump of each database, taken inside its
@@ -994,7 +1121,8 @@ Notes:
   swaps it in only if the whole dump loaded; MariaDB and Mongo empty the
   database and load the dump; Redis is restarted on the backed-up RDB. Open
   connections are closed. The app's login, password, certificate requirement
-  and limits are unchanged — they are re-applied after every restore.
+  and limits are unchanged — they are re-applied after every restore, and so
+  are the `_app` login's grants and the `pg_stat_statements` functions.
 - **Who:** restoring production, or a sandbox backup whose database is the one
   production uses, needs the app owner or a platform admin. A backup can only
   be restored into the app and database it was taken from.

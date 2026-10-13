@@ -15,6 +15,7 @@ export const SETTING_KEYS = {
   pgMaxConnections: 'managed_db_pg_max_connections',
   statementTimeoutS: 'managed_db_statement_timeout_s',
   authAlertThreshold: 'managed_db_auth_alert_threshold',
+  pgStatStatements: 'managed_db_pg_stat_statements',
 };
 
 // [default, min, max]. Bounds are what each engine accepts and what is sane on
@@ -31,11 +32,19 @@ export const SETTING_KEYS = {
 //                       holds locks and a connection slot until it finishes.
 //   auth_alert_threshold failures per login per 10 minutes BEFORE an alert;
 //                       the alert fires on the next one past it.
+//   pg_stat_statements  0/1, per SERVER: load pg_stat_statements into the
+//                       shared Postgres (shared_preload_libraries). A start-time
+//                       setting, so flipping it recreates the shared Postgres
+//                       once (data kept, open connections drop). Off by
+//                       default: the module tracks every statement of every
+//                       app, and only apps that ask for it in deployhub.json
+//                       can read their own share (managedDbStats.js).
 const SPEC = {
   conn_limit: [SETTING_KEYS.connLimit, 25, 1, 1000],
   pg_max_connections: [SETTING_KEYS.pgMaxConnections, 300, 100, 5000],
   statement_timeout_s: [SETTING_KEYS.statementTimeoutS, 300, 0, 86400],
   auth_alert_threshold: [SETTING_KEYS.authAlertThreshold, 5, 1, 1000],
+  pg_stat_statements: [SETTING_KEYS.pgStatStatements, 0, 0, 1],
 };
 
 export const DEFAULTS = Object.fromEntries(Object.entries(SPEC).map(([k, [, d]]) => [k, d]));

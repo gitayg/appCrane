@@ -394,6 +394,13 @@ container starts:
   receives production's credentials. (For catalogue apps, the owner/app admin
   setting **Separate sandbox database** decides.) Read your config the same way in both;
   just don't assume sandbox starts with production's data.
+- `deployhub.json` databases only (not catalogue `needs`): `"app_login": true`
+  adds a DML-only `<login>_app` per stage as `APP_DATABASE_URL` (no
+  CREATE/ALTER/DROP); `"sandbox_url_env": "SANDBOX_DATABASE_URL"` gives
+  PRODUCTION the sandbox database's URL (never the reverse); and
+  `"extensions": ["pg_stat_statements"]` exposes this database's own statements
+  through `appcrane_stats.app_stat_statements()`, never the raw view. The
+  onboarding guide has the details.
 - **Transport and identity.** Every managed server speaks TLS with a
   certificate from AppCrane's private CA. For a catalogue app TLS is
   *offered*: your login works in plain text too, because many images cannot be

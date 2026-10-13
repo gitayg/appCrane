@@ -42,6 +42,8 @@
  *    additionally assertIdent'd by the caller — a-z, 0-9, underscore.
  */
 
+import { pgDumpExcludeArgs } from './managedDbStats.js';
+
 const SAFE_IDENT = /^[a-z][a-z0-9_]{0,62}$/;
 
 function ident(name) {
@@ -91,11 +93,15 @@ export function pgStagingName(database) {
  *             the admin path is the unix socket (my.cnf protocol=socket).
  *   mongo     --archive --gzip to stdout; one stream, no directory tree.
  */
-export function dumpArgs(engine, { container, database, port: p, configPath } = {}) {
+export function dumpArgs(engine, { container, database, port: p, configPath, pgKeepExtensions = null } = {}) {
   ident(database);
   if (engine === 'postgres') {
+    // pgKeepExtensions (an array) means the database carries AppCrane's
+    // pg_stat_statements wiring, which the dump leaves out — see
+    // managedDbStats.parseDumpExtensions for why, and pgDumpExcludeArgs for how.
     return ['exec', '-u', 'postgres', container,
-      'pg_dump', '-U', 'postgres', '--no-password', '--format=custom', '-d', database];
+      'pg_dump', '-U', 'postgres', '--no-password', '--format=custom', '-d', database,
+      ...(Array.isArray(pgKeepExtensions) ? pgDumpExcludeArgs(pgKeepExtensions) : [])];
   }
   if (engine === 'mariadb') {
     return ['exec', container,

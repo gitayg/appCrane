@@ -97,13 +97,30 @@ const REDIS_CLIENT_FILES = ['redis-client.crt', 'redis-client.key', 'redis-clien
  *  non-Redis engine that login has (ensureClientCert is keyed by login). */
 const SQL_CLIENT_FILES = ['client.crt', 'client.key', 'client.pem'];
 
+/**
+ * Where a container finds the files of a SECOND login it holds, each in its
+ * own mount so nothing collides with CLIENT_MOUNT_PATH:
+ *   APP_CLIENT_MOUNT_PATH     the scope's DML-only `<login>_app` login
+ *                             (deployhub.json `app_login`), its own directory
+ *                             client/<login>_app/, in that scope's container.
+ *   SANDBOX_PEER_MOUNT_PATH   PRODUCTION only: the sandbox owner login's
+ *                             certificate (deployhub.json `sandbox_url_env`),
+ *                             from a copy under peer/<sandbox login>/ written
+ *                             for production's image, so the sandbox
+ *                             container's own files are never rewritten or
+ *                             re-owned for production.
+ * The reverse mount (production's certificate into sandbox) does not exist.
+ */
+export const APP_CLIENT_MOUNT_PATH = '/run/appcrane/db-app';
+export const SANDBOX_PEER_MOUNT_PATH = '/run/appcrane/db-sandbox';
+
 /** Container paths of a login's files. ca.crt is shared: it verifies the SERVER. */
-export function clientFilePaths(prefix = '') {
+export function clientFilePaths(prefix = '', base = CLIENT_MOUNT_PATH) {
   return {
-    ca: `${CLIENT_MOUNT_PATH}/ca.crt`,
-    cert: `${CLIENT_MOUNT_PATH}/${prefix}client.crt`,
-    key: `${CLIENT_MOUNT_PATH}/${prefix}client.key`,
-    pem: `${CLIENT_MOUNT_PATH}/${prefix}client.pem`,
+    ca: `${base}/ca.crt`,
+    cert: `${base}/${prefix}client.crt`,
+    key: `${base}/${prefix}client.key`,
+    pem: `${base}/${prefix}client.pem`,
   };
 }
 
@@ -147,6 +164,23 @@ export function clientTlsDir(login) {
   privateDir(tlsRoot());
   privateDir(join(tlsRoot(), 'client'));
   return join(tlsRoot(), 'client', login);
+}
+
+/** Production's private copy of the sandbox login's files (see SANDBOX_PEER_MOUNT_PATH). */
+export function peerTlsDir(login) {
+  if (!SAFE_LOGIN.test(login)) throw new Error(`dbCerts: bad login ${JSON.stringify(login)}`);
+  privateDir(tlsRoot());
+  privateDir(join(tlsRoot(), 'peer'));
+  return join(tlsRoot(), 'peer', login);
+}
+
+/** Remove production's copy of a sandbox login's files (that login was deprovisioned). */
+export function dropPeerFiles(login) {
+  if (!SAFE_LOGIN.test(login)) return;
+  const dir = join(tlsRoot(), 'peer', login);
+  if (!isRealDir(dir)) return;
+  for (const n of ['ca.crt', ...SQL_CLIENT_FILES]) unlinkIfFile(join(dir, n));
+  try { rmdirSync(dir); } catch (e) { if (e.code !== 'ENOTEMPTY' && e.code !== 'EEXIST' && e.code !== 'ENOENT') throw e; }
 }
 
 // ---------------------------------------------------------------------------
@@ -374,7 +408,21 @@ export function releaseClientCerts(row) {
   const stillUsed = getDb().prepare(
     "SELECT 1 FROM managed_databases WHERE db_user = ? AND engine <> 'redis' LIMIT 1"
   ).get(row.db_user);
-  if (!stillUsed) dropClientCert(row.db_user);
+  if (!stillUsed) {
+    dropClientCert(row.db_user);
+    // Production's copy of this login's certificate, when it was a sandbox
+    // login handed to production (sandbox_url_env). Same certificate, same
+    // lifetime.
+    dropPeerFiles(row.db_user);
+  }
+  // The scope's `_app` login: one certificate per login name, which the
+  // scope's Postgres and MariaDB would share, so it goes with the last.
+  if (row.app_user) {
+    const appStillUsed = getDb().prepare(
+      "SELECT 1 FROM managed_databases WHERE app_user = ? AND engine <> 'redis' LIMIT 1"
+    ).get(row.app_user);
+    if (!appStillUsed) dropClientCert(row.app_user);
+  }
 }
 
 /**
@@ -448,9 +496,10 @@ export function writeServerFiles(engine, cert, extra = {}) {
  *
  * Returns the host directory to bind-mount and the container paths.
  */
-export function writeClientFiles(login, cert, owner = null, { prefix = '' } = {}) {
+export function writeClientFiles(login, cert, owner = null, { prefix = '', peer = false, mountPath = CLIENT_MOUNT_PATH } = {}) {
   if (prefix !== '' && prefix !== REDIS_CLIENT_PREFIX) throw new Error(`dbCerts: bad client file prefix ${JSON.stringify(prefix)}`);
-  const dir = clientTlsDir(login);
+  if (peer && prefix !== '') throw new Error('dbCerts: a peer copy carries the SQL client certificate only');
+  const dir = peer ? peerTlsDir(login) : clientTlsDir(login);
   mkdirSync(dir, { recursive: true });
   const canChown = Boolean(owner) && typeof process.getuid === 'function' && process.getuid() === 0;
   const keyMode = canChown ? 0o400 : 0o444;
@@ -467,7 +516,7 @@ export function writeClientFiles(login, cert, owner = null, { prefix = '' } = {}
     hostDir: dir,
     keyMode,
     chowned: canChown,
-    files: clientFilePaths(prefix),
+    files: clientFilePaths(prefix, mountPath),
   };
 }
 

@@ -1,5 +1,5 @@
 {
-  "count": 68,
+  "count": 69,
   "tools": [
     {
       "name": "appcrane_append_app_context",
@@ -58,6 +58,11 @@
     },
     {
       "name": "appcrane_crew_roster",
+      "requiredRole": "any",
+      "readOnly": true
+    },
+    {
+      "name": "appcrane_crew_rules",
       "requiredRole": "any",
       "readOnly": true
     },

@@ -6,6 +6,7 @@ import {
 } from '../services/crew.js';
 import { issueInitialToken, rotateAgentToken, revokeAgentToken, tokenStatusFor } from '../services/crewTokens.js';
 import { crewMap } from '../services/crewMap.js';
+import { decideTask, waitingForMe, myRules, addRule, editRule, removeRule } from '../services/crewDecisions.js';
 
 /**
  * Crew for the dashboard (v2.105.0). Rules live in services/crew.js; this file
@@ -27,6 +28,14 @@ import { crewMap } from '../services/crewMap.js';
  * (`a2a_token`); POST/DELETE /agents/:name/token rotate or revoke it, both
  * through agentForCaller (the caller owns the agent). GET /map returns the
  * communication map: counts only, see services/crewMap.js.
+ *
+ * Phase 3 (people in the loop), same per-row ownership inside the service:
+ *   - POST /decisions/:id          → decision.decider_user_id === caller
+ *                                    (the one person the question was routed to)
+ *   - GET/POST/PATCH/DELETE /rules → rule.owner_user_id === caller; a person
+ *                                    lists and changes only their own rules
+ *   - GET /waiting                 → the caller's own pending questions and
+ *                                    first contacts (the Crew nav badge)
  */
 const router = Router();
 router.use(requireAuth);
@@ -79,6 +88,33 @@ router.delete('/agents/:name', (req, res) => {
 router.post('/connections/:id/decision', (req, res) => {
   const b = req.body || {};
   res.json(decideConnection(req.user, req.params.id, b.decision, { task_id: b.task_id }));
+});
+
+router.get('/waiting', (req, res) => {
+  res.json(waitingForMe(req.user));
+});
+
+router.post('/decisions/:id', (req, res) => {
+  const b = req.body || {};
+  res.json(decideTask(req.user, req.params.id, { decision: b.decision, message: b.message, expires_in_days: b.expires_in_days }));
+});
+
+router.get('/rules', (req, res) => {
+  res.json(myRules(req.user));
+});
+
+router.post('/rules', (req, res) => {
+  const b = req.body || {};
+  const r = addRule(req.user, { agent: b.agent, action: b.action, scope: b.scope, expires_in_days: b.expires_in_days });
+  res.status(r.created ? 201 : 200).json(r);
+});
+
+router.patch('/rules/:id', (req, res) => {
+  res.json(editRule(req.user, req.params.id, { expires_in_days: (req.body || {}).expires_in_days }));
+});
+
+router.delete('/rules/:id', (req, res) => {
+  res.json(removeRule(req.user, req.params.id));
 });
 
 router.get('/blocks', (req, res) => {

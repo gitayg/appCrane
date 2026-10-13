@@ -6,6 +6,9 @@ import { CrewMap, type CrewMapData } from './CrewMap'
 // Crew (v2.105.0): the platform-wide agent hub, as its owners see it.
 // Shapes mirror server/services/crew.js (roster, crewLog, listBlocks).
 // v2.106.0: the Map tab (CrewMap.tsx, GET /api/crew/map) and A2A tokens on My agents.
+// Phase 3: questions routed to you (input_required) with Approve / Approve and
+// always allow / Reply / Decline, and standing rules on Rules & blocks
+// (server/services/crewDecisions.js, crewRules.js).
 
 interface RosterRow {
   name: string
@@ -39,7 +42,37 @@ interface LogEntry {
   waiting_for_approval?: boolean
   awaiting_your_decision: boolean
   connection_id?: number
+  action?: string
+  scope?: string
+  ran_under_rule?: { id: string; agent?: string; action?: string; scope?: string; revoked?: boolean; removed?: boolean; yours?: boolean }
+  input_required?: {
+    asked_by: string
+    ask: 'sender_owner' | 'my_owner' | 'declared'
+    action: string | null
+    scope: string | null
+    always_asks: 'production' | 'deletion' | null
+    question: string | null
+    waiting_for: string
+    decision_id?: string
+    can_always_allow?: boolean
+  }
 }
+
+interface RuleRow {
+  id: string
+  agent: string
+  agent_owner: string
+  action: string
+  scope: string
+  expires_at: string | null
+  expired: boolean
+  from_decision: boolean
+  use_count: number
+  last_used_at: string | null
+  created_at: string
+}
+
+type TaskDecision = 'approve' | 'approve_always' | 'reply' | 'decline'
 
 interface BlockRow { id: number; agent: string; owner: string; created_at: string; refused_since: number }
 interface TokenRow { agent: string; hint: string; created_at: string; last_used_at: string | null }
@@ -153,13 +186,63 @@ function RosterTab({ rows, onBlock }: { rows: RosterRow[]; onBlock: (name: strin
 
 // ── Crew log ────────────────────────────────────────────────────────────────
 
-function LogTab({ entries, onDecide }: { entries: LogEntry[]; onDecide: (e: LogEntry, d: 'allow' | 'allow_once' | 'refuse' | 'block') => void }) {
+const label72 = { fontSize: '.72rem', fontWeight: 600, color: 'var(--yellow)', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 2 } as const
+
+function askLine(e: LogEntry): string {
+  const q = e.input_required!
+  const what = q.action || q.scope ? ` (${q.action ?? 'unnamed action'}${q.scope ? ` on ${q.scope}` : ''})` : ''
+  if (q.ask === 'declared') return `${e.from_agent} (${e.from_owner}) asks your agent ${e.to_agent} to do something that needs your approval first${what}.`
+  if (q.ask === 'my_owner') return `Your agent ${q.asked_by} asks you before working on "${e.title}"${what}.`
+  return `${q.asked_by} (${e.to_owner}) asks you to approve a plan for the task your agent sent${what}.`
+}
+
+function DecisionButtons({ e, onDecideTask }: { e: LogEntry; onDecideTask: (e: LogEntry, d: TaskDecision, message?: string) => void }) {
+  const [replying, setReplying] = useState(false)
+  const [text, setText] = useState('')
+  const q = e.input_required!
+  return (
+    <div style={{ marginTop: 8 }}>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+        <button className="btn btn-xs btn-accent" onClick={() => onDecideTask(e, 'approve')} title="Approve this once; the agent carries on">Approve</button>
+        {q.can_always_allow && (
+          <button className="btn btn-xs" onClick={() => onDecideTask(e, 'approve_always')} title={`Approve, and add a standing rule: ${e.input_required?.ask === 'sender_owner' ? q.asked_by : e.from_agent} may ${q.action} on ${q.scope} without asking you`}>
+            Approve and always allow "{q.action}" on {q.scope}
+          </button>
+        )}
+        <button className="btn btn-xs" onClick={() => setReplying(r => !r)} aria-expanded={replying}>Reply</button>
+        <button className="btn btn-xs btn-red" onClick={() => onDecideTask(e, 'decline')} title="Decline: the task ends as rejected">Decline</button>
+      </div>
+      {q.always_asks && (
+        <div style={{ ...dim, fontSize: '.75rem', marginTop: 4 }}>
+          {q.always_asks === 'production' ? 'Production' : 'Deleting'} always asks: no standing rule can cover it.
+        </div>
+      )}
+      {replying && (
+        <div style={{ marginTop: 6, display: 'flex', gap: 6, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+          <textarea rows={2} value={text} onChange={ev => setText(ev.target.value)} placeholder="Your answer, sent to the agent as a message from you"
+            aria-label="Reply to the agent" style={{ flex: '1 1 240px', fontSize: '.85rem' }} />
+          <button className="btn btn-xs btn-accent" disabled={!text.trim()} onClick={() => { onDecideTask(e, 'reply', text); setText(''); setReplying(false) }}>Send reply</button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function LogTab({ entries, onDecide, onDecideTask }: {
+  entries: LogEntry[]
+  onDecide: (e: LogEntry, d: 'allow' | 'allow_once' | 'refuse' | 'block') => void
+  onDecideTask: (e: LogEntry, d: TaskDecision, message?: string) => void
+}) {
   if (entries.length === 0) {
     return <div style={{ ...dim, padding: '20px 0' }}>Nothing yet. Tasks your agents send or receive appear here. History is kept for 30 days.</div>
   }
+  // Questions waiting for you first, then everything else by recent activity.
+  const sorted = [...entries].sort((a, b) => Number(!!b.input_required?.decision_id) - Number(!!a.input_required?.decision_id))
   return (
     <div style={{ border: '1px solid var(--border)', borderRadius: 8, background: 'var(--surface)' }}>
-      {entries.map(e => {
+      {sorted.map(e => {
+        const firstContact = e.awaiting_your_decision && e.connection_id != null
+        const q = e.input_required
         const verb = e.direction === 'received'
           ? <><b>{e.from_agent}</b> <span style={dim}>({e.from_owner})</span> sent your agent <b>{e.to_agent}</b></>
           : e.direction === 'sent'
@@ -169,24 +252,33 @@ function LogTab({ entries, onDecide }: { entries: LogEntry[]; onDecide: (e: LogE
           <div key={e.task_id} style={{ display: 'grid', gridTemplateColumns: 'minmax(70px, 90px) 1fr auto', gap: 12, padding: '11px 14px', borderBottom: '1px solid var(--border)', alignItems: 'start' }}>
             <div style={{ ...mono, ...dim }} title={serverDate(e.updated_at).toLocaleString()}>{when(e.updated_at)}</div>
             <div style={{ minWidth: 0 }}>
-              {e.awaiting_your_decision && <div style={{ fontSize: '.72rem', fontWeight: 600, color: 'var(--yellow)', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 2 }}>First contact</div>}
-              <div>{verb} "{e.title}"</div>
-              {e.awaiting_your_decision && (
+              {firstContact && <div style={label72}>First contact</div>}
+              {q?.decision_id && <div style={label72}>Input required</div>}
+              {q?.decision_id ? <div>{askLine(e)}</div> : <div>{verb} "{e.title}"</div>}
+              {firstContact && (
                 <div style={{ ...dim, fontSize: '.8rem', marginTop: 2 }}>
                   Agents of different people need your approval the first time. Until you decide, your agents do not see this task.
                 </div>
               )}
-              {e.preview && (
+              {q?.question ? (
+                <div style={{ fontSize: '.85rem', marginTop: 4, borderLeft: '2px solid var(--yellow)', paddingLeft: 8, overflowWrap: 'anywhere' }}>{q.question}</div>
+              ) : e.preview && (
                 <div style={{ ...dim, fontSize: '.8rem', marginTop: 4, borderLeft: '2px solid var(--border)', paddingLeft: 8, overflowWrap: 'anywhere' }}>{e.preview}</div>
               )}
+              {q?.decision_id && <DecisionButtons e={e} onDecideTask={onDecideTask} />}
               <div style={{ ...dim, fontSize: '.75rem', marginTop: 4 }}>
+                {q?.decision_id && <>Task: "{e.title}" · </>}
                 {e.message_count} message{e.message_count === 1 ? '' : 's'}
                 {e.artifact_name && <> · artifact: <span style={mono}>{e.artifact_name}</span></>}
                 {e.waiting_for_approval && !e.awaiting_your_decision && <> · waiting for {e.to_owner} to approve</>}
+                {q && !q.decision_id && <> · waiting for {q.waiting_for} to decide</>}
+                {e.ran_under_rule && (
+                  <> · ran under a standing rule{e.ran_under_rule.removed ? ' (since removed)' : `: ${e.ran_under_rule.agent} may ${e.ran_under_rule.action} on ${e.ran_under_rule.scope}${e.ran_under_rule.revoked ? ' (revoked)' : ''}`}</>
+                )}
               </div>
             </div>
             <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end', alignItems: 'center' }}>
-              {e.awaiting_your_decision ? (
+              {firstContact ? (
                 <>
                   <button className="btn btn-xs btn-accent" onClick={() => onDecide(e, 'allow')} title="Let this agent send tasks to your agents from now on">Allow</button>
                   <button className="btn btn-xs" onClick={() => onDecide(e, 'allow_once')} title="Release this task only; ask again next time">Allow once</button>
@@ -330,14 +422,98 @@ function AgentsTab({ mine, tokens, onChanged, setError }: { mine: RosterRow[]; t
 
 // ── Rules & blocks ──────────────────────────────────────────────────────────
 
-function RulesTab({ blocks, refused, onUnblock, onAllow }: { blocks: BlockRow[]; refused: RefusedRow[]; onUnblock: (id: number) => void; onAllow: (connectionId: number) => void }) {
+function expiryText(r: RuleRow): string {
+  if (!r.expires_at) return 'No expiry'
+  if (r.expired) return 'Expired'
+  const days = Math.max(0, Math.round((serverDate(r.expires_at).getTime() - Date.now()) / 86400000))
+  return days <= 0 ? 'Expires today' : `Expires in ${days} day${days === 1 ? '' : 's'}`
+}
+
+function AddRule({ agents, onAdd }: { agents: RosterRow[]; onAdd: (body: { agent: string; action: string; scope: string; expires_in_days?: number }) => Promise<boolean> }) {
+  const [agent, setAgent] = useState('')
+  const [action, setAction] = useState('')
+  const [scope, setScope] = useState('')
+  const [days, setDays] = useState('')
+  const [busy, setBusy] = useState(false)
+  const lbl = { display: 'block', fontSize: '.8rem', ...dim, margin: '0 0 4px' } as const
+  const submit = async () => {
+    setBusy(true)
+    const ok = await onAdd({ agent, action: action.trim(), scope: scope.trim(), ...(days.trim() ? { expires_in_days: Number(days) } : {}) })
+    setBusy(false)
+    if (ok) { setAction(''); setScope(''); setDays('') }
+  }
+  return (
+    <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: '12px 14px', background: 'var(--surface)', marginTop: 10 }}>
+      <div style={{ fontWeight: 600, marginBottom: 8 }}>Add a rule</div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 10, alignItems: 'end' }}>
+        <div>
+          <label style={lbl} htmlFor="rule-agent">Who (agent)</label>
+          <select id="rule-agent" value={agent} onChange={e => setAgent(e.target.value)} style={{ width: '100%' }}>
+            <option value="">Choose an agent</option>
+            {agents.map(a => <option key={a.name} value={a.name}>{a.name} ({a.owner})</option>)}
+          </select>
+        </div>
+        <div>
+          <label style={lbl} htmlFor="rule-action">May do (action)</label>
+          <input id="rule-action" type="text" placeholder="migrate" value={action} onChange={e => setAction(e.target.value)} style={{ width: '100%' }} />
+        </div>
+        <div>
+          <label style={lbl} htmlFor="rule-scope">On (scope)</label>
+          <input id="rule-scope" type="text" placeholder="sandbox" value={scope} onChange={e => setScope(e.target.value)} style={{ width: '100%' }} />
+        </div>
+        <div>
+          <label style={lbl} htmlFor="rule-days">Expires after (days, optional)</label>
+          <input id="rule-days" type="number" min={1} max={365} placeholder="no expiry" value={days} onChange={e => setDays(e.target.value)} style={{ width: '100%' }} />
+        </div>
+        <div>
+          <button className="btn btn-accent" onClick={submit} disabled={busy || !agent || !action.trim() || !scope.trim()}>{busy ? 'Adding...' : 'Add rule'}</button>
+        </div>
+      </div>
+      <p style={{ ...dim, fontSize: '.78rem', margin: '8px 0 0' }}>
+        The action and scope must match what the agent declares, exactly. Production and anything that deletes always ask, whatever the rules say.
+      </p>
+    </div>
+  )
+}
+
+function RulesTab({ rules, agents, blocks, refused, onUnblock, onAllow, onRevokeRule, onEditRule, onAddRule }: {
+  rules: RuleRow[]
+  agents: RosterRow[]
+  blocks: BlockRow[]
+  refused: RefusedRow[]
+  onUnblock: (id: number) => void
+  onAllow: (connectionId: number) => void
+  onRevokeRule: (r: RuleRow) => void
+  onEditRule: (r: RuleRow) => void
+  onAddRule: (body: { agent: string; action: string; scope: string; expires_in_days?: number }) => Promise<boolean>
+}) {
   return (
     <>
       <h3 style={{ ...h3, marginTop: 0 }}>Standing rules</h3>
-      <p style={note}>Standing rules arrive in a later release. Until then, every first contact from another person's agent asks you.</p>
+      <p style={note}>Tasks matching a rule run without asking you. They still show in the Crew log, marked with the rule. Production and deletions always ask.</p>
+      {rules.length === 0 ? <div style={dim}>No standing rules. Add one below, or choose "Approve and always allow" on a question in the Crew log.</div> : (
+        <div style={{ border: '1px solid var(--border)', borderRadius: 8, background: 'var(--surface)' }}>
+          {rules.map(r => (
+            <div key={r.id} style={{ display: 'flex', gap: 12, padding: '10px 14px', borderBottom: '1px solid var(--border)', alignItems: 'center', flexWrap: 'wrap' }}>
+              <span className="badge badge-live">Rule</span>
+              <div style={{ flex: '1 1 280px', minWidth: 0 }}>
+                <div><b style={mono}>{r.agent}</b> <span style={dim}>({r.agent_owner})</span> may <b>{r.action}</b> on <b>{r.scope}</b></div>
+                <div style={{ ...dim, fontSize: '.78rem', marginTop: 2 }}>
+                  {r.from_decision ? 'Added from an approval' : 'Added by hand'} on {serverDate(r.created_at).toLocaleDateString()} · {expiryText(r)} · used {r.use_count} time{r.use_count === 1 ? '' : 's'}
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button className="btn btn-xs" onClick={() => onEditRule(r)} title="Change when this rule expires">Edit</button>
+                <button className="btn btn-xs btn-red" onClick={() => onRevokeRule(r)}>Revoke</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      <AddRule agents={agents} onAdd={onAddRule} />
 
       <h3 style={h3}>Blocked agents</h3>
-      <p style={note}>Their requests to your agents are refused automatically. You are never notified about them.</p>
+      <p style={note}>Their requests to your agents are refused automatically. You are never notified about them. Blocking an agent also ends every standing rule you gave it.</p>
       {blocks.length === 0 ? <div style={dim}>You have not blocked any agent.</div> : (
         <table>
           <thead><tr><th>Agent</th><th>Owner</th><th>Blocked</th><th>Refused since</th><th></th></tr></thead>
@@ -385,6 +561,7 @@ export function Crew() {
   const [blocks, setBlocks] = useState<BlockRow[]>([])
   const [refused, setRefused] = useState<RefusedRow[]>([])
   const [tokens, setTokens] = useState<TokenRow[]>([])
+  const [rules, setRules] = useState<RuleRow[]>([])
   const [mapData, setMapData] = useState<CrewMapData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -403,8 +580,10 @@ export function Crew() {
       adminApi.get<{ blocks: BlockRow[]; refused: RefusedRow[] }>('/api/crew/blocks'),
       adminApi.get<{ tokens: TokenRow[] }>('/api/crew/agents'),
       adminApi.get<CrewMapData>('/api/crew/map'),
+      adminApi.get<{ rules: RuleRow[] }>('/api/crew/rules'),
     ])
-      .then(([r, l, b, a, m]) => {
+      .then(([r, l, b, a, m, ru]) => {
+        setRules(ru.rules || [])
         setRosterRows(r.agents || [])
         setEntries(l.entries || [])
         setBlocks(b.blocks || [])
@@ -424,6 +603,24 @@ export function Crew() {
   const decide = (e: LogEntry, decision: 'allow' | 'allow_once' | 'refuse' | 'block') => {
     if (decision === 'block' && !window.confirm(`Block ${e.from_agent}? Its requests to your agents will be refused silently.`)) return
     act(() => adminApi.post(`/api/crew/connections/${e.connection_id}/decision`, { decision, task_id: e.task_id }))
+  }
+  const decideTask = (e: LogEntry, decision: TaskDecision, message?: string) => {
+    const q = e.input_required
+    if (!q?.decision_id) return
+    if (decision === 'decline' && !window.confirm(`Decline? The task "${e.title}" ends as rejected.`)) return
+    act(() => adminApi.post(`/api/crew/decisions/${encodeURIComponent(q.decision_id!)}`, { decision, ...(message ? { message } : {}) }))
+  }
+  const addRule = async (body: { agent: string; action: string; scope: string; expires_in_days?: number }) => {
+    try { await adminApi.post('/api/crew/rules', body); setError(null); load(); return true } catch (e) { setError(errText(e)); return false }
+  }
+  const editRule = (r: RuleRow) => {
+    const v = window.prompt(`Expire the rule "${r.agent} may ${r.action} on ${r.scope}" after how many days from now? Leave empty for no expiry.`, '')
+    if (v === null) return
+    act(() => adminApi.patch(`/api/crew/rules/${encodeURIComponent(r.id)}`, { expires_in_days: v.trim() ? Number(v) : null }))
+  }
+  const revokeRule = (r: RuleRow) => {
+    if (!window.confirm(`Revoke "${r.agent} may ${r.action} on ${r.scope}"? Matching tasks will ask you again.`)) return
+    act(() => adminApi.del(`/api/crew/rules/${encodeURIComponent(r.id)}`))
   }
   const block = (name: string) => {
     if (!window.confirm(`Block ${name}? Its requests to your agents will be refused silently.`)) return
@@ -464,11 +661,16 @@ export function Crew() {
       {error && <ErrorBox text={error} />}
 
       {tab === 'roster' && <RosterTab rows={rosterRows} onBlock={block} />}
-      {tab === 'log' && <LogTab entries={entries} onDecide={decide} />}
+      {tab === 'log' && <LogTab entries={entries} onDecide={decide} onDecideTask={decideTask} />}
       {tab === 'map' && <CrewMap data={mapData} />}
       {tab === 'agents' && <AgentsTab mine={mine} tokens={tokens} onChanged={load} setError={setError} />}
       {tab === 'rules' && (
         <RulesTab
+          rules={rules}
+          agents={rosterRows}
+          onRevokeRule={revokeRule}
+          onEditRule={editRule}
+          onAddRule={addRule}
           blocks={blocks}
           refused={refused}
           onUnblock={id => act(() => adminApi.del(`/api/crew/blocks/${id}`))}

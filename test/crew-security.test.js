@@ -90,13 +90,13 @@ test('fix 1: a read-only MCP key changes nothing, appcrane_crew_inbox included',
 });
 
 test('fix 2: an app-scoped key and an agent identity get no Crew over MCP, A2A or (identity) the dashboard', async () => {
-  for (const tool of ['appcrane_crew_register', 'appcrane_crew_roster', 'appcrane_crew_who_is_on', 'appcrane_crew_send', 'appcrane_crew_inbox', 'appcrane_crew_reply']) {
+  for (const tool of ['appcrane_crew_register', 'appcrane_crew_roster', 'appcrane_crew_who_is_on', 'appcrane_crew_send', 'appcrane_crew_inbox', 'appcrane_crew_reply', 'appcrane_crew_rules']) {
     await assert.rejects(mcp(scoped, tool, { name: 'scoped-bot', query: 'anything', as_agent: 'x', to_agent: 'y', title: 't', message: 'm', task_id: 'z' }), /MCP app scope/, `${tool} (scoped)`);
     await assert.rejects(mcp(bot, tool, { name: 'botty-bot', query: 'anything', as_agent: 'x', to_agent: 'y', title: 't', message: 'm', task_id: 'z' }), /agent identity/, `${tool} (agent identity)`);
   }
   assert.deepEqual(listTools(scoped).filter((t) => t.name.startsWith('appcrane_crew_')), [], 'the catalogue hides them too');
   assert.deepEqual(listTools(bot).filter((t) => t.name.startsWith('appcrane_crew_')), []);
-  assert.equal(listTools(dana).filter((t) => t.name.startsWith('appcrane_crew_')).length, 6);
+  assert.equal(listTools(dana).filter((t) => t.name.startsWith('appcrane_crew_')).length, 7);
   assert.equal((await rest(bot, 'POST', '/api/crew/agents', { name: 'botty-hosted' })).status, 403);
   assert.equal((await rest(bot, 'GET', '/api/crew/roster')).status, 403);
   // A2A: a token whose owner is later limited to some apps stops working.

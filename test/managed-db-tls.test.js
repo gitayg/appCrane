@@ -153,7 +153,8 @@ test('login policy SQL: cert requirement, connection limit and statement timeout
 
 test('settings: defaults, bounds, and an out-of-range stored value never reaches SQL', () => {
   const db = getDb();
-  assert.deepEqual(getManagedDbSettings(db), { conn_limit: 25, pg_max_connections: 300, statement_timeout_s: 300, auth_alert_threshold: 5 });
+  assert.deepEqual(getManagedDbSettings(db), { conn_limit: 25, pg_max_connections: 300, statement_timeout_s: 300, auth_alert_threshold: 5, pg_stat_statements: 0 });
+  assert.throws(() => setManagedDbSettings(db, { pg_stat_statements: 2 }), /pg_stat_statements must be an integer from 0 to 1/);
   assert.throws(() => setManagedDbSettings(db, { conn_limit: 0 }), /conn_limit must be an integer from 1/);
   assert.throws(() => setManagedDbSettings(db, { pg_max_connections: 50 }), /from 100/);
   assert.throws(() => setManagedDbSettings(db, { nope: 1 }), /unknown managed database setting/);

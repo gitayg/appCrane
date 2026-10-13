@@ -30,6 +30,7 @@ import { join, resolve, dirname } from 'path';
 import crypto from 'crypto';
 import { slugRefusal } from '../utils/slugPolicy.js';
 import { registerAgent, roster, whoIsOn, sendTask, inbox, reply, redactCrewArgs, assertCrewCaller } from './crew.js';
+import { myRules } from './crewDecisions.js';
 
 /**
  * The commit part of a managed-push response. A GitHub commit carries its web
@@ -5044,7 +5045,8 @@ const TOOLS = [
       'Send a task from one of YOUR agents (as_agent, which must be owned by the person whose key you use) to any registered agent. Returns a task id and its state. '
       + 'FIRST CONTACT: if the receiving agent belongs to another person who has not yet accepted tasks from your agent, the task is held (state "submitted") and that person gets ONE e-mail to Allow, Allow once, Refuse or Block; you cannot hurry it. If they refuse or block, the task comes back "rejected" with no reason. '
       + 'The receiver acts with its own owner\'s permissions, never yours. NEVER put secrets (keys, tokens, passwords) in a task: messages are scanned and refused, and history is kept 30 days. '
-      + 'Limits: 60 tasks and 300 messages per agent per hour; at most 20 first-contact requests of yours waiting at once.',
+      + 'Limits: 60 tasks and 300 messages per agent per hour; at most 20 first-contact requests of yours waiting at once. '
+      + 'APPROVAL: declare `action` (a skill name, e.g. "migrate") and `scope` (where, e.g. "sandbox") when the task does something its receiver\'s owner should approve. The receiving person is then asked in the dashboard before their agent starts (state input_required), unless their standing rule allows exactly your agent + action + scope. Production and deletions always ask; leaving action or scope out never matches a rule.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -5052,6 +5054,8 @@ const TOOLS = [
         to_agent: { type: 'string', description: 'The receiving agent\'s name (see appcrane_crew_roster).' },
         title:    { type: 'string', description: 'One line: what you want done (max 200 chars).' },
         message:  { type: 'string', description: 'The details the other agent needs (max 16 KB). No secrets.' },
+        action:   { type: 'string', description: 'Optional: what the task does, as a skill name (e.g. "migrate"). Declaring action or scope asks the receiving person to approve it, unless a standing rule covers it.' },
+        scope:    { type: 'string', description: 'Optional: where it acts, free text (e.g. "sandbox"). Anything mentioning production always asks a person.' },
       },
       required: ['as_agent', 'to_agent', 'title', 'message'],
       additionalProperties: false,
@@ -5082,8 +5086,10 @@ const TOOLS = [
     name: 'appcrane_crew_reply',
     crew: true,
     description:
-      'Reply on a task as one of YOUR agents. The receiving agent can move it to working, input_required (it needs something from the sender), completed or failed, and attach an artifact {name, body} (max 64 KB) with the result. '
-      + 'The sending agent can add a message (e.g. answer input_required) or set state "canceled". Completed, failed, canceled and rejected tasks are closed. No secrets: messages are scanned and refused. History is kept 30 days.',
+      'Reply on a task as one of YOUR agents. The receiving agent can move it to working, input_required, completed or failed, and attach an artifact {name, body} (max 64 KB) with the result. '
+      + 'The sending agent can add a message (e.g. answer input_required) or set state "canceled". Completed, failed, canceled and rejected tasks are closed. No secrets: messages are scanned and refused. History is kept 30 days. '
+      + 'ASKING A PERSON: state "input_required" with your question in `message` routes it to ONE person in the AppCrane dashboard (no e-mail): `ask` = "sender_owner" (default; whoever owns the agent that sent the task, e.g. to approve your plan) or "my_owner" (your own owner). Add `action` and `scope` (e.g. "migrate", "sandbox") to say what you want approved; if that person has a standing rule for exactly that, the answer is immediate (state back to working, approved_by_rule). Production and deletions always ask. '
+      + 'The person\'s answer arrives as a message with actor_kind "human": Approve or Reply moves the task back to working, Decline ends it as rejected.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -5091,6 +5097,9 @@ const TOOLS = [
         task_id:  { type: 'string', description: 'The task id from appcrane_crew_send or appcrane_crew_inbox.' },
         message:  { type: 'string', description: 'Message text (max 16 KB). Optional when only changing state.' },
         state:    { type: 'string', enum: ['working', 'input_required', 'completed', 'failed', 'canceled'], description: 'Optional new state. Receiver: working | input_required | completed | failed. Sender: canceled.' },
+        ask:      { type: 'string', enum: ['sender_owner', 'my_owner'], description: 'With state input_required only: who decides. sender_owner (default) = the owner of the agent that sent the task; my_owner = your own owner.' },
+        action:   { type: 'string', description: 'With state input_required only: what you ask to do, as a skill name (e.g. "migrate"). Defaults to what the task declared.' },
+        scope:    { type: 'string', description: 'With state input_required only: where, free text (e.g. "sandbox"). Defaults to what the task declared.' },
         artifact: {
           type: 'object',
           description: 'Optional result document.',
@@ -5103,6 +5112,17 @@ const TOOLS = [
     },
     requiredRole: 'any',
     handler: async (user, args) => reply(user, args, { actorKind: 'agent' }),
+  },
+  {
+    name: 'appcrane_crew_rules',
+    crew: true,
+    description:
+      'List the standing rules of the person whose key you use: "agent X may do <action> on <scope> without asking me", with expiry and how often each was used. '
+      + 'A task or question matching one exactly is approved without asking that person. Read-only: rules are added, edited and revoked by the person in AppCrane (Crew → Rules & blocks, or "Approve and always allow" on a question). Production and deletions are never covered.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    requiredRole: 'any',
+    readOnly: true,
+    handler: async (user) => myRules(user),
   },
 ];
 

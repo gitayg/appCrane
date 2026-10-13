@@ -121,6 +121,8 @@ import * as certs from './dbCerts.js';
 import * as tlsCfg from './managedDbTls.js';
 import { getManagedDbSettings } from './managedDbSettings.js';
 import * as tde from './managedDbEncryption.js';
+import * as appLogin from './managedDbAppLogin.js';
+import * as pgStats from './managedDbStats.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -529,7 +531,14 @@ function withLock(key, fn) {
  */
 function serverConfigLabel(engine) {
   const parts = { tls: tlsCfg.TLS_CONFIG_VERSION };
-  if (engine === 'postgres') parts.maxConnections = getManagedDbSettings(getDb()).pg_max_connections;
+  if (engine === 'postgres') {
+    const settings = getManagedDbSettings(getDb());
+    parts.maxConnections = settings.pg_max_connections;
+    // Only while on, so a server whose admin never turned it on keeps the
+    // label it has and this release recreates nothing by itself. Flipping it
+    // recreates the shared Postgres once (it is a start-time setting).
+    if (settings.pg_stat_statements === 1) parts.pgStatStatements = 1;
+  }
   // MariaDB data-at-rest encryption (managedDbEncryption.js): the mode, plus a
   // one-way tag of the key file's wrapping secret so a changed ENCRYPTION_KEY
   // recreates a container still holding the old secret. ONLY when the key is
@@ -1030,7 +1039,11 @@ async function ensureServerLocked(engine, cfg) {
 function serverCommandFor(engine, port) {
   if (engine === 'mongo') return mongo.serverCommand(port, { tls: true });
   if (engine === 'postgres') {
-    const flags = tlsCfg.pgServerArgs({ maxConnections: getManagedDbSettings(getDb()).pg_max_connections });
+    const settings = getManagedDbSettings(getDb());
+    const flags = tlsCfg.pgServerArgs({
+      maxConnections: settings.pg_max_connections,
+      pgStatStatements: settings.pg_stat_statements === 1,
+    });
     return ['sh', '-c', `${tlsCfg.installSnippet(engine)} && exec docker-entrypoint.sh "$@"`, 'sh', ...flags];
   }
   // MariaDB: the TLS flags, plus the encryption flags and the key install
@@ -1711,8 +1724,13 @@ export async function serverStatus() {
 async function runAdminSql(engine, sql, { database, timeout = 60000 } = {}) {
   const cfg = ENGINES[engine];
   if (engine === 'postgres') {
+    // track_utility off for AppCrane's own sessions: with pg_stat_statements
+    // loaded, a utility statement is recorded VERBATIM, and provisioning's
+    // CREATE/ALTER ROLE ... PASSWORD '<app password>' would otherwise sit in
+    // the module's query-text file on the data volume. A placeholder setting
+    // when the module is not loaded, so it is harmless either way.
     return dockerExecStdin(
-      ['exec', '-u', 'postgres', '-i', cfg.container,
+      ['exec', '-u', 'postgres', '-e', 'PGOPTIONS=-c pg_stat_statements.track_utility=off', '-i', cfg.container,
         'psql', '-X', '-q', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres', '-d', database ? assertIdent(database) : 'postgres', '-f', '-'],
       sql,
       { timeout }
@@ -2340,9 +2358,192 @@ export function clientMountFor(row, hostDir = certs.clientTlsDir(row.db_user)) {
   return { host: hostDir, container: certs.CLIENT_MOUNT_PATH, readOnly: true };
 }
 
-async function dropInEngine(engine, database, username) {
+// ---------------------------------------------------------------------------
+// The second login, extensions, and the sandbox URL for production
+// (deployhub.json `app_login`, `extensions`, `sandbox_url_env`)
+// ---------------------------------------------------------------------------
+
+/**
+ * Create (or re-assert) the scope's DML-only `<login>_app` login, put it under
+ * the same policy as the owner login, and return what ITS container needs.
+ *
+ * Same rules as the owner login, deliberately: the platform limits
+ * (connection cap, statement timeout) and — whenever the owner login requires
+ * one, which every deployhub.json login does — TLS plus its OWN client
+ * certificate (CN = the app login; Postgres checks it with clientcert=
+ * verify-full through the cert group, MariaDB with REQUIRE SUBJECT). Its files
+ * live in client/<login>_app/ and are mounted read-only at
+ * APP_CLIENT_MOUNT_PATH into this scope's container only.
+ *
+ * The row is written FIRST (as provision() does), so the password exists in
+ * exactly one place before any engine sees it, and every later call converges
+ * the engine on it. Called on every deploy and restart; idempotent.
+ *
+ * `enabled: false` with an existing app login disables it (NOLOGIN / ACCOUNT
+ * LOCK) rather than dropping it: a dump taken while it existed names it in
+ * its GRANTs and would not restore without it.
+ */
+export async function ensureAppLogin(scope, engine, {
+  enabled = true, image = null, resolveOwner = certs.resolveImageOwner, ops = null,
+} = {}) {
+  const { ensureServer: ensure, runAdminSql: sql } = ops || { ensureServer, runAdminSql };
+  const row = rowFor(scope, engine);
+  if (!row) return null;
+  if (!appLogin.APP_LOGIN_ENGINES.includes(engine)) {
+    throw new Error(`managedDb: a second (app) login is supported for ${appLogin.APP_LOGIN_ENGINES.join(' and ')}, not ${engine}`);
+  }
+  if (!enabled) {
+    if (row.app_user && row.app_password_enc) {
+      await ensure(engine);
+      await sql(engine, appLogin.appLoginDisableSql(engine, assertIdent(row.app_user)));
+      // No password on the row = disabled: restores keep it unable to log in
+      // (managedDbBackup), and opting back in issues a fresh password.
+      getDb().prepare('UPDATE managed_databases SET app_password_enc = NULL WHERE id = ?').run(row.id);
+    }
+    return null;
+  }
+
+  const appUser = appLogin.appLoginName(row.db_user);
+  let password = row.app_password_enc ? decrypt(row.app_password_enc) : null;
+  if (!password || row.app_user !== appUser) {
+    password = generatePassword();
+    getDb().prepare('UPDATE managed_databases SET app_user = ?, app_password_enc = ? WHERE id = ?')
+      .run(appUser, encrypt(password), row.id);
+  }
+  assertPassword(password);
+
+  const settings = getManagedDbSettings(getDb());
+  const certRequired = row.client_cert_required === 1;
+  const server = await ensure(engine);
+  try {
+    await sql(engine, appLogin.appLoginServerSql(engine, row.db_name, appUser, password));
+    if (engine === 'postgres') {
+      await sql(engine, appLogin.pgAppGrantsSql(row.db_user, appUser), { database: row.db_name });
+    }
+    await sql(engine, tlsCfg.loginPolicySql(engine, appUser, {
+      certRequired,
+      connLimit: settings.conn_limit,
+      statementTimeoutS: settings.statement_timeout_s,
+    }));
+  } catch (e) {
+    // The engine can echo the failing statement, which carries the password.
+    throw new Error(`managedDb: setting up the app login failed: ${redactSecret(e.message, password)}`);
+  }
+
+  let tls = null;
+  const mounts = [];
+  if (certRequired) {
+    const cert = certs.ensureClientCert(appUser);
+    const owner = await resolveOwner(image);
+    const files = certs.writeClientFiles(appUser, cert, owner, { mountPath: certs.APP_CLIENT_MOUNT_PATH });
+    tls = { required: true, x509: false, ...files.files };
+    mounts.push({ host: files.hostDir, container: certs.APP_CLIENT_MOUNT_PATH, readOnly: true });
+  }
+  const port = server?.port || serverRow(engine)?.host_port || ENGINES[engine].defaultPort;
+  const creds = {
+    engine,
+    host: DB_HOST_FOR_CONTAINERS,
+    port,
+    database: row.db_name,
+    username: appUser,
+    password,
+    ...(tls ? { tls } : {}),
+  };
+  return { creds, mounts };
+}
+
+/**
+ * Install (or remove) the extensions a deployhub.json database asked for, as
+ * the superuser, in that one database. Today: pg_stat_statements, through
+ * managedDbStats.js's filtered functions — never the raw view. The list is
+ * recorded on the row so a restore can put the wiring back.
+ *
+ * Returns { installed, preloaded }: `preloaded` false means the platform
+ * switch is off, so the functions exist but Postgres will answer
+ * "pg_stat_statements must be loaded via shared_preload_libraries" until a
+ * platform admin turns it on (the deployer logs that).
+ */
+export async function ensurePgExtensions(scope, { extensions = [], ops = null } = {}) {
+  const { ensureServer: ensure, runAdminSql: sql } = ops || { ensureServer, runAdminSql };
+  const row = rowFor(scope, 'postgres');
+  if (!row) return { installed: [], preloaded: null };
+  const want = extensions.filter((e) => pgStats.SUPPORTED_EXTENSIONS.postgres.includes(e));
+  const had = parseExtensions(row.extensions);
+  if (!want.length && !had.length) return { installed: [], preloaded: null };
+
+  await ensure('postgres');
+  if (want.includes('pg_stat_statements')) {
+    const logins = [assertIdent(row.db_user), ...(row.app_user ? [assertIdent(row.app_user)] : [])];
+    await sql('postgres', pgStats.pgStatStatementsSql(logins), { database: row.db_name });
+  } else if (had.includes('pg_stat_statements')) {
+    await sql('postgres', pgStats.pgStatStatementsDropSql(), { database: row.db_name });
+  }
+  getDb().prepare('UPDATE managed_databases SET extensions = ? WHERE id = ?')
+    .run(want.length ? JSON.stringify(want) : null, row.id);
+  const preloaded = getManagedDbSettings(getDb()).pg_stat_statements === 1;
+  return { installed: want, preloaded };
+}
+
+export function parseExtensions(value) {
+  if (!value) return [];
+  try {
+    const v = JSON.parse(value);
+    return Array.isArray(v) ? v.filter((e) => typeof e === 'string') : [];
+  } catch (_) { return []; }
+}
+
+/**
+ * The sandbox database's OWNER credentials for PRODUCTION's container
+ * (deployhub.json `sandbox_url_env`): the Supply Hub flow, where production
+ * pushes a masked copy of its data down into sandbox. Never the other way:
+ * nothing calls this for a sandbox container (deployer.injectManagedDbForEnv
+ * gates it on env === 'production'), and no function here hands production's
+ * credentials to sandbox.
+ *
+ * The sandbox login keeps its own certificate requirement. Production gets a
+ * PRIVATE copy of that login's certificate (peer/<sandbox login>/, written for
+ * production's image owner) mounted at SANDBOX_PEER_MOUNT_PATH; the sandbox
+ * container's own files are left exactly as its deploy wrote them.
+ *
+ * Returns null when the sandbox database does not exist (the caller logs it
+ * and injects nothing — no fallback to any other database).
+ */
+export async function sandboxPeerAccess(appId, engine, {
+  image = null, resolveOwner = certs.resolveImageOwner, ops = null,
+} = {}) {
+  const { ensureServer: ensure, runAdminSql: sql } = ops || { ensureServer, runAdminSql };
+  const scope = { appId, tenant: SANDBOX_TENANT };
+  const row = rowFor(scope, engine);
+  if (!row) return null;
+  if (!tlsCfg.POLICY_ENGINES.includes(engine)) {
+    throw new Error(`managedDb: the sandbox URL for production is supported for ${tlsCfg.POLICY_ENGINES.join(' and ')}, not ${engine}`);
+  }
+  // A sandbox database provisioned by this production deploy, before any
+  // sandbox deploy converted its login: convert it now, so production never
+  // holds a password-only route into it. Same statements secureLogin() runs.
+  if (row.client_cert_required !== 1) {
+    const settings = getManagedDbSettings(getDb());
+    await ensure(engine);
+    await sql(engine, tlsCfg.loginPolicySql(engine, assertIdent(row.db_user), {
+      certRequired: true, connLimit: settings.conn_limit, statementTimeoutS: settings.statement_timeout_s,
+    }));
+    getDb().prepare('UPDATE managed_databases SET client_cert_required = 1 WHERE id = ?').run(row.id);
+  }
+  const fresh = rowFor(scope, engine);
+  const cert = certs.ensureClientCert(fresh.db_user);
+  const owner = await resolveOwner(image);
+  const files = certs.writeClientFiles(fresh.db_user, cert, owner, { peer: true, mountPath: certs.SANDBOX_PEER_MOUNT_PATH });
+  const conn = connectionWithoutTls(fresh, serverRow(engine)?.host_port || ENGINES[engine].defaultPort);
+  return {
+    creds: { ...conn, tls: { required: true, x509: false, ...files.files } },
+    mounts: [{ host: files.hostDir, container: certs.SANDBOX_PEER_MOUNT_PATH, readOnly: true }],
+  };
+}
+
+async function dropInEngine(engine, database, username, appUser = null) {
   assertIdent(database);
   assertIdent(username);
+  if (appUser) assertIdent(appUser);
   if (engine === 'mongo') {
     await runAdminMongo(mongo.dropScript({ ...adminCoordsFor('mongo'), database, username }));
     return;
@@ -2351,8 +2552,11 @@ async function dropInEngine(engine, database, username) {
     // WITH (FORCE) terminates any session the app still holds — without it a
     // container that has not shut down yet keeps the database undroppable, and
     // a delete that half-succeeds is worse than one that fails.
+    // The `_app` login after the database (its grants and default
+    // privileges live in that database and go with it), before the owner.
     await runAdminSql('postgres', [
       `DROP DATABASE IF EXISTS "${database}" WITH (FORCE);`,
+      ...(appUser ? [appLogin.appLoginDropSql('postgres', appUser).trim()] : []),
       `DROP ROLE IF EXISTS "${username}";`,
     ].join('\n'));
     return;
@@ -2360,6 +2564,7 @@ async function dropInEngine(engine, database, username) {
   await runAdminSql('mariadb', [
     `DROP DATABASE IF EXISTS \`${database}\`;`,
     `DROP USER IF EXISTS '${username}'@'%';`,
+    ...(appUser ? [`DROP USER IF EXISTS '${appUser}'@'%';`] : []),
     'FLUSH PRIVILEGES;',
   ].join('\n'));
 }
@@ -2401,7 +2606,7 @@ async function dropRow(row) {
     return;
   }
   await ensureServer(row.engine);
-  await dropInEngine(row.engine, row.db_name, row.db_user);
+  await dropInEngine(row.engine, row.db_name, row.db_user, row.app_user || null);
 }
 
 /**

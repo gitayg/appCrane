@@ -312,11 +312,12 @@ test('retention deletes tasks and messages older than 30 days, never audit rows'
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM audit_log').get().n, auditBefore);
 });
 
-test('the six Crew MCP tools are wired and advertised', () => {
+test('the Crew MCP tools are wired and advertised', () => {
   const names = listTools(dana).map((t) => t.name).filter((n) => n.startsWith('appcrane_crew_'));
+  // Phase 3 (crew-rules.test.js) added appcrane_crew_rules, read-only.
   assert.deepEqual(names.sort(), [
     'appcrane_crew_inbox', 'appcrane_crew_register', 'appcrane_crew_reply',
-    'appcrane_crew_roster', 'appcrane_crew_send', 'appcrane_crew_who_is_on',
+    'appcrane_crew_roster', 'appcrane_crew_rules', 'appcrane_crew_send', 'appcrane_crew_who_is_on',
   ]);
 });
 

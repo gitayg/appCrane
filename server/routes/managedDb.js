@@ -436,7 +436,9 @@ serversRouter.put('/settings', requireAuth, requirePlatformAdmin, async (req, re
     spec: SETTINGS_SPEC,
     note: 'Per-login limits reach each login on its app\'s next deploy or restart. '
       + 'A new Postgres max_connections takes effect when the shared Postgres is next recreated, '
-      + 'which AppCrane does on the next provision, deploy or restart that needs it.',
+      + 'which AppCrane does on the next provision, deploy or restart that needs it. '
+      + 'The same goes for pg_stat_statements: turning it on or off recreates the shared Postgres once '
+      + '(data is kept; open connections drop and reconnect).',
   });
 });
 

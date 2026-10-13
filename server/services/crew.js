@@ -50,11 +50,25 @@
  * receiving person is not notified. Refused and blocked look identical to the
  * sender on purpose.
  *
- * ── Seams for phase 3 ────────────────────────────────────────────────────────
- * Standing rules and INPUT_REQUIRED approvals routed to people are NOT built.
- * gateFor() is the one place that decides a new task's fate; a rule lookup goes
- * there, between the block check and the connection check. input_required is a
- * valid state an agent can set today; phase 3 adds who gets asked.
+ * ── Phase 3: people in the loop (standing rules, decisions) ──────────────────
+ * A task that needs a person's decision asks that ONE person in the dashboard
+ * (Crew log entry + the Crew nav badge), never by e-mail — e-mail stays for
+ * first contact only. Two ways a task comes to need a decision:
+ *   - declared: the sender declares an `action` and/or `scope` when sending
+ *     (MCP args, A2A message.metadata). The receiving person is asked before
+ *     their agent starts (state input_required, ask 'declared'), unless one of
+ *     their standing rules covers (sender agent, action, scope).
+ *   - asked: the receiving agent sets input_required with `ask` =
+ *     'sender_owner' (default: the person whose agent sent the task decides,
+ *     e.g. "approve my migration plan") or 'my_owner' (its own person).
+ *     The decider's standing rule for the OTHER agent covers it: for
+ *     sender_owner the asking (receiving) agent, for my_owner the sender.
+ * The gate order is block → refused → first contact → standing rule
+ * (gateFor). A rule is consulted only once a task is deliverable, so it can
+ * never release a held task or reach past a block. Production and deletions
+ * always ask: services/crewRules.js alwaysAskReason(). Decisions (Approve /
+ * Approve and always allow / Reply / Decline) are made only by the routed
+ * person, platform admins included: services/crewDecisions.js.
  *
  * ── Retention ────────────────────────────────────────────────────────────────
  * Tasks and messages are deleted 30 days after their last update
@@ -99,6 +113,10 @@ import { AppError } from '../utils/errors.js';
 import { isAdmin } from '../utils/roles.js';
 import { enqueueEmail } from './emailQueue.js';
 import { findSecret } from './crewSecrets.js';
+import {
+  normalizeAction, normalizeScope, alwaysAskReason, matchRule, recordRuleUse, auditRuleUse,
+  newOpaqueId, revokeRulesForAgent, auditRulesRevokedByBlock, ruleSummary,
+} from './crewRules.js';
 import log from '../utils/logger.js';
 
 export const CREW_LIMITS = Object.freeze({
@@ -124,7 +142,7 @@ const RECEIVER_STATES = ['working', 'completed', 'failed', 'input_required'];
 
 // ── Small helpers ───────────────────────────────────────────────────────────
 
-function fail(status, code, message) {
+export function fail(status, code, message) {
   throw new AppError(message, status, code);
 }
 
@@ -133,7 +151,7 @@ function newTaskId() {
 }
 
 /** Control characters out, whitespace collapsed: titles land in e-mail subjects and table cells. */
-function oneLine(s, max) {
+export function oneLine(s, max) {
   const t = String(s ?? '').replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
   return t.length > max ? t.slice(0, max) : t;
 }
@@ -146,7 +164,7 @@ export function normalizeAgentName(raw) {
   return name;
 }
 
-function assertNoSecret(where, text) {
+export function assertNoSecret(where, text) {
   const rule = findSecret(text);
   if (rule) {
     fail(400, 'SECRET_IN_MESSAGE',
@@ -154,7 +172,7 @@ function assertNoSecret(where, text) {
   }
 }
 
-function assertBodySize(where, text, maxBytes) {
+export function assertBodySize(where, text, maxBytes) {
   if (Buffer.byteLength(text, 'utf8') > maxBytes) {
     fail(400, 'VALIDATION', `The ${where} is larger than ${Math.round(maxBytes / 1024)} KB. Send a summary, or put the content somewhere both owners can reach and send a pointer.`);
   }
@@ -206,7 +224,7 @@ function touchAgent(db, agentId) {
 export const crewEvents = new EventEmitter();
 crewEvents.setMaxListeners(0);
 
-function announce(taskIds, kind) {
+export function announce(taskIds, kind) {
   const ids = (Array.isArray(taskIds) ? taskIds : [taskIds]).filter(Boolean);
   if (!ids.length) return;
   setImmediate(() => {
@@ -255,7 +273,7 @@ export function assertCrewCaller(user, channel) {
   }
 }
 
-function audit(user, action, detail, actorKind) {
+export function audit(user, action, detail, actorKind) {
   try {
     logAudit(user.id, null, action, detail, actorKind);
   } catch (e) {
@@ -530,7 +548,10 @@ function assertTaskBudget(db, agentId) {
 }
 
 function assertMessageBudget(db, agentId) {
-  const { n } = db.prepare("SELECT COUNT(*) AS n FROM crew_messages WHERE from_agent_id = ? AND created_at >= datetime('now', '-1 hour')").get(agentId);
+  // Only the agent's own words count: a person's answer (actor_kind 'human',
+  // phase 3) is stored on the agent of their side of the task and must not
+  // spend that agent's budget.
+  const { n } = db.prepare("SELECT COUNT(*) AS n FROM crew_messages WHERE from_agent_id = ? AND actor_kind = 'agent' AND created_at >= datetime('now', '-1 hour')").get(agentId);
   if (n >= CREW_LIMITS.MESSAGES_PER_HOUR) {
     fail(429, 'RATE_LIMITED', `This agent has sent ${n} messages in the last hour (the limit is ${CREW_LIMITS.MESSAGES_PER_HOUR}). Wait before sending more.`);
   }
@@ -547,20 +568,82 @@ function assertPendingFirstContactBudget(db, ownerId) {
 
 /**
  * Decide what happens to a new task from `from` to `to`. Returns one of:
- *   { verdict: 'deliver' }                       same owner, or an allowed connection
+ *   { verdict: 'deliver', rule, ask }            same owner, or an allowed connection
  *   { verdict: 'reject' }                        blocked, or a refused connection (silent)
  *   { verdict: 'hold', connection, isNew }       first contact pending a decision
- * Phase 3's standing rules slot in after the block check.
+ *
+ * Order (phase 3): block → refused → first contact → standing rule. The rule
+ * stage runs ONLY for a deliverable task, so no rule can release a held first
+ * contact or reach past a block or refusal; it applies only to a task that
+ * declared an action or scope (the sender asking for something that needs the
+ * receiving person's approval). On 'deliver':
+ *   rule = the receiving person's live rule covering (from, action, scope), or null
+ *   ask  = true when the task declared something and no rule covers it: the
+ *          receiving person is asked before their agent starts.
  */
-function gateFor(db, from, to) {
-  if (from.owner_user_id === to.owner_user_id) return { verdict: 'deliver' };
-  const blocked = db.prepare('SELECT 1 FROM crew_blocks WHERE owner_user_id = ? AND blocked_agent_id = ?').get(to.owner_user_id, from.id);
-  if (blocked) return { verdict: 'reject', reason: 'blocked' };
-  const conn = db.prepare('SELECT * FROM crew_connections WHERE from_agent_id = ? AND to_owner_id = ?').get(from.id, to.owner_user_id);
-  if (conn?.state === 'allowed') return { verdict: 'deliver' };
-  if (conn?.state === 'refused') return { verdict: 'reject', reason: 'refused' };
-  if (conn) return { verdict: 'hold', connection: conn, isNew: false };
-  return { verdict: 'hold', connection: null, isNew: true };
+function gateFor(db, from, to, declared = {}) {
+  let base;
+  if (from.owner_user_id === to.owner_user_id) {
+    base = { verdict: 'deliver' };
+  } else {
+    const blocked = db.prepare('SELECT 1 FROM crew_blocks WHERE owner_user_id = ? AND blocked_agent_id = ?').get(to.owner_user_id, from.id);
+    if (blocked) return { verdict: 'reject', reason: 'blocked' };
+    const conn = db.prepare('SELECT * FROM crew_connections WHERE from_agent_id = ? AND to_owner_id = ?').get(from.id, to.owner_user_id);
+    if (conn?.state === 'refused') return { verdict: 'reject', reason: 'refused' };
+    if (conn?.state !== 'allowed') return conn ? { verdict: 'hold', connection: conn, isNew: false } : { verdict: 'hold', connection: null, isNew: true };
+    base = { verdict: 'deliver' };
+  }
+  return { ...base, ...declaredApproval(db, from, to, declared) };
+}
+
+/**
+ * The standing-rule stage for a deliverable task (gateFor, and a held task
+ * when its first contact is allowed). Nothing declared → nothing to approve.
+ */
+function declaredApproval(db, from, to, { action, scope, texts = [] }) {
+  if (!action && !scope) return { rule: null, ask: false };
+  const rule = matchRule(db, { ownerId: to.owner_user_id, agentId: from.id, action, scope, texts });
+  return { rule, ask: !rule };
+}
+
+/**
+ * Apply the rule stage's outcome to a task that is now deliverable, inside
+ * the caller's transaction: either record the rule that pre-approved it, or
+ * put it to input_required with a decision for the receiving person. Returns
+ * { rule, decisionId } for the caller to audit after commit.
+ */
+function applyDeclaredApproval(db, task, from, to, gate) {
+  if (gate.rule) {
+    recordRuleUse(db, gate.rule.id);
+    db.prepare('UPDATE crew_tasks SET rule_id = ? WHERE id = ?').run(gate.rule.id, task.id);
+    return { rule: gate.rule, decisionId: null };
+  }
+  if (!gate.ask) return { rule: null, decisionId: null };
+  const decisionId = openDecision(db, {
+    task, askedBy: from.id, subject: from.id, decider: to.owner_user_id, ask: 'declared',
+    action: task.action, scope: task.scope, texts: [task.title],
+  });
+  db.prepare("UPDATE crew_tasks SET state = 'input_required', updated_at = datetime('now') WHERE id = ?").run(task.id);
+  return { rule: null, decisionId };
+}
+
+/**
+ * A new pending question for exactly one person. Any older pending question
+ * on the same task is closed first: only the newest question is answerable,
+ * so a person can never approve a plan the agent has since replaced.
+ */
+function openDecision(db, { task, askedBy, subject, decider, ask, action, scope, texts }) {
+  closePendingDecisions(db, [task.id]);
+  const id = newOpaqueId();
+  db.prepare(`INSERT INTO crew_decisions (id, task_id, asked_by_agent_id, subject_agent_id, decider_user_id, ask, action, scope, always_ask)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(id, task.id, askedBy, subject, decider, ask, action || null, scope || null, alwaysAskReason({ action, scope, texts }));
+  return id;
+}
+
+export function closePendingDecisions(db, taskIds) {
+  const stmt = db.prepare("UPDATE crew_decisions SET status = 'closed', decided_at = datetime('now') WHERE task_id = ? AND status = 'pending'");
+  for (const id of taskIds) stmt.run(id);
 }
 
 function dashboardLink(path) {
@@ -624,7 +707,7 @@ function firstContactEmail(db, conn, from, to, title) {
  * The sender always gets a task id and a state; a refused or blocked sender
  * gets 'rejected' and nothing else.
  */
-export function sendTask(user, { as_agent, to_agent, title, message, context_id, message_id }, { actorKind }) {
+export function sendTask(user, { as_agent, to_agent, title, message, context_id, message_id, action, scope }, { actorKind }) {
   const db = getDb();
   const from = agentForCaller(db, user, as_agent);
   const toName = normalizeAgentName(to_agent);
@@ -638,18 +721,24 @@ export function sendTask(user, { as_agent, to_agent, title, message, context_id,
   assertBodySize('message', body, CREW_LIMITS.BODY_MAX_BYTES);
   assertNoSecret('title', cleanTitle);
   assertNoSecret('message', body);
+  // Phase 3: what the task says it will do and where. Optional; declaring
+  // either asks the receiving person (or their standing rule) before their
+  // agent starts. The body is part of the always-ask backstop too.
+  const declAction = normalizeAction(action);
+  const declScope = normalizeScope(scope);
+  if (declScope) assertNoSecret('scope', declScope);
 
   const out = db.transaction(() => {
     assertTaskBudget(db, from.id);
     assertMessageBudget(db, from.id);
-    const gate = gateFor(db, from, to);
+    const gate = gateFor(db, from, to, { action: declAction, scope: declScope, texts: [cleanTitle, body] });
     const id = newTaskId();
     touchAgent(db, from.id);
 
     if (gate.verdict === 'reject') {
       // No message stored: nobody will ever read it, and keeping a blocked
       // sender's text for 30 days serves no one.
-      db.prepare("INSERT INTO crew_tasks (id, from_agent_id, to_agent_id, title, state) VALUES (?, ?, ?, ?, 'rejected')").run(id, from.id, to.id, cleanTitle);
+      db.prepare("INSERT INTO crew_tasks (id, from_agent_id, to_agent_id, title, state, action, scope) VALUES (?, ?, ?, ?, 'rejected', ?, ?)").run(id, from.id, to.id, cleanTitle, declAction, declScope);
       return { id, state: 'rejected', audit: { reason: gate.reason } };
     }
 
@@ -664,8 +753,12 @@ export function sendTask(user, { as_agent, to_agent, title, message, context_id,
     const held = gate.verdict === 'hold' ? 1 : 0;
     // context_id: the A2A caller's contextId when it gave one (validated in
     // crewA2a.js), else the task's own id — every task is its own context.
-    db.prepare("INSERT INTO crew_tasks (id, from_agent_id, to_agent_id, title, state, held, context_id) VALUES (?, ?, ?, ?, 'submitted', ?, ?)").run(id, from.id, to.id, cleanTitle, held, context_id || id);
+    db.prepare("INSERT INTO crew_tasks (id, from_agent_id, to_agent_id, title, state, held, context_id, action, scope) VALUES (?, ?, ?, ?, 'submitted', ?, ?, ?, ?)").run(id, from.id, to.id, cleanTitle, held, context_id || id, declAction, declScope);
     db.prepare("INSERT INTO crew_messages (task_id, from_agent_id, body, message_id, state_after) VALUES (?, ?, ?, ?, 'submitted')").run(id, from.id, body, message_id || null);
+    // A held task is not deliverable yet: the rule stage runs when its first
+    // contact is allowed (releaseHeld), never before.
+    const approval = held ? { rule: null, decisionId: null }
+      : applyDeclaredApproval(db, db.prepare('SELECT * FROM crew_tasks WHERE id = ?').get(id), from, to, gate);
 
     // At most one e-mail per connection: only when notified_at is still NULL,
     // and set in this same transaction. notified_at is set even when the
@@ -680,13 +773,18 @@ export function sendTask(user, { as_agent, to_agent, title, message, context_id,
       }
       db.prepare("UPDATE crew_connections SET notified_at = datetime('now') WHERE id = ? AND notified_at IS NULL").run(connection.id);
     }
-    return { id, state: 'submitted', held: !!held, connection_id: connection?.id ?? null, emailed, newConnection: !!gate.isNew };
+    return {
+      id, state: approval.decisionId ? 'input_required' : 'submitted', held: !!held, connection_id: connection?.id ?? null, emailed,
+      newConnection: !!gate.isNew, rule: approval.rule, decisionId: approval.decisionId,
+    };
   })();
 
   audit(user, out.state === 'rejected' ? 'crew.task.rejected' : 'crew.task.send', {
     task_id: out.id, from_agent_id: from.id, to_agent_id: to.id, title_len: cleanTitle.length,
-    message_len: body.length, held: !!out.held, ...(out.audit || {}),
+    message_len: body.length, held: !!out.held, action: declAction, scope: declScope, ...(out.audit || {}),
   }, actorKind);
+  if (out.rule) auditRuleUse(user.id, out.rule, { task_id: out.id, at: 'send' }, actorKind);
+  if (out.decisionId) audit(user, 'crew.decision.ask', { decision_id: out.decisionId, task_id: out.id, ask: 'declared', decider_user_id: to.owner_user_id }, actorKind);
   if (out.newConnection) {
     audit(user, 'crew.first_contact', { connection_id: out.connection_id, from_agent_id: from.id, to_owner_id: to.owner_user_id, task_id: out.id, emailed: out.emailed }, actorKind);
   }
@@ -695,6 +793,10 @@ export function sendTask(user, { as_agent, to_agent, title, message, context_id,
   const res = { task_id: out.id, state: out.state, to_agent: to.name };
   if (out.held) {
     res.note = `${to.name} belongs to another person who has not yet accepted tasks from ${from.name}. The task is held until they decide; check its state later with appcrane_crew_inbox (sent tasks).`;
+  } else if (out.rule) {
+    res.approved_by_rule = { rule_id: out.rule.id, action: out.rule.action, scope: out.rule.scope };
+  } else if (out.decisionId) {
+    res.note = `The task declares an action/scope, so ${to.name}'s owner is asked to approve it in the AppCrane dashboard before ${to.name} starts (state input_required). No e-mail is sent; check its state later.`;
   }
   return res;
 }
@@ -703,11 +805,14 @@ export function sendTask(user, { as_agent, to_agent, title, message, context_id,
 
 function messagesFor(db, taskId) {
   return db.prepare(`
-    SELECT m.id, a.name AS from_agent, m.body, m.artifact_name, m.artifact_body, m.created_at
-    FROM crew_messages m JOIN crew_agents a ON a.id = m.from_agent_id
+    SELECT m.id, a.name AS from_agent, m.body, m.artifact_name, m.artifact_body, m.created_at, m.actor_kind, u.name AS person
+    FROM crew_messages m JOIN crew_agents a ON a.id = m.from_agent_id LEFT JOIN users u ON u.id = m.from_user_id
     WHERE m.task_id = ? ORDER BY m.id DESC LIMIT 50`).all(taskId).reverse()
     .map((m) => {
-      const out = { from_agent: m.from_agent, body: m.body, created_at: m.created_at };
+      // Phase 3: a person's answer is labelled as theirs, never as the agent's.
+      const out = m.actor_kind === 'human'
+        ? { from_person: m.person || 'a person', actor_kind: 'human', body: m.body, created_at: m.created_at }
+        : { from_agent: m.from_agent, body: m.body, created_at: m.created_at };
       if (m.artifact_name) out.artifact = { name: m.artifact_name, body: m.artifact_body };
       return out;
     });
@@ -726,21 +831,47 @@ export function inbox(user, { as_agent }, { touch = true } = {}) {
   // handler passes touch:false for a read-only key, keeping that promise.
   if (touch) touchAgent(db, agent.id);
   const received = db.prepare(`
-    SELECT t.id, t.title, t.state, t.created_at, t.updated_at, fa.name AS from_agent, u.name AS from_owner
+    SELECT t.id, t.title, t.state, t.created_at, t.updated_at, t.action, t.scope, t.rule_id, fa.name AS from_agent, u.name AS from_owner
     FROM crew_tasks t JOIN crew_agents fa ON fa.id = t.from_agent_id JOIN users u ON u.id = fa.owner_user_id
     WHERE t.to_agent_id = ? AND t.held = 0 AND t.state IN ('submitted', 'working', 'input_required')
     ORDER BY t.created_at ASC LIMIT 50`).all(agent.id)
-    .map((t) => ({ task_id: t.id, title: t.title, state: t.state, from_agent: t.from_agent, from_owner: t.from_owner, created_at: t.created_at, updated_at: t.updated_at, messages: messagesFor(db, t.id) }));
+    .map((t) => ({
+      task_id: t.id, title: t.title, state: t.state, from_agent: t.from_agent, from_owner: t.from_owner, created_at: t.created_at, updated_at: t.updated_at,
+      ...approvalFields(db, t), messages: messagesFor(db, t.id),
+    }));
   const sent = db.prepare(`
-    SELECT t.id, t.title, t.state, t.held, t.created_at, t.updated_at, ta.name AS to_agent, u.name AS to_owner
+    SELECT t.id, t.title, t.state, t.held, t.created_at, t.updated_at, t.action, t.scope, t.rule_id, ta.name AS to_agent, u.name AS to_owner
     FROM crew_tasks t JOIN crew_agents ta ON ta.id = t.to_agent_id JOIN users u ON u.id = ta.owner_user_id
     WHERE t.from_agent_id = ? ORDER BY t.updated_at DESC LIMIT 20`).all(agent.id)
     .map((t) => ({
       task_id: t.id, title: t.title, state: t.state, to_agent: t.to_agent, to_owner: t.to_owner,
       waiting_for_approval: !!t.held && t.state === 'submitted', created_at: t.created_at, updated_at: t.updated_at,
+      ...(t.state === 'rejected' ? {} : approvalFields(db, t)),
       messages: t.state === 'rejected' ? [] : messagesFor(db, t.id),
     }));
   return { agent: agent.name, received, sent };
+}
+
+/**
+ * What an agent needs to know about approvals on a task: what it declared,
+ * the rule that pre-approved it, whether a person is being asked, and whether
+ * it is something that always asks (production / deletion).
+ */
+function approvalFields(db, t) {
+  const out = {};
+  if (t.action) out.action = t.action;
+  if (t.scope) out.scope = t.scope;
+  if (t.rule_id) {
+    const r = ruleSummary(db, t.rule_id);
+    out.approved_by_rule = r?.removed ? { rule_id: t.rule_id } : { rule_id: r.id, action: r.action, scope: r.scope };
+  }
+  const pending = t.state === 'input_required'
+    ? db.prepare("SELECT ask FROM crew_decisions WHERE task_id = ? AND status = 'pending' ORDER BY created_at DESC LIMIT 1").get(t.id)
+    : null;
+  if (pending) out.waiting_for_person = pending.ask;
+  const always = alwaysAskReason({ action: t.action, scope: t.scope, texts: [t.title] });
+  if (always) out.always_asks = always;
+  return out;
 }
 
 // ── Task reads for the A2A door (phase 2) ──────────────────────────────────
@@ -755,7 +886,10 @@ export function inbox(user, { as_agent }, { touch = true } = {}) {
 export function taskVisibleTo(task, agentId) {
   if (!task) return false;
   if (task.from_agent_id === agentId) return true;
-  return task.to_agent_id === agentId && task.held === 0 && task.state !== 'rejected';
+  // Phase 3: a task a PERSON declined (declined = 1) stays visible to the
+  // receiving agent — it asked, and needs the answer. A gate rejection (block,
+  // refused first contact) stays hidden and silent, as before.
+  return task.to_agent_id === agentId && task.held === 0 && (task.state !== 'rejected' || task.declined === 1);
 }
 
 const TASK_SELECT = `
@@ -773,7 +907,7 @@ export function taskFor(agentId, taskId) {
 export function taskMessages(taskId, limit = 200) {
   return getDb().prepare(`
     SELECT * FROM (
-      SELECT m.id, m.from_agent_id, m.body, m.artifact_name, m.artifact_body, m.message_id, m.state_after, m.created_at
+      SELECT m.id, m.from_agent_id, m.body, m.artifact_name, m.artifact_body, m.message_id, m.state_after, m.created_at, m.actor_kind
       FROM crew_messages m WHERE m.task_id = ? ORDER BY m.id DESC LIMIT ?
     ) ORDER BY id ASC`).all(taskId, limit);
 }
@@ -786,7 +920,7 @@ export function taskMessages(taskId, limit = 200) {
  * page boundary is stable while rows are added.
  */
 export function listTasksFor(agentId, { contextId, state, updatedAfter, pageSize = 50, cursor } = {}) {
-  const where = ['(t.from_agent_id = ? OR (t.to_agent_id = ? AND t.held = 0 AND t.state <> \'rejected\'))'];
+  const where = ['(t.from_agent_id = ? OR (t.to_agent_id = ? AND t.held = 0 AND (t.state <> \'rejected\' OR t.declined = 1)))'];
   const args = [agentId, agentId];
   if (contextId) { where.push('t.context_id = ?'); args.push(contextId); }
   if (state) { where.push('t.state = ?'); args.push(state); }
@@ -818,8 +952,18 @@ export function touchAgentSeen(agentId) {
  * Reply on a task, optionally moving its state. The receiving agent may set
  * working | input_required | completed | failed; the sending agent may add a
  * message (e.g. answer input_required) or cancel. A closed task takes nothing.
+ *
+ * Phase 3: input_required is a question for a PERSON. `ask` says whose:
+ *   'sender_owner' (default) — the owner of the agent that sent the task,
+ *   'my_owner'               — the receiving agent's own owner.
+ * `action` / `scope` describe what it wants approved (falling back to what the
+ * task declared). If the decider has a standing rule for the other agent that
+ * covers exactly that, the task goes straight back to working and the rule is
+ * recorded; otherwise it waits in that person's Crew log. Nobody is e-mailed.
  */
-export function reply(user, { as_agent, task_id, message, state, artifact, message_id }, { actorKind }) {
+const ASKS = ['sender_owner', 'my_owner'];
+
+export function reply(user, { as_agent, task_id, message, state, artifact, message_id, ask, action, scope }, { actorKind }) {
   const db = getDb();
   const agent = agentForCaller(db, user, as_agent);
   const task = typeof task_id === 'string' ? db.prepare('SELECT * FROM crew_tasks WHERE id = ?').get(task_id) : null;
@@ -843,6 +987,25 @@ export function reply(user, { as_agent, task_id, message, state, artifact, messa
     if (!isReceiver && nextState !== 'canceled') fail(403, 'FORBIDDEN', 'Only the receiving agent sets a task\'s progress; the sending agent may only cancel it.');
     if (task.held && nextState !== 'canceled') fail(409, 'HELD', 'This task is still waiting for the receiving person\'s approval.');
   }
+  const asking = nextState === 'input_required';
+  const hasAskFields = [ask, action, scope].some((v) => v != null && v !== '');
+  if (hasAskFields && !asking) fail(400, 'VALIDATION', 'ask, action and scope go with state "input_required" (a question for a person).');
+  let askKind = null;
+  if (asking) {
+    askKind = ask == null || ask === '' ? 'sender_owner' : String(ask);
+    if (!ASKS.includes(askKind)) fail(400, 'VALIDATION', `ask must be one of ${ASKS.join(', ')}.`);
+    if (!String(message ?? '').trim()) fail(400, 'VALIDATION', 'input_required needs a message: the question the person will answer.');
+  }
+  const askAction = asking ? (normalizeAction(action) ?? task.action ?? null) : null;
+  const askScope = asking ? (normalizeScope(scope) ?? task.scope ?? null) : null;
+  // A task the sender declared an action for waits on the receiving PERSON
+  // (ask 'declared'). Their agent cannot get past that by moving on: it may
+  // talk or give up (failed), not start, finish, or replace the question with
+  // one of its own (a new question would close the person's pending one).
+  if (isReceiver && ['working', 'completed', 'input_required'].includes(nextState) && task.state === 'input_required'
+      && db.prepare("SELECT 1 FROM crew_decisions WHERE task_id = ? AND status = 'pending' AND ask = 'declared'").get(task.id)) {
+    fail(409, 'WAITING_FOR_PERSON', 'This task declared an action, and your owner has not approved it yet. Wait for their decision in the AppCrane dashboard, or set state "failed" if you will not do it.');
+  }
   const body = String(message ?? '');
   let art = null;
   if (artifact != null) {
@@ -857,12 +1020,42 @@ export function reply(user, { as_agent, task_id, message, state, artifact, messa
   if (!body.trim() && !nextState && !art) fail(400, 'VALIDATION', 'Send a message, an artifact or a state change.');
   assertBodySize('message', body, CREW_LIMITS.BODY_MAX_BYTES);
   assertNoSecret('message', body);
+  if (askScope) assertNoSecret('scope', askScope);
 
-  db.transaction(() => {
+  const out = db.transaction(() => {
+    let finalState = nextState;
+    let rule = null;
+    let decisionId = null;
+    let decider = null;
+    if (asking) {
+      // Who decides, and which agent a standing rule of theirs must name:
+      //   sender_owner → the sender's person; the rule names the asking agent
+      //                  ("db-steward may migrate on sandbox");
+      //   my_owner     → this agent's own person; the rule names the sender
+      //                  ("dana-laptop may have my agents migrate on sandbox").
+      const fromAgent = db.prepare('SELECT * FROM crew_agents WHERE id = ?').get(task.from_agent_id);
+      decider = askKind === 'sender_owner' ? fromAgent.owner_user_id : agent.owner_user_id;
+      const subject = askKind === 'sender_owner' ? agent.id : task.from_agent_id;
+      const texts = [task.title, body];
+      rule = matchRule(db, { ownerId: decider, agentId: subject, action: askAction, scope: askScope, texts });
+      closePendingDecisions(db, [task.id]);
+      decisionId = newOpaqueId();
+      db.prepare(`INSERT INTO crew_decisions (id, task_id, asked_by_agent_id, subject_agent_id, decider_user_id, ask, action, scope, always_ask, status, rule_id, decided_at)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${rule ? "datetime('now')" : 'NULL'})`)
+        .run(decisionId, task.id, agent.id, subject, decider, askKind, askAction, askScope,
+          alwaysAskReason({ action: askAction, scope: askScope, texts }), rule ? 'by_rule' : 'pending', rule?.id ?? null);
+      if (rule) {
+        recordRuleUse(db, rule.id);
+        finalState = 'working';
+      }
+    } else if (nextState) {
+      // The task moved on without the person: their question is no longer answerable.
+      closePendingDecisions(db, [task.id]);
+    }
     if (body.trim() || art) {
       assertMessageBudget(db, agent.id);
       db.prepare('INSERT INTO crew_messages (task_id, from_agent_id, body, artifact_name, artifact_body, message_id, state_after) VALUES (?, ?, ?, ?, ?, ?, ?)')
-        .run(task.id, agent.id, body, art?.name ?? null, art?.body ?? null, message_id || null, nextState || task.state);
+        .run(task.id, agent.id, body, art?.name ?? null, art?.body ?? null, message_id || null, finalState || task.state);
     }
     // held is left as it is. SECURITY FIX (review of v2.106.0): cancelling a
     // held task used to clear held, and taskVisibleTo() then showed the
@@ -870,16 +1063,33 @@ export function reply(user, { as_agent, task_id, message, state, artifact, messa
     // ListTasks): a sender could get any text past first contact by sending
     // and cancelling. held = 1 means "never released", whatever the state.
     db.prepare(`UPDATE crew_tasks SET state = COALESCE(?, state), updated_at = datetime('now') WHERE id = ?`)
-      .run(nextState, task.id);
+      .run(finalState, task.id);
     touchAgent(db, agent.id);
+    return { finalState, rule, decisionId, decider };
   })();
 
+  const endState = out.finalState || task.state;
   audit(user, 'crew.task.reply', {
     task_id: task.id, agent_id: agent.id, role: isReceiver ? 'receiver' : 'sender',
-    state_from: task.state, state_to: nextState || task.state, message_len: body.length, artifact: !!art,
+    state_from: task.state, state_to: endState, message_len: body.length, artifact: !!art,
+    ...(asking ? { ask: askKind, action: askAction, scope: askScope } : {}),
   }, actorKind);
-  announce(task.id, art ? 'artifact' : nextState ? 'status' : 'message');
-  return { task_id: task.id, state: nextState || task.state };
+  if (asking) {
+    audit(user, out.rule ? 'crew.decision.by_rule' : 'crew.decision.ask', {
+      decision_id: out.decisionId, task_id: task.id, ask: askKind, decider_user_id: out.decider, ...(out.rule ? { rule_id: out.rule.id } : {}),
+    }, actorKind);
+    if (out.rule) auditRuleUse(user.id, out.rule, { task_id: task.id, decision_id: out.decisionId, at: 'input_required' }, actorKind);
+  }
+  announce(task.id, art ? 'artifact' : out.finalState ? 'status' : 'message');
+  const res = { task_id: task.id, state: endState };
+  if (asking && out.rule) {
+    res.approved_by_rule = { rule_id: out.rule.id, action: out.rule.action, scope: out.rule.scope };
+    res.note = 'A standing rule of the person you asked covers this exactly, so it is approved: carry on (the task is back to working).';
+  } else if (asking) {
+    res.asked = askKind;
+    res.note = `Your question waits for ${askKind === 'sender_owner' ? 'the person who owns the agent that sent this task' : 'your owner'} in the AppCrane dashboard (no e-mail). Their answer arrives as a message from a person (actor_kind "human"): an approval or reply moves the task back to working, a decline ends it as rejected.`;
+  }
+  return res;
 }
 
 // ── The dashboard side: log, decisions, blocks ─────────────────────────────
@@ -901,9 +1111,17 @@ export function crewLog(user, { limit = 100 } = {}) {
     FROM crew_tasks t
     JOIN crew_agents fa ON fa.id = t.from_agent_id JOIN users fu ON fu.id = fa.owner_user_id
     JOIN crew_agents ta ON ta.id = t.to_agent_id   JOIN users tu ON tu.id = ta.owner_user_id
-    WHERE fa.owner_user_id = ? OR (ta.owner_user_id = ? AND t.state <> 'rejected')
+    WHERE fa.owner_user_id = ? OR (ta.owner_user_id = ? AND (t.state <> 'rejected' OR t.declined = 1))
     ORDER BY t.updated_at DESC, t.created_at DESC LIMIT ?`).all(user.id, user.id, n);
   const connStmt = db.prepare('SELECT id, state FROM crew_connections WHERE from_agent_id = ? AND to_owner_id = ?');
+  // Phase 3: the newest question on the task (pending for someone, or
+  // answered by a rule). Only its decider is offered the buttons.
+  const decisionStmt = db.prepare(`
+    SELECT d.*, aa.name AS asked_by, du.name AS decider_name
+    FROM crew_decisions d JOIN crew_agents aa ON aa.id = d.asked_by_agent_id JOIN users du ON du.id = d.decider_user_id
+    WHERE d.task_id = ? ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1`);
+  const questionStmt = db.prepare(`SELECT body FROM crew_messages WHERE task_id = ? AND from_agent_id = ? AND actor_kind = 'agent' ORDER BY id DESC LIMIT 1`);
+  const ruleStmt = db.prepare("SELECT rule_id FROM crew_decisions WHERE task_id = ? AND status = 'by_rule' ORDER BY created_at DESC LIMIT 1");
   return rows.map((t) => {
     const mineSent = t.from_owner_id === user.id;
     const mineReceived = t.to_owner_id === user.id;
@@ -924,6 +1142,28 @@ export function crewLog(user, { limit = 100 } = {}) {
         const c = connStmt.get(t.from_agent_id, user.id);
         if (c) { entry.connection_id = c.id; entry.awaiting_your_decision = true; }
       }
+    }
+    if (t.action) entry.action = t.action;
+    if (t.scope) entry.scope = t.scope;
+    // "Tasks that ran under a rule still appear, marked with the rule."
+    const ruleId = t.rule_id || ruleStmt.get(t.id)?.rule_id;
+    if (ruleId) {
+      const r = ruleSummary(db, ruleId);
+      entry.ran_under_rule = r.removed ? { id: ruleId, removed: true } : { id: r.id, agent: r.agent, action: r.action, scope: r.scope, revoked: r.revoked, yours: r.owner_user_id === user.id };
+    }
+    const d = t.state === 'input_required' ? decisionStmt.get(t.id) : null;
+    if (d && d.status === 'pending') {
+      const mineToDecide = d.decider_user_id === user.id;
+      const q = questionStmt.get(t.id, d.asked_by_agent_id);
+      entry.input_required = {
+        asked_by: d.asked_by, ask: d.ask, action: d.action, scope: d.scope,
+        always_asks: d.always_ask || null,
+        question: q ? oneLine(q.body, 600) : null,
+        waiting_for: mineToDecide ? 'you' : d.decider_name || 'another person',
+        // Only the routed person gets a decision id: nobody else can act on it.
+        ...(mineToDecide ? { decision_id: d.id, can_always_allow: !!(d.action && d.scope && !d.always_ask) } : {}),
+      };
+      if (mineToDecide) entry.awaiting_your_decision = true;
     }
     return entry;
   });
@@ -962,11 +1202,13 @@ export function decideConnection(user, connectionId, decision, { task_id } = {})
   const affectedIds = decision.startsWith('allow')
     ? db.prepare(`SELECT id FROM crew_tasks WHERE ${WAITING} AND from_agent_id = ? AND to_agent_id IN (${myAgentIds})`).all(conn.from_agent_id, user.id).map((r) => r.id)
     : db.prepare(`SELECT id FROM crew_tasks WHERE ${OPEN_FROM_SENDER} AND from_agent_id = ? AND to_agent_id IN (${myAgentIds})`).all(conn.from_agent_id, user.id).map((r) => r.id);
+  const approvals = [];
   const result = db.transaction(() => {
     if (decision === 'allow') {
       db.prepare("UPDATE crew_connections SET state = 'allowed', decided_at = datetime('now') WHERE id = ?").run(conn.id);
       const r = db.prepare(`UPDATE crew_tasks SET held = 0, updated_at = datetime('now')
                             WHERE ${WAITING} AND from_agent_id = ? AND to_agent_id IN (${myAgentIds})`).run(conn.from_agent_id, user.id);
+      for (const tid of affectedIds) approvals.push(releaseDeclared(db, tid));
       return { state: 'allowed', released: r.changes };
     }
     if (decision === 'allow_once') {
@@ -976,6 +1218,7 @@ export function decideConnection(user, connectionId, decision, { task_id } = {})
         : db.prepare(`SELECT id FROM crew_tasks WHERE ${WAITING} AND from_agent_id = ? AND to_agent_id IN (${myAgentIds}) ORDER BY created_at ASC LIMIT 1`).get(conn.from_agent_id, user.id);
       if (!task) fail(404, 'NOT_FOUND', 'No held task to allow on this request.');
       db.prepare("UPDATE crew_tasks SET held = 0, updated_at = datetime('now') WHERE id = ?").run(task.id);
+      approvals.push(releaseDeclared(db, task.id));
       return { state: 'pending', released: 1, task_id: task.id };
     }
     // refuse and block both reject, silently, everything of the sender's that
@@ -987,12 +1230,39 @@ export function decideConnection(user, connectionId, decision, { task_id } = {})
     if (decision === 'block') {
       db.prepare('INSERT OR IGNORE INTO crew_blocks (owner_user_id, blocked_agent_id) VALUES (?, ?)').run(user.id, conn.from_agent_id);
     }
-    return { state: 'refused', rejected: r.changes, blocked: decision === 'block' };
+    // Refusing or blocking an agent ends every standing rule you gave it.
+    const revokedRules = revokeRulesForAgent(db, user.id, conn.from_agent_id);
+    return { state: 'refused', rejected: r.changes, blocked: decision === 'block', revokedRules };
   })();
 
-  audit(user, `crew.connection.${decision}`, { connection_id: conn.id, from_agent_id: conn.from_agent_id, ...result }, 'human');
+  const { revokedRules, ...shown } = result;
+  audit(user, `crew.connection.${decision}`, { connection_id: conn.id, from_agent_id: conn.from_agent_id, ...shown }, 'human');
+  if (revokedRules?.length) auditRulesRevokedByBlock(user.id, revokedRules, conn.from_agent_id);
+  auditReleasedApprovals(user, approvals);
   announce(decision === 'allow_once' ? result.task_id : affectedIds, decision.startsWith('allow') ? 'released' : 'status');
-  return { connection_id: conn.id, decision, ...result };
+  return { connection_id: conn.id, decision, ...shown };
+}
+
+/**
+ * A held task was just released by its first contact being allowed: NOW the
+ * standing-rule stage runs for it, exactly as gateFor runs it for a task that
+ * was deliverable at once. Inside the caller's transaction.
+ */
+function releaseDeclared(db, taskId) {
+  const task = db.prepare('SELECT * FROM crew_tasks WHERE id = ?').get(taskId);
+  if (!task || (!task.action && !task.scope)) return { taskId, rule: null, decisionId: null };
+  const from = db.prepare('SELECT * FROM crew_agents WHERE id = ?').get(task.from_agent_id);
+  const to = db.prepare('SELECT * FROM crew_agents WHERE id = ?').get(task.to_agent_id);
+  const first = db.prepare('SELECT body FROM crew_messages WHERE task_id = ? ORDER BY id ASC LIMIT 1').get(taskId);
+  const gate = declaredApproval(db, from, to, { action: task.action, scope: task.scope, texts: [task.title, first?.body || ''] });
+  return { taskId, ...applyDeclaredApproval(db, task, from, to, gate), decider: to.owner_user_id };
+}
+
+function auditReleasedApprovals(user, approvals) {
+  for (const a of approvals) {
+    if (a.rule) auditRuleUse(user.id, a.rule, { task_id: a.taskId, at: 'release' }, 'human');
+    if (a.decisionId) audit(user, 'crew.decision.ask', { decision_id: a.decisionId, task_id: a.taskId, ask: 'declared', decider_user_id: a.decider }, 'human');
+  }
 }
 
 /** Block an agent directly (from the roster). Rejects anything it has waiting on you. */
@@ -1003,12 +1273,15 @@ export function blockAgent(user, rawName) {
   if (!agent) fail(404, 'NOT_FOUND', `No agent named "${name}" is registered.`);
   if (agent.owner_user_id === user.id) fail(400, 'VALIDATION', 'You cannot block your own agent; remove it instead.');
   const openIds = db.prepare(`SELECT id FROM crew_tasks WHERE ${OPEN_FROM_SENDER} AND from_agent_id = ? AND to_agent_id IN (SELECT id FROM crew_agents WHERE owner_user_id = ?)`).all(agent.id, user.id).map((r) => r.id);
-  const rejected = db.transaction(() => {
+  const { rejected, revokedRules } = db.transaction(() => {
     db.prepare('INSERT OR IGNORE INTO crew_blocks (owner_user_id, blocked_agent_id) VALUES (?, ?)').run(user.id, agent.id);
-    return db.prepare(`UPDATE crew_tasks SET held = 0, state = 'rejected', updated_at = datetime('now')
+    const n = db.prepare(`UPDATE crew_tasks SET held = 0, state = 'rejected', updated_at = datetime('now')
                        WHERE ${OPEN_FROM_SENDER} AND from_agent_id = ? AND to_agent_id IN (SELECT id FROM crew_agents WHERE owner_user_id = ?)`).run(agent.id, user.id).changes;
+    // Blocking an agent ends every standing rule you gave it (plan, "Blocking").
+    return { rejected: n, revokedRules: revokeRulesForAgent(db, user.id, agent.id) };
   })();
   audit(user, 'crew.block', { agent_id: agent.id, rejected }, 'human');
+  auditRulesRevokedByBlock(user.id, revokedRules, agent.id);
   announce(openIds, 'status');
   return { blocked: agent.name };
 }
@@ -1056,6 +1329,9 @@ export function purgeExpiredCrewHistory(db = getDb()) {
     const tasks = db.prepare("DELETE FROM crew_tasks WHERE updated_at < datetime('now', ?)").run(cutoff).changes;
     // Only the last 24 hours matter to the e-mail cap; 30 days is plenty.
     db.prepare("DELETE FROM crew_first_contact_emails WHERE sent_at < datetime('now', ?)").run(cutoff);
+    // Revoked rules are kept so a task can name the rule it ran under; once
+    // every such task is past retention, so is the revoked rule.
+    db.prepare("DELETE FROM crew_rules WHERE revoked_at IS NOT NULL AND revoked_at < datetime('now', ?)").run(cutoff);
     return { tasks, messages };
   })();
 }

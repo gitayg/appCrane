@@ -12,7 +12,12 @@ import { AppError } from '../utils/errors.js';
 import { getIngressForApp } from './tcpIngress.js';
 import { ensureCodebaseContext } from './appstudio/contextBuilder.js';
 import { findEntry } from './catalogService.js';
-import { credentialsFor, secureLogin as defaultSecureLogin, tlsUrl } from './managedDb.js';
+import {
+  credentialsFor, secureLogin as defaultSecureLogin, tlsUrl,
+  ensureAppLogin as defaultEnsureAppLogin, ensurePgExtensions as defaultEnsurePgExtensions,
+  sandboxPeerAccess as defaultSandboxPeerAccess,
+} from './managedDb.js';
+import { APP_LOGIN_ENGINES } from './managedDbAppLogin.js';
 import { parseManifestDatabase, ensureManifestDatabase } from './manifestDatabase.js';
 import { managedDbScopeFor, SANDBOX_TENANT } from './sandboxDb.js';
 import { parseContainerCommand, parseVolumePaths, resolveVolumeMounts, declaredVolumePathsFor } from './containerRuntimeSpec.js';
@@ -162,6 +167,35 @@ export function tlsFileEnv(needs, creds) {
 }
 
 /**
+ * The URL and certificate PATHS of a second login a container holds — the
+ * scope's `_app` login (prefix APP) or, in production only, the sandbox
+ * database's owner login (prefix SANDBOX). Pure. The URL carries the TLS
+ * parameters (managedDb.tlsUrl); the <PREFIX>_DB_*_FILE paths are for drivers
+ * that ignore URL parameters (mysql2), named apart from the owner login's
+ * DB_*_FILE so the two can never be confused or overwrite each other.
+ */
+export function buildSecondLoginEnv(urlEnv, creds, prefix) {
+  if (!urlEnv || !creds) return {};
+  const out = { [urlEnv]: managedDbUrl(creds) };
+  if (creds.tls) {
+    out[`${prefix}_DB_CA_FILE`] = creds.tls.ca;
+    out[`${prefix}_DB_CERT_FILE`] = creds.tls.cert;
+    out[`${prefix}_DB_KEY_FILE`] = creds.tls.key;
+  }
+  return out;
+}
+
+/** Same precedence as applyManagedDbEnv: a variable the app set itself wins. */
+function applySecondLoginEnv(runtimeEnvVars, claimedKeys, env, result) {
+  const claimed = new Set(claimedKeys);
+  for (const [key, value] of Object.entries(env)) {
+    if (claimed.has(key) || Object.prototype.hasOwnProperty.call(runtimeEnvVars, key)) { result.deferred.push(key); continue; }
+    runtimeEnvVars[key] = value;
+    result.injected.push(key);
+  }
+}
+
+/**
  * Inject an app's managed-database credentials into a runtime env map, under the
  * variable names its catalogue entry declares — or, when it has no catalogue
  * `needs`, the names its validated deployhub.json `database` block declares
@@ -258,6 +292,10 @@ export async function injectManagedDbForEnv({
   app, env, runtimeEnvVars, claimedKeys = [], manifestNeeds = null,
   appendLog = () => {}, isRestart = false, provision,
   image = null, secureLogin = defaultSecureLogin,
+  // Test seams for the deployhub.json extras (app_login, extensions,
+  // sandbox_url_env); production never passes them.
+  ensureAppLogin = defaultEnsureAppLogin, ensurePgExtensions = defaultEnsurePgExtensions,
+  sandboxPeerAccess = defaultSandboxPeerAccess,
 }) {
   const resolved = resolveManagedDbNeeds(app, manifestNeeds);
   // A database the app's own deployhub.json declares is ALWAYS separate in
@@ -309,7 +347,65 @@ export async function injectManagedDbForEnv({
       appendLog(`Managed ${resolved.needs.engine} database: could not apply the per-login limits this time (${e.message}); the login works as before.`);
     }
   }
+  // Snapshot before ANY managed injection: precedence for the second logins
+  // below is "the app set it", not "the owner-login step just set it".
+  const ownKeys = [...Object.keys(runtimeEnvVars), ...claimedKeys];
   const mdbEnv = applyManagedDbEnv(app, runtimeEnvVars, claimedKeys, manifestNeeds, scope);
+
+  // deployhub.json extras. Manifest databases only (validated there), and
+  // fail closed like the certificate step: a deploy that was told to hand the
+  // app a DML-only login, or production a route into sandbox, must not start
+  // without it.
+  if (resolved.source === 'manifest' && resolved.needs) {
+    const needs = resolved.needs;
+    const engine = needs.engine;
+    const extra = {};
+    try {
+      // 1. The scope's own `_app` login: this stage's database, never the
+      //    other stage's. enabled:false disables one that was opted out of.
+      if (APP_LOGIN_ENGINES.includes(engine)) {
+        const appLogin = await ensureAppLogin(scope, engine, { enabled: Boolean(needs.app_url_env), image });
+        if (appLogin) {
+          mounts = [...mounts, ...appLogin.mounts];
+          Object.assign(extra, buildSecondLoginEnv(needs.app_url_env, appLogin.creds, 'APP'));
+          appendLog(`Managed ${engine} database: DML-only login ${appLogin.creds.username} (no CREATE/ALTER/DROP) injected as ${needs.app_url_env}`);
+        }
+      }
+      // 2. Extensions AppCrane installs as the superuser (after the app
+      //    login, whose name the pg_stat_statements filter includes).
+      if (engine === 'postgres') {
+        const ext = await ensurePgExtensions(scope, { extensions: needs.extensions || [] });
+        if (ext.installed?.includes('pg_stat_statements')) {
+          appendLog(ext.preloaded
+            ? 'Managed postgres database: pg_stat_statements is on — SELECT * FROM appcrane_stats.app_stat_statements() shows this database\'s own statements.'
+            : 'Managed postgres database: pg_stat_statements is installed, but the platform has not loaded it yet '
+              + '(a platform admin turns it on under Managed databases → Database limits; that recreates the shared Postgres once). '
+              + 'Until then appcrane_stats.app_stat_statements() errors.');
+        }
+      }
+      // 3. PRODUCTION ONLY: the sandbox database's URL, for pushing a masked
+      //    copy down. The sandbox branch of this function never reaches here
+      //    with a production credential: it only ever sees `scope`, which for
+      //    sandbox is the sandbox's own.
+      if (env === 'production' && needs.sandbox_url_env) {
+        const sandboxScope = { appId: app.id, tenant: SANDBOX_TENANT };
+        if (!isRestart) {
+          await ensureManifestDatabase(app, needs, { appendLog, scope: sandboxScope, ...(provision ? { provision } : {}) });
+        }
+        const peer = await sandboxPeerAccess(app.id, engine, { image });
+        if (peer) {
+          mounts = [...mounts, ...peer.mounts];
+          Object.assign(extra, buildSecondLoginEnv(needs.sandbox_url_env, peer.creds, 'SANDBOX'));
+          appendLog(`Managed ${engine} database: the sandbox database's URL is injected into production as ${needs.sandbox_url_env} (sandbox never receives production's)`);
+        } else {
+          appendLog(`Managed ${engine} database: no sandbox database yet, so ${needs.sandbox_url_env} was not injected.`);
+        }
+      }
+    } catch (e) {
+      throw new Error(`Setting up the deployhub.json database options failed: ${e.message}`);
+    }
+    applySecondLoginEnv(runtimeEnvVars, ownKeys, extra, mdbEnv);
+  }
   return { ...mdbEnv, separateSandbox, manifestIgnored: resolved.manifestIgnored, mounts, tls };
 }
 

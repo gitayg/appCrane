@@ -35,6 +35,7 @@
 
 import { CA_COMMON_NAME } from './dbPki.js';
 import { SERVER_MOUNT_PATH, SERVER_RUNTIME_PATH } from './dbCerts.js';
+import { PG_STATS_SERVER_ARGS } from './managedDbStats.js';
 
 /**
  * Bumped whenever the server-side TLS configuration changes shape. It is part
@@ -134,7 +135,7 @@ export function pgHbaConf() {
  * dbAuthAlerts.js attributes a failure: Postgres's own auth-failure message
  * names the user but not the database.
  */
-export function pgServerArgs({ maxConnections }) {
+export function pgServerArgs({ maxConnections, pgStatStatements = false }) {
   const n = Number(maxConnections);
   if (!Number.isInteger(n) || n < 1) throw new Error(`managedDbTls: bad max_connections ${JSON.stringify(maxConnections)}`);
   return [
@@ -153,6 +154,10 @@ export function pgServerArgs({ maxConnections }) {
     '-c', 'work_mem=4MB',
     '-c', 'log_connections=on',
     '-c', 'log_line_prefix=%m [%p] user=%u db=%d ',
+    // Platform switch (managedDbSettings pg_stat_statements). Loading the
+    // module exposes nothing by itself: no database has the extension until
+    // an app asks for it, and then only through managedDbStats.js's filter.
+    ...(pgStatStatements ? PG_STATS_SERVER_ARGS : []),
   ];
 }
 

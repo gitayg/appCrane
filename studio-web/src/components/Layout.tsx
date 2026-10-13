@@ -148,6 +148,9 @@ export function Layout({ children, subItems, activeSub }: Props) {
   const [notifItems, setNotifItems] = useState<{ title: string; sub: string; color: string }[]>([])
   const [notifLoaded, setNotifLoaded] = useState(false)
   const [openRequests, setOpenRequests] = useState(0)
+  // Crew phase 3: questions and first contacts waiting for YOU (GET /api/crew/waiting).
+  // The in-app notification for Crew; ongoing Crew work never e-mails.
+  const [crewWaiting, setCrewWaiting] = useState(0)
   // v2.13.0: AppCrane's own What's New, shown to platform admins post-login
   // when the running version is newer than what they last saw.
   const [platformWN, setPlatformWN] = useState<{ currentVersion: string | null; changes: WhatsNewChange[]; seenUrl?: string; primaryLabel?: string; onPrimary?: () => void } | null>(null)
@@ -333,6 +336,19 @@ export function Layout({ children, subItems, activeSub }: Props) {
     return () => clearInterval(t)
   }, [isAuthed, userRole, navApps])
 
+
+  // Crew phase 3: same 15 s poll as the Requests badge. A failure (an agent
+  // identity, which Crew refuses) just shows no badge.
+  useEffect(() => {
+    if (!isAuthed) return
+    const fetchWaiting = () =>
+      adminApi.get<{ waiting: number }>('/api/crew/waiting')
+        .then(r => setCrewWaiting(r?.waiting || 0))
+        .catch(() => setCrewWaiting(0))
+    fetchWaiting()
+    const t = setInterval(fetchWaiting, 15000)
+    return () => clearInterval(t)
+  }, [isAuthed, location.pathname])
 
   useEffect(() => {
     function handleClick(e: MouseEvent) {
@@ -550,11 +566,13 @@ export function Layout({ children, subItems, activeSub }: Props) {
         <NavLink
           to={p.href}
           className={({ isActive }) => 'sidebar-link' + (isActive ? ' active' : '')}
-          title={p.id === 'requests' && openRequests > 0 ? `${p.label} — ${openRequests} open` : p.label}
+          title={p.id === 'requests' && openRequests > 0 ? `${p.label} — ${openRequests} open`
+            : p.id === 'crew' && crewWaiting > 0 ? `${p.label}: ${crewWaiting} waiting for you` : p.label}
         >
           <span className="sidebar-link-icon">{p.icon}</span>
           <span className="sidebar-link-text">{p.label}</span>
           {p.id === 'requests' && openRequests > 0 && <span className="sidebar-link-badge">{openRequests}</span>}
+          {p.id === 'crew' && crewWaiting > 0 && <span className="sidebar-link-badge" aria-label={`${crewWaiting} waiting for you`}>{crewWaiting}</span>}
         </NavLink>
       )}
       {activeNavId === p.id && subItems && subItems.length > 0 && !collapsed && (

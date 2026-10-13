@@ -39,6 +39,8 @@ import * as tlsCfg from './managedDbTls.js';
 import * as redis from './managedRedis.js';
 import * as mongo from './managedMongo.js';
 import { getManagedDbSettings } from './managedDbSettings.js';
+import * as appLoginSql from './managedDbAppLogin.js';
+import * as pgStats from './managedDbStats.js';
 import log from '../utils/logger.js';
 
 // A large database takes a while; a hung one must still end. Overridable for
@@ -220,7 +222,16 @@ export async function dumpDatabase(row, file, { ops = null } = {}) {
       execToFile(cmd.dumpArgs('mongo', { container, database: row.db_name, port, configPath }), file));
   } else if (row.engine === 'postgres' || row.engine === 'mariadb') {
     await o.ensureServer(row.engine);
-    await execToFile(cmd.dumpArgs(row.engine, { container: o.containerFor(row.engine), database: row.db_name }), file);
+    // Asked of the database itself rather than read off the row: what has to
+    // stay out of the dump is whatever is really there.
+    let pgKeepExtensions = null;
+    if (row.engine === 'postgres') {
+      const found = pgStats.parseDumpExtensions(
+        await o.runAdminSql('postgres', pgStats.PG_DUMP_EXTENSIONS_QUERY, { database: row.db_name }),
+      );
+      if (found.exclude) pgKeepExtensions = found.keep;
+    }
+    await execToFile(cmd.dumpArgs(row.engine, { container: o.containerFor(row.engine), database: row.db_name, pgKeepExtensions }), file);
   } else {
     throw new Error(`managedDbBackup: unknown engine '${row.engine}'`);
   }
@@ -296,16 +307,21 @@ export async function dumpAll(stageDir, { ops = null } = {}) {
 export async function reapplyLoginPolicy(row, ops) {
   const settings = getManagedDbSettings(getDb());
   const certRequired = row.client_cert_required === 1;
+  const policy = { certRequired, connLimit: settings.conn_limit, statementTimeoutS: settings.statement_timeout_s };
   if (row.engine === 'postgres') {
     await ops.runAdminSql('postgres', cmd.pgSchemaGrantsSql(row.db_user), { database: row.db_name });
-    await ops.runAdminSql('postgres', tlsCfg.loginPolicySql('postgres', row.db_user, {
-      certRequired, connLimit: settings.conn_limit, statementTimeoutS: settings.statement_timeout_s,
-    }));
+    await ops.runAdminSql('postgres', tlsCfg.loginPolicySql('postgres', row.db_user, policy));
+    await reapplyAppLogin(row, ops, policy);
+    // The dump left the pg_stat_statements wiring out (managedDbStats), so
+    // the restored database gets it back from the row.
+    if (parseRowExtensions(row.extensions).includes('pg_stat_statements')) {
+      const logins = [row.db_user, ...(row.app_user ? [row.app_user] : [])];
+      await ops.runAdminSql('postgres', pgStats.pgStatStatementsSql(logins), { database: row.db_name });
+    }
   } else if (row.engine === 'mariadb') {
     await ops.runAdminSql('mariadb', cmd.mariadbGrantSql(row.db_name, row.db_user));
-    await ops.runAdminSql('mariadb', tlsCfg.loginPolicySql('mariadb', row.db_user, {
-      certRequired, connLimit: settings.conn_limit, statementTimeoutS: settings.statement_timeout_s,
-    }));
+    await ops.runAdminSql('mariadb', tlsCfg.loginPolicySql('mariadb', row.db_user, policy));
+    await reapplyAppLogin(row, ops, policy);
   } else if (row.engine === 'mongo') {
     // Users live in admin/$external, which a --db dump does not contain and
     // dropDatabase does not touch. A converted login is re-asserted anyway
@@ -322,9 +338,48 @@ export async function reapplyLoginPolicy(row, ops) {
   // the ACL user and the TLS start flags from the row.
 }
 
+function parseRowExtensions(value) {
+  if (!value) return [];
+  try { const v = JSON.parse(value); return Array.isArray(v) ? v : []; } catch (_) { return []; }
+}
+
+/**
+ * The scope's `_app` login after a restore: the database was replaced, so its
+ * CONNECT, its DML grants and the owner's DEFAULT PRIVILEGES for it are put
+ * back from the row (pgSwapSql re-grants CONNECT to the owner only). Its
+ * password is re-asserted too, so a restore onto a rebuilt host converges.
+ */
+async function reapplyAppLogin(row, ops, policy) {
+  if (!row.app_user || !row.app_password_enc) return;
+  const password = ops.decrypt(row.app_password_enc);
+  try {
+    await ops.runAdminSql(row.engine, appLoginSql.appLoginServerSql(row.engine, row.db_name, row.app_user, password));
+    if (row.engine === 'postgres') {
+      await ops.runAdminSql('postgres', appLoginSql.pgAppGrantsSql(row.db_user, row.app_user), { database: row.db_name });
+    }
+    await ops.runAdminSql(row.engine, tlsCfg.loginPolicySql(row.engine, row.app_user, policy));
+  } catch (e) {
+    throw new Error(ops.redactSecret(e.message, password));
+  }
+}
+
 async function restorePostgres(row, file, o) {
   await o.ensureServer('postgres');
   const container = o.containerFor('postgres');
+  // A dump taken while the `_app` login existed carries GRANTs naming it, and
+  // pg_restore --exit-on-error fails on a role that does not exist (a host
+  // rebuilt from an export, before its first deploy). Make sure it does.
+  if (row.app_user && row.app_password_enc) {
+    const pw = o.decrypt(row.app_password_enc);
+    try {
+      await o.runAdminSql('postgres', appLoginSql.pgAppRoleSql(row.db_name, row.app_user, pw));
+    } catch (e) {
+      throw new Error(o.redactSecret(e.message, pw));
+    }
+  } else if (row.app_user) {
+    // Opted out: the role only has to exist, and must stay unable to log in.
+    await o.runAdminSql('postgres', appLoginSql.pgAppRoleExistsSql(row.app_user));
+  }
   await o.runAdminSql('postgres', cmd.pgPrepareStagingSql(row.db_name, row.db_user));
   await o.runAdminSql('postgres', cmd.pgSchemaGrantsSql(row.db_user), { database: cmd.pgStagingName(row.db_name) });
   try {
@@ -375,6 +430,10 @@ async function restoreMariadb(row, file, o) {
   // app login, so the lock is lifted just before it — after the KILLs and the
   // recreate, which are the steps the lock exists to protect.)
   await o.runAdminSql('mariadb', cmd.mariadbLockSql(row.db_user, true));
+  // The `_app` login too: it could otherwise read the half-loaded database.
+  // Unlocked in `finally`, once the load is over.
+  const appActive = Boolean(row.app_user && row.app_password_enc);
+  if (appActive) await o.runAdminSql('mariadb', cmd.mariadbLockSql(row.app_user, true));
   let unlocked = false;
   try {
     const sessions = await o.runAdminSql('mariadb', cmd.mariadbSessionsSql(row.db_user));
@@ -390,6 +449,9 @@ async function restoreMariadb(row, file, o) {
       }), file, { env: { MYSQL_PWD: password } }));
   } finally {
     if (!unlocked) await o.runAdminSql('mariadb', cmd.mariadbLockSql(row.db_user, false));
+    // After the load (or its failure), never before: same rule as the owner.
+    // A disabled `_app` login (opted out: no password on the row) stays locked.
+    if (appActive) await o.runAdminSql('mariadb', cmd.mariadbLockSql(row.app_user, false));
   }
 }
 

@@ -74,12 +74,17 @@ function messageId(m) {
  */
 function toMessage(task, m) {
   const text = m.body && m.body.trim() ? m.body : (m.artifact_name ? `[artifact: ${m.artifact_name}]` : '');
+  // Phase 3: a PERSON's answer (actor_kind 'human') is always ROLE_USER — it
+  // comes from the client side of the conversation, whichever agent's side
+  // it was stored on — and is marked so an agent can tell it from its peer.
+  const human = m.actor_kind === 'human';
   return {
     messageId: messageId(m),
     contextId: task.context_id || task.id,
     taskId: task.id,
-    role: m.from_agent_id === task.from_agent_id ? 'ROLE_USER' : 'ROLE_AGENT',
+    role: human || m.from_agent_id === task.from_agent_id ? 'ROLE_USER' : 'ROLE_AGENT',
     parts: [{ text }],
+    ...(human ? { metadata: { actorKind: 'human' } } : {}),
   };
 }
 
@@ -98,7 +103,7 @@ function statusOf(task, msgs) {
   // (failed); attached so a client polling GetTask sees why without history.
   if (task.state === 'input_required' || task.state === 'failed') {
     const last = msgs.at(-1);
-    if (last && last.from_agent_id === task.to_agent_id) status.message = toMessage(task, last);
+    if (last && last.from_agent_id === task.to_agent_id && last.actor_kind !== 'human') status.message = toMessage(task, last);
   }
   return status;
 }
@@ -129,6 +134,9 @@ export function toTask(task, { historyLength, includeArtifacts = true } = {}) {
     fromAgent: task.from_agent,
     toAgent: task.to_agent,
     ...(task.held && task.state === 'submitted' ? { waitingForApproval: true } : {}),
+    ...(task.action ? { action: task.action } : {}),
+    ...(task.scope ? { scope: task.scope } : {}),
+    ...(task.rule_id ? { approvedByRule: task.rule_id } : {}),
   };
   return out;
 }
