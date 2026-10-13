@@ -170,7 +170,37 @@ test('scanOnce reads each server with docker logs --timestamps --since, and does
   const now = new Date(T0.getTime() + 120e3);
   await alerts.scanOnce({ db, now, exec });
   await alerts.scanOnce({ db, now, exec }); // the same lines again
-  assert.equal(db.prepare('SELECT COUNT(*) n FROM managed_db_auth_failures').get().n, 4);
+  assert.equal(db.prepare('SELECT SUM(count) n FROM managed_db_auth_failures').get().n, 4);
   assert.deepEqual(calls[0].slice(0, 4), ['docker', 'logs', '--timestamps', '--since']);
   assert.equal(calls[0].at(-1), 'x-pg');
+});
+
+// ── amplification (security review) ─────────────────────────────────────────
+// Login names and Redis's grouped count are the caller's to inflate. Neither
+// may turn into unbounded rows, audit entries or e-mails.
+test('AMPLIFICATION: a Redis entry counting a million failures stores one row, not a million', () => {
+  const db = getDb();
+  db.prepare('DELETE FROM managed_db_auth_failures').run();
+  const now = new Date();
+  alerts.recordRedisAclEntries(db, { container: 'amp', dbName: 'crane_amp' },
+    [{ entryId: 1, createdMs: now.getTime() - 5e3, updatedMs: now.getTime() - 1e3, count: 1_000_000, username: 'whoever' }], { now });
+  const r = db.prepare("SELECT COUNT(*) rows_, SUM(count) total FROM managed_db_auth_failures WHERE engine = 'redis'").get();
+  assert.equal(r.rows_, 1, 'one row per failure');
+  assert.equal(r.total, 1_000_000);
+});
+
+test('AMPLIFICATION: thousands of invented login names give one alert, and alerts are capped per hour', () => {
+  const db = getDb();
+  db.prepare('DELETE FROM managed_db_auth_failures').run();
+  db.prepare('DELETE FROM managed_db_auth_alerts').run();
+  const now = new Date();
+  const at = new Date(now.getTime() - 60e3).toISOString();
+  const failures = [];
+  for (let i = 0; i < 3000; i++) for (let k = 0; k < 6; k++) failures.push({ login: `fake${i}`, database: null, reason: 'bad-password', at });
+  alerts.recordFailures(db, 'postgres', failures);
+  assert.ok(db.prepare('SELECT COUNT(*) n FROM managed_db_auth_failures').get().n <= alerts.MAX_GROUPS_PER_SCAN, 'distinct invented logins grew the table');
+  const mails = [];
+  const raised = alerts.evaluateAlerts(db, { now, sendMail: (m) => mails.push(m), audit: () => {} });
+  assert.ok(raised.length <= alerts.MAX_ALERTS_PER_HOUR, `${raised.length} alerts raised`);
+  assert.equal(raised.filter(r => r.login === alerts.UNKNOWN_LOGINS).length, 1, 'unknown logins were not grouped into one alert');
 });

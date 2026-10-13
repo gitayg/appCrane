@@ -294,7 +294,7 @@ test('THRESHOLD via scanOnce: 7 bad passwords against A (grouped by Redis) -> on
   const mails = [];
   const evaluate = (n) => alerts.evaluateAlerts(db, { now: n, sendMail: (m) => mails.push(m) });
   await alerts.scanOnce({ db, now, exec });
-  assert.equal(db.prepare("SELECT COUNT(*) n FROM managed_db_auth_failures WHERE engine = 'redis'").get().n, 3);
+  assert.equal(db.prepare("SELECT SUM(count) n FROM managed_db_auth_failures WHERE engine = 'redis'").get().n, 3);
   assert.equal(mails.length, 0);
 
   // Scan 2: the same entry, count now 7 (four more inside the grouping
@@ -302,7 +302,7 @@ test('THRESHOLD via scanOnce: 7 bad passwords against A (grouped by Redis) -> on
   writeFileSync(join(STATE, `acllog-${a.container_name}`), JSON.stringify([aclEntry(0, 7, { username: b.db_user, createdMs: t, updatedMs: t + 9000 })]));
   await alerts.scanOnce({ db, now, exec });
   await alerts.scanOnce({ db, now, exec });
-  assert.equal(db.prepare("SELECT COUNT(*) n FROM managed_db_auth_failures WHERE engine = 'redis'").get().n, 7, 'counted once');
+  assert.equal(db.prepare("SELECT SUM(count) n FROM managed_db_auth_failures WHERE engine = 'redis'").get().n, 7, 'counted once');
   const raised = evaluate(now);
   // scanOnce already evaluated with the real mail queue; the alert is rate
   // limited, so this explicit evaluation raises nothing more.

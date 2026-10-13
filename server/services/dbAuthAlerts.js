@@ -77,6 +77,13 @@ const execFileAsync = promisify(execFile);
 export const WINDOW_MINUTES = 10;
 export const RATE_LIMIT_MINUTES = 60;
 export const SCAN_INTERVAL_MS = 3 * 60 * 1000;
+// Bounds an attacker cannot push past (security review: amplification). Login
+// names in these logs are whatever the caller typed, so a rogue app can invent
+// thousands; each distinct name used to get its own rows, audit entry and e-mail.
+export const MAX_ALERTS_PER_HOUR = 10;      // across every engine and login
+export const MAX_GROUPS_PER_SCAN = 200;     // distinct (login, db, reason) kept per engine scan
+export const UNKNOWN_LOGINS = '(logins not belonging to any app)';
+export const ALERT_CAP_KEY = '(alert limit reached)';
 
 const SAFE_NAME = /[^A-Za-z0-9_.$@-]/g;
 function clamp(s) {
@@ -186,7 +193,7 @@ export function recordRedisAclEntries(db, { container, dbName }, entries, { now 
     VALUES (?, ?, ?, ?, ?)
     ON CONFLICT(container_name, entry_id, created_ms) DO UPDATE SET seen_count = excluded.seen_count, updated_at = excluded.updated_at`);
   const ins = db.prepare(
-    "INSERT INTO managed_db_auth_failures (engine, login, database_name, reason, occurred_at) VALUES ('redis', ?, ?, 'auth-failed', ?)",
+    "INSERT INTO managed_db_auth_failures (engine, login, database_name, reason, occurred_at, count) VALUES ('redis', ?, ?, 'auth-failed', ?, ?)",
   );
   let n = 0;
   db.transaction(() => {
@@ -195,7 +202,10 @@ export function recordRedisAclEntries(db, { container, dbName }, entries, { now 
       const login = redisLogin(e.username, dbName);
       if (!IGNORED_LOGINS.has(login)) {
         const at = new Date(e.updatedMs).toISOString();
-        for (let i = prev; i < e.count; i++) { ins.run(login, dbName, at); n++; }
+        const delta = e.count - prev;
+        // ONE row carrying the delta, never one row per failure: the count is
+        // the attacker's to inflate.
+        if (delta > 0) { ins.run(login, dbName, at, delta); n += delta; }
       }
       // Touched on every scan, delta or not: a row is pruned only once its
       // entry has not been in the log for a day.
@@ -211,24 +221,52 @@ export function recordRedisAclEntries(db, { container, dbName }, entries, { now 
 // would page the admins on every recreate.
 const IGNORED_LOGINS = new Set(['appcrane_readiness_probe']);
 
-/** Store parsed failures, skipping exact repeats (overlapping log reads). */
+/**
+ * Store parsed failures as one counted row per (login, database, reason) in this
+ * batch, skipping a group already stored at the same time (overlapping log
+ * reads). At most MAX_GROUPS_PER_SCAN groups are kept; the rest are folded into
+ * one UNKNOWN_LOGINS row, so invented login names cannot grow the table.
+ */
 export function recordFailures(db, engine, failures) {
+  const groups = new Map();
+  for (const f of failures) {
+    const k = `${f.login}\u0000${f.database ?? ''}\u0000${f.reason}`;
+    const g = groups.get(k);
+    if (g) { g.count++; if (f.at > g.at) g.at = f.at; }
+    else groups.set(k, { login: f.login, database: f.database, reason: f.reason, at: f.at, count: 1 });
+  }
+  let list = [...groups.values()].sort((a, b) => b.count - a.count);
+  if (list.length > MAX_GROUPS_PER_SCAN) {
+    const rest = list.slice(MAX_GROUPS_PER_SCAN - 1);
+    list = list.slice(0, MAX_GROUPS_PER_SCAN - 1);
+    list.push({
+      login: UNKNOWN_LOGINS, database: null, reason: 'many-logins',
+      at: rest.reduce((m, g) => (g.at > m ? g.at : m), rest[0].at),
+      count: rest.reduce((n, g) => n + g.count, 0),
+    });
+  }
   const exists = db.prepare(
     'SELECT 1 FROM managed_db_auth_failures WHERE engine = ? AND login = ? AND IFNULL(database_name, \'\') = IFNULL(?, \'\') AND reason = ? AND occurred_at = ?',
   );
   const ins = db.prepare(
-    'INSERT INTO managed_db_auth_failures (engine, login, database_name, reason, occurred_at) VALUES (?, ?, ?, ?, ?)',
+    'INSERT INTO managed_db_auth_failures (engine, login, database_name, reason, occurred_at, count) VALUES (?, ?, ?, ?, ?, ?)',
   );
   let n = 0;
-  for (const f of failures) {
-    if (exists.get(engine, f.login, f.database, f.reason, f.at)) continue;
-    ins.run(engine, f.login, f.database, f.reason, f.at);
-    n++;
-  }
+  db.transaction(() => {
+    for (const g of list) {
+      if (exists.get(engine, g.login, g.database, g.reason, g.at)) continue;
+      ins.run(engine, g.login, g.database, g.reason, g.at, g.count);
+      n += g.count;
+    }
+  })();
   return n;
 }
 
 function appForLogin(db, login) {
+  // A Redis instance's built-in `default` user is recorded as default@<db>, and
+  // belongs to that instance's app.
+  const m = /^default@(.+)$/.exec(login || '');
+  if (m) return appForDatabase(db, m[1]);
   return db.prepare(`SELECT a.id, a.slug FROM managed_databases m JOIN apps a ON a.id = m.app_id WHERE m.db_user = ? LIMIT 1`).get(login) || null;
 }
 
@@ -253,8 +291,8 @@ export function evaluateAlerts(db, {
 } = {}) {
   const windowStart = new Date(now.getTime() - WINDOW_MINUTES * 60 * 1000).toISOString();
   const rateStart = new Date(now.getTime() - RATE_LIMIT_MINUTES * 60 * 1000).toISOString();
-  const groups = db.prepare(`
-    SELECT engine, login, COUNT(*) AS failures,
+  const rawGroups = db.prepare(`
+    SELECT engine, login, SUM(count) AS failures,
            GROUP_CONCAT(DISTINCT IFNULL(database_name, '')) AS dbs,
            GROUP_CONCAT(DISTINCT reason) AS reasons,
            MIN(occurred_at) AS first_at, MAX(occurred_at) AS last_at
@@ -263,11 +301,54 @@ export function evaluateAlerts(db, {
     GROUP BY engine, login
   `).all(windowStart);
 
+  // Logins that belong to no app (invented names, typos) share ONE alert per
+  // engine instead of one each: their names are the attacker's to multiply.
+  const groups = [];
+  const unknown = new Map();
+  for (const g of rawGroups) {
+    if (g.login === UNKNOWN_LOGINS || !appForLogin(db, g.login)) {
+      const u = unknown.get(g.engine) || { engine: g.engine, login: UNKNOWN_LOGINS, failures: 0, dbs: new Set(), reasons: new Set(), first_at: g.first_at, last_at: g.last_at, samples: [] };
+      u.failures += g.failures;
+      for (const d of String(g.dbs || '').split(',').filter(Boolean)) u.dbs.add(d);
+      for (const r of String(g.reasons || '').split(',').filter(Boolean)) u.reasons.add(r);
+      if (g.first_at < u.first_at) u.first_at = g.first_at;
+      if (g.last_at > u.last_at) u.last_at = g.last_at;
+      if (g.login !== UNKNOWN_LOGINS && u.samples.length < 10) u.samples.push(g.login);
+      unknown.set(g.engine, u);
+    } else groups.push(g);
+  }
+  for (const u of unknown.values()) {
+    groups.push({ ...u, dbs: [...u.dbs].slice(0, 20).join(','), reasons: [...u.reasons].join(',') });
+  }
+
+  const alertsThisHour = () => db.prepare(
+    'SELECT COUNT(*) AS n FROM managed_db_auth_alerts WHERE alerted_at >= ? AND login != ?',
+  ).get(rateStart, ALERT_CAP_KEY).n;
+
   const raised = [];
   for (const g of groups) {
     if (!(g.failures > threshold)) continue;
     const last = db.prepare('SELECT alerted_at FROM managed_db_auth_alerts WHERE engine = ? AND login = ?').get(g.engine, g.login);
     if (last && last.alerted_at >= rateStart) continue;
+    if (alertsThisHour() >= MAX_ALERTS_PER_HOUR) {
+      // Over the hourly ceiling: one notice that alerts are being held back,
+      // then silence until the hour rolls over. The failures stay recorded.
+      const capped = db.prepare('SELECT alerted_at FROM managed_db_auth_alerts WHERE engine = ? AND login = ?').get('*', ALERT_CAP_KEY);
+      if (!capped || capped.alerted_at < rateStart) {
+        db.prepare(`INSERT INTO managed_db_auth_alerts (engine, login, alerted_at) VALUES ('*', ?, ?)
+          ON CONFLICT(engine, login) DO UPDATE SET alerted_at = excluded.alerted_at`).run(ALERT_CAP_KEY, now.toISOString());
+        try { audit(null, null, 'managed-db-auth-alert-limit', { limit: MAX_ALERTS_PER_HOUR }, 'system'); } catch (_) {}
+        const hourKey = now.toISOString().slice(0, 13);
+        for (const a of db.prepare("SELECT email FROM users WHERE role = 'platform_admin' AND active = 1 AND email IS NOT NULL").all()) {
+          try {
+            sendMail({ to: a.email, subject: '[AppCrane] Database login alerts paused for this hour',
+              text: `More than ${MAX_ALERTS_PER_HOUR} logins hit the failed-login alert threshold within an hour. Further alerts are held back until the hour rolls over; the failures are still recorded. Check the audit log for managed-db-auth-alert entries.`,
+              appId: null, idempotencyKey: `db-auth-alert-limit:${hourKey}:${String(a.email).toLowerCase()}`, source: 'db-auth-alert' });
+          } catch (_) {}
+        }
+      }
+      break;
+    }
 
     const databases = String(g.dbs || '').split(',').filter(Boolean);
     const owner = appForLogin(db, g.login);
@@ -300,6 +381,7 @@ export function evaluateAlerts(db, {
       `The managed ${g.engine} server refused login "${g.login}" ${g.failures} times in the last ${WINDOW_MINUTES} minutes (alert threshold: more than ${threshold}).`,
       '',
       `Login belongs to: ${owner ? owner.slug : 'no app on this platform (an unknown login name)'}`,
+      ...(g.samples?.length ? [`Login names tried (up to 10): ${g.samples.join(', ')}`] : []),
       `Target database(s): ${targets.length ? targets.map(t => `${t.database}${t.app ? ` (app ${t.app})` : ''}`).join(', ') : 'not named by the engine'}`,
       `Reasons: ${detail.reasons.join(', ')}`,
       `First: ${g.first_at}   Last: ${g.last_at}`,
