@@ -230,3 +230,17 @@ test('SUPPRESSION: a flood of invented names cannot hide a real login, and many 
   assert.equal(mails.length, admins, 'many alerts were not batched into one digest per admin');
   if (admins) for (const u of real) assert.match(mails[0].text, new RegExp(u), `digest is missing ${u}`);
 });
+
+test('BOUND (Redis): invented usernames fold into one row per instance per scan; real logins keep theirs', () => {
+  const db = getDb();
+  db.prepare('DELETE FROM managed_db_auth_failures').run();
+  const now = new Date();
+  const t = now.getTime() - 5e3;
+  const entries = [];
+  for (let i = 0; i < 128; i++) entries.push({ entryId: 1000 + i, createdMs: t, updatedMs: t + 1, count: 3, username: `inv${i}` });
+  alerts.recordRedisAclEntries(db, { container: 'bnd', dbName: 'supp_db0' }, entries, { now });
+  const rows = db.prepare("SELECT login, SUM(count) c, COUNT(*) n FROM managed_db_auth_failures WHERE engine = 'redis' GROUP BY login").all();
+  assert.equal(rows.length, 1, `invented usernames stored as ${rows.length} rows`);
+  assert.equal(rows[0].login, alerts.UNKNOWN_LOGINS);
+  assert.equal(rows[0].c, 384);
+});

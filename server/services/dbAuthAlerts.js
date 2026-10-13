@@ -198,6 +198,11 @@ export function recordRedisAclEntries(db, { container, dbName }, entries, { now 
     "INSERT INTO managed_db_auth_failures (engine, login, database_name, reason, occurred_at, count) VALUES ('redis', ?, ?, 'auth-failed', ?, ?)",
   );
   let n = 0;
+  const owner = ownerCache(db);
+  // Usernames are the caller's to invent: every one that belongs to no app is
+  // folded into ONE row per instance per scan, the same bound recordFailures
+  // applies to the other engines. Real logins keep their own row.
+  const folded = { count: 0, at: null };
   db.transaction(() => {
     for (const e of entries) {
       const prev = seen.get(container, e.entryId, e.createdMs)?.seen_count || 0;
@@ -207,15 +212,34 @@ export function recordRedisAclEntries(db, { container, dbName }, entries, { now 
         const delta = e.count - prev;
         // ONE row carrying the delta, never one row per failure: the count is
         // the attacker's to inflate.
-        if (delta > 0) { ins.run(login, dbName, at, delta); n += delta; }
+        if (delta > 0) {
+          if (owner(login)) ins.run(login, dbName, at, delta);
+          else { folded.count += delta; if (!folded.at || at > folded.at) folded.at = at; }
+          n += delta;
+        }
       }
       // Touched on every scan, delta or not: a row is pruned only once its
       // entry has not been in the log for a day.
       upsert.run(container, e.entryId, e.createdMs, Math.max(prev, e.count), now.toISOString());
     }
+    if (folded.count > 0) ins.run(UNKNOWN_LOGINS, dbName, folded.at, folded.count);
   })();
   return n;
 }
+
+/** appForLogin, memoised for one batch: one lookup per distinct name, not per failure. */
+function ownerCache(db) {
+  const memo = new Map();
+  return (login) => {
+    if (!memo.has(login)) memo.set(login, appForLogin(db, login));
+    return memo.get(login);
+  };
+}
+
+// A log read is capped at 32 MiB, but a parse of it could still yield hundreds
+// of thousands of failures; only this many are grouped per scan, the rest are
+// counted into the folded row without being examined one by one.
+export const MAX_FAILURES_PER_SCAN = 100000;
 
 // AppCrane's own readiness probe deliberately logs in as a user that does not
 // exist (managedDb.waitReady: "Access denied" proves the server is up without
@@ -232,6 +256,8 @@ const IGNORED_LOGINS = new Set(['appcrane_readiness_probe']);
  */
 export function recordFailures(db, engine, failures) {
   const groups = new Map();
+  const overflow = failures.length > MAX_FAILURES_PER_SCAN ? failures.length - MAX_FAILURES_PER_SCAN : 0;
+  if (overflow) failures = failures.slice(0, MAX_FAILURES_PER_SCAN);
   for (const f of failures) {
     const k = `${f.login}\u0000${f.database ?? ''}\u0000${f.reason}`;
     const g = groups.get(k);
@@ -241,9 +267,14 @@ export function recordFailures(db, engine, failures) {
   // Real logins are kept whole, always; only invented names are folded, so an
   // attacker flooding invented names cannot push a real login's failures out.
   const all = [...groups.values()];
-  const known = all.filter(g => appForLogin(db, g.login));
-  const unknownGroups = all.filter(g => !appForLogin(db, g.login)).sort((a, b) => b.count - a.count);
+  const owner = ownerCache(db);
+  const known = all.filter(g => owner(g.login));
+  const unknownGroups = all.filter(g => !owner(g.login)).sort((a, b) => b.count - a.count);
   let list = known;
+  if (overflow) {
+    const last = failures[failures.length - 1];
+    unknownGroups.push({ login: UNKNOWN_LOGINS, database: null, reason: 'many-logins', at: last?.at, count: overflow });
+  }
   if (unknownGroups.length <= MAX_UNKNOWN_GROUPS_PER_SCAN) list = list.concat(unknownGroups);
   else {
     const rest = unknownGroups.slice(MAX_UNKNOWN_GROUPS_PER_SCAN - 1);
