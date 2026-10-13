@@ -244,3 +244,19 @@ test('BOUND (Redis): invented usernames fold into one row per instance per scan;
   assert.equal(rows[0].login, alerts.UNKNOWN_LOGINS);
   assert.equal(rows[0].c, 384);
 });
+
+test('SUPPRESSION: a real login logged AFTER 100,000+ invented failures still gets its own alert', () => {
+  const db = getDb();
+  db.prepare('DELETE FROM managed_db_auth_failures').run();
+  db.prepare('DELETE FROM managed_db_auth_alerts').run();
+  const now = new Date();
+  const at = new Date(now.getTime() - 60e3).toISOString();
+  const failures = [];
+  for (let i = 0; i < alerts.MAX_FAILURES_PER_SCAN + 5000; i++) failures.push({ login: `noise${i % 50}`, database: null, reason: 'bad-password', at });
+  for (let k = 0; k < 6; k++) failures.push({ login: 'supp_u0', database: 'supp_db0', reason: 'bad-password', at });
+  alerts.recordFailures(db, 'postgres', failures);
+  const real = db.prepare("SELECT SUM(count) c FROM managed_db_auth_failures WHERE login = 'supp_u0'").get().c;
+  assert.equal(real, 6, 'the real login was folded away by log order');
+  const raised = alerts.evaluateAlerts(db, { now, sendMail: () => {}, audit: () => {} });
+  assert.ok(raised.some(r => r.login === 'supp_u0'), 'no alert for the real login');
+});

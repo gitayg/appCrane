@@ -227,18 +227,25 @@ export function recordRedisAclEntries(db, { container, dbName }, entries, { now 
   return n;
 }
 
-/** appForLogin, memoised for one batch: one lookup per distinct name, not per failure. */
+/**
+ * Every login that belongs to an app, loaded ONCE per batch: membership is then
+ * a Set lookup, so neither the number of failures nor the number of invented
+ * names turns into database queries.
+ */
 function ownerCache(db) {
-  const memo = new Map();
-  return (login) => {
-    if (!memo.has(login)) memo.set(login, appForLogin(db, login));
-    return memo.get(login);
-  };
+  const known = new Set();
+  for (const r of db.prepare('SELECT db_user, db_name FROM managed_databases').all()) {
+    if (r.db_user) known.add(r.db_user);
+    if (r.db_name) known.add(`default@${r.db_name}`);
+  }
+  return (login) => known.has(login);
 }
 
 // A log read is capped at 32 MiB, but a parse of it could still yield hundreds
-// of thousands of failures; only this many are grouped per scan, the rest are
-// counted into the folded row without being examined one by one.
+// of thousands of failures. Real logins' failures are ALWAYS grouped in full
+// (bounded by the number of databases); at most this many invented-login
+// failures are grouped one by one, the rest only counted into the folded row.
+// The split happens BEFORE the cap, so log order cannot push a real login out.
 export const MAX_FAILURES_PER_SCAN = 100000;
 
 // AppCrane's own readiness probe deliberately logs in as a user that does not
@@ -256,8 +263,13 @@ const IGNORED_LOGINS = new Set(['appcrane_readiness_probe']);
  */
 export function recordFailures(db, engine, failures) {
   const groups = new Map();
-  const overflow = failures.length > MAX_FAILURES_PER_SCAN ? failures.length - MAX_FAILURES_PER_SCAN : 0;
-  if (overflow) failures = failures.slice(0, MAX_FAILURES_PER_SCAN);
+  const owner = ownerCache(db);
+  const realFailures = [];
+  const inventedFailures = [];
+  for (const f of failures) (owner(f.login) ? realFailures : inventedFailures).push(f);
+  const overflow = Math.max(0, inventedFailures.length - MAX_FAILURES_PER_SCAN);
+  const lastOverflowAt = overflow ? inventedFailures.reduce((m, f) => (f.at > m ? f.at : m), inventedFailures[0].at) : null;
+  failures = realFailures.concat(overflow ? inventedFailures.slice(0, MAX_FAILURES_PER_SCAN) : inventedFailures);
   for (const f of failures) {
     const k = `${f.login}\u0000${f.database ?? ''}\u0000${f.reason}`;
     const g = groups.get(k);
@@ -267,13 +279,11 @@ export function recordFailures(db, engine, failures) {
   // Real logins are kept whole, always; only invented names are folded, so an
   // attacker flooding invented names cannot push a real login's failures out.
   const all = [...groups.values()];
-  const owner = ownerCache(db);
   const known = all.filter(g => owner(g.login));
   const unknownGroups = all.filter(g => !owner(g.login)).sort((a, b) => b.count - a.count);
   let list = known;
   if (overflow) {
-    const last = failures[failures.length - 1];
-    unknownGroups.push({ login: UNKNOWN_LOGINS, database: null, reason: 'many-logins', at: last?.at, count: overflow });
+    unknownGroups.push({ login: UNKNOWN_LOGINS, database: null, reason: 'many-logins', at: lastOverflowAt, count: overflow });
   }
   if (unknownGroups.length <= MAX_UNKNOWN_GROUPS_PER_SCAN) list = list.concat(unknownGroups);
   else {
