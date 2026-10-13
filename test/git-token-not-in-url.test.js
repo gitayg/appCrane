@@ -5,6 +5,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { fileURLToPath } from 'url';
 import { execFileSync, spawn } from 'child_process';
+import { WORKSPACE_DOCKER_PRELUDE } from './fixtures/workspaceDockerShim.js';
 
 // A stored GitHub token reaches git as an http.extraHeader in the child's
 // environment -- never in the clone URL. A tokenized URL was in argv, in error
@@ -88,6 +89,7 @@ if [ -n "$dir" ] && [ -f "$dir/.git/config" ]; then n=$(ls "${SNAP}" | wc -l | t
 exit $rc
 `, { mode: 0o755 });
 writeFileSync(join(SHIM, 'docker'), `#!/bin/sh
+${WORKSPACE_DOCKER_PRELUDE}
 case "$1" in
   ps|rm|stop|inspect) exit 0 ;;
   image) echo 5; exit 0 ;;

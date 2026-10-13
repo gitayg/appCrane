@@ -5,6 +5,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync
 import { tmpdir } from 'os';
 import { join } from 'path';
 import express from 'express';
+import { WORKSPACE_DOCKER_PRELUDE } from './fixtures/workspaceDockerShim.js';
 
 // Phase 1 of re-introducing Builder for Crane-hosted apps: /api/coder works for
 // a managed app whose source lives in <DATA_DIR>/repos/<slug>.git
@@ -43,6 +44,7 @@ writeFileSync(join(SHIM, 'git'), `#!/bin/sh
 exec "${REAL_GIT}" "$@"
 `, { mode: 0o755 });
 writeFileSync(join(SHIM, 'docker'), `#!/bin/sh
+${WORKSPACE_DOCKER_PRELUDE}
 { for a in "$@"; do printf '%s\\037' "$a"; done; printf '\\n'; } >> "${DOCKER_LOG}"
 case "$1" in
   image)   echo 5 ;;

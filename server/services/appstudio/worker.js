@@ -10,6 +10,9 @@ import { ensureCodebaseContext } from './contextBuilder.js';
 import { enqueue as enqueueWork, PRIORITY } from '../builder/appQueue.js';
 import { formatToolBreadcrumb } from './toolBreadcrumb.js';
 import {
+  studioGit, stagedFiles, studioNpm, studioNpmCacheDir, dirsWithBuildScript, assertTopDir, pushWorkspaceCommits,
+} from './workspacePush.js';
+import {
   usesLocalRepo, refuseLocalRepoPhase, checkoutForAnalysis, removeAnalysisCheckout, recordAnalysisAsRequest,
 } from './localAnalysis.js';
 import log from '../../utils/logger.js';
@@ -363,16 +366,17 @@ async function handleCode(job) {
   if (priorCodeJobs > 0) onLog(`[studio:git] Retry #${priorCodeJobs + 1} — using new branch name ${branchName} (avoids the previous attempt's PR)`);
 
   const onCodingDone = async (workspaceDir, _branch) => {
-    const git = (args, opts = {}) => execFileSync('git', ['-c', `safe.directory=${workspaceDir}`, '-C', workspaceDir, ...args], { stdio: 'pipe', ...opts });
+    // Every git and npm below runs in a helper container, never on the host:
+    // the workspace is the agent's, .git/ and every package.json included
+    // (appstudio/workspacePush.js has the whole story).
+    const git = (args, opts = {}) => studioGit(workspaceDir, args, opts);
+    const npmCache = studioNpmCacheDir(app.slug);
 
     onLog('[studio:git] Staging all file changes…');
     git(['add', '-A']);
 
     let changedFiles = [];
-    try {
-      const out = git(['diff', '--cached', '--name-only']).toString().trim();
-      changedFiles = out ? out.split('\n').filter(Boolean) : [];
-    } catch (_) {}
+    try { changedFiles = stagedFiles(workspaceDir); } catch (_) {}
 
     if (changedFiles.length === 0) {
       onLog('[studio:git] No file changes detected — enhancement may already be implemented');
@@ -382,13 +386,14 @@ async function handleCode(job) {
 
     // Regenerate package-lock.json when package.json was modified so npm ci
     // inside the Docker build doesn't abort due to a stale lock file.
+    // --ignore-scripts, and in a helper with only the registry reachable.
     if (changedFiles.includes('package.json')) {
       onLog('[studio:git] package.json modified — regenerating package-lock.json…');
       try {
-        execFileSync('npm', ['install', '--package-lock-only', '--ignore-scripts'], {
-          cwd: workspaceDir, stdio: 'pipe', timeout: 120000,
+        studioNpm(workspaceDir, ['install', '--package-lock-only', '--ignore-scripts'], {
+          cacheDir: npmCache, network: 'bridge', timeout: 120000,
         });
-        git(['add', 'package-lock.json']);
+        git(['add', '--', 'package-lock.json']);
         onLog('[studio:git] package-lock.json updated and staged');
       } catch (err) {
         onLog(`[studio:git] Warning: could not regenerate package-lock.json: ${err.message}`);
@@ -401,26 +406,24 @@ async function handleCode(job) {
     // Common case: monorepo with `client/` (React/Vue/Svelte) and a checked-in
     // `client/dist/`. Without this step, AppStudio merges src changes but the
     // deployed bundle stays stale.
+    //
+    // The install and the build run the agent's package.json scripts, so they
+    // run in a helper container (H1): the install with the registry
+    // reachable, the build with no network at all.
     const touchedTopDirs = new Set();
     for (const f of changedFiles) {
       const slash = f.indexOf('/');
       if (slash > 0) touchedTopDirs.add(f.slice(0, slash));
     }
     let rebuiltAny = false;
-    for (const dir of touchedTopDirs) {
-      const subPkgPath = join(workspaceDir, dir, 'package.json');
-      if (!existsSync(subPkgPath)) continue;
-      let subPkg;
-      try { subPkg = JSON.parse(readFileSync(subPkgPath, 'utf8')); } catch (_) { continue; }
-      if (!subPkg.scripts?.build) continue;
+    const buildDirs = touchedTopDirs.size ? dirsWithBuildScript(workspaceDir, [...touchedTopDirs]) : [];
+    for (const dir of buildDirs) {
       onLog(`[studio:build] ${dir}/ has a build script — running npm install && npm run build`);
       try {
-        execFileSync('npm', ['install', '--prefer-offline', '--no-audit', '--no-fund'], {
-          cwd: join(workspaceDir, dir), stdio: 'pipe', timeout: 300000,
+        studioNpm(workspaceDir, ['install', '--prefix', assertTopDir(dir), '--prefer-offline', '--no-audit', '--no-fund'], {
+          cacheDir: npmCache, network: 'bridge',
         });
-        execFileSync('npm', ['run', 'build'], {
-          cwd: join(workspaceDir, dir), stdio: 'pipe', timeout: 300000,
-        });
+        studioNpm(workspaceDir, ['run', '--prefix', assertTopDir(dir), 'build'], { cacheDir: npmCache });
         onLog(`[studio:build] ${dir}/ built successfully`);
         rebuiltAny = true;
       } catch (err) {
@@ -432,8 +435,8 @@ async function handleCode(job) {
     if (rebuiltAny) {
       git(['add', '-A']);
       try {
-        const out2 = git(['diff', '--cached', '--name-only']).toString().trim();
-        changedFiles = out2 ? out2.split('\n').filter(Boolean) : changedFiles;
+        const again = stagedFiles(workspaceDir);
+        changedFiles = again.length ? again : changedFiles;
       } catch (_) {}
       onLog(`[studio:git] Re-staged after build — ${changedFiles.length} file(s) total`);
     }
@@ -443,7 +446,7 @@ async function handleCode(job) {
     git(['commit', '-m', commitMsg]);
     onLog('[studio:git] Commit created');
 
-    onLog(`[studio:git] Pushing branch ${branchName} to origin…`);
+    onLog(`[studio:git] Pushing branch ${branchName} to GitHub…`);
     // No --force fallback (v1.27.69). cloneForCode now clones FROM the
     // existing remote branch when one exists (and refuses outright if a
     // PR is already open), so this push fast-forwards in the normal
@@ -451,8 +454,11 @@ async function handleCode(job) {
     // same branch between clone and push) is rare; treat it as a
     // re-plan signal so the operator can re-evaluate, NOT silently
     // overwrite the conflicting commits.
-    // The workspace's origin is the plain URL (cloneForCode keeps the token
-    // out of .git/config), so the credential rides in the push's env.
+    //
+    // The push is made from a host repo AppCrane creates for it, to
+    // app.github_url — not from the workspace and not to its `origin`, which
+    // the agent could have rewritten (workspacePush.pushWorkspaceCommits). The
+    // credential rides in that host git's env only.
     let pushToken = null;
     let pushEnv = null;
     if (app.github_token_encrypted) {
@@ -462,7 +468,7 @@ async function handleCode(job) {
       } catch (_) { pushEnv = null; }
     }
     try {
-      git(['push', '-u', 'origin', branchName], { timeout: 60000, ...(pushEnv ? { env: pushEnv } : {}) });
+      pushWorkspaceCommits({ workspaceDir, url: app.github_url, branchName, gitEnv: pushEnv });
       onLog(`[studio:git] Branch ${branchName} pushed`);
     } catch (_) {
       pushConflict = true;

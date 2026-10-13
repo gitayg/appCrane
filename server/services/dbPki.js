@@ -214,12 +214,20 @@ function newKeyPair() {
 // Public API
 // ---------------------------------------------------------------------------
 
-/** A fresh self-signed CA. `keyPem` is PKCS#8 and must be stored encrypted. */
-export function generateCa({ now } = {}) {
+/**
+ * A fresh self-signed CA. `keyPem` is PKCS#8 and must be stored encrypted.
+ *
+ * `commonName` defaults to the platform CA's. The other caller is the
+ * per-instance Redis client CA (dbCerts.ensureRedisCa): a CA whose ONLY job is
+ * to be the one trust anchor a single Redis instance accepts client
+ * certificates from, so that a certificate issued for a different app cannot
+ * complete that instance's handshake.
+ */
+export function generateCa({ now, commonName = CA_COMMON_NAME } = {}) {
   const { publicKey, privateKey } = newKeyPair();
   const cert = buildCert({
-    subjectCn: CA_COMMON_NAME,
-    issuerCn: CA_COMMON_NAME,
+    subjectCn: commonName,
+    issuerCn: commonName,
     subjectPublicKey: publicKey,
     issuerPublicKey: publicKey,
     signingKey: privateKey,
@@ -227,7 +235,19 @@ export function generateCa({ now } = {}) {
     isCa: true,
     now,
   });
-  return { ...cert, keyPem: privateKey.export({ type: 'pkcs8', format: 'pem' }) };
+  return { ...cert, commonName, keyPem: privateKey.export({ type: 'pkcs8', format: 'pem' }) };
+}
+
+/**
+ * The CN of a certificate's subject. A leaf's issuer name has to be its CA's
+ * subject byte for byte — OpenSSL finds the issuer by NAME before it checks the
+ * signature — so issueCert() reads it off the CA rather than assuming the
+ * platform CA's.
+ */
+function subjectCnOf(certPem) {
+  const m = /^CN=(.*)$/m.exec(new crypto.X509Certificate(certPem).subject);
+  if (!m) throw new Error('dbPki: CA certificate has no CN');
+  return m[1];
 }
 
 /**
@@ -243,7 +263,7 @@ export function issueCert({ ca, commonName, usage, dnsNames = [], ips = [], days
   const { publicKey, privateKey } = newKeyPair();
   const cert = buildCert({
     subjectCn: commonName,
-    issuerCn: CA_COMMON_NAME,
+    issuerCn: ca.commonName || subjectCnOf(ca.certPem),
     subjectPublicKey: publicKey,
     issuerPublicKey: caPub,
     signingKey: caKey,

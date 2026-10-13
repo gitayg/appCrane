@@ -672,6 +672,49 @@ export function stageRepoFromBundleSync(stageDir, slug, head, bundle) {
 }
 
 /**
+ * Land an eviction rescue in a managed repo: unbundle `bundleFile` (written by
+ * a helper container from the agent's workspace — see
+ * builder/appContainer.js preserveWorkspace) into the bare repo and point
+ * refs/heads/<branch> at its tip.
+ *
+ * This is the only host git that touches anything the agent produced, and it
+ * runs in the bare repo AppCrane created, with this module's scratch
+ * environment and hooks off. A bundle carries objects and ref names, never
+ * config or hooks, and `unbundle` only indexes the pack: nothing in it is
+ * executed. `unbundle` also refuses a bundle whose prerequisite commits the
+ * repo lacks, so the rescue can only ever extend history the repo already has.
+ *
+ * Returns { ok: true } when the ref now points at `head`, or { ok: false,
+ * reason: 'taken' } when the branch exists and `head` does not descend from it
+ * (the caller moves on to the next free suffix — never a force). Throws on
+ * anything else.
+ */
+export function importWorkspaceBundleSync(slug, bundleFile, branch, head) {
+  const gitDir = repoPath(slug);
+  if (!localRepoExists(slug)) throw fail('REPO_NOT_FOUND', 404, `no local repo for '${slug}'`);
+  assertBranch(branch);
+  if (!SHA_RE.test(String(head))) throw new Error(`invalid rescue head ${JSON.stringify(head)}`);
+
+  const listed = text(gitSync(gitDir, ['bundle', 'unbundle', bundleFile]));
+  const tips = listed.split('\n').map((l) => /^([0-9a-f]{40}) (\S+)$/.exec(l.trim())).filter(Boolean);
+  if (tips.length !== 1 || tips[0][1] !== head) {
+    throw new Error(`rescue bundle for '${slug}' does not carry exactly the expected head ${head}: ${JSON.stringify(listed)}`);
+  }
+  gitSync(gitDir, ['cat-file', '-e', `${head}^{commit}`]);
+
+  const ref = `refs/heads/${branch}`;
+  let current = null;
+  try { current = text(gitSync(gitDir, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`])) || null; } catch (_) {}
+  if (current === head) return { ok: true };
+  if (current) {
+    try { gitSync(gitDir, ['merge-base', '--is-ancestor', current, head]); }
+    catch (_) { return { ok: false, reason: 'taken' }; }
+  }
+  gitSync(gitDir, ['update-ref', ref, head, current || ZERO_SHA]);
+  return { ok: true };
+}
+
+/**
  * Move staged repos into the live repos root. A live repo being replaced is
  * moved to `preImportDir/repos/<slug>.git` first, the same reversible pattern
  * the DB import uses. Returns the slugs installed.

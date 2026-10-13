@@ -22,6 +22,12 @@ import { join } from 'path';
 // So the repo config is checked against an ALLOWLIST before every host git, and
 // anything else refuses the operation. HARDENED_GIT_ARGS is defence in depth on
 // top of that, not the fix.
+//
+// v2.103.2: and the check alone could be raced — the agent's container keeps
+// running between this read and git's own, so a config swapped in that gap won.
+// The git itself now runs inside a container (builder/workspaceRunner.js), so
+// this allowlist is the second layer: it still keeps a planted driver from
+// running at all in the un-raced case, and a raced one runs as the agent.
 
 /**
  * Keys a workspace config may carry, as `section.variable` for a plain key or
@@ -139,7 +145,7 @@ export function assertSafeWorkspaceGit(dir) {
   if (!cst) return;
   if (!cst.isFile()) throw refuse(dir, '.git/config is not a regular file');
 
-  const out = execFileSync('git', [
+  const out = execFileSync('git', [ // host-git-ok: reads the config FILE (--file, --no-includes, cwd /), no repository
     '-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null',
     'config', '--file', configPath, '--no-includes', '--null', '--list', '--name-only',
   ], {

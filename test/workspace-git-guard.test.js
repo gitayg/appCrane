@@ -4,6 +4,7 @@ import { execFileSync } from 'child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, symlinkSync, renameSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { WORKSPACE_DOCKER_PRELUDE } from './fixtures/workspaceDockerShim.js';
 
 /**
  * A coder workspace is chmod 777'd and mounted into the agent's container, so
@@ -20,6 +21,16 @@ const ROOT = mkdtempSync(join(tmpdir(), 'crane-wsguard-'));
 process.env.DATA_DIR = join(ROOT, 'data');
 process.env.ENCRYPTION_KEY = 'f'.repeat(64);
 process.env.LOG_LEVEL = 'error';
+
+// Workspace git runs in a container now (builder/workspaceRunner.js). This file
+// is about the allowlist that still runs first, as defence in depth, so docker
+// is played by the workspace shim: the git it runs is the host's, which makes
+// "the planted command never ran on the host" the strict version of the claim.
+// test/workspace-runner-live.test.js covers the real containers.
+const BIN = join(ROOT, 'bin');
+mkdirSync(BIN, { recursive: true });
+writeFileSync(join(BIN, 'docker'), `#!/bin/sh\n${WORKSPACE_DOCKER_PRELUDE}\necho "docker shim: refusing $1" >&2\nexit 1\n`, { mode: 0o755 });
+process.env.PATH = `${BIN}:${process.env.PATH}`;
 
 const { assertSafeWorkspaceGit } = await import('../server/services/builder/workspaceGitGuard.js');
 const { gitIn } = await import('../server/services/builder/appContainer.js');

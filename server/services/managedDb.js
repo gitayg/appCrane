@@ -563,6 +563,31 @@ async function prepareServerTls(engine, addrs) {
 }
 
 /**
+ * The server-side files for ONE per-scope Redis: the shared Redis server
+ * certificate (platform CA, so apps verify it exactly as before) plus that
+ * instance's own client CA and AppCrane's admin certificate under it. The
+ * instance CA is the only anchor the container's tls-ca-cert-file holds — see
+ * managedRedis.tlsServerFlags and the dbCerts.js header for why.
+ *
+ * `renewed` covers the server AND admin certificates: either one being new
+ * means the running container's private copy is stale.
+ */
+async function prepareRedisInstanceTls(dbName, addrs) {
+  const server = certs.ensureServerCert('redis', {
+    dnsNames: [DB_HOST_FOR_CONTAINERS, 'localhost'],
+    ips: [...new Set(['127.0.0.1', ...addrs.filter(a => /^\d+\.\d+\.\d+\.\d+$/.test(a))])],
+    // Still both usages: a TLS instance created before the per-instance CA
+    // keeps presenting server.crt as redis-cli's client certificate (the
+    // fallback in managedRedis.cliArgs) until it is converted.
+    bothUsages: true,
+  });
+  const instanceCa = certs.ensureRedisCa(dbName);
+  const admin = certs.ensureRedisAdminCert(dbName);
+  const dir = certs.writeRedisServerFiles(dbName, { server, instanceCa, admin });
+  return { dir, renewed: server.renewed || admin.renewed };
+}
+
+/**
  * Make a RUNNING server pick up renewed certificate files: copy them into its
  * private directory again (same fixed snippet the start command runs), then
  * ask the engine to reload. Applied connections keep their session; new ones
@@ -1268,18 +1293,21 @@ async function ensureRedisInstance({ container, dbName, username, password, port
   assertIdent(username);
   assertPassword(password);
 
-  // A TLS instance (a deployhub.json login) mounts the shared Redis server
-  // certificate. A catalogue instance stays plain — see managedRedis.tlsServerFlags.
-  const tlsFiles = tls ? await prepareServerTls('redis', await bindAddresses()) : null;
-  const wantConfig = tls ? tlsCfg.TLS_CONFIG_VERSION : '';
+  // A TLS instance (a deployhub.json login) mounts its OWN server directory:
+  // the shared Redis server certificate plus the instance's client CA. A
+  // catalogue instance stays plain — see managedRedis.tlsServerFlags.
+  const tlsFiles = tls ? await prepareRedisInstanceTls(dbName, await bindAddresses()) : null;
+  const wantConfig = tls ? redis.REDIS_TLS_CONFIG_VERSION : '';
   const facts = await containerFacts(container);
   let state = facts.state;
-  // Converting an existing plain instance to TLS is a recreate: the port mode
-  // is a start-time flag. Same volume, same port, same password. Only ever in
-  // the plain -> TLS direction for an AppCrane container; a TLS instance is
-  // never turned back into a plain one by this check.
+  // Converting an existing instance is a recreate: the port mode and the CA
+  // file are start-time flags. Same volume (the RDB is untouched), same port,
+  // same password. Two conversions take this branch: plain -> TLS, and a TLS
+  // instance created before the per-instance CA (label 'tls1', trusting the
+  // platform CA) -> one trusting only its own CA. Never TLS -> plain: a
+  // catalogue ensure (tls false) does not reach this branch.
   if (state && facts.owner === 'redis' && facts.config !== wantConfig && tls) {
-    log.info(`managedDb: ${container} is being recreated with TLS required (its login now needs a client certificate)`);
+    log.info(`managedDb: ${container} is being recreated with TLS required and its own client CA (${facts.config || 'plain'} -> ${wantConfig})`);
     await dockerExec(['rm', '-f', container], { timeout: 60000 }).catch(() => {});
     state = null;
   }
@@ -1330,7 +1358,7 @@ async function createRedisContainer({ container, dbName, password, port, tlsDir 
     '--label', 'appcrane=true',
     '--label', 'appcrane-db=redis',
     '--label', `appcrane-db-name=${dbName}`,
-    '--label', `appcrane-db-config=${tlsDir ? tlsCfg.TLS_CONFIG_VERSION : ''}`,
+    '--label', `appcrane-db-config=${tlsDir ? redis.REDIS_TLS_CONFIG_VERSION : ''}`,
     '--restart=on-failure:2',
     `--memory=${memoryMb}m`,
     `--memory-swap=${memoryMb}m`,
@@ -1814,15 +1842,11 @@ function rowFor(scope, engine) {
  */
 function tlsFor(row) {
   if (row.client_cert_required !== 1) return null;
-  const base = certs.CLIENT_MOUNT_PATH;
-  return {
-    required: true,
-    x509: row.engine === 'mongo',
-    ca: `${base}/ca.crt`,
-    cert: `${base}/client.crt`,
-    key: `${base}/client.key`,
-    pem: `${base}/client.pem`,
-  };
+  // Redis reads its own certificate (redis-client.*, signed by the instance's
+  // CA); the other engines keep client.* (dbCerts.js header). ca.crt is the
+  // same file for both: it verifies the SERVER.
+  const files = certs.clientFilePaths(row.engine === 'redis' ? certs.REDIS_CLIENT_PREFIX : '');
+  return { required: true, x509: row.engine === 'mongo', ...files };
 }
 
 function connectionFor(row, port) {
@@ -1845,7 +1869,8 @@ function connectionFor(row, port) {
  *             URL — the docs give the explicit ssl:{} snippet)
  *   mongo     tls=true + tlsCAFile/tlsCertificateKeyFile + MONGODB-X509 from
  *             $external, and NO user:password — an x509 login has no password
- *   redis     rediss:// (TLS); the files come from DB_*_FILE, as no Redis URL
+ *   redis     rediss:// (TLS); the files come from DB_*_FILE and
+ *             REDIS_TLS_*_FILE (deployer.tlsFileEnv), as no Redis URL
  *             convention carries them
  */
 export function tlsUrl(conn, tls) {
@@ -2155,7 +2180,9 @@ export function tlsView(row) {
   const settings = getManagedDbSettings(getDb());
   return {
     tls: required ? 'required' : (ENGINES[row.engine]?.perScope ? 'none' : 'offered'),
-    client_cert_expires_at: required ? (certs.clientCertInfo(row.db_user)?.not_after || null) : null,
+    client_cert_expires_at: required
+      ? ((row.engine === 'redis' ? certs.redisClientCertInfo(row.db_name) : certs.clientCertInfo(row.db_user))?.not_after || null)
+      : null,
     connection_limit: tlsCfg.POLICY_ENGINES.includes(row.engine) ? settings.conn_limit : null,
     statement_timeout_s: tlsCfg.POLICY_ENGINES.includes(row.engine) ? settings.statement_timeout_s : null,
   };
@@ -2197,9 +2224,12 @@ export async function secureLogin(scope, engine, { certRequired = false, image =
 
   let files = null;
   if (requireCert) {
-    const cert = certs.ensureClientCert(row.db_user);
+    // Redis: a certificate from the INSTANCE's CA, in redis-client.*, so the
+    // instance accepts this app's certificate and no other app's.
+    const isRedis = engine === 'redis';
+    const cert = isRedis ? certs.ensureRedisClientCert(row.db_name, row.db_user) : certs.ensureClientCert(row.db_user);
     const owner = await resolveOwner(image);
-    files = certs.writeClientFiles(row.db_user, cert, owner);
+    files = certs.writeClientFiles(row.db_user, cert, owner, { prefix: isRedis ? certs.REDIS_CLIENT_PREFIX : '' });
   }
 
   if (ENGINES[engine].perScope) {
@@ -2288,6 +2318,7 @@ export async function deprovision(scope, engine) {
   await dropRow(row);
   getDb().prepare('DELETE FROM managed_databases WHERE id = ?').run(row.id);
   certs.dropClientCert(row.db_user);
+  if (row.engine === 'redis') certs.dropRedisCerts(row.db_name, row.db_user);
   log.info(`managedDb: deprovisioned ${engine} database ${row.db_name}`);
   return true;
 }
@@ -2335,6 +2366,7 @@ export async function deprovisionApp(appId) {
       await dropRow(row);
       getDb().prepare('DELETE FROM managed_databases WHERE id = ?').run(row.id);
       certs.dropClientCert(row.db_user);
+      if (row.engine === 'redis') certs.dropRedisCerts(row.db_name, row.db_user);
       dropped++;
     } catch (e) {
       // Never block an app delete on a database server that is down: report it

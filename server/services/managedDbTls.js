@@ -80,7 +80,10 @@ const R = SERVER_RUNTIME_PATH;
 export function installSnippet(engine) {
   const user = ENGINE_USER[engine];
   if (!user) throw new Error(`managedDbTls: no engine user for '${engine}'`);
-  return `mkdir -p ${R} && cp ${SERVER_MOUNT_PATH}/* ${R}/ && chown -R ${user} ${R} && chmod 700 ${R} && chmod 600 ${R}/server.key ${R}/server.pem`;
+  // Redis also carries admin.key: the client key AppCrane's own redis-cli
+  // presents to the instance's per-scope CA (dbCerts.ensureRedisAdminCert).
+  const keys = engine === 'redis' ? `${R}/server.key ${R}/server.pem ${R}/admin.key` : `${R}/server.key ${R}/server.pem`;
+  return `mkdir -p ${R} && cp ${SERVER_MOUNT_PATH}/* ${R}/ && chown -R ${user} ${R} && chmod 700 ${R} && chmod 600 ${keys}`;
 }
 
 /** `-v` value for the read-only server mount. */

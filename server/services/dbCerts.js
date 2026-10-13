@@ -18,7 +18,35 @@
  *     client/<login>/    ca.crt, client.crt, client.key, client.pem. Bind-
  *                        mounted READ-ONLY into the ONE app container (one app,
  *                        one env) whose database login is <login>, at
- *                        CLIENT_MOUNT_PATH.
+ *                        CLIENT_MOUNT_PATH. A login with a managed Redis also
+ *                        gets redis-client.crt/.key/.pem here (see below).
+ *     redis/<db_name>/   one per-scope Redis instance's server files — see
+ *                        "PER-INSTANCE REDIS CLIENT CA".
+ *
+ * PER-INSTANCE REDIS CLIENT CA. Postgres and MariaDB check the
+ * client certificate's CN against the login (clientcert=verify-full, REQUIRE
+ * SUBJECT), so one platform CA is enough there: app B's certificate names
+ * app B's login and is refused by app A's. Redis cannot express that — it only
+ * checks that a client certificate chains to tls-ca-cert-file (see
+ * managedRedis.tlsServerFlags) — so while every Redis trusted the platform CA,
+ * app B's certificate plus app A's Redis password opened app A's Redis.
+ *
+ * So each per-scope Redis gets its OWN small CA (managed_db_certs row
+ * `redis-ca:<db_name>`, key encrypted like every other key), and that CA is
+ * the ONLY thing in the instance's tls-ca-cert-file. It signs exactly two
+ * certificates: the app's Redis client certificate (`redis-client:<db_name>`,
+ * CN = the login, written to client/<login>/redis-client.*) and the admin
+ * certificate redis-cli presents inside the container (`redis-admin:<db_name>`,
+ * never leaves redis/<db_name>/). A certificate from any other app — or from
+ * the platform CA — fails the handshake, before AUTH is ever reached.
+ *
+ * The SERVER certificate is still the platform CA's `server:redis`: clients
+ * verify the server with the same ca.crt they always have, so nothing changes
+ * on the app's verifying side. Distinct file names for the Redis client
+ * certificate keep a login that also has Postgres/MariaDB/Mongo working: those
+ * engines keep reading client.* (platform-CA-signed), Redis reads
+ * redis-client.* (instance-CA-signed), and both live in the one directory the
+ * app's container already mounts.
  *
  * WHY _tls IS A SIBLING OF THE ENGINE DATA DIRECTORIES AND NEVER INSIDE ONE.
  * Same reasoning as managedDb.envFileFor(): DATA_DIR/managed-db/<engine> IS the
@@ -44,6 +72,7 @@
  *     only matters on native Linux.
  */
 
+import crypto from 'crypto';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { join, resolve } from 'path';
@@ -56,6 +85,24 @@ const execFileAsync = promisify(execFile);
 
 /** Where an app container finds its client certificate. */
 export const CLIENT_MOUNT_PATH = '/run/appcrane/db';
+
+/**
+ * The Redis client certificate's file-name prefix inside the same mount:
+ * redis-client.crt/.key/.pem, next to (never replacing) client.* — see the
+ * header for why Redis needs a certificate of its own.
+ */
+export const REDIS_CLIENT_PREFIX = 'redis-';
+const REDIS_CLIENT_FILES = ['redis-client.crt', 'redis-client.key', 'redis-client.pem'];
+
+/** Container paths of a login's files. ca.crt is shared: it verifies the SERVER. */
+export function clientFilePaths(prefix = '') {
+  return {
+    ca: `${CLIENT_MOUNT_PATH}/ca.crt`,
+    cert: `${CLIENT_MOUNT_PATH}/${prefix}client.crt`,
+    key: `${CLIENT_MOUNT_PATH}/${prefix}client.key`,
+    pem: `${CLIENT_MOUNT_PATH}/${prefix}client.pem`,
+  };
+}
 
 /** Where an engine container finds its server certificate (read-only source). */
 export const SERVER_MOUNT_PATH = '/etc/appcrane-tls';
@@ -82,6 +129,14 @@ export function serverTlsDir(engine) {
   privateDir(tlsRoot());
   privateDir(join(tlsRoot(), 'server'));
   return join(tlsRoot(), 'server', engine);
+}
+
+/** One per-scope Redis instance's server-side files (never mounted into an app). */
+export function redisInstanceTlsDir(dbName) {
+  if (!SAFE_LOGIN.test(dbName)) throw new Error(`dbCerts: bad instance name ${JSON.stringify(dbName)}`);
+  privateDir(tlsRoot());
+  privateDir(join(tlsRoot(), 'redis'));
+  return join(tlsRoot(), 'redis', dbName);
 }
 
 export function clientTlsDir(login) {
@@ -164,6 +219,119 @@ export function ensureClientCert(login) {
   return { certPem: cert.certPem, keyPem: cert.keyPem, notAfter: cert.notAfter, ca, renewed: true };
 }
 
+// ---------------------------------------------------------------------------
+// Per-instance Redis client CA (see the header)
+// ---------------------------------------------------------------------------
+
+/**
+ * The CA's CN. Readable when it fits dbPki's 63-character CN limit, which
+ * every name namesForScope() derives today does; a hash otherwise, because the
+ * CN is a label for an operator reading `openssl x509 -text`, not the thing
+ * that isolates — the key is.
+ */
+export function redisCaCommonName(dbName) {
+  const cn = `AppCrane Redis CA ${dbName}`;
+  if (cn.length <= 63) return cn;
+  return `AppCrane Redis CA ${crypto.createHash('sha256').update(dbName).digest('hex').slice(0, 16)}`;
+}
+
+/**
+ * The instance's own client CA, generated ONCE and then only ever loaded.
+ * Ten years, not renewed, for the same reason as ensureCa(): a new CA
+ * invalidates the app's certificate, and that is a deploy, not a side effect.
+ */
+export function ensureRedisCa(dbName) {
+  if (!SAFE_LOGIN.test(dbName)) throw new Error(`dbCerts: bad instance name ${JSON.stringify(dbName)}`);
+  const name = `redis-ca:${dbName}`;
+  const row = rowNamed(name);
+  if (row) return load(row);
+  const ca = pki.generateCa({ commonName: redisCaCommonName(dbName) });
+  store(name, ca);
+  return { certPem: ca.certPem, keyPem: ca.keyPem, notAfter: ca.notAfter };
+}
+
+/**
+ * A leaf signed by an instance CA, re-issued when it is due for renewal OR no
+ * longer verifies against that CA. The second check is what makes the
+ * certificate follow its CA: a CA row that was dropped and regenerated (an
+ * instance deprovisioned and provisioned again under the same name) would
+ * otherwise leave a stored leaf that the new instance refuses.
+ */
+function ensureLeafUnder(name, issuer, { commonName, usage }) {
+  const row = rowNamed(name);
+  if (row && !pki.needsRenewal(row.cert_pem)) {
+    let chained = false;
+    try { chained = new crypto.X509Certificate(row.cert_pem).verify(crypto.createPublicKey(issuer.certPem)); } catch (_) {}
+    if (chained) return { ...load(row), renewed: false };
+  }
+  const cert = pki.issueCert({ ca: issuer, commonName, usage });
+  store(name, cert);
+  return { certPem: cert.certPem, keyPem: cert.keyPem, notAfter: cert.notAfter, renewed: true };
+}
+
+/**
+ * The app's Redis client certificate: CN = its login, signed by the
+ * instance's CA. `ca` is the PLATFORM CA — what the app verifies the server
+ * with — so writeClientFiles() writes the same ca.crt it always has.
+ */
+export function ensureRedisClientCert(dbName, login) {
+  if (!SAFE_LOGIN.test(login)) throw new Error(`dbCerts: bad login ${JSON.stringify(login)}`);
+  const issuer = ensureRedisCa(dbName);
+  const leaf = ensureLeafUnder(`redis-client:${dbName}`, issuer, { commonName: login, usage: 'client' });
+  return { ...leaf, ca: ensureCa() };
+}
+
+/**
+ * The certificate AppCrane's own redis-cli presents inside the instance's
+ * container (readiness, ACL SETUSER, BGSAVE for backups, ACL LOG for alerts).
+ * It used to be the server certificate, issued with clientAuth for exactly
+ * this; that stopped working the moment the instance stopped trusting the
+ * platform CA, so it is now a client certificate of the instance's own CA.
+ */
+export function ensureRedisAdminCert(dbName) {
+  const issuer = ensureRedisCa(dbName);
+  return ensureLeafUnder(`redis-admin:${dbName}`, issuer, { commonName: 'appcrane-admin', usage: 'client' });
+}
+
+/**
+ * Write an instance's server files: the platform CA (ca.crt, what redis-cli
+ * verifies the server with), the instance CA (client-ca.crt, the ONLY anchor
+ * Redis accepts clients from), the shared Redis server certificate and the
+ * admin client certificate. 0700 directory, keys 0600.
+ */
+export function writeRedisServerFiles(dbName, { server, instanceCa, admin }) {
+  const dir = privateDir(redisInstanceTlsDir(dbName));
+  atomicWrite(join(dir, 'ca.crt'), server.ca.certPem, 0o644);
+  atomicWrite(join(dir, 'client-ca.crt'), instanceCa.certPem, 0o644);
+  atomicWrite(join(dir, 'server.crt'), server.certPem, 0o644);
+  atomicWrite(join(dir, 'server.key'), server.keyPem, 0o600);
+  atomicWrite(join(dir, 'server.pem'), server.certPem + server.keyPem, 0o600);
+  atomicWrite(join(dir, 'admin.crt'), admin.certPem, 0o644);
+  atomicWrite(join(dir, 'admin.key'), admin.keyPem, 0o600);
+  return dir;
+}
+
+/** Expiry of the app's Redis client certificate. Never decrypts. */
+export function redisClientCertInfo(dbName) {
+  const row = rowNamed(`redis-client:${dbName}`);
+  return row ? { not_after: row.not_after } : null;
+}
+
+/**
+ * Forget an instance's CA and certificates and remove their files
+ * (deprovision). Only the redis-client.* files leave the login's directory:
+ * client.* there may belong to the same login's Postgres/MariaDB/Mongo.
+ */
+export function dropRedisCerts(dbName, login) {
+  if (!SAFE_LOGIN.test(dbName)) return;
+  const del = getDb().prepare('DELETE FROM managed_db_certs WHERE name = ?');
+  for (const n of [`redis-ca:${dbName}`, `redis-client:${dbName}`, `redis-admin:${dbName}`]) del.run(n);
+  rmSync(join(tlsRoot(), 'redis', dbName), { recursive: true, force: true });
+  if (login && SAFE_LOGIN.test(login)) {
+    for (const f of REDIS_CLIENT_FILES) rmSync(join(tlsRoot(), 'client', login, f), { force: true });
+  }
+}
+
 /** Expiry only — for the API. Never decrypts. */
 export function clientCertInfo(login) {
   const row = rowNamed(`client:${login}`);
@@ -216,7 +384,8 @@ export function writeServerFiles(engine, cert, extra = {}) {
  *
  * Returns the host directory to bind-mount and the container paths.
  */
-export function writeClientFiles(login, cert, owner = null) {
+export function writeClientFiles(login, cert, owner = null, { prefix = '' } = {}) {
+  if (prefix !== '' && prefix !== REDIS_CLIENT_PREFIX) throw new Error(`dbCerts: bad client file prefix ${JSON.stringify(prefix)}`);
   const dir = clientTlsDir(login);
   mkdirSync(dir, { recursive: true });
   const canChown = Boolean(owner) && typeof process.getuid === 'function' && process.getuid() === 0;
@@ -227,19 +396,14 @@ export function writeClientFiles(login, cert, owner = null) {
   if (canChown) chownSync(dir, owner.uid, owner.gid);
   const o = canChown ? owner : null;
   atomicWrite(join(dir, 'ca.crt'), cert.ca.certPem, 0o444, o);
-  atomicWrite(join(dir, 'client.crt'), cert.certPem, 0o444, o);
-  atomicWrite(join(dir, 'client.key'), cert.keyPem, keyMode, o);
-  atomicWrite(join(dir, 'client.pem'), cert.certPem + cert.keyPem, keyMode, o);
+  atomicWrite(join(dir, `${prefix}client.crt`), cert.certPem, 0o444, o);
+  atomicWrite(join(dir, `${prefix}client.key`), cert.keyPem, keyMode, o);
+  atomicWrite(join(dir, `${prefix}client.pem`), cert.certPem + cert.keyPem, keyMode, o);
   return {
     hostDir: dir,
     keyMode,
     chowned: canChown,
-    files: {
-      ca: `${CLIENT_MOUNT_PATH}/ca.crt`,
-      cert: `${CLIENT_MOUNT_PATH}/client.crt`,
-      key: `${CLIENT_MOUNT_PATH}/client.key`,
-      pem: `${CLIENT_MOUNT_PATH}/client.pem`,
-    },
+    files: clientFilePaths(prefix),
   };
 }
 

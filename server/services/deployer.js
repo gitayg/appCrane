@@ -117,6 +117,20 @@ export function buildManagedDbEnv(needs, creds) {
  *                                             libpq's PG* names — libpq reads
  *                                             these from the environment with
  *                                             no code at all
+ *   REDIS_TLS_CA_FILE / REDIS_TLS_CERT_FILE / REDIS_TLS_KEY_FILE
+ *                                             Redis only. The same paths as
+ *                                             DB_*_FILE for a Redis login
+ *                                             (redis-client.*, signed by the
+ *                                             instance's own CA), under names
+ *                                             that cannot be confused with a
+ *                                             Postgres/MariaDB certificate in
+ *                                             an app that has both.
+ *
+ * The rediss:// URL itself carries NO certificate parameters: no Redis URL
+ * convention is shared across clients, and a client that does not know a
+ * query option either ignores it or refuses the URL (go-redis's ParseURL
+ * rejects unknown options), so a query string would break URLs that work
+ * today. The client is pointed at the files through these variables.
  */
 export function tlsFileEnv(needs, creds) {
   const tls = creds?.tls;
@@ -127,6 +141,13 @@ export function tlsFileEnv(needs, creds) {
     DB_KEY_FILE: tls.key,
     DB_CERT_KEY_FILE: tls.pem,
   };
+  if (creds.engine === 'redis') {
+    Object.assign(out, {
+      REDIS_TLS_CA_FILE: tls.ca,
+      REDIS_TLS_CERT_FILE: tls.cert,
+      REDIS_TLS_KEY_FILE: tls.key,
+    });
+  }
   const speaksPg = creds.engine === 'postgres'
     && Object.values(needs?.env || {}).some((v) => typeof v === 'string' && v.startsWith('PG'));
   if (speaksPg) {

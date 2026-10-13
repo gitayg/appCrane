@@ -4,6 +4,7 @@ import { execFileSync } from 'child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync, chmodSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { WORKSPACE_DOCKER_PRELUDE } from './fixtures/workspaceDockerShim.js';
 
 /**
  * An eviction must not destroy a coder session's work or its conversation.
@@ -40,6 +41,7 @@ const BIN = join(ROOT, 'bin');
 const DOCKER_LOG = join(ROOT, 'docker-argv.log');
 mkdirSync(BIN, { recursive: true });
 writeFileSync(join(BIN, 'docker'), `#!/bin/sh
+${WORKSPACE_DOCKER_PRELUDE}
 printf '%s\\n' "$*" >> ${JSON.stringify(DOCKER_LOG)}
 case "$1" in
   run)     echo c0ffee000000c0ffee000000c0ffee000000c0ffee000000c0ffee000000c0ff ;;

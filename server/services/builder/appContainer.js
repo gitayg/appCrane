@@ -1,11 +1,12 @@
 import { execFileSync } from 'child_process';
-import { mkdirSync, chmodSync, existsSync, rmSync, readdirSync } from 'fs';
+import { mkdirSync, chmodSync, existsSync, rmSync, readdirSync, mkdtempSync, openSync, closeSync } from 'fs';
+import { tmpdir } from 'os';
 import { join, resolve } from 'path';
 import { getDb } from '../../db.js';
 import { usesLocalRepo, cloneLocalRepoForDeploy } from '../managedRepo.js';
 import { isEnvFilePath } from '../envFilePushGuard.js';
-import { repoPath } from '../localGit.js';
-import { assertSafeWorkspaceGit, HARDENED_GIT_ARGS } from './workspaceGitGuard.js';
+import { runWorkspaceGit } from './workspaceRunner.js';
+import { importWorkspaceBundleSync } from '../localGit.js';
 import { ensureStudioImage } from '../appstudio/generator.js';
 import { writeSnapshot } from '../github/snapshot.js';
 import { prepareSkillsMount } from '../skills.js';
@@ -117,6 +118,32 @@ export function getContainer(slug) {
   return c?.ready ? c : null;
 }
 
+/**
+ * The name of the RUNNING container that mounts `workspaceDir`, or null. Git
+ * in a workspace runs inside that container (builder/workspaceRunner.js), so
+ * this is how gitOps finds it without being handed a slug. By name rather than
+ * id because startContainer removes any same-named container first, so the name
+ * is unique for as long as the in-memory record exists.
+ */
+export function liveContainerNameFor(workspaceDir) {
+  for (const c of containers.values()) {
+    if (c.ready && c.workspaceDir === workspaceDir) return containerNameFor(c.appSlug);
+  }
+  return null;
+}
+
+/**
+ * True for a path inside the coder's workspace root (DATA_DIR/app-containers).
+ * Anything there is, or was, mounted into an agent's container.
+ */
+export function isCoderWorkspace(dir) {
+  const root = rootDir();
+  const abs = resolve(String(dir));
+  return abs.startsWith(`${root}/`);
+}
+
+function containerNameFor(slug) { return `appcrane-app-${slug}`; }
+
 export function listContainers() {
   return [...containers.values()].filter(c => c.ready).map(c => ({
     slug: c.appSlug,
@@ -169,8 +196,12 @@ async function cloneWorkspace(app, onLog) {
   onLog?.(`[appContainer:git] Cloning Crane-hosted repo for ${app.slug} (${app.branch || 'main'})…`);
   await cloneLocalRepoForDeploy(app, workspaceDir, app.branch || 'main');
 
-  execFileSync('git', ['-C', workspaceDir, 'config', 'user.email', 'builder@appcrane.local'], { stdio: 'pipe' });
-  execFileSync('git', ['-C', workspaceDir, 'config', 'user.name', 'AppCrane Builder'], { stdio: 'pipe' });
+  // Host git is safe HERE and only here: the directory was just removed and
+  // re-cloned by AppCrane, and no container mounts it yet (startContainer runs
+  // after; a container that mounted the old directory holds the old, deleted
+  // inode). Every git after the mount goes through workspaceRunner.js.
+  execFileSync('git', ['-C', workspaceDir, 'config', 'user.email', 'builder@appcrane.local'], { stdio: 'pipe' }); // host-git-ok: pre-mount
+  execFileSync('git', ['-C', workspaceDir, 'config', 'user.name', 'AppCrane Builder'], { stdio: 'pipe' }); // host-git-ok: pre-mount
 
   try { execFileSync('chmod', ['-R', '777', workspaceDir], { stdio: 'pipe' }); } catch (_) {}
   try { execFileSync('chown', ['-R', '1000:1000', workspaceDir], { stdio: 'pipe' }); } catch (_) {}
@@ -179,7 +210,7 @@ async function cloneWorkspace(app, onLog) {
 }
 
 function startContainer(slug, workspaceDir, onLog) {
-  const containerName = `appcrane-app-${slug}`;
+  const containerName = containerNameFor(slug);
   // Clean up any leftover container with the same name (previous AppCrane process)
   try { execFileSync('docker', ['rm', '-f', containerName], { stdio: 'pipe', timeout: 10000 }); } catch (_) {}
 
@@ -268,7 +299,7 @@ export async function getOrCreate(app, onLog) {
 
     // Create the shared builder branch in the workspace before the container starts
     try {
-      execFileSync('git', ['-C', workspaceDir, 'checkout', '-B', branchName], { stdio: 'pipe' });
+      execFileSync('git', ['-C', workspaceDir, 'checkout', '-B', branchName], { stdio: 'pipe' }); // host-git-ok: pre-mount (startContainer is below)
     } catch (err) {
       log.warn(`appContainer: failed to create branch ${branchName}: ${err.message}`);
     }
@@ -374,16 +405,16 @@ export function assertPreserveBranchSafe(branch, app) {
  * far better outcome than no rescue commit.
  */
 //
-// The workspace is the agent's to rewrite, .git/ included, so its config is
-// checked against an allowlist before EVERY call and HARDENED_GIT_ARGS cut off
-// hooks, fsmonitor and network transports on top (builder/workspaceGitGuard.js).
-// safe.directory alone would make this host honour whatever command the agent
-// planted in .git/config.
-export function gitIn(dir, args) {
-  assertSafeWorkspaceGit(dir);
-  return execFileSync('git', ['-c', `safe.directory=${dir}`, '-c', 'core.fileMode=false', ...HARDENED_GIT_ARGS, '-C', dir, ...args], {
-    stdio: 'pipe', timeout: 60000,
-  }).toString();
+// The workspace is the agent's to rewrite, .git/ included. Until v2.103.2 this
+// ran host git after an allowlist check of .git/config; the check and git's own
+// read were separate moments, so a swapped config could win the gap. Now the
+// git itself runs in a container (builder/workspaceRunner.js) — every caller
+// here is the eviction rescue, which stops the session's container first, so
+// that is a throwaway helper with no network and only the workspace mounted.
+// The allowlist and HARDENED_GIT_ARGS still apply inside it.
+export function gitIn(dir, args, opts = {}) {
+  const out = runWorkspaceGit(dir, args, opts);
+  return out ? out.toString() : ''; // null when stdout went to a file descriptor
 }
 
 function stagedPaths(dir) {
@@ -448,7 +479,11 @@ function preserveWorkspace(slug, workspaceDir) {
   // itself — so there is nothing to write. An empty ref would be noise a user
   // has to read and dismiss.
   let upstream = null;
-  try { upstream = gitIn(workspaceDir, ['rev-parse', `refs/remotes/origin/${app.branch || 'main'}`]).trim(); } catch (_) {}
+  try { upstream = gitIn(workspaceDir, ['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${app.branch || 'main'}^{commit}`]).trim(); } catch (_) {}
+  // Both come out of a repository the agent can rewrite and go back in as
+  // argv (bundle create, update-ref), so they must be object names, nothing else.
+  if (!/^[0-9a-f]{40}$/.test(head)) throw new Error(`workspace HEAD is not a commit id: ${JSON.stringify(head.slice(0, 80))}`);
+  if (upstream && !/^[0-9a-f]{40}$/.test(upstream)) upstream = null;
   if (!staged.length && head === upstream) return { preserved: false, reason: 'no_changes', skippedEnvFiles };
 
   // A session can be evicted more than once: it is resumed, gets a FRESH clone
@@ -460,25 +495,55 @@ function preserveWorkspace(slug, workspaceDir) {
   // three slash-separated segments, so the deploy-branch guard applies to each.
   // Bounded: after ten rescues for one session, something is wrong and silently
   // creating refs forever is not the answer.
-  // Pushed to the managed repo by its path, not to `origin`: remote.origin.url
-  // is in the agent-writable .git/config, and a rewritten one would make this
-  // host write the rescue branch into some other repository.
-  const pushTarget = repoPath(slug);
-  const targets = [branch, ...Array.from({ length: 9 }, (_, i) => `${branch}.${i + 2}`)];
-  let lastErr = null;
-  for (const target of targets) {
-    try {
-      gitIn(workspaceDir, ['push', pushTarget, `HEAD:refs/heads/${assertPreserveBranchSafe(target, app)}`]);
-      return { preserved: true, branch: target, commit: head, files: staged.length, skippedEnvFiles };
-    } catch (err) {
-      lastErr = err;
-      const why = String(err.stderr || err.message);
-      // Only a ref that is already taken is worth another ref. Anything else
-      // (repo gone, disk full, permissions) fails the same way ten times over.
-      if (!/non-fast-forward|fetch first|\[rejected\]/i.test(why)) throw err;
+  //
+  // The commits leave the workspace as a git BUNDLE, never as a push from it.
+  // A push runs inside the workspace's git (whose config is the agent's), and
+  // from a helper container it would need the managed bare repo mounted into
+  // something the agent's files can steer. Instead the helper writes
+  // `git bundle create - HEAD --not <upstream>` to stdout — only the new
+  // commits, so a shallow clone works — straight into a file AppCrane owns,
+  // and the HOST unbundles it into the bare repo by path
+  // (localGit.importWorkspaceBundleSync). That host git runs in the bare repo
+  // AppCrane created, with localGit's scratch environment and hooks cut off;
+  // the bundle is data — objects and one ref — and git executes nothing from
+  // it. Not to `origin` either: remote.origin.url is the agent's to rewrite.
+  const bundle = bundleWorkspace(workspaceDir, upstream);
+  try {
+    const targets = [branch, ...Array.from({ length: 9 }, (_, i) => `${branch}.${i + 2}`)];
+    for (const target of targets) {
+      const r = importWorkspaceBundleSync(slug, bundle.file, assertPreserveBranchSafe(target, app), head);
+      if (r.ok) return { preserved: true, branch: target, commit: head, files: staged.length, skippedEnvFiles };
+      // Only a ref that is already taken by unrelated history is worth another
+      // ref. Anything else threw out of importWorkspaceBundleSync.
     }
+    throw new Error(`every preserve branch from ${branch} to ${targets[targets.length - 1]} is already taken`);
+  } finally {
+    bundle.cleanup();
   }
-  throw lastErr;
+}
+
+/**
+ * The commits HEAD has that `upstream` (the clone's origin tip — the managed
+ * repo's own commit) does not, as a bundle file in a private temp dir. Without
+ * an upstream the whole of HEAD is bundled; unbundling then fails on the
+ * missing shallow parents, which is the right outcome for a workspace whose
+ * origin ref the agent deleted.
+ */
+function bundleWorkspace(workspaceDir, upstream) {
+  const dir = mkdtempSync(join(tmpdir(), 'appcrane-rescue-'));
+  const file = join(dir, 'rescue.bundle');
+  const fd = openSync(file, 'w', 0o600);
+  try {
+    gitIn(workspaceDir, ['bundle', 'create', '-', 'HEAD', ...(upstream ? ['--not', upstream] : [])], {
+      stdout: fd, timeout: 300000,
+    });
+  } catch (err) {
+    closeSync(fd);
+    rmSync(dir, { recursive: true, force: true });
+    throw err;
+  }
+  closeSync(fd);
+  return { file, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
 /**

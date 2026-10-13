@@ -5,6 +5,8 @@ import { getDb } from '../../db.js';
 import log from '../../utils/logger.js';
 import { runAgentOneShot } from '../llm/runAgent.js';
 import { ensureStudioImage } from './generator.js';
+import { runWorkspaceGit } from '../builder/workspaceRunner.js';
+import { isCoderWorkspace, liveContainerNameFor } from '../builder/appContainer.js';
 
 const MODEL        = process.env.APPSTUDIO_PLANNER_MODEL || 'claude-sonnet-4-6';
 const STUDIO_IMAGE = process.env.APPSTUDIO_IMAGE || 'appcrane-studio:latest';
@@ -13,19 +15,31 @@ const STUDIO_IMAGE = process.env.APPSTUDIO_IMAGE || 'appcrane-studio:latest';
 // it has "dubious ownership" and every read failed quietly: the summary was
 // built with no commit (so it was never cached) and an empty file tree.
 // Measured on a real instance: `context BUILD for tiny-barons @ undefined`.
+//
+// And it is the agent's to rewrite, .git/ included, while its container runs —
+// builderSession calls this for the coder workspace on every first turn. So
+// for a coder workspace the git runs inside the session's container (or a
+// throwaway helper), never on the host (builder/workspaceRunner.js). Every
+// other caller passes production/current, a release directory AppCrane cloned
+// and no agent has mounted, which keeps host git.
+function repoGit(repoDir, args, timeout) {
+  if (isCoderWorkspace(repoDir)) {
+    return runWorkspaceGit(repoDir, args, { container: liveContainerNameFor(repoDir), timeout }).toString('utf8');
+  }
+  return execFileSync('git', ['-c', `safe.directory=${repoDir}`, ...args], { // host-git-ok: release dir, never a coder workspace
+    cwd: repoDir, encoding: 'utf8', timeout, stdio: 'pipe',
+  });
+}
+
 function getGitHash(repoDir) {
   try {
-    return execFileSync('git', ['-c', `safe.directory=${repoDir}`, 'rev-parse', 'HEAD'], {
-      cwd: repoDir, encoding: 'utf8', timeout: 5000, stdio: 'pipe',
-    }).trim();
+    return repoGit(repoDir, ['rev-parse', 'HEAD'], 5000).trim();
   } catch (_) { return null; }
 }
 
 function getFileTree(repoDir) {
   try {
-    return execFileSync('git', ['-c', `safe.directory=${repoDir}`, 'ls-tree', '-r', '--name-only', 'HEAD'], {
-      cwd: repoDir, encoding: 'utf8', timeout: 10000, stdio: 'pipe',
-    }).trim();
+    return repoGit(repoDir, ['ls-tree', '-r', '--name-only', 'HEAD'], 10000).trim();
   } catch (_) { return ''; }
 }
 
@@ -148,9 +162,7 @@ Update the context document to reflect these changes. Update only the sections a
 
 function getChangedFiles(repoDir, oldHash, newHash) {
   try {
-    const out = execFileSync('git', ['-c', `safe.directory=${repoDir}`, 'diff', '--name-status', oldHash, newHash], {
-      cwd: repoDir, encoding: 'utf8', timeout: 10000, stdio: 'pipe',
-    }).trim();
+    const out = repoGit(repoDir, ['diff', '--name-status', oldHash, newHash], 10000).trim();
     return out.split('\n').filter(Boolean).map(line => {
       const [status, ...parts] = line.split('\t');
       return status.startsWith('R')

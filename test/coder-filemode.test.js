@@ -1,9 +1,10 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, chmodSync } from 'fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, chmodSync, realpathSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { WORKSPACE_DOCKER_PRELUDE } from './fixtures/workspaceDockerShim.js';
 
 /**
  * appContainer.cloneWorkspace runs `chmod -R 777` over a fresh workspace so the
@@ -45,6 +46,7 @@ const GIT_LOG = join(ROOT, 'git-argv.log');
 mkdirSync(BIN, { recursive: true });
 writeFileSync(GIT_LOG, '');
 writeFileSync(join(BIN, 'docker'), `#!/bin/sh
+${WORKSPACE_DOCKER_PRELUDE}
 case "$1" in
   run)     echo c0ffee000000c0ffee000000c0ffee000000c0ffee000000c0ffee000000c0ff ;;
   image)   echo 5 ;;
@@ -52,8 +54,14 @@ case "$1" in
 esac
 exit 0
 `, { mode: 0o755 });
+// Records argv, the cwd, and any config passed in the environment
+// (GIT_CONFIG_COUNT/KEY/VALUE): workspace git now runs through
+// builder/workspaceRunner.js, which hands its fixed scripts their config that
+// way, and in a container whose cwd is the workspace.
 writeFileSync(join(BIN, 'git'), `#!/bin/sh
-{ for a in "$@"; do printf '%s\\037' "$a"; done; printf '\\n'; } >> "${GIT_LOG}"
+{ printf 'PWD:%s\\037' "$(pwd -P)"
+  i=0; while [ "$i" -lt "\${GIT_CONFIG_COUNT:-0}" ]; do eval "k=\\$GIT_CONFIG_KEY_$i; v=\\$GIT_CONFIG_VALUE_$i"; printf 'ENV:%s=%s\\037' "$k" "$v"; i=$((i+1)); done
+  for a in "$@"; do printf '%s\\037' "$a"; done; printf '\\n'; } >> "${GIT_LOG}"
 exec "${REAL_GIT}" "$@"
 `, { mode: 0o755 });
 chmodSync(join(BIN, 'docker'), 0o755);
@@ -134,12 +142,12 @@ test('every git status/diff run against the workspace carried core.fileMode=fals
   const lines = readFileSync(GIT_LOG, 'utf8').split('\n').filter(Boolean)
     .map((l) => l.split('\x1f').slice(0, -1));
   const reads = lines.filter((a) =>
-    a.some((x) => x === c.workspaceDir || x === `safe.directory=${c.workspaceDir}`) &&
+    a.some((x) => x === `PWD:${realpathSync(c.workspaceDir)}`) &&
     a.some((x) => x === 'status' || x === 'diff' || x === 'add'));
   assert.ok(reads.length > 0, 'no status/diff/add calls were recorded — the git shim is not on PATH');
   for (const a of reads) {
     assert.ok(
-      a.includes('core.fileMode=false'),
+      a.includes('core.fileMode=false') || a.includes('ENV:core.fileMode=false'),
       `a workspace status/diff ran with git's default fileMode: ${a.join(' ')}`,
     );
   }

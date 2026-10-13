@@ -32,10 +32,35 @@
  *             database is named only when the denial was for a database
  *   mongo     the structured "Failed to authenticate" event (id 5286307 on
  *             mongo:8.0, measured; "Authentication failed" id 20249 before)
- *   redis     NOT covered: a failed AUTH is not logged by redis-server (it is
- *             kept in the in-memory ACL LOG only), and reading N per-app
- *             containers' ACL LOG over redis-cli is not the cheap thing the
- *             other three are.
+ *   redis     a failed AUTH is not logged by redis-server at all; it is
+ *             kept in the in-memory ACL LOG. So each per-scope instance's
+ *             `ACL LOG 128` is read with redis-cli INSIDE its own container
+ *             (managedRedis.aclLogArgs), authenticated by the REDISCLI_AUTH
+ *             the container already has — no password on any argv, and none
+ *             passed in with `docker exec -e` either, since nothing needs to
+ *             cross. Entries with reason "auth" are counted.
+ *
+ * REDIS IS READ BY ENTRY, NOT BY LINE. The ACL LOG groups repeats: a burst of
+ * failures for one username is ONE entry whose count grows (measured on
+ * redis:8.10-alpine: three wrong passwords -> one entry, count 3). An entry is
+ * identified by (entry-id, timestamp-created) — ids restart at 0 with the
+ * instance — and managed_db_redis_acl_seen (migration 110) records the count
+ * already turned into failure rows, so each scan stores only the DELTA, and a
+ * restart of AppCrane does not count the log twice. The log is never reset:
+ * it stays as evidence for whoever investigates the alert.
+ *
+ * A failure row's time is the entry's timestamp-last-updated, so the up to
+ * SCAN_INTERVAL_MS of failures a delta covers are all dated at the newest of
+ * them. That can only move failures LATER, i.e. into the window, never out.
+ *
+ * For Redis the login stored is the username the client sent, and `default`
+ * (what a password-only `AUTH <pw>` resolves to on every instance) is stored
+ * as default@<instance>, so failures against six different apps' instances do
+ * not add up to one alert. The client address in the entry is never read: as
+ * for the shared servers, it is the Docker bridge gateway for every
+ * connection (measured), so the username and the TARGET INSTANCE are what
+ * identify the caller. A connection refused for a missing or wrong client
+ * certificate never reaches AUTH, so it is not in the ACL LOG and not counted.
  */
 
 import { execFile } from 'child_process';
@@ -45,6 +70,7 @@ import log from '../utils/logger.js';
 import { logAudit } from '../middleware/audit.js';
 import { enqueueEmail } from './emailQueue.js';
 import { getManagedDbSettings } from './managedDbSettings.js';
+import * as redis from './managedRedis.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -117,6 +143,66 @@ export function parseAuthFailures(engine, text) {
     }
   }
   return out.filter(f => f.login && !IGNORED_LOGINS.has(f.login));
+}
+
+/**
+ * Parse `redis-cli --json ACL LOG 128` (redis:8.10 output, measured). Keeps
+ * only reason "auth" and only the fields counted; `client-info` is dropped
+ * unread, and the username is clamped like every other attacker-chosen name.
+ * @returns {Array<{ entryId: number, createdMs: number, updatedMs: number, count: number, username: string }>}
+ */
+export function parseRedisAclLog(text) {
+  let entries;
+  try { entries = JSON.parse(String(text || '').trim() || '[]'); } catch (_) { return []; }
+  if (!Array.isArray(entries)) return [];
+  const out = [];
+  for (const e of entries) {
+    if (!e || e.reason !== 'auth') continue;
+    const entryId = Number(e['entry-id']);
+    const createdMs = Number(e['timestamp-created']);
+    const updatedMs = Number(e['timestamp-last-updated'] ?? e['timestamp-created']);
+    const count = Number(e.count);
+    const username = clamp(e.username);
+    if (!Number.isInteger(entryId) || !Number.isFinite(createdMs) || !Number.isFinite(updatedMs)) continue;
+    if (!Number.isInteger(count) || count < 1 || !username) continue;
+    out.push({ entryId, createdMs, updatedMs, count, username });
+  }
+  return out;
+}
+
+/** The login a Redis failure is stored under (see the header on `default`). */
+export function redisLogin(username, dbName) {
+  return username === 'default' ? clamp(`default@${dbName}`) : username;
+}
+
+/**
+ * Turn ACL LOG entries into failure rows: for each entry, only the count not
+ * already recorded. One transaction, so the rows and the seen-count move
+ * together — a crash between them can neither lose nor double failures.
+ */
+export function recordRedisAclEntries(db, { container, dbName }, entries, { now = new Date() } = {}) {
+  const seen = db.prepare('SELECT seen_count FROM managed_db_redis_acl_seen WHERE container_name = ? AND entry_id = ? AND created_ms = ?');
+  const upsert = db.prepare(`INSERT INTO managed_db_redis_acl_seen (container_name, entry_id, created_ms, seen_count, updated_at)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(container_name, entry_id, created_ms) DO UPDATE SET seen_count = excluded.seen_count, updated_at = excluded.updated_at`);
+  const ins = db.prepare(
+    "INSERT INTO managed_db_auth_failures (engine, login, database_name, reason, occurred_at) VALUES ('redis', ?, ?, 'auth-failed', ?)",
+  );
+  let n = 0;
+  db.transaction(() => {
+    for (const e of entries) {
+      const prev = seen.get(container, e.entryId, e.createdMs)?.seen_count || 0;
+      const login = redisLogin(e.username, dbName);
+      if (!IGNORED_LOGINS.has(login)) {
+        const at = new Date(e.updatedMs).toISOString();
+        for (let i = prev; i < e.count; i++) { ins.run(login, dbName, at); n++; }
+      }
+      // Touched on every scan, delta or not: a row is pruned only once its
+      // entry has not been in the log for a day.
+      upsert.run(container, e.entryId, e.createdMs, Math.max(prev, e.count), now.toISOString());
+    }
+  })();
+  return n;
 }
 
 // AppCrane's own readiness probe deliberately logs in as a user that does not
@@ -220,7 +306,9 @@ export function evaluateAlerts(db, {
       '',
       foreign.length
         ? `This login targeted a database it does not own. The app it belongs to (${owner.slug}) is the likely source.`
-        : 'The source address is not reported: every connection to a managed database arrives from the Docker bridge gateway, so the login and the database are what identify the caller.',
+        : g.engine === 'redis'
+          ? 'The source address is not reported: Redis records every connection to a managed instance as coming from the Docker bridge gateway, so the username and the target instance are what identify the caller. Connections refused for a missing or wrong client certificate never reach AUTH and are not counted here.'
+          : 'The source address is not reported: every connection to a managed database arrives from the Docker bridge gateway, so the login and the database are what identify the caller.',
       '',
       'Passwords are never logged by the database engines and are not part of this alert. You will get at most one of these per login per hour.',
     ].join('\n');
@@ -270,10 +358,35 @@ export async function scanOnce({ db = getDb(), now = new Date(), exec = execFile
     const newest = failures.reduce((m, f) => (f.at > m ? f.at : m), since);
     cursors.set(s.container_name, newest);
   }
-  // Keep the table bounded: nothing older than a day is ever consulted.
-  db.prepare("DELETE FROM managed_db_auth_failures WHERE occurred_at < ?").run(new Date(now.getTime() - 24 * 3600 * 1000).toISOString());
+  stored += await scanRedisInstances({ db, now, exec });
+  // Keep the tables bounded: nothing older than a day is ever consulted.
+  const dayAgo = new Date(now.getTime() - 24 * 3600 * 1000).toISOString();
+  db.prepare("DELETE FROM managed_db_auth_failures WHERE occurred_at < ?").run(dayAgo);
+  db.prepare('DELETE FROM managed_db_redis_acl_seen WHERE updated_at < ?').run(dayAgo);
   const raised = evaluateAlerts(db, { now });
   return { stored, raised };
+}
+
+/**
+ * Every per-scope Redis: read its ACL LOG and record the new failures. One
+ * unreachable instance (stopped, mid-recreate) is skipped, not fatal.
+ */
+async function scanRedisInstances({ db, now, exec }) {
+  const rows = db.prepare(
+    "SELECT db_name, container_name, client_cert_required FROM managed_databases WHERE engine = 'redis' AND container_name IS NOT NULL",
+  ).all();
+  let stored = 0;
+  for (const r of rows) {
+    let stdout = '';
+    try {
+      ({ stdout } = await exec('docker', redis.aclLogArgs(r.container_name, { tls: r.client_cert_required === 1 }), { timeout: 30000, maxBuffer: 4 * 1024 * 1024 }));
+    } catch (e) {
+      log.debug(`[db-auth-alerts] could not read ${r.container_name} ACL LOG: ${e.message}`);
+      continue;
+    }
+    stored += recordRedisAclEntries(db, { container: r.container_name, dbName: r.db_name }, parseRedisAclLog(stdout), { now });
+  }
+  return stored;
 }
 
 export function __resetCursorsForTests() { cursors.clear(); }

@@ -5,6 +5,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync
 import { tmpdir } from 'os';
 import { join } from 'path';
 import express from 'express';
+import { WORKSPACE_DOCKER_PRELUDE } from './fixtures/workspaceDockerShim.js';
 
 // Phase 4a: a Builder session on a Crane-hosted app RELEASES selected changes
 // to sandbox THROUGH the managed repository.
@@ -49,6 +50,7 @@ const STUDIO_VERSION = /STUDIO_IMAGE_VERSION = '(\d+)'/
   .exec(readFileSync(new URL('../server/services/appstudio/generator.js', import.meta.url), 'utf8'))?.[1];
 if (!STUDIO_VERSION) throw new Error('could not read STUDIO_IMAGE_VERSION from generator.js');
 writeFileSync(join(SHIM, 'docker'), `#!/bin/sh
+${WORKSPACE_DOCKER_PRELUDE}
 case "$1" in
   image)   echo ${STUDIO_VERSION}; exit 0 ;;
   inspect) echo true; exit 0 ;;

@@ -710,7 +710,8 @@ other names, or to get discrete variables too:
   sets itself (`PORT`, `NODE_ENV`, `DATA_DIR`, `FE_PORT`, `APP_BASE_PATH`,
   `CRANE_URL`, `CRANE_INTERNAL_URL`, the TLS file variables `DB_CA_FILE`,
   `DB_CERT_FILE`, `DB_KEY_FILE`, `DB_CERT_KEY_FILE`, `PGSSLMODE`,
-  `PGSSLROOTCERT`, `PGSSLCERT`, `PGSSLKEY`, anything starting `APPCRANE_`).
+  `PGSSLROOTCERT`, `PGSSLCERT`, `PGSSLKEY`, `REDIS_TLS_CA_FILE`,
+  `REDIS_TLS_CERT_FILE`, `REDIS_TLS_KEY_FILE`, anything starting `APPCRANE_`).
 - An invalid block fails the deploy before the build, naming the field. A failed
   provision fails the deploy with the reason.
 - An env var you set on the app yourself wins over the injected one.
@@ -745,6 +746,23 @@ own), and mounted read-only into that one container:
 | Client certificate | `/run/appcrane/db/client.crt` (`DB_CERT_FILE`) |
 | Client key | `/run/appcrane/db/client.key` (`DB_KEY_FILE`) |
 | Certificate + key in one file | `/run/appcrane/db/client.pem` (`DB_CERT_KEY_FILE`) |
+
+**Redis uses its own certificate.** Each app's Redis instance trusts only a CA
+of its own, which signs only that app's Redis certificate, so another app's
+certificate is refused at the TLS handshake even with the right password. Its
+files sit next to the ones above, and for a Redis database `DB_CERT_FILE`,
+`DB_KEY_FILE` and `DB_CERT_KEY_FILE` point at them:
+
+| File | Path in the container |
+|---|---|
+| CA certificate (verifies the server) | `/run/appcrane/db/ca.crt` (`REDIS_TLS_CA_FILE`, `DB_CA_FILE`) |
+| Redis client certificate | `/run/appcrane/db/redis-client.crt` (`REDIS_TLS_CERT_FILE`, `DB_CERT_FILE`) |
+| Redis client key | `/run/appcrane/db/redis-client.key` (`REDIS_TLS_KEY_FILE`, `DB_KEY_FILE`) |
+| Certificate + key in one file | `/run/appcrane/db/redis-client.pem` (`DB_CERT_KEY_FILE`) |
+
+The `rediss://` URL carries no certificate parameters: Redis clients share no
+URL convention for them, and some (go-redis) reject a URL with options they do
+not know. Point the client at the files.
 
 The injected URL already carries the TLS parameters. What each driver reads
 from it, measured against the real engines:
@@ -805,9 +823,9 @@ import fs from 'node:fs'
 import Redis from 'ioredis'
 const redis = new Redis(process.env.REDIS_URL, {
   tls: {
-    ca: fs.readFileSync(process.env.DB_CA_FILE),
-    cert: fs.readFileSync(process.env.DB_CERT_FILE),
-    key: fs.readFileSync(process.env.DB_KEY_FILE),
+    ca: fs.readFileSync(process.env.REDIS_TLS_CA_FILE),
+    cert: fs.readFileSync(process.env.REDIS_TLS_CERT_FILE),
+    key: fs.readFileSync(process.env.REDIS_TLS_KEY_FILE),
     servername: 'host.docker.internal',
   },
 })
@@ -819,6 +837,12 @@ Notes:
   the app's next deploy or restart: the certificate is issued and mounted, and
   from then on the plain-text connection string stops working. Update the
   connection code (above) in the same deploy.
+- A Redis instance that already required TLS before per-instance CAs is
+  converted the same way: on the app's next deploy or restart the instance is
+  restarted trusting only its own CA (its data is untouched) and the app gets
+  `redis-client.*`. Code that reads the `DB_*_FILE` or `REDIS_TLS_*` variables
+  keeps working; code with `/run/appcrane/db/client.crt` hard-coded must
+  switch to `redis-client.crt`.
 - Certificates last two years and are renewed automatically when fewer than 30
   days are left; the new files are written before the old ones expire and the
   next deploy or restart picks them up, so a running app is never cut off.
@@ -828,7 +852,10 @@ Notes:
   no per-login connection cap.
 - Repeated failed logins are reported to platform admins with the login and the
   database it tried — a login that keeps failing against a database it does not
-  own identifies the app doing it.
+  own identifies the app doing it. Redis is included: AppCrane reads each
+  instance's `ACL LOG` (Redis logs failed logins nowhere else) and reports the
+  username and the target instance. A connection refused for a missing or wrong
+  certificate never reaches the password check, so it is not counted.
 - Catalogue apps keep working without TLS: the servers offer TLS to anyone who
   asks, but only logins declared in `deployhub.json` are required to use it.
 

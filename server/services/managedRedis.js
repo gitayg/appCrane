@@ -325,16 +325,21 @@ export function serverCommand(maxmemoryMb, { tls = false } = {}) {
 /**
  * TLS for a per-scope Redis whose login comes from a deployhub.json: the plain
  * port is CLOSED (--port 0) and the instance's one port speaks TLS only, with
- * tls-auth-clients yes so a client without a CA-signed certificate is refused
- * at the handshake, before AUTH. The password (ACL user) is still required on
- * top.
+ * tls-auth-clients yes so a client without an acceptable certificate is
+ * refused at the handshake, before AUTH. The password (ACL user) is still
+ * required on top.
  *
- * GAP, stated: Redis checks that the client certificate is signed by the CA,
- * not WHICH login it names. tls-auth-clients-user (Redis 8) would map a cert's
- * CN to an ACL user, but it AUTHENTICATES on a match rather than refusing on a
- * mismatch, so it cannot express "this cert and only this cert". What binds an
- * instance to its app is that it is the app's own container with its own
- * password; the certificate adds "and an AppCrane-issued client certificate".
+ * WHICH certificate is acceptable is the whole point of tls-ca-cert-file, and
+ * it is the INSTANCE's own client CA (client-ca.crt), not the platform CA.
+ * Redis checks only that a client certificate chains to that file — not which
+ * login it names (tls-auth-clients-user maps a CN to a user, but it
+ * AUTHENTICATES on a match rather than refusing on a mismatch, so it cannot say
+ * "this cert and only this cert"). While the file held the platform CA, every
+ * AppCrane-issued client certificate was accepted by every app's Redis: app
+ * B's certificate plus app A's password opened app A's instance. With one CA
+ * per instance, signing exactly that app's certificate and AppCrane's admin
+ * certificate (dbCerts.js header), another app's certificate fails the
+ * handshake regardless of the password it then would have sent.
  *
  * Catalogue instances are unchanged — plain only. A per-scope Redis publishes
  * one port, and Redis cannot speak TLS and plain on one port, so "offered but
@@ -347,24 +352,63 @@ export function tlsServerFlags() {
     '--tls-port', String(REDIS_CONTAINER_PORT),
     '--tls-cert-file', `${SERVER_RUNTIME_PATH}/server.crt`,
     '--tls-key-file', `${SERVER_RUNTIME_PATH}/server.key`,
-    '--tls-ca-cert-file', `${SERVER_RUNTIME_PATH}/ca.crt`,
+    '--tls-ca-cert-file', `${SERVER_RUNTIME_PATH}/${REDIS_CLIENT_CA_FILE}`,
     '--tls-auth-clients', 'yes',
   ];
 }
 
+/** The instance CA's file name inside the server directory (dbCerts.writeRedisServerFiles). */
+export const REDIS_CLIENT_CA_FILE = 'client-ca.crt';
+
 /**
- * redis-cli inside the instance's own container. With TLS on, it connects with
- * the SERVER's certificate as its client certificate (issued with clientAuth
- * for exactly this) — the files are already in the container, so nothing new
- * crosses into it. Carries no password: REDISCLI_AUTH is in the environment.
+ * The label value a TLS instance is created with. NOT managedDbTls's shared
+ * TLS_CONFIG_VERSION: this changes only when the REDIS TLS shape changes, and
+ * it changed with the per-instance CA — so a TLS instance created before that
+ * (label 'tls1', trusting the platform CA) differs from it and is recreated on
+ * its next ensure, on its existing volume, port and password.
+ */
+export const REDIS_TLS_CONFIG_VERSION = 'tls2-instance-ca';
+
+/**
+ * redis-cli inside the instance's own container. Carries no password:
+ * REDISCLI_AUTH is already in the container's environment (it arrived through
+ * --env-file when the container was created), so no credential crosses argv —
+ * not the host's and not the container's.
+ *
+ * With TLS on it presents the instance's ADMIN client certificate (admin.crt,
+ * signed by the instance CA) and verifies the server with the platform CA.
+ * The fixed shell literal falls back to server.crt for a container that has no
+ * admin.crt yet: a TLS instance created before the per-instance CA, which
+ * still trusts the platform CA and was given a server certificate with
+ * clientAuth for exactly this. Without the fallback, backups and auth alerts
+ * of such an instance would fail from the moment AppCrane is upgraded until
+ * its app is next deployed — the only point that instance is converted.
+ * Nothing caller-supplied enters the shell string: the redis-cli arguments
+ * travel as "$@".
  */
 export function cliArgs(container, { tls = false, interactive = false } = {}) {
+  const target = ['-h', '127.0.0.1', '-p', String(REDIS_CONTAINER_PORT)];
+  if (!tls) return ['exec', ...(interactive ? ['-i'] : []), container, 'redis-cli', ...target];
+  const R = SERVER_RUNTIME_PATH;
   return [
-    'exec', ...(interactive ? ['-i'] : []), container, 'redis-cli',
-    '-h', '127.0.0.1', '-p', String(REDIS_CONTAINER_PORT),
-    ...(tls ? ['--tls', '--cacert', `${SERVER_RUNTIME_PATH}/ca.crt`,
-      '--cert', `${SERVER_RUNTIME_PATH}/server.crt`, '--key', `${SERVER_RUNTIME_PATH}/server.key`] : []),
+    'exec', ...(interactive ? ['-i'] : []), container, 'sh', '-c',
+    `k=${R}/admin; [ -f "$k.crt" ] || k=${R}/server; `
+      + `exec redis-cli --tls --cacert ${R}/ca.crt --cert "$k.crt" --key "$k.key" "$@"`,
+    'redis-cli', ...target,
   ];
+}
+
+/**
+ * `ACL LOG 128` as JSON, for services/dbAuthAlerts.js.
+ *
+ * 128 because a bare `ACL LOG` returns only the newest 10 entries and the log
+ * holds up to acllog-max-len (128 by default); --json because the plain output
+ * is one field per line with nothing marking where an entry ends — measured on
+ * redis:8.10-alpine, `--json` gives an array of objects with count, reason,
+ * username, entry-id, timestamp-created and timestamp-last-updated.
+ */
+export function aclLogArgs(container, { tls = false } = {}) {
+  return [...cliArgs(container, { tls }), '--json', 'ACL', 'LOG', '128'];
 }
 
 /** `docker exec` argv for the readiness probe. Carries no credential. */

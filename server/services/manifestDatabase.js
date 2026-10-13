@@ -50,6 +50,7 @@ export const RESERVED_ENV_NAMES = [
   // overwritten by) a path the driver needs.
   'DB_CA_FILE', 'DB_CERT_FILE', 'DB_KEY_FILE', 'DB_CERT_KEY_FILE',
   'PGSSLMODE', 'PGSSLROOTCERT', 'PGSSLCERT', 'PGSSLKEY',
+  'REDIS_TLS_CA_FILE', 'REDIS_TLS_CERT_FILE', 'REDIS_TLS_KEY_FILE',
 ];
 export const RESERVED_ENV_PREFIX = 'APPCRANE_';
 

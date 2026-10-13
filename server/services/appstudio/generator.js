@@ -5,6 +5,7 @@ import { decrypt } from '../encryption.js';
 import { tokenGitEnv, scrubToken } from '../githubGitAuth.js';
 import { assertCapacity } from '../containerLimit.js';
 import { runAgentNew } from '../llm/runAgent.js';
+import { syncDeployhubVersionInWorkspace } from './workspacePush.js';
 import { writeSnapshot } from '../github/snapshot.js';
 import { renderOpenCommentsSection } from '../enhancementComments.js';
 import { formatToolBreadcrumb } from './toolBreadcrumb.js';
@@ -22,7 +23,7 @@ const STUDIO_IMAGE    = process.env.APPSTUDIO_IMAGE || 'appcrane-studio:latest';
  */
 function checkRemoteBranchExists(repoUrl, gitEnv, token, branch, onLog) {
   try {
-    const out = execFileSync('git', ['ls-remote', '--heads', repoUrl, branch], {
+    const out = execFileSync('git', ['ls-remote', '--heads', repoUrl, branch], { // host-git-ok: no repository
       stdio: 'pipe', timeout: 30000, ...(gitEnv ? { env: gitEnv } : {}),
     }).toString().trim();
     return out.length > 0;
@@ -66,18 +67,13 @@ async function checkOpenPr(app, branch, token, onLog) {
  * Skips silently when either file is missing or unreadable — never
  * throws. Failures log a non-fatal warning via onLog.
  */
+// After the agent has run, the workspace is the agent's: a deployhub.json it
+// replaced with a symlink would turn a host write here into a write to any
+// file the AppCrane user owns. So the read-modify-write runs in a helper
+// container (appstudio/workspacePush.js).
 function syncDeployhubVersion(workspaceDir, onLog) {
-  const pkgPath = join(workspaceDir, 'package.json');     // nosemgrep: path-join-resolve-traversal — workspaceDir is internal
-  const dhPath  = join(workspaceDir, 'deployhub.json');   // nosemgrep
-  if (!existsSync(pkgPath) || !existsSync(dhPath)) return;
-  const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
-  const dh  = JSON.parse(readFileSync(dhPath,  'utf8'));
-  if (!pkg?.version) return;
-  if (dh.version === pkg.version) return;
-  const before = dh.version;
-  dh.version = pkg.version;
-  writeFileSync(dhPath, JSON.stringify(dh, null, 2) + '\n');
-  onLog?.(`[studio] Synced deployhub.json version ${before} → ${pkg.version} (matches package.json)`);
+  const moved = syncDeployhubVersionInWorkspace(workspaceDir);
+  if (moved) onLog?.(`[studio] Synced deployhub.json version ${moved} (matches package.json)`);
 }
 
 function workspaceRoot() {
@@ -226,21 +222,21 @@ async function cloneForCode(dir, app, baseBranch, branchName, onLog) {
 
   onLog?.(`[studio:git] Cloning ${app.github_url} (${cloneFromBranch})…`);
   try {
-    execFileSync('git', ['clone', '--depth', '1', '--branch', cloneFromBranch, app.github_url, workspaceDir], {
+    execFileSync('git', ['clone', '--depth', '1', '--branch', cloneFromBranch, app.github_url, workspaceDir], { // host-git-ok: pre-mount
       timeout: 120000, stdio: 'pipe', ...(gitEnv ? { env: gitEnv } : {}),
     });
   } catch (err) {
     throw new Error(scrubToken(err.message, token));
   }
 
-  execFileSync('git', ['-C', workspaceDir, 'config', 'user.email', 'appstudio@appcrane.local'], { stdio: 'pipe' });
-  execFileSync('git', ['-C', workspaceDir, 'config', 'user.name', 'AppStudio'], { stdio: 'pipe' });
+  execFileSync('git', ['-C', workspaceDir, 'config', 'user.email', 'appstudio@appcrane.local'], { stdio: 'pipe' }); // host-git-ok: pre-mount
+  execFileSync('git', ['-C', workspaceDir, 'config', 'user.name', 'AppStudio'], { stdio: 'pipe' }); // host-git-ok: pre-mount
   if (isContinuation) {
     // Already on the right branch from --branch above; nothing to create.
     onLog?.(`[studio:git] On branch ${branchName} (continuation)`);
   } else {
     onLog?.(`[studio:git] Creating branch ${branchName}…`);
-    execFileSync('git', ['-C', workspaceDir, 'checkout', '-b', branchName], { stdio: 'pipe' });
+    execFileSync('git', ['-C', workspaceDir, 'checkout', '-b', branchName], { stdio: 'pipe' }); // host-git-ok: pre-mount
   }
 
   // Make workspace fully accessible to the container's studio user.
@@ -368,7 +364,7 @@ export function cloneForBuild(jobId, app, branch) {
   }
 
   try {
-    execFileSync('git', ['clone', '--depth', '1', '--branch', branch, app.github_url, dir], {
+    execFileSync('git', ['clone', '--depth', '1', '--branch', branch, app.github_url, dir], { // host-git-ok: fresh build clone, never mounted into an agent
       timeout: 120000, stdio: 'pipe', ...(gitEnv ? { env: gitEnv } : {}),
     });
   } catch (err) {
