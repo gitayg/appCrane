@@ -189,7 +189,7 @@ test('AMPLIFICATION: a Redis entry counting a million failures stores one row, n
   assert.equal(r.total, 1_000_000);
 });
 
-test('AMPLIFICATION: thousands of invented login names give one alert, and alerts are capped per hour', () => {
+test('AMPLIFICATION: thousands of invented login names give one alert and one e-mail', () => {
   const db = getDb();
   db.prepare('DELETE FROM managed_db_auth_failures').run();
   db.prepare('DELETE FROM managed_db_auth_alerts').run();
@@ -198,9 +198,35 @@ test('AMPLIFICATION: thousands of invented login names give one alert, and alert
   const failures = [];
   for (let i = 0; i < 3000; i++) for (let k = 0; k < 6; k++) failures.push({ login: `fake${i}`, database: null, reason: 'bad-password', at });
   alerts.recordFailures(db, 'postgres', failures);
-  assert.ok(db.prepare('SELECT COUNT(*) n FROM managed_db_auth_failures').get().n <= alerts.MAX_GROUPS_PER_SCAN, 'distinct invented logins grew the table');
+  assert.ok(db.prepare('SELECT COUNT(*) n FROM managed_db_auth_failures').get().n <= alerts.MAX_UNKNOWN_GROUPS_PER_SCAN, 'distinct invented logins grew the table');
   const mails = [];
   const raised = alerts.evaluateAlerts(db, { now, sendMail: (m) => mails.push(m), audit: () => {} });
-  assert.ok(raised.length <= alerts.MAX_ALERTS_PER_HOUR, `${raised.length} alerts raised`);
-  assert.equal(raised.filter(r => r.login === alerts.UNKNOWN_LOGINS).length, 1, 'unknown logins were not grouped into one alert');
+  assert.equal(raised.length, 1, `${raised.length} alerts raised`);
+  assert.equal(raised[0].login, alerts.UNKNOWN_LOGINS);
+});
+
+test('SUPPRESSION: a flood of invented names cannot hide a real login, and many real alerts are batched, not dropped', () => {
+  const db = getDb();
+  db.prepare('DELETE FROM managed_db_auth_failures').run();
+  db.prepare('DELETE FROM managed_db_auth_alerts').run();
+  // Real logins: give twelve apps a managed database each.
+  const real = [];
+  for (let i = 0; i < 12; i++) {
+    const appId = db.prepare("INSERT INTO apps (name,slug,slot,source_type,branch) VALUES (?,?,?,'managed','main')").run(`S${i}`, `supp${i}`, 900 + i).lastInsertRowid;
+    db.prepare("INSERT INTO managed_databases (app_id, tenant, engine, db_name, db_user, password_enc) VALUES (?, '', 'postgres', ?, ?, 'x')").run(appId, `supp_db${i}`, `supp_u${i}`);
+    real.push(`supp_u${i}`);
+  }
+  const now = new Date();
+  const at = new Date(now.getTime() - 60e3).toISOString();
+  const failures = [];
+  // The attacker floods invented names with far MORE failures each than the real target gets.
+  for (let i = 0; i < 1000; i++) for (let k = 0; k < 20; k++) failures.push({ login: `noise${i}`, database: null, reason: 'bad-password', at });
+  for (const u of real) for (let k = 0; k < 6; k++) failures.push({ login: u, database: null, reason: 'bad-password', at });
+  alerts.recordFailures(db, 'postgres', failures);
+  const mails = [];
+  const raised = alerts.evaluateAlerts(db, { now, sendMail: (m) => mails.push(m), audit: () => {} });
+  for (const u of real) assert.ok(raised.some(r => r.login === u), `the real login ${u} was hidden`);
+  const admins = db.prepare("SELECT COUNT(*) n FROM users WHERE role = 'platform_admin' AND active = 1 AND email IS NOT NULL").get().n;
+  assert.equal(mails.length, admins, 'many alerts were not batched into one digest per admin');
+  if (admins) for (const u of real) assert.match(mails[0].text, new RegExp(u), `digest is missing ${u}`);
 });

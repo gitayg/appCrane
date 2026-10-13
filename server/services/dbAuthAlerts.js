@@ -80,10 +80,12 @@ export const SCAN_INTERVAL_MS = 3 * 60 * 1000;
 // Bounds an attacker cannot push past (security review: amplification). Login
 // names in these logs are whatever the caller typed, so a rogue app can invent
 // thousands; each distinct name used to get its own rows, audit entry and e-mail.
-export const MAX_ALERTS_PER_HOUR = 10;      // across every engine and login
-export const MAX_GROUPS_PER_SCAN = 200;     // distinct (login, db, reason) kept per engine scan
+// Logins that belong to an app are bounded by the number of managed databases,
+// so they are never folded or capped: hiding them is the attack. Only invented
+// names are bounded here.
+export const MAX_UNKNOWN_GROUPS_PER_SCAN = 200; // distinct invented-login groups kept per engine scan
+export const DIGEST_OVER = 3;                    // more alerts than this in one pass -> one digest e-mail
 export const UNKNOWN_LOGINS = '(logins not belonging to any app)';
-export const ALERT_CAP_KEY = '(alert limit reached)';
 
 const SAFE_NAME = /[^A-Za-z0-9_.$@-]/g;
 function clamp(s) {
@@ -224,8 +226,9 @@ const IGNORED_LOGINS = new Set(['appcrane_readiness_probe']);
 /**
  * Store parsed failures as one counted row per (login, database, reason) in this
  * batch, skipping a group already stored at the same time (overlapping log
- * reads). At most MAX_GROUPS_PER_SCAN groups are kept; the rest are folded into
- * one UNKNOWN_LOGINS row, so invented login names cannot grow the table.
+ * reads). Groups for logins that belong to an app are always kept; at most
+ * MAX_UNKNOWN_GROUPS_PER_SCAN invented-login groups are, the rest folded into one
+ * UNKNOWN_LOGINS row, so invented names cannot grow the table.
  */
 export function recordFailures(db, engine, failures) {
   const groups = new Map();
@@ -235,10 +238,16 @@ export function recordFailures(db, engine, failures) {
     if (g) { g.count++; if (f.at > g.at) g.at = f.at; }
     else groups.set(k, { login: f.login, database: f.database, reason: f.reason, at: f.at, count: 1 });
   }
-  let list = [...groups.values()].sort((a, b) => b.count - a.count);
-  if (list.length > MAX_GROUPS_PER_SCAN) {
-    const rest = list.slice(MAX_GROUPS_PER_SCAN - 1);
-    list = list.slice(0, MAX_GROUPS_PER_SCAN - 1);
+  // Real logins are kept whole, always; only invented names are folded, so an
+  // attacker flooding invented names cannot push a real login's failures out.
+  const all = [...groups.values()];
+  const known = all.filter(g => appForLogin(db, g.login));
+  const unknownGroups = all.filter(g => !appForLogin(db, g.login)).sort((a, b) => b.count - a.count);
+  let list = known;
+  if (unknownGroups.length <= MAX_UNKNOWN_GROUPS_PER_SCAN) list = list.concat(unknownGroups);
+  else {
+    const rest = unknownGroups.slice(MAX_UNKNOWN_GROUPS_PER_SCAN - 1);
+    list = list.concat(unknownGroups.slice(0, MAX_UNKNOWN_GROUPS_PER_SCAN - 1));
     list.push({
       login: UNKNOWN_LOGINS, database: null, reason: 'many-logins',
       at: rest.reduce((m, g) => (g.at > m ? g.at : m), rest[0].at),
@@ -321,34 +330,12 @@ export function evaluateAlerts(db, {
     groups.push({ ...u, dbs: [...u.dbs].slice(0, 20).join(','), reasons: [...u.reasons].join(',') });
   }
 
-  const alertsThisHour = () => db.prepare(
-    'SELECT COUNT(*) AS n FROM managed_db_auth_alerts WHERE alerted_at >= ? AND login != ?',
-  ).get(rateStart, ALERT_CAP_KEY).n;
-
   const raised = [];
+  const pending = [];
   for (const g of groups) {
     if (!(g.failures > threshold)) continue;
     const last = db.prepare('SELECT alerted_at FROM managed_db_auth_alerts WHERE engine = ? AND login = ?').get(g.engine, g.login);
     if (last && last.alerted_at >= rateStart) continue;
-    if (alertsThisHour() >= MAX_ALERTS_PER_HOUR) {
-      // Over the hourly ceiling: one notice that alerts are being held back,
-      // then silence until the hour rolls over. The failures stay recorded.
-      const capped = db.prepare('SELECT alerted_at FROM managed_db_auth_alerts WHERE engine = ? AND login = ?').get('*', ALERT_CAP_KEY);
-      if (!capped || capped.alerted_at < rateStart) {
-        db.prepare(`INSERT INTO managed_db_auth_alerts (engine, login, alerted_at) VALUES ('*', ?, ?)
-          ON CONFLICT(engine, login) DO UPDATE SET alerted_at = excluded.alerted_at`).run(ALERT_CAP_KEY, now.toISOString());
-        try { audit(null, null, 'managed-db-auth-alert-limit', { limit: MAX_ALERTS_PER_HOUR }, 'system'); } catch (_) {}
-        const hourKey = now.toISOString().slice(0, 13);
-        for (const a of db.prepare("SELECT email FROM users WHERE role = 'platform_admin' AND active = 1 AND email IS NOT NULL").all()) {
-          try {
-            sendMail({ to: a.email, subject: '[AppCrane] Database login alerts paused for this hour',
-              text: `More than ${MAX_ALERTS_PER_HOUR} logins hit the failed-login alert threshold within an hour. Further alerts are held back until the hour rolls over; the failures are still recorded. Check the audit log for managed-db-auth-alert entries.`,
-              appId: null, idempotencyKey: `db-auth-alert-limit:${hourKey}:${String(a.email).toLowerCase()}`, source: 'db-auth-alert' });
-          } catch (_) {}
-        }
-      }
-      break;
-    }
 
     const databases = String(g.dbs || '').split(',').filter(Boolean);
     const owner = appForLogin(db, g.login);
@@ -373,9 +360,6 @@ export function evaluateAlerts(db, {
     try { audit(null, owner?.id ?? null, 'managed-db-auth-alert', detail, 'system'); }
     catch (e) { log.warn(`[db-auth-alerts] audit write failed: ${e.message}`); }
 
-    const admins = db.prepare(
-      "SELECT email FROM users WHERE role = 'platform_admin' AND active = 1 AND email IS NOT NULL",
-    ).all();
     const subject = `[AppCrane] Repeated failed ${g.engine} logins for ${g.login}`;
     const text = [
       `The managed ${g.engine} server refused login "${g.login}" ${g.failures} times in the last ${WINDOW_MINUTES} minutes (alert threshold: more than ${threshold}).`,
@@ -392,17 +376,35 @@ export function evaluateAlerts(db, {
           ? 'The source address is not reported: Redis records every connection to a managed instance as coming from the Docker bridge gateway, so the username and the target instance are what identify the caller. Connections refused for a missing or wrong client certificate never reach AUTH and are not counted here.'
           : 'The source address is not reported: every connection to a managed database arrives from the Docker bridge gateway, so the login and the database are what identify the caller.',
       '',
-      'Passwords are never logged by the database engines and are not part of this alert. You will get at most one of these per login per hour.',
+      'Passwords are never logged by the database engines and are not part of this alert. You will get at most one of these per login per hour; when several logins cross the threshold at once they arrive as one digest.',
     ].join('\n');
+    pending.push({ subject, text, key: `${g.engine}:${g.login}` });
+    raised.push(detail);
+  }
+
+  // Never suppressed, only batched: every alert above is audited; the e-mail is
+  // one per alert, or ONE digest listing all of them when many fire at once.
+  if (pending.length) {
+    const admins = db.prepare(
+      "SELECT email FROM users WHERE role = 'platform_admin' AND active = 1 AND email IS NOT NULL",
+    ).all();
     const hour = now.toISOString().slice(0, 13);
-    for (const a of admins) {
-      try {
-        sendMail({ to: a.email, subject, text, appId: null, idempotencyKey: `db-auth-alert:${g.engine}:${g.login}:${hour}:${String(a.email).toLowerCase()}`, source: 'db-auth-alert' });
-      } catch (e) {
-        log.warn(`[db-auth-alerts] mail to a platform admin skipped: ${e.message}`);
+    const mails = pending.length > DIGEST_OVER
+      ? [{
+        subject: `[AppCrane] Repeated failed database logins for ${pending.length} logins`,
+        text: [`${pending.length} logins crossed the failed-login alert threshold in this pass:`, '', ...pending.map(p => `----\n${p.subject}\n\n${p.text}`)].join('\n'),
+        key: `digest:${pending.map(p => p.key).sort().join('|').slice(0, 200)}`,
+      }]
+      : pending;
+    for (const m of mails) {
+      for (const a of admins) {
+        try {
+          sendMail({ to: a.email, subject: m.subject, text: m.text, appId: null, idempotencyKey: `db-auth-alert:${m.key}:${hour}:${String(a.email).toLowerCase()}`, source: 'db-auth-alert' });
+        } catch (e) {
+          log.warn(`[db-auth-alerts] mail to a platform admin skipped: ${e.message}`);
+        }
       }
     }
-    raised.push(detail);
   }
   return raised;
 }
