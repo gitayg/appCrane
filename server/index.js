@@ -76,6 +76,7 @@ import serviceApiRoutes from './routes/serviceApi.js';
 import noticesRoutes from './routes/notices.js';
 import catalogRoutes from './routes/catalog.js';
 import crewRoutes from './routes/crew.js';
+import a2aRoutes, { wellKnownAgentCard } from './routes/a2a.js';
 import { globalNotices } from './services/platformNotices.js';
 
 const PORT = process.env.PORT || 5001;
@@ -230,6 +231,10 @@ for (const p of ['/favicon.ico', '/favicon.png', '/logo.svg', '/apple-touch-icon
  * Unset ⇒ 404. Publishing a security.txt pointing at an address nobody reads is
  * worse than not publishing one: it looks like a channel and silently isn't.
  */
+// v2.106.0: A2A discovery (spec §8.2 well-known URI): the public Agent Card of
+// the Crew endpoint. Lists no agents; the roster needs an agent token.
+app.get('/.well-known/agent-card.json', wellKnownAgentCard);
+
 app.get('/.well-known/security.txt', (req, res) => {
   let contact = process.env.SECURITY_CONTACT || '';
   if (!contact) {
@@ -298,6 +303,11 @@ app.get('/api/apps/:slug/icon', (req, res) => {
 // read raw HERE, before express.json() can consume it (body-parser skips a
 // stream that is already read). The handler itself is mounted with the routes.
 app.use('/api/github-app/webhook', rawWebhookBody);
+// v2.106.0: Crew's A2A endpoint (JSON-RPC 2.0 + SSE). Mounted before the global
+// express.json() below, which accepts 50 MB for uploads: routes/a2a.js parses
+// its own bodies with a 256 KB cap, and authenticates every request with a
+// Crew agent token (no requireAuth — agents are not users).
+app.use('/a2a', a2aRoutes);
 app.use(express.json({ limit: '50mb', type: ['application/json', 'application/scim+json'] }));
 app.use(express.urlencoded({ extended: true }));
 
@@ -397,7 +407,11 @@ crane init --name admin --email you@example.com</pre>
 // v2.103.0: '/api/enhancements' — an app's own "send feedback" button posts
 // there from inside its page, and the fallback 307'd it into the app, which
 // answered 404: requests filed from inside an app never reached the queue.
-const APPCRANE_PASSTHROUGH = ['/api/identity', '/api/apps', '/api/info', '/api/notices', '/api/_crashed', '/api/me', '/api/directory', '/api/mcp', '/api/service', '/api/enhancements', '/favicon.svg', '/docs'];
+// v2.106.0: '/a2a' and '/.well-known' — both are mounted above this middleware
+// so it never sees them today, but listing them keeps a future reorder from
+// 307ing an agent's A2A call (or a card fetch made from inside an app page)
+// into an app's prefix.
+const APPCRANE_PASSTHROUGH = ['/api/identity', '/api/apps', '/api/info', '/api/notices', '/api/_crashed', '/api/me', '/api/directory', '/api/mcp', '/api/service', '/api/enhancements', '/favicon.svg', '/docs', '/a2a', '/.well-known'];
 const APPCRANE_PAGE_SLUGS = new Set(['login', 'portal', 'dashboard', 'applications', 'users-page', 'audit-page', 'settings', 'docs', 'app', 'studio', 'appstudio']);
 app.use((req, res, next) => {
   if (req.method === 'OPTIONS') return next();
@@ -1674,6 +1688,13 @@ app.listen(PORT, HOST, async () => {
     startCrewRetentionScheduler();
   } catch (e) {
     log.error('Crew retention scheduler failed to start: ' + e.message);
+  }
+  // v2.106.0: A2A push notifications for Crew tasks (SSRF-guarded webhooks).
+  try {
+    const { startCrewPush } = await import('./services/crewPush.js');
+    startCrewPush();
+  } catch (e) {
+    log.error('Crew push notifications failed to start: ' + e.message);
   }
 
   try {

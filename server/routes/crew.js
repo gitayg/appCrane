@@ -2,8 +2,10 @@ import { Router } from 'express';
 import { requireAuth } from '../middleware/auth.js';
 import {
   roster, crewLog, registerAgent, removeAgent, decideConnection,
-  blockAgent, listBlocks, unblock,
+  blockAgent, listBlocks, unblock, assertCrewCaller,
 } from '../services/crew.js';
+import { issueInitialToken, rotateAgentToken, revokeAgentToken, tokenStatusFor } from '../services/crewTokens.js';
+import { crewMap } from '../services/crewMap.js';
 
 /**
  * Crew for the dashboard (v2.105.0). Rules live in services/crew.js; this file
@@ -20,9 +22,19 @@ import {
  * Registering a hosted agent takes a PASTED card or form fields. There is no
  * "card URL" fetch in phase 1: that would let any logged-in user make the
  * server request an address of their choosing (SSRF).
+ *
+ * Phase 2: registering a NEW hosted agent returns its A2A token once
+ * (`a2a_token`); POST/DELETE /agents/:name/token rotate or revoke it, both
+ * through agentForCaller (the caller owns the agent). GET /map returns the
+ * communication map: counts only, see services/crewMap.js.
  */
 const router = Router();
 router.use(requireAuth);
+// Security fix after v2.105.0: an agent identity cannot own crew agents on
+// any channel, the dashboard included (services/crew.js assertCrewCaller).
+router.use((req, _res, next) => {
+  try { assertCrewCaller(req.user, 'dashboard'); next(); } catch (e) { next(e); }
+});
 
 router.get('/roster', (req, res) => {
   res.json({ agents: roster(req.user, { skill: req.query.skill }) });
@@ -33,7 +45,19 @@ router.get('/log', (req, res) => {
 });
 
 router.get('/agents', (req, res) => {
-  res.json({ agents: roster(req.user).filter((a) => a.is_mine) });
+  res.json({ agents: roster(req.user).filter((a) => a.is_mine), tokens: tokenStatusFor(req.user) });
+});
+
+router.get('/map', (req, res) => {
+  res.json(crewMap(req.user));
+});
+
+router.post('/agents/:name/token', (req, res) => {
+  res.status(201).json(rotateAgentToken(req.user, req.params.name));
+});
+
+router.delete('/agents/:name/token', (req, res) => {
+  res.json(revokeAgentToken(req.user, req.params.name));
 });
 
 router.post('/agents', (req, res) => {
@@ -42,7 +66,10 @@ router.post('/agents', (req, res) => {
     name: b.name, description: b.description, skills: b.skills,
     knows_about: b.knows_about, card_json: b.card_json,
   }, { kind: 'hosted', actorKind: 'human' });
-  res.status(agent.created ? 201 : 200).json({ agent });
+  // A new hosted agent gets its A2A token now, shown once. Re-registering an
+  // existing name never issues one: rotation is an explicit act.
+  const a2a = agent.created ? issueInitialToken(req.user, agent.name) : null;
+  res.status(agent.created ? 201 : 200).json({ agent, ...(a2a ? { a2a_token: a2a.token, a2a_token_note: a2a.note } : {}) });
 });
 
 router.delete('/agents/:name', (req, res) => {

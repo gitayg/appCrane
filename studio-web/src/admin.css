@@ -2122,3 +2122,9 @@ input[type='email'], select, textarea {
 .coder-attachment-remove { background: none; border: 0; color: inherit; cursor: pointer; font-size: .9rem; line-height: 1; padding: 0 2px; opacity: .7; }
 .coder-attachment-remove:hover, .coder-attachment-remove:focus-visible { opacity: 1; }
 .coder-attachment-remove:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 3px; }
+
+/* Crew → Map (v2.106.0): the side panel drops under the graph when the page is
+   narrow (the sidebar takes ~220px of the viewport). */
+@media (max-width: 1100px) {
+  .crew-map-grid { grid-template-columns: minmax(0, 1fr) !important; }
+}

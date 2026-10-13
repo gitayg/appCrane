@@ -17,6 +17,16 @@ test('slugs that would capture a platform path are refused', () => {
   }
 });
 
+test('Crew\'s A2A endpoint and its discovery card cannot be captured by an app slug', () => {
+  // /a2a is the platform A2A endpoint (v2.106.0): an app named `a2a` or `a2`
+  // would receive every agent's bearer token.
+  for (const s of ['a2', 'a2a']) assert.ok(slugRefusal(s), `'${s}' is allowed but /${s}* captures /a2a`);
+  // /.well-known/agent-card.json cannot be shadowed at all: a slug must start
+  // with a letter or digit, so no app is ever routed at /.<anything>.
+  assert.ok(slugRefusal('.well-known'));
+  assert.equal(slugRefusal('a2a-demo'), null, 'a slug that merely starts with a2a- is fine: /a2a-demo* does not match /a2a');
+});
+
 test('ordinary slugs, including ones that merely start like a platform path, are allowed', () => {
   for (const s of ['voc', 'odoo', 'apiary', 'logins-demo', 'my-app', 'crm2']) {
     assert.equal(slugRefusal(s), null, `'${s}' was refused`);

@@ -61,8 +61,29 @@
  * (purgeExpiredCrewHistory, run daily). Audit rows are NOT deleted: they hold
  * ids, states and lengths — never a message body or a title — so they can
  * outlive the content under the platform's normal audit retention.
+ *
+ * ── Phase 2: A2A is another door into the same rules ────────────────────────
+ * services/crewA2a.js speaks the A2A JSON-RPC binding and calls sendTask /
+ * reply / taskFor / listTasksFor here with the agent its token identifies; it
+ * re-implements none of the gate, budget, secret or audit rules. Every change
+ * to a task is announced on `crewEvents` (after the transaction commits) so
+ * SSE streams and push notifications see the same events whichever door the
+ * change came through.
+ *
+ * ── Security fixes after phase 1 (review of v2.105.0) ───────────────────────
+ *   - Blocks and refusals survive the blocked person removing their agent and
+ *     registering the same name again (crew_decision_tombstones).
+ *   - First-contact e-mail is capped per (sending PERSON, receiving person):
+ *     one per 24 hours, however many agents the sender registers
+ *     (crew_first_contact_emails). Later first contacts still wait in the
+ *     receiver's Crew log; they just do not e-mail.
+ *   - assertCrewCaller(): Crew has no app, so a key limited to some apps
+ *     (mcp_app_scope) gets no Crew over MCP or A2A, and an agent identity
+ *     (users.kind = 'agent') cannot own or act as a crew agent anywhere — a
+ *     crew agent must belong to a person who can answer a first contact.
  */
 import crypto from 'crypto';
+import { EventEmitter } from 'events';
 import { getDb } from '../db.js';
 import { logAudit } from '../middleware/audit.js';
 import { AppError } from '../utils/errors.js';
@@ -160,6 +181,69 @@ function normalizeCapabilities(input) {
 
 function touchAgent(db, agentId) {
   db.prepare("UPDATE crew_agents SET last_seen_at = datetime('now') WHERE id = ?").run(agentId);
+}
+
+// ── Events (phase 2) ────────────────────────────────────────────────────────
+
+/**
+ * One event per change to a task: { task_id, kind } with kind one of
+ * 'created' | 'status' | 'message' | 'artifact' | 'released' | 'deleted'.
+ * Emitted on the next tick, after the transaction that made the change has
+ * committed, so a listener that re-reads the task sees the new row, and a
+ * listener that throws can never fail the agent's call. Listeners re-read the
+ * task through taskFor() for their own agent: an event carries no content and
+ * no visibility decision of its own.
+ */
+export const crewEvents = new EventEmitter();
+crewEvents.setMaxListeners(0);
+
+function announce(taskIds, kind) {
+  const ids = (Array.isArray(taskIds) ? taskIds : [taskIds]).filter(Boolean);
+  if (!ids.length) return;
+  setImmediate(() => {
+    for (const task_id of ids) {
+      try { crewEvents.emit('task', { task_id, kind }); } catch (e) { log.warn(`[crew] event listener failed: ${e.message}`); }
+    }
+  });
+}
+
+// ── Who may use Crew at all (security fix after v2.105.0) ───────────────────
+
+/**
+ * Mirrors mcpTools.mcpScope(): an explicit users.mcp_app_scope (a JSON array,
+ * including [] = locked out) restricts the caller to those apps. Unparsable
+ * means "no scope", exactly as mcpScope treats it, so the two never disagree.
+ */
+function hasExplicitAppScope(user) {
+  const raw = user?.mcp_app_scope;
+  if (raw == null || raw === '') return false;
+  try { return Array.isArray(JSON.parse(raw)); } catch { return false; }
+}
+
+/**
+ * The caller-level gate every Crew entry point passes (MCP tools via callTool,
+ * A2A via the token's owner, the dashboard via routes/crew.js).
+ *
+ * - An agent identity (users.kind = 'agent') is refused on every channel. A
+ *   crew agent's owner is the person who answers first contacts, blocks and
+ *   (later) approvals; an identity that is itself an agent has nobody behind
+ *   it to decide, and letting it own crew agents would let one agent register
+ *   others and launder its permissions through them.
+ * - A key limited to some apps (mcp_app_scope) is refused over 'mcp' and
+ *   'a2a'. Crew is platform-wide and belongs to no app, so nothing in it is
+ *   inside such a scope: the operator who limited the key to two apps did not
+ *   mean "and also the whole platform's agent directory and inboxes". The
+ *   dashboard ('dashboard') is a person's own browser session, which
+ *   mcp_app_scope has never governed.
+ */
+export function assertCrewCaller(user, channel) {
+  if (!user) fail(401, 'UNAUTHORIZED', 'Not authenticated.');
+  if (user.kind === 'agent') {
+    fail(403, 'FORBIDDEN', 'Forbidden: Crew agents belong to people. This is an agent identity, which cannot own or act as a crew agent; use the personal key of the person the agent works for.');
+  }
+  if ((channel === 'mcp' || channel === 'a2a') && hasExplicitAppScope(user)) {
+    fail(403, 'FORBIDDEN', 'Forbidden: this key is limited to specific apps (MCP app scope), and Crew is platform-wide, so it is outside that scope. Use an unscoped personal key for Crew.');
+  }
 }
 
 function audit(user, action, detail, actorKind) {
@@ -272,6 +356,7 @@ export function registerAgent(user, input, { kind, actorKind }) {
     }
     const id = db.prepare(`INSERT INTO crew_agents (name, owner_user_id, kind, card_json, knows_about, last_seen_at)
                            VALUES (?, ?, ?, ?, ?, datetime('now'))`).run(name, user.id, kind, card, knowsAbout).lastInsertRowid;
+    restoreDecisions(db, user.id, name, id);
     return { id, created: true };
   })();
 
@@ -280,12 +365,56 @@ export function registerAgent(user, input, { kind, actorKind }) {
   return { ...agentView(db, db.prepare('SELECT * FROM crew_agents WHERE id = ?').get(result.id)), created: result.created };
 }
 
+/**
+ * SECURITY FIX (review of v2.105.0). Before an agent row is deleted, every
+ * block and refusal OTHER people placed on it is written down by (owner, name),
+ * because both are keyed by agent id and cascade away with the row — which let
+ * a blocked person remove the agent, register the same name, and start over
+ * with a fresh first contact and a fresh e-mail.
+ */
+function tombstoneDecisions(db, agent) {
+  const ins = db.prepare(`INSERT OR IGNORE INTO crew_decision_tombstones (decider_user_id, agent_owner_id, agent_name, kind)
+                          VALUES (?, ?, ?, ?)`);
+  for (const b of db.prepare('SELECT owner_user_id FROM crew_blocks WHERE blocked_agent_id = ?').all(agent.id)) {
+    ins.run(b.owner_user_id, agent.owner_user_id, agent.name, 'block');
+  }
+  for (const c of db.prepare("SELECT to_owner_id FROM crew_connections WHERE from_agent_id = ? AND state = 'refused'").all(agent.id)) {
+    ins.run(c.to_owner_id, agent.owner_user_id, agent.name, 'refused');
+  }
+}
+
+/**
+ * The other half: the same owner registering the same name gets its blocks and
+ * refusals back, as live rows, in the transaction that creates it. A refusal
+ * comes back with notified_at set, so it can never produce an e-mail. A
+ * DIFFERENT owner who later takes the freed name inherits nothing — the
+ * decision was about that person's agent.
+ */
+function restoreDecisions(db, ownerId, name, agentId) {
+  const rows = db.prepare('SELECT * FROM crew_decision_tombstones WHERE agent_owner_id = ? AND agent_name = ?').all(ownerId, name);
+  for (const t of rows) {
+    if (t.kind === 'block') {
+      db.prepare('INSERT OR IGNORE INTO crew_blocks (owner_user_id, blocked_agent_id) VALUES (?, ?)').run(t.decider_user_id, agentId);
+    } else {
+      db.prepare(`INSERT OR IGNORE INTO crew_connections (from_agent_id, from_owner_id, to_owner_id, state, notified_at, decided_at)
+                  VALUES (?, ?, ?, 'refused', datetime('now'), datetime('now'))`).run(agentId, ownerId, t.decider_user_id);
+    }
+  }
+  if (rows.length) db.prepare('DELETE FROM crew_decision_tombstones WHERE agent_owner_id = ? AND agent_name = ?').run(ownerId, name);
+}
+
 /** Remove one of the caller's own agents. Its tasks go with it (they are 30-day history). */
 export function removeAgent(user, rawName, { actorKind }) {
   const db = getDb();
   const agent = agentForCaller(db, user, rawName);
-  db.prepare('DELETE FROM crew_agents WHERE id = ?').run(agent.id);
+  const taskIds = db.prepare('SELECT id FROM crew_tasks WHERE from_agent_id = ? OR to_agent_id = ?').all(agent.id, agent.id).map((r) => r.id);
+  db.transaction(() => {
+    tombstoneDecisions(db, agent);
+    db.prepare('DELETE FROM crew_agents WHERE id = ?').run(agent.id);
+  })();
   audit(user, 'crew.agent.remove', { agent_id: agent.id, agent: agent.name }, actorKind);
+  // Open SSE streams on those tasks close on 'deleted' instead of idling.
+  announce(taskIds, 'deleted');
   return { removed: agent.name };
 }
 
@@ -430,6 +559,19 @@ function dashboardLink(path) {
   return host ? `https://${host}${path}` : `AppCrane → ${path}`;
 }
 
+export const FIRST_CONTACT_EMAIL_WINDOW = '-1 day';
+
+/**
+ * SECURITY FIX (review of v2.105.0): has the sending PERSON already caused a
+ * first-contact e-mail to this receiving person in the last 24 hours? Counted
+ * in crew_first_contact_emails, which does not cascade from agents, so
+ * removing and re-registering agents cannot reset it.
+ */
+function firstContactEmailedRecently(db, fromOwnerId, toOwnerId) {
+  return !!db.prepare("SELECT 1 FROM crew_first_contact_emails WHERE from_owner_id = ? AND to_owner_id = ? AND sent_at >= datetime('now', ?)")
+    .get(fromOwnerId, toOwnerId, FIRST_CONTACT_EMAIL_WINDOW);
+}
+
 function firstContactEmail(db, conn, from, to, title) {
   const receiver = db.prepare('SELECT name, email FROM users WHERE id = ?').get(to.owner_user_id);
   const sender = db.prepare('SELECT name, email FROM users WHERE id = ?').get(from.owner_user_id);
@@ -473,7 +615,7 @@ function firstContactEmail(db, conn, from, to, title) {
  * The sender always gets a task id and a state; a refused or blocked sender
  * gets 'rejected' and nothing else.
  */
-export function sendTask(user, { as_agent, to_agent, title, message }, { actorKind }) {
+export function sendTask(user, { as_agent, to_agent, title, message, context_id, message_id }, { actorKind }) {
   const db = getDb();
   const from = agentForCaller(db, user, as_agent);
   const toName = normalizeAgentName(to_agent);
@@ -511,13 +653,22 @@ export function sendTask(user, { as_agent, to_agent, title, message }, { actorKi
       connection = db.prepare('SELECT * FROM crew_connections WHERE id = ?').get(connId);
     }
     const held = gate.verdict === 'hold' ? 1 : 0;
-    db.prepare("INSERT INTO crew_tasks (id, from_agent_id, to_agent_id, title, state, held) VALUES (?, ?, ?, ?, 'submitted', ?)").run(id, from.id, to.id, cleanTitle, held);
-    db.prepare('INSERT INTO crew_messages (task_id, from_agent_id, body) VALUES (?, ?, ?)').run(id, from.id, body);
+    // context_id: the A2A caller's contextId when it gave one (validated in
+    // crewA2a.js), else the task's own id — every task is its own context.
+    db.prepare("INSERT INTO crew_tasks (id, from_agent_id, to_agent_id, title, state, held, context_id) VALUES (?, ?, ?, ?, 'submitted', ?, ?)").run(id, from.id, to.id, cleanTitle, held, context_id || id);
+    db.prepare("INSERT INTO crew_messages (task_id, from_agent_id, body, message_id, state_after) VALUES (?, ?, ?, ?, 'submitted')").run(id, from.id, body, message_id || null);
 
-    // Exactly one e-mail per connection: only when notified_at is still NULL,
-    // and set in this same transaction.
+    // At most one e-mail per connection: only when notified_at is still NULL,
+    // and set in this same transaction. notified_at is set even when the
+    // per-person cap below suppresses the e-mail: it means "this connection
+    // has had its chance to e-mail", and must not e-mail on a later task.
     if (held && connection && !connection.notified_at) {
-      emailed = firstContactEmail(db, connection, from, to, cleanTitle);
+      if (!firstContactEmailedRecently(db, from.owner_user_id, to.owner_user_id)) {
+        emailed = firstContactEmail(db, connection, from, to, cleanTitle);
+        if (emailed) {
+          db.prepare('INSERT INTO crew_first_contact_emails (from_owner_id, to_owner_id) VALUES (?, ?)').run(from.owner_user_id, to.owner_user_id);
+        }
+      }
       db.prepare("UPDATE crew_connections SET notified_at = datetime('now') WHERE id = ? AND notified_at IS NULL").run(connection.id);
     }
     return { id, state: 'submitted', held: !!held, connection_id: connection?.id ?? null, emailed, newConnection: !!gate.isNew };
@@ -530,6 +681,7 @@ export function sendTask(user, { as_agent, to_agent, title, message }, { actorKi
   if (out.newConnection) {
     audit(user, 'crew.first_contact', { connection_id: out.connection_id, from_agent_id: from.id, to_owner_id: to.owner_user_id, task_id: out.id, emailed: out.emailed }, actorKind);
   }
+  announce(out.id, 'created');
 
   const res = { task_id: out.id, state: out.state, to_agent: to.name };
   if (out.held) {
@@ -557,10 +709,13 @@ function messagesFor(db, taskId) {
  * tasks it sent recently so it can collect answers. Held tasks are invisible
  * to the receiver until the receiving person decides.
  */
-export function inbox(user, { as_agent }) {
+export function inbox(user, { as_agent }, { touch = true } = {}) {
   const db = getDb();
   const agent = agentForCaller(db, user, as_agent);
-  touchAgent(db, agent.id);
+  // SECURITY FIX (review of v2.105.0): appcrane_crew_inbox is marked readOnly,
+  // so a read-only MCP key may call it — and it wrote last_seen_at. The MCP
+  // handler passes touch:false for a read-only key, keeping that promise.
+  if (touch) touchAgent(db, agent.id);
   const received = db.prepare(`
     SELECT t.id, t.title, t.state, t.created_at, t.updated_at, fa.name AS from_agent, u.name AS from_owner
     FROM crew_tasks t JOIN crew_agents fa ON fa.id = t.from_agent_id JOIN users u ON u.id = fa.owner_user_id
@@ -579,17 +734,88 @@ export function inbox(user, { as_agent }) {
   return { agent: agent.name, received, sent };
 }
 
+// ── Task reads for the A2A door (phase 2) ──────────────────────────────────
+
+/**
+ * THE rule for whether one agent may see one task, shared by reply() and every
+ * A2A read. The sender always sees its task (including 'rejected', which is the
+ * only answer a blocked sender gets). The receiver sees it only once it has
+ * been released (held = 0) and never when it was rejected: a held task is a
+ * request its owner has not agreed to receive, and a rejection is silent.
+ */
+export function taskVisibleTo(task, agentId) {
+  if (!task) return false;
+  if (task.from_agent_id === agentId) return true;
+  return task.to_agent_id === agentId && task.held === 0 && task.state !== 'rejected';
+}
+
+const TASK_SELECT = `
+  SELECT t.*, fa.name AS from_agent, ta.name AS to_agent
+  FROM crew_tasks t JOIN crew_agents fa ON fa.id = t.from_agent_id JOIN crew_agents ta ON ta.id = t.to_agent_id`;
+
+/** One task as `agentId` may see it, or null — the same null for "no such task" and "not yours". */
+export function taskFor(agentId, taskId) {
+  if (typeof taskId !== 'string' || !taskId || taskId.length > 64) return null;
+  const task = getDb().prepare(`${TASK_SELECT} WHERE t.id = ?`).get(taskId);
+  return taskVisibleTo(task, agentId) ? task : null;
+}
+
+/** Every message of a task, oldest first, with what the A2A view needs. Capped like messagesFor(). */
+export function taskMessages(taskId, limit = 200) {
+  return getDb().prepare(`
+    SELECT * FROM (
+      SELECT m.id, m.from_agent_id, m.body, m.artifact_name, m.artifact_body, m.message_id, m.state_after, m.created_at
+      FROM crew_messages m WHERE m.task_id = ? ORDER BY m.id DESC LIMIT ?
+    ) ORDER BY id ASC`).all(taskId, limit);
+}
+
+/**
+ * Tasks visible to `agentId`, most recently updated first (A2A ListTasks,
+ * spec §3.1.4: "Tasks MUST be sorted by last update time in descending
+ * order" with cursor pagination). The visibility predicate is taskVisibleTo()
+ * written as SQL; the cursor is the (updated_at, id) of the last row, so a
+ * page boundary is stable while rows are added.
+ */
+export function listTasksFor(agentId, { contextId, state, updatedAfter, pageSize = 50, cursor } = {}) {
+  const where = ['(t.from_agent_id = ? OR (t.to_agent_id = ? AND t.held = 0 AND t.state <> \'rejected\'))'];
+  const args = [agentId, agentId];
+  if (contextId) { where.push('t.context_id = ?'); args.push(contextId); }
+  if (state) { where.push('t.state = ?'); args.push(state); }
+  if (updatedAfter) { where.push('t.updated_at > ?'); args.push(updatedAfter); }
+  const db = getDb();
+  const total = db.prepare(`SELECT COUNT(*) AS n FROM crew_tasks t WHERE ${where.join(' AND ')}`).get(...args).n;
+  if (cursor) { where.push('(t.updated_at < ? OR (t.updated_at = ? AND t.id < ?))'); args.push(cursor.u, cursor.u, cursor.i); }
+  const rows = db.prepare(`${TASK_SELECT} WHERE ${where.join(' AND ')} ORDER BY t.updated_at DESC, t.id DESC LIMIT ?`).all(...args, pageSize + 1);
+  const more = rows.length > pageSize;
+  const page = more ? rows.slice(0, pageSize) : rows;
+  const last = page.at(-1);
+  return { tasks: page, total, next: more && last ? { u: last.updated_at, i: last.id } : null };
+}
+
+/** A crew agent by id with its owner's users row, for the A2A token door. */
+export function agentWithOwner(agentId) {
+  const db = getDb();
+  const agent = db.prepare('SELECT * FROM crew_agents WHERE id = ?').get(agentId);
+  if (!agent) return null;
+  const owner = db.prepare('SELECT * FROM users WHERE id = ?').get(agent.owner_user_id);
+  return owner ? { agent, owner } : null;
+}
+
+export function touchAgentSeen(agentId) {
+  touchAgent(getDb(), agentId);
+}
+
 /**
  * Reply on a task, optionally moving its state. The receiving agent may set
  * working | input_required | completed | failed; the sending agent may add a
  * message (e.g. answer input_required) or cancel. A closed task takes nothing.
  */
-export function reply(user, { as_agent, task_id, message, state, artifact }, { actorKind }) {
+export function reply(user, { as_agent, task_id, message, state, artifact, message_id }, { actorKind }) {
   const db = getDb();
   const agent = agentForCaller(db, user, as_agent);
   const task = typeof task_id === 'string' ? db.prepare('SELECT * FROM crew_tasks WHERE id = ?').get(task_id) : null;
-  const isReceiver = task && task.to_agent_id === agent.id && task.held === 0 && task.state !== 'rejected';
-  const isSender = task && task.from_agent_id === agent.id;
+  const isSender = !!task && task.from_agent_id === agent.id;
+  const isReceiver = !isSender && taskVisibleTo(task, agent.id);
   // Same answer for "no such task" and "not yours": task ids must not be probeable.
   if (!isReceiver && !isSender) fail(404, 'NOT_FOUND', `No task ${oneLine(task_id, 40)} for agent ${agent.name}.`);
   if (TERMINAL_STATES.includes(task.state)) fail(409, 'TASK_CLOSED', `Task is already ${task.state}; start a new task instead.`);
@@ -619,8 +845,8 @@ export function reply(user, { as_agent, task_id, message, state, artifact }, { a
   db.transaction(() => {
     if (body.trim() || art) {
       assertMessageBudget(db, agent.id);
-      db.prepare('INSERT INTO crew_messages (task_id, from_agent_id, body, artifact_name, artifact_body) VALUES (?, ?, ?, ?, ?)')
-        .run(task.id, agent.id, body, art?.name ?? null, art?.body ?? null);
+      db.prepare('INSERT INTO crew_messages (task_id, from_agent_id, body, artifact_name, artifact_body, message_id, state_after) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .run(task.id, agent.id, body, art?.name ?? null, art?.body ?? null, message_id || null, nextState || task.state);
     }
     db.prepare(`UPDATE crew_tasks SET state = COALESCE(?, state), held = CASE WHEN ? = 'canceled' THEN 0 ELSE held END, updated_at = datetime('now') WHERE id = ?`)
       .run(nextState, nextState, task.id);
@@ -631,6 +857,7 @@ export function reply(user, { as_agent, task_id, message, state, artifact }, { a
     task_id: task.id, agent_id: agent.id, role: isReceiver ? 'receiver' : 'sender',
     state_from: task.state, state_to: nextState || task.state, message_len: body.length, artifact: !!art,
   }, actorKind);
+  announce(task.id, art ? 'artifact' : nextState ? 'status' : 'message');
   return { task_id: task.id, state: nextState || task.state };
 }
 
@@ -694,6 +921,7 @@ export function decideConnection(user, connectionId, decision, { task_id } = {})
   if (!conn || conn.to_owner_id !== user.id) fail(404, 'NOT_FOUND', 'No such first-contact request for you.');
   const myAgentIds = `SELECT id FROM crew_agents WHERE owner_user_id = ?`;
 
+  const heldIds = db.prepare(`SELECT id FROM crew_tasks WHERE held = 1 AND from_agent_id = ? AND to_agent_id IN (${myAgentIds})`).all(conn.from_agent_id, user.id).map((r) => r.id);
   const result = db.transaction(() => {
     if (decision === 'allow') {
       db.prepare("UPDATE crew_connections SET state = 'allowed', decided_at = datetime('now') WHERE id = ?").run(conn.id);
@@ -721,6 +949,7 @@ export function decideConnection(user, connectionId, decision, { task_id } = {})
   })();
 
   audit(user, `crew.connection.${decision}`, { connection_id: conn.id, from_agent_id: conn.from_agent_id, ...result }, 'human');
+  announce(decision === 'allow_once' ? result.task_id : heldIds, decision.startsWith('allow') ? 'released' : 'status');
   return { connection_id: conn.id, decision, ...result };
 }
 
@@ -731,12 +960,14 @@ export function blockAgent(user, rawName) {
   const agent = agentByName(db, name);
   if (!agent) fail(404, 'NOT_FOUND', `No agent named "${name}" is registered.`);
   if (agent.owner_user_id === user.id) fail(400, 'VALIDATION', 'You cannot block your own agent; remove it instead.');
+  const heldIds = db.prepare(`SELECT id FROM crew_tasks WHERE held = 1 AND from_agent_id = ? AND to_agent_id IN (SELECT id FROM crew_agents WHERE owner_user_id = ?)`).all(agent.id, user.id).map((r) => r.id);
   const rejected = db.transaction(() => {
     db.prepare('INSERT OR IGNORE INTO crew_blocks (owner_user_id, blocked_agent_id) VALUES (?, ?)').run(user.id, agent.id);
     return db.prepare(`UPDATE crew_tasks SET held = 0, state = 'rejected', updated_at = datetime('now')
                        WHERE held = 1 AND from_agent_id = ? AND to_agent_id IN (SELECT id FROM crew_agents WHERE owner_user_id = ?)`).run(agent.id, user.id).changes;
   })();
   audit(user, 'crew.block', { agent_id: agent.id, rejected }, 'human');
+  announce(heldIds, 'status');
   return { blocked: agent.name };
 }
 
@@ -781,6 +1012,8 @@ export function purgeExpiredCrewHistory(db = getDb()) {
   return db.transaction(() => {
     const messages = db.prepare("DELETE FROM crew_messages WHERE created_at < datetime('now', ?)").run(cutoff).changes;
     const tasks = db.prepare("DELETE FROM crew_tasks WHERE updated_at < datetime('now', ?)").run(cutoff).changes;
+    // Only the last 24 hours matter to the e-mail cap; 30 days is plenty.
+    db.prepare("DELETE FROM crew_first_contact_emails WHERE sent_at < datetime('now', ?)").run(cutoff);
     return { tasks, messages };
   })();
 }

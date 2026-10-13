@@ -250,9 +250,12 @@ test('outside the embed policy, only the bypass blocks differ from v2.43.1', () 
       `${k} did not change at all — the v2.77.0 CSP override never reached this route`);
   }
   // The log block is additive, so it shows up as a new key rather than a diff.
+  // v2.106.0 adds the two Crew A2A platform routes, named so that no legacy
+  // app prefix (`a`, `a2`) can capture /a2a (services/caddy.js).
   assert.deepEqual(
-    [...craneNow.keys()].filter(k => !craneWas.has(k)), ['log'],
-    'the crane site gained a block other than the redacting access log');
+    [...craneNow.keys()].filter(k => !craneWas.has(k)).sort(),
+    ['handle /.well-known/agent-card.json', 'handle /a2a*', 'log'],
+    'the crane site gained a block other than the redacting access log and the A2A routes');
   assert.deepEqual([...craneWas.keys()].filter(k => !craneNow.has(k)), []);
 });
 

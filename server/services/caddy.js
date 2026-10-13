@@ -603,6 +603,20 @@ export function generateCaddyfile() {
   caddyfile += `        respond 404\n`;
   caddyfile += `    }\n\n`;
 
+  // v2.106.0: Crew's A2A endpoint and its discovery card, named explicitly
+  // instead of left to the catch-all below. Caddy picks the MOST SPECIFIC
+  // matching `handle` path, so an app block left over from before the slug
+  // policy (an app or old alias named `a` or `a2`) would otherwise capture
+  // /a2a — every agent token sent to it would land in that app. `/a2a*` is
+  // longer than any such prefix, so it wins. reverse_proxy flushes
+  // text/event-stream responses immediately, which the A2A SSE stream needs.
+  caddyfile += `    handle /a2a* {\n`;
+  caddyfile += `        reverse_proxy 127.0.0.1:${cranePort}\n`;
+  caddyfile += `    }\n\n`;
+  caddyfile += `    handle /.well-known/agent-card.json {\n`;
+  caddyfile += `        reverse_proxy 127.0.0.1:${cranePort}\n`;
+  caddyfile += `    }\n\n`;
+
   // Everything else → AppCrane itself
   caddyfile += `    handle {\n`;
   caddyfile += `        reverse_proxy 127.0.0.1:${cranePort}\n`;

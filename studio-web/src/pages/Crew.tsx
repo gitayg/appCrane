@@ -1,9 +1,11 @@
 import { useState, useEffect, useCallback } from 'react'
 import { adminApi } from '../adminApi'
 import { serverDate } from '../utils/serverDate'
+import { CrewMap, type CrewMapData } from './CrewMap'
 
 // Crew (v2.105.0): the platform-wide agent hub, as its owners see it.
 // Shapes mirror server/services/crew.js (roster, crewLog, listBlocks).
+// v2.106.0: the Map tab (CrewMap.tsx, GET /api/crew/map) and A2A tokens on My agents.
 
 interface RosterRow {
   name: string
@@ -40,12 +42,14 @@ interface LogEntry {
 }
 
 interface BlockRow { id: number; agent: string; owner: string; created_at: string; refused_since: number }
+interface TokenRow { agent: string; hint: string; created_at: string; last_used_at: string | null }
 interface RefusedRow { connection_id: number; agent: string; owner: string; decided_at: string | null }
 
-type Tab = 'roster' | 'log' | 'agents' | 'rules'
+type Tab = 'roster' | 'log' | 'map' | 'agents' | 'rules'
 const TABS: { id: Tab; label: string }[] = [
   { id: 'roster', label: 'Roster' },
   { id: 'log',    label: 'Crew log' },
+  { id: 'map',    label: 'Map' },
   { id: 'agents', label: 'My agents' },
   { id: 'rules',  label: 'Rules & blocks' },
 ]
@@ -202,7 +206,26 @@ function LogTab({ entries, onDecide }: { entries: LogEntry[]; onDecide: (e: LogE
 
 // ── My agents ───────────────────────────────────────────────────────────────
 
-function AgentsTab({ mine, onChanged, setError }: { mine: RosterRow[]; onChanged: () => void; setError: (s: string | null) => void }) {
+/** A token shown once, right after it was issued, with a copy button. */
+function NewToken({ agent, token, onDone }: { agent: string; token: string; onDone: () => void }) {
+  const [copied, setCopied] = useState(false)
+  return (
+    <div role="status" style={{ border: '1px solid var(--yellow)', borderRadius: 8, padding: '12px 14px', marginBottom: 14, background: 'var(--surface)' }}>
+      <div style={{ fontWeight: 600, marginBottom: 4 }}>A2A token for {agent}</div>
+      <div style={{ ...dim, fontSize: '.82rem', marginBottom: 8 }}>
+        Shown once. Store it where the agent keeps its secrets; AppCrane keeps only a hash. The agent sends it as <code>Authorization: Bearer ...</code> to <code>/a2a</code>.
+      </div>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+        <code style={{ ...mono, overflowWrap: 'anywhere', flex: '1 1 260px' }}>{token}</code>
+        <button className="btn btn-xs" onClick={() => { navigator.clipboard?.writeText(token).then(() => setCopied(true), () => {}) }}>{copied ? 'Copied' : 'Copy'}</button>
+        <button className="btn btn-xs" onClick={onDone}>I stored it</button>
+      </div>
+    </div>
+  )
+}
+
+function AgentsTab({ mine, tokens, onChanged, setError }: { mine: RosterRow[]; tokens: TokenRow[]; onChanged: () => void; setError: (s: string | null) => void }) {
+  const [issued, setIssued] = useState<{ agent: string; token: string } | null>(null)
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [skills, setSkills] = useState('')
@@ -213,7 +236,7 @@ function AgentsTab({ mine, onChanged, setError }: { mine: RosterRow[]; onChanged
   const register = async () => {
     setBusy(true)
     try {
-      await adminApi.post('/api/crew/agents', {
+      const r = await adminApi.post<{ agent: { name: string }; a2a_token?: string }>('/api/crew/agents', {
         name: name.trim() || undefined,
         description: description.trim() || undefined,
         skills: skills.trim() || undefined,
@@ -221,10 +244,23 @@ function AgentsTab({ mine, onChanged, setError }: { mine: RosterRow[]; onChanged
         card_json: card.trim() || undefined,
       })
       setName(''); setDescription(''); setSkills(''); setKnowsAbout(''); setCard('')
+      if (r.a2a_token) setIssued({ agent: r.agent.name, token: r.a2a_token })
       setError(null)
       onChanged()
     } catch (e) { setError(errText(e)) } finally { setBusy(false) }
   }
+  const rotate = async (n: string, hadToken: boolean) => {
+    if (hadToken && !window.confirm(`Issue a new A2A token for ${n}? The current token stops working at once.`)) return
+    try {
+      const r = await adminApi.post<{ agent: string; token: string }>(`/api/crew/agents/${encodeURIComponent(n)}/token`, {})
+      setIssued({ agent: r.agent, token: r.token }); setError(null); onChanged()
+    } catch (e) { setError(errText(e)) }
+  }
+  const revoke = async (n: string) => {
+    if (!window.confirm(`Revoke ${n}'s A2A token? Calls with it are refused at once.`)) return
+    try { await adminApi.del(`/api/crew/agents/${encodeURIComponent(n)}/token`); setError(null); onChanged() } catch (e) { setError(errText(e)) }
+  }
+  const tokenOf = (n: string) => tokens.find(t => t.agent === n)
   const remove = async (n: string) => {
     if (!window.confirm(`Remove ${n}? Its tasks are deleted with it.`)) return
     try { await adminApi.del(`/api/crew/agents/${encodeURIComponent(n)}`); setError(null); onChanged() } catch (e) { setError(errText(e)) }
@@ -235,24 +271,40 @@ function AgentsTab({ mine, onChanged, setError }: { mine: RosterRow[]; onChanged
     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: 18, alignItems: 'start' }}>
       <div>
         <h3 style={{ marginTop: 0 }}>Your agents</h3>
+        {issued && <NewToken agent={issued.agent} token={issued.token} onDone={() => setIssued(null)} />}
         {mine.length === 0 && <div style={dim}>You have no agents registered.</div>}
         {mine.length > 0 && (
-          <table>
-            <thead><tr><th>Agent</th><th>Runs as</th><th>Last seen</th><th></th></tr></thead>
-            <tbody>
-              {mine.map(a => (
-                <tr key={a.name}>
-                  <td style={agentCell}>{a.name}</td>
-                  <td style={dim}>{a.runs_as === 'mcp' ? 'Local agent · MCP' : 'Hosted'}</td>
-                  <td style={dim}>{when(a.last_seen_at)}</td>
-                  <td><button className="btn btn-xs btn-red" onClick={() => remove(a.name)}>Remove</button></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <div className="apps-table-wrap">
+            <table>
+              <thead><tr><th>Agent</th><th>Runs as</th><th>Last seen</th><th>A2A token</th><th></th></tr></thead>
+              <tbody>
+                {mine.map(a => {
+                  const t = tokenOf(a.name)
+                  return (
+                    <tr key={a.name}>
+                      <td style={agentCell}>{a.name}</td>
+                      <td style={dim}>{a.runs_as === 'mcp' ? 'Local agent · MCP' : 'Hosted'}</td>
+                      <td style={dim}>{when(a.last_seen_at)}</td>
+                      <td style={dim}>
+                        {t
+                          ? <span title={`Issued ${serverDate(t.created_at).toLocaleString()}`}><span style={mono}>dhk_crew_{t.hint}...</span>{t.last_used_at ? `, used ${when(t.last_used_at)}` : ', never used'}</span>
+                          : 'none'}
+                      </td>
+                      <td style={{ whiteSpace: 'nowrap' }}>
+                        <button className="btn btn-xs" onClick={() => rotate(a.name, !!t)} title="Issue a token this agent uses to call AppCrane's A2A endpoint">{t ? 'Rotate' : 'Issue token'}</button>{' '}
+                        {t && <button className="btn btn-xs" onClick={() => revoke(a.name)}>Revoke</button>}{' '}
+                        <button className="btn btn-xs btn-red" onClick={() => remove(a.name)}>Remove</button>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
         )}
         <p style={{ ...dim, fontSize: '.82rem', marginTop: 12 }}>
           Local agents (Claude Code, Cursor) register themselves over MCP with <code>appcrane_crew_register</code>, using your key. An agent can never do more than you may.
+          Hosted agents talk A2A: each gets its own token, which acts only as that agent.
         </p>
       </div>
       <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: '14px 16px', background: 'var(--surface)' }}>
@@ -268,7 +320,7 @@ function AgentsTab({ mine, onChanged, setError }: { mine: RosterRow[]; onChanged
         <label style={label} htmlFor="crew-card">Or paste its Agent Card (JSON)</label>
         <textarea id="crew-card" rows={5} placeholder='{"name": "release-bot", "skills": [{"id": "release-notes"}]}' value={card} onChange={e => setCard(e.target.value)} style={{ width: '100%', ...mono }} />
         <p style={{ ...dim, fontSize: '.78rem', margin: '6px 0 10px' }}>
-          Paste the card's contents; AppCrane does not fetch card URLs. Others' agents can send it tasks only after you approve them.
+          Paste the card's contents; AppCrane does not fetch card URLs. Others' agents can send it tasks only after you approve them. Registering shows the agent's A2A token once.
         </p>
         <button className="btn btn-accent" onClick={register} disabled={busy || (!name.trim() && !card.trim())}>{busy ? 'Registering...' : 'Register'}</button>
       </div>
@@ -332,6 +384,8 @@ export function Crew() {
   const [entries, setEntries] = useState<LogEntry[]>([])
   const [blocks, setBlocks] = useState<BlockRow[]>([])
   const [refused, setRefused] = useState<RefusedRow[]>([])
+  const [tokens, setTokens] = useState<TokenRow[]>([])
+  const [mapData, setMapData] = useState<CrewMapData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -347,12 +401,16 @@ export function Crew() {
       adminApi.get<{ agents: RosterRow[] }>('/api/crew/roster'),
       adminApi.get<{ entries: LogEntry[] }>('/api/crew/log'),
       adminApi.get<{ blocks: BlockRow[]; refused: RefusedRow[] }>('/api/crew/blocks'),
+      adminApi.get<{ tokens: TokenRow[] }>('/api/crew/agents'),
+      adminApi.get<CrewMapData>('/api/crew/map'),
     ])
-      .then(([r, l, b]) => {
+      .then(([r, l, b, a, m]) => {
         setRosterRows(r.agents || [])
         setEntries(l.entries || [])
         setBlocks(b.blocks || [])
         setRefused(b.refused || [])
+        setTokens(a.tokens || [])
+        setMapData(m)
         setError(null)
       })
       .catch(e => setError(errText(e)))
@@ -407,7 +465,8 @@ export function Crew() {
 
       {tab === 'roster' && <RosterTab rows={rosterRows} onBlock={block} />}
       {tab === 'log' && <LogTab entries={entries} onDecide={decide} />}
-      {tab === 'agents' && <AgentsTab mine={mine} onChanged={load} setError={setError} />}
+      {tab === 'map' && <CrewMap data={mapData} />}
+      {tab === 'agents' && <AgentsTab mine={mine} tokens={tokens} onChanged={load} setError={setError} />}
       {tab === 'rules' && (
         <RulesTab
           blocks={blocks}
