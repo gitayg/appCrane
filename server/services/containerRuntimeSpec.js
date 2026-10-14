@@ -6,6 +6,7 @@
 // a shell — see the array-only rule below, which is the whole security story of
 // this file.
 
+import { lstatSync } from 'fs';
 import { resolve, join, posix } from 'path';
 
 // --------------------------------------------------------------------------
@@ -298,12 +299,39 @@ export function declaredVolumePathsFor({ app, entry }) {
   return parseVolumePaths(rowValue);
 }
 
+// The prefix test above is on the STRING. The callers then mkdir -p, chown -R
+// and bind-mount that string, and all three follow a symbolic link in it. App
+// code can create one: with '/var' declared, the container writes
+// <shared>/volumes/var/lib as a link to /etc, and once '/var/lib' is declared
+// the host's /etc is chowned to the app's uid and mounted read-write into the
+// container. So every component below the shared dir that already exists must
+// be a real directory.
+export function assertNoSymlinkBelow(base, host, containerPath) {
+  let cur = base;
+  for (const seg of host.slice(base.length + 1).split('/')) {
+    cur = join(cur, seg);
+    let st;
+    try { st = lstatSync(cur); } catch (e) {
+      if (e.code === 'ENOENT') return; // nothing below a missing component can be a link yet
+      throw e;
+    }
+    if (st.isSymbolicLink() || !st.isDirectory()) {
+      throw new Error(`Security: volume host path for '${containerPath}' passes through ${cur}, which is not a plain directory`);
+    }
+  }
+}
+
 export function resolveVolumeMounts({ sharedDir, paths = [] }) {
   const base = resolve(sharedDir);
   const mounts = [{ host: resolve(join(base, 'data')), container: DEFAULT_CONTAINER_PATH }];
   const skipped = [];
 
-  for (const p of validateVolumePaths(paths)) {
+  // Shortest first, so "covered by another mount" does not depend on the order
+  // the paths were declared in: ['/config/cache', '/config'] used to mount
+  // both, the nested bind docker resolves by mount order. Stable, so paths of
+  // equal length keep their declared order.
+  const ordered = validateVolumePaths(paths).slice().sort((a, b) => a.length - b.length);
+  for (const p of ordered) {
     const covering = mounts.find((m) => isUnderneath(p, m.container));
     if (covering) {
       skipped.push({ path: p, coveredBy: covering.container });
@@ -317,7 +345,11 @@ export function resolveVolumeMounts({ sharedDir, paths = [] }) {
     if (!host.startsWith(`${root}/`)) {
       throw new Error(`Security: volume host path ${host} for '${p}' is outside ${root}`);
     }
-    mounts.push({ host, container: p });
+    assertNoSymlinkBelow(base, host, p);
+    // `base` travels with the mount so startApp() can repeat the check after
+    // it stops the old container: until then that container is still running
+    // and can swap a checked directory for a link before `docker run`.
+    mounts.push({ host, container: p, base });
   }
   return { mounts, skipped };
 }

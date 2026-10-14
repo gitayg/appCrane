@@ -11,6 +11,7 @@ import { join, resolve } from 'path';
 import { randomUUID } from 'crypto';
 import { getDb } from '../db.js';
 import log from '../utils/logger.js';
+import { fetchToBuffer } from './remoteFetch.js';
 
 function dataDir() {
   return resolve(process.env.DATA_DIR || './data');
@@ -275,15 +276,17 @@ export function normalizeFetchUrl(url) {
  */
 export async function fetchSkillFromUrl(url) {
   const target = normalizeFetchUrl(url);
-  if (!/^https?:\/\//.test(target)) throw new Error('URL must be http(s)');
-  let res;
+  // The shared SSRF guard: https only, the resolved address must be public,
+  // redirects refused, size capped. This fetch used to follow redirects to any
+  // address, and the bytes became a skill that is mounted into app containers —
+  // a way to copy the host's internal endpoints (Caddy admin, cloud metadata)
+  // out to every app the skill is assigned to.
+  let buf;
   try {
-    res = await fetch(target, { redirect: 'follow' });
+    buf = await fetchToBuffer(target);
   } catch (e) {
     throw new Error(`fetch failed: ${e.message}`);
   }
-  if (!res.ok) throw new Error(`fetch failed: HTTP ${res.status}`);
-  const buf = Buffer.from(await res.arrayBuffer());
 
   const lower = target.toLowerCase();
   const looksZip = buf.length >= 4 && buf[0] === 0x50 && buf[1] === 0x4b && buf[2] === 0x03 && buf[3] === 0x04;

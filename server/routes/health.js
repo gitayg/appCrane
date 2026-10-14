@@ -3,6 +3,7 @@ import { getDb } from '../db.js';
 import { requireAuth, requireAppUser, requireAppAccess } from '../middleware/auth.js';
 import { auditMiddleware } from '../middleware/audit.js';
 import { AppError } from '../utils/errors.js';
+import { fetchAppProbe } from '../services/appProbeFetch.js';
 import { getPortsForSlot } from '../services/portAllocator.js';
 
 const router = Router();
@@ -86,7 +87,7 @@ router.post('/:slug/health/:env/test', requireAppAccess, async (req, res) => {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000);
 
-    const response = await fetch(url, { signal: controller.signal });
+    const response = await fetchAppProbe(url, { signal: controller.signal });
     clearTimeout(timeout);
 
     const elapsed = Date.now() - start;
@@ -141,7 +142,7 @@ router.get('/:slug/live-version/:env', requireAppAccess, async (req, res) => {
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 3000);
-    const response = await fetch(url, { signal: controller.signal });
+    const response = await fetchAppProbe(url, { signal: controller.signal });
     clearTimeout(timeout);
 
     if (response.ok) {

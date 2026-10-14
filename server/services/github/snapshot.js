@@ -1,5 +1,6 @@
-import { mkdirSync, writeFileSync } from 'fs';
+import { mkdirSync } from 'fs';
 import { join } from 'path';
+import { writeFileInside } from '../../utils/paths.js';
 import { decrypt } from '../encryption.js';
 import log from '../../utils/logger.js';
 
@@ -119,10 +120,11 @@ function writeMinimalSnapshot(workspaceDir, reason) {
   try {
     const dir = join(workspaceDir, '.appcrane');
     mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, 'github-snapshot.md'),
-      `# GitHub snapshot unavailable\n\n${reason}\n\nRely on \`git log\` and \`git status\` for project history.\n`,
-      { mode: 0o644 });
-    writeFileSync(join(dir, 'CLAUDE.md'), POINTER_BODY, { mode: 0o644 });
+    // The workspace is a clone of the app's repo: a committed .appcrane link
+    // or file link would carry these writes anywhere on the host.
+    writeFileInside(workspaceDir, join(dir, 'github-snapshot.md'),
+      `# GitHub snapshot unavailable\n\n${reason}\n\nRely on \`git log\` and \`git status\` for project history.\n`);
+    writeFileInside(workspaceDir, join(dir, 'CLAUDE.md'), POINTER_BODY);
   } catch (_) {}
 }
 
@@ -172,8 +174,8 @@ export async function writeSnapshot(app, workspaceDir, onLog) {
   try {
     const dir = join(workspaceDir, '.appcrane');
     mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, 'github-snapshot.md'), md, { mode: 0o644 });
-    writeFileSync(join(dir, 'CLAUDE.md'), POINTER_BODY, { mode: 0o644 });
+    writeFileInside(workspaceDir, join(dir, 'github-snapshot.md'), md);
+    writeFileInside(workspaceDir, join(dir, 'CLAUDE.md'), POINTER_BODY);
   } catch (err) {
     log.warn(`snapshot: failed to write ${workspaceDir}/.appcrane: ${err.message}`);
     return false;

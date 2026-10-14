@@ -1,5 +1,6 @@
-import { existsSync, readFileSync, writeFileSync } from 'fs';
-import { join } from 'path';
+import { existsSync, readFileSync, lstatSync } from 'fs';
+import { join, dirname } from 'path';
+import { writeFileInside } from '../utils/paths.js';
 import log from '../utils/logger.js';
 import { detectPhpApp, ensurePhpDockerfile } from './dockerfileGenPhp.js';
 
@@ -206,6 +207,12 @@ export function ensureDockerfile({ releaseDir, manifest, appBasePath, craneUrl, 
   const existing = join(releaseDir, 'Dockerfile'); // nosemgrep: path-join-resolve-traversal — releaseDir is an internal computed path
   const warnings = [];
 
+  // A committed link — dangling ones read as "no Dockerfile" to existsSync —
+  // would have the generated file written wherever it points, as root.
+  let isLink = false;
+  try { isLink = lstatSync(existing).isSymbolicLink(); } catch (_) {}
+  if (isLink) throw new Error('Dockerfile is a symbolic link; commit a regular file or none at all');
+
   // If the app ships its own Dockerfile, use it as-is.
   if (existsSync(existing)) {
     // Everything below this line is unreachable for these apps: their build
@@ -393,7 +400,7 @@ export function ensureDockerfile({ releaseDir, manifest, appBasePath, craneUrl, 
     '',
   );
 
-  writeFileSync(existing, lines.join('\n'));
+  writeFileInside(releaseDir, existing, lines.join('\n'));
   return { path: existing, warnings, runtime: 'node' };
 }
 
@@ -417,5 +424,5 @@ export function injectAppBasePathArg(dockerfilePath) {
   if (fromIdx === -1) return; // malformed Dockerfile — skip silently
 
   lines.splice(fromIdx + 1, 0, 'ARG APP_BASE_PATH=/', 'ENV APP_BASE_PATH=$APP_BASE_PATH', '');
-  writeFileSync(dockerfilePath, lines.join('\n'), 'utf8');
+  writeFileInside(dirname(dockerfilePath), dockerfilePath, lines.join('\n'));
 }

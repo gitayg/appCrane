@@ -1,5 +1,6 @@
-import { existsSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
+import { writeFileInside } from '../utils/paths.js';
 import log from '../utils/logger.js';
 
 const PHP_IMAGE = 'php:8.3-apache';
@@ -380,6 +381,6 @@ export function generatePhpDockerfile({ releaseDir, manifest }) {
 
 export function ensurePhpDockerfile({ releaseDir, manifest, dockerfilePath }) {
   const { lines, warnings } = generatePhpDockerfile({ releaseDir, manifest });
-  writeFileSync(dockerfilePath, lines.join('\n'));
+  writeFileInside(releaseDir, dockerfilePath, lines.join('\n'));
   return { path: dockerfilePath, warnings };
 }

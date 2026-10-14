@@ -9,6 +9,7 @@ import log from '../utils/logger.js';
 import { usesLocalRepo } from './managedRepo.js';
 import { scrubToken } from './githubGitAuth.js';
 import { AppError } from '../utils/errors.js';
+import { pickUpAppIcon } from './appIcon.js';
 import { getIngressForApp } from './tcpIngress.js';
 import { ensureCodebaseContext } from './appstudio/contextBuilder.js';
 import { findEntry } from './catalogService.js';
@@ -22,6 +23,7 @@ import { parseManifestDatabase, ensureManifestDatabase } from './manifestDatabas
 import { managedDbScopeFor, SANDBOX_TENANT } from './sandboxDb.js';
 import { parseContainerCommand, parseVolumePaths, resolveVolumeMounts, declaredVolumePathsFor } from './containerRuntimeSpec.js';
 import { resolveHealthProbe } from './healthProbeTarget.js';
+import { fetchAppProbe } from './appProbeFetch.js';
 import { imagesToKeep } from './imageRetention.js';
 
 // ---------------------------------------------------------------------------
@@ -569,7 +571,7 @@ async function probeHealthEndpoint(url, timeoutMs, { strict = true } = {}) {
 
   while (Date.now() < deadline) {
     try {
-      const res = await fetch(url, { signal: AbortSignal.timeout(3000) });
+      const res = await fetchAppProbe(url, { signal: AbortSignal.timeout(3000) });
       lastStatus = res.status;
       if (res.ok) {
         const text = await res.text();
@@ -1665,32 +1667,12 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     // public/icon.png in the app's own repo, and an image app has no repo and
     // no release dir to look in.
     if (!isImageDeploy) {
-    try {
-      const ICON_PREFERENCE = ['png', 'svg', 'webp', 'jpg', 'jpeg', 'gif'];
-      const found = ICON_PREFERENCE
-        .map(ext => ({ ext, path: join(releaseDir, 'public', `icon.${ext}`) }))
-        .find(({ path }) => existsSync(path));
-      if (found) {
-        const appIconDir = join(dataDir, 'apps', app.slug);
-        mkdirSync(appIconDir, { recursive: true });
-        // Wipe stale icons under a different extension before copying.
-        for (const oldExt of ICON_PREFERENCE) {
-          if (oldExt === found.ext) continue;
-          const oldPath = join(appIconDir, `icon.${oldExt}`);
-          if (existsSync(oldPath)) {
-            try { unlinkSync(oldPath); } catch (_) {}
-          }
-        }
-        const destPath = join(appIconDir, `icon.${found.ext}`);
-        // copyFileSync rather than rename — the source lives inside the
-        // release dir and we don't want to corrupt that dir's contents.
-        const { copyFileSync } = await import('fs');
-        copyFileSync(found.path, destPath);
-        appendLog(`Picked up app icon from public/icon.${found.ext}`);
+      try {
+        const ext = pickUpAppIcon({ releaseDir, dataDir, slug: app.slug });
+        if (ext) appendLog(`Picked up app icon from public/icon.${ext}`);
+      } catch (e) {
+        appendLog(`WARNING: icon pickup failed: ${e.message}`);
       }
-    } catch (e) {
-      appendLog(`WARNING: icon pickup failed: ${e.message}`);
-    }
     }
 
     // Read deployhub.json manifest (everything except `version`)

@@ -175,6 +175,12 @@ router.get('/:slug/logs/:env', requireAppAccess, async (req, res) => {
     throw new AppError('Runtime logs are visible to the app owner or a platform admin only', 403, 'FORBIDDEN');
   }
   const { env } = req.params;
+  // Checked here rather than left to getAppLogs, whose error the catch below
+  // would turn into an empty 200: the env is part of a container name, and
+  // anything but these two reaches another app's container (see docker.js).
+  if (env !== 'production' && env !== 'sandbox') {
+    throw new AppError('env must be production or sandbox', 400, 'VALIDATION');
+  }
   const url3 = new URL(req.url, `http://${req.headers.host}`);
   const lines = Math.min(parseInt(url3.searchParams.get('lines')) || 100, 2000);
   const search = url3.searchParams.get('search') || '';

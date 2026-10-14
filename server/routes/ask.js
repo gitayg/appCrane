@@ -80,7 +80,9 @@ router.post('/:appSlug', async (req, res) => {
   const { question, session_id } = req.body || {};
   if (!question?.trim()) throw new AppError('question is required', 400, 'VALIDATION');
   // Length only: a question can contain anything, including secrets.
-  logAudit(user.id, app.id, 'ask', { question_chars: question.trim().length });
+  // resolveUser() returns { userId, ... }, not a users row: user.id was
+  // undefined and every Ask row was written with no actor.
+  logAudit(user.userId, app.id, 'ask', { question_chars: question.trim().length });
 
   let sessionId = session_id ? Number(session_id) : null;
   if (sessionId) {

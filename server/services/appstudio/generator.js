@@ -1,6 +1,7 @@
 import { execFileSync, spawn } from 'child_process';
 import { mkdirSync, existsSync, readFileSync, rmSync, writeFileSync, chmodSync } from 'fs';
 import { join, resolve } from 'path';
+import { writeFileInside } from '../../utils/paths.js';
 import { decrypt } from '../encryption.js';
 import { tokenGitEnv, scrubToken } from '../githubGitAuth.js';
 import { assertCapacity } from '../containerLimit.js';
@@ -245,7 +246,8 @@ async function cloneForCode(dir, app, baseBranch, branchName, onLog) {
   try { execFileSync('chmod', ['-R', '777', workspaceDir], { stdio: 'pipe' }); } catch (_) {}
   try { execFileSync('chown', ['-R', '1000:1000', workspaceDir], { stdio: 'pipe' }); } catch (_) {}
 
-  writeFileSync(join(workspaceDir, 'CLAUDE.md'), buildWorkspaceClaude(), { mode: 0o644 }); // nosemgrep
+  // A cloned repo may commit CLAUDE.md as a link out of the workspace.
+  writeFileInside(workspaceDir, join(workspaceDir, 'CLAUDE.md'), buildWorkspaceClaude()); // nosemgrep
 
   // Drop a GitHub-state snapshot into .appcrane/ before the container starts.
   // The token stays on the host. Fail-soft: snapshot errors do not block coding.

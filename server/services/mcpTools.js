@@ -31,6 +31,8 @@ import crypto from 'crypto';
 import { slugRefusal } from '../utils/slugPolicy.js';
 import { registerAgent, roster, whoIsOn, sendTask, inbox, reply, redactCrewArgs, assertCrewCaller } from './crew.js';
 import { myRules } from './crewDecisions.js';
+import { fetchAppProbe } from './appProbeFetch.js';
+import { normalizeFrameAncestors } from '../utils/frameAncestors.js';
 
 /**
  * The commit part of a managed-push response. A GitHub commit carries its web
@@ -301,6 +303,23 @@ function isAppAdmin(user, app) {
   // got "Forbidden" on call. Matters for non-admin onboarding: the app
   // creator is auto-assigned owner.
   return row?.app_role === 'admin' || row?.app_role === 'owner';
+}
+
+/**
+ * The owner tier is the owner's (or a platform admin's) to hand out or take
+ * away. REST already says so (PUT /api/users/:slug/roles is owner-only); the
+ * MCP member tools let any app admin through, so an admin could grant
+ * themselves owner, or demote and remove the real owner. An app admin keeps
+ * what those tools gave them for the tiers below owner.
+ */
+function assertMayChangeMemberRole(user, app, { newRole = null, currentRole = null } = {}) {
+  if (isAdmin(user)) return;
+  const db = getDb();
+  const mine = db.prepare('SELECT app_role FROM app_user_roles WHERE app_id = ? AND user_id = ?').get(app.id, user.id);
+  if (mine?.app_role === 'owner') return;
+  if (newRole === 'owner' || currentRole === 'owner') {
+    throw new Error('Forbidden: only an owner of this app or a platform admin can grant, change or remove the owner role');
+  }
 }
 
 /**
@@ -876,7 +895,7 @@ const TOOLS = [
       const url = `http://127.0.0.1:${port}${path}`;
 
       try {
-        const r = await fetch(url, { signal: AbortSignal.timeout(5000) });
+        const r = await fetchAppProbe(url, { signal: AbortSignal.timeout(5000) });
         const text = await r.text();
         let body;
         try { body = JSON.parse(text); } catch { body = text.slice(0, 4096); }
@@ -2269,7 +2288,7 @@ const TOOLS = [
         if (!Number.isFinite(n) || n < 0 || n > 50) throw new Error('image_retention must be 0-50');
         updates.image_retention = n;
       }
-      if (args.frame_ancestors !== undefined) updates.frame_ancestors = args.frame_ancestors ? String(args.frame_ancestors) : null;
+      if (args.frame_ancestors !== undefined) updates.frame_ancestors = normalizeFrameAncestors(args.frame_ancestors);
       if (args.auth_bypass_paths !== undefined) {
         const parsed = validateBypassPaths(args.auth_bypass_paths);
         updates.auth_bypass_paths = parsed && parsed.length > 0 ? JSON.stringify(parsed) : null;
@@ -2980,7 +2999,7 @@ const TOOLS = [
   {
     name: 'appcrane_grant_app_access',
     description:
-      'Grant a user access to an app at a specific per-app role. `user` accepts a numeric user id, an email, or a username — first match wins. role defaults to "user". Idempotent: existing rows are upgraded/downgraded to the new role. App-admin or owner of the app required (or platform admin).',
+      'Grant a user access to an app at a specific per-app role. `user` accepts a numeric user id, an email, or a username — first match wins. role defaults to "user". Idempotent: existing rows are upgraded/downgraded to the new role. App-admin or owner of the app required (or platform admin); only an owner or platform admin can grant or change the owner role.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -3010,6 +3029,10 @@ const TOOLS = [
         LIMIT 1
       `).get(args.user, args.user, args.user);
       if (!target) throw new Error(`User not found: ${args.user}`);
+      assertMayChangeMemberRole(user, app, {
+        newRole: role,
+        currentRole: db.prepare('SELECT app_role FROM app_user_roles WHERE app_id = ? AND user_id = ?').get(app.id, target.id)?.app_role,
+      });
 
       // The role row IS the access (v2.94.0: app_users is a view of it).
       db.prepare(`
@@ -3025,7 +3048,7 @@ const TOOLS = [
   {
     name: 'appcrane_revoke_app_access',
     description:
-      'Remove a user\'s access from an app entirely. Idempotent: returns ok even if the user had no access. App-admin or owner of the app required (or platform admin). Refuses to remove the only remaining owner.',
+      'Remove a user\'s access from an app entirely. Idempotent: returns ok even if the user had no access. App-admin or owner of the app required (or platform admin); only an owner or platform admin can remove an owner. Refuses to remove the only remaining owner.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -3053,6 +3076,7 @@ const TOOLS = [
       // Owner-protection: refuse to remove the last owner — would leave
       // the app un-ownable. Caller must promote a different user first.
       const cur = db.prepare("SELECT app_role FROM app_user_roles WHERE app_id = ? AND user_id = ?").get(app.id, target.id);
+      assertMayChangeMemberRole(user, app, { currentRole: cur?.app_role });
       if (cur?.app_role === 'owner') {
         const ownerCount = db.prepare("SELECT COUNT(*) AS c FROM app_user_roles WHERE app_id = ? AND app_role = 'owner'").get(app.id).c;
         if (ownerCount <= 1) {
@@ -3265,7 +3289,7 @@ const TOOLS = [
   {
     name: 'appcrane_approve_access_request',
     description:
-      'Approve a pending access request: grants the requester access to the app at `role` (default "user") and marks the enhancement_request as done. Verifies the request is actually an access request before acting. App-admin / owner / platform admin required.',
+      'Approve a pending access request: grants the requester access to the app at `role` (default "user") and marks the enhancement_request as done. Verifies the request is actually an access request before acting. App-admin / owner / platform admin required; only an owner or platform admin can approve at the owner role.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -3292,6 +3316,16 @@ const TOOLS = [
       }
 
       const role = args.role || 'user';
+      // The schema's enum is advice to the client, not a check this server runs.
+      if (!['user', 'admin', 'owner'].includes(role)) {
+        throw new Error('role must be one of: user, admin, owner');
+      }
+      // An admin can file an access request for themselves and approve it, so
+      // this is the same owner-tier rule as grant, not a weaker one.
+      assertMayChangeMemberRole(user, app, {
+        newRole: role,
+        currentRole: db.prepare('SELECT app_role FROM app_user_roles WHERE app_id = ? AND user_id = ?').get(app.id, req.user_id)?.app_role,
+      });
       db.prepare(`
         INSERT INTO app_user_roles (app_id, user_id, app_role) VALUES (?, ?, ?)
         ON CONFLICT(app_id, user_id) DO UPDATE SET app_role = excluded.app_role
@@ -4032,6 +4066,12 @@ const TOOLS = [
       const env = args.env === 'production' ? 'production' : 'sandbox';
       const app = getAppForUser(user, args.slug);
       if (!isAppAdmin(user, app)) throw new Error('Forbidden: setting env vars requires admin or app-admin role');
+      // The same configurable gate PUT /api/apps/:slug/env/production applies;
+      // without it an operator who narrowed env.write.production in the matrix
+      // narrowed only the dashboard.
+      if (env === 'production' && !userHasAppPermission(user, app, 'env.write.production')) {
+        throw new Error('Forbidden: writing production env vars requires the env.write.production permission for this app.');
+      }
       if (!/^[A-Z_][A-Z0-9_]*$/i.test(args.key)) {
         throw new Error(`Invalid env var key: ${args.key} (must match /^[A-Z_][A-Z0-9_]*$/i)`);
       }
@@ -5311,7 +5351,11 @@ function canUseTool(user, tool) {
     ).get(user.id);
     return !!row;
   }
-  return true;
+  if (tool.requiredRole === 'platform_admin') return isAdmin(user);
+  // Fail closed. appcrane_rename_app declared 'platform_admin', which no
+  // branch above recognised, so the old trailing `return true` handed it to
+  // every member — a role name nobody had taught this function meant "anyone".
+  return tool.requiredRole === 'any';
 }
 
 export function getToolCatalog() {

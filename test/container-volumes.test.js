@@ -144,8 +144,8 @@ test('/data is always first, and no declared path can displace it', () => {
   });
   assert.deepEqual(mounts[0], { host: `${SHARED}/data`, container: '/data' });
   assert.deepEqual(mounts.slice(1), [
-    { host: `${SHARED}/volumes/config`, container: '/config' },
-    { host: `${SHARED}/volumes/var/lib/odoo`, container: '/var/lib/odoo' },
+    { host: `${SHARED}/volumes/config`, container: '/config', base: SHARED },
+    { host: `${SHARED}/volumes/var/lib/odoo`, container: '/var/lib/odoo', base: SHARED },
   ]);
 });
 

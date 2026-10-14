@@ -1,6 +1,7 @@
 import { execFileSync } from 'child_process';
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
+import { regularFileInside } from '../../utils/paths.js';
 import { getDb } from '../../db.js';
 import log from '../../utils/logger.js';
 import { runAgentOneShot } from '../llm/runAgent.js';
@@ -91,7 +92,9 @@ function readKeyFiles(repoDir, paths, commit) {
   if (!isCoderWorkspace(repoDir)) {
     for (const p of paths) {
       const abs = join(repoDir, p); // nosemgrep: path-join-resolve-traversal — p is a hardcoded name or from git ls-tree/diff output
-      out.set(p, existsSync(abs) ? readKeySafe(abs) : null); // host-read-ok: release directory only (see above)
+      // A release dir is a git checkout, and git checks a committed symlink out
+      // as one: following it would put a host file in the context document.
+      out.set(p, regularFileInside(repoDir, abs) ? readKeySafe(abs) : null); // host-read-ok: release directory only (see above)
     }
     return out;
   }

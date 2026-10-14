@@ -8,6 +8,7 @@ import { getNextSlot, getPortsForSlot } from '../services/portAllocator.js';
 import { encrypt, generateApiKey, hashApiKey } from '../services/encryption.js';
 import { AppError } from '../utils/errors.js';
 import { slugRefusal } from '../utils/slugPolicy.js';
+import { normalizeFrameAncestors } from '../utils/frameAncestors.js';
 import { resolveSafe } from '../utils/paths.js';
 import { reloadCaddy } from '../services/caddy.js';
 import { validateBypassPaths } from '../utils/authBypassPaths.js';
@@ -959,7 +960,15 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
     branch !== undefined ||
     github_token !== undefined ||
     source_type !== undefined ||
-    image_ref !== undefined;
+    image_ref !== undefined ||
+    // What the container runs, what host directories it mounts, and which
+    // catalogue entry's variable names receive the managed-DB credential are
+    // the code selection too. Left open to any member, a viewer could set a
+    // command and restart production with its secrets, or link a catalogue
+    // entry so the sandbox receives production's database login.
+    container_command !== undefined ||
+    volume_paths !== undefined ||
+    req.body.catalog_slug !== undefined;
   if (repoFieldChanged && !userHasAppPermission(req.user, app, 'code.modify_repo_settings')) {
     throw new AppError('Modifying repo settings is not permitted by your role on this app', 403, 'FORBIDDEN');
   }
@@ -1191,18 +1200,11 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
     if (frame_ancestors === null || frame_ancestors === '') {
       updates.frame_ancestors = null;
     } else {
-      // Validate CSP source-list syntax: tokens separated by spaces, each
-      // either 'self' / 'none' (with quotes) or a scheme://host[:port]
-      // (optional wildcards in subdomain only). Reject anything containing
-      // ;, newlines, double-quotes, or other CSP-injection characters.
-      const v = String(frame_ancestors).trim();
-      if (!/^[A-Za-z0-9 _.\-:/'*]+$/.test(v))     throw new AppError("frame_ancestors contains invalid characters", 400, 'VALIDATION');
-      if (v.length > 512)                          throw new AppError("frame_ancestors too long (max 512 chars)", 400, 'VALIDATION');
-      const tokens = v.split(/\s+/).filter(Boolean);
-      const TOKEN_RE = /^('self'|'none'|https?:\/\/(\*\.)?[a-z0-9.\-]+(:\d+)?)$/i;
-      const bad = tokens.find(t => !TOKEN_RE.test(t));
-      if (bad) throw new AppError(`frame_ancestors token "${bad}" is not a valid CSP source`, 400, 'VALIDATION');
-      updates.frame_ancestors = tokens.join(' ');
+      // CSP source-list syntax; the rule and why it matters live in
+      // utils/frameAncestors.js, shared with MCP and the Caddyfile generator.
+      try { updates.frame_ancestors = normalizeFrameAncestors(frame_ancestors); } catch (e) {
+        throw new AppError(e.message, 400, 'VALIDATION');
+      }
     }
   }
 

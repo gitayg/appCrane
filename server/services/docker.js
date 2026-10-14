@@ -6,7 +6,7 @@ import { getDb } from '../db.js';
 import {
   publicPortForApp, dataPlanePortForApp, effectiveDataPlaneProtocol, releasePendingPortAfterRecreate, CONTROL_PLANE_PORT,
 } from './tcpIngress.js';
-import { assertRunnableCommand } from './containerRuntimeSpec.js';
+import { assertRunnableCommand, assertNoSymlinkBelow } from './containerRuntimeSpec.js';
 import log from '../utils/logger.js';
 
 const execFileAsync = promisify(execFile);
@@ -723,6 +723,10 @@ export async function startApp({ slug, env, image, hostPort, envVars = {}, volum
   const network = await ensureAppNetwork();
 
   await stopApp(slug, env).catch(() => {});
+  // Now that nothing of this app is running, a declared volume's path is
+  // checked again (see resolveVolumeMounts) — the check made earlier in the
+  // deploy left the old container minutes to plant a link before this mount.
+  for (const v of volumes) if (v.base) assertNoSymlinkBelow(v.base, v.host, v.container);
 
   const args = [
     'run', '-d',
@@ -971,6 +975,9 @@ function parseMemoryUsage(s) {
 }
 
 export async function getAppLogs(slug, env, lines = 100, search = '') {
+  // The container name is `appcrane-<slug>-<env>`, so an env of 'b-production'
+  // under slug 'a' names app 'a-b's container. Only the two real environments.
+  if (env !== 'production' && env !== 'sandbox') throw new Error(`invalid env: ${env}`);
   const name = containerName(slug, env);
   try {
     const output = await dockerExec(['logs', '--tail', String(lines), name]);

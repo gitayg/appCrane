@@ -1,6 +1,7 @@
 import { execFileSync } from 'child_process';
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
+import { regularFileInside } from '../../utils/paths.js';
 import log from '../../utils/logger.js';
 import { ensureCodebaseContext } from './contextBuilder.js';
 import { runAgentOneShot } from '../llm/runAgent.js';
@@ -86,7 +87,9 @@ function grepRelevantFiles(repoDir, fileTree, keywords, maxFiles = 6) {
   return [...files].slice(0, maxFiles);
 }
 
-function readFileSafe(absPath, maxBytes = 20000) {
+function readFileSafe(repoDir, absPath, maxBytes = 20000) {
+  // A committed symlink would put a host file in the prompt (utils/paths.js).
+  if (!regularFileInside(repoDir, absPath)) return '(could not read file)';
   try {
     const c = readFileSync(absPath, 'utf8'); // host-read-ok: worker passes production/current (getRepoDir), a release dir no agent mounts
     return c.length > maxBytes ? c.slice(0, maxBytes) + '\n...(truncated)' : c;
@@ -115,12 +118,12 @@ export async function planEnhancement({ appSlug, enhancementId, request, repoDir
   const keywords = extractKeywords(request + ' ' + (priorComments || ''));
   const relevantPaths = grepRelevantFiles(repoDir, fileTree, keywords);
   const fileContents = relevantPaths
-    .map(rel => `### ${rel}\n\`\`\`\n${readFileSafe(join(repoDir, rel))}\n\`\`\``) // nosemgrep: path-join-resolve-traversal — rel from git ls-tree/grep
+    .map(rel => `### ${rel}\n\`\`\`\n${readFileSafe(repoDir, join(repoDir, rel))}\n\`\`\``) // nosemgrep: path-join-resolve-traversal — rel from git ls-tree/grep
     .join('\n\n');
 
   const testPaths = getTestFiles(fileTree);
   const testContents = testPaths
-    .map(p => `### ${p}\n\`\`\`\n${readFileSafe(join(repoDir, p), 6000)}\n\`\`\``) // nosemgrep: path-join-resolve-traversal — p from git ls-files
+    .map(p => `### ${p}\n\`\`\`\n${readFileSafe(repoDir, join(repoDir, p), 6000)}\n\`\`\``) // nosemgrep: path-join-resolve-traversal — p from git ls-files
     .join('\n\n');
 
   const contextNote = fromCache

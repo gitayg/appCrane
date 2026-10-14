@@ -311,6 +311,12 @@ router.post('/:slug/restart/:env', requireAppAccess, auditMiddleware('restart'),
   if (!['production', 'sandbox'].includes(env)) {
     throw new AppError('env must be production or sandbox', 400, 'VALIDATION');
   }
+  // A restart re-reads the stored command, mounts and env, decrypts production
+  // secrets and starts a container with them: for production that is a deploy
+  // in everything but name, so it takes the deploy gate.
+  if (env === 'production' && !userHasAppPermission(req.user, req.app, 'deploy.production')) {
+    throw new AppError('Restarting production requires the deploy.production permission for this app', 403, 'FORBIDDEN');
+  }
 
   const db = getDb();
   const app = req.app;

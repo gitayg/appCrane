@@ -5,6 +5,7 @@ import log from '../utils/logger.js';
 import { parseBypassPaths } from '../utils/authBypassPaths.js';
 import { isValidDomainFormat } from '../utils/customDomain.js';
 import { platformEmbedAncestors, mergeAncestors } from '../utils/embed.js';
+import { safeFrameAncestors } from '../utils/frameAncestors.js';
 
 const CADDY_ADMIN = process.env.CADDY_ADMIN_URL || 'http://localhost:2019';
 
@@ -391,7 +392,9 @@ export function generateCaddyfile() {
     // v2.44.0: mergeAncestors honours the `'none'` opt-out, so an app's value can
     // now NARROW the platform default instead of only widening it — see
     // utils/embed.js.
-    const fa = mergeAncestors(platformFa, app.frame_ancestors);
+    // The column is re-checked here, not trusted: it is written by more than one
+    // path, and it lands inside a quoted directive (utils/frameAncestors.js).
+    const fa = mergeAncestors(platformFa, safeFrameAncestors(app.frame_ancestors));
 
     // Emitted identically on the sandbox and production routes below. The ops
     // and the reason each one is there: see embedHeaderBlock.

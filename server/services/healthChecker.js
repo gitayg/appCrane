@@ -5,6 +5,7 @@ import { join, resolve } from 'path';
 import { promisify } from 'util';
 import { getDb } from '../db.js';
 import { getPortsForSlot } from './portAllocator.js';
+import { fetchAppProbe } from './appProbeFetch.js';
 import { getIngressForApp } from './tcpIngress.js';
 import log from '../utils/logger.js';
 
@@ -229,7 +230,7 @@ async function probeHttp(url) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
 
-    const response = await fetch(url, { signal: controller.signal });
+    const response = await fetchAppProbe(url, { signal: controller.signal });
     clearTimeout(timeout);
 
     return { status: response.status, responseMs: Date.now() - start };
