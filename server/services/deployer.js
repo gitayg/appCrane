@@ -1170,7 +1170,12 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
   const declaredVolumePaths = declaredVolumePathsFor({ app, entry: findEntry(app.catalog_slug) });
   const { mounts: containerVolumes, skipped: skippedVolumePaths } =
     resolveVolumeMounts({ sharedDir, paths: declaredVolumePaths });
-  for (const vol of containerVolumes) mkdirSync(vol.host, { recursive: true });
+  // Only the mounts whose directory AppCrane itself owns (/data). A declared
+  // volume's path runs through directories the app can replace with a link, so
+  // its mkdir and chown happen inside the helper container the seeding step
+  // below runs (volumeHelper.js), never by a host path walk.
+  const hostOwnedVolumes = containerVolumes.filter((vol) => !vol.base);
+  for (const vol of hostOwnedVolumes) mkdirSync(vol.host, { recursive: true });
 
   // Bind-mounted volumes inherit host ownership, not container ownership.
   // Our Dockerfile runs as the `node` user (UID 1000 in node:*-alpine), so
@@ -1189,7 +1194,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
   // cannot write /config" and "the app cannot write /data" have different
   // causes and different fixes.
   const chownDetails = [];
-  for (const vol of containerVolumes) {
+  for (const vol of hostOwnedVolumes) {
     try {
       execFileSync('chown', ['-R', '1000:1000', vol.host], { stdio: 'pipe', timeout: 30000 });
       chownDetails.push(`chown 1000:1000 ${vol.host} (${vol.container}) → ok`);

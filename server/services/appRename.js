@@ -90,6 +90,12 @@ export async function renameApp({ app, newSlug, redirect = true, userId }) {
     const { stopApp } = await import('./docker.js');
     await stopApp(oldSlug, 'production').catch(() => {});
     await stopApp(oldSlug, 'sandbox').catch(() => {});
+    // The per-env volume declared paths are mounted through is named after the
+    // slug and bound to the OLD directory. Left behind it is a stale record
+    // (startApp recreates one under the new name); removed here so it does not
+    // outlive the slug. The daemon's record only: the data moves with the dir.
+    const { removeAppVolumes } = await import('./docker.js');
+    await removeAppVolumes(oldSlug).catch(() => {});
   } catch (_) {}
 
   // The row already says newSlug, so a failure here is the inconsistency in the

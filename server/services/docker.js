@@ -1,12 +1,19 @@
 import { execFile, execFileSync, spawn } from 'child_process';
+import { pipeline } from 'stream/promises';
 import { randomBytes } from 'crypto';
 import { promisify } from 'util';
 import { basename, dirname, isAbsolute } from 'path';
+import { mkdirSync, lstatSync } from 'fs';
 import { getDb } from '../db.js';
 import {
   publicPortForApp, dataPlanePortForApp, effectiveDataPlaneProtocol, releasePendingPortAfterRecreate, CONTROL_PLANE_PORT,
 } from './tcpIngress.js';
 import { assertRunnableCommand, assertNoSymlinkBelow } from './containerRuntimeSpec.js';
+import {
+  volumeHelperArgs, parseVolumeHelperOutput, sharedVolumesRoot, subpathOf,
+  volumesVolumeName, volumeSubpathMountArg, apiSupportsVolumeSubpath,
+  HELPER_IMAGE, createTarGuard,
+} from './volumeHelper.js';
 import log from '../utils/logger.js';
 
 const execFileAsync = promisify(execFile);
@@ -607,6 +614,202 @@ export async function removeInsideAppData({ image, dataRoot, relPath }) {
   await runRootHelper({ image, hostDir: dataRoot, entrypoint: 'rm', args: ['-rf', '--', `/target/${relPath}`] });
 }
 
+// --------------------------------------------------------------------------
+// Declared volumes: prepared and mounted without a host path walk
+// --------------------------------------------------------------------------
+// volumeHelper.js holds the reasoning; these are the parts that talk to the
+// daemon.
+
+/** <shared>/volumes itself: created on the host, because every component of it
+ *  is a directory AppCrane made and no container mounts. Refused if it is
+ *  anything but a plain directory. */
+function ensureVolumesRoot(root) {
+  mkdirSync(root, { recursive: true });
+  const st = lstatSync(root);
+  if (st.isSymbolicLink() || !st.isDirectory()) {
+    throw new Error(`Security: ${root} is not a plain directory`);
+  }
+}
+
+/** The helper image, on this host. Pulled BY DIGEST when absent: the bytes
+ *  are fixed, so the one registry round-trip cannot change what runs. */
+let helperImageReady = false;
+async function ensureHelperImage() {
+  if (helperImageReady) return;
+  try { await dockerExec(['image', 'inspect', '--format', '{{.Id}}', HELPER_IMAGE], { timeout: 30000 }); } catch {
+    await dockerExec(['pull', HELPER_IMAGE], { timeout: 300000 });
+  }
+  helperImageReady = true;
+}
+
+/** Run a helper mode and return its per-path report. */
+async function runVolumeHelper(root, mode, paths, owner) {
+  return parseVolumeHelperOutput(await dockerExec(volumeHelperArgs({ root, mode, paths, owner }), { timeout: 600000 }), paths);
+}
+
+/**
+ * Stream `<path>/.` out of a created (never started) container of the app's
+ * image, through the tar guard, into the helper's `extract`. Nothing is
+ * executed from the app's image, and the archive is extracted only inside the
+ * helper. Returns 'seeded' | 'absent' | 'occupied'; throws on failure.
+ */
+async function streamSeed({ root, cid, path }) {
+  const cp = spawn('docker', ['cp', `${cid}:${path}/.`, '-'], { stdio: ['ignore', 'pipe', 'pipe'] });
+  let cpErr = '';
+  cp.stderr.on('data', (d) => { cpErr += d; });
+  const cpDone = new Promise((res) => cp.on('close', (code) => res(code)));
+
+  // Wait for the first byte, or the end. An image with nothing at the path
+  // produces no archive at all, and tar given an empty stdin fails ("short
+  // read"), so that case must never reach the helper.
+  const first = await new Promise((res) => {
+    const onData = (d) => { cp.stdout.pause(); cp.stdout.off('end', onEnd); res(d); };
+    const onEnd = () => { cp.stdout.off('data', onData); res(null); };
+    cp.stdout.once('data', onData);
+    cp.stdout.once('end', onEnd);
+  });
+  if (!first) {
+    const code = await cpDone;
+    if (code !== 0 && !IMAGE_PATH_ABSENT.test(cpErr)) throw new Error(`docker cp ${path}: ${cpErr.trim() || `exit ${code}`}`);
+    return 'absent';
+  }
+
+  cp.stdout.unshift(first);
+  let state;
+  try {
+    state = await extractTarIntoVolume({ root, path, tar: cp.stdout });
+  } catch (e) {
+    cp.kill('SIGKILL');
+    await cpDone;
+    throw e;
+  }
+  const cpCode = await cpDone;
+  if (cpCode !== 0) {
+    await runVolumeHelper(root, 'clear', [path]).catch(() => {});
+    throw new Error(`seeding ${path} failed: ${cpErr.trim() || `docker cp exit ${cpCode}`}`);
+  }
+  return state;
+}
+
+/**
+ * Untar a stream into ONE declared path, inside the helper, after the tar
+ * guard (volumeHelper.js) has checked every header. Any failure — a refused
+ * entry, a broken stream, tar itself — clears the path back to empty.
+ * Returns 'seeded' | 'absent' | 'occupied'.
+ */
+export async function extractTarIntoVolume({ root, path, tar }) {
+  await ensureHelperImage();
+  const helper = spawn('docker', volumeHelperArgs({ root, mode: 'extract', paths: [path], stdin: true }), { stdio: ['pipe', 'pipe', 'pipe'] });
+  let out = '';
+  let herr = '';
+  helper.stdout.on('data', (d) => { out += d; });
+  helper.stderr.on('data', (d) => { herr += d; });
+  const helperDone = new Promise((res) => helper.on('close', (code) => res(code)));
+  let streamErr = null;
+  try {
+    await pipeline(tar, createTarGuard(), helper.stdin);
+  } catch (e) {
+    streamErr = e;
+  }
+  const helperCode = await helperDone;
+  const state = parseVolumeHelperOutput(out, [path])[0].state;
+  if (streamErr || helperCode !== 0 || !['seeded', 'absent', 'occupied'].includes(state)) {
+    // Whatever tar wrote before the stream broke is not a seed: put it back to
+    // empty so the next deploy retries rather than reading wreckage as state.
+    await runVolumeHelper(root, 'clear', [path]).catch(() => {});
+    throw new Error(`seeding ${path} failed: ${streamErr?.message || herr.trim() || `helper exit ${helperCode}`}`);
+  }
+  return state;
+}
+
+/**
+ * mkdir -p, seed-once and chown -R every declared mount, in throwaway
+ * containers of HELPER_IMAGE that mount only <shared>/volumes. The seed
+ * content is read out of the app's image without running it. Runs while the
+ * old container may still be up; that is safe because nothing here resolves a
+ * path on the host below <shared>/volumes.
+ *
+ * @returns {Promise<{path: string, state: string, chownOk: boolean}[]>}
+ */
+export async function prepareVolumesInHelper({ image, mounts, owner }) {
+  if (!mounts.length) return [];
+  const root = sharedVolumesRoot(mounts);
+  ensureVolumesRoot(root);
+  const paths = mounts.map((m) => m.container);
+  const report = new Map();
+  try {
+    await ensureHelperImage();
+    for (const r of await runVolumeHelper(root, 'prep', paths)) {
+      if (r.state !== 'empty' && r.state !== 'occupied') throw new Error(`the helper did not prepare ${r.path}`);
+      report.set(r.path, r.state);
+    }
+    const empty = paths.filter((p) => report.get(p) === 'empty');
+    if (empty.length) {
+      // `true` only satisfies an image with no CMD; a created container never runs.
+      const cid = await dockerExec(['create', '--pull', 'never', '--network', 'none', '--label', SEED_CONTAINER_LABEL, image, 'true']);
+      try {
+        for (const p of empty) report.set(p, await streamSeed({ root, cid, path: p }));
+      } finally {
+        await dockerExec(['rm', '-fv', cid]).catch((e) => log.warn(`could not remove seed container ${cid}: ${e.message}`));
+      }
+    }
+    const chowned = await runVolumeHelper(root, 'chown', paths, owner);
+    return paths.map((p) => ({ path: p, state: report.get(p), chownOk: chowned.find((c) => c.path === p)?.state === 'chown-ok' }));
+  } catch (e) {
+    throw new Error(`VOLUME_PREP_FAILED: could not prepare ${paths.join(', ')} (${e.message})`);
+  }
+}
+
+/** Remove the per-env volumes an app's declared paths were mounted through.
+ *  The daemon's record only: the directory and its data stay on disk. */
+export async function removeAppVolumes(slug) {
+  for (const env of ['production', 'sandbox']) {
+    await dockerExec(['volume', 'rm', '-f', volumesVolumeName(slug, env)]).catch((e) => {
+      log.warn(`could not remove volume ${volumesVolumeName(slug, env)}: ${e.message}`);
+    });
+  }
+}
+
+let volumeSubpathProbe = null;
+/** Whether this daemon understands `volume-subpath` (API 1.45+). Only a
+ *  successful answer is cached, so a daemon that was briefly unreachable is
+ *  asked again rather than pinned to the fallback. */
+export async function volumeSubpathSupported() {
+  if (volumeSubpathProbe !== null) return volumeSubpathProbe;
+  let api;
+  try { api = await dockerExec(['version', '--format', '{{.Server.APIVersion}}'], { timeout: 15000 }); } catch { return false; }
+  if (!/^\d+\.\d+$/.test(api)) return false;
+  volumeSubpathProbe = apiSupportsVolumeSubpath(api);
+  return volumeSubpathProbe;
+}
+export function resetVolumeSubpathProbe() { volumeSubpathProbe = null; }
+
+/**
+ * Recreate this app/env's volume bound to <shared>/volumes. Recreated rather
+ * than reused so its device is always the root this start computed (a moved
+ * DATA_DIR cannot leave it pointing at the old tree). Called after stopApp, so
+ * nothing uses it; `docker volume rm` of a bind-backed local volume removes the
+ * daemon's record only, never the directory's contents (measured).
+ */
+async function recreateVolumesVolume(slug, env, root) {
+  const name = volumesVolumeName(slug, env);
+  await dockerExec(['volume', 'rm', '-f', name]);
+  await dockerExec([
+    'volume', 'create',
+    '--driver', 'local',
+    '--opt', 'type=none',
+    '--opt', 'o=bind',
+    '--opt', `device=${root}`,
+    '--label', APPCRANE_LABEL,
+    '--label', `slug=${slug}`,
+    '--label', `env=${env}`,
+    name,
+  ]);
+  return name;
+}
+
+let warnedNoSubpath = false;
+
 /**
  * BOTH ends of this app's 0.0.0.0 publish — `{ host, container }` — or null when
  * it publishes nothing. Resolved from the database here rather than taken as a
@@ -727,6 +930,24 @@ export async function startApp({ slug, env, image, hostPort, envVars = {}, volum
   // checked again (see resolveVolumeMounts) — the check made earlier in the
   // deploy left the old container minutes to plant a link before this mount.
   for (const v of volumes) if (v.base) assertNoSymlinkBelow(v.base, v.host, v.container);
+
+  // That re-check alone is still check-then-use: `-v <host path>` is resolved
+  // by the daemon when the container starts, and a component swapped for a
+  // link after the lstat is followed. So a declared mount goes through a
+  // volume bound to <shared>/volumes with `volume-subpath`, which the daemon
+  // resolves itself and refuses when it leads outside the volume. Only a
+  // daemon older than API 1.45 still gets the bind, and says so.
+  const declared = volumes.filter((v) => v.base);
+  let volumesVolume = null;
+  if (declared.length) {
+    if (await volumeSubpathSupported()) {
+      volumesVolume = await recreateVolumesVolume(slug, env, sharedVolumesRoot(declared));
+    } else if (!warnedNoSubpath) {
+      warnedNoSubpath = true;
+      log.warn('docker daemon is older than API 1.45 (no volume-subpath): declared volumes are bind-mounted ' +
+        'by host path, which a link planted between the check and the mount can redirect. Upgrade Docker Engine to 26+.');
+    }
+  }
 
   const args = [
     'run', '-d',
@@ -855,6 +1076,10 @@ export async function startApp({ slug, env, image, hostPort, envVars = {}, volum
     // `readOnly` is AppCrane's own mounts only (a managed database client
     // certificate, services/dbCerts.js): the third field is a fixed literal,
     // never a caller-supplied string, so the colon check above still holds.
+    if (volumesVolume && vol.base) {
+      args.push('--mount', volumeSubpathMountArg({ volume: volumesVolume, subpath: subpathOf(vol), container: vol.container }));
+      continue;
+    }
     args.push('-v', vol.readOnly === true ? `${vol.host}:${vol.container}:ro` : `${vol.host}:${vol.container}`);
   }
 

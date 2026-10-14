@@ -28,9 +28,10 @@
 // three can disagree with the disk, and the disk is the thing that holds the
 // data.
 
-import { existsSync, mkdirSync, readdirSync, rmSync } from 'fs';
-import { join } from 'path';
-import { copyFromImage, chownTreeAsRoot } from './docker.js';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, renameSync, lstatSync } from 'fs';
+import { join, dirname, basename } from 'path';
+import { copyFromImage, chownTreeAsRoot, prepareVolumesInHelper } from './docker.js';
+import { resolveImageOwner } from './dbCerts.js';
 import log from '../utils/logger.js';
 
 /** The ownership every mount gets, matching the chown deployer.js already
@@ -78,16 +79,26 @@ export function mountIsEmpty(hostDir) {
   }
 }
 
-/** Put a directory back to empty. Only ever called on a directory this module
- *  found empty moments earlier, so it cannot destroy anything an app wrote —
- *  it removes a half-finished copy so the NEXT deploy sees "empty" and seeds
- *  cleanly, instead of inheriting a truncated tree that looks like live state
- *  forever after. */
-function clearDir(hostDir) {
-  try {
-    for (const entry of readdirSync(hostDir)) rmSync(join(hostDir, entry), { recursive: true, force: true });
-  } catch (e) {
-    log.warn(`could not clear partially-seeded ${hostDir}: ${e.message}`);
+// `docker cp` extracts on the HOST, as the AppCrane user, and follows any link
+// it meets under the destination. /data's directory is one AppCrane made and
+// the app cannot replace (it is the container's mount point), but what is
+// INSIDE it is the app's: while the old container still runs it can plant a
+// link there between the emptiness check and the extraction. So the copy lands
+// in a fresh staging directory beside the mount, which no container mounts,
+// and each top-level entry is then renamed in. rename(2) never follows its
+// last component, and its parent is the mount directory itself.
+function stagingFor(hostDir) {
+  return mkdtempSync(join(dirname(hostDir), `.seed-${basename(hostDir)}-`));
+}
+
+function moveStagedInto(staging, hostDir) {
+  for (const entry of readdirSync(staging)) {
+    const dest = join(hostDir, entry);
+    let exists = true;
+    try { lstatSync(dest); } catch (e) { if (e.code === 'ENOENT') exists = false; else throw e; }
+    // Something appeared since the emptiness check: the app's, so it wins.
+    if (exists) { log.warn(`volume seed: ${dest} appeared during seeding — kept, the image copy was dropped`); continue; }
+    renameSync(join(staging, entry), dest);
   }
 }
 
@@ -111,7 +122,65 @@ function clearDir(hostDir) {
  * @param {{image: string, volumes: {host: string, container: string}[], copy?: Function}} args
  * @returns {Promise<{seeded: string[], absent: string[], occupied: string[], log: string[]}>}
  */
-export async function seedNewVolumeMounts({ image, volumes = [], copy = copyFromImage }) {
+/**
+ * Who a declared volume belongs to: the image's own USER when it declares a
+ * non-root one (read from the image config and its /etc/passwd, never by
+ * running it — dbCerts.resolveImageOwner), else MOUNT_OWNER as before. Root or
+ * unset keeps 1000:1000 on purpose: images that start as root and drop to a
+ * PUID (linuxserver's bookstack defaults it to 1000) relied on it.
+ */
+export async function declaredVolumeOwner(image, resolveOwner = resolveImageOwner) {
+  const o = await Promise.resolve().then(() => resolveOwner(image)).catch(() => null);
+  return o && o.uid !== 0 ? `${o.uid}:${o.gid}` : MOUNT_OWNER;
+}
+
+export async function seedNewVolumeMounts({ image, volumes = [], copy = copyFromImage, prepare = prepareVolumesInHelper, resolveOwner = resolveImageOwner }) {
+  // A declared volume (resolveVolumeMounts gives it a `base`) lives below
+  // <shared>/volumes, where the app can replace any component with a link, so
+  // the host does not walk its path at all: volumeHelper.js.
+  const declared = volumes.filter((v) => v.base);
+  const plain = volumes.filter((v) => !v.base);
+  const res = await seedPlainMounts({ image, volumes: plain, copy });
+  if (!declared.length) return res;
+
+  let report;
+  let owner = MOUNT_OWNER;
+  try {
+    owner = await declaredVolumeOwner(image, resolveOwner);
+    report = await prepare({ image, mounts: declared, owner });
+  } catch (e) {
+    throw new Error(
+      `VOLUME_SEED_FAILED: ${e.message}. Refusing to start the container: a bind mount over a path the image ` +
+      'seeds would hide the image\'s own content, and an unprepared mount may not exist or be writable.',
+    );
+  }
+  const occupied = [];
+  for (const r of report) {
+    if (r.state === 'seeded') res.seeded.push(r.path);
+    else if (r.state === 'occupied') { res.occupied.push(r.path); occupied.push(r.path); } else if (r.state === 'absent') res.absent.push(r.path);
+    if (r.state === 'seeded') {
+      res.log.push(`Volume seed: ${r.path} populated from the image, chown ${owner} → ${r.chownOk ? 'ok' : 'failed'} (in a throwaway container)`);
+    } else {
+      res.log.push(`chown ${owner} ${r.path} → ${r.chownOk ? 'ok' : `failed${r.state === 'unreported' ? ' (helper did not report it)' : ''}. App may hit EACCES on ${r.path} writes if its container runs as a non-root user.`}`);
+    }
+  }
+  if (occupied.length) {
+    res.log.push(
+      `Volume seed: ${occupied.join(', ')} already holds data — left untouched. ` +
+      'A mount is seeded from the image once, when it is empty; after that it is the app\'s state.',
+    );
+  }
+  const absentDeclared = report.filter((r) => r.state === 'absent').map((r) => r.path);
+  if (absentDeclared.length) {
+    res.log.push(
+      `Volume seed: ${absentDeclared.join(', ')} — the image ships nothing there, so the mount starts empty ` +
+      '(the same thing a fresh named volume would do).',
+    );
+  }
+  return res;
+}
+
+async function seedPlainMounts({ image, volumes, copy }) {
   const lines = [];
   const seeded = [];
   const absent = [];
@@ -132,14 +201,17 @@ export async function seedNewVolumeMounts({ image, volumes = [], copy = copyFrom
   }
   if (!fresh.length) return { seeded, absent, occupied, log: lines };
 
+  const staged = fresh.map((v) => ({ vol: v, dir: stagingFor(v.host) }));
+  const dropStaging = () => { for (const s of staged) rmSync(s.dir, { recursive: true, force: true }); };
   let results;
   try {
     results = await copy({
       image,
-      copies: fresh.map((v) => ({ containerPath: v.container, destDir: v.host })),
+      copies: staged.map((s) => ({ containerPath: s.vol.container, destDir: s.dir })),
     });
   } catch (e) {
-    for (const v of fresh) clearDir(v.host);
+    // Nothing reached the mount itself, so the next deploy still sees it empty.
+    dropStaging();
     throw new Error(
       `VOLUME_SEED_FAILED: could not copy ${fresh.map((v) => v.container).join(', ')} out of ${image} ` +
       `(${e.message}). Refusing to start the container: a bind mount over a path the image seeds ` +
@@ -148,41 +220,47 @@ export async function seedNewVolumeMounts({ image, volumes = [], copy = copyFrom
     );
   }
 
-  for (const r of results) {
-    const vol = fresh.find((v) => v.container === r.containerPath);
-    if (!r.found) {
-      absent.push(r.containerPath);
-      continue;
+  try {
+    for (const r of results) {
+      const s = staged.find((x) => x.vol.container === r.containerPath);
+      const vol = s.vol;
+      if (!r.found) {
+        absent.push(r.containerPath);
+        continue;
+      }
+      // `docker cp` of a directory the image ships but leaves empty succeeds and
+      // copies nothing. Reported as absent rather than seeded, because "seeded"
+      // is a claim about content and there is none.
+      if (mountIsEmpty(s.dir)) {
+        absent.push(r.containerPath);
+        continue;
+      }
+      moveStagedInto(s.dir, vol.host);
+      seeded.push(r.containerPath);
+      // Ownership, immediately, on the files that were just written. deployer.js
+      // chowned this directory before the image existed, when it was empty, so
+      // that pass could not have covered anything in it.
+      try {
+        // `image` is the one being seeded FROM, so it is already on this host and
+        // the fallback container cannot turn into a registry round-trip.
+        const how = await chownTreeAsRoot({ hostDir: vol.host, owner: MOUNT_OWNER, image });
+        lines.push(
+          `Volume seed: ${r.containerPath} populated from the image, chown ${MOUNT_OWNER} → ok` +
+          (how === 'container' ? ' (via a throwaway container: AppCrane is not root here)' : ''),
+        );
+      } catch (e) {
+        // Both mechanisms are gone. Say so at ERROR, not in a log line the deploy
+        // output buries: the app IS going to hit EACCES on its own data.
+        log.error(`volume seed: could not give ${vol.host} to ${MOUNT_OWNER}: ${e.message}`);
+        lines.push(
+          `Volume seed: ${r.containerPath} populated from the image, but chown ${MOUNT_OWNER} failed ` +
+          `(${e.message}). An image that runs as a non-root user WILL hit EACCES writing ` +
+          `${r.containerPath}.`,
+        );
+      }
     }
-    // `docker cp` of a directory the image ships but leaves empty succeeds and
-    // copies nothing. Reported as absent rather than seeded, because "seeded"
-    // is a claim about content and there is none.
-    if (mountIsEmpty(vol.host)) {
-      absent.push(r.containerPath);
-      continue;
-    }
-    seeded.push(r.containerPath);
-    // Ownership, immediately, on the files that were just written. deployer.js
-    // chowned this directory before the image existed, when it was empty, so
-    // that pass could not have covered anything in it.
-    try {
-      // `image` is the one being seeded FROM, so it is already on this host and
-      // the fallback container cannot turn into a registry round-trip.
-      const how = await chownTreeAsRoot({ hostDir: vol.host, owner: MOUNT_OWNER, image });
-      lines.push(
-        `Volume seed: ${r.containerPath} populated from the image, chown ${MOUNT_OWNER} → ok` +
-        (how === 'container' ? ' (via a throwaway container: AppCrane is not root here)' : ''),
-      );
-    } catch (e) {
-      // Both mechanisms are gone. Say so at ERROR, not in a log line the deploy
-      // output buries: the app IS going to hit EACCES on its own data.
-      log.error(`volume seed: could not give ${vol.host} to ${MOUNT_OWNER}: ${e.message}`);
-      lines.push(
-        `Volume seed: ${r.containerPath} populated from the image, but chown ${MOUNT_OWNER} failed ` +
-        `(${e.message}). An image that runs as a non-root user WILL hit EACCES writing ` +
-        `${r.containerPath}.`,
-      );
-    }
+  } finally {
+    dropStaging();
   }
 
   if (absent.length) {

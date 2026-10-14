@@ -463,7 +463,15 @@ router.post('/:slug/restart/:env', requireAppAccess, auditMiddleware('restart'),
   // an action whose entire contract is "same app, fresh env vars".
   const { mounts: containerVolumes } =
     resolveVolumeMounts({ sharedDir, paths: parseVolumePaths(app.volume_paths) });
-  for (const vol of containerVolumes) mkdirSync(vol.host, { recursive: true });
+  for (const vol of containerVolumes) if (!vol.base) mkdirSync(vol.host, { recursive: true });
+  // A declared volume's directory is created (and, if still empty, seeded) in a
+  // throwaway container, never by a host mkdir through a path the app can
+  // redirect with a link (volumeHelper.js).
+  const declaredVolumes = containerVolumes.filter((vol) => vol.base);
+  if (declaredVolumes.length) {
+    const { seedNewVolumeMounts } = await import('../services/volumeSeeder.js');
+    await seedNewVolumeMounts({ image, volumes: declaredVolumes });
+  }
   await dockerStop(app.slug, env).catch(() => {});
   await dockerStart({
     slug: app.slug,

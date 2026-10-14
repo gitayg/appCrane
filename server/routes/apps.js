@@ -1661,6 +1661,10 @@ router.delete('/:slug', requireAppAccess, auditMiddleware('app-delete'), async (
     // disk forever. Before the rows go: it reads this app's deployments.
     const { removeAppImages } = await import('../services/docker.js');
     await removeAppImages(req.app.id, slug).catch(() => {});
+    // And the per-env volumes its declared paths were mounted through. The
+    // daemon's record only; the data on disk stays, as it always has.
+    const { removeAppVolumes } = await import('../services/docker.js');
+    await removeAppVolumes(slug).catch(() => {});
   } catch (e) {}
 
   // v2.65.0: drop the app's managed databases BEFORE the row goes away.

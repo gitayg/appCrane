@@ -7,6 +7,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import net from 'net';
 import http from 'node:http';
+import { createRequire, syncBuiltinESMExports } from 'module';
 
 const execFileAsync = promisify(execFile);
 
@@ -87,6 +88,15 @@ writeFileSync(RULES, JSON.stringify([
   { match: ['image', 'inspect'], stdout: `bs@${DIGEST}\n` },
   { match: ['network', 'inspect'], stdout: 'false|172.20.0.0/16\n' },
   { match: ['images', '--filter'], stdout: '' },
+  // A daemon new enough for volume-subpath (Engine 26+), so declared volumes
+  // take the --mount path. The fallback is pinned separately below.
+  { match: ['version', '--format'], stdout: '1.55\n' },
+  // The volume helper's modes (volumeHelper.js), for the one deploy below that
+  // declares volumes. `docker cp ... -` answers with nothing: the image ships
+  // nothing at those paths, so no extract runs.
+  { match: ['appcrane-roothelper=true', 'prep'], stdout: 'empty /config\nempty /var/lib/odoo\n' },
+  { match: ['appcrane-roothelper=true', 'chown'], stdout: 'chown-ok /config\nchown-ok /var/lib/odoo\n' },
+  { match: ['cp', '-'], stdout: '' },
 ]));
 
 function dockerCalls() {
@@ -99,16 +109,49 @@ function dockerCalls() {
 function clearDockerCalls() {
   if (existsSync(ARGV_LOG)) rmSync(ARGV_LOG);
 }
+const isHelperRun = (c) => c[0] === 'run' && c.includes('appcrane-roothelper=true');
 function runArgs() {
-  const runs = dockerCalls().filter((c) => c[0] === 'run');
+  const runs = dockerCalls().filter((c) => c[0] === 'run' && !isHelperRun(c));
   assert.equal(runs.length, 1, `expected exactly one \`docker run\`, saw ${runs.length}`);
   return runs[0];
 }
-/** Every `-v` value in the argv, in order. */
+/** Every `-v` and `--mount` value in the argv, in order. */
 function mountArgs(args) {
   const out = [];
-  for (let i = 0; i < args.length; i++) if (args[i] === '-v') out.push(args[i + 1]);
+  for (let i = 0; i < args.length; i++) if (args[i] === '-v' || args[i] === '--mount') out.push(args[i + 1]);
   return out;
+}
+/** What a declared volume is mounted as: the app/env's volume bound to
+ *  <shared>/volumes, with the daemon resolving the subpath (volumeHelper.js). */
+const subpathMount = (slug, env, sub, dst) =>
+  `type=volume,src=appcrane-vols-${slug}-${env},dst=${dst},volume-subpath=${sub},volume-nocopy=true`;
+
+// GUARD for the v2.107.3 follow-up: while a deploy runs, record every
+// mutating host fs call and every non-docker child process whose arguments
+// name a path strictly BELOW `prefix` (<shared>/volumes). Builtin named
+// exports are live bindings, so syncBuiltinESMExports() makes the already
+// imported `mkdirSync` etc. in deployer.js and volumeSeeder.js the wrappers.
+const nodeRequire = createRequire(import.meta.url);
+function guardHostCalls(prefix) {
+  const fs = nodeRequire('fs');
+  const cp = nodeRequire('child_process');
+  const under = (a) => typeof a === 'string' && a.startsWith(`${prefix}/`);
+  const hits = [];
+  const restore = [];
+  const wrap = (mod, n, test) => {
+    const orig = mod[n];
+    mod[n] = function wrapped(...a) { if (test(a)) hits.push([n, ...a.filter((x) => typeof x === 'string' || Array.isArray(x)).flat()]); return orig.apply(this, a); };
+    restore.push(() => { mod[n] = orig; });
+  };
+  for (const n of ['mkdirSync', 'chownSync', 'lchownSync', 'chmodSync', 'renameSync', 'rmSync', 'rmdirSync', 'unlinkSync',
+    'writeFileSync', 'cpSync', 'copyFileSync', 'symlinkSync', 'mkdtempSync', 'openSync', 'utimesSync']) {
+    wrap(fs, n, (a) => a.some(under));
+  }
+  for (const n of ['execFileSync', 'execFile', 'spawn', 'spawnSync']) {
+    wrap(cp, n, (a) => a[0] !== 'docker' && Array.isArray(a[1]) && a[1].some(under));
+  }
+  syncBuiltinESMExports();
+  return { hits, restore() { for (const r of restore) r(); syncBuiltinESMExports(); } };
 }
 
 const logger = (await import('../server/utils/logger.js')).default;
@@ -245,8 +288,37 @@ test('startApp emits one -v per mount, in order', async () => {
   });
   assert.deepEqual(mountArgs(runArgs()), [
     `${SHARED}/data:/data`,
-    `${SHARED}/volumes/config:/config`,
+    subpathMount('vol-argv', 'production', 'config', '/config'),
   ]);
+  // The volume is recreated bound to exactly <shared>/volumes before the run.
+  const create = dockerCalls().find((c) => c[0] === 'volume' && c[1] === 'create');
+  assert.ok(create.includes(`device=${SHARED}/volumes`) && create.includes('o=bind') && create.at(-1) === 'appcrane-vols-vol-argv-production');
+  assert.ok(dockerCalls().findIndex((c) => c[0] === 'volume' && c[1] === 'rm') < dockerCalls().findIndex((c) => c[0] === 'volume' && c[1] === 'create'));
+});
+
+test('a daemon without volume-subpath falls back to the host-path bind', async () => {
+  const { resetVolumeSubpathProbe } = await import('../server/services/docker.js');
+  const rules = JSON.parse(readFileSync(RULES, 'utf8'));
+  writeFileSync(RULES, JSON.stringify(rules.map((r) => (r.match[0] === 'version' ? { ...r, stdout: '1.44\n' } : r))));
+  resetVolumeSubpathProbe();
+  try {
+    clearDockerCalls();
+    const { mounts } = spec.resolveVolumeMounts({ sharedDir: SHARED, paths: ['/config'] });
+    await startApp({ slug: 'vol-old', env: 'production', image: 'bs:1', hostPort: 4813, memoryMb: 512, cpus: 0.5, volumes: mounts });
+    assert.deepEqual(mountArgs(runArgs()), [`${SHARED}/data:/data`, `${SHARED}/volumes/config:/config`]);
+    assert.ok(!dockerCalls().some((c) => c[0] === 'volume'));
+  } finally {
+    writeFileSync(RULES, JSON.stringify(rules));
+    resetVolumeSubpathProbe();
+  }
+});
+
+test('a container path with a comma is quoted in the --mount record, not split by it', async () => {
+  clearDockerCalls();
+  const { mounts } = spec.resolveVolumeMounts({ sharedDir: SHARED, paths: ['/a,b'] });
+  await startApp({ slug: 'vol-comma', env: 'production', image: 'bs:1', hostPort: 4814, memoryMb: 512, cpus: 0.5, volumes: mounts });
+  assert.equal(mountArgs(runArgs())[1],
+    'type=volume,src=appcrane-vols-vol-comma-production,"dst=/a,b","volume-subpath=a,b",volume-nocopy=true');
 });
 
 describe('a real deploy reads the column', () => {
@@ -303,19 +375,38 @@ describe('a real deploy reads the column', () => {
   }
 
   test('volume_paths on the row become -v flags AND host directories on disk', async () => {
-    const { args, row, shared } = await deployWith('vol-row', JSON.stringify(['/config', '/var/lib/odoo']));
+    const guard = guardHostCalls(join(process.env.DATA_DIR, 'apps', 'vol-row', 'sandbox', 'shared', 'volumes'));
+    let out;
+    try { out = await deployWith('vol-row', JSON.stringify(['/config', '/var/lib/odoo'])); } finally { guard.restore(); }
+    const { args, row, shared } = out;
     assert.equal(row.status, 'live', row.log);
+    // The host never walks a path below <shared>/volumes: not with fs, not
+    // with a chown binary, and not as a docker -v source or a docker cp
+    // destination (every docker argv the shim saw).
+    assert.deepEqual(guard.hits, [], 'a host fs call or process touched a path inside the app-writable volumes tree');
+    const dockerHostPaths = dockerCalls().flat().filter((a) => a.includes(`${shared}/volumes/`));
+    assert.deepEqual(dockerHostPaths, [], 'docker was handed a host path inside the volumes tree');
     assert.deepEqual(mountArgs(args), [
       `${shared}/data:/data`,
-      `${shared}/volumes/config:/config`,
-      `${shared}/volumes/var/lib/odoo:/var/lib/odoo`,
+      subpathMount('vol-row', 'sandbox', 'config', '/config'),
+      subpathMount('vol-row', 'sandbox', 'var/lib/odoo', '/var/lib/odoo'),
     ]);
-    // The directory has to EXIST before the container is created. Docker would
-    // otherwise create it itself, as root, and an image that drops privileges
-    // then cannot write it — an app that boots and crashes on its first write.
-    for (const p of [`${shared}/data`, `${shared}/volumes/config`, `${shared}/volumes/var/lib/odoo`]) {
-      assert.ok(existsSync(p) && statSync(p).isDirectory(), `${p} was not created before the run`);
+    // The directories have to EXIST before the container is created. /data is
+    // AppCrane's own and is made on the host; the declared ones sit below a
+    // tree the app can plant links in, so they are made by the helper, which
+    // mounts ONLY <shared>/volumes and is handed the container paths.
+    assert.ok(existsSync(`${shared}/data`) && statSync(`${shared}/data`).isDirectory());
+    assert.ok(statSync(`${shared}/volumes`).isDirectory(), 'the volumes root is AppCrane\'s to create');
+    const helpers = dockerCalls().filter(isHelperRun);
+    assert.deepEqual(helpers.map((c) => c[c.indexOf('appcrane-volume-helper') + 1]), ['prep', 'chown']);
+    for (const h of helpers) {
+      assert.deepEqual(h.filter((a, i) => h[i - 1] === '-v'), [`${shared}/volumes:/.appcrane-volumes`]);
     }
+    assert.deepEqual(helpers[0].slice(helpers[0].indexOf('appcrane-volume-helper') + 1), ['prep', '/config', '/var/lib/odoo']);
+    assert.deepEqual(helpers[1].slice(helpers[1].indexOf('appcrane-volume-helper') + 1), ['chown', '1000:1000', '/config', '/var/lib/odoo']);
+    const appRunAt = dockerCalls().findIndex((c) => c[0] === 'run' && !isHelperRun(c));
+    assert.ok(helpers.every((h) => dockerCalls().indexOf(h) < appRunAt),
+      'the helper must prepare the directories before the app container exists');
     assert.match(row.log, /Persistent mounts: \/data, \/config, \/var\/lib\/odoo/,
       'the deploy log must name the mounts — it is the only surface that tells an operator ' +
       'which paths are actually being kept');
@@ -378,6 +469,7 @@ describe('LIVE', { skip: liveSkip }, () => {
 
   after(async () => {
     await dk(['rm', '-f', NAME], 30000).catch(() => {});
+    await dk(['volume', 'rm', '-f', `appcrane-vols-${SLUG}-production`], 30000).catch(() => {});
   });
 
   /** What deployApp does on every deploy: the container is DESTROYED and a new
@@ -422,19 +514,20 @@ describe('LIVE', { skip: liveSkip }, () => {
   test('the daemon binds the declared path to the app\'s own directory, read-write', async (t) => {
     if (imageProblem) return t.skip(imageProblem);
     const binds = JSON.parse(await dk(['inspect', NAME, '--format', '{{json .HostConfig.Binds}}']));
-    // Compared as a SET. The daemon does not promise to report Binds in the
-    // order they were passed, and it demonstrably does not: this assertion
-    // failed intermittently against a container whose mounts were both correct,
-    // purely because /config came back ahead of /data. Asserting an order the
-    // daemon never guaranteed makes the suite flaky without testing anything —
-    // what matters is that exactly these two binds exist and no third one does.
-    assert.deepEqual(
-      [...binds].sort(),
-      [`${mounts[0].host}:/data`, `${mounts[1].host}:/config`].sort(),
-    );
+    // /data is still the one host-path bind. A declared path is NOT: it comes
+    // through the app/env's volume bound to <shared>/volumes, with the daemon
+    // resolving the subpath (volumeHelper.js), so a link planted in the tree
+    // cannot redirect it.
+    assert.deepEqual(binds, [`${mounts[0].host}:/data`]);
+    const spec2 = JSON.parse(await dk(['inspect', NAME, '--format', '{{json .HostConfig.Mounts}}']))
+      .find((m) => m.Target === '/config');
+    assert.equal(spec2.Type, 'volume');
+    assert.equal(spec2.Source, `appcrane-vols-${SLUG}-production`);
+    assert.equal(spec2.VolumeOptions?.Subpath, 'config');
+    const vol = JSON.parse(await dk(['volume', 'inspect', spec2.Source, '--format', '{{json .Options}}']));
+    assert.deepEqual(vol, { device: join(shared, 'volumes'), o: 'bind', type: 'none' });
     const mnt = JSON.parse(await dk(['inspect', NAME, '--format', '{{json .Mounts}}']))
       .find((m) => m.Destination === '/config');
-    assert.equal(mnt.Type, 'bind');
     assert.equal(mnt.RW, true, 'a read-only mount would let the app boot and fail on its first write');
   });
 });

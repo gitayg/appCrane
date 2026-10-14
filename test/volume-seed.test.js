@@ -383,6 +383,7 @@ describe('LIVE', { skip: liveSkip }, () => {
 
   after(async () => {
     await dk(['rm', '-f', NAME], 30000).catch(() => {});
+    await dk(['volume', 'rm', '-f', `appcrane-vols-${SLUG}-production`], 30000).catch(() => {});
     await dk(['image', 'rm', '-f', IMAGE], 60000).catch(() => {});
   });
 
@@ -527,8 +528,30 @@ describe('a real deploy seeds its new mounts', () => {
     'if (argv[0] === "image" && argv[1] === "inspect") { process.stdout.write("bs@' + DIGEST + '\\n"); process.exit(0); }\n' +
     'if (argv[0] === "network" && argv[1] === "inspect") { process.stdout.write("false|172.20.0.0/16\\n"); process.exit(0); }\n' +
     'if (argv[0] === "images") { process.exit(0); }\n' +
-    'if (argv[0] === "cp" && argv[1].includes(":/config/")) { fs.writeFileSync(argv[2] + "/default.conf", "FROM-IMAGE"); process.exit(0); }\n' +
-    'if (argv[0] === "cp") { process.stderr.write("Error response from daemon: Could not find the file " + argv[1] + " in container x\\n"); process.exit(1); }\n' +
+    'if (argv[0] === "cp" && argv[2] !== "-" && argv[1].includes(":/config/")) { fs.writeFileSync(argv[2] + "/default.conf", "FROM-IMAGE"); process.exit(0); }\n' +
+    // The volume helper (volumeHelper.js), emulated on its one mount: the
+    // shell script itself runs against the real daemon in
+    // test/volume-race.test.js and the LIVE section above. The image "ships"
+    // /config only; `docker cp <cid>:/config/. -` answers with a one-file tar.
+    'const tar1 = (name, body) => { const h = Buffer.alloc(512); h.write(name, 0); h.write("0000644\\0", 100);' +
+    ' h.write(body.length.toString(8).padStart(11, "0") + "\\0", 124); h.write("0", 156); h.write("ustar\\0", 257);' +
+    ' const d = Buffer.alloc(512); d.write(body); return Buffer.concat([h, d, Buffer.alloc(1024)]); };\n' +
+    'if (argv[0] === "cp" && argv[2] === "-") {\n' +
+    '  if (argv[1].endsWith(":/config/.")) { process.stdout.write(tar1("./default.conf", "FROM-IMAGE")); process.exit(0); }\n' +
+    '  process.stderr.write("Error response from daemon: Could not find the file " + argv[1] + " in container x\\n"); process.exit(1);\n' +
+    '}\n' +
+    'if (argv[0] === "run" && argv.includes("appcrane-roothelper=true")) {\n' +
+    '  const root = argv[argv.indexOf("-v") + 1].split(":")[0];\n' +
+    '  const at = argv.indexOf("appcrane-volume-helper");\n' +
+    '  const mode = argv[at + 1];\n' +
+    '  const rest = argv.slice(at + 2);\n' +
+    '  if (mode === "prep") { for (const p of rest) { fs.mkdirSync(root + p, { recursive: true });' +
+    ' process.stdout.write((fs.readdirSync(root + p).length ? "occupied " : "empty ") + p + "\\n"); } }\n' +
+    '  if (mode === "extract") { const buf = fs.readFileSync(0); fs.writeFileSync(root + rest[0] + "/default.conf", buf.subarray(512, 522).toString());' +
+    ' process.stdout.write("seeded " + rest[0] + "\\n"); }\n' +
+    '  if (mode === "chown") for (const p of rest.slice(1)) process.stdout.write("chown-ok " + p + "\\n");\n' +
+    '  process.exit(0);\n' +
+    '}\n' +
     'process.stdout.write("0123456789abcdef\\n");\n',
     { mode: 0o755 });
   writeFileSync(join(SHIM_DIR, 'chown'), '#!/usr/bin/env node\nprocess.exit(0);\n', { mode: 0o755 });
@@ -617,19 +640,37 @@ describe('a real deploy seeds its new mounts', () => {
       'the deploy log is the only place an operator can see that a mount was seeded');
   });
 
-  test('seeding does not add a `docker run` or a `docker pull` to the deploy', async () => {
-    // test/image-deploy.test.js asserts a deploy issues EXACTLY ONE of each and
-    // is a known tripwire — four confusing failures if this shape moves. Held
-    // here too, against the same deploy that just seeded.
+  test('seeding adds exactly one confined helper run, and no `docker pull`, to the deploy', async () => {
+    // test/image-deploy.test.js asserts a deploy issues EXACTLY ONE app run and
+    // one pull, and is a known tripwire. An app that declares volumes now adds
+    // ONE more `docker run`: the throwaway helper that prepares <shared>/volumes
+    // without a host path walk (volumeHelper.js). It is told apart by its label
+    // and must carry the confinement flags, or it would be a second app run.
     const { row } = await deploy('seed-wire-shape', 1);
     assert.equal(row.status, 'live', row.log);
+    const isHelper = (c) => c[0] === 'run' && c.includes('appcrane-roothelper=true');
+    const appRuns = calls().filter((c) => c[0] === 'run' && !isHelper(c));
+    const helpers = calls().filter(isHelper);
+    assert.equal(appRuns.length, 1);
+    assert.deepEqual(helpers.map((c) => c[c.indexOf('appcrane-volume-helper') + 1]), ['prep', 'extract', 'chown'],
+      'prep, one extract per empty mount, chown — each its own throwaway container');
+    for (const hc of helpers) {
+      for (const flag of [['--network', 'none'], ['--cap-drop', 'ALL'], ['--pull', 'never'], ['--security-opt', 'no-new-privileges']]) {
+        assert.equal(hc[hc.indexOf(flag[0]) + 1], flag[1], `helper is missing ${flag.join(' ')}`);
+      }
+      assert.ok(hc.some((a) => a.startsWith('busybox@sha256:')), 'the helper must run the pinned utility image, not the app\'s');
+      assert.ok(!hc.includes('bs:1') && !hc.some((a) => a.startsWith('bs@')));
+    }
+    // The app's image is only ever CREATED (never run) to read /config out of.
+    const create = calls().filter((c) => c[0] === 'create' && c.includes('appcrane-seed=true'));
+    assert.ok(create.length >= 1 && create.every((c) => c.includes('never')));
     const verbs = calls().map((c) => c[0]);
-    assert.equal(verbs.filter((v) => v === 'run').length, 1);
     assert.equal(verbs.filter((v) => v === 'pull').length, 1);
-    assert.ok(verbs.includes('create') && verbs.includes('cp'),
-      'the seed happens via create + cp + rm, which are different verbs and so cannot inflate either count');
-    // And it happens BEFORE the container exists.
-    assert.ok(verbs.lastIndexOf('cp') < verbs.indexOf('run'),
+    // /data still seeds via create + cp + rm (into a staging directory).
+    assert.ok(verbs.includes('create') && verbs.includes('cp'));
+    // And all of it happens BEFORE the app container exists.
+    const appRunAt = calls().findIndex((c) => c[0] === 'run' && !isHelper(c));
+    assert.ok(verbs.lastIndexOf('cp') < appRunAt && calls().findIndex(isHelper) < appRunAt,
       'seeding after the container starts is seeding into a mount the app is already using');
   });
 
