@@ -40,6 +40,11 @@ const CONTAINERS = [];
 after(async () => {
   for (const n of CONTAINERS) { try { execFileSync('docker', ['rm', '-f', n], { stdio: 'pipe' }); } catch (_) {} }
   try { (await import('../server/services/healthChecker.js')).stopHealthChecker(); } catch (_) {}
+  // The containers wrote here as uid 100 (new .git/objects dirs, mode 755): a
+  // non-root host user cannot unlink inside them, so remove as root in a container.
+  if (DOCKER) {
+    try { await (await import('../server/services/docker.js')).removeTreeAsRoot({ hostPath: ROOT, image: 'appcrane-studio:latest' }); } catch (_) {}
+  }
   rmSync(ROOT, { recursive: true, force: true });
 });
 

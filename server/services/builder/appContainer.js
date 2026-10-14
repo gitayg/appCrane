@@ -171,7 +171,7 @@ export function setClaudeSessionId(slug, id) {
   if (c?.ready && id && c.claudeSessionId !== id) c.claudeSessionId = id;
 }
 
-async function cloneWorkspace(app, onLog) {
+async function cloneWorkspace(app, branchName, onLog) {
   const workspaceDir = workspaceDirFor(app.slug);
   // No workspace caching — start fresh every time the container is created
   if (existsSync(workspaceDir)) {
@@ -202,6 +202,16 @@ async function cloneWorkspace(app, onLog) {
   // inode). Every git after the mount goes through workspaceRunner.js.
   execFileSync('git', ['-C', workspaceDir, 'config', 'user.email', 'builder@appcrane.local'], { stdio: 'pipe' }); // host-git-ok: pre-mount
   execFileSync('git', ['-C', workspaceDir, 'config', 'user.name', 'AppCrane Builder'], { stdio: 'pipe' }); // host-git-ok: pre-mount
+  // Before the chmod below, not after it: run by a non-root AppCrane, the
+  // checkout creates .git/refs/heads/builder/ owned by that user, mode 755,
+  // and the chown that would have handed it over fails. The agent (uid 100)
+  // then cannot lock its own branch, and every commit in the workspace fails
+  // with "cannot lock ref 'HEAD'". Measured on Linux as uid 1001.
+  try {
+    execFileSync('git', ['-C', workspaceDir, 'checkout', '-B', branchName], { stdio: 'pipe' }); // host-git-ok: pre-mount
+  } catch (err) {
+    log.warn(`appContainer: failed to create branch ${branchName}: ${err.message}`);
+  }
 
   try { execFileSync('chmod', ['-R', '777', workspaceDir], { stdio: 'pipe' }); } catch (_) {}
   try { execFileSync('chown', ['-R', '1000:1000', workspaceDir], { stdio: 'pipe' }); } catch (_) {}
@@ -290,18 +300,11 @@ export async function getOrCreate(app, onLog) {
   const branchName = `builder/${slug}`;
   const promise = (async () => {
     await ensureStudioImage(onLog);
-    const workspaceDir = await cloneWorkspace(app, onLog);
+    const workspaceDir = await cloneWorkspace(app, branchName, onLog);
     try {
       await writeSnapshot(app, workspaceDir, onLog);
     } catch (err) {
       log.warn(`appContainer snapshot write failed for ${slug}: ${err.message}`);
-    }
-
-    // Create the shared builder branch in the workspace before the container starts
-    try {
-      execFileSync('git', ['-C', workspaceDir, 'checkout', '-B', branchName], { stdio: 'pipe' }); // host-git-ok: pre-mount (startContainer is below)
-    } catch (err) {
-      log.warn(`appContainer: failed to create branch ${branchName}: ${err.message}`);
     }
 
     const { containerId, skillsCleanup, credsCleanup } = startContainer(slug, workspaceDir, onLog);
