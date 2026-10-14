@@ -186,7 +186,7 @@ function RosterTab({ rows, onBlock }: { rows: RosterRow[]; onBlock: (name: strin
 
 // ── Crew log ────────────────────────────────────────────────────────────────
 
-const label72 = { fontSize: '.72rem', fontWeight: 600, color: 'var(--yellow)', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 2 } as const
+const label72 = { fontSize: '.72rem', fontWeight: 600, color: 'var(--yellow-text)', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 2 } as const
 
 function askLine(e: LogEntry): string {
   const q = e.input_required!
@@ -249,9 +249,9 @@ function LogTab({ entries, onDecide, onDecideTask }: {
             ? <>Your agent <b>{e.from_agent}</b> sent <b>{e.to_agent}</b> <span style={dim}>({e.to_owner})</span></>
             : <><b>{e.from_agent}</b> sent <b>{e.to_agent}</b> <span style={dim}>(both yours)</span></>
         return (
-          <div key={e.task_id} style={{ display: 'grid', gridTemplateColumns: 'minmax(70px, 90px) 1fr auto', gap: 12, padding: '11px 14px', borderBottom: '1px solid var(--border)', alignItems: 'start' }}>
-            <div style={{ ...mono, ...dim }} title={serverDate(e.updated_at).toLocaleString()}>{when(e.updated_at)}</div>
-            <div style={{ minWidth: 0 }}>
+          <div key={e.task_id} className="crew-log-row">
+            <div className="crew-log-when" style={{ ...mono, ...dim }} title={serverDate(e.updated_at).toLocaleString()}>{when(e.updated_at)}</div>
+            <div className="crew-log-body">
               {firstContact && <div style={label72}>First contact</div>}
               {q?.decision_id && <div style={label72}>Input required</div>}
               {q?.decision_id ? <div>{askLine(e)}</div> : <div>{verb} "{e.title}"</div>}
@@ -277,7 +277,7 @@ function LogTab({ entries, onDecide, onDecideTask }: {
                 )}
               </div>
             </div>
-            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end', alignItems: 'center' }}>
+            <div className="crew-log-acts">
               {firstContact ? (
                 <>
                   <button className="btn btn-xs btn-accent" onClick={() => onDecide(e, 'allow')} title="Let this agent send tasks to your agents from now on">Allow</button>
@@ -515,7 +515,7 @@ function RulesTab({ rules, agents, blocks, refused, onUnblock, onAllow, onRevoke
       <h3 style={h3}>Blocked agents</h3>
       <p style={note}>Their requests to your agents are refused automatically. You are never notified about them. Blocking an agent also ends every standing rule you gave it.</p>
       {blocks.length === 0 ? <div style={dim}>You have not blocked any agent.</div> : (
-        <table>
+        <div className="apps-table-wrap"><table>
           <thead><tr><th>Agent</th><th>Owner</th><th>Blocked</th><th>Refused since</th><th></th></tr></thead>
           <tbody>
             {blocks.map(b => (
@@ -528,13 +528,13 @@ function RulesTab({ rules, agents, blocks, refused, onUnblock, onAllow, onRevoke
               </tr>
             ))}
           </tbody>
-        </table>
+        </table></div>
       )}
 
       <h3 style={h3}>Refused agents</h3>
       <p style={note}>You refused these agents' first contact. Their tasks are rejected until you allow them.</p>
       {refused.length === 0 ? <div style={dim}>None.</div> : (
-        <table>
+        <div className="apps-table-wrap"><table>
           <thead><tr><th>Agent</th><th>Owner</th><th>Refused</th><th></th></tr></thead>
           <tbody>
             {refused.map(r => (
@@ -546,7 +546,7 @@ function RulesTab({ rules, agents, blocks, refused, onUnblock, onAllow, onRevoke
               </tr>
             ))}
           </tbody>
-        </table>
+        </table></div>
       )}
     </>
   )
@@ -571,6 +571,18 @@ export function Crew() {
     window.addEventListener('hashchange', fn)
     return () => window.removeEventListener('hashchange', fn)
   }, [])
+
+  // At phone width the tab strip is one scrolling row (admin.css .crew-tabs),
+  // so a tab opened from a link (/crew#rules) can start off-screen; bring the
+  // active one into view. Only the strip scrolls, never the page.
+  useEffect(() => {
+    const strip = document.querySelector<HTMLElement>('.crew-tabs')
+    const active = strip?.querySelector<HTMLElement>('.phase-tab.active')
+    if (!strip || !active || strip.scrollWidth <= strip.clientWidth) return
+    const s = strip.getBoundingClientRect()
+    const a = active.getBoundingClientRect()
+    strip.scrollLeft += a.left - s.left - (s.width - a.width) / 2
+  }, [tab])
 
   const load = useCallback(() => {
     setLoading(true)
@@ -636,11 +648,11 @@ export function Crew() {
       <h2>Crew</h2>
       <p style={{ ...dim, marginTop: -6 }}>
         {rosterRows.length} agent{rosterRows.length === 1 ? '' : 's'} registered · {working} working now
-        {waiting > 0 && <> · <b style={{ color: 'var(--yellow)' }}>{waiting} decision{waiting === 1 ? '' : 's'} waiting for you</b></>}
+        {waiting > 0 && <> · <b style={{ color: 'var(--yellow-text)' }}>{waiting} decision{waiting === 1 ? '' : 's'} waiting for you</b></>}
         {blocks.length > 0 && <> · {blocks.length} blocked</>}
       </p>
 
-      <div className="phase-tab-strip" role="tablist">
+      <div className="phase-tab-strip crew-tabs" role="tablist">
         {TABS.map(t => (
           <button
             key={t.id}

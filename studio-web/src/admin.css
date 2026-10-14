@@ -2,6 +2,8 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
 
 :root {
+  --yellow-text: var(--yellow);
+  --green-text: var(--green);
   --bg: #0f1117;
   --surface: #1a1d27;
   --surface2: #222536;
@@ -46,6 +48,12 @@
   --bg-3: #e2e8f0;
   --fg: #0f172a;
   --fg-2: #64748b;
+  /* Amber and green are signal colours, not text colours: on the light
+     surfaces --yellow measures 2.8:1 and --green 3.3:1 (WCAG AA needs 4.5).
+     Text set in them darkens toward --text here; dark mode keeps the signal
+     colours, which already pass on the dark surfaces. */
+  --yellow-text: color-mix(in srgb, var(--yellow) 62%, var(--text));
+  --green-text: color-mix(in srgb, var(--green) 72%, var(--text));
 }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -493,9 +501,9 @@ tr:last-child td { border-bottom: none; }
 .dot-yellow { background: var(--yellow, #f59e0b); }
 
 .badge { padding: 2px 8px; border-radius: 4px; font-size: .75rem; font-weight: 600; }
-.badge-live { background: #22c55e22; color: var(--green); }
+.badge-live { background: #22c55e22; color: var(--green-text); }
 .badge-failed { background: #ef444422; color: var(--red); }
-.badge-building, .badge-deploying { background: #eab30822; color: var(--yellow); }
+.badge-building, .badge-deploying { background: #eab30822; color: var(--yellow-text); }
 .badge-pending { background: #71717a22; color: var(--dim); }
 .badge-offline { background: #71717a22; color: var(--dim); }
 .badge-degraded { background: #f9731622; color: var(--orange); }
@@ -2127,4 +2135,23 @@ input[type='email'], select, textarea {
    narrow (the sidebar takes ~220px of the viewport). */
 @media (max-width: 1100px) {
   .crew-map-grid { grid-template-columns: minmax(0, 1fr) !important; }
+}
+
+/* Crew → Crew log. Three columns (when | what | actions) on a wide page; on a
+   phone the middle column was squeezed to ~100px, one or two words a line,
+   so the row stacks instead. */
+.crew-log-row { display: grid; grid-template-columns: minmax(70px, 90px) 1fr auto; gap: 12px; padding: 11px 14px; border-bottom: 1px solid var(--border); align-items: start; }
+.crew-log-body { min-width: 0; }
+.crew-log-acts { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; align-items: center; }
+/* 900px, not phone width: with the 220px sidebar, a first contact's four
+   buttons still squeezed the text to ~90px on a laptop-sized window. */
+@media (max-width: 900px) {
+  .crew-log-row { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .crew-log-acts { justify-content: flex-start; }
+}
+/* Crew tabs: five tabs and Refresh wrapped into two rows at phone width, with
+   the active tab's box floating mid-strip; one scrollable row instead. */
+@media (max-width: 600px) {
+  .crew-tabs { flex-wrap: nowrap; overflow-x: auto; }
+  .crew-tabs > * { flex-shrink: 0; white-space: nowrap; }
 }

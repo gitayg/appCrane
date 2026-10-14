@@ -78,6 +78,8 @@ function when(raw: string | null): string {
 
 const NODE_R = 13
 
+const MAP_MIN_W = 460
+
 export function CrewMap({ data }: { data: CrewMapData | null }) {
   const [showStopped, setShowStopped] = useState(false)
   const [selected, setSelected] = useState<string | null>(null)
@@ -134,10 +136,12 @@ export function CrewMap({ data }: { data: CrewMapData | null }) {
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(220px, 280px)', gap: 16, alignItems: 'start' }} className="crew-map-grid">
-        <div style={{ border: '1px solid var(--border)', borderRadius: 8, background: 'var(--surface)', overflow: 'hidden' }}>
+        {/* A phone would shrink the drawing until the 11-13 px labels were
+            7-8 px; below MAP_MIN_W it scrolls inside this box instead. */}
+        <div style={{ border: '1px solid var(--border)', borderRadius: 8, background: 'var(--surface)', overflowX: 'auto', overflowY: 'hidden' }}>
           <svg
             viewBox={`0 0 ${vw} ${vh}`}
-            style={{ width: '100%', height: 'auto', display: 'block', maxHeight: '75vh' }}
+            style={{ width: '100%', minWidth: MAP_MIN_W, height: 'auto', display: 'block', maxHeight: '75vh' }}
             role="img"
             aria-label={`Communication map of ${data.nodes.length} agents and ${edges.length} connections`}
             onClick={() => setSelected(null)}

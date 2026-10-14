@@ -466,7 +466,11 @@ export function Dashboard() {
       {dbServers && dbServers.length > 0 && (
         <>
           <h2>Managed Databases</h2>
-          <table style={{ marginBottom: 24 }}>
+          {/* Scrolls inside its own box: at phone width this table widened the
+              whole page to ~540px, which also pushed fixed dialogs (the
+              update-blocked one included) half off-screen. */}
+          <div className="apps-table-wrap" style={{ marginBottom: 24 }}>
+          <table>
             <thead>
               <tr>
                 <th>Engine</th>
@@ -536,6 +540,7 @@ export function Dashboard() {
               })}
             </tbody>
           </table>
+          </div>
           <ManagedDbSettingsCard />
         </>
       )}

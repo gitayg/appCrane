@@ -325,7 +325,15 @@ function doSendMessage(ctx, params) {
 
 async function SendMessage(ctx, params) {
   const r = doSendMessage(ctx, params);
-  const task = r.returnImmediately ? taskFor(ctx.agent.id, r.taskId) : await waitForSettled(ctx.agent.id, r.taskId, blockingWaitMs());
+  // The blocking wait is for a caller waiting on ANOTHER agent's work. When
+  // the caller is the task's receiver reporting its own progress (WORKING,
+  // a reply, an artifact), the only agent that could settle the task is the
+  // one holding this request open, so waiting would stall every progress
+  // update for the full CREW_A2A_BLOCKING_WAIT_MS (measured: 30 s per WORKING
+  // update behind Caddy) for nothing.
+  const sent = taskFor(ctx.agent.id, r.taskId);
+  const ownWork = sent && sent.to_agent_id === ctx.agent.id;
+  const task = r.returnImmediately || ownWork ? sent : await waitForSettled(ctx.agent.id, r.taskId, blockingWaitMs());
   if (!task) throw notFound(r.taskId);
   // a2a.proto SendMessageResponse: oneof { task, message }.
   return { task: toTask(task, { historyLength: r.historyLength }) };

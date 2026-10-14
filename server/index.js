@@ -77,6 +77,7 @@ import noticesRoutes from './routes/notices.js';
 import catalogRoutes from './routes/catalog.js';
 import crewRoutes from './routes/crew.js';
 import a2aRoutes, { wellKnownAgentCard } from './routes/a2a.js';
+import { refererSlug } from './utils/refererSlug.js';
 import { globalNotices } from './services/platformNotices.js';
 
 const PORT = process.env.PORT || 5001;
@@ -418,10 +419,8 @@ app.use((req, res, next) => {
   for (const prefix of APPCRANE_PASSTHROUGH) {
     if (req.path === prefix || req.path.startsWith(prefix + '/')) return next();
   }
-  const referer = req.headers.referer || req.headers.referrer || '';
-  const m = referer.match(/^https?:\/\/[^/]+\/([^/?#]+)/);
-  if (!m) return next();
-  const refSlug = m[1];
+  const refSlug = refererSlug(req.headers.referer || req.headers.referrer, req.headers.host);
+  if (!refSlug) return next();
   if (APPCRANE_PAGE_SLUGS.has(refSlug)) return next();
 
   const baseSlug = refSlug.replace(/-sandbox$/, '');

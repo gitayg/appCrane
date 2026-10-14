@@ -99,8 +99,12 @@ export function ManagedDatabaseCard({ slug, reload, onMsg }: Props) {
   return (
     <div className="am-card">
       <h3 style={{ marginBottom: 10 }}>Managed databases</h3>
+      {/* Seven columns do not fit a phone, or even the app page beside the
+          sidebar on a laptop: the table widened the whole page (measured
+          997px in a 788px window). It scrolls inside the card instead. */}
       {data.databases.length > 0 && (
-        <table style={{ width: '100%', fontSize: '.8rem', marginBottom: 10 }}>
+        <div style={{ overflowX: 'auto', marginBottom: 10 }}>
+        <table style={{ width: '100%', fontSize: '.8rem' }}>
           <thead>
             <tr><th style={{ textAlign: 'left' }}>Engine</th><th style={{ textAlign: 'left' }}>Database</th><th style={{ textAlign: 'left' }}>User</th><th style={{ textAlign: 'left' }}>Used by</th><th style={{ textAlign: 'left' }}>TLS</th><th style={{ textAlign: 'left' }}>Connections</th><th /></tr>
           </thead>
@@ -127,10 +131,13 @@ export function ManagedDatabaseCard({ slug, reload, onMsg }: Props) {
             ))}
           </tbody>
         </table>
+        </div>
       )}
       <div style={{ fontSize: '.75rem', color: 'var(--dim)', marginBottom: 8 }}>
-        Production uses <span className="am-mono">{data.by_env.production.join(', ') || 'none'}</span>
-        {' '}· Sandbox uses <span className="am-mono">{data.by_env.sandbox.join(', ') || 'none yet (created on its next deploy)'}</span>
+        {/* Engines of one app share the database name (postgres and redis
+            both "app_<slug>"), which read as "app_x, app_x". */}
+        Production uses <span className="am-mono">{[...new Set(data.by_env.production)].join(', ') || 'none'}</span>
+        {' '}· Sandbox uses <span className="am-mono">{[...new Set(data.by_env.sandbox)].join(', ') || 'none yet (created on its next deploy)'}</span>
       </div>
       {data.can_change_separate_sandbox_db && (
         <>

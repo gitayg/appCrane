@@ -140,7 +140,11 @@ router.get('/:slug/backups', requireAppAccess, (req, res) => {
   `).all(req.app.id);
 
   res.json({
-    backups: backups.map((b) => {
+    // file_path is left out for the same reason databasesView drops each
+    // dump's `file`: it is a host path (DATA_DIR and the box's layout) and
+    // this list is readable by every app member. Nothing reads it — restore
+    // looks the row up by id. POST /backup never returned it either.
+    backups: backups.map(({ file_path: _hostPath, ...b }) => {
       const databases = databasesView(b.databases);
       return { ...b, databases, includes_database: databases.length > 0 };
     }),

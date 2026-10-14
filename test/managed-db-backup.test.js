@@ -356,6 +356,7 @@ test('POST backup dumps the env\'s scope into the same record; GET lists it with
   const row = list.body.backups.find((b) => b.id === Number(r.body.backup.id));
   assert.equal(row.includes_database, true);
   assert.ok(row.databases.every((d) => !('file' in d)), 'no host paths in the API');
+  assert.ok(!('file_path' in row) && !JSON.stringify(list.body).includes(process.env.DATA_DIR), 'the backup row carries no host path either');
   const all = docker().map((c) => c.argv.join(' ')).join('\n');
   assert.ok(!all.includes(nB.database));
 });

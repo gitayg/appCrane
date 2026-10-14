@@ -89,6 +89,7 @@ export function BackupsCard({ slug, env, reload, onMsg }: Props) {
       {rows.length === 0 ? (
         <div style={{ fontSize: '.8rem', color: 'var(--dim)' }}>No backups of {env} yet.</div>
       ) : (
+        <div style={{ overflowX: 'auto' }}>
         <table style={{ width: '100%', fontSize: '.8rem' }}>
           <thead>
             <tr><th style={{ textAlign: 'left' }}>Taken</th><th style={{ textAlign: 'left' }}>Files</th><th style={{ textAlign: 'left' }}>Database</th><th style={{ textAlign: 'left' }}>By</th><th /></tr>
@@ -111,6 +112,7 @@ export function BackupsCard({ slug, env, reload, onMsg }: Props) {
             ))}
           </tbody>
         </table>
+        </div>
       )}
 
       {restoring && (

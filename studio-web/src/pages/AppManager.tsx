@@ -8,7 +8,9 @@ import { BackupsCard } from '../components/BackupsCard'
 import { serverDate } from '../utils/serverDate'
 
 const PAGE_CSS = `
-.app-manager .breadcrumb{font-size:.78rem;color:var(--dim);padding:7px 24px;background:var(--surface);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:5px;margin:-24px -24px 16px;}
+/* margin 0, not -24px: .app-manager has no padding to cancel, so the negative margins made
+   the breadcrumb 48px wider than the page and gave every width a horizontal scroll. */
+.app-manager .breadcrumb{font-size:.78rem;color:var(--dim);padding:7px 24px;background:var(--surface);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:5px;margin:0 0 16px;flex-wrap:wrap}
 .app-manager .breadcrumb a{color:var(--dim);text-decoration:none}
 .app-manager .breadcrumb a:hover{color:var(--text)}
 .app-manager .breadcrumb-sep{color:var(--dim)}
@@ -31,9 +33,13 @@ const PAGE_CSS = `
 .app-manager .dp-step.dp-active .dp-dot{animation:dp-pulse 1s infinite}
 @keyframes dp-pulse{0%,100%{opacity:1}50%{opacity:.2}}
 .app-manager .add-row{display:flex;gap:8px;margin-top:8px}
-.app-manager .add-row input{background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:4px;font-size:.85rem;font-family:'SF Mono',Monaco,monospace}
-.app-manager .am-msg{padding:8px 12px;border-radius:6px;margin-bottom:12px;font-size:.85rem}
-.app-manager .msg-ok{background:#22c55e18;border:1px solid #22c55e44;color:var(--green)}
+.app-manager .add-row input{min-width:0;flex:1;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:4px;font-size:.85rem;font-family:'SF Mono',Monaco,monospace}
+/* Sticky + opaque: cards report outcomes here (a refused restore, a toggle), and the
+   card that acted is usually scrolled far below the top of the page. */
+.app-manager .am-msg{padding:8px 12px;border-radius:6px;margin-bottom:12px;font-size:.85rem;position:sticky;top:8px;z-index:20;box-shadow:0 2px 8px rgba(0,0,0,.18)}
+.app-manager .am-msg.msg-ok{background:linear-gradient(#22c55e18,#22c55e18),var(--surface)}
+.app-manager .am-msg.msg-err{background:linear-gradient(#ef444418,#ef444418),var(--surface)}
+.app-manager .msg-ok{background:#22c55e18;border:1px solid #22c55e44;color:var(--green-text)}
 .app-manager .msg-err{background:#ef444418;border:1px solid #ef444444;color:var(--red)}
 .app-manager .timeline{margin-top:0}
 .app-manager .tl-item{display:flex}

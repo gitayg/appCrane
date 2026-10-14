@@ -34,6 +34,16 @@ updates:
     # major with a behaviour change nothing in the suite exercises, and it
     # deserved its own review rather than a line in a batch of thirty.
     open-pull-requests-limit: 5
+    # better-sqlite3 13.x publishes NO prebuilt binaries (every v13 GitHub
+    # release has zero assets), so `npm install` compiles it from source with
+    # node-gyp on the server, and a box without a C++ toolchain cannot
+    # self-update at all (v2.107.2: apphub's update failed exactly there).
+    # 12.11.1 ships linux-x64 binaries for Node 22. Stay on 12.x until a
+    # 13.x release publishes prebuilds; test/better-sqlite3-prebuilt.test.js
+    # states the same rule. Security fixes still arrive as alerts.
+    ignore:
+      - dependency-name: better-sqlite3
+        update-types: ["version-update:semver-major"]
     commit-message:
       prefix: "deps"
       include: scope
