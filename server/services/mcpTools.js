@@ -973,7 +973,7 @@ const TOOLS = [
       'Reveal the PLAINTEXT of ONE secret by key. Use ONLY when the user explicitly needs the actual value — it will appear in this ' +
       'conversation transcript, so treat the transcript as sensitive afterward (and consider rotating the secret if the transcript may be stored/shared). ' +
       'For checking whether a var is set, comparing values, or seeing what exists, use appcrane_get_secret (masked) instead — do NOT reveal just to inspect config. ' +
-      'Single key only — it never dumps the whole env. Every reveal is audit-logged. Defaults to sandbox; env="production" only when the user explicitly asks. App-admin or AppCrane admin only.',
+      'Single key only — it never dumps the whole env. Every reveal is audit-logged. Defaults to sandbox; env="production" only when the user explicitly asks. App admins can reveal sandbox values; a PRODUCTION value needs the app owner or a platform admin.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -990,6 +990,13 @@ const TOOLS = [
       const env = args.env === 'production' ? 'production' : 'sandbox';
       const app = getAppForUser(user, args.slug);
       if (!isAppAdmin(user, app)) throw new Error('Forbidden: revealing a secret requires admin or app-admin role');
+      // Operator decision (v2.107.5): a PRODUCTION secret's value is the app
+      // owner's or a platform admin's to read. App admins still manage the
+      // keys and see the masked list (appcrane_get_secret); sandbox reveals
+      // are unchanged.
+      if (env === 'production' && !isAppOwnerOrPlatformAdmin(user, app)) {
+        throw new Error('Forbidden: revealing a production secret requires the app owner or a platform admin. The masked value and fingerprint are available from appcrane_get_secret.');
+      }
 
       const db = getDb();
       const row = db

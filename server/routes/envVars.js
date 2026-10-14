@@ -60,6 +60,12 @@ router.get('/:slug/env/:env', requireAppUser, (req, res) => {
   // Express 5: req.query may be a getter; access safely
   const url = new URL(req.url, `http://${req.headers.host}`);
   const showValues = url.searchParams.get('reveal') === 'true';
+  // Operator decision (v2.107.5): reading production secret VALUES is the app
+  // owner's or a platform admin's call; everyone else with access still gets
+  // the masked list.
+  if (showValues && env === 'production' && !isAppOwnerOrPlatformAdmin(req.user, req.app)) {
+    throw new AppError('Revealing production secrets requires the app owner or a platform admin.', 403, 'FORBIDDEN');
+  }
   const db = getDb();
 
   const vars = db.prepare(

@@ -132,6 +132,11 @@ const serviceApiRoutes = (await import('../server/routes/serviceApi.js')).defaul
 initDb();
 const db = getDb();
 
+// The reveal fixtures use SANDBOX secrets: since v2.107.5 only the app owner or
+// a platform admin may reveal a production value, and these tests are about the
+// notice, the throttle and the budget, which work the same in both envs.
+// test/production-secret-reveal.test.js covers the production rule.
+
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 
 const mkApp = (name, slug, slot) => db.prepare(
@@ -169,14 +174,14 @@ const MEMBER_A = mkUser('Member A', MEMBER_EMAIL, 'user', KEY_MEMBER_A);
 assign(OWNED_ID, OWNER_A, 'owner');
 assign(OWNED_ID, MEMBER_A, 'user');
 const OWNED_KEYS = ['ALPHA_TOKEN', 'BETA_TOKEN', 'GAMMA_TOKEN', 'DELTA_TOKEN', 'EPSILON_TOKEN'];
-OWNED_KEYS.forEach((k, i) => setVar(OWNED_ID, 'production', k, `owned-secret-${i}`));
+OWNED_KEYS.forEach((k, i) => setVar(OWNED_ID, 'sandbox', k, `owned-secret-${i}`));
 
 // (1b) reveal notice — an app with NO owner at all (admin fallback).
 const ORPHAN_ID = mkApp('Orphan App', 'sn-orphan', 502);
 const KEY_MEMBER_B = 'dhk_user_sn_member_b';
 const MEMBER_B = mkUser('Member B', 'member-b@example.test', 'user', KEY_MEMBER_B);
 assign(ORPHAN_ID, MEMBER_B, 'user');
-setVar(ORPHAN_ID, 'production', 'ORPHAN_TOKEN', 'orphan-secret');
+setVar(ORPHAN_ID, 'sandbox', 'ORPHAN_TOKEN', 'orphan-secret');
 
 // (2) throttle.
 const THROTTLE_ID = mkApp('Throttle App', 'sn-throttle', 503);
@@ -186,7 +191,7 @@ const THROTTLE_OWNER = mkUser('Throttle Owner', 'throttle-owner@example.test', '
 assign(THROTTLE_ID, THROTTLE_USER, 'user');
 assign(THROTTLE_ID, THROTTLE_OWNER, 'owner');
 const CANARY = 'plaintext-canary-9f2c41';
-setVar(THROTTLE_ID, 'production', 'STRIPE_KEY', CANARY);
+setVar(THROTTLE_ID, 'sandbox', 'STRIPE_KEY', CANARY);
 
 // (2b) the other door: MCP writes `secret-reveal`, and a control app proving the
 // budget keys off the ACTION and not merely "this user did something here".
@@ -196,7 +201,7 @@ const KEY_DOORS = 'dhk_user_sn_doors';
 const DOORS_USER = mkUser('Doors User', 'doors@example.test', 'user', KEY_DOORS);
 for (const id of [MCPDOOR_ID, CONTROL_ID]) {
   assign(id, DOORS_USER, 'user');
-  setVar(id, 'production', 'DOOR_KEY', 'door-secret');
+  setVar(id, 'sandbox', 'DOOR_KEY', 'door-secret');
 }
 
 // (3) attribution. The app NAME carries angle brackets so the HTML footer's
@@ -255,7 +260,7 @@ async function req(method, path, { apiKey, serviceToken, body } = {}) {
   return { status: r.status, body: text, json, code: json?.error?.code };
 }
 
-const reveal = (slug, key, env = 'production') =>
+const reveal = (slug, key, env = 'sandbox') =>
   req('GET', `/api/apps/${slug}/env/${env}?reveal=true`, { apiKey: key });
 
 // ── Reading the wire ─────────────────────────────────────────────────────────
@@ -352,7 +357,7 @@ test('a plaintext reveal mails the app OWNERS exactly once, whatever the key cou
   }
   assert.ok(text.includes(MEMBER_EMAIL), 'the notice never names who read the secrets');
   assert.ok(header(m.raw, 'Subject').includes('sn-owned'), 'the subject does not name the app');
-  assert.ok(header(m.raw, 'Subject').includes('production'), 'the subject does not name the env');
+  assert.ok(header(m.raw, 'Subject').includes('sandbox'), 'the subject does not name the env');
   assert.ok(header(m.raw, 'Subject').includes(`${OWNED_KEYS.length} key`),
     'the subject does not carry the key count');
 
@@ -370,7 +375,7 @@ test('a masked read — the ordinary Environment tab render — notifies nobody'
   // mailed the owners, the SPA's every-visit render would bury the reveal that
   // matters, and "a notice arrived" would prove nothing about reveals.
   const before = inbox.length;
-  const r = await req('GET', '/api/apps/sn-owned/env/production', { apiKey: KEY_MEMBER_A });
+  const r = await req('GET', '/api/apps/sn-owned/env/sandbox', { apiKey: KEY_MEMBER_A });
   assert.equal(r.status, 200);
   assert.equal(r.json.vars[0].value, '********', 'a read without ?reveal=true returned plaintext');
 
@@ -478,7 +483,7 @@ test('the MCP door spends the same budget as the HTTP door', async () => {
   // it, a caller would refresh their allowance just by switching transports —
   // and switching transports is free.
   for (let i = 0; i < MAX_PER_WINDOW; i++) {
-    logAudit(DOORS_USER, MCPDOOR_ID, 'secret-reveal', { env: 'production', keys: ['DOOR_KEY'] });
+    logAudit(DOORS_USER, MCPDOOR_ID, 'secret-reveal', { env: 'sandbox', keys: ['DOOR_KEY'] });
   }
   const blocked = await reveal('sn-mcpdoor', KEY_DOORS);
   assert.equal(blocked.status, 429,
@@ -491,7 +496,7 @@ test('unrelated audit rows do not consume the reveal budget', async () => {
   // ACTIONS, not "this user touched this app N times". A throttle that fires on
   // ordinary deploys is one that gets ripped out.
   for (let i = 0; i < MAX_PER_WINDOW * 2; i++) {
-    logAudit(DOORS_USER, CONTROL_ID, 'env-set', { env: 'production', keys: ['DOOR_KEY'] });
+    logAudit(DOORS_USER, CONTROL_ID, 'env-set', { env: 'sandbox', keys: ['DOOR_KEY'] });
   }
   const r = await reveal('sn-control', KEY_DOORS);
   assert.equal(r.status, 200,
@@ -708,8 +713,8 @@ async function sweep() {
 }
 
 test('an app over its disk budget produces an audit row and mails owners AND platform admins', async () => {
-  seedDataDir('sn-diskbig', 'production', 3 * 1024 * 1024);
-  seedDataDir('sn-disksmall', 'production', 4 * 1024);
+  seedDataDir('sn-diskbig', 'sandbox', 3 * 1024 * 1024);
+  seedDataDir('sn-disksmall', 'sandbox', 4 * 1024);
   db.prepare("INSERT OR REPLACE INTO settings (key,value) VALUES ('app_disk_quota_mb', ?)").run(String(QUOTA_MB));
 
   const before = inbox.length;
@@ -719,7 +724,7 @@ test('an app over its disk budget produces an audit row and mails owners AND pla
   const rows = quotaAudits(BIG_ID);
   assert.equal(rows.length, 1);
   const detail = JSON.parse(rows[0].detail);
-  assert.equal(detail.env, 'production');
+  assert.equal(detail.env, 'sandbox');
   assert.ok(detail.used_bytes > detail.quota_bytes,
     `the alert fired below the line: ${detail.used_bytes} <= ${detail.quota_bytes}`);
   assert.equal(detail.quota_bytes, QUOTA_MB * 1024 * 1024, 'the app_disk_quota_mb setting was ignored');
