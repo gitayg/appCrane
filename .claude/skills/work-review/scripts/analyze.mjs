@@ -74,7 +74,7 @@ function analyzeFile(path) {
     usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, turns: 0, userPrompts: [],
     toolCalls: 0, toolCounts: new Map(), errors: [], redundantReads: [], repeatedCmds: [],
     retryLoops: [], editMisses: 0, denials: [], bigOutputs: [], corrections: [], interrupts: 0,
-    compactions: 0, searchBursts: 0, singleToolTurns: 0, multiToolTurns: 0, cmdHeads: new Map(),
+    compactions: 0, searchBursts: 0, wastedTokens: { read: 0, rerun: 0, errors: 0 }, singleToolTurns: 0, multiToolTurns: 0, cmdHeads: new Map(),
   };
   const seenMsg = new Set();
   const pending = new Map();          // tool_use_id -> {name, input, key}
@@ -113,7 +113,7 @@ function analyzeFile(path) {
           key = `Read ${inp.file_path}`;
           const r = readState.get(inp.file_path) || { count: 0, editMark: -1, ranges: new Set() };
           const range = `${inp.offset ?? 0}:${inp.limit ?? 'all'}`;
-          if (r.count && r.editMark === editCounter && r.ranges.has(range)) s.redundantReads.push({ file: inp.file_path, nth: r.count + 1 });
+          if (r.count && r.editMark === editCounter && r.ranges.has(range)) { s.redundantReads.push({ file: inp.file_path, nth: r.count + 1 }); u._wasted = 'read'; }
           if (r.editMark !== editCounter) r.ranges = new Set();
           r.count++; r.editMark = editCounter; r.ranges.add(range); readState.set(inp.file_path, r);
         } else if (/^(Edit|Write|MultiEdit|NotebookEdit)$/.test(u.name)) {
@@ -124,15 +124,15 @@ function analyzeFile(path) {
           const rm = nc.match(READ_CMD_RE);
           if (rm) {                         // shell reads count toward redundant reads too
             const f = rm[2]; const r = readState.get(f) || { count: 0, editMark: -1, ranges: new Set() };
-            if (r.count && r.editMark === editCounter && r.ranges.has(nc)) s.redundantReads.push({ file: f, nth: r.count + 1, via: 'Bash' });
+            if (r.count && r.editMark === editCounter && r.ranges.has(nc)) { s.redundantReads.push({ file: f, nth: r.count + 1, via: 'Bash' }); u._wasted = 'read'; }
             if (r.editMark !== editCounter) r.ranges = new Set();
             r.count++; r.editMark = editCounter; r.ranges.add(nc); readState.set(f, r);
           }
           const c = cmdState.get(nc) || { count: 0, editMark: -1, idle: 0 };
-          if (c.count && c.editMark === editCounter) c.idle++;   // rerun with no edit in between
+          if (c.count && c.editMark === editCounter) { c.idle++; u._wasted ??= 'rerun'; }   // rerun with no edit in between
           c.count++; c.editMark = editCounter; cmdState.set(nc, c);
         }
-        pending.set(u.id, { name: u.name, key, input: inp });
+        pending.set(u.id, { name: u.name, key, input: inp, wasted: u._wasted });
       }
     }
 
@@ -151,6 +151,9 @@ function analyzeFile(path) {
       for (const r of c.filter(x => x.type === 'tool_result')) {
         const p = pending.get(r.tool_use_id) || { name: '?', key: '?' };
         const out = textOf(r.content);
+        // ~4 chars/token; the output sits in context for the rest of the session, this is the floor.
+        if (p.wasted) s.wastedTokens[p.wasted] += Math.round(out.length / 4);
+        if (r.is_error) s.wastedTokens.errors += Math.round(out.length / 4);
         if (out.length > 20000) s.bigOutputs.push({ tool: p.name, key: clip(p.key, 120), chars: out.length });
         if (r.is_error) {
           const first = clip(out.split('\n').find(l => l.trim()) || out, 140);
@@ -234,6 +237,7 @@ const totals = {
   retryLoops: sum(s => s.retryLoops.length), editMisses: sum(s => s.editMisses), permissionDenials: sum(s => s.denials.length),
   oversizedOutputs: sum(s => s.bigOutputs.length), corrections: sum(s => s.corrections.length), interrupts: sum(s => s.interrupts),
   compactions: sum(s => s.compactions), searchBursts: sum(s => s.searchBursts),
+  wastedTokensEstimate: { redundantReads: sum(s => s.wastedTokens.read), idleReruns: sum(s => s.wastedTokens.rerun), errorOutputs: sum(s => s.wastedTokens.errors) },
   parallelToolTurnShare: +(sum(s => s.multiToolTurns) / Math.max(1, sum(s => s.multiToolTurns + s.singleToolTurns))).toFixed(3),
   tools: Object.fromEntries([...toolTotals].sort((a, b) => b[1] - a[1])),
 };
@@ -260,9 +264,9 @@ out.push(`# Claude work review — last ${SINCE_DAYS} days`, '',
   `| Model turns / tool calls / your prompts | ${T.turns} / ${T.toolCalls} / ${T.userPrompts} |`,
   `| Tokens in (fresh · cache read · cache write) / out | ${k(U.input)} · ${k(U.cacheRead)} · ${k(U.cacheWrite)} / ${k(U.output)} |`,
   `| Cache hit rate | ${(T.cacheHitRate * 100).toFixed(1)}% |`,
-  `| Tool error rate | ${(T.errorRate * 100).toFixed(1)}% (${T.toolErrors}) |`,
-  `| Redundant reads (same file+range, no edit between) | ${T.redundantReads} |`,
-  `| Command re-runs with no edit between | ${T.idleCommandReruns} |`,
+  `| Tool error rate | ${(T.errorRate * 100).toFixed(1)}% (${T.toolErrors}, ~${k(T.wastedTokensEstimate.errorOutputs)} tokens of error output) |`,
+  `| Redundant reads (same file+range, no edit between) | ${T.redundantReads} (~${k(T.wastedTokensEstimate.redundantReads)} tokens) |`,
+  `| Command re-runs with no edit between | ${T.idleCommandReruns} (~${k(T.wastedTokensEstimate.idleReruns)} tokens) |`,
   `| Retry loops (same error ≥3× in a row) | ${T.retryLoops} |`,
   `| Edit misses (old_string not found etc.) | ${T.editMisses} |`,
   `| Permission denials | ${T.permissionDenials} |`,

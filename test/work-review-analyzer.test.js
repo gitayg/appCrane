@@ -39,11 +39,11 @@ test('analyzer detects each waste signal and dedupes streamed usage', () => {
   mkdirSync(proj);
 
   writeSession(proj, 's1', ['run the unit tests and fix failures in the billing module', "no, don't mock the database in tests"], ({ tool, assistant, user }) => {
-    tool('Read', { file_path: '/r/a.js' }, 'x');
-    tool('Read', { file_path: '/r/a.js' }, 'x');                        // redundant: no edit between
+    tool('Read', { file_path: '/r/a.js' }, 'x'.repeat(400));
+    tool('Read', { file_path: '/r/a.js' }, 'x'.repeat(400));   // redundant: no edit between
     tool('Bash', { command: 'cd /r && npm test 2>&1 | tail' }, 'fail');
     tool('Bash', { command: 'npm test' }, 'fail');
-    tool('Bash', { command: 'npm test' }, 'fail');                      // 2 idle re-runs
+    tool('Bash', { command: 'npm test' }, 'fail '.repeat(100));        // 2 idle re-runs
     for (let i = 0; i < 3; i++) tool('Edit', { file_path: '/r/a.js' }, 'String to replace not found in file', true);
     tool('Bash', { command: 'rm -rf build' }, 'Permission to use Bash was denied', true);
     tool('Bash', { command: 'cat big.log' }, 'y'.repeat(30000));
@@ -53,8 +53,8 @@ test('analyzer detects each waste signal and dedupes streamed usage', () => {
     user('[Request interrupted by user]');
   });
   writeSession(proj, 's2', ['run the unit tests and fix the failures in the billing module please', 'no, do not mock the database in tests'], ({ tool }) => {
-    tool('Read', { file_path: '/r/a.js' }, 'x');
-    tool('Read', { file_path: '/r/a.js' }, 'x');
+    tool('Read', { file_path: '/r/a.js' }, 'x'.repeat(400));
+    tool('Read', { file_path: '/r/a.js' }, 'x'.repeat(400));
   });
 
   const out = join(root, 'report.json');
@@ -72,6 +72,8 @@ test('analyzer detects each waste signal and dedupes streamed usage', () => {
   assert.equal(t.oversizedOutputs, 1);
   assert.equal(t.corrections, 2);
   assert.equal(t.interrupts, 1);
+  assert.ok(t.wastedTokensEstimate.redundantReads > 0, 'redundant reads are priced');
+  assert.ok(t.wastedTokensEstimate.idleReruns > 0, 'idle re-runs are priced');
   assert.ok(t.parallelToolTurnShare > 0, 'parallel calls in one streamed message are recognised');
 
   assert.equal(cross.repeatedPrompts.length, 1);

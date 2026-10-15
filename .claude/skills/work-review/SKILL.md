@@ -7,6 +7,20 @@ description: Analyze how the user actually works with Claude Code — mine local
 
 Find where working with Claude is redundant or rough, and propose specific changes that remove it. The analysis is quantitative first (a script over the transcripts), then qualitative (you read the flagged moments), then prescriptive (diffs the user can accept).
 
+## Where this fits
+
+Claude Code already ships tools that overlap with parts of this skill. Don't redo their work; point the user to them:
+- `/insights` gives an LLM-written narrative of friction, and spends plan tokens to do it.
+- `/fewer-permission-prompts` writes a permission allowlist from the transcripts. For permission friction, recommend running it rather than hand-writing an allowlist.
+- `/doctor` covers config hygiene: unused MCP servers and skills, duplicated CLAUDE.md content, and conflicting rules (`/doctor prompt-audit`).
+
+What this skill adds:
+- deterministic counts with an estimated token cost, so you can rank fixes by what they save;
+- evidence-backed diffs that go to the right destination (a CLAUDE.md rule, a skill, a hook, or a settings entry);
+- before/after verification that a change actually reduced the waste.
+
+See `references/market-analysis.md` for the full landscape.
+
 Everything stays local. Transcripts can contain secrets and private code: never send them, or excerpts of them, to any external service, and quote at most a sentence of any prompt in your report.
 
 ## 1. Measure
@@ -55,7 +69,7 @@ Before proposing a `CLAUDE.md` line, read the existing `CLAUDE.md`, `.claude/set
 Write the review in this shape. Keep it short, because the user wants actions, not a dashboard:
 
 1. **Headline**: 2–3 sentences, giving the biggest source of waste and what fixing it would save, in counts from the data (e.g. "you restated the test command in 6 of 9 sessions").
-2. **Top fixes** (at most 5, ranked by occurrences × effort saved). Each one has:
+2. **Top fixes** (at most 5, ranked by occurrences × cost: use `totals.wastedTokensEstimate`, which is a floor because the output then stays in context for the rest of the session). Each one has:
    - the evidence: the count, the sessions, and one short quoted example;
    - the exact change: a ready-to-apply diff to `CLAUDE.md` or `.claude/settings.json`, a new `SKILL.md` skeleton, or a hook config;
    - confidence (high/medium/low), and why.
@@ -67,6 +81,15 @@ Then ask which fixes to apply. Apply only the ones the user approves. When you a
 - for a permission allowlist, add only read-only or clearly safe commands, never broad patterns like `Bash(*)`, `rm`, `git push` or `curl` to arbitrary hosts;
 - for a new skill, create `.claude/skills/<name>/SKILL.md` with a precise trigger `description`.
 
-## 4. Track (optional)
+## 4. Verify
 
-If the user wants to see a trend, save the JSON with a date (`.claude/work-review/<YYYY-MM-DD>.json`, gitignored) and compare its `totals` with the previous run, reporting which signals went down after the fixes. Suggest re-running about two weeks after applying fixes.
+A fix only counts if the waste it targeted goes down. When you apply fixes, save the report as a baseline: `--json .claude/work-review/<YYYY-MM-DD>.json`. Make sure `.claude/work-review/` is gitignored, since the reports quote prompts. Also append one line per applied fix to `.claude/work-review/applied.md` with the date, the fix, and the signal it targets (e.g. `recurringCorrections: "don't mock the db"`).
+
+On a later run, if a baseline exists:
+- run with `--since <days since that baseline>` so only sessions after the fix are counted;
+- for each line in `applied.md`, compare the targeted signal, normalised per session;
+- say plainly which fixes worked, which didn't, and which have too few sessions to tell (fewer than about 5).
+
+A CLAUDE.md rule that didn't reduce its signal is just context overhead. Propose rewriting it or removing it.
+
+Suggest re-running about two weeks after applying fixes.
