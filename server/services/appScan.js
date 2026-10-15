@@ -19,6 +19,7 @@ import { existsSync, readdirSync } from 'fs';
 import { join, resolve } from 'path';
 import { MANIFESTS, parseManifest } from './ecosystems.js';
 import { assertFinding, assertPackage } from './scanShapes.js';
+import { syncVulnRequests } from './vulnRequests.js';
 
 const OSV_BATCH_URL = 'https://api.osv.dev/v1/querybatch';
 
@@ -660,7 +661,9 @@ export async function scanApp(db, app, env, source = 'deploy') {
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `).run(app.id, env, source, ecosystem, status, packageCount, findingsJson, error);
 
-  return db.prepare('SELECT * FROM app_vuln_scans WHERE id = ?').get(info.lastInsertRowid);
+  const row = db.prepare('SELECT * FROM app_vuln_scans WHERE id = ?').get(info.lastInsertRowid);
+  syncVulnRequests(db, app, row);
+  return row;
 }
 
 /** Most recent scan for an app/env, or null. */
