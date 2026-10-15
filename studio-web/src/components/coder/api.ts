@@ -149,6 +149,8 @@ export interface CoderGap {
 export interface CoderAvailability {
   available: boolean
   can_release: boolean
+  /** App owner or platform admin: may send this app's requests to the coder. */
+  can_dispatch_requests?: boolean
   gaps: CoderGap[]
 }
 
@@ -163,6 +165,17 @@ export const coderApi = {
    */
   availability: (slug: string) =>
     adminApi.get<CoderAvailability>(`${base(slug)}/availability`),
+
+  /**
+   * Send open requests of this app to the coder as ONE prompt, in the order
+   * given. Lands in the caller's live session if they have one (queued when a
+   * turn is running), else a new one. Refuses whole: NOT_FOUND (an id that is
+   * not this app's), REQUEST_CLOSED, CODER_UNAVAILABLE, BUILDER_OCCUPIED,
+   * TOO_MANY_REQUESTS (more than 10).
+   */
+  dispatchRequests: (slug: string, requestIds: number[]) =>
+    adminApi.post<{ session_id: string; request_ids: number[]; queued: boolean }>(
+      `${base(slug)}/requests/dispatch`, { request_ids: requestIds }),
 
   /** Latest session for this app, or null. */
   latestSession: (slug: string) =>

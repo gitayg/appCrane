@@ -1856,6 +1856,19 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                             )
                           })}
                         </div>
+                        {app.source_type === 'managed' && app.repo_backend === 'local' && (() => {
+                          const cloneUrl = `${window.location.origin}/git/${app.slug}.git`
+                          return (
+                            <div style={{ marginTop: 8, fontSize: '.78rem', display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                              <span style={{ color: 'var(--dim)' }}>git clone</span>
+                              <code style={{ userSelect: 'all' }}>{cloneUrl}</code>
+                              <button className="btn btn-xs" onClick={() => copyText(cloneUrl, `clone:${app.slug}`)}>
+                                {copiedLabel === `clone:${app.slug}` ? 'Copied ✓' : 'Copy'}
+                              </button>
+                              <span style={{ color: 'var(--dim)' }}>Read-only. Username anything, password = your AppCrane API key.</span>
+                            </div>
+                          )
+                        })()}
                       </td>
                     </tr>
                   )}

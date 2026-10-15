@@ -77,6 +77,7 @@ import noticesRoutes from './routes/notices.js';
 import catalogRoutes from './routes/catalog.js';
 import crewRoutes from './routes/crew.js';
 import a2aRoutes, { wellKnownAgentCard } from './routes/a2a.js';
+import gitHttpRoutes from './routes/gitHttp.js';
 import { refererSlug } from './utils/refererSlug.js';
 import { globalNotices } from './services/platformNotices.js';
 
@@ -309,6 +310,9 @@ app.use('/api/github-app/webhook', rawWebhookBody);
 // its own bodies with a 256 KB cap, and authenticates every request with a
 // Crew agent token (no requireAuth — agents are not users).
 app.use('/a2a', a2aRoutes);
+// git clone/fetch over HTTPS for Crane-hosted apps. Before express.json(): the
+// upload-pack request body is a binary (often gzipped) stream git must read raw.
+app.use('/git', gitHttpRoutes);
 app.use(express.json({ limit: '50mb', type: ['application/json', 'application/scim+json'] }));
 app.use(express.urlencoded({ extended: true }));
 

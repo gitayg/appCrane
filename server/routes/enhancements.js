@@ -176,7 +176,7 @@ router.get('/owned', (req, res) => {
     SELECT
       er.id, er.app_slug, er.user_name, er.message, er.created_at, er.status,
       er.fix_version, er.cost_tokens, er.cost_usd_cents, er.branch_name, er.pr_url,
-      er.validated_at, er.validated_by,
+      er.validated_at, er.validated_by, er.coder_session_id,
       j.id        AS latest_job_id,
       j.phase     AS latest_job_phase,
       j.status    AS latest_job_status,
@@ -213,7 +213,7 @@ router.get('/', requireAuth, requireAdmin, (req, res) => {
     SELECT
       er.id, er.app_slug, er.user_name, er.message, er.created_at, er.status,
       er.fix_version, er.cost_tokens, er.cost_usd_cents, er.branch_name, er.pr_url,
-      er.validated_at, er.validated_by,
+      er.validated_at, er.validated_by, er.coder_session_id,
       j.id        AS latest_job_id,
       j.phase     AS latest_job_phase,
       j.status    AS latest_job_status,

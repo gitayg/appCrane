@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { adminApi } from '../adminApi'
 import { usePeek, type PeekCtx } from '../hooks/usePeek'
 import { RequestModal } from '../components/runtime-topbar/RequestModal'
@@ -185,6 +186,21 @@ export function AppFrame({ slug, active, onClose }: Props) {
   // conversation is about it.
   const CODER_DOCK_WIDTH = 460
   const dockWidth = coderOpen ? CODER_DOCK_WIDTH : 0
+
+  // ?coder=1 is how the Requests page hands over after sending requests to the
+  // coder: land on Sandbox with the panel open on the session they went to.
+  // The key remounts the panel, so one that was already open looks the
+  // session up again instead of keeping the "no session yet" it found earlier.
+  const [searchParams, setSearchParams] = useSearchParams()
+  const [coderKey, setCoderKey] = useState(0)
+  const openCoder = active && searchParams.get('coder') === '1' && stage?.slug === slug
+  useEffect(() => {
+    if (!openCoder) return
+    setStage(s => (s && s.sandUrl ? { ...s, env: 'sandbox', url: s.sandUrl } : s))
+    setCoderKey(k => k + 1)
+    setCoderOpen(true)
+    setSearchParams(p => { p.delete('coder'); return p }, { replace: true })
+  }, [openCoder]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     let cancelled = false
@@ -373,6 +389,7 @@ export function AppFrame({ slug, active, onClose }: Props) {
           )}
           {(
             <CoderPanel
+              key={coderKey}
               slug={stage.slug}
               appName={stage.name}
               open={coderOpen}

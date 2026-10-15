@@ -1,6 +1,9 @@
 import { useState, useEffect, useCallback } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { adminApi } from '../adminApi'
 import { ShipNoteModal } from '../components/ShipNoteModal'
+import { coderApi, type CoderAvailability } from '../components/coder/api'
+import { SendToCoderBar, MAX_CODER_BATCH } from '../components/coder/SendToCoderBar'
 
 type Bucket = 'triage' | 'in_progress' | 'shipped' | 'validated'
 
@@ -23,6 +26,8 @@ interface Enhancement {
   branch_name?: string
   pr_url?: string
   ai_plan?: any
+  /** The coder session this request was last sent to. */
+  coder_session_id?: string | null
 }
 
 const BUCKET_LABELS: Record<Bucket, string> = {
@@ -164,6 +169,33 @@ export function AppStudio({ tab: forcedTab }: AppStudioProps = {}) {
 
   useEffect(() => { loadData() }, [loadData])
 
+  // Send to coder: availability per app with open requests, fetched once per
+  // app. It says both whether this user may dispatch there (owner / platform
+  // admin) and whether the coder can run there at all — and if not, why.
+  const [coderAvail, setCoderAvail] = useState<Record<string, CoderAvailability>>({})
+  const [selected, setSelected] = useState<number[]>([])
+  useEffect(() => {
+    const slugs = [...new Set(allEnhancements
+      .filter(e => e.app_slug && e.app_slug !== '_platform' && isOpen(e))
+      .map(e => e.app_slug as string))]
+      .filter(slug => !(slug in coderAvail))
+    for (const slug of slugs) {
+      coderApi.availability(slug)
+        .then(a => setCoderAvail(prev => ({ ...prev, [slug]: a })))
+        .catch(() => { /* no availability, no checkbox: the server refuses anyway */ })
+    }
+  }, [allEnhancements]) // eslint-disable-line react-hooks/exhaustive-deps
+  const selectedApp = selected.length
+    ? allEnhancements.find(e => e.id === selected[0])?.app_slug ?? null
+    : null
+  function toggleSelected(id: number) {
+    setSelected(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id])
+  }
+  function markSent(ids: number[]) {
+    setAllEnhancements(prev => prev.map(e => ids.includes(e.id) ? { ...e, bucket: 'in_progress' } : e))
+    setSelected([])
+  }
+
   function handleSort(key: SortKey) {
     if (sortKey === key) setSortDir(d => d === 'asc' ? 'desc' : 'asc')
     else { setSortKey(key); setSortDir('asc') }
@@ -245,6 +277,9 @@ export function AppStudio({ tab: forcedTab }: AppStudioProps = {}) {
 
   return (
     <div className="container" style={{ maxWidth: 1400 }}>
+      {tab === 'requests' && selectedApp && (
+        <SendToCoderBar slug={selectedApp} ids={selected} onClear={() => setSelected([])} onSent={markSent} />
+      )}
       {tab === 'requests' && (
         <RequestsTab
           enhancements={sortedFiltered}
@@ -262,6 +297,10 @@ export function AppStudio({ tab: forcedTab }: AppStudioProps = {}) {
           onSetBucket={setBucket}
           onDelete={deleteEnhancement}
           total={sortedFiltered.length}
+          coderAvail={coderAvail}
+          selected={selected}
+          selectedApp={selectedApp}
+          onToggleSelected={toggleSelected}
         />
       )}
       {shipping && (
@@ -292,13 +331,57 @@ interface RequestsTabProps {
   onSetBucket: (id: number, bucket: Bucket) => void
   onDelete: (id: number) => void
   total: number
+  coderAvail: Record<string, CoderAvailability>
+  selected: number[]
+  selectedApp: string | null
+  onToggleSelected: (id: number) => void
+}
+
+function isOpen(e: Enhancement): boolean {
+  return !e.bucket || e.bucket === 'triage' || e.bucket === 'in_progress'
+}
+
+/**
+ * The select box for sending a request to the coder. Absent where this user
+ * may not dispatch (not the app's owner or a platform admin) or the request is
+ * closed; muted, with the reason, where the coder can't run for the app, where
+ * the selection is another app's, or where the batch is full.
+ */
+function CoderSelect({ e, avail, selected, selectedApp, count, onToggle }: {
+  e: Enhancement
+  avail?: CoderAvailability
+  selected: boolean
+  selectedApp: string | null
+  count: number
+  onToggle: () => void
+}) {
+  if (!avail?.can_dispatch_requests || !isOpen(e)) return null
+  let why = ''
+  if (!avail.available) why = `The coder isn't available for ${e.app_slug}: ${avail.gaps[0]?.title ?? 'see the app\'s Coder button'}`
+  else if (selectedApp && selectedApp !== e.app_slug) why = `Requests go to the coder one app at a time — clear the ${selectedApp} selection first`
+  else if (!selected && count >= MAX_CODER_BATCH) why = `At most ${MAX_CODER_BATCH} requests go to the coder at once`
+  return (
+    <input
+      type="checkbox"
+      checked={selected}
+      disabled={!!why}
+      onChange={onToggle}
+      title={why || 'Select to send to the coder'}
+      aria-label={`Select request #${e.id} to send to the coder`}
+      style={{ cursor: why ? 'not-allowed' : 'pointer', opacity: why ? 0.4 : 1 }}
+    />
+  )
 }
 
 function RequestsTab({
   enhancements, apps, filterApp, filterBuckets, filterText,
   onFilterApp, onToggleBucket, onFilterText,
   onSort, thArrow, onSetBucket, onDelete, total,
+  coderAvail, selected, selectedApp, onToggleSelected,
 }: RequestsTabProps) {
+  const selectable = Object.values(coderAvail).some(a => a.can_dispatch_requests)
+  const navigate = useNavigate()
+  const navigateToCoder = (slug: string) => navigate(`/launch/${encodeURIComponent(slug)}?coder=1`)
   return (
     <>
       <div className="filter-row" style={{ flexWrap: 'wrap', alignItems: 'center', gap: 10 }}>
@@ -341,6 +424,7 @@ function RequestsTab({
       <div className="req-table-wrap">
         <table className="req-table">
           <colgroup>
+            {selectable && <col style={{ width: 34 }} />}
             <col style={{ width: 70 }} />
             <col style={{ width: 130 }} />
             <col style={{ width: 190 }} />
@@ -352,6 +436,7 @@ function RequestsTab({
           </colgroup>
           <thead>
             <tr>
+              {selectable && <th title="Select requests of one app to send to the coder" />}
               <th style={{ cursor: 'pointer' }} onClick={() => onSort('id')}>#{ thArrow('id')}</th>
               <th style={{ cursor: 'pointer' }} onClick={() => onSort('app_slug')}>App{thArrow('app_slug')}</th>
               <th style={{ cursor: 'pointer' }} onClick={() => onSort('user_name')}>User{thArrow('user_name')}</th>
@@ -365,6 +450,18 @@ function RequestsTab({
           <tbody>
             {enhancements.map(e => (
               <tr key={e.id}>
+                {selectable && (
+                  <td>
+                    <CoderSelect
+                      e={e}
+                      avail={e.app_slug ? coderAvail[e.app_slug] : undefined}
+                      selected={selected.includes(e.id)}
+                      selectedApp={selectedApp}
+                      count={selected.length}
+                      onToggle={() => onToggleSelected(e.id)}
+                    />
+                  </td>
+                )}
                 <td style={{ fontFamily: 'monospace', fontSize: '.78rem', color: 'var(--dim)' }}>
                   #{String(e.id).padStart(4, '0')}
                 </td>
@@ -380,6 +477,12 @@ function RequestsTab({
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                     <BucketBadge bucket={e.bucket} />
                     <BucketAction bucket={e.bucket} onChange={b => onSetBucket(e.id, b)} />
+                    {e.coder_session_id && e.app_slug && isOpen(e) && (
+                      <a href={`/launch/${encodeURIComponent(e.app_slug)}?coder=1`}
+                         onClick={ev => { ev.preventDefault(); navigateToCoder(e.app_slug as string) }}
+                         style={{ fontSize: '.72rem', color: 'var(--accent)', whiteSpace: 'nowrap' }}
+                         title="Sent to the coder — open the app's coder session">In coder ↗</a>
+                    )}
                   </div>
                 </td>
                 <td style={{ fontSize: '.78rem' }}>
@@ -405,7 +508,7 @@ function RequestsTab({
             ))}
             {enhancements.length === 0 && (
               <tr>
-                <td colSpan={8} style={{ color: 'var(--dim)', textAlign: 'center', padding: 24 }}>No requests found</td>
+                <td colSpan={selectable ? 9 : 8} style={{ color: 'var(--dim)', textAlign: 'center', padding: 24 }}>No requests found</td>
               </tr>
             )}
           </tbody>

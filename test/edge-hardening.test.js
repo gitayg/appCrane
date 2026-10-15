@@ -251,11 +251,17 @@ test('outside the embed policy, only the bypass blocks differ from v2.43.1', () 
   }
   // The log block is additive, so it shows up as a new key rather than a diff.
   // v2.106.0 adds the two Crew A2A platform routes, named so that no legacy
-  // app prefix (`a`, `a2`) can capture /a2a (services/caddy.js).
+  // app prefix (`a`, `a2`) can capture /a2a (services/caddy.js). git smart-HTTP
+  // adds /git/* for the same reason: a legacy `g`/`gi`/`git` app would otherwise
+  // receive every clone's API key. Like the catch-all it proxies to AppCrane and
+  // inherits the site-level headers; it gets no handle-level difference.
   assert.deepEqual(
     [...craneNow.keys()].filter(k => !craneWas.has(k)).sort(),
-    ['handle /.well-known/agent-card.json', 'handle /a2a*', 'log'],
-    'the crane site gained a block other than the redacting access log and the A2A routes');
+    ['handle /.well-known/agent-card.json', 'handle /a2a*', 'handle /git/*', 'log'],
+    'the crane site gained a block other than the redacting access log, the A2A routes and git');
+  const body = (k) => craneNow.get(k).split('\n').slice(1).join('\n');
+  assert.equal(body('handle /git/*'), body('handle /a2a*'),
+    '/git/* must be proxied exactly like the other platform routes');
   assert.deepEqual([...craneWas.keys()].filter(k => !craneNow.has(k)), []);
 });
 

@@ -616,6 +616,11 @@ export function generateCaddyfile() {
   caddyfile += `    handle /a2a* {\n`;
   caddyfile += `        reverse_proxy 127.0.0.1:${cranePort}\n`;
   caddyfile += `    }\n\n`;
+  // git clone/fetch (routes/gitHttp.js), named for the same reason: an app
+  // left over as `g`, `gi` or `git` would otherwise receive every clone's API key.
+  caddyfile += `    handle /git/* {\n`;
+  caddyfile += `        reverse_proxy 127.0.0.1:${cranePort}\n`;
+  caddyfile += `    }\n\n`;
   caddyfile += `    handle /.well-known/agent-card.json {\n`;
   caddyfile += `        reverse_proxy 127.0.0.1:${cranePort}\n`;
   caddyfile += `    }\n\n`;

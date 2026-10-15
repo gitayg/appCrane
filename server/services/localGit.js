@@ -165,6 +165,11 @@ function gitArgs(gitDir, args) {
   return gitDir ? [...base, `--git-dir=${gitDir}`, ...args] : [...base, ...args];
 }
 
+export function hardenedGitInvocation(args) {
+  ensureGitVersion();
+  return { args: gitArgs(null, args), env: gitEnv() };
+}
+
 let versionChecked = false;
 export function parseGitVersion(out) {
   const m = /git version (\d+)\.(\d+)/.exec(String(out));
