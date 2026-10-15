@@ -369,7 +369,7 @@ export function AppFrame({ slug, active, onClose }: Props) {
             />
           )}
           {active && requestCtx && (
-            <RequestModal slug={stage.slug} appName={stage.name} peekCtx={requestCtx} onClose={() => setRequestCtx(null)} />
+            <RequestModal slug={stage.slug} appName={stage.name} peekCtx={requestCtx} onClose={() => setRequestCtx(null)} iframeRef={iframeRef} />
           )}
           {(
             <CoderPanel

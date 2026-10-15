@@ -9,6 +9,8 @@ interface Props {
   peekCtx: PeekCtx
   /** Close + drop the picked ctx. */
   onClose: () => void
+  /** The app iframe — focus it grabs on its own is handed back to the textarea. */
+  iframeRef?: React.RefObject<HTMLIFrameElement | null>
 }
 
 const MODAL_W = 380
@@ -55,13 +57,58 @@ function initialPosition(rect: PeekCtx['rect']): { left: number; top: number } {
  *   5. Modal mounts at a position that doesn't cover the pick.
  *   6. User types, hits Enter or Submit → POST /api/enhancements → close.
  */
-export function RequestModal({ slug, appName, peekCtx, onClose }: Props) {
+export function RequestModal({ slug, appName, peekCtx, onClose, iframeRef }: Props) {
   const [text, setText] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const [pos, setPos] = useState(() => initialPosition(peekCtx.rect))
   const dragRef = useRef<{ startX: number; startY: number; left: number; top: number } | null>(null)
+
+  // The app can still pull focus into its iframe after the pick (a menu
+  // opened by hover, a focus trap, a refocus timer) and then nothing typed
+  // here lands. Hand it back unless the user's own last press was in the app,
+  // and until then hide the focus loss from the app so a trap that refocuses
+  // on blur/focusout doesn't take it straight back.
+  const taRef = useRef<HTMLTextAreaElement>(null)
+  const userInAppRef = useRef(false)
+  useEffect(() => {
+    const iframe = iframeRef?.current
+    if (!iframe) return
+    let appWin: Window | null = null
+    const onAppPress = () => { userInAppRef.current = true }
+    const onHostPress = () => { userInAppRef.current = false }
+    const onAppFocusLoss = (e: FocusEvent) => {
+      if (!userInAppRef.current && !e.relatedTarget) e.stopImmediatePropagation()
+    }
+    const attach = () => {
+      try {
+        appWin = iframe.contentWindow
+        appWin?.addEventListener('pointerdown', onAppPress, true)
+        appWin?.addEventListener('focusout', onAppFocusLoss, true)
+        appWin?.addEventListener('blur', onAppFocusLoss, true)
+      } catch { appWin = null }
+    }
+    attach()
+    iframe.addEventListener('load', attach)
+    window.addEventListener('pointerdown', onHostPress, true)
+    return () => {
+      iframe.removeEventListener('load', attach)
+      window.removeEventListener('pointerdown', onHostPress, true)
+      try {
+        appWin?.removeEventListener('pointerdown', onAppPress, true)
+        appWin?.removeEventListener('focusout', onAppFocusLoss, true)
+        appWin?.removeEventListener('blur', onAppFocusLoss, true)
+      } catch { /* navigated away */ }
+    }
+  }, [iframeRef])
+  function onTextareaBlur() {
+    // A microtask, not a timer: it runs before the next keystroke is handled.
+    queueMicrotask(() => {
+      const iframe = iframeRef?.current
+      if (iframe && document.activeElement === iframe && !userInAppRef.current) taRef.current?.focus()
+    })
+  }
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) { if (e.key === 'Escape' && !busy) onClose() }
@@ -133,9 +180,11 @@ export function RequestModal({ slug, appName, peekCtx, onClose }: Props) {
         {error && <div className="request-modal-error" style={{ marginBottom: 8 }}>⚠️ {error}</div>}
         <div className="ask-input-row">
           <textarea
+            ref={taRef}
             className="ask-textarea"
             value={text}
             onChange={e => setText(e.target.value)}
+            onBlur={onTextareaBlur}
             onKeyDown={e => {
               if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); onSubmit() }
             }}

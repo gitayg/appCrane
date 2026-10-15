@@ -2715,6 +2715,7 @@ function FrameOverlay({ frame, framePanel, setFrame, setFramePanel }: FrameOverl
           appName={frame.appName ?? frame.title ?? ''}
           peekCtx={requestCtx}
           onClose={() => setRequestCtx(null)}
+          iframeRef={iframeRef}
         />
       )}
       {whatsNew && frame.slug && (
