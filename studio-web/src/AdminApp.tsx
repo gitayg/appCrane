@@ -14,6 +14,7 @@ import { Settings } from './pages/Settings'
 import { Docs } from './pages/Docs'
 import { AppManager } from './pages/AppManager'
 import { MyRequests } from './pages/MyRequests'
+import { RequestDetail } from './pages/RequestDetail'
 import { Crew } from './pages/Crew'
 import { PlatformRequestBar } from './components/PlatformRequestBar'
 import { AppTabsProvider } from './components/AppTabsContext'
@@ -247,6 +248,7 @@ export function AdminApp() {
           {/* v2.16.0: one role-scoped Requests page (admin=all, owner=their
               apps, user=own). Old /my-requests link folds back into it. */}
           <Route path="/requests"    element={<RequestsRoute />} />
+          <Route path="/requests/:id" element={<Layout><RequestDetail /></Layout>} />
           <Route path="/my-requests" element={<Navigate to="/requests" replace />} />
           <Route path="/builders"    element={<Navigate to="/requests" replace />} />
           <Route path="/appstudio"   element={<Navigate to="/requests" replace />} />

@@ -58,8 +58,12 @@ function toolSummary(name: string, input: unknown): string {
  * each time the stream blipped. Re-reading also recovers the user turns, which
  * the replay (system rows only) does not carry.
  */
-export function useCoderSession(slug: string, open: boolean) {
+export function useCoderSession(slug: string, open: boolean, pinnedSessionId?: string | null) {
   const [sessionId, setSessionId] = useState<string | null>(null)
+  // A specific session asked for by the caller (a request's "In coder" link),
+  // instead of the app's latest one. unpin() drops back to the latest.
+  const [pinned,    setPinned]    = useState<string | null>(pinnedSessionId ?? null)
+  const [pinError,  setPinError]  = useState<'gone' | 'forbidden' | null>(null)
   const [session,   setSession]   = useState<CoderSession | null>(null)
   const [phase,     setPhase]     = useState<'loading' | 'absent' | 'ready' | 'failed'>('loading')
   const [history,   setHistory]   = useState<Entry[]>([])
@@ -113,6 +117,31 @@ export function useCoderSession(slug: string, open: boolean) {
     let cancelled = false
     setPhase('loading')
     setError(null)
+    setPinError(null)
+    if (pinned) {
+      // The pinned session is shown whatever its state — ended, or another
+      // user's — so the panel can say so rather than open a different one.
+      coderApi.session(slug, pinned)
+        .then(r => {
+          if (cancelled) return
+          setSession(r.session)
+          setSessionId(r.session.id)
+          setStatus(r.session.status)
+          setCostCents(r.session.cost_usd_cents || 0)
+          setPhase('ready')
+        })
+        .catch(e => {
+          if (cancelled) return
+          const st = e instanceof ApiError ? e.status : 0
+          if (st === 404 || st === 403) {
+            setSessionId(null)
+            setSession(null)
+            setPinError(st === 404 ? 'gone' : 'forbidden')
+            setPhase('absent')
+          } else { setError(e as Error); setPhase('failed') }
+        })
+      return () => { cancelled = true }
+    }
     coderApi.latestSession(slug)
       .then(r => {
         if (cancelled) return
@@ -130,7 +159,17 @@ export function useCoderSession(slug: string, open: boolean) {
       })
       .catch(e => { if (!cancelled) { setError(e as Error); setPhase('failed') } })
     return () => { cancelled = true }
-  }, [slug, open])
+  }, [slug, open, pinned])
+
+  // Null first, so the stream reconnects even when the latest session turns
+  // out to be the pinned one.
+  const unpin = useCallback(() => {
+    setSessionId(null)
+    setSession(null)
+    setHistory([])
+    setLive([])
+    setPinned(null)
+  }, [])
 
   // ── stream ────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -408,6 +447,7 @@ export function useCoderSession(slug: string, open: boolean) {
     deploys,
     followups, cancelFollowup,
     start, send, stop, resume,
+    pinned, pinError, unpin,
   }
 }
 

@@ -233,7 +233,7 @@
     },
     {
       "name": "appcrane_rename_app",
-      "requiredRole": "platform_admin",
+      "requiredRole": "app_admin",
       "readOnly": false
     },
     {

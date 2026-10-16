@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { adminApi } from '../../adminApi'
 import { type PeekCtx, peekToPromptPrefix } from '../../hooks/usePeek'
+import { useKeepFocusFromIframe } from '../../hooks/useKeepFocusFromIframe'
 
 interface Props {
   slug:    string | null | undefined
@@ -65,50 +66,10 @@ export function RequestModal({ slug, appName, peekCtx, onClose, iframeRef }: Pro
   const [pos, setPos] = useState(() => initialPosition(peekCtx.rect))
   const dragRef = useRef<{ startX: number; startY: number; left: number; top: number } | null>(null)
 
-  // The app can still pull focus into its iframe after the pick (a menu
-  // opened by hover, a focus trap, a refocus timer) and then nothing typed
-  // here lands. Hand it back unless the user's own last press was in the app,
-  // and until then hide the focus loss from the app so a trap that refocuses
-  // on blur/focusout doesn't take it straight back.
+  // The app can still pull focus into its iframe after the pick; the hook
+  // hands it back to the textarea (see useKeepFocusFromIframe).
   const taRef = useRef<HTMLTextAreaElement>(null)
-  const userInAppRef = useRef(false)
-  useEffect(() => {
-    const iframe = iframeRef?.current
-    if (!iframe) return
-    let appWin: Window | null = null
-    const onAppPress = () => { userInAppRef.current = true }
-    const onHostPress = () => { userInAppRef.current = false }
-    const onAppFocusLoss = (e: FocusEvent) => {
-      if (!userInAppRef.current && !e.relatedTarget) e.stopImmediatePropagation()
-    }
-    const attach = () => {
-      try {
-        appWin = iframe.contentWindow
-        appWin?.addEventListener('pointerdown', onAppPress, true)
-        appWin?.addEventListener('focusout', onAppFocusLoss, true)
-        appWin?.addEventListener('blur', onAppFocusLoss, true)
-      } catch { appWin = null }
-    }
-    attach()
-    iframe.addEventListener('load', attach)
-    window.addEventListener('pointerdown', onHostPress, true)
-    return () => {
-      iframe.removeEventListener('load', attach)
-      window.removeEventListener('pointerdown', onHostPress, true)
-      try {
-        appWin?.removeEventListener('pointerdown', onAppPress, true)
-        appWin?.removeEventListener('focusout', onAppFocusLoss, true)
-        appWin?.removeEventListener('blur', onAppFocusLoss, true)
-      } catch { /* navigated away */ }
-    }
-  }, [iframeRef])
-  function onTextareaBlur() {
-    // A microtask, not a timer: it runs before the next keystroke is handled.
-    queueMicrotask(() => {
-      const iframe = iframeRef?.current
-      if (iframe && document.activeElement === iframe && !userInAppRef.current) taRef.current?.focus()
-    })
-  }
+  const { onBlur: onTextareaBlur } = useKeepFocusFromIframe(iframeRef, taRef)
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) { if (e.key === 'Escape' && !busy) onClose() }

@@ -39,7 +39,7 @@ export function dashboardBaseUrl() {
 }
 
 export function requestUrl(requestId) {
-  return `${dashboardBaseUrl()}/requests?request=${Number(requestId)}`;
+  return `${dashboardBaseUrl()}/requests/${Number(requestId)}`;
 }
 
 export function vulnRequestTitle(f, advisoryId) {

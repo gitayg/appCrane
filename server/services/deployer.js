@@ -2379,6 +2379,18 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       await notifyDeploy(app, env, manifest.version || 'unknown', 'success');
     } catch (e) {}
 
+    // A new production version mails the app's owners and admins its What's
+    // New (services/appWhatsNewMail.js). Queued only; never fails the deploy.
+    if (env === 'production') {
+      try {
+        const { queueAppUpgradeMail } = await import('./appWhatsNewMail.js');
+        const r = queueAppUpgradeMail({ db, app, deployId });
+        if (r.status === 'sent') appendLog(`What's new e-mail queued for ${r.sent} owner(s) and admin(s)`);
+      } catch (e) {
+        log.warn(`[app-whats-new] ${app.slug}: ${e.message}`);
+      }
+    }
+
     // 11. Dependency CVE scan (v2.52.0). REPORT-ONLY, and deliberately the
     // last thing that happens: the container is live, the symlink is flipped,
     // the deployment row already says 'live' and the success notification has

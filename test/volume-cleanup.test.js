@@ -64,6 +64,6 @@ test('renaming an app removes the volumes named after the old slug', async () =>
   const app = db.prepare("SELECT * FROM apps WHERE slug = 'vold'").get();
   mkdirSync(join(process.env.DATA_DIR, 'apps', 'vold'), { recursive: true });
   writeFileSync(LOG, '');
-  await renameApp({ app, newSlug: 'vnew', redirect: false, userId });
+  await renameApp({ app, newSlug: 'vnew', redirect: false, user: { id: userId, role: 'platform_admin' } });
   assert.deepEqual(volumeRms().sort(), ['appcrane-vols-vold-production', 'appcrane-vols-vold-sandbox']);
 });

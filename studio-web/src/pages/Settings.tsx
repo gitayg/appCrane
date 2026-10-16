@@ -966,11 +966,17 @@ function MailTab() {
   const [secret, setSecret] = useState('')
   const [saved, flashSaved] = useFlash()
   const [test, setTest] = useState<{ ok: boolean; msg: string } | null>(null)
+  const [whatsNew, setWhatsNew] = useState(true)
+  const [whatsNewSaved, flashWhatsNewSaved] = useFlash()
 
   function load() {
     adminApi.get<{ mail: typeof cfg }>('/api/settings/mail/config').then(r => { if (r?.mail) setCfg(r.mail) }).catch(() => {})
   }
   useEffect(load, [])
+  useEffect(() => {
+    adminApi.get<{ value?: string | null }>('/api/settings/whats_new_email_enabled')
+      .then(r => setWhatsNew(r?.value !== '0')).catch(() => {})
+  }, [])
 
   async function save() {
     const body: Record<string, string> = {
@@ -1027,6 +1033,25 @@ function MailTab() {
         </span>
       </div>
       {test && <p style={{ color: test.ok ? 'var(--green)' : 'var(--red)', marginTop: 8 }}>{test.msg}</p>}
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 20 }}>
+        <input
+          type="checkbox"
+          id="whats-new-email"
+          checked={whatsNew}
+          onChange={async e => {
+            const next = e.target.checked
+            setWhatsNew(next)
+            await adminApi.put('/api/settings/whats_new_email_enabled', { value: next ? '1' : '0' }).catch(() => {})
+            flashWhatsNewSaved()
+          }}
+        />
+        <label htmlFor="whats-new-email" style={{ fontSize: '.85rem' }}>E-mail app owners and platform admins what's new after each AppCrane upgrade</label>
+        {whatsNewSaved && <span style={{ color: 'var(--green)' }}>Saved</span>}
+      </div>
+      <p style={{ fontSize: '.75rem', color: 'var(--dim)', margin: '6px 0 0 24px' }}>
+        When an app ships a new production version, its owners and admins get that version's What's new by e-mail. Each app can turn this off on its app page.
+      </p>
     </div>
   )
 }

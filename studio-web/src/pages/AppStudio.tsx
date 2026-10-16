@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { adminApi } from '../adminApi'
 import { ShipNoteModal } from '../components/ShipNoteModal'
 import { coderApi, type CoderAvailability } from '../components/coder/api'
-import { SendToCoderBar, MAX_CODER_BATCH } from '../components/coder/SendToCoderBar'
+import { SendToCoderBar, MAX_CODER_BATCH, coderSessionHref } from '../components/coder/SendToCoderBar'
 
 type Bucket = 'triage' | 'in_progress' | 'shipped' | 'validated'
 
@@ -381,7 +381,7 @@ function RequestsTab({
 }: RequestsTabProps) {
   const selectable = Object.values(coderAvail).some(a => a.can_dispatch_requests)
   const navigate = useNavigate()
-  const navigateToCoder = (slug: string) => navigate(`/launch/${encodeURIComponent(slug)}?coder=1`)
+
   return (
     <>
       <div className="filter-row" style={{ flexWrap: 'wrap', alignItems: 'center', gap: 10 }}>
@@ -472,16 +472,21 @@ function RequestsTab({
                 </td>
                 <td style={{ fontSize: '.82rem', color: 'var(--dim)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={e.user_name ?? undefined}>{e.user_name ?? '—'}</td>
                 <td style={{ fontSize: '.78rem', color: 'var(--dim)', whiteSpace: 'nowrap' }}>{fmtDate(e.created_at)}</td>
-                <td style={{ fontSize: '.82rem', wordBreak: 'break-word' }}>{e.message}</td>
+                <td style={{ fontSize: '.82rem', wordBreak: 'break-word' }}>
+                  <a href={`/requests/${e.id}`}
+                     onClick={ev => { ev.preventDefault(); navigate(`/requests/${e.id}`) }}
+                     style={{ color: 'inherit', textDecoration: 'none' }}
+                     title="Open this request">{e.message}</a>
+                </td>
                 <td>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                     <BucketBadge bucket={e.bucket} />
                     <BucketAction bucket={e.bucket} onChange={b => onSetBucket(e.id, b)} />
                     {e.coder_session_id && e.app_slug && isOpen(e) && (
-                      <a href={`/launch/${encodeURIComponent(e.app_slug)}?coder=1`}
-                         onClick={ev => { ev.preventDefault(); navigateToCoder(e.app_slug as string) }}
+                      <a href={coderSessionHref(e.app_slug, e.coder_session_id)}
+                         onClick={ev => { ev.preventDefault(); navigate(coderSessionHref(e.app_slug as string, e.coder_session_id as string)) }}
                          style={{ fontSize: '.72rem', color: 'var(--accent)', whiteSpace: 'nowrap' }}
-                         title="Sent to the coder — open the app's coder session">In coder ↗</a>
+                         title="Sent to the coder — open the session it went to">In coder ↗</a>
                     )}
                   </div>
                 </td>

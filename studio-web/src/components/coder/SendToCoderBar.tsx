@@ -20,6 +20,11 @@ interface Props {
  * app opens on Sandbox with the coder panel showing that session, which is
  * where the work is watched, reviewed and released.
  */
+/** The app's Sandbox with the coder panel open on one session. */
+export function coderSessionHref(slug: string, sessionId: string) {
+  return `/launch/${encodeURIComponent(slug)}?coder=1&session=${encodeURIComponent(sessionId)}`
+}
+
 export function SendToCoderBar({ slug, ids, onClear, onSent }: Props) {
   const navigate = useNavigate()
   const [busy, setBusy] = useState(false)
@@ -29,9 +34,9 @@ export function SendToCoderBar({ slug, ids, onClear, onSent }: Props) {
     setBusy(true)
     setError(null)
     try {
-      await coderApi.dispatchRequests(slug, ids)
+      const r = await coderApi.dispatchRequests(slug, ids)
       onSent(ids)
-      navigate(`/launch/${encodeURIComponent(slug)}?coder=1`)
+      navigate(coderSessionHref(slug, r.session_id))
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {

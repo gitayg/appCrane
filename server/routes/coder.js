@@ -117,6 +117,7 @@ function getApp(slug, user) {
  * `fix` is written for the person reading it, not for the code that raised it.
  */
 export function coderGaps(app, user) {
+  if (!isAppOwnerOrPlatformAdmin(user, app)) return [OWNER_ONLY_GAP];
   const gaps = [];
   const source = String(app.source_type || '');
 
@@ -196,6 +197,15 @@ export function coderGaps(app, user) {
   return gaps;
 }
 
+const OWNER_ONLY_MESSAGE = 'Only the app owner or a platform admin can use the coder';
+
+const OWNER_ONLY_GAP = {
+  code: 'NOT_APP_OWNER',
+  title: OWNER_ONLY_MESSAGE,
+  detail: 'The coder edits this app\'s code and reads every conversation held about it, so it is reserved for the app\'s owner and platform admins.',
+  fix: 'Ask the app owner to make the change, or send it as a request.',
+};
+
 /** Whether `user` may release on `app` — the predicate requireAppAdmin enforces. */
 function canReleaseOn(app, user) {
   if (user.role === 'platform_admin') return true;
@@ -268,12 +278,25 @@ router.get('/models', (req, res) => {
 router.get('/:slug/availability', (req, res) => {
   const app = getApp(req.params.slug, req.user);
   const gaps = coderGaps(app, req.user);
+  const coderUser = isAppOwnerOrPlatformAdmin(req.user, app);
   res.json({
     available: gaps.length === 0,
-    can_release: canReleaseOn(app, req.user),
-    can_dispatch_requests: isAppOwnerOrPlatformAdmin(req.user, app),
+    can_release: coderUser && canReleaseOn(app, req.user),
+    can_dispatch_requests: coderUser,
     gaps,
   });
+});
+
+// Every route registered below this line is the app owner's or a platform
+// admin's alone: sessions, transcripts, the stream, changes, release, the
+// container. One gate, ahead of all of them, so a new route cannot forget it.
+// App admins, members and outsiders all get the same 403 — the refusal every
+// other coder access check already answers with.
+router.use('/:slug', (req, res, next) => {
+  const app = getDb().prepare('SELECT * FROM apps WHERE slug = ?').get(req.params.slug);
+  if (!app) return next(new AppError(`App '${req.params.slug}' not found`, 404, 'NOT_FOUND'));
+  if (!isAppOwnerOrPlatformAdmin(req.user, app)) return next(new AppError(OWNER_ONLY_MESSAGE, 403, 'FORBIDDEN'));
+  next();
 });
 
 // ── POST /api/coder/:slug/session — start a new session ─────────────────
@@ -530,7 +553,7 @@ router.delete('/:slug/session/:id/followups/:followupId', (req, res) => {
 router.post('/:slug/session/:id/stop', (req, res) => {
   const app = getApp(req.params.slug, req.user);
   const session = getSession(req.params.id, req.params.slug);
-  // Stopping spends nothing, so an app admin may stop a colleague's runaway turn.
+  // Stopping spends nothing, so the app owner and a platform admin may stop each other's runaway turn.
   if (session.user_id !== req.user.id && !canReleaseOn(app, req.user)) assertSessionOwner(session, req.user);
   stopDispatch(req.params.id);
   res.json({ message: 'Stopped' });

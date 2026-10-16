@@ -385,6 +385,52 @@ router.post('/:id/delete', (req, res) => {
   res.json({ message: 'Deleted' });
 });
 
+/**
+ * Whether `user` may see one request: the union of what the list routes show
+ * them. A platform admin sees every request (GET /); the requester sees their
+ * own (/my); anyone else needs request.view_app on the request's app through a
+ * role row or an assignment (/owned).
+ */
+function canViewRequest(db, user, row) {
+  if (user.role === 'platform_admin') return true;
+  if (row.user_id && row.user_id === user.id) return true;
+  if (!row.app_slug) return false;
+  const app = db.prepare('SELECT id, slug FROM apps WHERE slug = ?').get(row.app_slug);
+  if (!app) return false;
+  const related = db.prepare('SELECT 1 FROM app_user_roles WHERE app_id = ? AND user_id = ?').get(app.id, user.id)
+               || db.prepare('SELECT 1 FROM app_users WHERE app_id = ? AND user_id = ?').get(app.id, user.id);
+  return !!related && userHasAppPermission({ id: user.id, role: user.role }, app, 'request.view_app');
+}
+
+/**
+ * GET /api/enhancements/:id
+ * One request, for its own page. An unknown id and one the caller may not see
+ * answer the same 404, so the route does not confirm which ids exist.
+ */
+router.get('/:id', requireAuth, (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) throw new AppError('Request not found', 404, 'NOT_FOUND');
+  const db = getDb();
+  const row = db.prepare(`
+    SELECT er.id, er.app_slug, er.user_id, er.user_name, er.message, er.created_at, er.status,
+           er.validated_at, er.done_note, er.fix_version, er.branch_name, er.pr_url,
+           er.coder_session_id, er.vuln_key, a.name AS app_name
+    FROM enhancement_requests er
+    LEFT JOIN apps a ON a.slug = er.app_slug
+    WHERE er.id = ?
+  `).get(id);
+  if (!row || !canViewRequest(db, req.user, row)) throw new AppError('Request not found', 404, 'NOT_FOUND');
+  const { user_id: _uid, vuln_key: vulnKey, ...rest } = row;
+  res.json({
+    request: {
+      ...rest,
+      bucket: bucketize(row.status, row.validated_at),
+      // Opened by the dependency scan: its message is the advisory.
+      dependency_scan: !!vulnKey,
+    },
+  });
+});
+
 // ── Comments thread (bugs / notes / reviews) ───────────────────────────
 //
 // Authenticates with the same Bearer-or-API-key pattern as the rest of

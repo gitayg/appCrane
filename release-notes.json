@@ -1,0 +1,93 @@
+{
+  "2.110.0": [
+    "Environment variables open masked. Reveal one key at a time, copy it once revealed, or replace a value without seeing the old one.",
+    "Every request has its own page, and \"In coder\" opens the coder session the request was actually sent to.",
+    "New e-mails in AppCrane's colours: app owners and platform admins hear what's new after each AppCrane upgrade, and an app's owners and admins hear what's new when that app ships a new version (each app can turn this off).",
+    "App owners can rename their app's address, and the old address keeps redirecting. The coder is now limited to the app's owner and platform admins."
+  ],
+  "2.109.1": [
+    "Request text sent to the coder is treated as a description of the work, never as instructions, so a request cannot change the coder's rules."
+  ],
+  "2.109.0": [
+    "Pick several of an app's open requests and send them to the coder in one session. It works through them in your order and reports on each one.",
+    "Clone or pull a Crane-hosted app's code with git over HTTPS, signing in with your AppCrane API key. The clone address is in the app's row on Applications."
+  ],
+  "2.108.0": [
+    "Each vulnerable dependency an app uses becomes one request in that app's queue, and the request closes itself once the fix is deployed.",
+    "The daily vulnerability e-mail links every advisory to its request."
+  ],
+  "2.107.7": [
+    "The Request box takes your typing when the element you picked is a menu or a drawer."
+  ],
+  "2.107.6": [
+    "The coder can save its work again on servers where AppCrane does not run as root."
+  ],
+  "2.107.5": [
+    "Only the app owner or a platform admin can reveal a production secret value. App admins and members still manage keys and see them masked."
+  ],
+  "2.107.4": [
+    "Folders an app keeps between deploys are prepared more safely, so an app cannot use them to reach other files on the server. Your data stays where it was."
+  ],
+  "2.107.3": [
+    "Security fixes: an app's code can no longer point AppCrane at files elsewhere on the server.",
+    "Changing an app's start command or restarting production now needs the matching permission, not just app membership.",
+    "App admins can no longer give out or take away the owner role."
+  ],
+  "2.107.2": [
+    "AppCrane updates install again on servers without developer build tools.",
+    "Crew and the dashboard fit a phone screen and read well in the light theme."
+  ],
+  "2.107.1": [
+    "Restoring an app's MariaDB database also signs out its open database sessions, and the deploy log explains what happened with the sandbox database link."
+  ],
+  "2.107.0": [
+    "Crew asks you before your agent takes on certain work, and standing rules (for example, \"this agent may run migrations on sandbox\") let it go ahead without asking every time. Production and deletions always ask.",
+    "Apps on managed Postgres can turn on query statistics for their own database.",
+    "A database login that can read and write data but not change the tables, for each environment.",
+    "Production can reach its sandbox database to copy masked data down, never the other way round."
+  ],
+  "2.106.1": [
+    "Crew keeps a held task held until you approve it, and blocking or refusing an agent ends all of its open tasks."
+  ],
+  "2.106.0": [
+    "Crew talks to hosted agents over the open A2A standard, and each hosted agent gets its own token you can rotate or revoke.",
+    "A new Map in Crew shows which agents work with each other.",
+    "Three Crew security gaps are closed."
+  ],
+  "2.105.0": [
+    "New: Crew, a page where agents register, find each other and hand off work. A new contact between two people's agents waits for its owner's approval."
+  ],
+  "2.104.1": [
+    "Times in the dashboard are right in every timezone. A deploy made a moment ago no longer shows as hours ago.",
+    "Releasing the coder's changes is safer: AppCrane no longer reads the agent's files directly on the server.",
+    "With MariaDB encryption on, every app table is encrypted and the database's own log stays small."
+  ],
+  "2.104.0": [
+    "The coder is safer: AppCrane no longer runs its own tools inside files the agent can change.",
+    "Each app's Redis accepts only that app's own certificate.",
+    "Failed-login alerts for managed databases cannot be flooded or used to hide a real attack."
+  ],
+  "2.103.1": [
+    "A deployment that got stuck no longer blocks AppCrane updates, and the dashboard shows what an update is waiting for."
+  ],
+  "2.103.0": [
+    "Platform admins can turn on encryption at rest for managed MariaDB data.",
+    "The nightly backup now includes every app's managed databases.",
+    "Feedback sent from inside an app reaches that app's request queue again."
+  ],
+  "2.102.0": [
+    "Managed databases are backed up, and an app's owner can restore them.",
+    "Deploying a ready-made image is safer: AppCrane no longer starts the image just to inspect it."
+  ],
+  "2.101.0": [
+    "Managed databases use encrypted connections, and a custom app connects with its own certificate, so another app cannot sign in to yours even with the password.",
+    "Per-app connection limits, and platform admins are alerted to repeated failed database logins."
+  ],
+  "2.100.1": [
+    "Sandbox never receives production's database credentials: a database declared in deployhub.json is always separate for each environment."
+  ],
+  "2.100.0": [
+    "Custom apps can ask for a managed database (Postgres, MariaDB, MongoDB or Redis) in deployhub.json, and the connection details are given to the app when it deploys.",
+    "Sandbox can have its own database, separate from production."
+  ]
+}

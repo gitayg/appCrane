@@ -1195,6 +1195,8 @@ app.get('/enhancements-page', (req, res) => sendHtml(res, adminSpa));
 // AppStudio collapsed in v1.27.38: Requests + Builders are top-level
 // SPA routes; the React router redirects /appstudio → /requests.
 app.get('/requests', (req, res) => sendHtml(res, adminSpa));
+// One request's own page; the dependency digest links here.
+app.get('/requests/*splat', (req, res) => sendHtml(res, adminSpa));
 // v2.16.0: personal "My Requests" view (any signed-in user, see + delete own).
 app.get('/my-requests', (req, res) => sendHtml(res, adminSpa));
 app.get('/builders', (req, res) => sendHtml(res, adminSpa)); // legacy — SPA redirects to /requests
@@ -1679,6 +1681,15 @@ app.listen(PORT, HOST, async () => {
     startVulnScheduler();
   } catch (e) {
     log.error('Vulnerability scan scheduler failed to start: ' + e.message);
+  }
+
+  // After an upgrade, mail app owners and platform admins what changed, once
+  // per release (services/whatsNewMail.js). Runs off the startup path.
+  try {
+    const { scheduleWhatsNewMail } = await import('./services/whatsNewMail.js');
+    scheduleWhatsNewMail();
+  } catch (e) {
+    log.error('What\'s New mail failed to schedule: ' + e.message);
   }
 
   // Failed-login alerts for the managed databases: reads the shared servers'

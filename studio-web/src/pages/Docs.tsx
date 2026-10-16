@@ -82,6 +82,7 @@ const REST_FAMILIES: { name: string; rows: [string, string, string][] }[] = [
   ] },
   { name: "Environment variables", rows: [
     ["GET", "/api/apps/:slug/env/:env", "List vars (?reveal=true to decrypt)"],
+    ["POST", "/api/apps/:slug/env/:env/:key/reveal", "Decrypt one var (audited, owners notified)"],
     ["PUT", "/api/apps/:slug/env/:env", "Upsert vars { vars: { KEY: value } }"],
     ["DELETE", "/api/apps/:slug/env/:env/:key", "Delete one var"],
   ] },

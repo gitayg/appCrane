@@ -28,11 +28,12 @@ import { DEFAULT_IMAGE_RETENTION } from './imageRetention.js';
 import { mkdirSync, existsSync, readFileSync, writeFileSync } from 'fs';
 import { join, resolve, dirname } from 'path';
 import crypto from 'crypto';
-import { slugRefusal } from '../utils/slugPolicy.js';
+import { slugRefusal, slugTakenRefusal } from '../utils/slugPolicy.js';
 import { registerAgent, roster, whoIsOn, sendTask, inbox, reply, redactCrewArgs, assertCrewCaller } from './crew.js';
 import { myRules } from './crewDecisions.js';
 import { fetchAppProbe } from './appProbeFetch.js';
 import { normalizeFrameAncestors } from '../utils/frameAncestors.js';
+import { secretPreview, opaquePreview, secretFingerprint } from './secretMask.js';
 
 /**
  * The commit part of a managed-push response. A GitHub commit carries its web
@@ -924,7 +925,8 @@ const TOOLS = [
     description:
       'List an app\'s secrets (encrypted env vars) with their values MASKED — safe to show in chat. ' +
       'For each key you get: is_set, length, a short preview (last 3 chars, rest masked; fully masked for short values), ' +
-      'a sha256 `fingerprint` (compare two envs or detect a changed value without seeing it), and updated_at. ' +
+      'a keyed `fingerprint` (compare two envs or detect a changed value without seeing it; it cannot be checked against guesses), and updated_at. ' +
+      'For a PRODUCTION value you may not reveal (anyone but the app owner or a platform admin), length is left out and the preview is fully masked. ' +
       'This is what you want for "is X set?", "did the key change?", "which vars exist?". ' +
       'Does NOT return plaintext — a secret never lands in the transcript. To read one actual value, use appcrane_reveal_secret with a specific key. ' +
       'Defaults to sandbox; pass env="production" only when the user explicitly says production. App-admin or AppCrane admin only.',
@@ -948,16 +950,14 @@ const TOOLS = [
       const rows = db
         .prepare('SELECT key, value_encrypted, updated_at FROM env_vars WHERE app_id = ? AND env = ? ORDER BY key')
         .all(app.id, env);
+      const canReveal = env !== 'production' || isAppOwnerOrPlatformAdmin(user, app);
       const vars = rows.map((r) => {
         let plain = null;
         try { plain = decrypt(r.value_encrypted); } catch (_) { /* below */ }
         if (plain == null) return { key: r.key, is_set: true, error: 'decrypt_failed', updated_at: r.updated_at };
-        const len = plain.length;
-        // Show last 3 chars only when the value is long enough that 3 chars is
-        // a small fraction; otherwise mask entirely (don't leak short passwords).
-        const preview = len >= 10 ? `${'•'.repeat(Math.min(len - 3, 8))}${plain.slice(-3)}` : '•'.repeat(Math.min(len, 8));
-        const fingerprint = crypto.createHash('sha256').update(plain).digest('hex').slice(0, 8);
-        return { key: r.key, is_set: true, length: len, preview, fingerprint, updated_at: r.updated_at };
+        // An app admin who may not reveal production sees neither its length nor its tail.
+        if (!canReveal) return { key: r.key, is_set: true, preview: opaquePreview(plain), fingerprint: secretFingerprint(plain), updated_at: r.updated_at };
+        return { key: r.key, is_set: true, length: plain.length, preview: secretPreview(plain), fingerprint: secretFingerprint(plain), updated_at: r.updated_at };
       });
       log.info(`MCP: env metadata (masked) read for ${app.slug}/${env} by user ${user.id}`);
       return {
@@ -1620,7 +1620,8 @@ const TOOLS = [
       'Rename an app\'s slug. The slug is its URL, its container name and its data directory, so this '
       + 'changes all three — but it is NOT destructive: deploy history, env vars, ports, per-app roles and '
       + 'grants are keyed on the app id, not the slug, and survive untouched. The old slug is kept as a '
-      + 'redirect unless redirect=false. Platform admin. '
+      + 'redirect unless redirect=false. The app\'s owner or a platform admin; only a platform admin may pass '
+      + 'redirect=false, and an owner may rename an app at most 3 times in 24 hours. '
       + 'Use this instead of recreating an app under a new name, which is what loses the history. '
       + 'To free a slug held by an app you no longer want, rename THAT app out of the way with '
       + 'redirect=false rather than deleting it — deleting clears the database rows but leaves '
@@ -1635,7 +1636,7 @@ const TOOLS = [
       required: ['slug', 'new_slug'],
       additionalProperties: false,
     },
-    requiredRole: 'platform_admin',
+    requiredRole: 'app_admin', // gated per-slug in renameApp (owner of the app, or platform admin)
     handler: async (user, args) => {
       const app = getAppForUser(user, args.slug);
       const { renameApp } = await import('./appRename.js');
@@ -1643,7 +1644,7 @@ const TOOLS = [
         app,
         newSlug: args.new_slug,
         redirect: args.redirect !== false,
-        userId: user.id,
+        user,
       });
       return {
         ...out,
@@ -2087,7 +2088,7 @@ const TOOLS = [
       // Mirror server/routes/apps.js POST / validation rules
       const { name, slug, github_url } = args;
       if (!name || !slug) throw new Error('name and slug are required');
-      { const slugProblem = slugRefusal(slug); if (slugProblem) throw new Error(slugProblem); }
+      { const slugProblem = slugRefusal(slug, user); if (slugProblem) throw new Error(slugProblem); }
       if (args.branch && !/^[A-Za-z0-9._/\-]{1,200}$/.test(args.branch)) {
         throw new Error('branch must be alphanumeric with . _ / - (max 200 chars)');
       }
@@ -2107,9 +2108,7 @@ const TOOLS = [
       }
 
       const db = getDb();
-      if (db.prepare('SELECT id FROM apps WHERE slug = ?').get(slug)) {
-        throw new Error(`App slug '${slug}' already exists`);
-      }
+      { const slugTaken = slugTakenRefusal(db, slug); if (slugTaken) throw new Error(slugTaken); }
 
       const { getNextSlot, getPortsForSlot } = await import('./portAllocator.js');
       const { reloadCaddy } = await import('./caddy.js');
@@ -3526,7 +3525,7 @@ const TOOLS = [
     handler: async (user, args) => {
       const { name, slug } = args;
       if (!name || !slug) throw new Error('name and slug are required');
-      { const slugProblem = slugRefusal(slug); if (slugProblem) throw new Error(slugProblem); }
+      { const slugProblem = slugRefusal(slug, user); if (slugProblem) throw new Error(slugProblem); }
       if (args.branch && !/^[A-Za-z0-9._/\-]{1,200}$/.test(args.branch)) {
         throw new Error('branch must be alphanumeric with . _ / - (max 200 chars)');
       }
@@ -3614,6 +3613,7 @@ const TOOLS = [
           next: `Repo (re)provisioned. Next: appcrane_push_to_managed_app slug="${slug}" files=[…], then appcrane_deploy slug="${slug}" stage="sandbox".`,
         };
       }
+      { const slugTaken = slugTakenRefusal(db, slug); if (slugTaken) throw new Error(slugTaken); }
 
       // Create the GitHub repo first — if this fails (token misconfigured,
       // owner is wrong, slug collides), bail before touching the DB so we

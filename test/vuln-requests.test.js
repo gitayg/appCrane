@@ -332,7 +332,7 @@ test('the digest links each finding to its request, and omits the link when ther
   sendVulnDigest(db);
   const mail = db.prepare("SELECT * FROM email_queue WHERE source = 'vuln-digest' AND to_email = 'root@example.com'").get();
   assert.ok(mail, 'a digest was queued');
-  const url = `http://crane.test/requests?request=${req.id}`;
+  const url = `http://crane.test/requests/${req.id}`;
   assert.ok(mail.body_html.includes(`<a href="${url}" style="color:#2563eb;">GHSA-digest</a>`), 'the HTML links the advisory to its request');
   assert.ok(mail.body_text.includes(`GHSA-digest (request #${req.id}: ${url})`), 'the text part names the request and its link');
   assert.ok(mail.body_html.includes('GHSA-nolink') && mail.body_text.includes('GHSA-nolink'), 'the finding without a request is still listed');

@@ -72,6 +72,14 @@ container never started. Two log surfaces, two tools:
 code. `appcrane_update_app` cannot do it — that tool changes name, domain and
 source, never the slug.
 
+Who: the app's owner or a platform admin (app admins and members are refused).
+An owner always keeps the redirect and may rename an app at most 3 times in 24
+hours; `redirect: false` is platform-admin only. The new slug may not be another
+app's slug, nor an old slug another app still redirects from, nor a path
+AppCrane reserves, nor offensive. Words that read like an AppCrane page or a
+trust signal (admin, login, support, official, ...) are refused for everyone
+but platform admins.
+
 The rename is **not destructive**. Deploy history, env vars, ports, per-app
 roles and grants all key off `apps.id`, not the slug, so they survive untouched.
 The old slug is recorded in `slug_aliases` and keeps redirecting, the data

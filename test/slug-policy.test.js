@@ -46,8 +46,8 @@ test('every top-level path server/index.js mounts is in PLATFORM_PATHS', () => {
 
 test('every place that names an app uses the policy', () => {
   for (const f of ['server/routes/apps.js', 'server/services/appRename.js']) {
-    assert.match(readFileSync(join(ROOT, f), 'utf8'), /slugRefusal\((slug|newSlug)\)/, `${f} skips the slug policy`);
+    assert.match(readFileSync(join(ROOT, f), 'utf8'), /slugRefusal\((slug|newSlug)(, [\w.]+)?\)/, `${f} skips the slug policy`);
   }
   const mcp = readFileSync(join(ROOT, 'server/services/mcpTools.js'), 'utf8');
-  assert.equal((mcp.match(/slugRefusal\(slug\)/g) || []).length, 2, 'an MCP create tool skips the slug policy');
+  assert.equal((mcp.match(/slugRefusal\(slug, user\)/g) || []).length, 2, 'an MCP create tool skips the slug policy');
 });

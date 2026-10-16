@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { peekToPromptPrefix, type PeekCtx } from '../../hooks/usePeek'
+import { useKeepFocusFromIframe } from '../../hooks/useKeepFocusFromIframe'
 import { Icon } from '../icons'
 import { CoderChanges } from './CoderChanges'
 import { CoderRefusal } from './CoderRefusal'
 import { CoderUnavailable } from './CoderUnavailable'
-import type { CoderAvailability } from './api'
+import { CoderPinNote, type PinKind } from './CoderPinNote'
+import { isLiveStatus, type CoderAvailability } from './api'
 import { fileToDataUrl, useCoderSession, type Entry } from './useCoderSession'
 
 interface Props {
@@ -29,6 +31,14 @@ interface Props {
   onPickStart:   () => void
   onPickStop:    () => void
   onPeekConsumed: () => void
+  /** The app iframe — focus it grabs on its own is handed back to the composer. */
+  iframeRef?:    React.RefObject<HTMLIFrameElement | null>
+  /** Changes when AppFrame replaces the iframe element (it keys it on the URL). */
+  frameKey?:     string
+  /** Open this session (a request's "In coder" link) instead of the app's latest. */
+  sessionId?:    string | null
+  /** The signed-in user's id, to tell them when that session is someone else's. */
+  viewerId?:     number | null
 }
 
 /**
@@ -48,7 +58,16 @@ export function CoderPanel(props: Props) {
   // The server's can_release is the truth; the role-derived prop is only a
   // placeholder for the moment before availability arrives.
   const canRelease = availability ? availability.can_release : props.canRelease
-  const s = useCoderSession(slug, open && usable)
+  const s = useCoderSession(slug, open && usable, props.sessionId)
+  // A pinned session that can't be worked in here says why, instead of the
+  // panel quietly showing some other session.
+  const pinKind: PinKind | null = !s.pinned ? null
+    : s.pinError ? s.pinError
+    : !s.session ? null
+    : !isLiveStatus(s.status) ? 'ended'
+    : props.viewerId != null && s.session.user_id !== props.viewerId ? 'other_user'
+    : null
+  const readOnly = pinKind === 'ended' || pinKind === 'other_user'
   const [tab, setTab]   = useState<'chat' | 'changes'>('chat')
   const [draft, setDraft] = useState('')
   // Files waiting to go with the next message: pasted, dropped or picked.
@@ -60,13 +79,15 @@ export function CoderPanel(props: Props) {
   const wasStreaming = useRef(false)
 
   // A picked element becomes a prefix on the next prompt, and the composer
-  // takes focus so the user can just keep typing.
+  // takes focus so the user can just keep typing — and keeps it if the app
+  // then grabs focus into its iframe (same guard as RequestModal).
   const taRef = useRef<HTMLTextAreaElement>(null)
+  const keep = useKeepFocusFromIframe(props.iframeRef, taRef, { enabled: open, frameKey: props.frameKey })
   useEffect(() => {
     if (!open || !props.peekCtx) return
     setDraft(d => peekToPromptPrefix(props.peekCtx!) + d)
     props.onPeekConsumed()
-    taRef.current?.focus()
+    keep.claim()
   }, [props.peekCtx, open]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -86,7 +107,7 @@ export function CoderPanel(props: Props) {
   // server-side and dispatched when the turn ends. A paused session accepts it
   // too — send() resumes the container first, then runs it. Only an in-flight
   // resume blocks the composer.
-  const canSend = !!s.sessionId && !s.resumingSince
+  const canSend = !!s.sessionId && !s.resumingSince && !readOnly
   const send = () => {
     const text = draft.trim()
     if (!text || !canSend) return
@@ -162,6 +183,7 @@ export function CoderPanel(props: Props) {
       ) : (
         <>
           <div className="coder-body" ref={scrollRef}>
+            {pinKind && <CoderPinNote kind={pinKind} onUnpin={s.unpin} />}
             {s.phase === 'loading' && <div className="coder-note">Looking for a session…</div>}
 
             {s.phase === 'absent' && (
@@ -210,7 +232,7 @@ export function CoderPanel(props: Props) {
               </div>
             ))}
 
-            {s.status === 'paused' && (
+            {s.status === 'paused' && !readOnly && (
               s.resumingSince
                 ? <ResumeProgress since={s.resumingSince} />
                 : (
@@ -254,6 +276,7 @@ export function CoderPanel(props: Props) {
                     ? 'Type an instruction — the session resumes first, then runs it'
                     : 'Describe the change… (↩ send · ⇧↩ newline)'}
                 onChange={e => setDraft(e.target.value)}
+                onBlur={keep.onBlur}
                 onPaste={e => {
                   // Screenshots and copied files arrive as clipboard files;
                   // plain text keeps the browser's own paste.

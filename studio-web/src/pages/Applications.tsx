@@ -6,6 +6,7 @@ import { JobsButton } from '../components/runtime-topbar/JobsButton'
 import { RequestModal } from '../components/runtime-topbar/RequestModal'
 import { WhatsNewModal, type WhatsNewChange } from '../components/WhatsNewModal'
 import { AppAccessModal } from '../components/AppAccessModal'
+import { EnvVarsPanel } from '../components/env/EnvVarsPanel'
 import { usePeek, type PeekCtx } from '../hooks/usePeek'
 import { Navigate, useLocation } from 'react-router-dom'
 import { useMe, isAdmin, canCreateApps } from '../hooks/useMe'
@@ -78,11 +79,6 @@ interface App {
   show_sandbox?: boolean
   /** Server-computed: whether THIS caller is offered Sandbox. Absent = yes. */
   sandbox_visible?: boolean
-}
-
-interface EnvVar {
-  key: string
-  value: string
 }
 
 interface FrameState {
@@ -296,7 +292,6 @@ export function Applications() {
   const [apps, setApps] = useState<App[]>([])
   const [versions, setVersions] = useState<Record<string, { prod?: string; sand?: string }>>({})
   const [openEvars, setOpenEvars] = useState<Record<string, string | null>>({})
-  const [evarData, setEvarData] = useState<Record<string, EnvVar[]>>({})
   const [frame, setFrame] = useState<FrameState>({ open: false, url: '', title: '' })
   const [framePanel, setFramePanel] = useState<'ask' | 'request' | 'bug' | null>(null)
   const [promptModal, setPromptModal] = useState<PromptModal>({ open: false })
@@ -1033,60 +1028,7 @@ STEP 3 - In any terminal run \`claude\`, then paste:
   }
 
   function toggleEvars(slug: string, env: string) {
-    const ekey = `${slug}:${env}`
-    if (openEvars[slug] === env) {
-      setOpenEvars(prev => ({ ...prev, [slug]: null }))
-      return
-    }
-    setOpenEvars(prev => ({ ...prev, [slug]: env }))
-    adminApi
-      .get<Record<string, string> | EnvVar[]>(`/api/apps/${slug}/env/${env}?reveal=true`)
-      .then(r => {
-        let vars: EnvVar[]
-        if (Array.isArray(r)) {
-          vars = r
-        } else {
-          vars = Object.entries(r as Record<string, string>).map(([key, value]) => ({ key, value }))
-        }
-        setEvarData(prev => ({ ...prev, [ekey]: vars }))
-      })
-      .catch(() => {})
-  }
-
-  function updateEnvVar(slug: string, env: string, idx: number, field: 'key' | 'value', val: string) {
-    const ekey = `${slug}:${env}`
-    setEvarData(prev => {
-      const arr = [...(prev[ekey] ?? [])]
-      arr[idx] = { ...arr[idx], [field]: val }
-      return { ...prev, [ekey]: arr }
-    })
-  }
-
-  async function saveEnvVar(slug: string, env: string, idx: number) {
-    const ekey = `${slug}:${env}`
-    const row = evarData[ekey]?.[idx]
-    if (!row) return
-    await adminApi.put(`/api/apps/${slug}/env/${env}`, { [row.key]: row.value }).catch(() => {})
-  }
-
-  async function deleteEnvVar(slug: string, env: string, idx: number) {
-    const ekey = `${slug}:${env}`
-    const row = evarData[ekey]?.[idx]
-    if (!row) return
-    await adminApi.del(`/api/apps/${slug}/env/${env}/${row.key}`).catch(() => {})
-    setEvarData(prev => {
-      const arr = [...(prev[ekey] ?? [])]
-      arr.splice(idx, 1)
-      return { ...prev, [ekey]: arr }
-    })
-  }
-
-  async function addEnvVar(slug: string, env: string) {
-    const ekey = `${slug}:${env}`
-    setEvarData(prev => ({
-      ...prev,
-      [ekey]: [...(prev[ekey] ?? []), { key: '', value: '' }],
-    }))
+    setOpenEvars(prev => ({ ...prev, [slug]: prev[slug] === env ? null : env }))
   }
 
   function openAppFrame(app: App, requested: 'production' | 'sandbox') {
@@ -1878,26 +1820,7 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                         <div style={{ fontWeight: 600, fontSize: '.78rem', marginBottom: 10, textTransform: 'uppercase', letterSpacing: '.5px', color: 'var(--dim)' }}>
                           {activeEnv === 'production' ? 'Production' : 'Sandbox'} Env Vars · {app.name}
                         </div>
-                        {(evarData[`${app.slug}:${activeEnv}`] ?? []).map((row, idx) => (
-                          <div key={idx} style={{ display: 'flex', gap: 6, marginBottom: 6, alignItems: 'center' }}>
-                            <input
-                              style={{ flex: 1, padding: '4px 8px', fontSize: '.8rem' }}
-                              value={row.key}
-                              onChange={e => updateEnvVar(app.slug, activeEnv, idx, 'key', e.target.value)}
-                              onBlur={() => saveEnvVar(app.slug, activeEnv, idx)}
-                              placeholder="KEY"
-                            />
-                            <input
-                              style={{ flex: 2, padding: '4px 8px', fontSize: '.8rem', fontFamily: 'monospace' }}
-                              value={row.value}
-                              onChange={e => updateEnvVar(app.slug, activeEnv, idx, 'value', e.target.value)}
-                              onBlur={() => saveEnvVar(app.slug, activeEnv, idx)}
-                              placeholder="value"
-                            />
-                            <button className="btn btn-xs btn-red" onClick={() => deleteEnvVar(app.slug, activeEnv, idx)}>✕</button>
-                          </div>
-                        ))}
-                        <button className="btn btn-xs" style={{ marginTop: 4 }} onClick={() => addEnvVar(app.slug, activeEnv)}>+ Add var</button>
+                        <EnvVarsPanel slug={app.slug} env={activeEnv === 'production' ? 'production' : 'sandbox'} compact />
                       </td>
                     </tr>
                   )}

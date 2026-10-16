@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useEnhancementSubmit } from '../../hooks/useEnhancementSubmit'
 import { usePeek, PeekChip, peekToPromptPrefix } from '../../hooks/usePeek'
+import { useKeepFocusFromIframe } from '../../hooks/useKeepFocusFromIframe'
 
 interface Props {
   slug:    string | null | undefined
@@ -42,10 +43,20 @@ export function RequestPanel({ slug, appName, open, onClose, width = 420, iframe
   const [text, setText] = useState('')
   const { submit, busy, last, reset } = useEnhancementSubmit(slug)
   const peek = usePeek(iframeRef ?? { current: null })
+  // Same guard as RequestModal: the app can take focus into its iframe after a
+  // pick, and the textarea gets it back.
+  const taRef = useRef<HTMLTextAreaElement>(null)
+  const keep = useKeepFocusFromIframe(iframeRef, taRef, { enabled: open })
 
   useEffect(() => {
     if (!open) { setText(''); peek.stop(); peek.clear(); reset() }
   }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // A picked element is context for the request: the textarea takes focus so
+  // the user can just keep typing.
+  useEffect(() => {
+    if (open && peek.ctx) keep.claim()
+  }, [peek.ctx]) // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!open) return null
 
@@ -115,9 +126,11 @@ export function RequestPanel({ slug, appName, open, onClose, width = 420, iframe
         {peek.ctx && <PeekChip ctx={peek.ctx} onClear={peek.clear} />}
         <div className="ask-input-row">
           <textarea
+            ref={taRef}
             className="ask-textarea"
             value={text}
             onChange={e => setText(e.target.value)}
+            onBlur={keep.onBlur}
             onKeyDown={e => {
               if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); onSubmit() }
             }}

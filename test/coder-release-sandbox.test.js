@@ -290,20 +290,19 @@ test('release: a path outside the change set is refused and nothing is committed
   assert.equal(tipOf(CRANE), tip, 'a refused release still committed');
 });
 
-test('release: a chat-capable user who is not an app admin is refused', async () => {
+test('release: a member or an app admin is refused; the app owner releases', async () => {
   const tip = tipOf(CRANE);
-  // The member can read the session — the bar for releasing is higher.
-  const seen = await call('GET', `/api/coder/${CRANE}/session/${sessions[CRANE].id}/changes`, null, MEMBER_KEY);
-  assert.equal(seen.status, 200, 'fixture is wrong: the member cannot reach this app at all');
+  for (const role of ['user', 'admin']) {
+    db.prepare("INSERT OR REPLACE INTO app_user_roles (app_id, user_id, app_role) VALUES (?, ?, ?)").run(craneAppRow.id, memberId, role);
+    const { status, body } = await json(await release(CRANE, { paths: ['src/keep.js'] }, MEMBER_KEY));
+    assert.equal(status, 403, `an app ${role} released: ${JSON.stringify(body)}`);
+    assert.equal(body.error.code, 'FORBIDDEN');
+    assert.equal(tipOf(CRANE), tip, 'a refused release still committed');
+  }
 
-  const { status, body } = await json(await release(CRANE, { paths: ['src/keep.js'] }, MEMBER_KEY));
-  assert.equal(status, 403, `a non-app-admin released: ${JSON.stringify(body)}`);
-  assert.equal(body.error.code, 'FORBIDDEN');
-  assert.equal(tipOf(CRANE), tip, 'a refused release still committed');
-
-  // Promoted to app-admin, the same call goes through: the gate is the role,
+  // As the app's owner, the same call goes through: the gate is the role,
   // not "platform admin only".
-  db.prepare("INSERT OR REPLACE INTO app_user_roles (app_id, user_id, app_role) VALUES (?, ?, 'admin')").run(craneAppRow.id, memberId);
+  db.prepare("INSERT OR REPLACE INTO app_user_roles (app_id, user_id, app_role) VALUES (?, ?, 'owner')").run(craneAppRow.id, memberId);
   const ok = await json(await release(CRANE, { paths: ['src/keep.js'] }, MEMBER_KEY));
   assert.equal(ok.status, 200, JSON.stringify(ok.body));
   assert.equal(blobOf(CRANE, 'src/keep.js').toString('utf8'), 'export const keep = 2;\n');

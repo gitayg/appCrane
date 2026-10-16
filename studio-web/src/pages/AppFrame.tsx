@@ -103,6 +103,7 @@ export function AppFrame({ slug, active, onClose }: Props) {
   // Mirrors deploy.js's isAdmin() half. Without it a platform admin — who the
   // server WILL let promote — is shown no menu at all.
   const [platformAdmin, setPlatformAdmin] = useState(false)
+  const [viewerId, setViewerId] = useState<number | null>(null)
   const [envNotice, setEnvNotice] = useState<string | null>(null)
   // Whether the coder can run here, and if not, every reason why. Fetched per
   // app rather than inferred from the app row: the credential half depends on
@@ -134,8 +135,12 @@ export function AppFrame({ slug, active, onClose }: Props) {
 
   useEffect(() => {
     let alive = true
-    adminApi.get<{ user?: { role?: string } }>('/api/me')
-      .then(r => { if (alive) setPlatformAdmin(r?.user?.role === 'platform_admin') })
+    adminApi.get<{ user?: { id?: number; role?: string } }>('/api/me')
+      .then(r => {
+        if (!alive) return
+        setPlatformAdmin(r?.user?.role === 'platform_admin')
+        setViewerId(r?.user?.id ?? null)
+      })
       .catch(() => { /* not fatal: the menu just stays hidden */ })
     return () => { alive = false }
   }, [])
@@ -189,17 +194,20 @@ export function AppFrame({ slug, active, onClose }: Props) {
 
   // ?coder=1 is how the Requests page hands over after sending requests to the
   // coder: land on Sandbox with the panel open on the session they went to.
-  // The key remounts the panel, so one that was already open looks the
+  // &session=<id> names that session; without it the panel finds the app's
+  // latest. The key remounts the panel, so one that was already open looks the
   // session up again instead of keeping the "no session yet" it found earlier.
   const [searchParams, setSearchParams] = useSearchParams()
   const [coderKey, setCoderKey] = useState(0)
+  const [coderSession, setCoderSession] = useState<string | null>(null)
   const openCoder = active && searchParams.get('coder') === '1' && stage?.slug === slug
   useEffect(() => {
     if (!openCoder) return
     setStage(s => (s && s.sandUrl ? { ...s, env: 'sandbox', url: s.sandUrl } : s))
+    setCoderSession(searchParams.get('session'))
     setCoderKey(k => k + 1)
     setCoderOpen(true)
-    setSearchParams(p => { p.delete('coder'); return p }, { replace: true })
+    setSearchParams(p => { p.delete('coder'); p.delete('session'); return p }, { replace: true })
   }, [openCoder]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -351,7 +359,7 @@ export function AppFrame({ slug, active, onClose }: Props) {
                   + (coderAvail && !coderAvail.available ? ' crane-topbar-btn--muted' : '')}
                 onClick={() => setCoderOpen(o => !o)}
                 title={coderAvail && !coderAvail.available
-                  ? `Coder isn't available here yet: ${coderAvail.gaps[0]?.title ?? 'see why'} — click for what it takes`
+                  ? `Coder unavailable: ${coderAvail.gaps[0]?.title ?? 'see why'} — click for details`
                   : 'Open the coder — change this app by describing what you want'}
               ><Icon.Sparkles size={14} /> Coder</button>
               )}
@@ -403,6 +411,10 @@ export function AppFrame({ slug, active, onClose }: Props) {
               onPickStart={startCoderPick}
               onPickStop={peek.stop}
               onPeekConsumed={() => setCoderCtx(null)}
+              iframeRef={iframeRef}
+              frameKey={stage.url}
+              sessionId={coderSession}
+              viewerId={viewerId}
             />
           )}
         </>
