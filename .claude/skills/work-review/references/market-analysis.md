@@ -50,7 +50,35 @@ Researched 2026-10-15. Sources are linked inline. Vendor claims (accuracy, ROI, 
 - Productivity evidence is contested. METR's 2025 RCT found experienced developers were 19% slower while believing they were faster ([eWeek](https://eweek.com/news/news-ai-tools-slow-developer-productivity-study)). In the Stack Overflow 2025 survey, 66% cite "almost right" AI output ([VentureBeat](https://venturebeat.com/ai/stack-overflow-data-reveals-the-hidden-productivity-tax-of-almost-right-ai-code)). Measurement is in demand because nobody is sure about the gains.
 - No credible market size exists for this niche. AI coding tools overall are put at about $8.5B for 2026 by a secondary source, which is directional only.
 
+## Jellyfish AI Engineering Trends (Sept 2026)
+
+Source: [jellyfish.co/ai-engineering-trends](https://jellyfish.co/ai-engineering-trends/). The dataset is 294K engineers, 105M PRs and 1,300+ companies. Jellyfish says all comparisons are "correlational rather than causal". Most chart values are rendered interactively and could not be read as text.
+
+The report has three sections: **AIDLC → ROI → Adoption**.
+- **AIDLC**
+  - Autonomous agent PR share.
+  - Agentic-merged PRs: merged with AI-only review. The median company is at 0.6% and leaders are at 9%+.
+  - Model usage per tool. In Claude Code, Opus 5 gained +10.4pp month over month in Jul→Aug.
+  - Open-weight models: 0.7% of weekly engineers, up from about 0.2% in March.
+  - Agent-skill categories: Cursor skill invocations, sorted into categories by an LLM.
+- **ROI**
+  - AI spend per developer-week. It is heavily concentrated: top users spend an order of magnitude more than the median, and the headline figure is "$949/month" for top users.
+  - Token consumption.
+  - **Productivity by token consumption**: developer-weeks are put in 50 bins by tokens and compared on merged PRs. Throughput rises with tokens, but sub-linearly, and **tapers at the high end**.
+- **Adoption**: Access %, WAU %, and AI Code % (AI-assisted merged additions divided by all merged additions).
+
+What `work-review` borrows:
+- **Returns curve**: `overcomplication.returnsCurve` bins one user's sessions by tokens and shows edits+commits per bin. This is Jellyfish's diminishing-returns view at the level of one person. Org dashboards show *that* spend tapers off. The transcript shows *which* sessions and *which prompts* did it.
+- **Spend concentration**: the per-prompt cost attribution in `instructionQuality` explains the top-user tail at the level of individual instructions. Jellyfish can only see the totals.
+- **Model right-sizing**: per-tool model mix becomes the `big-model-small-task` flag.
+- **Skill usage**: `overcomplication.skillsInvoked` counts the skills actually used, so unused ones can be removed.
+- **Roadmap for AppCrane team mode**:
+  - spend distribution across apps and users;
+  - share of commits made autonomously by the builder;
+  - an agentic-merge rate, meaning changes deployed with no human look. This is Jellyfish's 9% metric, on AppCrane's own deploy log.
+
 ## Gaps nobody fills well
+0. **Instruction quality, priced.** Org tools see spend, and Cursor scores "prompt specificity" without attaching a cost. Nobody charges each prompt for the work it triggered and shows a cheaper rewrite.
 1. **Semantic redundancy across sessions**, e.g. re-explaining the same context, rediscovering the build command, redoing the same fix. Today's detection is lexical: the same file read twice.
 2. **Pricing per pattern.** Cost tools don't know why tokens were spent, and friction tools don't put a price on the friction.
 3. **Routing findings into the right artifact**, with a diff: CLAUDE.md rule, skill, hook, allowlist, or removing an MCP server.
@@ -60,7 +88,7 @@ Researched 2026-10-15. Sources are linked inline. Vendor claims (accuracy, ROI, 
 7. **Linking session patterns to outcomes**: thrash leading to reverts or rework.
 
 ## How `work-review` positions against this
-- **Built:** deterministic detectors with token estimates (gaps 2 and 3, partly), destination routing with diffs (gap 3), a baseline plus `applied.md` verification loop (gap 4), and deferring to `/fewer-permission-prompts`, `/doctor` and `/insights` instead of duplicating them.
+- **Built:** a cost for every prompt, comparing vague and anchored prompts and prompts with and without done-criteria, plus the rework cost and prompt rewrites (gap 0); overcomplication flags and a returns curve; deterministic detectors with token estimates (gaps 2 and 3, partly), destination routing with diffs (gap 3), a baseline plus `applied.md` verification loop (gap 4), and deferring to `/fewer-permission-prompts`, `/doctor` and `/insights` instead of duplicating them.
 - **Cross-session repetition:** detected by lexical shingle similarity, followed by a manual read of the transcripts (gap 1, partly).
 - **Roadmap:**
   - embedding or LLM clustering of re-explanations (gap 1);

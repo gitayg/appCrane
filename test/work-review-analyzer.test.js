@@ -29,7 +29,7 @@ function writeSession(dir, id, prompts, body) {
     user([{ type: 'tool_result', tool_use_id: id, content: out, is_error: isError }]);
   };
   prompts.forEach(user);
-  body({ tool, assistant, user });
+  body({ tool, assistant, user, raw: l => lines.push(l) });
   writeFileSync(join(dir, `${id}.jsonl`), lines.map(l => JSON.stringify(l)).join('\n'));
 }
 
@@ -93,4 +93,37 @@ test('analyzer redacts secrets in quoted prompts', () => {
   const md = execFileSync(process.execPath, [SCRIPT, '--root', root], { encoding: 'utf8' });
   assert.ok(md.includes('deploy the staging server'));
   assert.ok(!md.includes(secret));
+});
+
+test('analyzer charges each prompt for its work and flags vague and reworked ones', () => {
+  const root = mkdtempSync(join(tmpdir(), 'work-review-'));
+  mkdirSync(join(root, '-p'));
+  writeSession(join(root, '-p'), 'q', ['fix the bug'], ({ tool, raw }) => {
+    for (let i = 0; i < 6; i++) tool('Grep', { pattern: 'x' }, 'x');     // went looking
+    tool('Edit', { file_path: '/r/b.js' }, 'ok');
+    // Typed mid-turn: stored as a queued_command attachment, not a user record.
+    raw({ type: 'attachment', attachment: { type: 'queued_command', prompt: 'no, wrong file — fix `parse()` in src/a.js so it returns []', humanTurn: true } });
+    tool('Edit', { file_path: '/r/a.js' }, 'ok');
+  });
+  const out = join(root, 'r.json');
+  execFileSync(process.execPath, [SCRIPT, '--root', root, '--json', out]);
+  const { instructionQuality: q, totals } = JSON.parse(readFileSync(out, 'utf8'));
+
+  assert.equal(totals.userPrompts, 2, 'the mid-turn message counts as a prompt');
+  assert.equal(q.vague.prompts, 1);
+  assert.equal(q.vague.medianExploreBeforeFirstEdit, 6);
+  assert.equal(q.vague.reworkRate, 1, 'the vague prompt was followed by a correction');
+  assert.equal(q.anchored.prompts, 1, 'a file name and code in backticks make it anchored');
+  assert.equal(q.withCriteria.prompts, 1, '"returns" is a done-criterion');
+  assert.ok(q.reworkCost > 0 && q.reworkShare > 0.5, 'the reworked prompt carries most of the spend');
+  assert.match(q.costliestBadPrompts[0].why.join(' '), /followed by correction/);
+});
+
+test('lowercase prose is not mistaken for a code identifier', () => {
+  const root = mkdtempSync(join(tmpdir(), 'work-review-'));
+  mkdirSync(join(root, '-p'));
+  writeSession(join(root, '-p'), 'v', ['make the dashboard better and cleaner'], ({ tool }) => tool('Read', { file_path: '/x' }, 'x'));
+  const out = join(root, 'r.json');
+  execFileSync(process.execPath, [SCRIPT, '--root', root, '--json', out]);
+  assert.equal(JSON.parse(readFileSync(out, 'utf8')).instructionQuality.vague.prompts, 1);
 });

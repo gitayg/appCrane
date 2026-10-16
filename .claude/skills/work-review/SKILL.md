@@ -1,11 +1,11 @@
 ---
 name: work-review
-description: Analyze how the user actually works with Claude Code — mine local session transcripts for redundancy (re-reading unchanged files, re-running commands with nothing changed, retry loops, repeated instructions across sessions), friction (tool errors, permission denials, corrections, interrupts, compactions) and missed leverage, then turn the findings into concrete fixes (CLAUDE.md lines, skills/slash commands, permission allowlists, hooks). Use when the user asks to review, audit or retro their Claude usage, asks "where am I wasting tokens/time", "what should go in CLAUDE.md", "what should I automate", or wants a weekly/monthly work review.
+description: Analyze how the user actually works with Claude Code — mine local session transcripts for costly instructions (vague prompts that send Claude searching, prompts that end in a correction, missing done-criteria, overcomplicated setups), redundancy (re-reading unchanged files, re-running commands with nothing changed, retry loops, repeated instructions across sessions), friction (tool errors, permission denials, corrections, interrupts, compactions) and missed leverage, then turn the findings into concrete fixes (CLAUDE.md lines, skills/slash commands, permission allowlists, hooks). Use when the user asks to review, audit or retro their Claude usage, asks "where am I wasting tokens/time", "how can I prompt better", "what should go in CLAUDE.md", "what should I automate", or wants a weekly/monthly work review.
 ---
 
 # Work review
 
-Find where working with Claude is redundant or rough, and propose specific changes that remove it. The analysis is quantitative first (a script over the transcripts), then qualitative (you read the flagged moments), then prescriptive (diffs the user can accept).
+Find where working with Claude is redundant or rough, and propose specific changes that remove it. The biggest lever is usually the instructions themselves. A vague or overcomplicated brief makes Claude spend tokens finding out what the user already knew, or doing the wrong thing first. So lead with instruction quality, then the mechanical waste. The analysis is quantitative first (a script over the transcripts), then qualitative (you read the flagged moments), then prescriptive (diffs the user can accept).
 
 ## Where this fits
 
@@ -45,6 +45,45 @@ For the top 3–5 signals, open the actual transcript around the flagged event (
 - Errors that were the point, such as probing whether a file exists.
 - "Corrections" that are really a new requirement rather than Claude getting it wrong.
 
+### Instruction quality (lead with this)
+
+The analyzer charges every token to the human prompt that triggered it: everything up to the next prompt, priced in fresh-input-token equivalents (output ×5, cache write ×1.25, cache read ×0.1). `instructionQuality` in the JSON compares groups of prompts by their median cost, the lookups Claude did before its first edit, and how often each led to rework:
+- vague prompts against anchored ones (naming a file, code, an error or a URL);
+- prompts with done-criteria against prompts without.
+
+`reworkCost` is what prompts followed by a correction or interrupt cost.
+
+For the 3 costliest entries in `costliestBadPrompts`, read the prompt and what Claude did next, and work out what was missing. Usually it is one of these:
+- **where**: a file, function, or screen;
+- **what done looks like**: a test that passes, or an output;
+- **a constraint Claude violated**: "don't touch the API", "keep the old flag";
+- **the actual error text**: as opposed to "it's broken".
+
+Then show the user a rewrite of that prompt: the same request, one or two sentences longer, with the missing piece added. Show what that piece would have saved, e.g. "the 14 lookups before the first edit, ~40k tokens". This is the most useful part of the review, so make it concrete. Don't lecture about prompting in general.
+
+If the same missing context shows up across sessions (the same "where", the same constraint), it doesn't belong in prompts. Put it in `CLAUDE.md` once.
+
+Don't punish short prompts in general. "fix the failing test in `billing.test.js`" is short and anchored. A cheap vague prompt that worked is fine. Flag cost, not style.
+
+### Overcomplication
+
+`overcomplication` flags sessions where effort didn't turn into output:
+
+| Flag | What it suggests | Simpler alternative |
+|---|---|---|
+| `heavy-for-output` (top 20% tokens, ≤2 edits/commits) | Exploring without a target, or a Q&A session. Check which | Anchor the prompt, or accept it: research sessions are fine |
+| `long-brief-small-change` (prompt >3k chars, ≤2 edits) | Pasted logs or specs where one line would do | Paste the failing excerpt and say what done is |
+| `subagent-fanout` (≥3 subagents, ≤3 edits) | Orchestration for a task that needed none | Ask directly; save subagents for broad independent searches |
+| `ceremony` (todo/plan calls outnumber edits) | Process overhead on small work | Skip plan mode and todos for one-step tasks |
+| `micromanaged` ("continue"/"yes" prompts, <3 tool calls per prompt) | Approving step by step | State the whole goal and done-criteria once; widen permissions for safe steps |
+| `big-model-small-task` | Top-tier model on a trivial ask | A smaller or faster model, or lower effort |
+
+`medianBaselineContextTokens` is the always-on context each session pays before any work: the system prompt, tools, MCP servers, skills and CLAUDE.md. If it is large (over about 40k), the fix is removal, not addition, so point to `/doctor`.
+
+`returnsCurve` bins sessions by tokens and shows output (edits + commits) per bin, similar to Jellyfish's productivity-by-token curve. If output per token falls sharply in the top bins, the biggest sessions are the place to simplify. These are usually long sessions doing several tasks, so split them and `/clear` between tasks.
+
+### Mechanical waste
+
 Signals and what they usually mean:
 
 | Signal | Typical root cause | Typical fix |
@@ -68,13 +107,16 @@ Before proposing a `CLAUDE.md` line, read the existing `CLAUDE.md`, `.claude/set
 
 Write the review in this shape. Keep it short, because the user wants actions, not a dashboard:
 
-1. **Headline**: 2–3 sentences, giving the biggest source of waste and what fixing it would save, in counts from the data (e.g. "you restated the test command in 6 of 9 sessions").
-2. **Top fixes** (at most 5, ranked by occurrences × cost: use `totals.wastedTokensEstimate`, which is a floor because the output then stays in context for the rest of the session). Each one has:
+1. **Headline**: 2–3 sentences, giving the biggest source of waste and what fixing it would save, in counts from the data (e.g. "prompts that ended in a correction took 31% of your spend", "you restated the test command in 6 of 9 sessions").
+2. **Your costliest instructions**: up to 3 before/after prompt rewrites, each with what it would have saved.
+3. **Top fixes** (at most 5, ranked by occurrences × cost: use `totals.wastedTokensEstimate`, which is a floor because the output then stays in context for the rest of the session). Each one has:
    - the evidence: the count, the sessions, and one short quoted example;
    - the exact change: a ready-to-apply diff to `CLAUDE.md` or `.claude/settings.json`, a new `SKILL.md` skeleton, or a hook config;
    - confidence (high/medium/low), and why.
-3. **Habits worth keeping**: one or two things that are working well, such as a high cache hit rate or few corrections. A review that only criticises gets ignored.
-4. **Numbers**: the summary table from the script.
+4. **Habits worth keeping**: one or two things that are working well, such as a high cache hit rate or few corrections. A review that only criticises gets ignored.
+5. **Numbers**: the summary table from the script.
+
+Don't overcomplicate the fixes either. Prefer removing to adding: deleting a stale CLAUDE.md rule, an unused MCP server or a needless step beats adding a new skill. Propose a skill or hook only when a procedure really repeats.
 
 Then ask which fixes to apply. Apply only the ones the user approves. When you apply a fix:
 - for a `CLAUDE.md` edit, keep the file's style and keep rules short and imperative, with the reason attached;

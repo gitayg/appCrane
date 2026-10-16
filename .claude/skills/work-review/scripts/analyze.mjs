@@ -61,6 +61,17 @@ const cmdHead = c => normCmd(c).split(' ').slice(0, 2).join(' ');
 const READ_CMD_RE = /^(cat|head|tail|less|sed\s+-n\s+\S+|nl)\s+(?:-\S+\s+)*([^\s|;&>]+)/;
 
 const CORRECTION_RE = /^(no[,.! ]|nope|don'?t|do not|stop|wrong|actually|instead|that'?s not|not what i|i said|i told you|why did you|you (?:forgot|missed|broke)|please don'?t|never )/i;
+// Concrete anchors in a prompt: a path or file name, code in backticks, an identifier,
+// an error/line reference, a URL. A prompt with none of them makes Claude go find out.
+// Case-sensitive on purpose: `camelCase` must not match every lowercase word.
+const ANCHOR_RE = /(`[^`]+`|\b[\w-]+\.(?:js|mjs|ts|tsx|jsx|py|go|rs|java|rb|php|css|html|json|ya?ml|md|sql|sh|toml)\b|(?:^|\s)\.{0,2}\/[\w.-]+\/|https?:\/\/|\b[a-z]+[A-Z]\w*\b|\b\w+\(\)|\b(?:[Ee]rror|[Ee]xception|Traceback|line \d+|status \d{3})\b)/;
+// Done-criteria: tells Claude when to stop and how to check.
+const CRITERIA_RE = /\b(should|must|expect(?:ed)?|so that|done when|until|make sure|verify|passes?|returns?|instead of|acceptance)\b/i;
+// Relative price of a token vs fresh input: output ×5, cache write ×1.25, cache read ×0.1.
+const costUnits = u => (u.input_tokens || 0) + 5 * (u.output_tokens || 0) + 1.25 * (u.cache_creation_input_tokens || 0) + 0.1 * (u.cache_read_input_tokens || 0);
+const NUDGE_RE = /^(continue|go on|go ahead|proceed|yes|yep|y|ok(?:ay)?|sure|do it|next|keep going|carry on)[.!\s]*$/i;
+const CEREMONY_RE = /^(TodoWrite|TaskCreate|TaskUpdate|EnterPlanMode|ExitPlanMode)$/;
+const BIG_MODEL_RE = /opus|fable/i;
 const INTERRUPT_RE = /\[Request interrupted by user/;
 const DENIED_RE = /(permission|was denied|user (?:rejected|declined|doesn't want)|not allowed|requires approval)/i;
 const EDIT_MISS_RE = /(string to replace not found|old_string.*not (?:found|unique)|found \d+ matches|File has not been read yet|file has been modified since)/i;
@@ -74,7 +85,8 @@ function analyzeFile(path) {
     usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, turns: 0, userPrompts: [],
     toolCalls: 0, toolCounts: new Map(), errors: [], redundantReads: [], repeatedCmds: [],
     retryLoops: [], editMisses: 0, denials: [], bigOutputs: [], corrections: [], interrupts: 0,
-    compactions: 0, searchBursts: 0, wastedTokens: { read: 0, rerun: 0, errors: 0 }, singleToolTurns: 0, multiToolTurns: 0, cmdHeads: new Map(),
+    compactions: 0, searchBursts: 0, wastedTokens: { read: 0, rerun: 0, errors: 0 },
+    edits: 0, commits: 0, prompts: [], agentCalls: 0, ceremony: 0, skills: new Map(), promptChars: 0, maxPrompt: 0, nudges: 0, baselineCtx: null, singleToolTurns: 0, multiToolTurns: 0, cmdHeads: new Map(),
   };
   const seenMsg = new Set();
   const pending = new Map();          // tool_use_id -> {name, input, key}
@@ -83,6 +95,17 @@ function analyzeFile(path) {
   let lastErrKey = null, errStreak = 0, searchRun = 0;
   let editCounter = 0;
   const usesPerMsg = new Map();
+  let cur = null;                     // the human prompt the current work is charged to
+  function onHuman(t) {
+    s.userPrompts.push(t);
+    const corr = CORRECTION_RE.test(t.trim());
+    if (cur && corr && !cur.followedBy) cur.followedBy = 'correction';
+    cur = { text: t, chars: t.length, anchored: ANCHOR_RE.test(t), criteria: CRITERIA_RE.test(t), nudge: NUDGE_RE.test(t.trim()), correction: corr, cost: 0, tools: 0, explore: 0, edits: 0, followedBy: null };
+    s.prompts.push(cur);
+    s.promptChars += t.length; s.maxPrompt = Math.max(s.maxPrompt, t.length);
+    if (NUDGE_RE.test(t.trim())) s.nudges++;
+    if (corr) s.corrections.push(clip(t, 220));
+  }
 
   for (const line of lines) {
     if (!line.trim()) continue;
@@ -90,6 +113,10 @@ function analyzeFile(path) {
     if (d.timestamp) { const t = Date.parse(d.timestamp); if (!s.start || t < s.start) s.start = t; if (!s.end || t > s.end) s.end = t; }
     if (d.type === 'system' && (d.subtype === 'compact_boundary' || /compact/i.test(d.content || ''))) s.compactions++;
     if (d.isCompactSummary) s.compactions++;
+    // A message the user typed while Claude was mid-turn is stored as an attachment.
+    if (d.type === 'attachment' && d.attachment?.type === 'queued_command' && d.attachment.humanTurn && !d.isSidechain) {
+      const t = textOf(d.attachment.prompt); if (t.trim()) onHuman(t); continue;
+    }
     const m = d.message;
     if (!m || typeof m !== 'object') continue;
 
@@ -100,6 +127,9 @@ function analyzeFile(path) {
         s.usage.input += m.usage.input_tokens || 0; s.usage.output += m.usage.output_tokens || 0;
         s.usage.cacheRead += m.usage.cache_read_input_tokens || 0; s.usage.cacheWrite += m.usage.cache_creation_input_tokens || 0;
         if (m.model) inc(s.models, m.model);
+        if (cur) cur.cost += costUnits(m.usage);
+        // First turn's prompt size ≈ the always-on context: system prompt, tools, CLAUDE.md, MCP, skills.
+        if (s.baselineCtx === null) s.baselineCtx = (m.usage.input_tokens || 0) + (m.usage.cache_read_input_tokens || 0) + (m.usage.cache_creation_input_tokens || 0);
       }
       const uses = (Array.isArray(m.content) ? m.content : []).filter(x => x.type === 'tool_use');
       if (uses.length) inc(usesPerMsg, id, uses.length);   // streamed: one block per record, same id
@@ -107,6 +137,16 @@ function analyzeFile(path) {
         s.toolCalls++; inc(s.toolCounts, u.name);
         const inp = u.input || {};
         let key = u.name;
+        if (cur) {
+          cur.tools++;
+          if (/^(Edit|Write|MultiEdit|NotebookEdit)$/.test(u.name)) cur.edits++;
+          else if (!cur.edits && /^(Read|Grep|Glob|Agent|Task|WebSearch|WebFetch)$/.test(u.name)) cur.explore++;
+          else if (!cur.edits && u.name === 'Bash' && /^(ls|find|grep|rg|cat|head|tail|sed -n|git (log|show|grep))\b/.test(normCmd(inp.command || ''))) cur.explore++;
+        }
+        if (/^(Agent|Task)$/.test(u.name)) s.agentCalls++;
+        if (CEREMONY_RE.test(u.name)) s.ceremony++;
+        if (u.name === 'Skill' && inp.skill) inc(s.skills, inp.skill);
+        if (u.name === 'Bash' && /\bgit\s+commit\b/.test(inp.command || '')) s.commits++;
         if (/^(Grep|Glob)$/.test(u.name)) { if (++searchRun === 8) s.searchBursts++; } else if (u.name !== 'Read') searchRun = 0;
 
         if (u.name === 'Read' && inp.file_path) {
@@ -117,9 +157,12 @@ function analyzeFile(path) {
           if (r.editMark !== editCounter) r.ranges = new Set();
           r.count++; r.editMark = editCounter; r.ranges.add(range); readState.set(inp.file_path, r);
         } else if (/^(Edit|Write|MultiEdit|NotebookEdit)$/.test(u.name)) {
-          editCounter++;
+          editCounter++; s.edits++;
         } else if (u.name === 'Bash' && inp.command) {
           const nc = normCmd(inp.command); key = `Bash ${nc}`;
+          // Re-run key: the whole command minus a leading `cd` and trailing output trimming.
+          const full = inp.command.replace(/^\s*cd\s+\S+\s*(?:&&|;)\s*/, '').replace(/(\s*2>&1|\s*\|\s*(?:tail|head)\b[^|]*)+\s*$/, '').replace(/\s+/g, ' ').trim();
+          if (/(\bsed -i|\btee\b|[^2&]>\s*[^&\s]|<<|\bgit (commit|checkout|merge|pull|reset)|\bnpm (i|install)\b)/.test(inp.command)) { editCounter++; s.edits++; if (cur) cur.edits++; }
           inc(s.cmdHeads, cmdHead(inp.command));
           const rm = nc.match(READ_CMD_RE);
           if (rm) {                         // shell reads count toward redundant reads too
@@ -128,9 +171,9 @@ function analyzeFile(path) {
             if (r.editMark !== editCounter) r.ranges = new Set();
             r.count++; r.editMark = editCounter; r.ranges.add(nc); readState.set(f, r);
           }
-          const c = cmdState.get(nc) || { count: 0, editMark: -1, idle: 0 };
+          const c = cmdState.get(full) || { count: 0, editMark: -1, idle: 0, display: nc };
           if (c.count && c.editMark === editCounter) { c.idle++; u._wasted ??= 'rerun'; }   // rerun with no edit in between
-          c.count++; c.editMark = editCounter; cmdState.set(nc, c);
+          c.count++; c.editMark = editCounter; cmdState.set(full, c);
         }
         pending.set(u.id, { name: u.name, key, input: inp, wasted: u._wasted });
       }
@@ -141,11 +184,8 @@ function analyzeFile(path) {
       if (typeof c === 'string' || (Array.isArray(c) && !c.some(x => x.type === 'tool_result'))) {
         const t = textOf(c);
         const human = !d.isMeta && !d.isSidechain && !/^<(command-|local-command|system-reminder)/.test(t.trim()) && !d.isCompactSummary;
-        if (INTERRUPT_RE.test(t)) s.interrupts++;
-        else if (human && t.trim()) {
-          s.userPrompts.push(t);
-          if (CORRECTION_RE.test(t.trim())) s.corrections.push(clip(t, 220));
-        }
+        if (INTERRUPT_RE.test(t)) { s.interrupts++; if (cur) cur.followedBy = 'interrupt'; }
+        else if (human && t.trim()) onHuman(t);
         continue;
       }
       for (const r of c.filter(x => x.type === 'tool_result')) {
@@ -168,7 +208,7 @@ function analyzeFile(path) {
     }
   }
   for (const n of usesPerMsg.values()) n > 1 ? s.multiToolTurns++ : s.singleToolTurns++;
-  for (const [cmd, c] of cmdState) if (c.idle >= 2) s.repeatedCmds.push({ cmd: clip(cmd, 120), runs: c.count, noEditBetween: c.idle });
+  for (const c of cmdState.values()) if (c.idle >= 2) s.repeatedCmds.push({ cmd: clip(c.display, 120), runs: c.count, noEditBetween: c.idle });
   return s;
 }
 
@@ -225,6 +265,46 @@ const sessions = files.map(analyzeFile).filter(s => s.turns > 0);
 if (!sessions.length) { console.error(`No sessions with assistant turns under ${ROOT} in the last ${SINCE_DAYS} days.`); process.exit(1); }
 
 const sum = (f) => sessions.reduce((a, s) => a + f(s), 0);
+const tokTotal = s => s.usage.input + s.usage.output + s.usage.cacheRead + s.usage.cacheWrite;
+
+// ── overcomplication: effort that doesn't turn into output ───────
+// Output proxy = edits + commits. Q&A and research sessions are legitimately
+// edit-free, so every flag here is a lead to verify, not a verdict.
+const mains = sessions.filter(s => !s.subagent);
+const byTok = [...mains].sort((a, b) => tokTotal(a) - tokTotal(b));
+const p80 = byTok.length ? tokTotal(byTok[Math.floor(byTok.length * 0.8)] || byTok.at(-1)) : Infinity;
+for (const s of sessions) {
+  const f = [];
+  const out = s.edits + s.commits;
+  const prompts = s.userPrompts.length;
+  if (!s.subagent && byTok.length >= 5 && tokTotal(s) >= p80 && out <= 2) f.push('heavy-for-output');
+  if (s.maxPrompt > 3000 && s.edits <= 2) f.push('long-brief-small-change');
+  if (s.agentCalls >= 3 && s.edits <= 3) f.push('subagent-fanout');
+  if (s.ceremony >= 5 && s.ceremony > s.edits) f.push('ceremony');
+  if (s.nudges >= 3 || (prompts >= 6 && s.toolCalls / prompts < 3)) f.push('micromanaged');
+  if ([...s.models.keys()].some(m => BIG_MODEL_RE.test(m)) && s.toolCalls <= 5 && s.turns <= 6) f.push('big-model-small-task');
+  s.overcomplication = f;
+}
+// Jellyfish-style returns curve: sessions binned by token use, output per bin.
+const nb = Math.min(5, byTok.length);
+const returnsCurve = Array.from({ length: nb }, (_, i) => {
+  const bin = byTok.slice(Math.floor(i * byTok.length / nb), Math.floor((i + 1) * byTok.length / nb));
+  const avg = f => bin.reduce((a, s) => a + f(s), 0) / Math.max(1, bin.length);
+  const t = avg(tokTotal), e = avg(s => s.edits + s.commits);
+  return { bin: i + 1, sessions: bin.length, avgTokens: Math.round(t), avgEditsAndCommits: +e.toFixed(1), outputPerMillionTokens: t ? +(e / t * 1e6).toFixed(1) : 0 };
+});
+const ocCounts = {}; for (const s of sessions) for (const f of s.overcomplication) ocCounts[f] = (ocCounts[f] || 0) + 1;
+const baselines = mains.map(s => s.baselineCtx || 0).sort((a, b) => a - b);
+const skillUse = new Map(); for (const s of sessions) for (const [k2, v] of s.skills) inc(skillUse, k2, v);
+const overcomplication = {
+  flags: ocCounts, returnsCurve,
+  medianBaselineContextTokens: baselines[Math.floor(baselines.length / 2)] || 0,
+  subagentRuns: sum(s => s.agentCalls), ceremonyCalls: sum(s => s.ceremony), nudgePrompts: sum(s => s.nudges),
+  toolCallsPerPrompt: +(sum(s => s.toolCalls) / Math.max(1, sum(s => s.userPrompts.length))).toFixed(1),
+  skillsInvoked: Object.fromEntries([...skillUse].sort((a, b) => b[1] - a[1])),
+  examples: sessions.filter(s => s.overcomplication.length).sort((a, b) => b.overcomplication.length - a.overcomplication.length || tokTotal(b) - tokTotal(a)).slice(0, TOP)
+    .map(s => ({ sessionId: s.sessionId, project: s.project, flags: s.overcomplication, tokens: tokTotal(s), edits: s.edits, commits: s.commits, subagents: s.agentCalls, firstPrompt: clip(s.userPrompts[0] || '', 120) })),
+};
 const U = { input: sum(s => s.usage.input), output: sum(s => s.usage.output), cacheRead: sum(s => s.usage.cacheRead), cacheWrite: sum(s => s.usage.cacheWrite) };
 const totalIn = U.input + U.cacheRead + U.cacheWrite;
 const toolTotals = new Map(); for (const s of sessions) for (const [k, v] of s.toolCounts) inc(toolTotals, k, v);
@@ -247,11 +327,32 @@ const perSession = sessions.map(s => ({
   start: s.start && new Date(s.start).toISOString(), minutes: s.start ? Math.round((s.end - s.start) / 60000) : 0,
   firstPrompt: clip(s.userPrompts[0] || '', 120), turns: s.turns, toolCalls: s.toolCalls, errors: s.errors.length,
   redundantReads: s.redundantReads.length, retryLoops: s.retryLoops, corrections: s.corrections, interrupts: s.interrupts,
-  compactions: s.compactions, tokens: s.usage,
+  compactions: s.compactions, tokens: s.usage, edits: s.edits, commits: s.commits, subagents: s.agentCalls, overcomplication: s.overcomplication,
   wasteScore: s.redundantReads.length + 2 * s.retryLoops.length + s.errors.length + 3 * s.corrections.length + s.interrupts + 2 * s.compactions,
 })).sort((a, b) => b.wasteScore - a.wasteScore);
 
-const report = { generatedAt: new Date().toISOString(), root: ROOT, sinceDays: SINCE_DAYS, totals, cross, worstSessions: perSession.slice(0, TOP), sessions: perSession };
+// ── instruction quality: what each prompt cost, and why ──────────
+const allPrompts = mains.flatMap(s => s.prompts.map(p => ({ ...p, sid: s.sessionId })));
+const work = allPrompts.filter(p => !p.nudge && p.tools > 0);   // prompts that set Claude to work
+const median = a => { const b = [...a].sort((x, y) => x - y); return b.length ? b[Math.floor(b.length / 2)] : 0; };
+const group = ps => ({ prompts: ps.length, medianCost: Math.round(median(ps.map(p => p.cost))), medianExploreBeforeFirstEdit: median(ps.map(p => p.explore)),
+  reworkRate: +(ps.filter(p => p.followedBy).length / Math.max(1, ps.length)).toFixed(2) });
+const vague = p => !p.anchored && p.chars < 300;
+const totalCost = allPrompts.reduce((a, p) => a + p.cost, 0);
+const reworked = allPrompts.filter(p => p.followedBy);
+const instructionQuality = {
+  costUnit: 'fresh-input-token equivalents (output ×5, cache write ×1.25, cache read ×0.1)',
+  totalCost: Math.round(totalCost),
+  vague: group(work.filter(vague)), anchored: group(work.filter(p => p.anchored)),
+  withCriteria: group(work.filter(p => p.criteria)), withoutCriteria: group(work.filter(p => !p.criteria)),
+  reworkCost: Math.round(reworked.reduce((a, p) => a + p.cost, 0)),
+  reworkShare: +(reworked.reduce((a, p) => a + p.cost, 0) / Math.max(1, totalCost)).toFixed(3),
+  costliestBadPrompts: allPrompts.filter(p => p.followedBy || (vague(p) && !p.nudge && p.explore >= 5))
+    .sort((a, b) => b.cost - a.cost).slice(0, TOP)
+    .map(p => ({ sessionId: p.sid, cost: Math.round(p.cost), why: [p.followedBy && `followed by ${p.followedBy}`, vague(p) && 'no concrete anchor', !p.criteria && 'no done-criteria', p.explore >= 5 && `${p.explore} lookups before first edit`].filter(Boolean), prompt: clip(p.text, 300) })),
+};
+
+const report = { generatedAt: new Date().toISOString(), root: ROOT, sinceDays: SINCE_DAYS, totals, instructionQuality, cross, overcomplication, worstSessions: perSession.slice(0, TOP), sessions: perSession };
 if (JSON_OUT) writeFileSync(JSON_OUT, JSON.stringify(report, null, 2));
 
 // ── markdown summary ─────────────────────────────────────────────
@@ -276,6 +377,28 @@ out.push(`# Claude work review — last ${SINCE_DAYS} days`, '',
   `| Search bursts (≥8 Grep/Glob in a row) | ${T.searchBursts} |`,
   `| Turns that batched parallel tool calls | ${(T.parallelToolTurnShare * 100).toFixed(1)}% |`, '');
 const section = (title, rows, fmt) => { if (rows.length) { out.push(`## ${title}`, ''); rows.forEach(r => out.push(`- ${fmt(r)}`)); out.push(''); } };
+const OC = overcomplication;
+{
+  const Q = instructionQuality, row = (name, g) => `| ${name} | ${g.prompts} | ${k(g.medianCost)} | ${g.medianExploreBeforeFirstEdit} | ${(g.reworkRate * 100).toFixed(0)}% |`;
+  out.push('## Instruction quality', '',
+    `Prompts followed by a correction or interrupt cost **~${k(Q.reworkCost)}** (${(Q.reworkShare * 100).toFixed(1)}% of all spend, in ${Q.costUnit}).`, '',
+    '| Prompts | Count | Median cost | Median lookups before first edit | Led to rework |', '|---|---|---|---|---|',
+    row('Vague (no file, code, error or URL; <300 chars)', Q.vague), row('Anchored (names a file, code, error or URL)', Q.anchored),
+    row('States done-criteria', Q.withCriteria), row('No done-criteria', Q.withoutCriteria), '');
+  if (Q.costliestBadPrompts.length) { out.push('Costliest prompts that were vague or needed correcting:', ''); Q.costliestBadPrompts.slice(0, 5).forEach(p => out.push(`- ~${k(p.cost)} (${p.why.join('; ')}) \`${p.sessionId.slice(0, 8)}\`: “${clip(p.prompt, 160)}”`)); out.push(''); }
+}
+if (Object.keys(OC.flags).length || OC.returnsCurve.length > 1) {
+  out.push('## Overcomplication', '',
+    `Always-on context per session (median): ~${k(OC.medianBaselineContextTokens)} tokens · tool calls per prompt: ${OC.toolCallsPerPrompt} · subagents: ${OC.subagentRuns} · todo/plan calls: ${OC.ceremonyCalls} · “continue/yes” prompts: ${OC.nudgePrompts}`, '');
+  if (Object.keys(OC.flags).length) out.push('Flags: ' + Object.entries(OC.flags).map(([f, n]) => `${f} ×${n}`).join(', '), '');
+  if (OC.returnsCurve.length > 1) {
+    out.push('Output per token, sessions binned by token use (does more spend buy more change?):', '', '| Bin | Sessions | Avg tokens | Avg edits+commits | per 1M tokens |', '|---|---|---|---|---|');
+    for (const b of OC.returnsCurve) out.push(`| ${b.bin} | ${b.sessions} | ${k(b.avgTokens)} | ${b.avgEditsAndCommits} | ${b.outputPerMillionTokens} |`);
+    out.push('');
+  }
+  OC.examples.slice(0, 5).forEach(e => out.push(`- \`${e.sessionId.slice(0, 8)}\` ${e.flags.join(', ')} — ${k(e.tokens)} tokens, ${e.edits} edits, ${e.commits} commits, ${e.subagents} subagents: “${e.firstPrompt}”`));
+  out.push('');
+}
 section('Instructions you repeat across sessions', cross.repeatedPrompts, r => `${r.sessions} sessions / ${r.occurrences}×: “${r.example}”`);
 section('Corrections you keep making', cross.recurringCorrections, r => `${r.sessions} sessions / ${r.count}×: “${r.example}”`);
 section('Most common tool errors', cross.topErrors, r => `${r.count}× in ${r.sessions} sessions — **${r.tool}**: ${r.msg}`);
