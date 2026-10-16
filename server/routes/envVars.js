@@ -129,17 +129,19 @@ router.get('/:slug/env/:env', requireAppUser, (req, res) => {
       id: v.id,
       key: v.key,
       value: '********',
-      // The length and tail characters are for people who could read the whole value anyway.
-      ...(canReveal && { length: plain.length }),
+      // Length, tail and fingerprint are for people who could read the whole value
+      // anyway: a member who can reveal sandbox would otherwise learn a production
+      // value by matching its fingerprint against a sandbox one.
+      ...(canReveal && { length: plain.length, fingerprint: secretFingerprint(plain) }),
       preview: canReveal ? secretPreview(plain) : opaquePreview(plain),
-      fingerprint: secretFingerprint(plain),
       updated_at: v.updated_at,
     };
   });
 
   // Check for matching values across envs (safety warning)
   const warnings = [];
-  if (env === 'sandbox') {
+  // Comparing against production tells the reader something about production values.
+  if (env === 'sandbox' && isAppOwnerOrPlatformAdmin(req.user, req.app)) {
     const prodVars = db.prepare(
       'SELECT key, value_encrypted FROM env_vars WHERE app_id = ? AND env = ?'
     ).all(req.app.id, 'production');

@@ -926,7 +926,7 @@ const TOOLS = [
       'List an app\'s secrets (encrypted env vars) with their values MASKED — safe to show in chat. ' +
       'For each key you get: is_set, length, a short preview (last 3 chars, rest masked; fully masked for short values), ' +
       'a keyed `fingerprint` (compare two envs or detect a changed value without seeing it; it cannot be checked against guesses), and updated_at. ' +
-      'For a PRODUCTION value you may not reveal (anyone but the app owner or a platform admin), length is left out and the preview is fully masked. ' +
+      'For a PRODUCTION value you may not reveal (anyone but the app owner or a platform admin), length and fingerprint are left out and the preview is fully masked. ' +
       'This is what you want for "is X set?", "did the key change?", "which vars exist?". ' +
       'Does NOT return plaintext — a secret never lands in the transcript. To read one actual value, use appcrane_reveal_secret with a specific key. ' +
       'Defaults to sandbox; pass env="production" only when the user explicitly says production. App-admin or AppCrane admin only.',
@@ -956,7 +956,7 @@ const TOOLS = [
         try { plain = decrypt(r.value_encrypted); } catch (_) { /* below */ }
         if (plain == null) return { key: r.key, is_set: true, error: 'decrypt_failed', updated_at: r.updated_at };
         // An app admin who may not reveal production sees neither its length nor its tail.
-        if (!canReveal) return { key: r.key, is_set: true, preview: opaquePreview(plain), fingerprint: secretFingerprint(plain), updated_at: r.updated_at };
+        if (!canReveal) return { key: r.key, is_set: true, preview: opaquePreview(plain), updated_at: r.updated_at };
         return { key: r.key, is_set: true, length: plain.length, preview: secretPreview(plain), fingerprint: secretFingerprint(plain), updated_at: r.updated_at };
       });
       log.info(`MCP: env metadata (masked) read for ${app.slug}/${env} by user ${user.id}`);

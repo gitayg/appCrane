@@ -1,4 +1,7 @@
 {
+  "2.110.1": [
+    "Someone who can't reveal a production value no longer sees its fingerprint either, so it can't be compared with a sandbox value they can see."
+  ],
   "2.110.0": [
     "Environment variables open masked. Reveal one key at a time, copy it once revealed, or replace a value without seeing the old one.",
     "Every request has its own page, and \"In coder\" opens the coder session the request was actually sent to.",

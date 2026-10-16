@@ -59,7 +59,7 @@ export function EnvVarRow({ v, revealed, canReveal, revealRefusal, busy, onRevea
         ) : (
           <span>
             {v.preview || v.value}
-            {v.fingerprint && <span style={{ color: 'var(--dim)', marginLeft: 8 }} title="sha256 fingerprint of the value">#{v.fingerprint}</span>}
+            {v.fingerprint && <span style={{ color: 'var(--dim)', marginLeft: 8 }} title="Fingerprint of the value: it changes when the value changes">#{v.fingerprint}</span>}
           </span>
         )}
       </td>

@@ -204,10 +204,12 @@ test('the masked list carries masks and fingerprints, never plaintext, and recor
   assert.equal(prodMember.json.can_reveal, false, 'a member is told they can reveal production');
   assert.match(prodMember.json.reveal_refusal, /owner or a platform admin/);
   assert.match(prodMember.json.vars[0].preview, /^•+$/, 'a viewer who cannot reveal saw the value\'s tail');
-  assert.ok(prodMember.json.vars[0].fingerprint === fp(SECRETS.production.PROD_KEY));
+  assert.equal(prodMember.json.vars[0].fingerprint, undefined, 'a viewer who cannot reveal production got a fingerprint to match against sandbox');
   assert.equal(prodMember.json.vars[0].length, undefined, 'a viewer who cannot reveal saw the value\'s length');
+  const prodOwnerFp = (await call(OWNER, 'GET', '/api/apps/onekey/env/production')).json.vars[0].fingerprint;
   const plainHash = crypto.createHash('sha256').update(SECRETS.production.PROD_KEY).digest('hex').slice(0, 8);
-  assert.notEqual(prodMember.json.vars[0].fingerprint, plainHash, 'the fingerprint is a plain hash anyone can check guesses against');
+  assert.equal(prodOwnerFp, fp(SECRETS.production.PROD_KEY));
+  assert.notEqual(prodOwnerFp, plainHash, 'the fingerprint is a plain hash anyone can check guesses against');
 
   const prodOwner = await call(OWNER, 'GET', '/api/apps/onekey/env/production');
   assert.equal(prodOwner.json.can_reveal, true);

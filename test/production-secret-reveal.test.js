@@ -58,7 +58,7 @@ test('MCP: appcrane_get_secret hides a production value\'s length and tail from 
   const v = admin.vars.find((x) => x.key === 'API_TOKEN');
   assert.equal(v.length, undefined, 'an app admin saw a production value\'s length');
   assert.match(v.preview, /^•+$/, 'an app admin saw a production value\'s tail');
-  assert.ok(v.fingerprint, 'the fingerprint should still be there to compare values');
+  assert.equal(v.fingerprint, undefined, 'an app admin got a production fingerprint to match against sandbox');
   const owner = unwrap(await callTool(OWNER.row, 'appcrane_get_secret', { slug: 'reveal', env: 'production' }));
   assert.equal(owner.vars.find((x) => x.key === 'API_TOKEN').length, 'secret-production'.length);
 });
