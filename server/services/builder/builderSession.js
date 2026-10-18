@@ -286,7 +286,7 @@ export async function createSession(app, userId, onLog, { takeOver = false } = {
       status: 'idle',
       container_id: c.containerId,
       workspace_dir: c.workspaceDir,
-      claude_session_id: c.claudeSessionId || null,
+      ...(c.claudeSessionId ? { claude_session_id: c.claudeSessionId } : {}),
     });
 
     try {
@@ -334,7 +334,7 @@ export async function resumeSession(sessionId, onLog, { takeOver = false } = {})
     status: 'idle',
     container_id: c.containerId,
     workspace_dir: c.workspaceDir,
-    claude_session_id: c.claudeSessionId || null,
+    ...(c.claudeSessionId ? { claude_session_id: c.claudeSessionId } : {}),
   });
   publish(sessionId, { type: 'status', status: 'idle' });
 }

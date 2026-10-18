@@ -63,6 +63,27 @@ export const CONTAINER_CLAUDE_PROJECTS_DIR = '/home/studio/.claude/projects';
 export function transcriptDirFor(slug) { return join(appDir(slug), 'claude-projects'); }
 
 /**
+ * The app's one coder conversation outlives its container: a fresh container
+ * resumes the latest conversation whose transcript is still on disk, so every
+ * user's session continues the same history after an idle stop, a restart or
+ * a take-over. Null when there is none to resume.
+ */
+export function lastClaudeSessionId(slug) {
+  try {
+    const rows = getDb().prepare(`
+      SELECT claude_session_id AS id FROM coder_sessions
+      WHERE app_slug = ? AND claude_session_id IS NOT NULL
+      ORDER BY last_activity_at DESC, rowid DESC LIMIT 20
+    `).all(slug);
+    for (const { id } of rows) {
+      if (!/^[A-Za-z0-9_-]{1,128}$/.test(String(id))) continue;
+      if (existsSync(join(transcriptDirFor(slug), '-workspace', `${id}.jsonl`))) return id;
+    }
+  } catch (_) {}
+  return null;
+}
+
+/**
  * Files a user attached to coder messages, per session. Kept across restarts
  * like the transcripts, because a queued follow-up or a resumed session still
  * refers to them. Never inside the workspace: an attachment is not a change to
@@ -325,7 +346,7 @@ export async function getOrCreate(app, onLog) {
       containerId,
       workspaceDir,
       branchName,
-      claudeSessionId: null,
+      claudeSessionId: lastClaudeSessionId(slug),
       lastActivityAt: Date.now(),
       skillsCleanup,
       credsCleanup,
