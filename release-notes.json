@@ -1,4 +1,7 @@
 {
+  "2.111.2": [
+    "The browser tab now shows which AppCrane you are on: the server's address followed by \"- AppCrane\"."
+  ],
   "2.111.1": [
     "The coder keeps one conversation per app that survives restarts, idle stops and take-overs, so every session picks up the full history, including colleagues' turns."
   ],
