@@ -453,14 +453,25 @@ describe('LIVE', { skip: liveSkip }, () => {
   test('the throwaway container is gone and its anonymous volume with it', async (t) => {
     if (problem) return t.skip(problem);
     const before = (await dk(['volume', 'ls', '-q'])).split('\n').filter(Boolean).length;
+    const seedNames = async () => (await dk(['ps', '-a', '--filter', 'label=appcrane-seed=true', '--format', '{{.Names}}']))
+      .split('\n').map((n) => n.trim()).filter(Boolean);
+    const seedBefore = new Set(await seedNames());
     const fresh = scratch('leak-check');
     await copyFromImage({ image: IMAGE, copies: [{ containerPath: '/seeded', destDir: fresh }] });
     const after = (await dk(['volume', 'ls', '-q'])).split('\n').filter(Boolean).length;
     assert.equal(after, before,
       'this image declares VOLUME /seeded, so `docker create` makes an anonymous volume — measured: ' +
       '`docker rm -f` leaves it dangling and only `docker rm -fv` removes it');
-    const left = (await dk(['ps', '-a', '--filter', 'label=appcrane-seed=true', '-q'])).trim();
-    assert.equal(left, '', 'the throwaway container must not survive the copy');
+    // Other files' tests seed volumes in parallel, so a seed container that is
+    // not ours can exist for a moment. A leaked one never goes away; a
+    // neighbour's does, so wait out the transient ones rather than fail on them.
+    let left = [];
+    for (let i = 0; i < 30; i++) {
+      left = (await seedNames()).filter((n) => !seedBefore.has(n));
+      if (!left.length) break;
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    assert.deepEqual(left, [], 'the throwaway container must not survive the copy');
   });
 
   test('an image path that does not exist leaves the mount empty and does not throw', async (t) => {

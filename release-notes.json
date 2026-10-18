@@ -1,4 +1,7 @@
 {
+  "2.111.3": [
+    "No visible changes: a test that sometimes failed when tests ran side by side is now reliable."
+  ],
   "2.111.2": [
     "The browser tab now shows which AppCrane you are on: the server's address followed by \"- AppCrane\"."
   ],
