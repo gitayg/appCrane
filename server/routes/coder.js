@@ -299,7 +299,20 @@ router.use('/:slug', (req, res, next) => {
   next();
 });
 
+// Another user holds the app's coder: BUILDER_OCCUPIED (idle, take_over would
+// work), BUILDER_BUSY (mid-turn, nothing can take it), TAKEOVER_FAILED (their
+// work could not be saved, so nothing was touched).
+function throwOccupancy(err) {
+  if (['BUILDER_OCCUPIED', 'BUILDER_BUSY', 'TAKEOVER_FAILED'].includes(err.code)) {
+    throw new AppError(err.message, 409, err.code);
+  }
+}
+
 // ── POST /api/coder/:slug/session — start a new session ─────────────────
+//
+// Body (optional): { take_over: true } — when another user's session holds the
+// app's container and is idle, save their unreleased work to an agent/* branch,
+// pause their session and start this one (builder/coderTakeover.js).
 
 router.post('/:slug/session', auditMiddleware('coder.start'), async (req, res) => {
   const app = getApp(req.params.slug, req.user);
@@ -319,12 +332,10 @@ router.post('/:slug/session', auditMiddleware('coder.start'), async (req, res) =
   };
 
   try {
-    const sessionId = await createSession(app, req.user.id, onLog);
+    const sessionId = await createSession(app, req.user.id, onLog, { takeOver: req.body?.take_over === true });
     res.status(201).json({ session_id: sessionId, log: logs });
   } catch (err) {
-    if (err.code === 'BUILDER_OCCUPIED') {
-      throw new AppError(err.message, 409, 'BUILDER_OCCUPIED');
-    }
+    throwOccupancy(err);
     throw err;
   }
 });
@@ -415,12 +426,18 @@ router.post('/:slug/requests/dispatch', async (req, res) => {
 
 // ── GET /api/coder/:slug/session — get active/latest session ─────────────
 
+// The caller's own live session first: once they have started one, the panel
+// must not keep opening a colleague's newer one. Otherwise the app's latest,
+// with its owner's display name, so the panel can say whose it is.
 router.get('/:slug/session', (req, res) => {
   getApp(req.params.slug, req.user);
   const db = getDb();
   const session = db.prepare(`
-    SELECT * FROM coder_sessions WHERE app_slug = ? ORDER BY created_at DESC LIMIT 1
-  `).get(req.params.slug);
+    SELECT s.*, u.name AS user_name FROM coder_sessions s LEFT JOIN users u ON u.id = s.user_id
+    WHERE s.app_slug = ?
+    ORDER BY (s.user_id = ? AND s.status IN ('starting', 'idle', 'active', 'queued', 'paused')) DESC, s.created_at DESC, s.rowid DESC
+    LIMIT 1
+  `).get(req.params.slug, req.user.id);
   if (!session) return res.json({ session: null });
   res.json({ session });
 });
@@ -443,7 +460,8 @@ router.get('/:slug/session/:id', (req, res) => {
   // Pending follow-ups ride along with the transcript: this is the call the
   // chat makes on every (re)connect, so it is what makes a typed-ahead message
   // survive F5.
-  res.json({ session, messages, followups: listFollowups(session.id) });
+  const userName = db.prepare('SELECT name FROM users WHERE id = ?').get(session.user_id)?.name ?? null;
+  res.json({ session: { ...session, user_name: userName }, messages, followups: listFollowups(session.id) });
 });
 
 // ── POST /api/coder/:slug/session/:id/attachments — upload one file ─────
@@ -578,11 +596,10 @@ router.post('/:slug/session/:id/resume', auditMiddleware('coder.resume'), async 
 
   const logs = [];
   try {
-    await resumeSession(req.params.id, (msg) => { logs.push(msg); log.info(`[builder:resume] ${msg}`); });
+    await resumeSession(req.params.id, (msg) => { logs.push(msg); log.info(`[builder:resume] ${msg}`); },
+      { takeOver: req.body?.take_over === true });
   } catch (err) {
-    if (err.code === 'BUILDER_OCCUPIED') {
-      throw new AppError(err.message, 409, 'BUILDER_OCCUPIED');
-    }
+    throwOccupancy(err);
     throw err;
   }
   res.json({ message: 'Session resumed', log: logs });

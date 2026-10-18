@@ -369,7 +369,18 @@ test('an AppCrane restart clears workspaces but keeps every app transcript', asy
 
   for (const t of transcripts) assert.equal(existsSync(t.workspace), true, `${t.slug} has no workspace to clear`);
 
+  // Unreleased work in app a's live session: a restart must save it first.
+  const uid = userRow();
+  const sid = session(a, ca, uid);
+  writeFileSync(join(ca.workspaceDir, 'UNRELEASED.js'), 'export const keep = 1;\n');
+
   appContainer.recoverOrphans();
+
+  const bare = lg.repoPath('ev-restart-a');
+  const branch = `refs/heads/agent/${uid}/${sid}`;
+  assert.ok(refsIn(bare).includes(branch), `the restart sweep wiped unreleased work without saving it; refs are ${refsIn(bare).join(', ')}`);
+  assert.equal(blobIn(bare, branch, 'UNRELEASED.js'), 'export const keep = 1;');
+  assert.equal(treeOf(bare, 'refs/heads/main').includes('UNRELEASED.js'), false, 'the restart rescue landed on main');
 
   for (const t of transcripts) {
     assert.equal(existsSync(t.workspace), false, `${t.slug}: the workspace survived the restart sweep`);

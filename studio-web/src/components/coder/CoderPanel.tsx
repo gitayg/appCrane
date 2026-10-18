@@ -67,7 +67,12 @@ export function CoderPanel(props: Props) {
     : !isLiveStatus(s.status) ? 'ended'
     : props.viewerId != null && s.session.user_id !== props.viewerId ? 'other_user'
     : null
-  const readOnly = pinKind === 'ended' || pinKind === 'other_user'
+  // Someone else's session — pinned or simply the app's latest. Only its owner
+  // can send it messages or resume it (NOT_SESSION_OWNER), so the panel offers
+  // the viewer their own session instead of a Resume and a composer that 403.
+  const otherUser = !!s.session && props.viewerId != null && s.session.user_id !== props.viewerId
+  const readOnly = pinKind === 'ended' || pinKind === 'other_user' || otherUser
+  const othersTurnRunning = otherUser && s.streaming
   const [tab, setTab]   = useState<'chat' | 'changes'>('chat')
   const [draft, setDraft] = useState('')
   // Files waiting to go with the next message: pasted, dropped or picked.
@@ -183,7 +188,22 @@ export function CoderPanel(props: Props) {
       ) : (
         <>
           <div className="coder-body" ref={scrollRef}>
-            {pinKind && <CoderPinNote kind={pinKind} onUnpin={s.unpin} />}
+            {pinKind && pinKind !== 'other_user' && <CoderPinNote kind={pinKind} onUnpin={s.unpin} />}
+            {otherUser && isLiveStatus(s.status) && (
+              <div className="coder-paused coder-other-user" role="status">
+                This session belongs to <strong>{s.session?.user_name || 'another user'}</strong>. Only they can
+                send it messages or resume it.{' '}
+                {othersTurnRunning
+                  ? 'A turn is running in it; you can start your own session once it finishes.'
+                  : 'Start your own session to work here. If theirs still holds the coder, their unreleased changes are saved to a branch first and their session is paused.'}
+                <button
+                  type="button"
+                  className="coder-btn coder-btn-xs"
+                  disabled={s.starting || othersTurnRunning}
+                  onClick={() => void s.start(true)}
+                >{s.starting ? 'Starting…' : 'Start my own session'}</button>
+              </div>
+            )}
             {s.phase === 'loading' && <div className="coder-note">Looking for a session…</div>}
 
             {s.phase === 'absent' && (
@@ -193,7 +213,7 @@ export function CoderPanel(props: Props) {
                   opens a container on this app’s repository; you describe the change,
                   review what it wrote, then release the files you want to sandbox.
                 </p>
-                {s.error && <CoderRefusal error={s.error} />}
+                {s.error && <CoderRefusal error={s.error} onTakeOver={() => void s.start(true)} />}
                 <button
                   type="button"
                   className="coder-btn coder-btn-primary"
@@ -244,10 +264,15 @@ export function CoderPanel(props: Props) {
                   </div>
                 )
             )}
-            {s.phase === 'ready' && s.error && <CoderRefusal error={s.error} />}
+            {s.phase === 'ready' && s.error && (
+              <CoderRefusal
+                error={s.error}
+                onTakeOver={otherUser ? () => void s.start(true) : () => void s.resume(true)}
+              />
+            )}
           </div>
 
-          {s.sessionId && (
+          {s.sessionId && !otherUser && (
             <div
               className="coder-composer"
               onDragOver={e => { if (e.dataTransfer.types.includes('Files')) e.preventDefault() }}

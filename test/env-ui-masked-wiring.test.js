@@ -41,10 +41,10 @@ test('editing opens an empty field and saves without revealing the old value', (
   assert.match(saveFn, /setEnvVar\(slug, env, key, value\)/);
 });
 
-test('Copy exists only once the value has been revealed', () => {
-  const copyBranch = row.slice(row.indexOf('{revealed !== undefined ? ('), row.indexOf('>Reveal</button>'));
-  assert.match(copyBranch, /Copy/, 'Copy is not inside the revealed branch');
-  assert.equal((row.match(/'Copy'/g) || []).length, 1, 'Copy is rendered outside the revealed branch');
+test('the env row shows the value through the eye, not a Reveal button', () => {
+  assert.doesNotMatch(row, />Reveal<\/button>/, 'the row still renders a Reveal text button');
+  assert.match(row, /<SecretValue\b[\s\S]*?reveal=\{onReveal\}/, 'the row does not hand its reveal to SecretValue');
+  assert.doesNotMatch(row, /'Copy'|>Copy</, 'the row renders its own Copy button outside SecretValue');
 });
 
 test('the Applications env panel uses the masked panel and never bulk-reveals', () => {

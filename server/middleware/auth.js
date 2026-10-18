@@ -47,7 +47,7 @@ export function requireAuth(req, res, next) {
       const keyHash = hashApiKey(apiKey);
       const row = db.prepare(`
         SELECT umk.id AS umk_id, umk.label, umk.expires_at, umk.revoked_at,
-               umk.read_only,
+               umk.read_only, umk.coder_session_id, umk.app_id,
                u.id AS uid, u.name, u.email, u.role, u.active, u.kind, u.username,
                u.mcp_app_scope
         FROM user_mcp_keys umk
@@ -60,6 +60,17 @@ export function requireAuth(req, res, next) {
         if (!row.active) return next(new AppError('Account is deactivated', 403, 'DEACTIVATED'));
         if (!isMcpPath) {
           return next(new AppError('Personal MCP keys (dhk_mcp_*) are restricted to /api/mcp and /api/files/staged endpoints', 403, 'KEY_SCOPE_RESTRICTED'));
+        }
+        let coder = null;
+        if (row.coder_session_id != null) {
+          // A coder session key: POST /api/mcp only (not staged files, not the
+          // admin catalogue or GitHub-container routes beside it), one app.
+          if (req.method !== 'POST' || !/^\/api\/mcp\/?$/.test(path)) {
+            return next(new AppError('Coder session keys are restricted to POST /api/mcp', 403, 'KEY_SCOPE_RESTRICTED'));
+          }
+          const app = db.prepare('SELECT slug FROM apps WHERE id = ?').get(row.app_id);
+          if (!app) return next(new AppError('Invalid API key', 401, 'UNAUTHORIZED'));
+          coder = { sessionId: row.coder_session_id, appId: row.app_id, slug: app.slug };
         }
         try { db.prepare("UPDATE user_mcp_keys SET last_used_at = datetime('now') WHERE id = ?").run(row.umk_id); } catch (_) {}
         // SECURITY: mcp_app_scope must be carried onto req.user. This is a
@@ -79,10 +90,14 @@ export function requireAuth(req, res, next) {
         req.user = {
           id: row.uid, name: row.name, email: row.email,
           role: row.role, active: row.active, kind: row.kind, username: row.username,
-          mcp_app_scope: row.mcp_app_scope,
-          mcp_read_only: !!row.read_only,
+          mcp_app_scope: coder ? coderScope(row.mcp_app_scope, coder.slug) : row.mcp_app_scope,
+          mcp_read_only: !!row.read_only || !!coder,
+          ...(coder ? { coder_key: coder } : {}),
         };
-        req.user_mcp_key = { id: row.umk_id, label: row.label, read_only: !!row.read_only };
+        req.user_mcp_key = {
+          id: row.umk_id, label: row.label, read_only: !!row.read_only || !!coder,
+          ...(coder ? { coder } : {}),
+        };
         return next();
       }
     }
@@ -119,6 +134,17 @@ export function requireAuth(req, res, next) {
   }
 
   return next(new AppError('Missing X-API-Key header or Bearer token', 401, 'UNAUTHORIZED'));
+}
+
+// A coder key's scope is its one app, inside whatever scope its owner's keys
+// already have: an owner scope that leaves the app out locks the key out.
+function coderScope(ownerScope, slug) {
+  if (ownerScope != null && ownerScope !== '') {
+    let list = null;
+    try { list = JSON.parse(ownerScope); } catch (_) { list = null; }
+    if (Array.isArray(list) && !list.map(String).includes(slug)) return '[]';
+  }
+  return JSON.stringify([slug]);
 }
 
 /**

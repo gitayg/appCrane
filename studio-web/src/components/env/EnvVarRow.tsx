@@ -1,14 +1,14 @@
 import { useState, type CSSProperties } from 'react'
 import type { MaskedEnvVar } from './envVarsApi'
+import { SecretValue } from '../secret/SecretValue'
+import { PasswordInput } from '../secret/PasswordInput'
 
 interface Props {
   v: MaskedEnvVar
-  revealed: string | undefined
   canReveal: boolean
   revealRefusal?: string
   busy: boolean
-  onReveal: () => void
-  onHide: () => void
+  onReveal: () => Promise<string>
   onSave: (value: string) => Promise<boolean>
   onDelete: () => void
   compact?: boolean
@@ -16,10 +16,9 @@ interface Props {
 
 const mono: CSSProperties = { fontFamily: "'SF Mono',Monaco,monospace", fontSize: '.8rem' }
 
-export function EnvVarRow({ v, revealed, canReveal, revealRefusal, busy, onReveal, onHide, onSave, onDelete, compact }: Props) {
+export function EnvVarRow({ v, canReveal, revealRefusal, busy, onReveal, onSave, onDelete, compact }: Props) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState('')
-  const [copied, setCopied] = useState(false)
   const btn = compact ? 'btn btn-xs' : 'btn btn-sm'
 
   async function save() {
@@ -27,24 +26,15 @@ export function EnvVarRow({ v, revealed, canReveal, revealRefusal, busy, onRevea
     if (await onSave(draft)) { setEditing(false); setDraft('') }
   }
 
-  async function copy() {
-    if (revealed === undefined) return
-    try {
-      await navigator.clipboard.writeText(revealed)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1500)
-    } catch { /* clipboard denied: the value is on screen */ }
-  }
-
   return (
     <tr data-env-key={v.key}>
       <td style={{ ...mono, whiteSpace: 'nowrap' }}>{v.key}</td>
       <td style={{ ...mono, wordBreak: 'break-all' }}>
         {editing ? (
-          <input
-            type="text"
+          <PasswordInput
+            label={`new value for ${v.key}`}
             autoFocus
-            autoComplete="off"
+            autoComplete="new-password"
             spellCheck={false}
             placeholder="Enter a new value"
             value={draft}
@@ -52,15 +42,19 @@ export function EnvVarRow({ v, revealed, canReveal, revealRefusal, busy, onRevea
             onKeyDown={e => { if (e.key === 'Enter') save(); if (e.key === 'Escape') { setEditing(false); setDraft('') } }}
             style={{ ...mono, width: '100%', padding: '4px 8px' }}
           />
-        ) : revealed !== undefined ? (
-          <span>{revealed}</span>
         ) : v.error ? (
           <span style={{ color: 'var(--red)' }}>cannot decrypt</span>
         ) : (
-          <span>
-            {v.preview || v.value}
-            {v.fingerprint && <span style={{ color: 'var(--dim)', marginLeft: 8 }} title="Fingerprint of the value: it changes when the value changes">#{v.fingerprint}</span>}
-          </span>
+          <SecretValue
+            key={v.updated_at}
+            name={v.key}
+            masked={v.preview || v.value}
+            fingerprint={v.fingerprint}
+            disabled={!canReveal || busy}
+            disabledReason={canReveal ? undefined : revealRefusal}
+            compact={compact}
+            reveal={onReveal}
+          />
         )}
       </td>
       <td style={{ whiteSpace: 'nowrap', textAlign: 'right' }}>
@@ -71,20 +65,6 @@ export function EnvVarRow({ v, revealed, canReveal, revealRefusal, busy, onRevea
           </>
         ) : (
           <>
-            {revealed !== undefined ? (
-              <>
-                <button className={btn} onClick={copy}>{copied ? 'Copied' : 'Copy'}</button>{' '}
-                <button className={btn + ' btn-dim'} onClick={onHide}>Hide</button>
-              </>
-            ) : (
-              <button
-                className={btn + ' btn-dim'}
-                disabled={!canReveal || busy || !!v.error}
-                title={canReveal ? 'Decrypt this one value (audited; the app owners are notified)' : revealRefusal}
-                style={canReveal ? undefined : { opacity: 0.5, cursor: 'not-allowed' }}
-                onClick={onReveal}
-              >Reveal</button>
-            )}{' '}
             <button className={btn} onClick={() => setEditing(true)}>Edit</button>{' '}
             <button className={btn + ' btn-red'} onClick={onDelete}>Del</button>
           </>

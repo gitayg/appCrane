@@ -184,7 +184,7 @@ router.post('/', requireAuth, async (req, res) => {
         // Append github_* tools if the caller provided X-Github-Token. Lazy-
         // spawns a container; idle-reaped after settings.github_mcp_idle_timeout.
         let githubTools = [];
-        if (req.github_token) {
+        if (req.github_token && !req.user_mcp_key?.coder) {
           try {
             githubTools = await ghListTools(req.user.id, req.github_token);
           } catch (e) {
@@ -220,6 +220,13 @@ router.post('/', requireAuth, async (req, res) => {
             const upstreamName = stripPrefix(params.name, 'mcp__appcrane__');
             result = await callTool(req.user, upstreamName, params.arguments, req.user_mcp_key);
           } else {
+            // The coder's key is AppCrane-only: no GitHub passthrough, whatever headers it sends.
+            if (req.user_mcp_key?.coder) {
+              return res.json({
+                jsonrpc: '2.0', id,
+                error: { code: -32000, message: `Forbidden: the coder's AppCrane connection has no tool '${params.name}'` },
+              });
+            }
             if (!req.github_token) {
               return res.json({
                 jsonrpc: '2.0', id,

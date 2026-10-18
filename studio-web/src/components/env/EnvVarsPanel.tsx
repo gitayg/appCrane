@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState, type CSSProperties } from 'react'
 import { EnvVarRow } from './EnvVarRow'
+import { PasswordInput } from '../secret/PasswordInput'
 import { loadMaskedEnv, revealEnvVar, setEnvVar, deleteEnvVar, type EnvName, type MaskedEnvList } from './envVarsApi'
 
 export interface EnvVarsPanelProps {
@@ -16,7 +17,7 @@ const errText = (e: unknown) => (e as Error)?.message || String(e)
 export function EnvVarsPanel({ slug, env, reload, onMsg, onChanged, compact }: EnvVarsPanelProps) {
   const [data, setData] = useState<MaskedEnvList | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [revealed, setRevealed] = useState<Record<string, string>>({})
+  const [generation, setGeneration] = useState(0)
   const [busyKey, setBusyKey] = useState<string | null>(null)
   const [newKey, setNewKey] = useState('')
   const [newVal, setNewVal] = useState('')
@@ -25,39 +26,23 @@ export function EnvVarsPanel({ slug, env, reload, onMsg, onChanged, compact }: E
   const load = useCallback(() => {
     setError(null)
     loadMaskedEnv(slug, env)
-      .then(d => setData(d))
+      .then(d => { setData(d); setGeneration(g => g + 1) })
       .catch(e => setError(errText(e) || 'Cannot load env vars'))
   }, [slug, env])
 
+  useEffect(() => { setData(null) }, [slug, env])
+
   useEffect(() => {
-    setRevealed({})
     load()
   }, [load, reload])
 
-  const forget = (key: string) => setRevealed(prev => {
-    const next = { ...prev }
-    delete next[key]
-    return next
-  })
-
-  async function reveal(key: string) {
-    setBusyKey(key)
-    try {
-      const r = await revealEnvVar(slug, env, key)
-      setRevealed(prev => ({ ...prev, [key]: r.value }))
-    } catch (e) {
-      msg(errText(e), false)
-    } finally {
-      setBusyKey(null)
-    }
-  }
+  const reveal = async (key: string) => (await revealEnvVar(slug, env, key)).value
 
   async function save(key: string, value: string): Promise<boolean> {
     setBusyKey(key)
     try {
       const r = await setEnvVar(slug, env, key, value)
       msg(r.message || `Updated ${key}`, true)
-      forget(key)
       onChanged?.()
       load()
       return true
@@ -74,7 +59,6 @@ export function EnvVarsPanel({ slug, env, reload, onMsg, onChanged, compact }: E
     try {
       await deleteEnvVar(slug, env, key)
       msg('Deleted ' + key, true)
-      forget(key)
       onChanged?.()
       load()
     } catch (e) {
@@ -89,7 +73,6 @@ export function EnvVarsPanel({ slug, env, reload, onMsg, onChanged, compact }: E
       const r = await setEnvVar(slug, env, k, newVal)
       msg(r.message || 'Added', true)
       setNewKey(''); setNewVal('')
-      forget(k)
       onChanged?.()
       load()
     } catch (e) {
@@ -121,15 +104,13 @@ export function EnvVarsPanel({ slug, env, reload, onMsg, onChanged, compact }: E
             <tbody>
               {data.vars.map(v => (
                 <EnvVarRow
-                  key={v.key}
+                  key={`${env}/${v.key}/${generation}`}
                   v={v}
-                  revealed={revealed[v.key]}
                   canReveal={canReveal}
                   revealRefusal={data.reveal_refusal}
                   busy={busyKey === v.key}
                   compact={compact}
                   onReveal={() => reveal(v.key)}
-                  onHide={() => forget(v.key)}
                   onSave={value => save(v.key, value)}
                   onDelete={() => remove(v.key)}
                 />
@@ -143,7 +124,9 @@ export function EnvVarsPanel({ slug, env, reload, onMsg, onChanged, compact }: E
       )}
       <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
         <input type="text" placeholder="KEY" value={newKey} onChange={e => setNewKey(e.target.value)} style={{ ...inputStyle, flex: 1 }} />
-        <input type="text" placeholder="value" autoComplete="off" value={newVal} onChange={e => setNewVal(e.target.value)} style={{ ...inputStyle, flex: 2 }} />
+        <span style={{ flex: 2, minWidth: 0, display: 'flex' }}>
+          <PasswordInput label="new value" placeholder="value" autoComplete="new-password" value={newVal} onChange={e => setNewVal(e.target.value)} style={{ ...inputStyle, width: '100%' }} />
+        </span>
         <button className={compact ? 'btn btn-xs' : 'btn btn-sm'} onClick={add}>Add</button>
       </div>
     </div>

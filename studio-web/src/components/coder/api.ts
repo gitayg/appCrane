@@ -18,6 +18,8 @@ export interface CoderSession {
   container_id:       string | null
   workspace_dir:      string | null
   status:             CoderStatus
+  /** Display name of the user the session belongs to. */
+  user_name?:         string | null
   claude_session_id:  string | null
   cost_tokens:        number
   cost_usd_cents:     number
@@ -181,9 +183,12 @@ export const coderApi = {
   latestSession: (slug: string) =>
     adminApi.get<{ session: CoderSession | null }>(`${base(slug)}/session`),
 
-  /** 201 { session_id, log[] }. Refuses with NOT_CRANE_HOSTED / NO_REPO / NOT_CONFIGURED / BUILDER_OCCUPIED. */
-  startSession: (slug: string) =>
-    adminApi.post<{ session_id: string; log: string[] }>(`${base(slug)}/session`),
+  /**
+   * 201 { session_id, log[] }. Refuses with NOT_CRANE_HOSTED / NO_REPO / NOT_CONFIGURED / BUILDER_OCCUPIED,
+   * and with takeOver, BUILDER_BUSY (a turn is running) / TAKEOVER_FAILED (their work could not be saved).
+   */
+  startSession: (slug: string, takeOver = false) =>
+    adminApi.post<{ session_id: string; log: string[] }>(`${base(slug)}/session`, takeOver ? { take_over: true } : undefined),
 
   session: (slug: string, id: string) =>
     adminApi.get<{ session: CoderSession; messages: CoderMessage[]; followups: CoderFollowup[] }>(
@@ -218,8 +223,8 @@ export const coderApi = {
   stop: (slug: string, id: string) =>
     adminApi.post<{ message: string }>(`${base(slug)}/session/${enc(id)}/stop`),
 
-  resume: (slug: string, id: string) =>
-    adminApi.post<{ message: string; log: string[] }>(`${base(slug)}/session/${enc(id)}/resume`),
+  resume: (slug: string, id: string, takeOver = false) =>
+    adminApi.post<{ message: string; log: string[] }>(`${base(slug)}/session/${enc(id)}/resume`, takeOver ? { take_over: true } : undefined),
 
   changes: (slug: string, id: string) =>
     adminApi.get<{ files: ChangedFile[] }>(`${base(slug)}/session/${enc(id)}/changes`),

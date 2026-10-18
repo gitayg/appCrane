@@ -295,15 +295,17 @@ export function useCoderSession(slug: string, open: boolean, pinnedSessionId?: s
 
   // ── actions ───────────────────────────────────────────────────────────
 
-  const start = useCallback(async () => {
+  const start = useCallback(async (takeOver = false) => {
     setStarting(true)
     setError(null)
     setStartLog([])
     try {
-      const r = await coderApi.startSession(slug)
+      const r = await coderApi.startSession(slug, takeOver)
       setStartLog(r.log || [])
       setHistory([])
       setLive([])
+      setSession(null)
+      setPinned(null)
       setSessionId(r.session_id)
       setStatus('idle')
       setPhase('ready')
@@ -321,7 +323,7 @@ export function useCoderSession(slug: string, open: boolean, pinnedSessionId?: s
    * is watching the same session.
    */
   // Shared by the Resume button and by send(): true once the container is back.
-  const resumeNow = useCallback(async (): Promise<boolean> => {
+  const resumeNow = useCallback(async (takeOver = false): Promise<boolean> => {
     if (!sessionId) return false
     setError(null)
     setResumingSince(Date.now())
@@ -330,7 +332,7 @@ export function useCoderSession(slug: string, open: boolean, pinnedSessionId?: s
       // stalls would leave the counter running forever. Ten minutes is well
       // past the slowest image rebuild; past it, say so rather than wait on.
       const r = await Promise.race([
-        coderApi.resume(slug, sessionId),
+        coderApi.resume(slug, sessionId, takeOver),
         new Promise<never>((_, reject) => setTimeout(() => reject(new Error(
           'Resume did not finish within 10 minutes. The container may still be starting on the server — '
           + 'reload in a minute, and if the session is still paused, this is worth reporting.',
@@ -431,9 +433,9 @@ export function useCoderSession(slug: string, open: boolean, pinnedSessionId?: s
     }
   }, [slug, sessionId])
 
-  const resume = useCallback(async () => {
+  const resume = useCallback(async (takeOver = false) => {
     if (resumingSince) return
-    await resumeNow()
+    await resumeNow(takeOver)
   }, [resumingSince, resumeNow])
 
   const streaming = status === 'active' || status === 'queued' || status === 'starting'

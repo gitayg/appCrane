@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { adminApi } from '../adminApi'
 import { useAppTabs } from '../components/AppTabsContext'
 import { serverDate } from '../utils/serverDate'
+import { PasswordInput } from '../components/secret/PasswordInput'
 
 // v2.59.x: the app catalogue — 76 curated self-hostable business apps, readable
 // by EVERY logged-in user and deployable by whoever holds `platform.create_app`.
@@ -1608,8 +1609,8 @@ function InstallDialog({ entry, onClose, onCreated }: {
                         </div>
                         <div style={field}>
                           <label style={label} htmlFor="cat-db-pass">Password</label>
-                          <input
-                            id="cat-db-pass" type="password" value={dbPassword}
+                          <PasswordInput
+                            id="cat-db-pass" label="database password" value={dbPassword}
                             onChange={e => setDbPassword(e.target.value)}
                             autoComplete="new-password"
                           />

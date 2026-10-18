@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, type ReactNode } from 'react'
 import { adminApi, authHeaders } from '../adminApi'
 import { useFlash, FocusInput, FocusTextarea } from '../components/formHelpers'
+import { PasswordInput } from '../components/secret/PasswordInput'
 import { Users } from './Users'
 import { AuditLog } from './AuditLog'
 import { BrandingTab } from '../components/BrandingTab'
@@ -241,8 +242,10 @@ function SecurityTab() {
         </div>
         <div style={fieldWrap}>
           <label style={labelStyle}>Client Secret</label>
-          <FocusInput
-            type="password"
+          <PasswordInput
+            styled
+            label="client secret"
+            autoComplete="new-password"
             value={oidcSecret}
             onChange={e => setOidcSecret(e.target.value)}
             placeholder={oidc.client_secret_set ? '••••••••••••' : 'Client secret'}
@@ -879,8 +882,10 @@ function GithubTab() {
           <label style={{ fontSize: '.85rem', color: 'var(--dim)' }}>
             PAT {svc.configured && <span style={{ color: 'var(--green)' }}>· stored</span>}
           </label>
-          <FocusInput
-            type="password"
+          <PasswordInput
+            styled
+            label="personal access token"
+            autoComplete="new-password"
             value={svcToken}
             onChange={e => setSvcToken(e.target.value)}
             placeholder={svc.configured ? '•••••••• (leave empty to keep current)' : 'ghp_… or fine-grained token'}
@@ -1022,7 +1027,7 @@ function MailTab() {
       <FocusInput value={cfg.client_id} onChange={e => setCfg({ ...cfg, client_id: e.target.value })} placeholder="00000000-0000-0000-0000-000000000000" />
 
       <label>Client secret {cfg.client_secret_set && <span style={{ color: 'var(--green)' }}>— set ✓ (leave blank to keep)</span>}</label>
-      <FocusInput type="password" value={secret} onChange={e => setSecret(e.target.value)} placeholder={cfg.client_secret_set ? '••••••••' : 'paste the IT-provided secret'} />
+      <PasswordInput styled label="client secret" autoComplete="new-password" value={secret} onChange={e => setSecret(e.target.value)} placeholder={cfg.client_secret_set ? '••••••••' : 'paste the IT-provided secret'} />
 
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 12 }}>
         <button className="btn" onClick={save}>Save</button>
@@ -1276,7 +1281,7 @@ function BackupTab() {
         <label>Prefix</label><input className="editable" value={s3.prefix ?? ''} onChange={e => setS3(s => ({ ...s, prefix: e.target.value }))} placeholder="(optional) appcrane/" />
         <label>Endpoint</label><input className="editable" value={s3.endpoint ?? ''} onChange={e => setS3(s => ({ ...s, endpoint: e.target.value }))} placeholder="(optional — set for R2/MinIO)" />
         <label>Access key</label><input className="editable" value={s3.access_key_id ?? ''} onChange={e => setS3(s => ({ ...s, access_key_id: e.target.value }))} placeholder="AKIA…" />
-        <label>Secret key</label><input className="editable" type="password" value={s3Secret} onChange={e => setS3Secret(e.target.value)} placeholder={s3.has_secret ? '•••• stored — blank keeps current' : 'secret access key'} />
+        <label>Secret key</label><PasswordInput className="editable" label="S3 secret key" autoComplete="new-password" value={s3Secret} onChange={e => setS3Secret(e.target.value)} placeholder={s3.has_secret ? '•••• stored — blank keeps current' : 'secret access key'} />
         <label>Hour (0–23)</label><input className="editable" type="number" min={0} max={23} value={s3.hour ?? 3} onChange={e => setS3(s => ({ ...s, hour: Number(e.target.value) }))} style={{ width: 90 }} />
       </div>
       <div style={{ display: 'flex', gap: 8 }}>

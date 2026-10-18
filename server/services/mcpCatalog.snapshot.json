@@ -1,5 +1,5 @@
 {
-  "count": 69,
+  "count": 70,
   "tools": [
     {
       "name": "appcrane_append_app_context",
@@ -103,6 +103,11 @@
     },
     {
       "name": "appcrane_get_app_ingress",
+      "requiredRole": "any",
+      "readOnly": true
+    },
+    {
+      "name": "appcrane_get_app_scan",
       "requiredRole": "any",
       "readOnly": true
     },

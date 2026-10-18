@@ -221,7 +221,9 @@ function buildPreflightShell(checks) {
 // here, independently of coderModes.js, because the value reaches `sh -c`.
 const PERMISSION_MODES = new Set(['bypassPermissions', 'acceptEdits', 'plan']);
 
-function buildClaudeCmd({ prompt, model, resume, addDir = '/workspace', systemPrompt, preflight = [], permissionMode }) {
+const MCP_TOOL_NAME_RE = /^mcp__[a-z0-9_]+__[a-z0-9_]+$/;
+
+function buildClaudeCmd({ prompt, model, resume, addDir = '/workspace', systemPrompt, preflight = [], permissionMode, mcpConfig, allowedTools = [] }) {
   if (permissionMode != null && !PERMISSION_MODES.has(permissionMode)) {
     throw new Error(`Refusing unsupported permission mode '${permissionMode}'`);
   }
@@ -242,6 +244,17 @@ function buildClaudeCmd({ prompt, model, resume, addDir = '/workspace', systemPr
     `--add-dir ${addDir}`,
   ];
   if (systemPrompt) parts.push(`--append-system-prompt ${shellQuote(systemPrompt)}`);
+  if (mcpConfig) {
+    // --strict-mcp-config: the servers named here are the only ones loaded, so
+    // a .mcp.json in the agent-writable workspace cannot replace them.
+    parts.push(`--mcp-config ${shellQuote(String(mcpConfig))}`, '--strict-mcp-config');
+  }
+  if (allowedTools.length) {
+    for (const t of allowedTools) {
+      if (!MCP_TOOL_NAME_RE.test(String(t))) throw new Error(`Refusing unexpected allowed tool '${t}'`);
+    }
+    parts.push(`--allowedTools ${allowedTools.join(' ')}`);
+  }
   if (resume) {
     if (!SESSION_ID_RE.test(String(resume))) {
       // Defense in depth — the writer in builderSession.js already validates
@@ -410,6 +423,9 @@ export function runAgentExec({
   oauthToken   = null,        // an already-resolved CLAUDE_CODE_OAUTH_TOKEN
   credentialDeps = {},        // injection point for resolveAgentCredential
   permissionMode = null,      // coderModes.permissionModeFor(); null = skip permissions (Auto)
+  mcpConfig    = null,        // JSON for --mcp-config (services/coderMcpKey.js)
+  allowedTools = [],          // MCP tool names pre-approved for Plan / Edits-only modes
+  secrets      = [],          // further values scrubbed from the agent's output
 }) {
   // One decision, shared with runAgentNew — see the precedence block above.
   const cred = resolveAgentCredential(
@@ -438,9 +454,9 @@ export function runAgentExec({
   args.push(
     containerId,
     'sh', '-c',
-    buildClaudeCmd({ prompt, model, resume, addDir, systemPrompt, preflight, permissionMode }),
+    buildClaudeCmd({ prompt, model, resume, addDir, systemPrompt, preflight, permissionMode, mcpConfig, allowedTools }),
   );
-  return new Agent(args, timeoutMs, [cred.oauthToken]);
+  return new Agent(args, timeoutMs, [cred.oauthToken, ...secrets]);
 }
 
 // ── run mode — used by enhancement coder + Ask (fresh container per job) ──

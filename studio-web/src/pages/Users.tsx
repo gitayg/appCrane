@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { adminApi } from '../adminApi'
 import { serverDate } from '../utils/serverDate'
+import { PasswordInput } from '../components/secret/PasswordInput'
 
 interface User {
   id: number
@@ -319,9 +320,9 @@ export function Users() {
               <label style={{ fontSize: '0.75rem', color: 'var(--dim)' }}>
                 Password{newKind === 'human' ? ' *' : ''}
               </label>
-              <input
+              <PasswordInput
                 ref={passwordRef}
-                type="password"
+                label="password"
                 style={{ width: 120, opacity: newKind === 'agent' ? 0.5 : 1 }}
                 placeholder={newKind === 'agent' ? '(not used)' : 'Password'}
                 disabled={newKind === 'agent'}

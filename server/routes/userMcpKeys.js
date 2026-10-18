@@ -66,7 +66,7 @@ router.get('/me/mcp-keys', requireSession, (req, res) => {
   const keys = db.prepare(`
     SELECT id, label, created_at, last_used_at, expires_at, revoked_at, read_only
     FROM user_mcp_keys
-    WHERE user_id = ?
+    WHERE user_id = ? AND coder_session_id IS NULL
     ORDER BY id DESC
   `).all(req.user.id);
   res.json({
@@ -177,7 +177,7 @@ router.post('/users/:id/mcp-keys', requirePlatformAdmin, auditMiddleware('user-m
 router.post('/me/mcp-keys/:id/rotate', requireSession, auditMiddleware('user-mcp-key-rotate'), (req, res) => {
   const keyId = parseInt(req.params.id, 10);
   const db = getDb();
-  const existing = db.prepare('SELECT * FROM user_mcp_keys WHERE id = ? AND user_id = ?').get(keyId, req.user.id);
+  const existing = db.prepare('SELECT * FROM user_mcp_keys WHERE id = ? AND user_id = ? AND coder_session_id IS NULL').get(keyId, req.user.id);
   if (!existing) throw new AppError('Key not found', 404, 'NOT_FOUND');
   if (existing.revoked_at) throw new AppError('Cannot rotate a revoked key — create a new one instead', 400, 'KEY_REVOKED');
 

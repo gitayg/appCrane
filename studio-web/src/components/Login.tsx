@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useAuth } from '../hooks/useAuth'
 import { isSafeRedirect } from '../utils/safeRedirect'
+import { PasswordInput } from './secret/PasswordInput'
 import {
   POPUP_FEATURES, POPUP_NAME, browserWaitDeps, isFramed, popupStartUrl,
   reloadTargetAfterSignIn, signInPlan, waitForPopupSignIn, type SsoProvider,
@@ -227,9 +228,9 @@ export function Login() {
               autoFocus
               style={{ width: '100%', marginBottom: 8 }}
             />
-            <input
+            <PasswordInput
               id="loginPass"
-              type="password"
+              label="password"
               placeholder="Password"
               value={password}
               onChange={e => setPassword(e.target.value)}
@@ -322,8 +323,8 @@ export function Login() {
             <p style={{ color: 'var(--dim)', fontSize: '.78rem', marginBottom: 8 }}>
               Legacy / break-glass. After signing in, go to your profile to set a password — future logins will use email + password.
             </p>
-            <input
-              type="password"
+            <PasswordInput
+              label="API key"
               placeholder="dhk_admin_… or dhk_user_…"
               value={keyVal}
               onChange={e => setKeyVal(e.target.value)}

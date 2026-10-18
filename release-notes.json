@@ -1,4 +1,10 @@
 {
+  "2.111.0": [
+    "The coder can now see your app's live dependency scan, requests, deploys and logs while it works, through a read-only connection limited to that app and that turn.",
+    "Passwords and env variables show as dots with an eye icon. Owners get an alert only when someone presses the eye to see a value, never just for opening the page.",
+    "The coder no longer tries to commit or asks you to push, and you can take over an app's coder from a colleague's idle session without losing their unreleased work.",
+    "Restarting or updating AppCrane no longer throws away the coder's unreleased changes: they are saved to a branch first."
+  ],
   "2.110.1": [
     "Someone who can't reveal a production value no longer sees its fingerprint either, so it can't be compared with a sandbox value they can see."
   ],

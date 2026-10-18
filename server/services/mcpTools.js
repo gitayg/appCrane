@@ -34,6 +34,7 @@ import { myRules } from './crewDecisions.js';
 import { fetchAppProbe } from './appProbeFetch.js';
 import { normalizeFrameAncestors } from '../utils/frameAncestors.js';
 import { secretPreview, opaquePreview, secretFingerprint } from './secretMask.js';
+import { isCoderKey, assertCoderToolAllowed, CODER_MCP_TOOLS } from './coderMcpKey.js';
 
 /**
  * The commit part of a managed-push response. A GitHub commit carries its web
@@ -555,6 +556,67 @@ function projectScanRow(row, where) {
   };
 }
 
+// One app's recorded scan state, both stages. appcrane_scan_report (fleet,
+// admin) and appcrane_get_app_scan (one app, its members) answer from here.
+async function appScanReport(db, app, haveHistory) {
+  const isScanned = isScannedRow;
+  const REPORT_ONLY = 'Report-only: a finding here has never blocked and cannot block a deploy.';
+  const scans = { production: null, sandbox: null };
+  if (haveHistory) {
+    const { latestScan } = await import('./appScan.js');
+    for (const env of ['production', 'sandbox']) scans[env] = latestScan(db, app.id, env) ?? null;
+  }
+  const stages = ['production', 'sandbox'];
+  for (const env of stages) {
+    if (scans[env]) scans[env] = projectScanRow(scans[env], `${app.slug}/${env}`);
+  }
+  const unscanned = stages.filter((e) => !isScanned(scans[e]));
+  const vulnerable = stages.filter((e) => scans[e]?.status === 'findings');
+  const readManifests = stages.filter((e) => isScanned(scans[e]) && scans[e].manifest);
+  const coverage = coverageOf(stages.map((e) => scans[e] ?? {}));
+  // The stage's own recorded reason, not just its status word. "skipped"
+  // alone sends the reader to the dashboard; "no recognised manifest in
+  // the live release" is the whole answer.
+  const reasons = Object.fromEntries(unscanned.map((e) => [
+    e, scans[e]?.status ? normalizeReason(scans[e].error) : 'no scan on record',
+  ]));
+  return {
+    app: app.slug,
+    scans,
+    scanned: unscanned.length === 0,
+    unscanned,
+    unscanned_reasons: reasons,
+    coverage,
+    vulnerable_stages: vulnerable,
+    manifests_scanned: [...new Set(readManifests.map((e) => scans[e].manifest))],
+    manifests_by_stage: Object.fromEntries(stages.map((e) => [e, isScanned(scans[e]) ? scans[e].manifest : null])),
+    assurance: unscanned.length === 2 ? 'none' : unscanned.length ? 'partial' : 'complete',
+    assurance_note: assuranceNote(coverage),
+    enforcement: 'report-only',
+    summary: [
+      coverageSentence(coverage, 'stage'),
+      unscanned.length
+        ? `NOT SCANNED: ${unscanned.map((e) => `${e} (${scans[e]?.status ?? 'no scan on record'}: ${reasons[e]})`).join(', ')}. ` +
+          `Nothing is known about ${app.slug}'s dependencies in ${unscanned.length === 2 ? 'either stage' : 'that stage'} — ` +
+          'that is an absence of evidence and must not be reported as a clean result. Use appcrane_scan_app to scan it now.'
+        : null,
+      vulnerable.length
+        ? `Known-vulnerable dependencies in: ${vulnerable.join(', ')}.`
+        : null,
+      !unscanned.length && !vulnerable.length
+        ? `Both stages of ${app.slug} were scanned and nothing was found.`
+        : null,
+      readManifests.length
+        ? `Manifests read: ${readManifests.map((e) => `${e} (${scans[e].manifest})`).join(', ')}. ` +
+          'Coverage is per manifest, not per app: any other manifest in the release — a go.mod, a ' +
+          'requirements.txt, a second service\'s lockfile — was never read, so the findings above ' +
+          'cover only the manifests named here.'
+        : `No manifest was read in either stage, so no dependency of ${app.slug} has been looked at.`,
+      REPORT_ONLY,
+    ].filter(Boolean).join(' '),
+  };
+}
+
 // Shared description text for the three source_type='image' fields, so the
 // create tool and the update tool cannot drift into telling an agent two
 // different things about the same column.
@@ -950,7 +1012,7 @@ const TOOLS = [
       const rows = db
         .prepare('SELECT key, value_encrypted, updated_at FROM env_vars WHERE app_id = ? AND env = ? ORDER BY key')
         .all(app.id, env);
-      const canReveal = env !== 'production' || isAppOwnerOrPlatformAdmin(user, app);
+      const canReveal = env !== 'production' || (!isCoderKey(user, user._mcpUserKey) && isAppOwnerOrPlatformAdmin(user, app));
       const vars = rows.map((r) => {
         let plain = null;
         try { plain = decrypt(r.value_encrypted); } catch (_) { /* below */ }
@@ -4561,6 +4623,29 @@ const TOOLS = [
   // quiet fleet. No table means nothing has ever been scanned, and that is what
   // gets reported.
   {
+    name: 'appcrane_get_app_scan',
+    description:
+      'The latest recorded dependency scan of ONE app, per stage (production and sandbox): each stage\'s `status`, the manifest it read, and its findings, each with `name`, `version`, `ecosystem`, advisory `ids` and `fixed` (the version that resolves them, or null when no fix is published yet — null never means harmless). Use it before changing a manifest or lockfile to see what is actually flagged on the live release, and after a release to check a finding is gone. READ `status` FIRST: `ok` and `findings` are scan results; `skipped`, `error` or no scan row mean the stage was NOT scanned, which is not a clean result. Coverage is per manifest: a manifest not named in `manifests_scanned` was never read. Report-only: findings never block a deploy. Any member of the app; the same findings the scan-opened requests carry.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        slug: { type: 'string', description: 'App slug, e.g. "mysite"' },
+      },
+      required: ['slug'],
+      additionalProperties: false,
+    },
+    requiredRole: 'any',
+    readOnly: true,
+    handler: async (user, args) => {
+      const app = getAppForUser(user, args.slug);
+      const db = getDb();
+      const haveHistory = !!db.prepare(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'app_vuln_scans'"
+      ).get();
+      return appScanReport(db, app, haveHistory);
+    },
+  },
+  {
     name: 'appcrane_scan_report',
     description:
       'Which hosted apps have known-vulnerable dependencies? Reports the recorded CVE scan state for the whole fleet, or for one app with `slug`. REPORT ONLY: this scan has never blocked a deploy and cannot — the apps belong to other teams who did not choose the control, so findings are recorded and mailed and the deploy proceeds either way. Never relay a finding as a deploy failure. READ `status` BEFORE READING COUNTS. It is four-valued: `ok` (scanned, nothing found) and `findings` (scanned, something found) are results; `skipped` (no lockfile AppCrane can read) and `error` (OSV unreachable, unparseable lockfile) mean the app was NOT SCANNED, as does having no scan row at all. Those two carry no findings for the same reason an unopened box is empty, and an agent that reports such an app as clean has stated the opposite of what is known — "no vulnerabilities found" is only ever true of an app whose status is `ok`. READ `coverage` BEFORE THE FINDINGS AND BEFORE `assurance`. It is the explicit arithmetic — `{ rows, covered, not_covered, skipped, errored, never_scanned, percent }` — where `percent` is covered/rows floored, and it is the only field that says how much of the fleet these numbers describe. `assurance` is still none / partial / complete and still means exactly that, but `partial` spans 1% to 99%: 30 covered rows out of 99 is `partial` and so is 98 out of 99, so NEVER relay `partial` as "mostly covered" or relay it without the counts beside it (`assurance_note` states this too). `skip_reasons` and `error_reasons` name WHY rows are uncovered, counted and most-common first, from the reason each row recorded — quote them instead of reporting a bare "67 skipped". `unscanned_count` and `unscanned_by_status` are unchanged. EVERY FINDING CARRIES `ecosystem` AND `fixed` beside `name`, `version` and `ids`. `fixed` is the version that resolves those advisories, or null when OSV PUBLISHED NO FIXED VERSION — a null means there is nothing to upgrade to yet, NEVER that no fix is needed and never that AppCrane did not look, so a null-`fixed` finding is not a harmless one. `manifests_scanned` says WHICH manifests were actually read, because coverage is per manifest and not per app: one scan row reads ONE manifest — the ecosystem named on it — so an app whose Go service was never read appears here beside its scanned npm frontend with an empty findings list, and that emptiness is evidence about the frontend only. Scans run at deploy AND daily, and the daily run is the one that matters, because it catches an advisory published against code that was already deployed and has not changed since. ADMIN ONLY.',
@@ -4588,63 +4673,7 @@ const TOOLS = [
       const isScanned = isScannedRow;
       const REPORT_ONLY = 'Report-only: a finding here has never blocked and cannot block a deploy.';
 
-      if (args.slug) {
-        const app = getAppForUser(user, args.slug);
-        const scans = { production: null, sandbox: null };
-        if (haveHistory) {
-          const { latestScan } = await import('./appScan.js');
-          for (const env of ['production', 'sandbox']) scans[env] = latestScan(db, app.id, env) ?? null;
-        }
-        const stages = ['production', 'sandbox'];
-        for (const env of stages) {
-          if (scans[env]) scans[env] = projectScanRow(scans[env], `${app.slug}/${env}`);
-        }
-        const unscanned = stages.filter((e) => !isScanned(scans[e]));
-        const vulnerable = stages.filter((e) => scans[e]?.status === 'findings');
-        const readManifests = stages.filter((e) => isScanned(scans[e]) && scans[e].manifest);
-        const coverage = coverageOf(stages.map((e) => scans[e] ?? {}));
-        // The stage's own recorded reason, not just its status word. "skipped"
-        // alone sends the reader to the dashboard; "no recognised manifest in
-        // the live release" is the whole answer.
-        const reasons = Object.fromEntries(unscanned.map((e) => [
-          e, scans[e]?.status ? normalizeReason(scans[e].error) : 'no scan on record',
-        ]));
-        return {
-          app: app.slug,
-          scans,
-          scanned: unscanned.length === 0,
-          unscanned,
-          unscanned_reasons: reasons,
-          coverage,
-          vulnerable_stages: vulnerable,
-          manifests_scanned: [...new Set(readManifests.map((e) => scans[e].manifest))],
-          manifests_by_stage: Object.fromEntries(stages.map((e) => [e, isScanned(scans[e]) ? scans[e].manifest : null])),
-          assurance: unscanned.length === 2 ? 'none' : unscanned.length ? 'partial' : 'complete',
-          assurance_note: assuranceNote(coverage),
-          enforcement: 'report-only',
-          summary: [
-            coverageSentence(coverage, 'stage'),
-            unscanned.length
-              ? `NOT SCANNED: ${unscanned.map((e) => `${e} (${scans[e]?.status ?? 'no scan on record'}: ${reasons[e]})`).join(', ')}. ` +
-                `Nothing is known about ${app.slug}'s dependencies in ${unscanned.length === 2 ? 'either stage' : 'that stage'} — ` +
-                'that is an absence of evidence and must not be reported as a clean result. Use appcrane_scan_app to scan it now.'
-              : null,
-            vulnerable.length
-              ? `Known-vulnerable dependencies in: ${vulnerable.join(', ')}.`
-              : null,
-            !unscanned.length && !vulnerable.length
-              ? `Both stages of ${app.slug} were scanned and nothing was found.`
-              : null,
-            readManifests.length
-              ? `Manifests read: ${readManifests.map((e) => `${e} (${scans[e].manifest})`).join(', ')}. ` +
-                'Coverage is per manifest, not per app: any other manifest in the release — a go.mod, a ' +
-                'requirements.txt, a second service\'s lockfile — was never read, so the findings above ' +
-                'cover only the manifests named here.'
-              : `No manifest was read in either stage, so no dependency of ${app.slug} has been looked at.`,
-            REPORT_ONLY,
-          ].filter(Boolean).join(' '),
-        };
-      }
+      if (args.slug) return appScanReport(db, getAppForUser(user, args.slug), haveHistory);
 
       if (!haveHistory) {
         return {
@@ -5247,7 +5276,8 @@ export function listTools(user, userMcpKey = null) {
   // at connect and callers may invoke a name they were never shown.
   const readOnlyKey = isReadOnlyKey(user, userMcpKey);
   const crewOk = crewAllowedFor(user);
-  return TOOLS.filter((t) => (!readOnlyKey || t.readOnly) && (!t.crew || crewOk) && canUseTool(userView, t)).map((t) => ({
+  const coderKey = isCoderKey(user, userMcpKey);
+  return TOOLS.filter((t) => (!readOnlyKey || t.readOnly) && (!t.crew || crewOk) && (!coderKey || CODER_MCP_TOOLS.includes(t.name)) && canUseTool(userView, t)).map((t) => ({
     name: t.name,
     description: t.description,
     inputSchema: stageifySchema(t.inputSchema),
@@ -5267,6 +5297,7 @@ export async function callTool(user, name, args, userMcpKey = null) {
   // admin's read-only key is still read-only.
   try {
     assertToolAllowedForKey(user, tool, userMcpKey);
+    assertCoderToolAllowed(user, tool.name, args, userMcpKey);
   } catch (err) {
     auditMcpCall(user, name, args, err);
     throw err;
