@@ -13,6 +13,7 @@ import { join } from 'path';
 import { exportDataArchive } from './configBackup.js';
 import { s3PutObject } from './s3.js';
 import log from '../utils/logger.js';
+import { jobStarted, trackJob } from './jobHealth.js';
 
 const K = {
   enabled: 'backup_s3_enabled', bucket: 'backup_s3_bucket', region: 'backup_s3_region',
@@ -150,12 +151,13 @@ export function startBackupScheduler() {
       if (!cfg.enabled) return;
       const today = new Date().toISOString().slice(0, 10);
       if ((get(db, K.lastRun) || '').slice(0, 10) !== today && new Date().getHours() >= cfg.hour) {
-        await runS3Backup().catch(() => { /* last_error already recorded */ });
+        await trackJob('offsite-backup', runS3Backup).catch(() => { /* last_error already recorded */ });
       }
     } catch (e) {
       log.warn(`[backup-s3] scheduler tick failed: ${e.message}`);
     }
   };
+  jobStarted('offsite-backup', { enabled: () => getBackupConfig().enabled });
   tick();
   _timer = setInterval(() => { tick().catch(() => {}); }, 60 * 60 * 1000);
   log.info('[backup-s3] scheduler started (hourly check)');

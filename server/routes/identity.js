@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { auditLogin } from '../middleware/audit.js';
+import { auditLogin, logAudit } from '../middleware/audit.js';
 import { identitySecretFor, signIdentity } from '../services/identitySignature.js';
 import { existsSync } from 'fs';
 import { join, resolve } from 'path';
@@ -702,6 +702,27 @@ router.get('/me', (req, res) => {
   });
 });
 
+// Wrong current passwords on POST /set-password, per user: 5 per 15 minutes.
+// Keyed by user id, so the map is bounded by the user table and needs no sweep.
+const _setPasswordFailures = new Map();
+const SET_PASSWORD_MAX_FAILURES = 5;
+const SET_PASSWORD_WINDOW_MS = 15 * 60_000;
+
+export function checkSetPasswordRateLimit(userId, now = Date.now()) {
+  const rec = _setPasswordFailures.get(userId);
+  if (!rec || now > rec.resetAt) return true;
+  return rec.count < SET_PASSWORD_MAX_FAILURES;
+}
+
+function recordSetPasswordFailure(userId, now = Date.now()) {
+  const rec = _setPasswordFailures.get(userId);
+  if (!rec || now > rec.resetAt) {
+    _setPasswordFailures.set(userId, { count: 1, resetAt: now + SET_PASSWORD_WINDOW_MS });
+  } else {
+    rec.count++;
+  }
+}
+
 /**
  * POST /api/identity/set-password
  *
@@ -716,6 +737,10 @@ router.get('/me', (req, res) => {
  * here is the only valid one.
  *
  * Bridges the v2.4.0 migration off `dhk_admin_*`-only login.
+ *
+ * Body: { password, current_password }. current_password is required once the
+ * user has a password, so a stolen session or API key cannot change it and
+ * lock the owner out; a user with no password yet sets one without it.
  */
 router.post('/set-password', (req, res) => {
   const db = getDb();
@@ -741,11 +766,37 @@ router.post('/set-password', (req, res) => {
   }
   if (!user) throw new AppError('Authentication required', 401, 'UNAUTHORIZED');
 
-  const { password } = req.body || {};
+  const ip = req.ip || req.socket?.remoteAddress || 'unknown';
+  const audit = (action, detail) => {
+    try { logAudit(user.id, null, action, { method: 'self-service', ip, ...detail }); } catch (_) {}
+  };
+
+  const { password, current_password } = req.body || {};
+  const hadPassword = !!user.password_hash;
+
+  if (hadPassword) {
+    if (!checkSetPasswordRateLimit(user.id)) {
+      audit('password-change-failed', { reason: 'rate_limited' });
+      throw new AppError('Too many wrong current passwords. Try again in 15 minutes.', 429, 'RATE_LIMITED');
+    }
+    if (!current_password || typeof current_password !== 'string') {
+      throw new AppError('Enter your current password to set a new one', 400, 'CURRENT_PASSWORD_REQUIRED');
+    }
+    if (!verifyPassword(current_password, user.password_hash)) {
+      recordSetPasswordFailure(user.id);
+      audit('password-change-failed', { reason: 'bad_current_password' });
+      throw new AppError('Current password is incorrect', 403, 'INVALID_CURRENT_PASSWORD');
+    }
+  }
+
   if (!password || typeof password !== 'string' || password.length < 12) {
     throw new AppError('Password must be at least 12 characters', 400, 'VALIDATION');
   }
+  if (hadPassword && password === current_password) {
+    throw new AppError('The new password must be different from the current one', 400, 'PASSWORD_UNCHANGED');
+  }
 
+  _setPasswordFailures.delete(user.id);
   db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(password), user.id);
   db.prepare('DELETE FROM identity_sessions WHERE user_id = ?').run(user.id);
 
@@ -766,6 +817,7 @@ router.post('/set-password', (req, res) => {
   // was set.
   setSessionCookie(res, token, req);
 
+  audit(hadPassword ? 'password-change' : 'password-set', {});
   log.info(`User ${user.id} (${user.email || user.username}) set their own password`);
   res.json({
     ok: true,

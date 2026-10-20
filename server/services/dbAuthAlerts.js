@@ -71,6 +71,7 @@ import { logAudit } from '../middleware/audit.js';
 import { enqueueEmail } from './emailQueue.js';
 import { getManagedDbSettings } from './managedDbSettings.js';
 import * as redis from './managedRedis.js';
+import { jobStarted, trackJob } from './jobHealth.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -530,8 +531,9 @@ export function __resetCursorsForTests() { cursors.clear(); }
 let timer = null;
 export function startDbAuthAlertScheduler() {
   if (timer) return;
+  jobStarted('db-auth-alerts');
   timer = setInterval(() => {
-    scanOnce().catch(e => log.warn(`[db-auth-alerts] scan failed: ${e.message}`));
+    trackJob('db-auth-alerts', () => scanOnce()).catch(e => log.warn(`[db-auth-alerts] scan failed: ${e.message}`));
   }, SCAN_INTERVAL_MS);
   timer.unref?.();
 }

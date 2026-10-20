@@ -10,8 +10,24 @@ import {
   killUserContainer as ghKill,
 } from '../services/githubMcpContainers.js';
 import log from '../utils/logger.js';
+import { resourceMetadataUrlOf, SCOPE_FULL } from '../services/oauthPolicy.js';
+import { viewAsRefusalMessage } from '../services/viewAs.js';
 
 const router = Router();
+
+// RFC 9728 section 5.1 / MCP authorization: a 401 from the MCP endpoint names
+// the protected-resource metadata, which is how an OAuth-capable client finds
+// AppCrane's authorization server. API-key clients ignore the header.
+function requireMcpAuth(req, res, next) {
+  requireAuth(req, res, (err) => {
+    if (err && err.status === 401) {
+      res.set('WWW-Authenticate', `Bearer resource_metadata="${resourceMetadataUrlOf(req)}", scope="${SCOPE_FULL}"`);
+    }
+    next(err);
+  });
+}
+
+const READ_ONLY_TOOLS = new Set(getToolCatalog().filter(t => t.readOnly).map(t => t.name));
 
 const SERVER_INFO = {
   name: 'appcrane',
@@ -137,7 +153,7 @@ registration.
  * echoed in the MCP-Protocol-Version response header, so old and new clients
  * can both talk to the same endpoint.
  */
-router.post('/', requireAuth, async (req, res) => {
+router.post('/', requireMcpAuth, async (req, res) => {
   const { jsonrpc, id, method, params } = req.body || {};
   if (jsonrpc !== '2.0') {
     return res.json({ jsonrpc: '2.0', id, error: { code: -32600, message: 'Invalid request — expected jsonrpc 2.0' } });
@@ -216,6 +232,14 @@ router.post('/', requireAuth, async (req, res) => {
           const stripPrefix = (name, prefix) =>
             name.startsWith(prefix) ? name.slice(prefix.length) : name;
 
+          // View as role is a read-only preview: only read tools run, and the
+          // refusal says why rather than blaming the key.
+          if (req.view_as) {
+            const name = stripPrefix(params.name, 'mcp__appcrane__');
+            if (!isAppCraneTool || !READ_ONLY_TOOLS.has(name)) {
+              return res.json({ jsonrpc: '2.0', id, error: { code: -32000, message: `Forbidden: ${viewAsRefusalMessage(req.view_as)}` } });
+            }
+          }
           if (isAppCraneTool) {
             const upstreamName = stripPrefix(params.name, 'mcp__appcrane__');
             result = await callTool(req.user, upstreamName, params.arguments, req.user_mcp_key);

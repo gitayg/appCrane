@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { adminApi } from '../adminApi'
 import { serverDate } from '../utils/serverDate'
 import { PasswordInput } from '../components/secret/PasswordInput'
+import { SetUserPasswordModal } from '../components/SetUserPasswordModal'
 
 interface User {
   id: number
@@ -53,6 +54,7 @@ export function Users() {
   // stay in sync, and the modal is easier with many apps. The wide
   // matrix stays for now as a power-user / bulk-edit affordance.
   const [appsModalUser, setAppsModalUser] = useState<User | null>(null)
+  const [passwordUser, setPasswordUser] = useState<User | null>(null)
   const [newKind, setNewKind] = useState<'human' | 'agent'>('human')
   const [kindFilter, setKindFilter] = useState<'all' | 'human' | 'agent'>('human')
   // Modal shows the result of any key-issuance flow. `kind === 'mcp'` →
@@ -188,12 +190,6 @@ export function Users() {
 
   function updateProfile(id: number, field: string, value: string) {
     adminApi.put(`/api/users/${id}/profile`, { [field]: value || null }).catch(() => {})
-  }
-
-  async function setPassword(id: number) {
-    const pw = prompt('New password:')
-    if (!pw) return
-    await adminApi.put(`/api/users/${id}/password`, { password: pw }).catch(() => {})
   }
 
   async function deleteUser(id: number) {
@@ -439,7 +435,7 @@ export function Users() {
                   {u.has_password && (
                     <span style={{ color: 'var(--green)', marginRight: 6 }}>&#10003;</span>
                   )}
-                  <button className="btn btn-xs" onClick={() => setPassword(u.id)}>set</button>
+                  <button className="btn btn-xs" onClick={() => setPasswordUser(u)}>set</button>
                 </td>
                 <td>
                   <span style={{ color: 'var(--dim)', fontSize: '0.82rem' }} title={abs}>{rel}</span>
@@ -481,6 +477,10 @@ export function Users() {
           The matrix is gone — same surface area, less visual noise,
           and it scales to many apps × many users without becoming a
           400-cell soup. */}
+
+      {passwordUser && (
+        <SetUserPasswordModal user={passwordUser} onClose={() => setPasswordUser(null)} onSaved={loadUsers} />
+      )}
 
       {mcpKeyModal.open && (
         <div

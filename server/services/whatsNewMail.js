@@ -30,6 +30,7 @@ import { getVersionNotes } from './releaseNotes.js';
 import { BRAND, bulletList, esc, renderBrandedEmail, versionPill } from './mail/brandedLayout.js';
 import { dashboardBaseUrl } from './vulnRequests.js';
 import log from '../utils/logger.js';
+import { jobStarted, trackJob } from './jobHealth.js';
 
 export const K = {
   lastAnnounced: 'whats_new_last_announced',
@@ -188,8 +189,9 @@ export async function announceWhatsNew({ db = getDb(), version = PKG_VERSION, lo
 
 /** Run once, shortly after boot, off the startup path. Never throws. */
 export function scheduleWhatsNewMail(delayMs = 20_000) {
+  jobStarted('whats-new-mail');
   const t = setTimeout(() => {
-    announceWhatsNew().catch((e) => log.error(`[whats-new] failed: ${e.message}`));
+    trackJob('whats-new-mail', announceWhatsNew).catch((e) => log.error(`[whats-new] failed: ${e.message}`));
   }, delayMs);
   t.unref?.();
   return t;

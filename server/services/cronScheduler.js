@@ -26,6 +26,7 @@
 import { execFile } from 'child_process';
 import { getDb } from '../db.js';
 import log from '../utils/logger.js';
+import { jobStarted, trackJob, noteJobFailure } from './jobHealth.js';
 
 const TICK_MS = 60_000;
 const LOG_TAIL_BYTES = 4096;
@@ -267,6 +268,7 @@ async function tick() {
     }
   } catch (e) {
     log.error(`[cron] tick error: ${e.message}`);
+    noteJobFailure('cron-scheduler', e);
   }
 }
 
@@ -274,7 +276,8 @@ async function tick() {
 export function startCronScheduler() {
   if (timer) return;
   log.info(`[cron] scheduler started (tick every ${TICK_MS / 1000}s)`);
-  timer = setInterval(tick, TICK_MS);
+  jobStarted('cron-scheduler');
+  timer = setInterval(() => { trackJob('cron-scheduler', tick).catch(() => {}); }, TICK_MS);
   // Don't fire immediately — wait for the first minute boundary tick.
   // (Test setups can call tick() directly.)
 }

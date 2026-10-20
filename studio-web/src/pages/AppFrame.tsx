@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router-dom'
 import { adminApi } from '../adminApi'
 import { usePeek, type PeekCtx } from '../hooks/usePeek'
 import { RequestModal } from '../components/runtime-topbar/RequestModal'
+import { SurveyCard } from '../components/runtime-topbar/SurveyCard'
 import { CoderPanel } from '../components/coder/CoderPanel'
 import { coderApi, type CoderAvailability } from '../components/coder/api'
 import { Icon } from '../components/icons'
@@ -392,6 +393,7 @@ export function AppFrame({ slug, active, onClose }: Props) {
               onClose={() => setWhatsNew(null)}
             />
           )}
+          {active && !whatsNew && stage.env === 'production' && <SurveyCard slug={stage.slug} appName={stage.name} />}
           {active && requestCtx && (
             <RequestModal slug={stage.slug} appName={stage.name} peekCtx={requestCtx} onClose={() => setRequestCtx(null)} iframeRef={iframeRef} />
           )}

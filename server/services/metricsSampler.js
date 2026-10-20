@@ -10,6 +10,7 @@
 import { getDb } from '../db.js';
 import { getProcessMetrics } from './docker.js';
 import log from '../utils/logger.js';
+import { jobStarted, trackJob, noteJobFailure } from './jobHealth.js';
 
 const SAMPLE_MS = 5 * 60 * 1000; // every 5 minutes
 const RETAIN_DAYS = 7;
@@ -35,12 +36,14 @@ async function tick() {
     db.prepare(`DELETE FROM metrics_history WHERE recorded_at < datetime('now', '-${RETAIN_DAYS} days')`).run();
   } catch (e) {
     log.warn(`[metrics-sampler] tick failed: ${e.message}`);
+    noteJobFailure('metrics-sampler', e);
   }
 }
 
 export function startMetricsSampler() {
   if (_timer) return;
-  tick();
-  _timer = setInterval(() => { tick().catch(() => {}); }, SAMPLE_MS);
+  jobStarted('metrics-sampler');
+  trackJob('metrics-sampler', tick).catch(() => {});
+  _timer = setInterval(() => { trackJob('metrics-sampler', tick).catch(() => {}); }, SAMPLE_MS);
   log.info(`[metrics-sampler] started (every ${SAMPLE_MS / 60000} min, ${RETAIN_DAYS}-day retention)`);
 }

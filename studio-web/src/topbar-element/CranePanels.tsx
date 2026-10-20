@@ -2,6 +2,7 @@ import { createRoot, Root } from 'react-dom/client'
 import { createElement } from 'react'
 import { RequestPanel } from '../components/runtime-topbar/RequestPanel'
 import { BugPanel }     from '../components/runtime-topbar/BugPanel'
+import { SurveyCard }   from '../components/runtime-topbar/SurveyCard'
 
 /**
  * Custom Element wrappers around the React Ask / Request / Bug panels.
@@ -94,9 +95,34 @@ abstract class CranePanelBase extends HTMLElement {
 class CraneRequestPanel extends CranePanelBase { kind: PanelKind = 'request' }
 class CraneBugPanel     extends CranePanelBase { kind: PanelKind = 'bug' }
 
+// <crane-survey-card slug app-name>: the portal's survey card (SurveyCard).
+// No slug, no card -- the portal clears it when the app frame closes.
+class CraneSurveyCard extends HTMLElement {
+  private root: Root | null = null
+  static get observedAttributes() { return ['slug', 'app-name'] }
+  connectedCallback() {
+    if (!this.root) this.root = createRoot(this)
+    this.render()
+  }
+  disconnectedCallback() {
+    if (this.root) {
+      const r = this.root
+      queueMicrotask(() => r.unmount())
+      this.root = null
+    }
+  }
+  attributeChangedCallback() { this.render() }
+  private render() {
+    if (!this.root) return
+    const slug = this.getAttribute('slug') || ''
+    this.root.render(createElement(SurveyCard, { slug, appName: this.getAttribute('app-name') || slug }))
+  }
+}
+
 export function defineCranePanels() {
   if (!customElements.get('crane-request-panel')) customElements.define('crane-request-panel', CraneRequestPanel)
   if (!customElements.get('crane-bug-panel'))     customElements.define('crane-bug-panel',     CraneBugPanel)
+  if (!customElements.get('crane-survey-card'))   customElements.define('crane-survey-card',   CraneSurveyCard)
 }
 
-export { CraneRequestPanel, CraneBugPanel }
+export { CraneRequestPanel, CraneBugPanel, CraneSurveyCard }

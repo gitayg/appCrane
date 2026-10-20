@@ -94,6 +94,13 @@ code, kbd, .mono, .job-tag, pre {
 
 .admin-content { margin-left: var(--sidebar-w, 220px); flex: 1; min-width: 0; }
 .admin-content.collapsed { margin-left: 56px; }
+/* Unpinned, the sidebar rests as a 56px icon rail and opens OVER the page on
+   hover / focus / tap (.peek) — the content keeps its 56px margin, so nothing
+   reflows. Pinned keeps the old always-open layout. */
+.admin-sidebar.peek { width: var(--sidebar-w, 220px); z-index: 20; box-shadow: 4px 0 24px rgba(0,0,0,.35); }
+@media (prefers-reduced-motion: reduce) {
+  .admin-sidebar, .admin-sidebar.peek { transition: none; }
+}
 
 /* v2.21.0: draggable sidebar-width handle, pinned to the sidebar's right edge. */
 .sidebar-resizer {
@@ -369,6 +376,7 @@ body.resizing-sidebar .admin-sidebar, body.resizing-sidebar .admin-content { tra
   }
   .admin-sidebar.open { transform: translateX(0); box-shadow: 4px 0 24px rgba(0,0,0,.5); }
   .admin-content { margin-left: 0 !important; }
+  .admin-sidebar.collapsed, .admin-sidebar.peek { width: var(--sidebar-w, 220px); box-shadow: none; }
   .container { padding: 16px; }
 }
 

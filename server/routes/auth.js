@@ -30,13 +30,14 @@ router.get('/me', requireAuth, (req, res) => {
 
   const can_create_apps = userHasPlatformPermission(req.user, 'platform.create_app');
   // v2.18.0: surface the directory attributes inherited from the IdP (SCIM).
-  const dir = db.prepare('SELECT department, region, location FROM users WHERE id = ?').get(id) || {};
+  const dir = db.prepare("SELECT department, region, location, (password_hash IS NOT NULL AND password_hash != '') AS has_password FROM users WHERE id = ?").get(id) || {};
   res.json({
     user: {
       id, name, email, role, created_at, can_create_apps,
       department: dir.department || null,
       region:     dir.region || null,
       location:   dir.location || null,
+      has_password: !!dir.has_password,
     },
     apps,
   });

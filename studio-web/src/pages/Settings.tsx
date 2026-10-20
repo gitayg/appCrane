@@ -4,6 +4,8 @@ import { useFlash, FocusInput, FocusTextarea } from '../components/formHelpers'
 import { PasswordInput } from '../components/secret/PasswordInput'
 import { Users } from './Users'
 import { AuditLog } from './AuditLog'
+import { JobHealth } from './JobHealth'
+import { ClientErrors } from './ClientErrors'
 import { BrandingTab } from '../components/BrandingTab'
 import { Mcp } from './Mcp'
 import { SkillsTab } from '../components/SkillsTab'
@@ -11,6 +13,7 @@ import { ScimGroupMapping } from '../components/ScimGroupMapping'
 import { useMe, isAdmin } from '../hooks/useMe'
 import { GithubAppCard } from '../components/GithubAppCard'
 import { ClaudeTokenCard } from '../components/ClaudeTokenCard'
+import { ChangePasswordCard } from '../components/ChangePasswordCard'
 import { serverDate } from '../utils/serverDate'
 
 function SecurityTab() {
@@ -1303,12 +1306,17 @@ function BackupTab() {
  * role gate — a plain user reaches it exactly as a platform admin does.
  */
 function AccountTab() {
-  return <ClaudeTokenCard />
+  return (
+    <>
+      <ChangePasswordCard />
+      <ClaudeTokenCard />
+    </>
+  )
 }
 
-type Tab = 'account' | 'security' | 'users' | 'roles' | 'github' | 'mail' | 'backup' | 'branding' | 'audit' | 'mcp' | 'skills'
+type Tab = 'account' | 'security' | 'users' | 'roles' | 'github' | 'mail' | 'backup' | 'jobs' | 'branding' | 'audit' | 'client-errors' | 'mcp' | 'skills'
 
-const VALID_TABS: Tab[] = ['account', 'security', 'users', 'roles', 'github', 'mail', 'backup', 'branding', 'audit', 'mcp', 'skills']
+const VALID_TABS: Tab[] = ['account', 'security', 'users', 'roles', 'github', 'mail', 'backup', 'jobs', 'branding', 'audit', 'client-errors', 'mcp', 'skills']
 
 function getTab(): Tab {
   // GitHub's App-manifest redirect lands on /settings?code=…&state=…, and its
@@ -1391,9 +1399,11 @@ export function Settings() {
       {panel('github', <GithubTab />)}
       {panel('mail', <MailTab />)}
       {panel('backup', <BackupTab />)}
+      {panel('jobs', <JobHealth />)}
       {/* v2.6.9: skills tab removed from Settings — now top-level /skills */}
       {panel('branding', <BrandingTab />)}
       {panel('audit', <AuditLog />)}
+      {panel('client-errors', <ClientErrors />)}
     </div>
   )
 }

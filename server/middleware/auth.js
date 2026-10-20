@@ -2,6 +2,9 @@ import { getDb } from '../db.js';
 import { hashApiKey } from '../services/encryption.js';
 import { AppError } from '../utils/errors.js';
 import { isAdmin } from '../utils/roles.js';
+import { activeViewAs, effectiveUser } from '../services/viewAs.js';
+import { lookupAccessToken } from '../services/oauthStore.js';
+import { ACCESS_PREFIX, canonicalResource, mcpResourceOf } from '../services/oauthPolicy.js';
 
 /**
  * Authentication middleware. Accepts either:
@@ -118,10 +121,12 @@ export function requireAuth(req, res, next) {
     if (!user) return next(new AppError('Invalid API key', 401, 'UNAUTHORIZED'));
     if (!user.active) return next(new AppError('Account is deactivated', 403, 'DEACTIVATED'));
     req.user = user;
+    applyViewAs(req, apiKey);
     return next();
   }
 
   const bearer = (req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
+  if (bearer && bearer.startsWith(ACCESS_PREFIX)) return oauthAccessToken(req, bearer, next);
   if (bearer) {
     const session = db.prepare(`
       SELECT u.*
@@ -130,10 +135,51 @@ export function requireAuth(req, res, next) {
     `).get(hashApiKey(bearer));
     if (!session) return next(new AppError('Invalid or expired session', 401, 'UNAUTHORIZED'));
     req.user = session;
+    applyViewAs(req, bearer);
     return next();
   }
 
   return next(new AppError('Missing X-API-Key header or Bearer token', 401, 'UNAUTHORIZED'));
+}
+
+// View as role (services/viewAs.js). Only the two credentials a person signs
+// the dashboard in with can carry one: an identity session and a user API key.
+// The record is looked up by the hash of the credential actually presented and
+// re-checked against the real user, so it can only ever lower what they see.
+function applyViewAs(req, credential) {
+  req.auth_credential_hash = hashApiKey(credential);
+  const va = activeViewAs(req.auth_credential_hash, req.user);
+  if (!va) return;
+  req.real_user = req.user;
+  req.view_as = va;
+  req.user = effectiveUser(req.user, va);
+}
+
+// MCP OAuth access token (routes/oauth.js issues them). Usable on POST /api/mcp
+// only, for the resource it was issued for, with the approving user's MCP app
+// scope and the grant's read-only flag, the same carriage as a dhk_mcp_* key.
+function oauthAccessToken(req, token, next) {
+  const row = lookupAccessToken(token);
+  if (!row) return next(new AppError('Invalid or expired access token', 401, 'UNAUTHORIZED'));
+  if (!row.active) return next(new AppError('Account is deactivated', 403, 'DEACTIVATED'));
+  const path = req.baseUrl + (req.path || '') || req.originalUrl || '';
+  if (req.method !== 'POST' || !/^\/api\/mcp\/?$/.test(path)) {
+    return next(new AppError('OAuth access tokens are restricted to POST /api/mcp', 403, 'KEY_SCOPE_RESTRICTED'));
+  }
+  if (canonicalResource(row.resource) !== canonicalResource(mcpResourceOf(req))) {
+    return next(new AppError('This access token was issued for a different resource', 401, 'UNAUTHORIZED'));
+  }
+  req.user = {
+    id: row.uid, name: row.name, email: row.email,
+    role: row.role, active: row.active, kind: row.kind, username: row.username,
+    mcp_app_scope: row.mcp_app_scope,
+    mcp_read_only: !!row.read_only,
+  };
+  req.user_mcp_key = {
+    id: `oauth-${row.grant_id}`, label: row.client_name, read_only: !!row.read_only,
+    oauth: { grant_id: row.grant_id, client_id: row.client_id },
+  };
+  return next();
 }
 
 // A coder key's scope is its one app, inside whatever scope its owner's keys
@@ -187,6 +233,12 @@ export function requireAppAccess(req, res, next) {
 
   req.app = app;
 
+  const va = req.user.view_as;
+  if (va && va.app_id === app.id) {
+    if (va.role === 'none') return next(new AppError('You are not assigned to this app', 403, 'FORBIDDEN'));
+    if (isAdmin(req.real_user)) return next();
+  }
+
   // Platform admins can access app info (env/data still gated below)
   if (isAdmin(req.user)) {
     return next();
@@ -227,6 +279,10 @@ export function requireAppUser(req, res, next) {
   }
 
   req.app = app;
+
+  if (req.user.view_as?.app_id === app.id && req.user.view_as.role === 'none') {
+    return next(new AppError('You are not assigned to this app', 403, 'FORBIDDEN'));
+  }
 
   // Assignment is authoritative for EVERY role, including platform_admin.
   //

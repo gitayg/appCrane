@@ -4,6 +4,7 @@ import { GithubAppModal } from '../components/GithubAppModal'
 import { PresenceAvatars } from '../components/runtime-topbar/PresenceAvatars'
 import { JobsButton } from '../components/runtime-topbar/JobsButton'
 import { RequestModal } from '../components/runtime-topbar/RequestModal'
+import { SurveyCard } from '../components/runtime-topbar/SurveyCard'
 import { WhatsNewModal, type WhatsNewChange } from '../components/WhatsNewModal'
 import { AppAccessModal } from '../components/AppAccessModal'
 import { EnvVarsPanel } from '../components/env/EnvVarsPanel'
@@ -2654,6 +2655,7 @@ function FrameOverlay({ frame, framePanel, setFrame, setFramePanel }: FrameOverl
           iframeRef={iframeRef}
         />
       )}
+      {!whatsNew && (frame.env ?? 'production') === 'production' && <SurveyCard slug={frame.slug} appName={frame.appName ?? frame.title ?? ''} />}
       {whatsNew && frame.slug && (
         <WhatsNewModal
           slug={frame.slug}

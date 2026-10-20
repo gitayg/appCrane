@@ -624,6 +624,17 @@ export function generateCaddyfile() {
   caddyfile += `    handle /.well-known/agent-card.json {\n`;
   caddyfile += `        reverse_proxy 127.0.0.1:${cranePort}\n`;
   caddyfile += `    }\n\n`;
+  // MCP OAuth (routes/oauth.js), named for the same reason as /git/*: a legacy
+  // app `o`, `oa`, `oau` or `oauth` would otherwise receive every client's
+  // authorization code, refresh token and client secret. The metadata documents
+  // cannot be shadowed by a slug (none starts with '.'), but they are what an
+  // MCP client trusts to find the token endpoint, so they are pinned too.
+  caddyfile += `    handle /oauth/* {\n`;
+  caddyfile += `        reverse_proxy 127.0.0.1:${cranePort}\n`;
+  caddyfile += `    }\n\n`;
+  caddyfile += `    handle /.well-known/oauth-* {\n`;
+  caddyfile += `        reverse_proxy 127.0.0.1:${cranePort}\n`;
+  caddyfile += `    }\n\n`;
 
   // Everything else → AppCrane itself
   caddyfile += `    handle {\n`;

@@ -8,6 +8,7 @@ import { getPortsForSlot } from './portAllocator.js';
 import { fetchAppProbe } from './appProbeFetch.js';
 import { getIngressForApp } from './tcpIngress.js';
 import log from '../utils/logger.js';
+import { jobStarted, trackJob } from './jobHealth.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -165,8 +166,9 @@ export function startHealthChecker() {
   // Deliberately no immediate first run: boot is the busiest moment on the box
   // and an over-quota disk is not a condition that changes in 15 minutes.
   if (!diskTimer) {
+    jobStarted('disk-quota');
     diskTimer = setInterval(() => {
-      runDiskChecks().catch(e => log.error(`[disk-quota] sweep failed: ${e.message}`));
+      trackJob('disk-quota', runDiskChecks).catch(e => log.error(`[disk-quota] sweep failed: ${e.message}`));
     }, DISK_CHECK_MS);
   }
 

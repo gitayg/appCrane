@@ -18,6 +18,7 @@ import { execFileSync } from 'child_process';
 import { StdioMcpClient } from './mcpStdioBridge.js';
 import { getDb } from '../db.js';
 import log from '../utils/logger.js';
+import { jobStarted, trackJobSync } from './jobHealth.js';
 
 /** user_id → { client, startedAt, lastActiveAt, tokenHash, toolsCache } */
 const containers = new Map();
@@ -169,7 +170,8 @@ function killOrphans() {
 export function startContainerManager() {
   if (_reaperInterval) return;
   killOrphans();
-  _reaperInterval = setInterval(reaperTick, 60_000);
+  jobStarted('gh-mcp-reaper');
+  _reaperInterval = setInterval(() => { try { trackJobSync('gh-mcp-reaper', reaperTick); } catch (e) { log.warn(`[gh-mcp] reaper failed: ${e.message}`); } }, 60_000);
   log.info('GitHub MCP container manager started');
 }
 

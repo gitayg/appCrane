@@ -87,7 +87,8 @@ test('every password field in the dashboard has the eye', () => {
   assert.deepEqual(raw, [], 'a password field bypasses PasswordInput');
   const users = sources.filter(({ text }) => /<PasswordInput\b/.test(text)).map((s) => s.rel).sort();
   assert.deepEqual(users, [
-    'components/ClaudeTokenCard.tsx', 'components/Login.tsx', 'components/env/EnvVarRow.tsx', 'components/env/EnvVarsPanel.tsx',
+    'components/ChangePasswordCard.tsx', 'components/ClaudeTokenCard.tsx', 'components/Login.tsx', 'components/SetUserPasswordModal.tsx',
+    'components/env/EnvVarRow.tsx', 'components/env/EnvVarsPanel.tsx',
     'pages/Catalog.tsx', 'pages/Settings.tsx', 'pages/Users.tsx',
   ]);
   for (const { rel, text } of sources) {

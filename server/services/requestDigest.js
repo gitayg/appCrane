@@ -7,6 +7,7 @@
 import { getDb } from '../db.js';
 import { enqueueEmail } from './emailQueue.js';
 import log from '../utils/logger.js';
+import { jobStarted, trackJobSync } from './jobHealth.js';
 
 function getSetting(db, key, fallback) {
   const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
@@ -177,13 +178,14 @@ export function startRequestDigestScheduler() {
       const hour = parseInt(getSetting(db, 'request_digest_hour', '8'), 10) || 8;
       const today = new Date().toISOString().slice(0, 10);
       if (getSetting(db, 'request_digest_last_run', '') !== today && new Date().getHours() >= hour) {
-        sendPendingRequestDigests();
+        trackJobSync('request-digest', () => sendPendingRequestDigests());
         setSetting(db, 'request_digest_last_run', today);
       }
     } catch (e) {
       log.warn(`[request-digest] scheduler tick failed: ${e.message}`);
     }
   };
+  jobStarted('request-digest');
   tick();
   _timer = setInterval(tick, 60 * 60 * 1000);
   log.info('[request-digest] daily scheduler started');

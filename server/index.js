@@ -63,6 +63,10 @@ import planRoutes from './routes/plan.js';
 import coderRoutes from './routes/coder.js';
 import skillsRoutes from './routes/skills.js';
 import mcpRoutes from './routes/mcp.js';
+import oauthRoutes, { wellKnownRouter as oauthWellKnownRoutes } from './routes/oauth.js';
+import oauthConsentRoutes from './routes/oauthConsent.js';
+import viewAsRoutes from './routes/viewAs.js';
+import { viewAsWriteGuard } from './middleware/viewAsGuard.js';
 import userMcpKeysRoutes from './routes/userMcpKeys.js';
 import meRoutes from './routes/me.js';
 import filesRoutes, { sweepStagedFiles } from './routes/files.js';
@@ -76,8 +80,10 @@ import serviceApiRoutes from './routes/serviceApi.js';
 import noticesRoutes from './routes/notices.js';
 import catalogRoutes from './routes/catalog.js';
 import crewRoutes from './routes/crew.js';
+import surveysRoutes from './routes/surveys.js';
 import a2aRoutes, { wellKnownAgentCard } from './routes/a2a.js';
 import gitHttpRoutes from './routes/gitHttp.js';
+import clientErrorsRoutes, { adminRouter as clientErrorsAdminRoutes } from './routes/clientErrors.js';
 import { refererSlug } from './utils/refererSlug.js';
 import { globalNotices } from './services/platformNotices.js';
 
@@ -313,6 +319,7 @@ app.use('/a2a', a2aRoutes);
 // git clone/fetch over HTTPS for Crane-hosted apps. Before express.json(): the
 // upload-pack request body is a binary (often gzipped) stream git must read raw.
 app.use('/git', gitHttpRoutes);
+app.use('/api', clientErrorsRoutes); // POST /api/client-errors: browser error reports, own 8 KB parser (before the 50 MB one)
 app.use(express.json({ limit: '50mb', type: ['application/json', 'application/scim+json'] }));
 app.use(express.urlencoded({ extended: true }));
 
@@ -416,7 +423,7 @@ crane init --name admin --email you@example.com</pre>
 // so it never sees them today, but listing them keeps a future reorder from
 // 307ing an agent's A2A call (or a card fetch made from inside an app page)
 // into an app's prefix.
-const APPCRANE_PASSTHROUGH = ['/api/identity', '/api/apps', '/api/info', '/api/notices', '/api/_crashed', '/api/me', '/api/directory', '/api/mcp', '/api/service', '/api/enhancements', '/favicon.svg', '/docs', '/a2a', '/.well-known'];
+const APPCRANE_PASSTHROUGH = ['/api/identity', '/api/apps', '/api/info', '/api/notices', '/api/_crashed', '/api/me', '/api/directory', '/api/mcp', '/api/service', '/api/enhancements', '/favicon.svg', '/docs', '/a2a', '/.well-known', '/oauth'];
 const APPCRANE_PAGE_SLUGS = new Set(['login', 'portal', 'dashboard', 'applications', 'users-page', 'audit-page', 'settings', 'docs', 'app', 'studio', 'appstudio']);
 app.use((req, res, next) => {
   if (req.method === 'OPTIONS') return next();
@@ -975,7 +982,12 @@ app.get('/api/self-update/status', requireAuth, requireAdmin, (req, res) => {
 
 // API Routes
 app.use('/api', apiRateLimit);
+app.use('/api', viewAsWriteGuard);       // view as role is read-only: refuses every write from a previewing credential
+app.use('/.well-known', oauthWellKnownRoutes); // MCP OAuth: RFC 9728 + RFC 8414 metadata
+app.use('/oauth', oauthRoutes);          // MCP OAuth: register / authorize / token / revoke
+app.use('/api/oauth', oauthConsentRoutes); // MCP OAuth consent data + connected clients (signed-in)
 app.use('/api/auth', authRoutes);
+app.use('/api/auth', viewAsRoutes);      // /api/auth/view-as, /view-as-options, /stop-viewing-as
 app.use('/api/auth/oidc', oidcRoutes);
 app.use('/api/auth/saml', samlRoutes);
 app.use('/api/auth/popup', ssoPopupRoutes); // popup sign-in completion script (framed sign-in)
@@ -1018,6 +1030,8 @@ app.use('/api/crew', crewRoutes);        // Crew: platform-wide agent hub (requi
 // Mount identity FIRST so its routes don't get caught by other middleware
 app.use('/api/identity', identityRoutes);
 app.use('/api/enhancements', enhancementsRoutes); // Enhancement requests (Bearer auth, must be before logsRoutes)
+app.use('/api/service/tasks', (await import('./routes/tasksService.js')).default); // Tasks API for hosted apps (service-token auth, internal-only)
+app.use('/api/tasks', (await import('./routes/tasks.js')).default); // My tasks: per-user inbox across apps (requireAuth; party-only in services/tasks.js)
 app.use('/api/service', serviceApiRoutes); // v2.8.0 internal app service API (service-token auth, internal-only)
 app.use('/api/appstudio', appstudioRoutes); // AppStudio plan/code/build pipeline
 app.use('/api/skills', skillsRoutes);       // Skill bundles loaded by all CLI agents via ~/.claude/skills/
@@ -1046,6 +1060,8 @@ app.use('/api/mcp', mcpRoutes);          // Model Context Protocol endpoint (JSO
 // Safe to hoist ONLY because settingsRoutes now carries its own per-key auth
 // (v2.38.0). Before that, this accidental ordering WAS its protection, and
 // moving it would have made every setting world-readable.
+app.use('/api/settings', (await import('./routes/jobHealth.js')).default); // /api/settings/job-health (platform admin)
+app.use('/api/settings/client-errors', clientErrorsAdminRoutes); // aggregated browser errors (platform admin)
 app.use('/api/settings', settingsRoutes); // General settings (branding, etc.)
 
 // v2.7.17: meRoutes MUST come before userMcpKeysRoutes. userMcpKeys's
@@ -1065,6 +1081,7 @@ app.use('/api/github-app', githubAppRoutes);         // per-instance GitHub App:
 app.use('/api/apps', appGithubAppRoutes);           // /api/apps/:slug/github-app — attach an app to an installation
 app.use('/api/apps', whatsNewRoutes);     // /api/apps/:slug/whats-new — per-user version dialog state
 app.use('/api/whats-new', platformWhatsNewRoutes); // /api/whats-new/platform — AppCrane update dialog (platform admins)
+app.use('/api/surveys', surveysRoutes);    // /api/surveys — in-app NPS surveys: pending card, answers, results, admin config
 
 app.use('/api', logsRoutes);             // /api/audit, /api/:slug/audit, /api/:slug/logs/:env
 app.use('/api', monitoringRoutes);       // /api/server/health
@@ -1217,10 +1234,13 @@ app.get('/catalog', (req, res) => sendHtml(res, adminSpa));
 app.get('/audit', (req, res) => sendHtml(res, adminSpa));
 // v2.105.0: Crew, the agent hub. The first-contact e-mail links to /crew#log.
 app.get('/crew', (req, res) => sendHtml(res, adminSpa));
+app.get('/tasks', (req, res) => sendHtml(res, adminSpa)); // My tasks; task e-mails link to /tasks?task=<id>
+app.get('/surveys', (req, res) => sendHtml(res, adminSpa)); // NPS & surveys; survey e-mails link to /surveys?app=<slug>
 // Found by the same test: /skills is a client-side redirect to /settings#skills,
 // but a direct load never reaches React to be redirected.
 app.get('/skills', (req, res) => sendHtml(res, adminSpa));
 app.get('/mcp', (req, res) => sendHtml(res, adminSpa));
+app.get('/mcp/authorize', (req, res) => sendHtml(res, adminSpa)); // MCP OAuth consent screen
 app.get('/studio', (req, res) => res.redirect(301, '/appstudio'));
 app.get('/studio/*splat', (req, res) => res.redirect(301, '/appstudio'));
 app.get('/coder', (req, res) => res.redirect(301, '/studio')); // legacy redirect

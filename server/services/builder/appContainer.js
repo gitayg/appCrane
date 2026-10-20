@@ -12,6 +12,7 @@ import { writeSnapshot } from '../github/snapshot.js';
 import { prepareSkillsMount } from '../skills.js';
 import { prepareClaudeCredentialsMount } from '../claudeCredentials.js';
 import log from '../../utils/logger.js';
+import { jobStarted, trackJobSync } from '../jobHealth.js';
 
 const STUDIO_IMAGE  = process.env.APPSTUDIO_IMAGE || 'appcrane-studio:latest';
 const IDLE_EVICT_MS = parseInt(process.env.CODER_IDLE_MS || '1800000', 10); // 30 min
@@ -658,14 +659,15 @@ export function preserveThenEvict(slug, session, reason) {
   return preserved;
 }
 
-setInterval(() => {
+jobStarted('coder-idle-sweep');
+setInterval(() => trackJobSync('coder-idle-sweep', () => {
   const threshold = Date.now() - IDLE_EVICT_MS;
   for (const [slug, c] of containers) {
     if (!c.ready || c.busy) continue;
     if (c.lastActivityAt > threshold) continue;
     evict(slug, 'idle');
   }
-}, SWEEP_MS).unref();
+}), SWEEP_MS).unref();
 
 /**
  * Called once on AppCrane startup. Kills any leftover app containers from a

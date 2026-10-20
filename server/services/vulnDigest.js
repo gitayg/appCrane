@@ -17,6 +17,7 @@ import { scanApp, fleetScanSummary } from './appScan.js';
 import { assertFindings } from './scanShapes.js';
 import { vulnRequestIdFor, requestUrl } from './vulnRequests.js';
 import log from '../utils/logger.js';
+import { jobStarted, trackJob } from './jobHealth.js';
 
 const K = {
   lastRun: 'vuln_scan_last_run',
@@ -324,12 +325,15 @@ export function startVulnScheduler() {
       return;
     }
     try {
-      await runDailyScan(db);
-      sendVulnDigest(db);
+      await trackJob('vuln-scan', async () => {
+        await runDailyScan(db);
+        sendVulnDigest(db);
+      });
     } catch (e) {
       log.error(`[vuln-scan] daily run failed: ${e.message}`);
     }
   };
+  jobStarted('vuln-scan');
   tick().catch(() => {});
   _timer = setInterval(() => { tick().catch(() => {}); }, 60 * 60 * 1000);
   log.info('[vuln-scan] daily scheduler started (hourly check)');

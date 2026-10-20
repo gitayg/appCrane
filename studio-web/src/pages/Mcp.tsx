@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { adminApi } from '../adminApi'
+import { OAuthConnections } from '../components/OAuthConnections'
 import { serverDate } from '../utils/serverDate'
 
 type McpTool = {
@@ -402,6 +403,7 @@ export function Mcp() {
       </p>
 
       <PersonalKeyCard endpoint={endpoint} />
+      <OAuthConnections endpoint={endpoint} />
 
       <div className="setting-card">
         <h3>Setup (Claude Code)</h3>
