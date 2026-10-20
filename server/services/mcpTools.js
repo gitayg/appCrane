@@ -1129,6 +1129,9 @@ const TOOLS = [
 
       await refuseUnacknowledgedDataLoss({ db, app, env, args });
 
+      const { refuseDeployForMemory } = await import('./deployer.js');
+      await refuseDeployForMemory({ db, app, env, userId: user.id });
+
       const result = db
         .prepare("INSERT INTO deployments (app_id, env, status, deployed_by) VALUES (?, ?, 'pending', ?)")
         .run(app.id, env, user.id);

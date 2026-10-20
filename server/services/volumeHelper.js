@@ -32,6 +32,7 @@
 import { join, resolve } from 'path';
 import { Transform } from 'stream';
 import { VOLUME_SUBDIR, validateVolumePaths } from './containerRuntimeSpec.js';
+import { OOM_APP_FLAG } from './oomPriority.js';
 
 /** Where the helper sees <shared>/volumes. Outside any path an app can declare
  *  that matters, and checked against the declared ones anyway. */
@@ -133,6 +134,7 @@ export function volumeHelperArgs({ root, mode, paths, owner = null, stdin = fals
   }
   return [
     'run', '--rm',
+    OOM_APP_FLAG,
     ...(stdin ? ['-i'] : []),
     '--pull', 'never',
     '--user', '0:0',

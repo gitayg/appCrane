@@ -27,6 +27,7 @@ export const JOBS = {
   'db-auth-alerts':   { label: 'Managed database login alerts',     cadenceMs: 3 * MIN },
   'gh-mcp-reaper':    { label: 'GitHub MCP container reaper',       cadenceMs: MIN },
   'coder-idle-sweep': { label: 'Idle coder container sweep',        cadenceMs: 5 * MIN },
+  'host-resources':   { label: 'Server memory and disk check',      cadenceMs: 5 * MIN },
   'whats-new-mail':   { label: "What's New mail (once per release)", cadenceMs: null },
 };
 
@@ -35,6 +36,7 @@ const active = new Map();
 const lastRun = new Map();
 const lastPersisted = new Map();
 const counters = new Map();
+const details = new Map();
 let watchTimer = null;
 let alertsEnabled = false;
 
@@ -127,6 +129,11 @@ export function trackJobSync(id, fn) {
       record(id, { startedAt: run.startedAt, finishedAt: Date.now(), error: thrown ?? run.error });
     } catch (_) { /* reporting never breaks a job */ }
   }
+}
+
+/** Attach what a job last observed (host-resources: memory and disk) to its Job Health row. */
+export function setJobDetail(id, detail) {
+  try { details.set(id, detail); } catch (_) {}
 }
 
 export function isJobRunning(id) {
@@ -236,6 +243,7 @@ export function getJobHealth(now = Date.now()) {
       history,
     };
     if (id === 'email-queue') job.queue = queueDepth(db);
+    if (details.has(id)) job.detail = details.get(id);
     return job;
   });
 }
@@ -286,7 +294,7 @@ export function alertOnUnhealthy(now = Date.now()) {
 }
 
 export function _resetJobHealthForTests() {
-  started.clear(); active.clear(); lastRun.clear(); lastPersisted.clear(); counters.clear();
+  started.clear(); active.clear(); lastRun.clear(); lastPersisted.clear(); counters.clear(); details.clear();
   if (watchTimer) { clearInterval(watchTimer); watchTimer = null; }
   alertsEnabled = false;
 }

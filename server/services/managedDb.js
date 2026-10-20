@@ -123,6 +123,8 @@ import { getManagedDbSettings } from './managedDbSettings.js';
 import * as tde from './managedDbEncryption.js';
 import * as appLogin from './managedDbAppLogin.js';
 import * as pgStats from './managedDbStats.js';
+import { OOM_DB_FLAG } from './oomPriority.js';
+import { admitContainer } from './memoryAdmission.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -993,6 +995,11 @@ async function ensureServerLocked(engine, cfg) {
       await createServerContainer(engine, cfg, port, adminPassword, tls.dir);
     }
   } else if (!state) {
+    // Only a server that did not exist is admitted: a recreate restores memory
+    // this database already held, and refusing it would leave it down.
+    if (!facts.state) {
+      await admitContainer({ name: cfg.container, memoryMb: cfg.memoryMb, kind: 'db', what: 'database start', subject: `the managed ${engine} server` });
+    }
     await createServerContainer(engine, cfg, port, adminPassword, tls.dir);
   }
 
@@ -1105,6 +1112,7 @@ async function createServerContainer(engine, cfg, port, adminPassword, tlsDir) {
     '--label', `appcrane-db=${engine}`,
     '--label', `appcrane-db-config=${serverConfigLabel(engine)}`,
     '--restart=on-failure:2',
+    OOM_DB_FLAG,
     `--memory=${cfg.memoryMb}m`,
     // Equal to --memory: Docker's spelling for "no swap at all". Omitting it
     // silently doubles the real ceiling on any host that has swap. Same
@@ -1393,6 +1401,9 @@ async function ensureRedisInstance({ container, dbName, username, password, port
       await createRedisContainer({ container, dbName, password, port, tlsDir: tlsFiles?.dir || null });
     }
   } else if (!state) {
+    if (!facts.state) {
+      await admitContainer({ name: container, memoryMb: ENGINES.redis.memoryMb, kind: 'db', what: 'database start', subject: `the managed Redis instance ${dbName}` });
+    }
     await createRedisContainer({ container, dbName, password, port, tlsDir: tlsFiles?.dir || null });
   }
 
@@ -1429,6 +1440,7 @@ async function createRedisContainer({ container, dbName, password, port, tlsDir 
     '--label', `appcrane-db-name=${dbName}`,
     '--label', `appcrane-db-config=${tlsDir ? redis.REDIS_TLS_CONFIG_VERSION : ''}`,
     '--restart=on-failure:2',
+    OOM_DB_FLAG,
     `--memory=${memoryMb}m`,
     `--memory-swap=${memoryMb}m`,
     '--security-opt', 'no-new-privileges',

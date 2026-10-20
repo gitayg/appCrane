@@ -71,6 +71,9 @@ const { initDb, getDb } = await import('../server/db.js');
 const { generateApiKey, hashApiKey } = await import('../server/services/encryption.js');
 initDb();
 const db = getDb();
+// This file exercises a real daemon, not memory admission (test/memory-admission.test.js); a busy
+// Docker host must not refuse its containers.
+db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('memory_admission_mode', 'off')").run();
 
 const mdb = await import('../server/services/managedDb.js');
 const catalog = JSON.parse(

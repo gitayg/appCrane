@@ -374,6 +374,9 @@ StandardError=journal
 KillSignal=SIGTERM
 TimeoutStopSec=20
 LimitNOFILE=65535
+# Under whole-host memory pressure the kernel kills app containers first: they
+# run with --oom-score-adj=500 (databases 300), AppCrane with -500.
+OOMScoreAdjust=-500
 
 [Install]
 WantedBy=multi-user.target

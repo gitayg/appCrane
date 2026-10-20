@@ -42,6 +42,9 @@ const bk = await import('../server/services/managedDbBackup.js');
 let A; let B; let C;
 before(() => {
   initDb(process.env.DATA_DIR);
+  // This file exercises a real daemon, not memory admission (test/memory-admission.test.js); a busy
+  // Docker host must not refuse its containers.
+  getDb().prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('memory_admission_mode', 'off')").run();
   const ins = getDb().prepare('INSERT INTO apps (name, slug, slot) VALUES (?, ?, ?)');
   A = Number(ins.run('A', 'app-a', 1).lastInsertRowid);
   B = Number(ins.run('B', 'app-b', 2).lastInsertRowid);

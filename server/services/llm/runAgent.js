@@ -22,6 +22,7 @@ import { prepareClaudeCredentialsMount, credentialsInfo } from '../claudeCredent
 import { getUserClaudeToken, userClaudeTokenMeta } from '../userClaudeToken.js';
 import { defaultCoderModel } from './coderModels.js';
 import log from '../../utils/logger.js';
+import { OOM_APP_FLAG } from '../oomPriority.js';
 
 const DEFAULT_TIMEOUT = parseInt(process.env.CODER_TIMEOUT_MS || '1800000', 10);
 
@@ -494,6 +495,7 @@ export function runAgentNew({
   // require a per-app outbound proxy (out of scope today).
   const args = [
     'run', '--rm',
+    OOM_APP_FLAG,
     '--cap-drop=ALL',
     '--security-opt', 'no-new-privileges:true',
     '--pids-limit=256',

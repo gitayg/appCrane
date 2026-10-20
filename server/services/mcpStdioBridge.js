@@ -18,6 +18,7 @@
 
 import { spawn } from 'child_process';
 import log from '../utils/logger.js';
+import { OOM_APP_FLAG } from './oomPriority.js';
 
 const CALL_TIMEOUT_MS = parseInt(process.env.APPCRANE_GH_MCP_CALL_TIMEOUT_MS || '30000', 10);
 
@@ -53,6 +54,7 @@ export function buildDockerArgs({ image, env = {}, label = 'gh-mcp', extraDocker
 
   const args = [
     'run', '-i', '--rm',
+    OOM_APP_FLAG,
     '--label', 'appcrane.gh-mcp=1',
     `--label`, `appcrane.label=${label}`,
 

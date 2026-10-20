@@ -20,6 +20,7 @@ import {
 import { pruneGrantsForNonMembers } from '../services/appDefinedRoles.js';
 import { assessMemoryChange } from '../services/memoryBudget.js';
 import { attachedInstallationIds, codeSourceFields } from '../services/codeSource.js';
+import { discoverableApp, ownerNames, pendingAccessRequestSlugs } from '../services/discoverableApps.js';
 import {
   effectiveIngressType, publicPortForApp, pendingPortRelease, validateIngressType,
   assignPublicPort, releasePublicPort, drainingPorts, effectiveDataPlanePort, validateDataPlanePort, storedDataPlaneProtocol, validateDataPlaneProtocol, CONTROL_PLANE_PORT,
@@ -454,8 +455,17 @@ router.get('/', async (req, res) => {
     return 'none';                                                 // discoverable: needs request access
   }
 
+  const requestedSlugs = isAdmin(req.user) ? null : pendingAccessRequestSlugs(db, req.user.id);
+
   // Enrich with ports and health status
   const enriched = apps.map(app => {
+    if (userAppRole(app) === 'none') {
+      return discoverableApp(app, {
+        owners: ownerNames(db, app.id),
+        hasIcon: hasIconFile(app.slug),
+        accessRequested: requestedSlugs.has(app.slug),
+      });
+    }
     const ports = getPortsForSlot(app.slot);
 
     const healthProd = db.prepare('SELECT * FROM health_state WHERE app_id = ? AND env = ?').get(app.id, 'production');

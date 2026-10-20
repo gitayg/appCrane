@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ReactElement } from 'react'
 import { adminApi } from '../adminApi'
+import { useMe } from '../hooks/useMe'
 
 /**
  * v2.32.0: the /launch empty state. Previously a rocket glyph telling you to
@@ -11,9 +12,9 @@ import { adminApi } from '../adminApi'
  * merged into the nav in v2.13.0 — the CSS survived with no component using it,
  * so this matches the established look rather than inventing a second one.
  *
- * /api/apps is already role-filtered server-side (admins see everything, users
- * see what they're assigned plus public apps), so whatever comes back is
- * exactly what this user may open — no client-side filtering to get wrong.
+ * /api/apps also returns apps this user has no role on (app_role 'none') so
+ * they can ask for access. Those are never openable: they get their own
+ * "Request access" section and a button instead of a tile that opens.
  */
 
 interface PickerApp {
@@ -22,7 +23,11 @@ interface PickerApp {
   description?: string | null
   category?: string | null
   has_icon?: boolean
-  owner?: { name?: string; email?: string } | null
+  owner?: { id?: number; name?: string; email?: string } | null
+  owners?: { id?: number; name?: string }[]
+  app_role?: 'owner' | 'admin' | 'user' | 'viewer' | 'none'
+  /** Only on app_role 'none': this user already has a pending access request. */
+  access_requested?: boolean
   production?: { deploy?: { status?: string; version?: string } }
   sandbox?: { deploy?: { status?: string; version?: string } }
   /** Server-computed: false when the app hides Sandbox from this caller. */
@@ -59,8 +64,13 @@ function isLive(a: PickerApp): boolean {
   return a.production?.deploy?.status === 'live' || (sandboxOffered(a) && a.sandbox?.deploy?.status === 'live')
 }
 
+const canOpen = (a: PickerApp) => a.app_role !== 'none'
+
 export function AppPicker({ onOpen }: { onOpen: (slug: string) => void }) {
+  const me = useMe()
+  const myId = me?.user?.id
   const [apps, setApps] = useState<PickerApp[] | null>(null)
+  const [requested, setRequested] = useState<Record<string, 'sending' | 'sent' | 'failed'>>({})
   const [menuFor, setMenuFor] = useState<string | null>(null)
   const [query, setQuery] = useState('')
   // Persisted: sort order is a standing preference, not a per-visit decision,
@@ -100,9 +110,14 @@ export function AppPicker({ onOpen }: { onOpen: (slug: string) => void }) {
   // has plenty.
   if (apps === null) return null
 
-  const openable = apps.filter(isLive)
+  // A platform admin's app_role is 'admin' everywhere, so ownership is also
+  // read from the owners list.
+  const isOwned = (a: PickerApp) =>
+    a.app_role === 'owner' || (myId !== undefined && (a.owners ?? []).some(o => o.id === myId))
+  const openable = apps.filter(a => canOpen(a) && isLive(a))
+  const requestable = apps.filter(a => !canOpen(a))
 
-  if (openable.length === 0) {
+  if (openable.length === 0 && requestable.length === 0) {
     return (
       <div className="lstage-empty">
         <div className="lstage-empty-inner">
@@ -118,16 +133,20 @@ export function AppPicker({ onOpen }: { onOpen: (slug: string) => void }) {
     )
   }
 
-  const visible = openable.filter(a => matches(a, query))
+  const visibleOpenable = openable.filter(a => matches(a, query))
+  const owned = visibleOpenable.filter(isOwned)
+  const others = visibleOpenable.filter(a => !isOwned(a))
+  const visibleRequestable = requestable.filter(a => matches(a, query))
+  const anyVisible = visibleOpenable.length + visibleRequestable.length > 0
   const byName = (x: PickerApp, y: PickerApp) => x.name.localeCompare(y.name)
 
   // Sorted by name → one flat grid. Sorted by category → a grid per category,
   // categories alphabetical with Uncategorized pinned last so an unlabelled
   // app never leads the page.
-  const groups: { key: string; apps: PickerApp[] }[] =
+  const groupsOf = (list: PickerApp[]): { key: string; apps: PickerApp[] }[] =>
     sortBy === 'category'
       ? Object.entries(
-          visible.reduce<Record<string, PickerApp[]>>((acc, a) => {
+          list.reduce<Record<string, PickerApp[]>>((acc, a) => {
             const k = (a.category || '').trim() || UNCATEGORIZED
             ;(acc[k] ||= []).push(a)
             return acc
@@ -135,8 +154,78 @@ export function AppPicker({ onOpen }: { onOpen: (slug: string) => void }) {
         )
           .sort(([a], [b]) =>
             a === UNCATEGORIZED ? 1 : b === UNCATEGORIZED ? -1 : a.localeCompare(b))
-          .map(([key, list]) => ({ key, apps: list.sort(byName) }))
-      : [{ key: '', apps: [...visible].sort(byName) }]
+          .map(([key, l]) => ({ key, apps: l.sort(byName) }))
+      : [{ key: '', apps: [...list].sort(byName) }]
+
+  const requestAccess = async (a: PickerApp) => {
+    setRequested(r => ({ ...r, [a.slug]: 'sending' }))
+    try {
+      await adminApi.post('/api/enhancements', {
+        message: `Access request for app \u201c${a.name}\u201d`,
+        app_slug: a.slug,
+      })
+      setRequested(r => ({ ...r, [a.slug]: 'sent' }))
+    } catch {
+      setRequested(r => ({ ...r, [a.slug]: 'failed' }))
+    }
+  }
+
+  // Never opens the app: no onOpen, no link. The only action is the request.
+  const renderRequestTile = (a: PickerApp) => {
+    const state = requested[a.slug] ?? (a.access_requested ? 'sent' : undefined)
+    const done = state === 'sent'
+    const builder = builderOf(a)
+    return (
+      <div key={a.slug} className="launcher-tile-cell picker-cell">
+        <div
+          className={'launcher-tile picker-locked' + (done ? ' launcher-tile-requested' : ' launcher-tile-request')}
+          aria-disabled="true"
+          title={builder ? `${a.name} — ask ${builder} for access` : a.name}
+        >
+          <span className="launcher-tile-icon">
+            {a.has_icon
+              ? <img src={`/api/apps/${a.slug}/icon`} alt="" />
+              : <span>{initials(a.name)}</span>}
+          </span>
+          <span className="launcher-tile-name">
+            <span aria-label="No access" role="img">🔒</span> {a.name}
+          </span>
+          {builder && <span className="picker-locked-owner">{builder}</span>}
+        </div>
+        <button
+          type="button"
+          className="launcher-tile-ctrl picker-request-btn"
+          disabled={done || state === 'sending'}
+          onClick={() => requestAccess(a)}
+        >
+          {done ? 'Requested' : state === 'sending' ? 'Sending…' : state === 'failed' ? 'Failed — try again' : 'Request access'}
+        </button>
+      </div>
+    )
+  }
+
+  const renderSection = (
+    key: string,
+    title: string,
+    list: PickerApp[],
+    render: (a: PickerApp) => ReactElement,
+  ) => list.length === 0 ? null : (
+    <section key={key} className="picker-section" data-section={key}>
+      <h3 className="picker-section-head">
+        {title} <span className="picker-group-count">{list.length}</span>
+      </h3>
+      {groupsOf(list).map(g => (
+        <div key={g.key || 'all'} className="picker-group">
+          {g.key && (
+            <h4 className="picker-group-head">
+              {g.key} <span className="picker-group-count">{g.apps.length}</span>
+            </h4>
+          )}
+          <div className="launcher-grid">{g.apps.map(render)}</div>
+        </div>
+      ))}
+    </section>
+  )
 
   const renderTile = (a: PickerApp) => {
             const prodV = a.production?.deploy?.version
@@ -250,25 +339,22 @@ export function AppPicker({ onOpen }: { onOpen: (slug: string) => void }) {
 
         <p className="lstage-picker-sub">
           {query
-            ? `${visible.length} of ${openable.length} app${openable.length === 1 ? '' : 's'} match “${query}”`
-            : `${openable.length} app${openable.length === 1 ? '' : 's'} available — it opens here as a tab.`}
+            ? `${visibleOpenable.length} of ${openable.length} app${openable.length === 1 ? '' : 's'} match “${query}”`
+            : openable.length === 0
+              ? 'No apps you can open yet — request access to one below.'
+              : `${openable.length} app${openable.length === 1 ? '' : 's'} available — it opens here as a tab.`}
         </p>
 
-        {visible.length === 0 ? (
+        {!anyVisible ? (
           <p className="picker-no-match">
             Nothing matches “{query}”. Search covers app name, builder and slug.
           </p>
         ) : (
-          groups.map(g => (
-            <div key={g.key || 'all'} className="picker-group">
-              {g.key && (
-                <h4 className="picker-group-head">
-                  {g.key} <span className="picker-group-count">{g.apps.length}</span>
-                </h4>
-              )}
-              <div className="launcher-grid">{g.apps.map(renderTile)}</div>
-            </div>
-          ))
+          <>
+            {renderSection('owned', 'Apps you own', owned, renderTile)}
+            {renderSection('yours', 'Your apps', others, renderTile)}
+            {renderSection('request', 'Request access', visibleRequestable, renderRequestTile)}
+          </>
         )}
       </div>
     </div>

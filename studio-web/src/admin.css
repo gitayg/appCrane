@@ -1206,6 +1206,18 @@ textarea:focus { border-color: var(--accent); }
   background: var(--surface2, #232323); color: var(--dim);
 }
 
+/* Launch picker sections: Apps you own, Your apps, Request access. */
+.picker-section { margin-bottom: 26px; }
+.lstage-picker-inner .picker-section-head {
+  display: flex; align-items: center; gap: 8px;
+  margin: 0 0 12px; font-size: .9rem; font-weight: 600; color: var(--text);
+}
+.picker-locked { cursor: default; opacity: .7; }
+.picker-locked:hover { transform: none; background: var(--surface, #1a1a1a); }
+.picker-locked-owner { font-size: .72rem; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.picker-request-btn { text-align: center; cursor: pointer; }
+.picker-request-btn:disabled { cursor: default; opacity: .7; }
+
 /* Per-tile ⋯ menu (version / builder / open in a new tab). The cell is the
    positioning context; the dots sit over the tile's top-right corner without
    being nested inside the tile button. */

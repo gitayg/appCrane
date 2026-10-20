@@ -5,6 +5,7 @@ import { PasswordInput } from '../components/secret/PasswordInput'
 import { Users } from './Users'
 import { AuditLog } from './AuditLog'
 import { JobHealth } from './JobHealth'
+import { ServerCapacity } from './ServerCapacity'
 import { ClientErrors } from './ClientErrors'
 import { BrandingTab } from '../components/BrandingTab'
 import { Mcp } from './Mcp'
@@ -1399,7 +1400,7 @@ export function Settings() {
       {panel('github', <GithubTab />)}
       {panel('mail', <MailTab />)}
       {panel('backup', <BackupTab />)}
-      {panel('jobs', <JobHealth />)}
+      {panel('jobs', <><ServerCapacity /><JobHealth /></>)}
       {/* v2.6.9: skills tab removed from Settings — now top-level /skills */}
       {panel('branding', <BrandingTab />)}
       {panel('audit', <AuditLog />)}

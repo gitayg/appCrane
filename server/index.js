@@ -1661,6 +1661,24 @@ app.listen(PORT, HOST, async () => {
     log.error('Metrics sampler failed to start: ' + e.message);
   }
 
+  // Server memory and disk for Job Health, with alerts to platform admins.
+  try {
+    const { startHostResourceMonitor } = await import('./services/hostResources.js');
+    startHostResourceMonitor();
+  } catch (e) {
+    log.error('Host resource monitor failed to start: ' + e.message);
+  }
+
+  // Ask the kernel to kill app containers before AppCrane under whole-host OOM.
+  try {
+    const { protectFromOom } = await import('./services/oomSelfProtect.js');
+    const r = protectFromOom();
+    if (r.status === 'set') log.info(`OOM priority: oom_score_adj set to ${r.value} (was ${r.previous})`);
+    else if (r.status === 'not-permitted' || r.status === 'failed') log.warn(`OOM priority unchanged: ${r.reason}`);
+  } catch (e) {
+    log.warn('OOM priority check failed: ' + e.message);
+  }
+
   // v2.21.9: nightly off-site (S3) backup — no-op until configured in Settings.
   try {
     const { startBackupScheduler } = await import('./services/backupScheduler.js');

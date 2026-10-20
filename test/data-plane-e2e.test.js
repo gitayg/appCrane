@@ -159,6 +159,9 @@ before(async () => {
   }
   const db = await import('../server/db.js');
   db.initDb();
+  // This file exercises a real daemon, not memory admission (test/memory-admission.test.js); a busy
+  // Docker host must not refuse its containers.
+  db.getDb().prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('memory_admission_mode', 'off')").run();
   getDb = db.getDb;
   ({ startApp } = await import('../server/services/docker.js'));
 });

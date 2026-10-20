@@ -1,4 +1,9 @@
 {
+  "2.113.0": [
+    "When the server is short on memory, platform admins are alerted about deploys, coder sessions and new databases that would over-commit it (or, if they choose, those are refused with a \"try again later\" message), and app containers are killed before AppCrane under memory pressure.",
+    "Job Health now watches server memory and disk and e-mails platform admins when either runs low.",
+    "The Launch page shows the apps you own first, and puts apps you have no access to under \"Request access\" instead of opening them; the app list no longer sends their health, versions or URLs."
+  ],
   "2.112.0": [
     "Apps can assign tasks to people, and everyone gets a \"My tasks\" inbox across all apps to reply, change status, or delete what they asked for.",
     "NPS surveys: platform admins choose the questions, apps and how often to ask; every answer is e-mailed to the app's owners and admins and shown on a new NPS & surveys page.",

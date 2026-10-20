@@ -13,6 +13,8 @@ import { prepareSkillsMount } from '../skills.js';
 import { prepareClaudeCredentialsMount } from '../claudeCredentials.js';
 import log from '../../utils/logger.js';
 import { jobStarted, trackJobSync } from '../jobHealth.js';
+import { OOM_APP_FLAG } from '../oomPriority.js';
+import { admitContainer, reserveMemory } from '../memoryAdmission.js';
 
 const STUDIO_IMAGE  = process.env.APPSTUDIO_IMAGE || 'appcrane-studio:latest';
 const IDLE_EVICT_MS = parseInt(process.env.CODER_IDLE_MS || '1800000', 10); // 30 min
@@ -245,6 +247,9 @@ async function cloneWorkspace(app, branchName, onLog) {
   return workspaceDir;
 }
 
+// The --memory=2g below, in MB, for memory admission.
+export const CODER_MEMORY_MB = 2048;
+
 function startContainer(slug, workspaceDir, onLog) {
   const containerName = containerNameFor(slug);
   // Clean up any leftover container with the same name (previous AppCrane process)
@@ -270,6 +275,7 @@ function startContainer(slug, workspaceDir, onLog) {
     '--label', 'appcrane=true',
     '--label', 'appcrane.container.type=app',
     '--label', `app.slug=${slug}`,
+    OOM_APP_FLAG,
     '--memory=2g', '--cpus=1',
     '--cap-drop=ALL',
     '--security-opt', 'no-new-privileges:true',
@@ -308,7 +314,7 @@ function startContainer(slug, workspaceDir, onLog) {
  * Returns the live AppContainer for `app.slug`, creating it if necessary.
  * Concurrent calls during creation share the same in-flight promise.
  */
-export async function getOrCreate(app, onLog) {
+export async function getOrCreate(app, onLog, { userId = null } = {}) {
   const slug = app.slug;
 
   // Live + healthy → return as-is
@@ -330,6 +336,11 @@ export async function getOrCreate(app, onLog) {
 
   const branchName = `builder/${slug}`;
   const promise = (async () => {
+    const name = containerNameFor(slug);
+    await admitContainer({
+      name, memoryMb: CODER_MEMORY_MB, kind: 'coder', slug, appId: app.id ?? null, userId,
+      what: 'coder session', subject: `the coder for ${slug}`,
+    });
     await ensureStudioImage(onLog);
     const workspaceDir = await cloneWorkspace(app, branchName, onLog);
     try {
@@ -338,7 +349,14 @@ export async function getOrCreate(app, onLog) {
       log.warn(`appContainer snapshot write failed for ${slug}: ${err.message}`);
     }
 
-    const { containerId, skillsCleanup, credsCleanup } = startContainer(slug, workspaceDir, onLog);
+    const release = reserveMemory(name, CODER_MEMORY_MB * 1024 * 1024);
+    let started;
+    try {
+      started = startContainer(slug, workspaceDir, onLog);
+    } finally {
+      release();
+    }
+    const { containerId, skillsCleanup, credsCleanup } = started;
 
     const c = {
       ready: true,

@@ -180,6 +180,11 @@ router.post('/:slug/deploy/:env', requireAppAccess, auditMiddleware('deploy'), a
   const refusal = await refuseUnacknowledgedDataLoss(req, app, env);
   if (refusal) return res.status(409).json(refusal);
 
+  // No memory on the server for this container: 409 with the reason, recorded
+  // as a failed deployment, the running version untouched.
+  const { refuseDeployForMemory } = await import('../services/deployer.js');
+  await refuseDeployForMemory({ db, app, env, userId: req.user.id });
+
   // Create deployment record
   const result = db.prepare(`
     INSERT INTO deployments (app_id, env, status, deployed_by)
@@ -472,8 +477,12 @@ router.post('/:slug/restart/:env', requireAppAccess, auditMiddleware('restart'),
     const { seedNewVolumeMounts } = await import('../services/volumeSeeder.js');
     await seedNewVolumeMounts({ image, volumes: declaredVolumes });
   }
+  // Admitted before the stop: a refusal leaves the running container alone.
+  const { admitAppStart } = await import('../services/deployer.js');
+  await admitAppStart({ app, env, userId: req.user.id, what: 'restart' });
   await dockerStop(app.slug, env).catch(() => {});
   await dockerStart({
+    admission: false,
     slug: app.slug,
     env,
     image,

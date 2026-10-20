@@ -23,6 +23,7 @@ const HEADINGS: Record<string, string> = {
   WRONG_STATUS:     'Not right now',
   FORBIDDEN:        'You do not have permission',
   VALIDATION:       'That request was not valid',
+  INSUFFICIENT_MEMORY: 'Not enough memory on the server',
 }
 
 /** Extra guidance the server message does not carry, keyed by code. */

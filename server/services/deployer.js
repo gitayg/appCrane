@@ -25,6 +25,7 @@ import { parseContainerCommand, parseVolumePaths, resolveVolumeMounts, declaredV
 import { resolveHealthProbe } from './healthProbeTarget.js';
 import { fetchAppProbe } from './appProbeFetch.js';
 import { imagesToKeep } from './imageRetention.js';
+import { admitContainer, REFUSED_CODE } from './memoryAdmission.js';
 
 // ---------------------------------------------------------------------------
 // Managed database credentials -> container environment
@@ -739,6 +740,38 @@ function parseResourceLimits(raw) {
   }
 }
 
+/** The memory cap, in MB, an app's container is started with. */
+export function appMemoryMb(app) {
+  return parseResourceLimits(app?.resource_limits).max_ram_mb;
+}
+
+/** Memory admission for starting app+env's container (memoryAdmission.js). */
+export function admitAppStart({ app, env, userId = null, automatic = false, what = 'deploy', onWarn = 'notify' }) {
+  return admitContainer({
+    name: `appcrane-${app.slug}-${env}`, memoryMb: appMemoryMb(app),
+    kind: 'app', slug: app.slug, env, appId: app.id, userId, automatic, what, onWarn,
+  });
+}
+
+/**
+ * For a route that starts a deploy in the background: refuse it up front when
+ * the server has no memory for it, so the caller gets the reason in the
+ * response. The refusal is still recorded as a failed deployment with the
+ * reason as its log. Warn mode passes here and warns from deployApp itself.
+ */
+export async function refuseDeployForMemory({ db, app, env, userId }) {
+  try {
+    await admitAppStart({ app, env, userId, onWarn: 'silent' });
+  } catch (e) {
+    if (e.code === REFUSED_CODE) {
+      db.prepare(`INSERT INTO deployments (app_id, env, status, deployed_by, log, finished_at)
+                  VALUES (?, ?, 'failed', ?, ?, datetime('now'))`)
+        .run(app.id, env, userId ?? null, `DEPLOY REFUSED: ${e.message}`);
+    }
+    throw e;
+  }
+}
+
 /**
  * Allowlist of executables permitted in deployhub.json build/entry commands.
  * Prevents arbitrary command execution via attacker-controlled manifest fields.
@@ -824,6 +857,11 @@ export async function rollbackApp(app, env, deploymentId, userId) {
   }
 
   if (!target) throw new AppError('No previous deployment to roll back to', 404, 'NO_ROLLBACK_TARGET');
+
+  // Before the symlink swap and the status updates below, so a refusal leaves
+  // the running version and its records exactly as they were. A rollback that
+  // does not raise the total (same or smaller cap) is always admitted.
+  await admitAppStart({ app, env, userId, what: 'rollback', onWarn: 'silent' });
 
   // An image app rolls back by re-running the digest it ran before, and it has
   // to be handled BEFORE the release_path check below — an image deploy never
@@ -952,6 +990,8 @@ export async function promoteApp(app, userId) {
   if (sbHealth && sbHealth.is_down) {
     throw new AppError('Sandbox is currently unhealthy — fix sandbox before promoting it to production.', 409, 'SANDBOX_UNHEALTHY');
   }
+
+  await admitAppStart({ app, env: 'production', userId, what: 'promote', onWarn: 'silent' });
 
   const { getPortsForSlot } = await import('./portAllocator.js');
   const prodPorts = getPortsForSlot(app.slot);
@@ -1237,7 +1277,18 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
   // deploy's image stayed on disk forever, and as the newest image it outranked
   // the last good one in the next keep-N-newest prune.
   let attemptImage = null;
+  // Who this deploy is for: a person (deployed_by), or nobody (git push,
+  // webhook, poller, auto-heal), in which case the app's owners hear about a
+  // memory refusal.
+  const deployedBy = db.prepare('SELECT deployed_by FROM deployments WHERE id = ?').get(deployId)?.deployed_by ?? null;
+  const admissionCtx = { appId: app.id, userId: deployedBy, automatic: deployedBy == null };
   try {
+    // Before the build, so a server with no memory for this container says so
+    // now instead of after minutes of building; startApp checks again just
+    // before it touches the running container.
+    const early = await admitAppStart({ app, env, ...admissionCtx });
+    if (early.warned) appendLog(`⚠ ${early.message}`);
+
     // Trim any accumulated release backlog BEFORE cloning, so an app whose disk
     // filled from repeated failed deploys can self-heal on its next attempt
     // instead of hitting ENOSPC again on mkdir. Never touches the live release.
@@ -2088,6 +2139,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       memoryMb: limits.max_ram_mb,
       cpus: limits.max_cpu_percent / 100,
       addHostGateway: true,
+      admission: { ...admissionCtx, onWarn: 'silent' },
     });
     appendLog(`Container started: appcrane-${app.slug}-${env} (host port ${bePort})`);
     if (containerVolumes.length > 1) {
@@ -2253,7 +2305,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
         // in — no command means the previous image now exits 0, and fewer
         // mounts means the recovery container cannot see the state the failed
         // one was writing.
-        await dockerStart({ slug: app.slug, env, image: prevImage, hostPort: bePort, containerPort: app.container_port, command: parseContainerCommand(app.container_command), envVars: runtimeEnvVars, volumes: [...containerVolumes, ...dbCertMounts], memoryMb: limits.max_ram_mb, cpus: limits.max_cpu_percent / 100 }).catch(() => {});
+        await dockerStart({ slug: app.slug, env, image: prevImage, hostPort: bePort, containerPort: app.container_port, command: parseContainerCommand(app.container_command), envVars: runtimeEnvVars, volumes: [...containerVolumes, ...dbCertMounts], memoryMb: limits.max_ram_mb, cpus: limits.max_cpu_percent / 100, admission: false }).catch(() => {});
       }
       const restoreNote = prevImage
         ? 'Previous version restored.'
@@ -2459,11 +2511,14 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       WHERE id = ?
     `).run(deployLog.join('\n'), deployId);
 
-    // Send failure notification
-    try {
-      const { notifyDeploy } = await import('./emailService.js');
-      await notifyDeploy(app, env, 'unknown', 'failed', error.message);
-    } catch (e) {}
+    // Send failure notification. A memory refusal has already told the right
+    // people to try again later (memoryAdmissionMail.js).
+    if (error.code !== REFUSED_CODE) {
+      try {
+        const { notifyDeploy } = await import('./emailService.js');
+        await notifyDeploy(app, env, 'unknown', 'failed', error.message);
+      } catch (e) {}
+    }
 
     throw error;
   }

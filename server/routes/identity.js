@@ -9,6 +9,7 @@ import { AppError } from '../utils/errors.js';
 import { setSessionCookie, clearSessionCookie } from '../utils/sessionCookie.js';
 import { isSsoOnly } from '../services/authPolicy.js';
 import { roleKeysForUser } from '../services/appDefinedRoles.js';
+import { discoverablePortalRow } from '../services/discoverableApps.js';
 import log from '../utils/logger.js';
 import { isSafeRedirect } from '../utils/safeRedirect.js';
 import { frameAncestorsForRedirect } from '../utils/embed.js';
@@ -175,7 +176,8 @@ router.post('/login', (req, res) => {
     app_role: isAdmin && (a.app_role === 'none' || a.app_role === 'viewer') ? 'admin' : a.app_role,
     has_icon: hasIcon(a.slug),
     has_github: !!a.has_github,
-  })).filter(a => isAdmin || a.visibility !== 'hidden');
+  })).filter(a => isAdmin || a.visibility !== 'hidden')
+    .map(a => (a.app_role === 'none' ? discoverablePortalRow(a, 'app_role') : a));
 
   // v2.6.18: set cc_token cookie server-side. Eliminates the class
   // of bugs where the SPA's client-side cookie write was missing
@@ -686,7 +688,8 @@ router.get('/me', (req, res) => {
     role: isAdmin && (a.role === 'none' || a.role === 'viewer') ? 'admin' : a.role,
     has_icon: hasIcon(a.slug),
     has_github: !!a.has_github,
-  })).filter(a => isAdmin || a.visibility !== 'hidden');
+  })).filter(a => isAdmin || a.visibility !== 'hidden')
+    .map(a => (a.role === 'none' ? discoverablePortalRow(a, 'role') : a));
 
   res.json({
     user: {

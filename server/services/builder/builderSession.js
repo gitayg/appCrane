@@ -273,7 +273,7 @@ export async function createSession(app, userId, onLog, { takeOver = false } = {
   `).run(sessionId, app.slug, userId, `builder/${app.slug}`);
 
   try {
-    const c = await ensureAppContainer(app, onLog);
+    const c = await ensureAppContainer(app, onLog, { userId });
 
     sessions.set(sessionId, {
       appSlug: app.slug,
@@ -321,7 +321,7 @@ export async function resumeSession(sessionId, onLog, { takeOver = false } = {})
   const app = db.prepare('SELECT * FROM apps WHERE slug = ?').get(row.app_slug);
   if (!app) throw new Error(`App ${row.app_slug} no longer exists`);
 
-  const c = await ensureAppContainer(app, onLog);
+  const c = await ensureAppContainer(app, onLog, { userId: row.user_id });
 
   sessions.set(sessionId, {
     appSlug: row.app_slug,
