@@ -7,6 +7,11 @@ export const ACCESS_TOKEN_TTL_SECONDS = 3600;
 export const REFRESH_TOKEN_TTL_DAYS = 30;
 export const CODE_TTL_SECONDS = 300;
 export const AUTH_REQUEST_TTL_SECONDS = 600;
+export const CONSENT_FRESH_MINUTES = 10;
+
+export const DCR_MODES = ['open', 'allowlist', 'approval'];
+export const DCR_DEFAULT_MODE = 'allowlist';
+export const DCR_DEFAULT_REDIRECT_HOSTS = ['claude.ai', 'claude.com'];
 
 export const SCOPE_FULL = 'mcp';
 export const SCOPE_READ = 'mcp:read';
@@ -67,6 +72,26 @@ export function redirectUriRefusal(uri) {
   if (u.protocol === 'https:') return null;
   if (u.protocol === 'http:' && LOOPBACK_HOSTS.has(u.hostname.toLowerCase())) return null;
   return 'redirect_uri must use https, or http on localhost / 127.0.0.1 / [::1]';
+}
+
+const HOST_RE = /^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*(:\d{1,5})?$/;
+
+/** Normalise an allowlist entry (a bare host, optionally with a port) or null when it is not one. */
+export function normalizeRedirectHost(v) {
+  if (typeof v !== 'string') return null;
+  const h = v.trim().toLowerCase();
+  return HOST_RE.test(h) ? h : null;
+}
+
+/**
+ * Allowlist mode: a loopback redirect (any port, RFC 8252 section 7.3) or an
+ * https redirect whose host (with its port, when it has one) is listed exactly.
+ */
+export function redirectAllowedByHosts(uri, hosts) {
+  if (redirectUriRefusal(uri)) return false;
+  const u = new URL(uri);
+  if (LOOPBACK_HOSTS.has(u.hostname.toLowerCase())) return true;
+  return u.protocol === 'https:' && hosts.includes(u.host.toLowerCase());
 }
 
 /** Loopback redirect: shown with a warning on the consent page (any local program can listen there). */

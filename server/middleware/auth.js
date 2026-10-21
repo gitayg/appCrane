@@ -5,6 +5,8 @@ import { isAdmin } from '../utils/roles.js';
 import { activeViewAs, effectiveUser } from '../services/viewAs.js';
 import { lookupAccessToken } from '../services/oauthStore.js';
 import { ACCESS_PREFIX, canonicalResource, mcpResourceOf } from '../services/oauthPolicy.js';
+import { auditExpiredUse, expiredMessage, expireUserKey, isPast } from '../services/apiKeyExpiry.js';
+import { touchSession } from '../services/sessionPolicy.js';
 
 /**
  * Authentication middleware. Accepts either:
@@ -57,9 +59,12 @@ export function requireAuth(req, res, next) {
         JOIN users u ON u.id = umk.user_id
         WHERE umk.key_hash = ?
           AND umk.revoked_at IS NULL
-          AND (umk.expires_at IS NULL OR umk.expires_at > datetime('now'))
       `).get(keyHash);
-      if (row) {
+      if (row && row.coder_session_id == null && row.expires_at && isPast(row.expires_at)) {
+        auditExpiredUse(row.uid, 'mcp', row.umk_id, row.expires_at, req.ip);
+        return next(new AppError(expiredMessage(row.expires_at, 'the MCP page (rotate it there)'), 401, 'API_KEY_EXPIRED'));
+      }
+      if (row && (row.expires_at == null || !isPast(row.expires_at))) {
         if (!row.active) return next(new AppError('Account is deactivated', 403, 'DEACTIVATED'));
         if (!isMcpPath) {
           return next(new AppError('Personal MCP keys (dhk_mcp_*) are restricted to /api/mcp and /api/files/staged endpoints', 403, 'KEY_SCOPE_RESTRICTED'));
@@ -117,9 +122,25 @@ export function requireAuth(req, res, next) {
       ));
     }
 
-    const user = db.prepare('SELECT * FROM users WHERE api_key_hash = ?').get(hashApiKey(apiKey));
-    if (!user) return next(new AppError('Invalid API key', 401, 'UNAUTHORIZED'));
+    const userKeyHash = hashApiKey(apiKey);
+    const user = db.prepare('SELECT * FROM users WHERE api_key_hash = ?').get(userKeyHash);
+    if (!user) {
+      const gone = db.prepare('SELECT id, api_key_expires_at FROM users WHERE api_key_expired_hash = ?').get(userKeyHash);
+      if (gone) {
+        auditExpiredUse(gone.id, 'user', gone.id, gone.api_key_expires_at, req.ip);
+        return next(new AppError(expiredMessage(gone.api_key_expires_at), 401, 'API_KEY_EXPIRED'));
+      }
+      return next(new AppError('Invalid API key', 401, 'UNAUTHORIZED'));
+    }
     if (!user.active) return next(new AppError('Account is deactivated', 403, 'DEACTIVATED'));
+    if (user.api_key_expires_at && isPast(user.api_key_expires_at)) {
+      try { expireUserKey(db, user.id); } catch (_) {}
+      auditExpiredUse(user.id, 'user', user.id, user.api_key_expires_at, req.ip);
+      return next(new AppError(expiredMessage(user.api_key_expires_at), 401, 'API_KEY_EXPIRED'));
+    }
+    try {
+      db.prepare("UPDATE users SET api_key_last_used_at = datetime('now') WHERE id = ? AND (api_key_last_used_at IS NULL OR api_key_last_used_at < datetime('now', '-1 hour'))").run(user.id);
+    } catch (_) {}
     req.user = user;
     applyViewAs(req, apiKey);
     return next();
@@ -129,12 +150,16 @@ export function requireAuth(req, res, next) {
   if (bearer && bearer.startsWith(ACCESS_PREFIX)) return oauthAccessToken(req, bearer, next);
   if (bearer) {
     const session = db.prepare(`
-      SELECT u.*
+      SELECT u.*, s.id AS _session_id, s.last_seen_at AS _session_last_seen_at, s.absolute_expires_at AS _session_absolute_expires_at
       FROM identity_sessions s JOIN users u ON s.user_id = u.id
-      WHERE s.token_hash = ? AND s.expires_at > datetime('now') AND u.active = 1
+      WHERE s.token_hash = ? AND datetime(s.expires_at) > datetime('now') AND u.active = 1
     `).get(hashApiKey(bearer));
     if (!session) return next(new AppError('Invalid or expired session', 401, 'UNAUTHORIZED'));
-    req.user = session;
+    const { _session_id, _session_last_seen_at, _session_absolute_expires_at, ...sessionUser } = session;
+    try {
+      touchSession(db, { id: _session_id, last_seen_at: _session_last_seen_at, absolute_expires_at: _session_absolute_expires_at }, sessionUser);
+    } catch (_) {}
+    req.user = sessionUser;
     applyViewAs(req, bearer);
     return next();
   }

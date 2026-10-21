@@ -124,6 +124,8 @@ import * as tde from './managedDbEncryption.js';
 import * as appLogin from './managedDbAppLogin.js';
 import * as pgStats from './managedDbStats.js';
 import { OOM_DB_FLAG } from './oomPriority.js';
+import { CPU_DB_FLAG } from './cpuPriority.js';
+import { managedDbCpuDrift } from './resourceDrift.js';
 import { admitContainer } from './memoryAdmission.js';
 
 const execFileAsync = promisify(execFile);
@@ -161,6 +163,18 @@ export function isPerScopeEngine(engine) {
 // sets it.
 const CONTAINER_PREFIX = process.env.MANAGED_DB_CONTAINER_PREFIX || 'appcrane-db';
 
+// A CPU cap per database server, configured like memory: MANAGED_DB_CPUS for
+// every engine (default 1), MANAGED_DB_<ENGINE>_CPUS for one. One core, because
+// a database pegging every core of a small host is the incident this exists
+// for, and the --cpu-shares weight lets it use idle cores' worth of time slices
+// within that cap. Like memoryMb it is a `docker run` flag and NOT part of
+// serverConfigLabel(): it applies when a server is next created, and the
+// status (cpu_drift) says which running servers do not have it yet.
+function dbCpus(engine) {
+  const pick = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? n : null; };
+  return pick(process.env[`MANAGED_DB_${engine.toUpperCase()}_CPUS`]) ?? pick(process.env.MANAGED_DB_CPUS) ?? 1;
+}
+
 const ENGINES = {
   postgres: {
     image: process.env.MANAGED_DB_POSTGRES_IMAGE || 'postgres:16-alpine',
@@ -183,6 +197,7 @@ const ENGINES = {
     // that decides when that happens. Applies when the container is next
     // created, which the TLS change does once anyway.
     memoryMb: Number(process.env.MANAGED_DB_POSTGRES_MEMORY_MB) || 1024,
+    cpus: dbCpus('postgres'),
     scheme: 'postgresql',
   },
   mariadb: {
@@ -211,6 +226,7 @@ const ENGINES = {
     // database is a bad default on its own terms, not because it is a diagnosed
     // fix. If a provision still fails at 1024, the cause is elsewhere.
     memoryMb: Number(process.env.MANAGED_DB_MARIADB_MEMORY_MB) || 1024,
+    cpus: dbCpus('mariadb'),
     scheme: 'mysql',
   },
   // Mongo is a SHARED server, like the two above and unlike Redis: it has real
@@ -234,6 +250,7 @@ const ENGINES = {
     dataPath: mongo.MONGO_DATA_PATH,
     passwordEnv: mongo.MONGO_PASSWORD_ENV,
     memoryMb: mongo.MONGO_MEMORY_MB,
+    cpus: dbCpus('mongo'),
     scheme: mongo.MONGO_SCHEME,
   },
   // Per-scope, so there is no `container` and no `defaultPort` here: both are
@@ -249,6 +266,7 @@ const ENGINES = {
     dataPath: redis.REDIS_DATA_PATH,
     passwordEnv: redis.REDIS_PASSWORD_ENV,
     memoryMb: redis.REDIS_MEMORY_MB,
+    cpus: dbCpus('redis'),
     scheme: 'redis',
     perScope: true,
   },
@@ -998,7 +1016,7 @@ async function ensureServerLocked(engine, cfg) {
     // Only a server that did not exist is admitted: a recreate restores memory
     // this database already held, and refusing it would leave it down.
     if (!facts.state) {
-      await admitContainer({ name: cfg.container, memoryMb: cfg.memoryMb, kind: 'db', what: 'database start', subject: `the managed ${engine} server` });
+      await admitContainer({ name: cfg.container, memoryMb: cfg.memoryMb, cpus: cfg.cpus, kind: 'db', what: 'database start', subject: `the managed ${engine} server` });
     }
     await createServerContainer(engine, cfg, port, adminPassword, tls.dir);
   }
@@ -1113,6 +1131,8 @@ async function createServerContainer(engine, cfg, port, adminPassword, tlsDir) {
     '--label', `appcrane-db-config=${serverConfigLabel(engine)}`,
     '--restart=on-failure:2',
     OOM_DB_FLAG,
+    CPU_DB_FLAG,
+    `--cpus=${cfg.cpus}`,
     `--memory=${cfg.memoryMb}m`,
     // Equal to --memory: Docker's spelling for "no swap at all". Omitting it
     // silently doubles the real ceiling on any host that has swap. Same
@@ -1402,7 +1422,7 @@ async function ensureRedisInstance({ container, dbName, username, password, port
     }
   } else if (!state) {
     if (!facts.state) {
-      await admitContainer({ name: container, memoryMb: ENGINES.redis.memoryMb, kind: 'db', what: 'database start', subject: `the managed Redis instance ${dbName}` });
+      await admitContainer({ name: container, memoryMb: ENGINES.redis.memoryMb, cpus: ENGINES.redis.cpus, kind: 'db', what: 'database start', subject: `the managed Redis instance ${dbName}` });
     }
     await createRedisContainer({ container, dbName, password, port, tlsDir: tlsFiles?.dir || null });
   }
@@ -1441,6 +1461,8 @@ async function createRedisContainer({ container, dbName, password, port, tlsDir 
     '--label', `appcrane-db-config=${tlsDir ? redis.REDIS_TLS_CONFIG_VERSION : ''}`,
     '--restart=on-failure:2',
     OOM_DB_FLAG,
+    CPU_DB_FLAG,
+    `--cpus=${ENGINES.redis.cpus}`,
     `--memory=${memoryMb}m`,
     `--memory-swap=${memoryMb}m`,
     '--security-opt', 'no-new-privileges',
@@ -1544,6 +1566,10 @@ const STATUS_FIELDS = [
   // cgroup was unchanged -- and it would say so most confidently in the one
   // situation where it matters, someone reading this page right after an OOM.
   '{{.HostConfig.Memory}}',
+  // The CPU cap and weight the running container was created with, for the
+  // same live-versus-configured reason (cpu_drift).
+  '{{.HostConfig.NanoCpus}}',
+  '{{.HostConfig.CpuShares}}',
 ];
 const STATUS_SEP = '|';
 const STATUS_FORMAT = STATUS_FIELDS.join(STATUS_SEP);
@@ -1601,7 +1627,7 @@ async function inspectFacts(container) {
     if (NO_SUCH_CONTAINER.test(e.message)) return { absent: true, error: null };
     return { absent: true, error: e.message };
   }
-  const [state, restarts, exitCode, oom, startedAt, memBytes] = raw.split(STATUS_SEP);
+  const [state, restarts, exitCode, oom, startedAt, memBytes, nanoCpus, cpuShares] = raw.split(STATUS_SEP);
   const bytes = intOrNull(memBytes);
   return {
     absent: false,
@@ -1615,6 +1641,8 @@ async function inspectFacts(container) {
     // 0 is Docker's "no limit", which is a different fact from "unknown" and
     // must not be rounded into 0 MB.
     memory_mb: bytes === null || bytes === 0 ? null : Math.round(bytes / (1024 * 1024)),
+    nano_cpus: intOrNull(nanoCpus),
+    cpu_shares: intOrNull(cpuShares),
   };
 }
 
@@ -1637,6 +1665,7 @@ async function perScopeStatus(engine, cfg, count) {
       oom_killed: facts.absent ? null : facts.oom_killed,
       started_at: facts.absent ? null : facts.started_at,
       memory_mb: facts.absent ? null : facts.memory_mb,
+      cpu_drift: facts.absent ? null : managedDbCpuDrift(cfg.cpus, facts),
       error: facts.error,
     };
   }));
@@ -1652,6 +1681,7 @@ async function perScopeStatus(engine, cfg, count) {
     host_port: null,
     memory_mb: null,
     configured_memory_mb: cfg.memoryMb,
+    configured_cpus: cfg.cpus,
     databases: count,
     // Aggregated across instances rather than invented: the maximum restart
     // count and "did ANY of them get OOM-killed", which is the question an
@@ -1698,6 +1728,8 @@ export async function serverStatus() {
       host_port: row?.host_port ?? cfg.defaultPort,
       memory_mb: null,
       configured_memory_mb: cfg.memoryMb,
+      configured_cpus: cfg.cpus,
+      cpu_drift: null,
       databases: count,
       restart_count: null,
       last_exit_code: null,
@@ -1718,6 +1750,7 @@ export async function serverStatus() {
     out.oom_killed = facts.oom_killed;
     out.started_at = facts.started_at;
     out.memory_mb = facts.memory_mb;
+    out.cpu_drift = managedDbCpuDrift(cfg.cpus, facts);
     return out;
   }));
 }

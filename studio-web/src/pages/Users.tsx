@@ -3,6 +3,8 @@ import { adminApi } from '../adminApi'
 import { serverDate } from '../utils/serverDate'
 import { PasswordInput } from '../components/secret/PasswordInput'
 import { SetUserPasswordModal } from '../components/SetUserPasswordModal'
+import { UserApiKeyCell } from '../components/UserApiKeyCell'
+import { ResetMfaButton } from '../components/mfa/ResetMfaButton'
 
 interface User {
   id: number
@@ -20,6 +22,8 @@ interface User {
   department?: string | null
   region?: string | null
   location?: string | null
+  api_key_expires_at?: string | null
+  api_key_expired?: number
 }
 
 interface App {
@@ -356,6 +360,7 @@ export function Users() {
             <th>Location</th>
             <th>Password</th>
             <th>Last login</th>
+            <th>API key</th>
             <th>Delete</th>
           </tr>
         </thead>
@@ -439,6 +444,10 @@ export function Users() {
                 </td>
                 <td>
                   <span style={{ color: 'var(--dim)', fontSize: '0.82rem' }} title={abs}>{rel}</span>
+                </td>
+                <td>
+                  <UserApiKeyCell user={u} onRotated={loadUsers} />
+                  <ResetMfaButton userId={u.id} userName={u.name} />
                 </td>
                 <td>
                   <div style={{ display: 'flex', gap: 4, justifyContent: 'flex-end' }}>

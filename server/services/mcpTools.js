@@ -35,6 +35,11 @@ import { fetchAppProbe } from './appProbeFetch.js';
 import { normalizeFrameAncestors } from '../utils/frameAncestors.js';
 import { secretPreview, opaquePreview, secretFingerprint } from './secretMask.js';
 import { isCoderKey, assertCoderToolAllowed, CODER_MCP_TOOLS } from './coderMcpKey.js';
+import { coderRequestsView } from './coderRequestView.js';
+import { recordAuditEvent } from './eventStore.js';
+import { adoptAppTool } from './adopt/mcpTool.js';
+import { deleteAppTool } from './mcpGaps/deleteAppTool.js';
+import { getAuditTool } from './mcpGaps/getAuditTool.js';
 
 /**
  * The commit part of a managed-push response. A GitHub commit carries its web
@@ -65,6 +70,9 @@ function managedCommitView(result) {
  *     Absent means "write tool". requiredRole cannot stand in for this: it
  *     grades WHO may call, not WHETHER the call mutates — appcrane_deploy is
  *     'any' and appcrane_get_secret is 'app_admin'.
+ *   - revealsSecrets — true for a read tool that can return plaintext secrets or
+ *     raw file contents (appcrane_reveal_secret, appcrane_cat). Read-only keys
+ *     and read-only OAuth connections are refused it, readOnly notwithstanding.
  *   - handler(user, args) → arbitrary JSON returned to the agent
  *
  * v1 surface (5 tools): list apps, read env, deploy, list requests, read logs.
@@ -127,7 +135,13 @@ function isReadOnlyKey(user, userMcpKey) {
  */
 function assertToolAllowedForKey(user, tool, userMcpKey) {
   if (!isReadOnlyKey(user, userMcpKey)) return;
-  if (tool.readOnly) return;
+  if (tool.readOnly && !tool.revealsSecrets) return;
+  if (tool.revealsSecrets) {
+    throw new Error(
+      `Forbidden: ${tool.name} can return plaintext secrets or raw file contents and this MCP key is read-only. ` +
+      'Read-only keys and connections never read secrets; use appcrane_get_secret (masked) or a full-access key.'
+    );
+  }
   throw new Error(
     `Forbidden: ${tool.name} changes state and this MCP key is read-only. ` +
     'Issue a full-access key to perform writes.'
@@ -455,9 +469,10 @@ function auditMcpCall(user, toolName, args, error) {
     // v2.28.0: attribute the actor. `kind` is 'agent' for MCP/agent identities
     // and 'human' otherwise; denormalized onto the row so the trail stays
     // truthful even if the user is later deleted or reclassified.
-    db.prepare(
+    const info = db.prepare(
       'INSERT INTO audit_log (user_id, app_id, action, detail, actor_kind) VALUES (?, ?, ?, ?, ?)'
     ).run(user.id, appId, `mcp.${toolName}`, detail, user.kind || 'agent');
+    recordAuditEvent(info.lastInsertRowid, user.id, appId, `mcp.${toolName}`, detail);
   } catch (e) {
     log.warn(`MCP audit log failed: ${e.message}`);
     // Compliance/regulated installs can flip this to fail-closed: any audit
@@ -1048,6 +1063,7 @@ const TOOLS = [
     },
     requiredRole: 'app_admin', // also gated per-slug inside handler
     readOnly: true,
+    revealsSecrets: true,
     handler: async (user, args) => {
       const env = args.env === 'production' ? 'production' : 'sandbox';
       const app = getAppForUser(user, args.slug);
@@ -1126,8 +1142,10 @@ const TOOLS = [
       const { getPortsForSlot } = await import('./portAllocator.js');
       const { deployApp, assertNoInflightDeploy } = await import('./deployer.js');
       assertNoInflightDeploy(db, app.id, env, app.slug);
+      (await import('./managedDbRestoreGuard.js')).assertNoRestoreInProgress(app.slug, env);
 
       await refuseUnacknowledgedDataLoss({ db, app, env, args });
+      if (env === 'production') await (await import('./releaseCheck.js')).assertProductionRelease({ db, app, userId: user.id, trigger: 'deploy-request' });
 
       const { refuseDeployForMemory } = await import('./deployer.js');
       await refuseDeployForMemory({ db, app, env, userId: user.id });
@@ -1212,6 +1230,7 @@ const TOOLS = [
       if (!isAdmin(user) && roleForUserOnApp(user, app) !== 'owner') {
         throw new Error('Forbidden: only the app owner can roll back this app.');
       }
+      (await import('./managedDbRestoreGuard.js')).assertNoRestoreInProgress(app.slug, env);
       const { rollbackApp } = await import('./deployer.js');
       const r = await rollbackApp(app, env, args.deployment_id, user.id);
       return {
@@ -1245,6 +1264,7 @@ const TOOLS = [
       if (!isAdmin(user) && roleForUserOnApp(user, app) !== 'owner') {
         throw new Error('Forbidden: only the app owner can promote to production.');
       }
+      (await import('./managedDbRestoreGuard.js')).assertNoRestoreInProgress(app.slug, 'production');
       const { promoteApp } = await import('./deployer.js');
       const r = await promoteApp(app, user.id);
       return {
@@ -1298,6 +1318,18 @@ const TOOLS = [
       if (!accessibleSlugs.length) return { requests: [], count: 0 };
       where.push(`app_slug IN (${accessibleSlugs.map(() => '?').join(',')})`);
       params.push(...accessibleSlugs);
+      const coder = isCoderKey(user, user._mcpUserKey);
+      if (coder) {
+        const coderSlug = user._mcpUserKey?.coder?.slug ?? user.coder_key?.slug;
+        const coderApp = coderSlug && db.prepare('SELECT * FROM apps WHERE slug = ?').get(coderSlug);
+        if (!coderApp) throw new Error('Forbidden: this coder key has no app');
+        where.push('app_slug = ?', "(kind IS NULL OR kind != 'access')", "message NOT LIKE 'Access request for app%'");
+        params.push(coderApp.slug);
+        if (!userHasAppPermission(user, coderApp, 'request.view_app')) {
+          where.push('user_id = ?');
+          params.push(user.id);
+        }
+      }
       const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
       params.push(limit);
       const rows = db
@@ -1309,6 +1341,7 @@ const TOOLS = [
         .all(...params);
       let requests = rows.map(r => ({ ...r, bucket: bucketize(r.status, r.validated_at) }));
       if (args.bucket) requests = requests.filter(r => r.bucket === args.bucket);
+      if (coder) return coderRequestsView(requests);
       return { requests, count: requests.length };
     },
   },
@@ -1426,6 +1459,7 @@ const TOOLS = [
     },
     requiredRole: 'any',
     readOnly: true,
+    revealsSecrets: true,
     handler: async (user, args) => {
       const env = args.env === 'production' ? 'production' : 'sandbox';
       const app = getAppForUser(user, args.slug);
@@ -1791,6 +1825,7 @@ const TOOLS = [
       // cause. Refusing here leaves pushed_at unset, so the same token still
       // works on the acknowledged retry.
       await refuseUnacknowledgedDataLoss({ db, app, env, args });
+      if (env === 'production') await (await import('./releaseCheck.js')).assertProductionRelease({ db, app, userId: user.id, trigger: 'deploy-request' });
 
       const { deployArtifact } = await import('./artifactDeploy.js');
       const out = await deployArtifact({
@@ -1828,7 +1863,8 @@ const TOOLS = [
     description:
       'Move a previously-staged file into a running container at a path under /app or /data. THE WAY TO GET LARGE BINARIES (DMGs, datasets, bundles) into a container when they\'re too big to inline through appcrane_cp. ' +
       'Two steps: (1) upload the bytes with a plain multipart POST to ' + '`' + 'curl -F file=@local.dmg -H "X-API-Key: <your dhk_mcp_ key>" https://<host>/api/files/staged' + '`' + ' — your MCP key IS allowed on this endpoint (v2.10.6+); it returns { token, sha256, size_bytes }. (2) Call this tool with that token and a dest path. ' +
-      'The container must be running. Path is validated (no "..", must start with /app or /data). The staged blob is deleted on success.',
+      'The container must be running. Path is validated (no "..", must start with /app or /data). The staged blob is deleted on success. ' +
+      'For files too big for one request: POST /api/files/staged/chunked {slug, filename} returns a handle; then PUT the bytes with Content-Type: application/octet-stream to /api/files/staged/<handle>?offset=N (N = bytes sent so far; a 409 says where to resume); then POST /api/files/staged/<handle>/finalize {sha256}. The token it returns works here.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2144,6 +2180,7 @@ const TOOLS = [
         github_token:    { type: 'string', description: 'GitHub PAT for private repos. Stored encrypted; only used to clone.' },
         max_ram_mb:      { type: 'number', description: 'Per-container memory cap. Default: 512.' },
         max_cpu_percent: { type: 'number', description: 'Per-container CPU cap. Default: 50.' },
+        intake: { type: 'object', additionalProperties: false, description: 'App intake. data_classification decides whether production waits for a platform admin\'s security approval (by default confidential and restricted do; sandbox never waits). Omitted: internal.', properties: { purpose: { type: 'string' }, data_classification: { type: 'string', enum: ['public', 'internal', 'confidential', 'restricted'] }, personal_data: { type: 'boolean', description: 'Stores personal or customer data' }, external_integrations: { type: 'string' }, access: { type: 'string', description: 'Who should have access' } } },
       },
       required: ['name', 'slug'],
       additionalProperties: false,
@@ -2152,6 +2189,8 @@ const TOOLS = [
     handler: async (user, args) => {
       // Mirror server/routes/apps.js POST / validation rules
       const { name, slug, github_url } = args;
+      const { submitIntake, normalizeIntake } = await import('./appIntake.js');
+      normalizeIntake(args.intake || {});
       if (!name || !slug) throw new Error('name and slug are required');
       { const slugProblem = slugRefusal(slug, user); if (slugProblem) throw new Error(slugProblem); }
       if (args.branch && !/^[A-Za-z0-9._/\-]{1,200}$/.test(args.branch)) {
@@ -2208,6 +2247,7 @@ const TOOLS = [
         INSERT INTO app_user_roles (app_id, user_id, app_role) VALUES (?, ?, 'owner')
         ON CONFLICT(app_id, user_id) DO UPDATE SET app_role = 'owner'
       `).run(appId, user.id);
+      const intake = submitIntake({ id: appId, slug }, { ...(args.intake || {}), purpose: args.intake?.purpose ?? args.description, owner: user.id, submitted_by: user.id });
 
       const webhookToken = crypto.randomBytes(16).toString('hex');
       const webhookSecret = crypto.randomBytes(32).toString('hex');
@@ -2244,6 +2284,7 @@ const TOOLS = [
         },
         ports,
         urls,
+        intake,
         next: `Set secrets with appcrane_set_secret, then deploy with appcrane_deploy slug="${slug}" stage="sandbox".`,
       };
     },
@@ -3568,6 +3609,10 @@ const TOOLS = [
     },
   },
 
+  adoptAppTool,
+  deleteAppTool,
+  getAuditTool,
+
   {
     name: 'appcrane_create_managed_app',
     description:
@@ -3582,6 +3627,7 @@ const TOOLS = [
         domain:      { type: 'string', description: 'Optional custom domain.' },
         max_ram_mb:      { type: 'number', description: 'Per-container memory cap. Default: 512.' },
         max_cpu_percent: { type: 'number', description: 'Per-container CPU cap. Default: 50.' },
+        intake: { type: 'object', additionalProperties: false, description: 'App intake. data_classification decides whether production waits for a platform admin\'s security approval (by default confidential and restricted do; sandbox never waits). Omitted: internal.', properties: { purpose: { type: 'string' }, data_classification: { type: 'string', enum: ['public', 'internal', 'confidential', 'restricted'] }, personal_data: { type: 'boolean', description: 'Stores personal or customer data' }, external_integrations: { type: 'string' }, access: { type: 'string', description: 'Who should have access' } } },
       },
       required: ['name', 'slug'],
       additionalProperties: false,
@@ -3590,6 +3636,8 @@ const TOOLS = [
     handler: async (user, args) => {
       const { name, slug } = args;
       if (!name || !slug) throw new Error('name and slug are required');
+      const { submitIntake, normalizeIntake } = await import('./appIntake.js');
+      normalizeIntake(args.intake || {});
       { const slugProblem = slugRefusal(slug, user); if (slugProblem) throw new Error(slugProblem); }
       if (args.branch && !/^[A-Za-z0-9._/\-]{1,200}$/.test(args.branch)) {
         throw new Error('branch must be alphanumeric with . _ / - (max 200 chars)');
@@ -3723,6 +3771,7 @@ const TOOLS = [
         INSERT INTO app_user_roles (app_id, user_id, app_role) VALUES (?, ?, 'owner')
         ON CONFLICT(app_id, user_id) DO UPDATE SET app_role = 'owner'
       `).run(appId, user.id);
+      const intake = submitIntake({ id: appId, slug }, { ...(args.intake || {}), purpose: args.intake?.purpose ?? args.description, owner: user.id, submitted_by: user.id });
 
       const webhookToken = crypto.randomBytes(16).toString('hex');
       const webhookSecret = crypto.randomBytes(32).toString('hex');
@@ -3754,6 +3803,7 @@ const TOOLS = [
           repo: repoView(backend, repo),
           ports,
           urls,
+          intake,
           next: `Push scaffolding via appcrane_push_to_managed_app slug="${slug}" files=[…], then appcrane_deploy slug="${slug}" stage="sandbox". This app's repository is hosted on this AppCrane server, not GitHub — read and change it only through appcrane_push_to_managed_app / appcrane_managed_push_chunk / appcrane_managed_assemble / appcrane_managed_patch. github_* tools cannot reach it.`,
         };
       }
@@ -3762,6 +3812,7 @@ const TOOLS = [
         repo: repoView(backend, repo),
         ports,
         urls,
+        intake,
         next: `Push scaffolding via appcrane_push_to_managed_app slug="${slug}" files=[…], then appcrane_deploy slug="${slug}" stage="sandbox". Do NOT use github_push_files for this repo — that's authed with the user's PAT and has zero access to the service account.`,
       };
     },
@@ -4518,7 +4569,7 @@ const TOOLS = [
   {
     name: 'appcrane_run_backup_now',
     description:
-      'Run the off-site backup immediately and report what was uploaded. Use this to PROVE a new configuration works instead of waiting for the nightly run to fail quietly — it exercises the real credentials, the real bucket and the real upload path, and records the result in last_run / last_error exactly as the scheduled job does. Works whether or not the schedule is enabled, so a configuration can be verified before turning it on. Uploads a zip of the SQLite database, .env, icons and appdata. PLATFORM ADMIN ONLY.',
+      'Run the off-site backup immediately and report what was uploaded. Use this to PROVE a new configuration works instead of waiting for the nightly run to fail quietly — it exercises the real credentials, the real bucket and the real upload path, and records the result in last_run / last_error exactly as the scheduled job does. Works whether or not the schedule is enabled, so a configuration can be verified before turning it on. Uploads a verified backup set: the database, .env, icons, per-app /data and volumes, managed-database dumps and every managed-app git repository, plus a SHA-256 manifest (`key` is the manifest key, `size` the total bytes of the set). PLATFORM ADMIN ONLY.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     requiredRole: 'admin',
     handler: async (user) => {
@@ -5280,7 +5331,7 @@ export function listTools(user, userMcpKey = null) {
   const readOnlyKey = isReadOnlyKey(user, userMcpKey);
   const crewOk = crewAllowedFor(user);
   const coderKey = isCoderKey(user, userMcpKey);
-  return TOOLS.filter((t) => (!readOnlyKey || t.readOnly) && (!t.crew || crewOk) && (!coderKey || CODER_MCP_TOOLS.includes(t.name)) && canUseTool(userView, t)).map((t) => ({
+  return TOOLS.filter((t) => (!readOnlyKey || (t.readOnly && !t.revealsSecrets)) && (!t.crew || crewOk) && (!coderKey || CODER_MCP_TOOLS.includes(t.name)) && canUseTool(userView, t)).map((t) => ({
     name: t.name,
     description: t.description,
     inputSchema: stageifySchema(t.inputSchema),

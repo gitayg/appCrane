@@ -44,6 +44,7 @@
 
 import { pgDumpExcludeArgs } from './managedDbStats.js';
 import { OOM_DB_FLAG } from './oomPriority.js';
+import { CPU_DB_FLAG } from './cpuPriority.js';
 
 const SAFE_IDENT = /^[a-z][a-z0-9_]{0,62}$/;
 
@@ -242,7 +243,7 @@ export function redisSwapArgs({ hostDir, image }) {
   if (!hostDir || typeof hostDir !== 'string' || hostDir.includes(':')) {
     throw new Error('managedDbDumpCmd: bad redis data directory');
   }
-  return ['run', '--rm', '-i', OOM_DB_FLAG, '--network', 'none', '-v', `${hostDir}:/data`, '--entrypoint', 'sh', image, '-c',
+  return ['run', '--rm', '-i', OOM_DB_FLAG, CPU_DB_FLAG, '--network', 'none', '-v', `${hostDir}:/data`, '--entrypoint', 'sh', image, '-c',
     'cat > /data/.appcrane-restore.rdb && chown redis:redis /data/.appcrane-restore.rdb'
     + ' && mv -f /data/.appcrane-restore.rdb /data/dump.rdb'];
 }

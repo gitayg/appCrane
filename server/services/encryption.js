@@ -91,17 +91,76 @@ export function generateApiKey(prefix = 'dhk') {
   return `${prefix}_${random}`;
 }
 
-// Password hashing using Node.js built-in scrypt (no external deps)
-export function hashPassword(password) {
-  const salt = crypto.randomBytes(16).toString('hex');
-  const hash = crypto.scryptSync(password, salt, 64).toString('hex');
-  return `${salt}:${hash}`;
+// Password hashing. New hashes are PBKDF2-HMAC-SHA256 (FIPS 140-3 approved),
+// stored self-describing as pbkdf2-sha256$<iterations>$<salt b64>$<hash b64>.
+// 600,000 iterations is OWASP's Password Storage Cheat Sheet figure for
+// PBKDF2-HMAC-SHA256 (2023+). Hashes written before this are scrypt,
+// "<32 hex salt>:<128 hex hash>" (the salt used as the hex string itself), and
+// still verify; a successful verify of one hands a PBKDF2 replacement to
+// onRehash so the caller can store it. Under a FIPS provider scrypt is not
+// available: such a verify returns false and calls onLegacyUnavailable, and
+// that user has to have the password reset.
+export const PBKDF2_SCHEME = 'pbkdf2-sha256';
+export const PBKDF2_ITERATIONS = 600000;
+const PBKDF2_MIN_ITERATIONS = 100000;
+const PBKDF2_MAX_ITERATIONS = 10000000;
+const B64 = /^[A-Za-z0-9+/]+={0,2}$/;
+
+export function hashPassword(password, { iterations = PBKDF2_ITERATIONS } = {}) {
+  const salt = crypto.randomBytes(16);
+  const hash = crypto.pbkdf2Sync(String(password), salt, iterations, 32, 'sha256');
+  return `${PBKDF2_SCHEME}$${iterations}$${salt.toString('base64')}$${hash.toString('base64')}`;
 }
 
-export function verifyPassword(password, stored) {
-  const [salt, hash] = stored.split(':');
-  const check = crypto.scryptSync(password, salt, 64).toString('hex');
-  return crypto.timingSafeEqual(Buffer.from(hash, 'hex'), Buffer.from(check, 'hex'));
+/** { scheme: 'pbkdf2-sha256'|'scrypt', ... } or null when `stored` is not a hash this module wrote. */
+export function parsePasswordHash(stored) {
+  if (typeof stored !== 'string') return null;
+  const legacy = /^([0-9a-f]{32}):([0-9a-f]{128})$/.exec(stored);
+  if (legacy) return { scheme: 'scrypt', salt: legacy[1], hash: Buffer.from(legacy[2], 'hex') };
+  const parts = stored.split('$');
+  if (parts.length !== 4 || parts[0] !== PBKDF2_SCHEME || !/^[1-9][0-9]{0,7}$/.test(parts[1])) return null;
+  const iterations = Number(parts[1]);
+  if (iterations < PBKDF2_MIN_ITERATIONS || iterations > PBKDF2_MAX_ITERATIONS) return null;
+  if (!B64.test(parts[2]) || !B64.test(parts[3])) return null;
+  const salt = Buffer.from(parts[2], 'base64');
+  const hash = Buffer.from(parts[3], 'base64');
+  if (salt.length < 16 || hash.length !== 32) return null;
+  return { scheme: PBKDF2_SCHEME, iterations, salt, hash };
+}
+
+/** True when `stored` should be replaced by a fresh hashPassword() after a successful verify. */
+export function needsRehash(stored) {
+  const p = parsePasswordHash(stored);
+  return !p || p.scheme !== PBKDF2_SCHEME || p.iterations < PBKDF2_ITERATIONS;
+}
+
+/** True when this process can compute scrypt (false under an OpenSSL FIPS provider). */
+export function scryptAvailable() {
+  try {
+    crypto.scryptSync('probe', 'probe', 16);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function verifyPassword(password, stored, { onRehash, onLegacyUnavailable } = {}) {
+  const p = parsePasswordHash(stored);
+  if (!p) return false;
+  let check;
+  if (p.scheme === PBKDF2_SCHEME) {
+    check = crypto.pbkdf2Sync(String(password), p.salt, p.iterations, p.hash.length, 'sha256');
+  } else {
+    try {
+      check = crypto.scryptSync(String(password), p.salt, 64);
+    } catch {
+      if (onLegacyUnavailable) onLegacyUnavailable();
+      return false;
+    }
+  }
+  const ok = crypto.timingSafeEqual(p.hash, check);
+  if (ok && onRehash && needsRehash(stored)) onRehash(hashPassword(password));
+  return ok;
 }
 
 export function generateSessionToken() {

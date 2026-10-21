@@ -13,6 +13,10 @@ import { discoverablePortalRow } from '../services/discoverableApps.js';
 import log from '../utils/logger.js';
 import { isSafeRedirect } from '../utils/safeRedirect.js';
 import { frameAncestorsForRedirect } from '../utils/embed.js';
+import { decideAccess, effectiveRules } from '../services/accessRules.js';
+import { revokeAllGrantsForUser } from '../services/oauthStore.js';
+import { passwordLoginMfaStep } from '../services/mfa.js';
+import { touchSession } from '../services/sessionPolicy.js';
 
 const ICON_DIR = resolve(process.env.DATA_DIR || './data', 'apps');
 const ICON_EXTS = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg'];
@@ -116,9 +120,15 @@ router.post('/login', (req, res) => {
     throw new AppError('Password not set for this user. Contact admin.', 401, 'NO_PASSWORD');
   }
 
-  if (!verifyPassword(password, user.password_hash)) {
+  let legacyUnavailable = false;
+  const passwordOk = verifyPassword(password, user.password_hash, {
+    onRehash: (h) => db.prepare('UPDATE users SET password_hash = ? WHERE id = ? AND password_hash = ?').run(h, user.id, user.password_hash),
+    onLegacyUnavailable: () => { legacyUnavailable = true; },
+  });
+  if (!passwordOk) {
     log.warn(`Failed login for "${login}" from ${ip}`);
-    failed('bad_password');
+    failed(legacyUnavailable ? 'legacy_hash_unavailable' : 'bad_password');
+    if (legacyUnavailable) throw new AppError('Your password must be reset by an administrator.', 401, 'PASSWORD_RESET_REQUIRED');
     throw new AppError('Invalid credentials', 401, 'INVALID_CREDENTIALS');
   }
 
@@ -135,6 +145,9 @@ router.post('/login', (req, res) => {
       appRole = roleRecord?.app_role || 'none';
     }
   }
+
+  const mfaStep = passwordLoginMfaStep(db, user, { appId });
+  if (mfaStep) return res.status(401).json(mfaStep);
 
   // Create session token
   const token = generateSessionToken();
@@ -203,6 +216,29 @@ router.post('/login', (req, res) => {
     apps,
   });
 });
+
+const escapeHtml = (v) => String(v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+
+// Caddy forward_auth hands a non-2xx verify response straight to the client, so
+// this is what the person sees: a page for a browser, JSON for anything else.
+function refuseByRule(req, res, verdict, appLabel) {
+  const malformed = verdict.reason === 'malformed';
+  const status = malformed ? 400 : 403;
+  const message = malformed
+    ? 'This request path cannot be read unambiguously, so it was refused.'
+    : `You need the ${verdict.role} role${verdict.role === 'owner' ? '' : ' or higher'} on ${appLabel} for this page.`;
+  const code = malformed ? 'MALFORMED_PATH' : 'ROLE_REQUIRED';
+  res.status(status);
+  if (req.accepts(['json', 'html']) === 'html') {
+    res.type('html').send(`<!doctype html><meta charset="utf-8"><title>Access denied</title>`
+      + `<body style="font-family:system-ui,sans-serif;max-width:40rem;margin:4rem auto;padding:0 1rem">`
+      + `<h1>Access denied</h1><p>${escapeHtml(message)}</p>`
+      + (malformed ? '' : `<p>Ask an owner of ${escapeHtml(appLabel)} for that role.</p>`)
+      + `</body>`);
+    return;
+  }
+  res.json({ error: { code, message, ...(malformed ? {} : { required_role: verdict.role }) } });
+}
 
 /**
  * GET /api/identity/verify
@@ -393,6 +429,7 @@ router.get('/verify', (req, res) => {
     if (!isApiClient) return loginRedirect();
     throw new AppError('Account is deactivated', 403, 'DEACTIVATED');
   }
+  if (!apiKey) touchSession(db, session, { role: session.crane_role });
 
   // Get app role
   const url = new URL(req.url, `http://${req.headers.host}`);
@@ -440,6 +477,24 @@ router.get('/verify', (req, res) => {
   if (appRole === 'none') {
     if (!isApiClient) return loginRedirect({ denied: '1', app: appSlug || '', name: appName || '' });
     throw new AppError('You do not have access to this app', 403, 'FORBIDDEN');
+  }
+
+  // Path role rules (services/accessRules.js): the app's own pages and APIs
+  // that need more than plain access. Only a Caddy forward_auth call carries
+  // X-Forwarded-Uri, and Caddy always sets ?app=, so a direct /verify call by
+  // an API client is not a page request and is not gated here.
+  const forwardedUri = req.headers['x-forwarded-uri'];
+  if (appIdForRoles && appSlug && forwardedUri !== undefined) {
+    const sandboxMount = `/${appSlug}-sandbox`;
+    const env = req.query.prefix === sandboxMount ? 'sandbox' : 'production';
+    const verdict = decideAccess(effectiveRules(db, appIdForRoles, env), {
+      method: req.headers['x-forwarded-method'],
+      uri: forwardedUri,
+      mountPrefix: env === 'sandbox' ? sandboxMount : `/${appSlug}`,
+      appRole,
+      headers: req.headers,
+    });
+    if (!verdict.ok) return refuseByRule(req, res, verdict, appName || appSlug);
   }
 
   // Record visit (one row per user/app/day via UPSERT — no-op if already exists)
@@ -802,6 +857,7 @@ router.post('/set-password', (req, res) => {
   _setPasswordFailures.delete(user.id);
   db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(password), user.id);
   db.prepare('DELETE FROM identity_sessions WHERE user_id = ?').run(user.id);
+  revokeAllGrantsForUser(user.id);
 
   // Issue a fresh session so the caller can drop the API-key path
   // immediately and start using Bearer (cc_identity_token) right away.

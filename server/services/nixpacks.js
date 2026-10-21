@@ -14,8 +14,34 @@
 import { spawn, execFile } from 'child_process';
 import { promisify } from 'util';
 import { dockerBuildEnv } from './docker.js';
+import { nixpacksResourceArgs } from './cpuPriority.js';
 
 const execFileP = promisify(execFile);
+
+// --cpu-quota and --memory arrived in nixpacks 1.x after 1.10 (absent from
+// v1.10.0's CLI, present in v1.20.0's), and an older nixpacks rejects an
+// unknown flag, which would fail the build. So ask the binary once.
+let resourceFlagsProbe = null;
+export async function nixpacksSupportsResourceFlags() {
+  if (resourceFlagsProbe !== null) return resourceFlagsProbe;
+  try {
+    const { stdout } = await execFileP('nixpacks', ['build', '--help'], { timeout: 5000 });
+    resourceFlagsProbe = /--cpu-quota\b/.test(stdout) && /--memory\b/.test(stdout);
+  } catch {
+    resourceFlagsProbe = false;
+  }
+  return resourceFlagsProbe;
+}
+
+export function resetNixpacksProbe() { resourceFlagsProbe = null; }
+
+export function nixpacksArgs({ releaseDir, tag, slug, env, withResources }) {
+  return [
+    'build', releaseDir, '--name', tag,
+    '--label', 'appcrane=true', '--label', `slug=${slug}`, '--label', `env=${env}`,
+    ...(withResources ? nixpacksResourceArgs() : []),
+  ];
+}
 
 export async function nixpacksAvailable() {
   try {
@@ -26,12 +52,11 @@ export async function nixpacksAvailable() {
   }
 }
 
-export function nixpacksBuild({ releaseDir, tag, slug, env, onLog }) {
+export async function nixpacksBuild({ releaseDir, tag, slug, env, onLog }) {
+  const withResources = await nixpacksSupportsResourceFlags();
+  if (!withResources) onLog?.('nixpacks is too old for --cpu-quota/--memory; this build runs without a CPU or memory cap (upgrade nixpacks)');
   return new Promise((resolve, reject) => {
-    const args = [
-      'build', releaseDir, '--name', tag,
-      '--label', 'appcrane=true', '--label', `slug=${slug}`, '--label', `env=${env}`,
-    ];
+    const args = nixpacksArgs({ releaseDir, tag, slug, env, withResources });
     // nixpacks shells out to `docker build`, so it inherits the builder choice
     // from its own environment. Without this, the two build paths on one host
     // could use two different builders — see docker.js:dockerBuildEnv().

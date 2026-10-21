@@ -5,6 +5,10 @@ import { PasswordInput } from '../components/secret/PasswordInput'
 import { Users } from './Users'
 import { AuditLog } from './AuditLog'
 import { JobHealth } from './JobHealth'
+import { S3BackupCard } from '../components/backup/S3BackupCard'
+import { ApiKeyCard } from '../components/ApiKeyCard'
+import { McpAuthPolicyCard } from '../components/McpAuthPolicyCard'
+import { EventRetentionCard } from '../components/events/EventRetentionCard'
 import { ServerCapacity } from './ServerCapacity'
 import { ClientErrors } from './ClientErrors'
 import { BrandingTab } from '../components/BrandingTab'
@@ -16,6 +20,15 @@ import { GithubAppCard } from '../components/GithubAppCard'
 import { ClaudeTokenCard } from '../components/ClaudeTokenCard'
 import { ChangePasswordCard } from '../components/ChangePasswordCard'
 import { serverDate } from '../utils/serverDate'
+import { TwoFactorCard } from '../components/mfa/TwoFactorCard'
+import { RestoreDrillsCard } from '../components/backup/RestoreDrillsCard'
+import { EvidencePackPanel } from '../components/compliance/EvidencePackPanel'
+import { SignInPolicyCard } from '../components/mfa/SignInPolicyCard'
+import { OAuthAdminCard } from '../components/OAuthAdminCard'
+import { SiemSinks } from '../components/siem/SiemSinks'
+import { LlmGatewaySettingsCard } from '../components/llm/LlmGatewaySettingsCard'
+import { CryptographyCard } from '../components/crypto/CryptographyCard'
+import { ClassificationPolicyCard } from '../components/intake/ClassificationPolicyCard'
 
 function SecurityTab() {
   const [certFile, setCertFile] = useState('')
@@ -1079,8 +1092,6 @@ function BackupTab() {
   type OffSite = { configured?: boolean; has_off_site_copy?: boolean; notice?: string | null; missing?: string[] }
   type S3Cfg = { enabled?: boolean; bucket?: string; region?: string; prefix?: string; endpoint?: string; access_key_id?: string; has_secret?: boolean; hour?: number; last_run?: string | null; last_error?: string | null; off_site?: OffSite }
   const [s3, setS3] = useState<S3Cfg>({})
-  const [s3Secret, setS3Secret] = useState('')
-  const [s3Busy, setS3Busy] = useState(false)
   useEffect(() => { adminApi.get<S3Cfg>('/api/settings/backup/s3').then(setS3).catch(() => {}) }, [])
 
   // v2.79.0: scheduled LOCAL backup — on by default, db + .env only.
@@ -1116,27 +1127,8 @@ function BackupTab() {
     finally { setLocalBusy(false) }
   }
 
-  async function saveS3() {
-    setS3Busy(true); setMsg(null)
-    try {
-      const patch: Record<string, unknown> = { enabled: s3.enabled, bucket: s3.bucket, region: s3.region, prefix: s3.prefix, endpoint: s3.endpoint, access_key_id: s3.access_key_id, hour: s3.hour }
-      if (s3Secret.trim()) patch.secret_access_key = s3Secret.trim()
-      const next = await adminApi.put<S3Cfg>('/api/settings/backup/s3', patch)
-      setS3(next); setS3Secret('')
-      setMsg({ ok: true, text: 'S3 backup settings saved.' })
-    } catch (e) { setMsg({ ok: false, text: (e as Error).message }) }
-    finally { setS3Busy(false) }
-  }
-  async function runS3Now() {
-    setS3Busy(true); setMsg(null)
-    try {
-      const r = await adminApi.post<{ ok: boolean; key?: string; size?: number; error?: string }>('/api/settings/backup/s3/run', {})
-      if (!r.ok) throw new Error(r.error || 'Backup failed')
-      setMsg({ ok: true, text: `Uploaded ${r.key} (${Math.round((r.size || 0) / 1024)} KB).` })
-      adminApi.get<S3Cfg>('/api/settings/backup/s3').then(setS3).catch(() => {})
-    } catch (e) { setMsg({ ok: false, text: (e as Error).message }) }
-    finally { setS3Busy(false) }
-  }
+
+
 
   async function download() {
     setBusy(true); setMsg(null)
@@ -1270,30 +1262,8 @@ function BackupTab() {
       </p>
       {local.last_error && <p style={{ color: 'var(--red)', fontSize: '.8rem' }}>Last error: {local.last_error}</p>}
 
-      <h3 style={{ marginTop: 24 }}>Scheduled off-site backup (S3)</h3>
-      <p className="settings-hint">
-        Upload the config backup to an S3 bucket (or S3-compatible store like Cloudflare R2) once a night.
-        No-op until you enter a bucket and credentials. The IAM key needs <code>s3:PutObject</code> on the bucket.
-      </p>
-      <label style={{ display: 'block', margin: '6px 0' }}>
-        <input type="checkbox" checked={!!s3.enabled} onChange={e => setS3(s => ({ ...s, enabled: e.target.checked }))} />
-        {' '}Enable nightly S3 backup
-      </label>
-      <div style={{ display: 'grid', gridTemplateColumns: '110px 1fr', gap: 8, maxWidth: 540, alignItems: 'center', margin: '8px 0' }}>
-        <label>Bucket</label><input className="editable" value={s3.bucket ?? ''} onChange={e => setS3(s => ({ ...s, bucket: e.target.value }))} placeholder="my-appcrane-backups" />
-        <label>Region</label><input className="editable" value={s3.region ?? ''} onChange={e => setS3(s => ({ ...s, region: e.target.value }))} placeholder="us-east-1" />
-        <label>Prefix</label><input className="editable" value={s3.prefix ?? ''} onChange={e => setS3(s => ({ ...s, prefix: e.target.value }))} placeholder="(optional) appcrane/" />
-        <label>Endpoint</label><input className="editable" value={s3.endpoint ?? ''} onChange={e => setS3(s => ({ ...s, endpoint: e.target.value }))} placeholder="(optional — set for R2/MinIO)" />
-        <label>Access key</label><input className="editable" value={s3.access_key_id ?? ''} onChange={e => setS3(s => ({ ...s, access_key_id: e.target.value }))} placeholder="AKIA…" />
-        <label>Secret key</label><PasswordInput className="editable" label="S3 secret key" autoComplete="new-password" value={s3Secret} onChange={e => setS3Secret(e.target.value)} placeholder={s3.has_secret ? '•••• stored — blank keeps current' : 'secret access key'} />
-        <label>Hour (0–23)</label><input className="editable" type="number" min={0} max={23} value={s3.hour ?? 3} onChange={e => setS3(s => ({ ...s, hour: Number(e.target.value) }))} style={{ width: 90 }} />
-      </div>
-      <div style={{ display: 'flex', gap: 8 }}>
-        <button className="btn" onClick={saveS3} disabled={s3Busy}>Save S3 settings</button>
-        <button className="btn" onClick={runS3Now} disabled={s3Busy}>{s3Busy ? '…' : 'Back up to S3 now'}</button>
-      </div>
-      {s3.last_run && <p className="settings-hint" style={{ marginTop: 6 }}>Last off-site backup: {new Date(s3.last_run).toLocaleString()}</p>}
-      {s3.last_error && <p style={{ color: 'var(--red)', fontSize: '.8rem' }}>Last error: {s3.last_error}</p>}
+      <S3BackupCard onConfig={setS3} />
+      <RestoreDrillsCard />
 
       {msg && <p style={{ color: msg.ok ? 'var(--green)' : 'var(--red)', marginTop: 12 }}>{msg.text}</p>}
     </div>
@@ -1310,14 +1280,16 @@ function AccountTab() {
   return (
     <>
       <ChangePasswordCard />
+      <TwoFactorCard />
       <ClaudeTokenCard />
+      <ApiKeyCard />
     </>
   )
 }
 
-type Tab = 'account' | 'security' | 'users' | 'roles' | 'github' | 'mail' | 'backup' | 'jobs' | 'branding' | 'audit' | 'client-errors' | 'mcp' | 'skills'
+type Tab = 'account' | 'security' | 'users' | 'roles' | 'github' | 'mail' | 'backup' | 'jobs' | 'branding' | 'audit' | 'client-errors' | 'mcp' | 'skills' | 'compliance'
 
-const VALID_TABS: Tab[] = ['account', 'security', 'users', 'roles', 'github', 'mail', 'backup', 'jobs', 'branding', 'audit', 'client-errors', 'mcp', 'skills']
+const VALID_TABS: Tab[] = ['account', 'security', 'users', 'roles', 'github', 'mail', 'backup', 'jobs', 'branding', 'audit', 'client-errors', 'mcp', 'skills', 'compliance']
 
 function getTab(): Tab {
   // GitHub's App-manifest redirect lands on /settings?code=…&state=…, and its
@@ -1394,13 +1366,14 @@ export function Settings() {
       {panel('account', <AccountTab />)}
       {panel('mcp', <Mcp />)}
       {panel('skills', <SkillsTab />)}
-      {panel('security', <SecurityTab />)}
+      {panel('security', <><SecurityTab /><SignInPolicyCard /><McpAuthPolicyCard /><OAuthAdminCard /><ClassificationPolicyCard /><CryptographyCard /><LlmGatewaySettingsCard /><SiemSinks /></>)}
       {panel('users', <Users />)}
       {panel('roles', <RolesTab />)}
       {panel('github', <GithubTab />)}
       {panel('mail', <MailTab />)}
       {panel('backup', <BackupTab />)}
-      {panel('jobs', <><ServerCapacity /><JobHealth /></>)}
+      {panel('jobs', <><ServerCapacity /><JobHealth /><EventRetentionCard /></>)}
+      {panel('compliance', <EvidencePackPanel />)}
       {/* v2.6.9: skills tab removed from Settings — now top-level /skills */}
       {panel('branding', <BrandingTab />)}
       {panel('audit', <AuditLog />)}

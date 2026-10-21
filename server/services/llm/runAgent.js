@@ -23,6 +23,7 @@ import { getUserClaudeToken, userClaudeTokenMeta } from '../userClaudeToken.js';
 import { defaultCoderModel } from './coderModels.js';
 import log from '../../utils/logger.js';
 import { OOM_APP_FLAG } from '../oomPriority.js';
+import { CPU_APP_FLAG } from '../cpuPriority.js';
 
 const DEFAULT_TIMEOUT = parseInt(process.env.CODER_TIMEOUT_MS || '1800000', 10);
 
@@ -496,6 +497,7 @@ export function runAgentNew({
   const args = [
     'run', '--rm',
     OOM_APP_FLAG,
+    CPU_APP_FLAG,
     '--cap-drop=ALL',
     '--security-opt', 'no-new-privileges:true',
     '--pids-limit=256',

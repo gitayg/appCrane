@@ -87,7 +87,7 @@ export function revokeAgentToken(user, rawName) {
 /** Token status for the caller's agents (My agents): never the token, only its hint and dates. */
 export function tokenStatusFor(user) {
   return getDb().prepare(`
-    SELECT a.name AS agent, t.hint, t.created_at, t.last_used_at
+    SELECT a.name AS agent, t.hint, t.created_at, t.last_used_at, t.expires_at
     FROM crew_agents a JOIN crew_agent_tokens t ON t.agent_id = a.id AND t.revoked_at IS NULL
     WHERE a.owner_user_id = ?`).all(user.id);
 }
@@ -100,7 +100,7 @@ export function tokenStatusFor(user) {
  * calls this before rendering anything for a delivery.
  */
 export function pushConfigAuthorized(row) {
-  const tok = getDb().prepare('SELECT agent_id FROM crew_agent_tokens WHERE id = ? AND revoked_at IS NULL').get(row.token_id);
+  const tok = getDb().prepare("SELECT agent_id FROM crew_agent_tokens WHERE id = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > datetime('now'))").get(row.token_id);
   if (!tok || tok.agent_id !== row.agent_id) return false;
   const found = agentWithOwner(row.agent_id);
   if (!found || !found.owner.active || found.agent.status !== 'active') return false;
@@ -117,7 +117,7 @@ export function resolveAgentToken(raw) {
   if (typeof raw !== 'string' || !raw.startsWith(PREFIX) || raw.length > 128) return null;
   const db = getDb();
   const hash = hashApiKey(raw);
-  const row = db.prepare('SELECT id, agent_id, token_hash FROM crew_agent_tokens WHERE token_hash = ? AND revoked_at IS NULL').get(hash);
+  const row = db.prepare("SELECT id, agent_id, token_hash FROM crew_agent_tokens WHERE token_hash = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > datetime('now'))").get(hash);
   if (!row) return null;
   const a = Buffer.from(row.token_hash, 'hex');
   const b = Buffer.from(hash, 'hex');

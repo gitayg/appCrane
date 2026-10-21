@@ -80,6 +80,7 @@ import { join, resolve } from 'path';
 import { assertFinding } from './scanShapes.js';
 import { compareVersions } from './appScan.js';
 import { OOM_APP_FLAG } from './oomPriority.js';
+import { CPU_APP_FLAG } from './cpuPriority.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -368,6 +369,7 @@ export async function runScanner(ref) {
   const args = [
     'run', '--rm',
     OOM_APP_FLAG,
+    CPU_APP_FLAG,
     '-v', `${DOCKER_SOCKET}:${DOCKER_SOCKET}`,
     '-v', `${cacheDir()}:/root/.cache/trivy`,
     SCANNER_IMAGE,

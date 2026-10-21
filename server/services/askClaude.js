@@ -11,6 +11,7 @@ import log from '../utils/logger.js';
 import { usesLocalRepo } from './managedRepo.js';
 import { runLocalAskJob } from './askLocalRepo.js';
 import { OOM_APP_FLAG } from './oomPriority.js';
+import { CPU_APP_FLAG } from './cpuPriority.js';
 
 const ASK_IMAGE      = process.env.APPSTUDIO_IMAGE || 'appcrane-studio:latest';
 const ASK_MODEL      = process.env.APPSTUDIO_CODER_MODEL || 'claude-sonnet-4-6';
@@ -129,6 +130,7 @@ async function ensureSessionContainer(sessionId, app, onLog) {
     '--label', 'appcrane=true',
     '--label', 'appcrane.container.type=ask',
     OOM_APP_FLAG,
+    CPU_APP_FLAG,
     '--memory=1g', '--cpus=0.5',
     '--cap-drop=ALL',
     '--security-opt', 'no-new-privileges:true',

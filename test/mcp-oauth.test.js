@@ -353,9 +353,12 @@ test('registration accepts only https and loopback redirect URIs, and confidenti
     assert.equal(r.status, 400, uri);
     assert.equal(r.body.error, 'invalid_redirect_uri');
   }
+  // URI shape only: the default 'allowlist' registration policy (oauth-client-policy.test.js) is lifted here.
+  db.prepare("INSERT INTO settings (key, value) VALUES ('oauth_dcr_mode', 'open') ON CONFLICT(key) DO UPDATE SET value = 'open'").run();
   for (const uri of ['https://claude.example/api/mcp/auth_callback', 'http://localhost:33418/callback', 'http://[::1]:9/cb']) {
     assert.equal((await register({ redirect_uris: [uri] })).status, 201, uri);
   }
+  db.prepare("DELETE FROM settings WHERE key = 'oauth_dcr_mode'").run();
   const conf = await register({ token_endpoint_auth_method: 'client_secret_basic' });
   assert.equal(conf.status, 201);
   assert.match(conf.body.client_secret, /^dhk_ocs_/);

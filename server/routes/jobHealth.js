@@ -5,6 +5,8 @@ import { AppError } from '../utils/errors.js';
 import { getDb } from '../db.js';
 import { getAdmissionSettings, measureMemory, MODES, MODE_KEY, RESERVE_KEY, toMb } from '../services/memoryAdmission.js';
 import { getLastHostSample, getThresholds, THRESHOLD_DEFAULTS } from '../services/hostResources.js';
+import { getCpuAdmissionSettings, measureCpu, containersWithoutWeight, CPU_MODES, CPU_MODE_KEY, CPU_RESERVE_KEY } from '../services/cpuAdmission.js';
+import { getHostCpuPriority, readBuildCapStatus } from '../services/cpuPriority.js';
 import { logAudit } from '../middleware/audit.js';
 import log from '../utils/logger.js';
 
@@ -41,8 +43,18 @@ router.post('/job-health/:id/run', requireAuth, requirePlatformAdmin, (req, res,
 router.get('/server-capacity', requireAuth, requirePlatformAdmin, async (req, res) => {
   const db = getDb();
   const m = await measureMemory({ fresh: req.query.fresh === '1', db });
+  const c = await measureCpu({ fresh: req.query.fresh === '1', db });
+  const round = (n) => Math.round(n * 100) / 100;
   res.json({
-    settings: { ...getAdmissionSettings(db), thresholds: getThresholds(db), threshold_defaults: THRESHOLD_DEFAULTS },
+    settings: { ...getAdmissionSettings(db), cpu: getCpuAdmissionSettings(db), thresholds: getThresholds(db), threshold_defaults: THRESHOLD_DEFAULTS },
+    cpu: {
+      cores: c.cores, cores_source: c.coresSource, reserve_cores: round(c.reserveCores), reserve_source: c.reserveSource,
+      capacity_cores: round(c.capacityCores), committed_cores: round(c.committedCores), error: c.error, measured_at: c.measuredAt,
+      uncapped: c.containers.filter((x) => x.uncapped).map((x) => x.label).slice(0, 15),
+      unweighted: containersWithoutWeight(c).map((x) => x.label).slice(0, 15),
+      host_priority: getHostCpuPriority(),
+      builds: await readBuildCapStatus(),
+    },
     memory: {
       total_mb: toMb(m.totalBytes), total_source: m.totalSource,
       reserve_mb: toMb(m.reserveBytes), reserve_source: m.reserveSource,
@@ -70,6 +82,16 @@ router.put('/server-capacity', requireAuth, requirePlatformAdmin, (req, res, nex
       return next(new AppError('reserve_mb must be a whole number of MB (0 to 1048576), or null for the default', 400, 'VALIDATION'));
     } else writes.push([RESERVE_KEY, String(body.reserve_mb)]);
   }
+  if (body.cpu_mode !== undefined) {
+    if (!CPU_MODES.includes(body.cpu_mode)) return next(new AppError(`cpu_mode must be one of ${CPU_MODES.join(', ')}`, 400, 'VALIDATION'));
+    writes.push([CPU_MODE_KEY, body.cpu_mode]);
+  }
+  if (body.cpu_reserve_cores !== undefined) {
+    if (body.cpu_reserve_cores === null || body.cpu_reserve_cores === '') writes.push([CPU_RESERVE_KEY, '']);
+    else if (typeof body.cpu_reserve_cores !== 'number' || !Number.isFinite(body.cpu_reserve_cores) || body.cpu_reserve_cores < 0 || body.cpu_reserve_cores > 1024) {
+      return next(new AppError('cpu_reserve_cores must be a number of cores (0 to 1024), or null for the default', 400, 'VALIDATION'));
+    } else writes.push([CPU_RESERVE_KEY, String(body.cpu_reserve_cores)]);
+  }
   for (const k of Object.keys(THRESHOLD_DEFAULTS)) {
     const v = body.thresholds?.[k];
     if (v === undefined) continue;
@@ -83,7 +105,7 @@ router.put('/server-capacity', requireAuth, requirePlatformAdmin, (req, res, nex
     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_by = excluded.updated_by, updated_at = datetime('now')`);
   db.transaction(() => { for (const [k, v] of writes) up.run(k, v, req.user.id); })();
   try { logAudit(req.user.id, null, 'settings.server-capacity', Object.fromEntries(writes)); } catch (_) {}
-  res.json({ settings: { ...getAdmissionSettings(db), thresholds: getThresholds(db) } });
+  res.json({ settings: { ...getAdmissionSettings(db), cpu: getCpuAdmissionSettings(db), thresholds: getThresholds(db) } });
 });
 
 export default router;

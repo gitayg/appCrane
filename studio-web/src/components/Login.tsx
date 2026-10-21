@@ -6,6 +6,9 @@ import {
   POPUP_FEATURES, POPUP_NAME, browserWaitDeps, isFramed, popupStartUrl,
   reloadTargetAfterSignIn, signInPlan, waitForPopupSignIn, type SsoProvider,
 } from '../utils/popupSignIn'
+import { EnrollPanel, type EnrollmentStart } from './mfa/EnrollPanel'
+import { RecoveryCodes } from './mfa/RecoveryCodes'
+import { takeSignedOutMessage } from './mfa/idle'
 
 /**
  * v2.7.8: the cc_token cookie is now httpOnly and set entirely by the
@@ -35,6 +38,12 @@ import {
  */
 interface SsoCfg { enabled?: boolean; provider_name?: string }
 type PopupState = 'idle' | 'waiting' | 'blocked' | 'failed' | 'timeout'
+// Second step of password sign-in (server/routes/mfa.js). The password was
+// accepted; no session exists until a code (or first-time enrollment) passes.
+type MfaStep =
+  | { kind: 'verify'; token: string }
+  | { kind: 'enroll'; token: string; start: EnrollmentStart | null }
+  | { kind: 'codes'; codes: string[] }
 
 export function Login() {
   const { setKey } = useAuth()
@@ -62,6 +71,10 @@ export function Login() {
   const [popupState, setPopupState] = useState<PopupState>('idle')
   const [popupHref, setPopupHref] = useState('')
   const waitRef = useRef<{ cancel: () => void } | null>(null)
+  const [mfa, setMfa] = useState<MfaStep | null>(null)
+  const [mfaCode, setMfaCode] = useState('')
+  const [mfaBusy, setMfaBusy] = useState(false)
+  const [notice] = useState<string | null>(() => takeSignedOutMessage())
 
   const plan = signInPlan({ framed: isFramed(window), ssoEnabled: !!(oidc.enabled || saml.enabled), ssoOnly: !!ssoOnly })
 
@@ -192,11 +205,57 @@ export function Login() {
         body: JSON.stringify({ login, password }),
       })
       const data = await res.json()
+      if (data?.mfa_token && data.error?.code === 'MFA_REQUIRED') { setPassword(''); setMfa({ kind: 'verify', token: data.mfa_token }); return }
+      if (data?.mfa_token && data.error?.code === 'MFA_ENROLL_REQUIRED') { setPassword(''); beginEnroll(data.mfa_token); return }
       if (!res.ok) { setError(data.error?.message || 'Login failed'); return }
       localStorage.setItem('cc_identity_token', data.token)
       // cc_token cookie was already set httpOnly on the login response.
       postLoginRedirect()
     } catch { setError('Connection failed') }
+  }
+
+  async function mfaPost(path: string, body: Record<string, unknown>) {
+    const res = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      if (data.error?.code === 'MFA_TOKEN_INVALID') { setMfa(null); setMfaCode('') }
+      throw new Error(data.error?.message || 'Sign-in failed')
+    }
+    return data
+  }
+
+  async function beginEnroll(token: string) {
+    setError('')
+    setMfa({ kind: 'enroll', token, start: null })
+    try {
+      const start = await mfaPost('/api/identity/mfa/enroll/start', { mfa_token: token })
+      setMfa({ kind: 'enroll', token, start })
+    } catch (e) { setError(e instanceof Error ? e.message : 'Sign-in failed') }
+  }
+
+  async function submitMfaCode() {
+    if (mfa?.kind !== 'verify' || !mfaCode.trim() || mfaBusy) return
+    setError('')
+    setMfaBusy(true)
+    try {
+      const data = await mfaPost('/api/identity/mfa/verify', { mfa_token: mfa.token, code: mfaCode.trim() })
+      localStorage.setItem('cc_identity_token', data.token)
+      postLoginRedirect()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Sign-in failed')
+      setMfaCode('')
+    } finally { setMfaBusy(false) }
+  }
+
+  async function confirmEnroll(code: string) {
+    if (mfa?.kind !== 'enroll' || mfaBusy) return
+    setError('')
+    setMfaBusy(true)
+    try {
+      const data = await mfaPost('/api/identity/mfa/enroll/confirm', { mfa_token: mfa.token, code })
+      localStorage.setItem('cc_identity_token', data.token)
+      setMfa({ kind: 'codes', codes: data.recovery_codes })
+    } catch (e) { setError(e instanceof Error ? e.message : 'Sign-in failed') } finally { setMfaBusy(false) }
   }
 
   const singleProvider = !(oidc.enabled && saml.enabled)
@@ -206,7 +265,44 @@ export function Login() {
     <div className="login-wrap">
       <div className="login-box">
         <h2 style={{ marginBottom: 4, fontSize: '1.3rem' }}>Sign In</h2>
-        {ssoOnly === null ? (
+        {notice && !mfa && <p style={{ color: 'var(--dim)', fontSize: '.85rem', margin: '4px 0 12px' }}>{notice}</p>}
+        {mfa ? (
+          <div style={{ marginTop: 12 }}>
+            {error && <div className="login-error">{error}</div>}
+            {mfa.kind === 'verify' && (
+              <form onSubmit={e => { e.preventDefault(); submitMfaCode() }}>
+                <p style={{ color: 'var(--dim)', marginBottom: 12, fontSize: '.9rem' }}>
+                  Enter the 6-digit code from your authenticator app, or one of your recovery codes.
+                </p>
+                <input
+                  type="text" autoComplete="one-time-code" placeholder="123456" value={mfaCode} autoFocus
+                  onChange={e => setMfaCode(e.target.value)}
+                  style={{ width: '100%', marginBottom: 12, letterSpacing: 3, textAlign: 'center', fontSize: '1.1rem' }}
+                />
+                <button className="btn btn-accent" type="submit" disabled={mfaBusy || !mfaCode.trim()} style={{ width: '100%', padding: 10 }}>
+                  {mfaBusy ? 'Checking...' : 'Verify'}
+                </button>
+              </form>
+            )}
+            {mfa.kind === 'enroll' && (
+              <>
+                <p style={{ color: 'var(--dim)', marginBottom: 12, fontSize: '.9rem' }}>
+                  This instance requires two-factor sign-in for your account. Set it up to finish signing in.
+                </p>
+                {mfa.start ? <EnrollPanel start={mfa.start} onConfirm={confirmEnroll} busy={mfaBusy} />
+                  : <p style={{ color: 'var(--dim)', fontSize: '.85rem' }}>Loading...</p>}
+              </>
+            )}
+            {mfa.kind === 'codes' && <RecoveryCodes codes={mfa.codes} onDone={postLoginRedirect} />}
+            {mfa.kind !== 'codes' && (
+              <p style={{ marginTop: 14, marginBottom: 0, fontSize: '.78rem', textAlign: 'center' }}>
+                <button type="button" className="login-key-link" onClick={() => { setMfa(null); setMfaCode(''); setError('') }}
+                  style={{ background: 'none', border: 'none', color: 'var(--dim)', cursor: 'pointer', textDecoration: 'underline', padding: 0, font: 'inherit' }}
+                >Start over</button>
+              </p>
+            )}
+          </div>
+        ) : ssoOnly === null ? (
           // Policy unknown — render nothing actionable yet so we never flash
           // the password form on an SSO-only instance.
           <p style={{ color: 'var(--dim)', marginTop: 16, fontSize: '.9rem' }}>Loading…</p>

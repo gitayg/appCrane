@@ -3,6 +3,7 @@ import { randomBytes } from 'crypto';
 import { isAbsolute } from 'path';
 import { assertSafeWorkspaceGit, HARDENED_GIT_ARGS } from './workspaceGitGuard.js';
 import { OOM_APP_FLAG } from '../oomPriority.js';
+import { CPU_APP_FLAG } from '../cpuPriority.js';
 
 // ---------------------------------------------------------------------------
 // Running git (and npm) in an agent-writable workspace — never on the host
@@ -139,6 +140,7 @@ export function helperRunArgs({ workspaceDir, name, argv, env = {}, network = 'n
   const args = [
     'run', '--rm', '-i',
     OOM_APP_FLAG,
+    CPU_APP_FLAG,
     '--name', name,
     '--pull', 'never',
     '--label', HELPER_LABEL,

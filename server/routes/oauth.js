@@ -3,7 +3,7 @@ import { getDb } from '../db.js';
 import { hashApiKey } from '../services/encryption.js';
 import log from '../utils/logger.js';
 import {
-  OAuthError, issuerOf, mcpResourceOf, canonicalResource, resolveScope, isValidCodeChallenge,
+  OAuthError, issuerOf, mcpResourceOf, resolveScope, isValidCodeChallenge,
   validateRegistration, SCOPES_SUPPORTED, SCOPE_FULL, AUTH_METHODS, GRANT_TYPES,
 } from '../services/oauthPolicy.js';
 import {
@@ -11,6 +11,8 @@ import {
   redeemCode, refreshTokens, revokeToken,
 } from '../services/oauthStore.js';
 import { createOAuthLimiter } from '../services/oauthRateLimit.js';
+import { checkRegistration, clientRefusal } from '../services/oauthClientPolicy.js';
+import { resolveRequestedResource } from '../services/appMcp/oauthResource.js';
 
 // AppCrane as the OAuth 2.1 authorization server for its own MCP endpoint
 // (MCP authorization spec 2025-11-25): RFC 9728 protected-resource metadata,
@@ -83,6 +85,7 @@ router.post('/register', openCors, registerLimit, (req, res) => {
   try {
     pruneStale();
     const meta = validateRegistration(req.body);
+    checkRegistration(meta.redirect_uris);
     const { client, clientSecret } = registerClient(meta);
     log.info(`OAuth: registered client ${client.client_id} auth=${client.token_endpoint_auth_method}`);
     res.status(201).json({
@@ -135,6 +138,8 @@ router.get('/authorize', authorizeLimit, (req, res) => {
   if (!redirectUri || !client.redirect_uris.includes(redirectUri)) {
     return errorPage(res, 400, 'redirect_uri is missing or does not exactly match a URI this app registered.');
   }
+  const refusal = clientRefusal(client, redirectUri);
+  if (refusal) return errorPage(res, 403, refusal);
   const state = str(q.state);
   const issuer = issuerOf(req);
   const fail = (error, description) => {
@@ -149,11 +154,8 @@ router.get('/authorize', authorizeLimit, (req, res) => {
   if (str(q.response_type) !== 'code') return fail('unsupported_response_type', "response_type must be 'code'");
   if (str(q.code_challenge_method) !== 'S256') return fail('invalid_request', 'PKCE is required: code_challenge_method must be S256');
   if (!isValidCodeChallenge(str(q.code_challenge))) return fail('invalid_request', 'code_challenge must be a base64url SHA-256 (43 characters)');
-  const resource = mcpResourceOf(req);
-  const asked = q.resource;
-  if (asked !== undefined && (typeof asked !== 'string' || canonicalResource(asked) !== canonicalResource(resource))) {
-    return fail('invalid_target', `resource must be ${resource}`);
-  }
+  const resource = resolveRequestedResource(req, q.resource, (slug) => !!getDb().prepare('SELECT 1 FROM apps WHERE slug = ?').get(slug));
+  if (!resource) return fail('invalid_target', `resource must be ${mcpResourceOf(req)} or an app's ${mcpResourceOf(req)}/apps/<slug>`);
   const { scope } = resolveScope(str(q.scope));
   const id = createAuthRequest({
     clientId: client.client_id, redirectUri, codeChallenge: q.code_challenge, scope, resource, state,

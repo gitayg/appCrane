@@ -19,6 +19,13 @@ import { Crew } from './pages/Crew'
 import { McpAuthorize } from './pages/McpAuthorize'
 import { Surveys } from './pages/Surveys'
 import { Tasks } from './pages/Tasks'
+import { Events } from './pages/Events'
+import { Adopt } from './pages/Adopt'
+import { IntakeQueue } from './pages/IntakeQueue'
+import { AccessReviews } from './pages/AccessReviews'
+import { AccessReviewCampaigns } from './pages/AccessReviewCampaigns'
+import { AuditIntegrity } from './pages/AuditIntegrity'
+import { IdleSessionGuard } from './components/mfa/IdleSessionGuard'
 import { PlatformRequestBar } from './components/PlatformRequestBar'
 import { AppTabsProvider } from './components/AppTabsContext'
 import { PersistentAppTabs } from './components/PersistentAppTabs'
@@ -59,6 +66,7 @@ const SETTINGS_SUB = [
   { id: 'mail',       label: 'Mail',        href: '#mail',     platformAdminOnly: true },
   { id: 'backup',     label: 'Backup',      href: '#backup',   platformAdminOnly: true },
   { id: 'jobs',       label: 'Job Health',  href: '#jobs',     platformAdminOnly: true },
+  { id: 'compliance', label: 'Compliance',  href: '#compliance', platformAdminOnly: true },
   { id: 'branding',   label: 'Style Guide', href: '#branding', platformAdminOnly: true },
   { id: 'audit',      label: 'Audit Log',   href: '#audit',    platformAdminOnly: true },
   { id: 'client-errors', label: 'Client Errors', href: '#client-errors', platformAdminOnly: true },
@@ -225,6 +233,7 @@ export function AdminApp() {
   return (
     <AuthContext.Provider value={auth}>
       <AppTabsProvider>
+      <IdleSessionGuard />
       <BrowserRouter>
         <Routes>
           {/* v2.21.16: land on the app picker (/launch shows "Select an app")
@@ -255,6 +264,13 @@ export function AdminApp() {
           <Route path="/requests"    element={<RequestsRoute />} />
           <Route path="/surveys"     element={<Layout><Surveys /></Layout>} />
           <Route path="/tasks"       element={<Layout><Tasks /></Layout>} />
+          <Route path="/events"      element={<Layout><Events /></Layout>} />
+          <Route path="/adopt" element={<Layout><Adopt /></Layout>} />
+          <Route path="/intake" element={<Layout><IntakeQueue /></Layout>} />
+          <Route path="/access-reviews" element={<Layout><AccessReviews /></Layout>} />
+          <Route path="/access-reviews/campaigns" element={<Layout><AccessReviewCampaigns /></Layout>} />
+          <Route path="/access-reviews/campaigns/:id" element={<Layout><AccessReviewCampaigns /></Layout>} />
+          <Route path="/audit-integrity" element={<Layout><AuditIntegrity /></Layout>} />
           <Route path="/requests/:id" element={<Layout><RequestDetail /></Layout>} />
           <Route path="/my-requests" element={<Navigate to="/requests" replace />} />
           <Route path="/builders"    element={<Navigate to="/requests" replace />} />

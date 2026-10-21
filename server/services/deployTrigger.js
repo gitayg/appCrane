@@ -124,6 +124,12 @@ export async function triggerAutoDeploys({
 
   for (const { env, flag } of ENVIRONMENTS) {
     if (!config[flag]) continue;
+    const { restoreInProgress } = await import('./managedDbRestoreGuard.js');
+    if (restoreInProgress(config.slug, env)) {
+      log.warn(`[deploy-trigger] ${config.slug}/${env}: not deployed, a database restore is running`);
+      logDelivery({ actionTaken: 'skipped_restore', branch, commitSha });
+      continue;
+    }
 
     const deployResult = db.prepare(`
       INSERT INTO deployments (app_id, env, status, commit_hash, commit_message, log)

@@ -425,7 +425,9 @@ test('export contents=full carries managed-db/<engine>/<db>.dump for every datab
 
 test('restore-database from an export: platform admin only, and the member is derived from the target app', async () => {
   settingsRoutes.__setRestoreDbOpsForTests(recorder());
-  const body = { archive: 'full.tar.gz', app: 'bk-a', env: 'production', engine: 'postgres' };
+  // keep_running: this test is about who may restore and which member is used;
+  // stopping the app around a restore is test/managed-db-restore-stop.test.js.
+  const body = { archive: 'full.tar.gz', app: 'bk-a', env: 'production', engine: 'postgres', keep_running: true };
   assert.equal((await call('POST', '/api/settings/backup/restore-database', OWNER, body)).status, 403);
   const r = await call('POST', '/api/settings/backup/restore-database', PLATFORM, body);
   assert.equal(r.status, 200, JSON.stringify(r.body));

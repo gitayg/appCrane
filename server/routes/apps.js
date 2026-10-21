@@ -563,6 +563,8 @@ router.post('/', requireAuth, auditMiddleware('app-create'), async (req, res) =>
   const { name, slug, domain, description, category, source_type, github_url, branch, github_token, max_ram_mb, max_cpu_percent, visibility, public_access, image_ref, container_port, health_path, catalog_slug } = req.body;
 
   if (!name || !slug) throw new AppError('Name and slug are required', 400, 'VALIDATION');
+  const { submitIntake, normalizeIntake } = await import('../services/appIntake.js');
+  normalizeIntake(req.body.intake || {});
   const slugProblem = slugRefusal(slug, req.user);
   if (slugProblem) throw new AppError(slugProblem, 400, 'VALIDATION');
   if (github_url) validateGithubUrl(github_url);
@@ -704,6 +706,7 @@ router.post('/', requireAuth, auditMiddleware('app-create'), async (req, res) =>
     INSERT INTO app_user_roles (app_id, user_id, app_role) VALUES (?, ?, 'owner')
     ON CONFLICT(app_id, user_id) DO UPDATE SET app_role = 'owner'
   `).run(appId, req.user.id);
+  const intake = submitIntake({ id: appId, slug }, { ...(req.body.intake || {}), purpose: req.body.intake?.purpose ?? description, owner: req.user.id, submitted_by: req.user.id });
 
   // Create webhook config
   const webhookToken = crypto.randomBytes(16).toString('hex');
@@ -741,6 +744,7 @@ router.post('/', requireAuth, auditMiddleware('app-create'), async (req, res) =>
     urls,
     base_path: { production: `/${slug}/`, sandbox: `/${slug}-sandbox/` },
     webhook_url: `/api/webhooks/${webhookToken}`,
+    intake,
     message: `App '${name}' created. Assign users with PUT /api/apps/${slug}/users`,
   });
 });
@@ -1673,71 +1677,8 @@ router.delete('/:slug', requireAppAccess, auditMiddleware('app-delete'), async (
     throw new AppError('Add ?confirm=true to delete', 400, 'CONFIRMATION_REQUIRED');
   }
 
-  const db = getDb();
-  const slug = req.app.slug;
-
-  // Stop containers
-  try {
-    const { stopApp } = await import('../services/docker.js');
-    await stopApp(slug, 'production').catch(() => {});
-    await stopApp(slug, 'sandbox').catch(() => {});
-    // Nothing removed a deleted app's images, so every delete left them on
-    // disk forever. Before the rows go: it reads this app's deployments.
-    const { removeAppImages } = await import('../services/docker.js');
-    await removeAppImages(req.app.id, slug).catch(() => {});
-    // And the per-env volumes its declared paths were mounted through. The
-    // daemon's record only; the data on disk stays, as it always has.
-    const { removeAppVolumes } = await import('../services/docker.js');
-    await removeAppVolumes(slug).catch(() => {});
-  } catch (e) {}
-
-  // v2.65.0: drop the app's managed databases BEFORE the row goes away.
-  //
-  // Migration 085's foreign key cascades the managed_databases ROW when apps is
-  // deleted, and that is the whole of what SQLite can do — it cannot reach into
-  // Postgres or MariaDB. So a delete that skipped this would leave the database
-  // itself and a live login role standing, holding the deleted app's data, with
-  // nothing left in AppCrane pointing at either and anyone who still has the
-  // credentials able to open it. The cascade makes the leak INVISIBLE rather
-  // than loud, which is why this runs first rather than being left to a sweeper.
-  //
-  // After stopApp on purpose: the engine-side drop is what has to survive a
-  // container that has not finished shutting down (managedDb uses
-  // DROP DATABASE ... WITH (FORCE) for exactly that), but there is no reason to
-  // race it when stopping first is free.
-  //
-  // Called plainly, not wrapped: deprovisionApp catches per row and logs, and
-  // returns {requested, dropped} counts rather than throwing, so a database
-  // server that is down leaves a warning in the log and a deletable app. Read
-  // rather than assumed — server/services/managedDb.js, deprovisionApp().
-  // The counts are safe to return: they are integers, never a name or a secret.
-  const { deprovisionApp } = await import('../services/managedDb.js');
-  const dbDrop = await deprovisionApp(req.app.id);
-  if (dbDrop.requested !== dbDrop.dropped) {
-    log.warn(
-      `App delete '${slug}': ${dbDrop.requested - dbDrop.dropped} of ${dbDrop.requested} managed ` +
-      'databases could not be dropped — they are now orphaned in the engine',
-    );
-  }
-
-  // Delete related records first to avoid FK constraint failures
-  const appId = req.app.id;
-  db.transaction(() => {
-    db.prepare('DELETE FROM app_user_roles WHERE app_id = ?').run(appId);
-    db.prepare('DELETE FROM app_identity_secrets WHERE app_id = ?').run(appId);
-    db.prepare('DELETE FROM app_settings WHERE app_id = ?').run(appId);
-    db.prepare('DELETE FROM app_domain_aliases WHERE app_id = ?').run(appId);
-    db.prepare('DELETE FROM deployments WHERE app_id = ?').run(appId);
-    db.prepare('DELETE FROM env_vars WHERE app_id = ?').run(appId);
-    db.prepare('DELETE FROM health_configs WHERE app_id = ?').run(appId);
-    db.prepare('DELETE FROM health_state WHERE app_id = ?').run(appId);
-    db.prepare('DELETE FROM webhook_configs WHERE app_id = ?').run(appId);
-    db.prepare('DELETE FROM backups WHERE app_id = ?').run(appId);
-    db.prepare('DELETE FROM notification_configs WHERE app_id = ?').run(appId);
-    db.prepare('DELETE FROM identity_sessions WHERE app_id = ?').run(appId);
-    db.prepare('DELETE FROM audit_log WHERE app_id = ?').run(appId);
-    db.prepare('DELETE FROM apps WHERE id = ?').run(appId);
-  })();
+  const { deleteApp } = await import('../services/appDelete.js');
+  const { slug, managed_databases: dbDrop } = await deleteApp(req.app);
 
   // Update Caddy config (removes app routes) — after the 200 is on the wire.
   reloadCaddyAfterResponse(res, 'app delete');

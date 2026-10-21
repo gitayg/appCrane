@@ -10,8 +10,10 @@ import {
   killUserContainer as ghKill,
 } from '../services/githubMcpContainers.js';
 import log from '../utils/logger.js';
+import { AppError } from '../utils/errors.js';
 import { resourceMetadataUrlOf, SCOPE_FULL } from '../services/oauthPolicy.js';
 import { viewAsRefusalMessage } from '../services/viewAs.js';
+import { isMcpOauthOnly, oauthOnlyExemptIds } from '../services/apiKeyExpiry.js';
 
 const router = Router();
 
@@ -20,11 +22,29 @@ const router = Router();
 // AppCrane's authorization server. API-key clients ignore the header.
 function requireMcpAuth(req, res, next) {
   requireAuth(req, res, (err) => {
+    if (!err && apiKeyRefusedByOauthOnly(req)) {
+      res.set('WWW-Authenticate', `Bearer error="invalid_token", error_description="API keys are turned off for MCP; sign in with OAuth", resource_metadata="${resourceMetadataUrlOf(req)}", scope="${SCOPE_FULL}"`);
+      return next(new AppError('This AppCrane accepts only OAuth sign-in for MCP. API keys are turned off for MCP; connect your client again and sign in when it asks.', 401, 'MCP_OAUTH_ONLY'));
+    }
     if (err && err.status === 401) {
       res.set('WWW-Authenticate', `Bearer resource_metadata="${resourceMetadataUrlOf(req)}", scope="${SCOPE_FULL}"`);
     }
     next(err);
   });
+}
+
+// "MCP: OAuth only" (Settings > Security). Refuses every X-API-Key credential
+// on POST /api/mcp (dhk_user_*, dhk_admin_*, dhk_mcp_*) except the coder's
+// per-turn keys, which AppCrane issues to its own coder container, and the
+// users an admin exempted for automation. OAuth tokens and dashboard sessions
+// never come through X-API-Key, so they are untouched.
+function apiKeyRefusedByOauthOnly(req) {
+  if (!req.headers['x-api-key']) return false;
+  if (req.user_mcp_key?.coder || req.user?.coder_key) return false;
+  const db = getDb();
+  if (!isMcpOauthOnly(db)) return false;
+  const uid = (req.real_user || req.user)?.id;
+  return !oauthOnlyExemptIds(db).includes(uid);
 }
 
 const READ_ONLY_TOOLS = new Set(getToolCatalog().filter(t => t.readOnly).map(t => t.name));

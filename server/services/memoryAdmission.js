@@ -27,6 +27,8 @@ import { totalmem } from 'os';
 import { getDb } from '../db.js';
 import { AppError } from '../utils/errors.js';
 import log from '../utils/logger.js';
+import { recordAdmissionEvent } from './eventStore.js';
+import { admitCpu } from './cpuAdmission.js';
 
 export const MODE_KEY = 'memory_admission_mode';
 export const RESERVE_KEY = 'memory_reserve_mb';
@@ -242,7 +244,13 @@ export function warningMessage({ subject, what, verdict }) {
  * ctx: { kind, slug, env, appId, userId, automatic, what ('deploy' | 'coder
  *        start' | ...), subject, onWarn: 'notify' | 'silent', notify (test seam) }
  */
-export async function admitContainer({ name, memoryMb, ...ctx }) {
+export async function admitContainer({ name, memoryMb, cpus, ...ctx }) {
+  const cpu = cpus == null ? null : await admitCpu({ name, cpus, ...ctx });
+  const result = await admitMemory({ name, memoryMb, ...ctx });
+  return cpu ? { ...result, cpu } : result;
+}
+
+async function admitMemory({ name, memoryMb, ...ctx }) {
   const db = getDb();
   const { mode } = getAdmissionSettings(db);
   if (mode === 'off') return { mode, allowed: true, warned: false, skipped: true };
@@ -263,12 +271,14 @@ export async function admitContainer({ name, memoryMb, ...ctx }) {
       try { await notify({ db, outcome: 'warned', message, verdict, measurement, name, subject, what, ...ctx }); } catch (e) { log.warn(`[memory-admission] notify failed: ${e.message}`); }
     }
     log.warn(`[memory-admission] ${message}`);
+    recordAdmissionEvent('warned', ctx, message);
     return { mode, allowed: true, warned: true, message, verdict };
   }
 
   const message = refusalMessage({ subject, what, verdict, replacing });
   try { await notify({ db, outcome: 'refused', message, verdict, measurement, name, subject, what, ...ctx }); } catch (e) { log.warn(`[memory-admission] notify failed: ${e.message}`); }
   log.warn(`[memory-admission] refused ${name}: ${message}`);
+  recordAdmissionEvent('refused', ctx, message);
   const err = new AppError(message, 409, REFUSED_CODE);
   err.admission = { verdict, mode };
   throw err;

@@ -88,8 +88,11 @@ test('every password field in the dashboard has the eye', () => {
   const users = sources.filter(({ text }) => /<PasswordInput\b/.test(text)).map((s) => s.rel).sort();
   assert.deepEqual(users, [
     'components/ChangePasswordCard.tsx', 'components/ClaudeTokenCard.tsx', 'components/Login.tsx', 'components/SetUserPasswordModal.tsx',
+    'components/adopt/AdoptForm.tsx', 'components/adopt/SourceStep.tsx',
+    'components/backup/S3BackupCard.tsx',
     'components/env/EnvVarRow.tsx', 'components/env/EnvVarsPanel.tsx',
-    'pages/Catalog.tsx', 'pages/Settings.tsx', 'pages/Users.tsx',
+    'components/llm/LlmGatewaySettingsCard.tsx', 'components/mfa/TwoFactorCard.tsx', 'components/siem/SinkForm.tsx',
+    'pages/Catalog.tsx', 'pages/McpAuthorize.tsx', 'pages/Settings.tsx', 'pages/Users.tsx',
   ]);
   for (const { rel, text } of sources) {
     for (const m of text.matchAll(/<PasswordInput\b([\s\S]*?)\/>/g)) {

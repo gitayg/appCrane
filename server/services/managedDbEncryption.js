@@ -198,7 +198,50 @@ export function fileKey() {
  * rather than fail at its next restart.
  */
 export function fileKeyFingerprint() {
-  return crypto.createHash('sha256').update(`fp:${fileKey()}`).digest('hex').slice(0, 12);
+  const kdf = keyFileKdf();
+  const tag = kdf.name === 'legacy' ? '' : `:${kdf.name}:${kdf.iterations}`;
+  return crypto.createHash('sha256').update(`fp:${fileKey()}${tag}`).digest('hex').slice(0, 12);
+}
+
+/**
+ * How keys.enc is wrapped. 'legacy' (the default) is what every server built
+ * before this has: OpenSSL EVP_BytesToKey with SHA-1, the only derivation the
+ * file_key_management plugin accepts before MariaDB 12.0. 'pbkdf2-sha256' is
+ * PBKDF2-HMAC-SHA256 (an approved KDF), which needs the plugin's
+ * file_key_management_digest and file_key_management_use_pbkdf2 options, both
+ * "available from MariaDB 12.0" (MariaDB docs). Chosen by APPCRANE_TDE_KDF.
+ *
+ * Switching only re-wraps the key FILE: the 256-bit key inside it, and so
+ * every encrypted tablespace, stays the same, and no database password is
+ * involved. It is a start-time option, so the switch takes effect when the
+ * MariaDB container is next recreated — fileKeyFingerprint() changes with it,
+ * which is what makes the next ensure recreate the container.
+ */
+export const KEY_FILE_PBKDF2_ITERATIONS = 600000;
+export const PBKDF2_MIN_MARIADB_MAJOR = 12;
+
+export function keyFileKdf(env = process.env) {
+  const v = String(env.APPCRANE_TDE_KDF || 'legacy').trim().toLowerCase();
+  if (v === 'legacy' || v === '') return { name: 'legacy' };
+  if (v === 'pbkdf2-sha256') return { name: 'pbkdf2-sha256', iterations: KEY_FILE_PBKDF2_ITERATIONS };
+  throw new Error(`managedDbEncryption: APPCRANE_TDE_KDF must be legacy or pbkdf2-sha256, not ${JSON.stringify(v)}`);
+}
+
+/** null when the image can load a key file wrapped with `kdf`, else why not. */
+export function kdfImageRefusal(kdf, image = process.env.MANAGED_DB_MARIADB_IMAGE || 'mariadb:11.4') {
+  if (kdf.name === 'legacy') return null;
+  const m = /:(\d+)(?:\.|$|-)/.exec(String(image).split('@')[0]);
+  if (m && Number(m[1]) < PBKDF2_MIN_MARIADB_MAJOR) {
+    return `APPCRANE_TDE_KDF=${kdf.name} needs MariaDB ${PBKDF2_MIN_MARIADB_MAJOR}.0 or later, and the managed MariaDB image is ${image}. `
+      + `Set MANAGED_DB_MARIADB_IMAGE to a ${PBKDF2_MIN_MARIADB_MAJOR}.x image or unset APPCRANE_TDE_KDF.`;
+  }
+  return null;
+}
+
+/** True when keys.enc is (or would be) wrapped with the SHA-1 derivation. */
+export function keyFileUsesLegacyKdf(db) {
+  if (modeFor(getState(db)) === 'none') return false;
+  return keyFileKdf().name === 'legacy';
 }
 
 // OpenSSL's EVP_BytesToKey with SHA-1, one round — what the plugin uses to
@@ -213,17 +256,28 @@ function bytesToKey(secret, salt) {
   return { key: out.subarray(0, 32), iv: out.subarray(32, 48) };
 }
 
-/** `openssl enc -aes-256-cbc -md sha1` output: "Salted__" + salt + ciphertext. */
-export function wrapKeyFile(plain, secret) {
+// `openssl enc -pbkdf2 -md sha256 -iter N`: 48 bytes of PBKDF2 output split
+// into the AES-256 key and the IV.
+function pbkdf2ToKey(secret, salt, iterations) {
+  const out = crypto.pbkdf2Sync(Buffer.from(secret, 'utf8'), salt, iterations, 48, 'sha256');
+  return { key: out.subarray(0, 32), iv: out.subarray(32, 48) };
+}
+
+function deriveWrap(secret, salt, kdf) {
+  return kdf.name === 'legacy' ? bytesToKey(secret, salt) : pbkdf2ToKey(secret, salt, kdf.iterations);
+}
+
+/** `openssl enc -aes-256-cbc` output: "Salted__" + salt + ciphertext, SHA-1 or PBKDF2-SHA256 derived. */
+export function wrapKeyFile(plain, secret, kdf = { name: 'legacy' }) {
   const salt = crypto.randomBytes(8);
-  const { key, iv } = bytesToKey(secret, salt);
+  const { key, iv } = deriveWrap(secret, salt, kdf);
   const c = crypto.createCipheriv('aes-256-cbc', key, iv);
   return Buffer.concat([Buffer.from('Salted__'), salt, c.update(plain, 'utf8'), c.final()]);
 }
 
-export function unwrapKeyFile(buf, secret) {
+export function unwrapKeyFile(buf, secret, kdf = { name: 'legacy' }) {
   if (buf.subarray(0, 8).toString('latin1') !== 'Salted__') throw new Error('not a wrapped key file');
-  const { key, iv } = bytesToKey(secret, buf.subarray(8, 16));
+  const { key, iv } = deriveWrap(secret, buf.subarray(8, 16), kdf);
   const d = crypto.createDecipheriv('aes-256-cbc', key, iv);
   return Buffer.concat([d.update(buf.subarray(16)), d.final()]).toString('utf8');
 }
@@ -266,6 +320,9 @@ export function writeKeyFile(db) {
   if (isWithin(dir, dataVolumeDir()) || isWithin(dataVolumeDir(), dir)) {
     throw new Error(`managedDbEncryption: the key directory ${dir} overlaps the MariaDB data volume; refusing`);
   }
+  const kdf = keyFileKdf();
+  const refusal = kdfImageRefusal(kdf);
+  if (refusal) throw new Error(`managedDbEncryption: ${refusal}`);
   const hex = keyHex(db);
   if (!hex) {
     throw new Error('MariaDB encryption is in use but its key is missing from AppCrane\'s database. ' +
@@ -276,7 +333,7 @@ export function writeKeyFile(db) {
   privateDir(dir);
   const path = join(dir, KEY_FILE);
   const tmp = `${path}.tmp-${process.pid}`;
-  writeFileSync(tmp, wrapKeyFile(`${KEY_ID};${hex}\n`, fileKey()), { mode: 0o600 });
+  writeFileSync(tmp, wrapKeyFile(`${KEY_ID};${hex}\n`, fileKey(), kdf), { mode: 0o600 });
   chmodSync(tmp, 0o600);
   renameSync(tmp, path);
   return dir;
@@ -347,6 +404,12 @@ export function installSnippet() {
  * In decrypt mode the flags are the same with every *_encrypt_* OFF, and the
  * plugin stays loaded so the threads can read what they are decrypting.
  */
+/** The plugin options matching how keys.enc is wrapped; none for 'legacy'. */
+export function kdfServerArgs(kdf) {
+  if (kdf.name === 'legacy') return [];
+  return ['--file-key-management-digest=sha256', `--file-key-management-use-pbkdf2=${kdf.iterations}`];
+}
+
 export function serverArgs(mode) {
   if (mode === 'none') return [];
   if (mode !== 'encrypt' && mode !== 'decrypt') throw new Error(`managedDbEncryption: bad mode ${JSON.stringify(mode)}`);
@@ -357,6 +420,7 @@ export function serverArgs(mode) {
     `--file-key-management-filename=${KEY_RUNTIME_PATH}/${KEY_FILE}`,
     `--file-key-management-filekey=FILE:${KEY_RUNTIME_PATH}/filekey`,
     '--file-key-management-encryption-algorithm=AES_CTR',
+    ...kdfServerArgs(keyFileKdf()),
     `--innodb-encrypt-tables=${v}`,
     `--innodb-encrypt-log=${v}`,
     `--innodb-encrypt-temporary-tables=${v}`,

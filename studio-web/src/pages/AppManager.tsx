@@ -5,6 +5,12 @@ import { RedeployWarning, fetchRedeployRisk, type RedeployRisk } from '../compon
 import { StoredEnvFilesCard } from '../components/StoredEnvFilesCard'
 import { ManagedDatabaseCard } from '../components/ManagedDatabaseCard'
 import { BackupsCard } from '../components/BackupsCard'
+import { AccessRulesCard } from '../components/AccessRulesCard'
+import { IntakeCard } from '../components/intake/IntakeCard'
+import { ReleaseCheckPanel } from '../components/intake/ReleaseCheckPanel'
+import { LlmGatewayAppCard } from '../components/llm/LlmGatewayAppCard'
+import { AppMcpCard } from '../components/appMcp/AppMcpCard'
+import { AppTimeline } from '../components/events/AppTimeline'
 import { WhatsNewMailCard } from '../components/WhatsNewMailCard'
 import { EnvVarsPanel } from '../components/env/EnvVarsPanel'
 import { serverDate } from '../utils/serverDate'
@@ -1073,6 +1079,7 @@ export function AppManager() {
       setTimeout(() => setReloadCounter(c => c + 1), 3000)
     } catch (e) {
       showMsg({ text: (e as Error).message, ok: false })
+      setReloadCounter(c => c + 1)
     }
   }
 
@@ -1174,6 +1181,12 @@ export function AppManager() {
             <WhatsNewMailCard slug={currentApp} reload={reloadCounter} onMsg={showMsg} />
             <ManagedDatabaseCard slug={currentApp} reload={reloadCounter} onMsg={showMsg} />
             <BackupsCard slug={currentApp} env={currentEnv} reload={reloadCounter} onMsg={showMsg} />
+            <AccessRulesCard slug={currentApp} env={currentEnv} reload={reloadCounter} onMsg={showMsg} />
+            <IntakeCard slug={currentApp} onMsg={showMsg} />
+            <ReleaseCheckPanel slug={currentApp} reload={reloadCounter} onMsg={showMsg} />
+            <LlmGatewayAppCard slug={currentApp} isPlatformAdmin={isAdminUser} onMsg={showMsg} />
+            <AppMcpCard slug={currentApp} env={currentEnv} reload={reloadCounter} onMsg={showMsg} />
+            <AppTimeline slug={currentApp} />
             <DeployCard
               slug={currentApp}
               env={currentEnv}

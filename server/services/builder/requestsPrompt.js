@@ -5,19 +5,30 @@
 // together. Each request's text is fenced and labelled with its number so the
 // agent's report — and the changes — can be traced back to the request.
 
+import { stripInvisible } from '../coderRequestView.js';
+
 /** Most requests one dispatch may carry. One turn has one context window, and
  *  every request's changes land in the same change set the user reviews before
  *  releasing; past ten that review stops being something a person does. */
 export const MAX_DISPATCH_REQUESTS = 10;
 
-function requester(r) {
-  return r.user_name ? `filed by ${r.user_name}` : 'filed by an unknown user';
+export function requester(r) {
+  const name = stripInvisible(r.user_name).replace(/\s+/g, ' ').trim();
+  return name ? `filed by ${name}` : 'filed by an unknown user';
 }
 
 // A filer must not be able to end their own request early and write text that
 // reads as AppCrane's: a line opening with === inside a message is indented.
-function fenceSafe(message) {
-  return String(message ?? '').trim().replace(/^(\s*)===/gm, '$1 ===');
+export function fenceSafe(message) {
+  return stripInvisible(message).trim().replace(/^(\s*)===/gm, '$1 ===');
+}
+
+export function fencedRequest(r) {
+  return [
+    `=== Request #${r.id} (${requester(r)}${r.created_at ? `, ${r.created_at}` : ''}) ===`,
+    fenceSafe(r.message),
+    `=== End of request #${r.id} ===`,
+  ];
 }
 
 export function buildRequestsPrompt(requests) {
@@ -39,10 +50,6 @@ export function buildRequestsPrompt(requests) {
     '  Request #<id>: not done — <why>',
     '',
   ];
-  for (const r of requests) {
-    lines.push(`=== Request #${r.id} (${requester(r)}${r.created_at ? `, ${r.created_at}` : ''}) ===`);
-    lines.push(fenceSafe(r.message));
-    lines.push(`=== End of request #${r.id} ===`, '');
-  }
+  for (const r of requests) lines.push(...fencedRequest(r), '');
   return lines.join('\n').trimEnd();
 }

@@ -11,6 +11,7 @@ import { isAdmin } from '../utils/roles.js';
 import log from '../utils/logger.js';
 import { parseContainerCommand, parseVolumePaths, resolveVolumeMounts } from '../services/containerRuntimeSpec.js';
 import { assessRedeployRisk, ACK_PARAM } from '../services/redeployRisk.js';
+import { assertNoRestoreInProgress } from '../services/managedDbRestoreGuard.js';
 
 const router = Router();
 
@@ -118,6 +119,11 @@ router.post('/:slug/deploy/upload', requireAppAccess, auditMiddleware('deploy-up
       return res.status(409).json(refusal);
     }
 
+    if (env === 'production') {
+      const { assertProductionRelease, sendReleaseRefusal } = await import('../services/releaseCheck.js');
+      try { await assertProductionRelease({ app, userId: req.user.id, trigger: 'deploy-request' }); } catch (e) { try { unlinkSync(req.file.path); } catch (_) {} if (e.releaseCheck) return sendReleaseRefusal(res, e); return res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: e.message } }); }
+    }
+
     const declaredSha = (req.body?.commit_sha || '').slice(0, 40) || null;
     const commitMessage = (req.body?.commit_message || '').slice(0, 200) || null;
 
@@ -173,12 +179,18 @@ router.post('/:slug/deploy/:env', requireAppAccess, auditMiddleware('deploy'), a
   // this app+env (deploy-storm guard). Stale in-flight rows are reclaimed.
   const { assertNoInflightDeploy } = await import('../services/deployer.js');
   assertNoInflightDeploy(db, app.id, env, app.slug);
+  assertNoRestoreInProgress(app.slug, env);
 
   // v2.72.0: a redeploy that destroys state needs the caller to have SAID so.
   // Placed after the in-flight guard and before the deployments INSERT, so a
   // refused deploy leaves no row behind and no deploy-storm window open.
   const refusal = await refuseUnacknowledgedDataLoss(req, app, env);
   if (refusal) return res.status(409).json(refusal);
+
+  if (env === 'production') {
+    const { assertProductionRelease, sendReleaseRefusal } = await import('../services/releaseCheck.js');
+    try { await assertProductionRelease({ db, app, userId: req.user.id, trigger: 'deploy-request' }); } catch (e) { if (e.releaseCheck) return sendReleaseRefusal(res, e); throw e; }
+  }
 
   // No memory on the server for this container: 409 with the reason, recorded
   // as a failed deployment, the running version untouched.
@@ -274,6 +286,7 @@ router.post('/:slug/rollback/:env', requireAppAccess, auditMiddleware('rollback'
   if (!isAdmin(req.user) && roleForUserOnApp(req.user, req.app) !== 'owner') {
     throw new AppError('Only the app owner can roll back this app.', 403, 'FORBIDDEN');
   }
+  assertNoRestoreInProgress(req.app.slug, env);
   const { deployment_id } = req.body || {};
   const { rollbackApp } = await import('../services/deployer.js');
   const r = await rollbackApp(req.app, env, deployment_id, req.user.id);
@@ -298,8 +311,10 @@ router.post('/:slug/promote', requireAppAccess, auditMiddleware('promote'), asyn
   if (!isAdmin(req.user) && roleForUserOnApp(req.user, req.app) !== 'owner') {
     throw new AppError('Only the app owner can promote to production.', 403, 'FORBIDDEN');
   }
+  assertNoRestoreInProgress(req.app.slug, 'production');
   const { promoteApp } = await import('../services/deployer.js');
-  const r = await promoteApp(req.app, req.user.id);
+  const r = await promoteApp(req.app, req.user.id).catch((e) => { if (e.releaseCheck) return e; throw e; });
+  if (r instanceof Error) return (await import('../services/releaseCheck.js')).sendReleaseRefusal(res, r);
   res.status(r.status === 'pending' ? 202 : 200).json({
     message: `Promoting sandbox v${r.version || '?'} to production${r.mode === 'rebuild' ? ' (fresh build)' : ''}`,
     deployment: { id: r.deployment_id, from_sandbox: r.from_sandbox, status: r.status },
@@ -322,6 +337,7 @@ router.post('/:slug/restart/:env', requireAppAccess, auditMiddleware('restart'),
   if (env === 'production' && !userHasAppPermission(req.user, req.app, 'deploy.production')) {
     throw new AppError('Restarting production requires the deploy.production permission for this app', 403, 'FORBIDDEN');
   }
+  assertNoRestoreInProgress(req.app.slug, env);
 
   const db = getDb();
   const app = req.app;
@@ -436,6 +452,7 @@ router.post('/:slug/restart/:env', requireAppAccess, auditMiddleware('restart'),
   }
 
   Object.assign(runtimeEnvVars, carried);
+  Object.assign(runtimeEnvVars, (await import('../services/llmGateway/env.js')).llmGatewayEnv(app, env));
 
   // v2.97.0: the identity-signing secret, for THIS environment, exactly as the
   // deploy path injects it. Restart rebuilds the whole environment, so leaving

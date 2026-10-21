@@ -1,4 +1,16 @@
 {
+  "2.115.0": [
+    "SOC 2 controls: two-factor sign-in for password logins (required for platform admins by default), shorter session and idle timeouts for admins, periodic access reviews, a tamper-evident audit chain, weekly restore drills with RPO/RTO, and a signed compliance evidence pack.",
+    "FIPS 140-3 mode: AppCrane can refuse to start without a FIPS provider, passwords move to PBKDF2-HMAC-SHA256 at each user's next sign-in, S3 deletes use SHA-256 checksums, and Settings shows the cryptography status.",
+    "New apps answer a security intake with a data classification, every production deploy passes a release check, Adopt an app brings Lovable, Bolt, v0, Replit or Figma Make projects onto a sandbox, and Caddy, SSH and AppCrane now keep CPU under load (builds and databases are capped, CPU admission joins memory admission).",
+    "Stream events to your SIEM, give apps an LLM gateway, turn an app's features into MCP tools, let agents delete apps, read audit trails and upload large files in resumable chunks, and security fixes for MCP OAuth, off-site backups, path role rules and request text the coder reads."
+  ],
+  "2.114.0": [
+    "A new Events timeline joins the audit log, deploys, scan findings, browser errors, job failures, server alerts and sign-ins, per app and per person, kept 30 / 90 / 365 days by severity.",
+    "Apps can declare path role rules (in deployhub.json or on the Manage page) that AppCrane enforces before a request reaches the app, and a person can have only one open access request per app.",
+    "API keys now expire after 90 days with e-mail warnings and one-click rotation, and a new \"MCP: OAuth only\" setting makes MCP clients sign in with OAuth.",
+    "Restoring a backup or database stops the app first and starts it again afterwards; off-site S3/R2 backups now include app repositories, upload in parts, keep 7 daily / 4 weekly / 6 monthly copies, verify every file, and can be encrypted, listed and restored."
+  ],
   "2.113.0": [
     "When the server is short on memory, platform admins are alerted about deploys, coder sessions and new databases that would over-commit it (or, if they choose, those are refused with a \"try again later\" message), and app containers are killed before AppCrane under memory pressure.",
     "Job Health now watches server memory and disk and e-mails platform admins when either runs low.",

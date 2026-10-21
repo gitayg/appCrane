@@ -23,6 +23,7 @@
 
 import { bucketize } from './requestStatus.js';
 import log from '../utils/logger.js';
+import { recordScanEvents } from './eventStore.js';
 
 export const VULN_REQUESTER = 'AppCrane dependency scan';
 const SUCCESSFUL = ['ok', 'findings'];
@@ -134,6 +135,7 @@ export function syncVulnRequests(db, app, scan) {
     const opened = openVulnRequests(db, app, scan.env, scan.source, findings);
     const closed = closeResolvedVulnRequests(db, app);
     if (opened || closed) log.info(`[vuln-requests] ${app.slug}/${scan.env}: opened ${opened}, closed ${closed}`);
+    recordScanEvents(app, scan, opened, closed);
     return { opened, closed };
   } catch (e) {
     log.warn(`[vuln-requests] ${app.slug}/${scan.env}: could not update requests: ${e.message}`);

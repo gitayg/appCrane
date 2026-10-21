@@ -14,6 +14,7 @@ import { prepareClaudeCredentialsMount } from '../claudeCredentials.js';
 import log from '../../utils/logger.js';
 import { jobStarted, trackJobSync } from '../jobHealth.js';
 import { OOM_APP_FLAG } from '../oomPriority.js';
+import { CPU_APP_FLAG } from '../cpuPriority.js';
 import { admitContainer, reserveMemory } from '../memoryAdmission.js';
 
 const STUDIO_IMAGE  = process.env.APPSTUDIO_IMAGE || 'appcrane-studio:latest';
@@ -276,6 +277,7 @@ function startContainer(slug, workspaceDir, onLog) {
     '--label', 'appcrane.container.type=app',
     '--label', `app.slug=${slug}`,
     OOM_APP_FLAG,
+    CPU_APP_FLAG,
     '--memory=2g', '--cpus=1',
     '--cap-drop=ALL',
     '--security-opt', 'no-new-privileges:true',
@@ -338,7 +340,7 @@ export async function getOrCreate(app, onLog, { userId = null } = {}) {
   const promise = (async () => {
     const name = containerNameFor(slug);
     await admitContainer({
-      name, memoryMb: CODER_MEMORY_MB, kind: 'coder', slug, appId: app.id ?? null, userId,
+      name, memoryMb: CODER_MEMORY_MB, cpus: 1, kind: 'coder', slug, appId: app.id ?? null, userId,
       what: 'coder session', subject: `the coder for ${slug}`,
     });
     await ensureStudioImage(onLog);

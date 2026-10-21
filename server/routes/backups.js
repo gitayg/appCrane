@@ -9,6 +9,9 @@ import { existsSync, mkdirSync, statSync, mkdtempSync, rmSync } from 'fs';
 import { join, resolve, sep } from 'path';
 import { managedDbScopeFor, SANDBOX_TENANT, envForTenant } from '../services/sandboxDb.js';
 import { dumpScope, restoreDatabase, rowsForScope } from '../services/managedDbBackup.js';
+import { runWithAppStopped, envsForRestore, restoreStatus, describeSteps } from '../services/managedDbRestoreGuard.js';
+import { logAudit } from '../middleware/audit.js';
+import { isPlatformAdmin } from '../utils/roles.js';
 
 const router = Router();
 
@@ -204,39 +207,85 @@ router.post('/:slug/restore/:id', requireAppUser, auditMiddleware('backup-restor
     }
   }
 
+  // The app keeps running unless a platform admin says it tolerates a restore underneath it.
+  const keepRunning = (req.body || {}).keep_running === true;
+  if (keepRunning && !isPlatformAdmin(req.user)) {
+    throw new AppError('Only a platform admin can restore without stopping the app', 403, 'FORBIDDEN');
+  }
+
   const targetDir = join(dataDir, 'apps', req.app.slug, backup.env, 'shared', 'data');
   mkdirSync(targetDir, { recursive: true });
 
-  try {
-    // TODO: Stop app before restore
-    execFileSync('tar', ['-xzf', backup.file_path, '-C', targetDir], { timeout: 120000, stdio: 'pipe' });
-    // TODO: Restart app after restore
-  } catch (e) {
-    throw new AppError(`Restore failed: ${e.message}`, 500, 'RESTORE_FAILED');
-  }
-
-  const restored = [];
-  if (includeDb) {
-    for (const d of databases) {
-      try {
-        // appId is THIS app, always; restoreDatabase refuses a dump whose
-        // database is not this app's (cross-app), on the server.
-        restored.push(await restoreDatabase(
-          { appId: req.app.id, tenant: d.tenant || '', engine: d.engine, expectDbName: d.db_name },
-          resolve(d.file), { ops: dbOps },
-        ));
-      } catch (e) {
-        if (e.code === 'CROSS_APP_RESTORE') throw new AppError(e.message, 403, 'CROSS_APP_RESTORE');
-        throw new AppError(`Database restore failed (${d.engine}): ${e.message}`, e.status || 500, 'RESTORE_FAILED');
-      }
-    }
-  }
-
-  res.json({
-    message: `Restored backup #${backup.id} to ${req.app.slug} ${backup.env}`
-      + (restored.length ? `, including the ${restored.map((r) => r.engine).join(', ')} database` : ''),
-    databases_restored: restored,
+  const envs = envsForRestore(req.app.id, { env: backup.env, tenants: includeDb ? databases.map((d) => d.tenant || '') : [] });
+  const audit = (outcome, steps) => logAudit(req.user.id, req.app.id, 'restore-run', {
+    backup_id: backup.id, env: backup.env, envs, keep_running: keepRunning, outcome, steps,
   });
+  let run;
+  try {
+    run = await runWithAppStopped({ app: req.app, envs, keepRunning }, async () => {
+      try {
+        execFileSync('tar', ['-xzf', backup.file_path, '-C', targetDir], { timeout: 120000, stdio: 'pipe' });
+      } catch (e) {
+        throw new AppError(`Restore failed: ${e.message}`, 500, 'RESTORE_FAILED');
+      }
+      const restored = [];
+      if (includeDb) {
+        for (const d of databases) {
+          try {
+            // appId is THIS app, always; restoreDatabase refuses a dump whose
+            // database is not this app's (cross-app), on the server.
+            restored.push(await restoreDatabase(
+              { appId: req.app.id, tenant: d.tenant || '', engine: d.engine, expectDbName: d.db_name },
+              resolve(d.file), { ops: dbOps },
+            ));
+          } catch (e) {
+            if (e.code === 'CROSS_APP_RESTORE') throw new AppError(e.message, 403, 'CROSS_APP_RESTORE');
+            throw new AppError(`Database restore failed (${d.engine}): ${e.message}`, e.status || 500, 'RESTORE_FAILED');
+          }
+        }
+      }
+      return restored;
+    });
+  } catch (e) {
+    if (!e.restoreSteps) throw e;
+    audit('failed', e.restoreSteps);
+    const notStarted = e.startFailures.map((f) => f.env);
+    return res.status(e.status || 500).json({
+      error: {
+        code: e.code || 'RESTORE_FAILED',
+        message: e.message + (notStarted.length ? ` The app (${notStarted.join(', ')}) also did not start again; start it from the app page or redeploy.` : ''),
+      },
+      steps: e.restoreSteps,
+    });
+  }
+
+  const restored = run.result;
+  const message = `Restored backup #${backup.id} to ${req.app.slug} ${backup.env}`
+    + (restored.length ? `, including the ${restored.map((r) => r.engine).join(', ')} database` : '');
+  if (run.startFailures.length) {
+    audit('restored-app-not-started', run.steps);
+    return res.status(500).json({
+      error: {
+        code: 'APP_START_FAILED',
+        message: `${message}, but the app (${run.startFailures.map((f) => `${f.env}: ${f.error}`).join('; ')}) did not start again. Start it from the app page or redeploy.`,
+      },
+      databases_restored: restored,
+      steps: run.steps,
+    });
+  }
+  audit('ok', run.steps);
+  res.json({
+    message: `${message} (${describeSteps(run.steps)})`,
+    databases_restored: restored,
+    steps: run.steps,
+  });
+});
+
+/**
+ * GET /api/apps/:slug/restore-status - What a running restore is doing, for the restore UI.
+ */
+router.get('/:slug/restore-status', requireAppUser, (req, res) => {
+  res.json(restoreStatus(req.app.slug));
 });
 
 /**

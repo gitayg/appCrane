@@ -13,10 +13,20 @@ interface Thresholds {
 interface Resource {
   id: string; label: string; level: Level; error?: string
   freeBytes?: number; totalBytes?: number; committedBytes?: number; capacityBytes?: number
+  detail?: string | null
+}
+
+interface CpuInfo {
+  cores: number; cores_source: 'docker' | 'os'; reserve_cores: number; reserve_source: string
+  capacity_cores: number; committed_cores: number; error: string | null
+  uncapped: string[]; unweighted: string[]
+  host_priority: { status: string; reason?: string; units?: string[] } | null
+  builds: { enforced: boolean | null; detail: string; cpus: number; memory_mb: number }
 }
 
 interface Capacity {
-  settings: { mode: Mode; reserveMb: number | null; thresholds: Thresholds }
+  settings: { mode: Mode; reserveMb: number | null; cpu: { mode: Mode; reserveCores: number | null }; thresholds: Thresholds }
+  cpu: CpuInfo
   memory: {
     total_mb: number; total_source: 'docker' | 'os'; reserve_mb: number; reserve_source: string
     capacity_mb: number; committed_mb: number; error: string | null
@@ -41,6 +51,7 @@ function gb(bytes?: number) {
 function resourceText(r: Resource) {
   if (r.level === 'unknown') return `unknown${r.error ? ` (${r.error})` : ''}`
   if (r.id === 'committed') return `${gb(r.committedBytes)} of ${gb(r.capacityBytes)}`
+  if (r.id === 'cpu-priority') return r.detail || 'in force'
   const pct = r.totalBytes ? ((r.freeBytes! / r.totalBytes) * 100).toFixed(1) : '?'
   return `${gb(r.freeBytes)} of ${gb(r.totalBytes)} (${pct}%)`
 }
@@ -50,6 +61,8 @@ export function ServerCapacity() {
   const [error, setError] = useState<string | null>(null)
   const [mode, setMode] = useState<Mode>('refuse')
   const [reserve, setReserve] = useState('')
+  const [cpuMode, setCpuMode] = useState<Mode>('warn')
+  const [cpuReserve, setCpuReserve] = useState('')
   const [thresholds, setThresholds] = useState<Thresholds | null>(null)
   const [saved, flashSaved] = useFlash()
 
@@ -59,6 +72,8 @@ export function ServerCapacity() {
         setData(r); setError(null)
         setMode(r.settings.mode)
         setReserve(r.settings.reserveMb == null ? '' : String(r.settings.reserveMb))
+        setCpuMode(r.settings.cpu.mode)
+        setCpuReserve(r.settings.cpu.reserveCores == null ? '' : String(r.settings.cpu.reserveCores))
         setThresholds(r.settings.thresholds)
       })
       .catch(e => setError(e instanceof Error ? e.message : String(e)))
@@ -71,6 +86,8 @@ export function ServerCapacity() {
       await adminApi.put('/api/settings/server-capacity', {
         mode,
         reserve_mb: reserve.trim() === '' ? null : Number(reserve),
+        cpu_mode: cpuMode,
+        cpu_reserve_cores: cpuReserve.trim() === '' ? null : Number(cpuReserve),
         thresholds,
       })
       flashSaved()
@@ -83,6 +100,8 @@ export function ServerCapacity() {
   const m = data?.memory
   const pct = m && m.capacity_mb > 0 ? Math.round((m.committed_mb / m.capacity_mb) * 100) : 0
   const over = !!m && m.committed_mb > m.capacity_mb
+  const c = data?.cpu
+  const hp = c?.host_priority
 
   return (
     <div style={{ marginBottom: 28 }}>
@@ -126,6 +145,36 @@ export function ServerCapacity() {
           )}
         </>
       )}
+      {c && (
+        <div style={{ marginTop: 10, fontSize: '.85rem' }}>
+          <p style={{ fontWeight: 600, margin: '6px 0', color: c.error ? 'var(--dim)' : c.committed_cores > c.capacity_cores ? 'var(--orange)' : 'var(--green)' }}>
+            {c.error ? `CPU committed: unknown (${c.error})` : `CPU committed: ${c.committed_cores} of ${c.capacity_cores} cores`}
+          </p>
+          <p style={{ color: 'var(--dim)', fontSize: '.78rem', margin: '0 0 6px' }}>
+            {c.cores} cores {c.cores_source === 'docker' ? 'reported by Docker' : 'on this machine'} minus a {c.reserve_cores} core reserve
+            ({c.reserve_source === 'setting' ? 'set below' : 'default: 0.5 core or 25%, whichever is larger'}).
+            {c.uncapped.length > 0 && ` Not counted, no CPU cap: ${c.uncapped.join(', ')}.`}
+          </p>
+          <ul style={{ margin: 0, paddingLeft: 18 }}>
+            <li>
+              Host services (Caddy, SSH, AppCrane) CPU weight:{' '}
+              {!hp ? 'not checked yet'
+                : hp.status === 'set' || hp.status === 'already' ? `in force (${(hp.units || []).join(', ')})`
+                : hp.status === 'unsupported' ? `not applicable (${hp.reason})`
+                : <span style={{ color: 'var(--orange)' }}>not applied: {hp.reason}</span>}
+            </li>
+            <li>
+              Container CPU weight:{' '}
+              {c.unweighted.length === 0 ? 'every AppCrane container has it'
+                : <span style={{ color: 'var(--orange)' }}>missing until recreated on {c.unweighted.join(', ')}</span>}
+            </li>
+            <li>
+              Builds: {c.builds.cpus} CPU, {c.builds.memory_mb} MB.{' '}
+              <span style={{ color: c.builds.enforced === false ? 'var(--orange)' : 'inherit' }}>{c.builds.detail}</span>
+            </li>
+          </ul>
+        </div>
+      )}
       {data?.host && (
         <ul style={{ margin: '10px 0 0', paddingLeft: 18, fontSize: '.85rem' }}>
           {data.host.resources.map(r => (
@@ -146,6 +195,14 @@ export function ServerCapacity() {
           </select>
           <label htmlFor="mem-reserve">Reserve for the host, MB (blank for the default)</label>
           <input id="mem-reserve" type="number" min={0} value={reserve} onChange={e => setReserve(e.target.value)} />
+          <label htmlFor="cpu-admission-mode">When a start does not fit the CPU</label>
+          <select id="cpu-admission-mode" value={cpuMode} onChange={e => setCpuMode(e.target.value as Mode)}>
+            <option value="refuse">Refuse it (the running version keeps serving)</option>
+            <option value="warn">Start it and e-mail platform admins</option>
+            <option value="off">Off (no check)</option>
+          </select>
+          <label htmlFor="cpu-reserve">CPU reserve for the host, cores (blank for the default)</label>
+          <input id="cpu-reserve" type="number" min={0} step={0.25} value={cpuReserve} onChange={e => setCpuReserve(e.target.value)} />
           {thresholds && (
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(190px, 1fr))', gap: 8, marginTop: 8 }}>
               {THRESHOLD_FIELDS.map(([k, label]) => (

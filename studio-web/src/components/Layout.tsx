@@ -97,12 +97,14 @@ const NAV: NavItem[] = [
   { id: 'launch',       label: 'Launch',       href: '/launch',       icon: <Icon.Grid /> },
   { id: 'dashboard',    label: 'Dashboard',    href: '/dashboard',    icon: <Icon.Dashboard /> },
   { id: 'applications', label: 'Manage',       href: '/applications', icon: <Icon.Layers /> },
+  { id: 'adopt',        label: 'Adopt an app', href: '/adopt',        icon: <Icon.Plus /> },
   { id: 'requests',     label: 'Requests',     href: '/requests',     icon: <Icon.Lightbulb /> },
   // v2.105.0: Crew — the platform-wide agent hub. Ungated: every person can
   // own agents, and the API scopes every row to the caller (the roster is
   // platform-wide by design, decisions and blocks are the caller's own).
   { id: 'crew',         label: 'Crew',         href: '/crew',         icon: <Icon.Users /> },
   { id: 'tasks',        label: 'My tasks',     href: '/tasks',        icon: <Icon.Check /> },
+  { id: 'access-reviews', label: 'My reviews', href: '/access-reviews', icon: <Icon.ShieldCheck /> },
   // v2.59.x: the app catalogue. Deliberately ungated — every logged-in user
   // may browse it; only the per-row Deploy button is conditioned on
   // `platform.create_app`, which the page learns from GET /api/catalog.
@@ -115,8 +117,13 @@ const NAV: NavItem[] = [
   // client-side role test can predict who it will answer usefully — the page
   // says "no audit entries you can see" instead.
   { id: 'audit',        label: 'Audit',        href: '/audit',        icon: <Icon.ShieldCheck /> },
+  // Ungated like Audit: platform admins get every event, others fall back to their own activity.
+  { id: 'events',       label: 'Events',       href: '/events',       icon: <Icon.Activity /> },
   // Ungated like Audit: the surveys API answers non-owners with 403 and the page explains.
   { id: 'surveys',      label: 'NPS & surveys', href: '/surveys',     icon: <Icon.Activity /> },
+  { id: 'intake',       label: 'Intake',       href: '/intake',       icon: <Icon.ShieldCheck />, platformAdminOnly: true },
+  { id: 'access-review-campaigns', label: 'Access reviews', href: '/access-reviews/campaigns', icon: <Icon.ShieldCheck />, platformAdminOnly: true },
+  { id: 'audit-integrity', label: 'Audit integrity', href: '/audit-integrity', icon: <Icon.ShieldCheck />, platformAdminOnly: true },
   { id: 'docs',         label: 'Docs',         href: '/docs',         icon: <Icon.Book /> },
   { id: 'settings',     label: 'Settings',     href: '/settings',     icon: <Icon.Settings /> },
 ]

@@ -9,6 +9,7 @@ interface Connection {
   read_only: boolean
   created_at: string
   last_used_at: string | null
+  expires_at: string
 }
 
 /**
@@ -44,6 +45,8 @@ export function OAuthConnections({ endpoint }: { endpoint: string }) {
         MCP clients that support OAuth (Claude.ai connectors, Claude Code) can connect with a browser sign-in instead
         of a key. Add <code style={code}>{endpoint}</code> with no key; your browser opens, you sign in and approve.
         The connection reaches the same apps a personal key does, and you can make it read-only when you approve.
+        Each connection ends on its expiry date (the API key window) and has to be approved again; changing your
+        password or rotating your API key ends all of them.
       </p>
       <pre style={{ ...code, background: 'var(--surface2)', padding: '8px 10px', borderRadius: 6, overflowX: 'auto', margin: '0 0 12px' }}>
         {`claude mcp add --transport http appcrane ${endpoint}`}
@@ -59,6 +62,7 @@ export function OAuthConnections({ endpoint }: { endpoint: string }) {
               <th style={{ padding: '4px 6px' }}>Returns to</th>
               <th style={{ padding: '4px 6px' }}>Access</th>
               <th style={{ padding: '4px 6px' }}>Last used</th>
+              <th style={{ padding: '4px 6px' }}>Expires</th>
               <th />
             </tr>
           </thead>
@@ -69,6 +73,7 @@ export function OAuthConnections({ endpoint }: { endpoint: string }) {
                 <td style={{ padding: '6px', ...code }}>{c.redirect_hosts.join(', ')}</td>
                 <td style={{ padding: '6px' }}>{c.read_only ? 'Read-only' : 'Full'}</td>
                 <td style={{ padding: '6px' }}>{c.last_used_at || 'never'}</td>
+                <td style={{ padding: '6px' }}>{c.expires_at.slice(0, 10)}</td>
                 <td style={{ padding: '6px', textAlign: 'right' }}>
                   <button type="button" className="btn btn-xs btn-danger" onClick={() => revoke(c)}>Revoke</button>
                 </td>

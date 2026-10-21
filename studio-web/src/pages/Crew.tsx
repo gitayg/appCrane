@@ -75,7 +75,7 @@ interface RuleRow {
 type TaskDecision = 'approve' | 'approve_always' | 'reply' | 'decline'
 
 interface BlockRow { id: number; agent: string; owner: string; created_at: string; refused_since: number }
-interface TokenRow { agent: string; hint: string; created_at: string; last_used_at: string | null }
+interface TokenRow { agent: string; hint: string; created_at: string; last_used_at: string | null; expires_at?: string | null }
 interface RefusedRow { connection_id: number; agent: string; owner: string; decided_at: string | null }
 
 type Tab = 'roster' | 'log' | 'map' | 'agents' | 'rules'
@@ -379,7 +379,7 @@ function AgentsTab({ mine, tokens, onChanged, setError }: { mine: RosterRow[]; t
                       <td style={dim}>{when(a.last_seen_at)}</td>
                       <td style={dim}>
                         {t
-                          ? <span title={`Issued ${serverDate(t.created_at).toLocaleString()}`}><span style={mono}>dhk_crew_{t.hint}...</span>{t.last_used_at ? `, used ${when(t.last_used_at)}` : ', never used'}</span>
+                          ? <span title={`Issued ${serverDate(t.created_at).toLocaleString()}`}><span style={mono}>dhk_crew_{t.hint}...</span>{t.last_used_at ? `, used ${when(t.last_used_at)}` : ', never used'}{t.expires_at ? `, expires ${serverDate(t.expires_at).toLocaleDateString()}` : ''}</span>
                           : 'none'}
                       </td>
                       <td style={{ whiteSpace: 'nowrap' }}>

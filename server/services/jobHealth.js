@@ -1,6 +1,7 @@
 import { getDb } from '../db.js';
 import log from '../utils/logger.js';
 import { stripUrlCredentials } from './gitCredentialScrub.js';
+import { recordJobEvent } from './eventStore.js';
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -29,6 +30,11 @@ export const JOBS = {
   'coder-idle-sweep': { label: 'Idle coder container sweep',        cadenceMs: 5 * MIN },
   'host-resources':   { label: 'Server memory and disk check',      cadenceMs: 5 * MIN },
   'whats-new-mail':   { label: "What's New mail (once per release)", cadenceMs: null },
+  'event-retention':  { label: 'Event store retention',             cadenceMs: DAY },
+  'api-key-expiry':   { label: 'API key expiry sweep and warnings', cadenceMs: 5 * MIN },
+  'audit-chain':      { label: 'Audit chain sealer and verifier',   cadenceMs: 5 * MIN },
+  'restore-drill':    { label: 'Scheduled restore drill',           cadenceMs: 7 * DAY },
+  'access-reviews':   { label: 'Access review campaigns and reminders', cadenceMs: 60 * MIN },
 };
 
 const started = new Map();
@@ -170,6 +176,7 @@ function record(id, { startedAt, finishedAt, error }) {
   if (alertsEnabled && !ok && prev?.ok !== false) {
     try { alertAdmins(id, 'failing', entry.error); } catch (_) {}
   }
+  recordJobEvent(id, JOBS[id]?.label, prev?.ok, entry);
 }
 
 function persist(id, entry) {
@@ -290,6 +297,7 @@ export function enableJobHealthAlerts() {
 export function alertOnUnhealthy(now = Date.now()) {
   for (const j of getJobHealth(now)) {
     if (j.status === 'late') alertAdmins(j.id, 'late', null);
+    if (j.status === 'late') recordJobEvent(j.id, j.label, null, 'late');
   }
 }
 

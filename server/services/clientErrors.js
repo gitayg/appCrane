@@ -1,5 +1,6 @@
 import { createHash } from 'crypto';
 import { getDb } from '../db.js';
+import { recordClientErrorEvent } from './eventStore.js';
 
 // Browser error reports (POST /api/client-errors), aggregated by fingerprint.
 // Everything that reaches the table has been through scrub() here, whatever
@@ -103,7 +104,7 @@ export function recordClientError(report, userId = null) {
   const db = getDb();
   maybePrune();
   const fingerprint = fingerprintOf(report.message, report.stack);
-  const existing = db.prepare('SELECT id, pages, versions FROM client_errors WHERE fingerprint = ?').get(fingerprint);
+  const existing = db.prepare('SELECT id, count, pages, versions FROM client_errors WHERE fingerprint = ?').get(fingerprint);
   if (existing) {
     db.prepare(`
       UPDATE client_errors
@@ -118,9 +119,10 @@ export function recordClientError(report, userId = null) {
       pushCapped(existing.versions, report.version, LIMITS.listedVersions),
       report.userAgent, userId, report.appSlug, report.stack, existing.id,
     );
+    recordClientErrorEvent(existing.id, report, existing.count + 1, userId);
     return { fingerprint, created: false };
   }
-  db.prepare(`
+  const inserted = db.prepare(`
     INSERT INTO client_errors (fingerprint, message, stack, source, last_page, pages, versions, user_agent, last_user_id, app_slug)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
@@ -133,6 +135,7 @@ export function recordClientError(report, userId = null) {
   if (over > 0) {
     db.prepare('DELETE FROM client_errors WHERE id IN (SELECT id FROM client_errors ORDER BY last_seen ASC, id ASC LIMIT ?)').run(over);
   }
+  recordClientErrorEvent(inserted.lastInsertRowid, report, 1, userId);
   return { fingerprint, created: true };
 }
 

@@ -25,7 +25,10 @@ import { resolve } from 'path';
 import { getDb } from '../db.js';
 import { jobStarted, trackJob, setJobDetail } from './jobHealth.js';
 import { measureMemory } from './memoryAdmission.js';
+import { measureCpu, peekCpuMeasurement, containersWithoutWeight } from './cpuAdmission.js';
+import { getHostCpuPriority } from './cpuPriority.js';
 import { enqueueEmail } from './emailQueue.js';
+import { recordHostEvent } from './eventStore.js';
 import { dashboardBaseUrl } from './vulnRequests.js';
 import { BRAND, bulletList, renderBrandedEmail } from './mail/brandedLayout.js';
 import log from '../utils/logger.js';
@@ -90,6 +93,8 @@ const DEFAULT_DEPS = {
   freemem, totalmem,
   dockerRootDir,
   measure: () => measureMemory(),
+  hostCpuPriority: () => getHostCpuPriority(),
+  cpuMeasurement: () => peekCpuMeasurement(),
   dataDir: () => resolve(process.env.DATA_DIR || './data'),
 };
 
@@ -127,6 +132,34 @@ async function sampleCommitted(deps) {
   }
 }
 
+// CPU reservation: did the host services get their CPUWeight drop-in
+// (cpuPriority.js), and do AppCrane's running containers carry the low
+// --cpu-shares weight? Shown in Job Health, never mailed: a non-root install
+// stays in this state until an operator acts, and the README says how.
+export function sampleCpuPriority(deps) {
+  const label = 'CPU reservation for host services';
+  let host = null;
+  let m = null;
+  try { host = deps.hostCpuPriority(); m = deps.cpuMeasurement(); } catch (e) {
+    return { id: 'cpu-priority', label, level: 'unknown', notify: false, error: e.message };
+  }
+  const unweighted = m && !m.error ? containersWithoutWeight(m).map((c) => c.label) : null;
+  const hostOk = host && (host.status === 'set' || host.status === 'already');
+  const hostBad = host && (host.status === 'not-permitted' || host.status === 'failed');
+  if (!host && unweighted === null) return { id: 'cpu-priority', label, level: 'unknown', notify: false, error: 'not measured yet' };
+  const problems = [];
+  if (hostBad) problems.push(`host services have no CPUWeight drop-in (${host.reason})`);
+  if (host?.status === 'unsupported') problems.push(`drop-in not applicable: ${host.reason}`);
+  if (unweighted?.length) problems.push(`${unweighted.length} AppCrane container(s) still run at Docker's default CPU weight until recreated: ${unweighted.slice(0, 5).join(', ')}`);
+  return {
+    id: 'cpu-priority', label, notify: false,
+    level: hostBad || unweighted?.length ? 'warning' : (hostOk || host?.status === 'unsupported' ? 'ok' : 'unknown'),
+    host: host ? { status: host.status, units: host.units || [], reason: host.reason || null, at: host.at } : null,
+    unweighted, committedCores: m && !m.error ? m.committedCores : null, capacityCores: m && !m.error ? m.capacityCores : null,
+    detail: problems.join('; ') || null,
+  };
+}
+
 async function sampleDisks(deps, t) {
   let dockerDir = null;
   try { dockerDir = await deps.dockerRootDir(); } catch (_) {}
@@ -162,7 +195,7 @@ const RANK = { ok: 0, unknown: 0, warning: 1, critical: 2 };
 export async function sampleHost(deps = {}, db = getDb()) {
   const d = { ...DEFAULT_DEPS, ...deps };
   const t = getThresholds(db);
-  const resources = [sampleMemory(d, t), await sampleCommitted(d), ...(await sampleDisks(d, t))];
+  const resources = [sampleMemory(d, t), await sampleCommitted(d), ...(await sampleDisks(d, t)), sampleCpuPriority(d)];
   const worst = resources.reduce((w, r) => (RANK[r.level] > RANK[w] ? r.level : w), 'ok');
   const overall = worst === 'ok' && resources.every((r) => r.level === 'unknown') ? 'unknown' : worst;
   return { at: new Date().toISOString(), overall, thresholds: t, resources };
@@ -175,6 +208,7 @@ function fmt(bytes) {
 export function describeResource(r) {
   if (r.level === 'unknown') return `${r.label}: unknown${r.error ? ` (${r.error})` : ''}`;
   if (r.id === 'committed') return `${r.label}: ${fmt(r.committedBytes)} of ${fmt(r.capacityBytes)} capacity`;
+  if (r.id === 'cpu-priority') return `${r.label}: ${r.detail || 'in force'}`;
   const pct = ((r.freeBytes / r.totalBytes) * 100).toFixed(1);
   return `${r.label}: ${fmt(r.freeBytes)} of ${fmt(r.totalBytes)} (${pct}%)`;
 }
@@ -229,8 +263,9 @@ export async function runHostCheck({ deps = {}, now = Date.now(), db = getDb() }
   setJobDetail('host-resources', sample);
   const mailed = [];
   for (const r of sample.resources) {
-    if (r.level === 'unknown') continue;
+    if (r.level === 'unknown' || r.notify === false) continue;
     const prev = previous.get(r.id);
+    recordHostEvent(r, prev);
     try {
       if (r.level === 'warning' || r.level === 'critical') {
         const to = mail(db, r, r.level, now);
@@ -254,7 +289,7 @@ export function getLastHostSample() {
 export function startHostResourceMonitor() {
   if (timer) return;
   jobStarted('host-resources');
-  const tick = () => trackJob('host-resources', () => runHostCheck()).catch((e) => log.warn(`[host-resources] ${e.message}`));
+  const tick = () => trackJob('host-resources', async () => { await measureCpu(); return runHostCheck(); }).catch((e) => log.warn(`[host-resources] ${e.message}`));
   setTimeout(tick, 30_000).unref?.();
   timer = setInterval(tick, SAMPLE_MS);
   timer.unref?.();

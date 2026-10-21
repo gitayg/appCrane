@@ -15,6 +15,8 @@ import { notifyRequesterFulfilled, notifyAppAdminsOfNewRequest, notifyPlatformAd
 
 const router = Router();
 
+const ACCESS_REQUEST_RE = /^Access request for app/i;
+
 const VALID_STATUSES = ['new', 'selected', 'planning', 'in_progress', 'done', 'no_changes_needed'];
 
 function noteFromBody(body) {
@@ -74,10 +76,32 @@ router.post('/', (req, res) => {
   }
 
   const db = getDb();
-  const { lastInsertRowid } = db.prepare(`
-    INSERT INTO enhancement_requests (app_slug, user_id, user_name, message, status)
-    VALUES (?, ?, ?, ?, 'new')
-  `).run(app_slug || null, userId, userName, message.trim());
+  // One open access request per person per app. The pre-check gives the usual
+  // answer; the unique index from migration 135 settles two requests racing.
+  const kind = ACCESS_REQUEST_RE.test(message.trim()) ? 'access' : null;
+  const openAccessRequest = () => db.prepare(`
+    SELECT id FROM enhancement_requests
+    WHERE user_id = ? AND app_slug = ? AND kind = 'access' AND status != 'done'
+  `).get(userId, app_slug);
+  const refuseDuplicate = (id) => res.status(409).json({
+    error: { code: 'DUPLICATE_ACCESS_REQUEST', message: 'You already have an open access request for this app.' },
+    enhancement_id: id,
+  });
+  if (kind && app_slug) {
+    const existing = openAccessRequest();
+    if (existing) return refuseDuplicate(existing.id);
+  }
+  let lastInsertRowid;
+  try {
+    ({ lastInsertRowid } = db.prepare(`
+      INSERT INTO enhancement_requests (app_slug, user_id, user_name, message, status, kind)
+      VALUES (?, ?, ?, ?, 'new', ?)
+    `).run(app_slug || null, userId, userName, message.trim(), kind));
+  } catch (e) {
+    const existing = kind && app_slug && e.code === 'SQLITE_CONSTRAINT_UNIQUE' ? openAccessRequest() : null;
+    if (existing) return refuseDuplicate(existing.id);
+    throw e;
+  }
 
   // v2: requests land in 'triage' for human/MCP-agent pickup. We no longer
   // auto-queue an AppStudio plan job — that whole pipeline (Anthropic API

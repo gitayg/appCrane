@@ -1,6 +1,7 @@
 import { randomBytes, timingSafeEqual } from 'crypto';
 import { getDb } from '../db.js';
 import { hashApiKey } from './encryption.js';
+import { maxAgeDays } from './apiKeyExpiry.js';
 import {
   OAuthError, ACCESS_PREFIX, REFRESH_PREFIX, ACCESS_TOKEN_TTL_SECONDS, REFRESH_TOKEN_TTL_DAYS,
   CODE_TTL_SECONDS, AUTH_REQUEST_TTL_SECONDS, pkceMatches, canonicalResource, scopeFor,
@@ -10,6 +11,14 @@ import {
 // as its SHA-256 (hashApiKey) and returned in plaintext exactly once.
 
 const rand = (n = 32) => randomBytes(n).toString('base64url');
+
+// A grant's absolute lifetime is the API key window (api_key_max_age_days):
+// refresh rotation never moves it, so a connection has to be approved again,
+// by a person, at least that often. Read at use, so shortening the window
+// shortens every connection already approved.
+const GRANT_EXPIRY_SQL = "datetime(g.created_at, '+' || ? || ' days')";
+export const grantLifetimeDays = (db = getDb()) => maxAgeDays(db);
+const toIso = (s) => (s ? `${String(s).replace(' ', 'T')}Z` : null);
 
 function sameHash(a, b) {
   if (typeof a !== 'string' || typeof b !== 'string' || a.length !== b.length) return false;
@@ -84,7 +93,7 @@ export function createAuthRequest({ clientId, redirectUri, codeChallenge, scope,
 export function getAuthRequest(id) {
   if (typeof id !== 'string' || !id) return null;
   return getDb().prepare(`
-    SELECT r.*, c.client_name FROM oauth_auth_requests r
+    SELECT r.*, c.client_name, c.approved_at AS client_approved_at FROM oauth_auth_requests r
     JOIN oauth_clients c ON c.client_id = r.client_id
     WHERE r.id = ? AND r.expires_at > datetime('now')
   `).get(id) || null;
@@ -113,11 +122,15 @@ export function createCode({ clientId, userId, redirectUri, codeChallenge, scope
 function issueTokens(db, grantId) {
   const access = `${ACCESS_PREFIX}${rand(32)}`;
   const refresh = `${REFRESH_PREFIX}${rand(32)}`;
+  const days = grantLifetimeDays(db);
+  const capped = (offset) => `MIN(datetime('now', ${offset}), (SELECT ${GRANT_EXPIRY_SQL} FROM oauth_grants g WHERE g.id = ?))`;
   db.prepare(`INSERT INTO oauth_tokens (token_hash, grant_id, kind, expires_at)
-              VALUES (?, ?, 'access', datetime('now', '+' || ? || ' seconds'))`).run(hashApiKey(access), grantId, ACCESS_TOKEN_TTL_SECONDS);
+              VALUES (?, ?, 'access', ${capped("'+' || ? || ' seconds'")})`).run(hashApiKey(access), grantId, ACCESS_TOKEN_TTL_SECONDS, days, grantId);
   db.prepare(`INSERT INTO oauth_tokens (token_hash, grant_id, kind, expires_at)
-              VALUES (?, ?, 'refresh', datetime('now', '+' || ? || ' days'))`).run(hashApiKey(refresh), grantId, REFRESH_TOKEN_TTL_DAYS);
-  return { access, refresh };
+              VALUES (?, ?, 'refresh', ${capped("'+' || ? || ' days'")})`).run(hashApiKey(refresh), grantId, REFRESH_TOKEN_TTL_DAYS, days, grantId);
+  const exp = db.prepare("SELECT expires_at FROM oauth_tokens WHERE token_hash = ?").get(hashApiKey(access)).expires_at;
+  const expiresIn = Math.min(ACCESS_TOKEN_TTL_SECONDS, Math.max(0, Math.ceil((Date.parse(toIso(exp)) - Date.now()) / 1000)));
+  return { access, refresh, expiresIn };
 }
 
 export function revokeGrantById(grantId) {
@@ -130,7 +143,7 @@ function tokenResponse(grant, pair) {
   return {
     access_token: pair.access,
     token_type: 'Bearer',
-    expires_in: ACCESS_TOKEN_TTL_SECONDS,
+    expires_in: pair.expiresIn ?? ACCESS_TOKEN_TTL_SECONDS,
     refresh_token: pair.refresh,
     scope: scopeFor(!!grant.read_only),
   };
@@ -183,21 +196,28 @@ export function refreshTokens({ refreshToken, client, resource }) {
   const out = db.transaction(() => {
     const hash = hashApiKey(refreshToken);
     const row = db.prepare(`
-      SELECT t.*, g.client_id, g.user_id, g.read_only, g.resource, g.revoked_at AS grant_revoked_at
+      SELECT t.*, g.client_id, g.user_id, g.read_only, g.resource, g.revoked_at AS grant_revoked_at,
+             ${GRANT_EXPIRY_SQL} <= datetime('now') AS grant_expired
       FROM oauth_tokens t JOIN oauth_grants g ON g.id = t.grant_id
       WHERE t.token_hash = ? AND t.kind = 'refresh'
-    `).get(hash);
+    `).get(grantLifetimeDays(db), hash);
     if (!row || row.client_id !== client.client_id) throw new OAuthError('invalid_grant', 'Unknown refresh token');
     if (row.revoked_at || row.grant_revoked_at) {
       revokeGrantById(row.grant_id);
       return { err: new OAuthError('invalid_grant', 'Refresh token was already used or revoked; the connection is revoked') };
+    }
+    if (row.grant_expired) {
+      throw new OAuthError('invalid_grant', `This connection reached its maximum lifetime of ${grantLifetimeDays(db)} days; approve it again from the app`);
     }
     if (Date.parse(row.expires_at.replace(' ', 'T') + 'Z') <= Date.now()) throw new OAuthError('invalid_grant', 'Refresh token expired');
     if (resource != null && canonicalResource(resource) !== canonicalResource(row.resource)) {
       throw new OAuthError('invalid_target', 'resource does not match the grant');
     }
     const user = db.prepare('SELECT active FROM users WHERE id = ?').get(row.user_id);
-    if (!user?.active) throw new OAuthError('invalid_grant', 'The approving account is deactivated');
+    if (!user?.active) {
+      revokeGrantById(row.grant_id);
+      return { err: new OAuthError('invalid_grant', 'The approving account is deactivated; the connection is revoked') };
+    }
     db.prepare("UPDATE oauth_tokens SET revoked_at = datetime('now') WHERE token_hash = ?").run(hash);
     return { ok: tokenResponse(row, issueTokens(db, row.grant_id)) };
   })();
@@ -231,27 +251,91 @@ export function lookupAccessToken(token) {
     JOIN users u ON u.id = g.user_id
     WHERE t.token_hash = ? AND t.kind = 'access'
       AND t.revoked_at IS NULL AND t.expires_at > datetime('now')
-      AND g.revoked_at IS NULL
-  `).get(hashApiKey(token));
+      AND g.revoked_at IS NULL AND ${GRANT_EXPIRY_SQL} > datetime('now')
+  `).get(hashApiKey(token), grantLifetimeDays(db));
   if (!row) return null;
+  if (!row.active) {
+    revokeGrantById(row.grant_id);
+    return row;
+  }
   try { db.prepare("UPDATE oauth_grants SET last_used_at = datetime('now') WHERE id = ?").run(row.grant_id); } catch (_) {}
   return row;
 }
 
+function grantView(g) {
+  let hosts = [];
+  try { hosts = [...new Set(JSON.parse(g.redirect_uris).map(u => new URL(u).host))]; } catch (_) {}
+  return {
+    id: g.id, client_name: g.client_name, redirect_hosts: hosts, scope: g.scope,
+    read_only: !!g.read_only, created_at: g.created_at, last_used_at: g.last_used_at,
+    expires_at: g.expires_at, client_approved: !!g.approved_at,
+    ...(g.user_id !== undefined ? { user: { id: g.user_id, name: g.user_name, email: g.user_email } } : {}),
+  };
+}
+
+/** Live (not revoked, not past their lifetime) grants of one user. */
 export function listGrantsForUser(userId) {
-  return getDb().prepare(`
-    SELECT g.id, g.scope, g.read_only, g.created_at, g.last_used_at, c.client_name, c.redirect_uris
+  const db = getDb();
+  return db.prepare(`
+    SELECT g.id, g.scope, g.read_only, g.created_at, g.last_used_at, c.client_name, c.redirect_uris, c.approved_at,
+           ${GRANT_EXPIRY_SQL} AS expires_at
     FROM oauth_grants g JOIN oauth_clients c ON c.client_id = g.client_id
-    WHERE g.user_id = ? AND g.revoked_at IS NULL
+    WHERE g.user_id = ? AND g.revoked_at IS NULL AND ${GRANT_EXPIRY_SQL} > datetime('now')
     ORDER BY g.id DESC
-  `).all(userId).map(g => {
-    let hosts = [];
-    try { hosts = [...new Set(JSON.parse(g.redirect_uris).map(u => new URL(u).host))]; } catch (_) {}
-    return {
-      id: g.id, client_name: g.client_name, redirect_hosts: hosts, scope: g.scope,
-      read_only: !!g.read_only, created_at: g.created_at, last_used_at: g.last_used_at,
-    };
-  });
+  `).all(grantLifetimeDays(db), userId, grantLifetimeDays(db)).map(grantView);
+}
+
+/** Platform admin view: every live grant, optionally one user's. */
+export function listAllGrants({ userId = null } = {}) {
+  const db = getDb();
+  const days = grantLifetimeDays(db);
+  return db.prepare(`
+    SELECT g.id, g.user_id, g.scope, g.read_only, g.created_at, g.last_used_at, c.client_name, c.redirect_uris, c.approved_at,
+           ${GRANT_EXPIRY_SQL} AS expires_at, u.name AS user_name, u.email AS user_email
+    FROM oauth_grants g JOIN oauth_clients c ON c.client_id = g.client_id JOIN users u ON u.id = g.user_id
+    WHERE g.revoked_at IS NULL AND ${GRANT_EXPIRY_SQL} > datetime('now') AND (? IS NULL OR g.user_id = ?)
+    ORDER BY g.id DESC LIMIT 1000
+  `).all(days, days, userId, userId).map(grantView);
+}
+
+/** Revoke one grant by id, whoever owns it (platform admin). Null when there is no such grant. */
+export function revokeGrantAsAdmin(grantId) {
+  const row = getDb().prepare('SELECT id, user_id, revoked_at FROM oauth_grants WHERE id = ?').get(grantId);
+  if (!row) return null;
+  if (!row.revoked_at) revokeGrantById(row.id);
+  return row;
+}
+
+/**
+ * End every OAuth connection a user approved: on a password change, an API key
+ * rotation or regeneration, a demotion, a deactivation. Returns how many were live.
+ */
+export function revokeAllGrantsForUser(userId) {
+  const db = getDb();
+  return db.transaction(() => {
+    const ids = db.prepare('SELECT id FROM oauth_grants WHERE user_id = ? AND revoked_at IS NULL').all(userId).map(r => r.id);
+    for (const id of ids) revokeGrantById(id);
+    return ids.length;
+  })();
+}
+
+export function listClients() {
+  return getDb().prepare(`
+    SELECT c.client_id, c.client_name, c.redirect_uris, c.token_endpoint_auth_method, c.created_at, c.approved_at, c.approved_by,
+           (SELECT COUNT(*) FROM oauth_grants g WHERE g.client_id = c.client_id AND g.revoked_at IS NULL) AS live_grants
+    FROM oauth_clients c ORDER BY c.id DESC LIMIT 500
+  `).all().map(c => ({ ...c, redirect_uris: JSON.parse(c.redirect_uris) }));
+}
+
+/** Approve a client (platform admin). Withdrawing approval also ends its connections. */
+export function setClientApproval(clientId, userId, approved) {
+  const db = getDb();
+  if (approved) {
+    return db.prepare("UPDATE oauth_clients SET approved_at = datetime('now'), approved_by = ? WHERE client_id = ?").run(userId, clientId).changes > 0;
+  }
+  const changed = db.prepare('UPDATE oauth_clients SET approved_at = NULL, approved_by = NULL WHERE client_id = ?').run(clientId).changes > 0;
+  for (const g of db.prepare('SELECT id FROM oauth_grants WHERE client_id = ? AND revoked_at IS NULL').all(clientId)) revokeGrantById(g.id);
+  return changed;
 }
 
 export function revokeGrantForUser(userId, grantId) {

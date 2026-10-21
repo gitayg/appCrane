@@ -121,11 +121,13 @@ function PersonalKeyCard({ endpoint }: { endpoint: string }) {
   const [draftLabel, setDraftLabel] = useState('')
   const [created, setCreated] = useState<CreatedKey | null>(null)
   const [copied, setCopied] = useState(false)
+  const [maxAgeDays, setMaxAgeDays] = useState<number | null>(null)
 
   function load() {
-    adminApi.get<{ keys: UserMcpKey[]; accessible_app_count: number; is_admin: boolean }>('/api/me/mcp-keys')
+    adminApi.get<{ keys: UserMcpKey[]; accessible_app_count: number; is_admin: boolean; max_age_days?: number }>('/api/me/mcp-keys')
       .then(r => {
         setKeys(r.keys ?? [])
+        setMaxAgeDays(typeof r.max_age_days === 'number' ? r.max_age_days : null)
         setAccessibleCount(r.accessible_app_count ?? 0)
         setIsAdmin(!!r.is_admin)
       })
@@ -211,6 +213,13 @@ function PersonalKeyCard({ endpoint }: { endpoint: string }) {
         )}
       </p>
 
+      {maxAgeDays != null && (
+        <p style={{ fontSize: '.78rem', color: 'var(--dim)', margin: '0 0 8px' }}>
+          Keys expire {maxAgeDays} days after they are created or rotated. You get an e-mail 14 and 3 days before.
+          Rotate gives you a new key once; the old one stops working immediately.
+        </p>
+      )}
+
       {keys && keys.length > 0 && (
         <table style={{ width: '100%', fontSize: '.8rem', marginBottom: 12 }}>
           <thead>
@@ -218,6 +227,7 @@ function PersonalKeyCard({ endpoint }: { endpoint: string }) {
               <th style={{ textAlign: 'left', color: 'var(--dim)', fontWeight: 500, padding: '4px 8px' }}>Label</th>
               <th style={{ textAlign: 'left', color: 'var(--dim)', fontWeight: 500, padding: '4px 8px' }}>Created</th>
               <th style={{ textAlign: 'left', color: 'var(--dim)', fontWeight: 500, padding: '4px 8px' }}>Last used</th>
+              <th style={{ textAlign: 'left', color: 'var(--dim)', fontWeight: 500, padding: '4px 8px' }}>Expires</th>
               <th style={{ textAlign: 'left', color: 'var(--dim)', fontWeight: 500, padding: '4px 8px' }}>Status</th>
               <th></th>
             </tr>
@@ -225,6 +235,9 @@ function PersonalKeyCard({ endpoint }: { endpoint: string }) {
           <tbody>
             {keys.map(k => {
               const revoked = !!k.revoked_at
+              const expiresMs = k.expires_at ? serverDate(k.expires_at).getTime() : NaN
+              const expired = !revoked && Number.isFinite(expiresMs) && expiresMs <= Date.now()
+              const expiringSoon = !revoked && !expired && Number.isFinite(expiresMs) && expiresMs - Date.now() <= 14 * 86_400_000
               return (
                 <tr key={k.id} style={{ opacity: revoked ? 0.5 : 1 }}>
                   <td style={{ padding: '4px 8px' }}>{k.label || <span style={{ color: 'var(--dim)' }}>(no label)</span>}</td>
@@ -232,8 +245,15 @@ function PersonalKeyCard({ endpoint }: { endpoint: string }) {
                   <td style={{ padding: '4px 8px', color: 'var(--dim)', fontSize: '.78rem' }}>
                     {k.last_used_at ? serverDate(k.last_used_at).toLocaleString() : 'never'}
                   </td>
+                  <td style={{ padding: '4px 8px', fontSize: '.78rem', color: expired ? 'var(--red)' : expiringSoon ? 'var(--yellow)' : 'var(--dim)' }}>
+                    {k.expires_at ? serverDate(k.expires_at).toLocaleDateString() : 'never'}
+                  </td>
                   <td style={{ padding: '4px 8px', fontSize: '.78rem' }}>
-                    {revoked ? <span style={{ color: 'var(--red)' }}>revoked</span> : <span style={{ color: 'var(--green)' }}>active</span>}
+                    {revoked
+                      ? <span style={{ color: 'var(--red)' }}>revoked</span>
+                      : expired
+                        ? <span style={{ color: 'var(--red)' }}>expired, rotate to use again</span>
+                        : <span style={{ color: 'var(--green)' }}>active</span>}
                   </td>
                   <td style={{ padding: '4px 8px', textAlign: 'right' }}>
                     {!revoked && (

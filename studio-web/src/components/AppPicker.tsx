@@ -1,6 +1,8 @@
 import { useEffect, useState, type ReactElement } from 'react'
-import { adminApi } from '../adminApi'
+import { adminApi, ApiError } from '../adminApi'
 import { useMe } from '../hooks/useMe'
+import { ClassificationBadge } from './intake/ClassificationBadge'
+import type { Level } from './intake/types'
 
 /**
  * v2.32.0: the /launch empty state. Previously a rocket glyph telling you to
@@ -70,6 +72,7 @@ export function AppPicker({ onOpen }: { onOpen: (slug: string) => void }) {
   const me = useMe()
   const myId = me?.user?.id
   const [apps, setApps] = useState<PickerApp[] | null>(null)
+  const [levels, setLevels] = useState<Record<string, Level>>({})
   const [requested, setRequested] = useState<Record<string, 'sending' | 'sent' | 'failed'>>({})
   const [menuFor, setMenuFor] = useState<string | null>(null)
   const [query, setQuery] = useState('')
@@ -88,6 +91,9 @@ export function AppPicker({ onOpen }: { onOpen: (slug: string) => void }) {
     adminApi.get<{ apps: PickerApp[] }>('/api/apps')
       .then(r => { if (!cancelled) setApps(r?.apps ?? []) })
       .catch(() => { if (!cancelled) setApps([]) })
+    adminApi.get<{ levels: Record<string, Level> }>('/api/data-classification/apps')
+      .then(r => { if (!cancelled) setLevels(r?.levels ?? {}) })
+      .catch(() => {})
     return () => { cancelled = true }
   }, [])
 
@@ -165,8 +171,9 @@ export function AppPicker({ onOpen }: { onOpen: (slug: string) => void }) {
         app_slug: a.slug,
       })
       setRequested(r => ({ ...r, [a.slug]: 'sent' }))
-    } catch {
-      setRequested(r => ({ ...r, [a.slug]: 'failed' }))
+    } catch (e) {
+      const already = e instanceof ApiError && e.status === 409
+      setRequested(r => ({ ...r, [a.slug]: already ? 'sent' : 'failed' }))
     }
   }
 
@@ -252,7 +259,7 @@ export function AppPicker({ onOpen }: { onOpen: (slug: string) => void }) {
                       ? <img src={`/api/apps/${a.slug}/icon`} alt="" />
                       : <span>{initials(a.name)}</span>}
                   </span>
-                  <span className="launcher-tile-name">{a.name}</span>
+                  <span className="launcher-tile-name">{a.name}{' '}<ClassificationBadge level={levels[a.slug]} /></span>
                 </button>
 
                 <button

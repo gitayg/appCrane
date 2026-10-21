@@ -225,12 +225,12 @@ export async function planRepoArchives() {
   return { repos, estimated_bytes: estimated, required_bytes: required, free_bytes: free, fits: free === null ? null : free > required, dest_dir: dir };
 }
 
-export async function exportRepoArchive(slug, { at = new Date() } = {}) {
+export async function exportRepoArchive(slug, { at = new Date(), dir: destDir } = {}) {
   if (!SLUG_RE.test(String(slug))) throw new Error(`invalid slug ${JSON.stringify(slug)}`);
   if (!listLocalRepoSlugs().includes(slug)) {
     throw Object.assign(new Error(`no local managed repository for '${slug}'`), { status: 404 });
   }
-  const dir = await ensureBackupsDir();
+  const dir = destDir ? (await mkdir(destDir, { recursive: true, mode: 0o700 }), destDir) : await ensureBackupsDir();
   const work = await newWorkDir('repo-export');
   try {
     const bundlePath = join(work, REPO_BUNDLE);
@@ -272,13 +272,13 @@ export async function exportRepoArchive(slug, { at = new Date() } = {}) {
 }
 
 /** Every repo (or `slugs`), one archive each. One failure does not stop the rest. */
-export async function exportRepoArchives({ slugs, at = new Date(), onProgress } = {}) {
+export async function exportRepoArchives({ slugs, at = new Date(), onProgress, dir } = {}) {
   const targets = slugs && slugs.length ? slugs : listLocalRepoSlugs();
   const exported = [];
   const failed = [];
   for (const slug of targets) {
     try {
-      exported.push(await exportRepoArchive(slug, { at }));
+      exported.push(await exportRepoArchive(slug, { at, dir }));
     } catch (e) {
       failed.push({ slug, error: e.message });
     }

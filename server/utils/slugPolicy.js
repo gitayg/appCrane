@@ -19,7 +19,8 @@ export const PLATFORM_PATHS = [
   'a2a', 'api', 'app', 'applications', 'appstudio', 'audit', 'audit-page', 'builders', 'catalog',
   'coder', 'crew', 'dashboard', 'docs', 'enhancements-page', 'favicon.svg', 'git', 'launch', 'login',
   'login-legacy', 'mcp', 'my-requests', 'oauth', 'portal', 'public', 'raiseme', 'requests', 'settings',
-  'skills', 'studio', 'surveys', 'tasks', 'users-page',
+  'events', 'skills', 'studio', 'surveys', 'tasks', 'users-page', 'adopt', 'intake', 'access-reviews',
+  'audit-integrity',
 ];
 
 /**

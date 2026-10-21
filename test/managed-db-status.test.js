@@ -277,6 +277,11 @@ test('a running container reports its docker facts', async () => {
     // 300); a container created before keeps its 512 until recreated, which
     // is exactly the live-vs-configured split this field exists to show.
     configured_memory_mb: 1024,
+    // The CPU cap a new server would get (MANAGED_DB_CPUS, default 1). This
+    // fixture predates the NanoCpus/CpuShares fields, so whether they are in
+    // force is unknown, not "missing".
+    configured_cpus: 1,
+    cpu_drift: { applied: null, findings: [] },
     databases: 2,
     restart_count: 3,
     last_exit_code: 0,

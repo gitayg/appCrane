@@ -17,6 +17,8 @@
 // Same shape as ingressDrift: pure, comparing an app row against an already
 // observed container state, knowing nothing about how that state was read.
 
+import { CPU_SHARES } from './cpuPriority.js';
+
 const MB = 1024 * 1024;
 
 /**
@@ -120,4 +122,38 @@ export function resourceDrift(app, observed) {
   }
 
   return { applied: findings.length === 0, expected, actual, findings };
+}
+
+/**
+ * A managed database server's CPU cap and weight, configured versus in force.
+ * Both are `docker run` flags and neither is part of the server's config label,
+ * so an upgrade never recreates a live database to add them: they land when the
+ * server is next created, and until then this says so. `facts` is the status
+ * inspect ({ nano_cpus, cpu_shares }); either missing means unknown.
+ */
+export function managedDbCpuDrift(configuredCpus, facts, wantShares = CPU_SHARES.db) {
+  const nano = facts?.nano_cpus;
+  const shares = facts?.cpu_shares;
+  if (nano == null || shares == null) return { applied: null, findings: [] };
+  const findings = [];
+  if (nano === 0) {
+    findings.push({
+      resource: 'cpu', state: 'not_applied', expected_cpus: configuredCpus, actual_cpus: 0,
+      message: `NO CPU limit is in force on this database server; ${configuredCpus} CPU is configured. ` +
+        'It applies the next time the server is created (an upgrade does not recreate a live database to add it).',
+    });
+  } else if (!cpusClose(nano, configuredCpus * NANO)) {
+    findings.push({
+      resource: 'cpu', state: 'stale', expected_cpus: configuredCpus, actual_cpus: Math.round((nano / NANO) * 100) / 100,
+      message: `The server is capped at ${Math.round((nano / NANO) * 100) / 100} CPU, ${configuredCpus} is configured; it applies when the server is next created.`,
+    });
+  }
+  if (shares !== wantShares) {
+    findings.push({
+      resource: 'cpu_weight', state: 'not_applied', expected_shares: wantShares, actual_shares: shares,
+      message: `The server runs at CPU weight ${shares || 'default (1024)'}, not ${wantShares}, so under contention it competes with ` +
+        'Caddy and sshd on equal terms. It applies the next time the server is created.',
+    });
+  }
+  return { applied: findings.length === 0, findings };
 }

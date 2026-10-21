@@ -17,6 +17,8 @@ import {
 import log from '../utils/logger.js';
 import { admitContainer, reserveMemory } from './memoryAdmission.js';
 import { OOM_APP_FLAG } from './oomPriority.js';
+import { CPU_APP_FLAG, buildResourceArgs } from './cpuPriority.js';
+import { assertNoRestoreInProgress } from './managedDbRestoreGuard.js';
 
 const execFileAsync = promisify(execFile);
 // Imported rather than re-declared as 3000. v2.45.0's data-plane guard is
@@ -343,7 +345,7 @@ export async function getContainerImage(slug, env) {
 
 export async function buildImage({ slug, env, contextDir, commitHash, appBasePath, onLog }) {
   const tag = imageTag(slug, env, commitHash);
-  const args = ['build', '-t', tag, '--label', APPCRANE_LABEL, '--label', `slug=${slug}`, '--label', `env=${env}`];
+  const args = ['build', '-t', tag, '--label', APPCRANE_LABEL, '--label', `slug=${slug}`, '--label', `env=${env}`, ...buildResourceArgs()];
   // Build-time only: bundlers (Vite, CRA, Next) need APP_BASE_PATH to emit
   // correct asset URLs. Caddy strips this prefix at runtime, so it must NOT
   // appear in the runtime container env — see bugs/2026-04-26-appcrane-app-base-path-resolution.md
@@ -541,6 +543,7 @@ async function runRootHelper({ image, hostDir, mountAt = '/target', entrypoint, 
   return dockerExec([
     'run', '--rm',
     OOM_APP_FLAG,
+    CPU_APP_FLAG,
     '--pull', 'never',
     '--user', '0:0',
     '--network', 'none',
@@ -908,13 +911,15 @@ function publicPublishTargets(slug, env, containerPort) {
 // the check, for a caller that already admitted this exact start (a restart
 // checked before its stop, a health-check revert to the image that was running).
 export async function startApp(opts) {
-  const { slug, env, memoryMb = 512, admission } = opts;
+  const { slug, env, memoryMb = 512, cpus = 0.5, admission } = opts;
+  // A container recreated mid-restore would write into the half-restored data.
+  assertNoRestoreInProgress(slug, env);
   // A malformed command is refused before anything touches Docker, measuring included.
   assertRunnableCommand(opts.command ?? null);
   let release = null;
   if (admission !== false) {
     const name = containerName(slug, env);
-    await admitContainer({ name, memoryMb, kind: 'app', slug, env, what: 'deploy', ...(admission || {}) });
+    await admitContainer({ name, memoryMb, cpus, kind: 'app', slug, env, what: 'deploy', ...(admission || {}) });
     release = reserveMemory(name, memoryMb * 1024 * 1024);
   }
   try {
@@ -990,6 +995,7 @@ async function runAppContainer({ slug, env, image, hostPort, envVars = {}, volum
     '--restart=on-failure:2',
     '--network', network,
     OOM_APP_FLAG,
+    CPU_APP_FLAG,
     `--memory=${memoryMb}m`,
     // Equal to --memory, which is Docker's spelling for "no swap at all": the
     // flag is the combined memory+swap ceiling, so swap budget = memory-swap -

@@ -302,8 +302,21 @@ function undoOomPriority(args) {
   return out;
 }
 
+/**
+ * The FOURTH: the CPU weight flag (cpuPriority.js), right after the OOM flag,
+ * so host services outweigh app containers under CPU contention.
+ */
+function undoCpuPriority(args) {
+  const out = [...args];
+  const at = out.indexOf('--cpu-shares=128');
+  assert.notEqual(at, -1, `expected --cpu-shares=128 in the argv: ${JSON.stringify(args)}`);
+  assert.equal(out.lastIndexOf('--cpu-shares=128'), at, `--cpu-shares appears twice: ${JSON.stringify(args)}`);
+  out.splice(at, 1);
+  return out;
+}
+
 function stripDeliberate(args) {
-  return undoV248ResourceFlags(stripAdded(undoOomPriority(args)));
+  return undoV248ResourceFlags(stripAdded(undoOomPriority(undoCpuPriority(args))));
 }
 
 // ===========================================================================

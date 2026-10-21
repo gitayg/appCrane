@@ -70,6 +70,7 @@ import { viewAsWriteGuard } from './middleware/viewAsGuard.js';
 import userMcpKeysRoutes from './routes/userMcpKeys.js';
 import meRoutes from './routes/me.js';
 import filesRoutes, { sweepStagedFiles } from './routes/files.js';
+import stagedFilesRoutes, { sweepChunkedUploads } from './routes/stagedFiles.js';
 import githubServiceRoutes from './routes/githubService.js';
 import githubAppRoutes from './routes/githubApp.js';
 import githubAppWebhookRoutes, { rawWebhookBody } from './routes/githubAppWebhook.js';
@@ -86,9 +87,13 @@ import gitHttpRoutes from './routes/gitHttp.js';
 import clientErrorsRoutes, { adminRouter as clientErrorsAdminRoutes } from './routes/clientErrors.js';
 import { refererSlug } from './utils/refererSlug.js';
 import { globalNotices } from './services/platformNotices.js';
+import { enforceFipsAtStartup } from './services/fipsMode.js';
+import appMcpRoutes, { appMcpWellKnownRouter } from './routes/appMcp.js';
 
 const PORT = process.env.PORT || 5001;
 const HOST = process.env.HOST || '0.0.0.0';
+
+try { enforceFipsAtStartup({ log }); } catch (e) { log.error(e.message); process.exit(1); }
 
 // Initialize database
 initDb();
@@ -147,7 +152,7 @@ const apiRateLimit = createApiRateLimit();
 // MCP-E (v2.2.18): reap expired staged_files rows + their scratch dirs every
 // 5 minutes. Idempotent; safe across server restarts (the row's expires_at
 // is the source of truth, not in-memory state).
-setInterval(() => { try { sweepStagedFiles(); } catch (_) {} }, 5 * 60_000);
+setInterval(() => { try { sweepStagedFiles(); } catch (_) {} try { sweepChunkedUploads(); } catch (_) {} }, 5 * 60_000);
 
 /**
  * v2.36.0: `script-src` no longer allows 'unsafe-inline'.
@@ -319,6 +324,7 @@ app.use('/a2a', a2aRoutes);
 // git clone/fetch over HTTPS for Crane-hosted apps. Before express.json(): the
 // upload-pack request body is a binary (often gzipped) stream git must read raw.
 app.use('/git', gitHttpRoutes);
+app.use('/api/service/llm', (await import('./routes/llmGateway.js')).default); // LLM gateway for hosted apps (gateway-token auth, internal-only, own body limit; before the 50 MB parser)
 app.use('/api', clientErrorsRoutes); // POST /api/client-errors: browser error reports, own 8 KB parser (before the 50 MB one)
 app.use(express.json({ limit: '50mb', type: ['application/json', 'application/scim+json'] }));
 app.use(express.urlencoded({ extended: true }));
@@ -984,6 +990,7 @@ app.get('/api/self-update/status', requireAuth, requireAdmin, (req, res) => {
 app.use('/api', apiRateLimit);
 app.use('/api', viewAsWriteGuard);       // view as role is read-only: refuses every write from a previewing credential
 app.use('/.well-known', oauthWellKnownRoutes); // MCP OAuth: RFC 9728 + RFC 8414 metadata
+app.use('/.well-known', appMcpWellKnownRouter); // MCP front door: per-app RFC 9728 metadata
 app.use('/oauth', oauthRoutes);          // MCP OAuth: register / authorize / token / revoke
 app.use('/api/oauth', oauthConsentRoutes); // MCP OAuth consent data + connected clients (signed-in)
 app.use('/api/auth', authRoutes);
@@ -1017,6 +1024,15 @@ app.use('/api/apps', envVarsRoutes);     // /api/apps/:slug/env/:env
 app.use('/api/apps', envFilesRoutes);    // /api/apps/:slug/env-files — stored .env files of a Crane-hosted app
 app.use('/api/apps', healthRoutes);      // /api/apps/:slug/health/:env
 app.use('/api/apps', backupsRoutes);     // /api/apps/:slug/backup/:env
+app.use('/api/apps', (await import('./routes/accessRules.js')).default); // /api/apps/:slug/access-rules[/:env]: path role rules
+app.use('/api', (await import('./routes/apiKeys.js')).default); // /api/me/api-key, /api/me/api-key/rotate, /api/api-key-policy
+app.use('/api', (await import('./routes/intake.js')).default); // /api/apps/:slug/intake[/review], /api/apps/:slug/classification, /api/intake/queue, /api/data-classification/{policy,apps}
+app.use('/api', (await import('./routes/releaseCheck.js')).default); // /api/apps/:slug/release-check[/run|/exceptions]
+app.use('/api', (await import('./routes/accessReviews.js')).default); // /api/access-reviews/*: periodic access reviews
+app.use('/api', (await import('./routes/auditChain.js')).default); // /api/audit-chain/*: tamper-evident audit
+app.use('/api/adopt', (await import('./routes/adopt.js')).default); // Adopt an app: analyse a GitHub repo or zip, adopt to sandbox
+app.use('/api/llm-gateway', (await import('./routes/llmGateway.js')).adminRouter); // LLM gateway config + usage (platform admin)
+app.use('/api/apps', (await import('./routes/llmGateway.js')).appRouter); // /api/apps/:slug/llm-gateway[/overrides|/usage]
 app.use('/api/apps', managedDbRoutes);   // /api/apps/:slug/database — shared Postgres/MariaDB, one DB + one user per app
 app.use('/api/apps', notificationsRoutes); // /api/apps/:slug/notifications
 // /api/apps/:slug/app-roles — the roles an app defines for ITSELF. Distinct
@@ -1028,6 +1044,7 @@ app.use('/api/apps', appRolesRoutes);
 app.use('/api/catalog', catalogRoutes);  // Curated self-hostable app catalogue (requireAuth — every logged-in user)
 app.use('/api/crew', crewRoutes);        // Crew: platform-wide agent hub (requireAuth; per-row ownership in services/crew.js)
 // Mount identity FIRST so its routes don't get caught by other middleware
+app.use('/api/identity/mfa', (await import('./routes/mfa.js')).default); // local MFA second step + self-service + sign-in policy
 app.use('/api/identity', identityRoutes);
 app.use('/api/enhancements', enhancementsRoutes); // Enhancement requests (Bearer auth, must be before logsRoutes)
 app.use('/api/service/tasks', (await import('./routes/tasksService.js')).default); // Tasks API for hosted apps (service-token auth, internal-only)
@@ -1046,6 +1063,7 @@ app.use('/api/coder', coderRoutes);       // AppCrane Studio (API key + Bearer a
 // no reachable client either — studio-web/src/api.ts was the only caller, and
 // nothing rendered the App.tsx that imported it. AIDE talks this shape to its
 // own server, not to AppCrane. /api/coder is the coder surface.
+app.use('/api/mcp/apps', appMcpRoutes);  // MCP front door for hosted apps
 app.use('/api/mcp', mcpRoutes);          // Model Context Protocol endpoint (JSON-RPC + admin catalog)
 // MUST precede every router mounted at the bare '/api' — userMcpKeysRoutes,
 // logsRoutes and monitoringRoutes each do a pathless `router.use(requireAuth)`,
@@ -1062,6 +1080,9 @@ app.use('/api/mcp', mcpRoutes);          // Model Context Protocol endpoint (JSO
 // moving it would have made every setting world-readable.
 app.use('/api/settings', (await import('./routes/jobHealth.js')).default); // /api/settings/job-health (platform admin)
 app.use('/api/settings/client-errors', clientErrorsAdminRoutes); // aggregated browser errors (platform admin)
+app.use('/api/settings', (await import('./routes/restoreDrills.js')).default); // /api/settings/restore-drills (platform admin)
+app.use('/api/evidence-packs', (await import('./routes/evidencePack.js')).default); // compliance evidence packs (platform admin)
+app.use('/api/settings', (await import('./routes/siem.js')).default); // /api/settings/siem: SIEM and log streaming (platform admin)
 app.use('/api/settings', settingsRoutes); // General settings (branding, etc.)
 
 // v2.7.17: meRoutes MUST come before userMcpKeysRoutes. userMcpKeys's
@@ -1074,6 +1095,7 @@ app.use('/api/settings', settingsRoutes); // General settings (branding, etc.)
 // collide with /me/mcp-keys/*.
 app.use('/api', meRoutes);               // /api/me — proxied-app identity endpoint (cookie/Bearer/X-API-Key)
 app.use('/api', userMcpKeysRoutes);      // /api/me/mcp-keys — personal MCP keys
+app.use('/api/files/staged', stagedFilesRoutes);   // chunked staged uploads: POST /chunked, PUT /:handle?offset=N, POST /:handle/finalize
 app.use('/api/files', filesRoutes);      // /api/files/staged — staged uploads for MCP-E
 app.use('/api/github-service', githubServiceRoutes); // service-account config + verify (admin)
 app.use('/api/github-app/webhook', githubAppWebhookRoutes); // GitHub App webhook receiver (no auth: X-Hub-Signature-256 only) — must precede the admin router below
@@ -1082,6 +1104,7 @@ app.use('/api/apps', appGithubAppRoutes);           // /api/apps/:slug/github-ap
 app.use('/api/apps', whatsNewRoutes);     // /api/apps/:slug/whats-new — per-user version dialog state
 app.use('/api/whats-new', platformWhatsNewRoutes); // /api/whats-new/platform — AppCrane update dialog (platform admins)
 app.use('/api/surveys', surveysRoutes);    // /api/surveys — in-app NPS surveys: pending card, answers, results, admin config
+app.use('/api', (await import('./routes/events.js')).default); // /api/events, /api/apps/:slug/events, /api/me/events: shared event store
 
 app.use('/api', logsRoutes);             // /api/audit, /api/:slug/audit, /api/:slug/logs/:env
 app.use('/api', monitoringRoutes);       // /api/server/health
@@ -1234,6 +1257,13 @@ app.get('/catalog', (req, res) => sendHtml(res, adminSpa));
 app.get('/audit', (req, res) => sendHtml(res, adminSpa));
 // v2.105.0: Crew, the agent hub. The first-contact e-mail links to /crew#log.
 app.get('/crew', (req, res) => sendHtml(res, adminSpa));
+app.get('/events', (req, res) => sendHtml(res, adminSpa)); // Events timeline
+app.get('/adopt', (req, res) => sendHtml(res, adminSpa));
+app.get('/intake', (req, res) => sendHtml(res, adminSpa));
+app.get('/access-reviews', (req, res) => sendHtml(res, adminSpa));
+app.get('/access-reviews/campaigns', (req, res) => sendHtml(res, adminSpa));
+app.get('/access-reviews/campaigns/:id', (req, res) => sendHtml(res, adminSpa));
+app.get('/audit-integrity', (req, res) => sendHtml(res, adminSpa));
 app.get('/tasks', (req, res) => sendHtml(res, adminSpa)); // My tasks; task e-mails link to /tasks?task=<id>
 app.get('/surveys', (req, res) => sendHtml(res, adminSpa)); // NPS & surveys; survey e-mails link to /surveys?app=<slug>
 // Found by the same test: /skills is a client-side redirect to /settings#skills,
@@ -1665,6 +1695,11 @@ app.listen(PORT, HOST, async () => {
   try {
     const { startHostResourceMonitor } = await import('./services/hostResources.js');
     startHostResourceMonitor();
+    try { const { startApiKeyExpiryJob } = await import('./services/apiKeyExpiry.js'); startApiKeyExpiryJob(); } catch (e) { log.error('API key expiry job failed to start: ' + e.message); }
+    try { const { startEventRetention } = await import('./services/eventRetention.js'); startEventRetention(); } catch (e) { log.error('Event retention job failed to start: ' + e.message); }
+    try { const { startAuditChain } = await import('./services/auditChain.js'); startAuditChain(); } catch (e) { log.error('Audit chain job failed to start: ' + e.message); }
+    try { const { startAccessReviews } = await import('./services/accessReviews/index.js'); startAccessReviews(); } catch (e) { log.error('Access review job failed to start: ' + e.message); }
+    try { (await import('./services/siem/delivery.js')).startSiemDelivery(); } catch (e) { log.error('SIEM delivery failed to start: ' + e.message); }
   } catch (e) {
     log.error('Host resource monitor failed to start: ' + e.message);
   }
@@ -1677,6 +1712,16 @@ app.listen(PORT, HOST, async () => {
     else if (r.status === 'not-permitted' || r.status === 'failed') log.warn(`OOM priority unchanged: ${r.reason}`);
   } catch (e) {
     log.warn('OOM priority check failed: ' + e.message);
+  }
+
+  // Give Caddy, sshd and AppCrane CPU weight over app containers (cpuPriority.js).
+  try {
+    const { ensureHostCpuPriority, recordHostCpuPriority } = await import('./services/cpuPriority.js');
+    const r = recordHostCpuPriority(ensureHostCpuPriority());
+    if (r.status === 'set') log.info(`CPU priority: CPUWeight drop-in written for ${r.written.join(', ')}`);
+    else if (r.status === 'not-permitted' || r.status === 'failed') log.warn(`CPU priority unchanged: ${r.reason}`);
+  } catch (e) {
+    log.warn('CPU priority check failed: ' + e.message);
   }
 
   // v2.21.9: nightly off-site (S3) backup — no-op until configured in Settings.
@@ -1697,6 +1742,7 @@ app.listen(PORT, HOST, async () => {
   try {
     const { startLocalBackupScheduler } = await import('./services/localBackup.js');
     startLocalBackupScheduler();
+    try { const { startRestoreDrillScheduler } = await import('./services/restoreDrills.js'); startRestoreDrillScheduler(); } catch (e) { log.error('Restore drill scheduler failed to start: ' + e.message); }
     // AppCrane has no setup wizard — boot IS first run. So the state gets said
     // once, in the log every new install reads, rather than waiting for someone
     // to open Settings → Backup. One line per boot, not a standing banner: the
