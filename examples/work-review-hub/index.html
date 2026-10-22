@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Work Review</title>
+<style>
+  :root { --bg:#f7f7f8; --card:#fff; --ink:#1b1c1f; --mute:#6b6f76; --line:#e3e4e8; --accent:#2f6fde; --warn:#c2410c; --good:#15803d; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#141518; --card:#1d1f23; --ink:#e8e9ec; --mute:#9a9ea6; --line:#2c2f35; --accent:#6d9cf0; --warn:#f08a5d; --good:#4ade80; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.5 system-ui, -apple-system, Segoe UI, sans-serif; }
+  main { max-width: 1040px; margin: 0 auto; padding: 24px 16px 64px; }
+  header { display:flex; justify-content:space-between; align-items:baseline; gap:12px; flex-wrap:wrap; }
+  h1 { font-size: 22px; margin: 0; } h2 { font-size: 16px; margin: 28px 0 10px; }
+  .mute { color: var(--mute); font-size: 13px; }
+  .tabs button { background:none; border:1px solid var(--line); color:var(--ink); padding:6px 12px; border-radius:6px; cursor:pointer; font:inherit; }
+  .tabs button[aria-selected="true"] { border-color: var(--accent); color: var(--accent); }
+  .kpis { display:grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap:12px; }
+  .kpi, .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px 16px; }
+  .kpi .v { font-size: 24px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .kpi .l { color: var(--mute); font-size: 13px; }
+  table { width:100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align:left; padding:7px 8px; border-bottom:1px solid var(--line); vertical-align: top; }
+  th { color: var(--mute); font-weight: 500; font-size: 13px; }
+  td.n, th.n { text-align: right; }
+  .prompt { margin: 0 0 12px; } .prompt q { display:block; font-style: italic; margin: 4px 0; overflow-wrap:anywhere; }
+  .tag { display:inline-block; font-size:12px; padding:1px 8px; border-radius:99px; border:1px solid var(--line); color: var(--mute); margin: 0 4px 4px 0; }
+  .warn { color: var(--warn); } .good { color: var(--good); }
+  svg { display:block; width:100%; height:120px; }
+  .danger { background:none; border:1px solid var(--warn); color: var(--warn); border-radius:6px; padding:6px 12px; cursor:pointer; font:inherit; }
+  .scroll { overflow-x:auto; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div><h1>Work Review</h1><div class="mute" id="who"></div></div>
+    <nav class="tabs" id="tabs" hidden><button data-tab="me" aria-selected="true">Me</button> <button data-tab="team">Team</button></nav>
+  </header>
+
+  <section id="me">
+    <p class="mute" id="empty" hidden>No snapshots yet. Set up the uploader from the work-review skill: <code>node upload.mjs --setup --url &lt;this app's URL&gt;</code>.</p>
+    <div id="mine" hidden>
+      <h2>Last 7 days <span class="mute" id="asof"></span></h2>
+      <div class="kpis" id="kpis"></div>
+      <h2>Spend per day (7-day window)</h2>
+      <div class="card"><svg id="trend" role="img" aria-label="Daily spend trend"></svg><div class="mute" id="trendNote"></div></div>
+      <h2>Instruction quality</h2>
+      <div class="card scroll"><table id="iq"></table></div>
+      <h2>Costliest prompts that were vague or got corrected</h2>
+      <div class="card" id="prompts"></div>
+      <h2>Overcomplication</h2>
+      <div class="card" id="oc"></div>
+      <p style="margin-top:28px"><button class="danger" id="del">Delete all my data</button> <span class="mute">Excerpts are visible to you only; admins see numbers.</span></p>
+    </div>
+  </section>
+
+  <section id="team" hidden>
+    <h2>Team: latest snapshot per person</h2>
+    <div class="card scroll"><table id="teamTable"></table></div>
+  </section>
+</main>
+<script>
+// Everything stored comes from uploads, so it is rendered with textContent
+// only, never as HTML.
+const $ = id => document.getElementById(id);
+const el = (tag, text, cls) => { const e = document.createElement(tag); if (text != null) e.textContent = text; if (cls) e.className = cls; return e; };
+const k = n => n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : String(Math.round(n));
+const pct = x => (x * 100).toFixed(0) + '%';
+const api = p => fetch(p, { credentials: 'same-origin' }).then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
+
+function kpi(label, value, cls) { const d = el('div', null, 'kpi'); d.append(el('div', value, 'v' + (cls ? ' ' + cls : '')), el('div', label, 'l')); return d; }
+function row(cells, head) { const tr = el('tr'); cells.forEach((c, i) => tr.append(el(head ? 'th' : 'td', c, i ? 'n' : ''))); return tr; }
+
+function renderMine(reports) {
+  if (!reports.length) { $('empty').hidden = false; return; }
+  $('mine').hidden = false;
+  const r = reports[reports.length - 1], T = r.totals, Q = r.instructionQuality, O = r.overcomplication;
+  $('asof').textContent = `· snapshot ${r.day}`;
+  $('kpis').replaceChildren(
+    kpi('Spend (input-token equivalents)', k(Q.totalCost)),
+    kpi('Spent on prompts that needed correcting', pct(Q.reworkShare), Q.reworkShare > 0.15 ? 'warn' : ''),
+    kpi('Vague prompts', `${Q.vague.prompts} / ${Q.vague.prompts + Q.anchored.prompts}`),
+    kpi('Cache hit rate', pct(T.cacheHitRate), T.cacheHitRate > 0.85 ? 'good' : ''),
+    kpi('Tool error rate', pct(T.errorRate), T.errorRate > 0.1 ? 'warn' : ''),
+    kpi('Sessions · prompts', `${T.sessions} · ${T.userPrompts}`));
+
+  // Trend: totalCost per daily snapshot, as a simple line.
+  const pts = reports.map(x => x.instructionQuality.totalCost), max = Math.max(1, ...pts), W = 1000, H = 120, pad = 8;
+  const svg = $('trend'); svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.replaceChildren();
+  const ns = 'http://www.w3.org/2000/svg', line = document.createElementNS(ns, 'polyline');
+  line.setAttribute('points', pts.map((v, i) => `${pad + i * (W - 2 * pad) / Math.max(1, pts.length - 1)},${H - pad - v / max * (H - 2 * pad)}`).join(' '));
+  line.setAttribute('fill', 'none'); line.setAttribute('stroke', 'currentColor'); line.setAttribute('stroke-width', '2.5'); line.style.color = 'var(--accent)';
+  svg.append(line);
+  $('trendNote').textContent = `${reports.length} daily snapshots, ${reports[0].day} → ${r.day}. Peak ${k(max)}.`;
+
+  const t = $('iq'); t.replaceChildren(row(['Prompts', 'Count', 'Median cost', 'Lookups before first edit', 'Led to rework'], true));
+  for (const [name, g] of [['Vague', Q.vague], ['Anchored', Q.anchored], ['With done-criteria', Q.withCriteria], ['Without done-criteria', Q.withoutCriteria]])
+    t.append(row([name, g.prompts, k(g.medianCost), g.medianExploreBeforeFirstEdit, pct(g.reworkRate)]));
+
+  const p = $('prompts'); p.replaceChildren();
+  if (!Q.costliestBadPrompts.length) p.append(el('div', 'None this week.', 'mute'));
+  for (const b of Q.costliestBadPrompts) {
+    const d = el('div', null, 'prompt'); d.append(el('strong', `~${k(b.cost)}`), el('q', b.excerpt));
+    b.why.forEach(w => d.append(el('span', w, 'tag'))); p.append(d);
+  }
+
+  const oc = $('oc'); oc.replaceChildren();
+  const flags = Object.entries(O.flags);
+  oc.append(el('div', `Always-on context ~${k(O.medianBaselineContextTokens)} tokens/session · ${O.toolCallsPerPrompt} tool calls per prompt · ${O.subagentRuns} subagents · ${O.nudgePrompts} "continue/yes" prompts`, 'mute'));
+  const fl = el('div'); fl.style.margin = '8px 0';
+  flags.length ? flags.forEach(([f, n]) => fl.append(el('span', `${f} ×${n}`, 'tag'))) : fl.append(el('span', 'No flags', 'tag'));
+  oc.append(fl);
+  if (O.returnsCurve.length > 1) {
+    const rt = el('table'); rt.append(row(['Token bin', 'Sessions', 'Avg tokens', 'Edits+commits', 'Per 1M tokens'], true));
+    O.returnsCurve.forEach(b => rt.append(row([b.bin, b.sessions, k(b.avgTokens), b.avgEditsAndCommits, b.outputPerMillionTokens])));
+    oc.append(rt);
+  }
+}
+
+function renderTeam(people) {
+  const t = $('teamTable'); t.replaceChildren(row(['Person', 'Snapshot', 'Spend', 'Rework share', 'Vague prompts', 'Cache hit', 'Error rate', 'Recurring corrections'], true));
+  for (const p of people) t.append(row([p.name || p.email, p.day, k(p.instructionQuality.totalCost), pct(p.instructionQuality.reworkShare),
+    p.instructionQuality.vague.prompts, pct(p.totals.cacheHitRate), pct(p.totals.errorRate), p.recurring.corrections]));
+}
+
+(async () => {
+  const me = await api('/api/me');
+  $('who').textContent = me.name === me.email ? me.email : `${me.name} · ${me.email}`;
+  renderMine((await api('/api/reports/me')).reports);
+  if (me.admin) {
+    $('tabs').hidden = false;
+    $('tabs').addEventListener('click', async e => {
+      const tab = e.target.dataset?.tab; if (!tab) return;
+      for (const b of $('tabs').children) b.setAttribute('aria-selected', String(b.dataset.tab === tab));
+      $('me').hidden = tab !== 'me'; $('team').hidden = tab !== 'team';
+      if (tab === 'team') renderTeam((await api('/api/team')).people);
+    });
+  }
+  $('del').addEventListener('click', async () => {
+    if (!confirm('Delete every snapshot you have uploaded? This cannot be undone.')) return;
+    await fetch('/api/reports/me', { method: 'DELETE', credentials: 'same-origin' });
+    location.reload();
+  });
+})().catch(e => { document.querySelector('main').append(el('p', `Could not load: ${e.message}`, 'warn')); });
+</script>
+</body>
+</html>

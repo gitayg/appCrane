@@ -21,7 +21,7 @@ What this skill adds:
 
 See `references/market-analysis.md` for the full landscape.
 
-Everything stays local. Transcripts can contain secrets and private code: never send them, or excerpts of them, to any external service, and quote at most a sentence of any prompt in your report.
+Analysis is local. Transcripts can contain secrets and private code: never send them, or excerpts of them, to any external service, and quote at most a sentence of any prompt in your report. The one exception is the opt-in daily upload in §5. It sends a fixed, scrubbed summary to the Work Review hub on app.opswat.com, through `scripts/upload.mjs` only. Never send review data any other way.
 
 ## 1. Measure
 
@@ -135,3 +135,33 @@ On a later run, if a baseline exists:
 A CLAUDE.md rule that didn't reduce its signal is just context overhead. Propose rewriting it or removing it.
 
 Suggest re-running about two weeks after applying fixes.
+
+## 5. Share (daily upload to the Work Review hub)
+
+`scripts/upload.mjs` sends a rolling 7-day summary, at most once a day, to the Work Review hub. The hub is an AppCrane app on app.opswat.com; its source is in `examples/work-review-hub/` in the appCrane repo. There each developer sees their own trend, and app admins see team numbers.
+
+**What leaves the machine:** numeric totals, flags, the returns curve, recurring-correction counts, and up to 5 prompt excerpts.
+- Excerpts are at most 160 characters. Secrets, emails, URLs, IPs, paths and long tokens are scrubbed out.
+- The hub shows excerpts to their author only, never to admins.
+
+**What never leaves:** transcripts, file contents, file paths, shell commands, error text, project names, session IDs.
+
+**Security:**
+- Uploads go over HTTPS only, and only to `app.opswat.com` or its subdomains. The host is pinned in code.
+- Redirects are refused.
+- Auth uses the developer's own AppCrane `dhk_*` key. The key is read from stdin at setup and stored in `~/.config/work-review/key` with owner-only permissions (0600); the uploader refuses a key file others can read.
+- AppCrane's proxy checks the key and passes the verified identity to the hub, which re-validates every field.
+- Each payload sent is kept in `~/.config/work-review/sent/` for audit.
+
+When the user asks to set it up, walk them through these steps. Don't do any of them for them:
+1. Get their personal key from AppCrane (profile → API key) and run:
+   `node <skill-dir>/scripts/upload.mjs --setup --url https://<hub-app-host>`, pasting the key at the prompt (it is read from stdin).
+2. Preview the payload: `node <skill-dir>/scripts/upload.mjs --dry-run`.
+3. Send one now: `node <skill-dir>/scripts/upload.mjs --force`.
+4. Make it daily by adding this to their own `~/.claude/settings.json`. The hook returns at once and uploads in the background only if the last upload is more than 24h old:
+   ```json
+   { "hooks": { "SessionStart": [ { "hooks": [ { "type": "command", "command": "node ~/.claude/skills/work-review/scripts/upload.mjs --hook" } ] } ] } }
+   ```
+   This assumes a personal install at `~/.claude/skills/work-review`. Adjust the path otherwise.
+
+To stop: `upload.mjs --disable`, or remove the hook. To erase what was uploaded, use "Delete all my data" on the hub. Errors go to `~/.config/work-review/upload.log` and never interrupt a session.
