@@ -1,4 +1,7 @@
 {
+  "2.116.0": [
+    "PHP apps without a Dockerfile now build on the newest PHP (8.5, 8.4 or 8.3) that their composer.json allows; new apps with no requirement get 8.5, apps already deployed stay on their current version, and the deploy log says which PHP was chosen and why."
+  ],
   "2.115.0": [
     "SOC 2 controls: two-factor sign-in for password logins (required for platform admins by default), shorter session and idle timeouts for admins, periodic access reviews, a tamper-evident audit chain, weekly restore drills with RPO/RTO, and a signed compliance evidence pack.",
     "FIPS 140-3 mode: AppCrane can refuse to start without a FIPS provider, passwords move to PBKDF2-HMAC-SHA256 at each user's next sign-in, S3 deletes use SHA-256 checksums, and Settings shows the cryptography status.",

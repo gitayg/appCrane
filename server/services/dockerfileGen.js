@@ -203,7 +203,7 @@ function supplyChainLines({ relDir, lockfileMissing, omitDev }) {
  * generation time, as opposed to the ones the generated Dockerfile prints
  * during the build.
  */
-export function ensureDockerfile({ releaseDir, manifest, appBasePath, craneUrl, craneInternalUrl }) {
+export function ensureDockerfile({ releaseDir, manifest, appBasePath, craneUrl, craneInternalUrl, pinnedPhpVersion = null }) {
   const existing = join(releaseDir, 'Dockerfile'); // nosemgrep: path-join-resolve-traversal — releaseDir is an internal computed path
   const warnings = [];
 
@@ -238,15 +238,15 @@ export function ensureDockerfile({ releaseDir, manifest, appBasePath, craneUrl, 
     return { path: existing, userProvided: true, warnings };
   }
 
-  // A PHP release is built from php:8.3-apache by dockerfileGenPhp.js. The
+  // A PHP release is built from php:<version>-apache by dockerfileGenPhp.js. The
   // precedence rule (composer.json wins unless package.json declares a start
   // script or main) lives with detectPhpApp(); everything below this line is
   // the Node path and is reached by exactly the releases that reached it
   // before.
   if (detectPhpApp(releaseDir)) {
-    const php = ensurePhpDockerfile({ releaseDir, manifest, dockerfilePath: existing });
+    const php = ensurePhpDockerfile({ releaseDir, manifest, dockerfilePath: existing, pinnedPhpVersion });
     for (const w of php.warnings) warnings.push(w);
-    return { path: php.path, warnings, runtime: 'php' };
+    return { path: php.path, warnings, runtime: 'php', php: php.php };
   }
 
   const node = pickNodeVersion(manifest);

@@ -79,7 +79,7 @@ test('composer.json alone produces a PHP image, not a Node one', () => {
   assert.equal(detectPhpApp(dir), true);
 
   const { source } = gen(dir);
-  assert.match(source, /^FROM php:8\.3-apache$/m);
+  assert.match(source, /^FROM php:8\.5-apache$/m);
   assert.doesNotMatch(source, /FROM node:/);
   assert.match(source, /composer install --no-dev --prefer-dist --no-interaction/);
 });
@@ -102,7 +102,7 @@ test('the Laravel/Symfony shape — composer.json plus an asset-only package.jso
     'public/index.php': '<?php echo 1;',
   });
   assert.equal(detectPhpApp(dir), true);
-  assert.match(gen(dir).source, /^FROM php:8\.3-apache$/m);
+  assert.match(gen(dir).source, /^FROM php:8\.5-apache$/m);
 });
 
 test('the PHP path says out loud that it does not build Vite assets', () => {
@@ -343,7 +343,7 @@ test('an unparseable composer.json is reported rather than crashing generation',
   const dir = app({ 'composer.json': '{ "require": ', 'composer.lock': LOCK, 'index.php': '<?php' });
   const { warnings, source } = gen(dir);
   assert.ok(warnings.some(w => /not valid JSON/.test(w)));
-  assert.match(source, /^FROM php:8\.3-apache$/m);
+  assert.match(source, /^FROM php:8\.5-apache$/m);
 });
 
 // --- the real thing ------------------------------------------------------

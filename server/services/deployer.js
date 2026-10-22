@@ -1913,7 +1913,9 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       });
       appendLog(`Image ready (Nixpacks): ${image}`);
     } else {
-      const { userProvided, runtime } = ensureDockerfile({ releaseDir, manifest, appBasePath, craneUrl, craneInternalUrl });
+      const { pinnedPhpVersionFor, describePhpBuild } = await import('./phpVersion.js');
+      const pinnedPhpVersion = pinnedPhpVersionFor(db, app.id, env);
+      const { userProvided, runtime, php } = ensureDockerfile({ releaseDir, manifest, appBasePath, craneUrl, craneInternalUrl, pinnedPhpVersion });
       buildRuntime = runtime ?? null;
 
       if (userProvided) {
@@ -1923,10 +1925,11 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
         if (!valid) throw new Error(`Dockerfile validation failed:\n${errors.map(e => '  • ' + e).join('\n')}`);
         injectAppBasePathArg(join(releaseDir, 'Dockerfile'));
         appendLog('Using app-provided Dockerfile (validated)');
+      } else if (runtime === 'php') {
+        appendLog(describePhpBuild(php));
+        db.prepare('UPDATE deployments SET php_version = ? WHERE id = ?').run(php.version, deployId);
       } else {
-        appendLog(runtime === 'php'
-          ? 'Generated Dockerfile (php:8.3-apache, non-root)'
-          : 'Generated Dockerfile (Node Alpine, non-root)');
+        appendLog('Generated Dockerfile (Node Alpine, non-root)');
       }
 
       appendLog('Building docker image...');

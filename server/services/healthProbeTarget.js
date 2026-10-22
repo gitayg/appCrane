@@ -69,7 +69,7 @@ export function resolveHealthProbe({ manifest, app, runtime = null }) {
     return {
       path: PHP_DEFAULT_HEALTH_PATH,
       strict: false,
-      source: 'default / (php:8.3-apache build — AppCrane did not write this app\'s routes)',
+      source: 'default / (php:<version>-apache build — AppCrane did not write this app\'s routes)',
     };
   }
   return {

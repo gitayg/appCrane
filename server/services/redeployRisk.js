@@ -214,7 +214,7 @@ const MAX_REPORTED_PATHS = 12;
 // suppresses. Images booted for this (all already local; no speculative pulls):
 //
 //   leantime/leantime:latest       real catalogue app, Laravel   53 diff lines
-//   php:8.3-apache                 the base 9 catalogue apps use  3 diff lines
+//   php:8.3-apache                 PHP base (php:<v>-apache)      3 diff lines
 //   mariadb:11.4                   declares VOLUME /var/lib/mysql 4 diff lines
 //   redis:8-alpine (bare)          0 diff lines
 //   redis:8-alpine --save 20 1     2 diff lines

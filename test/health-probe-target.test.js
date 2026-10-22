@@ -48,7 +48,7 @@ test('a generated PHP build probes the front controller, not /api/health', () =>
   const r = resolveHealthProbe({ manifest: {}, app: app(), runtime: 'php' });
   assert.equal(r.path, PHP_DEFAULT_HEALTH_PATH);
   assert.notEqual(r.path, DEFAULT_HEALTH_PATH,
-    'php:8.3-apache serves the release front controller; /api/health is an AppCrane-build ' +
+    'php:<version>-apache serves the release front controller; /api/health is an AppCrane-build ' +
     'convention no Laravel or Symfony app has a reason to serve, so probing it 404s for the ' +
     'whole window and the deploy tears down a healthy container');
 });
