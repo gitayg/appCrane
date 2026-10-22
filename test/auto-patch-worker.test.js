@@ -60,7 +60,11 @@ let S;
 let calls;
 function reset() {
   for (const t of ['auto_patch_runs', 'enhancement_comments', 'audit_log', 'events', 'email_queue', 'deployments', 'health_state', 'app_auto_patch']) db.prepare(`DELETE FROM ${t}`).run();
+  db.prepare("DELETE FROM settings WHERE key = 'auto_approve_rce_fixes'").run();
+  // Production runs the branch tip: the only state auto-patch may build on.
+  db.prepare(`INSERT INTO deployments (app_id, env, status, commit_hash, finished_at) VALUES (?, 'production', 'live', ?, datetime('now', '-1 day'))`).run(app.id, TIP.slice(0, 8));
   S = {
+    tip: TIP, onReleaseCheck: null, onPromote: null,
     now: Date.parse('2026-10-22T12:00:00Z'), publishedAgoH: 48, fixedHasAdvisory: false, bump: null,
     sandbox: 'live', sandboxDown: false, rcBlocked: false, prod: 'live', prodDown: false, coder: { live: false }, restore: false,
   };
@@ -70,7 +74,7 @@ function reset() {
     fetchAdvisories: async (ids) => ({ records: new Map(ids.map((i) => [i, ADVISORIES[i]])), failures: new Map() }),
     queryOsv: async () => { calls.osv++; return { ok: true, findings: S.fixedHasAdvisory ? [{ ...FINDING, version: '1.2.6', ids: ['GHSA-NEW1'] }] : [] }; },
     publishedAt: async () => new Date(S.now - S.publishedAgoH * H),
-    branchHead: async () => TIP,
+    branchHead: async () => S.tip,
     readFile: async (_a, path) => { if (repoFiles[path]) return { content: repoFiles[path] }; const e = new Error('nope'); e.code = 'FILE_NOT_FOUND'; throw e; },
     runBump: async () => { calls.bump++; return S.bump || { packageJson: repoFiles['package.json'], packageLock: read('transitive.package-lock.json') }; },
     push: async (_a, files, opts) => { calls.push.push({ files: files.map((f) => f.path), opts }); return { commit: { sha: calls.push.length === 1 ? BUMP : REVERT } }; },
@@ -79,9 +83,10 @@ function reset() {
       db.prepare("UPDATE deployments SET status = ?, commit_hash = ?, finished_at = datetime('now') WHERE id = ?").run(S.sandbox, BUMP.slice(0, 8), id);
       db.prepare("INSERT OR REPLACE INTO health_state (app_id, env, is_down, last_check_at) VALUES (?, 'sandbox', ?, datetime('now'))").run(app.id, S.sandboxDown ? 1 : 0);
     },
-    runReleaseCheck: async () => { calls.releaseCheck++; return { id: 77, blocked: S.rcBlocked, result: S.rcBlocked ? 'fail' : 'pass', checks: S.rcBlocked ? [{ status: 'fail', label: 'Dependency scan', reasons: ['1 vulnerable package'] }] : [] }; },
+    runReleaseCheck: async () => { calls.releaseCheck++; await S.onReleaseCheck?.(); return { id: 77, blocked: S.rcBlocked, result: S.rcBlocked ? 'fail' : 'pass', checks: S.rcBlocked ? [{ status: 'fail', label: 'Dependency scan', reasons: ['1 vulnerable package'] }] : [] }; },
     promoteApp: async (a, userId, opts) => {
       calls.promote.push({ userId, opts });
+      await S.onPromote?.();
       const id = Number(db.prepare(`INSERT INTO deployments (app_id, env, status, commit_hash, finished_at) VALUES (?, 'production', ?, ?, datetime('now', '-1 minute'))`).run(a.id, S.prod, BUMP.slice(0, 8)).lastInsertRowid);
       db.prepare("INSERT OR REPLACE INTO health_state (app_id, env, is_down, last_check_at) VALUES (?, 'production', ?, datetime('now', '+1 minute'))").run(a.id, S.prodDown ? 1 : 0);
       return { deployment_id: id };
@@ -180,7 +185,7 @@ test('sandbox health fails: back to a person, the bump is reverted, production u
   assert.equal(calls.releaseCheck, 0);
   assert.equal(calls.push.length, 2);
   assert.equal(calls.push[1].opts.expectParent, BUMP);
-  assert.equal(db.prepare("SELECT COUNT(*) n FROM deployments WHERE env = 'production'").get().n, 0);
+  assert.equal(db.prepare("SELECT COUNT(*) n FROM deployments WHERE env = 'production'").get().n, 1, 'only the release that was already there');
 });
 
 test('sandbox deploy fails outright: back to a person, production untouched', async () => {
@@ -274,4 +279,82 @@ test('skipped during a database restore, and when the app is opted out', async (
   assert.match((await run()).reason, /auto-patch is off/);
   assert.equal(calls.push.length + calls.bump, 0);
   void owner;
+});
+
+const { setPolicy } = await import('../server/services/autoPatch/policy.js');
+const platformAdmin = () => {
+  const id = db.prepare("SELECT id FROM users WHERE email = 'pa@acme.test'").get()?.id
+    ?? Number(db.prepare("INSERT INTO users (name,email,role,active,api_key_hash,kind) VALUES ('Pat','pa@acme.test','platform_admin',1,'h2','human')").run().lastInsertRowid);
+  return db.prepare('SELECT * FROM users WHERE id = ?').get(id);
+};
+const prodRows = () => db.prepare("SELECT COUNT(*) n FROM deployments WHERE env = 'production'").get().n;
+
+test('the branch has a commit production does not run: back to a person, nothing pushed or promoted', async () => {
+  S.tip = 'd'.repeat(40);
+  const r = await run();
+  assert.equal(r.action, 'fallback');
+  assert.match(r.reason, /changes that are not in production/);
+  assert.equal(calls.bump, 0);
+  assert.equal(calls.push.length, 0);
+  assert.equal(calls.deploy.length, 0);
+  assert.equal(calls.promote.length, 0);
+  assert.equal(prodRows(), 1);
+});
+
+test('production has no live release: back to a person, nothing pushed', async () => {
+  db.prepare("DELETE FROM deployments WHERE env = 'production'").run();
+  const r = await run();
+  assert.equal(r.action, 'fallback');
+  assert.match(r.reason, /production has no live release/);
+  assert.equal(calls.push.length + calls.promote.length, 0);
+});
+
+for (const [name, flip, re] of [
+  ['the platform switch is turned off', () => setPolicy(db, { enabled: false }, platformAdmin()), /turned off .*platform setting is off/],
+  ['the app is opted out', () => setAppOptOut(db, app, { opted_out: true }, owner), /turned off .*opted out/],
+  ['a database restore starts', () => { S.restore = true; }, /database restore started/],
+]) {
+  test(`${name} between sandbox and promote: no promote, the bump is reverted, owners told`, async () => {
+    S.onReleaseCheck = flip;
+    const r = await run();
+    assert.equal(r.action, 'fallback');
+    assert.match(r.reason, re);
+    assert.match(r.reason, /nothing was promoted/);
+    assert.equal(calls.promote.length, 0);
+    assert.equal(calls.push.length, 2, 'bump, then its revert');
+    assert.equal(calls.push[1].opts.expectParent, BUMP);
+    assert.match(calls.push[1].opts.message, /not promoted/);
+    assert.equal(prodRows(), 1);
+    assert.equal(runRow().status, 'fallback');
+    assert.equal(audits('change.auto_patch_fallback').length, 1);
+    assert.equal(db.prepare("SELECT COUNT(*) n FROM email_queue WHERE source = 'auto-patch'").get().n, 1);
+  });
+}
+
+test('production changed between sandbox and promote: no promote', async () => {
+  S.onReleaseCheck = () => db.prepare(`INSERT INTO deployments (app_id, env, status, commit_hash) VALUES (?, 'production', 'live', 'eeeeeeee')`).run(app.id);
+  const r = await run();
+  assert.equal(r.action, 'fallback');
+  assert.match(r.reason, /production changed/);
+  assert.equal(calls.promote.length, 0);
+});
+
+test('turned off after promote: an unhealthy production is not rolled back by the worker, and owners are told to act', async () => {
+  S.prodDown = true;
+  S.onPromote = () => setPolicy(db, { enabled: false }, platformAdmin());
+  const r = await run();
+  assert.equal(r.action, 'fallback');
+  assert.match(r.reason, /automatic rollback did not run because auto-patch was turned off/);
+  assert.equal(calls.rollback.length, 0);
+  const mail = db.prepare("SELECT subject FROM email_queue WHERE source = 'auto-patch'").get();
+  assert.match(mail.subject, /NOT rolled back/);
+});
+
+test('a restore that starts after promote stops the worker\'s rollback too', async () => {
+  S.prodDown = true;
+  S.onPromote = () => { S.restore = true; };
+  const r = await run();
+  assert.equal(r.action, 'fallback');
+  assert.match(r.reason, /database restore started/);
+  assert.equal(calls.rollback.length, 0);
 });

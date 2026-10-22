@@ -1,4 +1,7 @@
 {
+  "2.117.1": [
+    "RCE auto-patch only runs when the branch matches what is live in production, so it can never promote changes a person has not approved, and it re-checks the on/off switch, the app opt-out and running restores right before promoting and before any rollback."
+  ],
   "2.117.0": [
     "RCE auto-patch, on by default: fixes for remote-code-execution advisories in npm dependencies are applied, sandbox-tested, release-checked and promoted by a written, audited policy instead of a person, with automatic rollback and an e-mail to owners. Every other fix keeps the human approval step."
   ],

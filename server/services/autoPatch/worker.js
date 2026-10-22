@@ -217,11 +217,29 @@ async function productionHealthy(db, app, deployment, d) {
   }
 }
 
-async function revertCommit(d, app, branch, commit, files, run) {
+/** The live production deployment, or null. Its commit is what production runs. */
+function liveProduction(db, appId) {
+  return db.prepare(`SELECT id, commit_hash FROM deployments WHERE app_id = ? AND env = 'production' AND status = 'live'
+    ORDER BY id DESC LIMIT 1`).get(appId) || null;
+}
+
+/**
+ * Null when the run may still act on production; otherwise why not. Read
+ * again right before a promote or a rollback, because a person can turn the
+ * policy off, opt the app out or start a restore while a sandbox build runs.
+ */
+async function stillAllowed(db, app, d) {
+  const eff = effectiveForApp(db, app);
+  if (!eff.enabled) return `auto-patch was turned off while this run was in progress (${eff.reason})`;
+  if (await d.restoreInProgress(app.slug)) return 'a database restore started while this run was in progress';
+  return null;
+}
+
+async function revertCommit(d, app, branch, commit, files, run, why = 'sandbox deploy failed') {
   try {
     await d.push(app, files, {
       branch, expectParent: commit, deployOnPush: false,
-      message: `${ACTOR}: revert ${run.package} ${run.to_version} (sandbox deploy failed)`,
+      message: `${ACTOR}: revert ${run.package} ${run.to_version} (${why})`,
     });
     return 'the bump commit was reverted';
   } catch (e) {
@@ -262,6 +280,17 @@ async function execute(db, app, req, run, key, d) {
 
   const branch = app.branch || 'main';
   const tip = await d.branchHead(app, branch);
+  // The bump is built on the branch tip and promoted, so everything on the tip
+  // reaches production with it. Only a tip that IS production may be patched:
+  // a commit a person released to sandbox but never promoted is unreviewed for
+  // production, and auto-patch must not be the thing that ships it.
+  const prodLive = liveProduction(db, app.id);
+  if (!prodLive || !/^[0-9a-f]{7,40}$/i.test(String(prodLive.commit_hash || ''))) {
+    throw fallback('production has no live release with a recorded commit, so there is nothing auto-patch may build on; a person must deploy production first.');
+  }
+  if (!sameCommit(tip, prodLive.commit_hash)) {
+    throw fallback(`the branch has changes that are not in production (${branch} is at ${String(tip).slice(0, 12)}, production deployment #${prodLive.id} runs ${prodLive.commit_hash}); a person must promote them first.`);
+  }
   const pkgText = await readJson(d, app, 'package.json', branch);
   const lockText = await readJson(d, app, 'package-lock.json', branch);
   if (!pkgText || !lockText) throw fallback('the repository has no package.json and package-lock.json at its root (subdirectory lockfiles are not auto-patched).');
@@ -343,6 +372,15 @@ async function execute(db, app, req, run, key, d) {
     throw fallback(`release check #${rc.id} did not pass (${failing}); the fix is live in sandbox #${sandboxId} and production was not touched.`);
   }
 
+  const stop = await stillAllowed(db, app, d);
+  const prodNow = liveProduction(db, app.id);
+  const why = stop || (!prodNow || !sameCommit(tip, prodNow.commit_hash)
+    ? `production changed while this run was in progress (it now runs deployment #${prodNow?.id ?? 'none'})` : null);
+  if (why) {
+    const note = await revertCommit(d, app, branch, commit, original, run, 'not promoted');
+    throw fallback(`${why}; nothing was promoted (the fix is live in sandbox #${sandboxId}) and ${note}.`);
+  }
+
   let promoted;
   try {
     promoted = await d.promoteApp(fresh, null, { expectSandboxDeploymentId: sandboxId });
@@ -356,6 +394,10 @@ async function execute(db, app, req, run, key, d) {
     throw new Outcome('rolled_back', `production deployment #${prodId} ended ${prod.status}; the deploy health gate kept the previous release running.`);
   }
   if (!(await productionHealthy(db, app, prod, d))) {
+    const stopRollback = await stillAllowed(db, app, d);
+    if (stopRollback) {
+      throw fallback(`production deployment #${prodId} failed its health check after going live, and the automatic rollback did not run because ${stopRollback}; a person must roll production back.`);
+    }
     let how;
     try { const r = await d.rollbackApp(fresh, 'production', null, null); how = `rolled back to deployment #${r.rollback_to} (#${r.deployment_id})`; } catch (e) { how = `the rollback failed: ${e.message}`; }
     throw new Outcome('rolled_back', `production deployment #${prodId} failed its health check after going live; ${how}.`);

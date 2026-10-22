@@ -13,7 +13,9 @@ export const AUTO_PATCH_MAIL_SOURCE = 'auto-patch';
 const HEADLINE = {
   applied: (r) => `Auto-patched ${r.package} ${r.from_version} → ${r.to_version} in production`,
   rolled_back: (r) => `Auto-patch of ${r.package} rolled back: production failed its health check`,
-  fallback: (r) => `Auto-patch did not apply ${r.package}: back to you`,
+  fallback: (r) => (r.production_deployment_id
+    ? `Auto-patch of ${r.package} failed in production and was NOT rolled back: act now`
+    : `Auto-patch did not apply ${r.package}: back to you`),
 };
 
 export function autoPatchMail(app, run) {
@@ -31,7 +33,9 @@ export function autoPatchMail(app, run) {
     ? 'A dependency fix for a remote-code-execution advisory passed every guardrail and was shipped without a person approving it. The request closes itself after the next clean scan.'
     : run.status === 'rolled_back'
       ? 'The fix reached production, failed its health check there, and production was rolled back to the previous release. The request is back in your queue.'
-      : 'A guardrail did not hold, so nothing was promoted to production. The request stays in your queue for a person to handle as before.';
+      : run.production_deployment_id
+        ? 'The fix reached production and failed its health check there, and the automatic rollback did not run. A person must check production and roll it back now.'
+        : 'A guardrail did not hold, so nothing was promoted to production. The request stays in your queue for a person to handle as before.';
   const text = [intro, '', ...lines.map((l) => `- ${l}`), '', run.request_id ? requestUrl(run.request_id) : ''].join('\n');
   const html = renderBrandedEmail({
     preheader: HEADLINE[run.status](run),
