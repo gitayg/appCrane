@@ -29,6 +29,13 @@ so nothing failed when it silently fell 22 tools behind the platform (35 adverti
 against 57 real). `test/mcp-catalog-sync.test.js` now fails the moment step 1 is missed,
 but only the discipline written here catches step 2.
 
+## Releasing: update the website changelog
+Every minor or major release (vX.Y.0) also updates the appcrane.dev changelog page
+(`/changelog.html` in the separate `appcrane-website` repo) from `release-notes.json`:
+run `npm run sync:changelog` there, build with `npm test`, and publish the site with
+the release. Patch releases fold into their minor's entry. The page fell 95 minor
+releases behind (v2.21 shown at v2.116) before this step was written down.
+
 ## Data Persistence
 If settings or configuration appear wiped, always check `/data` first.
 AppCrane stores all persistent state (database, env vars, app configs) under the `DATA_DIR` path (default: `./data`).

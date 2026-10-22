@@ -1,4 +1,7 @@
 {
+  "2.117.0": [
+    "RCE auto-patch, on by default: fixes for remote-code-execution advisories in npm dependencies are applied, sandbox-tested, release-checked and promoted by a written, audited policy instead of a person, with automatic rollback and an e-mail to owners. Every other fix keeps the human approval step."
+  ],
   "2.116.0": [
     "PHP apps without a Dockerfile now build on the newest PHP (8.5, 8.4 or 8.3) that their composer.json allows; new apps with no requirement get 8.5, apps already deployed stay on their current version, and the deploy log says which PHP was chosen and why."
   ],

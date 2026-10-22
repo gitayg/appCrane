@@ -74,7 +74,7 @@ export async function createManagedRepo(backend, slug, opts) {
  * before, with no deploy and no extra key.
  */
 export async function pushFilesToManagedRepo(app, files, opts = {}) {
-  const { actorId = null, ...backendOpts } = opts;
+  const { actorId = null, deployOnPush = true, ...backendOpts } = opts;
   const deletions = Array.isArray(backendOpts.deletions) ? backendOpts.deletions : [];
   // Deletion is a local-backend capability only. GitHub's contents API has no
   // way to express one, so rather than let a caller believe a path was removed
@@ -107,8 +107,10 @@ export async function pushFilesToManagedRepo(app, files, opts = {}) {
       const { getDb } = await import('../db.js');
       getDb().prepare('UPDATE apps SET last_managed_push_sha = ? WHERE id = ?').run(result.commit.sha, app.id);
     }
-    const { deployAfterLocalPush } = await import('./deployTrigger.js');
-    result.auto_deploy = await deployAfterLocalPush(app, result, { actorId });
+    if (deployOnPush) {
+      const { deployAfterLocalPush } = await import('./deployTrigger.js');
+      result.auto_deploy = await deployAfterLocalPush(app, result, { actorId });
+    }
   }
   return result;
 }

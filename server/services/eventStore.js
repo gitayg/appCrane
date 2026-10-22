@@ -79,6 +79,7 @@ export function auditKind(action) {
   if (action === 'login-failed') return 'login.failed';
   if (REVEAL_ACTIONS.has(action)) return 'secret.reveal';
   if (action === 'coder.release') return 'coder.release';
+  if (action.startsWith('change.')) return action;
   if (action.startsWith('survey.')) return 'survey';
   if (action.startsWith('task-')) return 'task';
   if (action.startsWith('appstudio.')) return 'request';
@@ -104,6 +105,8 @@ function auditSummary(action, d) {
     const n = Array.isArray(d?.keys) ? d.keys.length : null;
     return `Revealed ${n == null ? 'secret values' : `${n} secret value(s)`}${d?.env ? ` (${d.env})` : ''}`;
   }
+  if (action === 'change.auto_approved') return `Change approved by ${d?.policy || 'policy'}: ${d?.package} ${d?.from_version} → ${d?.to_version} (${d?.advisory}), ${d?.outcome}`;
+  if (action === 'change.auto_patch_fallback') return `Auto-patch handed back to a person: ${d?.package} (${d?.advisory})`;
   return `Audit: ${action.replace(/[-_.]+/g, ' ')}`;
 }
 

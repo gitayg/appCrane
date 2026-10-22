@@ -29,6 +29,7 @@ import { SiemSinks } from '../components/siem/SiemSinks'
 import { LlmGatewaySettingsCard } from '../components/llm/LlmGatewaySettingsCard'
 import { CryptographyCard } from '../components/crypto/CryptographyCard'
 import { ClassificationPolicyCard } from '../components/intake/ClassificationPolicyCard'
+import { AutoPatchPolicyCard } from '../components/autoPatch/AutoPatchPolicyCard'
 
 function SecurityTab() {
   const [certFile, setCertFile] = useState('')
@@ -1366,7 +1367,7 @@ export function Settings() {
       {panel('account', <AccountTab />)}
       {panel('mcp', <Mcp />)}
       {panel('skills', <SkillsTab />)}
-      {panel('security', <><SecurityTab /><SignInPolicyCard /><McpAuthPolicyCard /><OAuthAdminCard /><ClassificationPolicyCard /><CryptographyCard /><LlmGatewaySettingsCard /><SiemSinks /></>)}
+      {panel('security', <><SecurityTab /><SignInPolicyCard /><McpAuthPolicyCard /><OAuthAdminCard /><ClassificationPolicyCard /><AutoPatchPolicyCard /><CryptographyCard /><LlmGatewaySettingsCard /><SiemSinks /></>)}
       {panel('users', <Users />)}
       {panel('roles', <RolesTab />)}
       {panel('github', <GithubTab />)}

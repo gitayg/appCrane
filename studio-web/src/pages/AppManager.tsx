@@ -8,6 +8,7 @@ import { BackupsCard } from '../components/BackupsCard'
 import { AccessRulesCard } from '../components/AccessRulesCard'
 import { IntakeCard } from '../components/intake/IntakeCard'
 import { ReleaseCheckPanel } from '../components/intake/ReleaseCheckPanel'
+import { AutoPatchAppCard } from '../components/autoPatch/AutoPatchAppCard'
 import { LlmGatewayAppCard } from '../components/llm/LlmGatewayAppCard'
 import { AppMcpCard } from '../components/appMcp/AppMcpCard'
 import { AppTimeline } from '../components/events/AppTimeline'
@@ -1184,6 +1185,7 @@ export function AppManager() {
             <AccessRulesCard slug={currentApp} env={currentEnv} reload={reloadCounter} onMsg={showMsg} />
             <IntakeCard slug={currentApp} onMsg={showMsg} />
             <ReleaseCheckPanel slug={currentApp} reload={reloadCounter} onMsg={showMsg} />
+            <AutoPatchAppCard slug={currentApp} reload={reloadCounter} onMsg={showMsg} />
             <LlmGatewayAppCard slug={currentApp} isPlatformAdmin={isAdminUser} onMsg={showMsg} />
             <AppMcpCard slug={currentApp} env={currentEnv} reload={reloadCounter} onMsg={showMsg} />
             <AppTimeline slug={currentApp} />

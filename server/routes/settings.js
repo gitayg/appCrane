@@ -797,6 +797,9 @@ router.put('/:key', requireAuth, requirePlatformAdmin, (req, res) => {
   if (req.params.key.startsWith(MARIADB_ENCRYPTION_PREFIX)) {
     return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Use /api/managed-db/encryption to change MariaDB encryption' } });
   }
+  if (req.params.key === 'auto_approve_rce_fixes' || req.params.key === 'auto_patch_cooldown_hours') {
+    return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Use /api/auto-patch/policy to change the auto-patch policy' } });
+  }
   const db = getDb();
 
   // v2.7.0: guard SSO-only so it can't lock the org out. Refuse to turn it

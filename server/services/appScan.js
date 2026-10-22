@@ -406,6 +406,11 @@ async function hydrateAdvisories(ids) {
   return { records, failures };
 }
 
+/** Hydrated advisory records for `ids` (same cache and retries as a scan). */
+export async function fetchAdvisories(ids) {
+  return hydrateAdvisories([...new Set(ids)]);
+}
+
 /**
  * Ask OSV about these packages, in two passes: querybatch to find out WHICH are
  * affected, then /v1/vulns/<id> for the advisories that say what to upgrade to.

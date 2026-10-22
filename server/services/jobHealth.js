@@ -35,6 +35,7 @@ export const JOBS = {
   'audit-chain':      { label: 'Audit chain sealer and verifier',   cadenceMs: 5 * MIN },
   'restore-drill':    { label: 'Scheduled restore drill',           cadenceMs: 7 * DAY },
   'access-reviews':   { label: 'Access review campaigns and reminders', cadenceMs: 60 * MIN },
+  'auto-patch':       { label: 'RCE auto-patch worker',             cadenceMs: 15 * MIN },
 };
 
 const started = new Map();

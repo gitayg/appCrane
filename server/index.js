@@ -1028,6 +1028,7 @@ app.use('/api/apps', (await import('./routes/accessRules.js')).default); // /api
 app.use('/api', (await import('./routes/apiKeys.js')).default); // /api/me/api-key, /api/me/api-key/rotate, /api/api-key-policy
 app.use('/api', (await import('./routes/intake.js')).default); // /api/apps/:slug/intake[/review], /api/apps/:slug/classification, /api/intake/queue, /api/data-classification/{policy,apps}
 app.use('/api', (await import('./routes/releaseCheck.js')).default); // /api/apps/:slug/release-check[/run|/exceptions]
+app.use('/api', (await import('./routes/autoPatch.js')).default); // /api/auto-patch/policy, /api/apps/:slug/auto-patch
 app.use('/api', (await import('./routes/accessReviews.js')).default); // /api/access-reviews/*: periodic access reviews
 app.use('/api', (await import('./routes/auditChain.js')).default); // /api/audit-chain/*: tamper-evident audit
 app.use('/api/adopt', (await import('./routes/adopt.js')).default); // Adopt an app: analyse a GitHub repo or zip, adopt to sandbox
@@ -1743,6 +1744,7 @@ app.listen(PORT, HOST, async () => {
     const { startLocalBackupScheduler } = await import('./services/localBackup.js');
     startLocalBackupScheduler();
     try { const { startRestoreDrillScheduler } = await import('./services/restoreDrills.js'); startRestoreDrillScheduler(); } catch (e) { log.error('Restore drill scheduler failed to start: ' + e.message); }
+    try { const { startAutoPatchWorker } = await import('./services/autoPatch/worker.js'); startAutoPatchWorker(); } catch (e) { log.error('Auto-patch worker failed to start: ' + e.message); }
     // AppCrane has no setup wizard — boot IS first run. So the state gets said
     // once, in the log every new install reads, rather than waiting for someone
     // to open Settings → Backup. One line per boot, not a standing banner: the

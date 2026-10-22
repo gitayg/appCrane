@@ -985,13 +985,16 @@ export async function rollbackApp(app, env, deploymentId, userId) {
  * Shared by POST /api/apps/:slug/promote and the appcrane_promote MCP tool.
  * Caller is responsible for authz (must require deploy.production).
  */
-export async function promoteApp(app, userId) {
+export async function promoteApp(app, userId, opts = {}) {
   const db = getDb();
 
   const sandboxDeploy = db.prepare(
     "SELECT * FROM deployments WHERE app_id = ? AND env = 'sandbox' AND status = 'live' ORDER BY started_at DESC LIMIT 1"
   ).get(app.id);
   if (!sandboxDeploy) throw new AppError('No live sandbox deployment to promote', 400, 'NO_SANDBOX_DEPLOY');
+  if (opts.expectSandboxDeploymentId != null && sandboxDeploy.id !== opts.expectSandboxDeploymentId) {
+    throw new AppError(`The live sandbox deployment is #${sandboxDeploy.id}, not #${opts.expectSandboxDeploymentId}; nothing was promoted.`, 409, 'SANDBOX_CHANGED');
+  }
 
   // v2.7.12: promotion gate — only advance a HEALTHY sandbox to production.
   const sbHealth = db.prepare("SELECT is_down FROM health_state WHERE app_id = ? AND env = 'sandbox'").get(app.id);
