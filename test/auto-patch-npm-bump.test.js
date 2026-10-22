@@ -121,3 +121,24 @@ test('live: npm in the helper container bumps only the target (AUTO_PATCH_LIVE_D
   const vd = verifyNpmBump({ before: base, after: dd, name: 'lodash', fromVersion: '4.17.15', toVersion: '4.17.21', mode: 'direct' });
   assert.deepEqual(vd.problems, []);
 });
+
+test('npmVersionInfo reads the publish time and the maintainer\'s deprecation message from the packument', async () => {
+  const { npmVersionInfo } = await import('../server/services/autoPatch/registry.js');
+  const real = global.fetch;
+  const doc = {
+    versions: { '4.18.0': { deprecated: 'Bad release. Please use lodash@4.17.21 instead.' }, '4.18.1': {} },
+    time: { '4.18.0': '2026-03-31T18:18:42.717Z', '4.18.1': '2026-04-01T21:01:20.458Z' },
+  };
+  const seen = [];
+  global.fetch = async (url) => { seen.push(String(url)); return { ok: true, status: 200, json: async () => doc }; };
+  try {
+    const bad = await npmVersionInfo('lodash', '4.18.0');
+    assert.equal(bad.published.toISOString(), '2026-03-31T18:18:42.717Z');
+    assert.equal(bad.deprecated, 'Bad release. Please use lodash@4.17.21 instead.');
+    assert.equal((await npmVersionInfo('lodash', '4.18.1')).deprecated, null);
+    await assert.rejects(npmVersionInfo('lodash', '9.9.9'), /not on the npm registry/);
+    assert.equal(seen[0], 'https://registry.npmjs.org/lodash');
+  } finally {
+    global.fetch = real;
+  }
+});

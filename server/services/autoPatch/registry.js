@@ -10,8 +10,13 @@ export function packumentUrl(name) {
   return `${NPM_REGISTRY}${name.startsWith('@') ? `@${encodeURIComponent(name.slice(1))}` : encodeURIComponent(name)}`;
 }
 
-/** @returns {Promise<Date>} throws when the registry does not say. */
-export async function npmPublishedAt(name, version) {
+/**
+ * @returns {Promise<{ published: Date, deprecated: string|null }>} throws when
+ * the registry does not say when it was published. `deprecated` is the
+ * maintainer's deprecation message for that version ("Bad release. Please use
+ * ..."), which OSV does not carry.
+ */
+export async function npmVersionInfo(name, version) {
   const res = await fetch(packumentUrl(name), {
     headers: { Accept: 'application/json' },
     signal: AbortSignal.timeout(TIMEOUT_MS),
@@ -22,5 +27,6 @@ export async function npmPublishedAt(name, version) {
   const t = doc?.time?.[version];
   const d = typeof t === 'string' ? new Date(t) : null;
   if (!d || Number.isNaN(d.getTime())) throw new Error(`the npm registry has no publish time for ${name}@${version}`);
-  return d;
+  const dep = doc?.versions?.[version]?.deprecated;
+  return { published: d, deprecated: typeof dep === 'string' && dep.trim() ? dep.trim().slice(0, 300) : null };
 }

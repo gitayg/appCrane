@@ -64,7 +64,7 @@ function reset() {
   // Production runs the branch tip: the only state auto-patch may build on.
   db.prepare(`INSERT INTO deployments (app_id, env, status, commit_hash, finished_at) VALUES (?, 'production', 'live', ?, datetime('now', '-1 day'))`).run(app.id, TIP.slice(0, 8));
   S = {
-    tip: TIP, onReleaseCheck: null, onPromote: null,
+    tip: TIP, onReleaseCheck: null, onPromote: null, objects: [TIP, BUMP, REVERT],
     now: Date.parse('2026-10-22T12:00:00Z'), publishedAgoH: 48, fixedHasAdvisory: false, bump: null,
     sandbox: 'live', sandboxDown: false, rcBlocked: false, prod: 'live', prodDown: false, coder: { live: false }, restore: false,
   };
@@ -73,14 +73,14 @@ function reset() {
     now: () => S.now, pollMs: 1, healthSettleMs: 0, deployTimeoutMs: 2000,
     fetchAdvisories: async (ids) => ({ records: new Map(ids.map((i) => [i, ADVISORIES[i]])), failures: new Map() }),
     queryOsv: async () => { calls.osv++; return { ok: true, findings: S.fixedHasAdvisory ? [{ ...FINDING, version: '1.2.6', ids: ['GHSA-NEW1'] }] : [] }; },
-    publishedAt: async () => new Date(S.now - S.publishedAgoH * H),
+    versionInfo: async () => ({ published: new Date(S.now - S.publishedAgoH * H), deprecated: S.deprecated || null }),
     branchHead: async () => S.tip,
     readFile: async (_a, path) => { if (repoFiles[path]) return { content: repoFiles[path] }; const e = new Error('nope'); e.code = 'FILE_NOT_FOUND'; throw e; },
     runBump: async () => { calls.bump++; return S.bump || { packageJson: repoFiles['package.json'], packageLock: read('transitive.package-lock.json') }; },
     push: async (_a, files, opts) => { calls.push.push({ files: files.map((f) => f.path), opts }); return { commit: { sha: calls.push.length === 1 ? BUMP : REVERT } }; },
     deployApp: async (id, _a, env) => {
       calls.deploy.push({ id, env });
-      db.prepare("UPDATE deployments SET status = ?, commit_hash = ?, finished_at = datetime('now') WHERE id = ?").run(S.sandbox, BUMP.slice(0, 8), id);
+      db.prepare("UPDATE deployments SET status = ?, commit_hash = ?, commit_sha = ?, finished_at = datetime('now') WHERE id = ?").run(S.sandbox, BUMP.slice(0, 8), S.sandboxSha || null, id);
       db.prepare("INSERT OR REPLACE INTO health_state (app_id, env, is_down, last_check_at) VALUES (?, 'sandbox', ?, datetime('now'))").run(app.id, S.sandboxDown ? 1 : 0);
     },
     runReleaseCheck: async () => { calls.releaseCheck++; await S.onReleaseCheck?.(); return { id: 77, blocked: S.rcBlocked, result: S.rcBlocked ? 'fail' : 'pass', checks: S.rcBlocked ? [{ status: 'fail', label: 'Dependency scan', reasons: ['1 vulnerable package'] }] : [] }; },
@@ -97,6 +97,8 @@ function reset() {
     assessRisk: async () => ({ at_risk: false }),
     coderState: async () => S.coder,
     restoreInProgress: async () => S.restore,
+    // The repository's objects: a hash resolves only when exactly one has that prefix.
+    resolveCommit: async (_slug, h) => { const m = S.objects.filter((o) => o.startsWith(String(h))); return m.length === 1 ? m[0] : null; },
   });
 }
 beforeEach(reset);
@@ -357,4 +359,45 @@ test('a restore that starts after promote stops the worker\'s rollback too', asy
   assert.equal(r.action, 'fallback');
   assert.match(r.reason, /database restore started/);
   assert.equal(calls.rollback.length, 0);
+});
+
+test('a tip that shares production\'s short hash but is a different commit: back to a person', async () => {
+  const crafted = TIP.slice(0, 8) + '9'.repeat(32);
+  S.tip = crafted;
+  db.prepare("UPDATE deployments SET commit_sha = ? WHERE env = 'production'").run(TIP);
+  const r = await run();
+  assert.equal(r.action, 'fallback');
+  assert.match(r.reason, /changes that are not in production/);
+  assert.equal(calls.push.length + calls.promote.length + calls.bump, 0);
+});
+
+test('an older production row whose short hash is ambiguous in the repository: back to a person', async () => {
+  S.tip = TIP;
+  S.objects = [TIP, TIP.slice(0, 8) + '9'.repeat(32), BUMP, REVERT];
+  const r = await run();
+  assert.equal(r.action, 'fallback');
+  assert.match(r.reason, /does not name exactly one commit/);
+  assert.equal(calls.push.length + calls.promote.length + calls.bump, 0);
+});
+
+test('a production row with the full SHA recorded is matched exactly, without resolving the short hash', async () => {
+  db.prepare("UPDATE deployments SET commit_sha = ?, commit_hash = 'zzzzzzzz' WHERE env = 'production'").run(TIP);
+  const r = await run();
+  assert.equal(r.action, 'applied', r.reason);
+});
+
+test('sandbox reports a build sharing the bump\'s short hash but a different commit: no promote', async () => {
+  S.sandboxSha = BUMP.slice(0, 8) + '7'.repeat(32);
+  const r = await run();
+  assert.equal(r.action, 'fallback');
+  assert.match(r.reason, /not the bump commit/);
+  assert.equal(calls.promote.length, 0);
+});
+
+test('a fixed version deprecated on npm ("Bad release") is not shipped: back to a person, nothing committed', async () => {
+  S.deprecated = 'Bad release. Please use lodash@4.17.21 instead.';
+  const r = await run();
+  assert.equal(r.action, 'fallback');
+  assert.match(r.reason, /is deprecated on npm \("Bad release/);
+  assert.equal(calls.bump + calls.push.length + calls.promote.length, 0);
 });

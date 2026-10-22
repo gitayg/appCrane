@@ -46,6 +46,7 @@ export const HOST_CPU_WEIGHT = 1000;
 
 export const CPU_APP_FLAG = `--cpu-shares=${CPU_SHARES.app}`;
 export const CPU_DB_FLAG = `--cpu-shares=${CPU_SHARES.db}`;
+export const CPU_BUILD_FLAG = `--cpu-shares=${CPU_SHARES.build}`;
 
 export const HOST_UNITS = Object.freeze(['appcrane.service', 'caddy.service', 'ssh.service', 'sshd.service']);
 export const DROPIN_NAME = '50-appcrane-cpu-priority.conf';

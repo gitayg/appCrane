@@ -19,6 +19,7 @@ import { classifyAdvisory } from './classify.js';
 import { effectiveForApp, POLICY_NAME } from './policy.js';
 import { dependencyMode, verifyNpmBump, NPM_REGISTRY, NPM_HELPER_MEMORY_MB } from './npmBump.js';
 import { sendAutoPatchMail } from './mail.js';
+import { deploymentCommit, isFullSha } from './commits.js';
 
 export const ACTOR = 'AppCrane auto-patch';
 export const SWEEP_MS = 15 * 60 * 1000;
@@ -32,7 +33,7 @@ const defaults = {
   healthSettleMs: 5 * 60 * 1000,
   fetchAdvisories: async (ids) => (await import('../appScan.js')).fetchAdvisories(ids),
   queryOsv: async (pkgs) => (await import('../appScan.js')).queryOsv(pkgs),
-  publishedAt: async (name, version) => (await import('./registry.js')).npmPublishedAt(name, version),
+  versionInfo: async (name, version) => (await import('./registry.js')).npmVersionInfo(name, version),
   runBump: async (a) => (await import('./npmBump.js')).runNpmBump(a),
   branchHead: async (app, branch) => (await import('../managedRepo.js')).localBranchHeadSha(app, branch),
   readFile: async (app, path, branch) => (await import('../managedRepo.js')).readManagedRepoFile(app, path, { branch }),
@@ -54,6 +55,7 @@ const defaults = {
     return { live: true, dirty: listWorkspaceChanges(c.workspaceDir).length > 0 };
   },
   usesLocalRepo: async (app) => (await import('../managedRepo.js')).usesLocalRepo(app),
+  resolveCommit: async (slug, hash) => (await import('./commits.js')).resolveCommitExact(slug, hash),
 };
 
 let testDeps = null;
@@ -190,14 +192,15 @@ function finish(db, app, run, outcome, now = Date.now()) {
 async function waitForDeployment(db, id, d) {
   const deadline = d.now() + d.deployTimeoutMs;
   for (;;) {
-    const row = db.prepare('SELECT id, status, commit_hash, finished_at FROM deployments WHERE id = ?').get(id);
+    const row = db.prepare('SELECT id, status, commit_hash, commit_sha, finished_at FROM deployments WHERE id = ?').get(id);
     if (row && ['live', 'failed', 'rolled_back'].includes(row.status)) return row;
     if (d.now() > deadline) return row || { id, status: 'timeout' };
     await sleep(d.pollMs);
   }
 }
 
-const sameCommit = (a, b) => !!a && !!b && (String(a).startsWith(String(b)) || String(b).startsWith(String(a)));
+// Commits are compared as full 40-hex SHAs and nothing else (commits.js).
+const exactCommit = (a, b) => isFullSha(a) && a === b;
 
 async function readJson(d, app, path, branch) {
   try { return (await d.readFile(app, path, branch)).content; } catch (e) {
@@ -219,7 +222,7 @@ async function productionHealthy(db, app, deployment, d) {
 
 /** The live production deployment, or null. Its commit is what production runs. */
 function liveProduction(db, appId) {
-  return db.prepare(`SELECT id, commit_hash FROM deployments WHERE app_id = ? AND env = 'production' AND status = 'live'
+  return db.prepare(`SELECT id, commit_hash, commit_sha FROM deployments WHERE app_id = ? AND env = 'production' AND status = 'live'
     ORDER BY id DESC LIMIT 1`).get(appId) || null;
 }
 
@@ -266,11 +269,14 @@ async function execute(db, app, req, run, key, d) {
   if (q.findings.length) throw fallback(`${key.name}@${finding.fixed} has advisories of its own (${q.findings.flatMap((f) => f.ids).join(', ')}).`);
 
   const cooldownMs = effectiveForApp(db, app).policy.cooldown_hours * 3600_000;
-  let published;
-  try { published = await d.publishedAt(key.name, finding.fixed); } catch (e) {
+  let published, deprecated;
+  try { ({ published, deprecated } = await d.versionInfo(key.name, finding.fixed)); } catch (e) {
     if (/not on the npm registry/.test(e.message)) throw fallback(e.message);
     throw defer(`the npm registry did not say when ${key.name}@${finding.fixed} was published; will retry`, RETRY_SOON_MS);
   }
+  // A fix its own maintainers withdrew is not one to ship without a person
+  // (lodash 4.18.0: "Bad release. Please use lodash@4.17.21 instead.").
+  if (deprecated) throw fallback(`${key.name}@${finding.fixed} is deprecated on npm ("${deprecated}"); a person must choose the version.`);
   const readyAt = published.getTime() + cooldownMs;
   if (d.now() < readyAt) {
     const o = defer(`${key.name}@${finding.fixed} was published ${published.toISOString()}; the policy waits ${cooldownMs / 3600_000}h, so it is applied after ${new Date(readyAt).toISOString()}.`, readyAt - d.now());
@@ -285,11 +291,15 @@ async function execute(db, app, req, run, key, d) {
   // a commit a person released to sandbox but never promoted is unreviewed for
   // production, and auto-patch must not be the thing that ships it.
   const prodLive = liveProduction(db, app.id);
-  if (!prodLive || !/^[0-9a-f]{7,40}$/i.test(String(prodLive.commit_hash || ''))) {
+  if (!prodLive || !(prodLive.commit_sha || prodLive.commit_hash)) {
     throw fallback('production has no live release with a recorded commit, so there is nothing auto-patch may build on; a person must deploy production first.');
   }
-  if (!sameCommit(tip, prodLive.commit_hash)) {
-    throw fallback(`the branch has changes that are not in production (${branch} is at ${String(tip).slice(0, 12)}, production deployment #${prodLive.id} runs ${prodLive.commit_hash}); a person must promote them first.`);
+  const prodSha = await deploymentCommit(app.slug, prodLive, d.resolveCommit);
+  if (!prodSha) {
+    throw fallback(`production deployment #${prodLive.id} records commit ${prodLive.commit_hash}, which does not name exactly one commit in the repository (missing or ambiguous); a person must check production.`);
+  }
+  if (!exactCommit(tip, prodSha)) {
+    throw fallback(`the branch has changes that are not in production (${branch} is at ${String(tip).slice(0, 12)}, production deployment #${prodLive.id} runs ${prodSha.slice(0, 12)}); a person must promote them first.`);
   }
   const pkgText = await readJson(d, app, 'package.json', branch);
   const lockText = await readJson(d, app, 'package-lock.json', branch);
@@ -363,7 +373,7 @@ async function execute(db, app, req, run, key, d) {
     const note = await revertCommit(d, app, branch, commit, original, run);
     throw fallback(`sandbox deployment #${sandboxId} ${sb.status === 'live' ? 'is failing its health check' : `ended ${sb.status}`}; production was not touched and ${note}.`);
   }
-  if (!sameCommit(sb.commit_hash, commit)) throw fallback(`sandbox deployment #${sandboxId} built ${sb.commit_hash}, not the bump commit ${commit.slice(0, 12)} (another push landed); production was not touched.`);
+  if (!exactCommit(await deploymentCommit(app.slug, sb, d.resolveCommit), commit)) throw fallback(`sandbox deployment #${sandboxId} built ${sb.commit_hash}, not the bump commit ${commit.slice(0, 12)} (another push landed); production was not touched.`);
 
   const rc = await d.runReleaseCheck({ db, app: fresh, userId: null, trigger: 'auto-patch' });
   update(db, run, { release_check_id: rc.id });
@@ -374,7 +384,7 @@ async function execute(db, app, req, run, key, d) {
 
   const stop = await stillAllowed(db, app, d);
   const prodNow = liveProduction(db, app.id);
-  const why = stop || (!prodNow || !sameCommit(tip, prodNow.commit_hash)
+  const why = stop || (!prodNow || !exactCommit(await deploymentCommit(app.slug, prodNow, d.resolveCommit), tip)
     ? `production changed while this run was in progress (it now runs deployment #${prodNow?.id ?? 'none'})` : null);
   if (why) {
     const note = await revertCommit(d, app, branch, commit, original, run, 'not promoted');

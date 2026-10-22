@@ -1,4 +1,8 @@
 {
+  "2.117.2": [
+    "Automatic security fixes are stricter: they only ship when the code is exactly what is already in production, so nothing unapproved can slip out with them.",
+    "The background job that applies those fixes now gives way to your apps when the server is busy."
+  ],
   "2.117.1": [
     "RCE auto-patch only runs when the branch matches what is live in production, so it can never promote changes a person has not approved, and it re-checks the on/off switch, the app opt-out and running restores right before promoting and before any rollback."
   ],

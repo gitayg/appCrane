@@ -24,7 +24,7 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync, chmodSync, mkdirSync 
 import { join, resolve } from 'path';
 import { randomBytes } from 'crypto';
 import { OOM_APP_FLAG } from '../oomPriority.js';
-import { CPU_SHARES } from '../cpuPriority.js';
+import { CPU_BUILD_FLAG } from '../cpuPriority.js';
 
 export const NPM_REGISTRY = 'https://registry.npmjs.org/';
 export const NPM_HELPER_IMAGE = process.env.AUTO_PATCH_NPM_IMAGE || 'node:22-slim';
@@ -59,7 +59,7 @@ export function npmHelperArgs({ workDir, name, version, mode, containerName }) {
     '--name', containerName,
     '--label', NPM_HELPER_LABEL,
     OOM_APP_FLAG,
-    `--cpu-shares=${CPU_SHARES.build}`,
+    CPU_BUILD_FLAG,
     '--pull', 'missing',
     '--user', '1000:1000',
     '--cap-drop', 'ALL',

@@ -931,9 +931,9 @@ export async function rollbackApp(app, env, deploymentId, userId) {
   symlinkSync(releaseDir, currentLink);
 
   const rollbackInsert = db.prepare(`
-    INSERT INTO deployments (app_id, env, version, status, commit_hash, release_path, deployed_by, log)
-    VALUES (?, ?, ?, 'pending', ?, ?, ?, ?)
-  `).run(app.id, env, target.version, target.commit_hash, releaseDir, userId, `Rollback to deployment #${target.id}`);
+    INSERT INTO deployments (app_id, env, version, status, commit_hash, commit_sha, release_path, deployed_by, log)
+    VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?)
+  `).run(app.id, env, target.version, target.commit_hash, target.commit_sha || null, releaseDir, userId, `Rollback to deployment #${target.id}`);
   const newId = rollbackInsert.lastInsertRowid;
 
   // v2.53.0: provenance travels with the rollback. Without this the restored
@@ -1067,9 +1067,9 @@ export async function promoteApp(app, userId, opts = {}) {
   // instead of a github_url that happens to be set deciding the path.
   if (usesLocalRepo(app) || ((app.source_type === 'github' || app.source_type === 'managed') && app.github_url)) {
     const freshResult = db.prepare(`
-      INSERT INTO deployments (app_id, env, version, status, commit_hash, deployed_by, log)
-      VALUES (?, 'production', ?, 'pending', ?, ?, ?)
-    `).run(app.id, sandboxDeploy.version, sandboxDeploy.commit_hash, userId,
+      INSERT INTO deployments (app_id, env, version, status, commit_hash, commit_sha, deployed_by, log)
+      VALUES (?, 'production', ?, 'pending', ?, ?, ?, ?)
+    `).run(app.id, sandboxDeploy.version, sandboxDeploy.commit_hash, sandboxDeploy.commit_sha || null, userId,
       `Promote from sandbox #${sandboxDeploy.id} — fresh production build @ ${sandboxDeploy.commit_hash || 'HEAD'}`);
     const freshDeployId = freshResult.lastInsertRowid;
     // v2.7.12: build production from the EXACT sandbox commit (targetCommit),
@@ -1077,7 +1077,7 @@ export async function promoteApp(app, userId, opts = {}) {
     // sandbox. A fresh build (not the sandbox image) is still required so the
     // bundler bakes the prod base path /<slug>/. deployApp clones managed repos
     // with the service-account token, so this works for source_type='managed'.
-    deployApp(freshDeployId, app, 'production', prodPorts, { targetCommit: sandboxDeploy.commit_hash }).catch(err => {
+    deployApp(freshDeployId, app, 'production', prodPorts, { targetCommit: sandboxDeploy.commit_sha || sandboxDeploy.commit_hash }).catch(err => {
       log.error(`Promote build ${freshDeployId} for ${app.slug} failed: ${err.message}`);
     });
     return { deployment_id: freshDeployId, status: 'pending', mode: 'rebuild', version: sandboxDeploy.version, from_sandbox: sandboxDeploy.id };
@@ -1314,6 +1314,9 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     // 1. Clone or locate release
     const timestamp = Date.now();
     let commitHash = 'unknown';
+    // The full SHA beside the short one (migration 150): auto-patch compares
+    // commits exactly, and a short prefix can be brute-forced.
+    let commitSha = null;
     // v2.5.16: capture the commit message too so the What's New dialog
     // has actual content to show end users on a version bump. Previously
     // only the webhook + manual-upload paths populated this column; the
@@ -1620,6 +1623,8 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       try {
         commitHash = execFileSync('git', ['-C', releaseDir, 'rev-parse', '--short', 'HEAD'], { timeout: 5000 })
           .toString().trim();
+        const full = execFileSync('git', ['-C', releaseDir, 'rev-parse', 'HEAD'], { timeout: 5000 }).toString().trim();
+        if (/^[0-9a-f]{40}$/.test(full)) commitSha = full;
       } catch (e) {}
 
       // Get commit message (subject + body). %s is the subject line,
@@ -2393,9 +2398,9 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     // rollbackApp reads this column, which is why it needed an image branch of
     // its own rather than the release_path check it hard-fails on.
     db.prepare(`
-      UPDATE deployments SET status = 'live', version = ?, commit_hash = ?, commit_message = ?, release_path = ?, finished_at = datetime('now'), log = ?
+      UPDATE deployments SET status = 'live', version = ?, commit_hash = ?, commit_sha = COALESCE(?, commit_sha), commit_message = ?, release_path = ?, finished_at = datetime('now'), log = ?
       WHERE id = ?
-    `).run(manifest.version || 'unknown', commitHash, commitMessage, isImageDeploy ? null : releaseDir, deployLog.join('\n'), deployId);
+    `).run(manifest.version || 'unknown', commitHash, commitSha, commitMessage, isImageDeploy ? null : releaseDir, deployLog.join('\n'), deployId);
     recordDeployEvent(deployId, 'succeeded');
     // Refresh AI codebase context in background after production deploy —
     // there is no codebase to index for an image app.

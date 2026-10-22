@@ -49,6 +49,7 @@ test('weights order host services over databases over apps over builds', () => {
   assert.deepEqual(prio.CPU_SHARES, { app: 128, db: 256, build: 2 });
   assert.equal(prio.CPU_APP_FLAG, '--cpu-shares=128');
   assert.equal(prio.CPU_DB_FLAG, '--cpu-shares=256');
+  assert.equal(prio.CPU_BUILD_FLAG, '--cpu-shares=2');
   assert.ok(prio.HOST_CPU_WEIGHT >= 1000 && prio.HOST_CPU_WEIGHT <= 10000, 'systemd range 1..10000');
 });
 
@@ -62,7 +63,7 @@ test('no `docker run` argv builder in server/ omits the CPU weight flag', () => 
       const where = `${file.slice(ROOT.length + 1)}:${src.slice(0, at).split('\n').length}`;
       builders.push(where);
       const window = src.slice(at, Math.min(at + 2500, starts[i + 1] ?? Infinity));
-      if (!/CPU_(APP|DB)_FLAG/.test(window)) missing.push(where);
+      if (!/CPU_(APP|DB|BUILD)_FLAG/.test(window)) missing.push(where);
     });
   }
   assert.ok(builders.length >= 15, `found only ${builders.length} builders: ${builders.join(', ')}`);
