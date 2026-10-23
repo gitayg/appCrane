@@ -28,3 +28,4 @@ studio-web/src/**/*.d.ts
 
 # test runs with an unset DATA_DIR write here
 undefined/
+**/update-snapshots/

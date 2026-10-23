@@ -33,7 +33,9 @@ export function getDb() {
  * schema behind its code — see pendingMigrationNames().
  */
 export function openDb(dataDir) {
-  const dbDir = dataDir || process.env.DATA_DIR || join(__dirname, '..', 'data');
+  const envDir = process.env.DATA_DIR;
+  if (envDir === 'undefined' || envDir === 'null') throw new Error(`DATA_DIR is the string "${envDir}"; a caller assigned an unset value to process.env.DATA_DIR`);
+  const dbDir = dataDir || envDir || join(__dirname, '..', 'data');
   if (!existsSync(dbDir)) mkdirSync(dbDir, { recursive: true });
 
   const dbPath = join(dbDir, 'deployhub.db');

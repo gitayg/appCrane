@@ -1,4 +1,7 @@
 {
+  "2.120.2": [
+    "AppCrane now refuses to start if its data folder setting is broken, instead of quietly writing data to the wrong place."
+  ],
   "2.120.1": [
     "Housekeeping: test leftovers that were published by mistake have been removed."
   ],
