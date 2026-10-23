@@ -36,6 +36,7 @@ export const JOBS = {
   'restore-drill':    { label: 'Scheduled restore drill',           cadenceMs: 7 * DAY },
   'access-reviews':   { label: 'Access review campaigns and reminders', cadenceMs: 60 * MIN },
   'auto-patch':       { label: 'RCE auto-patch worker',             cadenceMs: 15 * MIN },
+  'mongo-kernel':     { label: 'Managed MongoDB kernel check',      cadenceMs: 6 * HOUR },
 };
 
 const started = new Map();
@@ -231,7 +232,8 @@ export function getJobHealth(now = Date.now()) {
     if (s?.enabled) { try { enabled = !!s.enabled(); } catch (_) { enabled = null; } }
     const cadenceMs = cadenceOf(id);
     const running = active.has(id);
-    const status = computeStatus({ cadenceMs, startedAt: s?.at ?? null, enabled, last, running }, now);
+    let status = computeStatus({ cadenceMs, startedAt: s?.at ?? null, enabled, last, running }, now);
+    if (status === 'ok' && details.get(id)?.severity === 'warning') status = 'warning';
     const base = last ? Date.parse(last.finished_at) : s?.at ?? null;
     const next = cadenceMs != null && base != null && status !== 'disabled'
       ? new Date(base + cadenceMs).toISOString() : null;

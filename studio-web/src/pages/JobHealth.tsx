@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { adminApi } from '../adminApi'
 import { serverDate } from '../utils/serverDate'
 
-type JobStatus = 'ok' | 'late' | 'failing' | 'never-run' | 'disabled'
+type JobStatus = 'ok' | 'warning' | 'late' | 'failing' | 'never-run' | 'disabled'
 
 interface JobRun {
   started_at: string
@@ -26,19 +26,21 @@ interface Job {
   history: JobRun[]
   can_run_now: boolean
   queue?: { queued: number; sending: number; failed: number; oldest_queued_at: string | null } | null
+  detail?: { message?: string; severity?: string } | null
 }
 
 const REFRESH_MS = 30_000
 
 const STATUS_STYLE: Record<JobStatus, { label: string; color: string }> = {
   ok:          { label: 'OK',        color: 'var(--green)' },
+  warning:     { label: 'Warning',   color: 'var(--orange)' },
   late:        { label: 'Late',      color: 'var(--orange)' },
   failing:     { label: 'Failing',   color: 'var(--red)' },
   'never-run': { label: 'Never run', color: 'var(--dim)' },
   disabled:    { label: 'Disabled',  color: 'var(--dim)' },
 }
 
-const ORDER: JobStatus[] = ['failing', 'late', 'never-run', 'ok', 'disabled']
+const ORDER: JobStatus[] = ['failing', 'late', 'warning', 'never-run', 'ok', 'disabled']
 
 function StatusPill({ status, running }: { status: JobStatus; running: boolean }) {
   const s = STATUS_STYLE[status]
@@ -89,6 +91,9 @@ function JobRow({ job, onRun }: { job: Job; onRun: (id: string) => void }) {
             {cadence(job.cadence_ms)}
             {job.queue && <> | queue: {job.queue.queued} queued, {job.queue.sending} sending, {job.queue.failed} failed</>}
           </div>
+          {typeof job.detail?.message === 'string' && (
+            <div style={{ color: job.detail.severity === 'warning' ? 'var(--orange)' : 'var(--dim)', fontSize: '.75rem' }}>{job.detail.message}</div>
+          )}
         </td>
         <td style={{ padding: '8px 6px' }} title={last?.finished_at || ''}>
           {last ? <>{relative(last.finished_at)} <span style={{ color: 'var(--dim)' }}>({duration(last.duration_ms)})</span></> : '-'}
@@ -167,7 +172,7 @@ export function JobHealth() {
   }
 
   const sorted = jobs ? [...jobs].sort((a, b) => ORDER.indexOf(a.status) - ORDER.indexOf(b.status)) : []
-  const unhealthy = sorted.filter(j => j.status === 'failing' || j.status === 'late').length
+  const unhealthy = sorted.filter(j => j.status === 'failing' || j.status === 'late' || j.status === 'warning').length
 
   return (
     <div>

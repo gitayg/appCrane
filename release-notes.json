@@ -1,4 +1,7 @@
 {
+  "2.117.3": [
+    "If your server runs a Linux version that MongoDB 8.0 cannot start on, AppCrane now tells you right away and names the upgrade you need, instead of waiting two minutes and failing without a reason."
+  ],
   "2.117.2": [
     "Automatic security fixes are stricter: they only ship when the code is exactly what is already in production, so nothing unapproved can slip out with them.",
     "The background job that applies those fixes now gives way to your apps when the server is busy."

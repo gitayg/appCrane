@@ -127,6 +127,7 @@ import { OOM_DB_FLAG } from './oomPriority.js';
 import { CPU_DB_FLAG } from './cpuPriority.js';
 import { managedDbCpuDrift } from './resourceDrift.js';
 import { admitContainer } from './memoryAdmission.js';
+import { assertMongoKernelCompatible, dockerHostMongoCompat, isMongodKernelRefusal, mongoKernelError } from './kernelCompat.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -902,7 +903,7 @@ function upsertServerRow(engine, cfg, port, adminPassword) {
  * well as a successful ping would — without putting the superuser password in
  * the host's process table on every poll.
  */
-async function waitReady(engine, port, timeoutMs = 120000) {
+async function waitReady(engine, port, { timeoutMs = 120000, secrets = [] } = {}) {
   const cfg = ENGINES[engine];
   const probe = engine === 'postgres'
     ? ['exec', cfg.container, 'pg_isready', '-q', '-h', '127.0.0.1', '-p', String(cfg.containerPort), '-U', 'postgres']
@@ -925,10 +926,47 @@ async function waitReady(engine, port, timeoutMs = 120000) {
     } catch (e) {
       if (engine === 'mariadb' && upAnyway.test(e.message)) return;
       last = e.message;
+      await throwIfExited(cfg.container, engine, secrets);
       await new Promise(r => setTimeout(r, 1000));
     }
   }
   throw new Error(`managedDb: ${engine} container did not become ready within ${timeoutMs}ms (last probe: ${last})`);
+}
+
+export { waitReady as _waitReadyForTests };
+
+/**
+ * Stop waiting for a container that has stopped. `restarting` is not final:
+ * the servers run with --restart=on-failure:2, so Docker is still retrying.
+ * `exited` / `dead` (retries used up, or a clean exit) and a removed container
+ * are, and waiting the full timeout for them only hides the reason.
+ */
+async function throwIfExited(container, engine, secrets = []) {
+  let state;
+  let exitCode;
+  try {
+    [state, exitCode] = (await dockerExec(['inspect', '-f', '{{.State.Status}}|{{.State.ExitCode}}', container], { timeout: 10000 })).split('|');
+  } catch (e) {
+    if (!NO_SUCH_CONTAINER.test(e.message)) return;
+    throw new Error(`managedDb: the ${engine} container ${container} no longer exists; it was removed before it became ready`);
+  }
+  if (state !== 'exited' && state !== 'dead') return;
+  let tail = '';
+  try {
+    const { stdout, stderr } = await execFileAsync('docker', ['logs', '--tail', '20', container], { timeout: 10000, maxBuffer: 4 * 1024 * 1024 });
+    tail = [stdout, stderr].map(t => String(t || '').trim()).filter(Boolean).join('\n');
+  } catch (e) {
+    tail = `(could not read its logs: ${e.stderr?.toString().trim() || e.message})`;
+  }
+  for (const secret of secrets) tail = redactSecret(tail, secret);
+  if (engine === 'mongo' && isMongodKernelRefusal(tail)) {
+    const { kernel } = await dockerHostMongoCompat();
+    throw mongoKernelError(kernel || 'unknown');
+  }
+  throw new Error(
+    `managedDb: the ${engine} container ${container} stopped with exit code ${exitCode} before it became ready. ` +
+    `Last log lines:\n${tail || '(no log output)'}`,
+  );
 }
 
 /**
@@ -950,6 +988,7 @@ export async function ensureServer(engine) {
       `Use provision(scope, '${engine}') instead of ensureServer('${engine}').`
     );
   }
+  if (engine === 'mongo') await assertMongoKernelCompatible(cfg.image);
   return withLock(`server:${engine}`, () => ensureServerLocked(engine, cfg));
 }
 
@@ -1021,7 +1060,7 @@ async function ensureServerLocked(engine, cfg) {
     await createServerContainer(engine, cfg, port, adminPassword, tls.dir);
   }
 
-  await waitReady(engine, port);
+  await waitReady(engine, port, { secrets: engine === 'mongo' ? [adminPassword, mongo.keyfileFor(adminPassword)] : [adminPassword] });
   await ensureAdminCredentialFile(engine, adminPassword);
   await verifyAdminLogin(engine, { adopted: state === 'running' });
   if (tdeMode === 'decrypt' && ours) {
@@ -1427,7 +1466,7 @@ async function ensureRedisInstance({ container, dbName, username, password, port
     await createRedisContainer({ container, dbName, password, port, tlsDir: tlsFiles?.dir || null });
   }
 
-  await waitRedisReady(container, { tls });
+  await waitRedisReady(container, { tls, secrets: [password] });
   if (tlsFiles?.renewed && facts.state === 'running' && facts.config === wantConfig) {
     await reloadServerTls('redis', container);
   }
@@ -1509,7 +1548,7 @@ async function createRedisContainer({ container, dbName, password, port, tlsDir 
  * no credential in argv: redis-cli authenticates from REDISCLI_AUTH, which the
  * container already has in its environment.
  */
-async function waitRedisReady(container, { tls = false, timeoutMs = 60000 } = {}) {
+async function waitRedisReady(container, { tls = false, timeoutMs = 60000, secrets = [] } = {}) {
   const deadline = Date.now() + timeoutMs;
   let last = '';
   while (Date.now() < deadline) {
@@ -1519,6 +1558,7 @@ async function waitRedisReady(container, { tls = false, timeoutMs = 60000 } = {}
       last = out;
     } catch (e) {
       last = e.message;
+      await throwIfExited(container, 'redis', secrets);
     }
     await new Promise(r => setTimeout(r, 500));
   }
@@ -1737,6 +1777,10 @@ export async function serverStatus() {
       started_at: null,
       error: null,
     };
+    if (engine === 'mongo') {
+      const { kernel, status, message } = await dockerHostMongoCompat();
+      out.kernel_compat = { kernel, status, message };
+    }
 
     const facts = await inspectFacts(container);
     if (facts.absent) {

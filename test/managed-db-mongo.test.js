@@ -64,6 +64,17 @@ try {
 } catch (_) { /* left false */ }
 const noDocker = dockerOk ? false : 'no reachable Docker daemon on this host';
 
+// MongoDB 8.0 refuses to start on Linux 6.19 through 7.0.13 (its release
+// notes), Docker images included. On such a Docker host the live tests skip by
+// name instead of waiting for a server that has already exited.
+// CRANE_TEST_DOCKER_KERNEL stands in for the daemon's kernel (test/kernel-compat.test.js).
+const kc = await import('../server/services/kernelCompat.js');
+if (process.env.CRANE_TEST_DOCKER_KERNEL) kc._setKernelSourceForTests(async () => process.env.CRANE_TEST_DOCKER_KERNEL);
+const hostKernel = dockerOk || process.env.CRANE_TEST_DOCKER_KERNEL ? await kc.dockerHostMongoCompat() : null;
+const noMongo = hostKernel?.status === 'incompatible'
+  ? `${hostKernel.message} (Docker host kernel ${hostKernel.kernel})`
+  : noDocker;
+
 const { initDb, getDb } = await import('../server/db.js');
 const mdb = await import('../server/services/managedDb.js');
 const mgo = await import('../server/services/managedMongo.js');
@@ -84,7 +95,7 @@ before(() => {
 });
 
 after(async () => {
-  if (dockerOk) await mdb.stopServer('mongo').catch(() => {});
+  if (dockerOk && !noMongo) await mdb.stopServer('mongo').catch(() => {});
   try { rmSync(process.env.DATA_DIR, { recursive: true, force: true }); } catch (_) {}
 });
 
@@ -317,7 +328,7 @@ async function asApp(network, conn, script, { database = conn.database } = {}) {
   });
 }
 
-test('mongo provisions, isolates, and deprovisions', { skip: noDocker, timeout: 900000 }, async (t) => {
+test('mongo provisions, isolates, and deprovisions', { skip: noMongo, timeout: 900000 }, async (t) => {
   const { ensureAppNetwork } = await import('../server/services/docker.js');
   const network = await ensureAppNetwork();
 
@@ -497,7 +508,7 @@ test('mongo provisions, isolates, and deprovisions', { skip: noDocker, timeout: 
 });
 
 test('the data directory lives under DATA_DIR and the init credential does not survive the run',
-  { skip: noDocker, timeout: 600000 }, async () => {
+  { skip: noMongo, timeout: 600000 }, async () => {
   await mdb.ensureServer('mongo');
   const dir = join(process.env.DATA_DIR, 'managed-db', 'mongo');
   assert.ok(existsSync(dir));
@@ -509,7 +520,7 @@ test('the data directory lives under DATA_DIR and the init credential does not s
 });
 
 test('serverStatus reports mongo as a shared server, with no secret in it',
-  { skip: noDocker, timeout: 600000 }, async () => {
+  { skip: noMongo, timeout: 600000 }, async () => {
   await mdb.ensureServer('mongo');
   const rows = await mdb.serverStatus();
   const row = rows.find(r => r.engine === 'mongo');

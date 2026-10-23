@@ -1699,6 +1699,7 @@ app.listen(PORT, HOST, async () => {
     try { const { startApiKeyExpiryJob } = await import('./services/apiKeyExpiry.js'); startApiKeyExpiryJob(); } catch (e) { log.error('API key expiry job failed to start: ' + e.message); }
     try { const { startEventRetention } = await import('./services/eventRetention.js'); startEventRetention(); } catch (e) { log.error('Event retention job failed to start: ' + e.message); }
     try { const { startAuditChain } = await import('./services/auditChain.js'); startAuditChain(); } catch (e) { log.error('Audit chain job failed to start: ' + e.message); }
+    try { const { startMongoKernelCheck } = await import('./services/mongoKernelCheck.js'); startMongoKernelCheck(); } catch (e) { log.error('MongoDB kernel check failed to start: ' + e.message); }
     try { const { startAccessReviews } = await import('./services/accessReviews/index.js'); startAccessReviews(); } catch (e) { log.error('Access review job failed to start: ' + e.message); }
     try { (await import('./services/siem/delivery.js')).startSiemDelivery(); } catch (e) { log.error('SIEM delivery failed to start: ' + e.message); }
   } catch (e) {

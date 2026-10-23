@@ -19,6 +19,7 @@ const router = Router();
 const RUN_NOW = {
   'credential-check': async () => (await import('../services/credentialChecker.js')).runCredentialCheckOnce(),
   'local-backup': async () => (await import('../services/localBackup.js')).runLocalBackup(),
+  'mongo-kernel': async () => (await import('../services/mongoKernelCheck.js')).runMongoKernelCheck(),
 };
 
 // GET /api/settings/* is public at the global gate (settings reads classify

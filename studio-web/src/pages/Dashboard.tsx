@@ -69,6 +69,7 @@ interface ManagedDbServer {
   oom_killed: boolean
   started_at: string | null
   error: string | null
+  kernel_compat?: { kernel: string | null; status: 'compatible' | 'incompatible' | 'unknown'; message: string | null }
 }
 
 interface UsageSummary {
@@ -528,6 +529,11 @@ export function Dashboard() {
                           <code>{dbMemoryEnvVar(sv.engine)}</code> and restarting AppCrane — deploys against this
                           engine will keep failing until then.
                         </td>
+                      </tr>
+                    )}
+                    {sv.kernel_compat?.status === 'incompatible' && (
+                      <tr>
+                        <td colSpan={6} style={{ color: 'var(--orange)', fontSize: '.82rem' }}>{sv.kernel_compat.message}</td>
                       </tr>
                     )}
                     {sv.error && (
