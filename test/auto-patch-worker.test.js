@@ -76,7 +76,7 @@ function reset() {
     versionInfo: async () => ({ published: new Date(S.now - S.publishedAgoH * H), deprecated: S.deprecated || null }),
     branchHead: async () => S.tip,
     readFile: async (_a, path) => { if (repoFiles[path]) return { content: repoFiles[path] }; const e = new Error('nope'); e.code = 'FILE_NOT_FOUND'; throw e; },
-    runBump: async () => { calls.bump++; return S.bump || { packageJson: repoFiles['package.json'], packageLock: read('transitive.package-lock.json') }; },
+    runBump: async () => { calls.bump++; if (S.bumpError) throw S.bumpError; return S.bump || { packageJson: repoFiles['package.json'], packageLock: read('transitive.package-lock.json') }; },
     push: async (_a, files, opts) => { calls.push.push({ files: files.map((f) => f.path), opts }); return { commit: { sha: calls.push.length === 1 ? BUMP : REVERT } }; },
     deployApp: async (id, _a, env) => {
       calls.deploy.push({ id, env });
@@ -400,4 +400,13 @@ test('a fixed version deprecated on npm ("Bad release") is not shipped: back to 
   assert.equal(r.action, 'fallback');
   assert.match(r.reason, /is deprecated on npm \("Bad release/);
   assert.equal(calls.bump + calls.push.length + calls.promote.length, 0);
+});
+
+test('the npm helper\'s network cannot be confined: back to a person, nothing committed or deployed', async () => {
+  const { EgressError } = await import('../server/services/autoPatch/egress.js');
+  S.bumpError = new EgressError('docker network create --internal failed');
+  const r = await run();
+  assert.equal(r.action, 'fallback');
+  assert.match(r.reason, /could not be confined to the npm registry .*nothing ran/);
+  assert.equal(calls.push.length + calls.deploy.length + calls.promote.length, 0);
 });

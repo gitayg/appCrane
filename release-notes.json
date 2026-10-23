@@ -1,4 +1,7 @@
 {
+  "2.118.1": [
+    "Automatic security fixes for app dependencies are now locked down further: the tool that updates a package can only talk to the official npm registry, and fixes that the package maintainer has withdrawn are left for a person to choose."
+  ],
   "2.118.0": [
     "If your app runs on PHP and a serious security flaw is found in PHP itself, AppCrane now rebuilds your app on the fixed PHP for you, tests it in sandbox before it reaches production, rolls it back if it fails, and e-mails you either way.",
     "Every build also starts from the latest security fixes of its base image."

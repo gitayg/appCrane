@@ -287,6 +287,12 @@ const MAX_REPORTED_PATHS = 12;
 //         regenerates both on boot. Without this rule leantime reports
 //         /var/www/html/bootstrap alongside /var/www/html/storage; with it, the
 //         verdict is the single directory an operator should actually mount.
+//   .npm  every Node app AppCrane builds without a Dockerfile runs `npm start`
+//         (dockerfileGen.js), and npm writes its own debug log on each start:
+//         measured on a generated node image, `docker diff` showed
+//         A /home/node/.npm/_logs/<timestamp>-debug-0.log and nothing else, so
+//         every such app read as "would lose data" (RCE auto-patch fell back
+//         on it). ~/.npm is npm's cache and log directory, never app state.
 //
 // ---------------------------------------------------------------------------
 // Why there is no size threshold and no file-count threshold
@@ -336,7 +342,7 @@ export const EPHEMERAL_ROOTS = Object.freeze([
 
 /** Path components that mean scratch wherever they appear, so that a noisy
  *  subdirectory can be dropped without dropping its parent. */
-export const EPHEMERAL_SEGMENTS = Object.freeze(['tmp', 'temp', 'cache']);
+export const EPHEMERAL_SEGMENTS = Object.freeze(['tmp', 'temp', 'cache', '.npm']);
 
 /** The parameter a caller passes to say "yes, I know". One spelling, shared by
  *  the REST routes and the MCP tools, so an agent that learns it once from an

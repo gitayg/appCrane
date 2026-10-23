@@ -17,7 +17,10 @@
 // tarball). The container sees only package.json and package-lock.json: no
 // .npmrc, no token, no other file of the app. The registry is the public npm
 // registry, set explicitly; an app whose lockfile resolves the package from
-// anywhere else is refused before this runs.
+// anywhere else is refused before this runs. Its network is an --internal
+// Docker network whose only way out is a proxy that tunnels to
+// registry.npmjs.org:443 and nothing else (egress.js); if that cannot be set
+// up, nothing runs. The image is pinned by digest, not by tag.
 
 import { execFile, execFileSync } from 'child_process';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, chmodSync, mkdirSync } from 'fs';
@@ -25,9 +28,12 @@ import { join, resolve } from 'path';
 import { randomBytes } from 'crypto';
 import { OOM_APP_FLAG } from '../oomPriority.js';
 import { CPU_BUILD_FLAG } from '../cpuPriority.js';
+import { startEgressProxy } from './egress.js';
 
 export const NPM_REGISTRY = 'https://registry.npmjs.org/';
-export const NPM_HELPER_IMAGE = process.env.AUTO_PATCH_NPM_IMAGE || 'node:22-slim';
+// node:22-slim's multi-arch index, resolved 2026-10-22 from registry-1.docker.io
+// (Docker-Content-Digest). Bump it deliberately; never a bare tag.
+export const NPM_HELPER_IMAGE = 'node:22-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d';
 export const NPM_HELPER_LABEL = 'appcrane.container.type=auto-patch';
 export const NPM_HELPER_MEMORY_MB = 1024;
 const TIMEOUT_MS = 180_000;
@@ -37,7 +43,8 @@ const VERSION_RE = /^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.+-]+)?$/;
 const SCRIPT = [
   'set -eu',
   'cd /work',
-  'npm install --package-lock-only --ignore-scripts --no-audit --no-fund "$1@$2"',
+  'EXACT=""; if [ "${4:-}" = exact ]; then EXACT=--save-exact; fi',
+  'npm install --package-lock-only --ignore-scripts --no-audit --no-fund $EXACT "$1@$2"',
   'if [ "$3" = transitive ]; then',
   '  cp /work/orig/package.json /work/package.json',
   '  npm install --package-lock-only --ignore-scripts --no-audit --no-fund',
@@ -50,14 +57,18 @@ export function assertBumpTarget(name, version) {
 }
 
 /** The docker argv. Asserted by the tests: confinement must not drift. */
-export function npmHelperArgs({ workDir, name, version, mode, containerName }) {
+export function npmHelperArgs({ workDir, name, version, mode, containerName, network, proxyUrl, save = 'prefix' }) {
   assertBumpTarget(name, version);
+  if (typeof network !== 'string' || !network) throw new Error('the npm helper needs its internal network');
+  if (typeof proxyUrl !== 'string' || !/^http:\/\/[a-z0-9-]+:[0-9]+$/.test(proxyUrl)) throw new Error('the npm helper needs its egress proxy');
   if (!['direct', 'transitive'].includes(mode)) throw new Error(`unknown bump mode ${mode}`);
+  if (!['exact', 'prefix'].includes(save)) throw new Error(`unknown save style ${save}`);
   if (typeof workDir !== 'string' || !workDir.startsWith('/') || workDir.includes(':')) throw new Error('workDir must be an absolute path without ":"');
   return [
     'run', '--rm',
     '--name', containerName,
     '--label', NPM_HELPER_LABEL,
+    '--network', network,
     OOM_APP_FLAG,
     CPU_BUILD_FLAG,
     '--pull', 'missing',
@@ -73,14 +84,28 @@ export function npmHelperArgs({ workDir, name, version, mode, containerName }) {
     '-e', 'HOME=/tmp',
     '-e', 'npm_config_cache=/tmp/.npm',
     '-e', `npm_config_registry=${NPM_REGISTRY}`,
+    '-e', `npm_config_https_proxy=${proxyUrl}`,
+    '-e', `npm_config_proxy=${proxyUrl}`,
+    '-e', 'npm_config_noproxy=',
     '-e', 'npm_config_userconfig=/tmp/no-user-npmrc',
     '-e', 'npm_config_globalconfig=/tmp/no-global-npmrc',
     '-e', 'npm_config_ignore_scripts=true',
     '-e', 'npm_config_update_notifier=false',
     '--entrypoint', 'sh',
     NPM_HELPER_IMAGE,
-    '-c', SCRIPT, 'appcrane-auto-patch', name, version, mode,
+    '-c', SCRIPT, 'appcrane-auto-patch', name, version, mode, save,
   ];
+}
+
+/**
+ * Why the helper failed, in words an app owner may read: the note and the
+ * e-mail carry it. Never err.message, which is the whole docker command line,
+ * host scratch path included.
+ */
+export function helperFailure(err, stderr) {
+  if (err?.killed || err?.signal) return `the npm helper timed out after ${TIMEOUT_MS / 1000}s`;
+  const tail = String(stderr || '').trim().split('\n').slice(-8).join('\n');
+  return tail || `the npm helper exited with code ${err?.code ?? 'unknown'} and no output`;
 }
 
 function scratchRoot() {
@@ -96,20 +121,22 @@ function scratchRoot() {
 export async function runNpmBump({ packageJson, packageLock, name, version, mode }) {
   const workDir = mkdtempSync(join(scratchRoot(), 'bump-'));
   const containerName = `appcrane-auto-patch-${randomBytes(6).toString('hex')}`;
+  let proxy = null;
   try {
+    proxy = await startEgressProxy({ image: NPM_HELPER_IMAGE, scratch: scratchRoot() });
     mkdirSync(join(workDir, 'orig'));
     writeFileSync(join(workDir, 'package.json'), packageJson);
     writeFileSync(join(workDir, 'package-lock.json'), packageLock);
     writeFileSync(join(workDir, 'orig', 'package.json'), packageJson);
     chmodSync(workDir, 0o777);
     for (const f of ['package.json', 'package-lock.json']) chmodSync(join(workDir, f), 0o666);
-    const args = npmHelperArgs({ workDir, name, version, mode, containerName });
+    const save = mode === 'direct' && pinnedExactly(JSON.parse(packageJson), name) ? 'exact' : 'prefix';
+    const args = npmHelperArgs({ workDir, name, version, mode, containerName, network: proxy.network, proxyUrl: proxy.url, save });
     await new Promise((res, rej) => {
       execFile('docker', args, { timeout: TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024 }, (err, _stdout, stderr) => {
         if (!err) return res();
         try { execFileSync('docker', ['rm', '-f', containerName], { stdio: 'ignore', timeout: 15_000 }); } catch (_) {}
-        const tail = String(stderr || err.message).trim().split('\n').slice(-8).join('\n');
-        rej(new Error(`npm could not resolve ${name}@${version}: ${tail}`));
+        rej(new Error(`npm could not resolve ${name}@${version}: ${helperFailure(err, stderr)}`));
       });
     });
     return {
@@ -117,6 +144,7 @@ export async function runNpmBump({ packageJson, packageLock, name, version, mode
       packageLock: readFileSync(join(workDir, 'package-lock.json'), 'utf8'),
     };
   } finally {
+    if (proxy) await proxy.stop();
     rmSync(workDir, { recursive: true, force: true });
   }
 }
@@ -129,6 +157,16 @@ function stable(v) {
   return JSON.stringify(v);
 }
 const same = (a, b) => stable(a) === stable(b);
+
+/**
+ * Is `name` declared as one exact version ("4.7.6", not "^4.7.6")? Then the
+ * bump keeps it exact: npm's default save-prefix would otherwise loosen the
+ * owner's pin to a range.
+ */
+export function pinnedExactly(pkg, name) {
+  const sec = SECTIONS.find((s) => pkg?.[s] && Object.prototype.hasOwnProperty.call(pkg[s], name));
+  return !!sec && VERSION_RE.test(String(pkg[sec][name]));
+}
 
 /** 'direct', 'transitive', or null when npm cannot be asked about it safely. */
 export function dependencyMode(pkg, name) {
@@ -193,6 +231,7 @@ export function verifyNpmBump({ before, after, name, fromVersion, toVersion, mod
     const sec = sectionOf(bPkg, name);
     if (!sec || sectionOf(aPkg, name) !== sec) problems.push(`${name} moved out of package.json ${sec || 'dependencies'}`);
     if (!same(withoutTarget(bPkg, name), withoutTarget(aPkg, name))) problems.push('package.json changed beyond the range of ' + name);
+    if (sec && pinnedExactly(bPkg, name) && aPkg?.[sec]?.[name] !== toVersion) problems.push(`${name} was pinned to an exact version and is now ${JSON.stringify(aPkg?.[sec]?.[name])}, not ${toVersion}`);
   }
 
   const { packages: bp = {}, dependencies: bd, ...bTop } = bLock;
