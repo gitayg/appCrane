@@ -129,7 +129,10 @@ function innerBlocks(body) {
  * nothing else. Removed here so the comparisons keep checking everything else
  * byte for byte; the test below proves this removes lines that are really there.
  */
-const SIGNATURE_HEADERS = ['X-AppCrane-Identity-Ts', 'X-AppCrane-Identity-Sig'];
+//
+// v2.108.0 added X-AppCrane-Auth-Via ('app-key' for app sign-in keys) to the
+// same list, with the same effect, so it is normalised the same way.
+const SIGNATURE_HEADERS = ['X-AppCrane-Identity-Ts', 'X-AppCrane-Identity-Sig', 'X-AppCrane-Auth-Via'];
 function withoutIdentitySignature(text) {
   if (text == null) return text;
   return text.split('\n')

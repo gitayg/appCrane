@@ -3,7 +3,7 @@
 //
 // Runs as an ordinary AppCrane app (auth_mode default, i.e. behind forward_auth).
 // It has no login of its own: AppCrane verifies the caller — SSO session in a
-// browser, the developer's dhk_* key from the uploader — and injects
+// browser, the developer's dhk_uak_* app sign-in key from the uploader — and injects
 // X-AppCrane-User-* headers, stripping any the client sent. So identity here is
 // read only from those headers, and a request without them is refused: it did
 // not come through the platform.
@@ -46,7 +46,7 @@ function nums(o, keys, path) {
   for (const k of keys) { if (!isNum(o[k] ?? 0)) throw new Error(`${path}.${k} not a number`); out[k] = o[k] ?? 0; }
   return out;
 }
-const SECRETISH = /(sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|dhk_[A-Za-z0-9_]{8,}|AKIA[0-9A-Z]{16}|-----BEGIN|eyJ[A-Za-z0-9_-]{10,}\.)/;
+const SECRETISH = /(sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|dhk_[A-Za-z0-9_-]{8,}|AKIA[0-9A-Z]{16}|-----BEGIN|eyJ[A-Za-z0-9_-]{10,}\.)/;
 function excerpt(s) {
   if (typeof s !== 'string' || s.length > 200) throw new Error('excerpt too long');
   if (SECRETISH.test(s)) throw new Error('excerpt looks like it contains a secret');
@@ -141,6 +141,14 @@ export function handler(req, res) {
 
   const user = who(req);
   if (!user) return send(res, 401, { error: 'No AppCrane identity on the request. This app must run behind AppCrane forward_auth.' });
+
+  // An app sign-in key (the uploader's credential) may upload and nothing else:
+  // a key copied off a laptop cannot read the excerpts its owner uploaded, or
+  // delete them. AppCrane sets this header only on that path and strips any
+  // copy a client sends.
+  if (req.headers['x-appcrane-auth-via'] === 'app-key' && !(req.method === 'POST' && path === '/api/reports')) {
+    return send(res, 403, { error: 'An app sign-in key can only upload. Open the hub in a browser to read your reports.' });
+  }
 
   if (req.method === 'GET' && (path === '/' || path === '/index.html')) return send(res, 200, INDEX, 'text/html; charset=utf-8');
   if (req.method === 'GET' && path === '/api/me') return send(res, 200, { email: user.email, name: user.name, admin: user.admin });

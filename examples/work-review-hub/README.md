@@ -18,13 +18,18 @@ snapshot per user per day, pruned after `RETENTION_DAYS` (default 180).
 3. Give developers the `user` role on the app, and team leads `admin`.
 4. Deploy. The health check is `/api/health`.
 5. Each developer runs the skill's `upload.mjs --setup --url https://<app host>`
-   with their personal `dhk_*` key.
+   with an **app sign-in key** (`dhk_uak_*`) they issue for this app in
+   AppCrane (MCP page → App sign-in keys). That key signs in to this app only,
+   and is refused by the rest of AppCrane.
 
 ## Trust model
 
 - **Who is calling:** read only from `X-AppCrane-User-Email` and
   `X-AppCrane-App-Role`. AppCrane's proxy sets these after verifying the SSO
-  session or the `dhk_*` key, and strips any copy a client sends.
+  session or the app sign-in key, and strips any copy a client sends.
+- **What an app key can do:** AppCrane adds `X-AppCrane-Auth-Via: app-key` when
+  the caller used one. The hub then allows `POST /api/reports` only, so a key
+  copied off a laptop cannot read or delete that person's reports.
 - **Storage:** each person's data sits under a hash of their email. Excerpts are
   returned only to their author. `/api/team` (admins) returns numbers only.
 - **Uploads:** must send `application/json` and `X-Work-Review-Client`, which

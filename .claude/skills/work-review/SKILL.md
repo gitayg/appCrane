@@ -149,12 +149,13 @@ Suggest re-running about two weeks after applying fixes.
 **Security:**
 - Uploads go over HTTPS only, and only to `app.opswat.com` or its subdomains. The host is pinned in code.
 - Redirects are refused.
-- Auth uses the developer's own AppCrane `dhk_*` key. The key is read from stdin at setup and stored in `~/.config/work-review/key` with owner-only permissions (0600); the uploader refuses a key file others can read.
+- Auth uses an **app sign-in key** (`dhk_uak_*`) that the developer issues for the hub app only. The key signs in to that one app, is refused by the rest of AppCrane, and the hub accepts it only for uploads. It cannot read or delete reports. The uploader refuses a full `dhk_user_*` key.
+- The key is read from stdin at setup and stored in `~/.config/work-review/key` with owner-only permissions (0600); the uploader refuses a key file others can read.
 - AppCrane's proxy checks the key and passes the verified identity to the hub, which re-validates every field.
 - Each payload sent is kept in `~/.config/work-review/sent/` for audit.
 
 When the user asks to set it up, walk them through these steps. Don't do any of them for them:
-1. Get their personal key from AppCrane (profile → API key) and run:
+1. In AppCrane, open the MCP page, go to **App sign-in keys**, and issue a key for the Work Review hub app (it expires after 180 days by default). Then run:
    `node <skill-dir>/scripts/upload.mjs --setup --url https://<hub-app-host>`, pasting the key at the prompt (it is read from stdin).
 2. Preview the payload: `node <skill-dir>/scripts/upload.mjs --dry-run`.
 3. Send one now: `node <skill-dir>/scripts/upload.mjs --force`.

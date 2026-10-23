@@ -2,7 +2,7 @@
 // Daily upload of a redacted work-review summary to the Work Review hub (an
 // AppCrane app on app.opswat.com).
 //
-//   node upload.mjs --setup --url https://work-review.app.opswat.com   (reads the key from stdin)
+//   node upload.mjs --setup --url https://work-review.app.opswat.com   (reads a dhk_uak_* app key from stdin)
 //   node upload.mjs --dry-run      print exactly what would be sent, send nothing
 //   node upload.mjs                upload now if the last upload is >24h old
 //   node upload.mjs --force        upload now regardless
@@ -34,6 +34,10 @@ const WINDOW_DAYS = 7;          // each upload is a rolling 7-day snapshot; the 
 const TOP_EXCERPTS = 5;
 const EXCERPT_CHARS = 160;
 export const SCHEMA = 'work-review/v1';
+// Only an app sign-in key: it opens the hub's gate and nothing else on AppCrane,
+// and the hub accepts it on its upload endpoint only. A full dhk_user_* key in a
+// file on disk would be the whole account. (base64url body, so '-' too.)
+export const APP_KEY_RE = /^dhk_uak_[A-Za-z0-9_-]+$/;
 
 // The only hosts a payload may go to. Pinned in code, not config, so a
 // tampered config.json cannot redirect the upload.
@@ -50,7 +54,7 @@ export function checkUrl(raw) {
 // redacts obvious secrets; this also strips identifying detail.
 const SCRUBS = [
   [/-----BEGIN [A-Z ]+-----[\s\S]*?(-----END [A-Z ]+-----|$)/g, '«key»'],
-  [/(sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|xox[abpr]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|dhk_[A-Za-z0-9_]{8,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*)/g, '«secret»'],
+  [/(sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|xox[abpr]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|dhk_[A-Za-z0-9_-]{8,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*)/g, '«secret»'],
   [/(?<!«)\b(password|passwd|secret|token|api[_-]?key|authorization|bearer)\b(?:\s*[:=]\s*|\s+)(?!«)\S+/gi, '$1 «secret»'],
   [/[\w.+-]+@[\w-]+(\.[\w-]+)+/g, '«email»'],
   [/https?:\/\/\S+/g, '«url»'],
@@ -120,7 +124,7 @@ function readKey() {
   const mode = statSync(KEY).mode & 0o777;
   if (mode & 0o077) throw new Error(`${KEY} is readable by others (mode ${mode.toString(8)}); run: chmod 600 ${KEY}`);
   const k = readFileSync(KEY, 'utf8').trim();
-  if (!/^dhk_[A-Za-z0-9_]+$/.test(k)) throw new Error(`${KEY} does not hold an AppCrane dhk_* key`);
+  if (!APP_KEY_RE.test(k)) throw new Error(`${KEY} does not hold an AppCrane app sign-in key (dhk_uak_*)`);
   return k;
 }
 const lastUpload = () => { try { return Number(readFileSync(STAMP, 'utf8')) || 0; } catch { return 0; } };
@@ -158,7 +162,11 @@ function keepCopy(payload) {
 async function setup(url) {
   checkUrl(url);
   const key = readFileSync(0, 'utf8').trim();            // stdin, so the key never appears in argv or shell history
-  if (!/^dhk_[A-Za-z0-9_]+$/.test(key)) throw new Error('expected an AppCrane dhk_* key on stdin');
+  if (!APP_KEY_RE.test(key)) {
+    throw new Error(/^dhk_/.test(key)
+      ? 'that is a full AppCrane key; issue an app sign-in key (dhk_uak_*) for the hub instead (AppCrane → MCP page → App sign-in keys)'
+      : 'expected an AppCrane app sign-in key (dhk_uak_*) on stdin');
+  }
   ensureDir();
   writeFileSync(KEY, key + '\n', { mode: 0o600 }); chmodSync(KEY, 0o600);
   writeFileSync(CONF, JSON.stringify({ url, enabled: true }, null, 2) + '\n', { mode: 0o600 });

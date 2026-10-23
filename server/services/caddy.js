@@ -58,6 +58,10 @@ const IDENTITY_HEADERS = [
   // be rejected by a verifying app anyway; stripping it keeps the rule simple.
   'X-AppCrane-Identity-Ts',
   'X-AppCrane-Identity-Sig',
+  // v2.108.0: 'app-key' when the caller signed in with a personal app sign-in
+  // key (dhk_uak_*) instead of a browser session. An app that lets a script do
+  // less than its person relies on it, so a client must not be able to send it.
+  'X-AppCrane-Auth-Via',
 ];
 
 /**

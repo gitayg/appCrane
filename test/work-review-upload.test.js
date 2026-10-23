@@ -14,7 +14,7 @@ import { createServer } from 'http';
 // can neither read another's excerpts nor write into their history.
 
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'wr-hub-'));
-const { buildPayload, scrub, checkUrl, SCHEMA } = await import('../.claude/skills/work-review/scripts/upload.mjs');
+const { buildPayload, scrub, checkUrl, SCHEMA, APP_KEY_RE } = await import('../.claude/skills/work-review/scripts/upload.mjs');
 const { handler, validate } = await import('../examples/work-review-hub/server.mjs');
 
 const report = {
@@ -111,4 +111,21 @@ test('hub rejects forged, oversized and secret-bearing uploads', async () => {
   assert.equal((await post(h, injected)).status, 422);
   const big = buildPayload(report); big.pad = 'x'.repeat(100_000);
   assert.equal((await post(h, big).catch(() => ({ status: 413 }))).status, 413);
+});
+
+test('uploader takes only an app sign-in key; scrub catches keys with dashes', () => {
+  assert.ok(APP_KEY_RE.test('dhk_uak_Ab-c_9xYz'), 'base64url keys contain - and _');
+  assert.ok(!APP_KEY_RE.test('dhk_user_Abc123'), 'a full user key is refused');
+  assert.ok(!APP_KEY_RE.test('dhk_mcp_Abc123'));
+  assert.equal(scrub('key dhk_uak_Ab-cdEFgh-1234 here'), 'key «secret» here');
+});
+
+test('hub lets an app sign-in key upload and nothing else', async () => {
+  const viaKey = { ...as('kim@opswat.com'), 'X-AppCrane-Auth-Via': 'app-key' };
+  assert.equal((await post(viaKey, buildPayload(report))).status, 201, 'upload allowed');
+  assert.equal((await fetch(`${base}/api/reports/me`, { headers: viaKey })).status, 403, 'cannot read excerpts');
+  assert.equal((await fetch(`${base}/api/reports/me`, { method: 'DELETE', headers: viaKey })).status, 403, 'cannot delete');
+  assert.equal((await fetch(`${base}/`, { headers: viaKey })).status, 403, 'no dashboard');
+  const browser = await (await fetch(`${base}/api/reports/me`, { headers: as('kim@opswat.com') })).json();
+  assert.equal(browser.reports.length, 1, 'the same person in a browser sees the upload');
 });

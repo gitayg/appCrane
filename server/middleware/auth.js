@@ -99,6 +99,15 @@ export function requireAuth(req, res, next) {
       ));
     }
 
+    // v2.108.0: personal app sign-in keys (dhk_uak_*) open one app's
+    // forward_auth gate and nothing on this API. Their hashes live in
+    // user_app_keys, so the lookup below could never match one anyway; the
+    // explicit refusal is for the person holding it, who would otherwise read
+    // "Invalid API key" and assume the key is broken.
+    if (apiKey.startsWith('dhk_uak_')) {
+      return next(new AppError('App sign-in keys (dhk_uak_*) only sign in to the app they were issued for; they cannot call the AppCrane API', 403, 'KEY_SCOPE_RESTRICTED'));
+    }
+
     const user = db.prepare('SELECT * FROM users WHERE api_key_hash = ?').get(hashApiKey(apiKey));
     if (!user) return next(new AppError('Invalid API key', 401, 'UNAUTHORIZED'));
     if (!user.active) return next(new AppError('Account is deactivated', 403, 'DEACTIVATED'));
