@@ -73,7 +73,7 @@ export function scrub(s) {
 
 const num = v => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
 const pickNums = (o, keys) => Object.fromEntries(keys.map(k => [k, num(o?.[k])]));
-const group = g => pickNums(g, ['prompts', 'medianCost', 'medianExploreBeforeFirstEdit', 'reworkRate']);
+const group = g => pickNums(g, ['prompts', 'medianCost', 'medianUsd', 'medianExploreBeforeFirstEdit', 'reworkRate']);
 
 // Allow-list, field by field: anything the analyzer adds later stays local
 // until it is deliberately added here.
@@ -91,12 +91,16 @@ export function buildPayload(report, { now = new Date() } = {}) {
         'corrections', 'interrupts', 'compactions', 'searchBursts', 'parallelToolTurnShare']),
       tokens: pickNums(T.tokens, ['input', 'output', 'cacheRead', 'cacheWrite']),
       wastedTokensEstimate: pickNums(T.wastedTokensEstimate, ['redundantReads', 'idleReruns', 'errorOutputs']),
+      // API-list-price dollars (see analyze.mjs): the API-equivalent value, not a bill.
+      usd: num(T.usd),
     },
     instructionQuality: {
       totalCost: num(Q.totalCost), reworkCost: num(Q.reworkCost), reworkShare: num(Q.reworkShare),
+      totalUsd: num(Q.totalUsd), reworkUsd: num(Q.reworkUsd),
       vague: group(Q.vague), anchored: group(Q.anchored), withCriteria: group(Q.withCriteria), withoutCriteria: group(Q.withoutCriteria),
       costliestBadPrompts: (Q.costliestBadPrompts || []).slice(0, TOP_EXCERPTS).map(p => ({
         cost: num(p.cost),
+        usd: num(p.usd),
         why: (p.why || []).filter(w => typeof w === 'string').map(w => w.replace(/[^\w\s;-]/g, '').slice(0, 60)).slice(0, 4),
         excerpt: scrub(p.prompt),
       })),

@@ -43,7 +43,7 @@
     <div id="mine" hidden>
       <h2>Last 7 days <span class="mute" id="asof"></span></h2>
       <div class="kpis" id="kpis"></div>
-      <h2>Spend per day (7-day window)</h2>
+      <h2>Cost at API list prices, per daily 7-day snapshot</h2>
       <div class="card"><svg id="trend" role="img" aria-label="Daily spend trend"></svg><div class="mute" id="trendNote"></div></div>
       <h2>Instruction quality</h2>
       <div class="card scroll"><table id="iq"></table></div>
@@ -67,6 +67,7 @@ const $ = id => document.getElementById(id);
 const el = (tag, text, cls) => { const e = document.createElement(tag); if (text != null) e.textContent = text; if (cls) e.className = cls; return e; };
 const k = n => n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : String(Math.round(n));
 const pct = x => (x * 100).toFixed(0) + '%';
+const usd = n => n >= 100 ? `$${n.toFixed(0)}` : `$${(n || 0).toFixed(2)}`;
 const api = p => fetch(p, { credentials: 'same-origin' }).then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
 
 function kpi(label, value, cls) { const d = el('div', null, 'kpi'); d.append(el('div', value, 'v' + (cls ? ' ' + cls : '')), el('div', label, 'l')); return d; }
@@ -78,30 +79,30 @@ function renderMine(reports) {
   const r = reports[reports.length - 1], T = r.totals, Q = r.instructionQuality, O = r.overcomplication;
   $('asof').textContent = `· snapshot ${r.day}`;
   $('kpis').replaceChildren(
-    kpi('Spend (input-token equivalents)', k(Q.totalCost)),
-    kpi('Spent on prompts that needed correcting', pct(Q.reworkShare), Q.reworkShare > 0.15 ? 'warn' : ''),
+    kpi('Cost at API list prices (not your seat bill)', usd(T.usd)),
+    kpi('Spent on prompts that needed correcting', `${pct(Q.reworkShare)} · ${usd(Q.reworkUsd)}`, Q.reworkShare > 0.15 ? 'warn' : ''),
     kpi('Vague prompts', `${Q.vague.prompts} / ${Q.vague.prompts + Q.anchored.prompts}`),
     kpi('Cache hit rate', pct(T.cacheHitRate), T.cacheHitRate > 0.85 ? 'good' : ''),
     kpi('Tool error rate', pct(T.errorRate), T.errorRate > 0.1 ? 'warn' : ''),
     kpi('Sessions · prompts', `${T.sessions} · ${T.userPrompts}`));
 
   // Trend: totalCost per daily snapshot, as a simple line.
-  const pts = reports.map(x => x.instructionQuality.totalCost), max = Math.max(1, ...pts), W = 1000, H = 120, pad = 8;
+  const pts = reports.map(x => x.totals.usd || 0), max = Math.max(1, ...pts), W = 1000, H = 120, pad = 8;
   const svg = $('trend'); svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.replaceChildren();
   const ns = 'http://www.w3.org/2000/svg', line = document.createElementNS(ns, 'polyline');
   line.setAttribute('points', pts.map((v, i) => `${pad + i * (W - 2 * pad) / Math.max(1, pts.length - 1)},${H - pad - v / max * (H - 2 * pad)}`).join(' '));
   line.setAttribute('fill', 'none'); line.setAttribute('stroke', 'currentColor'); line.setAttribute('stroke-width', '2.5'); line.style.color = 'var(--accent)';
   svg.append(line);
-  $('trendNote').textContent = `${reports.length} daily snapshots, ${reports[0].day} → ${r.day}. Peak ${k(max)}.`;
+  $('trendNote').textContent = `${reports.length} daily snapshots (each a 7-day window), ${reports[0].day} → ${r.day}. Peak ${usd(max)} at API list prices.`;
 
   const t = $('iq'); t.replaceChildren(row(['Prompts', 'Count', 'Median cost', 'Lookups before first edit', 'Led to rework'], true));
   for (const [name, g] of [['Vague', Q.vague], ['Anchored', Q.anchored], ['With done-criteria', Q.withCriteria], ['Without done-criteria', Q.withoutCriteria]])
-    t.append(row([name, g.prompts, k(g.medianCost), g.medianExploreBeforeFirstEdit, pct(g.reworkRate)]));
+    t.append(row([name, g.prompts, usd(g.medianUsd), g.medianExploreBeforeFirstEdit, pct(g.reworkRate)]));
 
   const p = $('prompts'); p.replaceChildren();
   if (!Q.costliestBadPrompts.length) p.append(el('div', 'None this week.', 'mute'));
   for (const b of Q.costliestBadPrompts) {
-    const d = el('div', null, 'prompt'); d.append(el('strong', `~${k(b.cost)}`), el('q', b.excerpt));
+    const d = el('div', null, 'prompt'); d.append(el('strong', usd(b.usd)), el('q', b.excerpt));
     b.why.forEach(w => d.append(el('span', w, 'tag'))); p.append(d);
   }
 
@@ -119,8 +120,8 @@ function renderMine(reports) {
 }
 
 function renderTeam(people) {
-  const t = $('teamTable'); t.replaceChildren(row(['Person', 'Snapshot', 'Spend', 'Rework share', 'Vague prompts', 'Cache hit', 'Error rate', 'Recurring corrections'], true));
-  for (const p of people) t.append(row([p.name || p.email, p.day, k(p.instructionQuality.totalCost), pct(p.instructionQuality.reworkShare),
+  const t = $('teamTable'); t.replaceChildren(row(['Person', 'Snapshot', 'API-list cost (7 days)', 'Rework share', 'Vague prompts', 'Cache hit', 'Error rate', 'Recurring corrections'], true));
+  for (const p of people) t.append(row([p.name || p.email, p.day, usd(p.totals.usd), pct(p.instructionQuality.reworkShare),
     p.instructionQuality.vague.prompts, pct(p.totals.cacheHitRate), pct(p.totals.errorRate), p.recurring.corrections]));
 }
 

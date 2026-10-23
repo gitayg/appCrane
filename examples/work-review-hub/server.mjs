@@ -55,7 +55,7 @@ function excerpt(s) {
 export function validate(p) {
   if (!p || p.schema !== SCHEMA) throw new Error(`schema must be ${SCHEMA}`);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(p.day)) throw new Error('bad day');
-  const g = (o, path) => nums(o, ['prompts', 'medianCost', 'medianExploreBeforeFirstEdit', 'reworkRate'], path);
+  const g = (o, path) => nums(o, ['prompts', 'medianCost', 'medianUsd', 'medianExploreBeforeFirstEdit', 'reworkRate'], path);
   const Q = p.instructionQuality || {}, O = p.overcomplication || {}, T = p.totals || {};
   if (!Array.isArray(Q.costliestBadPrompts) || Q.costliestBadPrompts.length > 5) throw new Error('costliestBadPrompts must be ≤5');
   if (!Array.isArray(O.returnsCurve) || O.returnsCurve.length > 5) throw new Error('returnsCurve must be ≤5');
@@ -68,12 +68,13 @@ export function validate(p) {
         'searchBursts', 'parallelToolTurnShare'], 'totals'),
       tokens: nums(T.tokens, ['input', 'output', 'cacheRead', 'cacheWrite'], 'totals.tokens'),
       wastedTokensEstimate: nums(T.wastedTokensEstimate, ['redundantReads', 'idleReruns', 'errorOutputs'], 'totals.wastedTokensEstimate'),
+      usd: nums(T, ['usd'], 'totals').usd,
     },
     instructionQuality: {
-      ...nums(Q, ['totalCost', 'reworkCost', 'reworkShare'], 'instructionQuality'),
+      ...nums(Q, ['totalCost', 'reworkCost', 'reworkShare', 'totalUsd', 'reworkUsd'], 'instructionQuality'),
       vague: g(Q.vague, 'vague'), anchored: g(Q.anchored, 'anchored'), withCriteria: g(Q.withCriteria, 'withCriteria'), withoutCriteria: g(Q.withoutCriteria, 'withoutCriteria'),
       costliestBadPrompts: Q.costliestBadPrompts.map(b => ({
-        cost: nums(b, ['cost'], 'prompt').cost,
+        ...nums(b, ['cost', 'usd'], 'prompt'),
         why: (Array.isArray(b.why) ? b.why : []).slice(0, 4).map(w => String(w).replace(/[^\w\s;-]/g, '').slice(0, 60)),
         excerpt: excerpt(b.excerpt),
       })),
@@ -113,7 +114,7 @@ function team() {
     const last = history(dir, 1)[0]; if (!last) return null;
     const { costliestBadPrompts, ...iq } = last.instructionQuality;
     return { name: meta.name, email: meta.email, day: last.day, totals: last.totals, instructionQuality: iq, overcomplication: last.overcomplication, recurring: last.recurring };
-  }).filter(Boolean).sort((a, b) => b.instructionQuality.totalCost - a.instructionQuality.totalCost);
+  }).filter(Boolean).sort((a, b) => (b.totals.usd || 0) - (a.totals.usd || 0));
 }
 
 // ── http ─────────────────────────────────────────────────────────

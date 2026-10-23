@@ -127,3 +127,39 @@ test('lowercase prose is not mistaken for a code identifier', () => {
   execFileSync(process.execPath, [SCRIPT, '--root', root, '--json', out]);
   assert.equal(JSON.parse(readFileSync(out, 'utf8')).instructionQuality.vague.prompts, 1);
 });
+
+test('analyzer prices usage at API list rates per model, and never guesses an unknown model', () => {
+  const root = mkdtempSync(join(tmpdir(), 'work-review-'));
+  mkdirSync(join(root, '-p'));
+  const msg = (id, model, usage) => ({ type: 'assistant', timestamp: new Date().toISOString(), message: { id, model, content: [{ type: 'text', text: 'x' }], usage } });
+  const lines = [
+    { type: 'user', timestamp: new Date().toISOString(), message: { role: 'user', content: 'price this' } },
+    // Opus 5.5, $4 in / $20 out / $0.20 read: 1M fresh + 1M out + 1M read
+    // + 1M 5-minute write (×1.25) + 1M 1-hour write (×2) = 4 + 20 + 0.2 + 5 + 8.
+    msg('a', 'claude-opus-5-5[1m]', { input_tokens: 1e6, output_tokens: 1e6, cache_read_input_tokens: 1e6,
+      cache_creation_input_tokens: 2e6, cache_creation: { ephemeral_5m_input_tokens: 1e6, ephemeral_1h_input_tokens: 1e6 } }),
+    // Fast mode doubles: 1M Opus 5.5 output at $40.
+    msg('b', 'claude-opus-5-5', { input_tokens: 0, output_tokens: 1e6, speed: 'fast' }),
+    // Haiku 5.5 over 100K prompt tokens uses the long pair ($0.50 in): 200K fresh = $0.10.
+    msg('c', 'claude-haiku-5-5', { input_tokens: 200_000, output_tokens: 0 }),
+    // claude-opus-5 must not be priced as claude-opus-5-5, nor the reverse: 1M in at $5.
+    msg('d', 'claude-opus-5-20260301', { input_tokens: 1e6, output_tokens: 0 }),
+    msg('e', 'some-future-model', { input_tokens: 5, output_tokens: 5 }),
+  ];
+  writeFileSync(join(root, '-p', 'p.jsonl'), lines.map(l => JSON.stringify(l)).join('\n'));
+  const out = join(root, 'r.json');
+  const md = execFileSync(process.execPath, [SCRIPT, '--root', root, '--json', out], { encoding: 'utf8' });
+  const t = JSON.parse(readFileSync(out, 'utf8')).totals;
+  assert.equal(t.usdByModel['claude-opus-5-5[1m]'], 37.2);
+  assert.equal(t.usdByModel['claude-opus-5-5'], 40);
+  assert.equal(t.usdByModel['claude-haiku-5-5'], 0.1);
+  assert.equal(t.usdByModel['claude-opus-5-20260301'], 5);
+  assert.equal(t.usd, 82.3);
+  assert.deepEqual(t.unpricedModels, { 'some-future-model': 10 });
+  assert.match(md, /not an invoice/, 'the report says what the dollars are');
+
+  const prices = join(root, 'prices.json');
+  writeFileSync(prices, JSON.stringify({ 'some-future-model': { in: 1e6, out: 0, read: 0 } }));
+  execFileSync(process.execPath, [SCRIPT, '--root', root, '--json', out, '--prices', prices]);
+  assert.equal(JSON.parse(readFileSync(out, 'utf8')).totals.usd, 87.3, '--prices adds a model');
+});

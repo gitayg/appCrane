@@ -33,6 +33,8 @@ node <skill-dir>/scripts/analyze.mjs --since 30 --json /tmp/work-review.json
 
 Options: `--project <substr>` limits to one project (transcript dirs are named after the cwd, e.g. `-home-user-appCrane`); `--session <id>`; `--since <days>` (default 30); `--include-subagents`; `--top <n>`; `--root <dir>` for a different transcript root. The default root is `$CLAUDE_CONFIG_DIR/projects` or `~/.claude/projects`. In AppCrane, an app's builder transcripts live on the host at `$DATA_DIR/apps/<slug>/claude-projects`.
 
+**Dollars.** The analyzer prices every message at Claude API list rates, per model. Cache writes are 1.25× or 2× input depending on TTL, cache reads are priced per model, and fast mode costs 2×. The prices table is in `analyze.mjs` and carries its as-of date. On a Team, Max or Enterprise seat, `/usage` mostly shows plan-limit bars, because "usage inside the seat allowance isn't metered in dollars" ([costs docs](https://code.claude.com/docs/en/costs.md)). So the analyzer's figure is the *API-equivalent value* of the work. Always call it that, never "your bill". The actual dollar spend on a Team plan (usage credits beyond the seat) is in the claude.ai admin spend report. If the organisation pays contract rates, pass `--prices <file.json>` with `{ "<model prefix>": { "in", "out", "read" } }` in $ per million tokens, so the figures match the `modelPricing` managed setting. Models not in the table are listed as unpriced, never guessed.
+
 By default, scope to the current project when the user is asking about "this repo", and to everything otherwise. If no transcripts are found, say so and stop. Don't fabricate a review.
 
 ## 2. Understand
@@ -107,7 +109,7 @@ Before proposing a `CLAUDE.md` line, read the existing `CLAUDE.md`, `.claude/set
 
 Write the review in this shape. Keep it short, because the user wants actions, not a dashboard:
 
-1. **Headline**: 2–3 sentences, giving the biggest source of waste and what fixing it would save, in counts from the data (e.g. "prompts that ended in a correction took 31% of your spend", "you restated the test command in 6 of 9 sessions").
+1. **Headline**: 2–3 sentences, giving the biggest source of waste and what fixing it would save, in dollars at API list prices where priced, and in counts from the data (e.g. "prompts that ended in a correction took 31% of your spend", "you restated the test command in 6 of 9 sessions").
 2. **Your costliest instructions**: up to 3 before/after prompt rewrites, each with what it would have saved.
 3. **Top fixes** (at most 5, ranked by occurrences × cost: use `totals.wastedTokensEstimate`, which is a floor because the output then stays in context for the rest of the session). Each one has:
    - the evidence: the count, the sessions, and one short quoted example;

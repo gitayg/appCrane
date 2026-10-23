@@ -27,6 +27,7 @@ const ONLY_SESSION = opt('session', null);
 const SUBAGENTS = flag('include-subagents');
 const JSON_OUT = opt('json', null);
 const TOP = Number(opt('top', 10));
+const PRICE_FILE = opt('prices', process.env.WORK_REVIEW_PRICES || null);
 const sinceMs = Date.now() - SINCE_DAYS * 86400_000;
 
 // ── helpers ──────────────────────────────────────────────────────
@@ -69,6 +70,54 @@ const ANCHOR_RE = /(`[^`]+`|\b[\w-]+\.(?:js|mjs|ts|tsx|jsx|py|go|rs|java|rb|php|
 const CRITERIA_RE = /\b(should|must|expect(?:ed)?|so that|done when|until|make sure|verify|passes?|returns?|instead of|acceptance)\b/i;
 // Relative price of a token vs fresh input: output ×5, cache write ×1.25, cache read ×0.1.
 const costUnits = u => (u.input_tokens || 0) + 5 * (u.output_tokens || 0) + 1.25 * (u.cache_creation_input_tokens || 0) + 0.1 * (u.cache_read_input_tokens || 0);
+// ── pricing: what the same tokens would cost on the Claude API ──
+// Team, Max and Enterprise seats are billed per seat, so /usage on those plans
+// shows plan limits rather than a bill. Pricing the transcript's own usage at
+// API list rates gives a comparable dollar figure: the API-equivalent value of
+// the work, not an invoice. $ per million tokens, first-party Claude API rates
+// as of PRICES_AS_OF; --prices <file.json> (or WORK_REVIEW_PRICES) overrides or
+// extends it with { "<model-id prefix>": { "in", "out", "read" } }.
+// Cache writes are priced from `in`: ×1.25 for the 5-minute TTL, ×2 for 1-hour.
+const PRICES_AS_OF = '2026-10-06';
+const BASE_PRICES = {
+  'claude-fable-5-1': { in: 10, out: 50, read: 0.25 },
+  'claude-mythos-5-1': { in: 10, out: 50, read: 0.25 },
+  'claude-fable-5': { in: 10, out: 50, read: 1 },
+  'claude-mythos-5': { in: 10, out: 50, read: 1 },
+  'claude-opus-5-5': { in: 4, out: 20, read: 0.2 },
+  'claude-opus-5': { in: 5, out: 25, read: 0.5 },
+  'claude-opus-4-8': { in: 5, out: 25, read: 0.5 },
+  'claude-opus-4-7': { in: 5, out: 25, read: 0.5 },
+  'claude-opus-4-6': { in: 5, out: 25, read: 0.5 },
+  'claude-sonnet-5-5': { in: 2, out: 10, read: 0.2 },
+  'claude-sonnet-5': { in: 2, out: 10, read: 0.2 },
+  'claude-sonnet-4-6': { in: 3, out: 15, read: 0.3 },
+  // Haiku 5.5: prompts over 100K tokens are billed at the higher pair.
+  'claude-haiku-5-5': { in: 0.1, out: 0.5, read: 0.01, longAt: 100_000, longIn: 0.5, longOut: 2.5 },
+  'claude-haiku-4-5': { in: 1, out: 5, read: 0.1 },
+};
+const PRICES = { ...BASE_PRICES, ...(PRICE_FILE ? JSON.parse(readFileSync(PRICE_FILE, 'utf8')) : {}) };
+const PRICE_KEYS = Object.keys(PRICES).sort((a, b) => b.length - a.length);   // claude-opus-5-5 before claude-opus-5
+export function priceFor(model) {
+  const id = String(model || '').toLowerCase()
+    .replace(/\[[^\]]*\]/g, '')                       // claude-opus-5-5[1m]
+    .replace(/^(?:(?:us|eu|apac|global)\.)?anthropic\./, '') // Bedrock-style prefixes
+    .replace(/@.*$/, '').replace(/-\d{8}$/, '').trim();    // dated snapshots
+  const key = PRICE_KEYS.find(k => id === k || id.startsWith(k + '-'));
+  return key ? PRICES[key] : null;
+}
+/** Dollars for one message's usage, or null when the model is not priced. */
+export function usdOf(u, model) {
+  const p = priceFor(model);
+  if (!p) return null;
+  const fresh = u.input_tokens || 0, read = u.cache_read_input_tokens || 0, write = u.cache_creation_input_tokens || 0;
+  const long = p.longAt && fresh + read + write > p.longAt;
+  const rin = long ? p.longIn : p.in, rout = long ? p.longOut : p.out, rread = long ? p.longIn * (p.read / p.in) : p.read;
+  const w1h = Math.min(write, u.cache_creation?.ephemeral_1h_input_tokens || 0);
+  const fast = u.speed === 'fast' ? 2 : 1;   // fast mode: 2× standard on the Opus models that offer it
+  return fast * (fresh * rin + (u.output_tokens || 0) * rout + read * rread + (write - w1h) * rin * 1.25 + w1h * rin * 2) / 1e6;
+}
+
 const NUDGE_RE = /^(continue|go on|go ahead|proceed|yes|yep|y|ok(?:ay)?|sure|do it|next|keep going|carry on)[.!\s]*$/i;
 const CEREMONY_RE = /^(TodoWrite|TaskCreate|TaskUpdate|EnterPlanMode|ExitPlanMode)$/;
 const BIG_MODEL_RE = /opus|fable/i;
@@ -82,7 +131,7 @@ function analyzeFile(path) {
   const s = {
     file: path, project: basename(dirname(path).replace(/\/subagents$/, '')), sessionId: basename(path, '.jsonl'),
     subagent: path.includes('/subagents/'), start: null, end: null, models: new Map(),
-    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, turns: 0, userPrompts: [],
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, usd: 0, usdByModel: new Map(), unpriced: new Map(), turns: 0, userPrompts: [],
     toolCalls: 0, toolCounts: new Map(), errors: [], redundantReads: [], repeatedCmds: [],
     retryLoops: [], editMisses: 0, denials: [], bigOutputs: [], corrections: [], interrupts: 0,
     compactions: 0, searchBursts: 0, wastedTokens: { read: 0, rerun: 0, errors: 0 },
@@ -100,7 +149,7 @@ function analyzeFile(path) {
     s.userPrompts.push(t);
     const corr = CORRECTION_RE.test(t.trim());
     if (cur && corr && !cur.followedBy) cur.followedBy = 'correction';
-    cur = { text: t, chars: t.length, anchored: ANCHOR_RE.test(t), criteria: CRITERIA_RE.test(t), nudge: NUDGE_RE.test(t.trim()), correction: corr, cost: 0, tools: 0, explore: 0, edits: 0, followedBy: null };
+    cur = { text: t, chars: t.length, anchored: ANCHOR_RE.test(t), criteria: CRITERIA_RE.test(t), nudge: NUDGE_RE.test(t.trim()), correction: corr, cost: 0, usd: 0, tools: 0, explore: 0, edits: 0, followedBy: null };
     s.prompts.push(cur);
     s.promptChars += t.length; s.maxPrompt = Math.max(s.maxPrompt, t.length);
     if (NUDGE_RE.test(t.trim())) s.nudges++;
@@ -128,6 +177,9 @@ function analyzeFile(path) {
         s.usage.cacheRead += m.usage.cache_read_input_tokens || 0; s.usage.cacheWrite += m.usage.cache_creation_input_tokens || 0;
         if (m.model) inc(s.models, m.model);
         if (cur) cur.cost += costUnits(m.usage);
+        const usd = usdOf(m.usage, m.model);
+        if (usd == null) { if (m.model && m.model !== '<synthetic>') inc(s.unpriced, m.model, (m.usage.input_tokens || 0) + (m.usage.output_tokens || 0) + (m.usage.cache_read_input_tokens || 0) + (m.usage.cache_creation_input_tokens || 0)); }
+        else { s.usd += usd; inc(s.usdByModel, m.model, usd); if (cur) cur.usd += usd; }
         // First turn's prompt size ≈ the always-on context: system prompt, tools, CLAUDE.md, MCP, skills.
         if (s.baselineCtx === null) s.baselineCtx = (m.usage.input_tokens || 0) + (m.usage.cache_read_input_tokens || 0) + (m.usage.cache_creation_input_tokens || 0);
       }
@@ -320,6 +372,11 @@ const totals = {
   wastedTokensEstimate: { redundantReads: sum(s => s.wastedTokens.read), idleReruns: sum(s => s.wastedTokens.rerun), errorOutputs: sum(s => s.wastedTokens.errors) },
   parallelToolTurnShare: +(sum(s => s.multiToolTurns) / Math.max(1, sum(s => s.multiToolTurns + s.singleToolTurns))).toFixed(3),
   tools: Object.fromEntries([...toolTotals].sort((a, b) => b[1] - a[1])),
+  usd: +sum(s => s.usd).toFixed(4),
+  usdByModel: (() => { const m = new Map(); for (const s of sessions) for (const [k2, v] of s.usdByModel) inc(m, k2, v); return Object.fromEntries([...m].sort((a, b) => b[1] - a[1]).map(([k2, v]) => [k2, +v.toFixed(4)])); })(),
+  unpricedModels: (() => { const m = new Map(); for (const s of sessions) for (const [k2, v] of s.unpriced) inc(m, k2, v); return Object.fromEntries(m); })(),
+  pricesAsOf: PRICES_AS_OF,
+  subagentsIncluded: SUBAGENTS,
 };
 const cross = crossSession(sessions);
 const perSession = sessions.map(s => ({
@@ -327,7 +384,7 @@ const perSession = sessions.map(s => ({
   start: s.start && new Date(s.start).toISOString(), minutes: s.start ? Math.round((s.end - s.start) / 60000) : 0,
   firstPrompt: clip(s.userPrompts[0] || '', 120), turns: s.turns, toolCalls: s.toolCalls, errors: s.errors.length,
   redundantReads: s.redundantReads.length, retryLoops: s.retryLoops, corrections: s.corrections, interrupts: s.interrupts,
-  compactions: s.compactions, tokens: s.usage, edits: s.edits, commits: s.commits, subagents: s.agentCalls, overcomplication: s.overcomplication,
+  compactions: s.compactions, tokens: s.usage, usd: +s.usd.toFixed(4), edits: s.edits, commits: s.commits, subagents: s.agentCalls, overcomplication: s.overcomplication,
   wasteScore: s.redundantReads.length + 2 * s.retryLoops.length + s.errors.length + 3 * s.corrections.length + s.interrupts + 2 * s.compactions,
 })).sort((a, b) => b.wasteScore - a.wasteScore);
 
@@ -335,7 +392,7 @@ const perSession = sessions.map(s => ({
 const allPrompts = mains.flatMap(s => s.prompts.map(p => ({ ...p, sid: s.sessionId })));
 const work = allPrompts.filter(p => !p.nudge && p.tools > 0);   // prompts that set Claude to work
 const median = a => { const b = [...a].sort((x, y) => x - y); return b.length ? b[Math.floor(b.length / 2)] : 0; };
-const group = ps => ({ prompts: ps.length, medianCost: Math.round(median(ps.map(p => p.cost))), medianExploreBeforeFirstEdit: median(ps.map(p => p.explore)),
+const group = ps => ({ prompts: ps.length, medianCost: Math.round(median(ps.map(p => p.cost))), medianUsd: +median(ps.map(p => p.usd)).toFixed(4), medianExploreBeforeFirstEdit: median(ps.map(p => p.explore)),
   reworkRate: +(ps.filter(p => p.followedBy).length / Math.max(1, ps.length)).toFixed(2) });
 const vague = p => !p.anchored && p.chars < 300;
 const totalCost = allPrompts.reduce((a, p) => a + p.cost, 0);
@@ -346,10 +403,12 @@ const instructionQuality = {
   vague: group(work.filter(vague)), anchored: group(work.filter(p => p.anchored)),
   withCriteria: group(work.filter(p => p.criteria)), withoutCriteria: group(work.filter(p => !p.criteria)),
   reworkCost: Math.round(reworked.reduce((a, p) => a + p.cost, 0)),
+  totalUsd: +allPrompts.reduce((a, p) => a + p.usd, 0).toFixed(4),
+  reworkUsd: +reworked.reduce((a, p) => a + p.usd, 0).toFixed(4),
   reworkShare: +(reworked.reduce((a, p) => a + p.cost, 0) / Math.max(1, totalCost)).toFixed(3),
   costliestBadPrompts: allPrompts.filter(p => p.followedBy || (vague(p) && !p.nudge && p.explore >= 5))
     .sort((a, b) => b.cost - a.cost).slice(0, TOP)
-    .map(p => ({ sessionId: p.sid, cost: Math.round(p.cost), why: [p.followedBy && `followed by ${p.followedBy}`, vague(p) && 'no concrete anchor', !p.criteria && 'no done-criteria', p.explore >= 5 && `${p.explore} lookups before first edit`].filter(Boolean), prompt: clip(p.text, 300) })),
+    .map(p => ({ sessionId: p.sid, cost: Math.round(p.cost), usd: +p.usd.toFixed(4), why: [p.followedBy && `followed by ${p.followedBy}`, vague(p) && 'no concrete anchor', !p.criteria && 'no done-criteria', p.explore >= 5 && `${p.explore} lookups before first edit`].filter(Boolean), prompt: clip(p.text, 300) })),
 };
 
 const report = { generatedAt: new Date().toISOString(), root: ROOT, sinceDays: SINCE_DAYS, totals, instructionQuality, cross, overcomplication, worstSessions: perSession.slice(0, TOP), sessions: perSession };
@@ -358,9 +417,12 @@ if (JSON_OUT) writeFileSync(JSON_OUT, JSON.stringify(report, null, 2));
 // ── markdown summary ─────────────────────────────────────────────
 const k = n => n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : String(n);
 const T = totals, out = [];
+const usd = n => n >= 100 ? `$${n.toFixed(0)}` : n >= 1 ? `$${n.toFixed(2)}` : `$${n.toFixed(3)}`;
+const byModel = Object.entries(T.usdByModel).map(([m, v]) => `${m} ${usd(v)}`).join(', ');
 out.push(`# Claude work review — last ${SINCE_DAYS} days`, '',
   `Root: \`${ROOT}\`${PROJECT ? ` · project filter: \`${PROJECT}\`` : ''}`, '',
   `| Metric | Value |`, `|---|---|`,
+  `| Cost at API list prices (not your bill on a seat plan) | **${usd(T.usd)}**${byModel ? ` — ${byModel}` : ''} |`,
   `| Sessions (subagent runs) | ${T.sessions} (${T.subagentRuns}) |`,
   `| Model turns / tool calls / your prompts | ${T.turns} / ${T.toolCalls} / ${T.userPrompts} |`,
   `| Tokens in (fresh · cache read · cache write) / out | ${k(U.input)} · ${k(U.cacheRead)} · ${k(U.cacheWrite)} / ${k(U.output)} |`,
@@ -375,17 +437,20 @@ out.push(`# Claude work review — last ${SINCE_DAYS} days`, '',
   `| Your corrections / interrupts | ${T.corrections} / ${T.interrupts} |`,
   `| Compactions | ${T.compactions} |`,
   `| Search bursts (≥8 Grep/Glob in a row) | ${T.searchBursts} |`,
-  `| Turns that batched parallel tool calls | ${(T.parallelToolTurnShare * 100).toFixed(1)}% |`, '');
+  `| Turns that batched parallel tool calls | ${(T.parallelToolTurnShare * 100).toFixed(1)}% |`, '',
+  `Dollars are what these tokens would cost on the Claude API at list prices as of ${T.pricesAsOf} (cache writes and reads priced separately, fast mode ×2). On a Team, Max or Enterprise seat you pay per seat, so this is the API-equivalent value of the work, not an invoice.` +
+  (T.subagentsIncluded ? '' : ' Subagent runs are not included; add --include-subagents to count them.') +
+  (Object.keys(T.unpricedModels).length ? ` Not priced (unknown model): ${Object.entries(T.unpricedModels).map(([m, n]) => `${m} ${k(n)} tokens`).join(', ')}; add it with --prices.` : ''), '');
 const section = (title, rows, fmt) => { if (rows.length) { out.push(`## ${title}`, ''); rows.forEach(r => out.push(`- ${fmt(r)}`)); out.push(''); } };
 const OC = overcomplication;
 {
-  const Q = instructionQuality, row = (name, g) => `| ${name} | ${g.prompts} | ${k(g.medianCost)} | ${g.medianExploreBeforeFirstEdit} | ${(g.reworkRate * 100).toFixed(0)}% |`;
+  const Q = instructionQuality, row = (name, g) => `| ${name} | ${g.prompts} | ${usd(g.medianUsd)} | ${g.medianExploreBeforeFirstEdit} | ${(g.reworkRate * 100).toFixed(0)}% |`;
   out.push('## Instruction quality', '',
-    `Prompts followed by a correction or interrupt cost **~${k(Q.reworkCost)}** (${(Q.reworkShare * 100).toFixed(1)}% of all spend, in ${Q.costUnit}).`, '',
+    `Prompts followed by a correction or interrupt cost **${usd(Q.reworkUsd)}** (${(Q.reworkShare * 100).toFixed(1)}% of all spend).`, '',
     '| Prompts | Count | Median cost | Median lookups before first edit | Led to rework |', '|---|---|---|---|---|',
     row('Vague (no file, code, error or URL; <300 chars)', Q.vague), row('Anchored (names a file, code, error or URL)', Q.anchored),
     row('States done-criteria', Q.withCriteria), row('No done-criteria', Q.withoutCriteria), '');
-  if (Q.costliestBadPrompts.length) { out.push('Costliest prompts that were vague or needed correcting:', ''); Q.costliestBadPrompts.slice(0, 5).forEach(p => out.push(`- ~${k(p.cost)} (${p.why.join('; ')}) \`${p.sessionId.slice(0, 8)}\`: “${clip(p.prompt, 160)}”`)); out.push(''); }
+  if (Q.costliestBadPrompts.length) { out.push('Costliest prompts that were vague or needed correcting:', ''); Q.costliestBadPrompts.slice(0, 5).forEach(p => out.push(`- ${usd(p.usd)} (${p.why.join('; ')}) \`${p.sessionId.slice(0, 8)}\`: “${clip(p.prompt, 160)}”`)); out.push(''); }
 }
 if (Object.keys(OC.flags).length || OC.returnsCurve.length > 1) {
   out.push('## Overcomplication', '',
