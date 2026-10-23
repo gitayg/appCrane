@@ -154,7 +154,7 @@ test('live: generated Node 22 app on a freshly pulled node:22-alpine runs a Node
   writeFileSync(join(rel, 'package.json'), JSON.stringify({ name: 'hello', version: '1.0.0', scripts: { start: 'node server.js' } }));
   writeFileSync(join(rel, 'package-lock.json'), JSON.stringify({ name: 'hello', version: '1.0.0', lockfileVersion: 3, requires: true, packages: { '': { name: 'hello', version: '1.0.0' } } }));
   writeFileSync(join(rel, 'server.js'), "require('http').createServer((q, s) => s.end(process.version)).listen(3000);\n");
-  // The generator reads the Node line from deployhub.json (node_version), not package.json.
+  // Pin the Node line so this test does not follow AppCrane's default.
   ensureDockerfile({ releaseDir: rel, manifest: { node_version: '22' }, appBasePath: '/hello/' });
   assert.match(readFileSync(join(rel, 'Dockerfile'), 'utf8'), /^FROM node:22-alpine/m);
   const lines = [];

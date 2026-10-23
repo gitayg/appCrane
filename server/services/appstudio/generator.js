@@ -10,6 +10,7 @@ import { syncDeployhubVersionInWorkspace } from './workspacePush.js';
 import { writeSnapshot } from '../github/snapshot.js';
 import { renderOpenCommentsSection } from '../enhancementComments.js';
 import { formatToolBreadcrumb } from './toolBreadcrumb.js';
+import { pickNodeVersion } from '../nodeVersion.js';
 import log from '../../utils/logger.js';
 
 const GEN_MODEL       = process.env.APPSTUDIO_CODER_MODEL || 'claude-sonnet-4-6';
@@ -89,7 +90,7 @@ export function cleanupWorkspace(jobId) {
   try { rmSync(jobDir(jobId), { recursive: true, force: true }); } catch (_) {}
 }
 
-const STUDIO_IMAGE_VERSION = '5'; // bump to force image rebuild (4: bash — the agent had no working shell without it; 5: ~/.claude owned by studio, uid/gid pinned)
+const STUDIO_IMAGE_VERSION = '6'; // bump to force image rebuild (4: bash — the agent had no working shell without it; 5: ~/.claude owned by studio, uid/gid pinned; 6: Node 22, CVE-2026-111497)
 // v3 (2026-05-03): rebuild to pull latest @anthropic-ai/claude-code in
 // case a cached older CLI looks at a different credentials.json path
 // than what AppCrane mounts. Symptom: "Not logged in · Please run /login"
@@ -125,8 +126,8 @@ export async function ensureStudioImage(onLog) {
   } else {
     onLog?.('[studio] infra/studio.Dockerfile missing — using inline recipe');
     writeFileSync(buildDockerfile, [
-      'ARG STUDIO_IMAGE_VERSION=5',
-      'FROM node:20-alpine',
+      'ARG STUDIO_IMAGE_VERSION=6',
+      `FROM node:${pickNodeVersion().version}-alpine`,
       'ARG STUDIO_IMAGE_VERSION',
       'LABEL appcrane.studio.version="${STUDIO_IMAGE_VERSION}"',
       // bash: alpine has none, and Claude Code's Bash tool spawns bash.

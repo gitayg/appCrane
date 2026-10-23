@@ -25,7 +25,7 @@ mkdirSync(SHIM, { recursive: true });
 writeFileSync(EXEC_LOG, '');
 writeFileSync(join(SHIM, 'docker'), `#!/bin/sh
 case "$1" in
-  image)   echo 5 ;;
+  image)   echo 6 ;;
   inspect) echo true ;;
   run)     echo 0123456789abcdef0123456789abcdef ;;
   exec)

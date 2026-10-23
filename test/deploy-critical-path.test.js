@@ -311,6 +311,7 @@ describe('a real deploy', () => {
     branchSha = CLONE_SHA;
     const { row, events } = await runDeploy('cp-overlap');
     assert.equal(row.status, 'live', `deploy did not go live:\n${row.log}`);
+    assert.match(row.log, /Generated Dockerfile \(node:22-alpine, non-root\) - Node 22: default \(no Node version in deployhub\.json or package\.json engines\); AppCrane's default changed from Node 20 to 22/);
 
     const build = events.find((e) => e.verb === 'build');
     assert.ok(build, `no docker build ran: ${JSON.stringify(events.map((e) => e.verb))}`);

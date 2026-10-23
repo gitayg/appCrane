@@ -83,7 +83,7 @@ case "$1" in
     done
     echo shimcontainer ;;
   inspect) echo running ;;
-  image) echo 5 ;;
+  image) echo 6 ;;
 esac
 exit 0
 `, { mode: 0o755 });

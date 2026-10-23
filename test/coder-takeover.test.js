@@ -49,7 +49,7 @@ esac
 ${WORKSPACE_DOCKER_PRELUDE}
 case "$1" in
   run)     echo c0ffee000000c0ffee000000c0ffee000000c0ffee000000c0ffee000000c0ff ;;
-  image)   echo 5 ;;
+  image)   echo 6 ;;
   inspect) echo true ;;
 esac
 exit 0

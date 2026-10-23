@@ -1927,7 +1927,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     } else {
       const { pinnedPhpVersionFor, describePhpBuild } = await import('./phpVersion.js');
       const pinnedPhpVersion = pinnedPhpVersionFor(db, app.id, env);
-      const { userProvided, runtime, php } = ensureDockerfile({ releaseDir, manifest, appBasePath, craneUrl, craneInternalUrl, pinnedPhpVersion });
+      const { userProvided, runtime, php, node } = ensureDockerfile({ releaseDir, manifest, appBasePath, craneUrl, craneInternalUrl, pinnedPhpVersion });
       buildRuntime = runtime ?? null;
 
       if (userProvided) {
@@ -1941,7 +1941,9 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
         appendLog(describePhpBuild(php));
         db.prepare('UPDATE deployments SET php_version = ? WHERE id = ?').run(php.version, deployId);
       } else {
-        appendLog('Generated Dockerfile (Node Alpine, non-root)');
+        const { describeNodeBuild } = await import('./nodeVersion.js');
+        appendLog(describeNodeBuild(node));
+        for (const w of node.warnings) appendLog(`⚠ ${w}`);
       }
 
       appendLog('Building docker image...');

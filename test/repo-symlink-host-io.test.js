@@ -36,7 +36,7 @@ const ARGV = join(ROOT, 'docker-argv');
 mkdirSync(BIN);
 writeFileSync(join(BIN, 'docker'), `#!/bin/sh
 case "$1" in
-  image) echo 5 ; exit 0 ;;
+  image) echo 6 ; exit 0 ;;
   run) { for a in "$@"; do printf '%s\\037' "$a"; done; } > "${ARGV}" ; exit 1 ;;
 esac
 exit 0

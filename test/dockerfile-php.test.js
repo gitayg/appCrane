@@ -90,7 +90,7 @@ test('a package.json that CLAIMS the app keeps the Node path — precedence, sta
   for (const pkg of [{ scripts: { start: 'node server.js' } }, { main: 'index.js' }]) {
     const dir = app({ 'composer.json': COMPOSER, 'composer.lock': LOCK, 'package.json': pkg });
     assert.equal(detectPhpApp(dir), false, JSON.stringify(pkg));
-    assert.match(gen(dir).source, /^FROM node:20-alpine$/m, JSON.stringify(pkg));
+    assert.match(gen(dir).source, /^FROM node:22-alpine$/m, JSON.stringify(pkg));
   }
 });
 
@@ -129,7 +129,7 @@ test('a Node app with no composer.json is untouched by any of this', () => {
   const dir = app({ 'package.json': { name: 'n', scripts: { start: 'node s.js' } }, 'package-lock.json': {} });
   assert.equal(detectPhpApp(dir), false);
   const { source } = gen(dir);
-  assert.match(source, /^FROM node:20-alpine$/m);
+  assert.match(source, /^FROM node:22-alpine$/m);
   assert.doesNotMatch(source, /php|composer/i);
 });
 

@@ -273,7 +273,7 @@ test('refuses while the database is open in another process (AppCrane running)',
   const f = fixture();
   const holder = spawn(process.execPath, ['--input-type=module', '-e', `
     const Database = (await import(${JSON.stringify(join(ROOT, 'node_modules/better-sqlite3/lib/index.js'))})).default;
-    const d = new Database(${JSON.stringify(f.dbPath)}); d.pragma('journal_mode = WAL'); d.prepare('SELECT 1').get();
+    const d = new Database(${JSON.stringify(f.dbPath)}); d.pragma('journal_mode = WAL'); d.prepare('SELECT 1').get(); globalThis.holdDb = d;
     console.log('ready'); setInterval(() => {}, 1000);`], { stdio: ['ignore', 'pipe', 'inherit'] });
   await new Promise((r) => holder.stdout.once('data', r));
   const before = sha(f.dbPath);

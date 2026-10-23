@@ -3,9 +3,7 @@ import { join, dirname } from 'path';
 import { writeFileInside } from '../utils/paths.js';
 import log from '../utils/logger.js';
 import { detectPhpApp, ensurePhpDockerfile } from './dockerfileGenPhp.js';
-
-const SUPPORTED_NODE = new Set(['18', '20', '22']);
-const DEFAULT_NODE = '20';
+import { pickNodeVersion } from './nodeVersion.js';
 
 // Lockfiles `npm ci` can actually consume. Only these make the generated
 // install reproducible, because the generated install runs npm.
@@ -28,9 +26,10 @@ function findLockfile(dir, names) {
 function requireLockfile() { return process.env.APPCRANE_REQUIRE_LOCKFILE === '1'; }
 function requireCleanAudit() { return process.env.APPCRANE_REQUIRE_CLEAN_AUDIT === '1'; }
 
-function pickNodeVersion(manifest) {
-  const v = String(manifest?.node_version || manifest?.engines?.node || '').replace(/[^\d]/g, '').slice(0, 2);
-  return SUPPORTED_NODE.has(v) ? v : DEFAULT_NODE;
+function readPackageJson(releaseDir, relDir) {
+  const p = relDir ? join(releaseDir, relDir, 'package.json') : join(releaseDir, 'package.json');
+  if (!existsSync(p)) return null;
+  try { return JSON.parse(readFileSync(p, 'utf8')); } catch { return null; }
 }
 
 function safeRel(p) {
@@ -249,9 +248,11 @@ export function ensureDockerfile({ releaseDir, manifest, appBasePath, craneUrl, 
     return { path: php.path, warnings, runtime: 'php', php: php.php };
   }
 
-  const node = pickNodeVersion(manifest);
-
   const beWorkdir = manifest?.be?.workdir ? safeRel(manifest.be.workdir) : null;
+  const packageJsons = [{ pkg: readPackageJson(releaseDir, null), label: 'package.json' }];
+  if (beWorkdir) packageJsons.push({ pkg: readPackageJson(releaseDir, beWorkdir), label: `${beWorkdir}/package.json` });
+  const nodeChoice = pickNodeVersion({ manifest, packageJsons });
+  const node = nodeChoice.version;
   // Auto-detect a frontend monorepo workdir when the manifest doesn't say.
   // Only kicks in if there's no `fe` block at all — if the user declared
   // `fe.workdir` we honor it, and if they declared `fe` without a workdir
@@ -401,7 +402,7 @@ export function ensureDockerfile({ releaseDir, manifest, appBasePath, craneUrl, 
   );
 
   writeFileInside(releaseDir, existing, lines.join('\n'));
-  return { path: existing, warnings, runtime: 'node' };
+  return { path: existing, warnings, runtime: 'node', node: nodeChoice };
 }
 
 /**

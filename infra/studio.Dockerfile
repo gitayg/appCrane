@@ -11,9 +11,9 @@
 # or directly:
 #   docker build -t appcrane-studio:latest -f infra/studio.Dockerfile infra/
 
-ARG STUDIO_IMAGE_VERSION=5
+ARG STUDIO_IMAGE_VERSION=6
 
-FROM node:20-alpine
+FROM node:22-alpine
 ARG STUDIO_IMAGE_VERSION
 LABEL appcrane.studio.version="${STUDIO_IMAGE_VERSION}"
 # bash is NOT optional. node:*-alpine ships busybox `ash` as /bin/sh and no
