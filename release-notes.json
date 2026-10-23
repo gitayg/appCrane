@@ -1,4 +1,7 @@
 {
+  "2.118.3": [
+    "A failed deploy now cleans up only what it built itself, including after an automatic security rebuild, so a version you might roll back to is never removed."
+  ],
   "2.118.2": [
     "When an automatic security fix cannot run, the message you get explains why in plain words and no longer includes internal server details."
   ],

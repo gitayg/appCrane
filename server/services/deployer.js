@@ -1941,7 +1941,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       }
 
       appendLog('Building docker image...');
-      const wasCached = await imageExists(imageTagFor(app.slug, env, commitHash));
+      const wasCached = opts.freshBase === true ? false : await imageExists(imageTagFor(app.slug, env, commitHash));
       image = await buildImageIfNeeded({
         slug: app.slug,
         env,
@@ -1953,7 +1953,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
         appDockerfile: !!userProvided,
       });
       appendLog(`Image ready: ${image}`);
-      if (!wasCached || opts.freshBase === true) attemptImage = image;
+      if (!wasCached) attemptImage = image;
       const { imageBaseInfo } = await import('./docker.js');
       const base = await imageBaseInfo(image);
       if (base) db.prepare('UPDATE deployments SET base_image = ?, base_digest = ? WHERE id = ?').run(base.image, base.digest, deployId);
