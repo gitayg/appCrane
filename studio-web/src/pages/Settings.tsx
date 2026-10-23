@@ -30,6 +30,7 @@ import { LlmGatewaySettingsCard } from '../components/llm/LlmGatewaySettingsCard
 import { CryptographyCard } from '../components/crypto/CryptographyCard'
 import { ClassificationPolicyCard } from '../components/intake/ClassificationPolicyCard'
 import { AutoPatchPolicyCard } from '../components/autoPatch/AutoPatchPolicyCard'
+import { VulnAlertsCard } from '../components/vulnAlerts/VulnAlertsCard'
 import { RuntimePatchCard } from '../components/autoPatch/RuntimePatchCard'
 
 function SecurityTab() {
@@ -1368,7 +1369,7 @@ export function Settings() {
       {panel('account', <AccountTab />)}
       {panel('mcp', <Mcp />)}
       {panel('skills', <SkillsTab />)}
-      {panel('security', <><SecurityTab /><SignInPolicyCard /><McpAuthPolicyCard /><OAuthAdminCard /><ClassificationPolicyCard /><AutoPatchPolicyCard /><RuntimePatchCard /><CryptographyCard /><LlmGatewaySettingsCard /><SiemSinks /></>)}
+      {panel('security', <><SecurityTab /><SignInPolicyCard /><McpAuthPolicyCard /><OAuthAdminCard /><ClassificationPolicyCard /><VulnAlertsCard /><AutoPatchPolicyCard /><RuntimePatchCard /><CryptographyCard /><LlmGatewaySettingsCard /><SiemSinks /></>)}
       {panel('users', <Users />)}
       {panel('roles', <RolesTab />)}
       {panel('github', <GithubTab />)}

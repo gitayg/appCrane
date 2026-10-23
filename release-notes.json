@@ -1,4 +1,7 @@
 {
+  "2.120.0": [
+    "When a scan finds a vulnerable package in your app that was not reported before, the app owners and platform admins now get one e-mail right away listing it, the fixed version and what happens next; each finding is mailed once, and a platform admin can turn this off in Settings > Security."
+  ],
   "2.119.0": [
     "An automatic security fix is no longer held back by older problems your app already had in production, as long as the fix adds nothing new; those older problems are listed in the e-mail.",
     "When the first fixed version of a package has been withdrawn by its maintainer, AppCrane now picks the next safe release instead of asking you.",

@@ -20,6 +20,7 @@ import { join, resolve } from 'path';
 import { MANIFESTS, parseManifest } from './ecosystems.js';
 import { assertFinding, assertPackage } from './scanShapes.js';
 import { syncVulnRequests } from './vulnRequests.js';
+import { alertNewFindings } from './vulnAlerts.js';
 
 const OSV_BATCH_URL = 'https://api.osv.dev/v1/querybatch';
 
@@ -668,6 +669,7 @@ export async function scanApp(db, app, env, source = 'deploy') {
 
   const row = db.prepare('SELECT * FROM app_vuln_scans WHERE id = ?').get(info.lastInsertRowid);
   syncVulnRequests(db, app, row);
+  await alertNewFindings(db, app, row);
   return row;
 }
 

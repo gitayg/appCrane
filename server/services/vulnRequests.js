@@ -85,7 +85,7 @@ export function openVulnRequests(db, app, env, source, findings) {
   return opened;
 }
 
-function stillFound(db, appId) {
+export function stillFound(db, appId) {
   const rows = db.prepare(`
     SELECT s.findings_json FROM app_vuln_scans s
     WHERE s.app_id = ? AND s.id = (
