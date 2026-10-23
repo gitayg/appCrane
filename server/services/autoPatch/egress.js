@@ -36,9 +36,16 @@ export class EgressError extends Error {
   constructor(message) { super(`the npm helper's network could not be confined to the npm registry (${message}); nothing ran`); this.code = 'EGRESS_UNCONFINED'; }
 }
 
+export function dockerErrorMessage(err, stderr, args) {
+  const tail = String(stderr || '').trim().split('\n').slice(-3).join(' ').replace(/(?:\/[^\s:'"]+){2,}/g, '<path>');
+  if (tail) return tail;
+  if (err.killed) return `docker ${args[0]} timed out`;
+  return `docker ${args[0]} exited with code ${err.code ?? 'unknown'}`;
+}
+
 const defaultDocker = (args, timeout = 60_000) => new Promise((res, rej) => {
   execFile('docker', args, { timeout, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => (err
-    ? rej(Object.assign(new Error(String(stderr || err.message).trim().split('\n').slice(-3).join(' ')), { code: err.code }))
+    ? rej(Object.assign(new Error(dockerErrorMessage(err, stderr, args)), { code: err.code }))
     : res(String(stdout).trim())));
 });
 let docker = defaultDocker;

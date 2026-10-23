@@ -1,4 +1,7 @@
 {
+  "2.118.2": [
+    "When an automatic security fix cannot run, the message you get explains why in plain words and no longer includes internal server details."
+  ],
   "2.118.1": [
     "Automatic security fixes for app dependencies are now locked down further: the tool that updates a package can only talk to the official npm registry, and fixes that the package maintainer has withdrawn are left for a person to choose."
   ],
