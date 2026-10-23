@@ -625,4 +625,7 @@ program
     }
   });
 
+const { registerRotateKey } = await import('./rotateKey.js');
+registerRotateKey(program, out);
+
 program.parse();

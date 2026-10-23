@@ -62,7 +62,7 @@ export const CONTROLS = [
   {
     id: 'C1.1', family: 'C1', title: 'Confidentiality: encryption and key management',
     implementation: 'Secrets at rest (app environment variables, SSO client secrets, managed database passwords, stored tokens) are encrypted with AES-256-GCM under the instance ENCRYPTION_KEY. '
-      + 'No ENCRYPTION_KEY rotation mechanism exists today; this is stated as a gap, not hidden.',
+      + 'The key is rotated with crane rotate-key (AppCrane stopped, backup first, every secret re-encrypted in one transaction and checked); the last rotation is in C1/encryption.json.',
     evidence: ['C1/encryption.json'],
   },
 ];

@@ -4,7 +4,9 @@
  * Format: MAGIC (8 bytes) | IV (12) | AES-256-GCM ciphertext | tag (16).
  * The key is derived from ENCRYPTION_KEY (deriveSecret), never stored. LOSING
  * ENCRYPTION_KEY MAKES EVERY ENCRYPTED BACKUP UNRECOVERABLE — there is no
- * other copy of the key and no rotation mechanism.
+ * other copy of the key. `crane rotate-key` does not re-encrypt objects already
+ * in the bucket: a set made before a rotation decrypts (and its manifest
+ * verifies) only under the previous key.
  *
  * Decryption writes plaintext to a file and only keeps it once the GCM tag has
  * verified; a tampered or truncated object leaves nothing behind.

@@ -1,4 +1,7 @@
 {
+  "2.121.0": [
+    "Platform admins can now change the master key that protects every stored secret: stop AppCrane and run crane rotate-key. It saves a backup first, re-locks every secret with the new key and checks each one before switching."
+  ],
   "2.120.2": [
     "AppCrane now refuses to start if its data folder setting is broken, instead of quietly writing data to the wrong place."
   ],

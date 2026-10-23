@@ -78,8 +78,11 @@ export function decrypt(encoded, keyOverrideHex) {
 // MariaDB key file's wrapping secret (managedDbEncryption.js) is handed to a
 // container, and a container must never hold the key that decrypts every
 // other secret in SQLite. Changing the label changes the secret.
-export function deriveSecret(label) {
-  return crypto.createHmac('sha256', getKey()).update(String(label)).digest('hex');
+// keyOverrideHex (optional): derive under that key instead of the instance key
+// (crane rotate-key derives under the old and the new key side by side).
+export function deriveSecret(label, keyOverrideHex) {
+  const key = keyOverrideHex ? Buffer.from(keyOverrideHex.slice(0, 64), 'hex') : getKey();
+  return crypto.createHmac('sha256', key).update(String(label)).digest('hex');
 }
 
 export function hashApiKey(key) {

@@ -303,6 +303,22 @@ export function restoreDrills(period) {
   return toCsv(rows, ['run_id', 'source', 'trigger', 'status', 'backup_ref', 'backup_created_at', 'rpo_seconds', 'rto_ms', 'cleaned_up', 'started_at', 'finished_at', 'failed_checks', 'checks', 'error']);
 }
 
+function keyRotation(db) {
+  let last = null;
+  try { last = db.prepare("SELECT MAX(created_at) AS at FROM audit_log WHERE action = 'security.key_rotated'").get()?.at || null; } catch (_) {}
+  return {
+    supported: true,
+    method: 'crane rotate-key, run on the host with AppCrane stopped: backs up deployhub.db and .env, re-encrypts every stored secret under a new key in one transaction, '
+      + 're-signs the audit chain checkpoints, checks every value against the new key, then replaces the key in .env.',
+    last_rotated_at: last,
+    status: last
+      ? `ENCRYPTION_KEY was last rotated at ${last} (UTC).`
+      : 'ENCRYPTION_KEY has not been rotated since the instance was installed (or since rotation was recorded).',
+    limits: 'Off-site backups and evidence packs made before a rotation stay signed under the previous key and verify only with it. '
+      + 'Rotation is refused while MariaDB encryption at rest is in use. Losing the current key makes every encrypted value and every encrypted backup unrecoverable.',
+  };
+}
+
 export async function encryption(db) {
   const count = (sql) => { try { return db.prepare(sql).get().n; } catch (_) { return null; } };
   const { getBackupConfig } = await import('../backupScheduler.js');
@@ -320,11 +336,7 @@ export async function encryption(db) {
     legacy_encrypted_api_keys: count('SELECT COUNT(*) AS n FROM users WHERE api_key_encrypted IS NOT NULL'),
     off_site_backups: { client_side_encryption: s3.encrypt, server_side_encryption: s3.sse || null },
     local_backups: 'Not encrypted. Written 0600 inside a 0700 directory on the same host; they contain the ENCRYPTION_KEY.',
-    key_rotation: {
-      supported: false,
-      status: 'No ENCRYPTION_KEY rotation mechanism exists. The key has been in use since the instance was installed. '
-        + 'Rotating it today means re-encrypting every secret by hand; losing it makes every encrypted value and every encrypted backup unrecoverable.',
-    },
+    key_rotation: keyRotation(db),
     data_in_transit: 'TLS is terminated by the reverse proxy in front of AppCrane; its configuration is outside this pack.',
   });
 }

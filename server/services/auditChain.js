@@ -25,7 +25,7 @@ export const COMPACT_MIN = 1000;
 export const FINGERPRINT_LEN = 24;
 const BATCH = 2000;
 const MAX_BATCHES = 200;
-const KEY_LABEL = 'appcrane-audit-chain-checkpoint-v1';
+export const KEY_LABEL = 'appcrane-audit-chain-checkpoint-v1';
 const MAIL_SOURCE = 'audit-chain';
 const DAY = 86_400_000;
 

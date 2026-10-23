@@ -22,6 +22,7 @@ const router = Router();
  */
 const SENSITIVE_KEYS = new Set([
   'oidc_client_secret_enc',
+  'mfa_recovery_legacy_secrets_enc',
   'saml_idp_cert_enc',
   'scim_token_hash',
   'scim_token_created_at',

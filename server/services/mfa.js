@@ -190,8 +190,9 @@ export function verifyCode(db, user, code, { nowMs = Date.now(), ip = null } = {
   }
   const norm = normalizeRecoveryCode(raw);
   if (!norm) return fail(db, user, ip, nowMs, 'bad_code');
+  const hashes = [recoveryHash(user.id, norm), ...legacyRecoverySecrets(db).map((k) => recoveryHashWith(k, user.id, norm))];
   const info = db.prepare(`UPDATE user_mfa_recovery_codes SET used_at = datetime('now')
-    WHERE user_id = ? AND code_hash = ? AND used_at IS NULL`).run(user.id, recoveryHash(user.id, norm));
+    WHERE user_id = ? AND code_hash IN (${hashes.map(() => '?').join(', ')}) AND used_at IS NULL`).run(user.id, ...hashes);
   if (info.changes === 0) return fail(db, user, ip, nowMs, 'bad_recovery_code');
   clearFailures(user.id);
   const left = db.prepare('SELECT COUNT(*) AS n FROM user_mfa_recovery_codes WHERE user_id = ? AND used_at IS NULL').get(user.id).n;
@@ -235,8 +236,27 @@ export function normalizeRecoveryCode(code) {
   return /^[A-Z0-9]{10}$/.test(s) ? s : null;
 }
 
+export const RECOVERY_LABEL = 'mfa-recovery-codes';
+// crane rotate-key cannot re-hash recovery codes (only their hashes are kept),
+// so it stores the recovery-code secret derived from each previous key here,
+// encrypted under the current key; codes issued before a rotation keep working.
+export const LEGACY_RECOVERY_SETTING = 'mfa_recovery_legacy_secrets_enc';
+
+function recoveryHashWith(secretHex, userId, normalized) {
+  return crypto.createHmac('sha256', secretHex).update(`${userId}:${normalized}`).digest('hex');
+}
+
 function recoveryHash(userId, normalized) {
-  return crypto.createHmac('sha256', deriveSecret('mfa-recovery-codes')).update(`${userId}:${normalized}`).digest('hex');
+  return recoveryHashWith(deriveSecret(RECOVERY_LABEL), userId, normalized);
+}
+
+function legacyRecoverySecrets(db) {
+  const enc = db.prepare('SELECT value FROM settings WHERE key = ?').get(LEGACY_RECOVERY_SETTING)?.value;
+  if (!enc) return [];
+  try {
+    const list = JSON.parse(decrypt(enc));
+    return Array.isArray(list) ? list.filter((k) => /^[0-9a-f]{64}$/.test(k)) : [];
+  } catch { return []; }
 }
 
 function storeRecoveryCodes(db, userId, codes) {

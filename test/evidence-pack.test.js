@@ -83,7 +83,8 @@ test('the pack holds every control\'s evidence, the README disclaimer, and no pl
   for (const f of ['README.md', 'index.html', 'manifest.json', 'manifest.sig']) assert.ok(files[f], f);
   const readme = files['README.md'].toString();
   assert.match(readme, /not a SOC 2 report, an attestation or a certification/);
-  assert.match(readme, /No ENCRYPTION_KEY rotation mechanism exists/);
+  assert.match(readme, /The key is rotated with crane rotate-key/);
+  assert.doesNotMatch(readme, /No ENCRYPTION_KEY rotation mechanism exists/);
   assert.match(files['CC7/audit-log.csv'].toString(), /env-set/);
   assert.match(files['CC7/critical-events.csv'].toString(), /planted critical event/);
   assert.match(files['CC8/deployments.csv'].toString(), /abc123/);
@@ -93,7 +94,9 @@ test('the pack holds every control\'s evidence, the README disclaimer, and no pl
   assert.equal(auth.settings.oidc_client_secret_enc.configured, true);
   assert.equal(auth.settings.session_user_idle_minutes.value, '30');
   const enc = JSON.parse(files['C1/encryption.json']);
-  assert.equal(enc.key_rotation.supported, false);
+  assert.equal(enc.key_rotation.supported, true);
+  assert.equal(enc.key_rotation.last_rotated_at, null);
+  assert.match(enc.key_rotation.method, /crane rotate-key/);
   for (const [path, buf] of Object.entries(files)) {
     const text = buf.toString('utf8');
     for (const s of PLANTED) assert.equal(text.includes(s), false, `${path} contains a planted secret (${s.slice(0, 6)}...)`);

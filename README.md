@@ -514,6 +514,31 @@ running what was reviewed?" has an answer for an app with no repo. Before
 v2.53.0 it did not: `commit_hash` held whatever the uploader typed, or the
 literal string `unknown`, and two unrelated bundles could claim one SHA.
 
+### Rotating ENCRYPTION_KEY
+
+`crane rotate-key` re-encrypts every stored secret under a new ENCRYPTION_KEY.
+Run it on the AppCrane host with AppCrane stopped:
+
+    sudo systemctl stop appcrane
+    crane rotate-key --dry-run      # what would change, and anything that blocks it
+    crane rotate-key                # generates a new key; or --new-key-file <path>
+    sudo systemctl start appcrane
+
+What it does:
+1. Refuses if AppCrane is still running (its port answers, or another process has deployhub.db open), if the database is behind the code, or if there is not enough disk.
+2. Backs up first: DATA_DIR/backups/key-rotation-<time>/ holds a copy of deployhub.db and of .env. After the rotation this folder is the ONLY place the old key exists.
+3. Re-encrypts every secret (app environment variables and files, tokens, SSO and GitHub App secrets, managed database passwords, MFA secrets, SIEM and backup credentials, LLM gateway keys) in one database transaction, re-signs the audit history checkpoints, and checks every value against the new key. Any value that does not decrypt stops the run: nothing is changed and .env is untouched.
+4. Replaces the key in .env atomically (mode 0600) and checks every value again.
+5. Records "security.key_rotated" in the audit log (no key material).
+
+Keep in mind:
+- MFA recovery codes issued before the rotation keep working.
+- Rotation is refused while MariaDB encryption at rest is on. Turn it off and unload its key (Settings > Managed databases), rotate, then turn it back on.
+- Off-site backups and evidence packs made before the rotation stay signed (and, for encrypted off-site backups, encrypted) under the old key. On this host they show as not verified and are never pruned automatically; restore one on a host whose .env holds the old key. Run a fresh off-site backup after AppCrane starts.
+- SSO sign-ins in progress at that moment must be started again.
+- If ENCRYPTION_KEY is set in the service's environment (not only in .env), remove it there: the environment wins over .env.
+- Store the new key somewhere other than this host, and delete the backup folder once you no longer need the old key.
+
 ## Identity contract for deployed apps
 
 Apps deployed on AppCrane never need to implement their own auth. The Caddy proxy verifies every request against `/api/identity/verify` *before* forwarding it to the container, and the result is delivered to the app in three complementary ways. Apps should consume them in this **precedence order**:
