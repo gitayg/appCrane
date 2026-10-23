@@ -62,7 +62,7 @@ function reset() {
     },
     images: {},
   };
-  calls = { deploy: [], promote: [], rollback: [], retag: [], releaseCheck: 0, registry: 0 };
+  calls = { deploy: [], promote: [], rollback: [], retag: [], releaseCheck: 0, registry: 0, rcCtx: [] };
   W._setRuntimePatchDepsForTests({
     now: () => Date.now(), pollMs: 1, healthSettleMs: 0, deployTimeoutMs: 2000,
     inspect: async (slug, env) => {
@@ -85,7 +85,8 @@ function reset() {
       db.prepare("INSERT OR REPLACE INTO health_state (app_id, env, is_down, last_check_at) VALUES (?, 'sandbox', ?, datetime('now'))").run(a.id, S.sandboxDown ? 1 : 0);
       S.images[`${a.slug}/sandbox`] = `appcrane-${a.slug}-sandbox:aaaaaaaa-rt1`;
     },
-    runReleaseCheck: async () => { calls.releaseCheck++; await S.onReleaseCheck?.(); return { id: 88, blocked: S.rcBlocked, result: S.rcBlocked ? 'fail' : 'pass', checks: [] }; },
+    productionBaseline: async () => ({ ok: true, scan_id: 1, findings: [] }),
+    runReleaseCheck: async (ctx) => { calls.releaseCheck++; calls.rcCtx.push(ctx); await S.onReleaseCheck?.(); return { id: 88, blocked: S.rcBlocked, result: S.rcBlocked ? 'fail' : 'pass', checks: [] }; },
     promoteApp: async (a, userId, opts) => {
       calls.promote.push({ app: a.slug, userId, opts });
       const id = Number(db.prepare(`INSERT INTO deployments (app_id, env, status, commit_hash, commit_sha, finished_at) VALUES (?, 'production', ?, ?, ?, datetime('now', '-1 minute'))`)
@@ -286,4 +287,17 @@ test('skipped while a coder session has uncommitted work', async () => {
   assert.equal(resultFor(r, app).action, 'skip');
   assert.match(resultFor(r, app).reason, /uncommitted work/);
   assert.equal(calls.deploy.length, 0);
+});
+
+test('delta mode: the release check is told the runtime fix seen in sandbox, and the promote carries the same delta', async () => {
+  const res = resultFor(await sweep(), app);
+  assert.equal(res.action, 'applied', res.reason);
+  const ctx = calls.rcCtx.find((c) => c.app.id === app.id);
+  assert.equal(ctx.mode, 'auto-patch-delta');
+  assert.equal(ctx.userId, null);
+  assert.equal(ctx.delta.target.kind, 'runtime');
+  assert.equal(ctx.delta.target.version, '8.3.36');
+  assert.ok(ctx.delta.target.fixed_version);
+  assert.equal(ctx.delta.baseline.ok, true);
+  assert.equal(calls.promote.find((p) => p.app === app.slug).opts.releaseCheckDelta, ctx.delta);
 });

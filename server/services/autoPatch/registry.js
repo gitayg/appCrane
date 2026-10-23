@@ -16,17 +16,32 @@ export function packumentUrl(name) {
  * maintainer's deprecation message for that version ("Bad release. Please use
  * ..."), which OSV does not carry.
  */
-export async function npmVersionInfo(name, version) {
+async function packument(name) {
   const res = await fetch(packumentUrl(name), {
     headers: { Accept: 'application/json' },
     signal: AbortSignal.timeout(TIMEOUT_MS),
   });
   if (!res.ok) throw new Error(`the npm registry returned HTTP ${res.status} for ${name}`);
-  const doc = await res.json();
+  return res.json();
+}
+
+const deprecation = (v) => (typeof v?.deprecated === 'string' && v.deprecated.trim() ? v.deprecated.trim().slice(0, 300) : null);
+
+export async function npmVersionInfo(name, version) {
+  const doc = await packument(name);
   if (doc?.versions && !doc.versions[version]) throw new Error(`${name}@${version} is not on the npm registry (unpublished?)`);
   const t = doc?.time?.[version];
   const d = typeof t === 'string' ? new Date(t) : null;
   if (!d || Number.isNaN(d.getTime())) throw new Error(`the npm registry has no publish time for ${name}@${version}`);
-  const dep = doc?.versions?.[version]?.deprecated;
-  return { published: d, deprecated: typeof dep === 'string' && dep.trim() ? dep.trim().slice(0, 300) : null };
+  return { published: d, deprecated: deprecation(doc?.versions?.[version]) };
+}
+
+/** Every published version: [{ version, published: Date|null, deprecated: string|null }]. */
+export async function npmVersionList(name) {
+  const doc = await packument(name);
+  return Object.entries(doc?.versions || {}).map(([version, v]) => {
+    const t = doc?.time?.[version];
+    const d = typeof t === 'string' ? new Date(t) : null;
+    return { version, published: d && !Number.isNaN(d.getTime()) ? d : null, deprecated: deprecation(v) };
+  });
 }

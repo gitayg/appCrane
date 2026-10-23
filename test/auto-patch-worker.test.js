@@ -68,22 +68,42 @@ function reset() {
     now: Date.parse('2026-10-22T12:00:00Z'), publishedAgoH: 48, fixedHasAdvisory: false, bump: null,
     sandbox: 'live', sandboxDown: false, rcBlocked: false, prod: 'live', prodDown: false, coder: { live: false }, restore: false,
   };
-  calls = { push: [], deploy: [], promote: [], rollback: [], releaseCheck: 0, bump: 0, osv: 0 };
+  calls = { push: [], deploy: [], promote: [], rollback: [], releaseCheck: 0, bump: 0, osv: 0, osvVersions: [], bumpTo: [], rcCtx: [] };
   W._setAutoPatchDepsForTests({
     now: () => S.now, pollMs: 1, healthSettleMs: 0, deployTimeoutMs: 2000,
     fetchAdvisories: async (ids) => ({ records: new Map(ids.map((i) => [i, ADVISORIES[i]])), failures: new Map() }),
-    queryOsv: async () => { calls.osv++; return { ok: true, findings: S.fixedHasAdvisory ? [{ ...FINDING, version: '1.2.6', ids: ['GHSA-NEW1'] }] : [] }; },
+    queryOsv: async (pkgs) => {
+      calls.osv++;
+      calls.osvVersions.push(pkgs.map((p) => p.version));
+      if (S.osvDown && pkgs.length > 1) return { ok: false, findings: [], error: 'down' };
+      const bad = (v) => (S.fixedHasAdvisory && v === '1.2.6') || (S.flagged || []).includes(v);
+      return { ok: true, findings: pkgs.filter((p) => bad(p.version)).map((p) => ({ ...FINDING, version: p.version, ids: ['GHSA-NEW1'] })) };
+    },
     versionInfo: async () => ({ published: new Date(S.now - S.publishedAgoH * H), deprecated: S.deprecated || null }),
+    versionList: async () => (S.versions || []).map((v) => ({ version: v.v, deprecated: v.dep || null, published: new Date(S.now - (v.agoH ?? 48) * H) })),
+    productionBaseline: async () => S.baseline || { ok: true, scan_id: 1, findings: [FINDING, NOT_RCE] },
     branchHead: async () => S.tip,
     readFile: async (_a, path) => { if (repoFiles[path]) return { content: repoFiles[path] }; const e = new Error('nope'); e.code = 'FILE_NOT_FOUND'; throw e; },
-    runBump: async () => { calls.bump++; if (S.bumpError) throw S.bumpError; return S.bump || { packageJson: repoFiles['package.json'], packageLock: read('transitive.package-lock.json') }; },
+    runBump: async (a) => {
+      calls.bump++; calls.bumpTo.push(a.version);
+      if (S.bumpError) throw S.bumpError;
+      return S.bump || { packageJson: repoFiles['package.json'], packageLock: read('transitive.package-lock.json').replaceAll('1.2.6', a.version) };
+    },
     push: async (_a, files, opts) => { calls.push.push({ files: files.map((f) => f.path), opts }); return { commit: { sha: calls.push.length === 1 ? BUMP : REVERT } }; },
     deployApp: async (id, _a, env) => {
       calls.deploy.push({ id, env });
       db.prepare("UPDATE deployments SET status = ?, commit_hash = ?, commit_sha = ?, finished_at = datetime('now') WHERE id = ?").run(S.sandbox, BUMP.slice(0, 8), S.sandboxSha || null, id);
       db.prepare("INSERT OR REPLACE INTO health_state (app_id, env, is_down, last_check_at) VALUES (?, 'sandbox', ?, datetime('now'))").run(app.id, S.sandboxDown ? 1 : 0);
     },
-    runReleaseCheck: async () => { calls.releaseCheck++; await S.onReleaseCheck?.(); return { id: 77, blocked: S.rcBlocked, result: S.rcBlocked ? 'fail' : 'pass', checks: S.rcBlocked ? [{ status: 'fail', label: 'Dependency scan', reasons: ['1 vulnerable package'] }] : [] }; },
+    runReleaseCheck: async (ctx) => {
+      calls.releaseCheck++; calls.rcCtx.push(ctx); await S.onReleaseCheck?.();
+      if (S.rcChecks) {
+        const id = Number(db.prepare(`INSERT INTO release_checks (app_id, env, trigger, candidate, data_classification, mode, result, blocked, checks_json)
+          VALUES (?, 'production', 'auto-patch', 'x', 'internal', 'warn', 'warn', 0, ?)`).run(app.id, JSON.stringify(S.rcChecks)).lastInsertRowid);
+        return { id, blocked: false, result: 'warn', checks: S.rcChecks };
+      }
+      return { id: 77, blocked: S.rcBlocked, result: S.rcBlocked ? 'fail' : 'pass', checks: S.rcBlocked ? [{ status: 'fail', label: 'Dependency scan', reasons: ['1 vulnerable package'] }] : [] };
+    },
     promoteApp: async (a, userId, opts) => {
       calls.promote.push({ userId, opts });
       await S.onPromote?.();
@@ -394,12 +414,93 @@ test('sandbox reports a build sharing the bump\'s short hash but a different com
   assert.equal(calls.promote.length, 0);
 });
 
-test('a fixed version deprecated on npm ("Bad release") is not shipped: back to a person, nothing committed', async () => {
-  S.deprecated = 'Bad release. Please use lodash@4.17.21 instead.';
+test('a deprecated fix with no later release in its major is not shipped: back to a person, nothing committed', async () => {
+  S.deprecated = 'Bad release. Please use minimist@1.2.5 instead.';
+  S.versions = [{ v: '1.2.5' }, { v: '1.2.6', dep: S.deprecated }, { v: '2.0.0' }, { v: '1.3.0-beta.1' }];
   const r = await run();
   assert.equal(r.action, 'fallback');
   assert.match(r.reason, /is deprecated on npm \("Bad release/);
+  assert.match(r.reason, /no later 1\.x release/);
   assert.equal(calls.bump + calls.push.length + calls.promote.length, 0);
+  assert.ok(!calls.bumpTo.includes('2.0.0') && !calls.bumpTo.includes('1.2.5'), 'neither another major nor the maintainer\'s suggestion');
+});
+
+test('a deprecated fix: the next non-deprecated release in the same major is shipped, everywhere the version is named', async () => {
+  S.deprecated = 'Bad release. Please use minimist@1.2.5 instead.';
+  S.versions = [{ v: '1.2.5' }, { v: '1.2.6', dep: S.deprecated }, { v: '1.2.7', dep: 'also bad' }, { v: '1.2.8' }, { v: '1.2.9' }, { v: '2.0.0' }];
+  const r = await run();
+  assert.equal(r.action, 'applied', r.reason);
+  assert.deepEqual(calls.bumpTo, ['1.2.8']);
+  assert.equal(runRow().to_version, '1.2.8');
+  assert.match(calls.push[0].opts.message, /bump minimist 1\.2\.5 -> 1\.2\.8/);
+  assert.deepEqual(calls.osvVersions.at(-1), ['1.2.8', '1.2.9'], 'OSV is asked about the candidates, in order');
+});
+
+test('a deprecated fix: a candidate with an advisory of its own is skipped for the next one', async () => {
+  S.deprecated = 'Bad release.';
+  S.versions = [{ v: '1.2.6', dep: S.deprecated }, { v: '1.2.7' }, { v: '1.2.8' }];
+  S.flagged = ['1.2.7'];
+  const r = await run();
+  assert.equal(r.action, 'applied', r.reason);
+  assert.deepEqual(calls.bumpTo, ['1.2.8']);
+});
+
+test('a deprecated fix: every candidate has advisories → a person; another major is never chosen', async () => {
+  S.deprecated = 'Bad release.';
+  S.versions = [{ v: '1.2.6', dep: S.deprecated }, { v: '1.2.7' }, { v: '2.0.0' }];
+  S.flagged = ['1.2.7'];
+  const r = await run();
+  assert.equal(r.action, 'fallback');
+  assert.match(r.reason, /every later 1\.x release is deprecated or has advisories of its own \(1\.2\.7 \(advisories GHSA-NEW1\)\)/);
+  assert.equal(calls.bump, 0);
+});
+
+test('a deprecated fix: the chosen version waits out the cooldown; a clean one past it is preferred to a newer one inside it', async () => {
+  S.deprecated = 'Bad release.';
+  S.versions = [{ v: '1.2.6', dep: S.deprecated }, { v: '1.2.7', agoH: 2 }];
+  const r = await run();
+  assert.equal(r.action, 'deferred');
+  assert.match(r.reason, /minimist@1\.2\.7 is the first clean 1\.x release .* applied after/);
+  assert.equal(calls.bump, 0);
+  assert.ok(runRow().retry_after);
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM enhancement_comments').get().n, 1, 'the wait is noted on the request');
+
+  reset();
+  S.deprecated = 'Bad release.';
+  S.versions = [{ v: '1.2.6', dep: S.deprecated }, { v: '1.2.7', agoH: 30 }, { v: '1.2.8', agoH: 1 }];
+  assert.equal((await run()).action, 'applied');
+  assert.deepEqual(calls.bumpTo, ['1.2.7']);
+});
+
+test('a deprecated fix: OSV down while candidates are checked defers, nothing committed', async () => {
+  S.deprecated = 'Bad release.';
+  S.versions = [{ v: '1.2.6', dep: S.deprecated }, { v: '1.2.7' }, { v: '1.2.8' }];
+  S.osvDown = true;
+  const r = await run();
+  assert.equal(r.action, 'deferred');
+  assert.equal(calls.bump, 0);
+});
+
+test('delta mode: the release check gets the production baseline and the target; the promote carries the same delta', async () => {
+  const r = await run();
+  assert.equal(r.action, 'applied', r.reason);
+  const ctx = calls.rcCtx[0];
+  assert.equal(ctx.mode, 'auto-patch-delta');
+  assert.equal(ctx.userId, null);
+  assert.deepEqual(ctx.delta.target, { kind: 'npm', ecosystem: 'npm', name: 'minimist', advisory: 'GHSA-RCE1' });
+  assert.equal(ctx.delta.baseline.ok, true);
+  assert.equal(calls.promote[0].opts.releaseCheckDelta, ctx.delta);
+});
+
+test('delta mode: the audit row, the note-bearing e-mail and the run name the pre-existing findings', async () => {
+  S.rcChecks = [{ id: 'dependencies', status: 'warn', label: 'Dependency scan', reasons: ['1 pre-existing finding(s) unchanged: lodash@4.17.15 (GHSA-PP01)'],
+    delta: { baseline_scan_id: 1, pre_existing: ['lodash@4.17.15 (GHSA-PP01)'] } }];
+  const r = await run();
+  assert.equal(r.action, 'applied', r.reason);
+  const d = JSON.parse(audits('change.auto_approved')[0].detail);
+  assert.deepEqual(d.pre_existing_findings, ['lodash@4.17.15 (GHSA-PP01)']);
+  const mail = db.prepare("SELECT body_text FROM email_queue WHERE source = 'auto-patch'").get();
+  assert.match(mail.body_text, /Already in production before this fix, unchanged by it \(1\): lodash@4\.17\.15 \(GHSA-PP01\)/);
 });
 
 test('the npm helper\'s network cannot be confined: back to a person, nothing committed or deployed', async () => {

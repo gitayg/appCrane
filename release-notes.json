@@ -1,4 +1,9 @@
 {
+  "2.119.0": [
+    "An automatic security fix is no longer held back by older problems your app already had in production, as long as the fix adds nothing new; those older problems are listed in the e-mail.",
+    "When the first fixed version of a package has been withdrawn by its maintainer, AppCrane now picks the next safe release instead of asking you.",
+    "After a server restart, apps are brought back on the exact version that was running, even if they have older known issues."
+  ],
   "2.118.3": [
     "A failed deploy now cleans up only what it built itself, including after an automatic security rebuild, so a version you might roll back to is never removed."
   ],

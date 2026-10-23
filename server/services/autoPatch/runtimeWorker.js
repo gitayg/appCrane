@@ -26,6 +26,7 @@ import { logAudit } from '../../middleware/audit.js';
 import { trackJob, jobStarted, setJobDetail } from '../jobHealth.js';
 import { effectiveForApp, POLICY_NAME } from './policy.js';
 import { deploymentCommit, isFullSha } from './commits.js';
+import { AUTO_PATCH_DELTA, preExistingFindings } from '../releaseCheck.js';
 import { compareVersions, branchOf, RUNTIMES } from './runtimeAdvisories.js';
 import { UnsupportedRegistry } from './runtimeRegistry.js';
 import { sendRuntimePatchMail, notifyAdminsOfAdvisories } from './runtimeMail.js';
@@ -56,6 +57,7 @@ const defaults = {
   promoteApp: async (...a) => (await import('../deployer.js')).promoteApp(...a),
   rollbackApp: async (...a) => (await import('../deployer.js')).rollbackApp(...a),
   runReleaseCheck: async (ctx) => (await import('../releaseCheck.js')).runReleaseCheck(ctx),
+  productionBaseline: async (db, app) => (await import('../releaseCheck.js')).productionBaseline(db, app),
   refuseDeployForMemory: async (ctx) => (await import('../deployer.js')).refuseDeployForMemory(ctx),
   assessRisk: async (ctx) => (await import('../redeployRisk.js')).assessRedeployRisk(ctx),
   restoreInProgress: async (slug) => (await import('../managedDbRestoreGuard.js')).restoreInProgress(slug),
@@ -244,13 +246,15 @@ function addNote(db, requestId, body, resolved) {
   }
 }
 
-function approvalDetail(run, outcome) {
+function approvalDetail(db, run, outcome) {
+  const preExisting = preExistingFindings(db, run.release_check_id);
   return {
     actor: ACTOR, policy: POLICY_NAME, outcome, kind: 'runtime', advisory: run.advisory_key, runtime: run.runtime,
     from_version: run.from_version, to_version: run.to_version, fixed_version: run.fixed_version,
     base_image: run.base_image, from_digest: run.from_digest, to_digest: run.to_digest, commit: run.commit_sha,
     sandbox_deployment_id: run.sandbox_deployment_id, production_deployment_id: run.production_deployment_id,
     release_check_id: run.release_check_id, request_id: run.request_id, run_id: run.id, reason: run.reason || null,
+    ...(preExisting.length ? { pre_existing_findings: preExisting } : {}),
   };
 }
 
@@ -263,7 +267,7 @@ function finish(db, app, run, outcome, now = Date.now()) {
   update(db, run, { status, reason: outcome.reason || null, finished_at: sqlTime(Date.now()) });
   if (status === 'ineligible') return run;
   ensureRequest(db, app, run);
-  logAudit(null, app.id, status === 'applied' || status === 'rolled_back' ? 'change.auto_approved' : 'change.auto_patch_fallback', approvalDetail(run, status), 'system');
+  logAudit(null, app.id, status === 'applied' || status === 'rolled_back' ? 'change.auto_approved' : 'change.auto_patch_fallback', approvalDetail(db, run, status), 'system');
   const rt = rtLabel(run.runtime);
   const head = status === 'applied'
     ? `${ACTOR} rebuilt commit ${String(run.commit_sha).slice(0, 12)} on ${run.base_image} (${rt} ${run.from_version} → ${run.to_version}) under "${POLICY_NAME}" (sandbox #${run.sandbox_deployment_id}, production #${run.production_deployment_id}).`
@@ -384,7 +388,11 @@ async function execute(db, app, row, run, kind, d) {
   }
   update(db, run, { to_version: sbRt.version });
 
-  const rc = await d.runReleaseCheck({ db, app: fresh, userId: null, trigger: 'runtime-patch' });
+  const delta = {
+    baseline: await d.productionBaseline(db, fresh),
+    target: { kind: 'runtime', runtime: rt, advisories: row.advisories, fixed_version: row.fixed_version, version: sbRt.version },
+  };
+  const rc = await d.runReleaseCheck({ db, app: fresh, userId: null, trigger: 'runtime-patch', mode: AUTO_PATCH_DELTA, delta });
   update(db, run, { release_check_id: rc.id });
   if (rc.blocked || rc.result === 'fail') {
     const failing = (rc.checks || []).filter((c) => c.status === 'fail').map((c) => `${c.label}: ${c.reasons.join('; ')}`).join(' | ');
@@ -398,7 +406,7 @@ async function execute(db, app, row, run, kind, d) {
 
   let promoted;
   try {
-    promoted = await d.promoteApp(fresh, null, { expectSandboxDeploymentId: sandboxId, freshBase: true });
+    promoted = await d.promoteApp(fresh, null, { expectSandboxDeploymentId: sandboxId, freshBase: true, releaseCheckDelta: delta });
   } catch (e) {
     throw fallback(`promote was refused: ${e.message}`);
   }

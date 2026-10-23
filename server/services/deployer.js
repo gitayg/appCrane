@@ -1002,7 +1002,9 @@ export async function promoteApp(app, userId, opts = {}) {
     throw new AppError('Sandbox is currently unhealthy — fix sandbox before promoting it to production.', 409, 'SANDBOX_UNHEALTHY');
   }
 
-  await (await import('./releaseCheck.js')).assertProductionRelease({ db, app, userId, trigger: 'promote' });
+  const rcMod = await import('./releaseCheck.js');
+  const delta = opts.releaseCheckDelta ? { mode: rcMod.AUTO_PATCH_DELTA, delta: opts.releaseCheckDelta } : {};
+  await rcMod.assertProductionRelease({ db, app, userId, trigger: 'promote', ...delta });
   await admitAppStart({ app, env: 'production', userId, what: 'promote', onWarn: 'silent' });
 
   const { getPortsForSlot } = await import('./portAllocator.js');
@@ -1039,6 +1041,7 @@ export async function promoteApp(app, userId, opts = {}) {
     deployApp(newDeployId, fullApp, 'production', prodPorts, {
       imageRef: sandboxDeploy.image_ref,
       commitHash: sandboxDeploy.commit_hash,
+      releaseCheckDelta: opts.releaseCheckDelta,
     }).catch(err => {
       log.error(`Promote (image) ${newDeployId} for ${app.slug} failed: ${err.message}`);
     });
@@ -1077,7 +1080,7 @@ export async function promoteApp(app, userId, opts = {}) {
     // sandbox. A fresh build (not the sandbox image) is still required so the
     // bundler bakes the prod base path /<slug>/. deployApp clones managed repos
     // with the service-account token, so this works for source_type='managed'.
-    deployApp(freshDeployId, app, 'production', prodPorts, { targetCommit: sandboxDeploy.commit_sha || sandboxDeploy.commit_hash, freshBase: opts.freshBase === true }).catch(err => {
+    deployApp(freshDeployId, app, 'production', prodPorts, { targetCommit: sandboxDeploy.commit_sha || sandboxDeploy.commit_hash, freshBase: opts.freshBase === true, releaseCheckDelta: opts.releaseCheckDelta }).catch(err => {
       log.error(`Promote build ${freshDeployId} for ${app.slug} failed: ${err.message}`);
     });
     return { deployment_id: freshDeployId, status: 'pending', mode: 'rebuild', version: sandboxDeploy.version, from_sandbox: sandboxDeploy.id };
@@ -1161,6 +1164,7 @@ export async function promoteApp(app, userId, opts = {}) {
     deployApp(newDeployId, fullApp, 'production', prodPorts, {
       preExtractedDir: newReleaseDir,
       commitHash: sandboxDeploy.commit_hash,
+      releaseCheckDelta: opts.releaseCheckDelta,
     }).catch(e => {
       log.error(`Promote deploy failed for ${app.slug}-production (deployment #${newDeployId}): ${e.message}`);
     });

@@ -1836,7 +1836,9 @@ app.listen(PORT, HOST, async () => {
             VALUES (?, 'production', 'pending', 'auto-queued after PM2 cleanup')
           `).run(app.id);
           log.info(`  → ${app.slug} (deploy id ${r.lastInsertRowid})`);
-          deployApp(r.lastInsertRowid, app, 'production', ports).catch(err => {
+          const live = db.prepare("SELECT commit_sha, commit_hash FROM deployments WHERE app_id = ? AND env = 'production' AND status = 'live' ORDER BY id DESC LIMIT 1").get(app.id) || {};
+          const liveCommit = [live.commit_sha, live.commit_hash].find(c => /^[0-9a-f]{7,40}$/i.test(String(c || '')));
+          deployApp(r.lastInsertRowid, app, 'production', ports, liveCommit ? { releaseCheck: 'skip', targetCommit: liveCommit } : {}).catch(err => {
             log.error(`     ${app.slug} failed: ${err.message}`);
           });
         } catch (e) {
@@ -1869,7 +1871,7 @@ app.listen(PORT, HOST, async () => {
     // was deployed >5min ago. If the latest deploy failed, or was just attempted,
     // don't redeploy — same code → same failure → CPU drain.
     const liveDeploys = db.prepare(`
-      SELECT a.*, d.env AS deploy_env, d.finished_at AS deploy_finished_at
+      SELECT a.*, d.env AS deploy_env, d.finished_at AS deploy_finished_at, d.commit_sha AS live_commit_sha, d.commit_hash AS live_commit_hash
       FROM apps a
       JOIN deployments d ON d.app_id = a.id
       WHERE d.id = (
@@ -1891,7 +1893,8 @@ app.listen(PORT, HOST, async () => {
             VALUES (?, ?, 'pending', 'auto-heal: live deploy had no running container')
           `).run(row.id, row.deploy_env);
           log.info(`  → ${row.slug}-${row.deploy_env} (deploy id ${r.lastInsertRowid})`);
-          deployApp(r.lastInsertRowid, row, row.deploy_env, ports).catch(err => {
+          const liveCommit = [row.live_commit_sha, row.live_commit_hash].find(c => /^[0-9a-f]{7,40}$/i.test(String(c || '')));
+          deployApp(r.lastInsertRowid, row, row.deploy_env, ports, liveCommit ? { releaseCheck: 'skip', targetCommit: liveCommit } : {}).catch(err => {
             log.error(`     ${row.slug}-${row.deploy_env} failed: ${err.message}`);
           });
         } catch (e) {

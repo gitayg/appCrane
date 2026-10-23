@@ -6,6 +6,7 @@ import { appOwners } from '../memoryAdmissionMail.js';
 import { requestUrl } from '../vulnRequests.js';
 import { bulletList, renderBrandedEmail } from '../mail/brandedLayout.js';
 import { POLICY_NAME } from './policy.js';
+import { preExistingFindings } from '../releaseCheck.js';
 import log from '../../utils/logger.js';
 
 export const AUTO_PATCH_MAIL_SOURCE = 'auto-patch';
@@ -18,7 +19,7 @@ const HEADLINE = {
     : `Auto-patch did not apply ${r.package}: back to you`),
 };
 
-export function autoPatchMail(app, run) {
+export function autoPatchMail(app, run, { preExisting = [] } = {}) {
   const subject = `[AppCrane] ${app.slug}: ${HEADLINE[run.status](run)}`;
   const lines = [
     `Advisory: ${run.advisory_id}`,
@@ -28,6 +29,7 @@ export function autoPatchMail(app, run) {
     run.sandbox_deployment_id ? `Sandbox deployment: #${run.sandbox_deployment_id}` : null,
     run.production_deployment_id ? `Production deployment: #${run.production_deployment_id}` : null,
     run.reason ? `${run.status === 'applied' ? 'Note' : 'Why'}: ${run.reason}` : null,
+    preExisting.length ? `Already in production before this fix, unchanged by it (${preExisting.length}): ${preExisting.join('; ')}` : null,
   ].filter(Boolean);
   const intro = run.status === 'applied'
     ? 'A dependency fix for a remote-code-execution advisory passed every guardrail and was shipped without a person approving it. The request closes itself after the next clean scan.'
@@ -49,7 +51,7 @@ export function autoPatchMail(app, run) {
 
 export function sendAutoPatchMail(db, app, run) {
   if (!HEADLINE[run.status]) return 0;
-  const m = autoPatchMail(app, run);
+  const m = autoPatchMail(app, run, { preExisting: preExistingFindings(db, run.release_check_id) });
   let sent = 0;
   for (const owner of appOwners(db, app.id)) {
     try {

@@ -4,7 +4,10 @@
 // Checks, each pass / warn / fail with reasons:
 //   intake          the app's intake allows production (appIntake.js)
 //   dependencies    the candidate release's lockfile scan (or image scan) has
-//                   no advisory with a published fix; advisories with no fix warn
+//                   no advisory with a published fix; advisories with no fix warn.
+//                   An auto-patch run (mode 'auto-patch-delta', no user) passes
+//                   it when the target advisory is gone and every fixable
+//                   finding left is one production's own scan already has
 //   secrets         no credential-shaped string in the candidate tree
 //   access_rules    path rules present, when the classification requires them
 //   sso_gate        no headless mode, bypass paths, custom domain or public
@@ -127,7 +130,73 @@ async function scanTreeDeps(dir) {
   return { status: osv.findings.length ? 'findings' : 'ok', findings_json: osv.findings.length ? JSON.stringify(osv.findings) : null };
 }
 
-async function dependencyCheck(db, app, { releaseDir, commit, sandbox }) {
+export const AUTO_PATCH_DELTA = 'auto-patch-delta';
+const findingKeys = (f) => (f.ids || []).map((id) => `${f.ecosystem}|${f.name}|${id}`);
+const findingName = (f) => `${f.name}@${f.version} (${(f.ids || []).join(', ')})`;
+
+/**
+ * What production runs now, scanned: the baseline an auto-patch run's release
+ * check is compared against. Never throws; { ok: false, error } when there is
+ * no usable scan, which makes the delta check fail closed.
+ */
+export async function productionBaseline(db, app) {
+  try {
+    const prod = db.prepare(`SELECT id, finished_at, started_at FROM deployments WHERE app_id = ? AND env = 'production' AND status = 'live'
+      ORDER BY id DESC LIMIT 1`).get(app.id);
+    if (!prod) return { ok: false, error: 'production has no live release' };
+    const { latestScan } = await import('./appScan.js');
+    const since = prod.finished_at || prod.started_at;
+    let row = latestScan(db, app.id, 'production');
+    const fresh = row && ['ok', 'findings', 'skipped'].includes(row.status) && (!since || row.scanned_at >= since);
+    if (!fresh) {
+      const runScanApp = deps?.scanApp || (async (...a) => (await import('./appScan.js')).scanApp(...a));
+      row = await withTimeout(Promise.resolve(runScanApp(db, app, 'production', 'release-check')), scanTimeoutMs(), 'The production scan');
+    }
+    if (!row || !['ok', 'findings', 'skipped'].includes(row.status)) return { ok: false, error: `the production scan could not complete (${row?.error || 'no result'})` };
+    return { ok: true, scan_id: row.id ?? null, findings: row.findings_json ? JSON.parse(row.findings_json) : [] };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+async function targetGone(target, findings) {
+  if (target?.kind === 'npm' && target.name && target.advisory) {
+    const still = findings.some((f) => f.ecosystem === target.ecosystem && f.name === target.name && (f.ids || []).includes(target.advisory));
+    return still ? { ok: false, why: `${target.advisory} on ${target.name} is still in the release` } : { ok: true, what: `${target.advisory} on ${target.name} is gone` };
+  }
+  if (target?.kind === 'runtime' && target.version && target.fixed_version) {
+    const { compareVersions } = await import('./appScan.js');
+    let fixed = false;
+    try { fixed = compareVersions(target.version, target.fixed_version) >= 0; } catch { fixed = false; }
+    const what = `${target.runtime || 'the runtime'} ${target.version} (fixed in ${target.fixed_version}${target.advisories?.length ? `, ${target.advisories.join(', ')}` : ''})`;
+    return fixed ? { ok: true, what: `${what} is fixed` } : { ok: false, why: `${what} is not fixed` };
+  }
+  return { ok: false, why: 'no target advisory was named' };
+}
+
+// Auto-patch runs only: fixable findings production already has do not stop
+// a release that removes the target advisory and adds nothing new. Any doubt
+// (no baseline, no target, a new finding) leaves the failure as it was.
+async function judgeDelta(normal, row, delta, label) {
+  if (normal.status !== 'fail' || !normal.fixable || !row?.findings_json) return normal;
+  const findings = JSON.parse(row.findings_json);
+  const refuse = (why) => ({ ...normal, reasons: [`Auto-patch delta check did not pass: ${why}`, ...normal.reasons] });
+  const base = delta?.baseline;
+  if (!base?.ok || !Array.isArray(base.findings)) return refuse(`no production baseline to compare with (${base?.error || 'none given'})`);
+  const gone = await targetGone(delta.target, findings);
+  if (!gone.ok) return refuse(gone.why);
+  const known = new Set(base.findings.flatMap(findingKeys));
+  const fixable = findings.filter((f) => f.fixed);
+  const added = fixable.filter((f) => findingKeys(f).some((k) => !known.has(k)));
+  if (added.length) return refuse(`${added.length} fixable finding(s) production does not have: ${added.slice(0, 5).map(findingName).join('; ')}`);
+  const preExisting = fixable.map(findingName);
+  return check('dependencies', 'warn', [
+    `${label}: auto-patch delta check passed: ${gone.what}, and the release adds no fixable finding production does not already have`,
+    `${preExisting.length} pre-existing finding(s) unchanged: ${preExisting.join('; ')}`,
+  ], { findings: findings.length, fixable: fixable.length, delta: { baseline_scan_id: base.scan_id ?? null, pre_existing: preExisting } });
+}
+
+async function dependencyCheck(db, app, { releaseDir, commit, sandbox, delta }) {
   const label = app.source_type === 'image' ? 'Image scan' : 'Dependency scan';
   const runScanApp = deps?.scanApp || (async (...a) => (await import('./appScan.js')).scanApp(...a));
   const runTree = deps?.scanTree || scanTreeDeps;
@@ -142,11 +211,15 @@ async function dependencyCheck(db, app, { releaseDir, commit, sandbox }) {
       let row = latestScan(db, app.id, 'sandbox');
       const fresh = row && row.status !== 'error' && (!since || row.scanned_at >= since);
       if (!fresh) row = await withTimeout(runScanApp(db, app, 'sandbox', 'release-check'), timeout, 'The scan');
-      return judgeScanRow(row, `${label} of sandbox release #${sandbox.id}`);
+      const l = `${label} of sandbox release #${sandbox.id}`;
+      const normal = judgeScanRow(row, l);
+      return delta ? judgeDelta(normal, row, delta, l) : normal;
     }
     if (releaseDir && app.source_type !== 'image') {
       const row = await withTimeout(Promise.resolve(runTree(releaseDir)), timeout, 'The scan');
-      return judgeScanRow(row, `${label} of the release being deployed`);
+      const l = `${label} of the release being deployed`;
+      const normal = judgeScanRow(row, l);
+      return delta ? judgeDelta(normal, row, delta, l) : normal;
     }
     return check('dependencies', 'warn', [`${label}: no candidate release to scan before deploy (no live sandbox); the deploy-time scan reports after it ships`]);
   } catch (e) {
@@ -245,7 +318,9 @@ export async function runReleaseCheck(ctx) {
 
   const checks = [intakeCheck(db, app)];
   if (mode !== 'off') {
-    checks.push(await dependencyCheck(db, app, { releaseDir: ctx.releaseDir || null, commit: ctx.commit || null, sandbox }));
+    // Only a run no person started may ask for the delta comparison.
+    const delta = ctx.mode === AUTO_PATCH_DELTA && ctx.userId == null ? (ctx.delta || {}) : null;
+    checks.push(await dependencyCheck(db, app, { releaseDir: ctx.releaseDir || null, commit: ctx.commit || null, sandbox, delta }));
     checks.push(secretsCheck(app, dir));
     checks.push(accessRulesCheck(db, app, policy, level, dir));
     checks.push(ssoCheck(app, policy, level));
@@ -323,7 +398,8 @@ export async function enforceReleaseCheckInDeploy({ app, deployId, releaseDir, c
   const db = getDb();
   const row = db.prepare('SELECT log, deployed_by FROM deployments WHERE id = ?').get(deployId);
   if (/^(auto-heal:|auto-queued after)/.test(row?.log || '')) return null;
-  const record = await runReleaseCheck({ db, app, userId: row?.deployed_by ?? null, trigger: 'deploy', releaseDir, commit, deploymentId: deployId });
+  const delta = opts.releaseCheckDelta ? { mode: AUTO_PATCH_DELTA, delta: opts.releaseCheckDelta } : {};
+  const record = await runReleaseCheck({ db, app, userId: row?.deployed_by ?? null, trigger: 'deploy', releaseDir, commit, deploymentId: deployId, ...delta });
   appendLog(`Release check #${record.id}: ${record.result} (${record.data_classification}, mode ${record.mode})`);
   for (const c of record.checks) if (c.status !== 'pass') appendLog(`  ${c.status}: ${c.label}: ${c.reasons.join('; ')}`);
   if (record.blocked) {
@@ -332,6 +408,14 @@ export async function enforceReleaseCheckInDeploy({ app, deployId, releaseDir, c
     throw e;
   }
   return record;
+}
+
+/** The pre-existing findings an auto-patch delta check let through, from its stored record. */
+export function preExistingFindings(db, releaseCheckId) {
+  if (!releaseCheckId) return [];
+  const r = db.prepare('SELECT checks_json FROM release_checks WHERE id = ?').get(releaseCheckId);
+  if (!r) return [];
+  try { return JSON.parse(r.checks_json).find((c) => c.id === 'dependencies')?.delta?.pre_existing || []; } catch { return []; }
 }
 
 export function latestReleaseCheck(db, appId) {

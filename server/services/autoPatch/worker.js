@@ -20,6 +20,7 @@ import { effectiveForApp, POLICY_NAME } from './policy.js';
 import { dependencyMode, verifyNpmBump, NPM_REGISTRY, NPM_HELPER_MEMORY_MB } from './npmBump.js';
 import { sendAutoPatchMail } from './mail.js';
 import { deploymentCommit, isFullSha } from './commits.js';
+import { AUTO_PATCH_DELTA, preExistingFindings } from '../releaseCheck.js';
 
 export const ACTOR = 'AppCrane auto-patch';
 export const SWEEP_MS = 15 * 60 * 1000;
@@ -34,6 +35,7 @@ const defaults = {
   fetchAdvisories: async (ids) => (await import('../appScan.js')).fetchAdvisories(ids),
   queryOsv: async (pkgs) => (await import('../appScan.js')).queryOsv(pkgs),
   versionInfo: async (name, version) => (await import('./registry.js')).npmVersionInfo(name, version),
+  versionList: async (name) => (await import('./registry.js')).npmVersionList(name),
   runBump: async (a) => (await import('./npmBump.js')).runNpmBump(a),
   branchHead: async (app, branch) => (await import('../managedRepo.js')).localBranchHeadSha(app, branch),
   readFile: async (app, path, branch) => (await import('../managedRepo.js')).readManagedRepoFile(app, path, { branch }),
@@ -42,6 +44,7 @@ const defaults = {
   promoteApp: async (...a) => (await import('../deployer.js')).promoteApp(...a),
   rollbackApp: async (...a) => (await import('../deployer.js')).rollbackApp(...a),
   runReleaseCheck: async (ctx) => (await import('../releaseCheck.js')).runReleaseCheck(ctx),
+  productionBaseline: async (db, app) => (await import('../releaseCheck.js')).productionBaseline(db, app),
   admitHelper: async (ctx) => (await import('../memoryAdmission.js')).admitContainer(ctx),
   refuseDeployForMemory: async (ctx) => (await import('../deployer.js')).refuseDeployForMemory(ctx),
   assessRisk: async (ctx) => (await import('../redeployRisk.js')).assessRedeployRisk(ctx),
@@ -155,12 +158,14 @@ function addNote(db, requestId, body, resolved) {
   }
 }
 
-function approvalDetail(run, outcome) {
+function approvalDetail(db, run, outcome) {
+  const preExisting = preExistingFindings(db, run.release_check_id);
   return {
     actor: ACTOR, policy: POLICY_NAME, outcome, advisory: run.advisory_id, ecosystem: run.ecosystem, package: run.package,
     from_version: run.from_version, to_version: run.to_version, commit: run.commit_sha,
     sandbox_deployment_id: run.sandbox_deployment_id, production_deployment_id: run.production_deployment_id,
     release_check_id: run.release_check_id, request_id: run.request_id, run_id: run.id, reason: run.reason || null,
+    ...(preExisting.length ? { pre_existing_findings: preExisting } : {}),
   };
 }
 
@@ -176,9 +181,9 @@ function finish(db, app, run, outcome, now = Date.now()) {
   if (status === 'ineligible') return run;
 
   if (status === 'applied' || status === 'rolled_back') {
-    logAudit(null, app.id, 'change.auto_approved', approvalDetail(run, status), 'system');
+    logAudit(null, app.id, 'change.auto_approved', approvalDetail(db, run, status), 'system');
   } else {
-    logAudit(null, app.id, 'change.auto_patch_fallback', approvalDetail(run, status), 'system');
+    logAudit(null, app.id, 'change.auto_patch_fallback', approvalDetail(db, run, status), 'system');
   }
   const head = status === 'applied'
     ? `${ACTOR} applied ${run.package} ${run.from_version} → ${run.to_version} under "${POLICY_NAME}" (commit ${String(run.commit_sha).slice(0, 12)}, sandbox #${run.sandbox_deployment_id}, production #${run.production_deployment_id}). This request closes itself when the next scan no longer finds the advisory.`
@@ -267,7 +272,6 @@ async function execute(db, app, req, run, key, d) {
 
   const q = await d.queryOsv([{ name: key.name, version: finding.fixed, ecosystem: 'npm' }]);
   if (!q.ok) throw defer(`OSV could not be asked about ${key.name}@${finding.fixed}; will retry`, RETRY_SOON_MS);
-  if (q.findings.length) throw fallback(`${key.name}@${finding.fixed} has advisories of its own (${q.findings.flatMap((f) => f.ids).join(', ')}).`);
 
   const cooldownMs = effectiveForApp(db, app).policy.cooldown_hours * 3600_000;
   let published, deprecated;
@@ -275,12 +279,32 @@ async function execute(db, app, req, run, key, d) {
     if (/not on the npm registry/.test(e.message)) throw fallback(e.message);
     throw defer(`the npm registry did not say when ${key.name}@${finding.fixed} was published; will retry`, RETRY_SOON_MS);
   }
-  // A fix its own maintainers withdrew is not one to ship without a person
-  // (lodash 4.18.0: "Bad release. Please use lodash@4.17.21 instead.").
-  if (deprecated) throw fallback(`${key.name}@${finding.fixed} is deprecated on npm ("${deprecated}"); a person must choose the version.`);
+  let target = finding.fixed;
+  // A fix its own maintainers withdrew is not shipped (lodash 4.18.0: "Bad
+  // release. Please use lodash@4.17.21 instead."); the next clean release in
+  // the same major is, when OSV and the cooldown allow it.
+  if (deprecated) {
+    let versions;
+    try { versions = await d.versionList(key.name); } catch (e) {
+      throw defer(`the npm registry did not list the releases of ${key.name}; will retry`, RETRY_SOON_MS);
+    }
+    const { pickReplacementVersion } = await import('./pickVersion.js');
+    const pick = await pickReplacementVersion({ name: key.name, fixed: finding.fixed, deprecated, versions, queryOsv: d.queryOsv, cooldownMs, now: d.now() });
+    if (!pick.ok && pick.kind === 'person') throw fallback(pick.reason);
+    if (!pick.ok) {
+      const o = defer(pick.reason, pick.retryAfterMs || RETRY_SOON_MS);
+      o.extra.note = !!pick.retryAfterMs;
+      throw o;
+    }
+    target = pick.version;
+    published = pick.published;
+    update(db, run, { to_version: target });
+  } else if (q.findings.length) {
+    throw fallback(`${key.name}@${finding.fixed} has advisories of its own (${q.findings.flatMap((f) => f.ids).join(', ')}).`);
+  }
   const readyAt = published.getTime() + cooldownMs;
   if (d.now() < readyAt) {
-    const o = defer(`${key.name}@${finding.fixed} was published ${published.toISOString()}; the policy waits ${cooldownMs / 3600_000}h, so it is applied after ${new Date(readyAt).toISOString()}.`, readyAt - d.now());
+    const o = defer(`${key.name}@${target} was published ${published.toISOString()}; the policy waits ${cooldownMs / 3600_000}h, so it is applied after ${new Date(readyAt).toISOString()}.`, readyAt - d.now());
     o.extra.note = true;
     throw o;
   }
@@ -325,11 +349,11 @@ async function execute(db, app, req, run, key, d) {
   }
   let after;
   try {
-    after = await d.runBump({ packageJson: pkgText, packageLock: lockText, name: key.name, version: finding.fixed, mode });
+    after = await d.runBump({ packageJson: pkgText, packageLock: lockText, name: key.name, version: target, mode });
   } catch (e) {
     throw fallback(e.message);
   }
-  const verdict = verifyNpmBump({ before: { packageJson: pkgText, packageLock: lockText }, after, name: key.name, fromVersion: finding.version, toVersion: finding.fixed, mode });
+  const verdict = verifyNpmBump({ before: { packageJson: pkgText, packageLock: lockText }, after, name: key.name, fromVersion: finding.version, toVersion: target, mode });
   if (!verdict.ok) throw fallback(`the bump changed more than ${key.name}: ${verdict.problems.slice(0, 5).join('; ')}.`);
 
   const late = await transientBlock(db, app, d);
@@ -347,7 +371,7 @@ async function execute(db, app, req, run, key, d) {
   try {
     pushed = await d.push(app, files, {
       branch, expectParent: tip, deployOnPush: false, actorId: null,
-      message: `${ACTOR}: bump ${key.name} ${finding.version} -> ${finding.fixed} (${key.advisoryId})\n\nApproved by ${POLICY_NAME}.`,
+      message: `${ACTOR}: bump ${key.name} ${finding.version} -> ${target} (${key.advisoryId})\n\nApproved by ${POLICY_NAME}.`,
     });
   } catch (e) {
     if (e.code === 'BRANCH_MOVED') throw defer(`the branch moved while the bump was prepared (${e.message}); will retry`, 10 * 60 * 1000);
@@ -363,7 +387,7 @@ async function execute(db, app, req, run, key, d) {
     throw fallback(`the sandbox deploy was refused (${e.message}); ${note}.`);
   }
   const sandboxId = Number(db.prepare(`INSERT INTO deployments (app_id, env, status, commit_hash, commit_message, deployed_by, log)
-    VALUES (?, 'sandbox', 'pending', ?, ?, NULL, ?)`).run(app.id, commit, `bump ${key.name} to ${finding.fixed}`, `${ACTOR}: ${key.advisoryId}`).lastInsertRowid);
+    VALUES (?, 'sandbox', 'pending', ?, ?, NULL, ?)`).run(app.id, commit, `bump ${key.name} to ${target}`, `${ACTOR}: ${key.advisoryId}`).lastInsertRowid);
   update(db, run, { sandbox_deployment_id: sandboxId });
   const { getPortsForSlot } = await import('../portAllocator.js');
   const fresh = db.prepare('SELECT * FROM apps WHERE id = ?').get(app.id);
@@ -376,7 +400,11 @@ async function execute(db, app, req, run, key, d) {
   }
   if (!exactCommit(await deploymentCommit(app.slug, sb, d.resolveCommit), commit)) throw fallback(`sandbox deployment #${sandboxId} built ${sb.commit_hash}, not the bump commit ${commit.slice(0, 12)} (another push landed); production was not touched.`);
 
-  const rc = await d.runReleaseCheck({ db, app: fresh, userId: null, trigger: 'auto-patch' });
+  const delta = {
+    baseline: await d.productionBaseline(db, fresh),
+    target: { kind: 'npm', ecosystem: key.ecosystem, name: key.name, advisory: key.advisoryId },
+  };
+  const rc = await d.runReleaseCheck({ db, app: fresh, userId: null, trigger: 'auto-patch', mode: AUTO_PATCH_DELTA, delta });
   update(db, run, { release_check_id: rc.id });
   if (rc.blocked || rc.result === 'fail') {
     const failing = rc.checks.filter((c) => c.status === 'fail').map((c) => `${c.label}: ${c.reasons.join('; ')}`).join(' | ');
@@ -394,7 +422,7 @@ async function execute(db, app, req, run, key, d) {
 
   let promoted;
   try {
-    promoted = await d.promoteApp(fresh, null, { expectSandboxDeploymentId: sandboxId });
+    promoted = await d.promoteApp(fresh, null, { expectSandboxDeploymentId: sandboxId, releaseCheckDelta: delta });
   } catch (e) {
     throw fallback(`promote was refused: ${e.message}`);
   }

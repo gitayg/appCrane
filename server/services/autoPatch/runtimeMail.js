@@ -6,6 +6,7 @@ import { appOwners } from '../memoryAdmissionMail.js';
 import { requestUrl, dashboardBaseUrl } from '../vulnRequests.js';
 import { bulletList, renderBrandedEmail } from '../mail/brandedLayout.js';
 import { POLICY_NAME } from './policy.js';
+import { preExistingFindings } from '../releaseCheck.js';
 import { RUNTIMES } from './runtimeAdvisories.js';
 import log from '../../utils/logger.js';
 
@@ -22,7 +23,7 @@ const HEADLINE = {
     : `${label(r)} ${r.from_version} needs a person: not rebuilt automatically`),
 };
 
-export function runtimePatchMail(app, run) {
+export function runtimePatchMail(app, run, { preExisting = [] } = {}) {
   const subject = `[AppCrane] ${app.slug}: ${HEADLINE[run.status](run)}`;
   const lines = [
     `Advisories: ${run.advisory_key}`,
@@ -33,6 +34,7 @@ export function runtimePatchMail(app, run) {
     run.sandbox_deployment_id ? `Sandbox deployment: #${run.sandbox_deployment_id}` : null,
     run.production_deployment_id ? `Production deployment: #${run.production_deployment_id}` : null,
     run.reason ? `${run.status === 'applied' ? 'Note' : 'Why'}: ${run.reason}` : null,
+    preExisting.length ? `Already in production before this fix, unchanged by it (${preExisting.length}): ${preExisting.join('; ')}` : null,
   ].filter(Boolean);
   const intro = run.status === 'applied'
     ? `The ${label(run)} runtime your app ran had a remote-code-execution flaw. AppCrane rebuilt the same code on the patched runtime, checked it in sandbox, and shipped it to production without a person approving it.`
@@ -52,7 +54,7 @@ export function runtimePatchMail(app, run) {
 
 export function sendRuntimePatchMail(db, app, run) {
   if (!HEADLINE[run.status]) return 0;
-  const m = runtimePatchMail(app, run);
+  const m = runtimePatchMail(app, run, { preExisting: preExistingFindings(db, run.release_check_id) });
   let sent = 0;
   for (const owner of appOwners(db, app.id)) {
     try {

@@ -145,6 +145,28 @@ test('npmVersionInfo reads the publish time and the maintainer\'s deprecation me
   }
 });
 
+test('npmVersionList lists every version with its publish time and deprecation from one packument read', async () => {
+  const { npmVersionList } = await import('../server/services/autoPatch/registry.js');
+  const real = global.fetch;
+  const doc = {
+    versions: { '4.17.21': {}, '4.18.0': { deprecated: 'Bad release. Please use lodash@4.17.21 instead.' }, '4.18.1': {} },
+    time: { '4.17.21': '2021-02-20T15:42:16.891Z', '4.18.0': '2026-03-31T18:18:42.717Z', '4.18.1': '2026-04-01T21:01:20.458Z' },
+  };
+  let n = 0;
+  global.fetch = async () => { n++; return { ok: true, status: 200, json: async () => doc }; };
+  try {
+    const list = await npmVersionList('lodash');
+    assert.equal(n, 1);
+    assert.deepEqual(list.map((v) => [v.version, v.published.toISOString(), v.deprecated]), [
+      ['4.17.21', '2021-02-20T15:42:16.891Z', null],
+      ['4.18.0', '2026-03-31T18:18:42.717Z', 'Bad release. Please use lodash@4.17.21 instead.'],
+      ['4.18.1', '2026-04-01T21:01:20.458Z', null],
+    ]);
+  } finally {
+    global.fetch = real;
+  }
+});
+
 test('a failed helper is described without the docker command line or host paths', async () => {
   const { helperFailure } = await import('../server/services/autoPatch/npmBump.js');
   const cmd = 'Command failed: docker run --rm -v /srv/appcrane/data/tmp/auto-patch/bump-x:/work node:22-slim';
