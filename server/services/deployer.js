@@ -1077,7 +1077,7 @@ export async function promoteApp(app, userId, opts = {}) {
     // sandbox. A fresh build (not the sandbox image) is still required so the
     // bundler bakes the prod base path /<slug>/. deployApp clones managed repos
     // with the service-account token, so this works for source_type='managed'.
-    deployApp(freshDeployId, app, 'production', prodPorts, { targetCommit: sandboxDeploy.commit_sha || sandboxDeploy.commit_hash }).catch(err => {
+    deployApp(freshDeployId, app, 'production', prodPorts, { targetCommit: sandboxDeploy.commit_sha || sandboxDeploy.commit_hash, freshBase: opts.freshBase === true }).catch(err => {
       log.error(`Promote build ${freshDeployId} for ${app.slug} failed: ${err.message}`);
     });
     return { deployment_id: freshDeployId, status: 'pending', mode: 'rebuild', version: sandboxDeploy.version, from_sandbox: sandboxDeploy.id };
@@ -1949,9 +1949,14 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
         commitHash,
         appBasePath,
         onLog: (line) => { if (deployLog.length < 500) appendLog(`  ${line}`); },
+        freshBase: opts.freshBase === true,
+        appDockerfile: !!userProvided,
       });
       appendLog(`Image ready: ${image}`);
-      if (!wasCached) attemptImage = image;
+      if (!wasCached || opts.freshBase === true) attemptImage = image;
+      const { imageBaseInfo } = await import('./docker.js');
+      const base = await imageBaseInfo(image);
+      if (base) db.prepare('UPDATE deployments SET base_image = ?, base_digest = ? WHERE id = ?').run(base.image, base.digest, deployId);
     }
     }
 

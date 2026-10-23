@@ -1746,6 +1746,7 @@ app.listen(PORT, HOST, async () => {
     startLocalBackupScheduler();
     try { const { startRestoreDrillScheduler } = await import('./services/restoreDrills.js'); startRestoreDrillScheduler(); } catch (e) { log.error('Restore drill scheduler failed to start: ' + e.message); }
     try { const { startAutoPatchWorker } = await import('./services/autoPatch/worker.js'); startAutoPatchWorker(); } catch (e) { log.error('Auto-patch worker failed to start: ' + e.message); }
+    try { const { startRuntimePatchWorker } = await import('./services/autoPatch/runtimeWorker.js'); startRuntimePatchWorker(); } catch (e) { log.error('Runtime patch worker failed to start: ' + e.message); }
     // AppCrane has no setup wizard — boot IS first run. So the state gets said
     // once, in the log every new install reads, rather than waiting for someone
     // to open Settings → Backup. One line per boot, not a standing banner: the

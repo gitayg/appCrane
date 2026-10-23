@@ -5,6 +5,8 @@ import { isPlatformAdmin } from '../utils/roles.js';
 import { roleForUserOnApp } from '../services/permissions.js';
 import { getPolicy, setPolicy, effectiveForApp, setAppOptOut } from '../services/autoPatch/policy.js';
 import { usesLocalRepo } from '../services/managedRepo.js';
+import { getRuntimePolicy, setRuntimePolicy, recentRuntimeRuns } from '../services/autoPatch/runtimePolicy.js';
+import { latestSurvey } from '../services/autoPatch/runtimeWorker.js';
 
 const router = Router();
 
@@ -54,6 +56,18 @@ router.put('/apps/:slug/auto-patch', requireAuth, requireAppAccess, (req, res) =
   const db = getDb();
   setAppOptOut(db, req.app, req.body || {}, req.user);
   res.json(appView(db, req.app, req.user));
+});
+
+/** GET /api/runtime-patch — affected runtimes, setting, recent rebuilds (platform admin). */
+router.get('/runtime-patch', requireAuth, requirePlatformAdmin, (req, res) => {
+  const db = getDb();
+  const s = latestSurvey();
+  res.json({ policy: getRuntimePolicy(db), survey: { at: s.at, rows: s.rows.map(({ advisory_details, ...r }) => r) }, recent: recentRuntimeRuns(db) });
+});
+
+/** PUT /api/runtime-patch/policy — { pull_app_dockerfiles: boolean } (platform admin). */
+router.put('/runtime-patch/policy', requireAuth, requirePlatformAdmin, (req, res) => {
+  res.json({ policy: setRuntimePolicy(getDb(), req.body || {}, req.user) });
 });
 
 export default router;

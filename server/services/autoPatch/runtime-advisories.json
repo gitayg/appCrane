@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "updated": "2026-10-22",
+  "about": "Runtime remote-code-execution advisories AppCrane knows without asking OSV. OSV is asked first (ecosystem Bitnami, package php) and this list is merged in, so a host that cannot reach OSV still sees these. Ranges use OSV SEMVER events: a version is affected from an 'introduced' up to (not including) the next 'fixed'.",
+  "advisories": [
+    {
+      "id": "CVE-2026-109618",
+      "aliases": ["BIT-php-2026-109618", "GHSA-w8hw-w9fx-j79w"],
+      "runtime": "php",
+      "campaign": "PHP2Shell",
+      "summary": "RCE via OOM corruption",
+      "events": [
+        { "introduced": "0" }, { "fixed": "8.2.35" },
+        { "introduced": "8.3.0" }, { "fixed": "8.3.36" },
+        { "introduced": "8.4.0" }, { "fixed": "8.4.27" },
+        { "introduced": "8.5.0" }, { "fixed": "8.5.12" }
+      ],
+      "sources": [
+        "https://osv.dev/vulnerability/BIT-php-2026-109618",
+        "https://github.com/php/php-src/security/advisories/GHSA-w8hw-w9fx-j79w",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-109618",
+        "https://www.wiz.io/blog/php2shell-php-rce"
+      ]
+    },
+    {
+      "id": "CVE-2026-109619",
+      "aliases": ["BIT-php-2026-109619", "GHSA-6wmf-4rv5-p3rp"],
+      "runtime": "php",
+      "campaign": "PHP2Shell",
+      "summary": "RCE via stale global state",
+      "events": [
+        { "introduced": "0" }, { "fixed": "8.2.35" },
+        { "introduced": "8.3.0" }, { "fixed": "8.3.36" },
+        { "introduced": "8.4.0" }, { "fixed": "8.4.27" },
+        { "introduced": "8.5.0" }, { "fixed": "8.5.12" }
+      ],
+      "sources": [
+        "https://osv.dev/vulnerability/BIT-php-2026-109619",
+        "https://github.com/php/php-src/security/advisories/GHSA-6wmf-4rv5-p3rp",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-109619",
+        "https://www.wiz.io/blog/php2shell-php-rce"
+      ]
+    }
+  ]
+}

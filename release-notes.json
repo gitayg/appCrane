@@ -1,4 +1,8 @@
 {
+  "2.118.0": [
+    "If your app runs on PHP and a serious security flaw is found in PHP itself, AppCrane now rebuilds your app on the fixed PHP for you, tests it in sandbox before it reaches production, rolls it back if it fails, and e-mails you either way.",
+    "Every build also starts from the latest security fixes of its base image."
+  ],
   "2.117.3": [
     "If your server runs a Linux version that MongoDB 8.0 cannot start on, AppCrane now tells you right away and names the upgrade you need, instead of waiting two minutes and failing without a reason."
   ],

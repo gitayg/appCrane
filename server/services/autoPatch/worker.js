@@ -110,6 +110,7 @@ async function transientBlock(db, app, d) {
   if (await d.restoreInProgress(app.slug)) return 'a database restore is running';
   const inflight = db.prepare(`SELECT id, env FROM deployments WHERE app_id = ? AND status IN ('pending','building','deploying')
     AND started_at > datetime('now', '-30 minutes') LIMIT 1`).get(app.id);
+  if (db.prepare("SELECT 1 FROM runtime_patch_runs WHERE app_id = ? AND status = 'running'").get(app.id)) return 'a runtime rebuild is running on this app';
   if (inflight) return `deployment #${inflight.id} (${inflight.env}) is in progress`;
   let coder;
   try { coder = await d.coderState(app.slug); } catch (e) { return `could not read the coder workspace (${e.message})`; }

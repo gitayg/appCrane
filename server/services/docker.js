@@ -19,6 +19,7 @@ import { admitContainer, reserveMemory } from './memoryAdmission.js';
 import { OOM_APP_FLAG } from './oomPriority.js';
 import { CPU_APP_FLAG, buildResourceArgs } from './cpuPriority.js';
 import { assertNoRestoreInProgress } from './managedDbRestoreGuard.js';
+import { prepareBuildBase, buildWithPullFallback, freshBaseTag, BASE_IMAGE_LABEL, BASE_DIGEST_LABEL } from './autoPatch/runtimeImages.js';
 
 const execFileAsync = promisify(execFile);
 // Imported rather than re-declared as 3000. v2.45.0's data-plane guard is
@@ -302,8 +303,11 @@ function imageTag(slug, env, commitHash) {
 // v2.21.10: exposed so the Nixpacks path can tag its image identically.
 export function imageTagFor(slug, env, commitHash) { return imageTag(slug, env, commitHash); }
 
-export async function buildImageIfNeeded({ slug, env, contextDir, commitHash, appBasePath, onLog }) {
+export async function buildImageIfNeeded({ slug, env, contextDir, commitHash, appBasePath, onLog, freshBase = false, appDockerfile = false }) {
   const tag = imageTag(slug, env, commitHash);
+  if (freshBase) {
+    return buildImage({ slug, env, contextDir, commitHash, appBasePath, onLog, appDockerfile, tag: freshBaseTag(tag) });
+  }
   if (commitHash && commitHash !== 'unknown') {
     try {
       await dockerExec(['image', 'inspect', tag, '--format', '{{.Id}}'], { timeout: 5000 });
@@ -311,7 +315,18 @@ export async function buildImageIfNeeded({ slug, env, contextDir, commitHash, ap
       return tag;
     } catch (_) {}
   }
-  return buildImage({ slug, env, contextDir, commitHash, appBasePath, onLog });
+  return buildImage({ slug, env, contextDir, commitHash, appBasePath, onLog, appDockerfile });
+}
+
+/** { image, digest } of the base an AppCrane-built image was built on (its labels), or null. */
+export async function imageBaseInfo(ref) {
+  try {
+    const labels = JSON.parse(await dockerExec(['image', 'inspect', ref, '--format', '{{json .Config.Labels}}'], { timeout: 10000 }) || 'null') || {};
+    const image = labels[BASE_IMAGE_LABEL];
+    return image ? { image, digest: labels[BASE_DIGEST_LABEL] || null } : null;
+  } catch (_) {
+    return null;
+  }
 }
 
 /** Whether an image with this ref is on the host. */
@@ -343,9 +358,10 @@ export async function getContainerImage(slug, env) {
   return dockerExec(['inspect', name, '--format', '{{.Config.Image}}'], { timeout: 5000 });
 }
 
-export async function buildImage({ slug, env, contextDir, commitHash, appBasePath, onLog }) {
-  const tag = imageTag(slug, env, commitHash);
-  const args = ['build', '-t', tag, '--label', APPCRANE_LABEL, '--label', `slug=${slug}`, '--label', `env=${env}`, ...buildResourceArgs()];
+export async function buildImage({ slug, env, contextDir, commitHash, appBasePath, onLog, appDockerfile = false, tag: tagOverride = null }) {
+  const tag = tagOverride || imageTag(slug, env, commitHash);
+  const prep = await prepareBuildBase({ contextDir, appDockerfile, db: safeDb(), run: dockerExec, onLog });
+  const args = ['build', '-t', tag, '--label', APPCRANE_LABEL, '--label', `slug=${slug}`, '--label', `env=${env}`, ...prep.labelArgs, ...buildResourceArgs()];
   // Build-time only: bundlers (Vite, CRA, Next) need APP_BASE_PATH to emit
   // correct asset URLs. Caddy strips this prefix at runtime, so it must NOT
   // appear in the runtime container env — see bugs/2026-04-26-appcrane-app-base-path-resolution.md
@@ -356,6 +372,14 @@ export async function buildImage({ slug, env, contextDir, commitHash, appBasePat
   }
   args.push(contextDir);
 
+  return buildWithPullFallback({ args, buildPull: prep.buildPull, onLog, runBuild: (a) => runDockerBuild(a, tag, onLog) });
+}
+
+function safeDb() {
+  try { return getDb(); } catch (_) { return null; }
+}
+
+function runDockerBuild(args, tag, onLog) {
   return new Promise((resolve, reject) => {
     // Explicitly chosen, never inherited — see dockerBuildEnv().
     const child = spawn('docker', args, { stdio: 'pipe', env: dockerBuildEnv() });
