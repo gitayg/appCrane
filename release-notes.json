@@ -1,4 +1,7 @@
 {
+  "2.120.1": [
+    "Housekeeping: test leftovers that were published by mistake have been removed."
+  ],
   "2.120.0": [
     "When a scan finds a vulnerable package in your app that was not reported before, the app owners and platform admins now get one e-mail right away listing it, the fixed version and what happens next; each finding is mailed once, and a platform admin can turn this off in Settings > Security."
   ],

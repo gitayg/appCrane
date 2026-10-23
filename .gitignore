@@ -25,3 +25,6 @@ studio-web/src/**/*.d.ts
 # Productizer hygiene pattern list — names private strings, must never be committed.
 .claude/productizer/hygiene-local.txt
 /.runtime/
+
+# test runs with an unset DATA_DIR write here
+undefined/
