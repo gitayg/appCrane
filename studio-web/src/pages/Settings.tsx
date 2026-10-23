@@ -77,6 +77,9 @@ function SecurityTab() {
   const [embed, setEmbed] = useState({ enabled: true, domain_override: '', derived_domain: '', effective: '' })
   const [embedSaved, flashEmbedSaved] = useFlash()
   const [embedError, setEmbedError] = useState<string | null>(null)
+  const [brotliGuard, setBrotliGuard] = useState(true)
+  const [brotliSaved, flashBrotliSaved] = useFlash()
+  const [brotliError, setBrotliError] = useState<string | null>(null)
 
   useEffect(() => {
     adminApi.get<{ value?: string }>('/api/settings/tls_cert_file').then(r => { if (r?.value) setCertFile(r.value) }).catch(() => {})
@@ -94,7 +97,19 @@ function SecurityTab() {
       .then(r => setCatalogEnabled(r?.value !== '0')).catch(() => {})
     adminApi.get<{ value?: string }>('/api/settings/auth_sso_only').then(r => setSsoOnly(r?.value === 'true')).catch(() => {})
     adminApi.get<typeof embed>('/api/settings/embed/config').then(r => { if (r) setEmbed(r) }).catch(() => {})
+    adminApi.get<{ enabled: boolean }>('/api/settings/edge/brotli').then(r => { if (r) setBrotliGuard(r.enabled) }).catch(() => {})
   }, [])
+
+  async function saveBrotliGuard(enabled: boolean) {
+    setBrotliError(null)
+    try {
+      await adminApi.put('/api/settings/edge/brotli', { enabled })
+      setBrotliGuard(enabled)
+      flashBrotliSaved()
+    } catch (e) {
+      setBrotliError(e instanceof Error ? e.message : 'Save failed')
+    }
+  }
 
   async function saveEmbed(next: { enabled?: boolean; domain_override?: string }) {
     setEmbedError(null)
@@ -408,6 +423,29 @@ function SecurityTab() {
           </div>
         )}
         {embedError && <div style={{ fontSize: '.82rem', color: 'var(--red)' }}>{embedError}</div>}
+      </div>
+
+      <div className="setting-card">
+        <h3>Brotli-compressed uploads</h3>
+        <p>
+          Refuse request bodies compressed with Brotli (<code>Content-Encoding: br</code>) before they reach any
+          app. Node.js releases before 22.23.4, 24.22.1 and 26.12.1 can be taken over through such a body
+          (CVE-2026-111497). Browsers never send one. Turn this off only if an app really accepts Brotli uploads
+          and every app runs a patched Node.js. AppCrane itself refuses them either way.
+        </p>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <input
+            type="checkbox"
+            id="edge-brotli-guard"
+            checked={brotliGuard}
+            onChange={e => saveBrotliGuard(e.target.checked)}
+          />
+          <label htmlFor="edge-brotli-guard" style={{ fontSize: '.85rem' }}>
+            Refuse Brotli request bodies for hosted apps
+          </label>
+          {brotliSaved && <span className="saved-msg">Saved ✓</span>}
+        </div>
+        {brotliError && <div style={{ fontSize: '.82rem', color: 'var(--red)' }}>{brotliError}</div>}
       </div>
 
       <div className="setting-card">

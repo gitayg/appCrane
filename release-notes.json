@@ -1,4 +1,7 @@
 {
+  "2.122.0": [
+    "Your apps are protected against a newly found attack on the software that runs them: AppCrane now turns away the kind of upload it uses, and moves itself and your apps onto the fixed version automatically."
+  ],
   "2.121.0": [
     "Platform admins can now change the master key that protects every stored secret: stop AppCrane and run crane rotate-key. It saves a backup first, re-locks every secret with the new key and checks each one before switching."
   ],

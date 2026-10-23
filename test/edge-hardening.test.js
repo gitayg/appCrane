@@ -260,8 +260,10 @@ test('outside the embed policy, only the bypass blocks differ from v2.43.1', () 
   // metadata an MCP client trusts to find the token endpoint), proxied the same.
   assert.deepEqual(
     [...craneNow.keys()].filter(k => !craneWas.has(k)).sort(),
-    ['handle /.well-known/agent-card.json', 'handle /.well-known/oauth-*', 'handle /a2a*', 'handle /git/*', 'handle /oauth/*', 'log'],
-    'the crane site gained a block other than the redacting access log, the A2A routes, git and MCP OAuth');
+    // v2.122.0 adds the Brotli-body refusal (CVE-2026-111497), a named-matcher
+    // handle ahead of every route; test/caddy-brotli-guard.test.js pins it.
+    ['handle /.well-known/agent-card.json', 'handle /.well-known/oauth-*', 'handle /a2a*', 'handle /git/*', 'handle /oauth/*', 'handle @brotli_body', 'log'],
+    'the crane site gained a block other than the redacting access log, the A2A routes, git, MCP OAuth and the Brotli refusal');
   const body = (k) => craneNow.get(k).split('\n').slice(1).join('\n');
   for (const k of ['handle /git/*', 'handle /oauth/*', 'handle /.well-known/oauth-*']) {
     assert.equal(body(k), body('handle /a2a*'), `${k} must be proxied exactly like the other platform routes`);

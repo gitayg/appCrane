@@ -36,8 +36,9 @@ export const JOBS = {
   'restore-drill':    { label: 'Scheduled restore drill',           cadenceMs: 7 * DAY },
   'access-reviews':   { label: 'Access review campaigns and reminders', cadenceMs: 60 * MIN },
   'auto-patch':       { label: 'RCE auto-patch worker',             cadenceMs: 15 * MIN },
-  'runtime-patch':    { label: 'Runtime auto-patch (PHP)',          cadenceMs: 60 * MIN },
+  'runtime-patch':    { label: 'Runtime auto-patch (PHP, Node.js)', cadenceMs: 60 * MIN },
   'mongo-kernel':     { label: 'Managed MongoDB kernel check',      cadenceMs: 6 * HOUR },
+  'node-runtime':     { label: 'AppCrane Node.js security check',   cadenceMs: 6 * HOUR },
 };
 
 const started = new Map();

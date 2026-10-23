@@ -4,7 +4,7 @@ import { requireAuth, requirePlatformAdmin } from '../middleware/auth.js';
 import { PERMISSIONS, getMatrix, setMatrix, resetToDefaults } from '../services/permissions.js';
 import { ssoProviderConfigured } from '../services/authPolicy.js';
 import { encrypt } from '../services/encryption.js';
-import { reloadCaddy } from '../services/caddy.js';
+import { reloadCaddy, BROTLI_GUARD_KEY, brotliGuardEnabled } from '../services/caddy.js';
 import { platformEmbedAncestors, platformRegistrableDomain } from '../utils/embed.js';
 import { settingVisibility, PUBLIC, AUTHED } from '../utils/settingsVisibility.js';
 import { RESERVED_SETTING_PREFIX as MARIADB_ENCRYPTION_PREFIX } from '../services/managedDbEncryption.js';
@@ -767,6 +767,30 @@ router.put('/embed/config', requireAuth, requirePlatformAdmin, async (req, res) 
   }
   await reloadCaddy().catch(() => {});
   res.json({ ok: true, effective: platformEmbedAncestors(db) || '' });
+});
+
+/**
+ * GET/PUT /api/settings/edge/brotli { enabled } — platform-admin. Whether Caddy
+ * refuses request bodies sent with Content-Encoding: br to hosted apps
+ * (CVE-2026-111497). On unless turned off; PUT reloads Caddy.
+ */
+router.get('/edge/brotli', requireAuth, requirePlatformAdmin, (req, res) => {
+  res.json({ enabled: brotliGuardEnabled(getDb()) });
+});
+
+router.put('/edge/brotli', requireAuth, requirePlatformAdmin, async (req, res) => {
+  const { enabled } = req.body || {};
+  if (typeof enabled !== 'boolean') {
+    return res.status(400).json({ error: { code: 'VALIDATION', message: 'enabled must be true or false' } });
+  }
+  getDb().prepare(
+    `INSERT INTO settings (key, value, updated_by, updated_at) VALUES (?, ?, ?, datetime('now'))
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_by = excluded.updated_by, updated_at = datetime('now')`
+  ).run(BROTLI_GUARD_KEY, enabled ? 'on' : 'off', req.user.id);
+  const { logAudit } = await import('../middleware/audit.js');
+  logAudit(req.user.id, null, 'edge-brotli-guard', { enabled });
+  await reloadCaddy().catch(() => {});
+  res.json({ ok: true, enabled });
 });
 
 /**

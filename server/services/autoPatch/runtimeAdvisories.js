@@ -11,6 +11,11 @@
 // runtime-advisories.json is merged in, so a host that cannot reach OSV still
 // knows PHP2Shell. Node is added the same way: a RUNTIMES entry naming the
 // image env var and the OSV package (Bitnami "node"), plus list entries.
+// Measured 2026-10-23: POST /v1/query {node, Bitnami, 22.22.0} returns
+// BIT-node-2026-111497 (alias CVE-2026-111497) with ranges fixed 22.23.4 /
+// 24.22.1 / 26.12.1 and nothing for 25.x, which Node no longer patches; the
+// bundled entry also covers 25. A Node release line is its major (22.x), where
+// a PHP branch is major.minor (8.3), so `branch` says which a runtime uses.
 
 import { readFileSync } from 'fs';
 import { classifyAdvisory } from './classify.js';
@@ -20,7 +25,7 @@ const TIMEOUT_MS = 20_000;
 
 export const RUNTIMES = Object.freeze({
   php: { label: 'PHP', env: 'PHP_VERSION', probe: ['php', '-r', 'echo PHP_VERSION;'], osv: { ecosystem: 'Bitnami', name: 'php' }, enabled: true },
-  node: { label: 'Node.js', env: 'NODE_VERSION', probe: ['node', '-p', 'process.versions.node'], osv: { ecosystem: 'Bitnami', name: 'node' }, enabled: false },
+  node: { label: 'Node.js', env: 'NODE_VERSION', probe: ['node', '-p', 'process.versions.node'], osv: { ecosystem: 'Bitnami', name: 'node' }, enabled: true, branch: 'major' },
 });
 
 export function loadBundled() {
@@ -42,13 +47,17 @@ export function compareVersions(a, b) {
   return y[3] - x[3];
 }
 
-export const branchOf = (v) => { const p = parseVersion(v); return p ? `${p[0]}.${p[1]}` : null; };
+export const branchOf = (v, runtime) => {
+  const p = parseVersion(v);
+  if (!p) return null;
+  return RUNTIMES[runtime]?.branch === 'major' ? `${p[0]}.x` : `${p[0]}.${p[1]}`;
+};
 
 /**
  * Where `version` falls in OSV SEMVER `events`.
  * { affected: false } | { affected: true, fixed: string|null, sameBranch: boolean }
  */
-export function fixFor(version, events) {
+export function fixFor(version, events, runtime) {
   let introduced = null;
   for (const e of events || []) {
     if (e.introduced !== undefined) { introduced = e.introduced; continue; }
@@ -59,7 +68,7 @@ export function fixFor(version, events) {
       && (e.fixed !== undefined ? compareVersions(version, e.fixed) < 0 : compareVersions(version, e.last_affected) <= 0);
     if (inside) {
       if (e.fixed === undefined) return { affected: true, fixed: null, sameBranch: false };
-      return { affected: true, fixed: e.fixed, sameBranch: branchOf(e.fixed) === branchOf(version) };
+      return { affected: true, fixed: e.fixed, sameBranch: branchOf(e.fixed, runtime) === branchOf(version, runtime) };
     }
     introduced = null;
   }
@@ -111,14 +120,14 @@ export async function runtimeAdvisories(runtime, version, { osvRecords, fetchFn 
   const found = new Map();
   for (const r of records) {
     if (!classifyAdvisory(r).rce) continue;
-    const f = fixFor(version, osvEvents(r, pkg));
+    const f = fixFor(version, osvEvents(r, pkg), runtime);
     if (!f.affected) continue;
     const id = cveOf(r.id, r.aliases);
     found.set(id, { id, aliases: [r.id, ...(r.aliases || [])].filter((a) => a !== id), summary: r.summary || '', fixed: f.fixed, sameBranch: f.sameBranch, source: 'osv' });
   }
   for (const b of bundled.advisories || []) {
     if (b.runtime !== runtime || found.has(b.id)) continue;
-    const f = fixFor(version, b.events);
+    const f = fixFor(version, b.events, runtime);
     if (!f.affected) continue;
     found.set(b.id, { id: b.id, aliases: b.aliases || [], summary: b.summary || '', fixed: f.fixed, sameBranch: f.sameBranch, source: 'bundled', campaign: b.campaign || null });
   }

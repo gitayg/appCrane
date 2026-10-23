@@ -170,6 +170,12 @@ bundled_major() {
   "$BUNDLED_BIN/node" -p "process.versions.node.split('.')[0]" 2>/dev/null || echo ""
 }
 
+# ok | vulnerable | unsupported for the given node binary (server/services/nodeSecurity.js),
+# empty when it cannot tell. A known RCE in a supported major is fixed in place.
+node_security() {
+  "${1:-node}" "$APPCRANE_DIR/server/services/nodeSecurity.js" ${2:-} 2>/dev/null | head -1 || echo ""
+}
+
 # Put the bundled Node first on PATH when the system one is below the floor
 # and the bundled one meets it. Returns 0 when it did.
 use_bundled_node() {
@@ -178,7 +184,9 @@ use_bundled_node() {
   [ -n "$bundled" ] && [ -n "$want" ] || return 1
   [ "$bundled" -ge "$want" ] || return 1
   if [ -n "$have" ] && [ "$have" -ge "$want" ] && [ "$BUNDLED_BIN/node" != "$(command -v node)" ]; then
-    return 1
+    # The system Node meets the floor: the bundled one wins only when it has a
+    # security fix the system one lacks.
+    [ "$(node_security node)" != "ok" ] && [ "$(node_security "$BUNDLED_BIN/node")" = "ok" ] || return 1
   fi
   case ":$PATH:" in *":$BUNDLED_BIN:"*) ;; *) export PATH="$BUNDLED_BIN:$PATH" ;; esac
   return 0
@@ -214,6 +222,32 @@ upgrade_node() {
   return 0
 }
 
+# A Node at or above the floor that is missing a security fix
+# (server/services/nodeSecurity.js, e.g. CVE-2026-111497) is moved to the newest
+# release of the SAME major, apt first, then the signed official build. Fails open.
+reconcile_security() {
+  local major="$1" verdict
+  verdict="$(node_security node)"
+  if [ "$verdict" = "unsupported" ]; then
+    log "WARNING: $(node_security node --message)"
+    return 0
+  fi
+  [ "$verdict" = "vulnerable" ] || return 0
+  if [ "${APPCRANE_SKIP_NODE_UPGRADE:-}" = "1" ]; then
+    log "WARNING: $(node_security node --message) APPCRANE_SKIP_NODE_UPGRADE=1 is set, so it was left alone."
+    return 0
+  fi
+  log "$(node_security node --message) Upgrading within Node ${major}.x."
+  if { upgrade_node "$major" && [ "$(node_security node)" = "ok" ]; } \
+    || { install_bundled_node "$major" && [ "$(node_security node)" = "ok" ]; }; then
+    log "Node is now $(node -v 2>/dev/null), with the security fix"
+  else
+    log "WARNING: could not install a patched Node ${major}.x automatically; AppCrane is booting on $(node -v 2>/dev/null). Run on this host:"
+    log "    curl -fsSL https://deb.nodesource.com/setup_${major}.x | sudo -E bash -"
+    log "    sudo apt-get install -y nodejs && sudo systemctl restart appcrane"
+  fi
+}
+
 reconcile_runtime() {
   local have want
   want="$(required_node_major)"
@@ -231,6 +265,7 @@ reconcile_runtime() {
       log "node_modules missing — installing"
       npm install --omit=dev --prefer-offline 2>&1 | sed 's/^/[safe-boot] npm: /' >&2 || true
     fi
+    reconcile_security "$have"
     return 0
   fi
 
@@ -303,6 +338,7 @@ if [ "${1:-}" = "--check-runtime" ]; then
     echo "decision=ok"
   fi
   if native_ok; then echo "native=ok"; else echo "native=broken"; fi
+  echo "security=$(node_security node)"
   echo "node_path=$(command -v node)"
   exit 0
 fi

@@ -17,6 +17,7 @@
 // part worth getting right.
 
 import { nodeDistArch } from './bundledNode.js';
+import { nodeSecurityStatus } from './nodeSecurity.js';
 
 /** Every reason the upgrade is skipped, so a caller can log the specific one. */
 export const SKIP = {
@@ -26,6 +27,7 @@ export const SKIP = {
   NOT_ROOT:     'not_root',
   NO_APT:       'no_apt',
   NOT_SYSTEM:   'node_not_from_system_package_manager',
+  UNSUPPORTED_LINE: 'release_line_gets_no_security_fix',
 };
 
 /**
@@ -41,6 +43,8 @@ export const SKIP = {
  *   skipEnv      {string=} APPCRANE_SKIP_NODE_UPGRADE
  *   arch         {string=} process.arch
  *   underSafeBoot {boolean=} started by scripts/safe-boot.sh (APPCRANE_SAFE_BOOT=1)
+ *   currentVersion {string=} process.versions.node; when given, a runtime at or
+ *     above the floor is also checked against services/nodeSecurity.js
  * @returns {{ upgrade: boolean, blocking: boolean, reason: string, message: string, commands?: string[][] }}
  *   `blocking` means: do NOT continue the update. Installing dependencies that
  *   declare a newer engine onto this runtime is how a working platform becomes
@@ -49,9 +53,13 @@ export const SKIP = {
  */
 export function planNodeUpgrade({
   currentMajor, floor, platform, isRoot, hasApt, nodePath = '', skipEnv,
-  arch = null, underSafeBoot = false,
+  arch = null, underSafeBoot = false, currentVersion = null,
 }) {
   if (currentMajor >= floor) {
+    if (currentVersion) {
+      const sec = planSecurityUpgrade({ currentVersion, platform, isRoot, hasApt, nodePath, skipEnv, arch, underSafeBoot });
+      if (sec) return sec;
+    }
     return { upgrade: false, blocking: false, reason: SKIP.AT_FLOOR,
       message: `Node ${currentMajor} is at or above the floor (${floor}).` };
   }
@@ -124,6 +132,53 @@ export function planNodeUpgrade({
       ['apt-get', ['install', '-y', 'nodejs']],
     ],
   };
+}
+
+/**
+ * A runtime at or above the floor that is missing a security fix: move it to the
+ * fixed release of the SAME major, through the same two channels as the floor
+ * upgrade (nodesource apt, or the signed official build under safe-boot).
+ * Never blocking: the host is already running this runtime, and refusing the
+ * AppCrane update would not make it any safer. Null when there is nothing to do.
+ */
+export function planSecurityUpgrade({ currentVersion, platform, isRoot, hasApt, nodePath = '', skipEnv, arch = null, underSafeBoot = false }) {
+  const sec = nodeSecurityStatus(currentVersion);
+  if (sec.status === 'unsupported') {
+    return { upgrade: false, blocking: false, security: true, reason: SKIP.UNSUPPORTED_LINE, message: sec.message };
+  }
+  if (sec.status !== 'vulnerable') return null;
+  const base = { blocking: false, security: true, targetMajor: sec.major, minimum: sec.minimum };
+  const leave = (reason, why) => ({ ...base, upgrade: false, reason, message: `${sec.message} ${why}` });
+  if (skipEnv === '1') return leave(SKIP.DISABLED, 'APPCRANE_SKIP_NODE_UPGRADE=1 is set, so the runtime was left alone: upgrade it yourself.');
+  if (platform !== 'linux') return leave(SKIP.NOT_LINUX, `This host is ${platform}, where AppCrane does not manage the runtime: upgrade it yourself.`);
+  const bundled = (reason, why) => {
+    if (underSafeBoot && nodeDistArch(arch)) {
+      return { ...base, upgrade: true, reason: 'bundling', method: 'bundled',
+        message: `${sec.message} ${why}, so AppCrane is downloading the official Node ${sec.major} build into its own directory.` };
+    }
+    return leave(reason, `${why}, and AppCrane cannot bring its own Node here: upgrade the runtime yourself.`);
+  };
+  if (!isRoot) return bundled(SKIP.NOT_ROOT, 'This process is not root');
+  if (!hasApt) return bundled(SKIP.NO_APT, 'apt-get is unavailable');
+  if (nodePath && !/^\/usr\/(bin|local\/bin)\/node$/.test(nodePath)) {
+    return bundled(SKIP.NOT_SYSTEM, `Its binary is at ${nodePath}, not a system package path`);
+  }
+  return {
+    ...base, upgrade: true, reason: 'upgrading',
+    message: `${sec.message} Installing the latest Node ${sec.major}.x before dependencies.`,
+    commands: [
+      ['bash', ['-c', `set -o pipefail; curl -fsSL https://deb.nodesource.com/setup_${sec.major}.x | bash -`]],
+      ['apt-get', ['install', '-y', 'nodejs']],
+    ],
+  };
+}
+
+/** Did a security upgrade take? Asked with the version the `node` now on PATH reports. */
+export function verifySecurityUpgrade(installedVersion) {
+  const sec = nodeSecurityStatus(installedVersion);
+  return sec.status === 'ok'
+    ? { ok: true, message: `Node ${installedVersion} is now installed and has the security fixes; the restart will pick it up.` }
+    : { ok: false, message: `After the upgrade the runtime on PATH is still ${installedVersion || 'unreadable'}: ${sec.message}` };
 }
 
 /**

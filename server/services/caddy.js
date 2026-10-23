@@ -122,6 +122,30 @@ const BASELINE_HEADERS =
   `        -Server\n` +
   `    }\n`;
 
+// CVE-2026-111497 ("Node2Shell"): Node's bundled Brotli decoder before 22.23.4 /
+// 24.22.1 / 26.12.1 can be driven to an out-of-bounds write by a malformed body,
+// and Express 5 / body-parser 2.x decode `Content-Encoding: br` bodies for any
+// client. Refused at the edge for every hosted app, ahead of every route: a
+// `handle` with a named matcher keeps its written position among `handle`
+// blocks (Caddy sorts only single-path matchers by specificity), so emitted
+// first it runs first; the adapted order is pinned by test/caddy-brotli-guard.test.js.
+// Caddy's header matcher is case-sensitive, so the case-insensitive
+// header_regexp form is used. A platform admin can turn it off for an app
+// fleet that really accepts Brotli uploads.
+export const BROTLI_GUARD_KEY = 'edge_refuse_brotli_bodies';
+
+export function brotliGuardEnabled(db) {
+  const v = db.prepare('SELECT value FROM settings WHERE key = ?').get(BROTLI_GUARD_KEY)?.value;
+  return v == null || String(v).trim().toLowerCase() !== 'off';
+}
+
+const BROTLI_REFUSAL =
+  `    @brotli_body header_regexp Content-Encoding "(?i)(^|,)\\s*br\\s*(,|$)"\n` +
+  `    handle @brotli_body {\n` +
+  `        header Accept-Encoding "gzip, deflate"\n` +
+  `        respond "Request bodies compressed with Brotli (Content-Encoding: br) are not accepted." 415\n` +
+  `    }\n`;
+
 /**
  * Access log for the crane domain, with every query-string value redacted.
  *
@@ -347,6 +371,8 @@ export function generateCaddyfile() {
   // See BASELINE_HEADERS. The custom-domain site blocks below emit the same
   // constant — a site block inherits nothing from this one.
   caddyfile += BASELINE_HEADERS + '\n';
+  const refuseBrotli = brotliGuardEnabled(db) ? BROTLI_REFUSAL : '';
+  if (refuseBrotli) caddyfile += refuseBrotli + '\n';
 
   // Auth-bypass routes are parsed here rather than in the app loop because the
   // answer is needed twice: once to decide whether this site needs the
@@ -699,6 +725,7 @@ export function generateCaddyfile() {
     // TLS cert for this domain (ACME) and serves it over HTTPS, so HSTS is a
     // true statement about it.
     caddyfile += BASELINE_HEADERS;
+    caddyfile += refuseBrotli;
     caddyfile += identityStrip('    ');
     caddyfile += authMode('    ', 'bypass');
     // Belt-and-braces: cc_token is host-only (no Domain attribute), so a browser

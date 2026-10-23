@@ -125,6 +125,9 @@ app.use((req, res, next) => {
   res.setHeader('X-Permitted-Cross-Domain-Policies', 'none');
   next();
 });
+// CVE-2026-111497: refuse Brotli request bodies before any body parser, raw or
+// JSON, can hand them to the vulnerable decoder. Must stay above every route.
+app.use((await import('./middleware/brotliGuard.js')).createBrotliGuard());
 
 /**
  * No-store on API responses (v2.35.1).
@@ -764,7 +767,7 @@ app.post('/api/self-update', requireAuth, requirePlatformAdmin, async (req, res)
     // — when is it safe to touch system packages on a live host? — is testable
     // without apt.
     {
-      const { planNodeUpgrade, verifyUpgrade } = await import('./services/nodeUpgrade.js');
+      const { planNodeUpgrade, verifyUpgrade, verifySecurityUpgrade } = await import('./services/nodeUpgrade.js');
       const which = (bin) => {
         try {
           return execFileSync('/bin/sh', ['-c', `command -v ${bin}`], { stdio: 'pipe' }).toString().trim();
@@ -780,7 +783,19 @@ app.post('/api/self-update', requireAuth, requirePlatformAdmin, async (req, res)
         skipEnv: process.env.APPCRANE_SKIP_NODE_UPGRADE,
         arch: process.arch,
         underSafeBoot: process.env.APPCRANE_SAFE_BOOT === '1',
+        currentVersion: process.versions.node,
       });
+      // A security upgrade stays on this major and never stops the update: the
+      // host already runs this runtime, so a failed attempt is reported, not fatal.
+      const targetMajor = plan.security ? plan.targetMajor : incomingFloor;
+      const verdictFor = (installedVersion) => (plan.security
+        ? verifySecurityUpgrade(installedVersion)
+        : verifyUpgrade(Number(installedVersion.split('.')[0]), incomingFloor));
+      const settle = (verdict) => {
+        if (verdict.ok) return log.info(`[self-update] ${verdict.message}`);
+        if (plan.security) return log.error(`[self-update] ${verdict.message}`);
+        throw new Error(`Self-update aborted: ${verdict.message}`);
+      };
 
       if (plan.upgrade && plan.method === 'bundled') {
         // v2.92.0: no root, so no apt. Download the official build into the
@@ -790,31 +805,40 @@ app.post('/api/self-update', requireAuth, requirePlatformAdmin, async (req, res)
         // restart.
         log.info(`[self-update] ${plan.message}`);
         const { installBundledNode } = await import('./services/bundledNode.js');
-        const { version, binDir } = await installBundledNode({
-          major: incomingFloor, appcraneDir: cwd, log: (m) => log.info(`[self-update] ${m}`),
-        });
-        process.env.PATH = `${binDir}:${process.env.PATH}`;
-        const installed = Number(execFileSync('node', ['-v'], { stdio: 'pipe' })
-          .toString().trim().replace(/^v/, '').split('.')[0]);
-        const verdict = verifyUpgrade(installed, incomingFloor);
-        if (!verdict.ok) throw new Error(`Self-update aborted: ${verdict.message}`);
-        log.info(`[self-update] Node ${version} is on PATH for this update and every boot after it.`);
+        let bundledNode = null;
+        try {
+          bundledNode = await installBundledNode({
+            major: targetMajor, appcraneDir: cwd, log: (m) => log.info(`[self-update] ${m}`),
+          });
+        } catch (e) {
+          if (!plan.security) throw e;
+          log.error(`[self-update] could not download a patched Node ${targetMajor}: ${e.message}`);
+        }
+        if (bundledNode) {
+          const { version, binDir } = bundledNode;
+          process.env.PATH = `${binDir}:${process.env.PATH}`;
+          settle(verdictFor(execFileSync('node', ['-v'], { stdio: 'pipe' }).toString().trim().replace(/^v/, '')));
+          log.info(`[self-update] Node ${version} is on PATH for this update and every boot after it.`);
+        }
       } else if (plan.upgrade) {
         log.info(`[self-update] ${plan.message}`);
-        for (const [bin, args] of plan.commands) {
-          execFileSync(bin, args, {
-            cwd, stdio: 'pipe', timeout: 300000,
-            env: { ...process.env, DEBIAN_FRONTEND: 'noninteractive' },
-          });
+        try {
+          for (const [bin, args] of plan.commands) {
+            execFileSync(bin, args, {
+              cwd, stdio: 'pipe', timeout: 300000,
+              env: { ...process.env, DEBIAN_FRONTEND: 'noninteractive' },
+            });
+          }
+        } catch (e) {
+          if (!plan.security) throw e;
+          log.error(`[self-update] the Node security upgrade failed: ${e.message}`);
         }
         // Asked of the node now on PATH, not of this process: it keeps running
         // the binary it started with and would report the old version whatever
         // apt did.
-        const installed = Number(execFileSync('node', ['-v'], { stdio: 'pipe' })
-          .toString().trim().replace(/^v/, '').split('.')[0]);
-        const verdict = verifyUpgrade(installed, incomingFloor);
-        if (!verdict.ok) throw new Error(`Self-update aborted: ${verdict.message}`);
-        log.info(`[self-update] ${verdict.message}`);
+        settle(verdictFor(execFileSync('node', ['-v'], { stdio: 'pipe' }).toString().trim().replace(/^v/, '')));
+      } else if (plan.security) {
+        log.warn(`[self-update] ${plan.message}`);
       } else if (plan.blocking) {
         // Refused, not warned. A host left on the previous release is in better
         // shape than one that installed dependencies its runtime cannot run —
@@ -1427,6 +1451,7 @@ app.listen(PORT, HOST, async () => {
     log.warn('    Node 20 left long-term support in April 2026 and receives no security patches.');
     log.warn('');
   }
+  for (const line of (await import('./services/nodeSecurityCheck.js')).bootSecurityWarnings()) log.warn(line);
 
   // Boot sentinel — confirms this process actually started with this version.
   // Also reconciles any pending self-update left by a previous process exit.
@@ -1700,6 +1725,7 @@ app.listen(PORT, HOST, async () => {
     try { const { startEventRetention } = await import('./services/eventRetention.js'); startEventRetention(); } catch (e) { log.error('Event retention job failed to start: ' + e.message); }
     try { const { startAuditChain } = await import('./services/auditChain.js'); startAuditChain(); } catch (e) { log.error('Audit chain job failed to start: ' + e.message); }
     try { const { startMongoKernelCheck } = await import('./services/mongoKernelCheck.js'); startMongoKernelCheck(); } catch (e) { log.error('MongoDB kernel check failed to start: ' + e.message); }
+    try { const { startNodeSecurityCheck } = await import('./services/nodeSecurityCheck.js'); startNodeSecurityCheck(); } catch (e) { log.error('Node.js security check failed to start: ' + e.message); }
     try { const { startAccessReviews } = await import('./services/accessReviews/index.js'); startAccessReviews(); } catch (e) { log.error('Access review job failed to start: ' + e.message); }
     try { (await import('./services/siem/delivery.js')).startSiemDelivery(); } catch (e) { log.error('SIEM delivery failed to start: ' + e.message); }
   } catch (e) {

@@ -130,7 +130,7 @@ async function stillAllowed(db, app, d) {
 function personReason(db, app, row, kind) {
   if (kind === 'image') return 'deployed from a prebuilt image: rebuild that image on a patched base and redeploy it';
   if (kind === 'other') return `a ${app.source_type || 'unknown'} app is not rebuilt automatically: redeploy it on a patched base`;
-  if (row.unsupported_branch) return `${rtLabel(row.runtime)} ${branchOf(row.version)} gets no fix for this flaw: move the app to a supported ${rtLabel(row.runtime)} branch`;
+  if (row.unsupported_branch) return `${rtLabel(row.runtime)} ${branchOf(row.version, row.runtime)} gets no fix for this flaw: move the app to a supported ${rtLabel(row.runtime)} branch`;
   if (!row.fixed_version) return 'no fixed version is known';
   if (!row.base_image) return 'AppCrane does not know which base image this release was built on: redeploy it so the base is recorded';
   const eff = effectiveForApp(db, app);
