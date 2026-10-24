@@ -1,4 +1,7 @@
 {
+  "2.123.1": [
+    "Uploading a file into a new folder in your app's data no longer leaves that folder locked against your app: the folder now belongs to your app, so it can keep saving there."
+  ],
   "2.123.0": [
     "Apps that AppCrane builds without a Dockerfile now run on Node 22 instead of Node 20, which no longer gets security fixes. If your app says which Node version it needs, AppCrane follows that, and the deploy log says which version was picked and why."
   ],
