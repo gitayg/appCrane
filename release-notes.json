@@ -1,4 +1,7 @@
 {
+  "2.123.2": [
+    "Three building blocks AppCrane relies on for handling uploads, web requests and e-mail were updated to close newly reported security problems."
+  ],
   "2.123.1": [
     "Uploading a file into a new folder in your app's data no longer leaves that folder locked against your app: the folder now belongs to your app, so it can keep saving there."
   ],
