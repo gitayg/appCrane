@@ -88,6 +88,10 @@ export function validate(p) {
       ...nums(p.subagents || {}, ['runs', 'usd', 'startupUsd', 'parallelShare', 'flaggedUsd', 'repeatedDelegations'], 'subagents'),
       flags: Object.fromEntries(Object.entries(p.subagents?.flags || {}).filter(([k, v]) => /^[a-z-]{1,40}$/.test(k) && isNum(v)).slice(0, 10)),
     },
+    setup: p.setup ? {
+      ...nums(p.setup, ['alwaysOnTokens', 'agents', 'skills', 'mcpServers', 'hooks', 'multiAgentFrameworks'], 'setup'),
+      findings: Object.fromEntries(Object.entries(p.setup.findings || {}).filter(([k, v]) => /^[a-z-]{1,40}$/.test(k) && isNum(v)).slice(0, 40)),
+    } : null,
     recurring: nums(p.recurring || {}, ['corrections', 'repeatedInstructions'], 'recurring'),
   };
 }
@@ -117,7 +121,7 @@ function team() {
     let meta = {}; try { meta = JSON.parse(readFileSync(join(dir, 'meta.json'), 'utf8')); } catch { return null; }
     const last = history(dir, 1)[0]; if (!last) return null;
     const { costliestBadPrompts, ...iq } = last.instructionQuality;
-    return { name: meta.name, email: meta.email, day: last.day, totals: last.totals, instructionQuality: iq, overcomplication: last.overcomplication, recurring: last.recurring };
+    return { name: meta.name, email: meta.email, day: last.day, totals: last.totals, instructionQuality: iq, overcomplication: last.overcomplication, subagents: last.subagents, setup: last.setup, recurring: last.recurring };
   }).filter(Boolean).sort((a, b) => (b.totals.usd || 0) - (a.totals.usd || 0));
 }
 

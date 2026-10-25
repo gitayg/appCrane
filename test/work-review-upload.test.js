@@ -129,3 +129,16 @@ test('hub lets an app sign-in key upload and nothing else', async () => {
   const browser = await (await fetch(`${base}/api/reports/me`, { headers: as('kim@opswat.com') })).json();
   assert.equal(browser.reports.length, 1, 'the same person in a browser sees the upload');
 });
+
+test('the setup summary travels as counts and finding kinds, never names or paths', () => {
+  const setup = {
+    inventory: { alwaysOnTokens: 6000, agents: [{ name: 'secret-billing-agent' }], skills: [{ name: 'acme-deploy' }, { name: 'org', managed: true }], mcpServers: [{ name: 'acme-jira' }], hooks: [], frameworks: { LangGraph: 2 } },
+    findings: [{ kind: 'agent-unused', item: 'secret-billing-agent', evidence: { file: '/home/jane/acme/.claude/agents/x.md' } }, { kind: 'agent-unused', item: 'y' }, { kind: 'Bad Kind!', item: 'z' }],
+  };
+  const p = buildPayload(report, { setup });
+  const s = JSON.stringify(p.setup);
+  for (const leak of ['secret-billing-agent', 'acme', '/home/jane', 'LangGraph', 'Bad Kind']) assert.ok(!s.includes(leak), `setup must not carry ${leak}`);
+  assert.deepEqual(p.setup.findings, { 'agent-unused': 2 });
+  assert.equal(p.setup.skills, 1, 'org-managed skills are not counted as the person\'s own');
+  assert.equal(validate(p).setup.multiAgentFrameworks, 1, 'the hub accepts it');
+});

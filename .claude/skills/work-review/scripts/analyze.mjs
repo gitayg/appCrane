@@ -135,7 +135,7 @@ function analyzeFile(path) {
     toolCalls: 0, toolCounts: new Map(), errors: [], redundantReads: [], repeatedCmds: [],
     retryLoops: [], editMisses: 0, denials: [], bigOutputs: [], corrections: [], interrupts: 0,
     compactions: 0, searchBursts: 0, wastedTokens: { read: 0, rerun: 0, errors: 0 },
-    edits: 0, commits: 0, prompts: [], agentCalls: 0, agentUses: [], filesRead: new Set(), toolOutChars: 0, lastText: '', startupUsd: null, ceremony: 0, skills: new Map(), promptChars: 0, maxPrompt: 0, nudges: 0, baselineCtx: null, singleToolTurns: 0, multiToolTurns: 0, cmdHeads: new Map(),
+    edits: 0, commits: 0, prompts: [], agentCalls: 0, agentUses: [], commands: new Map(), filesRead: new Set(), toolOutChars: 0, lastText: '', startupUsd: null, ceremony: 0, skills: new Map(), promptChars: 0, maxPrompt: 0, nudges: 0, baselineCtx: null, singleToolTurns: 0, multiToolTurns: 0, cmdHeads: new Map(),
   };
   const seenMsg = new Set();
   const pending = new Map();          // tool_use_id -> {name, input, key}
@@ -242,6 +242,8 @@ function analyzeFile(path) {
       if (typeof c === 'string' || (Array.isArray(c) && !c.some(x => x.type === 'tool_result'))) {
         const t = textOf(c);
         const human = !d.isMeta && !d.isSidechain && !/^<(command-|local-command|system-reminder)/.test(t.trim()) && !d.isCompactSummary;
+        const cmd = t.match(/<command-name>\/?([^<\s]+)<\/command-name>/);
+        if (cmd && !d.isSidechain) inc(s.commands, cmd[1]);
         if (INTERRUPT_RE.test(t)) { s.interrupts++; if (cur) cur.followedBy = 'interrupt'; }
         else if (human && t.trim()) onHuman(t);
         continue;
@@ -481,7 +483,17 @@ const instructionQuality = {
     .map(p => ({ sessionId: p.sid, cost: Math.round(p.cost), usd: +p.usd.toFixed(4), why: [p.followedBy && `followed by ${p.followedBy}`, vague(p) && 'no concrete anchor', !p.criteria && 'no done-criteria', p.explore >= 5 && `${p.explore} lookups before first edit`].filter(Boolean), prompt: clip(p.text, 300) })),
 };
 
-const report = { generatedAt: new Date().toISOString(), root: ROOT, sinceDays: SINCE_DAYS, totals, instructionQuality, cross, overcomplication, subagents, worstSessions: perSession.slice(0, TOP), sessions: perSession };
+// What the setup is actually used for, so audit-setup.mjs can tell a configured
+// agent, skill, MCP server or command apart from one that is only paid for.
+const usage = (() => {
+  const agents = new Map(), commands = new Map(), mcpServers = new Map();
+  for (const s of mains) { for (const u of s.agentUses) inc(agents, u.type); for (const [c, n] of s.commands) inc(commands, c, n); }
+  for (const [tool, n] of Object.entries(totals.tools)) { const m = tool.match(/^mcp__(.+?)__/); if (m) inc(mcpServers, m[1], n); }
+  const obj = m => Object.fromEntries([...m].sort((a, b) => b[1] - a[1]));
+  return { sessions: mains.length, agents: obj(agents), skills: overcomplication.skillsInvoked, mcpServers: obj(mcpServers), commands: obj(commands) };
+})();
+
+const report = { generatedAt: new Date().toISOString(), root: ROOT, sinceDays: SINCE_DAYS, totals, instructionQuality, cross, overcomplication, subagents, usage, worstSessions: perSession.slice(0, TOP), sessions: perSession };
 if (JSON_OUT) writeFileSync(JSON_OUT, JSON.stringify(report, null, 2));
 
 // ── markdown summary ─────────────────────────────────────────────

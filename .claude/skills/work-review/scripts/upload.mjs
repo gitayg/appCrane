@@ -77,7 +77,7 @@ const group = g => pickNums(g, ['prompts', 'medianCost', 'medianUsd', 'medianExp
 
 // Allow-list, field by field: anything the analyzer adds later stays local
 // until it is deliberately added here.
-export function buildPayload(report, { now = new Date() } = {}) {
+export function buildPayload(report, { now = new Date(), setup = null } = {}) {
   const T = report.totals || {}, Q = report.instructionQuality || {}, O = report.overcomplication || {};
   return {
     schema: SCHEMA,
@@ -115,6 +115,16 @@ export function buildPayload(report, { now = new Date() } = {}) {
       flags: Object.fromEntries(Object.entries(report.subagents?.flags || {}).filter(([k]) => /^[a-z-]{1,40}$/.test(k)).map(([k, v]) => [k, num(v)])),
       repeatedDelegations: (report.subagents?.repeatedDelegations || []).length,
     },
+    // How the setup is built: counts and finding kinds only. No names, paths or
+    // file contents, so a team view can say "4 people run unused subagents"
+    // without showing anyone's configuration.
+    setup: setup ? {
+      alwaysOnTokens: num(setup.inventory?.alwaysOnTokens),
+      agents: num(setup.inventory?.agents?.length), skills: num(setup.inventory?.skills?.filter(s => !s.managed).length),
+      mcpServers: num(setup.inventory?.mcpServers?.length), hooks: num(setup.inventory?.hooks?.length),
+      multiAgentFrameworks: num(Object.keys(setup.inventory?.frameworks || {}).length),
+      findings: (setup.findings || []).reduce((m, f) => { if (/^[a-z-]{1,40}$/.test(f.kind)) m[f.kind] = (m[f.kind] || 0) + 1; return m; }, {}),
+    } : null,
     recurring: {
       // Counts only for these: their examples are quoted from prompts the user
       // may not want on a dashboard, and the count is what a trend needs.
@@ -144,6 +154,17 @@ function runAnalyzer() {
   execFileSync(process.execPath, [join(HERE, 'analyze.mjs'), '--since', String(WINDOW_DAYS), '--json', out], { stdio: ['ignore', 'ignore', 'pipe'], timeout: 120_000 });
   chmodSync(out, 0o600);
   return JSON.parse(readFileSync(out, 'utf8'));
+}
+
+// The setup audit of the directory the hook fired in (the project being worked
+// on). Best effort: a failure here must never block the upload.
+function runSetupAudit() {
+  try {
+    const out = join(CONF_DIR, 'last-setup.json');
+    execFileSync(process.execPath, [join(HERE, 'audit-setup.mjs'), '--report', join(CONF_DIR, 'last-report.json'), '--json', out], { stdio: 'ignore', timeout: 60_000 });
+    chmodSync(out, 0o600);
+    return JSON.parse(readFileSync(out, 'utf8'));
+  } catch { return null; }
 }
 
 async function send(url, key, payload) {
@@ -199,7 +220,7 @@ async function main(argv) {
   }
 
   const report = runAnalyzer();
-  const payload = buildPayload(report);
+  const payload = buildPayload(report, { setup: runSetupAudit() });
   if (has('--dry-run')) { console.log(JSON.stringify(payload, null, 2)); return; }
 
   const c = readConfig();

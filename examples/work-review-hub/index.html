@@ -108,6 +108,14 @@ function renderMine(reports) {
 
   const oc = $('oc'); oc.replaceChildren();
   const flags = Object.entries(O.flags);
+  const SU = r.setup;
+  if (SU) {
+    const fk = Object.entries(SU.findings || {});
+    oc.append(el('div', `Setup: ~${k(SU.alwaysOnTokens)} tokens of CLAUDE.md on every request · ${SU.agents} subagents · ${SU.skills} skills · ${SU.mcpServers} MCP servers · ${SU.hooks} hooks${SU.multiAgentFrameworks ? ` · multi-agent code in this project` : ''}`, 'mute'));
+    const sf = el('div'); sf.style.margin = '6px 0';
+    fk.length ? fk.forEach(([f, n]) => sf.append(el('span', `${f} ×${n}`, 'tag'))) : sf.append(el('span', 'setup: no findings', 'tag'));
+    oc.append(sf);
+  }
   const SA = r.subagents;
   if (SA && SA.runs) oc.append(el('div', `Subagents: ${SA.runs} runs, ${usd(SA.usd)} (${usd(SA.startupUsd)} start-up), ${Math.round(SA.parallelShare * 100)}% parallel · no benefit from delegating: ${usd(SA.flaggedUsd)}${SA.repeatedDelegations ? ` · ${SA.repeatedDelegations} procedures delegated 3+ times (skill candidates)` : ''}`, 'mute'));
   oc.append(el('div', `Always-on context ~${k(O.medianBaselineContextTokens)} tokens/session · ${O.toolCallsPerPrompt} tool calls per prompt · ${O.subagentRuns} subagents · ${O.nudgePrompts} "continue/yes" prompts`, 'mute'));
@@ -122,8 +130,8 @@ function renderMine(reports) {
 }
 
 function renderTeam(people) {
-  const t = $('teamTable'); t.replaceChildren(row(['Person', 'Snapshot', 'API-list cost (7 days)', 'Rework share', 'Vague prompts', 'Cache hit', 'Error rate', 'Recurring corrections'], true));
-  for (const p of people) t.append(row([p.name || p.email, p.day, usd(p.totals.usd), pct(p.instructionQuality.reworkShare),
+  const t = $('teamTable'); t.replaceChildren(row(['Person', 'Snapshot', 'API-list cost (7 days)', 'Setup findings', 'Rework share', 'Vague prompts', 'Cache hit', 'Error rate', 'Recurring corrections'], true));
+  for (const p of people) t.append(row([p.name || p.email, p.day, usd(p.totals.usd), p.setup ? Object.values(p.setup.findings || {}).reduce((a, n) => a + n, 0) : '—', pct(p.instructionQuality.reworkShare),
     p.instructionQuality.vague.prompts, pct(p.totals.cacheHitRate), pct(p.totals.errorRate), p.recurring.corrections]));
 }
 

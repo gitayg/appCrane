@@ -37,6 +37,30 @@ Options: `--project <substr>` limits to one project (transcript dirs are named a
 
 By default, scope to the current project when the user is asking about "this repo", and to everything otherwise. If no transcripts are found, say so and stop. Don't fabricate a review.
 
+## 1b. Audit the setup
+
+How someone works shows up in how they set Claude Code up, and that is usually where "overcomplicated" comes from. Run:
+
+```bash
+node <skill-dir>/scripts/audit-setup.mjs --report /tmp/work-review.json --json /tmp/work-review-setup.json
+```
+
+Run it from the project; add `--project <dir>` otherwise. It inventories:
+- CLAUDE.md files, including what their `@imports` add to every request;
+- subagents, skills, slash commands and MCP servers, each set against how often the transcripts show it used;
+- hooks and permission rules;
+- multi-agent frameworks in the code being built: LangGraph, CrewAI, AutoGen, Agent SDK subagents, Managed Agents multiagent.
+
+Each finding carries a `kind` and the fix. "Unused" findings need at least 10 sessions of history. Skills synced from an organisation or plugin are listed but not judged.
+
+The script finds candidates; you decide. For each high or medium finding:
+1. Open the file and judge it against `references/best-practices.md`. Quote the doc line when it is a documented rule. When it is this skill's heuristic, say so: never present a heuristic as Anthropic guidance.
+2. Ask the one-line test from the docs: would removing it make Claude make mistakes? If not, the fix is deletion.
+3. A subagent flagged as a playbook (`agent-is-a-skill`) is a skill if it neither runs in parallel nor isolates heavy reading. Cross-check the `subagents` section of the work report: a run flagged `trivial` or `no-isolation-gain` confirms it.
+4. For `multi-agent-framework`, read the orchestration. Name the agents that run in parallel or isolate context; those earn their place. Each remaining hop is a candidate for one agent with a skill or a tool. Say what the single-agent version would look like.
+
+In the review, put setup fixes under **Top fixes** alongside the transcript findings, ranked the same way. A setup with no findings is a habit worth keeping.
+
 ## 2. Understand
 
 The script prints a summary table and ranked lists. Read `/tmp/work-review.json` for the details: `cross.*` holds cross-session patterns, `worstSessions` the sessions with the most waste signals, and each session's `file` is the transcript path.
