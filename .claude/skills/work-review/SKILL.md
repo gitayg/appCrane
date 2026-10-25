@@ -84,6 +84,26 @@ Don't punish short prompts in general. "fix the failing test in `billing.test.js
 
 `returnsCurve` bins sessions by tokens and shows output (edits + commits) per bin, similar to Jellyfish's productivity-by-token curve. If output per token falls sharply in the top bins, the biggest sessions are the place to simplify. These are usually long sessions doing several tasks, so split them and `/clear` between tasks.
 
+### Subagents: was each delegation worth it?
+
+A subagent pays for its own start-up context: system prompt, tools and brief. It also returns only a report. That cost is worth it for three things:
+- **parallel work**: several independent searches at once;
+- **isolating a lot of reading**: it reads a great deal and hands back a short answer, so the main context stays small;
+- **a task one agent struggles with.**
+
+Anything else is overhead. A single agent equipped with the right skill is often faster and cheaper. `subagents` in the JSON covers every run, with its cost, its start-up cost and these flags:
+
+| Flag | What happened | Simpler alternative |
+|---|---|---|
+| `trivial` (≤3 tool calls) | Start-up context cost more than the work | Do it in the main agent |
+| `no-isolation-gain` (alone in the foreground, read under 3× what it reported) | No parallelism, and the context it saved was about what it handed back | Do it directly, or ask for a much shorter report |
+| `duplicated-reads` (≥50% of its files also read by the main agent) | The work was done twice | Delegate before reading, or don't delegate |
+| `repeatedDelegations` (the same brief 3+ times) | The procedure is re-explained to a fresh agent each time | Write it once as a **skill**: skills teach *how*, tools and MCP let the agent *act*, subagents are for *parallel or isolated* work |
+
+Agents that exist to lend a tool the main agent lacks (`web-fetch`) are never flagged. When this section shows real money, put it in the review's headline, as "subagents cost $X, of which $Y was start-up context". When it is clean, say so under habits worth keeping.
+
+Skills also win on always-on context through progressive disclosure: only a skill's one-line description is loaded until the skill is used, while every MCP tool's full schema and every CLAUDE.md line is paid for in every request. If `medianBaselineContextTokens` is high, move rarely needed CLAUDE.md procedures into skills, and remove unused MCP servers (see `/doctor`).
+
 ### Mechanical waste
 
 Signals and what they usually mean:

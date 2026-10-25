@@ -110,6 +110,11 @@ export function buildPayload(report, { now = new Date() } = {}) {
       returnsCurve: (O.returnsCurve || []).slice(0, 5).map(b => pickNums(b, ['bin', 'sessions', 'avgTokens', 'avgEditsAndCommits', 'outputPerMillionTokens'])),
       ...pickNums(O, ['medianBaselineContextTokens', 'subagentRuns', 'ceremonyCalls', 'nudgePrompts', 'toolCallsPerPrompt']),
     },
+    subagents: {
+      ...pickNums(report.subagents, ['runs', 'usd', 'startupUsd', 'parallelShare', 'flaggedUsd']),
+      flags: Object.fromEntries(Object.entries(report.subagents?.flags || {}).filter(([k]) => /^[a-z-]{1,40}$/.test(k)).map(([k, v]) => [k, num(v)])),
+      repeatedDelegations: (report.subagents?.repeatedDelegations || []).length,
+    },
     recurring: {
       // Counts only for these: their examples are quoted from prompts the user
       // may not want on a dashboard, and the count is what a trend needs.

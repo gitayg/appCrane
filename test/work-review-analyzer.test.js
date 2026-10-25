@@ -163,3 +163,60 @@ test('analyzer prices usage at API list rates per model, and never guesses an un
   execFileSync(process.execPath, [SCRIPT, '--root', root, '--json', out, '--prices', prices]);
   assert.equal(JSON.parse(readFileSync(out, 'utf8')).totals.usd, 87.3, '--prices adds a model');
 });
+
+test('analyzer tells useful subagents from ones that only paid the overhead', () => {
+  const root = mkdtempSync(join(tmpdir(), 'work-review-'));
+  const proj = join(root, '-p');
+  mkdirSync(proj);
+  const ts = () => new Date().toISOString();
+  const usage = { input_tokens: 1000, output_tokens: 100 };
+  const asst = (id, content) => ({ type: 'assistant', timestamp: ts(), message: { id, model: 'claude-opus-5-5', content, usage } });
+  const result = (id, text) => ({ type: 'user', timestamp: ts(), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: text }] } });
+  const read = (msg, id, f, out = 'x'.repeat(50)) => [asst(msg, [{ type: 'tool_use', id, name: 'Read', input: { file_path: f } }]), result(id, out)];
+  const agent = (id, prompt, bg = false) => ({ type: 'tool_use', id, name: 'Agent', input: { description: prompt.slice(0, 30), prompt, subagent_type: 'general-purpose', run_in_background: bg } });
+  const write = (dir, name, lines) => writeFileSync(join(dir, name), lines.map(l => JSON.stringify(l)).join('\n'));
+  const sub = (sid, aid, toolUseId, lines) => {
+    const d = join(proj, sid, 'subagents'); mkdirSync(d, { recursive: true });
+    writeFileSync(join(d, `agent-${aid}.meta.json`), JSON.stringify({ agentType: 'general-purpose', description: aid, toolUseId, requestShape: 'foreground' }));
+    write(d, `agent-${aid}.jsonl`, lines);
+  };
+  const brief = 'Summarise how the billing module computes invoice totals and list the files involved in detail';
+
+  // s1: the main agent reads three files, then delegates "look at them" alone in
+  // the foreground; the subagent reads the same three and hands back more than it
+  // read. Then two parallel subagents each read a lot and report one line.
+  write(proj, 's1.jsonl', [
+    { type: 'user', timestamp: ts(), message: { role: 'user', content: 'fix billing' } },
+    ...read('m1', 'r1', '/a.js'), ...read('m2', 'r2', '/b.js'), ...read('m3', 'r3', '/c.js'),
+    asst('m4', [agent('t-bad', brief)]), result('t-bad', 'report'),
+    asst('m5', [agent('t-p1', 'Search the whole repository for every caller of computeTotals and report the count'), agent('t-p2', 'Search the docs folder for anything describing invoice rounding and report it')]),
+    result('t-p1', 'ok'), result('t-p2', 'ok'),
+  ]);
+  sub('s1', 'bad', 't-bad', [
+    { type: 'user', timestamp: ts(), message: { role: 'user', content: brief } },
+    ...read('b1', 'x1', '/a.js', 'short'), ...read('b2', 'x2', '/b.js', 'short'), ...read('b3', 'x3', '/c.js', 'short'),
+    asst('b4', [{ type: 'text', text: 'A long restatement of everything. '.repeat(20) }]),
+  ]);
+  for (const id of ['p1', 'p2']) sub('s1', id, `t-${id}`, [
+    { type: 'user', timestamp: ts(), message: { role: 'user', content: 'search' } },
+    ...Array.from({ length: 6 }, (_, i) => read(`${id}m${i}`, `${id}r${i}`, `/src/f${i}.js`, 'y'.repeat(5000))).flat(),
+    asst(`${id}end`, [{ type: 'text', text: 'Found 4.' }]),
+  ]);
+  // s2, s3: the same brief delegated again in two more sessions.
+  for (const sid of ['s2', 's3']) {
+    write(proj, `${sid}.jsonl`, [{ type: 'user', timestamp: ts(), message: { role: 'user', content: 'billing again' } }, asst(`${sid}m`, [agent(`t-${sid}`, brief)]), result(`t-${sid}`, 'r')]);
+    sub(sid, `rep${sid}`, `t-${sid}`, [{ type: 'user', timestamp: ts(), message: { role: 'user', content: brief } }, ...read(`${sid}x`, `${sid}y`, '/a.js', 'z'.repeat(9000)), asst(`${sid}e`, [{ type: 'text', text: 'done' }])]);
+  }
+
+  const out = join(root, 'r.json');
+  execFileSync(process.execPath, [SCRIPT, '--root', root, '--json', out]);
+  const S = JSON.parse(readFileSync(out, 'utf8')).subagents;
+  assert.equal(S.runs, 5);
+  const bad = S.examples.find(r => r.description === 'bad');
+  assert.deepEqual(bad.flags.sort(), ['duplicated-reads', 'no-isolation-gain', 'trivial'],
+    'alone, three tool calls, re-read the main agent\'s files, handed back more than it read');
+  assert.equal(bad.parallel, false);
+  assert.ok(!S.examples.some(r => r.description === 'p1' || r.description === 'p2'), 'parallel, heavy reading, one-line report: not flagged');
+  assert.ok(S.startupUsd > 0 && S.usd >= S.startupUsd);
+  assert.equal(S.repeatedDelegations[0].runs, 3, 'the same brief delegated in three sessions is a skill candidate');
+});

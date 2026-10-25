@@ -108,6 +108,8 @@ function renderMine(reports) {
 
   const oc = $('oc'); oc.replaceChildren();
   const flags = Object.entries(O.flags);
+  const SA = r.subagents;
+  if (SA && SA.runs) oc.append(el('div', `Subagents: ${SA.runs} runs, ${usd(SA.usd)} (${usd(SA.startupUsd)} start-up), ${Math.round(SA.parallelShare * 100)}% parallel · no benefit from delegating: ${usd(SA.flaggedUsd)}${SA.repeatedDelegations ? ` · ${SA.repeatedDelegations} procedures delegated 3+ times (skill candidates)` : ''}`, 'mute'));
   oc.append(el('div', `Always-on context ~${k(O.medianBaselineContextTokens)} tokens/session · ${O.toolCallsPerPrompt} tool calls per prompt · ${O.subagentRuns} subagents · ${O.nudgePrompts} "continue/yes" prompts`, 'mute'));
   const fl = el('div'); fl.style.margin = '8px 0';
   flags.length ? flags.forEach(([f, n]) => fl.append(el('span', `${f} ×${n}`, 'tag'))) : fl.append(el('span', 'No flags', 'tag'));

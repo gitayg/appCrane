@@ -135,7 +135,7 @@ function analyzeFile(path) {
     toolCalls: 0, toolCounts: new Map(), errors: [], redundantReads: [], repeatedCmds: [],
     retryLoops: [], editMisses: 0, denials: [], bigOutputs: [], corrections: [], interrupts: 0,
     compactions: 0, searchBursts: 0, wastedTokens: { read: 0, rerun: 0, errors: 0 },
-    edits: 0, commits: 0, prompts: [], agentCalls: 0, ceremony: 0, skills: new Map(), promptChars: 0, maxPrompt: 0, nudges: 0, baselineCtx: null, singleToolTurns: 0, multiToolTurns: 0, cmdHeads: new Map(),
+    edits: 0, commits: 0, prompts: [], agentCalls: 0, agentUses: [], filesRead: new Set(), toolOutChars: 0, lastText: '', startupUsd: null, ceremony: 0, skills: new Map(), promptChars: 0, maxPrompt: 0, nudges: 0, baselineCtx: null, singleToolTurns: 0, multiToolTurns: 0, cmdHeads: new Map(),
   };
   const seenMsg = new Set();
   const pending = new Map();          // tool_use_id -> {name, input, key}
@@ -182,7 +182,10 @@ function analyzeFile(path) {
         else { s.usd += usd; inc(s.usdByModel, m.model, usd); if (cur) cur.usd += usd; }
         // First turn's prompt size ≈ the always-on context: system prompt, tools, CLAUDE.md, MCP, skills.
         if (s.baselineCtx === null) s.baselineCtx = (m.usage.input_tokens || 0) + (m.usage.cache_read_input_tokens || 0) + (m.usage.cache_creation_input_tokens || 0);
+        // What it costs just to start: the first request's input side (system prompt, tools, brief).
+        if (s.startupUsd === null) s.startupUsd = usdOf({ ...m.usage, output_tokens: 0 }, m.model) ?? 0;
       }
+      for (const b of Array.isArray(m.content) ? m.content : []) if (b.type === 'text' && b.text?.trim()) s.lastText = b.text;
       const uses = (Array.isArray(m.content) ? m.content : []).filter(x => x.type === 'tool_use');
       if (uses.length) inc(usesPerMsg, id, uses.length);   // streamed: one block per record, same id
       for (const u of uses) {
@@ -195,7 +198,10 @@ function analyzeFile(path) {
           else if (!cur.edits && /^(Read|Grep|Glob|Agent|Task|WebSearch|WebFetch)$/.test(u.name)) cur.explore++;
           else if (!cur.edits && u.name === 'Bash' && /^(ls|find|grep|rg|cat|head|tail|sed -n|git (log|show|grep))\b/.test(normCmd(inp.command || ''))) cur.explore++;
         }
-        if (/^(Agent|Task)$/.test(u.name)) s.agentCalls++;
+        if (/^(Agent|Task)$/.test(u.name)) {
+          s.agentCalls++;
+          s.agentUses.push({ id: u.id, msg: id, background: !!inp.run_in_background, type: inp.subagent_type || 'general-purpose', prompt: String(inp.prompt || '') });
+        }
         if (CEREMONY_RE.test(u.name)) s.ceremony++;
         if (u.name === 'Skill' && inp.skill) inc(s.skills, inp.skill);
         if (u.name === 'Bash' && /\bgit\s+commit\b/.test(inp.command || '')) s.commits++;
@@ -207,7 +213,7 @@ function analyzeFile(path) {
           const range = `${inp.offset ?? 0}:${inp.limit ?? 'all'}`;
           if (r.count && r.editMark === editCounter && r.ranges.has(range)) { s.redundantReads.push({ file: inp.file_path, nth: r.count + 1 }); u._wasted = 'read'; }
           if (r.editMark !== editCounter) r.ranges = new Set();
-          r.count++; r.editMark = editCounter; r.ranges.add(range); readState.set(inp.file_path, r);
+          r.count++; r.editMark = editCounter; r.ranges.add(range); readState.set(inp.file_path, r); s.filesRead.add(inp.file_path);
         } else if (/^(Edit|Write|MultiEdit|NotebookEdit)$/.test(u.name)) {
           editCounter++; s.edits++;
         } else if (u.name === 'Bash' && inp.command) {
@@ -243,6 +249,7 @@ function analyzeFile(path) {
       for (const r of c.filter(x => x.type === 'tool_result')) {
         const p = pending.get(r.tool_use_id) || { name: '?', key: '?' };
         const out = textOf(r.content);
+        s.toolOutChars += out.length;
         // ~4 chars/token; the output sits in context for the rest of the session, this is the floor.
         if (p.wasted) s.wastedTokens[p.wasted] += Math.round(out.length / 4);
         if (r.is_error) s.wastedTokens.errors += Math.round(out.length / 4);
@@ -379,6 +386,69 @@ const totals = {
   subagentsIncluded: SUBAGENTS,
 };
 const cross = crossSession(sessions);
+
+// ── subagents: was each delegation worth its overhead? ───────────
+// A subagent pays its own start-up context and returns only a report. That is
+// worth it for parallel work, for isolating a lot of reading from the main
+// context, or for a task one agent struggles with. A run that did a few tool
+// calls, ran alone in the foreground, handed back about as much as it read, or
+// read what the main agent read anyway got none of those and paid the overhead.
+// A procedure delegated again and again is better taught once as a skill.
+const TOOL_PROXY_AGENTS = new Set(['web-fetch']);   // exist to lend a tool the main agent lacks
+function subagentRuns(main) {
+  const dir = join(dirname(main.file), main.sessionId, 'subagents');
+  let names; try { names = readdirSync(dir).filter(f => f.endsWith('.meta.json')); } catch { return []; }
+  const byUse = new Map(main.agentUses.map(u => [u.id, u]));
+  const siblings = new Map(); for (const u of main.agentUses) inc(siblings, u.msg);
+  const runs = [];
+  for (const f of names) {
+    let meta; try { meta = JSON.parse(readFileSync(join(dir, f), 'utf8')); } catch { continue; }
+    const log = join(dir, f.replace(/\.meta\.json$/, '.jsonl'));
+    if (!existsSync(log)) continue;
+    const r = analyzeFile(log);
+    if (!r.turns) continue;
+    const use = byUse.get(meta.toolUseId);
+    const type = meta.agentType || use?.type || 'general-purpose';
+    const background = meta.requestShape === 'background' || !!use?.background;
+    const parallel = background || (use ? (siblings.get(use.msg) || 0) > 1 : false);
+    const reportChars = r.lastText.length;
+    const isolation = reportChars ? r.toolOutChars / reportChars : Infinity;   // chars read per char handed back
+    const reads = [...r.filesRead];
+    const dupShare = reads.length ? reads.filter(x => main.filesRead.has(x)).length / reads.length : 0;
+    const flags = [];
+    if (!TOOL_PROXY_AGENTS.has(type)) {
+      if (r.toolCalls <= 3) flags.push('trivial');
+      if (!parallel && isolation < 3) flags.push('no-isolation-gain');
+      if (reads.length >= 3 && dupShare >= 0.5) flags.push('duplicated-reads');
+    }
+    runs.push({ sessionId: main.sessionId, type, description: clip(meta.description || '', 80), prompt: use?.prompt || '',
+      usd: +r.usd.toFixed(4), startupUsd: +(r.startupUsd || 0).toFixed(4), toolCalls: r.toolCalls, turns: r.turns,
+      parallel, background, isolation: Number.isFinite(isolation) ? +isolation.toFixed(1) : null, dupShare: +dupShare.toFixed(2), flags });
+  }
+  return runs;
+}
+const runs = mains.flatMap(subagentRuns);
+const delegationClusters = (() => {
+  const cs = [];
+  for (const r of runs.filter(x => x.prompt.length > 40 && !TOOL_PROXY_AGENTS.has(x.type))) {
+    const sh = shingles(r.prompt);
+    const c = cs.find(c => jaccard(c.sh, sh) >= 0.3);
+    if (c) { c.n++; c.usd += r.usd; c.sessions.add(r.sessionId); } else cs.push({ sh, n: 1, usd: r.usd, sessions: new Set([r.sessionId]), example: r.description || clip(r.prompt, 80) });
+  }
+  return cs.filter(c => c.n >= 3).sort((a, b) => b.n - a.n).slice(0, TOP)
+    .map(c => ({ runs: c.n, sessions: c.sessions.size, usd: +c.usd.toFixed(4), example: c.example }));
+})();
+const flagged = runs.filter(r => r.flags.length);
+const subagents = {
+  runs: runs.length,
+  usd: +runs.reduce((a, r) => a + r.usd, 0).toFixed(4),
+  startupUsd: +runs.reduce((a, r) => a + r.startupUsd, 0).toFixed(4),
+  parallelShare: +(runs.filter(r => r.parallel).length / Math.max(1, runs.length)).toFixed(2),
+  flags: flagged.reduce((m, r) => { for (const f of r.flags) m[f] = (m[f] || 0) + 1; return m; }, {}),
+  flaggedUsd: +flagged.reduce((a, r) => a + r.usd, 0).toFixed(4),
+  repeatedDelegations: delegationClusters,
+  examples: flagged.sort((a, b) => b.usd - a.usd).slice(0, TOP).map(({ prompt, ...r }) => r),
+};
 const perSession = sessions.map(s => ({
   sessionId: s.sessionId, project: s.project, subagent: s.subagent,
   start: s.start && new Date(s.start).toISOString(), minutes: s.start ? Math.round((s.end - s.start) / 60000) : 0,
@@ -411,7 +481,7 @@ const instructionQuality = {
     .map(p => ({ sessionId: p.sid, cost: Math.round(p.cost), usd: +p.usd.toFixed(4), why: [p.followedBy && `followed by ${p.followedBy}`, vague(p) && 'no concrete anchor', !p.criteria && 'no done-criteria', p.explore >= 5 && `${p.explore} lookups before first edit`].filter(Boolean), prompt: clip(p.text, 300) })),
 };
 
-const report = { generatedAt: new Date().toISOString(), root: ROOT, sinceDays: SINCE_DAYS, totals, instructionQuality, cross, overcomplication, worstSessions: perSession.slice(0, TOP), sessions: perSession };
+const report = { generatedAt: new Date().toISOString(), root: ROOT, sinceDays: SINCE_DAYS, totals, instructionQuality, cross, overcomplication, subagents, worstSessions: perSession.slice(0, TOP), sessions: perSession };
 if (JSON_OUT) writeFileSync(JSON_OUT, JSON.stringify(report, null, 2));
 
 // ── markdown summary ─────────────────────────────────────────────
@@ -462,6 +532,15 @@ if (Object.keys(OC.flags).length || OC.returnsCurve.length > 1) {
     out.push('');
   }
   OC.examples.slice(0, 5).forEach(e => out.push(`- \`${e.sessionId.slice(0, 8)}\` ${e.flags.join(', ')} — ${k(e.tokens)} tokens, ${e.edits} edits, ${e.commits} commits, ${e.subagents} subagents: “${e.firstPrompt}”`));
+  out.push('');
+}
+if (subagents.runs) {
+  const S = subagents;
+  out.push('## Subagents', '',
+    `${S.runs} subagent runs cost ${usd(S.usd)}, of which ${usd(S.startupUsd)} was start-up context alone. ${Math.round(S.parallelShare * 100)}% ran in parallel or in the background.`, '');
+  if (Object.keys(S.flags).length) out.push(`Runs that got no benefit from being a subagent (${usd(S.flaggedUsd)}): ` + Object.entries(S.flags).map(([f, n]) => `${f} ×${n}`).join(', '), '');
+  S.examples.slice(0, 5).forEach(r => out.push(`- ${usd(r.usd)} ${r.type} “${r.description}” — ${r.toolCalls} tool calls, ${r.parallel ? 'parallel' : 'alone in the foreground'}, read ${r.isolation ?? '∞'}× what it reported, ${Math.round(r.dupShare * 100)}% of its files also read by the main agent: ${r.flags.join(', ')}`));
+  S.repeatedDelegations.forEach(c => out.push(`- Delegated ${c.runs}× across ${c.sessions} sessions (${usd(c.usd)}): “${c.example}” — a procedure repeated this often is a skill candidate.`));
   out.push('');
 }
 section('Instructions you repeat across sessions', cross.repeatedPrompts, r => `${r.sessions} sessions / ${r.occurrences}×: “${r.example}”`);

@@ -84,6 +84,10 @@ export function validate(p) {
       returnsCurve: O.returnsCurve.map(b => nums(b, ['bin', 'sessions', 'avgTokens', 'avgEditsAndCommits', 'outputPerMillionTokens'], 'returnsCurve')),
       ...nums(O, ['medianBaselineContextTokens', 'subagentRuns', 'ceremonyCalls', 'nudgePrompts', 'toolCallsPerPrompt'], 'overcomplication'),
     },
+    subagents: {
+      ...nums(p.subagents || {}, ['runs', 'usd', 'startupUsd', 'parallelShare', 'flaggedUsd', 'repeatedDelegations'], 'subagents'),
+      flags: Object.fromEntries(Object.entries(p.subagents?.flags || {}).filter(([k, v]) => /^[a-z-]{1,40}$/.test(k) && isNum(v)).slice(0, 10)),
+    },
     recurring: nums(p.recurring || {}, ['corrections', 'repeatedInstructions'], 'recurring'),
   };
 }
