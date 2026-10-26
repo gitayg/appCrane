@@ -12,6 +12,7 @@
 import { readdirSync, readFileSync, statSync, writeFileSync, existsSync } from 'fs';
 import { join, basename, dirname } from 'path';
 import { homedir } from 'os';
+import { execFileSync } from 'child_process';
 
 // ── args ─────────────────────────────────────────────────────────
 const args = process.argv.slice(2);
@@ -26,6 +27,12 @@ const SINCE_DAYS = Number(opt('since', 30));
 const ONLY_SESSION = opt('session', null);
 const SUBAGENTS = flag('include-subagents');
 const JSON_OUT = opt('json', null);
+// --allow-remote <regex> (repeatable): keep only sessions whose working
+// directory is a git checkout with a matching `origin`, e.g.
+// 'github.com[:/]opswat/'. How the uploader keeps personal and side projects
+// out of a company hub. A session whose directory is gone, or is not a git
+// checkout, never matches.
+const ALLOW_REMOTES = args.flatMap((a, i) => a === '--allow-remote' && args[i + 1] ? [new RegExp(args[i + 1], 'i')] : []);
 const TOP = Number(opt('top', 10));
 const PRICE_FILE = opt('prices', process.env.WORK_REVIEW_PRICES || null);
 const sinceMs = Date.now() - SINCE_DAYS * 86400_000;
@@ -159,6 +166,7 @@ function analyzeFile(path) {
   for (const line of lines) {
     if (!line.trim()) continue;
     let d; try { d = JSON.parse(line); } catch { continue; }
+    if (!s.cwd && typeof d.cwd === 'string') s.cwd = d.cwd;
     if (d.timestamp) { const t = Date.parse(d.timestamp); if (!s.start || t < s.start) s.start = t; if (!s.end || t > s.end) s.end = t; }
     if (d.type === 'system' && (d.subtype === 'compact_boundary' || /compact/i.test(d.content || ''))) s.compactions++;
     if (d.isCompactSummary) s.compactions++;
@@ -322,8 +330,23 @@ const files = walk(ROOT).filter(f => {
   if (ONLY_SESSION && !f.includes(ONLY_SESSION)) return false;
   try { return statSync(f).mtimeMs >= sinceMs; } catch { return false; }
 });
-const sessions = files.map(analyzeFile).filter(s => s.turns > 0);
-if (!sessions.length) { console.error(`No sessions with assistant turns under ${ROOT} in the last ${SINCE_DAYS} days.`); process.exit(1); }
+const remoteOf = (() => {
+  const cache = new Map();
+  return cwd => {
+    if (!cwd) return null;
+    if (!cache.has(cwd)) {
+      let url = null;
+      try { url = execFileSync('git', ['-C', cwd, 'remote', 'get-url', 'origin'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 }).trim(); } catch {}
+      cache.set(cwd, url);
+    }
+    return cache.get(cwd);
+  };
+})();
+const allowed = s => !ALLOW_REMOTES.length || ALLOW_REMOTES.some(re => re.test(remoteOf(s.cwd) || '\u0000'));
+const scanned = files.map(analyzeFile).filter(s => s.turns > 0);
+const sessions = scanned.filter(allowed);
+const excludedByRemote = scanned.length - sessions.length;
+if (!sessions.length) { console.error(`No sessions with assistant turns under ${ROOT} in the last ${SINCE_DAYS} days${excludedByRemote ? ` (${excludedByRemote} left out by --allow-remote)` : ''}.`); process.exit(1); }
 
 const sum = (f) => sessions.reduce((a, s) => a + f(s), 0);
 const tokTotal = s => s.usage.input + s.usage.output + s.usage.cacheRead + s.usage.cacheWrite;
@@ -386,6 +409,7 @@ const totals = {
   unpricedModels: (() => { const m = new Map(); for (const s of sessions) for (const [k2, v] of s.unpriced) inc(m, k2, v); return Object.fromEntries(m); })(),
   pricesAsOf: PRICES_AS_OF,
   subagentsIncluded: SUBAGENTS,
+  excludedByRemote,
 };
 const cross = crossSession(sessions);
 

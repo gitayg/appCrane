@@ -186,7 +186,11 @@ Suggest re-running about two weeks after applying fixes.
 
 `scripts/upload.mjs` sends a rolling 7-day summary, at most once a day, to the Work Review hub. The hub is an AppCrane app on app.opswat.com; its source is in `examples/work-review-hub/` in the appCrane repo. There each developer sees their own trend, and app admins see team numbers.
 
-**What leaves the machine:** numeric totals, flags, the returns curve, recurring-correction counts, and up to 5 prompt excerpts.
+**What leaves the machine:** numeric totals, flags, the returns curve, recurring-correction counts, setup counts, and up to 5 prompt excerpts. Excerpts are sent only if the developer turned them on and approved each one.
+
+**Whose sessions:** only sessions whose working directory is a git checkout with an `origin` matching an `--allow-remote` pattern. Without a pattern nothing is uploaded. With `--account-domain`, nothing is sent while the signed-in Claude account is not a work account.
+
+**Excerpt approval:** with `--excerpts`, new excerpts wait in a local queue and are never sent until approved with `--review-excerpts --approve <n|all>`. Dropped ones never leave the machine.
 - Excerpts are at most 160 characters. Secrets, emails, URLs, IPs, paths and long tokens are scrubbed out.
 - The hub shows excerpts to their author only, never to admins.
 
@@ -202,8 +206,8 @@ Suggest re-running about two weeks after applying fixes.
 
 When the user asks to set it up, walk them through these steps. Don't do any of them for them:
 1. In AppCrane, open the MCP page, go to **App sign-in keys**, and issue a key for the Work Review hub app (it expires after 180 days by default). Then run:
-   `node <skill-dir>/scripts/upload.mjs --setup --url https://<hub-app-host>`, pasting the key at the prompt (it is read from stdin).
-2. Preview the payload: `node <skill-dir>/scripts/upload.mjs --dry-run`.
+   `node <skill-dir>/scripts/upload.mjs --setup --url https://<hub-app-host> --allow-remote 'github.com[:/]<org>/' --account-domain <company.com> [--excerpts]`, pasting the key at the prompt (it is read from stdin). Ask the user for the org and domain rather than guessing them.
+2. Preview the payload: `node <skill-dir>/scripts/upload.mjs --dry-run`. If excerpts are on, show the queue with `--review-excerpts` and let the user approve or drop each one. Never approve on their behalf.
 3. Send one now: `node <skill-dir>/scripts/upload.mjs --force`.
 4. Make it daily by adding this to their own `~/.claude/settings.json`. The hook returns at once and uploads in the background only if the last upload is more than 24h old:
    ```json

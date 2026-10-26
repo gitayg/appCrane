@@ -29,6 +29,8 @@ const KEY = join(CONF_DIR, 'key');
 const STAMP = join(CONF_DIR, 'last-upload');
 const LOG = join(CONF_DIR, 'upload.log');
 const SENT = join(CONF_DIR, 'sent');
+const PENDING = join(CONF_DIR, 'pending-excerpts.json');   // waiting for the person's approval
+const DECIDED = join(CONF_DIR, 'excerpt-decisions.json');  // sha256 → 'approved' | 'dropped'
 const DAY_MS = 86400_000;
 const WINDOW_DAYS = 7;          // each upload is a rolling 7-day snapshot; the hub keeps one per day
 const TOP_EXCERPTS = 5;
@@ -77,7 +79,11 @@ const group = g => pickNums(g, ['prompts', 'medianCost', 'medianUsd', 'medianExp
 
 // Allow-list, field by field: anything the analyzer adds later stays local
 // until it is deliberately added here.
-export function buildPayload(report, { now = new Date(), setup = null } = {}) {
+const excerptId = text => createHash('sha256').update(text).digest('hex').slice(0, 16);
+
+// allowExcerpt(text) decides each prompt excerpt. The default sends none: an
+// excerpt leaves the machine only after its owner approved that exact text.
+export function buildPayload(report, { now = new Date(), setup = null, allowExcerpt = () => false } = {}) {
   const T = report.totals || {}, Q = report.instructionQuality || {}, O = report.overcomplication || {};
   return {
     schema: SCHEMA,
@@ -98,11 +104,11 @@ export function buildPayload(report, { now = new Date(), setup = null } = {}) {
       totalCost: num(Q.totalCost), reworkCost: num(Q.reworkCost), reworkShare: num(Q.reworkShare),
       totalUsd: num(Q.totalUsd), reworkUsd: num(Q.reworkUsd),
       vague: group(Q.vague), anchored: group(Q.anchored), withCriteria: group(Q.withCriteria), withoutCriteria: group(Q.withoutCriteria),
-      costliestBadPrompts: (Q.costliestBadPrompts || []).slice(0, TOP_EXCERPTS).map(p => ({
+      costliestBadPrompts: (Q.costliestBadPrompts || []).slice(0, TOP_EXCERPTS).map(p => ({ ...p, excerpt: scrub(p.prompt) })).filter(p => allowExcerpt(p.excerpt)).map(p => ({
         cost: num(p.cost),
         usd: num(p.usd),
         why: (p.why || []).filter(w => typeof w === 'string').map(w => w.replace(/[^\w\s;-]/g, '').slice(0, 60)).slice(0, 4),
-        excerpt: scrub(p.prompt),
+        excerpt: p.excerpt,
       })),
     },
     overcomplication: {
@@ -148,10 +154,28 @@ function readKey() {
 }
 const lastUpload = () => { try { return Number(readFileSync(STAMP, 'utf8')) || 0; } catch { return 0; } };
 
-function runAnalyzer() {
+// Who is signed in to Claude Code right now. Transcripts do not record the
+// account per session, so this is checked at upload time: with accountDomain
+// set, nothing is sent unless the current login is a work account.
+function currentAccountEmail() {
+  try { return JSON.parse(readFileSync(join(homedir(), '.claude.json'), 'utf8')).oauthAccount?.emailAddress || null; } catch { return null; }
+}
+export function accountProblem(config, email = currentAccountEmail()) {
+  if (!config.accountDomain) return null;
+  if (!email) return `cannot confirm the Claude account is a ${config.accountDomain} one (no signed-in account found)`;
+  return email.toLowerCase().endsWith('@' + config.accountDomain.toLowerCase()) ? null : `the signed-in Claude account is not a ${config.accountDomain} account`;
+}
+
+function runAnalyzer(config = {}) {
   ensureDir();
   const out = join(CONF_DIR, 'last-report.json');      // full local report, stays here (0600)
-  execFileSync(process.execPath, [join(HERE, 'analyze.mjs'), '--since', String(WINDOW_DAYS), '--json', out], { stdio: ['ignore', 'ignore', 'pipe'], timeout: 120_000 });
+  const allow = (config.allowRemotes || []).flatMap(r => ['--allow-remote', r]);
+  try {
+    execFileSync(process.execPath, [join(HERE, 'analyze.mjs'), '--since', String(WINDOW_DAYS), '--include-subagents', '--json', out, ...allow], { stdio: ['ignore', 'ignore', 'pipe'], timeout: 120_000 });
+  } catch (e) {
+    if (/No sessions/.test(String(e.stderr || ''))) return null;   // nothing in the allowed repos this week
+    throw e;
+  }
   chmodSync(out, 0o600);
   return JSON.parse(readFileSync(out, 'utf8'));
 }
@@ -189,8 +213,51 @@ function keepCopy(payload) {
   for (const f of files.slice(0, Math.max(0, files.length - 90))) rmSync(join(SENT, f));
 }
 
-async function setup(url) {
+// ── excerpt approval queue ───────────────────────────────────────
+const readJson = (f, d) => { try { return JSON.parse(readFileSync(f, 'utf8')); } catch { return d; } };
+const writeJson = (f, v) => { ensureDir(); writeFileSync(f, JSON.stringify(v, null, 2) + '\n', { mode: 0o600 }); };
+function queueExcerpts(report) {
+  const decided = readJson(DECIDED, {});
+  const pending = readJson(PENDING, []);
+  const known = new Set(pending.map(p => p.id));
+  for (const p of (report.instructionQuality?.costliestBadPrompts || []).slice(0, TOP_EXCERPTS)) {
+    const text = scrub(p.prompt), id = excerptId(text);
+    if (!decided[id] && !known.has(id)) { pending.push({ id, text, cost: num(p.usd) }); known.add(id); }
+  }
+  writeJson(PENDING, pending.slice(-50));
+  return pending.length;
+}
+function reviewExcerpts(argv) {
+  const pending = readJson(PENDING, []);
+  const decided = readJson(DECIDED, {});
+  const pick = flag => { const i = argv.indexOf(flag); if (i === -1) return null; const v = argv[i + 1] || ''; return v === 'all' ? pending.map((_, n) => n + 1) : v.split(',').map(Number).filter(Boolean); };
+  const approve = pick('--approve'), drop = pick('--drop');
+  if (!approve && !drop) {
+    if (!pending.length) { console.log('No excerpts waiting.'); return; }
+    console.log('Excerpts waiting for your approval (nothing here has been sent):\n');
+    pending.forEach((p, n) => console.log(`${n + 1}. ${p.text}`));
+    console.log(`\nApprove: --review-excerpts --approve 1,3 (or all) · Drop: --review-excerpts --drop 2 (or all)`);
+    return;
+  }
+  for (const n of approve || []) if (pending[n - 1]) decided[pending[n - 1].id] = 'approved';
+  for (const n of drop || []) if (pending[n - 1]) decided[pending[n - 1].id] = 'dropped';
+  writeJson(DECIDED, decided);
+  writeJson(PENDING, pending.filter(p => !decided[p.id]));
+  console.log(`Recorded. Approved excerpts go with the next upload; dropped ones never leave this machine.`);
+}
+const approvedExcerpt = config => {
+  if (!config.excerpts) return () => false;
+  const decided = readJson(DECIDED, {});
+  return text => decided[excerptId(text)] === 'approved';
+};
+
+async function setup(url, argv = []) {
   checkUrl(url);
+  const allowRemotes = argv.flatMap((a, i) => a === '--allow-remote' && argv[i + 1] ? [argv[i + 1]] : []);
+  if (!allowRemotes.length) throw new Error('give at least one --allow-remote <pattern> (e.g. \'github.com[:/]opswat/\'): only sessions in matching repositories are uploaded');
+  for (const r of allowRemotes) new RegExp(r);   // fail now, not at the first upload
+  const ai = argv.indexOf('--account-domain');
+  const accountDomain = ai === -1 ? null : argv[ai + 1];
   const key = readFileSync(0, 'utf8').trim();            // stdin, so the key never appears in argv or shell history
   if (!APP_KEY_RE.test(key)) {
     throw new Error(/^dhk_/.test(key)
@@ -199,8 +266,9 @@ async function setup(url) {
   }
   ensureDir();
   writeFileSync(KEY, key + '\n', { mode: 0o600 }); chmodSync(KEY, 0o600);
-  writeFileSync(CONF, JSON.stringify({ url, enabled: true }, null, 2) + '\n', { mode: 0o600 });
-  console.log(`Saved. Uploads go to ${url}. Preview one with: node ${join(HERE, 'upload.mjs')} --dry-run`);
+  writeFileSync(CONF, JSON.stringify({ url, enabled: true, allowRemotes, accountDomain, excerpts: argv.includes('--excerpts') }, null, 2) + '\n', { mode: 0o600 });
+  console.log(`Saved. Uploads go to ${url}, from repositories matching ${allowRemotes.join(' or ')}${accountDomain ? `, only while signed in with a ${accountDomain} account` : ''}. ` +
+    `Prompt excerpts: ${argv.includes('--excerpts') ? 'on, each one only after you approve it (--review-excerpts)' : 'off'}. Preview with: node ${join(HERE, 'upload.mjs')} --dry-run`);
 }
 
 // ── main ─────────────────────────────────────────────────────────
@@ -208,7 +276,8 @@ async function main(argv) {
   const has = f => argv.includes(f);
   const val = f => { const i = argv.indexOf(f); return i === -1 ? null : argv[i + 1]; };
 
-  if (has('--setup')) return setup(val('--url') || '');
+  if (has('--setup')) return setup(val('--url') || '', argv);
+  if (has('--review-excerpts')) return reviewExcerpts(argv);
   if (has('--disable')) { const c = readConfig() || {}; ensureDir(); writeFileSync(CONF, JSON.stringify({ ...c, enabled: false }, null, 2) + '\n', { mode: 0o600 }); console.log('Uploads disabled.'); return; }
 
   if (has('--hook')) {
@@ -219,13 +288,19 @@ async function main(argv) {
     return;
   }
 
-  const report = runAnalyzer();
-  const payload = buildPayload(report, { setup: runSetupAudit() });
-  if (has('--dry-run')) { console.log(JSON.stringify(payload, null, 2)); return; }
-
   const c = readConfig();
-  if (!c?.enabled) { console.error('Uploads are not set up or are disabled. See --setup.'); process.exitCode = 1; return; }
-  if (!has('--force') && Date.now() - lastUpload() < DAY_MS) { console.log('Already uploaded in the last 24h; use --force to send again.'); return; }
+  const dry = has('--dry-run');
+  if (!dry && !c?.enabled) { console.error('Uploads are not set up or are disabled. See --setup.'); process.exitCode = 1; return; }
+  if (c && !c.allowRemotes?.length) { console.error('No --allow-remote patterns configured, so nothing may be uploaded. Run --setup again with --allow-remote.'); process.exitCode = 1; return; }
+  if (!dry && !has('--force') && Date.now() - lastUpload() < DAY_MS) { console.log('Already uploaded in the last 24h; use --force to send again.'); return; }
+  const blocked = c && accountProblem(c);
+  if (blocked) { log(`skipped: ${blocked}`); console.log(`Not uploading: ${blocked}.`); return; }
+
+  const report = runAnalyzer(c || {});
+  if (!report) { log('skipped: no sessions in the allowed repositories this week'); console.log('Nothing to upload: no sessions in the allowed repositories this week.'); return; }
+  const waiting = c?.excerpts ? queueExcerpts(report) : 0;
+  const payload = buildPayload(report, { setup: runSetupAudit(), allowExcerpt: approvedExcerpt(c || {}) });
+  if (dry) { console.log(JSON.stringify(payload, null, 2)); if (waiting) console.error(`${waiting} excerpt(s) are waiting for your approval and are not in this payload: --review-excerpts`); return; }
   await send(c.url, readKey(), payload);
   keepCopy(payload);
   writeFileSync(STAMP, String(Date.now()), { mode: 0o600 });

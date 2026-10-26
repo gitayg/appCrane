@@ -220,3 +220,28 @@ test('analyzer tells useful subagents from ones that only paid the overhead', ()
   assert.ok(S.startupUsd > 0 && S.usd >= S.startupUsd);
   assert.equal(S.repeatedDelegations[0].runs, 3, 'the same brief delegated in three sessions is a skill candidate');
 });
+
+test('--allow-remote keeps only sessions from matching git repositories', () => {
+  const root = mkdtempSync(join(tmpdir(), 'work-review-'));
+  mkdirSync(join(root, '-p'));
+  const repo = (name, url) => {
+    const d = join(root, name); mkdirSync(d);
+    execFileSync('git', ['init', '-q', d]);
+    if (url) execFileSync('git', ['-C', d, 'remote', 'add', 'origin', url]);
+    return d;
+  };
+  const work = repo('work', 'git@github.com:opswat/billing.git');
+  const side = repo('side', 'https://github.com/kim/hobby.git');
+  const bare = repo('bare', null);
+  for (const [id, cwd] of [['w', work], ['s', side], ['b', bare], ['gone', join(root, 'deleted')]]) {
+    writeFileSync(join(root, '-p', `${id}.jsonl`), [
+      { type: 'user', cwd, timestamp: new Date().toISOString(), message: { role: 'user', content: 'hi' } },
+      { type: 'assistant', cwd, timestamp: new Date().toISOString(), message: { id: id + 'm', model: 'x', content: [], usage: { input_tokens: 1, output_tokens: 1 } } },
+    ].map(l => JSON.stringify(l)).join('\n'));
+  }
+  const out = join(root, 'r.json');
+  execFileSync(process.execPath, [SCRIPT, '--root', join(root, '-p'), '--json', out, '--allow-remote', 'github.com[:/]opswat/']);
+  const r = JSON.parse(readFileSync(out, 'utf8'));
+  assert.deepEqual(r.sessions.map(s => s.sessionId), ['w'], 'only the work repo');
+  assert.equal(r.totals.excludedByRemote, 3, 'side project, no remote and a deleted directory are all left out');
+});
