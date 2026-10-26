@@ -51,14 +51,16 @@
       <div class="card" id="prompts"></div>
       <h2>Overcomplication</h2>
       <div class="card" id="oc"></div>
-      <p style="margin-top:28px"><button class="danger" id="del">Delete all my data</button> <span class="mute">Excerpts are visible to you only; admins see numbers.</span></p>
+      <p style="margin-top:28px"><button class="danger" id="del">Delete all my data</button> <span class="mute">Excerpts are visible to you only. Admins see team totals once 5 or more people take part, never your numbers on their own.</span></p>
     </div>
   </section>
 
   <section id="team" hidden>
-    <h2>Team: latest snapshot per person</h2>
-    <div class="card scroll"><table id="teamTable"></table></div>
+    <h2>Team</h2>
+    <div class="card" id="teamBody"></div>
   </section>
+
+  <p class="mute" style="margin-top:40px" id="policy">This hub is for each developer to improve how they work with Claude. It is not for performance reviews: admins see only team-wide totals, shown once enough people take part that nobody can be singled out, and there is no ranking of people.</p>
 </main>
 <script>
 // Everything stored comes from uploads, so it is rendered with textContent
@@ -129,10 +131,27 @@ function renderMine(reports) {
   }
 }
 
-function renderTeam(people) {
-  const t = $('teamTable'); t.replaceChildren(row(['Person', 'Snapshot', 'API-list cost (7 days)', 'Setup findings', 'Rework share', 'Vague prompts', 'Cache hit', 'Error rate', 'Recurring corrections'], true));
-  for (const p of people) t.append(row([p.name || p.email, p.day, usd(p.totals.usd), p.setup ? Object.values(p.setup.findings || {}).reduce((a, n) => a + n, 0) : '—', pct(p.instructionQuality.reworkShare),
-    p.instructionQuality.vague.prompts, pct(p.totals.cacheHitRate), pct(p.totals.errorRate), p.recurring.corrections]));
+function renderTeam(T) {
+  const b = $('teamBody'); b.replaceChildren();
+  if (!T.enough) {
+    b.append(el('p', `${T.people} ${T.people === 1 ? 'person has' : 'people have'} uploaded in the last ${T.activeDays} days. Team totals appear at ${T.minPeople} or more, so nobody can be singled out.`, 'mute'));
+    return;
+  }
+  b.append(el('p', `${T.people} people active in the last ${T.activeDays} days · ${usd(T.usdTotal)} at API list prices (7-day windows).`, 'mute'));
+  const m = T.median, t = el('table');
+  t.append(row(['Median per person', ''], true));
+  for (const [l, v] of [['Cost at API list prices', usd(m.usd)], ['Spend on prompts that needed correcting', pct(m.reworkShare)], ['Share of prompts that were vague', pct(m.vagueShare)],
+    ['Cache hit rate', pct(m.cacheHitRate)], ['Tool error rate', pct(m.errorRate)], ['CLAUDE.md tokens on every request', k(m.alwaysOnTokens)]]) t.append(row([l, v]));
+  b.append(t);
+  const list = (title, obj) => {
+    const e = Object.entries(obj || {}).sort((x, y) => y[1] - x[1]);
+    if (!e.length) return;
+    b.append(el('h2', title));
+    const d = el('div'); e.forEach(([k2, n]) => d.append(el('span', `${k2}: ${n} of ${T.people}`, 'tag'))); b.append(d);
+  };
+  list('People with each setup finding', T.peopleWithSetupFinding);
+  list('People with each subagent flag', T.peopleWithSubagentFlag);
+  b.append(el('p', `Subagent runs that gained nothing from delegating: ${usd(T.subagentUsdNoBenefit)} · people correcting Claude on the same thing repeatedly: ${T.peopleWithRecurringCorrections}`, 'mute'));
 }
 
 (async () => {
@@ -145,7 +164,7 @@ function renderTeam(people) {
       const tab = e.target.dataset?.tab; if (!tab) return;
       for (const b of $('tabs').children) b.setAttribute('aria-selected', String(b.dataset.tab === tab));
       $('me').hidden = tab !== 'me'; $('team').hidden = tab !== 'team';
-      if (tab === 'team') renderTeam((await api('/api/team')).people);
+      if (tab === 'team') renderTeam(await api('/api/team'));
     });
   }
   $('del').addEventListener('click', async () => {

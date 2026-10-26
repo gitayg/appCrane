@@ -90,7 +90,9 @@ test('hub stores per user, shows excerpts only to their author, numbers to admin
 
   assert.equal((await fetch(`${base}/api/team`, { headers: as('bob@opswat.com') })).status, 403);
   const team = await (await fetch(`${base}/api/team`, { headers: as('lead@opswat.com', 'owner') })).json();
-  assert.equal(team.people.length, 2);
+  assert.equal(team.people, 2);
+  assert.equal(team.enough, false, 'two people: no team numbers, only the count');
+  assert.equal(team.median, undefined);
   assert.ok(!JSON.stringify(team).includes('«'), 'team view carries no excerpts');
 
   // Same day again replaces, not appends.
@@ -157,4 +159,14 @@ test('with an account domain set, only a work login uploads', () => {
   assert.match(accountProblem({ accountDomain: 'opswat.com' }, 'kim@gmail.com'), /not a opswat\.com account/);
   assert.match(accountProblem({ accountDomain: 'opswat.com' }, null), /cannot confirm/);
   assert.match(accountProblem({ accountDomain: 'opswat.com' }, 'kim@opswat.com.evil.io'), /not a/);
+});
+
+test('the team view is aggregates only, and only once enough people take part', async () => {
+  for (let i = 1; i <= 6; i++) assert.equal((await post(as(`dev${i}@opswat.com`), buildPayload(report, { setup: { inventory: {}, findings: [{ kind: 'agent-unused' }] } }))).status, 201);
+  const T = await (await fetch(`${base}/api/team`, { headers: as('lead@opswat.com', 'admin') })).json();
+  assert.equal(T.enough, true);
+  assert.ok(T.people >= 5);
+  assert.ok(T.peopleWithSetupFinding['agent-unused'] >= 6, 'counted as people, not named');
+  assert.ok(!JSON.stringify(T).includes('@'), 'no email, name or row per person anywhere in the team view');
+  assert.equal(T.median.usd >= 0, true);
 });

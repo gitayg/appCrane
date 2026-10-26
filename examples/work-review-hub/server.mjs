@@ -112,17 +112,38 @@ function history(dir, limit = 90) {
   return readdirSync(dir).filter(f => /^\d{4}-\d{2}-\d{2}\.json$/.test(f)).sort().slice(-limit)
     .map(f => { try { return JSON.parse(readFileSync(join(dir, f), 'utf8')); } catch { return null; } }).filter(Boolean);
 }
-// Team view: latest snapshot per person, numbers only. Prompt excerpts are
-// shown to their author alone, never to admins.
+// Team view: aggregates over the people active recently, never a row per
+// person. A per-person table sorted by spend is a leaderboard, and this hub is
+// for each developer's own improvement, not for performance reviews. Below
+// TEAM_MIN_PEOPLE the aggregates themselves would point at individuals, so
+// nothing is shown but the count.
+export const TEAM_MIN_PEOPLE = Math.max(3, Number(process.env.TEAM_MIN_PEOPLE || 5));
+const TEAM_ACTIVE_DAYS = 14;
+const median = xs => { const s = xs.filter(Number.isFinite).sort((a, b) => a - b); return s.length ? s[Math.floor(s.length / 2)] : 0; };
 function team() {
-  if (!existsSync(DATA)) return [];
-  return readdirSync(DATA).map(h => {
-    const dir = join(DATA, h);
-    let meta = {}; try { meta = JSON.parse(readFileSync(join(dir, 'meta.json'), 'utf8')); } catch { return null; }
-    const last = history(dir, 1)[0]; if (!last) return null;
-    const { costliestBadPrompts, ...iq } = last.instructionQuality;
-    return { name: meta.name, email: meta.email, day: last.day, totals: last.totals, instructionQuality: iq, overcomplication: last.overcomplication, subagents: last.subagents, setup: last.setup, recurring: last.recurring };
-  }).filter(Boolean).sort((a, b) => (b.totals.usd || 0) - (a.totals.usd || 0));
+  if (!existsSync(DATA)) return { people: 0, minPeople: TEAM_MIN_PEOPLE, enough: false };
+  const since = new Date(Date.now() - TEAM_ACTIVE_DAYS * 86400_000).toISOString().slice(0, 10);
+  const latest = readdirSync(DATA).map(h => history(join(DATA, h), 1)[0]).filter(s => s && s.day >= since);
+  const base = { people: latest.length, minPeople: TEAM_MIN_PEOPLE, activeDays: TEAM_ACTIVE_DAYS };
+  if (latest.length < TEAM_MIN_PEOPLE) return { ...base, enough: false };
+  // How many people have each setup finding / subagent flag: "4 of 9 run unused subagents".
+  const peopleWith = pick => latest.reduce((m, s) => { for (const k of Object.keys(pick(s) || {})) m[k] = (m[k] || 0) + 1; return m; }, {});
+  return {
+    ...base, enough: true,
+    usdTotal: +latest.reduce((a, s) => a + (s.totals.usd || 0), 0).toFixed(2),
+    median: {
+      usd: median(latest.map(s => s.totals.usd || 0)),
+      reworkShare: median(latest.map(s => s.instructionQuality.reworkShare)),
+      vagueShare: median(latest.map(s => { const v = s.instructionQuality.vague.prompts, a = s.instructionQuality.anchored.prompts; return v + a ? v / (v + a) : 0; })),
+      cacheHitRate: median(latest.map(s => s.totals.cacheHitRate)),
+      errorRate: median(latest.map(s => s.totals.errorRate)),
+      alwaysOnTokens: median(latest.map(s => s.setup?.alwaysOnTokens).filter(x => x != null)),
+    },
+    subagentUsdNoBenefit: +latest.reduce((a, s) => a + (s.subagents?.flaggedUsd || 0), 0).toFixed(2),
+    peopleWithSetupFinding: peopleWith(s => s.setup?.findings),
+    peopleWithSubagentFlag: peopleWith(s => s.subagents?.flags),
+    peopleWithRecurringCorrections: latest.filter(s => s.recurring.corrections > 0).length,
+  };
 }
 
 // ── http ─────────────────────────────────────────────────────────
@@ -163,7 +184,7 @@ export function handler(req, res) {
   if (req.method === 'GET' && path === '/api/me') return send(res, 200, { email: user.email, name: user.name, admin: user.admin });
   if (req.method === 'GET' && path === '/api/reports/me') return send(res, 200, { reports: history(userDir(user.email)) });
   if (req.method === 'DELETE' && path === '/api/reports/me') { rmSync(userDir(user.email), { recursive: true, force: true }); return send(res, 200, { deleted: true }); }
-  if (req.method === 'GET' && path === '/api/team') return user.admin ? send(res, 200, { people: team() }) : send(res, 403, { error: 'admins only' });
+  if (req.method === 'GET' && path === '/api/team') return user.admin ? send(res, 200, team()) : send(res, 403, { error: 'admins only' });
 
   if (req.method === 'POST' && path === '/api/reports') {
     // Custom header + JSON content type: a cross-site form or image request
