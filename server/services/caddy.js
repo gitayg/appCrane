@@ -58,7 +58,7 @@ const IDENTITY_HEADERS = [
   // be rejected by a verifying app anyway; stripping it keeps the rule simple.
   'X-AppCrane-Identity-Ts',
   'X-AppCrane-Identity-Sig',
-  // v2.108.0: 'app-key' when the caller signed in with a personal app sign-in
+  // v2.124.0: 'app-key' when the caller signed in with a personal app sign-in
   // key (dhk_uak_*) instead of a browser session. An app that lets a script do
   // less than its person relies on it, so a client must not be able to send it.
   'X-AppCrane-Auth-Via',
@@ -124,6 +124,30 @@ const BASELINE_HEADERS =
   // Server banners: version/stack disclosure, no upside.
   `        -X-Powered-By\n` +
   `        -Server\n` +
+  `    }\n`;
+
+// CVE-2026-111497 ("Node2Shell"): Node's bundled Brotli decoder before 22.23.4 /
+// 24.22.1 / 26.12.1 can be driven to an out-of-bounds write by a malformed body,
+// and Express 5 / body-parser 2.x decode `Content-Encoding: br` bodies for any
+// client. Refused at the edge for every hosted app, ahead of every route: a
+// `handle` with a named matcher keeps its written position among `handle`
+// blocks (Caddy sorts only single-path matchers by specificity), so emitted
+// first it runs first; the adapted order is pinned by test/caddy-brotli-guard.test.js.
+// Caddy's header matcher is case-sensitive, so the case-insensitive
+// header_regexp form is used. A platform admin can turn it off for an app
+// fleet that really accepts Brotli uploads.
+export const BROTLI_GUARD_KEY = 'edge_refuse_brotli_bodies';
+
+export function brotliGuardEnabled(db) {
+  const v = db.prepare('SELECT value FROM settings WHERE key = ?').get(BROTLI_GUARD_KEY)?.value;
+  return v == null || String(v).trim().toLowerCase() !== 'off';
+}
+
+const BROTLI_REFUSAL =
+  `    @brotli_body header_regexp Content-Encoding "(?i)(^|,)\\s*br\\s*(,|$)"\n` +
+  `    handle @brotli_body {\n` +
+  `        header Accept-Encoding "gzip, deflate"\n` +
+  `        respond "Request bodies compressed with Brotli (Content-Encoding: br) are not accepted." 415\n` +
   `    }\n`;
 
 /**
@@ -351,6 +375,8 @@ export function generateCaddyfile() {
   // See BASELINE_HEADERS. The custom-domain site blocks below emit the same
   // constant — a site block inherits nothing from this one.
   caddyfile += BASELINE_HEADERS + '\n';
+  const refuseBrotli = brotliGuardEnabled(db) ? BROTLI_REFUSAL : '';
+  if (refuseBrotli) caddyfile += refuseBrotli + '\n';
 
   // Auth-bypass routes are parsed here rather than in the app loop because the
   // answer is needed twice: once to decide whether this site needs the
@@ -620,7 +646,23 @@ export function generateCaddyfile() {
   caddyfile += `    handle /a2a* {\n`;
   caddyfile += `        reverse_proxy 127.0.0.1:${cranePort}\n`;
   caddyfile += `    }\n\n`;
+  // git clone/fetch (routes/gitHttp.js), named for the same reason: an app
+  // left over as `g`, `gi` or `git` would otherwise receive every clone's API key.
+  caddyfile += `    handle /git/* {\n`;
+  caddyfile += `        reverse_proxy 127.0.0.1:${cranePort}\n`;
+  caddyfile += `    }\n\n`;
   caddyfile += `    handle /.well-known/agent-card.json {\n`;
+  caddyfile += `        reverse_proxy 127.0.0.1:${cranePort}\n`;
+  caddyfile += `    }\n\n`;
+  // MCP OAuth (routes/oauth.js), named for the same reason as /git/*: a legacy
+  // app `o`, `oa`, `oau` or `oauth` would otherwise receive every client's
+  // authorization code, refresh token and client secret. The metadata documents
+  // cannot be shadowed by a slug (none starts with '.'), but they are what an
+  // MCP client trusts to find the token endpoint, so they are pinned too.
+  caddyfile += `    handle /oauth/* {\n`;
+  caddyfile += `        reverse_proxy 127.0.0.1:${cranePort}\n`;
+  caddyfile += `    }\n\n`;
+  caddyfile += `    handle /.well-known/oauth-* {\n`;
   caddyfile += `        reverse_proxy 127.0.0.1:${cranePort}\n`;
   caddyfile += `    }\n\n`;
 
@@ -687,6 +729,7 @@ export function generateCaddyfile() {
     // TLS cert for this domain (ACME) and serves it over HTTPS, so HSTS is a
     // true statement about it.
     caddyfile += BASELINE_HEADERS;
+    caddyfile += refuseBrotli;
     caddyfile += identityStrip('    ');
     caddyfile += authMode('    ', 'bypass');
     // Belt-and-braces: cc_token is host-only (no Domain attribute), so a browser

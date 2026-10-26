@@ -374,12 +374,30 @@ StandardError=journal
 KillSignal=SIGTERM
 TimeoutStopSec=20
 LimitNOFILE=65535
+# Under whole-host memory pressure the kernel kills app containers first: they
+# run with --oom-score-adj=500 (databases 300), AppCrane with -500.
+OOMScoreAdjust=-500
+# Under CPU contention AppCrane, Caddy and sshd outweigh containers: apps run
+# with --cpu-shares=128, databases 256, builds 2 (cgroup weight 1 to 35), where an
+# unflagged container and an unconfigured service both weigh 100.
+CPUWeight=1000
 
 [Install]
 WantedBy=multi-user.target
 UNIT
 chmod 644 /etc/systemd/system/appcrane.service
+for unit in caddy.service ssh.service sshd.service; do
+  if [[ -f "/lib/systemd/system/$unit" || -f "/usr/lib/systemd/system/$unit" || -f "/etc/systemd/system/$unit" ]]; then
+    mkdir -p "/etc/systemd/system/$unit.d"
+    printf '%s\n' '# Written by AppCrane. Under CPU contention this service outweighs app containers' \
+      '# (--cpu-shares 128 to 256) so the site and SSH stay reachable.' '[Service]' 'CPUWeight=1000' \
+      > "/etc/systemd/system/$unit.d/50-appcrane-cpu-priority.conf"
+  fi
+done
 systemctl daemon-reload
+for unit in caddy.service ssh.service sshd.service; do
+  [[ -f "/etc/systemd/system/$unit.d/50-appcrane-cpu-priority.conf" ]] && systemctl set-property --runtime "$unit" CPUWeight=1000 2>/dev/null || true
+done
 systemctl enable --now appcrane.service
 
 # Wait for the API to come up.

@@ -19,6 +19,8 @@ import { existsSync, readdirSync } from 'fs';
 import { join, resolve } from 'path';
 import { MANIFESTS, parseManifest } from './ecosystems.js';
 import { assertFinding, assertPackage } from './scanShapes.js';
+import { syncVulnRequests } from './vulnRequests.js';
+import { alertNewFindings } from './vulnAlerts.js';
 
 const OSV_BATCH_URL = 'https://api.osv.dev/v1/querybatch';
 
@@ -405,6 +407,11 @@ async function hydrateAdvisories(ids) {
   return { records, failures };
 }
 
+/** Hydrated advisory records for `ids` (same cache and retries as a scan). */
+export async function fetchAdvisories(ids) {
+  return hydrateAdvisories([...new Set(ids)]);
+}
+
 /**
  * Ask OSV about these packages, in two passes: querybatch to find out WHICH are
  * affected, then /v1/vulns/<id> for the advisories that say what to upgrade to.
@@ -660,7 +667,10 @@ export async function scanApp(db, app, env, source = 'deploy') {
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `).run(app.id, env, source, ecosystem, status, packageCount, findingsJson, error);
 
-  return db.prepare('SELECT * FROM app_vuln_scans WHERE id = ?').get(info.lastInsertRowid);
+  const row = db.prepare('SELECT * FROM app_vuln_scans WHERE id = ?').get(info.lastInsertRowid);
+  syncVulnRequests(db, app, row);
+  await alertNewFindings(db, app, row);
+  return row;
 }
 
 /** Most recent scan for an app/env, or null. */

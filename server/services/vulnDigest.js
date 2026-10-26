@@ -15,7 +15,9 @@ import { getDb } from '../db.js';
 import { enqueueEmail } from './emailQueue.js';
 import { scanApp, fleetScanSummary } from './appScan.js';
 import { assertFindings } from './scanShapes.js';
+import { vulnRequestIdFor, requestUrl } from './vulnRequests.js';
 import log from '../utils/logger.js';
+import { jobStarted, trackJob } from './jobHealth.js';
 
 const K = {
   lastRun: 'vuln_scan_last_run',
@@ -119,6 +121,7 @@ function vulnerableApps(db) {
       ownerEmail: owners.get(r.app_id)?.owner_email ?? null,
       scannedAt: r.scanned_at || null,
       findings,
+      requestIds: findings.map((f) => f.ids.map((id) => vulnRequestIdFor(db, r.app_id, f, id))),
     });
   }
   return out;
@@ -200,19 +203,29 @@ function renderDigest(recipient, date) {
   let text = `${scopeLine}\n\n`;
   for (const a of recipient.apps) {
     text += `${a.appName} (${a.env}) — ${a.findings.length} vulnerable package${a.findings.length === 1 ? '' : 's'}${ownerSuffix(a)}\n`;
-    for (const f of a.findings) {
-      text += `  - ${f.name} ${f.version} (${f.ecosystem}) — ${f.ids.join(', ')} — ${fixLabel(f)}\n`;
-    }
+    a.findings.forEach((f, i) => {
+      const ids = f.ids.map((id, j) => {
+        const reqId = a.requestIds?.[i]?.[j];
+        return reqId ? `${id} (request #${reqId}: ${requestUrl(reqId)})` : id;
+      });
+      text += `  - ${f.name} ${f.version} (${f.ecosystem}) — ${ids.join(', ')} — ${fixLabel(f)}\n`;
+    });
     text += '\n';
   }
   text += `Scans are report-only: nothing here blocked or failed a deploy.\n`;
 
   const sections = recipient.apps.map((a) => {
-    const rows = a.findings.map((f) => (
+    const idCell = (f, i) => f.ids.map((id, j) => {
+      const reqId = a.requestIds?.[i]?.[j];
+      return reqId
+        ? `<a href="${esc(requestUrl(reqId))}" style="color:#2563eb;">${esc(id)}</a>`
+        : esc(id);
+    }).join(', ');
+    const rows = a.findings.map((f, i) => (
       `<tr>` +
       `<td style="padding:6px 10px;border-top:1px solid #eef0f3;font-family:ui-monospace,Menlo,monospace;font-size:12px;color:#111827;">${esc(f.name)} ${esc(f.version)}</td>` +
       `<td style="padding:6px 10px;border-top:1px solid #eef0f3;font-size:12px;color:#6b7280;">${esc(f.ecosystem)}</td>` +
-      `<td style="padding:6px 10px;border-top:1px solid #eef0f3;font-family:ui-monospace,Menlo,monospace;font-size:12px;color:#6b7280;">${esc(f.ids.join(', '))}</td>` +
+      `<td style="padding:6px 10px;border-top:1px solid #eef0f3;font-family:ui-monospace,Menlo,monospace;font-size:12px;color:#6b7280;">${idCell(f, i)}</td>` +
       `<td style="padding:6px 10px;border-top:1px solid #eef0f3;font-size:12px;color:#111827;">${esc(fixLabel(f))}</td>` +
       `</tr>`
     )).join('');
@@ -312,12 +325,15 @@ export function startVulnScheduler() {
       return;
     }
     try {
-      await runDailyScan(db);
-      sendVulnDigest(db);
+      await trackJob('vuln-scan', async () => {
+        await runDailyScan(db);
+        sendVulnDigest(db);
+      });
     } catch (e) {
       log.error(`[vuln-scan] daily run failed: ${e.message}`);
     }
   };
+  jobStarted('vuln-scan');
   tick().catch(() => {});
   _timer = setInterval(() => { tick().catch(() => {}); }, 60 * 60 * 1000);
   log.info('[vuln-scan] daily scheduler started (hourly check)');

@@ -27,6 +27,7 @@ import { probeServiceAccount } from './githubService.js';
 import { probeGitHubApp } from './githubApp.js';
 import { repoBackendOf, REPO_BACKEND_LOCAL } from './managedRepo.js';
 import log from '../utils/logger.js';
+import { jobStarted, trackJob } from './jobHealth.js';
 
 const CHECK_INTERVAL_MS = 15 * 60_000;
 const FIRST_CHECK_DELAY_MS = 60_000;      // let the app finish booting
@@ -226,8 +227,9 @@ async function runOnce(probes = PROBES) {
 export function startCredentialChecker() {
   if (timer) return;
   log.info('[credcheck] platform credential checker started (every 15m)');
-  setTimeout(() => { runOnce().catch(e => log.error(`[credcheck] first run: ${e.message}`)); }, FIRST_CHECK_DELAY_MS);
-  timer = setInterval(() => { runOnce().catch(e => log.error(`[credcheck] tick: ${e.message}`)); }, CHECK_INTERVAL_MS);
+  jobStarted('credential-check');
+  setTimeout(() => { trackJob('credential-check', () => runOnce()).catch(e => log.error(`[credcheck] first run: ${e.message}`)); }, FIRST_CHECK_DELAY_MS);
+  timer = setInterval(() => { trackJob('credential-check', () => runOnce()).catch(e => log.error(`[credcheck] tick: ${e.message}`)); }, CHECK_INTERVAL_MS);
   if (timer.unref) timer.unref();
 }
 

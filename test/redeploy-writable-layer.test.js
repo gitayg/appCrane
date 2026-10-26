@@ -604,3 +604,16 @@ describe('LIVE writable layer', { skip: liveSkip }, () => {
     }).written.map((w) => w.path), ['/var/www/html/storage']);
   });
 });
+
+test('npm\'s own debug log under ~/.npm (every generated node image runs `npm start`) is scratch, not data', () => {
+  // Measured: the only docker diff of a generated node image after one start.
+  const diff = [
+    { kind: 'C', path: '/home' }, { kind: 'C', path: '/home/node' }, { kind: 'A', path: '/home/node/.npm' },
+    { kind: 'A', path: '/home/node/.npm/_logs' }, { kind: 'A', path: '/home/node/.npm/_logs/2026-10-23T00_31_23_000Z-debug-0.log' },
+  ];
+  const r = risk.classifyWrittenPaths({ diff, mountDestinations: ['/data'] });
+  assert.deepEqual(r.written, []);
+  // A real file next to it still counts.
+  const withData = risk.classifyWrittenPaths({ diff: [...diff, { kind: 'A', path: '/home/node/app.db' }], mountDestinations: ['/data'] });
+  assert.deepEqual(withData.written.map((w) => w.path), ['/home/node']);
+});

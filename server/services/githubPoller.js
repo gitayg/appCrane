@@ -24,6 +24,7 @@
 import { getDb } from '../db.js';
 import { applyBucket, bucketize } from './requestStatus.js';
 import log from '../utils/logger.js';
+import { jobStarted, trackJob } from './jobHealth.js';
 
 const POLL_MS = parseInt(process.env.APPCRANE_PR_POLL_MS || '300000', 10);
 const PER_PAGE = 30;
@@ -135,9 +136,10 @@ export function startGithubPoller() {
   if (_running) return;
   _running = true;
   log.info(`GitHub PR poller starting (interval: ${POLL_MS}ms)`);
-  setTimeout(() => tick().catch(e => log.error(`PR poller tick: ${e.message}`)), 30000);
+  jobStarted('github-pr-poller', { cadenceMs: POLL_MS });
+  setTimeout(() => trackJob('github-pr-poller', tick).catch(e => log.error(`PR poller tick: ${e.message}`)), 30000);
   setInterval(() => {
-    tick().catch(e => log.error(`PR poller tick: ${e.message}`));
+    trackJob('github-pr-poller', tick).catch(e => log.error(`PR poller tick: ${e.message}`));
   }, POLL_MS);
 }
 

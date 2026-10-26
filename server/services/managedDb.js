@@ -123,6 +123,11 @@ import { getManagedDbSettings } from './managedDbSettings.js';
 import * as tde from './managedDbEncryption.js';
 import * as appLogin from './managedDbAppLogin.js';
 import * as pgStats from './managedDbStats.js';
+import { OOM_DB_FLAG } from './oomPriority.js';
+import { CPU_DB_FLAG } from './cpuPriority.js';
+import { managedDbCpuDrift } from './resourceDrift.js';
+import { admitContainer } from './memoryAdmission.js';
+import { assertMongoKernelCompatible, dockerHostMongoCompat, isMongodKernelRefusal, mongoKernelError } from './kernelCompat.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -159,6 +164,18 @@ export function isPerScopeEngine(engine) {
 // sets it.
 const CONTAINER_PREFIX = process.env.MANAGED_DB_CONTAINER_PREFIX || 'appcrane-db';
 
+// A CPU cap per database server, configured like memory: MANAGED_DB_CPUS for
+// every engine (default 1), MANAGED_DB_<ENGINE>_CPUS for one. One core, because
+// a database pegging every core of a small host is the incident this exists
+// for, and the --cpu-shares weight lets it use idle cores' worth of time slices
+// within that cap. Like memoryMb it is a `docker run` flag and NOT part of
+// serverConfigLabel(): it applies when a server is next created, and the
+// status (cpu_drift) says which running servers do not have it yet.
+function dbCpus(engine) {
+  const pick = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? n : null; };
+  return pick(process.env[`MANAGED_DB_${engine.toUpperCase()}_CPUS`]) ?? pick(process.env.MANAGED_DB_CPUS) ?? 1;
+}
+
 const ENGINES = {
   postgres: {
     image: process.env.MANAGED_DB_POSTGRES_IMAGE || 'postgres:16-alpine',
@@ -181,6 +198,7 @@ const ENGINES = {
     // that decides when that happens. Applies when the container is next
     // created, which the TLS change does once anyway.
     memoryMb: Number(process.env.MANAGED_DB_POSTGRES_MEMORY_MB) || 1024,
+    cpus: dbCpus('postgres'),
     scheme: 'postgresql',
   },
   mariadb: {
@@ -209,6 +227,7 @@ const ENGINES = {
     // database is a bad default on its own terms, not because it is a diagnosed
     // fix. If a provision still fails at 1024, the cause is elsewhere.
     memoryMb: Number(process.env.MANAGED_DB_MARIADB_MEMORY_MB) || 1024,
+    cpus: dbCpus('mariadb'),
     scheme: 'mysql',
   },
   // Mongo is a SHARED server, like the two above and unlike Redis: it has real
@@ -232,6 +251,7 @@ const ENGINES = {
     dataPath: mongo.MONGO_DATA_PATH,
     passwordEnv: mongo.MONGO_PASSWORD_ENV,
     memoryMb: mongo.MONGO_MEMORY_MB,
+    cpus: dbCpus('mongo'),
     scheme: mongo.MONGO_SCHEME,
   },
   // Per-scope, so there is no `container` and no `defaultPort` here: both are
@@ -247,6 +267,7 @@ const ENGINES = {
     dataPath: redis.REDIS_DATA_PATH,
     passwordEnv: redis.REDIS_PASSWORD_ENV,
     memoryMb: redis.REDIS_MEMORY_MB,
+    cpus: dbCpus('redis'),
     scheme: 'redis',
     perScope: true,
   },
@@ -882,7 +903,7 @@ function upsertServerRow(engine, cfg, port, adminPassword) {
  * well as a successful ping would — without putting the superuser password in
  * the host's process table on every poll.
  */
-async function waitReady(engine, port, timeoutMs = 120000) {
+async function waitReady(engine, port, { timeoutMs = 120000, secrets = [] } = {}) {
   const cfg = ENGINES[engine];
   const probe = engine === 'postgres'
     ? ['exec', cfg.container, 'pg_isready', '-q', '-h', '127.0.0.1', '-p', String(cfg.containerPort), '-U', 'postgres']
@@ -905,10 +926,47 @@ async function waitReady(engine, port, timeoutMs = 120000) {
     } catch (e) {
       if (engine === 'mariadb' && upAnyway.test(e.message)) return;
       last = e.message;
+      await throwIfExited(cfg.container, engine, secrets);
       await new Promise(r => setTimeout(r, 1000));
     }
   }
   throw new Error(`managedDb: ${engine} container did not become ready within ${timeoutMs}ms (last probe: ${last})`);
+}
+
+export { waitReady as _waitReadyForTests };
+
+/**
+ * Stop waiting for a container that has stopped. `restarting` is not final:
+ * the servers run with --restart=on-failure:2, so Docker is still retrying.
+ * `exited` / `dead` (retries used up, or a clean exit) and a removed container
+ * are, and waiting the full timeout for them only hides the reason.
+ */
+async function throwIfExited(container, engine, secrets = []) {
+  let state;
+  let exitCode;
+  try {
+    [state, exitCode] = (await dockerExec(['inspect', '-f', '{{.State.Status}}|{{.State.ExitCode}}', container], { timeout: 10000 })).split('|');
+  } catch (e) {
+    if (!NO_SUCH_CONTAINER.test(e.message)) return;
+    throw new Error(`managedDb: the ${engine} container ${container} no longer exists; it was removed before it became ready`);
+  }
+  if (state !== 'exited' && state !== 'dead') return;
+  let tail = '';
+  try {
+    const { stdout, stderr } = await execFileAsync('docker', ['logs', '--tail', '20', container], { timeout: 10000, maxBuffer: 4 * 1024 * 1024 });
+    tail = [stdout, stderr].map(t => String(t || '').trim()).filter(Boolean).join('\n');
+  } catch (e) {
+    tail = `(could not read its logs: ${e.stderr?.toString().trim() || e.message})`;
+  }
+  for (const secret of secrets) tail = redactSecret(tail, secret);
+  if (engine === 'mongo' && isMongodKernelRefusal(tail)) {
+    const { kernel } = await dockerHostMongoCompat();
+    throw mongoKernelError(kernel || 'unknown');
+  }
+  throw new Error(
+    `managedDb: the ${engine} container ${container} stopped with exit code ${exitCode} before it became ready. ` +
+    `Last log lines:\n${tail || '(no log output)'}`,
+  );
 }
 
 /**
@@ -930,6 +988,7 @@ export async function ensureServer(engine) {
       `Use provision(scope, '${engine}') instead of ensureServer('${engine}').`
     );
   }
+  if (engine === 'mongo') await assertMongoKernelCompatible(cfg.image);
   return withLock(`server:${engine}`, () => ensureServerLocked(engine, cfg));
 }
 
@@ -993,10 +1052,15 @@ async function ensureServerLocked(engine, cfg) {
       await createServerContainer(engine, cfg, port, adminPassword, tls.dir);
     }
   } else if (!state) {
+    // Only a server that did not exist is admitted: a recreate restores memory
+    // this database already held, and refusing it would leave it down.
+    if (!facts.state) {
+      await admitContainer({ name: cfg.container, memoryMb: cfg.memoryMb, cpus: cfg.cpus, kind: 'db', what: 'database start', subject: `the managed ${engine} server` });
+    }
     await createServerContainer(engine, cfg, port, adminPassword, tls.dir);
   }
 
-  await waitReady(engine, port);
+  await waitReady(engine, port, { secrets: engine === 'mongo' ? [adminPassword, mongo.keyfileFor(adminPassword)] : [adminPassword] });
   await ensureAdminCredentialFile(engine, adminPassword);
   await verifyAdminLogin(engine, { adopted: state === 'running' });
   if (tdeMode === 'decrypt' && ours) {
@@ -1105,6 +1169,9 @@ async function createServerContainer(engine, cfg, port, adminPassword, tlsDir) {
     '--label', `appcrane-db=${engine}`,
     '--label', `appcrane-db-config=${serverConfigLabel(engine)}`,
     '--restart=on-failure:2',
+    OOM_DB_FLAG,
+    CPU_DB_FLAG,
+    `--cpus=${cfg.cpus}`,
     `--memory=${cfg.memoryMb}m`,
     // Equal to --memory: Docker's spelling for "no swap at all". Omitting it
     // silently doubles the real ceiling on any host that has swap. Same
@@ -1393,10 +1460,13 @@ async function ensureRedisInstance({ container, dbName, username, password, port
       await createRedisContainer({ container, dbName, password, port, tlsDir: tlsFiles?.dir || null });
     }
   } else if (!state) {
+    if (!facts.state) {
+      await admitContainer({ name: container, memoryMb: ENGINES.redis.memoryMb, cpus: ENGINES.redis.cpus, kind: 'db', what: 'database start', subject: `the managed Redis instance ${dbName}` });
+    }
     await createRedisContainer({ container, dbName, password, port, tlsDir: tlsFiles?.dir || null });
   }
 
-  await waitRedisReady(container, { tls });
+  await waitRedisReady(container, { tls, secrets: [password] });
   if (tlsFiles?.renewed && facts.state === 'running' && facts.config === wantConfig) {
     await reloadServerTls('redis', container);
   }
@@ -1429,6 +1499,9 @@ async function createRedisContainer({ container, dbName, password, port, tlsDir 
     '--label', `appcrane-db-name=${dbName}`,
     '--label', `appcrane-db-config=${tlsDir ? redis.REDIS_TLS_CONFIG_VERSION : ''}`,
     '--restart=on-failure:2',
+    OOM_DB_FLAG,
+    CPU_DB_FLAG,
+    `--cpus=${ENGINES.redis.cpus}`,
     `--memory=${memoryMb}m`,
     `--memory-swap=${memoryMb}m`,
     '--security-opt', 'no-new-privileges',
@@ -1475,7 +1548,7 @@ async function createRedisContainer({ container, dbName, password, port, tlsDir 
  * no credential in argv: redis-cli authenticates from REDISCLI_AUTH, which the
  * container already has in its environment.
  */
-async function waitRedisReady(container, { tls = false, timeoutMs = 60000 } = {}) {
+async function waitRedisReady(container, { tls = false, timeoutMs = 60000, secrets = [] } = {}) {
   const deadline = Date.now() + timeoutMs;
   let last = '';
   while (Date.now() < deadline) {
@@ -1485,6 +1558,7 @@ async function waitRedisReady(container, { tls = false, timeoutMs = 60000 } = {}
       last = out;
     } catch (e) {
       last = e.message;
+      await throwIfExited(container, 'redis', secrets);
     }
     await new Promise(r => setTimeout(r, 500));
   }
@@ -1532,6 +1606,10 @@ const STATUS_FIELDS = [
   // cgroup was unchanged -- and it would say so most confidently in the one
   // situation where it matters, someone reading this page right after an OOM.
   '{{.HostConfig.Memory}}',
+  // The CPU cap and weight the running container was created with, for the
+  // same live-versus-configured reason (cpu_drift).
+  '{{.HostConfig.NanoCpus}}',
+  '{{.HostConfig.CpuShares}}',
 ];
 const STATUS_SEP = '|';
 const STATUS_FORMAT = STATUS_FIELDS.join(STATUS_SEP);
@@ -1589,7 +1667,7 @@ async function inspectFacts(container) {
     if (NO_SUCH_CONTAINER.test(e.message)) return { absent: true, error: null };
     return { absent: true, error: e.message };
   }
-  const [state, restarts, exitCode, oom, startedAt, memBytes] = raw.split(STATUS_SEP);
+  const [state, restarts, exitCode, oom, startedAt, memBytes, nanoCpus, cpuShares] = raw.split(STATUS_SEP);
   const bytes = intOrNull(memBytes);
   return {
     absent: false,
@@ -1603,6 +1681,8 @@ async function inspectFacts(container) {
     // 0 is Docker's "no limit", which is a different fact from "unknown" and
     // must not be rounded into 0 MB.
     memory_mb: bytes === null || bytes === 0 ? null : Math.round(bytes / (1024 * 1024)),
+    nano_cpus: intOrNull(nanoCpus),
+    cpu_shares: intOrNull(cpuShares),
   };
 }
 
@@ -1625,6 +1705,7 @@ async function perScopeStatus(engine, cfg, count) {
       oom_killed: facts.absent ? null : facts.oom_killed,
       started_at: facts.absent ? null : facts.started_at,
       memory_mb: facts.absent ? null : facts.memory_mb,
+      cpu_drift: facts.absent ? null : managedDbCpuDrift(cfg.cpus, facts),
       error: facts.error,
     };
   }));
@@ -1640,6 +1721,7 @@ async function perScopeStatus(engine, cfg, count) {
     host_port: null,
     memory_mb: null,
     configured_memory_mb: cfg.memoryMb,
+    configured_cpus: cfg.cpus,
     databases: count,
     // Aggregated across instances rather than invented: the maximum restart
     // count and "did ANY of them get OOM-killed", which is the question an
@@ -1686,6 +1768,8 @@ export async function serverStatus() {
       host_port: row?.host_port ?? cfg.defaultPort,
       memory_mb: null,
       configured_memory_mb: cfg.memoryMb,
+      configured_cpus: cfg.cpus,
+      cpu_drift: null,
       databases: count,
       restart_count: null,
       last_exit_code: null,
@@ -1693,6 +1777,10 @@ export async function serverStatus() {
       started_at: null,
       error: null,
     };
+    if (engine === 'mongo') {
+      const { kernel, status, message } = await dockerHostMongoCompat();
+      out.kernel_compat = { kernel, status, message };
+    }
 
     const facts = await inspectFacts(container);
     if (facts.absent) {
@@ -1706,6 +1794,7 @@ export async function serverStatus() {
     out.oom_killed = facts.oom_killed;
     out.started_at = facts.started_at;
     out.memory_mb = facts.memory_mb;
+    out.cpu_drift = managedDbCpuDrift(cfg.cpus, facts);
     return out;
   }));
 }

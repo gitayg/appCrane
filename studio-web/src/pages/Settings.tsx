@@ -1,8 +1,16 @@
 import { useState, useEffect, useRef, type ReactNode } from 'react'
 import { adminApi, authHeaders } from '../adminApi'
 import { useFlash, FocusInput, FocusTextarea } from '../components/formHelpers'
+import { PasswordInput } from '../components/secret/PasswordInput'
 import { Users } from './Users'
 import { AuditLog } from './AuditLog'
+import { JobHealth } from './JobHealth'
+import { S3BackupCard } from '../components/backup/S3BackupCard'
+import { ApiKeyCard } from '../components/ApiKeyCard'
+import { McpAuthPolicyCard } from '../components/McpAuthPolicyCard'
+import { EventRetentionCard } from '../components/events/EventRetentionCard'
+import { ServerCapacity } from './ServerCapacity'
+import { ClientErrors } from './ClientErrors'
 import { BrandingTab } from '../components/BrandingTab'
 import { Mcp } from './Mcp'
 import { SkillsTab } from '../components/SkillsTab'
@@ -10,7 +18,20 @@ import { ScimGroupMapping } from '../components/ScimGroupMapping'
 import { useMe, isAdmin } from '../hooks/useMe'
 import { GithubAppCard } from '../components/GithubAppCard'
 import { ClaudeTokenCard } from '../components/ClaudeTokenCard'
+import { ChangePasswordCard } from '../components/ChangePasswordCard'
 import { serverDate } from '../utils/serverDate'
+import { TwoFactorCard } from '../components/mfa/TwoFactorCard'
+import { RestoreDrillsCard } from '../components/backup/RestoreDrillsCard'
+import { EvidencePackPanel } from '../components/compliance/EvidencePackPanel'
+import { SignInPolicyCard } from '../components/mfa/SignInPolicyCard'
+import { OAuthAdminCard } from '../components/OAuthAdminCard'
+import { SiemSinks } from '../components/siem/SiemSinks'
+import { LlmGatewaySettingsCard } from '../components/llm/LlmGatewaySettingsCard'
+import { CryptographyCard } from '../components/crypto/CryptographyCard'
+import { ClassificationPolicyCard } from '../components/intake/ClassificationPolicyCard'
+import { AutoPatchPolicyCard } from '../components/autoPatch/AutoPatchPolicyCard'
+import { VulnAlertsCard } from '../components/vulnAlerts/VulnAlertsCard'
+import { RuntimePatchCard } from '../components/autoPatch/RuntimePatchCard'
 
 function SecurityTab() {
   const [certFile, setCertFile] = useState('')
@@ -56,6 +77,9 @@ function SecurityTab() {
   const [embed, setEmbed] = useState({ enabled: true, domain_override: '', derived_domain: '', effective: '' })
   const [embedSaved, flashEmbedSaved] = useFlash()
   const [embedError, setEmbedError] = useState<string | null>(null)
+  const [brotliGuard, setBrotliGuard] = useState(true)
+  const [brotliSaved, flashBrotliSaved] = useFlash()
+  const [brotliError, setBrotliError] = useState<string | null>(null)
 
   useEffect(() => {
     adminApi.get<{ value?: string }>('/api/settings/tls_cert_file').then(r => { if (r?.value) setCertFile(r.value) }).catch(() => {})
@@ -73,7 +97,19 @@ function SecurityTab() {
       .then(r => setCatalogEnabled(r?.value !== '0')).catch(() => {})
     adminApi.get<{ value?: string }>('/api/settings/auth_sso_only').then(r => setSsoOnly(r?.value === 'true')).catch(() => {})
     adminApi.get<typeof embed>('/api/settings/embed/config').then(r => { if (r) setEmbed(r) }).catch(() => {})
+    adminApi.get<{ enabled: boolean }>('/api/settings/edge/brotli').then(r => { if (r) setBrotliGuard(r.enabled) }).catch(() => {})
   }, [])
+
+  async function saveBrotliGuard(enabled: boolean) {
+    setBrotliError(null)
+    try {
+      await adminApi.put('/api/settings/edge/brotli', { enabled })
+      setBrotliGuard(enabled)
+      flashBrotliSaved()
+    } catch (e) {
+      setBrotliError(e instanceof Error ? e.message : 'Save failed')
+    }
+  }
 
   async function saveEmbed(next: { enabled?: boolean; domain_override?: string }) {
     setEmbedError(null)
@@ -241,8 +277,10 @@ function SecurityTab() {
         </div>
         <div style={fieldWrap}>
           <label style={labelStyle}>Client Secret</label>
-          <FocusInput
-            type="password"
+          <PasswordInput
+            styled
+            label="client secret"
+            autoComplete="new-password"
             value={oidcSecret}
             onChange={e => setOidcSecret(e.target.value)}
             placeholder={oidc.client_secret_set ? '••••••••••••' : 'Client secret'}
@@ -385,6 +423,29 @@ function SecurityTab() {
           </div>
         )}
         {embedError && <div style={{ fontSize: '.82rem', color: 'var(--red)' }}>{embedError}</div>}
+      </div>
+
+      <div className="setting-card">
+        <h3>Brotli-compressed uploads</h3>
+        <p>
+          Refuse request bodies compressed with Brotli (<code>Content-Encoding: br</code>) before they reach any
+          app. Node.js releases before 22.23.4, 24.22.1 and 26.12.1 can be taken over through such a body
+          (CVE-2026-111497). Browsers never send one. Turn this off only if an app really accepts Brotli uploads
+          and every app runs a patched Node.js. AppCrane itself refuses them either way.
+        </p>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <input
+            type="checkbox"
+            id="edge-brotli-guard"
+            checked={brotliGuard}
+            onChange={e => saveBrotliGuard(e.target.checked)}
+          />
+          <label htmlFor="edge-brotli-guard" style={{ fontSize: '.85rem' }}>
+            Refuse Brotli request bodies for hosted apps
+          </label>
+          {brotliSaved && <span className="saved-msg">Saved ✓</span>}
+        </div>
+        {brotliError && <div style={{ fontSize: '.82rem', color: 'var(--red)' }}>{brotliError}</div>}
       </div>
 
       <div className="setting-card">
@@ -879,8 +940,10 @@ function GithubTab() {
           <label style={{ fontSize: '.85rem', color: 'var(--dim)' }}>
             PAT {svc.configured && <span style={{ color: 'var(--green)' }}>· stored</span>}
           </label>
-          <FocusInput
-            type="password"
+          <PasswordInput
+            styled
+            label="personal access token"
+            autoComplete="new-password"
             value={svcToken}
             onChange={e => setSvcToken(e.target.value)}
             placeholder={svc.configured ? '•••••••• (leave empty to keep current)' : 'ghp_… or fine-grained token'}
@@ -966,11 +1029,17 @@ function MailTab() {
   const [secret, setSecret] = useState('')
   const [saved, flashSaved] = useFlash()
   const [test, setTest] = useState<{ ok: boolean; msg: string } | null>(null)
+  const [whatsNew, setWhatsNew] = useState(true)
+  const [whatsNewSaved, flashWhatsNewSaved] = useFlash()
 
   function load() {
     adminApi.get<{ mail: typeof cfg }>('/api/settings/mail/config').then(r => { if (r?.mail) setCfg(r.mail) }).catch(() => {})
   }
   useEffect(load, [])
+  useEffect(() => {
+    adminApi.get<{ value?: string | null }>('/api/settings/whats_new_email_enabled')
+      .then(r => setWhatsNew(r?.value !== '0')).catch(() => {})
+  }, [])
 
   async function save() {
     const body: Record<string, string> = {
@@ -1016,7 +1085,7 @@ function MailTab() {
       <FocusInput value={cfg.client_id} onChange={e => setCfg({ ...cfg, client_id: e.target.value })} placeholder="00000000-0000-0000-0000-000000000000" />
 
       <label>Client secret {cfg.client_secret_set && <span style={{ color: 'var(--green)' }}>— set ✓ (leave blank to keep)</span>}</label>
-      <FocusInput type="password" value={secret} onChange={e => setSecret(e.target.value)} placeholder={cfg.client_secret_set ? '••••••••' : 'paste the IT-provided secret'} />
+      <PasswordInput styled label="client secret" autoComplete="new-password" value={secret} onChange={e => setSecret(e.target.value)} placeholder={cfg.client_secret_set ? '••••••••' : 'paste the IT-provided secret'} />
 
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 12 }}>
         <button className="btn" onClick={save}>Save</button>
@@ -1027,6 +1096,25 @@ function MailTab() {
         </span>
       </div>
       {test && <p style={{ color: test.ok ? 'var(--green)' : 'var(--red)', marginTop: 8 }}>{test.msg}</p>}
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 20 }}>
+        <input
+          type="checkbox"
+          id="whats-new-email"
+          checked={whatsNew}
+          onChange={async e => {
+            const next = e.target.checked
+            setWhatsNew(next)
+            await adminApi.put('/api/settings/whats_new_email_enabled', { value: next ? '1' : '0' }).catch(() => {})
+            flashWhatsNewSaved()
+          }}
+        />
+        <label htmlFor="whats-new-email" style={{ fontSize: '.85rem' }}>E-mail app owners and platform admins what's new after each AppCrane upgrade</label>
+        {whatsNewSaved && <span style={{ color: 'var(--green)' }}>Saved</span>}
+      </div>
+      <p style={{ fontSize: '.75rem', color: 'var(--dim)', margin: '6px 0 0 24px' }}>
+        When an app ships a new production version, its owners and admins get that version's What's new by e-mail. Each app can turn this off on its app page.
+      </p>
     </div>
   )
 }
@@ -1045,8 +1133,6 @@ function BackupTab() {
   type OffSite = { configured?: boolean; has_off_site_copy?: boolean; notice?: string | null; missing?: string[] }
   type S3Cfg = { enabled?: boolean; bucket?: string; region?: string; prefix?: string; endpoint?: string; access_key_id?: string; has_secret?: boolean; hour?: number; last_run?: string | null; last_error?: string | null; off_site?: OffSite }
   const [s3, setS3] = useState<S3Cfg>({})
-  const [s3Secret, setS3Secret] = useState('')
-  const [s3Busy, setS3Busy] = useState(false)
   useEffect(() => { adminApi.get<S3Cfg>('/api/settings/backup/s3').then(setS3).catch(() => {}) }, [])
 
   // v2.79.0: scheduled LOCAL backup — on by default, db + .env only.
@@ -1082,27 +1168,8 @@ function BackupTab() {
     finally { setLocalBusy(false) }
   }
 
-  async function saveS3() {
-    setS3Busy(true); setMsg(null)
-    try {
-      const patch: Record<string, unknown> = { enabled: s3.enabled, bucket: s3.bucket, region: s3.region, prefix: s3.prefix, endpoint: s3.endpoint, access_key_id: s3.access_key_id, hour: s3.hour }
-      if (s3Secret.trim()) patch.secret_access_key = s3Secret.trim()
-      const next = await adminApi.put<S3Cfg>('/api/settings/backup/s3', patch)
-      setS3(next); setS3Secret('')
-      setMsg({ ok: true, text: 'S3 backup settings saved.' })
-    } catch (e) { setMsg({ ok: false, text: (e as Error).message }) }
-    finally { setS3Busy(false) }
-  }
-  async function runS3Now() {
-    setS3Busy(true); setMsg(null)
-    try {
-      const r = await adminApi.post<{ ok: boolean; key?: string; size?: number; error?: string }>('/api/settings/backup/s3/run', {})
-      if (!r.ok) throw new Error(r.error || 'Backup failed')
-      setMsg({ ok: true, text: `Uploaded ${r.key} (${Math.round((r.size || 0) / 1024)} KB).` })
-      adminApi.get<S3Cfg>('/api/settings/backup/s3').then(setS3).catch(() => {})
-    } catch (e) { setMsg({ ok: false, text: (e as Error).message }) }
-    finally { setS3Busy(false) }
-  }
+
+
 
   async function download() {
     setBusy(true); setMsg(null)
@@ -1236,30 +1303,8 @@ function BackupTab() {
       </p>
       {local.last_error && <p style={{ color: 'var(--red)', fontSize: '.8rem' }}>Last error: {local.last_error}</p>}
 
-      <h3 style={{ marginTop: 24 }}>Scheduled off-site backup (S3)</h3>
-      <p className="settings-hint">
-        Upload the config backup to an S3 bucket (or S3-compatible store like Cloudflare R2) once a night.
-        No-op until you enter a bucket and credentials. The IAM key needs <code>s3:PutObject</code> on the bucket.
-      </p>
-      <label style={{ display: 'block', margin: '6px 0' }}>
-        <input type="checkbox" checked={!!s3.enabled} onChange={e => setS3(s => ({ ...s, enabled: e.target.checked }))} />
-        {' '}Enable nightly S3 backup
-      </label>
-      <div style={{ display: 'grid', gridTemplateColumns: '110px 1fr', gap: 8, maxWidth: 540, alignItems: 'center', margin: '8px 0' }}>
-        <label>Bucket</label><input className="editable" value={s3.bucket ?? ''} onChange={e => setS3(s => ({ ...s, bucket: e.target.value }))} placeholder="my-appcrane-backups" />
-        <label>Region</label><input className="editable" value={s3.region ?? ''} onChange={e => setS3(s => ({ ...s, region: e.target.value }))} placeholder="us-east-1" />
-        <label>Prefix</label><input className="editable" value={s3.prefix ?? ''} onChange={e => setS3(s => ({ ...s, prefix: e.target.value }))} placeholder="(optional) appcrane/" />
-        <label>Endpoint</label><input className="editable" value={s3.endpoint ?? ''} onChange={e => setS3(s => ({ ...s, endpoint: e.target.value }))} placeholder="(optional — set for R2/MinIO)" />
-        <label>Access key</label><input className="editable" value={s3.access_key_id ?? ''} onChange={e => setS3(s => ({ ...s, access_key_id: e.target.value }))} placeholder="AKIA…" />
-        <label>Secret key</label><input className="editable" type="password" value={s3Secret} onChange={e => setS3Secret(e.target.value)} placeholder={s3.has_secret ? '•••• stored — blank keeps current' : 'secret access key'} />
-        <label>Hour (0–23)</label><input className="editable" type="number" min={0} max={23} value={s3.hour ?? 3} onChange={e => setS3(s => ({ ...s, hour: Number(e.target.value) }))} style={{ width: 90 }} />
-      </div>
-      <div style={{ display: 'flex', gap: 8 }}>
-        <button className="btn" onClick={saveS3} disabled={s3Busy}>Save S3 settings</button>
-        <button className="btn" onClick={runS3Now} disabled={s3Busy}>{s3Busy ? '…' : 'Back up to S3 now'}</button>
-      </div>
-      {s3.last_run && <p className="settings-hint" style={{ marginTop: 6 }}>Last off-site backup: {new Date(s3.last_run).toLocaleString()}</p>}
-      {s3.last_error && <p style={{ color: 'var(--red)', fontSize: '.8rem' }}>Last error: {s3.last_error}</p>}
+      <S3BackupCard onConfig={setS3} />
+      <RestoreDrillsCard />
 
       {msg && <p style={{ color: msg.ok ? 'var(--green)' : 'var(--red)', marginTop: 12 }}>{msg.text}</p>}
     </div>
@@ -1273,12 +1318,19 @@ function BackupTab() {
  * role gate — a plain user reaches it exactly as a platform admin does.
  */
 function AccountTab() {
-  return <ClaudeTokenCard />
+  return (
+    <>
+      <ChangePasswordCard />
+      <TwoFactorCard />
+      <ClaudeTokenCard />
+      <ApiKeyCard />
+    </>
+  )
 }
 
-type Tab = 'account' | 'security' | 'users' | 'roles' | 'github' | 'mail' | 'backup' | 'branding' | 'audit' | 'mcp' | 'skills'
+type Tab = 'account' | 'security' | 'users' | 'roles' | 'github' | 'mail' | 'backup' | 'jobs' | 'branding' | 'audit' | 'client-errors' | 'mcp' | 'skills' | 'compliance'
 
-const VALID_TABS: Tab[] = ['account', 'security', 'users', 'roles', 'github', 'mail', 'backup', 'branding', 'audit', 'mcp', 'skills']
+const VALID_TABS: Tab[] = ['account', 'security', 'users', 'roles', 'github', 'mail', 'backup', 'jobs', 'branding', 'audit', 'client-errors', 'mcp', 'skills', 'compliance']
 
 function getTab(): Tab {
   // GitHub's App-manifest redirect lands on /settings?code=…&state=…, and its
@@ -1355,15 +1407,18 @@ export function Settings() {
       {panel('account', <AccountTab />)}
       {panel('mcp', <Mcp />)}
       {panel('skills', <SkillsTab />)}
-      {panel('security', <SecurityTab />)}
+      {panel('security', <><SecurityTab /><SignInPolicyCard /><McpAuthPolicyCard /><OAuthAdminCard /><ClassificationPolicyCard /><VulnAlertsCard /><AutoPatchPolicyCard /><RuntimePatchCard /><CryptographyCard /><LlmGatewaySettingsCard /><SiemSinks /></>)}
       {panel('users', <Users />)}
       {panel('roles', <RolesTab />)}
       {panel('github', <GithubTab />)}
       {panel('mail', <MailTab />)}
       {panel('backup', <BackupTab />)}
+      {panel('jobs', <><ServerCapacity /><JobHealth /><EventRetentionCard /></>)}
+      {panel('compliance', <EvidencePackPanel />)}
       {/* v2.6.9: skills tab removed from Settings — now top-level /skills */}
       {panel('branding', <BrandingTab />)}
       {panel('audit', <AuditLog />)}
+      {panel('client-errors', <ClientErrors />)}
     </div>
   )
 }

@@ -7,9 +7,13 @@ import { Icon } from './icons'
 import { WhatsNewModal, type WhatsNewChange } from './WhatsNewModal'
 import { useAppTabs } from './AppTabsContext'
 import { CredentialAlertBanner } from './CredentialAlertBanner'
+import { ViewAsBanner } from './ViewAsBanner'
+import { ViewAsControl } from './ViewAsControl'
+import { useTaskCount } from './tasks/useTaskCount'
 import { UpdateBlockedDialog } from './UpdateBlockedDialog'
 import { buildsInFlightOf, isConnectionDrop, waitForNewVersion, type BuildsInFlight } from './selfUpdateFlow'
 import { serverDate } from '../utils/serverDate'
+import { setClientErrorVersion } from '../lib/clientErrors'
 
 interface NavItem { id: string; label: string; href: string; icon: ReactElement; external?: boolean; platformAdminOnly?: boolean; adminOnly?: boolean; ownerOrAdmin?: boolean }
 interface NavApp {
@@ -93,11 +97,14 @@ const NAV: NavItem[] = [
   { id: 'launch',       label: 'Launch',       href: '/launch',       icon: <Icon.Grid /> },
   { id: 'dashboard',    label: 'Dashboard',    href: '/dashboard',    icon: <Icon.Dashboard /> },
   { id: 'applications', label: 'Manage',       href: '/applications', icon: <Icon.Layers /> },
+  { id: 'adopt',        label: 'Adopt an app', href: '/adopt',        icon: <Icon.Plus /> },
   { id: 'requests',     label: 'Requests',     href: '/requests',     icon: <Icon.Lightbulb /> },
   // v2.105.0: Crew — the platform-wide agent hub. Ungated: every person can
   // own agents, and the API scopes every row to the caller (the roster is
   // platform-wide by design, decisions and blocks are the caller's own).
   { id: 'crew',         label: 'Crew',         href: '/crew',         icon: <Icon.Users /> },
+  { id: 'tasks',        label: 'My tasks',     href: '/tasks',        icon: <Icon.Check /> },
+  { id: 'access-reviews', label: 'My reviews', href: '/access-reviews', icon: <Icon.ShieldCheck /> },
   // v2.59.x: the app catalogue. Deliberately ungated — every logged-in user
   // may browse it; only the per-row Deploy button is conditioned on
   // `platform.create_app`, which the page learns from GET /api/catalog.
@@ -110,6 +117,13 @@ const NAV: NavItem[] = [
   // client-side role test can predict who it will answer usefully — the page
   // says "no audit entries you can see" instead.
   { id: 'audit',        label: 'Audit',        href: '/audit',        icon: <Icon.ShieldCheck /> },
+  // Ungated like Audit: platform admins get every event, others fall back to their own activity.
+  { id: 'events',       label: 'Events',       href: '/events',       icon: <Icon.Activity /> },
+  // Ungated like Audit: the surveys API answers non-owners with 403 and the page explains.
+  { id: 'surveys',      label: 'NPS & surveys', href: '/surveys',     icon: <Icon.Activity /> },
+  { id: 'intake',       label: 'Intake',       href: '/intake',       icon: <Icon.ShieldCheck />, platformAdminOnly: true },
+  { id: 'access-review-campaigns', label: 'Access reviews', href: '/access-reviews/campaigns', icon: <Icon.ShieldCheck />, platformAdminOnly: true },
+  { id: 'audit-integrity', label: 'Audit integrity', href: '/audit-integrity', icon: <Icon.ShieldCheck />, platformAdminOnly: true },
   { id: 'docs',         label: 'Docs',         href: '/docs',         icon: <Icon.Book /> },
   { id: 'settings',     label: 'Settings',     href: '/settings',     icon: <Icon.Settings /> },
 ]
@@ -130,12 +144,20 @@ export function Layout({ children, subItems, activeSub }: Props) {
   // v2.14.1: whether the user can create apps — gates the sidebar "+ Add
   // Application" button (mirrors canCreateApps: admins or a granted tier).
   const [canCreate, setCanCreate] = useState(false)
-  const [collapsed, setCollapsed] = useState(() => localStorage.getItem('cc_sb_col') === '1')
+  const [pinned, setPinned] = useState(() => { try { return localStorage.getItem('cc_sb_pin') === '1' } catch { return false } })
+  const [peek, setPeek] = useState(false)
+  const sidebarRef = useRef<HTMLElement>(null)
+  const openTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const pointerInside = useRef(false)
+  const lastPointer = useRef<string>('mouse')
+  const pointerDownAt = useRef(0)
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     const v = parseInt(localStorage.getItem('cc_sb_w') || '', 10)
     return v >= 180 && v <= 460 ? v : 220
   })
   const [mobileOpen, setMobileOpen] = useState(false)
+  const collapsed = !pinned && !peek && !mobileOpen
   const [theme, setTheme] = useState(() => localStorage.getItem('cc_theme') || 'dark')
   const [userName, setUserName] = useState('')
   // v2.5.9: AppCrane version + update info is platform_admin-only. We
@@ -151,6 +173,8 @@ export function Layout({ children, subItems, activeSub }: Props) {
   // Crew phase 3: questions and first contacts waiting for YOU (GET /api/crew/waiting).
   // The in-app notification for Crew; ongoing Crew work never e-mails.
   const [crewWaiting, setCrewWaiting] = useState(0)
+  const taskCounts = useTaskCount()
+  const taskBadge = Math.max(taskCounts.open_assigned, taskCounts.unread)
   // v2.13.0: AppCrane's own What's New, shown to platform admins post-login
   // when the running version is newer than what they last saw.
   const [platformWN, setPlatformWN] = useState<{ currentVersion: string | null; changes: WhatsNewChange[]; seenUrl?: string; primaryLabel?: string; onPrimary?: () => void } | null>(null)
@@ -207,7 +231,7 @@ export function Layout({ children, subItems, activeSub }: Props) {
     // resolved. We deliberately skip /api/version-check fallback for
     // non-platform-admins because the endpoint now enforces the same.
     adminApi.get<{ version?: string }>('/api/info')
-      .then(d => { if (d?.version) setVersion('v' + d.version) })
+      .then(d => { if (d?.version) { setVersion('v' + d.version); setClientErrorVersion(d.version) } })
       .catch(() => {})
   }, [isAuthed])
 
@@ -360,11 +384,76 @@ export function Layout({ children, subItems, activeSub }: Props) {
     return () => document.removeEventListener('click', handleClick)
   }, [notifOpen])
 
-  const toggleCollapse = () => {
-    const next = !collapsed
-    setCollapsed(next)
-    localStorage.setItem('cc_sb_col', next ? '1' : '')
+  const togglePin = () => {
+    const next = !pinned
+    setPinned(next)
+    if (!next) setPeek(pointerInside.current)
+    try { localStorage.setItem('cc_sb_pin', next ? '1' : '') } catch (_) { /* private mode */ }
   }
+
+  // Unpinned, the sidebar rests as an icon rail and opens over the page (no
+  // reflow) on hover, focus or a tap. Hover-intent delays keep a pointer that
+  // merely crosses the rail from flickering it open.
+  const HOVER_OPEN_MS = 150
+  const HOVER_CLOSE_MS = 300
+  const clearPeekTimers = () => {
+    if (openTimer.current) clearTimeout(openTimer.current)
+    if (closeTimer.current) clearTimeout(closeTimer.current)
+    openTimer.current = closeTimer.current = null
+  }
+  useEffect(() => clearPeekTimers, [])
+  const isNarrow = () => window.matchMedia('(max-width: 768px)').matches
+  const onSidebarPointerEnter = (e: React.PointerEvent) => {
+    lastPointer.current = e.pointerType
+    if (e.pointerType === 'touch') return
+    pointerInside.current = true
+    if (pinned || isNarrow()) return
+    clearPeekTimers()
+    openTimer.current = setTimeout(() => setPeek(true), HOVER_OPEN_MS)
+  }
+  const onSidebarPointerLeave = (e: React.PointerEvent) => {
+    if (e.pointerType === 'touch') return
+    pointerInside.current = false
+    if (pinned) return
+    clearPeekTimers()
+    closeTimer.current = setTimeout(() => setPeek(false), HOVER_CLOSE_MS)
+  }
+  const onSidebarPointerDown = (e: React.PointerEvent) => { lastPointer.current = e.pointerType; pointerDownAt.current = Date.now() }
+  // Touch has no hover: the first tap on the resting rail opens it instead of
+  // following whatever icon was under the finger.
+  const onSidebarClickCapture = (e: React.MouseEvent) => {
+    if (lastPointer.current !== 'touch' || pinned || peek || isNarrow()) return
+    e.preventDefault()
+    e.stopPropagation()
+    setPeek(true)
+  }
+  const onSidebarFocus = () => {
+    if (pinned || isNarrow()) return
+    if (lastPointer.current === 'touch' && Date.now() - pointerDownAt.current < 800) return
+    clearPeekTimers()
+    setPeek(true)
+  }
+  const onSidebarBlur = (e: React.FocusEvent) => {
+    if (pinned || pointerInside.current) return
+    if (e.relatedTarget && sidebarRef.current?.contains(e.relatedTarget as Node)) return
+    setPeek(false)
+  }
+  const onSidebarKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key !== 'Escape' || pinned || !peek) return
+    clearPeekTimers()
+    setPeek(false)
+  }
+  useEffect(() => {
+    if (!peek || pinned) return
+    const onDown = (ev: PointerEvent) => {
+      if (sidebarRef.current && !sidebarRef.current.contains(ev.target as Node)) { clearPeekTimers(); setPeek(false) }
+    }
+    document.addEventListener('pointerdown', onDown)
+    return () => document.removeEventListener('pointerdown', onDown)
+  }, [peek, pinned])
+  useEffect(() => {
+    if (lastPointer.current === 'touch' && !pointerInside.current) setPeek(false)
+  }, [location.pathname])
 
   const toggleTheme = () => {
     const next = theme === 'dark' ? 'light' : 'dark'
@@ -457,8 +546,8 @@ export function Layout({ children, subItems, activeSub }: Props) {
   useEffect(() => {
     const root = document.documentElement.style
     root.setProperty('--sidebar-w', sidebarWidth + 'px')
-    root.setProperty('--content-left', (collapsed ? 56 : sidebarWidth) + 'px')
-  }, [collapsed, sidebarWidth])
+    root.setProperty('--content-left', (pinned ? sidebarWidth : 56) + 'px')
+  }, [pinned, sidebarWidth])
 
   // Drag-to-resize the sidebar. Persists the final width on mouse-up.
   const startResize = useCallback((e: React.MouseEvent) => {
@@ -558,7 +647,7 @@ export function Layout({ children, subItems, activeSub }: Props) {
   const renderNavItem = (p: NavItem) => (
     <div key={p.id}>
       {p.external ? (
-        <a href={p.href} className={'sidebar-link' + (location.pathname === p.href ? ' active' : '')} title={p.label}>
+        <a href={p.href} className={'sidebar-link' + (location.pathname === p.href ? ' active' : '')} title={p.label} aria-label={collapsed ? p.label : undefined}>
           <span className="sidebar-link-icon">{p.icon}</span>
           <span className="sidebar-link-text">{p.label}</span>
         </a>
@@ -568,11 +657,15 @@ export function Layout({ children, subItems, activeSub }: Props) {
           className={({ isActive }) => 'sidebar-link' + (isActive ? ' active' : '')}
           title={p.id === 'requests' && openRequests > 0 ? `${p.label} — ${openRequests} open`
             : p.id === 'crew' && crewWaiting > 0 ? `${p.label}: ${crewWaiting} waiting for you` : p.label}
+          aria-label={!collapsed ? undefined
+            : p.id === 'requests' && openRequests > 0 ? `${p.label}, ${openRequests} open`
+            : p.id === 'crew' && crewWaiting > 0 ? `${p.label}, ${crewWaiting} waiting for you` : p.label}
         >
           <span className="sidebar-link-icon">{p.icon}</span>
           <span className="sidebar-link-text">{p.label}</span>
           {p.id === 'requests' && openRequests > 0 && <span className="sidebar-link-badge">{openRequests}</span>}
           {p.id === 'crew' && crewWaiting > 0 && <span className="sidebar-link-badge" aria-label={`${crewWaiting} waiting for you`}>{crewWaiting}</span>}
+          {p.id === 'tasks' && taskBadge > 0 && <span className="sidebar-link-badge" aria-label={`${taskCounts.open_assigned} open, ${taskCounts.unread} unread`}>{taskBadge}</span>}
         </NavLink>
       )}
       {activeNavId === p.id && subItems && subItems.length > 0 && !collapsed && (
@@ -604,7 +697,19 @@ export function Layout({ children, subItems, activeSub }: Props) {
       {mobileOpen && <div className="sidebar-overlay open" onClick={() => setMobileOpen(false)} />}
 
       {/* Sidebar */}
-      <aside className={`admin-sidebar${collapsed ? ' collapsed' : ''}${mobileOpen ? ' open' : ''}`} id="mainSidebar">
+      <aside
+        ref={sidebarRef}
+        className={`admin-sidebar${collapsed ? ' collapsed' : ''}${peek && !pinned ? ' peek' : ''}${pinned ? ' pinned' : ''}${mobileOpen ? ' open' : ''}`}
+        id="mainSidebar"
+        aria-label="Main navigation"
+        onPointerEnter={onSidebarPointerEnter}
+        onPointerLeave={onSidebarPointerLeave}
+        onPointerDown={onSidebarPointerDown}
+        onClickCapture={onSidebarClickCapture}
+        onFocus={onSidebarFocus}
+        onBlur={onSidebarBlur}
+        onKeyDown={onSidebarKeyDown}
+      >
         {/* Logo + version */}
         <div className="sidebar-logo-section">
           <a href="/dashboard" className="sidebar-logo">
@@ -660,6 +765,7 @@ export function Layout({ children, subItems, activeSub }: Props) {
             className="sidebar-add-app btn btn-accent"
             onClick={() => navigate('/applications', { state: { addApp: true } })}
             title="Add Application"
+            aria-label="Add Application"
           >{collapsed ? '+' : '+ Add Application'}</button>
         )}
         <nav className="sidebar-nav">
@@ -751,6 +857,7 @@ export function Layout({ children, subItems, activeSub }: Props) {
                   onClick={() => { addTab({ slug: a.slug, name: a.name, hasIcon: a.has_icon }); navigate(`/launch/${a.slug}`) }}
                   onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); addTab({ slug: a.slug, name: a.name, hasIcon: a.has_icon }); navigate(`/launch/${a.slug}`) } }}
                   title={a.name}
+                  aria-label={a.name}
                 >
                   <span className="sidebar-app-ico">
                     {a.has_icon
@@ -799,7 +906,8 @@ export function Layout({ children, subItems, activeSub }: Props) {
                 </div>
               </div>
             )}
-            <button className="sidebar-signout" onClick={signOut} title="Sign out">
+            {!collapsed && <ViewAsControl className="theme-btn" />}
+            <button className="sidebar-signout" onClick={signOut} title="Sign out" aria-label="Sign out">
               {collapsed ? '⎋' : 'Sign out'}
             </button>
             <button className="theme-btn" onClick={toggleTheme} title="Toggle theme">
@@ -807,18 +915,20 @@ export function Layout({ children, subItems, activeSub }: Props) {
             </button>
             <button
               className="sidebar-collapse-btn"
-              onClick={toggleCollapse}
+              onClick={togglePin}
               style={{ marginLeft: 'auto' }}
-              title={collapsed ? 'Expand' : 'Collapse'}
+              aria-pressed={pinned}
+              aria-label={pinned ? 'Stop keeping the sidebar expanded' : 'Keep the sidebar expanded'}
+              title={pinned ? 'Collapse to icons, expand on hover' : 'Keep expanded'}
             >
-              {collapsed ? '▸' : '◄'}{!collapsed && <span> Collapse</span>}
+              {pinned ? '◄' : '📌'}{!collapsed && <span>{pinned ? ' Unpin' : ' Keep expanded'}</span>}
             </button>
           </div>
         </div>
       </aside>
 
       {/* v2.21.0: drag handle to resize the sidebar (hidden in the icon rail). */}
-      {!collapsed && (
+      {pinned && (
         <div
           className="sidebar-resizer"
           onMouseDown={startResize}
@@ -830,7 +940,8 @@ export function Layout({ children, subItems, activeSub }: Props) {
       )}
 
       {/* Page content */}
-      <main className={`admin-content${collapsed ? ' collapsed' : ''}`}>
+      <main className={`admin-content${pinned ? '' : ' collapsed'}`}>
+        <ViewAsBanner />
         <CredentialAlertBanner />
         {children}
       </main>

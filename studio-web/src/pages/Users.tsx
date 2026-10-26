@@ -1,6 +1,10 @@
 import { useState, useEffect, useRef } from 'react'
 import { adminApi } from '../adminApi'
 import { serverDate } from '../utils/serverDate'
+import { PasswordInput } from '../components/secret/PasswordInput'
+import { SetUserPasswordModal } from '../components/SetUserPasswordModal'
+import { UserApiKeyCell } from '../components/UserApiKeyCell'
+import { ResetMfaButton } from '../components/mfa/ResetMfaButton'
 
 interface User {
   id: number
@@ -18,6 +22,8 @@ interface User {
   department?: string | null
   region?: string | null
   location?: string | null
+  api_key_expires_at?: string | null
+  api_key_expired?: number
 }
 
 interface App {
@@ -52,6 +58,7 @@ export function Users() {
   // stay in sync, and the modal is easier with many apps. The wide
   // matrix stays for now as a power-user / bulk-edit affordance.
   const [appsModalUser, setAppsModalUser] = useState<User | null>(null)
+  const [passwordUser, setPasswordUser] = useState<User | null>(null)
   const [newKind, setNewKind] = useState<'human' | 'agent'>('human')
   const [kindFilter, setKindFilter] = useState<'all' | 'human' | 'agent'>('human')
   // Modal shows the result of any key-issuance flow. `kind === 'mcp'` →
@@ -189,12 +196,6 @@ export function Users() {
     adminApi.put(`/api/users/${id}/profile`, { [field]: value || null }).catch(() => {})
   }
 
-  async function setPassword(id: number) {
-    const pw = prompt('New password:')
-    if (!pw) return
-    await adminApi.put(`/api/users/${id}/password`, { password: pw }).catch(() => {})
-  }
-
   async function deleteUser(id: number) {
     if (!confirm('Delete this user?')) return
     await adminApi.del(`/api/users/${id}`).catch(() => {})
@@ -319,9 +320,9 @@ export function Users() {
               <label style={{ fontSize: '0.75rem', color: 'var(--dim)' }}>
                 Password{newKind === 'human' ? ' *' : ''}
               </label>
-              <input
+              <PasswordInput
                 ref={passwordRef}
-                type="password"
+                label="password"
                 style={{ width: 120, opacity: newKind === 'agent' ? 0.5 : 1 }}
                 placeholder={newKind === 'agent' ? '(not used)' : 'Password'}
                 disabled={newKind === 'agent'}
@@ -359,6 +360,7 @@ export function Users() {
             <th>Location</th>
             <th>Password</th>
             <th>Last login</th>
+            <th>API key</th>
             <th>Delete</th>
           </tr>
         </thead>
@@ -438,10 +440,14 @@ export function Users() {
                   {u.has_password && (
                     <span style={{ color: 'var(--green)', marginRight: 6 }}>&#10003;</span>
                   )}
-                  <button className="btn btn-xs" onClick={() => setPassword(u.id)}>set</button>
+                  <button className="btn btn-xs" onClick={() => setPasswordUser(u)}>set</button>
                 </td>
                 <td>
                   <span style={{ color: 'var(--dim)', fontSize: '0.82rem' }} title={abs}>{rel}</span>
+                </td>
+                <td>
+                  <UserApiKeyCell user={u} onRotated={loadUsers} />
+                  <ResetMfaButton userId={u.id} userName={u.name} />
                 </td>
                 <td>
                   <div style={{ display: 'flex', gap: 4, justifyContent: 'flex-end' }}>
@@ -480,6 +486,10 @@ export function Users() {
           The matrix is gone — same surface area, less visual noise,
           and it scales to many apps × many users without becoming a
           400-cell soup. */}
+
+      {passwordUser && (
+        <SetUserPasswordModal user={passwordUser} onClose={() => setPasswordUser(null)} onSaved={loadUsers} />
+      )}
 
       {mcpKeyModal.open && (
         <div

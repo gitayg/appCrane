@@ -51,3 +51,14 @@ test('MCP: appcrane_reveal_secret on production needs the owner or a platform ad
   const s = await callTool(APPADMIN.row, 'appcrane_reveal_secret', { slug: 'reveal', env: 'sandbox', key: 'API_TOKEN' });
   assert.match(JSON.stringify(s), /secret-sandbox/);
 });
+
+test('MCP: appcrane_get_secret hides a production value\'s length and tail from an app admin who cannot reveal it', async () => {
+  const unwrap = (r) => (r?.content?.[0]?.text ? JSON.parse(r.content[0].text) : r);
+  const admin = unwrap(await callTool(APPADMIN.row, 'appcrane_get_secret', { slug: 'reveal', env: 'production' }));
+  const v = admin.vars.find((x) => x.key === 'API_TOKEN');
+  assert.equal(v.length, undefined, 'an app admin saw a production value\'s length');
+  assert.match(v.preview, /^•+$/, 'an app admin saw a production value\'s tail');
+  assert.equal(v.fingerprint, undefined, 'an app admin got a production fingerprint to match against sandbox');
+  const owner = unwrap(await callTool(OWNER.row, 'appcrane_get_secret', { slug: 'reveal', env: 'production' }));
+  assert.equal(owner.vars.find((x) => x.key === 'API_TOKEN').length, 'secret-production'.length);
+});

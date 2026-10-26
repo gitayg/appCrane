@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { adminApi } from '../adminApi'
-import { FocusInput } from './formHelpers'
+import { PasswordInput } from './secret/PasswordInput'
 
 /**
  * The signed-in user's own Claude subscription token.
@@ -163,8 +163,9 @@ export function ClaudeTokenCard() {
 
       <div style={{ marginBottom: 12 }}>
         <label style={labelStyle}>Paste a token</label>
-        <FocusInput
-          type="password"
+        <PasswordInput
+          styled
+          label="token"
           value={token}
           onChange={e => setToken(e.target.value)}
           onPaste={e => {

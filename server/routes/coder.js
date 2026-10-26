@@ -31,6 +31,9 @@ import { watchReleaseDeploy } from '../services/builder/releaseWatch.js';
 import { usesLocalRepo, pushFilesToManagedRepo } from '../services/managedRepo.js';
 import { getQueueState } from '../services/builder/appQueue.js';
 import { fetchReleasesAndChangelog, renderReleasesPage } from '../services/github/releases.js';
+import { isAppOwnerOrPlatformAdmin } from '../services/permissions.js';
+import { bucketize, applyBucket } from '../services/requestStatus.js';
+import { buildRequestsPrompt, MAX_DISPATCH_REQUESTS } from '../services/builder/requestsPrompt.js';
 import log from '../utils/logger.js';
 
 const router = Router();
@@ -114,6 +117,7 @@ function getApp(slug, user) {
  * `fix` is written for the person reading it, not for the code that raised it.
  */
 export function coderGaps(app, user) {
+  if (!isAppOwnerOrPlatformAdmin(user, app)) return [OWNER_ONLY_GAP];
   const gaps = [];
   const source = String(app.source_type || '');
 
@@ -193,6 +197,15 @@ export function coderGaps(app, user) {
   return gaps;
 }
 
+const OWNER_ONLY_MESSAGE = 'Only the app owner or a platform admin can use the coder';
+
+const OWNER_ONLY_GAP = {
+  code: 'NOT_APP_OWNER',
+  title: OWNER_ONLY_MESSAGE,
+  detail: 'The coder edits this app\'s code and reads every conversation held about it, so it is reserved for the app\'s owner and platform admins.',
+  fix: 'Ask the app owner to make the change, or send it as a request.',
+};
+
 /** Whether `user` may release on `app` — the predicate requireAppAdmin enforces. */
 function canReleaseOn(app, user) {
   if (user.role === 'platform_admin') return true;
@@ -265,10 +278,41 @@ router.get('/models', (req, res) => {
 router.get('/:slug/availability', (req, res) => {
   const app = getApp(req.params.slug, req.user);
   const gaps = coderGaps(app, req.user);
-  res.json({ available: gaps.length === 0, can_release: canReleaseOn(app, req.user), gaps });
+  const coderUser = isAppOwnerOrPlatformAdmin(req.user, app);
+  res.json({
+    available: gaps.length === 0,
+    can_release: coderUser && canReleaseOn(app, req.user),
+    can_dispatch_requests: coderUser,
+    gaps,
+  });
 });
 
+// Every route registered below this line is the app owner's or a platform
+// admin's alone: sessions, transcripts, the stream, changes, release, the
+// container. One gate, ahead of all of them, so a new route cannot forget it.
+// App admins, members and outsiders all get the same 403 — the refusal every
+// other coder access check already answers with.
+router.use('/:slug', (req, res, next) => {
+  const app = getDb().prepare('SELECT * FROM apps WHERE slug = ?').get(req.params.slug);
+  if (!app) return next(new AppError(`App '${req.params.slug}' not found`, 404, 'NOT_FOUND'));
+  if (!isAppOwnerOrPlatformAdmin(req.user, app)) return next(new AppError(OWNER_ONLY_MESSAGE, 403, 'FORBIDDEN'));
+  next();
+});
+
+// Another user holds the app's coder: BUILDER_OCCUPIED (idle, take_over would
+// work), BUILDER_BUSY (mid-turn, nothing can take it), TAKEOVER_FAILED (their
+// work could not be saved, so nothing was touched).
+function throwOccupancy(err) {
+  if (['BUILDER_OCCUPIED', 'BUILDER_BUSY', 'TAKEOVER_FAILED'].includes(err.code)) {
+    throw new AppError(err.message, 409, err.code);
+  }
+}
+
 // ── POST /api/coder/:slug/session — start a new session ─────────────────
+//
+// Body (optional): { take_over: true } — when another user's session holds the
+// app's container and is idle, save their unreleased work to an agent/* branch,
+// pause their session and start this one (builder/coderTakeover.js).
 
 router.post('/:slug/session', auditMiddleware('coder.start'), async (req, res) => {
   const app = getApp(req.params.slug, req.user);
@@ -288,24 +332,112 @@ router.post('/:slug/session', auditMiddleware('coder.start'), async (req, res) =
   };
 
   try {
-    const sessionId = await createSession(app, req.user.id, onLog);
+    const sessionId = await createSession(app, req.user.id, onLog, { takeOver: req.body?.take_over === true });
     res.status(201).json({ session_id: sessionId, log: logs });
   } catch (err) {
-    if (err.code === 'BUILDER_OCCUPIED') {
-      throw new AppError(err.message, 409, 'BUILDER_OCCUPIED');
-    }
+    throwOccupancy(err);
     throw err;
   }
 });
 
+// ── POST /api/coder/:slug/requests/dispatch — send requests to the coder ──
+//
+// Body: { request_ids: [id, ...] }, all of them this app's open requests, in
+// the order they should be worked. They become ONE prompt in ONE session —
+// the caller's own live session if they have one (createSession returns it, so
+// the batch lands where they are already reviewing work; a turn in flight
+// queues it as a follow-up), else a new one. The owner of the app or a platform
+// admin only: dispatching spends the caller's Claude credential on work other
+// people asked for, which is a triage decision, not a member's.
+//
+// Refused whole, before anything changes: an id that is unknown or another
+// app's (one answer for both, so the refusal does not confirm which ids exist
+// elsewhere), a request already shipped or validated, or a coder that is not
+// available here (the first gap is the message; all of them ride along).
+router.post('/:slug/requests/dispatch', async (req, res) => {
+  const app = getApp(req.params.slug, req.user);
+  if (!isAppOwnerOrPlatformAdmin(req.user, app)) {
+    throw new AppError(`Only the owner of '${app.slug}' or a platform admin can send its requests to the coder`, 403, 'FORBIDDEN');
+  }
+
+  const ids = req.body?.request_ids;
+  if (!Array.isArray(ids) || ids.length === 0 || ids.some((id) => !Number.isInteger(id) || id <= 0)) {
+    throw new AppError('request_ids must be a non-empty array of request ids', 400, 'VALIDATION');
+  }
+  if (new Set(ids).size !== ids.length) throw new AppError('request_ids lists a request twice', 400, 'VALIDATION');
+  if (ids.length > MAX_DISPATCH_REQUESTS) {
+    throw new AppError(
+      `At most ${MAX_DISPATCH_REQUESTS} requests go to the coder at once: they run as one turn and are reviewed and released together. Send the rest in another batch.`,
+      400,
+      'TOO_MANY_REQUESTS',
+    );
+  }
+
+  const db = getDb();
+  const found = db.prepare(
+    `SELECT id, user_name, message, created_at, status, validated_at FROM enhancement_requests
+     WHERE app_slug = ? AND id IN (${ids.map(() => '?').join(', ')})`,
+  ).all(app.slug, ...ids);
+  if (found.length !== ids.length) {
+    throw new AppError(`One or more of these requests is not a request on '${app.slug}'. Nothing was sent.`, 404, 'NOT_FOUND');
+  }
+  const byId = new Map(found.map((r) => [r.id, r]));
+  const rows = ids.map((id) => byId.get(id));
+
+  const closed = rows.filter((r) => !['triage', 'in_progress'].includes(bucketize(r.status, r.validated_at)));
+  if (closed.length) {
+    throw new AppError(
+      `Already shipped or validated: ${closed.map((r) => `#${r.id}`).join(', ')}. Nothing was sent.`,
+      409,
+      'REQUEST_CLOSED',
+    );
+  }
+
+  const gaps = coderGaps(app, req.user);
+  if (gaps.length) {
+    return res.status(409).json({
+      error: { code: 'CODER_UNAVAILABLE', message: `The coder isn't available here: ${gaps[0].title}`, gaps },
+    });
+  }
+
+  let sessionId;
+  let r;
+  try {
+    sessionId = await createSession(app, req.user.id, (msg) => log.info(`[builder:${app.slug}] ${msg}`));
+    r = await dispatch(sessionId, buildRequestsPrompt(rows), { userId: req.user.id });
+  } catch (err) {
+    if (err.code === 'BUILDER_OCCUPIED') throw new AppError(err.message, 409, 'BUILDER_OCCUPIED');
+    if (err.code === 'SESSION_PAUSED') throw new AppError(err.message, 409, 'SESSION_PAUSED');
+    throw err;
+  }
+
+  // Only once the prompt is in: a refusal above leaves every request as it was.
+  const stamp = db.prepare('UPDATE enhancement_requests SET coder_session_id = ? WHERE id = ?');
+  db.transaction(() => {
+    for (const row of rows) {
+      if (bucketize(row.status, row.validated_at) !== 'in_progress') applyBucket(db, row.id, 'in_progress', req.user.id);
+      stamp.run(sessionId, row.id);
+    }
+  })();
+  logAudit(req.user.id, app.id, 'coder.dispatch-requests', { session: sessionId, request_ids: ids, queued: !!r?.queued });
+
+  res.json({ session_id: sessionId, request_ids: ids, queued: !!r?.queued });
+});
+
 // ── GET /api/coder/:slug/session — get active/latest session ─────────────
 
+// The caller's own live session first: once they have started one, the panel
+// must not keep opening a colleague's newer one. Otherwise the app's latest,
+// with its owner's display name, so the panel can say whose it is.
 router.get('/:slug/session', (req, res) => {
   getApp(req.params.slug, req.user);
   const db = getDb();
   const session = db.prepare(`
-    SELECT * FROM coder_sessions WHERE app_slug = ? ORDER BY created_at DESC LIMIT 1
-  `).get(req.params.slug);
+    SELECT s.*, u.name AS user_name FROM coder_sessions s LEFT JOIN users u ON u.id = s.user_id
+    WHERE s.app_slug = ?
+    ORDER BY (s.user_id = ? AND s.status IN ('starting', 'idle', 'active', 'queued', 'paused')) DESC, s.created_at DESC, s.rowid DESC
+    LIMIT 1
+  `).get(req.params.slug, req.user.id);
   if (!session) return res.json({ session: null });
   res.json({ session });
 });
@@ -328,7 +460,8 @@ router.get('/:slug/session/:id', (req, res) => {
   // Pending follow-ups ride along with the transcript: this is the call the
   // chat makes on every (re)connect, so it is what makes a typed-ahead message
   // survive F5.
-  res.json({ session, messages, followups: listFollowups(session.id) });
+  const userName = db.prepare('SELECT name FROM users WHERE id = ?').get(session.user_id)?.name ?? null;
+  res.json({ session: { ...session, user_name: userName }, messages, followups: listFollowups(session.id) });
 });
 
 // ── POST /api/coder/:slug/session/:id/attachments — upload one file ─────
@@ -438,7 +571,7 @@ router.delete('/:slug/session/:id/followups/:followupId', (req, res) => {
 router.post('/:slug/session/:id/stop', (req, res) => {
   const app = getApp(req.params.slug, req.user);
   const session = getSession(req.params.id, req.params.slug);
-  // Stopping spends nothing, so an app admin may stop a colleague's runaway turn.
+  // Stopping spends nothing, so the app owner and a platform admin may stop each other's runaway turn.
   if (session.user_id !== req.user.id && !canReleaseOn(app, req.user)) assertSessionOwner(session, req.user);
   stopDispatch(req.params.id);
   res.json({ message: 'Stopped' });
@@ -463,11 +596,10 @@ router.post('/:slug/session/:id/resume', auditMiddleware('coder.resume'), async 
 
   const logs = [];
   try {
-    await resumeSession(req.params.id, (msg) => { logs.push(msg); log.info(`[builder:resume] ${msg}`); });
+    await resumeSession(req.params.id, (msg) => { logs.push(msg); log.info(`[builder:resume] ${msg}`); },
+      { takeOver: req.body?.take_over === true });
   } catch (err) {
-    if (err.code === 'BUILDER_OCCUPIED') {
-      throw new AppError(err.message, 409, 'BUILDER_OCCUPIED');
-    }
+    throwOccupancy(err);
     throw err;
   }
   res.json({ message: 'Session resumed', log: logs });

@@ -330,6 +330,7 @@ input:focus{border-color:var(--accent)}
        the React component. Post-build job polling moves to the 📋 Jobs
        panel (one source of truth). -->
   <crane-request-panel id="planPanel" iframe-selector="#frameIframe"></crane-request-panel>
+  <crane-survey-card id="surveyCard"></crane-survey-card>
 
   <!-- Bug report panel — same pipeline as Request, structured fields -->
   <!-- Bug panel — Custom Element from /docs/shared/crane-topbar.js so the
@@ -480,6 +481,7 @@ input:focus{border-color:var(--accent)}
 </div>
 
 <script>
+document.title = location.hostname + ' - AppCrane';
 const API = window.location.origin;
 const params = new URLSearchParams(window.location.search);
 const appSlug = params.get('app');
@@ -1122,6 +1124,8 @@ function openApp(url, name, slug, hasIcon, appData) {
     if (_currentAppProdVersion) tb.setAttribute('prod-version', _currentAppProdVersion); else tb.removeAttribute('prod-version');
     if (_currentAppSandVersion) tb.setAttribute('sand-version', _currentAppSandVersion); else tb.removeAttribute('sand-version');
   }
+  const sc = document.getElementById('surveyCard');
+  if (sc) { sc.setAttribute('app-name', name || ''); if (_currentAppEnv === 'prod' && slug) sc.setAttribute('slug', slug); else sc.removeAttribute('slug'); }
   document.getElementById('jobsBtn').style.display = '';
   refreshJobsBadge();
 
@@ -1219,6 +1223,7 @@ function closeApp() {
     tb.removeAttribute('prod-url'); tb.removeAttribute('sand-url');
     tb.removeAttribute('prod-version'); tb.removeAttribute('sand-version');
   }
+  document.getElementById('surveyCard')?.removeAttribute('slug');
   currentAppSlug = null;
   stopPresence();
 }

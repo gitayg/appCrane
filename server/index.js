@@ -63,10 +63,15 @@ import planRoutes from './routes/plan.js';
 import coderRoutes from './routes/coder.js';
 import skillsRoutes from './routes/skills.js';
 import mcpRoutes from './routes/mcp.js';
+import oauthRoutes, { wellKnownRouter as oauthWellKnownRoutes } from './routes/oauth.js';
+import oauthConsentRoutes from './routes/oauthConsent.js';
+import viewAsRoutes from './routes/viewAs.js';
+import { viewAsWriteGuard } from './middleware/viewAsGuard.js';
 import userMcpKeysRoutes from './routes/userMcpKeys.js';
 import userAppKeysRoutes from './routes/userAppKeys.js';
 import meRoutes from './routes/me.js';
 import filesRoutes, { sweepStagedFiles } from './routes/files.js';
+import stagedFilesRoutes, { sweepChunkedUploads } from './routes/stagedFiles.js';
 import githubServiceRoutes from './routes/githubService.js';
 import githubAppRoutes from './routes/githubApp.js';
 import githubAppWebhookRoutes, { rawWebhookBody } from './routes/githubAppWebhook.js';
@@ -77,12 +82,19 @@ import serviceApiRoutes from './routes/serviceApi.js';
 import noticesRoutes from './routes/notices.js';
 import catalogRoutes from './routes/catalog.js';
 import crewRoutes from './routes/crew.js';
+import surveysRoutes from './routes/surveys.js';
 import a2aRoutes, { wellKnownAgentCard } from './routes/a2a.js';
+import gitHttpRoutes from './routes/gitHttp.js';
+import clientErrorsRoutes, { adminRouter as clientErrorsAdminRoutes } from './routes/clientErrors.js';
 import { refererSlug } from './utils/refererSlug.js';
 import { globalNotices } from './services/platformNotices.js';
+import { enforceFipsAtStartup } from './services/fipsMode.js';
+import appMcpRoutes, { appMcpWellKnownRouter } from './routes/appMcp.js';
 
 const PORT = process.env.PORT || 5001;
 const HOST = process.env.HOST || '0.0.0.0';
+
+try { enforceFipsAtStartup({ log }); } catch (e) { log.error(e.message); process.exit(1); }
 
 // Initialize database
 initDb();
@@ -114,6 +126,9 @@ app.use((req, res, next) => {
   res.setHeader('X-Permitted-Cross-Domain-Policies', 'none');
   next();
 });
+// CVE-2026-111497: refuse Brotli request bodies before any body parser, raw or
+// JSON, can hand them to the vulnerable decoder. Must stay above every route.
+app.use((await import('./middleware/brotliGuard.js')).createBrotliGuard());
 
 /**
  * No-store on API responses (v2.35.1).
@@ -141,7 +156,7 @@ const apiRateLimit = createApiRateLimit();
 // MCP-E (v2.2.18): reap expired staged_files rows + their scratch dirs every
 // 5 minutes. Idempotent; safe across server restarts (the row's expires_at
 // is the source of truth, not in-memory state).
-setInterval(() => { try { sweepStagedFiles(); } catch (_) {} }, 5 * 60_000);
+setInterval(() => { try { sweepStagedFiles(); } catch (_) {} try { sweepChunkedUploads(); } catch (_) {} }, 5 * 60_000);
 
 /**
  * v2.36.0: `script-src` no longer allows 'unsafe-inline'.
@@ -310,6 +325,11 @@ app.use('/api/github-app/webhook', rawWebhookBody);
 // its own bodies with a 256 KB cap, and authenticates every request with a
 // Crew agent token (no requireAuth — agents are not users).
 app.use('/a2a', a2aRoutes);
+// git clone/fetch over HTTPS for Crane-hosted apps. Before express.json(): the
+// upload-pack request body is a binary (often gzipped) stream git must read raw.
+app.use('/git', gitHttpRoutes);
+app.use('/api/service/llm', (await import('./routes/llmGateway.js')).default); // LLM gateway for hosted apps (gateway-token auth, internal-only, own body limit; before the 50 MB parser)
+app.use('/api', clientErrorsRoutes); // POST /api/client-errors: browser error reports, own 8 KB parser (before the 50 MB one)
 app.use(express.json({ limit: '50mb', type: ['application/json', 'application/scim+json'] }));
 app.use(express.urlencoded({ extended: true }));
 
@@ -413,7 +433,7 @@ crane init --name admin --email you@example.com</pre>
 // so it never sees them today, but listing them keeps a future reorder from
 // 307ing an agent's A2A call (or a card fetch made from inside an app page)
 // into an app's prefix.
-const APPCRANE_PASSTHROUGH = ['/api/identity', '/api/apps', '/api/info', '/api/notices', '/api/_crashed', '/api/me', '/api/directory', '/api/mcp', '/api/service', '/api/enhancements', '/favicon.svg', '/docs', '/a2a', '/.well-known'];
+const APPCRANE_PASSTHROUGH = ['/api/identity', '/api/apps', '/api/info', '/api/notices', '/api/_crashed', '/api/me', '/api/directory', '/api/mcp', '/api/service', '/api/enhancements', '/favicon.svg', '/docs', '/a2a', '/.well-known', '/oauth'];
 const APPCRANE_PAGE_SLUGS = new Set(['login', 'portal', 'dashboard', 'applications', 'users-page', 'audit-page', 'settings', 'docs', 'app', 'studio', 'appstudio']);
 app.use((req, res, next) => {
   if (req.method === 'OPTIONS') return next();
@@ -748,7 +768,7 @@ app.post('/api/self-update', requireAuth, requirePlatformAdmin, async (req, res)
     // — when is it safe to touch system packages on a live host? — is testable
     // without apt.
     {
-      const { planNodeUpgrade, verifyUpgrade } = await import('./services/nodeUpgrade.js');
+      const { planNodeUpgrade, verifyUpgrade, verifySecurityUpgrade } = await import('./services/nodeUpgrade.js');
       const which = (bin) => {
         try {
           return execFileSync('/bin/sh', ['-c', `command -v ${bin}`], { stdio: 'pipe' }).toString().trim();
@@ -764,7 +784,19 @@ app.post('/api/self-update', requireAuth, requirePlatformAdmin, async (req, res)
         skipEnv: process.env.APPCRANE_SKIP_NODE_UPGRADE,
         arch: process.arch,
         underSafeBoot: process.env.APPCRANE_SAFE_BOOT === '1',
+        currentVersion: process.versions.node,
       });
+      // A security upgrade stays on this major and never stops the update: the
+      // host already runs this runtime, so a failed attempt is reported, not fatal.
+      const targetMajor = plan.security ? plan.targetMajor : incomingFloor;
+      const verdictFor = (installedVersion) => (plan.security
+        ? verifySecurityUpgrade(installedVersion)
+        : verifyUpgrade(Number(installedVersion.split('.')[0]), incomingFloor));
+      const settle = (verdict) => {
+        if (verdict.ok) return log.info(`[self-update] ${verdict.message}`);
+        if (plan.security) return log.error(`[self-update] ${verdict.message}`);
+        throw new Error(`Self-update aborted: ${verdict.message}`);
+      };
 
       if (plan.upgrade && plan.method === 'bundled') {
         // v2.92.0: no root, so no apt. Download the official build into the
@@ -774,31 +806,40 @@ app.post('/api/self-update', requireAuth, requirePlatformAdmin, async (req, res)
         // restart.
         log.info(`[self-update] ${plan.message}`);
         const { installBundledNode } = await import('./services/bundledNode.js');
-        const { version, binDir } = await installBundledNode({
-          major: incomingFloor, appcraneDir: cwd, log: (m) => log.info(`[self-update] ${m}`),
-        });
-        process.env.PATH = `${binDir}:${process.env.PATH}`;
-        const installed = Number(execFileSync('node', ['-v'], { stdio: 'pipe' })
-          .toString().trim().replace(/^v/, '').split('.')[0]);
-        const verdict = verifyUpgrade(installed, incomingFloor);
-        if (!verdict.ok) throw new Error(`Self-update aborted: ${verdict.message}`);
-        log.info(`[self-update] Node ${version} is on PATH for this update and every boot after it.`);
+        let bundledNode = null;
+        try {
+          bundledNode = await installBundledNode({
+            major: targetMajor, appcraneDir: cwd, log: (m) => log.info(`[self-update] ${m}`),
+          });
+        } catch (e) {
+          if (!plan.security) throw e;
+          log.error(`[self-update] could not download a patched Node ${targetMajor}: ${e.message}`);
+        }
+        if (bundledNode) {
+          const { version, binDir } = bundledNode;
+          process.env.PATH = `${binDir}:${process.env.PATH}`;
+          settle(verdictFor(execFileSync('node', ['-v'], { stdio: 'pipe' }).toString().trim().replace(/^v/, '')));
+          log.info(`[self-update] Node ${version} is on PATH for this update and every boot after it.`);
+        }
       } else if (plan.upgrade) {
         log.info(`[self-update] ${plan.message}`);
-        for (const [bin, args] of plan.commands) {
-          execFileSync(bin, args, {
-            cwd, stdio: 'pipe', timeout: 300000,
-            env: { ...process.env, DEBIAN_FRONTEND: 'noninteractive' },
-          });
+        try {
+          for (const [bin, args] of plan.commands) {
+            execFileSync(bin, args, {
+              cwd, stdio: 'pipe', timeout: 300000,
+              env: { ...process.env, DEBIAN_FRONTEND: 'noninteractive' },
+            });
+          }
+        } catch (e) {
+          if (!plan.security) throw e;
+          log.error(`[self-update] the Node security upgrade failed: ${e.message}`);
         }
         // Asked of the node now on PATH, not of this process: it keeps running
         // the binary it started with and would report the old version whatever
         // apt did.
-        const installed = Number(execFileSync('node', ['-v'], { stdio: 'pipe' })
-          .toString().trim().replace(/^v/, '').split('.')[0]);
-        const verdict = verifyUpgrade(installed, incomingFloor);
-        if (!verdict.ok) throw new Error(`Self-update aborted: ${verdict.message}`);
-        log.info(`[self-update] ${verdict.message}`);
+        settle(verdictFor(execFileSync('node', ['-v'], { stdio: 'pipe' }).toString().trim().replace(/^v/, '')));
+      } else if (plan.security) {
+        log.warn(`[self-update] ${plan.message}`);
       } else if (plan.blocking) {
         // Refused, not warned. A host left on the previous release is in better
         // shape than one that installed dependencies its runtime cannot run —
@@ -972,7 +1013,13 @@ app.get('/api/self-update/status', requireAuth, requireAdmin, (req, res) => {
 
 // API Routes
 app.use('/api', apiRateLimit);
+app.use('/api', viewAsWriteGuard);       // view as role is read-only: refuses every write from a previewing credential
+app.use('/.well-known', oauthWellKnownRoutes); // MCP OAuth: RFC 9728 + RFC 8414 metadata
+app.use('/.well-known', appMcpWellKnownRouter); // MCP front door: per-app RFC 9728 metadata
+app.use('/oauth', oauthRoutes);          // MCP OAuth: register / authorize / token / revoke
+app.use('/api/oauth', oauthConsentRoutes); // MCP OAuth consent data + connected clients (signed-in)
 app.use('/api/auth', authRoutes);
+app.use('/api/auth', viewAsRoutes);      // /api/auth/view-as, /view-as-options, /stop-viewing-as
 app.use('/api/auth/oidc', oidcRoutes);
 app.use('/api/auth/saml', samlRoutes);
 app.use('/api/auth/popup', ssoPopupRoutes); // popup sign-in completion script (framed sign-in)
@@ -1002,6 +1049,16 @@ app.use('/api/apps', envVarsRoutes);     // /api/apps/:slug/env/:env
 app.use('/api/apps', envFilesRoutes);    // /api/apps/:slug/env-files — stored .env files of a Crane-hosted app
 app.use('/api/apps', healthRoutes);      // /api/apps/:slug/health/:env
 app.use('/api/apps', backupsRoutes);     // /api/apps/:slug/backup/:env
+app.use('/api/apps', (await import('./routes/accessRules.js')).default); // /api/apps/:slug/access-rules[/:env]: path role rules
+app.use('/api', (await import('./routes/apiKeys.js')).default); // /api/me/api-key, /api/me/api-key/rotate, /api/api-key-policy
+app.use('/api', (await import('./routes/intake.js')).default); // /api/apps/:slug/intake[/review], /api/apps/:slug/classification, /api/intake/queue, /api/data-classification/{policy,apps}
+app.use('/api', (await import('./routes/releaseCheck.js')).default); // /api/apps/:slug/release-check[/run|/exceptions]
+app.use('/api', (await import('./routes/autoPatch.js')).default); // /api/auto-patch/policy, /api/apps/:slug/auto-patch
+app.use('/api', (await import('./routes/accessReviews.js')).default); // /api/access-reviews/*: periodic access reviews
+app.use('/api', (await import('./routes/auditChain.js')).default); // /api/audit-chain/*: tamper-evident audit
+app.use('/api/adopt', (await import('./routes/adopt.js')).default); // Adopt an app: analyse a GitHub repo or zip, adopt to sandbox
+app.use('/api/llm-gateway', (await import('./routes/llmGateway.js')).adminRouter); // LLM gateway config + usage (platform admin)
+app.use('/api/apps', (await import('./routes/llmGateway.js')).appRouter); // /api/apps/:slug/llm-gateway[/overrides|/usage]
 app.use('/api/apps', managedDbRoutes);   // /api/apps/:slug/database — shared Postgres/MariaDB, one DB + one user per app
 app.use('/api/apps', notificationsRoutes); // /api/apps/:slug/notifications
 // /api/apps/:slug/app-roles — the roles an app defines for ITSELF. Distinct
@@ -1013,8 +1070,11 @@ app.use('/api/apps', appRolesRoutes);
 app.use('/api/catalog', catalogRoutes);  // Curated self-hostable app catalogue (requireAuth — every logged-in user)
 app.use('/api/crew', crewRoutes);        // Crew: platform-wide agent hub (requireAuth; per-row ownership in services/crew.js)
 // Mount identity FIRST so its routes don't get caught by other middleware
+app.use('/api/identity/mfa', (await import('./routes/mfa.js')).default); // local MFA second step + self-service + sign-in policy
 app.use('/api/identity', identityRoutes);
 app.use('/api/enhancements', enhancementsRoutes); // Enhancement requests (Bearer auth, must be before logsRoutes)
+app.use('/api/service/tasks', (await import('./routes/tasksService.js')).default); // Tasks API for hosted apps (service-token auth, internal-only)
+app.use('/api/tasks', (await import('./routes/tasks.js')).default); // My tasks: per-user inbox across apps (requireAuth; party-only in services/tasks.js)
 app.use('/api/service', serviceApiRoutes); // v2.8.0 internal app service API (service-token auth, internal-only)
 app.use('/api/appstudio', appstudioRoutes); // AppStudio plan/code/build pipeline
 app.use('/api/skills', skillsRoutes);       // Skill bundles loaded by all CLI agents via ~/.claude/skills/
@@ -1029,6 +1089,7 @@ app.use('/api/coder', coderRoutes);       // AppCrane Studio (API key + Bearer a
 // no reachable client either — studio-web/src/api.ts was the only caller, and
 // nothing rendered the App.tsx that imported it. AIDE talks this shape to its
 // own server, not to AppCrane. /api/coder is the coder surface.
+app.use('/api/mcp/apps', appMcpRoutes);  // MCP front door for hosted apps
 app.use('/api/mcp', mcpRoutes);          // Model Context Protocol endpoint (JSON-RPC + admin catalog)
 // MUST precede every router mounted at the bare '/api' — userMcpKeysRoutes,
 // logsRoutes and monitoringRoutes each do a pathless `router.use(requireAuth)`,
@@ -1043,6 +1104,11 @@ app.use('/api/mcp', mcpRoutes);          // Model Context Protocol endpoint (JSO
 // Safe to hoist ONLY because settingsRoutes now carries its own per-key auth
 // (v2.38.0). Before that, this accidental ordering WAS its protection, and
 // moving it would have made every setting world-readable.
+app.use('/api/settings', (await import('./routes/jobHealth.js')).default); // /api/settings/job-health (platform admin)
+app.use('/api/settings/client-errors', clientErrorsAdminRoutes); // aggregated browser errors (platform admin)
+app.use('/api/settings', (await import('./routes/restoreDrills.js')).default); // /api/settings/restore-drills (platform admin)
+app.use('/api/evidence-packs', (await import('./routes/evidencePack.js')).default); // compliance evidence packs (platform admin)
+app.use('/api/settings', (await import('./routes/siem.js')).default); // /api/settings/siem: SIEM and log streaming (platform admin)
 app.use('/api/settings', settingsRoutes); // General settings (branding, etc.)
 
 // v2.7.17: meRoutes MUST come before userMcpKeysRoutes. userMcpKeys's
@@ -1055,7 +1121,8 @@ app.use('/api/settings', settingsRoutes); // General settings (branding, etc.)
 // collide with /me/mcp-keys/*.
 app.use('/api', meRoutes);               // /api/me — proxied-app identity endpoint (cookie/Bearer/X-API-Key)
 app.use('/api', userMcpKeysRoutes);      // /api/me/mcp-keys — personal MCP keys
-app.use('/api/me/app-keys', userAppKeysRoutes); // personal app sign-in keys (dhk_uak_*), v2.108.0
+app.use('/api/files/staged', stagedFilesRoutes);   // chunked staged uploads: POST /chunked, PUT /:handle?offset=N, POST /:handle/finalize
+app.use('/api/me/app-keys', userAppKeysRoutes); // personal app sign-in keys (dhk_uak_*), v2.124.0
 app.use('/api/files', filesRoutes);      // /api/files/staged — staged uploads for MCP-E
 app.use('/api/github-service', githubServiceRoutes); // service-account config + verify (admin)
 app.use('/api/github-app/webhook', githubAppWebhookRoutes); // GitHub App webhook receiver (no auth: X-Hub-Signature-256 only) — must precede the admin router below
@@ -1063,6 +1130,8 @@ app.use('/api/github-app', githubAppRoutes);         // per-instance GitHub App:
 app.use('/api/apps', appGithubAppRoutes);           // /api/apps/:slug/github-app — attach an app to an installation
 app.use('/api/apps', whatsNewRoutes);     // /api/apps/:slug/whats-new — per-user version dialog state
 app.use('/api/whats-new', platformWhatsNewRoutes); // /api/whats-new/platform — AppCrane update dialog (platform admins)
+app.use('/api/surveys', surveysRoutes);    // /api/surveys — in-app NPS surveys: pending card, answers, results, admin config
+app.use('/api', (await import('./routes/events.js')).default); // /api/events, /api/apps/:slug/events, /api/me/events: shared event store
 
 app.use('/api', logsRoutes);             // /api/audit, /api/:slug/audit, /api/:slug/logs/:env
 app.use('/api', monitoringRoutes);       // /api/server/health
@@ -1193,6 +1262,8 @@ app.get('/enhancements-page', (req, res) => sendHtml(res, adminSpa));
 // AppStudio collapsed in v1.27.38: Requests + Builders are top-level
 // SPA routes; the React router redirects /appstudio → /requests.
 app.get('/requests', (req, res) => sendHtml(res, adminSpa));
+// One request's own page; the dependency digest links here.
+app.get('/requests/*splat', (req, res) => sendHtml(res, adminSpa));
 // v2.16.0: personal "My Requests" view (any signed-in user, see + delete own).
 app.get('/my-requests', (req, res) => sendHtml(res, adminSpa));
 app.get('/builders', (req, res) => sendHtml(res, adminSpa)); // legacy — SPA redirects to /requests
@@ -1213,10 +1284,20 @@ app.get('/catalog', (req, res) => sendHtml(res, adminSpa));
 app.get('/audit', (req, res) => sendHtml(res, adminSpa));
 // v2.105.0: Crew, the agent hub. The first-contact e-mail links to /crew#log.
 app.get('/crew', (req, res) => sendHtml(res, adminSpa));
+app.get('/events', (req, res) => sendHtml(res, adminSpa)); // Events timeline
+app.get('/adopt', (req, res) => sendHtml(res, adminSpa));
+app.get('/intake', (req, res) => sendHtml(res, adminSpa));
+app.get('/access-reviews', (req, res) => sendHtml(res, adminSpa));
+app.get('/access-reviews/campaigns', (req, res) => sendHtml(res, adminSpa));
+app.get('/access-reviews/campaigns/:id', (req, res) => sendHtml(res, adminSpa));
+app.get('/audit-integrity', (req, res) => sendHtml(res, adminSpa));
+app.get('/tasks', (req, res) => sendHtml(res, adminSpa)); // My tasks; task e-mails link to /tasks?task=<id>
+app.get('/surveys', (req, res) => sendHtml(res, adminSpa)); // NPS & surveys; survey e-mails link to /surveys?app=<slug>
 // Found by the same test: /skills is a client-side redirect to /settings#skills,
 // but a direct load never reaches React to be redirected.
 app.get('/skills', (req, res) => sendHtml(res, adminSpa));
 app.get('/mcp', (req, res) => sendHtml(res, adminSpa));
+app.get('/mcp/authorize', (req, res) => sendHtml(res, adminSpa)); // MCP OAuth consent screen
 app.get('/studio', (req, res) => res.redirect(301, '/appstudio'));
 app.get('/studio/*splat', (req, res) => res.redirect(301, '/appstudio'));
 app.get('/coder', (req, res) => res.redirect(301, '/studio')); // legacy redirect
@@ -1372,6 +1453,7 @@ app.listen(PORT, HOST, async () => {
     log.warn('    Node 20 left long-term support in April 2026 and receives no security patches.');
     log.warn('');
   }
+  for (const line of (await import('./services/nodeSecurityCheck.js')).bootSecurityWarnings()) log.warn(line);
 
   // Boot sentinel — confirms this process actually started with this version.
   // Also reconciles any pending self-update left by a previous process exit.
@@ -1637,6 +1719,41 @@ app.listen(PORT, HOST, async () => {
     log.error('Metrics sampler failed to start: ' + e.message);
   }
 
+  // Server memory and disk for Job Health, with alerts to platform admins.
+  try {
+    const { startHostResourceMonitor } = await import('./services/hostResources.js');
+    startHostResourceMonitor();
+    try { const { startApiKeyExpiryJob } = await import('./services/apiKeyExpiry.js'); startApiKeyExpiryJob(); } catch (e) { log.error('API key expiry job failed to start: ' + e.message); }
+    try { const { startEventRetention } = await import('./services/eventRetention.js'); startEventRetention(); } catch (e) { log.error('Event retention job failed to start: ' + e.message); }
+    try { const { startAuditChain } = await import('./services/auditChain.js'); startAuditChain(); } catch (e) { log.error('Audit chain job failed to start: ' + e.message); }
+    try { const { startMongoKernelCheck } = await import('./services/mongoKernelCheck.js'); startMongoKernelCheck(); } catch (e) { log.error('MongoDB kernel check failed to start: ' + e.message); }
+    try { const { startNodeSecurityCheck } = await import('./services/nodeSecurityCheck.js'); startNodeSecurityCheck(); } catch (e) { log.error('Node.js security check failed to start: ' + e.message); }
+    try { const { startAccessReviews } = await import('./services/accessReviews/index.js'); startAccessReviews(); } catch (e) { log.error('Access review job failed to start: ' + e.message); }
+    try { (await import('./services/siem/delivery.js')).startSiemDelivery(); } catch (e) { log.error('SIEM delivery failed to start: ' + e.message); }
+  } catch (e) {
+    log.error('Host resource monitor failed to start: ' + e.message);
+  }
+
+  // Ask the kernel to kill app containers before AppCrane under whole-host OOM.
+  try {
+    const { protectFromOom } = await import('./services/oomSelfProtect.js');
+    const r = protectFromOom();
+    if (r.status === 'set') log.info(`OOM priority: oom_score_adj set to ${r.value} (was ${r.previous})`);
+    else if (r.status === 'not-permitted' || r.status === 'failed') log.warn(`OOM priority unchanged: ${r.reason}`);
+  } catch (e) {
+    log.warn('OOM priority check failed: ' + e.message);
+  }
+
+  // Give Caddy, sshd and AppCrane CPU weight over app containers (cpuPriority.js).
+  try {
+    const { ensureHostCpuPriority, recordHostCpuPriority } = await import('./services/cpuPriority.js');
+    const r = recordHostCpuPriority(ensureHostCpuPriority());
+    if (r.status === 'set') log.info(`CPU priority: CPUWeight drop-in written for ${r.written.join(', ')}`);
+    else if (r.status === 'not-permitted' || r.status === 'failed') log.warn(`CPU priority unchanged: ${r.reason}`);
+  } catch (e) {
+    log.warn('CPU priority check failed: ' + e.message);
+  }
+
   // v2.21.9: nightly off-site (S3) backup — no-op until configured in Settings.
   try {
     const { startBackupScheduler } = await import('./services/backupScheduler.js');
@@ -1655,6 +1772,9 @@ app.listen(PORT, HOST, async () => {
   try {
     const { startLocalBackupScheduler } = await import('./services/localBackup.js');
     startLocalBackupScheduler();
+    try { const { startRestoreDrillScheduler } = await import('./services/restoreDrills.js'); startRestoreDrillScheduler(); } catch (e) { log.error('Restore drill scheduler failed to start: ' + e.message); }
+    try { const { startAutoPatchWorker } = await import('./services/autoPatch/worker.js'); startAutoPatchWorker(); } catch (e) { log.error('Auto-patch worker failed to start: ' + e.message); }
+    try { const { startRuntimePatchWorker } = await import('./services/autoPatch/runtimeWorker.js'); startRuntimePatchWorker(); } catch (e) { log.error('Runtime patch worker failed to start: ' + e.message); }
     // AppCrane has no setup wizard — boot IS first run. So the state gets said
     // once, in the log every new install reads, rather than waiting for someone
     // to open Settings → Backup. One line per boot, not a standing banner: the
@@ -1677,6 +1797,15 @@ app.listen(PORT, HOST, async () => {
     startVulnScheduler();
   } catch (e) {
     log.error('Vulnerability scan scheduler failed to start: ' + e.message);
+  }
+
+  // After an upgrade, mail app owners and platform admins what changed, once
+  // per release (services/whatsNewMail.js). Runs off the startup path.
+  try {
+    const { scheduleWhatsNewMail } = await import('./services/whatsNewMail.js');
+    scheduleWhatsNewMail();
+  } catch (e) {
+    log.error('What\'s New mail failed to schedule: ' + e.message);
   }
 
   // Failed-login alerts for the managed databases: reads the shared servers'
@@ -1735,7 +1864,9 @@ app.listen(PORT, HOST, async () => {
             VALUES (?, 'production', 'pending', 'auto-queued after PM2 cleanup')
           `).run(app.id);
           log.info(`  → ${app.slug} (deploy id ${r.lastInsertRowid})`);
-          deployApp(r.lastInsertRowid, app, 'production', ports).catch(err => {
+          const live = db.prepare("SELECT commit_sha, commit_hash FROM deployments WHERE app_id = ? AND env = 'production' AND status = 'live' ORDER BY id DESC LIMIT 1").get(app.id) || {};
+          const liveCommit = [live.commit_sha, live.commit_hash].find(c => /^[0-9a-f]{7,40}$/i.test(String(c || '')));
+          deployApp(r.lastInsertRowid, app, 'production', ports, liveCommit ? { releaseCheck: 'skip', targetCommit: liveCommit } : {}).catch(err => {
             log.error(`     ${app.slug} failed: ${err.message}`);
           });
         } catch (e) {
@@ -1768,7 +1899,7 @@ app.listen(PORT, HOST, async () => {
     // was deployed >5min ago. If the latest deploy failed, or was just attempted,
     // don't redeploy — same code → same failure → CPU drain.
     const liveDeploys = db.prepare(`
-      SELECT a.*, d.env AS deploy_env, d.finished_at AS deploy_finished_at
+      SELECT a.*, d.env AS deploy_env, d.finished_at AS deploy_finished_at, d.commit_sha AS live_commit_sha, d.commit_hash AS live_commit_hash
       FROM apps a
       JOIN deployments d ON d.app_id = a.id
       WHERE d.id = (
@@ -1790,7 +1921,8 @@ app.listen(PORT, HOST, async () => {
             VALUES (?, ?, 'pending', 'auto-heal: live deploy had no running container')
           `).run(row.id, row.deploy_env);
           log.info(`  → ${row.slug}-${row.deploy_env} (deploy id ${r.lastInsertRowid})`);
-          deployApp(r.lastInsertRowid, row, row.deploy_env, ports).catch(err => {
+          const liveCommit = [row.live_commit_sha, row.live_commit_hash].find(c => /^[0-9a-f]{7,40}$/i.test(String(c || '')));
+          deployApp(r.lastInsertRowid, row, row.deploy_env, ports, liveCommit ? { releaseCheck: 'skip', targetCommit: liveCommit } : {}).catch(err => {
             log.error(`     ${row.slug}-${row.deploy_env} failed: ${err.message}`);
           });
         } catch (e) {

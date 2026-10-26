@@ -118,6 +118,7 @@ import {
   newOpaqueId, revokeRulesForAgent, auditRulesRevokedByBlock, ruleSummary,
 } from './crewRules.js';
 import log from '../utils/logger.js';
+import { jobStarted, trackJobSync } from './jobHealth.js';
 
 export const CREW_LIMITS = Object.freeze({
   TASKS_PER_HOUR: 60,          // per sending agent
@@ -1351,7 +1352,7 @@ export function startCrewRetentionScheduler() {
       const today = new Date().toISOString().slice(0, 10);
       const last = db.prepare("SELECT value FROM settings WHERE key = 'crew_retention_last_run'").get()?.value;
       if (last === today) return;
-      const r = purgeExpiredCrewHistory(db);
+      const r = trackJobSync('crew-retention', () => purgeExpiredCrewHistory(db));
       db.prepare(`INSERT INTO settings (key, value, updated_at) VALUES ('crew_retention_last_run', ?, datetime('now'))
                   ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`).run(today);
       if (r.tasks || r.messages) log.info(`[crew] retention removed ${r.tasks} task(s) and ${r.messages} message(s) older than ${CREW_LIMITS.RETENTION_DAYS} days`);
@@ -1359,6 +1360,7 @@ export function startCrewRetentionScheduler() {
       log.warn(`[crew] retention tick failed: ${e.message}`);
     }
   };
+  jobStarted('crew-retention');
   tick();
   _timer = setInterval(tick, 60 * 60 * 1000);
   _timer.unref?.();

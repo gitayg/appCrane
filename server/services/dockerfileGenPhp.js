@@ -2,8 +2,8 @@ import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { writeFileInside } from '../utils/paths.js';
 import log from '../utils/logger.js';
+import { choosePhpVersion } from './phpVersion.js';
 
-const PHP_IMAGE = 'php:8.3-apache';
 const COMPOSER_IMAGE = 'composer:2';
 
 /**
@@ -265,7 +265,7 @@ function apacheConfLines(docroot) {
  * `warnings` are host-side findings (raised at generation time), as opposed to
  * the ones the generated build prints while it runs.
  */
-export function generatePhpDockerfile({ releaseDir, manifest }) {
+export function generatePhpDockerfile({ releaseDir, manifest, pinnedPhpVersion = null }) {
   const warnings = [];
   const composerJson = readJson(join(releaseDir, 'composer.json')); // nosemgrep: path-join-resolve-traversal — releaseDir is an internal computed path
   if (!composerJson) {
@@ -288,6 +288,7 @@ export function generatePhpDockerfile({ releaseDir, manifest }) {
     );
   }
 
+  const php = choosePhpVersion({ composerJson, pinnedPhpVersion });
   const plan = extensionPlan(composerJson?.require);
   const docroot = detectDocroot(releaseDir, manifest);
   const docrootAbs = docroot === '.' ? releaseDir : join(releaseDir, docroot); // nosemgrep: path-join-resolve-traversal — releaseDir is an internal computed path
@@ -310,7 +311,7 @@ export function generatePhpDockerfile({ releaseDir, manifest }) {
     warnings.push(finding);
   }
 
-  const lines = [`FROM ${PHP_IMAGE}`, ''];
+  const lines = [`FROM ${php.image}`, ''];
 
   if (plan.apt.length) {
     lines.push(
@@ -376,11 +377,11 @@ export function generatePhpDockerfile({ releaseDir, manifest }) {
     '',
   );
 
-  return { lines, warnings };
+  return { lines, warnings, php };
 }
 
-export function ensurePhpDockerfile({ releaseDir, manifest, dockerfilePath }) {
-  const { lines, warnings } = generatePhpDockerfile({ releaseDir, manifest });
+export function ensurePhpDockerfile({ releaseDir, manifest, dockerfilePath, pinnedPhpVersion = null }) {
+  const { lines, warnings, php } = generatePhpDockerfile({ releaseDir, manifest, pinnedPhpVersion });
   writeFileInside(releaseDir, dockerfilePath, lines.join('\n'));
-  return { path: dockerfilePath, warnings };
+  return { path: dockerfilePath, warnings, php };
 }

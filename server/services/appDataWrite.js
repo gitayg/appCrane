@@ -18,7 +18,7 @@
 
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { lstatSync, mkdirSync, mkdtempSync, openSync, writeSync, closeSync, renameSync, rmSync, realpathSync } from 'fs';
+import { lstatSync, statSync, lchownSync, fchownSync, mkdirSync, mkdtempSync, openSync, writeSync, closeSync, renameSync, rmSync, realpathSync } from 'fs';
 import { tmpdir } from 'os';
 import { join, dirname } from 'path';
 import { randomBytes } from 'crypto';
@@ -26,12 +26,32 @@ import { randomBytes } from 'crypto';
 const run = promisify(execFile);
 export const CONTAINER_DATA_PATH = '/data';
 
+// What AppCrane creates in /data belongs to whoever owns /data, not to root:
+// the app usually runs as `node` and could not write a root-owned folder
+// (Supply Hub sandbox, 2026-10-24: /data/order-status was root's after an
+// upload, so every save into it failed). The deployer chowns /data to
+// 1000:1000 on each deploy; following the directory keeps an operator's own
+// choice.
+function dataOwner(root) {
+  try {
+    const st = statSync(root);
+    return { uid: st.uid, gid: st.gid };
+  } catch {
+    return { uid: 1000, gid: 1000 };
+  }
+}
+
+// EPERM: AppCrane is not root, so what it creates is already its own.
+function chownQuiet(fn) {
+  try { fn(); } catch (e) { if (e.code !== 'EPERM') throw e; }
+}
+
 /**
  * Absolute host path of `rel` under `root`, refusing any symbolic link on the
  * way (including the last segment). Missing parent directories are created
  * when `createParents` is set. `rel` must already be a clean relative path.
  */
-export function confinedHostPath(root, rel, { createParents = false } = {}) {
+export function confinedHostPath(root, rel, { createParents = false, owner = null } = {}) {
   const segs = String(rel).split('/').filter(Boolean);
   if (!segs.length) throw new Error('path is required');
   let cur = realpathSync(root);
@@ -47,6 +67,7 @@ export function confinedHostPath(root, rel, { createParents = false } = {}) {
       if (!st) {
         if (!createParents) throw new Error(`'${segs.slice(0, i + 1).join('/')}' does not exist`);
         mkdirSync(next);
+        if (owner) chownQuiet(() => lchownSync(next, owner.uid, owner.gid));
       } else if (!st.isDirectory()) {
         throw new Error(`'${segs.slice(0, i + 1).join('/')}' is not a directory`);
       }
@@ -86,15 +107,39 @@ async function containerState(name) {
   }
 }
 
+/**
+ * Folders on the way to /data/<rel> that do not exist yet, as relative paths,
+ * read from the host side of the bind mount. Docker creates a missing parent
+ * as root unless the archive carries an entry for it, and rewrites the owner
+ * and mode of an existing folder that has one, so only the missing ones get an
+ * entry. A link or a non-folder on the way ends the walk: from there Docker
+ * resolves the path inside the container, as before.
+ */
+function missingParents(root, rel) {
+  const segs = rel.split('/').slice(0, -1);
+  let cur = root;
+  for (let i = 0; i < segs.length; i++) {
+    cur = join(cur, segs[i]);
+    let st = null;
+    try { st = lstatSync(cur); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+    if (!st) return segs.slice(i).map((_, k) => segs.slice(0, i + k + 1).join('/'));
+    if (!st.isDirectory()) return [];
+  }
+  return [];
+}
+
 /** Stream `buf` into the running container at /data/<rel> via `docker cp -`. */
-async function writeIntoContainer(container, rel, buf) {
+async function writeIntoContainer(container, rel, buf, { owner, newDirs }) {
   const stage = mkdtempSync(join(tmpdir(), 'appcrane-cp-'));
   try {
     const file = join(stage, ...rel.split('/'));
     mkdirSync(dirname(file), { recursive: true });
     const fd = openSync(file, 'wx', 0o644);
     try { writeSync(fd, buf); } finally { closeSync(fd); }
-    const { stdout: tar } = await run('tar', ['-C', stage, '-cf', '-', '--', rel], { encoding: 'buffer', maxBuffer: 1024 * 1024 * 1024, timeout: 120000 });
+    const { stdout: tar } = await run('tar', [
+      '-C', stage, `--owner=${owner.uid}`, `--group=${owner.gid}`, '--numeric-owner', '--no-recursion',
+      '-cf', '-', '--', ...newDirs, rel,
+    ], { encoding: 'buffer', maxBuffer: 1024 * 1024 * 1024, timeout: 120000 });
     await new Promise((resolve, reject) => {
       const child = execFile('docker', ['cp', '-', `${container}:${CONTAINER_DATA_PATH}`], { timeout: 120000 },
         (err, _out, stderr) => (err ? reject(new Error(`docker cp failed: ${String(stderr || err.message).trim()}`)) : resolve()));
@@ -112,21 +157,25 @@ async function writeIntoContainer(container, rel, buf) {
 export async function writeAppData({ dataDir, slug, env, rel, buf }) {
   assertCleanRel(rel);
   const container = `appcrane-${slug}-${env}`;
+  const root = join(dataDir, 'apps', slug, env, 'shared', 'data');
   // Running OR stopped: docker cp works on both and resolves the path inside
   // the container (verified live: a link to /etc in a stopped container's
   // bind-mounted /data wrote the container's /etc, not the host's). Checking
   // "stopped" and then writing on the host left a race: the container can start
   // in between (commit review of v2.97.1).
   if (await containerState(container) !== 'absent') {
-    await writeIntoContainer(container, rel, buf);
+    await writeIntoContainer(container, rel, buf, { owner: dataOwner(root), newDirs: missingParents(root, rel) });
     return { via: 'container' };
   }
-  const root = join(dataDir, 'apps', slug, env, 'shared', 'data');
   mkdirSync(root, { recursive: true });
-  const target = confinedHostPath(root, rel, { createParents: true });
+  const owner = dataOwner(root);
+  const target = confinedHostPath(root, rel, { createParents: true, owner });
   const tmp = join(dirname(target), `.appcrane-tmp-${randomBytes(8).toString('hex')}`);
   const fd = openSync(tmp, 'wx', 0o644); // exclusive: never opens an existing file or link
-  try { writeSync(fd, buf); } finally { closeSync(fd); }
+  try {
+    writeSync(fd, buf);
+    chownQuiet(() => fchownSync(fd, owner.uid, owner.gid));
+  } finally { closeSync(fd); }
   renameSync(tmp, target); // rename replaces a path, it does not follow a link at the target
   return { via: 'host' };
 }

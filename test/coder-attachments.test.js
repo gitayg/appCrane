@@ -24,7 +24,7 @@ mkdirSync(SHIM, { recursive: true });
 writeFileSync(LOG, '');
 writeFileSync(join(SHIM, 'docker'), `#!/bin/sh
 case "$1" in
-  image)   echo 5 ;;
+  image)   echo 6 ;;
   inspect) echo true ;;
   run)     echo 0123456789abcdef0123456789abcdef ;;
   cp)      printf 'CP %s %s\\n' "$2" "$3" >> "${LOG}" ;;

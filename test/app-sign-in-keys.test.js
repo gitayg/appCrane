@@ -5,7 +5,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import express from 'express';
 
-// Personal app sign-in keys, dhk_uak_* (v2.108.0).
+// Personal app sign-in keys, dhk_uak_* (v2.124.0).
 //
 // The Work Review uploader needed a credential a cron job can hold. The only one
 // that passed forward_auth was the user's full dhk_user_* key, which also

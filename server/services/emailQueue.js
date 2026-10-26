@@ -16,6 +16,7 @@
 import { getDb } from '../db.js';
 import { sendEmail } from './emailService.js';
 import log from '../utils/logger.js';
+import { jobStarted, trackJob, noteJobFailure } from './jobHealth.js';
 
 const TICK_MS = 5_000;
 const MAX_ATTEMPTS = 5;
@@ -296,6 +297,7 @@ async function tick() {
     }
   } catch (e) {
     log.error(`[email] tick error: ${e.message}`);
+    noteJobFailure('email-queue', e);
   }
 }
 
@@ -310,7 +312,8 @@ export function startEmailWorker() {
     log.warn(`[email] boot orphan-reset failed: ${e.message}`);
   }
   log.info(`[email] queue worker started (tick every ${TICK_MS / 1000}s)`);
-  timer = setInterval(() => { tick().catch(() => {}); }, TICK_MS);
+  jobStarted('email-queue');
+  timer = setInterval(() => { trackJob('email-queue', tick).catch(() => {}); }, TICK_MS);
 }
 
 export function stopEmailWorker() {

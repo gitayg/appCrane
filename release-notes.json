@@ -1,0 +1,196 @@
+{
+  "2.124.0": [
+    "You can give a script or a scheduled job its own key for one app, from the MCP page. The key signs you in to that app only, does nothing anywhere else in AppCrane, and stops working as soon as you lose access to the app.",
+    "Apps can tell when a request came from such a key, so an app can let a script do less than you can, for example upload but not read."
+  ],
+  "2.123.2": [
+    "Three building blocks AppCrane relies on for handling uploads, web requests and e-mail were updated to close newly reported security problems."
+  ],
+  "2.123.1": [
+    "Uploading a file into a new folder in your app's data no longer leaves that folder locked against your app: the folder now belongs to your app, so it can keep saving there."
+  ],
+  "2.123.0": [
+    "Apps that AppCrane builds without a Dockerfile now run on Node 22 instead of Node 20, which no longer gets security fixes. If your app says which Node version it needs, AppCrane follows that, and the deploy log says which version was picked and why."
+  ],
+  "2.122.0": [
+    "Your apps are protected against a newly found attack on the software that runs them: AppCrane now turns away the kind of upload it uses, and moves itself and your apps onto the fixed version automatically."
+  ],
+  "2.121.0": [
+    "Platform admins can now change the master key that protects every stored secret: stop AppCrane and run crane rotate-key. It saves a backup first, re-locks every secret with the new key and checks each one before switching."
+  ],
+  "2.120.2": [
+    "AppCrane now refuses to start if its data folder setting is broken, instead of quietly writing data to the wrong place."
+  ],
+  "2.120.1": [
+    "Housekeeping: test leftovers that were published by mistake have been removed."
+  ],
+  "2.120.0": [
+    "When a scan finds a vulnerable package in your app that was not reported before, the app owners and platform admins now get one e-mail right away listing it, the fixed version and what happens next; each finding is mailed once, and a platform admin can turn this off in Settings > Security."
+  ],
+  "2.119.0": [
+    "An automatic security fix is no longer held back by older problems your app already had in production, as long as the fix adds nothing new; those older problems are listed in the e-mail.",
+    "When the first fixed version of a package has been withdrawn by its maintainer, AppCrane now picks the next safe release instead of asking you.",
+    "After a server restart, apps are brought back on the exact version that was running, even if they have older known issues."
+  ],
+  "2.118.3": [
+    "A failed deploy now cleans up only what it built itself, including after an automatic security rebuild, so a version you might roll back to is never removed."
+  ],
+  "2.118.2": [
+    "When an automatic security fix cannot run, the message you get explains why in plain words and no longer includes internal server details."
+  ],
+  "2.118.1": [
+    "Automatic security fixes for app dependencies are now locked down further: the tool that updates a package can only talk to the official npm registry, and fixes that the package maintainer has withdrawn are left for a person to choose."
+  ],
+  "2.118.0": [
+    "If your app runs on PHP and a serious security flaw is found in PHP itself, AppCrane now rebuilds your app on the fixed PHP for you, tests it in sandbox before it reaches production, rolls it back if it fails, and e-mails you either way.",
+    "Every build also starts from the latest security fixes of its base image."
+  ],
+  "2.117.3": [
+    "If your server runs a Linux version that MongoDB 8.0 cannot start on, AppCrane now tells you right away and names the upgrade you need, instead of waiting two minutes and failing without a reason."
+  ],
+  "2.117.2": [
+    "Automatic security fixes are stricter: they only ship when the code is exactly what is already in production, so nothing unapproved can slip out with them.",
+    "The background job that applies those fixes now gives way to your apps when the server is busy."
+  ],
+  "2.117.1": [
+    "RCE auto-patch only runs when the branch matches what is live in production, so it can never promote changes a person has not approved, and it re-checks the on/off switch, the app opt-out and running restores right before promoting and before any rollback."
+  ],
+  "2.117.0": [
+    "RCE auto-patch, on by default: fixes for remote-code-execution advisories in npm dependencies are applied, sandbox-tested, release-checked and promoted by a written, audited policy instead of a person, with automatic rollback and an e-mail to owners. Every other fix keeps the human approval step."
+  ],
+  "2.116.0": [
+    "PHP apps without a Dockerfile now build on the newest PHP (8.5, 8.4 or 8.3) that their composer.json allows; new apps with no requirement get 8.5, apps already deployed stay on their current version, and the deploy log says which PHP was chosen and why."
+  ],
+  "2.115.0": [
+    "SOC 2 controls: two-factor sign-in for password logins (required for platform admins by default), shorter session and idle timeouts for admins, periodic access reviews, a tamper-evident audit chain, weekly restore drills with RPO/RTO, and a signed compliance evidence pack.",
+    "FIPS 140-3 mode: AppCrane can refuse to start without a FIPS provider, passwords move to PBKDF2-HMAC-SHA256 at each user's next sign-in, S3 deletes use SHA-256 checksums, and Settings shows the cryptography status.",
+    "New apps answer a security intake with a data classification, every production deploy passes a release check, Adopt an app brings Lovable, Bolt, v0, Replit or Figma Make projects onto a sandbox, and Caddy, SSH and AppCrane now keep CPU under load (builds and databases are capped, CPU admission joins memory admission).",
+    "Stream events to your SIEM, give apps an LLM gateway, turn an app's features into MCP tools, let agents delete apps, read audit trails and upload large files in resumable chunks, and security fixes for MCP OAuth, off-site backups, path role rules and request text the coder reads."
+  ],
+  "2.114.0": [
+    "A new Events timeline joins the audit log, deploys, scan findings, browser errors, job failures, server alerts and sign-ins, per app and per person, kept 30 / 90 / 365 days by severity.",
+    "Apps can declare path role rules (in deployhub.json or on the Manage page) that AppCrane enforces before a request reaches the app, and a person can have only one open access request per app.",
+    "API keys now expire after 90 days with e-mail warnings and one-click rotation, and a new \"MCP: OAuth only\" setting makes MCP clients sign in with OAuth.",
+    "Restoring a backup or database stops the app first and starts it again afterwards; off-site S3/R2 backups now include app repositories, upload in parts, keep 7 daily / 4 weekly / 6 monthly copies, verify every file, and can be encrypted, listed and restored."
+  ],
+  "2.113.0": [
+    "When the server is short on memory, platform admins are alerted about deploys, coder sessions and new databases that would over-commit it (or, if they choose, those are refused with a \"try again later\" message), and app containers are killed before AppCrane under memory pressure.",
+    "Job Health now watches server memory and disk and e-mails platform admins when either runs low.",
+    "The Launch page shows the apps you own first, and puts apps you have no access to under \"Request access\" instead of opening them; the app list no longer sends their health, versions or URLs."
+  ],
+  "2.112.0": [
+    "Apps can assign tasks to people, and everyone gets a \"My tasks\" inbox across all apps to reply, change status, or delete what they asked for.",
+    "NPS surveys: platform admins choose the questions, apps and how often to ask; every answer is e-mailed to the app's owners and admins and shown on a new NPS & surveys page.",
+    "Platform admins and app owners can preview AppCrane as a lower role (read-only); MCP clients can connect by signing in through the browser; and changing your own password now asks for the current one (Settings > Account).",
+    "New Job Health and Client Errors pages for platform admins, and the side menu now opens on hover and folds back to icons on its own."
+  ],
+  "2.111.3": [
+    "No visible changes: a test that sometimes failed when tests ran side by side is now reliable."
+  ],
+  "2.111.2": [
+    "The browser tab now shows which AppCrane you are on: the server's address followed by \"- AppCrane\"."
+  ],
+  "2.111.1": [
+    "The coder keeps one conversation per app that survives restarts, idle stops and take-overs, so every session picks up the full history, including colleagues' turns."
+  ],
+  "2.111.0": [
+    "The coder can now see your app's live dependency scan, requests, deploys and logs while it works, through a read-only connection limited to that app and that turn.",
+    "Passwords and env variables show as dots with an eye icon. Owners get an alert only when someone presses the eye to see a value, never just for opening the page.",
+    "The coder no longer tries to commit or asks you to push, and you can take over an app's coder from a colleague's idle session without losing their unreleased work.",
+    "Restarting or updating AppCrane no longer throws away the coder's unreleased changes: they are saved to a branch first."
+  ],
+  "2.110.1": [
+    "Someone who can't reveal a production value no longer sees its fingerprint either, so it can't be compared with a sandbox value they can see."
+  ],
+  "2.110.0": [
+    "Environment variables open masked. Reveal one key at a time, copy it once revealed, or replace a value without seeing the old one.",
+    "Every request has its own page, and \"In coder\" opens the coder session the request was actually sent to.",
+    "New e-mails in AppCrane's colours: app owners and platform admins hear what's new after each AppCrane upgrade, and an app's owners and admins hear what's new when that app ships a new version (each app can turn this off).",
+    "App owners can rename their app's address, and the old address keeps redirecting. The coder is now limited to the app's owner and platform admins."
+  ],
+  "2.109.1": [
+    "Request text sent to the coder is treated as a description of the work, never as instructions, so a request cannot change the coder's rules."
+  ],
+  "2.109.0": [
+    "Pick several of an app's open requests and send them to the coder in one session. It works through them in your order and reports on each one.",
+    "Clone or pull a Crane-hosted app's code with git over HTTPS, signing in with your AppCrane API key. The clone address is in the app's row on Applications."
+  ],
+  "2.108.0": [
+    "Each vulnerable dependency an app uses becomes one request in that app's queue, and the request closes itself once the fix is deployed.",
+    "The daily vulnerability e-mail links every advisory to its request."
+  ],
+  "2.107.7": [
+    "The Request box takes your typing when the element you picked is a menu or a drawer."
+  ],
+  "2.107.6": [
+    "The coder can save its work again on servers where AppCrane does not run as root."
+  ],
+  "2.107.5": [
+    "Only the app owner or a platform admin can reveal a production secret value. App admins and members still manage keys and see them masked."
+  ],
+  "2.107.4": [
+    "Folders an app keeps between deploys are prepared more safely, so an app cannot use them to reach other files on the server. Your data stays where it was."
+  ],
+  "2.107.3": [
+    "Security fixes: an app's code can no longer point AppCrane at files elsewhere on the server.",
+    "Changing an app's start command or restarting production now needs the matching permission, not just app membership.",
+    "App admins can no longer give out or take away the owner role."
+  ],
+  "2.107.2": [
+    "AppCrane updates install again on servers without developer build tools.",
+    "Crew and the dashboard fit a phone screen and read well in the light theme."
+  ],
+  "2.107.1": [
+    "Restoring an app's MariaDB database also signs out its open database sessions, and the deploy log explains what happened with the sandbox database link."
+  ],
+  "2.107.0": [
+    "Crew asks you before your agent takes on certain work, and standing rules (for example, \"this agent may run migrations on sandbox\") let it go ahead without asking every time. Production and deletions always ask.",
+    "Apps on managed Postgres can turn on query statistics for their own database.",
+    "A database login that can read and write data but not change the tables, for each environment.",
+    "Production can reach its sandbox database to copy masked data down, never the other way round."
+  ],
+  "2.106.1": [
+    "Crew keeps a held task held until you approve it, and blocking or refusing an agent ends all of its open tasks."
+  ],
+  "2.106.0": [
+    "Crew talks to hosted agents over the open A2A standard, and each hosted agent gets its own token you can rotate or revoke.",
+    "A new Map in Crew shows which agents work with each other.",
+    "Three Crew security gaps are closed."
+  ],
+  "2.105.0": [
+    "New: Crew, a page where agents register, find each other and hand off work. A new contact between two people's agents waits for its owner's approval."
+  ],
+  "2.104.1": [
+    "Times in the dashboard are right in every timezone. A deploy made a moment ago no longer shows as hours ago.",
+    "Releasing the coder's changes is safer: AppCrane no longer reads the agent's files directly on the server.",
+    "With MariaDB encryption on, every app table is encrypted and the database's own log stays small."
+  ],
+  "2.104.0": [
+    "The coder is safer: AppCrane no longer runs its own tools inside files the agent can change.",
+    "Each app's Redis accepts only that app's own certificate.",
+    "Failed-login alerts for managed databases cannot be flooded or used to hide a real attack."
+  ],
+  "2.103.1": [
+    "A deployment that got stuck no longer blocks AppCrane updates, and the dashboard shows what an update is waiting for."
+  ],
+  "2.103.0": [
+    "Platform admins can turn on encryption at rest for managed MariaDB data.",
+    "The nightly backup now includes every app's managed databases.",
+    "Feedback sent from inside an app reaches that app's request queue again."
+  ],
+  "2.102.0": [
+    "Managed databases are backed up, and an app's owner can restore them.",
+    "Deploying a ready-made image is safer: AppCrane no longer starts the image just to inspect it."
+  ],
+  "2.101.0": [
+    "Managed databases use encrypted connections, and a custom app connects with its own certificate, so another app cannot sign in to yours even with the password.",
+    "Per-app connection limits, and platform admins are alerted to repeated failed database logins."
+  ],
+  "2.100.1": [
+    "Sandbox never receives production's database credentials: a database declared in deployhub.json is always separate for each environment."
+  ],
+  "2.100.0": [
+    "Custom apps can ask for a managed database (Postgres, MariaDB, MongoDB or Redis) in deployhub.json, and the connection details are given to the app when it deploys.",
+    "Sandbox can have its own database, separate from production."
+  ]
+}

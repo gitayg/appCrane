@@ -8,7 +8,10 @@
 // (login.html) gets the same registration via a top-level <script> tag.
 import { defineCraneAppTopbar, CraneAppTopbar } from './CraneAppTopbar'
 import { defineCranePanels, CraneRequestPanel, CraneBugPanel } from './CranePanels'
+import { installClientErrorReporter } from '../lib/clientErrors'
+import { authHeaders } from '../adminApi'
 
+installClientErrorReporter({ source: 'topbar', headers: authHeaders })
 defineCraneAppTopbar()
 defineCranePanels()
 

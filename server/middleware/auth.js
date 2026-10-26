@@ -2,6 +2,11 @@ import { getDb } from '../db.js';
 import { hashApiKey } from '../services/encryption.js';
 import { AppError } from '../utils/errors.js';
 import { isAdmin } from '../utils/roles.js';
+import { activeViewAs, effectiveUser } from '../services/viewAs.js';
+import { lookupAccessToken } from '../services/oauthStore.js';
+import { ACCESS_PREFIX, canonicalResource, mcpResourceOf } from '../services/oauthPolicy.js';
+import { auditExpiredUse, expiredMessage, expireUserKey, isPast } from '../services/apiKeyExpiry.js';
+import { touchSession } from '../services/sessionPolicy.js';
 
 /**
  * Authentication middleware. Accepts either:
@@ -47,19 +52,33 @@ export function requireAuth(req, res, next) {
       const keyHash = hashApiKey(apiKey);
       const row = db.prepare(`
         SELECT umk.id AS umk_id, umk.label, umk.expires_at, umk.revoked_at,
-               umk.read_only,
+               umk.read_only, umk.coder_session_id, umk.app_id,
                u.id AS uid, u.name, u.email, u.role, u.active, u.kind, u.username,
                u.mcp_app_scope
         FROM user_mcp_keys umk
         JOIN users u ON u.id = umk.user_id
         WHERE umk.key_hash = ?
           AND umk.revoked_at IS NULL
-          AND (umk.expires_at IS NULL OR umk.expires_at > datetime('now'))
       `).get(keyHash);
-      if (row) {
+      if (row && row.coder_session_id == null && row.expires_at && isPast(row.expires_at)) {
+        auditExpiredUse(row.uid, 'mcp', row.umk_id, row.expires_at, req.ip);
+        return next(new AppError(expiredMessage(row.expires_at, 'the MCP page (rotate it there)'), 401, 'API_KEY_EXPIRED'));
+      }
+      if (row && (row.expires_at == null || !isPast(row.expires_at))) {
         if (!row.active) return next(new AppError('Account is deactivated', 403, 'DEACTIVATED'));
         if (!isMcpPath) {
           return next(new AppError('Personal MCP keys (dhk_mcp_*) are restricted to /api/mcp and /api/files/staged endpoints', 403, 'KEY_SCOPE_RESTRICTED'));
+        }
+        let coder = null;
+        if (row.coder_session_id != null) {
+          // A coder session key: POST /api/mcp only (not staged files, not the
+          // admin catalogue or GitHub-container routes beside it), one app.
+          if (req.method !== 'POST' || !/^\/api\/mcp\/?$/.test(path)) {
+            return next(new AppError('Coder session keys are restricted to POST /api/mcp', 403, 'KEY_SCOPE_RESTRICTED'));
+          }
+          const app = db.prepare('SELECT slug FROM apps WHERE id = ?').get(row.app_id);
+          if (!app) return next(new AppError('Invalid API key', 401, 'UNAUTHORIZED'));
+          coder = { sessionId: row.coder_session_id, appId: row.app_id, slug: app.slug };
         }
         try { db.prepare("UPDATE user_mcp_keys SET last_used_at = datetime('now') WHERE id = ?").run(row.umk_id); } catch (_) {}
         // SECURITY: mcp_app_scope must be carried onto req.user. This is a
@@ -79,10 +98,14 @@ export function requireAuth(req, res, next) {
         req.user = {
           id: row.uid, name: row.name, email: row.email,
           role: row.role, active: row.active, kind: row.kind, username: row.username,
-          mcp_app_scope: row.mcp_app_scope,
-          mcp_read_only: !!row.read_only,
+          mcp_app_scope: coder ? coderScope(row.mcp_app_scope, coder.slug) : row.mcp_app_scope,
+          mcp_read_only: !!row.read_only || !!coder,
+          ...(coder ? { coder_key: coder } : {}),
         };
-        req.user_mcp_key = { id: row.umk_id, label: row.label, read_only: !!row.read_only };
+        req.user_mcp_key = {
+          id: row.umk_id, label: row.label, read_only: !!row.read_only || !!coder,
+          ...(coder ? { coder } : {}),
+        };
         return next();
       }
     }
@@ -99,7 +122,7 @@ export function requireAuth(req, res, next) {
       ));
     }
 
-    // v2.108.0: personal app sign-in keys (dhk_uak_*) open one app's
+    // v2.124.0: personal app sign-in keys (dhk_uak_*) open one app's
     // forward_auth gate and nothing on this API. Their hashes live in
     // user_app_keys, so the lookup below could never match one anyway; the
     // explicit refusal is for the person holding it, who would otherwise read
@@ -108,26 +131,100 @@ export function requireAuth(req, res, next) {
       return next(new AppError('App sign-in keys (dhk_uak_*) only sign in to the app they were issued for; they cannot call the AppCrane API', 403, 'KEY_SCOPE_RESTRICTED'));
     }
 
-    const user = db.prepare('SELECT * FROM users WHERE api_key_hash = ?').get(hashApiKey(apiKey));
-    if (!user) return next(new AppError('Invalid API key', 401, 'UNAUTHORIZED'));
+    const userKeyHash = hashApiKey(apiKey);
+    const user = db.prepare('SELECT * FROM users WHERE api_key_hash = ?').get(userKeyHash);
+    if (!user) {
+      const gone = db.prepare('SELECT id, api_key_expires_at FROM users WHERE api_key_expired_hash = ?').get(userKeyHash);
+      if (gone) {
+        auditExpiredUse(gone.id, 'user', gone.id, gone.api_key_expires_at, req.ip);
+        return next(new AppError(expiredMessage(gone.api_key_expires_at), 401, 'API_KEY_EXPIRED'));
+      }
+      return next(new AppError('Invalid API key', 401, 'UNAUTHORIZED'));
+    }
     if (!user.active) return next(new AppError('Account is deactivated', 403, 'DEACTIVATED'));
+    if (user.api_key_expires_at && isPast(user.api_key_expires_at)) {
+      try { expireUserKey(db, user.id); } catch (_) {}
+      auditExpiredUse(user.id, 'user', user.id, user.api_key_expires_at, req.ip);
+      return next(new AppError(expiredMessage(user.api_key_expires_at), 401, 'API_KEY_EXPIRED'));
+    }
+    try {
+      db.prepare("UPDATE users SET api_key_last_used_at = datetime('now') WHERE id = ? AND (api_key_last_used_at IS NULL OR api_key_last_used_at < datetime('now', '-1 hour'))").run(user.id);
+    } catch (_) {}
     req.user = user;
+    applyViewAs(req, apiKey);
     return next();
   }
 
   const bearer = (req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
+  if (bearer && bearer.startsWith(ACCESS_PREFIX)) return oauthAccessToken(req, bearer, next);
   if (bearer) {
     const session = db.prepare(`
-      SELECT u.*
+      SELECT u.*, s.id AS _session_id, s.last_seen_at AS _session_last_seen_at, s.absolute_expires_at AS _session_absolute_expires_at
       FROM identity_sessions s JOIN users u ON s.user_id = u.id
-      WHERE s.token_hash = ? AND s.expires_at > datetime('now') AND u.active = 1
+      WHERE s.token_hash = ? AND datetime(s.expires_at) > datetime('now') AND u.active = 1
     `).get(hashApiKey(bearer));
     if (!session) return next(new AppError('Invalid or expired session', 401, 'UNAUTHORIZED'));
-    req.user = session;
+    const { _session_id, _session_last_seen_at, _session_absolute_expires_at, ...sessionUser } = session;
+    try {
+      touchSession(db, { id: _session_id, last_seen_at: _session_last_seen_at, absolute_expires_at: _session_absolute_expires_at }, sessionUser);
+    } catch (_) {}
+    req.user = sessionUser;
+    applyViewAs(req, bearer);
     return next();
   }
 
   return next(new AppError('Missing X-API-Key header or Bearer token', 401, 'UNAUTHORIZED'));
+}
+
+// View as role (services/viewAs.js). Only the two credentials a person signs
+// the dashboard in with can carry one: an identity session and a user API key.
+// The record is looked up by the hash of the credential actually presented and
+// re-checked against the real user, so it can only ever lower what they see.
+function applyViewAs(req, credential) {
+  req.auth_credential_hash = hashApiKey(credential);
+  const va = activeViewAs(req.auth_credential_hash, req.user);
+  if (!va) return;
+  req.real_user = req.user;
+  req.view_as = va;
+  req.user = effectiveUser(req.user, va);
+}
+
+// MCP OAuth access token (routes/oauth.js issues them). Usable on POST /api/mcp
+// only, for the resource it was issued for, with the approving user's MCP app
+// scope and the grant's read-only flag, the same carriage as a dhk_mcp_* key.
+function oauthAccessToken(req, token, next) {
+  const row = lookupAccessToken(token);
+  if (!row) return next(new AppError('Invalid or expired access token', 401, 'UNAUTHORIZED'));
+  if (!row.active) return next(new AppError('Account is deactivated', 403, 'DEACTIVATED'));
+  const path = req.baseUrl + (req.path || '') || req.originalUrl || '';
+  if (req.method !== 'POST' || !/^\/api\/mcp\/?$/.test(path)) {
+    return next(new AppError('OAuth access tokens are restricted to POST /api/mcp', 403, 'KEY_SCOPE_RESTRICTED'));
+  }
+  if (canonicalResource(row.resource) !== canonicalResource(mcpResourceOf(req))) {
+    return next(new AppError('This access token was issued for a different resource', 401, 'UNAUTHORIZED'));
+  }
+  req.user = {
+    id: row.uid, name: row.name, email: row.email,
+    role: row.role, active: row.active, kind: row.kind, username: row.username,
+    mcp_app_scope: row.mcp_app_scope,
+    mcp_read_only: !!row.read_only,
+  };
+  req.user_mcp_key = {
+    id: `oauth-${row.grant_id}`, label: row.client_name, read_only: !!row.read_only,
+    oauth: { grant_id: row.grant_id, client_id: row.client_id },
+  };
+  return next();
+}
+
+// A coder key's scope is its one app, inside whatever scope its owner's keys
+// already have: an owner scope that leaves the app out locks the key out.
+function coderScope(ownerScope, slug) {
+  if (ownerScope != null && ownerScope !== '') {
+    let list = null;
+    try { list = JSON.parse(ownerScope); } catch (_) { list = null; }
+    if (Array.isArray(list) && !list.map(String).includes(slug)) return '[]';
+  }
+  return JSON.stringify([slug]);
 }
 
 /**
@@ -170,6 +267,12 @@ export function requireAppAccess(req, res, next) {
 
   req.app = app;
 
+  const va = req.user.view_as;
+  if (va && va.app_id === app.id) {
+    if (va.role === 'none') return next(new AppError('You are not assigned to this app', 403, 'FORBIDDEN'));
+    if (isAdmin(req.real_user)) return next();
+  }
+
   // Platform admins can access app info (env/data still gated below)
   if (isAdmin(req.user)) {
     return next();
@@ -210,6 +313,10 @@ export function requireAppUser(req, res, next) {
   }
 
   req.app = app;
+
+  if (req.user.view_as?.app_id === app.id && req.user.view_as.role === 'none') {
+    return next(new AppError('You are not assigned to this app', 403, 'FORBIDDEN'));
+  }
 
   // Assignment is authoritative for EVERY role, including platform_admin.
   //

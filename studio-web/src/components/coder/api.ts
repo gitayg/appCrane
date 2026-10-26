@@ -18,6 +18,8 @@ export interface CoderSession {
   container_id:       string | null
   workspace_dir:      string | null
   status:             CoderStatus
+  /** Display name of the user the session belongs to. */
+  user_name?:         string | null
   claude_session_id:  string | null
   cost_tokens:        number
   cost_usd_cents:     number
@@ -149,6 +151,8 @@ export interface CoderGap {
 export interface CoderAvailability {
   available: boolean
   can_release: boolean
+  /** App owner or platform admin: may send this app's requests to the coder. */
+  can_dispatch_requests?: boolean
   gaps: CoderGap[]
 }
 
@@ -164,13 +168,27 @@ export const coderApi = {
   availability: (slug: string) =>
     adminApi.get<CoderAvailability>(`${base(slug)}/availability`),
 
+  /**
+   * Send open requests of this app to the coder as ONE prompt, in the order
+   * given. Lands in the caller's live session if they have one (queued when a
+   * turn is running), else a new one. Refuses whole: NOT_FOUND (an id that is
+   * not this app's), REQUEST_CLOSED, CODER_UNAVAILABLE, BUILDER_OCCUPIED,
+   * TOO_MANY_REQUESTS (more than 10).
+   */
+  dispatchRequests: (slug: string, requestIds: number[]) =>
+    adminApi.post<{ session_id: string; request_ids: number[]; queued: boolean }>(
+      `${base(slug)}/requests/dispatch`, { request_ids: requestIds }),
+
   /** Latest session for this app, or null. */
   latestSession: (slug: string) =>
     adminApi.get<{ session: CoderSession | null }>(`${base(slug)}/session`),
 
-  /** 201 { session_id, log[] }. Refuses with NOT_CRANE_HOSTED / NO_REPO / NOT_CONFIGURED / BUILDER_OCCUPIED. */
-  startSession: (slug: string) =>
-    adminApi.post<{ session_id: string; log: string[] }>(`${base(slug)}/session`),
+  /**
+   * 201 { session_id, log[] }. Refuses with NOT_CRANE_HOSTED / NO_REPO / NOT_CONFIGURED / BUILDER_OCCUPIED,
+   * and with takeOver, BUILDER_BUSY (a turn is running) / TAKEOVER_FAILED (their work could not be saved).
+   */
+  startSession: (slug: string, takeOver = false) =>
+    adminApi.post<{ session_id: string; log: string[] }>(`${base(slug)}/session`, takeOver ? { take_over: true } : undefined),
 
   session: (slug: string, id: string) =>
     adminApi.get<{ session: CoderSession; messages: CoderMessage[]; followups: CoderFollowup[] }>(
@@ -205,8 +223,8 @@ export const coderApi = {
   stop: (slug: string, id: string) =>
     adminApi.post<{ message: string }>(`${base(slug)}/session/${enc(id)}/stop`),
 
-  resume: (slug: string, id: string) =>
-    adminApi.post<{ message: string; log: string[] }>(`${base(slug)}/session/${enc(id)}/resume`),
+  resume: (slug: string, id: string, takeOver = false) =>
+    adminApi.post<{ message: string; log: string[] }>(`${base(slug)}/session/${enc(id)}/resume`, takeOver ? { take_over: true } : undefined),
 
   changes: (slug: string, id: string) =>
     adminApi.get<{ files: ChangedFile[] }>(`${base(slug)}/session/${enc(id)}/changes`),

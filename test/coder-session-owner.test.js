@@ -29,7 +29,7 @@ const mk = (name, role = 'user') => {
 };
 const APP = db.prepare("INSERT INTO apps (name,slot,slug,source_type,repo_backend,branch) VALUES ('S',1,'sess','managed','local','main')").run().lastInsertRowid;
 const OWNER = mk('owner'), MEMBER = mk('member'), APPADMIN = mk('appadmin'), PLATFORM = mk('platform', 'platform_admin'), GADMIN = mk('gadmin'); // an ex global admin: that tier is retired (migration 105), holders became 'user'
-for (const [u, r] of [[OWNER, 'user'], [MEMBER, 'user'], [APPADMIN, 'admin']]) {
+for (const [u, r] of [[OWNER, 'owner'], [MEMBER, 'user'], [APPADMIN, 'admin']]) {
   db.prepare('INSERT INTO app_user_roles (app_id,user_id,app_role) VALUES (?,?,?)').run(APP, u.id, r);
 }
 db.prepare("INSERT INTO coder_sessions (id, app_slug, user_id, branch_name, status) VALUES ('s-idle', 'sess', ?, 'b', 'idle')").run(OWNER.id);
@@ -50,8 +50,8 @@ const call = async (method, path, who, body) => {
   return { status: r.status, body: await r.json().catch(() => ({})) };
 };
 
-test('H3: another member cannot feed, resume or edit the queue of a colleague\'s session', async () => {
-  for (const who of [MEMBER, APPADMIN, PLATFORM]) {
+test('H3: a platform admin cannot feed, resume or edit the queue of the owner\'s session', async () => {
+  for (const who of [PLATFORM]) {
     for (const [m, p, b] of [
       ['POST', '/api/coder/sess/session/s-idle/dispatch', { prompt: 'hi' }],
       ['POST', '/api/coder/sess/session/s-idle/attachments', { name: 'a.txt', data: 'aGk=' }],
@@ -70,9 +70,10 @@ test('H3: the owner passes the ownership gate', async () => {
   assert.notEqual(r.body.error?.code ?? r.body.code, 'NOT_SESSION_OWNER');
 });
 
-test('H3: stopping a colleague\'s turn is the owner\'s or an app admin\'s', async () => {
+test('H3: stopping the owner\'s turn is the owner\'s or a platform admin\'s', async () => {
   assert.equal((await call('POST', '/api/coder/sess/session/s-idle/stop', MEMBER)).status, 403);
-  assert.equal((await call('POST', '/api/coder/sess/session/s-idle/stop', APPADMIN)).status, 200);
+  assert.equal((await call('POST', '/api/coder/sess/session/s-idle/stop', APPADMIN)).status, 403);
+  assert.equal((await call('POST', '/api/coder/sess/session/s-idle/stop', PLATFORM)).status, 200);
 });
 
 test('H6: only a platform admin may issue an MCP key for another user', async () => {

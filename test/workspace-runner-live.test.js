@@ -120,6 +120,9 @@ test('end to end: real coder container, change list by exec, eviction rescue via
   const { initDb, getDb } = await import('../server/db.js');
   initDb();
   const db = getDb();
+  // This file exercises a real daemon, not memory admission (test/memory-admission.test.js); a busy
+  // Docker host must not refuse its containers.
+  db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('memory_admission_mode', 'off')").run();
   const { getNextSlot } = await import('../server/services/portAllocator.js');
   const lg = await import('../server/services/localGit.js');
   const appContainer = await import('../server/services/builder/appContainer.js');

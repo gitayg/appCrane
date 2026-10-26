@@ -59,6 +59,9 @@ let APP_B;
 before(() => {
   initDb(process.env.DATA_DIR);
   const db = getDb();
+  // This file exercises a real daemon, not memory admission (test/memory-admission.test.js); a busy
+  // Docker host must not refuse its containers.
+  db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('memory_admission_mode', 'off')").run();
   const ins = db.prepare("INSERT INTO apps (name, slug, slot) VALUES (?, ?, ?)");
   APP_A = Number(ins.run('App A', 'app-a', 1).lastInsertRowid);
   APP_B = Number(ins.run('App B', 'app-b', 2).lastInsertRowid);

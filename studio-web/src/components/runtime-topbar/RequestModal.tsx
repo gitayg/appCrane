@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { adminApi } from '../../adminApi'
 import { type PeekCtx, peekToPromptPrefix } from '../../hooks/usePeek'
+import { useKeepFocusFromIframe } from '../../hooks/useKeepFocusFromIframe'
 
 interface Props {
   slug:    string | null | undefined
@@ -9,6 +10,8 @@ interface Props {
   peekCtx: PeekCtx
   /** Close + drop the picked ctx. */
   onClose: () => void
+  /** The app iframe — focus it grabs on its own is handed back to the textarea. */
+  iframeRef?: React.RefObject<HTMLIFrameElement | null>
 }
 
 const MODAL_W = 380
@@ -55,13 +58,18 @@ function initialPosition(rect: PeekCtx['rect']): { left: number; top: number } {
  *   5. Modal mounts at a position that doesn't cover the pick.
  *   6. User types, hits Enter or Submit → POST /api/enhancements → close.
  */
-export function RequestModal({ slug, appName, peekCtx, onClose }: Props) {
+export function RequestModal({ slug, appName, peekCtx, onClose, iframeRef }: Props) {
   const [text, setText] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const [pos, setPos] = useState(() => initialPosition(peekCtx.rect))
   const dragRef = useRef<{ startX: number; startY: number; left: number; top: number } | null>(null)
+
+  // The app can still pull focus into its iframe after the pick; the hook
+  // hands it back to the textarea (see useKeepFocusFromIframe).
+  const taRef = useRef<HTMLTextAreaElement>(null)
+  const { onBlur: onTextareaBlur } = useKeepFocusFromIframe(iframeRef, taRef)
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) { if (e.key === 'Escape' && !busy) onClose() }
@@ -133,9 +141,11 @@ export function RequestModal({ slug, appName, peekCtx, onClose }: Props) {
         {error && <div className="request-modal-error" style={{ marginBottom: 8 }}>⚠️ {error}</div>}
         <div className="ask-input-row">
           <textarea
+            ref={taRef}
             className="ask-textarea"
             value={text}
             onChange={e => setText(e.target.value)}
+            onBlur={onTextareaBlur}
             onKeyDown={e => {
               if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); onSubmit() }
             }}

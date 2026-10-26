@@ -1,5 +1,5 @@
 import { execFileSync } from 'child_process';
-import { mkdirSync, chmodSync, existsSync, rmSync, readdirSync, mkdtempSync, openSync, closeSync } from 'fs';
+import { mkdirSync, chmodSync, existsSync, rmSync, readdirSync, mkdtempSync, openSync, closeSync, renameSync } from 'fs';
 import { tmpdir } from 'os';
 import { join, resolve } from 'path';
 import { getDb } from '../../db.js';
@@ -12,6 +12,10 @@ import { writeSnapshot } from '../github/snapshot.js';
 import { prepareSkillsMount } from '../skills.js';
 import { prepareClaudeCredentialsMount } from '../claudeCredentials.js';
 import log from '../../utils/logger.js';
+import { jobStarted, trackJobSync } from '../jobHealth.js';
+import { OOM_APP_FLAG } from '../oomPriority.js';
+import { CPU_APP_FLAG } from '../cpuPriority.js';
+import { admitContainer, reserveMemory } from '../memoryAdmission.js';
 
 const STUDIO_IMAGE  = process.env.APPSTUDIO_IMAGE || 'appcrane-studio:latest';
 const IDLE_EVICT_MS = parseInt(process.env.CODER_IDLE_MS || '1800000', 10); // 30 min
@@ -61,6 +65,27 @@ export const CONTAINER_CLAUDE_PROJECTS_DIR = '/home/studio/.claude/projects';
  * would take the transcripts with it, which is the whole point.
  */
 export function transcriptDirFor(slug) { return join(appDir(slug), 'claude-projects'); }
+
+/**
+ * The app's one coder conversation outlives its container: a fresh container
+ * resumes the latest conversation whose transcript is still on disk, so every
+ * user's session continues the same history after an idle stop, a restart or
+ * a take-over. Null when there is none to resume.
+ */
+export function lastClaudeSessionId(slug) {
+  try {
+    const rows = getDb().prepare(`
+      SELECT claude_session_id AS id FROM coder_sessions
+      WHERE app_slug = ? AND claude_session_id IS NOT NULL
+      ORDER BY last_activity_at DESC, rowid DESC LIMIT 20
+    `).all(slug);
+    for (const { id } of rows) {
+      if (!/^[A-Za-z0-9_-]{1,128}$/.test(String(id))) continue;
+      if (existsSync(join(transcriptDirFor(slug), '-workspace', `${id}.jsonl`))) return id;
+    }
+  } catch (_) {}
+  return null;
+}
 
 /**
  * Files a user attached to coder messages, per session. Kept across restarts
@@ -214,10 +239,17 @@ async function cloneWorkspace(app, branchName, onLog) {
   }
 
   try { execFileSync('chmod', ['-R', '777', workspaceDir], { stdio: 'pipe' }); } catch (_) {}
-  try { execFileSync('chown', ['-R', '1000:1000', workspaceDir], { stdio: 'pipe' }); } catch (_) {}
+  // To the uid the agent and every workspace helper run as (STUDIO_UID, as the
+  // transcripts are since v2.90.4), not 1000: the studio image calls uid 1000
+  // `node`, so the agent read its whole .git/ as someone else's and told the
+  // user it could not write there.
+  try { execFileSync('chown', ['-R', `${STUDIO_UID}:${STUDIO_GID}`, workspaceDir], { stdio: 'pipe' }); } catch (_) {}
 
   return workspaceDir;
 }
+
+// The --memory=2g below, in MB, for memory admission.
+export const CODER_MEMORY_MB = 2048;
 
 function startContainer(slug, workspaceDir, onLog) {
   const containerName = containerNameFor(slug);
@@ -244,10 +276,17 @@ function startContainer(slug, workspaceDir, onLog) {
     '--label', 'appcrane=true',
     '--label', 'appcrane.container.type=app',
     '--label', `app.slug=${slug}`,
+    OOM_APP_FLAG,
+    CPU_APP_FLAG,
     '--memory=2g', '--cpus=1',
     '--cap-drop=ALL',
     '--security-opt', 'no-new-privileges:true',
     '--pids-limit=512',
+    // The coder's read-only AppCrane MCP endpoint (services/coderMcpKey.js).
+    // A name for a route the bridge already has, the host-gateway convention
+    // CRANE_INTERNAL_URL uses: what the agent may do there is decided by its
+    // per-turn key on the server, not by the network.
+    '--add-host', 'host.docker.internal:host-gateway',
     '-v', `${workspaceDir}:/workspace`,
     '-v', `${transcriptDir}:${CONTAINER_CLAUDE_PROJECTS_DIR}`,
   ];
@@ -277,7 +316,7 @@ function startContainer(slug, workspaceDir, onLog) {
  * Returns the live AppContainer for `app.slug`, creating it if necessary.
  * Concurrent calls during creation share the same in-flight promise.
  */
-export async function getOrCreate(app, onLog) {
+export async function getOrCreate(app, onLog, { userId = null } = {}) {
   const slug = app.slug;
 
   // Live + healthy → return as-is
@@ -299,6 +338,11 @@ export async function getOrCreate(app, onLog) {
 
   const branchName = `builder/${slug}`;
   const promise = (async () => {
+    const name = containerNameFor(slug);
+    await admitContainer({
+      name, memoryMb: CODER_MEMORY_MB, cpus: 1, kind: 'coder', slug, appId: app.id ?? null, userId,
+      what: 'coder session', subject: `the coder for ${slug}`,
+    });
     await ensureStudioImage(onLog);
     const workspaceDir = await cloneWorkspace(app, branchName, onLog);
     try {
@@ -307,7 +351,14 @@ export async function getOrCreate(app, onLog) {
       log.warn(`appContainer snapshot write failed for ${slug}: ${err.message}`);
     }
 
-    const { containerId, skillsCleanup, credsCleanup } = startContainer(slug, workspaceDir, onLog);
+    const release = reserveMemory(name, CODER_MEMORY_MB * 1024 * 1024);
+    let started;
+    try {
+      started = startContainer(slug, workspaceDir, onLog);
+    } finally {
+      release();
+    }
+    const { containerId, skillsCleanup, credsCleanup } = started;
 
     const c = {
       ready: true,
@@ -316,7 +367,7 @@ export async function getOrCreate(app, onLog) {
       containerId,
       workspaceDir,
       branchName,
-      claudeSessionId: null,
+      claudeSessionId: lastClaudeSessionId(slug),
       lastActivityAt: Date.now(),
       skillsCleanup,
       credsCleanup,
@@ -429,7 +480,7 @@ function stagedPaths(dir) {
  * Returns a description of what happened; the caller logs it. Throws only on a
  * genuine git failure — evict() catches that, because eviction must complete.
  */
-function preserveWorkspace(slug, workspaceDir) {
+function preserveWorkspace(slug, workspaceDir, forSession = null) {
   if (!workspaceDir || !existsSync(join(workspaceDir, '.git'))) return { preserved: false, reason: 'no_workspace' };
 
   const db = getDb();
@@ -439,7 +490,7 @@ function preserveWorkspace(slug, workspaceDir) {
   // to start from a timer.
   if (!app || !usesLocalRepo(app)) return { preserved: false, reason: 'not_crane_hosted' };
 
-  const session = db.prepare(`
+  const session = forSession || db.prepare(`
     SELECT id, user_id FROM coder_sessions
     WHERE app_slug = ? AND workspace_dir = ?
     ORDER BY last_activity_at DESC, rowid DESC LIMIT 1
@@ -556,7 +607,7 @@ function bundleWorkspace(workspaceDir, upstream) {
  * The transcript directory is deliberately NOT wiped — it is the session's
  * conversation, and `--resume` needs it after the container is gone.
  */
-export function evict(slug, reason = 'manual') {
+export function evict(slug, reason = 'manual', { preserved: alreadyPreserved = null } = {}) {
   const c = containers.get(slug);
   const workspaceDir = c?.workspaceDir || workspaceDirFor(slug);
   if (c) containers.delete(slug);
@@ -576,7 +627,7 @@ export function evict(slug, reason = 'manual') {
   // carried in the notification, never thrown.
   let preserved = { preserved: false, reason: 'skipped' };
   try {
-    preserved = preserveWorkspace(slug, workspaceDir);
+    preserved = alreadyPreserved || preserveWorkspace(slug, workspaceDir);
     if (preserved.preserved) {
       log.info(`appContainer: ${slug} — ${preserved.files} uncommitted file(s) preserved on ${preserved.branch} (${preserved.commit.slice(0, 12)})`);
     }
@@ -603,14 +654,40 @@ export function evict(slug, reason = 'manual') {
   return !!c;
 }
 
-setInterval(() => {
+/**
+ * Free an app's container for another user, keeping the current holder's work.
+ *
+ * The rescue runs FIRST, with the container still up, and a rescue that throws
+ * stops everything: nothing is stopped, wiped or paused, and the caller refuses.
+ * Only once the holder's unreleased work is on agent/<userId>/<sessionId> is the
+ * container evicted (which pauses their session). A plain evict() logs a failed
+ * rescue and wipes anyway, because an idle sweep must always reclaim; handing a
+ * colleague's workspace to someone else is not that, so it never does.
+ *
+ * Synchronous from the busy check to the wipe, so no turn can start in between.
+ */
+export function preserveThenEvict(slug, session, reason) {
+  const c = containers.get(slug);
+  if (c?.busy) {
+    const err = new Error(`The coder for ${slug} is running a turn.`);
+    err.code = 'BUILDER_BUSY';
+    throw err;
+  }
+  const workspaceDir = c?.workspaceDir || workspaceDirFor(slug);
+  const preserved = preserveWorkspace(slug, workspaceDir, session);
+  evict(slug, reason, { preserved });
+  return preserved;
+}
+
+jobStarted('coder-idle-sweep');
+setInterval(() => trackJobSync('coder-idle-sweep', () => {
   const threshold = Date.now() - IDLE_EVICT_MS;
   for (const [slug, c] of containers) {
     if (!c.ready || c.busy) continue;
     if (c.lastActivityAt > threshold) continue;
     evict(slug, 'idle');
   }
-}, SWEEP_MS).unref();
+}), SWEEP_MS).unref();
 
 /**
  * Called once on AppCrane startup. Kills any leftover app containers from a
@@ -647,7 +724,22 @@ export function recoverOrphans() {
       let entries = [];
       try { entries = readdirSync(dir); } catch (_) { continue; }
       for (const entry of entries) {
-        if (entry === 'claude-projects' || entry === 'attachments') continue;
+        if (entry === 'claude-projects' || entry === 'attachments' || entry.startsWith('unsaved-workspace-')) continue;
+        // A restart must not be the one eviction that loses unreleased work: save
+        // it to agent/<user>/<session> first, as an idle eviction does. If that
+        // fails, keep the workspace aside rather than delete it.
+        if (entry === 'workspace') {
+          const ws = join(dir, entry);
+          try {
+            const r = preserveWorkspace(slug, ws);
+            if (r?.preserved) log.info(`appContainer: saved unreleased work for ${slug} to ${r.branch} before the restart sweep`);
+          } catch (err) {
+            const aside = join(dir, `unsaved-workspace-${Date.now()}`);
+            try { renameSync(ws, aside); } catch (_) {}
+            log.error(`appContainer: could not save ${slug}'s workspace before the restart sweep (${err.message}); kept it at ${aside}`);
+            continue;
+          }
+        }
         try { rmSync(join(dir, entry), { recursive: true, force: true }); } catch (_) {}
       }
     }

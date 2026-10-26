@@ -15,6 +15,8 @@ import { notifyRequesterFulfilled, notifyAppAdminsOfNewRequest, notifyPlatformAd
 
 const router = Router();
 
+const ACCESS_REQUEST_RE = /^Access request for app/i;
+
 const VALID_STATUSES = ['new', 'selected', 'planning', 'in_progress', 'done', 'no_changes_needed'];
 
 function noteFromBody(body) {
@@ -74,10 +76,32 @@ router.post('/', (req, res) => {
   }
 
   const db = getDb();
-  const { lastInsertRowid } = db.prepare(`
-    INSERT INTO enhancement_requests (app_slug, user_id, user_name, message, status)
-    VALUES (?, ?, ?, ?, 'new')
-  `).run(app_slug || null, userId, userName, message.trim());
+  // One open access request per person per app. The pre-check gives the usual
+  // answer; the unique index from migration 135 settles two requests racing.
+  const kind = ACCESS_REQUEST_RE.test(message.trim()) ? 'access' : null;
+  const openAccessRequest = () => db.prepare(`
+    SELECT id FROM enhancement_requests
+    WHERE user_id = ? AND app_slug = ? AND kind = 'access' AND status != 'done'
+  `).get(userId, app_slug);
+  const refuseDuplicate = (id) => res.status(409).json({
+    error: { code: 'DUPLICATE_ACCESS_REQUEST', message: 'You already have an open access request for this app.' },
+    enhancement_id: id,
+  });
+  if (kind && app_slug) {
+    const existing = openAccessRequest();
+    if (existing) return refuseDuplicate(existing.id);
+  }
+  let lastInsertRowid;
+  try {
+    ({ lastInsertRowid } = db.prepare(`
+      INSERT INTO enhancement_requests (app_slug, user_id, user_name, message, status, kind)
+      VALUES (?, ?, ?, ?, 'new', ?)
+    `).run(app_slug || null, userId, userName, message.trim(), kind));
+  } catch (e) {
+    const existing = kind && app_slug && e.code === 'SQLITE_CONSTRAINT_UNIQUE' ? openAccessRequest() : null;
+    if (existing) return refuseDuplicate(existing.id);
+    throw e;
+  }
 
   // v2: requests land in 'triage' for human/MCP-agent pickup. We no longer
   // auto-queue an AppStudio plan job — that whole pipeline (Anthropic API
@@ -176,7 +200,7 @@ router.get('/owned', (req, res) => {
     SELECT
       er.id, er.app_slug, er.user_name, er.message, er.created_at, er.status,
       er.fix_version, er.cost_tokens, er.cost_usd_cents, er.branch_name, er.pr_url,
-      er.validated_at, er.validated_by,
+      er.validated_at, er.validated_by, er.coder_session_id,
       j.id        AS latest_job_id,
       j.phase     AS latest_job_phase,
       j.status    AS latest_job_status,
@@ -213,7 +237,7 @@ router.get('/', requireAuth, requireAdmin, (req, res) => {
     SELECT
       er.id, er.app_slug, er.user_name, er.message, er.created_at, er.status,
       er.fix_version, er.cost_tokens, er.cost_usd_cents, er.branch_name, er.pr_url,
-      er.validated_at, er.validated_by,
+      er.validated_at, er.validated_by, er.coder_session_id,
       j.id        AS latest_job_id,
       j.phase     AS latest_job_phase,
       j.status    AS latest_job_status,
@@ -383,6 +407,52 @@ router.post('/:id/delete', (req, res) => {
     db.prepare('DELETE FROM enhancement_requests WHERE id = ?').run(id);
   })();
   res.json({ message: 'Deleted' });
+});
+
+/**
+ * Whether `user` may see one request: the union of what the list routes show
+ * them. A platform admin sees every request (GET /); the requester sees their
+ * own (/my); anyone else needs request.view_app on the request's app through a
+ * role row or an assignment (/owned).
+ */
+function canViewRequest(db, user, row) {
+  if (user.role === 'platform_admin') return true;
+  if (row.user_id && row.user_id === user.id) return true;
+  if (!row.app_slug) return false;
+  const app = db.prepare('SELECT id, slug FROM apps WHERE slug = ?').get(row.app_slug);
+  if (!app) return false;
+  const related = db.prepare('SELECT 1 FROM app_user_roles WHERE app_id = ? AND user_id = ?').get(app.id, user.id)
+               || db.prepare('SELECT 1 FROM app_users WHERE app_id = ? AND user_id = ?').get(app.id, user.id);
+  return !!related && userHasAppPermission({ id: user.id, role: user.role }, app, 'request.view_app');
+}
+
+/**
+ * GET /api/enhancements/:id
+ * One request, for its own page. An unknown id and one the caller may not see
+ * answer the same 404, so the route does not confirm which ids exist.
+ */
+router.get('/:id', requireAuth, (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) throw new AppError('Request not found', 404, 'NOT_FOUND');
+  const db = getDb();
+  const row = db.prepare(`
+    SELECT er.id, er.app_slug, er.user_id, er.user_name, er.message, er.created_at, er.status,
+           er.validated_at, er.done_note, er.fix_version, er.branch_name, er.pr_url,
+           er.coder_session_id, er.vuln_key, a.name AS app_name
+    FROM enhancement_requests er
+    LEFT JOIN apps a ON a.slug = er.app_slug
+    WHERE er.id = ?
+  `).get(id);
+  if (!row || !canViewRequest(db, req.user, row)) throw new AppError('Request not found', 404, 'NOT_FOUND');
+  const { user_id: _uid, vuln_key: vulnKey, ...rest } = row;
+  res.json({
+    request: {
+      ...rest,
+      bucket: bucketize(row.status, row.validated_at),
+      // Opened by the dependency scan: its message is the advisory.
+      dependency_scan: !!vulnKey,
+    },
+  });
 });
 
 // ── Comments thread (bugs / notes / reviews) ───────────────────────────

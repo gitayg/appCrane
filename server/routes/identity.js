@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { auditLogin } from '../middleware/audit.js';
+import { auditLogin, logAudit } from '../middleware/audit.js';
 import { identitySecretFor, signIdentity } from '../services/identitySignature.js';
 import { existsSync } from 'fs';
 import { join, resolve } from 'path';
@@ -9,9 +9,14 @@ import { AppError } from '../utils/errors.js';
 import { setSessionCookie, clearSessionCookie } from '../utils/sessionCookie.js';
 import { isSsoOnly } from '../services/authPolicy.js';
 import { roleKeysForUser } from '../services/appDefinedRoles.js';
+import { discoverablePortalRow } from '../services/discoverableApps.js';
 import log from '../utils/logger.js';
 import { isSafeRedirect } from '../utils/safeRedirect.js';
 import { frameAncestorsForRedirect } from '../utils/embed.js';
+import { decideAccess, effectiveRules } from '../services/accessRules.js';
+import { revokeAllGrantsForUser } from '../services/oauthStore.js';
+import { passwordLoginMfaStep } from '../services/mfa.js';
+import { touchSession } from '../services/sessionPolicy.js';
 
 const ICON_DIR = resolve(process.env.DATA_DIR || './data', 'apps');
 const ICON_EXTS = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg'];
@@ -115,9 +120,15 @@ router.post('/login', (req, res) => {
     throw new AppError('Password not set for this user. Contact admin.', 401, 'NO_PASSWORD');
   }
 
-  if (!verifyPassword(password, user.password_hash)) {
+  let legacyUnavailable = false;
+  const passwordOk = verifyPassword(password, user.password_hash, {
+    onRehash: (h) => db.prepare('UPDATE users SET password_hash = ? WHERE id = ? AND password_hash = ?').run(h, user.id, user.password_hash),
+    onLegacyUnavailable: () => { legacyUnavailable = true; },
+  });
+  if (!passwordOk) {
     log.warn(`Failed login for "${login}" from ${ip}`);
-    failed('bad_password');
+    failed(legacyUnavailable ? 'legacy_hash_unavailable' : 'bad_password');
+    if (legacyUnavailable) throw new AppError('Your password must be reset by an administrator.', 401, 'PASSWORD_RESET_REQUIRED');
     throw new AppError('Invalid credentials', 401, 'INVALID_CREDENTIALS');
   }
 
@@ -134,6 +145,9 @@ router.post('/login', (req, res) => {
       appRole = roleRecord?.app_role || 'none';
     }
   }
+
+  const mfaStep = passwordLoginMfaStep(db, user, { appId });
+  if (mfaStep) return res.status(401).json(mfaStep);
 
   // Create session token
   const token = generateSessionToken();
@@ -175,7 +189,8 @@ router.post('/login', (req, res) => {
     app_role: isAdmin && (a.app_role === 'none' || a.app_role === 'viewer') ? 'admin' : a.app_role,
     has_icon: hasIcon(a.slug),
     has_github: !!a.has_github,
-  })).filter(a => isAdmin || a.visibility !== 'hidden');
+  })).filter(a => isAdmin || a.visibility !== 'hidden')
+    .map(a => (a.app_role === 'none' ? discoverablePortalRow(a, 'app_role') : a));
 
   // v2.6.18: set cc_token cookie server-side. Eliminates the class
   // of bugs where the SPA's client-side cookie write was missing
@@ -201,6 +216,29 @@ router.post('/login', (req, res) => {
     apps,
   });
 });
+
+const escapeHtml = (v) => String(v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+
+// Caddy forward_auth hands a non-2xx verify response straight to the client, so
+// this is what the person sees: a page for a browser, JSON for anything else.
+function refuseByRule(req, res, verdict, appLabel) {
+  const malformed = verdict.reason === 'malformed';
+  const status = malformed ? 400 : 403;
+  const message = malformed
+    ? 'This request path cannot be read unambiguously, so it was refused.'
+    : `You need the ${verdict.role} role${verdict.role === 'owner' ? '' : ' or higher'} on ${appLabel} for this page.`;
+  const code = malformed ? 'MALFORMED_PATH' : 'ROLE_REQUIRED';
+  res.status(status);
+  if (req.accepts(['json', 'html']) === 'html') {
+    res.type('html').send(`<!doctype html><meta charset="utf-8"><title>Access denied</title>`
+      + `<body style="font-family:system-ui,sans-serif;max-width:40rem;margin:4rem auto;padding:0 1rem">`
+      + `<h1>Access denied</h1><p>${escapeHtml(message)}</p>`
+      + (malformed ? '' : `<p>Ask an owner of ${escapeHtml(appLabel)} for that role.</p>`)
+      + `</body>`);
+    return;
+  }
+  res.json({ error: { code, message, ...(malformed ? {} : { required_role: verdict.role }) } });
+}
 
 /**
  * GET /api/identity/verify
@@ -350,7 +388,7 @@ router.get('/verify', (req, res) => {
   //   (2) Bearer / cc_token → identity_sessions
   let session = null;
   if (apiKey && apiKey.startsWith('dhk_uak_')) {
-    // v2.108.0: a personal app sign-in key (migration 121). It opens ONE app's
+    // v2.124.0: a personal app sign-in key (migration 153). It opens ONE app's
     // gate and nothing else, so the app it names must be the app being entered.
     // A request with no ?app= is a bare verify, not entering any app, and is
     // refused too — otherwise the key would answer "who am I" platform-wide.
@@ -420,6 +458,7 @@ router.get('/verify', (req, res) => {
     if (!isApiClient) return loginRedirect();
     throw new AppError('Account is deactivated', 403, 'DEACTIVATED');
   }
+  if (!apiKey) touchSession(db, session, { role: session.crane_role });
 
   // Get app role
   const url = new URL(req.url, `http://${req.headers.host}`);
@@ -467,6 +506,24 @@ router.get('/verify', (req, res) => {
   if (appRole === 'none') {
     if (!isApiClient) return loginRedirect({ denied: '1', app: appSlug || '', name: appName || '' });
     throw new AppError('You do not have access to this app', 403, 'FORBIDDEN');
+  }
+
+  // Path role rules (services/accessRules.js): the app's own pages and APIs
+  // that need more than plain access. Only a Caddy forward_auth call carries
+  // X-Forwarded-Uri, and Caddy always sets ?app=, so a direct /verify call by
+  // an API client is not a page request and is not gated here.
+  const forwardedUri = req.headers['x-forwarded-uri'];
+  if (appIdForRoles && appSlug && forwardedUri !== undefined) {
+    const sandboxMount = `/${appSlug}-sandbox`;
+    const env = req.query.prefix === sandboxMount ? 'sandbox' : 'production';
+    const verdict = decideAccess(effectiveRules(db, appIdForRoles, env), {
+      method: req.headers['x-forwarded-method'],
+      uri: forwardedUri,
+      mountPrefix: env === 'sandbox' ? sandboxMount : `/${appSlug}`,
+      appRole,
+      headers: req.headers,
+    });
+    if (!verdict.ok) return refuseByRule(req, res, verdict, appName || appSlug);
   }
 
   // Record visit (one row per user/app/day via UPSERT — no-op if already exists)
@@ -567,7 +624,7 @@ router.get('/verify', (req, res) => {
     res.setHeader('X-AppCrane-App-Roles', appRoleKeys.join(','));
   }
 
-  // v2.108.0: say when the caller signed in with an app key rather than a
+  // v2.124.0: say when the caller signed in with an app key rather than a
   // browser session, so an app can let a script do less than its person can
   // (the Work Review hub accepts an app key on its upload endpoint only).
   // Present only on that path; Caddy strips any copy a client sends. It is NOT
@@ -724,7 +781,8 @@ router.get('/me', (req, res) => {
     role: isAdmin && (a.role === 'none' || a.role === 'viewer') ? 'admin' : a.role,
     has_icon: hasIcon(a.slug),
     has_github: !!a.has_github,
-  })).filter(a => isAdmin || a.visibility !== 'hidden');
+  })).filter(a => isAdmin || a.visibility !== 'hidden')
+    .map(a => (a.role === 'none' ? discoverablePortalRow(a, 'role') : a));
 
   res.json({
     user: {
@@ -740,6 +798,27 @@ router.get('/me', (req, res) => {
   });
 });
 
+// Wrong current passwords on POST /set-password, per user: 5 per 15 minutes.
+// Keyed by user id, so the map is bounded by the user table and needs no sweep.
+const _setPasswordFailures = new Map();
+const SET_PASSWORD_MAX_FAILURES = 5;
+const SET_PASSWORD_WINDOW_MS = 15 * 60_000;
+
+export function checkSetPasswordRateLimit(userId, now = Date.now()) {
+  const rec = _setPasswordFailures.get(userId);
+  if (!rec || now > rec.resetAt) return true;
+  return rec.count < SET_PASSWORD_MAX_FAILURES;
+}
+
+function recordSetPasswordFailure(userId, now = Date.now()) {
+  const rec = _setPasswordFailures.get(userId);
+  if (!rec || now > rec.resetAt) {
+    _setPasswordFailures.set(userId, { count: 1, resetAt: now + SET_PASSWORD_WINDOW_MS });
+  } else {
+    rec.count++;
+  }
+}
+
 /**
  * POST /api/identity/set-password
  *
@@ -754,6 +833,10 @@ router.get('/me', (req, res) => {
  * here is the only valid one.
  *
  * Bridges the v2.4.0 migration off `dhk_admin_*`-only login.
+ *
+ * Body: { password, current_password }. current_password is required once the
+ * user has a password, so a stolen session or API key cannot change it and
+ * lock the owner out; a user with no password yet sets one without it.
  */
 router.post('/set-password', (req, res) => {
   const db = getDb();
@@ -779,13 +862,40 @@ router.post('/set-password', (req, res) => {
   }
   if (!user) throw new AppError('Authentication required', 401, 'UNAUTHORIZED');
 
-  const { password } = req.body || {};
+  const ip = req.ip || req.socket?.remoteAddress || 'unknown';
+  const audit = (action, detail) => {
+    try { logAudit(user.id, null, action, { method: 'self-service', ip, ...detail }); } catch (_) {}
+  };
+
+  const { password, current_password } = req.body || {};
+  const hadPassword = !!user.password_hash;
+
+  if (hadPassword) {
+    if (!checkSetPasswordRateLimit(user.id)) {
+      audit('password-change-failed', { reason: 'rate_limited' });
+      throw new AppError('Too many wrong current passwords. Try again in 15 minutes.', 429, 'RATE_LIMITED');
+    }
+    if (!current_password || typeof current_password !== 'string') {
+      throw new AppError('Enter your current password to set a new one', 400, 'CURRENT_PASSWORD_REQUIRED');
+    }
+    if (!verifyPassword(current_password, user.password_hash)) {
+      recordSetPasswordFailure(user.id);
+      audit('password-change-failed', { reason: 'bad_current_password' });
+      throw new AppError('Current password is incorrect', 403, 'INVALID_CURRENT_PASSWORD');
+    }
+  }
+
   if (!password || typeof password !== 'string' || password.length < 12) {
     throw new AppError('Password must be at least 12 characters', 400, 'VALIDATION');
   }
+  if (hadPassword && password === current_password) {
+    throw new AppError('The new password must be different from the current one', 400, 'PASSWORD_UNCHANGED');
+  }
 
+  _setPasswordFailures.delete(user.id);
   db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(password), user.id);
   db.prepare('DELETE FROM identity_sessions WHERE user_id = ?').run(user.id);
+  revokeAllGrantsForUser(user.id);
 
   // Issue a fresh session so the caller can drop the API-key path
   // immediately and start using Bearer (cc_identity_token) right away.
@@ -804,6 +914,7 @@ router.post('/set-password', (req, res) => {
   // was set.
   setSessionCookie(res, token, req);
 
+  audit(hadPassword ? 'password-change' : 'password-set', {});
   log.info(`User ${user.id} (${user.email || user.username}) set their own password`);
   res.json({
     ok: true,

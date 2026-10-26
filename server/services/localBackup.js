@@ -54,6 +54,7 @@ import { getDb } from '../db.js';
 import { exportDataArchive } from './configBackup.js';
 import { dataDir } from './backupFiles.js';
 import log from '../utils/logger.js';
+import { jobStarted, trackJob } from './jobHealth.js';
 
 const K = {
   enabled: 'backup_local_enabled',
@@ -199,11 +200,12 @@ export function startLocalBackupScheduler() {
       const today = new Date().toISOString().slice(0, 10);
       if ((get(db, K.lastRun) || '').slice(0, 10) === today) return;
       if (new Date().getHours() < cfg.hour) return;
-      await runLocalBackup().catch(() => { /* last_error already recorded */ });
+      await trackJob('local-backup', runLocalBackup).catch(() => { /* last_error already recorded */ });
     } catch (e) {
       log.warn(`[backup-local] scheduler tick failed: ${e.message}`);
     }
   };
+  jobStarted('local-backup', { enabled: () => getLocalBackupConfig().enabled });
   tick();
   _timer = setInterval(() => { tick().catch(() => {}); }, 60 * 60 * 1000);
   log.info('[backup-local] scheduler started (hourly check)');

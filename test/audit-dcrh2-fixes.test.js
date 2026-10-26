@@ -96,7 +96,7 @@ const listen = (handler, port = 0, host) => new Promise((r) => {
 test('rename: an app member cannot rename the app over MCP; the check is fail-closed', async () => {
   await assert.rejects(
     callTool(MEMBER.row, 'appcrane_rename_app', { slug: 'dfixrn', new_slug: 'dfixrn-taken', redirect: false }),
-    /Forbidden: tool appcrane_rename_app requires platform_admin/,
+    /Forbidden: tool appcrane_rename_app requires app_admin|Only the app owner or a platform admin/,
   );
   assert.ok(db.prepare("SELECT 1 FROM apps WHERE slug = 'dfixrn'").get(), 'the app was renamed by a member');
 });

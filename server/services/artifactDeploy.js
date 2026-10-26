@@ -49,6 +49,13 @@ export async function deployArtifact({
     drop();
     throw new Error('env must be production or sandbox');
   }
+  try {
+    const { assertNoRestoreInProgress } = await import('./managedDbRestoreGuard.js');
+    assertNoRestoreInProgress(app.slug, env);
+  } catch (e) {
+    drop();
+    throw e;
+  }
   // An app converted to a Crane-hosted repository deploys from that repository;
   // a bundle deployed on top of it would run code the repository does not hold.
   const { conversionRefusal } = await import('./uploadConversion.js');

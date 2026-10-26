@@ -14,6 +14,7 @@ import log from '../utils/logger.js';
 import { encrypt, decrypt } from '../services/encryption.js';
 import { userHasAppPermission, isAppOwnerOrPlatformAdmin } from '../services/permissions.js';
 import { notifySecretReveal } from '../services/emailService.js';
+import { secretFingerprint, secretPreview, opaquePreview } from '../services/secretMask.js';
 import { AppError } from '../utils/errors.js';
 
 const router = Router();
@@ -23,8 +24,9 @@ router.use(requireAuth);
 // ── Plaintext-reveal throttle (v2.44.0) ──────────────────────────────────────
 //
 // Both numbers are set against the ACTUAL client, not a guess. The admin SPA
-// (studio-web AppManager) loads the Environment tab with ?reveal=true and calls
-// load() again after every set and every delete, so one honest sitting — open
+// (studio-web AppManager) loaded the Environment tab with ?reveal=true and called
+// load() again after every set and every delete (it now loads the masked list and
+// reveals one key at a time through POST .../:key/reveal), so one honest sitting — open
 // the tab, add half a dozen variables, delete a stale one, switch between the
 // sandbox and production tabs — is on the order of 15-20 reveals in a few
 // minutes. 30 per 10 minutes clears that with room to spare, which is the point:
@@ -48,6 +50,41 @@ const REVEAL_MAX_PER_WINDOW = 30;
 // one teaches them to filter the rest. One notice per person per app per 30
 // minutes keeps the signal; the audit log keeps the complete record.
 const REVEAL_NOTICE_COOLDOWN_MIN = 30;
+
+// Throttle, audit and notify for a plaintext read of `keys`. Throws 429 (and
+// records nothing) once the caller's reveal budget for this app is spent.
+// Keys only — the values are the thing being protected.
+function recordReveal(req, env, keys) {
+  const db = getDb();
+  // Both counts are taken BEFORE this reveal is logged, so "recent" and
+  // "notified" mean strictly prior events and the arithmetic is unambiguous.
+  const countReveals = (minutes) => db.prepare(`
+    SELECT COUNT(*) AS n FROM audit_log
+    WHERE user_id = ? AND app_id = ? AND action IN ('env-reveal', 'secret-reveal', 'env_file.reveal')
+      AND created_at >= datetime('now', ?)
+  `).get(req.user.id, req.app.id, `-${minutes} minutes`).n;
+
+  if (countReveals(REVEAL_WINDOW_MIN) >= REVEAL_MAX_PER_WINDOW) {
+    // Logged at error: hitting this ceiling is never routine use.
+    log.error(`SECRET REVEAL THROTTLED ${req.app.slug}/${env} — user ${req.user.id} exceeded ${REVEAL_MAX_PER_WINDOW} reveals in ${REVEAL_WINDOW_MIN}m`);
+    throw new AppError(
+      `Too many secret reveals for this app (${REVEAL_MAX_PER_WINDOW} per ${REVEAL_WINDOW_MIN} minutes). Wait and retry, or ask a platform admin.`,
+      429, 'REVEAL_THROTTLED'
+    );
+  }
+
+  const alreadyNotified = countReveals(REVEAL_NOTICE_COOLDOWN_MIN) > 0;
+
+  logAudit(req.user.id, req.app.id, 'env-reveal', { env, keys });
+  log.warn(`SECRET REVEAL ${req.app.slug}/${env} (${keys.length} key(s)) by user ${req.user.id}`);
+
+  if (!alreadyNotified) {
+    // Fire-and-forget: the reveal must not block on SMTP, and a mail
+    // transport that is down must not turn a valid read into a 500.
+    notifySecretReveal(req.app, env, req.user, keys)
+      .catch(e => log.error(`Secret-reveal notification failed for ${req.app.slug}/${env}: ${e.message}`));
+  }
+}
 
 /**
  * GET /api/apps/:slug/env/:env - List env vars
@@ -80,48 +117,31 @@ router.get('/:slug/env/:env', requireAppUser, (req, res) => {
   //
   // Only the reveal. The masked list is the ordinary UI render on every visit to
   // the Environment tab, and logging that would bury the reads that matter.
-  // Keys only — the values are the thing being protected.
-  if (showValues && vars.length) {
-    // Both counts are taken BEFORE this reveal is logged, so "recent" and
-    // "notified" mean strictly prior events and the arithmetic is unambiguous.
-    const countReveals = (minutes) => db.prepare(`
-      SELECT COUNT(*) AS n FROM audit_log
-      WHERE user_id = ? AND app_id = ? AND action IN ('env-reveal', 'secret-reveal', 'env_file.reveal')
-        AND created_at >= datetime('now', ?)
-    `).get(req.user.id, req.app.id, `-${minutes} minutes`).n;
+  if (showValues && vars.length) recordReveal(req, env, vars.map(v => v.key));
 
-    if (countReveals(REVEAL_WINDOW_MIN) >= REVEAL_MAX_PER_WINDOW) {
-      // Logged at error: hitting this ceiling is never routine use.
-      log.error(`SECRET REVEAL THROTTLED ${req.app.slug}/${env} — user ${req.user.id} exceeded ${REVEAL_MAX_PER_WINDOW} reveals in ${REVEAL_WINDOW_MIN}m`);
-      throw new AppError(
-        `Too many secret reveals for this app (${REVEAL_MAX_PER_WINDOW} per ${REVEAL_WINDOW_MIN} minutes). Wait and retry, or ask a platform admin.`,
-        429, 'REVEAL_THROTTLED'
-      );
-    }
-
-    const alreadyNotified = countReveals(REVEAL_NOTICE_COOLDOWN_MIN) > 0;
-
-    logAudit(req.user.id, req.app.id, 'env-reveal', { env, keys: vars.map(v => v.key) });
-    log.warn(`SECRET REVEAL ${req.app.slug}/${env} (${vars.length} key(s)) by user ${req.user.id}`);
-
-    if (!alreadyNotified) {
-      // Fire-and-forget: the reveal must not block on SMTP, and a mail
-      // transport that is down must not turn a valid read into a 500.
-      notifySecretReveal(req.app, env, req.user, vars.map(v => v.key))
-        .catch(e => log.error(`Secret-reveal notification failed for ${req.app.slug}/${env}: ${e.message}`));
-    }
-  }
-
-  const result = vars.map(v => ({
-    id: v.id,
-    key: v.key,
-    value: showValues ? decrypt(v.value_encrypted) : '********',
-    updated_at: v.updated_at,
-  }));
+  const canReveal = env !== 'production' || isAppOwnerOrPlatformAdmin(req.user, req.app);
+  const result = vars.map(v => {
+    if (showValues) return { id: v.id, key: v.key, value: decrypt(v.value_encrypted), updated_at: v.updated_at };
+    let plain = null;
+    try { plain = decrypt(v.value_encrypted); } catch (_) { /* reported below */ }
+    if (plain == null) return { id: v.id, key: v.key, value: '********', error: 'decrypt_failed', updated_at: v.updated_at };
+    return {
+      id: v.id,
+      key: v.key,
+      value: '********',
+      // Length, tail and fingerprint are for people who could read the whole value
+      // anyway: a member who can reveal sandbox would otherwise learn a production
+      // value by matching its fingerprint against a sandbox one.
+      ...(canReveal && { length: plain.length, fingerprint: secretFingerprint(plain) }),
+      preview: canReveal ? secretPreview(plain) : opaquePreview(plain),
+      updated_at: v.updated_at,
+    };
+  });
 
   // Check for matching values across envs (safety warning)
   const warnings = [];
-  if (env === 'sandbox') {
+  // Comparing against production tells the reader something about production values.
+  if (env === 'sandbox' && isAppOwnerOrPlatformAdmin(req.user, req.app)) {
     const prodVars = db.prepare(
       'SELECT key, value_encrypted FROM env_vars WHERE app_id = ? AND env = ?'
     ).all(req.app.id, 'production');
@@ -134,7 +154,33 @@ router.get('/:slug/env/:env', requireAppUser, (req, res) => {
     }
   }
 
-  res.json({ env, vars: result, warnings });
+  res.json({
+    env, vars: result, warnings,
+    can_reveal: canReveal,
+    ...(!canReveal && { reveal_refusal: 'Revealing production secrets requires the app owner or a platform admin.' }),
+  });
+});
+
+/**
+ * POST /api/apps/:slug/env/:env/:key/reveal - Plaintext of ONE env var
+ * POST, not GET: a reveal writes an audit row, spends the reveal budget and can
+ * mail the owners, so it must not be cached, prefetched or replayed from a URL.
+ */
+router.post('/:slug/env/:env/:key/reveal', requireAppUser, (req, res) => {
+  const { env, key } = req.params;
+  if (!['production', 'sandbox'].includes(env)) throw new AppError('env must be production or sandbox', 400, 'VALIDATION');
+  if (env === 'production' && !isAppOwnerOrPlatformAdmin(req.user, req.app)) {
+    throw new AppError('Revealing production secrets requires the app owner or a platform admin.', 403, 'FORBIDDEN');
+  }
+  const row = getDb().prepare(
+    'SELECT key, value_encrypted, updated_at FROM env_vars WHERE app_id = ? AND env = ? AND key = ?'
+  ).get(req.app.id, env, key);
+  if (!row) throw new AppError(`Env var '${key}' not found in ${env}`, 404, 'NOT_FOUND');
+
+  recordReveal(req, env, [row.key]);
+  const value = decrypt(row.value_encrypted);
+  res.set('Cache-Control', 'no-store');
+  res.json({ env, key: row.key, value, fingerprint: secretFingerprint(value), updated_at: row.updated_at });
 });
 
 /**

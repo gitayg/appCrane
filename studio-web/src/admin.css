@@ -94,6 +94,13 @@ code, kbd, .mono, .job-tag, pre {
 
 .admin-content { margin-left: var(--sidebar-w, 220px); flex: 1; min-width: 0; }
 .admin-content.collapsed { margin-left: 56px; }
+/* Unpinned, the sidebar rests as a 56px icon rail and opens OVER the page on
+   hover / focus / tap (.peek) — the content keeps its 56px margin, so nothing
+   reflows. Pinned keeps the old always-open layout. */
+.admin-sidebar.peek { width: var(--sidebar-w, 220px); z-index: 20; box-shadow: 4px 0 24px rgba(0,0,0,.35); }
+@media (prefers-reduced-motion: reduce) {
+  .admin-sidebar, .admin-sidebar.peek { transition: none; }
+}
 
 /* v2.21.0: draggable sidebar-width handle, pinned to the sidebar's right edge. */
 .sidebar-resizer {
@@ -369,6 +376,7 @@ body.resizing-sidebar .admin-sidebar, body.resizing-sidebar .admin-content { tra
   }
   .admin-sidebar.open { transform: translateX(0); box-shadow: 4px 0 24px rgba(0,0,0,.5); }
   .admin-content { margin-left: 0 !important; }
+  .admin-sidebar.collapsed, .admin-sidebar.peek { width: var(--sidebar-w, 220px); box-shadow: none; }
   .container { padding: 16px; }
 }
 
@@ -1197,6 +1205,18 @@ textarea:focus { border-color: var(--accent); }
   padding: 1px 6px; border-radius: 10px;
   background: var(--surface2, #232323); color: var(--dim);
 }
+
+/* Launch picker sections: Apps you own, Your apps, Request access. */
+.picker-section { margin-bottom: 26px; }
+.lstage-picker-inner .picker-section-head {
+  display: flex; align-items: center; gap: 8px;
+  margin: 0 0 12px; font-size: .9rem; font-weight: 600; color: var(--text);
+}
+.picker-locked { cursor: default; opacity: .7; }
+.picker-locked:hover { transform: none; background: var(--surface, #1a1a1a); }
+.picker-locked-owner { font-size: .72rem; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.picker-request-btn { text-align: center; cursor: pointer; }
+.picker-request-btn:disabled { cursor: default; opacity: .7; }
 
 /* Per-tile ⋯ menu (version / builder / open in a new tab). The cell is the
    positioning context; the dots sit over the tile's top-right corner without

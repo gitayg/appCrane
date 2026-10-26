@@ -47,7 +47,7 @@ writeFileSync(join(SHIM, 'docker'), `#!/bin/sh
 ${WORKSPACE_DOCKER_PRELUDE}
 { for a in "$@"; do printf '%s\\037' "$a"; done; printf '\\n'; } >> "${DOCKER_LOG}"
 case "$1" in
-  image)   echo 5 ;;
+  image)   echo 6 ;;
   inspect) echo true ;;
   run)     echo 0123456789abcdef0123456789abcdef ;;
 esac

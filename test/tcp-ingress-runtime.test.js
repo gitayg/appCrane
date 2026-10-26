@@ -244,7 +244,9 @@ const DOCKER_ARGS = {
  * v2.42.1 added the isolation and hardening flags below, and v2.48.0 changed
  * the two resource flags (--restart=on-failure:5 -> :2, and --memory-swap
  * pinned to --memory), so the constant this file compares against moved with
- * them. What these tests assert is unchanged: that tcp ingress adds the public
+ * them; the memory-admission release added --oom-score-adj=500 after the
+ * network (oomPriority.js), and the CPU-priority release --cpu-shares=128 after it
+ * (cpuPriority.js). What these tests assert is unchanged: that tcp ingress adds the public
  * publish and NOTHING else, measured against whatever the current common
  * baseline is.
  */
@@ -257,6 +259,8 @@ function baselineArgs(slug, env, hostPort) {
     '--label', `env=${env}`,
     '--restart=on-failure:2',
     '--network', 'appcrane-apps',
+    '--oom-score-adj=500',
+    '--cpu-shares=128',
     '--memory=512m',
     '--memory-swap=512m',
     '--cpus=0.5',

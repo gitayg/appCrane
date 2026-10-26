@@ -57,7 +57,7 @@ test('a rename succeeds with a relative DATA_DIR', async () => {
   mkdirSync(join('./data', 'apps', 'squatter'), { recursive: true });
   writeFileSync(join('./data', 'apps', 'squatter', 'marker'), 'x');
 
-  const out = await renameApp({ app, newSlug: 'squatter-retired', redirect: false, userId: user });
+  const out = await renameApp({ app, newSlug: 'squatter-retired', redirect: false, user: { id: user, role: 'platform_admin' } });
 
   assert.equal(out.new_slug, 'squatter-retired');
   assert.equal(db.prepare('SELECT slug FROM apps WHERE id = ?').get(app.id).slug, 'squatter-retired');
@@ -71,7 +71,7 @@ test('a dashed slug is accepted — the shape blamed for the failure was never t
   const app = db.prepare("SELECT * FROM apps WHERE slug = 'plain'").get();
   mkdirSync(join('./data', 'apps', 'plain'), { recursive: true });
 
-  const out = await renameApp({ app, newSlug: 'a-b-c-dashed', redirect: false, userId: user });
+  const out = await renameApp({ app, newSlug: 'a-b-c-dashed', redirect: false, user: { id: user, role: 'platform_admin' } });
   assert.equal(out.new_slug, 'a-b-c-dashed');
 });
 
@@ -80,6 +80,6 @@ test('traversal is still refused, relative DATA_DIR or not', async () => {
   const app = db.prepare("SELECT * FROM apps WHERE slug = 'trav'").get();
   // The slug regex rejects this first; the assertion is that fixing the path
   // comparison did not open a hole behind it.
-  await assert.rejects(() => renameApp({ app, newSlug: '../escape', redirect: false, userId: user }),
+  await assert.rejects(() => renameApp({ app, newSlug: '../escape', redirect: false, user: { id: user, role: 'platform_admin' } }),
     /lowercase alphanumeric|Path traversal/);
 });

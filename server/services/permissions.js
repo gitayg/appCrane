@@ -98,6 +98,11 @@ const VALID_ROLES = ['user', 'admin', 'owner', 'platform_admin'];
  */
 export function roleForUserOnApp(user, app) {
   if (!user || !app) return null;
+  // View as role: the previewed role on the previewed app. middleware/auth.js
+  // only sets view_as after checking it is below the caller's real role.
+  if (user.view_as && user.view_as.app_id === app.id) {
+    return user.view_as.role === 'none' ? null : user.view_as.role;
+  }
   const db = getDb();
   const row = db.prepare(
     'SELECT app_role FROM app_user_roles WHERE app_id = ? AND user_id = ?'

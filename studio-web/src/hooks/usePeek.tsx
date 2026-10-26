@@ -103,10 +103,22 @@ export function usePeek(iframeRef: React.RefObject<HTMLIFrameElement | null>) {
     const onKeydown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') { e.preventDefault(); stop() }
     }
+    // The pick's press/release must not reach the app either: menus and
+    // drawers that open on pointerdown/mouseup would open under the modal,
+    // grab focus, and retarget the click to <body>. Window capture (for the
+    // click too) runs before the app's own document listeners. Touch events
+    // are only stopped — cancelling them would suppress the click that picks.
+    const win = doc.defaultView
+    const onPress = (e: Event) => {
+      if (!e.type.startsWith('touch')) e.preventDefault()
+      e.stopImmediatePropagation()
+    }
+    const PRESS = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'touchstart', 'touchend']
+    PRESS.forEach(t => win?.addEventListener(t, onPress, true))
 
     doc.addEventListener('mouseover', onOver, true)
     doc.addEventListener('mouseout',  onOut,  true)
-    doc.addEventListener('click',     onClick, true)
+    win?.addEventListener('click',    onClick, true)
     doc.addEventListener('keydown',   onKeydown, true)
     document.addEventListener('keydown', onKeydown, true)
 
@@ -116,8 +128,9 @@ export function usePeek(iframeRef: React.RefObject<HTMLIFrameElement | null>) {
         doc.getElementById(STYLE_ID)?.remove()
         doc.removeEventListener('mouseover', onOver, true)
         doc.removeEventListener('mouseout',  onOut,  true)
-        doc.removeEventListener('click',     onClick, true)
+        win?.removeEventListener('click',    onClick, true)
         doc.removeEventListener('keydown',   onKeydown, true)
+        PRESS.forEach(t => win?.removeEventListener(t, onPress, true))
       } catch (_) {}
       document.removeEventListener('keydown', onKeydown, true)
       hoverElRef.current = null

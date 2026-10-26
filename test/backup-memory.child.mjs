@@ -1,6 +1,7 @@
 // Child process for backup-memory.test.js: runs one backup operation and
 // prints its own peak RSS (KB) as JSON on the last line of stdout.
 const [mode, root, archive] = process.argv.slice(2);
+if (!root) { console.error('backup-memory.child.mjs is started by backup-memory.test.js with a data directory'); process.exit(2); }
 process.env.DATA_DIR = root;
 
 const { initDb } = await import('../server/db.js');

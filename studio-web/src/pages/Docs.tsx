@@ -82,6 +82,7 @@ const REST_FAMILIES: { name: string; rows: [string, string, string][] }[] = [
   ] },
   { name: "Environment variables", rows: [
     ["GET", "/api/apps/:slug/env/:env", "List vars (?reveal=true to decrypt)"],
+    ["POST", "/api/apps/:slug/env/:env/:key/reveal", "Decrypt one var (audited, owners notified)"],
     ["PUT", "/api/apps/:slug/env/:env", "Upsert vars { vars: { KEY: value } }"],
     ["DELETE", "/api/apps/:slug/env/:env/:key", "Delete one var"],
   ] },
@@ -104,6 +105,24 @@ const REST_FAMILIES: { name: string; rows: [string, string, string][] }[] = [
   ] },
   { name: "App email (internal-only)", rows: [
     ["POST", "/api/service/email", "Send email from an app's server (service-token auth)"],
+  ] },
+  { name: "App tasks (internal-only, service-token auth)", rows: [
+    ["POST", "/api/service/tasks", "Create a task: subject, body?, requester_user_id|requester_email, assignee_user_id|assignee_email, due_date?, external_ref?, url?"],
+    ["GET", "/api/service/tasks", "List this app's tasks (?status, assignee_user_id, requester_user_id, external_ref, limit)"],
+    ["GET", "/api/service/tasks/:id", "One task with its thread and status history"],
+    ["POST", "/api/service/tasks/:id/comments", "Comment as the app"],
+    ["PATCH", "/api/service/tasks/:id", "Change status: open, in_progress, done, declined"],
+    ["DELETE", "/api/service/tasks/:id", "Delete (soft, audited; hidden from everyone)"],
+    ["GET", "/api/service/tasks/events?since=", "Change feed after a cursor: created, comment, status, deleted"],
+    ["PUT", "/api/service/tasks/webhook", "Set or clear ({url:null}) the https URL people's replies and status changes are POSTed to (signed)"],
+  ] },
+  { name: "My tasks", rows: [
+    ["GET", "/api/tasks", "Tasks I am assigned or requested, across apps (?box=all|assigned|requested, status, app)"],
+    ["GET", "/api/tasks/count", "Open tasks assigned to me + tasks with unread activity (nav badge)"],
+    ["GET", "/api/tasks/:id", "One task (marks it read)"],
+    ["POST", "/api/tasks/:id/comments", "Reply (requester or assignee)"],
+    ["PATCH", "/api/tasks/:id", "Change status (moves allowed for my role)"],
+    ["DELETE", "/api/tasks/:id", "Delete (requester only)"],
   ] },
   { name: "Backups", rows: [
     ["POST", "/api/apps/:slug/backup/:env", "Snapshot /data and the managed databases it uses"],

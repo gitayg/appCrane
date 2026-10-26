@@ -57,6 +57,9 @@ for (const lvl of ['warn', 'info', 'debug']) logger[lvl] = () => {};
 
 const { initDb } = await import('../server/db.js');
 initDb();
+// This file exercises a real daemon, not memory admission (test/memory-admission.test.js); a busy
+// Docker host must not refuse its containers.
+(await import('../server/db.js')).getDb().prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('memory_admission_mode', 'off')").run();
 
 const { seedNewVolumeMounts, mountIsEmpty, MOUNT_OWNER } =
   await import('../server/services/volumeSeeder.js');
@@ -452,15 +455,29 @@ describe('LIVE', { skip: liveSkip }, () => {
 
   test('the throwaway container is gone and its anonymous volume with it', async (t) => {
     if (problem) return t.skip(problem);
-    const before = (await dk(['volume', 'ls', '-q'])).split('\n').filter(Boolean).length;
+    // Unused volumes only: other files' tests create and hold volumes in
+    // parallel, so the total count moves for reasons that are not this copy.
+    const dangling = async () => new Set((await dk(['volume', 'ls', '-q', '--filter', 'dangling=true'])).split('\n').filter(Boolean));
+    const danglingBefore = await dangling();
+    const seedNames = async () => (await dk(['ps', '-a', '--filter', 'label=appcrane-seed=true', '--format', '{{.Names}}']))
+      .split('\n').map((n) => n.trim()).filter(Boolean);
+    const seedBefore = new Set(await seedNames());
     const fresh = scratch('leak-check');
     await copyFromImage({ image: IMAGE, copies: [{ containerPath: '/seeded', destDir: fresh }] });
-    const after = (await dk(['volume', 'ls', '-q'])).split('\n').filter(Boolean).length;
-    assert.equal(after, before,
+    const leakedVolumes = [...await dangling()].filter((v) => !danglingBefore.has(v));
+    assert.deepEqual(leakedVolumes, [],
       'this image declares VOLUME /seeded, so `docker create` makes an anonymous volume — measured: ' +
       '`docker rm -f` leaves it dangling and only `docker rm -fv` removes it');
-    const left = (await dk(['ps', '-a', '--filter', 'label=appcrane-seed=true', '-q'])).trim();
-    assert.equal(left, '', 'the throwaway container must not survive the copy');
+    // Other files' tests seed volumes in parallel, so a seed container that is
+    // not ours can exist for a moment. A leaked one never goes away; a
+    // neighbour's does, so wait out the transient ones rather than fail on them.
+    let left = [];
+    for (let i = 0; i < 30; i++) {
+      left = (await seedNames()).filter((n) => !seedBefore.has(n));
+      if (!left.length) break;
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    assert.deepEqual(left, [], 'the throwaway container must not survive the copy');
   });
 
   test('an image path that does not exist leaves the mount empty and does not throw', async (t) => {

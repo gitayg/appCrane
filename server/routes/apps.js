@@ -7,7 +7,7 @@ import { auditMiddleware, logAudit } from '../middleware/audit.js';
 import { getNextSlot, getPortsForSlot } from '../services/portAllocator.js';
 import { encrypt, generateApiKey, hashApiKey } from '../services/encryption.js';
 import { AppError } from '../utils/errors.js';
-import { slugRefusal } from '../utils/slugPolicy.js';
+import { slugRefusal, slugTakenRefusal } from '../utils/slugPolicy.js';
 import { normalizeFrameAncestors } from '../utils/frameAncestors.js';
 import { resolveSafe } from '../utils/paths.js';
 import { reloadCaddy } from '../services/caddy.js';
@@ -20,6 +20,7 @@ import {
 import { pruneGrantsForNonMembers } from '../services/appDefinedRoles.js';
 import { assessMemoryChange } from '../services/memoryBudget.js';
 import { attachedInstallationIds, codeSourceFields } from '../services/codeSource.js';
+import { discoverableApp, ownerNames, pendingAccessRequestSlugs } from '../services/discoverableApps.js';
 import {
   effectiveIngressType, publicPortForApp, pendingPortRelease, validateIngressType,
   assignPublicPort, releasePublicPort, drainingPorts, effectiveDataPlanePort, validateDataPlanePort, storedDataPlaneProtocol, validateDataPlaneProtocol, CONTROL_PLANE_PORT,
@@ -147,6 +148,7 @@ function effectiveAuthMode(raw) {
 }
 import { userHasAppPermission, userHasPlatformPermission, roleForUserOnApp, isAppOwnerOrPlatformAdmin, isAppOwnerAdminOrPlatformAdmin } from '../services/permissions.js';
 import { getSeparateSandboxDb, setSeparateSandboxDb, parseSeparateSandboxDb, SEPARATE_SANDBOX_DB_NOTE } from '../services/sandboxDb.js';
+import { getAppWhatsNewEmail, setAppWhatsNewEmail, parseAppWhatsNewEmail } from '../services/appWhatsNewMail.js';
 import { getShowSandbox, showSandboxByAppId, setShowSandbox, sandboxVisibleFor, parseShowSandbox } from '../services/sandboxVisibility.js';
 import { isAdmin } from '../utils/roles.js';
 import log from '../utils/logger.js';
@@ -453,8 +455,17 @@ router.get('/', async (req, res) => {
     return 'none';                                                 // discoverable: needs request access
   }
 
+  const requestedSlugs = isAdmin(req.user) ? null : pendingAccessRequestSlugs(db, req.user.id);
+
   // Enrich with ports and health status
   const enriched = apps.map(app => {
+    if (userAppRole(app) === 'none') {
+      return discoverableApp(app, {
+        owners: ownerNames(db, app.id),
+        hasIcon: hasIconFile(app.slug),
+        accessRequested: requestedSlugs.has(app.slug),
+      });
+    }
     const ports = getPortsForSlot(app.slot);
 
     const healthProd = db.prepare('SELECT * FROM health_state WHERE app_id = ? AND env = ?').get(app.id, 'production');
@@ -552,7 +563,9 @@ router.post('/', requireAuth, auditMiddleware('app-create'), async (req, res) =>
   const { name, slug, domain, description, category, source_type, github_url, branch, github_token, max_ram_mb, max_cpu_percent, visibility, public_access, image_ref, container_port, health_path, catalog_slug } = req.body;
 
   if (!name || !slug) throw new AppError('Name and slug are required', 400, 'VALIDATION');
-  const slugProblem = slugRefusal(slug);
+  const { submitIntake, normalizeIntake } = await import('../services/appIntake.js');
+  normalizeIntake(req.body.intake || {});
+  const slugProblem = slugRefusal(slug, req.user);
   if (slugProblem) throw new AppError(slugProblem, 400, 'VALIDATION');
   if (github_url) validateGithubUrl(github_url);
   // SECURITY: same regex as PUT — branch flows into `sh -c` calls.
@@ -655,10 +668,9 @@ router.post('/', requireAuth, auditMiddleware('app-create'), async (req, res) =>
              change what this route does, which is the one thing it must not. */ }
   if (wantedVisibility !== undefined) assertVisibilityAllowed(db, wantedVisibility);
 
-  // Check uniqueness
-  if (db.prepare('SELECT id FROM apps WHERE slug = ?').get(slug)) {
-    throw new AppError(`App slug '${slug}' already exists`, 409, 'DUPLICATE');
-  }
+  // Check uniqueness: another app's slug, or an old slug one still redirects from.
+  const slugTaken = slugTakenRefusal(db, slug);
+  if (slugTaken) throw new AppError(slugTaken, 409, 'DUPLICATE');
 
   const slot = getNextSlot(db);
   const ports = getPortsForSlot(slot);
@@ -694,6 +706,7 @@ router.post('/', requireAuth, auditMiddleware('app-create'), async (req, res) =>
     INSERT INTO app_user_roles (app_id, user_id, app_role) VALUES (?, ?, 'owner')
     ON CONFLICT(app_id, user_id) DO UPDATE SET app_role = 'owner'
   `).run(appId, req.user.id);
+  const intake = submitIntake({ id: appId, slug }, { ...(req.body.intake || {}), purpose: req.body.intake?.purpose ?? description, owner: req.user.id, submitted_by: req.user.id });
 
   // Create webhook config
   const webhookToken = crypto.randomBytes(16).toString('hex');
@@ -731,6 +744,7 @@ router.post('/', requireAuth, auditMiddleware('app-create'), async (req, res) =>
     urls,
     base_path: { production: `/${slug}/`, sandbox: `/${slug}-sandbox/` },
     webhook_url: `/api/webhooks/${webhookToken}`,
+    intake,
     message: `App '${name}' created. Assign users with PUT /api/apps/${slug}/users`,
   });
 });
@@ -829,6 +843,9 @@ router.get('/:slug', requireAppAccess, async (req, res) => {
       can_change_show_sandbox: isAppOwnerOrPlatformAdmin(req.user, app),
       separate_sandbox_db: getSeparateSandboxDb(db, app.id),
       can_change_separate_sandbox_db: isAppOwnerAdminOrPlatformAdmin(req.user, app),
+      whats_new_email: getAppWhatsNewEmail(db, app.id),
+      can_change_whats_new_email: isAppOwnerAdminOrPlatformAdmin(req.user, app),
+      can_rename: isAppOwnerOrPlatformAdmin(req.user, app),
     },
     urls: urlsDetail,
     base_path: { production: `/${app.slug}/`, sandbox: `/${app.slug}-sandbox/` },
@@ -944,6 +961,15 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
     }
     separateSandboxDbValue = parseSeparateSandboxDb(req.body.separate_sandbox_db);
     if (separateSandboxDbValue === undefined) throw new AppError('separate_sandbox_db must be true or false', 400, 'VALIDATION');
+  }
+
+  let whatsNewEmailValue;
+  if (req.body.whats_new_email !== undefined) {
+    if (!isAppOwnerAdminOrPlatformAdmin(req.user, app)) {
+      throw new AppError("Only the app owner, an app admin or a platform admin can change the What's new e-mail.", 403, 'FORBIDDEN');
+    }
+    whatsNewEmailValue = parseAppWhatsNewEmail(req.body.whats_new_email);
+    if (whatsNewEmailValue === undefined) throw new AppError('whats_new_email must be true or false', 400, 'VALIDATION');
   }
 
   // Configurable RBAC: changes to repo-related fields gated by code.modify_repo_settings.
@@ -1465,7 +1491,7 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
     }
   }
 
-  if (Object.keys(updates).length === 0 && !ingressWork && showSandboxValue === undefined && separateSandboxDbValue === undefined) {
+  if (Object.keys(updates).length === 0 && !ingressWork && showSandboxValue === undefined && separateSandboxDbValue === undefined && whatsNewEmailValue === undefined) {
     // Normalize auth_mode here too: a caller can't tell which branch of this
     // route answered, so both must report the same effective mode.
     return res.json({ app: { ...withoutSecretColumns(app), auth_mode: effectiveAuthMode(app.auth_mode), ...ingressFields(app) }, message: 'No changes' });
@@ -1508,6 +1534,7 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
   const applyWrites = db.transaction(() => {
     if (showSandboxValue !== undefined) setShowSandbox(db, app.id, showSandboxValue);
     if (separateSandboxDbValue !== undefined) setSeparateSandboxDb(db, app.id, separateSandboxDbValue);
+    if (whatsNewEmailValue !== undefined) setAppWhatsNewEmail(db, app.id, whatsNewEmailValue);
     if (Object.keys(updates).length > 0) {
       const setClauses = Object.keys(updates).map(k => `${k} = ?`).join(', ');
       const values = Object.values(updates);
@@ -1591,6 +1618,7 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
       ...ingressFields(updated),
       show_sandbox: getShowSandbox(db, app.id),
       separate_sandbox_db: getSeparateSandboxDb(db, app.id),
+      whats_new_email: getAppWhatsNewEmail(db, app.id),
       domain_aliases: db.prepare('SELECT id, domain, source, created_at FROM app_domain_aliases WHERE app_id = ? ORDER BY created_at, id').all(app.id),
     },
   });
@@ -1649,71 +1677,8 @@ router.delete('/:slug', requireAppAccess, auditMiddleware('app-delete'), async (
     throw new AppError('Add ?confirm=true to delete', 400, 'CONFIRMATION_REQUIRED');
   }
 
-  const db = getDb();
-  const slug = req.app.slug;
-
-  // Stop containers
-  try {
-    const { stopApp } = await import('../services/docker.js');
-    await stopApp(slug, 'production').catch(() => {});
-    await stopApp(slug, 'sandbox').catch(() => {});
-    // Nothing removed a deleted app's images, so every delete left them on
-    // disk forever. Before the rows go: it reads this app's deployments.
-    const { removeAppImages } = await import('../services/docker.js');
-    await removeAppImages(req.app.id, slug).catch(() => {});
-    // And the per-env volumes its declared paths were mounted through. The
-    // daemon's record only; the data on disk stays, as it always has.
-    const { removeAppVolumes } = await import('../services/docker.js');
-    await removeAppVolumes(slug).catch(() => {});
-  } catch (e) {}
-
-  // v2.65.0: drop the app's managed databases BEFORE the row goes away.
-  //
-  // Migration 085's foreign key cascades the managed_databases ROW when apps is
-  // deleted, and that is the whole of what SQLite can do — it cannot reach into
-  // Postgres or MariaDB. So a delete that skipped this would leave the database
-  // itself and a live login role standing, holding the deleted app's data, with
-  // nothing left in AppCrane pointing at either and anyone who still has the
-  // credentials able to open it. The cascade makes the leak INVISIBLE rather
-  // than loud, which is why this runs first rather than being left to a sweeper.
-  //
-  // After stopApp on purpose: the engine-side drop is what has to survive a
-  // container that has not finished shutting down (managedDb uses
-  // DROP DATABASE ... WITH (FORCE) for exactly that), but there is no reason to
-  // race it when stopping first is free.
-  //
-  // Called plainly, not wrapped: deprovisionApp catches per row and logs, and
-  // returns {requested, dropped} counts rather than throwing, so a database
-  // server that is down leaves a warning in the log and a deletable app. Read
-  // rather than assumed — server/services/managedDb.js, deprovisionApp().
-  // The counts are safe to return: they are integers, never a name or a secret.
-  const { deprovisionApp } = await import('../services/managedDb.js');
-  const dbDrop = await deprovisionApp(req.app.id);
-  if (dbDrop.requested !== dbDrop.dropped) {
-    log.warn(
-      `App delete '${slug}': ${dbDrop.requested - dbDrop.dropped} of ${dbDrop.requested} managed ` +
-      'databases could not be dropped — they are now orphaned in the engine',
-    );
-  }
-
-  // Delete related records first to avoid FK constraint failures
-  const appId = req.app.id;
-  db.transaction(() => {
-    db.prepare('DELETE FROM app_user_roles WHERE app_id = ?').run(appId);
-    db.prepare('DELETE FROM app_identity_secrets WHERE app_id = ?').run(appId);
-    db.prepare('DELETE FROM app_settings WHERE app_id = ?').run(appId);
-    db.prepare('DELETE FROM app_domain_aliases WHERE app_id = ?').run(appId);
-    db.prepare('DELETE FROM deployments WHERE app_id = ?').run(appId);
-    db.prepare('DELETE FROM env_vars WHERE app_id = ?').run(appId);
-    db.prepare('DELETE FROM health_configs WHERE app_id = ?').run(appId);
-    db.prepare('DELETE FROM health_state WHERE app_id = ?').run(appId);
-    db.prepare('DELETE FROM webhook_configs WHERE app_id = ?').run(appId);
-    db.prepare('DELETE FROM backups WHERE app_id = ?').run(appId);
-    db.prepare('DELETE FROM notification_configs WHERE app_id = ?').run(appId);
-    db.prepare('DELETE FROM identity_sessions WHERE app_id = ?').run(appId);
-    db.prepare('DELETE FROM audit_log WHERE app_id = ?').run(appId);
-    db.prepare('DELETE FROM apps WHERE id = ?').run(appId);
-  })();
+  const { deleteApp } = await import('../services/appDelete.js');
+  const { slug, managed_databases: dbDrop } = await deleteApp(req.app);
 
   // Update Caddy config (removes app routes) — after the 200 is on the wire.
   reloadCaddyAfterResponse(res, 'app delete');
@@ -1725,10 +1690,10 @@ router.delete('/:slug', requireAppAccess, auditMiddleware('app-delete'), async (
 });
 
 /**
- * POST /api/apps/:slug/rename - Rename app slug (admin only)
+ * POST /api/apps/:slug/rename - Rename app slug (the app's owner or a platform admin)
  * Stops containers, renames data dir, updates DB, reloads Caddy, redeploys.
  */
-router.post('/:slug/rename', requireAdmin, requireAppAccess, auditMiddleware('app-rename'), async (req, res) => {
+router.post('/:slug/rename', requireAppAccess, auditMiddleware('app-rename'), async (req, res) => {
   // Logic lives in services/appRename.js so appcrane_rename_app can call the
   // same code — REST is unreachable for the dhk_mcp_* keys agents hold.
   const { renameApp } = await import('../services/appRename.js');
@@ -1736,7 +1701,7 @@ router.post('/:slug/rename', requireAdmin, requireAppAccess, auditMiddleware('ap
     app: req.app,
     newSlug: req.body?.new_slug,
     redirect: req.body?.redirect !== false,
-    userId: req.user.id,
+    user: req.user,
   });
   res.json({ message: `App renamed from '${out.old_slug}' to '${out.new_slug}'`, ...out });
 });

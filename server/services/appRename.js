@@ -5,7 +5,8 @@ import { getPortsForSlot } from './portAllocator.js';
 import { resolveSafe } from '../utils/paths.js';
 import { reloadCaddy } from './caddy.js';
 import { AppError } from '../utils/errors.js';
-import { slugRefusal } from '../utils/slugPolicy.js';
+import { slugRefusal, slugTakenRefusal } from '../utils/slugPolicy.js';
+import { isAppOwnerOrPlatformAdmin } from './permissions.js';
 import log from '../utils/logger.js';
 
 // Renaming an app, for both front doors.
@@ -17,6 +18,8 @@ import log from '../utils/logger.js';
 // workaround people reached for instead was recreating the app, which loses
 // the history a rename preserves.
 
+export const RENAMES_PER_DAY = 3;
+
 /**
  * Rename an app in place.
  *
@@ -24,19 +27,33 @@ import log from '../utils/logger.js';
  * on apps.id, so a slug change does not touch them. The old slug is kept in
  * slug_aliases and keeps redirecting unless `redirect` is false.
  *
+ * The app's owner or a platform admin. Owners always keep the redirect and are
+ * held to RENAMES_PER_DAY; releasing an old slug (redirect=false) is a platform
+ * admin's call, because whoever takes it next receives the app's old links.
+ *
  * Returns { old_slug, new_slug, redirect, redeploying }.
  */
-export async function renameApp({ app, newSlug, redirect = true, userId }) {
+export async function renameApp({ app, newSlug, redirect = true, user }) {
   const db = getDb();
   const oldSlug = app.slug;
+  const userId = user?.id;
+  const platformAdmin = user?.role === 'platform_admin';
 
+  if (!isAppOwnerOrPlatformAdmin(user, app)) {
+    throw new AppError('Only the app owner or a platform admin can rename an app.', 403, 'FORBIDDEN');
+  }
+  if (!redirect && !platformAdmin) {
+    throw new AppError(
+      'Only a platform admin can release the old slug (redirect: false). Rename with the redirect kept.',
+      403, 'FORBIDDEN',
+    );
+  }
   if (!newSlug) throw new AppError('new_slug is required', 400, 'VALIDATION');
-  const slugProblem = slugRefusal(newSlug);
+  const slugProblem = slugRefusal(newSlug, user);
   if (slugProblem) throw new AppError(slugProblem, 400, 'VALIDATION');
   if (newSlug === oldSlug) throw new AppError('New slug is the same as current slug', 400, 'VALIDATION');
-  if (db.prepare('SELECT id FROM apps WHERE slug = ?').get(newSlug)) {
-    throw new AppError(`Slug '${newSlug}' is already in use`, 409, 'DUPLICATE');
-  }
+  const taken = slugTakenRefusal(db, newSlug, app.id);
+  if (taken) throw new AppError(taken, 400, 'SLUG_TAKEN');
 
   // The target directory has to be free too, and it is not implied by the slug
   // being free: deleting an app clears its rows and leaves data/apps/<slug> on
@@ -62,9 +79,6 @@ export async function renameApp({ app, newSlug, redirect = true, userId }) {
     );
   }
 
-  let aliases = [];
-  try { aliases = JSON.parse(app.slug_aliases || '[]'); } catch (_) {}
-  if (redirect && !aliases.includes(oldSlug)) aliases.push(oldSlug);
 
   // The database write comes FIRST, and carries app_skills with it.
   //
@@ -78,13 +92,56 @@ export async function renameApp({ app, newSlug, redirect = true, userId }) {
   // defer_foreign_keys because neither order works without it: the child first
   // points at a slug that does not exist yet, the parent first orphans the
   // child. Deferring moves the check to COMMIT, where the two rows agree.
+  //
+  // The checks above are repeated inside an IMMEDIATE transaction, which takes
+  // the write lock before reading: the row is re-read (a concurrent rename may
+  // have moved it), the throttle is counted, and the slug is checked once more,
+  // so nothing can change between the check and the write. The apps.slug
+  // UNIQUE constraint and migration 124's triggers back that up for writers
+  // that do not come through here.
+  let previousAliases = null;
+  let renameLogId = null;
   const applyRename = db.transaction(() => {
+    const current = db.prepare('SELECT slug, slug_aliases FROM apps WHERE id = ?').get(app.id);
+    if (!current || current.slug !== oldSlug) {
+      throw new AppError('The app was renamed while this request was in flight. Reload and try again.', 409, 'CONFLICT');
+    }
+    if (!platformAdmin) {
+      const recent = db.prepare(
+        "SELECT COUNT(*) AS n FROM app_slug_renames WHERE app_id = ? AND renamed_at > datetime('now', '-1 day')"
+      ).get(app.id).n;
+      if (recent >= RENAMES_PER_DAY) {
+        throw new AppError(
+          `This app has been renamed ${RENAMES_PER_DAY} times in the last 24 hours, the most allowed. Try again later.`,
+          429, 'RENAME_LIMIT',
+        );
+      }
+    }
+    const takenNow = slugTakenRefusal(db, newSlug, app.id);
+    if (takenNow) throw new AppError(takenNow, 400, 'SLUG_TAKEN');
+
+    previousAliases = current.slug_aliases;
+    let aliases = [];
+    try { aliases = JSON.parse(current.slug_aliases || '[]'); } catch (_) {}
+    // Returning to one of its own old slugs: that one stops being a redirect.
+    aliases = aliases.filter(a => a !== newSlug);
+    if (redirect && !aliases.includes(oldSlug)) aliases.push(oldSlug);
+
     db.pragma('defer_foreign_keys = ON');
     db.prepare('UPDATE app_skills SET app_slug = ? WHERE app_slug = ?').run(newSlug, oldSlug);
     db.prepare('UPDATE apps SET slug = ?, slug_aliases = ? WHERE id = ?')
       .run(newSlug, aliases.length ? JSON.stringify(aliases) : null, app.id);
+    renameLogId = db.prepare('INSERT INTO app_slug_renames (app_id, old_slug, new_slug, renamed_by) VALUES (?, ?, ?, ?)')
+      .run(app.id, oldSlug, newSlug, userId ?? null).lastInsertRowid;
   });
-  applyRename();
+  try {
+    applyRename.immediate();
+  } catch (e) {
+    if (/SLUG_TAKEN/.test(e.message) && !(e instanceof AppError)) {
+      throw new AppError(`Slug '${newSlug}' is already used by another app. Choose a different slug.`, 400, 'SLUG_TAKEN');
+    }
+    throw e;
+  }
 
   try {
     const { stopApp } = await import('./docker.js');
@@ -108,7 +165,8 @@ export async function renameApp({ app, newSlug, redirect = true, userId }) {
         db.pragma('defer_foreign_keys = ON');
         db.prepare('UPDATE app_skills SET app_slug = ? WHERE app_slug = ?').run(oldSlug, newSlug);
         db.prepare('UPDATE apps SET slug = ?, slug_aliases = ? WHERE id = ?')
-          .run(oldSlug, app.slug_aliases, app.id);
+          .run(oldSlug, previousAliases, app.id);
+        db.prepare('DELETE FROM app_slug_renames WHERE id = ?').run(renameLogId);
       })();
       throw new AppError(
         `Could not move the app's data directory (${e.message}). The rename was rolled back; `

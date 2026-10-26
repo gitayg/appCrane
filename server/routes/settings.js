@@ -4,10 +4,11 @@ import { requireAuth, requirePlatformAdmin } from '../middleware/auth.js';
 import { PERMISSIONS, getMatrix, setMatrix, resetToDefaults } from '../services/permissions.js';
 import { ssoProviderConfigured } from '../services/authPolicy.js';
 import { encrypt } from '../services/encryption.js';
-import { reloadCaddy } from '../services/caddy.js';
+import { reloadCaddy, BROTLI_GUARD_KEY, brotliGuardEnabled } from '../services/caddy.js';
 import { platformEmbedAncestors, platformRegistrableDomain } from '../utils/embed.js';
 import { settingVisibility, PUBLIC, AUTHED } from '../utils/settingsVisibility.js';
 import { RESERVED_SETTING_PREFIX as MARIADB_ENCRYPTION_PREFIX } from '../services/managedDbEncryption.js';
+import { cryptoStatus } from '../services/fipsMode.js';
 
 const router = Router();
 
@@ -21,6 +22,7 @@ const router = Router();
  */
 const SENSITIVE_KEYS = new Set([
   'oidc_client_secret_enc',
+  'mfa_recovery_legacy_secrets_enc',
   'saml_idp_cert_enc',
   'scim_token_hash',
   'scim_token_created_at',
@@ -92,6 +94,8 @@ router.get('/', requireAuth, requirePlatformAdmin, (req, res) => {
 // handlers below — otherwise PUT /:key captures /role-permissions first
 // and rejects the body with "value required" (the matrix payload has no
 // `value` field).
+
+router.get('/crypto', requireAuth, requirePlatformAdmin, (req, res) => res.json(cryptoStatus(getDb())));
 
 router.get('/role-permissions/catalog', requireAuth, requirePlatformAdmin, (req, res) => {
   res.json({
@@ -469,6 +473,100 @@ router.post('/backup/s3/run', requireAuth, requirePlatformAdmin, async (_req, re
   }
 });
 
+// Test connection: PUT + GET + DELETE a probe object, with the saved config or
+// unsaved form values in the body (a blank secret keeps the stored one).
+router.post('/backup/s3/test', requireAuth, requirePlatformAdmin, async (req, res) => {
+  const { testS3Connection } = await import('../services/backupScheduler.js');
+  const b = req.body || {};
+  const overrides = {};
+  for (const k of ['bucket', 'region', 'prefix', 'endpoint', 'access_key_id', 'secret_access_key', 'sse', 'sse_kms_key_id']) {
+    if (typeof b[k] === 'string') overrides[k] = b[k];
+  }
+  res.json(await testS3Connection(overrides));
+});
+
+router.get('/backup/s3/backups', requireAuth, requirePlatformAdmin, async (_req, res) => {
+  const { listS3Backups } = await import('../services/backupScheduler.js');
+  try {
+    res.json(await listS3Backups());
+  } catch (e) {
+    res.status(e.status || 502).json({ error: { code: 'S3_LIST_FAILED', message: e.message } });
+  }
+});
+
+router.get('/backup/s3/backups/:id', requireAuth, requirePlatformAdmin, async (req, res) => {
+  const { getS3BackupManifest } = await import('../services/backupScheduler.js');
+  try {
+    res.json(await getS3BackupManifest(req.params.id));
+  } catch (e) {
+    res.status(e.status || 502).json({ error: { code: 'S3_MANIFEST_FAILED', message: e.message } });
+  }
+});
+
+// Browser download of ONE artifact: fetched to a private temp dir, verified
+// against the manifest (and decrypted), then streamed and deleted.
+router.get('/backup/s3/backups/:id/download', requireAuth, requirePlatformAdmin, async (req, res) => {
+  const { fetchS3Backup } = await import('../services/backupScheduler.js');
+  const { newWorkDir } = await import('../services/backupFiles.js');
+  const { logAudit } = await import('../middleware/audit.js');
+  const { createReadStream } = await import('fs');
+  const { rm } = await import('fs/promises');
+  const artifact = typeof req.query.artifact === 'string' ? req.query.artifact : null;
+  const work = await newWorkDir('s3-download');
+  const cleanup = () => rm(work, { recursive: true, force: true }).catch(() => {});
+  let f;
+  try {
+    const r = await fetchS3Backup(req.params.id, work, { only: artifact ? [artifact] : null });
+    f = artifact ? r.files[0] : r.files.find((x) => x.kind === 'data');
+    if (!f) throw Object.assign(new Error('This backup has no data archive'), { status: 404 });
+  } catch (e) {
+    await cleanup();
+    return res.status(e.status || 502).json({ error: { code: 'S3_DOWNLOAD_FAILED', message: e.message } });
+  }
+  logAudit(req.user.id, null, 'backup-s3-download', { backup: req.params.id, artifact: f.local_file, verified: f.verified });
+  res.setHeader('Content-Type', 'application/octet-stream');
+  res.setHeader('Content-Disposition', `attachment; filename="${f.local_file}"`);
+  res.setHeader('X-AppCrane-Verified', f.verified ? 'sha256' : 'none');
+  const stream = createReadStream(f.path);
+  res.on('close', () => { stream.destroy(); cleanup(); });
+  stream.pipe(res);
+});
+
+// Fetch every artifact of a backup into DATA_DIR/backups, verified, so the
+// existing restore routes (/config/import, /repos/import,
+// /backup/restore-database) can take them by name.
+router.post('/backup/s3/backups/:id/fetch', requireAuth, requirePlatformAdmin, async (req, res) => {
+  const { fetchS3Backup } = await import('../services/backupScheduler.js');
+  const { backupsDir } = await import('../services/backupFiles.js');
+  const { logAudit } = await import('../middleware/audit.js');
+  try {
+    const r = await fetchS3Backup(req.params.id, backupsDir());
+    logAudit(req.user.id, null, 'backup-s3-fetch', { backup: req.params.id, files: r.files.length });
+    res.json({ ok: true, set: r.set, files: r.files.map(({ path: _p, ...f }) => f) });
+  } catch (e) {
+    res.status(e.status || 502).json({ error: { code: 'S3_FETCH_FAILED', message: e.message } });
+  }
+});
+
+// One-step restore: fetch + verify, then the same importers as /config/import
+// and /repos/import. Destructive, so the body must repeat the backup id.
+router.post('/backup/s3/backups/:id/restore', requireAuth, requirePlatformAdmin, async (req, res) => {
+  const { restoreS3Backup } = await import('../services/backupScheduler.js');
+  const { logAudit } = await import('../middleware/audit.js');
+  if ((req.body || {}).confirm !== req.params.id) {
+    return res.status(400).json({ error: { code: 'CONFIRM_REQUIRED', message: 'Type the backup id into confirm to restore it' } });
+  }
+  let r;
+  try {
+    r = await restoreS3Backup(req.params.id);
+  } catch (e) {
+    return res.status(e.status || 400).json({ error: { code: 'S3_RESTORE_FAILED', message: e.message } });
+  }
+  logAudit(req.user.id, null, 'backup-s3-restore', { backup: req.params.id, repos_restored: r.repos.restored.length, repos_failed: r.repos.failed.length });
+  res.json({ message: 'Backup restored. The server will restart now to load the restored database.', ...r });
+  if (!process.env.APPCRANE_NO_RESTART_AFTER_IMPORT) setTimeout(() => process.exit(0), 1200);
+});
+
 // ── Scheduled LOCAL backup — platform_admin only (v2.79.0) ─────────────────
 //
 // On by default, unlike the off-site schedule, which is a no-op until someone
@@ -536,12 +634,29 @@ router.post('/backup/restore-database', requireAuth, requirePlatformAdmin, async
       return res.status(e2.status || 400).json({ error: { code: 'VALIDATION', message: e2.message } });
     }
   }
+  const { runWithAppStopped, envsForRestore, describeSteps } = await import('../services/managedDbRestoreGuard.js');
+  const { SANDBOX_TENANT } = await import('../services/sandboxDb.js');
+  const keepRunning = (req.body || {}).keep_running === true;
+  const envs = ['production', 'sandbox'].includes(env)
+    ? envsForRestore(app.id, { tenants: [env === 'sandbox' ? SANDBOX_TENANT : ''] })
+    : [];
   try {
-    const r = await restoreFromExport({ archivePath: abs, appId: app.id, env, engine }, { ops: restoreDbOps });
-    logAudit(req.user.id, app.id, 'managed-db-restore', { engine, env, archive: String(archive).split('/').pop(), db_name: r.db_name });
-    res.json({ ok: true, message: `Restored the ${engine} database of ${app.slug} (${env}) from ${String(archive).split('/').pop()}`, ...r });
+    const run = await runWithAppStopped({ app, envs, keepRunning },
+      () => restoreFromExport({ archivePath: abs, appId: app.id, env, engine }, { ops: restoreDbOps }));
+    const r = run.result;
+    logAudit(req.user.id, app.id, 'managed-db-restore', { engine, env, archive: String(archive).split('/').pop(), db_name: r.db_name, envs, keep_running: keepRunning, steps: run.steps });
+    const message = `Restored the ${engine} database of ${app.slug} (${env}) from ${String(archive).split('/').pop()}`;
+    if (run.startFailures.length) {
+      return res.status(500).json({ error: { code: 'APP_START_FAILED', message: `${message}, but the app (${run.startFailures.map((f) => `${f.env}: ${f.error}`).join('; ')}) did not start again. Start it from the app page or redeploy.` }, steps: run.steps, ...r });
+    }
+    res.json({ ok: true, message: `${message} (${describeSteps(run.steps)})`, steps: run.steps, ...r });
   } catch (e) {
-    res.status(e.status || 500).json({ error: { code: e.code || 'RESTORE_FAILED', message: e.message } });
+    if (e.restoreSteps) logAudit(req.user.id, app.id, 'managed-db-restore-failed', { engine, env, envs, keep_running: keepRunning, steps: e.restoreSteps });
+    const notStarted = (e.startFailures || []).map((f) => f.env);
+    res.status(e.status || 500).json({
+      error: { code: e.code || 'RESTORE_FAILED', message: e.message + (notStarted.length ? ` The app (${notStarted.join(', ')}) also did not start again; start it from the app page or redeploy.` : '') },
+      ...(e.restoreSteps ? { steps: e.restoreSteps } : {}),
+    });
   }
 });
 
@@ -655,6 +770,30 @@ router.put('/embed/config', requireAuth, requirePlatformAdmin, async (req, res) 
 });
 
 /**
+ * GET/PUT /api/settings/edge/brotli { enabled } — platform-admin. Whether Caddy
+ * refuses request bodies sent with Content-Encoding: br to hosted apps
+ * (CVE-2026-111497). On unless turned off; PUT reloads Caddy.
+ */
+router.get('/edge/brotli', requireAuth, requirePlatformAdmin, (req, res) => {
+  res.json({ enabled: brotliGuardEnabled(getDb()) });
+});
+
+router.put('/edge/brotli', requireAuth, requirePlatformAdmin, async (req, res) => {
+  const { enabled } = req.body || {};
+  if (typeof enabled !== 'boolean') {
+    return res.status(400).json({ error: { code: 'VALIDATION', message: 'enabled must be true or false' } });
+  }
+  getDb().prepare(
+    `INSERT INTO settings (key, value, updated_by, updated_at) VALUES (?, ?, ?, datetime('now'))
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_by = excluded.updated_by, updated_at = datetime('now')`
+  ).run(BROTLI_GUARD_KEY, enabled ? 'on' : 'off', req.user.id);
+  const { logAudit } = await import('../middleware/audit.js');
+  logAudit(req.user.id, null, 'edge-brotli-guard', { enabled });
+  await reloadCaddy().catch(() => {});
+  res.json({ ok: true, enabled });
+});
+
+/**
  * GET /api/settings/:key - Single setting, gated by its classified visibility
  * (PUBLIC / AUTHED / ADMIN, defaulting to ADMIN). See settingsVisibility.js.
  *
@@ -682,6 +821,9 @@ router.put('/:key', requireAuth, requirePlatformAdmin, (req, res) => {
   // that nothing is still encrypted with it.
   if (req.params.key.startsWith(MARIADB_ENCRYPTION_PREFIX)) {
     return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Use /api/managed-db/encryption to change MariaDB encryption' } });
+  }
+  if (req.params.key === 'auto_approve_rce_fixes' || req.params.key === 'auto_patch_cooldown_hours') {
+    return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Use /api/auto-patch/policy to change the auto-patch policy' } });
   }
   const db = getDb();
 

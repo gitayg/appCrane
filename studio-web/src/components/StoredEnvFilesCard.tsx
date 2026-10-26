@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { adminApi } from '../adminApi'
+import { SecretValue } from './secret/SecretValue'
 
 // Stored .env files of a Crane-hosted app (/api/apps/:slug/env-files). Kept
 // outside the repository, encrypted, and written into each release at deploy.
@@ -63,12 +64,14 @@ export function StoredEnvFilesCard({ slug, env, reload, onMsg, onDeploy }: Props
 
   const q = (path: string) => `env=${encodeURIComponent(env)}&path=${encodeURIComponent(path)}`
 
+  const revealContent = async (path: string) =>
+    (await adminApi.get<ContentResp>(`/api/apps/${encodeURIComponent(slug)}/env-files/content?${q(path)}`)).content
+
   async function loadContent() {
     if (!editor || editor.isNew) return
     setBusy(true)
     try {
-      const d = await adminApi.get<ContentResp>(`/api/apps/${encodeURIComponent(slug)}/env-files/content?${q(editor.path)}`)
-      setEditor({ ...editor, content: d.content, base64: null, fileName: null })
+      setEditor({ ...editor, content: await revealContent(editor.path), base64: null, fileName: null })
     } catch (e) {
       onMsg({ text: (e as Error).message, ok: false })
     } finally {
@@ -138,12 +141,13 @@ export function StoredEnvFilesCard({ slug, env, reload, onMsg, onDeploy }: Props
         ) : (
           <table>
             <thead>
-              <tr><th>Path</th><th>Mode</th><th>Size</th><th>Updated</th><th></th></tr>
+              <tr><th>Path</th><th>Content</th><th>Mode</th><th>Size</th><th>Updated</th><th></th></tr>
             </thead>
             <tbody>
               {rows.map(f => (
-                <tr key={f.path}>
+                <tr key={`${env}/${f.path}/${f.updated_at}`}>
                   <td className="am-mono">{f.path}</td>
+                  <td><SecretValue name={`stored ${f.path}`} multiline reveal={() => revealContent(f.path)} /></td>
                   <td className="am-mono">{f.mode}</td>
                   <td>{f.bytes} B</td>
                   <td>{f.updated_at}</td>

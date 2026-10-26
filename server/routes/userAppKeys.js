@@ -12,7 +12,7 @@ const router = Router();
 router.use(requireAuth);
 
 /**
- * Personal app sign-in keys (dhk_uak_*, migration 121), v2.108.0.
+ * Personal app sign-in keys (dhk_uak_*, migration 153), v2.124.0.
  *
  * A user issues one for an app they can already enter. It signs them in to that
  * app's forward_auth gate and is refused everywhere else (middleware/auth.js),

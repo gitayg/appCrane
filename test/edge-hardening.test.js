@@ -130,7 +130,7 @@ function innerBlocks(body) {
  * byte for byte; the test below proves this removes lines that are really there.
  */
 //
-// v2.108.0 added X-AppCrane-Auth-Via ('app-key' for app sign-in keys) to the
+// v2.124.0 added X-AppCrane-Auth-Via ('app-key' for app sign-in keys) to the
 // same list, with the same effect, so it is normalised the same way.
 const SIGNATURE_HEADERS = ['X-AppCrane-Identity-Ts', 'X-AppCrane-Identity-Sig', 'X-AppCrane-Auth-Via'];
 function withoutIdentitySignature(text) {
@@ -254,11 +254,23 @@ test('outside the embed policy, only the bypass blocks differ from v2.43.1', () 
   }
   // The log block is additive, so it shows up as a new key rather than a diff.
   // v2.106.0 adds the two Crew A2A platform routes, named so that no legacy
-  // app prefix (`a`, `a2`) can capture /a2a (services/caddy.js).
+  // app prefix (`a`, `a2`) can capture /a2a (services/caddy.js). git smart-HTTP
+  // adds /git/* for the same reason: a legacy `g`/`gi`/`git` app would otherwise
+  // receive every clone's API key. Like the catch-all it proxies to AppCrane and
+  // inherits the site-level headers; it gets no handle-level difference.
+  // MCP OAuth adds /oauth/* (a legacy `o`/`oa`/`oau`/`oauth` app would receive
+  // every authorization code and refresh token) and /.well-known/oauth-* (the
+  // metadata an MCP client trusts to find the token endpoint), proxied the same.
   assert.deepEqual(
     [...craneNow.keys()].filter(k => !craneWas.has(k)).sort(),
-    ['handle /.well-known/agent-card.json', 'handle /a2a*', 'log'],
-    'the crane site gained a block other than the redacting access log and the A2A routes');
+    // v2.122.0 adds the Brotli-body refusal (CVE-2026-111497), a named-matcher
+    // handle ahead of every route; test/caddy-brotli-guard.test.js pins it.
+    ['handle /.well-known/agent-card.json', 'handle /.well-known/oauth-*', 'handle /a2a*', 'handle /git/*', 'handle /oauth/*', 'handle @brotli_body', 'log'],
+    'the crane site gained a block other than the redacting access log, the A2A routes, git, MCP OAuth and the Brotli refusal');
+  const body = (k) => craneNow.get(k).split('\n').slice(1).join('\n');
+  for (const k of ['handle /git/*', 'handle /oauth/*', 'handle /.well-known/oauth-*']) {
+    assert.equal(body(k), body('handle /a2a*'), `${k} must be proxied exactly like the other platform routes`);
+  }
   assert.deepEqual([...craneWas.keys()].filter(k => !craneNow.has(k)), []);
 });
 

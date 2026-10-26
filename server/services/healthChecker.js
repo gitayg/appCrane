@@ -8,6 +8,8 @@ import { getPortsForSlot } from './portAllocator.js';
 import { fetchAppProbe } from './appProbeFetch.js';
 import { getIngressForApp } from './tcpIngress.js';
 import log from '../utils/logger.js';
+import { jobStarted, trackJob } from './jobHealth.js';
+import { restoreInProgress } from './managedDbRestoreGuard.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -165,8 +167,9 @@ export function startHealthChecker() {
   // Deliberately no immediate first run: boot is the busiest moment on the box
   // and an over-quota disk is not a condition that changes in 15 minutes.
   if (!diskTimer) {
+    jobStarted('disk-quota');
     diskTimer = setInterval(() => {
-      runDiskChecks().catch(e => log.error(`[disk-quota] sweep failed: ${e.message}`));
+      trackJob('disk-quota', runDiskChecks).catch(e => log.error(`[disk-quota] sweep failed: ${e.message}`));
     }, DISK_CHECK_MS);
   }
 
@@ -286,6 +289,8 @@ function probeTcp(host, port) {
  * Run a single health check.
  */
 async function runCheck(config) {
+  // Stopped on purpose for a restore: no failure count, no auto-restart, no DOWN mail.
+  if (restoreInProgress(config.slug, config.env)) return;
   const db = getDb();
   const ports = getPortsForSlot(config.slot);
   const port = config.env === 'production' ? ports.prod_be : ports.sand_be;

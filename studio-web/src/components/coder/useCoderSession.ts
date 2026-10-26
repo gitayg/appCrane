@@ -58,8 +58,12 @@ function toolSummary(name: string, input: unknown): string {
  * each time the stream blipped. Re-reading also recovers the user turns, which
  * the replay (system rows only) does not carry.
  */
-export function useCoderSession(slug: string, open: boolean) {
+export function useCoderSession(slug: string, open: boolean, pinnedSessionId?: string | null) {
   const [sessionId, setSessionId] = useState<string | null>(null)
+  // A specific session asked for by the caller (a request's "In coder" link),
+  // instead of the app's latest one. unpin() drops back to the latest.
+  const [pinned,    setPinned]    = useState<string | null>(pinnedSessionId ?? null)
+  const [pinError,  setPinError]  = useState<'gone' | 'forbidden' | null>(null)
   const [session,   setSession]   = useState<CoderSession | null>(null)
   const [phase,     setPhase]     = useState<'loading' | 'absent' | 'ready' | 'failed'>('loading')
   const [history,   setHistory]   = useState<Entry[]>([])
@@ -113,6 +117,31 @@ export function useCoderSession(slug: string, open: boolean) {
     let cancelled = false
     setPhase('loading')
     setError(null)
+    setPinError(null)
+    if (pinned) {
+      // The pinned session is shown whatever its state — ended, or another
+      // user's — so the panel can say so rather than open a different one.
+      coderApi.session(slug, pinned)
+        .then(r => {
+          if (cancelled) return
+          setSession(r.session)
+          setSessionId(r.session.id)
+          setStatus(r.session.status)
+          setCostCents(r.session.cost_usd_cents || 0)
+          setPhase('ready')
+        })
+        .catch(e => {
+          if (cancelled) return
+          const st = e instanceof ApiError ? e.status : 0
+          if (st === 404 || st === 403) {
+            setSessionId(null)
+            setSession(null)
+            setPinError(st === 404 ? 'gone' : 'forbidden')
+            setPhase('absent')
+          } else { setError(e as Error); setPhase('failed') }
+        })
+      return () => { cancelled = true }
+    }
     coderApi.latestSession(slug)
       .then(r => {
         if (cancelled) return
@@ -130,7 +159,17 @@ export function useCoderSession(slug: string, open: boolean) {
       })
       .catch(e => { if (!cancelled) { setError(e as Error); setPhase('failed') } })
     return () => { cancelled = true }
-  }, [slug, open])
+  }, [slug, open, pinned])
+
+  // Null first, so the stream reconnects even when the latest session turns
+  // out to be the pinned one.
+  const unpin = useCallback(() => {
+    setSessionId(null)
+    setSession(null)
+    setHistory([])
+    setLive([])
+    setPinned(null)
+  }, [])
 
   // ── stream ────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -256,15 +295,17 @@ export function useCoderSession(slug: string, open: boolean) {
 
   // ── actions ───────────────────────────────────────────────────────────
 
-  const start = useCallback(async () => {
+  const start = useCallback(async (takeOver = false) => {
     setStarting(true)
     setError(null)
     setStartLog([])
     try {
-      const r = await coderApi.startSession(slug)
+      const r = await coderApi.startSession(slug, takeOver)
       setStartLog(r.log || [])
       setHistory([])
       setLive([])
+      setSession(null)
+      setPinned(null)
       setSessionId(r.session_id)
       setStatus('idle')
       setPhase('ready')
@@ -282,7 +323,7 @@ export function useCoderSession(slug: string, open: boolean) {
    * is watching the same session.
    */
   // Shared by the Resume button and by send(): true once the container is back.
-  const resumeNow = useCallback(async (): Promise<boolean> => {
+  const resumeNow = useCallback(async (takeOver = false): Promise<boolean> => {
     if (!sessionId) return false
     setError(null)
     setResumingSince(Date.now())
@@ -291,7 +332,7 @@ export function useCoderSession(slug: string, open: boolean) {
       // stalls would leave the counter running forever. Ten minutes is well
       // past the slowest image rebuild; past it, say so rather than wait on.
       const r = await Promise.race([
-        coderApi.resume(slug, sessionId),
+        coderApi.resume(slug, sessionId, takeOver),
         new Promise<never>((_, reject) => setTimeout(() => reject(new Error(
           'Resume did not finish within 10 minutes. The container may still be starting on the server — '
           + 'reload in a minute, and if the session is still paused, this is worth reporting.',
@@ -392,9 +433,9 @@ export function useCoderSession(slug: string, open: boolean) {
     }
   }, [slug, sessionId])
 
-  const resume = useCallback(async () => {
+  const resume = useCallback(async (takeOver = false) => {
     if (resumingSince) return
-    await resumeNow()
+    await resumeNow(takeOver)
   }, [resumingSince, resumeNow])
 
   const streaming = status === 'active' || status === 'queued' || status === 'starting'
@@ -408,6 +449,7 @@ export function useCoderSession(slug: string, open: boolean) {
     deploys,
     followups, cancelFollowup,
     start, send, stop, resume,
+    pinned, pinError, unpin,
   }
 }
 

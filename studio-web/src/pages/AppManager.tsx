@@ -5,6 +5,15 @@ import { RedeployWarning, fetchRedeployRisk, type RedeployRisk } from '../compon
 import { StoredEnvFilesCard } from '../components/StoredEnvFilesCard'
 import { ManagedDatabaseCard } from '../components/ManagedDatabaseCard'
 import { BackupsCard } from '../components/BackupsCard'
+import { AccessRulesCard } from '../components/AccessRulesCard'
+import { IntakeCard } from '../components/intake/IntakeCard'
+import { ReleaseCheckPanel } from '../components/intake/ReleaseCheckPanel'
+import { AutoPatchAppCard } from '../components/autoPatch/AutoPatchAppCard'
+import { LlmGatewayAppCard } from '../components/llm/LlmGatewayAppCard'
+import { AppMcpCard } from '../components/appMcp/AppMcpCard'
+import { AppTimeline } from '../components/events/AppTimeline'
+import { WhatsNewMailCard } from '../components/WhatsNewMailCard'
+import { EnvVarsPanel } from '../components/env/EnvVarsPanel'
 import { serverDate } from '../utils/serverDate'
 
 const PAGE_CSS = `
@@ -129,8 +138,6 @@ interface UpdatesResp {
   sandbox?: { update_available?: boolean }
 }
 
-interface EnvVar { key: string; value: string }
-interface EnvResp { vars?: EnvVar[]; warnings?: string[] }
 
 interface ProcessInfo {
   status?: string
@@ -149,6 +156,7 @@ interface AppData {
     resource_limits?: { max_ram_mb?: number; max_cpu_percent?: number }
     show_sandbox?: boolean
     can_change_show_sandbox?: boolean
+    can_rename?: boolean
   }
 }
 
@@ -600,51 +608,11 @@ interface EnvVarsCardProps {
 }
 
 function EnvVarsCard({ slug, env, reload, onMsg, onDeploy, onChanged }: EnvVarsCardProps) {
-  const [data, setData] = useState<EnvResp | null>(null)
-  const [error, setError] = useState<string | null>(null)
   const [showBanner, setShowBanner] = useState(false)
-  const [newKey, setNewKey] = useState('')
-  const [newVal, setNewVal] = useState('')
-
-  const load = useCallback(() => {
-    setError(null)
-    adminApi.get<EnvResp>(`/api/apps/${slug}/env/${env}?reveal=true`)
-      .then(d => setData(d))
-      .catch(e => setError((e as Error).message || 'Cannot load env vars'))
-  }, [slug, env])
 
   useEffect(() => {
     setShowBanner(false)
-    load()
-  }, [load, reload])
-
-  async function addVar() {
-    const k = newKey.trim()
-    if (!k) return
-    try {
-      const data = await adminApi.put<{ message?: string }>(`/api/apps/${slug}/env/${env}`, { vars: { [k]: newVal } })
-      onMsg({ text: data.message || 'Added', ok: true })
-      setNewKey(''); setNewVal('')
-      setShowBanner(true)
-      onChanged()
-      load()
-    } catch (e) {
-      onMsg({ text: (e as Error).message, ok: false })
-    }
-  }
-
-  async function delVar(k: string) {
-    if (!confirm('Delete ' + k + '?')) return
-    try {
-      await adminApi.del(`/api/apps/${slug}/env/${env}/${k}`)
-      onMsg({ text: 'Deleted ' + k, ok: true })
-      setShowBanner(true)
-      onChanged()
-      load()
-    } catch (e) {
-      onMsg({ text: (e as Error).message, ok: false })
-    }
-  }
+  }, [slug, env, reload])
 
   return (
     <>
@@ -656,40 +624,13 @@ function EnvVarsCard({ slug, env, reload, onMsg, onDeploy, onChanged }: EnvVarsC
         </div>
       )}
       <div className="am-card">
-        <div>
-          {error ? (
-            <span style={{ color: 'var(--red)' }}>{error}</span>
-          ) : !data ? 'Loading...' : !data.vars?.length ? (
-            <span style={{ color: 'var(--dim)' }}>No env vars set</span>
-          ) : (
-            <>
-              <table>
-                <thead>
-                  <tr><th>Key</th><th>Value</th><th></th></tr>
-                </thead>
-                <tbody>
-                  {data.vars.map(v => (
-                    <tr key={v.key}>
-                      <td className="am-mono">{v.key}</td>
-                      <td className="am-mono">{v.value}</td>
-                      <td>
-                        <button className="btn btn-sm btn-red" onClick={() => delVar(v.key)}>Del</button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              {data.warnings?.map((w, i) => (
-                <div key={i} style={{ color: 'var(--yellow)', fontSize: '.8rem', marginTop: 6 }}>⚠ {w}</div>
-              ))}
-            </>
-          )}
-        </div>
-        <div className="add-row">
-          <input type="text" placeholder="KEY" value={newKey} onChange={e => setNewKey(e.target.value)} style={{ flex: 1 }} />
-          <input type="text" placeholder="value" value={newVal} onChange={e => setNewVal(e.target.value)} style={{ flex: 2 }} />
-          <button className="btn btn-sm" onClick={addVar}>Add</button>
-        </div>
+        <EnvVarsPanel
+          slug={slug}
+          env={env}
+          reload={reload}
+          onMsg={onMsg}
+          onChanged={() => { setShowBanner(true); onChanged() }}
+        />
       </div>
     </>
   )
@@ -775,6 +716,7 @@ function AppInfoCard({ slug, reload, onMsg, onRenamed }: AppInfoCardProps) {
   const [name, setName] = useState('')
   const [desc, setDesc] = useState('')
   const [slugInput, setSlugInput] = useState('')
+  const [canRename, setCanRename] = useState(false)
 
   useEffect(() => {
     adminApi.get<AppData>(`/api/apps/${slug}`)
@@ -782,6 +724,7 @@ function AppInfoCard({ slug, reload, onMsg, onRenamed }: AppInfoCardProps) {
         setName(d.app.name || '')
         setDesc(d.app.description || '')
         setSlugInput(d.app.slug || '')
+        setCanRename(!!d.app.can_rename)
       })
       .catch(() => {})
   }, [slug, reload])
@@ -813,6 +756,10 @@ function AppInfoCard({ slug, reload, onMsg, onRenamed }: AppInfoCardProps) {
       onMsg({ text: (e as Error).message, ok: false })
     }
   }
+
+  // The card is the owner's and the platform admin's: the server sends
+  // can_rename to exactly the people POST /rename accepts.
+  if (!canRename) return null
 
   return (
     <>
@@ -848,7 +795,7 @@ function AppInfoCard({ slug, reload, onMsg, onRenamed }: AppInfoCardProps) {
             />
             <button className="btn btn-sm btn-dim" onClick={rename}>Rename</button>
           </div>
-          <div style={{ fontSize: '.75rem', color: 'var(--dim)', marginTop: 5 }}>Renames the URL path. Old path redirects to new one. Triggers a redeploy.</div>
+          <div style={{ fontSize: '.75rem', color: 'var(--dim)', marginTop: 5 }}>Renames the URL path. Old path keeps redirecting to the new one and stays reserved for this app. Triggers a redeploy. At most 3 renames a day.</div>
         </div>
       </div>
     </>
@@ -1133,6 +1080,7 @@ export function AppManager() {
       setTimeout(() => setReloadCounter(c => c + 1), 3000)
     } catch (e) {
       showMsg({ text: (e as Error).message, ok: false })
+      setReloadCounter(c => c + 1)
     }
   }
 
@@ -1231,8 +1179,16 @@ export function AppManager() {
             <MetricsCard slug={currentApp} env={currentEnv} />
             {isAdminUser && <LimitsCard slug={currentApp} reload={reloadCounter} onMsg={showMsg} />}
             <SandboxVisibilityCard slug={currentApp} reload={reloadCounter} onMsg={showMsg} />
+            <WhatsNewMailCard slug={currentApp} reload={reloadCounter} onMsg={showMsg} />
             <ManagedDatabaseCard slug={currentApp} reload={reloadCounter} onMsg={showMsg} />
             <BackupsCard slug={currentApp} env={currentEnv} reload={reloadCounter} onMsg={showMsg} />
+            <AccessRulesCard slug={currentApp} env={currentEnv} reload={reloadCounter} onMsg={showMsg} />
+            <IntakeCard slug={currentApp} onMsg={showMsg} />
+            <ReleaseCheckPanel slug={currentApp} reload={reloadCounter} onMsg={showMsg} />
+            <AutoPatchAppCard slug={currentApp} reload={reloadCounter} onMsg={showMsg} />
+            <LlmGatewayAppCard slug={currentApp} isPlatformAdmin={isAdminUser} onMsg={showMsg} />
+            <AppMcpCard slug={currentApp} env={currentEnv} reload={reloadCounter} onMsg={showMsg} />
+            <AppTimeline slug={currentApp} />
             <DeployCard
               slug={currentApp}
               env={currentEnv}
@@ -1263,14 +1219,12 @@ export function AppManager() {
               onOpenLogs={openLogsForDeploy}
               onOpenRuntime={openRuntimeLogs}
             />
-            {isAdminUser && (
-              <AppInfoCard
-                slug={currentApp}
-                reload={reloadCounter}
-                onMsg={showMsg}
-                onRenamed={handleRenamed}
-              />
-            )}
+            <AppInfoCard
+              slug={currentApp}
+              reload={reloadCounter}
+              onMsg={showMsg}
+              onRenamed={handleRenamed}
+            />
           </>
         )}
       </div>

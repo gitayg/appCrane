@@ -24,6 +24,12 @@ import { defaultCoderModel, isAllowedCoderModel } from '../llm/coderModels.js';
 import { DEFAULT_CODER_MODE, isAllowedCoderMode, permissionModeFor } from '../llm/coderModes.js';
 import { explainTurnFailure, isAuthFailure } from './turnFailure.js';
 import { copyAttachmentsIntoContainer, attachmentsPromptSection, resolveAttachments } from './coderAttachments.js';
+import {
+  issueCoderMcpKey, revokeCoderMcpKey, revokeCoderMcpKeysForApp, revokeAllCoderMcpKeys,
+  coderMcpConfig, coderAllowedMcpTools, CODER_MCP_PROMPT,
+} from '../coderMcpKey.js';
+import { coderSystemPrompt } from './deliveryPrompt.js';
+import { takeOverAppCoder, holderName } from './coderTakeover.js';
 import log from '../../utils/logger.js';
 
 const STUDIO_IMAGE  = process.env.APPSTUDIO_IMAGE || 'appcrane-studio:latest';
@@ -153,6 +159,7 @@ function touchActivity(sessionId) {
 // in-memory session that was bound to it and notify subscribers so the chat
 // UI updates immediately.
 onAppContainerEvict((slug, reason) => {
+  try { revokeCoderMcpKeysForApp(slug); } catch (err) { log.warn(`Builder: could not revoke coder MCP keys for ${slug}: ${err.message}`); }
   for (const [sessionId, state] of sessions) {
     if (state.appSlug !== slug) continue;
     sessions.delete(sessionId);
@@ -170,6 +177,7 @@ export function recoverOrphans() {
   // are stale: their app containers are gone (recoverOrphans on appContainer
   // wipes them on boot). Mark all such rows paused.
   const db = getDb();
+  try { revokeAllCoderMcpKeys(); } catch (err) { log.warn(`Builder: could not revoke coder MCP keys on startup: ${err.message}`); }
   const orphans = db.prepare(
     "SELECT id FROM coder_sessions WHERE status IN ('starting', 'idle', 'active')"
   ).all();
@@ -204,7 +212,29 @@ function existingOwnSessionForApp(slug, userId) {
   `).get(slug, userId);
 }
 
-export async function createSession(app, userId, onLog) {
+function appTurnRunning(slug) {
+  for (const st of sessions.values()) {
+    if (st.appSlug === slug && (st.runner || st.queued)) return true;
+  }
+  return false;
+}
+
+function occupiedError(blocking, message) {
+  const err = new Error(message || `Builder is occupied by ${holderName(blocking)}.`);
+  err.code = 'BUILDER_OCCUPIED';
+  return err;
+}
+
+/** Another user holds the app's coder: refuse, or take it over when asked to. */
+function claimFrom(slug, userId, blocking, takeOver, message) {
+  if (!takeOver) throw occupiedError(blocking, message);
+  takeOverAppCoder({
+    slug, userId, holder: blocking, turnRunning: appTurnRunning(slug),
+    notify: (sessionId, text) => notifySession(sessionId, { type: 'note', message: text }, { record: text }),
+  });
+}
+
+export async function createSession(app, userId, onLog, { takeOver = false } = {}) {
   // The SECOND gate, and the one that made the per-user subscription unusable.
   //
   // v2.81.0 relaxed the route gates (coder.js, ask.js, appstudio.js) to "any
@@ -226,10 +256,8 @@ export async function createSession(app, userId, onLog) {
 
   const blocking = activeOtherSessionForApp(app.slug, userId);
   if (blocking) {
-    const who = blocking.user_name || blocking.user_username || blocking.user_email || `user ${blocking.user_id}`;
-    const err = new Error(`Builder is occupied by ${who}. Only one interactive Builder session per app — wait for them to finish or evict the container.`);
-    err.code = 'BUILDER_OCCUPIED';
-    throw err;
+    claimFrom(app.slug, userId, blocking, takeOver,
+      `Builder is occupied by ${holderName(blocking)}. Only one interactive Builder session per app — wait for them to finish, or take over: their unreleased work is saved to a branch first.`);
   }
 
   // If THIS user already has a live session for the app, return it (no double-spawn)
@@ -245,7 +273,7 @@ export async function createSession(app, userId, onLog) {
   `).run(sessionId, app.slug, userId, `builder/${app.slug}`);
 
   try {
-    const c = await ensureAppContainer(app, onLog);
+    const c = await ensureAppContainer(app, onLog, { userId });
 
     sessions.set(sessionId, {
       appSlug: app.slug,
@@ -258,7 +286,7 @@ export async function createSession(app, userId, onLog) {
       status: 'idle',
       container_id: c.containerId,
       workspace_dir: c.workspaceDir,
-      claude_session_id: c.claudeSessionId || null,
+      ...(c.claudeSessionId ? { claude_session_id: c.claudeSessionId } : {}),
     });
 
     try {
@@ -281,24 +309,19 @@ export async function createSession(app, userId, onLog) {
   }
 }
 
-export async function resumeSession(sessionId, onLog) {
+export async function resumeSession(sessionId, onLog, { takeOver = false } = {}) {
   const db = getDb();
   const row = db.prepare('SELECT * FROM coder_sessions WHERE id = ?').get(sessionId);
   if (!row) throw new Error('Session not found');
   if (row.status !== 'paused') throw new Error(`Session status is '${row.status}', expected 'paused'`);
 
   const blocking = activeOtherSessionForApp(row.app_slug, row.user_id);
-  if (blocking) {
-    const who = blocking.user_name || blocking.user_username || blocking.user_email || `user ${blocking.user_id}`;
-    const err = new Error(`Builder is occupied by ${who}.`);
-    err.code = 'BUILDER_OCCUPIED';
-    throw err;
-  }
+  if (blocking) claimFrom(row.app_slug, row.user_id, blocking, takeOver);
 
   const app = db.prepare('SELECT * FROM apps WHERE slug = ?').get(row.app_slug);
   if (!app) throw new Error(`App ${row.app_slug} no longer exists`);
 
-  const c = await ensureAppContainer(app, onLog);
+  const c = await ensureAppContainer(app, onLog, { userId: row.user_id });
 
   sessions.set(sessionId, {
     appSlug: row.app_slug,
@@ -311,7 +334,7 @@ export async function resumeSession(sessionId, onLog) {
     status: 'idle',
     container_id: c.containerId,
     workspace_dir: c.workspaceDir,
-    claude_session_id: c.claudeSessionId || null,
+    ...(c.claudeSessionId ? { claude_session_id: c.claudeSessionId } : {}),
   });
   publish(sessionId, { type: 'status', status: 'idle' });
 }
@@ -653,16 +676,37 @@ async function runBuilderTurn(sessionId, state, prompt, model, mode = DEFAULT_CO
     const credentialKind = agentCredentialKind({
       actingUserId: ownerId, hasAppCredentials: !!c.credsCleanup, apiKey: process.env.ANTHROPIC_API_KEY,
     });
-    const runner = runAgentExec({
-      containerId:  c.containerId,
-      prompt:       augmentedPrompt,
-      model,
-      apiKey:       process.env.ANTHROPIC_API_KEY,
-      resume:       c.claudeSessionId || undefined,
-      hasAppCredentials: !!c.credsCleanup,
-      actingUserId: ownerId,
-      permissionMode: permissionModeFor(mode),
-    });
+    // This turn's read-only AppCrane MCP key, for the session owner and this
+    // app only; revoked in settle(), whichever way the turn ends.
+    let mcpKey = null;
+    try {
+      const appId = getDb().prepare('SELECT id FROM apps WHERE slug = ?').get(state.appSlug)?.id;
+      if (ownerId != null && appId != null) mcpKey = issueCoderMcpKey({ userId: ownerId, appId, sessionId });
+    } catch (err) {
+      log.warn(`Builder: could not issue a coder MCP key for ${state.appSlug}: ${err.message}`);
+    }
+    let runner;
+    try {
+      runner = runAgentExec({
+        containerId:  c.containerId,
+        prompt:       augmentedPrompt,
+        model,
+        apiKey:       process.env.ANTHROPIC_API_KEY,
+        resume:       c.claudeSessionId || undefined,
+        hasAppCredentials: !!c.credsCleanup,
+        actingUserId: ownerId,
+        permissionMode: permissionModeFor(mode),
+        systemPrompt: coderSystemPrompt(mcpKey ? CODER_MCP_PROMPT : null),
+        ...(mcpKey ? {
+          mcpConfig: coderMcpConfig(mcpKey.apiKey),
+          allowedTools: coderAllowedMcpTools(),
+          secrets: [mcpKey.apiKey],
+        } : {}),
+      });
+    } catch (err) {
+      if (mcpKey) { try { revokeCoderMcpKey(mcpKey.id); } catch (_) {} }
+      throw err;
+    }
     state.runner = runner;
 
     let assistantBuf = '';
@@ -671,6 +715,7 @@ async function runBuilderTurn(sessionId, state, prompt, model, mode = DEFAULT_CO
     const settle = () => {
       if (settled) return;
       settled = true;
+      if (mcpKey) { try { revokeCoderMcpKey(mcpKey.id); } catch (_) {} }
       state.settleTurn = null;
       resolveRun();
     };

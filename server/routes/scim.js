@@ -33,6 +33,7 @@ import { getDb } from '../db.js';
 import { hashApiKey, generateApiKey, hashPassword } from '../services/encryption.js';
 import { requireAuth, requirePlatformAdmin } from '../middleware/auth.js';
 import { reconcileGroupAccess } from '../services/scimGroupAccess.js';
+import { revokeAllGrantsForUser } from '../services/oauthStore.js';
 import log from '../utils/logger.js';
 
 const router = Router();
@@ -181,6 +182,7 @@ function applyUpdateToUser(db, id, attrs) {
     // Expire sessions of deactivated users immediately
     if (!attrs.active) {
       db.prepare("DELETE FROM identity_sessions WHERE user_id = ?").run(id);
+      revokeAllGrantsForUser(id);
     }
   }
   if (attrs.externalId !== undefined) {

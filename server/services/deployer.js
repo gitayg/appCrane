@@ -1,4 +1,5 @@
 import { execFileSync } from 'child_process';
+import { assertNoRestoreInProgress } from './managedDbRestoreGuard.js';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, unlinkSync, symlinkSync, cpSync, writeFileSync, readlinkSync } from 'fs';
 import { join, resolve, basename } from 'path';
 import net from 'net';
@@ -20,11 +21,15 @@ import {
 } from './managedDb.js';
 import { APP_LOGIN_ENGINES } from './managedDbAppLogin.js';
 import { parseManifestDatabase, ensureManifestDatabase } from './manifestDatabase.js';
+import { parseAccessRules, storeManifestRules, stageManifestRules, revertStagedManifestRules } from './accessRules.js';
+import { parseAppMcp, storeManifestMcp } from './appMcp/manifest.js';
 import { managedDbScopeFor, SANDBOX_TENANT } from './sandboxDb.js';
 import { parseContainerCommand, parseVolumePaths, resolveVolumeMounts, declaredVolumePathsFor } from './containerRuntimeSpec.js';
 import { resolveHealthProbe } from './healthProbeTarget.js';
 import { fetchAppProbe } from './appProbeFetch.js';
 import { imagesToKeep } from './imageRetention.js';
+import { admitContainer, REFUSED_CODE } from './memoryAdmission.js';
+import { recordDeployEvent, recordRollbackEvent } from './eventStore.js';
 
 // ---------------------------------------------------------------------------
 // Managed database credentials -> container environment
@@ -739,6 +744,39 @@ function parseResourceLimits(raw) {
   }
 }
 
+/** The memory cap, in MB, an app's container is started with. */
+export function appMemoryMb(app) {
+  return parseResourceLimits(app?.resource_limits).max_ram_mb;
+}
+
+/** Memory admission for starting app+env's container (memoryAdmission.js). */
+export function admitAppStart({ app, env, userId = null, automatic = false, what = 'deploy', onWarn = 'notify' }) {
+  return admitContainer({
+    name: `appcrane-${app.slug}-${env}`, memoryMb: appMemoryMb(app),
+    cpus: parseResourceLimits(app?.resource_limits).max_cpu_percent / 100,
+    kind: 'app', slug: app.slug, env, appId: app.id, userId, automatic, what, onWarn,
+  });
+}
+
+/**
+ * For a route that starts a deploy in the background: refuse it up front when
+ * the server has no memory for it, so the caller gets the reason in the
+ * response. The refusal is still recorded as a failed deployment with the
+ * reason as its log. Warn mode passes here and warns from deployApp itself.
+ */
+export async function refuseDeployForMemory({ db, app, env, userId }) {
+  try {
+    await admitAppStart({ app, env, userId, onWarn: 'silent' });
+  } catch (e) {
+    if (e.code === REFUSED_CODE) {
+      db.prepare(`INSERT INTO deployments (app_id, env, status, deployed_by, log, finished_at)
+                  VALUES (?, ?, 'failed', ?, ?, datetime('now'))`)
+        .run(app.id, env, userId ?? null, `DEPLOY REFUSED: ${e.message}`);
+    }
+    throw e;
+  }
+}
+
 /**
  * Allowlist of executables permitted in deployhub.json build/entry commands.
  * Prevents arbitrary command execution via attacker-controlled manifest fields.
@@ -825,6 +863,12 @@ export async function rollbackApp(app, env, deploymentId, userId) {
 
   if (!target) throw new AppError('No previous deployment to roll back to', 404, 'NO_ROLLBACK_TARGET');
 
+  // Before the symlink swap and the status updates below, so a refusal leaves
+  // the running version and its records exactly as they were. A rollback that
+  // does not raise the total (same or smaller cap) is always admitted.
+  await admitAppStart({ app, env, userId, what: 'rollback', onWarn: 'silent' });
+  recordRollbackEvent(app, env, target, userId);
+
   // An image app rolls back by re-running the digest it ran before, and it has
   // to be handled BEFORE the release_path check below — an image deploy never
   // writes a release directory, so that check would reject every image
@@ -862,6 +906,7 @@ export async function rollbackApp(app, env, deploymentId, userId) {
     await deployApp(newId, fullApp, env, ports, {
       imageRef: target.image_ref,
       commitHash: target.commit_hash,
+      releaseCheck: 'skip',
     });
 
     log.info(`Rollback: ${app.slug}/${env} → deployment #${target.id} (image ${target.image_ref}) by user ${userId}`);
@@ -886,9 +931,9 @@ export async function rollbackApp(app, env, deploymentId, userId) {
   symlinkSync(releaseDir, currentLink);
 
   const rollbackInsert = db.prepare(`
-    INSERT INTO deployments (app_id, env, version, status, commit_hash, release_path, deployed_by, log)
-    VALUES (?, ?, ?, 'pending', ?, ?, ?, ?)
-  `).run(app.id, env, target.version, target.commit_hash, releaseDir, userId, `Rollback to deployment #${target.id}`);
+    INSERT INTO deployments (app_id, env, version, status, commit_hash, commit_sha, release_path, deployed_by, log)
+    VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?)
+  `).run(app.id, env, target.version, target.commit_hash, target.commit_sha || null, releaseDir, userId, `Rollback to deployment #${target.id}`);
   const newId = rollbackInsert.lastInsertRowid;
 
   // v2.53.0: provenance travels with the rollback. Without this the restored
@@ -915,6 +960,7 @@ export async function rollbackApp(app, env, deploymentId, userId) {
     preExtractedDir: releaseDir,
     commitHash: target.commit_hash,
     expectTreeSha: target.tree_sha256 || null,
+    releaseCheck: 'skip',
   });
 
   log.info(`Rollback: ${app.slug}/${env} → deployment #${target.id} (v${target.version || '?'}) by user ${userId}`);
@@ -939,19 +985,27 @@ export async function rollbackApp(app, env, deploymentId, userId) {
  * Shared by POST /api/apps/:slug/promote and the appcrane_promote MCP tool.
  * Caller is responsible for authz (must require deploy.production).
  */
-export async function promoteApp(app, userId) {
+export async function promoteApp(app, userId, opts = {}) {
   const db = getDb();
 
   const sandboxDeploy = db.prepare(
     "SELECT * FROM deployments WHERE app_id = ? AND env = 'sandbox' AND status = 'live' ORDER BY started_at DESC LIMIT 1"
   ).get(app.id);
   if (!sandboxDeploy) throw new AppError('No live sandbox deployment to promote', 400, 'NO_SANDBOX_DEPLOY');
+  if (opts.expectSandboxDeploymentId != null && sandboxDeploy.id !== opts.expectSandboxDeploymentId) {
+    throw new AppError(`The live sandbox deployment is #${sandboxDeploy.id}, not #${opts.expectSandboxDeploymentId}; nothing was promoted.`, 409, 'SANDBOX_CHANGED');
+  }
 
   // v2.7.12: promotion gate — only advance a HEALTHY sandbox to production.
   const sbHealth = db.prepare("SELECT is_down FROM health_state WHERE app_id = ? AND env = 'sandbox'").get(app.id);
   if (sbHealth && sbHealth.is_down) {
     throw new AppError('Sandbox is currently unhealthy — fix sandbox before promoting it to production.', 409, 'SANDBOX_UNHEALTHY');
   }
+
+  const rcMod = await import('./releaseCheck.js');
+  const delta = opts.releaseCheckDelta ? { mode: rcMod.AUTO_PATCH_DELTA, delta: opts.releaseCheckDelta } : {};
+  await rcMod.assertProductionRelease({ db, app, userId, trigger: 'promote', ...delta });
+  await admitAppStart({ app, env: 'production', userId, what: 'promote', onWarn: 'silent' });
 
   const { getPortsForSlot } = await import('./portAllocator.js');
   const prodPorts = getPortsForSlot(app.slot);
@@ -987,6 +1041,7 @@ export async function promoteApp(app, userId) {
     deployApp(newDeployId, fullApp, 'production', prodPorts, {
       imageRef: sandboxDeploy.image_ref,
       commitHash: sandboxDeploy.commit_hash,
+      releaseCheckDelta: opts.releaseCheckDelta,
     }).catch(err => {
       log.error(`Promote (image) ${newDeployId} for ${app.slug} failed: ${err.message}`);
     });
@@ -1015,9 +1070,9 @@ export async function promoteApp(app, userId) {
   // instead of a github_url that happens to be set deciding the path.
   if (usesLocalRepo(app) || ((app.source_type === 'github' || app.source_type === 'managed') && app.github_url)) {
     const freshResult = db.prepare(`
-      INSERT INTO deployments (app_id, env, version, status, commit_hash, deployed_by, log)
-      VALUES (?, 'production', ?, 'pending', ?, ?, ?)
-    `).run(app.id, sandboxDeploy.version, sandboxDeploy.commit_hash, userId,
+      INSERT INTO deployments (app_id, env, version, status, commit_hash, commit_sha, deployed_by, log)
+      VALUES (?, 'production', ?, 'pending', ?, ?, ?, ?)
+    `).run(app.id, sandboxDeploy.version, sandboxDeploy.commit_hash, sandboxDeploy.commit_sha || null, userId,
       `Promote from sandbox #${sandboxDeploy.id} — fresh production build @ ${sandboxDeploy.commit_hash || 'HEAD'}`);
     const freshDeployId = freshResult.lastInsertRowid;
     // v2.7.12: build production from the EXACT sandbox commit (targetCommit),
@@ -1025,7 +1080,7 @@ export async function promoteApp(app, userId) {
     // sandbox. A fresh build (not the sandbox image) is still required so the
     // bundler bakes the prod base path /<slug>/. deployApp clones managed repos
     // with the service-account token, so this works for source_type='managed'.
-    deployApp(freshDeployId, app, 'production', prodPorts, { targetCommit: sandboxDeploy.commit_hash }).catch(err => {
+    deployApp(freshDeployId, app, 'production', prodPorts, { targetCommit: sandboxDeploy.commit_sha || sandboxDeploy.commit_hash, freshBase: opts.freshBase === true, releaseCheckDelta: opts.releaseCheckDelta }).catch(err => {
       log.error(`Promote build ${freshDeployId} for ${app.slug} failed: ${err.message}`);
     });
     return { deployment_id: freshDeployId, status: 'pending', mode: 'rebuild', version: sandboxDeploy.version, from_sandbox: sandboxDeploy.id };
@@ -1109,6 +1164,7 @@ export async function promoteApp(app, userId) {
     deployApp(newDeployId, fullApp, 'production', prodPorts, {
       preExtractedDir: newReleaseDir,
       commitHash: sandboxDeploy.commit_hash,
+      releaseCheckDelta: opts.releaseCheckDelta,
     }).catch(e => {
       log.error(`Promote deploy failed for ${app.slug}-production (deployment #${newDeployId}): ${e.message}`);
     });
@@ -1123,6 +1179,7 @@ export async function promoteApp(app, userId) {
 
 export async function deployApp(deployId, app, env, ports, opts = {}) {
   const db = getDb();
+  recordDeployEvent(deployId, 'started');
 
   // An image app has no release tree — no clone, no bundle, no `current`
   // symlink target. Every step below that reads a file out of a release
@@ -1237,7 +1294,22 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
   // deploy's image stayed on disk forever, and as the newest image it outranked
   // the last good one in the next keep-N-newest prune.
   let attemptImage = null;
+  // Who this deploy is for: a person (deployed_by), or nobody (git push,
+  // webhook, poller, auto-heal), in which case the app's owners hear about a
+  // memory refusal.
+  const deployedBy = db.prepare('SELECT deployed_by FROM deployments WHERE id = ?').get(deployId)?.deployed_by ?? null;
+  const admissionCtx = { appId: app.id, userId: deployedBy, automatic: deployedBy == null };
   try {
+    // Before the build, so a server with no memory for this container says so
+    // now instead of after minutes of building; startApp checks again just
+    // before it touches the running container.
+    // Every deploy path (AppStudio, PR poller, rename redeploys, …) passes
+    // here, so a restore's stopped container is never replaced mid-restore.
+    assertNoRestoreInProgress(app.slug, env);
+    const early = await admitAppStart({ app, env, ...admissionCtx });
+    if (early.warned) appendLog(`⚠ ${early.message}`);
+    if (early.cpu?.warned) appendLog(`⚠ ${early.cpu.message}`);
+
     // Trim any accumulated release backlog BEFORE cloning, so an app whose disk
     // filled from repeated failed deploys can self-heal on its next attempt
     // instead of hitting ENOSPC again on mkdir. Never touches the live release.
@@ -1246,6 +1318,9 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     // 1. Clone or locate release
     const timestamp = Date.now();
     let commitHash = 'unknown';
+    // The full SHA beside the short one (migration 150): auto-patch compares
+    // commits exactly, and a short prefix can be brute-forced.
+    let commitSha = null;
     // v2.5.16: capture the commit message too so the What's New dialog
     // has actual content to show end users on a version bump. Previously
     // only the webhook + manual-upload paths populated this column; the
@@ -1552,6 +1627,8 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       try {
         commitHash = execFileSync('git', ['-C', releaseDir, 'rev-parse', '--short', 'HEAD'], { timeout: 5000 })
           .toString().trim();
+        const full = execFileSync('git', ['-C', releaseDir, 'rev-parse', 'HEAD'], { timeout: 5000 }).toString().trim();
+        if (/^[0-9a-f]{40}$/.test(full)) commitSha = full;
       } catch (e) {}
 
       // Get commit message (subject + body). %s is the subject line,
@@ -1700,6 +1777,8 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     // the deploy in seconds with the field named instead of after a full build —
     // or, worse, deploying an app with no database and no error.
     const manifestDbNeeds = parseManifestDatabase(manifest.database);
+    const manifestAccessRules = parseAccessRules(manifest.access);
+    const manifestMcp = parseAppMcp(manifest.mcp);
 
     // Sync the per-tenant DB opt-in from the manifest onto the app row, so the
     // revoke path (which runs outside a deploy) knows whether to purge tenant
@@ -1846,7 +1925,9 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       });
       appendLog(`Image ready (Nixpacks): ${image}`);
     } else {
-      const { userProvided, runtime } = ensureDockerfile({ releaseDir, manifest, appBasePath, craneUrl, craneInternalUrl });
+      const { pinnedPhpVersionFor, describePhpBuild } = await import('./phpVersion.js');
+      const pinnedPhpVersion = pinnedPhpVersionFor(db, app.id, env);
+      const { userProvided, runtime, php, node } = ensureDockerfile({ releaseDir, manifest, appBasePath, craneUrl, craneInternalUrl, pinnedPhpVersion });
       buildRuntime = runtime ?? null;
 
       if (userProvided) {
@@ -1856,14 +1937,17 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
         if (!valid) throw new Error(`Dockerfile validation failed:\n${errors.map(e => '  • ' + e).join('\n')}`);
         injectAppBasePathArg(join(releaseDir, 'Dockerfile'));
         appendLog('Using app-provided Dockerfile (validated)');
+      } else if (runtime === 'php') {
+        appendLog(describePhpBuild(php));
+        db.prepare('UPDATE deployments SET php_version = ? WHERE id = ?').run(php.version, deployId);
       } else {
-        appendLog(runtime === 'php'
-          ? 'Generated Dockerfile (php:8.3-apache, non-root)'
-          : 'Generated Dockerfile (Node Alpine, non-root)');
+        const { describeNodeBuild } = await import('./nodeVersion.js');
+        appendLog(describeNodeBuild(node));
+        for (const w of node.warnings) appendLog(`⚠ ${w}`);
       }
 
       appendLog('Building docker image...');
-      const wasCached = await imageExists(imageTagFor(app.slug, env, commitHash));
+      const wasCached = opts.freshBase === true ? false : await imageExists(imageTagFor(app.slug, env, commitHash));
       image = await buildImageIfNeeded({
         slug: app.slug,
         env,
@@ -1871,9 +1955,14 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
         commitHash,
         appBasePath,
         onLog: (line) => { if (deployLog.length < 500) appendLog(`  ${line}`); },
+        freshBase: opts.freshBase === true,
+        appDockerfile: !!userProvided,
       });
       appendLog(`Image ready: ${image}`);
       if (!wasCached) attemptImage = image;
+      const { imageBaseInfo } = await import('./docker.js');
+      const base = await imageBaseInfo(image);
+      if (base) db.prepare('UPDATE deployments SET base_image = ?, base_digest = ? WHERE id = ?').run(base.image, base.digest, deployId);
     }
     }
 
@@ -1892,6 +1981,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     // same message, the same 'failed' deployment status and the same audit trail
     // it produced when this was awaited at the clone. Nothing has been stopped
     // and nothing has been started at this point.
+    if (env === 'production') await (await import('./releaseCheck.js')).enforceReleaseCheckInDeploy({ app, deployId, releaseDir: isImageDeploy ? null : releaseDir, commit: commitHash, opts, appendLog });
     if (supplyChainGate) await supplyChainGate.settle();
 
     // v2.6.16: pre-flight entry-exists check. Validate that the entry
@@ -2017,6 +2107,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       runtimeEnvVars.CRANE_INTERNAL_URL = `http://host.docker.internal:${cranePort}`;
       appendLog('Injected APPCRANE_SERVICE_TOKEN + host-gateway CRANE_INTERNAL_URL (email service)');
     }
+    { const llm = (await import('./llmGateway/env.js')).llmGatewayEnv(app, env); Object.assign(runtimeEnvVars, llm); if (Object.keys(llm).length) appendLog(`LLM gateway: injected ${Object.keys(llm).join(', ')} (provider keys stay in AppCrane)`); }
 
     // v2.97.0: the key the app checks its identity headers with (appcrane-tenant
     // verifyIdentity). Every app, multitenant or not: forged identity is a
@@ -2064,6 +2155,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     const seedResult = await seedNewVolumeMounts({ image, volumes: containerVolumes });
     for (const line of seedResult.log) appendLog(line);
 
+    const stagedRules = isImageDeploy ? null : stageManifestRules(app.id, env, manifestAccessRules);
     const limits = parseResourceLimits(app.resource_limits);
     await dockerStart({
       slug: app.slug,
@@ -2088,6 +2180,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       memoryMb: limits.max_ram_mb,
       cpus: limits.max_cpu_percent / 100,
       addHostGateway: true,
+      admission: { ...admissionCtx, onWarn: 'silent' },
     });
     appendLog(`Container started: appcrane-${app.slug}-${env} (host port ${bePort})`);
     if (containerVolumes.length > 1) {
@@ -2246,6 +2339,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       }
 
       await dockerStop(app.slug, env).catch(() => {});
+      revertStagedManifestRules(stagedRules);
       if (prevImage) {
         appendLog(`Reverting to previous image: ${prevImage}`);
         // Same command and same mounts as the forward start. A rollback that
@@ -2253,7 +2347,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
         // in — no command means the previous image now exits 0, and fewer
         // mounts means the recovery container cannot see the state the failed
         // one was writing.
-        await dockerStart({ slug: app.slug, env, image: prevImage, hostPort: bePort, containerPort: app.container_port, command: parseContainerCommand(app.container_command), envVars: runtimeEnvVars, volumes: [...containerVolumes, ...dbCertMounts], memoryMb: limits.max_ram_mb, cpus: limits.max_cpu_percent / 100 }).catch(() => {});
+        await dockerStart({ slug: app.slug, env, image: prevImage, hostPort: bePort, containerPort: app.container_port, command: parseContainerCommand(app.container_command), envVars: runtimeEnvVars, volumes: [...containerVolumes, ...dbCertMounts], memoryMb: limits.max_ram_mb, cpus: limits.max_cpu_percent / 100, admission: false }).catch(() => {});
       }
       const restoreNote = prevImage
         ? 'Previous version restored.'
@@ -2305,6 +2399,8 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       appendLog(`Updated current symlink → ${releaseDir.split('/').pop()}`);
     }
 
+    if (!isImageDeploy) storeManifestRules(app.id, env, manifestAccessRules);
+    if (!isImageDeploy) storeManifestMcp(app.id, env, manifestMcp);
     // 8. Update deployment record
     deployFinished = true;
     appendLog(`Deploy complete! Version: ${manifest.version || 'unknown'}`);
@@ -2313,9 +2409,10 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     // rollbackApp reads this column, which is why it needed an image branch of
     // its own rather than the release_path check it hard-fails on.
     db.prepare(`
-      UPDATE deployments SET status = 'live', version = ?, commit_hash = ?, commit_message = ?, release_path = ?, finished_at = datetime('now'), log = ?
+      UPDATE deployments SET status = 'live', version = ?, commit_hash = ?, commit_sha = COALESCE(?, commit_sha), commit_message = ?, release_path = ?, finished_at = datetime('now'), log = ?
       WHERE id = ?
-    `).run(manifest.version || 'unknown', commitHash, commitMessage, isImageDeploy ? null : releaseDir, deployLog.join('\n'), deployId);
+    `).run(manifest.version || 'unknown', commitHash, commitSha, commitMessage, isImageDeploy ? null : releaseDir, deployLog.join('\n'), deployId);
+    recordDeployEvent(deployId, 'succeeded');
     // Refresh AI codebase context in background after production deploy —
     // there is no codebase to index for an image app.
     if (env === 'production' && !isImageDeploy) {
@@ -2378,6 +2475,18 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       const { notifyDeploy } = await import('./emailService.js');
       await notifyDeploy(app, env, manifest.version || 'unknown', 'success');
     } catch (e) {}
+
+    // A new production version mails the app's owners and admins its What's
+    // New (services/appWhatsNewMail.js). Queued only; never fails the deploy.
+    if (env === 'production') {
+      try {
+        const { queueAppUpgradeMail } = await import('./appWhatsNewMail.js');
+        const r = queueAppUpgradeMail({ db, app, deployId });
+        if (r.status === 'sent') appendLog(`What's new e-mail queued for ${r.sent} owner(s) and admin(s)`);
+      } catch (e) {
+        log.warn(`[app-whats-new] ${app.slug}: ${e.message}`);
+      }
+    }
 
     // 11. Dependency CVE scan (v2.52.0). REPORT-ONLY, and deliberately the
     // last thing that happens: the container is live, the symlink is flipped,
@@ -2446,12 +2555,16 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       UPDATE deployments SET status = 'failed', finished_at = datetime('now'), log = ?
       WHERE id = ?
     `).run(deployLog.join('\n'), deployId);
+    recordDeployEvent(deployId, 'failed', error);
 
-    // Send failure notification
-    try {
-      const { notifyDeploy } = await import('./emailService.js');
-      await notifyDeploy(app, env, 'unknown', 'failed', error.message);
-    } catch (e) {}
+    // Send failure notification. A memory refusal has already told the right
+    // people to try again later (memoryAdmissionMail.js).
+    if (error.code !== REFUSED_CODE) {
+      try {
+        const { notifyDeploy } = await import('./emailService.js');
+        await notifyDeploy(app, env, 'unknown', 'failed', error.message);
+      } catch (e) {}
+    }
 
     throw error;
   }

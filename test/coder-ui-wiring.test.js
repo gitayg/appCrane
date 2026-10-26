@@ -195,7 +195,7 @@ test('the coder button is shown on the Sandbox tab, on every app, and explains i
   assert.match(appFrame, /availability=\{coderAvail\}/, 'the panel is not told whether it can run');
 
   // And the panel does not start a session the server already said it would refuse.
-  assert.match(panel, /useCoderSession\(slug, open && usable\)/,
+  assert.match(panel, /useCoderSession\(slug, open && usable[,)]/,
     'the panel starts a session regardless of availability — the user sees a refusal instead of the explanation');
   assert.match(panel, /<CoderUnavailable gaps=\{availability\.gaps\}/, 'the gaps are not shown');
 });

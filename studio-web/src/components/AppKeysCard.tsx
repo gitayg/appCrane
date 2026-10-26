@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { adminApi } from '../adminApi'
 import { serverDate } from '../utils/serverDate'
 
-// Personal app sign-in keys (dhk_uak_*), v2.108.0. Each one signs its owner in
+// Personal app sign-in keys (dhk_uak_*), v2.124.0. Each one signs its owner in
 // to ONE app's gate — for a script or a cron job that has no browser — and is
 // refused by the rest of AppCrane. See server/routes/userAppKeys.js.
 

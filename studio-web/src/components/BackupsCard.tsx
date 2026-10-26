@@ -24,6 +24,12 @@ interface Props {
   onMsg: (m: { text: string; ok: boolean }) => void
 }
 
+const PHASES: Record<string, string> = {
+  stopping: 'Stopping the app…',
+  restoring: 'Restoring…',
+  starting_app: 'Starting the app…',
+}
+
 function fmtBytes(n: number) {
   if (n < 1024) return `${n} B`
   if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`
@@ -36,6 +42,7 @@ export function BackupsCard({ slug, env, reload, onMsg }: Props) {
   const [busy, setBusy] = useState(false)
   const [restoring, setRestoring] = useState<Backup | null>(null)
   const [includeDb, setIncludeDb] = useState(true)
+  const [phase, setPhase] = useState<string | null>(null)
 
   const load = useCallback(() => {
     adminApi.get<{ backups: Backup[] }>(`/api/apps/${slug}/backups`)
@@ -61,6 +68,12 @@ export function BackupsCard({ slug, env, reload, onMsg }: Props) {
   async function restore() {
     if (!restoring) return
     setBusy(true)
+    setPhase('Stopping the app…')
+    const poll = setInterval(() => {
+      adminApi.get<{ in_progress: boolean; phase?: string }>(`/api/apps/${slug}/restore-status`)
+        .then(s => { if (s.in_progress && s.phase) setPhase(PHASES[s.phase] || null) })
+        .catch(() => {})
+    }, 1000)
     try {
       const r = await adminApi.post<{ message?: string }>(`/api/apps/${slug}/restore/${restoring.id}`, {
         include_database: restoring.includes_database ? includeDb : false,
@@ -70,6 +83,8 @@ export function BackupsCard({ slug, env, reload, onMsg }: Props) {
     } catch (e) {
       onMsg({ text: (e as Error).message, ok: false })
     } finally {
+      clearInterval(poll)
+      setPhase(null)
       setBusy(false)
     }
   }
@@ -139,6 +154,9 @@ export function BackupsCard({ slug, env, reload, onMsg }: Props) {
           <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
             <button className="btn btn-sm btn-red" disabled={busy} onClick={restore}>Restore</button>
             <button className="btn btn-sm" disabled={busy} onClick={() => setRestoring(null)}>Cancel</button>
+          </div>
+          <div style={{ fontSize: '.75rem', color: 'var(--dim)', marginTop: 6 }}>
+            {phase || 'The app is stopped during the restore and started again afterwards.'}
           </div>
         </div>
       )}

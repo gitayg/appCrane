@@ -159,6 +159,9 @@ for (const lvl of ['warn', 'info', 'debug']) logger[lvl] = () => {};
 
 const { initDb, getDb } = await import('../server/db.js');
 initDb();
+// This file exercises a real daemon, not memory admission (test/memory-admission.test.js); a busy
+// Docker host must not refuse its containers.
+getDb().prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('memory_admission_mode', 'off')").run();
 const db = getDb();
 
 const { startApp, stopApp } = await import('../server/services/docker.js');

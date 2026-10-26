@@ -5,14 +5,6 @@ The dashboard's "What's New" dialog reads this file over raw.githubusercontent
 so it can show admins what changed when AppCrane is updated (or about to be).
 Keep newest-first; add an entry before every version bump.
 
-## 2.108.0 — A script can sign in to one app with a key that opens nothing else.
-
-A job that posts to an app on a schedule (the Work Review uploader was the first) had one credential that passed `forward_auth`: the user's full `dhk_user_*` key. A copy of it in a config file on a laptop was the whole account, including the REST API and MCP.
-
-App sign-in keys (`dhk_uak_*`) are issued by a user for one app they can already enter, from the MCP page. A key signs them in to that app's gate. Any other app, a bare `/verify`, the REST API and MCP refuse it. It grants only the role the user holds on the app *at that moment*, so removing the role or deactivating the user shuts it with no revoke step, and it expires after 180 days by default. This is not the app-owned `dhk_app_*` model removed in v2.2.12: the key belongs to a user and carries no grant of its own.
-
-`/verify` adds `X-AppCrane-Auth-Via: app-key` on that path, so an app can let a script do less than its person. Caddy strips a client-sent copy. It is deliberately outside the identity signature, because adding a header there would break every app still on an older `appcrane-tenant`.
-
 ## 2.78.1 — The README documented a CLI that was removed 72 releases ago.
 
 `## CLI Reference` and the quick start taught `crane app create`, `crane deploy`, `crane env set`, `crane rollback`, `crane promote`, `crane user create`, `crane health`, `crane webhook`, `crane backup`, `crane logs` and `crane audit`. None of them exist: v2.6.0 retired the agent-facing CLI surface and the docs never followed, so a new user's first command failed. The real CLI is nine platform commands (`config`, `init`, `regenerate-key`, `update`, `caddy`, `setup-https`, `me`, `status`, `reconcile`), six of which had never been documented at all.

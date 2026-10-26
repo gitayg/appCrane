@@ -76,7 +76,7 @@ test('a successful save clears the field instead of echoing what was typed', () 
 });
 
 test('the input is masked and kept out of autofill', () => {
-  assert.match(card, /type="password"/);
+  assert.match(card, /<PasswordInput\b/, 'the token field is not a masked PasswordInput');
   assert.match(card, /autoComplete="off"/);
 });
 

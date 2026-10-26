@@ -45,7 +45,7 @@ ${WORKSPACE_DOCKER_PRELUDE}
 printf '%s\\n' "$*" >> ${JSON.stringify(DOCKER_LOG)}
 case "$1" in
   run)     echo c0ffee000000c0ffee000000c0ffee000000c0ffee000000c0ffee000000c0ff ;;
-  image)   echo 5 ;;
+  image)   echo 6 ;;
   inspect) echo true ;;
 esac
 exit 0
@@ -334,6 +334,41 @@ test('the transcript directory gets the workspace treatment, not looser', async 
 // 3. Transcript persistence across an AppCrane RESTART
 // ---------------------------------------------------------------------------
 //
+test('a fresh container resumes the app\'s shared conversation when its transcript is on disk', async () => {
+  const app = await craneApp('ev-convo');
+  const c1 = await appContainer.getOrCreate(app);
+  const a = userRow();
+  const b = userRow();
+  const sa = session(app, c1, a);
+  const sb = session(app, c1, b);
+  const convo = '33333333-3333-3333-3333-333333333333';
+  // What the CLI left behind: the id on every session of the app, and its transcript.
+  db.prepare('UPDATE coder_sessions SET claude_session_id = ? WHERE app_slug = ?').run(convo, 'ev-convo');
+  const dir = join(appContainer.transcriptDirFor('ev-convo'), '-workspace');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${convo}.jsonl`), '{"type":"user"}\n');
+
+  appContainer.evict('ev-convo', 'idle');
+  const c2 = await appContainer.getOrCreate(app);
+  assert.equal(c2.claudeSessionId, convo, 'a restarted container started the coder with a blank conversation');
+
+  // The other user's session continues the same conversation.
+  const { resumeSession } = await import('../server/services/builder/builderSession.js');
+  if (typeof resumeSession === 'function') {
+    db.prepare("UPDATE coder_sessions SET status = 'paused' WHERE app_slug = ?").run('ev-convo');
+    await resumeSession(sb, () => {});
+  }
+  assert.equal(db.prepare('SELECT claude_session_id AS id FROM coder_sessions WHERE id = ?').get(sb).id, convo,
+    'resuming erased the stored conversation id');
+
+  // No transcript on disk, nothing to resume: start blank rather than fail on --resume.
+  appContainer.evict('ev-convo', 'idle');
+  rmSync(join(dir, `${convo}.jsonl`));
+  const c3 = await appContainer.getOrCreate(app);
+  assert.equal(c3.claudeSessionId, null);
+  assert.ok(sa);
+});
+
 // recoverOrphans() runs once on boot and clears the on-disk workspaces, because
 // nothing is cached across a restart. It used to wipe the whole app-containers
 // root, which took every app's `claude-projects` with it: the transcript
@@ -369,7 +404,18 @@ test('an AppCrane restart clears workspaces but keeps every app transcript', asy
 
   for (const t of transcripts) assert.equal(existsSync(t.workspace), true, `${t.slug} has no workspace to clear`);
 
+  // Unreleased work in app a's live session: a restart must save it first.
+  const uid = userRow();
+  const sid = session(a, ca, uid);
+  writeFileSync(join(ca.workspaceDir, 'UNRELEASED.js'), 'export const keep = 1;\n');
+
   appContainer.recoverOrphans();
+
+  const bare = lg.repoPath('ev-restart-a');
+  const branch = `refs/heads/agent/${uid}/${sid}`;
+  assert.ok(refsIn(bare).includes(branch), `the restart sweep wiped unreleased work without saving it; refs are ${refsIn(bare).join(', ')}`);
+  assert.equal(blobIn(bare, branch, 'UNRELEASED.js'), 'export const keep = 1;');
+  assert.equal(treeOf(bare, 'refs/heads/main').includes('UNRELEASED.js'), false, 'the restart rescue landed on main');
 
   for (const t of transcripts) {
     assert.equal(existsSync(t.workspace), false, `${t.slug}: the workspace survived the restart sweep`);

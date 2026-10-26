@@ -8,6 +8,8 @@
 // failure with the missing path + suggested candidates spelled out.
 
 import { execFileSync } from 'node:child_process';
+import { OOM_APP_FLAG } from './oomPriority.js';
+import { CPU_APP_FLAG } from './cpuPriority.js';
 
 const COMMON_ENTRY_NAMES = [
   'server.js', 'server.mjs',
@@ -69,7 +71,7 @@ function imageFileExists(image, absPath) {
     // around just because the current inputs happen to be filtered.
     execFileSync(
       'docker',
-      ['run', '--rm', '--entrypoint', 'sh', image, '-c', 'test -e "$1"', 'sh', absPath],
+      ['run', '--rm', OOM_APP_FLAG, CPU_APP_FLAG, '--entrypoint', 'sh', image, '-c', 'test -e "$1"', 'sh', absPath],
       { stdio: 'pipe', timeout: 15000 },
     );
     return true;
@@ -82,7 +84,7 @@ function readNpmStartScript(image) {
   try {
     const out = execFileSync(
       'docker',
-      ['run', '--rm', '--entrypoint', 'sh', image, '-c', 'cat /app/package.json 2>/dev/null || true'],
+      ['run', '--rm', OOM_APP_FLAG, CPU_APP_FLAG, '--entrypoint', 'sh', image, '-c', 'cat /app/package.json 2>/dev/null || true'],
       { stdio: 'pipe', timeout: 15000 },
     ).toString();
     if (!out.trim()) return null;
@@ -105,7 +107,7 @@ function findCandidates(image) {
   try {
     const out = execFileSync(
       'docker',
-      ['run', '--rm', '--entrypoint', 'sh', image, '-c', cmd],
+      ['run', '--rm', OOM_APP_FLAG, CPU_APP_FLAG, '--entrypoint', 'sh', image, '-c', cmd],
       { stdio: 'pipe', timeout: 15000 },
     ).toString().trim();
     if (!out) return [];

@@ -165,6 +165,11 @@ function gitArgs(gitDir, args) {
   return gitDir ? [...base, `--git-dir=${gitDir}`, ...args] : [...base, ...args];
 }
 
+export function hardenedGitInvocation(args) {
+  ensureGitVersion();
+  return { args: gitArgs(null, args), env: gitEnv() };
+}
+
 let versionChecked = false;
 export function parseGitVersion(out) {
   const m = /git version (\d+)\.(\d+)/.exec(String(out));
@@ -383,6 +388,9 @@ export async function pushFilesToManagedRepo(slug, files, opts = {}) {
   if (!parent) {
     throw fail('BRANCH_NOT_FOUND', 404, `branch '${branch}' does not exist in the managed repository '${repoName}'.`);
   }
+  if (opts.expectParent && parent !== opts.expectParent) {
+    throw fail('BRANCH_MOVED', 409, `branch '${branch}' is at ${parent.slice(0, 12)}, not ${String(opts.expectParent).slice(0, 12)}; nothing was committed.`);
+  }
 
   // Before hash-object writes anything: a deletion of a path the parent commit
   // does not have would otherwise be a no-op git never complains about, and the
@@ -450,6 +458,9 @@ export async function pushFilesToManagedRepo(slug, files, opts = {}) {
       const tip = await resolveBranchCommit(gitDir, branch);
       if (!tip) {
         throw fail('BRANCH_NOT_FOUND', 404, `branch '${branch}' was deleted while this push was being built.`);
+      }
+      if (opts.expectParent) {
+        throw fail('BRANCH_MOVED', 409, `branch '${branch}' moved to ${tip.slice(0, 12)} while this push was being built; nothing was committed.`);
       }
       if (attempt >= MAX_TAKEOVER_ATTEMPTS) {
         throw fail('BRANCH_MOVED', 409,

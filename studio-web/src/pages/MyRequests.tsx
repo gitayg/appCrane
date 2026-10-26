@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { Link } from 'react-router-dom'
 import { adminApi } from '../adminApi'
 
 // v2.16.0: personal "My Requests" view — every signed-in user can see the
@@ -104,7 +105,7 @@ export function MyRequests() {
                     </td>
                     <td style={{ fontSize: '.78rem', color: 'var(--dim)', whiteSpace: 'nowrap' }}>{fmtDate(r.created_at)}</td>
                     <td style={{ fontSize: '.82rem', wordBreak: 'break-word' }}>
-                      {r.message}
+                      <Link to={`/requests/${r.id}`} style={{ color: 'inherit', textDecoration: 'none' }} title="Open this request">{r.message}</Link>
                       {/* The closer's note, also sent in the completion email. Only
                           shown once the request is closed, so a note left from an
                           earlier round does not sit on a reopened request. Rendered

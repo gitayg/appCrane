@@ -6,6 +6,7 @@ import { auditMiddleware } from '../middleware/audit.js';
 import { AppError } from '../utils/errors.js';
 import { isAdmin } from '../utils/roles.js';
 import log from '../utils/logger.js';
+import { maxAgeDays } from '../services/apiKeyExpiry.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -58,19 +59,25 @@ function accessibleAppCount(user) {
   `).get(user.id).n;
 }
 
+// The expiry migration 136's trigger stored: capped at the platform window.
+function storedExpiry(db, id) {
+  return db.prepare('SELECT expires_at FROM user_mcp_keys WHERE id = ?').get(id)?.expires_at ?? null;
+}
+
 /**
  * GET /api/me/mcp-keys — list current user's personal MCP keys
  */
 router.get('/me/mcp-keys', requireSession, (req, res) => {
   const db = getDb();
   const keys = db.prepare(`
-    SELECT id, label, created_at, last_used_at, expires_at, revoked_at, read_only
+    SELECT id, label, created_at, issued_at, last_used_at, expires_at, revoked_at, read_only
     FROM user_mcp_keys
-    WHERE user_id = ?
+    WHERE user_id = ? AND coder_session_id IS NULL
     ORDER BY id DESC
   `).all(req.user.id);
   res.json({
     keys,
+    max_age_days: maxAgeDays(db),
     accessible_app_count: accessibleAppCount(req.user),
     is_admin: isAdmin(req.user),
   });
@@ -99,7 +106,7 @@ router.post('/me/mcp-keys', requireSession, auditMiddleware('user-mcp-key-create
   log.info(`UserMcpKey: created id=${result.lastInsertRowid} user=${req.user.id} read_only=${readOnly}`);
   res.json({
     key: {
-      id: result.lastInsertRowid, label: label || null, expires_at: expires_at || null,
+      id: result.lastInsertRowid, label: label || null, expires_at: storedExpiry(db, result.lastInsertRowid),
       read_only: readOnly,
     },
     api_key: apiKey,
@@ -156,7 +163,7 @@ router.post('/users/:id/mcp-keys', requirePlatformAdmin, auditMiddleware('user-m
   log.info(`UserMcpKey: admin id=${req.user.id} issued key id=${result.lastInsertRowid} for user id=${targetId} read_only=${readOnly}`);
   res.json({
     key: {
-      id: result.lastInsertRowid, label: label || null, expires_at: expires_at || null,
+      id: result.lastInsertRowid, label: label || null, expires_at: storedExpiry(db, result.lastInsertRowid),
       read_only: readOnly,
     },
     api_key: apiKey,
@@ -177,7 +184,7 @@ router.post('/users/:id/mcp-keys', requirePlatformAdmin, auditMiddleware('user-m
 router.post('/me/mcp-keys/:id/rotate', requireSession, auditMiddleware('user-mcp-key-rotate'), (req, res) => {
   const keyId = parseInt(req.params.id, 10);
   const db = getDb();
-  const existing = db.prepare('SELECT * FROM user_mcp_keys WHERE id = ? AND user_id = ?').get(keyId, req.user.id);
+  const existing = db.prepare('SELECT * FROM user_mcp_keys WHERE id = ? AND user_id = ? AND coder_session_id IS NULL').get(keyId, req.user.id);
   if (!existing) throw new AppError('Key not found', 404, 'NOT_FOUND');
   if (existing.revoked_at) throw new AppError('Cannot rotate a revoked key — create a new one instead', 400, 'KEY_REVOKED');
 
@@ -187,7 +194,7 @@ router.post('/me/mcp-keys/:id/rotate', requireSession, auditMiddleware('user-mcp
 
   log.info(`UserMcpKey: rotated id=${keyId} user=${req.user.id}`);
   res.json({
-    key: { id: keyId, label: existing.label, read_only: existing.read_only },
+    key: { id: keyId, label: existing.label, read_only: existing.read_only, expires_at: storedExpiry(db, keyId) },
     api_key: apiKey,
     warning: 'Save this API key — it will not be shown again. The previous value is now invalid.',
   });

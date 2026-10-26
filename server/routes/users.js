@@ -8,6 +8,7 @@ import { roleForUserOnApp } from '../services/permissions.js';
 import { clearUserRoleGrants } from '../services/appDefinedRoles.js';
 import { isAdmin, refuseRetiredAdminRole } from '../utils/roles.js';
 import { purgeRevokedTenants } from '../services/tenants.js';
+import { revokeAllGrantsForUser } from '../services/oauthStore.js';
 
 const router = Router();
 
@@ -34,7 +35,8 @@ router.get('/', (req, res) => {
   if (isAdmin(req.user)) {
     const users = db.prepare(`
       SELECT u.id, u.name, u.email, u.username, u.role, u.kind, u.created_at, u.last_login_at,
-        u.department, u.region, u.location,
+        u.department, u.region, u.location, u.api_key_expires_at, u.api_key_last_used_at,
+        CASE WHEN u.api_key_hash LIKE 'expired:%' THEN 1 ELSE 0 END as api_key_expired,
         CASE WHEN u.password_hash IS NOT NULL THEN 1 ELSE 0 END as has_password,
         CASE WHEN u.saml_name_id IS NOT NULL THEN 'saml' WHEN u.sso_sub IS NOT NULL THEN 'oidc' ELSE NULL END as sso_provider,
         (SELECT GROUP_CONCAT(a.slug, ', ') FROM app_users au JOIN apps a ON a.id = au.app_id WHERE au.user_id = u.id) as assigned_apps
@@ -175,6 +177,7 @@ router.put('/:id/role', requirePlatformAdmin, auditMiddleware('user-set-role'), 
   }
 
   db.prepare('UPDATE users SET role = ? WHERE id = ?').run(role, userId);
+  if (user.role === 'platform_admin' && role !== 'platform_admin') revokeAllGrantsForUser(userId);
   res.json({ user: { id: userId, role } });
 });
 
@@ -204,6 +207,7 @@ router.post('/:id/regenerate-key', requireAdmin, auditMiddleware('user-regen-key
 
   db.prepare('UPDATE users SET api_key_hash = ? WHERE id = ?').run(keyHash, userId);
   db.prepare('DELETE FROM identity_sessions WHERE user_id = ?').run(userId);
+  revokeAllGrantsForUser(userId);
 
   res.json({
     user: { id: user.id, name: user.name, role: user.role },
@@ -228,6 +232,7 @@ router.put('/:id/password', requirePlatformAdmin, auditMiddleware('user-set-pass
   const pwHash = hashPassword(password);
   db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(pwHash, user.id);
   db.prepare('DELETE FROM identity_sessions WHERE user_id = ?').run(user.id);
+  revokeAllGrantsForUser(user.id);
 
   res.json({ message: `Password set for ${user.name}` });
 });

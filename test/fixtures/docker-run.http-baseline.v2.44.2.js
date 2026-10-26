@@ -32,6 +32,16 @@
  * element is still the recorded v2.44.2 token, and the tests still compare the
  * whole list element for element — so a third change would show up here as a
  * failure, which is the only reason this baseline exists.
+ *
+ * AMENDED again at the memory-admission release, one element:
+ *   (new, immediately after the network)  '--oom-score-adj=500'
+ * so the kernel kills app containers before AppCrane, sshd or a security agent
+ * under whole-host OOM (server/services/oomPriority.js).
+ *
+ * AMENDED again at v2.115.0, one element:
+ *   (new, immediately after --oom-score-adj)  '--cpu-shares=128'
+ * so Caddy, SSH and AppCrane win CPU over app containers under contention
+ * (server/services/cpuPriority.js).
  */
 export const HTTP_BASELINE_V2_44_2 = [
   'run',
@@ -47,6 +57,8 @@ export const HTTP_BASELINE_V2_44_2 = [
   '--restart=on-failure:2',
   '--network',
   'appcrane-apps',
+  '--oom-score-adj=500',
+  '--cpu-shares=128',
   '--memory=512m',
   '--memory-swap=512m',
   '--cpus=0.5',

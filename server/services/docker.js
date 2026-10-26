@@ -15,6 +15,11 @@ import {
   HELPER_IMAGE, createTarGuard,
 } from './volumeHelper.js';
 import log from '../utils/logger.js';
+import { admitContainer, reserveMemory } from './memoryAdmission.js';
+import { OOM_APP_FLAG } from './oomPriority.js';
+import { CPU_APP_FLAG, buildResourceArgs } from './cpuPriority.js';
+import { assertNoRestoreInProgress } from './managedDbRestoreGuard.js';
+import { prepareBuildBase, buildWithPullFallback, freshBaseTag, BASE_IMAGE_LABEL, BASE_DIGEST_LABEL } from './autoPatch/runtimeImages.js';
 
 const execFileAsync = promisify(execFile);
 // Imported rather than re-declared as 3000. v2.45.0's data-plane guard is
@@ -298,8 +303,11 @@ function imageTag(slug, env, commitHash) {
 // v2.21.10: exposed so the Nixpacks path can tag its image identically.
 export function imageTagFor(slug, env, commitHash) { return imageTag(slug, env, commitHash); }
 
-export async function buildImageIfNeeded({ slug, env, contextDir, commitHash, appBasePath, onLog }) {
+export async function buildImageIfNeeded({ slug, env, contextDir, commitHash, appBasePath, onLog, freshBase = false, appDockerfile = false }) {
   const tag = imageTag(slug, env, commitHash);
+  if (freshBase) {
+    return buildImage({ slug, env, contextDir, commitHash, appBasePath, onLog, appDockerfile, tag: freshBaseTag(tag) });
+  }
   if (commitHash && commitHash !== 'unknown') {
     try {
       await dockerExec(['image', 'inspect', tag, '--format', '{{.Id}}'], { timeout: 5000 });
@@ -307,7 +315,18 @@ export async function buildImageIfNeeded({ slug, env, contextDir, commitHash, ap
       return tag;
     } catch (_) {}
   }
-  return buildImage({ slug, env, contextDir, commitHash, appBasePath, onLog });
+  return buildImage({ slug, env, contextDir, commitHash, appBasePath, onLog, appDockerfile });
+}
+
+/** { image, digest } of the base an AppCrane-built image was built on (its labels), or null. */
+export async function imageBaseInfo(ref) {
+  try {
+    const labels = JSON.parse(await dockerExec(['image', 'inspect', ref, '--format', '{{json .Config.Labels}}'], { timeout: 10000 }) || 'null') || {};
+    const image = labels[BASE_IMAGE_LABEL];
+    return image ? { image, digest: labels[BASE_DIGEST_LABEL] || null } : null;
+  } catch (_) {
+    return null;
+  }
 }
 
 /** Whether an image with this ref is on the host. */
@@ -339,9 +358,10 @@ export async function getContainerImage(slug, env) {
   return dockerExec(['inspect', name, '--format', '{{.Config.Image}}'], { timeout: 5000 });
 }
 
-export async function buildImage({ slug, env, contextDir, commitHash, appBasePath, onLog }) {
-  const tag = imageTag(slug, env, commitHash);
-  const args = ['build', '-t', tag, '--label', APPCRANE_LABEL, '--label', `slug=${slug}`, '--label', `env=${env}`];
+export async function buildImage({ slug, env, contextDir, commitHash, appBasePath, onLog, appDockerfile = false, tag: tagOverride = null }) {
+  const tag = tagOverride || imageTag(slug, env, commitHash);
+  const prep = await prepareBuildBase({ contextDir, appDockerfile, db: safeDb(), run: dockerExec, onLog });
+  const args = ['build', '-t', tag, '--label', APPCRANE_LABEL, '--label', `slug=${slug}`, '--label', `env=${env}`, ...prep.labelArgs, ...buildResourceArgs()];
   // Build-time only: bundlers (Vite, CRA, Next) need APP_BASE_PATH to emit
   // correct asset URLs. Caddy strips this prefix at runtime, so it must NOT
   // appear in the runtime container env — see bugs/2026-04-26-appcrane-app-base-path-resolution.md
@@ -352,6 +372,14 @@ export async function buildImage({ slug, env, contextDir, commitHash, appBasePat
   }
   args.push(contextDir);
 
+  return buildWithPullFallback({ args, buildPull: prep.buildPull, onLog, runBuild: (a) => runDockerBuild(a, tag, onLog) });
+}
+
+function safeDb() {
+  try { return getDb(); } catch (_) { return null; }
+}
+
+function runDockerBuild(args, tag, onLog) {
   return new Promise((resolve, reject) => {
     // Explicitly chosen, never inherited — see dockerBuildEnv().
     const child = spawn('docker', args, { stdio: 'pipe', env: dockerBuildEnv() });
@@ -538,6 +566,8 @@ async function runRootHelper({ image, hostDir, mountAt = '/target', entrypoint, 
   if (typeof image !== 'string' || !image) throw new Error('runRootHelper needs an image already on this host');
   return dockerExec([
     'run', '--rm',
+    OOM_APP_FLAG,
+    CPU_APP_FLAG,
     '--pull', 'never',
     '--user', '0:0',
     '--network', 'none',
@@ -899,7 +929,31 @@ function publicPublishTargets(slug, env, containerPort) {
 // 0 having printed help; with `start-dev` it reaches state=running and answers
 // on 8080. Optional and null by default, so every existing caller's argv is
 // unchanged to the byte.
-export async function startApp({ slug, env, image, hostPort, envVars = {}, volumes = [], memoryMb = 512, cpus = 0.5, addHostGateway = false, containerPort = CONTAINER_PORT, command = null }) {
+// Memory admission (memoryAdmission.js) runs first, before anything is torn
+// down, so a refused start leaves the running container serving. `admission`
+// carries who asked ({ appId, userId, automatic, what, onWarn }); false skips
+// the check, for a caller that already admitted this exact start (a restart
+// checked before its stop, a health-check revert to the image that was running).
+export async function startApp(opts) {
+  const { slug, env, memoryMb = 512, cpus = 0.5, admission } = opts;
+  // A container recreated mid-restore would write into the half-restored data.
+  assertNoRestoreInProgress(slug, env);
+  // A malformed command is refused before anything touches Docker, measuring included.
+  assertRunnableCommand(opts.command ?? null);
+  let release = null;
+  if (admission !== false) {
+    const name = containerName(slug, env);
+    await admitContainer({ name, memoryMb, cpus, kind: 'app', slug, env, what: 'deploy', ...(admission || {}) });
+    release = reserveMemory(name, memoryMb * 1024 * 1024);
+  }
+  try {
+    return await runAppContainer(opts);
+  } finally {
+    release?.();
+  }
+}
+
+async function runAppContainer({ slug, env, image, hostPort, envVars = {}, volumes = [], memoryMb = 512, cpus = 0.5, addHostGateway = false, containerPort = CONTAINER_PORT, command = null }) {
   const name = containerName(slug, env);
 
   // The argv-build boundary for the command (services/containerRuntimeSpec.js
@@ -964,6 +1018,8 @@ export async function startApp({ slug, env, image, hostPort, envVars = {}, volum
     // one app's OOM into the host's.
     '--restart=on-failure:2',
     '--network', network,
+    OOM_APP_FLAG,
+    CPU_APP_FLAG,
     `--memory=${memoryMb}m`,
     // Equal to --memory, which is Docker's spelling for "no swap at all": the
     // flag is the combined memory+swap ceiling, so swap budget = memory-swap -

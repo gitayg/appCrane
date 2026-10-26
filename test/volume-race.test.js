@@ -39,6 +39,9 @@ const liveSkip = REAL_DOCKER ? false : 'no reachable Docker daemon on this host'
 const logger = (await import('../server/utils/logger.js')).default;
 for (const lvl of ['warn', 'info', 'debug', 'error']) logger[lvl] = () => {};
 (await import('../server/db.js')).initDb();
+// This file exercises a real daemon, not memory admission (test/memory-admission.test.js); a busy
+// Docker host must not refuse its containers.
+(await import('../server/db.js')).getDb().prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('memory_admission_mode', 'off')").run();
 const spec = await import('../server/services/containerRuntimeSpec.js');
 const { seedNewVolumeMounts } = await import('../server/services/volumeSeeder.js');
 const { startApp, stopApp, volumeSubpathSupported } = await import('../server/services/docker.js');

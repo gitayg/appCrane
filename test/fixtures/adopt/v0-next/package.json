@@ -1,0 +1,8 @@
+{
+  "name": "my-v0-project",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": { "dev": "next dev", "build": "next build", "start": "next start", "lint": "next lint" },
+  "dependencies": { "@radix-ui/react-slot": "1.1.1", "ai": "^4.0.0", "@ai-sdk/openai": "^1.0.0", "class-variance-authority": "^0.7.1", "next": "15.2.4", "react": "^19", "react-dom": "^19" },
+  "devDependencies": { "@types/node": "^22", "tailwindcss": "^3.4.17", "typescript": "^5" }
+}

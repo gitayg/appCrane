@@ -1,6 +1,7 @@
 import { getDb } from '../db.js';
 import { redactAuditArgs } from '../utils/auditRedact.js';
 import log from '../utils/logger.js';
+import { recordAuditEvent } from '../services/eventStore.js';
 
 /**
  * Log an action to the audit log.
@@ -22,7 +23,7 @@ export function auditLogin(userId, outcome, detail) {
 
 export function logAudit(userId, appId, action, detail, actorKind = null) {
   const db = getDb();
-  db.prepare(`
+  const info = db.prepare(`
     INSERT INTO audit_log (user_id, app_id, action, detail, actor_kind)
     VALUES (?, ?, ?, ?, COALESCE(?, (SELECT kind FROM users WHERE id = ?)))
   `).run(
@@ -30,6 +31,7 @@ export function logAudit(userId, appId, action, detail, actorKind = null) {
     typeof detail === 'string' ? detail : JSON.stringify(detail),
     actorKind, userId
   );
+  recordAuditEvent(info.lastInsertRowid, userId, appId, action, detail);
 }
 
 /**

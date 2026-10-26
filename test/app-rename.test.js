@@ -111,7 +111,7 @@ test('a rejected rename leaves the app exactly as it was', async () => {
   const taken = makeApp('taken-slug');
   const { status } = await rename('keeper', 'taken-slug');
 
-  assert.equal(status, 409, 'renaming onto an existing slug must be refused');
+  assert.equal(status, 400, 'renaming onto an existing slug must be refused');
   assert.ok(appBySlug('keeper'), 'the app kept its slug');
   assert.ok(existsSync(dataDir('keeper')), 'and its data directory was not moved');
   assert.ok(appBySlug('taken-slug').id === taken, 'the other app is untouched');
