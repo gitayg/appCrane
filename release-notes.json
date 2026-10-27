@@ -1,4 +1,8 @@
 {
+  "2.124.0": [
+    "You can give a script or a scheduled job its own key for one app, from the MCP page. The key signs you in to that app only, does nothing anywhere else in AppCrane, and stops working as soon as you lose access to the app.",
+    "Apps can tell when a request came from such a key, so an app can let a script do less than you can, for example upload but not read."
+  ],
   "2.123.2": [
     "Three building blocks AppCrane relies on for handling uploads, web requests and e-mail were updated to close newly reported security problems."
   ],

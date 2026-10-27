@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/skills/work-review/scripts/upload.mjs\" --hook"
+          }
+        ]
+      }
+    ]
+  }
+}

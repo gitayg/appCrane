@@ -1,0 +1,14 @@
+{
+  "name": "work-review-hub",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Receives daily redacted work-review snapshots and shows each developer's trend. Runs as an AppCrane app behind forward_auth.",
+  "type": "module",
+  "main": "server.mjs",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

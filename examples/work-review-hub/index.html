@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Work Review</title>
+<style>
+  :root { --bg:#f7f7f8; --card:#fff; --ink:#1b1c1f; --mute:#6b6f76; --line:#e3e4e8; --accent:#2f6fde; --warn:#c2410c; --good:#15803d; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#141518; --card:#1d1f23; --ink:#e8e9ec; --mute:#9a9ea6; --line:#2c2f35; --accent:#6d9cf0; --warn:#f08a5d; --good:#4ade80; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.5 system-ui, -apple-system, Segoe UI, sans-serif; }
+  main { max-width: 1040px; margin: 0 auto; padding: 24px 16px 64px; }
+  header { display:flex; justify-content:space-between; align-items:baseline; gap:12px; flex-wrap:wrap; }
+  h1 { font-size: 22px; margin: 0; } h2 { font-size: 16px; margin: 28px 0 10px; }
+  .mute { color: var(--mute); font-size: 13px; }
+  .tabs button { background:none; border:1px solid var(--line); color:var(--ink); padding:6px 12px; border-radius:6px; cursor:pointer; font:inherit; }
+  .tabs button[aria-selected="true"] { border-color: var(--accent); color: var(--accent); }
+  .kpis { display:grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap:12px; }
+  .kpi, .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px 16px; }
+  .kpi .v { font-size: 24px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .kpi .l { color: var(--mute); font-size: 13px; }
+  table { width:100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align:left; padding:7px 8px; border-bottom:1px solid var(--line); vertical-align: top; }
+  th { color: var(--mute); font-weight: 500; font-size: 13px; }
+  td.n, th.n { text-align: right; }
+  .prompt { margin: 0 0 12px; } .prompt q { display:block; font-style: italic; margin: 4px 0; overflow-wrap:anywhere; }
+  .tag { display:inline-block; font-size:12px; padding:1px 8px; border-radius:99px; border:1px solid var(--line); color: var(--mute); margin: 0 4px 4px 0; }
+  .warn { color: var(--warn); } .good { color: var(--good); }
+  svg { display:block; width:100%; height:120px; }
+  .danger { background:none; border:1px solid var(--warn); color: var(--warn); border-radius:6px; padding:6px 12px; cursor:pointer; font:inherit; }
+  .scroll { overflow-x:auto; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div><h1>Work Review</h1><div class="mute" id="who"></div></div>
+    <nav class="tabs" id="tabs" hidden><button data-tab="me" aria-selected="true">Me</button> <button data-tab="team">Team</button></nav>
+  </header>
+
+  <section id="me">
+    <p class="mute" id="empty" hidden>No snapshots yet. Set up the uploader from the work-review skill: <code>node upload.mjs --setup --url &lt;this app's URL&gt;</code>.</p>
+    <div id="mine" hidden>
+      <h2>Last 7 days <span class="mute" id="asof"></span></h2>
+      <div class="kpis" id="kpis"></div>
+      <div class="card" id="since" style="margin-top:12px" hidden></div>
+      <h2>Cost at API list prices, per daily 7-day snapshot</h2>
+      <div class="card"><svg id="trend" role="img" aria-label="Daily spend trend"></svg><div class="mute" id="trendNote"></div></div>
+      <h2>Instruction quality</h2>
+      <div class="card scroll"><table id="iq"></table></div>
+      <h2>Costliest prompts that were vague or got corrected</h2>
+      <div class="card" id="prompts"></div>
+      <h2>Overcomplication</h2>
+      <div class="card" id="oc"></div>
+      <p style="margin-top:28px"><label><input type="checkbox" id="digest"> Email me a weekly digest on Mondays (only I get it)</label></p>
+      <p style="margin-top:12px"><button class="danger" id="del">Delete all my data</button> <span class="mute">Excerpts are visible to you only. Admins see team totals once 5 or more people take part, never your numbers on their own.</span></p>
+    </div>
+  </section>
+
+  <section id="team" hidden>
+    <h2>Team</h2>
+    <div class="card" id="teamBody"></div>
+  </section>
+
+  <p class="mute" style="margin-top:40px" id="policy">This hub is for each developer to improve how they work with Claude. It is not for performance reviews: admins see only team-wide totals, shown once enough people take part that nobody can be singled out, and there is no ranking of people.</p>
+</main>
+<script>
+// Everything stored comes from uploads, so it is rendered with textContent
+// only, never as HTML.
+const $ = id => document.getElementById(id);
+const el = (tag, text, cls) => { const e = document.createElement(tag); if (text != null) e.textContent = text; if (cls) e.className = cls; return e; };
+const k = n => n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : String(Math.round(n));
+const pct = x => (x * 100).toFixed(0) + '%';
+const usd = n => n >= 100 ? `$${n.toFixed(0)}` : `$${(n || 0).toFixed(2)}`;
+const api = p => fetch(p, { credentials: 'same-origin' }).then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
+
+function kpi(label, value, cls) { const d = el('div', null, 'kpi'); d.append(el('div', value, 'v' + (cls ? ' ' + cls : '')), el('div', label, 'l')); return d; }
+function row(cells, head) { const tr = el('tr'); cells.forEach((c, i) => tr.append(el(head ? 'th' : 'td', c, i ? 'n' : ''))); return tr; }
+
+function renderMine(reports) {
+  if (!reports.length) { $('empty').hidden = false; return; }
+  $('mine').hidden = false;
+  const r = reports[reports.length - 1], T = r.totals, Q = r.instructionQuality, O = r.overcomplication;
+  $('asof').textContent = `· snapshot ${r.day}`;
+  $('kpis').replaceChildren(
+    kpi('Cost at API list prices (not your seat bill)', usd(T.usd)),
+    kpi('Spent on prompts that needed correcting', `${pct(Q.reworkShare)} · ${usd(Q.reworkUsd)}`, Q.reworkShare > 0.15 ? 'warn' : ''),
+    kpi('Commits landed · cost per commit', r.outcomes ? `${r.outcomes.commits} · ${r.outcomes.commits ? usd(r.outcomes.usdPerCommit) : '—'}` : '—'),
+    kpi('Vague prompts', `${Q.vague.prompts} / ${Q.vague.prompts + Q.anchored.prompts}`),
+    kpi('Cache hit rate', pct(T.cacheHitRate), T.cacheHitRate > 0.85 ? 'good' : ''),
+    kpi('Tool error rate', pct(T.errorRate), T.errorRate > 0.1 ? 'warn' : ''),
+    kpi('Sessions · prompts', `${T.sessions} · ${T.userPrompts}`));
+
+  // Trend: totalCost per daily snapshot, as a simple line.
+  const pts = reports.map(x => x.totals.usd || 0), max = Math.max(1, ...pts), W = 1000, H = 120, pad = 8;
+  const svg = $('trend'); svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.replaceChildren();
+  const ns = 'http://www.w3.org/2000/svg', line = document.createElementNS(ns, 'polyline');
+  line.setAttribute('points', pts.map((v, i) => `${pad + i * (W - 2 * pad) / Math.max(1, pts.length - 1)},${H - pad - v / max * (H - 2 * pad)}`).join(' '));
+  line.setAttribute('fill', 'none'); line.setAttribute('stroke', 'currentColor'); line.setAttribute('stroke-width', '2.5'); line.style.color = 'var(--accent)';
+  svg.append(line);
+  $('trendNote').textContent = `${reports.length} daily snapshots (each a 7-day window), ${reports[0].day} → ${r.day}. Peak ${usd(max)} at API list prices.`;
+
+  // Since about two weeks ago: did the fixes work? The newest snapshot at least
+  // 10 days older than today's, so the two 7-day windows do not overlap much.
+  const cutoff = new Date(Date.parse(r.day) - 10 * 864e5).toISOString().slice(0, 10);
+  const then = [...reports].reverse().find(x => x.day <= cutoff);
+  if (then) {
+    const per = x => Math.max(1, x.totals.sessions);
+    const vagueShare = x => { const v = x.instructionQuality.vague.prompts, a = x.instructionQuality.anchored.prompts; return v + a ? v / (v + a) : 0; };
+    const signals = [
+      ['Cost per session', x => x.totals.usd / per(x), 'lower', usd],
+      ['Cost per landed commit', x => x.outcomes?.usdPerCommit || null, 'lower', usd],
+      ['Spend on prompts that needed correcting', x => x.instructionQuality.reworkShare, 'lower', pct],
+      ['Vague prompts', vagueShare, 'lower', pct],
+      ['Re-reads of unchanged files per session', x => x.totals.redundantReads / per(x), 'lower', n => n.toFixed(1)],
+      ['Setup findings', x => x.setup ? Object.values(x.setup.findings || {}).reduce((a, n) => a + n, 0) : null, 'lower', n => String(n)],
+      ['Cache hit rate', x => x.totals.cacheHitRate, 'higher', pct],
+    ];
+    const box = $('since'); box.hidden = false; box.replaceChildren(el('strong', `Since ${then.day}`));
+    const tbl = el('table'); tbl.append(row(['Signal', 'Then', 'Now', ''], true));
+    for (const [name, f, good, fmt] of signals) {
+      const a = f(then), b = f(r);
+      if (a == null || b == null) continue;
+      const ch = a === 0 ? (b === 0 ? 0 : 1) : (b - a) / Math.abs(a);
+      const verdict = Math.abs(ch) < 0.1 ? 'about the same' : (ch < 0) === (good === 'lower') ? 'better' : 'worse';
+      const tr = row([name, fmt(a), fmt(b), verdict]);
+      tr.lastChild.className = verdict === 'better' ? 'good' : verdict === 'worse' ? 'warn' : 'mute';
+      tbl.append(tr);
+    }
+    box.append(tbl);
+  }
+
+  const t = $('iq'); t.replaceChildren(row(['Prompts', 'Count', 'Median cost', 'Lookups before first edit', 'Led to rework'], true));
+  for (const [name, g] of [['Vague', Q.vague], ['Anchored', Q.anchored], ['With done-criteria', Q.withCriteria], ['Without done-criteria', Q.withoutCriteria]])
+    t.append(row([name, g.prompts, usd(g.medianUsd), g.medianExploreBeforeFirstEdit, pct(g.reworkRate)]));
+
+  const p = $('prompts'); p.replaceChildren();
+  if (!Q.costliestBadPrompts.length) p.append(el('div', 'None this week.', 'mute'));
+  for (const b of Q.costliestBadPrompts) {
+    const d = el('div', null, 'prompt'); d.append(el('strong', usd(b.usd)), el('q', b.excerpt));
+    b.why.forEach(w => d.append(el('span', w, 'tag'))); p.append(d);
+  }
+
+  const oc = $('oc'); oc.replaceChildren();
+  const flags = Object.entries(O.flags);
+  const SU = r.setup;
+  if (SU) {
+    const fk = Object.entries(SU.findings || {});
+    oc.append(el('div', `Setup: ~${k(SU.alwaysOnTokens)} tokens of CLAUDE.md on every request · ${SU.agents} subagents · ${SU.skills} skills · ${SU.mcpServers} MCP servers · ${SU.hooks} hooks${SU.multiAgentFrameworks ? ` · multi-agent code in this project` : ''}`, 'mute'));
+    const sf = el('div'); sf.style.margin = '6px 0';
+    fk.length ? fk.forEach(([f, n]) => sf.append(el('span', `${f} ×${n}`, 'tag'))) : sf.append(el('span', 'setup: no findings', 'tag'));
+    oc.append(sf);
+  }
+  const SA = r.subagents;
+  if (SA && SA.runs) oc.append(el('div', `Subagents: ${SA.runs} runs, ${usd(SA.usd)} (${usd(SA.startupUsd)} start-up), ${Math.round(SA.parallelShare * 100)}% parallel · no benefit from delegating: ${usd(SA.flaggedUsd)}${SA.repeatedDelegations ? ` · ${SA.repeatedDelegations} procedures delegated 3+ times (skill candidates)` : ''}`, 'mute'));
+  oc.append(el('div', `Always-on context ~${k(O.medianBaselineContextTokens)} tokens/session · ${O.toolCallsPerPrompt} tool calls per prompt · ${O.subagentRuns} subagents · ${O.nudgePrompts} "continue/yes" prompts`, 'mute'));
+  const fl = el('div'); fl.style.margin = '8px 0';
+  flags.length ? flags.forEach(([f, n]) => fl.append(el('span', `${f} ×${n}`, 'tag'))) : fl.append(el('span', 'No flags', 'tag'));
+  oc.append(fl);
+  if (O.returnsCurve.length > 1) {
+    const rt = el('table'); rt.append(row(['Token bin', 'Sessions', 'Avg tokens', 'Edits+commits', 'Per 1M tokens'], true));
+    O.returnsCurve.forEach(b => rt.append(row([b.bin, b.sessions, k(b.avgTokens), b.avgEditsAndCommits, b.outputPerMillionTokens])));
+    oc.append(rt);
+  }
+}
+
+function renderTeam(T) {
+  const b = $('teamBody'); b.replaceChildren();
+  if (!T.enough) {
+    b.append(el('p', `${T.people} ${T.people === 1 ? 'person has' : 'people have'} uploaded in the last ${T.activeDays} days. Team totals appear at ${T.minPeople} or more, so nobody can be singled out.`, 'mute'));
+    return;
+  }
+  b.append(el('p', `${T.people} people active in the last ${T.activeDays} days · ${usd(T.usdTotal)} at API list prices (7-day windows).`, 'mute'));
+  const m = T.median, t = el('table');
+  t.append(row(['Median per person', ''], true));
+  for (const [l, v] of [['Cost at API list prices', usd(m.usd)], ['Cost per landed commit', m.usdPerCommit ? usd(m.usdPerCommit) : '—'], ['Spend on prompts that needed correcting', pct(m.reworkShare)], ['Share of prompts that were vague', pct(m.vagueShare)],
+    ['Cache hit rate', pct(m.cacheHitRate)], ['Tool error rate', pct(m.errorRate)], ['CLAUDE.md tokens on every request', k(m.alwaysOnTokens)]]) t.append(row([l, v]));
+  b.append(t);
+  const list = (title, obj) => {
+    const e = Object.entries(obj || {}).sort((x, y) => y[1] - x[1]);
+    if (!e.length) return;
+    b.append(el('h2', title));
+    const d = el('div'); e.forEach(([k2, n]) => d.append(el('span', `${k2}: ${n} of ${T.people}`, 'tag'))); b.append(d);
+  };
+  list('People with each setup finding', T.peopleWithSetupFinding);
+  list('People with each subagent flag', T.peopleWithSubagentFlag);
+  b.append(el('p', `Subagent runs that gained nothing from delegating: ${usd(T.subagentUsdNoBenefit)} · people correcting Claude on the same thing repeatedly: ${T.peopleWithRecurringCorrections}`, 'mute'));
+}
+
+(async () => {
+  const me = await api('/api/me');
+  $('who').textContent = me.name === me.email ? me.email : `${me.name} · ${me.email}`;
+  renderMine((await api('/api/reports/me')).reports);
+  if (me.admin) {
+    $('tabs').hidden = false;
+    $('tabs').addEventListener('click', async e => {
+      const tab = e.target.dataset?.tab; if (!tab) return;
+      for (const b of $('tabs').children) b.setAttribute('aria-selected', String(b.dataset.tab === tab));
+      $('me').hidden = tab !== 'me'; $('team').hidden = tab !== 'team';
+      if (tab === 'team') renderTeam(await api('/api/team'));
+    });
+  }
+  $('digest').checked = !!me.digest;
+  $('digest').addEventListener('change', async e => {
+    const r = await fetch('/api/me/digest', { method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-Work-Review-Client': 'work-review/v1' }, body: JSON.stringify({ enabled: e.target.checked }) });
+    if (!r.ok) { e.target.checked = !e.target.checked; alert('Could not save that setting.'); }
+  });
+  $('del').addEventListener('click', async () => {
+    if (!confirm('Delete every snapshot you have uploaded? This cannot be undone.')) return;
+    await fetch('/api/reports/me', { method: 'DELETE', credentials: 'same-origin' });
+    location.reload();
+  });
+})().catch(e => { document.querySelector('main').append(el('p', `Could not load: ${e.message}`, 'warn')); });
+</script>
+</body>
+</html>
