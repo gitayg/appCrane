@@ -200,7 +200,14 @@ export function handler(req, res) {
     }).catch(e => send(res, e.status || 400, { error: e.message }));
   }
   if (req.method === 'GET' && path === '/api/reports/me') return send(res, 200, { reports: history(userDir(user.email)) });
-  if (req.method === 'DELETE' && path === '/api/reports/me') { rmSync(userDir(user.email), { recursive: true, force: true }); return send(res, 200, { deleted: true }); }
+  if (req.method === 'DELETE' && path === '/api/reports/me') {
+    const dir = userDir(user.email), optedOut = readMeta(dir).digest === false;
+    rmSync(dir, { recursive: true, force: true });
+    // Erasing data must not undo an opt-out: keep only that choice, with no
+    // email, name or numbers. The next upload merges into it.
+    if (optedOut) writeMeta(dir, { digest: false });
+    return send(res, 200, { deleted: true });
+  }
   if (req.method === 'GET' && path === '/api/team') return user.admin ? send(res, 200, team()) : send(res, 403, { error: 'admins only' });
 
   if (req.method === 'POST' && path === '/api/reports') {

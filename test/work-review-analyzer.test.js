@@ -243,6 +243,9 @@ test('--allow-remote keeps only sessions from matching git repositories', () => 
   execFileSync(process.execPath, [SCRIPT, '--root', join(root, '-p'), '--json', out, '--allow-remote', 'github.com[:/]opswat/']);
   const r = JSON.parse(readFileSync(out, 'utf8'));
   assert.deepEqual(r.sessions.map(s => s.sessionId), ['w'], 'only the work repo');
+  execFileSync(process.execPath, [SCRIPT, '--root', join(root, '-p'), '--json', out, '--allow-remote', '.*']);
+  assert.deepEqual(JSON.parse(readFileSync(out, 'utf8')).sessions.map(s => s.sessionId).sort(), ['s', 'w'],
+    'even a match-anything pattern never admits a session with no remote or no directory');
   assert.equal(r.totals.excludedByRemote, 3, 'side project, no remote and a deleted directory are all left out');
 });
 

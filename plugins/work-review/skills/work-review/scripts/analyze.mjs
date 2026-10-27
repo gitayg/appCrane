@@ -351,7 +351,9 @@ const remoteOf = (() => {
     return cache.get(cwd);
   };
 })();
-const allowed = s => !ALLOW_REMOTES.length || ALLOW_REMOTES.some(re => re.test(remoteOf(s.cwd) || '\u0000'));
+// No remote (or no directory) never matches, whatever the pattern: testing a
+// placeholder string would let a pattern like '.*' admit non-git sessions.
+const allowed = s => { if (!ALLOW_REMOTES.length) return true; const url = remoteOf(s.cwd); return !!url && ALLOW_REMOTES.some(re => re.test(url)); };
 const scanned = files.map(analyzeFile).filter(s => s.turns > 0);
 const sessions = scanned.filter(allowed);
 const excludedByRemote = scanned.length - sessions.length;

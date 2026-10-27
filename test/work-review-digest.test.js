@@ -87,3 +87,20 @@ test('the digest goes through AppCrane\'s email service with the app\'s token', 
   assert.deepEqual([got.body.to, got.body.idempotencyKey, got.body.fromName, got.body.env], ['kim@opswat.com', 'k1', 'Work Review', 'production']);
   await assert.rejects(sendViaAppCrane({ to: 'x' }, {}), /no AppCrane email service/);
 });
+
+test('erasing your data keeps your digest opt-out, and nothing else', async () => {
+  const { readdirSync, readFileSync } = await import('fs');
+  const f = [{ id: 'rework', usd: 3, share: 0.2 }];
+  assert.equal((await upload('sam@opswat.com', '2026-10-25', report(20, f))).status, 201);
+  const put = await fetch(`${base}/api/me/digest`, { method: 'PUT', headers: { ...as('sam@opswat.com'), 'Content-Type': 'application/json', 'X-Work-Review-Client': SCHEMA }, body: '{"enabled":false}' });
+  assert.equal(put.status, 200);
+  assert.equal((await fetch(`${base}/api/reports/me`, { method: 'DELETE', headers: as('sam@opswat.com') })).status, 200);
+  const dirs = readdirSync(join(process.env.DATA_DIR, 'reports'));
+  const kept = dirs.map(d => readFileSync(join(process.env.DATA_DIR, 'reports', d, 'meta.json'), 'utf8')).find(m => !m.includes('@'));
+  assert.equal(kept, '{"digest":false}', 'only the opt-out survives: no email, name or numbers');
+  assert.equal((await upload('sam@opswat.com', '2026-10-26', report(21, f))).status, 201);
+  assert.equal((await (await fetch(`${base}/api/me`, { headers: as('sam@opswat.com') })).json()).digest, false, 'still off after the next upload');
+  const sent = [];
+  await runDigests({ now: MONDAY, sender: async m => { sent.push(m.to); } });
+  assert.ok(!sent.includes('sam@opswat.com'));
+});
