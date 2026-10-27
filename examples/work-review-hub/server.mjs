@@ -16,6 +16,7 @@ import { mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync, existsSync
 import { join, dirname } from 'path';
 import { createHash } from 'crypto';
 import { fileURLToPath } from 'url';
+import { digestFor, sendViaAppCrane, isoWeek } from './digest.mjs';
 
 const VERSION = '1.0.0';
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -88,6 +89,9 @@ export function validate(p) {
       ...nums(p.subagents || {}, ['runs', 'usd', 'startupUsd', 'parallelShare', 'flaggedUsd', 'repeatedDelegations'], 'subagents'),
       flags: Object.fromEntries(Object.entries(p.subagents?.flags || {}).filter(([k, v]) => /^[a-z-]{1,40}$/.test(k) && isNum(v)).slice(0, 10)),
     },
+    // Ranked findings as fixed ids with their cost: what the weekly digest says.
+    findings: (Array.isArray(p.findings) ? p.findings : []).slice(0, 6).filter(f => /^[a-z-]{1,40}$/.test(f?.id))
+      .map(f => ({ id: f.id, ...nums(f, ['usd', 'share'], 'findings') })),
     outcomes: nums(p.outcomes || {}, ['commits', 'linesAdded', 'linesDeleted', 'sessionsWithCommits', 'withClaudeTrailer', 'usdPerCommit', 'usdWithoutCommit', 'sessionsWithoutCommit'], 'outcomes'),
     setup: p.setup ? {
       ...nums(p.setup, ['alwaysOnTokens', 'agents', 'skills', 'mcpServers', 'hooks', 'multiAgentFrameworks'], 'setup'),
@@ -98,10 +102,12 @@ export function validate(p) {
 }
 
 // ── storage ──────────────────────────────────────────────────────
+const readMeta = dir => { try { return JSON.parse(readFileSync(join(dir, 'meta.json'), 'utf8')); } catch { return {}; } };
+// Merge, never replace: the person's own settings (the digest switch) live here too.
+const writeMeta = (dir, patch) => { mkdirSync(dir, { recursive: true, mode: 0o700 }); writeFileSync(join(dir, 'meta.json'), JSON.stringify({ ...readMeta(dir), ...patch }), { mode: 0o600 }); };
 function save(user, snap) {
   const dir = userDir(user.email);
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
-  writeFileSync(join(dir, 'meta.json'), JSON.stringify({ email: user.email, name: user.name }), { mode: 0o600 });
+  writeMeta(dir, { email: user.email, name: user.name });
   const tmp = join(dir, `.${snap.day}.tmp`);
   writeFileSync(tmp, JSON.stringify({ ...snap, receivedAt: new Date().toISOString() }), { mode: 0o600 });
   renameSync(tmp, join(dir, `${snap.day}.json`));
@@ -183,7 +189,16 @@ export function handler(req, res) {
   }
 
   if (req.method === 'GET' && (path === '/' || path === '/index.html')) return send(res, 200, INDEX, 'text/html; charset=utf-8');
-  if (req.method === 'GET' && path === '/api/me') return send(res, 200, { email: user.email, name: user.name, admin: user.admin });
+  if (req.method === 'GET' && path === '/api/me') return send(res, 200, { email: user.email, name: user.name, admin: user.admin, digest: readMeta(userDir(user.email)).digest !== false });
+  if (req.method === 'PUT' && path === '/api/me/digest') {
+    if (req.headers['x-work-review-client'] !== SCHEMA) return send(res, 400, { error: 'expected X-Work-Review-Client' });
+    return readBody(req).then(raw => {
+      let enabled; try { enabled = JSON.parse(raw).enabled; } catch {}
+      if (typeof enabled !== 'boolean') return send(res, 422, { error: 'enabled must be true or false' });
+      writeMeta(userDir(user.email), { email: user.email, name: user.name, digest: enabled });
+      send(res, 200, { digest: enabled });
+    }).catch(e => send(res, e.status || 400, { error: e.message }));
+  }
   if (req.method === 'GET' && path === '/api/reports/me') return send(res, 200, { reports: history(userDir(user.email)) });
   if (req.method === 'DELETE' && path === '/api/reports/me') { rmSync(userDir(user.email), { recursive: true, force: true }); return send(res, 200, { deleted: true }); }
   if (req.method === 'GET' && path === '/api/team') return user.admin ? send(res, 200, team()) : send(res, 403, { error: 'admins only' });
@@ -204,8 +219,36 @@ export function handler(req, res) {
   return send(res, 404, { error: 'not found' });
 }
 
+// ── weekly digest ────────────────────────────────────────────────
+// Mondays from DIGEST_HOUR_UTC (default 7), each person who uploaded in the
+// last week and has not switched it off gets one email. A marker file per
+// ISO week makes it once per person per week across restarts; AppCrane's
+// idempotency key catches a race between two hub instances.
+export async function runDigests({ now = new Date(), sender = sendViaAppCrane, hour = Number(process.env.DIGEST_HOUR_UTC ?? 7) } = {}) {
+  const result = { sent: 0, skipped: 0, failed: 0 };
+  if (now.getUTCDay() !== 1 || now.getUTCHours() < hour || !existsSync(DATA)) return result;
+  const week = isoWeek(now);
+  for (const h of readdirSync(DATA)) {
+    const dir = join(DATA, h), meta = readMeta(dir), marker = join(dir, `digest-${week}.sent`);
+    if (!meta.email || meta.digest === false || existsSync(marker)) { result.skipped++; continue; }
+    const mail = digestFor(meta.name || meta.email, history(dir, 30), { now, hubUrl: process.env.HUB_URL || '' });
+    if (!mail) { result.skipped++; continue; }
+    try {
+      await sender({ to: meta.email, ...mail, idempotencyKey: `work-review-digest-${week}-${h}` });
+      writeFileSync(marker, now.toISOString(), { mode: 0o600 });
+      result.sent++;
+    } catch (e) { result.failed++; console.error(`digest for one person failed: ${e.message}`); }
+  }
+  return result;
+}
+
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   mkdirSync(DATA, { recursive: true, mode: 0o700 });
   const port = Number(process.env.PORT || 3000);
   createServer(handler).listen(port, () => console.log(`work-review-hub ${VERSION} on :${port}, data in ${DATA}`));
+  if (process.env.APPCRANE_SERVICE_TOKEN && process.env.DIGEST !== 'off') {
+    const tick = () => runDigests().then(r => r.sent && console.log(`weekly digest: ${r.sent} sent, ${r.failed} failed`)).catch(e => console.error(`digest run failed: ${e.message}`));
+    setTimeout(tick, 60_000);
+    setInterval(tick, 30 * 60_000).unref();
+  }
 }

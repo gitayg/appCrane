@@ -21,6 +21,26 @@ snapshot per user per day, pruned after `RETENTION_DAYS` (default 180).
    AppCrane (MCP page → App sign-in keys). That key signs in to this app only,
    and is refused by the rest of AppCrane.
 
+## Weekly digest
+
+On Mondays, each person who uploaded in the last week gets one email about
+their own week:
+- their cost at API list prices against the week before;
+- their commits landed;
+- up to three fixes worth trying.
+
+It goes through AppCrane's email service for hosted apps (`/api/service/email`,
+using the injected `APPCRANE_SERVICE_TOKEN`), so the hub holds no mail
+credentials, and only platform users can receive it. People switch it off on
+their page. Settings:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `DIGEST` | on | `off` disables the digest |
+| `DIGEST_HOUR_UTC` | `7` | Earliest Monday hour (UTC) to send |
+| `HUB_URL` | none | Link back to the hub in the email |
+| `WORK_REVIEW_ENV` | `production` | `sandbox` sends through the sandbox mail path |
+
 ## Trust model
 
 - **Who is calling:** read only from `X-AppCrane-User-Email` and

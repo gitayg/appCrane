@@ -52,7 +52,8 @@
       <div class="card" id="prompts"></div>
       <h2>Overcomplication</h2>
       <div class="card" id="oc"></div>
-      <p style="margin-top:28px"><button class="danger" id="del">Delete all my data</button> <span class="mute">Excerpts are visible to you only. Admins see team totals once 5 or more people take part, never your numbers on their own.</span></p>
+      <p style="margin-top:28px"><label><input type="checkbox" id="digest"> Email me a weekly digest on Mondays (only I get it)</label></p>
+      <p style="margin-top:12px"><button class="danger" id="del">Delete all my data</button> <span class="mute">Excerpts are visible to you only. Admins see team totals once 5 or more people take part, never your numbers on their own.</span></p>
     </div>
   </section>
 
@@ -199,6 +200,11 @@ function renderTeam(T) {
       if (tab === 'team') renderTeam(await api('/api/team'));
     });
   }
+  $('digest').checked = !!me.digest;
+  $('digest').addEventListener('change', async e => {
+    const r = await fetch('/api/me/digest', { method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-Work-Review-Client': 'work-review/v1' }, body: JSON.stringify({ enabled: e.target.checked }) });
+    if (!r.ok) { e.target.checked = !e.target.checked; alert('Could not save that setting.'); }
+  });
   $('del').addEventListener('click', async () => {
     if (!confirm('Delete every snapshot you have uploaded? This cannot be undone.')) return;
     await fetch('/api/reports/me', { method: 'DELETE', credentials: 'same-origin' });
