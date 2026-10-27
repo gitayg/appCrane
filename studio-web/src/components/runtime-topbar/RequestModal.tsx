@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { adminApi } from '../../adminApi'
-import { type PeekCtx, peekToPromptPrefix } from '../../hooks/usePeek'
+import { type PeekCtx, peekToPromptPrefix, WHOLE_PAGE_LABEL } from '../../hooks/usePeek'
 import { useKeepFocusFromIframe } from '../../hooks/useKeepFocusFromIframe'
 
 interface Props {
@@ -116,7 +116,7 @@ export function RequestModal({ slug, appName, peekCtx, onClose, iframeRef }: Pro
     }
   }
 
-  const elementLabel = (peekCtx.tag ? `<${peekCtx.tag}>` : '') +
+  const elementLabel = !peekCtx.selector ? WHOLE_PAGE_LABEL : (peekCtx.tag ? `<${peekCtx.tag}>` : '') +
     (peekCtx.text ? ` "${peekCtx.text.slice(0, 50)}"` : peekCtx.id ? ` #${peekCtx.id}` : '')
 
   return (

@@ -6,6 +6,10 @@ import { parseBypassPaths } from '../utils/authBypassPaths.js';
 import { isValidDomainFormat } from '../utils/customDomain.js';
 import { platformEmbedAncestors, mergeAncestors } from '../utils/embed.js';
 import { safeFrameAncestors } from '../utils/frameAncestors.js';
+import {
+  isolationDomain, isolationTls, appHost, RESERVED_APP_PATH,
+  APP_SESSION_COOKIE, PLATFORM_SESSION_COOKIE_ISOLATED, PLATFORM_SESSION_COOKIE_LEGACY,
+} from './appOrigin.js';
 
 const CADDY_ADMIN = process.env.CADDY_ADMIN_URL || 'http://localhost:2019';
 
@@ -21,6 +25,16 @@ const CADDY_ADMIN = process.env.CADDY_ADMIN_URL || 'http://localhost:2019';
  */
 function platformCookieStrip(indent) {
   return `${indent}request_header Cookie "(^|;\\s*)cc_token=[^;]*" ""\n` +
+         `${indent}request_header Cookie "^;\\s*" ""\n`;
+}
+
+// Per-app origins (services/appOrigin.js): on an app host, and on a custom
+// domain that runs AppCrane sign-in, the app sees none of AppCrane's session
+// cookies — the legacy and __Host- platform cookies, and the app-scope cookie
+// its own host holds. Same two-pass, anchored shape as platformCookieStrip.
+function isolatedCookieStrip(indent) {
+  const names = [PLATFORM_SESSION_COOKIE_LEGACY, PLATFORM_SESSION_COOKIE_ISOLATED, APP_SESSION_COOKIE].join('|');
+  return `${indent}request_header Cookie "(^|;\\s*)(${names})=[^;]*" ""\n` +
          `${indent}request_header Cookie "^;\\s*" ""\n`;
 }
 
@@ -271,6 +285,105 @@ function embedHeaderBlock(fa, indent) {
 }
 
 /**
+ * The body of a site block that serves ONE app at the root of its own host:
+ * an isolated app host (<slug>.<domain>, <slug>-sandbox.<domain>) or a custom
+ * domain with custom_domain_auth = 1. Same security rules as the /<slug>
+ * routes on the platform host, with these differences:
+ *
+ *   - forward_auth asks /api/identity/verify in isolated mode (verifyUri), which
+ *     accepts only this host's app-scope cookie and sends a signed-out browser
+ *     through the one-time handoff on the platform host.
+ *   - /__appcrane/* (handoff landing, sign-out) and exactly /api/me and
+ *     /api/directory go to AppCrane with the Host header unchanged, so AppCrane
+ *     knows which app and environment is asking.
+ *   - prefix (app hosts only): a path that is exactly /<prefix> or under
+ *     /<prefix>/ loses that prefix before the app sees it, so links and
+ *     APP_BASE_PATH written for the /<slug> mount keep working; any other path
+ *     reaches the app unchanged. The rewrite sits inside the route AFTER
+ *     forward_auth (`uri` otherwise sorts ahead of it), so verify receives the
+ *     original URI in X-Forwarded-Uri and the handoff returns there.
+ */
+function isolatedSiteBody(o) {
+  const { cranePort, port, verifyUri, prefix, isHeadless, fa } = o;
+  // A bypass entry under /__appcrane would out-rank the AppCrane route below
+  // (longer path wins) and hand the sign-in landing to the app.
+  const reserved = RESERVED_APP_PATH.toLowerCase();
+  const bypassPaths = o.bypassPaths.filter(p => {
+    const lp = p.toLowerCase();
+    return lp !== reserved && !lp.startsWith(reserved + '/');
+  });
+  let s = BASELINE_HEADERS + '\n';
+  if (o.refuseBrotli) s += o.refuseBrotli + '\n';
+  if (bypassPaths.length) s += BYPASS_ACCESS_LOG;
+  s += '\n';
+  if (prefix) s += `    @appcrane_compat path ${prefix} ${prefix}/*\n\n`;
+
+  for (const p of [`${RESERVED_APP_PATH}/*`, '/api/me', '/api/directory']) {
+    s += `    handle ${p} {\n`;
+    s += `        reverse_proxy 127.0.0.1:${cranePort}\n`;
+    s += `    }\n\n`;
+  }
+
+  // Each exempt path at the root and, for a client still using the /<slug>
+  // mount (a redirect from the platform host), under the prefix too.
+  for (const p of bypassPaths) {
+    for (const mount of prefix ? [prefix, ''] : ['']) {
+      s += `    handle ${mount}${p}* {\n`;
+      s += isolatedCookieStrip('        ');
+      s += identityStrip('        ');
+      s += authMode('        ', 'bypass');
+      if (mount) s += `        uri strip_prefix ${mount}\n`;
+      s += `        reverse_proxy 127.0.0.1:${port} {\n`;
+      s += `            flush_interval -1\n`;
+      s += `            transport http {\n`;
+      s += `                read_timeout 0\n`;
+      s += `                write_timeout 0\n`;
+      s += `            }\n`;
+      s += `        }\n`;
+      s += `    }\n\n`;
+    }
+  }
+
+  const compat = prefix ? `uri @appcrane_compat strip_prefix ${prefix}\n` : '';
+  s += `    handle {\n`;
+  s += authMode('        ', isHeadless ? 'headless' : 'authenticated');
+  if (isHeadless) {
+    s += isolatedCookieStrip('        ');
+    s += identityStrip('        ');
+    if (compat) s += `        ${compat}`;
+  } else {
+    // Same route-wrapped order as emitForwardAuth on the platform host, for the
+    // same reasons: strip forged identity, verify, strip the session cookies,
+    // then rewrite.
+    s += `        route {\n`;
+    s += identityStrip('            ');
+    s += `            forward_auth 127.0.0.1:${cranePort} {\n`;
+    s += `                uri ${verifyUri}\n`;
+    s += `                copy_headers ${IDENTITY_HEADERS.join(' ')}\n`;
+    s += `            }\n`;
+    s += isolatedCookieStrip('            ');
+    if (compat) s += `            ${compat}`;
+    s += `        }\n`;
+  }
+  if (fa) s += embedHeaderBlock(fa, '        ');
+  s += `        reverse_proxy 127.0.0.1:${port}\n`;
+  s += `    }\n`;
+
+  if (prefix) {
+    // Crash page: AppCrane names the app from the first path segment, which on
+    // an app host is no longer in the URI, so it is put back.
+    s += `\n    handle_errors {\n`;
+    s += `        @appdown expression \`{err.status_code} in [502, 503, 504]\`\n`;
+    s += `        handle @appdown {\n`;
+    s += `            rewrite * /api/_crashed${prefix}{uri}\n`;
+    s += `            reverse_proxy 127.0.0.1:${cranePort}\n`;
+    s += `        }\n`;
+    s += `    }\n`;
+  }
+  return s;
+}
+
+/**
  * Generate full Caddy config JSON (path-based routing).
  * Note: the Caddyfile format (generateCaddyfile) is used in production via systemctl reload.
  */
@@ -355,7 +468,23 @@ export function generateCaddyfile() {
 
   // Any *.caddy files in /etc/caddy/sites/ are imported and never overwritten by AppCrane.
   // Put custom domains (e.g. your own static sites) there.
-  let caddyfile = '# Managed by AppCrane - do not edit manually\n\nimport /etc/caddy/sites/*.caddy\n\n';
+  // Per-app origins (services/appOrigin.js): null = off, and then nothing below
+  // differs from a box that never had the setting.
+  const isoDomain = craneDomain ? isolationDomain(db) : null;
+  const isoTls = isoDomain ? isolationTls(db) : null;
+
+  let caddyfile = '# Managed by AppCrane - do not edit manually\n\n';
+  // App hosts without a wildcard certificate get on-demand TLS, which Caddy
+  // issues only for a name AppCrane's ask endpoint approves (an existing app).
+  // Global options must be the first block of the file, ahead of the import.
+  if (isoDomain && !isoTls) {
+    caddyfile += `{\n`;
+    caddyfile += `    on_demand_tls {\n`;
+    caddyfile += `        ask http://127.0.0.1:${cranePort}/api/identity/tls-ask\n`;
+    caddyfile += `    }\n`;
+    caddyfile += `}\n\n`;
+  }
+  caddyfile += 'import /etc/caddy/sites/*.caddy\n\n';
 
   if (!craneDomain) {
     caddyfile += '# CRANE_DOMAIN not configured — no routing generated\n';
@@ -392,7 +521,8 @@ export function generateCaddyfile() {
   // (Caddy logs no access lines at all unless a site asks for them).
   const anyBypassRoute = apps.some(a => bypassByApp.get(a.id).length > 0 &&
     (liveSet.has(`${a.id}:sandbox`) || liveSet.has(`${a.id}:production`)));
-  if (anyBypassRoute) caddyfile += BYPASS_ACCESS_LOG + '\n';
+  // Isolated: the bypass routes live on the app hosts, not here.
+  if (anyBypassRoute && !isoDomain) caddyfile += BYPASS_ACCESS_LOG + '\n';
 
   for (const app of apps) {
     const ports = getPortsForSlot(app.slot);
@@ -401,6 +531,30 @@ export function generateCaddyfile() {
     // Permanent redirects for any old slugs (after a rename)
     let aliases = [];
     try { aliases = JSON.parse(app.slug_aliases || '[]'); } catch (_) {}
+
+    // Isolated: no app is served on this host any more. Its /<slug> mounts and
+    // old slugs redirect to the app's own host, path and query kept (308, so a
+    // POST stays a POST); the app host strips the /<slug> prefix again. An env
+    // that is not live keeps its 503, since there is no app host to send it to.
+    if (isoDomain) {
+      for (const alias of aliases) {
+        caddyfile += `    handle /${alias}-sandbox* {\n`;
+        caddyfile += `        redir https://${appHost(db, slug, 'sandbox')}{uri} 308\n`;
+        caddyfile += `    }\n\n`;
+        caddyfile += `    handle /${alias}* {\n`;
+        caddyfile += `        redir https://${appHost(db, slug, 'production')}{uri} 308\n`;
+        caddyfile += `    }\n\n`;
+      }
+      for (const [env, mount] of [['sandbox', `/${slug}-sandbox`], ['production', `/${slug}`]]) {
+        caddyfile += `    handle ${mount}* {\n`;
+        caddyfile += liveSet.has(`${app.id}:${env}`)
+          ? `        redir https://${appHost(db, slug, env)}{uri} 308\n`
+          : `        respond "Not deployed" 503\n`;
+        caddyfile += `    }\n\n`;
+      }
+      continue;
+    }
+
     for (const alias of aliases) {
       caddyfile += `    handle /${alias}-sandbox* {\n`;
       caddyfile += `        redir /${slug}-sandbox{uri} permanent\n`;
@@ -681,6 +835,39 @@ export function generateCaddyfile() {
   caddyfile += `    }\n`;
   caddyfile += `}\n`;
 
+  // ── Per-app hosts (isolation on) ─────────────────────────────────────────
+  // One site per live app environment, at the root of its own host. The rules
+  // are the /<slug> routes' rules — see isolatedSiteBody. frame-ancestors keeps
+  // the app's policy and adds the platform origin, because the dashboard frames
+  // apps in its app tabs and is no longer same-origin with them. A policy of
+  // 'none' stays 'none' (CSP admits no other source next to it), and an app
+  // with no policy is left to its own headers, as on the platform host.
+  if (isoDomain) {
+    const tlsLine = isoTls
+      ? `    tls ${isoTls.cert} ${isoTls.key}\n\n`
+      : `    tls {\n        on_demand\n    }\n\n`;
+    for (const app of apps) {
+      const ports = getPortsForSlot(app.slot);
+      const appFa = mergeAncestors(platformFa, safeFrameAncestors(app.frame_ancestors));
+      const fa = !appFa || appFa === "'none'" ? appFa : mergeAncestors(appFa, `https://${craneDomain}`);
+      for (const [env, prefix, port] of [
+        ['sandbox', `/${app.slug}-sandbox`, ports.sand_be],
+        ['production', `/${app.slug}`, ports.prod_be],
+      ]) {
+        if (!liveSet.has(`${app.id}:${env}`)) continue;
+        caddyfile += `\n${appHost(db, app.slug, env)} {\n`;
+        caddyfile += tlsLine;
+        caddyfile += isolatedSiteBody({
+          cranePort, port, prefix, fa, refuseBrotli,
+          verifyUri: `/api/identity/verify?app=${app.slug}&env=${env}&host=isolated`,
+          isHeadless: app.auth_mode === 'headless',
+          bypassPaths: bypassByApp.get(app.id),
+        });
+        caddyfile += `}\n`;
+      }
+    }
+  }
+
   // ── Custom-domain passthrough apps (v2.10.0) ──────────────────────────
   // When an app has `domain` set, serve it at the ROOT of that domain with NO
   // forward_auth, NO topbar, NO path prefix — the app does its own auth, and
@@ -702,6 +889,15 @@ export function generateCaddyfile() {
   // app learns either way is the thing it needs: identity is not coming on THIS
   // request, and the absence is deliberate rather than a broken proxy.
   const emittedDomains = new Set([(craneDomain || '').toLowerCase()]);
+  // An app host already has its site block; a custom domain naming one is a
+  // duplicate site address, which Caddy refuses.
+  if (isoDomain) {
+    for (const app of apps) {
+      for (const env of ['sandbox', 'production']) {
+        if (liveSet.has(`${app.id}:${env}`)) emittedDomains.add(appHost(db, app.slug, env));
+      }
+    }
+  }
   for (const app of apps) {
     const domain = (app.domain || '').trim().toLowerCase();
     if (!domain) continue;
@@ -717,6 +913,23 @@ export function generateCaddyfile() {
     emittedDomains.add(domain);
     const ports = getPortsForSlot(app.slot);
     caddyfile += `\n${domain} {\n`;
+    // custom_domain_auth = 1: the app's normal AppCrane sign-in on its custom
+    // domain too, through the same handoff as an app host (production, no
+    // /<slug> prefix to undo, no embedding override, as before). With or
+    // without isolation. A headless app has no sign-in to apply.
+    if (app.custom_domain_auth && app.auth_mode !== 'headless') {
+      caddyfile += isolatedSiteBody({
+        cranePort, refuseBrotli,
+        port: ports.prod_be,
+        prefix: null,
+        fa: null,
+        verifyUri: `/api/identity/verify?app=${app.slug}&env=production&host=isolated`,
+        isHeadless: false,
+        bypassPaths: bypassByApp.get(app.id),
+      });
+      caddyfile += `}\n`;
+      continue;
+    }
     // v2.44.0: the same baseline the crane domain gets. A site block inherits
     // nothing from another site block, so through v2.43.1 an app on its own
     // hostname was served with no HSTS, no nosniff, no referrer or permissions

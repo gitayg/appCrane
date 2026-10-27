@@ -11,6 +11,7 @@ import { slugRefusal, slugTakenRefusal } from '../utils/slugPolicy.js';
 import { normalizeFrameAncestors } from '../utils/frameAncestors.js';
 import { resolveSafe } from '../utils/paths.js';
 import { reloadCaddy } from '../services/caddy.js';
+import { appUrl, isolationEnabled } from '../services/appOrigin.js';
 import { validateBypassPaths } from '../utils/authBypassPaths.js';
 import { ingressDrift } from '../services/ingressDrift.js';
 import { resolveVisibility } from '../utils/appVisibility.js';
@@ -169,6 +170,23 @@ function withoutSecretColumns(app) {
   const out = {};
   for (const [k, v] of Object.entries(app || {})) if (!k.endsWith('_encrypted')) out[k] = v;
   return out;
+}
+
+// Where a person opens the app: its own host when app_isolation_domain is set
+// (services/appOrigin.js), otherwise /<slug> on the platform host.
+function appUrlFields(db, slug) {
+  const craneBase = process.env.CRANE_DOMAIN ? `https://${process.env.CRANE_DOMAIN}` : '';
+  return {
+    url: appUrl(db, slug, 'production', { craneBase }),
+    sandbox_url: appUrl(db, slug, 'sandbox', { craneBase }),
+  };
+}
+
+// The older `urls` object: null when there is no absolute URL to give.
+function appUrlsObject(db, slug) {
+  if (!process.env.CRANE_DOMAIN && !isolationEnabled(db)) return null;
+  const { url, sandbox_url } = appUrlFields(db, slug);
+  return { production: url, sandbox: sandbox_url };
 }
 
 const router = Router();
@@ -497,14 +515,11 @@ router.get('/', async (req, res) => {
       ORDER BY u.id
     `).all(app.id);
 
-    const craneDomain = process.env.CRANE_DOMAIN;
-    const urls = craneDomain ? {
-      production: `https://${craneDomain}/${app.slug}`,
-      sandbox: `https://${craneDomain}/${app.slug}-sandbox`,
-    } : null;
+    const urls = appUrlsObject(db, app.slug);
 
     return {
       ...withoutSecretColumns(app),
+      ...appUrlFields(db, app.slug),
       resource_limits: JSON.parse(app.resource_limits || '{}'),
       auth_bypass_paths: parseBypassPathsField(app.auth_bypass_paths),
       auth_mode: effectiveAuthMode(app.auth_mode),
@@ -733,14 +748,10 @@ router.post('/', requireAuth, auditMiddleware('app-create'), async (req, res) =>
     refreshAppChecks(appId);
   } catch (e) {}
 
-  const craneDomain = process.env.CRANE_DOMAIN;
-  const urls = craneDomain ? {
-    production: `https://${craneDomain}/${slug}`,
-    sandbox: `https://${craneDomain}/${slug}-sandbox`,
-  } : null;
+  const urls = appUrlsObject(db, slug);
 
   res.status(201).json({
-    app: { ...withoutSecretColumns(app), resource_limits: JSON.parse(app.resource_limits), auth_bypass_paths: parseBypassPathsField(app.auth_bypass_paths), auth_mode: effectiveAuthMode(app.auth_mode), ...ingressFields(app) },
+    app: { ...withoutSecretColumns(app), ...appUrlFields(db, slug), resource_limits: JSON.parse(app.resource_limits), auth_bypass_paths: parseBypassPathsField(app.auth_bypass_paths), auth_mode: effectiveAuthMode(app.auth_mode), ...ingressFields(app) },
     urls,
     base_path: { production: `/${slug}/`, sandbox: `/${slug}-sandbox/` },
     webhook_url: `/api/webhooks/${webhookToken}`,
@@ -819,11 +830,7 @@ router.get('/:slug', requireAppAccess, async (req, res) => {
 
   const webhook = db.prepare('SELECT token, auto_deploy_sandbox, auto_deploy_prod, branch_filter FROM webhook_configs WHERE app_id = ?').get(app.id);
 
-  const craneDomainDetail = process.env.CRANE_DOMAIN;
-  const urlsDetail = craneDomainDetail ? {
-    production: `https://${craneDomainDetail}/${app.slug}`,
-    sandbox: `https://${craneDomainDetail}/${app.slug}-sandbox`,
-  } : null;
+  const urlsDetail = appUrlsObject(db, app.slug);
 
   // What the production container actually binds, so the payload can say whether
   // the configured publish is live. `null` from the reader (Docker unreachable)
@@ -836,7 +843,7 @@ router.get('/:slug', requireAppAccess, async (req, res) => {
 
   res.json({
     app: {
-      ...withoutSecretColumns(app), resource_limits: JSON.parse(app.resource_limits || '{}'), auth_bypass_paths: parseBypassPathsField(app.auth_bypass_paths), auth_mode: effectiveAuthMode(app.auth_mode), ...ingressFields(app, true, observedDetail, drainingPorts(db, app.id)), ...codeSourceFields(app, attachedInstallationIds([app.id])),
+      ...withoutSecretColumns(app), ...appUrlFields(db, app.slug), resource_limits: JSON.parse(app.resource_limits || '{}'), auth_bypass_paths: parseBypassPathsField(app.auth_bypass_paths), auth_mode: effectiveAuthMode(app.auth_mode), ...ingressFields(app, true, observedDetail, drainingPorts(db, app.id)), ...codeSourceFields(app, attachedInstallationIds([app.id])),
       show_sandbox: showSandbox,
       sandbox_visible: sandboxVisibleFor(req.user, roleForUserOnApp(req.user, app), showSandbox),
       // Lets the app page show the toggle only to the people PUT will accept.
@@ -1098,6 +1105,24 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
     if (updates.domain) {
       const clash = db.prepare('SELECT slug FROM apps WHERE lower(domain) = ? AND id != ?').get(updates.domain, app.id);
       if (clash) throw new AppError(`Domain "${updates.domain}" is already used by app "${clash.slug}"`, 409, 'DOMAIN_TAKEN');
+    }
+  }
+  // custom_domain_auth: 1 puts the app's normal AppCrane sign-in in front of its
+  // custom domain too (the same one-time handoff isolated app hosts use); 0, the
+  // default, leaves the custom domain to the app's own auth. An exposure change,
+  // so the same gate as the domain. Gated on a change, not on presence: the GET
+  // payload carries the column, and a read-modify-write client echoes it back.
+  if (req.body.custom_domain_auth !== undefined) {
+    const raw = req.body.custom_domain_auth;
+    if (![true, false, 0, 1].includes(raw)) {
+      throw new AppError('custom_domain_auth must be true or false', 400, 'VALIDATION');
+    }
+    const next = raw ? 1 : 0;
+    if (next !== (app.custom_domain_auth ? 1 : 0)) {
+      if (!isAdmin(req.user) && roleForUserOnApp(req.user, app) !== 'owner') {
+        throw new AppError('Only the app owner can change sign-in on the custom domain.', 403, 'FORBIDDEN');
+      }
+      updates.custom_domain_auth = next;
     }
   }
   // Stored as JSON TEXT; validated just below with the rest of the column
@@ -1494,10 +1519,10 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
   if (Object.keys(updates).length === 0 && !ingressWork && showSandboxValue === undefined && separateSandboxDbValue === undefined && whatsNewEmailValue === undefined) {
     // Normalize auth_mode here too: a caller can't tell which branch of this
     // route answered, so both must report the same effective mode.
-    return res.json({ app: { ...withoutSecretColumns(app), auth_mode: effectiveAuthMode(app.auth_mode), ...ingressFields(app) }, message: 'No changes' });
+    return res.json({ app: { ...withoutSecretColumns(app), ...appUrlFields(db, app.slug), auth_mode: effectiveAuthMode(app.auth_mode), ...ingressFields(app) }, message: 'No changes' });
   }
 
-  const ALLOWED_APP_COLS = new Set(['name','domain','description','category','source_type','github_url','branch','public_access','visibility','github_token_encrypted','resource_limits','runtime','image_retention','frame_ancestors','auth_mode','auth_bypass_paths','email_from_name','ingress_type','data_plane_port','data_plane_protocol','image_ref','container_port','health_path','catalog_slug','container_command','volume_paths']);
+  const ALLOWED_APP_COLS = new Set(['name','domain','description','category','source_type','github_url','branch','public_access','visibility','github_token_encrypted','resource_limits','runtime','image_retention','frame_ancestors','auth_mode','auth_bypass_paths','email_from_name','ingress_type','data_plane_port','data_plane_protocol','image_ref','container_port','health_path','catalog_slug','container_command','volume_paths','custom_domain_auth']);
   const invalidKey = Object.keys(updates).find(k => !ALLOWED_APP_COLS.has(k));
   if (invalidKey) throw new AppError(`Invalid field: ${invalidKey}`, 400, 'VALIDATION');
 
@@ -1583,6 +1608,7 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
   }
 
   // frame_ancestors and auth_mode change the per-app Caddyfile block — reload to apply.
+  // custom_domain_auth adds or removes forward_auth on the custom-domain site.
   // auth_mode flips whether forward_auth runs at all; without a reload the new
   // setting wouldn't take effect on the live proxy.
   // ingress_type is deliberately NOT in this list. The Caddyfile generator does
@@ -1591,7 +1617,7 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
   // door Caddy never sees. Generating the config with an app flipped either way
   // produces a byte-identical file, so reloading here would be a no-op that
   // reads as "Caddy special-cases tcp apps" to the next person.
-  if ('frame_ancestors' in updates || 'auth_mode' in updates || 'auth_bypass_paths' in updates || 'domain' in updates) {
+  if ('frame_ancestors' in updates || 'auth_mode' in updates || 'auth_bypass_paths' in updates || 'domain' in updates || 'custom_domain_auth' in updates) {
     await reloadCaddy().catch(e => log.warn(`Caddy reload after app meta update: ${e.message}`));
   }
 
@@ -1612,6 +1638,7 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
     ...(separateSandboxDbValue !== undefined ? { separate_sandbox_db_notice: SEPARATE_SANDBOX_DB_NOTE } : {}),
     app: {
       ...withoutSecretColumns(updated),
+      ...appUrlFields(db, updated.slug),
       resource_limits: JSON.parse(updated.resource_limits || '{}'),
       auth_bypass_paths: parseBypassPathsField(updated.auth_bypass_paths),
       auth_mode: effectiveAuthMode(updated.auth_mode),

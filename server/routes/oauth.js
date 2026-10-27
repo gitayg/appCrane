@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { getDb } from '../db.js';
 import { hashApiKey } from '../services/encryption.js';
 import log from '../utils/logger.js';
+import { readSessionCookie } from '../utils/sessionCookie.js';
 import {
   OAuthError, issuerOf, mcpResourceOf, resolveScope, isValidCodeChallenge,
   validateRegistration, SCOPES_SUPPORTED, SCOPE_FULL, AUTH_METHODS, GRANT_TYPES,
@@ -114,13 +115,11 @@ function errorPage(res, status, message) {
 }
 
 function sessionFromCookie(req) {
-  const m = (req.headers.cookie || '').match(/(?:^|;\s*)cc_token=([^;]+)/);
-  if (!m) return false;
-  let token;
-  try { token = decodeURIComponent(m[1]); } catch (_) { token = m[1]; }
+  const token = readSessionCookie(req);
+  if (!token) return false;
   return !!getDb().prepare(`
     SELECT 1 FROM identity_sessions s JOIN users u ON u.id = s.user_id
-    WHERE s.token_hash = ? AND s.expires_at > datetime('now') AND u.active = 1
+    WHERE s.token_hash = ? AND s.scope = 'platform' AND s.expires_at > datetime('now') AND u.active = 1
   `).get(hashApiKey(token));
 }
 

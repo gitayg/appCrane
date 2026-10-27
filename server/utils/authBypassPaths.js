@@ -16,7 +16,7 @@
 // case-insensitive and segment-aware so /API/identity/verify and /Api/anything
 // can't sneak past the lowercase startsWith check. Over-rejecting /apidocs is
 // fine — it's a deliberate boundary, not a path-traversal hole.
-const RESERVED_ROOTS = ['/api', '/admin', '/login', '/portal', '/health', '/__crashed'];
+const RESERVED_ROOTS = ['/api', '/admin', '/login', '/portal', '/health', '/__crashed', '/__appcrane'];
 
 // Allowed character class. Excludes %, so percent-encoded traversal sequences
 // like %2e%2e or %2f are rejected by the regex itself before string-level

@@ -37,7 +37,7 @@ function freshness(req) {
   if (req.view_as) return { fresh: false, why: 'view_as' };
   const bearer = (req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
   const row = bearer && getDb().prepare(`
-    SELECT created_at >= datetime('now', '-' || ? || ' minutes') AS fresh FROM identity_sessions WHERE token_hash = ?
+    SELECT created_at >= datetime('now', '-' || ? || ' minutes') AS fresh FROM identity_sessions WHERE token_hash = ? AND scope = 'platform'
   `).get(CONSENT_FRESH_MINUTES, hashApiKey(bearer));
   return row?.fresh ? { fresh: true } : { fresh: false, why: 'stale_session' };
 }

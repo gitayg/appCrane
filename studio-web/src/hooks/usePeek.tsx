@@ -6,7 +6,10 @@ import { useCallback, useEffect, useRef, useState } from 'react'
  * captures, Escape cancels.
  *
  * Works only when the iframe is same-origin (the AppCrane apps live
- * under the same host so `iframe.contentDocument` is reachable).
+ * under the same host so `iframe.contentDocument` is reachable). With app
+ * isolation on, each app has its own address and the dashboard cannot see
+ * inside it: start() then hands back the whole page (empty selector) at once,
+ * so the Request and coder flows still open, just without a pointed element.
  *
  * Returns:
  *   active   — picker is currently capturing
@@ -55,7 +58,7 @@ export function usePeek(iframeRef: React.RefObject<HTMLIFrameElement | null>) {
       if (!d || !d.body) throw new Error('iframe not ready')
       doc = d
     } catch {
-      alert("Can't access this app's content for point-and-click — the app is served from a different origin than the dashboard.")
+      setCtx({ selector: '', tag: '', id: '', text: '', path: iframe.src })
       return
     }
 
@@ -175,8 +178,11 @@ function capture(el: Element): PeekCtx {
  * Renders a small chip with the picked element info + an X to clear.
  * Drop in just above the input row in any panel that uses usePeek.
  */
+export const WHOLE_PAGE_LABEL = 'This page (this app opens on its own address, so you can\'t point at one part of it)'
+
 export function PeekChip({ ctx, onClear }: { ctx: PeekCtx; onClear: () => void }) {
-  const label = (ctx.tag ? `<${ctx.tag}>` : '') + (ctx.text ? ` "${ctx.text.slice(0, 60)}"` : ` ${ctx.selector}`)
+  const label = !ctx.selector ? WHOLE_PAGE_LABEL
+    : (ctx.tag ? `<${ctx.tag}>` : '') + (ctx.text ? ` "${ctx.text.slice(0, 60)}"` : ` ${ctx.selector}`)
   return (
     <div className="ask-peek-bar" title={ctx.selector}>
       <span>🎯</span>
@@ -191,6 +197,7 @@ export function PeekChip({ ctx, onClear }: { ctx: PeekCtx; onClear: () => void }
  * (matches portal's planPeekCtx prepend in sendPlanRequest).
  */
 export function peekToPromptPrefix(ctx: PeekCtx): string {
+  if (!ctx.selector) return `--- Page ---\nURL: ${ctx.path}\n\n`
   return [
     '--- Pointed element ---',
     `URL: ${ctx.path}`,

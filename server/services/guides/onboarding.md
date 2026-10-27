@@ -453,6 +453,10 @@ The user's role is computed server-side from the authenticated identity, not
 from anything the client passes — so a spoofed `Referer` or `?app=` can only
 ask "what's MY role on app X", never escalate to someone else's role.
 
+Both calls keep working unchanged when the platform runs apps on their own hosts
+(see "Per-app origins" below): there, `/api/me` and `/api/directory` on the
+app's host answer for that host's app and ignore `?app=` and `Referer`.
+
 ## App-defined roles — the vocabulary your app invents for itself
 
 Two headers, one letter apart, two entirely different systems. Confusing them is
@@ -1317,6 +1321,69 @@ Rules and guarantees:
   contentType? }]`, max 10 and 3 MB total decoded. Invalid/oversized → `400`,
   nothing queued.
 
+## Per-app origins — when each app gets its own host
+
+A platform admin can turn on **per-app origins** (operations guide: "Per-app
+origins"). Off, every app is a path on the platform host — `{{HOST}}/<slug>` —
+and so shares one browser origin with every other app and with the dashboard:
+one app's script could call another app as the visitor. On, each app is served
+on its own host under the isolation domain the admin chose:
+
+| | Off (default) | On |
+|---|---|---|
+| production | `https://{{HOST}}/<slug>` | `https://<slug>.<isolation domain>/` |
+| sandbox | `https://{{HOST}}/<slug>-sandbox` | `https://<slug>-sandbox.<isolation domain>/` |
+
+Old links keep working: `{{HOST}}/<slug>/x?y` answers with a 308 redirect to the
+same path and query on the app's host. Read an app's URLs from the API rather
+than building them — `url` / `sandbox_url` on the app object
+(`GET /api/apps/<slug>`), or `urls` from `appcrane_get_app`.
+
+**Your app needs no change and no restart.** On the app's host, a request path
+that is exactly `/<slug>` (`/<slug>-sandbox` on the sandbox host), or starts
+with it followed by `/`, has that prefix removed before it reaches the
+container; any other path reaches it unchanged (`/` stays `/`). So
+`APP_BASE_PATH` stays `/<slug>/`, asset URLs built from it still resolve, and
+root-relative links work too. The `X-AppCrane-*` identity headers, roles and
+signatures are exactly as before.
+
+What does change for browser code:
+
+- **`/api/me` and `/api/directory` still work** with a same-origin
+  `fetch('/api/me')` from the app's page. They are the only AppCrane API paths
+  on the app's host. Any other `/api/...` request there reaches **your own
+  container**, so call other AppCrane endpoints from your server, with a key.
+- **`/__appcrane/` is reserved** on the app's host (sign-in and sign-out); your
+  app never sees requests under it.
+- **AppCrane's cookies never reach your container.** `cc_token`,
+  `__Host-cc_token` and `__Host-cc_app` are removed from the `Cookie` header
+  before the request is proxied. Your app's own cookies now belong to its host
+  alone; do not set them with a `Domain=` attribute for the isolation domain,
+  or every other app on it receives them.
+- **The dashboard's stored session is out of reach.** It lives in the platform
+  host's storage, which an app on another host cannot read.
+
+**Sign-in is a one-time handoff.** On the first visit to an app host the visitor
+has no session for it, so AppCrane redirects the browser to the platform host.
+If they are signed in there (or after they sign in), and verify would let them
+into this app, AppCrane issues a single-use code that expires in seconds and
+sends the browser back to `/__appcrane/session` on the app's host. That exchanges
+the code for a session valid for **this app and environment only**, held in the
+host-only cookie `__Host-cc_app`, and returns the visitor to the page they asked
+for. The session ends no later than their platform session. `/__appcrane/logout`
+on the app's host ends that one app session; signing out of AppCrane ends every
+app session that came from it.
+
+**API clients:** `X-API-Key` keeps working against the app's host. A
+`Authorization: Bearer` token is accepted there only if it is a session issued
+for that app and environment — a dashboard session token is refused.
+
+**Embedding:** the dashboard opens apps in a frame (its app tabs), so the
+platform origin is added to each app host's `frame-ancestors` automatically.
+If the isolation domain is not under the platform's own registrable domain, the
+browser treats that frame as third-party and blocks its cookies, so a framed app
+cannot keep its sign-in; opened in its own tab it works.
+
 ## Custom domains — serve an app on its own domain, bypassing AppCrane
 
 Most apps live at `{{HOST}}/<slug>` behind AppCrane SSO. When an app should be
@@ -1324,13 +1391,13 @@ its OWN product on its OWN domain — its own login, no AppCrane chrome — set 
 **custom domain**:
 
 ```
-appcrane_set_app_meta(slug="raise", domain="raise.glick.run")
+appcrane_set_app_meta(slug="shop", domain="shop.example.com")
 # or appcrane_update_app, or the 🌐 button on the Applications page
 ```
 
 What that does:
 
-- AppCrane emits a dedicated Caddy site for `raise.glick.run` that serves the
+- AppCrane emits a dedicated Caddy site for `shop.example.com` that serves the
   app's **production** container **at the root** — no `/slug` prefix.
 - **No AppCrane SSO** (`forward_auth` is not applied) and **no topbar** — the
   app does its own user authentication. Incoming `X-AppCrane-*` headers are
@@ -1359,7 +1426,22 @@ add/removable via the 🌐 domain control on the Applications page or the REST
 endpoints `POST`/`DELETE /api/apps/<slug>/domain-aliases`.
 
 Owner/admin only. Maps to production; the sandbox stays at
-`{{HOST}}/<slug>-sandbox`.
+`{{HOST}}/<slug>-sandbox` (or its own host, with per-app origins on).
+
+**AppCrane sign-in on the custom domain — `custom_domain_auth`.** Off by
+default, as above. Turn it on when the app should keep its normal AppCrane
+sign-in on its custom domain too:
+
+```
+appcrane_set_app_meta(slug="shop", custom_domain_auth=true)
+# or PUT /api/apps/<slug>  { "custom_domain_auth": true }
+```
+
+The custom domain then gets the same treatment as a per-app host: visitors are
+signed in by the one-time handoff from the platform host, the app receives the
+usual `X-AppCrane-*` headers with its **production** roles, and AppCrane's
+cookies are still stripped. It works whether or not per-app origins are on.
+Same permission as the domain (owner or platform admin); a change reloads Caddy.
 
 ## TCP (layer-4) ingress — apps that aren't HTTP
 

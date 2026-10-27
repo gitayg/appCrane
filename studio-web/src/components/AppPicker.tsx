@@ -3,6 +3,7 @@ import { adminApi, ApiError } from '../adminApi'
 import { useMe } from '../hooks/useMe'
 import { ClassificationBadge } from './intake/ClassificationBadge'
 import type { Level } from './intake/types'
+import { appOpenUrl } from '../lib/appLinks'
 
 /**
  * v2.32.0: the /launch empty state. Previously a rocket glyph telling you to
@@ -34,6 +35,8 @@ interface PickerApp {
   sandbox?: { deploy?: { status?: string; version?: string } }
   /** Server-computed: false when the app hides Sandbox from this caller. */
   sandbox_visible?: boolean
+  url?: string
+  sandbox_url?: string
 }
 
 // Absent on an older server's payload, which hid nothing.
@@ -241,7 +244,7 @@ export function AppPicker({ onOpen }: { onOpen: (slug: string) => void }) {
             // AppFrame, so the menu can't promise an env the frame won't open.
             const prodLive = a.production?.deploy?.status === 'live'
             const opensIn = prodLive || !sandboxOffered(a) ? 'production' : 'sandbox'
-            const directUrl = opensIn === 'production' ? `/${a.slug}` : `/${a.slug}-sandbox`
+            const directUrl = appOpenUrl(a, opensIn)
 
             return (
               // The tile is a <button>; the menu control must be a sibling, not

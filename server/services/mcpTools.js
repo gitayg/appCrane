@@ -1,4 +1,5 @@
 import { getDb } from '../db.js';
+import { appUrl, isolationEnabled } from './appOrigin.js';
 import { decrypt, encrypt } from './encryption.js';
 import { BUCKETS, bucketize, applyBucket } from './requestStatus.js';
 import { cleanDoneNote } from './requestDoneNote.js';
@@ -505,14 +506,22 @@ function effectiveAuthMode(raw) {
  *
  * `app` must include `id`, `slug`, and `domain`.
  */
-function enrichAppRow(db, app) {
+// Where a person opens the app: its own host when app_isolation_domain is set
+// (services/appOrigin.js), otherwise /<slug> on the platform host. Null when
+// neither gives an absolute URL.
+function appUrls(db, slug) {
   const craneDomain = process.env.CRANE_DOMAIN;
-  const urls = craneDomain
-    ? {
-        production: app.domain ? `https://${app.domain}` : `https://${craneDomain}/${app.slug}`,
-        sandbox: `https://${craneDomain}/${app.slug}-sandbox`,
-      }
-    : null;
+  if (!craneDomain && !isolationEnabled(db)) return null;
+  const craneBase = `https://${craneDomain}`;
+  return {
+    production: appUrl(db, slug, 'production', { craneBase }),
+    sandbox: appUrl(db, slug, 'sandbox', { craneBase }),
+  };
+}
+
+function enrichAppRow(db, app) {
+  const urls = appUrls(db, app.slug);
+  if (urls && app.domain) urls.production = `https://${app.domain}`;
 
   const lastLiveProd = db
     .prepare(
@@ -2268,11 +2277,7 @@ const TOOLS = [
       } catch (_) {}
 
       log.info(`MCP: app '${slug}' created by user ${user.id}`);
-      const craneDomain = process.env.CRANE_DOMAIN;
-      const urls = craneDomain ? {
-        production: `https://${craneDomain}/${slug}`,
-        sandbox:    `https://${craneDomain}/${slug}-sandbox`,
-      } : null;
+      const urls = appUrls(db, slug);
       return {
         app: {
           slug, name, branch,
@@ -2636,7 +2641,11 @@ const TOOLS = [
         },
         domain: {
           type: 'string',
-          description: 'v2.10.0: custom domain (e.g. "raise.glick.run") that serves this app at the ROOT of that domain with NO AppCrane SSO and NO topbar — the app does its own auth. Maps to production. Requires the domain\'s DNS to point at this host (Caddy auto-provisions TLS). Pass "" or null to remove. The /<slug> path under the platform domain stays.',
+          description: 'v2.10.0: custom domain (e.g. "app.example.com") that serves this app at the ROOT of that domain with NO AppCrane SSO and NO topbar — the app does its own auth (unless custom_domain_auth is on). Maps to production. Requires the domain\'s DNS to point at this host (Caddy auto-provisions TLS). Pass "" or null to remove. The /<slug> path under the platform domain stays.',
+        },
+        custom_domain_auth: {
+          type: 'boolean',
+          description: 'true = put the app\'s normal AppCrane sign-in in front of its custom domain too (visitors are signed in by a one-time handoff from the platform host; production roles apply). false (default) = the custom domain has no AppCrane sign-in and the app does its own auth. Same permission as domain.',
         },
       },
       required: ['slug'],
@@ -2647,10 +2656,10 @@ const TOOLS = [
       const app = getAppForUser(user, args.slug);
       const globalAdmin = isAdmin(user);
       if (!globalAdmin && roleForUserOnApp(user, app) !== 'owner') {
-        throw new Error('Forbidden: only the app owner (or a platform admin) can change category/visibility/auth_mode/auth_bypass_paths/domain.');
+        throw new Error('Forbidden: only the app owner (or a platform admin) can change category/visibility/auth_mode/auth_bypass_paths/domain/custom_domain_auth.');
       }
-      if (args.category === undefined && args.visibility === undefined && args.auth_mode === undefined && args.auth_bypass_paths === undefined && args.domain === undefined) {
-        throw new Error('Pass at least one of category, visibility, auth_mode, auth_bypass_paths, or domain.');
+      if (args.category === undefined && args.visibility === undefined && args.auth_mode === undefined && args.auth_bypass_paths === undefined && args.domain === undefined && args.custom_domain_auth === undefined) {
+        throw new Error('Pass at least one of category, visibility, auth_mode, auth_bypass_paths, domain, or custom_domain_auth.');
       }
       const db = getDb();
       const updates = {};
@@ -2700,14 +2709,20 @@ const TOOLS = [
         }
       }
 
+      if (args.custom_domain_auth !== undefined) {
+        if (typeof args.custom_domain_auth !== 'boolean') throw new Error('custom_domain_auth must be true or false');
+        updates.custom_domain_auth = args.custom_domain_auth ? 1 : 0;
+      }
+
       const keys = Object.keys(updates);
       const setClause = keys.map(k => `${k} = ?`).join(', ');
       db.prepare(`UPDATE apps SET ${setClause} WHERE id = ?`).run(...keys.map(k => updates[k]), app.id);
 
       // v2.7.22: auth_mode flips the Caddy block shape (forward_auth on/off);
       // v2.7.28: auth_bypass_paths emits inner handle blocks; v2.10.0: domain
-      // adds/removes a whole custom-domain site. Reload Caddy when any change.
-      if ('auth_mode' in updates || 'auth_bypass_paths' in updates || 'domain' in updates) {
+      // adds/removes a whole custom-domain site; custom_domain_auth adds or
+      // removes forward_auth on it. Reload Caddy when any change.
+      if ('auth_mode' in updates || 'auth_bypass_paths' in updates || 'domain' in updates || 'custom_domain_auth' in updates) {
         try {
           const { reloadCaddy } = await import('./caddy.js');
           await reloadCaddy();
@@ -2715,7 +2730,7 @@ const TOOLS = [
       }
 
       log.info(`MCP: app '${app.slug}' meta updated by user ${user.id}; fields=${keys.join(',')}`);
-      const fresh = db.prepare('SELECT category, visibility, public_access, auth_mode, auth_bypass_paths FROM apps WHERE id = ?').get(app.id);
+      const fresh = db.prepare('SELECT category, visibility, public_access, auth_mode, auth_bypass_paths, custom_domain_auth FROM apps WHERE id = ?').get(app.id);
       let bypassPaths = [];
       try { bypassPaths = fresh.auth_bypass_paths ? JSON.parse(fresh.auth_bypass_paths) : []; } catch (_) {}
       return {
@@ -2725,6 +2740,7 @@ const TOOLS = [
         public_access: fresh.public_access,
         auth_mode: effectiveAuthMode(fresh.auth_mode),
         auth_bypass_paths: bypassPaths,
+        custom_domain_auth: !!fresh.custom_domain_auth,
         updated_fields: keys,
       };
     },
@@ -3792,11 +3808,7 @@ const TOOLS = [
       } catch (_) {}
 
       log.info(`MCP: managed app '${slug}' created by user ${user.id}; repo=${repo.full_name} (${backend})`);
-      const craneDomain = process.env.CRANE_DOMAIN;
-      const urls = craneDomain ? {
-        production: `https://${craneDomain}/${slug}`,
-        sandbox:    `https://${craneDomain}/${slug}-sandbox`,
-      } : null;
+      const urls = appUrls(db, slug);
       if (backend !== REPO_BACKEND_GITHUB) {
         return {
           app: { slug, name, branch, source_type: 'managed', repo_backend: backend },

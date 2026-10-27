@@ -17,6 +17,7 @@ import { SAND_HIDDEN_HINT } from '../topbar-element/CraneAppTopbar'
 import { Icon } from '../components/icons'
 import '../topbar-element/jsx.d.ts'
 import { serverDate } from '../utils/serverDate'
+import { appOpenUrl } from '../lib/appLinks'
 
 defineCraneAppTopbar()
 
@@ -70,6 +71,11 @@ interface App {
   // running container was started with.
   pending_port_release?: number | null
   domain?: string | null
+  /** 1 = visitors on the custom domain sign in with AppCrane first. */
+  custom_domain_auth?: number
+  /** Where the browser opens each environment (lib/appLinks.ts). */
+  url?: string
+  sandbox_url?: string
   domain_aliases?: { id: number; domain: string; source: string; created_at: string }[]
   owner?: { id: number; name: string; email: string } | null
   owners?: { id: number; name: string; email: string }[]
@@ -627,10 +633,11 @@ export function Applications() {
 
   async function setCustomDomain(app: App) {
     const help = "Custom domain for this app (served at the root of that domain).\n\n" +
-      "e.g. raise.glick.run\n\n" +
-      "The app is served there with NO AppCrane SSO and NO topbar - it does its\n" +
-      "own auth. Maps to PRODUCTION. Point the domain's DNS at this host; Caddy\n" +
-      "auto-provisions HTTPS. The crane.glick.run/" + app.slug + " path stays for ops.\n\n" +
+      "e.g. myapp.example.com\n\n" +
+      "The app is served there with NO topbar and, unless you turn on\n" +
+      "\"Require AppCrane sign-in\" next to this button, NO AppCrane sign-in - it\n" +
+      "does its own. Maps to PRODUCTION. Point the domain's DNS at this host; Caddy\n" +
+      "auto-provisions HTTPS. The /" + app.slug + " address on AppCrane stays for ops.\n\n" +
       "If you CHANGE the domain, the old one is kept automatically as a 301\n" +
       "redirect so existing links/bookmarks keep working.\n\n" +
       "Leave blank to remove the custom domain."
@@ -650,6 +657,16 @@ export function Applications() {
     }
     // Offer redirect-alias management (old domains → this app's primary).
     await manageDomainAliases(updated)
+  }
+
+  async function setCustomDomainAuth(app: App, on: boolean) {
+    try {
+      const r = await adminApi.put<{ error?: { message?: string } }>(`/api/apps/${app.slug}`, { custom_domain_auth: on ? 1 : 0 })
+      if (r?.error) { alert('Failed: ' + (r.error.message || 'unknown')); return }
+      setApps(prev => prev.map(a => a.slug === app.slug ? { ...a, custom_domain_auth: on ? 1 : 0 } : a))
+    } catch (e) {
+      alert('Failed: ' + (e as Error).message)
+    }
   }
 
   // Old domains that 301-redirect to the app's primary custom domain. Managed
@@ -1037,8 +1054,8 @@ STEP 3 - In any terminal run \`claude\`, then paste:
     // also removes the topbar's env switch. Visibility only: the route works.
     const sandboxOffered = app.sandbox_visible !== false
     const env = sandboxOffered ? requested : 'production'
-    const prodUrl = `/${app.slug}`
-    const sandUrl = sandboxOffered ? `/${app.slug}-sandbox` : ''
+    const prodUrl = appOpenUrl(app, 'production')
+    const sandUrl = sandboxOffered ? appOpenUrl(app, 'sandbox') : ''
     setFrame({
       open:        true,
       url:         env === 'production' ? prodUrl : sandUrl,
@@ -1724,9 +1741,22 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                           aria-label={`Custom domain for ${app.name}`}
                           style={app.domain ? { color: 'var(--accent)' } : undefined}
                           title={app.domain
-                            ? `Custom domain: ${app.domain} (served at root, no SSO/topbar)`
-                            : 'Custom domain — serve this app on its own domain, bypassing AppCrane auth'}
+                            ? `Custom domain: ${app.domain} (served at root, no topbar${app.custom_domain_auth ? '' : ', no AppCrane sign-in'})`
+                            : 'Custom domain — serve this app on its own domain'}
                         ><IconGlobe /></button>
+                        {app.domain && (
+                          <label
+                            style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: '.72rem', color: 'var(--dim)', marginRight: 4 }}
+                            title={`When on, visitors to ${app.domain} sign in with AppCrane before they reach the app, and the app gets the same identity it gets on AppCrane. When off, the app is open there and does its own sign-in.`}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={!!app.custom_domain_auth}
+                              onChange={e => setCustomDomainAuth(app, e.target.checked)}
+                            />
+                            Require AppCrane sign-in on the custom domain
+                          </label>
+                        )}
                         {(app.source_type === 'github' || app.source_type === 'managed' || app.github_url) && (
                           <>
                             {app.github_url && (

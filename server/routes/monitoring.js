@@ -3,6 +3,7 @@ import { getDb } from '../db.js';
 import { requireAuth, requireAdmin, requirePlatformAdmin, requireAppAccess } from '../middleware/auth.js';
 import { getSystemInfo, formatBytes } from '../services/platform.js';
 import { getPortsForSlot } from '../services/portAllocator.js';
+import { appUrl, isolationEnabled } from '../services/appOrigin.js';
 
 const router = Router();
 
@@ -220,8 +221,8 @@ router.get('/apps/:slug/metrics/:env', requireAppAccess, async (req, res) => {
   ).all(req.app.id, env);
 
   const craneDomain = process.env.CRANE_DOMAIN;
-  const url = craneDomain
-    ? `https://${craneDomain}/${env === 'production' ? req.app.slug : `${req.app.slug}-sandbox`}`
+  const url = craneDomain || isolationEnabled(db)
+    ? appUrl(db, req.app.slug, env, { craneBase: `https://${craneDomain}` })
     : (() => { const d = req.app.domain || `${req.app.slug}.example.com`; return env === 'production' ? `https://${d}` : `https://${d.replace(/^([^.]+)/, '$1-sandbox')}`; })();
 
   res.json({

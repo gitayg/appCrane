@@ -32,6 +32,7 @@ import { ClassificationPolicyCard } from '../components/intake/ClassificationPol
 import { AutoPatchPolicyCard } from '../components/autoPatch/AutoPatchPolicyCard'
 import { VulnAlertsCard } from '../components/vulnAlerts/VulnAlertsCard'
 import { RuntimePatchCard } from '../components/autoPatch/RuntimePatchCard'
+import { AppIsolationCard } from '../components/AppIsolationCard'
 
 function SecurityTab() {
   const [certFile, setCertFile] = useState('')
@@ -424,6 +425,8 @@ function SecurityTab() {
         )}
         {embedError && <div style={{ fontSize: '.82rem', color: 'var(--red)' }}>{embedError}</div>}
       </div>
+
+      <AppIsolationCard />
 
       <div className="setting-card">
         <h3>Brotli-compressed uploads</h3>

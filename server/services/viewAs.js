@@ -1,6 +1,8 @@
 import { getDb } from '../db.js';
 import { hashApiKey } from './encryption.js';
 import { AppError } from '../utils/errors.js';
+import { readCookie } from '../utils/sessionCookie.js';
+import { PLATFORM_SESSION_COOKIE_LEGACY, PLATFORM_SESSION_COOKIE_ISOLATED } from './appOrigin.js';
 
 // View as role: a read-only preview of AppCrane as a lower role.
 //
@@ -130,10 +132,9 @@ export function stopViewAs(credentialHash) {
   return getDb().prepare('DELETE FROM view_as_sessions WHERE credential_hash = ?').run(credentialHash).changes > 0;
 }
 
-function cookieToken(req) {
-  const m = (req.headers.cookie || '').match(/(?:^|;\s*)cc_token=([^;]+)/);
-  if (!m) return null;
-  try { return decodeURIComponent(m[1]); } catch (_) { return m[1]; }
+// Both platform cookie names: over-matching is safe here (writes are refused).
+function cookieTokens(req) {
+  return [readCookie(req, PLATFORM_SESSION_COOKIE_LEGACY), readCookie(req, PLATFORM_SESSION_COOKIE_ISOLATED)].filter(Boolean);
 }
 
 /**
@@ -148,8 +149,7 @@ export function viewAsOnAnyCredential(req) {
   if (typeof apiKey === 'string' && apiKey) creds.push(apiKey);
   const bearer = (req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
   if (bearer) creds.push(bearer);
-  const cookie = cookieToken(req);
-  if (cookie) creds.push(cookie);
+  creds.push(...cookieTokens(req));
   if (!creds.length) return null;
   const db = getDb();
   for (const c of creds) {

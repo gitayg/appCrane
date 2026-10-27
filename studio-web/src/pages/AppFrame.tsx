@@ -9,6 +9,7 @@ import { coderApi, type CoderAvailability } from '../components/coder/api'
 import { Icon } from '../components/icons'
 import { EnvActionMenu, type EnvMenuState } from '../components/EnvActionMenu'
 import { WhatsNewModal, type WhatsNewChange } from '../components/WhatsNewModal'
+import { appOpenUrl } from '../lib/appLinks'
 
 /**
  * One app rendered inline, hosted by the <crane-app-topbar> element (env switch,
@@ -36,6 +37,9 @@ interface AppRow {
   show_sandbox?: boolean
   /** Server-computed: whether THIS caller is offered Sandbox. Absent = yes. */
   sandbox_visible?: boolean
+  /** Where the browser opens each environment (lib/appLinks.ts). */
+  url?:         string
+  sandbox_url?: string
 }
 
 interface Stage {
@@ -56,12 +60,12 @@ interface Stage {
 }
 
 function buildStage(app: AppRow): Stage {
-  const prodUrl = `/${app.slug}`
+  const prodUrl = appOpenUrl(app, 'production')
   // A member of an app that hides Sandbox gets no sandbox URL at all, which is
   // what removes the topbar's env switch and stops a sandbox-only app from
   // opening there. The route itself still works; this is the launcher.
   const sandboxOffered = app.sandbox_visible !== false
-  const sandUrl = sandboxOffered ? `/${app.slug}-sandbox` : ''
+  const sandUrl = sandboxOffered ? appOpenUrl(app, 'sandbox') : ''
   const prodOk = app.production?.health?.status === 'healthy'
   const sandOk = app.sandbox?.health?.status === 'healthy'
   // v2.32.1: deployment presence decides first, health only breaks ties.

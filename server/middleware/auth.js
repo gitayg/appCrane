@@ -152,7 +152,7 @@ export function requireAuth(req, res, next) {
     const session = db.prepare(`
       SELECT u.*, s.id AS _session_id, s.last_seen_at AS _session_last_seen_at, s.absolute_expires_at AS _session_absolute_expires_at
       FROM identity_sessions s JOIN users u ON s.user_id = u.id
-      WHERE s.token_hash = ? AND datetime(s.expires_at) > datetime('now') AND u.active = 1
+      WHERE s.token_hash = ? AND s.scope = 'platform' AND datetime(s.expires_at) > datetime('now') AND u.active = 1
     `).get(hashApiKey(bearer));
     if (!session) return next(new AppError('Invalid or expired session', 401, 'UNAUTHORIZED'));
     const { _session_id, _session_last_seen_at, _session_absolute_expires_at, ...sessionUser } = session;

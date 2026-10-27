@@ -49,6 +49,8 @@ import monitoringRoutes from './routes/monitoring.js';
 import notificationsRoutes from './routes/notifications.js';
 import appRolesRoutes from './routes/appRoles.js';
 import identityRoutes from './routes/identity.js';
+import appHandoffRoutes, { appHostRouter } from './routes/appHandoff.js';
+import { RESERVED_APP_PATH } from './services/appOrigin.js';
 import settingsRoutes from './routes/settings.js';
 import configRoutes from './routes/config.js';
 import enhancementsRoutes from './routes/enhancements.js';
@@ -432,6 +434,12 @@ crane init --name admin --email you@example.com</pre>
 // so it never sees them today, but listing them keeps a future reorder from
 // 307ing an agent's A2A call (or a card fetch made from inside an app page)
 // into an app's prefix.
+// Per-app origins: the sign-in handoff landing and sign-out on an app's own
+// host (Caddy proxies /__appcrane/* there with the Host header unchanged).
+// Mounted ahead of the Referer slug fallback so an app-host request is never
+// re-pointed into a /<slug> prefix.
+app.use(RESERVED_APP_PATH, appHostRouter);
+
 const APPCRANE_PASSTHROUGH = ['/api/identity', '/api/apps', '/api/info', '/api/notices', '/api/_crashed', '/api/me', '/api/directory', '/api/mcp', '/api/service', '/api/enhancements', '/favicon.svg', '/docs', '/a2a', '/.well-known', '/oauth'];
 const APPCRANE_PAGE_SLUGS = new Set(['login', 'portal', 'dashboard', 'applications', 'users-page', 'audit-page', 'settings', 'docs', 'app', 'studio', 'appstudio']);
 app.use((req, res, next) => {
@@ -1070,6 +1078,7 @@ app.use('/api/catalog', catalogRoutes);  // Curated self-hostable app catalogue 
 app.use('/api/crew', crewRoutes);        // Crew: platform-wide agent hub (requireAuth; per-row ownership in services/crew.js)
 // Mount identity FIRST so its routes don't get caught by other middleware
 app.use('/api/identity/mfa', (await import('./routes/mfa.js')).default); // local MFA second step + self-service + sign-in policy
+app.use('/api/identity', appHandoffRoutes); // GET /handoff (sign-in into an app host), GET /tls-ask (Caddy on-demand TLS)
 app.use('/api/identity', identityRoutes);
 app.use('/api/enhancements', enhancementsRoutes); // Enhancement requests (Bearer auth, must be before logsRoutes)
 app.use('/api/service/tasks', (await import('./routes/tasksService.js')).default); // Tasks API for hosted apps (service-token auth, internal-only)

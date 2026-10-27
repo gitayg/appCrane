@@ -69,7 +69,7 @@ router.use((req, res, next) => {
       SELECT s.*, u.id as id, u.name, u.email, u.username, u.role, u.active
       FROM identity_sessions s
       JOIN users u ON s.user_id = u.id
-      WHERE s.token_hash = ? AND s.expires_at > datetime('now') AND u.active = 1
+      WHERE s.token_hash = ? AND s.scope = 'platform' AND s.expires_at > datetime('now') AND u.active = 1
     `).get(hashApiKey(token));
     if (session?.active) { req.user = session; return next(); }
   }

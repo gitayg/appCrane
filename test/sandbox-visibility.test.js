@@ -153,7 +153,7 @@ test('the launch surfaces honour sandbox_visible', () => {
   const frame = src('pages/AppFrame.tsx');
   const build = frame.slice(frame.indexOf('function buildStage'), frame.indexOf('interface Props'));
   assert.match(build, /sandbox_visible !== false/);
-  assert.match(build, /const sandUrl = sandboxOffered \? `\/\$\{app\.slug\}-sandbox` : ''/, 'member gets no sandbox URL, so no env switch');
+  assert.match(build, /const sandUrl = sandboxOffered \? appOpenUrl\(app, 'sandbox'\) : ''/, 'member gets no sandbox URL, so no env switch');
   assert.match(build, /const sandLive = sandboxOffered &&/, 'a sandbox-only app must not open sandbox for a member');
   assert.match(frame, /'sand-hidden': ''/);
 

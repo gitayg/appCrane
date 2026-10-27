@@ -6,7 +6,8 @@ import { join, resolve } from 'path';
 import { getDb } from '../db.js';
 import { verifyPassword, generateSessionToken, hashApiKey, hashPassword } from '../services/encryption.js';
 import { AppError } from '../utils/errors.js';
-import { setSessionCookie, clearSessionCookie } from '../utils/sessionCookie.js';
+import { setSessionCookie, clearSessionCookie, readSessionCookie, readCookie } from '../utils/sessionCookie.js';
+import { APP_SESSION_COOKIE } from '../services/appOrigin.js';
 import { isSsoOnly } from '../services/authPolicy.js';
 import { roleKeysForUser } from '../services/appDefinedRoles.js';
 import { discoverablePortalRow } from '../services/discoverableApps.js';
@@ -240,6 +241,39 @@ function refuseByRule(req, res, verdict, appLabel) {
   res.json({ error: { code, message, ...(malformed ? {} : { required_role: verdict.role }) } });
 }
 
+// Per-app role, the one verdict every gate into an app agrees on.
+// v2.7.21: correct role precedence is
+//   explicit per-app row > global-admin short-circuit > public→viewer > none
+// The old order put `visibility === 'public'` first and unconditionally set
+// appRole = 'viewer', wiping any explicit app_user_roles entry. That meant
+// an owner of a public app got 'viewer' on the wire (X-AppCrane-App-Role),
+// and any in-app role gate (e.g. Settings) wrongly denied them.
+// `session` is { user_id, crane_role }.
+export const resolveAppRole = (db, session, appRecord) => {
+  const roleRecord = db.prepare(
+    'SELECT app_role FROM app_user_roles WHERE app_id = ? AND user_id = ?'
+  ).get(appRecord.id, session.user_id);
+  if (roleRecord?.app_role) return roleRecord.app_role;          // explicit wins
+  if (session.crane_role === 'platform_admin') return 'admin';
+  if (appRecord.visibility === 'public') return 'viewer';        // public fallback
+  return 'none';
+};
+
+// A person with no role on the app, on an app host: there is no platform
+// sign-in page to send them to with a `denied` flag, so they get the answer.
+export function refuseNoAccess(req, res, appLabel) {
+  const message = `You do not have access to ${appLabel}.`;
+  res.status(403);
+  if (req.accepts(['json', 'html']) === 'html') {
+    res.type('html').send(`<!doctype html><meta charset="utf-8"><title>Access denied</title>`
+      + `<body style="font-family:system-ui,sans-serif;max-width:40rem;margin:4rem auto;padding:0 1rem">`
+      + `<h1>Access denied</h1><p>${escapeHtml(message)}</p>`
+      + `<p>Ask an owner of ${escapeHtml(appLabel)} for access.</p></body>`);
+    return;
+  }
+  res.json({ error: { code: 'FORBIDDEN', message } });
+}
+
 /**
  * GET /api/identity/verify
  * App calls this to verify a session token and get user info + app role
@@ -257,11 +291,17 @@ router.get('/verify', (req, res) => {
   const apiKey = (req.headers['x-api-key'] || '').toString().trim();
   const isApiClient = !!(authHeader || apiKey); // browsers/Caddy don't send either header
 
-  // Fallback: read cc_token cookie (forwarded by Caddy forward_auth from the browser)
+  // Per-app origins (services/appOrigin.js): Caddy calls with host=isolated
+  // from an app's own host. There only a session issued for THIS app and
+  // environment counts (scope 'app'), from the app host's own cookie or as a
+  // Bearer; a platform session never does. Everything after authentication is
+  // the same as on the platform host.
+  const isolated = req.query.host === 'isolated';
+  const isolatedEnv = req.query.env === 'sandbox' ? 'sandbox' : 'production';
+
+  // Fallback: the session cookie (forwarded by Caddy forward_auth from the browser)
   if (!token && !apiKey) {
-    const cookies = req.headers.cookie || '';
-    const match = cookies.match(/(?:^|;\s*)cc_token=([^;]+)/);
-    if (match) token = decodeURIComponent(match[1]);
+    token = (isolated ? readCookie(req, APP_SESSION_COOKIE) : readSessionCookie(req)) || '';
   }
 
   // v2.5.14: always build an absolute https://<crane-host>/login URL so a
@@ -360,6 +400,25 @@ router.get('/verify', (req, res) => {
     }
   }
 
+  // An app host signs in through the platform host: a one-time handoff that
+  // comes back to the URI the visitor asked for (forward_auth runs before any
+  // rewrite there, so X-Forwarded-Uri is the original).
+  function handoffRedirect() {
+    const domain = String(process.env.CRANE_DOMAIN || '').replace(/^https?:\/\//, '').replace(/\/+$/, '');
+    const base = domain ? `https://${domain}` : craneUrl;
+    const p = new URLSearchParams({
+      app: String(req.query.app || ''),
+      env: isolatedEnv,
+      return: String(req.headers['x-forwarded-uri'] || '/'),
+      ...(req.headers['x-forwarded-host'] && { site: String(req.headers['x-forwarded-host']) }),
+    });
+    return res.redirect(302, `${base}/api/identity/handoff?${p}`);
+  }
+
+  function signIn() {
+    return isolated ? handoffRedirect() : loginRedirect();
+  }
+
   function loginRedirect(extra = {}) {
     const orig = redirectTargetFor(originalUrl());
     // This 302 is the first hop an embedded frame sees, so it carries the same
@@ -375,7 +434,7 @@ router.get('/verify', (req, res) => {
   }
 
   if (!token && !apiKey) {
-    if (!isApiClient) return loginRedirect();
+    if (!isApiClient) return signIn();
     throw new AppError('Authorization: Bearer TOKEN, X-API-Key, or cc_token cookie required', 401, 'NO_TOKEN');
   }
 
@@ -403,22 +462,25 @@ router.get('/verify', (req, res) => {
     // doesn't keep waving them through Caddy forward_auth into iframed apps
     // (security review v1.27.34 H6). Lookup remains a single query so the
     // existing redirect-when-cookie-only flow stays intact.
-    session = db.prepare(`
+    const select = `
       SELECT s.*, u.id as user_id, u.name, u.email, u.username, u.avatar_url, u.phone, u.year_of_birth, u.role as crane_role, u.active as user_active
       FROM identity_sessions s
       JOIN users u ON s.user_id = u.id
-      WHERE s.token_hash = ?
-    `).get(tokenHash);
+      WHERE s.token_hash = ?`;
+    session = isolated
+      ? db.prepare(`${select} AND s.scope = 'app' AND s.app_env = ?
+          AND s.app_id = (SELECT id FROM apps WHERE slug = ?)`).get(tokenHash, isolatedEnv, String(req.query.app || ''))
+      : db.prepare(`${select} AND s.scope = 'platform'`).get(tokenHash);
 
     if (session && session.expires_at && new Date(session.expires_at) < new Date()) {
       db.prepare('DELETE FROM identity_sessions WHERE token_hash = ?').run(tokenHash);
-      if (!isApiClient) return loginRedirect();
+      if (!isApiClient) return signIn();
       throw new AppError('Token expired', 401, 'TOKEN_EXPIRED');
     }
   }
 
   if (!session) {
-    if (!isApiClient) return loginRedirect();
+    if (!isApiClient) return signIn();
     throw new AppError('Invalid or expired token', 401, 'INVALID_TOKEN');
   }
 
@@ -426,7 +488,7 @@ router.get('/verify', (req, res) => {
   // session row stays (so they can't slip through during cleanup) but no
   // operation is performed on their behalf.
   if (session.user_active === 0) {
-    if (!isApiClient) return loginRedirect();
+    if (!isApiClient) return signIn();
     throw new AppError('Account is deactivated', 403, 'DEACTIVATED');
   }
   if (!apiKey) touchSession(db, session, { role: session.crane_role });
@@ -441,40 +503,26 @@ router.get('/verify', (req, res) => {
   // can never disagree about which app was resolved.
   let appIdForRoles = null;
 
-  // v2.7.21: correct role precedence is
-  //   explicit per-app row > global-admin short-circuit > public→viewer > none
-  // The old order put `visibility === 'public'` first and unconditionally set
-  // appRole = 'viewer', wiping any explicit app_user_roles entry. That meant
-  // an owner of a public app got 'viewer' on the wire (X-AppCrane-App-Role),
-  // and any in-app role gate (e.g. Settings) wrongly denied them.
-  const resolveAppRole = (appRecord, lookupAppId) => {
-    const roleRecord = db.prepare(
-      'SELECT app_role FROM app_user_roles WHERE app_id = ? AND user_id = ?'
-    ).get(lookupAppId, session.user_id);
-    if (roleRecord?.app_role) return roleRecord.app_role;          // explicit wins
-    if (session.crane_role === 'platform_admin') return 'admin';
-    if (appRecord.visibility === 'public') return 'viewer';        // public fallback
-    return 'none';
-  };
 
   if (appSlug) {
     const appRecord = db.prepare('SELECT * FROM apps WHERE slug = ?').get(appSlug);
     if (appRecord) {
       appName = appRecord.name;
       appIdForRoles = appRecord.id;
-      appRole = resolveAppRole(appRecord, appRecord.id);
+      appRole = resolveAppRole(db, session, appRecord);
     }
   } else if (session.app_id) {
     const appRecord = db.prepare('SELECT * FROM apps WHERE id = ?').get(session.app_id);
     if (appRecord) {
       appName = appRecord.name;
       appIdForRoles = session.app_id;
-      appRole = resolveAppRole(appRecord, session.app_id);
+      appRole = resolveAppRole(db, session, appRecord);
     }
   }
 
   // Deny access if user has no role for the requested app
   if (appRole === 'none') {
+    if (!isApiClient && isolated) return refuseNoAccess(req, res, appName || appSlug);
     if (!isApiClient) return loginRedirect({ denied: '1', app: appSlug || '', name: appName || '' });
     throw new AppError('You do not have access to this app', 403, 'FORBIDDEN');
   }
@@ -486,7 +534,7 @@ router.get('/verify', (req, res) => {
   const forwardedUri = req.headers['x-forwarded-uri'];
   if (appIdForRoles && appSlug && forwardedUri !== undefined) {
     const sandboxMount = `/${appSlug}-sandbox`;
-    const env = req.query.prefix === sandboxMount ? 'sandbox' : 'production';
+    const env = isolated ? isolatedEnv : (req.query.prefix === sandboxMount ? 'sandbox' : 'production');
     const verdict = decideAccess(effectiveRules(db, appIdForRoles, env), {
       method: req.headers['x-forwarded-method'],
       uri: forwardedUri,
@@ -603,7 +651,8 @@ router.get('/verify', (req, res) => {
     const ts = Math.floor(Date.now() / 1000);
     // Caddy sets this URL, not the client: the sandbox route passes
     // prefix=/<slug>-sandbox. Each environment signs with its own secret.
-    const signEnv = appSlug && req.query.prefix === `/${appSlug}-sandbox` ? 'sandbox' : 'production';
+    const signEnv = isolated ? isolatedEnv
+      : (appSlug && req.query.prefix === `/${appSlug}-sandbox` ? 'sandbox' : 'production');
     const secret = identitySecretFor(db, appIdForRoles, signEnv);
     res.setHeader('X-AppCrane-Identity-Ts', String(ts));
     res.setHeader('X-AppCrane-Identity-Sig', signIdentity(secret, ts, (h) => {
@@ -627,6 +676,13 @@ router.get('/verify', (req, res) => {
   });
 });
 
+// Signing out of AppCrane ends the session and every app session the sign-in
+// handoff issued from it (scope 'app', parent_token_hash).
+function endPlatformSession(db, tokenHash) {
+  db.prepare("DELETE FROM identity_sessions WHERE token_hash = ? AND scope = 'platform'").run(tokenHash);
+  db.prepare("DELETE FROM identity_sessions WHERE parent_token_hash = ? AND scope = 'app'").run(tokenHash);
+}
+
 /**
  * POST /api/identity/logout
  * Invalidate session token
@@ -646,8 +702,7 @@ router.post('/logout', (req, res) => {
   }
 
   const db = getDb();
-  const tokenHash = hashApiKey(token);
-  db.prepare('DELETE FROM identity_sessions WHERE token_hash = ?').run(tokenHash);
+  endPlatformSession(db, hashApiKey(token));
 
   res.json({ message: 'Logged out' });
 });
@@ -671,7 +726,7 @@ router.post('/refresh-cookie', (req, res) => {
   const row = db.prepare(`
     SELECT s.id FROM identity_sessions s
     JOIN users u ON s.user_id = u.id
-    WHERE s.token_hash = ? AND s.expires_at > datetime('now') AND u.active = 1
+    WHERE s.token_hash = ? AND s.scope = 'platform' AND s.expires_at > datetime('now') AND u.active = 1
   `).get(hashApiKey(token));
   if (!row) throw new AppError('Invalid or expired session', 401, 'UNAUTHORIZED');
 
@@ -692,8 +747,7 @@ router.post('/logout-beacon', (req, res) => {
   const token = (req.body && typeof req.body.token === 'string' && req.body.token.trim()) || '';
   if (!token) return res.status(204).end();
   try {
-    const db = getDb();
-    db.prepare('DELETE FROM identity_sessions WHERE token_hash = ?').run(hashApiKey(token));
+    endPlatformSession(getDb(), hashApiKey(token));
   } catch (_) {}
   res.status(204).end();
 });
@@ -715,7 +769,7 @@ router.get('/me', (req, res) => {
   const session = db.prepare(`
     SELECT u.* FROM identity_sessions s
     JOIN users u ON s.user_id = u.id
-    WHERE s.token_hash = ? AND s.expires_at > datetime('now') AND u.active = 1
+    WHERE s.token_hash = ? AND s.scope = 'platform' AND s.expires_at > datetime('now') AND u.active = 1
   `).get(tokenHash);
 
   if (!session) throw new AppError('Invalid or expired token', 401, 'INVALID_TOKEN');
@@ -812,7 +866,7 @@ router.post('/set-password', (req, res) => {
     user = db.prepare(`
       SELECT u.* FROM identity_sessions s
       JOIN users u ON s.user_id = u.id
-      WHERE s.token_hash = ? AND s.expires_at > datetime('now') AND u.active = 1
+      WHERE s.token_hash = ? AND s.scope = 'platform' AND s.expires_at > datetime('now') AND u.active = 1
     `).get(tokenHash);
   }
   if (!user) {
@@ -902,7 +956,7 @@ router.get('/preview-as/:userId', (req, res) => {
   const session = db.prepare(`
     SELECT u.role FROM identity_sessions s
     JOIN users u ON s.user_id = u.id
-    WHERE s.token_hash = ? AND s.expires_at > datetime('now') AND u.active = 1
+    WHERE s.token_hash = ? AND s.scope = 'platform' AND s.expires_at > datetime('now') AND u.active = 1
   `).get(tokenHash);
 
   if (!session) throw new AppError('Invalid or expired token', 401, 'INVALID_TOKEN');
@@ -952,7 +1006,7 @@ router.get('/app-updates/:slug', (req, res) => {
   const session = db.prepare(`
     SELECT u.id as user_id FROM identity_sessions s
     JOIN users u ON s.user_id = u.id
-    WHERE s.token_hash = ? AND s.expires_at > datetime('now') AND u.active = 1
+    WHERE s.token_hash = ? AND s.scope = 'platform' AND s.expires_at > datetime('now') AND u.active = 1
   `).get(hashApiKey(token));
   if (!session) throw new AppError('Invalid or expired token', 401, 'INVALID_TOKEN');
 

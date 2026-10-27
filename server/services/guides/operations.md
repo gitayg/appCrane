@@ -12,7 +12,9 @@ If you're onboarding a brand-new app, call
 ## How AppCrane is organized
 
 - **Apps** are containerized workloads behind one of two URLs:
-  `{{HOST}}/<slug>` (production) and `{{HOST}}/<slug>-sandbox`.
+  `{{HOST}}/<slug>` (production) and `{{HOST}}/<slug>-sandbox` — or, with
+  per-app origins on, `<slug>.<isolation domain>` and
+  `<slug>-sandbox.<isolation domain>` (see "Per-app origins" below).
 - Most apps have a **GitHub source of truth** — either a user repo
   (`source_type='github'`) or an AppCrane-managed repo on a service account
   (`source_type='managed'`). An app can also be **upload-only**
@@ -355,6 +357,77 @@ request modal. Agents work them via:
 
 The bigger plan-then-build flow happens elsewhere; this just exposes the
 queue so an agent can triage.
+
+## Per-app origins (platform setting)
+
+Off by default. Every app is then a path on the platform host, so all apps and
+the dashboard share one browser origin: one app's script can call another app
+as the visitor, and can read the dashboard's stored session. Paths do not
+separate origins; hosts do. Turning this on gives each app its own host:
+
+- production `https://<slug>.<isolation domain>/`, sandbox
+  `https://<slug>-sandbox.<isolation domain>/`;
+- the platform host keeps the dashboard and the API, and its `/<slug>...` and
+  `/<slug>-sandbox...` paths become 308 redirects to the app's host (same path
+  and query), so existing links and bookmarks keep working;
+- on the app's host the `/<slug>` (or `/<slug>-sandbox`) prefix is stripped
+  before the request reaches the container, so `APP_BASE_PATH` is unchanged and
+  apps need no redeploy or restart;
+- `/api/me` and `/api/directory` still answer from the browser on the app's
+  host, for that host's app; other `/api/...` paths there go to the app;
+- AppCrane's cookies (`cc_token`, `__Host-cc_token`, `__Host-cc_app`) are
+  stripped before any request reaches an app container, as are client-sent
+  `X-AppCrane-*` headers;
+- visitors are signed in on an app's host by a one-time handoff from the
+  platform host into a host-only cookie valid for that one app and environment
+  (onboarding guide: "Per-app origins").
+
+**Turning it on.** In the dashboard's Settings, or as a platform admin
+`PUT /api/settings/isolation` with `{ "domain": "apps.example.com" }`
+(`GET` returns the current values and `enabled`). These keys cannot be written
+through `PUT /api/settings/<key>`. An empty `domain` turns it off. Refused:
+
+- a domain equal to the platform host;
+- a domain the platform host sits directly under (platform `crane.example.com`
+  with domain `example.com` would make the platform host the app "crane") —
+  use a dedicated subdomain such as `apps.example.com`;
+- any domain while `CRANE_DOMAIN` is not set.
+
+Every change is written to the audit log (`app-isolation-change`, from and to)
+and reloads Caddy.
+
+**DNS.** One wildcard record, `*.<isolation domain>`, pointing at this server
+(A/AAAA, or a CNAME to the platform host).
+
+**TLS — pick one.**
+
+- A wildcard certificate: set `tls_cert_file` and `tls_key_file` together (both
+  or neither) to the paths of a certificate and key for `*.<isolation domain>`.
+  AppCrane checks that both files exist and are readable when you save; Caddy
+  must be able to read them too.
+- On-demand TLS (both left empty): Caddy obtains a certificate for each app
+  host on its first visit, after asking AppCrane whether that host belongs to
+  an existing app; any other name under the domain is refused. Ports 80 and 443
+  must be reachable, and every app has two hosts, so this is one certificate
+  per app host.
+
+**Use a domain under the platform's own registrable domain** (for a platform at
+`crane.example.com`, something like `apps.example.com`). The dashboard opens
+apps in a frame; when the app's host is on another site, browsers treat that
+frame as third-party and block its cookies, so a framed app cannot keep its
+sign-in (in its own tab it works). Saving such a domain is allowed and returns
+a `warning` saying so.
+
+**Everyone signs in again once.** With per-app origins on, the platform session
+cookie becomes `__Host-cc_token` (an app host under the platform's domain can
+set a cookie for that domain, but never a `__Host-` one), and the old
+`cc_token` is no longer read. Turning the setting on — or back off — signs
+every dashboard user out once. API keys are unaffected.
+
+**Custom domains** are unaffected by this setting. Separately, an app owner can
+set `custom_domain_auth` on an app (`appcrane_set_app_meta` or
+`PUT /api/apps/<slug>`) to put the normal AppCrane sign-in, through the same
+handoff, in front of its custom domain; it works with per-app origins on or off.
 
 ## Deploys: production vs sandbox
 

@@ -5,6 +5,7 @@ import { auditMiddleware } from '../middleware/audit.js';
 import { AppError } from '../utils/errors.js';
 import { fetchAppProbe } from '../services/appProbeFetch.js';
 import { getPortsForSlot } from '../services/portAllocator.js';
+import { appOrigin } from '../services/appOrigin.js';
 
 const router = Router();
 
@@ -57,6 +58,8 @@ router.put('/:slug/health/:env', requireAppUser, auditMiddleware('health-config'
 });
 
 function buildPublicUrl(app, env, endpoint = '') {
+  const origin = appOrigin(getDb(), app.slug, env);
+  if (origin) return `${origin}${endpoint}`;
   const craneDomain = process.env.CRANE_DOMAIN;
   if (craneDomain) {
     const path = env === 'production' ? `/${app.slug}` : `/${app.slug}-sandbox`;

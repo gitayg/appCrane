@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { join, resolve } from 'path';
 import { getDb } from '../../db.js';
+import { appUrl, isolationEnabled } from '../appOrigin.js';
 import { logAudit } from '../../middleware/audit.js';
 import { encrypt } from '../encryption.js';
 import { userHasPlatformPermission } from '../permissions.js';
@@ -293,7 +294,7 @@ export async function adoptAnalyzed(user, opts, deps = {}) {
     const craneDomain = process.env.CRANE_DOMAIN;
     return {
       app: { id: app.id, slug: app.slug, name: app.name },
-      sandbox_url: craneDomain ? `https://${craneDomain}/${slug}-sandbox` : `/${slug}-sandbox/`,
+      sandbox_url: craneDomain || isolationEnabled(db) ? appUrl(db, slug, 'sandbox', { craneBase: `https://${craneDomain}` }) : `/${slug}-sandbox/`,
       commit: pushed?.commit?.sha || null,
       files_committed: commitFiles.length,
       env_files_left_out: leftOut,

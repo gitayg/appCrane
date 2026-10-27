@@ -19,6 +19,10 @@
  * Optional query: `?app=<slug>` to get the caller's per-app role. Without it
  * the response includes the global role only.
  *
+ * On an app's own host (per-app origins, services/appOrigin.js) the only
+ * credential is that host's app-session cookie, and the app is the host's:
+ * `?app=` and Referer are ignored there.
+ *
  * NEVER returns a session token, password hash, or any other secret. Just
  * identity + role so the app can decorate its UI ("Hi, Alice. You're an
  * admin on this app.") or branch its logic.
@@ -29,6 +33,9 @@ import { hashApiKey } from '../services/encryption.js';
 import { roleKeysForUser } from '../services/appDefinedRoles.js';
 import { AppError } from '../utils/errors.js';
 import { auditMiddleware } from '../middleware/audit.js';
+import { readCookie, readSessionCookie, cookieWriteAllowed } from '../utils/sessionCookie.js';
+import { APP_SESSION_COOKIE } from '../services/appOrigin.js';
+import { resolveAppHost } from './appHandoff.js';
 import {
   userClaudeTokenMeta,
   setUserClaudeToken,
@@ -38,27 +45,37 @@ import {
 
 const router = Router();
 
-function readCookieToken(req) {
-  const raw = req.headers.cookie || '';
-  const m = raw.match(/(?:^|;\s*)cc_token=([^;]+)/);
-  if (!m) return null;
-  try { return decodeURIComponent(m[1]); } catch (_) { return m[1]; }
-}
-
 function sessionUserFor(db, token) {
   if (!token) return null;
   return db.prepare(`
     SELECT u.* FROM identity_sessions s
     JOIN users u ON s.user_id = u.id
-    WHERE s.token_hash = ? AND s.expires_at > datetime('now') AND u.active = 1
+    WHERE s.token_hash = ? AND s.scope = 'platform' AND s.expires_at > datetime('now') AND u.active = 1
   `).get(hashApiKey(token)) || null;
 }
 
+function appSessionUserFor(db, token, site) {
+  if (!token) return null;
+  return db.prepare(`
+    SELECT u.* FROM identity_sessions s
+    JOIN users u ON s.user_id = u.id
+    WHERE s.token_hash = ? AND s.scope = 'app' AND s.app_id = ? AND s.app_env = ?
+      AND datetime(s.expires_at) > datetime('now') AND u.active = 1
+  `).get(hashApiKey(token), site.app.id, site.env) || null;
+}
+
 // Resolve the calling platform user from the proxied-app auth precedence:
-// cc_token cookie (what a proxied app's browser has) → Authorization: Bearer →
+// session cookie (what a proxied app's browser has) → Authorization: Bearer →
 // X-API-Key. Returns null if none match. Shared by /me and /directory.
-function authedUser(db, req) {
-  let user = sessionUserFor(db, readCookieToken(req));
+// On an app host: that host's app-session cookie and nothing else.
+function authedUser(db, req, site = resolveAppHost(db, req.headers.host)) {
+  if (site) return appSessionUserFor(db, readCookie(req, APP_SESSION_COOKIE), site);
+  return platformUser(db, req);
+}
+
+function platformUser(db, req) {
+  let user = sessionUserFor(db, readSessionCookie(req));
+  if (user) req.authed_by_cookie = true;
   if (!user) {
     const bearer = (req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
     if (bearer) user = sessionUserFor(db, bearer);
@@ -74,7 +91,8 @@ function authedUser(db, req) {
 
 router.get('/me', (req, res) => {
   const db = getDb();
-  const user = authedUser(db, req);
+  const site = resolveAppHost(db, req.headers.host);
+  const user = authedUser(db, req, site);
   if (!user) throw new AppError('Authentication required', 401, 'UNAUTHORIZED');
 
   // Per-app role. Resolution order for the app context:
@@ -87,7 +105,7 @@ router.get('/me', (req, res) => {
   //      the slug, so a spoofed Referer can only ask "what's my role on
   //      app X", never escalate. If no Referer / malformed / no match, the
   //      response omits the per-app fields (lean global-only payload).
-  let appSlug = req.query.app ? String(req.query.app) : null;
+  let appSlug = site ? site.app.slug : (req.query.app ? String(req.query.app) : null);
   if (!appSlug) {
     const ref = req.headers.referer || '';
     if (ref) {
@@ -192,12 +210,18 @@ router.get('/directory', (req, res) => {
  * (utils/auditRedact.js) and the 400 messages never quote what was rejected.
  */
 
-// Resolve the caller the same way /me does (cookie -> Bearer -> X-API-Key) and
-// publish them as req.user so auditMiddleware attributes the entry. 401 before
-// any body is looked at.
+// Resolve the caller the same way /me does on the platform host (cookie ->
+// Bearer -> X-API-Key) and publish them as req.user so auditMiddleware
+// attributes the entry. 401 before any body is looked at. An app session never
+// reaches a personal credential, and a cookie-authenticated write has to come
+// from the platform's own pages (sessionCookie.cookieWriteAllowed).
 function requireMe(req, res, next) {
-  const user = authedUser(getDb(), req);
+  const db = getDb();
+  const user = resolveAppHost(db, req.headers.host) ? null : platformUser(db, req);
   if (!user) throw new AppError('Authentication required', 401, 'UNAUTHORIZED');
+  if (req.authed_by_cookie && !cookieWriteAllowed(req)) {
+    throw new AppError('Cross-site request refused', 403, 'CSRF_REFUSED');
+  }
   req.user = user;
   next();
 }

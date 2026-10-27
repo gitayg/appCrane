@@ -9,6 +9,10 @@ import { platformEmbedAncestors, platformRegistrableDomain } from '../utils/embe
 import { settingVisibility, PUBLIC, AUTHED } from '../utils/settingsVisibility.js';
 import { RESERVED_SETTING_PREFIX as MARIADB_ENCRYPTION_PREFIX } from '../services/managedDbEncryption.js';
 import { cryptoStatus } from '../services/fipsMode.js';
+import { normalizeDomain, isolationEnabled, parseAppHost } from '../services/appOrigin.js';
+import { accessSync, statSync, constants as fsConstants } from 'fs';
+import psl from 'psl';
+import log from '../utils/logger.js';
 
 const router = Router();
 
@@ -793,6 +797,133 @@ router.put('/edge/brotli', requireAuth, requirePlatformAdmin, async (req, res) =
   res.json({ ok: true, enabled });
 });
 
+// ── Per-app origins (services/appOrigin.js) ────────────────────────────
+//
+// app_isolation_domain puts every app on its own host under that domain
+// (<slug>.<domain>, <slug>-sandbox.<domain>); empty = off. The two TLS keys
+// name a wildcard certificate and key for it; both or neither (neither =
+// Caddy on-demand TLS). Written only here, never through PUT /:key, so the
+// checks below cannot be skipped.
+const ISOLATION_KEYS = ['app_isolation_domain', 'app_isolation_tls_cert_file', 'app_isolation_tls_key_file'];
+
+function isolationSettings(db) {
+  const get = (k) => db.prepare('SELECT value FROM settings WHERE key = ?').get(k)?.value || '';
+  return {
+    domain: get('app_isolation_domain'),
+    tls_cert_file: get('app_isolation_tls_cert_file'),
+    tls_key_file: get('app_isolation_tls_key_file'),
+    enabled: isolationEnabled(db),
+  };
+}
+
+function registrableDomain(host) {
+  try { return psl.parse(host)?.domain || null; } catch (_) { return null; }
+}
+
+// Apps open inside the dashboard's frame (its app tabs). A browser treats a
+// frame on another site as third-party and blocks its cookies, so the app's
+// sign-in cookie would never be sent there.
+function isolationWarning(domain) {
+  if (!domain) return null;
+  const crane = (process.env.CRANE_DOMAIN || '').trim().toLowerCase();
+  const a = registrableDomain(domain);
+  if (a && a === platformRegistrableDomain()) return null;
+  return `${domain} is not under the same registrable domain as the platform host (${crane}). `
+    + "Apps opened inside the dashboard's frame lose their sign-in there, because browsers block "
+    + 'third-party cookies. Opened in their own tab they work. Use a domain under the platform\'s own '
+    + 'registrable domain to avoid this.';
+}
+
+function readableFile(label, path) {
+  try {
+    if (!statSync(path).isFile()) throw new Error('not a file');
+    accessSync(path, fsConstants.R_OK);
+  } catch (_) {
+    return `${label} ${path} does not exist or is not a readable file`;
+  }
+  return null;
+}
+
+router.get('/isolation', requireAuth, requirePlatformAdmin, (req, res) => {
+  const db = getDb();
+  const cur = isolationSettings(db);
+  res.json({ ...cur, warning: cur.enabled ? isolationWarning(cur.domain) : null });
+});
+
+/**
+ * PUT /api/settings/isolation { domain?, tls_cert_file?, tls_key_file? } —
+ * platform-admin. An omitted field keeps its value; '' clears it. Reloads
+ * Caddy after the response (the routing of every app changes) and audits.
+ */
+router.put('/isolation', requireAuth, requirePlatformAdmin, async (req, res) => {
+  const db = getDb();
+  const body = req.body || {};
+  const before = isolationSettings(db);
+  const bad = (message) => res.status(400).json({ error: { code: 'VALIDATION', message } });
+  for (const f of ['domain', 'tls_cert_file', 'tls_key_file']) {
+    if (body[f] !== undefined && body[f] !== null && typeof body[f] !== 'string') return bad(`${f} must be a string`);
+  }
+
+  let domain = before.domain;
+  if (body.domain !== undefined) {
+    const raw = String(body.domain || '').trim();
+    if (!raw) domain = '';
+    else {
+      domain = normalizeDomain(raw);
+      if (!domain) return bad('domain must be a bare hostname like apps.example.com');
+    }
+  }
+  const crane = (process.env.CRANE_DOMAIN || '').trim().toLowerCase().replace(/\.$/, '');
+  if (domain) {
+    if (!crane) return bad('CRANE_DOMAIN is not set, so there is no platform host to sign in on. Set it before turning on per-app origins.');
+    if (domain === crane) return bad('domain must not be the platform host itself; use a separate domain such as apps.<platform domain>');
+  }
+  const cert = body.tls_cert_file !== undefined ? String(body.tls_cert_file || '').trim() : before.tls_cert_file;
+  const key = body.tls_key_file !== undefined ? String(body.tls_key_file || '').trim() : before.tls_key_file;
+  if (!!cert !== !!key) return bad('Set both tls_cert_file and tls_key_file, or neither (neither = on-demand TLS)');
+  if (cert) {
+    const why = readableFile('tls_cert_file', cert) || readableFile('tls_key_file', key);
+    if (why) return bad(why);
+  }
+
+  const upsert = db.prepare(
+    `INSERT INTO settings (key, value, updated_by, updated_at) VALUES (?, ?, ?, datetime('now'))
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_by = excluded.updated_by, updated_at = datetime('now')`
+  );
+  const PLATFORM_IS_APP_HOST = 'PLATFORM_IS_APP_HOST';
+  try {
+    db.transaction(() => {
+      upsert.run('app_isolation_domain', domain, req.user.id);
+      upsert.run('app_isolation_tls_cert_file', cert, req.user.id);
+      upsert.run('app_isolation_tls_key_file', key, req.user.id);
+      // The platform host must never read as an app host (e.g. crane.example.com
+      // under domain example.com would be the app "crane"). Checked against the
+      // stored value with the same parser routing uses, then rolled back.
+      if (domain && parseAppHost(db, crane)) throw new Error(PLATFORM_IS_APP_HOST);
+    })();
+  } catch (e) {
+    if (e.message !== PLATFORM_IS_APP_HOST) throw e;
+    return bad(`The platform host ${crane} would itself be an app host under ${domain}. Use a domain the platform host is not directly under, such as apps.<platform domain>.`);
+  }
+
+  const after = isolationSettings(db);
+  const changed = before.domain !== after.domain
+    || before.tls_cert_file !== after.tls_cert_file || before.tls_key_file !== after.tls_key_file;
+  if (changed) {
+    const strip = ({ enabled, ...rest }) => rest;
+    const { logAudit } = await import('../middleware/audit.js');
+    logAudit(req.user.id, null, 'app-isolation-change', { from: strip(before), to: strip(after) });
+    // After the response: the reload can escalate to restarting Caddy, which
+    // would cut this very connection (see reloadCaddyAfterResponse in apps.js).
+    res.once('finish', () => {
+      reloadCaddy()
+        .then(r => { if (r && r.success === false) log.warn(`Caddy reload after isolation change failed: ${r.error}`); })
+        .catch(e => log.warn(`Caddy reload after isolation change: ${e.message}`));
+    });
+  }
+  res.json({ ok: true, ...after, warning: after.enabled ? isolationWarning(after.domain) : null });
+});
+
 /**
  * GET /api/settings/:key - Single setting, gated by its classified visibility
  * (PUBLIC / AUTHED / ADMIN, defaulting to ADMIN). See settingsVisibility.js.
@@ -821,6 +952,9 @@ router.put('/:key', requireAuth, requirePlatformAdmin, (req, res) => {
   // that nothing is still encrypted with it.
   if (req.params.key.startsWith(MARIADB_ENCRYPTION_PREFIX)) {
     return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Use /api/managed-db/encryption to change MariaDB encryption' } });
+  }
+  if (ISOLATION_KEYS.includes(req.params.key)) {
+    return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Use /api/settings/isolation to change per-app origins' } });
   }
   if (req.params.key === 'auto_approve_rce_fixes' || req.params.key === 'auto_patch_cooldown_hours') {
     return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Use /api/auto-patch/policy to change the auto-patch policy' } });
