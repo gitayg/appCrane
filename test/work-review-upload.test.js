@@ -5,7 +5,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { createServer } from 'http';
 
-// The work-review daily upload (.claude/skills/work-review/scripts/upload.mjs)
+// The work-review daily upload (plugins/work-review/skills/work-review/scripts/upload.mjs)
 // and the hub that receives it (examples/work-review-hub).
 //
 // What is pinned here is what the user was promised: only an allow-listed,
@@ -15,7 +15,7 @@ import { createServer } from 'http';
 
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'wr-hub-'));
 const OK = { allowExcerpt: () => true };   // tests that exercise the excerpt path approve it explicitly
-const { buildPayload, scrub, checkUrl, SCHEMA, APP_KEY_RE, accountProblem } = await import('../.claude/skills/work-review/scripts/upload.mjs');
+const { buildPayload, scrub, checkUrl, SCHEMA, APP_KEY_RE, accountProblem } = await import('../plugins/work-review/skills/work-review/scripts/upload.mjs');
 const { handler, validate } = await import('../examples/work-review-hub/server.mjs');
 
 const report = {

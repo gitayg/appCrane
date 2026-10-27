@@ -1,0 +1,14 @@
+{
+  "name": "appcrane",
+  "owner": {
+    "name": "AppCrane"
+  },
+  "description": "Claude Code plugins that ship with AppCrane.",
+  "plugins": [
+    {
+      "name": "work-review",
+      "source": "./plugins/work-review",
+      "description": "Review how you work with Claude Code and get concrete fixes; optional daily upload to a Work Review hub."
+    }
+  ]
+}

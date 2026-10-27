@@ -1,5 +1,6 @@
 ---
 name: work-review
+allowed-tools: Bash(node ${CLAUDE_SKILL_DIR}/scripts/analyze.mjs *), Bash(node ${CLAUDE_SKILL_DIR}/scripts/audit-setup.mjs *)
 description: Analyze how the user actually works with Claude Code — mine local session transcripts for costly instructions (vague prompts that send Claude searching, prompts that end in a correction, missing done-criteria, overcomplicated setups), redundancy (re-reading unchanged files, re-running commands with nothing changed, retry loops, repeated instructions across sessions), friction (tool errors, permission denials, corrections, interrupts, compactions) and missed leverage, then turn the findings into concrete fixes (CLAUDE.md lines, skills/slash commands, permission allowlists, hooks). Use when the user asks to review, audit or retro their Claude usage, asks "where am I wasting tokens/time", "how can I prompt better", "what should go in CLAUDE.md", "what should I automate", or wants a weekly/monthly work review.
 ---
 
@@ -28,7 +29,7 @@ Analysis is local. Transcripts can contain secrets and private code: never send 
 Run the analyzer (Node, no dependencies):
 
 ```bash
-node <skill-dir>/scripts/analyze.mjs --since 30 --json /tmp/work-review.json
+node ${CLAUDE_SKILL_DIR}/scripts/analyze.mjs --since 30 --json /tmp/work-review.json
 ```
 
 Options: `--project <substr>` limits to one project (transcript dirs are named after the cwd, e.g. `-home-user-appCrane`); `--session <id>`; `--since <days>` (default 30); `--include-subagents`; `--top <n>`; `--root <dir>` for a different transcript root. The default root is `$CLAUDE_CONFIG_DIR/projects` or `~/.claude/projects`. In AppCrane, an app's builder transcripts live on the host at `$DATA_DIR/apps/<slug>/claude-projects`.
@@ -44,7 +45,7 @@ By default, scope to the current project when the user is asking about "this rep
 How someone works shows up in how they set Claude Code up, and that is usually where "overcomplicated" comes from. Run:
 
 ```bash
-node <skill-dir>/scripts/audit-setup.mjs --report /tmp/work-review.json --json /tmp/work-review-setup.json
+node ${CLAUDE_SKILL_DIR}/scripts/audit-setup.mjs --report /tmp/work-review.json --json /tmp/work-review-setup.json
 ```
 
 Run it from the project; add `--project <dir>` otherwise. It inventories:
@@ -205,13 +206,12 @@ Suggest re-running about two weeks after applying fixes.
 
 When the user asks to set it up, walk them through these steps. Don't do any of them for them:
 1. In AppCrane, open the MCP page, go to **App sign-in keys**, and issue a key for the Work Review hub app (it expires after 180 days by default). Then run:
-   `node <skill-dir>/scripts/upload.mjs --setup --url https://<hub-app-host> --allow-remote 'github.com[:/]<org>/' --account-domain <company.com> [--excerpts]`, pasting the key at the prompt (it is read from stdin). Ask the user for the org and domain rather than guessing them.
-2. Preview the payload: `node <skill-dir>/scripts/upload.mjs --dry-run`. If excerpts are on, show the queue with `--review-excerpts` and let the user approve or drop each one. Never approve on their behalf.
-3. Send one now: `node <skill-dir>/scripts/upload.mjs --force`.
-4. Make it daily by adding this to their own `~/.claude/settings.json`. The hook returns at once and uploads in the background only if the last upload is more than 24h old:
+   `node ${CLAUDE_SKILL_DIR}/scripts/upload.mjs --setup --url https://<hub-app-host> --allow-remote 'github.com[:/]<org>/' --account-domain <company.com> [--excerpts]`, pasting the key at the prompt (it is read from stdin). Ask the user for the org and domain rather than guessing them.
+2. Preview the payload: `node ${CLAUDE_SKILL_DIR}/scripts/upload.mjs --dry-run`. If excerpts are on, show the queue with `--review-excerpts` and let the user approve or drop each one. Never approve on their behalf.
+3. Send one now: `node ${CLAUDE_SKILL_DIR}/scripts/upload.mjs --force`.
+4. Make it daily. **Installed as the plugin** (`/plugin install work-review@appcrane`), the start-up hook is already included: it returns at once, and uploads in the background only when setup has been done and the last upload is more than 24 hours old. **Installed as a plain skill**, add the hook to the user's own `~/.claude/settings.json`:
    ```json
    { "hooks": { "SessionStart": [ { "hooks": [ { "type": "command", "command": "node ~/.claude/skills/work-review/scripts/upload.mjs --hook" } ] } ] } }
    ```
-   This assumes a personal install at `~/.claude/skills/work-review`. Adjust the path otherwise.
 
 To stop: `upload.mjs --disable`, or remove the hook. To erase what was uploaded, use "Delete all my data" on the hub. Errors go to `~/.config/work-review/upload.log` and never interrupt a session.

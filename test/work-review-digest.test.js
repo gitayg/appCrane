@@ -14,7 +14,7 @@ import { createServer } from 'http';
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'wr-digest-'));
 const { handler, runDigests } = await import('../examples/work-review-hub/server.mjs');
 const { digestFor, sendViaAppCrane, isoWeek } = await import('../examples/work-review-hub/digest.mjs');
-const { buildPayload, SCHEMA } = await import('../.claude/skills/work-review/scripts/upload.mjs');
+const { buildPayload, SCHEMA } = await import('../plugins/work-review/skills/work-review/scripts/upload.mjs');
 
 const MONDAY = new Date('2026-10-26T09:00:00Z'), TUESDAY = new Date('2026-10-27T09:00:00Z');
 const report = (usd, findings) => ({

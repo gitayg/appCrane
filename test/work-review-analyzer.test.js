@@ -5,14 +5,14 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { execFileSync } from 'child_process';
 
-// The work-review skill's analyzer (.claude/skills/work-review/scripts/analyze.mjs).
+// The work-review skill's analyzer (plugins/work-review/skills/work-review/scripts/analyze.mjs).
 //
 // Builds two synthetic Claude Code transcripts, each seeded with one instance of
 // every waste signal the analyzer claims to detect, and checks that each one is
 // counted, and counted once: streamed assistant messages repeat their usage on
 // every content block, and the totals must not double-count them.
 
-const SCRIPT = join(import.meta.dirname, '..', '.claude', 'skills', 'work-review', 'scripts', 'analyze.mjs');
+const SCRIPT = join(import.meta.dirname, '..', 'plugins', 'work-review', 'skills', 'work-review', 'scripts', 'analyze.mjs');
 
 function writeSession(dir, id, prompts, body) {
   const lines = [];

@@ -5,7 +5,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { execFileSync } from 'child_process';
 
-// The work-review setup audit (.claude/skills/work-review/scripts/audit-setup.mjs).
+// The work-review setup audit (plugins/work-review/skills/work-review/scripts/audit-setup.mjs).
 //
 // The question it answers is not "how much did it cost" but "is this set up the
 // way Claude Code's docs recommend, or in a more complicated way": a CLAUDE.md
@@ -14,7 +14,7 @@ import { execFileSync } from 'child_process';
 // multi-agent graph where one agent with skills might do. A clean setup must
 // produce no findings, or the review cries wolf.
 
-const SCRIPT = join(import.meta.dirname, '..', '.claude', 'skills', 'work-review', 'scripts', 'audit-setup.mjs');
+const SCRIPT = join(import.meta.dirname, '..', 'plugins', 'work-review', 'skills', 'work-review', 'scripts', 'audit-setup.mjs');
 
 function run(project, userDir, usage) {
   const out = join(mkdtempSync(join(tmpdir(), 'audit-out-')), 'a.json');
@@ -95,4 +95,16 @@ test('a lean setup produces no findings, and "unused" needs enough history', () 
   const r = run(proj, user, { sessions: 3, agents: {}, skills: {}, mcpServers: {}, commands: {} });
   assert.deepEqual(kinds(r), [], `expected no findings; got ${kinds(r).join(', ')}`);
   assert.match(r.md, /No findings/);
+});
+
+test('a skill installed as a symlink is inventoried', async () => {
+  const { symlinkSync } = await import('fs');
+  const root = mkdtempSync(join(tmpdir(), 'audit-'));
+  const proj = join(root, 'proj'), user = join(root, 'user');
+  mkdirSync(join(root, 'home'), { recursive: true });
+  w(join(root, 'checkout', 'linked', 'SKILL.md'), '---\nname: linked\ndescription: Reviews pull requests for missing tests; use when asked to review a PR\n---\nsteps');
+  mkdirSync(join(proj, '.claude', 'skills'), { recursive: true });
+  symlinkSync(join(root, 'checkout', 'linked'), join(proj, '.claude', 'skills', 'linked'));
+  const r = run(proj, user, null);
+  assert.ok(r.inventory.skills.some(s => s.name === 'linked'));
 });

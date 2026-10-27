@@ -52,7 +52,10 @@ function walk(dir, pick, depth = 6, out = []) {
   let ents; try { ents = readdirSync(dir, { withFileTypes: true }); } catch { return out; }
   for (const e of ents) {
     const p = join(dir, e.name);
-    if (e.isDirectory()) { if (!SKIP_DIRS.has(e.name)) walk(p, pick, depth - 1, out); }
+    // Follow symlinks: skills are often installed as a link to a checkout. The
+    // depth limit bounds a link loop.
+    const isDirLike = e.isDirectory() || (e.isSymbolicLink() && isDir(p));
+    if (isDirLike) { if (!SKIP_DIRS.has(e.name)) walk(p, pick, depth - 1, out); }
     else if (pick(p, e.name)) out.push(p);
   }
   return out;
