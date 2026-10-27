@@ -1,4 +1,7 @@
 {
+  "2.125.2": [
+    "The apps domain for app isolation can now be the platform's own address: with AppCrane at crane.example.com, apps can live at myapp.crane.example.com."
+  ],
   "2.125.1": [
     "Housekeeping: a check for the app isolation setting now runs correctly on the build server."
   ],

@@ -876,7 +876,6 @@ router.put('/isolation', requireAuth, requirePlatformAdmin, async (req, res) => 
   const crane = (process.env.CRANE_DOMAIN || '').trim().toLowerCase().replace(/\.$/, '');
   if (domain) {
     if (!crane) return bad('CRANE_DOMAIN is not set, so there is no platform host to sign in on. Set it before turning on per-app origins.');
-    if (domain === crane) return bad('domain must not be the platform host itself; use a separate domain such as apps.<platform domain>');
   }
   const cert = body.tls_cert_file !== undefined ? String(body.tls_cert_file || '').trim() : before.tls_cert_file;
   const key = body.tls_key_file !== undefined ? String(body.tls_key_file || '').trim() : before.tls_key_file;

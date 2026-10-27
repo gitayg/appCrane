@@ -70,8 +70,8 @@ test('off by default; the read is platform-admin only', async () => {
   assert.equal(stored('app_isolation_domain'), '');
 });
 
-test('refuses a malformed domain and the platform host itself', async () => {
-  for (const domain of ['not a domain', 'localhost', 'crane.example.com', 'CRANE.example.com.']) {
+test('refuses a malformed domain', async () => {
+  for (const domain of ['not a domain', 'localhost']) {
     const r = await req('PUT', '/api/settings/isolation', ADMIN_KEY, { domain });
     assert.equal(r.status, 400, `${domain}: ${r.text}`);
   }
@@ -83,6 +83,23 @@ test('refuses a domain under which the platform host would be an app host, and s
   assert.equal(r.status, 400, r.text);
   assert.match(r.body.error.message, /would itself be an app host/);
   assert.equal(stored('app_isolation_domain'), '', 'the refused value was left in the settings table');
+});
+
+// Apps directly under the platform host (<slug>.crane.example.com next to
+// crane.example.com) are allowed: the platform host is not under itself, so it
+// never parses as an app host, and its session cookie is __Host- either way.
+test('accepts the platform host itself as the apps domain; the platform host is not an app host', async () => {
+  const r = await req('PUT', '/api/settings/isolation', ADMIN_KEY, { domain: 'CRANE.example.com.' });
+  assert.equal(r.status, 200, r.text);
+  assert.equal(r.body.domain, 'crane.example.com');
+  assert.equal(r.body.warning, null);
+  const { parseAppHost, appHost } = await import('../server/services/appOrigin.js');
+  assert.equal(parseAppHost(db, 'crane.example.com'), null);
+  assert.equal(appHost(db, 'orders', 'production'), 'orders.crane.example.com');
+  assert.deepEqual(parseAppHost(db, 'orders-sandbox.crane.example.com'), { slug: 'orders', env: 'sandbox' });
+  const off = await req('PUT', '/api/settings/isolation', ADMIN_KEY, { domain: '' });
+  assert.equal(off.status, 200, off.text);
+  assert.equal(stored('app_isolation_domain'), '');
 });
 
 test('TLS files: both or neither, and they must exist and be readable', async () => {

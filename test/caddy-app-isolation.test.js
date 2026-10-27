@@ -258,6 +258,26 @@ test('caddy:2 adapts the on-demand config: verify runs before the rewrite inside
   }
 });
 
+test('apps directly under the platform host: own site per app, the platform site still redirects, and caddy:2 matches them apart', { skip: noDocker }, () => {
+  isolation(CRANE);
+  const text = generateCaddyfile();
+  const all = sites(text);
+  assert.ok(all.has(CRANE), 'the platform site is missing');
+  assert.ok(all.has(`hub.${CRANE}`) && all.has(`hub-sandbox.${CRANE}`), 'the app sites are missing');
+  assert.match(handles(all.get(CRANE)).get('/hub*'), /redir https:\/\/hub\.crane\.example\.test\{uri\} 308/);
+  assert.doesNotMatch(all.get(CRANE), APP_PORT, 'an app is still proxied on the platform host');
+  const p = join(SCRATCH, 'Caddyfile.nested');
+  writeFileSync(p, text.replace('import /etc/caddy/sites/*.caddy\n', ''));
+  const cfg = JSON.parse(execFileSync('docker', ['run', '--rm', '-v', `${p}:/etc/caddy/Caddyfile:ro`, 'caddy:2',
+    'caddy', 'adapt', '--config', '/etc/caddy/Caddyfile', '--adapter', 'caddyfile'], { stdio: 'pipe', timeout: 120000 }).toString());
+  const hostsOf = (r) => (r.match || []).flatMap(m => m.host || []);
+  const routes = cfg.apps.http.servers.srv0.routes;
+  const platform = routes.filter(r => hostsOf(r).includes(CRANE));
+  assert.equal(platform.length, 1, 'the platform host is matched by more than one site');
+  assert.deepEqual(hostsOf(platform[0]), [CRANE], 'the platform site also matches an app host');
+  assert.ok(routes.some(r => hostsOf(r).includes(`hub.${CRANE}`)), 'no route for the app host');
+});
+
 function curl(port, host, path, headers = []) {
   const args = ['-s', '-o', '-', '-w', '\n%{http_code} %{redirect_url}', '-H', `Host: ${host}`];
   for (const h of headers) args.push('-H', h);
