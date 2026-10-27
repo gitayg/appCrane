@@ -166,7 +166,7 @@ Write the review in this shape. Keep it short, because the user wants actions, n
 
 Don't overcomplicate the fixes either. Prefer removing to adding: deleting a stale CLAUDE.md rule, an unused MCP server or a needless step beats adding a new skill. Propose a skill or hook only when a procedure really repeats.
 
-Then ask which fixes to apply. Apply only the ones the user approves. When you apply a fix:
+Number the fixes, each with its diff inline, and end with one line: *Reply `apply 1 3`, `apply all`, or `skip`.* That is the one-key apply: nothing changes until the user answers, and then you apply exactly the numbers they gave. Use the analyzer's **Top findings** table (`findings.shown`, ranked by cost with each one's share of spend, under 5% hidden) for the order. Apply only the ones the user approves. When you apply a fix:
 - for a `CLAUDE.md` edit, keep the file's style and keep rules short and imperative, with the reason attached;
 - for a permission allowlist, add only read-only or clearly safe commands, never broad patterns like `Bash(*)`, `rm`, `git push` or `curl` to arbitrary hosts;
 - for a new skill, create `.claude/skills/<name>/SKILL.md` with a precise trigger `description`.
@@ -175,10 +175,7 @@ Then ask which fixes to apply. Apply only the ones the user approves. When you a
 
 A fix only counts if the waste it targeted goes down. When you apply fixes, save the report as a baseline: `--json .claude/work-review/<YYYY-MM-DD>.json`. Make sure `.claude/work-review/` is gitignored, since the reports quote prompts. Also append one line per applied fix to `.claude/work-review/applied.md` with the date, the fix, and the signal it targets (e.g. `recurringCorrections: "don't mock the db"`).
 
-On a later run, if a baseline exists:
-- run with `--since <days since that baseline>` so only sessions after the fix are counted;
-- for each line in `applied.md`, compare the targeted signal, normalised per session;
-- say plainly which fixes worked, which didn't, and which have too few sessions to tell (fewer than about 5).
+On a later run, if a baseline exists, run with `--since <days since that baseline> --baseline <that baseline.json>`. The report gains a **Since** table that compares the tracked signals per session or as rates, so a busier week does not look worse. Each signal gets a verdict: `better`, `worse`, `about the same` (within 10%), or `too few sessions` (fewer than 5 on either side). For each line in `applied.md`, read the verdict of the signal it targets. Say plainly which fixes worked, which didn't, and which can't be judged yet. The hub shows the same comparison against about two weeks ago on each person's page.
 
 A CLAUDE.md rule that didn't reduce its signal is just context overhead. Propose rewriting it or removing it.
 

@@ -43,6 +43,7 @@
     <div id="mine" hidden>
       <h2>Last 7 days <span class="mute" id="asof"></span></h2>
       <div class="kpis" id="kpis"></div>
+      <div class="card" id="since" style="margin-top:12px" hidden></div>
       <h2>Cost at API list prices, per daily 7-day snapshot</h2>
       <div class="card"><svg id="trend" role="img" aria-label="Daily spend trend"></svg><div class="mute" id="trendNote"></div></div>
       <h2>Instruction quality</h2>
@@ -97,6 +98,36 @@ function renderMine(reports) {
   line.setAttribute('fill', 'none'); line.setAttribute('stroke', 'currentColor'); line.setAttribute('stroke-width', '2.5'); line.style.color = 'var(--accent)';
   svg.append(line);
   $('trendNote').textContent = `${reports.length} daily snapshots (each a 7-day window), ${reports[0].day} → ${r.day}. Peak ${usd(max)} at API list prices.`;
+
+  // Since about two weeks ago: did the fixes work? The newest snapshot at least
+  // 10 days older than today's, so the two 7-day windows do not overlap much.
+  const cutoff = new Date(Date.parse(r.day) - 10 * 864e5).toISOString().slice(0, 10);
+  const then = [...reports].reverse().find(x => x.day <= cutoff);
+  if (then) {
+    const per = x => Math.max(1, x.totals.sessions);
+    const vagueShare = x => { const v = x.instructionQuality.vague.prompts, a = x.instructionQuality.anchored.prompts; return v + a ? v / (v + a) : 0; };
+    const signals = [
+      ['Cost per session', x => x.totals.usd / per(x), 'lower', usd],
+      ['Cost per landed commit', x => x.outcomes?.usdPerCommit || null, 'lower', usd],
+      ['Spend on prompts that needed correcting', x => x.instructionQuality.reworkShare, 'lower', pct],
+      ['Vague prompts', vagueShare, 'lower', pct],
+      ['Re-reads of unchanged files per session', x => x.totals.redundantReads / per(x), 'lower', n => n.toFixed(1)],
+      ['Setup findings', x => x.setup ? Object.values(x.setup.findings || {}).reduce((a, n) => a + n, 0) : null, 'lower', n => String(n)],
+      ['Cache hit rate', x => x.totals.cacheHitRate, 'higher', pct],
+    ];
+    const box = $('since'); box.hidden = false; box.replaceChildren(el('strong', `Since ${then.day}`));
+    const tbl = el('table'); tbl.append(row(['Signal', 'Then', 'Now', ''], true));
+    for (const [name, f, good, fmt] of signals) {
+      const a = f(then), b = f(r);
+      if (a == null || b == null) continue;
+      const ch = a === 0 ? (b === 0 ? 0 : 1) : (b - a) / Math.abs(a);
+      const verdict = Math.abs(ch) < 0.1 ? 'about the same' : (ch < 0) === (good === 'lower') ? 'better' : 'worse';
+      const tr = row([name, fmt(a), fmt(b), verdict]);
+      tr.lastChild.className = verdict === 'better' ? 'good' : verdict === 'worse' ? 'warn' : 'mute';
+      tbl.append(tr);
+    }
+    box.append(tbl);
+  }
 
   const t = $('iq'); t.replaceChildren(row(['Prompts', 'Count', 'Median cost', 'Lookups before first edit', 'Led to rework'], true));
   for (const [name, g] of [['Vague', Q.vague], ['Anchored', Q.anchored], ['With done-criteria', Q.withCriteria], ['Without done-criteria', Q.withoutCriteria]])

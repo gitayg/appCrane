@@ -35,6 +35,7 @@ const JSON_OUT = opt('json', null);
 const ALLOW_REMOTES = args.flatMap((a, i) => a === '--allow-remote' && args[i + 1] ? [new RegExp(args[i + 1], 'i')] : []);
 const TOP = Number(opt('top', 10));
 const PRICE_FILE = opt('prices', process.env.WORK_REVIEW_PRICES || null);
+const BASELINE = opt('baseline', null);   // an earlier --json report: what changed since
 const sinceMs = Date.now() - SINCE_DAYS * 86400_000;
 
 // ── helpers ──────────────────────────────────────────────────────
@@ -582,7 +583,71 @@ const usage = (() => {
   return { sessions: mains.length, agents: obj(agents), skills: overcomplication.skillsInvoked, mcpServers: obj(mcpServers), commands: obj(commands) };
 })();
 
-const report = { generatedAt: new Date().toISOString(), root: ROOT, sinceDays: SINCE_DAYS, totals, outcomes, instructionQuality, cross, overcomplication, subagents, usage, worstSessions: perSession.slice(0, TOP), sessions: perSession };
+// ── findings: one row each, ranked by what it costs ──────────────
+// The /usage format: each finding with its dollar estimate and its share of
+// spend, smallest hidden. Mechanical waste is priced at 1.25× the session's
+// main model's input rate (the output is written to the cache once): a floor,
+// since it is then re-read on every later turn.
+const inputRate = s => { const [m] = [...s.usdByModel].sort((a, b) => b[1] - a[1])[0] || []; return (priceFor(m)?.in || 0) * 1.25 / 1e6; };
+const wasteUsd = kind => mains.reduce((a, s) => a + s.wastedTokens[kind] * inputRate(s), 0);
+const totalUsd = totals.usd || 0;
+const anchoredMedian = instructionQuality.anchored.prompts >= 3 ? instructionQuality.anchored.medianUsd : null;
+const vagueExcess = anchoredMedian == null ? 0 : allPrompts.filter(p => vague(p) && !p.nudge && p.tools > 0).reduce((a, p) => a + Math.max(0, p.usd - anchoredMedian), 0);
+const FINDING_MIN_SHARE = 0.05;
+const findingRows = [
+  { id: 'rework', title: 'Prompts that ended in a correction or interrupt', usd: instructionQuality.reworkUsd, count: allPrompts.filter(p => p.followedBy).length,
+    fix: 'Rewrite the costliest ones with the missing where / done-criteria / constraint; recurring corrections go in CLAUDE.md' },
+  { id: 'vague-prompts', title: 'Vague prompts, cost above the anchored median', usd: vagueExcess, count: instructionQuality.vague.prompts, estimate: true,
+    fix: 'Name the file, the error or what done looks like' },
+  { id: 'subagents-no-benefit', title: 'Subagent runs that gained nothing from delegating', usd: subagents.flaggedUsd, count: Object.values(subagents.flags).reduce((a, n) => a + n, 0),
+    fix: 'Do it in the main agent, or make a repeated brief a skill' },
+  { id: 'redundant-reads', title: 'Re-reading files that had not changed', usd: wasteUsd('read'), count: totals.redundantReads, floor: true,
+    fix: 'A CLAUDE.md map of where things live; read with offset/limit' },
+  { id: 'idle-reruns', title: 'Re-running commands with nothing changed', usd: wasteUsd('rerun'), count: totals.idleCommandReruns, floor: true,
+    fix: 'Run slow checks in the background and wait; fix flaky ones' },
+  { id: 'error-output', title: 'Tool errors read back into context', usd: wasteUsd('errors'), count: totals.toolErrors, floor: true,
+    fix: 'Fix the most common error in `cross.topErrors`' },
+].map(f => ({ ...f, usd: +f.usd.toFixed(4), share: totalUsd ? +(f.usd / totalUsd).toFixed(3) : 0 }))
+ .filter(f => f.count > 0).sort((a, b) => b.usd - a.usd);
+const findings = { shown: findingRows.filter(f => f.share >= FINDING_MIN_SHARE), hidden: findingRows.filter(f => f.share < FINDING_MIN_SHARE).length, minShare: FINDING_MIN_SHARE };
+
+// ── before / after: did the fixes work? ──────────────────────────
+// Compare tracked signals with an earlier report, per session (or as a rate),
+// so a busier week does not look worse. Too few sessions on either side is
+// said plainly rather than guessed at.
+const SIGNALS = [
+  ['usd per session', r => r.totals.usd / Math.max(1, r.totals.sessions), 'lower'],
+  ['cost per landed commit', r => r.outcomes?.usdPerCommit ?? null, 'lower'],
+  ['rework share of spend', r => r.instructionQuality.reworkShare, 'lower'],
+  ['vague share of prompts', r => { const v = r.instructionQuality.vague.prompts, a = r.instructionQuality.anchored.prompts; return v + a ? v / (v + a) : null; }, 'lower'],
+  ['corrections per session', r => r.totals.corrections / Math.max(1, r.totals.sessions), 'lower'],
+  ['redundant reads per session', r => r.totals.redundantReads / Math.max(1, r.totals.sessions), 'lower'],
+  ['idle re-runs per session', r => r.totals.idleCommandReruns / Math.max(1, r.totals.sessions), 'lower'],
+  ['retry loops per session', r => r.totals.retryLoops / Math.max(1, r.totals.sessions), 'lower'],
+  ['permission denials per session', r => r.totals.permissionDenials / Math.max(1, r.totals.sessions), 'lower'],
+  ['tool error rate', r => r.totals.errorRate, 'lower'],
+  ['cache hit rate', r => r.totals.cacheHitRate, 'higher'],
+  ['subagent spend with no benefit', r => r.subagents ? r.subagents.flaggedUsd / Math.max(1e-9, r.totals.usd) : null, 'lower'],
+];
+export function compare(before, after, minSessions = 5) {
+  const enough = before.totals.sessions >= minSessions && after.totals.sessions >= minSessions;
+  return {
+    sessions: { before: before.totals.sessions, after: after.totals.sessions }, enough,
+    since: before.generatedAt,
+    signals: SIGNALS.map(([name, f, good]) => {
+      const b = f(before), a = f(after);
+      if (b == null || a == null || !Number.isFinite(b) || !Number.isFinite(a)) return { name, before: b, after: a, verdict: 'no data' };
+      const change = b === 0 ? (a === 0 ? 0 : 1) : (a - b) / Math.abs(b);
+      const verdict = !enough ? 'too few sessions' : Math.abs(change) < 0.1 ? 'about the same' : (change < 0) === (good === 'lower') ? 'better' : 'worse';
+      return { name, before: +b.toFixed(4), after: +a.toFixed(4), change: +change.toFixed(3), verdict };
+    }),
+  };
+}
+
+const partial = { generatedAt: new Date().toISOString(), totals, outcomes, instructionQuality, subagents };
+const delta = BASELINE ? compare(JSON.parse(readFileSync(BASELINE, 'utf8')), partial) : null;
+
+const report = { generatedAt: partial.generatedAt, root: ROOT, sinceDays: SINCE_DAYS, totals, findings, delta, outcomes, instructionQuality, cross, overcomplication, subagents, usage, worstSessions: perSession.slice(0, TOP), sessions: perSession };
 if (JSON_OUT) writeFileSync(JSON_OUT, JSON.stringify(report, null, 2));
 
 // ── markdown summary ─────────────────────────────────────────────
@@ -614,6 +679,18 @@ out.push(`# Claude work review — last ${SINCE_DAYS} days`, '',
   `Dollars are what these tokens would cost on the Claude API at list prices as of ${T.pricesAsOf} (cache writes and reads priced separately, fast mode ×2). On a Team, Max or Enterprise seat you pay per seat, so this is the API-equivalent value of the work, not an invoice.` +
   (T.subagentsIncluded ? '' : ' Subagent runs are not included; add --include-subagents to count them.') +
   (Object.keys(T.unpricedModels).length ? ` Not priced (unknown model): ${Object.entries(T.unpricedModels).map(([m, n]) => `${m} ${k(n)} tokens`).join(', ')}; add it with --prices.` : ''), '');
+if (findings.shown.length) {
+  out.push('## Top findings', '', '| # | Finding | Cost | Share of spend | Count | Fix |', '|---|---|---|---|---|---|');
+  findings.shown.forEach((f, i) => out.push(`| ${i + 1} | ${f.title} | ${f.floor ? '≥' : f.estimate ? '≈' : ''}${usd(f.usd)} | ${(f.share * 100).toFixed(0)}% | ${f.count} | ${f.fix} |`));
+  if (findings.hidden) out.push('', `${findings.hidden} smaller finding(s) under ${findings.minShare * 100}% of spend are not shown; they are in the JSON.`);
+  out.push('');
+}
+if (delta) {
+  out.push(`## Since ${delta.since.slice(0, 10)}`, '', `Sessions: ${delta.sessions.before} before, ${delta.sessions.after} after${delta.enough ? '' : ' — too few on one side to call any change'}.`, '',
+    '| Signal | Before | After | Change | Verdict |', '|---|---|---|---|---|');
+  for (const g of delta.signals) if (g.verdict !== 'no data') out.push(`| ${g.name} | ${g.before} | ${g.after} | ${g.change > 0 ? '+' : ''}${Math.round(g.change * 100)}% | ${g.verdict} |`);
+  out.push('');
+}
 const section = (title, rows, fmt) => { if (rows.length) { out.push(`## ${title}`, ''); rows.forEach(r => out.push(`- ${fmt(r)}`)); out.push(''); } };
 const OC = overcomplication;
 {

@@ -275,3 +275,44 @@ test('commits are attributed by the session\'s own git output, not by the traile
   assert.equal(o.withClaudeTrailer, 1);
   assert.equal(o.usdPerCommit, 4, '$8 of Opus 5.5 input over 2 commits');
 });
+
+test('findings are ranked by cost, and --baseline says which signals improved', () => {
+  const mk = (withProblems) => {
+    const root = mkdtempSync(join(tmpdir(), 'work-review-'));
+    mkdirSync(join(root, '-p'));
+    for (let i = 0; i < 5; i++) {
+      const ts = new Date().toISOString();
+      const u = { input_tokens: 100_000, output_tokens: 0 };
+      const lines = [{ type: 'user', timestamp: ts, message: { role: 'user', content: 'fix the export in `src/export.js`' } }];
+      const read = (id, f) => {
+        lines.push({ type: 'assistant', timestamp: ts, message: { id: `m${id}`, model: 'claude-opus-5-5', usage: u, content: [{ type: 'tool_use', id, name: 'Read', input: { file_path: f } }] } });
+        lines.push({ type: 'user', timestamp: ts, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: 'z'.repeat(200_000) }] } });
+      };
+      read(`a${i}`, '/src/export.js');
+      if (withProblems) {
+        read(`b${i}`, '/src/export.js');                                   // re-read, nothing changed
+        lines.push({ type: 'user', timestamp: ts, message: { role: 'user', content: "no, that's the wrong file" } });
+        read(`c${i}`, '/src/other.js');
+      }
+      writeFileSync(join(root, '-p', `s${i}.jsonl`), lines.map(l => JSON.stringify(l)).join('\n'));
+    }
+    return root;
+  };
+  const before = join(mkdtempSync(join(tmpdir(), 'wr-')), 'before.json');
+  execFileSync(process.execPath, [SCRIPT, '--root', mk(true), '--json', before]);
+  const B = JSON.parse(readFileSync(before, 'utf8'));
+  const ids = B.findings.shown.map(f => f.id);
+  assert.ok(ids.includes('rework') && ids.includes('redundant-reads'), `got ${ids}`);
+  assert.equal(B.findings.shown[0].id, 'rework', 'the costliest first');
+  assert.ok(B.findings.shown.every((f, i, a) => i === 0 || a[i - 1].usd >= f.usd));
+
+  const after = join(mkdtempSync(join(tmpdir(), 'wr-')), 'after.json');
+  const md = execFileSync(process.execPath, [SCRIPT, '--root', mk(false), '--json', after, '--baseline', before], { encoding: 'utf8' });
+  const D = JSON.parse(readFileSync(after, 'utf8')).delta;
+  const v = name => D.signals.find(g => g.name === name).verdict;
+  assert.equal(D.enough, true);
+  assert.equal(v('redundant reads per session'), 'better');
+  assert.equal(v('corrections per session'), 'better');
+  assert.equal(v('usd per session'), 'better');
+  assert.match(md, /## Since/);
+});
