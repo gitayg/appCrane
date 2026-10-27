@@ -27,11 +27,15 @@ const USER_KEY = generateApiKey('dhk_user');
 db.prepare("INSERT INTO users (name,email,role,api_key_hash,active,kind) VALUES ('Admin','admin@example.test','platform_admin',?,1,'human')").run(hashApiKey(ADMIN_KEY));
 db.prepare("INSERT INTO users (name,email,role,api_key_hash,active,kind) VALUES ('User','user@example.test','user',?,1,'human')").run(hashApiKey(USER_KEY));
 
-// reloadCaddy() off Linux logs the config it would write; count those.
+// Count reload attempts. Off Linux reloadCaddy() logs the config it would
+// write; on Linux (CI) it really runs caddy, which a runner does not have, so
+// the attempt shows up as the route's "reload ... failed" warning instead.
 const log = (await import('../server/utils/logger.js')).default;
 let reloads = 0;
 const origInfo = log.info;
+const origWarn = log.warn;
 log.info = (msg, meta) => { if (String(msg).startsWith('[Caddy mock]')) reloads += 1; else origInfo(msg, meta); };
+log.warn = (msg, meta) => { if (String(msg).startsWith('Caddy reload after isolation change')) reloads += 1; else origWarn(msg, meta); };
 
 const settingsRoutes = (await import('../server/routes/settings.js')).default;
 const { errorHandler } = await import('../server/utils/errors.js');
