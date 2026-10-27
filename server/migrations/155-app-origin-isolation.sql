@@ -22,6 +22,9 @@ CREATE TABLE IF NOT EXISTS app_handoff_codes (
   app_id INTEGER NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
   app_env TEXT NOT NULL CHECK (app_env IN ('sandbox', 'production')),
   parent_token_hash TEXT NOT NULL,
+  -- sha256 of the value in the app host's __Host-cc_handoff cookie: only the
+  -- browser that started the sign-in can use the code.
+  state_hash TEXT NOT NULL,
   return_path TEXT NOT NULL DEFAULT '/',
   expires_at TEXT NOT NULL,
   used_at TEXT,

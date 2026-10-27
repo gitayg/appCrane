@@ -22,6 +22,13 @@ export const PLATFORM_SESSION_COOKIE_LEGACY = 'cc_token';
 // Paths on an app host that AppCrane answers itself (sign-in handoff, sign-out).
 export const RESERVED_APP_PATH = '/__appcrane';
 export const HANDOFF_CODE_TTL_SECONDS = 60;
+// Ties a sign-in code to the browser that started the sign-in: the app host
+// sets a random value here before sending the visitor to the platform, the
+// code carries its hash, and only a browser holding the value can use the
+// code. Without it, someone could send a victim a link with a code issued to
+// their own account and sign the victim in to the app as themselves.
+export const HANDOFF_STATE_COOKIE = '__Host-cc_handoff';
+export const HANDOFF_STATE_MAX_AGE_SECONDS = 600;
 
 const ENVS = new Set(['sandbox', 'production']);
 

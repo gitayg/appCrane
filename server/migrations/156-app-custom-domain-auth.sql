@@ -7,7 +7,7 @@
 -- apps.custom_domain_auth -- whether an app's custom domain gets AppCrane
 -- sign-in. A custom domain is served with no AppCrane sign-in (the app does
 -- its own); 1 applies the app's normal sign-in there too, through the per-app
--- sign-in handoff (153, routes/appHandoff.js).
+-- sign-in handoff (155, routes/appHandoff.js).
 --
 -- A TABLE REBUILD, NOT `ALTER TABLE apps ADD COLUMN`, for the reason 086, 090
 -- and 102 give: the newest migration containing `CREATE TABLE apps_new` must

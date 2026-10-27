@@ -5,6 +5,7 @@ import { generateSessionToken, hashApiKey } from '../services/encryption.js';
 import {
   APP_SESSION_COOKIE,
   HANDOFF_CODE_TTL_SECONDS,
+  HANDOFF_STATE_COOKIE,
   appOrigin,
   parseAppHost,
 } from '../services/appOrigin.js';
@@ -103,12 +104,17 @@ router.get('/handoff', (req, res) => {
     return refuseNoAccess(req, res, app.name || app.slug);
   }
 
+  // The hash of the app host's state cookie (set by verify's redirect). Only
+  // the browser holding that cookie can use the code this issues.
+  const state = typeof req.query.state === 'string' && /^[0-9a-f]{64}$/.test(req.query.state) ? req.query.state : null;
+  if (!state) throw new AppError('Start signing in from the app', 400, 'NO_STATE');
+
   db.prepare("DELETE FROM app_handoff_codes WHERE expires_at < datetime('now')").run();
   const code = crypto.randomBytes(32).toString('base64url');
   db.prepare(`
-    INSERT INTO app_handoff_codes (code_hash, user_id, app_id, app_env, parent_token_hash, return_path, expires_at)
-    VALUES (?, ?, ?, ?, ?, ?, datetime('now', '+' || ? || ' seconds'))
-  `).run(hashApiKey(code), session.user_id, app.id, env, session.token_hash, safeReturn(req.query.return), HANDOFF_CODE_TTL_SECONDS);
+    INSERT INTO app_handoff_codes (code_hash, user_id, app_id, app_env, parent_token_hash, state_hash, return_path, expires_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now', '+' || ? || ' seconds'))
+  `).run(hashApiKey(code), session.user_id, app.id, env, session.token_hash, state, safeReturn(req.query.return), HANDOFF_CODE_TTL_SECONDS);
 
   res.redirect(302, `${origin}/__appcrane/session?code=${encodeURIComponent(code)}`);
 });
@@ -145,6 +151,14 @@ appHostRouter.get('/session', (req, res) => {
   })();
   if (!row || row.app_id !== site.app.id || row.app_env !== site.env) {
     return page(res, 403, 'Sign-in link not valid', 'This sign-in link has expired, was already used, or belongs to another app.', true);
+  }
+  // The code must come back to the browser that asked for it.
+  const state = readCookie(req, HANDOFF_STATE_COOKIE);
+  res.clearCookie(HANDOFF_STATE_COOKIE, { httpOnly: true, secure: true, sameSite: 'lax', path: '/' });
+  const want = Buffer.from(row.state_hash, 'hex');
+  const got = Buffer.from(state ? hashApiKey(state) : '', 'hex');
+  if (got.length !== want.length || !crypto.timingSafeEqual(got, want)) {
+    return page(res, 403, 'Sign-in link not valid', 'This sign-in link was started in another browser. Open the app again to sign in.', true);
   }
 
   const parent = db.prepare(`

@@ -89,9 +89,14 @@ const cookieValue = (res, name) => {
   return line ? decodeURIComponent(line.slice(name.length + 1).split(';')[0]) : null;
 };
 
+// The app host's state cookie value for "this browser", and its hash as the
+// handoff URL carries it.
+const STATE = 'browser-state-value';
+const stateOf = (v) => hashApiKey(v);
+
 /** Platform handoff → the code it hands to the app host. */
-async function issueCode(platformToken, { app = 'hub', env = 'production', ret = '/' } = {}) {
-  const r = await call(`/api/identity/handoff?app=${app}&env=${env}&return=${encodeURIComponent(ret)}`, {
+async function issueCode(platformToken, { app = 'hub', env = 'production', ret = '/', state = STATE } = {}) {
+  const r = await call(`/api/identity/handoff?app=${app}&env=${env}&return=${encodeURIComponent(ret)}&state=${stateOf(state)}`, {
     headers: { Cookie: `__Host-cc_token=${platformToken}` },
   });
   assert.equal(r.status, 302, r.body);
@@ -99,7 +104,9 @@ async function issueCode(platformToken, { app = 'hub', env = 'production', ret =
   return { code: loc.searchParams.get('code'), location: loc, res: r };
 }
 
-const land = (code, host = `hub.${DOMAIN}`) => call(`/__appcrane/session?code=${encodeURIComponent(code)}`, { host });
+const land = (code, host = `hub.${DOMAIN}`, state = STATE) => call(`/__appcrane/session?code=${encodeURIComponent(code)}`, {
+  host, headers: state === null ? {} : { Cookie: `__Host-cc_handoff=${state}` },
+});
 
 const verifyIsolated = (app, env, headers) => call(`/api/identity/verify?app=${app}&env=${env}&host=isolated`, {
   headers: { 'X-Forwarded-Uri': '/', 'X-Forwarded-Method': 'GET', 'X-Forwarded-Host': `${env === 'sandbox' ? `${app}-sandbox` : app}.${DOMAIN}`, ...headers },
@@ -205,7 +212,7 @@ test('an expired code is refused', async () => {
   db.prepare("UPDATE app_handoff_codes SET expires_at = datetime('now', '-1 second') WHERE code_hash = ?").run(hashApiKey(code));
   const r = await land(code);
   assert.equal(r.status, 403);
-  assert.equal(r.headers['set-cookie'], undefined);
+  assert.equal(cookieValue(r, '__Host-cc_app'), null, 'no app session');
 });
 
 test("a code for one app is refused on another app's host, and is spent", async () => {
@@ -221,7 +228,7 @@ test('a sandbox code is refused on the production host', async () => {
   assert.equal(location.origin, `https://hub-sandbox.${DOMAIN}`);
   const r = await land(code, `hub.${DOMAIN}`);
   assert.equal(r.status, 403);
-  assert.equal(r.headers['set-cookie'], undefined);
+  assert.equal(cookieValue(r, '__Host-cc_app'), null, 'no app session');
 });
 
 test('an app session is refused by the platform API and by non-isolated verify', async () => {
@@ -293,7 +300,7 @@ test('a code issued before sign-out cannot be landed after it', async () => {
   await call('/api/identity/logout', { method: 'POST', headers: { Authorization: `Bearer ${plat}` } });
   const r = await land(code);
   assert.equal(r.status, 403);
-  assert.equal(r.headers['set-cookie'], undefined);
+  assert.equal(cookieValue(r, '__Host-cc_app'), null, 'no app session');
 });
 
 test('tls-ask answers 200 only for an existing app host, and only to a direct loopback caller', async () => {
@@ -357,9 +364,9 @@ test('a custom domain with AppCrane sign-in is an app host for production; witho
   try {
     assert.deepEqual(handoff.resolveAppHost(db, 'HUB.example.org:443')?.env, 'production');
     const plat = platformSession();
-    const r = await call(`/api/identity/handoff?app=hub&env=production&site=hub.example.org`, { headers: { Cookie: `__Host-cc_token=${plat}` } });
+    const r = await call(`/api/identity/handoff?app=hub&env=production&site=hub.example.org&state=${stateOf(STATE)}`, { headers: { Cookie: `__Host-cc_token=${plat}` } });
     assert.equal(new URL(r.headers.location).origin, 'https://hub.example.org');
-    const forged = await call(`/api/identity/handoff?app=hub&env=production&site=other.${DOMAIN}`, { headers: { Cookie: `__Host-cc_token=${plat}` } });
+    const forged = await call(`/api/identity/handoff?app=hub&env=production&site=other.${DOMAIN}&state=${stateOf(STATE)}`, { headers: { Cookie: `__Host-cc_token=${plat}` } });
     assert.equal(new URL(forged.headers.location).origin, `https://hub.${DOMAIN}`, "a site that is not this app's falls back to its own host");
     db.prepare('UPDATE apps SET custom_domain_auth = 0 WHERE id = ?').run(HUB);
     assert.equal(handoff.resolveAppHost(db, 'hub.example.org'), null);
@@ -367,4 +374,35 @@ test('a custom domain with AppCrane sign-in is an app host for production; witho
   } finally {
     db.prepare('UPDATE apps SET domain = NULL, custom_domain_auth = 0 WHERE id = ?').run(HUB);
   }
+});
+
+test('a sign-in code works only in the browser that started the sign-in (no login CSRF)', async () => {
+  // An attacker asks for a code with their own browser state and sends the
+  // victim the /__appcrane/session link. The victim's browser holds a different
+  // state value, or none, so the code must not sign the victim in.
+  const attacker = platformSession();
+  for (const victimState of [null, 'victim-own-state']) {
+    const { code } = await issueCode(attacker, { state: 'attacker-state' });
+    const r = await land(code, `hub.${DOMAIN}`, victimState);
+    assert.equal(r.status, 403, `victim state ${victimState}`);
+    assert.equal(cookieValue(r, '__Host-cc_app'), null, 'no app session for the victim');
+    assert.equal(db.prepare("SELECT COUNT(*) c FROM app_handoff_codes WHERE code_hash = ? AND used_at IS NOT NULL").get(hashApiKey(code)).c, 1, 'the code is spent');
+  }
+  const ok = await land((await issueCode(attacker, { state: 'attacker-state' })).code, `hub.${DOMAIN}`, 'attacker-state');
+  assert.equal(ok.status, 302, 'the browser that started it signs in');
+});
+
+test('verify sets the state cookie on the app host and sends only its hash; handoff refuses a missing state', async () => {
+  const r = await verifyIsolated('hub', 'production', {});
+  assert.equal(r.status, 302);
+  const state = cookieValue(r, '__Host-cc_handoff');
+  assert.ok(state && state.length >= 40, 'state cookie set');
+  const line = r.headers['set-cookie'].find((c) => c.startsWith('__Host-cc_handoff='));
+  assert.match(line, /HttpOnly/i); assert.match(line, /Secure/i); assert.match(line, /Path=\//);
+  const loc = new URL(r.headers.location);
+  assert.equal(loc.searchParams.get('state'), hashApiKey(state));
+  assert.ok(!r.headers.location.includes(state), 'the value itself never travels in a URL');
+
+  const none = await call('/api/identity/handoff?app=hub&env=production&return=%2F', { headers: { Cookie: `__Host-cc_token=${platformSession()}` } });
+  assert.equal(none.status, 400);
 });

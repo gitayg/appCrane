@@ -1356,7 +1356,7 @@ What does change for browser code:
 - **`/__appcrane/` is reserved** on the app's host (sign-in and sign-out); your
   app never sees requests under it.
 - **AppCrane's cookies never reach your container.** `cc_token`,
-  `__Host-cc_token` and `__Host-cc_app` are removed from the `Cookie` header
+  `__Host-cc_token`, `__Host-cc_app` and `__Host-cc_handoff` are removed from the `Cookie` header
   before the request is proxied. Your app's own cookies now belong to its host
   alone; do not set them with a `Domain=` attribute for the isolation domain,
   or every other app on it receives them.
@@ -1364,11 +1364,14 @@ What does change for browser code:
   host's storage, which an app on another host cannot read.
 
 **Sign-in is a one-time handoff.** On the first visit to an app host the visitor
-has no session for it, so AppCrane redirects the browser to the platform host.
+has no session for it, so AppCrane sets a random value in the app host's
+`__Host-cc_handoff` cookie and redirects the browser to the platform host.
 If they are signed in there (or after they sign in), and verify would let them
 into this app, AppCrane issues a single-use code that expires in seconds and
 sends the browser back to `/__appcrane/session` on the app's host. That exchanges
-the code for a session valid for **this app and environment only**, held in the
+the code for a session valid for **this app and environment only** (only in the
+browser holding the matching `__Host-cc_handoff` value, so a sign-in link sent to
+someone else signs nobody in), held in the
 host-only cookie `__Host-cc_app`, and returns the visitor to the page they asked
 for. The session ends no later than their platform session. `/__appcrane/logout`
 on the app's host ends that one app session; signing out of AppCrane ends every

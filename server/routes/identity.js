@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import crypto from 'crypto';
 import { auditLogin, logAudit } from '../middleware/audit.js';
 import { identitySecretFor, signIdentity } from '../services/identitySignature.js';
 import { existsSync } from 'fs';
@@ -7,7 +8,7 @@ import { getDb } from '../db.js';
 import { verifyPassword, generateSessionToken, hashApiKey, hashPassword } from '../services/encryption.js';
 import { AppError } from '../utils/errors.js';
 import { setSessionCookie, clearSessionCookie, readSessionCookie, readCookie } from '../utils/sessionCookie.js';
-import { APP_SESSION_COOKIE } from '../services/appOrigin.js';
+import { APP_SESSION_COOKIE, HANDOFF_STATE_COOKIE, HANDOFF_STATE_MAX_AGE_SECONDS } from '../services/appOrigin.js';
 import { isSsoOnly } from '../services/authPolicy.js';
 import { roleKeysForUser } from '../services/appDefinedRoles.js';
 import { discoverablePortalRow } from '../services/discoverableApps.js';
@@ -403,12 +404,19 @@ router.get('/verify', (req, res) => {
   // An app host signs in through the platform host: a one-time handoff that
   // comes back to the URI the visitor asked for (forward_auth runs before any
   // rewrite there, so X-Forwarded-Uri is the original).
+  // The state cookie is set on the app host (Caddy returns this response
+  // there) and its hash rides along, binding the code to this browser.
   function handoffRedirect() {
     const domain = String(process.env.CRANE_DOMAIN || '').replace(/^https?:\/\//, '').replace(/\/+$/, '');
     const base = domain ? `https://${domain}` : craneUrl;
+    const state = crypto.randomBytes(32).toString('base64url');
+    res.cookie(HANDOFF_STATE_COOKIE, state, {
+      httpOnly: true, secure: true, sameSite: 'lax', path: '/', maxAge: HANDOFF_STATE_MAX_AGE_SECONDS * 1000,
+    });
     const p = new URLSearchParams({
       app: String(req.query.app || ''),
       env: isolatedEnv,
+      state: hashApiKey(state),
       return: String(req.headers['x-forwarded-uri'] || '/'),
       ...(req.headers['x-forwarded-host'] && { site: String(req.headers['x-forwarded-host']) }),
     });
@@ -446,7 +454,36 @@ router.get('/verify', (req, res) => {
   //   (1) X-API-Key  → users.api_key_hash (no expiry, no app_id)
   //   (2) Bearer / cc_token → identity_sessions
   let session = null;
-  if (apiKey) {
+  if (apiKey && apiKey.startsWith('dhk_uak_')) {
+    // v2.124.0: a personal app sign-in key (migration 153). It opens ONE app's
+    // gate and nothing else, so the app it names must be the app being entered.
+    // A request with no ?app= is a bare verify, not entering any app, and is
+    // refused too — otherwise the key would answer "who am I" platform-wide.
+    // What it grants is still the user's CURRENT role on that app, resolved
+    // below exactly as for a browser session.
+    const k = db.prepare(`
+      SELECT k.id AS key_id, k.app_id AS key_app_id, a.slug AS key_app_slug,
+             u.id as user_id, u.name, u.email, u.username, u.avatar_url, u.phone, u.year_of_birth,
+             u.role as crane_role, u.active as user_active
+      FROM user_app_keys k
+      JOIN users u ON u.id = k.user_id
+      JOIN apps a ON a.id = k.app_id
+      WHERE k.key_hash = ?
+        AND k.revoked_at IS NULL
+        AND (k.expires_at IS NULL OR k.expires_at > datetime('now'))
+    `).get(hashApiKey(apiKey));
+    if (!k) throw new AppError('Invalid, revoked or expired app key', 401, 'INVALID_TOKEN');
+    const requested = new URL(req.url, 'http://x').searchParams.get('app');
+    if (!requested || requested !== k.key_app_slug) {
+      throw new AppError('This key signs in only to the app it was issued for', 403, 'KEY_SCOPE_RESTRICTED');
+    }
+    try { db.prepare("UPDATE user_app_keys SET last_used_at = datetime('now') WHERE id = ?").run(k.key_id); } catch (_) {}
+    session = {
+      user_id: k.user_id, name: k.name, email: k.email, username: k.username, avatar_url: k.avatar_url,
+      phone: k.phone, year_of_birth: k.year_of_birth, crane_role: k.crane_role, user_active: k.user_active,
+      app_id: k.key_app_id, expires_at: null, via_app_key: true,
+    };
+  } else if (apiKey) {
     const keyHash = hashApiKey(apiKey);
     const u = db.prepare(`
       SELECT id as user_id, name, email, username, avatar_url, phone, year_of_birth,
@@ -642,6 +679,15 @@ router.get('/verify', (req, res) => {
   if (appRoleKeys.length > 0) {
     res.setHeader('X-AppCrane-App-Roles', appRoleKeys.join(','));
   }
+
+  // v2.124.0: say when the caller signed in with an app key rather than a
+  // browser session, so an app can let a script do less than its person can
+  // (the Work Review hub accepts an app key on its upload endpoint only).
+  // Present only on that path; Caddy strips any copy a client sends. It is NOT
+  // in the v1 signature: adding a header to IDENTITY_SIGNED_HEADERS changes the
+  // signed string, and every deployed app on an older appcrane-tenant would
+  // start rejecting every request.
+  if (session.via_app_key) res.setHeader('X-AppCrane-Auth-Via', 'app-key');
 
   // v2.97.0: sign everything above with the app's own secret, LAST, so the
   // signature covers exactly the values Caddy is about to copy. The app checks

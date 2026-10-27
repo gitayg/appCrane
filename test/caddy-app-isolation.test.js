@@ -58,7 +58,7 @@ function handles(body) {
   return out;
 }
 
-const STRIP3 = 'request_header Cookie "(^|;\\s*)(cc_token|__Host-cc_token|__Host-cc_app)=[^;]*" ""';
+const STRIP3 = 'request_header Cookie "(^|;\\s*)(cc_token|__Host-cc_token|__Host-cc_app|__Host-cc_handoff)=[^;]*" ""';
 const APP_PORT = /reverse_proxy 127\.0\.0\.1:4\d{3}/;
 
 test('off: byte-identical to the generator before per-app origins', () => {

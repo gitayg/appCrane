@@ -1,7 +1,11 @@
 {
-  "2.124.0": [
+  "2.125.0": [
     "Platform admins can now give every app its own web address, so one app can no longer act as you inside another app or reach your AppCrane sign-in. Old links keep working, apps need no changes, and everyone signs in again once when it is turned on. It needs a wildcard DNS record, and stays off until an admin sets it up in Settings > Security.",
     "Apps on their own custom domain can now ask visitors to sign in with AppCrane."
+  ],
+  "2.124.0": [
+    "You can give a script or a scheduled job its own key for one app, from the MCP page. The key signs you in to that app only, does nothing anywhere else in AppCrane, and stops working as soon as you lose access to the app.",
+    "Apps can tell when a request came from such a key, so an app can let a script do less than you can, for example upload but not read."
   ],
   "2.123.2": [
     "Three building blocks AppCrane relies on for handling uploads, web requests and e-mail were updated to close newly reported security problems."

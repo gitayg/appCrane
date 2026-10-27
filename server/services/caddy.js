@@ -8,7 +8,7 @@ import { platformEmbedAncestors, mergeAncestors } from '../utils/embed.js';
 import { safeFrameAncestors } from '../utils/frameAncestors.js';
 import {
   isolationDomain, isolationTls, appHost, RESERVED_APP_PATH,
-  APP_SESSION_COOKIE, PLATFORM_SESSION_COOKIE_ISOLATED, PLATFORM_SESSION_COOKIE_LEGACY,
+  APP_SESSION_COOKIE, HANDOFF_STATE_COOKIE, PLATFORM_SESSION_COOKIE_ISOLATED, PLATFORM_SESSION_COOKIE_LEGACY,
 } from './appOrigin.js';
 
 const CADDY_ADMIN = process.env.CADDY_ADMIN_URL || 'http://localhost:2019';
@@ -33,7 +33,7 @@ function platformCookieStrip(indent) {
 // cookies — the legacy and __Host- platform cookies, and the app-scope cookie
 // its own host holds. Same two-pass, anchored shape as platformCookieStrip.
 function isolatedCookieStrip(indent) {
-  const names = [PLATFORM_SESSION_COOKIE_LEGACY, PLATFORM_SESSION_COOKIE_ISOLATED, APP_SESSION_COOKIE].join('|');
+  const names = [PLATFORM_SESSION_COOKIE_LEGACY, PLATFORM_SESSION_COOKIE_ISOLATED, APP_SESSION_COOKIE, HANDOFF_STATE_COOKIE].join('|');
   return `${indent}request_header Cookie "(^|;\\s*)(${names})=[^;]*" ""\n` +
          `${indent}request_header Cookie "^;\\s*" ""\n`;
 }
@@ -72,6 +72,10 @@ const IDENTITY_HEADERS = [
   // be rejected by a verifying app anyway; stripping it keeps the rule simple.
   'X-AppCrane-Identity-Ts',
   'X-AppCrane-Identity-Sig',
+  // v2.124.0: 'app-key' when the caller signed in with a personal app sign-in
+  // key (dhk_uak_*) instead of a browser session. An app that lets a script do
+  // less than its person relies on it, so a client must not be able to send it.
+  'X-AppCrane-Auth-Via',
 ];
 
 /**

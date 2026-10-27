@@ -70,6 +70,7 @@ import oauthConsentRoutes from './routes/oauthConsent.js';
 import viewAsRoutes from './routes/viewAs.js';
 import { viewAsWriteGuard } from './middleware/viewAsGuard.js';
 import userMcpKeysRoutes from './routes/userMcpKeys.js';
+import userAppKeysRoutes from './routes/userAppKeys.js';
 import meRoutes from './routes/me.js';
 import filesRoutes, { sweepStagedFiles } from './routes/files.js';
 import stagedFilesRoutes, { sweepChunkedUploads } from './routes/stagedFiles.js';
@@ -1130,6 +1131,7 @@ app.use('/api/settings', settingsRoutes); // General settings (branding, etc.)
 app.use('/api', meRoutes);               // /api/me — proxied-app identity endpoint (cookie/Bearer/X-API-Key)
 app.use('/api', userMcpKeysRoutes);      // /api/me/mcp-keys — personal MCP keys
 app.use('/api/files/staged', stagedFilesRoutes);   // chunked staged uploads: POST /chunked, PUT /:handle?offset=N, POST /:handle/finalize
+app.use('/api/me/app-keys', userAppKeysRoutes); // personal app sign-in keys (dhk_uak_*), v2.124.0
 app.use('/api/files', filesRoutes);      // /api/files/staged — staged uploads for MCP-E
 app.use('/api/github-service', githubServiceRoutes); // service-account config + verify (admin)
 app.use('/api/github-app/webhook', githubAppWebhookRoutes); // GitHub App webhook receiver (no auth: X-Hub-Signature-256 only) — must precede the admin router below
