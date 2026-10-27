@@ -245,3 +245,33 @@ test('--allow-remote keeps only sessions from matching git repositories', () => 
   assert.deepEqual(r.sessions.map(s => s.sessionId), ['w'], 'only the work repo');
   assert.equal(r.totals.excludedByRemote, 3, 'side project, no remote and a deleted directory are all left out');
 });
+
+test('commits are attributed by the session\'s own git output, not by the trailer alone', () => {
+  const root = mkdtempSync(join(tmpdir(), 'work-review-'));
+  mkdirSync(join(root, '-p'));
+  const repo = join(root, 'repo'); mkdirSync(repo);
+  const git = (...a) => execFileSync('git', ['-C', repo, ...a], { encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@x', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@x' } }).trim();
+  execFileSync('git', ['init', '-q', repo]);
+  const commit = (file, msg) => { writeFileSync(join(repo, file), 'a\nb\nc\n'); git('add', file); git('commit', '-q', '-m', msg); return git('rev-parse', 'HEAD'); };
+  const start = Date.now() - 60_000;
+  const a = commit('a.txt', 'Add the billing export endpoint\n\nCo-Authored-By: Claude <noreply@anthropic.com>');
+  commit('b.txt', 'Tidy the invoice rounding helper used by billing');                                // quiet commit by the session
+  commit('c.txt', 'Somebody else\'s Claude session changed this\n\nCo-Authored-By: Claude <noreply@anthropic.com>');  // same window, not ours
+  const ts = new Date(start).toISOString(), te = new Date().toISOString();
+  const tool = (id, command, out) => [
+    { type: 'assistant', cwd: repo, timestamp: ts, message: { id: 'm' + id, model: 'claude-opus-5-5', content: [{ type: 'tool_use', id, name: 'Bash', input: { command } }], usage: { input_tokens: 1e6, output_tokens: 0 } } },
+    { type: 'user', cwd: repo, timestamp: te, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: out }] } },
+  ];
+  writeFileSync(join(root, '-p', 's.jsonl'), [
+    { type: 'user', cwd: repo, timestamp: ts, message: { role: 'user', content: 'ship the export' } },
+    ...tool('t1', `git commit -m "Add the billing export endpoint"`, `[main ${a.slice(0, 7)}] Add the billing export endpoint\n 1 file changed, 3 insertions(+)`),
+    ...tool('t2', `git commit -q -m "Tidy the invoice rounding helper used by billing"`, ''),
+  ].map(l => JSON.stringify(l)).join('\n'));
+  const out = join(root, 'r.json');
+  execFileSync(process.execPath, [SCRIPT, '--root', join(root, '-p'), '--json', out]);
+  const o = JSON.parse(readFileSync(out, 'utf8')).outcomes;
+  assert.equal(o.commits, 2, 'the reported sha and the quiet commit, not the other session\'s');
+  assert.equal(o.linesAdded, 6);
+  assert.equal(o.withClaudeTrailer, 1);
+  assert.equal(o.usdPerCommit, 4, '$8 of Opus 5.5 input over 2 commits');
+});

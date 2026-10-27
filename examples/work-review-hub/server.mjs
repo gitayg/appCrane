@@ -88,6 +88,7 @@ export function validate(p) {
       ...nums(p.subagents || {}, ['runs', 'usd', 'startupUsd', 'parallelShare', 'flaggedUsd', 'repeatedDelegations'], 'subagents'),
       flags: Object.fromEntries(Object.entries(p.subagents?.flags || {}).filter(([k, v]) => /^[a-z-]{1,40}$/.test(k) && isNum(v)).slice(0, 10)),
     },
+    outcomes: nums(p.outcomes || {}, ['commits', 'linesAdded', 'linesDeleted', 'sessionsWithCommits', 'withClaudeTrailer', 'usdPerCommit', 'usdWithoutCommit', 'sessionsWithoutCommit'], 'outcomes'),
     setup: p.setup ? {
       ...nums(p.setup, ['alwaysOnTokens', 'agents', 'skills', 'mcpServers', 'hooks', 'multiAgentFrameworks'], 'setup'),
       findings: Object.fromEntries(Object.entries(p.setup.findings || {}).filter(([k, v]) => /^[a-z-]{1,40}$/.test(k) && isNum(v)).slice(0, 40)),
@@ -133,6 +134,7 @@ function team() {
     usdTotal: +latest.reduce((a, s) => a + (s.totals.usd || 0), 0).toFixed(2),
     median: {
       usd: median(latest.map(s => s.totals.usd || 0)),
+      usdPerCommit: median(latest.map(s => s.outcomes?.usdPerCommit).filter(x => x > 0)),
       reworkShare: median(latest.map(s => s.instructionQuality.reworkShare)),
       vagueShare: median(latest.map(s => { const v = s.instructionQuality.vague.prompts, a = s.instructionQuality.anchored.prompts; return v + a ? v / (v + a) : 0; })),
       cacheHitRate: median(latest.map(s => s.totals.cacheHitRate)),

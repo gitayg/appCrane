@@ -116,6 +116,7 @@ export function buildPayload(report, { now = new Date(), setup = null, allowExce
       returnsCurve: (O.returnsCurve || []).slice(0, 5).map(b => pickNums(b, ['bin', 'sessions', 'avgTokens', 'avgEditsAndCommits', 'outputPerMillionTokens'])),
       ...pickNums(O, ['medianBaselineContextTokens', 'subagentRuns', 'ceremonyCalls', 'nudgePrompts', 'toolCallsPerPrompt']),
     },
+    outcomes: pickNums(report.outcomes, ['commits', 'linesAdded', 'linesDeleted', 'sessionsWithCommits', 'withClaudeTrailer', 'usdPerCommit', 'usdWithoutCommit', 'sessionsWithoutCommit']),
     subagents: {
       ...pickNums(report.subagents, ['runs', 'usd', 'startupUsd', 'parallelShare', 'flaggedUsd']),
       flags: Object.fromEntries(Object.entries(report.subagents?.flags || {}).filter(([k]) => /^[a-z-]{1,40}$/.test(k)).map(([k, v]) => [k, num(v)])),

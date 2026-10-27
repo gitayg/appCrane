@@ -142,7 +142,7 @@ function analyzeFile(path) {
     toolCalls: 0, toolCounts: new Map(), errors: [], redundantReads: [], repeatedCmds: [],
     retryLoops: [], editMisses: 0, denials: [], bigOutputs: [], corrections: [], interrupts: 0,
     compactions: 0, searchBursts: 0, wastedTokens: { read: 0, rerun: 0, errors: 0 },
-    edits: 0, commits: 0, prompts: [], agentCalls: 0, agentUses: [], commands: new Map(), filesRead: new Set(), toolOutChars: 0, lastText: '', startupUsd: null, ceremony: 0, skills: new Map(), promptChars: 0, maxPrompt: 0, nudges: 0, baselineCtx: null, singleToolTurns: 0, multiToolTurns: 0, cmdHeads: new Map(),
+    edits: 0, commits: 0, prompts: [], agentCalls: 0, agentUses: [], commitShas: new Set(), commitSubjects: new Set(), commands: new Map(), filesRead: new Set(), toolOutChars: 0, lastText: '', startupUsd: null, ceremony: 0, skills: new Map(), promptChars: 0, maxPrompt: 0, nudges: 0, baselineCtx: null, singleToolTurns: 0, multiToolTurns: 0, cmdHeads: new Map(),
   };
   const seenMsg = new Set();
   const pending = new Map();          // tool_use_id -> {name, input, key}
@@ -260,6 +260,14 @@ function analyzeFile(path) {
         const p = pending.get(r.tool_use_id) || { name: '?', key: '?' };
         const out = textOf(r.content);
         s.toolOutChars += out.length;
+        // `git commit` prints "[branch abc1234] subject": the session's own proof of
+        // which commit it made. Merges and amends print the same way.
+        if (p.name === 'Bash' && /\bgit\b[^|;&]*\bcommit\b/.test(p.input?.command || '')) {
+          for (const m of out.matchAll(/^\[[^\]\n]*?\s([0-9a-f]{7,40})\]/gm)) s.commitShas.add(m[1]);
+          // `git commit -q` prints nothing, so also keep the subject line it was given.
+          const msg = (p.input.command.match(/\s-m\s+(["'])([\s\S]*?)(?:\1|$)/) || [])[2];
+          if (!r.is_error && msg && msg.split('\n')[0].trim().length >= 12) s.commitSubjects.add(msg.split('\n')[0].trim());
+        }
         // ~4 chars/token; the output sits in context for the rest of the session, this is the floor.
         if (p.wasted) s.wastedTokens[p.wasted] += Math.round(out.length / 4);
         if (r.is_error) s.wastedTokens.errors += Math.round(out.length / 4);
@@ -413,6 +421,63 @@ const totals = {
 };
 const cross = crossSession(sessions);
 
+// ── outcomes: which commits did each session land? ───────────────
+// A commit counts for a session when that session's own `git commit` output
+// named it ("[branch abc1234] ..."), matched against the repository's log for
+// its size. A time window plus the Co-Authored-By: Claude trailer is not
+// enough: other people's Claude sessions write the same trailer, and a merge
+// from main brings their commits into the window. The trailer is still
+// reported, as the share of landed commits that carry it.
+const commitsOf = (() => {
+  const cache = new Map();
+  return cwd => {
+    if (!cwd) return [];
+    let top;
+    try { top = execFileSync('git', ['-C', cwd, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 }).trim(); } catch { return []; }
+    if (!cache.has(top)) {
+      const list = [];
+      try {
+        const out = execFileSync('git', ['-C', top, 'log', '--all', `--since=${SINCE_DAYS + 1} days ago`, '--format=@@%H\x1f%ct\x1f%(trailers:key=Co-Authored-By,valueonly,separator=;)\x1f%s', '--shortstat'],
+          { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 20_000, maxBuffer: 64 * 1024 * 1024 });
+        for (const chunk of out.split('@@').slice(1)) {
+          const [head, ...rest] = chunk.split('\n');
+          const [sha, ct, trailers, subject] = head.split('\x1f');
+          const stat = rest.join(' ');
+          list.push({ sha, t: Number(ct) * 1000, subject: (subject || '').trim(), claude: /claude/i.test(trailers || ''),
+            added: Number(stat.match(/(\d+) insertion/)?.[1] || 0), deleted: Number(stat.match(/(\d+) deletion/)?.[1] || 0) });
+        }
+      } catch {}
+      cache.set(top, list);
+    }
+    return cache.get(top);
+  };
+})();
+const claimed = new Set();
+for (const s of mains) {
+  s.landed = [];
+  if (!s.start) continue;
+  for (const c of commitsOf(s.cwd)) {
+    if (claimed.has(c.sha)) continue;
+    const bySha = [...s.commitShas].some(short => c.sha.startsWith(short));
+    const bySubject = s.commitSubjects.has(c.subject) && c.t >= s.start - 60_000 && c.t <= s.end + 10 * 60_000;
+    if (bySha || bySubject) { s.landed.push(c); claimed.add(c.sha); }
+  }
+}
+const withCommits = mains.filter(s => s.landed.length);
+const landedCount = withCommits.reduce((a, s) => a + s.landed.length, 0);
+const outcomes = {
+  commits: landedCount,
+  linesAdded: withCommits.reduce((a, s) => a + s.landed.reduce((b, c) => b + c.added, 0), 0),
+  linesDeleted: withCommits.reduce((a, s) => a + s.landed.reduce((b, c) => b + c.deleted, 0), 0),
+  sessionsWithCommits: withCommits.length,
+  withClaudeTrailer: withCommits.reduce((a, s) => a + s.landed.filter(c => c.claude).length, 0),
+  usdPerCommit: landedCount ? +(withCommits.reduce((a, s) => a + s.usd, 0) / landedCount).toFixed(4) : null,
+  // Not waste by itself (research and questions land no commit), but the
+  // number to look at first when spend is high and output is low.
+  usdWithoutCommit: +mains.filter(s => !s.landed.length).reduce((a, s) => a + s.usd, 0).toFixed(4),
+  sessionsWithoutCommit: mains.length - withCommits.length,
+};
+
 // ── subagents: was each delegation worth its overhead? ───────────
 // A subagent pays its own start-up context and returns only a report. That is
 // worth it for parallel work, for isolating a lot of reading from the main
@@ -480,7 +545,7 @@ const perSession = sessions.map(s => ({
   start: s.start && new Date(s.start).toISOString(), minutes: s.start ? Math.round((s.end - s.start) / 60000) : 0,
   firstPrompt: clip(s.userPrompts[0] || '', 120), turns: s.turns, toolCalls: s.toolCalls, errors: s.errors.length,
   redundantReads: s.redundantReads.length, retryLoops: s.retryLoops, corrections: s.corrections, interrupts: s.interrupts,
-  compactions: s.compactions, tokens: s.usage, usd: +s.usd.toFixed(4), edits: s.edits, commits: s.commits, subagents: s.agentCalls, overcomplication: s.overcomplication,
+  compactions: s.compactions, tokens: s.usage, usd: +s.usd.toFixed(4), landedCommits: s.landed?.length ?? 0, edits: s.edits, commits: s.commits, subagents: s.agentCalls, overcomplication: s.overcomplication,
   wasteScore: s.redundantReads.length + 2 * s.retryLoops.length + s.errors.length + 3 * s.corrections.length + s.interrupts + 2 * s.compactions,
 })).sort((a, b) => b.wasteScore - a.wasteScore);
 
@@ -517,7 +582,7 @@ const usage = (() => {
   return { sessions: mains.length, agents: obj(agents), skills: overcomplication.skillsInvoked, mcpServers: obj(mcpServers), commands: obj(commands) };
 })();
 
-const report = { generatedAt: new Date().toISOString(), root: ROOT, sinceDays: SINCE_DAYS, totals, instructionQuality, cross, overcomplication, subagents, usage, worstSessions: perSession.slice(0, TOP), sessions: perSession };
+const report = { generatedAt: new Date().toISOString(), root: ROOT, sinceDays: SINCE_DAYS, totals, outcomes, instructionQuality, cross, overcomplication, subagents, usage, worstSessions: perSession.slice(0, TOP), sessions: perSession };
 if (JSON_OUT) writeFileSync(JSON_OUT, JSON.stringify(report, null, 2));
 
 // ── markdown summary ─────────────────────────────────────────────
@@ -529,6 +594,8 @@ out.push(`# Claude work review — last ${SINCE_DAYS} days`, '',
   `Root: \`${ROOT}\`${PROJECT ? ` · project filter: \`${PROJECT}\`` : ''}`, '',
   `| Metric | Value |`, `|---|---|`,
   `| Cost at API list prices (not your bill on a seat plan) | **${usd(T.usd)}**${byModel ? ` — ${byModel}` : ''} |`,
+  `| Commits landed (Claude-attributed) · cost per commit | ${outcomes.commits} (+${outcomes.linesAdded}/−${outcomes.linesDeleted} lines) · ${outcomes.usdPerCommit == null ? '—' : usd(outcomes.usdPerCommit)} |`,
+  `| Spend in sessions that landed no commit | ${usd(outcomes.usdWithoutCommit)} in ${outcomes.sessionsWithoutCommit} of ${T.sessions} sessions |`,
   `| Sessions (subagent runs) | ${T.sessions} (${T.subagentRuns}) |`,
   `| Model turns / tool calls / your prompts | ${T.turns} / ${T.toolCalls} / ${T.userPrompts} |`,
   `| Tokens in (fresh · cache read · cache write) / out | ${k(U.input)} · ${k(U.cacheRead)} · ${k(U.cacheWrite)} / ${k(U.output)} |`,

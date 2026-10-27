@@ -83,6 +83,7 @@ function renderMine(reports) {
   $('kpis').replaceChildren(
     kpi('Cost at API list prices (not your seat bill)', usd(T.usd)),
     kpi('Spent on prompts that needed correcting', `${pct(Q.reworkShare)} · ${usd(Q.reworkUsd)}`, Q.reworkShare > 0.15 ? 'warn' : ''),
+    kpi('Commits landed · cost per commit', r.outcomes ? `${r.outcomes.commits} · ${r.outcomes.commits ? usd(r.outcomes.usdPerCommit) : '—'}` : '—'),
     kpi('Vague prompts', `${Q.vague.prompts} / ${Q.vague.prompts + Q.anchored.prompts}`),
     kpi('Cache hit rate', pct(T.cacheHitRate), T.cacheHitRate > 0.85 ? 'good' : ''),
     kpi('Tool error rate', pct(T.errorRate), T.errorRate > 0.1 ? 'warn' : ''),
@@ -140,7 +141,7 @@ function renderTeam(T) {
   b.append(el('p', `${T.people} people active in the last ${T.activeDays} days · ${usd(T.usdTotal)} at API list prices (7-day windows).`, 'mute'));
   const m = T.median, t = el('table');
   t.append(row(['Median per person', ''], true));
-  for (const [l, v] of [['Cost at API list prices', usd(m.usd)], ['Spend on prompts that needed correcting', pct(m.reworkShare)], ['Share of prompts that were vague', pct(m.vagueShare)],
+  for (const [l, v] of [['Cost at API list prices', usd(m.usd)], ['Cost per landed commit', m.usdPerCommit ? usd(m.usdPerCommit) : '—'], ['Spend on prompts that needed correcting', pct(m.reworkShare)], ['Share of prompts that were vague', pct(m.vagueShare)],
     ['Cache hit rate', pct(m.cacheHitRate)], ['Tool error rate', pct(m.errorRate)], ['CLAUDE.md tokens on every request', k(m.alwaysOnTokens)]]) t.append(row([l, v]));
   b.append(t);
   const list = (title, obj) => {
