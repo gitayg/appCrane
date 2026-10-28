@@ -1,4 +1,7 @@
 {
+  "2.125.6": [
+    "Renaming an app no longer breaks rolling back: releases from before the rename can be restored again. A rename also redeploys each environment once, instead of once for every release the app ever had."
+  ],
   "2.125.5": [
     "When a deploy fails, AppCrane now says why wherever you check on it: the deployment list, the deploy log, and the deploy tools for agents and CI all carry a one-line reason, instead of just \"failed\"."
   ],

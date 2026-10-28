@@ -1,5 +1,5 @@
 import { existsSync, renameSync } from 'fs';
-import { join } from 'path';
+import { join, sep } from 'path';
 import { getDb } from '../db.js';
 import { getPortsForSlot } from './portAllocator.js';
 import { resolveSafe } from '../utils/paths.js';
@@ -176,9 +176,18 @@ export async function renameApp({ app, newSlug, redirect = true, user }) {
     }
   }
 
+  // deployments.release_path is absolute, under the directory just moved.
+  // Left naming the old slug, rollback and promote refuse every release from
+  // before the rename with "Release directory missing on disk".
+  const oldPrefix = oldDir + sep;
+  db.prepare('UPDATE deployments SET release_path = ? || substr(release_path, ?) WHERE app_id = ? AND substr(release_path, 1, ?) = ?')
+    .run(newDir + sep, oldPrefix.length + 1, app.id, oldPrefix.length, oldPrefix);
+
   await reloadCaddy().catch((e) => log.warn(`Caddy reload after rename: ${e.message}`));
 
-  const liveEnvs = db.prepare("SELECT env FROM deployments WHERE app_id = ? AND status = 'live'").all(app.id);
+  // DISTINCT: past releases keep status 'live', so without it this was one
+  // redeploy per release ever shipped, all started at once.
+  const liveEnvs = db.prepare("SELECT DISTINCT env FROM deployments WHERE app_id = ? AND status = 'live'").all(app.id);
   const updatedApp = db.prepare('SELECT * FROM apps WHERE id = ?').get(app.id);
   const ports = getPortsForSlot(updatedApp.slot);
 
