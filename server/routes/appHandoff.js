@@ -66,7 +66,12 @@ function safeReturn(value) {
   return value;
 }
 
+// Shown inside the dashboard's app tab too, so the platform may frame it;
+// with the global X-Frame-Options SAMEORIGIN the browser would hide the
+// message behind "refused to connect".
 function page(res, status, title, message, retry) {
+  res.removeHeader('X-Frame-Options');
+  res.setHeader('Content-Security-Policy', `frame-ancestors https://${craneDomain()}`);
   const esc = (v) => String(v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
   res.status(status).type('html').send(`<!doctype html><meta charset="utf-8"><title>${esc(title)}</title>`
     + `<body style="font-family:system-ui,sans-serif;max-width:40rem;margin:4rem auto;padding:0 1rem">`

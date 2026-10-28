@@ -1,4 +1,7 @@
 {
+  "2.125.4": [
+    "With app isolation on, apps opened inside the dashboard showed \"This content is blocked\" instead of the app. They open again, and a sign-in problem inside an app tab now shows its message instead of a blank box."
+  ],
   "2.125.3": [
     "Housekeeping: a tool used only to build the dashboard was updated to close newly reported security problems."
   ],

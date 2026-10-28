@@ -59,6 +59,17 @@ export function isolationTls(db) {
   return cert && key ? { cert, key } : null;
 }
 
+/**
+ * The dashboard frames apps in its app tabs. Its CSP allows frames from
+ * 'self' only, which was every app while apps lived under /<slug>; on their
+ * own hosts they need the isolation domain added, or the browser refuses the
+ * frame ("This content is blocked"). Off, the policy is returned unchanged.
+ */
+export function withAppFrames(db, csp) {
+  const base = isolationDomain(db);
+  return base ? csp.replace("frame-src 'self'", `frame-src 'self' https://*.${base}`) : csp;
+}
+
 export function appHost(db, slug, env) {
   const base = isolationDomain(db);
   if (!base || !ENVS.has(env)) return null;

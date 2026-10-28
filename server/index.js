@@ -50,7 +50,7 @@ import notificationsRoutes from './routes/notifications.js';
 import appRolesRoutes from './routes/appRoles.js';
 import identityRoutes from './routes/identity.js';
 import appHandoffRoutes, { appHostRouter } from './routes/appHandoff.js';
-import { RESERVED_APP_PATH } from './services/appOrigin.js';
+import { RESERVED_APP_PATH, withAppFrames } from './services/appOrigin.js';
 import settingsRoutes from './routes/settings.js';
 import configRoutes from './routes/config.js';
 import enhancementsRoutes from './routes/enhancements.js';
@@ -197,10 +197,11 @@ const HTML_CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsaf
  * "anything that isn't the SPA".
  */
 const LEGACY_HTML_CSP = HTML_CSP.replace("script-src 'self'", "script-src 'self' 'unsafe-inline'");
+const htmlCsp = (csp = HTML_CSP) => withAppFrames(getDb(), csp);
 const LEGACY_INLINE_PAGES = new Set(['login.html']);
 
 function sendHtml(res, filePath) {
-  res.setHeader('Content-Security-Policy', HTML_CSP);
+  res.setHeader('Content-Security-Policy', htmlCsp());
   // SPA shell HTML must always be re-fetched so the latest auth-check JS
   // runs on every navigation. Without this, browser back/forward can
   // restore a cached page that bypasses the post-logout redirect.
@@ -226,7 +227,7 @@ app.use('/docs', express.static(join(__dirname, '..', 'docs'), {
     if (filePath.endsWith('.html')) {
       const needsLegacy = LEGACY_INLINE_PAGES.has(basename(filePath))
         && !filePath.includes(`${sep}admin-app${sep}`);
-      res.setHeader('Content-Security-Policy', needsLegacy ? LEGACY_HTML_CSP : HTML_CSP);
+      res.setHeader('Content-Security-Policy', htmlCsp(needsLegacy ? LEGACY_HTML_CSP : HTML_CSP));
     }
   },
 }));
@@ -1175,7 +1176,7 @@ function applyEmbedHeaders(req, res, baseCsp = HTML_CSP) {
   const fa = frameAncestorsForRedirect(req.query.redirect);
   if (!fa) return false;
   res.removeHeader('X-Frame-Options');
-  res.setHeader('Content-Security-Policy', `${baseCsp}; frame-ancestors ${fa}`);
+  res.setHeader('Content-Security-Policy', `${htmlCsp(baseCsp)}; frame-ancestors ${fa}`);
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
   res.setHeader('Pragma', 'no-cache');
   return true;
@@ -1188,7 +1189,7 @@ function applyEmbedHeaders(req, res, baseCsp = HTML_CSP) {
 function loginHandler(req, res) {
   const loginPage = join(__dirname, '..', 'docs', 'login.html');
   if (applyEmbedHeaders(req, res, LEGACY_HTML_CSP)) return res.sendFile(loginPage);
-  res.setHeader('Content-Security-Policy', LEGACY_HTML_CSP);
+  res.setHeader('Content-Security-Policy', htmlCsp(LEGACY_HTML_CSP));
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
   res.setHeader('Pragma', 'no-cache');
   res.sendFile(loginPage);
