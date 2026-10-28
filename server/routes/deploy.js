@@ -271,7 +271,7 @@ router.get('/:slug/deployments/:env/:id/log', requireAppAccess, (req, res) => {
   );
   if (!deploy) throw new AppError('Deployment not found', 404, 'NOT_FOUND');
 
-  res.json({ log: deploy.log || '', status: deploy.status });
+  res.json({ log: deploy.log || '', status: deploy.status, failure_reason: deploy.failure_reason ?? null });
 });
 
 /**

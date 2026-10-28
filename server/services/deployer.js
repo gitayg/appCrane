@@ -488,6 +488,7 @@ export function assertNoInflightDeploy(db, appId, env, slug) {
   const ids = rows.map(r => r.id);
   db.prepare(
     `UPDATE deployments SET status='failed', finished_at=datetime('now'),
+       failure_reason = 'Reclaimed: stale in-flight deploy superseded by a newer deploy',
        log = COALESCE(log || char(10), '') || '[Reclaimed: stale in-flight deploy superseded by a newer deploy]'
      WHERE id IN (${ids.map(() => '?').join(',')})`
   ).run(...ids);
@@ -769,9 +770,9 @@ export async function refuseDeployForMemory({ db, app, env, userId }) {
     await admitAppStart({ app, env, userId, onWarn: 'silent' });
   } catch (e) {
     if (e.code === REFUSED_CODE) {
-      db.prepare(`INSERT INTO deployments (app_id, env, status, deployed_by, log, finished_at)
-                  VALUES (?, ?, 'failed', ?, ?, datetime('now'))`)
-        .run(app.id, env, userId ?? null, `DEPLOY REFUSED: ${e.message}`);
+      db.prepare(`INSERT INTO deployments (app_id, env, status, deployed_by, log, failure_reason, finished_at)
+                  VALUES (?, ?, 'failed', ?, ?, ?, datetime('now'))`)
+        .run(app.id, env, userId ?? null, `DEPLOY REFUSED: ${e.message}`, `DEPLOY REFUSED: ${e.message}`);
     }
     throw e;
   }
@@ -1172,7 +1173,7 @@ export async function promoteApp(app, userId, opts = {}) {
     log.info(`Promote: ${app.slug} sandbox #${sandboxDeploy.id} → production (deployment #${newDeployId}, pending) by user ${userId}`);
     return { deployment_id: newDeployId, status: 'pending', mode: 'copy', version: sandboxDeploy.version, from_sandbox: sandboxDeploy.id };
   } catch (e) {
-    db.prepare("UPDATE deployments SET status = 'failed', finished_at = datetime('now'), log = ? WHERE id = ?").run(`Promote failed: ${e.message}`, newDeployId);
+    db.prepare("UPDATE deployments SET status = 'failed', finished_at = datetime('now'), log = ?, failure_reason = ? WHERE id = ?").run(`Promote failed: ${e.message}`, `Promote failed: ${e.message}`, newDeployId);
     throw new AppError(`Promote failed: ${e.message}`, 500, 'PROMOTE_FAILED');
   }
 }
@@ -2552,9 +2553,9 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     }
 
     db.prepare(`
-      UPDATE deployments SET status = 'failed', finished_at = datetime('now'), log = ?
+      UPDATE deployments SET status = 'failed', finished_at = datetime('now'), log = ?, failure_reason = ?
       WHERE id = ?
-    `).run(deployLog.join('\n'), deployId);
+    `).run(deployLog.join('\n'), String(error.message).slice(0, 2000), deployId);
     recordDeployEvent(deployId, 'failed', error);
 
     // Send failure notification. A memory refusal has already told the right

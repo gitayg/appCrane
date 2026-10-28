@@ -382,6 +382,7 @@ the same per-app roles.
 | List / inspect | `appcrane_list_apps`, `appcrane_get_app` | `GET /api/apps`, `GET /api/apps/:slug` |
 | Deploy | `appcrane_deploy` | `POST /api/apps/:slug/deploy/:env` |
 | Deploy history / log | `appcrane_list_releases`, `appcrane_get_deploy_log` | `GET /api/apps/:slug/deployments/:env`, `…/:id/log` |
+| Why a deploy failed | `appcrane_wait_deploy`, `appcrane_get_deploy_log` (`failure_reason`) | `failure_reason` on `GET /api/apps/:slug/deployments/:env` and `…/:id/log` |
 | Roll back | `appcrane_rollback` | `POST /api/apps/:slug/rollback/:env` |
 | Promote sandbox → production | `appcrane_promote` | `POST /api/apps/:slug/promote` |
 | Env vars / secrets | `appcrane_set_secret`, `appcrane_get_secret`, `appcrane_reveal_secret` | `GET` / `PUT /api/apps/:slug/env/:env`, `DELETE …/:key` |

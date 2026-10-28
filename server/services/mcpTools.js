@@ -1967,7 +1967,7 @@ const TOOLS = [
       const initial = db
         .prepare(
           `SELECT d.id, d.app_id, d.env, d.status, d.version, d.commit_hash, d.started_at, d.finished_at, d.frontend_assets,
-                  a.slug AS app_slug
+                  d.failure_reason, a.slug AS app_slug
            FROM deployments d JOIN apps a ON a.id = d.app_id
            WHERE d.id = ?`
         )
@@ -1988,6 +1988,7 @@ const TOOLS = [
           started_at: initial.started_at,
           finished_at: initial.finished_at,
           frontend_assets: initial.frontend_assets,
+          failure_reason: initial.failure_reason ?? null,
           timed_out: false,
           waited_ms: 0,
         };
@@ -1999,7 +2000,7 @@ const TOOLS = [
       const start = Date.now();
       const deadline = start + timeoutSec * 1000;
       const stmt = db.prepare(
-        `SELECT id, status, version, commit_hash, started_at, finished_at, frontend_assets
+        `SELECT id, status, version, commit_hash, started_at, finished_at, frontend_assets, failure_reason
          FROM deployments WHERE id = ?`
       );
       while (Date.now() < deadline) {
@@ -2028,6 +2029,7 @@ const TOOLS = [
             started_at: row.started_at,
             finished_at: row.finished_at,
             frontend_assets: row.frontend_assets,
+          failure_reason: row.failure_reason ?? null,
             timed_out: false,
             waited_ms: Date.now() - start,
           };
@@ -2046,6 +2048,7 @@ const TOOLS = [
         started_at: last.started_at,
         finished_at: last.finished_at,
         frontend_assets: last.frontend_assets,
+        failure_reason: last.failure_reason ?? null,
         timed_out: true,
         waited_ms: Date.now() - start,
         next: `Deployment still ${last.status} after ${timeoutSec}s. Call appcrane_wait_deploy again or use appcrane_get_logs to see what's happening.`,
@@ -2112,6 +2115,7 @@ const TOOLS = [
         commit_message:  row.commit_message,
         started_at:      row.started_at,
         finished_at:     row.finished_at,
+        failure_reason:  row.failure_reason ?? null,
         duration_seconds: row.finished_at && row.started_at
           ? Math.round((new Date(row.finished_at).getTime() - new Date(row.started_at).getTime()) / 1000)
           : null,

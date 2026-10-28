@@ -1,4 +1,7 @@
 {
+  "2.125.5": [
+    "When a deploy fails, AppCrane now says why wherever you check on it: the deployment list, the deploy log, and the deploy tools for agents and CI all carry a one-line reason, instead of just \"failed\"."
+  ],
   "2.125.4": [
     "With app isolation on, apps opened inside the dashboard showed \"This content is blocked\" instead of the app. They open again, and a sign-in problem inside an app tab now shows its message instead of a blank box."
   ],
