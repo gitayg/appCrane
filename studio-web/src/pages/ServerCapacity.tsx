@@ -19,13 +19,14 @@ interface Resource {
 interface CpuInfo {
   cores: number; cores_source: 'docker' | 'os'; reserve_cores: number; reserve_source: string
   capacity_cores: number; committed_cores: number; error: string | null
+  overcommit_ratio: number; limit_cores: number
   uncapped: string[]; unweighted: string[]
   host_priority: { status: string; reason?: string; units?: string[] } | null
   builds: { enforced: boolean | null; detail: string; cpus: number; memory_mb: number }
 }
 
 interface Capacity {
-  settings: { mode: Mode; reserveMb: number | null; cpu: { mode: Mode; reserveCores: number | null }; thresholds: Thresholds }
+  settings: { mode: Mode; reserveMb: number | null; cpu: { mode: Mode; reserveCores: number | null; overcommitRatio: number }; thresholds: Thresholds }
   cpu: CpuInfo
   memory: {
     total_mb: number; total_source: 'docker' | 'os'; reserve_mb: number; reserve_source: string
@@ -63,6 +64,7 @@ export function ServerCapacity() {
   const [reserve, setReserve] = useState('')
   const [cpuMode, setCpuMode] = useState<Mode>('warn')
   const [cpuReserve, setCpuReserve] = useState('')
+  const [cpuOvercommit, setCpuOvercommit] = useState('')
   const [thresholds, setThresholds] = useState<Thresholds | null>(null)
   const [saved, flashSaved] = useFlash()
 
@@ -74,6 +76,7 @@ export function ServerCapacity() {
         setReserve(r.settings.reserveMb == null ? '' : String(r.settings.reserveMb))
         setCpuMode(r.settings.cpu.mode)
         setCpuReserve(r.settings.cpu.reserveCores == null ? '' : String(r.settings.cpu.reserveCores))
+        setCpuOvercommit(String(r.settings.cpu.overcommitRatio))
         setThresholds(r.settings.thresholds)
       })
       .catch(e => setError(e instanceof Error ? e.message : String(e)))
@@ -88,6 +91,7 @@ export function ServerCapacity() {
         reserve_mb: reserve.trim() === '' ? null : Number(reserve),
         cpu_mode: cpuMode,
         cpu_reserve_cores: cpuReserve.trim() === '' ? null : Number(cpuReserve),
+        cpu_overcommit_ratio: cpuOvercommit.trim() === '' ? null : Number(cpuOvercommit),
         thresholds,
       })
       flashSaved()
@@ -147,12 +151,13 @@ export function ServerCapacity() {
       )}
       {c && (
         <div style={{ marginTop: 10, fontSize: '.85rem' }}>
-          <p style={{ fontWeight: 600, margin: '6px 0', color: c.error ? 'var(--dim)' : c.committed_cores > c.capacity_cores ? 'var(--orange)' : 'var(--green)' }}>
-            {c.error ? `CPU committed: unknown (${c.error})` : `CPU committed: ${c.committed_cores} of ${c.capacity_cores} cores`}
+          <p style={{ fontWeight: 600, margin: '6px 0', color: c.error ? 'var(--dim)' : c.committed_cores > c.limit_cores ? 'var(--orange)' : 'var(--green)' }}>
+            {c.error ? `CPU committed: unknown (${c.error})` : `CPU caps: ${c.committed_cores} of ${c.limit_cores} cores allowed (${c.capacity_cores} capacity x ${c.overcommit_ratio})`}
           </p>
           <p style={{ color: 'var(--dim)', fontSize: '.78rem', margin: '0 0 6px' }}>
             {c.cores} cores {c.cores_source === 'docker' ? 'reported by Docker' : 'on this machine'} minus a {c.reserve_cores} core reserve
             ({c.reserve_source === 'setting' ? 'set below' : 'default: 0.5 core or 25%, whichever is larger'}).
+            {' '}A cap is a ceiling, not a reservation (an idle app uses none of it), so the caps may add up to more than the capacity.
             {c.uncapped.length > 0 && ` Not counted, no CPU cap: ${c.uncapped.join(', ')}.`}
           </p>
           <ul style={{ margin: 0, paddingLeft: 18 }}>
@@ -203,6 +208,8 @@ export function ServerCapacity() {
           </select>
           <label htmlFor="cpu-reserve">CPU reserve for the host, cores (blank for the default)</label>
           <input id="cpu-reserve" type="number" min={0} step={0.25} value={cpuReserve} onChange={e => setCpuReserve(e.target.value)} />
+          <label htmlFor="cpu-overcommit">CPU caps may add up to this many times the capacity (blank for the default, 4)</label>
+          <input id="cpu-overcommit" type="number" min={1} max={64} step={0.5} value={cpuOvercommit} onChange={e => setCpuOvercommit(e.target.value)} />
           {thresholds && (
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(190px, 1fr))', gap: 8, marginTop: 8 }}>
               {THRESHOLD_FIELDS.map(([k, label]) => (

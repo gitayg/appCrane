@@ -1,4 +1,7 @@
 {
+  "2.125.7": [
+    "Far fewer CPU warnings: an app's CPU limit is a ceiling it only uses when busy, so the limits of all running apps may now add up to four times the server's CPU before AppCrane warns. Platform admins can change the four in Settings > Job Health."
+  ],
   "2.125.6": [
     "Renaming an app no longer breaks rolling back: releases from before the rename can be restored again. A rename also redeploys each environment once, instead of once for every release the app ever had."
   ],

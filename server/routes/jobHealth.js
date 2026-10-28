@@ -5,7 +5,7 @@ import { AppError } from '../utils/errors.js';
 import { getDb } from '../db.js';
 import { getAdmissionSettings, measureMemory, MODES, MODE_KEY, RESERVE_KEY, toMb } from '../services/memoryAdmission.js';
 import { getLastHostSample, getThresholds, THRESHOLD_DEFAULTS } from '../services/hostResources.js';
-import { getCpuAdmissionSettings, measureCpu, containersWithoutWeight, CPU_MODES, CPU_MODE_KEY, CPU_RESERVE_KEY } from '../services/cpuAdmission.js';
+import { getCpuAdmissionSettings, measureCpu, containersWithoutWeight, CPU_MODES, CPU_MODE_KEY, CPU_RESERVE_KEY, CPU_OVERCOMMIT_KEY } from '../services/cpuAdmission.js';
 import { getHostCpuPriority, readBuildCapStatus } from '../services/cpuPriority.js';
 import { logAudit } from '../middleware/audit.js';
 import log from '../utils/logger.js';
@@ -46,11 +46,13 @@ router.get('/server-capacity', requireAuth, requirePlatformAdmin, async (req, re
   const m = await measureMemory({ fresh: req.query.fresh === '1', db });
   const c = await measureCpu({ fresh: req.query.fresh === '1', db });
   const round = (n) => Math.round(n * 100) / 100;
+  const { overcommitRatio } = getCpuAdmissionSettings(db);
   res.json({
     settings: { ...getAdmissionSettings(db), cpu: getCpuAdmissionSettings(db), thresholds: getThresholds(db), threshold_defaults: THRESHOLD_DEFAULTS },
     cpu: {
       cores: c.cores, cores_source: c.coresSource, reserve_cores: round(c.reserveCores), reserve_source: c.reserveSource,
-      capacity_cores: round(c.capacityCores), committed_cores: round(c.committedCores), error: c.error, measured_at: c.measuredAt,
+      capacity_cores: round(c.capacityCores), committed_cores: round(c.committedCores), error: c.error,
+      overcommit_ratio: overcommitRatio, limit_cores: round(c.capacityCores * overcommitRatio), measured_at: c.measuredAt,
       uncapped: c.containers.filter((x) => x.uncapped).map((x) => x.label).slice(0, 15),
       unweighted: containersWithoutWeight(c).map((x) => x.label).slice(0, 15),
       host_priority: getHostCpuPriority(),
@@ -92,6 +94,12 @@ router.put('/server-capacity', requireAuth, requirePlatformAdmin, (req, res, nex
     else if (typeof body.cpu_reserve_cores !== 'number' || !Number.isFinite(body.cpu_reserve_cores) || body.cpu_reserve_cores < 0 || body.cpu_reserve_cores > 1024) {
       return next(new AppError('cpu_reserve_cores must be a number of cores (0 to 1024), or null for the default', 400, 'VALIDATION'));
     } else writes.push([CPU_RESERVE_KEY, String(body.cpu_reserve_cores)]);
+  }
+  if (body.cpu_overcommit_ratio !== undefined) {
+    if (body.cpu_overcommit_ratio === null || body.cpu_overcommit_ratio === '') writes.push([CPU_OVERCOMMIT_KEY, '']);
+    else if (typeof body.cpu_overcommit_ratio !== 'number' || !Number.isFinite(body.cpu_overcommit_ratio) || body.cpu_overcommit_ratio < 1 || body.cpu_overcommit_ratio > 64) {
+      return next(new AppError('cpu_overcommit_ratio must be a number from 1 to 64, or null for the default', 400, 'VALIDATION'));
+    } else writes.push([CPU_OVERCOMMIT_KEY, String(body.cpu_overcommit_ratio)]);
   }
   for (const k of Object.keys(THRESHOLD_DEFAULTS)) {
     const v = body.thresholds?.[k];

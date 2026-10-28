@@ -14,6 +14,12 @@
 // CPU is compressible: an over-committed host slows down, it does not kill
 // anything, and the --cpu-shares weights (cpuPriority.js) keep the host
 // services ahead regardless. So the default is warn, and refuse is opt-in.
+//
+// A cap is a ceiling, not a reservation: an app capped at 1 CPU uses nothing
+// while idle. So the caps may total capacity x cpu_overcommit_ratio (default
+// 4). At 1 a normal host warned on nearly every deploy (crane.glick.run,
+// 2026-10-28: 8.9 CPU of caps on 6 of capacity, 235 warnings in a week) and an
+// app could not be given room to burst.
 // Same rule as memory: a start that does not raise the total (a same-size
 // redeploy or rollback) is always allowed, and a measurement that fails admits.
 
@@ -26,6 +32,8 @@ import { hostCores, CPU_SHARES } from './cpuPriority.js';
 
 export const CPU_MODE_KEY = 'cpu_admission_mode';
 export const CPU_RESERVE_KEY = 'cpu_reserve_cores';
+export const CPU_OVERCOMMIT_KEY = 'cpu_overcommit_ratio';
+export const DEFAULT_CPU_OVERCOMMIT = 4;
 export const CPU_MODES = ['refuse', 'warn', 'off'];
 export const DEFAULT_CPU_MODE = 'warn';
 export const CPU_REFUSED_CODE = 'INSUFFICIENT_CPU';
@@ -44,7 +52,11 @@ export function getCpuAdmissionSettings(db = getDb()) {
   const mode = CPU_MODES.includes(raw) ? raw : DEFAULT_CPU_MODE;
   const r = setting(db, CPU_RESERVE_KEY);
   const n = r === null || r === '' ? NaN : Number(r);
-  return { mode, reserveCores: Number.isFinite(n) && n >= 0 ? n : null };
+  const o = Number(setting(db, CPU_OVERCOMMIT_KEY) || NaN);
+  return {
+    mode, reserveCores: Number.isFinite(n) && n >= 0 ? n : null,
+    overcommitRatio: Number.isFinite(o) && o >= 1 ? o : DEFAULT_CPU_OVERCOMMIT,
+  };
 }
 
 export function defaultReserveCores(cores) {
@@ -130,16 +142,17 @@ export function containersWithoutWeight(measurement) {
 }
 
 /** Pure rule, exported for tests. */
-export function decideCpu({ measurement, name, newCores }) {
+export function decideCpu({ measurement, name, newCores, overcommitRatio = 1 }) {
   const replaced = measurement.containers.find((c) => c.name === name)?.cores || 0;
   const base = measurement.committedCores - replaced;
   const after = base + newCores;
-  const fits = after <= measurement.capacityCores + 1e-9;
+  const limit = measurement.capacityCores * overcommitRatio;
+  const fits = after <= limit + 1e-9;
   const notRaising = newCores <= replaced + 1e-9;
   return {
     allowed: fits || notRaising, fits, notRaising,
     newCores, replacedCores: replaced, committedCores: measurement.committedCores, afterCores: after,
-    capacityCores: measurement.capacityCores, freeCores: Math.max(0, measurement.capacityCores - base),
+    capacityCores: measurement.capacityCores, overcommitRatio, limitCores: limit, freeCores: Math.max(0, limit - base),
     uncapped: measurement.containers.filter((c) => c.uncapped).length,
   };
 }
@@ -148,7 +161,7 @@ const r2 = (n) => Math.round(n * 100) / 100;
 
 export function cpuMessage({ outcome, subject, what, verdict }) {
   const nums = `${subject} asks for ${r2(verdict.newCores)} CPU, ${r2(verdict.freeCores)} is free `
-    + `(${r2(verdict.committedCores)} of ${r2(verdict.capacityCores)} CPU committed`
+    + `(${r2(verdict.committedCores)} of ${r2(verdict.limitCores)} CPU of caps allowed: ${r2(verdict.capacityCores)} CPU capacity x ${r2(verdict.overcommitRatio)}`
     + `${verdict.uncapped ? `; ${verdict.uncapped} running container(s) have no CPU cap and are not counted` : ''}).`;
   return outcome === 'refused'
     ? `Not enough CPU on the server for this ${what}: ${nums} Nothing was changed. Try again later, or ask a platform admin to lower other containers' CPU limits.`
@@ -184,13 +197,13 @@ async function defaultNotify({ db, outcome, message, subject }) {
  */
 export async function admitCpu({ name, cpus, ...ctx }) {
   const db = getDb();
-  const { mode } = getCpuAdmissionSettings(db);
+  const { mode, overcommitRatio } = getCpuAdmissionSettings(db);
   if (mode === 'off') return { mode, allowed: true, warned: false, skipped: true };
   const newCores = Math.max(0, Number(cpus) || 0);
   if (!newCores) return { mode, allowed: true, warned: false, skipped: true };
   const measurement = await measureCpu({ db });
   if (measurement.error) return { mode, allowed: true, warned: false, unknown: true, error: measurement.error };
-  const verdict = decideCpu({ measurement, name, newCores });
+  const verdict = decideCpu({ measurement, name, newCores, overcommitRatio });
   if (verdict.allowed) return { mode, allowed: true, warned: false, verdict };
 
   const subject = ctx.subject || (ctx.slug ? `${ctx.slug}${ctx.env ? ` (${ctx.env})` : ''}` : name);
