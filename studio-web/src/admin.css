@@ -1050,9 +1050,12 @@ textarea:focus { border-color: var(--accent); }
 .launcher-tile-icon img { width: 100%; height: 100%; object-fit: cover; }
 .launcher-tile-icon span { font-size: 1.2rem; font-weight: 700; color: var(--dim); }
 .launcher-tile-name {
-  font-size: .92rem; font-weight: 600;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  width: 100%; max-width: 140px;
+  font-size: .92rem; font-weight: 600; line-height: 1.3;
+  /* Two lines across the whole tile, then an ellipsis: one line capped at
+     140px cut most names to "AgentClub ..." with room to spare beside it. */
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2;
+  overflow: hidden; overflow-wrap: anywhere;
+  width: 100%;
   text-align: center;
 }
 /* v2.6.1: description below the app name. Centered, dim, clamped to two
@@ -1222,6 +1225,8 @@ textarea:focus { border-color: var(--accent); }
    positioning context; the dots sit over the tile's top-right corner without
    being nested inside the tile button. */
 .picker-cell { position: relative; }
+/* Names wrap to two lines, so tiles in one row keep one height. */
+.picker-cell > .launcher-tile { height: 100%; }
 .picker-dots {
   position: absolute; top: 6px; right: 6px;
   width: 24px; height: 24px; line-height: 1;
