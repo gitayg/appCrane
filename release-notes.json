@@ -1,4 +1,7 @@
 {
+  "2.125.10": [
+    "OpenCATS, an applicant tracking system, is in the app catalogue. Its only published image is from 2017, and its settings and attachments are lost on redeploy, which the catalogue entry says."
+  ],
   "2.125.9": [
     "App names on the launcher are no longer cut off after a word or two: a name now uses two lines across the whole tile before it is shortened."
   ],

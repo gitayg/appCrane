@@ -872,6 +872,24 @@
     }
   },
   {
+    "name": "OpenCATS",
+    "slug": "opencats",
+    "category": "HR",
+    "repo": "opencats/OpenCATS",
+    "image": "opencats/opencats:0.9.5",
+    "home": "https://www.opencats.org",
+    "license": "NOASSERTION",
+    "short": "Applicant tracking: job orders, candidates, pipelines",
+    "port": 80,
+    "needs": {
+      "engine": "mariadb",
+      "required": true,
+      "env": null,
+      "url_env": null,
+      "note": "NOT WIRABLE: the image declares no database variables; the host, name, user and password are typed into OpenCATS's own install wizard (/installwizard.php) on first run, which writes them to config.php inside the container. The image declares no VOLUME, so config.php and uploaded attachments do not survive a redeploy. The only published image is 0.9.5 from 2017 on PHP 5.6 (no 'latest' tag); newer releases ship no image."
+    }
+  },
+  {
     "name": "OrangeHRM",
     "slug": "orangehrm",
     "category": "HR",
