@@ -1,4 +1,7 @@
 {
+  "2.125.8": [
+    "Apps renamed before 2.125.6 can be rolled back again: updating AppCrane repairs the saved locations of their earlier releases, with no work needed on the server."
+  ],
   "2.125.7": [
     "Far fewer CPU warnings: an app's CPU limit is a ceiling it only uses when busy, so the limits of all running apps may now add up to four times the server's CPU before AppCrane warns. Platform admins can change the four in Settings > Job Health."
   ],
