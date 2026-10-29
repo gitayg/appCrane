@@ -1,4 +1,7 @@
 {
+  "2.125.11": [
+    "Surveys have a Preview button: see the survey card exactly as people will, with the app's name filled in, before you save or turn it on. Nothing you click in the preview is sent."
+  ],
   "2.125.10": [
     "OpenCATS, an applicant tracking system, is in the app catalogue. Its only published image is from 2017, and its settings and attachments are lost on redeploy, which the catalogue entry says."
   ],

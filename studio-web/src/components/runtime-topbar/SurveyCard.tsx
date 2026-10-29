@@ -28,6 +28,10 @@ export interface PendingSurvey {
 interface Props {
   slug: string | null | undefined
   appName?: string
+  // Admin preview: show this survey as people will see it. Nothing is fetched
+  // or sent, and closing it calls onClose.
+  preview?: PendingSurvey
+  onClose?: () => void
 }
 
 type Value = number | string
@@ -87,7 +91,7 @@ function missingRequired(questions: SurveyQuestion[], values: Record<number, Val
   return questions.some(q => q.required && (values[q.id] === undefined || values[q.id] === ''))
 }
 
-export function SurveyCard({ slug, appName }: Props) {
+export function SurveyCard({ slug, appName, preview, onClose }: Props) {
   const [survey, setSurvey] = useState<PendingSurvey | null>(null)
   const [values, setValues] = useState<Record<number, Value>>({})
   const [phase, setPhase] = useState<Phase>('idle')
@@ -95,31 +99,34 @@ export function SurveyCard({ slug, appName }: Props) {
 
   useEffect(() => {
     setSurvey(null); setValues({}); setPhase('idle'); setError(null)
+    if (preview) { setSurvey(preview); setPhase('open'); return }
     if (!slug) return
     let alive = true
     adminApi.get<{ survey: PendingSurvey | null }>(`/api/surveys/pending?app=${encodeURIComponent(slug)}`)
       .then(r => { if (alive && r.survey) { setSurvey(r.survey); setPhase('open') } })
       .catch(() => {})
     return () => { alive = false }
-  }, [slug])
+  }, [slug, preview])
 
   useEffect(() => {
     if (phase !== 'thanks') return
-    const t = setTimeout(() => setPhase('gone'), 2500)
+    const t = setTimeout(() => { setPhase('gone'); onClose?.() }, 2500)
     return () => clearTimeout(t)
-  }, [phase])
+  }, [phase, onClose])
 
-  if (!slug || !survey || phase === 'idle' || phase === 'gone') return null
+  if ((!slug && !preview) || !survey || phase === 'idle' || phase === 'gone') return null
 
   const set = (id: number, v: Value) => setValues(prev => ({ ...prev, [id]: v }))
 
   async function later() {
     setPhase('gone')
+    if (preview) { onClose?.(); return }
     try { await adminApi.post(`/api/surveys/${survey!.id}/snooze`, { app: slug }) } catch { /* shown again next visit */ }
   }
 
   async function send() {
     if (!survey || phase === 'sending') return
+    if (preview) { setPhase('thanks'); return }
     setPhase('sending'); setError(null)
     const answers: Record<string, Value> = {}
     for (const q of survey.questions) {
@@ -147,7 +154,7 @@ export function SurveyCard({ slug, appName }: Props) {
         <button type="button" className="crane-survey-x" onClick={later} aria-label="Close survey and ask me later" title="Not now">×</button>
       </div>
       {phase === 'thanks' ? (
-        <p role="status" style={{ margin: '4px 0 6px' }}>Thanks, your answer was sent to the app's owners.</p>
+        <p role="status" style={{ margin: '4px 0 6px' }}>{preview ? 'Preview: nothing was sent.' : "Thanks, your answer was sent to the app's owners."}</p>
       ) : (
         <form onSubmit={e => { e.preventDefault(); void send() }}>
           {survey.questions.map(q => <Question key={q.id} q={q} value={values[q.id]} onChange={v => set(q.id, v)} />)}

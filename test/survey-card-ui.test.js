@@ -38,3 +38,22 @@ test('every top bar host mounts the card', () => {
   assert.match(portal, /sc\.setAttribute\('slug', slug\)/);
   assert.match(portal, /getElementById\('surveyCard'\)\?\.removeAttribute\('slug'\)/, 'closing the app leaves the card up');
 });
+
+test('the admin preview shows the draft in the real card and sends nothing', () => {
+  // Preview returns before the pending fetch, the snooze and the response POST,
+  // so trying a survey out never snoozes it or stores (and e-mails) an answer.
+  const at = (re) => card.search(re);
+  const before = (guard, call, msg) => {
+    const g = at(guard), c = at(call);
+    assert.ok(c >= 0, `control: ${call} not found`);
+    assert.ok(g >= 0 && g < c, msg);
+  };
+  before(/if \(preview\) \{ setSurvey\(preview\); setPhase\('open'\); return \}/,
+    /adminApi\.get<[^>]*>\(`\/api\/surveys\/pending/, 'preview must return before the pending fetch');
+  before(/if \(preview\) \{ onClose\?\.\(\); return \}/, /adminApi\.post\(`\/api\/surveys\/\$\{survey!\.id\}\/snooze/, 'preview "Not now" must not snooze');
+  before(/if \(preview\) \{ setPhase\('thanks'\); return \}/, /adminApi\.post\(`\/api\/surveys\/\$\{survey\.id\}\/responses/, 'preview "Send" must not post an answer');
+  const admin = read('studio-web/src/components/surveys/SurveyAdmin.tsx');
+  assert.match(admin, /<SurveyCard slug=\{null\} preview=\{preview\} onClose=\{closePreview\} \/>/);
+  assert.match(admin, />Preview<\/button>/);
+  assert.match(admin, /replaceAll\('\{app\}', appName\)/, 'the preview shows {app} as an app name, as the server does');
+});

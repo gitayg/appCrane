@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { adminApi } from '../../adminApi'
-import type { SurveyQuestion } from '../runtime-topbar/SurveyCard'
+import { SurveyCard, type PendingSurvey, type SurveyQuestion } from '../runtime-topbar/SurveyCard'
 
 // Platform admins define the surveys the app top bar shows (/api/surveys/admin):
 // the questions, the apps, how often one person is asked, and on/off.
@@ -94,6 +94,33 @@ function toBody(d: Draft) {
   }
 }
 
+// The draft as the top bar card would get it from /api/surveys/pending: the
+// server's defaults filled in and {app} replaced with an app's name.
+function toPreview(d: Draft, appName: string): PendingSurvey {
+  const body = toBody(d)
+  return {
+    id: 0,
+    name: d.name,
+    questions: body.questions.map((q, i) => {
+      const nps = q.kind === 'nps'
+      const scale = nps || q.kind === 'scale'
+      const src = d.questions[i]
+      return {
+        id: i + 1,
+        kind: q.kind,
+        prompt: q.prompt.replaceAll('{app}', appName),
+        required: q.required,
+        scale_min: nps ? 0 : scale ? src.scale_min : null,
+        scale_max: nps ? 10 : scale ? src.scale_max : null,
+        low_label: scale ? src.low_label.trim() || null : null,
+        high_label: scale ? src.high_label.trim() || null : null,
+        options: q.kind === 'choice' ? ('options' in q ? q.options : []) : null,
+        max_length: q.kind === 'text' ? src.max_length : null,
+      }
+    }),
+  }
+}
+
 const KIND_LABEL: Record<Kind, string> = { nps: 'NPS (0-10)', scale: 'Score', choice: 'Single choice', text: 'Free text' }
 
 function describe(s: SurveyDef): string {
@@ -108,6 +135,8 @@ export function SurveyAdmin() {
   const [draft, setDraft] = useState<Draft | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [preview, setPreview] = useState<PendingSurvey | null>(null)
+  const closePreview = useCallback(() => setPreview(null), [])
 
   const load = useCallback(() => {
     adminApi.get<{ surveys: SurveyDef[] }>('/api/surveys/admin')
@@ -129,6 +158,7 @@ export function SurveyAdmin() {
       if (draft.id) await adminApi.put(`/api/surveys/admin/${draft.id}`, toBody(draft))
       else await adminApi.post('/api/surveys/admin', toBody(draft))
       setDraft(null)
+      setPreview(null)
       load()
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not save the survey')
@@ -270,10 +300,15 @@ export function SurveyAdmin() {
 
           <div style={{ display: 'flex', gap: 8 }}>
             <button type="submit" className="btn btn-accent" disabled={busy}>{busy ? 'Saving…' : 'Save'}</button>
-            <button type="button" className="btn" onClick={() => setDraft(null)}>Cancel</button>
+            <button type="button" className="btn" onClick={() => {
+              const first = draft.all_apps ? apps[0] : apps.find(a => draft.apps.includes(a.slug))
+              setPreview(toPreview(draft, first?.name ?? 'Your app'))
+            }}>Preview</button>
+            <button type="button" className="btn" onClick={() => { setPreview(null); setDraft(null) }}>Cancel</button>
           </div>
         </form>
       )}
+      {draft && preview && <SurveyCard slug={null} preview={preview} onClose={closePreview} />}
     </div>
   )
 }
