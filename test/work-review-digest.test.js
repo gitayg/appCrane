@@ -50,6 +50,15 @@ test('the digest says the week\'s cost, the change, and the top fixes', () => {
   assert.equal(isoWeek(MONDAY), '2026-W44');
 });
 
+test('a week whose cost was not measured is never mailed as $0.00', () => {
+  const history = [{ day: '2026-10-18', totals: { usd: null } },
+    { day: '2026-10-25', totals: { usd: null }, findings: [{ id: 'rework', usd: null, share: null }] }];
+  const m = digestFor('Kim', history, { now: MONDAY });
+  assert.doesNotMatch(m.subject + m.text, /\$0\.00|0% of spend|null/);
+  assert.match(m.text, /not measured/);
+  assert.match(m.subject, /^Your week with Claude: 1 thing to try$/);
+});
+
 test('sent on Monday only, once a week, and never to someone who switched it off', async () => {
   const f = [{ id: 'rework', usd: 3, share: 0.2 }];
   assert.equal((await upload('kim@opswat.com', '2026-10-25', report(20, f))).status, 201);

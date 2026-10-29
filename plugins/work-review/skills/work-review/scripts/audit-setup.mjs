@@ -196,17 +196,22 @@ const skills = skillFiles.map(({ f, scope }) => {
 // say — loads twice and competes for the same requests, and a plugin update
 // moves only one of them: the copies drift with nothing saying so. A symlink to
 // the same file is one install, not two.
-const twice = new Set();
+const twice = new Set(), reported = new Set();
 for (let i = 0; i < skills.length; i++) for (let j = i + 1; j < skills.length; j++) {
   const a = skills[i], b = skills[j];
   if (a.real === b.real || a.scope === b.scope || a.name !== b.name) continue;
   twice.add(i + ':' + j);
+  // One finding per skill name, however many cached plugin versions it has.
+  if (reported.has(a.name)) continue;
+  reported.add(a.name);
   const copy = a.scope === 'plugin' ? b : a, other = copy === a ? b : a;
   add('skill-installed-twice', 'Skills', 'medium', a.name, `installed at ${copy.scope} scope (${copy.file}) and ${other.scope} scope (${other.file}); both load and compete, and updating one leaves the other behind`,
     other.scope === 'plugin' ? `Delete the ${copy.scope} copy and keep the plugin's, so updates reach it` : 'Keep one copy: delete the other, or link it to the first', { files: [a.file, b.file] });
 }
 for (let i = 0; i < skills.length; i++) for (let j = i + 1; j < skills.length; j++) {
-  if (twice.has(i + ':' + j) || skills[i].real === skills[j].real) continue;
+  // Two skills nobody here can edit (synced, or plugin copies such as two cached
+  // versions of one plugin) are not the user's overlap to fix.
+  if (twice.has(i + ':' + j) || skills[i].real === skills[j].real || (skills[i].managed && skills[j].managed)) continue;
   const sim = jaccard(shingles(skills[i].description), shingles(skills[j].description));
   if (sim >= LIMITS.similarDescriptions) add('skill-overlap', 'Skills', 'medium', `${skills[i].name} / ${skills[j].name}`, `descriptions overlap ${Math.round(sim * 100)}%`, 'Merge them or sharpen when each applies', {});
 }

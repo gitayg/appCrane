@@ -117,6 +117,8 @@ test('a skill installed both as a personal copy and from a plugin is caught; a s
   const skill = '---\nname: spec\ndescription: Runs the spec lifecycle from intent to release; use when starting a feature\n---\nsteps';
   w(join(user, 'skills', 'spec', 'SKILL.md'), skill);
   w(join(user, 'plugins', 'cache', 'mkt', 'productizer', '4.73.0', 'skills', 'spec', 'SKILL.md'), skill);
+  // An older cached version of the same plugin: still one plugin skill, not an overlap.
+  w(join(user, 'plugins', 'cache', 'mkt', 'productizer', '4.72.0', 'skills', 'spec', 'SKILL.md'), skill);
   // The project links to the plugin's own copy: one install, not two.
   w(join(root, 'checkout', 'review', 'SKILL.md'), '---\nname: review\ndescription: Reviews pull requests for missing tests; use when asked to review a PR\n---\nsteps');
   w(join(user, 'plugins', 'cache', 'mkt', 'tools', '1.0.0', 'skills', 'review', '.keep'), '');
@@ -126,7 +128,7 @@ test('a skill installed both as a personal copy and from a plugin is caught; a s
 
   const r = run(proj, user, null);
   const twice = r.findings.filter(f => f.kind === 'skill-installed-twice');
-  assert.deepEqual(twice.map(f => f.item), ['spec'], `got ${kinds(r).join(', ')}`);
+  assert.deepEqual(twice.map(f => f.item), ['spec'], `one finding per skill, however many cached versions; got ${kinds(r).join(', ')}`);
   assert.match(twice[0].fix, /Delete the user copy and keep the plugin's/);
   assert.ok(!kinds(r).includes('skill-overlap'), 'a duplicate install is reported once, not also as an overlap');
 });

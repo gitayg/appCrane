@@ -150,7 +150,7 @@ function renderMine(reports) {
   const SU = r.setup;
   if (SU) {
     const fk = Object.entries(SU.findings || {});
-    oc.append(el('div', `Setup: ~${k(SU.alwaysOnTokens)} tokens of CLAUDE.md on every request · ${SU.agents} subagents · ${SU.skills} skills · ${SU.mcpServers} MCP servers · ${SU.hooks} hooks${SU.multiAgentFrameworks ? ` · multi-agent code in this project` : ''}`, 'mute'));
+    oc.append(el('div', `Setup: ${SU.alwaysOnTokens == null ? '—' : '~' + k(SU.alwaysOnTokens)} tokens of CLAUDE.md on every request · ${n0(SU.agents)} subagents · ${n0(SU.skills)} skills · ${n0(SU.mcpServers)} MCP servers · ${n0(SU.hooks)} hooks${SU.multiAgentFrameworks ? ` · multi-agent code in this project` : ''}`, 'mute'));
     const sf = el('div'); sf.style.margin = '6px 0';
     fk.length ? fk.forEach(([f, n]) => sf.append(el('span', `${f} ×${n}`, 'tag'))) : sf.append(el('span', 'setup: no findings', 'tag'));
     oc.append(sf);

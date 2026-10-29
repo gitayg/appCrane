@@ -48,16 +48,16 @@ export function digestFor(name, history, { now = new Date(), hubUrl = '' } = {})
   const weekAgo = new Date(now.getTime() - 7 * 864e5).toISOString().slice(0, 10);
   if (!latest || latest.day < weekAgo) return null;
   const prev = [...history].reverse().find(s => s.day <= new Date(Date.parse(latest.day) - 6 * 864e5).toISOString().slice(0, 10));
-  const cost = latest.totals.usd || 0;
+  const cost = latest.totals.usd ?? null;
   const lines = [];
-  lines.push(`Cost at API list prices, last 7 days: ${usd(cost)}${prev ? ` (the week before: ${usd(prev.totals.usd || 0)})` : ''}. On a seat plan this is the API-equivalent value of the work, not a bill.`);
+  lines.push(`Cost at API list prices, last 7 days: ${usd(cost)}${prev ? ` (the week before: ${usd(prev.totals.usd ?? null)})` : ''}. On a seat plan this is the API-equivalent value of the work, not a bill.`);
   if (latest.outcomes?.commits) lines.push(`Commits landed: ${latest.outcomes.commits}, ${usd(latest.outcomes.usdPerCommit)} each.`);
   const fixes = [
-    ...(latest.findings || []).filter(f => FIXES[f.id]).map(f => `${FIXES[f.id][0]} (${usd(f.usd)}, ${Math.round(f.share * 100)}% of spend): ${FIXES[f.id][1]}.`),
+    ...(latest.findings || []).filter(f => FIXES[f.id]).map(f => `${FIXES[f.id][0]} (${usd(f.usd)}${f.share == null ? '' : `, ${Math.round(f.share * 100)}% of spend`}): ${FIXES[f.id][1]}.`),
     ...Object.keys(latest.setup?.findings || {}).filter(k => SETUP_FIXES[k]).map(k => `${SETUP_FIXES[k]}.`),
   ].slice(0, 3);
   const first = (name || '').split(/[\s@]/)[0] || 'there';
-  const subject = fixes.length ? `Your week with Claude: ${usd(cost)}, ${fixes.length} thing${fixes.length > 1 ? 's' : ''} to try` : `Your week with Claude: ${usd(cost)}`;
+  const subject = fixes.length ? `Your week with Claude: ${cost == null ? '' : `${usd(cost)}, `}${fixes.length} thing${fixes.length > 1 ? 's' : ''} to try` : `Your week with Claude${cost == null ? '' : `: ${usd(cost)}`}`;
   const footer = 'Only you get this email. Turn it off on your Work Review page.';
   const text = [`Hi ${first},`, '', ...lines, '', fixes.length ? 'Worth trying this week:' : 'Nothing stood out this week. Nice.', ...fixes.map((f, i) => `${i + 1}. ${f}`),
     '', hubUrl ? `Your page: ${hubUrl}` : 'Open Work Review in AppCrane for the details.', '', footer].join('\n');

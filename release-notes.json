@@ -2,7 +2,7 @@
   "2.125.14": [
     "Work Review shows a figure it could not measure as a dash, never as zero: a week with no commits no longer shows $0.00 per commit, and when some usage comes from a model without a known price, the cost says it is incomplete.",
     "The work-review setup audit flags a skill installed twice, such as your own copy beside the same skill from a plugin: both load and compete, and a plugin update only moves one of them.",
-    "The work-review plugin is now version 1.1.0, so people who installed it receive these changes; a test now fails whenever the plugin changes without a version bump."
+    "The work-review plugin is now version 1.1.1, so people who installed it receive these changes; a test now fails whenever the plugin changes without a version bump."
   ],
   "2.125.13": [
     "The Dashboard's visitor and CPU charts label each day correctly for people west of UTC (in the Americas every day showed as the day before)."
