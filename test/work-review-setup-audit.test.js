@@ -108,3 +108,25 @@ test('a skill installed as a symlink is inventoried', async () => {
   const r = run(proj, user, null);
   assert.ok(r.inventory.skills.some(s => s.name === 'linked'));
 });
+
+test('a skill installed both as a personal copy and from a plugin is caught; a symlink is not', async () => {
+  const { symlinkSync } = await import('fs');
+  const root = mkdtempSync(join(tmpdir(), 'audit-'));
+  const proj = join(root, 'proj'), user = join(root, 'user');
+  mkdirSync(join(root, 'home'), { recursive: true });
+  const skill = '---\nname: spec\ndescription: Runs the spec lifecycle from intent to release; use when starting a feature\n---\nsteps';
+  w(join(user, 'skills', 'spec', 'SKILL.md'), skill);
+  w(join(user, 'plugins', 'cache', 'mkt', 'productizer', '4.73.0', 'skills', 'spec', 'SKILL.md'), skill);
+  // The project links to the plugin's own copy: one install, not two.
+  w(join(root, 'checkout', 'review', 'SKILL.md'), '---\nname: review\ndescription: Reviews pull requests for missing tests; use when asked to review a PR\n---\nsteps');
+  w(join(user, 'plugins', 'cache', 'mkt', 'tools', '1.0.0', 'skills', 'review', '.keep'), '');
+  symlinkSync(join(root, 'checkout', 'review', 'SKILL.md'), join(user, 'plugins', 'cache', 'mkt', 'tools', '1.0.0', 'skills', 'review', 'SKILL.md'));
+  mkdirSync(join(proj, '.claude', 'skills'), { recursive: true });
+  symlinkSync(join(root, 'checkout', 'review'), join(proj, '.claude', 'skills', 'review'));
+
+  const r = run(proj, user, null);
+  const twice = r.findings.filter(f => f.kind === 'skill-installed-twice');
+  assert.deepEqual(twice.map(f => f.item), ['spec'], `got ${kinds(r).join(', ')}`);
+  assert.match(twice[0].fix, /Delete the user copy and keep the plugin's/);
+  assert.ok(!kinds(r).includes('skill-overlap'), 'a duplicate install is reported once, not also as an overlap');
+});

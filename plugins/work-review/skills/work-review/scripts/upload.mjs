@@ -73,7 +73,10 @@ export function scrub(s) {
   return t.length > EXCERPT_CHARS ? t.slice(0, EXCERPT_CHARS) + '…' : t;
 }
 
-const num = v => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+// A figure the analyzer could not measure travels as null, never as 0: a week
+// with no commits has no cost per commit, and a stored 0 would read a month
+// later exactly like a perfect week.
+const num = v => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 const pickNums = (o, keys) => Object.fromEntries(keys.map(k => [k, num(o?.[k])]));
 const group = g => pickNums(g, ['prompts', 'medianCost', 'medianUsd', 'medianExploreBeforeFirstEdit', 'reworkRate']);
 
@@ -99,6 +102,9 @@ export function buildPayload(report, { now = new Date(), setup = null, allowExce
       wastedTokensEstimate: pickNums(T.wastedTokensEstimate, ['redundantReads', 'idleReruns', 'errorOutputs']),
       // API-list-price dollars (see analyze.mjs): the API-equivalent value, not a bill.
       usd: num(T.usd),
+      // Tokens from models with no known price: their cost is missing from usd,
+      // so the hub says the total is incomplete instead of showing it as whole.
+      unpricedTokens: Object.values(T.unpricedModels || {}).reduce((a, n) => a + (num(n) || 0), 0),
     },
     instructionQuality: {
       totalCost: num(Q.totalCost), reworkCost: num(Q.reworkCost), reworkShare: num(Q.reworkShare),

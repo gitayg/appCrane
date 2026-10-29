@@ -23,10 +23,11 @@ const SETUP_FIXES = {
   'mcp-unused': 'An MCP server you never call: disable it with /mcp',
   'allow-all-bash': 'Bash(*) is allowed: narrow it, or use auto mode',
   'skill-side-effect-auto': 'A deploy-style skill Claude can run on its own: set disable-model-invocation',
+  'skill-installed-twice': 'A skill installed twice, as your own copy and from a plugin: delete your copy',
 };
 
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const usd = n => (n >= 100 ? `$${n.toFixed(0)}` : `$${(n || 0).toFixed(2)}`);
+const usd = n => (n == null ? 'not measured' : n >= 100 ? `$${n.toFixed(0)}` : `$${n.toFixed(2)}`);
 
 /** ISO week label, e.g. 2026-W44, for "once per week" markers and idempotency. */
 export function isoWeek(d) {

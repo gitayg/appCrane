@@ -11,7 +11,7 @@
 //
 // Read-only. Prints a markdown summary; --json writes the findings.
 
-import { readdirSync, readFileSync, statSync, writeFileSync, existsSync } from 'fs';
+import { readdirSync, readFileSync, statSync, writeFileSync, existsSync, realpathSync } from 'fs';
 import { join, relative, basename, dirname } from 'path';
 import { homedir } from 'os';
 
@@ -166,13 +166,17 @@ for (let i = 0; i < agents.length; i++) for (let j = i + 1; j < agents.length; j
 }
 
 // ── skills ───────────────────────────────────────────────────────
-const skillFiles = [join(PROJECT, '.claude', 'skills'), join(USER_DIR, 'skills')].filter(isDir)
-  .flatMap(d => walk(d, (p, n) => n === 'SKILL.md', 4));
-const skills = skillFiles.map(f => {
+// Installed plugins are read too (inventoried, never judged), so a personal
+// copy of a skill a plugin also ships is caught below.
+const skillFiles = [[join(PROJECT, '.claude', 'skills'), 'project', 4], [join(USER_DIR, 'skills'), 'user', 4], [join(USER_DIR, 'plugins', 'cache'), 'plugin', 7]]
+  .filter(([d]) => isDir(d))
+  .flatMap(([d, scope, depth]) => walk(d, (p, n) => n === 'SKILL.md', depth).map(f => ({ f, scope: scope === 'user' && /[\\/]synced[\\/]/.test(f) ? 'synced' : scope })));
+const real = f => { try { return realpathSync(f); } catch { return f; } };
+const skills = skillFiles.map(({ f, scope }) => {
   const text = read(f) || '';
   const { fm } = frontmatter(text);
   const name = fm?.name || basename(dirname(f));
-  const s = { name, file: rel(f), description: fm?.description || '', lines: lines(text).length, used: usedCount(usage?.skills, name) };
+  const s = { name, scope, file: rel(f), real: real(f), description: fm?.description || '', lines: lines(text).length, used: usedCount(usage?.skills, name) };
   // Skills synced from an organisation or plugin are inventoried, not judged:
   // the person running the review cannot edit them.
   s.managed = /[\\/](synced|plugins)[\\/]/.test(f);
@@ -188,7 +192,21 @@ const skills = skillFiles.map(f => {
   if (s.used === 0 && enoughUsage) add('skill-unused', 'Skills', 'low', name, `not invoked in ${usage.sessions} recent sessions`, 'Check the description triggers on real requests, or remove it', s);
   return s;
 });
+// The same skill installed twice — a personal or project copy beside a plugin's,
+// say — loads twice and competes for the same requests, and a plugin update
+// moves only one of them: the copies drift with nothing saying so. A symlink to
+// the same file is one install, not two.
+const twice = new Set();
 for (let i = 0; i < skills.length; i++) for (let j = i + 1; j < skills.length; j++) {
+  const a = skills[i], b = skills[j];
+  if (a.real === b.real || a.scope === b.scope || a.name !== b.name) continue;
+  twice.add(i + ':' + j);
+  const copy = a.scope === 'plugin' ? b : a, other = copy === a ? b : a;
+  add('skill-installed-twice', 'Skills', 'medium', a.name, `installed at ${copy.scope} scope (${copy.file}) and ${other.scope} scope (${other.file}); both load and compete, and updating one leaves the other behind`,
+    other.scope === 'plugin' ? `Delete the ${copy.scope} copy and keep the plugin's, so updates reach it` : 'Keep one copy: delete the other, or link it to the first', { files: [a.file, b.file] });
+}
+for (let i = 0; i < skills.length; i++) for (let j = i + 1; j < skills.length; j++) {
+  if (twice.has(i + ':' + j) || skills[i].real === skills[j].real) continue;
   const sim = jaccard(shingles(skills[i].description), shingles(skills[j].description));
   if (sim >= LIMITS.similarDescriptions) add('skill-overlap', 'Skills', 'medium', `${skills[i].name} / ${skills[j].name}`, `descriptions overlap ${Math.round(sim * 100)}%`, 'Merge them or sharpen when each applies', {});
 }
