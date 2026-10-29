@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { adminApi } from '../../adminApi'
-import { SurveyCard, type PendingSurvey, type SurveyQuestion } from '../runtime-topbar/SurveyCard'
+import { SurveyCard, type PendingSurvey, type SurveyPosition, type SurveyQuestion } from '../runtime-topbar/SurveyCard'
 
 // Platform admins define the surveys the app top bar shows (/api/surveys/admin):
 // the questions, the apps, how often one person is asked, and on/off.
@@ -15,6 +15,8 @@ export interface SurveyDef {
   min_visits: number
   min_days: number
   snooze_days: number
+  position: SurveyPosition
+  block_until_answered: boolean
   responses: number
   questions: SurveyQuestion[]
 }
@@ -43,6 +45,8 @@ interface Draft {
   min_visits: number
   min_days: number
   snooze_days: number
+  position: SurveyPosition
+  block_until_answered: boolean
   questions: DraftQuestion[]
 }
 
@@ -63,7 +67,7 @@ function newQuestion(kind: Kind): DraftQuestion {
 
 const EMPTY: Draft = {
   id: null, name: 'NPS', enabled: false, all_apps: true, apps: [],
-  frequency_days: 90, min_visits: 3, min_days: 0, snooze_days: 7,
+  frequency_days: 90, min_visits: 3, min_days: 0, snooze_days: 7, position: 'bottom-right', block_until_answered: false,
   questions: [newQuestion('nps'), { ...newQuestion('text'), prompt: 'What is the main reason for your score?' }],
 }
 
@@ -71,6 +75,7 @@ function toDraft(s: SurveyDef): Draft {
   return {
     id: s.id, name: s.name, enabled: s.enabled, all_apps: s.all_apps, apps: s.apps.map(a => a.slug),
     frequency_days: s.frequency_days, min_visits: s.min_visits, min_days: s.min_days, snooze_days: s.snooze_days,
+    position: s.position ?? 'bottom-right', block_until_answered: !!s.block_until_answered,
     questions: s.questions.map(q => ({
       kind: q.kind, prompt: q.prompt, required: q.required,
       scale_min: q.scale_min ?? 1, scale_max: q.scale_max ?? 5,
@@ -84,6 +89,7 @@ function toBody(d: Draft) {
   return {
     name: d.name, enabled: d.enabled, all_apps: d.all_apps, apps: d.apps,
     frequency_days: d.frequency_days, min_visits: d.min_visits, min_days: d.min_days, snooze_days: d.snooze_days,
+    position: d.position, block_until_answered: d.block_until_answered,
     questions: d.questions.map(q => {
       const base = { kind: q.kind, prompt: q.prompt, required: q.required }
       if (q.kind === 'nps') return { ...base, low_label: q.low_label, high_label: q.high_label }
@@ -101,6 +107,8 @@ function toPreview(d: Draft, appName: string): PendingSurvey {
   return {
     id: 0,
     name: d.name,
+    position: d.position,
+    block: d.block_until_answered,
     questions: body.questions.map((q, i) => {
       const nps = q.kind === 'nps'
       const scale = nps || q.kind === 'scale'
@@ -121,12 +129,17 @@ function toPreview(d: Draft, appName: string): PendingSurvey {
   }
 }
 
+const POSITION_LABEL: Record<SurveyPosition, string> = {
+  'bottom-right': 'Bottom right', 'bottom-left': 'Bottom left', 'top-right': 'Top right', 'top-left': 'Top left', center: 'Centre of the screen',
+}
+
 const KIND_LABEL: Record<Kind, string> = { nps: 'NPS (0-10)', scale: 'Score', choice: 'Single choice', text: 'Free text' }
 
 function describe(s: SurveyDef): string {
   const where = s.all_apps ? 'all apps' : s.apps.map(a => a.name).join(', ')
   const again = s.frequency_days === 0 ? 'asked once' : `asked again after ${s.frequency_days} days`
-  return `${where} · after ${s.min_visits} visits${s.min_days ? ` and ${s.min_days} days` : ''} · ${again} · "Not now" waits ${s.snooze_days} days`
+  const at = POSITION_LABEL[s.position] ?? POSITION_LABEL['bottom-right']
+  return `${at.toLowerCase()}${s.block_until_answered ? ' · blocks the app until answered' : ''} · ${where} · after ${s.min_visits} visits${s.min_days ? ` and ${s.min_days} days` : ''} · ${again} · "Not now" waits ${s.snooze_days} days`
 }
 
 export function SurveyAdmin() {
@@ -247,11 +260,19 @@ export function SurveyAdmin() {
           </fieldset>
 
           <fieldset style={{ border: '1px solid var(--border)', borderRadius: 6, padding: 10, display: 'grid', gap: 8, gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))' }}>
-            <legend>How often</legend>
+            <legend>When and where</legend>
             <label>First ask after this many visits<br /><input type="number" min={0} max={1000} value={draft.min_visits} onChange={e => patch({ min_visits: num(e.target.value) })} /></label>
             <label>...and this many days after first use<br /><input type="number" min={0} max={3650} value={draft.min_days} onChange={e => patch({ min_days: num(e.target.value) })} /></label>
             <label>Ask again after (days, 0 = only once)<br /><input type="number" min={0} max={3650} value={draft.frequency_days} onChange={e => patch({ frequency_days: num(e.target.value) })} /></label>
             <label>"Not now" waits (days)<br /><input type="number" min={1} max={365} value={draft.snooze_days} onChange={e => patch({ snooze_days: Math.max(1, num(e.target.value)) })} /></label>
+            <label>Where the card appears in the app<br />
+              <select value={draft.position} onChange={e => patch({ position: e.target.value as SurveyPosition })}>
+                {(Object.keys(POSITION_LABEL) as SurveyPosition[]).map(p => <option key={p} value={p}>{POSITION_LABEL[p]}</option>)}
+              </select>
+            </label>
+            <label><input type="checkbox" checked={draft.block_until_answered} onChange={e => patch({ block_until_answered: e.target.checked })} /> Block the app until answered<br />
+              <span style={{ fontSize: '.75rem', color: 'var(--dim)' }}>Dims the app and hides "Not now". "Not now" comes back only if sending fails.</span>
+            </label>
           </fieldset>
 
           <fieldset style={{ border: '1px solid var(--border)', borderRadius: 6, padding: 10, display: 'grid', gap: 10 }}>

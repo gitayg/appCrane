@@ -1,10 +1,16 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { adminApi } from '../../adminApi'
 
-// A small survey card over the app's corner (GET /api/surveys/pending). It never
-// takes keyboard focus: the app keeps whatever the person was doing, and the
-// card is reached with Tab or the mouse like any other control. "Not now" and
-// the close button snooze it server-side; an answer is stored once per round.
+// A small survey card over the app (GET /api/surveys/pending), in the corner or
+// centre the survey chooses. It never takes keyboard focus: the app keeps
+// whatever the person was doing, and the card is reached with Tab or the mouse
+// like any other control. "Not now" and the close button snooze it server-side;
+// an answer is stored once per round.
+//
+// A survey set to block the app is the exception: the app is dimmed and covered
+// until the person answers, there is no "Not now", and the card takes focus as
+// any modal does. If sending fails, "Not now" comes back so a server error never
+// locks someone out of their app.
 
 export interface SurveyQuestion {
   id: number
@@ -19,9 +25,13 @@ export interface SurveyQuestion {
   max_length: number | null
 }
 
+export type SurveyPosition = 'bottom-right' | 'bottom-left' | 'top-right' | 'top-left' | 'center'
+
 export interface PendingSurvey {
   id: number
   name: string
+  position?: SurveyPosition
+  block?: boolean
   questions: SurveyQuestion[]
 }
 
@@ -51,6 +61,12 @@ const STYLES = `
   .crane-survey { animation: crane-survey-in .18s ease-out; }
   @keyframes crane-survey-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 }
+.crane-survey.at-bottom-left { right: auto; left: 16px; }
+.crane-survey.at-top-right { bottom: auto; top: 60px; }
+.crane-survey.at-top-left { bottom: auto; top: 60px; right: auto; left: 16px; }
+.crane-survey.at-center { inset: 0; margin: auto; height: fit-content; }
+.crane-survey[role="dialog"]:focus { outline: none; }
+.crane-survey-backdrop { position: fixed; inset: 0; z-index: 939; background: rgba(0,0,0,.55); }
 .crane-survey-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
 .crane-survey-title { font-weight: 600; font-size: .8rem; color: var(--dim, #a1a1aa); }
 .crane-survey-x { background: transparent; border: 0; color: var(--dim, #a1a1aa); cursor: pointer; font-size: 1.1rem; line-height: 1; padding: 2px 6px; border-radius: 4px; }
@@ -96,6 +112,8 @@ export function SurveyCard({ slug, appName, preview, onClose }: Props) {
   const [values, setValues] = useState<Record<number, Value>>({})
   const [phase, setPhase] = useState<Phase>('idle')
   const [error, setError] = useState<string | null>(null)
+  const cardRef = useRef<HTMLElement>(null)
+  const blocking = !!survey?.block && (phase === 'open' || phase === 'sending')
 
   useEffect(() => {
     setSurvey(null); setValues({}); setPhase('idle'); setError(null)
@@ -113,6 +131,10 @@ export function SurveyCard({ slug, appName, preview, onClose }: Props) {
     const t = setTimeout(() => { setPhase('gone'); onClose?.() }, 2500)
     return () => clearTimeout(t)
   }, [phase, onClose])
+
+  useEffect(() => {
+    if (blocking) cardRef.current?.focus()
+  }, [blocking])
 
   if ((!slug && !preview) || !survey || phase === 'idle' || phase === 'gone') return null
 
@@ -145,13 +167,17 @@ export function SurveyCard({ slug, appName, preview, onClose }: Props) {
   }
 
   const label = survey.name || `${appName || 'App'} survey`
+  const canLater = !blocking || !!error
 
   return (
-    <section className="crane-survey" role="region" aria-label={label}>
+    <>
+    {blocking && <div className="crane-survey-backdrop" aria-hidden="true" />}
+    <section ref={cardRef} className={`crane-survey at-${survey.position ?? 'bottom-right'}`}
+      {...(blocking ? { role: 'dialog', 'aria-modal': true, tabIndex: -1 } : { role: 'region' })} aria-label={label}>
       <style>{STYLES}</style>
       <div className="crane-survey-head">
         <span className="crane-survey-title">{label}</span>
-        <button type="button" className="crane-survey-x" onClick={later} aria-label="Close survey and ask me later" title="Not now">×</button>
+        {canLater && <button type="button" className="crane-survey-x" onClick={later} aria-label="Close survey and ask me later" title="Not now">×</button>}
       </div>
       {phase === 'thanks' ? (
         <p role="status" style={{ margin: '4px 0 6px' }}>{preview ? 'Preview: nothing was sent.' : "Thanks, your answer was sent to the app's owners."}</p>
@@ -160,7 +186,7 @@ export function SurveyCard({ slug, appName, preview, onClose }: Props) {
           {survey.questions.map(q => <Question key={q.id} q={q} value={values[q.id]} onChange={v => set(q.id, v)} />)}
           {error && <p className="crane-survey-err" role="alert">{error}</p>}
           <div className="crane-survey-actions">
-            <button type="button" className="crane-survey-later" onClick={later}>Not now</button>
+            {canLater && <button type="button" className="crane-survey-later" onClick={later}>Not now</button>}
             <button type="submit" className="crane-survey-send" disabled={phase === 'sending' || missingRequired(survey.questions, values)}>
               {phase === 'sending' ? 'Sending…' : 'Send'}
             </button>
@@ -168,6 +194,7 @@ export function SurveyCard({ slug, appName, preview, onClose }: Props) {
         </form>
       )}
     </section>
+    </>
   )
 }
 

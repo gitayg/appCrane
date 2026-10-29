@@ -1,4 +1,8 @@
 {
+  "2.125.12": [
+    "Choose where a survey appears in the app: bottom right (as before), bottom left, top right, top left or the centre of the screen, so it does not cover the app's own buttons.",
+    "A survey can block the app until it is answered: the app is dimmed behind the card and there is no Not now (it comes back only if sending fails). Both are under When and where, and the preview shows them."
+  ],
   "2.125.11": [
     "Surveys have a Preview button: see the survey card exactly as people will, with the app's name filled in, before you save or turn it on. Nothing you click in the preview is sent."
   ],

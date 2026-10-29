@@ -10,11 +10,23 @@ import { readFileSync } from 'node:fs';
 const read = (p) => readFileSync(new URL(`../${p}`, import.meta.url), 'utf8');
 const card = read('studio-web/src/components/runtime-topbar/SurveyCard.tsx');
 
-test('the survey card never takes focus', () => {
-  assert.doesNotMatch(card, /\.focus\(/, 'the card calls .focus() -- it would take the keyboard from the app');
+test('the survey card never takes focus unless the survey blocks the app', () => {
+  // The one .focus() and the modal role belong to a blocking survey only: the
+  // app is covered then, so there is nothing to take the keyboard from.
+  assert.equal(card.match(/\.focus\(/g)?.length, 1, 'a .focus() call outside the blocking branch');
+  assert.match(card, /if \(blocking\) cardRef\.current\?\.focus\(\)/);
   assert.doesNotMatch(card, /autoFocus/, 'autoFocus takes the keyboard from the app on mount');
-  assert.doesNotMatch(card, /aria-modal|role="dialog"/, 'the card is not a modal: the app stays usable around it');
-  assert.match(card, /role="region"/);
+  assert.match(card, /\(blocking \? \{ role: 'dialog', 'aria-modal': true, tabIndex: -1 \} : \{ role: 'region' \}\)/,
+    'the card is a modal only when it blocks the app');
+  assert.equal(card.match(/aria-modal/g).length, 1);
+});
+
+test('a blocking survey covers the app and offers no "Not now" until sending fails', () => {
+  assert.match(card, /const blocking = !!survey\?\.block && \(phase === 'open' \|\| phase === 'sending'\)/);
+  assert.match(card, /\{blocking && <div className="crane-survey-backdrop"/);
+  assert.match(card, /const canLater = !blocking \|\| !!error/, 'a send error must bring "Not now" back');
+  assert.equal(card.match(/onClick=\{later\}/g).length, 2);
+  assert.equal(card.match(/\{canLater && <button[^>]*onClick=\{later\}/g)?.length, 2, 'a "Not now" or close button shown while blocking');
 });
 
 test('the card animates only without a reduced-motion preference', () => {

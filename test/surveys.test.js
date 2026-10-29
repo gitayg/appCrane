@@ -349,3 +349,26 @@ test('results: platform admins see all apps, owners only their own, others are r
   assert.equal(empty.json.overall.nps, null);
   assert.equal(empty.json.overall.total, 0);
 });
+
+test('the admin chooses the corner the card appears in, and the app gets it', async () => {
+  resetState();
+  assert.equal(survey.position, 'bottom-right', 'a survey saved without a position is not bottom right');
+  const put = await call('root', 'PUT', `/api/surveys/admin/${survey.id}`, { ...NPS_SURVEY, position: 'top-left' });
+  assert.equal(put.status, 200, put.text);
+  const listed = (await call('root', 'GET', '/api/surveys/admin')).json.surveys.find((s) => s.id === survey.id);
+  assert.equal(listed.position, 'top-left', 'the position was not stored');
+  const pend = await call('member', 'GET', '/api/surveys/pending?app=alpha');
+  assert.equal(pend.json.survey?.position, 'top-left', 'the app card was not told where to sit');
+  const bad = await call('root', 'PUT', `/api/surveys/admin/${survey.id}`, { ...NPS_SURVEY, position: 'middle' });
+  assert.equal(bad.status, 400, 'an unknown position was accepted');
+  assert.equal(survey.block_until_answered, false, 'a survey saved without the setting blocks the app');
+  assert.equal(pend.json.survey.block, false);
+  resetState();
+  assert.equal((await call('root', 'PUT', `/api/surveys/admin/${survey.id}`, { ...NPS_SURVEY, position: 'center', block_until_answered: true })).status, 200);
+  const stored = (await call('root', 'GET', '/api/surveys/admin')).json.surveys.find((s) => s.id === survey.id);
+  assert.equal(stored.position, 'center');
+  assert.equal(stored.block_until_answered, true, 'block_until_answered was not stored');
+  const blocked = await call('member', 'GET', '/api/surveys/pending?app=alpha');
+  assert.equal(blocked.json.survey?.block, true, 'the app card was not told to block');
+  assert.equal((await call('root', 'PUT', `/api/surveys/admin/${survey.id}`, NPS_SURVEY)).status, 200);
+});

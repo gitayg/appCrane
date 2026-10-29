@@ -13,6 +13,7 @@ import { AppError } from '../utils/errors.js';
 
 export const KINDS = ['nps', 'scale', 'choice', 'text'];
 export const DEFAULT_NPS_PROMPT = 'How likely are you to recommend {app} to a colleague?';
+export const POSITIONS = ['bottom-right', 'bottom-left', 'top-right', 'top-left', 'center'];
 export const MAX_QUESTIONS = 10;
 export const TEXT_CAP = 2000;
 const VISIT_WINDOW_MIN = 30;
@@ -76,6 +77,12 @@ function normalizeQuestion(q, i) {
   return out;
 }
 
+function position(v) {
+  if (v === undefined || v === null || v === '') return 'bottom-right';
+  if (!POSITIONS.includes(v)) throw bad(`position must be one of ${POSITIONS.join(', ')}`);
+  return v;
+}
+
 /** Validate a survey definition from the admin UI. Throws AppError(400). */
 export function normalizeSurveyInput(db, body) {
   if (!body || typeof body !== 'object') throw bad('body must be an object');
@@ -104,6 +111,8 @@ export function normalizeSurveyInput(db, body) {
     min_visits: int(body.min_visits, 'min_visits', 0, 1000, 3),
     min_days: int(body.min_days, 'min_days', 0, 3650, 0),
     snooze_days: int(body.snooze_days, 'snooze_days', 1, 365, 7),
+    position: position(body.position),
+    block_until_answered: bool(body.block_until_answered, false),
     questions: qs,
   };
 }
@@ -124,10 +133,10 @@ function writeChildren(db, id, s) {
 export function createSurvey(db, input, userId) {
   return db.transaction(() => {
     const id = Number(db.prepare(`
-      INSERT INTO surveys (name, enabled, all_apps, frequency_days, min_visits, min_days, snooze_days, created_by)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO surveys (name, enabled, all_apps, frequency_days, min_visits, min_days, snooze_days, position, block_until_answered, created_by)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(input.name, input.enabled ? 1 : 0, input.all_apps ? 1 : 0, input.frequency_days,
-      input.min_visits, input.min_days, input.snooze_days, userId ?? null).lastInsertRowid);
+      input.min_visits, input.min_days, input.snooze_days, input.position, input.block_until_answered ? 1 : 0, userId ?? null).lastInsertRowid);
     writeChildren(db, id, input);
     return id;
   })();
@@ -137,9 +146,9 @@ export function updateSurvey(db, id, input) {
   return db.transaction(() => {
     const r = db.prepare(`
       UPDATE surveys SET name = ?, enabled = ?, all_apps = ?, frequency_days = ?, min_visits = ?, min_days = ?,
-        snooze_days = ?, updated_at = datetime('now') WHERE id = ?
+        snooze_days = ?, position = ?, block_until_answered = ?, updated_at = datetime('now') WHERE id = ?
     `).run(input.name, input.enabled ? 1 : 0, input.all_apps ? 1 : 0, input.frequency_days,
-      input.min_visits, input.min_days, input.snooze_days, id);
+      input.min_visits, input.min_days, input.snooze_days, input.position, input.block_until_answered ? 1 : 0, id);
     if (!r.changes) throw new AppError('Survey not found', 404, 'NOT_FOUND');
     writeChildren(db, id, input);
   })();
@@ -172,7 +181,7 @@ export function getSurvey(db, id) {
   return {
     id: s.id, name: s.name, enabled: s.enabled === 1, all_apps: s.all_apps === 1,
     apps, frequency_days: s.frequency_days, min_visits: s.min_visits, min_days: s.min_days,
-    snooze_days: s.snooze_days, created_at: s.created_at, updated_at: s.updated_at,
+    snooze_days: s.snooze_days, position: s.position, block_until_answered: s.block_until_answered === 1, created_at: s.created_at, updated_at: s.updated_at,
     responses: n, questions: questionsFor(db, id),
   };
 }
@@ -245,6 +254,8 @@ function forDisplay(db, survey, app) {
   return {
     id: survey.id,
     name: survey.name,
+    position: survey.position,
+    block: survey.block_until_answered === 1,
     questions: questionsFor(db, survey.id).map((q) => ({ ...q, prompt: q.prompt.replaceAll('{app}', app.name) })),
   };
 }
