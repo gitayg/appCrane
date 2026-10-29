@@ -90,9 +90,11 @@ function barColor(pct: number): string {
   return 'var(--green)'
 }
 
+// Chart days are UTC calendar days ('YYYY-MM-DD'). new Date() reads a bare date
+// as UTC midnight, which is the previous evening west of UTC, so every label
+// showed the day before; format it in UTC to keep the day it names.
 function formatDate(iso: string): string {
-  const d = new Date(iso)
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+  return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' })
 }
 
 // v2.31.0: `emptyText` and `fmt` let this chart serve both the visitor counts

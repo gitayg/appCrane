@@ -47,3 +47,17 @@ test('the audit page shows whether an agent or a person acted', () => {
   const audit = readFileSync(join(ROOT, 'pages/Audit.tsx'), 'utf8');
   assert.match(audit, /e\.actor_kind === 'agent' \|\| e\.actor_kind === 'human'/);
 });
+
+test('a dashboard chart day keeps its date for a viewer west of UTC', () => {
+  // '2026-10-28' labelled "Oct 27" in New York: a bare date is UTC midnight.
+  const dash = readFileSync(join(ROOT, 'pages/Dashboard.tsx'), 'utf8');
+  const fn = /function formatDate\(iso: string\): string \{[\s\S]*?\n\}/.exec(dash)[0].replace('iso: string): string', 'iso)');
+  const formatDate = new Function(`${fn}; return formatDate;`)();
+  const tz = process.env.TZ;
+  try {
+    for (const zone of ['America/New_York', 'America/Los_Angeles', 'Asia/Jerusalem', 'UTC']) {
+      process.env.TZ = zone;
+      assert.equal(formatDate('2026-10-28'), 'Oct 28', `wrong day in ${zone}`);
+    }
+  } finally { if (tz === undefined) delete process.env.TZ; else process.env.TZ = tz; }
+});
