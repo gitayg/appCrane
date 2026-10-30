@@ -11,7 +11,7 @@
 //
 // Read-only. Prints a markdown summary; --json writes the findings.
 
-import { readdirSync, readFileSync, statSync, writeFileSync, existsSync, realpathSync } from 'fs';
+import { readdirSync, readFileSync, statSync, writeFileSync, existsSync, realpathSync, lstatSync } from 'fs';
 import { join, relative, basename, dirname } from 'path';
 import { homedir } from 'os';
 
@@ -172,11 +172,13 @@ const skillFiles = [[join(PROJECT, '.claude', 'skills'), 'project', 4], [join(US
   .filter(([d]) => isDir(d))
   .flatMap(([d, scope, depth]) => walk(d, (p, n) => n === 'SKILL.md', depth).map(f => ({ f, scope: scope === 'user' && /[\\/]synced[\\/]/.test(f) ? 'synced' : scope })));
 const real = f => { try { return realpathSync(f); } catch { return f; } };
+// The skill's own folder or file is a link (a symlinked parent such as /tmp is not).
+const isLink = f => { try { return lstatSync(f).isSymbolicLink(); } catch { return false; } };
 const skills = skillFiles.map(({ f, scope }) => {
   const text = read(f) || '';
   const { fm } = frontmatter(text);
   const name = fm?.name || basename(dirname(f));
-  const s = { name, scope, file: rel(f), real: real(f), linked: real(f) !== join(real(dirname(dirname(f))), basename(dirname(f)), basename(f)), description: fm?.description || '', lines: lines(text).length, used: usedCount(usage?.skills, name) };
+  const s = { name, scope, file: rel(f), real: real(f), linked: isLink(f) || isLink(dirname(f)), description: fm?.description || '', lines: lines(text).length, used: usedCount(usage?.skills, name) };
   // Skills synced from an organisation or plugin are inventoried, not judged:
   // the person running the review cannot edit them.
   s.managed = /[\\/](synced|plugins)[\\/]/.test(f);

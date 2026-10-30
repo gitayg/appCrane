@@ -1,6 +1,6 @@
 {
   "name": "work-review",
-  "version": "1.1.3",
+  "version": "1.1.4",
   "description": "Reviews how you work with Claude Code: what each prompt cost and why, waste and overcomplicated setups, with concrete fixes. Optional daily upload of a redacted summary to a Work Review hub.",
   "author": { "name": "AppCrane" },
   "repository": "https://github.com/gitayg/appCrane",
