@@ -6,7 +6,7 @@
 // Built from scratch for every request. Nothing the MCP client sent is
 // forwarded, so a client cannot choose who the app thinks it is.
 
-import { identitySecretFor, signIdentity } from '../identitySignature.js';
+import { identitySecretFor, signIdentity, signIdentityV2 } from '../identitySignature.js';
 import { roleKeysForUser } from '../appDefinedRoles.js';
 
 export function identityHeadersFor(db, { app, env, user, appRole }) {
@@ -24,7 +24,9 @@ export function identityHeadersFor(db, { app, env, user, appRole }) {
   if (keys.length) h['X-AppCrane-App-Roles'] = keys.join(',');
   const ts = Math.floor(Date.now() / 1000);
   h['X-AppCrane-Identity-Ts'] = String(ts);
-  h['X-AppCrane-Identity-Sig'] = signIdentity(identitySecretFor(db, app.id, env), ts, (name) => h[name]);
+  const secret = identitySecretFor(db, app.id, env);
+  h['X-AppCrane-Identity-Sig'] = signIdentity(secret, ts, (name) => h[name]);
+  h['X-AppCrane-Identity-Sig-V2'] = signIdentityV2(secret, ts, (name) => h[name]);
   h['X-AppCrane-Auth-Mode'] = 'authenticated';
   h['X-AppCrane-Via'] = 'mcp';
   return h;

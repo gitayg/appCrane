@@ -132,7 +132,9 @@ function innerBlocks(body) {
 //
 // v2.124.0 added X-AppCrane-Auth-Via ('app-key' for app sign-in keys) to the
 // same list, with the same effect, so it is normalised the same way.
-const SIGNATURE_HEADERS = ['X-AppCrane-Identity-Ts', 'X-AppCrane-Identity-Sig', 'X-AppCrane-Auth-Via'];
+// v2.125.14 added X-AppCrane-Identity-Sig-V2, listed ahead of -Sig because the
+// copy_headers removal is a substring replace and -Sig is a prefix of it.
+const SIGNATURE_HEADERS = ['X-AppCrane-Identity-Ts', 'X-AppCrane-Identity-Sig-V2', 'X-AppCrane-Identity-Sig', 'X-AppCrane-Auth-Via'];
 function withoutIdentitySignature(text) {
   if (text == null) return text;
   return text.split('\n')

@@ -87,7 +87,9 @@ Always build tenant paths through this helper, never from raw user input — the
 `X-AppCrane-*` identity headers are platform-signed (1.2.0+: `verifyIdentity(req)`
 checks `X-AppCrane-Identity-Sig` against `APPCRANE_IDENTITY_SECRET`, and
 `tenantKey()`/`tenantDb()` do so automatically when that variable is set, so a
-forged `X-AppCrane-User-Id` cannot choose someone else's folder), and the org slug is
+forged `X-AppCrane-User-Id` cannot choose someone else's folder; 1.3.0: the v2 signature,
+`X-AppCrane-Identity-Sig-V2` from AppCrane 2.125.14, also covers `X-AppCrane-Auth-Via`, read
+as `verifyIdentity(req).authVia`, with `{ requireV2: true }` to refuse v1-only identity), and the org slug is
 sanitised so a hostile email can't traverse out of the tenant root. Consumer
 domains (e.g. `gmail.com`) share an `org` label, but isolation is per-user, so
 data never mixes.

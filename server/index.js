@@ -1740,6 +1740,7 @@ app.listen(PORT, HOST, async () => {
     try { const { startNodeSecurityCheck } = await import('./services/nodeSecurityCheck.js'); startNodeSecurityCheck(); } catch (e) { log.error('Node.js security check failed to start: ' + e.message); }
     try { const { startAccessReviews } = await import('./services/accessReviews/index.js'); startAccessReviews(); } catch (e) { log.error('Access review job failed to start: ' + e.message); }
     try { (await import('./services/siem/delivery.js')).startSiemDelivery(); } catch (e) { log.error('SIEM delivery failed to start: ' + e.message); }
+    try { (await import('./services/identityUpgradeRequests.js')).startIdentityUpgradeRequests(); } catch (e) { log.error('Identity upgrade requests failed to start: ' + e.message); }
   } catch (e) {
     log.error('Host resource monitor failed to start: ' + e.message);
   }

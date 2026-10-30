@@ -64,27 +64,53 @@ export function signIdentity(secret, ts, get) {
   return createHmac('sha256', secret).update(lines.join('\n')).digest('base64url');
 }
 
+// 1.3.0: v1 left out X-AppCrane-Auth-Via ('app-key' when the caller used a
+// personal app sign-in key), so off the proxy it could be deleted and a script
+// call passed off as a browser session. v2 signs it too, in its own header, so
+// apps on an older appcrane-tenant keep verifying v1 unchanged.
+export const IDENTITY_SIGNED_HEADERS_V2 = Object.freeze([...IDENTITY_SIGNED_HEADERS, 'X-AppCrane-Auth-Via']);
+
+/** Like signIdentity, over IDENTITY_SIGNED_HEADERS_V2 (sent as X-AppCrane-Identity-Sig-V2). */
+export function signIdentityV2(secret, ts, get) {
+  const lines = ['appcrane-identity-v2', String(ts),
+    ...IDENTITY_SIGNED_HEADERS_V2.map((h) => `${h.toLowerCase()}:${get(h) ?? ''}`)];
+  return createHmac('sha256', secret).update(lines.join('\n')).digest('base64url');
+}
+
+function sameSig(expected, sig) {
+  const a = Buffer.from(expected);
+  const b = Buffer.from(sig);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
 /**
  * Check the request's identity headers against APPCRANE_IDENTITY_SECRET (or
- * opts.secret) and return { userId, email, org }. Throws on a missing,
+ * opts.secret) and return { userId, email, org, authVia }. Throws on a missing,
  * forged, altered or expired signature. A request whose headers came from
  * anywhere but this app's own /verify call cannot pass.
+ *
+ * authVia (1.3.0) is 'app-key' or 'session' when the v2 signature vouches for
+ * it, and null when only v1 was checked: an AppCrane older than 2.125.14, or a
+ * request with the v2 signature removed. Treat null as "not known to be a
+ * browser session". requireV2: true rejects v1-only requests outright.
  */
-export function verifyIdentity(req, { secret = process.env.APPCRANE_IDENTITY_SECRET, maxAgeSec = IDENTITY_MAX_AGE_SEC, now = Date.now() } = {}) {
+export function verifyIdentity(req, { secret = process.env.APPCRANE_IDENTITY_SECRET, maxAgeSec = IDENTITY_MAX_AGE_SEC, now = Date.now(), requireV2 = false } = {}) {
   if (!secret) throw new Error('appcrane-tenant: no APPCRANE_IDENTITY_SECRET to verify the identity signature with');
   const get = (h) => { const v = header(req, h); return v === '' ? undefined : String(v); };
+  const sigV2 = get('X-AppCrane-Identity-Sig-V2');
   const sig = get('X-AppCrane-Identity-Sig');
   const ts = get('X-AppCrane-Identity-Ts');
-  if (!sig || !ts || !/^\d+$/.test(ts)) throw new Error('appcrane-tenant: identity signature missing');
-  const expected = Buffer.from(signIdentity(secret, ts, get));
-  const given = Buffer.from(sig);
-  if (expected.length !== given.length || !timingSafeEqual(expected, given)) {
-    throw new Error('appcrane-tenant: identity signature does not match');
-  }
+  if (!(sigV2 || sig) || !ts || !/^\d+$/.test(ts)) throw new Error('appcrane-tenant: identity signature missing');
+  if (!sigV2 && requireV2) throw new Error('appcrane-tenant: identity signature v2 missing');
+  const ok = sigV2 ? sameSig(signIdentityV2(secret, ts, get), sigV2) : sameSig(signIdentity(secret, ts, get), sig);
+  if (!ok) throw new Error('appcrane-tenant: identity signature does not match');
   const age = Math.floor(now / 1000) - Number(ts);
   if (age > maxAgeSec || age < -60) throw new Error(`appcrane-tenant: identity signature expired (${age}s old)`);
   const email = get('X-AppCrane-User-Email') || '';
-  return { userId: String(get('X-AppCrane-User-Id') || '').replace(/[^0-9]/g, ''), email, org: orgFromEmail(email) };
+  return {
+    userId: String(get('X-AppCrane-User-Id') || '').replace(/[^0-9]/g, ''), email, org: orgFromEmail(email),
+    authVia: sigV2 ? (get('X-AppCrane-Auth-Via') || 'session') : null,
+  };
 }
 
 /**

@@ -72,6 +72,10 @@ const IDENTITY_HEADERS = [
   // be rejected by a verifying app anyway; stripping it keeps the rule simple.
   'X-AppCrane-Identity-Ts',
   'X-AppCrane-Identity-Sig',
+  // v2.125.14: the v2 signature, which also covers X-AppCrane-Auth-Via. Not in
+  // copy_headers, it would never reach the app; not stripped, a client could
+  // send its own (and a verifier prefers v2).
+  'X-AppCrane-Identity-Sig-V2',
   // v2.124.0: 'app-key' when the caller signed in with a personal app sign-in
   // key (dhk_uak_*) instead of a browser session. An app that lets a script do
   // less than its person relies on it, so a client must not be able to send it.

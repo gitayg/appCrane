@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import crypto from 'crypto';
 import { auditLogin, logAudit } from '../middleware/audit.js';
-import { identitySecretFor, signIdentity } from '../services/identitySignature.js';
+import { identitySecretFor, signIdentity, signIdentityV2 } from '../services/identitySignature.js';
 import { existsSync } from 'fs';
 import { join, resolve } from 'path';
 import { getDb } from '../db.js';
@@ -701,10 +701,13 @@ router.get('/verify', (req, res) => {
       : (appSlug && req.query.prefix === `/${appSlug}-sandbox` ? 'sandbox' : 'production');
     const secret = identitySecretFor(db, appIdForRoles, signEnv);
     res.setHeader('X-AppCrane-Identity-Ts', String(ts));
-    res.setHeader('X-AppCrane-Identity-Sig', signIdentity(secret, ts, (h) => {
+    const issued = (h) => {
       const v = res.getHeader(h);
       return v === undefined ? undefined : String(v);
-    }));
+    };
+    res.setHeader('X-AppCrane-Identity-Sig', signIdentity(secret, ts, issued));
+    // v2.125.14: v2 also covers X-AppCrane-Auth-Via, which v1 leaves out.
+    res.setHeader('X-AppCrane-Identity-Sig-V2', signIdentityV2(secret, ts, issued));
   }
 
   res.json({
