@@ -44,7 +44,8 @@ const isNum = v => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v < 
 function nums(o, keys, path) {
   if (!o || typeof o !== 'object') throw new Error(`${path} missing`);
   const out = {};
-  for (const k of keys) { if (!isNum(o[k] ?? 0)) throw new Error(`${path}.${k} not a number`); out[k] = o[k] ?? 0; }
+  // null (or absent) means "not measured" and is kept as null, never stored as 0.
+  for (const k of keys) { if (o[k] != null && !isNum(o[k])) throw new Error(`${path}.${k} not a number`); out[k] = o[k] ?? null; }
   return out;
 }
 const SECRETISH = /(sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|dhk_[A-Za-z0-9_-]{8,}|AKIA[0-9A-Z]{16}|-----BEGIN|eyJ[A-Za-z0-9_-]{10,}\.)/;
@@ -69,7 +70,7 @@ export function validate(p) {
         'searchBursts', 'parallelToolTurnShare'], 'totals'),
       tokens: nums(T.tokens, ['input', 'output', 'cacheRead', 'cacheWrite'], 'totals.tokens'),
       wastedTokensEstimate: nums(T.wastedTokensEstimate, ['redundantReads', 'idleReruns', 'errorOutputs'], 'totals.wastedTokensEstimate'),
-      usd: nums(T, ['usd'], 'totals').usd,
+      ...nums(T, ['usd', 'unpricedTokens'], 'totals'),
     },
     instructionQuality: {
       ...nums(Q, ['totalCost', 'reworkCost', 'reworkShare', 'totalUsd', 'reworkUsd'], 'instructionQuality'),
@@ -126,7 +127,9 @@ function history(dir, limit = 90) {
 // nothing is shown but the count.
 export const TEAM_MIN_PEOPLE = Math.max(3, Number(process.env.TEAM_MIN_PEOPLE || 5));
 const TEAM_ACTIVE_DAYS = 14;
-const median = xs => { const s = xs.filter(Number.isFinite).sort((a, b) => a - b); return s.length ? s[Math.floor(s.length / 2)] : 0; };
+// null when nobody measured it: an empty median is not a zero.
+const median = xs => { const s = xs.filter(Number.isFinite).sort((a, b) => a - b); return s.length ? s[Math.floor(s.length / 2)] : null; };
+const share = (v, a) => (v == null || a == null || !(v + a) ? null : v / (v + a));
 function team() {
   if (!existsSync(DATA)) return { people: 0, minPeople: TEAM_MIN_PEOPLE, enough: false };
   const since = new Date(Date.now() - TEAM_ACTIVE_DAYS * 86400_000).toISOString().slice(0, 10);
@@ -139,13 +142,13 @@ function team() {
     ...base, enough: true,
     usdTotal: +latest.reduce((a, s) => a + (s.totals.usd || 0), 0).toFixed(2),
     median: {
-      usd: median(latest.map(s => s.totals.usd || 0)),
-      usdPerCommit: median(latest.map(s => s.outcomes?.usdPerCommit).filter(x => x > 0)),
+      usd: median(latest.map(s => s.totals.usd)),
+      usdPerCommit: median(latest.map(s => s.outcomes?.commits ? s.outcomes.usdPerCommit : null)),
       reworkShare: median(latest.map(s => s.instructionQuality.reworkShare)),
-      vagueShare: median(latest.map(s => { const v = s.instructionQuality.vague.prompts, a = s.instructionQuality.anchored.prompts; return v + a ? v / (v + a) : 0; })),
+      vagueShare: median(latest.map(s => share(s.instructionQuality.vague.prompts, s.instructionQuality.anchored.prompts))),
       cacheHitRate: median(latest.map(s => s.totals.cacheHitRate)),
       errorRate: median(latest.map(s => s.totals.errorRate)),
-      alwaysOnTokens: median(latest.map(s => s.setup?.alwaysOnTokens).filter(x => x != null)),
+      alwaysOnTokens: median(latest.map(s => s.setup?.alwaysOnTokens)),
     },
     subagentUsdNoBenefit: +latest.reduce((a, s) => a + (s.subagents?.flaggedUsd || 0), 0).toFixed(2),
     peopleWithSetupFinding: peopleWith(s => s.setup?.findings),

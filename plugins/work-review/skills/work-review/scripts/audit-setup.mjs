@@ -11,7 +11,7 @@
 //
 // Read-only. Prints a markdown summary; --json writes the findings.
 
-import { readdirSync, readFileSync, statSync, writeFileSync, existsSync } from 'fs';
+import { readdirSync, readFileSync, statSync, writeFileSync, existsSync, realpathSync, lstatSync } from 'fs';
 import { join, relative, basename, dirname } from 'path';
 import { homedir } from 'os';
 
@@ -166,13 +166,19 @@ for (let i = 0; i < agents.length; i++) for (let j = i + 1; j < agents.length; j
 }
 
 // ── skills ───────────────────────────────────────────────────────
-const skillFiles = [join(PROJECT, '.claude', 'skills'), join(USER_DIR, 'skills')].filter(isDir)
-  .flatMap(d => walk(d, (p, n) => n === 'SKILL.md', 4));
-const skills = skillFiles.map(f => {
+// Installed plugins are read too (inventoried, never judged), so a personal
+// copy of a skill a plugin also ships is caught below.
+const skillFiles = [[join(PROJECT, '.claude', 'skills'), 'project', 4], [join(USER_DIR, 'skills'), 'user', 4], [join(USER_DIR, 'plugins', 'cache'), 'plugin', 7]]
+  .filter(([d]) => isDir(d))
+  .flatMap(([d, scope, depth]) => walk(d, (p, n) => n === 'SKILL.md', depth).map(f => ({ f, scope: scope === 'user' && /[\\/]synced[\\/]/.test(f) ? 'synced' : scope })));
+const real = f => { try { return realpathSync(f); } catch { return f; } };
+// The skill's own folder or file is a link (a symlinked parent such as /tmp is not).
+const isLink = f => { try { return lstatSync(f).isSymbolicLink(); } catch { return false; } };
+const skills = skillFiles.map(({ f, scope }) => {
   const text = read(f) || '';
   const { fm } = frontmatter(text);
   const name = fm?.name || basename(dirname(f));
-  const s = { name, file: rel(f), description: fm?.description || '', lines: lines(text).length, used: usedCount(usage?.skills, name) };
+  const s = { name, scope, file: rel(f), real: real(f), linked: isLink(f) || isLink(dirname(f)), description: fm?.description || '', lines: lines(text).length, used: usedCount(usage?.skills, name) };
   // Skills synced from an organisation or plugin are inventoried, not judged:
   // the person running the review cannot edit them.
   s.managed = /[\\/](synced|plugins)[\\/]/.test(f);
@@ -188,7 +194,35 @@ const skills = skillFiles.map(f => {
   if (s.used === 0 && enoughUsage) add('skill-unused', 'Skills', 'low', name, `not invoked in ${usage.sessions} recent sessions`, 'Check the description triggers on real requests, or remove it', s);
   return s;
 });
+// The same skill installed twice — a personal or project copy beside a plugin's,
+// say — loads twice and competes for the same requests, and a plugin update
+// moves only one of them: the copies drift with nothing saying so. A symlink to
+// the same file is one install, not two.
+// Grouped by name, so a skill at project, user and plugin scope is one finding
+// that names every copy, and the plugin's drift warning is never lost.
+const twice = new Set(), byName = new Map();
+skills.forEach((s, i) => { if (!byName.has(s.name)) byName.set(s.name, []); byName.get(s.name).push(i); });
+for (const [name, idx] of byName) {
+  // One entry per real file. Where a file is also reached through a symlink,
+  // name the real location: deleting the link would leave the file installed.
+  const byReal = new Map();
+  for (const i of idx) { const c = skills[i], had = byReal.get(c.real); if (!had || (had.linked && !c.linked)) byReal.set(c.real, c); }
+  const copies = [...byReal.values()];
+  if (new Set(copies.map(c => c.scope)).size < 2) continue;
+  for (const i of idx) for (const j of idx) if (i < j) twice.add(i + ':' + j);
+  // Only copies this person can edit can be removed; two managed copies (synced
+  // beside a plugin's) are nobody's to fix here.
+  const editable = copies.filter(c => !c.managed);
+  if (!editable.length) continue;
+  const plugin = copies.find(c => c.scope === 'plugin');
+  const where = copies.filter(c => c.scope !== 'plugin' || c === plugin).map(c => `${c.scope} scope (${c.file})`).join(', ');
+  add('skill-installed-twice', 'Skills', 'medium', name, `installed at ${where}; every copy loads and competes${plugin ? ', and a plugin update moves only the plugin\'s copy' : ''}`,
+    plugin ? `Delete the ${[...new Set(editable.map(c => c.scope))].join(' and ')} cop${editable.length > 1 ? 'ies' : 'y'} and keep the plugin's, so updates reach it` : 'Keep one copy: delete the others, or link them to one', { files: copies.map(c => c.file) });
+}
 for (let i = 0; i < skills.length; i++) for (let j = i + 1; j < skills.length; j++) {
+  // Two skills nobody here can edit (synced, or plugin copies such as two cached
+  // versions of one plugin) are not the user's overlap to fix.
+  if (twice.has(i + ':' + j) || skills[i].real === skills[j].real || (skills[i].managed && skills[j].managed)) continue;
   const sim = jaccard(shingles(skills[i].description), shingles(skills[j].description));
   if (sim >= LIMITS.similarDescriptions) add('skill-overlap', 'Skills', 'medium', `${skills[i].name} / ${skills[j].name}`, `descriptions overlap ${Math.round(sim * 100)}%`, 'Merge them or sharpen when each applies', {});
 }

@@ -69,9 +69,11 @@
 // only, never as HTML.
 const $ = id => document.getElementById(id);
 const el = (tag, text, cls) => { const e = document.createElement(tag); if (text != null) e.textContent = text; if (cls) e.className = cls; return e; };
-const k = n => n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : String(Math.round(n));
-const pct = x => (x * 100).toFixed(0) + '%';
-const usd = n => n >= 100 ? `$${n.toFixed(0)}` : `$${(n || 0).toFixed(2)}`;
+// null is "not measured": shown as a dash, never as 0.
+const k = n => n == null ? '—' : n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : String(Math.round(n));
+const n0 = v => v == null ? '—' : String(v);
+const pct = x => x == null ? '—' : (x * 100).toFixed(0) + '%';
+const usd = n => n == null ? '—' : n >= 100 ? `$${n.toFixed(0)}` : `$${n.toFixed(2)}`;
 const api = p => fetch(p, { credentials: 'same-origin' }).then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
 
 function kpi(label, value, cls) { const d = el('div', null, 'kpi'); d.append(el('div', value, 'v' + (cls ? ' ' + cls : '')), el('div', label, 'l')); return d; }
@@ -83,22 +85,23 @@ function renderMine(reports) {
   const r = reports[reports.length - 1], T = r.totals, Q = r.instructionQuality, O = r.overcomplication;
   $('asof').textContent = `· snapshot ${r.day}`;
   $('kpis').replaceChildren(
-    kpi('Cost at API list prices (not your seat bill)', usd(T.usd)),
+    kpi(T.unpricedTokens ? `Cost at API list prices: incomplete, ${k(T.unpricedTokens)} tokens from unpriced models not counted` : 'Cost at API list prices (not your seat bill)', usd(T.usd), T.unpricedTokens ? 'warn' : ''),
     kpi('Spent on prompts that needed correcting', `${pct(Q.reworkShare)} · ${usd(Q.reworkUsd)}`, Q.reworkShare > 0.15 ? 'warn' : ''),
-    kpi('Commits landed · cost per commit', r.outcomes ? `${r.outcomes.commits} · ${r.outcomes.commits ? usd(r.outcomes.usdPerCommit) : '—'}` : '—'),
-    kpi('Vague prompts', `${Q.vague.prompts} / ${Q.vague.prompts + Q.anchored.prompts}`),
+    kpi('Commits landed · cost per commit', r.outcomes ? `${n0(r.outcomes.commits)} · ${r.outcomes.commits ? usd(r.outcomes.usdPerCommit) : '—'}` : '—'),
+    kpi('Vague prompts', Q.vague.prompts == null || Q.anchored.prompts == null ? '—' : `${Q.vague.prompts} / ${Q.vague.prompts + Q.anchored.prompts}`),
     kpi('Cache hit rate', pct(T.cacheHitRate), T.cacheHitRate > 0.85 ? 'good' : ''),
     kpi('Tool error rate', pct(T.errorRate), T.errorRate > 0.1 ? 'warn' : ''),
-    kpi('Sessions · prompts', `${T.sessions} · ${T.userPrompts}`));
+    kpi('Sessions · prompts', `${n0(T.sessions)} · ${n0(T.userPrompts)}`));
 
   // Trend: totalCost per daily snapshot, as a simple line.
-  const pts = reports.map(x => x.totals.usd || 0), max = Math.max(1, ...pts), W = 1000, H = 120, pad = 8;
+  // A snapshot whose cost was not measured is left off the line, not drawn at $0.
+  const pts = reports.map(x => x.totals.usd).filter(v => v != null), max = Math.max(1, ...pts), W = 1000, H = 120, pad = 8;
   const svg = $('trend'); svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.replaceChildren();
   const ns = 'http://www.w3.org/2000/svg', line = document.createElementNS(ns, 'polyline');
   line.setAttribute('points', pts.map((v, i) => `${pad + i * (W - 2 * pad) / Math.max(1, pts.length - 1)},${H - pad - v / max * (H - 2 * pad)}`).join(' '));
   line.setAttribute('fill', 'none'); line.setAttribute('stroke', 'currentColor'); line.setAttribute('stroke-width', '2.5'); line.style.color = 'var(--accent)';
   svg.append(line);
-  $('trendNote').textContent = `${reports.length} daily snapshots (each a 7-day window), ${reports[0].day} → ${r.day}. Peak ${usd(max)} at API list prices.`;
+  $('trendNote').textContent = `${pts.length} daily snapshots (each a 7-day window), ${reports[0].day} → ${r.day}. Peak ${usd(max)} at API list prices.`;
 
   // Since about two weeks ago: did the fixes work? The newest snapshot at least
   // 10 days older than today's, so the two 7-day windows do not overlap much.
@@ -106,13 +109,14 @@ function renderMine(reports) {
   const then = [...reports].reverse().find(x => x.day <= cutoff);
   if (then) {
     const per = x => Math.max(1, x.totals.sessions);
-    const vagueShare = x => { const v = x.instructionQuality.vague.prompts, a = x.instructionQuality.anchored.prompts; return v + a ? v / (v + a) : 0; };
+    const vagueShare = x => { const v = x.instructionQuality.vague.prompts, a = x.instructionQuality.anchored.prompts; return v == null || a == null || !(v + a) ? null : v / (v + a); };
+    const perSession = n => x => (n(x) == null ? null : n(x) / per(x));
     const signals = [
-      ['Cost per session', x => x.totals.usd / per(x), 'lower', usd],
-      ['Cost per landed commit', x => x.outcomes?.usdPerCommit || null, 'lower', usd],
+      ['Cost per session', perSession(x => x.totals.usd), 'lower', usd],
+      ['Cost per landed commit', x => (x.outcomes?.commits ? x.outcomes.usdPerCommit : null), 'lower', usd],
       ['Spend on prompts that needed correcting', x => x.instructionQuality.reworkShare, 'lower', pct],
       ['Vague prompts', vagueShare, 'lower', pct],
-      ['Re-reads of unchanged files per session', x => x.totals.redundantReads / per(x), 'lower', n => n.toFixed(1)],
+      ['Re-reads of unchanged files per session', perSession(x => x.totals.redundantReads), 'lower', n => n.toFixed(1)],
       ['Setup findings', x => x.setup ? Object.values(x.setup.findings || {}).reduce((a, n) => a + n, 0) : null, 'lower', n => String(n)],
       ['Cache hit rate', x => x.totals.cacheHitRate, 'higher', pct],
     ];
@@ -146,14 +150,14 @@ function renderMine(reports) {
   const SU = r.setup;
   if (SU) {
     const fk = Object.entries(SU.findings || {});
-    oc.append(el('div', `Setup: ~${k(SU.alwaysOnTokens)} tokens of CLAUDE.md on every request · ${SU.agents} subagents · ${SU.skills} skills · ${SU.mcpServers} MCP servers · ${SU.hooks} hooks${SU.multiAgentFrameworks ? ` · multi-agent code in this project` : ''}`, 'mute'));
+    oc.append(el('div', `Setup: ${SU.alwaysOnTokens == null ? '—' : '~' + k(SU.alwaysOnTokens)} tokens of CLAUDE.md on every request · ${n0(SU.agents)} subagents · ${n0(SU.skills)} skills · ${n0(SU.mcpServers)} MCP servers · ${n0(SU.hooks)} hooks${SU.multiAgentFrameworks ? ` · multi-agent code in this project` : ''}`, 'mute'));
     const sf = el('div'); sf.style.margin = '6px 0';
     fk.length ? fk.forEach(([f, n]) => sf.append(el('span', `${f} ×${n}`, 'tag'))) : sf.append(el('span', 'setup: no findings', 'tag'));
     oc.append(sf);
   }
   const SA = r.subagents;
-  if (SA && SA.runs) oc.append(el('div', `Subagents: ${SA.runs} runs, ${usd(SA.usd)} (${usd(SA.startupUsd)} start-up), ${Math.round(SA.parallelShare * 100)}% parallel · no benefit from delegating: ${usd(SA.flaggedUsd)}${SA.repeatedDelegations ? ` · ${SA.repeatedDelegations} procedures delegated 3+ times (skill candidates)` : ''}`, 'mute'));
-  oc.append(el('div', `Always-on context ~${k(O.medianBaselineContextTokens)} tokens/session · ${O.toolCallsPerPrompt} tool calls per prompt · ${O.subagentRuns} subagents · ${O.nudgePrompts} "continue/yes" prompts`, 'mute'));
+  if (SA && SA.runs) oc.append(el('div', `Subagents: ${SA.runs} runs, ${usd(SA.usd)} (${usd(SA.startupUsd)} start-up), ${pct(SA.parallelShare)} parallel · no benefit from delegating: ${usd(SA.flaggedUsd)}${SA.repeatedDelegations ? ` · ${SA.repeatedDelegations} procedures delegated 3+ times (skill candidates)` : ''}`, 'mute'));
+  oc.append(el('div', `Always-on context ${O.medianBaselineContextTokens == null ? "—" : "~" + k(O.medianBaselineContextTokens)} tokens/session · ${n0(O.toolCallsPerPrompt)} tool calls per prompt · ${n0(O.subagentRuns)} subagents · ${n0(O.nudgePrompts)} "continue/yes" prompts`, 'mute'));
   const fl = el('div'); fl.style.margin = '8px 0';
   flags.length ? flags.forEach(([f, n]) => fl.append(el('span', `${f} ×${n}`, 'tag'))) : fl.append(el('span', 'No flags', 'tag'));
   oc.append(fl);
@@ -173,7 +177,7 @@ function renderTeam(T) {
   b.append(el('p', `${T.people} people active in the last ${T.activeDays} days · ${usd(T.usdTotal)} at API list prices (7-day windows).`, 'mute'));
   const m = T.median, t = el('table');
   t.append(row(['Median per person', ''], true));
-  for (const [l, v] of [['Cost at API list prices', usd(m.usd)], ['Cost per landed commit', m.usdPerCommit ? usd(m.usdPerCommit) : '—'], ['Spend on prompts that needed correcting', pct(m.reworkShare)], ['Share of prompts that were vague', pct(m.vagueShare)],
+  for (const [l, v] of [['Cost at API list prices', usd(m.usd)], ['Cost per landed commit', usd(m.usdPerCommit)], ['Spend on prompts that needed correcting', pct(m.reworkShare)], ['Share of prompts that were vague', pct(m.vagueShare)],
     ['Cache hit rate', pct(m.cacheHitRate)], ['Tool error rate', pct(m.errorRate)], ['CLAUDE.md tokens on every request', k(m.alwaysOnTokens)]]) t.append(row([l, v]));
   b.append(t);
   const list = (title, obj) => {

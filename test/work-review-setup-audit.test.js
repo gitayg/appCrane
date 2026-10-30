@@ -108,3 +108,60 @@ test('a skill installed as a symlink is inventoried', async () => {
   const r = run(proj, user, null);
   assert.ok(r.inventory.skills.some(s => s.name === 'linked'));
 });
+
+test('a skill installed both as a personal copy and from a plugin is caught; a symlink is not', async () => {
+  const { symlinkSync } = await import('fs');
+  const root = mkdtempSync(join(tmpdir(), 'audit-'));
+  const proj = join(root, 'proj'), user = join(root, 'user');
+  mkdirSync(join(root, 'home'), { recursive: true });
+  const skill = '---\nname: spec\ndescription: Runs the spec lifecycle from intent to release; use when starting a feature\n---\nsteps';
+  w(join(user, 'skills', 'spec', 'SKILL.md'), skill);
+  w(join(user, 'plugins', 'cache', 'mkt', 'productizer', '4.73.0', 'skills', 'spec', 'SKILL.md'), skill);
+  // An older cached version of the same plugin: still one plugin skill, not an overlap.
+  w(join(user, 'plugins', 'cache', 'mkt', 'productizer', '4.72.0', 'skills', 'spec', 'SKILL.md'), skill);
+  // The project links to the plugin's own copy: one install, not two.
+  w(join(root, 'checkout', 'review', 'SKILL.md'), '---\nname: review\ndescription: Reviews pull requests for missing tests; use when asked to review a PR\n---\nsteps');
+  w(join(user, 'plugins', 'cache', 'mkt', 'tools', '1.0.0', 'skills', 'review', '.keep'), '');
+  symlinkSync(join(root, 'checkout', 'review', 'SKILL.md'), join(user, 'plugins', 'cache', 'mkt', 'tools', '1.0.0', 'skills', 'review', 'SKILL.md'));
+  mkdirSync(join(proj, '.claude', 'skills'), { recursive: true });
+  symlinkSync(join(root, 'checkout', 'review'), join(proj, '.claude', 'skills', 'review'));
+
+  const r = run(proj, user, null);
+  const twice = r.findings.filter(f => f.kind === 'skill-installed-twice');
+  assert.deepEqual(twice.map(f => f.item), ['spec'], `one finding per skill, however many cached versions; got ${kinds(r).join(', ')}`);
+  assert.match(twice[0].fix, /Delete the user copy and keep the plugin's/);
+  assert.ok(!kinds(r).includes('skill-overlap'), 'a duplicate install is reported once, not also as an overlap');
+});
+
+test('a skill at project, user and plugin scope is one finding that keeps the plugin warning; two managed copies are not flagged', () => {
+  const root = mkdtempSync(join(tmpdir(), 'audit-'));
+  const proj = join(root, 'proj'), user = join(root, 'user');
+  mkdirSync(join(root, 'home'), { recursive: true });
+  const md = n => `---\nname: ${n}\ndescription: Runs the ${n} lifecycle from intent to release; use when starting a feature\n---\nsteps`;
+  for (const d of [join(proj, '.claude', 'skills', 'spec'), join(user, 'skills', 'spec'), join(user, 'plugins', 'cache', 'mkt', 'p', '1.0.0', 'skills', 'spec')]) w(join(d, 'SKILL.md'), md('spec'));
+  // An org-synced copy beside a plugin's: neither is editable here.
+  for (const d of [join(user, 'skills', 'synced', 'org', 'sdk'), join(user, 'plugins', 'cache', 'mkt', 'p', '1.0.0', 'skills', 'sdk')]) w(join(d, 'SKILL.md'), md('sdk'));
+  const r = run(proj, user, null);
+  const twice = r.findings.filter(f => f.kind === 'skill-installed-twice');
+  assert.deepEqual(twice.map(f => f.item), ['spec'], `got ${kinds(r).join(', ')}`);
+  assert.match(twice[0].finding, /project scope.*user scope.*plugin scope.*plugin update moves only/);
+  assert.match(twice[0].fix, /Delete the project and user copies and keep the plugin's/);
+});
+
+test('when a project skill is also linked from user scope, the finding names the real file, not the link', async () => {
+  const { symlinkSync } = await import('fs');
+  const root = mkdtempSync(join(tmpdir(), 'audit-'));
+  const proj = join(root, 'proj'), user = join(root, 'user');
+  mkdirSync(join(root, 'home'), { recursive: true });
+  const md = '---\nname: spec\ndescription: Runs the spec lifecycle from intent to release; use when starting a feature\n---\nsteps';
+  w(join(proj, '.claude', 'skills', 'spec', 'SKILL.md'), md);
+  mkdirSync(join(user, 'skills'), { recursive: true });
+  symlinkSync(join(proj, '.claude', 'skills', 'spec'), join(user, 'skills', 'spec'));
+  w(join(user, 'plugins', 'cache', 'mkt', 'p', '1.0.0', 'skills', 'spec', 'SKILL.md'), md);
+  const r = run(proj, user, null);
+  const f = r.findings.find(x => x.kind === 'skill-installed-twice');
+  assert.ok(f, `got ${kinds(r).join(', ')}`);
+  assert.match(f.finding, /project scope/);
+  assert.doesNotMatch(f.finding, /user scope/, 'the symlink is not reported as a separate copy');
+  assert.match(f.fix, /Delete the project copy/);
+});

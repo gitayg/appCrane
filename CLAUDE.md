@@ -36,6 +36,12 @@ run `npm run sync:changelog` there, build with `npm test`, and publish the site 
 the release. Patch releases fold into their minor's entry. The page fell 95 minor
 releases behind (v2.21 shown at v2.116) before this step was written down.
 
+## Releasing: bump a plugin's version when its files change
+The `plugins/` marketplace sets an explicit `version` in each `plugin.json`, and Claude
+Code ships an update only when that version changes. After changing a plugin, bump its
+version, then run `npm run gen:plugin-releases`. `test/plugin-releases.test.js` fails
+until you do, and the generator refuses to record a change that kept the old version.
+
 ## Data Persistence
 If settings or configuration appear wiped, always check `/data` first.
 AppCrane stores all persistent state (database, env vars, app configs) under the `DATA_DIR` path (default: `./data`).

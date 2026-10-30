@@ -41,6 +41,7 @@ Sources:
 - **Commands are merged into skills:** "Prefer a skill for new work, since skills also support supporting files" (skills).
 - **Description:** put the key use case first. Description and `when_to_use` are "truncated at 1,536 characters" in the listing (skills).
 - **Side effects:** use `disable-model-invocation: true`, because "You don't want Claude deciding to deploy because your code looks ready" (skills).
+- **One copy per skill (ours):** the docs do not cover a skill installed twice. Plugin skills are namespaced, so a personal copy beside a plugin's does not replace it: both load and compete for the same requests, and a plugin update moves only one. `skill-installed-twice` flags it; a symlink to the same file is one install.
 - **Size:** "Keep `SKILL.md` under 500 lines. Move detailed reference material to separate files." (skills)
 - **Scripts are "executed, not loaded".** Reference them via `${CLAUDE_SKILL_DIR}` (skills).
 

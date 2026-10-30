@@ -63,6 +63,19 @@ test('hub accepts exactly what the uploader builds', () => {
   assert.equal(v.instructionQuality.costliestBadPrompts.length, 1);
 });
 
+test('what was not measured reaches the hub as null, never as 0', () => {
+  // No commits, so no cost per commit; one model nobody priced.
+  const r = { ...report, totals: { ...report.totals, unpricedModels: { 'mystery-model': 1200 } }, outcomes: { commits: 0, usdPerCommit: null } };
+  const p = buildPayload(r, OK);
+  assert.equal(p.outcomes.usdPerCommit, null, 'the uploader does not invent a $0 cost per commit');
+  assert.equal(p.outcomes.linesAdded, null, 'a field the analyzer did not send is not measured, not zero');
+  assert.equal(p.totals.unpricedTokens, 1200, 'the hub is told the dollar total is incomplete');
+  const v = validate(p);
+  assert.equal(v.outcomes.usdPerCommit, null, 'the hub stores it as not measured');
+  assert.equal(v.totals.unpricedTokens, 1200);
+  assert.throws(() => validate({ ...p, outcomes: { ...p.outcomes, usdPerCommit: 'free' } }), /not a number/);
+});
+
 // ── hub over HTTP ────────────────────────────────────────────────
 let server, base;
 before(async () => { server = createServer(handler); await new Promise(r => server.listen(0, '127.0.0.1', r)); base = `http://127.0.0.1:${server.address().port}`; });
