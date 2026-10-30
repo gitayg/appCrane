@@ -1,4 +1,7 @@
 {
+  "2.125.17": [
+    "With app isolation on, scripts and devices that send data (POST, PUT and the like) to an app's old address (/<app> on the platform host) reach the app again, on the app's sign-in-exempt paths and on apps that need no sign-in. They used to get a redirect back that most HTTP clients do not follow for a POST, so they silently stopped working while their GET requests still went through. Browsers and GET requests are still redirected to the app's own address. What passes through gets no cookies from the request, can set none, and is shown by browsers in a sandbox, so nothing of the app runs as the dashboard. Requests on the old address are now in the access log (query strings redacted), so you can see which clients have not moved yet."
+  ],
   "2.125.16": [
     "A file moved into an app with appcrane_push_staged_file now belongs to the app's own user instead of root, so an app that runs as a non-root user (node) can change or replace it. Before, it landed root-owned and the app got a permission error writing it. appcrane_cp already worked this way since 2.123.1."
   ],

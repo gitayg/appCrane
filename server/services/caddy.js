@@ -293,6 +293,58 @@ function embedHeaderBlock(fa, indent) {
 }
 
 /**
+ * Isolated mode, on the platform host: the old /<slug> address of an app path
+ * that machine clients use. Everything else on that address is a 308 to the
+ * app host, and a client that does not re-send a POST on a 308 (ureq follows
+ * one only for GET, HEAD, OPTIONS and TRACE) got the redirect back as its
+ * answer: on crane, 28 Oct 2026, every relayed haivecontrol device went silent
+ * for two days while its polls (GET) still followed the redirect.
+ *
+ * So a request that is NOT a GET or HEAD, to an exempt path (or anywhere in a
+ * headless app), is proxied to the app here instead. Safe on the dashboard's
+ * origin because nothing of the app runs there as that origin, and nothing of
+ * the dashboard reaches the app:
+ *   - GET and HEAD still redirect, so a browser never renders an app page here;
+ *   - every response carries CSP sandbox (an opaque origin, for a form POST a
+ *     browser renders) and nosniff, and loses any Set-Cookie;
+ *   - the whole Cookie header is dropped, so the dashboard session never
+ *     reaches the app, and forged identity headers are stripped as everywhere.
+ */
+function legacyMachineRoute(app, mount, port, bypassPaths, live = true) {
+  const paths = !live ? [] : app.auth_mode === 'headless' ? [`${mount}*`] : bypassPaths.map(p => `${mount}${p}*`);
+  if (!paths.length) return '';
+  return `        @legacy_machine {\n` +
+         `            path ${paths.join(' ')}\n` +
+         `            not method GET HEAD\n` +
+         `        }\n` +
+         `        handle @legacy_machine {\n` +
+         `            request_header -Cookie\n` +
+         identityStrip('            ') +
+         authMode('            ', 'bypass') +
+         `            uri strip_prefix ${mount}\n` +
+         `            header {\n` +
+         `                Content-Security-Policy "sandbox"\n` +
+         `                X-Content-Type-Options "nosniff"\n` +
+         `                -Set-Cookie\n` +
+         `                defer\n` +
+         `            }\n` +
+         `            reverse_proxy 127.0.0.1:${port} {\n` +
+         `                flush_interval -1\n` +
+         `            }\n` +
+         `        }\n`;
+}
+
+/** The body of an isolated /<slug> handle: the 308, behind the legacy machine
+ *  route when there is one. `redir` sorts ahead of `handle` inside a block, so
+ *  with a machine route the redirect needs a handle of its own to come second. */
+function redirOrLegacy(app, mount, port, bypassPaths, host, live = true) {
+  const redir = `redir https://${host}{uri} 308\n`;
+  const legacy = legacyMachineRoute(app, mount, port, bypassPaths, live);
+  if (!legacy) return `        ${redir}`;
+  return legacy + `        handle {\n            ${redir}        }\n`;
+}
+
+/**
  * The body of a site block that serves ONE app at the root of its own host:
  * an isolated app host (<slug>.<domain>, <slug>-sandbox.<domain>) or a custom
  * domain with custom_domain_auth = 1. Same security rules as the /<slug>
@@ -530,7 +582,11 @@ export function generateCaddyfile() {
   const anyBypassRoute = apps.some(a => bypassByApp.get(a.id).length > 0 &&
     (liveSet.has(`${a.id}:sandbox`) || liveSet.has(`${a.id}:production`)));
   // Isolated: the bypass routes live on the app hosts, not here.
-  if (anyBypassRoute && !isoDomain) caddyfile += BYPASS_ACCESS_LOG + '\n';
+  // Isolated, the old /<slug> address still passes machine requests through
+  // (legacyMachineRoute), so the log shows who has not moved yet.
+  const anyHeadlessLive = apps.some(a => a.auth_mode === 'headless' &&
+    (liveSet.has(`${a.id}:sandbox`) || liveSet.has(`${a.id}:production`)));
+  if (anyBypassRoute || (isoDomain && anyHeadlessLive)) caddyfile += BYPASS_ACCESS_LOG + '\n';
 
   for (const app of apps) {
     const ports = getPortsForSlot(app.slot);
@@ -546,18 +602,21 @@ export function generateCaddyfile() {
     // that is not live keeps its 503, since there is no app host to send it to.
     if (isoDomain) {
       for (const alias of aliases) {
-        caddyfile += `    handle /${alias}-sandbox* {\n`;
-        caddyfile += `        redir https://${appHost(db, slug, 'sandbox')}{uri} 308\n`;
-        caddyfile += `    }\n\n`;
-        caddyfile += `    handle /${alias}* {\n`;
-        caddyfile += `        redir https://${appHost(db, slug, 'production')}{uri} 308\n`;
-        caddyfile += `    }\n\n`;
+        for (const [env, mount] of [['sandbox', `/${alias}-sandbox`], ['production', `/${alias}`]]) {
+          caddyfile += `    handle ${mount}* {\n`;
+          caddyfile += redirOrLegacy(app, mount, env === 'sandbox' ? ports.sand_be : ports.prod_be,
+            bypassByApp.get(app.id), appHost(db, slug, env), liveSet.has(`${app.id}:${env}`));
+          caddyfile += `    }\n\n`;
+        }
       }
       for (const [env, mount] of [['sandbox', `/${slug}-sandbox`], ['production', `/${slug}`]]) {
         caddyfile += `    handle ${mount}* {\n`;
-        caddyfile += liveSet.has(`${app.id}:${env}`)
-          ? `        redir https://${appHost(db, slug, env)}{uri} 308\n`
-          : `        respond "Not deployed" 503\n`;
+        if (liveSet.has(`${app.id}:${env}`)) {
+          caddyfile += redirOrLegacy(app, mount, env === 'sandbox' ? ports.sand_be : ports.prod_be,
+            bypassByApp.get(app.id), appHost(db, slug, env));
+        } else {
+          caddyfile += `        respond "Not deployed" 503\n`;
+        }
         caddyfile += `    }\n\n`;
       }
       continue;

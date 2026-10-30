@@ -103,9 +103,35 @@ test('on: the platform host redirects every app mount to the app host and proxie
   assert.match(h.get('/oldhub-sandbox*'), /redir https:\/\/hub-sandbox\.apps\.example\.test\{uri\} 308/);
   assert.match(h.get('/shop-sandbox*'), /respond "Not deployed" 503/);
   assert.match(h.get('/idle*'), /respond "Not deployed" 503/);
-  assert.doesNotMatch(crane, APP_PORT, 'an app is still proxied on the platform host');
-  assert.doesNotMatch(crane, /forward_auth|log \{/);
+  // Only the legacy machine routes (next test) still proxy an app here.
+  const outsideLegacy = crane.replace(/ {8}handle @legacy_machine \{[\s\S]*?\n {8}\}\n/g, '');
+  assert.doesNotMatch(outsideLegacy, APP_PORT, 'an app is still proxied on the platform host');
+  assert.doesNotMatch(crane, /forward_auth/);
   assert.match(h.get('(catch-all)'), /reverse_proxy 127\.0\.0\.1:5001/);
+});
+
+// crane, 28 Oct 2026: a relay agent (ureq) does not re-send a POST on a 308, so
+// every relayed device went silent when isolation turned the old address into
+// a redirect. Machine methods on exempt paths now reach the app there.
+test('on: the old address passes non-GET requests on exempt paths (and headless apps) to the app, safely', () => {
+  isolation(ISO);
+  const crane = sites(generateCaddyfile()).get(CRANE);
+  const h = handles(crane);
+  const runner = h.get('/runner*');
+  assert.match(runner, /path \/runner\/ws\/runner\* \/runner\/hooks\/\*\n/);
+  assert.match(runner, /not method GET HEAD\n/);
+  assert.match(runner, /request_header -Cookie\n/);
+  assert.match(runner, /request_header -X-AppCrane-User\n/);
+  assert.match(runner, /uri strip_prefix \/runner\n/);
+  assert.match(runner, /Content-Security-Policy "sandbox"\n[\s\S]*-Set-Cookie\n\s*defer/);
+  assert.match(runner, /reverse_proxy 127\.0\.0\.1:4005 \{/);
+  assert.match(runner, /\n {8}handle \{\n {12}redir https:\/\/runner\.apps\.example\.test\{uri\} 308\n {8}\}/);
+  assert.match(h.get('/runner-sandbox*'), /path \/runner-sandbox\/ws\/runner\*[\s\S]*reverse_proxy 127\.0\.0\.1:4006 \{/);
+  assert.match(h.get('/open*'), /path \/open\*\n/);
+  assert.doesNotMatch(h.get('/hub*'), /legacy_machine/, 'an app with no exempt path keeps a plain redirect');
+  assert.doesNotMatch(h.get('/oldhub*'), /legacy_machine/);
+  assert.doesNotMatch(h.get('/idle*'), /legacy_machine/, 'an env that is not live gets nothing to proxy to');
+  assert.match(crane, /request>uri regexp/, 'the old address is logged while it still carries traffic');
 });
 
 test('on: one site per LIVE app environment', () => {
@@ -265,7 +291,8 @@ test('apps directly under the platform host: own site per app, the platform site
   assert.ok(all.has(CRANE), 'the platform site is missing');
   assert.ok(all.has(`hub.${CRANE}`) && all.has(`hub-sandbox.${CRANE}`), 'the app sites are missing');
   assert.match(handles(all.get(CRANE)).get('/hub*'), /redir https:\/\/hub\.crane\.example\.test\{uri\} 308/);
-  assert.doesNotMatch(all.get(CRANE), APP_PORT, 'an app is still proxied on the platform host');
+  assert.doesNotMatch(all.get(CRANE).replace(/ {8}handle @legacy_machine \{[\s\S]*?\n {8}\}\n/g, ''), APP_PORT,
+    'an app is still proxied on the platform host');
   const p = join(SCRATCH, 'Caddyfile.nested');
   writeFileSync(p, text.replace('import /etc/caddy/sites/*.caddy\n', ''));
   const cfg = JSON.parse(execFileSync('docker', ['run', '--rm', '-v', `${p}:/etc/caddy/Caddyfile:ro`, 'caddy:2',
@@ -296,6 +323,10 @@ test('live caddy:2: redirect, prefix strip, cookie strip, AppCrane routes, hando
   cf = '{\n\tauto_https off\n\tadmin off\n}\n' + cf + `
 http://:4001 {
 \trespond "APP path={uri} cookie=[{header.Cookie}] user=[{header.X-AppCrane-User}]" 200
+}
+http://:4005 {
+\theader Set-Cookie "app=leak"
+\trespond "RUNNER {method} path={uri} cookie=[{header.Cookie}] user=[{header.X-AppCrane-User}]" 200
 }
 http://:5001 {
 \t@authed {
@@ -333,4 +364,18 @@ http://:5001 {
   assert.equal(curl(port, hub, '/api/me'), `APPCRANE host=${hub} path=/api/me\n200 `);
   assert.equal(curl(port, hub, '/hub/deep?x=1', ['Cookie: cc_token=P; __Host-cc_token=P2']),
     `\n302 https://${CRANE}/api/identity/handoff?app=hub&env=production&return=/hub/deep?x=1`);
+
+  // The old address: a POST to an exempt path reaches the app, with no cookie,
+  // no forged identity, a sandboxed response and no Set-Cookie; a GET still
+  // redirects; a POST off the exempt paths still redirects.
+  const raw = execFileSync('curl', ['-s', '-i', '-X', 'POST', '-H', `Host: ${CRANE}`, '-H', 'Cookie: __Host-cc_token=ADMIN; theme=dark',
+    '-H', 'X-AppCrane-User: mallory', `http://127.0.0.1:${port}/runner/hooks/ping?x=1`], { timeout: 20000 }).toString();
+  assert.match(raw, /^HTTP\/1\.1 200/);
+  assert.match(raw, /RUNNER POST path=\/hooks\/ping\?x=1 cookie=\[\] user=\[\]$/);
+  assert.match(raw, /^Content-Security-Policy: sandbox\r?$/mi);
+  assert.match(raw, /^X-Content-Type-Options: nosniff\r?$/mi);
+  assert.doesNotMatch(raw, /^Set-Cookie:/mi);
+  assert.equal(curl(port, CRANE, '/runner/hooks/ping'), `\n308 https://runner.${ISO}/runner/hooks/ping`);
+  assert.match(execFileSync('curl', ['-s', '-o', '/dev/null', '-w', '%{http_code}', '-X', 'POST', '-H', `Host: ${CRANE}`,
+    `http://127.0.0.1:${port}/runner/other`], { timeout: 20000 }).toString(), /^308$/);
 });
