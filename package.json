@@ -1,6 +1,6 @@
 {
   "name": "appcrane",
-  "version": "2.125.14",
+  "version": "2.125.15",
   "engines": {
     "node": ">=22"
   },
