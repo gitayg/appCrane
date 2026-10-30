@@ -52,10 +52,11 @@ crane.example.test {
             request_header -X-AppCrane-App-Roles
             request_header -X-AppCrane-Identity-Ts
             request_header -X-AppCrane-Identity-Sig
+            request_header -X-AppCrane-Identity-Sig-V2
             request_header -X-AppCrane-Auth-Via
             forward_auth 127.0.0.1:5001 {
                 uri /api/identity/verify?app=hub&prefix=/hub-sandbox
-                copy_headers X-AppCrane-User X-AppCrane-User-Id X-AppCrane-User-Email X-AppCrane-User-Name X-AppCrane-User-Role X-AppCrane-App-Role X-AppCrane-Is-Admin X-AppCrane-App-Roles X-AppCrane-Identity-Ts X-AppCrane-Identity-Sig X-AppCrane-Auth-Via
+                copy_headers X-AppCrane-User X-AppCrane-User-Id X-AppCrane-User-Email X-AppCrane-User-Name X-AppCrane-User-Role X-AppCrane-App-Role X-AppCrane-Is-Admin X-AppCrane-App-Roles X-AppCrane-Identity-Ts X-AppCrane-Identity-Sig X-AppCrane-Identity-Sig-V2 X-AppCrane-Auth-Via
             }
             request_header Cookie "(^|;\s*)cc_token=[^;]*" ""
             request_header Cookie "^;\s*" ""
@@ -84,10 +85,11 @@ crane.example.test {
             request_header -X-AppCrane-App-Roles
             request_header -X-AppCrane-Identity-Ts
             request_header -X-AppCrane-Identity-Sig
+            request_header -X-AppCrane-Identity-Sig-V2
             request_header -X-AppCrane-Auth-Via
             forward_auth 127.0.0.1:5001 {
                 uri /api/identity/verify?app=hub&prefix=/hub
-                copy_headers X-AppCrane-User X-AppCrane-User-Id X-AppCrane-User-Email X-AppCrane-User-Name X-AppCrane-User-Role X-AppCrane-App-Role X-AppCrane-Is-Admin X-AppCrane-App-Roles X-AppCrane-Identity-Ts X-AppCrane-Identity-Sig X-AppCrane-Auth-Via
+                copy_headers X-AppCrane-User X-AppCrane-User-Id X-AppCrane-User-Email X-AppCrane-User-Name X-AppCrane-User-Role X-AppCrane-App-Role X-AppCrane-Is-Admin X-AppCrane-App-Roles X-AppCrane-Identity-Ts X-AppCrane-Identity-Sig X-AppCrane-Identity-Sig-V2 X-AppCrane-Auth-Via
             }
             request_header Cookie "(^|;\s*)cc_token=[^;]*" ""
             request_header Cookie "^;\s*" ""
@@ -117,6 +119,7 @@ crane.example.test {
         request_header -X-AppCrane-App-Roles
         request_header -X-AppCrane-Identity-Ts
         request_header -X-AppCrane-Identity-Sig
+        request_header -X-AppCrane-Identity-Sig-V2
         request_header -X-AppCrane-Auth-Via
         header {
             Content-Security-Policy "(?i)(^\s*|;\s*)frame-ancestors[^;]*" "${1}frame-ancestors 'self' https://*.example.test https://example.test"
@@ -143,6 +146,7 @@ crane.example.test {
         request_header -X-AppCrane-App-Roles
         request_header -X-AppCrane-Identity-Ts
         request_header -X-AppCrane-Identity-Sig
+        request_header -X-AppCrane-Identity-Sig-V2
         request_header -X-AppCrane-Auth-Via
         header {
             Content-Security-Policy "(?i)(^\s*|;\s*)frame-ancestors[^;]*" "${1}frame-ancestors 'self' https://*.example.test https://example.test"
@@ -167,6 +171,7 @@ crane.example.test {
         request_header -X-AppCrane-App-Roles
         request_header -X-AppCrane-Identity-Ts
         request_header -X-AppCrane-Identity-Sig
+        request_header -X-AppCrane-Identity-Sig-V2
         request_header -X-AppCrane-Auth-Via
         request_header -X-AppCrane-Auth-Mode
         request_header X-AppCrane-Auth-Mode "bypass"
@@ -193,6 +198,7 @@ crane.example.test {
         request_header -X-AppCrane-App-Roles
         request_header -X-AppCrane-Identity-Ts
         request_header -X-AppCrane-Identity-Sig
+        request_header -X-AppCrane-Identity-Sig-V2
         request_header -X-AppCrane-Auth-Via
         request_header -X-AppCrane-Auth-Mode
         request_header X-AppCrane-Auth-Mode "bypass"
@@ -219,6 +225,7 @@ crane.example.test {
         request_header -X-AppCrane-App-Roles
         request_header -X-AppCrane-Identity-Ts
         request_header -X-AppCrane-Identity-Sig
+        request_header -X-AppCrane-Identity-Sig-V2
         request_header -X-AppCrane-Auth-Via
         request_header -X-AppCrane-Auth-Mode
         request_header X-AppCrane-Auth-Mode "bypass"
@@ -245,6 +252,7 @@ crane.example.test {
         request_header -X-AppCrane-App-Roles
         request_header -X-AppCrane-Identity-Ts
         request_header -X-AppCrane-Identity-Sig
+        request_header -X-AppCrane-Identity-Sig-V2
         request_header -X-AppCrane-Auth-Via
         request_header -X-AppCrane-Auth-Mode
         request_header X-AppCrane-Auth-Mode "bypass"
@@ -272,10 +280,11 @@ crane.example.test {
             request_header -X-AppCrane-App-Roles
             request_header -X-AppCrane-Identity-Ts
             request_header -X-AppCrane-Identity-Sig
+            request_header -X-AppCrane-Identity-Sig-V2
             request_header -X-AppCrane-Auth-Via
             forward_auth 127.0.0.1:5001 {
                 uri /api/identity/verify?app=runner&prefix=/runner-sandbox
-                copy_headers X-AppCrane-User X-AppCrane-User-Id X-AppCrane-User-Email X-AppCrane-User-Name X-AppCrane-User-Role X-AppCrane-App-Role X-AppCrane-Is-Admin X-AppCrane-App-Roles X-AppCrane-Identity-Ts X-AppCrane-Identity-Sig X-AppCrane-Auth-Via
+                copy_headers X-AppCrane-User X-AppCrane-User-Id X-AppCrane-User-Email X-AppCrane-User-Name X-AppCrane-User-Role X-AppCrane-App-Role X-AppCrane-Is-Admin X-AppCrane-App-Roles X-AppCrane-Identity-Ts X-AppCrane-Identity-Sig X-AppCrane-Identity-Sig-V2 X-AppCrane-Auth-Via
             }
             request_header Cookie "(^|;\s*)cc_token=[^;]*" ""
             request_header Cookie "^;\s*" ""
@@ -304,10 +313,11 @@ crane.example.test {
             request_header -X-AppCrane-App-Roles
             request_header -X-AppCrane-Identity-Ts
             request_header -X-AppCrane-Identity-Sig
+            request_header -X-AppCrane-Identity-Sig-V2
             request_header -X-AppCrane-Auth-Via
             forward_auth 127.0.0.1:5001 {
                 uri /api/identity/verify?app=runner&prefix=/runner
-                copy_headers X-AppCrane-User X-AppCrane-User-Id X-AppCrane-User-Email X-AppCrane-User-Name X-AppCrane-User-Role X-AppCrane-App-Role X-AppCrane-Is-Admin X-AppCrane-App-Roles X-AppCrane-Identity-Ts X-AppCrane-Identity-Sig X-AppCrane-Auth-Via
+                copy_headers X-AppCrane-User X-AppCrane-User-Id X-AppCrane-User-Email X-AppCrane-User-Name X-AppCrane-User-Role X-AppCrane-App-Role X-AppCrane-Is-Admin X-AppCrane-App-Roles X-AppCrane-Identity-Ts X-AppCrane-Identity-Sig X-AppCrane-Identity-Sig-V2 X-AppCrane-Auth-Via
             }
             request_header Cookie "(^|;\s*)cc_token=[^;]*" ""
             request_header Cookie "^;\s*" ""
@@ -340,10 +350,11 @@ crane.example.test {
             request_header -X-AppCrane-App-Roles
             request_header -X-AppCrane-Identity-Ts
             request_header -X-AppCrane-Identity-Sig
+            request_header -X-AppCrane-Identity-Sig-V2
             request_header -X-AppCrane-Auth-Via
             forward_auth 127.0.0.1:5001 {
                 uri /api/identity/verify?app=shop&prefix=/shop
-                copy_headers X-AppCrane-User X-AppCrane-User-Id X-AppCrane-User-Email X-AppCrane-User-Name X-AppCrane-User-Role X-AppCrane-App-Role X-AppCrane-Is-Admin X-AppCrane-App-Roles X-AppCrane-Identity-Ts X-AppCrane-Identity-Sig X-AppCrane-Auth-Via
+                copy_headers X-AppCrane-User X-AppCrane-User-Id X-AppCrane-User-Email X-AppCrane-User-Name X-AppCrane-User-Role X-AppCrane-App-Role X-AppCrane-Is-Admin X-AppCrane-App-Roles X-AppCrane-Identity-Ts X-AppCrane-Identity-Sig X-AppCrane-Identity-Sig-V2 X-AppCrane-Auth-Via
             }
             request_header Cookie "(^|;\s*)cc_token=[^;]*" ""
             request_header Cookie "^;\s*" ""
@@ -379,10 +390,11 @@ crane.example.test {
             request_header -X-AppCrane-App-Roles
             request_header -X-AppCrane-Identity-Ts
             request_header -X-AppCrane-Identity-Sig
+            request_header -X-AppCrane-Identity-Sig-V2
             request_header -X-AppCrane-Auth-Via
             forward_auth 127.0.0.1:5001 {
                 uri /api/identity/verify?app=boxed&prefix=/boxed-sandbox
-                copy_headers X-AppCrane-User X-AppCrane-User-Id X-AppCrane-User-Email X-AppCrane-User-Name X-AppCrane-User-Role X-AppCrane-App-Role X-AppCrane-Is-Admin X-AppCrane-App-Roles X-AppCrane-Identity-Ts X-AppCrane-Identity-Sig X-AppCrane-Auth-Via
+                copy_headers X-AppCrane-User X-AppCrane-User-Id X-AppCrane-User-Email X-AppCrane-User-Name X-AppCrane-User-Role X-AppCrane-App-Role X-AppCrane-Is-Admin X-AppCrane-App-Roles X-AppCrane-Identity-Ts X-AppCrane-Identity-Sig X-AppCrane-Identity-Sig-V2 X-AppCrane-Auth-Via
             }
             request_header Cookie "(^|;\s*)cc_token=[^;]*" ""
             request_header Cookie "^;\s*" ""
@@ -411,10 +423,11 @@ crane.example.test {
             request_header -X-AppCrane-App-Roles
             request_header -X-AppCrane-Identity-Ts
             request_header -X-AppCrane-Identity-Sig
+            request_header -X-AppCrane-Identity-Sig-V2
             request_header -X-AppCrane-Auth-Via
             forward_auth 127.0.0.1:5001 {
                 uri /api/identity/verify?app=boxed&prefix=/boxed
-                copy_headers X-AppCrane-User X-AppCrane-User-Id X-AppCrane-User-Email X-AppCrane-User-Name X-AppCrane-User-Role X-AppCrane-App-Role X-AppCrane-Is-Admin X-AppCrane-App-Roles X-AppCrane-Identity-Ts X-AppCrane-Identity-Sig X-AppCrane-Auth-Via
+                copy_headers X-AppCrane-User X-AppCrane-User-Id X-AppCrane-User-Email X-AppCrane-User-Name X-AppCrane-User-Role X-AppCrane-App-Role X-AppCrane-Is-Admin X-AppCrane-App-Roles X-AppCrane-Identity-Ts X-AppCrane-Identity-Sig X-AppCrane-Identity-Sig-V2 X-AppCrane-Auth-Via
             }
             request_header Cookie "(^|;\s*)cc_token=[^;]*" ""
             request_header Cookie "^;\s*" ""
@@ -491,6 +504,7 @@ shop.example.com {
     request_header -X-AppCrane-App-Roles
     request_header -X-AppCrane-Identity-Ts
     request_header -X-AppCrane-Identity-Sig
+    request_header -X-AppCrane-Identity-Sig-V2
     request_header -X-AppCrane-Auth-Via
     request_header -X-AppCrane-Auth-Mode
     request_header X-AppCrane-Auth-Mode "bypass"
@@ -524,6 +538,7 @@ boxed.example.com {
     request_header -X-AppCrane-App-Roles
     request_header -X-AppCrane-Identity-Ts
     request_header -X-AppCrane-Identity-Sig
+    request_header -X-AppCrane-Identity-Sig-V2
     request_header -X-AppCrane-Auth-Via
     request_header -X-AppCrane-Auth-Mode
     request_header X-AppCrane-Auth-Mode "bypass"

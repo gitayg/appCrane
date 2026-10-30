@@ -10,7 +10,7 @@
 
 import { randomBytes } from 'crypto';
 import { encrypt, decrypt } from './encryption.js';
-export { signIdentity } from '../../packages/tenant/index.js';
+export { signIdentity, signIdentityV2 } from '../../packages/tenant/index.js';
 
 /** The secret for this app's `env`, created on first use. Stable afterwards. */
 export function identitySecretFor(db, appId, env = 'production') {

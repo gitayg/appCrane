@@ -66,6 +66,9 @@ test('/verify signs what it issues, and the app\'s own secret verifies it', asyn
   const id = verifyIdentity(h, { secret: identitySecretFor(db, ALPHA) });
   assert.equal(id.userId, String(uid));
   assert.equal(id.email, 'dana@acme.test');
+  assert.ok(h['x-appcrane-identity-sig-v2'], 'no v2 signature issued');
+  assert.equal(id.authVia, 'session', 'the v2 signature was not the one checked');
+  assert.equal(verifyIdentity(h, { secret: identitySecretFor(db, ALPHA), requireV2: true }).authVia, 'session');
 });
 
 test('forged headers with no signature are rejected', () => {
@@ -102,7 +105,7 @@ test('each app has its own secret, created once and then stable', () => {
 test('Caddy strips client-sent signature headers and copies the issued ones', () => {
   const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'server/services/caddy.js'), 'utf8');
   const list = src.slice(src.indexOf('const IDENTITY_HEADERS = ['), src.indexOf('];', src.indexOf('const IDENTITY_HEADERS = [')));
-  for (const h of ['X-AppCrane-Identity-Ts', 'X-AppCrane-Identity-Sig']) {
+  for (const h of ['X-AppCrane-Identity-Ts', 'X-AppCrane-Identity-Sig', 'X-AppCrane-Identity-Sig-V2']) {
     assert.ok(list.includes(`'${h}'`), `${h} is not in IDENTITY_HEADERS, so a client could send its own`);
   }
 });
@@ -125,4 +128,11 @@ test('sandbox and production of one app sign with different secrets', async () =
   assert.ok(verifyIdentity(h, { secret: identitySecretFor(db, ALPHA, 'sandbox') }));
   assert.throws(() => verifyIdentity(h, { secret: identitySecretFor(db, ALPHA, 'production') }), /signature/,
     'a sandbox-signed identity verifies in production');
+});
+
+test('identity sent to an app for an MCP caller carries a v2 signature that verifies', async () => {
+  const { identityHeadersFor } = await import('../server/services/appMcp/identityHeaders.js');
+  const app = db.prepare('SELECT * FROM apps WHERE id = ?').get(ALPHA);
+  const h = identityHeadersFor(db, { app, env: 'production', user: { id: uid, email: 'dana@acme.test', role: 'user' }, appRole: 'user' });
+  assert.equal(verifyIdentity(h, { secret: identitySecretFor(db, ALPHA), requireV2: true }).authVia, 'session');
 });
