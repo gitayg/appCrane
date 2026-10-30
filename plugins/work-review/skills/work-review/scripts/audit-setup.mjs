@@ -196,17 +196,22 @@ const skills = skillFiles.map(({ f, scope }) => {
 // say — loads twice and competes for the same requests, and a plugin update
 // moves only one of them: the copies drift with nothing saying so. A symlink to
 // the same file is one install, not two.
-const twice = new Set(), reported = new Set();
-for (let i = 0; i < skills.length; i++) for (let j = i + 1; j < skills.length; j++) {
-  const a = skills[i], b = skills[j];
-  if (a.real === b.real || a.scope === b.scope || a.name !== b.name) continue;
-  twice.add(i + ':' + j);
-  // One finding per skill name, however many cached plugin versions it has.
-  if (reported.has(a.name)) continue;
-  reported.add(a.name);
-  const copy = a.scope === 'plugin' ? b : a, other = copy === a ? b : a;
-  add('skill-installed-twice', 'Skills', 'medium', a.name, `installed at ${copy.scope} scope (${copy.file}) and ${other.scope} scope (${other.file}); both load and compete, and updating one leaves the other behind`,
-    other.scope === 'plugin' ? `Delete the ${copy.scope} copy and keep the plugin's, so updates reach it` : 'Keep one copy: delete the other, or link it to the first', { files: [a.file, b.file] });
+// Grouped by name, so a skill at project, user and plugin scope is one finding
+// that names every copy, and the plugin's drift warning is never lost.
+const twice = new Set(), byName = new Map();
+skills.forEach((s, i) => { if (!byName.has(s.name)) byName.set(s.name, []); byName.get(s.name).push(i); });
+for (const [name, idx] of byName) {
+  const copies = [...new Map(idx.map(i => [skills[i].real, skills[i]])).values()];
+  if (new Set(copies.map(c => c.scope)).size < 2) continue;
+  for (const i of idx) for (const j of idx) if (i < j) twice.add(i + ':' + j);
+  // Only copies this person can edit can be removed; two managed copies (synced
+  // beside a plugin's) are nobody's to fix here.
+  const editable = copies.filter(c => !c.managed);
+  if (!editable.length) continue;
+  const plugin = copies.find(c => c.scope === 'plugin');
+  const where = copies.filter(c => c.scope !== 'plugin' || c === plugin).map(c => `${c.scope} scope (${c.file})`).join(', ');
+  add('skill-installed-twice', 'Skills', 'medium', name, `installed at ${where}; every copy loads and competes${plugin ? ', and a plugin update moves only the plugin\'s copy' : ''}`,
+    plugin ? `Delete the ${[...new Set(editable.map(c => c.scope))].join(' and ')} cop${editable.length > 1 ? 'ies' : 'y'} and keep the plugin's, so updates reach it` : 'Keep one copy: delete the others, or link them to one', { files: copies.map(c => c.file) });
 }
 for (let i = 0; i < skills.length; i++) for (let j = i + 1; j < skills.length; j++) {
   // Two skills nobody here can edit (synced, or plugin copies such as two cached

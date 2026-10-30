@@ -132,3 +132,18 @@ test('a skill installed both as a personal copy and from a plugin is caught; a s
   assert.match(twice[0].fix, /Delete the user copy and keep the plugin's/);
   assert.ok(!kinds(r).includes('skill-overlap'), 'a duplicate install is reported once, not also as an overlap');
 });
+
+test('a skill at project, user and plugin scope is one finding that keeps the plugin warning; two managed copies are not flagged', () => {
+  const root = mkdtempSync(join(tmpdir(), 'audit-'));
+  const proj = join(root, 'proj'), user = join(root, 'user');
+  mkdirSync(join(root, 'home'), { recursive: true });
+  const md = n => `---\nname: ${n}\ndescription: Runs the ${n} lifecycle from intent to release; use when starting a feature\n---\nsteps`;
+  for (const d of [join(proj, '.claude', 'skills', 'spec'), join(user, 'skills', 'spec'), join(user, 'plugins', 'cache', 'mkt', 'p', '1.0.0', 'skills', 'spec')]) w(join(d, 'SKILL.md'), md('spec'));
+  // An org-synced copy beside a plugin's: neither is editable here.
+  for (const d of [join(user, 'skills', 'synced', 'org', 'sdk'), join(user, 'plugins', 'cache', 'mkt', 'p', '1.0.0', 'skills', 'sdk')]) w(join(d, 'SKILL.md'), md('sdk'));
+  const r = run(proj, user, null);
+  const twice = r.findings.filter(f => f.kind === 'skill-installed-twice');
+  assert.deepEqual(twice.map(f => f.item), ['spec'], `got ${kinds(r).join(', ')}`);
+  assert.match(twice[0].finding, /project scope.*user scope.*plugin scope.*plugin update moves only/);
+  assert.match(twice[0].fix, /Delete the project and user copies and keep the plugin's/);
+});
