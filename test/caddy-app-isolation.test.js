@@ -123,7 +123,7 @@ test('on: the old address passes non-GET requests on exempt paths (and headless 
   assert.match(runner, /request_header -Cookie\n/);
   assert.match(runner, /request_header -X-AppCrane-User\n/);
   assert.match(runner, /uri strip_prefix \/runner\n/);
-  assert.match(runner, /Content-Security-Policy "sandbox"\n[\s\S]*-Set-Cookie\n\s*defer/);
+  assert.match(runner, /Content-Security-Policy "sandbox"\n[\s\S]*-Set-Cookie\n[\s\S]*-Clear-Site-Data\n[\s\S]*defer/);
   assert.match(runner, /reverse_proxy 127\.0\.0\.1:4005 \{/);
   assert.match(runner, /\n {8}handle \{\n {12}redir https:\/\/runner\.apps\.example\.test\{uri\} 308\n {8}\}/);
   assert.match(h.get('/runner-sandbox*'), /path \/runner-sandbox\/ws\/runner\*[\s\S]*reverse_proxy 127\.0\.0\.1:4006 \{/);
@@ -325,7 +325,19 @@ http://:4001 {
 \trespond "APP path={uri} cookie=[{header.Cookie}] user=[{header.X-AppCrane-User}]" 200
 }
 http://:4005 {
-\theader Set-Cookie "app=leak"
+\theader {
+\t\tSet-Cookie "app=leak"
+\t\tClear-Site-Data "\\"cookies\\""
+\t\tStrict-Transport-Security "max-age=0"
+\t\tAccess-Control-Allow-Origin "*"
+\t\tAccess-Control-Allow-Credentials "true"
+\t\tNEL "{\\"report_to\\":\\"x\\",\\"max_age\\":99999}"
+\t\tReport-To "{\\"group\\":\\"x\\"}"
+\t\tLink "</evil.js>; rel=preload"
+\t\tRefresh "0; url=https://evil.example"
+\t\tCross-Origin-Resource-Policy "cross-origin"
+\t\tX-Relay-Id "kept"
+\t}
 \trespond "RUNNER {method} path={uri} cookie=[{header.Cookie}] user=[{header.X-AppCrane-User}]" 200
 }
 http://:5001 {
@@ -375,6 +387,12 @@ http://:5001 {
   assert.match(raw, /^Content-Security-Policy: sandbox\r?$/mi);
   assert.match(raw, /^X-Content-Type-Options: nosniff\r?$/mi);
   assert.doesNotMatch(raw, /^Set-Cookie:/mi);
+  for (const h of ['Clear-Site-Data', 'Access-Control-Allow-Origin', 'Access-Control-Allow-Credentials', 'NEL', 'Report-To', 'Link', 'Refresh', 'Cross-Origin-Resource-Policy']) {
+    assert.doesNotMatch(raw, new RegExp(`^${h}:`, 'mi'), `${h} reached the dashboard origin`);
+  }
+  assert.match(raw, /^Strict-Transport-Security: max-age=31536000; includeSubDomains\r?$/mi);
+  assert.doesNotMatch(raw, /max-age=0/);
+  assert.match(raw, /^X-Relay-Id: kept\r?$/mi, 'an ordinary app header must still reach the client');
   assert.equal(curl(port, CRANE, '/runner/hooks/ping'), `\n308 https://runner.${ISO}/runner/hooks/ping`);
   assert.match(execFileSync('curl', ['-s', '-o', '/dev/null', '-w', '%{http_code}', '-X', 'POST', '-H', `Host: ${CRANE}`,
     `http://127.0.0.1:${port}/runner/other`], { timeout: 20000 }).toString(), /^308$/);

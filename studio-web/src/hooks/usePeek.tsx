@@ -49,6 +49,60 @@ export function usePeek(iframeRef: React.RefObject<HTMLIFrameElement | null>) {
     setActive(false)
   }, [])
 
+  // App isolation: the app is on its own host, so this document cannot see
+  // into its frame. A hidden page AppCrane serves on that host
+  // (/__appcrane/picker, server/assets/app-picker.js) runs the picker in the
+  // app's frame and posts the pick back. If it never answers, or the app has
+  // left its host, the pick is the whole page, as before.
+  const startOnAppHost = useCallback((iframe: HTMLIFrameElement): boolean => {
+    let origin: string
+    try { origin = new URL(iframe.src, location.href).origin } catch { return false }
+    if (origin === location.origin) return false
+
+    const helper = document.createElement('iframe')
+    helper.src = origin + '/__appcrane/picker'
+    helper.hidden = true
+    helper.tabIndex = -1
+    helper.setAttribute('aria-hidden', 'true')
+    const post = (msg: object) => helper.contentWindow?.postMessage(msg, origin)
+    const fallback = () => { setCtx(wholePage(iframe)); stop() }
+    const timer = setTimeout(fallback, 5000)
+
+    const onMessage = (e: MessageEvent) => {
+      if (e.origin !== origin || e.source !== helper.contentWindow) return
+      const m = e.data || {}
+      if (m.type === 'appcrane-picker-ready') {
+        clearTimeout(timer)
+        let frame = -1
+        for (let i = 0; i < window.frames.length; i++) if (window.frames[i] === iframe.contentWindow) frame = i
+        post({ type: 'appcrane-pick-start', frame })
+      } else if (m.type === 'appcrane-picked') {
+        setCtx(fromAppHost(m.ctx, iframe))
+        stop()
+      } else if (m.type === 'appcrane-pick-cancel') {
+        stop()
+      } else if (m.type === 'appcrane-pick-unavailable') {
+        fallback()
+      }
+    }
+    const onKeydown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') { e.preventDefault(); stop() }
+    }
+    window.addEventListener('message', onMessage)
+    document.addEventListener('keydown', onKeydown, true)
+    document.body.appendChild(helper)
+
+    cleanupRef.current = () => {
+      clearTimeout(timer)
+      post({ type: 'appcrane-pick-stop' })
+      window.removeEventListener('message', onMessage)
+      document.removeEventListener('keydown', onKeydown, true)
+      helper.remove()
+    }
+    setActive(true)
+    return true
+  }, [stop])
+
   const start = useCallback(() => {
     const iframe = iframeRef.current
     if (!iframe) return
@@ -58,7 +112,7 @@ export function usePeek(iframeRef: React.RefObject<HTMLIFrameElement | null>) {
       if (!d || !d.body) throw new Error('iframe not ready')
       doc = d
     } catch {
-      setCtx({ selector: '', tag: '', id: '', text: '', path: iframe.src })
+      if (!startOnAppHost(iframe)) setCtx(wholePage(iframe))
       return
     }
 
@@ -139,7 +193,7 @@ export function usePeek(iframeRef: React.RefObject<HTMLIFrameElement | null>) {
       hoverElRef.current = null
     }
     setActive(true)
-  }, [iframeRef, stop])
+  }, [iframeRef, stop, startOnAppHost])
 
   const toggle = useCallback(() => { active ? stop() : start() }, [active, start, stop])
   const clear  = useCallback(() => setCtx(null), [])
@@ -148,6 +202,29 @@ export function usePeek(iframeRef: React.RefObject<HTMLIFrameElement | null>) {
   useEffect(() => () => stop(), [stop])
 
   return { active, ctx, start, stop, toggle, clear }
+}
+
+function wholePage(iframe: HTMLIFrameElement): PeekCtx {
+  return { selector: '', tag: '', id: '', text: '', path: iframe.src }
+}
+
+// The pick as the app's host posted it, in this document's coordinates. It
+// comes from the app's page, so every field is coerced and bounded.
+function fromAppHost(raw: any, iframe: HTMLIFrameElement): PeekCtx {
+  const str = (v: unknown, max: number) => (typeof v === 'string' ? v : '').slice(0, max)
+  const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : 0)
+  const box = iframe.getBoundingClientRect()
+  const r = raw?.rect || {}
+  return {
+    selector: str(raw?.selector, 2000),
+    tag:      str(raw?.tag, 64),
+    id:       str(raw?.id, 200),
+    text:     str(raw?.text, 200),
+    path:     str(raw?.path, 2000),
+    clickX:   box.left + num(raw?.clickX),
+    clickY:   box.top + num(raw?.clickY),
+    rect:     { left: box.left + num(r.left), top: box.top + num(r.top), width: num(r.width), height: num(r.height) },
+  }
 }
 
 function capture(el: Element): PeekCtx {
@@ -178,7 +255,7 @@ function capture(el: Element): PeekCtx {
  * Renders a small chip with the picked element info + an X to clear.
  * Drop in just above the input row in any panel that uses usePeek.
  */
-export const WHOLE_PAGE_LABEL = 'This page (this app opens on its own address, so you can\'t point at one part of it)'
+export const WHOLE_PAGE_LABEL = 'This page (the picker could not reach inside this app)'
 
 export function PeekChip({ ctx, onClear }: { ctx: PeekCtx; onClear: () => void }) {
   const label = !ctx.selector ? WHOLE_PAGE_LABEL

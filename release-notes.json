@@ -1,4 +1,10 @@
 {
+  "2.125.19": [
+    "With app isolation on, the Request button's picker works again: you can point at a button, a field or any part of the app before writing your request, instead of always getting the whole page. Each app now runs on its own address, which the dashboard cannot look inside, so AppCrane serves a small hidden helper on the app's address that does the pointing and hands the result back. Apps need no change. The coder's picker works the same way. If the helper cannot reach the app (for example, it has moved to a sign-in page on another site), you still get the whole page."
+  ],
+  "2.125.18": [
+    "Hardening for the 2.125.17 pass-through on an app's old address: the app's response there loses every header a browser applies to the whole site (clearing cookies, CORS, error-report destinations, preload links, refresh and redirects), and HSTS is forced to the platform's value, so an app cannot sign people out of AppCrane, weaken its HTTPS protection or collect its error reports. Ordinary response headers still reach the client."
+  ],
   "2.125.17": [
     "With app isolation on, scripts and devices that send data (POST, PUT and the like) to an app's old address (/<app> on the platform host) reach the app again, on the app's sign-in-exempt paths and on apps that need no sign-in. They used to get a redirect back that most HTTP clients do not follow for a POST, so they silently stopped working while their GET requests still went through. Browsers and GET requests are still redirected to the app's own address. What passes through gets no cookies from the request, can set none, and is shown by browsers in a sandbox, so nothing of the app runs as the dashboard. Requests on the old address are now in the access log (query strings redacted), so you can see which clients have not moved yet."
   ],

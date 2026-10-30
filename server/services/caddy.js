@@ -308,8 +308,17 @@ function embedHeaderBlock(fa, indent) {
  *   - every response carries CSP sandbox (an opaque origin, for a form POST a
  *     browser renders) and nosniff, and loses any Set-Cookie;
  *   - the whole Cookie header is dropped, so the dashboard session never
- *     reaches the app, and forged identity headers are stripped as everywhere.
+ *     reaches the app, and forged identity headers are stripped as everywhere;
+ *   - the response loses every header a browser applies to the whole origin
+ *     (LEGACY_ORIGIN_HEADERS), and HSTS is forced to the platform's value, so
+ *     the app cannot clear the dashboard's cookies, weaken its HSTS, grant
+ *     itself CORS, or point its error reports at the app.
  */
+const LEGACY_ORIGIN_HEADERS = [
+  'Set-Cookie', 'Clear-Site-Data', 'Access-Control-*', 'Link', 'Refresh', 'Location',
+  'NEL', 'Report-To', 'Reporting-Endpoints', 'Service-Worker-Allowed', 'Origin-Agent-Cluster',
+  'Cross-Origin-*', 'Timing-Allow-Origin', 'Content-Security-Policy-Report-Only',
+];
 function legacyMachineRoute(app, mount, port, bypassPaths, live = true) {
   const paths = !live ? [] : app.auth_mode === 'headless' ? [`${mount}*`] : bypassPaths.map(p => `${mount}${p}*`);
   if (!paths.length) return '';
@@ -325,7 +334,8 @@ function legacyMachineRoute(app, mount, port, bypassPaths, live = true) {
          `            header {\n` +
          `                Content-Security-Policy "sandbox"\n` +
          `                X-Content-Type-Options "nosniff"\n` +
-         `                -Set-Cookie\n` +
+         `                >Strict-Transport-Security "max-age=31536000; includeSubDomains"\n` +
+         LEGACY_ORIGIN_HEADERS.map(h => `                -${h}\n`).join('') +
          `                defer\n` +
          `            }\n` +
          `            reverse_proxy 127.0.0.1:${port} {\n` +

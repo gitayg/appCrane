@@ -1355,7 +1355,7 @@ What does change for browser code:
   `fetch('/api/me')` from the app's page. They are the only AppCrane API paths
   on the app's host. Any other `/api/...` request there reaches **your own
   container**, so call other AppCrane endpoints from your server, with a key.
-- **`/__appcrane/` is reserved** on the app's host (sign-in and sign-out); your
+- **`/__appcrane/` is reserved** on the app's host (sign-in, sign-out and the Request picker); your
   app never sees requests under it.
 - **AppCrane's cookies never reach your container.** `cc_token`,
   `__Host-cc_token`, `__Host-cc_app` and `__Host-cc_handoff` are removed from the `Cookie` header

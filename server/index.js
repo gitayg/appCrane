@@ -50,6 +50,7 @@ import notificationsRoutes from './routes/notifications.js';
 import appRolesRoutes from './routes/appRoles.js';
 import identityRoutes from './routes/identity.js';
 import appHandoffRoutes, { appHostRouter } from './routes/appHandoff.js';
+import { appPickerRouter } from './routes/appPicker.js';
 import { RESERVED_APP_PATH, withAppFrames } from './services/appOrigin.js';
 import settingsRoutes from './routes/settings.js';
 import configRoutes from './routes/config.js';
@@ -441,6 +442,7 @@ crane init --name admin --email you@example.com</pre>
 // Mounted ahead of the Referer slug fallback so an app-host request is never
 // re-pointed into a /<slug> prefix.
 app.use(RESERVED_APP_PATH, appHostRouter);
+app.use(RESERVED_APP_PATH, appPickerRouter);
 
 const APPCRANE_PASSTHROUGH = ['/api/identity', '/api/apps', '/api/info', '/api/notices', '/api/_crashed', '/api/me', '/api/directory', '/api/mcp', '/api/service', '/api/enhancements', '/favicon.svg', '/docs', '/a2a', '/.well-known', '/oauth'];
 const APPCRANE_PAGE_SLUGS = new Set(['login', 'portal', 'dashboard', 'applications', 'users-page', 'audit-page', 'settings', 'docs', 'app', 'studio', 'appstudio']);

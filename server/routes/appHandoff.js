@@ -33,7 +33,7 @@ function stripHost(raw) {
   return String(raw || '').trim().toLowerCase().replace(/:\d+$/, '').replace(/\.$/, '');
 }
 
-function craneDomain() {
+export function craneDomain() {
   return stripHost(String(process.env.CRANE_DOMAIN || '').replace(/^https?:\/\//, '').replace(/\/+$/, ''));
 }
 

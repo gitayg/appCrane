@@ -30,11 +30,12 @@ test('no app-opening site builds /<slug> or /<slug>-sandbox itself', () => {
   }
 });
 
-test('the picker hands back the whole page when it cannot see into the app', () => {
+test('the picker tries the app host first, and hands back the whole page when that fails', () => {
   const src = read('hooks/usePeek.tsx');
   const start = src.indexOf('const start = useCallback');
   const body = src.slice(start, src.indexOf('const STYLE_ID', start));
-  assert.match(body, /setCtx\(\{ selector: '', tag: '', id: '', text: '', path: iframe\.src \}\)/);
+  assert.match(body, /if \(!startOnAppHost\(iframe\)\) setCtx\(wholePage\(iframe\)\)/);
+  assert.match(src, /function wholePage\(iframe: HTMLIFrameElement\): PeekCtx \{\s*return \{ selector: '', tag: '', id: '', text: '', path: iframe\.src \}/);
   assert.doesNotMatch(body, /alert\(/, 'a cross-address app must not dead-end in an alert');
   assert.match(src, /if \(!ctx\.selector\) return `--- Page ---/);
 });
