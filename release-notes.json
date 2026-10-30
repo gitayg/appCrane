@@ -2,7 +2,7 @@
   "2.125.15": [
     "Work Review shows a figure it could not measure as a dash, never as zero: a week with no commits no longer shows $0.00 per commit, and when some usage comes from a model without a known price, the cost says it is incomplete.",
     "The work-review setup audit flags a skill installed twice, such as your own copy beside the same skill from a plugin: both load and compete, and a plugin update only moves one of them.",
-    "The work-review plugin is now version 1.1.2, so people who installed it receive these changes; a test now fails whenever the plugin changes without a version bump."
+    "The work-review plugin is now version 1.1.3, so people who installed it receive these changes; a test now fails whenever the plugin changes without a version bump."
   ],
   "2.125.14": [
     "Hosted apps can trust X-AppCrane-Auth-Via (which says a request came from a script using a personal app sign-in key). The identity signature did not cover it, so on a route that skips the proxy it could be removed to make a script look like a person in a browser. A second signature, X-AppCrane-Identity-Sig-V2, now covers it; appcrane-tenant 1.3.0 checks it and returns authVia. Apps on older appcrane-tenant keep working unchanged.",

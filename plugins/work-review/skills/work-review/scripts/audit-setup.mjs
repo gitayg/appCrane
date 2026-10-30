@@ -176,7 +176,7 @@ const skills = skillFiles.map(({ f, scope }) => {
   const text = read(f) || '';
   const { fm } = frontmatter(text);
   const name = fm?.name || basename(dirname(f));
-  const s = { name, scope, file: rel(f), real: real(f), description: fm?.description || '', lines: lines(text).length, used: usedCount(usage?.skills, name) };
+  const s = { name, scope, file: rel(f), real: real(f), linked: real(f) !== join(real(dirname(dirname(f))), basename(dirname(f)), basename(f)), description: fm?.description || '', lines: lines(text).length, used: usedCount(usage?.skills, name) };
   // Skills synced from an organisation or plugin are inventoried, not judged:
   // the person running the review cannot edit them.
   s.managed = /[\\/](synced|plugins)[\\/]/.test(f);
@@ -201,7 +201,11 @@ const skills = skillFiles.map(({ f, scope }) => {
 const twice = new Set(), byName = new Map();
 skills.forEach((s, i) => { if (!byName.has(s.name)) byName.set(s.name, []); byName.get(s.name).push(i); });
 for (const [name, idx] of byName) {
-  const copies = [...new Map(idx.map(i => [skills[i].real, skills[i]])).values()];
+  // One entry per real file. Where a file is also reached through a symlink,
+  // name the real location: deleting the link would leave the file installed.
+  const byReal = new Map();
+  for (const i of idx) { const c = skills[i], had = byReal.get(c.real); if (!had || (had.linked && !c.linked)) byReal.set(c.real, c); }
+  const copies = [...byReal.values()];
   if (new Set(copies.map(c => c.scope)).size < 2) continue;
   for (const i of idx) for (const j of idx) if (i < j) twice.add(i + ':' + j);
   // Only copies this person can edit can be removed; two managed copies (synced

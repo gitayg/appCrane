@@ -147,3 +147,21 @@ test('a skill at project, user and plugin scope is one finding that keeps the pl
   assert.match(twice[0].finding, /project scope.*user scope.*plugin scope.*plugin update moves only/);
   assert.match(twice[0].fix, /Delete the project and user copies and keep the plugin's/);
 });
+
+test('when a project skill is also linked from user scope, the finding names the real file, not the link', async () => {
+  const { symlinkSync } = await import('fs');
+  const root = mkdtempSync(join(tmpdir(), 'audit-'));
+  const proj = join(root, 'proj'), user = join(root, 'user');
+  mkdirSync(join(root, 'home'), { recursive: true });
+  const md = '---\nname: spec\ndescription: Runs the spec lifecycle from intent to release; use when starting a feature\n---\nsteps';
+  w(join(proj, '.claude', 'skills', 'spec', 'SKILL.md'), md);
+  mkdirSync(join(user, 'skills'), { recursive: true });
+  symlinkSync(join(proj, '.claude', 'skills', 'spec'), join(user, 'skills', 'spec'));
+  w(join(user, 'plugins', 'cache', 'mkt', 'p', '1.0.0', 'skills', 'spec', 'SKILL.md'), md);
+  const r = run(proj, user, null);
+  const f = r.findings.find(x => x.kind === 'skill-installed-twice');
+  assert.ok(f, `got ${kinds(r).join(', ')}`);
+  assert.match(f.finding, /project scope/);
+  assert.doesNotMatch(f.finding, /user scope/, 'the symlink is not reported as a separate copy');
+  assert.match(f.fix, /Delete the project copy/);
+});
