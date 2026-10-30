@@ -1,4 +1,7 @@
 {
+  "2.125.16": [
+    "A file moved into an app with appcrane_push_staged_file now belongs to the app's own user instead of root, so an app that runs as a non-root user (node) can change or replace it. Before, it landed root-owned and the app got a permission error writing it. appcrane_cp already worked this way since 2.123.1."
+  ],
   "2.125.15": [
     "Work Review shows a figure it could not measure as a dash, never as zero: a week with no commits no longer shows $0.00 per commit, and when some usage comes from a model without a known price, the cost says it is incomplete.",
     "The work-review setup audit flags a skill installed twice, such as your own copy beside the same skill from a plugin: both load and compete, and a plugin update only moves one of them.",

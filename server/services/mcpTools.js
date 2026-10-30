@@ -1907,7 +1907,10 @@ const TOOLS = [
       const containerName = `appcrane-${app.slug}-${env}`;
       const cpSpec = `${containerName}:${safeDest}`;
       try {
-        execFileSync('docker', ['cp', row.scratch_path, cpSpec], {
+        // -a: the copy belongs to the container's user. Without it docker cp
+        // keeps the staged file's owner, root, and an app running as node gets
+        // EACCES on its own upload (measured: 0:0 without, 1000:1000 with).
+        execFileSync('docker', ['cp', '-a', row.scratch_path, cpSpec], {
           stdio: 'pipe',
           timeout: 30000,
         });
