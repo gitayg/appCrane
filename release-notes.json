@@ -1,4 +1,7 @@
 {
+  "2.130.1": [
+    "In the coder panel's Requests list, the Clear and Send to coder buttons stay on one line when the panel is narrow; the hint beside them shortens instead (hover it for the full text)."
+  ],
   "2.130.0": [
     "The coder panel now has a Requests list for the app you are working on: pick one or more open requests and send them straight into the coder session on screen, open any request in full, or mention one in your own message (\"do #123 but in blue\") and the coder gets that request with your instruction. Sending waits while the coder is in the middle of a reply.",
     "Security: a look-alike word that mixes letters the check knows with ones it does not now also makes an app coder's owner approve the task."

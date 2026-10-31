@@ -58,3 +58,10 @@ test('a #id in the message goes along as request_ids, only for this app\'s open 
 test('each request links to its full page', () => {
   assert.match(drawer, /<Link to=\{`\/requests\/\$\{r\.id\}`\} target="_blank" rel="noopener"/);
 });
+
+test('the drawer footer stays on one line at narrow widths: the hint shortens, the buttons never wrap', () => {
+  const css = readFileSync(new URL('../studio-web/src/admin.css', import.meta.url), 'utf8');
+  assert.match(css, /\.coder-reqs-foot \.coder-composer-row \{ flex-wrap: nowrap; \}/);
+  assert.match(css, /\.coder-reqs-foot \.coder-composer-row > \.coder-note \{[^}]*min-width: 0;[^}]*text-overflow: ellipsis;[^}]*white-space: nowrap;/);
+  assert.match(css, /\.coder-reqs-foot \.coder-composer-row > \.coder-btn \{ flex-shrink: 0; white-space: nowrap; \}/);
+});

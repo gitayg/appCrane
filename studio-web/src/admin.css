@@ -2024,6 +2024,11 @@ input[type='email'], select, textarea {
 .coder-req-text { font-size: .78rem; line-height: 1.4; color: var(--text); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; word-break: break-word; white-space: pre-line; }
 .coder-reqs-foot { border-top: 1px solid var(--border); padding: 7px 10px; display: flex; flex-direction: column; gap: 6px; }
 .coder-reqs-done { font-size: .76rem; color: #3fb950; }
+/* One line at any panel width: the hint gives way (ellipsis), the buttons never wrap below it. */
+.coder-reqs-foot .coder-composer-row { flex-wrap: nowrap; }
+.coder-reqs-foot .coder-composer-row > .coder-note { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.coder-reqs-foot .coder-composer-row > .coder-spacer { display: none; }
+.coder-reqs-foot .coder-composer-row > .coder-btn { flex-shrink: 0; white-space: nowrap; }
 .coder-refs { font-size: .74rem; }
 
 /* ── Environment right-click menu (topbar pills) ───────────────────────── */

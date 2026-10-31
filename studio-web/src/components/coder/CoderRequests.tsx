@@ -127,7 +127,7 @@ export function CoderRequests(props: Props) {
         {error && <div className="coder-error">{error}</div>}
         {n > 0 && blockedReason && <div className="coder-note" role="status">{blockedReason}</div>}
         <div className="coder-composer-row">
-          <span className="coder-note">
+          <span className="coder-note" title={n === 0 ? `Pick up to ${MAX_CODER_BATCH}.` : `${n} picked${n > 1 ? ', worked in the order you picked them' : ''}.`}>
             {n === 0
               ? `Pick up to ${MAX_CODER_BATCH}.`
               : `${n} picked${n > 1 ? ', worked in the order you picked them' : ''}.`}
