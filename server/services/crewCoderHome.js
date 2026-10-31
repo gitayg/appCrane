@@ -10,7 +10,7 @@
  * or gone, and any crew-coder container a previous process left behind.
  */
 import { execFileSync } from 'child_process';
-import { mkdirSync, chmodSync, existsSync, rmSync, readdirSync, copyFileSync } from 'fs';
+import { mkdirSync, chmodSync, existsSync, rmSync, readdirSync, lstatSync, openSync, readSync, writeSync, fstatSync, fchmodSync, closeSync, constants } from 'fs';
 import { join, resolve } from 'path';
 import log from '../utils/logger.js';
 import { transcriptDirFor, STUDIO_UID, STUDIO_GID } from './builder/appContainer.js';
@@ -37,12 +37,55 @@ export function crewTaskHomeDir(taskId) {
 
 function own(dir) {
   try {
-    execFileSync('chown', ['-R', `${STUDIO_UID}:${STUDIO_GID}`, dir], { stdio: 'pipe' });
+    // SECURITY FIX (review of v2.131.0): -h so a symlink a turn left in the
+    // home is re-owned itself, never its target (GNU chown -R already does
+    // not follow; this keeps it so on any chown).
+    execFileSync('chown', ['-R', '-h', `${STUDIO_UID}:${STUDIO_GID}`, dir], { stdio: 'pipe' });
     chmodSync(dir, 0o700);
   } catch (_) {
     // Not root: leave it writable for the container's uid, as appContainer does
     // with the transcripts.
     try { chmodSync(dir, 0o777); } catch (_) {}
+  }
+}
+
+function isRealDir(p) {
+  try { return lstatSync(p).isDirectory(); } catch (_) { return false; }
+}
+
+/** mkdir that refuses to go through a symlink: false when `p` is anything but a real directory afterwards. */
+function mkdirNoFollow(p) {
+  try { mkdirSync(p); } catch (err) { if (err.code !== 'EEXIST') return false; }
+  return isRealDir(p);
+}
+
+/**
+ * Copy a regular file without following a symlink at either end and without
+ * replacing anything already at `to`. False when it did not copy.
+ */
+function copyNoFollow(from, to) {
+  const { O_RDONLY, O_WRONLY, O_CREAT, O_EXCL, O_NOFOLLOW } = constants;
+  let src = null;
+  let dst = null;
+  try {
+    src = openSync(from, O_RDONLY | O_NOFOLLOW);
+    const st = fstatSync(src);
+    if (!st.isFile()) return false;
+    dst = openSync(to, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600);
+    fchmodSync(dst, st.mode & 0o777); // as copyFileSync did
+    const buf = Buffer.alloc(64 * 1024);
+    let n;
+    while ((n = readSync(src, buf, 0, buf.length, null)) > 0) {
+      let off = 0;
+      while (off < n) off += writeSync(dst, buf, off, n - off);
+    }
+    return true;
+  } catch (err) {
+    log.warn(`[crew-coder] legacy transcript not copied: ${err.code || err.message}`);
+    return false;
+  } finally {
+    if (src !== null) try { closeSync(src); } catch (_) {}
+    if (dst !== null) try { closeSync(dst); } catch (_) {}
   }
 }
 
@@ -55,16 +98,27 @@ function own(dir) {
  */
 export function prepareCrewTaskHome(taskId, { slug, resumeId = null } = {}) {
   const dir = crewTaskHomeDir(taskId);
+  const fresh = !existsSync(dir);
   mkdirSync(dir, { recursive: true });
+  // rmSync removes a symlink itself, never what it points at.
   for (const f of ['credentials.json', '.credentials.json', 'skills']) {
     try { rmSync(join(dir, f), { recursive: true, force: true }); } catch (_) {}
   }
-  if (slug && resumeId && SESSION_ID_RE.test(String(resumeId))) {
-    const target = join(dir, 'projects', '-workspace', `${resumeId}.jsonl`);
-    const legacy = join(transcriptDirFor(slug), '-workspace', `${resumeId}.jsonl`);
-    if (!existsSync(target) && existsSync(legacy)) {
-      mkdirSync(join(dir, 'projects', '-workspace'), { recursive: true });
-      copyFileSync(legacy, target);
+  // SECURITY FIX (review of v2.131.0): the home is mounted read-write into the
+  // turn's container, so a turn can leave symlinks (`projects`, `-workspace`,
+  // a dangling `<sid>.jsonl`) that a root copy here would follow to write
+  // anywhere on the host. The legacy copy now happens only into a home this
+  // call created (no container has had it), through real directories only,
+  // with a create-exclusive no-follow open at both ends: the app's transcript
+  // directory is writable from the app container, so a symlinked legacy file
+  // must not be read either.
+  if (fresh && slug && resumeId && SESSION_ID_RE.test(String(resumeId))) {
+    const legacyDir = join(transcriptDirFor(slug), '-workspace');
+    const legacy = join(legacyDir, `${resumeId}.jsonl`);
+    const projects = join(dir, 'projects');
+    const ws = join(projects, '-workspace');
+    if (isRealDir(legacyDir) && existsSync(legacy) && mkdirNoFollow(projects) && mkdirNoFollow(ws)) {
+      copyNoFollow(legacy, join(ws, `${resumeId}.jsonl`));
     }
   }
   own(dir);

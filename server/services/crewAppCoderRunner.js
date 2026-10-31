@@ -17,14 +17,22 @@
  * credentials file, and keeps whatever a turn leaves behind (hooks, processes,
  * files outside /workspace). Each turn now runs in its own throwaway container
  * (runAgentNew, --rm, read-only root) that mounts only the workspace, the
- * task's own Claude home (crewCoderHome.js), the app's skills read-only and,
- * when the owner's credential is the app's credentials.json, a per-call copy
- * of it. The owner's coder panel still runs in the app's container.
+ * task's own Claude home (crewCoderHome.js), the app's skills read-only and
+ * the one credential the turn uses. The owner's coder panel still runs in the
+ * app's container.
+ *
+ * SECURITY FIX (review of v2.131.0): that credential is never the app's shared
+ * Claude login. The login was mounted as a writable copy that is stored back
+ * for the app when the turn ends (claudeCredentials.js), so a turn steered by
+ * another person's agent could read out its refresh token or replace it with
+ * a login of its choosing for the owner's later sessions. A Crew turn uses the
+ * owner's own Claude token, else the platform ANTHROPIC_API_KEY, else it fails
+ * (allowAppCredentials: false, checked at the gate and again in the turn).
  *
  * What stays the same as any coder turn: the app's workspace (the app
  * container is still created for it and marked busy for the turn, so it is not
  * evicted mid-turn), the app's work queue (builder/appQueue.js), the owner's
- * credential (actingUserId → user token, app credentials or platform key), the
+ * own credential (actingUserId → user token, else platform key), the
  * default coder mode, and a read-only per-app coder MCP key issued for the turn
  * and revoked when it ends.
  *
@@ -48,6 +56,8 @@ import { usesLocalRepo } from './managedRepo.js';
 import { prepareCrewTaskHome, CREW_CODER_CONTAINER_TYPE } from './crewCoderHome.js';
 
 const SESSION_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
+export const NO_CREW_CREDENTIAL_REASON =
+  "The app coder's owner has no Claude login of their own and no platform API key is set; Crew turns do not use the app's shared login.";
 const STUDIO_IMAGE = process.env.APPSTUDIO_IMAGE || 'appcrane-studio:latest';
 export const CREW_CODER_MEMORY_MB = 2048;
 
@@ -64,6 +74,7 @@ export function crewTurnContainerOptions({ slug, taskId, workspaceDir, claudeHom
     workspaceDir,
     claudeHomeDir,
     appSlug: slug,
+    allowAppCredentials: false,
     memory: '2g',
     memorySwap: '2g',
     cpus: '1',
@@ -139,8 +150,8 @@ export async function defaultCoderRunner({ app, userId, prompt, taskId, resume =
   const d = { ...(await realDeps()), ...deps };
 
   if (!usesLocalRepo(app)) return { ok: false, reason: `${app.slug} is not Crane-hosted any more, so its coder cannot run.` };
-  if (d.agentCredentialKind({ actingUserId: userId, appSlug: app.slug }) === 'none') {
-    return { ok: false, reason: `${app.slug}'s owner has no Claude credential connected (and the app and platform have none), so the coder cannot run.` };
+  if (d.agentCredentialKind({ actingUserId: userId, appSlug: app.slug, allowAppCredentials: false }) === 'none') {
+    return { ok: false, reason: NO_CREW_CREDENTIAL_REASON };
   }
   if (d.occupiedByAnother(app.slug, userId)) {
     return { ok: false, busy: true, reason: `${app.slug}'s coder workspace is in use by another person right now. Send the task again later.` };
@@ -167,6 +178,10 @@ export async function defaultCoderRunner({ app, userId, prompt, taskId, resume =
 
 async function runTurn(d, { app, c, userId, prompt, taskId, resumeId, signal }) {
   if (signal?.aborted) return { ok: false, reason: 'The task was canceled before the coder started.' };
+  // Again here: the owner's token may have gone while the turn was queued, and
+  // without it the app's login must not be the fallback.
+  const kind = d.agentCredentialKind({ actingUserId: userId, appSlug: app.slug, apiKey: process.env.ANTHROPIC_API_KEY, allowAppCredentials: false });
+  if (kind === 'none') return { ok: false, reason: NO_CREW_CREDENTIAL_REASON };
   const name = crewContainerName(app.slug, taskId);
   try {
     await d.admit({
@@ -185,7 +200,6 @@ async function runTurn(d, { app, c, userId, prompt, taskId, resumeId, signal }) 
   }
   const release = d.reserveMemory(name, CREW_CODER_MEMORY_MB * 1024 * 1024);
   return new Promise((resolve) => {
-    const kind = d.agentCredentialKind({ actingUserId: userId, appSlug: app.slug, apiKey: process.env.ANTHROPIC_API_KEY });
     let key = null;
     try {
       key = d.issueKey({ userId, appId: app.id, sessionId: `crew-task:${taskId}` });

@@ -94,6 +94,11 @@ export function agentCredentialKind({
   oauthToken        = null,
   hasAppCredentials = null,   // exec-mode callers already know; null = look it up
   apiKey            = undefined,
+  // SECURITY FIX (review of v2.131.0): false skips the app's shared Claude
+  // login entirely (Crew turns: a prompt shaped by another person's agent must
+  // never hold, read out or rewrite the app's login). Every other caller
+  // leaves it true and keeps the order above.
+  allowAppCredentials = true,
 } = {}, deps = {}) {
   const tokenMeta = deps.userClaudeTokenMeta || userClaudeTokenMeta;
   const appCreds  = deps.credentialsInfo     || credentialsInfo;
@@ -102,8 +107,8 @@ export function agentCredentialKind({
   if (actingUserId !== null && actingUserId !== undefined) {
     if (probe('user Claude token', () => tokenMeta(actingUserId))?.present) return 'user_oauth';
   }
-  if (hasAppCredentials === true) return 'app_credentials';
-  if (hasAppCredentials === null && appSlug) {
+  if (allowAppCredentials && hasAppCredentials === true) return 'app_credentials';
+  if (allowAppCredentials && hasAppCredentials === null && appSlug) {
     if (probe(`app credentials for ${appSlug}`, () => appCreds(appSlug))?.present) return 'app_credentials';
   }
   if (platformApiKey(apiKey)) return 'api_key';
@@ -507,6 +512,7 @@ function buildRunAgentNew({
   oauthToken    = null,                  // an already-resolved CLAUDE_CODE_OAUTH_TOKEN
   credentialDeps = {},                   // injection point for resolveAgentCredential
   claudeHomeDir = null,                  // host path → mounted rw as ~/.claude (Crew coder: per-task home)
+  allowAppCredentials = true,            // false: never the app's shared login (Crew turns)
   permissionMode = null,                 // as runAgentExec; null = skip permissions
   mcpConfig     = null,                  // JSON for --mcp-config
   allowedTools  = [],                    // MCP tool names pre-approved for Plan / Edits-only modes
@@ -561,7 +567,7 @@ function buildRunAgentNew({
   // Claude Code's auth precedence is API key > credentials.json > OAuth token,
   // so any second credential silently outranks the one the caller meant to use
   // (manifested as "Credit balance is too low" against the wrong account).
-  const cred = resolveAgentCredential({ actingUserId, oauthToken, appSlug, apiKey }, credentialDeps);
+  const cred = resolveAgentCredential({ actingUserId, oauthToken, appSlug, apiKey, allowAppCredentials }, credentialDeps);
   let credsMount = null;
   if (cred.kind === 'user_oauth') {
     args.push('-e', `CLAUDE_CODE_OAUTH_TOKEN=${cred.oauthToken}`);

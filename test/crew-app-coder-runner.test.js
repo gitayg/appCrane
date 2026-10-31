@@ -163,7 +163,7 @@ test('no credential: nothing starts', async () => {
   const { deps, calls } = fakes({ script: answer('s', 'x'), kind: 'none' });
   const r = await defaultCoderRunner({ app, userId: 42, prompt: 'P', taskId: 't4' }, deps);
   assert.equal(r.ok, false);
-  assert.match(r.reason, /no Claude credential/);
+  assert.match(r.reason, /no Claude login of their own/);
   assert.equal(calls.exec.length, 0);
 });
 

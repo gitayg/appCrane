@@ -1,4 +1,8 @@
 {
+  "2.131.1": [
+    "Security: a Crew task sent to an app coder no longer uses the app's shared Claude login. It runs on the app owner's own Claude login, or on the platform API key; with neither, the task is refused with a message saying so. This stops a Crew turn from reading the app's login or replacing it with another.",
+    "Security: the files kept for a Crew task can no longer be used to make AppCrane write outside the task's folder on the server."
+  ],
   "2.131.0": [
     "Each app now has a guaranteed memory amount of half its max. The app can still use up to its max whenever the server has memory free; memory admission now counts the guaranteed halves, so the server only promises what it can keep. Manage shows the guaranteed amount next to the limit, the memory e-mail shows guaranteed and max for each container, and saving a new limit updates both on the running app. The room above the guarantee is shared, not promised: containers have no swap, so if several apps grow at once the server can still run out.",
     "Security: a Crew task sent to an app coder now runs in its own short-lived container. It sees only the app's code and its own task files, not your coder sessions' transcripts or the app's Claude login, and cannot leave anything behind for your next coder turn. Changes it makes still appear in your Changes tab for review. Each Crew turn is limited to 2 GB and 1 CPU.",
