@@ -1,18 +1,21 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'events';
 import { mkdtempSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
-// The real coder-session runner for Crew app coder tasks
-// (services/crewAppCoderRunner.js), with builderSession's API replaced by a
-// fake that publishes the same events a turn publishes (status active → turn →
-// error? → status idle / paused) and writes the transcript rows it writes.
-// What is pinned: the answer is the turn's last assistant message, a failed
-// turn and a stopped container fail with the reason, a session that is
-// mid-turn or held by another person is "busy" (and nothing is left queued),
-// no credential means no session, and the session is started as the given
-// user (whose credential it bills).
+// The coder turn for a Crew app coder task (services/crewAppCoderRunner.js),
+// with the container, queue, MCP key and Claude CLI replaced by fakes that
+// emit what runAgentExec emits (system with session_id, data text, result,
+// exit). What is pinned:
+//   - a Crew turn never uses a person's coder session: no --resume of any
+//     coder_sessions conversation, it gets a fresh one, and a follow-up on the
+//     same task resumes only that task's conversation;
+//   - it runs as the given user (billing), with a read-only coder key that is
+//     revoked when the turn ends, through the app's work queue;
+//   - busy while someone's interactive session is mid-turn; a failed turn,
+//     no credential and a cancel each fail with their reason.
 
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'crane-crew-coder-runner-'));
 process.env.ENCRYPTION_KEY = 'e'.repeat(64);
@@ -26,114 +29,102 @@ const { defaultCoderRunner } = await import('../server/services/crewAppCoderRunn
 db.prepare("INSERT INTO users (id, name, email, role, api_key_hash, active, kind) VALUES (42, 'Olga', 'olga@example.com', 'user', 'x-runner-test', 1, 'human')").run();
 db.prepare("INSERT INTO apps (id, name, slot, slug, source_type, repo_backend, branch) VALUES (1, 'shop', 1, 'shop', 'managed', 'local', 'main')").run();
 const app = db.prepare('SELECT * FROM apps WHERE id = 1').get();
-let n = 0;
+// The owner's own interactive session, with its conversation: a Crew turn must never continue it.
+db.prepare("INSERT INTO coder_sessions (id, app_slug, user_id, branch_name, status, claude_session_id) VALUES ('owner-s', 'shop', 42, 'builder/shop', 'idle', 'owner-thread')").run();
 
-function fakeSession({ status = 'idle', occupied = false, turn }) {
-  const subs = new Map();
-  const calls = { created: [], dispatched: [], cancelled: [], stopped: [] };
-  const publish = (id, ev) => { for (const fn of subs.get(id) || []) fn(ev); };
-  const api = {
-    calls,
-    async createSession(a, userId) {
-      calls.created.push({ slug: a.slug, userId });
-      if (occupied) { const e = new Error('Builder is occupied by Omar.'); e.code = 'BUILDER_OCCUPIED'; throw e; }
-      const id = `s-${++n}`;
-      db.prepare("INSERT INTO coder_sessions (id, app_slug, user_id, branch_name, status) VALUES (?, ?, ?, 'builder/shop', ?)").run(id, a.slug, userId, status);
-      db.prepare("INSERT INTO coder_session_messages (session_id, role, content) VALUES (?, 'assistant', 'an earlier answer')").run(id);
-      return id;
+function fakes({ script, kind = 'user_oauth', failure = null } = {}) {
+  const calls = { exec: [], issued: [], revoked: [], queued: [], busy: [], stopped: 0 };
+  const deps = {
+    getOrCreateContainer: async () => ({ containerId: 'ctr-shop', credsCleanup: null, claudeSessionId: 'owner-thread' }),
+    setContainerBusy: (slug, b) => calls.busy.push(b),
+    enqueue: (slug, item) => { calls.queued.push(item.sourceType); return Promise.resolve().then(item.run); },
+    runAgentExec: (args) => {
+      calls.exec.push(args);
+      const r = new EventEmitter();
+      r.start = () => setImmediate(() => script(r));
+      r.stop = () => { calls.stopped += 1; };
+      r.getStderrTail = () => [];
+      return r;
     },
-    subscribe(id, fn) {
-      if (!subs.has(id)) subs.set(id, new Set());
-      subs.get(id).add(fn);
-      return () => subs.get(id).delete(fn);
-    },
-    async dispatch(id, prompt, opts) {
-      calls.dispatched.push({ id, prompt, userId: opts.userId });
-      if (status === 'race') return { queued: true, followup: { id: 77 } };
-      db.prepare("INSERT INTO coder_session_messages (session_id, role, content) VALUES (?, 'user', ?)").run(id, prompt);
-      publish(id, { type: 'status', status: 'active' });
-      setImmediate(() => turn({ id, publish }));
-      return { started: true };
-    },
-    stopDispatch(id) { calls.stopped.push(id); },
-    cancelFollowup(id, fid) { calls.cancelled.push({ id, fid }); return true; },
+    agentCredentialKind: () => kind,
+    issueKey: ({ userId, appId }) => { calls.issued.push({ userId, appId }); return { id: 7, apiKey: 'dhk_mcp_fake' }; },
+    revokeKey: (id) => calls.revoked.push(id),
+    mcpConfig: () => '{}',
+    allowedTools: () => [],
+    mcpPrompt: 'mcp',
+    model: () => 'sonnet',
+    permissionMode: () => null,
+    systemPrompt: () => 'sys',
+    explainTurnFailure: () => failure,
   };
-  return api;
+  return { deps, calls };
 }
-
-const answer = (text) => ({ id, publish }) => {
-  publish(id, { type: 'turn' });
-  db.prepare("INSERT INTO coder_session_messages (session_id, role, content) VALUES (?, 'assistant', ?)").run(id, text);
-  publish(id, { type: 'status', status: 'idle', exitCode: 0 });
+const answer = (sid, text) => (r) => {
+  r.emit('system', { type: 'system', data: { session_id: sid } });
+  r.emit('data', { type: 'text', text });
+  r.emit('result', { isError: false });
+  r.emit('exit', 0);
 };
-const withCredential = () => 'user_oauth';
 
-test('the answer is the turn\'s last assistant message, from a session started as the given user', async () => {
-  const s = fakeSession({ turn: answer('Changed src/cart.js.') });
-  const r = await defaultCoderRunner({ app, userId: 42, prompt: 'P' }, { session: s, agentCredentialKind: withCredential });
-  assert.deepEqual({ ok: r.ok, text: r.text }, { ok: true, text: 'Changed src/cart.js.' });
-  assert.deepEqual(s.calls.created, [{ slug: 'shop', userId: 42 }]);
-  assert.equal(s.calls.dispatched[0].userId, 42);
-  assert.equal(s.calls.dispatched[0].prompt, 'P');
+test('a first turn starts a fresh conversation, never the owner\'s session, as the given user', async () => {
+  const { deps, calls } = fakes({ script: answer('crew-new-1', 'Changed src/cart.js.') });
+  const r = await defaultCoderRunner({ app, userId: 42, prompt: 'P', taskId: 't1' }, deps);
+  assert.deepEqual({ ok: r.ok, text: r.text, sid: r.claudeSessionId }, { ok: true, text: 'Changed src/cart.js.', sid: 'crew-new-1' });
+  assert.equal(calls.exec[0].resume, undefined, 'no --resume: the owner thread and the container thread are not continued');
+  assert.equal(calls.exec[0].actingUserId, 42);
+  assert.equal(calls.exec[0].containerId, 'ctr-shop');
+  assert.deepEqual(calls.issued, [{ userId: 42, appId: 1 }]);
+  assert.deepEqual(calls.revoked, [7], 'the coder key is revoked when the turn ends');
+  assert.deepEqual(calls.queued, ['crew'], "through the app's work queue");
+  assert.deepEqual(calls.busy, [true, false]);
+  assert.equal(db.prepare("SELECT claude_session_id FROM coder_sessions WHERE id = 'owner-s'").get().claude_session_id, 'owner-thread', "the owner's session is untouched");
 });
 
-test('a failed turn fails with its reason, not with the failure text as an answer', async () => {
-  const s = fakeSession({
-    turn: ({ id, publish }) => {
-      db.prepare("INSERT INTO coder_session_messages (session_id, role, content) VALUES (?, 'assistant', 'API Error: 401')").run(id);
-      publish(id, { type: 'error', message: 'Your Claude token was rejected.', turnFailed: true });
-      publish(id, { type: 'status', status: 'idle', exitCode: 1 });
-    },
-  });
-  const r = await defaultCoderRunner({ app, userId: 42, prompt: 'P' }, { session: s, agentCredentialKind: withCredential });
+test("a follow-up on the same task resumes that task's conversation only", async () => {
+  const { deps, calls } = fakes({ script: answer('crew-new-1', 'Done.') });
+  const r = await defaultCoderRunner({ app, userId: 42, prompt: 'P2', taskId: 't1', resume: 'crew-new-1' }, deps);
+  assert.equal(r.ok, true);
+  assert.equal(calls.exec[0].resume, 'crew-new-1');
+  // A malformed id never reaches the shell.
+  const bad = fakes({ script: answer('x', 'y') });
+  await defaultCoderRunner({ app, userId: 42, prompt: 'P', taskId: 't1', resume: 'a; rm -rf /' }, bad.deps);
+  assert.equal(bad.calls.exec[0].resume, undefined);
+});
+
+test("busy while someone's interactive coder session is mid-turn", async () => {
+  db.prepare("UPDATE coder_sessions SET status = 'active' WHERE id = 'owner-s'").run();
+  try {
+    const { deps, calls } = fakes({ script: answer('s', 'x') });
+    const r = await defaultCoderRunner({ app, userId: 42, prompt: 'P', taskId: 't2' }, deps);
+    assert.equal(r.busy, true);
+    assert.equal(calls.exec.length, 0);
+  } finally {
+    db.prepare("UPDATE coder_sessions SET status = 'idle' WHERE id = 'owner-s'").run();
+  }
+});
+
+test('a failed turn fails with its reason', async () => {
+  const { deps, calls } = fakes({ script: answer('s', 'API Error: 401'), failure: 'Your Claude token was rejected.' });
+  const r = await defaultCoderRunner({ app, userId: 42, prompt: 'P', taskId: 't3' }, deps);
   assert.equal(r.ok, false);
   assert.match(r.reason, /token was rejected/);
+  assert.deepEqual(calls.revoked, [7]);
 });
 
-test('a container stopped mid-turn fails the task', async () => {
-  const s = fakeSession({ turn: ({ id, publish }) => publish(id, { type: 'status', status: 'paused', reason: 'idle' }) });
-  const r = await defaultCoderRunner({ app, userId: 42, prompt: 'P' }, { session: s, agentCredentialKind: withCredential });
-  assert.equal(r.ok, false);
-  assert.match(r.reason, /container stopped/);
-});
-
-test('a stopped turn with no new answer is not mistaken for the previous answer', async () => {
-  const s = fakeSession({ turn: ({ id, publish }) => { publish(id, { type: 'turn' }); publish(id, { type: 'status', status: 'idle' }); } });
-  const r = await defaultCoderRunner({ app, userId: 42, prompt: 'P' }, { session: s, agentCredentialKind: withCredential });
-  assert.equal(r.ok, false);
-  assert.match(r.reason, /without an answer/);
-});
-
-test('busy: another person holds the coder, or the session is mid-turn; nothing is left queued', async () => {
-  const held = fakeSession({ occupied: true, turn: answer('x') });
-  const a = await defaultCoderRunner({ app, userId: 42, prompt: 'P' }, { session: held, agentCredentialKind: withCredential });
-  assert.equal(a.busy, true);
-  assert.match(a.reason, /in use by another person/);
-
-  const mid = fakeSession({ status: 'active', turn: answer('x') });
-  const b = await defaultCoderRunner({ app, userId: 42, prompt: 'P' }, { session: mid, agentCredentialKind: withCredential });
-  assert.equal(b.busy, true);
-  assert.equal(mid.calls.dispatched.length, 0, 'nothing dispatched into a running turn');
-
-  const race = fakeSession({ status: 'race', turn: answer('x') });
-  const c = await defaultCoderRunner({ app, userId: 42, prompt: 'P' }, { session: race, agentCredentialKind: withCredential });
-  assert.equal(c.busy, true);
-  assert.deepEqual(race.calls.cancelled.map((x) => x.fid), [77], 'a request that slipped into the follow-up queue is taken out again');
-});
-
-test('no credential for the owner: no session is started', async () => {
-  const s = fakeSession({ turn: answer('x') });
-  const r = await defaultCoderRunner({ app, userId: 42, prompt: 'P' }, { session: s, agentCredentialKind: () => 'none' });
+test('no credential: nothing starts', async () => {
+  const { deps, calls } = fakes({ script: answer('s', 'x'), kind: 'none' });
+  const r = await defaultCoderRunner({ app, userId: 42, prompt: 'P', taskId: 't4' }, deps);
   assert.equal(r.ok, false);
   assert.match(r.reason, /no Claude credential/);
-  assert.equal(s.calls.created.length, 0);
+  assert.equal(calls.exec.length, 0);
 });
 
 test('canceling the task stops the turn', async () => {
   const ac = new AbortController();
-  const s = fakeSession({ turn: () => ac.abort() });
-  const r = await defaultCoderRunner({ app, userId: 42, prompt: 'P', signal: ac.signal }, { session: s, agentCredentialKind: withCredential });
+  const { deps, calls } = fakes({ script: () => ac.abort() });
+  const r = await defaultCoderRunner({ app, userId: 42, prompt: 'P', taskId: 't5', signal: ac.signal }, deps);
   assert.equal(r.ok, false);
   assert.match(r.reason, /canceled/);
-  assert.equal(s.calls.stopped.length, 1);
+  assert.equal(calls.stopped, 1);
+  assert.deepEqual(calls.revoked, [7]);
 });

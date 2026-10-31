@@ -13,7 +13,9 @@
  * starts a turn for a task that is delivered (held = 0), open (submitted or
  * working), has no question pending for a person, and carries a message the
  * coder has not seen. A person's Approve or Reply on a question the coder asked
- * moves the task back to working, which is how a follow-up turn starts.
+ * moves the task back to working, which is how a follow-up turn starts. Words
+ * in a later message that nobody on the app's side approved (production,
+ * deleting) put the task to the owner first, as in the first message (claim).
  *
  * ── Whose credential ────────────────────────────────────────────────────────
  * The turn runs as the app coder's owner (crew_agents.owner_user_id): the
@@ -24,8 +26,8 @@
  *
  * ── One at a time, refused when busy ────────────────────────────────────────
  * An app has one coder workspace. A task that arrives while another task for
- * the same app is running, while the owner's own session is mid-turn, or while
- * another person holds the app's coder is FAILED with a clear "busy, send it
+ * the same app is running, or while anyone's interactive coder session on the
+ * app is mid-turn, is FAILED with a clear "busy, send it
  * again" reason rather than queued: a queued request would run later against
  * code that changed under it, its sender has no way to withdraw it from a
  * queue it cannot see, and an in-memory queue would be lost on restart. The
@@ -41,7 +43,8 @@
 import { getDb } from '../db.js';
 import { logAudit } from '../middleware/audit.js';
 import log from '../utils/logger.js';
-import { crewEvents, replyAsAppCoder, syncAppCoders, CREW_LIMITS } from './crew.js';
+import { crewEvents, replyAsAppCoder, syncAppCoders, askAppCoderOwner, announce, CREW_LIMITS } from './crew.js';
+import { alwaysAskReason } from './crewRules.js';
 import { buildCoderTaskPrompt, parseCoderAnswer } from './crewAppCoderPrompt.js';
 import { defaultCoderRunner } from './crewAppCoderRunner.js';
 
@@ -97,7 +100,8 @@ function failTask(agentId, taskId, reason) {
 /**
  * Claim a runnable task for a turn, inside one transaction so two events for
  * the same task (or two tasks for the same app) cannot both start one.
- * Returns null (nothing to do), { busy } or { task, messages }.
+ * Returns null (nothing to do), { ask } (held for the owner), { busy } or
+ * { task, messages }.
  */
 function claim(db, taskId) {
   return db.transaction(() => {
@@ -109,6 +113,18 @@ function claim(db, taskId) {
       WHERE m.task_id = ? AND m.id > COALESCE(?, 0) AND NOT (m.from_agent_id = ? AND m.actor_kind = 'agent')
       ORDER BY m.id ASC`).all(t.id, t.coder_seen_msg_id, t.to_agent_id);
     if (!messages.length) return null;
+    // SECURITY FIX (review of v2.129.0): production and deletions always ask,
+    // follow-ups included. The words that count are the ones nobody on the
+    // app's side has approved yet: everything after the owner's latest answer
+    // on this task (a human message on the app coder's side), except the
+    // owner's own words.
+    const ownerOk = db.prepare("SELECT MAX(id) AS id FROM crew_messages WHERE task_id = ? AND from_agent_id = ? AND actor_kind = 'human'")
+      .get(t.id, t.to_agent_id).id || 0;
+    const unapproved = messages.filter((m) => m.id > ownerOk && !(m.from_agent_id === t.to_agent_id && m.actor_kind === 'human'))
+      .map((m) => m.body);
+    if (unapproved.length && alwaysAskReason({ texts: unapproved })) {
+      return { ask: askAppCoderOwner(db, t.id, unapproved), task: t };
+    }
     const other = db.prepare("SELECT 1 FROM crew_tasks WHERE to_agent_id = ? AND coder_status = 'running' AND id <> ?").get(t.to_agent_id, t.id);
     if (other) return { busy: true, task: t };
     const maxId = db.prepare('SELECT MAX(id) AS id FROM crew_messages WHERE task_id = ?').get(t.id).id;
@@ -128,6 +144,11 @@ async function tryStart(taskId) {
   const c = claim(db, taskId);
   if (!c) return;
   const t = c.task;
+  if (c.ask) {
+    audit(t.coder_owner_id, t.app_id, 'crew.decision.ask', { decision_id: c.ask.decisionId, task_id: t.id, ask: 'declared', decider_user_id: c.ask.decider, at: 'follow_up' });
+    announce(t.id, 'status');
+    return;
+  }
   if (c.busy) {
     failTask(t.to_agent_id, t.id, `${t.coder_name} is already working on another task for this app. One task runs at a time; send this one again when that one is done.`);
     return;
@@ -164,14 +185,19 @@ async function tryStart(taskId) {
   running.set(t.id, ac);
   let result;
   try {
-    result = await runner({ app, userId: t.coder_owner_id, prompt, taskId: t.id, signal: ac.signal });
+    // A follow-up continues this task's own conversation; a first turn starts
+    // a fresh one (crewAppCoderRunner.js: never a person's coder session).
+    result = await runner({
+      app, userId: t.coder_owner_id, prompt, taskId: t.id, signal: ac.signal,
+      resume: t.coder_status === 'idle' ? t.coder_session_id : null,
+    });
   } catch (e) {
     result = { ok: false, reason: `The coder turn failed: ${e.message}` };
   } finally {
     running.delete(t.id);
   }
   db.prepare("UPDATE crew_tasks SET coder_status = 'idle', coder_session_id = COALESCE(?, coder_session_id) WHERE id = ?")
-    .run(result?.sessionId ?? null, t.id);
+    .run(result?.claudeSessionId ?? null, t.id);
   finishTurn(db, t, app, result || { ok: false, reason: 'The coder turn ended without a result.' });
 }
 

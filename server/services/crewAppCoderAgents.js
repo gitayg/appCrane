@@ -20,8 +20,9 @@
  * the app coder belongs to ONE of them: the app's creator while they are still
  * an owner, otherwise the owner granted first. When that changes, every open
  * task the previous owner approved is failed (not handed to the new owner's
- * subscription), and the new owner answers first contacts afresh: connections
- * are keyed by the receiving person.
+ * subscription), the previous owner's first-contact rows and pending questions
+ * for this app coder are deleted, and the new owner answers first contacts
+ * afresh.
  *
  * ── What it can never be ────────────────────────────────────────────────────
  * Nobody acts AS an app coder — not its owner, not a platform admin
@@ -149,6 +150,13 @@ function syncOne(db, app, existing, eligible) {
     out.changedTaskIds = failOpenTasks(db, existing.id,
       `${app.slug}'s owner changed, so this task (approved by the previous owner) was not run. Send it again: the new owner decides whether your agent may use this app's coder.`);
     db.prepare('UPDATE crew_agents SET owner_user_id = ? WHERE id = ?').run(ownerId, existing.id);
+    // SECURITY FIX (review of v2.129.0): the previous owner's first-contact
+    // decisions for this app coder (allowed, pending or refused) go, so the
+    // new owner decides afresh and the previous owner cannot release anything.
+    db.prepare('DELETE FROM crew_connections WHERE to_agent_id = ?').run(existing.id);
+    db.prepare(`UPDATE crew_decisions SET status = 'closed', decided_at = datetime('now')
+                WHERE status = 'pending' AND decider_user_id = ? AND task_id IN (SELECT id FROM crew_tasks WHERE to_agent_id = ?)`)
+      .run(existing.owner_user_id, existing.id);
     // The previous owner's standing rules stop applying by themselves: rules
     // are matched against the receiving agent's CURRENT owner (crew.gateFor).
     audit(ownerId, app.id, 'crew.app_coder.owner_change', { agent_id: existing.id, from_user_id: existing.owner_user_id, to_user_id: ownerId, failed_tasks: out.changedTaskIds.length });

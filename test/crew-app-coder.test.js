@@ -66,10 +66,11 @@ mkApp('ghsite', [olga], { hosted: false });
 const runs = [];
 let nextResult = () => ({ ok: true, text: 'Changed src/cart.js: the total now rounds to cents.' });
 let gate = null; // when set, a turn waits on it (to hold a turn "running")
+let convo = 0;
 async function fakeRunner(args) {
   runs.push(args);
   if (gate) await gate.promise;
-  return nextResult(args);
+  return { claudeSessionId: args.resume || `crew-convo-${++convo}`, ...nextResult(args) };
 }
 function holdTurns() {
   let release;
@@ -247,6 +248,36 @@ test("a question from the coder goes to the sender's owner; their reply starts o
   assert.match(follow.prompt, /EUR, always\./);
   assert.match(follow.prompt, /Sven \(a person\)/);
   assert.ok(!follow.prompt.includes('Show totals in the right currency.'), 'only what the coder has not seen');
+  // The first turn started a conversation of its own; the follow-up continues
+  // exactly that one (crewAppCoderRunner: never a person's coder session).
+  const first = runs.at(-2);
+  assert.equal(first.resume, null, 'the first turn starts a fresh conversation');
+  assert.equal(follow.resume, task(s.task_id).coder_session_id);
+  assert.match(follow.resume, /^crew-convo-/);
+  nextResult = () => ({ ok: true, text: 'Changed src/cart.js: the total now rounds to cents.' });
+});
+
+test('a follow-up that asks for production or deletion is held for the owner and runs nothing until approved', async () => {
+  nextResult = () => ({ ok: true, text: 'Done the copy.\nQUESTION FOR REQUESTER: anything else?' });
+  const s = await mcp(sven, 'appcrane_crew_send', { as_agent: 'sven-laptop', to_agent: 'shop-coder', title: 'Copy edit', message: 'Fix the checkout copy.' });
+  await settle();
+  assert.equal(task(s.task_id).state, 'input_required');
+  const q = db.prepare("SELECT * FROM crew_decisions WHERE task_id = ? AND status = 'pending'").get(s.task_id);
+  const before = runs.length;
+  nextResult = () => ({ ok: true, text: 'Dropped it.' });
+  decideTask(sven, q.id, { decision: 'reply', message: 'Yes: now drop the orders table.' });
+  await settle();
+  assert.equal(runs.length, before, 'the follow-up did not run');
+  assert.equal(task(s.task_id).state, 'input_required');
+  const d = db.prepare("SELECT * FROM crew_decisions WHERE task_id = ? AND status = 'pending'").get(s.task_id);
+  assert.equal(d.ask, 'declared');
+  assert.equal(d.decider_user_id, olga.id, "the app coder's owner decides");
+  assert.equal(d.always_ask, 'deletion');
+  decideTask(olga, d.id, { decision: 'approve' });
+  await settle();
+  assert.equal(runs.length, before + 1, 'approved: it runs once');
+  assert.match(runs.at(-1).prompt, /drop the orders table/);
+  assert.equal(task(s.task_id).state, 'completed');
   nextResult = () => ({ ok: true, text: 'Changed src/cart.js: the total now rounds to cents.' });
 });
 
@@ -384,6 +415,28 @@ test('a standing rule that names the app coder lets exactly that sender in, for 
   assert.equal(runs.length, before + 1);
 });
 
+test('only the current owner of an app coder decides its first contact; a previous owner gets 404 and releases nothing', async () => {
+  // sven-hosted's A2A task to blog-coder is held for Olga (earlier test).
+  const conn = connectionFor('sven-hosted', olga, 'blog-coder');
+  assert.equal(conn.state, 'pending');
+  const held = db.prepare("SELECT t.id FROM crew_tasks t JOIN crew_agents a ON a.id = t.from_agent_id WHERE a.name = 'sven-hosted'").get().id;
+  const coderId = db.prepare("SELECT id FROM crew_agents WHERE name = 'blog-coder'").get().id;
+  // The app coder now belongs to Omar, but the connection row still names Olga.
+  db.prepare('UPDATE crew_agents SET owner_user_id = ? WHERE id = ?').run(omar.id, coderId);
+  const before = runs.length;
+  try {
+    for (const d of ['allow', 'allow_once', 'refuse']) {
+      assert.throws(() => crew.decideConnection(olga, conn.id, d), (e) => e.status === 404, d);
+    }
+    await settle();
+    assert.equal(task(held).held, 1, 'nothing released');
+    assert.equal(task(held).state, 'submitted');
+    assert.equal(runs.length, before, 'nothing ran');
+  } finally {
+    db.prepare('UPDATE crew_agents SET owner_user_id = ? WHERE id = ?').run(olga.id, coderId);
+  }
+});
+
 test('an ownership change fails what the previous owner approved, and the new owner decides afresh', async () => {
   // An open task Olga's Allow let through: the coder asked a question on it.
   nextResult = () => ({ ok: true, text: 'Where?\nQUESTION FOR REQUESTER: which page?' });
@@ -399,6 +452,11 @@ test('an ownership change fails what the previous owner approved, and the new ow
   assert.equal(db.prepare("SELECT owner_user_id FROM crew_agents WHERE name = 'blog-coder'").get().owner_user_id, omar.id);
   assert.equal(task(q.task_id).state, 'failed', "Olga's approval does not carry over to Omar's credential");
   assert.match(lastMessage(q.task_id).body, /owner changed/);
+  const coderId = db.prepare("SELECT id FROM crew_agents WHERE name = 'blog-coder'").get().id;
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM crew_connections WHERE to_agent_id = ?').get(coderId).n, 0,
+    "Olga's first-contact rows for blog-coder are gone");
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM crew_decisions d JOIN crew_tasks t ON t.id = d.task_id WHERE t.to_agent_id = ? AND d.status = 'pending' AND d.decider_user_id = ?").get(coderId, olga.id).n, 0,
+    'and so are her pending questions on it');
   const before = runs.length;
   const pending = await mcp(sven, 'appcrane_crew_send', { as_agent: 'sven-laptop', to_agent: 'blog-coder', title: 'More', message: 'And the footer.' });
   await settle();

@@ -700,6 +700,24 @@ function openDecision(db, { task, askedBy, subject, decider, ask, action, scope,
   return id;
 }
 
+/**
+ * SECURITY FIX (review of v2.129.0): a later message on a task to an app coder
+ * (the sender's, or the sender's owner answering the coder) that mentions
+ * production or deleting asks the app coder's owner before the coder runs it,
+ * exactly as the same words in the first message do (declaredApproval). Inside
+ * the caller's transaction; the caller announces and audits.
+ */
+export function askAppCoderOwner(db, taskId, texts) {
+  const task = db.prepare('SELECT * FROM crew_tasks WHERE id = ?').get(taskId);
+  const to = db.prepare('SELECT * FROM crew_agents WHERE id = ?').get(task.to_agent_id);
+  const decisionId = openDecision(db, {
+    task, askedBy: task.from_agent_id, subject: task.from_agent_id, decider: to.owner_user_id, ask: 'declared',
+    action: task.action, scope: task.scope, texts,
+  });
+  db.prepare("UPDATE crew_tasks SET state = 'input_required', updated_at = datetime('now') WHERE id = ?").run(task.id);
+  return { decisionId, decider: to.owner_user_id };
+}
+
 export function closePendingDecisions(db, taskIds) {
   const stmt = db.prepare("UPDATE crew_decisions SET status = 'closed', decided_at = datetime('now') WHERE task_id = ? AND status = 'pending'");
   for (const id of taskIds) stmt.run(id);
@@ -1289,18 +1307,26 @@ export function decideConnection(user, connectionId, decision, { task_id } = {})
   const id = parseInt(connectionId, 10);
   const conn = Number.isFinite(id) ? db.prepare('SELECT * FROM crew_connections WHERE id = ?').get(id) : null;
   if (!conn || conn.to_owner_id !== user.id) fail(404, 'NOT_FOUND', 'No such first-contact request for you.');
+  // SECURITY FIX (review of v2.129.0): an app coder's connection is decided
+  // only by the person who owns that app coder NOW. to_owner_id records who
+  // owned it when the request came in; a previous owner must not release
+  // tasks that would bill the current one. Same 404 as "not yours".
+  if (conn.to_agent_id != null
+      && !db.prepare('SELECT 1 FROM crew_agents WHERE id = ? AND owner_user_id = ?').get(conn.to_agent_id, user.id)) {
+    fail(404, 'NOT_FOUND', 'No such first-contact request for you.');
+  }
   const myAgentIds = `SELECT id FROM crew_agents WHERE owner_user_id = ?`;
   // What an Allow releases: an app coder's connection covers that app coder
   // only; the person-level one covers their own agents, never their app coders
   // (gateFor keys app coders' first contact by the app coder).
   const allowTo = conn.to_agent_id != null
-    ? { sql: 'to_agent_id = ?', arg: conn.to_agent_id }
-    : { sql: 'to_agent_id IN (SELECT id FROM crew_agents WHERE owner_user_id = ? AND app_id IS NULL)', arg: user.id };
+    ? { sql: 'to_agent_id = ? AND to_agent_id IN (SELECT id FROM crew_agents WHERE owner_user_id = ?)', args: [conn.to_agent_id, user.id] }
+    : { sql: 'to_agent_id IN (SELECT id FROM crew_agents WHERE owner_user_id = ? AND app_id IS NULL)', args: [user.id] };
   // What a Refuse or Block rejects: a block, or a refusal of the agent as a
   // person, ends its open tasks with all of the person's agents; refusing it
   // one app coder ends only those.
   const rejectTo = decision === 'block' || conn.to_agent_id == null
-    ? { sql: `to_agent_id IN (${myAgentIds})`, arg: user.id }
+    ? { sql: `to_agent_id IN (${myAgentIds})`, args: [user.id] }
     : allowTo;
   // Only a task still waiting (held AND submitted) can be released: a held
   // task its sender cancelled was withdrawn, and releasing it would show the
@@ -1308,22 +1334,22 @@ export function decideConnection(user, connectionId, decision, { task_id } = {})
   const WAITING = `held = 1 AND state = 'submitted'`;
 
   const affectedIds = decision.startsWith('allow')
-    ? db.prepare(`SELECT id FROM crew_tasks WHERE ${WAITING} AND from_agent_id = ? AND ${allowTo.sql}`).all(conn.from_agent_id, allowTo.arg).map((r) => r.id)
-    : db.prepare(`SELECT id FROM crew_tasks WHERE ${OPEN_FROM_SENDER} AND from_agent_id = ? AND ${rejectTo.sql}`).all(conn.from_agent_id, rejectTo.arg).map((r) => r.id);
+    ? db.prepare(`SELECT id FROM crew_tasks WHERE ${WAITING} AND from_agent_id = ? AND ${allowTo.sql}`).all(conn.from_agent_id, ...allowTo.args).map((r) => r.id)
+    : db.prepare(`SELECT id FROM crew_tasks WHERE ${OPEN_FROM_SENDER} AND from_agent_id = ? AND ${rejectTo.sql}`).all(conn.from_agent_id, ...rejectTo.args).map((r) => r.id);
   const approvals = [];
   const result = db.transaction(() => {
     if (decision === 'allow') {
       db.prepare("UPDATE crew_connections SET state = 'allowed', decided_at = datetime('now') WHERE id = ?").run(conn.id);
       const r = db.prepare(`UPDATE crew_tasks SET held = 0, updated_at = datetime('now')
-                            WHERE ${WAITING} AND from_agent_id = ? AND ${allowTo.sql}`).run(conn.from_agent_id, allowTo.arg);
+                            WHERE ${WAITING} AND from_agent_id = ? AND ${allowTo.sql}`).run(conn.from_agent_id, ...allowTo.args);
       for (const tid of affectedIds) approvals.push(releaseDeclared(db, tid));
       return { state: 'allowed', released: r.changes };
     }
     if (decision === 'allow_once') {
       if (conn.state !== 'pending') fail(409, 'NOT_PENDING', `This connection is ${conn.state}; "allow once" applies to a pending request.`);
       const task = task_id
-        ? db.prepare(`SELECT id FROM crew_tasks WHERE id = ? AND ${WAITING} AND from_agent_id = ? AND ${allowTo.sql}`).get(String(task_id), conn.from_agent_id, allowTo.arg)
-        : db.prepare(`SELECT id FROM crew_tasks WHERE ${WAITING} AND from_agent_id = ? AND ${allowTo.sql} ORDER BY created_at ASC LIMIT 1`).get(conn.from_agent_id, allowTo.arg);
+        ? db.prepare(`SELECT id FROM crew_tasks WHERE id = ? AND ${WAITING} AND from_agent_id = ? AND ${allowTo.sql}`).get(String(task_id), conn.from_agent_id, ...allowTo.args)
+        : db.prepare(`SELECT id FROM crew_tasks WHERE ${WAITING} AND from_agent_id = ? AND ${allowTo.sql} ORDER BY created_at ASC LIMIT 1`).get(conn.from_agent_id, ...allowTo.args);
       if (!task) fail(404, 'NOT_FOUND', 'No held task to allow on this request.');
       db.prepare("UPDATE crew_tasks SET held = 0, updated_at = datetime('now') WHERE id = ?").run(task.id);
       approvals.push(releaseDeclared(db, task.id));
@@ -1334,7 +1360,7 @@ export function decideConnection(user, connectionId, decision, { task_id } = {})
     // OPEN_FROM_SENDER).
     db.prepare("UPDATE crew_connections SET state = 'refused', decided_at = datetime('now') WHERE id = ?").run(conn.id);
     const r = db.prepare(`UPDATE crew_tasks SET held = 0, state = 'rejected', updated_at = datetime('now')
-                          WHERE ${OPEN_FROM_SENDER} AND from_agent_id = ? AND ${rejectTo.sql}`).run(conn.from_agent_id, rejectTo.arg);
+                          WHERE ${OPEN_FROM_SENDER} AND from_agent_id = ? AND ${rejectTo.sql}`).run(conn.from_agent_id, ...rejectTo.args);
     if (decision === 'block') {
       db.prepare('INSERT OR IGNORE INTO crew_blocks (owner_user_id, blocked_agent_id) VALUES (?, ?)').run(user.id, conn.from_agent_id);
     }

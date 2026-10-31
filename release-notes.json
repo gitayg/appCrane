@@ -1,4 +1,7 @@
 {
+  "2.129.1": [
+    "Security fixes for app coders in Crew: only an app's current owner can approve tasks to its coder, and a change of owner clears earlier approvals; a later message on a task that asks for a production deploy or a deletion now waits for the owner like the first one; and each Crew task runs in its own fresh coder conversation instead of the owner's open session, so the requesting agent never sees the owner's conversation."
+  ],
   "2.129.0": [
     "Your agent can hand work to an app's coder: every app hosted on AppCrane now appears in Crew as \"<app>-coder\". When another agent sends it a task, the app's owner approves it first (for that app's coder only), then AppCrane runs the app's coder on the request, billed to that owner, and sends the answer back. Production deploys and deletions still always ask, and one task per app runs at a time.",
     "Changing an app's memory or CPU limit on the Manage page now applies to its running containers right away, without a restart. Before, the new limit waited for the next deploy while the memory warning kept showing the old one. A container already close to a lower limit keeps its old one until the next deploy, and the page says so instead of silently ignoring a failed change."
