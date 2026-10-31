@@ -19,6 +19,7 @@ import { decideAccess, effectiveRules } from '../services/accessRules.js';
 import { revokeAllGrantsForUser } from '../services/oauthStore.js';
 import { passwordLoginMfaStep } from '../services/mfa.js';
 import { touchSession } from '../services/sessionPolicy.js';
+import { auditTrustedSkip, clearTrustedDeviceCookie, hasTrustedDeviceCookie, revokeAllDevices, trustedDeviceFor } from '../services/trustedDevices.js';
 
 const ICON_DIR = resolve(process.env.DATA_DIR || './data', 'apps');
 const ICON_EXTS = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg'];
@@ -148,8 +149,13 @@ router.post('/login', (req, res) => {
     }
   }
 
-  const mfaStep = passwordLoginMfaStep(db, user, { appId });
+  // Only here, after the password passed: a remembered device for THIS user
+  // replaces the code step, never the password.
+  const trustedDevice = trustedDeviceFor(db, req, user);
+  if (!trustedDevice && hasTrustedDeviceCookie(req)) clearTrustedDeviceCookie(req, res);
+  const mfaStep = trustedDevice ? null : passwordLoginMfaStep(db, user, { appId });
   if (mfaStep) return res.status(401).json(mfaStep);
+  if (trustedDevice) auditTrustedSkip(user, trustedDevice, ip);
 
   // Create session token
   const token = generateSessionToken();
@@ -199,7 +205,7 @@ router.post('/login', (req, res) => {
   // (direct nav, new tab, browser restart) or had wrong attributes
   // (path / SameSite), which blocked Caddy forward_auth on per-app
   // routes and bounced users to /applications.
-  auditLogin(user.id, 'ok', { method: 'password', ip });
+  auditLogin(user.id, 'ok', { method: trustedDevice ? 'password+trusted_device' : 'password', ip });
   setSessionCookie(res, token, req);
 
   res.json({
@@ -961,6 +967,7 @@ router.post('/set-password', (req, res) => {
   db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(password), user.id);
   db.prepare('DELETE FROM identity_sessions WHERE user_id = ?').run(user.id);
   revokeAllGrantsForUser(user.id);
+  revokeAllDevices(db, user.id, { actorId: user.id, reason: 'password-change', ip });
 
   // Issue a fresh session so the caller can drop the API-key path
   // immediately and start using Bearer (cc_identity_token) right away.

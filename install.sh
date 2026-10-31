@@ -319,6 +319,13 @@ if grep -qx docker.io <<<"$_installed" && grep -qE '^docker-ce' <<<"$_installed"
   warn "  apt-get remove -y '^docker-ce.*'"
 fi
 
+# Cap journald, syslog and Docker logs and keep a disk reserve — a full disk
+# once took a box down. Runs before the Docker restart below so a fresh install's
+# default log-opts take effect now. A failure here must not abort the install.
+log "Hardening host logs and disk headroom"
+bash "$REPO_DIR/scripts/host-hardening.sh" \
+  || warn "scripts/host-hardening.sh failed — re-run it: sudo bash $REPO_DIR/scripts/host-hardening.sh"
+
 # Bring Docker up robustly. dockerd runs with -H fd:// and gets its listener from
 # docker.socket, so the socket must come up FIRST — starting docker.service alone
 # yields "no sockets found via socket activation". Repeated failed starts also

@@ -4,6 +4,7 @@ import { requireAuth, requireAdmin, requirePlatformAdmin, requireAppAccess } fro
 import { getSystemInfo, formatBytes } from '../services/platform.js';
 import { getPortsForSlot } from '../services/portAllocator.js';
 import { appUrl, isolationEnabled } from '../services/appOrigin.js';
+import { getLastHostVulns } from '../services/hostVulnsNotify.js';
 
 const router = Router();
 
@@ -177,6 +178,16 @@ router.get('/server/health', requireAdmin, (req, res) => {
     recent_deploys: recentDeploys,
     recent_audit: recentAudit,
   });
+});
+
+/**
+ * GET /api/server/host-vulns - the daily host security check (hostVulnsNotify.js):
+ * pending security updates, reboot required, unattended-upgrades. Read-only; the
+ * last stored result, null before the first run. Platform admin only, like the
+ * rest of the server internals here.
+ */
+router.get('/server/host-vulns', requireAdmin, (req, res) => {
+  res.json({ result: getLastHostVulns() });
 });
 
 /**

@@ -9,6 +9,7 @@ import { clearUserRoleGrants } from '../services/appDefinedRoles.js';
 import { isAdmin, refuseRetiredAdminRole } from '../utils/roles.js';
 import { purgeRevokedTenants } from '../services/tenants.js';
 import { revokeAllGrantsForUser } from '../services/oauthStore.js';
+import { revokeAllDevices } from '../services/trustedDevices.js';
 
 const router = Router();
 
@@ -233,6 +234,7 @@ router.put('/:id/password', requirePlatformAdmin, auditMiddleware('user-set-pass
   db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(pwHash, user.id);
   db.prepare('DELETE FROM identity_sessions WHERE user_id = ?').run(user.id);
   revokeAllGrantsForUser(user.id);
+  revokeAllDevices(db, user.id, { actorId: req.user.id, reason: 'password-reset' });
 
   res.json({ message: `Password set for ${user.name}` });
 });

@@ -34,6 +34,7 @@ import { hashApiKey, generateApiKey, hashPassword } from '../services/encryption
 import { requireAuth, requirePlatformAdmin } from '../middleware/auth.js';
 import { reconcileGroupAccess } from '../services/scimGroupAccess.js';
 import { revokeAllGrantsForUser } from '../services/oauthStore.js';
+import { revokeAllDevices } from '../services/trustedDevices.js';
 import log from '../utils/logger.js';
 
 const router = Router();
@@ -183,6 +184,7 @@ function applyUpdateToUser(db, id, attrs) {
     if (!attrs.active) {
       db.prepare("DELETE FROM identity_sessions WHERE user_id = ?").run(id);
       revokeAllGrantsForUser(id);
+      revokeAllDevices(db, id, { reason: 'user-deactivated' });
     }
   }
   if (attrs.externalId !== undefined) {

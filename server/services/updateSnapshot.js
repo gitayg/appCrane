@@ -20,13 +20,19 @@
  * (see `crane snapshots` / the README) once they know what broke.
  */
 
-import { existsSync, mkdirSync, copyFileSync, writeFileSync, readFileSync, readdirSync, rmSync, statSync, chmodSync } from 'fs';
+import { existsSync, mkdirSync, copyFileSync, writeFileSync, readFileSync, readdirSync, rmSync, statSync, statfsSync, chmodSync } from 'fs';
 import { join, resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { getDb } from '../db.js';
+import { readThresholds, belowDiskFloor, fmtBytes, diskFloorText, GiB } from './hostThresholds.js';
 import log from '../utils/logger.js';
 
 const KEEP = 5; // retain the last N snapshots; older ones are pruned
+// Each snapshot is a full copy of the database, so five of a large one filled a
+// production disk (1.1 GB of snapshots on a box that hit 100%). The newest is
+// always kept even when it alone is over the cap: it is the restore point for
+// the update about to run.
+export const MAX_TOTAL_BYTES = 1 * GiB;
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -66,12 +72,35 @@ export function listSnapshots() {
     .sort((a, b) => (a.id < b.id ? 1 : -1)); // newest first
 }
 
-function prune() {
+export function pruneSnapshots() {
   const all = listSnapshots();
-  for (const old of all.slice(KEEP)) {
+  let total = 0;
+  let cut = all.length;
+  for (let i = 0; i < all.length; i++) {
+    total += all[i].bytes;
+    if (i > 0 && (i >= KEEP || total > MAX_TOTAL_BYTES)) { cut = i; break; }
+  }
+  for (const old of all.slice(cut)) {
     try { rmSync(old.dir, { recursive: true, force: true }); log.info(`[snapshot] pruned ${old.id}`); }
     catch (e) { log.warn(`[snapshot] could not prune ${old.id}: ${e.message}`); }
   }
+}
+
+// The copy is about the size of the live database, and writing it must not be
+// what takes DATA_DIR's filesystem below the disk floor: a full disk there
+// is worse than an update without a restore point, because the live database
+// can no longer commit. Unknown free space (statfs failed) does not skip.
+function headroomRefusal(db, deps) {
+  const statfs = deps.statfs || statfsSync;
+  let s;
+  let dbBytes;
+  try { s = statfs(dataDir()); dbBytes = statSync(db.name).size; } catch (_) { return null; }
+  const freeBytes = Number(s.bavail) * Number(s.bsize);
+  const totalBytes = Number(s.blocks) * Number(s.bsize);
+  const t = readThresholds(db);
+  if (!belowDiskFloor(freeBytes - dbBytes, t)) return null;
+  return `snapshot skipped: DATA_DIR (${dataDir()}) has ${fmtBytes(freeBytes)} free of ${fmtBytes(totalBytes)}, and a ${fmtBytes(dbBytes)} database copy `
+    + `would take it below the floor of ${diskFloorText(t)}. Continuing WITHOUT a restore point; free disk space to get one.`;
 }
 
 /**
@@ -81,10 +110,16 @@ function prune() {
  *
  * @param {string} cwd  repo root (where .env lives)
  * @param {object} meta {from, to, sha} recorded in the manifest
- * @returns {{ok:boolean, id?:string, dir?:string, files?:string[], bytes?:number, error?:string}}
+ * @returns {{ok:boolean, skipped?:boolean, id?:string, dir?:string, files?:string[], bytes?:number, error?:string}}
  */
-export function createPreUpdateSnapshot(cwd, meta = {}, dbHandle = null) {
+export function createPreUpdateSnapshot(cwd, meta = {}, dbHandle = null, deps = {}) {
   try {
+    const space = headroomRefusal(dbHandle || getDb(), deps);
+    if (space) {
+      log.warn(`[snapshot] ${space}`);
+      return { ok: false, skipped: true, error: space };
+    }
+
     // Ids are second-resolution, and two snapshots can genuinely land in the
     // same second — a pre-migration snapshot at boot followed by a pre-update
     // one, or a tight retry. Without a uniquifier they share a directory, and
@@ -150,7 +185,7 @@ export function createPreUpdateSnapshot(cwd, meta = {}, dbHandle = null) {
     let bytes = 0;
     for (const f of readdirSync(dir)) bytes += statSync(join(dir, f)).size;
 
-    prune();
+    pruneSnapshots();
 
     // A snapshot without the database is not a restore point. Reporting ok
     // here would tell an operator they can roll back when they can't — the

@@ -4,6 +4,7 @@ import { encrypt, decrypt, deriveSecret, hashApiKey } from './encryption.js';
 import { base32Decode, base32Encode, generateSecret, matchStep, normalizeAlgorithm, otpauthUri } from './totp.js';
 import { logAudit } from '../middleware/audit.js';
 import { recordEvent } from './eventStore.js';
+import { rememberDays, revokeAllDevices } from './trustedDevices.js';
 
 // Local MFA for password sign-in: TOTP with single-use recovery codes.
 // SSO sign-ins never reach this module (the IdP owns MFA there); API keys are
@@ -120,6 +121,8 @@ export function activateEnrollment(db, user, code, { nowMs = Date.now(), ip = nu
     storeRecoveryCodes(db, user.id, codes);
   })();
   clearFailures(user.id);
+  // A new factor means devices remembered under the old one no longer count.
+  revokeAllDevices(db, user.id, { actorId: user.id, reason: 'mfa-enroll', ip });
   audit(user.id, 'mfa-enroll', { algorithm: r.pending_algorithm || 'SHA1', ip }, user.id, 'Two-factor sign-in turned on');
   return { ok: true, recovery_codes: codes };
 }
@@ -130,6 +133,7 @@ export function disable(db, user, { actorId = user.id, ip = null } = {}) {
     db.prepare('DELETE FROM user_mfa_recovery_codes WHERE user_id = ?').run(user.id);
     db.prepare('DELETE FROM mfa_challenges WHERE user_id = ?').run(user.id);
   })();
+  revokeAllDevices(db, user.id, { actorId, reason: 'mfa-disable', ip });
   audit(actorId, 'mfa-disable', { target_user_id: user.id, ip }, user.id, 'Two-factor sign-in turned off', 'warning');
 }
 
@@ -142,6 +146,7 @@ export async function adminReset(db, admin, target, { ip = null, mail = defaultR
     db.prepare('DELETE FROM mfa_challenges WHERE user_id = ?').run(target.id);
   })();
   clearFailures(target.id);
+  revokeAllDevices(db, target.id, { actorId: admin.id, reason: 'mfa-reset', ip });
   audit(admin.id, 'mfa-reset', { target_user_id: target.id, was_enrolled: had, ip }, target.id,
     'Two-factor sign-in reset by a platform admin', 'warning');
   let mailed = false;
@@ -302,6 +307,8 @@ export function passwordLoginMfaStep(db, user, { appId = null } = {}) {
     return {
       mfa_required: true,
       mfa_token: createChallenge(db, user, 'verify', appId),
+      // >0 tells the sign-in page to offer "Remember this device for N days".
+      remember_device_days: rememberDays(db),
       error: { code: 'MFA_REQUIRED', message: 'Enter the code from your authenticator app to finish signing in.' },
     };
   }

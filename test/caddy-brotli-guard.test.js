@@ -112,7 +112,11 @@ function curl(port, host, path, headers, bodyFile) {
 test('live Caddy: br bodies get 415 on app, bypass, headless, platform and custom-domain routes; gzip does not', { skip: noDocker }, async () => {
   setGuard(null);
   // Same file, served over plain HTTP on :8080 so it can run in a throwaway container.
-  const cf = '{\n\tauto_https off\n\tadmin off\n}\n' + generateCaddyfile()
+  // Test-only options go inside the generated global block (it holds the
+  // redacting error logger); a second global block is a parse error.
+  const gen = generateCaddyfile();
+  assert.ok(gen.includes('\n\n{\n    log appcrane_errors {'), 'no global block to extend');
+  const cf = gen.replace('\n\n{\n', '\n\n{\n\tauto_https off\n\tadmin off\n')
     .replace('import /etc/caddy/sites/*.caddy\n', '')
     .replace(/^(crane\.example\.com|custom\.test\.local|old\.test\.local) \{$/gm, 'http://$1:8080 {');
   const p = join(SCRATCH, 'Caddyfile.live');

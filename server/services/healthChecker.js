@@ -371,11 +371,19 @@ async function runCheck(config) {
     if (newFails === config.fail_threshold) {
       log.warn(`[AUTO-RESTART] ${config.slug} ${config.env} (${newFails} consecutive failures)`);
       try {
-        const { restartApp } = await import('./docker.js');
-        await restartApp(config.slug, config.env);
+        // `docker restart` cannot bring back a container that no longer
+        // exists; container recovery runs the live release again instead.
+        const { containerMissing, recoverSoon } = await import('./containerRecovery.js');
+        if (await containerMissing(config.slug, config.env)) {
+          log.warn(`[AUTO-RESTART] ${config.slug} ${config.env} has no container; handing it to container recovery`);
+          recoverSoon();
+        } else {
+          const { restartApp } = await import('./docker.js');
+          await restartApp(config.slug, config.env);
 
-        const { logAudit } = await import('../middleware/audit.js');
-        logAudit(null, config.app_id, 'health-restart', { env: config.env, consecutive_fails: newFails });
+          const { logAudit } = await import('../middleware/audit.js');
+          logAudit(null, config.app_id, 'health-restart', { env: config.env, consecutive_fails: newFails });
+        }
       } catch (e) {
         log.error(`Auto-restart failed for ${config.slug}: ${e.message}`);
       }

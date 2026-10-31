@@ -96,6 +96,12 @@ export function cookieWriteAllowed(req) {
   return !!origin && !!domain && origin === `https://${domain}`;
 }
 
+// The same Secure decision setSessionCookie makes, for other platform cookies
+// (the MFA trusted-device cookie) that must not be weaker than the session's.
+export function platformCookieSecure(req) {
+  return isolated() || isHttps(req);
+}
+
 function isHttps(req) {
   if (!req) return false;
   if (req.secure) return true;

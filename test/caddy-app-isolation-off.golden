@@ -1,5 +1,22 @@
 # Managed by AppCrane - do not edit manually
 
+{
+    log appcrane_errors {
+        include http.log.error
+        format filter {
+            wrap json
+            fields {
+                request>uri regexp "\?.*" "?redacted"
+            }
+        }
+        output file /var/log/caddy/access.log {
+            roll_size 50MiB
+            roll_keep 5
+            roll_keep_for 14d
+        }
+    }
+}
+
 import /etc/caddy/sites/*.caddy
 
 crane.example.test {
@@ -27,6 +44,11 @@ crane.example.test {
             fields {
                 request>uri regexp "\?.*" "?redacted"
             }
+        }
+        output file /var/log/caddy/access.log {
+            roll_size 50MiB
+            roll_keep 5
+            roll_keep_for 14d
         }
     }
 

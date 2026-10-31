@@ -1,3 +1,5 @@
+import { statSync } from 'fs';
+import { dirname } from 'path';
 import { getDb } from '../db.js';
 import { getPortsForSlot } from './portAllocator.js';
 import { isLinux } from './platform.js';
@@ -201,17 +203,114 @@ const BROTLI_REFUSAL =
  * (confirmed in the adapted JSON) rather than falling through to an UNFILTERED
  * default logger.
  */
-const BYPASS_ACCESS_LOG =
-  `    # Access log with query strings redacted — an auth-bypass path carries its\n` +
-  `    # token in the query, and this domain's log must not become a token store.\n` +
-  `    log {\n` +
-  `        format filter {\n` +
-  `            wrap json\n` +
-  `            fields {\n` +
-  `                request>uri regexp "\\?.*" "?redacted"\n` +
-  `            }\n` +
-  `        }\n` +
-  `    }\n`;
+const ACCESS_LOG_DEFAULT = '/var/log/caddy/access.log';
+
+/**
+ * Where the redacting access log is written: CADDY_ACCESS_LOG_FILE, else
+ * /var/log/caddy/access.log — the directory Caddy's Ubuntu package creates,
+ * owned by the `caddy` user the service runs as.
+ *
+ * Through v2.125.19 the log had no `output`, so every line went to stderr and
+ * from there into the systemd journal: one production box took ~19.7k JSON
+ * lines a day that way, into a journal that reached 4 GB and helped fill the
+ * disk. A file Caddy rotates itself has a hard size bound; the journal had none
+ * that AppCrane set.
+ *
+ * The value is written into the Caddyfile verbatim, so anything but a plain
+ * absolute path — a space, quote, brace or newline could add directives — falls
+ * back to the default instead.
+ */
+function accessLogPath() {
+  const p = process.env.CADDY_ACCESS_LOG_FILE;
+  if (!p) return ACCESS_LOG_DEFAULT;
+  if (/^(\/[A-Za-z0-9_.-]+)+$/.test(p) && !p.split('/').some(seg => seg === '.' || seg === '..')) return p;
+  log.warn(`[caddy] CADDY_ACCESS_LOG_FILE is not a plain absolute path — using ${ACCESS_LOG_DEFAULT}`);
+  return ACCESS_LOG_DEFAULT;
+}
+
+/**
+ * Whether the log file's directory exists, checked when the Caddyfile is built.
+ *
+ * Caddy refuses a config whose log file it cannot open, and a refused reload
+ * escalates to a restart in reloadCaddy — so pointing at a directory that is not
+ * there could take Caddy down on a box that self-updated into this change (one
+ * whose Caddy did not come from the apt package that creates /var/log/caddy).
+ * Without the directory the loggers keep stderr, filter and all, and AppCrane
+ * warns once per process. Existence only: AppCrane may run as a user that cannot
+ * write there, while Caddy (as `caddy`) can, so writability here proves nothing.
+ * Replaceable for tests via setAccessLogDirCheck.
+ */
+let accessLogDirExists = (dir) => {
+  try { return statSync(dir).isDirectory(); } catch { return false; }
+};
+export function setAccessLogDirCheck(fn) { accessLogDirExists = fn; }
+let warnedMissingLogDir = false;
+
+function accessLogOutput(indent) {
+  const file = accessLogPath();
+  const dir = dirname(file);
+  if (!accessLogDirExists(dir)) {
+    if (!warnedMissingLogDir) {
+      warnedMissingLogDir = true;
+      log.warn(`[caddy] ${dir} does not exist — Caddy's redacted access log stays on stderr (the journal). ` +
+        `Create it, owned by the user Caddy runs as, to get a rotated ${file}.`);
+    }
+    return '';
+  }
+  return `${indent}output file ${file} {\n` +
+         `${indent}    roll_size 50MiB\n` +
+         `${indent}    roll_keep 5\n` +
+         `${indent}    roll_keep_for 14d\n` +
+         `${indent}}\n`;
+}
+
+/**
+ * Body shared by both redacting loggers below: the query-string filter and the
+ * rotated file. One definition, so the access and error streams cannot drift.
+ *
+ * Rotation: 50 MiB per file, 5 rolled files, none older than 14 days — at most
+ * 300 MiB on disk even with no compression (Caddy gzips rolled files by default,
+ * so in practice far less). At the incident's ~20k lines a day (0.5-1 KB each,
+ * 10-20 MB/day) that is roughly two weeks of history, so the bounds agree.
+ */
+function redactedLogBody(indent) {
+  return `${indent}format filter {\n` +
+         `${indent}    wrap json\n` +
+         `${indent}    fields {\n` +
+         `${indent}        request>uri regexp "\\?.*" "?redacted"\n` +
+         `${indent}    }\n` +
+         `${indent}}\n` +
+         accessLogOutput(indent);
+}
+
+function bypassAccessLog() {
+  return `    # Access log with query strings redacted — an auth-bypass path carries its\n` +
+         `    # token in the query, and this domain's log must not become a token store.\n` +
+         `    log {\n` +
+         redactedLogBody('        ') +
+         `    }\n`;
+}
+
+/**
+ * Global-options logger for Caddy's per-request ERROR stream, emitted whenever
+ * bypassAccessLog is.
+ *
+ * Measured against caddy:2, not assumed: once a site has a `log` block, a request
+ * that fails (a 502 while the app is down, say) is also logged as
+ * `http.log.error.log0` — and the site's own logger includes only
+ * `http.log.access.log0`, so that record fell through to Caddy's DEFAULT logger:
+ * unfiltered, to stderr, to the journal, with "uri":"…?token=<the token>" intact.
+ * Including the whole `http.log.error` namespace here sends it through the same
+ * filter to the same file (Caddy pools one writer per filename; stderr, filtered,
+ * when accessLogOutput has no directory to write to), and the adapter
+ * adds it to the default logger's `exclude`, so the unfiltered copy is gone.
+ */
+function bypassErrorLog() {
+  return `    log appcrane_errors {\n` +
+         `        include http.log.error\n` +
+         redactedLogBody('        ') +
+         `    }\n`;
+}
 
 function authMode(indent, mode) {
   return `${indent}request_header -${AUTH_MODE_HEADER}\n` +
@@ -384,7 +483,7 @@ function isolatedSiteBody(o) {
   });
   let s = BASELINE_HEADERS + '\n';
   if (o.refuseBrotli) s += o.refuseBrotli + '\n';
-  if (bypassPaths.length) s += BYPASS_ACCESS_LOG;
+  if (bypassPaths.length) s += bypassAccessLog();
   s += '\n';
   if (prefix) s += `    @appcrane_compat path ${prefix} ${prefix}/*\n\n`;
 
@@ -543,22 +642,24 @@ export function generateCaddyfile() {
   const isoDomain = craneDomain ? isolationDomain(db) : null;
   const isoTls = isoDomain ? isolationTls(db) : null;
 
-  let caddyfile = '# Managed by AppCrane - do not edit manually\n\n';
   // App hosts without a wildcard certificate get on-demand TLS, which Caddy
   // issues only for a name AppCrane's ask endpoint approves (an existing app).
-  // Global options must be the first block of the file, ahead of the import.
+  // Global options must be the first block of the file, ahead of the import —
+  // so they are collected here and put in front of the body on return, once the
+  // sites below have decided whether the redacting error logger is needed.
+  let globalOpts = '';
   if (isoDomain && !isoTls) {
-    caddyfile += `{\n`;
-    caddyfile += `    on_demand_tls {\n`;
-    caddyfile += `        ask http://127.0.0.1:${cranePort}/api/identity/tls-ask\n`;
-    caddyfile += `    }\n`;
-    caddyfile += `}\n\n`;
+    globalOpts += `    on_demand_tls {\n`;
+    globalOpts += `        ask http://127.0.0.1:${cranePort}/api/identity/tls-ask\n`;
+    globalOpts += `    }\n`;
   }
-  caddyfile += 'import /etc/caddy/sites/*.caddy\n\n';
+  const withGlobals = (body) => '# Managed by AppCrane - do not edit manually\n\n' +
+    (globalOpts ? `{\n${globalOpts}}\n\n` : '') + body;
+  let caddyfile = 'import /etc/caddy/sites/*.caddy\n\n';
 
   if (!craneDomain) {
     caddyfile += '# CRANE_DOMAIN not configured — no routing generated\n';
-    return caddyfile;
+    return withGlobals(caddyfile);
   }
 
   caddyfile += `${craneDomain} {\n`;
@@ -596,7 +697,7 @@ export function generateCaddyfile() {
   // (legacyMachineRoute), so the log shows who has not moved yet.
   const anyHeadlessLive = apps.some(a => a.auth_mode === 'headless' &&
     (liveSet.has(`${a.id}:sandbox`) || liveSet.has(`${a.id}:production`)));
-  if (anyBypassRoute || (isoDomain && anyHeadlessLive)) caddyfile += BYPASS_ACCESS_LOG + '\n';
+  if (anyBypassRoute || (isoDomain && anyHeadlessLive)) caddyfile += bypassAccessLog() + '\n';
 
   for (const app of apps) {
     const ports = getPortsForSlot(app.slot);
@@ -782,13 +883,13 @@ export function generateCaddyfile() {
     //      and so a client cannot claim 'authenticated' on the one route
     //      where nothing verified it.
     //   2. v2.44.0: these routes ARE access-logged, with the query string
-    //      redacted by BYPASS_ACCESS_LOG above. They used to carry
+    //      redacted by bypassAccessLog() above. They used to carry
     //      `log_skip` — the token aghook puts in the query string would
     //      otherwise have sat in Caddy's log storage — which left the one
     //      deliberately-unauthenticated route class as the only one with no
     //      request record. The filter syntax the old comment could not
     //      verify has now been checked against caddy:2 end to end; see
-    //      BYPASS_ACCESS_LOG.
+    //      the comment above ACCESS_LOG_DEFAULT.
     //   3. flush_interval -1 + transport read/write_timeout 0 keep
     //      long-lived idle WS connections from being cut by AppCrane.
     //      Caddy's default global idle_timeout (5m) is far above
@@ -1049,7 +1150,9 @@ export function generateCaddyfile() {
     caddyfile += `\n${alias} {\n    redir https://${primary}{uri} permanent\n}\n`;
   }
 
-  return caddyfile;
+  // Any site that access-logs also gets its error stream redacted; see bypassErrorLog.
+  if (caddyfile.includes(bypassAccessLog())) globalOpts += bypassErrorLog();
+  return withGlobals(caddyfile);
 }
 
 /**

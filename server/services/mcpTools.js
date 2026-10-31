@@ -2340,7 +2340,7 @@ const TOOLS = [
           type: 'array',
           maxItems: 10,
           items: { type: 'string' },
-          description: 'v2.7.27: array of path prefixes (e.g. ["/ws/local-runner"]) that bypass SSO forward_auth on this app. Requests under these prefixes reach the container with NO X-AppCrane-* identity headers — the app authenticates them itself (e.g. token in query string). Caddy suppresses access logging for these paths to prevent token leakage to log storage. Pass [] or null to clear.',
+          description: 'v2.7.27: array of path prefixes (e.g. ["/ws/local-runner"]) that bypass SSO forward_auth on this app. Requests under these prefixes reach the container with NO X-AppCrane-* identity headers — the app authenticates them itself (e.g. token in query string). Caddy access-logs these paths with the query string redacted, so a query-string token never reaches log storage. Pass [] or null to clear.',
         },
         max_ram_mb:      { type: 'number', description: 'Per-container memory cap.' },
         max_cpu_percent: { type: 'number', description: 'Per-container CPU cap (0-100).' },
@@ -2644,7 +2644,7 @@ const TOOLS = [
           type: 'array',
           maxItems: 10,
           items: { type: 'string' },
-          description: 'v2.7.27: array of path prefixes (e.g. ["/ws/local-runner"]) that bypass SSO forward_auth on this app. Requests under these prefixes reach the container with NO X-AppCrane-* identity headers — the app authenticates them itself. Caddy suppresses access logging for these paths to prevent query-string-token leakage. Pass [] or null to clear.',
+          description: 'v2.7.27: array of path prefixes (e.g. ["/ws/local-runner"]) that bypass SSO forward_auth on this app. Requests under these prefixes reach the container with NO X-AppCrane-* identity headers — the app authenticates them itself. Caddy access-logs these paths with the query string redacted, so a query-string token never reaches log storage. Pass [] or null to clear.',
         },
         domain: {
           type: 'string',

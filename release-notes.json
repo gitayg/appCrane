@@ -1,4 +1,10 @@
 {
+  "2.126.0": [
+    "A server that runs low on disk no longer stays down quietly. New installs cap the system logs, keep a 1 GB emergency reserve and turn on automatic security updates (the README shows how to apply this to an existing server). AppCrane refuses to start a deploy or update when less than 5 GB is free, keeps its own backups and deploy logs small, and checks the server every day for pending security updates, e-mailing platform admins when something new shows up.",
+    "An app whose container disappeared (for example after a reboot or a full disk) is brought back automatically from its live release within 10 minutes, and its owners get one e-mail. Before, one failed attempt could leave it down until someone redeployed by hand. Scheduled jobs for an app that is down are paused instead of failing every few minutes, with one e-mail.",
+    "Admins can let users remember a device for two-step sign-in for up to 30 days (Settings > Security). The password is still required every time, and single sign-on is not affected.",
+    "Security: Caddy's access log now goes to a rotated file instead of the system journal, and its error records for sign-in-exempt paths now hide query strings too; before, a failed request could write a token from the URL into the journal."
+  ],
   "2.125.19": [
     "With app isolation on, the Request button's picker works again: you can point at a button, a field or any part of the app before writing your request, instead of always getting the whole page. Each app now runs on its own address, which the dashboard cannot look inside, so AppCrane serves a small hidden helper on the app's address that does the pointing and hands the result back. Apps need no change. The coder's picker works the same way. If the helper cannot reach the app (for example, it has moved to a sign-in page on another site), you still get the whole page."
   ],

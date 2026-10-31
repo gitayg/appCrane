@@ -16,7 +16,10 @@ import { setupFixture, setSetting } from './caddy-app-isolation-fixtures.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const { db, ids } = await setupFixture();
-const { generateCaddyfile } = await import('../server/services/caddy.js');
+const { generateCaddyfile, setAccessLogDirCheck } = await import('../server/services/caddy.js');
+// The golden carries the rotated-file output; pin the directory check so the
+// result does not depend on whether this machine has /var/log/caddy.
+setAccessLogDirCheck(() => true);
 
 const ISO = 'apps.example.test';
 const CRANE = 'crane.example.test';
@@ -78,16 +81,20 @@ test('on, on-demand TLS: a global on_demand_tls block is the first block, ahead 
   const cf = generateCaddyfile();
   const firstBrace = cf.indexOf('{');
   assert.ok(firstBrace < cf.indexOf('import /etc/caddy/sites/'), 'options block must precede the import');
+  // One global block: on-demand TLS, then the redacting error logger the bypass
+  // paths in this fixture switch on (a second global block is a parse error).
   assert.match(cf.slice(0, cf.indexOf('import')),
-    /^# Managed by AppCrane[^\n]*\n\n\{\n {4}on_demand_tls \{\n {8}ask http:\/\/127\.0\.0\.1:5001\/api\/identity\/tls-ask\n {4}\}\n\}\n\n$/);
+    /^# Managed by AppCrane[^\n]*\n\n\{\n {4}on_demand_tls \{\n {8}ask http:\/\/127\.0\.0\.1:5001\/api\/identity\/tls-ask\n {4}\}\n {4}log appcrane_errors \{\n[\s\S]*\n\}\n\n$/);
+  assert.equal(cf.slice(0, cf.indexOf('import')).match(/^\{$/gm).length, 1);
   assert.match(sites(cf).get(`hub.${ISO}`), /^ {4}tls \{\n {8}on_demand\n {4}\}$/m);
 });
 
-test('on, wildcard cert files: tls <cert> <key> on every app host and no global block', () => {
+test('on, wildcard cert files: tls <cert> <key> on every app host and no on-demand options', () => {
   isolation(ISO, { cert: '/etc/caddy/certs/w.crt', key: '/etc/caddy/certs/w.key' });
   const cf = generateCaddyfile();
   assert.doesNotMatch(cf, /on_demand/);
-  assert.ok(cf.startsWith('# Managed by AppCrane - do not edit manually\n\nimport '));
+  // The only global option left is the redacting error logger (this fixture has bypass paths).
+  assert.match(cf, /^# Managed by AppCrane - do not edit manually\n\n\{\n {4}log appcrane_errors \{\n[\s\S]*?\n\}\n\nimport /);
   for (const [name, body] of sites(cf)) {
     if (name.endsWith(`.${ISO}`)) assert.match(body, /^ {4}tls \/etc\/caddy\/certs\/w\.crt \/etc\/caddy\/certs\/w\.key$/m, name);
   }
@@ -320,7 +327,10 @@ test('live caddy:2: redirect, prefix strip, cookie strip, AppCrane routes, hando
     .replace('import /etc/caddy/sites/*.caddy\n', '')
     .replace(/^ {4}tls \S+ \S+\n/gm, '')
     .replace(/^([a-z0-9.-]+\.(?:test|com)) \{$/gm, 'http://$1:8080 {');
-  cf = '{\n\tauto_https off\n\tadmin off\n}\n' + cf + `
+  // The generated file opens with a global block (the error logger); the
+  // test-only options go inside it, since a second global block is a parse error.
+  assert.ok(cf.includes('\n\n{\n    log appcrane_errors {'), 'no global block to extend');
+  cf = cf.replace('\n\n{\n', '\n\n{\n\tauto_https off\n\tadmin off\n') + `
 http://:4001 {
 \trespond "APP path={uri} cookie=[{header.Cookie}] user=[{header.X-AppCrane-User}]" 200
 }

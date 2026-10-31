@@ -211,8 +211,10 @@ test('the fixture and the live generator describe the same site set', () => {
   // Guards every comparison below. If the seed drifts, the "byte-identical"
   // results stop meaning anything, and a Map lookup that returns undefined on
   // both sides would compare equal.
-  assert.deepEqual([...siteNow.keys()], [CRANE, 'custom.test.local', 'old.test.local']);
-  assert.deepEqual([...siteWas.keys()], [...siteNow.keys()]);
+  // '' is the global options block: since the access log moved to a file it
+  // carries the redacting error logger, which v2.43.1 had no reason to emit.
+  assert.deepEqual([...siteNow.keys()], ['', CRANE, 'custom.test.local', 'old.test.local']);
+  assert.deepEqual([...siteWas.keys()], [...siteNow.keys()].filter(k => k !== ''));
   assert.ok(craneWas.size > 10, 'the snapshot parsed into too few blocks to be the real file');
 });
 

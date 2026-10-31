@@ -30,6 +30,7 @@ import { fetchAppProbe } from './appProbeFetch.js';
 import { imagesToKeep } from './imageRetention.js';
 import { admitContainer, REFUSED_CODE } from './memoryAdmission.js';
 import { recordDeployEvent, recordRollbackEvent } from './eventStore.js';
+import { createDeployLog } from './deployLog.js';
 
 // ---------------------------------------------------------------------------
 // Managed database credentials -> container environment
@@ -908,6 +909,7 @@ export async function rollbackApp(app, env, deploymentId, userId) {
       imageRef: target.image_ref,
       commitHash: target.commit_hash,
       releaseCheck: 'skip',
+      rollback: true,
     });
 
     log.info(`Rollback: ${app.slug}/${env} → deployment #${target.id} (image ${target.image_ref}) by user ${userId}`);
@@ -962,6 +964,7 @@ export async function rollbackApp(app, env, deploymentId, userId) {
     commitHash: target.commit_hash,
     expectTreeSha: target.tree_sha256 || null,
     releaseCheck: 'skip',
+    rollback: true,
   });
 
   log.info(`Rollback: ${app.slug}/${env} → deployment #${target.id} (v${target.version || '?'}) by user ${userId}`);
@@ -1265,18 +1268,11 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
   }
   const chownDetail = chownDetails.join('\n');
 
-  const deployLog = [];
-  let deployFinished = false;
-  const appendLog = (msg) => {
-    const line = `[${new Date().toISOString().slice(11, 19)}] ${msg}`;
-    deployLog.push(line);
-    log.info(`[deploy:${deployId}] ${msg}`);
-    // Update log in DB (don't overwrite status after deploy is done)
-    if (!deployFinished) {
-      db.prepare("UPDATE deployments SET log = ?, status = 'building' WHERE id = ?")
-        .run(deployLog.join('\n'), deployId);
-    }
-  };
+  const deployLogWriter = createDeployLog(deployId, db);
+  const deployLog = deployLogWriter.lines;
+  const appendLog = deployLogWriter.append;
+
+  log.info(`[deploy:${deployId}] ${app.slug}/${env} started${opts.rollback ? ' (rollback)' : ''}`);
 
   // v2.6.15: surface the data-volume chown result captured during dir
   // setup. Was silently swallowed; now visible in the deploy log so an
@@ -1307,6 +1303,12 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     // Every deploy path (AppStudio, PR poller, rename redeploys, …) passes
     // here, so a restore's stopped container is never replaced mid-restore.
     assertNoRestoreInProgress(app.slug, env);
+    // A rollback reuses a release or image already on disk, so it is the one
+    // deploy that stays allowed on a nearly full disk.
+    if (!opts.rollback) {
+      const { assertDiskHeadroom } = await import('./hostResources.js');
+      await assertDiskHeadroom(`deploy ${app.slug}/${env}`);
+    }
     const early = await admitAppStart({ app, env, ...admissionCtx });
     if (early.warned) appendLog(`⚠ ${early.message}`);
     if (early.cpu?.warned) appendLog(`⚠ ${early.cpu.message}`);
@@ -2403,7 +2405,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     if (!isImageDeploy) storeManifestRules(app.id, env, manifestAccessRules);
     if (!isImageDeploy) storeManifestMcp(app.id, env, manifestMcp);
     // 8. Update deployment record
-    deployFinished = true;
+    deployLogWriter.finish();
     appendLog(`Deploy complete! Version: ${manifest.version || 'unknown'}`);
     // release_path stays NULL for an image deploy — nothing was written to
     // disk, and a path recorded here would be a directory that does not exist.
@@ -2412,7 +2414,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     db.prepare(`
       UPDATE deployments SET status = 'live', version = ?, commit_hash = ?, commit_sha = COALESCE(?, commit_sha), commit_message = ?, release_path = ?, finished_at = datetime('now'), log = ?
       WHERE id = ?
-    `).run(manifest.version || 'unknown', commitHash, commitSha, commitMessage, isImageDeploy ? null : releaseDir, deployLog.join('\n'), deployId);
+    `).run(manifest.version || 'unknown', commitHash, commitSha, commitMessage, isImageDeploy ? null : releaseDir, deployLogWriter.text(), deployId);
     recordDeployEvent(deployId, 'succeeded');
     // Refresh AI codebase context in background after production deploy —
     // there is no codebase to index for an image app.
@@ -2465,7 +2467,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     }
     try {
       db.prepare('UPDATE deployments SET frontend_assets = ?, log = ? WHERE id = ?')
-        .run(frontendAssets, deployLog.join('\n'), deployId);
+        .run(frontendAssets, deployLogWriter.text(), deployId);
     } catch (_) {}
 
     // Cleanup old releases (keep last 5, never the live one).
@@ -2555,7 +2557,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     db.prepare(`
       UPDATE deployments SET status = 'failed', finished_at = datetime('now'), log = ?, failure_reason = ?
       WHERE id = ?
-    `).run(deployLog.join('\n'), String(error.message).slice(0, 2000), deployId);
+    `).run(deployLogWriter.text(), String(error.message).slice(0, 2000), deployId);
     recordDeployEvent(deployId, 'failed', error);
 
     // Send failure notification. A memory refusal has already told the right

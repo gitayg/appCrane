@@ -6,6 +6,7 @@ import { AppError } from '../utils/errors.js';
 import { verifyPassword } from '../services/encryption.js';
 import * as mfa from '../services/mfa.js';
 import { BOUNDS, DEFAULTS, issueSession, policyFor, readPolicy, writePolicy } from '../services/sessionPolicy.js';
+import { REMEMBER_MAX_DAYS, listDevices, rememberDays, revokeAllDevices, revokeDevice, setRememberDays, trustDevice } from '../services/trustedDevices.js';
 
 // Mounted at /api/identity/mfa. Two halves:
 //  - the sign-in second step (no session yet; authorised by the short-lived
@@ -53,15 +54,21 @@ function sessionBody(session, user) {
 router.post('/verify', (req, res) => {
   const db = getDb();
   const ip = ipOf(req);
-  const { mfa_token, code } = req.body || {};
+  const { mfa_token, code, remember_device } = req.body || {};
   if (!code || typeof code !== 'string') throw new AppError('code is required', 400, 'VALIDATION');
   const { challenge, user } = challengeOr400(db, mfa_token, 'verify');
   const result = mfa.verifyCode(db, user, code, { ip });
   if (!result.ok) throw codeError(result);
   if (!mfa.consumeChallenge(db, challenge.id)) throw new AppError('The sign-in step expired. Sign in again.', 400, 'MFA_TOKEN_INVALID');
   const session = issueSession(db, req, res, user, challenge.app_id);
+  // Strictly true: a truthy string from a hand-made request is not consent.
+  const trusted = remember_device === true ? trustDevice(db, req, res, user, { ip }) : null;
   auditLogin(user.id, 'ok', { method: `password+${result.method}`, ip });
-  res.json({ ...sessionBody(session, user), ...(result.method === 'recovery_code' && { recovery_codes_remaining: result.recovery_codes_remaining }) });
+  res.json({
+    ...sessionBody(session, user),
+    ...(result.method === 'recovery_code' && { recovery_codes_remaining: result.recovery_codes_remaining }),
+    ...(trusted && { device_remembered_days: trusted.days }),
+  });
 });
 
 router.post('/enroll/start', (req, res) => {
@@ -164,6 +171,26 @@ router.post('/disable', requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
+// Own remembered devices. Always the caller's real user (never a view-as
+// target), and revoke is scoped by user_id, so another user's id is a 404.
+router.get('/trusted-devices', requireAuth, (req, res) => {
+  const db = getDb();
+  res.json({ remember_device_days: rememberDays(db), devices: listDevices(db, (req.real_user || req.user).id) });
+});
+
+router.delete('/trusted-devices/:deviceId', requireAuth, (req, res) => {
+  const db = getDb();
+  const userId = (req.real_user || req.user).id;
+  if (!revokeDevice(db, userId, req.params.deviceId, { ip: ipOf(req) })) throw new AppError('Device not found', 404, 'NOT_FOUND');
+  res.json({ ok: true });
+});
+
+router.delete('/trusted-devices', requireAuth, (req, res) => {
+  const db = getDb();
+  const userId = (req.real_user || req.user).id;
+  res.json({ ok: true, revoked: revokeAllDevices(db, userId, { actorId: userId, reason: 'user', ip: ipOf(req) }) });
+});
+
 router.post('/recovery-codes', requireAuth, (req, res) => {
   const db = getDb();
   const user = fullUser(db, req);
@@ -176,7 +203,10 @@ router.post('/recovery-codes', requireAuth, (req, res) => {
 // ── platform admin ────────────────────────────────────────────────────────
 
 function policyBody(db) {
-  return { mfa_required: mfa.requiredLevel(db), mfa_required_levels: mfa.REQUIRE_LEVELS, sessions: readPolicy(db), defaults: DEFAULTS, bounds: BOUNDS };
+  return {
+    mfa_required: mfa.requiredLevel(db), mfa_required_levels: mfa.REQUIRE_LEVELS, sessions: readPolicy(db), defaults: DEFAULTS, bounds: BOUNDS,
+    remember_device_days: rememberDays(db), remember_device_max_days: REMEMBER_MAX_DAYS,
+  };
 }
 
 router.get('/policy', requireAuth, requirePlatformAdmin, (req, res) => {
@@ -185,12 +215,14 @@ router.get('/policy', requireAuth, requirePlatformAdmin, (req, res) => {
 
 router.put('/policy', requireAuth, requirePlatformAdmin, (req, res) => {
   const db = getDb();
-  const { mfa_required, sessions } = req.body || {};
+  const { mfa_required, sessions, remember_device_days } = req.body || {};
   const before = policyBody(db);
+  let revokedDevices = 0;
   try {
     db.transaction(() => {
       if (mfa_required !== undefined) mfa.setRequiredLevel(db, mfa_required, req.user.id);
       if (sessions !== undefined) writePolicy(db, sessions, req.user.id);
+      if (remember_device_days !== undefined) revokedDevices = setRememberDays(db, remember_device_days, req.user.id).revoked;
     })();
   } catch (e) {
     if (e.field) throw new AppError(e.message, 400, 'VALIDATION');
@@ -199,8 +231,9 @@ router.put('/policy', requireAuth, requirePlatformAdmin, (req, res) => {
   const after = policyBody(db);
   logAudit(req.user.id, null, 'platform-policy-change', {
     policy: 'sign-in',
-    before: { mfa_required: before.mfa_required, sessions: before.sessions },
-    after: { mfa_required: after.mfa_required, sessions: after.sessions },
+    before: { mfa_required: before.mfa_required, sessions: before.sessions, remember_device_days: before.remember_device_days },
+    after: { mfa_required: after.mfa_required, sessions: after.sessions, remember_device_days: after.remember_device_days },
+    ...(revokedDevices && { revoked_trusted_devices: revokedDevices }),
   });
   res.json(after);
 });
@@ -216,6 +249,17 @@ router.get('/users/:id', requireAuth, requirePlatformAdmin, (req, res) => {
   const db = getDb();
   const s = mfa.status(db, targetUser(db, req.params.id));
   res.json({ enrolled: s.enrolled, enabled_at: s.enabled_at, recovery_codes_remaining: s.recovery_codes_remaining, required: s.required });
+});
+
+router.get('/users/:id/trusted-devices', requireAuth, requirePlatformAdmin, (req, res) => {
+  const db = getDb();
+  res.json({ devices: listDevices(db, targetUser(db, req.params.id).id) });
+});
+
+router.delete('/users/:id/trusted-devices', requireAuth, requirePlatformAdmin, (req, res) => {
+  const db = getDb();
+  const target = targetUser(db, req.params.id);
+  res.json({ ok: true, revoked: revokeAllDevices(db, target.id, { actorId: req.user.id, reason: 'admin', ip: ipOf(req) }) });
 });
 
 router.post('/users/:id/reset', requireAuth, requirePlatformAdmin, async (req, res) => {

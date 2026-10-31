@@ -31,41 +31,23 @@ import { enqueueEmail } from './emailQueue.js';
 import { recordHostEvent } from './eventStore.js';
 import { dashboardBaseUrl } from './vulnRequests.js';
 import { BRAND, bulletList, renderBrandedEmail } from './mail/brandedLayout.js';
+import { THRESHOLD_DEFAULTS, MiB, readThresholds, levelFor, diskLevel, belowDiskFloor, fmtBytes, diskFloorText } from './hostThresholds.js';
+import { AppError } from '../utils/errors.js';
+import { maybePruneForDisk } from './buildCachePrune.js';
 import log from '../utils/logger.js';
 
 export const HOST_MAIL_SOURCE = 'host-resources';
 export const SAMPLE_MS = 5 * 60_000;
 const WINDOW_MS = 6 * 60 * 60_000;
-const MiB = 1024 * 1024;
-const GiB = 1024 * MiB;
 
-export const THRESHOLD_DEFAULTS = Object.freeze({
-  mem_warn_pct: 10, mem_crit_pct: 5, mem_floor_mb: 512,
-  disk_warn_pct: 10, disk_crit_pct: 5, disk_floor_gb: 5,
-});
+export { THRESHOLD_DEFAULTS, levelFor };
 
 const previous = new Map();
 let lastSample = null;
 let timer = null;
 
 export function getThresholds(db = getDb()) {
-  const out = {};
-  for (const [k, def] of Object.entries(THRESHOLD_DEFAULTS)) {
-    let v = null;
-    try { v = db.prepare('SELECT value FROM settings WHERE key = ?').get(`host_alert_${k}`)?.value ?? null; } catch (_) {}
-    const n = v === null || v === '' ? NaN : Number(v);
-    out[k] = Number.isFinite(n) && n >= 0 ? n : def;
-  }
-  return out;
-}
-
-/** ok / warning / critical for a free-vs-total pair; unknown when either is missing. */
-export function levelFor({ freeBytes, totalBytes }, { warnPct, critPct, floorBytes }) {
-  if (!Number.isFinite(freeBytes) || !Number.isFinite(totalBytes) || totalBytes <= 0) return 'unknown';
-  const pct = (freeBytes / totalBytes) * 100;
-  if (pct < critPct || freeBytes < floorBytes) return 'critical';
-  if (pct < warnPct) return 'warning';
-  return 'ok';
+  return readThresholds(db);
 }
 
 export function parseMeminfo(text) {
@@ -178,7 +160,7 @@ async function sampleDisks(deps, t) {
       const s = deps.statfs(p);
       const freeBytes = Number(s.bavail) * Number(s.bsize);
       const totalBytes = Number(s.blocks) * Number(s.bsize);
-      const level = levelFor({ freeBytes, totalBytes }, { warnPct: t.disk_warn_pct, critPct: t.disk_crit_pct, floorBytes: t.disk_floor_gb * GiB });
+      const level = diskLevel(freeBytes, totalBytes, t);
       r = { id: `disk:${dev}`, label: `Disk free (${name}`, paths: [p], freeBytes, totalBytes, level };
     } catch (e) {
       r = { id: `disk:${dev}`, label: `Disk free (${name}`, paths: [p], level: 'unknown', error: e.message };
@@ -188,6 +170,59 @@ async function sampleDisks(deps, t) {
   }
   for (const r of byDevice.values()) r.label += ')';
   return out;
+}
+
+// The low-disk guard: a deploy (release tree, image build) or a self-update
+// (npm install, SPA rebuild, pre-update snapshot) writes to DATA_DIR and to
+// Docker's data root, and running either below the disk floor is how a box
+// ends up at 100% with the database unable to commit. Same filesystems as the
+// Job Health sample and the same disk_floor_gb setting, but not its percent
+// rule (see belowDiskFloor). A filesystem that cannot be read is
+// reported as unknown and does not block: refusing every deploy because statfs
+// failed would turn a monitoring problem into an outage.
+export async function checkDiskHeadroom({ need = 0, deps = {}, db = getDb() } = {}) {
+  const d = { ...DEFAULT_DEPS, ...deps };
+  const t = getThresholds(db);
+  let dockerDir = null;
+  try { dockerDir = await d.dockerRootDir(); } catch (_) {}
+  const byDevice = new Map();
+  const filesystems = [];
+  for (const [name, p] of [['DATA_DIR', d.dataDir()], ['Docker data root', dockerDir]]) {
+    if (!p) continue;
+    let dev;
+    let s;
+    try { dev = String(d.deviceOf(p)); s = byDevice.has(dev) ? null : d.statfs(p); } catch (e) {
+      filesystems.push({ names: [name], path: p, level: 'unknown', error: e.message });
+      continue;
+    }
+    if (byDevice.has(dev)) { byDevice.get(dev).names.push(name); continue; }
+    const freeBytes = Number(s.bavail) * Number(s.bsize);
+    const totalBytes = Number(s.blocks) * Number(s.bsize);
+    const f = { names: [name], path: p, freeBytes, totalBytes, level: belowDiskFloor(freeBytes - need, t) ? 'critical' : 'ok' };
+    byDevice.set(dev, f);
+    filesystems.push(f);
+  }
+  const blocked = filesystems.filter((f) => f.level === 'critical');
+  return { ok: blocked.length === 0, thresholds: t, need, filesystems, blocked };
+}
+
+export function diskRefusalMessage(action, f, t, need = 0) {
+  const pct = ((f.freeBytes / f.totalBytes) * 100).toFixed(1);
+  const after = need > 0 ? ` once the ${fmt(need)} it needs is written` : '';
+  return `Refusing to ${action}: the filesystem holding ${f.names.join(' and ')} (${f.path}) has ${fmt(f.freeBytes)} free of ${fmt(f.totalBytes)} (${pct}%), `
+    + `below the floor of ${diskFloorText(t)}${after}. Free space on that filesystem (old images, backups, logs) and retry; `
+    + 'the floor is set in Settings > Job Health.';
+}
+
+/** Throws a 507 DISK_LOW AppError when a filesystem the action writes to is below the disk floor. */
+export async function assertDiskHeadroom(action, opts = {}) {
+  const r = await checkDiskHeadroom(opts);
+  if (r.ok) return r;
+  const msg = diskRefusalMessage(action, r.blocked[0], r.thresholds, r.need);
+  log.warn(`[disk-guard] ${msg}`);
+  const err = new AppError(msg, 507, 'DISK_LOW');
+  err.filesystems = r.blocked.map(({ names, path, freeBytes, totalBytes }) => ({ names, path, freeBytes, totalBytes }));
+  throw err;
 }
 
 const RANK = { ok: 0, unknown: 0, warning: 1, critical: 2 };
@@ -201,9 +236,7 @@ export async function sampleHost(deps = {}, db = getDb()) {
   return { at: new Date().toISOString(), overall, thresholds: t, resources };
 }
 
-function fmt(bytes) {
-  return bytes >= GiB ? `${(bytes / GiB).toFixed(1)} GB` : `${Math.round(bytes / MiB)} MB`;
-}
+const fmt = fmtBytes;
 
 export function describeResource(r) {
   if (r.level === 'unknown') return `${r.label}: unknown${r.error ? ` (${r.error})` : ''}`;
@@ -289,7 +322,9 @@ export function getLastHostSample() {
 export function startHostResourceMonitor() {
   if (timer) return;
   jobStarted('host-resources');
-  const tick = () => trackJob('host-resources', async () => { await measureCpu(); return runHostCheck(); }).catch((e) => log.warn(`[host-resources] ${e.message}`));
+  const tick = () => trackJob('host-resources', async () => { await measureCpu(); return runHostCheck(); })
+    .then(({ sample }) => maybePruneForDisk(sample))
+    .catch((e) => log.warn(`[host-resources] ${e.message}`));
   setTimeout(tick, 30_000).unref?.();
   timer = setInterval(tick, SAMPLE_MS);
   timer.unref?.();

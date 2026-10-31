@@ -9,6 +9,7 @@ import { platformEmbedAncestors, platformRegistrableDomain } from '../utils/embe
 import { settingVisibility, PUBLIC, AUTHED } from '../utils/settingsVisibility.js';
 import { RESERVED_SETTING_PREFIX as MARIADB_ENCRYPTION_PREFIX } from '../services/managedDbEncryption.js';
 import { cryptoStatus } from '../services/fipsMode.js';
+import { REMEMBER_KEY } from '../services/trustedDevices.js';
 import { normalizeDomain, isolationEnabled, parseAppHost } from '../services/appOrigin.js';
 import { accessSync, statSync, constants as fsConstants } from 'fs';
 import psl from 'psl';
@@ -954,6 +955,11 @@ router.put('/:key', requireAuth, requirePlatformAdmin, (req, res) => {
   }
   if (ISOLATION_KEYS.includes(req.params.key)) {
     return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Use /api/settings/isolation to change per-app origins' } });
+  }
+  // Written only through PUT /api/identity/mfa/policy, which validates the
+  // 1-30 range, revokes devices when it is turned off, and audits the change.
+  if (req.params.key === REMEMBER_KEY) {
+    return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Use the sign-in security policy to change remembered devices' } });
   }
   if (req.params.key === 'auto_approve_rce_fixes' || req.params.key === 'auto_patch_cooldown_hours') {
     return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Use /api/auto-patch/policy to change the auto-patch policy' } });

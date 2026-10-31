@@ -3,6 +3,7 @@ import { adminApi } from '../../adminApi'
 import { PasswordInput } from '../secret/PasswordInput'
 import { EnrollPanel, type EnrollmentStart } from './EnrollPanel'
 import { RecoveryCodes } from './RecoveryCodes'
+import { TrustedDevicesList } from './TrustedDevicesList'
 
 // Settings -> Account: the signed-in person's own two-factor sign-in for
 // password logins. Backed by /api/identity/mfa/* (server/routes/mfa.js).
@@ -133,6 +134,8 @@ export function TwoFactorCard() {
           )}
 
           {mode === 'codes' && <RecoveryCodes codes={codes} onDone={() => { setCodes([]); reset() }} />}
+
+          {status.enrolled && mode === 'idle' && <TrustedDevicesList />}
 
           {mode === 'disable' && (
             <form onSubmit={e => { e.preventDefault(); disable() }}>

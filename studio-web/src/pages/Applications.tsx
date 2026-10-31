@@ -716,8 +716,8 @@ export function Applications() {
       "  • not contain '..', '//', or whitespace\n\n" +
       "⚠ Requests under these prefixes reach your app with NO X-AppCrane-* identity\n" +
       "headers. Your app must authenticate them itself (e.g. token in query string).\n" +
-      "Caddy suppresses access logging for these paths so query-string tokens don't\n" +
-      "sit in log storage.\n\n" +
+      "Caddy logs these paths with the query string redacted, so query-string\n" +
+      "tokens don't sit in log storage.\n\n" +
       "Leave blank to clear all bypass paths."
     const val = prompt(help, current)
     if (val === null) return

@@ -27,6 +27,7 @@ import { execFile } from 'child_process';
 import { getDb } from '../db.js';
 import log from '../utils/logger.js';
 import { jobStarted, trackJob, noteJobFailure } from './jobHealth.js';
+import { inspectContainer, noteContainerDown, noteContainerUp } from './cronContainerGuard.js';
 
 const TICK_MS = 60_000;
 const LOG_TAIL_BYTES = 4096;
@@ -212,6 +213,20 @@ export async function runCronJob(jobRow) {
   try {
     const app = db.prepare('SELECT slug FROM apps WHERE id = ?').get(jobRow.app_id);
     if (!app) return { skipped: true, reason: 'app not found' };
+
+    const container = await inspectContainer(containerName(app.slug, jobRow.env));
+    if (!container.running) {
+      const reason = `skipped: ${container.reason}`;
+      const at = new Date().toISOString();
+      db.prepare(`
+        UPDATE app_cron_jobs
+        SET last_run_at = ?, last_exit_code = NULL, last_log = ?, updated_at = datetime('now')
+        WHERE id = ?
+      `).run(at, `[${at}] ${reason}`, jobRow.id);
+      noteContainerDown(db, jobRow, app, container.reason);
+      return { skipped: true, reason };
+    }
+    noteContainerUp(jobRow);
 
     const startedAt = new Date().toISOString();
     log.info(`[cron] running ${key} (${jobRow.schedule}) → ${jobRow.command}`);

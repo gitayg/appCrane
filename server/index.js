@@ -671,6 +671,11 @@ app.post('/api/self-update', requireAuth, requirePlatformAdmin, async (req, res)
       const refusal = inflightRefusal(getDb(), 'self-update');
       if (refusal) return res.status(409).json(refusal);
     }
+    // ?force=1 does not skip this: an update that fills the disk mid-npm-install
+    // leaves a half-installed tree that safe-boot cannot always roll back.
+    const { assertDiskHeadroom } = await import('./services/hostResources.js');
+    try { await assertDiskHeadroom('self-update'); }
+    catch (e) { if (e.code === 'DISK_LOW') return res.status(507).json({ error: { code: e.code, message: e.message } }); throw e; }
 
     // "Smart turn toward the upgrade": don't restart out from under a live MCP
     // agent. If an MCP request is in flight, or one ran very recently (the agent
@@ -1737,6 +1742,9 @@ app.listen(PORT, HOST, async () => {
     startHostResourceMonitor();
     try { const { startApiKeyExpiryJob } = await import('./services/apiKeyExpiry.js'); startApiKeyExpiryJob(); } catch (e) { log.error('API key expiry job failed to start: ' + e.message); }
     try { const { startEventRetention } = await import('./services/eventRetention.js'); startEventRetention(); } catch (e) { log.error('Event retention job failed to start: ' + e.message); }
+    try { const { startDeployLogRetention } = await import('./services/deployLogRetention.js'); startDeployLogRetention(); } catch (e) { log.error('Deploy log retention job failed to start: ' + e.message); }
+    try { const { startBuildCachePrune } = await import('./services/buildCachePrune.js'); startBuildCachePrune(); } catch (e) { log.error('Build cache prune job failed to start: ' + e.message); }
+    try { const { startTrustedDevicePurge } = await import('./services/trustedDevicePurge.js'); startTrustedDevicePurge(); } catch (e) { log.error('Trusted device purge failed to start: ' + e.message); }
     try { const { startAuditChain } = await import('./services/auditChain.js'); startAuditChain(); } catch (e) { log.error('Audit chain job failed to start: ' + e.message); }
     try { const { startMongoKernelCheck } = await import('./services/mongoKernelCheck.js'); startMongoKernelCheck(); } catch (e) { log.error('MongoDB kernel check failed to start: ' + e.message); }
     try { const { startNodeSecurityCheck } = await import('./services/nodeSecurityCheck.js'); startNodeSecurityCheck(); } catch (e) { log.error('Node.js security check failed to start: ' + e.message); }
@@ -1810,6 +1818,12 @@ app.listen(PORT, HOST, async () => {
     startVulnScheduler();
   } catch (e) {
     log.error('Vulnerability scan scheduler failed to start: ' + e.message);
+  }
+  try {
+    const { startHostVulnScheduler } = await import('./services/hostVulnsNotify.js');
+    startHostVulnScheduler();
+  } catch (e) {
+    log.error('Host vulnerability check scheduler failed to start: ' + e.message);
   }
 
   // After an upgrade, mail app owners and platform admins what changed, once
@@ -1893,58 +1907,14 @@ app.listen(PORT, HOST, async () => {
     log.warn('Bulk-redeploy sentinel check failed: ' + e.message);
   }
 
-  // Auto-heal: any app with a 'live' deployment but no running container gets
-  // redeployed. Catches the "PM2 got killed by a cutover, apps are orphaned,
-  // no one wrote the sentinel" state and also recovers after docker restarts.
-  // Runs once per boot; if Docker isn't available, no-ops silently.
+  // Container recovery (services/containerRecovery.js): a live release with no
+  // container up is run again, at boot once Docker answers and every 10 minutes
+  // after. Replaces the boot-only auto-heal that used to live here.
   try {
-    const { execFileSync } = await import('child_process');
-    let runningSet = new Set();
-    try {
-      const out = execFileSync('docker', ['ps', '--filter', 'label=appcrane=true', '--format', '{{.Names}}'],
-        { encoding: 'utf8', stdio: 'pipe', timeout: 5000 }).trim();
-      if (out) runningSet = new Set(out.split('\n'));
-    } catch (e) {
-      // Docker not installed or daemon down — skip auto-heal
-      throw new Error('docker ps unavailable');
-    }
-    // Only consider apps whose MOST RECENT deployment per env is 'live' AND
-    // was deployed >5min ago. If the latest deploy failed, or was just attempted,
-    // don't redeploy — same code → same failure → CPU drain.
-    const liveDeploys = db.prepare(`
-      SELECT a.*, d.env AS deploy_env, d.finished_at AS deploy_finished_at, d.commit_sha AS live_commit_sha, d.commit_hash AS live_commit_hash
-      FROM apps a
-      JOIN deployments d ON d.app_id = a.id
-      WHERE d.id = (
-        SELECT MAX(id) FROM deployments WHERE app_id = a.id AND env = d.env
-      )
-      AND d.status = 'live'
-      AND (strftime('%s', 'now') - strftime('%s', COALESCE(d.finished_at, d.started_at))) > 300
-    `).all();
-    const missing = liveDeploys.filter(r => !runningSet.has(`appcrane-${r.slug}-${r.deploy_env}`));
-    if (missing.length > 0) {
-      const { deployApp } = await import('./services/deployer.js');
-      const { getPortsForSlot } = await import('./services/portAllocator.js');
-      log.info(`Auto-heal: ${missing.length} live deploy(s) have no running container — redeploying`);
-      for (const row of missing) {
-        try {
-          const ports = getPortsForSlot(row.slot);
-          const r = db.prepare(`
-            INSERT INTO deployments (app_id, env, status, log)
-            VALUES (?, ?, 'pending', 'auto-heal: live deploy had no running container')
-          `).run(row.id, row.deploy_env);
-          log.info(`  → ${row.slug}-${row.deploy_env} (deploy id ${r.lastInsertRowid})`);
-          const liveCommit = [row.live_commit_sha, row.live_commit_hash].find(c => /^[0-9a-f]{7,40}$/i.test(String(c || '')));
-          deployApp(r.lastInsertRowid, row, row.deploy_env, ports, liveCommit ? { releaseCheck: 'skip', targetCommit: liveCommit } : {}).catch(err => {
-            log.error(`     ${row.slug}-${row.deploy_env} failed: ${err.message}`);
-          });
-        } catch (e) {
-          log.error(`  ${row.slug}-${row.deploy_env}: ${e.message}`);
-        }
-      }
-    }
+    const { startContainerRecovery } = await import('./services/containerRecovery.js');
+    startContainerRecovery();
   } catch (e) {
-    log.warn('Auto-heal skipped: ' + e.message);
+    log.error('Container recovery failed to start: ' + e.message);
   }
 
   // Orphan check — warn if Docker containers are running but not tracked in the DB

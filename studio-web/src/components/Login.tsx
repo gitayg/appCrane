@@ -41,7 +41,7 @@ type PopupState = 'idle' | 'waiting' | 'blocked' | 'failed' | 'timeout'
 // Second step of password sign-in (server/routes/mfa.js). The password was
 // accepted; no session exists until a code (or first-time enrollment) passes.
 type MfaStep =
-  | { kind: 'verify'; token: string }
+  | { kind: 'verify'; token: string; rememberDays: number }
   | { kind: 'enroll'; token: string; start: EnrollmentStart | null }
   | { kind: 'codes'; codes: string[] }
 
@@ -74,6 +74,7 @@ export function Login() {
   const [mfa, setMfa] = useState<MfaStep | null>(null)
   const [mfaCode, setMfaCode] = useState('')
   const [mfaBusy, setMfaBusy] = useState(false)
+  const [rememberDevice, setRememberDevice] = useState(false)
   const [notice] = useState<string | null>(() => takeSignedOutMessage())
 
   const plan = signInPlan({ framed: isFramed(window), ssoEnabled: !!(oidc.enabled || saml.enabled), ssoOnly: !!ssoOnly })
@@ -205,7 +206,7 @@ export function Login() {
         body: JSON.stringify({ login, password }),
       })
       const data = await res.json()
-      if (data?.mfa_token && data.error?.code === 'MFA_REQUIRED') { setPassword(''); setMfa({ kind: 'verify', token: data.mfa_token }); return }
+      if (data?.mfa_token && data.error?.code === 'MFA_REQUIRED') { setPassword(''); setRememberDevice(false); setMfa({ kind: 'verify', token: data.mfa_token, rememberDays: Number(data.remember_device_days) || 0 }); return }
       if (data?.mfa_token && data.error?.code === 'MFA_ENROLL_REQUIRED') { setPassword(''); beginEnroll(data.mfa_token); return }
       if (!res.ok) { setError(data.error?.message || 'Login failed'); return }
       localStorage.setItem('cc_identity_token', data.token)
@@ -238,7 +239,10 @@ export function Login() {
     setError('')
     setMfaBusy(true)
     try {
-      const data = await mfaPost('/api/identity/mfa/verify', { mfa_token: mfa.token, code: mfaCode.trim() })
+      const data = await mfaPost('/api/identity/mfa/verify', {
+        mfa_token: mfa.token, code: mfaCode.trim(),
+        ...(mfa.rememberDays > 0 && rememberDevice && { remember_device: true }),
+      })
       localStorage.setItem('cc_identity_token', data.token)
       postLoginRedirect()
     } catch (e) {
@@ -279,6 +283,12 @@ export function Login() {
                   onChange={e => setMfaCode(e.target.value)}
                   style={{ width: '100%', marginBottom: 12, letterSpacing: 3, textAlign: 'center', fontSize: '1.1rem' }}
                 />
+                {mfa.rememberDays > 0 && (
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12, fontSize: '.85rem', color: 'var(--dim)' }}>
+                    <input type="checkbox" checked={rememberDevice} onChange={e => setRememberDevice(e.target.checked)} />
+                    Remember this device for {mfa.rememberDays} day{mfa.rememberDays === 1 ? '' : 's'}
+                  </label>
+                )}
                 <button className="btn btn-accent" type="submit" disabled={mfaBusy || !mfaCode.trim()} style={{ width: '100%', padding: 10 }}>
                   {mfaBusy ? 'Checking...' : 'Verify'}
                 </button>
