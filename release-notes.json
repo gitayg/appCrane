@@ -1,4 +1,7 @@
 {
+  "2.129.6": [
+    "Security: a word that mixes plain A-Z letters with any other letter (look-alikes such as a dotless i or a small capital P) now always makes an app coder's owner approve the task. Accented letters such as é are not affected."
+  ],
   "2.129.5": [
     "Security: the check that makes an app coder's owner approve anything about production or deleting now also sees through accent marks, other hidden filler characters, an invisible character used to glue two words together, and look-alike letters from other alphabets; and look-alike vertical bars can no longer fake the line between two messages."
   ],

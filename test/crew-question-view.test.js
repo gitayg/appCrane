@@ -56,3 +56,10 @@ test('a word mixing Latin with look-alike letters from another script asks', asy
 test('vertical-bar look-alikes cannot fake the separator either', () => {
   assert.equal(displayLine('a ｜ b ∣ c │ d'), 'a / b / c / d');
 });
+
+test('Latin-alphabet look-alikes (dotless i, small capitals) inside an A-Z word ask too', async () => {
+  const { alwaysAskReason } = await import('../server/services/crewRules.js');
+  assert.equal(alwaysAskReason({ texts: ['deploy to ᴘroduction'] }), 'mixed-script');
+  assert.equal(alwaysAskReason({ texts: ['prıd cleanup'] }), 'mixed-script');
+  assert.equal(alwaysAskReason({ texts: ['fix the café menu'] }), null, 'an accented letter folds to plain A-Z');
+});

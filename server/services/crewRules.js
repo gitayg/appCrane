@@ -89,15 +89,18 @@ const DELETE_WORDS = /\b(delet\w*|drop\w*|remov\w*|destroy\w*|truncat\w*|purg\w*
 // with invisible characters (format, combining marks, Hangul fillers, variation
 // selectors) removed, so "del\u200Bete" still reads as delete, and with them
 // turned into spaces, so "deploy\u200Bproduction" still has a word boundary.
-// A word that mixes Latin letters with another script's ("prоduction" with a
-// Cyrillic о) reads as the word but matches nothing, so it asks too.
+// A word that mixes A-Z with any other letter ("prоduction" with a Cyrillic о,
+// "deploy to ᴘroduction") reads as the word but matches nothing, so it asks too.
 const IGNORABLE = /[\p{Cf}\p{Mn}\p{Me}\u115F\u1160\u3164\uFFA0\u034F\uFE00-\uFE0F\u{E0100}-\u{E01EF}]+/gu;
 const forms = (v) => {
   const n = String(v ?? '').normalize('NFKD');
   return [n.replace(IGNORABLE, ''), n.replace(IGNORABLE, ' ')];
 };
+// After NFKD and mark stripping an accented letter is already plain (é -> e),
+// so any letter left outside A-Z in a word that also has A-Z letters is a
+// look-alike or a rare letter (ı, ᴘ, a Cyrillic о, ß): ask rather than guess.
 const mixedScript = (s) => (s.match(/\p{L}+/gu) || [])
-  .some((w) => /\p{Script=Latin}/u.test(w) && /[^\p{Script=Latin}]/u.test(w));
+  .some((w) => /[A-Za-z]/.test(w) && /[^A-Za-z]/.test(w));
 
 export function alwaysAskReason({ action, scope, texts = [] }) {
   if (scope && forms(scope).some((f) => PROD_FIELD.test(f))) return 'production';
