@@ -1,4 +1,7 @@
 {
+  "2.129.3": [
+    "Security: when an app coder's owner is asked to approve a task, the message that triggered the question is shown first and in full, and the approval covers exactly the messages shown; anything left out because it was too long is asked about separately."
+  ],
   "2.129.2": [
     "More security fixes for app coders in Crew: an owner's approval now covers only the messages they were shown, so anything the requesting agent adds afterwards is checked again, and a Crew task is refused while another person is using that app's coder, so it never edits someone else's work in progress."
   ],

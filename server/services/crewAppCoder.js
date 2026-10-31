@@ -45,6 +45,7 @@ import { logAudit } from '../middleware/audit.js';
 import log from '../utils/logger.js';
 import { crewEvents, replyAsAppCoder, syncAppCoders, askAppCoderOwner, announce, CREW_LIMITS } from './crew.js';
 import { alwaysAskReason } from './crewRules.js';
+import { approvedMessageIds } from './crewQuestionView.js';
 import { buildCoderTaskPrompt, parseCoderAnswer } from './crewAppCoderPrompt.js';
 import { defaultCoderRunner } from './crewAppCoderRunner.js';
 
@@ -116,15 +117,13 @@ function claim(db, taskId) {
     // SECURITY FIX (review of v2.129.0): production and deletions always ask,
     // follow-ups included. The words that count are the ones nobody on the
     // app's side has approved yet, except the owner's own words.
-    // SECURITY FIX (review of v2.129.1): "approved" means covered by a
-    // declared question the CURRENT owner approved (or answered): messages up
-    // to its covers_msg_id, the newest message when it was asked. A message
-    // posted after the question and before the answer was never shown to the
-    // owner, so it is checked again here.
-    const ownerOk = db.prepare(`SELECT MAX(covers_msg_id) AS id FROM crew_decisions
-                                WHERE task_id = ? AND ask = 'declared' AND status IN ('approved', 'replied') AND decider_user_id = ?`)
-      .get(t.id, t.coder_owner_id).id || 0;
-    const unapproved = messages.filter((m) => m.id > ownerOk && !(m.from_agent_id === t.to_agent_id && m.actor_kind === 'human'))
+    // SECURITY FIX (reviews of v2.129.1 and v2.129.2): "approved" means
+    // covered by a declared question the CURRENT owner approved (or answered),
+    // and a question covers exactly the messages it showed them in full
+    // (crewQuestionView.js). A message posted after the question, or left out
+    // of it, was never shown, so it is checked again here.
+    const approved = approvedMessageIds(db, t.id, t.coder_owner_id);
+    const unapproved = messages.filter((m) => !approved.has(m.id) && !(m.from_agent_id === t.to_agent_id && m.actor_kind === 'human'))
       .map((m) => m.body);
     if (unapproved.length && alwaysAskReason({ texts: unapproved })) {
       return { ask: askAppCoderOwner(db, t.id, unapproved), task: t };

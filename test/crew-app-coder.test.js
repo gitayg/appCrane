@@ -351,6 +351,48 @@ test('an approval covers only the messages the owner was shown: a later producti
   assert.equal(task(s.task_id).state, 'completed');
 });
 
+test('a question covers only what it shows in full; the trigger comes first and whole; the rest is asked again', async () => {
+  nextResult = () => ({ ok: true, text: 'Started.\nQUESTION FOR REQUESTER: go on?' });
+  const s = await mcp(sven, 'appcrane_crew_send', { as_agent: 'sven-laptop', to_agent: 'shop-coder', title: 'Tidy', message: 'Tidy the CSS.' });
+  await settle();
+  const q = db.prepare("SELECT * FROM crew_decisions WHERE task_id = ? AND status = 'pending'").get(s.task_id);
+  // A long triggering message (past the per-message cap), a harmless one, and
+  // a production line that cannot fit in the same question.
+  const longTrigger = `Please delete the stale cache files ${'and the old logs '.repeat(67)}END-OF-LONG`;
+  assert.ok(longTrigger.length > 1100 && longTrigger.length < 1200);
+  await mcp(sven, 'appcrane_crew_reply', { as_agent: 'sven-laptop', task_id: s.task_id, message: longTrigger });
+  await mcp(sven, 'appcrane_crew_reply', { as_agent: 'sven-laptop', task_id: s.task_id, message: `Harmless note: ${'colour tweaks '.repeat(6)}` });
+  await mcp(sven, 'appcrane_crew_reply', { as_agent: 'sven-laptop', task_id: s.task_id, message: 'Then deploy it to production.' });
+  const before = runs.length;
+  nextResult = () => ({ ok: true, text: 'All done.' });
+  decideTask(sven, q.id, { decision: 'reply', message: 'ok' });
+  await settle();
+  assert.equal(runs.length, before, 'held for the owner');
+  const first = db.prepare("SELECT * FROM crew_decisions WHERE task_id = ? AND status = 'pending'").get(s.task_id);
+  assert.equal(first.decider_user_id, olga.id);
+  const shown1 = (await rest(olga, 'GET', '/api/crew/log')).body.entries.find((e) => e.task_id === s.task_id).input_required.question;
+  assert.ok(shown1.startsWith('Please delete the stale cache files'), 'the triggering message comes first');
+  assert.match(shown1, /END-OF-LONG/, 'and is shown whole, past the per-message cap');
+  assert.ok(!/production/.test(shown1), 'the production line did not fit');
+  assert.match(shown1, /2 more messages will be asked about separately/);
+  decideTask(olga, first.id, { decision: 'approve' });
+  await settle();
+  assert.equal(runs.length, before, 'the approval did not cover the production line: nothing ran');
+  const second = db.prepare("SELECT * FROM crew_decisions WHERE task_id = ? AND status = 'pending'").get(s.task_id);
+  assert.ok(second && second.id !== first.id);
+  assert.equal(second.always_ask, 'production');
+  const shown2 = (await rest(olga, 'GET', '/api/crew/log')).body.entries.find((e) => e.task_id === s.task_id).input_required.question;
+  assert.ok(shown2.startsWith('Then deploy it to production.'), 'the trigger first, though an earlier message is also shown');
+  assert.match(shown2, /Harmless note/);
+  assert.ok(!/stale cache/.test(shown2), 'what the first answer covered is not asked again');
+  decideTask(olga, second.id, { decision: 'approve' });
+  await settle();
+  assert.equal(runs.length, before + 1, 'everything was shown and approved: it runs once');
+  assert.match(runs.at(-1).prompt, /deploy it to production/);
+  assert.equal(task(s.task_id).state, 'completed');
+  nextResult = () => ({ ok: true, text: 'Changed src/cart.js: the total now rounds to cents.' });
+});
+
 test('a blocked or refused sender starts nothing', async () => {
   const before = runs.length;
   const s = await mcp(bea, 'appcrane_crew_send', { as_agent: 'bea-bot', to_agent: 'shop-coder', title: 'Hello', message: 'Please change the logo.' });

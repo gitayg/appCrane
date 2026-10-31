@@ -120,6 +120,7 @@ import {
 import log from '../utils/logger.js';
 import { jobStarted, trackJobSync } from './jobHealth.js';
 import { syncAppCoderAgents, isReservedAppCoderName, APP_CODER_SUFFIX } from './crewAppCoderAgents.js';
+import { planQuestion, renderQuestion } from './crewQuestionView.js';
 
 export const CREW_LIMITS = Object.freeze({
   TASKS_PER_HOUR: 60,          // per sending agent
@@ -694,10 +695,11 @@ function applyDeclaredApproval(db, task, from, to, gate) {
 function openDecision(db, { task, askedBy, subject, decider, ask, action, scope, texts }) {
   closePendingDecisions(db, [task.id]);
   const id = newOpaqueId();
-  // SECURITY FIX (review of v2.129.1): a declared question covers the task's
-  // messages as they stand now, and only those (migration 164).
-  const covers = db.prepare('SELECT MAX(id) AS id FROM crew_messages WHERE task_id = ?').get(task.id).id ?? null;
-  db.prepare(`INSERT INTO crew_decisions (id, task_id, asked_by_agent_id, subject_agent_id, decider_user_id, ask, action, scope, always_ask, covers_msg_id)
+  // SECURITY FIX (reviews of v2.129.1 and v2.129.2): a declared question
+  // covers exactly the messages it shows the person in full, and only those
+  // (crewQuestionView.js, migration 165).
+  const covers = ask === 'declared' ? JSON.stringify(planQuestion(db, task, decider)) : null;
+  db.prepare(`INSERT INTO crew_decisions (id, task_id, asked_by_agent_id, subject_agent_id, decider_user_id, ask, action, scope, always_ask, covers_json)
               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     .run(id, task.id, askedBy, subject, decider, ask, action || null, scope || null, alwaysAskReason({ action, scope, texts }), covers);
   return id;
@@ -1278,7 +1280,11 @@ export function crewLog(user, { limit = 100 } = {}) {
     if (d && d.status === 'pending') {
       const mineToDecide = d.decider_user_id === user.id;
       let question;
-      if (d.ask === 'declared' && d.covers_msg_id != null) {
+      if (d.ask === 'declared' && d.covers_json) {
+        // The stored plan: what the approval covers is what is shown here.
+        question = renderQuestion(db, d.covers_json);
+      } else if (d.ask === 'declared' && d.covers_msg_id != null) {
+        // A question asked under migration 164, before plans were stored.
         const from = prevCoverStmt.get(t.id, d.decider_user_id).id || 0;
         const covered = coveredStmt.all(t.id, from, d.covers_msg_id, t.to_agent_id).map((m) => oneLine(m.body, 600));
         question = covered.length ? oneLine(covered.join(' | '), 1200) : null;
