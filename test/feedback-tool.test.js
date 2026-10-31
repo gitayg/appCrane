@@ -168,3 +168,19 @@ test('read-only keys may send feedback; View as previews and the coder key may n
   const coder = { ...owner, mcp_read_only: true, coder_key: { slug: 'fb-app' } };
   await assert.rejects(send(coder, { message: 'coder' }, { id: 10, read_only: true, coder: { slug: 'fb-app' } }), /Forbidden/);
 });
+
+test('feedback text never carries the sender\'s e-mail, even when they have no name', async () => {
+  const { composeFeedbackText } = await import('../server/services/feedback/submit.js');
+  const src = (await import('fs')).readFileSync(new URL('../server/services/feedback/submit.js', import.meta.url), 'utf8');
+  assert.doesNotMatch(src, /user\.name \|\| user\.email/, 'the e-mail must not stand in for a missing name');
+  const text = composeFeedbackText({ message: 'm', kind: 'bug', env: null, context: {} }, { who: 'user 7', actorKind: 'agent', at: 'now' });
+  assert.match(text, /Sent over MCP by user 7 \(agent\)/);
+});
+
+test('feedback is never mirrored to the app\'s GitHub issues (a read-only key may file it)', async () => {
+  const fs = await import('fs');
+  const submit = fs.readFileSync(new URL('../server/services/feedback/submit.js', import.meta.url), 'utf8');
+  const create = fs.readFileSync(new URL('../server/services/requestCreate.js', import.meta.url), 'utf8');
+  assert.match(submit, /announceRequest\(db, id, appSlug, \{ platformMail: false, mirror: false \}\)/);
+  assert.match(create, /if \(mirror && app\?\.github_url\)/);
+});

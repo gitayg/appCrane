@@ -65,13 +65,16 @@ export function submitFeedback(user, args) {
   const app = platform ? null : resolveMcpApp(user, input.slug);
   assertUnderRateLimit(db, user.id);
 
-  const who = user.name || user.email || `user ${user.id}`;
+  // Never the e-mail address: the text is shown wherever the request is.
+  const who = user.name || `user ${user.id}`;
   const actorKind = user.kind || 'agent';
   const appSlug = platform ? PLATFORM_SLUG : app.slug;
   const text = composeFeedbackText(input, { who, actorKind, at: new Date().toISOString() });
   const id = insertRequest(db, { appSlug, userId: user.id, userName: user.name || '', message: text, kind: FEEDBACK_KIND });
 
-  announceRequest(db, id, appSlug, { platformMail: false });
+  // Not mirrored to the app's GitHub issues: a read-only key may file feedback,
+  // and must not thereby create issues in a repository, possibly a public one.
+  announceRequest(db, id, appSlug, { platformMail: false, mirror: false });
   if (platform) {
     try {
       notifyAdminsOfFeedback(db, { id, kind: input.kind, who, message: redactFeedbackText(input.message) });

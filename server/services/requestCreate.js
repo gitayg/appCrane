@@ -23,14 +23,14 @@ export function insertRequest(db, { appSlug, userId, userName, message, kind = n
  * caller with its own throttled platform-admin mail (feedback) skip the
  * one-mail-per-request notice.
  */
-export function announceRequest(db, id, appSlug, { platformMail = true } = {}) {
+export function announceRequest(db, id, appSlug, { platformMail = true, mirror = true } = {}) {
   if (appSlug === PLATFORM_SLUG) {
     if (platformMail) notifyPlatformAdminsOfPlatformRequest(id);
     return;
   }
   if (!appSlug) return;
   const app = getAppForMirror(appSlug);
-  if (app?.github_url) {
+  if (mirror && app?.github_url) {
     const row = db.prepare('SELECT id, message, user_name, status, created_at FROM enhancement_requests WHERE id = ?').get(id);
     mirrorRequest(app, row).catch(() => {});
   }

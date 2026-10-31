@@ -1,4 +1,7 @@
 {
+  "2.128.1": [
+    "Security: feedback sent by an agent is no longer copied to the app's GitHub issues, since a read-only key can send it, and the stored feedback never includes the sender's e-mail address."
+  ],
   "2.128.0": [
     "Your coding agent can now send feedback for you: tell it in plain words what went wrong or what you want, and it files the report with the details attached (the app, environment, the step it was doing, the deploy and the error). Feedback about an app goes to that app's requests, where its team sees it; feedback about AppCrane goes to the platform admins, with at most one e-mail an hour. Secrets in the text are removed before it is stored."
   ],
