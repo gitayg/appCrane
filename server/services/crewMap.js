@@ -30,7 +30,7 @@ const STATES = ['submitted', 'working', 'input_required', 'completed', 'failed',
 export function crewMap(user) {
   const db = getDb();
   const agents = db.prepare(`
-    SELECT a.id, a.name, a.kind, a.owner_user_id, u.name AS owner_name, u.email AS owner_email
+    SELECT a.id, a.name, a.kind, a.app_id, a.owner_user_id, u.name AS owner_name, u.email AS owner_email
     FROM crew_agents a JOIN users u ON u.id = a.owner_user_id ORDER BY a.name`).all();
 
   // Owners get a small opaque index for colouring. User ids are not exposed:
@@ -45,7 +45,7 @@ export function crewMap(user) {
     owner: a.owner_name || a.owner_email || 'unknown',
     owner_key: ownerIndex.get(a.owner_user_id),
     is_mine: a.owner_user_id === user.id,
-    runs_as: a.kind,
+    runs_as: a.app_id != null ? 'app-coder' : a.kind,
   }));
 
   // Grouped in SQL by (from, to, state, held): titles and bodies are never

@@ -8,6 +8,7 @@ import { AppError } from '../utils/errors.js';
 import { slugRefusal, slugTakenRefusal } from '../utils/slugPolicy.js';
 import { isAppOwnerOrPlatformAdmin } from './permissions.js';
 import log from '../utils/logger.js';
+import { syncAppCoders } from './crew.js';
 
 // Renaming an app, for both front doors.
 //
@@ -184,6 +185,9 @@ export async function renameApp({ app, newSlug, redirect = true, user }) {
     .run(newDir + sep, oldPrefix.length + 1, app.id, oldPrefix.length, oldPrefix);
 
   await reloadCaddy().catch((e) => log.warn(`Caddy reload after rename: ${e.message}`));
+
+  // The app's Crew coder is named after the slug ("<slug>-coder").
+  syncAppCoders(db, app.id);
 
   // DISTINCT: past releases keep status 'live', so without it this was one
   // redeploy per release ever shipped, all started at once.

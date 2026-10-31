@@ -18,6 +18,7 @@ import { Icon } from '../components/icons'
 import '../topbar-element/jsx.d.ts'
 import { serverDate } from '../utils/serverDate'
 import { appOpenUrl } from '../lib/appLinks'
+import { limitsAppliedText, type LimitApply } from '../utils/limitsApplied'
 
 defineCraneAppTopbar()
 
@@ -571,7 +572,11 @@ export function Applications() {
   async function saveRam(slug: string, raw: string) {
     const ram = raw.trim() ? Number(raw) : null
     if (raw.trim() && (isNaN(ram!) || ram! < 0)) return
-    await adminApi.put(`/api/apps/${slug}`, { max_ram_mb: ram }).catch(() => {})
+    try {
+      const r = await adminApi.put<{ limits_applied?: LimitApply[] }>(`/api/apps/${slug}`, { max_ram_mb: ram })
+      const m = limitsAppliedText(r?.limits_applied)
+      if (!m.ok) alert(m.text)
+    } catch (e) { alert((e as Error).message); return }
     setApps(prev => prev.map(a => a.slug === slug
       ? { ...a, resource_limits: { ...(a.resource_limits ?? {}), max_ram_mb: ram ?? undefined } }
       : a))
@@ -580,7 +585,11 @@ export function Applications() {
   async function saveCpu(slug: string, raw: string) {
     const cpu = raw.trim() ? Number(raw) : null
     if (raw.trim() && (isNaN(cpu!) || cpu! < 0)) return
-    await adminApi.put(`/api/apps/${slug}`, { max_cpu_percent: cpu }).catch(() => {})
+    try {
+      const r = await adminApi.put<{ limits_applied?: LimitApply[] }>(`/api/apps/${slug}`, { max_cpu_percent: cpu })
+      const m = limitsAppliedText(r?.limits_applied)
+      if (!m.ok) alert(m.text)
+    } catch (e) { alert((e as Error).message); return }
     setApps(prev => prev.map(a => a.slug === slug
       ? { ...a, resource_limits: { ...(a.resource_limits ?? {}), max_cpu_percent: cpu ?? undefined } }
       : a))

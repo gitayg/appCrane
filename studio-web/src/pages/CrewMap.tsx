@@ -10,7 +10,7 @@ import { serverDate } from '../utils/serverDate'
 // together. Plain SVG, no graph library: studio-web has none, and 2-50 nodes
 // on a circle need no force simulation.
 
-export interface MapNode { name: string; owner: string; owner_key: number; is_mine: boolean; runs_as: 'mcp' | 'hosted' }
+export interface MapNode { name: string; owner: string; owner_key: number; is_mine: boolean; runs_as: 'mcp' | 'hosted' | 'app-coder' }
 export interface MapEdge {
   from: string
   to: string
@@ -241,7 +241,7 @@ export function CrewMap({ data }: { data: CrewMapData | null }) {
           {sel && selStats ? (
             <div style={{ border: '1px solid var(--border)', borderRadius: 8, background: 'var(--surface)', padding: '12px 14px' }}>
               <div style={{ fontFamily: 'monospace', fontWeight: 600 }}>{sel.name}</div>
-              <div style={{ color: 'var(--dim)', marginBottom: 8 }}>{sel.owner}{sel.is_mine ? ' (you)' : ''} · {sel.runs_as === 'mcp' ? 'Local agent · MCP' : 'Hosted'}</div>
+              <div style={{ color: 'var(--dim)', marginBottom: 8 }}>{sel.owner}{sel.is_mine ? ' (you)' : ''} · {sel.runs_as === 'mcp' ? 'Local agent · MCP' : sel.runs_as === 'app-coder' ? 'App coder (run by AppCrane)' : 'Hosted'}</div>
               <div>Sent {selStats.sent} · received {selStats.received}</div>
               {[['Sent to', selStats.out, 'to'], ['Received from', selStats.inc, 'from']].map(([title, list, key]) => (
                 (list as MapEdge[]).length > 0 && (

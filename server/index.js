@@ -1847,6 +1847,16 @@ app.listen(PORT, HOST, async () => {
   } catch (e) {
     log.error('Crew retention scheduler failed to start: ' + e.message);
   }
+  // Crew app coders: every Crane-hosted app is addressable as "<slug>-coder";
+  // a task let through by Crew's rules runs that app's coder session, billed
+  // to the app coder's owner. After coder orphan recovery (above), so a turn a
+  // restart cut off is failed rather than waited on.
+  try {
+    const { startCrewAppCoder } = await import('./services/crewAppCoder.js');
+    startCrewAppCoder();
+  } catch (e) {
+    log.error('Crew app coders failed to start: ' + e.message);
+  }
   // v2.106.0: A2A push notifications for Crew tasks (SSRF-guarded webhooks).
   try {
     const { startCrewPush } = await import('./services/crewPush.js');

@@ -111,7 +111,8 @@ export function waitingForMe(user) {
   const firstContacts = db.prepare(`
     SELECT COUNT(*) AS n FROM crew_tasks t JOIN crew_agents ta ON ta.id = t.to_agent_id JOIN crew_agents fa ON fa.id = t.from_agent_id
     WHERE ta.owner_user_id = ? AND fa.owner_user_id <> ? AND t.held = 1 AND t.state = 'submitted'
-      AND EXISTS (SELECT 1 FROM crew_connections c WHERE c.from_agent_id = t.from_agent_id AND c.to_owner_id = ? AND c.state = 'pending')`)
+      AND EXISTS (SELECT 1 FROM crew_connections c WHERE c.from_agent_id = t.from_agent_id AND c.to_owner_id = ? AND c.state = 'pending'
+                  AND COALESCE(c.to_agent_id, 0) = CASE WHEN ta.app_id IS NOT NULL THEN ta.id ELSE 0 END)`)
     .get(user.id, user.id, user.id).n;
   return {
     waiting: questions.length + firstContacts,

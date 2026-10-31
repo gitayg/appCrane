@@ -15,6 +15,7 @@ import { AppTimeline } from '../components/events/AppTimeline'
 import { WhatsNewMailCard } from '../components/WhatsNewMailCard'
 import { EnvVarsPanel } from '../components/env/EnvVarsPanel'
 import { serverDate } from '../utils/serverDate'
+import { limitsAppliedText, type LimitApply } from '../utils/limitsApplied'
 
 const PAGE_CSS = `
 /* margin 0, not -24px: .app-manager has no padding to cancel, so the negative margins made
@@ -368,8 +369,8 @@ function LimitsCard({ slug, reload, onMsg }: LimitsCardProps) {
   async function save() {
     if (ram < 128 || cpu < 5) { onMsg({ text: 'Invalid limits', ok: false }); return }
     try {
-      await adminApi.put(`/api/apps/${slug}`, { max_ram_mb: ram, max_cpu_percent: cpu })
-      onMsg({ text: 'Resource limits saved. They apply when the container is next created: redeploy or restart.', ok: true })
+      const r = await adminApi.put<{ limits_applied?: LimitApply[] }>(`/api/apps/${slug}`, { max_ram_mb: ram, max_cpu_percent: cpu })
+      onMsg(limitsAppliedText(r?.limits_applied))
     } catch (e) {
       onMsg({ text: (e as Error).message, ok: false })
     }

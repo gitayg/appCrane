@@ -1622,6 +1622,15 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
   }
 
   const updated = db.prepare('SELECT * FROM apps WHERE id = ?').get(app.id);
+  // New limits reach the running containers now (docker update), not only at
+  // the next deploy; services/applyResourceLimits.js says when one is skipped.
+  let limitsApplied = null;
+  if ('resource_limits' in updates) {
+    const lim = JSON.parse(updates.resource_limits);
+    const { applyLimitsLive } = await import('../services/applyResourceLimits.js');
+    limitsApplied = await applyLimitsLive({ slug: updated.slug, memoryMb: lim.max_ram_mb, cpus: lim.max_cpu_percent / 100 })
+      .catch((e) => { log.warn(`[limits] live apply for ${updated.slug} failed: ${e.message}`); return null; });
+  }
   // A 200 on a tcp -> http flip must not read as "the port is closed". Said in
   // prose as well as in the pending_port_release field, because the caller that
   // most needs to hear it is a script or an agent that checked the status code
@@ -1632,6 +1641,7 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
     // fleet is summed to produce it, and an unrelated field edit should not pay
     // for that, nor read as though it moved the total.
     ...(memoryBudgetReport ? { memory_budget: memoryBudgetReport } : {}),
+    ...(limitsApplied ? { limits_applied: limitsApplied } : {}),
     ...(stillBound !== null && ingressWork ? {
       ingress_notice: `Port ${stillBound} is NOT closed yet. AppCrane will not publish it again and no other app can be given it, but the container that is running right now still binds 0.0.0.0:${stillBound} — the publish is a \`docker run\` flag. Deploy the app, or POST /api/apps/${app.slug}/restart/production, to recreate the container and actually close the port; AppCrane returns the port to the pool at that moment.`,
     } : {}),

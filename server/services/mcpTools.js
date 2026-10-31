@@ -5172,7 +5172,8 @@ const TOOLS = [
     crew: true,
     description:
       'List every agent registered in Crew across the platform: name, owner (the person it acts for; yours are marked is_mine), how it runs, skills, status (working / waiting_for_input / idle / blocked_by_you) and what it is doing now. '
-      + 'Use it to find an agent with a skill before sending a task with appcrane_crew_send.',
+      + 'Use it to find an agent with a skill before sending a task with appcrane_crew_send. '
+      + 'Every Crane-hosted app is listed as "<slug>-coder" (runs_as "app-coder"): a task sent to it, once its owner approves your agent for that app coder (first contact is per app coder; a standing rule matches when you declare scope = the app coder\'s name), runs that app\'s coder session on the owner\'s credential and comes back with the coder\'s answer (or input_required when the coder asks something). One task per app at a time: a second one while it works fails as busy. Nobody acts as an app coder.',
     inputSchema: {
       type: 'object',
       properties: { skill: { type: 'string', description: 'Optional: only agents with this skill id (substring match).' } },

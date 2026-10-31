@@ -1,5 +1,7 @@
 import { getDb } from '../db.js';
 import log from '../utils/logger.js';
+import { deleteAppCoderRows } from './crewAppCoderAgents.js';
+import { announce } from './crew.js';
 
 // The body of DELETE /api/apps/:slug, moved here unchanged so appcrane_delete_app
 // runs the same teardown. Caddy is reloaded by the caller.
@@ -53,7 +55,11 @@ export async function deleteApp(app) {
 
   // Delete related records first to avoid FK constraint failures
   const appId = app.id;
+  let crewTaskIds = [];
   db.transaction(() => {
+    // The app's Crew coder identity (crew_agents.app_id, no foreign key: see
+    // migration 162) and, by cascade, the tasks sent to it.
+    crewTaskIds = deleteAppCoderRows(db, appId);
     db.prepare('DELETE FROM app_user_roles WHERE app_id = ?').run(appId);
     db.prepare('DELETE FROM app_identity_secrets WHERE app_id = ?').run(appId);
     db.prepare('DELETE FROM app_settings WHERE app_id = ?').run(appId);
@@ -68,6 +74,8 @@ export async function deleteApp(app) {
     db.prepare('DELETE FROM identity_sessions WHERE app_id = ?').run(appId);
     db.prepare('DELETE FROM apps WHERE id = ?').run(appId);
   })();
+  // Open task streams and a running coder turn for those tasks end on 'deleted'.
+  if (crewTaskIds.length) announce(crewTaskIds, 'deleted');
 
   return { slug, managed_databases: dbDrop };
 }

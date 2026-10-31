@@ -119,6 +119,7 @@ import {
 } from './crewRules.js';
 import log from '../utils/logger.js';
 import { jobStarted, trackJobSync } from './jobHealth.js';
+import { syncAppCoderAgents, isReservedAppCoderName, APP_CODER_SUFFIX } from './crewAppCoderAgents.js';
 
 export const CREW_LIMITS = Object.freeze({
   TASKS_PER_HOUR: 60,          // per sending agent
@@ -315,6 +316,11 @@ export function agentForCaller(db, user, rawName) {
   const name = normalizeAgentName(rawName);
   const agent = agentByName(db, name);
   if (!agent) fail(404, 'NOT_FOUND', `No agent named "${name}" is registered.`);
+  // An app coder is run by AppCrane (services/crewAppCoder.js), so nobody acts
+  // as it, its owner included: words in its name come only from the coder.
+  if (agent.app_id != null) {
+    fail(403, 'FORBIDDEN', `Forbidden: "${name}" is an app's coder, run by AppCrane. Nobody acts as it; send it a task instead.`);
+  }
   if (agent.owner_user_id !== user.id) {
     fail(403, 'FORBIDDEN', `Forbidden: agent "${name}" belongs to another person. An agent acts only through its owner's own key.`);
   }
@@ -326,7 +332,7 @@ function agentView(db, a) {
   const owner = db.prepare('SELECT name, email FROM users WHERE id = ?').get(a.owner_user_id);
   return {
     name: a.name,
-    kind: a.kind,
+    kind: a.app_id != null ? 'app-coder' : a.kind,
     owner: owner?.name || owner?.email || 'unknown',
     description: card.description || '',
     skills: Array.isArray(card.skills) ? card.skills : [],
@@ -370,6 +376,9 @@ export function registerAgent(user, input, { kind, actorKind }) {
 
   const result = db.transaction(() => {
     const existing = agentByName(db, name);
+    if (existing?.app_id != null || (!existing && isReservedAppCoderName(db, name))) {
+      fail(409, 'NAME_TAKEN', `The agent name "${name}" is reserved for the coder of the app "${name.slice(0, -APP_CODER_SUFFIX.length)}". Pick another.`);
+    }
     if (existing && existing.owner_user_id !== user.id) {
       fail(409, 'NAME_TAKEN', `The agent name "${name}" is already registered by another person. Names are unique across the platform; pick another.`);
     }
@@ -378,7 +387,9 @@ export function registerAgent(user, input, { kind, actorKind }) {
         .run(card, knowsAbout, kind, existing.id);
       return { id: existing.id, created: false };
     }
-    const n = db.prepare('SELECT COUNT(*) AS n FROM crew_agents WHERE owner_user_id = ?').get(user.id).n;
+    // App coders are the apps', not agents the person registered: they do not
+    // count toward the limit.
+    const n = db.prepare('SELECT COUNT(*) AS n FROM crew_agents WHERE owner_user_id = ? AND app_id IS NULL').get(user.id).n;
     if (n >= CREW_LIMITS.AGENTS_PER_OWNER) {
       fail(429, 'RATE_LIMITED', `You already have ${n} agents registered (the limit is ${CREW_LIMITS.AGENTS_PER_OWNER}). Remove one you no longer use.`);
     }
@@ -447,6 +458,21 @@ export function removeAgent(user, rawName, { actorKind }) {
 }
 
 /**
+ * Reconcile the app coder identities (services/crewAppCoderAgents.js) and
+ * announce the tasks that changed or went with them. Never fails the caller:
+ * a roster read or a send must not break on identity upkeep.
+ */
+export function syncAppCoders(db = getDb(), appId = null) {
+  try {
+    const { changed, deleted } = syncAppCoderAgents({ db, appId });
+    announce(changed, 'status');
+    announce(deleted, 'deleted');
+  } catch (e) {
+    log.warn(`[crew] app coder sync failed: ${e.message}`);
+  }
+}
+
+/**
  * The roster: every registered agent, with its owner. Status and "doing now"
  * come from tasks that were actually accepted into an inbox (held and
  * rejected tasks are never shown to third parties — a held title is a request
@@ -454,10 +480,11 @@ export function removeAgent(user, rawName, { actorKind }) {
  */
 export function roster(user, { skill } = {}) {
   const db = getDb();
+  syncAppCoders(db);
   const wantSkill = skill ? String(skill).trim().toLowerCase() : '';
   const agents = db.prepare(`
-    SELECT a.*, u.name AS owner_name, u.email AS owner_email
-    FROM crew_agents a JOIN users u ON u.id = a.owner_user_id
+    SELECT a.*, u.name AS owner_name, u.email AS owner_email, ap.slug AS app_slug
+    FROM crew_agents a JOIN users u ON u.id = a.owner_user_id LEFT JOIN apps ap ON ap.id = a.app_id
     ORDER BY a.name`).all();
   const myBlocks = new Set(db.prepare('SELECT blocked_agent_id FROM crew_blocks WHERE owner_user_id = ?').all(user.id).map((r) => r.blocked_agent_id));
   const blockCounts = isAdmin(user)
@@ -485,7 +512,8 @@ export function roster(user, { skill } = {}) {
       name: a.name,
       owner: a.owner_name || a.owner_email || 'unknown',
       is_mine: a.owner_user_id === user.id,
-      runs_as: a.kind,
+      runs_as: a.app_id != null ? 'app-coder' : a.kind,
+      ...(a.app_id != null ? { app: a.app_slug } : {}),
       description: card.description || '',
       skills: skills.map((s) => s.id),
       knows_about: a.knows_about || '',
@@ -589,12 +617,38 @@ function gateFor(db, from, to, declared = {}) {
   } else {
     const blocked = db.prepare('SELECT 1 FROM crew_blocks WHERE owner_user_id = ? AND blocked_agent_id = ?').get(to.owner_user_id, from.id);
     if (blocked) return { verdict: 'reject', reason: 'blocked' };
-    const conn = db.prepare('SELECT * FROM crew_connections WHERE from_agent_id = ? AND to_owner_id = ?').get(from.id, to.owner_user_id);
-    if (conn?.state === 'refused') return { verdict: 'reject', reason: 'refused' };
-    if (conn?.state !== 'allowed') return conn ? { verdict: 'hold', connection: conn, isNew: false } : { verdict: 'hold', connection: null, isNew: true };
+    // A person who refused this agent refused it for all their agents, app
+    // coders included.
+    const personConn = connectionFor(db, from.id, to.owner_user_id, null);
+    if (personConn?.state === 'refused') return { verdict: 'reject', reason: 'refused' };
+    // App coders: first contact is per app coder (connectionKey). The
+    // person-level Allow does not reach them — each starts billed coder
+    // sessions — and allowing one app's coder does not open another's.
+    const key = connectionKey(to);
+    const conn = key == null ? personConn : connectionFor(db, from.id, to.owner_user_id, key);
+    if (key != null && conn?.state === 'refused') return { verdict: 'reject', reason: 'refused' };
+    if (conn?.state !== 'allowed') {
+      // A standing rule that names this app coder (declared scope = its name)
+      // is the owner's own approval for exactly this sender and coder.
+      if (key != null && declared.scope === to.name) {
+        const rule = matchRule(db, { ownerId: to.owner_user_id, agentId: from.id, action: declared.action, scope: declared.scope, texts: declared.texts || [] });
+        if (rule) return { verdict: 'deliver', rule, ask: false };
+      }
+      return conn ? { verdict: 'hold', connection: conn, isNew: false } : { verdict: 'hold', connection: null, isNew: true, toAgentId: key };
+    }
     base = { verdict: 'deliver' };
   }
   return { ...base, ...declaredApproval(db, from, to, declared) };
+}
+
+/** The receiving agent a first contact is keyed by: the app coder itself, or null (the person). */
+function connectionKey(to) {
+  return to.app_id != null ? to.id : null;
+}
+
+function connectionFor(db, fromAgentId, toOwnerId, toAgentId) {
+  return db.prepare('SELECT * FROM crew_connections WHERE from_agent_id = ? AND to_owner_id = ? AND COALESCE(to_agent_id, 0) = ?')
+    .get(fromAgentId, toOwnerId, toAgentId ?? 0);
 }
 
 /**
@@ -602,6 +656,10 @@ function gateFor(db, from, to, declared = {}) {
  * when its first contact is allowed). Nothing declared → nothing to approve.
  */
 function declaredApproval(db, from, to, { action, scope, texts = [] }) {
+  // An app coder starts work the moment a task is delivered, so the always-ask
+  // backstop reads the task's own words even when it declared nothing: a
+  // request that mentions production or deleting asks the app's owner first.
+  if (to.app_id != null && alwaysAskReason({ action, scope, texts })) return { rule: null, ask: true };
   if (!action && !scope) return { rule: null, ask: false };
   const rule = matchRule(db, { ownerId: to.owner_user_id, agentId: from.id, action, scope, texts });
   return { rule, ask: !rule };
@@ -671,12 +729,22 @@ function firstContactEmail(db, conn, from, to, title) {
   if (!receiver?.email) return false;
   const senderName = oneLine(sender?.name || sender?.email || 'Another person', 80);
   const link = dashboardLink(`/crew#log`);
+  const appSlug = to.app_id != null ? db.prepare('SELECT slug FROM apps WHERE id = ?').get(to.app_id)?.slug : null;
   const text = [
-    `${from.name}, owned by ${senderName}, asked to send tasks to your agent ${to.name}.`,
+    appSlug
+      ? `${from.name}, owned by ${senderName}, asked to send tasks to ${to.name}, the coder of your app ${appSlug}.`
+      : `${from.name}, owned by ${senderName}, asked to send tasks to your agent ${to.name}.`,
     `Agents of different people need your approval before they can work together.`,
     ``,
     `First request: "${oneLine(title, 140)}"`,
     ``,
+    ...(appSlug ? [
+      `Allowing it starts a coder session on ${appSlug} with this request as its instruction, billed to you:`,
+      `your Claude subscription, or the app's or the platform's key if you have none. The coder works in`,
+      `the app's workspace with its usual permissions; nothing is released until you release it.`,
+      `Allow applies to ${appSlug}'s coder only: your other agents and your other apps' coders still ask.`,
+      ``,
+    ] : []),
     `Decide in AppCrane (Allow, Allow once, Refuse or Block ${from.name}):`,
     link,
     ``,
@@ -692,7 +760,7 @@ function firstContactEmail(db, conn, from, to, title) {
       // Belt to notified_at's braces. emailQueue dedupes only per app, so
       // notified_at (set once, in the transaction that creates the
       // connection) is what actually guarantees one e-mail.
-      idempotencyKey: `crew-first-contact:${conn.from_agent_id}:${conn.to_owner_id}`,
+      idempotencyKey: `crew-first-contact:${conn.from_agent_id}:${conn.to_owner_id}${conn.to_agent_id ? `:${conn.to_agent_id}` : ''}`,
     });
     return true;
   } catch (e) {
@@ -712,6 +780,9 @@ export function sendTask(user, { as_agent, to_agent, title, message, context_id,
   const db = getDb();
   const from = agentForCaller(db, user, as_agent);
   const toName = normalizeAgentName(to_agent);
+  // An app coder's identity follows its app (owner, name); bring it up to date
+  // before the gate reads its owner.
+  if (toName.endsWith(APP_CODER_SUFFIX)) syncAppCoders(db);
   const to = agentByName(db, toName);
   if (!to) fail(404, 'NOT_FOUND', `No agent named "${toName}" is registered. appcrane_crew_roster lists them.`);
   if (to.id === from.id) fail(400, 'VALIDATION', 'An agent cannot send a task to itself.');
@@ -747,8 +818,8 @@ export function sendTask(user, { as_agent, to_agent, title, message, context_id,
     let emailed = false;
     if (gate.verdict === 'hold' && gate.isNew) {
       assertPendingFirstContactBudget(db, from.owner_user_id);
-      const connId = db.prepare(`INSERT INTO crew_connections (from_agent_id, from_owner_id, to_owner_id, state)
-                                 VALUES (?, ?, ?, 'pending')`).run(from.id, from.owner_user_id, to.owner_user_id).lastInsertRowid;
+      const connId = db.prepare(`INSERT INTO crew_connections (from_agent_id, from_owner_id, to_owner_id, state, to_agent_id)
+                                 VALUES (?, ?, ?, 'pending', ?)`).run(from.id, from.owner_user_id, to.owner_user_id, gate.toAgentId ?? null).lastInsertRowid;
       connection = db.prepare('SELECT * FROM crew_connections WHERE id = ?').get(connId);
     }
     const held = gate.verdict === 'hold' ? 1 : 0;
@@ -964,9 +1035,27 @@ export function touchAgentSeen(agentId) {
  */
 const ASKS = ['sender_owner', 'my_owner'];
 
-export function reply(user, { as_agent, task_id, message, state, artifact, message_id, ask, action, scope }, { actorKind }) {
+export function reply(user, args, { actorKind }) {
   const db = getDb();
-  const agent = agentForCaller(db, user, as_agent);
+  const agent = agentForCaller(db, user, args.as_agent);
+  return replyAs(db, user, agent, args, { actorKind });
+}
+
+/**
+ * An app coder's answer on a task addressed to it (services/crewAppCoder.js):
+ * the same reply() rules — visibility, states, the secret scan, budgets,
+ * input_required routing — with the app coder as the agent and its owner as
+ * the acting person in the audit row. Not reachable from MCP, A2A or REST.
+ */
+export function replyAsAppCoder(agentId, args) {
+  const db = getDb();
+  const agent = db.prepare('SELECT * FROM crew_agents WHERE id = ? AND app_id IS NOT NULL').get(agentId);
+  if (!agent) fail(404, 'NOT_FOUND', 'No such app coder.');
+  const owner = db.prepare('SELECT * FROM users WHERE id = ?').get(agent.owner_user_id);
+  return replyAs(db, owner, agent, args, { actorKind: 'agent' });
+}
+
+function replyAs(db, user, agent, { task_id, message, state, artifact, message_id, ask, action, scope }, { actorKind }) {
   const task = typeof task_id === 'string' ? db.prepare('SELECT * FROM crew_tasks WHERE id = ?').get(task_id) : null;
   const isSender = !!task && task.from_agent_id === agent.id;
   const isReceiver = !isSender && taskVisibleTo(task, agent.id);
@@ -1106,6 +1195,7 @@ export function crewLog(user, { limit = 100 } = {}) {
   const rows = db.prepare(`
     SELECT t.*, fa.name AS from_agent, fa.owner_user_id AS from_owner_id, fu.name AS from_owner,
            ta.name AS to_agent, ta.owner_user_id AS to_owner_id, tu.name AS to_owner,
+           (SELECT slug FROM apps WHERE id = ta.app_id) AS to_app_slug,
            (SELECT COUNT(*) FROM crew_messages m WHERE m.task_id = t.id) AS message_count,
            (SELECT body FROM crew_messages m WHERE m.task_id = t.id ORDER BY m.id ASC LIMIT 1) AS first_body,
            (SELECT artifact_name FROM crew_messages m WHERE m.task_id = t.id AND artifact_name IS NOT NULL ORDER BY m.id DESC LIMIT 1) AS artifact_name
@@ -1114,7 +1204,7 @@ export function crewLog(user, { limit = 100 } = {}) {
     JOIN crew_agents ta ON ta.id = t.to_agent_id   JOIN users tu ON tu.id = ta.owner_user_id
     WHERE fa.owner_user_id = ? OR (ta.owner_user_id = ? AND (t.state <> 'rejected' OR t.declined = 1))
     ORDER BY t.updated_at DESC, t.created_at DESC LIMIT ?`).all(user.id, user.id, n);
-  const connStmt = db.prepare('SELECT id, state FROM crew_connections WHERE from_agent_id = ? AND to_owner_id = ?');
+  const connStmt = db.prepare('SELECT id, state FROM crew_connections WHERE from_agent_id = ? AND to_owner_id = ? AND COALESCE(to_agent_id, 0) = ?');
   // Phase 3: the newest question on the task (pending for someone, or
   // answered by a rule). Only its decider is offered the buttons.
   const decisionStmt = db.prepare(`
@@ -1135,12 +1225,17 @@ export function crewLog(user, { limit = 100 } = {}) {
       created_at: t.created_at, updated_at: t.updated_at,
       awaiting_your_decision: false,
     };
+    // A task to an app coder runs the app's coder session once it is let
+    // through, billed to the app coder's owner: the dashboard says so where
+    // that person decides.
+    if (t.to_app_slug) entry.app_coder = { app: t.to_app_slug, billed_to_you: mineReceived };
     // A held task the sender cancelled stays held (never released) but waits
     // for nobody: offering a decision on it would release a withdrawn request.
     if (t.held && t.state === 'submitted') {
       entry.waiting_for_approval = true;
       if (mineReceived && !mineSent) {
-        const c = connStmt.get(t.from_agent_id, user.id);
+        // An app coder's first contact is its own connection (gateFor).
+        const c = connStmt.get(t.from_agent_id, user.id, t.to_app_slug ? t.to_agent_id : 0);
         if (c) { entry.connection_id = c.id; entry.awaiting_your_decision = true; }
       }
     }
@@ -1195,28 +1290,40 @@ export function decideConnection(user, connectionId, decision, { task_id } = {})
   const conn = Number.isFinite(id) ? db.prepare('SELECT * FROM crew_connections WHERE id = ?').get(id) : null;
   if (!conn || conn.to_owner_id !== user.id) fail(404, 'NOT_FOUND', 'No such first-contact request for you.');
   const myAgentIds = `SELECT id FROM crew_agents WHERE owner_user_id = ?`;
+  // What an Allow releases: an app coder's connection covers that app coder
+  // only; the person-level one covers their own agents, never their app coders
+  // (gateFor keys app coders' first contact by the app coder).
+  const allowTo = conn.to_agent_id != null
+    ? { sql: 'to_agent_id = ?', arg: conn.to_agent_id }
+    : { sql: 'to_agent_id IN (SELECT id FROM crew_agents WHERE owner_user_id = ? AND app_id IS NULL)', arg: user.id };
+  // What a Refuse or Block rejects: a block, or a refusal of the agent as a
+  // person, ends its open tasks with all of the person's agents; refusing it
+  // one app coder ends only those.
+  const rejectTo = decision === 'block' || conn.to_agent_id == null
+    ? { sql: `to_agent_id IN (${myAgentIds})`, arg: user.id }
+    : allowTo;
   // Only a task still waiting (held AND submitted) can be released: a held
   // task its sender cancelled was withdrawn, and releasing it would show the
   // receiver's agents a request nobody now stands behind.
   const WAITING = `held = 1 AND state = 'submitted'`;
 
   const affectedIds = decision.startsWith('allow')
-    ? db.prepare(`SELECT id FROM crew_tasks WHERE ${WAITING} AND from_agent_id = ? AND to_agent_id IN (${myAgentIds})`).all(conn.from_agent_id, user.id).map((r) => r.id)
-    : db.prepare(`SELECT id FROM crew_tasks WHERE ${OPEN_FROM_SENDER} AND from_agent_id = ? AND to_agent_id IN (${myAgentIds})`).all(conn.from_agent_id, user.id).map((r) => r.id);
+    ? db.prepare(`SELECT id FROM crew_tasks WHERE ${WAITING} AND from_agent_id = ? AND ${allowTo.sql}`).all(conn.from_agent_id, allowTo.arg).map((r) => r.id)
+    : db.prepare(`SELECT id FROM crew_tasks WHERE ${OPEN_FROM_SENDER} AND from_agent_id = ? AND ${rejectTo.sql}`).all(conn.from_agent_id, rejectTo.arg).map((r) => r.id);
   const approvals = [];
   const result = db.transaction(() => {
     if (decision === 'allow') {
       db.prepare("UPDATE crew_connections SET state = 'allowed', decided_at = datetime('now') WHERE id = ?").run(conn.id);
       const r = db.prepare(`UPDATE crew_tasks SET held = 0, updated_at = datetime('now')
-                            WHERE ${WAITING} AND from_agent_id = ? AND to_agent_id IN (${myAgentIds})`).run(conn.from_agent_id, user.id);
+                            WHERE ${WAITING} AND from_agent_id = ? AND ${allowTo.sql}`).run(conn.from_agent_id, allowTo.arg);
       for (const tid of affectedIds) approvals.push(releaseDeclared(db, tid));
       return { state: 'allowed', released: r.changes };
     }
     if (decision === 'allow_once') {
       if (conn.state !== 'pending') fail(409, 'NOT_PENDING', `This connection is ${conn.state}; "allow once" applies to a pending request.`);
       const task = task_id
-        ? db.prepare(`SELECT id FROM crew_tasks WHERE id = ? AND ${WAITING} AND from_agent_id = ? AND to_agent_id IN (${myAgentIds})`).get(String(task_id), conn.from_agent_id, user.id)
-        : db.prepare(`SELECT id FROM crew_tasks WHERE ${WAITING} AND from_agent_id = ? AND to_agent_id IN (${myAgentIds}) ORDER BY created_at ASC LIMIT 1`).get(conn.from_agent_id, user.id);
+        ? db.prepare(`SELECT id FROM crew_tasks WHERE id = ? AND ${WAITING} AND from_agent_id = ? AND ${allowTo.sql}`).get(String(task_id), conn.from_agent_id, allowTo.arg)
+        : db.prepare(`SELECT id FROM crew_tasks WHERE ${WAITING} AND from_agent_id = ? AND ${allowTo.sql} ORDER BY created_at ASC LIMIT 1`).get(conn.from_agent_id, allowTo.arg);
       if (!task) fail(404, 'NOT_FOUND', 'No held task to allow on this request.');
       db.prepare("UPDATE crew_tasks SET held = 0, updated_at = datetime('now') WHERE id = ?").run(task.id);
       approvals.push(releaseDeclared(db, task.id));
@@ -1227,7 +1334,7 @@ export function decideConnection(user, connectionId, decision, { task_id } = {})
     // OPEN_FROM_SENDER).
     db.prepare("UPDATE crew_connections SET state = 'refused', decided_at = datetime('now') WHERE id = ?").run(conn.id);
     const r = db.prepare(`UPDATE crew_tasks SET held = 0, state = 'rejected', updated_at = datetime('now')
-                          WHERE ${OPEN_FROM_SENDER} AND from_agent_id = ? AND to_agent_id IN (${myAgentIds})`).run(conn.from_agent_id, user.id);
+                          WHERE ${OPEN_FROM_SENDER} AND from_agent_id = ? AND ${rejectTo.sql}`).run(conn.from_agent_id, rejectTo.arg);
     if (decision === 'block') {
       db.prepare('INSERT OR IGNORE INTO crew_blocks (owner_user_id, blocked_agent_id) VALUES (?, ?)').run(user.id, conn.from_agent_id);
     }
@@ -1251,9 +1358,10 @@ export function decideConnection(user, connectionId, decision, { task_id } = {})
  */
 function releaseDeclared(db, taskId) {
   const task = db.prepare('SELECT * FROM crew_tasks WHERE id = ?').get(taskId);
-  if (!task || (!task.action && !task.scope)) return { taskId, rule: null, decisionId: null };
+  if (!task) return { taskId, rule: null, decisionId: null };
   const from = db.prepare('SELECT * FROM crew_agents WHERE id = ?').get(task.from_agent_id);
   const to = db.prepare('SELECT * FROM crew_agents WHERE id = ?').get(task.to_agent_id);
+  if (!task.action && !task.scope && to.app_id == null) return { taskId, rule: null, decisionId: null };
   const first = db.prepare('SELECT body FROM crew_messages WHERE task_id = ? ORDER BY id ASC LIMIT 1').get(taskId);
   const gate = declaredApproval(db, from, to, { action: task.action, scope: task.scope, texts: [task.title, first?.body || ''] });
   return { taskId, ...applyDeclaredApproval(db, task, from, to, gate), decider: to.owner_user_id };
@@ -1298,7 +1406,8 @@ export function listBlocks(user) {
     FROM crew_blocks b JOIN crew_agents a ON a.id = b.blocked_agent_id JOIN users u ON u.id = a.owner_user_id
     WHERE b.owner_user_id = ? ORDER BY b.created_at DESC`).all(user.id);
   const refused = db.prepare(`
-    SELECT c.id AS connection_id, c.decided_at, a.name AS agent, u.name AS owner
+    SELECT c.id AS connection_id, c.decided_at, a.name AS agent, u.name AS owner,
+           (SELECT name FROM crew_agents WHERE id = c.to_agent_id) AS for_app_coder
     FROM crew_connections c JOIN crew_agents a ON a.id = c.from_agent_id JOIN users u ON u.id = a.owner_user_id
     WHERE c.to_owner_id = ? AND c.state = 'refused'
       AND NOT EXISTS (SELECT 1 FROM crew_blocks b WHERE b.owner_user_id = c.to_owner_id AND b.blocked_agent_id = c.from_agent_id)

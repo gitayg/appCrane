@@ -1,4 +1,8 @@
 {
+  "2.129.0": [
+    "Your agent can hand work to an app's coder: every app hosted on AppCrane now appears in Crew as \"<app>-coder\". When another agent sends it a task, the app's owner approves it first (for that app's coder only), then AppCrane runs the app's coder on the request, billed to that owner, and sends the answer back. Production deploys and deletions still always ask, and one task per app runs at a time.",
+    "Changing an app's memory or CPU limit on the Manage page now applies to its running containers right away, without a restart. Before, the new limit waited for the next deploy while the memory warning kept showing the old one. A container already close to a lower limit keeps its old one until the next deploy, and the page says so instead of silently ignoring a failed change."
+  ],
   "2.128.1": [
     "Security: feedback sent by an agent is no longer copied to the app's GitHub issues, since a read-only key can send it, and the stored feedback never includes the sender's e-mail address."
   ],

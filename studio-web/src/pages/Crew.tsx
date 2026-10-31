@@ -9,12 +9,17 @@ import { CrewMap, type CrewMapData } from './CrewMap'
 // Phase 3: questions routed to you (input_required) with Approve / Approve and
 // always allow / Reply / Decline, and standing rules on Rules & blocks
 // (server/services/crewDecisions.js, crewRules.js).
+// App coders: every Crane-hosted app is on the roster as "<slug>-coder"
+// (runs_as 'app-coder'); a task to one runs the app's coder session, billed to
+// its owner, so the decisions that let one through say so
+// (server/services/crewAppCoder*.js).
 
 interface RosterRow {
   name: string
   owner: string
   is_mine: boolean
-  runs_as: 'mcp' | 'hosted'
+  runs_as: 'mcp' | 'hosted' | 'app-coder'
+  app?: string
   description: string
   skills: string[]
   knows_about: string
@@ -42,6 +47,7 @@ interface LogEntry {
   waiting_for_approval?: boolean
   awaiting_your_decision: boolean
   connection_id?: number
+  app_coder?: { app: string; billed_to_you: boolean }
   action?: string
   scope?: string
   ran_under_rule?: { id: string; agent?: string; action?: string; scope?: string; revoked?: boolean; removed?: boolean; yours?: boolean }
@@ -76,7 +82,7 @@ type TaskDecision = 'approve' | 'approve_always' | 'reply' | 'decline'
 
 interface BlockRow { id: number; agent: string; owner: string; created_at: string; refused_since: number }
 interface TokenRow { agent: string; hint: string; created_at: string; last_used_at: string | null; expires_at?: string | null }
-interface RefusedRow { connection_id: number; agent: string; owner: string; decided_at: string | null }
+interface RefusedRow { connection_id: number; agent: string; owner: string; decided_at: string | null; for_app_coder?: string | null }
 
 type Tab = 'roster' | 'log' | 'map' | 'agents' | 'rules'
 const TABS: { id: Tab; label: string }[] = [
@@ -100,6 +106,11 @@ function when(raw: string | null | undefined): string {
   if (mins < 60) return `${mins} min ago`
   if (mins < 24 * 60) return `${Math.round(mins / 60)} h ago`
   return d.toLocaleDateString()
+}
+
+function runsAsLabel(r: RosterRow): string {
+  if (r.runs_as === 'app-coder') return `App coder · ${r.app ?? ''}`
+  return r.runs_as === 'mcp' ? 'Local agent · MCP' : 'Hosted'
 }
 
 function errText(e: unknown): string {
@@ -155,7 +166,7 @@ function RosterTab({ rows, onBlock }: { rows: RosterRow[]; onBlock: (name: strin
                 <tr key={r.name}>
                   <td style={agentCell} title={r.description || undefined}>{r.name}</td>
                   <td>{r.owner}{r.is_mine && <span style={dim}> (you)</span>}</td>
-                  <td style={dim}>{r.runs_as === 'mcp' ? 'Local agent · MCP' : 'Hosted'}</td>
+                  <td style={dim} title={r.runs_as === 'app-coder' ? `Run by AppCrane: a task to it runs ${r.app}'s coder session, billed to ${r.owner}` : undefined}>{runsAsLabel(r)}</td>
                   <td>{r.skills.length ? r.skills.map(s => <span key={s} className="tag" style={{ marginRight: 4 }}>{s}</span>) : <span style={dim}>-</span>}</td>
                   <td>
                     <span className={STATUS_CLASS[r.status]}>{STATUS_LABEL[r.status]}</span>
@@ -169,7 +180,7 @@ function RosterTab({ rows, onBlock }: { rows: RosterRow[]; onBlock: (name: strin
                         : r.last_task ? `Last: ${r.last_task.title}, ${when(r.last_task.at)}` : '-'}
                   </td>
                   <td>
-                    {!r.is_mine && r.status !== 'blocked_by_you' && (
+                    {!r.is_mine && r.status !== 'blocked_by_you' && r.runs_as !== 'app-coder' && (
                       <button className="btn btn-xs" onClick={() => onBlock(r.name)} title="Refuse every request from this agent to your agents, silently">Block</button>
                     )}
                   </td>
@@ -191,6 +202,7 @@ const label72 = { fontSize: '.72rem', fontWeight: 600, color: 'var(--yellow-text
 function askLine(e: LogEntry): string {
   const q = e.input_required!
   const what = q.action || q.scope ? ` (${q.action ?? 'unnamed action'}${q.scope ? ` on ${q.scope}` : ''})` : ''
+  if (q.ask === 'declared' && e.app_coder) return `${e.from_agent} (${e.from_owner}) asks ${e.to_agent} for something that always needs your approval${what}. Approving starts a coder session on ${e.app_coder.app}, billed to you.`
   if (q.ask === 'declared') return `${e.from_agent} (${e.from_owner}) asks your agent ${e.to_agent} to do something that needs your approval first${what}.`
   if (q.ask === 'my_owner') return `Your agent ${q.asked_by} asks you before working on "${e.title}"${what}.`
   return `${q.asked_by} (${e.to_owner}) asks you to approve a plan for the task your agent sent${what}.`
@@ -258,6 +270,11 @@ function LogTab({ entries, onDecide, onDecideTask }: {
               {firstContact && (
                 <div style={{ ...dim, fontSize: '.8rem', marginTop: 2 }}>
                   Agents of different people need your approval the first time. Until you decide, your agents do not see this task.
+                </div>
+              )}
+              {firstContact && e.app_coder && (
+                <div style={{ fontSize: '.8rem', marginTop: 4, color: 'var(--yellow-text)' }}>
+                  Allowing starts a coder session on {e.app_coder.app} with this request as its instruction, billed to you (your Claude subscription, or the app's or platform's key if you have none). Nothing is released until you release it from the coder panel. Allow applies to {e.app_coder.app}'s coder only; Allow once to this task only.
                 </div>
               )}
               {q?.question ? (
@@ -372,10 +389,20 @@ function AgentsTab({ mine, tokens, onChanged, setError }: { mine: RosterRow[]; t
               <tbody>
                 {mine.map(a => {
                   const t = tokenOf(a.name)
+                  if (a.runs_as === 'app-coder') {
+                    return (
+                      <tr key={a.name}>
+                        <td style={agentCell}>{a.name}</td>
+                        <td style={dim}>{runsAsLabel(a)}</td>
+                        <td style={dim}>{when(a.last_seen_at)}</td>
+                        <td style={dim} colSpan={2}>Run by AppCrane: tasks to it start {a.app}'s coder session, billed to you. It goes away with the app.</td>
+                      </tr>
+                    )
+                  }
                   return (
                     <tr key={a.name}>
                       <td style={agentCell}>{a.name}</td>
-                      <td style={dim}>{a.runs_as === 'mcp' ? 'Local agent · MCP' : 'Hosted'}</td>
+                      <td style={dim}>{runsAsLabel(a)}</td>
                       <td style={dim}>{when(a.last_seen_at)}</td>
                       <td style={dim}>
                         {t
@@ -539,7 +566,7 @@ function RulesTab({ rules, agents, blocks, refused, onUnblock, onAllow, onRevoke
           <tbody>
             {refused.map(r => (
               <tr key={r.connection_id}>
-                <td style={agentCell}>{r.agent}</td>
+                <td style={agentCell}>{r.agent}{r.for_app_coder && <span style={dim}> (for {r.for_app_coder} only)</span>}</td>
                 <td>{r.owner}</td>
                 <td style={dim}>{when(r.decided_at)}</td>
                 <td><button className="btn btn-xs" onClick={() => onAllow(r.connection_id)}>Allow</button></td>
