@@ -1122,6 +1122,7 @@ app.use('/api/mcp', mcpRoutes);          // Model Context Protocol endpoint (JSO
 // (v2.38.0). Before that, this accidental ordering WAS its protection, and
 // moving it would have made every setting world-readable.
 app.use('/api/settings', (await import('./routes/jobHealth.js')).default); // /api/settings/job-health (platform admin)
+app.use('/api/settings', (await import('./routes/hostHardening.js')).default); // /api/settings/host-hardening: Host limits (platform admin)
 app.use('/api/settings/client-errors', clientErrorsAdminRoutes); // aggregated browser errors (platform admin)
 app.use('/api/settings', (await import('./routes/restoreDrills.js')).default); // /api/settings/restore-drills (platform admin)
 app.use('/api/evidence-packs', (await import('./routes/evidencePack.js')).default); // compliance evidence packs (platform admin)

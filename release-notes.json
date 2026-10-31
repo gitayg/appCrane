@@ -1,4 +1,7 @@
 {
+  "2.127.0": [
+    "Platform admins can now check and apply the server's log limits from Settings > Job Health > Host limits: the journal cap, syslog rotation, Docker log defaults, automatic security updates and the 1 GB disk reserve each show as applied or missing, and Apply runs the hardening script after a two-factor code. When AppCrane does not run as root, the installer sets up a narrow sudo rule for a root-owned copy of the script; without it, the card shows the command to run on the server."
+  ],
   "2.126.0": [
     "A server that runs low on disk no longer stays down quietly. New installs cap the system logs, keep a 1 GB emergency reserve and turn on automatic security updates (the README shows how to apply this to an existing server). AppCrane refuses to start a deploy or update when less than 5 GB is free, keeps its own backups and deploy logs small, and checks the server every day for pending security updates, e-mailing platform admins when something new shows up.",
     "An app whose container disappeared (for example after a reboot or a full disk) is brought back automatically from its live release within 10 minutes, and its owners get one e-mail. Before, one failed attempt could leave it down until someone redeployed by hand. Scheduled jobs for an app that is down are paused instead of failing every few minutes, with one e-mail.",

@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'fs';
 import { execFileSync } from 'child_process';
+import { createHash } from 'crypto';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -252,4 +253,90 @@ test('caddy log dir: skipped with a warning when the caddy user does not exist',
   assert.equal(r.runs[0].exit, 0, r.runs[0].log);
   assert.equal(r.runs[0].caddyDir, 'missing');
   assert.match(r.runs[0].log, /user 'caddy' does not exist/);
+});
+
+// ---- Apply from Settings > Job Health > Host limits on a non-root AppCrane ----
+// install-host-hardening.sh installs a root-owned copy with the repo path baked
+// in (sudo's env_reset strips the environment) and a sudoers rule for exactly
+// that file with no arguments. The repo copy is never sudoable: self-update
+// rewrites it as the run user.
+
+const INSTALL = join(ROOT, 'scripts', 'install-host-hardening.sh');
+const DEST = '/usr/local/lib/appcrane/host-hardening.sh';
+
+test('install.sh installs the sudo copy after running the script, passing the run user, without aborting on failure', () => {
+  execFileSync('bash', ['-n', INSTALL]);
+  const harden = install.search(/^bash "\$REPO_DIR\/scripts\/host-hardening\.sh"/m);
+  const call = install.search(/^bash "\$REPO_DIR\/scripts\/install-host-hardening\.sh" "\$RUN_USER"/m);
+  assert.ok(call > harden && harden > 0, 'install.sh must call install-host-hardening.sh "$RUN_USER" after the script');
+  assert.match(install.slice(call, call + 300), /\|\| warn /);
+});
+
+const SUDO_TAG = 'appcrane-test-host-hardening-sudo:24.04';
+let sudoImage = null;
+if (images['24.04']) {
+  try {
+    execFileSync('docker', ['build', '-q', '-t', SUDO_TAG, '-'], {
+      input: `FROM ${images['24.04']}\nRUN apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq sudo >/dev/null && rm -rf /var/lib/apt/lists/*\nRUN useradd -m app\n`,
+      stdio: ['pipe', 'pipe', 'pipe'], timeout: 600000,
+    });
+    sudoImage = SUDO_TAG;
+  } catch (_) { /* the tests below skip */ }
+}
+const skipSudo = sudoImage ? false : 'docker (or the package mirror) unavailable';
+
+function installRun(runUser, after = '') {
+  const body = [
+    'mkdir -p /opt/appcrane/scripts /mnt/data',
+    'cp /src/host-hardening.sh /src/install-host-hardening.sh /opt/appcrane/scripts/',
+    'chown -R app:app /opt/appcrane',
+    'printf "DATA_DIR=/mnt/data\\n" > /opt/appcrane/.env',
+    `echo "@@INSTALL"; bash /opt/appcrane/scripts/install-host-hardening.sh ${runUser} 2>&1; echo "@@EXIT $?"`,
+    `echo "@@DIR"; stat -c '%U:%G %a' /usr/local/lib/appcrane`,
+    `echo "@@FILE"; stat -c '%U:%G %a' ${DEST} 2>&1`,
+    `echo "@@SHA"; sha256sum ${DEST} | cut -d' ' -f1`,
+    `echo "@@REPOLINE"; grep '^REPO_DIR=' ${DEST}`,
+    'echo "@@SUDOERS"; cat /etc/sudoers.d/appcrane-host-hardening 2>/dev/null || echo "@@MISSING"',
+    'echo "@@SUDOERSMODE"; stat -c \'%U:%G %a\' /etc/sudoers.d/appcrane-host-hardening 2>&1',
+    'echo "@@VISUDO"; visudo -c >/dev/null 2>&1; echo "rc=$?"',
+    after,
+    'echo "@@END"',
+  ].join('\n');
+  return execFileSync('docker', ['run', '--rm', '--tmpfs', '/mnt/data:size=64m',
+    '-v', `${SCRIPT}:/src/host-hardening.sh:ro`, '-v', `${INSTALL}:/src/install-host-hardening.sh:ro`,
+    sudoImage, 'bash', '-c', body], { encoding: 'utf8', timeout: 120000, stdio: ['ignore', 'pipe', 'pipe'] });
+}
+
+test('install-host-hardening: root-owned copy with REPO_DIR baked, sudoers rule with "" that permits only the bare copy', { skip: skipSudo }, async () => {
+  const H = await import('../server/services/hostHardening.js');
+  const out = installRun('app', [
+    `echo "@@L"; su app -c "sudo -n -l ${DEST}" 2>&1; echo "rc=$?"`,
+    `echo "@@LARG"; su app -c "sudo -n -l ${DEST} x" 2>&1; echo "rc=$?"`,
+    `echo "@@RUN"; su app -c "sudo -n ${DEST}" 2>&1; echo "rc=$?"`,
+    `echo "@@RUNARG"; su app -c "sudo -n ${DEST} x" 2>&1; echo "rc=$?"`,
+    'echo "@@REPOSUDO"; su app -c "sudo -n bash /opt/appcrane/scripts/host-hardening.sh" 2>&1; echo "rc=$?"',
+  ].join('\n'));
+  const sec = (n) => section(out, n);
+  assert.match(out, /^@@EXIT 0$/m, out);
+  assert.equal(sec('DIR').trim(), 'root:root 755');
+  assert.equal(sec('FILE').trim(), 'root:root 755');
+  assert.equal(sec('REPOLINE').trim(), "REPO_DIR='/opt/appcrane'");
+  assert.equal(sec('SHA').trim(), createHash('sha256').update(H.expectedInstalledCopy(src, '/opt/appcrane')).digest('hex'),
+    'the server compares against exactly what the install step writes');
+  assert.match(sec('SUDOERS'), /^app ALL=\(root\) NOPASSWD: \/usr\/local\/lib\/appcrane\/host-hardening\.sh ""$/m);
+  assert.equal(sec('SUDOERSMODE').trim(), 'root:root 440');
+  assert.equal(sec('VISUDO').trim(), 'rc=0');
+  assert.match(sec('L'), /rc=0$/m, 'sudo -n -l <copy> exits 0 when permitted');
+  assert.match(sec('LARG'), /rc=1$/m, 'with an argument it is not permitted');
+  assert.match(sec('RUN'), /rc=0$/m, sec('RUN'));
+  assert.match(sec('RUN'), /on \/mnt\/data|\/mnt\/data\/appcrane-disk-reserve/, 'the copy found DATA_DIR through the baked repo path');
+  assert.match(sec('RUNARG'), /rc=1$/m);
+  assert.match(sec('REPOSUDO'), /rc=1$/m, 'the repo copy must not be sudoable');
+});
+
+test('install-host-hardening: a root run user gets the copy but no sudoers rule', { skip: skipSudo }, () => {
+  const out = installRun('root');
+  assert.match(out, /^@@EXIT 0$/m, out);
+  assert.equal(section(out, 'FILE').trim(), 'root:root 755');
+  assert.match(out, /^@@SUDOERS\n@@MISSING$/m, out);
 });

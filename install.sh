@@ -325,6 +325,10 @@ fi
 log "Hardening host logs and disk headroom"
 bash "$REPO_DIR/scripts/host-hardening.sh" \
   || warn "scripts/host-hardening.sh failed — re-run it: sudo bash $REPO_DIR/scripts/host-hardening.sh"
+# A root-owned copy plus a sudoers rule, so a non-root AppCrane can re-apply it
+# from Settings > Job Health > Host limits without sudoing the repo copy.
+bash "$REPO_DIR/scripts/install-host-hardening.sh" "$RUN_USER" \
+  || warn "scripts/install-host-hardening.sh failed — Host limits can only be applied by hand: sudo bash $REPO_DIR/scripts/install-host-hardening.sh"
 
 # Bring Docker up robustly. dockerd runs with -H fd:// and gets its listener from
 # docker.socket, so the socket must come up FIRST — starting docker.service alone

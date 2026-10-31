@@ -81,7 +81,7 @@ async function securityUpdates(d) {
   return { source: 'apt', packages: parseAptSimulate(sim.stdout).packages, unavailable: 0, notes };
 }
 
-async function unattended(d) {
+export async function unattended(d) {
   const st = await d.exec('dpkg-query', ['-W', '-f=${Status}', 'unattended-upgrades']);
   const cfg = await d.exec('apt-config', ['dump', 'APT::Periodic']);
   const periodic = parseAptPeriodic(cfg.stdout);

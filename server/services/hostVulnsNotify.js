@@ -89,7 +89,7 @@ function lines(r, fresh) {
     : 'No reboot required');
   status.push(r.unattended.enabled
     ? 'Unattended security upgrades: on'
-    : `Unattended security upgrades: OFF (${r.unattended.installed ? 'installed but not enabled in APT::Periodic' : 'package not installed'}); scripts/host-hardening.sh turns it on`);
+    : `Unattended security upgrades: OFF (${r.unattended.installed ? 'installed but not enabled in APT::Periodic' : 'package not installed'}); Settings > Job Health > Host limits (or scripts/host-hardening.sh) turns it on`);
   status.push(`Package lists last refreshed: ${ago(r.cache.ageHours)}${r.cache.stale ? ' (stale: the apt-daily timer may not be running, so this list can be incomplete)' : ''}`);
   if (r.unavailable) status.push(`${r.unavailable} further update(s) need an Ubuntu Pro (ESM) subscription`);
   status.push(`Source: ${r.source === 'pro' ? 'pro security-status' : 'apt-get -s dist-upgrade (-security pocket)'}`);
