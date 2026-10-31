@@ -70,3 +70,9 @@ test('a word spelled wholly in look-alike letters is read as the word', async ()
   assert.equal(alwaysAskReason({ texts: ['гм -rf the folder'] }), 'deletion', 'Cyrillic гм reads as rm');
   assert.equal(alwaysAskReason({ texts: ['שלום עולם, תקן את הכותרת'] }), null, 'ordinary Hebrew text does not ask');
 });
+
+test('a look-alike word with a letter the table does not map still asks', async () => {
+  const { alwaysAskReason } = await import('../server/services/crewRules.js');
+  assert.ok(alwaysAskReason({ texts: ['\u0440\u0433\u043E\u0501\u0438\u056A\u0442\u0456\u043E\u043F please'] }), 'no A-Z letter at all: folds to produ?tion');
+  assert.equal(alwaysAskReason({ texts: ['שלום עולם, תקן את הכותרת'] }), null);
+});

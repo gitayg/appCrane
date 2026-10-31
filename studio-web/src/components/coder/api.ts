@@ -156,6 +156,20 @@ export interface CoderAvailability {
   gaps: CoderGap[]
 }
 
+/** One of this app's requests as the coder panel lists it (GET /:slug/requests). */
+export interface CoderRequest {
+  id:               number
+  user_name:        string | null
+  /** The first 400 characters of the request; `truncated` says whether there is more. */
+  excerpt:          string
+  truncated:        boolean
+  created_at:       string
+  status:           string | null
+  bucket:           'triage' | 'in_progress' | 'shipped' | 'validated'
+  kind:             'request' | 'vulnerability'
+  coder_session_id: string | null
+}
+
 const enc = encodeURIComponent
 const base = (slug: string) => `/api/coder/${enc(slug)}`
 
@@ -174,10 +188,16 @@ export const coderApi = {
    * turn is running), else a new one. Refuses whole: NOT_FOUND (an id that is
    * not this app's), REQUEST_CLOSED, CODER_UNAVAILABLE, BUILDER_OCCUPIED,
    * TOO_MANY_REQUESTS (more than 10).
+   * With `sessionId`, exactly that session (the caller's, idle): a turn in
+   * flight is CODER_BUSY, a stopped container SESSION_PAUSED.
    */
-  dispatchRequests: (slug: string, requestIds: number[]) =>
+  dispatchRequests: (slug: string, requestIds: number[], sessionId?: string) =>
     adminApi.post<{ session_id: string; request_ids: number[]; queued: boolean }>(
-      `${base(slug)}/requests/dispatch`, { request_ids: requestIds }),
+      `${base(slug)}/requests/dispatch`, { request_ids: requestIds, ...(sessionId ? { session_id: sessionId } : {}) }),
+
+  /** This app's requests, newest first; open ones only unless includeClosed. */
+  requests: (slug: string, includeClosed = false) =>
+    adminApi.get<{ requests: CoderRequest[] }>(`${base(slug)}/requests${includeClosed ? '?include_closed=1' : ''}`),
 
   /** Latest session for this app, or null. */
   latestSession: (slug: string) =>
@@ -203,11 +223,14 @@ export const coderApi = {
    * VALIDATION, because the value reaches a shell command in the container.
    * When a turn is already running the route QUEUES this as a follow-up and
    * answers `{ queued: true, followup }` rather than refusing.
+   * `requestIds` are this app's open requests the message names (#id); the
+   * server appends their text fenced after the message, never as the user's.
    */
-  dispatch: (slug: string, id: string, prompt: string, model?: string, mode?: string, attachments?: string[]) =>
-    adminApi.post<{ message: string; queued?: boolean; followup?: CoderFollowup }>(
+  dispatch: (slug: string, id: string, prompt: string, model?: string, mode?: string, attachments?: string[], requestIds?: number[]) =>
+    adminApi.post<{ message: string; queued?: boolean; followup?: CoderFollowup; request_ids?: number[] }>(
       `${base(slug)}/session/${enc(id)}/dispatch`,
-      { prompt, ...(model ? { model } : {}), ...(mode ? { mode } : {}), ...(attachments?.length ? { attachments } : {}) }),
+      { prompt, ...(model ? { model } : {}), ...(mode ? { mode } : {}), ...(attachments?.length ? { attachments } : {}),
+        ...(requestIds?.length ? { request_ids: requestIds } : {}) }),
 
   /** Upload one file for the next message; `data` is base64 without the data: prefix. */
   uploadAttachment: (slug: string, id: string, name: string, data: string) =>

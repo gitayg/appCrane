@@ -124,7 +124,9 @@ export function alwaysAskReason({ action, scope, texts = [] }) {
     if (fs.some((f) => DELETE_WORDS.test(f))) return 'deletion';
   }
   for (const v of [scope, action, ...texts]) {
-    if (v && mixedScript(String(v).normalize('NFKD').replace(IGNORABLE, ''))) return 'mixed-script';
+    // On the folded forms too: a letter the table leaves unmapped next to ones
+    // it folds to A-Z ("ргоԁжuction") is a look-alike word all the same.
+    if (v && forms(v).some(mixedScript)) return 'mixed-script';
   }
   return null;
 }

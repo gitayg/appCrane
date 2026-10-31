@@ -75,6 +75,7 @@ const REFUSED_ROUTES = [
   ['POST', '/api/coder/own/session/s-own/release', { paths: ['a.js'] }],
   ['POST', '/api/coder/own/session'],
   ['POST', '/api/coder/own/requests/dispatch', { request_ids: [Number(REQ)] }],
+  ['GET', '/api/coder/own/requests'],
   ['GET', '/api/coder/own/session/s-own/followups'],
   ['POST', '/api/coder/own/session/s-own/stop'],
   ['POST', '/api/coder/own/session/s-own/resume'],

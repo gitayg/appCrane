@@ -32,8 +32,8 @@ import { usesLocalRepo, pushFilesToManagedRepo } from '../services/managedRepo.j
 import { getQueueState } from '../services/builder/appQueue.js';
 import { fetchReleasesAndChangelog, renderReleasesPage } from '../services/github/releases.js';
 import { isAppOwnerOrPlatformAdmin } from '../services/permissions.js';
-import { bucketize, applyBucket } from '../services/requestStatus.js';
-import { buildRequestsPrompt, MAX_DISPATCH_REQUESTS } from '../services/builder/requestsPrompt.js';
+import { buildRequestsPrompt, buildReferencedRequests } from '../services/builder/requestsPrompt.js';
+import { listCoderRequests, loadOpenRequests, markSentToCoder } from '../services/builder/coderRequests.js';
 import log from '../utils/logger.js';
 
 const router = Router();
@@ -340,15 +340,31 @@ router.post('/:slug/session', auditMiddleware('coder.start'), async (req, res) =
   }
 });
 
+// ── GET /api/coder/:slug/requests — this app's requests, for the coder panel ──
+//
+// Newest first, open ones only unless ?include_closed=1. Behind the owner gate
+// above, like every coder route: the panel offers these to send to the coder,
+// which is the owner's or a platform admin's call.
+router.get('/:slug/requests', (req, res) => {
+  const app = getApp(req.params.slug, req.user);
+  if (!isAppOwnerOrPlatformAdmin(req.user, app)) throw new AppError(OWNER_ONLY_MESSAGE, 403, 'FORBIDDEN');
+  const includeClosed = req.query.include_closed === '1' || req.query.include_closed === 'true';
+  res.json({ requests: listCoderRequests(getDb(), app.slug, { includeClosed }) });
+});
+
 // ── POST /api/coder/:slug/requests/dispatch — send requests to the coder ──
 //
-// Body: { request_ids: [id, ...] }, all of them this app's open requests, in
-// the order they should be worked. They become ONE prompt in ONE session —
-// the caller's own live session if they have one (createSession returns it, so
-// the batch lands where they are already reviewing work; a turn in flight
-// queues it as a follow-up), else a new one. The owner of the app or a platform
-// admin only: dispatching spends the caller's Claude credential on work other
-// people asked for, which is a triage decision, not a member's.
+// Body: { request_ids: [id, ...], session_id? }, all of them this app's open
+// requests, in the order they should be worked. They become ONE prompt in ONE
+// session. Without session_id: the caller's own live session if they have one
+// (createSession returns it, so the batch lands where they are already
+// reviewing work; a turn in flight queues it as a follow-up), else a new one.
+// With session_id (the coder panel's "Send to coder"): exactly that session,
+// which must be the caller's and idle — a turn in flight is CODER_BUSY rather
+// than a queued follow-up, so the panel never sends into a turn the user is
+// watching. The owner of the app or a platform admin only: dispatching spends
+// the caller's Claude credential on work other people asked for, which is a
+// triage decision, not a member's.
 //
 // Refused whole, before anything changes: an id that is unknown or another
 // app's (one answer for both, so the refusal does not confirm which ids exist
@@ -361,36 +377,25 @@ router.post('/:slug/requests/dispatch', async (req, res) => {
   }
 
   const ids = req.body?.request_ids;
-  if (!Array.isArray(ids) || ids.length === 0 || ids.some((id) => !Number.isInteger(id) || id <= 0)) {
-    throw new AppError('request_ids must be a non-empty array of request ids', 400, 'VALIDATION');
-  }
-  if (new Set(ids).size !== ids.length) throw new AppError('request_ids lists a request twice', 400, 'VALIDATION');
-  if (ids.length > MAX_DISPATCH_REQUESTS) {
-    throw new AppError(
-      `At most ${MAX_DISPATCH_REQUESTS} requests go to the coder at once: they run as one turn and are reviewed and released together. Send the rest in another batch.`,
-      400,
-      'TOO_MANY_REQUESTS',
-    );
-  }
-
   const db = getDb();
-  const found = db.prepare(
-    `SELECT id, user_name, message, created_at, status, validated_at FROM enhancement_requests
-     WHERE app_slug = ? AND id IN (${ids.map(() => '?').join(', ')})`,
-  ).all(app.slug, ...ids);
-  if (found.length !== ids.length) {
-    throw new AppError(`One or more of these requests is not a request on '${app.slug}'. Nothing was sent.`, 404, 'NOT_FOUND');
-  }
-  const byId = new Map(found.map((r) => [r.id, r]));
-  const rows = ids.map((id) => byId.get(id));
+  const rows = loadOpenRequests(db, app.slug, ids);
 
-  const closed = rows.filter((r) => !['triage', 'in_progress'].includes(bucketize(r.status, r.validated_at)));
-  if (closed.length) {
-    throw new AppError(
-      `Already shipped or validated: ${closed.map((r) => `#${r.id}`).join(', ')}. Nothing was sent.`,
-      409,
-      'REQUEST_CLOSED',
-    );
+  const targetId = req.body?.session_id;
+  if (targetId !== undefined && targetId !== null && typeof targetId !== 'string') {
+    throw new AppError('session_id must be a session id', 400, 'VALIDATION');
+  }
+  if (targetId) {
+    const target = getSession(targetId, app.slug);
+    assertSessionOwner(target, req.user);
+    if (target.status === 'paused') {
+      throw new AppError('This session is paused (its container was stopped). Resume it, then send the requests.', 409, 'SESSION_PAUSED');
+    }
+    if (['active', 'queued', 'starting'].includes(target.status)) {
+      throw new AppError('The coder is in the middle of a turn. Send the requests once it finishes. Nothing was sent.', 409, 'CODER_BUSY');
+    }
+    if (target.status !== 'idle') {
+      throw new AppError(`Session is '${target.status}', must be idle to send requests`, 400, 'WRONG_STATUS');
+    }
   }
 
   const gaps = coderGaps(app, req.user);
@@ -403,7 +408,7 @@ router.post('/:slug/requests/dispatch', async (req, res) => {
   let sessionId;
   let r;
   try {
-    sessionId = await createSession(app, req.user.id, (msg) => log.info(`[builder:${app.slug}] ${msg}`));
+    sessionId = targetId || await createSession(app, req.user.id, (msg) => log.info(`[builder:${app.slug}] ${msg}`));
     r = await dispatch(sessionId, buildRequestsPrompt(rows), { userId: req.user.id });
   } catch (err) {
     if (err.code === 'BUILDER_OCCUPIED') throw new AppError(err.message, 409, 'BUILDER_OCCUPIED');
@@ -412,13 +417,7 @@ router.post('/:slug/requests/dispatch', async (req, res) => {
   }
 
   // Only once the prompt is in: a refusal above leaves every request as it was.
-  const stamp = db.prepare('UPDATE enhancement_requests SET coder_session_id = ? WHERE id = ?');
-  db.transaction(() => {
-    for (const row of rows) {
-      if (bucketize(row.status, row.validated_at) !== 'in_progress') applyBucket(db, row.id, 'in_progress', req.user.id);
-      stamp.run(sessionId, row.id);
-    }
-  })();
+  markSentToCoder(db, rows, sessionId, req.user.id);
   logAudit(req.user.id, app.id, 'coder.dispatch-requests', { session: sessionId, request_ids: ids, queued: !!r?.queued });
 
   res.json({ session_id: sessionId, request_ids: ids, queued: !!r?.queued });
@@ -502,8 +501,12 @@ router.post('/:slug/session/:id/dispatch', async (req, res) => {
     throw new AppError(`Session is '${session.status}', must be idle to dispatch`, 400, 'WRONG_STATUS');
   }
 
-  const { prompt, model, mode, attachments: attachmentIds } = req.body || {};
+  const { prompt, model, mode, attachments: attachmentIds, request_ids: refIds } = req.body || {};
   if (!prompt?.trim()) throw new AppError('prompt is required', 400, 'VALIDATION');
+  // Requests the user named (#id) in the message: this app's open requests,
+  // appended fenced after the user's own words (never pasted in as their text).
+  const refRows = refIds === undefined || refIds === null || (Array.isArray(refIds) && refIds.length === 0)
+    ? [] : loadOpenRequests(getDb(), req.params.slug, refIds);
 
   // SECURITY — the whole reason this field is dangerous: `model` ends up in a
   // shell string built for `sh -c` inside the app container (runAgent.js
@@ -525,20 +528,25 @@ router.post('/:slug/session/:id/dispatch', async (req, res) => {
 
   const attachments = asAppError(() => resolveAttachments(req.params.slug, req.params.id, attachmentIds));
 
+  const fullPrompt = refRows.length ? `${prompt.trim()}\n\n${buildReferencedRequests(refRows)}` : prompt.trim();
+  const requestIds = refRows.map((row) => row.id);
+
   let r;
   try {
-    r = await dispatch(req.params.id, prompt.trim(), { model, mode, userId: req.user.id, attachments });
+    r = await dispatch(req.params.id, fullPrompt, { model, mode, userId: req.user.id, attachments });
     // Length only: the prompt is the user's own text and can contain anything.
     logAudit(req.user.id, dispatchAppId, 'coder-dispatch',
-      { session: req.params.id, mode: mode || null, model: model || null, prompt_chars: prompt.trim().length, attachments: (attachments || []).length });
+      { session: req.params.id, mode: mode || null, model: model || null, prompt_chars: prompt.trim().length, attachments: (attachments || []).length,
+        ...(requestIds.length ? { request_ids: requestIds } : {}) });
   } catch (err) {
     if (err.code === 'SESSION_PAUSED') throw new AppError(err.message, 409, 'SESSION_PAUSED');
     throw err;
   }
+  if (refRows.length) markSentToCoder(getDb(), refRows, req.params.id, req.user.id);
   if (r?.queued) {
-    return res.json({ message: 'Queued as a follow-up', queued: true, followup: r.followup });
+    return res.json({ message: 'Queued as a follow-up', queued: true, followup: r.followup, request_ids: requestIds });
   }
-  res.json({ message: 'Dispatch started', queued: false });
+  res.json({ message: 'Dispatch started', queued: false, request_ids: requestIds });
 });
 
 // ── follow-up queue (typed-ahead messages for THIS session) ──────────────

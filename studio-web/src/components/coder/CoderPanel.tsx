@@ -6,6 +6,8 @@ import { CoderChanges } from './CoderChanges'
 import { CoderRefusal } from './CoderRefusal'
 import { CoderUnavailable } from './CoderUnavailable'
 import { CoderPinNote, type PinKind } from './CoderPinNote'
+import { CoderRequests } from './CoderRequests'
+import { referencedRequestIds, useCoderRequests } from './useCoderRequests'
 import { isLiveStatus, type CoderAvailability } from './api'
 import { fileToDataUrl, useCoderSession, type Entry } from './useCoderSession'
 
@@ -80,6 +82,11 @@ export function CoderPanel(props: Props) {
   const [fileNote, setFileNote] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [refreshKey, setRefreshKey] = useState(0)
+  // The app's requests, beside the chat: shown on demand, loaded while the
+  // panel is open so a "#123" typed by hand is recognised too.
+  const [showRequests, setShowRequests] = useState(false)
+  const reqs = useCoderRequests(slug, open && usable)
+  const refIds = referencedRequestIds(draft, reqs.openIds)
   const scrollRef = useRef<HTMLDivElement>(null)
   const wasStreaming = useRef(false)
 
@@ -116,11 +123,33 @@ export function CoderPanel(props: Props) {
   const send = () => {
     const text = draft.trim()
     if (!text || !canSend) return
-    void s.send(text, undefined, files)
+    const refs = referencedRequestIds(text, reqs.openIds)
+    void s.send(text, undefined, files, refs).then(() => { if (refs.length) reqs.reload() })
     setDraft('')
     setFiles([])
     setFileNote(null)
   }
+  // Why the drawer's "Send to coder" is off. Unlike a typed message, picked
+  // requests are not queued behind a running turn: they go into the session
+  // on screen when it is idle (the server refuses CODER_BUSY otherwise), or
+  // start a session when there is none.
+  const requestsBlocked: string | null =
+    s.phase === 'loading' ? 'Looking for your session…'
+    : s.phase === 'failed' ? 'The coder could not be reached. Close and reopen the panel to try again.'
+    : s.starting ? 'Starting a session…'
+    : otherUser ? `This session is ${s.session?.user_name || 'another user'}'s. Start your own session to send requests to the coder.`
+    : pinKind === 'ended' ? 'This session has ended. Go back to your current session to send requests.'
+    : s.resumingSince ? 'The session is resuming. Send once it is back.'
+    : s.status === 'paused' ? 'This session is paused. Resume it, then send.'
+    : s.streaming ? 'The coder is in the middle of a turn. Send these once it finishes, or stop it.'
+    : s.sessionId && s.status !== 'idle' ? `The session is ${s.status}; requests can be sent once it is idle.`
+    : null
+  const mention = (id: number) => {
+    setDraft(d => `${d}${d && !/\s$/.test(d) ? ' ' : ''}#${id} `)
+    keep.claim()
+    taRef.current?.focus()
+  }
+
   // Checked here as well as on the server so the reason shows before sending.
   const addFiles = (incoming: File[]) => {
     if (!incoming.length) return
@@ -141,6 +170,15 @@ export function CoderPanel(props: Props) {
         <span className="coder-title">Coder</span>
         <span className="coder-app">{appName}</span>
         <span className="coder-head-right">
+          {usable && (
+            <button
+              type="button"
+              className={'coder-btn coder-btn-xs' + (showRequests ? ' active' : '')}
+              aria-pressed={showRequests}
+              title="This app's requests: send them to the coder, or mention one in your message"
+              onClick={() => { setShowRequests(v => !v); setTab('chat') }}
+            >Requests{reqs.openIds.size ? ` · ${reqs.openIds.size}` : ''}</button>
+          )}
           {availability && !usable ? (
             <span className="coder-pill coder-pill-unavailable">unavailable</span>
           ) : (
@@ -187,6 +225,20 @@ export function CoderPanel(props: Props) {
         </div>
       ) : (
         <>
+          {showRequests && (
+            <CoderRequests
+              requests={reqs.requests}
+              loadError={reqs.error}
+              showClosed={reqs.showClosed}
+              onShowClosed={reqs.setShowClosed}
+              blockedReason={requestsBlocked}
+              startsSession={!s.sessionId}
+              sessionId={s.sessionId}
+              onSend={s.sendRequests}
+              onMention={mention}
+              onSent={reqs.reload}
+            />
+          )}
           <div className="coder-body" ref={scrollRef}>
             {pinKind && pinKind !== 'other_user' && <CoderPinNote kind={pinKind} onUnpin={s.unpin} />}
             {otherUser && isLiveStatus(s.status) && (
@@ -290,6 +342,12 @@ export function CoderPanel(props: Props) {
                 </div>
               )}
               {fileNote && <div className="coder-note">{fileNote}</div>}
+              {refIds.length > 0 && (
+                <div className="coder-note coder-refs" role="status">
+                  Goes with {refIds.map(i => `#${i}`).join(', ')}: the coder gets {refIds.length === 1 ? 'that request\'s' : 'those requests\''} text
+                  after your message, marked as request text.
+                </div>
+              )}
               <textarea
                 ref={taRef}
                 className="coder-textarea"

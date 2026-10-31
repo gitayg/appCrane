@@ -350,7 +350,7 @@ export function useCoderSession(slug: string, open: boolean, pinnedSessionId?: s
     }
   }, [slug, sessionId])
 
-  const send = useCallback(async (text: string, chosen?: string, files: File[] = []) => {
+  const send = useCallback(async (text: string, chosen?: string, files: File[] = [], requestIds: number[] = []) => {
     if (!sessionId || !text.trim() || resumingSince) return
     const wasStreaming = status === 'active' || status === 'queued'
     if (!wasStreaming) {
@@ -381,7 +381,7 @@ export function useCoderSession(slug: string, open: boolean, pinnedSessionId?: s
     // the session was paused or only learns it from the server's 409.
     const dispatchOnce = async () => {
       if (!wasStreaming) setStatus('active')
-      const r = await coderApi.dispatch(slug, sessionId, text, chosen || model || undefined, mode || undefined, attachmentIds)
+      const r = await coderApi.dispatch(slug, sessionId, text, chosen || model || undefined, mode || undefined, attachmentIds, requestIds)
       // The same row arrives TWICE: once as this response, once on the SSE
       // `followups` event the enqueue publishes. The SSE copy is the whole
       // list and usually wins the race, so a blind append renders the newest
@@ -416,6 +416,31 @@ export function useCoderSession(slug: string, open: boolean, pinnedSessionId?: s
     }
   }, [slug, sessionId, model, mode, status, resumingSince, resumeNow])
 
+  /**
+   * The panel's "Send to coder": the picked requests, fenced, as one turn.
+   * Into the session on screen when it is idle; with no live session, the
+   * same dispatch the Requests page uses, which starts one, and the panel
+   * switches to it. The caller keeps the button disabled mid-turn; the server
+   * refuses it too (CODER_BUSY), so a second viewer's turn cannot slip by.
+   * Throws the server's refusal for the caller to show.
+   */
+  const sendRequests = useCallback(async (ids: number[]): Promise<number[]> => {
+    if (sessionId && status !== 'idle') throw new Error('The coder is busy. Send these once it finishes.')
+    const r = await coderApi.dispatchRequests(slug, ids, sessionId || undefined)
+    if (!sessionId) {
+      setHistory([])
+      setLive([])
+      setSession(null)
+      setPinned(null)
+      setSessionId(r.session_id)
+      setPhase('ready')
+    } else {
+      setStatus('active')
+      setLive(p => [...p, { key: key(), kind: 'note', text: `Sent ${ids.map(i => `#${i}`).join(', ')} to the coder.` }])
+    }
+    return r.request_ids
+  }, [slug, sessionId, status])
+
   const cancelFollowup = useCallback(async (id: number) => {
     if (!sessionId) return
     try {
@@ -448,7 +473,7 @@ export function useCoderSession(slug: string, open: boolean, pinnedSessionId?: s
     modes, mode, setMode,
     deploys,
     followups, cancelFollowup,
-    start, send, stop, resume,
+    start, send, sendRequests, stop, resume,
     pinned, pinError, unpin,
   }
 }
