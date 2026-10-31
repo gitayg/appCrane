@@ -72,16 +72,20 @@ async function topContainers(measurement) {
   const top = [...measurement.containers].sort((a, b) => b.countedBytes - a.countedBytes).slice(0, TOP_N);
   const usage = await readUsage(top.map((c) => c.name));
   return top.map((c) => ({
-    label: c.label, name: c.name,
+    label: c.label, name: c.name, image: c.image || null, kind: c.kind, countedFrom: c.countedFrom,
     capMb: c.unlimited ? null : toMb(c.capBytes),
     usageMb: usage.has(c.name) ? toMb(usage.get(c.name)) : null,
   }));
 }
 
+// The image says what a container is when its name does not (Docker's random
+// names, or a container AppCrane did not start).
 function containerLine(c) {
   const cap = c.capMb == null ? 'no limit' : `cap ${c.capMb} MB`;
   const use = c.usageMb == null ? 'usage unknown' : `using ${c.usageMb} MB`;
-  return `${c.label}: ${cap}, ${use}`;
+  const image = c.image ? ` [image ${c.image}]` : '';
+  const counted = c.kind === 'other' ? ', not started by AppCrane, counted at its usage' : '';
+  return `${c.label}${image}: ${cap}, ${use}${counted}`;
 }
 
 export async function notifyMemoryAdmission({

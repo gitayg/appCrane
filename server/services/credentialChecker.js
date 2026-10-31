@@ -33,6 +33,14 @@ const CHECK_INTERVAL_MS = 15 * 60_000;
 const FIRST_CHECK_DELAY_MS = 60_000;      // let the app finish booting
 const RE_ALERT_MS = 24 * 60 * 60_000;     // renotify at most once/day while broken
 const STATE_KEY = 'credcheck_state';
+// A probe that got no answer at all (DNS, TCP, TLS, timeout, a 5xx from the
+// provider) says nothing about the credential. app.opswat.com mailed admins
+// "credential stopped working … expired, rotated or revoked" for a single
+// "fetch failed" on 30 Oct 2026. Such a failure alerts only once it has lasted
+// this many checks in a row (an hour at 15 min), and says it is unreachable.
+export const UNREACHABLE_ALERT_AFTER = 4;
+const UNREACHABLE = /fetch failed|ECONN|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH|socket hang up|timed? ?out|aborted|\b5\d\d\b/i;
+export const isUnreachable = (error) => UNREACHABLE.test(String(error || ''));
 let timer = null;
 
 // `fix` is the human breadcrumb (CredentialAlertBanner renders it, the health
@@ -119,6 +127,19 @@ function fixDirection(probe) {
 /** Subject + body for the "credential stopped working" alert. Exported for tests. */
 export function buildFailureAlert(probe, result, now) {
   const instance = instanceName();
+  if (isUnreachable(result.error)) {
+    return {
+      subject: `[AppCrane: ${instance}] ${probe.name} is UNREACHABLE`,
+      body:
+        `Instance: ${instance}\n\n` +
+        `This AppCrane could not reach ${probe.name} for its last ${UNREACHABLE_ALERT_AFTER} checks (about an hour).\n\n` +
+        `Checked: ${new Date(now).toISOString()}\n` +
+        `Error: ${result.error}\n\n` +
+        `The credential was not rejected: no answer came back at all. This is usually a network, DNS or firewall problem on this server, or an outage at the provider. Check that the server can reach it before changing the credential.\n` +
+        `${fixDirection(probe)}\n` +
+        `You'll get a recovery notice once it works again.\n`,
+    };
+  }
   return {
     subject: `[AppCrane: ${instance}] ${probe.name} credential is FAILING`,
     body:
@@ -192,6 +213,15 @@ async function runOnce(probes = PROBES) {
       // Not configured → nothing to check; forget any prior state.
       delete state[probe.name];
       continue;
+    }
+
+    if (!result.ok && prev.ok !== false && isUnreachable(result.error)) {
+      const unreachable = (prev.unreachable || 0) + 1;
+      if (unreachable < UNREACHABLE_ALERT_AFTER) {
+        state[probe.name] = { ok: true, unreachable };
+        log.warn(`[credcheck] ${probe.name} unreachable (${unreachable}/${UNREACHABLE_ALERT_AFTER}): ${result.error}`);
+        continue;
+      }
     }
 
     if (!result.ok) {

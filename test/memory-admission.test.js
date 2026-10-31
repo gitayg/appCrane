@@ -63,7 +63,7 @@ function host({ totalMb = 4096, containers = [], usage = {}, statsFail = false }
       ? { match: ['info', '--format', '{{.MemTotal}}'], stderr: 'Cannot connect to the Docker daemon', code: 1 }
       : { match: ['info', '--format', '{{.MemTotal}}'], stdout: `${totalMb * MiB}\n` },
     { match: ['ps', '-q'], stdout: ids.join('\n') + (ids.length ? '\n' : '') },
-    { match: ['inspect', adm.INSPECT_FORMAT], stdout: containers.map(c => `/${c.name}\t${c.mb * MiB}\t${JSON.stringify(c.labels || {})}`).join('\n') + '\n' },
+    { match: ['inspect', adm.INSPECT_FORMAT], stdout: containers.map(c => `/${c.name}\t${c.mb * MiB}\t${JSON.stringify(c.labels || {})}\t${c.image || ''}`).join('\n') + '\n' },
     statsFail
       ? { match: ['stats', '--no-stream'], stderr: 'stats broke', code: 1 }
       : { match: ['stats', '--no-stream'], stdout: Object.entries(usage).map(([n, mb]) => `${n}\t${mb}MiB / 3.8GiB`).join('\n') + '\n' },
@@ -152,6 +152,34 @@ test('a container with no limit counts at its current usage, or at the default w
   m = await adm.measureMemory({ fresh: true });
   assert.equal(m.containers[0].countedFrom, 'default');
   assert.equal(m.committedBytes, adm.DEFAULT_UNLIMITED_MB * MiB);
+});
+
+// apphub, 30 Oct 2026: 24 containers AppCrane did not start, each capped at the
+// whole server, made the mail say 333,717 MB were committed on a 14,131 MB box.
+test('a container AppCrane did not start counts at its usage, not its cap; AppCrane\'s own count at their cap', async () => {
+  host({
+    totalMb: 15701,
+    containers: [
+      { name: 'bold_clarke', mb: 14131, image: 'example/worker:1' },
+      { name: 'gracious_tu', mb: 14131, image: 'example/worker:1' },
+      { ...app('c', 'production'), mb: 512, image: 'appcrane-c:live' },
+    ],
+    usage: { bold_clarke: 277, gracious_tu: 275 },
+  });
+  const m = await adm.measureMemory({ fresh: true });
+  const foreign = m.containers.find(c => c.name === 'bold_clarke');
+  assert.equal(foreign.countedFrom, 'usage');
+  assert.equal(foreign.image, 'example/worker:1');
+  assert.equal(m.containers.find(c => c.name === 'appcrane-c-production').countedFrom, 'cap');
+  assert.equal(m.committedBytes, (277 + 275 + 512) * MiB);
+
+  db.prepare("DELETE FROM email_queue WHERE source = 'memory-admission'").run();
+  const v = adm.decide({ measurement: m, name: 'appcrane-d-sandbox', newBytes: 512 * MiB });
+  await notifyMemoryAdmission({ db, outcome: 'warned', message: 'warn', verdict: v, measurement: m, subject: 'd (sandbox)', what: 'deploy', slug: 'd', env: 'sandbox' });
+  const admin = mailRows().find(r => r.to_email === ADMIN.email);
+  assert.match(admin.body_text, /bold_clarke \[image example\/worker:1\]: cap 14131 MB, using 277 MB, not started by AppCrane, counted at its usage/);
+  assert.match(admin.body_text, /c \(production\) \[image appcrane-c:live\]: cap 512 MB/);
+  assert.match(admin.body_html, /image example\/worker:1/);
 });
 
 test('docker info failing falls back to this machine\'s RAM and says so', async () => {

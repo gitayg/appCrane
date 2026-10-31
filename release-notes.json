@@ -1,4 +1,8 @@
 {
+  "2.127.2": [
+    "The memory warning e-mail no longer counts containers AppCrane did not start at their full memory limit: they count at what they actually use, as containers with no limit already did, so one server stops reporting hundreds of gigabytes \"committed\". The e-mail now shows each container's image, so a container with a random name can be identified.",
+    "A short network outage no longer sends \"GitHub service account credential stopped working\". When the check gets no answer at all, admins hear about it only after an hour, as \"unreachable\", with advice to check the server's connection; a credential GitHub actually rejects is still reported at once."
+  ],
   "2.127.1": [
     "Security: the server hardening script now creates its 1 GB emergency reserve file only on a disk folder that belongs to root and that no one else can write to, and never through a link. Before, on a server where AppCrane runs without root, someone controlling the app could have pointed that file at a system file."
   ],

@@ -10,6 +10,10 @@
 //             daemon, AppCrane's or not, since all of them draw on the same RAM.
 //             A container with no limit (Memory=0) counts at its current usage
 //             (docker stats); when that cannot be read, at DEFAULT_UNLIMITED_MB.
+//             So does a container AppCrane did not start (no appcrane label):
+//             its limit is someone else's choice, often the whole host, and
+//             counting it at its cap made 24 unlabelled containers "commit"
+//             333,717 MB of a 14,131 MB server (apphub, 30 Oct 2026).
 //
 // A start is allowed when committed - replaced + new <= capacity, where
 // `replaced` is the cap of the running container of the same name (the version
@@ -41,7 +45,8 @@ export const REFUSED_CODE = 'INSUFFICIENT_MEMORY';
 const MiB = 1024 * 1024;
 const GiB = 1024 * MiB;
 const DOCKER_TIMEOUT_MS = 10_000;
-export const INSPECT_FORMAT = '{{.Name}}\t{{.HostConfig.Memory}}\t{{json .Config.Labels}}';
+// The image comes last: labels are JSON, whose strings never hold a raw tab.
+export const INSPECT_FORMAT = '{{.Name}}\t{{.HostConfig.Memory}}\t{{json .Config.Labels}}\t{{.Config.Image}}';
 
 let cached = null;
 const reservations = new Map();
@@ -110,8 +115,9 @@ export function parseInspect(out) {
     const mem = Number(parts[1]);
     if (!name || !Number.isFinite(mem) || mem < 0) continue;
     let labels = {};
-    try { labels = JSON.parse(parts.slice(2).join('\t')) || {}; } catch (_) { labels = {}; }
-    rows.push({ name, capBytes: mem, unlimited: mem === 0, ...describe(name, labels) });
+    try { labels = JSON.parse(parts[2]) || {}; } catch (_) { labels = {}; }
+    const image = (parts[3] || '').trim() || null;
+    rows.push({ name, image, capBytes: mem, unlimited: mem === 0, ...describe(name, labels) });
   }
   return rows;
 }
@@ -131,16 +137,16 @@ async function readContainers() {
   const ids = String(await docker(['ps', '-q', '--no-trunc'])).split('\n').map((s) => s.trim()).filter(Boolean);
   if (!ids.length) return [];
   const rows = parseInspect(await docker(['inspect', '--format', INSPECT_FORMAT, ...ids]));
-  const unlimited = rows.filter((r) => r.unlimited);
-  if (unlimited.length) {
-    const usage = await readUsage(unlimited.map((r) => r.name));
-    for (const r of unlimited) {
+  const byUsage = rows.filter((r) => r.unlimited || r.kind === 'other');
+  if (byUsage.length) {
+    const usage = await readUsage(byUsage.map((r) => r.name));
+    for (const r of byUsage) {
       const u = usage.get(r.name);
       r.countedBytes = u ?? DEFAULT_UNLIMITED_MB * MiB;
       r.countedFrom = u != null ? 'usage' : 'default';
     }
   }
-  for (const r of rows) if (!r.unlimited) { r.countedBytes = r.capBytes; r.countedFrom = 'cap'; }
+  for (const r of rows) if (!r.countedFrom) { r.countedBytes = r.capBytes; r.countedFrom = 'cap'; }
   return rows;
 }
 
