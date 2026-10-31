@@ -111,3 +111,25 @@ test('removing a home does not follow a symlink inside it', () => {
   assert.equal(home.removeCrewTaskHome('link5'), true);
   assert.equal(readFileSync(join(outside, 'keep'), 'utf8'), 'keep');
 });
+
+test('the legacy file actually opened must be the one under the transcript mount, not one reached through a swapped parent', async () => {
+  const { openedInside } = await import('../server/services/crewCoderHome.js');
+  const { openSync, closeSync, rmSync } = await import('fs');
+  const root = mkdtempSync(join(tmpdir(), 'crane-crew-root-'));
+  const outside = mkdtempSync(join(tmpdir(), 'crane-crew-outside-'));
+  mkdirSync(join(root, '-workspace'));
+  writeFileSync(join(root, '-workspace', 'sid1.jsonl'), 'real');
+  writeFileSync(join(outside, 'sid1.jsonl'), 'secret');
+  const expected = join('-workspace', 'sid1.jsonl');
+
+  let fd = openSync(join(root, '-workspace', 'sid1.jsonl'), 'r');
+  assert.equal(openedInside(fd, join(root, '-workspace', 'sid1.jsonl'), root, expected), true);
+  closeSync(fd);
+
+  // The parent is swapped for a symlink after the checks: the open lands outside.
+  rmSync(join(root, '-workspace'), { recursive: true });
+  symlinkSync(outside, join(root, '-workspace'));
+  fd = openSync(join(root, '-workspace', 'sid1.jsonl'), 'r');
+  assert.equal(openedInside(fd, join(root, '-workspace', 'sid1.jsonl'), root, expected), false);
+  closeSync(fd);
+});

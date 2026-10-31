@@ -10,7 +10,7 @@
  * or gone, and any crew-coder container a previous process left behind.
  */
 import { execFileSync } from 'child_process';
-import { mkdirSync, chmodSync, existsSync, rmSync, readdirSync, lstatSync, openSync, readSync, writeSync, fstatSync, fchmodSync, closeSync, constants } from 'fs';
+import { mkdirSync, chmodSync, existsSync, rmSync, readdirSync, lstatSync, openSync, readSync, writeSync, fstatSync, fchmodSync, closeSync, readlinkSync, realpathSync, constants } from 'fs';
 import { join, resolve } from 'path';
 import log from '../utils/logger.js';
 import { transcriptDirFor, STUDIO_UID, STUDIO_GID } from './builder/appContainer.js';
@@ -63,7 +63,21 @@ function mkdirNoFollow(p) {
  * Copy a regular file without following a symlink at either end and without
  * replacing anything already at `to`. False when it did not copy.
  */
-function copyNoFollow(from, to) {
+// SECURITY FIX (review of v2.131.1): O_NOFOLLOW guards only the last path
+// component, and the app container can swap a parent directory for a symlink
+// between the checks and the open. So the file actually opened must be exactly
+// `expected` under the real path of `root` (the transcript mount, which the
+// container cannot replace), and the same inode as that path.
+export function openedInside(fd, from, root, expected) {
+  let opened;
+  try { opened = readlinkSync(`/proc/self/fd/${fd}`); } catch (_) { opened = realpathSync(from); }
+  if (opened !== join(realpathSync(root), expected)) return false;
+  const a = fstatSync(fd);
+  const b = lstatSync(opened);
+  return a.dev === b.dev && a.ino === b.ino;
+}
+
+function copyNoFollow(from, to, within = null) {
   const { O_RDONLY, O_WRONLY, O_CREAT, O_EXCL, O_NOFOLLOW } = constants;
   let src = null;
   let dst = null;
@@ -71,6 +85,10 @@ function copyNoFollow(from, to) {
     src = openSync(from, O_RDONLY | O_NOFOLLOW);
     const st = fstatSync(src);
     if (!st.isFile()) return false;
+    if (within && !openedInside(src, from, within.root, within.expected)) {
+      log.warn('[crew-coder] legacy transcript not copied: it resolves outside the app transcript directory');
+      return false;
+    }
     dst = openSync(to, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600);
     fchmodSync(dst, st.mode & 0o777); // as copyFileSync did
     const buf = Buffer.alloc(64 * 1024);
@@ -118,7 +136,7 @@ export function prepareCrewTaskHome(taskId, { slug, resumeId = null } = {}) {
     const projects = join(dir, 'projects');
     const ws = join(projects, '-workspace');
     if (isRealDir(legacyDir) && existsSync(legacy) && mkdirNoFollow(projects) && mkdirNoFollow(ws)) {
-      copyNoFollow(legacy, join(ws, `${resumeId}.jsonl`));
+      copyNoFollow(legacy, join(ws, `${resumeId}.jsonl`), { root: transcriptDirFor(slug), expected: join('-workspace', `${resumeId}.jsonl`) });
     }
   }
   own(dir);

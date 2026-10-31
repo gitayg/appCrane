@@ -1,4 +1,7 @@
 {
+  "2.131.2": [
+    "Security: when a Crew task in progress at the upgrade carries its earlier conversation over, AppCrane now checks that the file it opened is really that conversation, so a swapped folder cannot make it copy another file."
+  ],
   "2.131.1": [
     "Security: a Crew task sent to an app coder no longer uses the app's shared Claude login. It runs on the app owner's own Claude login, or on the platform API key; with neither, the task is refused with a message saying so. This stops a Crew turn from reading the app's login or replacing it with another.",
     "Security: the files kept for a Crew task can no longer be used to make AppCrane write outside the task's folder on the server."
