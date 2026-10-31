@@ -84,20 +84,31 @@ const DELETE_WORDS = /\b(delet\w*|drop\w*|remov\w*|destroy\w*|truncat\w*|purg\w*
  * 'production' | 'deletion' when no standing rule may cover this, else null.
  * `texts` are the free-text backstop (title, question).
  */
-// Invisible format characters and compatibility forms (full-width letters)
-// would otherwise let "del\u200Bete" or "ｐｒｏｄｕｃｔｉｏｎ" past the words below
-// while still reading as the word.
-const plain = (v) => String(v ?? '').normalize('NFKC').replace(/\p{Cf}+/gu, '');
+// Text is matched after NFKD (full-width letters become ASCII, accents come
+// apart from their letters) in two forms:
+// with invisible characters (format, combining marks, Hangul fillers, variation
+// selectors) removed, so "del\u200Bete" still reads as delete, and with them
+// turned into spaces, so "deploy\u200Bproduction" still has a word boundary.
+// A word that mixes Latin letters with another script's ("prоduction" with a
+// Cyrillic о) reads as the word but matches nothing, so it asks too.
+const IGNORABLE = /[\p{Cf}\p{Mn}\p{Me}\u115F\u1160\u3164\uFFA0\u034F\uFE00-\uFE0F\u{E0100}-\u{E01EF}]+/gu;
+const forms = (v) => {
+  const n = String(v ?? '').normalize('NFKD');
+  return [n.replace(IGNORABLE, ''), n.replace(IGNORABLE, ' ')];
+};
+const mixedScript = (s) => (s.match(/\p{L}+/gu) || [])
+  .some((w) => /\p{Script=Latin}/u.test(w) && /[^\p{Script=Latin}]/u.test(w));
 
 export function alwaysAskReason({ action, scope, texts = [] }) {
-  scope = scope && plain(scope);
-  action = action && plain(action);
-  if (scope && PROD_FIELD.test(scope)) return 'production';
-  if (action && DELETE_FIELD.test(action)) return 'deletion';
+  if (scope && forms(scope).some((f) => PROD_FIELD.test(f))) return 'production';
+  if (action && forms(action).some((f) => DELETE_FIELD.test(f))) return 'deletion';
   for (const t of texts) {
-    const s = plain(t);
-    if (PROD_WORDS.test(s)) return 'production';
-    if (DELETE_WORDS.test(s)) return 'deletion';
+    const fs = forms(t);
+    if (fs.some((f) => PROD_WORDS.test(f))) return 'production';
+    if (fs.some((f) => DELETE_WORDS.test(f))) return 'deletion';
+  }
+  for (const v of [scope, action, ...texts]) {
+    if (v && mixedScript(String(v).normalize('NFKD').replace(IGNORABLE, ''))) return 'mixed-script';
   }
   return null;
 }
@@ -146,7 +157,9 @@ export function createRuleRow(db, user, { agentId, action, scope, expiresInDays,
   if (reason) {
     fail(400, 'ALWAYS_ASKS', reason === 'production'
       ? 'Production always asks: a standing rule cannot cover a production scope.'
-      : 'Deletions always ask: a standing rule cannot cover an action that deletes.');
+      : reason === 'mixed-script'
+        ? 'Text that mixes alphabets inside a word always asks: a standing rule cannot cover it.'
+        : 'Deletions always ask: a standing rule cannot cover an action that deletes.');
   }
   const blocked = db.prepare('SELECT 1 FROM crew_blocks WHERE owner_user_id = ? AND blocked_agent_id = ?').get(user.id, agentId);
   if (blocked) fail(409, 'BLOCKED', 'You blocked this agent. Unblock it before giving it a standing rule.');

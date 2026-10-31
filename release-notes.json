@@ -1,4 +1,7 @@
 {
+  "2.129.5": [
+    "Security: the check that makes an app coder's owner approve anything about production or deleting now also sees through accent marks, other hidden filler characters, an invisible character used to glue two words together, and look-alike letters from other alphabets; and look-alike vertical bars can no longer fake the line between two messages."
+  ],
   "2.129.4": [
     "Security: invisible characters (such as text-direction overrides and zero-width spaces) are removed from what an app coder's owner is shown before approving, a message can no longer fake the line between two messages, and hidden characters or full-width letters no longer let \"production\" or \"delete\" slip past the check that always asks the owner."
   ],

@@ -29,9 +29,10 @@ export const QUESTION_BUDGET = Object.freeze({ perMessage: 600, total: 1200, mes
 // taken out of message text so the separator between messages cannot be faked.
 export function displayLine(body) {
   return String(body ?? '')
-    .replace(/\p{Cf}+/gu, '')
+    .normalize('NFKC')
+    .replace(/[\p{Cf}\u115F\u1160\u3164\uFFA0\u034F\uFE00-\uFE0F\u{E0100}-\u{E01EF}]+/gu, '')
     .replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ')
-    .replace(/\|/g, '/')
+    .replace(/[|｜∣│ǀ❘⏐׀¦]/g, '/')
     .replace(/\s+/g, ' ').trim();
 }
 

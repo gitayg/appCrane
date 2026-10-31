@@ -33,3 +33,26 @@ test('invisible characters or full-width letters do not slip production or delet
   assert.equal(alwaysAskReason({ texts: ['deploy to pro⁠duction'] }), 'production');
   assert.equal(alwaysAskReason({ texts: ['fix the typo'] }), null);
 });
+
+test('a format character between two words still leaves a word boundary', async () => {
+  const { alwaysAskReason } = await import('../server/services/crewRules.js');
+  assert.equal(alwaysAskReason({ texts: ['deploy​production now'] }), 'production');
+  assert.equal(alwaysAskReason({ texts: ['please⁠rm the folder'] }), 'deletion');
+});
+
+test('combining marks, Hangul fillers and variation selectors do not hide the words', async () => {
+  const { alwaysAskReason } = await import('../server/services/crewRules.js');
+  assert.equal(alwaysAskReason({ texts: ['deĺete it'] }), 'deletion');
+  assert.equal(alwaysAskReason({ texts: ['proㅤduction'] }), 'production');
+  assert.equal(alwaysAskReason({ texts: ['pro️duction'] }), 'production');
+});
+
+test('a word mixing Latin with look-alike letters from another script asks', async () => {
+  const { alwaysAskReason } = await import('../server/services/crewRules.js');
+  assert.equal(alwaysAskReason({ texts: ['ship to prоduction'] }), 'mixed-script');
+  assert.equal(alwaysAskReason({ texts: ['add a title שלום to the page'] }), null, 'separate words in two scripts are fine');
+});
+
+test('vertical-bar look-alikes cannot fake the separator either', () => {
+  assert.equal(displayLine('a ｜ b ∣ c │ d'), 'a / b / c / d');
+});
