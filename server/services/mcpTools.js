@@ -41,6 +41,8 @@ import { recordAuditEvent } from './eventStore.js';
 import { adoptAppTool } from './adopt/mcpTool.js';
 import { deleteAppTool } from './mcpGaps/deleteAppTool.js';
 import { getAuditTool } from './mcpGaps/getAuditTool.js';
+import { submitFeedbackTool } from './feedback/mcpTool.js';
+import { redactFeedbackAuditArgs } from './feedback/submit.js';
 
 /**
  * The commit part of a managed-push response. A GitHub commit carries its web
@@ -74,6 +76,9 @@ function managedCommitView(result) {
  *   - revealsSecrets — true for a read tool that can return plaintext secrets or
  *     raw file contents (appcrane_reveal_secret, appcrane_cat). Read-only keys
  *     and read-only OAuth connections are refused it, readOnly notwithstanding.
+ *   - readOnlyKeyMayCall — a write tool a read-only key may still call
+ *     (appcrane_submit_feedback only). It stays a write tool everywhere else,
+ *     so View as previews are still refused it.
  *   - handler(user, args) → arbitrary JSON returned to the agent
  *
  * v1 surface (5 tools): list apps, read env, deploy, list requests, read logs.
@@ -137,6 +142,7 @@ function isReadOnlyKey(user, userMcpKey) {
 function assertToolAllowedForKey(user, tool, userMcpKey) {
   if (!isReadOnlyKey(user, userMcpKey)) return;
   if (tool.readOnly && !tool.revealsSecrets) return;
+  if (readOnlyKeyMayCall(user, tool)) return;
   if (tool.revealsSecrets) {
     throw new Error(
       `Forbidden: ${tool.name} can return plaintext secrets or raw file contents and this MCP key is read-only. ` +
@@ -147,6 +153,10 @@ function assertToolAllowedForKey(user, tool, userMcpKey) {
     `Forbidden: ${tool.name} changes state and this MCP key is read-only. ` +
     'Issue a full-access key to perform writes.'
   );
+}
+
+function readOnlyKeyMayCall(user, tool) {
+  return !!tool.readOnlyKeyMayCall && !user?.view_as;
 }
 
 function isInMcpScope(user, slug) {
@@ -463,7 +473,7 @@ function auditMcpCall(user, toolName, args, error) {
     // Also truncates large strings so a file push can't write megabytes/call.
     const detail = JSON.stringify({
       tool: toolName,
-      args: redactAuditArgs(redactCrewArgs(toolName, redactEnvFileContentInArgs(args || {}))),
+      args: redactAuditArgs(redactFeedbackAuditArgs(toolName, redactCrewArgs(toolName, redactEnvFileContentInArgs(args || {})))),
       ok: !error,
       error: error ? String(error.message || error) : null,
     });
@@ -3635,6 +3645,7 @@ const TOOLS = [
   adoptAppTool,
   deleteAppTool,
   getAuditTool,
+  submitFeedbackTool,
 
   {
     name: 'appcrane_create_managed_app',
@@ -5350,7 +5361,7 @@ export function listTools(user, userMcpKey = null) {
   const readOnlyKey = isReadOnlyKey(user, userMcpKey);
   const crewOk = crewAllowedFor(user);
   const coderKey = isCoderKey(user, userMcpKey);
-  return TOOLS.filter((t) => (!readOnlyKey || (t.readOnly && !t.revealsSecrets)) && (!t.crew || crewOk) && (!coderKey || CODER_MCP_TOOLS.includes(t.name)) && canUseTool(userView, t)).map((t) => ({
+  return TOOLS.filter((t) => (!readOnlyKey || (t.readOnly && !t.revealsSecrets) || readOnlyKeyMayCall(user, t)) && (!t.crew || crewOk) && (!coderKey || CODER_MCP_TOOLS.includes(t.name)) && canUseTool(userView, t)).map((t) => ({
     name: t.name,
     description: t.description,
     inputSchema: stageifySchema(t.inputSchema),

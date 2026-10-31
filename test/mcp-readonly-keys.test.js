@@ -280,12 +280,16 @@ test('a NULL read_only means full access, not read-only', async () => {
 
 // --- 5. the classification drives the gate, uniformly ------------------------
 
+// Write tools a read-only key may still call (readOnlyKeyMayCall). Named here
+// so adding one is a deliberate edit to this file, not a silent widening.
+const READ_ONLY_KEY_EXCEPTIONS = new Set(['appcrane_submit_feedback']);
+
 test('EVERY write-classified tool is refused to a read-only key', async () => {
   // Proves the gate reads the per-tool flag rather than a curated list of names
   // that drifts as tools are added. The refusal happens before the handler, so
   // none of these calls touch anything.
   const req = authenticate({ 'x-api-key': admin.ro.key });
-  const writeTools = getToolCatalog().filter((t) => !t.readOnly);
+  const writeTools = getToolCatalog().filter((t) => !t.readOnly && !READ_ONLY_KEY_EXCEPTIONS.has(t.name));
   assert.ok(writeTools.length > 10, `expected a substantial write surface, saw ${writeTools.length}`);
   for (const t of writeTools) {
     await assert.rejects(
@@ -299,7 +303,7 @@ test('EVERY write-classified tool is refused to a read-only key', async () => {
 test('tools/list advertises exactly the read tools to a read-only key', async () => {
   // Secondary to the refusal above — omission from a catalogue is discovery, not
   // authorization — but an agent shown a tool it can never call burns turns on it.
-  const readOnlyNames = new Set(getToolCatalog().filter((t) => t.readOnly).map((t) => t.name));
+  const readOnlyNames = new Set(getToolCatalog().filter((t) => t.readOnly || READ_ONLY_KEY_EXCEPTIONS.has(t.name)).map((t) => t.name));
   const ro = await rpc(hdr(admin.ro), 'tools/list', {});
   const full = await rpc(hdr(admin.full), 'tools/list', {});
   const roNames = ro.result.tools.map((t) => t.name);

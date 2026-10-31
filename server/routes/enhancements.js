@@ -3,7 +3,7 @@ import { getDb } from '../db.js';
 import { hashApiKey } from '../services/encryption.js';
 import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { AppError } from '../utils/errors.js';
-import { mirrorRequest, closeRequest, getAppForMirror } from '../services/github/issuesMirror.js';
+import { closeRequest, getAppForMirror } from '../services/github/issuesMirror.js';
 import {
   listComments, createComment, setStatus as setCommentStatus,
   deleteComment, getComment,
@@ -11,7 +11,8 @@ import {
 import { BUCKETS, bucketize, applyBucket } from '../services/requestStatus.js';
 import { userHasAppPermission } from '../services/permissions.js';
 import { cleanDoneNote, writeDoneNote, NoteError } from '../services/requestDoneNote.js';
-import { notifyRequesterFulfilled, notifyAppAdminsOfNewRequest, notifyPlatformAdminsOfPlatformRequest } from '../services/requestNotify.js';
+import { notifyRequesterFulfilled } from '../services/requestNotify.js';
+import { insertRequest, announceRequest } from '../services/requestCreate.js';
 
 const router = Router();
 
@@ -93,10 +94,7 @@ router.post('/', (req, res) => {
   }
   let lastInsertRowid;
   try {
-    ({ lastInsertRowid } = db.prepare(`
-      INSERT INTO enhancement_requests (app_slug, user_id, user_name, message, status, kind)
-      VALUES (?, ?, ?, ?, 'new', ?)
-    `).run(app_slug || null, userId, userName, message.trim(), kind));
+    lastInsertRowid = insertRequest(db, { appSlug: app_slug, userId, userName, message: message.trim(), kind });
   } catch (e) {
     const existing = kind && app_slug && e.code === 'SQLITE_CONSTRAINT_UNIQUE' ? openAccessRequest() : null;
     if (existing) return refuseDuplicate(existing.id);
@@ -116,17 +114,7 @@ router.post('/', (req, res) => {
 
   // v2.21.5: '_platform' is a reserved slug for requests against AppCrane
   // itself — no GitHub mirror, notify platform admins instead of app admins.
-  if (app_slug === '_platform') {
-    notifyPlatformAdminsOfPlatformRequest(lastInsertRowid);
-  } else if (app_slug) {
-    const app = getAppForMirror(app_slug);
-    if (app?.github_url) {
-      const row = db.prepare('SELECT id, message, user_name, status, created_at FROM enhancement_requests WHERE id = ?').get(lastInsertRowid);
-      mirrorRequest(app, row).catch(() => {});
-    }
-    // v2.14.1/3: email the app's owners/admins on any new request (access or feature).
-    notifyAppAdminsOfNewRequest(lastInsertRowid);
-  }
+  announceRequest(db, lastInsertRowid, app_slug);
 });
 
 /**

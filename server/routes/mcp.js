@@ -147,6 +147,8 @@ A typical end-to-end app onboarding (no second MCP needed):
 Defaults & conventions:
 - Prefer sandbox over production unless the user explicitly asks for production
 - When the user asks "what should I work on?", call appcrane_list_requests
+- When the user wants to report a bug or an idea about an app or about AppCrane,
+  call appcrane_submit_feedback (slug for an app, omit it for AppCrane)
 - Use github_* tools (not gh/git CLI) when X-Github-Token is configured —
   works in any environment, no shell access needed
 - When opening a PR for a request, include "Closes appcrane#<id>" in the

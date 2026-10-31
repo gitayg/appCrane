@@ -1,5 +1,5 @@
 {
-  "count": 73,
+  "count": 74,
   "tools": [
     {
       "name": "appcrane_adopt_app",
@@ -343,6 +343,11 @@
     },
     {
       "name": "appcrane_stage_from_url",
+      "requiredRole": "any",
+      "readOnly": false
+    },
+    {
+      "name": "appcrane_submit_feedback",
       "requiredRole": "any",
       "readOnly": false
     },

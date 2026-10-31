@@ -1,4 +1,7 @@
 {
+  "2.128.0": [
+    "Your coding agent can now send feedback for you: tell it in plain words what went wrong or what you want, and it files the report with the details attached (the app, environment, the step it was doing, the deploy and the error). Feedback about an app goes to that app's requests, where its team sees it; feedback about AppCrane goes to the platform admins, with at most one e-mail an hour. Secrets in the text are removed before it is stored."
+  ],
   "2.127.2": [
     "The memory warning e-mail no longer counts containers AppCrane did not start at their full memory limit: they count at what they actually use, as containers with no limit already did, so one server stops reporting hundreds of gigabytes \"committed\". The e-mail now shows each container's image, so a container with a random name can be identified.",
     "A short network outage no longer sends \"GitHub service account credential stopped working\". When the check gets no answer at all, admins hear about it only after an hour, as \"unreachable\", with advice to check the server's connection; a credential GitHub actually rejects is still reported at once."
