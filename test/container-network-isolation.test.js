@@ -315,8 +315,23 @@ function undoCpuPriority(args) {
   return out;
 }
 
+/**
+ * The FIFTH: the guaranteed memory (--memory-reservation), half of --memory,
+ * straight after --memory-swap. Asserted at that value and place, then removed.
+ */
+function undoMemoryReservation(args) {
+  const out = [...args];
+  const swap = out.findIndex(a => a.startsWith('--memory-swap='));
+  assert.notEqual(swap, -1, `no --memory-swap in the argv: ${JSON.stringify(args)}`);
+  const maxMb = Number(out[swap].slice('--memory-swap='.length, -1));
+  assert.equal(out[swap + 1], `--memory-reservation=${Math.floor(maxMb / 2)}m`,
+    `--memory-reservation must follow --memory-swap at half the max: ${JSON.stringify(args)}`);
+  out.splice(swap + 1, 1);
+  return out;
+}
+
 function stripDeliberate(args) {
-  return undoV248ResourceFlags(stripAdded(undoOomPriority(undoCpuPriority(args))));
+  return undoV248ResourceFlags(stripAdded(undoOomPriority(undoCpuPriority(undoMemoryReservation(args)))));
 }
 
 // ===========================================================================

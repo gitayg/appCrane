@@ -48,6 +48,7 @@ import { alwaysAskReason } from './crewRules.js';
 import { approvedMessageIds } from './crewQuestionView.js';
 import { buildCoderTaskPrompt, parseCoderAnswer } from './crewAppCoderPrompt.js';
 import { defaultCoderRunner } from './crewAppCoderRunner.js';
+import { removeCrewTaskHome, sweepCrewTaskHomes, recoverCrewCoderOrphans, isTerminalState } from './crewCoderHome.js';
 
 let runner = defaultCoderRunner;
 let started = false;
@@ -202,6 +203,14 @@ async function tryStart(taskId) {
   db.prepare("UPDATE crew_tasks SET coder_status = 'idle', coder_session_id = COALESCE(?, coder_session_id) WHERE id = ?")
     .run(result?.claudeSessionId ?? null, t.id);
   finishTurn(db, t, app, result || { ok: false, reason: 'The coder turn ended without a result.' });
+  dropHomeIfClosed(db, t.id);
+}
+
+/** A closed or deleted task gets no further turn, so its Claude home (crewCoderHome.js) goes. */
+function dropHomeIfClosed(db, taskId) {
+  if (running.has(taskId)) return;
+  const t = db.prepare('SELECT state FROM crew_tasks WHERE id = ?').get(taskId);
+  if (!t || isTerminalState(t.state)) removeCrewTaskHome(taskId);
 }
 
 function finishTurn(db, t, app, result) {
@@ -245,7 +254,8 @@ function onTaskEvent({ task_id: taskId, kind }) {
     if (!t || ['canceled', 'rejected', 'failed', 'completed'].includes(t.state)) ac.abort();
     return;
   }
-  if (kind === 'deleted') return;
+  if (kind === 'deleted') { removeCrewTaskHome(taskId); return; }
+  try { dropHomeIfClosed(getDb(), taskId); } catch (e) { log.warn(`[crew] app coder task ${taskId} home cleanup: ${e.message}`); }
   track(tryStart(taskId).catch((e) => log.warn(`[crew] app coder task ${taskId}: ${e.message}`)));
 }
 
@@ -262,6 +272,10 @@ export function startCrewAppCoder({ runner: injected } = {}) {
     db.prepare("UPDATE crew_tasks SET coder_status = 'idle' WHERE id = ?").run(t.id);
     failTask(t.to_agent_id, t.id, 'AppCrane restarted while the coder was working on this task, so the turn was lost. Send the task again.');
   }
+  // Only the default runner starts crew-coder containers; an injected one
+  // (tests) must not remove containers another process is running.
+  if (!injected) recoverCrewCoderOrphans();
+  try { sweepCrewTaskHomes(db); } catch (e) { log.warn(`[crew] app coder home sweep failed: ${e.message}`); }
   if (!started) {
     started = true;
     crewEvents.on('task', onTaskEvent);

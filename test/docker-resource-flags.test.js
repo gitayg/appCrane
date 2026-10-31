@@ -205,6 +205,21 @@ test('no container is started with --memory set and --memory-swap absent', async
 });
 
 // ===========================================================================
+// --memory-reservation: the guaranteed half
+// ===========================================================================
+
+test('--memory-reservation is half of --memory, rounded down, right after --memory-swap, at every size', async () => {
+  for (const memoryMb of [128, 255, 512, 777, 1024, 4096]) {
+    const args = await start(HTTP_APP.slug, { memoryMb });
+    const res = flag(args, '--memory-reservation=');
+    assert.equal(res, `--memory-reservation=${Math.floor(memoryMb / 2)}m`, JSON.stringify(args));
+    assert.ok(bytes(res, '--memory-reservation=') <= bytes(flag(args, '--memory='), '--memory='),
+      'the guaranteed amount is never above the max');
+    assert.equal(args[args.indexOf(flag(args, '--memory-swap=')) + 1], res, JSON.stringify(args));
+  }
+});
+
+// ===========================================================================
 // Restart policy
 // ===========================================================================
 
@@ -298,4 +313,28 @@ test('LIVE: the emitted restart flag is recorded by the daemon as on-failure, ma
     const name = await runLive(`${LIVE}-restart`, [flag(args, '--restart')]);
     assert.equal(await inspect(name, '{{.HostConfig.RestartPolicy.Name}}'), 'on-failure');
     assert.equal(await inspect(name, '{{.HostConfig.RestartPolicy.MaximumRetryCount}}'), '2');
+  });
+
+test('LIVE: the emitted reservation is half the max in HostConfig and memory.low, and applyLimitsLive moves both',
+  { skip: noDocker }, async () => {
+    const { applyLimitsLive } = await import('../server/services/applyResourceLimits.js');
+    const args = await start(HTTP_APP.slug, { memoryMb: 256 });
+    const slug = `rflive${process.pid}`;
+    const name = await runLive(`appcrane-${slug}-production`,
+      [flag(args, '--memory='), flag(args, '--memory-swap='), flag(args, '--memory-reservation=')]);
+    const cg = (f) => dk(['exec', name, 'cat', `/sys/fs/cgroup/${f}`]);
+
+    assert.equal(await inspect(name, '{{.HostConfig.Memory}}'), String(256 * 1024 * 1024));
+    assert.equal(await inspect(name, '{{.HostConfig.MemoryReservation}}'), String(128 * 1024 * 1024));
+    assert.equal(await cg('memory.low'), String(128 * 1024 * 1024));
+    assert.equal(await cg('memory.max'), String(256 * 1024 * 1024));
+
+    // The real `docker update`, through applyLimitsLive, against the real daemon.
+    const realDocker = (a) => dk(a, 15000);
+    const r = await applyLimitsLive({ slug, memoryMb: 512, cpus: 0.5 }, { docker: realDocker, usage: async () => new Map() });
+    assert.deepEqual(r[0], { env: 'production', applied: true });
+    assert.equal(await inspect(name, '{{.HostConfig.Memory}}'), String(512 * 1024 * 1024));
+    assert.equal(await inspect(name, '{{.HostConfig.MemoryReservation}}'), String(256 * 1024 * 1024));
+    assert.equal(await cg('memory.low'), String(256 * 1024 * 1024));
+    assert.equal(await cg('memory.max'), String(512 * 1024 * 1024));
   });

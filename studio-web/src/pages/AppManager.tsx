@@ -16,6 +16,7 @@ import { WhatsNewMailCard } from '../components/WhatsNewMailCard'
 import { EnvVarsPanel } from '../components/env/EnvVarsPanel'
 import { serverDate } from '../utils/serverDate'
 import { limitsAppliedText, type LimitApply } from '../utils/limitsApplied'
+import { guaranteedHint } from '../utils/guaranteedMemory'
 
 const PAGE_CSS = `
 /* margin 0, not -24px: .app-manager has no padding to cancel, so the negative margins made
@@ -408,6 +409,7 @@ function LimitsCard({ slug, reload, onMsg }: LimitsCardProps) {
         </div>
         <button className="btn btn-sm" onClick={save}>Save</button>
       </div>
+      <div style={{ fontSize: '.75rem', color: 'var(--dim)', marginTop: 6 }}>{guaranteedHint(ram)}</div>
       <div style={{ fontSize: '.75rem', color: 'var(--dim)', marginTop: 6 }}>Platform admins only. Applies on the next deploy or restart.</div>
     </div>
   )

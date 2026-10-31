@@ -6,14 +6,15 @@
 // (an admin lowered agentix and the mail still said "cap 1024 MB", 31 Oct
 // 2026). `docker update` changes all three on a running container without a
 // restart. Memory and swap are set together, equal, as at `docker run`
-// (docker.js), so the container still gets no swap.
+// (docker.js), so the container still gets no swap, and the guaranteed amount
+// (--memory-reservation) moves with them to half the new max.
 //
 // A container already using about as much as the new limit is left alone: the
 // kernel would reclaim and then OOM-kill it on the spot. Its new limit applies
 // at the next deploy or restart, and the result says so.
 
 import { execFile } from 'child_process';
-import { readUsage, invalidateMemoryMeasurement } from './memoryAdmission.js';
+import { readUsage, invalidateMemoryMeasurement, guaranteedMb } from './memoryAdmission.js';
 
 const MiB = 1024 * 1024;
 export const ENVS = ['production', 'sandbox'];
@@ -47,7 +48,8 @@ export async function applyLimitsLive({ slug, memoryMb, cpus }, { docker = defau
       continue;
     }
     try {
-      await docker(['update', `--memory=${memoryMb}m`, `--memory-swap=${memoryMb}m`, `--cpus=${cpus}`, name]);
+      await docker(['update', `--memory=${memoryMb}m`, `--memory-swap=${memoryMb}m`,
+        `--memory-reservation=${guaranteedMb(memoryMb)}m`, `--cpus=${cpus}`, name]);
       results.push({ env, applied: true });
     } catch (e) {
       results.push({ env, applied: false, reason: `${e.message}; it applies at the next deploy or restart` });

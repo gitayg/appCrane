@@ -119,22 +119,116 @@ export function clearCredentials(slug) {
   log.info(`claudeCredentials: cleared for ${slug}`);
 }
 
+// ── several holders of one login ───────────────────────────────────────────
+//
+// One app's login can be held by several copies at once: the long-lived app
+// container's (builder/appContainer.js, for as long as it lives) and one per
+// per-turn container (a Crew coder turn, Improve, Ask). Claude Code refreshes
+// the token in whichever container hits expiry, rewrites its own copy, and the
+// refresh rotates the refresh token, so the old one is dead from then on.
+// Before v2.131.0 every copy was written back blindly when its holder ended:
+// the app container kept a refresh token another holder had rotated out, a
+// turn started from a DB the app container had not written yet, and a holder
+// ending later wrote an older login over a newer one.
+//
+// So every live copy is tracked with the stored blob and text it last agreed
+// with. A copy its CLI changed is stored only if the DB still holds what the
+// copy started from (compare-and-swap on the ciphertext) or the copy expires
+// later than what is stored now; then every unchanged or older copy is
+// rewritten in place (same inode, so the bind mount sees it) with the stored
+// login. This runs whenever a copy is taken or handed back, and at each app
+// coder turn boundary (syncClaudeCredentials).
+const liveCopies = new Map(); // slug -> Set<{ tmpFile, blob, text }>
+
+function storedBlob(slug) {
+  return getDb()
+    .prepare('SELECT claude_credentials_encrypted FROM apps WHERE slug = ?')
+    .get(slug)?.claude_credentials_encrypted || null;
+}
+
+function expiresOf(text) {
+  try { return Number(extractTokens(JSON.parse(text)).expires_at) || 0; } catch (_) { return 0; }
+}
+
+function readCopy(copy) {
+  try { return existsSync(copy.tmpFile) ? readFileSync(copy.tmpFile, 'utf8') : null; } catch (_) { return null; }
+}
+
+function pushCopy(slug, copy) {
+  const after = readCopy(copy);
+  if (!after || after === copy.text) return;
+  try {
+    validateCredentials(JSON.parse(after));
+  } catch (err) {
+    log.warn(`claudeCredentials: refused to persist refreshed token for ${slug} (validation failed): ${err.message}`);
+    return;
+  }
+  const blob = storedBlob(slug);
+  // Cleared by the operator while held: a running copy does not bring it back.
+  if (!blob) return;
+  if (blob !== copy.blob) {
+    let current = null;
+    try { current = decrypt(blob); } catch (_) {}
+    if (current !== null && expiresOf(after) <= expiresOf(current)) return;
+  }
+  const enc = encrypt(after);
+  const r = getDb()
+    .prepare('UPDATE apps SET claude_credentials_encrypted = ? WHERE slug = ? AND claude_credentials_encrypted = ?')
+    .run(enc, slug, blob);
+  if (r.changes) {
+    copy.blob = enc;
+    copy.text = after;
+    log.info(`claudeCredentials: captured refreshed token for ${slug}`);
+  }
+}
+
+function pullCopy(slug, copy) {
+  const blob = storedBlob(slug);
+  if (!blob || blob === copy.blob) return;
+  let text;
+  try { text = decrypt(blob); JSON.parse(text); } catch (_) { return; }
+  const file = readCopy(copy);
+  if (file === null) return;
+  if (file !== copy.text && expiresOf(file) > expiresOf(text)) return;
+  try {
+    if (file !== text) writeFileSync(copy.tmpFile, text);
+    copy.blob = blob;
+    copy.text = text;
+  } catch (err) {
+    log.warn(`claudeCredentials: could not hand the current login to a live copy for ${slug}: ${err.message}`);
+  }
+}
+
+/**
+ * Reconcile every live copy of `slug`'s login with the DB: store the newest
+ * rotation, then hand it to every copy still holding an older one.
+ */
+export function syncClaudeCredentials(slug) {
+  const copies = liveCopies.get(slug);
+  if (!copies?.size) return;
+  try {
+    for (const c of copies) pushCopy(slug, c);
+    for (const c of copies) pullCopy(slug, c);
+  } catch (err) {
+    log.warn(`claudeCredentials: sync failed for ${slug}: ${err.message}`);
+  }
+}
+
 /**
  * Prepare a per-call tmpfile holding the decrypted credentials. Returns:
  *   - { tmpFile, cleanup } when the app has credentials configured
  *   - null when the app has no credentials (caller should fall back to API key)
  *
- * The cleanup callback:
- *   1. Reads the tmpfile back. If the CLI inside the container refreshed
- *      the token, the file on disk now holds the new tokens.
- *   2. Re-encrypts and updates the DB so the next dispatch starts fresh.
- *   3. Wipes the tmpfile.
+ * The copy starts from the newest login any live copy holds (see above). The
+ * cleanup callback stores this copy's refresh if it is the newest, hands it
+ * to the other live copies, and wipes the tmpfile.
  *
  * Mounted r/w because Claude Code rewrites the file on token refresh.
  * The file stays on disk only for the duration of the dispatch.
  */
 export function prepareClaudeCredentialsMount(appSlug) {
   if (!appSlug) return null;
+  syncClaudeCredentials(appSlug);
   const row = getDb()
     .prepare('SELECT claude_credentials_encrypted FROM apps WHERE slug = ?')
     .get(appSlug);
@@ -169,29 +263,22 @@ export function prepareClaudeCredentialsMount(appSlug) {
   writeFileSync(tmpFile, payload, { mode: 0o666 });
   chmodSync(tmpFile, 0o666);
 
+  const copy = { tmpFile, blob: row.claude_credentials_encrypted, text: payload };
+  if (!liveCopies.has(appSlug)) liveCopies.set(appSlug, new Set());
+  liveCopies.get(appSlug).add(copy);
+
   return {
     tmpFile,
     cleanup: () => {
+      const copies = liveCopies.get(appSlug);
       try {
         // Capture refreshed token if the CLI rewrote the file.
-        if (existsSync(tmpFile)) {
-          const after = readFileSync(tmpFile, 'utf8');
-          if (after && after !== payload) {
-            try {
-              const parsed = JSON.parse(after);
-              validateCredentials(parsed);
-              const enc = encrypt(after);
-              getDb()
-                .prepare('UPDATE apps SET claude_credentials_encrypted = ? WHERE slug = ?')
-                .run(enc, appSlug);
-              log.info(`claudeCredentials: captured refreshed token for ${appSlug}`);
-            } catch (err) {
-              log.warn(`claudeCredentials: refused to persist refreshed token for ${appSlug} (validation failed): ${err.message}`);
-            }
-          }
-        }
+        pushCopy(appSlug, copy);
       } finally {
+        copies?.delete(copy);
+        if (copies && !copies.size) liveCopies.delete(appSlug);
         try { rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
+        syncClaudeCredentials(appSlug);
       }
     },
   };

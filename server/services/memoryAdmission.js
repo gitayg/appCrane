@@ -6,8 +6,15 @@
 //             minus a reserve for the host itself (setting memory_reserve_mb;
 //             default max(1 GiB, 10% of RAM): kernel, dockerd/containerd, sshd,
 //             Caddy, AppCrane's own Node process and a security agent).
-// committed = the sum of HostConfig.Memory over every RUNNING container on the
-//             daemon, AppCrane's or not, since all of them draw on the same RAM.
+// committed = the sum over every RUNNING container on the daemon, AppCrane's or
+//             not, since all of them draw on the same RAM, of what that
+//             container is guaranteed: HostConfig.MemoryReservation when it has
+//             one (> 0 and not above its limit), otherwise HostConfig.Memory.
+//             An app container is started with a reservation of half its max
+//             (docker.js), so it counts at that half; the other half is burst
+//             room it can use while the host has memory free, shared with every
+//             other app and promised to none. A reservation above the limit is
+//             ignored and the container counts at its limit.
 //             A container with no limit (Memory=0) counts at its current usage
 //             (docker stats); when that cannot be read, at DEFAULT_UNLIMITED_MB.
 //             So does a container AppCrane did not start (no appcrane label):
@@ -16,8 +23,11 @@
 //             333,717 MB of a 14,131 MB server (apphub, 30 Oct 2026).
 //
 // A start is allowed when committed - replaced + new <= capacity, where
-// `replaced` is the cap of the running container of the same name (the version
-// a redeploy swaps out). It is also always allowed when new <= replaced: a start
+// `replaced` is what the running container of the same name counts (the version
+// a redeploy swaps out) and `new` is what the new one will be guaranteed: half
+// its max for an app container (kind 'app', the only kind started with a
+// reservation), its full max for every other kind (coder, crew-coder, db,
+// auto-patch), which get no reservation. It is also always allowed when new <= replaced: a start
 // that does not raise the total cannot make things worse, and refusing it would
 // freeze every redeploy and rollback on a host that is already over-committed.
 //
@@ -46,13 +56,26 @@ const MiB = 1024 * 1024;
 const GiB = 1024 * MiB;
 const DOCKER_TIMEOUT_MS = 10_000;
 // The image comes last: labels are JSON, whose strings never hold a raw tab.
-export const INSPECT_FORMAT = '{{.Name}}\t{{.HostConfig.Memory}}\t{{json .Config.Labels}}\t{{.Config.Image}}';
+export const INSPECT_FORMAT = '{{.Name}}\t{{.HostConfig.Memory}}\t{{.HostConfig.MemoryReservation}}\t{{json .Config.Labels}}\t{{.Config.Image}}';
+// Container kinds started with --memory-reservation (half the max, docker.js).
+export const RESERVED_KINDS = new Set(['app']);
 
 let cached = null;
 const reservations = new Map();
 
 export function toMb(bytes) {
   return Math.floor(Number(bytes || 0) / MiB);
+}
+
+/** The guaranteed amount (--memory-reservation) for a container whose max is `maxMb`: half, rounded down. */
+export function guaranteedMb(maxMb) {
+  return Math.floor(Math.max(0, Number(maxMb) || 0) / 2);
+}
+
+/** What a new start of `kind` with max `memoryMb` counts against capacity, in MB. */
+export function countedStartMb(kind, memoryMb) {
+  const max = Math.max(0, Number(memoryMb) || 0);
+  return RESERVED_KINDS.has(kind) ? guaranteedMb(max) : max;
 }
 
 function setting(db, key) {
@@ -105,19 +128,21 @@ function describe(name, labels) {
   return { kind: 'other', label: name };
 }
 
-/** Parse `docker inspect` lines of "<name>\t<memory bytes>\t<labels json>". */
+/** Parse `docker inspect` lines of "<name>\t<memory bytes>\t<reservation bytes>\t<labels json>\t<image>". */
 export function parseInspect(out) {
   const rows = [];
   for (const line of String(out || '').split('\n')) {
     const parts = line.split('\t');
-    if (parts.length < 3) continue;
+    if (parts.length < 4) continue;
     const name = parts[0].replace(/^\//, '').trim();
     const mem = Number(parts[1]);
     if (!name || !Number.isFinite(mem) || mem < 0) continue;
+    const res = Number(parts[2]);
+    const reservedBytes = Number.isFinite(res) && res > 0 && res <= mem ? res : 0;
     let labels = {};
-    try { labels = JSON.parse(parts[2]) || {}; } catch (_) { labels = {}; }
-    const image = (parts[3] || '').trim() || null;
-    rows.push({ name, image, capBytes: mem, unlimited: mem === 0, ...describe(name, labels) });
+    try { labels = JSON.parse(parts[3]) || {}; } catch (_) { labels = {}; }
+    const image = (parts[4] || '').trim() || null;
+    rows.push({ name, image, capBytes: mem, reservedBytes, unlimited: mem === 0, ...describe(name, labels) });
   }
   return rows;
 }
@@ -146,7 +171,10 @@ async function readContainers() {
       r.countedFrom = u != null ? 'usage' : 'default';
     }
   }
-  for (const r of rows) if (!r.countedFrom) { r.countedBytes = r.capBytes; r.countedFrom = 'cap'; }
+  for (const r of rows) {
+    if (r.countedFrom) continue;
+    if (r.reservedBytes > 0) { r.countedBytes = r.reservedBytes; r.countedFrom = 'reservation'; } else { r.countedBytes = r.capBytes; r.countedFrom = 'cap'; }
+  }
   return rows;
 }
 
@@ -227,18 +255,25 @@ export function decide({ measurement, name, newBytes }) {
   };
 }
 
+/** "512 MB" or, for a container started with a reservation, "512 MB guaranteed (max 1024 MB)". */
+export function needText(verdict) {
+  return verdict.guaranteed
+    ? `${toMb(verdict.newBytes)} MB guaranteed (max ${toMb(verdict.maxBytes)} MB)`
+    : `${toMb(verdict.newBytes)} MB`;
+}
+
 export function refusalMessage({ subject, what, verdict, replacing }) {
   const tail = replacing
     ? 'Nothing was changed — the current version is still running.'
     : 'Nothing was started.';
-  return `Not enough memory on the server for this ${what}: ${subject} needs ${toMb(verdict.newBytes)} MB, `
+  return `Not enough memory on the server for this ${what}: ${subject} needs ${needText(verdict)}, `
     + `${toMb(verdict.freeBytes)} MB is free (${toMb(verdict.committedBytes)}/${toMb(verdict.capacityBytes)} MB committed). `
     + `${tail} Try again later, or ask a platform admin to free memory.`;
 }
 
 export function warningMessage({ subject, what, verdict }) {
   return `Memory warning: this ${what} takes the server past its memory capacity. ${subject} needs `
-    + `${toMb(verdict.newBytes)} MB, ${toMb(verdict.freeBytes)} MB was free; ${toMb(verdict.afterBytes)}/`
+    + `${needText(verdict)}, ${toMb(verdict.freeBytes)} MB was free; ${toMb(verdict.afterBytes)}/`
     + `${toMb(verdict.capacityBytes)} MB is now committed. Started anyway (memory admission is set to warn only).`;
 }
 
@@ -263,7 +298,11 @@ async function admitMemory({ name, memoryMb, ...ctx }) {
   const measurement = await measureMemory({ db });
   if (measurement.error) return { mode, allowed: true, warned: false, unknown: true, error: measurement.error };
 
-  const verdict = decide({ measurement, name, newBytes: Math.max(0, Number(memoryMb) || 0) * MiB });
+  const maxBytes = Math.max(0, Number(memoryMb) || 0) * MiB;
+  const verdict = {
+    ...decide({ measurement, name, newBytes: countedStartMb(ctx.kind, memoryMb) * MiB }),
+    maxBytes, guaranteed: RESERVED_KINDS.has(ctx.kind),
+  };
   if (verdict.allowed) return { mode, allowed: true, warned: false, verdict, overCommitted: !verdict.fits };
 
   const subject = ctx.subject || (ctx.slug ? `${ctx.slug}${ctx.env ? ` (${ctx.env})` : ''}` : name);

@@ -1,5 +1,6 @@
 import os from 'os';
 import { getDb } from '../db.js';
+import { guaranteedMb } from './memoryAdmission.js';
 
 // Does the sum of every app's configured memory limit fit in the host?
 //
@@ -84,11 +85,15 @@ function picture(db, overrideAppId, overrideMb) {
 
   const host_mb = hostMemoryMb();
   const committed_mb = apps.reduce((total, a) => total + a.max_ram_mb * ENVS_PER_APP, 0);
+  // What memory admission counts: each app container is guaranteed half its max.
+  const guaranteed_mb = apps.reduce((total, a) => total + guaranteedMb(a.max_ram_mb) * ENVS_PER_APP, 0);
 
   return {
     host_mb,
     committed_mb,
     headroom_mb: host_mb - committed_mb,
+    guaranteed_mb,
+    guaranteed_fits: guaranteed_mb <= host_mb,
     // Exactly filling the host is not over-committing it. It is the last
     // configuration whose promise the kernel can still keep.
     over_committed: committed_mb > host_mb,
@@ -104,7 +109,7 @@ function picture(db, overrideAppId, overrideMb) {
  * The whole picture, in one read.
  * @returns {{
  *   host_mb: number, committed_mb: number, headroom_mb: number,
- *   over_committed: boolean, ratio: number, app_count: number,
+ *   guaranteed_mb: number, guaranteed_fits: boolean, over_committed: boolean, ratio: number, app_count: number,
  *   top: Array<{slug: string, max_ram_mb: number}>
  * }}
  * `committed_mb` counts BOTH environments for every app that has a container,

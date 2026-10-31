@@ -32,8 +32,15 @@ test('running containers get memory, equal swap and CPUs in place; stopped or mi
   const { docker, calls } = fakeDocker({ 'appcrane-hub-production': true, 'appcrane-hub-sandbox': false });
   const r = await applyLimitsLive({ slug: 'hub', memoryMb: 768, cpus: 0.75 }, { docker, usage: async () => new Map() });
   assert.deepEqual(r, [{ env: 'production', applied: true }, { env: 'sandbox', applied: false, reason: 'not running' }]);
-  assert.ok(calls.includes('update --memory=768m --memory-swap=768m --cpus=0.75 appcrane-hub-production'));
+  assert.ok(calls.includes('update --memory=768m --memory-swap=768m --memory-reservation=384m --cpus=0.75 appcrane-hub-production'), calls.join('\n'));
   assert.ok(!calls.some((c) => c.startsWith('update') && c.endsWith('sandbox')));
+});
+
+test('the guaranteed amount moves with the max, at half of it rounded down', async () => {
+  const { docker, calls } = fakeDocker({ 'appcrane-hub-production': true });
+  await applyLimitsLive({ slug: 'hub', memoryMb: 1001, cpus: 1 }, { docker, usage: async () => new Map() });
+  const update = calls.find((c) => c.startsWith('update'));
+  assert.match(update, / --memory=1001m --memory-swap=1001m --memory-reservation=500m /);
 });
 
 test('a container using nearly the new limit is not lowered now (it would be OOM-killed)', async () => {

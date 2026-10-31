@@ -53,7 +53,8 @@ const appContainer = await import('../server/services/builder/appContainer.js');
 
 /**
  * Script the host: total RAM (null = docker info fails), running containers
- * [{ name, mb, labels }] (mb 0 = no limit), and their usage (null = stats fails).
+ * [{ name, mb, resMb, labels }] (mb 0 = no limit, resMb = --memory-reservation, 0 = none),
+ * and their usage (null = stats fails).
  */
 function host({ totalMb = 4096, containers = [], usage = {}, statsFail = false }) {
   const ids = containers.map((_, i) => `id${i}`);
@@ -63,7 +64,7 @@ function host({ totalMb = 4096, containers = [], usage = {}, statsFail = false }
       ? { match: ['info', '--format', '{{.MemTotal}}'], stderr: 'Cannot connect to the Docker daemon', code: 1 }
       : { match: ['info', '--format', '{{.MemTotal}}'], stdout: `${totalMb * MiB}\n` },
     { match: ['ps', '-q'], stdout: ids.join('\n') + (ids.length ? '\n' : '') },
-    { match: ['inspect', adm.INSPECT_FORMAT], stdout: containers.map(c => `/${c.name}\t${c.mb * MiB}\t${JSON.stringify(c.labels || {})}\t${c.image || ''}`).join('\n') + '\n' },
+    { match: ['inspect', adm.INSPECT_FORMAT], stdout: containers.map(c => `/${c.name}\t${c.mb * MiB}\t${(c.resMb || 0) * MiB}\t${JSON.stringify(c.labels || {})}\t${c.image || ''}`).join('\n') + '\n' },
     statsFail
       ? { match: ['stats', '--no-stream'], stderr: 'stats broke', code: 1 }
       : { match: ['stats', '--no-stream'], stdout: Object.entries(usage).map(([n, mb]) => `${n}\t${mb}MiB / 3.8GiB`).join('\n') + '\n' },
@@ -182,6 +183,65 @@ test('a container AppCrane did not start counts at its usage, not its cap; AppCr
   assert.match(admin.body_html, /image example\/worker:1/);
 });
 
+test('a container with a reservation counts at it; one without at its limit; a reservation above the limit is ignored', async () => {
+  host({
+    containers: [
+      { ...app('g1', 'production'), mb: 1024, resMb: 512 },
+      { name: 'appcrane-db-pg', labels: { 'appcrane-db': 'postgres' }, mb: 768 },
+      { ...app('g2', 'production'), mb: 256, resMb: 4096 },
+    ],
+  });
+  const m = await adm.measureMemory({ fresh: true });
+  const by = (n) => m.containers.find(c => c.name === n);
+  assert.equal(by('appcrane-g1-production').countedFrom, 'reservation');
+  assert.equal(by('appcrane-g1-production').countedBytes, 512 * MiB);
+  assert.equal(by('appcrane-db-pg').countedFrom, 'cap');
+  assert.equal(by('appcrane-db-pg').countedBytes, 768 * MiB);
+  assert.equal(by('appcrane-g2-production').countedFrom, 'cap', 'a reservation larger than the limit is not trusted');
+  assert.equal(by('appcrane-g2-production').countedBytes, 256 * MiB);
+  assert.equal(m.committedBytes, (512 + 768 + 256) * MiB);
+});
+
+test('a new app start counts at its guaranteed half; kinds started without a reservation count at their full max', async () => {
+  // 4096 capacity, 3000 committed: 1096 free. A 2048 MB app needs 1024 guaranteed and fits;
+  // the same 2048 MB as a coder, crew coder or kind-less start does not.
+  host({ containers: [{ ...app('big', 'production'), mb: 3000 }] });
+  const ok = await adm.admitContainer({ name: 'appcrane-half-production', memoryMb: 2048, kind: 'app', slug: 'half', env: 'production', notify: async () => {} });
+  assert.equal(ok.allowed, true);
+  assert.equal(ok.verdict.newBytes, 1024 * MiB);
+  assert.equal(ok.verdict.fits, true);
+  for (const kind of ['coder', 'crew-coder', 'db', 'auto-patch', undefined]) {
+    await assert.rejects(
+      adm.admitContainer({ name: `full-${kind}`, memoryMb: 2048, kind, notify: async () => {} }),
+      (e) => { assert.equal(e.code, 'INSUFFICIENT_MEMORY', String(kind)); assert.match(e.message, /needs 2048 MB, 1096 MB is free/); return true; },
+    );
+  }
+  assert.equal(adm.countedStartMb('app', 1023), 511, 'rounded down');
+  assert.equal(adm.guaranteedMb(777), 388);
+});
+
+test('a running app container being replaced counts at its reservation, so a same-size redeploy is not raising', async () => {
+  host({ containers: [{ ...app('big', 'production'), mb: 3800 }, { ...app('rp', 'production'), mb: 1024, resMb: 512 }] });
+  const r = await adm.admitContainer({ name: 'appcrane-rp-production', memoryMb: 1024, kind: 'app', slug: 'rp', env: 'production', notify: async () => {} });
+  assert.equal(r.verdict.replacedBytes, 512 * MiB);
+  assert.equal(r.verdict.newBytes, 512 * MiB);
+  assert.equal(r.verdict.notRaising, true);
+  assert.equal(r.allowed, true);
+});
+
+test('the admin mail shows guaranteed and max for a container with a reservation', async () => {
+  host({ containers: [{ ...app('gm', 'production'), mb: 1024, resMb: 512, image: 'appcrane-gm:live' }, { name: 'appcrane-db-x', labels: { 'appcrane-db': 'mysql' }, mb: 768 }] });
+  const m = await adm.measureMemory({ fresh: true });
+  db.prepare("DELETE FROM email_queue WHERE source = 'memory-admission'").run();
+  const v = { ...adm.decide({ measurement: m, name: 'appcrane-n-sandbox', newBytes: 256 * MiB }), maxBytes: 512 * MiB, guaranteed: true };
+  await notifyMemoryAdmission({ db, outcome: 'warned', message: 'warn', verdict: v, measurement: m, subject: 'n (sandbox)', what: 'deploy', slug: 'n', env: 'sandbox' });
+  const admin = mailRows().find(r => r.to_email === ADMIN.email);
+  assert.match(admin.body_text, /gm \(production\) \[image appcrane-gm:live\]: guaranteed 512 MB, max 1024 MB/);
+  assert.match(admin.body_text, /managed mysql: cap 768 MB/);
+  assert.match(admin.body_text, /Needed: 256 MB guaranteed \(max 512 MB\)/);
+  assert.match(admin.body_html, /guaranteed 512 MB, max 1024 MB/);
+});
+
 test('docker info failing falls back to this machine\'s RAM and says so', async () => {
   host({ totalMb: null, containers: [] });
   const m = await adm.measureMemory({ fresh: true });
@@ -193,14 +253,15 @@ test('docker info failing falls back to this machine\'s RAM and says so', async 
 
 test('refuse mode: over capacity throws INSUFFICIENT_MEMORY and the running container is NOT stopped', async () => {
   // 4096 MB capacity; 3584 committed by another app plus this app's own 256 MB.
+  // A 1536 MB max is a 768 MB guaranteed start, which no longer fits.
   host({ containers: [{ ...app('big', 'production'), mb: 3584 }, { ...app('svc', 'production'), mb: 256 }] });
   const sent = [];
   await assert.rejects(
-    docker.startApp(startOpts('svc', 'production', 1024, { notify: async (a) => { sent.push(a); } })),
+    docker.startApp(startOpts('svc', 'production', 1536, { notify: async (a) => { sent.push(a); } })),
     (e) => {
       assert.equal(e.code, 'INSUFFICIENT_MEMORY');
       assert.equal(e.status, 409);
-      assert.match(e.message, /svc \(production\) needs 1024 MB, 512 MB is free \(3840\/4096 MB committed\)/);
+      assert.match(e.message, /svc \(production\) needs 768 MB guaranteed \(max 1536 MB\), 512 MB is free \(3840\/4096 MB committed\)/);
       assert.match(e.message, /Nothing was changed — the current version is still running\. Try again later/);
       return true;
     },
@@ -238,7 +299,8 @@ test('rollback: a same-or-smaller cap is admitted on an over-committed host; a l
   assert.equal(ok.allowed, true);
   assert.equal(ok.overCommitted, true);
 
-  db.prepare('UPDATE apps SET resource_limits = ? WHERE id = ?').run(JSON.stringify({ max_ram_mb: 1024 }), a.id);
+  // 2048 max = 1024 guaranteed, more than the 512 the running container holds.
+  db.prepare('UPDATE apps SET resource_limits = ? WHERE id = ?').run(JSON.stringify({ max_ram_mb: 2048 }), a.id);
   const bigger = db.prepare('SELECT * FROM apps WHERE id = ?').get(a.id);
   const before = db.prepare('SELECT id, status FROM deployments WHERE app_id = ? ORDER BY id').all(a.id);
   await assert.rejects(deployer.rollbackApp(bigger, 'production', undefined, owner.id), { code: 'INSUFFICIENT_MEMORY' });
@@ -275,7 +337,7 @@ test('the route pre-check records a failed deployment carrying the reason', asyn
   const row = db.prepare('SELECT status, deployed_by, log FROM deployments WHERE app_id = ?').get(a.id);
   assert.equal(row.status, 'failed');
   assert.equal(row.deployed_by, u.id);
-  assert.match(row.log, /^DEPLOY REFUSED: Not enough memory on the server for this deploy: pre1 \(sandbox\) needs 1024 MB/);
+  assert.match(row.log, /^DEPLOY REFUSED: Not enough memory on the server for this deploy: pre1 \(sandbox\) needs 512 MB guaranteed \(max 1024 MB\)/);
 });
 
 test('an automatic deploy refused in deployApp fails with the reason in its log, before any pull, and mails the owners', async () => {
@@ -289,7 +351,7 @@ test('an automatic deploy refused in deployApp fails with the reason in its log,
   await assert.rejects(deployer.deployApp(dep, a, 'production', { prod_be: 39010, sand_be: 39011 }), { code: 'INSUFFICIENT_MEMORY' });
   const row = db.prepare('SELECT status, log FROM deployments WHERE id = ?').get(dep);
   assert.equal(row.status, 'failed');
-  assert.match(row.log, /DEPLOY FAILED: Not enough memory on the server for this deploy: auto1 \(production\) needs 1024 MB/);
+  assert.match(row.log, /DEPLOY FAILED: Not enough memory on the server for this deploy: auto1 \(production\) needs 512 MB guaranteed \(max 1024 MB\)/);
   assert.equal(calls().filter(c => ['pull', 'run', 'stop'].includes(c[0])).length, 0);
   const to = mailRows().map(r => r.to_email);
   assert.ok(to.includes(owner.email), 'owner told to try again later');

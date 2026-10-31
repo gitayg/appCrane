@@ -15,7 +15,7 @@ import {
   HELPER_IMAGE, createTarGuard,
 } from './volumeHelper.js';
 import log from '../utils/logger.js';
-import { admitContainer, reserveMemory } from './memoryAdmission.js';
+import { admitContainer, reserveMemory, guaranteedMb } from './memoryAdmission.js';
 import { OOM_APP_FLAG } from './oomPriority.js';
 import { CPU_APP_FLAG, buildResourceArgs } from './cpuPriority.js';
 import { assertNoRestoreInProgress } from './managedDbRestoreGuard.js';
@@ -944,7 +944,7 @@ export async function startApp(opts) {
   if (admission !== false) {
     const name = containerName(slug, env);
     await admitContainer({ name, memoryMb, cpus, kind: 'app', slug, env, what: 'deploy', ...(admission || {}) });
-    release = reserveMemory(name, memoryMb * 1024 * 1024);
+    release = reserveMemory(name, guaranteedMb(memoryMb) * 1024 * 1024);
   }
   try {
     return await runAppContainer(opts);
@@ -1039,6 +1039,13 @@ async function runAppContainer({ slug, env, image, hostPort, envVars = {}, volum
     // together removes the question — the configured number IS the ceiling, on a
     // host with swap and on a host without, and it means the same thing on both.
     `--memory-swap=${memoryMb}m`,
+    // The guaranteed half (cgroup memory.low): the kernel reclaims from this
+    // container last while it is under it. --memory above stays the hard max,
+    // and the space between the two is burst room shared with every other app,
+    // not promised. Memory admission counts this figure, not the max. Always
+    // derived from the max: Docker accepts a reservation larger than --memory
+    // (measured), so it is never taken from anywhere else.
+    `--memory-reservation=${guaranteedMb(memoryMb)}m`,
     `--cpus=${cpus}`,
     `--pids-limit=${PIDS_LIMIT}`,
     // Blocks the setuid/setgid escalation path: a process in the container can

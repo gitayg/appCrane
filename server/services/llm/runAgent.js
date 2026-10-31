@@ -463,7 +463,28 @@ export function runAgentExec({
 
 // ── run mode — used by enhancement coder + Ask (fresh container per job) ──
 
-export function runAgentNew({
+export function runAgentNew(opts) {
+  const { args, secrets, cleanups } = buildRunAgentNew(opts);
+  const agent = new Agent(args, opts.timeoutMs ?? DEFAULT_TIMEOUT, secrets);
+  for (const fn of cleanups) agent.registerCleanup(fn);
+  return agent;
+}
+
+/**
+ * The argv runAgentNew would hand to docker, without spawning anything. Any
+ * per-call file it prepared (skills farm, credentials copy) is removed before
+ * it returns, so the argv is for inspection and for tests that run it with
+ * neither. It CONTAINS the credential: never log it.
+ */
+export function runAgentNewArgs(opts) {
+  const { args, cleanups } = buildRunAgentNew(opts);
+  for (const fn of cleanups) { try { fn(); } catch (_) {} }
+  return args;
+}
+
+const PULL_POLICIES = new Set(['never', 'missing', 'always']);
+
+function buildRunAgentNew({
   image,
   containerName,
   prompt,
@@ -479,33 +500,51 @@ export function runAgentNew({
   labels        = {},                    // extra --label key=val pairs
   memory        = '2g',
   cpus          = '1',
-  timeoutMs     = DEFAULT_TIMEOUT,
   addDir        = '/workspace',
   homeDir       = '/home/studio',
   appSlug,                               // scopes which skills get bind-mounted; required for skill loading
   actingUserId  = null,                  // whose subscription this dispatch bills to
   oauthToken    = null,                  // an already-resolved CLAUDE_CODE_OAUTH_TOKEN
   credentialDeps = {},                   // injection point for resolveAgentCredential
+  claudeHomeDir = null,                  // host path → mounted rw as ~/.claude (Crew coder: per-task home)
+  permissionMode = null,                 // as runAgentExec; null = skip permissions
+  mcpConfig     = null,                  // JSON for --mcp-config
+  allowedTools  = [],                    // MCP tool names pre-approved for Plan / Edits-only modes
+  secrets       = [],                    // further values scrubbed from the agent's output
+  addHosts      = [],                    // --add-host entries, e.g. 'host.docker.internal:host-gateway'
+  readOnlyRoot  = false,                 // --read-only root filesystem
+  tmpfs         = [],                    // --tmpfs specs, e.g. '/tmp:rw,size=512m'
+  pidsLimit     = 256,
+  pull          = null,                  // --pull policy: 'never' | 'missing' | 'always'
+  memorySwap    = null,                  // --memory-swap; null leaves Docker's default
+  cmd           = null,                  // argv replacing `sh -c <claude ...>` (tests only)
 }) {
   if (!image) throw new Error('runAgentNew: image required');
   if (!workspaceDir) throw new Error('runAgentNew: workspaceDir required');
+  if (pull != null && !PULL_POLICIES.has(pull)) throw new Error(`runAgentNew: unsupported pull policy '${pull}'`);
 
   // SECURITY hardening (v1.27.34 H7): drop all Linux capabilities,
   // forbid suid escalation, cap PIDs. Network stays default because
   // the agent needs to reach GitHub + npm; further isolation would
   // require a per-app outbound proxy (out of scope today).
-  const args = [
-    'run', '--rm',
+  const args = ['run', '--rm'];
+  if (pull) args.push('--pull', pull);
+  args.push(
     OOM_APP_FLAG,
     CPU_APP_FLAG,
     '--cap-drop=ALL',
     '--security-opt', 'no-new-privileges:true',
-    '--pids-limit=256',
-  ];
+    `--pids-limit=${pidsLimit}`,
+  );
+  if (readOnlyRoot) args.push('--read-only');
+  for (const t of tmpfs) args.push('--tmpfs', t);
+  for (const h of addHosts) args.push('--add-host', h);
   if (containerName) args.push('--name', containerName);
   args.push('--label', 'appcrane=true');
   for (const [k, v] of Object.entries(labels)) args.push('--label', `${k}=${v}`);
-  args.push(`--memory=${memory}`, `--cpus=${cpus}`);
+  args.push(`--memory=${memory}`);
+  if (memorySwap) args.push(`--memory-swap=${memorySwap}`);
+  args.push(`--cpus=${cpus}`);
   args.push('--workdir', workdir);
   args.push('-e', `HOME=${homeDir}`);
   // Preflight checks built up alongside the mounts so each has the
@@ -513,6 +552,10 @@ export function runAgentNew({
   const preflight = [
     { path: workdir, mode: workspaceMode === 'ro' ? 'd' : 'dw', label: 'Workspace' },
   ];
+  if (claudeHomeDir) {
+    args.push('-v', `${claudeHomeDir}:${homeDir}/.claude`);
+    preflight.push({ path: `${homeDir}/.claude`, mode: 'dw', label: 'Claude home' });
+  }
   // One decision, shared with runAgentExec — see the precedence block above.
   // Whichever credential wins, the other two are left off the container:
   // Claude Code's auth precedence is API key > credentials.json > OAuth token,
@@ -557,11 +600,18 @@ export function runAgentNew({
     preflight.push({ path: `${homeDir}/.claude/skills`, mode: 'd', label: 'Skills dir' });
   }
 
-  args.push(image, 'sh', '-c', buildClaudeCmd({ prompt, model, resume, addDir, systemPrompt, preflight }));
-  const agent = new Agent(args, timeoutMs, [cred.oauthToken]);
-  if (credsMount)  agent.registerCleanup(credsMount.cleanup);
-  if (skillsMount) agent.registerCleanup(skillsMount.cleanup);
-  return agent;
+  const cleanups = [];
+  if (credsMount)  cleanups.push(credsMount.cleanup);
+  if (skillsMount) cleanups.push(skillsMount.cleanup);
+  let tail;
+  try {
+    tail = cmd || ['sh', '-c', buildClaudeCmd({ prompt, model, resume, addDir, systemPrompt, preflight, permissionMode, mcpConfig, allowedTools })];
+  } catch (err) {
+    for (const fn of cleanups) { try { fn(); } catch (_) {} }
+    throw err;
+  }
+  args.push(image, ...tail);
+  return { args, secrets: [cred.oauthToken, ...secrets], cleanups };
 }
 
 // One-shot wrapper: run a fresh container, collect text + usage into a Promise.

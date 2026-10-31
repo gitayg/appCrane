@@ -121,6 +121,7 @@ import log from '../utils/logger.js';
 import { jobStarted, trackJobSync } from './jobHealth.js';
 import { syncAppCoderAgents, isReservedAppCoderName, APP_CODER_SUFFIX } from './crewAppCoderAgents.js';
 import { planQuestion, renderQuestion } from './crewQuestionView.js';
+import { removeCrewTaskHome } from './crewCoderHome.js';
 
 export const CREW_LIMITS = Object.freeze({
   TASKS_PER_HOUR: 60,          // per sending agent
@@ -1483,16 +1484,21 @@ export function unblock(user, blockId) {
  */
 export function purgeExpiredCrewHistory(db = getDb()) {
   const cutoff = `-${CREW_LIMITS.RETENTION_DAYS} days`;
-  return db.transaction(() => {
+  const r = db.transaction(() => {
     const messages = db.prepare("DELETE FROM crew_messages WHERE created_at < datetime('now', ?)").run(cutoff).changes;
-    const tasks = db.prepare("DELETE FROM crew_tasks WHERE updated_at < datetime('now', ?)").run(cutoff).changes;
+    const ids = db.prepare("DELETE FROM crew_tasks WHERE updated_at < datetime('now', ?) RETURNING id").all(cutoff).map((t) => t.id);
+    const tasks = ids.length;
     // Only the last 24 hours matter to the e-mail cap; 30 days is plenty.
     db.prepare("DELETE FROM crew_first_contact_emails WHERE sent_at < datetime('now', ?)").run(cutoff);
     // Revoked rules are kept so a task can name the rule it ran under; once
     // every such task is past retention, so is the revoked rule.
     db.prepare("DELETE FROM crew_rules WHERE revoked_at IS NOT NULL AND revoked_at < datetime('now', ?)").run(cutoff);
-    return { tasks, messages };
+    return { tasks, messages, ids };
   })();
+  // A deleted task's Crew coder home (crewCoderHome.js) goes with it, not at the
+  // next restart's sweep. After the commit, so a rolled-back purge keeps them.
+  for (const id of r.ids) removeCrewTaskHome(id);
+  return { tasks: r.tasks, messages: r.messages };
 }
 
 let _timer = null;

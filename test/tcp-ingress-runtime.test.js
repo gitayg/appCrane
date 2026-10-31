@@ -246,7 +246,8 @@ const DOCKER_ARGS = {
  * pinned to --memory), so the constant this file compares against moved with
  * them; the memory-admission release added --oom-score-adj=500 after the
  * network (oomPriority.js), and the CPU-priority release --cpu-shares=128 after it
- * (cpuPriority.js). What these tests assert is unchanged: that tcp ingress adds the public
+ * (cpuPriority.js), and the guaranteed-memory release --memory-reservation at half
+ * --memory after --memory-swap. What these tests assert is unchanged: that tcp ingress adds the public
  * publish and NOTHING else, measured against whatever the current common
  * baseline is.
  */
@@ -263,6 +264,7 @@ function baselineArgs(slug, env, hostPort) {
     '--cpu-shares=128',
     '--memory=512m',
     '--memory-swap=512m',
+    '--memory-reservation=256m',
     '--cpus=0.5',
     '--pids-limit=512',
     '--security-opt', 'no-new-privileges',

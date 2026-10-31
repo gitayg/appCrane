@@ -1,4 +1,10 @@
 {
+  "2.131.0": [
+    "Each app now has a guaranteed memory amount of half its max. The app can still use up to its max whenever the server has memory free; memory admission now counts the guaranteed halves, so the server only promises what it can keep. Manage shows the guaranteed amount next to the limit, the memory e-mail shows guaranteed and max for each container, and saving a new limit updates both on the running app. The room above the guarantee is shared, not promised: containers have no swap, so if several apps grow at once the server can still run out.",
+    "Security: a Crew task sent to an app coder now runs in its own short-lived container. It sees only the app's code and its own task files, not your coder sessions' transcripts or the app's Claude login, and cannot leave anything behind for your next coder turn. Changes it makes still appear in your Changes tab for review. Each Crew turn is limited to 2 GB and 1 CPU.",
+    "Fix: when an app's Claude login refreshes its token in one place (a coder turn, Improve, Ask, a Crew task or the app's coder container), the other copies now pick up the new token instead of keeping one that no longer works, and an older copy can no longer overwrite a newer one when it is saved back.",
+    "The memory budget tool (appcrane_memory_budget) now also reports the total of the guaranteed amounts, which is what memory admission counts, and whether it fits in the server's memory."
+  ],
   "2.130.1": [
     "In the coder panel's Requests list, the Clear and Send to coder buttons stay on one line when the panel is narrow; the hint beside them shortens instead (hover it for the full text)."
   ],

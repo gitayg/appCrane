@@ -42,6 +42,11 @@
  *   (new, immediately after --oom-score-adj)  '--cpu-shares=128'
  * so Caddy, SSH and AppCrane win CPU over app containers under contention
  * (server/services/cpuPriority.js).
+ *
+ * AMENDED again at the guaranteed-memory release, one element:
+ *   (new, immediately after --memory-swap)  '--memory-reservation=256m'
+ * the guaranteed half of the 512 MB max, which memory admission counts
+ * (server/services/memoryAdmission.js).
  */
 export const HTTP_BASELINE_V2_44_2 = [
   'run',
@@ -61,6 +66,7 @@ export const HTTP_BASELINE_V2_44_2 = [
   '--cpu-shares=128',
   '--memory=512m',
   '--memory-swap=512m',
+  '--memory-reservation=256m',
   '--cpus=0.5',
   '--pids-limit=512',
   '--security-opt',

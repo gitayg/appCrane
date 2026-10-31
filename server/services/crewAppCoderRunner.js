@@ -11,11 +11,22 @@
  * reads or writes coder_sessions or the app container's conversation id, so
  * the coder panel's thread is neither shown to the task nor continued by it.
  *
- * What stays the same as any coder turn: the app's container and workspace
- * (builder/appContainer.js), the app's work queue (builder/appQueue.js), the
- * owner's credential (actingUserId → user token, app credentials or platform
- * key), the default coder mode, and a read-only per-app coder MCP key issued
- * for the turn and revoked when it ends.
+ * SECURITY FIX (review of v2.130.1): a Crew turn no longer runs inside the
+ * app's container either. That container mounts the app's shared transcript
+ * directory (every coder session's conversation) and its read-write
+ * credentials file, and keeps whatever a turn leaves behind (hooks, processes,
+ * files outside /workspace). Each turn now runs in its own throwaway container
+ * (runAgentNew, --rm, read-only root) that mounts only the workspace, the
+ * task's own Claude home (crewCoderHome.js), the app's skills read-only and,
+ * when the owner's credential is the app's credentials.json, a per-call copy
+ * of it. The owner's coder panel still runs in the app's container.
+ *
+ * What stays the same as any coder turn: the app's workspace (the app
+ * container is still created for it and marked busy for the turn, so it is not
+ * evicted mid-turn), the app's work queue (builder/appQueue.js), the owner's
+ * credential (actingUserId → user token, app credentials or platform key), the
+ * default coder mode, and a read-only per-app coder MCP key issued for the turn
+ * and revoked when it ends.
  *
  * Busy: refused while another person holds the app's coder workspace
  * (occupiedByAnother), and while anyone's interactive coder session on the
@@ -29,11 +40,51 @@
  * Resolves { ok: true, text, claudeSessionId } or { ok: false, reason, busy?,
  * claudeSessionId? }; never throws for a failed turn.
  */
+import crypto from 'crypto';
+import { execFile } from 'child_process';
 import { getDb } from '../db.js';
 import log from '../utils/logger.js';
 import { usesLocalRepo } from './managedRepo.js';
+import { prepareCrewTaskHome, CREW_CODER_CONTAINER_TYPE } from './crewCoderHome.js';
 
 const SESSION_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
+const STUDIO_IMAGE = process.env.APPSTUDIO_IMAGE || 'appcrane-studio:latest';
+export const CREW_CODER_MEMORY_MB = 2048;
+
+/**
+ * The runAgentNew options of one Crew turn, minus the prompt-specific ones.
+ * Exported so the isolation test runs exactly these mounts against Docker.
+ */
+export function crewTurnContainerOptions({ slug, taskId, workspaceDir, claudeHomeDir, containerName }) {
+  return {
+    image: STUDIO_IMAGE,
+    pull: 'never',
+    containerName,
+    labels: { 'appcrane.container.type': CREW_CODER_CONTAINER_TYPE, 'app.slug': slug, 'crew.task': String(taskId) },
+    workspaceDir,
+    claudeHomeDir,
+    appSlug: slug,
+    memory: '2g',
+    memorySwap: '2g',
+    cpus: '1',
+    pidsLimit: 256,
+    readOnlyRoot: true,
+    tmpfs: [
+      '/tmp:rw,exec,nosuid,nodev,size=512m',
+      '/home/studio:rw,nosuid,nodev,size=64m,uid=100,gid=101,mode=0700',
+    ],
+    // The per-turn coder MCP endpoint (services/coderMcpKey.js), as the app container has it.
+    addHosts: ['host.docker.internal:host-gateway'],
+  };
+}
+
+export function crewContainerName(slug, taskId) {
+  return `appcrane-crew-${slug}-t${taskId}-${crypto.randomBytes(3).toString('hex')}`;
+}
+
+function removeContainer(name) {
+  execFile('docker', ['rm', '-f', name], { timeout: 15000 }, () => {});
+}
 
 function interactiveTurnRunning(slug) {
   return !!getDb().prepare("SELECT 1 FROM coder_sessions WHERE app_slug = ? AND status IN ('active', 'queued')").get(slug);
@@ -55,6 +106,7 @@ async function realDeps() {
   const appQueue = await import('./builder/appQueue.js');
   const runAgent = await import('./llm/runAgent.js');
   const coderMcp = await import('./coderMcpKey.js');
+  const admission = await import('./memoryAdmission.js');
   const { defaultCoderModel } = await import('./llm/coderModels.js');
   const { DEFAULT_CODER_MODE, permissionModeFor } = await import('./llm/coderModes.js');
   const { coderSystemPrompt } = await import('./builder/deliveryPrompt.js');
@@ -63,7 +115,11 @@ async function realDeps() {
     getOrCreateContainer: appContainer.getOrCreate,
     setContainerBusy: appContainer.setBusy,
     enqueue: (slug, item) => appQueue.enqueue(slug, { ...item, priority: appQueue.PRIORITY.BUILDER }),
-    runAgentExec: runAgent.runAgentExec,
+    runAgentNew: runAgent.runAgentNew,
+    prepareHome: prepareCrewTaskHome,
+    admit: admission.admitContainer,
+    reserveMemory: admission.reserveMemory,
+    removeContainer,
     agentCredentialKind: runAgent.agentCredentialKind,
     issueKey: coderMcp.issueCoderMcpKey,
     revokeKey: coderMcp.revokeCoderMcpKey,
@@ -109,10 +165,27 @@ export async function defaultCoderRunner({ app, userId, prompt, taskId, resume =
   }).catch((err) => ({ ok: false, reason: `The coder turn failed: ${err.message}` }));
 }
 
-function runTurn(d, { app, c, userId, prompt, taskId, resumeId, signal }) {
+async function runTurn(d, { app, c, userId, prompt, taskId, resumeId, signal }) {
+  if (signal?.aborted) return { ok: false, reason: 'The task was canceled before the coder started.' };
+  const name = crewContainerName(app.slug, taskId);
+  try {
+    await d.admit({
+      name, memoryMb: CREW_CODER_MEMORY_MB, cpus: 1, kind: 'crew-coder', slug: app.slug, appId: app.id ?? null, userId,
+      what: 'Crew coder turn', subject: `the Crew coder for ${app.slug}`,
+    });
+  } catch (err) {
+    return { ok: false, reason: `The coder could not start: ${err.message}` };
+  }
+  if (signal?.aborted) return { ok: false, reason: 'The task was canceled before the coder started.' };
+  let claudeHomeDir;
+  try {
+    claudeHomeDir = d.prepareHome(taskId, { slug: app.slug, resumeId });
+  } catch (err) {
+    return { ok: false, reason: `The coder could not start: ${err.message}` };
+  }
+  const release = d.reserveMemory(name, CREW_CODER_MEMORY_MB * 1024 * 1024);
   return new Promise((resolve) => {
-    if (signal?.aborted) return resolve({ ok: false, reason: 'The task was canceled before the coder started.' });
-    const kind = d.agentCredentialKind({ actingUserId: userId, hasAppCredentials: !!c.credsCleanup, apiKey: process.env.ANTHROPIC_API_KEY });
+    const kind = d.agentCredentialKind({ actingUserId: userId, appSlug: app.slug, apiKey: process.env.ANTHROPIC_API_KEY });
     let key = null;
     try {
       key = d.issueKey({ userId, appId: app.id, sessionId: `crew-task:${taskId}` });
@@ -121,13 +194,12 @@ function runTurn(d, { app, c, userId, prompt, taskId, resumeId, signal }) {
     }
     let runner;
     try {
-      runner = d.runAgentExec({
-        containerId: c.containerId,
+      runner = d.runAgentNew({
+        ...crewTurnContainerOptions({ slug: app.slug, taskId, workspaceDir: c.workspaceDir, claudeHomeDir, containerName: name }),
         prompt,
         model: d.model(),
         apiKey: process.env.ANTHROPIC_API_KEY,
         resume: resumeId,
-        hasAppCredentials: !!c.credsCleanup,
         actingUserId: userId,
         permissionMode: d.permissionMode(),
         systemPrompt: d.systemPrompt(key ? d.mcpPrompt : null),
@@ -135,6 +207,7 @@ function runTurn(d, { app, c, userId, prompt, taskId, resumeId, signal }) {
       });
     } catch (err) {
       if (key) { try { d.revokeKey(key.id); } catch (_) { /* expires anyway */ } }
+      release();
       return resolve({ ok: false, reason: `The coder could not start: ${err.message}` });
     }
 
@@ -146,6 +219,10 @@ function runTurn(d, { app, c, userId, prompt, taskId, resumeId, signal }) {
       if (done) return;
       done = true;
       if (key) { try { d.revokeKey(key.id); } catch (_) { /* expires anyway */ } }
+      // Backstop: `docker run --rm` removes it on a normal exit; a stop or a
+      // killed client can leave it running.
+      try { d.removeContainer(name); } catch (_) { /* gone */ }
+      release();
       try { d.setContainerBusy(app.slug, false); } catch (_) { /* container gone */ }
       signal?.removeEventListener?.('abort', onAbort);
       resolve({ claudeSessionId: sessionId, ...r });

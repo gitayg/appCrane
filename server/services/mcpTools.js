@@ -4670,12 +4670,14 @@ const TOOLS = [
         : `Configured memory ceilings total ${gb(b.committed_mb)} across ${b.app_count} app(s), within this host's ` +
           `${gb(b.host_mb)} of RAM (${pct}%), leaving ${gb(b.headroom_mb)} uncommitted. This is a sum of LIMITS, ` +
           'not a measurement of memory in use.';
+      const guaranteed = ` The guaranteed amounts (half of each ceiling, what memory admission counts) total ${gb(b.guaranteed_mb)}` +
+        (b.guaranteed_fits ? ', which fits in RAM.' : `, MORE than the host's ${gb(b.host_mb)}: even the guarantees cannot all be kept.`);
 
       return {
         ...b,
         measures: 'configured per-container memory limits (docker --memory), summed across both stages of every app',
         does_not_measure: 'actual memory usage — nothing here reads a running container',
-        summary,
+        summary: summary + guaranteed,
       };
     },
   },

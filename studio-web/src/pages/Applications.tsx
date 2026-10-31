@@ -19,6 +19,7 @@ import '../topbar-element/jsx.d.ts'
 import { serverDate } from '../utils/serverDate'
 import { appOpenUrl } from '../lib/appLinks'
 import { limitsAppliedText, type LimitApply } from '../utils/limitsApplied'
+import { guaranteedHint } from '../utils/guaranteedMemory'
 
 defineCraneAppTopbar()
 
@@ -1597,7 +1598,7 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                         value={ramVal} type="number" min={0}
                         ariaLabel={`RAM cap in MB for ${app.name}`}
                         disabled={!isPlatformAdmin}
-                        title={isPlatformAdmin ? undefined : 'Only platform admins can change CPU/memory limits'}
+                        title={isPlatformAdmin ? (typeof ramVal === 'number' ? guaranteedHint(ramVal) : undefined) : 'Only platform admins can change CPU/memory limits'}
                         onSave={v => saveRam(app.slug, v)}
                         inputStyle={{ width: 70 }}
                       />

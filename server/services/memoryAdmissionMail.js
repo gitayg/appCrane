@@ -13,7 +13,7 @@
 import { enqueueEmail } from './emailQueue.js';
 import { dashboardBaseUrl } from './vulnRequests.js';
 import { BRAND, esc, bulletList, renderBrandedEmail } from './mail/brandedLayout.js';
-import { readUsage, toMb } from './memoryAdmission.js';
+import { readUsage, toMb, needText } from './memoryAdmission.js';
 import { logAudit } from '../middleware/audit.js';
 import log from '../utils/logger.js';
 
@@ -74,14 +74,17 @@ async function topContainers(measurement) {
   return top.map((c) => ({
     label: c.label, name: c.name, image: c.image || null, kind: c.kind, countedFrom: c.countedFrom,
     capMb: c.unlimited ? null : toMb(c.capBytes),
+    guaranteedMb: c.reservedBytes > 0 ? toMb(c.reservedBytes) : null,
     usageMb: usage.has(c.name) ? toMb(usage.get(c.name)) : null,
   }));
 }
 
 // The image says what a container is when its name does not (Docker's random
-// names, or a container AppCrane did not start).
+// names, or a container AppCrane did not start). A container with a guaranteed
+// amount (an app: half its max) shows both, since admission counts the first.
 function containerLine(c) {
-  const cap = c.capMb == null ? 'no limit' : `cap ${c.capMb} MB`;
+  const cap = c.capMb == null ? 'no limit'
+    : c.guaranteedMb != null ? `guaranteed ${c.guaranteedMb} MB, max ${c.capMb} MB` : `cap ${c.capMb} MB`;
   const use = c.usageMb == null ? 'usage unknown' : `using ${c.usageMb} MB`;
   const image = c.image ? ` [image ${c.image}]` : '';
   const counted = c.kind === 'other' ? ', not started by AppCrane, counted at its usage' : '';
@@ -120,9 +123,9 @@ export async function notifyMemoryAdmission({
 
   const top = await topContainers(measurement);
   const numbers = [
-    `Needed: ${toMb(verdict.newBytes)} MB${verdict.replacedBytes ? ` (replacing ${toMb(verdict.replacedBytes)} MB)` : ''}`,
+    `Needed: ${needText(verdict)}${verdict.replacedBytes ? ` (replacing ${toMb(verdict.replacedBytes)} MB)` : ''}`,
     `Free: ${toMb(verdict.freeBytes)} MB`,
-    `Committed: ${toMb(verdict.committedBytes)} MB of ${toMb(verdict.capacityBytes)} MB capacity`,
+    `Committed (guaranteed amounts, or the cap where a container has none): ${toMb(verdict.committedBytes)} MB of ${toMb(verdict.capacityBytes)} MB capacity`,
     `Host memory: ${toMb(measurement.totalBytes)} MB (${measurement.totalSource === 'docker' ? 'from docker info' : 'docker info failed; this machine\'s RAM'}), reserve ${toMb(measurement.reserveBytes)} MB`,
   ];
   const adminText = `${message}\n\n${numbers.join('\n')}\n\nContainers holding the most memory:\n`

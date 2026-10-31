@@ -257,6 +257,36 @@ test("a question from the coder goes to the sender's owner; their reply starts o
   nextResult = () => ({ ok: true, text: 'Changed src/cart.js: the total now rounds to cents.' });
 });
 
+test("a task's Claude home stays while the task is open and goes when it closes or is deleted", async () => {
+  const { prepareCrewTaskHome, crewTaskHomeDir } = await import('../server/services/crewCoderHome.js');
+  const { existsSync } = await import('fs');
+  const ask = (args) => { prepareCrewTaskHome(args.taskId, {}); return { ok: true, text: 'Which page?\nQUESTION FOR REQUESTER: About or Home?' }; };
+  try {
+    nextResult = ask;
+    const s = await mcp(sven, 'appcrane_crew_send', { as_agent: 'sven-laptop', to_agent: 'shop-coder', title: 'Page', message: 'Fix the page.' });
+    await settle();
+    assert.equal(task(s.task_id).state, 'input_required');
+    assert.ok(existsSync(crewTaskHomeDir(s.task_id)), 'kept for the follow-up');
+    nextResult = (args) => { prepareCrewTaskHome(args.taskId, {}); return { ok: true, text: 'Fixed the about page.' }; };
+    const d = db.prepare("SELECT * FROM crew_decisions WHERE task_id = ? AND status = 'pending'").get(s.task_id);
+    decideTask(sven, d.id, { decision: 'reply', message: 'About.' });
+    await settle();
+    assert.equal(task(s.task_id).state, 'completed');
+    assert.ok(!existsSync(crewTaskHomeDir(s.task_id)), 'removed once the task is closed');
+
+    nextResult = ask;
+    const g = await mcp(sven, 'appcrane_crew_send', { as_agent: 'sven-laptop', to_agent: 'shop-coder', title: 'Gone', message: 'Fix the footer.' });
+    await settle();
+    assert.ok(existsSync(crewTaskHomeDir(g.task_id)));
+    db.prepare('DELETE FROM crew_tasks WHERE id = ?').run(g.task_id);
+    crew.announce(g.task_id, 'deleted');
+    await settle();
+    assert.ok(!existsSync(crewTaskHomeDir(g.task_id)), 'removed when the task is deleted');
+  } finally {
+    nextResult = () => ({ ok: true, text: 'Changed src/cart.js: the total now rounds to cents.' });
+  }
+});
+
 test('a follow-up that asks for production or deletion is held for the owner and runs nothing until approved', async () => {
   nextResult = () => ({ ok: true, text: 'Done the copy.\nQUESTION FOR REQUESTER: anything else?' });
   const s = await mcp(sven, 'appcrane_crew_send', { as_agent: 'sven-laptop', to_agent: 'shop-coder', title: 'Copy edit', message: 'Fix the checkout copy.' });

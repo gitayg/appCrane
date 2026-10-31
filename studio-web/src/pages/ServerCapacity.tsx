@@ -139,7 +139,7 @@ export function ServerCapacity() {
                   {m.containers.map(c => (
                     <tr key={c.name}>
                       <td style={{ padding: '2px 12px 2px 0' }}>{c.label}</td>
-                      <td style={{ padding: '2px 12px 2px 0' }}>{c.cap_mb == null ? 'no limit' : `${c.cap_mb} MB cap`}</td>
+                      <td style={{ padding: '2px 12px 2px 0' }}>{c.cap_mb == null ? 'no limit' : c.counted_from === 'reservation' ? `${c.counted_mb} MB guaranteed, ${c.cap_mb} MB max` : `${c.cap_mb} MB cap`}</td>
                       <td style={{ color: 'var(--dim)' }}>{c.cap_mb == null ? `counted ${c.counted_mb} MB (${c.counted_from === 'usage' ? 'current use' : 'default'})` : ''}</td>
                     </tr>
                   ))}

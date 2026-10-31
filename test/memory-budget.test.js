@@ -85,6 +85,8 @@ test('an empty platform commits nothing and is not over-committed', () => {
     host_mb: HOST_MB,
     committed_mb: 0,
     headroom_mb: HOST_MB,
+    guaranteed_mb: 0,
+    guaranteed_fits: true,
     over_committed: false,
     ratio: 0,
     app_count: 0,
@@ -104,6 +106,17 @@ test('a deployed app commits BOTH environments, not one', () => {
   assert.deepEqual(b.top, [{ slug: 'alpha', max_ram_mb: 512 }]);
   assert.equal(b.headroom_mb, HOST_MB - 1024);
   assert.equal(b.over_committed, false);
+});
+
+test('guaranteed_mb is half of each ceiling, both environments, and says whether it fits', () => {
+  reset();
+  mockHost();
+  makeApp('alpha', 1024);
+  makeApp('beta', 513);
+  const b = memoryBudget(db);
+  assert.equal(b.committed_mb, (1024 + 513) * 2);
+  assert.equal(b.guaranteed_mb, (512 + 256) * 2);
+  assert.equal(b.guaranteed_fits, true);
 });
 
 test('an app with no explicit limit falls back to 512', () => {

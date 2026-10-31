@@ -505,6 +505,15 @@ surface reports the *configured* value. `appcrane_check_resource_limits` is what
 tells the two apart — `state: not_applied` on memory means no limit at all, so
 that container can take the whole host.
 
+An app's RAM setting is its **max** (`--memory`, no swap). AppCrane also gives
+the container a **guaranteed** amount of half that (`--memory-reservation`),
+derived, never set separately. Memory admission counts the guaranteed halves,
+not the maxes, so an app can burst toward its max only while the server has
+memory free. The burst room is shared and not promised: containers have no
+swap, so several apps bursting at once can still end in a kernel OOM kill.
+Coder, auto-patch and managed database containers get no guaranteed amount and
+are counted at their full cap.
+
 Off-site backup has existed since v2.21.9 and is a no-op until a bucket and
 credentials are entered, which made it easy to believe there was no backup
 feature at all. These make the state answerable without opening Settings:

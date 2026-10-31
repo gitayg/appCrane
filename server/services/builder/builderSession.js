@@ -5,6 +5,7 @@ import { randomUUID } from 'crypto';
 import { getDb } from '../../db.js';
 import { ensureCodebaseContext } from '../appstudio/contextBuilder.js';
 import { runAgentExec, agentCredentialKind, NO_CREDENTIAL_MESSAGE } from '../llm/runAgent.js';
+import { syncClaudeCredentials } from '../claudeCredentials.js';
 import {
   getOrCreate as ensureAppContainer,
   getContainer,
@@ -685,6 +686,9 @@ async function runBuilderTurn(sessionId, state, prompt, model, mode = DEFAULT_CO
     } catch (err) {
       log.warn(`Builder: could not issue a coder MCP key for ${state.appSlug}: ${err.message}`);
     }
+    // The app container's login copy outlives this turn: take any rotation
+    // another holder stored since, and store this turn's on the way out.
+    if (c.credsCleanup) syncClaudeCredentials(state.appSlug);
     let runner;
     try {
       runner = runAgentExec({
@@ -716,6 +720,7 @@ async function runBuilderTurn(sessionId, state, prompt, model, mode = DEFAULT_CO
       if (settled) return;
       settled = true;
       if (mcpKey) { try { revokeCoderMcpKey(mcpKey.id); } catch (_) {} }
+      if (c.credsCleanup) syncClaudeCredentials(state.appSlug);
       state.settleTurn = null;
       resolveRun();
     };
