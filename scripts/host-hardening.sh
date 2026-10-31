@@ -236,7 +236,16 @@ RESERVE="${_mount%/}/appcrane-disk-reserve"
 RESERVE_BYTES=$((1024 * 1024 * 1024))
 MIN_FREE_GB="${APPCRANE_RESERVE_MIN_FREE_GB:-10}"
 
-if [[ -f "$RESERVE" ]] && [[ "$(stat -c %s "$RESERVE")" -ge "$RESERVE_BYTES" ]]; then
+# Root writes here, and DATA_DIR comes from .env, which the run user can edit.
+# So only a root-owned mount point that nobody else can write to is used, and
+# never through a symlink: otherwise a planted link would point fallocate and
+# chmod at a system file.
+_mstat="$(stat -c '%u %a' "$_mount")"
+if [[ "${_mstat%% *}" != 0 ]] || (( 8#${_mstat##* } & 8#022 )); then
+  warn "reserve: $_mount is not root-owned or is writable by others — skipped"
+elif [[ -L "$RESERVE" ]] || { [[ -e "$RESERVE" ]] && [[ ! -f "$RESERVE" ]]; }; then
+  warn "reserve: $RESERVE is a symlink or not a regular file — left alone, skipped"
+elif [[ -f "$RESERVE" ]] && [[ "$(stat -c %s "$RESERVE")" -ge "$RESERVE_BYTES" ]]; then
   log "reserve: $RESERVE already present"
 else
   _avail_kb="$(df -Pk "$_mount" | awk 'NR==2 {print $4}')"

@@ -1,4 +1,7 @@
 {
+  "2.127.1": [
+    "Security: the server hardening script now creates its 1 GB emergency reserve file only on a disk folder that belongs to root and that no one else can write to, and never through a link. Before, on a server where AppCrane runs without root, someone controlling the app could have pointed that file at a system file."
+  ],
   "2.127.0": [
     "Platform admins can now check and apply the server's log limits from Settings > Job Health > Host limits: the journal cap, syslog rotation, Docker log defaults, automatic security updates and the 1 GB disk reserve each show as applied or missing, and Apply runs the hardening script after a two-factor code. When AppCrane does not run as root, the installer sets up a narrow sudo rule for a root-owned copy of the script; without it, the card shows the command to run on the server."
   ],

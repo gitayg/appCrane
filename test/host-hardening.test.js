@@ -86,7 +86,7 @@ function section(chunk, name) {
 }
 
 // Runs <setup>, then the script <runs> times, dumping state after each run.
-function run(rel, setup = '', { runs = 1, env = {} } = {}) {
+function run(rel, setup = '', { runs = 1, env = {}, dockerArgs = [] } = {}) {
   const body = [
     'set -e',
     'mkdir -p /opt/appcrane/scripts /opt/appcrane/data',
@@ -97,7 +97,7 @@ function run(rel, setup = '', { runs = 1, env = {} } = {}) {
     'echo "@@LOGROTATE"; logrotate -d /etc/logrotate.conf 2>&1; echo "@@LREXIT $?"',
   ].join('\n');
   const envArgs = Object.entries(env).flatMap(([k, v]) => ['-e', `${k}=${v}`]);
-  const out = execFileSync('docker', ['run', '--rm', ...envArgs, '-v', `${SCRIPT}:/src/host-hardening.sh:ro`, images[rel], 'bash', '-c', body],
+  const out = execFileSync('docker', ['run', '--rm', ...envArgs, ...dockerArgs, '-v', `${SCRIPT}:/src/host-hardening.sh:ro`, images[rel], 'bash', '-c', body],
     { encoding: 'utf8', timeout: 90000, stdio: ['ignore', 'pipe', 'pipe'] });
   const runsOut = out.split(/^@@RUN \d+\n/m).slice(1).map((chunk) => {
     const file = (p) => {
@@ -184,6 +184,25 @@ test('reserve: skipped with a warning when it would leave too little free space'
   assert.equal(r.runs[0].exit, 0);
   assert.equal(r.runs[0].reserve, 'none');
   assert.match(r.runs[0].log, /reserve: only .* skipped/);
+});
+
+// The root-owned copy runs as root but reads DATA_DIR from .env, which the run
+// user can edit, so the reserve must never be written where that user can plant
+// a link.
+test('reserve: a mount point others can write to is skipped', { skip: skipFor(R) }, () => {
+  const r = run(R, `printf "DATA_DIR=/mnt/data\\n" > /opt/appcrane/.env; echo "@@MOUNT"; stat -c '%u %a' /mnt/data`,
+    { env: { APPCRANE_RESERVE_MIN_FREE_GB: '0' }, dockerArgs: ['--tmpfs', '/mnt/data:mode=1777'] });
+  assert.equal(r.runs[0].exit, 0, r.runs[0].log);
+  assert.match(r.runs[0].log, /reserve: \/mnt\/data is not root-owned or is writable by others/);
+  assert.doesNotMatch(r.runs[0].log, /reserve: created/);
+});
+
+test('reserve: a planted symlink is left alone and its target untouched', { skip: skipFor(R) }, () => {
+  const r = run(R, `echo keep > /etc/victim; chmod 644 /etc/victim; ln -s /etc/victim /appcrane-disk-reserve`,
+    { env: { APPCRANE_RESERVE_MIN_FREE_GB: '0' } });
+  assert.equal(r.runs[0].exit, 0, r.runs[0].log);
+  assert.match(r.runs[0].log, /reserve: \/appcrane-disk-reserve is a symlink or not a regular file/);
+  assert.doesNotMatch(r.runs[0].log, /reserve: created/);
 });
 
 test('logrotate: an rsyslog file that already has maxsize is not edited again', { skip: skipFor(R) }, () => {
@@ -329,7 +348,7 @@ test('install-host-hardening: root-owned copy with REPO_DIR baked, sudoers rule 
   assert.match(sec('L'), /rc=0$/m, 'sudo -n -l <copy> exits 0 when permitted');
   assert.match(sec('LARG'), /rc=1$/m, 'with an argument it is not permitted');
   assert.match(sec('RUN'), /rc=0$/m, sec('RUN'));
-  assert.match(sec('RUN'), /on \/mnt\/data|\/mnt\/data\/appcrane-disk-reserve/, 'the copy found DATA_DIR through the baked repo path');
+  assert.match(sec('RUN'), /on \/mnt\/data|\/mnt\/data\/appcrane-disk-reserve|reserve: \/mnt\/data /, 'the copy found DATA_DIR through the baked repo path');
   assert.match(sec('RUNARG'), /rc=1$/m);
   assert.match(sec('REPOSUDO'), /rc=1$/m, 'the repo copy must not be sudoable');
 });
