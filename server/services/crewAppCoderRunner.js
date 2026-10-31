@@ -17,8 +17,9 @@
  * key), the default coder mode, and a read-only per-app coder MCP key issued
  * for the turn and revoked when it ends.
  *
- * Busy: refused while anyone's interactive coder session on the app is
- * mid-turn (the workspace would change under both), and the app's work queue
+ * Busy: refused while another person holds the app's coder workspace
+ * (occupiedByAnother), and while anyone's interactive coder session on the
+ * app is mid-turn (the workspace would change under both); and the app's work queue
  * serialises the Crew turn with everything else on the container — an owner
  * who starts a turn while a Crew turn runs waits in that queue, as behind an
  * Improve job. The workspace itself is shared: what the Crew turn changes
@@ -36,6 +37,17 @@ const SESSION_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 
 function interactiveTurnRunning(slug) {
   return !!getDb().prepare("SELECT 1 FROM coder_sessions WHERE app_slug = ? AND status IN ('active', 'queued')").get(slug);
+}
+
+/**
+ * SECURITY FIX (review of v2.129.1): another person holds the app's coder
+ * workspace — the occupancy builderSession enforces between people
+ * (activeOtherSessionForApp: a starting, idle or active session of someone
+ * else). A Crew turn would edit their unreleased work in progress, so it is
+ * refused; it never takes over.
+ */
+function occupiedByAnother(slug, ownerId) {
+  return !!getDb().prepare("SELECT 1 FROM coder_sessions WHERE app_slug = ? AND user_id <> ? AND status IN ('starting', 'idle', 'active')").get(slug, ownerId);
 }
 
 async function realDeps() {
@@ -63,6 +75,7 @@ async function realDeps() {
     systemPrompt: coderSystemPrompt,
     explainTurnFailure,
     interactiveTurnRunning,
+    occupiedByAnother,
   };
 }
 
@@ -72,6 +85,9 @@ export async function defaultCoderRunner({ app, userId, prompt, taskId, resume =
   if (!usesLocalRepo(app)) return { ok: false, reason: `${app.slug} is not Crane-hosted any more, so its coder cannot run.` };
   if (d.agentCredentialKind({ actingUserId: userId, appSlug: app.slug }) === 'none') {
     return { ok: false, reason: `${app.slug}'s owner has no Claude credential connected (and the app and platform have none), so the coder cannot run.` };
+  }
+  if (d.occupiedByAnother(app.slug, userId)) {
+    return { ok: false, busy: true, reason: `${app.slug}'s coder workspace is in use by another person right now. Send the task again later.` };
   }
   if (d.interactiveTurnRunning(app.slug)) {
     return { ok: false, busy: true, reason: `${app.slug}'s coder is in the middle of a turn in someone's coder session. Send the task again later.` };

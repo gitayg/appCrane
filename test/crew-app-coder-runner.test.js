@@ -103,6 +103,25 @@ test("busy while someone's interactive coder session is mid-turn", async () => {
   }
 });
 
+test('busy while another person holds the app\'s coder workspace, even idle; the owner\'s own session does not count', async () => {
+  db.prepare("INSERT INTO users (id, name, email, role, api_key_hash, active, kind) VALUES (43, 'Omar', 'omar@example.com', 'user', 'x-runner-test-2', 1, 'human')").run();
+  db.prepare("INSERT INTO coder_sessions (id, app_slug, user_id, branch_name, status) VALUES ('other-s', 'shop', 43, 'builder/shop', 'idle')").run();
+  try {
+    const { deps, calls } = fakes({ script: answer('s', 'x') });
+    const r = await defaultCoderRunner({ app, userId: 42, prompt: 'P', taskId: 't6' }, deps);
+    assert.equal(r.busy, true);
+    assert.match(r.reason, /in use by another person/);
+    assert.equal(calls.exec.length, 0, 'nothing ran in their workspace');
+  } finally {
+    db.prepare("UPDATE coder_sessions SET status = 'paused' WHERE id = 'other-s'").run();
+  }
+  // Paused: no longer holding it. The owner's own idle session ('owner-s') never blocks.
+  const { deps, calls } = fakes({ script: answer('s', 'ok') });
+  const r = await defaultCoderRunner({ app, userId: 42, prompt: 'P', taskId: 't7' }, deps);
+  assert.equal(r.ok, true);
+  assert.equal(calls.exec.length, 1);
+});
+
 test('a failed turn fails with its reason', async () => {
   const { deps, calls } = fakes({ script: answer('s', 'API Error: 401'), failure: 'Your Claude token was rejected.' });
   const r = await defaultCoderRunner({ app, userId: 42, prompt: 'P', taskId: 't3' }, deps);

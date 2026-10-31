@@ -694,9 +694,12 @@ function applyDeclaredApproval(db, task, from, to, gate) {
 function openDecision(db, { task, askedBy, subject, decider, ask, action, scope, texts }) {
   closePendingDecisions(db, [task.id]);
   const id = newOpaqueId();
-  db.prepare(`INSERT INTO crew_decisions (id, task_id, asked_by_agent_id, subject_agent_id, decider_user_id, ask, action, scope, always_ask)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .run(id, task.id, askedBy, subject, decider, ask, action || null, scope || null, alwaysAskReason({ action, scope, texts }));
+  // SECURITY FIX (review of v2.129.1): a declared question covers the task's
+  // messages as they stand now, and only those (migration 164).
+  const covers = db.prepare('SELECT MAX(id) AS id FROM crew_messages WHERE task_id = ?').get(task.id).id ?? null;
+  db.prepare(`INSERT INTO crew_decisions (id, task_id, asked_by_agent_id, subject_agent_id, decider_user_id, ask, action, scope, always_ask, covers_msg_id)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(id, task.id, askedBy, subject, decider, ask, action || null, scope || null, alwaysAskReason({ action, scope, texts }), covers);
   return id;
 }
 
@@ -1230,6 +1233,12 @@ export function crewLog(user, { limit = 100 } = {}) {
     FROM crew_decisions d JOIN crew_agents aa ON aa.id = d.asked_by_agent_id JOIN users du ON du.id = d.decider_user_id
     WHERE d.task_id = ? ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1`);
   const questionStmt = db.prepare(`SELECT body FROM crew_messages WHERE task_id = ? AND from_agent_id = ? AND actor_kind = 'agent' ORDER BY id DESC LIMIT 1`);
+  // A declared question shows the person exactly the messages it covers that
+  // no earlier answer of theirs did: what they approve is what they read.
+  const prevCoverStmt = db.prepare(`SELECT MAX(covers_msg_id) AS id FROM crew_decisions
+                                    WHERE task_id = ? AND ask = 'declared' AND status IN ('approved', 'replied') AND decider_user_id = ?`);
+  const coveredStmt = db.prepare(`SELECT body FROM crew_messages WHERE task_id = ? AND id > ? AND id <= ?
+                                  AND NOT (from_agent_id = ? AND actor_kind = 'human') ORDER BY id ASC LIMIT 20`);
   const ruleStmt = db.prepare("SELECT rule_id FROM crew_decisions WHERE task_id = ? AND status = 'by_rule' ORDER BY created_at DESC LIMIT 1");
   return rows.map((t) => {
     const mineSent = t.from_owner_id === user.id;
@@ -1268,11 +1277,19 @@ export function crewLog(user, { limit = 100 } = {}) {
     const d = t.state === 'input_required' ? decisionStmt.get(t.id) : null;
     if (d && d.status === 'pending') {
       const mineToDecide = d.decider_user_id === user.id;
-      const q = questionStmt.get(t.id, d.asked_by_agent_id);
+      let question;
+      if (d.ask === 'declared' && d.covers_msg_id != null) {
+        const from = prevCoverStmt.get(t.id, d.decider_user_id).id || 0;
+        const covered = coveredStmt.all(t.id, from, d.covers_msg_id, t.to_agent_id).map((m) => oneLine(m.body, 600));
+        question = covered.length ? oneLine(covered.join(' | '), 1200) : null;
+      } else {
+        const q = questionStmt.get(t.id, d.asked_by_agent_id);
+        question = q ? oneLine(q.body, 600) : null;
+      }
       entry.input_required = {
         asked_by: d.asked_by, ask: d.ask, action: d.action, scope: d.scope,
         always_asks: d.always_ask || null,
-        question: q ? oneLine(q.body, 600) : null,
+        question,
         waiting_for: mineToDecide ? 'you' : d.decider_name || 'another person',
         // Only the routed person gets a decision id: nobody else can act on it.
         ...(mineToDecide ? { decision_id: d.id, can_always_allow: !!(d.action && d.scope && !d.always_ask) } : {}),

@@ -115,11 +115,15 @@ function claim(db, taskId) {
     if (!messages.length) return null;
     // SECURITY FIX (review of v2.129.0): production and deletions always ask,
     // follow-ups included. The words that count are the ones nobody on the
-    // app's side has approved yet: everything after the owner's latest answer
-    // on this task (a human message on the app coder's side), except the
-    // owner's own words.
-    const ownerOk = db.prepare("SELECT MAX(id) AS id FROM crew_messages WHERE task_id = ? AND from_agent_id = ? AND actor_kind = 'human'")
-      .get(t.id, t.to_agent_id).id || 0;
+    // app's side has approved yet, except the owner's own words.
+    // SECURITY FIX (review of v2.129.1): "approved" means covered by a
+    // declared question the CURRENT owner approved (or answered): messages up
+    // to its covers_msg_id, the newest message when it was asked. A message
+    // posted after the question and before the answer was never shown to the
+    // owner, so it is checked again here.
+    const ownerOk = db.prepare(`SELECT MAX(covers_msg_id) AS id FROM crew_decisions
+                                WHERE task_id = ? AND ask = 'declared' AND status IN ('approved', 'replied') AND decider_user_id = ?`)
+      .get(t.id, t.coder_owner_id).id || 0;
     const unapproved = messages.filter((m) => m.id > ownerOk && !(m.from_agent_id === t.to_agent_id && m.actor_kind === 'human'))
       .map((m) => m.body);
     if (unapproved.length && alwaysAskReason({ texts: unapproved })) {

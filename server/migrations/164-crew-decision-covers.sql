@@ -1,0 +1,11 @@
+-- Crew: what a person's answer to a declared question covers.
+--
+-- A declared question (ask 'declared': the receiving person approves before
+-- their agent, or an app's coder, starts) is about the task's messages as they
+-- stood when it was asked. covers_msg_id is the newest crew_messages.id on the
+-- task at that moment. An approval covers those messages and nothing later: a
+-- sender message posted after the question and before the answer was never
+-- shown to the person, so for an app coder it goes through the production /
+-- deletion check again (services/crewAppCoder.js). NULL for questions asked
+-- before this column existed.
+ALTER TABLE crew_decisions ADD COLUMN covers_msg_id INTEGER;

@@ -322,6 +322,35 @@ test('production and deletions still ask the owner first, even when the sender d
   assert.equal(task(s.task_id).state, 'completed');
 });
 
+test('an approval covers only the messages the owner was shown: a later production/deletion message asks again', async () => {
+  const before = runs.length;
+  const s = await mcp(sven, 'appcrane_crew_send', { as_agent: 'sven-laptop', to_agent: 'shop-coder', title: 'Cleanup', message: 'Delete the unused banner image.' });
+  await settle();
+  assert.equal(task(s.task_id).state, 'input_required');
+  const first = db.prepare("SELECT * FROM crew_decisions WHERE task_id = ? AND status = 'pending'").get(s.task_id);
+  // Posted after the owner was asked, before they answered.
+  await mcp(sven, 'appcrane_crew_reply', { as_agent: 'sven-laptop', task_id: s.task_id, message: 'Also deploy it all to production.' });
+  const shown = (await rest(olga, 'GET', '/api/crew/log')).body.entries.find((e) => e.task_id === s.task_id).input_required.question;
+  assert.match(shown, /unused banner/);
+  assert.ok(!/production/.test(shown), 'the owner is shown what the question covers, not the later message');
+  decideTask(olga, first.id, { decision: 'approve' });
+  await settle();
+  assert.equal(runs.length, before, 'the approval does not cover the later message: nothing ran');
+  assert.equal(task(s.task_id).state, 'input_required');
+  const second = db.prepare("SELECT * FROM crew_decisions WHERE task_id = ? AND status = 'pending'").get(s.task_id);
+  assert.ok(second && second.id !== first.id, 'a new question');
+  assert.equal(second.ask, 'declared');
+  assert.equal(second.decider_user_id, olga.id);
+  assert.equal(second.always_ask, 'production');
+  const shown2 = (await rest(olga, 'GET', '/api/crew/log')).body.entries.find((e) => e.task_id === s.task_id).input_required.question;
+  assert.match(shown2, /deploy it all to production/);
+  assert.ok(!/unused banner/.test(shown2), 'only what the first answer did not cover');
+  decideTask(olga, second.id, { decision: 'approve' });
+  await settle();
+  assert.equal(runs.length, before + 1);
+  assert.equal(task(s.task_id).state, 'completed');
+});
+
 test('a blocked or refused sender starts nothing', async () => {
   const before = runs.length;
   const s = await mcp(bea, 'appcrane_crew_send', { as_agent: 'bea-bot', to_agent: 'shop-coder', title: 'Hello', message: 'Please change the logo.' });
