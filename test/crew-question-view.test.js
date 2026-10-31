@@ -49,7 +49,7 @@ test('combining marks, Hangul fillers and variation selectors do not hide the wo
 
 test('a word mixing Latin with look-alike letters from another script asks', async () => {
   const { alwaysAskReason } = await import('../server/services/crewRules.js');
-  assert.equal(alwaysAskReason({ texts: ['ship to prоduction'] }), 'mixed-script');
+  assert.ok(['production', 'mixed-script'].includes(alwaysAskReason({ texts: ['ship to prоduction'] })));
   assert.equal(alwaysAskReason({ texts: ['add a title שלום to the page'] }), null, 'separate words in two scripts are fine');
 });
 
@@ -59,7 +59,14 @@ test('vertical-bar look-alikes cannot fake the separator either', () => {
 
 test('Latin-alphabet look-alikes (dotless i, small capitals) inside an A-Z word ask too', async () => {
   const { alwaysAskReason } = await import('../server/services/crewRules.js');
-  assert.equal(alwaysAskReason({ texts: ['deploy to ᴘroduction'] }), 'mixed-script');
+  assert.ok(['production', 'mixed-script'].includes(alwaysAskReason({ texts: ['deploy to ᴘroduction'] })));
   assert.equal(alwaysAskReason({ texts: ['prıd cleanup'] }), 'mixed-script');
   assert.equal(alwaysAskReason({ texts: ['fix the café menu'] }), null, 'an accented letter folds to plain A-Z');
+});
+
+test('a word spelled wholly in look-alike letters is read as the word', async () => {
+  const { alwaysAskReason } = await import('../server/services/crewRules.js');
+  assert.equal(alwaysAskReason({ texts: ['please ргоԁ now'] }), 'production', 'Cyrillic ргоԁ reads as prod');
+  assert.equal(alwaysAskReason({ texts: ['гм -rf the folder'] }), 'deletion', 'Cyrillic гм reads as rm');
+  assert.equal(alwaysAskReason({ texts: ['שלום עולם, תקן את הכותרת'] }), null, 'ordinary Hebrew text does not ask');
 });

@@ -92,9 +92,22 @@ const DELETE_WORDS = /\b(delet\w*|drop\w*|remov\w*|destroy\w*|truncat\w*|purg\w*
 // A word that mixes A-Z with any other letter ("prоduction" with a Cyrillic о,
 // "deploy to ᴘroduction") reads as the word but matches nothing, so it asks too.
 const IGNORABLE = /[\p{Cf}\p{Mn}\p{Me}\u115F\u1160\u3164\uFFA0\u034F\uFE00-\uFE0F\u{E0100}-\u{E01EF}]+/gu;
+// Look-alikes folded to the A-Z letter they pass for (Cyrillic, Greek, Latin
+// small capitals and the like), so a word spelled wholly in them, with no A-Z
+// letter for the mixed-script check to catch, is still read as the word.
+const LOOKALIKE = {
+  а: 'a', в: 'b', с: 'c', ԁ: 'd', е: 'e', ё: 'e', һ: 'h', і: 'i', ї: 'i', ј: 'j', к: 'k', ӏ: 'l', м: 'm', н: 'h', о: 'o', р: 'p',
+  ԛ: 'q', г: 'r', ѕ: 's', т: 't', и: 'u', ц: 'u', ѵ: 'v', ԝ: 'w', х: 'x', у: 'y', з: 'z', п: 'n', л: 'n', д: 'd', ь: 'b',
+  α: 'a', β: 'b', ε: 'e', η: 'n', ι: 'i', κ: 'k', μ: 'u', ν: 'v', ο: 'o', ρ: 'p', τ: 't', υ: 'u', χ: 'x', γ: 'y', ω: 'w',
+  ı: 'i', ȷ: 'j', ł: 'l', ø: 'o', đ: 'd', ħ: 'h', ŧ: 't', ƅ: 'b', ɑ: 'a', ɡ: 'g', ɩ: 'i', ɪ: 'i', ʀ: 'r', ᴀ: 'a', ʙ: 'b', ᴄ: 'c',
+  ᴅ: 'd', ᴇ: 'e', ɢ: 'g', ʜ: 'h', ᴊ: 'j', ᴋ: 'k', ʟ: 'l', ᴍ: 'm', ɴ: 'n', ᴏ: 'o', ᴘ: 'p', ꞯ: 'q', ꜱ: 's', ᴛ: 't', ᴜ: 'u',
+  ᴠ: 'v', ᴡ: 'w', ʏ: 'y', ᴢ: 'z',
+};
+const fold = (s) => s.replace(/\p{L}/gu, (c) => LOOKALIKE[c.toLowerCase()] ?? c);
 const forms = (v) => {
   const n = String(v ?? '').normalize('NFKD');
-  return [n.replace(IGNORABLE, ''), n.replace(IGNORABLE, ' ')];
+  const a = n.replace(IGNORABLE, ''), b = n.replace(IGNORABLE, ' ');
+  return [a, b, fold(a), fold(b)];
 };
 // After NFKD and mark stripping an accented letter is already plain (é -> e),
 // so any letter left outside A-Z in a word that also has A-Z letters is a
