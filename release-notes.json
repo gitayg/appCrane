@@ -1,4 +1,7 @@
 {
+  "2.129.4": [
+    "Security: invisible characters (such as text-direction overrides and zero-width spaces) are removed from what an app coder's owner is shown before approving, a message can no longer fake the line between two messages, and hidden characters or full-width letters no longer let \"production\" or \"delete\" slip past the check that always asks the owner."
+  ],
   "2.129.3": [
     "Security: when an app coder's owner is asked to approve a task, the message that triggered the question is shown first and in full, and the approval covers exactly the messages shown; anything left out because it was too long is asked about separately."
   ],

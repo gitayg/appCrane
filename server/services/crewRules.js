@@ -84,11 +84,18 @@ const DELETE_WORDS = /\b(delet\w*|drop\w*|remov\w*|destroy\w*|truncat\w*|purg\w*
  * 'production' | 'deletion' when no standing rule may cover this, else null.
  * `texts` are the free-text backstop (title, question).
  */
+// Invisible format characters and compatibility forms (full-width letters)
+// would otherwise let "del\u200Bete" or "ｐｒｏｄｕｃｔｉｏｎ" past the words below
+// while still reading as the word.
+const plain = (v) => String(v ?? '').normalize('NFKC').replace(/\p{Cf}+/gu, '');
+
 export function alwaysAskReason({ action, scope, texts = [] }) {
+  scope = scope && plain(scope);
+  action = action && plain(action);
   if (scope && PROD_FIELD.test(scope)) return 'production';
   if (action && DELETE_FIELD.test(action)) return 'deletion';
   for (const t of texts) {
-    const s = String(t ?? '');
+    const s = plain(t);
     if (PROD_WORDS.test(s)) return 'production';
     if (DELETE_WORDS.test(s)) return 'deletion';
   }

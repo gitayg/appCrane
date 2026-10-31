@@ -24,8 +24,15 @@ import { alwaysAskReason } from './crewRules.js';
 export const QUESTION_BUDGET = Object.freeze({ perMessage: 600, total: 1200, messages: 20 });
 
 /** One display line: control characters out, whitespace collapsed (as crew.oneLine, uncut). */
+// Invisible format characters (bidi overrides, zero-width, tag characters) are
+// removed so the text the owner reads is the text they approve, and '|' is
+// taken out of message text so the separator between messages cannot be faked.
 export function displayLine(body) {
-  return String(body ?? '').replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return String(body ?? '')
+    .replace(/\p{Cf}+/gu, '')
+    .replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ')
+    .replace(/\|/g, '/')
+    .replace(/\s+/g, ' ').trim();
 }
 
 /**
