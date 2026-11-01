@@ -361,7 +361,9 @@ export async function getContainerImage(slug, env) {
 export async function buildImage({ slug, env, contextDir, commitHash, appBasePath, onLog, appDockerfile = false, tag: tagOverride = null }) {
   const tag = tagOverride || imageTag(slug, env, commitHash);
   const prep = await prepareBuildBase({ contextDir, appDockerfile, db: safeDb(), run: dockerExec, onLog });
-  const args = ['build', '-t', tag, '--label', APPCRANE_LABEL, '--label', `slug=${slug}`, '--label', `env=${env}`, ...prep.labelArgs, ...buildResourceArgs()];
+  // --force-rm: the classic builder otherwise keeps a failed RUN step's
+  // container, and its layers, forever (services/buildLeftovers.js).
+  const args = ['build', '--force-rm', '-t', tag, '--label', APPCRANE_LABEL, '--label', `slug=${slug}`, '--label', `env=${env}`, ...prep.labelArgs, ...buildResourceArgs()];
   // Build-time only: bundlers (Vite, CRA, Next) need APP_BASE_PATH to emit
   // correct asset URLs. Caddy strips this prefix at runtime, so it must NOT
   // appear in the runtime container env — see bugs/2026-04-26-appcrane-app-base-path-resolution.md
