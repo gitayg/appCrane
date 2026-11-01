@@ -16,6 +16,7 @@ import { execFile } from 'child_process';
 import { jobStarted, trackJob, setJobDetail } from './jobHealth.js';
 import { GiB } from './hostThresholds.js';
 import log from '../utils/logger.js';
+import { withPrune } from './buildGate.js';
 
 export const PRUNE_UNTIL = '168h';
 export const KEEP_BYTES = 10 * GiB;
@@ -50,13 +51,17 @@ export function parseReclaimed(out) {
 
 export async function pruneBuildCache({ reason = 'weekly', run = runDocker } = {}) {
   const sizeFlag = await pruneSizeFlag(run);
-  const age = await run(['builder', 'prune', '-f', '--filter', `until=${PRUNE_UNTIL}`]);
-  if (age.code !== 0) throw new Error(`docker builder prune --filter until=${PRUNE_UNTIL} failed: ${age.stderr.trim().slice(0, 300)}`);
-  let size = null;
-  if (sizeFlag) {
-    size = await run(['builder', 'prune', '-f', sizeFlag, String(KEEP_BYTES)]);
-    if (size.code !== 0) throw new Error(`docker builder prune ${sizeFlag} failed: ${size.stderr.trim().slice(0, 300)}`);
-  }
+  // Never beside a running build: services/buildGate.js.
+  const { age, size } = await withPrune('build-cache', async () => {
+    const age = await run(['builder', 'prune', '-f', '--filter', `until=${PRUNE_UNTIL}`]);
+    if (age.code !== 0) throw new Error(`docker builder prune --filter until=${PRUNE_UNTIL} failed: ${age.stderr.trim().slice(0, 300)}`);
+    let size = null;
+    if (sizeFlag) {
+      size = await run(['builder', 'prune', '-f', sizeFlag, String(KEEP_BYTES)]);
+      if (size.code !== 0) throw new Error(`docker builder prune ${sizeFlag} failed: ${size.stderr.trim().slice(0, 300)}`);
+    }
+    return { age, size };
+  });
   const { pruneBuildLeftovers } = await import('./buildLeftovers.js');
   const leftovers = await pruneBuildLeftovers({ run });
   const detail = {

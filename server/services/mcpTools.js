@@ -1647,12 +1647,13 @@ const TOOLS = [
         if (existing.of_total !== of) throw new Error(`session '${session}' was started with of=${existing.of_total}, not ${of}`);
       }
 
+      // Stored as base64 whatever the part arrived as; assemble decodes every row as base64.
       db.prepare(
         `INSERT INTO stage_chunks (session, user_id, part, of_total, content, sha256)
          VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT(session, part) DO UPDATE SET
            content = excluded.content, sha256 = excluded.sha256, created_at = datetime('now')`
-      ).run(session, user.id, part, of, args.content, actual);
+      ).run(session, user.id, part, of, bytes.toString('base64'), actual);
 
       const have = db.prepare('SELECT part FROM stage_chunks WHERE session = ? ORDER BY part').all(session).map((r) => r.part);
       const missing = [];

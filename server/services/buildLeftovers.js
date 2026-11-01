@@ -23,6 +23,7 @@
 // its own. Then untagged images that nothing uses any more are pruned.
 
 import { runDocker, parseReclaimed } from './buildCachePrune.js';
+import { withPrune } from './buildGate.js';
 
 export const MIN_AGE_MS = 6 * 60 * 60 * 1000;
 
@@ -47,7 +48,11 @@ export function leftoversFrom(inspectOut, now = Date.now()) {
   return ids;
 }
 
-export async function pruneBuildLeftovers({ run = runDocker, now = Date.now() } = {}) {
+export function pruneBuildLeftovers(opts = {}) {
+  return withPrune('build-leftovers', () => sweep(opts));
+}
+
+async function sweep({ run = runDocker, now = Date.now() } = {}) {
   const list = await run(['ps', '-a', '-q', '--no-trunc', '--filter', 'status=created', '--filter', 'status=exited']);
   if (list.code !== 0) throw new Error(`docker ps failed: ${list.stderr.trim().slice(0, 300)}`);
   const candidates = list.stdout.split('\n').map((s) => s.trim()).filter(Boolean);

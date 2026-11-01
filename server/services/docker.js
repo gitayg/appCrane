@@ -21,6 +21,7 @@ import { OOM_APP_FLAG } from './oomPriority.js';
 import { CPU_APP_FLAG, buildResourceArgs } from './cpuPriority.js';
 import { assertNoRestoreInProgress } from './managedDbRestoreGuard.js';
 import { prepareBuildBase, buildWithPullFallback, freshBaseTag, BASE_IMAGE_LABEL, BASE_DIGEST_LABEL } from './autoPatch/runtimeImages.js';
+import { withBuild, withPrune } from './buildGate.js';
 
 const execFileAsync = promisify(execFile);
 // Imported rather than re-declared as 3000. v2.45.0's data-plane guard is
@@ -383,7 +384,8 @@ function safeDb() {
 }
 
 function runDockerBuild(args, tag, onLog) {
-  return new Promise((resolve, reject) => {
+  // Never beside an image prune: services/buildGate.js.
+  return withBuild(() => new Promise((resolve, reject) => {
     // Explicitly chosen, never inherited — see dockerBuildEnv().
     const child = spawn('docker', args, { stdio: 'pipe', env: dockerBuildEnv() });
     let outputBuf = '';
@@ -411,7 +413,7 @@ function runDockerBuild(args, tag, onLog) {
       if (code !== 0) return reject(new Error(`docker build failed: ${outputBuf.slice(-3000)}`));
       resolve(tag);
     });
-  });
+  }));
 }
 
 // --------------------------------------------------------------------------
@@ -1453,7 +1455,7 @@ export async function pruneOldImages(slug, env, keep = 2) {
   // the pulled-image pass bolted on after it, that early return would skip it
   // for exactly the apps that need it, since an image app's label filter always
   // matches zero rows.
-  await pruneOldBuiltImages(slug, env, keep).catch(() => {});
+  await withPrune(`old-images:${slug}:${env}`, () => pruneOldBuiltImages(slug, env, keep)).catch(() => {});
 
   // v2.59.0: the pass above reclaims nothing for a source_type='image' app, so
   // every redeploy of a moving tag ('odoo:19' picking up a patch release) left
@@ -1473,7 +1475,7 @@ export async function pruneOldImages(slug, env, keep = 2) {
   // So the prune is extended instead: for an image app, scope by REPOSITORY —
   // the thing every tag and digest of that image shares — and apply the same
   // keep-N-newest rule.
-  await pruneOldPulledImages(slug, keep).catch(() => {});
+  await withPrune(`old-pulled:${slug}`, () => pruneOldPulledImages(slug, keep)).catch(() => {});
 }
 
 /** Keep-N-newest over the images buildImage() tagged and labelled for this app. */
@@ -1590,7 +1592,7 @@ export async function removeAppImages(appId, slug) {
 // Safe by default — `docker image prune -f` only removes images with no tags
 // AND no descendant tagged images, never touches anything in use by a container.
 export async function pruneDanglingImages() {
-  try { await dockerExec(['image', 'prune', '-f']); } catch (e) {}
+  try { await withPrune('dangling-images', () => dockerExec(['image', 'prune', '-f'])); } catch (e) {}
 }
 
 export async function dockerAvailable() {

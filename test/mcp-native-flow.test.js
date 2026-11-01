@@ -183,3 +183,22 @@ test('freeing a slug by renaming the squatter out of the way, with no delete', a
   const out = await call('appcrane_rename_app', { slug: 'realapp', new_slug: 'wanted' });
   assert.equal(out.new_slug, 'wanted', 'the freed slug is now takeable — no app was deleted to get here');
 });
+
+test('a utf-8 part assembles to the bytes it was sent as (feedback #2198)', async () => {
+  const text = '{"name":"x","note":"plain ascii, 305 bytes in the report"}\n';
+  const want = createHash('sha256').update(Buffer.from(text, 'utf-8')).digest('hex');
+  const r = await call('appcrane_stage_chunk', { session: 'u1', part: 1, of: 1, content: text, encoding: 'utf-8' });
+  assert.equal(r.sha256, want);
+  const asm = await call('appcrane_stage_assemble', { session: 'u1', filename: 'x.json', sha256: want });
+  assert.equal(asm.sha256, want);
+});
+
+test('utf-8 and base64 parts of one session join in order', async () => {
+  const a = 'héllo, ';
+  const b = Buffer.from([0, 1, 2, 255]);
+  const want = createHash('sha256').update(Buffer.concat([Buffer.from(a, 'utf-8'), b])).digest('hex');
+  await call('appcrane_stage_chunk', { session: 'u2', part: 1, of: 2, content: a });
+  await call('appcrane_stage_chunk', { session: 'u2', part: 2, of: 2, content: b.toString('base64'), encoding: 'base64' });
+  const asm = await call('appcrane_stage_assemble', { session: 'u2', filename: 'x.bin', sha256: want });
+  assert.equal(asm.sha256, want);
+});

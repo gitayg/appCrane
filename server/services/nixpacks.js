@@ -15,6 +15,7 @@ import { spawn, execFile } from 'child_process';
 import { promisify } from 'util';
 import { dockerBuildEnv } from './docker.js';
 import { nixpacksResourceArgs } from './cpuPriority.js';
+import { withBuild } from './buildGate.js';
 
 const execFileP = promisify(execFile);
 
@@ -55,7 +56,8 @@ export async function nixpacksAvailable() {
 export async function nixpacksBuild({ releaseDir, tag, slug, env, onLog }) {
   const withResources = await nixpacksSupportsResourceFlags();
   if (!withResources) onLog?.('nixpacks is too old for --cpu-quota/--memory; this build runs without a CPU or memory cap (upgrade nixpacks)');
-  return new Promise((resolve, reject) => {
+  // Never beside an image prune: services/buildGate.js.
+  return withBuild(() => new Promise((resolve, reject) => {
     const args = nixpacksArgs({ releaseDir, tag, slug, env, withResources });
     // nixpacks shells out to `docker build`, so it inherits the builder choice
     // from its own environment. Without this, the two build paths on one host
@@ -78,5 +80,5 @@ export async function nixpacksBuild({ releaseDir, tag, slug, env, onLog }) {
       if (code === 0) resolve(tag);
       else reject(new Error(`nixpacks build failed (exit ${code}):\n${buf.slice(-3000)}`));
     });
-  });
+  }));
 }
