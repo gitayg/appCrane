@@ -1,4 +1,7 @@
 {
+  "2.132.0": [
+    "Swap: AppCrane now gives the server a swapfile sized to how far the apps' memory limits go past its RAM, and lets each app move the part of its memory above its guaranteed amount to it. When several apps need memory at once, an app now slows down instead of being stopped by the system. The swapfile never takes free disk below the disk floor in Settings > Job Health, grows when apps are added or limits raised, and only shrinks while nothing is using it."
+  ],
   "2.131.5": [
     "Fix: after upgrading, apps that were already running were still counted at their full memory limit instead of their guaranteed half, so memory warnings said the server was over capacity when it was not. AppCrane now gives those apps their guaranteed amount when it starts, without restarting them.",
     "Memory e-mails now name the server they came from, in the subject and the body, so an admin of several AppCranes can tell which one is short of memory."

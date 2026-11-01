@@ -4,6 +4,11 @@ import { mkdtempSync, readFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
+// These assert the swapless-host argv (swap equal to memory). Pinned, so a CI
+// runner that has swap does not change the answer (services/hostSwap.js).
+process.env.APPCRANE_PROC_SWAPS = '/nonexistent/proc-swaps';
+
+
 // A memory limit changed on the Manage page used to wait in the database for
 // the next deploy, and the memory warning kept reporting the old cap (31 Oct
 // 2026). It now reaches the running containers with `docker update`. The real
@@ -41,6 +46,14 @@ test('the guaranteed amount moves with the max, at half of it rounded down', asy
   await applyLimitsLive({ slug: 'hub', memoryMb: 1001, cpus: 1 }, { docker, usage: async () => new Map() });
   const update = calls.find((c) => c.startsWith('update'));
   assert.match(update, / --memory=1001m --memory-swap=1001m --memory-reservation=500m /);
+});
+
+test('with host swap, the swap allowance moves with the max: max + (max - guaranteed)', async () => {
+  const { docker, calls } = fakeDocker({ 'appcrane-hub-production': true });
+  const { appMemorySwapMb } = await import('../server/services/hostSwap.js');
+  await applyLimitsLive({ slug: 'hub', memoryMb: 1001, cpus: 1 },
+    { docker, usage: async () => new Map(), swapMb: (mb) => appMemorySwapMb(mb, 4096) });
+  assert.match(calls.find((c) => c.startsWith('update')), / --memory=1001m --memory-swap=1502m --memory-reservation=500m /);
 });
 
 test('a container using nearly the new limit is not lowered now (it would be OOM-killed)', async () => {

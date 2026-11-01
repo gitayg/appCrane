@@ -10,6 +10,11 @@ import net from 'net';
 import http from 'http';
 import express from 'express';
 
+// These assert the swapless-host argv (swap equal to memory). Pinned, so a CI
+// runner that has swap does not change the answer (services/hostSwap.js).
+process.env.APPCRANE_PROC_SWAPS = '/nonexistent/proc-swaps';
+
+
 const execFileAsync = promisify(execFile);
 
 // Container network isolation (v2.42.1 SECURITY).

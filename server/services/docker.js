@@ -16,6 +16,7 @@ import {
 } from './volumeHelper.js';
 import log from '../utils/logger.js';
 import { admitContainer, reserveMemory, guaranteedMb } from './memoryAdmission.js';
+import { appMemorySwapMb } from './hostSwap.js';
 import { OOM_APP_FLAG } from './oomPriority.js';
 import { CPU_APP_FLAG, buildResourceArgs } from './cpuPriority.js';
 import { assertNoRestoreInProgress } from './managedDbRestoreGuard.js';
@@ -1040,7 +1041,12 @@ async function runAppContainer({ slug, env, image, hostPort, envVars = {}, volum
     // and the extra 512 MB was a contract nothing could deliver. Pinning the two
     // together removes the question — the configured number IS the ceiling, on a
     // host with swap and on a host without, and it means the same thing on both.
-    `--memory-swap=${memoryMb}m`,
+    //
+    // Since 2.132.0 AppCrane gives the host a swapfile sized to the fleet's
+    // burst room (services/hostSwap.js). Where host swap exists, the part above
+    // the guarantee may be swapped out instead of OOM-killed: max + (max -
+    // guaranteed). Where it does not, the two stay equal, as above.
+    `--memory-swap=${appMemorySwapMb(memoryMb)}m`,
     // The guaranteed half (cgroup memory.low): the kernel reclaims from this
     // container last while it is under it. --memory above stays the hard max,
     // and the space between the two is burst room shared with every other app,

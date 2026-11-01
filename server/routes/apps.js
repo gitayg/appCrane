@@ -1630,6 +1630,9 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
     const { applyLimitsLive } = await import('../services/applyResourceLimits.js');
     limitsApplied = await applyLimitsLive({ slug: updated.slug, memoryMb: lim.max_ram_mb, cpus: lim.max_cpu_percent / 100 })
       .catch((e) => { log.warn(`[limits] live apply for ${updated.slug} failed: ${e.message}`); return null; });
+    // The host swapfile follows the fleet's total max (services/hostSwap.js).
+    // Not awaited: writing a swapfile can take minutes.
+    import('../services/hostSwap.js').then(({ ensureHostSwap }) => ensureHostSwap()).catch(() => {});
   }
   // A 200 on a tcp -> http flip must not read as "the port is closed". Said in
   // prose as well as in the pending_port_release field, because the caller that

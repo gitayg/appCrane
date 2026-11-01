@@ -6,6 +6,11 @@ import { join } from 'path';
 import { execFile, execFileSync } from 'child_process';
 import { promisify } from 'util';
 
+// These assert the swapless-host argv (swap equal to memory). Pinned, so a CI
+// runner that has swap does not change the answer (services/hostSwap.js).
+process.env.APPCRANE_PROC_SWAPS = '/nonexistent/proc-swaps';
+
+
 // The two resource flags on every app container (v2.48.0), measured rather than
 // described: the argv comes from a recording `docker` shim, and the LIVE half at
 // the bottom hands that same argv to a real daemon and reads the cgroup back.
@@ -162,6 +167,22 @@ test('the swap budget beyond the RAM limit is exactly zero, which is the whole p
   const budget = bytes(flag(args, '--memory-swap='), '--memory-swap=')
     - bytes(flag(args, '--memory='), '--memory=');
   assert.equal(budget, 0);
+});
+
+test('on a host with swap, an app may swap out the part above its guarantee: --memory-swap = max + (max - guaranteed)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'procswaps-'));
+  writeFileSync(join(dir, 'swaps'), 'Filename Type Size Used Priority\n/var/lib/appcrane/swapfile file 4194300 0 -2\n');
+  process.env.APPCRANE_PROC_SWAPS = join(dir, 'swaps');
+  try {
+    for (const memoryMb of [512, 1001]) {
+      const args = await start(HTTP_APP.slug, { memoryMb });
+      assert.equal(flag(args, '--memory-swap='), `--memory-swap=${memoryMb + (memoryMb - Math.floor(memoryMb / 2))}m`);
+      assert.equal(flag(args, '--memory='), `--memory=${memoryMb}m`, 'the RAM limit is unchanged');
+    }
+  } finally {
+    process.env.APPCRANE_PROC_SWAPS = '/nonexistent/proc-swaps';
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('--memory-swap is emitted right after --memory, so the pair cannot drift apart', async () => {

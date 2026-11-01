@@ -7,6 +7,11 @@ import net from 'net';
 import http from 'http';
 import dns from 'dns';
 
+// These assert the swapless-host argv (swap equal to memory). Pinned, so a CI
+// runner that has swap does not change the answer (services/hostSwap.js).
+process.env.APPCRANE_PROC_SWAPS = '/nonexistent/proc-swaps';
+
+
 // runCheck's HTTP branch fetches `http://localhost:<port>`, while its TCP
 // branch connects to 127.0.0.1. Pinning resolution to IPv4 keeps both probes
 // pointed at the same loopback listener, so a failure here is always about

@@ -1444,7 +1444,17 @@ try {
 // Containers started before guaranteed memory existed get their reservation now,
 // live, so memory admission counts them at half their cap instead of all of it
 // (services/memoryReservationBackfill.js). Not awaited: Docker may be slow.
-import('./services/memoryReservationBackfill.js')
+//
+// The host swapfile is sized first (services/hostSwap.js), so the backfill
+// gives running containers the swap allowance that matches it; then every six
+// hours, which picks up apps added or deleted since.
+import('./services/hostSwap.js')
+  .then(async ({ ensureHostSwap }) => {
+    await ensureHostSwap();
+    setInterval(() => { ensureHostSwap(); }, 6 * 60 * 60 * 1000).unref();
+  })
+  .catch((e) => log.error(`[host-swap] could not run, boot continues: ${e.message}`))
+  .then(() => import('./services/memoryReservationBackfill.js'))
   .then(({ backfillMemoryReservationsAtBoot }) => backfillMemoryReservationsAtBoot())
   .catch((e) => log.error(`[memory-reservation] could not run, boot continues: ${e.message}`));
 

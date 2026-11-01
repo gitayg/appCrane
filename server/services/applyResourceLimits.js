@@ -5,8 +5,8 @@
 // recreated the container, while the memory warning kept reporting the old cap
 // (an admin lowered agentix and the mail still said "cap 1024 MB", 31 Oct
 // 2026). `docker update` changes all three on a running container without a
-// restart. Memory and swap are set together, equal, as at `docker run`
-// (docker.js), so the container still gets no swap, and the guaranteed amount
+// restart. Memory and swap are set together, as at `docker run` (docker.js):
+// equal on a host without swap, max + the burst part with it, and the guaranteed amount
 // (--memory-reservation) moves with them to half the new max.
 //
 // A container already using about as much as the new limit is left alone: the
@@ -15,6 +15,7 @@
 
 import { execFile } from 'child_process';
 import { readUsage, invalidateMemoryMeasurement, guaranteedMb } from './memoryAdmission.js';
+import { appMemorySwapMb } from './hostSwap.js';
 
 const MiB = 1024 * 1024;
 export const ENVS = ['production', 'sandbox'];
@@ -30,7 +31,7 @@ function defaultDocker(args) {
   });
 }
 
-export async function applyLimitsLive({ slug, memoryMb, cpus }, { docker = defaultDocker, usage = readUsage } = {}) {
+export async function applyLimitsLive({ slug, memoryMb, cpus }, { docker = defaultDocker, usage = readUsage, swapMb = appMemorySwapMb } = {}) {
   const results = [];
   for (const env of ENVS) {
     const name = `appcrane-${slug}-${env}`;
@@ -48,7 +49,7 @@ export async function applyLimitsLive({ slug, memoryMb, cpus }, { docker = defau
       continue;
     }
     try {
-      await docker(['update', `--memory=${memoryMb}m`, `--memory-swap=${memoryMb}m`,
+      await docker(['update', `--memory=${memoryMb}m`, `--memory-swap=${swapMb(memoryMb)}m`,
         `--memory-reservation=${guaranteedMb(memoryMb)}m`, `--cpus=${cpus}`, name]);
       results.push({ env, applied: true });
     } catch (e) {
