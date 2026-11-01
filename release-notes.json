@@ -1,4 +1,8 @@
 {
+  "2.131.5": [
+    "Fix: after upgrading, apps that were already running were still counted at their full memory limit instead of their guaranteed half, so memory warnings said the server was over capacity when it was not. AppCrane now gives those apps their guaranteed amount when it starts, without restarting them.",
+    "Memory e-mails now name the server they came from, in the subject and the body, so an admin of several AppCranes can tell which one is short of memory."
+  ],
   "2.131.4": [
     "Disk space: a build that failed left a stopped container behind holding everything that build step had written, and those piled up (one server had 285 of them, 48 GB). Failed builds no longer leave one, and the cleanup after each deploy and in the weekly cleanup now also removes the ones already there, then the old images they were holding. Running apps, rollback images and other containers are not touched."
   ],

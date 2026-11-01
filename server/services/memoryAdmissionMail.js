@@ -16,9 +16,17 @@ import { BRAND, esc, bulletList, renderBrandedEmail } from './mail/brandedLayout
 import { readUsage, toMb, needText } from './memoryAdmission.js';
 import { logAudit } from '../middleware/audit.js';
 import log from '../utils/logger.js';
+import { hostname } from 'os';
 
 export const MEMORY_MAIL_SOURCE = 'memory-admission';
 const TOP_N = 5;
+
+// Which AppCrane sent it: an admin of several gets the same mail from each.
+// CRANE_DOMAIN is the public identity; without it the OS hostname still tells
+// two machines apart (as in credentialChecker.js).
+export function serverName() {
+  return (process.env.CRANE_DOMAIN || '').trim() || hostname();
+}
 
 function hourBucket(now = new Date()) {
   return now.toISOString().slice(0, 13);
@@ -96,6 +104,7 @@ export async function notifyMemoryAdmission({
 }) {
   const hour = hourBucket();
   const base = dashboardBaseUrl();
+  const server = serverName();
   const sent = { users: [], admins: [] };
   const refused = outcome === 'refused';
 
@@ -103,13 +112,14 @@ export async function notifyMemoryAdmission({
     for (const u of userRecipients(db, { userId, automatic, appId })) {
       const ok = send({
         to: u.email,
-        subject: `[AppCrane] ${subject}: ${what} refused, not enough server memory`,
-        text: `Hi${u.name ? ` ${u.name}` : ''},\n\n${message}\n\nPlease try again later.\n`,
+        subject: `[AppCrane: ${server}] ${subject}: ${what} refused, not enough server memory`,
+        text: `Hi${u.name ? ` ${u.name}` : ''},\n\nServer: ${server}\n\n${message}\n\nPlease try again later.\n`,
         html: renderBrandedEmail({
           preheader: `Your ${what} of ${subject} was not started. Try again later.`,
           greeting: `Hi${u.name ? ` ${u.name}` : ''},`,
           intro: message,
-          bodyHtml: `<p style="margin:12px 0 0;font-size:14px;line-height:21px;color:${BRAND.text};">Please try again later.</p>`,
+          bodyHtml: `<p style="margin:12px 0 0;font-size:14px;line-height:21px;color:${BRAND.text};">Server: ${esc(server)}</p>`
+            + `<p style="margin:12px 0 0;font-size:14px;line-height:21px;color:${BRAND.text};">Please try again later.</p>`,
           cta: { label: 'Open AppCrane', url: base },
           footer: automatic
             ? `You get this because you own ${slug || subject} and this ${what} started automatically.`
@@ -123,6 +133,7 @@ export async function notifyMemoryAdmission({
 
   const top = await topContainers(measurement);
   const numbers = [
+    `Server: ${server}`,
     `Needed: ${needText(verdict)}${verdict.replacedBytes ? ` (replacing ${toMb(verdict.replacedBytes)} MB)` : ''}`,
     `Free: ${toMb(verdict.freeBytes)} MB`,
     `Committed (guaranteed amounts, or the cap where a container has none): ${toMb(verdict.committedBytes)} MB of ${toMb(verdict.capacityBytes)} MB capacity`,
@@ -134,10 +145,10 @@ export async function notifyMemoryAdmission({
   for (const a of platformAdmins(db)) {
     const ok = send({
       to: a.email,
-      subject: `[AppCrane] Memory admission ${refused ? 'refused' : 'warning'}: ${subject}`,
+      subject: `[AppCrane: ${server}] Memory admission ${refused ? 'refused' : 'warning'}: ${subject}`,
       text: adminText,
       html: renderBrandedEmail({
-        preheader: `${subject}: ${refused ? 'refused' : 'started past capacity'}`,
+        preheader: `${subject} on ${server}: ${refused ? 'refused' : 'started past capacity'}`,
         greeting: 'Hi,',
         intro: message,
         bodyHtml: bulletList(numbers)
@@ -145,7 +156,7 @@ export async function notifyMemoryAdmission({
           + bulletList(top.length ? top.map(containerLine) : ['(none running)'])
           + `<p style="margin:12px 0 0;font-size:13px;line-height:20px;color:${BRAND.dim};">${esc('Lower a container\'s memory limit, stop an unused sandbox, or raise the reserve in Settings > Job Health.')}</p>`,
         cta: { label: 'Open Job Health', url: `${base}/settings#jobs` },
-        footer: 'You get this because you are a platform admin of this AppCrane.',
+        footer: `You get this because you are a platform admin of the AppCrane at ${server}.`,
       }),
       idempotencyKey: `memory-admission:admin:${slug || subject}:${hour}:${a.email.trim().toLowerCase()}`,
     });

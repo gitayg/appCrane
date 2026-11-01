@@ -406,6 +406,12 @@ test('user and admin e-mails: deployer (not owners) for a manual deploy, owners 
   assert.match(admin.body_text, /big <img src=x> \(production\): cap 3584 MB, using 2000 MB/);
   assert.match(admin.body_text, /other: no limit, usage unknown/);
   assert.match(rows.find(r => r.to_email === deployerUser.email).body_text, /try again later/i);
+  const { serverName } = await import('../server/services/memoryAdmissionMail.js');
+  for (const r of rows) {
+    assert.ok(r.subject.startsWith(`[AppCrane: ${serverName()}] `), `subject names the server: ${r.subject}`);
+    assert.ok(r.body_text.includes(`Server: ${serverName()}`), 'body names the server');
+    assert.ok(r.body_html.includes(`Server: ${serverName()}`), 'html names the server');
+  }
 
   db.prepare("DELETE FROM email_queue WHERE source = 'memory-admission'").run();
   await notifyMemoryAdmission({ ...args, userId: null, automatic: true });

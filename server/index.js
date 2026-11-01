@@ -1441,6 +1441,13 @@ try {
   log.error(`[git-credential-scrub] could not run, boot continues: ${e.message}`);
 }
 
+// Containers started before guaranteed memory existed get their reservation now,
+// live, so memory admission counts them at half their cap instead of all of it
+// (services/memoryReservationBackfill.js). Not awaited: Docker may be slow.
+import('./services/memoryReservationBackfill.js')
+  .then(({ backfillMemoryReservationsAtBoot }) => backfillMemoryReservationsAtBoot())
+  .catch((e) => log.error(`[memory-reservation] could not run, boot continues: ${e.message}`));
+
 // Start server
 app.listen(PORT, HOST, async () => {
   log.info('');
