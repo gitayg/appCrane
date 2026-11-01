@@ -41,7 +41,7 @@ beforeEach(() => bc._resetBuildCachePruneForTests());
 test('buildx: age prune, then --max-used-space to the bound, as two calls', async () => {
   const f = fake(HELP_BUILDX);
   const d = await bc.pruneBuildCache({ run: f.run });
-  assert.deepEqual(f.calls, [
+  assert.deepEqual(f.calls.filter((c) => c.startsWith('builder')), [
     'builder prune --help',
     'builder prune -f --filter until=168h',
     `builder prune -f --max-used-space ${10 * 1024 ** 3}`,
@@ -59,7 +59,7 @@ test('legacy builder: --keep-storage', async () => {
 test('no size flag: only the age filter runs', async () => {
   const f = fake(HELP_NONE);
   const d = await bc.pruneBuildCache({ run: f.run });
-  assert.deepEqual(f.calls, ['builder prune --help', 'builder prune -f --filter until=168h']);
+  assert.deepEqual(f.calls.filter((c) => c.startsWith('builder')), ['builder prune --help', 'builder prune -f --filter until=168h']);
   assert.equal(d.size_flag, null);
 });
 
@@ -73,12 +73,12 @@ test('the host check triggers a prune on a disk at warning, records it in Job He
   const sample = (level) => ({ resources: [{ id: 'memory', level: 'critical' }, { id: 'disk:42', label: 'Disk free (DATA_DIR)', level }] });
   assert.equal(bc.maybePruneForDisk(sample('ok'), { now: 1_000_000, run: f.run }), null, 'disk ok: no prune (memory does not count)');
   await bc.maybePruneForDisk(sample('warning'), { now: 1_000_000, run: f.run });
-  assert.equal(f.calls.filter((c) => c.includes('--filter')).length, 1);
+  assert.equal(f.calls.filter((c) => c.includes('until=')).length, 1);
   assert.equal(job().last_run.ok, true);
   assert.match(job().detail.reason, /^disk warning: Disk free \(DATA_DIR\)/);
   assert.equal(bc.maybePruneForDisk(sample('critical'), { now: 1_000_000 + bc.DISK_TRIGGER_GAP_MS - 1, run: f.run }), null);
   await bc.maybePruneForDisk(sample('critical'), { now: 1_000_000 + bc.DISK_TRIGGER_GAP_MS, run: f.run });
-  assert.equal(f.calls.filter((c) => c.includes('--filter')).length, 2);
+  assert.equal(f.calls.filter((c) => c.includes('until=')).length, 2);
 });
 
 test('a failed disk-triggered prune shows as failing in Job Health', async () => {

@@ -57,12 +57,15 @@ export async function pruneBuildCache({ reason = 'weekly', run = runDocker } = {
     size = await run(['builder', 'prune', '-f', sizeFlag, String(KEEP_BYTES)]);
     if (size.code !== 0) throw new Error(`docker builder prune ${sizeFlag} failed: ${size.stderr.trim().slice(0, 300)}`);
   }
+  const { pruneBuildLeftovers } = await import('./buildLeftovers.js');
+  const leftovers = await pruneBuildLeftovers({ run });
   const detail = {
     at: new Date().toISOString(), reason, size_flag: sizeFlag, keep_bytes: sizeFlag ? KEEP_BYTES : null,
     reclaimed_by_age: parseReclaimed(age.stdout), reclaimed_by_size: size ? parseReclaimed(size.stdout) : null,
+    build_leftovers_removed: leftovers.removed, reclaimed_by_image_prune: leftovers.reclaimed,
   };
   setJobDetail('build-cache-prune', detail);
-  log.info(`[build-cache] ${reason} prune: ${detail.reclaimed_by_age ?? '?'} older than ${PRUNE_UNTIL}${sizeFlag ? `, ${detail.reclaimed_by_size ?? '?'} over the ${KEEP_BYTES / GiB} GB bound` : ' (this Docker has no size bound flag)'}`);
+  log.info(`[build-cache] ${reason} prune: ${detail.reclaimed_by_age ?? '?'} older than ${PRUNE_UNTIL}${sizeFlag ? `, ${detail.reclaimed_by_size ?? '?'} over the ${KEEP_BYTES / GiB} GB bound` : ' (this Docker has no size bound flag)'}; ${leftovers.removed} leftover build container(s) removed, ${detail.reclaimed_by_image_prune ?? '?'} from untagged images`);
   return detail;
 }
 

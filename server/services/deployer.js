@@ -2375,7 +2375,11 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     // which is what lets a rollback to it restart rather than rebuild.
     pruneOldImages(app.slug, env, imagesToKeep(app));
     // Reclaim dangling layers from failed/interrupted prior builds (safe — never touches in-use images).
-    pruneDanglingImages();
+    // The step containers an interrupted classic build leaves behind keep those
+    // images in use, so they go first (services/buildLeftovers.js).
+    import('./buildLeftovers.js')
+      .then(({ pruneBuildLeftovers }) => pruneBuildLeftovers())
+      .catch(() => pruneDanglingImages());
 
     // 7. Update current symlink (remove old even if target is gone).
     // This is the atomic publish step — until it lands, the release isn't

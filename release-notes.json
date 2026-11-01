@@ -1,4 +1,7 @@
 {
+  "2.131.3": [
+    "Disk space: builds that were cut off part-way (for example by a server restart) left hidden containers behind that kept old app images on disk, so the cleanup after each deploy could not remove them. AppCrane now clears those leftovers after every deploy and in the weekly cleanup, then removes the old images they were holding. Running apps, rollback images and other containers are not touched."
+  ],
   "2.131.2": [
     "Security: when a Crew task in progress at the upgrade carries its earlier conversation over, AppCrane now checks that the file it opened is really that conversation, so a swapped folder cannot make it copy another file."
   ],
