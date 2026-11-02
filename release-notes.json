@@ -1,4 +1,7 @@
 {
+  "2.132.2": [
+    "Every e-mail AppCrane sends to admins now names the server it came from, in the subject ([AppCrane: your-server]) and in the footer, so an admin of several AppCranes can tell which one a server alert, security notice or deploy result is about."
+  ],
   "2.132.1": [
     "Fix: two apps deploying at the same time could make one of them fail with \"failed to export layer\", because the image cleanup at the end of one deploy removed files the other build was still writing. Builds and image cleanups no longer overlap: a cleanup waits until no build is running, and cleanups asked for in the meantime run once.",
     "Fix: a file sent over MCP in parts as plain text (appcrane_stage_chunk with encoding utf-8) was rejected when assembled, with a SHA-256 mismatch, although each part had been accepted. Text parts now assemble to exactly the bytes sent, alone or mixed with base64 parts."

@@ -1,4 +1,5 @@
 import log from '../utils/logger.js';
+import { withServerName } from './mailServerName.js';
 
 let transporter = null;
 
@@ -34,6 +35,7 @@ async function getTransporter() {
  * address is always the platform-configured sender. `replyTo` is optional.
  */
 export async function sendEmail({ to, subject, text, html, fromName, replyTo, attachments }) {
+  ({ subject, text, html } = withServerName({ subject, text, html }));
   // 1. Microsoft Graph — the production transport (sends as the shared mailbox).
   try {
     const { isGraphConfigured, sendViaGraph } = await import('./graphMailer.js');
