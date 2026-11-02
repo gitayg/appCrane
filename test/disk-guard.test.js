@@ -32,6 +32,7 @@ initDb();
 const db = getDb();
 const { checkDiskHeadroom, assertDiskHeadroom } = await import('../server/services/hostResources.js');
 const { deployApp } = await import('../server/services/deployer.js');
+const { INFO_FORMAT } = await import('../server/services/dockerSnapshot.js');
 
 const MiB = 1024 * 1024;
 const GiB = 1024 * MiB;
@@ -117,7 +118,7 @@ test('a deploy on a disk under the floor is refused before any build work, and t
   assert.equal(row.status, 'failed');
   assert.match(row.failure_reason, /^Refusing to deploy diskapp\/sandbox: the filesystem holding DATA_DIR \(.+\) has .+ free of .+, below the floor of 1000000 GB/);
   // Only the docker-root lookup ran; no pull, build, run or inspect.
-  assert.deepEqual(dockerCalls().slice(before), ['info --format {{.DockerRootDir}}']);
+  assert.deepEqual(dockerCalls().slice(before), [`info --format ${INFO_FORMAT}`]);
 });
 
 test('deployApp writes its log through the quiet writer: start and failure reach the platform log at their levels', async () => {

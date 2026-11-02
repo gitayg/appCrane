@@ -91,6 +91,7 @@ import gitHttpRoutes from './routes/gitHttp.js';
 import clientErrorsRoutes, { adminRouter as clientErrorsAdminRoutes } from './routes/clientErrors.js';
 import { refererSlug } from './utils/refererSlug.js';
 import { globalNotices } from './services/platformNotices.js';
+import { adminExists } from './services/adminExists.js';
 import { enforceFipsAtStartup } from './services/fipsMode.js';
 import appMcpRoutes, { appMcpWellKnownRouter } from './routes/appMcp.js';
 
@@ -229,6 +230,11 @@ app.use('/docs', express.static(join(__dirname, '..', 'docs'), {
       const needsLegacy = LEGACY_INLINE_PAGES.has(basename(filePath))
         && !filePath.includes(`${sep}admin-app${sep}`);
       res.setHeader('Content-Security-Policy', htmlCsp(needsLegacy ? LEGACY_HTML_CSP : HTML_CSP));
+      if (filePath.includes(`${sep}admin-app${sep}`)) res.setHeader('Cache-Control', 'no-cache');
+    } else if (filePath.includes(`${sep}admin-app${sep}assets${sep}`)) {
+      // Vite names every file here by its content hash, so a URL never changes
+      // meaning; a new build ships new names and index.html points at them.
+      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
     }
   },
 }));
@@ -383,9 +389,7 @@ app.use((req, res, next) => {
   const isCrashPage = req.path.startsWith('/api/_crashed/');
   if (PUBLIC_PATHS.includes(req.path) || req.path.startsWith('/docs/') || isPublicSettingsRead || isCrashPage || req.method === 'OPTIONS') return next();
 
-  const db = getDb();
-  const adminExists = db.prepare("SELECT COUNT(*) as count FROM users WHERE role = 'platform_admin'").get().count > 0;
-  if (!adminExists) {
+  if (!adminExists(getDb())) {
     const accept = req.headers.accept || '';
     if (accept.includes('text/html')) {
       return res.status(503).send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>AppCrane - Setup</title>
@@ -476,7 +480,7 @@ let caddyReloadStatus = { ok: null, at: null, error: null, restarted: false, unc
 // Public API endpoints (no auth)
 app.get('/api/info', (req, res) => {
   const db = getDb();
-  const adminExists = db.prepare("SELECT COUNT(*) as count FROM users WHERE role = 'platform_admin'").get().count > 0;
+  const ready = adminExists(db);
   // Version is no longer auth-gated. It already leaks through
   // /api/version-check, bundle filenames, GitHub releases, and the
   // sidebar's first /api/info call (which can race auth-state setup).
@@ -484,7 +488,7 @@ app.get('/api/info', (req, res) => {
   res.json({
     name: 'AppCrane',
     version: VERSION,
-    status: adminExists ? 'ready' : 'needs_init',
+    status: ready ? 'ready' : 'needs_init',
     description: 'Self-service app hosting and deployment',
     docs: '/docs',
     dashboard: '/dashboard',
@@ -501,7 +505,7 @@ app.get('/api/info', (req, res) => {
     // endpoint — and costs ~40 bytes. The bodies live one fetch away.
     notices: { url: '/api/notices', count: globalNotices().length },
     caddy_reload_status: caddyReloadStatus,
-    ...(!adminExists && { init: 'POST /api/auth/init -d \'{"name":"admin","email":"you@example.com"}\'' }),
+    ...(!ready && { init: 'POST /api/auth/init -d \'{"name":"admin","email":"you@example.com"}\'' }),
   });
 });
 

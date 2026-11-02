@@ -1,4 +1,10 @@
 {
+  "2.133.0": [
+    "Faster AppCrane: backups, restores, storage sizes, file listings over MCP and git clones no longer freeze the server while they run, and background checks use far fewer Docker calls (one host spent about 35 s per metrics run before).",
+    "Faster deploys and promotes: build caches survive between sandbox and production, the .git folder no longer goes into generated builds, npm downloads are cached per app, and a healthy new version is detected in a quarter of a second instead of two.",
+    "The admin UI loads about a third as much code on first visit, caches its files, is compressed, and stops polling while its tab is in the background.",
+    "Fix: an app whose data folder held a folder owned by root (left by file uploads before 2.123.1) could not write there on servers where AppCrane does not run as root. Every deploy now repairs the owner on every server."
+  ],
   "2.132.2": [
     "Every e-mail AppCrane sends to admins now names the server it came from, in the subject ([AppCrane: your-server]) and in the footer, so an admin of several AppCranes can tell which one a server alert, security notice or deploy result is about."
   ],

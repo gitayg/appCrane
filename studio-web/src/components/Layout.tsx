@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, Suspense } from 'react'
 import type { ReactElement } from 'react'
 import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth'
@@ -14,6 +14,7 @@ import { UpdateBlockedDialog } from './UpdateBlockedDialog'
 import { buildsInFlightOf, isConnectionDrop, waitForNewVersion, type BuildsInFlight } from './selfUpdateFlow'
 import { serverDate } from '../utils/serverDate'
 import { setClientErrorVersion } from '../lib/clientErrors'
+import { setVisibleInterval } from '../utils/visibleInterval'
 
 interface NavItem { id: string; label: string; href: string; icon: ReactElement; external?: boolean; platformAdminOnly?: boolean; adminOnly?: boolean; ownerOrAdmin?: boolean }
 interface NavApp {
@@ -250,8 +251,8 @@ export function Layout({ children, subItems, activeSub }: Props) {
       } catch (_) { /* keep last good state */ }
     }
     check()
-    const t = setInterval(check, 30 * 60 * 1000)
-    return () => { cancelled = true; clearInterval(t) }
+    const stop = setVisibleInterval(check, 30 * 60 * 1000)
+    return () => { cancelled = true; stop() }
   }, [isAuthed, isPlatformAdmin])
 
   useEffect(() => () => { if (waitTimer.current) clearInterval(waitTimer.current) }, [])
@@ -335,29 +336,26 @@ export function Layout({ children, subItems, activeSub }: Props) {
 
   // Open-requests counter for the Requests nav badge. v2.16.0: the Requests
   // page is now role-scoped (platform admin → all, app owner → their apps,
-  // plain user → their own), so the badge queries the matching endpoint:
-  //   admin  → /api/enhancements  (fallback /owned)
-  //   owner  → /api/enhancements/owned
-  //   user   → /api/enhancements/my
+  // plain user → their own), so the badge queries the matching endpoint's
+  // count, which applies the same visibility as the list:
+  //   admin  → /api/enhancements/count  (fallback /owned/count)
+  //   owner  → /api/enhancements/owned/count
+  //   user   → /api/enhancements/my/count
   useEffect(() => {
     if (!isAuthed) return
-    const TERM = new Set(['done', 'merged', 'closed', 'failed', 'cancelled'])
     const adminLikeNow = userRole === 'platform_admin'
     const ownerNow = navApps.some(a => a.app_role === 'owner')
-    const endpoint = adminLikeNow ? '/api/enhancements'
-      : ownerNow ? '/api/enhancements/owned'
-      : '/api/enhancements/my'
-    const countOpen = (requests?: { status?: string }[]) =>
-      (requests || []).filter(r => !TERM.has((r.status || '').toLowerCase())).length
+    const endpoint = adminLikeNow ? '/api/enhancements/count'
+      : ownerNow ? '/api/enhancements/owned/count'
+      : '/api/enhancements/my/count'
     const fetchCount = () =>
-      adminApi.get<{ requests: { status?: string }[] }>(endpoint)
+      adminApi.get<{ count: number }>(endpoint)
         .catch(() => adminLikeNow
-          ? adminApi.get<{ requests: { status?: string }[] }>('/api/enhancements/owned').catch(() => ({ requests: [] }))
-          : { requests: [] })
-        .then(({ requests }) => setOpenRequests(countOpen(requests)))
+          ? adminApi.get<{ count: number }>('/api/enhancements/owned/count').catch(() => ({ count: 0 }))
+          : { count: 0 })
+        .then(({ count }) => setOpenRequests(count || 0))
     fetchCount()
-    const t = setInterval(fetchCount, 15000)
-    return () => clearInterval(t)
+    return setVisibleInterval(fetchCount, 15000)
   }, [isAuthed, userRole, navApps])
 
 
@@ -370,8 +368,7 @@ export function Layout({ children, subItems, activeSub }: Props) {
         .then(r => setCrewWaiting(r?.waiting || 0))
         .catch(() => setCrewWaiting(0))
     fetchWaiting()
-    const t = setInterval(fetchWaiting, 15000)
-    return () => clearInterval(t)
+    return setVisibleInterval(fetchWaiting, 15000)
   }, [isAuthed, location.pathname])
 
   useEffect(() => {
@@ -943,7 +940,7 @@ export function Layout({ children, subItems, activeSub }: Props) {
       <main className={`admin-content${pinned ? '' : ' collapsed'}`}>
         <ViewAsBanner />
         <CredentialAlertBanner />
-        {children}
+        <Suspense fallback={null}>{children}</Suspense>
       </main>
       {platformWN && (
         <WhatsNewModal

@@ -21,7 +21,7 @@ import {
 import { pruneGrantsForNonMembers } from '../services/appDefinedRoles.js';
 import { assessMemoryChange } from '../services/memoryBudget.js';
 import { attachedInstallationIds, codeSourceFields } from '../services/codeSource.js';
-import { discoverableApp, ownerNames, pendingAccessRequestSlugs } from '../services/discoverableApps.js';
+import { discoverableApp, pendingAccessRequestSlugs } from '../services/discoverableApps.js';
 import {
   effectiveIngressType, publicPortForApp, pendingPortRelease, validateIngressType,
   assignPublicPort, releasePublicPort, drainingPorts, effectiveDataPlanePort, validateDataPlanePort, storedDataPlaneProtocol, validateDataPlaneProtocol, CONTROL_PLANE_PORT,
@@ -187,6 +187,16 @@ function appUrlsObject(db, slug) {
   if (!process.env.CRANE_DOMAIN && !isolationEnabled(db)) return null;
   const { url, sandbox_url } = appUrlFields(db, slug);
   return { production: url, sandbox: sandbox_url };
+}
+
+// Rows carrying app_id, as app_id -> rows without it, keeping their order.
+function groupByApp(rows) {
+  const out = new Map();
+  for (const { app_id, ...rest } of rows) {
+    if (!out.has(app_id)) out.set(app_id, []);
+    out.get(app_id).push(rest);
+  }
+  return out;
 }
 
 const router = Router();
@@ -475,51 +485,73 @@ router.get('/', async (req, res) => {
 
   const requestedSlugs = isAdmin(req.user) ? null : pendingAccessRequestSlugs(db, req.user.id);
 
+  // One query per kind for the whole list, not per app: this ran ~11 queries
+  // for every app on the platform's hottest listing.
+  const healthByKey = new Map();
+  for (const h of db.prepare('SELECT * FROM health_state').all()) healthByKey.set(`${h.app_id}:${h.env}`, h);
+  const lastDeployByKey = new Map();
+  for (const d of db.prepare(`
+    SELECT d.app_id, d.env, d.version, d.status, d.finished_at
+    FROM (
+      SELECT a.id AS app_id, e.env,
+             (SELECT id FROM deployments WHERE app_id = a.id AND env = e.env ORDER BY started_at DESC LIMIT 1) AS deployment_id
+      FROM apps a CROSS JOIN (SELECT 'production' AS env UNION ALL SELECT 'sandbox') e
+    ) latest
+    JOIN deployments d ON d.id = latest.deployment_id
+  `).all()) {
+    lastDeployByKey.set(`${d.app_id}:${d.env}`, { version: d.version, status: d.status, finished_at: d.finished_at });
+  }
+  // app_users is a view over app_user_roles; its row order within an app is
+  // the order the per-app lookup returned members in.
+  const usersByApp = groupByApp(db.prepare(`
+    SELECT aur.app_id, u.id, u.name, u.email FROM app_user_roles aur
+    JOIN users u ON u.id = aur.user_id
+    WHERE aur.app_role <> 'none'
+    ORDER BY aur.app_id, aur.rowid
+  `).all());
+  const ownersByApp = groupByApp(db.prepare(`
+    SELECT aur.app_id, u.id, u.name, u.email FROM users u
+    JOIN app_user_roles aur ON aur.user_id = u.id
+    WHERE aur.app_role = 'owner'
+    ORDER BY aur.app_id, u.id
+  `).all());
+  const aliasesByApp = groupByApp(db.prepare(
+    'SELECT app_id, id, domain, source, created_at FROM app_domain_aliases ORDER BY app_id, created_at, id'
+  ).all());
+  const absoluteUrls = !!process.env.CRANE_DOMAIN || isolationEnabled(db);
+
   // Enrich with ports and health status
   const enriched = apps.map(app => {
     if (userAppRole(app) === 'none') {
       return discoverableApp(app, {
-        owners: ownerNames(db, app.id),
+        owners: (ownersByApp.get(app.id) ?? []).map(o => ({ name: o.name })),
         hasIcon: hasIconFile(app.slug),
         accessRequested: requestedSlugs.has(app.slug),
       });
     }
     const ports = getPortsForSlot(app.slot);
 
-    const healthProd = db.prepare('SELECT * FROM health_state WHERE app_id = ? AND env = ?').get(app.id, 'production');
-    const healthSand = db.prepare('SELECT * FROM health_state WHERE app_id = ? AND env = ?').get(app.id, 'sandbox');
+    const healthProd = healthByKey.get(`${app.id}:production`);
+    const healthSand = healthByKey.get(`${app.id}:sandbox`);
 
-    const lastDeployProd = db.prepare(
-      'SELECT version, status, finished_at FROM deployments WHERE app_id = ? AND env = ? ORDER BY started_at DESC LIMIT 1'
-    ).get(app.id, 'production');
-    const lastDeploySand = db.prepare(
-      'SELECT version, status, finished_at FROM deployments WHERE app_id = ? AND env = ? ORDER BY started_at DESC LIMIT 1'
-    ).get(app.id, 'sandbox');
+    const lastDeployProd = lastDeployByKey.get(`${app.id}:production`);
+    const lastDeploySand = lastDeployByKey.get(`${app.id}:sandbox`);
 
-    // Get assigned users
-    const users = db.prepare(`
-      SELECT u.id, u.name, u.email FROM users u
-      JOIN app_users au ON u.id = au.user_id
-      WHERE au.app_id = ?
-    `).all(app.id);
+    const users = usersByApp.get(app.id) ?? [];
 
     // The app's owners. Usually one, but multiple are allowed — v2.21.0
     // returns them all (`owners`); `owner` stays as the first for back-compat.
     // Empty when the owner record was never created (e.g. apps from before
     // migration 048 fixed the latent CHECK bug, or apps whose creator was
     // deleted leaving created_by NULL).
-    const ownerRows = db.prepare(`
-      SELECT u.id, u.name, u.email FROM users u
-      JOIN app_user_roles aur ON aur.user_id = u.id
-      WHERE aur.app_id = ? AND aur.app_role = 'owner'
-      ORDER BY u.id
-    `).all(app.id);
+    const ownerRows = ownersByApp.get(app.id) ?? [];
 
-    const urls = appUrlsObject(db, app.slug);
+    const urlFields = appUrlFields(db, app.slug);
+    const urls = absoluteUrls ? { production: urlFields.url, sandbox: urlFields.sandbox_url } : null;
 
     return {
       ...withoutSecretColumns(app),
-      ...appUrlFields(db, app.slug),
+      ...urlFields,
       resource_limits: JSON.parse(app.resource_limits || '{}'),
       auth_bypass_paths: parseBypassPathsField(app.auth_bypass_paths),
       auth_mode: effectiveAuthMode(app.auth_mode),
@@ -555,7 +587,7 @@ router.get('/', async (req, res) => {
       },
       users,
       // v2.24.4: old domains that 301-redirect to this app's primary domain.
-      domain_aliases: db.prepare('SELECT id, domain, source, created_at FROM app_domain_aliases WHERE app_id = ? ORDER BY created_at, id').all(app.id),
+      domain_aliases: aliasesByApp.get(app.id) ?? [],
     };
   });
 
@@ -894,14 +926,14 @@ router.get('/:slug/metrics', requireAppAccess, (req, res) => {
  */
 router.get('/:slug/storage', requireAppAccess, async (req, res) => {
   const app = req.app;
-  const { dirSizeBytes } = await import('../services/diskUsage.js');
+  const { dirSizeBytesAsync } = await import('../services/diskUsage.js');
   const dataDir = process.env.DATA_DIR || './data';
   const envs = {};
   for (const env of ['production', 'sandbox']) {
     let bytes = 0;
     try {
       const dataPath = resolveSafe(dataDir, 'apps', app.slug, env, 'shared', 'data');
-      bytes = dirSizeBytes(dataPath);
+      bytes = await dirSizeBytesAsync(dataPath);
     } catch (_) { bytes = 0; }
     envs[env] = bytes;
   }

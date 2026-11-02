@@ -19,7 +19,6 @@
 // returns to ok. Sampling never throws; what cannot be read is "unknown".
 
 import { readFileSync, statfsSync, statSync } from 'fs';
-import { execFile } from 'child_process';
 import { freemem, totalmem } from 'os';
 import { resolve } from 'path';
 import { getDb } from '../db.js';
@@ -34,6 +33,7 @@ import { BRAND, bulletList, renderBrandedEmail } from './mail/brandedLayout.js';
 import { THRESHOLD_DEFAULTS, MiB, readThresholds, levelFor, diskLevel, belowDiskFloor, fmtBytes, diskFloorText } from './hostThresholds.js';
 import { AppError } from '../utils/errors.js';
 import { maybePruneForDisk } from './buildCachePrune.js';
+import { dockerInfo } from './dockerSnapshot.js';
 import log from '../utils/logger.js';
 
 export const HOST_MAIL_SOURCE = 'host-resources';
@@ -58,13 +58,10 @@ export function parseMeminfo(text) {
   return { availableBytes: kb('MemAvailable'), totalBytes: kb('MemTotal') };
 }
 
-function dockerRootDir() {
-  return new Promise((res) => {
-    execFile('docker', ['info', '--format', '{{.DockerRootDir}}'], { timeout: 10_000 }, (err, stdout) => {
-      const p = String(stdout || '').trim();
-      res(err || !p.startsWith('/') ? null : p);
-    });
-  });
+// From the shared, cached `docker info` (dockerSnapshot.js): the sample, the
+// deploy disk guard and both admission checks would otherwise each ask Docker.
+async function dockerRootDir() {
+  try { return (await dockerInfo()).rootDir; } catch (_) { return null; }
 }
 
 const DEFAULT_DEPS = {

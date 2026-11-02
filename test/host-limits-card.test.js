@@ -47,7 +47,7 @@ test('RUNNING (409) and MANUAL_ONLY refusals are shown in plain words', () => {
 
 test('a run in progress on load is polled every 5 seconds', () => {
   assert.match(card, /const POLL_MS = 5_000/);
-  assert.match(card, /setInterval\(load, POLL_MS\)/);
+  assert.match(card, /setVisibleInterval\(load, POLL_MS\)/);
 });
 
 test('the stale-copy warning shows the refresh command, not the Apply command', () => {

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { adminApi, authHeaders } from '../../adminApi'
 import { serverDate } from '../../utils/serverDate'
+import { setVisibleInterval } from '../../utils/visibleInterval'
 
 type Degraded = { file: string; source: string; reason: string }
 type Pack = {
@@ -41,8 +42,7 @@ export function EvidencePackPanel() {
   const building = packs.some((p) => p.status === 'running')
   useEffect(() => {
     if (!building) return
-    const t = setInterval(load, 1500)
-    return () => clearInterval(t)
+    return setVisibleInterval(load, 1500)
   }, [building])
 
   async function act(label: string, fn: () => Promise<void>) {

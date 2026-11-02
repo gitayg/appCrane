@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { adminApi } from '../adminApi'
+import { setVisibleInterval } from '../utils/visibleInterval'
 
 // "Encrypt MariaDB data at rest" (GET/PUT /api/managed-db/encryption, POST
 // /api/managed-db/encryption/unload-key; platform admin only). Rendered inside
@@ -52,8 +53,7 @@ export function ManagedDbEncryptionCard() {
   const moving = status?.phase === 'encrypting' || status?.phase === 'decrypting'
   useEffect(() => {
     if (!moving || !status?.server_running) return
-    const t = setInterval(load, 5000)
-    return () => clearInterval(t)
+    return setVisibleInterval(load, 5000)
   }, [moving, status?.server_running, load])
 
   if (!status) return null

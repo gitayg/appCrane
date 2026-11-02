@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { getViewAs, stopViewAs, reloadView, roleLabel, type ViewAsStatus } from './viewAsApi'
+import { setVisibleInterval } from '../utils/visibleInterval'
 
 const CSS = `
 .viewas-banner{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:8px 16px;
@@ -25,8 +26,8 @@ export function ViewAsBanner() {
     let cancelled = false
     const load = () => getViewAs().then(s => { if (!cancelled) setStatus(s) }).catch(() => {})
     load()
-    const t = setInterval(load, 60_000)
-    return () => { cancelled = true; clearInterval(t) }
+    const stop = setVisibleInterval(load, 60_000)
+    return () => { cancelled = true; stop() }
   }, [])
 
   if (!status?.active) return null

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { adminApi, ApiError } from '../adminApi'
 import { serverDate } from '../utils/serverDate'
+import { setVisibleInterval } from '../utils/visibleInterval'
 
 type ItemState = 'applied' | 'missing' | 'not-applicable' | 'unknown'
 
@@ -110,8 +111,7 @@ export function HostLimitsCard() {
   const running = !!status?.running
   useEffect(() => {
     if (!running || step === 'applying') return
-    const t = setInterval(load, POLL_MS)
-    return () => clearInterval(t)
+    return setVisibleInterval(load, POLL_MS)
   }, [running, step, load])
 
   async function apply() {

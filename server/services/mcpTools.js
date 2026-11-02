@@ -1447,13 +1447,12 @@ const TOOLS = [
       const env = args.env === 'production' ? 'production' : 'sandbox';
       const app = getAppForUser(user, args.slug);
       const safePath = validateContainerPath(args.path || '/app');
-      const { execFileSync } = await import('child_process');
+      const execFileAsync = (await import('util')).promisify((await import('child_process')).execFile);
       const containerName = `appcrane-${app.slug}-${env}`;
       try {
-        const out = execFileSync('docker', ['exec', containerName, 'ls', '-la', '--', safePath], {
-          stdio: 'pipe',
+        const { stdout: out } = await execFileAsync('docker', ['exec', containerName, 'ls', '-la', '--', safePath], {
           timeout: 5000,
-        }).toString();
+        });
         return { app: app.slug, env, path: safePath, listing: out };
       } catch (e) {
         const detail = e.stderr?.toString().trim() || e.message;
@@ -1483,16 +1482,15 @@ const TOOLS = [
       const env = args.env === 'production' ? 'production' : 'sandbox';
       const app = getAppForUser(user, args.slug);
       const safePath = validateContainerPath(args.path);
-      const { execFileSync } = await import('child_process');
+      const execFileAsync = (await import('util')).promisify((await import('child_process')).execFile);
       const containerName = `appcrane-${app.slug}-${env}`;
       const MAX_BYTES = 256 * 1024;
       // Probe size first so we don't pull a multi-MB file into the response.
       let size;
       try {
-        const sizeOut = execFileSync('docker', ['exec', containerName, 'stat', '-c', '%s', '--', safePath], {
-          stdio: 'pipe',
+        const sizeOut = (await execFileAsync('docker', ['exec', containerName, 'stat', '-c', '%s', '--', safePath], {
           timeout: 5000,
-        }).toString().trim();
+        })).stdout.trim();
         size = parseInt(sizeOut, 10);
       } catch (e) {
         const detail = e.stderr?.toString().trim() || e.message;
@@ -1502,11 +1500,10 @@ const TOOLS = [
         throw new Error(`File too large (${size} bytes > ${MAX_BYTES} cap). Use a tail/head invocation outside this tool, or read a specific range.`);
       }
       try {
-        const out = execFileSync('docker', ['exec', containerName, 'cat', '--', safePath], {
-          stdio: 'pipe',
+        const { stdout: out } = await execFileAsync('docker', ['exec', containerName, 'cat', '--', safePath], {
           timeout: 5000,
           maxBuffer: MAX_BYTES + 1024,
-        }).toString();
+        });
         return { app: app.slug, env, path: safePath, size, content: out };
       } catch (e) {
         const detail = e.stderr?.toString().trim() || e.message;
@@ -1914,15 +1911,14 @@ const TOOLS = [
       const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
       if (row.expires_at < now)       throw new Error(`staged file expired at ${row.expires_at}`);
 
-      const { execFileSync } = await import('child_process');
+      const execFileAsync = (await import('util')).promisify((await import('child_process')).execFile);
       const containerName = `appcrane-${app.slug}-${env}`;
       const cpSpec = `${containerName}:${safeDest}`;
       try {
         // -a: the copy belongs to the container's user. Without it docker cp
         // keeps the staged file's owner, root, and an app running as node gets
         // EACCES on its own upload (measured: 0:0 without, 1000:1000 with).
-        execFileSync('docker', ['cp', '-a', row.scratch_path, cpSpec], {
-          stdio: 'pipe',
+        await execFileAsync('docker', ['cp', '-a', row.scratch_path, cpSpec], {
           timeout: 30000,
         });
       } catch (e) {

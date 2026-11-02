@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useState } from 'react'
 import { adminApi } from '../../adminApi'
 import { serverDate } from '../../utils/serverDate'
+import { setVisibleInterval } from '../../utils/visibleInterval'
 
 type Check = { id: string; label: string; status: 'pass' | 'fail' | 'warn' | 'skipped'; detail: unknown }
 type Drill = {
@@ -41,8 +42,7 @@ export function RestoreDrillsCard() {
   useEffect(() => { load() }, [])
   useEffect(() => {
     if (!data?.running) return
-    const t = setInterval(load, 3000)
-    return () => clearInterval(t)
+    return setVisibleInterval(load, 3000)
   }, [data?.running])
 
   async function save() {

@@ -3,6 +3,7 @@ import { adminApi } from '../adminApi'
 import { OAuthConnections } from '../components/OAuthConnections'
 import { serverDate } from '../utils/serverDate'
 import { AppKeysCard } from '../components/AppKeysCard'
+import { setVisibleInterval } from '../utils/visibleInterval'
 
 type McpTool = {
   name: string
@@ -377,8 +378,8 @@ export function Mcp() {
         .catch(() => { if (!cancelled) setConnStatus('unreachable') })
     }
     ping()
-    const iv = setInterval(ping, 30000)
-    return () => { cancelled = true; clearInterval(iv) }
+    const stop = setVisibleInterval(ping, 30000)
+    return () => { cancelled = true; stop() }
   }, [])
 
   if (error) {

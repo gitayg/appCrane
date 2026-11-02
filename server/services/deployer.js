@@ -1,4 +1,5 @@
-import { execFileSync } from 'child_process';
+import { execFile, execFileSync } from 'child_process';
+import { promisify } from 'util';
 import { assertNoRestoreInProgress } from './managedDbRestoreGuard.js';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, unlinkSync, symlinkSync, cpSync, writeFileSync, readlinkSync } from 'fs';
 import { join, resolve, basename } from 'path';
@@ -31,6 +32,10 @@ import { imagesToKeep } from './imageRetention.js';
 import { admitContainer, REFUSED_CODE } from './memoryAdmission.js';
 import { recordDeployEvent, recordRollbackEvent } from './eventStore.js';
 import { createDeployLog } from './deployLog.js';
+import { probeBackoffMs } from './probeBackoff.js';
+import { cloneGitRelease, readReleaseCommit } from './gitDeployClone.js';
+
+const execFileAsync = promisify(execFile);
 
 // ---------------------------------------------------------------------------
 // Managed database credentials -> container environment
@@ -575,6 +580,7 @@ async function probeHealthEndpoint(url, timeoutMs, { strict = true } = {}) {
   let lastErrorClass = null;
   let lastStatus = null;
   let lastBodyPreview = null;
+  let attempt = 0;
 
   while (Date.now() < deadline) {
     try {
@@ -608,7 +614,7 @@ async function probeHealthEndpoint(url, timeoutMs, { strict = true } = {}) {
       lastErrorClass = classifyFetchError(e);
       lastError = lastErrorClass.label + (lastErrorClass.code && lastErrorClass.code !== 'UNKNOWN' ? ` [${lastErrorClass.code}]` : '');
     }
-    await new Promise(r => setTimeout(r, 2000));
+    await new Promise(r => setTimeout(r, probeBackoffMs(attempt++)));
   }
   const cls = lastErrorClass;
   return {
@@ -628,8 +634,8 @@ async function probeHealthEndpoint(url, timeoutMs, { strict = true } = {}) {
  * TCP handshake on the loopback port the container publishes.
  *
  * Same retry envelope as the HTTP gate — attempts until `timeoutMs` elapses,
- * 2s between them — because a container needs the same few seconds to bind
- * whatever protocol it speaks. Each attempt gets healthChecker's 5s connect
+ * with the same backoff between them (probeBackoff.js) — because a container
+ * needs the same few seconds to bind whatever protocol it speaks. Each attempt gets healthChecker's 5s connect
  * budget, clamped to whatever is left of the envelope so the gate cannot
  * overrun it.
  *
@@ -664,13 +670,14 @@ function tcpConnectOnce(host, port, timeoutMs) {
 async function probeTcpListener(host, port, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   let last = null;
+  let attempt = 0;
 
   while (Date.now() < deadline) {
     const attemptMs = Math.min(TCP_ATTEMPT_TIMEOUT_MS, deadline - Date.now());
     const result = await tcpConnectOnce(host, port, attemptMs);
     if (result.ok) return { ok: true };
     last = result;
-    await new Promise(r => setTimeout(r, 2000));
+    await new Promise(r => setTimeout(r, probeBackoffMs(attempt++)));
   }
 
   return {
@@ -989,6 +996,15 @@ export async function rollbackApp(app, env, deploymentId, userId) {
  * Shared by POST /api/apps/:slug/promote and the appcrane_promote MCP tool.
  * Caller is responsible for authz (must require deploy.production).
  */
+// Release folders are named releases/<ms>-git. A push-triggered deploy and a
+// manual one can start in the same millisecond and pick the same folder, and
+// the second clone then fails with "already exists"; never hand out one twice.
+let lastReleaseTimestamp = 0;
+function releaseTimestamp() {
+  lastReleaseTimestamp = Math.max(Date.now(), lastReleaseTimestamp + 1);
+  return lastReleaseTimestamp;
+}
+
 export async function promoteApp(app, userId, opts = {}) {
   const db = getDb();
 
@@ -1113,7 +1129,7 @@ export async function promoteApp(app, userId, opts = {}) {
 
   try {
     // 1. Copy sandbox release tree into production releases/ (skip .env + data symlinks).
-    const timestamp = Date.now();
+    const timestamp = releaseTimestamp();
     const newReleaseDir = resolve(join(prodReleasesDir, `${timestamp}-promote`));
     cpSync(sandboxReleaseDir, newReleaseDir, {
       recursive: true,
@@ -1254,15 +1270,26 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
   // each failure is reported with the path it applies to, because "the app
   // cannot write /config" and "the app cannot write /data" have different
   // causes and different fixes.
+  //
+  // v2.133.0: where AppCrane is not root (an install running it as `ubuntu`),
+  // a host chown cannot take back anything another user owns, so a folder an
+  // older appcrane_cp left owned by root (fixed in v2.123.1) stayed unwritable
+  // for the app on every later deploy. A mount the host chown failed on is
+  // retried just before the container starts (refusedChowns below), in a
+  // throwaway root container of the pinned helper image: there, once the disk
+  // and memory gates have passed and Docker is known to answer, rather than
+  // here, where a deploy about to be refused would pull the helper first.
   const chownDetails = [];
+  const refusedChowns = [];
   for (const vol of hostOwnedVolumes) {
     try {
-      execFileSync('chown', ['-R', '1000:1000', vol.host], { stdio: 'pipe', timeout: 30000 });
+      await execFileAsync('chown', ['-R', '1000:1000', vol.host], { timeout: 30000 });
       chownDetails.push(`chown 1000:1000 ${vol.host} (${vol.container}) → ok`);
     } catch (e) {
+      refusedChowns.push(vol);
       chownDetails.push(
-        `chown 1000:1000 ${vol.host} (${vol.container}) → failed (${e?.stderr?.toString().trim() || e.message}). ` +
-        `App may hit EACCES on ${vol.container} writes if its container runs as a non-root user.`,
+        `chown 1000:1000 ${vol.host} (${vol.container}) → refused on the host (${e?.stderr?.toString().trim() || e.message}); ` +
+        `retried as root in a helper container before the app starts.`,
       );
     }
   }
@@ -1319,7 +1346,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     pruneOldReleases(releasesDir, appDir, 5, appendLog);
 
     // 1. Clone or locate release
-    const timestamp = Date.now();
+    const timestamp = releaseTimestamp();
     let commitHash = 'unknown';
     // The full SHA beside the short one (migration 150): auto-patch compares
     // commits exactly, and a short prefix can be brute-forced.
@@ -1591,57 +1618,21 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
           : { timeout: ms, stdio: 'pipe' });
         const scrubGit = (msg) => scrubToken(scrubToken(String(msg), installationToken), token);
 
-        try {
-          execFileSync('git', [
-            'clone', '--depth', '1',
-            '--branch', app.branch || 'main',
-            cloneUrl, releaseDir,
-          ], gitOpts(120000));
-        } catch (err) {
-          throw new Error(scrubGit(err.message));
-        }
-
-        // v2.7.12: pin to an exact commit when asked (promote ships the EXACT
-        // release tested in sandbox, not the branch tip which may have moved).
-        // GitHub serves reachable full SHAs directly; fall back to deepening the
-        // branch history so an abbreviated SHA (deployments.commit_hash is short)
-        // still resolves, then check it out detached.
-        if (opts.targetCommit && opts.targetCommit !== 'unknown') {
-          appendLog(`Pinning to commit ${opts.targetCommit} (exact sandbox release)…`);
-          let fetched = false;
-          try {
-            execFileSync('git', ['-C', releaseDir, 'fetch', '--depth', '1', 'origin', opts.targetCommit], gitOpts(120000));
-            fetched = true;
-          } catch (_) { /* abbreviated SHA or not directly fetchable — deepen below */ }
-          if (!fetched) {
-            try {
-              execFileSync('git', ['-C', releaseDir, 'fetch', '--depth', '200', 'origin', app.branch || 'main'], gitOpts(120000));
-            } catch (_) { /* best effort; checkout will surface a clear error if the commit is unreachable */ }
-          }
-          try {
-            execFileSync('git', ['-C', releaseDir, 'checkout', '--detach', opts.targetCommit], gitOpts(30000));
-          } catch (err) {
-            throw new Error(`Failed to check out commit ${opts.targetCommit} for promotion (is it on branch '${app.branch || 'main'}' within the last 200 commits?): ${scrubGit(err.message)}`);
-          }
-        }
+        await cloneGitRelease({
+          cloneUrl, branch: app.branch || 'main', releaseDir,
+          targetCommit: opts.targetCommit, gitOpts, scrubGit, appendLog,
+        });
       }
 
-      // Get commit hash
-      try {
-        commitHash = execFileSync('git', ['-C', releaseDir, 'rev-parse', '--short', 'HEAD'], { timeout: 5000 })
-          .toString().trim();
-        const full = execFileSync('git', ['-C', releaseDir, 'rev-parse', 'HEAD'], { timeout: 5000 }).toString().trim();
-        if (/^[0-9a-f]{40}$/.test(full)) commitSha = full;
-      } catch (e) {}
-
-      // Get commit message (subject + body). %s is the subject line,
-      // %B includes body — we use %B and trim, capping at 2000 chars
-      // so a verbose merge-commit body doesn't blow up the row.
-      try {
-        const raw = execFileSync('git', ['-C', releaseDir, 'log', '-1', '--format=%B'], { timeout: 5000 })
-          .toString().trim();
-        if (raw) commitMessage = raw.slice(0, 2000);
-      } catch (e) { /* commitMessage stays null */ }
+      // Get commit hash, and the commit message (subject + body, %B, trimmed
+      // and capped at 2000 chars so a verbose merge-commit body doesn't blow
+      // up the row).
+      {
+        const head = await readReleaseCommit(releaseDir);
+        if (head.commitHash !== null) commitHash = head.commitHash;
+        if (head.commitSha !== null) commitSha = head.commitSha;
+        if (head.commitMessage !== null) commitMessage = head.commitMessage;
+      }
 
       appendLog(`Cloned successfully. Commit: ${commitHash}${commitMessage ? ` — ${commitMessage.split('\n')[0].slice(0, 80)}` : ''}`);
 
@@ -1930,7 +1921,8 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     } else {
       const { pinnedPhpVersionFor, describePhpBuild } = await import('./phpVersion.js');
       const pinnedPhpVersion = pinnedPhpVersionFor(db, app.id, env);
-      const { userProvided, runtime, php, node } = ensureDockerfile({ releaseDir, manifest, appBasePath, craneUrl, craneInternalUrl, pinnedPhpVersion });
+      const { buildKitEnabled } = await import('./buildkitMode.js');
+      const { userProvided, runtime, php, node } = ensureDockerfile({ releaseDir, manifest, appBasePath, craneUrl, craneInternalUrl, buildkit: buildKitEnabled(), slug: app.slug, pinnedPhpVersion });
       buildRuntime = runtime ?? null;
 
       if (userProvided) {
@@ -2157,6 +2149,19 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     const { seedNewVolumeMounts } = await import('./volumeSeeder.js');
     const seedResult = await seedNewVolumeMounts({ image, volumes: containerVolumes });
     for (const line of seedResult.log) appendLog(line);
+
+    if (refusedChowns.length) {
+      const { chownTreeAsRoot, ensureHelperImage } = await import('./docker.js');
+      const { HELPER_IMAGE } = await import('./volumeHelper.js');
+      for (const vol of refusedChowns) {
+        try {
+          await chownTreeAsRoot({ hostDir: vol.host, owner: '1000:1000', image: HELPER_IMAGE, ensureImage: ensureHelperImage });
+          appendLog(`chown 1000:1000 ${vol.host} (${vol.container}) → ok in a root helper container`);
+        } catch (e) {
+          appendLog(`chown 1000:1000 ${vol.host} (${vol.container}) → failed (${e.message}). App may hit EACCES on ${vol.container} writes if its container runs as a non-root user.`);
+        }
+      }
+    }
 
     const stagedRules = isImageDeploy ? null : stageManifestRules(app.id, env, manifestAccessRules);
     const limits = parseResourceLimits(app.resource_limits);

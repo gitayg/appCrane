@@ -20,6 +20,7 @@ import { serverDate } from '../utils/serverDate'
 import { appOpenUrl } from '../lib/appLinks'
 import { limitsAppliedText, type LimitApply } from '../utils/limitsApplied'
 import { guaranteedHint } from '../utils/guaranteedMemory'
+import { setVisibleInterval } from '../utils/visibleInterval'
 
 defineCraneAppTopbar()
 
@@ -520,8 +521,8 @@ export function Applications() {
         .catch(() => {})
     }
     refresh()
-    const iv = setInterval(refresh, 30000)
-    return () => { cancelled = true; clearInterval(iv) }
+    const stop = setVisibleInterval(refresh, 30000)
+    return () => { cancelled = true; stop() }
   }, [])
 
   async function setVisibility(slug: string, vis: string) {

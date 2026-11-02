@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync, mkdtempSync } from 'node:fs';
+import { readFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { shippedBundle } from './admin-bundle.js';
 
 // TCP (layer-4) ingress — the two SURFACES that tell a human or an agent that an
 // app has a second door (v2.42.0).
@@ -40,24 +41,22 @@ const REST_SRC = readFileSync(join(ROOT, 'server/routes/apps.js'), 'utf8');
 // The shipped bundle
 // ---------------------------------------------------------------------------
 
-const ASSETS = join(ROOT, 'docs/admin-app/assets');
-const BUNDLES = readdirSync(ASSETS).filter(f => f.endsWith('.js'));
-const BUNDLE = BUNDLES.map(f => readFileSync(join(ASSETS, f), 'utf8')).join('\n');
-const INDEX_HTML = readFileSync(join(ROOT, 'docs/admin-app/index.html'), 'utf8');
+const SHIPPED = shippedBundle();
+const BUNDLE = SHIPPED.text;
 
-test('docs/admin-app ships exactly one SPA bundle and index.html points at it', () => {
-  // Vite hashes the filename, so a rebuild leaves a second .js behind whenever
-  // the stale one wasn't deleted. Two bundles means index.html loads one of
-  // them and the other is dead weight that still satisfies a naive
-  // "does any bundle contain X" search — which would make every assertion
-  // below pass against a file production never loads.
-  assert.equal(BUNDLES.length, 1,
-    `expected one built .js under docs/admin-app/assets, found ${BUNDLES.length}: ${BUNDLES.join(', ')}. ` +
-    'Delete the stale bundle — a leftover hash makes bundle assertions meaningless.');
-
-  assert.ok(INDEX_HTML.includes(BUNDLES[0]),
-    `docs/admin-app/index.html does not reference ${BUNDLES[0]} — the built bundle and the ` +
-    'page that loads it are out of sync, so the shipped dashboard is stale.');
+test('docs/admin-app ships no stale chunk and index.html loads an entry that is on disk', () => {
+  // Vite hashes every filename, so a rebuild leaves old chunks behind whenever
+  // they weren't deleted. A dead chunk still satisfies a naive "does any bundle
+  // contain X" search — which would make every assertion below pass against a
+  // file production never loads. The build is code-split, so BUNDLE is exactly
+  // index.html's entry plus every chunk reachable from it; anything else on
+  // disk is stale.
+  assert.ok(SHIPPED.entry, 'docs/admin-app/index.html loads no module script');
+  assert.deepEqual(SHIPPED.missing, [],
+    `docs/admin-app references chunks that are not on disk: ${SHIPPED.missing.join(', ')} — the shipped dashboard is broken.`);
+  assert.deepEqual(SHIPPED.stale, [],
+    `stale .js under docs/admin-app/assets: ${SHIPPED.stale.join(', ')}. ` +
+    'Delete it — a leftover hash makes bundle assertions meaningless.');
 });
 
 test('the built bundle carries the ingress modal, not just the source', () => {

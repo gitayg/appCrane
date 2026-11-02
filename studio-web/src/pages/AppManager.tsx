@@ -17,6 +17,7 @@ import { EnvVarsPanel } from '../components/env/EnvVarsPanel'
 import { serverDate } from '../utils/serverDate'
 import { limitsAppliedText, type LimitApply } from '../utils/limitsApplied'
 import { guaranteedHint } from '../utils/guaranteedMemory'
+import { setVisibleInterval } from '../utils/visibleInterval'
 
 const PAGE_CSS = `
 /* margin 0, not -24px: .app-manager has no padding to cancel, so the negative margins made
@@ -309,8 +310,7 @@ function MetricsCard({ slug, env }: MetricsCardProps) {
     setHidden(true)
     setMetrics(null)
     fetchMetrics()
-    const id = setInterval(fetchMetrics, 10000)
-    return () => clearInterval(id)
+    return setVisibleInterval(fetchMetrics, 10000)
   }, [fetchMetrics])
 
   if (hidden || !metrics) return null
@@ -823,7 +823,7 @@ function LogDrawer({ open, slug, env, tab, deployId, onClose, onTabChange }: Log
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const contentRef = useRef<HTMLDivElement | null>(null)
-  const pollerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const pollerRef = useRef<(() => void) | null>(null)
 
   const fetchRuntime = useCallback(async () => {
     try {
@@ -854,7 +854,7 @@ function LogDrawer({ open, slug, env, tab, deployId, onClose, onTabChange }: Log
   }, [slug, env])
 
   useEffect(() => {
-    if (pollerRef.current) { clearInterval(pollerRef.current); pollerRef.current = null }
+    if (pollerRef.current) { pollerRef.current(); pollerRef.current = null }
     if (!open) {
       setLines([])
       return
@@ -864,14 +864,14 @@ function LogDrawer({ open, slug, env, tab, deployId, onClose, onTabChange }: Log
     setLines([])
     if (tab === 'runtime') {
       fetchRuntime().finally(() => setLoading(false))
-      pollerRef.current = setInterval(fetchRuntime, 4000)
+      pollerRef.current = setVisibleInterval(fetchRuntime, 4000)
     } else if (tab === 'build' && deployId) {
       fetchBuild(deployId).finally(() => setLoading(false))
     } else {
       setLoading(false)
     }
     return () => {
-      if (pollerRef.current) { clearInterval(pollerRef.current); pollerRef.current = null }
+      if (pollerRef.current) { pollerRef.current(); pollerRef.current = null }
     }
   }, [open, tab, deployId, fetchRuntime, fetchBuild])
 

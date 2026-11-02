@@ -1,9 +1,12 @@
 import { existsSync, readFileSync, lstatSync } from 'fs';
+import { createHash } from 'crypto';
 import { join, dirname } from 'path';
 import { writeFileInside } from '../utils/paths.js';
 import log from '../utils/logger.js';
 import { detectPhpApp, ensurePhpDockerfile } from './dockerfileGenPhp.js';
 import { pickNodeVersion } from './nodeVersion.js';
+import { placeAppBasePathArg } from './dockerfileBasePath.js';
+import { ensureDockerignore } from './dockerignore.js';
 
 // Lockfiles `npm ci` can actually consume. Only these make the generated
 // install reproducible, because the generated install runs npm.
@@ -114,6 +117,19 @@ function entryToCmd(entry) {
   return JSON.stringify(trimmed.split(/\s+/));
 }
 
+/**
+ * BuildKit cache id for an app's npm cache, or null without a slug. Only
+ * [a-z0-9-] reaches the mount options; a slug that needed changing to get
+ * there also carries a hash of the original, so two slugs never share one.
+ */
+export function npmCacheId(slug) {
+  if (!slug) return null;
+  const raw = String(slug);
+  const clean = raw.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 60);
+  if (clean === raw) return `npm-${clean}`;
+  return `npm-${clean}-${createHash('sha256').update(raw).digest('hex').slice(0, 12)}`;
+}
+
 function defaultInstall() {
   // npm ci if a lockfile exists, else npm install. Stay --omit=dev.
   return `if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit=dev; fi`;
@@ -202,7 +218,7 @@ function supplyChainLines({ relDir, lockfileMissing, omitDev }) {
  * generation time, as opposed to the ones the generated Dockerfile prints
  * during the build.
  */
-export function ensureDockerfile({ releaseDir, manifest, appBasePath, craneUrl, craneInternalUrl, pinnedPhpVersion = null }) {
+export function ensureDockerfile({ releaseDir, manifest, appBasePath, craneUrl, craneInternalUrl, pinnedPhpVersion = null, buildkit = false, slug = null }) {
   const existing = join(releaseDir, 'Dockerfile'); // nosemgrep: path-join-resolve-traversal — releaseDir is an internal computed path
   const warnings = [];
 
@@ -244,6 +260,7 @@ export function ensureDockerfile({ releaseDir, manifest, appBasePath, craneUrl, 
   // before.
   if (detectPhpApp(releaseDir)) {
     const php = ensurePhpDockerfile({ releaseDir, manifest, dockerfilePath: existing, pinnedPhpVersion });
+    ensureDockerignore(releaseDir);
     for (const w of php.warnings) warnings.push(w);
     return { path: php.path, warnings, runtime: 'php', php: php.php };
   }
@@ -262,6 +279,15 @@ export function ensureDockerfile({ releaseDir, manifest, appBasePath, craneUrl, 
     feWorkdir = detectFrontendWorkdir(releaseDir);
   }
   const beInstall = manifest?.be?.install || defaultInstall();
+  // BuildKit only: the classic builder (DOCKER_BUILDKIT=0) rejects --mount as
+  // a syntax error. The cache keeps npm's download cache across builds so a
+  // lockfile change fetches only what changed, and out of the image layer.
+  // One cache per app: a cache with no id is shared by every build on the
+  // host, so one app's install could plant entries another app's build reads.
+  const cacheId = npmCacheId(slug);
+  const installRun = buildkit && cacheId
+    ? `RUN --mount=type=cache,id=${cacheId},target=/home/node/.npm,uid=1000,gid=1000,sharing=locked`
+    : 'RUN';
   const feInstall = manifest?.fe?.install || defaultInstall();
 
   // Install directories AppCrane resolves dependencies for itself. A
@@ -334,7 +360,7 @@ export function ensureDockerfile({ releaseDir, manifest, appBasePath, craneUrl, 
       lines.push(
         `# Backend deps (${beWorkdir})`,
         `COPY --chown=node:node ${beWorkdir}/package*.json ./${beWorkdir}/`,
-        `RUN cd ${beWorkdir} && ${beInstall}`,
+        `${installRun} cd ${beWorkdir} && ${beInstall}`,
         '',
       );
     } else {
@@ -342,7 +368,7 @@ export function ensureDockerfile({ releaseDir, manifest, appBasePath, craneUrl, 
       trackInstall('.', true);
       lines.push(
         'COPY --chown=node:node package*.json ./',
-        `RUN ${defaultInstall()}`,
+        `${installRun} ${defaultInstall()}`,
         '',
       );
     }
@@ -351,7 +377,7 @@ export function ensureDockerfile({ releaseDir, manifest, appBasePath, craneUrl, 
       lines.push(
         `# Frontend deps (${feWorkdir}) — devDeps included for build`,
         `COPY --chown=node:node ${feWorkdir}/package*.json ./${feWorkdir}/`,
-        `RUN cd ${feWorkdir} && ${feInstall.replace(/--omit=dev/g, '').trim()}`,
+        `${installRun} cd ${feWorkdir} && ${feInstall.replace(/--omit=dev/g, '').trim()}`,
         '',
       );
     }
@@ -361,7 +387,7 @@ export function ensureDockerfile({ releaseDir, manifest, appBasePath, craneUrl, 
     trackInstall('.', true);
     lines.push(
       'COPY --chown=node:node package*.json ./',
-      `RUN ${defaultInstall()}`,
+      `${installRun} ${defaultInstall()}`,
       '',
       'COPY --chown=node:node . .',
       '',
@@ -402,6 +428,7 @@ export function ensureDockerfile({ releaseDir, manifest, appBasePath, craneUrl, 
   );
 
   writeFileInside(releaseDir, existing, lines.join('\n'));
+  ensureDockerignore(releaseDir, { nodeModulesDirs: [...new Set(['.', beWorkdir, feWorkdir].filter(Boolean))] });
   return { path: existing, warnings, runtime: 'node', node: nodeChoice };
 }
 
@@ -413,17 +440,12 @@ export function ensureDockerfile({ releaseDir, manifest, appBasePath, craneUrl, 
  * declares with ARG, so bundlers (Vite, CRA) see `undefined` and fall back to
  * `/` or `./`, breaking sub-path deployments.
  *
- * The injection is placed immediately after the first FROM line so it is
- * in scope for all subsequent RUN / ENV / CMD instructions.
+ * Placement is decided by dockerfileBasePath.js: in the first stage, just
+ * before the first instruction that can see the app's source.
  */
 export function injectAppBasePathArg(dockerfilePath) {
   const content = readFileSync(dockerfilePath, 'utf8');
-  if (/^ARG\s+APP_BASE_PATH\b/m.test(content)) return; // already declared
-
-  const lines = content.split('\n');
-  const fromIdx = lines.findIndex(l => /^\s*FROM\s+/i.test(l));
-  if (fromIdx === -1) return; // malformed Dockerfile — skip silently
-
-  lines.splice(fromIdx + 1, 0, 'ARG APP_BASE_PATH=/', 'ENV APP_BASE_PATH=$APP_BASE_PATH', '');
-  writeFileInside(dirname(dockerfilePath), dockerfilePath, lines.join('\n'));
+  const placed = placeAppBasePathArg(content);
+  if (placed === null) return; // already declared, or no FROM
+  writeFileInside(dirname(dockerfilePath), dockerfilePath, placed);
 }

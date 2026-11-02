@@ -41,7 +41,7 @@ const NANO = 1e9;
 const labels = (o) => JSON.stringify(o);
 function host({ ncpu = 2, containers = [] }) {
   const ids = containers.map((_, i) => `id${i}`).join('\n');
-  const lines = containers.map((c) => [`/${c.name}`, Math.round((c.cpus || 0) * NANO), 0, 0, c.shares ?? 128, labels(c.labels || { appcrane: 'true', slug: c.name, env: 'production' })].join('\t')).join('\n');
+  const lines = containers.map((c) => [`/${c.name}`, 'running', 1, '', 0, 0, 0, Math.round((c.cpus || 0) * NANO), 0, 0, c.shares ?? 128, labels(c.labels || { appcrane: 'true', slug: c.name, env: 'production' }), ''].join('\t')).join('\n');
   writeFileSync(RULES, JSON.stringify([
     { match: ['info'], stdout: `${ncpu}\n` },
     { match: ['ps', '-q'], stdout: ids ? `${ids}\n` : '' },

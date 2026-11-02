@@ -33,6 +33,7 @@ import { AutoPatchPolicyCard } from '../components/autoPatch/AutoPatchPolicyCard
 import { VulnAlertsCard } from '../components/vulnAlerts/VulnAlertsCard'
 import { RuntimePatchCard } from '../components/autoPatch/RuntimePatchCard'
 import { AppIsolationCard } from '../components/AppIsolationCard'
+import { setVisibleInterval } from '../utils/visibleInterval'
 
 function SecurityTab() {
   const [certFile, setCertFile] = useState('')
@@ -773,8 +774,7 @@ function GithubTab() {
     loadSettings()
     loadContainers()
     loadServiceConfig()
-    const iv = setInterval(loadContainers, 15000)
-    return () => clearInterval(iv)
+    return setVisibleInterval(loadContainers, 15000)
   }, [])
 
   async function save() {

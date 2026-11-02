@@ -170,6 +170,21 @@ const BROTLI_REFUSAL =
   `        respond "Request bodies compressed with Brotli (Content-Encoding: br) are not accepted." 415\n` +
   `    }\n`;
 
+// Compression for AppCrane's own UI and API only (the admin bundle went out
+// uncompressed: ~1 MB that gzips to ~270 kB). The types are listed rather than
+// left to Caddy's default, which includes text/* and so text/event-stream: the
+// ask/coder/plan/A2A/MCP streams must reach the browser event by event, not
+// held back in a compressor. App routes are left alone; an app compresses its
+// own responses or chooses not to.
+const CRANE_ENCODE =
+  `        encode zstd gzip {\n` +
+  `            match {\n` +
+  ['text/html*', 'text/css*', 'text/plain*', 'text/javascript*', 'application/javascript*',
+    'application/json*', 'image/svg+xml*', 'application/manifest+json*']
+    .map(t => `                header Content-Type ${t}\n`).join('') +
+  `            }\n` +
+  `        }\n`;
+
 /**
  * Access log for the crane domain, with every query-string value redacted.
  *
@@ -996,6 +1011,7 @@ export function generateCaddyfile() {
 
   // Everything else → AppCrane itself
   caddyfile += `    handle {\n`;
+  caddyfile += CRANE_ENCODE;
   caddyfile += `        reverse_proxy 127.0.0.1:${cranePort}\n`;
   caddyfile += `    }\n\n`;
 

@@ -117,7 +117,8 @@ function clearDockerCalls() {
 }
 /** The single `docker run` argv since the last clear. */
 function runArgs() {
-  const runs = dockerCalls().filter(c => c[0] === 'run');
+  // The /data chown helper (a refused host chown, as on any non-root test host) is not the app.
+  const runs = dockerCalls().filter(c => c[0] === 'run' && !c.includes('appcrane-roothelper=true'));
   assert.equal(runs.length, 1, `expected exactly one \`docker run\`, saw ${runs.length}`);
   return runs[0];
 }

@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { readFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { dirname, join, basename } from 'node:path';
+import { dirname, join } from 'node:path';
+import { shippedBundle } from './admin-bundle.js';
 
 // v2.45.0 dual ingress — the SURFACES that tell a human or an agent that an app
 // has two planes with different security properties.
@@ -43,28 +44,23 @@ const MCP_SRC = readFileSync(join(ROOT, 'server/services/mcpTools.js'), 'utf8');
 const REST_SRC = readFileSync(join(ROOT, 'server/routes/apps.js'), 'utf8');
 
 // The bundle PRODUCTION LOADS, resolved through index.html rather than by
-// globbing the assets directory. A stale hashed bundle left behind by a rebuild
-// satisfies a naive "does any bundle contain X" search while the page never
-// loads it; reading only the referenced file makes that impossible here.
-// (test/tcp-ingress-surface.test.js separately fails the leftover itself.)
-const INDEX_HTML = readFileSync(join(ROOT, 'docs/admin-app/index.html'), 'utf8');
-const BUNDLE_REF = INDEX_HTML.match(/<script[^>]+src="([^"]+\.js)"/)?.[1];
-// Read defensively so a missing bundle surfaces as the assertion below rather
-// than as an ENOENT at import time, which fails the whole FILE with a stack
-// trace and no statement of what was wrong.
-let BUNDLE = '';
-try {
-  BUNDLE = readFileSync(join(ROOT, 'docs/admin-app/assets', basename(BUNDLE_REF ?? '')), 'utf8');
-} catch { /* asserted below */ }
+// globbing the assets directory: the entry index.html names plus every chunk
+// reachable from it (the build is code-split). A stale hashed chunk left behind
+// by a rebuild satisfies a naive "does any bundle contain X" search while the
+// page never loads it; reading only the reachable files makes that impossible
+// here. (test/tcp-ingress-surface.test.js separately fails the leftover itself.)
+const SHIPPED = shippedBundle();
+const BUNDLE = SHIPPED.text;
 
 test('index.html names the SPA bundle this file then greps', () => {
   // Precondition for every bundle assertion below: if this resolves to nothing,
   // the greps would all pass vacuously against an empty string.
-  assert.ok(BUNDLE_REF, 'docs/admin-app/index.html loads no module script — nothing to assert against');
+  assert.ok(SHIPPED.entry, 'docs/admin-app/index.html loads no module script — nothing to assert against');
+  assert.deepEqual(SHIPPED.missing, [],
+    `docs/admin-app references chunks that are not on disk: ${SHIPPED.missing.join(', ')}`);
   assert.ok(BUNDLE.length > 100_000,
-    `the bundle index.html points at (${BUNDLE_REF}) is ${BUNDLE.length} bytes — either it is ` +
-    'missing from docs/admin-app/assets or it is not the built SPA. Every bundle assertion in ' +
-    'this file would otherwise pass against an empty string.');
+    `the bundle index.html loads (${SHIPPED.entry} and its chunks) is ${BUNDLE.length} bytes — it is ` +
+    'not the built SPA. Every bundle assertion in this file would otherwise pass against an empty string.');
 });
 
 // ---------------------------------------------------------------------------

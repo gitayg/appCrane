@@ -18,6 +18,9 @@ const router = Router();
 
 const ACCESS_REQUEST_RE = /^Access request for app/i;
 
+const MY_WHERE = 'er.user_id = ?';
+const OPEN_ONLY = "(er.status IS NULL OR LOWER(er.status) NOT IN ('done', 'merged', 'closed', 'failed', 'cancelled'))";
+
 const VALID_STATUSES = ['new', 'selected', 'planning', 'in_progress', 'done', 'no_changes_needed'];
 
 function noteFromBody(body) {
@@ -132,11 +135,36 @@ router.get('/my', requireAuth, (req, res) => {
   const db = getDb();
   const rows = db.prepare(`
     SELECT id, app_slug, message, created_at, status, done_note
-    FROM enhancement_requests
-    WHERE user_id = ?
+    FROM enhancement_requests er
+    WHERE ${MY_WHERE}
     ORDER BY created_at DESC
   `).all(session.user_id);
   res.json({ requests: rows });
+});
+
+// Open-request counts for the dashboard's Requests badge. Each one counts the
+// rows its list endpoint returns, under the same auth and the same WHERE, minus
+// the statuses the badge never counted (OPEN_ONLY) — so polling it shows no
+// more than the list would, without shipping every row to count them.
+router.get('/my/count', requireAuth, (req, res) => {
+  const db = getDb();
+  const { n } = db.prepare(`SELECT COUNT(*) AS n FROM enhancement_requests er WHERE ${MY_WHERE} AND ${OPEN_ONLY}`)
+    .get(req.user.id);
+  res.json({ count: n });
+});
+
+router.get('/owned/count', (req, res) => {
+  const scope = ownedScope(req);
+  if (!scope) return res.json({ count: 0 });
+  const { n } = getDb().prepare(`SELECT COUNT(*) AS n FROM enhancement_requests er WHERE ${scope.where} AND ${OPEN_ONLY}`)
+    .get(...scope.params);
+  res.json({ count: n });
+});
+
+router.get('/count', requireAuth, requireAdmin, (req, res) => {
+  const where = adminWhere(req);
+  const { n } = getDb().prepare(`SELECT COUNT(*) AS n FROM enhancement_requests er ${where ? where + ' AND' : 'WHERE'} ${OPEN_ONLY}`).get();
+  res.json({ count: n });
 });
 
 /**
@@ -154,7 +182,7 @@ router.get('/my', requireAuth, (req, res) => {
  * no role on (that's /api/enhancements/my, kept separate so this view stays
  * an app-triage list rather than mixing two mental models).
  */
-router.get('/owned', (req, res) => {
+function ownedScope(req) {
   const authHeader = req.headers.authorization || '';
   const token = authHeader.replace(/^Bearer\s+/i, '').trim();
   const session = getUserFromBearer(token);
@@ -179,11 +207,19 @@ router.get('/owned', (req, res) => {
     .filter(a => userHasAppPermission(principal, a, 'request.view_app'))
     .map(a => a.slug);
 
-  if (viewableSlugs.length === 0) return res.json({ requests: [] });
+  if (viewableSlugs.length === 0) return null;
 
   const includeDone = req.query.include_done === '1' || req.query.include_done === 'true';
   const placeholders = viewableSlugs.map(() => '?').join(', ');
-  const where = includeDone ? '' : "AND (er.status != 'done' OR er.status IS NULL)";
+  const doneCond = includeDone ? '' : "AND (er.status != 'done' OR er.status IS NULL)";
+  return { where: `er.app_slug IN (${placeholders}) ${doneCond}`, params: viewableSlugs };
+}
+
+router.get('/owned', (req, res) => {
+  const scope = ownedScope(req);
+  if (!scope) return res.json({ requests: [] });
+
+  const db = getDb();
   const rows = db.prepare(`
     SELECT
       er.id, er.app_slug, er.user_name, er.message, er.created_at, er.status,
@@ -199,9 +235,9 @@ router.get('/owned', (req, res) => {
     LEFT JOIN enhancement_jobs j ON j.id = (
       SELECT id FROM enhancement_jobs WHERE enhancement_id = er.id ORDER BY id DESC LIMIT 1
     )
-    WHERE er.app_slug IN (${placeholders}) ${where}
+    WHERE ${scope.where}
     ORDER BY er.created_at DESC
-  `).all(...viewableSlugs);
+  `).all(...scope.params);
   const enriched = rows.map(r => ({ ...r, bucket: bucketize(r.status, r.validated_at) }));
   res.json({ requests: enriched });
 });
@@ -210,8 +246,7 @@ router.get('/owned', (req, res) => {
  * GET /api/enhancements
  * List all enhancement requests. Requires admin API key.
  */
-router.get('/', requireAuth, requireAdmin, (req, res) => {
-  const db = getDb();
+function adminWhere(req) {
   // By default hide requests the user marked as done — they're cleanup
   // clutter on the active list. ?include_done=1 shows everything.
   const includeDone = req.query.include_done === '1' || req.query.include_done === 'true';
@@ -220,7 +255,12 @@ router.get('/', requireAuth, requireAdmin, (req, res) => {
   // v2.21.5: platform requests ('_platform') are visible only to platform
   // admins. Tier-2 admins and everyone else never see them in the triage list.
   if (req.user.role !== 'platform_admin') conds.push("(er.app_slug IS NULL OR er.app_slug != '_platform')");
-  const where = conds.length ? 'WHERE ' + conds.join(' AND ') : '';
+  return conds.length ? 'WHERE ' + conds.join(' AND ') : '';
+}
+
+router.get('/', requireAuth, requireAdmin, (req, res) => {
+  const db = getDb();
+  const where = adminWhere(req);
   const rows = db.prepare(`
     SELECT
       er.id, er.app_slug, er.user_name, er.message, er.created_at, er.status,
