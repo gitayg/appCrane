@@ -43,6 +43,10 @@ import { deleteAppTool } from './mcpGaps/deleteAppTool.js';
 import { getAuditTool } from './mcpGaps/getAuditTool.js';
 import { submitFeedbackTool } from './feedback/mcpTool.js';
 import { redactFeedbackAuditArgs } from './feedback/submit.js';
+import {
+  recordPush, recentPushes, singleFilePushAdvice, halfPushedBuildAdvice, largeInlineAdvice,
+  missingDataDirs, uploadCreatedDirAdvice, adviceField, withAdviceNote, toMs, ADVICE_WINDOW_MS,
+} from './deployAdvice.js';
 
 /**
  * The commit part of a managed-push response. A GitHub commit carries its web
@@ -314,6 +318,89 @@ function assertAgentContextSize(text) {
       + 'It is prepended to every coder dispatch, so it has to stay small — summarise or prune it.'
     );
   }
+}
+
+// Deploy advice (deployAdvice.js). Everything below degrades to "no advice":
+// a hint about HOW the agent deploys must never fail the call it rides on.
+
+// A warn-level rule that fired is written once per app into the agent context,
+// so the coder reads it on every dispatch, not only the agent that saw it.
+function persistAdviceNotes(slug, items) {
+  for (const item of items || []) {
+    try {
+      const next = withAdviceNote(readAgentContext(slug), item);
+      if (next == null) continue;
+      assertAgentContextSize(next);
+      writeAgentContext(slug, next);
+    } catch (_) { /* over the cap or unwritable: skip silently */ }
+  }
+}
+
+// After a committed managed push: record it, then R1 (and R3 for inline files).
+// Only a local repository's push deploys through AppCrane, so only those are
+// recorded: a GitHub-backed managed app keeps the push response it always had
+// (test/deploy-on-push-github-unchanged.test.js).
+function pushAdvice(app, result, inlineFiles = []) {
+  try {
+    const files = (result?.files?.length || 0) + (result?.deleted?.length || 0);
+    if (usesLocalRepo(app)) recordPush(app.slug, { files, commit: result?.commit?.sha || null });
+    const field = adviceField([singleFilePushAdvice(app.slug), largeInlineAdvice(inlineFiles)]);
+    if (field.advice) persistAdviceNotes(app.slug, field.advice);
+    return field;
+  } catch (_) { return {}; }
+}
+
+// Pushes to the app, from the in-memory ring and from the managed-push delivery
+// log (which survives a restart and also sees coder releases). One entry per
+// commit: a push that deployed both envs logs two delivery rows.
+function knownPushes(db, appId, slug) {
+  const out = recentPushes(slug).map((p) => ({ at: p.at, commit: p.commit }));
+  try {
+    const rows = db.prepare(
+      "SELECT received_at, commit_hash FROM webhook_deliveries WHERE app_id = ? AND event = 'managed-push' ORDER BY id DESC LIMIT 100",
+    ).all(appId);
+    for (const r of rows) {
+      const at = toMs(r.received_at);
+      if (at == null) continue;
+      const c = r.commit_hash ? String(r.commit_hash).toLowerCase() : null;
+      if (c && out.some((p) => p.commit && String(p.commit).toLowerCase().startsWith(c))) continue;
+      out.push({ at, commit: c });
+    }
+  } catch (_) { /* the ring alone */ }
+  return out;
+}
+
+// R2 for one deployment, plus R1 while it is active. `dep` needs id, status,
+// started_at, commit_hash; its log is read here only when it failed. Called
+// from read-only tools, so the note is written only for a caller who could
+// write the agent context themselves.
+function deploymentAdvice(db, appId, slug, dep, { persist = false } = {}) {
+  try {
+    if (!dep) return {};
+    let d = dep;
+    if (d.status === 'failed' && d.log === undefined) {
+      d = { ...d, log: db.prepare('SELECT log FROM deployments WHERE id = ?').get(d.id)?.log || '' };
+    }
+    const field = adviceField([halfPushedBuildAdvice(slug, d, knownPushes(db, appId, slug)), singleFilePushAdvice(slug)]);
+    if (field.advice && persist) persistAdviceNotes(slug, field.advice);
+    return field;
+  } catch (_) { return {}; }
+}
+
+// appcrane_get_app: the rules active for the app now. R2 counts only for a
+// failed deployment that started inside the window.
+function appAdvice(db, app, recentDeploys, { persist = false } = {}) {
+  try {
+    const now = Date.now();
+    const failed = (recentDeploys || []).find((d) => d.status === 'failed'
+      && toMs(d.started_at) != null && now - toMs(d.started_at) <= ADVICE_WINDOW_MS);
+    if (failed) return deploymentAdvice(db, app.id, app.slug, failed, { persist });
+    return adviceField([singleFilePushAdvice(app.slug)]);
+  } catch (_) { return {}; }
+}
+
+function canWriteAgentContext(user, slug) {
+  try { return isAppAdmin(user, getAppForUser(user, slug)); } catch (_) { return false; }
 }
 
 function isAppAdmin(user, app) {
@@ -887,6 +974,7 @@ const TOOLS = [
           show_sandbox:    getShowSandbox(db, app.id),
           separate_sandbox_db: getSeparateSandboxDb(db, app.id),
         },
+        ...appAdvice(db, app, recentDeploys, { persist: canWriteAgentContext(user, app.slug) }),
       };
     },
   },
@@ -1985,10 +2073,16 @@ const TOOLS = [
       if (!initial) throw new Error(`Deployment #${id} not found`);
       // getAppForUser throws Forbidden if the caller can't see the app.
       getAppForUser(user, initial.app_slug);
+      const withAdvice = (out) => ({
+        ...out,
+        ...deploymentAdvice(db, initial.app_id, initial.app_slug, {
+          id, status: out.status, started_at: out.started_at, commit_hash: out.commit_hash,
+        }, { persist: canWriteAgentContext(user, initial.app_slug) }),
+      });
 
       // Already terminal? Return immediately.
       if (TERMINAL.has(initial.status)) {
-        return {
+        return withAdvice({
           deployment_id: id,
           app: initial.app_slug,
           env: initial.env,
@@ -2001,7 +2095,7 @@ const TOOLS = [
           failure_reason: initial.failure_reason ?? null,
           timed_out: false,
           waited_ms: 0,
-        };
+        });
       }
 
       // Poll once per 2s until terminal or timeout. setInterval-style with
@@ -2029,7 +2123,7 @@ const TOOLS = [
           };
         }
         if (TERMINAL.has(row.status)) {
-          return {
+          return withAdvice({
             deployment_id: id,
             app: initial.app_slug,
             env: initial.env,
@@ -2042,13 +2136,13 @@ const TOOLS = [
           failure_reason: row.failure_reason ?? null,
             timed_out: false,
             waited_ms: Date.now() - start,
-          };
+          });
         }
       }
 
       // Timed out — give the caller back the latest known state.
       const last = stmt.get(id) || initial;
-      return {
+      return withAdvice({
         deployment_id: id,
         app: initial.app_slug,
         env: initial.env,
@@ -2062,7 +2156,7 @@ const TOOLS = [
         timed_out: true,
         waited_ms: Date.now() - start,
         next: `Deployment still ${last.status} after ${timeoutSec}s. Call appcrane_wait_deploy again or use appcrane_get_logs to see what's happening.`,
-      };
+      });
     },
   },
 
@@ -2133,6 +2227,7 @@ const TOOLS = [
         line_count:      trimmed.length,
         truncated,
         original_line_count: lines.length,
+        ...deploymentAdvice(db, row.app_id, row.app_slug, row, { persist: canWriteAgentContext(user, row.app_slug) }),
       };
     },
   },
@@ -3962,6 +4057,9 @@ const TOOLS = [
         ...(result.deleted ? { deleted: result.deleted } : {}),
         message: result.message,
         ...pushDeployView(app.slug, result, `Files pushed. Next: appcrane_deploy slug="${app.slug}" stage="sandbox" to ship.`),
+        ...pushAdvice(app, result, inputFiles
+          .filter((f) => typeof f?.content === 'string' && !f.staged_token)
+          .map((f) => ({ path: f.path, bytes: f.encoding === 'base64' ? Buffer.from(f.content, 'base64').length : Buffer.byteLength(f.content, 'utf-8') }))),
       };
     },
   },
@@ -4128,6 +4226,7 @@ const TOOLS = [
         branch: result.branch,
         file:   { path: args.path, bytes: buf.length, sha256: fullSha, ...result.files[0] },
         ...pushDeployView(app.slug, result, `File committed. Next: appcrane_deploy slug="${app.slug}" stage="sandbox" to ship.`),
+        ...pushAdvice(app, result),
       };
     },
   },
@@ -4190,6 +4289,7 @@ const TOOLS = [
         branch: result.branch,
         file:   { path: args.path, bytes_before: current.bytes, bytes_after: Buffer.byteLength(patched, 'utf-8'), ...result.files[0] },
         ...pushDeployView(app.slug, result, `Patch committed. Next: appcrane_deploy slug="${app.slug}" stage="sandbox" to ship.`),
+        ...pushAdvice(app, result),
       };
     },
   },
@@ -4286,6 +4386,9 @@ const TOOLS = [
         ? Buffer.from(String(args.content), 'base64')
         : Buffer.from(String(args.content), 'utf-8');
 
+      // Measured before the write, which creates whatever is missing.
+      const dataRoot = resolve(process.env.DATA_DIR || './data', 'apps', app.slug, env, 'shared', 'data');
+      const createdDirs = missingDataDirs(dataRoot, rel);
       const { via } = await writeAppData({ dataDir: resolve(process.env.DATA_DIR || './data'), slug: app.slug, env, rel, buf });
 
       const sha256 = createHash('sha256').update(buf).digest('hex');
@@ -4300,6 +4403,7 @@ const TOOLS = [
         container_path: '/data/' + rel,
         container_path: `/data/${rel}`,
         written_via: via,
+        ...adviceField([uploadCreatedDirAdvice(rel, createdDirs)]),
       };
     },
   },

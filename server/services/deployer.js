@@ -502,6 +502,23 @@ export function assertNoInflightDeploy(db, appId, env, slug) {
 }
 
 /**
+ * Non-throwing twin of assertNoInflightDeploy's check, for deploy-on-push: the
+ * newest in-flight deployment of app+env as { id } when it is fresh (younger
+ * than STALE_DEPLOY_SECONDS), else null. Reclaims nothing.
+ */
+export function freshInflightDeploy(db, appId, env) {
+  const rows = db.prepare(`
+    SELECT id, (strftime('%s','now') - strftime('%s', started_at)) AS age_s
+    FROM deployments
+    WHERE app_id = ? AND env = ? AND status IN ('pending','building','deploying')
+  `).all(appId, env);
+  if (rows.length === 0) return null;
+  const newest = rows.reduce((a, b) => (a.id > b.id ? a : b));
+  if (newest.age_s == null || newest.age_s < STALE_DEPLOY_SECONDS) return { id: newest.id };
+  return null;
+}
+
+/**
  * Health-endpoint contract for AppCrane apps:
  *   - Responds 200 within the timeout
  *   - Body is JSON

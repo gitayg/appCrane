@@ -190,6 +190,17 @@ test('a signed push to the deploy branch starts the deploy; the same delivery ag
   assert.equal(auditsOf(a.appId).length, 1);
 });
 
+test('a push while that app is still deploying is queued behind it and says so', async () => {
+  const a = mkApp({ repo: 'acme/queued' });
+  assert.equal((await deliver(push('acme/queued'))).body.result, 'deploy_triggered');
+  const second = await deliver(push('acme/queued'));
+  assert.equal(second.body.result, 'deploy_queued');
+  assert.deepEqual(second.body.apps.map((x) => [x.slug, x.action]), [[a.slug, 'deploy_queued']]);
+  assert.equal(deploysOf(a.appId).length, 1);
+  const { resetPushCoalescer } = await import('../server/services/pushCoalescer.js');
+  resetPushCoalescer();
+});
+
 test('auto_deploy_prod and the branch filter are honoured exactly as the per-app webhook honours them', async () => {
   const both = mkApp({ repo: 'acme/both', cfg: { auto_deploy_prod: 1 } });
   const r = await deliver(push('acme/both'));

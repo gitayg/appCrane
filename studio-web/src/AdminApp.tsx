@@ -16,6 +16,9 @@ import {
 } from './utils/landingRedirect'
 import { AccessDenied, CheckingSession, SignInStuck } from './components/LandingScreens'
 import { lazyPage } from './utils/lazyPage'
+// Registers <crane-app-topbar> and the panel elements at boot: an app tab can be
+// the first page opened, before any lazy page that would register them.
+import './topbar-element/entry'
 
 // Route pages load on first visit; the shell (layout, login, app tabs) stays
 // in the entry chunk.

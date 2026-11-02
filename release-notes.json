@@ -1,4 +1,9 @@
 {
+  "2.134.0": [
+    "AppCrane now coaches the AI agent that deploys your app: push, deploy, deploy-log, file-upload and app-info results carry advice when the way it deploys costs time or breaks builds (one file per push, a build that failed because a change was only partly pushed, very large files sent inline, folders created by an upload), and repeated deploy mistakes are noted once in the app's agent context.",
+    "Pushes that arrive while the app is still deploying no longer start a deploy each: they wait, and AppCrane deploys the latest code once when the running deploy ends. This also stops two deploys of one app running at once (\"container name already in use\").",
+    "Fix: opening an app straight from the side menu showed only the Request and Coder buttons; the app name, environment switch, Refresh, Back and the collapse button are back."
+  ],
   "2.133.0": [
     "Faster AppCrane: backups, restores, storage sizes, file listings over MCP and git clones no longer freeze the server while they run, and background checks use far fewer Docker calls (one host spent about 35 s per metrics run before).",
     "Faster deploys and promotes: build caches survive between sandbox and production, the .git folder no longer goes into generated builds, npm downloads are cached per app, and a healthy new version is detected in a quarter of a second instead of two.",
