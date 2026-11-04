@@ -1355,7 +1355,7 @@ const TOOLS = [
   {
     name: 'appcrane_promote',
     description:
-      'Promote the current live SANDBOX release to production — the gated sandbox→prod path. Refuses unless sandbox is live AND currently healthy (you do not ship a broken sandbox to prod), and the promoted prod release is health-checked with auto-revert. For github apps this rebuilds production from the EXACT sandbox commit; for managed/upload apps it copies the exact tested sandbox release. Owner-only (or platform admin).',
+      'Promote the current live SANDBOX release to production — the gated sandbox→prod path. Refuses unless sandbox is live AND currently healthy (you do not ship a broken sandbox to prod), and the promoted prod release is health-checked with auto-revert. For github and managed apps this rebuilds production from the EXACT sandbox commit; for upload apps, and any sandbox release made by appcrane_deploy_artifact, it copies the exact tested sandbox release. Owner-only (or platform admin).',
     inputSchema: {
       type: 'object',
       properties: {

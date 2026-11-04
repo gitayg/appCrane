@@ -300,8 +300,9 @@ router.post('/:slug/rollback/:env', requireAppAccess, auditMiddleware('rollback'
  * POST /api/apps/:slug/promote - Promote the live sandbox release to production.
  *
  * Gated: requires a live + healthy sandbox (see promoteApp), and the caller
- * must hold deploy.production. github apps rebuild for prod; managed/upload
- * apps copy the exact tested sandbox release. Mechanics live in
+ * must hold deploy.production. github and managed apps rebuild for prod;
+ * upload apps and deploy_artifact releases copy the exact tested sandbox
+ * release. Mechanics live in
  * services/deployer.js promoteApp() so REST and the appcrane_promote MCP tool
  * stay in lockstep.
  */

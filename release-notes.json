@@ -1,4 +1,7 @@
 {
+  "2.134.1": [
+    "Fix: promoting an app to production now works when its sandbox release was uploaded as a bundle (appcrane_deploy_artifact). Production gets exactly the files sandbox ran, checked file by file, instead of a rebuild that failed at once with \"expected a hex SHA\". A first promote no longer needs production to have been deployed before, and folders named data inside the bundle are kept."
+  ],
   "2.134.0": [
     "AppCrane now coaches the AI agent that deploys your app: push, deploy, deploy-log, file-upload and app-info results carry advice when the way it deploys costs time or breaks builds (one file per push, a build that failed because a change was only partly pushed, very large files sent inline, folders created by an upload), and repeated deploy mistakes are noted once in the app's agent context.",
     "Pushes that arrive while the app is still deploying no longer start a deploy each: they wait, and AppCrane deploys the latest code once when the running deploy ends. This also stops two deploys of one app running at once (\"container name already in use\").",

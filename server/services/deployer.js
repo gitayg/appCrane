@@ -1,7 +1,7 @@
 import { execFile, execFileSync } from 'child_process';
 import { promisify } from 'util';
 import { assertNoRestoreInProgress } from './managedDbRestoreGuard.js';
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, unlinkSync, symlinkSync, cpSync, writeFileSync, readlinkSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, unlinkSync, symlinkSync, cpSync, writeFileSync, readlinkSync, lstatSync } from 'fs';
 import { join, resolve, basename } from 'path';
 import net from 'net';
 import { getDb } from '../db.js';
@@ -1007,8 +1007,11 @@ export async function rollbackApp(app, env, deploymentId, userId) {
  *
  * - github apps: a FRESH production build (so the bundler bakes the prod
  *   base path /<slug>/ rather than the sandbox's /<slug>-sandbox/).
- * - managed/upload apps: copies the EXACT tested sandbox release tree into
- *   production (byte-identical artifact), rewriting only the prod .env.
+ * - managed apps: a fresh production build at the exact sandbox commit, like
+ *   github apps.
+ * - upload apps, and any sandbox release made by appcrane_deploy_artifact:
+ *   copies the EXACT tested sandbox release tree into production, rewriting
+ *   only the prod .env.
  *
  * Shared by POST /api/apps/:slug/promote and the appcrane_promote MCP tool.
  * Caller is responsible for authz (must require deploy.production).
@@ -1105,7 +1108,13 @@ export async function promoteApp(app, userId, opts = {}) {
   // A local-backed managed app has no github_url (its repo is on this host), so
   // it is selected by its marker, and FIRST: an unknown marker throws here
   // instead of a github_url that happens to be set deciding the path.
-  if (usesLocalRepo(app) || ((app.source_type === 'github' || app.source_type === 'managed') && app.github_url)) {
+  // A sandbox release made by appcrane_deploy_artifact has no commit to build
+  // from: its commit_hash is the bundle's sha256:<digest>, and a git checkout of
+  // that fails at once ("expected a hex SHA"). It takes the copy path below on
+  // any source type, so production gets the bytes sandbox ran.
+  const { isArtifactHash } = await import('./artifactDigest.js');
+  const artifactRelease = isArtifactHash(sandboxDeploy.commit_hash);
+  if (!artifactRelease && (usesLocalRepo(app) || ((app.source_type === 'github' || app.source_type === 'managed') && app.github_url))) {
     const freshResult = db.prepare(`
       INSERT INTO deployments (app_id, env, version, status, commit_hash, commit_sha, deployed_by, log)
       VALUES (?, 'production', ?, 'pending', ?, ?, ?, ?)
@@ -1123,7 +1132,7 @@ export async function promoteApp(app, userId, opts = {}) {
     return { deployment_id: freshDeployId, status: 'pending', mode: 'rebuild', version: sandboxDeploy.version, from_sandbox: sandboxDeploy.id };
   }
 
-  // Upload apps (no git repo): copy the exact sandbox release tree into production.
+  // Upload apps (no git repo) and artifact releases: copy the exact sandbox release tree into production.
   if (!sandboxDeploy.release_path || !existsSync(sandboxDeploy.release_path)) {
     throw new AppError('Sandbox release directory missing on disk (pre-promote-support deploy?)', 409, 'NO_RELEASE_PATH');
   }
@@ -1143,18 +1152,28 @@ export async function promoteApp(app, userId, opts = {}) {
   `).run(app.id, sandboxDeploy.version, sandboxDeploy.commit_hash, userId,
     `Promoted from sandbox deployment #${sandboxDeploy.id}`);
   const newDeployId = insertResult.lastInsertRowid;
+  db.prepare(`
+    UPDATE deployments
+       SET artifact_sha256 = ?, artifact_bytes = ?, artifact_filename = ?, declared_commit_sha = ?
+     WHERE id = ?
+  `).run(
+    sandboxDeploy.artifact_sha256 ?? null, sandboxDeploy.artifact_bytes ?? null,
+    sandboxDeploy.artifact_filename ?? null, sandboxDeploy.declared_commit_sha ?? null, newDeployId,
+  );
 
   try {
-    // 1. Copy sandbox release tree into production releases/ (skip .env + data symlinks).
+    // 1. Copy sandbox release tree into production releases/. Only the
+    //    sandbox's own top-level .env and data symlinks stay behind: a real
+    //    data/ directory, or any nested one, is part of the release.
     const timestamp = releaseTimestamp();
     const newReleaseDir = resolve(join(prodReleasesDir, `${timestamp}-promote`));
+    const runtimeLinks = new Set([join(sandboxReleaseDir, '.env'), join(sandboxReleaseDir, 'data')]);
     cpSync(sandboxReleaseDir, newReleaseDir, {
       recursive: true,
       dereference: false,
       filter: (src) => {
-        const base = src.split('/').pop();
-        if (base === '.env' || base === 'data') return false;
-        return true;
+        if (!runtimeLinks.has(resolve(src))) return true;
+        try { return !lstatSync(src).isSymbolicLink(); } catch (_) { return false; }
       },
     });
 
@@ -1165,6 +1184,7 @@ export async function promoteApp(app, userId, opts = {}) {
       catch (_) { return `# ERROR decrypting ${v.key}`; }
     }).join('\n');
     const fullEnv = `${envContent}\nPORT=${prodPorts.prod_be}\nFE_PORT=${prodPorts.prod_fe}\nNODE_ENV=production\n`;
+    mkdirSync(prodSharedDir, { recursive: true });
     writeFileSync(join(prodSharedDir, '.env.production'), fullEnv);
     const envDest = join(newReleaseDir, '.env');
     try { unlinkSync(envDest); } catch (_) {}
@@ -1201,6 +1221,7 @@ export async function promoteApp(app, userId, opts = {}) {
     deployApp(newDeployId, fullApp, 'production', prodPorts, {
       preExtractedDir: newReleaseDir,
       commitHash: sandboxDeploy.commit_hash,
+      expectTreeSha: sandboxDeploy.tree_sha256 || null,
       releaseCheckDelta: opts.releaseCheckDelta,
     }).catch(e => {
       log.error(`Promote deploy failed for ${app.slug}-production (deployment #${newDeployId}): ${e.message}`);
