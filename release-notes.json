@@ -1,4 +1,8 @@
 {
+  "2.135.1": [
+    "Security fix: the AWS Secrets Manager platform secret now accepts only the keys AppCrane uses, so nobody who can edit that secret can change how the server runs.",
+    "Security fix: API rate limits can no longer be stretched by sending extra made-up keys alongside a valid sign-in."
+  ],
   "2.135.0": [
     "AppCrane can keep its own keys and your apps' secrets in AWS Secrets Manager instead of files on the server. It is optional and off until you turn it on. An app only ever reaches its own secrets, and sandbox cannot read production's.",
     "Personal API keys are now created only when someone asks for one (Settings > Account), and can optionally be limited to a private port you keep behind your VPN (APPCRANE_PRIVATE_API_PORT). Sign-in, SSO, MCP and webhooks stay on the normal port.",

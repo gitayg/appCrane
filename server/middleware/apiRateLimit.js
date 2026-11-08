@@ -1,5 +1,6 @@
 import { createHash } from 'crypto';
 import { clientIp } from '../utils/clientIp.js';
+import { hashApiKey } from '../services/encryption.js';
 
 /**
  * Global API rate limiter: 2000 req/min per credential that has authenticated,
@@ -118,9 +119,13 @@ export function createApiRateLimit(limits = DEFAULT_LIMITS) {
 
   // Runs when the response ends, once the route has decided about the credential.
   // A cookie can set req.user too, and says nothing about the header beside it.
+  // With both headers, routes that authenticate for themselves may have used the
+  // Bearer, so the X-API-Key beside it is proven only if the route says it used it.
   function settle(req, res, key, ceiling) {
     if (res.statusCode === 401) { verified.delete(key); return; }
     if (!req.user || req.authed_by_cookie) return;
+    const apiKey = req.headers['x-api-key'];
+    if (apiKey && req.headers.authorization && req.auth_credential_hash !== hashApiKey(apiKey)) return;
     const now = Date.now();
     remember(key, now);
     if (!ceiling) return;

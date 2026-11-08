@@ -118,8 +118,19 @@ test('a missing secret throws', async () => {
   await assert.rejects(P.loadPlatformSecrets({ env: env(), log: quiet }), /ResourceNotFoundException/);
 });
 
-for (const bad of ['NODE_OPTIONS', 'PATH', 'LD_PRELOAD', 'DYLD_INSERT_LIBRARIES', 'DATA_DIR', 'APPCRANE_SECRETS_ID', 'lowercase', '1BAD', 'WITH-DASH']) {
-  test(`denied key name refused, nothing set: ${bad}`, async () => {
+test('every allowlisted key loads', async () => {
+  const values = { ENCRYPTION_KEY: K_A, ANTHROPIC_API_KEY: 'a1', SMTP_PASS: 's1', GRAPH_CLIENT_SECRET: 'g1', GITHUB_TOKEN: 't1', CATALOG_GITHUB_TOKEN: 'c1' };
+  sm.seed('plat', JSON.stringify(values));
+  const e = env();
+  await P.loadPlatformSecrets({ env: e, log: quiet });
+  for (const [k, v] of Object.entries(values)) assert.equal(e[k], v, k);
+});
+
+// The denylist this replaced let GIT_SSH_COMMAND (code execution through every git
+// call), NODE_EXTRA_CA_CERTS and HTTPS_PROXY (interception of outbound calls) through.
+for (const bad of ['NODE_OPTIONS', 'PATH', 'LD_PRELOAD', 'DYLD_INSERT_LIBRARIES', 'DATA_DIR', 'APPCRANE_SECRETS_ID', 'lowercase', '1BAD', 'WITH-DASH',
+  'GIT_SSH_COMMAND', 'GIT_CONFIG_PARAMETERS', 'NODE_EXTRA_CA_CERTS', 'HTTPS_PROXY', 'BASH_ENV', 'PORT', 'HOST', 'CRANE_DOMAIN']) {
+  test(`key name outside the allowlist refused, nothing set: ${bad}`, async () => {
     sm.seed('plat', JSON.stringify({ ENCRYPTION_KEY: K_A, [bad]: 'sensitive-value-1' }));
     const e = env();
     const err = await P.loadPlatformSecrets({ env: e, log: quiet }).then(() => null, (x) => x);

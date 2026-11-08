@@ -36,7 +36,7 @@ const bearer = (k) => ({ authorization: `Bearer ${k}` });
 
 // One request through the limiter. `auth` says how the route ended it: 'ok' is what
 // requireAuth leaves (req.user), 'bad' a 401, 'public' a route ignoring the header.
-function fire(lim, { headers = {}, ip = A, path = '/x', auth = 'public', cookie = false, hold = false } = {}) {
+function fire(lim, { headers = {}, ip = A, path = '/x', auth = 'public', cookie = false, hold = false, used = null } = {}) {
   let code = 200;
   let onClose = null;
   const req = { headers, path, ip, socket: { remoteAddress: ip } };
@@ -49,7 +49,7 @@ function fire(lim, { headers = {}, ip = A, path = '/x', auth = 'public', cookie 
   let passed = false;
   lim(req, res, () => { passed = true; });
   const finish = () => {
-    if (passed && auth === 'ok') { req.user = { id: 1 }; if (cookie) req.authed_by_cookie = true; }
+    if (passed && auth === 'ok') { req.user = { id: 1 }; if (cookie) req.authed_by_cookie = true; if (used) req.auth_credential_hash = hashApiKey(used); }
     if (passed && auth === 'bad') res.statusCode = 401;
     onClose?.();
   };
@@ -149,9 +149,19 @@ test('the limiter keys the credential requireAuth reads: X-API-Key over Bearer',
   assert.match(k.key, /^k:/);
   const lim = createApiRateLimit(LIMITS);
   // A real key in X-API-Key authenticates the request; a rotating Bearer beside it must not earn buckets.
-  const r = fireMany(lim, LIMITS.authed + 3, () => ({ headers: { 'x-api-key': 'real', ...randomBearer() }, auth: 'ok' }));
+  const r = fireMany(lim, LIMITS.authed + 3, () => ({ headers: { 'x-api-key': 'real', ...randomBearer() }, auth: 'ok', used: 'real' }));
   assert.deepEqual(r, { 200: LIMITS.authed, 429: 3 });
   assert.equal(lim.verified.size, 1);
+});
+
+// coder.js and the other routers that authenticate for themselves can take the
+// Bearer and ignore the X-API-Key beside it. One valid Bearer plus a made-up
+// X-API-Key per request used to prove every made-up key: a fresh bucket each.
+test('a valid Bearer used by the route does not vouch for a made-up X-API-Key beside it', () => {
+  const lim = createApiRateLimit(LIMITS);
+  const r = fireMany(lim, LIMITS.authed + 5, () => ({ headers: { 'x-api-key': randomBytes(16).toString('hex'), ...bearer('valid') }, auth: 'ok', used: 'valid' }));
+  assert.deepEqual(r, { 200: LIMITS.authed, 429: 5 });
+  assert.equal(lim.verified.size, 0);
 });
 
 test('API_RATE_LIMIT_IP_AUTHED sets the ceiling when the limits object does not', (t) => {

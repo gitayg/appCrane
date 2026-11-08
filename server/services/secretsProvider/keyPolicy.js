@@ -1,7 +1,10 @@
 // Which keys the platform secret may set on the server's environment.
 
-const KEY_RE = /^[A-Z][A-Z0-9_]*$/;
-const DENIED = [/^NODE_OPTIONS$/, /^PATH$/, /^LD_/, /^DYLD_/, /^DATA_DIR$/, /^APPCRANE_SECRETS_/];
+// An allowlist, not a denylist: whoever can write the secret must not be able to
+// set GIT_SSH_COMMAND, NODE_EXTRA_CA_CERTS, HTTPS_PROXY or the like on the server.
+export const ALLOWED_PLATFORM_KEYS = Object.freeze([
+  'ENCRYPTION_KEY', 'ANTHROPIC_API_KEY', 'SMTP_PASS', 'GRAPH_CLIENT_SECRET', 'GITHUB_TOKEN', 'CATALOG_GITHUB_TOKEN',
+]);
 const ENCRYPTION_KEY_RE = /^[0-9a-fA-F]{64}$/;
 
 // The CloudFormation template creates the secret with this one generated key,
@@ -14,8 +17,8 @@ export const PLATFORM_SECRET_NAMES = ['ENCRYPTION_KEY', 'ANTHROPIC_API_KEY'];
 export const MAX_SECRET_BYTES = 65536;
 
 export function assertAllowedKey(name) {
-  if (typeof name !== 'string' || !KEY_RE.test(name) || DENIED.some((re) => re.test(name))) {
-    throw new Error(`the key name ${JSON.stringify(String(name).slice(0, 64))} is not allowed in the platform secret`);
+  if (!ALLOWED_PLATFORM_KEYS.includes(name)) {
+    throw new Error(`the key name ${JSON.stringify(String(name).slice(0, 64))} is not allowed in the platform secret (allowed: ${ALLOWED_PLATFORM_KEYS.join(', ')})`);
   }
 }
 
