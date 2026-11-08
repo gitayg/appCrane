@@ -12,11 +12,14 @@ const execFileAsync = promisify(execFile);
  * `gitOpts(ms)` gives the execFile options; `scrubGit(msg)` removes credentials from error text.
  */
 export async function cloneGitRelease({ cloneUrl, branch, releaseDir, targetCommit, gitOpts, scrubGit, appendLog }) {
+  // Rows from before the write paths refused these still reach this point.
+  if (String(branch).startsWith('-')) throw new Error(`refusing branch ${JSON.stringify(branch)}: it would read as a git option`);
+  if (targetCommit && String(targetCommit).startsWith('-')) throw new Error(`refusing commit ${JSON.stringify(targetCommit)}: it would read as a git option`);
   try {
     await execFileAsync('git', [
       'clone', '--depth', '1',
       '--branch', branch,
-      cloneUrl, releaseDir,
+      '--', cloneUrl, releaseDir,
     ], gitOpts(120000));
   } catch (err) {
     throw new Error(scrubGit(err.message));
@@ -31,12 +34,12 @@ export async function cloneGitRelease({ cloneUrl, branch, releaseDir, targetComm
     appendLog(`Pinning to commit ${targetCommit} (exact sandbox release)…`);
     let fetched = false;
     try {
-      await execFileAsync('git', ['-C', releaseDir, 'fetch', '--depth', '1', 'origin', targetCommit], gitOpts(120000));
+      await execFileAsync('git', ['-C', releaseDir, 'fetch', '--depth', '1', '--', 'origin', targetCommit], gitOpts(120000));
       fetched = true;
     } catch (_) { /* abbreviated SHA or not directly fetchable — deepen below */ }
     if (!fetched) {
       try {
-        await execFileAsync('git', ['-C', releaseDir, 'fetch', '--depth', '200', 'origin', branch], gitOpts(120000));
+        await execFileAsync('git', ['-C', releaseDir, 'fetch', '--depth', '200', '--', 'origin', branch], gitOpts(120000));
       } catch (_) { /* best effort; checkout will surface a clear error if the commit is unreachable */ }
     }
     try {

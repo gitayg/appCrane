@@ -847,7 +847,6 @@ export function Applications() {
   // until v3.0.)
 
   async function generateAgentKey() {
-    const ts = Date.now()
     let failReason = ''
     // v2.7.4: ALWAYS issue a personal MCP key for the logged-in user — admins
     // included. Previously admins got a throwaway role:admin onboarding-agent
@@ -858,8 +857,10 @@ export function Applications() {
     // /api/mcp (auth.js KEY_SCOPE_RESTRICTED) but ties creation/ownership to
     // the human, so they own what they onboard. No admin-only endpoint, works
     // for admins and create_app-granted users alike.
+    // purpose 'onboarding': the server labels it, expires it in 30 days and
+    // revokes this user's earlier onboarding keys that were never used.
     const k = await adminApi.post<{ api_key?: string }>('/api/me/mcp-keys', {
-      label: `onboarding-${ts}`,
+      purpose: 'onboarding',
     }).catch((e: unknown) => { failReason = e instanceof Error ? e.message : String(e); return null })
     const key = k?.api_key ?? ''
     if (!key) {

@@ -61,7 +61,7 @@ program
 const configCmd = program
   .command('config')
   .description('Configure CLI connection; or export/import instance config (subcommands)')
-  .option('--url <url>', 'API server URL')
+  .option('--url <url>', 'API server URL (remote with APPCRANE_PRIVATE_API_PORT: https://<crane-host>:<port>)')
   .option('--key <key>', 'API key')
   .option('--show', 'Show current config')
   .action((opts) => {
@@ -162,7 +162,7 @@ program
       if (existsSync(envPath)) {
         envContent = readFileSync(envPath, 'utf8');
       }
-      if (!envContent.includes('ENCRYPTION_KEY=')) {
+      if (!envContent.includes('ENCRYPTION_KEY=') && !envContent.includes('APPCRANE_SECRETS_ID=')) {
         const encKey = crypto.randomBytes(32).toString('hex');
         envContent += `\nENCRYPTION_KEY=${encKey}\n`;
         writeFileSync(envPath, envContent);
@@ -627,5 +627,7 @@ program
 
 const { registerRotateKey } = await import('./rotateKey.js');
 registerRotateKey(program, out);
+const { registerSecrets } = await import('./secrets.js');
+registerSecrets(program, out);
 
 program.parse();

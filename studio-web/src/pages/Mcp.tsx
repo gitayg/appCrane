@@ -3,6 +3,7 @@ import { adminApi } from '../adminApi'
 import { OAuthConnections } from '../components/OAuthConnections'
 import { serverDate } from '../utils/serverDate'
 import { AppKeysCard } from '../components/AppKeysCard'
+import { AdminMcpKeysCard } from '../components/AdminMcpKeysCard'
 import { setVisibleInterval } from '../utils/visibleInterval'
 
 type McpTool = {
@@ -35,6 +36,7 @@ type ConnStatus = 'checking' | 'connected' | 'unreachable'
 interface UserMcpKey {
   id: number
   label: string | null
+  purpose?: string | null
   created_at: string
   last_used_at: string | null
   expires_at: string | null
@@ -242,13 +244,21 @@ function PersonalKeyCard({ endpoint }: { endpoint: string }) {
               const expiringSoon = !revoked && !expired && Number.isFinite(expiresMs) && expiresMs - Date.now() <= 14 * 86_400_000
               return (
                 <tr key={k.id} style={{ opacity: revoked ? 0.5 : 1 }}>
-                  <td style={{ padding: '4px 8px' }}>{k.label || <span style={{ color: 'var(--dim)' }}>(no label)</span>}</td>
+                  <td style={{ padding: '4px 8px' }}>
+                    {k.label || <span style={{ color: 'var(--dim)' }}>(no label)</span>}
+                    {k.purpose === 'onboarding' && (
+                      <span title="Issued by the onboarding button on Applications. A new onboarding key revokes your earlier ones that were never used." style={{ marginLeft: 6, fontSize: '.66rem', letterSpacing: '.3px', textTransform: 'uppercase', color: 'var(--accent)', border: '1px solid var(--accent)', borderRadius: 3, padding: '0 4px' }}>onboarding</span>
+                    )}
+                  </td>
                   <td style={{ padding: '4px 8px', color: 'var(--dim)', fontSize: '.78rem' }}>{serverDate(k.created_at).toLocaleDateString()}</td>
                   <td style={{ padding: '4px 8px', color: 'var(--dim)', fontSize: '.78rem' }}>
                     {k.last_used_at ? serverDate(k.last_used_at).toLocaleString() : 'never'}
                   </td>
                   <td style={{ padding: '4px 8px', fontSize: '.78rem', color: expired ? 'var(--red)' : expiringSoon ? 'var(--yellow)' : 'var(--dim)' }}>
                     {k.expires_at ? serverDate(k.expires_at).toLocaleDateString() : 'never'}
+                    {!revoked && !expired && Number.isFinite(expiresMs) && (
+                      <span style={{ marginLeft: 4 }}>({Math.max(0, Math.ceil((expiresMs - Date.now()) / 86_400_000))}d)</span>
+                    )}
                   </td>
                   <td style={{ padding: '4px 8px', fontSize: '.78rem' }}>
                     {revoked
@@ -426,6 +436,7 @@ export function Mcp() {
 
       <PersonalKeyCard endpoint={endpoint} />
       <AppKeysCard />
+      <AdminMcpKeysCard />
       <OAuthConnections endpoint={endpoint} />
 
       <div className="setting-card">

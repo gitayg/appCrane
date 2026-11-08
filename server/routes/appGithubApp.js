@@ -6,10 +6,13 @@
  *                                       covers this app's repository and store it
  *   DELETE /api/apps/:slug/github-app — detach (back to the app's own PAT)
  *
- * Every route is gated on access to THIS app (requireAppAccess), and the two
- * writes additionally need the same role permission that changing the repo URL
- * or rotating the PAT needs — attaching an installation IS a change of which
- * credential reaches the code.
+ * Every route is gated on access to THIS app (requireAppAccess), and detaching
+ * additionally needs the same role permission that changing the repo URL or
+ * rotating the PAT needs. Attaching is platform admin only: it issues an
+ * installation token for whatever repo the app names, and an owner can name any
+ * repo under any installation of this instance's App. AppCrane holds no GitHub
+ * identity for a user, so there is nothing to check their access to that repo
+ * against.
  */
 
 import { Router } from 'express';
@@ -17,6 +20,7 @@ import { requireAuth, requireAppAccess } from '../middleware/auth.js';
 import { auditMiddleware } from '../middleware/audit.js';
 import { AppError } from '../utils/errors.js';
 import { userHasAppPermission } from '../services/permissions.js';
+import { isAdmin } from '../utils/roles.js';
 import { getAppConfig } from '../services/githubApp.js';
 import {
   attachInstallation, detachInstallation, getInstallation, parseGithubRepo,
@@ -27,6 +31,13 @@ const router = Router();
 function requireRepoSettings(req, _res, next) {
   if (!userHasAppPermission(req.user, req.app, 'code.modify_repo_settings')) {
     return next(new AppError('Modifying repo settings is not permitted by your role on this app', 403, 'FORBIDDEN'));
+  }
+  next();
+}
+
+function requirePlatformAdmin(req, _res, next) {
+  if (!isAdmin(req.user)) {
+    return next(new AppError('Attaching the GitHub App is limited to platform admins: it gives this app a credential for the repository it names. Ask a platform admin to attach it.', 403, 'FORBIDDEN'));
   }
   next();
 }
@@ -50,7 +61,7 @@ router.get('/:slug/github-app', requireAuth, requireAppAccess, (req, res) => {
   });
 });
 
-router.put('/:slug/github-app', requireAuth, requireAppAccess, requireRepoSettings,
+router.put('/:slug/github-app', requireAuth, requireAppAccess, requirePlatformAdmin,
   auditMiddleware('app-github-app-attach'), async (req, res) => {
     try {
       const result = await attachInstallation(req.app, req.user.id);

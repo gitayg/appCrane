@@ -2,10 +2,12 @@ import { Router } from 'express';
 import { auditLogin } from '../middleware/audit.js';
 import { findOrLinkSsoUser } from '../services/ssoLink.js';
 import { SAML } from '@node-saml/node-saml';
+import crypto from 'crypto';
 import { getDb } from '../db.js';
-import { encrypt, decrypt, generateSessionToken, hashApiKey, generateApiKey } from '../services/encryption.js';
+import { encrypt, decrypt, generateSessionToken, hashApiKey } from '../services/encryption.js';
 import { requireAuth, requirePlatformAdmin } from '../middleware/auth.js';
-import { setSessionCookie } from '../utils/sessionCookie.js';
+import { setSessionCookie, readCookie } from '../utils/sessionCookie.js';
+import { readBrowserBinding, ensureBrowserBinding, browserMismatch, issueSsoHandoff } from './oidc.js';
 import { safeRedirectTarget } from '../utils/safeRedirect.js';
 import { POPUP_MODE, requestedMode, makePopupRelayState, isPopupRelayState, sendPopupComplete, sendPopupFailed } from '../utils/ssoPopup.js';
 import log from '../utils/logger.js';
@@ -39,9 +41,43 @@ function getSamlConfig() {
   };
 }
 
-function buildSaml(cfg) {
+// Browser binding for SAML: see the note in oidc.js. RelayState is unsigned and
+// the attacker's to choose, so the binding goes where the IdP's signature covers
+// it: the AuthnRequest ID, echoed as the signed response's InResponseTo.
+//
+// The IdP answers with a cross-site POST. Measured in Chrome 157: a SameSite=Lax
+// cookie is not sent on it, so this one is SameSite=None. It grants nothing by
+// itself, it is only ever compared, so being sent cross-site costs nothing. None
+// requires Secure, which SAML here already implies: the callback is https, or
+// http://localhost, where Chrome accepts Secure.
+const SAML_BIND_COOKIE = { name: '__Host-cc_saml_bind', secure: true, sameSite: 'none' };
+// Set when an unsolicited response is sent back through /start. An IdP that never
+// echoes InResponseTo would otherwise bounce the browser forever.
+const SAML_RESTART_COOKIE = `${SAML_BIND_COOKIE.name}_restart`;
+const SAML_RESTART_OPTS = { httpOnly: true, secure: true, sameSite: 'none', path: '/' };
+const REQUEST_ID = /^_([0-9a-f]{16})([0-9a-f]{32})$/;
+
+function requestIdSignature(random, binding) {
+  return crypto.createHmac('sha256', process.env.ENCRYPTION_KEY)
+    .update(`saml-request|${random}|${binding}`).digest('hex').slice(0, 32);
+}
+
+function makeRequestId(binding) {
+  const random = crypto.randomBytes(8).toString('hex');
+  return `_${random}${requestIdSignature(random, binding)}`;
+}
+
+function requestIdIsThisBrowsers(req, id) {
+  const binding = readBrowserBinding(req, SAML_BIND_COOKIE.name);
+  const m = binding && REQUEST_ID.exec(id);
+  if (!m) return false;
+  return crypto.timingSafeEqual(Buffer.from(m[2]), Buffer.from(requestIdSignature(m[1], binding)));
+}
+
+function buildSaml(cfg, extra = {}) {
   const base = craneBaseUrl();
   return new SAML({
+    ...extra,
     callbackUrl:            base + '/api/auth/saml/callback',
     entryPoint:             cfg.idp_sso_url,
     issuer:                 base + '/api/auth/saml/metadata',
@@ -141,7 +177,8 @@ router.get('/start', async (req, res) => {
     return res.status(400).send('SAML not configured');
   }
   try {
-    const saml     = buildSaml(cfg);
+    const binding  = ensureBrowserBinding(req, res, SAML_BIND_COOKIE);
+    const saml     = buildSaml(cfg, { generateUniqueId: () => makeRequestId(binding) });
     // RelayState comes back verbatim in the callback and is echoed to the
     // browser as /login?redirect=…, so it must be a validated same-origin path
     // before it ever leaves here. '' means "no deep link". CWE-601.
@@ -177,6 +214,17 @@ router.post('/callback', async (req, res) => {
 
     const saml = buildSaml(cfg);
     const { profile } = await saml.validatePostResponseAsync(req.body);
+
+    // An IdP tile sends a signed response nobody here asked for, which is exactly
+    // what an attacker would hand a victim. It never signs in: this browser starts
+    // a login of its own instead, and the user lands where the tile pointed.
+    if (!profile.inResponseTo) {
+      if (popupFailing || readCookie(req, SAML_RESTART_COOKIE)) throw browserMismatch();
+      res.cookie(SAML_RESTART_COOKIE, '1', { ...SAML_RESTART_OPTS, maxAge: 60_000 });
+      const restart = safeRedirectTarget(req.body.RelayState, '');
+      return res.redirect(303, base + '/api/auth/saml/start' + (restart ? '?' + new URLSearchParams({ redirect: restart }) : ''));
+    }
+    if (!requestIdIsThisBrowsers(req, profile.inResponseTo)) throw browserMismatch();
 
     // Extract identity from SAML attributes
     const nameId     = profile.nameID;                              // Okta default: email
@@ -221,10 +269,10 @@ router.post('/callback', async (req, res) => {
     }
 
     if (!user && cfg.auto_provision) {
-      const keyHash = hashApiKey(generateApiKey('dhk_user'));
+      // No API key: a person gets one only by asking (Settings > Account).
       const result = db.prepare(
-        "INSERT INTO users (name, email, role, saml_name_id, api_key_hash, created_at) VALUES (?, ?, 'user', ?, ?, datetime('now'))"
-      ).run(displayName, email || null, nameId, keyHash);
+        "INSERT INTO users (name, email, role, saml_name_id, created_at) VALUES (?, ?, 'user', ?, datetime('now'))"
+      ).run(displayName, email || null, nameId);
       user = db.prepare('SELECT * FROM users WHERE id = ?').get(result.lastInsertRowid);
       log.info(`SAML: auto-provisioned user "${displayName}" (${email || nameId})`);
     }
@@ -241,6 +289,7 @@ router.post('/callback', async (req, res) => {
     // v2.6.18: set cc_token cookie server-side on the redirect — see
     // matching block in oidc.js callback for the full rationale.
     setSessionCookie(res, token, req);
+    res.clearCookie(SAML_RESTART_COOKIE, SAML_RESTART_OPTS);
 
     // RelayState arrives on this POST from the browser, unsigned and outside the
     // SAMLResponse signature — an attacker can supply any value without ever
@@ -253,16 +302,18 @@ router.post('/callback', async (req, res) => {
     // it was not exploitable end-to-end was forwardToLaunch in server/index.js,
     // added in v2.35.0, stripping the absolute target one hop later at /login.
     // '/login' is excluded so the forward can't bounce back into the login page.
+    log.info(`SAML login: ${user.name} (${nameId})`);
+    // Only a RelayState signed by /start selects popup mode; a forged one is
+    // just an unsafe redirect that safeRedirectTarget below drops.
+    if (isPopupRelayState(req.body.RelayState)) return sendPopupComplete(res);
+
     const relayTarget = safeRedirectTarget(req.body.RelayState, '');
-    const p           = new URLSearchParams({ oidc_token: token });
+    // See SSO handoff in oidc.js: a code, never the session token, in the URL.
+    const p           = new URLSearchParams({ sso_code: issueSsoHandoff(token, SAML_BIND_COOKIE.name, readBrowserBinding(req, SAML_BIND_COOKIE.name)) });
     if (relayTarget && !relayTarget.includes('/login')) {
       p.set('redirect', relayTarget);
     }
 
-    log.info(`SAML login: ${user.name} (${nameId})`);
-    // Only a RelayState signed by /start selects popup mode; a forged one is
-    // just an unsafe redirect that safeRedirectTarget above already dropped.
-    if (isPopupRelayState(req.body.RelayState)) return sendPopupComplete(res);
     res.redirect(302, `${base}/login?${p.toString()}`);
   } catch (e) {
     log.error('SAML callback error: ' + e.message);

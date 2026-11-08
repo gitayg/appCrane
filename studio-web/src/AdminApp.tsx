@@ -173,6 +173,17 @@ export function AdminApp() {
     } catch (_) { /* SSR / non-browser — fine */ }
   }, [])
 
+  // Already signed in (a second tab finishing its SSO), so Login never mounts to
+  // clean the address bar. Effects run child first, so Login has read these by now.
+  useEffect(() => {
+    if (!auth.isAuthed) return
+    const url = new URL(window.location.href)
+    if (!url.searchParams.has('sso_code') && !url.searchParams.has('oidc_token')) return
+    url.searchParams.delete('sso_code')
+    url.searchParams.delete('oidc_token')
+    window.history.replaceState({}, '', url.pathname + url.search + url.hash)
+  }, [auth.isAuthed])
+
   // v2.5.14: when an already-authed user lands at <landing>?redirect=/foo,
   // forward them to the original target instead of leaving them on the landing
   // page. The decision lives in utils/landingRedirect.ts: it used to forward on
@@ -193,14 +204,15 @@ export function AdminApp() {
       if (cancelled) return
       const next = afterCheck(landing.target, check, attemptStore(), Date.now())
       // The refused credential goes, and the sign-in screen renders in place. No
-      // navigation: an ?oidc_token= in this URL is then absorbed by Login.
+      // navigation: an ?sso_code= in this URL is then redeemed by Login.
       if (next.kind === 'stale') forget(false)
       if (next.kind === 'go') {
         // Same Referer concern as Login.tsx: a same-origin hop sends the full
         // URL, and the deep-link target may be a tenant app served at /<slug>.
         const clean = new URL(window.location.href)
-        if (clean.searchParams.has('oidc_token')) {
+        if (clean.searchParams.has('oidc_token') || clean.searchParams.has('sso_code')) {
           clean.searchParams.delete('oidc_token')
+          clean.searchParams.delete('sso_code')
           window.history.replaceState({}, '', clean.pathname + clean.search + clean.hash)
         }
         window.location.replace(next.target)

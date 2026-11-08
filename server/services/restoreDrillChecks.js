@@ -90,6 +90,14 @@ export async function verifyDataTree(dir, { liveDb, tolerancePct, pgRestoreList 
   const envFile = join(dir, '.env');
   if (existsSync(envFile)) {
     backupKey = envKey(await readFile(envFile, 'utf8'));
+  }
+  const keyInProvider = !backupKey && manifest?.secrets?.encryption_key_in_provider;
+  if (keyInProvider) {
+    // By design: the archive holds no key. secrets_decrypt below measures whether the live one opens it.
+    const same = manifest.secrets.secret_id && manifest.secrets.secret_id === process.env.APPCRANE_SECRETS_ID;
+    checks.push(check('encryption_key', 'Backup carries an ENCRYPTION_KEY', same ? 'pass' : 'warn',
+      `the key lives in Secrets Manager (${manifest.secrets.secret_id}, version ${manifest.secrets.version_id || 'unknown'}), not in this archive; the archive alone cannot restore it${same ? '' : '. This host uses a different secret'}`));
+  } else if (existsSync(envFile)) {
     const live = process.env.ENCRYPTION_KEY ? process.env.ENCRYPTION_KEY.slice(0, 64) : null;
     if (!backupKey) checks.push(check('encryption_key', 'Backup carries an ENCRYPTION_KEY', 'fail', 'the .env in the backup has no ENCRYPTION_KEY'));
     else if (live && sha(backupKey.slice(0, 64)) !== sha(live)) checks.push(check('encryption_key', 'Backup carries an ENCRYPTION_KEY', 'warn', 'the key in the backup differs from the live key; the backup decrypts only with its own'));

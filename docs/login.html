@@ -488,11 +488,10 @@ const appSlug = params.get('app');
 const redirectUrl = params.get('redirect');
 const isDenied = params.get('denied') === '1';
 
-// Handle OIDC/SAML callback token — store it and clean the URL
-const oidcToken = params.get('oidc_token'); // SAML callback also reuses this param
-if (oidcToken) {
-  localStorage.setItem('cc_identity_token', oidcToken);
-  setAuthCookie(oidcToken);
+// A session is never taken from the URL: /login-legacy?oidc_token=<attacker's token>
+// would sign the victim in as the attacker. The callbacks go through the SPA's /login
+// and its sso_code exchange, not this page. Remove a stale one from the address bar.
+if (params.has('oidc_token')) {
   const clean = new URL(window.location.href);
   clean.searchParams.delete('oidc_token');
   history.replaceState(null, '', clean.toString());

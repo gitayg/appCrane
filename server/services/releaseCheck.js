@@ -32,6 +32,7 @@ import { intakeGate } from './appIntake.js';
 import { getClassification, getClassificationPolicy } from './dataClassification.js';
 import { effectiveRules, parseAccessRules } from './accessRules.js';
 import { scanTreeForSecrets } from './releaseSecretScan.js';
+import { regularFileInside } from '../utils/paths.js';
 
 export const CHECK_IDS = Object.freeze(['intake', 'dependencies', 'secrets', 'access_rules', 'sso_gate', 'sandbox_health']);
 export const EXCEPTABLE = Object.freeze(CHECK_IDS.filter((c) => c !== 'intake'));
@@ -244,7 +245,7 @@ function secretsCheck(app, dir) {
 function manifestRuleCount(dir) {
   if (!dir) return 0;
   const p = join(dir, 'deployhub.json');
-  if (!existsSync(p)) return 0;
+  if (!regularFileInside(dir, p)) return 0;
   try { return (parseAccessRules(JSON.parse(readFileSync(p, 'utf8')).access) || []).length; } catch { return 0; }
 }
 

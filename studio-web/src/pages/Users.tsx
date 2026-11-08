@@ -25,6 +25,7 @@ interface User {
   location?: string | null
   api_key_expires_at?: string | null
   api_key_expired?: number
+  has_api_key?: number
 }
 
 interface App {

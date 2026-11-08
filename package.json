@@ -1,6 +1,6 @@
 {
   "name": "appcrane",
-  "version": "2.134.1",
+  "version": "2.135.0",
   "engines": {
     "node": ">=22"
   },
@@ -32,6 +32,7 @@
     "follow-redirects": "^1.16.0"
   },
   "dependencies": {
+    "@aws-sdk/client-secrets-manager": "^3.1156.0",
     "@node-saml/node-saml": "^5.1.0",
     "adm-zip": "^0.6.1",
     "better-sqlite3": "^12.11.1",

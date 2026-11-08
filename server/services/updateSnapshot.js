@@ -25,6 +25,7 @@ import { join, resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { getDb } from '../db.js';
 import { readThresholds, belowDiskFloor, fmtBytes, diskFloorText, GiB } from './hostThresholds.js';
+import { backupSecretsNote } from './secretsProvider/index.js';
 import log from '../utils/logger.js';
 
 const KEEP = 5; // retain the last N snapshots; older ones are pruned
@@ -168,6 +169,7 @@ export function createPreUpdateSnapshot(cwd, meta = {}, dbHandle = null, deps = 
       files.push('env.backup');
     }
 
+    const secretsNote = backupSecretsNote();
     const manifest = {
       created_at: new Date().toISOString(),
       // 'pre-update' (taken by /api/self-update before the pull) or
@@ -179,6 +181,8 @@ export function createPreUpdateSnapshot(cwd, meta = {}, dbHandle = null, deps = 
       pending_migrations: meta.pending ?? null,
       files,
       note: 'Pre-update snapshot. Restore is manual and deliberate — stop the service, copy these back, then start it.',
+      // With the key in Secrets Manager, env.backup does not hold it.
+      ...(secretsNote ? { secrets: secretsNote } : {}),
     };
     writeFileSync(join(dir, 'manifest.json'), JSON.stringify(manifest, null, 2));
 

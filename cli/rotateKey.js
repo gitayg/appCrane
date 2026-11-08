@@ -69,10 +69,18 @@ export function registerRotateKey(program, out) {
         }
         if (!res.report.post_check.ok) {
           out.err(`post-rotation check failed: ${res.report.post_check.failures.join(', ')}`);
-          out.err(`Restore ${res.backupDir}/deployhub.db and ${res.backupDir}/env.backup before starting AppCrane.`);
+          if (res.provider) out.err(`Before starting AppCrane, restore ${res.backupDir}/deployhub.db and run: ${res.provider.undo}`);
+          else out.err(`Restore ${res.backupDir}/deployhub.db and ${res.backupDir}/env.backup before starting AppCrane.`);
           process.exit(1);
         }
         console.log('');
+        if (res.provider) {
+          out.ok(`ENCRYPTION_KEY rotated. AWSCURRENT of ${res.provider.secret_id} now holds the new key (version ${res.provider.version_id}); every value was checked against it.`);
+          out.info(`Backup, encrypted under the old key: ${res.backupDir}`);
+          out.info(`The old key is version ${res.provider.previous_version_id} (AWSPREVIOUS) until the next rotation.`);
+          out.dim('Start AppCrane and check it. Older copies of the old key stay as they were: crane secrets status lists what is still in .env, crane secrets migrate what is in backups.');
+          return;
+        }
         out.ok('ENCRYPTION_KEY rotated. .env now holds the new key; every value was checked against it.');
         out.info(`Backup (the old key is ONLY here now): ${res.backupDir}`);
         out.dim('Start AppCrane, check it, then store a copy of the new key away from this host. Delete the backup folder once you no longer need the old key.');

@@ -161,14 +161,15 @@ import { validateContainerCommand, validateVolumePaths } from '../services/conta
 import { DEFAULT_IMAGE_RETENTION } from '../services/imageRetention.js';
 
 /**
- * An app row as it may leave the server: every `*_encrypted` column removed.
+ * An app row as it may leave the server: every `*_encrypted` column removed, and
+ * secrets_namespace, which only a platform admin is shown (secretsProviderStatus.js).
  * Responses used to spread the whole row, so the encrypted GitHub token and
  * Claude credentials went to every signed-in user who could list the app. The
  * UI only ever needs the has_* booleans derived from them.
  */
 function withoutSecretColumns(app) {
   const out = {};
-  for (const [k, v] of Object.entries(app || {})) if (!k.endsWith('_encrypted')) out[k] = v;
+  for (const [k, v] of Object.entries(app || {})) if (!k.endsWith('_encrypted') && k !== 'secrets_namespace') out[k] = v;
   return out;
 }
 
@@ -240,6 +241,11 @@ export function reloadCaddyAfterResponse(res, label, reload = reloadCaddy) {
 const PLACEHOLDER_GH_OWNERS = new Set([
   'local', 'localhost', 'example', 'test', 'placeholder', 'todo', 'tbd', 'unknown',
 ]);
+
+// No leading dash: a branch is an argument to git, and that would read as an option.
+const BRANCH_RE = /^(?!-)[A-Za-z0-9._/\-]{1,200}$/;
+const BRANCH_MESSAGE = 'branch must be alphanumeric with . _ / - (max 200 chars), not starting with -';
+const MANAGED_SOURCE_MESSAGE = "Choosing a repository for a source_type='managed' app is limited to platform admins: it deploys with the platform's GitHub service account.";
 
 function validateGithubUrl(url) {
   if (!/^https:\/\//.test(url)) {
@@ -616,8 +622,11 @@ router.post('/', requireAuth, auditMiddleware('app-create'), async (req, res) =>
   if (slugProblem) throw new AppError(slugProblem, 400, 'VALIDATION');
   if (github_url) validateGithubUrl(github_url);
   // SECURITY: same regex as PUT — branch flows into `sh -c` calls.
-  if (branch && !/^[A-Za-z0-9._/\-]{1,200}$/.test(branch)) {
-    throw new AppError('branch must be alphanumeric with . _ / - (max 200 chars)', 400, 'VALIDATION');
+  if (branch && !BRANCH_RE.test(branch)) {
+    throw new AppError(BRANCH_MESSAGE, 400, 'VALIDATION');
+  }
+  if (source_type === 'managed' && !isAdmin(req.user)) {
+    throw new AppError(MANAGED_SOURCE_MESSAGE, 403, 'FORBIDDEN');
   }
   // v2.3.1: 'upload' is dead. Only 'github' (user/external repo) and
   // 'managed' (service-account-owned repo) are valid for new apps.
@@ -1037,6 +1046,15 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
   if (repoFieldChanged && !userHasAppPermission(req.user, app, 'code.modify_repo_settings')) {
     throw new AppError('Modifying repo settings is not permitted by your role on this app', 403, 'FORBIDDEN');
   }
+  // An owner's right to pick their repo stops at managed: that clone runs on the
+  // platform's service-account token, scoped to whatever URL the row names, so
+  // this choice reaches every repo the token can read. Resending the values the
+  // row already holds selects nothing, and a form may do that.
+  const sourceTypeMoves = source_type !== undefined && source_type !== app.source_type;
+  const githubUrlMoves = github_url !== undefined && (github_url || null) !== (app.github_url || null);
+  if ((source_type ?? app.source_type) === 'managed' && (sourceTypeMoves || githubUrlMoves) && !isAdmin(req.user)) {
+    throw new AppError(MANAGED_SOURCE_MESSAGE, 403, 'FORBIDDEN');
+  }
 
   // Same allowlist as POST. 'managed_legacy' stays absent from it: it is the
   // deprecation marker for pre-052 upload apps, so existing rows keep it but no
@@ -1183,8 +1201,8 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
     // commands (askClaude.js, generator.js). Validate at the write boundary
     // so a future inline interpolation can't be exploited via this column.
     // Regex matches the chars git accepts in a ref name plus '/' for paths.
-    if (branch && !/^[A-Za-z0-9._/\-]{1,200}$/.test(branch)) {
-      throw new AppError('branch must be alphanumeric with . _ / - (max 200 chars)', 400, 'VALIDATION');
+    if (branch && !BRANCH_RE.test(branch)) {
+      throw new AppError(BRANCH_MESSAGE, 400, 'VALIDATION');
     }
     updates.branch = branch;
   }
@@ -1750,7 +1768,7 @@ router.delete('/:slug', requireAppAccess, auditMiddleware('app-delete'), async (
   }
 
   const { deleteApp } = await import('../services/appDelete.js');
-  const { slug, managed_databases: dbDrop } = await deleteApp(req.app);
+  const { slug, managed_databases: dbDrop, aws_secrets_retained: awsRetained } = await deleteApp(req.app);
 
   // Update Caddy config (removes app routes) — after the 200 is on the wire.
   reloadCaddyAfterResponse(res, 'app delete');
@@ -1758,6 +1776,7 @@ router.delete('/:slug', requireAppAccess, auditMiddleware('app-delete'), async (
   res.json({
     message: `App '${slug}' deleted`,
     managed_databases: dbDrop,
+    ...(awsRetained && { aws_secrets_retained: awsRetained }),
   });
 });
 
@@ -1922,6 +1941,12 @@ router.post('/:slug/icon', requireAuth, requireAppAccess, async (req, res) => {
 router.post('/reconcile', requireAdmin, async (req, res) => {
   const dryRun = req.query.dry_run === '1' || req.body?.dry_run === true;
   const result = await reconcileOrphanedApps({ dryRun });
+  if (!dryRun && result.registered.length > 0) {
+    logAudit(req.user.id, null, 'apps-reconcile', {
+      registered: result.registered.map(r => r.slug),
+      skipped: result.skipped.map(r => r.slug),
+    });
+  }
   res.json({ ...result, dry_run: dryRun });
 });
 

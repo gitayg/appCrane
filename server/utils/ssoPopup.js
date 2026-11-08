@@ -4,7 +4,7 @@
 // so a framed sign-in page cannot navigate its own frame to the IdP. Instead
 // the SPA opens /api/auth/{oidc,saml}/start?mode=popup in a top-level popup.
 // The callback then answers with a small completion page rather than the
-// usual /login?oidc_token=… forward: the session cookie is set exactly as in
+// usual /login?sso_code=… forward: the session cookie is set exactly as in
 // the normal callback, and the page tells same-origin listeners "signed-in"
 // over a BroadcastChannel and closes itself.
 //

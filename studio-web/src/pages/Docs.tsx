@@ -103,6 +103,15 @@ const REST_FAMILIES: { name: string; rows: [string, string, string][] }[] = [
     ["GET", "/api/directory", "Active users (name+email) for people-pickers / email autocomplete"],
     ["GET", "/api/identity/me", "Current session identity"],
   ] },
+  { name: "Personal MCP keys", rows: [
+    ["GET", "/api/me/mcp-keys", "Your MCP keys (label, purpose, last used, expiry)"],
+    ["POST", "/api/me/mcp-keys", "Create one (label?, read_only?); purpose: 'onboarding' labels it, expires it in 30 days and revokes your unused earlier onboarding keys"],
+    ["POST", "/api/me/mcp-keys/:id/rotate", "New secret for a key (old one stops at once)"],
+    ["DELETE", "/api/me/mcp-keys/:id", "Revoke one of your keys"],
+    ["GET", "/api/admin/mcp-keys", "Every user's keys, never the secret (?status=live|all; platform admin)"],
+    ["DELETE", "/api/admin/mcp-keys/:id", "Revoke any user's key (platform admin, audited)"],
+    ["POST", "/api/admin/mcp-keys/revoke-unused", "Revoke keys unused for {days} days (dry_run: true previews the count; platform admin)"],
+  ] },
   { name: "App email (internal-only)", rows: [
     ["POST", "/api/service/email", "Send email from an app's server (service-token auth)"],
   ] },
@@ -232,6 +241,13 @@ export function Docs() {
             For scripting from outside (CI/CD, webhooks). Authenticate with the <code>X-API-Key</code> header
             (your AppCrane key). Agents should prefer the MCP tools above; these are the same operations over HTTP.
           </p>
+          <p>
+            If your operator set <code>APPCRANE_PRIVATE_API_PORT</code>, a personal key (<code>dhk_user_*</code>,
+            {' '}<code>dhk_admin_*</code>) works only on that private port, for example
+            {' '}<code>https://your-crane-host:8443</code>, reached through your SDP/VPN. On the public address it is
+            refused with 403 <code>USER_KEY_PRIVATE_PORT_ONLY</code>; that covers git clone over HTTPS too. MCP keys,
+            MCP OAuth and dashboard sign-in keep working on the public address.
+          </p>
           {REST_FAMILIES.map(f => (
             <div key={f.name}>
               <h3>{f.name}</h3>
@@ -268,6 +284,7 @@ export function Docs() {
             <li><code>crane caddy</code> — show or reload the generated Caddyfile</li>
             <li><code>crane update</code> — git pull + systemctl restart</li>
             <li><code>crane regenerate-key</code> — recover a lost platform-owner API key (targets the <code>platform_admin</code>; add <code>--email &lt;e&gt;</code> or <code>--user-id &lt;n&gt;</code> for a specific account)</li>
+            <li>Personal API keys are created only on request: no user gets one at sign-in or provisioning. Create yours at Settings &gt; Account; a platform admin can issue one from Users.</li>
             <li><code>crane reconcile</code> — register orphaned filesystem apps into the DB</li>
             <li><code>crane status</code> — server health + app summary</li>
             <li><code>crane config export --out config.json</code> — export platform settings (secrets stay encrypted)</li>

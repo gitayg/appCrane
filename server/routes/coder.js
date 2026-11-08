@@ -35,6 +35,7 @@ import { isAppOwnerOrPlatformAdmin } from '../services/permissions.js';
 import { buildRequestsPrompt, buildReferencedRequests } from '../services/builder/requestsPrompt.js';
 import { listCoderRequests, loadOpenRequests, markSentToCoder } from '../services/builder/coderRequests.js';
 import log from '../utils/logger.js';
+import { assertUserKeyIngress } from '../utils/ingress.js';
 
 const router = Router();
 
@@ -58,7 +59,11 @@ router.use((req, res, next) => {
   const apiKey = req.headers['x-api-key'];
   if (apiKey) {
     const user = db.prepare('SELECT * FROM users WHERE api_key_hash = ?').get(hashApiKey(apiKey));
-    if (user?.active) { req.user = user; return next(); }
+    if (user?.active) {
+      assertUserKeyIngress(req, user.id, 'coder');
+      req.user = user;
+      return next();
+    }
   }
 
   // Try Bearer (identity session)

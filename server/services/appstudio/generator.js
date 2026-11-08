@@ -23,9 +23,9 @@ const STUDIO_IMAGE    = process.env.APPSTUDIO_IMAGE || 'appcrane-studio:latest';
  * failure as "doesn't exist" so coding still attempts the normal path
  * and fails loudly via the clone instead).
  */
-function checkRemoteBranchExists(repoUrl, gitEnv, token, branch, onLog) {
+export function checkRemoteBranchExists(repoUrl, gitEnv, token, branch, onLog) {
   try {
-    const out = execFileSync('git', ['ls-remote', '--heads', repoUrl, branch], { // host-git-ok: no repository
+    const out = execFileSync('git', ['ls-remote', '--heads', '--', repoUrl, branch], { // host-git-ok: no repository
       stdio: 'pipe', timeout: 30000, ...(gitEnv ? { env: gitEnv } : {}),
     }).toString().trim();
     return out.length > 0;
@@ -175,7 +175,7 @@ export async function ensureStudioImage(onLog) {
   onLog?.('[studio] Studio image ready');
 }
 
-async function cloneForCode(dir, app, baseBranch, branchName, onLog) {
+export async function cloneForCode(dir, app, baseBranch, branchName, onLog) {
   const workspaceDir = join(dir, 'workspace');
   mkdirSync(workspaceDir, { recursive: true });
   chmodSync(workspaceDir, 0o777); // explicit chmod — mkdirSync mode is clipped by umask
@@ -224,7 +224,7 @@ async function cloneForCode(dir, app, baseBranch, branchName, onLog) {
 
   onLog?.(`[studio:git] Cloning ${app.github_url} (${cloneFromBranch})…`);
   try {
-    execFileSync('git', ['clone', '--depth', '1', '--branch', cloneFromBranch, app.github_url, workspaceDir], { // host-git-ok: pre-mount
+    execFileSync('git', ['clone', '--depth', '1', '--branch', cloneFromBranch, '--', app.github_url, workspaceDir], { // host-git-ok: pre-mount
       timeout: 120000, stdio: 'pipe', ...(gitEnv ? { env: gitEnv } : {}),
     });
   } catch (err) {
@@ -367,7 +367,7 @@ export function cloneForBuild(jobId, app, branch) {
   }
 
   try {
-    execFileSync('git', ['clone', '--depth', '1', '--branch', branch, app.github_url, dir], { // host-git-ok: fresh build clone, never mounted into an agent
+    execFileSync('git', ['clone', '--depth', '1', '--branch', branch, '--', app.github_url, dir], { // host-git-ok: fresh build clone, never mounted into an agent
       timeout: 120000, stdio: 'pipe', ...(gitEnv ? { env: gitEnv } : {}),
     });
   } catch (err) {

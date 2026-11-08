@@ -1,7 +1,8 @@
 import { existsSync, readFileSync, lstatSync } from 'fs';
-import { createHash } from 'crypto';
+import { createHmac } from 'crypto';
 import { join, dirname } from 'path';
-import { writeFileInside } from '../utils/paths.js';
+import { regularFileInside, writeFileInside } from '../utils/paths.js';
+import { deriveSecret } from './encryption.js';
 import log from '../utils/logger.js';
 import { detectPhpApp, ensurePhpDockerfile } from './dockerfileGenPhp.js';
 import { pickNodeVersion } from './nodeVersion.js';
@@ -29,10 +30,15 @@ function findLockfile(dir, names) {
 function requireLockfile() { return process.env.APPCRANE_REQUIRE_LOCKFILE === '1'; }
 function requireCleanAudit() { return process.env.APPCRANE_REQUIRE_CLEAN_AUDIT === '1'; }
 
+// A repo's own JSON, or null. Never through a committed link: what a link points
+// at would come back in the generated CMD and the deploy log.
+function readJsonInside(releaseDir, path) {
+  if (!regularFileInside(releaseDir, path)) return null;
+  try { return JSON.parse(readFileSync(path, 'utf8')); } catch { return null; }
+}
+
 function readPackageJson(releaseDir, relDir) {
-  const p = relDir ? join(releaseDir, relDir, 'package.json') : join(releaseDir, 'package.json');
-  if (!existsSync(p)) return null;
-  try { return JSON.parse(readFileSync(p, 'utf8')); } catch { return null; }
+  return readJsonInside(releaseDir, relDir ? join(releaseDir, relDir, 'package.json') : join(releaseDir, 'package.json'));
 }
 
 function safeRel(p) {
@@ -57,10 +63,8 @@ function safeRel(p) {
 function detectFrontendWorkdir(releaseDir) {
   const candidates = ['client', 'frontend', 'web', 'app', 'apps/web', 'apps/frontend'];
   for (const dir of candidates) {
-    const pkgPath = join(releaseDir, dir, 'package.json');
-    if (!existsSync(pkgPath)) continue;
-    let pkg;
-    try { pkg = JSON.parse(readFileSync(pkgPath, 'utf8')); } catch { continue; }
+    const pkg = readPackageJson(releaseDir, dir);
+    if (!pkg) continue;
     const hasBuild = !!pkg?.scripts?.build;
     const deps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
     const hasBundler = !!(
@@ -81,31 +85,16 @@ function detectFrontendWorkdir(releaseDir) {
 function detectEntry(manifest, releaseDir, beWorkdir) {
   if (manifest?.be?.entry) return manifest.be.entry;
   if (manifest?.start?.backend) return manifest.start.backend;
-  const pkgPath = beWorkdir
-    ? join(releaseDir, beWorkdir, 'package.json')
-    : join(releaseDir, 'package.json');
-  if (existsSync(pkgPath)) {
-    try {
-      const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
-      if (pkg.scripts?.start) return 'npm start';
-      if (pkg.main) return `node ${pkg.main}`;
-    } catch (_) {}
-  }
+  const pkg = readPackageJson(releaseDir, beWorkdir);
+  if (pkg?.scripts?.start) return 'npm start';
+  if (pkg?.main) return `node ${pkg.main}`;
   return 'node server.js';
 }
 
 function detectBuild(manifest, releaseDir, feWorkdir) {
   const fromManifest = manifest?.fe?.build || manifest?.build?.frontend;
   if (fromManifest) return fromManifest;
-  const pkgPath = feWorkdir
-    ? join(releaseDir, feWorkdir, 'package.json')
-    : join(releaseDir, 'package.json');
-  if (existsSync(pkgPath)) {
-    try {
-      const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
-      if (pkg.scripts?.build) return 'npm run build';
-    } catch (_) {}
-  }
+  if (readPackageJson(releaseDir, feWorkdir)?.scripts?.build) return 'npm run build';
   return null;
 }
 
@@ -118,16 +107,15 @@ function entryToCmd(entry) {
 }
 
 /**
- * BuildKit cache id for an app's npm cache, or null without a slug. Only
- * [a-z0-9-] reaches the mount options; a slug that needed changing to get
- * there also carries a hash of the original, so two slugs never share one.
+ * BuildKit cache id for an app's npm cache, or null without a slug. Any app's
+ * Dockerfile can mount any id it can name (dockerfileValidator has no rule on
+ * --mount), so the id is keyed by the instance secret instead of being the
+ * public slug. Hex only, so nothing of the slug reaches the mount options.
  */
 export function npmCacheId(slug) {
   if (!slug) return null;
-  const raw = String(slug);
-  const clean = raw.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 60);
-  if (clean === raw) return `npm-${clean}`;
-  return `npm-${clean}-${createHash('sha256').update(raw).digest('hex').slice(0, 12)}`;
+  const digest = createHmac('sha256', deriveSecret('npm-build-cache')).update(String(slug)).digest('hex');
+  return `npm-${digest.slice(0, 32)}`;
 }
 
 function defaultInstall() {

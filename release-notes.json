@@ -1,4 +1,10 @@
 {
+  "2.135.0": [
+    "AppCrane can keep its own keys and your apps' secrets in AWS Secrets Manager instead of files on the server. It is optional and off until you turn it on. An app only ever reaches its own secrets, and sandbox cannot read production's.",
+    "Personal API keys are now created only when someone asks for one (Settings > Account), and can optionally be limited to a private port you keep behind your VPN (APPCRANE_PRIVATE_API_PORT). Sign-in, SSO, MCP and webhooks stay on the normal port.",
+    "MCP keys: the onboarding button no longer piles up keys. Each new onboarding key lasts 30 days and replaces your earlier unused ones. Platform admins get a list of every MCP key on the MCP page, can revoke any of them, and can revoke all keys unused for 30+ days in one go.",
+    "Security fixes: SSO sign-in can no longer be hijacked with a link, credential rate limits can't be bypassed, git fetches are always audited, Ask and plan feedback are limited to people allowed to reach the credentials involved, and several build and pre-flight hardening fixes."
+  ],
   "2.134.1": [
     "Fix: promoting an app to production now works when its sandbox release was uploaded as a bundle (appcrane_deploy_artifact). Production gets exactly the files sandbox ran, checked file by file, instead of a rebuild that failed at once with \"expected a hex SHA\". A first promote no longer needs production to have been deployed before, and folders named data inside the bundle are kept."
   ],

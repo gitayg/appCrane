@@ -353,7 +353,7 @@ test('the per-app routes are gated on access to THAT app, not merely on being si
   assert.equal((await call('GET', '/api/apps/mine/github-app', plain.key)).status, 200);
 });
 
-test('attaching needs the same role permission as changing the repo URL', async () => {
+test('attaching is platform admin only: an owner is refused and a platform admin attaches', async () => {
   const app = mkApp('roles');
   const member = mkUser('user', 'dhk_member_key');
   assign(app.id, member.id);                    // plain assignment ('user' role)
@@ -363,7 +363,8 @@ test('attaching needs the same role permission as changing the repo URL', async 
   assert.equal(denied.body.error.code, 'FORBIDDEN');
 
   db.prepare('INSERT OR REPLACE INTO app_user_roles (app_id,user_id,app_role) VALUES (?,?,?)').run(app.id, member.id, 'owner');
-  const allowed = await call('PUT', '/api/apps/roles/github-app', member.key, {});
+  assert.equal((await call('PUT', '/api/apps/roles/github-app', member.key, {})).status, 403);
+  const allowed = await call('PUT', '/api/apps/roles/github-app', admin.key, {});
   assert.equal(allowed.status, 200, JSON.stringify(allowed.body));
   assert.equal(allowed.body.installation_id, INSTALLATION_ID);
 });

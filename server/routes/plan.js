@@ -1,8 +1,10 @@
 import { Router } from 'express';
 import { getDb } from '../db.js';
 import { hashApiKey } from '../services/encryption.js';
+import { isAppOwnerOrPlatformAdmin } from '../services/permissions.js';
 import { AppError } from '../utils/errors.js';
 import log from '../utils/logger.js';
+import { assertUserKeyIngress } from '../utils/ingress.js';
 
 const router = Router();
 
@@ -39,6 +41,7 @@ function resolveUser(req) {
 
     const apiKeyUser = db.prepare('SELECT * FROM users WHERE api_key_hash = ?').get(hash);
     if (apiKeyUser && apiKeyUser.active) {
+      assertUserKeyIngress(req, apiKeyUser.id, 'plan');
       return { userId: apiKeyUser.id, userName: apiKeyUser.name, role: apiKeyUser.role };
     }
   }
@@ -46,7 +49,10 @@ function resolveUser(req) {
   const apiKey = req.headers['x-api-key'];
   if (apiKey) {
     const user = db.prepare('SELECT * FROM users WHERE api_key_hash = ?').get(hashApiKey(apiKey));
-    if (user && user.active) return { userId: user.id, userName: user.name, role: user.role };
+    if (user && user.active) {
+      assertUserKeyIngress(req, user.id, 'plan');
+      return { userId: user.id, userName: user.name, role: user.role };
+    }
   }
   return null;
 }
@@ -225,6 +231,15 @@ router.post('/:enhancementId/feedback', (req, res) => {
   if (!comment?.trim()) throw new AppError('comment is required', 400, 'VALIDATION');
 
   const db = getDb();
+  // The comment goes into a planner container that holds the platform API key or
+  // the app's Claude login, with permissions off, so writing it means being able
+  // to read them. Same gate as /api/appstudio/:id/plan-feedback.
+  if (user.role !== 'platform_admin') {
+    const planApp = db.prepare('SELECT * FROM apps WHERE slug = ?').get(enh.app_slug);
+    if (!isAppOwnerOrPlatformAdmin({ id: user.userId, role: user.role }, planApp)) {
+      throw new AppError('Only the app owner or a platform admin can send plan feedback', 403, 'FORBIDDEN');
+    }
+  }
   const isAdmin = user.role === 'platform_admin';
   const existing = isAdmin ? (enh.admin_comments || '') : (enh.user_comments || '');
   const updated = existing + `\n[${new Date().toISOString()}] ${comment.trim()}`;

@@ -7,6 +7,7 @@ import net from 'net';
 import { getDb } from '../db.js';
 import { identitySecretFor } from './identitySignature.js';
 import { decrypt } from './encryption.js';
+import { isSecretRef, resolveStoredEnv } from './secretRefs.js';
 import log from '../utils/logger.js';
 import { usesLocalRepo } from './managedRepo.js';
 import { scrubToken } from './githubGitAuth.js';
@@ -29,6 +30,7 @@ import { parseContainerCommand, parseVolumePaths, resolveVolumeMounts, declaredV
 import { resolveHealthProbe } from './healthProbeTarget.js';
 import { fetchAppProbe } from './appProbeFetch.js';
 import { imagesToKeep } from './imageRetention.js';
+import { regularFileInside } from '../utils/paths.js';
 import { admitContainer, REFUSED_CODE } from './memoryAdmission.js';
 import { recordDeployEvent, recordRollbackEvent } from './eventStore.js';
 import { createDeployLog } from './deployLog.js';
@@ -1162,6 +1164,12 @@ export async function promoteApp(app, userId, opts = {}) {
   );
 
   try {
+    // Before anything on disk or in the records moves: past step 5 a failed deploy
+    // leaves the running release marked rolled_back, and a secret that cannot be
+    // read is known now. deployApp resolves again when it starts the container.
+    const envRows = db.prepare('SELECT key, value_encrypted FROM env_vars WHERE app_id = ? AND env = ?').all(app.id, 'production');
+    await resolveStoredEnv(app, 'production', envRows);
+
     // 1. Copy sandbox release tree into production releases/. Only the
     //    sandbox's own top-level .env and data symlinks stay behind: a real
     //    data/ directory, or any nested one, is part of the release.
@@ -1178,10 +1186,13 @@ export async function promoteApp(app, userId, opts = {}) {
     });
 
     // 2. Rewrite production .env from production env_vars (NEVER copy sandbox env).
-    const envRows = db.prepare('SELECT key, value_encrypted FROM env_vars WHERE app_id = ? AND env = ?').all(app.id, 'production');
+    //    The container gets its env from dockerStart; this host file stays outside
+    //    the build context. A Secrets Manager value is not written to it.
     const envContent = envRows.map(v => {
-      try { return `${v.key}=${decrypt(v.value_encrypted)}`; }
-      catch (_) { return `# ERROR decrypting ${v.key}`; }
+      try {
+        const plain = decrypt(v.value_encrypted);
+        return isSecretRef(plain) ? `# ${v.key} comes from Secrets Manager at container start` : `${v.key}=${plain}`;
+      } catch (_) { return `# ERROR decrypting ${v.key}`; }
     }).join('\n');
     const fullEnv = `${envContent}\nPORT=${prodPorts.prod_be}\nFE_PORT=${prodPorts.prod_fe}\nNODE_ENV=production\n`;
     mkdirSync(prodSharedDir, { recursive: true });
@@ -1238,6 +1249,14 @@ export async function promoteApp(app, userId, opts = {}) {
 export async function deployApp(deployId, app, env, ports, opts = {}) {
   const db = getDb();
   recordDeployEvent(deployId, 'started');
+
+  // One read per deploy, before anything is pulled or built: an unresolved
+  // Secrets Manager reference fails here and the old container keeps running.
+  let storedEnv = null;
+  const loadStoredEnv = () => {
+    storedEnv ??= resolveStoredEnv(app, env, db.prepare('SELECT key, value_encrypted FROM env_vars WHERE app_id = ? AND env = ?').all(app.id, env));
+    return storedEnv;
+  };
 
   // An image app has no release tree — no clone, no bundle, no `current`
   // symlink target. Every step below that reads a file out of a release
@@ -1368,6 +1387,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     // Every deploy path (AppStudio, PR poller, rename redeploys, …) passes
     // here, so a restore's stopped container is never replaced mid-restore.
     assertNoRestoreInProgress(app.slug, env);
+    await loadStoredEnv();
     // A rollback reuses a release or image already on disk, so it is the one
     // deploy that stays allowed on a nearly full disk.
     if (!opts.rollback) {
@@ -1603,7 +1623,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
         // THIS environment's clone before anything reads or builds it, with this
         // environment's env vars layered on. Paths and key names only in the log.
         const { restoreStoredEnvFiles, describeRestoredEnvFiles } = await import('./envFileStore.js');
-        const restoredEnvFiles = restoreStoredEnvFiles(db, app, env, releaseDir);
+        const restoredEnvFiles = restoreStoredEnvFiles(db, app, env, releaseDir, await loadStoredEnv());
         if (restoredEnvFiles.files.length) appendLog(describeRestoredEnvFiles(restoredEnvFiles));
       } else {
         let token = null;
@@ -1799,8 +1819,12 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       // absence, as the tree path does, would report a problem that isn't one.
       // The tag resolved above is the version.
       manifest = { version: imageVersion };
-    } else if (existsSync(manifestPath)) {
+    } else if (regularFileInside(releaseDir, manifestPath)) {
       manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    } else if (lstatSync(manifestPath, { throwIfNoEntry: false })) {
+      // Same rule as a linked Dockerfile (dockerfileGen.js). Reading through it
+      // printed the first bytes of any file the server can read into the deploy log.
+      throw new Error('deployhub.json is a symbolic link or not a regular file; commit a regular file or none at all');
     } else {
       appendLog('WARNING: No deployhub.json found. Using defaults.');
     }
@@ -1840,7 +1864,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     // This eliminates the drift class where deployhub.json:version goes stale
     // because every Node release bumps package.json but forgets the manifest.
     const pkgPath = isImageDeploy ? null : join(releaseDir, 'package.json');
-    if (pkgPath && existsSync(pkgPath)) {
+    if (pkgPath && regularFileInside(releaseDir, pkgPath)) {
       try {
         const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
         if (pkg.version) manifest.version = pkg.version;
@@ -1848,14 +1872,14 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       } catch (e) {
         appendLog(`WARNING: package.json parse failed (${e.message}); falling back to deployhub.json:version`);
       }
+    } else if (pkgPath && lstatSync(pkgPath, { throwIfNoEntry: false })) {
+      appendLog('WARNING: package.json is a symbolic link or not a regular file; not reading it, falling back to deployhub.json:version');
     }
     if (manifestPath && existsSync(manifestPath)) {
       appendLog(`Found deployhub.json: ${manifest.name || '(no name)'} v${manifest.version || '(no version)'}`);
     }
 
-    const envVars = db.prepare(
-      'SELECT key, value_encrypted FROM env_vars WHERE app_id = ? AND env = ?'
-    ).all(app.id, env);
+    const { values: runtimeEnvVars, decryptFailures, refKeys } = await loadStoredEnv();
 
     const bePort = env === 'production' ? ports.prod_be : ports.sand_be;
 
@@ -2003,9 +2027,9 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     // after the clone and has been running alongside everything since — the
     // manifest read, the dist check, the Dockerfile generation and the build.
     // This is the first point where its answer is needed, and it is deliberately
-    // ahead of all three things that run a container:
+    // ahead of all three things that touch a container:
     //
-    //   preflightEntryCheck  `docker run --rm` against the built image
+    //   preflightEntryCheck  `docker create` + `docker cp`, never started
     //   dockerStop           tears down the version currently serving traffic
     //   dockerStart          starts the new one
     //
@@ -2047,12 +2071,6 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
 
     await dockerStop(app.slug, env).catch(() => {});
 
-    const runtimeEnvVars = {};
-    const decryptFailures = [];
-    for (const v of envVars) {
-      try { runtimeEnvVars[v.key] = decrypt(v.value_encrypted); }
-      catch (_) { decryptFailures.push(v.key); }
-    }
     // v2.7.30: surface env injection in the deploy log — KEY NAMES ONLY,
     // never values. Lets an operator confirm a var actually reached the
     // container (e.g. ANTHROPIC_API_KEY) without shelling in or exposing the
@@ -2064,6 +2082,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
         ? `Injecting ${injectedKeys.length} env var(s) into container: ${injectedKeys.join(', ')}`
         : 'No app env vars to inject (env_vars empty for this app/env).'
     );
+    if (refKeys.length) appendLog(`Resolved from AWS Secrets Manager: ${refKeys.join(', ')}`);
     // v2.7.30: a value that fails to decrypt was previously dropped silently —
     // the container came up missing the secret with zero signal. Make it loud.
     if (decryptFailures.length) {

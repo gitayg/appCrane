@@ -109,7 +109,7 @@ test('generated npm install gets the cache mount with BuildKit and not without',
   try {
     const withBk = generate(a, { buildkit: true });
     const install = withBk.find((l) => l.includes('npm ci --omit=dev'));
-    assert.match(install, /^RUN --mount=type=cache,id=npm-app-a,target=\/home\/node\/\.npm,uid=1000,gid=1000,sharing=locked /);
+    assert.ok(install.startsWith(`RUN --mount=type=cache,id=${npmCacheId('app-a')},target=/home/node/.npm,uid=1000,gid=1000,sharing=locked `), install);
     const classic = generate(b, { buildkit: false });
     assert.ok(!classic.some((l) => l.includes('--mount')), 'classic builder rejects --mount');
     assert.match(classic.find((l) => l.includes('npm ci --omit=dev')), /^RUN if /);
@@ -192,7 +192,7 @@ test('npm cache is per app: different slugs, different ids; odd characters canno
     const idOf = (lines) => /--mount=type=cache,id=([^,]+),/.exec(lines.find((l) => l.includes('npm ci --omit=dev')))[1];
     const ida = idOf(generate(a, { buildkit: true, slug: 'app-a' }));
     const idb = idOf(generate(b, { buildkit: true, slug: 'app-b' }));
-    assert.equal(ida, 'npm-app-a');
+    assert.equal(ida, npmCacheId('app-a'));
     assert.notEqual(ida, idb);
   } finally { rmSync(a, { recursive: true, force: true }); rmSync(b, { recursive: true, force: true }); }
 

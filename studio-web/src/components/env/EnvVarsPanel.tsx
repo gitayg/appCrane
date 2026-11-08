@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useState, type CSSProperties } from 'react'
 import { EnvVarRow } from './EnvVarRow'
+import { StoreInSecretsManager } from './StoreInSecretsManager'
 import { PasswordInput } from '../secret/PasswordInput'
-import { loadMaskedEnv, revealEnvVar, setEnvVar, deleteEnvVar, type EnvName, type MaskedEnvList } from './envVarsApi'
+import { ApiError } from '../../adminApi'
+import { loadMaskedEnv, revealEnvVar, setEnvVar, deleteEnvVar, loadSecretsProviderStatus, type EnvName, type EnvStore, type MaskedEnvList } from './envVarsApi'
 
 export interface EnvVarsPanelProps {
   slug: string
@@ -21,7 +23,12 @@ export function EnvVarsPanel({ slug, env, reload, onMsg, onChanged, compact }: E
   const [busyKey, setBusyKey] = useState<string | null>(null)
   const [newKey, setNewKey] = useState('')
   const [newVal, setNewVal] = useState('')
-  const msg = (text: string, ok: boolean) => onMsg?.({ text, ok })
+  const [newStore, setNewStore] = useState(false)
+  const [offerSecretsManager, setOfferSecretsManager] = useState(false)
+  const [localMsg, setLocalMsg] = useState<{ text: string; ok: boolean } | null>(null)
+  const [retained, setRetained] = useState<{ key: string; name: string } | null>(null)
+  // Dashboard cards mount this panel without onMsg; a refusal must still reach the operator.
+  const msg = (text: string, ok: boolean) => { if (onMsg) onMsg({ text, ok }); else setLocalMsg({ text, ok }) }
 
   const load = useCallback(() => {
     setError(null)
@@ -30,7 +37,15 @@ export function EnvVarsPanel({ slug, env, reload, onMsg, onChanged, compact }: E
       .catch(e => setError(errText(e) || 'Cannot load env vars'))
   }, [slug, env])
 
-  useEffect(() => { setData(null) }, [slug, env])
+  useEffect(() => { setData(null); setRetained(null); setLocalMsg(null) }, [slug, env])
+
+  // Only platform admins can read the status. Everyone else gets the checkbox,
+  // and the PUT's 400 explains when the provider is off.
+  useEffect(() => {
+    loadSecretsProviderStatus()
+      .then(s => setOfferSecretsManager(s.active))
+      .catch(e => setOfferSecretsManager(e instanceof ApiError && e.status === 403))
+  }, [])
 
   useEffect(() => {
     load()
@@ -38,10 +53,10 @@ export function EnvVarsPanel({ slug, env, reload, onMsg, onChanged, compact }: E
 
   const reveal = async (key: string) => (await revealEnvVar(slug, env, key)).value
 
-  async function save(key: string, value: string): Promise<boolean> {
+  async function save(key: string, value: string, store?: EnvStore): Promise<boolean> {
     setBusyKey(key)
     try {
-      const r = await setEnvVar(slug, env, key, value)
+      const r = await setEnvVar(slug, env, key, value, store)
       msg(r.message || `Updated ${key}`, true)
       onChanged?.()
       load()
@@ -57,8 +72,9 @@ export function EnvVarsPanel({ slug, env, reload, onMsg, onChanged, compact }: E
   async function remove(key: string) {
     if (!confirm('Delete ' + key + '?')) return
     try {
-      await deleteEnvVar(slug, env, key)
+      const r = await deleteEnvVar(slug, env, key)
       msg('Deleted ' + key, true)
+      setRetained(r.aws_secret_retained ? { key, name: r.aws_secret_retained } : null)
       onChanged?.()
       load()
     } catch (e) {
@@ -70,9 +86,9 @@ export function EnvVarsPanel({ slug, env, reload, onMsg, onChanged, compact }: E
     const k = newKey.trim()
     if (!k) return
     try {
-      const r = await setEnvVar(slug, env, k, newVal)
+      const r = await setEnvVar(slug, env, k, newVal, newStore ? 'secrets_manager' : undefined)
       msg(r.message || 'Added', true)
-      setNewKey(''); setNewVal('')
+      setNewKey(''); setNewVal(''); setNewStore(false)
       onChanged?.()
       load()
     } catch (e) {
@@ -109,9 +125,10 @@ export function EnvVarsPanel({ slug, env, reload, onMsg, onChanged, compact }: E
                   canReveal={canReveal}
                   revealRefusal={data.reveal_refusal}
                   busy={busyKey === v.key}
+                  offerSecretsManager={offerSecretsManager}
                   compact={compact}
                   onReveal={() => reveal(v.key)}
-                  onSave={value => save(v.key, value)}
+                  onSave={(value, store) => save(v.key, value, store)}
                   onDelete={() => remove(v.key)}
                 />
               ))}
@@ -129,6 +146,17 @@ export function EnvVarsPanel({ slug, env, reload, onMsg, onChanged, compact }: E
         </span>
         <button className={compact ? 'btn btn-xs' : 'btn btn-sm'} onClick={add}>Add</button>
       </div>
+      {offerSecretsManager && (
+        <StoreInSecretsManager name={newKey.trim() || 'new variable'} checked={newStore} onChange={setNewStore} />
+      )}
+      {retained && (
+        <div data-aws-secret-retained style={{ color: 'var(--yellow-text)', fontSize: '.8rem', marginTop: 6 }}>
+          Deleted {retained.key} from AppCrane and kept its AWS secret <code>{retained.name}</code>. Delete the secret in AWS when nothing else needs it.
+        </div>
+      )}
+      {localMsg && (
+        <div style={{ color: localMsg.ok ? 'var(--dim)' : 'var(--red)', fontSize: '.8rem', marginTop: 6 }}>{localMsg.text}</div>
+      )}
     </div>
   )
 }

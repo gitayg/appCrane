@@ -309,6 +309,41 @@ appears in the conversation — reveal only when the user explicitly needs it, n
 to inspect config. Setting an env var does not redeploy automatically — call
 `appcrane_deploy` after changes to make them take effect.
 
+### Values kept in AWS Secrets Manager
+
+When this AppCrane has a secrets provider configured (`APPCRANE_SECRETS_PROVIDER`), an
+env var can hold a reference instead of a value:
+
+```
+appcrane_set_secret(slug, env, key, value, store="secrets_manager")  — value goes to AWS, AppCrane keeps secretsmanager:<KEY>
+appcrane_set_secret(slug, env, key, value="secretsmanager:NAME")     — point at a secret that already exists
+appcrane_set_secret(slug, env, key, value="secretsmanager:NAME#fld") — one field of a JSON secret
+```
+
+REST: `PUT /api/apps/:slug/env/:env` with `{ "vars": {...}, "store": "secrets_manager" }`.
+
+- A reference is a name, not a path. It always resolves to `<prefix>/<namespace>/<env>/<NAME>`
+  (default prefix `appcrane/apps`), so an app reaches only its own secrets and sandbox
+  cannot read production. ARNs, slashes and `..` are refused when set and when resolved.
+- `<namespace>` is a random value on the app's row. It is not the slug or the id, because
+  a slug can pass to another app and a restore hands an id out again. A platform admin gets
+  it from `GET /api/settings/secrets-provider/app-path/<slug>`; a reference that finds no
+  secret fails naming the path it looked at.
+- It is resolved at every deploy and restart and injected like any env var. A reference
+  that cannot be read fails that deploy or restart, names the key, and leaves the running
+  container alone. The reference text is never injected.
+- `appcrane_get_secret`, `appcrane_reveal_secret` and the env list show the reference text
+  with `source: "secrets_manager"`. They never fetch the value.
+- Removing the env var, or deleting the app, does NOT delete the AWS secret. The env var
+  delete response names it as `aws_secret_retained`; an app delete logs the app's path as a
+  warning. No later app can read what is left. Delete it in AWS when you are done: once the
+  app's row is gone, that log line is the only record of the path.
+- Renaming an app changes nothing in AWS, and a restored backup keeps each app's namespace.
+  An app created after that backup loses its namespace in the restore, and its secrets stay
+  in AWS unreachable. A copy of a backup on a second AppCrane reads and writes the same
+  secrets: give that AppCrane its own `APPCRANE_SECRETS_APP_PREFIX`.
+- AWS asks for no more than one `PutSecretValue` per secret every 10 minutes, sustained.
+
 ## Per-app access management
 
 The five tools that replace the old `/users` dashboard for an agent doing
@@ -428,6 +463,27 @@ every dashboard user out once. API keys are unaffected.
 set `custom_domain_auth` on an app (`appcrane_set_app_meta` or
 `PUT /api/apps/<slug>`) to put the normal AppCrane sign-in, through the same
 handoff, in front of its custom domain; it works with per-app origins on or off.
+
+## Personal API keys on a private port (`APPCRANE_PRIVATE_API_PORT`)
+
+An operator setting in `.env`, not an MCP tool. Set (e.g. `8443`), Caddy adds a
+second site for the platform host on that port with the same certificate, and
+personal user keys (`dhk_user_*` / `dhk_admin_*`) are refused with 403
+`USER_KEY_PRIVATE_PORT_ONLY` on 443 and on every app host: REST, git over
+HTTPS, `/api/identity/verify`, and MCP called with a user key. They work on
+`https://your-crane-host:8443`. MCP keys (`dhk_mcp_*`), MCP OAuth, dashboard
+sessions, SSO, Crew tokens and webhooks are unaffected, so this MCP connection
+keeps working on 443 when it uses an MCP key or OAuth. If a call answers
+`USER_KEY_PRIVATE_PORT_ONLY`, the client is using a personal key on the public
+address: switch it to an MCP key, or point it at the private port from inside
+the SDP/VPN.
+
+Operator checklist: open the private port only to the SDP/VPN (firewall or
+security group), keep Node's own `PORT` (5001) closed to the outside (requests
+that reach it directly are not refused; loopback and app containers use it),
+restart AppCrane so it regenerates and reloads the Caddy config, and check
+`GET /api/api-key-policy` (`private_api.configured`). Refusals are audited as
+`user-key.public-refused`, once per user per hour.
 
 ## Deploys: production vs sandbox
 
@@ -559,8 +615,8 @@ Settings → Backup than passed through an agent.
 
 | Tool | What it does |
 |---|---|
-| `appcrane_get_secret` | List env vars with MASKED values (preview + fingerprint) — safe for chat |
-| `appcrane_reveal_secret` | Reveal ONE env var's plaintext by key (lands in transcript; audited) |
+| `appcrane_get_secret` | List env vars with MASKED values (preview + fingerprint) — safe for chat. A Secrets Manager reference shows its reference text |
+| `appcrane_reveal_secret` | Reveal ONE env var's plaintext by key (lands in transcript; audited). A Secrets Manager reference returns the reference text, never the AWS value |
 | `appcrane_set_env` | Set or update an environment variable on an app |
 | `appcrane_set_data_blob` | Write a blob directly to the app's persistent /data volume on the host — single hop, no container round-trip, no GitHub round-trip, no inline size ... |
 | `appcrane_ls` | List files inside a running app container at a specific path |

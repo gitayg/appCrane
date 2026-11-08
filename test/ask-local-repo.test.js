@@ -424,9 +424,8 @@ test('a NULL-marker managed app still starts the ask container and never calls t
   assert.equal(runs.length, runsBefore + 1, 'no container was started for the NULL-marker app');
   const run = runs.at(-1);
   assert.ok(run.includes(`appcrane-ask-s${sessionId}`));
-  assert.equal(readFileSync(join(ASK_CAPTURE, 'clone_url'), 'utf8'), 'https://github.com/o/AMC_ask-gh');
-  assert.equal(run.at(-1),
-    'CLONE_URL=$(cat /studio/clone_url) && git clone --depth 1 --branch "$BRANCH" "$CLONE_URL" /workspace && git -C /workspace remote remove origin && git -C /workspace config --local credential.helper "" && tail -f /dev/null');
+  assert.deepEqual(run.slice(-3), ['tail', '-f', '/dev/null']);
+  assert.ok(readFileSync(DOCKER_LOG, 'utf8').includes('REPO_URL=https://github.com/o/AMC_ask-gh'), 'the clone did not get the app URL');
   assert.equal(calls.length, 0, 'the NULL-marker app called the Messages API directly');
 });
 

@@ -2,6 +2,7 @@ import { getDb } from '../db.js';
 import log from '../utils/logger.js';
 import { deleteAppCoderRows } from './crewAppCoderAgents.js';
 import { announce } from './crew.js';
+import { retainedAppSecrets } from './secretRefs.js';
 
 // The body of DELETE /api/apps/:slug, moved here unchanged so appcrane_delete_app
 // runs the same teardown. Caddy is reloaded by the caller.
@@ -53,6 +54,19 @@ export async function deleteApp(app) {
     );
   }
 
+  // The app's AWS secrets stay. AppCrane holds no delete call and its IAM policy
+  // no secretsmanager:DeleteSecret; a backup restored later brings the app and its
+  // secrets back together; and they may be the only copy. Nothing can read them
+  // meanwhile, since the path is the app's own random namespace, which no later
+  // app gets. So the operator is told where they are, while the row can still say.
+  const awsRetained = retainedAppSecrets(app, db.prepare('SELECT env, value_encrypted FROM env_vars WHERE app_id = ?').all(app.id));
+  if (awsRetained) {
+    log.warn(
+      `App delete '${slug}': AWS Secrets Manager secrets under ${awsRetained.path_prefix} are left in place ` +
+      `(${awsRetained.referenced.length} referenced at delete). Delete them in AWS when you are done`,
+    );
+  }
+
   // Delete related records first to avoid FK constraint failures
   const appId = app.id;
   let crewTaskIds = [];
@@ -77,5 +91,5 @@ export async function deleteApp(app) {
   // Open task streams and a running coder turn for those tasks end on 'deleted'.
   if (crewTaskIds.length) announce(crewTaskIds, 'deleted');
 
-  return { slug, managed_databases: dbDrop };
+  return { slug, managed_databases: dbDrop, ...(awsRetained && { aws_secrets_retained: awsRetained }) };
 }

@@ -261,6 +261,7 @@ for (const [name, src] of [['oidc', OIDC_SRC], ['saml', SAML_SRC]]) {
       /p\.set\(\s*['"]redirect['"]/,
       `server/routes/${name}.js never forwards a validated redirect target`,
     );
+    assert.match(src, /new URLSearchParams\(\{ sso_code: issueSsoHandoff\(/, `server/routes/${name}.js forwards something other than the handoff code`);
   });
 }
 
@@ -296,7 +297,7 @@ test('saml callback validates RelayState independently of start', () => {
 // this test covers what that shape actually emits.
 function forwardLocation(rawRedirect, base = BASE) {
   const target = safeRedirectTarget(rawRedirect, '');
-  const p = new URLSearchParams({ oidc_token: 'tok' });
+  const p = new URLSearchParams({ sso_code: 'code' });
   if (target && !target.includes('/login')) {
     p.set('redirect', target);
   }

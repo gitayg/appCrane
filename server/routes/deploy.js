@@ -343,7 +343,7 @@ router.post('/:slug/restart/:env', requireAppAccess, auditMiddleware('restart'),
   const db = getDb();
   const app = req.app;
   const ports = getPortsForSlot(app.slot);
-  const { decrypt } = await import('../services/encryption.js');
+  const { resolveStoredEnv, SecretRefError } = await import('../services/secretRefs.js');
   const { execFile } = await import('child_process');
   const { promisify } = await import('util');
   const { resolve, join } = await import('path');
@@ -384,12 +384,16 @@ router.post('/:slug/restart/:env', requireAppAccess, auditMiddleware('restart'),
     'SELECT key, value_encrypted FROM env_vars WHERE app_id = ? AND env = ?'
   ).all(app.id, env);
 
-  const runtimeEnvVars = {};
-  const decryptFailures = [];
-  for (const v of envVars) {
-    try { runtimeEnvVars[v.key] = decrypt(v.value_encrypted); }
-    catch (_) { decryptFailures.push(v.key); }
+  // An unresolved Secrets Manager reference stops here, with the running
+  // container untouched: dockerStop is further down.
+  let storedEnv;
+  try {
+    storedEnv = await resolveStoredEnv(app, env, envVars);
+  } catch (e) {
+    if (e instanceof SecretRefError) throw new AppError(e.message, 502, e.code);
+    throw e;
   }
+  const { values: runtimeEnvVars, decryptFailures } = storedEnv;
   // v2.7.30: loud decrypt failures — a silently-dropped secret on restart
   // is exactly the "I set it and it's still missing" mystery.
   if (decryptFailures.length) {

@@ -35,6 +35,7 @@ import { myRules } from './crewDecisions.js';
 import { fetchAppProbe } from './appProbeFetch.js';
 import { normalizeFrameAncestors } from '../utils/frameAncestors.js';
 import { secretPreview, opaquePreview, secretFingerprint } from './secretMask.js';
+import { REF_SOURCE, assertStorableValue, assertStoreRequest, isSecretRef, storeAppSecrets } from './secretRefs.js';
 import { isCoderKey, assertCoderToolAllowed, CODER_MCP_TOOLS } from './coderMcpKey.js';
 import { coderRequestsView } from './coderRequestView.js';
 import { recordAuditEvent } from './eventStore.js';
@@ -1113,6 +1114,7 @@ const TOOLS = [
       'For a PRODUCTION value you may not reveal (anyone but the app owner or a platform admin), length and fingerprint are left out and the preview is fully masked. ' +
       'This is what you want for "is X set?", "did the key change?", "which vars exist?". ' +
       'Does NOT return plaintext — a secret never lands in the transcript. To read one actual value, use appcrane_reveal_secret with a specific key. ' +
+      'A var that is a Secrets Manager reference also has source="secrets_manager" and value set to the reference text (secretsmanager:<NAME>[#field]); the value in AWS is never fetched. ' +
       'Defaults to sandbox; pass env="production" only when the user explicitly says production. App-admin or AppCrane admin only.',
     inputSchema: {
       type: 'object',
@@ -1139,9 +1141,10 @@ const TOOLS = [
         let plain = null;
         try { plain = decrypt(r.value_encrypted); } catch (_) { /* below */ }
         if (plain == null) return { key: r.key, is_set: true, error: 'decrypt_failed', updated_at: r.updated_at };
+        const ref = isSecretRef(plain) ? { value: plain, source: REF_SOURCE } : {};
         // An app admin who may not reveal production sees neither its length nor its tail.
-        if (!canReveal) return { key: r.key, is_set: true, preview: opaquePreview(plain), updated_at: r.updated_at };
-        return { key: r.key, is_set: true, length: plain.length, preview: secretPreview(plain), fingerprint: secretFingerprint(plain), updated_at: r.updated_at };
+        if (!canReveal) return { key: r.key, is_set: true, ...ref, preview: opaquePreview(plain), updated_at: r.updated_at };
+        return { key: r.key, is_set: true, ...ref, length: plain.length, preview: secretPreview(plain), fingerprint: secretFingerprint(plain), updated_at: r.updated_at };
       });
       log.info(`MCP: env metadata (masked) read for ${app.slug}/${env} by user ${user.id}`);
       return {
@@ -1157,7 +1160,7 @@ const TOOLS = [
       'Reveal the PLAINTEXT of ONE secret by key. Use ONLY when the user explicitly needs the actual value — it will appear in this ' +
       'conversation transcript, so treat the transcript as sensitive afterward (and consider rotating the secret if the transcript may be stored/shared). ' +
       'For checking whether a var is set, comparing values, or seeing what exists, use appcrane_get_secret (masked) instead — do NOT reveal just to inspect config. ' +
-      'Single key only — it never dumps the whole env. Every reveal is audit-logged. Defaults to sandbox; env="production" only when the user explicitly asks. App admins can reveal sandbox values; a PRODUCTION value needs the app owner or a platform admin.',
+      'Single key only — it never dumps the whole env. Every reveal is audit-logged. For a Secrets Manager reference this returns the reference text with source="secrets_manager" and never fetches the value from AWS. Defaults to sandbox; env="production" only when the user explicitly asks. App admins can reveal sandbox values; a PRODUCTION value needs the app owner or a platform admin.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1197,7 +1200,7 @@ const TOOLS = [
         logAudit(user.id, app.id, 'secret-reveal', { env, key: args.key });
       } catch (_) { /* audit is best-effort */ }
       log.warn(`MCP: SECRET REVEAL ${app.slug}/${env}/${args.key} by user ${user.id}`);
-      return { app: app.slug, env, key: args.key, value, updated_at: row.updated_at };
+      return { app: app.slug, env, key: args.key, value, ...(isSecretRef(value) && { source: REF_SOURCE }), updated_at: row.updated_at };
     },
   },
 
@@ -2311,13 +2314,19 @@ const TOOLS = [
       normalizeIntake(args.intake || {});
       if (!name || !slug) throw new Error('name and slug are required');
       { const slugProblem = slugRefusal(slug, user); if (slugProblem) throw new Error(slugProblem); }
-      if (args.branch && !/^[A-Za-z0-9._/\-]{1,200}$/.test(args.branch)) {
-        throw new Error('branch must be alphanumeric with . _ / - (max 200 chars)');
+      if (args.branch && !/^(?!-)[A-Za-z0-9._/\-]{1,200}$/.test(args.branch)) {
+        throw new Error('branch must be alphanumeric with . _ / - (max 200 chars), not starting with -');
       }
       // image_ref alone is enough to mean 'image'. An agent that passes the
       // reference but forgets the discriminator would otherwise create a github
       // app carrying an image reference nothing reads.
       const sourceType = args.source_type || (args.image_ref ? 'image' : 'github');
+      // The schema's enum leaves 'managed' out, but nothing enforces it at call
+      // time. A managed app with any github_url clones with the platform's
+      // service-account token, and this tool is open to platform.create_app.
+      if (sourceType === 'managed' && !isAdmin(user)) {
+        throw new Error("source_type='managed' with a chosen github_url is limited to platform admins; use appcrane_create_managed_app");
+      }
       const image = await validateImageFields(args);
       if (sourceType === 'image') {
         if (!image.image_ref) throw new Error("source_type='image' requires image_ref");
@@ -2498,8 +2507,8 @@ const TOOLS = [
         updates.github_url = args.github_url || null;
       }
       if (args.branch !== undefined) {
-        if (args.branch && !/^[A-Za-z0-9._/\-]{1,200}$/.test(args.branch)) {
-          throw new Error('branch must be alphanumeric with . _ / - (max 200 chars)');
+        if (args.branch && !/^(?!-)[A-Za-z0-9._/\-]{1,200}$/.test(args.branch)) {
+          throw new Error('branch must be alphanumeric with . _ / - (max 200 chars), not starting with -');
         }
         updates.branch = args.branch || null;
       }
@@ -3765,8 +3774,8 @@ const TOOLS = [
       const { submitIntake, normalizeIntake } = await import('./appIntake.js');
       normalizeIntake(args.intake || {});
       { const slugProblem = slugRefusal(slug, user); if (slugProblem) throw new Error(slugProblem); }
-      if (args.branch && !/^[A-Za-z0-9._/\-]{1,200}$/.test(args.branch)) {
-        throw new Error('branch must be alphanumeric with . _ / - (max 200 chars)');
+      if (args.branch && !/^(?!-)[A-Za-z0-9._/\-]{1,200}$/.test(args.branch)) {
+        throw new Error('branch must be alphanumeric with . _ / - (max 200 chars), not starting with -');
       }
 
       const db = getDb();
@@ -4298,6 +4307,8 @@ const TOOLS = [
     name: 'appcrane_set_secret',
     description:
       'Set or update a secret (an encrypted environment variable injected into the app). Encrypted at rest; only the running app process can read the plaintext. ' +
+      'With store="secrets_manager" (needs a secrets provider on this AppCrane) the value goes to AWS Secrets Manager under this app and env\'s own path, and AppCrane keeps only the reference secretsmanager:<KEY>; do not call it more than once every 10 minutes per key. ' +
+      'You can also set a reference directly as the value: secretsmanager:<NAME> or secretsmanager:<NAME>#<jsonField>, where NAME holds only letters, digits, _ and - and always resolves under this app and env, never an ARN or a path. A reference is resolved at every deploy and restart, and one that cannot be read fails that deploy or restart. Removing the env var, or the app, does not delete the AWS secret. ' +
       'Defaults to sandbox; require explicit stage="production" only when the user asks. ' +
       'App-admin or AppCrane admin only. Respects the caller\'s mcp_app_scope.',
     inputSchema: {
@@ -4307,6 +4318,7 @@ const TOOLS = [
         env:   { type: 'string', enum: ['sandbox', 'production'], default: 'sandbox' },
         key:   { type: 'string', description: 'Env var name. Letters, digits, underscores; must not start with a digit.' },
         value: { type: 'string', description: 'The value to store (will be encrypted server-side).' },
+        store: { type: 'string', enum: ['secrets_manager'], description: 'Keep the value in AWS Secrets Manager instead of AppCrane\'s database. Omit for an ordinary encrypted env var.' },
       },
       required: ['slug', 'key', 'value'],
       additionalProperties: false,
@@ -4325,8 +4337,18 @@ const TOOLS = [
       if (!/^[A-Z_][A-Z0-9_]*$/i.test(args.key)) {
         throw new Error(`Invalid env var key: ${args.key} (must match /^[A-Z_][A-Z0-9_]*$/i)`);
       }
+      if (args.store !== undefined && args.store !== REF_SOURCE) throw new Error(`store must be "${REF_SOURCE}"`);
+      let stored = null;
+      if (args.store) {
+        assertStoreRequest(env, { [args.key]: args.value });
+        const { stored: done, failed } = await storeAppSecrets(app, env, { [args.key]: args.value });
+        if (failed) throw new Error(`${failed.key}: ${failed.reason}.`);
+        [stored] = done;
+      } else {
+        assertStorableValue(String(args.value));
+      }
       const db = getDb();
-      const encrypted = encrypt(String(args.value));
+      const encrypted = encrypt(stored ? stored.reference : String(args.value));
       db.prepare(`
         INSERT INTO env_vars (app_id, env, key, value_encrypted, updated_by, updated_at)
         VALUES (?, ?, ?, ?, ?, datetime('now'))
@@ -4336,7 +4358,7 @@ const TOOLS = [
           updated_at = excluded.updated_at
       `).run(app.id, env, args.key, encrypted, user.id);
       log.info(`MCP: env var ${args.key} set on ${app.slug}/${env} by user ${user.id}`);
-      return { app: app.slug, env, key: args.key, ok: true };
+      return { app: app.slug, env, key: args.key, ok: true, ...(stored && { source: REF_SOURCE, reference: stored.reference, aws_secret: stored.name }) };
     },
   },
 

@@ -7,6 +7,7 @@ import { lookupAccessToken } from '../services/oauthStore.js';
 import { ACCESS_PREFIX, canonicalResource, mcpResourceOf } from '../services/oauthPolicy.js';
 import { auditExpiredUse, expiredMessage, expireUserKey, isPast } from '../services/apiKeyExpiry.js';
 import { touchSession } from '../services/sessionPolicy.js';
+import { userKeyIngressError } from '../utils/ingress.js';
 
 /**
  * Authentication middleware. Accepts either:
@@ -147,6 +148,10 @@ export function requireAuth(req, res, next) {
       auditExpiredUse(user.id, 'user', user.id, user.api_key_expires_at, req.ip);
       return next(new AppError(expiredMessage(user.api_key_expires_at), 401, 'API_KEY_EXPIRED'));
     }
+    // APPCRANE_PRIVATE_API_PORT: a personal key is refused on the public port
+    // (utils/ingress.js). Ahead of the last-used stamp: a refusal is not a use.
+    const ingressErr = userKeyIngressError(req, user.id, req.baseUrl === '/git' ? 'git' : 'rest');
+    if (ingressErr) return next(ingressErr);
     try {
       db.prepare("UPDATE users SET api_key_last_used_at = datetime('now') WHERE id = ? AND (api_key_last_used_at IS NULL OR api_key_last_used_at < datetime('now', '-1 hour'))").run(user.id);
     } catch (_) {}

@@ -13,6 +13,7 @@ import { userHasAppPermission } from '../services/permissions.js';
 import { cleanDoneNote, writeDoneNote, NoteError } from '../services/requestDoneNote.js';
 import { notifyRequesterFulfilled } from '../services/requestNotify.js';
 import { insertRequest, announceRequest } from '../services/requestCreate.js';
+import { assertUserKeyIngress } from '../utils/ingress.js';
 
 const router = Router();
 
@@ -69,6 +70,7 @@ router.post('/', (req, res) => {
     const db2 = getDb();
     const user = db2.prepare('SELECT * FROM users WHERE api_key_hash = ?').get(hashApiKey(apiKey));
     if (!user) throw new AppError('Invalid API key', 401, 'UNAUTHORIZED');
+    assertUserKeyIngress(req, user.id, 'enhancements');
     userId = user.id;
     userName = user.name;
     userRole = user.role;
@@ -414,6 +416,7 @@ router.post('/:id/delete', (req, res) => {
     const db2 = getDb();
     const user = db2.prepare('SELECT * FROM users WHERE api_key_hash = ?').get(hashApiKey(apiKey));
     if (!user) throw new AppError('Invalid API key', 401, 'UNAUTHORIZED');
+    assertUserKeyIngress(req, user.id, 'enhancements');
     userId = user.id;
     userRole = user.role;
   }
@@ -499,7 +502,10 @@ function resolveAuthOrThrow(req) {
   if (apiKey) {
     const db = getDb();
     const user = db.prepare('SELECT * FROM users WHERE api_key_hash = ?').get(hashApiKey(apiKey));
-    if (user) return { userId: user.id, userName: user.name, role: user.role };
+    if (user) {
+      assertUserKeyIngress(req, user.id, 'enhancements');
+      return { userId: user.id, userName: user.name, role: user.role };
+    }
   }
   throw new AppError('Authentication required', 401, 'UNAUTHORIZED');
 }

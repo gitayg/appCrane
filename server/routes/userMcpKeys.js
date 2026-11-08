@@ -7,6 +7,7 @@ import { AppError } from '../utils/errors.js';
 import { isAdmin } from '../utils/roles.js';
 import log from '../utils/logger.js';
 import { maxAgeDays } from '../services/apiKeyExpiry.js';
+import { issueOnboardingKey } from '../services/onboardingMcpKey.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -70,7 +71,7 @@ function storedExpiry(db, id) {
 router.get('/me/mcp-keys', requireSession, (req, res) => {
   const db = getDb();
   const keys = db.prepare(`
-    SELECT id, label, created_at, issued_at, last_used_at, expires_at, revoked_at, read_only
+    SELECT id, label, purpose, created_at, issued_at, last_used_at, expires_at, revoked_at, read_only
     FROM user_mcp_keys
     WHERE user_id = ? AND coder_session_id IS NULL
     ORDER BY id DESC
@@ -87,7 +88,30 @@ router.get('/me/mcp-keys', requireSession, (req, res) => {
  * POST /api/me/mcp-keys — issue a new key. Plaintext returned ONCE.
  */
 router.post('/me/mcp-keys', requireSession, auditMiddleware('user-mcp-key-create'), (req, res) => {
-  const { label, expires_at } = req.body || {};
+  const { label, expires_at, purpose } = req.body || {};
+  if (purpose != null && purpose !== 'onboarding') {
+    throw new AppError("purpose must be 'onboarding' or omitted", 400, 'VALIDATION');
+  }
+  if (purpose === 'onboarding') {
+    // The Applications page's onboarding button. The label and the expiry are
+    // the server's; the caller's earlier onboarding keys that were never used
+    // are revoked in the same transaction (services/onboardingMcpKey.js).
+    const readOnly = parseReadOnly(req.body);
+    const db = getDb();
+    const out = issueOnboardingKey(db, req.user.id, { readOnly });
+    log.info(`UserMcpKey: onboarding key id=${out.id} user=${req.user.id} replaced=${out.revokedIds.length}`);
+    return res.json({
+      key: {
+        id: out.id, label: out.label, purpose: 'onboarding',
+        expires_at: storedExpiry(db, out.id), read_only: readOnly,
+      },
+      api_key: out.apiKey,
+      revoked_previous: out.revokedIds.length,
+      warning: 'Save this API key — it will not be shown again.',
+      accessible_app_count: accessibleAppCount(req.user),
+      is_admin: isAdmin(req.user),
+    });
+  }
   if (label && typeof label !== 'string') throw new AppError('label must be a string', 400, 'VALIDATION');
   if (label && label.length > 80) throw new AppError('label must be ≤ 80 chars', 400, 'VALIDATION');
   if (expires_at && Number.isNaN(Date.parse(expires_at))) {

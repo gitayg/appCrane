@@ -38,7 +38,7 @@ test('editing opens an empty field and saves without revealing the old value', (
   const saveFn = panel.slice(panel.indexOf('async function save('), panel.indexOf('async function remove('));
   assert.ok(saveFn.length > 0);
   assert.doesNotMatch(saveFn, /revealEnvVar/, 'saving an edit reveals the old value first');
-  assert.match(saveFn, /setEnvVar\(slug, env, key, value\)/);
+  assert.match(saveFn, /setEnvVar\(slug, env, key, value, store\)/);
 });
 
 test('the env row shows the value through the eye, not a Reveal button', () => {

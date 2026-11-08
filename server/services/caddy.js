@@ -8,6 +8,7 @@ import { parseBypassPaths } from '../utils/authBypassPaths.js';
 import { isValidDomainFormat } from '../utils/customDomain.js';
 import { platformEmbedAncestors, mergeAncestors } from '../utils/embed.js';
 import { safeFrameAncestors } from '../utils/frameAncestors.js';
+import { INGRESS_HEADER, privateApiPort } from '../utils/ingress.js';
 import {
   isolationDomain, isolationTls, appHost, RESERVED_APP_PATH,
   APP_SESSION_COOKIE, HANDOFF_STATE_COOKIE, PLATFORM_SESSION_COOKIE_ISOLATED, PLATFORM_SESSION_COOKIE_LEGACY,
@@ -184,6 +185,43 @@ const CRANE_ENCODE =
     .map(t => `                header Content-Type ${t}\n`).join('') +
   `            }\n` +
   `        }\n`;
+
+/**
+ * APPCRANE_PRIVATE_API_PORT (utils/ingress.js): every request Caddy proxies to
+ * AppCrane carries X-AppCrane-Ingress, 'public' from every public site and
+ * 'private' from the private-port site, so AppCrane can refuse personal user
+ * keys that did not come through the private port. `header_up <field> <value>`
+ * SETS the field, so a value the client sent never survives. forward_auth is a
+ * reverse_proxy and takes the same subdirective. `ingress` null (setting unset)
+ * emits exactly what the generator emitted before the setting existed.
+ */
+function ingressHeaderUp(indent, ingress) {
+  return ingress ? `${indent}header_up ${INGRESS_HEADER} ${ingress}\n` : '';
+}
+function craneProxy(indent, cranePort, ingress) {
+  if (!ingress) return `${indent}reverse_proxy 127.0.0.1:${cranePort}\n`;
+  return `${indent}reverse_proxy 127.0.0.1:${cranePort} {\n` +
+         ingressHeaderUp(`${indent}    `, ingress) +
+         `${indent}}\n`;
+}
+
+/** The private-port site: the platform host on another port, AppCrane only. */
+function privateSite(o) {
+  const { craneDomain, port, cranePort, tlsLine, refuseBrotli } = o;
+  let s = `\n${craneDomain}:${port} {\n`;
+  if (tlsLine) s += tlsLine;
+  s += BASELINE_HEADERS + '\n';
+  if (refuseBrotli) s += refuseBrotli + '\n';
+  s += `    handle /api/service* {\n`;
+  s += `        respond 404\n`;
+  s += `    }\n\n`;
+  s += `    handle {\n`;
+  s += CRANE_ENCODE;
+  s += craneProxy('        ', cranePort, 'private');
+  s += `    }\n`;
+  s += `}\n`;
+  return s;
+}
 
 /**
  * Access log for the crane domain, with every query-string value redacted.
@@ -488,7 +526,7 @@ function redirOrLegacy(app, mount, port, bypassPaths, host, live = true) {
  *     original URI in X-Forwarded-Uri and the handoff returns there.
  */
 function isolatedSiteBody(o) {
-  const { cranePort, port, verifyUri, prefix, isHeadless, fa } = o;
+  const { cranePort, port, verifyUri, prefix, isHeadless, fa, ingress } = o;
   // A bypass entry under /__appcrane would out-rank the AppCrane route below
   // (longer path wins) and hand the sign-in landing to the app.
   const reserved = RESERVED_APP_PATH.toLowerCase();
@@ -504,7 +542,7 @@ function isolatedSiteBody(o) {
 
   for (const p of [`${RESERVED_APP_PATH}/*`, '/api/me', '/api/directory']) {
     s += `    handle ${p} {\n`;
-    s += `        reverse_proxy 127.0.0.1:${cranePort}\n`;
+    s += craneProxy('        ', cranePort, ingress);
     s += `    }\n\n`;
   }
 
@@ -544,6 +582,7 @@ function isolatedSiteBody(o) {
     s += `            forward_auth 127.0.0.1:${cranePort} {\n`;
     s += `                uri ${verifyUri}\n`;
     s += `                copy_headers ${IDENTITY_HEADERS.join(' ')}\n`;
+    s += ingressHeaderUp('                ', ingress);
     s += `            }\n`;
     s += isolatedCookieStrip('            ');
     if (compat) s += `            ${compat}`;
@@ -560,7 +599,7 @@ function isolatedSiteBody(o) {
     s += `        @appdown expression \`{err.status_code} in [502, 503, 504]\`\n`;
     s += `        handle @appdown {\n`;
     s += `            rewrite * /api/_crashed${prefix}{uri}\n`;
-    s += `            reverse_proxy 127.0.0.1:${cranePort}\n`;
+    s += craneProxy('            ', cranePort, ingress);
     s += `        }\n`;
     s += `    }\n`;
   }
@@ -676,6 +715,10 @@ export function generateCaddyfile() {
     caddyfile += '# CRANE_DOMAIN not configured — no routing generated\n';
     return withGlobals(caddyfile);
   }
+
+  // APPCRANE_PRIVATE_API_PORT set: stamp every proxy to AppCrane below.
+  const privatePort = privateApiPort();
+  const ingress = privatePort ? 'public' : null;
 
   caddyfile += `${craneDomain} {\n`;
   if (manualTls) {
@@ -831,6 +874,7 @@ export function generateCaddyfile() {
       `            forward_auth 127.0.0.1:${cranePort} {\n` +
       `                uri ${verifyUri}\n` +
       `                copy_headers ${IDENTITY_HEADERS.join(' ')}\n` +
+      ingressHeaderUp('                ', ingress) +
       `            }\n` +
       platformCookieStrip('            ') +
       `        }\n`;
@@ -987,15 +1031,15 @@ export function generateCaddyfile() {
   // longer than any such prefix, so it wins. reverse_proxy flushes
   // text/event-stream responses immediately, which the A2A SSE stream needs.
   caddyfile += `    handle /a2a* {\n`;
-  caddyfile += `        reverse_proxy 127.0.0.1:${cranePort}\n`;
+  caddyfile += craneProxy('        ', cranePort, ingress);
   caddyfile += `    }\n\n`;
   // git clone/fetch (routes/gitHttp.js), named for the same reason: an app
   // left over as `g`, `gi` or `git` would otherwise receive every clone's API key.
   caddyfile += `    handle /git/* {\n`;
-  caddyfile += `        reverse_proxy 127.0.0.1:${cranePort}\n`;
+  caddyfile += craneProxy('        ', cranePort, ingress);
   caddyfile += `    }\n\n`;
   caddyfile += `    handle /.well-known/agent-card.json {\n`;
-  caddyfile += `        reverse_proxy 127.0.0.1:${cranePort}\n`;
+  caddyfile += craneProxy('        ', cranePort, ingress);
   caddyfile += `    }\n\n`;
   // MCP OAuth (routes/oauth.js), named for the same reason as /git/*: a legacy
   // app `o`, `oa`, `oau` or `oauth` would otherwise receive every client's
@@ -1003,16 +1047,16 @@ export function generateCaddyfile() {
   // cannot be shadowed by a slug (none starts with '.'), but they are what an
   // MCP client trusts to find the token endpoint, so they are pinned too.
   caddyfile += `    handle /oauth/* {\n`;
-  caddyfile += `        reverse_proxy 127.0.0.1:${cranePort}\n`;
+  caddyfile += craneProxy('        ', cranePort, ingress);
   caddyfile += `    }\n\n`;
   caddyfile += `    handle /.well-known/oauth-* {\n`;
-  caddyfile += `        reverse_proxy 127.0.0.1:${cranePort}\n`;
+  caddyfile += craneProxy('        ', cranePort, ingress);
   caddyfile += `    }\n\n`;
 
   // Everything else → AppCrane itself
   caddyfile += `    handle {\n`;
   caddyfile += CRANE_ENCODE;
-  caddyfile += `        reverse_proxy 127.0.0.1:${cranePort}\n`;
+  caddyfile += craneProxy('        ', cranePort, ingress);
   caddyfile += `    }\n\n`;
 
   // Friendly crash page when a proxied app is down (container exited, port
@@ -1024,10 +1068,22 @@ export function generateCaddyfile() {
   caddyfile += `        @appdown expression \`{err.status_code} in [502, 503, 504]\`\n`;
   caddyfile += `        handle @appdown {\n`;
   caddyfile += `            rewrite * /api/_crashed{uri}\n`;
-  caddyfile += `            reverse_proxy 127.0.0.1:${cranePort}\n`;
+  caddyfile += craneProxy('            ', cranePort, ingress);
   caddyfile += `        }\n`;
   caddyfile += `    }\n`;
   caddyfile += `}\n`;
+
+  // ── Private API port (APPCRANE_PRIVATE_API_PORT) ─────────────────────────
+  // The same host on another port, same certificate (Caddy keys certificates by
+  // name, so automatic HTTPS reuses the one it holds for the platform host), to
+  // AppCrane only: personal user keys work here and nowhere else. The operator
+  // opens this port to the SDP/VPN only.
+  if (privatePort) {
+    caddyfile += privateSite({
+      craneDomain, port: privatePort, cranePort, refuseBrotli,
+      tlsLine: manualTls ? `    tls ${certFile} ${keyFile}\n\n` : '',
+    });
+  }
 
   // ── Per-app hosts (isolation on) ─────────────────────────────────────────
   // One site per live app environment, at the root of its own host. The rules
@@ -1052,7 +1108,7 @@ export function generateCaddyfile() {
         caddyfile += `\n${appHost(db, app.slug, env)} {\n`;
         caddyfile += tlsLine;
         caddyfile += isolatedSiteBody({
-          cranePort, port, prefix, fa, refuseBrotli,
+          cranePort, port, prefix, fa, refuseBrotli, ingress,
           verifyUri: `/api/identity/verify?app=${app.slug}&env=${env}&host=isolated`,
           isHeadless: app.auth_mode === 'headless',
           bypassPaths: bypassByApp.get(app.id),
@@ -1113,7 +1169,7 @@ export function generateCaddyfile() {
     // without isolation. A headless app has no sign-in to apply.
     if (app.custom_domain_auth && app.auth_mode !== 'headless') {
       caddyfile += isolatedSiteBody({
-        cranePort, refuseBrotli,
+        cranePort, refuseBrotli, ingress,
         port: ports.prod_be,
         prefix: null,
         fa: null,

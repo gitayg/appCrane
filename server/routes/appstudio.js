@@ -7,6 +7,9 @@ import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { auditMiddleware } from '../middleware/audit.js';
 import { AppError } from '../utils/errors.js';
 import { agentCredentialKind, NO_CREDENTIAL_MESSAGE } from '../services/llm/runAgent.js';
+import { isAppOwnerOrPlatformAdmin } from '../services/permissions.js';
+import { providerConfig, platformKeyLoaded } from '../services/secretsProvider/index.js';
+import { saveKeyToProvider } from '../services/secretsProvider/saveKey.js';
 import log from '../utils/logger.js';
 
 /**
@@ -155,6 +158,15 @@ router.post('/:id/plan-feedback', auditMiddleware('appstudio.plan-feedback'), (r
   const enh = db.prepare('SELECT * FROM enhancement_requests WHERE id = ?').get(req.params.id);
   if (!enh) throw new AppError('Enhancement not found', 404, 'NOT_FOUND');
   ensureAppAccessForEnh(req, enh); // v1.27.34 H8
+  // The comment goes into a planner container that holds the platform API key or
+  // the app's Claude login, with permissions off, so writing it means being able
+  // to read them. Same boundary as Ask and the coder.
+  if (req.user?.role !== 'platform_admin') {
+    const planApp = db.prepare('SELECT * FROM apps WHERE slug = ?').get(enh.app_slug);
+    if (!isAppOwnerOrPlatformAdmin(req.user, planApp)) {
+      throw new AppError('Only the app owner or a platform admin can send plan feedback', 403, 'FORBIDDEN');
+    }
+  }
 
   const isAdmin = req.user?.role === 'platform_admin';
   const existing = isAdmin ? (enh.admin_comments || '') : (enh.user_comments || '');
@@ -392,6 +404,9 @@ function writeEnvKey(key, value) {
 router.get('/anthropic-key', requireAdmin, (req, res) => {
   const configured = !!process.env.ANTHROPIC_API_KEY;
   if (!configured) return res.json({ configured: false, source: null });
+  if (platformKeyLoaded('ANTHROPIC_API_KEY')) {
+    return res.json({ configured: true, source: 'secrets-manager', suffix: process.env.ANTHROPIC_API_KEY.slice(-4) });
+  }
   const inFile = existsSync(envFilePath) &&
     readFileSync(envFilePath, 'utf8').split('\n').some(l => l.trim().startsWith('ANTHROPIC_API_KEY='));
   // No SDK liveness probe — the CLI (used for every real workload) gets
@@ -407,7 +422,16 @@ router.put('/anthropic-key', requireAdmin, auditMiddleware('appstudio.set-anthro
     throw new AppError('key is required', 400, 'VALIDATION');
   }
   const trimmed = key.trim();
-  writeEnvKey('ANTHROPIC_API_KEY', trimmed);
+  if (providerConfig()?.secretId) {
+    try {
+      await saveKeyToProvider('ANTHROPIC_API_KEY', trimmed, { envPath: envFilePath });
+    } catch (e) {
+      log.error(`Anthropic API key not saved: ${e.message}`);
+      throw new AppError(`The key was not saved: ${e.message}`, 502, 'SECRETS_PROVIDER');
+    }
+  } else {
+    writeEnvKey('ANTHROPIC_API_KEY', trimmed);
+  }
   process.env.ANTHROPIC_API_KEY = trimmed;
   // No SDK client to invalidate. v2.49.3 removed appAnalyzer.js — the last
   // @anthropic-ai/sdk consumer, whose only function had no callers — so nothing

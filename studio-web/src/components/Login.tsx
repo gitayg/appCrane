@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useAuth } from '../hooks/useAuth'
 import { isSafeRedirect } from '../utils/safeRedirect'
+import { redeemSsoCode } from '../utils/ssoHandoff'
 import { PasswordInput } from './secret/PasswordInput'
 import {
   POPUP_FEATURES, POPUP_NAME, browserWaitDeps, isFramed, popupStartUrl,
@@ -27,8 +28,10 @@ import { takeSignedOutMessage } from './mfa/idle'
  *
  * SSO callback handling absorbed from docs/login.html so the OIDC and
  * SAML flows still work without the legacy HTML page in the loop:
- *   - ?oidc_token=… (also used by SAML callbacks) → store + clean URL
- *     + go to ?redirect= or /applications
+ *   - ?sso_code=… (also used by SAML callbacks) → clean URL, exchange it for
+ *     the session token (utils/ssoHandoff.ts) + go to ?redirect= or /applications
+ *   - ?oidc_token=… → removed, never stored: a session from a URL is how a
+ *     victim got signed in as an attacker
  *   - ?sso_error=… / ?saml_error=… → render inline
  *   - ?redirect=… → preserved and used after successful password login
  *
@@ -56,7 +59,7 @@ export function Login() {
   // /api/auth/oidc/config and /api/auth/saml/config, shown only when the
   // provider is enabled. Clicking goes through /api/auth/{oidc,saml}/start
   // which redirects to the IdP; the IdP comes back to /login (now
-  // forwarded to /applications) with ?oidc_token=… that the useEffect
+  // forwarded to /applications) with ?sso_code=… that the useEffect
   // above absorbs.
   const [oidc, setOidc] = useState<SsoCfg>({})
   const [saml, setSaml] = useState<SsoCfg>({})
@@ -135,9 +138,9 @@ export function Login() {
     listenForPopup()
   }
 
-  // Read SSO callback / redirect query params on mount. Both providers
-  // hand the bearer back via ?oidc_token=…; we store it as cc_identity_token
-  // (same key the unified login uses) and forward to the redirect target.
+  // Read SSO callback / redirect query params on mount. Both providers send
+  // ?sso_code=…, which we exchange for the bearer and store as cc_identity_token
+  // (same key the unified login uses), then forward to the redirect target.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
     const ssoErr = params.get('sso_error') || params.get('saml_error')
@@ -149,18 +152,19 @@ export function Login() {
       window.history.replaceState({}, '', url.toString())
       return
     }
-    const oidcToken = params.get('oidc_token')
-    if (oidcToken) {
-      localStorage.setItem('cc_identity_token', oidcToken)
+    const ssoCode = params.get('sso_code')
+    if (ssoCode || params.has('oidc_token')) {
       // cc_token cookie was already set httpOnly by the SSO callback redirect.
       //
-      // Scrub the token from the address bar BEFORE navigating anywhere.
+      // Scrub these from the address bar BEFORE navigating anywhere. The code is
+      // useless to anyone else, and a stale token is never read, but neither
+      // belongs in a Referer.
       // Referrer-Policy is strict-origin-when-cross-origin, so a SAME-ORIGIN
       // hop sends the FULL current URL as Referer — and tenant apps are served
-      // same-origin at /<slug>. Following a deep link with ?oidc_token= still
-      // in the URL hands that app's container a live platform session token in
-      // its access logs, which an attacker can harvest by deploying an app and
-      // sending victims /login?redirect=/theirapp/.
+      // same-origin at /<slug>. Following a deep link with a credential still
+      // in the URL hands it to that app's container in its access logs, which an
+      // attacker can harvest by deploying an app and sending victims
+      // /login?redirect=/theirapp/.
       //
       // This was unreachable until v2.38.0: the SSO callbacks only ever
       // forwarded absolute `http…` values, which isSafeRedirect rejects, so the
@@ -168,16 +172,24 @@ export function Login() {
       // the other branch live, so the scrub has to precede both.
       const url = new URL(window.location.href)
       url.searchParams.delete('oidc_token')
+      url.searchParams.delete('sso_code')
       window.history.replaceState({}, '', url.pathname + url.search + url.hash)
+      if (!ssoCode) return
 
-      const redirect = params.get('redirect')
-      // v2.35.0: `//attacker.com` passes startsWith('/') — see safeRedirect.ts.
-      if (isSafeRedirect(redirect)) {
-        window.location.replace(redirect as string)
-      } else {
-        url.searchParams.delete('redirect')
-        window.location.replace(url.pathname + url.search + url.hash)
-      }
+      redeemSsoCode(ssoCode, { fetch: (u, init) => fetch(u, init), store: localStorage }).then(ok => {
+        if (!ok) {
+          setError('SSO failed: this sign-in link is not valid in this browser. Sign in again.')
+          return
+        }
+        const redirect = params.get('redirect')
+        // v2.35.0: `//attacker.com` passes startsWith('/') — see safeRedirect.ts.
+        if (isSafeRedirect(redirect)) {
+          window.location.replace(redirect as string)
+        } else {
+          url.searchParams.delete('redirect')
+          window.location.replace(url.pathname + url.search + url.hash)
+        }
+      })
     }
   }, [])
 

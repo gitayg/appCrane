@@ -52,11 +52,16 @@ for that app.
 **Ownership follows the connecting key's identity.** Whichever identity the
 MCP key resolves to becomes the app's owner at creation. Onboard with a
 **personal** MCP key (the "+ Add Application" button issues one for the
-logged-in user) — NOT a shared platform-admin key. If a shared admin key
+logged-in user, labelled "App onboarding, <date>", valid 30 days; each click
+revokes that user's earlier onboarding keys that were never used) — NOT a shared platform-admin key. If a shared admin key
 creates the app, the admin identity owns it and the human's personal key
 (scope-restricted to apps they own) won't see it. If that already happened,
 a platform admin can fix it at Settings → Users → the app's Users modal by
 setting the human's per-app role to **Owner**.
+
+People no longer get a personal REST API key (`dhk_user_*`) when they sign in or are
+provisioned. A user creates one at **Settings → Account** only when they need it; an MCP
+key or an OAuth sign-in covers agent work without one.
 
 ## Inputs to gather from the user (first turn, all at once)
 

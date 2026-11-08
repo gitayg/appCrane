@@ -5,6 +5,7 @@ import { mkdtempSync, rmSync, readFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import http from 'http';
+import { inflateRawSync } from 'zlib';
 import net from 'net';
 import vm from 'vm';
 import crypto from 'crypto';
@@ -46,10 +47,14 @@ const RAW_IDP_TEXT = '<img src=x onerror=alert(1)>RAW-IDP-TEXT-7f3a';
 // existing account is linked by e-mail only when the IdP verified it.
 const idpBehaviour = { tokenFails: false, user: { sub: 'alice-sub', email: 'alice@example.com', email_verified: true, name: 'Alice Example' } };
 
+// What /start handed "the browser": sent back on the callback, as a browser would,
+// and echoed by the IdP. Handing a callback to another browser is test/fix-auth-sso-csrf.test.js.
+const flow = { oidcCookie: '', nonce: undefined, samlCookie: '', samlRequestId: undefined };
+
 function idToken(issuer) {
   const enc = (o) => Buffer.from(JSON.stringify(o)).toString('base64url');
   const h = enc({ alg: 'RS256', kid: 'k1', typ: 'JWT' });
-  const p = enc({ iss: issuer, aud: CLIENT_ID, ...idpBehaviour.user, exp: Math.floor(Date.now() / 1000) + 300 });
+  const p = enc({ iss: issuer, aud: CLIENT_ID, ...idpBehaviour.user, nonce: flow.nonce, exp: Math.floor(Date.now() / 1000) + 300 });
   return `${h}.${p}.${crypto.sign('sha256', Buffer.from(`${h}.${p}`), oidcKey).toString('base64url')}`;
 }
 
@@ -96,7 +101,7 @@ function samlResponse() {
   const iso = (ms) => new Date(now.getTime() + ms).toISOString();
   const acs = `${BASE_URL}/api/auth/saml/callback`;
   const id = crypto.randomBytes(8).toString('hex');
-  const xml = `<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="_r${id}" Version="2.0" IssueInstant="${iso(0)}" Destination="${acs}">`
+  const xml = `<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="_r${id}" Version="2.0" IssueInstant="${iso(0)}" Destination="${acs}" InResponseTo="${flow.samlRequestId}">`
     + '<saml:Issuer>http://idp.example.com</saml:Issuer>'
     + '<samlp:Status><samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/></samlp:Status>'
     + `<saml:Assertion ID="_a${id}" Version="2.0" IssueInstant="${iso(0)}">`
@@ -168,9 +173,11 @@ async function oidcStart(query) {
   const r = await noFollow(`${base}/api/auth/oidc/start?${new URLSearchParams(query)}`);
   assert.equal(r.status, 302, `oidc start did not redirect: ${r.status}`);
   const loc = new URL(r.headers.get('location'));
+  flow.oidcCookie = r.headers.getSetCookie().map((c) => c.split(';')[0]).join('; ');
+  flow.nonce = loc.searchParams.get('nonce');
   return { loc, state: loc.searchParams.get('state') };
 }
-const oidcCallback = (state, extra = {}) => noFollow(`${base}/api/auth/oidc/callback?${new URLSearchParams({ code: 'c1', state, ...extra })}`);
+const oidcCallback = (state, extra = {}) => noFollow(`${base}/api/auth/oidc/callback?${new URLSearchParams({ code: 'c1', state, ...extra })}`, { headers: { Cookie: flow.oidcCookie } });
 
 async function assertPopupComplete(r, label) {
   assert.equal(r.status, 200, `${label}: expected the completion page, got ${r.status} ${r.headers.get('location')}`);
@@ -224,7 +231,8 @@ test('oidc normal callback still forwards through /login with the deep link', as
   assert.equal(r.status, 302);
   const loc = new URL(r.headers.get('location'));
   assert.equal(loc.pathname, '/login');
-  assert.ok(loc.searchParams.get('oidc_token'));
+  assert.ok(loc.searchParams.get('sso_code'));
+  assert.equal(loc.searchParams.get('oidc_token'), null);
   assert.equal(loc.searchParams.get('redirect'), '/product-roadmap-v2');
   assert.ok(ccToken(r));
 });
@@ -262,11 +270,14 @@ test('oidc popup: an unsafe redirect is dropped from state and never reaches the
 async function samlStart(query) {
   const r = await noFollow(`${base}/api/auth/saml/start?${new URLSearchParams(query)}`);
   assert.equal(r.status, 302, `saml start did not redirect: ${r.status}`);
-  return new URL(r.headers.get('location')).searchParams.get('RelayState');
+  const loc = new URL(r.headers.get('location'));
+  flow.samlCookie = r.headers.getSetCookie().map((c) => c.split(';')[0]).join('; ');
+  flow.samlRequestId = / ID="([^"]+)"/.exec(inflateRawSync(Buffer.from(loc.searchParams.get('SAMLRequest'), 'base64')).toString())[1];
+  return loc.searchParams.get('RelayState');
 }
 const samlCallback = (RelayState) => noFollow(`${base}/api/auth/saml/callback`, {
   method: 'POST',
-  headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+  headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: flow.samlCookie },
   body: new URLSearchParams({ SAMLResponse: samlResponse(), ...(RelayState !== undefined && { RelayState }) }),
 });
 
@@ -290,11 +301,13 @@ test('saml popup callback serves the completion page and sets the session', asyn
 });
 
 test('saml normal callback still forwards through /login', async () => {
+  await samlStart({ redirect: '/product-roadmap-v2' });
   const r = await samlCallback('/product-roadmap-v2');
   assert.equal(r.status, 302, `saml callback failed: ${r.headers.get('location')}`);
   const loc = new URL(r.headers.get('location'));
   assert.equal(loc.pathname, '/login');
-  assert.ok(loc.searchParams.get('oidc_token'));
+  assert.ok(loc.searchParams.get('sso_code'));
+  assert.equal(loc.searchParams.get('oidc_token'), null);
   assert.equal(loc.searchParams.get('redirect'), '/product-roadmap-v2');
 });
 

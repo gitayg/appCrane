@@ -7,18 +7,20 @@ import { getPortsForSlot } from './portAllocator.js';
 import { reloadCaddy } from './caddy.js';
 import log from '../utils/logger.js';
 import { DEFAULT_IMAGE_RETENTION } from './imageRetention.js';
+import { regularFileInside } from '../utils/paths.js';
+import { slugRefusal } from '../utils/slugPolicy.js';
 
 const ENVS = ['production', 'sandbox'];
 
 function getDockerContainers() {
   try {
     const out = execFileSync('docker', ['ps', '-a', '--filter', 'label=appcrane=true',
-      '--format', '{{.Names}}|{{.Label "slug"}}|{{.Label "env"}}|{{.Status}}'],
+      '--format', '{{.Names}}|{{.Label "env"}}|{{.Status}}'],
       { timeout: 10000, encoding: 'utf8' });
     if (!out.trim()) return [];
     return out.trim().split('\n').map(line => {
-      const [name, slug, env, status] = line.split('|');
-      return { name, slug, env, status };
+      const [name, env, status] = line.split('|');
+      return { name, env, status };
     });
   } catch (_) {
     return [];
@@ -31,6 +33,18 @@ function extractSlug(containerName) {
   return m ? m[1] : null;
 }
 
+// The slug of a container, from its name: AppCrane chooses names, and a pulled
+// image chooses its labels, which containers inherit. Null when that name does
+// not decode to a slug an app could have.
+function orphanSlug(container) {
+  const slug = extractSlug(container.name);
+  return slug && !slugRefusal(slug, { role: 'platform_admin' }) ? slug : null;
+}
+
+// A release's own files say what its repo was, and the app's author wrote them.
+const GITHUB_URL_RE = /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?(\.git)?\/?$/;
+const BRANCH_RE = /^(?!-)[A-Za-z0-9._/-]{1,200}$/;
+
 
 function readAppMeta(slug, dataDir) {
   const appDir = join(dataDir, 'apps', slug);
@@ -39,9 +53,10 @@ function readAppMeta(slug, dataDir) {
     if (!existsSync(current)) continue;
     for (const file of ['deployhub.json', 'package.json']) {
       const filePath = join(current, file);
-      if (!existsSync(filePath)) continue;
+      if (!regularFileInside(current, filePath)) continue;
       try {
         const data = JSON.parse(readFileSync(filePath, 'utf8'));
+        const githubUrl = typeof data.github_url === 'string' && GITHUB_URL_RE.test(data.github_url) ? data.github_url : null;
         return {
           name: data.name || slug,
           description: data.description || null,
@@ -49,9 +64,9 @@ function readAppMeta(slug, dataDir) {
           // 'managed_legacy' so the deployer's release-replay branch still
           // handles it; future migration can promote it to 'managed' once
           // the files are pushed to a service-account repo.
-          source_type: data.github_url ? 'github' : 'managed_legacy',
-          github_url: data.github_url || null,
-          branch: data.branch || 'main',
+          source_type: githubUrl ? 'github' : 'managed_legacy',
+          github_url: githubUrl,
+          branch: typeof data.branch === 'string' && BRANCH_RE.test(data.branch) ? data.branch : 'main',
         };
       } catch (_) {}
     }
@@ -74,7 +89,7 @@ export async function reconcileOrphanedApps({ dryRun = false, dataDir } = {}) {
   const slugInfo = {}; // slug → { processes: { production: { status }, sandbox: {...} }, fromDocker, fromFs }
 
   for (const c of getDockerContainers()) {
-    const slug = c.slug || extractSlug(c.name);
+    const slug = orphanSlug(c);
     if (!slug) continue;
     if (!slugInfo[slug]) slugInfo[slug] = { processes: {}, fromDocker: true };
     slugInfo[slug].processes[c.env] = { status: c.status };
@@ -161,7 +176,7 @@ export function getOrphanedSlugs(dataDir) {
   const found = new Set();
 
   for (const c of getDockerContainers()) {
-    const slug = c.slug || extractSlug(c.name);
+    const slug = orphanSlug(c);
     if (slug && !existingSlugs.has(slug)) found.add(slug);
   }
 

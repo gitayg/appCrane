@@ -42,6 +42,9 @@ export function uploadPackArgs(slug, { userId, advertiseRefs }) {
   return hardenedGitInvocation([
     '-c', 'uploadpack.hideRefs=refs/heads/agent',
     '-c', `uploadpack.hideRefs=!refs/heads/agent/${uid}`,
+    // A tip displaced from an agent branch is parked under refs/dropped/<branch>
+    // (localGit.js): the same commit, so hidden from everyone like the branch.
+    '-c', 'uploadpack.hideRefs=refs/dropped/agent',
     '-c', 'uploadpack.allowTipSHA1InWant=false',
     '-c', 'uploadpack.allowReachableSHA1InWant=false',
     '-c', 'uploadpack.allowAnySHA1InWant=false',

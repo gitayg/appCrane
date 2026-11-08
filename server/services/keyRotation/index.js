@@ -5,6 +5,7 @@ import { getState, modeFor } from '../managedDbEncryption.js';
 import { openExclusive, serverAnswers, pendingMigrations, diskRefusal, backupBeforeRotation } from './preflight.js';
 import { readEnv, readEnvKey, replaceEnvKey, stageEnv } from './envFile.js';
 import { rotateDatabase, selfCheck, RotationError } from './rotate.js';
+import { keyHeldByProvider, rotateWithProvider } from './providerKey.js';
 
 export { RotationError };
 
@@ -44,9 +45,22 @@ function signedElsewhere(db) {
 export async function rotateKey({ dataDir, envPath, newKey = null, dryRun = false, port = 5001, now = new Date() }) {
   if (!existsSync(envPath)) throw new RefusedError(`no .env at ${envPath}`);
   const envText = readEnv(envPath);
-  const oldKey = readEnvKey(envText);
+  let held;
+  try {
+    held = await keyHeldByProvider(envText);
+  } catch (e) {
+    throw new RefusedError(`the secrets provider could not be read, nothing was changed: ${e.message}`);
+  }
+  const envKey = readEnvKey(envText);
+  if (held && /^\s*ENCRYPTION_KEY\s*=\s*\S/m.test(envText)) {
+    throw new RefusedError(`ENCRYPTION_KEY is in both the platform secret and ${envPath}. Remove the .env line first: the server would refuse two keys after the rotation`);
+  }
+  const oldKey = held ? held.oldKey : envKey;
   if (!oldKey) throw new RefusedError(`${envPath} has no ENCRYPTION_KEY of 64 hex characters`);
   const live = process.env.ENCRYPTION_KEY;
+  if (held && live && live.slice(0, 64).toLowerCase() !== oldKey) {
+    throw new RefusedError('ENCRYPTION_KEY is set in this shell and differs from the one in the platform secret. Unset it (and remove it from the service definition) first');
+  }
   if (live && live.slice(0, 64).toLowerCase() !== oldKey) {
     throw new RefusedError('ENCRYPTION_KEY is set in this shell and differs from the one in .env. The server prefers the environment over .env, '
       + 'so rotating .env would not change the key it uses. Unset it (and remove it from the service definition) first');
@@ -83,6 +97,15 @@ export async function rotateKey({ dataDir, envPath, newKey = null, dryRun = fals
     if (disk) throw new RefusedError(disk);
 
     const backupDir = backupBeforeRotation(db, { dataDir, envPath, now });
+    if (held) {
+      try {
+        const done = await rotateWithProvider(db, { held, newKey, backupDir });
+        return { ...done, backupDir, notes };
+      } catch (e) {
+        e.backupDir = backupDir;
+        throw e;
+      }
+    }
     let staged = null;
     let report;
     try {

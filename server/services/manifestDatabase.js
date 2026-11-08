@@ -14,8 +14,9 @@
 // the platform relies on. Every rejection names the field so the author can fix
 // it from the deploy log alone.
 
-import { existsSync, readFileSync } from 'fs';
+import { lstatSync, readFileSync } from 'fs';
 import { join } from 'path';
+import { regularFileInside } from '../utils/paths.js';
 import { SUPPORTED_ENGINES, provision as defaultProvision, credentialsFor as defaultCredentialsFor } from './managedDb.js';
 import { APP_LOGIN_ENGINES, DEFAULT_APP_URL_ENV } from './managedDbAppLogin.js';
 import { SUPPORTED_EXTENSIONS } from './managedDbStats.js';
@@ -242,8 +243,10 @@ export async function ensureManifestDatabase(app, needs, {
  * the restart itself. Never provisions either — the deploy did that.
  */
 export function readReleaseManifestDatabase(appEnvDir) {
-  const manifestPath = join(appEnvDir, 'current', 'deployhub.json');
-  if (!existsSync(manifestPath)) return { needs: null, error: null };
+  const current = join(appEnvDir, 'current');
+  const manifestPath = join(current, 'deployhub.json');
+  if (!lstatSync(manifestPath, { throwIfNoEntry: false })) return { needs: null, error: null };
+  if (!regularFileInside(current, manifestPath)) return { needs: null, error: 'deployhub.json is a symbolic link or not a regular file' };
   try {
     return { needs: parseManifestDatabase(JSON.parse(readFileSync(manifestPath, 'utf8')).database), error: null };
   } catch (e) {

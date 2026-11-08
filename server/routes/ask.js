@@ -9,9 +9,11 @@ import { AppError } from '../utils/errors.js';
 import { runAskJob, hasActiveContainer } from '../services/askClaude.js';
 import { agentCredentialKind, NO_CREDENTIAL_MESSAGE } from '../services/llm/runAgent.js';
 import { usesLocalRepo } from '../services/managedRepo.js';
+import { isAppOwnerOrPlatformAdmin } from '../services/permissions.js';
 import { ensureCodebaseContext } from '../services/appstudio/contextBuilder.js';
 import { mirrorAsk } from '../services/github/issuesMirror.js';
 import log from '../utils/logger.js';
+import { assertUserKeyIngress } from '../utils/ingress.js';
 
 const router = Router();
 
@@ -40,13 +42,17 @@ function resolveUser(req) {
 
     const apiKeyUser = db.prepare('SELECT * FROM users WHERE api_key_hash = ?').get(hash);
     if (apiKeyUser && apiKeyUser.active) {
+      assertUserKeyIngress(req, apiKeyUser.id, 'ask');
       return { userId: apiKeyUser.id, userName: apiKeyUser.name, role: apiKeyUser.role };
     }
   }
   const apiKey = req.headers['x-api-key'];
   if (apiKey) {
     const user = db.prepare('SELECT * FROM users WHERE api_key_hash = ?').get(hashApiKey(apiKey));
-    if (user && user.active) return { userId: user.id, userName: user.name, role: user.role };
+    if (user && user.active) {
+      assertUserKeyIngress(req, user.id, 'ask');
+      return { userId: user.id, userName: user.name, role: user.role };
+    }
   }
   return null;
 }
@@ -65,6 +71,13 @@ router.post('/:appSlug', async (req, res) => {
   if (user.role !== 'platform_admin') {
     const access = db.prepare('SELECT 1 FROM app_users WHERE app_id = ? AND user_id = ?').get(app.id, user.userId);
     if (!access) throw new AppError('Access denied', 403, 'FORBIDDEN');
+  }
+  // A GitHub app is answered by an agent in a container that holds the platform
+  // API key or the app's Claude login, with permissions off: whoever writes the
+  // prompt can read them from /proc/1/environ. A local app has no container, so
+  // members keep it. Same boundary as the coder (coder.js).
+  if (!usesLocalRepo(app) && !isAppOwnerOrPlatformAdmin({ id: user.userId, role: user.role }, app)) {
+    throw new AppError('Only the app owner or a platform admin can use Ask Claude on a GitHub-backed app', 403, 'FORBIDDEN');
   }
 
   // A dispatch needs exactly ONE credential and there are three sources:

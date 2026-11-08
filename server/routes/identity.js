@@ -19,6 +19,7 @@ import { decideAccess, effectiveRules } from '../services/accessRules.js';
 import { revokeAllGrantsForUser } from '../services/oauthStore.js';
 import { passwordLoginMfaStep } from '../services/mfa.js';
 import { touchSession } from '../services/sessionPolicy.js';
+import { assertUserKeyIngress } from '../utils/ingress.js';
 import { auditTrustedSkip, clearTrustedDeviceCookie, hasTrustedDeviceCookie, revokeAllDevices, trustedDeviceFor } from '../services/trustedDevices.js';
 
 const ICON_DIR = resolve(process.env.DATA_DIR || './data', 'apps');
@@ -497,6 +498,9 @@ router.get('/verify', (req, res) => {
       FROM users WHERE api_key_hash = ?
     `).get(keyHash);
     if (u) {
+      // APPCRANE_PRIVATE_API_PORT: forward_auth subrequests from a public site
+      // carry the public stamp, so a personal key cannot open an app host there.
+      if (u.user_active !== 0) assertUserKeyIngress(req, u.user_id, 'verify');
       session = { ...u, app_id: null, expires_at: null };
     }
   } else {
@@ -927,6 +931,8 @@ router.post('/set-password', (req, res) => {
     if (apiKey) {
       const keyHash = hashApiKey(apiKey);
       user = db.prepare('SELECT * FROM users WHERE api_key_hash = ? AND active = 1').get(keyHash);
+      // Turning a personal key into a session would carry it past the private port.
+      if (user) assertUserKeyIngress(req, user.id, 'set-password');
     }
   }
   if (!user) throw new AppError('Authentication required', 401, 'UNAUTHORIZED');

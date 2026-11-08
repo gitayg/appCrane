@@ -41,7 +41,7 @@ test('the event loop keeps running while git clone runs', async () => {
     }));
     clearInterval(timer);
     assert.ok(ticks >= 10, `only ${ticks} timer ticks during a 1 s clone`);
-    assert.equal(readFileSync(join(bin, 'calls'), 'utf8').trim(), `clone --depth 1 --branch main https://example.invalid/r.git ${join(bin, 'rel')}`);
+    assert.equal(readFileSync(join(bin, 'calls'), 'utf8').trim(), `clone --depth 1 --branch main -- https://example.invalid/r.git ${join(bin, 'rel')}`);
   } finally { rmSync(bin, { recursive: true, force: true }); }
 });
 
@@ -61,8 +61,8 @@ test('promote pin: same fetch/deepen/checkout argv, and the same error text with
       },
     );
     assert.deepEqual(readFileSync(join(bin, 'calls'), 'utf8').trim().split('\n'), [
-      'clone --depth 1 --branch dev u d',
-      '-C d fetch --depth 1 origin abc123',
+      'clone --depth 1 --branch dev -- u d',
+      '-C d fetch --depth 1 -- origin abc123',
       '-C d checkout --detach abc123',
     ]);
     assert.deepEqual(logs, ['Pinning to commit abc123 (exact sandbox release)…']);
@@ -74,7 +74,7 @@ test('a failed clone throws the scrubbed git error', async () => {
   try {
     await assert.rejects(
       withPath(bin, () => cloneGitRelease({ cloneUrl: 'u', branch: 'main', releaseDir: 'd', gitOpts, scrubGit, appendLog: () => {} })),
-      /^Error: Command failed: git clone --depth 1 --branch main u d\nfatal: no such ref token-\*\*\*/,
+      /^Error: Command failed: git clone --depth 1 --branch main -- u d\nfatal: no such ref token-\*\*\*/,
     );
   } finally { rmSync(bin, { recursive: true, force: true }); }
 });

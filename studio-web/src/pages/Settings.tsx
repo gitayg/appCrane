@@ -28,6 +28,7 @@ import { OAuthAdminCard } from '../components/OAuthAdminCard'
 import { SiemSinks } from '../components/siem/SiemSinks'
 import { LlmGatewaySettingsCard } from '../components/llm/LlmGatewaySettingsCard'
 import { CryptographyCard } from '../components/crypto/CryptographyCard'
+import { SecretsManagerCard } from '../components/SecretsManagerCard'
 import { ClassificationPolicyCard } from '../components/intake/ClassificationPolicyCard'
 import { AutoPatchPolicyCard } from '../components/autoPatch/AutoPatchPolicyCard'
 import { VulnAlertsCard } from '../components/vulnAlerts/VulnAlertsCard'
@@ -1410,7 +1411,7 @@ export function Settings() {
       {panel('account', <AccountTab />)}
       {panel('mcp', <Mcp />)}
       {panel('skills', <SkillsTab />)}
-      {panel('security', <><SecurityTab /><SignInPolicyCard /><McpAuthPolicyCard /><OAuthAdminCard /><ClassificationPolicyCard /><VulnAlertsCard /><AutoPatchPolicyCard /><RuntimePatchCard /><CryptographyCard /><LlmGatewaySettingsCard /><SiemSinks /></>)}
+      {panel('security', <><SecurityTab /><SignInPolicyCard /><McpAuthPolicyCard /><OAuthAdminCard /><ClassificationPolicyCard /><VulnAlertsCard /><AutoPatchPolicyCard /><RuntimePatchCard /><CryptographyCard /><SecretsManagerCard /><LlmGatewaySettingsCard /><SiemSinks /></>)}
       {panel('users', <Users />)}
       {panel('roles', <RolesTab />)}
       {panel('github', <GithubTab />)}

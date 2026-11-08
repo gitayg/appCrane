@@ -30,6 +30,16 @@ if (existsSync(envPath)) {
   log.info(`.env loaded (${envPath})`);
 }
 
+// Platform keys from AWS Secrets Manager, when configured. Before anything
+// uses them; a failure stops the boot rather than falling back to .env.
+try {
+  const secrets = await loadPlatformSecrets({ log });
+  if (secrets.active) log.info(`platform secret loaded (keys: ${secrets.keys.join(', ')})`);
+} catch (e) {
+  log.error(`AppCrane cannot start: the platform secret could not be loaded. ${e.message}`);
+  process.exit(1);
+}
+
 const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf8'));
 const VERSION = pkg.version;
 
@@ -62,6 +72,7 @@ import ssoPopupRoutes from './routes/ssoPopup.js';
 import scimRoutes, { scimAdminRouter } from './routes/scim.js';
 import presenceRoutes from './routes/presence.js';
 import askRoutes from './routes/ask.js';
+import { sweepLegacyAskSessions } from './services/askClaude.js';
 import planRoutes from './routes/plan.js';
 import coderRoutes from './routes/coder.js';
 import skillsRoutes from './routes/skills.js';
@@ -92,6 +103,7 @@ import clientErrorsRoutes, { adminRouter as clientErrorsAdminRoutes } from './ro
 import { refererSlug } from './utils/refererSlug.js';
 import { globalNotices } from './services/platformNotices.js';
 import { adminExists } from './services/adminExists.js';
+import { loadPlatformSecrets } from './services/secretsProvider/index.js';
 import { enforceFipsAtStartup } from './services/fipsMode.js';
 import appMcpRoutes, { appMcpWellKnownRouter } from './routes/appMcp.js';
 
@@ -102,6 +114,7 @@ try { enforceFipsAtStartup({ log }); } catch (e) { log.error(e.message); process
 
 // Initialize database
 initDb();
+sweepLegacyAskSessions();
 // Checkpoint the WAL from a worker thread instead of inside whichever request
 // commits past the threshold (services/dbCheckpoint.js has the measurements).
 {
@@ -1128,6 +1141,7 @@ app.use('/api/mcp', mcpRoutes);          // Model Context Protocol endpoint (JSO
 app.use('/api/settings', (await import('./routes/jobHealth.js')).default); // /api/settings/job-health (platform admin)
 app.use('/api/settings', (await import('./routes/hostHardening.js')).default); // /api/settings/host-hardening: Host limits (platform admin)
 app.use('/api/settings/client-errors', clientErrorsAdminRoutes); // aggregated browser errors (platform admin)
+app.use('/api/settings/secrets-provider', (await import('./routes/secretsProviderStatus.js')).default); // AWS Secrets Manager status (platform admin)
 app.use('/api/settings', (await import('./routes/restoreDrills.js')).default); // /api/settings/restore-drills (platform admin)
 app.use('/api/evidence-packs', (await import('./routes/evidencePack.js')).default); // compliance evidence packs (platform admin)
 app.use('/api/settings', (await import('./routes/siem.js')).default); // /api/settings/siem: SIEM and log streaming (platform admin)
@@ -1142,6 +1156,7 @@ app.use('/api/settings', settingsRoutes); // General settings (branding, etc.)
 // matches GET /me and the three /me/claude-token methods, none of which
 // collide with /me/mcp-keys/*.
 app.use('/api', meRoutes);               // /api/me — proxied-app identity endpoint (cookie/Bearer/X-API-Key)
+app.use('/api/admin/mcp-keys', (await import('./routes/adminMcpKeys.js')).default); // every user's MCP keys: list, revoke, revoke-unused (platform admin)
 app.use('/api', userMcpKeysRoutes);      // /api/me/mcp-keys — personal MCP keys
 app.use('/api/files/staged', stagedFilesRoutes);   // chunked staged uploads: POST /chunked, PUT /:handle?offset=N, POST /:handle/finalize
 app.use('/api/me/app-keys', userAppKeysRoutes); // personal app sign-in keys (dhk_uak_*), v2.124.0
@@ -1208,7 +1223,7 @@ function loginHandler(req, res) {
 }
 // v2.5.14: collapse the dual-login UX. /login and /portal forward to
 // /applications, which renders the SPA's <Login> when unauthenticated.
-// The SPA handles the SSO query params (`oidc_token`, `sso_error`,
+// The SPA handles the SSO query params (`sso_code`, `sso_error`,
 // `saml_error`, `redirect`) that docs/login.html used to.
 //
 // loginHandler (above) is kept for any iframe-embedded SSO flow that
@@ -1219,7 +1234,7 @@ function loginHandler(req, res) {
 // when unauthenticated, exactly as /applications did, so this only changes
 // where you arrive AFTER authenticating: the tiles you can open, which is the
 // first thing most users want. Query string is preserved so the SSO
-// ?oidc_token=… / ?redirect=… handoff still works.
+// ?sso_code=… / ?redirect=… handoff still works.
 // v2.35.0: strip an unsafe `redirect` before forwarding it. The SPA now
 // validates it too (utils/safeRedirect.ts), but this endpoint is what a
 // phishing link actually targets — `/login?redirect=//attacker.com` — and it
@@ -1646,6 +1661,14 @@ app.listen(PORT, HOST, async () => {
     const { sweepStaleRuntimes } = await import('./services/skills.js');
     sweepStaleRuntimes();
   } catch (_) {}
+
+  // Containers left by a pre-flight check that was killed mid-way. Not awaited.
+  try {
+    const { startPreflightSweep } = await import('./services/preflightSweep.js');
+    startPreflightSweep();
+  } catch (e) {
+    log.warn('Pre-flight sweep skipped: ' + e.message);
+  }
 
   // Start health checker
   try {
