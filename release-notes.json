@@ -1,4 +1,7 @@
 {
+  "2.136.1": [
+    "Security fix: an app's Claude login, while a session is using it, can no longer be read by other accounts on the server."
+  ],
   "2.136.0": [
     "The platform Anthropic key is now set in Settings > Security and stored encrypted in AppCrane's database, moved out of the server's .env file automatically. Neither it nor your own Claude token shows up in the server's container or process listings any more.",
     "AppCrane's master encryption key can be kept in the server's own encrypted credential store (systemd) instead of the .env file, with no cloud service needed.",
