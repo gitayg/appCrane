@@ -62,21 +62,28 @@ export function formatSecretRef(name, field = null) {
 
 const MALFORMED = 'malformed reference: use secretsmanager:<NAME> or secretsmanager:<NAME>#<field>, where NAME holds only letters, digits, _ and - (no ARN, no path)';
 
+// App secret references live in AWS only: systemd-creds holds platform keys.
+const AWS_PROVIDER = 'aws-secrets-manager';
+const awsOnly = (cfg) => cfg?.provider === AWS_PROVIDER;
+const SYSTEMD_ONLY = 'this AppCrane keeps its keys in systemd-creds, which holds no app secrets; secretsmanager: references need APPCRANE_SECRETS_PROVIDER=aws-secrets-manager';
+
 // The provider puts the SDK's error name in .code.
 function fetchFailure(e, namespace, env, name) {
   const kind = e?.code || e?.name;
   if (kind === 'ResourceNotFoundException') return notFoundAt(namespace, env, name);
   if (kind === 'AccessDeniedException') return 'access denied by AWS';
+  if (kind === 'APP_SECRETS_UNSUPPORTED') return SYSTEMD_ONLY;
   return 'could not be read from Secrets Manager';
 }
 
 function writeFailure(e) {
   if ((e?.code || e?.name) === 'AccessDeniedException') return 'access denied by AWS';
+  if ((e?.code || e?.name) === 'APP_SECRETS_UNSUPPORTED') return SYSTEMD_ONLY;
   return 'could not be written to Secrets Manager';
 }
 
 function providerActive() {
-  return providerConfig() !== null;
+  return awsOnly(providerConfig());
 }
 
 // The app's own namespace, from the row when the caller holds a partial one. No
@@ -145,17 +152,21 @@ export async function resolveStoredEnv(app, env, rows, opts = {}) {
 export function assertStorableValue(plain, { config = providerConfig } = {}) {
   if (!isSecretRef(plain)) return;
   if (!parseSecretRef(plain)) throw new SecretRefError(MALFORMED, { code: 'SECRET_REF_MALFORMED' });
-  if (config() === null) {
+  const cfg = config();
+  if (cfg === null) {
     throw new SecretRefError('This value is a Secrets Manager reference, and no secrets provider is configured on this AppCrane (APPCRANE_SECRETS_PROVIDER).', { code: 'SECRETS_PROVIDER_NOT_CONFIGURED' });
   }
+  if (!awsOnly(cfg)) throw new SecretRefError(`This value is a Secrets Manager reference, and ${SYSTEMD_ONLY}.`, { code: 'SECRETS_PROVIDER_NOT_CONFIGURED' });
 }
 
 /** Everything that can refuse a store request without calling AWS. `vars`: { KEY: value }. */
 export function assertStoreRequest(env, vars, { config = providerConfig } = {}) {
   if (!ENVS.includes(env)) throw new SecretRefError('env must be production or sandbox', { code: 'VALIDATION' });
-  if (config() === null) {
+  const cfg = config();
+  if (cfg === null) {
     throw new SecretRefError('store "secrets_manager" needs a secrets provider, and none is configured on this AppCrane (APPCRANE_SECRETS_PROVIDER).', { code: 'SECRETS_PROVIDER_NOT_CONFIGURED' });
   }
+  if (!awsOnly(cfg)) throw new SecretRefError(`store "secrets_manager": ${SYSTEMD_ONLY}.`, { code: 'SECRETS_PROVIDER_NOT_CONFIGURED' });
   for (const [key, value] of Object.entries(vars)) {
     const text = String(value);
     if (text.length === 0) throw new SecretRefError(`${key}: Secrets Manager cannot store an empty value`, { code: 'VALIDATION', keys: [key] });

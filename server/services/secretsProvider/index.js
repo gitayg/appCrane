@@ -1,5 +1,6 @@
 import { getValue, describeVersions, versionWithStage, putValue, createSecret, moveStage, isNotFound } from './awsOps.js';
 import { assertAllowedKey, assertSecretSize, parseSecretObject, validatedPlatformKeys, MAX_SECRET_BYTES } from './keyPolicy.js';
+import { PROVIDER_SYSTEMD, systemdCredentialValues, systemdPaths, credentialName } from './systemdCreds.js';
 
 const PROVIDER = 'aws-secrets-manager';
 const DEFAULT_APP_PREFIX = 'appcrane/apps';
@@ -11,12 +12,22 @@ const PREFIX_RE = /^[A-Za-z0-9_+=.@-]+(\/[A-Za-z0-9_+=.@-]+)*$/;
 // What this process loaded at boot: key names and the version, never a value.
 let loaded = null;
 
-/** null when no provider is configured; else { provider: 'aws-secrets-manager', secretId: string|null, region: string|null }. */
+/**
+ * null when no provider is configured; else { provider, secretId, region }:
+ * 'aws-secrets-manager' with its secret and region, or 'systemd-creds' with
+ * both null (it has no platform secret in AWS and no app secrets).
+ */
 export function providerConfig(env = process.env) {
   const provider = env.APPCRANE_SECRETS_PROVIDER;
   if (!provider) return null;
-  if (provider !== PROVIDER) throw new Error(`APPCRANE_SECRETS_PROVIDER=${provider} is not supported (expected ${PROVIDER})`);
+  if (provider === PROVIDER_SYSTEMD) return { provider, secretId: null, region: null };
+  if (provider !== PROVIDER) throw new Error(`APPCRANE_SECRETS_PROVIDER=${provider} is not supported (expected ${PROVIDER} or ${PROVIDER_SYSTEMD})`);
   return { provider, secretId: env.APPCRANE_SECRETS_ID || null, region: env.APPCRANE_SECRETS_REGION || env.AWS_REGION || null };
+}
+
+/** True when secretsmanager:<NAME> app references can work here: AWS Secrets Manager only. */
+export function appSecretsAvailable(env = process.env) {
+  return providerConfig(env)?.provider === PROVIDER;
 }
 
 function requirePlatform(env = process.env) {
@@ -26,13 +37,24 @@ function requirePlatform(env = process.env) {
   return cfg;
 }
 
-/** Fetches the platform secret and sets its keys on `env`. No provider: no-op, returns { active: false }. Throws on any failure: never fall back to .env. */
+/**
+ * Loads the platform keys and sets them on `env`: the AWS platform secret, or
+ * the systemd credentials in $CREDENTIALS_DIRECTORY. No provider: no-op,
+ * returns { active: false }. Throws on any failure: never fall back to .env.
+ */
 export async function loadPlatformSecrets({ env = process.env, log = console } = {}) {
   const cfg = providerConfig(env);
+  if (cfg?.provider === PROVIDER_SYSTEMD) {
+    const label = 'systemd credentials';
+    return applyPlatformKeys(validatedPlatformKeys(systemdCredentialValues(env), label), { env, log, label, cfg, versionId: null });
+  }
   if (!cfg?.secretId) return { active: false };
   const label = `platform secret ${cfg.secretId}`;
   const { text, versionId } = await getValue(cfg, cfg.secretId);
-  const values = validatedPlatformKeys(parseSecretObject(text, label), label);
+  return applyPlatformKeys(validatedPlatformKeys(parseSecretObject(text, label), label), { env, log, label, cfg, versionId });
+}
+
+function applyPlatformKeys(values, { env, log, label, cfg, versionId }) {
   const names = Object.keys(values);
   const conflicts = names.filter((k) => env[k] && env[k] !== values[k]);
   if (conflicts.length) {
@@ -40,12 +62,13 @@ export async function loadPlatformSecrets({ env = process.env, log = console } =
       + 'Two keys is how data gets encrypted under the wrong one: remove the .env line that is not the real one.');
   }
   if (!values.ENCRYPTION_KEY && !env.ENCRYPTION_KEY) {
+    if (cfg.provider === PROVIDER_SYSTEMD) throw new Error(`the ${label} hold no ENCRYPTION_KEY and .env has none either. Run sudo crane secrets migrate --provider systemd-creds.`);
     throw new Error(`${label} has no ENCRYPTION_KEY and .env has none either. Run crane secrets migrate, or add the key to the secret.`);
   }
   const duplicates = names.filter((k) => env[k]);
   for (const k of names) env[k] = values[k];
   if (duplicates.length) log.warn(`${duplicates.join(', ')} also set in .env or the environment with the same value as ${label}: remove the .env line`);
-  loaded = { secretId: cfg.secretId, versionId, keys: new Set(names) };
+  loaded = { provider: cfg.provider, secretId: cfg.secretId, versionId, keys: new Set(names) };
   return { active: true, provider: cfg.provider, secretId: cfg.secretId, keys: names, versionId, duplicates };
 }
 
@@ -101,6 +124,9 @@ export async function platformVersions() {
 /** Read-merge-write of one key in the platform secret; used by the Anthropic key setting. */
 export async function setPlatformSecretKey(name, value) {
   assertAllowedKey(name);
+  if (providerConfig()?.provider === PROVIDER_SYSTEMD) {
+    throw new Error(`${name} is a systemd credential, which only root can write and AppCrane does not run as root. Change it on the host: sudo crane secrets migrate --provider systemd-creds with the new value in .env`);
+  }
   const cfg = requirePlatform();
   const label = `platform secret ${cfg.secretId}`;
   const { text } = await getValue(cfg, cfg.secretId);
@@ -119,6 +145,23 @@ export function backupSecretsNote(env = process.env) {
   if (!cfg) return null;
   const keys = loaded ? [...loaded.keys].sort() : [];
   const held = keys.includes('ENCRYPTION_KEY');
+  if (cfg.provider === PROVIDER_SYSTEMD) {
+    const paths = systemdPaths(env);
+    return {
+      provider: cfg.provider,
+      secret_id: null,
+      region: null,
+      version_id: null,
+      credentials: keys.map((k) => `${paths.credstore}/${credentialName(k)}`),
+      keys_in_provider: keys,
+      encryption_key_in_provider: held,
+      restorable_from_this_copy_alone: !held,
+      note: held
+        ? `ENCRYPTION_KEY lives in a systemd encrypted credential (${paths.credstore}/${credentialName('ENCRYPTION_KEY')}), sealed with this host's /var/lib/systemd/credential.secret, not in this copy. `
+          + 'This copy alone cannot restore the encrypted values: on this host root can decrypt the credential; on any other host only an offline copy of the key works.'
+        : 'A secrets provider is configured; ENCRYPTION_KEY is not in it.',
+    };
+  }
   return {
     provider: cfg.provider,
     secret_id: cfg.secretId,
@@ -161,6 +204,9 @@ export function appSecretName(namespace, env, name) {
 function appSecretTarget(namespace, env, name) {
   const cfg = providerConfig();
   if (!cfg) throw new Error('no secrets provider is configured (APPCRANE_SECRETS_PROVIDER)');
+  if (cfg.provider !== PROVIDER) {
+    throw Object.assign(new Error(`app secret references (secretsmanager:<NAME>) need APPCRANE_SECRETS_PROVIDER=${PROVIDER}; this AppCrane uses ${cfg.provider}, which holds only AppCrane's own keys`), { code: 'APP_SECRETS_UNSUPPORTED' });
+  }
   const id = appSecretName(namespace, env, name);
   // A prefix configured over the platform secret must not hand it to an app.
   if (cfg.secretId && (cfg.secretId === id || cfg.secretId.includes(`:secret:${id}`))) throw new Error(`the app secret path ${id} is the platform secret`);

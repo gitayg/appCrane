@@ -12,6 +12,7 @@ import { renderOpenCommentsSection } from '../enhancementComments.js';
 import { formatToolBreadcrumb } from './toolBreadcrumb.js';
 import { pickNodeVersion } from '../nodeVersion.js';
 import log from '../../utils/logger.js';
+import { getPlatformAnthropicKey } from '../platformAnthropicKey.js';
 
 const GEN_MODEL       = process.env.APPSTUDIO_CODER_MODEL || 'claude-sonnet-4-6';
 const GEN_TIMEOUT_MS  = parseInt(process.env.APPSTUDIO_TIMEOUT_MS || '1800000', 10);
@@ -413,7 +414,7 @@ export async function generateCode({ jobId, app, enhancementId, plan, summary, a
     containerName,
     workspaceDir,
     prompt,
-    apiKey:        process.env.ANTHROPIC_API_KEY,
+    apiKey:        getPlatformAnthropicKey(),
     model:         GEN_MODEL,
     timeoutMs:     GEN_TIMEOUT_MS + 60000,
     appSlug:       app.slug,

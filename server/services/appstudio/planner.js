@@ -8,6 +8,7 @@ import { runAgentOneShot } from '../llm/runAgent.js';
 import { extractJsonBlock } from '../../utils/json.js';
 import { ensureStudioImage } from './generator.js';
 import { renderOpenCommentsSection } from '../enhancementComments.js';
+import { getPlatformAnthropicKey } from '../platformAnthropicKey.js';
 
 const MODEL         = process.env.APPSTUDIO_PLANNER_MODEL || 'claude-sonnet-4-6';
 const STUDIO_IMAGE  = process.env.APPSTUDIO_IMAGE || 'appcrane-studio:latest';
@@ -162,7 +163,7 @@ export async function planEnhancement({ appSlug, enhancementId, request, repoDir
     workspaceMode: 'ro',
     prompt:        userContent,
     systemPrompt:  SYSTEM_PROMPT,
-    apiKey:        process.env.ANTHROPIC_API_KEY,
+    apiKey:        getPlatformAnthropicKey(),
     model:         MODEL,
     timeoutMs:     parseInt(process.env.APPSTUDIO_PLAN_TIMEOUT_MS || '300000', 10),
     appSlug,

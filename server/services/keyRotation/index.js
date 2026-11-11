@@ -1,11 +1,12 @@
 import { randomBytes } from 'crypto';
-import { existsSync, statSync } from 'fs';
+import { existsSync, statSync, readdirSync, chownSync } from 'fs';
 import { join } from 'path';
 import { getState, modeFor } from '../managedDbEncryption.js';
 import { openExclusive, serverAnswers, pendingMigrations, diskRefusal, backupBeforeRotation } from './preflight.js';
 import { readEnv, readEnvKey, replaceEnvKey, stageEnv } from './envFile.js';
 import { rotateDatabase, selfCheck, RotationError } from './rotate.js';
 import { keyHeldByProvider, rotateWithProvider } from './providerKey.js';
+import { rotateWithSystemdCreds } from './systemdKey.js';
 
 export { RotationError };
 
@@ -23,6 +24,20 @@ export function blockers(db) {
       + 'and unload its key (Settings > Managed databases) first, then rotate and turn it back on.');
   }
   return out;
+}
+
+/**
+ * rotate-key with systemd-creds runs as root. Its backup folder goes under
+ * DATA_DIR, which belongs to the service user: hand it over, so nothing there
+ * is left that AppCrane cannot read or prune. The old credential copied in is
+ * ciphertext only root on this host can open.
+ */
+function ownLikeDatabase(dir, dbPath) {
+  if (process.getuid?.() !== 0) return;
+  const { uid, gid } = statSync(dbPath);
+  if (uid === 0) return;
+  chownSync(dir, uid, gid);
+  for (const n of readdirSync(dir)) chownSync(join(dir, n), uid, gid);
 }
 
 /** Facts about things signed under the old key that stay that way (reported, not changed). */
@@ -53,13 +68,13 @@ export async function rotateKey({ dataDir, envPath, newKey = null, dryRun = fals
   }
   const envKey = readEnvKey(envText);
   if (held && /^\s*ENCRYPTION_KEY\s*=\s*\S/m.test(envText)) {
-    throw new RefusedError(`ENCRYPTION_KEY is in both the platform secret and ${envPath}. Remove the .env line first: the server would refuse two keys after the rotation`);
+    throw new RefusedError(`ENCRYPTION_KEY is in both the ${held.kind === 'systemd-creds' ? 'systemd credential' : 'platform secret'} and ${envPath}. Remove the .env line first: the server would refuse two keys after the rotation`);
   }
   const oldKey = held ? held.oldKey : envKey;
   if (!oldKey) throw new RefusedError(`${envPath} has no ENCRYPTION_KEY of 64 hex characters`);
   const live = process.env.ENCRYPTION_KEY;
   if (held && live && live.slice(0, 64).toLowerCase() !== oldKey) {
-    throw new RefusedError('ENCRYPTION_KEY is set in this shell and differs from the one in the platform secret. Unset it (and remove it from the service definition) first');
+    throw new RefusedError(`ENCRYPTION_KEY is set in this shell and differs from the one in the ${held.kind === 'systemd-creds' ? 'systemd credential' : 'platform secret'}. Unset it (and remove it from the service definition) first`);
   }
   if (live && live.slice(0, 64).toLowerCase() !== oldKey) {
     throw new RefusedError('ENCRYPTION_KEY is set in this shell and differs from the one in .env. The server prefers the environment over .env, '
@@ -99,11 +114,15 @@ export async function rotateKey({ dataDir, envPath, newKey = null, dryRun = fals
     const backupDir = backupBeforeRotation(db, { dataDir, envPath, now });
     if (held) {
       try {
-        const done = await rotateWithProvider(db, { held, newKey, backupDir });
+        const done = held.kind === 'systemd-creds'
+          ? await rotateWithSystemdCreds(db, { held, newKey, backupDir })
+          : await rotateWithProvider(db, { held, newKey, backupDir });
         return { ...done, backupDir, notes };
       } catch (e) {
         e.backupDir = backupDir;
         throw e;
+      } finally {
+        ownLikeDatabase(backupDir, dbPath);
       }
     }
     let staged = null;

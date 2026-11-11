@@ -62,16 +62,17 @@ async function bootKey(envPath) {
 test('migrate creates the secret, removes the lines, adds the settings, keeps the rest', async () => {
   const h = host();
   const res = await M.migrateToSecretsManager(await opts(h, { region: 'us-east-1' }));
-  assert.deepEqual(JSON.parse(sm.current('plat')), { ENCRYPTION_KEY: K_A, ANTHROPIC_API_KEY: ANTHROPIC });
-  assert.equal(readFileSync(h.envPath, 'utf8'), '# keep this comment\nPORT=1\nOTHER=1\nAPPCRANE_SECRETS_PROVIDER=aws-secrets-manager\nAPPCRANE_SECRETS_ID=plat\nAPPCRANE_SECRETS_REGION=us-east-1\n');
-  assert.deepEqual(res.moved, ['ENCRYPTION_KEY', 'ANTHROPIC_API_KEY']);
-  assert.deepEqual(res.boot_check_keys.sort(), ['ANTHROPIC_API_KEY', 'ENCRYPTION_KEY']);
+  assert.deepEqual(JSON.parse(sm.current('plat')), { ENCRYPTION_KEY: K_A });
+  assert.equal(readFileSync(h.envPath, 'utf8'), `# keep this comment\nPORT=1\nANTHROPIC_API_KEY=${ANTHROPIC}\nOTHER=1\nAPPCRANE_SECRETS_PROVIDER=aws-secrets-manager\nAPPCRANE_SECRETS_ID=plat\nAPPCRANE_SECRETS_REGION=us-east-1\n`,
+    'ANTHROPIC_API_KEY stays: the boot moves it into the database');
+  assert.deepEqual(res.moved, ['ENCRYPTION_KEY']);
+  assert.deepEqual(res.boot_check_keys.sort(), ['ENCRYPTION_KEY']);
   assert.ok(!JSON.stringify(res).includes(K_A) && !JSON.stringify(res).includes(ANTHROPIC));
   assert.equal(await bootKey(h.envPath), K_A);
   assert.ok(!sm.calls.some((c) => c.op === 'PutSecretValue'), 'a new name is created, not put');
 });
 
-test('ANTHROPIC_API_KEY is optional', async () => {
+test('ANTHROPIC_API_KEY absent changes nothing', async () => {
   const h = host({ anthropic: null });
   const res = await M.migrateToSecretsManager(await opts(h));
   assert.deepEqual(res.moved, ['ENCRYPTION_KEY']);
@@ -82,7 +83,7 @@ test('an existing secret gets a new version: placeholder dropped, other keys kep
   sm.seed('plat', JSON.stringify({ PLACEHOLDER: 'generated', SMTP_PASS: 'keep' }));
   const h = host();
   await M.migrateToSecretsManager(await opts(h));
-  assert.deepEqual(JSON.parse(sm.current('plat')), { SMTP_PASS: 'keep', ENCRYPTION_KEY: K_A, ANTHROPIC_API_KEY: ANTHROPIC });
+  assert.deepEqual(JSON.parse(sm.current('plat')), { SMTP_PASS: 'keep', ENCRYPTION_KEY: K_A });
   assert.ok(sm.calls.some((c) => c.op === 'PutSecretValue'));
 });
 
@@ -150,7 +151,7 @@ test('refuses bad input and hosts with nothing to move', async () => {
   await refused(host(), { secretId: 'a\nENCRYPTION_KEY=evil' }, /not a valid secret/);
   await refused(host(), { region: 'x y' }, /not a valid region/);
   await refused(host({ key: null, anthropic: null }), {}, /nothing to move/);
-  await refused(host({ key: null }), {}, /no ENCRYPTION_KEY/);
+  await refused(host({ key: null }), {}, /nothing to move: .* holds none of ENCRYPTION_KEY/);
   await refused(host({ key: 'tooshort' }), {}, /64 hex/);
 });
 
@@ -302,7 +303,7 @@ test('CLI: status before, migrate, status after: names only, never a value', asy
   const s1 = await crane(['status'], h);
   assert.equal(s1.code, 0, s1.all);
   assert.match(s1.all, /not configured/);
-  assert.match(s1.all, /ENCRYPTION_KEY, ANTHROPIC_API_KEY/);
+  assert.match(s1.all, /Secret names still in \.env\s+ENCRYPTION_KEY\n/);
   assert.match(s1.all, /not measured/);
   assert.doesNotMatch(s1.all, /\bsafe\b/i);
 
@@ -313,7 +314,7 @@ test('CLI: status before, migrate, status after: names only, never a value', asy
 
   const m = await crane(['migrate', '--secret-id', 'plat', '--region', 'us-east-1', '--data-dir', h.dataDir, '--port', String(await freePort())], h);
   assert.equal(m.code, 0, m.all);
-  assert.match(m.all, /Moved ENCRYPTION_KEY, ANTHROPIC_API_KEY to plat/);
+  assert.match(m.all, /Moved ENCRYPTION_KEY to plat/);
   assert.ok(m.all.includes(join(snap, 'env.backup')), 'names the copy');
   assert.match(m.all, /crane rotate-key/);
 
@@ -324,7 +325,7 @@ test('CLI: status before, migrate, status after: names only, never a value', asy
   assert.equal(st.secret_id, 'plat');
   assert.equal(st.region, 'us-east-1');
   assert.equal(st.current_readable, true);
-  assert.deepEqual(st.keys, ['ANTHROPIC_API_KEY', 'ENCRYPTION_KEY']);
+  assert.deepEqual(st.keys, ['ENCRYPTION_KEY']);
   assert.deepEqual(st.still_in_env_file, []);
   assert.equal(st.imds.status, 'not_measured');
 

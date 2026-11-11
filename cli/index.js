@@ -252,6 +252,51 @@ program
     }
   });
 
+// ── SSO sign-in requirement (direct DB, server-only break-glass) ──────────────
+// "Require SSO sign-in" refuses password and API-key sign-in while an SSO
+// provider is on. If the IdP is down, an operator on the host turns it off here:
+// a direct database write, so it needs host access, not a network request.
+const sso = program.command('sso').description('Single sign-on policy (must run on server)');
+sso
+  .command('enforce <state>')
+  .description('Require SSO sign-in: on | off | status')
+  .action(async (state) => {
+    if (!['on', 'off', 'status'].includes(state)) {
+      out.err('Usage: crane sso enforce <on|off|status>');
+      process.exit(1);
+    }
+    try {
+      const { dirname, join } = await import('path');
+      const { fileURLToPath } = await import('url');
+      const __dirname = dirname(fileURLToPath(import.meta.url));
+      const { openDb, getDb, pendingMigrationNames } = await import(join(__dirname, '..', 'server', 'db.js'));
+      const { isSsoOnly, ssoProviderConfigured, SSO_SETTING_KEY } = await import(join(__dirname, '..', 'server', 'services', 'authPolicy.js'));
+      openDb();
+      refuseIfBehind(pendingMigrationNames());
+      const db = getDb();
+
+      if (state !== 'status') {
+        const value = state === 'on' ? 'true' : 'false';
+        db.prepare(`INSERT INTO settings (key, value, updated_by, updated_at) VALUES (?, ?, NULL, datetime('now'))
+          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_by = NULL, updated_at = datetime('now')`).run(SSO_SETTING_KEY, value);
+        const { logAudit } = await import(join(__dirname, '..', 'server', 'middleware', 'audit.js'));
+        try { logAudit(null, null, 'sso-enforce-cli', { value, via: 'crane sso enforce' }, 'system'); } catch (_) {}
+      }
+
+      const on = isSsoOnly(db);
+      const provider = ssoProviderConfigured(db);
+      out.ok(`Require SSO sign-in: ${on ? 'on' : 'off'}`);
+      if (on && provider) out.dim('In force: password and API-key sign-in are refused; sign in through the SSO provider.');
+      else if (on) out.dim('No SSO provider is enabled, so it has no effect: password sign-in works.');
+      else out.dim('Password sign-in and the API-key sign-in on the login page are allowed.');
+      if (state === 'off' && provider) out.dim('Turn it back on once the IdP works: crane sso enforce on (or Settings).');
+    } catch (e) {
+      out.err(`Failed: ${e.message}`);
+      out.dim('Make sure you run this from the appCrane directory.');
+      process.exit(1);
+    }
+  });
+
 // ── Update (git pull + systemctl restart) ──────────────────────────────
 program
   .command('update')

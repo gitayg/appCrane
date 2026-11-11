@@ -6,6 +6,7 @@ import { AppError } from '../utils/errors.js';
 import { verifyPassword } from '../services/encryption.js';
 import * as mfa from '../services/mfa.js';
 import { BOUNDS, DEFAULTS, issueSession, policyFor, readPolicy, writePolicy } from '../services/sessionPolicy.js';
+import { refuseUnlessSsoOptional } from '../services/authPolicy.js';
 import { REMEMBER_MAX_DAYS, listDevices, rememberDays, revokeAllDevices, revokeDevice, setRememberDays, trustDevice } from '../services/trustedDevices.js';
 
 // Mounted at /api/identity/mfa. Two halves:
@@ -50,9 +51,12 @@ function sessionBody(session, user) {
 }
 
 // ── second step of password sign-in ───────────────────────────────────────
+// A challenge outlives the password step that created it, so a sign-in begun
+// before "Require SSO sign-in" took effect is refused here too.
 
 router.post('/verify', (req, res) => {
   const db = getDb();
+  refuseUnlessSsoOptional(db, req, { method: 'password+mfa' });
   const ip = ipOf(req);
   const { mfa_token, code, remember_device } = req.body || {};
   if (!code || typeof code !== 'string') throw new AppError('code is required', 400, 'VALIDATION');
@@ -73,6 +77,7 @@ router.post('/verify', (req, res) => {
 
 router.post('/enroll/start', (req, res) => {
   const db = getDb();
+  refuseUnlessSsoOptional(db, req, { method: 'password+mfa-enroll' });
   const { mfa_token, algorithm } = req.body || {};
   const { user } = challengeOr400(db, mfa_token, 'enroll');
   try {
@@ -85,6 +90,7 @@ router.post('/enroll/start', (req, res) => {
 
 router.post('/enroll/confirm', (req, res) => {
   const db = getDb();
+  refuseUnlessSsoOptional(db, req, { method: 'password+mfa-enroll' });
   const ip = ipOf(req);
   const { mfa_token, code } = req.body || {};
   if (!code || typeof code !== 'string') throw new AppError('code is required', 400, 'VALIDATION');

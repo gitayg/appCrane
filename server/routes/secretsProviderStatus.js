@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { requireAuth, requirePlatformAdmin } from '../middleware/auth.js';
 import { getDb } from '../db.js';
 import { AppError } from '../utils/errors.js';
-import { appSecretPrefix, appSecretRoot, providerConfig } from '../services/secretsProvider/index.js';
+import { appSecretPrefix, appSecretRoot, appSecretsAvailable, providerConfig } from '../services/secretsProvider/index.js';
 
 const router = Router();
 
@@ -20,7 +20,8 @@ router.get('/', (req, res) => {
     provider: config?.provider ?? null,
     region: config?.region ?? null,
     platform_secret_configured: Boolean(config?.secretId),
-    app_prefix: config ? appPrefix() : null,
+    app_prefix: appSecretsAvailable() ? appPrefix() : null,
+    app_secrets: appSecretsAvailable(),
   });
 });
 

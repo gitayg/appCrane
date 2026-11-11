@@ -29,6 +29,7 @@ import { SiemSinks } from '../components/siem/SiemSinks'
 import { LlmGatewaySettingsCard } from '../components/llm/LlmGatewaySettingsCard'
 import { CryptographyCard } from '../components/crypto/CryptographyCard'
 import { SecretsManagerCard } from '../components/SecretsManagerCard'
+import { PlatformAnthropicKeyCard } from '../components/PlatformAnthropicKeyCard'
 import { ClassificationPolicyCard } from '../components/intake/ClassificationPolicyCard'
 import { AutoPatchPolicyCard } from '../components/autoPatch/AutoPatchPolicyCard'
 import { VulnAlertsCard } from '../components/vulnAlerts/VulnAlertsCard'
@@ -71,7 +72,7 @@ function SecurityTab() {
 
   // v2.7.0: require-SSO toggle. Disables password sign-in across the
   // instance; the IdP becomes the only browser login path.
-  const [ssoOnly, setSsoOnly] = useState(false)
+  const [ssoOnly, setSsoOnly] = useState(true)
   const [ssoOnlySaved, flashSsoOnlySaved] = useFlash()
   const [ssoOnlyError, setSsoOnlyError] = useState<string | null>(null)
 
@@ -98,7 +99,8 @@ function SecurityTab() {
     // Absent row means enabled - only an explicit '0' turns the catalogue off.
     adminApi.get<{ value?: string | null }>('/api/settings/catalog_enabled')
       .then(r => setCatalogEnabled(r?.value !== '0')).catch(() => {})
-    adminApi.get<{ value?: string }>('/api/settings/auth_sso_only').then(r => setSsoOnly(r?.value === 'true')).catch(() => {})
+    // On unless an admin stored 'false' (server/services/authPolicy.js).
+    adminApi.get<{ value?: string | null }>('/api/settings/auth_sso_only').then(r => setSsoOnly(r?.value !== 'false')).catch(() => {})
     adminApi.get<typeof embed>('/api/settings/embed/config').then(r => { if (r) setEmbed(r) }).catch(() => {})
     adminApi.get<{ enabled: boolean }>('/api/settings/edge/brotli').then(r => { if (r) setBrotliGuard(r.enabled) }).catch(() => {})
   }, [])
@@ -343,36 +345,34 @@ function SecurityTab() {
       </div>
 
       <div className="setting-card">
-        <h3>Require SSO</h3>
+        <h3>Require SSO sign-in</h3>
         <p>
-          Disable <strong>interactive password sign-in</strong> for everyone. The SSO button becomes
-          the only browser login path; the API-key break-glass paste is hidden too. OIDC or SAML must
-          be enabled and configured first.
+          Password and API-key sign-in are refused while an SSO provider is on. The SSO button is the
+          only way to sign in to the dashboard; setting or changing a password is refused too. On by
+          default.
         </p>
         <p style={{ fontSize: '.8rem', color: 'var(--dim)' }}>
-          Scope: this governs <em>browser/password</em> login only. Programmatic <strong>API keys</strong>{' '}
-          (<code style={{ fontFamily: 'monospace' }}>dhk_*</code> — CLI, MCP, CI) remain valid machine
-          credentials and are <em>not</em> disabled by this toggle; manage them under Users. To fully
-          cut off non-SSO access you must also revoke API keys.
+          API keys (<code style={{ fontFamily: 'monospace' }}>dhk_*</code> — CLI, MCP, CI) and MCP OAuth
+          tokens keep working as API credentials; they never open a dashboard session. If the identity
+          provider is down, turn this off on the server with{' '}
+          <code style={{ fontFamily: 'monospace' }}>crane sso enforce off</code>.
         </p>
-        {!(oidc.enabled || saml.enabled) && (
-          <div style={{
-            background: 'rgba(234,179,8,.12)', border: '1px solid var(--yellow)', color: 'var(--yellow)',
-            borderRadius: 6, padding: '8px 12px', marginBottom: 12, fontSize: '.84rem',
-          }}>
-            No SSO provider is enabled yet. Configure OIDC or SAML above before requiring SSO.
-          </div>
-        )}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
           <input
             type="checkbox"
             id="sso-only"
             checked={ssoOnly}
-            disabled={!ssoOnly && !(oidc.enabled || saml.enabled)}
             onChange={e => saveSsoOnly(e.target.checked)}
           />
-          <label htmlFor="sso-only" style={{ fontSize: '.85rem' }}>Require SSO (disable password sign-in)</label>
+          <label htmlFor="sso-only" style={{ fontSize: '.85rem' }}>Require SSO sign-in</label>
           {ssoOnlySaved && <span className="saved-msg">Saved ✓</span>}
+        </div>
+        <div style={{ fontSize: '.82rem', color: 'var(--dim)', marginBottom: 8 }}>
+          {!ssoOnly
+            ? 'Off: password sign-in is allowed.'
+            : (oidc.enabled || saml.enabled)
+              ? 'In force: only SSO sign-in is accepted.'
+              : 'No effect yet: no SSO provider is enabled, so password sign-in still works. It takes effect when OIDC or SAML is turned on.'}
         </div>
         {ssoOnlyError && (
           <div style={{ fontSize: '.82rem', color: 'var(--red)' }}>{ssoOnlyError}</div>
@@ -1411,7 +1411,7 @@ export function Settings() {
       {panel('account', <AccountTab />)}
       {panel('mcp', <Mcp />)}
       {panel('skills', <SkillsTab />)}
-      {panel('security', <><SecurityTab /><SignInPolicyCard /><McpAuthPolicyCard /><OAuthAdminCard /><ClassificationPolicyCard /><VulnAlertsCard /><AutoPatchPolicyCard /><RuntimePatchCard /><CryptographyCard /><SecretsManagerCard /><LlmGatewaySettingsCard /><SiemSinks /></>)}
+      {panel('security', <><SecurityTab /><SignInPolicyCard /><McpAuthPolicyCard /><OAuthAdminCard /><ClassificationPolicyCard /><VulnAlertsCard /><AutoPatchPolicyCard /><RuntimePatchCard /><CryptographyCard /><SecretsManagerCard /><PlatformAnthropicKeyCard /><LlmGatewaySettingsCard /><SiemSinks /></>)}
       {panel('users', <Users />)}
       {panel('roles', <RolesTab />)}
       {panel('github', <GithubTab />)}

@@ -1,4 +1,4 @@
-import { readFileSync, openSync, writeSync, fsyncSync, closeSync, chmodSync, renameSync, rmSync } from 'fs';
+import { readFileSync, openSync, writeSync, fsyncSync, closeSync, chmodSync, chownSync, renameSync, rmSync } from 'fs';
 import { dirname } from 'path';
 
 const LINE_RE = /^(\s*)ENCRYPTION_KEY\s*=(.*)$/;
@@ -35,9 +35,11 @@ export function readEnv(envPath) {
 /**
  * Write `text` next to envPath as a 0600 temp file, fsynced. Returns
  * { commit(), discard() }: commit renames it over envPath (atomic on one
- * filesystem) and fsyncs the directory.
+ * filesystem) and fsyncs the directory. With `like` (an fs.Stats of the file
+ * being replaced) the temp file takes its mode and owner, so a run as root
+ * leaves .env owned by the service user.
  */
-export function stageEnv(envPath, text) {
+export function stageEnv(envPath, text, { like = null } = {}) {
   const tmp = `${envPath}.rotate-${process.pid}.tmp`;
   const fd = openSync(tmp, 'wx', 0o600);
   try {
@@ -46,7 +48,13 @@ export function stageEnv(envPath, text) {
   } finally {
     closeSync(fd);
   }
-  chmodSync(tmp, 0o600);
+  try {
+    if (like && process.getuid?.() === 0 && (like.uid !== 0 || like.gid !== 0)) chownSync(tmp, like.uid, like.gid);
+    chmodSync(tmp, like ? like.mode & 0o777 : 0o600);
+  } catch (e) {
+    rmSync(tmp, { force: true });
+    throw e;
+  }
   return {
     path: tmp,
     commit() {

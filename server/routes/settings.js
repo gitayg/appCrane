@@ -2,7 +2,6 @@ import { Router } from 'express';
 import { getDb } from '../db.js';
 import { requireAuth, requirePlatformAdmin } from '../middleware/auth.js';
 import { PERMISSIONS, getMatrix, setMatrix, resetToDefaults } from '../services/permissions.js';
-import { ssoProviderConfigured } from '../services/authPolicy.js';
 import { encrypt } from '../services/encryption.js';
 import { reloadCaddy, BROTLI_GUARD_KEY, brotliGuardEnabled } from '../services/caddy.js';
 import { platformEmbedAncestors, platformRegistrableDomain } from '../utils/embed.js';
@@ -14,6 +13,7 @@ import { normalizeDomain, isolationEnabled, parseAppHost } from '../services/app
 import { accessSync, statSync, constants as fsConstants } from 'fs';
 import psl from 'psl';
 import log from '../utils/logger.js';
+import { logAudit } from '../middleware/audit.js';
 
 const router = Router();
 
@@ -38,6 +38,10 @@ const SENSITIVE_KEYS = new Set([
   // encrypted. A literal: test/settings-visibility.test.js reads this set
   // from the source.
   'managed_db_mariadb_encryption_key_enc',
+  // The platform Anthropic API key (services/platformAnthropicKey.js
+  // SETTING_KEY), encrypted. Read and written only through
+  // /api/appstudio/anthropic-key.
+  'platform_anthropic_key_encrypted',
 ]);
 
 /**
@@ -961,23 +965,29 @@ router.put('/:key', requireAuth, requirePlatformAdmin, (req, res) => {
   if (req.params.key === REMEMBER_KEY) {
     return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Use the sign-in security policy to change remembered devices' } });
   }
+  // A plaintext value written here would be handed to agents as the key.
+  if (req.params.key === 'platform_anthropic_key_encrypted') {
+    return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Use /api/appstudio/anthropic-key to change the platform Anthropic key' } });
+  }
   if (req.params.key === 'auto_approve_rce_fixes' || req.params.key === 'auto_patch_cooldown_hours') {
     return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Use /api/auto-patch/policy to change the auto-patch policy' } });
   }
   const db = getDb();
 
-  // v2.7.0: guard SSO-only so it can't lock the org out. Refuse to turn it
-  // on unless an SSO provider (OIDC or SAML) is already enabled.
-  if (req.params.key === 'auth_sso_only' && String(value) === 'true' && !ssoProviderConfigured(db)) {
-    return res.status(400).json({
-      error: { code: 'NO_SSO_PROVIDER', message: 'Enable and configure an SSO provider (OIDC or SAML) before requiring SSO-only login.' },
-    });
+  // Require SSO sign-in is in force only while a provider is enabled
+  // (services/authPolicy.js ssoRequired), so 'true' with none is a no-op that
+  // takes effect when OIDC or SAML is turned on, the same as the default.
+  if (req.params.key === 'auth_sso_only' && !['true', 'false'].includes(String(value))) {
+    return res.status(400).json({ error: { code: 'VALIDATION', message: "auth_sso_only must be 'true' or 'false'" } });
   }
 
   db.prepare(`
     INSERT INTO settings (key, value, updated_by, updated_at) VALUES (?, ?, ?, datetime('now'))
     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_by = excluded.updated_by, updated_at = datetime('now')
   `).run(req.params.key, String(value), req.user.id);
+  if (req.params.key === 'auth_sso_only') {
+    logAudit(req.user.id, null, 'sso-enforce-set', { value: String(value) });
+  }
   res.json({ key: req.params.key, value, message: 'Setting saved' });
 });
 

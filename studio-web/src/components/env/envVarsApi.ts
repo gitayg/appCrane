@@ -39,6 +39,7 @@ export interface SecretsProviderStatus {
   region: string | null
   platform_secret_configured: boolean
   app_prefix: string | null
+  app_secrets: boolean
 }
 
 const base = (slug: string, env: EnvName) =>

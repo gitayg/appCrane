@@ -13,6 +13,7 @@ import { usesLocalRepo } from './managedRepo.js';
 import { runLocalAskJob } from './askLocalRepo.js';
 import { OOM_APP_FLAG } from './oomPriority.js';
 import { CPU_APP_FLAG } from './cpuPriority.js';
+import { getPlatformAnthropicKey } from './platformAnthropicKey.js';
 
 const ASK_IMAGE      = process.env.APPSTUDIO_IMAGE || 'appcrane-studio:latest';
 const ASK_MODEL      = process.env.APPSTUDIO_CODER_MODEL || 'claude-sonnet-4-6';
@@ -164,11 +165,10 @@ async function ensureSessionContainer(sessionId, app, onLog) {
     '--pids-limit=256',
     '-e', `ASK_MODEL=${ASK_MODEL}`,
   ];
-  // Only set ANTHROPIC_API_KEY when no per-app OAuth credentials are
-  // mounted — Claude CLI prefers the env var over credentials.json so
-  // setting both means the global key wins and the operator's
-  // subscription is bypassed.
-  if (!credsMount) dockerArgs.push('-e', `ANTHROPIC_API_KEY=${process.env.ANTHROPIC_API_KEY || ''}`);
+  // No ANTHROPIC_API_KEY on the container itself: only runAgentExec runs
+  // claude here, and it hands the key to that one `docker exec` in an
+  // --env-file. A key set at `docker run` would sit in the container's config
+  // for `docker inspect` for the whole session.
   // Mount creds at BOTH credentials.json and .credentials.json — newer
   // Claude Code releases moved to the dot-prefixed path.
   if (credsMount)  dockerArgs.push('-v', `${credsMount.tmpFile}:/home/studio/.claude/credentials.json`);
@@ -218,7 +218,7 @@ export async function runAskJob({ sessionId, app, question, history, agentContex
     const runner = runAgentExec({
       containerId: session.containerName,
       prompt,
-      apiKey: process.env.ANTHROPIC_API_KEY,
+      apiKey: getPlatformAnthropicKey(),
       model: ASK_MODEL,
       timeoutMs: ASK_TIMEOUT_MS + 60000,
       hasAppCredentials: !!session.credsCleanup,

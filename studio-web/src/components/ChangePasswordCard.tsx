@@ -35,9 +35,14 @@ export function ChangePasswordCard() {
     adminApi.get<{ user: { has_password?: boolean } }>('/api/auth/me')
       .then(m => setHasPassword(!!m.user.has_password))
       .catch(e => setLoadErr(e instanceof Error ? e.message : 'Could not read your account'))
-    adminApi.get<{ value?: string }>('/api/settings/auth_sso_only')
-      .then(r => setSsoOnly(r?.value === 'true'))
-      .catch(() => setSsoOnly(false))
+    // In force when the switch is not 'false' AND a provider is enabled
+    // (server/services/authPolicy.js); the server refuses set-password then.
+    const enabled = (u: string) => fetch(u).then(r => r.json()).then(c => !!c?.enabled).catch(() => false)
+    Promise.all([
+      adminApi.get<{ value?: string | null }>('/api/settings/auth_sso_only').then(r => r?.value !== 'false').catch(() => false),
+      enabled('/api/auth/oidc/config'),
+      enabled('/api/auth/saml/config'),
+    ]).then(([on, oidc, saml]) => setSsoOnly(on && (oidc || saml)))
   }, [])
 
   async function save() {

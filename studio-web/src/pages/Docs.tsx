@@ -285,6 +285,8 @@ export function Docs() {
             <li><code>crane update</code> — git pull + systemctl restart</li>
             <li><code>crane regenerate-key</code> — recover a lost platform-owner API key (targets the <code>platform_admin</code>; add <code>--email &lt;e&gt;</code> or <code>--user-id &lt;n&gt;</code> for a specific account)</li>
             <li>Personal API keys are created only on request: no user gets one at sign-in or provisioning. Create yours at Settings &gt; Account; a platform admin can issue one from Users.</li>
+            <li><code>crane sso enforce off|on|status</code> — break-glass for Require SSO sign-in when the identity provider is down (host access only)</li>
+            <li><code>sudo crane secrets migrate --provider systemd-creds</code> — move <code>ENCRYPTION_KEY</code> out of <code>.env</code> into systemd encrypted credentials; <code>crane secrets status</code> checks it</li>
             <li><code>crane reconcile</code> — register orphaned filesystem apps into the DB</li>
             <li><code>crane status</code> — server health + app summary</li>
             <li><code>crane config export --out config.json</code> — export platform settings (secrets stay encrypted)</li>

@@ -196,3 +196,10 @@ test('a reference is stored as one ordinary encrypted blob, in the column key ro
   assert.match(blob, ENCRYPTED_RE);
   assert.equal(decrypt(blob), 'secretsmanager:TOKEN#field');
 });
+
+test('systemd-creds holds no app secrets: references and store requests are refused, naming the AWS provider', () => {
+  const systemd = { config: () => ({ provider: 'systemd-creds', secretId: null, region: null }) };
+  assert.throws(() => assertStorableValue('secretsmanager:DB_URL', systemd), (e) => e.code === 'SECRETS_PROVIDER_NOT_CONFIGURED' && /aws-secrets-manager/.test(e.message));
+  assert.throws(() => assertStoreRequest('sandbox', { K: 'v' }, systemd), (e) => e.code === 'SECRETS_PROVIDER_NOT_CONFIGURED' && /systemd-creds/.test(e.message));
+  assert.doesNotThrow(() => assertStorableValue('plain value', systemd));
+});

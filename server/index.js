@@ -104,6 +104,9 @@ import { refererSlug } from './utils/refererSlug.js';
 import { globalNotices } from './services/platformNotices.js';
 import { adminExists } from './services/adminExists.js';
 import { loadPlatformSecrets } from './services/secretsProvider/index.js';
+import { migratePlatformAnthropicKey } from './services/platformAnthropicKeyBoot.js';
+import { scrubLegacyAuditSecrets } from './services/auditLegacyScrub.js';
+import { getPlatformAnthropicKey } from './services/platformAnthropicKey.js';
 import { enforceFipsAtStartup } from './services/fipsMode.js';
 import appMcpRoutes, { appMcpWellKnownRouter } from './routes/appMcp.js';
 
@@ -114,13 +117,17 @@ try { enforceFipsAtStartup({ log }); } catch (e) { log.error(e.message); process
 
 // Initialize database
 initDb();
-sweepLegacyAskSessions();
 // Checkpoint the WAL from a worker thread instead of inside whichever request
 // commits past the threshold (services/dbCheckpoint.js has the measurements).
 {
   const { startBackgroundCheckpoints } = await import('./services/dbCheckpoint.js');
   startBackgroundCheckpoints();
 }
+// ANTHROPIC_API_KEY moves from .env / the environment into the database, and
+// process.env stops carrying it (services/platformAnthropicKeyBoot.js).
+migratePlatformAnthropicKey({ envPath });
+scrubLegacyAuditSecrets();
+sweepLegacyAskSessions();
 // Anonymous daily install check-in: counts and versions only, opt out with
 // APPCRANE_CHECKIN=off (services/installCheckin.js lists every field).
 {
@@ -1685,7 +1692,7 @@ app.listen(PORT, HOST, async () => {
     // unprocessed on a platform with no ANTHROPIC_API_KEY. Fixing it properly
     // means the worker resolving a credential PER JOB (from
     // enhancement_requests.user_id) and starting unconditionally.
-    if (process.env.ANTHROPIC_API_KEY) {
+    if (getPlatformAnthropicKey()) {
       const { startWorker } = await import('./services/appstudio/worker.js');
       startWorker();
     }

@@ -74,6 +74,12 @@ export function registerRotateKey(program, out) {
           process.exit(1);
         }
         console.log('');
+        if (res.provider?.kind === 'systemd-creds') {
+          out.ok(`ENCRYPTION_KEY rotated. The systemd credential ${res.provider.file} now holds the new key; every value was checked against it.`);
+          out.info(`Backup, encrypted under the old key: ${res.backupDir} (the old credential is ${res.provider.previous_copy}; it decrypts only on this host)`);
+          out.dim(`Start AppCrane (sudo systemctl start appcrane) and check it. Keep an offline copy of the new key: sudo systemd-creds decrypt --name=${res.provider.credential} ${res.provider.file} -`);
+          return;
+        }
         if (res.provider) {
           out.ok(`ENCRYPTION_KEY rotated. AWSCURRENT of ${res.provider.secret_id} now holds the new key (version ${res.provider.version_id}); every value was checked against it.`);
           out.info(`Backup, encrypted under the old key: ${res.backupDir}`);

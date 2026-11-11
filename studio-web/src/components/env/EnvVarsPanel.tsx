@@ -43,7 +43,7 @@ export function EnvVarsPanel({ slug, env, reload, onMsg, onChanged, compact }: E
   // and the PUT's 400 explains when the provider is off.
   useEffect(() => {
     loadSecretsProviderStatus()
-      .then(s => setOfferSecretsManager(s.active))
+      .then(s => setOfferSecretsManager(s.app_secrets))
       .catch(e => setOfferSecretsManager(e instanceof ApiError && e.status === 403))
   }, [])
 

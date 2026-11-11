@@ -24,6 +24,7 @@ import { defaultCoderModel } from './coderModels.js';
 import log from '../../utils/logger.js';
 import { OOM_APP_FLAG } from '../oomPriority.js';
 import { CPU_APP_FLAG } from '../cpuPriority.js';
+import { getPlatformAnthropicKey, writeSecretEnvFile } from '../platformAnthropicKey.js';
 
 const DEFAULT_TIMEOUT = parseInt(process.env.CODER_TIMEOUT_MS || '1800000', 10);
 
@@ -67,7 +68,47 @@ export const NO_CREDENTIAL_MESSAGE =
 function platformApiKey(apiKey) {
   // `undefined` means "caller didn't say" → fall back to the platform key.
   // An explicit '' or null means "deliberately no key".
-  return (apiKey === undefined ? process.env.ANTHROPIC_API_KEY : apiKey) || '';
+  return (apiKey === undefined ? getPlatformAnthropicKey() : apiKey) || '';
+}
+
+// No credential is ever an argv element (`ps` shows argv to every local user)
+// or a container's config (`docker inspect` shows Config.Env, Cmd and Args).
+//
+// exec mode: a 0600 --env-file. Docker reads it when it parses its flags, and
+// a `docker exec`'s env is not recorded anywhere `docker inspect` shows.
+//
+// run mode: --env-file is NOT enough — Docker copies its values into the new
+// container's Config.Env (measured on Docker 29). The value goes on the
+// container's stdin instead: the command is wrapped in a fixed sh line that
+// reads one line into the variable, exports it and execs the real command with
+// stdin from /dev/null. No file, so no uid to match (the studio user is uid
+// 100; AppCrane is uid 1000 on Linux and remapped by Docker Desktop on macOS).
+//
+// An empty value has nothing to hide and stays a plain `-e`.
+function pushSecretEnvFile(args, name, value) {
+  const file = writeSecretEnvFile({ [name]: value });
+  args.push('--env-file', file.path);
+  return file;
+}
+
+function pushApiKeyEnv(args, key) {
+  if (!key) { args.push('-e', 'ANTHROPIC_API_KEY='); return null; }
+  return pushSecretEnvFile(args, 'ANTHROPIC_API_KEY', key);
+}
+
+const STDIN_CREDENTIAL_NAMES = new Set(['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN']);
+
+/** The wrapper's sh line. `name` is one of two constants, never input. */
+export function stdinCredentialScript(name) {
+  if (!STDIN_CREDENTIAL_NAMES.has(name)) throw new Error(`unexpected credential name ${name}`);
+  return `if ! IFS= read -r ${name}; then echo "[credential] ${name} was not delivered" >&2; exit 75; fi; `
+    + `export ${name}; exec "$@" </dev/null`;
+}
+
+function stdinCredential(name, value) {
+  const v = String(value);
+  if (/[\r\n\0]/.test(v)) throw new Error(`${name} contains a line break`);
+  return { name, value: v };
 }
 
 // A credential lookup must never turn a dispatch into a 500. If the store is
@@ -340,7 +381,7 @@ function attachStdoutParser(child, emitter) {
 }
 
 class Agent extends EventEmitter {
-  constructor(dockerArgs, timeoutMs, secrets = []) {
+  constructor(dockerArgs, timeoutMs, secrets = [], stdinCredential = null) {
     super();
     // Values that must not reach a log line, an Error, a stream event or the
     // stderr tail. Today that is the caller's CLAUDE_CODE_OAUTH_TOKEN.
@@ -352,7 +393,9 @@ class Agent extends EventEmitter {
     this._stopped    = false;
     this._cleanups   = [];
     this._cleanedUp  = false;
+    this._startCleanups = [];
     this._stderrTail = [];
+    this._stdinCredential = stdinCredential;
   }
 
   /** Last ~20 lines of docker/agent stderr — useful for diagnosing nonzero exit codes. */
@@ -364,13 +407,33 @@ class Agent extends EventEmitter {
    */
   getDockerArgs() { return this._dockerArgs.slice(); }
 
+  /**
+   * { name, value } of the credential written to the container's stdin (run
+   * mode), or null. Tests only — it IS the secret; never log it.
+   */
+  getStdinCredential() { return this._stdinCredential ? { ...this._stdinCredential } : null; }
+
   // Register a cleanup callback that runs exactly once on exit/error/stop.
   // Used by skills mount preparation to remove the per-call symlink dir.
   registerCleanup(fn) {
     if (typeof fn === 'function') this._cleanups.push(fn);
   }
 
+  // Runs once docker is past parsing its flags (its first output, or its exit):
+  // the exec-mode --env-file holding the credential is removed then, not at job end.
+  registerStartCleanup(fn) {
+    if (typeof fn === 'function') this._startCleanups.push(fn);
+  }
+
+  _runStartCleanups() {
+    const fns = this._startCleanups.splice(0);
+    for (const fn of fns) {
+      try { fn(); } catch (e) { log.warn(`Agent cleanup failed: ${e.message}`); }
+    }
+  }
+
   _runCleanups() {
+    this._runStartCleanups();
     if (this._cleanedUp) return;
     this._cleanedUp = true;
     for (const fn of this._cleanups) {
@@ -387,6 +450,17 @@ class Agent extends EventEmitter {
     }, this._timeoutMs);
 
     attachStdoutParser(this._child, this);
+    if (this._stdinCredential) {
+      // A container that exited before reading it closes the pipe: EPIPE here
+      // is reported by the exit code, not as a crash.
+      this._child.stdin.on('error', () => {});
+      this._child.stdin.end(`${this._stdinCredential.value}\n`);
+    }
+    if (this._startCleanups.length) {
+      const started = () => this._runStartCleanups();
+      this._child.stdout.once('data', started);
+      this._child.stderr.once('data', started);
+    }
 
     this._child.on('error', (err) => {
       clearTimeout(this._timer);
@@ -433,6 +507,7 @@ export function runAgentExec({
   mcpConfig    = null,        // JSON for --mcp-config (services/coderMcpKey.js)
   allowedTools = [],          // MCP tool names pre-approved for Plan / Edits-only modes
   secrets      = [],          // further values scrubbed from the agent's output
+  cmd          = null,        // argv replacing `sh -c <claude ...>` (tests only)
 }) {
   // One decision, shared with runAgentNew — see the precedence block above.
   const cred = resolveAgentCredential(
@@ -443,13 +518,6 @@ export function runAgentExec({
     '--workdir', workdir,
     '-e', `HOME=${homeDir}`,
   ];
-  if (cred.kind === 'user_oauth') {
-    // ANTHROPIC_API_KEY deliberately absent: it outranks CLAUDE_CODE_OAUTH_TOKEN,
-    // so setting both would bill the platform key and ignore the subscription.
-    args.push('-e', `CLAUDE_CODE_OAUTH_TOKEN=${cred.oauthToken}`);
-  } else if (cred.kind !== 'app_credentials') {
-    args.push('-e', `ANTHROPIC_API_KEY=${cred.apiKey || ''}`);
-  }
   // Preflight what we expect to be mounted in the container that was
   // started by appContainer.startContainer. This catches mode/uid issues
   // (umask-stripped perms, wrong owner) before claude swallows EACCES
@@ -458,33 +526,52 @@ export function runAgentExec({
   if (cred.kind === 'app_credentials') {
     preflight.push({ path: `${homeDir}/.claude/credentials.json`, mode: 'rw', label: 'Claude credentials' });
   }
-  args.push(
-    containerId,
-    'sh', '-c',
-    buildClaudeCmd({ prompt, model, resume, addDir, systemPrompt, preflight, permissionMode, mcpConfig, allowedTools }),
-  );
-  return new Agent(args, timeoutMs, [cred.oauthToken, ...secrets]);
+  // Built before the env file is written, so a refused command leaves none.
+  const tail = cmd || ['sh', '-c', buildClaudeCmd({ prompt, model, resume, addDir, systemPrompt, preflight, permissionMode, mcpConfig, allowedTools })];
+  // ANTHROPIC_API_KEY deliberately absent with a user token: it outranks
+  // CLAUDE_CODE_OAUTH_TOKEN, so setting both would bill the platform key and
+  // ignore the subscription.
+  let envFile = null;
+  if (cred.kind === 'user_oauth') envFile = pushSecretEnvFile(args, 'CLAUDE_CODE_OAUTH_TOKEN', cred.oauthToken);
+  else if (cred.kind !== 'app_credentials') envFile = pushApiKeyEnv(args, cred.apiKey);
+  args.push(containerId, ...tail);
+  const agent = new Agent(args, timeoutMs, [cred.oauthToken, cred.apiKey, ...secrets]);
+  if (envFile) agent.registerStartCleanup(envFile.cleanup);
+  return agent;
 }
 
 // ── run mode — used by enhancement coder + Ask (fresh container per job) ──
 
 export function runAgentNew(opts) {
-  const { args, secrets, cleanups } = buildRunAgentNew(opts);
-  const agent = new Agent(args, opts.timeoutMs ?? DEFAULT_TIMEOUT, secrets);
+  const { args, secrets, cleanups, stdinCredential } = buildRunAgentNew(opts);
+  const agent = new Agent(args, opts.timeoutMs ?? DEFAULT_TIMEOUT, secrets, stdinCredential);
   for (const fn of cleanups) agent.registerCleanup(fn);
   return agent;
 }
 
 /**
- * The argv runAgentNew would hand to docker, without spawning anything. Any
+ * What runAgentNew would run, without spawning anything: the argv and the
+ * { name, value } it would write to the container's stdin (or null). Any
  * per-call file it prepared (skills farm, credentials copy) is removed before
- * it returns, so the argv is for inspection and for tests that run it with
- * neither. It CONTAINS the credential: never log it.
+ * it returns. The argv holds no credential; `stdinCredential` IS one, so this
+ * is for tests only — never log it.
+ */
+export function runAgentNewPlan(opts) {
+  const { args, cleanups, stdinCredential } = buildRunAgentNew(opts);
+  for (const fn of cleanups) { try { fn(); } catch (_) {} }
+  return { args, stdinCredential };
+}
+
+/**
+ * The argv runAgentNew would hand to docker, minus the credential: no `-i`
+ * and no stdin wrapper, so a run of it (tests that start it with no stdin)
+ * has no platform key and no user token. Per-call files are removed as in
+ * runAgentNewPlan.
  */
 export function runAgentNewArgs(opts) {
-  const { args, cleanups } = buildRunAgentNew(opts);
+  const { bareArgs, cleanups } = buildRunAgentNew(opts);
   for (const fn of cleanups) { try { fn(); } catch (_) {} }
-  return args;
+  return bareArgs;
 }
 
 const PULL_POLICIES = new Set(['never', 'missing', 'always']);
@@ -569,8 +656,9 @@ function buildRunAgentNew({
   // (manifested as "Credit balance is too low" against the wrong account).
   const cred = resolveAgentCredential({ actingUserId, oauthToken, appSlug, apiKey, allowAppCredentials }, credentialDeps);
   let credsMount = null;
+  let stdinCred = null;
   if (cred.kind === 'user_oauth') {
-    args.push('-e', `CLAUDE_CODE_OAUTH_TOKEN=${cred.oauthToken}`);
+    stdinCred = stdinCredential('CLAUDE_CODE_OAUTH_TOKEN', cred.oauthToken);
   } else {
     credsMount = cred.kind === 'app_credentials' ? prepareClaudeCredentialsMount(appSlug) : null;
     if (credsMount) {
@@ -585,9 +673,13 @@ function buildRunAgentNew({
       // Includes the 'app_credentials' row that turned out to be unreadable —
       // prepareClaudeCredentialsMount logs and returns null, and the platform
       // key is still better than dispatching with nothing.
-      args.push('-e', `ANTHROPIC_API_KEY=${platformApiKey(apiKey)}`);
+      const key = platformApiKey(apiKey);
+      if (key) stdinCred = stdinCredential('ANTHROPIC_API_KEY', key);
+      else args.push('-e', 'ANTHROPIC_API_KEY=');
     }
   }
+  // Where `-i` goes: the bare argv (runAgentNewArgs) is this argv without it.
+  const stdinFlagAt = stdinCred ? args.push('-i') - 1 : -1;
   for (const [k, v] of Object.entries(envVars)) args.push('-e', `${k}=${v}`);
   args.push('-v', `${workspaceDir}:/workspace${workspaceMode === 'ro' ? ':ro' : ''}`);
   for (const m of extraMounts) {
@@ -616,8 +708,14 @@ function buildRunAgentNew({
     for (const fn of cleanups) { try { fn(); } catch (_) {} }
     throw err;
   }
-  args.push(image, ...tail);
-  return { args, secrets: [cred.oauthToken, ...secrets], cleanups };
+  const bareArgs = args.filter((_, i) => i !== stdinFlagAt).concat(image, ...tail);
+  if (stdinCred) {
+    // `appcrane-credential` is $0 of the wrapper; the real command is "$@".
+    args.push(image, 'sh', '-c', stdinCredentialScript(stdinCred.name), 'appcrane-credential', ...tail);
+  } else {
+    args.push(image, ...tail);
+  }
+  return { args, bareArgs, secrets: [cred.oauthToken, cred.apiKey, ...secrets], cleanups, stdinCredential: stdinCred };
 }
 
 // One-shot wrapper: run a fresh container, collect text + usage into a Promise.

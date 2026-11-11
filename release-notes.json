@@ -1,4 +1,10 @@
 {
+  "2.136.0": [
+    "The platform Anthropic key is now set in Settings > Security and stored encrypted in AppCrane's database, moved out of the server's .env file automatically. Neither it nor your own Claude token shows up in the server's container or process listings any more.",
+    "AppCrane's master encryption key can be kept in the server's own encrypted credential store (systemd) instead of the .env file, with no cloud service needed.",
+    "Require SSO sign-in is now on by default wherever single sign-on is set up: passwords and API-key sign-in can't be used to get around your identity provider. Admins can turn it off in Settings > Security.",
+    "Security fix: secret values that very old audit entries recorded in full are now masked."
+  ],
   "2.135.1": [
     "Security fix: the AWS Secrets Manager platform secret now accepts only the keys AppCrane uses, so nobody who can edit that secret can change how the server runs.",
     "Security fix: API rate limits can no longer be stretched by sending extra made-up keys alongside a valid sign-in."

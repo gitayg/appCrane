@@ -3,6 +3,7 @@ import { providerConfig, platformVersions, readPlatformSecret } from './index.js
 import { PLACEHOLDER_KEY, PLATFORM_SECRET_NAMES } from './keyPolicy.js';
 import { applyProviderSettings, parseEnvText } from './envText.js';
 import { probeImds } from './imdsProbe.js';
+import { systemdStatus } from './statusSystemd.js';
 
 /** crane secrets status. Key names only, never a value. */
 export async function secretsStatus({ envPath, probe = probeImds }) {
@@ -10,6 +11,7 @@ export async function secretsStatus({ envPath, probe = probeImds }) {
   applyProviderSettings(text);
   const parsed = parseEnvText(text);
   const cfg = providerConfig();
+  if (cfg?.provider === 'systemd-creds') return systemdStatus({ parsed });
   const out = {
     provider: cfg?.provider ?? null,
     secret_id: cfg?.secretId ?? null,

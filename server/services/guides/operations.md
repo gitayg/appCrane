@@ -344,6 +344,26 @@ REST: `PUT /api/apps/:slug/env/:env` with `{ "vars": {...}, "store": "secrets_ma
   secrets: give that AppCrane its own `APPCRANE_SECRETS_APP_PREFIX`.
 - AWS asks for no more than one `PutSecretValue` per secret every 10 minutes, sustained.
 
+## Keeping ENCRYPTION_KEY in systemd encrypted credentials
+
+For hosts without AWS. AppCrane must run as the systemd unit `appcrane` (systemd 250+).
+
+1. `sudo systemctl stop appcrane`
+2. `sudo crane secrets migrate --provider systemd-creds --dry-run` shows the credential, the drop-in and the .env change.
+3. `sudo crane secrets migrate --provider systemd-creds` backs .env up to /var/backups/appcrane (root, 0600), seals the key with `systemd-creds encrypt` (value on stdin), decrypts it back and compares, writes /etc/systemd/system/appcrane.service.d/credentials.conf (`LoadCredentialEncrypted=appcrane.ENCRYPTION_KEY:/etc/credstore.encrypted/appcrane.ENCRYPTION_KEY`), runs daemon-reload, and only then removes the key from .env. It prints the rollback steps.
+4. `sudo systemctl start appcrane`. The log shows `platform secret loaded (keys: ENCRYPTION_KEY)`.
+5. Keep an offline copy of the key (`sudo systemd-creds decrypt --name=appcrane.ENCRYPTION_KEY /etc/credstore.encrypted/appcrane.ENCRYPTION_KEY -`), then `sudo shred -u` the .env backup. The credential opens only on this host: losing /var/lib/systemd/credential.secret, or the disk, without that copy loses every encrypted value.
+
+The boot fails closed: no CREDENTIALS_DIRECTORY, a missing appcrane.* credential, a name off the allowlist, or a different value in .env stops it; it never falls back to .env. If the credential file itself is missing, systemd refuses the unit (status 243/CREDENTIALS). `sudo crane secrets status` lists the drop-in, the credential files, the keys a boot would load and keys still in .env. `sudo crane rotate-key` (AppCrane stopped) seals the new key as a new credential and never writes it to .env. App secret references (`secretsmanager:<NAME>`) need the AWS provider.
+
+Rollback: stop the unit, `sudo install` the .env backup back with its old mode and owner, remove the drop-in, daemon-reload, start.
+
+## Require SSO sign-in
+
+`auth_sso_only` is on unless a platform admin turns it off, and it takes effect only while an SSO provider (OIDC or SAML) is enabled. In force, the IdP is the only way to a dashboard session: password login, the MFA second step, setting or changing a password (by session or by personal API key), and admin password resets answer `403 SSO_REQUIRED`, each audited as `sso-required-refused`. API keys, MCP keys, OAuth access tokens and app sign-in keys are API credentials and keep working; none of them creates a session. Migration 170 sets the switch on wherever a provider is enabled. Sessions already issued stay valid until they expire.
+
+Break-glass (IdP down): on the AppCrane host, from the install directory, run `crane sso enforce off`. It writes the setting straight into the database (no network request, so it needs host access) and audits `sso-enforce-cli`. Run `crane sso enforce on` once the IdP is back; `crane sso enforce status` shows the stored switch and whether it is in force.
+
 ## Per-app access management
 
 The five tools that replace the old `/users` dashboard for an agent doing

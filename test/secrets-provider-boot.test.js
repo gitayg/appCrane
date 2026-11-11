@@ -149,7 +149,7 @@ const api = (s, method, path, body) => fetch(`${s.base}${path}`, {
   method, headers: { 'X-API-Key': ADMIN_KEY, 'Content-Type': 'application/json' }, ...(body ? { body: JSON.stringify(body) } : {}),
 });
 
-test('migrate, then boot from the secret: old data still decrypts; the Anthropic route and status route use the provider', async () => {
+test('migrate, then boot from the secret: old data still decrypts; the status route uses the provider; the Anthropic key goes to the database', async () => {
   // A host on .env: first boot creates the database, a value is stored under the key.
   const dir = tree(`ENCRYPTION_KEY=${K_A}\nANTHROPIC_API_KEY=${ANTHROPIC}\n`);
   const first = await startServer(dir);
@@ -175,8 +175,8 @@ test('migrate, then boot from the secret: old data still decrypts; the Anthropic
   cli.stderr.on('data', (d) => { cliOut += d; });
   assert.equal(await new Promise((r) => cli.on('exit', r)), 0, cliOut);
   assert.ok(!cliOut.includes(K_A) && !cliOut.includes(ANTHROPIC));
-  const envAfter = readFileSync(join(dir, '.env'), 'utf8');
-  assert.ok(!envAfter.includes(K_A) && !envAfter.includes(ANTHROPIC));
+  assert.ok(!readFileSync(join(dir, '.env'), 'utf8').includes(K_A));
+  assert.ok(!readFileSync(join(dir, '.env'), 'utf8').includes(ANTHROPIC), 'the first boot already moved ANTHROPIC_API_KEY into the database');
 
   const s = await startServer(dir);
   await waitUp(s);
@@ -192,35 +192,28 @@ test('migrate, then boot from the secret: old data still decrypts; the Anthropic
     assert.equal(stBody.platform_secret_configured, true);
     assert.equal((await fetch(`${s.base}/api/settings/secrets-provider`)).status, 401, 'and needs auth');
 
+    // The boot moved the .env key into the database and dropped the line.
     const g1 = await (await api(s, 'GET', '/api/appstudio/anthropic-key')).json();
-    assert.deepEqual([g1.configured, g1.source], [true, 'secrets-manager']);
+    assert.deepEqual([g1.configured, g1.source, g1.suffix], [true, 'database', ANTHROPIC.slice(-4)]);
+    const envAfter = readFileSync(join(dir, '.env'), 'utf8');
+    assert.ok(!envAfter.includes(ANTHROPIC) && !envAfter.includes(K_A));
 
-    // A failed write: an error, neither side changes.
+    // A new key goes to the database: the platform secret and .env stay as they are.
     const beforeSecret = sm.current('plat');
-    sm.faults.PutSecretValue = (input) => sm.err('InternalServiceError', `echo ${input.SecretString}`);
-    const bad = await api(s, 'PUT', '/api/appstudio/anthropic-key', { key: 'sk-new-value-1' });
-    assert.equal(bad.status, 502);
-    assert.ok(!JSON.stringify(await bad.json()).includes('sk-new-value-1'));
-    assert.equal(sm.current('plat'), beforeSecret);
-    assert.equal(readFileSync(join(dir, '.env'), 'utf8'), envAfter);
-    const g2 = await (await api(s, 'GET', '/api/appstudio/anthropic-key')).json();
-    assert.equal(g2.suffix, ANTHROPIC.slice(-4), 'the running key did not change');
-    delete sm.faults.PutSecretValue;
-
     const good = await api(s, 'PUT', '/api/appstudio/anthropic-key', { key: 'sk-new-value-2' });
     assert.equal(good.status, 200);
-    assert.equal(JSON.parse(sm.current('plat')).ANTHROPIC_API_KEY, 'sk-new-value-2');
-    assert.equal(JSON.parse(sm.current('plat')).ENCRYPTION_KEY, K_A, 'the rest of the secret is kept');
+    assert.equal(sm.current('plat'), beforeSecret, 'the platform secret is not written');
+    assert.deepEqual(JSON.parse(sm.current('plat')), { ENCRYPTION_KEY: K_A });
     assert.equal(readFileSync(join(dir, '.env'), 'utf8'), envAfter, '.env is not written');
     const g3 = await (await api(s, 'GET', '/api/appstudio/anthropic-key')).json();
-    assert.deepEqual([g3.source, g3.suffix], ['secrets-manager', 'ue-2']);
+    assert.deepEqual([g3.source, g3.suffix], ['database', 'ue-2']);
   } finally {
     await stop(s);
   }
   assert.ok(!s.all.includes(K_A) && !s.all.includes(ANTHROPIC) && !s.all.includes('sk-new-value'), 'no value in the server log');
 });
 
-test('without a provider the Anthropic route still writes .env', async () => {
+test('without a provider the Anthropic route stores the key in the database, never in .env', async () => {
   const dir = tree(`ENCRYPTION_KEY=${K_A}\n`);
   const first = await startServer(dir);
   await waitUp(first);
@@ -230,8 +223,8 @@ test('without a provider the Anthropic route still writes .env', async () => {
   await waitUp(s);
   try {
     assert.equal((await api(s, 'PUT', '/api/appstudio/anthropic-key', { key: 'sk-env-value' })).status, 200);
-    assert.match(readFileSync(join(dir, '.env'), 'utf8'), /^ANTHROPIC_API_KEY=sk-env-value$/m);
-    assert.equal((await (await api(s, 'GET', '/api/appstudio/anthropic-key')).json()).source, 'file');
+    assert.doesNotMatch(readFileSync(join(dir, '.env'), 'utf8'), /ANTHROPIC_API_KEY/);
+    assert.equal((await (await api(s, 'GET', '/api/appstudio/anthropic-key')).json()).source, 'database');
   } finally {
     await stop(s);
   }

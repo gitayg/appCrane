@@ -63,9 +63,10 @@ export function Login() {
   // above absorbs.
   const [oidc, setOidc] = useState<SsoCfg>({})
   const [saml, setSaml] = useState<SsoCfg>({})
-  // v2.7.0: SSO-only mode. When a platform admin has required SSO, hide the
-  // password form and the API-key break-glass paste entirely — the IdP
-  // button is the only browser login path (full lockdown).
+  // v2.7.0: SSO-only mode. When SSO sign-in is required, hide the password
+  // form and the API-key paste entirely — the IdP button is the only browser
+  // login path; the server refuses the others too. Break-glass is
+  // `crane sso enforce off` on the host.
   // v2.7.3: tri-state (null = policy not yet fetched). We must NOT render the
   // password form before we know — otherwise an SSO-only instance briefly
   // flashes the username/password screen until the fetch resolves. While
@@ -82,13 +83,19 @@ export function Login() {
 
   const plan = signInPlan({ framed: isFramed(window), ssoEnabled: !!(oidc.enabled || saml.enabled), ssoOnly: !!ssoOnly })
 
+  // "Require SSO sign-in" is on unless an admin stored 'false', and in force
+  // only while a provider is enabled (server/services/authPolicy.js). So the
+  // policy is known only once all three answers are in.
   useEffect(() => {
-    fetch('/api/auth/oidc/config').then(r => r.json()).then(setOidc).catch(() => {})
-    fetch('/api/auth/saml/config').then(r => r.json()).then(setSaml).catch(() => {})
-    fetch('/api/settings/auth_sso_only')
-      .then(r => r.json())
-      .then(d => setSsoOnly(d?.value === 'true'))
-      .catch(() => setSsoOnly(false))
+    const json = (u: string) => fetch(u).then(r => r.json()).catch(() => null)
+    Promise.all([json('/api/auth/oidc/config'), json('/api/auth/saml/config'), json('/api/settings/auth_sso_only')])
+      .then(([o, s, setting]) => {
+        const oc: SsoCfg = o || {}
+        const sc: SsoCfg = s || {}
+        setOidc(oc)
+        setSaml(sc)
+        setSsoOnly(setting?.value !== 'false' && !!(oc.enabled || sc.enabled))
+      })
   }, [])
 
   useEffect(() => () => waitRef.current?.cancel(), [])

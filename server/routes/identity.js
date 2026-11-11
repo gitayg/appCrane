@@ -9,7 +9,7 @@ import { verifyPassword, generateSessionToken, hashApiKey, hashPassword } from '
 import { AppError } from '../utils/errors.js';
 import { setSessionCookie, clearSessionCookie, readSessionCookie, readCookie } from '../utils/sessionCookie.js';
 import { APP_SESSION_COOKIE, HANDOFF_STATE_COOKIE, HANDOFF_STATE_MAX_AGE_SECONDS } from '../services/appOrigin.js';
-import { isSsoOnly } from '../services/authPolicy.js';
+import { refuseUnlessSsoOptional } from '../services/authPolicy.js';
 import { roleKeysForUser } from '../services/appDefinedRoles.js';
 import { discoverablePortalRow } from '../services/discoverableApps.js';
 import log from '../utils/logger.js';
@@ -95,13 +95,10 @@ router.post('/login', (req, res) => {
 
   const db = getDb();
 
-  // v2.7.0: SSO-only mode. When a platform admin has set auth_sso_only,
-  // password sign-in is disabled for everyone — the IdP is the only browser
-  // login path. OIDC/SAML callbacks issue sessions elsewhere and are
-  // unaffected; X-API-Key auth stays open as the CLI/recovery path.
-  if (isSsoOnly(db)) {
-    throw new AppError('Password sign-in is disabled. Use single sign-on.', 403, 'SSO_REQUIRED');
-  }
+  // Require SSO sign-in (services/authPolicy.js): on unless turned off, in
+  // force while an SSO provider is enabled. OIDC/SAML callbacks issue sessions
+  // elsewhere and are unaffected; API keys stay API credentials.
+  refuseUnlessSsoOptional(db, req, { method: 'password', message: 'Password sign-in is disabled. Use single sign-on.' });
 
   // Find user by email or username
   const user = db.prepare(
@@ -936,6 +933,9 @@ router.post('/set-password', (req, res) => {
     }
   }
   if (!user) throw new AppError('Authentication required', 401, 'UNAUTHORIZED');
+  // A password is a sign-in path of its own, and this route also returns a
+  // session: with SSO required, neither an API key nor a session may get one.
+  refuseUnlessSsoOptional(db, req, { method: 'set-password', userId: user.id });
 
   const ip = req.ip || req.socket?.remoteAddress || 'unknown';
   const audit = (action, detail) => {

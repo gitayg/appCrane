@@ -542,3 +542,34 @@ test('handoff store: a code expires after 60 seconds and the store is bounded', 
   for (let i = 0; i < SSO_HANDOFF_MAX; i++) issueSsoHandoff('x', 'bind', 'v'.repeat(32));
   assert.equal(redeemSsoHandoff(req, first), null, 'the store grew past its bound');
 });
+
+// Require SSO sign-in is on by default and in force here (OIDC and SAML enabled,
+// no stored switch). The SAML callback must still sign people in, while a real
+// password for the same person is refused, and accepted once the switch is off.
+test('saml with Require SSO sign-in in force: the password is refused, the SAML response signs in', async () => {
+  const { hashPassword } = await import('../server/services/encryption.js');
+  const db = new Database(join(dataDir, 'deployhub.db'));
+  db.prepare("UPDATE users SET password_hash = ? WHERE email = 'alice@example.com'").run(hashPassword('correct horse battery'));
+  assert.equal(db.prepare("SELECT value FROM settings WHERE key = 'auth_sso_only'").get(), undefined, 'the default, not a stored switch, must be under test');
+  const login = () => fetch(`${base}/api/identity/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ login: 'alice@example.com', password: 'correct horse battery' }) });
+  try {
+    const refused = await login();
+    assert.equal(refused.status, 403);
+    assert.equal((await refused.json()).error.code, 'SSO_REQUIRED');
+
+    const b = browser();
+    const { requestId } = await samlStart(b);
+    const r = await samlPost(b, { SAMLResponse: samlResponse('alice', requestId), RelayState: '/launch' });
+    assert.equal(r.status, 302);
+    assert.ok(new URL(r.headers.get('location')).searchParams.get('sso_code'), r.headers.get('location'));
+    assert.equal(await signedInAs(b), 'alice@example.com');
+
+    db.prepare("INSERT INTO settings (key, value) VALUES ('auth_sso_only', 'false')").run();
+    const allowed = await login();
+    assert.equal(allowed.status, 200, 'with the switch off the same password signs in, so the 403 was the switch');
+  } finally {
+    db.prepare("DELETE FROM settings WHERE key = 'auth_sso_only'").run();
+    db.prepare("UPDATE users SET password_hash = NULL WHERE email = 'alice@example.com'").run();
+    db.close();
+  }
+});

@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync } from 'fs';
@@ -39,6 +40,8 @@ writeFileSync(
   '#!/bin/sh\n' +
   'tok=""\n' +
   'for a in "$@"; do case "$a" in CLAUDE_CODE_OAUTH_TOKEN=*) tok="${a#CLAUDE_CODE_OAUTH_TOKEN=}";; esac; done\n' +
+  // docker run delivers it on stdin (the container's wrapper reads one line).
+  'if [ -z "$tok" ] && [ "$1" = run ]; then IFS= read -r tok; fi\n' +
   // stderr, deliberately split mid-token across two writes with a real pause
   // between them, so Node sees TWO 'data' chunks and a scrubber that works on
   // raw chunks instead of whole lines lets the second half straight through.
@@ -65,6 +68,7 @@ const {
   agentCredentialKind,
   resolveAgentCredential,
   NO_CREDENTIAL_MESSAGE,
+  stdinCredentialScript,
 } = await import('../server/services/llm/runAgent.js');
 
 // ---------------------------------------------------------------------------
@@ -103,13 +107,42 @@ const noUserTokenDeps = {
   getUserClaudeToken:  () => null,
 };
 
-/** The -e VAR=value pairs in a docker argv, as an object. */
-function envOf(args) {
+/**
+ * Every variable an agent's container gets, as an object: the -e pairs, the
+ * --env-file lines (exec mode) and the credential written to stdin (run mode).
+ * A value from a hidden channel must not also be on the argv.
+ */
+function envOf(agent) {
+  const args = agent.getDockerArgs();
   const out = {};
+  const hidden = [];
   for (let i = 0; i < args.length - 1; i++) {
+    if (args[i] === '--env-file') {
+      for (const line of readFileSync(args[i + 1], 'utf8').split('\n')) {
+        const eq = line.indexOf('=');
+        if (eq > 0) { out[line.slice(0, eq)] = line.slice(eq + 1); hidden.push(line.slice(eq + 1)); }
+      }
+      continue;
+    }
     if (args[i] !== '-e') continue;
     const eq = args[i + 1].indexOf('=');
     out[args[i + 1].slice(0, eq)] = args[i + 1].slice(eq + 1);
+    // A credential is never a plain -e (argv is in `ps`, -e is in `docker inspect`).
+    if (/^(ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN)$/.test(args[i + 1].slice(0, eq))) {
+      assert.equal(args[i + 1].slice(eq + 1), '', `${args[i + 1].slice(0, eq)} is on the argv`);
+    }
+  }
+  const cred = agent.getStdinCredential();
+  if (cred) {
+    // Delivered only if the argv really reads it: stdin attached, and the
+    // wrapper that reads that name in front of the command.
+    assert.ok(args.includes('-i'), 'stdin attached for the credential');
+    assert.ok(args.includes(stdinCredentialScript(cred.name)), `wrapper reads ${cred.name}`);
+    out[cred.name] = cred.value;
+    hidden.push(cred.value);
+  }
+  for (const v of hidden) {
+    if (v) assert.ok(!args.some((a) => a.includes(v)), 'a hidden credential is also on the argv');
   }
   return out;
 }
@@ -132,7 +165,7 @@ test('docker run: a user token sets CLAUDE_CODE_OAUTH_TOKEN and NO ANTHROPIC_API
     actingUserId: user, appSlug: slug, apiKey: API_KEY,   // ...and a platform key
     credentialDeps: userTokenDeps(user),
   });
-  const env = envOf(agent.getDockerArgs());
+  const env = envOf(agent);
 
   assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, USER_TOKEN);
   // The whole point. ANTHROPIC_API_KEY outranks the OAuth token, so its
@@ -150,7 +183,7 @@ test('docker exec: a user token sets CLAUDE_CODE_OAUTH_TOKEN and NO ANTHROPIC_AP
     actingUserId: user, apiKey: API_KEY, hasAppCredentials: true,
     credentialDeps: userTokenDeps(user),
   });
-  const env = envOf(agent.getDockerArgs());
+  const env = envOf(agent);
   assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, USER_TOKEN);
   assert.ok(!('ANTHROPIC_API_KEY' in env), `ANTHROPIC_API_KEY leaked: ${JSON.stringify(env)}`);
   agent.stop();
@@ -158,7 +191,7 @@ test('docker exec: a user token sets CLAUDE_CODE_OAUTH_TOKEN and NO ANTHROPIC_AP
 
 test('an already-resolved oauthToken is accepted without a user lookup', () => {
   const agent = execAgent({ oauthToken: USER_TOKEN, apiKey: API_KEY });
-  const env = envOf(agent.getDockerArgs());
+  const env = envOf(agent);
   assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, USER_TOKEN);
   assert.ok(!('ANTHROPIC_API_KEY' in env));
   agent.stop();
@@ -173,7 +206,7 @@ test('end to end, no injection: a token in the real store reaches the container'
   setUserClaudeToken(user, USER_TOKEN);
   try {
     const agent = newAgent({ actingUserId: user, appSlug: slug, apiKey: API_KEY });
-    const env = envOf(agent.getDockerArgs());
+    const env = envOf(agent);
     assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, USER_TOKEN);
     assert.ok(!('ANTHROPIC_API_KEY' in env), `ANTHROPIC_API_KEY leaked: ${JSON.stringify(env)}`);
     assert.deepEqual(mountsOf(agent.getDockerArgs()).filter(m => m.includes('credentials.json')), []);
@@ -194,7 +227,7 @@ test('app credentials, no user token: the mount is unchanged and no key is set',
     actingUserId: user, appSlug: slug, apiKey: API_KEY, credentialDeps: noUserTokenDeps,
   });
   const args = agent.getDockerArgs();
-  const env = envOf(args);
+  const env = envOf(agent);
 
   assert.ok(!('ANTHROPIC_API_KEY' in env), 'API key would outrank the mounted credentials.json');
   assert.ok(!('CLAUDE_CODE_OAUTH_TOKEN' in env));
@@ -212,7 +245,7 @@ test('neither: the platform ANTHROPIC_API_KEY is set, as before', () => {
   const agent = newAgent({
     actingUserId: user, appSlug: slug, apiKey: API_KEY, credentialDeps: noUserTokenDeps,
   });
-  const env = envOf(agent.getDockerArgs());
+  const env = envOf(agent);
   assert.equal(env.ANTHROPIC_API_KEY, API_KEY);
   assert.ok(!('CLAUDE_CODE_OAUTH_TOKEN' in env));
   assert.deepEqual(mountsOf(agent.getDockerArgs()).filter(m => m.includes('credentials.json')), []);
@@ -221,7 +254,7 @@ test('neither: the platform ANTHROPIC_API_KEY is set, as before', () => {
 
 test('exec mode with nothing but a key behaves as before', () => {
   const agent = execAgent({ apiKey: API_KEY, credentialDeps: noUserTokenDeps });
-  assert.equal(envOf(agent.getDockerArgs()).ANTHROPIC_API_KEY, API_KEY);
+  assert.equal(envOf(agent).ANTHROPIC_API_KEY, API_KEY);
   agent.stop();
 });
 

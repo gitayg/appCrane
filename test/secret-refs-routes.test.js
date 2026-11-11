@@ -526,12 +526,12 @@ test('status: platform admin only, shape fixed, no AWS call, no secret names', a
   assert.equal((await call(OWNER, 'GET', '/api/secrets-provider/status')).status, 403);
   const r = await call(PLATFORM, 'GET', '/api/secrets-provider/status');
   assert.equal(r.status, 200);
-  assert.deepEqual(r.json, { active: true, provider: 'aws-secrets-manager', region: 'us-east-1', platform_secret_configured: false, app_prefix: 'appcrane/apps' });
+  assert.deepEqual(r.json, { active: true, provider: 'aws-secrets-manager', region: 'us-east-1', platform_secret_configured: false, app_prefix: 'appcrane/apps', app_secrets: true });
   process.env.APPCRANE_SECRETS_ID = 'platform/keys';
   delete process.env.APPCRANE_SECRETS_PROVIDER;
   try {
     const off = await call(PLATFORM, 'GET', '/api/secrets-provider/status');
-    assert.deepEqual(off.json, { active: false, provider: null, region: null, platform_secret_configured: false, app_prefix: null });
+    assert.deepEqual(off.json, { active: false, provider: null, region: null, platform_secret_configured: false, app_prefix: null, app_secrets: false });
     process.env.APPCRANE_SECRETS_PROVIDER = 'aws-secrets-manager';
     const on = await call(PLATFORM, 'GET', '/api/secrets-provider/status');
     assert.equal(on.json.platform_secret_configured, true);

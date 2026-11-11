@@ -54,6 +54,7 @@ import { getDb } from '../db.js';
 import log from '../utils/logger.js';
 import { usesLocalRepo } from './managedRepo.js';
 import { prepareCrewTaskHome, CREW_CODER_CONTAINER_TYPE } from './crewCoderHome.js';
+import { getPlatformAnthropicKey } from './platformAnthropicKey.js';
 
 const SESSION_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 export const NO_CREW_CREDENTIAL_REASON =
@@ -180,7 +181,7 @@ async function runTurn(d, { app, c, userId, prompt, taskId, resumeId, signal }) 
   if (signal?.aborted) return { ok: false, reason: 'The task was canceled before the coder started.' };
   // Again here: the owner's token may have gone while the turn was queued, and
   // without it the app's login must not be the fallback.
-  const kind = d.agentCredentialKind({ actingUserId: userId, appSlug: app.slug, apiKey: process.env.ANTHROPIC_API_KEY, allowAppCredentials: false });
+  const kind = d.agentCredentialKind({ actingUserId: userId, appSlug: app.slug, apiKey: getPlatformAnthropicKey(), allowAppCredentials: false });
   if (kind === 'none') return { ok: false, reason: NO_CREW_CREDENTIAL_REASON };
   const name = crewContainerName(app.slug, taskId);
   try {
@@ -212,7 +213,7 @@ async function runTurn(d, { app, c, userId, prompt, taskId, resumeId, signal }) 
         ...crewTurnContainerOptions({ slug: app.slug, taskId, workspaceDir: c.workspaceDir, claudeHomeDir, containerName: name }),
         prompt,
         model: d.model(),
-        apiKey: process.env.ANTHROPIC_API_KEY,
+        apiKey: getPlatformAnthropicKey(),
         resume: resumeId,
         actingUserId: userId,
         permissionMode: d.permissionMode(),

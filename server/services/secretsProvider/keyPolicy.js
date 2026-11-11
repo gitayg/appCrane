@@ -11,8 +11,11 @@ const ENCRYPTION_KEY_RE = /^[0-9a-fA-F]{64}$/;
 // so the template never holds a value. It is not configuration: never loaded.
 export const PLACEHOLDER_KEY = 'PLACEHOLDER';
 
-// What `crane secrets migrate` moves out of .env.
-export const PLATFORM_SECRET_NAMES = ['ENCRYPTION_KEY', 'ANTHROPIC_API_KEY'];
+// What `crane secrets migrate` moves out of .env. Not ANTHROPIC_API_KEY: it
+// lives encrypted in the database, and the boot moves it there from .env. It
+// stays on the allowlist, so a platform secret that already holds it still
+// loads (and the boot copies it into the database).
+export const PLATFORM_SECRET_NAMES = ['ENCRYPTION_KEY'];
 
 export const MAX_SECRET_BYTES = 65536;
 

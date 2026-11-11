@@ -4,12 +4,13 @@ import { join, resolve } from 'path';
 import { getDb } from '../db.js';
 import { decrypt } from '../services/encryption.js';
 import { requireAuth, requireAdmin } from '../middleware/auth.js';
-import { auditMiddleware } from '../middleware/audit.js';
+import { auditMiddleware, logAudit } from '../middleware/audit.js';
 import { AppError } from '../utils/errors.js';
 import { agentCredentialKind, NO_CREDENTIAL_MESSAGE } from '../services/llm/runAgent.js';
 import { isAppOwnerOrPlatformAdmin } from '../services/permissions.js';
-import { providerConfig, platformKeyLoaded } from '../services/secretsProvider/index.js';
-import { saveKeyToProvider } from '../services/secretsProvider/saveKey.js';
+import {
+  setPlatformAnthropicKey, clearPlatformAnthropicKey, status as platformAnthropicKeyStatus, InvalidAnthropicKeyError,
+} from '../services/platformAnthropicKey.js';
 import log from '../utils/logger.js';
 
 /**
@@ -386,64 +387,45 @@ router.delete('/jobs/:jobId', requireAdmin, auditMiddleware('appstudio.delete-jo
 // ── Anthropic API key management ────────────────────────────────────────
 // MUST be registered before GET /:id to prevent "anthropic-key" matching as an id param.
 
-const envFilePath = join(resolve(import.meta.dirname, '..', '..'), '.env');
+// The key is stored encrypted in the database (services/platformAnthropicKey.js);
+// it is never written to .env or put in process.env. The audit row is written
+// here, not by auditMiddleware: the body field is `key`, which the audit
+// redaction does not mask, so the middleware would store the value.
 
-function writeEnvKey(key, value) {
-  let content = existsSync(envFilePath) ? readFileSync(envFilePath, 'utf8') : '';
-  const lines = content.split('\n');
-  const idx = lines.findIndex(l => l.trim().startsWith(key + '='));
-  if (idx !== -1) {
-    lines[idx] = `${key}=${value}`;
-  } else {
-    if (content && !content.endsWith('\n')) content += '\n';
-    lines.push(`${key}=${value}`);
-  }
-  writeFileSync(envFilePath, lines.join('\n'), 'utf8');
-}
-
-router.get('/anthropic-key', requireAdmin, (req, res) => {
-  const configured = !!process.env.ANTHROPIC_API_KEY;
-  if (!configured) return res.json({ configured: false, source: null });
-  if (platformKeyLoaded('ANTHROPIC_API_KEY')) {
-    return res.json({ configured: true, source: 'secrets-manager', suffix: process.env.ANTHROPIC_API_KEY.slice(-4) });
-  }
-  const inFile = existsSync(envFilePath) &&
-    readFileSync(envFilePath, 'utf8').split('\n').some(l => l.trim().startsWith('ANTHROPIC_API_KEY='));
-  // No SDK liveness probe — the CLI (used for every real workload) gets
-  // the same env var and any auth failure surfaces in the first job.
-  // Calling complete({}) just to check the key is misleading: it can pass
-  // while the CLI runs still fail (e.g. image missing, docker down).
-  res.json({ configured: true, source: inFile ? 'file' : 'env', suffix: process.env.ANTHROPIC_API_KEY.slice(-4) });
-});
-
-router.put('/anthropic-key', requireAdmin, auditMiddleware('appstudio.set-anthropic-key'), async (req, res) => {
-  const { key } = req.body || {};
-  if (!key || typeof key !== 'string' || !key.trim()) {
-    throw new AppError('key is required', 400, 'VALIDATION');
-  }
-  const trimmed = key.trim();
-  if (providerConfig()?.secretId) {
-    try {
-      await saveKeyToProvider('ANTHROPIC_API_KEY', trimmed, { envPath: envFilePath });
-    } catch (e) {
-      log.error(`Anthropic API key not saved: ${e.message}`);
-      throw new AppError(`The key was not saved: ${e.message}`, 502, 'SECRETS_PROVIDER');
-    }
-  } else {
-    writeEnvKey('ANTHROPIC_API_KEY', trimmed);
-  }
-  process.env.ANTHROPIC_API_KEY = trimmed;
-  // No SDK client to invalidate. v2.49.3 removed appAnalyzer.js — the last
-  // @anthropic-ai/sdk consumer, whose only function had no callers — so nothing
-  // caches an Anthropic client any more. Every AI path here hands the key to the
-  // Claude Code CLI, which reads it per invocation, so a rotated key is picked
-  // up by the next run without anything to bust.
+async function restartWorker() {
   try {
     const { startWorker } = await import('../services/appstudio/worker.js');
     startWorker();
   } catch (_) {}
+}
+
+router.get('/anthropic-key', requireAdmin, (req, res) => {
+  res.json(platformAnthropicKeyStatus());
+});
+
+router.put('/anthropic-key', requireAdmin, async (req, res) => {
+  const { key } = req.body || {};
+  if (!key || typeof key !== 'string' || !key.trim()) {
+    throw new AppError('key is required', 400, 'VALIDATION');
+  }
+  let st;
+  try {
+    st = setPlatformAnthropicKey(key, req.user.id);
+  } catch (e) {
+    if (e instanceof InvalidAnthropicKeyError) throw new AppError(e.message, 400, 'VALIDATION');
+    throw e;
+  }
+  logAudit(req.user.id, null, 'appstudio.set-anthropic-key', { suffix: st.suffix });
+  await restartWorker();
   log.info('Anthropic API key updated via settings');
-  res.json({ message: 'Anthropic API key saved and applied' });
+  res.json({ message: 'Anthropic API key saved and applied', ...st });
+});
+
+router.delete('/anthropic-key', requireAdmin, async (req, res) => {
+  const removed = clearPlatformAnthropicKey();
+  logAudit(req.user.id, null, 'appstudio.clear-anthropic-key', { removed });
+  log.info('Anthropic API key cleared via settings');
+  res.json({ message: removed ? 'Anthropic API key removed' : 'No Anthropic API key was stored', ...platformAnthropicKeyStatus() });
 });
 
 /**

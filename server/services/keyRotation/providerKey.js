@@ -3,6 +3,7 @@ import { join } from 'path';
 import { providerConfig, readPlatformSecret, stagePlatformSecret, promotePlatformSecret, discardPlatformStage, platformVersions } from '../secretsProvider/index.js';
 import { applyProviderSettings } from '../secretsProvider/envText.js';
 import { rotateDatabase, selfCheck } from './rotate.js';
+import { systemdKeyHeld } from './systemdKey.js';
 
 const KEY_RE = /^[0-9a-f]{64}$/i;
 
@@ -14,6 +15,7 @@ const KEY_RE = /^[0-9a-f]{64}$/i;
 export async function keyHeldByProvider(envText) {
   applyProviderSettings(envText);
   const cfg = providerConfig();
+  if (cfg?.provider === 'systemd-creds') return systemdKeyHeld();
   if (!cfg?.secretId) return null;
   const values = await readPlatformSecret();
   if (!values.ENCRYPTION_KEY) return null;

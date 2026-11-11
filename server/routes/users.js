@@ -10,6 +10,7 @@ import { isAdmin, refuseRetiredAdminRole } from '../utils/roles.js';
 import { purgeRevokedTenants } from '../services/tenants.js';
 import { revokeAllGrantsForUser } from '../services/oauthStore.js';
 import { revokeAllDevices } from '../services/trustedDevices.js';
+import { refuseUnlessSsoOptional } from '../services/authPolicy.js';
 
 const router = Router();
 
@@ -238,6 +239,9 @@ router.put('/:id/password', requirePlatformAdmin, auditMiddleware('user-set-pass
   if (!password || password.length < 12) throw new AppError('Password must be at least 12 characters', 400, 'VALIDATION');
 
   const db = getDb();
+  // With SSO sign-in required a password signs no one in; setting one is refused
+  // rather than left waiting for the day the requirement is turned off.
+  refuseUnlessSsoOptional(db, req, { method: 'admin-set-password', userId: req.user.id });
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(parseInt(req.params.id));
   if (!user) throw new AppError('User not found', 404, 'NOT_FOUND');
 

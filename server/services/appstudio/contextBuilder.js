@@ -9,6 +9,7 @@ import { ensureStudioImage } from './generator.js';
 import { runWorkspaceGit } from '../builder/workspaceRunner.js';
 import { readWorkspaceFiles } from '../builder/workspaceReader.js';
 import { isCoderWorkspace, liveContainerNameFor } from '../builder/appContainer.js';
+import { getPlatformAnthropicKey } from '../platformAnthropicKey.js';
 
 const MODEL        = process.env.APPSTUDIO_PLANNER_MODEL || 'claude-sonnet-4-6';
 const STUDIO_IMAGE = process.env.APPSTUDIO_IMAGE || 'appcrane-studio:latest';
@@ -168,7 +169,7 @@ async function callClaude(prompt, repoDir, appSlug, actingUserId = null) {
     workspaceDir:  repoDir,
     workspaceMode: 'ro',
     prompt,
-    apiKey:        process.env.ANTHROPIC_API_KEY,
+    apiKey:        getPlatformAnthropicKey(),
     model:         MODEL,
     timeoutMs:     parseInt(process.env.APPSTUDIO_CONTEXT_TIMEOUT_MS || '300000', 10),
     appSlug,
