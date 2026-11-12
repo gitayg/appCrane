@@ -1035,6 +1035,8 @@ function MailTab() {
   const [test, setTest] = useState<{ ok: boolean; msg: string } | null>(null)
   const [whatsNew, setWhatsNew] = useState(true)
   const [whatsNewSaved, flashWhatsNewSaved] = useFlash()
+  const [accessMail, setAccessMail] = useState(true)
+  const [accessMailSaved, flashAccessMailSaved] = useFlash()
 
   function load() {
     adminApi.get<{ mail: typeof cfg }>('/api/settings/mail/config').then(r => { if (r?.mail) setCfg(r.mail) }).catch(() => {})
@@ -1043,6 +1045,10 @@ function MailTab() {
   useEffect(() => {
     adminApi.get<{ value?: string | null }>('/api/settings/whats_new_email_enabled')
       .then(r => setWhatsNew(r?.value !== '0')).catch(() => {})
+  }, [])
+  useEffect(() => {
+    adminApi.get<{ value?: string | null }>('/api/settings/app_access_mail_enabled')
+      .then(r => setAccessMail(r?.value !== '0')).catch(() => {})
   }, [])
 
   async function save() {
@@ -1118,6 +1124,25 @@ function MailTab() {
       </div>
       <p style={{ fontSize: '.75rem', color: 'var(--dim)', margin: '6px 0 0 24px' }}>
         When an app ships a new production version, its owners and admins get that version's What's new by e-mail. Each app can turn this off on its app page.
+      </p>
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 20 }}>
+        <input
+          type="checkbox"
+          id="app-access-email"
+          checked={accessMail}
+          onChange={async e => {
+            const next = e.target.checked
+            setAccessMail(next)
+            await adminApi.put('/api/settings/app_access_mail_enabled', { value: next ? '1' : '0' }).catch(() => {})
+            flashAccessMailSaved()
+          }}
+        />
+        <label htmlFor="app-access-email" style={{ fontSize: '.85rem' }}>Email users when their app access changes</label>
+        {accessMailSaved && <span style={{ color: 'var(--green)' }}>Saved</span>}
+      </div>
+      <p style={{ fontSize: '.75rem', color: 'var(--dim)', margin: '6px 0 0 24px' }}>
+        A person gets one e-mail when they are given access to an app, their role on it changes, or their access is removed. A change undone within about 30 seconds sends nothing, and the creator of a new app is not told they own it.
       </p>
     </div>
   )

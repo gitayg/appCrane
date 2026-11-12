@@ -1763,6 +1763,14 @@ app.listen(PORT, HOST, async () => {
     log.error('Email worker failed to start: ' + e.message);
   }
 
+  // Mail a person when their access to an app changes (migration 171 triggers).
+  try {
+    const { startAppAccessMailWorker } = await import('./services/appAccessMail.js');
+    startAppAccessMailWorker();
+  } catch (e) {
+    log.error('App access mail worker failed to start: ' + e.message);
+  }
+
   // v2.25.2: probe platform integration credentials (Graph mail secret, GitHub
   // service-account PAT) every 15m and email platform admins when one fails.
   try {

@@ -1,4 +1,7 @@
 {
+  "2.137.0": [
+    "People now get an e-mail when they are given access to an app, when their role on it changes, or when their access is removed. It says which app, the old and new role, what the new role can do and, when AppCrane knows, who made the change. Admins can turn this off in Settings > Mail."
+  ],
   "2.136.3": [
     "Security fix: a deactivated account's personal API key, or an expired one, no longer works on Ask, plans, the coder, feedback or account pages; it is refused straight away like everywhere else.",
     "The check that runs before an AI coding session starts now actually stops the session when a folder it needs can't be used, with a clear message, instead of letting it fail later with a confusing error."

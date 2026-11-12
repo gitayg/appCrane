@@ -288,7 +288,8 @@ test('crane sso enforce off on the host lifts it; on puts it back', async () => 
 test('migration 170 turns a stored false to true only where a provider is enabled', () => {
   const dir = join(REPO, 'server', 'migrations');
   const files = readdirSync(dir).filter((f) => f.endsWith('.sql')).sort();
-  assert.equal(files.at(-1), '170-auth-sso-enforced.sql', 'not the last migration');
+  const later = files.filter((f) => f > '170-auth-sso-enforced.sql');
+  assert.ok(!later.some((f) => readFileSync(join(dir, f), 'utf8').includes('auth_sso_only')), 'a later migration rewrites auth_sso_only');
   const sql = readFileSync(join(dir, '170-auth-sso-enforced.sql'), 'utf8');
   const run = (rows) => {
     const db = new Database(':memory:');
