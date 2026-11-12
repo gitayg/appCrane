@@ -2,7 +2,8 @@ import { existsSync, readFileSync, writeFileSync, renameSync, statSync, realpath
 import { randomBytes } from 'crypto';
 import { getDb } from '../db.js';
 import { logAudit } from '../middleware/audit.js';
-import { platformKeyLoaded } from './secretsProvider/index.js';
+import { platformKeyLoaded, providerConfig } from './secretsProvider/index.js';
+import { PROVIDER_SYSTEMD } from './secretsProvider/systemdCreds.js';
 import {
   ENV_NAME, getPlatformAnthropicKey, hasStoredPlatformAnthropicKey, setPlatformAnthropicKey, sealEnvironment,
 } from './platformAnthropicKey.js';
@@ -88,7 +89,9 @@ export function migratePlatformAnthropicKey({
       if (kept) log.warn(`.env still has ${kept} ${ENV_NAME} line(s) that differ from the stored key; they are ignored`);
     }
     if (value && fromProvider) {
-      log.info(`${ENV_NAME} is also in the platform secret in AWS Secrets Manager; AppCrane no longer reads it there, so it can be removed from that secret`);
+      log.info(providerConfig(env)?.provider === PROVIDER_SYSTEMD
+        ? `${ENV_NAME} is also a systemd encrypted credential; AppCrane no longer reads it there, so its file in the credential store and its LoadCredentialEncrypted line can be removed`
+        : `${ENV_NAME} is also in the platform secret in AWS Secrets Manager; AppCrane no longer reads it there, so it can be removed from that secret`);
     }
   } catch (e) {
     // The key stays usable for this process (in memory only) and the boot goes

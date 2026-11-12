@@ -248,6 +248,39 @@ test('every route that accepts a personal key records it as used (api_key_last_u
   }
 });
 
+test('every route that accepts a personal key refuses a deactivated account and an expired key', async () => {
+  const calls = [
+    ['GET', '/api/me', {}],
+    ['POST', '/api/identity/set-password', {}, { password: 'a-long-enough-password' }],
+    ['POST', '/api/enhancements', {}, { message: 'x' }],
+    ['GET', '/api/plan/999999', {}],
+    ['GET', '/api/plan/999999?token=KEY', null],
+    ['POST', '/api/ask/no-such-app', {}],
+    ['POST', '/api/ask/no-such-app', 'bearer'],
+    ['GET', '/api/coder/models', {}],
+    ['POST', '/api/enhancements/999999/delete', {}],
+    ['GET', '/api/enhancements/999999/comments', {}],
+  ];
+  const call = async (u, [method, path, keyHeader, body]) => {
+    const auth = keyHeader === 'bearer' ? { Authorization: `Bearer ${u.key}` } : keyHeader ? { 'X-API-Key': u.key } : {};
+    return fetch(`${BASE}${path.replace('KEY', u.key)}`, {
+      method, redirect: 'manual',
+      headers: { ...auth, ...PRIVATE, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+  };
+  for (const c of calls) {
+    const off = mkUser();
+    db.prepare('UPDATE users SET active = 0 WHERE id = ?').run(off.id);
+    const r1 = await call(off, c);
+    assert.ok(r1.status === 401 || r1.status === 403, `${c[0]} ${c[1]} let a deactivated account in (${r1.status})`);
+    const old = mkUser();
+    db.prepare("UPDATE users SET api_key_expires_at = datetime('now', '-1 day') WHERE id = ?").run(old.id);
+    const r2 = await call(old, c);
+    assert.equal(r2.status, 401, `${c[0]} ${c[1]} accepted an expired key (${r2.status})`);
+  }
+});
+
 test('setting on: dashboard session, MCP key and MCP OAuth token on public still work', async () => {
   on();
   assert.equal((await rest({ Authorization: `Bearer ${SESSION}`, ...PUBLIC })).status, 200, 'session on REST');

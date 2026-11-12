@@ -228,8 +228,10 @@ const SESSION_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
  *   'd'  — directory must exist and be enterable (x bit)
  *   'dw' — directory must be writable too
  */
-function buildPreflightShell(checks) {
+export function buildPreflightShell(checks) {
   if (!checks?.length) return '';
+  // The test is grouped in `{ …; }`: `! a && b` negates only `a`, so a missing
+  // path skipped the failure and an unreadable one never reached it.
   // Statements separated by `;` not space — Alpine ash needs an explicit
   // terminator after `}` before the next command. Each check uses `if … fi`
   // (not `… || preflight_fail`) so the failure path is inside the function
@@ -260,7 +262,7 @@ function buildPreflightShell(checks) {
     } else {
       continue;
     }
-    lines.push(`if ! ${test}; then preflight_fail "${label} (${c.path}) ${reason}: $(preflight_meta ${path})"; fi`);
+    lines.push(`if ! { ${test}; }; then preflight_fail "${label} (${c.path}) ${reason}: $(preflight_meta ${path})"; fi`);
   }
   return lines.join('; ') + '; ';
 }

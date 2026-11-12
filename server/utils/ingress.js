@@ -13,7 +13,7 @@
 import { logAudit } from '../middleware/audit.js';
 import { AppError } from './errors.js';
 import log from './logger.js';
-import { recordUserKeyUse } from '../services/userKeyUse.js';
+import { assertUserKeyUsable, recordUserKeyUse } from '../services/userKeyUse.js';
 
 export const PRIVATE_PORT_ENV = 'APPCRANE_PRIVATE_API_PORT';
 export const INGRESS_HEADER = 'X-AppCrane-Ingress';
@@ -76,10 +76,12 @@ export function userKeyIngressError(req, userId, via = 'rest') {
 }
 
 /**
- * For a route that accepted a personal user key on its own: throws the refusal,
- * or records the use (a refusal is not a use).
+ * For a route that matched a personal user key with its own lookup: throws if
+ * the account is deactivated, the key expired or this ingress refuses it, and
+ * otherwise records the use (a refusal is not a use).
  */
 export function assertUserKeyIngress(req, userId, via) {
+  assertUserKeyUsable(req, userId);
   const err = userKeyIngressError(req, userId, via);
   if (err) throw err;
   recordUserKeyUse(userId);

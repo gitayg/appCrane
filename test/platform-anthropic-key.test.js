@@ -164,6 +164,17 @@ test('a key from the secrets provider is copied, and the provider is left alone'
   assert.ok(!('ANTHROPIC_API_KEY' in process.env));
 });
 
+test('a key from systemd encrypted credentials is named as that, not as AWS Secrets Manager', () => {
+  const envPath = join(DATA, 'systemd.env');
+  writeFileSync(envPath, 'APPCRANE_SECRETS_PROVIDER=systemd-creds\n');
+  const lg = quietLog();
+  migratePlatformAnthropicKey({ envPath, db, fromProvider: true, log: lg, env: { APPCRANE_SECRETS_PROVIDER: 'systemd-creds', ANTHROPIC_API_KEY: KEY } });
+  const text = lg.lines.join('\n');
+  assert.ok(/systemd encrypted credential/.test(text), text);
+  assert.ok(!/AWS Secrets Manager/.test(text), text);
+  assert.ok(!text.includes(KEY), 'no value logged');
+});
+
 test('docker argv never carries the key: run, exec and the Ask container', async () => {
   const ws = join(DATA, 'ws');
   mkdirSync(ws, { recursive: true });

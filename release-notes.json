@@ -1,4 +1,8 @@
 {
+  "2.136.3": [
+    "Security fix: a deactivated account's personal API key, or an expired one, no longer works on Ask, plans, the coder, feedback or account pages; it is refused straight away like everywhere else.",
+    "The check that runs before an AI coding session starts now actually stops the session when a folder it needs can't be used, with a clear message, instead of letting it fail later with a confusing error."
+  ],
   "2.136.2": [
     "A personal API key now counts as used on every page and feature that accepts it, including Ask, plans, the coder and feedback, so a key in active use is never mistaken for an unused one."
   ],
