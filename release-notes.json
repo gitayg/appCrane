@@ -1,4 +1,7 @@
 {
+  "2.136.2": [
+    "A personal API key now counts as used on every page and feature that accepts it, including Ask, plans, the coder and feedback, so a key in active use is never mistaken for an unused one."
+  ],
   "2.136.1": [
     "Security fix: an app's Claude login, while a session is using it, can no longer be read by other accounts on the server."
   ],

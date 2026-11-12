@@ -217,6 +217,37 @@ test('setting on: plan, ask, coder and enhancement-comment auth refuse a user ke
   }
 });
 
+test('every route that accepts a personal key records it as used (api_key_last_used_at)', async () => {
+  // A key used only on a route with its own key fallback looked never-used, and
+  // a cleanup of never-used keys would revoke it. Each call uses a fresh user.
+  const calls = [
+    ['GET', '/api/me', {}],
+    ['POST', '/api/identity/set-password', {}, { password: 'a-long-enough-password' }],
+    ['GET', '/api/identity/verify?app=pp-app', {}],
+    ['POST', '/api/enhancements', {}, { message: 'x' }],
+    ['GET', '/api/plan/999999', {}],
+    ['GET', '/api/plan/999999?token=KEY', null],
+    ['POST', '/api/ask/no-such-app', {}],
+    ['POST', '/api/ask/no-such-app', 'bearer'],
+    ['GET', '/api/coder/models', {}],
+    ['POST', '/api/enhancements/999999/delete', {}],
+    ['GET', '/api/enhancements/999999/comments', {}],
+  ];
+  const lastUsed = (id) => db.prepare('SELECT api_key_last_used_at v FROM users WHERE id = ?').get(id).v;
+  for (const [method, path, keyHeader, body] of calls) {
+    const u = mkUser();
+    assert.equal(lastUsed(u.id), null);
+    const auth = keyHeader === 'bearer' ? { Authorization: `Bearer ${u.key}` } : keyHeader ? { 'X-API-Key': u.key } : {};
+    const res = await fetch(`${BASE}${path.replace('KEY', u.key)}`, {
+      method, redirect: 'manual',
+      headers: { ...auth, ...PRIVATE, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+    assert.notEqual(res.status, 401, `${method} ${path} did not accept the key`);
+    assert.ok(lastUsed(u.id), `${method} ${path} accepted the key without recording the use`);
+  }
+});
+
 test('setting on: dashboard session, MCP key and MCP OAuth token on public still work', async () => {
   on();
   assert.equal((await rest({ Authorization: `Bearer ${SESSION}`, ...PUBLIC })).status, 200, 'session on REST');

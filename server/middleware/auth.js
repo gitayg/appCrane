@@ -8,6 +8,7 @@ import { ACCESS_PREFIX, canonicalResource, mcpResourceOf } from '../services/oau
 import { auditExpiredUse, expiredMessage, expireUserKey, isPast } from '../services/apiKeyExpiry.js';
 import { touchSession } from '../services/sessionPolicy.js';
 import { userKeyIngressError } from '../utils/ingress.js';
+import { recordUserKeyUse } from '../services/userKeyUse.js';
 
 /**
  * Authentication middleware. Accepts either:
@@ -152,9 +153,7 @@ export function requireAuth(req, res, next) {
     // (utils/ingress.js). Ahead of the last-used stamp: a refusal is not a use.
     const ingressErr = userKeyIngressError(req, user.id, req.baseUrl === '/git' ? 'git' : 'rest');
     if (ingressErr) return next(ingressErr);
-    try {
-      db.prepare("UPDATE users SET api_key_last_used_at = datetime('now') WHERE id = ? AND (api_key_last_used_at IS NULL OR api_key_last_used_at < datetime('now', '-1 hour'))").run(user.id);
-    } catch (_) {}
+    recordUserKeyUse(user.id, db);
     req.user = user;
     applyViewAs(req, apiKey);
     return next();

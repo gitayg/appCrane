@@ -13,6 +13,7 @@
 import { logAudit } from '../middleware/audit.js';
 import { AppError } from './errors.js';
 import log from './logger.js';
+import { recordUserKeyUse } from '../services/userKeyUse.js';
 
 export const PRIVATE_PORT_ENV = 'APPCRANE_PRIVATE_API_PORT';
 export const INGRESS_HEADER = 'X-AppCrane-Ingress';
@@ -74,9 +75,14 @@ export function userKeyIngressError(req, userId, via = 'rest') {
   return new AppError(userKeyRefusedMessage(port), 403, USER_KEY_REFUSED_CODE);
 }
 
+/**
+ * For a route that accepted a personal user key on its own: throws the refusal,
+ * or records the use (a refusal is not a use).
+ */
 export function assertUserKeyIngress(req, userId, via) {
   const err = userKeyIngressError(req, userId, via);
   if (err) throw err;
+  recordUserKeyUse(userId);
 }
 
 /** For a platform-admin status view. */
