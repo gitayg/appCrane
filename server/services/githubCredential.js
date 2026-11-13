@@ -19,8 +19,10 @@
  *      is what `patErrors` selects; it is a description of existing callers,
  *      not a new policy.
  *
- * Managed apps (source_type='managed') never come through here: they use the
- * platform service account, or their repository lives on this host.
+ * Managed apps (source_type='managed') use the platform service account, or
+ * their repository lives on this host. One still on GitHub may have an
+ * installation attached so the boot move onto this host can fetch it from an
+ * org that enforces SAML SSO (repoMigration.defaultResolveRemote).
  */
 
 import { getDb } from '../db.js';
@@ -66,12 +68,17 @@ export function getInstallation(appId) {
  * taken from a redirect parameter, because GitHub's own docs say a spoofed
  * `installation_id` can be handed to the setup URL.
  */
+/** Connected apps, and managed apps whose repository has not moved onto this host yet. */
+export function githubAppEligible(app) {
+  return app?.source_type === 'github' || (app?.source_type === 'managed' && app.repo_backend == null);
+}
+
 export async function attachInstallation(app, userId = null) {
   if (!getAppConfig()) {
     throw new Error('No GitHub App is configured on this AppCrane instance. A platform admin creates one at Settings → GitHub.');
   }
-  if (app.source_type !== 'github') {
-    throw new Error(`App '${app.slug}' is source_type='${app.source_type || '(unset)'}'. GitHub App authentication is for connected GitHub repositories only.`);
+  if (!githubAppEligible(app)) {
+    throw new Error(`App '${app.slug}' is source_type='${app.source_type || '(unset)'}'${app.repo_backend ? ` with its repository on this host` : ''}. GitHub App authentication is for apps whose repository is on GitHub.`);
   }
   const parsed = parseGithubRepo(app.github_url);
   if (!parsed) throw new Error(`App '${app.slug}' has no parseable GitHub repository URL.`);

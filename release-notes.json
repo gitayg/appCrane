@@ -1,4 +1,7 @@
 {
+  "2.137.1": [
+    "A managed app whose code is still on GitHub can now use this server's GitHub App (the gh app button in Applications). Moving its code onto the server then signs in with the App, which works for GitHub organizations that require single sign-on, where a personal token is refused until someone authorizes it."
+  ],
   "2.137.0": [
     "People now get an e-mail when they are given access to an app, when their role on it changes, or when their access is removed. It says which app, the old and new role, what the new role can do and, when AppCrane knows, who made the change. Admins can turn this off in Settings > Mail."
   ],

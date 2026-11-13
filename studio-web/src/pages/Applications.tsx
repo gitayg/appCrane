@@ -1784,7 +1784,7 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                               onClick={() => setHookApp(app)}
                               title="Auto-deploy on git push (webhook)"
                             >auto-deploy</button>
-                            {app.source_type === 'github' && (
+                            {(app.source_type === 'github' || app.source_type === 'managed') && (
                               <button
                                 className="btn btn-xs"
                                 onClick={() => setGhAppFor(app)}

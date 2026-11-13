@@ -69,7 +69,7 @@ export function GithubAppModal({ slug, name, onClose }: { slug: string; name: st
           ) : !st.app_configured ? (
             <p style={{ margin: 0, color: 'var(--dim)' }}>No GitHub App is set up on this AppCrane yet. A platform admin creates one at Settings → GitHub.</p>
           ) : !st.eligible ? (
-            <p style={{ margin: 0, color: 'var(--dim)' }}>Only apps connected to a GitHub repository can use the GitHub App.</p>
+            <p style={{ margin: 0, color: 'var(--dim)' }}>Only apps whose repository is on GitHub can use the GitHub App.</p>
           ) : st.attached ? (
             <>
               <p style={{ margin: 0 }}>

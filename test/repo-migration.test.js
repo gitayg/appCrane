@@ -445,6 +445,30 @@ test('escape hatch: env or setting turns it off; default is on', async () => {
   assert.equal(calls, 1);
 });
 
+test('default remote: an app with a GitHub App installation uses the installation token, never the service token', async () => {
+  const { setServiceConfig } = await import('../server/services/githubService.js');
+  setServiceConfig({ token: TOKEN, owner: 'example-owner', enabled: true });
+  const app = { id: 4242, slug: 'via-app', github_url: 'https://github.com/example-org/AMC_x' };
+  const seen = [];
+  const credential = {
+    getInstallation: (id) => (id === 4242 ? { installation_id: 7 } : null),
+    resolveGitHubCredential: async (a) => { seen.push(a.slug); return { source: 'installation', token: 'ghs_installation_made_up' }; },
+  };
+  try {
+    assert.deepEqual(await rm.defaultResolveRemote(app, { credential }),
+      { url: 'https://github.com/example-org/AMC_x.git', token: 'ghs_installation_made_up' });
+    assert.deepEqual(seen, ['via-app']);
+    assert.deepEqual(await rm.defaultResolveRemote({ ...app, id: 1 }, { credential }),
+      { url: 'https://github.com/example-org/AMC_x.git', token: TOKEN }, 'no installation: the service token is still used');
+    const failing = { ...credential, resolveGitHubCredential: async () => { throw new Error('installation does not cover example-org/AMC_x'); } };
+    await assert.rejects(rm.defaultResolveRemote(app, { credential: failing }), { code: 'GITHUB_APP', message: /does not cover/ });
+    const empty = { ...credential, resolveGitHubCredential: async () => ({ source: 'installation', token: null }) };
+    await assert.rejects(rm.defaultResolveRemote(app, { credential: empty }), { code: 'GITHUB_APP' });
+  } finally {
+    setServiceConfig({ token: null });
+  }
+});
+
 test('default remote: github.com URL + service token, header-only; refuses a missing token or foreign URL without any network', async () => {
   const { setServiceConfig } = await import('../server/services/githubService.js');
   const fetchCalls = [];

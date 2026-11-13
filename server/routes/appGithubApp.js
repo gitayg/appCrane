@@ -23,7 +23,7 @@ import { userHasAppPermission } from '../services/permissions.js';
 import { isAdmin } from '../utils/roles.js';
 import { getAppConfig } from '../services/githubApp.js';
 import {
-  attachInstallation, detachInstallation, getInstallation, parseGithubRepo,
+  attachInstallation, detachInstallation, getInstallation, parseGithubRepo, githubAppEligible,
 } from '../services/githubCredential.js';
 
 const router = Router();
@@ -51,7 +51,7 @@ router.get('/:slug/github-app', requireAuth, requireAppAccess, (req, res) => {
     app_configured: !!cfg,
     app_slug: cfg?.slug || null,
     install_url: cfg?.install_url || null,
-    eligible: app.source_type === 'github' && !!parsed,
+    eligible: githubAppEligible(app) && !!parsed,
     repo_full_name: parsed?.fullName || null,
     attached: !!inst,
     installation_id: inst?.installation_id || null,
