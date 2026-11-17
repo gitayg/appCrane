@@ -35,6 +35,21 @@ function scrub(text, secret) {
   return secret ? String(text).split(secret).join('[CRON_SECRET]') : String(text);
 }
 
+// A tail cut from a longer answer can begin with the end of a secret, and a read
+// stopped at the limit can end with its start; neither is a whole secret, so
+// scrub() would leave them. Drop both edges before scrubbing.
+function trimSecretEdges(text, secret) {
+  if (!secret) return text;
+  let s = text;
+  for (let k = Math.min(secret.length - 1, s.length); k > 0; k--) {
+    if (s.startsWith(secret.slice(-k))) { s = s.slice(k); break; }
+  }
+  for (let k = Math.min(secret.length - 1, s.length); k > 0; k--) {
+    if (s.endsWith(secret.slice(0, k))) { s = s.slice(0, -k); break; }
+  }
+  return s;
+}
+
 // The kept tail is longer than what is logged by the secret's length, so a
 // secret split across the cut is still whole when scrub() runs.
 async function readBodyTail(res, secret) {
@@ -74,7 +89,7 @@ export async function runHttpCron(app, job, { fetchImpl = fetch } = {}) {
   try {
     const res = await fetchImpl(url, { method: 'GET', headers, redirect: 'manual', signal: controller.signal });
     let body = '';
-    try { body = await readBodyTail(res, secret); } catch (_) {}
+    try { body = trimSecretEdges(await readBodyTail(res, secret), secret); } catch (_) {}
     const ok = res.status >= 200 && res.status < 300;
     const lines = [`GET ${job.http_path} ${auth} -> HTTP ${res.status}`];
     if (body) lines.push(scrub(body, secret).slice(-BODY_TAIL_BYTES));

@@ -1,4 +1,7 @@
 {
+  "2.138.2": [
+    "The end of an app's reply that a scheduled job keeps for its log can no longer show part of the app's CRON_SECRET. Only whole copies were hidden before, so a reply cut in the middle of the secret could leave a piece of it in the log."
+  ],
   "2.138.1": [
     "A scheduled job that calls an app now reads at most 1 MB of the app's reply and keeps only the end of it for the job log, so an app that answers with a very large or endless reply can no longer use up AppCrane's memory."
   ],

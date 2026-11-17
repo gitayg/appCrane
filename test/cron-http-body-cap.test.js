@@ -67,3 +67,39 @@ test('a small answer is logged whole', async () => {
   assert.equal(r.exitCode, 1);
   assert.match(r.log, /HTTP 500\nbackup failed: disk full$/);
 });
+
+test('a CRON_SECRET cut by the kept window or by the read limit leaves no fragment in the log', async () => {
+  const { getDb } = await import('../server/db.js');
+  const { encrypt } = await import('../server/services/encryption.js');
+  const db = getDb();
+  const secret = 'S3cr3tTok3nValue-0123456789abcdefABCDEF';
+  const id = Number(db.prepare("INSERT INTO apps (name, slug, slot) VALUES ('Cap Secret', 'capsecret', 7)").run().lastInsertRowid);
+  db.prepare("INSERT INTO env_vars (app_id, env, key, value_encrypted) VALUES (?, 'production', 'CRON_SECRET', ?)").run(id, encrypt(secret));
+  const secretApp = { id, slug: 'capsecret', slot: 7 };
+  const fragments = [];
+  for (let i = 0; i + 6 <= secret.length; i++) fragments.push(secret.slice(i, i + 6));
+  const leaks = (log) => fragments.filter((f) => log.includes(f));
+
+  // The window is cut in front: every offset lands the cut somewhere in a secret.
+  for (let pad = 0; pad <= secret.length + 1; pad++) {
+    const body = 'x'.repeat(pad) + `${secret}.`.repeat(400);
+    const server = await listen((_req, res) => { res.writeHead(200); res.end(body); });
+    const { port } = server.address();
+    const r = await runHttpCron(secretApp, job, { fetchImpl: (_u, opts) => fetch(`http://127.0.0.1:${port}/`, opts) });
+    server.close();
+    assert.deepEqual(leaks(r.log), [], `front cut, pad ${pad}`);
+  }
+
+  // The read stops at the limit in the middle of a secret.
+  const head = 'y'.repeat(BODY_READ_LIMIT_BYTES - 10);
+  // Half the secret arrives, then a pause, so the limit is crossed mid-secret.
+  const server = await listen((_req, res) => {
+    res.writeHead(200);
+    res.write(head + secret.slice(0, 20));
+    setTimeout(() => { if (!res.destroyed) res.end(secret.slice(20) + 'z'.repeat(4096)); }, 300);
+  });
+  const { port } = server.address();
+  const r = await runHttpCron(secretApp, job, { fetchImpl: (_u, opts) => fetch(`http://127.0.0.1:${port}/`, opts) });
+  server.close();
+  assert.deepEqual(leaks(r.log), [], 'cut at the read limit');
+});
