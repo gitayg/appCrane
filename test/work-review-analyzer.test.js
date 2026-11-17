@@ -219,6 +219,18 @@ test('analyzer tells useful subagents from ones that only paid the overhead', ()
   assert.ok(!S.examples.some(r => r.description === 'p1' || r.description === 'p2'), 'parallel, heavy reading, one-line report: not flagged');
   assert.ok(S.startupUsd > 0 && S.usd >= S.startupUsd);
   assert.equal(S.repeatedDelegations[0].runs, 3, 'the same brief delegated in three sessions is a skill candidate');
+
+  // Model fit: every run here read and edited nothing on Opus 5.5, and the s2/s3
+  // main sessions were one-call jobs. Priced again from the same usage
+  // (1,000 in + 100 out per turn): $0.006 on Opus 5.5, $0.003 on Sonnet 5.5,
+  // $0.00015 on Haiku 5.5.
+  const F = JSON.parse(readFileSync(out, 'utf8')).modelFit;
+  assert.equal(F.subagentRuns, 5);
+  assert.equal(F.sessions, 2, 's1 made six tool calls, so it is not a small task');
+  assert.ok(Math.abs(F.onSonnet - F.usd / 2) < 1e-9, `Sonnet 5.5 is half of Opus 5.5 here: ${F.onSonnet} vs ${F.usd}`);
+  assert.ok(Math.abs(F.onHaiku - F.usd * 0.025) < 1e-9, `Haiku 5.5 is 2.5% of Opus 5.5 here: ${F.onHaiku} vs ${F.usd}`);
+  assert.ok(Math.abs(F.saveSonnet - (F.usd - F.onSonnet)) < 1e-9);
+  assert.equal(F.upperBound, true);
 });
 
 test('--allow-remote keeps only sessions from matching git repositories', () => {
@@ -318,4 +330,12 @@ test('findings are ranked by cost, and --baseline says which signals improved', 
   assert.equal(v('corrections per session'), 'better');
   assert.equal(v('usd per session'), 'better');
   assert.match(md, /## Since/);
+  assert.equal(D.costVsQuality, 'cheaper, with no more rework');
+
+  // Cheaper than before, but with more corrections: not a saving yet.
+  const cheapBefore = join(mkdtempSync(join(tmpdir(), 'wr-')), 'b2.json');
+  writeFileSync(cheapBefore, JSON.stringify({ ...B, totals: { ...B.totals, usd: B.totals.usd * 10, corrections: 0 }, instructionQuality: { ...B.instructionQuality, reworkShare: 0 } }));
+  const worse = join(mkdtempSync(join(tmpdir(), 'wr-')), 'w.json');
+  execFileSync(process.execPath, [SCRIPT, '--root', mk(true), '--json', worse, '--baseline', cheapBefore]);
+  assert.equal(JSON.parse(readFileSync(worse, 'utf8')).delta.costVsQuality, 'cheaper, but with more rework: not a saving yet');
 });

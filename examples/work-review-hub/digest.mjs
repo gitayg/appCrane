@@ -13,6 +13,7 @@ export const FIXES = {
   'redundant-reads': ['Re-reading unchanged files', 'Add a short map of where things live to CLAUDE.md'],
   'idle-reruns': ['Re-running commands with nothing changed', 'Run slow checks in the background and wait for them'],
   'error-output': ['Tool errors', 'Fix the error that comes up most; /work-review shows which'],
+  'model-fit': ['Small or read-only work run on Opus or Fable', 'Give those subagents `model: sonnet` (haiku for lookups), then check rework did not rise'],
 };
 const SETUP_FIXES = {
   'claude-md-long': 'CLAUDE.md is over 200 lines: cut what Claude can read from the code',

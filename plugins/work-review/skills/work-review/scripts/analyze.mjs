@@ -13,6 +13,7 @@ import { readdirSync, readFileSync, statSync, writeFileSync, existsSync } from '
 import { join, basename, dirname } from 'path';
 import { homedir } from 'os';
 import { execFileSync } from 'child_process';
+import { makePricer, PRICES_AS_OF } from './prices.mjs';
 
 // ── args ─────────────────────────────────────────────────────────
 const args = process.argv.slice(2);
@@ -78,57 +79,17 @@ const ANCHOR_RE = /(`[^`]+`|\b[\w-]+\.(?:js|mjs|ts|tsx|jsx|py|go|rs|java|rb|php|
 const CRITERIA_RE = /\b(should|must|expect(?:ed)?|so that|done when|until|make sure|verify|passes?|returns?|instead of|acceptance)\b/i;
 // Relative price of a token vs fresh input: output ×5, cache write ×1.25, cache read ×0.1.
 const costUnits = u => (u.input_tokens || 0) + 5 * (u.output_tokens || 0) + 1.25 * (u.cache_creation_input_tokens || 0) + 0.1 * (u.cache_read_input_tokens || 0);
-// ── pricing: what the same tokens would cost on the Claude API ──
-// Team, Max and Enterprise seats are billed per seat, so /usage on those plans
-// shows plan limits rather than a bill. Pricing the transcript's own usage at
-// API list rates gives a comparable dollar figure: the API-equivalent value of
-// the work, not an invoice. $ per million tokens, first-party Claude API rates
-// as of PRICES_AS_OF; --prices <file.json> (or WORK_REVIEW_PRICES) overrides or
-// extends it with { "<model-id prefix>": { "in", "out", "read" } }.
-// Cache writes are priced from `in`: ×1.25 for the 5-minute TTL, ×2 for 1-hour.
-const PRICES_AS_OF = '2026-10-06';
-const BASE_PRICES = {
-  'claude-fable-5-1': { in: 10, out: 50, read: 0.25 },
-  'claude-mythos-5-1': { in: 10, out: 50, read: 0.25 },
-  'claude-fable-5': { in: 10, out: 50, read: 1 },
-  'claude-mythos-5': { in: 10, out: 50, read: 1 },
-  'claude-opus-5-5': { in: 4, out: 20, read: 0.2 },
-  'claude-opus-5': { in: 5, out: 25, read: 0.5 },
-  'claude-opus-4-8': { in: 5, out: 25, read: 0.5 },
-  'claude-opus-4-7': { in: 5, out: 25, read: 0.5 },
-  'claude-opus-4-6': { in: 5, out: 25, read: 0.5 },
-  'claude-sonnet-5-5': { in: 2, out: 10, read: 0.2 },
-  'claude-sonnet-5': { in: 2, out: 10, read: 0.2 },
-  'claude-sonnet-4-6': { in: 3, out: 15, read: 0.3 },
-  // Haiku 5.5: prompts over 100K tokens are billed at the higher pair.
-  'claude-haiku-5-5': { in: 0.1, out: 0.5, read: 0.01, longAt: 100_000, longIn: 0.5, longOut: 2.5 },
-  'claude-haiku-4-5': { in: 1, out: 5, read: 0.1 },
-};
-const PRICES = { ...BASE_PRICES, ...(PRICE_FILE ? JSON.parse(readFileSync(PRICE_FILE, 'utf8')) : {}) };
-const PRICE_KEYS = Object.keys(PRICES).sort((a, b) => b.length - a.length);   // claude-opus-5-5 before claude-opus-5
-export function priceFor(model) {
-  const id = String(model || '').toLowerCase()
-    .replace(/\[[^\]]*\]/g, '')                       // claude-opus-5-5[1m]
-    .replace(/^(?:(?:us|eu|apac|global)\.)?anthropic\./, '') // Bedrock-style prefixes
-    .replace(/@.*$/, '').replace(/-\d{8}$/, '').trim();    // dated snapshots
-  const key = PRICE_KEYS.find(k => id === k || id.startsWith(k + '-'));
-  return key ? PRICES[key] : null;
-}
-/** Dollars for one message's usage, or null when the model is not priced. */
-export function usdOf(u, model) {
-  const p = priceFor(model);
-  if (!p) return null;
-  const fresh = u.input_tokens || 0, read = u.cache_read_input_tokens || 0, write = u.cache_creation_input_tokens || 0;
-  const long = p.longAt && fresh + read + write > p.longAt;
-  const rin = long ? p.longIn : p.in, rout = long ? p.longOut : p.out, rread = long ? p.longIn * (p.read / p.in) : p.read;
-  const w1h = Math.min(write, u.cache_creation?.ephemeral_1h_input_tokens || 0);
-  const fast = u.speed === 'fast' ? 2 : 1;   // fast mode: 2× standard on the Opus models that offer it
-  return fast * (fresh * rin + (u.output_tokens || 0) * rout + read * rread + (write - w1h) * rin * 1.25 + w1h * rin * 2) / 1e6;
-}
+// Pricing lives in prices.mjs (no side effects, so tests can import it);
+// --prices <file.json> (or WORK_REVIEW_PRICES) overrides or extends the table
+// with { "<model-id prefix>": { "in", "out", "read" } }.
+const { priceFor, usdOf } = makePricer(PRICE_FILE ? JSON.parse(readFileSync(PRICE_FILE, 'utf8')) : {});
+export { priceFor, usdOf };
 
 const NUDGE_RE = /^(continue|go on|go ahead|proceed|yes|yep|y|ok(?:ay)?|sure|do it|next|keep going|carry on)[.!\s]*$/i;
 const CEREMONY_RE = /^(TodoWrite|TaskCreate|TaskUpdate|EnterPlanMode|ExitPlanMode)$/;
-const BIG_MODEL_RE = /opus|fable/i;
+const BIG_MODEL_RE = /opus|fable|mythos/i;
+// The cheaper models a "would this cost less elsewhere?" estimate prices against.
+const ALT_MODELS = { sonnet: 'claude-sonnet-5-5', haiku: 'claude-haiku-5-5' };
 const INTERRUPT_RE = /\[Request interrupted by user/;
 const DENIED_RE = /(permission|was denied|user (?:rejected|declined|doesn't want)|not allowed|requires approval)/i;
 const EDIT_MISS_RE = /(string to replace not found|old_string.*not (?:found|unique)|found \d+ matches|File has not been read yet|file has been modified since)/i;
@@ -139,7 +100,7 @@ function analyzeFile(path) {
   const s = {
     file: path, project: basename(dirname(path).replace(/\/subagents$/, '')), sessionId: basename(path, '.jsonl'),
     subagent: path.includes('/subagents/'), start: null, end: null, models: new Map(),
-    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, usd: 0, usdByModel: new Map(), unpriced: new Map(), turns: 0, userPrompts: [],
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, usd: 0, alt: { base: 0, sonnet: 0, haiku: 0 }, usdByModel: new Map(), unpriced: new Map(), turns: 0, userPrompts: [],
     toolCalls: 0, toolCounts: new Map(), errors: [], redundantReads: [], repeatedCmds: [],
     retryLoops: [], editMisses: 0, denials: [], bigOutputs: [], corrections: [], interrupts: 0,
     compactions: 0, searchBursts: 0, wastedTokens: { read: 0, rerun: 0, errors: 0 },
@@ -188,7 +149,15 @@ function analyzeFile(path) {
         if (cur) cur.cost += costUnits(m.usage);
         const usd = usdOf(m.usage, m.model);
         if (usd == null) { if (m.model && m.model !== '<synthetic>') inc(s.unpriced, m.model, (m.usage.input_tokens || 0) + (m.usage.output_tokens || 0) + (m.usage.cache_read_input_tokens || 0) + (m.usage.cache_creation_input_tokens || 0)); }
-        else { s.usd += usd; inc(s.usdByModel, m.model, usd); if (cur) cur.usd += usd; }
+        else {
+          s.usd += usd; inc(s.usdByModel, m.model, usd); if (cur) cur.usd += usd;
+          // The same message priced on the cheaper models, at standard speed, for
+          // the model-fit estimate: only turns that ran on Opus, Fable or Mythos.
+          if (BIG_MODEL_RE.test(m.model)) {
+            const plain = { ...m.usage, speed: undefined };
+            s.alt.base += usd; s.alt.sonnet += usdOf(plain, ALT_MODELS.sonnet); s.alt.haiku += usdOf(plain, ALT_MODELS.haiku);
+          }
+        }
         // First turn's prompt size ≈ the always-on context: system prompt, tools, CLAUDE.md, MCP, skills.
         if (s.baselineCtx === null) s.baselineCtx = (m.usage.input_tokens || 0) + (m.usage.cache_read_input_tokens || 0) + (m.usage.cache_creation_input_tokens || 0);
         // What it costs just to start: the first request's input side (system prompt, tools, brief).
@@ -517,7 +486,8 @@ function subagentRuns(main) {
     }
     runs.push({ sessionId: main.sessionId, type, description: clip(meta.description || '', 80), prompt: use?.prompt || '',
       usd: +r.usd.toFixed(4), startupUsd: +(r.startupUsd || 0).toFixed(4), toolCalls: r.toolCalls, turns: r.turns,
-      parallel, background, isolation: Number.isFinite(isolation) ? +isolation.toFixed(1) : null, dupShare: +dupShare.toFixed(2), flags });
+      parallel, background, isolation: Number.isFinite(isolation) ? +isolation.toFixed(1) : null, dupShare: +dupShare.toFixed(2), flags,
+      edits: r.edits, alt: r.alt, proxy: TOOL_PROXY_AGENTS.has(type) });
   }
   return runs;
 }
@@ -541,8 +511,35 @@ const subagents = {
   flags: flagged.reduce((m, r) => { for (const f of r.flags) m[f] = (m[f] || 0) + 1; return m; }, {}),
   flaggedUsd: +flagged.reduce((a, r) => a + r.usd, 0).toFixed(4),
   repeatedDelegations: delegationClusters,
-  examples: flagged.sort((a, b) => b.usd - a.usd).slice(0, TOP).map(({ prompt, ...r }) => r),
+  examples: flagged.sort((a, b) => b.usd - a.usd).slice(0, TOP).map(({ prompt, alt, proxy, ...r }) => r),
 };
+// ── model fit: small or read-only work run on the biggest models ─
+// Subagent runs that edited nothing or made three tool calls or fewer, and
+// main sessions flagged big-model-small-task, priced again at Sonnet 5.5 and
+// Haiku 5.5 rates from the same usage. An upper bound on the saving: it
+// assumes the cheaper model needs the same tokens and turns, and a model
+// switch loses the prompt cache at first. Whether it held is what --baseline
+// shows afterwards (cost per landed commit next to rework).
+const modelFit = (() => {
+  const picked = [
+    ...runs.filter(r => !r.proxy && r.alt.base > 0 && (r.flags.includes('trivial') || r.edits === 0))
+      .map(r => ({ kind: 'subagent', type: r.type, alt: r.alt })),
+    ...mains.filter(s => s.overcomplication.includes('big-model-small-task') && s.alt.base > 0)
+      .map(s => ({ kind: 'session', type: 'main session', alt: s.alt })),
+  ];
+  const sum = (xs, k) => xs.reduce((a, x) => a + x.alt[k], 0);
+  const byType = new Map();
+  for (const x of picked) { const g = byType.get(x.type) || { type: x.type, runs: 0, alt: { base: 0, sonnet: 0, haiku: 0 } }; g.runs++; for (const k of ['base', 'sonnet', 'haiku']) g.alt[k] += x.alt[k]; byType.set(x.type, g); }
+  const base = sum(picked, 'base'), onSonnet = sum(picked, 'sonnet'), onHaiku = sum(picked, 'haiku');
+  return {
+    models: ALT_MODELS, upperBound: true,
+    subagentRuns: picked.filter(x => x.kind === 'subagent').length, sessions: picked.filter(x => x.kind === 'session').length,
+    usd: +base.toFixed(4), onSonnet: +onSonnet.toFixed(4), onHaiku: +onHaiku.toFixed(4),
+    saveSonnet: +(base - onSonnet).toFixed(4), saveHaiku: +(base - onHaiku).toFixed(4),
+    byType: [...byType.values()].sort((a, b) => b.alt.base - a.alt.base).slice(0, TOP)
+      .map(g => ({ type: g.type, runs: g.runs, usd: +g.alt.base.toFixed(4), onSonnet: +g.alt.sonnet.toFixed(4), onHaiku: +g.alt.haiku.toFixed(4) })),
+  };
+})();
 const perSession = sessions.map(s => ({
   sessionId: s.sessionId, project: s.project, subagent: s.subagent,
   start: s.start && new Date(s.start).toISOString(), minutes: s.start ? Math.round((s.end - s.start) / 60000) : 0,
@@ -603,6 +600,8 @@ const findingRows = [
     fix: 'Name the file, the error or what done looks like' },
   { id: 'subagents-no-benefit', title: 'Subagent runs that gained nothing from delegating', usd: subagents.flaggedUsd, count: Object.values(subagents.flags).reduce((a, n) => a + n, 0),
     fix: 'Do it in the main agent, or make a repeated brief a skill' },
+  { id: 'model-fit', title: 'Small or read-only work run on Opus or Fable (saving if run on Sonnet 5.5)', usd: modelFit.saveSonnet, count: modelFit.subagentRuns + modelFit.sessions, estimate: true,
+    fix: 'Give that subagent a `model: sonnet` line (haiku for pure lookups); then check cost per commit and rework with --baseline' },
   { id: 'redundant-reads', title: 'Re-reading files that had not changed', usd: wasteUsd('read'), count: totals.redundantReads, floor: true,
     fix: 'A CLAUDE.md map of where things live; read with offset/limit' },
   { id: 'idle-reruns', title: 'Re-running commands with nothing changed', usd: wasteUsd('rerun'), count: totals.idleCommandReruns, floor: true,
@@ -633,23 +632,30 @@ const SIGNALS = [
 ];
 export function compare(before, after, minSessions = 5) {
   const enough = before.totals.sessions >= minSessions && after.totals.sessions >= minSessions;
-  return {
-    sessions: { before: before.totals.sessions, after: after.totals.sessions }, enough,
-    since: before.generatedAt,
-    signals: SIGNALS.map(([name, f, good]) => {
+  const signals = SIGNALS.map(([name, f, good]) => {
       const b = f(before), a = f(after);
       if (b == null || a == null || !Number.isFinite(b) || !Number.isFinite(a)) return { name, before: b, after: a, verdict: 'no data' };
       const change = b === 0 ? (a === 0 ? 0 : 1) : (a - b) / Math.abs(b);
       const verdict = !enough ? 'too few sessions' : Math.abs(change) < 0.1 ? 'about the same' : (change < 0) === (good === 'lower') ? 'better' : 'worse';
       return { name, before: +b.toFixed(4), after: +a.toFixed(4), change: +change.toFixed(3), verdict };
-    }),
-  };
+    });
+  // Cost and quality read together: a cheaper setup that brings more
+  // corrections is not a saving yet, since the rework is paid for later.
+  const v = n => signals.find(g => g.name === n)?.verdict;
+  const cheaper = ['usd per session', 'cost per landed commit'].some(n => v(n) === 'better');
+  const costlier = ['usd per session', 'cost per landed commit'].some(n => v(n) === 'worse');
+  const worseQuality = ['rework share of spend', 'corrections per session'].some(n => v(n) === 'worse');
+  const costVsQuality = !enough ? 'too few sessions'
+    : cheaper && worseQuality ? 'cheaper, but with more rework: not a saving yet'
+    : cheaper ? 'cheaper, with no more rework'
+    : costlier && !worseQuality ? 'costlier, with no less rework' : 'no clear change in cost';
+  return { sessions: { before: before.totals.sessions, after: after.totals.sessions }, enough, since: before.generatedAt, signals, costVsQuality };
 }
 
 const partial = { generatedAt: new Date().toISOString(), totals, outcomes, instructionQuality, subagents };
 const delta = BASELINE ? compare(JSON.parse(readFileSync(BASELINE, 'utf8')), partial) : null;
 
-const report = { generatedAt: partial.generatedAt, root: ROOT, sinceDays: SINCE_DAYS, totals, findings, delta, outcomes, instructionQuality, cross, overcomplication, subagents, usage, worstSessions: perSession.slice(0, TOP), sessions: perSession };
+const report = { generatedAt: partial.generatedAt, root: ROOT, sinceDays: SINCE_DAYS, totals, findings, delta, outcomes, instructionQuality, cross, overcomplication, subagents, modelFit, usage, worstSessions: perSession.slice(0, TOP), sessions: perSession };
 if (JSON_OUT) writeFileSync(JSON_OUT, JSON.stringify(report, null, 2));
 
 // ── markdown summary ─────────────────────────────────────────────
@@ -691,7 +697,7 @@ if (delta) {
   out.push(`## Since ${delta.since.slice(0, 10)}`, '', `Sessions: ${delta.sessions.before} before, ${delta.sessions.after} after${delta.enough ? '' : ' — too few on one side to call any change'}.`, '',
     '| Signal | Before | After | Change | Verdict |', '|---|---|---|---|---|');
   for (const g of delta.signals) if (g.verdict !== 'no data') out.push(`| ${g.name} | ${g.before} | ${g.after} | ${g.change > 0 ? '+' : ''}${Math.round(g.change * 100)}% | ${g.verdict} |`);
-  out.push('');
+  out.push('', `Cost and quality together: **${delta.costVsQuality}**.`, '');
 }
 const section = (title, rows, fmt) => { if (rows.length) { out.push(`## ${title}`, ''); rows.forEach(r => out.push(`- ${fmt(r)}`)); out.push(''); } };
 const OC = overcomplication;
@@ -724,6 +730,16 @@ if (subagents.runs) {
   S.examples.slice(0, 5).forEach(r => out.push(`- ${usd(r.usd)} ${r.type} “${r.description}” — ${r.toolCalls} tool calls, ${r.parallel ? 'parallel' : 'alone in the foreground'}, read ${r.isolation ?? '∞'}× what it reported, ${Math.round(r.dupShare * 100)}% of its files also read by the main agent: ${r.flags.join(', ')}`));
   S.repeatedDelegations.forEach(c => out.push(`- Delegated ${c.runs}× across ${c.sessions} sessions (${usd(c.usd)}): “${c.example}” — a procedure repeated this often is a skill candidate.`));
   out.push('');
+}
+if (modelFit.usd > 0) {
+  const F = modelFit;
+  out.push('## Model fit', '',
+    `${F.subagentRuns} subagent run(s) and ${F.sessions} session(s) did small or read-only work on Opus or Fable for ${usd(F.usd)}. ` +
+    `The same tokens would cost ${usd(F.onSonnet)} on Sonnet 5.5 (save ${usd(F.saveSonnet)}) or ${usd(F.onHaiku)} on Haiku 5.5 (save ${usd(F.saveHaiku)}).`, '',
+    '| Work | Runs | Cost | On Sonnet 5.5 | On Haiku 5.5 |', '|---|---|---|---|---|',
+    ...F.byType.map(g => `| ${g.type} | ${g.runs} | ${usd(g.usd)} | ${usd(g.onSonnet)} | ${usd(g.onHaiku)} |`), '',
+    'This is an upper bound: it assumes the cheaper model needs the same tokens and turns, and a switch loses the prompt cache at first. ' +
+    'Try the strong model at lower effort before switching models, and judge by cost per finished task: run again with --baseline after the change and check that rework did not rise.', '');
 }
 section('Instructions you repeat across sessions', cross.repeatedPrompts, r => `${r.sessions} sessions / ${r.occurrences}×: “${r.example}”`);
 section('Corrections you keep making', cross.recurringCorrections, r => `${r.sessions} sessions / ${r.count}×: “${r.example}”`);
