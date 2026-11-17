@@ -13,6 +13,9 @@ import { getPortsForSlot } from './portAllocator.js';
 import { resolveStoredEnv } from './secretRefs.js';
 
 const BODY_TAIL_BYTES = 2048;
+// The app chooses how much it answers, and it answers into AppCrane's own
+// process: read at most this much, keeping only a rolling tail, then cancel.
+export const BODY_READ_LIMIT_BYTES = 1024 * 1024;
 export const CRON_USER_AGENT = 'vercel-cron/1.0 (compatible; AppCrane)';
 
 export function cronTargetUrl(app, env, path) {
@@ -32,6 +35,28 @@ function scrub(text, secret) {
   return secret ? String(text).split(secret).join('[CRON_SECRET]') : String(text);
 }
 
+// The kept tail is longer than what is logged by the secret's length, so a
+// secret split across the cut is still whole when scrub() runs.
+async function readBodyTail(res, secret) {
+  const keep = BODY_TAIL_BYTES + (secret ? secret.length : 0);
+  if (!res.body?.getReader) return '';
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let tail = '';
+  let read = 0;
+  try {
+    while (read < BODY_READ_LIMIT_BYTES) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      read += value.byteLength;
+      tail = (tail + decoder.decode(value, { stream: true })).slice(-keep);
+    }
+  } finally {
+    reader.cancel().catch(() => {});
+  }
+  return tail;
+}
+
 /** {exitCode, httpStatus, log, error}. exitCode 0 for a 2xx answer, 1 otherwise. */
 export async function runHttpCron(app, job, { fetchImpl = fetch } = {}) {
   const url = cronTargetUrl(app, job.env, job.http_path);
@@ -49,7 +74,7 @@ export async function runHttpCron(app, job, { fetchImpl = fetch } = {}) {
   try {
     const res = await fetchImpl(url, { method: 'GET', headers, redirect: 'manual', signal: controller.signal });
     let body = '';
-    try { body = await res.text(); } catch (_) {}
+    try { body = await readBodyTail(res, secret); } catch (_) {}
     const ok = res.status >= 200 && res.status < 300;
     const lines = [`GET ${job.http_path} ${auth} -> HTTP ${res.status}`];
     if (body) lines.push(scrub(body, secret).slice(-BODY_TAIL_BYTES));

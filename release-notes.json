@@ -1,4 +1,7 @@
 {
+  "2.138.1": [
+    "A scheduled job that calls an app now reads at most 1 MB of the app's reply and keeps only the end of it for the job log, so an app that answers with a very large or endless reply can no longer use up AppCrane's memory."
+  ],
   "2.138.0": [
     "Apps that schedule jobs in vercel.json now get them on AppCrane too. On each deploy, every entry under \"crons\" in the app's vercel.json becomes a scheduled job that calls that path on the app at the same time Vercel would (times are UTC), sending the app's CRON_SECRET the way Vercel does when the app has one. You can see these jobs, marked as coming from vercel.json, and run one straight away from the AppCrane tools. Jobs you set up yourself are never changed, and a vercel.json with a mistake in it is reported in the deploy log instead of stopping the deploy.",
     "SignuDoc, an open-source app for sending PDFs to be signed, is now in the app catalogue. AppCrane builds it from its source, gives it its own Postgres database, sets up its database tables on every deploy and schedules its daily cleanup and backup jobs. To send e-mail it needs a Resend API key, which you add yourself.",
