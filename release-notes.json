@@ -3,7 +3,7 @@
     "Work Review prices Claude Fable 5.2 and Mythos 5.2 at their own rates (they were priced as Fable 5, with cache reads at five times the real price) and Sonnet 5.5 cache reads at $0.10, not $0.20. Requests pinned to US-only processing are priced at 1.1x. A test now holds the price table to Anthropic's pricing page.",
     "Work Review shows what small or read-only work that ran on Opus or Fable would have cost on Sonnet 5.5 or Haiku 5.5, as an upper bound, with the one-line fix for the subagent.",
     "A before-and-after Work Review now reads cost and rework together, and says when a cheaper setup is costing it back in corrections.",
-    "The work-review plugin is now version 1.2.0."
+    "The work-review plugin is now version 1.2.1."
   ],
   "2.138.2": [
     "The end of an app's reply that a scheduled job keeps for its log can no longer show part of the app's CRON_SECRET. Only whole copies were hidden before, so a reply cut in the middle of the secret could leave a piece of it in the log."

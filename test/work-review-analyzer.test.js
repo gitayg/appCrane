@@ -330,12 +330,18 @@ test('findings are ranked by cost, and --baseline says which signals improved', 
   assert.equal(v('corrections per session'), 'better');
   assert.equal(v('usd per session'), 'better');
   assert.match(md, /## Since/);
-  assert.equal(D.costVsQuality, 'cheaper, with no more rework');
+  assert.equal(D.costVsQuality, 'cheaper, with less rework');
 
-  // Cheaper than before, but with more corrections: not a saving yet.
-  const cheapBefore = join(mkdtempSync(join(tmpdir(), 'wr-')), 'b2.json');
-  writeFileSync(cheapBefore, JSON.stringify({ ...B, totals: { ...B.totals, usd: B.totals.usd * 10, corrections: 0 }, instructionQuality: { ...B.instructionQuality, reworkShare: 0 } }));
-  const worse = join(mkdtempSync(join(tmpdir(), 'wr-')), 'w.json');
-  execFileSync(process.execPath, [SCRIPT, '--root', mk(true), '--json', worse, '--baseline', cheapBefore]);
-  assert.equal(JSON.parse(readFileSync(worse, 'utf8')).delta.costVsQuality, 'cheaper, but with more rework: not a saving yet');
+  // The same sessions measured against doctored baselines, one per pairing:
+  // spend scaled by `usd`, corrections and rework share set as given.
+  const verdictAgainst = (usdScale, corrections, reworkShare) => {
+    const base = join(mkdtempSync(join(tmpdir(), 'wr-')), 'b.json');
+    writeFileSync(base, JSON.stringify({ ...B, totals: { ...B.totals, usd: B.totals.usd * usdScale, corrections }, instructionQuality: { ...B.instructionQuality, reworkShare } }));
+    const o = join(mkdtempSync(join(tmpdir(), 'wr-')), 'o.json');
+    execFileSync(process.execPath, [SCRIPT, '--root', mk(true), '--json', o, '--baseline', base]);
+    return JSON.parse(readFileSync(o, 'utf8')).delta.costVsQuality;
+  };
+  assert.equal(verdictAgainst(10, 0, 0), 'cheaper, but with more rework: not a saving yet');
+  assert.equal(verdictAgainst(0.1, 0, 0), 'costlier, with more rework');
+  assert.equal(verdictAgainst(0.1, B.totals.corrections * 10, 1), 'costlier, with less rework', 'paying more to cut corrections is named as such');
 });

@@ -642,13 +642,16 @@ export function compare(before, after, minSessions = 5) {
   // Cost and quality read together: a cheaper setup that brings more
   // corrections is not a saving yet, since the rework is paid for later.
   const v = n => signals.find(g => g.name === n)?.verdict;
-  const cheaper = ['usd per session', 'cost per landed commit'].some(n => v(n) === 'better');
-  const costlier = ['usd per session', 'cost per landed commit'].some(n => v(n) === 'worse');
-  const worseQuality = ['rework share of spend', 'corrections per session'].some(n => v(n) === 'worse');
-  const costVsQuality = !enough ? 'too few sessions'
-    : cheaper && worseQuality ? 'cheaper, but with more rework: not a saving yet'
-    : cheaper ? 'cheaper, with no more rework'
-    : costlier && !worseQuality ? 'costlier, with no less rework' : 'no clear change in cost';
+  const costSigs = ['usd per session', 'cost per landed commit'], qualitySigs = ['rework share of spend', 'corrections per session'];
+  const any = (names, verdict) => names.some(n => v(n) === verdict);
+  // Signals pointing both ways count as no clear change on that axis.
+  const cost = any(costSigs, 'better') === any(costSigs, 'worse') ? 'same' : any(costSigs, 'better') ? 'cheaper' : 'costlier';
+  const rework = any(qualitySigs, 'better') === any(qualitySigs, 'worse') ? 'same' : any(qualitySigs, 'better') ? 'less' : 'more';
+  const costVsQuality = !enough ? 'too few sessions' : {
+    'cheaper more': 'cheaper, but with more rework: not a saving yet', 'cheaper same': 'cheaper, with no more rework', 'cheaper less': 'cheaper, with less rework',
+    'costlier more': 'costlier, with more rework', 'costlier same': 'costlier, with no less rework', 'costlier less': 'costlier, with less rework',
+    'same more': 'no clear change in cost, with more rework', 'same same': 'no clear change in cost or rework', 'same less': 'no clear change in cost, with less rework',
+  }[`${cost} ${rework}`];
   return { sessions: { before: before.totals.sessions, after: after.totals.sessions }, enough, since: before.generatedAt, signals, costVsQuality };
 }
 
