@@ -156,7 +156,7 @@ function failClosedOnError() {
  * SHA, tagging HTTP failures with .status so the retry loop can tell a
  * transient (5xx, rate limit) from a settled answer (404, 401).
  */
-async function githubHeadSha(url, headers) {
+async function githubHeadSha(url, headers, readSha = (body) => body?.commit?.sha) {
   const r = await fetch(url, { headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
   if (!r.ok) {
     const body = await r.text().catch(() => '');
@@ -165,9 +165,9 @@ async function githubHeadSha(url, headers) {
     throw err;
   }
   const body = await r.json();
-  const sha = body?.commit?.sha;
+  const sha = readSha(body);
   if (!sha || !/^[0-9a-f]{40}$/.test(sha)) {
-    throw new Error('GitHub returned a 200 with no commit SHA for this branch');
+    throw new Error('GitHub returned a 200 with no commit SHA for this ref');
   }
   return sha;
 }
@@ -180,7 +180,7 @@ async function githubHeadSha(url, headers) {
  * branch/repo is not there — so they stop the loop immediately instead of
  * spending the full backoff on a result that will not change.
  */
-async function resolveRemoteSha(url, headers, localSha) {
+async function resolveRemoteSha(url, headers, localSha, readSha) {
   let lastSha = null;
   let lastError = null;
 
@@ -189,7 +189,7 @@ async function resolveRemoteSha(url, headers, localSha) {
       await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[i]));
     }
     try {
-      lastSha = await githubHeadSha(url, headers);
+      lastSha = await githubHeadSha(url, headers, readSha);
       lastError = null;
       if (lastSha === localSha) return { sha: lastSha };
     } catch (e) {
@@ -343,7 +343,7 @@ export async function verifyCommitSha(app, releaseDir, branch, appendLog) {
   }
 
   const branchName = branch || app.branch || 'main';
-  const url = `https://api.github.com/repos/${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.repo)}/branches/${encodeURIComponent(branchName)}`;
+  const repoApi = `https://api.github.com/repos/${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.repo)}`;
   const headers = {
     Accept: 'application/vnd.github+json',
     'X-GitHub-Api-Version': '2022-11-28',
@@ -352,7 +352,22 @@ export async function verifyCommitSha(app, releaseDir, branch, appendLog) {
   const token = await authForApp(app);
   if (token) headers.Authorization = `Bearer ${token}`;
 
-  const { sha: remoteSha, error } = await resolveRemoteSha(url, headers, localSha);
+  // Branch first, so a branch keeps the heads lookup. An app pinned to a release
+  // tag (the catalogue install pins the latest one) gets a settled 404 there;
+  // only then is the name read as a tag. The commits endpoint dereferences an
+  // annotated tag to its commit and answers with a top-level `sha`.
+  let refKind = 'branch';
+  let { sha: remoteSha, error } = await resolveRemoteSha(`${repoApi}/branches/${encodeURIComponent(branchName)}`, headers, localSha);
+  if (error?.status === 404) {
+    refKind = 'tag';
+    ({ sha: remoteSha, error } = await resolveRemoteSha(
+      `${repoApi}/commits/refs/tags/${encodeURIComponent(branchName)}`, headers, localSha, (body) => body?.sha,
+    ));
+  }
+
+  const refLabel = refKind === 'tag'
+    ? `${parsed.owner}/${parsed.repo} tag ${branchName}`
+    : `${parsed.owner}/${parsed.repo}@${branchName}`;
 
   if (error) {
     log.warn(`supply-chain verify: could not read ${parsed.owner}/${parsed.repo}@${branchName} — ${error.message}`);
@@ -362,11 +377,11 @@ export async function verifyCommitSha(app, releaseDir, branch, appendLog) {
   if (remoteSha !== localSha) {
     // The actual security signal. Refuse the deploy.
     throw new Error(
-      `Supply-chain verify FAILED: local HEAD ${localSha.slice(0, 12)}… does not match GitHub's ${parsed.owner}/${parsed.repo}@${branchName} ${remoteSha.slice(0, 12)}…. ` +
+      `Supply-chain verify FAILED: local HEAD ${localSha.slice(0, 12)}… does not match GitHub's ${refLabel} ${remoteSha.slice(0, 12)}…. ` +
       `Refusing to swap container. If this is a mirror or fork, set supply_chain_verify_enabled='0' in settings to bypass.`
     );
   }
 
-  appendLog?.(`Supply-chain verify: OK (HEAD ${localSha.slice(0, 12)} matches GitHub ${parsed.owner}/${parsed.repo}@${branchName}).`);
+  appendLog?.(`Supply-chain verify: OK (HEAD ${localSha.slice(0, 12)} matches GitHub ${refLabel}).`);
   return { skipped: false, verified: true, localSha, remoteSha };
 }

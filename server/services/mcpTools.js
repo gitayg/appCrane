@@ -4433,7 +4433,7 @@ const TOOLS = [
   {
     name: 'appcrane_list_cron',
     description:
-      'List the scheduled jobs declared in an app\'s deployhub.json `cron` array (after the most recent deploy). Each entry includes the cron schedule, the command, when it last ran, the exit code, and the tail of the last run\'s stdout/stderr. Use to verify a job was registered, debug a missing run, or read the recent log. App-admin or owner.',
+      'List the scheduled jobs of an app: those declared in its deployhub.json `cron` array (origin "manifest", kind "exec": a docker exec) and those AppCrane created from the `crons` of its vercel.json (origin "vercel", kind "http": GET http_path on the app\'s own container, with Authorization: Bearer CRON_SECRET when the app sets CRON_SECRET), as of the most recent deploy. Each entry includes the cron schedule (UTC), the command, when it last ran, the exit code (0 = success; for an http job, a 2xx answer), last_http_status for an http job, and the tail of the last run\'s output. Use to verify a job was registered, debug a missing run, or read the recent log. App-admin or owner.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -4452,8 +4452,8 @@ const TOOLS = [
       const filters = args.env ? 'AND env = ?' : '';
       const params = args.env ? [app.id, args.env] : [app.id];
       const rows = db.prepare(`
-        SELECT id, env, name, schedule, command, enabled, timeout_seconds,
-               last_run_at, last_exit_code, last_log
+        SELECT id, env, name, kind, origin, schedule, command, http_path, enabled, timeout_seconds,
+               last_run_at, last_exit_code, last_http_status, last_log
         FROM app_cron_jobs
         WHERE app_id = ? ${filters}
         ORDER BY env, name
@@ -4465,13 +4465,13 @@ const TOOLS = [
   {
     name: 'appcrane_run_cron_now',
     description:
-      'Trigger a scheduled cron job RIGHT NOW, regardless of its schedule. Useful for "I want to test my daily rebuild without waiting until midnight" or "rerun yesterday\'s failed job." Runs the same `docker exec` the tick loop would, against the app\'s container; updates last_run_at / last_exit_code / last_log just like a scheduled run. Returns the exit code and last-log tail. App-admin or owner. Idempotent: if the job is already running (mutex held), reports it and skips rather than overlapping.',
+      'Trigger a scheduled cron job RIGHT NOW, regardless of its schedule. Useful for "I want to test my daily rebuild without waiting until midnight" or "rerun yesterday\'s failed job." Runs the same `docker exec` the tick loop would against the app\'s container, or for a job from vercel.json the same GET of its path; updates last_run_at / last_exit_code / last_log just like a scheduled run. Returns the exit code and last-log tail. App-admin or owner. Idempotent: if the job is already running (mutex held), reports it and skips rather than overlapping.',
     inputSchema: {
       type: 'object',
       properties: {
         slug: { type: 'string' },
         env:  { type: 'string', enum: ['sandbox', 'production'], default: 'sandbox' },
-        name: { type: 'string', description: 'Job name from deployhub.json `cron[].name`.' },
+        name: { type: 'string', description: 'Job name from deployhub.json `cron[].name`, or the vercel:<path> name appcrane_list_cron shows for a vercel.json cron.' },
       },
       required: ['slug', 'name'],
       additionalProperties: false,
@@ -4483,7 +4483,7 @@ const TOOLS = [
       if (!isAppAdmin(user, app)) throw new Error('Forbidden: running cron jobs requires admin or app-admin role on this app');
       const db = getDb();
       const job = db.prepare(`
-        SELECT id, app_id, env, name, schedule, command, timeout_seconds
+        SELECT id, app_id, env, name, schedule, command, timeout_seconds, kind, http_path
         FROM app_cron_jobs
         WHERE app_id = ? AND env = ? AND name = ?
       `).get(app.id, env, String(args.name));

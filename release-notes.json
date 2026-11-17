@@ -1,4 +1,10 @@
 {
+  "2.138.0": [
+    "Apps that schedule jobs in vercel.json now get them on AppCrane too. On each deploy, every entry under \"crons\" in the app's vercel.json becomes a scheduled job that calls that path on the app at the same time Vercel would (times are UTC), sending the app's CRON_SECRET the way Vercel does when the app has one. You can see these jobs, marked as coming from vercel.json, and run one straight away from the AppCrane tools. Jobs you set up yourself are never changed, and a vercel.json with a mistake in it is reported in the deploy log instead of stopping the deploy.",
+    "SignuDoc, an open-source app for sending PDFs to be signed, is now in the app catalogue. AppCrane builds it from its source, gives it its own Postgres database, sets up its database tables on every deploy and schedules its daily cleanup and backup jobs. To send e-mail it needs a Resend API key, which you add yourself.",
+    "An app pinned to a release tag on GitHub, which is what installing from the catalogue does, can now go to production. The security check before a new version goes live asked GitHub for a branch with the tag's name, was told there is none, and stopped the deploy. It now checks the tag's commit instead, and still stops the deploy if that commit is not the one being deployed.",
+    "Redeploying an app built with Next, such as SignuDoc, no longer asks you to confirm data loss because of its page cache. AppCrane now knows that folder is rebuilt automatically, so only real data the app writes inside its container is reported."
+  ],
   "2.137.1": [
     "A managed app whose code is still on GitHub can now use this server's GitHub App (the gh app button in Applications). Moving its code onto the server then signs in with the App, which works for GitHub organizations that require single sign-on, where a personal token is refused until someone authorizes it."
   ],

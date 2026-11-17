@@ -8,6 +8,7 @@ import { detectPhpApp, ensurePhpDockerfile } from './dockerfileGenPhp.js';
 import { pickNodeVersion } from './nodeVersion.js';
 import { placeAppBasePathArg } from './dockerfileBasePath.js';
 import { ensureDockerignore } from './dockerignore.js';
+import { recipeEnvLines } from './catalogBuildRecipe.js';
 
 // Lockfiles `npm ci` can actually consume. Only these make the generated
 // install reproducible, because the generated install runs npm.
@@ -206,7 +207,7 @@ function supplyChainLines({ relDir, lockfileMissing, omitDev }) {
  * generation time, as opposed to the ones the generated Dockerfile prints
  * during the build.
  */
-export function ensureDockerfile({ releaseDir, manifest, appBasePath, craneUrl, craneInternalUrl, pinnedPhpVersion = null, buildkit = false, slug = null }) {
+export function ensureDockerfile({ releaseDir, manifest, appBasePath, craneUrl, craneInternalUrl, pinnedPhpVersion = null, buildkit = false, slug = null, recipe = null }) {
   const existing = join(releaseDir, 'Dockerfile'); // nosemgrep: path-join-resolve-traversal — releaseDir is an internal computed path
   const warnings = [];
 
@@ -296,8 +297,11 @@ export function ensureDockerfile({ releaseDir, manifest, appBasePath, craneUrl, 
     scanTargets.push({ relDir, lockfileMissing: !!finding, omitDev });
   };
 
-  const entry = detectEntry(manifest, releaseDir, beWorkdir);
-  const buildCmd = detectBuild(manifest, releaseDir, feWorkdir);
+  const declaresEntry = Boolean(manifest?.be?.entry || manifest?.start?.backend);
+  const declaresBuild = Boolean(manifest?.fe?.build || manifest?.build?.frontend);
+  const entry = recipe?.start && !declaresEntry ? recipe.start : detectEntry(manifest, releaseDir, beWorkdir);
+  const buildCmd = recipe?.build && !declaresBuild ? recipe.build : detectBuild(manifest, releaseDir, feWorkdir);
+  const flatInstall = recipe?.install && !manifest?.be?.install ? recipe.install : defaultInstall();
   const cmd = entryToCmd(entry);
 
   // Ownership is established ONCE, on the empty /app directory, and everything
@@ -375,7 +379,7 @@ export function ensureDockerfile({ releaseDir, manifest, appBasePath, craneUrl, 
     trackInstall('.', true);
     lines.push(
       'COPY --chown=node:node package*.json ./',
-      `${installRun} ${defaultInstall()}`,
+      `${installRun} ${flatInstall}`,
       '',
       'COPY --chown=node:node . .',
       '',
@@ -408,6 +412,7 @@ export function ensureDockerfile({ releaseDir, manifest, appBasePath, craneUrl, 
   lines.push(
     `WORKDIR ${runWorkdir}`,
     '',
+    ...recipeEnvLines(recipe),
     'EXPOSE 3000',
     '',
     'ENTRYPOINT ["/sbin/tini", "--"]',

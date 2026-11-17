@@ -1836,6 +1836,15 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     const manifestAccessRules = parseAccessRules(manifest.access);
     const manifestMcp = parseAppMcp(manifest.mcp);
 
+    // A catalogue entry with a `build` recipe (catalogBuildRecipe.js) says how
+    // to build a project that ships no Dockerfile and no deployhub.json.
+    const { catalogRecipeFor, applyRecipeHealth } = await import('./catalogBuildRecipe.js');
+    const catalogRecipe = catalogRecipeFor(app, isImageDeploy);
+    if (catalogRecipe) {
+      appendLog(`Catalogue build recipe for '${app.catalog_slug}' applies where the repo declares nothing of its own`);
+      if (applyRecipeHealth(manifest, catalogRecipe.entry)) appendLog(`Health path from the catalogue entry: ${manifest.be.health}`);
+    }
+
     // Sync the per-tenant DB opt-in from the manifest onto the app row, so the
     // revoke path (which runs outside a deploy) knows whether to purge tenant
     // data. Only touch the column when the manifest states it explicitly.
@@ -1854,6 +1863,12 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       if (result.synced > 0) appendLog(`Synced ${result.synced} cron job(s) from deployhub.json`);
     } catch (e) {
       appendLog(`WARNING: cron sync failed (deploy continues): ${e.message}`);
+    }
+    try {
+      const { syncVercelCronsForRelease } = await import('./vercelCrons.js');
+      for (const line of syncVercelCronsForRelease(app.id, env, isImageDeploy ? null : releaseDir)) appendLog(line);
+    } catch (e) {
+      appendLog(`WARNING: vercel.json cron sync failed (deploy continues): ${e.message}`);
     }
 
     // Resolve `version` with precedence:
@@ -1984,7 +1999,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       const { pinnedPhpVersionFor, describePhpBuild } = await import('./phpVersion.js');
       const pinnedPhpVersion = pinnedPhpVersionFor(db, app.id, env);
       const { buildKitEnabled } = await import('./buildkitMode.js');
-      const { userProvided, runtime, php, node } = ensureDockerfile({ releaseDir, manifest, appBasePath, craneUrl, craneInternalUrl, buildkit: buildKitEnabled(), slug: app.slug, pinnedPhpVersion });
+      const { userProvided, runtime, php, node } = ensureDockerfile({ releaseDir, manifest, appBasePath, craneUrl, craneInternalUrl, buildkit: buildKitEnabled(), slug: app.slug, recipe: catalogRecipe?.recipe || null, pinnedPhpVersion });
       buildRuntime = runtime ?? null;
 
       if (userProvided) {
@@ -2301,7 +2316,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     // AppCrane-build convention a stock image has no reason to serve — probing
     // it would 404 and mark a working container unhealthy. The column is NULL
     // for every tree-based app, so their behaviour is unchanged.
-    const probeTarget = resolveHealthProbe({ manifest, app, runtime: buildRuntime });
+    const probeTarget = resolveHealthProbe({ manifest, app, runtime: buildRuntime, catalogBuild: Boolean(catalogRecipe) });
     const healthPath = probeTarget.path;
     const healthSource = probeTarget.source;
     const healthUrl = `http://localhost:${bePort}${healthPath}`;

@@ -568,7 +568,7 @@ Every `appcrane_*` tool, grouped by purpose. The authoritative input schema for 
 | `appcrane_wait_deploy` | Block until a deployment reaches a terminal state (live / failed / rolled_back), then return its final status |
 | `appcrane_rollback` | Roll an env back to a prior release |
 | `appcrane_promote` | Promote the current live SANDBOX release to production — the gated sandbox→prod path |
-| `appcrane_list_cron` | List the scheduled jobs declared in an app's deployhub.json `cron` array (after the most recent deploy) |
+| `appcrane_list_cron` | List an app's scheduled jobs: its deployhub.json `cron` array and the `crons` of its vercel.json (after the most recent deploy) |
 | `appcrane_run_cron_now` | Trigger a scheduled cron job RIGHT NOW, regardless of its schedule |
 | `appcrane_check_resource_limits` | Which containers are NOT running with their configured CPU/RAM? Admin only |
 

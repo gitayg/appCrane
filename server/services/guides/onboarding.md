@@ -1221,6 +1221,18 @@ Jobs are synced from `deployhub.json` on every deploy: new entries added,
 missing ones removed, existing ones updated. So the source of truth lives
 with the app's code, not in some out-of-band UI.
 
+**Coming from Vercel.** An app that already has `crons` in a top-level
+`vercel.json` (`[{ "path": "/api/cron", "schedule": "0 5 * * *" }]`) needs no
+`deployhub.json` entry: each one becomes a job named `vercel:<path>` that calls
+`GET <path>` on the app's own container (loopback port, not the public proxy),
+in UTC, with `Authorization: Bearer <CRON_SECRET>` when the app has a
+`CRON_SECRET` env var, and without following redirects. A 2xx answer is success;
+the timeout is 300 s. `appcrane_list_cron` shows them with `origin: "vercel"`.
+A `vercel.json` that is not valid JSON, has a path that is not a plain `/...`
+path, a schedule Vercel would refuse, or more than 100 entries is reported in
+the deploy log and changes nothing. Jobs from `deployhub.json` are never
+touched by this.
+
 ## Path-level SSO bypass — when one endpoint takes its own token
 
 Headless mode (`auth_mode: 'headless'`) drops SSO from the WHOLE app — right
