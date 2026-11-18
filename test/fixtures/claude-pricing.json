@@ -1,0 +1,25 @@
+{
+  "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+  "asOf": "2026-11-17",
+  "note": "$ per million tokens, copied from the page's Model pricing table: base input, 5-minute cache write, 1-hour cache write, cache hits and refreshes, output. Update from the page together with BASE_PRICES in plugins/work-review/skills/work-review/scripts/prices.mjs.",
+  "models": {
+    "claude-fable-5-2":   { "in": 8,    "write5m": 10,    "write1h": 16,  "read": 0.20, "out": 40 },
+    "claude-mythos-5-2":  { "in": 8,    "write5m": 10,    "write1h": 16,  "read": 0.20, "out": 40 },
+    "claude-fable-5-1":   { "in": 10,   "write5m": 12.50, "write1h": 20,  "read": 0.25, "out": 50 },
+    "claude-mythos-5-1":  { "in": 10,   "write5m": 12.50, "write1h": 20,  "read": 0.25, "out": 50 },
+    "claude-fable-5":     { "in": 10,   "write5m": 12.50, "write1h": 20,  "read": 1,    "out": 50 },
+    "claude-mythos-5":    { "in": 10,   "write5m": 12.50, "write1h": 20,  "read": 1,    "out": 50 },
+    "claude-opus-5-5":    { "in": 4,    "write5m": 5,     "write1h": 8,   "read": 0.20, "out": 20 },
+    "claude-opus-5":      { "in": 5,    "write5m": 6.25,  "write1h": 10,  "read": 0.50, "out": 25 },
+    "claude-opus-4-8":    { "in": 5,    "write5m": 6.25,  "write1h": 10,  "read": 0.50, "out": 25 },
+    "claude-opus-4-7":    { "in": 5,    "write5m": 6.25,  "write1h": 10,  "read": 0.50, "out": 25 },
+    "claude-opus-4-6":    { "in": 5,    "write5m": 6.25,  "write1h": 10,  "read": 0.50, "out": 25 },
+    "claude-sonnet-5-5":  { "in": 2,    "write5m": 2.50,  "write1h": 4,   "read": 0.10, "out": 10 },
+    "claude-sonnet-5":    { "in": 2,    "write5m": 2.50,  "write1h": 4,   "read": 0.20, "out": 10 },
+    "claude-sonnet-4-6":  { "in": 3,    "write5m": 3.75,  "write1h": 6,   "read": 0.30, "out": 15 },
+    "claude-haiku-5-5":   { "in": 0.10, "write5m": 0.125, "write1h": 0.20, "read": 0.01, "out": 0.50,
+                            "over100k": { "in": 0.50, "write5m": 0.625, "write1h": 1, "read": 0.05, "out": 2.50 } },
+    "claude-haiku-4-5":   { "in": 1,    "write5m": 1.25,  "write1h": 2,   "read": 0.10, "out": 5 }
+  },
+  "multipliers": { "fastMode": 2, "usOnlyInference": 1.1 }
+}
