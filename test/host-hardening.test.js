@@ -49,17 +49,24 @@ function dockerUp() {
 }
 
 // One image per Ubuntu release, with the packages a real box has. Docker's
-// layer cache makes every run after the first instant. Built at module load so
-// the build is not charged to a test's timeout.
+// layer cache makes every run after the first instant. Built at module load,
+// which node --test still charges to this FILE's timeout (npm test passes
+// --test-timeout=120000): on a cold CI runner with a slow package mirror the
+// builds once ran past it and failed the file instead of skipping. So all the
+// builds share one budget well inside it; past that, the docker tests skip.
+const BUILD_BUDGET_MS = 75000;
+const buildStart = Date.now();
+const buildTimeLeft = () => BUILD_BUDGET_MS - (Date.now() - buildStart);
 const RELEASES = ['24.04', '20.04'];
 const images = {};
 if (dockerUp()) {
   for (const rel of RELEASES) {
     const tag = `appcrane-test-host-hardening:${rel}`;
+    if (buildTimeLeft() < 1000) break;
     try {
       execFileSync('docker', ['build', '-q', '-t', tag, '-'], {
         input: `FROM ubuntu:${rel}\nRUN apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq rsyslog logrotate jq unattended-upgrades >/dev/null && rm -rf /var/lib/apt/lists/*\nRUN useradd --system --home-dir /var/lib/caddy --shell /usr/sbin/nologin caddy\n`,
-        stdio: ['pipe', 'pipe', 'pipe'], timeout: 600000,
+        stdio: ['pipe', 'pipe', 'pipe'], timeout: Math.max(1000, buildTimeLeft()),
       });
       images[rel] = tag;
     } catch (_) { /* no network or no image: the tests below skip */ }
@@ -293,11 +300,11 @@ test('install.sh installs the sudo copy after running the script, passing the ru
 
 const SUDO_TAG = 'appcrane-test-host-hardening-sudo:24.04';
 let sudoImage = null;
-if (images['24.04']) {
+if (images['24.04'] && buildTimeLeft() >= 1000) {
   try {
     execFileSync('docker', ['build', '-q', '-t', SUDO_TAG, '-'], {
       input: `FROM ${images['24.04']}\nRUN apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq sudo >/dev/null && rm -rf /var/lib/apt/lists/*\nRUN useradd -m app\n`,
-      stdio: ['pipe', 'pipe', 'pipe'], timeout: 600000,
+      stdio: ['pipe', 'pipe', 'pipe'], timeout: Math.max(1000, buildTimeLeft()),
     });
     sudoImage = SUDO_TAG;
   } catch (_) { /* the tests below skip */ }
