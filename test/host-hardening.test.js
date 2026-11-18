@@ -55,6 +55,12 @@ function dockerUp() {
 // builds once ran past it and failed the file instead of skipping. So all the
 // builds share one budget well inside it; past that, the docker tests skip.
 const BUILD_BUDGET_MS = 75000;
+// Docker Hub's mirror on Google's registry: anonymous Docker Hub pulls are rate
+// limited (a 429 measured from a cloud container on 18 Nov 2026), and a
+// throttled pull stalls the build this file's timeout is counting.
+const BASE_IMAGE = 'mirror.gcr.io/library/ubuntu';
+// One line per build in the CI log, so a slow run shows where its time went.
+const note = (what, t0, ok) => process.stderr.write(`host-hardening: ${what} ${ok ? 'built' : 'not built'} in ${Date.now() - t0} ms\n`);
 const buildStart = Date.now();
 const buildTimeLeft = () => BUILD_BUDGET_MS - (Date.now() - buildStart);
 const RELEASES = ['24.04', '20.04'];
@@ -63,13 +69,15 @@ if (dockerUp()) {
   for (const rel of RELEASES) {
     const tag = `appcrane-test-host-hardening:${rel}`;
     if (buildTimeLeft() < 1000) break;
+    const t0 = Date.now();
     try {
       execFileSync('docker', ['build', '-q', '-t', tag, '-'], {
-        input: `FROM ubuntu:${rel}\nRUN apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq rsyslog logrotate jq unattended-upgrades >/dev/null && rm -rf /var/lib/apt/lists/*\nRUN useradd --system --home-dir /var/lib/caddy --shell /usr/sbin/nologin caddy\n`,
+        input: `FROM ${BASE_IMAGE}:${rel}\nRUN apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq rsyslog logrotate jq unattended-upgrades >/dev/null && rm -rf /var/lib/apt/lists/*\nRUN useradd --system --home-dir /var/lib/caddy --shell /usr/sbin/nologin caddy\n`,
         stdio: ['pipe', 'pipe', 'pipe'], timeout: Math.max(1000, buildTimeLeft()),
       });
       images[rel] = tag;
     } catch (_) { /* no network or no image: the tests below skip */ }
+    note(`ubuntu ${rel} image`, t0, !!images[rel]);
   }
 }
 const skipFor = (rel) => images[rel] ? false : 'docker (or the package mirror) unavailable';
@@ -301,6 +309,7 @@ test('install.sh installs the sudo copy after running the script, passing the ru
 const SUDO_TAG = 'appcrane-test-host-hardening-sudo:24.04';
 let sudoImage = null;
 if (images['24.04'] && buildTimeLeft() >= 1000) {
+  const t0 = Date.now();
   try {
     execFileSync('docker', ['build', '-q', '-t', SUDO_TAG, '-'], {
       input: `FROM ${images['24.04']}\nRUN apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq sudo >/dev/null && rm -rf /var/lib/apt/lists/*\nRUN useradd -m app\n`,
@@ -308,6 +317,7 @@ if (images['24.04'] && buildTimeLeft() >= 1000) {
     });
     sudoImage = SUDO_TAG;
   } catch (_) { /* the tests below skip */ }
+  note('sudo image', t0, !!sudoImage);
 }
 const skipSudo = sudoImage ? false : 'docker (or the package mirror) unavailable';
 
