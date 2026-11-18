@@ -1,4 +1,7 @@
 {
+  "2.138.6": [
+    "Housekeeping: the automated checks on the build server have more time to finish, so a healthy run is no longer cancelled for running a few seconds over. AppCrane itself is unchanged."
+  ],
   "2.138.5": [
     "Work Review prices Claude Fable 5.2 and Mythos 5.2 at their own rates (they were priced as Fable 5, with cache reads at five times the real price) and Sonnet 5.5 cache reads at $0.10, not $0.20. Requests pinned to US-only processing are priced at 1.1x. A test now holds the price table to Anthropic's pricing page.",
     "Work Review shows what small or read-only work that ran on Opus or Fable would have cost on Sonnet 5.5 or Haiku 5.5, as an upper bound, with the one-line fix for the subagent.",
