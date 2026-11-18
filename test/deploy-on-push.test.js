@@ -203,12 +203,15 @@ test('a push to a branch other than the filter deploys nothing; the filter is ma
 
 test('auto_deploy_prod=0 never deploys production; auto_deploy_prod=1 does; both off deploys nothing', async () => {
   const app = await localApp();
+  // Each push waits for the deploy before it to finish: a push that lands while
+  // one is still in flight is coalesced into a single follow-up (v2.134.0,
+  // services/pushCoalescer.js), so back-to-back pushes no longer make one row each.
   for (let i = 0; i < 3; i++) {
     await tool('appcrane_push_to_managed_app', { slug: app.slug, files: [{ path: 'x.txt', content: String(i) }] });
+    await settle(app.id);
   }
   assert.equal(deploysOf(app.id).filter((d) => d.env === 'production').length, 0, 'production deployed with auto_deploy_prod=0');
   assert.equal(deploysOf(app.id).length, 3);
-  await settle(app.id);
 
   setConfig(app.id, { auto_deploy_sandbox: 0, auto_deploy_prod: 1 });
   const res = await tool('appcrane_push_to_managed_app', { slug: app.slug, files: [{ path: 'x.txt', content: 'prod' }] });
