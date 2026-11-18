@@ -464,7 +464,10 @@ describe('LIVE', { skip: liveSkip }, () => {
     const seedBefore = new Set(await seedNames());
     const fresh = scratch('leak-check');
     await copyFromImage({ image: IMAGE, copies: [{ containerPath: '/seeded', destDir: fresh }] });
-    const leakedVolumes = [...await dangling()].filter((v) => !danglingBefore.has(v));
+    // Anonymous volumes only (Docker names them with 64 hex digits): a named
+    // volume another file's test releases in this window, such as
+    // volume-race's appcrane-vols-vrace-*, turns dangling too and is not this copy's.
+    const leakedVolumes = [...await dangling()].filter((v) => !danglingBefore.has(v) && /^[0-9a-f]{64}$/.test(v));
     assert.deepEqual(leakedVolumes, [],
       'this image declares VOLUME /seeded, so `docker create` makes an anonymous volume — measured: ' +
       '`docker rm -f` leaves it dangling and only `docker rm -fv` removes it');
