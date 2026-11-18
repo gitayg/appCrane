@@ -25,10 +25,11 @@ const css          = web('admin.css');
 // The request bodies
 // ---------------------------------------------------------------------------
 
-test('dispatch sends `prompt` (+ the optional `model` and `mode`), the fields the route reads', () => {
-  assert.match(coderRoute, /const \{ prompt, model, mode, attachments: attachmentIds \} = req\.body/,
+test('dispatch sends `prompt` (+ the optional `model`, `mode`, `attachments` and `request_ids`), the fields the route reads', () => {
+  // v2.130.0 added `request_ids` (requests named with #id) to both sides.
+  assert.match(coderRoute, /const \{ prompt, model, mode, attachments: attachmentIds, request_ids: refIds \} = req\.body/,
     'the route changed its field names — the client below has to follow');
-  assert.match(api, /dispatch:[\s\S]{0,600}?\{ prompt, \.\.\.\(model \? \{ model \} : \{\}\), \.\.\.\(mode \? \{ mode \} : \{\}\), \.\.\.\(attachments\?\.length \? \{ attachments \} : \{\}\) \}/,
+  assert.match(api, /dispatch:[\s\S]{0,600}?\{ prompt, \.\.\.\(model \? \{ model \} : \{\}\), \.\.\.\(mode \? \{ mode \} : \{\}\), \.\.\.\(attachments\?\.length \? \{ attachments \} : \{\}\),\s*\.\.\.\(requestIds\?\.length \? \{ request_ids: requestIds \} : \{\}\) \}/,
     'a dispatch body keyed anything but `prompt`/`model` is answered 400 VALIDATION, and the ' +
     'chat just looks broken: the message leaves the composer and no turn ever starts');
 });
