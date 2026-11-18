@@ -65,7 +65,9 @@ case "$1" in
     [ "$1" = sh ] || exit 0
     if [ -n "$SHIM_SKIP_CLONE_SCRIPT" ]; then cat >/dev/null; echo "CLONE_EXIT 0" >> "${LOG}"; exit 0; fi
     mkdir -p "$SHIM_WS" "$SHIM_WS.tmp"
-    script=$(printf '%s' "$3" | sed -e "s#/workspace#$SHIM_WS#g" -e "s#/tmp/#$SHIM_WS.tmp/#g")
+    # /tmp/ first: SHIM_WS itself usually lives under /tmp, so rewriting /workspace
+    # first would let the /tmp/ rule rewrite the path it just inserted.
+    script=$(printf '%s' "$3" | sed -e "s#/tmp/#$SHIM_WS.tmp/#g" -e "s#/workspace#$SHIM_WS#g")
     sh -c "$script"
     rc=$?
     echo "CLONE_EXIT $rc" >> "${LOG}"

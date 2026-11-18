@@ -1,4 +1,7 @@
 {
+  "2.138.4": [
+    "Housekeeping: thirteen automated checks that had been failing on the build server pass again. Some depended on the build server itself (its swap, its system services, its name); others still described AppCrane as it was before recent changes. AppCrane itself is unchanged."
+  ],
   "2.138.2": [
     "The end of an app's reply that a scheduled job keeps for its log can no longer show part of the app's CRON_SECRET. Only whole copies were hidden before, so a reply cut in the middle of the secret could leave a piece of it in the log."
   ],

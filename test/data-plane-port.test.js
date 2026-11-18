@@ -58,6 +58,9 @@ dns.setDefaultResultOrder('ipv4first');
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'crane-dpp-'));
 process.env.ENCRYPTION_KEY = 'e'.repeat(64);
 process.env.LOG_LEVEL = 'error';
+// The v2.44.2 baseline argv is the swapless host's (swap equal to memory).
+// Pinned, so a CI runner that has swap does not change it (services/hostSwap.js).
+process.env.APPCRANE_PROC_SWAPS = '/nonexistent/proc-swaps';
 // probeFrontendAssets and reloadCaddy run AFTER the deploy gate and are not
 // under test. Point the Caddy probe at a port nothing serves so it fails fast
 // instead of hitting whatever is on :80 on the machine running this.

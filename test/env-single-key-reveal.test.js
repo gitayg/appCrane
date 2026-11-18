@@ -106,7 +106,13 @@ const leaked = (text, except = []) => ALL_CANARIES.filter(c => !except.includes(
 const revealRows = (userId) => db.prepare("SELECT detail FROM audit_log WHERE user_id = ? AND action = 'env-reveal' ORDER BY id")
   .all(userId).map(r => JSON.parse(r.detail));
 const settle = (ms = 700) => new Promise(r => setTimeout(r, ms));
-const decoded = (raw) => raw + '\n' + raw.replace(/=\r?\n/g, '').replace(/=([0-9A-Fa-f]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
+// Header lines are unfolded first: a long Subject wraps (RFC 5322), and where
+// it wraps depends on the server name in it, which is the host's name when
+// CRANE_DOMAIN is unset — on a 13-character CI runner name it split "(1 key(s))".
+const decoded = (raw) => {
+  const unfolded = raw.replace(/\r?\n[ \t]+/g, ' ');
+  return unfolded + '\n' + unfolded.replace(/=\r?\n/g, '').replace(/=([0-9A-Fa-f]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
+};
 const notices = (from, actor) => inbox.slice(from).filter(m => /SECRET REVEAL/.test(m.raw) && (!actor || decoded(m.raw).includes(`${actor.name}@example.test`)));
 
 test('a single-key reveal returns that key\'s value and no other', async () => {
