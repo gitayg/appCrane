@@ -1,4 +1,7 @@
 {
+  "2.139.1": [
+    "With Google sign-in, an email domain on the Join without approval list now lets in only Google Workspace accounts that domain manages. A personal Google account made on a work address, which its owner keeps after leaving, now waits for approval instead. A full address on the list still lets that one person straight in."
+  ],
   "2.139.0": [
     "People can sign in and sign up with Google. Settings > Security > OIDC has a Set up Google sign-in button that fills in Google's details, shows the redirect address to paste into Google, and links to the page where you create the client.",
     "You choose who joins without asking: list email domains or single addresses, or * for anyone. Everyone else who signs in is added to Sign-up requests, where a platform admin approves or declines each person. Approving creates their account, and they get in on their next sign-in.",

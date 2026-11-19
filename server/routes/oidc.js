@@ -474,7 +474,10 @@ router.get('/callback', async (req, res) => {
       // A public provider with no list sends every new person to approval.
       refusal = isPublicProvider(cfg.discovery_url) && !cfg.allowed_domains.length
         ? (email && emailVerified ? 'domain_not_allowed' : 'email_unverified')
-        : signupRefusal({ email, emailVerified, allowed: cfg.allowed_domains });
+        : signupRefusal({
+          email, emailVerified, allowed: cfg.allowed_domains,
+          hostedDomain: claims.hd, requireHostedDomain: isPublicProvider(cfg.discovery_url),
+        });
       if (refusal === 'domain_not_allowed') {
         const outcome = recordSignupRequest(db, { provider: 'oidc', subject: sub, email, name: displayName });
         refusal = outcome === 'pending' ? 'pending_approval' : outcome === 'denied' ? 'signup_denied' : 'domain_not_allowed';

@@ -133,6 +133,19 @@ after(() => {
   try { rmSync(dataDir, { recursive: true, force: true }); } catch (_) {}
 });
 
+test('with a public provider a domain entry needs the hosted-domain claim; a single address does not', () => {
+  const allowed = parseAllowedDomains('allowed.example, kim@gmail.example');
+  const g = { emailVerified: true, allowed, requireHostedDomain: true };
+  // A consumer Google account made on a work address: verified, but no hd.
+  assert.equal(signupRefusal({ ...g, email: 'ex@allowed.example' }), 'domain_not_allowed');
+  assert.equal(signupRefusal({ ...g, email: 'ex@allowed.example', hostedDomain: 'other.example' }), 'domain_not_allowed');
+  assert.equal(signupRefusal({ ...g, email: 'pat@allowed.example', hostedDomain: 'Allowed.Example' }), null);
+  assert.equal(signupRefusal({ ...g, email: 'kim@gmail.example' }), null);
+  assert.equal(signupRefusal({ ...g, email: 'ex@allowed.example', emailVerified: false, hostedDomain: 'allowed.example' }), 'email_unverified');
+  // Other IdPs keep matching on the verified email's domain.
+  assert.equal(signupRefusal({ email: 'ex@allowed.example', emailVerified: true, allowed }), null);
+});
+
 test('the domain list: domains, single addresses, * and the public-provider check', () => {
   assert.deepEqual(parseAllowedDomains(' Allowed.Example, @x.example\nkim@Gmail.example ,,'), ['allowed.example', 'x.example', 'kim@gmail.example']);
   const allowed = parseAllowedDomains('allowed.example, kim@gmail.example');

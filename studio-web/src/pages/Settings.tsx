@@ -335,6 +335,7 @@ function SecurityTab() {
               Email domains or single addresses, comma separated; * lets anyone in. Everyone else waits in Sign-up requests below for a platform admin to approve them.
               {!oidc.allowed_domains.trim() && !oidc.discovery_url.includes('accounts.google.com') && ' Empty: with your own identity provider, everyone it signs in gets an account.'}
               {!oidc.allowed_domains.trim() && oidc.discovery_url.includes('accounts.google.com') && ' Empty: with Google, every new person needs approval.'}
+              {oidc.discovery_url.includes('accounts.google.com') && ' With Google, a domain lets in only Google Workspace accounts that domain manages; a personal Google account on that address needs approval unless you list the full address.'}
             </div>
           </div>
         )}
