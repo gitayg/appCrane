@@ -1,6 +1,8 @@
 import { Router } from 'express';
 import { auditLogin } from '../middleware/audit.js';
 import { findOrLinkSsoUser } from '../services/ssoLink.js';
+import { isPublicProvider, parseAllowedDomains, signupRefusal } from '../services/ssoSignupDomains.js';
+import { recordSignupRequest, listSignupRequests, approveSignupRequest, denySignupRequest } from '../services/ssoSignupRequests.js';
 import crypto from 'crypto';
 import { getDb } from '../db.js';
 import { encrypt, decrypt, generateSessionToken, hashApiKey } from '../services/encryption.js';
@@ -101,6 +103,7 @@ function getOidcConfig() {
     client_secret_set: !!cfg.oidc_client_secret_enc,
     provider_name:  cfg.oidc_provider_name || 'SSO',
     auto_provision: cfg.oidc_auto_provision === '1',
+    allowed_domains: parseAllowedDomains(cfg.oidc_allowed_domains),
   };
 }
 
@@ -286,6 +289,8 @@ router.get('/admin-config', requireAuth, requirePlatformAdmin, (req, res) => {
     client_secret_set: cfg.client_secret_set,
     provider_name:     cfg.provider_name,
     auto_provision:    cfg.auto_provision,
+    allowed_domains:   cfg.allowed_domains.join(', '),
+    redirect_uri:      craneBaseUrl() + '/api/auth/oidc/callback',
   });
 });
 
@@ -293,7 +298,8 @@ router.get('/admin-config', requireAuth, requirePlatformAdmin, (req, res) => {
  * PUT /api/auth/oidc/config — admin: save OIDC settings
  */
 router.put('/config', requireAuth, requirePlatformAdmin, (req, res) => {
-  const { enabled, discovery_url, client_id, client_secret, provider_name, auto_provision } = req.body || {};
+  const { enabled, discovery_url, client_id, client_secret, provider_name, auto_provision, allowed_domains } = req.body || {};
+  const domains = parseAllowedDomains(allowed_domains);
   const db = getDb();
   const save = (k, v) => upsertSetting(db, k, v, req.user.id);
 
@@ -302,6 +308,7 @@ router.put('/config', requireAuth, requirePlatformAdmin, (req, res) => {
   save('oidc_client_id',      client_id || '');
   save('oidc_provider_name',  provider_name || 'SSO');
   save('oidc_auto_provision', auto_provision ? '1' : '0');
+  save('oidc_allowed_domains', domains.join(','));
   if (client_secret) save('oidc_client_secret_enc', encrypt(client_secret));
 
   // Invalidate discovery cache when config changes
@@ -309,6 +316,27 @@ router.put('/config', requireAuth, requirePlatformAdmin, (req, res) => {
 
   res.json({ message: 'OIDC settings saved' });
 });
+
+/**
+ * Sign-up requests: people outside the allowed list waiting for a platform admin.
+ */
+router.get('/signup-requests', requireAuth, requirePlatformAdmin, (req, res) => {
+  const status = ['pending', 'approved', 'denied'].includes(req.query.status) ? req.query.status : 'pending';
+  res.json({ requests: listSignupRequests(getDb(), status) });
+});
+
+for (const [action, fn] of [['approve', approveSignupRequest], ['deny', denySignupRequest]]) {
+  router.post(`/signup-requests/:id/${action}`, requireAuth, requirePlatformAdmin, (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: { code: 'VALIDATION', message: 'Invalid id' } });
+    try {
+      res.json(fn(getDb(), id, req.user.id));
+    } catch (e) {
+      if (!e.status) throw e;
+      res.status(e.status).json({ error: { code: e.code, message: e.message } });
+    }
+  });
+}
 
 /**
  * POST /api/auth/oidc/test — admin: verify discovery URL is reachable
@@ -441,7 +469,18 @@ router.get('/callback', async (req, res) => {
       }
     }
 
+    let refusal = null;
     if (!user && cfg.auto_provision) {
+      // A public provider with no list sends every new person to approval.
+      refusal = isPublicProvider(cfg.discovery_url) && !cfg.allowed_domains.length
+        ? (email && emailVerified ? 'domain_not_allowed' : 'email_unverified')
+        : signupRefusal({ email, emailVerified, allowed: cfg.allowed_domains });
+      if (refusal === 'domain_not_allowed') {
+        const outcome = recordSignupRequest(db, { provider: 'oidc', subject: sub, email, name: displayName });
+        refusal = outcome === 'pending' ? 'pending_approval' : outcome === 'denied' ? 'signup_denied' : 'domain_not_allowed';
+      }
+    }
+    if (!user && cfg.auto_provision && !refusal) {
       // No API key: a person gets one only by asking (Settings > Account).
       const result = db.prepare(
         "INSERT INTO users (name, email, role, sso_sub, created_at) VALUES (?, ?, 'user', ?, datetime('now'))"
@@ -451,10 +490,11 @@ router.get('/callback', async (req, res) => {
     }
 
     if (!user) {
-      log.warn(`OIDC: no account for sub=${sub} email=${email}, auto-provision disabled`);
-      auditLogin(null, 'failed', { method: 'oidc', reason: 'no_account', email: email || null, ip: req.ip });
-      if (popup) return sendPopupFailed(res, 'no_account');
-      return res.redirect(302, base + '/login?sso_error=no_account');
+      const reason = refusal || 'no_account';
+      log.warn(`OIDC: no account for sub=${sub} email=${email}, ${refusal ? `sign-up refused (${refusal})` : 'auto-provision disabled'}`);
+      auditLogin(null, 'failed', { method: 'oidc', reason, email: email || null, ip: req.ip });
+      if (popup) return sendPopupFailed(res, reason);
+      return res.redirect(302, base + '/login?sso_error=' + reason);
     }
 
     // Create session and hand token back to the browser via login page JS

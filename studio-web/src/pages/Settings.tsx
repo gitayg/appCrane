@@ -35,6 +35,7 @@ import { AutoPatchPolicyCard } from '../components/autoPatch/AutoPatchPolicyCard
 import { VulnAlertsCard } from '../components/vulnAlerts/VulnAlertsCard'
 import { RuntimePatchCard } from '../components/autoPatch/RuntimePatchCard'
 import { AppIsolationCard } from '../components/AppIsolationCard'
+import { SignupRequestsCard } from '../components/sso/SignupRequestsCard'
 import { setVisibleInterval } from '../utils/visibleInterval'
 
 function SecurityTab() {
@@ -51,7 +52,10 @@ function SecurityTab() {
   const [oidc, setOidc] = useState({
     enabled: false, provider_name: '', discovery_url: '',
     client_id: '', client_secret_set: false, auto_provision: false,
+    allowed_domains: '', redirect_uri: '',
   })
+  const [oidcError, setOidcError] = useState<string | null>(null)
+  const [redirectCopied, flashRedirectCopied] = useFlash()
   const [oidcSecret, setOidcSecret] = useState('')
   const [oidcSaved, flashOidcSaved] = useFlash()
   const [oidcTest, setOidcTest] = useState<{ ok: boolean; msg: string } | null>(null)
@@ -90,7 +94,7 @@ function SecurityTab() {
     adminApi.get<{ value?: string }>('/api/settings/tls_key_file').then(r => { if (r?.value) setKeyFile(r.value) }).catch(() => {})
     adminApi.get<typeof tlsCheck>('/api/server/tls-check').then(setTlsCheck).catch(() => {})
     adminApi.get<typeof oidc & { client_secret_set: boolean }>('/api/auth/oidc/admin-config').then(r => {
-      if (r) setOidc({ enabled: r.enabled, provider_name: r.provider_name, discovery_url: r.discovery_url, client_id: r.client_id, client_secret_set: r.client_secret_set, auto_provision: r.auto_provision })
+      if (r) setOidc({ enabled: r.enabled, provider_name: r.provider_name, discovery_url: r.discovery_url, client_id: r.client_id, client_secret_set: r.client_secret_set, auto_provision: r.auto_provision, allowed_domains: r.allowed_domains ?? '', redirect_uri: r.redirect_uri ?? '' })
     }).catch(() => {})
     adminApi.get<typeof saml>('/api/auth/saml/admin-config').then(r => {
       if (r) setSaml({ enabled: r.enabled, provider_name: r.provider_name, idp_sso_url: r.idp_sso_url, idp_cert_set: r.idp_cert_set, auto_provision: r.auto_provision })
@@ -163,14 +167,20 @@ function SecurityTab() {
     const body: Record<string, unknown> = {
       enabled: oidc.enabled, provider_name: oidc.provider_name,
       discovery_url: oidc.discovery_url, client_id: oidc.client_id,
-      auto_provision: oidc.auto_provision,
+      auto_provision: oidc.auto_provision, allowed_domains: oidc.allowed_domains,
     }
     if (oidcSecret) body.client_secret = oidcSecret
-    await adminApi.put('/api/auth/oidc/config', body).catch(() => {})
+    setOidcError(null)
+    try {
+      await adminApi.put('/api/auth/oidc/config', body)
+    } catch (e) {
+      setOidcError((e as Error).message)
+      return
+    }
     flashOidcSaved()
     setOidcSecret('')
     adminApi.get<typeof oidc & { client_secret_set: boolean }>('/api/auth/oidc/admin-config').then(r => {
-      if (r) setOidc({ enabled: r.enabled, provider_name: r.provider_name, discovery_url: r.discovery_url, client_id: r.client_id, client_secret_set: r.client_secret_set, auto_provision: r.auto_provision })
+      if (r) setOidc({ enabled: r.enabled, provider_name: r.provider_name, discovery_url: r.discovery_url, client_id: r.client_id, client_secret_set: r.client_secret_set, auto_provision: r.auto_provision, allowed_domains: r.allowed_domains ?? '', redirect_uri: r.redirect_uri ?? '' })
     }).catch(() => {})
   }
 
@@ -263,7 +273,29 @@ function SecurityTab() {
 
       <div className="setting-card">
         <h3>OIDC / SSO</h3>
-        <p>Configure OpenID Connect single sign-on for your users.</p>
+        <p>Configure OpenID Connect single sign-on for your users, or let people sign in and sign up with Google.</p>
+        <div style={{ ...fieldWrap, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          <button className="btn" onClick={() => setOidc(v => ({
+            ...v, enabled: true, provider_name: 'Google', auto_provision: true,
+            discovery_url: 'https://accounts.google.com/.well-known/openid-configuration',
+          }))}>Set up Google sign-in</button>
+          <span style={{ fontSize: '.8rem', color: 'var(--dim)' }}>
+            Fills in Google's details. Then create a client in{' '}
+            <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noreferrer" style={{ color: 'var(--accent)' }}>Google Cloud Console → Credentials</a>
+            {' '}(Create credentials → OAuth client ID → Web application), add the redirect URI below, and paste its client ID and secret here.
+          </span>
+        </div>
+        {oidc.redirect_uri && (
+          <div style={fieldWrap}>
+            <label style={labelStyle}>Redirect URI (give this to your provider)</label>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <FocusInput value={oidc.redirect_uri} readOnly onFocus={e => e.currentTarget.select()} />
+              <button className="btn" onClick={() => { navigator.clipboard?.writeText(oidc.redirect_uri).then(flashRedirectCopied).catch(() => {}) }}>
+                {redirectCopied ? 'Copied' : 'Copy'}
+              </button>
+            </div>
+          </div>
+        )}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
           <input type="checkbox" id="oidc-enabled" checked={oidc.enabled} onChange={e => setOidc(v => ({ ...v, enabled: e.target.checked }))} />
           <label htmlFor="oidc-enabled" style={{ fontSize: '.85rem' }}>Enable SSO login</label>
@@ -293,12 +325,24 @@ function SecurityTab() {
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
           <input type="checkbox" id="oidc-provision" checked={oidc.auto_provision} onChange={e => setOidc(v => ({ ...v, auto_provision: e.target.checked }))} />
-          <label htmlFor="oidc-provision" style={{ fontSize: '.85rem' }}>Auto-provision new users</label>
+          <label htmlFor="oidc-provision" style={{ fontSize: '.85rem' }}>Let new people sign up (auto-provision)</label>
         </div>
+        {oidc.auto_provision && (
+          <div style={fieldWrap}>
+            <label style={labelStyle}>Join without approval</label>
+            <FocusInput value={oidc.allowed_domains} onChange={e => setOidc(v => ({ ...v, allowed_domains: e.target.value }))} placeholder="example.com, someone@gmail.com" />
+            <div style={{ fontSize: '.78rem', color: 'var(--dim)', marginTop: 4 }}>
+              Email domains or single addresses, comma separated; * lets anyone in. Everyone else waits in Sign-up requests below for a platform admin to approve them.
+              {!oidc.allowed_domains.trim() && !oidc.discovery_url.includes('accounts.google.com') && ' Empty: with your own identity provider, everyone it signs in gets an account.'}
+              {!oidc.allowed_domains.trim() && oidc.discovery_url.includes('accounts.google.com') && ' Empty: with Google, every new person needs approval.'}
+            </div>
+          </div>
+        )}
         <div className="save-row">
           <button className="btn" onClick={testOidc}>Test Connection</button>
           <button className="btn btn-accent" onClick={saveOidc}>Save</button>
           {oidcSaved && <span className="saved-msg">Saved ✓</span>}
+          {oidcError && <span style={{ fontSize: '.82rem', color: 'var(--red)' }}>{oidcError}</span>}
           {oidcTest && (
             <span style={{ fontSize: '.82rem', color: oidcTest.ok ? 'var(--green)' : 'var(--red)' }}>
               {oidcTest.ok ? '✓' : '✗'} {oidcTest.msg}
@@ -306,6 +350,8 @@ function SecurityTab() {
           )}
         </div>
       </div>
+
+      {oidc.enabled && oidc.auto_provision && <SignupRequestsCard />}
 
       <div className="setting-card">
         <h3>SAML 2.0 (Okta)</h3>

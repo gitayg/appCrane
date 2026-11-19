@@ -1,6 +1,11 @@
 {
-  "2.138.6": [
+  "2.139.1": [
     "Housekeeping: the automated checks on the build server have more time to finish, so a healthy run is no longer cancelled for running a few seconds over. AppCrane itself is unchanged."
+  ],
+  "2.139.0": [
+    "People can sign in and sign up with Google. Settings > Security > OIDC has a Set up Google sign-in button that fills in Google's details, shows the redirect address to paste into Google, and links to the page where you create the client.",
+    "You choose who joins without asking: list email domains or single addresses, or * for anyone. Everyone else who signs in is added to Sign-up requests, where a platform admin approves or declines each person. Approving creates their account, and they get in on their next sign-in.",
+    "With Google and an empty list, every new person needs approval, so turning on sign-up never opens AppCrane to everyone with a Google account. People who already have an account sign in as before."
   ],
   "2.138.5": [
     "Work Review prices Claude Fable 5.2 and Mythos 5.2 at their own rates (they were priced as Fable 5, with cache reads at five times the real price) and Sonnet 5.5 cache reads at $0.10, not $0.20. Requests pinned to US-only processing are priced at 1.1x. A test now holds the price table to Anthropic's pricing page.",

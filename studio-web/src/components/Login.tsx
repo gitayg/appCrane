@@ -40,6 +40,14 @@ import { takeSignedOutMessage } from './mfa/idle'
  * Password sign-in stays in the frame.
  */
 interface SsoCfg { enabled?: boolean; provider_name?: string }
+
+const SSO_ERROR_TEXT: Record<string, string> = {
+  no_account: 'There is no AppCrane account for this user. Ask an administrator for access.',
+  domain_not_allowed: 'This email domain cannot sign up here. Ask an administrator for access.',
+  email_unverified: 'Your identity provider has not verified your email address.',
+  pending_approval: 'Your request to join was sent. An administrator has to approve it before you can sign in.',
+  signup_denied: 'An administrator declined your request to join.',
+}
 type PopupState = 'idle' | 'waiting' | 'blocked' | 'failed' | 'timeout'
 // Second step of password sign-in (server/routes/mfa.js). The password was
 // accepted; no session exists until a code (or first-time enrollment) passes.
@@ -152,7 +160,7 @@ export function Login() {
     const params = new URLSearchParams(window.location.search)
     const ssoErr = params.get('sso_error') || params.get('saml_error')
     if (ssoErr) {
-      setError('SSO failed: ' + ssoErr)
+      setError(SSO_ERROR_TEXT[ssoErr] ?? 'SSO failed: ' + ssoErr)
       const url = new URL(window.location.href)
       url.searchParams.delete('sso_error')
       url.searchParams.delete('saml_error')
