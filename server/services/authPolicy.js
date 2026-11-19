@@ -34,12 +34,17 @@ export function isSsoOnly(db) {
   return row?.value !== 'false';
 }
 
-/** True if at least one SSO provider (OIDC or SAML) is enabled. */
+/**
+ * True if at least one SSO provider (OIDC or SAML) is enabled. OIDC counts only
+ * with a discovery URL and client ID: one saved on without them cannot sign
+ * anyone in, and counting it locked every password user out.
+ */
 export function ssoProviderConfigured(db) {
-  const rows = db
-    .prepare("SELECT value FROM settings WHERE key IN ('oidc_enabled', 'saml_enabled')")
-    .all();
-  return rows.some(r => r.value === '1');
+  const v = Object.fromEntries(db
+    .prepare("SELECT key, value FROM settings WHERE key IN ('oidc_enabled', 'oidc_discovery_url', 'oidc_client_id', 'saml_enabled')")
+    .all().map(r => [r.key, r.value]));
+  const oidc = v.oidc_enabled === '1' && !!String(v.oidc_discovery_url || '').trim() && !!String(v.oidc_client_id || '').trim();
+  return oidc || v.saml_enabled === '1';
 }
 
 /** The effective policy: the switch is on AND a provider is enabled. */

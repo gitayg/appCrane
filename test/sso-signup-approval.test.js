@@ -169,6 +169,64 @@ test('admin config hands back the redirect URI and the saved list; non-admins ca
   assert.equal((await call('GET', '/api/auth/oidc/admin-config', { token: USER_SESS })).status, 403);
 });
 
+test('OIDC turned on with no client ID is refused, and a stored one neither shows a button nor requires SSO', async () => {
+  const half = await call('PUT', '/api/auth/oidc/config', {
+    token: ADMIN_SESS,
+    body: { enabled: true, discovery_url: 'https://accounts.google.com/.well-known/openid-configuration', client_id: '', provider_name: 'Google', auto_provision: true },
+  });
+  assert.equal(half.status, 400);
+  assert.equal(half.body.error.code, 'VALIDATION');
+  assert.equal(q("SELECT value FROM settings WHERE key='oidc_client_id'").value, CLIENT_ID, 'a refused save changed nothing');
+
+  // A half setup saved before this check existed (what locked an admin out).
+  const db = dbw();
+  db.prepare("UPDATE settings SET value='' WHERE key='oidc_client_id'").run();
+  db.close();
+  try {
+    assert.equal((await call('GET', '/api/auth/oidc/config')).body.enabled, false, 'login page offers a button that cannot work');
+    const { ssoProviderConfigured } = await import('../server/services/authPolicy.js');
+    const ro = dbw();
+    try { assert.equal(ssoProviderConfigured(ro), false, 'a provider with no client ID puts SSO-only in force'); } finally { ro.close(); }
+  } finally {
+    assert.equal((await saveConfig('allowed.example, kim@gmail.example')).status, 200);
+  }
+  assert.equal((await call('GET', '/api/auth/oidc/config')).body.enabled, true);
+});
+
+test('turning on the first SSO provider leaves password sign-in on; later saves keep the admin\'s choice', async () => {
+  const set = (k, v) => { const db = dbw(); try {
+    if (v === null) db.prepare('DELETE FROM settings WHERE key = ?').run(k);
+    else db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(k, v);
+  } finally { db.close(); } };
+  const ssoOnly = () => q("SELECT value FROM settings WHERE key='auth_sso_only'")?.value ?? null;
+
+  // No provider yet and the switch at its default (no row = on).
+  set('oidc_enabled', '0'); set('saml_enabled', null); set('auth_sso_only', null);
+  const first = await saveConfig('allowed.example, kim@gmail.example');
+  assert.equal(first.status, 200);
+  assert.equal(first.body.sso_only_turned_off, true);
+  assert.equal(ssoOnly(), 'false', 'the first provider put SSO-only in force before anyone tried it');
+
+  // The admin turns it on after checking SSO works; saving OIDC again keeps it.
+  set('auth_sso_only', 'true');
+  const again = await saveConfig('allowed.example, kim@gmail.example');
+  assert.equal(again.body.sso_only_turned_off, false);
+  assert.equal(ssoOnly(), 'true', 'a later save undid the admin\'s choice');
+
+  assert.ok(q("SELECT 1 FROM audit_log WHERE action='sso-enforce-set' AND detail LIKE '%first-provider%'"), 'the change was not audited');
+
+  // An admin who chose SSO-only, turned every provider off and then OIDC back on keeps their choice.
+  set('oidc_enabled', '0'); set('auth_sso_only', 'true');
+  assert.equal((await saveConfig('allowed.example, kim@gmail.example')).body.sso_only_turned_off, false);
+  assert.equal(ssoOnly(), 'true', 'a stored choice was overwritten');
+
+  // SAML already in force: adding OIDC does not loosen it.
+  set('oidc_enabled', '0'); set('saml_enabled', '1');
+  assert.equal((await saveConfig('allowed.example, kim@gmail.example')).body.sso_only_turned_off, false);
+  assert.equal(ssoOnly(), 'true');
+  set('saml_enabled', null);
+});
+
 test('a verified email on the list signs up at once, by domain or by address', async () => {
   for (const who of [OK, LISTED]) {
     const r = await signIn(who);

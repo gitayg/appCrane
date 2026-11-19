@@ -179,6 +179,7 @@ function SecurityTab() {
     }
     flashOidcSaved()
     setOidcSecret('')
+    adminApi.get<{ value?: string | null }>('/api/settings/auth_sso_only').then(r => setSsoOnly(r?.value !== 'false')).catch(() => {})
     adminApi.get<typeof oidc & { client_secret_set: boolean }>('/api/auth/oidc/admin-config').then(r => {
       if (r) setOidc({ enabled: r.enabled, provider_name: r.provider_name, discovery_url: r.discovery_url, client_id: r.client_id, client_secret_set: r.client_secret_set, auto_provision: r.auto_provision, allowed_domains: r.allowed_domains ?? '', redirect_uri: r.redirect_uri ?? '' })
     }).catch(() => {})
@@ -395,8 +396,9 @@ function SecurityTab() {
         <h3>Require SSO sign-in</h3>
         <p>
           Password and API-key sign-in are refused while an SSO provider is on. The SSO button is the
-          only way to sign in to the dashboard; setting or changing a password is refused too. On by
-          default.
+          only way to sign in to the dashboard; setting or changing a password is refused too. Turning
+          on the first SSO provider leaves this off, so passwords keep working while you check that SSO
+          sign-in works. Turn it on yourself once it does.
         </p>
         <p style={{ fontSize: '.8rem', color: 'var(--dim)' }}>
           API keys (<code style={{ fontFamily: 'monospace' }}>dhk_*</code> — CLI, MCP, CI) and MCP OAuth

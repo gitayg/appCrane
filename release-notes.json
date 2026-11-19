@@ -1,6 +1,10 @@
 {
-  "2.139.2": [
+  "2.139.3": [
     "Housekeeping: the automated checks on the build server have more time to finish, so a healthy run is no longer cancelled for running a few seconds over. AppCrane itself is unchanged."
+  ],
+  "2.139.2": [
+    "Turning on SSO sign-in without a client ID no longer locks people out. AppCrane now refuses to save it with a message saying what is missing, and a setup saved that way before is ignored: the login page shows no sign-in button that cannot work, and passwords keep working.",
+    "Setting up Google or another SSO provider for the first time now leaves password sign-in on, so you can check that SSO sign-in works before relying on it. Once it does, turn on Require SSO sign-in under Settings > Security if you want SSO to be the only way in. Instances that already use SSO keep their setting."
   ],
   "2.139.1": [
     "With Google sign-in, an email domain on the Join without approval list now lets in only Google Workspace accounts that domain manages. A personal Google account made on a work address, which its owner keeps after leaving, now waits for approval instead. A full address on the list still lets that one person straight in."
