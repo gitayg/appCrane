@@ -29,8 +29,8 @@ export function parseAllowedDomains(text) {
 // A single-address entry names one mailbox, so the verified email is enough.
 export function signupRefusal({ email, emailVerified, allowed, hostedDomain, requireHostedDomain = false }) {
   if (!allowed.length) return null;
-  if (allowed.includes('*')) return null;
   if (!email || !emailVerified) return 'email_unverified';
+  if (allowed.includes('*')) return null;
   const address = email.toLowerCase();
   if (allowed.includes(address)) return null;
   const at = address.lastIndexOf('@');
@@ -38,4 +38,16 @@ export function signupRefusal({ email, emailVerified, allowed, hostedDomain, req
   if (!allowed.includes(domain)) return 'domain_not_allowed';
   if (requireHostedDomain && String(hostedDomain || '').toLowerCase() !== domain) return 'domain_not_allowed';
   return null;
+}
+
+// Whether a public provider's verified email may link to an existing local
+// account. Google verifies a gmail.com address it issued, and an address on a
+// Workspace domain only when the hd claim names that domain; a consumer Google
+// account registered on someone else's work address carries no hd.
+export function publicProviderVouches({ email, hostedDomain }) {
+  if (!email) return false;
+  const address = String(email).toLowerCase();
+  const domain = address.slice(address.lastIndexOf('@') + 1);
+  if (domain === 'gmail.com' || domain === 'googlemail.com') return true;
+  return String(hostedDomain || '').toLowerCase() === domain;
 }

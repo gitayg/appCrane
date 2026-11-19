@@ -56,6 +56,19 @@ test('SAML: an account bound to another NameID is never moved', () => {
   assert.equal(db.prepare('SELECT saml_name_id s FROM users WHERE id = ?').get(id).s, 'nameid-real');
 });
 
+test('a provider that does not vouch for the address cannot link by email, even a verified one', () => {
+  const id = mkUser('victim@acme.test', { role: 'platform_admin' });
+  assert.throws(() => findOrLinkSsoUser(db, { column: 'sso_sub', subject: 'google-consumer', email: 'victim@acme.test', emailVerified: true, linkByEmail: false }), /does not vouch/);
+  assert.equal(subOf(id), null);
+  // No account with that email: nothing to link, the caller decides about sign-up.
+  assert.equal(findOrLinkSsoUser(db, { column: 'sso_sub', subject: 'google-new', email: 'nobody@acme.test', emailVerified: true, linkByEmail: false }), null);
+});
+
+test('a subject already linked still signs in when linking by email is off', () => {
+  const id = mkUser('linked@acme.test', { sso_sub: 'sub-linked' });
+  assert.equal(findOrLinkSsoUser(db, { column: 'sso_sub', subject: 'sub-linked', email: 'linked@acme.test', emailVerified: true, linkByEmail: false }).id, id);
+});
+
 test('both SSO routes link only through findOrLinkSsoUser', () => {
   const root = join(dirname(fileURLToPath(import.meta.url)), '..', 'server', 'routes');
   for (const f of ['oidc.js', 'saml.js']) {

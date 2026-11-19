@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { auditLogin, logAudit } from '../middleware/audit.js';
 import { findOrLinkSsoUser } from '../services/ssoLink.js';
 import { ssoProviderConfigured, SSO_SETTING_KEY } from '../services/authPolicy.js';
-import { isPublicProvider, parseAllowedDomains, signupRefusal } from '../services/ssoSignupDomains.js';
+import { isPublicProvider, parseAllowedDomains, signupRefusal, publicProviderVouches } from '../services/ssoSignupDomains.js';
 import { recordSignupRequest, listSignupRequests, approveSignupRequest, denySignupRequest } from '../services/ssoSignupRequests.js';
 import crypto from 'crypto';
 import { getDb } from '../db.js';
@@ -467,6 +467,7 @@ router.get('/callback', async (req, res) => {
     let user = findOrLinkSsoUser(db, {
       column: 'sso_sub', subject: sub, email, emailVerified,
       allowUnverified: process.env.OIDC_ALLOW_UNVERIFIED_EMAIL_LINK === '1',
+      linkByEmail: !isPublicProvider(cfg.discovery_url) || publicProviderVouches({ email, hostedDomain: claims.hd }),
     });
 
     // Sync display name — and the email claim — from the IdP on every login,

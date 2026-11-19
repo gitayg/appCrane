@@ -26,7 +26,7 @@ function refuse(message, popupCode) {
  * Returns null when no account matches (the caller may auto-provision).
  * Throws when an account matches by e-mail but may not be linked.
  */
-export function findOrLinkSsoUser(db, { column, subject, email, emailVerified, allowUnverified = false }) {
+export function findOrLinkSsoUser(db, { column, subject, email, emailVerified, allowUnverified = false, linkByEmail = true }) {
   if (!COLUMNS.has(column)) throw new Error(`findOrLinkSsoUser: unknown column ${column}`);
   if (!subject) throw new Error('findOrLinkSsoUser: no subject');
   const bySubject = db.prepare(`SELECT * FROM users WHERE ${column} = ?`).get(subject);
@@ -37,6 +37,9 @@ export function findOrLinkSsoUser(db, { column, subject, email, emailVerified, a
   if (!byEmail) return null;
   if (byEmail[column] && byEmail[column] !== subject) {
     throw refuse(`The account for ${email} is already linked to a different SSO identity; it is not moved. Ask an administrator.`, 'sso_identity_conflict');
+  }
+  if (!linkByEmail) {
+    throw refuse(`The identity provider does not vouch for ${email} as an existing account's address, so it is not linked. Ask an administrator.`, 'link_refused');
   }
   if (!emailVerified && !allowUnverified) {
     throw refuse(`The identity provider did not verify ${email}, so it is not linked to the existing account. Ask an administrator.`, 'sso_email_unverified');

@@ -101,6 +101,7 @@ export const POPUP_FAILURE_REASONS = Object.freeze({
   no_account: 'There is no AppCrane account for this user. Ask an administrator for access.',
   domain_not_allowed: 'This email domain cannot sign up here. Ask an administrator for access.',
   email_unverified: 'The identity provider has not verified this email address.',
+  link_refused: 'This Google account cannot sign in to the existing account with this email. Ask an administrator.',
   pending_approval: 'Your request to join was sent. An administrator has to approve it before you can sign in.',
   signup_denied: 'An administrator declined your request to join.',
   expired: 'The sign-in took too long.',

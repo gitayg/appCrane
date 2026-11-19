@@ -1,4 +1,8 @@
 {
+  "2.139.5": [
+    "With Google sign-in, a Google account can no longer take over an existing AppCrane account just because it uses the same email. Google is trusted to link to an existing account only for a gmail.com address or a Google Workspace account that the email's domain manages. A personal Google account made on a work address is refused and the person is told to ask an administrator.",
+    "With * on the Join without approval list, a new account now needs an email the identity provider has verified, as every other list entry already did."
+  ],
   "2.139.4": [
     "Housekeeping: the automated checks on the build server have more time to finish, so a healthy run is no longer cancelled for running a few seconds over. AppCrane itself is unchanged."
   ],

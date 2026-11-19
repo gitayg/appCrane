@@ -1,7 +1,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'child_process';
-import { mkdtempSync, rmSync } from 'fs';
+import { mkdtempSync, rmSync, readFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { fileURLToPath } from 'url';
@@ -9,7 +9,7 @@ import http from 'http';
 import net from 'net';
 import crypto from 'crypto';
 import Database from 'better-sqlite3';
-import { isPublicProvider, parseAllowedDomains, signupRefusal, GOOGLE_DISCOVERY_URL } from '../server/services/ssoSignupDomains.js';
+import { isPublicProvider, parseAllowedDomains, signupRefusal, publicProviderVouches, GOOGLE_DISCOVERY_URL } from '../server/services/ssoSignupDomains.js';
 
 // SSO sign-up (auto-provision) with a "join without approval" list: a verified
 // email on the list gets an account at once; anyone else is queued for a
@@ -146,6 +146,22 @@ test('with a public provider a domain entry needs the hosted-domain claim; a sin
   assert.equal(signupRefusal({ email: 'ex@allowed.example', emailVerified: true, allowed }), null);
 });
 
+test('Google links an existing account by email only for gmail.com or a matching hd claim', () => {
+  assert.equal(publicProviderVouches({ email: 'Kim@Gmail.com' }), true);
+  assert.equal(publicProviderVouches({ email: 'kim@googlemail.com' }), true);
+  assert.equal(publicProviderVouches({ email: 'pat@work.example', hostedDomain: 'Work.Example' }), true);
+  // A consumer Google account on a work address: verified, but no hd.
+  assert.equal(publicProviderVouches({ email: 'admin@work.example' }), false);
+  assert.equal(publicProviderVouches({ email: 'admin@work.example', hostedDomain: 'other.example' }), false);
+  assert.equal(publicProviderVouches({ email: 'admin@sub.work.example', hostedDomain: 'work.example' }), false);
+  assert.equal(publicProviderVouches({ email: '' }), false);
+});
+
+test('the OIDC callback links by email for Google only when Google vouches for the address', () => {
+  const src = readFileSync(join(REPO, 'server/routes/oidc.js'), 'utf8');
+  assert.match(src, /linkByEmail: !isPublicProvider\(cfg\.discovery_url\) \|\| publicProviderVouches\(\{ email, hostedDomain: claims\.hd \}\)/);
+});
+
 test('the domain list: domains, single addresses, * and the public-provider check', () => {
   assert.deepEqual(parseAllowedDomains(' Allowed.Example, @x.example\nkim@Gmail.example ,,'), ['allowed.example', 'x.example', 'kim@gmail.example']);
   const allowed = parseAllowedDomains('allowed.example, kim@gmail.example');
@@ -154,7 +170,8 @@ test('the domain list: domains, single addresses, * and the public-provider chec
   assert.equal(signupRefusal({ email: 'jo@gmail.example', emailVerified: true, allowed }), 'domain_not_allowed');
   assert.equal(signupRefusal({ email: 'a@allowed.example.evil', emailVerified: true, allowed }), 'domain_not_allowed');
   assert.equal(signupRefusal({ email: 'a@allowed.example', emailVerified: false, allowed }), 'email_unverified');
-  assert.equal(signupRefusal({ email: 'any@where.example', emailVerified: false, allowed: ['*'] }), null);
+  assert.equal(signupRefusal({ email: 'any@where.example', emailVerified: false, allowed: ['*'] }), 'email_unverified');
+  assert.equal(signupRefusal({ emailVerified: true, allowed: ['*'] }), 'email_unverified');
   assert.equal(signupRefusal({ email: 'any@where.example', emailVerified: true, allowed: [] }), null);
   assert.equal(isPublicProvider(GOOGLE_DISCOVERY_URL), true);
   assert.equal(isPublicProvider('https://example.okta.com/.well-known/openid-configuration'), false);
@@ -299,8 +316,12 @@ test('a denied person stays out until an admin approves them after all', async (
   assert.ok((await signIn(DENIED)).session);
 });
 
-test('* lets anyone with a verified email sign up', async () => {
+test('* lets anyone with a verified email sign up, and no one with an unverified one', async () => {
   assert.equal((await saveConfig('*')).status, 200);
+  const unv = await signIn({ sub: 'sub-star-unv', email: 'claim@anything.example', email_verified: false, name: 'Unverified' });
+  assert.equal(unv.error, 'email_unverified');
+  assert.equal(unv.session, false);
+  assert.equal(q('SELECT id FROM users WHERE sso_sub = ?', 'sub-star-unv'), undefined);
   const r = await signIn({ sub: 'sub-star', email: 'new@anything.example', email_verified: true, name: 'Star' });
   assert.equal(r.error, null);
   assert.ok(r.session);
