@@ -3,8 +3,7 @@
     "Work Review's review is now read-only: it proposes numbered fixes, and you apply the ones you want with /work-review:apply 1 3 (or all), which also saves a baseline for the next review. /work-review:help lists the commands.",
     "Work Review ranks MCP tools by what their results cost to read into context, so you can see which connector to ask for less.",
     "The Work Review hub's team view shows cost per landed commit and rework week by week, still only for weeks with enough people that nobody can be singled out.",
-    "Work Review catches more kinds of secret before an excerpt leaves your machine (GitLab, Stripe, Google, npm, SendGrid and Slack tokens), and lists what its numbers cannot tell you in KNOWN_LIMITATIONS.md.",
-    "The work-review plugin is now version 1.3.0."
+    "Work Review catches more kinds of secret before an excerpt leaves your machine (GitLab, Stripe, Google, npm, SendGrid and Slack tokens), and lists what its numbers cannot tell you in KNOWN_LIMITATIONS.md. The plugin is now version 1.3.0."
   ],
   "2.139.5": [
     "With Google sign-in, a Google account can no longer take over an existing AppCrane account just because it uses the same email. Google is trusted to link to an existing account only for a gmail.com address or a Google Workspace account that the email's domain manages. A personal Google account made on a work address is refused and the person is told to ask an administrator.",
