@@ -227,6 +227,20 @@ test('turning on the first SSO provider leaves password sign-in on; later saves 
   set('saml_enabled', null);
 });
 
+test('the login page is told when the provider is Google, so it can show the G mark', async () => {
+  assert.equal((await call('GET', '/api/auth/oidc/config')).body.google, false);
+  const g = await call('PUT', '/api/auth/oidc/config', {
+    token: ADMIN_SESS,
+    body: { enabled: true, discovery_url: 'https://accounts.google.com/.well-known/openid-configuration', client_id: 'x.apps.googleusercontent.com', provider_name: 'Google', auto_provision: true, allowed_domains: '' },
+  });
+  try {
+    assert.equal(g.status, 200);
+    assert.equal((await call('GET', '/api/auth/oidc/config')).body.google, true);
+  } finally {
+    assert.equal((await saveConfig('allowed.example, kim@gmail.example')).status, 200);
+  }
+});
+
 test('a verified email on the list signs up at once, by domain or by address', async () => {
   for (const who of [OK, LISTED]) {
     const r = await signIn(who);

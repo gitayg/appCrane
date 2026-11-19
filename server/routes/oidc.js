@@ -275,7 +275,7 @@ function upsertSetting(db, key, value, adminId) {
  */
 router.get('/config', (req, res) => {
   const cfg = getOidcConfig();
-  res.json({ enabled: cfg.enabled && !!cfg.discovery_url && !!cfg.client_id, provider_name: cfg.provider_name });
+  res.json({ enabled: cfg.enabled && !!cfg.discovery_url && !!cfg.client_id, provider_name: cfg.provider_name, google: isPublicProvider(cfg.discovery_url) });
 });
 
 /**
