@@ -10,6 +10,7 @@ import {
 import { EnrollPanel, type EnrollmentStart } from './mfa/EnrollPanel'
 import { RecoveryCodes } from './mfa/RecoveryCodes'
 import { takeSignedOutMessage } from './mfa/idle'
+import { GoogleG } from './sso/GoogleG'
 
 /**
  * v2.7.8: the cc_token cookie is now httpOnly and set entirely by the
@@ -39,7 +40,9 @@ import { takeSignedOutMessage } from './mfa/idle'
  * framed, so SSO opens in a top-level popup instead — see utils/popupSignIn.ts.
  * Password sign-in stays in the frame.
  */
-interface SsoCfg { enabled?: boolean; provider_name?: string }
+const ssoBtnLayout = { display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10 } as const
+
+interface SsoCfg { enabled?: boolean; provider_name?: string; google?: boolean }
 
 const SSO_ERROR_TEXT: Record<string, string> = {
   no_account: 'There is no AppCrane account for this user. Ask an administrator for access.',
@@ -390,8 +393,8 @@ export function Login() {
                     type="button"
                     className="btn btn-accent"
                     onClick={() => startPopup('oidc')}
-                    style={{ width: '100%', padding: 10 }}
-                  >{popupLabel(oidc.provider_name || 'SSO')}</button>
+                    style={{ width: '100%', padding: 10, ...ssoBtnLayout }}
+                  >{oidc.google && <GoogleG />}{popupLabel(oidc.provider_name || 'SSO')}</button>
                 )}
                 {saml.enabled && (
                   <button
@@ -426,8 +429,8 @@ export function Login() {
                     type="button"
                     className="btn"
                     onClick={startOidc}
-                    style={{ width: '100%', padding: 10 }}
-                  >Sign in with {oidc.provider_name || 'SSO'}</button>
+                    style={{ width: '100%', padding: 10, ...ssoBtnLayout }}
+                  >{oidc.google && <GoogleG />}Sign in with {oidc.provider_name || 'SSO'}</button>
                 )}
                 {saml.enabled && (
                   <button
