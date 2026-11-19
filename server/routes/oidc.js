@@ -1,6 +1,7 @@
 import { Router } from 'express';
-import { auditLogin } from '../middleware/audit.js';
+import { auditLogin, logAudit } from '../middleware/audit.js';
 import { findOrLinkSsoUser } from '../services/ssoLink.js';
+import { ssoProviderConfigured, SSO_SETTING_KEY } from '../services/authPolicy.js';
 import { isPublicProvider, parseAllowedDomains, signupRefusal } from '../services/ssoSignupDomains.js';
 import { recordSignupRequest, listSignupRequests, approveSignupRequest, denySignupRequest } from '../services/ssoSignupRequests.js';
 import crypto from 'crypto';
@@ -274,7 +275,7 @@ function upsertSetting(db, key, value, adminId) {
  */
 router.get('/config', (req, res) => {
   const cfg = getOidcConfig();
-  res.json({ enabled: cfg.enabled, provider_name: cfg.provider_name });
+  res.json({ enabled: cfg.enabled && !!cfg.discovery_url && !!cfg.client_id, provider_name: cfg.provider_name });
 });
 
 /**
@@ -300,8 +301,14 @@ router.get('/admin-config', requireAuth, requirePlatformAdmin, (req, res) => {
 router.put('/config', requireAuth, requirePlatformAdmin, (req, res) => {
   const { enabled, discovery_url, client_id, client_secret, provider_name, auto_provision, allowed_domains } = req.body || {};
   const domains = parseAllowedDomains(allowed_domains);
+  // A provider turned on with no client ID cannot sign anyone in, yet it still
+  // switches "Require SSO sign-in" into force and refuses passwords.
+  if (enabled && (!String(discovery_url || '').trim() || !String(client_id || '').trim())) {
+    return res.status(400).json({ error: { code: 'VALIDATION', message: 'Enter the discovery URL and client ID before turning SSO sign-in on.' } });
+  }
   const db = getDb();
   const save = (k, v) => upsertSetting(db, k, v, req.user.id);
+  const hadProvider = ssoProviderConfigured(db);
 
   save('oidc_enabled',        enabled ? '1' : '0');
   save('oidc_discovery_url',  discovery_url || '');
@@ -311,10 +318,22 @@ router.put('/config', requireAuth, requirePlatformAdmin, (req, res) => {
   save('oidc_allowed_domains', domains.join(','));
   if (client_secret) save('oidc_client_secret_enc', encrypt(client_secret));
 
+  // The first provider turned on leaves password sign-in working, so the admin
+  // can try SSO before relying on it; "Require SSO sign-in" is theirs to turn
+  // on afterwards. A provider that does not work would otherwise lock everyone
+  // out. Only the default (no stored value) is filled in: a value an admin
+  // stored is never overwritten, and instances that had a provider keep theirs.
+  const storedSsoOnly = db.prepare('SELECT 1 FROM settings WHERE key = ?').get(SSO_SETTING_KEY);
+  const ssoOnlyTurnedOff = !storedSsoOnly && !hadProvider && ssoProviderConfigured(db);
+  if (ssoOnlyTurnedOff) {
+    save(SSO_SETTING_KEY, 'false');
+    logAudit(req.user.id, null, 'sso-enforce-set', { value: 'false', reason: 'first-provider' });
+  }
+
   // Invalidate discovery cache when config changes
   _discoveryCache.clear();
 
-  res.json({ message: 'OIDC settings saved' });
+  res.json({ message: 'OIDC settings saved', sso_only_turned_off: ssoOnlyTurnedOff });
 });
 
 /**
