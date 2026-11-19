@@ -345,3 +345,25 @@ test('findings are ranked by cost, and --baseline says which signals improved', 
   assert.equal(verdictAgainst(0.1, 0, 0), 'costlier, with more rework');
   assert.equal(verdictAgainst(0.1, B.totals.corrections * 10, 1), 'costlier, with less rework', 'paying more to cut corrections is named as such');
 });
+
+test('MCP tool results are ranked by what they cost to read into context', () => {
+  const root = mkdtempSync(join(tmpdir(), 'work-review-'));
+  mkdirSync(join(root, '-p'));
+  const ts = new Date().toISOString();
+  const usage = { input_tokens: 100, output_tokens: 10 };
+  const lines = [{ type: 'user', timestamp: ts, message: { role: 'user', content: 'find the open billing tickets' } }];
+  const call = (id, name, chars) => {
+    lines.push({ type: 'assistant', timestamp: ts, message: { id: `m${id}`, model: 'claude-opus-5-5', usage, content: [{ type: 'tool_use', id, name, input: {} }] } });
+    lines.push({ type: 'user', timestamp: ts, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: 'x'.repeat(chars) }] } });
+  };
+  call('a', 'mcp__jira__search', 30000); call('b', 'mcp__jira__search', 10000);
+  call('c', 'mcp__slack__read', 400); call('d', 'Read', 90000);
+  writeFileSync(join(root, '-p', 's.jsonl'), lines.map(l => JSON.stringify(l)).join('\n'));
+  const out = join(root, 'r.json');
+  const md = execFileSync(process.execPath, [SCRIPT, '--root', root, '--json', out], { encoding: 'utf8' });
+  const M = JSON.parse(readFileSync(out, 'utf8')).mcpTools;
+  assert.deepEqual(M.map(t => t.tool), ['mcp__jira__search', 'mcp__slack__read'], 'only MCP tools, costliest first; Read is not one');
+  assert.deepEqual([M[0].server, M[0].calls, M[0].tokens, M[0].avgTokens], ['jira', 2, 10000, 5000]);
+  assert.equal(M[0].usd, 0.05, '10,000 tokens at Opus 5.5 input x1.25 ($5 per million)');
+  assert.match(md, /MCP tool results by cost/);
+});

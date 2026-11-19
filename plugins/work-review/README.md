@@ -16,6 +16,14 @@ fix. Optionally, it uploads a redacted daily summary to a Work Review hub
 
 Then ask Claude to "review how I work with Claude", or run `/work-review:work-review`.
 
+| Command | What it does |
+|---|---|
+| `/work-review:work-review` | The review. It is read-only: it measures, audits the setup and proposes numbered fixes, and its file-editing tools are switched off. |
+| `/work-review:apply 1 3` (or `all`) | Applies those fixes from the latest review, then saves a baseline so the next review can tell whether they worked. Runs only when you type it. |
+| `/work-review:help` | Lists the commands, read from the installed plugin. |
+
+What the numbers can and cannot tell you: [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md).
+
 ## Roll it out to a team
 
 In managed settings (or a repository's `.claude/settings.json`):
