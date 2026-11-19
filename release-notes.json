@@ -1,4 +1,7 @@
 {
+  "2.139.4": [
+    "Housekeeping: the automated checks on the build server have more time to finish, so a healthy run is no longer cancelled for running a few seconds over. AppCrane itself is unchanged."
+  ],
   "2.139.3": [
     "The Sign in with Google button on the login page now shows Google's G logo."
   ],
