@@ -12,7 +12,8 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import express from 'express';
 import { mkdtempSync } from 'node:fs';
-import { networkInterfaces, tmpdir } from 'node:os';
+import { tmpdir } from 'node:os';
+import { findLanSelfAddr } from './lanSelfAddr.js';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
@@ -59,6 +60,9 @@ function fire(lim, { headers = {}, ip = A, path = '/x', auth = 'public', cookie 
 }
 const count = (codes) => codes.reduce((o, c) => ({ ...o, [c]: (o[c] || 0) + 1 }), {});
 const fireMany = (lim, n, opts) => count(Array.from({ length: n }, () => fire(lim, typeof opts === 'function' ? opts() : opts)));
+
+// Before any test(): a top-level await after one lets the file's after() run early.
+const { addr: lanAddr, skip: lanSkip } = await findLanSelfAddr();
 
 test('the attack, on a route that ignores credentials and never sends 401: stops at the address ceiling', () => {
   const lim = createApiRateLimit(LIMITS);
@@ -279,10 +283,9 @@ test('through the loopback proxy: a client-supplied XFF prefix does not move the
   assert.deepEqual(r, { 200: LIMITS.authed, 429: 5 });
 });
 
-const lanAddr = Object.values(networkInterfaces()).flat().find(i => i && i.family === 'IPv4' && !i.internal)?.address;
 
 test('direct from a non-loopback peer: a rotating XFF does not move the ceiling',
-  { skip: lanAddr ? false : 'no non-loopback IPv4 interface to bind' }, async () => {
+  { skip: lanSkip }, async () => {
     const base = await startApp(lanAddr);
     const r = await floodSpoofed(base, (i) => `10.9.${i >> 8}.${i & 255}`);
     assert.deepEqual(r, { 200: LIMITS.authed, 429: 5 });

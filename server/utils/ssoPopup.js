@@ -99,6 +99,10 @@ const POPUP_COMPLETE_HTML = `<!DOCTYPE html>
 export const POPUP_FAILURE_REASONS = Object.freeze({
   denied: 'The identity provider did not approve the sign-in.',
   no_account: 'There is no AppCrane account for this user. Ask an administrator for access.',
+  domain_not_allowed: 'This email domain cannot sign up here. Ask an administrator for access.',
+  email_unverified: 'The identity provider has not verified this email address.',
+  pending_approval: 'Your request to join was sent. An administrator has to approve it before you can sign in.',
+  signup_denied: 'An administrator declined your request to join.',
   expired: 'The sign-in took too long.',
   unavailable: 'The identity provider could not be reached.',
   failed: 'Sign-in could not be completed.',
