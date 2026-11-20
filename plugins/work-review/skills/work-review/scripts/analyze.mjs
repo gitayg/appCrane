@@ -104,7 +104,7 @@ function analyzeFile(path) {
     toolCalls: 0, toolCounts: new Map(), errors: [], redundantReads: [], repeatedCmds: [],
     retryLoops: [], editMisses: 0, denials: [], bigOutputs: [], corrections: [], interrupts: 0,
     compactions: 0, searchBursts: 0, wastedTokens: { read: 0, rerun: 0, errors: 0 },
-    edits: 0, commits: 0, prompts: [], agentCalls: 0, agentUses: [], commitShas: new Set(), commitSubjects: new Set(), commands: new Map(), filesRead: new Set(), toolOutChars: 0, lastText: '', startupUsd: null, ceremony: 0, skills: new Map(), promptChars: 0, maxPrompt: 0, nudges: 0, baselineCtx: null, singleToolTurns: 0, multiToolTurns: 0, cmdHeads: new Map(),
+    edits: 0, commits: 0, prompts: [], agentCalls: 0, agentUses: [], commitShas: new Set(), commitSubjects: new Set(), commands: new Map(), filesRead: new Set(), toolOutChars: 0, mcpOut: new Map(), lastText: '', startupUsd: null, ceremony: 0, skills: new Map(), promptChars: 0, maxPrompt: 0, nudges: 0, baselineCtx: null, singleToolTurns: 0, multiToolTurns: 0, cmdHeads: new Map(),
   };
   const seenMsg = new Set();
   const pending = new Map();          // tool_use_id -> {name, input, key}
@@ -230,6 +230,8 @@ function analyzeFile(path) {
         const p = pending.get(r.tool_use_id) || { name: '?', key: '?' };
         const out = textOf(r.content);
         s.toolOutChars += out.length;
+        // MCP results by tool: what each connector's answers cost to read into context.
+        if (p.name.startsWith('mcp__')) { const t = s.mcpOut.get(p.name) || { calls: 0, chars: 0 }; t.calls++; t.chars += out.length; s.mcpOut.set(p.name, t); }
         // `git commit` prints "[branch abc1234] subject": the session's own proof of
         // which commit it made. Merges and amends print the same way.
         if (p.name === 'Bash' && /\bgit\b[^|;&]*\bcommit\b/.test(p.input?.command || '')) {
@@ -658,7 +660,20 @@ export function compare(before, after, minSessions = 5) {
 const partial = { generatedAt: new Date().toISOString(), totals, outcomes, instructionQuality, subagents };
 const delta = BASELINE ? compare(JSON.parse(readFileSync(BASELINE, 'utf8')), partial) : null;
 
-const report = { generatedAt: partial.generatedAt, root: ROOT, sinceDays: SINCE_DAYS, totals, findings, delta, outcomes, instructionQuality, cross, overcomplication, subagents, modelFit, usage, worstSessions: perSession.slice(0, TOP), sessions: perSession };
+// ── MCP tool results: which connector answers cost the most to read ──
+// Tokens are characters / 4, priced like mechanical waste at 1.25x the session's
+// main model's input rate (written to the cache once): a floor, since a result
+// is then re-read on every later turn of that session.
+const mcpTools = (() => {
+  const m = new Map();
+  for (const s of sessions) for (const [tool, t] of s.mcpOut) {
+    const g = m.get(tool) || { tool, server: tool.split('__')[1] || '?', calls: 0, chars: 0, usd: 0 };
+    g.calls += t.calls; g.chars += t.chars; g.usd += Math.round(t.chars / 4) * inputRate(s); m.set(tool, g);
+  }
+  return [...m.values()].sort((a, b) => b.usd - a.usd || b.chars - a.chars).slice(0, TOP)
+    .map(g => ({ ...g, tokens: Math.round(g.chars / 4), avgTokens: Math.round(g.chars / 4 / g.calls), usd: +g.usd.toFixed(4) }));
+})();
+const report = { generatedAt: partial.generatedAt, root: ROOT, sinceDays: SINCE_DAYS, totals, findings, delta, outcomes, instructionQuality, cross, overcomplication, subagents, modelFit, mcpTools, usage, worstSessions: perSession.slice(0, TOP), sessions: perSession };
 if (JSON_OUT) writeFileSync(JSON_OUT, JSON.stringify(report, null, 2));
 
 // ── markdown summary ─────────────────────────────────────────────
@@ -750,6 +765,8 @@ section('Most common tool errors', cross.topErrors, r => `${r.count}× in ${r.se
 section('Files re-read without changes', cross.redundantReadFiles, r => `${r.count}× in ${r.sessions} sessions — \`${r.file}\``);
 section('Commands re-run with nothing changed', cross.repeatedCommands, r => `${r.sessions} sessions (up to ${r.runs} runs) — \`${r.cmd}\``);
 section('Permission friction', cross.permissionFriction, r => `${r.count}× — \`${r.call}\``);
+section('MCP tool results by cost (a floor: each result is re-read on later turns)', mcpTools,
+  r => `${usd(r.usd)} — \`${r.tool}\`: ${r.calls} calls, ~${k(r.tokens)} tokens (~${k(r.avgTokens)} per call). Ask for less: a narrower query, fewer fields or a page size, or a lighter tool`);
 section('Oversized outputs', cross.bigOutputs, r => `${r.count}× — \`${r.call}\` (~${k(r.chars)} chars)`);
 section('Most frequent shell commands', cross.frequentCommands, r => `${r.n}× \`${r.cmd}\``);
 section('Sessions with the most waste signals', report.worstSessions.filter(s => s.wasteScore > 0), s =>

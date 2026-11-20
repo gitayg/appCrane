@@ -51,9 +51,11 @@ function dockerUp() {
 // One image per Ubuntu release, with the packages a real box has. Docker's
 // layer cache makes every run after the first instant. Built at module load,
 // which node --test still charges to this FILE's timeout (npm test passes
-// --test-timeout=120000): on a cold CI runner with a slow package mirror the
+// --test-timeout=240000): on a cold CI runner with a slow package mirror the
 // builds once ran past it and failed the file instead of skipping. So all the
-// builds share one budget well inside it; past that, the docker tests skip.
+// builds share one budget; past that, the docker tests skip. The budget must
+// leave room for the docker-run tests too (about a minute on CI): with 120 s
+// per file, 75 s of cold builds plus those tests timed out on 19 Nov 2026.
 const BUILD_BUDGET_MS = 75000;
 // Docker Hub's mirror on Google's registry: anonymous Docker Hub pulls are rate
 // limited (a 429 measured from a cloud container on 18 Nov 2026), and a

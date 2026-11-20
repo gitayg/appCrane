@@ -189,6 +189,13 @@ function renderTeam(T) {
   list('People with each setup finding', T.peopleWithSetupFinding);
   list('People with each subagent flag', T.peopleWithSubagentFlag);
   b.append(el('p', `Subagent runs that gained nothing from delegating: ${usd(T.subagentUsdNoBenefit)} · people correcting Claude on the same thing repeatedly: ${T.peopleWithRecurringCorrections}`, 'mute'));
+  if (T.trend?.length) {
+    const tt = el('table');
+    tt.append(row(['Week', 'People', 'Median cost per landed commit', 'Median spend on rework'], true));
+    for (const w of T.trend) tt.append(row(w.enough ? [w.week, String(w.people), usd(w.medianUsdPerCommit), pct(w.medianReworkShare)]
+      : [w.week, String(w.people), `shown at ${T.minPeople}+ people`, '—']));
+    b.append(el('h3', 'Week by week'), el('p', 'Is the spend buying more work? Cost per commit should fall while rework does not rise.', 'mute'), tt);
+  }
 }
 
 (async () => {

@@ -1,6 +1,8 @@
 ---
 name: work-review
 allowed-tools: Bash(node ${CLAUDE_SKILL_DIR}/scripts/analyze.mjs *), Bash(node ${CLAUDE_SKILL_DIR}/scripts/audit-setup.mjs *)
+# The review reads and proposes; it never edits. Fixes are applied by /work-review:apply, which the user types.
+disallowed-tools: Write, Edit, NotebookEdit
 description: Analyze how the user actually works with Claude Code — mine local session transcripts for costly instructions (vague prompts that send Claude searching, prompts that end in a correction, missing done-criteria, overcomplicated setups), redundancy (re-reading unchanged files, re-running commands with nothing changed, retry loops, repeated instructions across sessions), friction (tool errors, permission denials, corrections, interrupts, compactions) and missed leverage, then turn the findings into concrete fixes (CLAUDE.md lines, skills/slash commands, permission allowlists, hooks). Use when the user asks to review, audit or retro their Claude usage, asks "where am I wasting tokens/time", "how can I prompt better", "what should go in CLAUDE.md", "what should I automate", or wants a weekly/monthly work review.
 ---
 
@@ -25,6 +27,8 @@ See `references/market-analysis.md` for the full landscape.
 Analysis is local. Transcripts can contain secrets and private code: never send them, or excerpts of them, to any external service, and quote at most a sentence of any prompt in your report. The one exception is the opt-in daily upload in §5. It sends a fixed, scrubbed summary to the Work Review hub on app.opswat.com, through `scripts/upload.mjs` only. Never send review data any other way.
 
 ## 1. Measure
+
+Every figure below is an estimate with known blind spots, listed in `${CLAUDE_SKILL_DIR}/../../KNOWN_LIMITATIONS.md`. When a finding rests on one of them (a vague-prompt call, a commit count, a model-fit saving), say so in one clause rather than presenting it as exact.
 
 Run the analyzer (Node, no dependencies):
 
@@ -135,6 +139,10 @@ Agents that exist to lend a tool the main agent lacks (`web-fetch`) are never fl
 
 Present it as an **upper bound**, always: it assumes the cheaper model needs the same tokens and turns, and a model switch loses the prompt cache at first. The fix is one line on the subagent's definition, `model: sonnet` (or `haiku` for pure lookups). Before suggesting a switch for main-session work, suggest the strong model at lower effort first, which keeps one model and its cache. Never quote a vendor's benchmark saving (for example another company's "x% of the performance at y% of the cost") as the saving for this person's work: only their own transcripts and a later `--baseline` run say what it saved.
 
+### MCP tool results: which connectors cost the most to read
+
+`mcpTools` in the JSON ranks MCP tools by the tokens their results put into context, priced as a floor (each result is then re-read on later turns). A connector whose answers are large on average is the one to fix: ask for a narrower query, fewer fields or a page size, or use a lighter tool. A server that ranks high but is rarely needed is a candidate for removal, which the setup audit's `mcp-unused` finding covers from the other side.
+
 Skills also win on always-on context through progressive disclosure: only a skill's one-line description is loaded until the skill is used, while every MCP tool's full schema and every CLAUDE.md line is paid for in every request. If `medianBaselineContextTokens` is high, move rarely needed CLAUDE.md procedures into skills, and remove unused MCP servers (see `/doctor`).
 
 ### Mechanical waste
@@ -173,14 +181,11 @@ Write the review in this shape. Keep it short, because the user wants actions, n
 
 Don't overcomplicate the fixes either. Prefer removing to adding: deleting a stale CLAUDE.md rule, an unused MCP server or a needless step beats adding a new skill. Propose a skill or hook only when a procedure really repeats.
 
-Number the fixes, each with its diff inline, and end with one line: *Reply `apply 1 3`, `apply all`, or `skip`.* That is the one-key apply: nothing changes until the user answers, and then you apply exactly the numbers they gave. Use the analyzer's **Top findings** table (`findings.shown`, ranked by cost with each one's share of spend, under 5% hidden) for the order. Apply only the ones the user approves. When you apply a fix:
-- for a `CLAUDE.md` edit, keep the file's style and keep rules short and imperative, with the reason attached;
-- for a permission allowlist, add only read-only or clearly safe commands, never broad patterns like `Bash(*)`, `rm`, `git push` or `curl` to arbitrary hosts;
-- for a new skill, create `.claude/skills/<name>/SKILL.md` with a precise trigger `description`.
+Number the fixes, each with its diff inline, and end with one line: *To apply, run `/work-review:apply 1 3` (or `all`).* This review is read-only: its file-editing tools are switched off, so nothing changes until the user runs `apply`. The `apply` skill then applies exactly the numbers given. Use the analyzer's **Top findings** table (`findings.shown`, ranked by cost with each one's share of spend, under 5% hidden) for the order. If this skill is used from a copy outside the plugin, where `apply` doesn't exist, say which file each fix goes in and let the user make the change.
 
 ## 4. Verify
 
-A fix only counts if the waste it targeted goes down. When you apply fixes, save the report as a baseline: `--json .claude/work-review/<YYYY-MM-DD>.json`. Make sure `.claude/work-review/` is gitignored, since the reports quote prompts. Also append one line per applied fix to `.claude/work-review/applied.md` with the date, the fix, and the signal it targets (e.g. `recurringCorrections: "don't mock the db"`).
+A fix only counts if the waste it targeted goes down. `/work-review:apply` saves the report as a baseline in `.claude/work-review/<YYYY-MM-DD>.json` and records each applied fix in `.claude/work-review/applied.md`, with the signal it targets (e.g. `recurringCorrections: "don't mock the db"`).
 
 On a later run, if a baseline exists, run with `--since <days since that baseline> --baseline <that baseline.json>`. The report gains a **Since** table that compares the tracked signals per session or as rates, so a busier week does not look worse. Each signal gets a verdict: `better`, `worse`, `about the same` (within 10%), or `too few sessions` (fewer than 5 on either side). For each line in `applied.md`, read the verdict of the signal it targets. Say plainly which fixes worked, which didn't, and which can't be judged yet. The hub shows the same comparison against about two weeks ago on each person's page.
 

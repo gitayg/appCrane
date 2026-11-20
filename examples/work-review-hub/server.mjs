@@ -48,7 +48,7 @@ function nums(o, keys, path) {
   for (const k of keys) { if (o[k] != null && !isNum(o[k])) throw new Error(`${path}.${k} not a number`); out[k] = o[k] ?? null; }
   return out;
 }
-const SECRETISH = /(sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|dhk_[A-Za-z0-9_-]{8,}|AKIA[0-9A-Z]{16}|-----BEGIN|eyJ[A-Za-z0-9_-]{10,}\.)/;
+const SECRETISH = /(sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|dhk_[A-Za-z0-9_-]{8,}|AKIA[0-9A-Z]{16}|-----BEGIN|eyJ[A-Za-z0-9_-]{10,}\.|glpat-[A-Za-z0-9_-]{20,}|[sr]k_(?:live|test)_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_-]{35}|npm_[A-Za-z0-9]{36}|SG\.[A-Za-z0-9_-]{16,}\.|xox[abprse]-[A-Za-z0-9-]{10,})/;
 function excerpt(s) {
   if (typeof s !== 'string' || s.length > 200) throw new Error('excerpt too long');
   if (SECRETISH.test(s)) throw new Error('excerpt looks like it contains a secret');
@@ -154,7 +154,33 @@ function team() {
     peopleWithSetupFinding: peopleWith(s => s.setup?.findings),
     peopleWithSubagentFlag: peopleWith(s => s.subagents?.flags),
     peopleWithRecurringCorrections: latest.filter(s => s.recurring.corrections > 0).length,
+    trend: teamTrend(),
   };
+}
+// Cost per landed commit and rework, week by week: is the team's spend buying
+// more work? Each person counts once a week (their latest snapshot that week),
+// and a week with fewer than TEAM_MIN_PEOPLE shows only its head count.
+const TREND_WEEKS = 8;
+function teamTrend(now = new Date()) {
+  const weeks = Array.from({ length: TREND_WEEKS }, (_, i) => isoWeek(new Date(now.getTime() - (TREND_WEEKS - 1 - i) * 7 * 864e5)));
+  const byWeek = new Map(weeks.map(w => [w, []]));
+  for (const h of readdirSync(DATA)) {
+    const perWeek = new Map();
+    for (const s of history(join(DATA, h), TREND_WEEKS * 7 + 7)) {
+      const w = isoWeek(new Date(`${s.day}T12:00:00Z`));
+      if (byWeek.has(w)) perWeek.set(w, s);   // history is oldest first, so the last one wins
+    }
+    for (const [w, s] of perWeek) byWeek.get(w).push(s);
+  }
+  return weeks.map(week => {
+    const snaps = byWeek.get(week);
+    if (snaps.length < TEAM_MIN_PEOPLE) return { week, people: snaps.length, enough: false };
+    return {
+      week, people: snaps.length, enough: true,
+      medianUsdPerCommit: median(snaps.map(s => s.outcomes?.commits ? s.outcomes.usdPerCommit : null)),
+      medianReworkShare: median(snaps.map(s => s.instructionQuality.reworkShare)),
+    };
+  });
 }
 
 // ── http ─────────────────────────────────────────────────────────
