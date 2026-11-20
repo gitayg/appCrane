@@ -352,7 +352,9 @@ router.put('/:slug/roles', requireAppAccess, auditMiddleware('app-set-role'), as
 
 /**
  * GET /api/apps/:slug/identity/users - List all users + roles for an app.
- * v2.7.9: platform admins OR an owner of this app.
+ * v2.7.9: platform admins OR an owner of this app. Platform admins are listed
+ * with the role recorded for them on this app, so one can be made an owner
+ * (and then counts as one, e.g. for request e-mails) like anyone else.
  */
 router.get('/:slug/identity/users', requireAppAccess, (req, res) => {
   const app = req.app; // set by requireAppAccess
@@ -363,10 +365,9 @@ router.get('/:slug/identity/users', requireAppAccess, (req, res) => {
 
   const users = db.prepare(`
     SELECT u.id, u.name, u.email, u.username, u.avatar_url, u.phone, u.year_of_birth,
-      COALESCE(aur.app_role, 'none') as app_role
+      u.role, COALESCE(aur.app_role, 'none') as app_role
     FROM users u
     LEFT JOIN app_user_roles aur ON u.id = aur.user_id AND aur.app_id = ?
-    WHERE u.role != 'platform_admin'
     ORDER BY u.name
   `).all(app.id);
 

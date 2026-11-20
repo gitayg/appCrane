@@ -39,7 +39,7 @@ const INSTALLATION_ID = 5150;
 const PAT = 'ghp_STOREDPAT0123456789abcdefABCDEFxy';
 
 // --- api.github.com, on 127.0.0.1 -----------------------------------------
-const api = { calls: [], tokenFails: false, issued: 0, installationStatus: 200 };
+const api = { calls: [], tokenFails: false, issued: 0, installationStatus: 200, accountInstallation: null };
 const server = http.createServer((req, res) => {
   const chunks = [];
   req.on('data', (c) => chunks.push(c));
@@ -70,6 +70,11 @@ const server = http.createServer((req, res) => {
     if (req.method === 'GET' && /^\/repos\/[^/]+\/[^/]+\/installation$/.test(req.url)) {
       if (api.installationStatus !== 200) return send(api.installationStatus, { message: 'Not Found' });
       return send(200, { id: INSTALLATION_ID, account: { login: 'acme' } });
+    }
+    if (req.method === 'GET' && (m = /^\/(orgs|users)\/[^/]+\/installation$/.exec(req.url))) {
+      const a = api.accountInstallation;
+      if (!a || a.kind !== m[1]) return send(404, { message: 'Not Found' });
+      return send(200, { id: a.id, account: { login: 'acme', type: a.type } });
     }
     if (req.method === 'GET' && req.url === '/app') return send(200, { slug: 'appcrane-test-instance' });
     return send(404, { message: `unrouted ${req.method} ${req.url}` });
@@ -377,6 +382,52 @@ test('attaching an app the App is not installed on says so instead of half-attac
     assert.equal(r.status, 409);
     assert.equal(r.body.error.code, 'NOT_INSTALLED');
     assert.equal(ghCred.getInstallation(app.id), null);
+  } finally {
+    api.installationStatus = 200;
+  }
+});
+
+test('a repo the org installation does not reach names the org owner and links its Repository access page', async () => {
+  const app = mkApp('unticked');
+  api.installationStatus = 404;
+  api.accountInstallation = { kind: 'orgs', id: 7777, type: 'Organization' };
+  try {
+    const r = await call('PUT', '/api/apps/unticked/github-app', admin.key, {});
+    assert.equal(r.status, 409);
+    assert.equal(r.body.error.reason, 'repo_not_selected');
+    assert.equal(r.body.error.fix_url, 'https://github.com/organizations/acme/settings/installations/7777');
+    assert.match(r.body.error.message, /owner of the acme organization adds it/);
+    assert.match(r.body.error.message, /select unticked/);
+    assert.equal(ghCred.getInstallation(app.id), null);
+  } finally {
+    api.installationStatus = 200;
+    api.accountInstallation = null;
+  }
+});
+
+test('a personal-account installation links the account\'s own installation settings', async () => {
+  mkApp('unticked-user');
+  api.installationStatus = 404;
+  api.accountInstallation = { kind: 'users', id: 8888, type: 'User' };
+  try {
+    const r = await call('PUT', '/api/apps/unticked-user/github-app', admin.key, {});
+    assert.equal(r.body.error.reason, 'repo_not_selected');
+    assert.equal(r.body.error.fix_url, 'https://github.com/settings/installations/8888');
+    assert.match(r.body.error.message, /The acme account adds it/);
+  } finally {
+    api.installationStatus = 200;
+    api.accountInstallation = null;
+  }
+});
+
+test('with the App on no account for that owner, the error links the install page', async () => {
+  mkApp('nowhere');
+  api.installationStatus = 404;
+  try {
+    const r = await call('PUT', '/api/apps/nowhere/github-app', admin.key, {});
+    assert.equal(r.body.error.reason, 'app_not_installed');
+    assert.equal(r.body.error.fix_url, 'https://github.com/apps/appcrane-test-instance/installations/new');
+    assert.match(r.body.error.message, /not installed on acme/);
   } finally {
     api.installationStatus = 200;
   }

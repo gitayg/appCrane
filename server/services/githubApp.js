@@ -248,6 +248,34 @@ export async function findInstallationForRepo(owner, repo) {
 }
 
 /**
+ * The installation of this instance's App on a GitHub account (an organization
+ * or a user), or null when the App is not installed there. Only used to explain
+ * why a repository is not covered, so a lookup GitHub answers 404 is "not there".
+ */
+export async function findInstallationForAccount(owner) {
+  const auth = `Bearer ${createAppJwt()}`;
+  for (const kind of ['orgs', 'users']) {
+    try {
+      const data = await githubJson(`/${kind}/${encodeURIComponent(owner)}/installation`, { auth });
+      if (data?.id) {
+        return { installationId: data.id, accountType: data.account?.type || (kind === 'orgs' ? 'Organization' : 'User') };
+      }
+    } catch (e) {
+      if (e.status !== 404) throw e;
+    }
+  }
+  return null;
+}
+
+/** Where the account that installed the App changes which repositories it reaches. */
+export function installationSettingsUrl({ owner, installationId, accountType }) {
+  const web = githubWebBase();
+  return accountType === 'Organization'
+    ? `${web}/organizations/${encodeURIComponent(owner)}/settings/installations/${Number(installationId)}`
+    : `${web}/settings/installations/${Number(installationId)}`;
+}
+
+/**
  * A short-lived installation access token, narrowed to `repositories` when
  * given. Cached in memory and re-issued once it is within 5 minutes of expiry;
  * never written anywhere durable.

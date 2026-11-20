@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { adminApi, authHeaders } from '../adminApi'
+import { adminApi, authHeaders, ApiError } from '../adminApi'
 
 // Applications → gh app: attach one connected app to this instance's GitHub
 // App installation, or detach it (v2.75.0).
@@ -21,6 +21,7 @@ export function GithubAppModal({ slug, name, onClose }: { slug: string; name: st
   const [st, setSt] = useState<AppGithubAppState | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [fixUrl, setFixUrl] = useState<string | null>(null)
 
   function load() {
     adminApi.get<AppGithubAppState>(`/api/apps/${slug}/github-app`).then(setSt).catch(e => setError(String(e.message || e)))
@@ -28,9 +29,13 @@ export function GithubAppModal({ slug, name, onClose }: { slug: string; name: st
   useEffect(load, [slug])
 
   async function attach() {
-    setBusy(true); setError(null)
+    setBusy(true); setError(null); setFixUrl(null)
     try { await adminApi.put(`/api/apps/${slug}/github-app`, {}); load() }
-    catch (e) { setError(e instanceof Error ? e.message : String(e)) }
+    catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+      const url = e instanceof ApiError ? e.details.fix_url : null
+      setFixUrl(typeof url === 'string' && /^https:\/\//.test(url) ? url : null)
+    }
     finally { setBusy(false) }
   }
 
@@ -63,7 +68,12 @@ export function GithubAppModal({ slug, name, onClose }: { slug: string; name: st
           GitHub App · {name}
         </div>
         <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 12, fontSize: '.85rem' }}>
-          {error && <p style={{ margin: 0, color: 'var(--red)' }}>{error}</p>}
+          {error && (
+            <p style={{ margin: 0, color: 'var(--red)' }}>
+              {error}
+              {fixUrl && <> <a href={fixUrl} target="_blank" rel="noreferrer" style={{ color: 'var(--accent)' }}>Open on GitHub ↗</a></>}
+            </p>
+          )}
           {st === null ? (
             <p style={{ margin: 0, color: 'var(--dim)' }}>Loading…</p>
           ) : !st.app_configured ? (

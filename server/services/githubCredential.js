@@ -29,6 +29,7 @@ import { getDb } from '../db.js';
 import { decrypt } from './encryption.js';
 import {
   getAppConfig, getInstallationToken, findInstallationForRepo, githubWebBase,
+  findInstallationForAccount, installationSettingsUrl,
 } from './githubApp.js';
 import {
   installationBlockedReason, getInstallationStatus, setInstallationStatus, clearReposRemoved,
@@ -101,6 +102,37 @@ export async function attachInstallation(app, userId = null) {
 }
 
 /** Stop using the GitHub App for this app. Whatever PAT it has applies again. */
+/**
+ * Why this instance's App cannot reach an app's repository, worded for the
+ * person who has to fix it on GitHub, with the page they fix it on:
+ *   - repo_not_selected: installed on the owner, but this repository is not
+ *     ticked under its Repository access
+ *   - app_not_installed: not installed on the owner at all
+ */
+export async function explainRepoNotCovered(app) {
+  const parsed = parseGithubRepo(app.github_url);
+  if (!parsed) return null;
+  const { owner, repo, fullName } = parsed;
+  const inst = await findInstallationForAccount(owner);
+  if (inst) {
+    const who = inst.accountType === 'Organization' ? `An owner of the ${owner} organization` : `The ${owner} account`;
+    return {
+      reason: 'repo_not_selected',
+      repo_full_name: fullName,
+      fix_url: installationSettingsUrl({ owner, ...inst }),
+      message: `The GitHub App is installed on ${owner}, but ${repo} is not one of the repositories it can reach. ` +
+        `${who} adds it on GitHub (Repository access, select ${repo}, Save), then attach again.`,
+    };
+  }
+  return {
+    reason: 'app_not_installed',
+    repo_full_name: fullName,
+    fix_url: getAppConfig()?.install_url || null,
+    message: `The GitHub App is not installed on ${owner}. Whoever owns ${owner} on GitHub (for an organization, an organization owner) ` +
+      `installs it, choosing "Only select repositories" and including ${repo}, then attach again.`,
+  };
+}
+
 export function detachInstallation(appId) {
   getDb().prepare('DELETE FROM app_github_installations WHERE app_id = ?').run(appId);
 }

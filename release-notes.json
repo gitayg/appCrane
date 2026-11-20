@@ -1,4 +1,9 @@
 {
+  "2.140.1": [
+    "When connecting the GitHub App to an app fails because the repository isn't covered, AppCrane now says why (the repository isn't selected, or the App isn't installed) and links to the GitHub page that fixes it.",
+    "Access requests are e-mailed to the app's admins (or its owners if it has none). Every other request goes to the app's owners. If nobody fits, platform admins get it.",
+    "Platform admins now appear in an app's members list and can make themselves an owner of the app, so they are listed and e-mailed as one."
+  ],
   "2.140.0": [
     "If you set up two-factor sign-in in AppCrane, you now enter your code after signing in with Google or single sign-on too, unless your identity provider already asked for a second factor.",
     "Single sign-on is harder to abuse: the sign-in page shows only fixed error text, one network can file at most 5 requests to join per hour, and approving a request covers only the email address you saw.",

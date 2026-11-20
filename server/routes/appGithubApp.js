@@ -24,6 +24,7 @@ import { isAdmin } from '../utils/roles.js';
 import { getAppConfig } from '../services/githubApp.js';
 import {
   attachInstallation, detachInstallation, getInstallation, parseGithubRepo, githubAppEligible,
+  explainRepoNotCovered,
 } from '../services/githubCredential.js';
 
 const router = Router();
@@ -68,12 +69,19 @@ router.put('/:slug/github-app', requireAuth, requireAppAccess, requirePlatformAd
       res.json({ attached: true, ...result });
     } catch (e) {
       const notInstalled = e.status === 404 || /returned 404/.test(e.message);
-      res.status(notInstalled ? 409 : 400).json({
+      if (!notInstalled) {
+        return res.status(400).json({ error: { code: 'ATTACH_FAILED', message: e.message } });
+      }
+      let why = null;
+      try { why = await explainRepoNotCovered(req.app); } catch (_) { why = null; }
+      res.status(409).json({
         error: {
-          code: notInstalled ? 'NOT_INSTALLED' : 'ATTACH_FAILED',
-          message: notInstalled
-            ? `This instance's GitHub App is not installed on ${parseGithubRepo(req.app.github_url)?.fullName || 'that repository'} yet. Install it there first, then attach.`
-            : e.message,
+          code: 'NOT_INSTALLED',
+          reason: why?.reason || 'unknown',
+          fix_url: why?.fix_url || getAppConfig()?.install_url || null,
+          message: why?.message ||
+            `This instance's GitHub App cannot reach ${parseGithubRepo(req.app.github_url)?.fullName || 'that repository'}. ` +
+            'Whoever owns it on GitHub installs the App there (or adds the repository to it), then attach again.',
         },
       });
     }

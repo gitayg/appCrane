@@ -2390,7 +2390,7 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                     {filtered.map(u => {
                       const status = usersModalSaving[u.id]
                       const isPlatformAdmin = u.role === 'platform_admin'
-                      const value = isPlatformAdmin ? 'owner' : u.app_role
+                      const value = u.app_role
                       return (
                         <tr key={u.id} style={{ borderBottom: '1px solid var(--border-faint, #2a2a2a)' }}>
                           <td style={{ padding: '8px 4px', fontSize: '.88rem' }}>
@@ -2411,9 +2411,9 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                           <td style={{ padding: '8px 4px', textAlign: 'right' }}>
                             <select
                               value={value}
-                              disabled={isPlatformAdmin || status === 'saving'}
+                              disabled={status === 'saving'}
                               title={isPlatformAdmin
-                                ? 'Platform admin has owner-equivalent access to every app. Demote their global role first.'
+                                ? 'Platform admins can manage every app whatever is set here. Set owner to be listed, and e-mailed, as an owner of this app.'
                                 : undefined}
                               onChange={e => changeUserAppRole(u.id, e.target.value as ModalUser['app_role'])}
                               style={{ minWidth: 110 }}
@@ -2425,9 +2425,9 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                             </select>
                           </td>
                           <td style={{ padding: '8px 0', textAlign: 'center', width: 28 }}>
-                            {!isPlatformAdmin && status === 'saving' && <span style={{ color: 'var(--dim)' }}>…</span>}
-                            {!isPlatformAdmin && status === 'saved'  && <span style={{ color: 'var(--green)' }}>✓</span>}
-                            {!isPlatformAdmin && status === 'error'  && <span style={{ color: 'var(--red)' }}>✗</span>}
+                            {status === 'saving' && <span style={{ color: 'var(--dim)' }}>…</span>}
+                            {status === 'saved'  && <span style={{ color: 'var(--green)' }}>✓</span>}
+                            {status === 'error'  && <span style={{ color: 'var(--red)' }}>✗</span>}
                           </td>
                         </tr>
                       )
