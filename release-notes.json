@@ -1,4 +1,10 @@
 {
+  "2.140.0": [
+    "If you set up two-factor sign-in in AppCrane, you now enter your code after signing in with Google or single sign-on too, unless your identity provider already asked for a second factor.",
+    "Single sign-on is harder to abuse: the sign-in page shows only fixed error text, one network can file at most 5 requests to join per hour, and approving a request covers only the email address you saw.",
+    "Git deploys now stop, and the running version keeps serving, if the code being built is not exactly the commit that was picked. The deploy log also says whether the app's lockfile changed since the last successful deploy.",
+    "AppCrane's database file can now be read only by the account AppCrane runs as."
+  ],
   "2.139.6": [
     "Work Review's review is now read-only: it proposes numbered fixes, and you apply the ones you want with /work-review:apply 1 3 (or all), which also saves a baseline for the next review. /work-review:help lists the commands.",
     "Work Review ranks MCP tools by what their results cost to read into context, so you can see which connector to ask for less.",

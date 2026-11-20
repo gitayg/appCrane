@@ -1,8 +1,8 @@
 {
   "name": "appcrane",
-  "version": "2.139.6",
+  "version": "2.140.0",
   "engines": {
-    "node": ">=22"
+    "node": ">=22 <23"
   },
   "description": "AppCrane - Self-service app hosting and deployment.",
   "license": "AGPL-3.0-only",
@@ -23,10 +23,14 @@
   "scripts": {
     "start": "node server/index.js",
     "dev": "node --watch server/index.js",
+    "pretest": "node scripts/check-node-version.mjs",
     "test": "node --test --test-timeout=240000 test/*.test.js packages/tenant/*.test.js",
+    "pretest:serial": "node scripts/check-node-version.mjs",
     "test:serial": "node --test --test-concurrency=1 --test-timeout=300000 test/serial/*.test.js",
     "gen:mcp-snapshot": "node scripts/gen-mcp-snapshot.mjs",
-    "gen:plugin-releases": "node scripts/gen-plugin-releases.mjs"
+    "gen:plugin-releases": "node scripts/gen-plugin-releases.mjs",
+    "version:next": "node scripts/next-version.mjs",
+    "version:check": "node scripts/check-version-bump.mjs"
   },
   "overrides": {
     "follow-redirects": "^1.16.0"

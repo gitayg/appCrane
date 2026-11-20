@@ -287,10 +287,10 @@ test('someone outside the list is queued, then gets in once an admin approves', 
   const list = await call('GET', '/api/auth/oidc/signup-requests', { token: ADMIN_SESS });
   const req = list.body.requests.find((x) => x.email === OUTSIDER.email);
   assert.ok(req, 'the request is not listed');
-  assert.equal((await call('POST', `/api/auth/oidc/signup-requests/${req.id}/approve`, { token: USER_SESS })).status, 403, 'a non-admin approved');
+  assert.equal((await call('POST', `/api/auth/oidc/signup-requests/${req.id}/approve`, { token: USER_SESS, body: { email: req.email } })).status, 403, 'a non-admin approved');
   assert.equal(q('SELECT id FROM users WHERE sso_sub = ?', OUTSIDER.sub), undefined);
 
-  const ok = await call('POST', `/api/auth/oidc/signup-requests/${req.id}/approve`, { token: ADMIN_SESS });
+  const ok = await call('POST', `/api/auth/oidc/signup-requests/${req.id}/approve`, { token: ADMIN_SESS, body: { email: req.email } });
   assert.equal(ok.status, 200, JSON.stringify(ok.body));
   const u = q('SELECT role, email FROM users WHERE sso_sub = ?', OUTSIDER.sub);
   assert.deepEqual({ ...u }, { role: 'user', email: OUTSIDER.email });
@@ -299,7 +299,7 @@ test('someone outside the list is queued, then gets in once an admin approves', 
   r = await signIn(OUTSIDER);
   assert.equal(r.error, null);
   assert.ok(r.session, 'approved person got no session');
-  assert.equal((await call('POST', `/api/auth/oidc/signup-requests/${req.id}/approve`, { token: ADMIN_SESS })).status, 409);
+  assert.equal((await call('POST', `/api/auth/oidc/signup-requests/${req.id}/approve`, { token: ADMIN_SESS, body: { email: req.email } })).status, 409);
 });
 
 test('a denied person stays out until an admin approves them after all', async () => {
@@ -312,7 +312,7 @@ test('a denied person stays out until an admin approves them after all', async (
   assert.equal(q('SELECT id FROM users WHERE sso_sub = ?', DENIED.sub), undefined);
   const denied = await call('GET', '/api/auth/oidc/signup-requests?status=denied', { token: ADMIN_SESS });
   assert.ok(denied.body.requests.some((x) => x.email === DENIED.email));
-  assert.equal((await call('POST', `/api/auth/oidc/signup-requests/${id}/approve`, { token: ADMIN_SESS })).status, 200);
+  assert.equal((await call('POST', `/api/auth/oidc/signup-requests/${id}/approve`, { token: ADMIN_SESS, body: { email: DENIED.email } })).status, 200);
   assert.ok((await signIn(DENIED)).session);
 });
 

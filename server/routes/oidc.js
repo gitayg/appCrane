@@ -4,13 +4,14 @@ import { findOrLinkSsoUser } from '../services/ssoLink.js';
 import { ssoProviderConfigured, SSO_SETTING_KEY } from '../services/authPolicy.js';
 import { isPublicProvider, parseAllowedDomains, signupRefusal, publicProviderVouches } from '../services/ssoSignupDomains.js';
 import { recordSignupRequest, listSignupRequests, approveSignupRequest, denySignupRequest } from '../services/ssoSignupRequests.js';
+import { idpDidMfa, ssoLoginMfaStep } from '../services/ssoMfa.js';
 import crypto from 'crypto';
 import { getDb } from '../db.js';
 import { encrypt, decrypt, generateSessionToken, hashApiKey } from '../services/encryption.js';
 import { requireAuth, requirePlatformAdmin } from '../middleware/auth.js';
 import { setSessionCookie, readCookie, platformCookieSecure } from '../utils/sessionCookie.js';
 import { safeRedirectTarget } from '../utils/safeRedirect.js';
-import { POPUP_MODE, requestedMode, sendPopupComplete, sendPopupFailed, popupFailure, idpErrorCode } from '../utils/ssoPopup.js';
+import { POPUP_MODE, requestedMode, sendPopupComplete, sendPopupFailed, popupFailure, idpErrorCode, loginErrorCode } from '../utils/ssoPopup.js';
 import log from '../utils/logger.js';
 
 const router = Router();
@@ -149,7 +150,7 @@ export function ensureBrowserBinding(req, res, { name, secure, sameSite }) {
 }
 
 export function browserMismatch() {
-  return popupFailure('failed', BROWSER_MISMATCH);
+  return popupFailure('browser_mismatch', BROWSER_MISMATCH);
 }
 
 // ---------------------------------------------------------------------------
@@ -161,25 +162,35 @@ export function browserMismatch() {
 // URL now carries a code that is single-use, lives a minute, and only redeems in
 // the browser holding the login's binding cookie. Kept in memory: a restart loses
 // a code in flight, the cookie stays valid, and signing in again fixes it.
+//
+// A user with AppCrane MFA enrolled gets no session from the callback: the code
+// carries the second step (services/ssoMfa.js) instead of a token, so only this
+// browser receives the mfa_token for POST /api/identity/mfa/verify. In popup
+// mode the popup goes to the sign-in page for it (sso_popup=1), and that page
+// tells the frame once the code is accepted.
 // ---------------------------------------------------------------------------
 export const SSO_HANDOFF_TTL_MS = 60_000;
 export const SSO_HANDOFF_MAX = 5000;
 const ssoHandoffs = new Map(); // sha256(code) -> record, oldest first
 
-export function issueSsoHandoff(token, cookieName, binding) {
+export function issueSsoHandoff(token, cookieName, binding, mfaStep = null) {
   const now = Date.now();
   for (const [k, rec] of ssoHandoffs) {
     if (now <= rec.expiresAt && ssoHandoffs.size < SSO_HANDOFF_MAX) break;
     ssoHandoffs.delete(k);
   }
   const code = crypto.randomBytes(16).toString('base64url');
-  ssoHandoffs.set(bindingHash(code), { token, cookieName, binding: bindingHash(binding), expiresAt: now + SSO_HANDOFF_TTL_MS });
+  ssoHandoffs.set(bindingHash(code), { token, mfaStep, cookieName, binding: bindingHash(binding), expiresAt: now + SSO_HANDOFF_TTL_MS });
   return code;
 }
 
 // The token, or null. A failed attempt does not use the code up: someone else
 // trying it must not be able to spoil the real browser's sign-in.
 export function redeemSsoHandoff(req, code) {
+  return redeemSsoHandoffRecord(req, code)?.token || null;
+}
+
+function redeemSsoHandoffRecord(req, code) {
   if (typeof code !== 'string') return null;
   const key = bindingHash(code);
   const rec = ssoHandoffs.get(key);
@@ -188,7 +199,7 @@ export function redeemSsoHandoff(req, code) {
   const value = readBrowserBinding(req, rec.cookieName);
   if (!value || !safeEqual(bindingHash(value), rec.binding)) return null;
   ssoHandoffs.delete(key);
-  return rec.token;
+  return rec;
 }
 
 function oidcBindCookie(req) {
@@ -349,7 +360,7 @@ for (const [action, fn] of [['approve', approveSignupRequest], ['deny', denySign
     const id = Number(req.params.id);
     if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: { code: 'VALIDATION', message: 'Invalid id' } });
     try {
-      res.json(fn(getDb(), id, req.user.id));
+      res.json(fn(getDb(), id, req.user.id, { email: req.body?.email }));
     } catch (e) {
       if (!e.status) throw e;
       res.status(e.status).json({ error: { code: e.code, message: e.message } });
@@ -402,7 +413,7 @@ router.get('/start', async (req, res) => {
   } catch (e) {
     log.error('OIDC start error: ' + e.message);
     if (requestedMode(req.query) === POPUP_MODE) return sendPopupFailed(res, 'unavailable');
-    res.redirect(302, craneBaseUrl() + '/login?sso_error=' + encodeURIComponent(e.message));
+    res.redirect(302, craneBaseUrl() + '/login?sso_error=unavailable');
   }
 });
 
@@ -499,8 +510,8 @@ router.get('/callback', async (req, res) => {
           hostedDomain: claims.hd, requireHostedDomain: isPublicProvider(cfg.discovery_url),
         });
       if (refusal === 'domain_not_allowed') {
-        const outcome = recordSignupRequest(db, { provider: 'oidc', subject: sub, email, name: displayName });
-        refusal = outcome === 'pending' ? 'pending_approval' : outcome === 'denied' ? 'signup_denied' : 'domain_not_allowed';
+        const outcome = recordSignupRequest(db, { provider: 'oidc', subject: sub, email, name: displayName, ip: req.ip });
+        refusal = { pending: 'pending_approval', denied: 'signup_denied', limited: 'signup_rate_limited' }[outcome] || 'domain_not_allowed';
       }
     }
     if (!user && cfg.auto_provision && !refusal) {
@@ -520,19 +531,26 @@ router.get('/callback', async (req, res) => {
       return res.redirect(302, base + '/login?sso_error=' + reason);
     }
 
-    // Create session and hand token back to the browser via login page JS
-    const token = createIdentitySession(user.id);
-    auditLogin(user.id, 'ok', { method: 'oidc', ip: req.ip });
-    log.info(`OIDC login: ${user.name} (${email || sub})`);
+    // AppCrane's own MFA comes first for a user who enrolled it, unless the
+    // verified id_token's amr says the IdP already did MFA.
+    const idpMfa = idpDidMfa(claims.amr);
+    const mfaStep = idpMfa ? null : ssoLoginMfaStep(db, user, { method: 'oidc' });
+    let token = null;
+    log.info(`OIDC login: ${user.name} (${email || sub})${mfaStep ? ', AppCrane MFA step next' : ''}`);
+    if (!mfaStep) {
+      // Create session and hand token back to the browser via login page JS
+      token = createIdentitySession(user.id);
+      auditLogin(user.id, 'ok', { method: 'oidc', ip: req.ip, ...(idpMfa && { idp_amr: claims.amr }) });
 
-    // v2.6.18: set cc_token cookie server-side on the redirect response, so a
-    // browser that goes straight into a per-app route after the callback, without
-    // the SPA running, is signed in. The SPA's own Bearer comes from the handoff
-    // code below; the cookie does not depend on it.
-    setSessionCookie(res, token, req);
+      // v2.6.18: set cc_token cookie server-side on the redirect response, so a
+      // browser that goes straight into a per-app route after the callback, without
+      // the SPA running, is signed in. The SPA's own Bearer comes from the handoff
+      // code below; the cookie does not depend on it.
+      setSessionCookie(res, token, req);
 
-    // Popup mode comes from the signed state only, never from this request's query.
-    if (stateData.m === POPUP_MODE) return sendPopupComplete(res);
+      // Popup mode comes from the signed state only, never from this request's query.
+      if (stateData.m === POPUP_MODE) return sendPopupComplete(res);
+    }
 
     // Always go through /login so it sets the cookie, then forward to redirect target.
     // Re-validate rather than trusting `start`: the value round-trips through the
@@ -543,16 +561,20 @@ router.get('/callback', async (req, res) => {
     // '/login' is excluded so the forward can't bounce back into the login page.
     const target = safeRedirectTarget(stateData.r, '');
     const bindCookie = oidcBindCookie(req).name;
-    const p = new URLSearchParams({ sso_code: issueSsoHandoff(token, bindCookie, readBrowserBinding(req, bindCookie)) });
-    if (target && !target.includes('/login')) {
+    const p = new URLSearchParams({ sso_code: issueSsoHandoff(token, bindCookie, readBrowserBinding(req, bindCookie), mfaStep) });
+    if (stateData.m === POPUP_MODE) {
+      p.set('sso_popup', '1');
+    } else if (target && !target.includes('/login')) {
       p.set('redirect', target);
     }
     res.redirect(302, `${base}/login?${p.toString()}`);
   } catch (e) {
     log.error('OIDC callback error: ' + e.message);
     auditLogin(null, 'failed', { method: 'oidc', reason: e.popupCode || 'error', message: String(e.message).slice(0, 200), ip: req.ip });
+    // The IdP's error_description and exception text stay in the log and audit:
+    // a crafted link controls them, so the page gets a fixed code only.
     if (popup) return sendPopupFailed(res, e.popupCode || 'failed');
-    res.redirect(302, base + '/login?sso_error=' + encodeURIComponent(e.message));
+    res.redirect(302, base + '/login?sso_error=' + loginErrorCode(e));
   }
 });
 
@@ -561,9 +583,9 @@ router.get('/callback', async (req, res) => {
  * Shared with SAML, whose callback issues the same code bound to its own cookie.
  */
 router.post('/handoff', (req, res) => {
-  const token = redeemSsoHandoff(req, req.body?.code);
-  if (!token) return res.status(401).json({ error: { code: 'SSO_HANDOFF_REFUSED', message: BROWSER_MISMATCH } });
-  res.json({ token });
+  const rec = redeemSsoHandoffRecord(req, req.body?.code);
+  if (!rec) return res.status(401).json({ error: { code: 'SSO_HANDOFF_REFUSED', message: BROWSER_MISMATCH } });
+  res.json(rec.mfaStep || { token: rec.token });
 });
 
 export default router;

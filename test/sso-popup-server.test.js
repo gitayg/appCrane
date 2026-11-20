@@ -456,7 +456,7 @@ test('oidc: failures that are not provably popup mode keep the /login redirect, 
   assertLoginError(await cb({ error: 'access_denied', state: popup.state.slice(0, popup.state.lastIndexOf('.') + 1) + otherKey }), 'popup state signed by another key');
 
   const r = await cb({ error: 'access_denied', error_description: 'plain text', state: normal.state });
-  assert.equal(new URL(r.headers.get('location')).searchParams.get('sso_error'), 'plain text', 'the non-popup error text changed');
+  assert.equal(new URL(r.headers.get('location')).searchParams.get('sso_error'), 'denied', 'IdP text reached the login page');
 });
 
 const tamperedSamlResponse = () => Buffer.from(Buffer.from(samlResponse(), 'base64').toString().replace(

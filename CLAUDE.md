@@ -46,3 +46,10 @@ until you do, and the generator refuses to record a change that kept the old ver
 If settings or configuration appear wiped, always check `/data` first.
 AppCrane stores all persistent state (database, env vars, app configs) under the `DATA_DIR` path (default: `./data`).
 Settings that "disappear" are usually still on disk — the process may have restarted pointing at a different working directory or `DATA_DIR` env var.
+
+## Releasing: pick the version number from main
+Run `git fetch origin && npm run version:next` (add `--minor` for a feature release,
+`-- --write` to set package.json and package-lock.json once release-notes.json has the
+key). Parallel branches kept claiming the same next patch; `version-guard.yml` now fails a
+PR whose number is not above the current main, and fails main if a merge reuses one. Tests
+need Node 22 (`.nvmrc`); `npm test` stops with one line on any other version.

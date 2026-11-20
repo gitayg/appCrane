@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import { readFileSync, readdirSync, existsSync, mkdirSync } from 'fs';
+import { readFileSync, readdirSync, existsSync, mkdirSync, chmodSync, statSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import log from './utils/logger.js';
@@ -44,8 +44,19 @@ export function openDb(dataDir) {
   db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
+  restrictDataFiles(dbDir, dbPath);
   cacheStatements(db);
   return db;
+}
+
+// The database holds every user, role and audit row, so only the account
+// AppCrane runs as may read it. SQLite gives -wal and -shm the main file's mode.
+// A sticky directory (/tmp) is shared by design and is left alone.
+export function restrictDataFiles(dbDir, dbPath) {
+  if (!(statSync(dbDir).mode & 0o1000)) chmodSync(dbDir, 0o700);
+  for (const f of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+    if (existsSync(f)) chmodSync(f, 0o600);
+  }
 }
 
 export const STATEMENT_CACHE_MAX = 500;

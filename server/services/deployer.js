@@ -977,6 +977,7 @@ export async function rollbackApp(app, env, deploymentId, userId) {
     target.artifact_sha256 ?? null, target.artifact_bytes ?? null,
     target.artifact_filename ?? null, target.declared_commit_sha ?? null, newId,
   );
+  (await import('./deployIntegrity.js')).copyLockfile(db, target.id, newId);
 
   // Mark the previously-live deployment as rolled_back.
   db.prepare("UPDATE deployments SET status = 'rolled_back' WHERE app_id = ? AND env = ? AND status = 'live' AND id != ?")
@@ -1370,6 +1371,10 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
   // Hoisted so the failure handler can still flush its deploy-log lines when
   // the BUILD is what failed. Stays null for source types that never clone.
   let supplyChainGate = null;
+  // Commit pinning (services/deployIntegrity.js): set once a git-sourced
+  // deploy has resolved its commit; checked before the build and again
+  // before the container swap. Stays null for image and upload deploys.
+  let integrity = null;
   // The image this attempt BUILT (null when it reused a cached one or pulled).
   // Pruning only runs after a passing health check, so without this a failed
   // deploy's image stayed on disk forever, and as the newest image it outranked
@@ -1599,6 +1604,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
 
       releaseDir = resolve(join(releasesDir, `${timestamp}-git`));
       mkdirSync(releaseDir, { recursive: true });
+      let restoredEnvPaths = [];
 
       if (localRepo) {
         // Same two steps as GitHub — shallow clone of the branch, then (for a
@@ -1625,6 +1631,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
         const { restoreStoredEnvFiles, describeRestoredEnvFiles } = await import('./envFileStore.js');
         const restoredEnvFiles = restoreStoredEnvFiles(db, app, env, releaseDir, await loadStoredEnv());
         if (restoredEnvFiles.files.length) appendLog(describeRestoredEnvFiles(restoredEnvFiles));
+        restoredEnvPaths = restoredEnvFiles.files.map((f) => f.path);
       } else {
         let token = null;
         let installationToken = null;
@@ -1693,6 +1700,14 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       }
 
       appendLog(`Cloned successfully. Commit: ${commitHash}${commitMessage ? ` — ${commitMessage.split('\n')[0].slice(0, 80)}` : ''}`);
+
+      {
+        const { checkRequestedCommit, PIPELINE_WRITTEN } = await import('./deployIntegrity.js');
+        if (!commitSha) throw new Error('Deploy integrity: the checkout\'s HEAD commit could not be read, so what would be built cannot be pinned. The deploy was stopped and the running container was not touched.');
+        const requested = checkRequestedCommit(opts.targetCommit, commitSha);
+        if (!requested.ok) throw new Error(`Deploy integrity: ${requested.message}. The deploy was stopped and the running container was not touched.`);
+        integrity = { expectedSha: commitSha, allowed: [...PIPELINE_WRITTEN, ...restoredEnvPaths], pinned: null };
+      }
 
       // v2.3.6: cross-check local HEAD against GitHub's claim for this
       // branch. Mismatch = refuse deploy. supplyChain.authForApp already
@@ -1780,6 +1795,14 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
         `Valid source_types are 'github' (per-app PAT, github_url required) and 'managed' (service-account-owned AMC_<slug> repo, no per-app PAT). ` +
         `Run appcrane_update_app to set a deployable source_type.`
       );
+    }
+
+    // Deploy integrity, first pass: the icon pickup and deployhub.json /
+    // vercel.json below write crons, multitenant and the icon from the release
+    // tree, so the tree is checked before any of it is acted on.
+    if (integrity) {
+      const { verifyReleaseTree } = await import('./deployIntegrity.js');
+      await verifyReleaseTree({ dir: releaseDir, expectedSha: integrity.expectedSha, allowed: integrity.allowed, stage: 'before reading the manifest' });
     }
 
     // v2.5.22: auto-pickup app icon from the release dir.
@@ -1930,6 +1953,15 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
 
     const appBasePath = env === 'production' ? `/${app.slug}/` : `/${app.slug}-sandbox/`;
 
+    const verifyTreeBeforeBuild = async () => {
+      if (!integrity) return;
+      const { verifyReleaseTree, recordLockfile } = await import('./deployIntegrity.js');
+      integrity.pinned = await verifyReleaseTree({ dir: releaseDir, expectedSha: integrity.expectedSha, allowed: integrity.allowed, stage: 'before build' });
+      const written = Object.keys(integrity.pinned);
+      appendLog(`Deploy integrity: release tree is exactly commit ${integrity.expectedSha}${written.length ? ` (plus files AppCrane wrote: ${written.join(', ')})` : ''}.`);
+      appendLog(recordLockfile(db, { appId: app.id, env, deployId, dir: releaseDir }));
+    };
+
     db.prepare("UPDATE deployments SET status = 'deploying' WHERE id = ?").run(deployId);
 
     const { dockerAvailable, buildImageIfNeeded, getContainerImage, startApp: dockerStart, stopApp: dockerStop, pruneOldImages, pruneDanglingImages, imageExists, imageTagFor } = await import('./docker.js');
@@ -1990,6 +2022,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       }
       appendLog('No Dockerfile + non-Node app → building with Nixpacks…');
       image = imageTagFor(app.slug, env, commitHash);
+      await verifyTreeBeforeBuild();
       await nixpacksBuild({
         releaseDir, tag: image, slug: app.slug, env,
         onLog: (line) => { if (deployLog.length < 500) appendLog(`  ${line}`); },
@@ -2018,6 +2051,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
         for (const w of node.warnings) appendLog(`⚠ ${w}`);
       }
 
+      await verifyTreeBeforeBuild();
       appendLog('Building docker image...');
       const wasCached = opts.freshBase === true ? false : await imageExists(imageTagFor(app.slug, env, commitHash));
       image = await buildImageIfNeeded({
@@ -2055,6 +2089,11 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     // and nothing has been started at this point.
     if (env === 'production') await (await import('./releaseCheck.js')).enforceReleaseCheckInDeploy({ app, deployId, releaseDir: isImageDeploy ? null : releaseDir, commit: commitHash, opts, appendLog });
     if (supplyChainGate) await supplyChainGate.settle();
+    if (integrity) {
+      const { verifyReleaseTree } = await import('./deployIntegrity.js');
+      await verifyReleaseTree({ dir: releaseDir, expectedSha: integrity.expectedSha, allowed: integrity.allowed, pinned: integrity.pinned, stage: 'before container swap' });
+      appendLog(`Deploy integrity: release tree still exactly commit ${integrity.expectedSha} before the container swap.`);
+    }
 
     // v2.6.16: pre-flight entry-exists check. Validate that the entry
     // declared in deployhub.json actually resolves in the built image

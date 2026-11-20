@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { adminApi } from '../../adminApi'
+import { ApiError, adminApi } from '../../adminApi'
 import { serverDate } from '../../utils/serverDate'
 
 interface SignupRequest {
@@ -32,11 +32,14 @@ export function SignupRequestsCard() {
     setBusy(r.id)
     setMsg('')
     try {
-      await adminApi.post(`/api/auth/oidc/signup-requests/${r.id}/${action}`, {})
+      // Approval names the email shown here: a sign-in since the list loaded
+      // may have changed it, and the server then refuses (409 EMAIL_CHANGED).
+      await adminApi.post(`/api/auth/oidc/signup-requests/${r.id}/${action}`, action === 'approve' ? { email: r.email } : {})
       setMsg(action === 'approve' ? `${r.email} can now sign in.` : `${r.email} was declined.`)
       load()
     } catch (e) {
       setMsg((e as Error).message)
+      if (e instanceof ApiError && e.code === 'EMAIL_CHANGED') load()
     } finally {
       setBusy(null)
     }

@@ -4,13 +4,15 @@ import { isSafeRedirect } from '../utils/safeRedirect'
 import { redeemSsoCode } from '../utils/ssoHandoff'
 import { PasswordInput } from './secret/PasswordInput'
 import {
-  POPUP_FEATURES, POPUP_NAME, browserWaitDeps, isFramed, popupStartUrl,
+  POPUP_FEATURES, POPUP_NAME, SSO_CHANNEL, browserWaitDeps, isFramed, popupStartUrl,
   reloadTargetAfterSignIn, signInPlan, waitForPopupSignIn, type SsoProvider,
 } from '../utils/popupSignIn'
 import { EnrollPanel, type EnrollmentStart } from './mfa/EnrollPanel'
 import { RecoveryCodes } from './mfa/RecoveryCodes'
 import { takeSignedOutMessage } from './mfa/idle'
 import { GoogleG } from './sso/GoogleG'
+import { ssoErrorText } from './sso/ssoErrorText'
+import { SSO_POPUP_PARAM, capturingMfaStep, tellOpenerFrame, type SsoMfaStep } from './sso/ssoMfaHandoff'
 
 /**
  * v2.7.8: the cc_token cookie is now httpOnly and set entirely by the
@@ -33,7 +35,12 @@ import { GoogleG } from './sso/GoogleG'
  *     the session token (utils/ssoHandoff.ts) + go to ?redirect= or /applications
  *   - ?oidc_token=… → removed, never stored: a session from a URL is how a
  *     victim got signed in as an attacker
- *   - ?sso_error=… / ?saml_error=… → render inline
+ *   - ?sso_error=… / ?saml_error=… → a code, rendered as fixed text
+ *     (sso/ssoErrorText.ts); nothing else from the URL is shown
+ *   - the handoff answers with an MFA step instead of a token for a user with
+ *     AppCrane MFA enrolled → the same code prompt password sign-in uses
+ *     (sso/ssoMfaHandoff.ts); ?sso_popup=1 means this is the popup of a framed
+ *     sign-in, which tells the frame and closes once the code is accepted
  *   - ?redirect=… → preserved and used after successful password login
  *
  * Inside an iframe (an embedded app's sign-in step) the IdP refuses to be
@@ -44,18 +51,12 @@ const ssoBtnLayout = { display: 'flex', alignItems: 'center', justifyContent: 'c
 
 interface SsoCfg { enabled?: boolean; provider_name?: string; google?: boolean }
 
-const SSO_ERROR_TEXT: Record<string, string> = {
-  no_account: 'There is no AppCrane account for this user. Ask an administrator for access.',
-  domain_not_allowed: 'This email domain cannot sign up here. Ask an administrator for access.',
-  email_unverified: 'Your identity provider has not verified your email address.',
-  pending_approval: 'Your request to join was sent. An administrator has to approve it before you can sign in.',
-  signup_denied: 'An administrator declined your request to join.',
-}
 type PopupState = 'idle' | 'waiting' | 'blocked' | 'failed' | 'timeout'
-// Second step of password sign-in (server/routes/mfa.js). The password was
-// accepted; no session exists until a code (or first-time enrollment) passes.
+// Second step of password or SSO sign-in (server/routes/mfa.js). The first step
+// passed; no session exists until a code (or first-time enrollment) passes.
+// `popup`: this window is the SSO popup of a framed sign-in.
 type MfaStep =
-  | { kind: 'verify'; token: string; rememberDays: number }
+  | { kind: 'verify'; token: string; rememberDays: number; popup?: boolean }
   | { kind: 'enroll'; token: string; start: EnrollmentStart | null }
   | { kind: 'codes'; codes: string[] }
 
@@ -91,6 +92,7 @@ export function Login() {
   const [mfaBusy, setMfaBusy] = useState(false)
   const [rememberDevice, setRememberDevice] = useState(false)
   const [notice] = useState<string | null>(() => takeSignedOutMessage())
+  const [popupDone, setPopupDone] = useState(false)
 
   const plan = signInPlan({ framed: isFramed(window), ssoEnabled: !!(oidc.enabled || saml.enabled), ssoOnly: !!ssoOnly })
 
@@ -163,7 +165,7 @@ export function Login() {
     const params = new URLSearchParams(window.location.search)
     const ssoErr = params.get('sso_error') || params.get('saml_error')
     if (ssoErr) {
-      setError(SSO_ERROR_TEXT[ssoErr] ?? 'SSO failed: ' + ssoErr)
+      setError(ssoErrorText(ssoErr))
       const url = new URL(window.location.href)
       url.searchParams.delete('sso_error')
       url.searchParams.delete('saml_error')
@@ -194,9 +196,17 @@ export function Login() {
       window.history.replaceState({}, '', url.pathname + url.search + url.hash)
       if (!ssoCode) return
 
-      redeemSsoCode(ssoCode, { fetch: (u, init) => fetch(u, init), store: localStorage }).then(ok => {
+      const popup = params.get(SSO_POPUP_PARAM) === '1'
+      const got: { step: SsoMfaStep | null } = { step: null }
+      const capture = capturingMfaStep((u, init) => fetch(u, init), step => { got.step = step })
+      redeemSsoCode(ssoCode, { fetch: capture, store: localStorage }).then(ok => {
+        if (!ok && got.step) {
+          setMfa({ kind: 'verify', token: got.step.token, rememberDays: got.step.rememberDays, popup })
+          return
+        }
         if (!ok) {
           setError('SSO failed: this sign-in link is not valid in this browser. Sign in again.')
+          if (popup) tellOpenerFrame(window, SSO_CHANNEL, 'sign-in-failed')
           return
         }
         const redirect = params.get('redirect')
@@ -274,6 +284,13 @@ export function Login() {
         ...(mfa.rememberDays > 0 && rememberDevice && { remember_device: true }),
       })
       localStorage.setItem('cc_identity_token', data.token)
+      if (mfa.popup) {
+        setMfa(null)
+        setError('')
+        setPopupDone(true)
+        tellOpenerFrame(window, SSO_CHANNEL, 'signed-in')
+        return
+      }
       postLoginRedirect()
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Sign-in failed')
@@ -300,7 +317,9 @@ export function Login() {
       <div className="login-box">
         <h2 style={{ marginBottom: 4, fontSize: '1.3rem' }}>Sign In</h2>
         {notice && !mfa && <p style={{ color: 'var(--dim)', fontSize: '.85rem', margin: '4px 0 12px' }}>{notice}</p>}
-        {mfa ? (
+        {popupDone ? (
+          <p style={{ color: 'var(--dim)', marginTop: 16, fontSize: '.9rem' }}>Signed in. You can close this window.</p>
+        ) : mfa ? (
           <div style={{ marginTop: 12 }}>
             {error && <div className="login-error">{error}</div>}
             {mfa.kind === 'verify' && (

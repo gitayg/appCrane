@@ -2,21 +2,27 @@
 // See migrations/173-sso-signup-requests.sql.
 
 import { logAudit } from '../middleware/audit.js';
+import { noteSignup, signupLimited } from './ssoSignupRateLimit.js';
 
 // A public provider lets anyone with an account there file a request, so the
 // queue is capped; past it, a new identity is refused without being recorded.
 export const MAX_PENDING = 500;
 
-/** 'pending' | 'denied' | 'full' for a sign-in that may not create an account by itself. */
-export function recordSignupRequest(db, { provider = 'oidc', subject, email, name }) {
+/**
+ * 'pending' | 'denied' | 'full' | 'limited' for a sign-in that may not create an
+ * account by itself. 'limited': `ip` already filed too many new requests.
+ */
+export function recordSignupRequest(db, { provider = 'oidc', subject, email, name, ip }) {
   const row = db.prepare('SELECT id, status FROM sso_signup_requests WHERE provider = ? AND subject = ?').get(provider, subject);
   if (row) {
     db.prepare("UPDATE sso_signup_requests SET last_seen_at = datetime('now'), email = ?, name = ? WHERE id = ?").run(email, name || null, row.id);
     return row.status === 'denied' ? 'denied' : 'pending';
   }
+  if (signupLimited(ip)) return 'limited';
   const { n } = db.prepare("SELECT COUNT(*) n FROM sso_signup_requests WHERE status = 'pending'").get();
   if (n >= MAX_PENDING) return 'full';
   db.prepare('INSERT INTO sso_signup_requests (provider, subject, email, name) VALUES (?, ?, ?, ?)').run(provider, subject, email, name || null);
+  noteSignup(ip);
   return 'pending';
 }
 
@@ -30,12 +36,20 @@ function httpError(status, code, message) {
   return Object.assign(new Error(message), { status, code });
 }
 
-/** Creates the account. Pending or denied requests can be approved. */
-export function approveSignupRequest(db, id, adminId) {
+/**
+ * Creates the account. Pending or denied requests can be approved. `email` is
+ * the address the admin saw: every sign-in rewrites the row's email, so a
+ * request whose email changed since is refused rather than approved unseen.
+ */
+export function approveSignupRequest(db, id, adminId, { email } = {}) {
+  if (typeof email !== 'string' || !email.trim()) throw httpError(400, 'VALIDATION', 'email is required: the address you are approving');
   return db.transaction(() => {
     const r = db.prepare('SELECT * FROM sso_signup_requests WHERE id = ?').get(id);
     if (!r) throw httpError(404, 'NOT_FOUND', 'No such sign-up request');
     if (r.status === 'approved') throw httpError(409, 'ALREADY_APPROVED', 'This request was already approved');
+    if (String(r.email || '').toLowerCase() !== email.trim().toLowerCase()) {
+      throw httpError(409, 'EMAIL_CHANGED', `This request's email changed to ${r.email} since the list was loaded. Check it and approve again.`);
+    }
     const column = r.provider === 'oidc' ? 'sso_sub' : null;
     if (!column) throw httpError(400, 'VALIDATION', 'Unknown provider');
     if (db.prepare(`SELECT 1 FROM users WHERE ${column} = ?`).get(r.subject)) throw httpError(409, 'EXISTS', 'An account already uses this sign-in');

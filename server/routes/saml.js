@@ -9,7 +9,8 @@ import { requireAuth, requirePlatformAdmin } from '../middleware/auth.js';
 import { setSessionCookie, readCookie } from '../utils/sessionCookie.js';
 import { readBrowserBinding, ensureBrowserBinding, browserMismatch, issueSsoHandoff } from './oidc.js';
 import { safeRedirectTarget } from '../utils/safeRedirect.js';
-import { POPUP_MODE, requestedMode, makePopupRelayState, isPopupRelayState, sendPopupComplete, sendPopupFailed } from '../utils/ssoPopup.js';
+import { POPUP_MODE, requestedMode, makePopupRelayState, isPopupRelayState, sendPopupComplete, sendPopupFailed, loginErrorCode } from '../utils/ssoPopup.js';
+import { ssoLoginMfaStep } from '../services/ssoMfa.js';
 import log from '../utils/logger.js';
 
 const router = Router();
@@ -195,7 +196,7 @@ router.get('/start', async (req, res) => {
   } catch (e) {
     log.error('SAML start error: ' + e.message);
     if (requestedMode(req.query) === POPUP_MODE) return sendPopupFailed(res, 'unavailable');
-    res.redirect(302, craneBaseUrl() + '/login?saml_error=' + encodeURIComponent(e.message));
+    res.redirect(302, craneBaseUrl() + '/login?saml_error=unavailable');
   }
 });
 
@@ -284,11 +285,16 @@ router.post('/callback', async (req, res) => {
       return res.redirect(302, base + '/login?saml_error=no_account');
     }
 
-    const token      = createIdentitySession(user.id);
-    auditLogin(user.id, 'ok', { method: 'saml', ip: req.ip });
-    // v2.6.18: set cc_token cookie server-side on the redirect — see
-    // matching block in oidc.js callback for the full rationale.
-    setSessionCookie(res, token, req);
+    // AppCrane's own MFA comes first for a user who enrolled it; see the SSO
+    // handoff in oidc.js.
+    const mfaStep    = ssoLoginMfaStep(db, user, { method: 'saml' });
+    const token      = mfaStep ? null : createIdentitySession(user.id);
+    if (token) {
+      auditLogin(user.id, 'ok', { method: 'saml', ip: req.ip });
+      // v2.6.18: set cc_token cookie server-side on the redirect — see
+      // matching block in oidc.js callback for the full rationale.
+      setSessionCookie(res, token, req);
+    }
     res.clearCookie(SAML_RESTART_COOKIE, SAML_RESTART_OPTS);
 
     // RelayState arrives on this POST from the browser, unsigned and outside the
@@ -302,15 +308,18 @@ router.post('/callback', async (req, res) => {
     // it was not exploitable end-to-end was forwardToLaunch in server/index.js,
     // added in v2.35.0, stripping the absolute target one hop later at /login.
     // '/login' is excluded so the forward can't bounce back into the login page.
-    log.info(`SAML login: ${user.name} (${nameId})`);
+    log.info(`SAML login: ${user.name} (${nameId})${mfaStep ? ', AppCrane MFA step next' : ''}`);
     // Only a RelayState signed by /start selects popup mode; a forged one is
     // just an unsafe redirect that safeRedirectTarget below drops.
-    if (isPopupRelayState(req.body.RelayState)) return sendPopupComplete(res);
+    const popup       = isPopupRelayState(req.body.RelayState);
+    if (popup && !mfaStep) return sendPopupComplete(res);
 
     const relayTarget = safeRedirectTarget(req.body.RelayState, '');
     // See SSO handoff in oidc.js: a code, never the session token, in the URL.
-    const p           = new URLSearchParams({ sso_code: issueSsoHandoff(token, SAML_BIND_COOKIE.name, readBrowserBinding(req, SAML_BIND_COOKIE.name)) });
-    if (relayTarget && !relayTarget.includes('/login')) {
+    const p           = new URLSearchParams({ sso_code: issueSsoHandoff(token, SAML_BIND_COOKIE.name, readBrowserBinding(req, SAML_BIND_COOKIE.name), mfaStep) });
+    if (popup) {
+      p.set('sso_popup', '1');
+    } else if (relayTarget && !relayTarget.includes('/login')) {
       p.set('redirect', relayTarget);
     }
 
@@ -318,8 +327,8 @@ router.post('/callback', async (req, res) => {
   } catch (e) {
     log.error('SAML callback error: ' + e.message);
     auditLogin(null, 'failed', { method: 'saml', reason: e.popupCode || 'error', message: String(e.message).slice(0, 200), ip: req.ip });
-    if (popupFailing) return sendPopupFailed(res, 'failed');
-    res.redirect(302, base + '/login?saml_error=' + encodeURIComponent(e.message));
+    if (popupFailing) return sendPopupFailed(res, loginErrorCode(e));
+    res.redirect(302, base + '/login?saml_error=' + loginErrorCode(e));
   }
 });
 

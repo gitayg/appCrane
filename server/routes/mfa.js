@@ -54,11 +54,14 @@ function sessionBody(session, user) {
 // A challenge outlives the password step that created it, so a sign-in begun
 // before "Require SSO sign-in" took effect is refused here too.
 
+// An SSO challenge (challenge.method 'oidc' / 'saml', services/ssoMfa.js) is the
+// second step of an SSO sign-in, so "Require SSO sign-in" does not refuse it.
 router.post('/verify', (req, res) => {
   const db = getDb();
-  refuseUnlessSsoOptional(db, req, { method: 'password+mfa' });
   const ip = ipOf(req);
   const { mfa_token, code, remember_device } = req.body || {};
+  const sso = typeof mfa_token === 'string' && mfa.challengeMethod(db, mfa_token);
+  if (!sso) refuseUnlessSsoOptional(db, req, { method: 'password+mfa' });
   if (!code || typeof code !== 'string') throw new AppError('code is required', 400, 'VALIDATION');
   const { challenge, user } = challengeOr400(db, mfa_token, 'verify');
   const result = mfa.verifyCode(db, user, code, { ip });
@@ -66,8 +69,9 @@ router.post('/verify', (req, res) => {
   if (!mfa.consumeChallenge(db, challenge.id)) throw new AppError('The sign-in step expired. Sign in again.', 400, 'MFA_TOKEN_INVALID');
   const session = issueSession(db, req, res, user, challenge.app_id);
   // Strictly true: a truthy string from a hand-made request is not consent.
-  const trusted = remember_device === true ? trustDevice(db, req, res, user, { ip }) : null;
-  auditLogin(user.id, 'ok', { method: `password+${result.method}`, ip });
+  // Not after SSO: the remembered-device cookie never reaches an SSO callback.
+  const trusted = remember_device === true && !challenge.method ? trustDevice(db, req, res, user, { ip }) : null;
+  auditLogin(user.id, 'ok', { method: `${challenge.method || 'password'}+${result.method}`, ip });
   res.json({
     ...sessionBody(session, user),
     ...(result.method === 'recovery_code' && { recovery_codes_remaining: result.recovery_codes_remaining }),
