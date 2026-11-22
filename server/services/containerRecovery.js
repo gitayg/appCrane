@@ -85,7 +85,7 @@ export function liveTargets(db) {
  * from one `docker ps -a`, `restoring(slug, env)` is the restore guard, and
  * `attemptState` the backoff map.
  */
-export function findMissing({ targets, containers, restoring, attemptState, now }) {
+export function findMissing({ targets, containers, restoring, attemptState, now, sleeping = () => false }) {
   const missing = [];
   const skipped = [];
   for (const t of targets) {
@@ -93,6 +93,7 @@ export function findMissing({ targets, containers, restoring, attemptState, now 
     const state = containers.get(name) || 'absent';
     if (LEAVE_ALONE.has(state)) continue;
     if (restoring(t.slug, t.env)) { skipped.push({ name, why: 'restore in progress' }); continue; }
+    if (sleeping(t.slug, t.env)) { skipped.push({ name, why: 'asleep' }); continue; }
     const a = attemptState.get(keyOf(t.app_id, t.env));
     if (a && a.nextAt > now) { skipped.push({ name, why: `backing off until ${new Date(a.nextAt).toISOString()}` }); continue; }
     missing.push({ ...t, name, state });
@@ -156,12 +157,14 @@ async function defaultDeps() {
   const deployer = await import('./deployer.js');
   const { getPortsForSlot } = await import('./portAllocator.js');
   const { restoreInProgress } = await import('./managedDbRestoreGuard.js');
+  const { envIsSleeping } = await import('./envSleepState.js');
   const { imageExists, imageTagFor } = await import('./docker.js');
   const { logAudit } = await import('../middleware/audit.js');
   return {
     db: getDb(),
     listContainers,
     restoring: restoreInProgress,
+    sleeping: envIsSleeping,
     assertNoInflightDeploy: deployer.assertNoInflightDeploy,
     deployApp: deployer.deployApp,
     getPortsForSlot,
@@ -257,6 +260,7 @@ export async function sweep(deps) {
   }
   const { missing, skipped } = findMissing({
     targets: liveTargets(d.db), containers, restoring: d.restoring, attemptState: attempts, now: d.now(),
+    sleeping: d.sleeping,
   });
   if (missing.length) log.info(`[container-recovery] ${missing.length} live env(s) have no container up: ${missing.map(m => `${m.name} (${m.state})`).join(', ')}`);
   const results = [];

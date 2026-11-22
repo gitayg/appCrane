@@ -36,15 +36,18 @@ test('the handler was found — the rest of this file means nothing otherwise', 
 test('the runtime is reconciled BEFORE the working tree is moved', () => {
   const fetch = HANDLER.indexOf("'fetch', 'origin'");
   const plan = HANDLER.indexOf('planNodeUpgrade({');
-  const reset = HANDLER.indexOf("'reset', '--hard', 'origin/main'");
-  const install = HANDLER.indexOf("'npm', ['install'");
+  // The install and SPA build run in a staging clone (preflightUpdate); only
+  // applyStagedRelease moves the live tree.
+  const install = HANDLER.indexOf('preflightUpdate({');
+  const reset = HANDLER.indexOf('applyStagedRelease({');
 
   assert.ok(fetch > -1 && plan > -1 && reset > -1 && install > -1, 'update steps moved — re-read this test');
   assert.ok(fetch < plan, 'the incoming floor cannot be known before fetching');
   assert.ok(plan < reset,
     'the Node decision runs after the reset: a refusal strands the host on new code with old ' +
     'dependencies and no rollback record');
-  assert.ok(reset < install, 'dependencies must be installed for the release that was checked out');
+  assert.ok(plan < install, 'dependencies must be installed on the runtime the update settled on');
+  assert.ok(install < reset, 'the live tree must not move before the staged install and build succeeded');
 });
 
 test('the floor comes from the INCOMING release, not the running one', () => {

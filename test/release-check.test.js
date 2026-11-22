@@ -72,7 +72,11 @@ const owner = db.prepare('SELECT * FROM users WHERE id = ?').get(ownerId);
 // The dependency/image scanner is replaced: the claim is about the gate's
 // judgement of a scan result, not OSV or Trivy.
 let scanRow = { status: 'ok', findings_json: null };
-rc._setReleaseCheckDepsForTests({ scanApp: async () => scanRow, scanTree: async () => scanRow });
+const { emptySupabase } = await import('../server/services/servedOutputScan.js');
+const cleanCrawl = async () => ({ ok: true, error: null, findings: [], scanned: [{ path: '/' }], truncated: false, html: true, supabase: emptySupabase() });
+const cleanProbe = async () => ({ ok: true, error: null, openapi: null, requests: 1, truncated: false, discovered: {}, skipped: {}, reads: [], writes: [], write_candidates: [] });
+const baseDeps = { scanApp: async () => scanRow, scanTree: async () => scanRow, crawlServed: cleanCrawl, probeUnauth: cleanProbe };
+rc._setReleaseCheckDepsForTests(baseDeps);
 const CRITICAL = { status: 'findings', findings_json: JSON.stringify([{ name: 'lodash', version: '4.17.20', ecosystem: 'npm', ids: ['GHSA-35jh-r3h4-6jhm'], fixed: '4.17.21' }]) };
 
 const servers = [];
@@ -136,15 +140,57 @@ async function post(path, body = {}) {
   return { status: r.status, body: await r.json() };
 }
 
+// The SBOM the sandbox deploy recorded (services/imageTrust/store.js), as the
+// deploy's attestation step writes it: a signed row whose dir holds sbom.cdx.json.
+const { dirFor: attestationDir, writeDoc: writeAttestationDoc, FILES: ATTESTATION_FILES } = await import('../server/services/imageTrust/store.js');
+function attachSbom(app, components) {
+  const dep = db.prepare("SELECT id FROM deployments WHERE app_id = ? AND env = 'sandbox' AND status = 'live' ORDER BY id DESC LIMIT 1").get(app.id);
+  const id = Number(db.prepare("INSERT INTO deploy_attestations (deployment_id, app_id, env, origin, image_ref, status) VALUES (?, ?, 'sandbox', 'deploy', 'img', 'pending')").run(dep.id, app.id).lastInsertRowid);
+  const dir = attestationDir(app.slug, 'sandbox', id);
+  writeAttestationDoc(dir, ATTESTATION_FILES.sbom, JSON.stringify({ bomFormat: 'CycloneDX', specVersion: '1.5', components }));
+  db.prepare("UPDATE deploy_attestations SET status = 'signed', dir = ? WHERE id = ?").run(dir, id);
+}
+const MIT = (name) => ({ type: 'library', name, version: '1.0.0', licenses: [{ license: { id: 'MIT' } }] });
+
 test('passes when the release is clean (node_modules is not scanned)', async () => {
   scanRow = { status: 'ok', findings_json: null };
   const app = treeApp('clean-a', 'confidential', { 'server.js': 'module.exports = 1;\n' });
+  attachSbom(app, [MIT('express')]);
   const rec = await rc.runReleaseCheck({ db, app, userId: adminId, trigger: 'promote' });
   assert.equal(rec.result, 'pass', JSON.stringify(rec.checks, null, 1));
   assert.equal(rec.blocked, false);
   assert.equal(rec.mode, 'enforce');
-  assert.deepEqual(rec.checks.map((c) => c.id), ['intake', 'dependencies', 'secrets', 'access_rules', 'sso_gate', 'sandbox_health']);
+  assert.deepEqual(rec.checks.map((c) => c.id), ['intake', 'dependencies', 'secrets', 'served_secrets', 'supabase_rls', 'unauth_endpoints', 'access_rules', 'sso_gate', 'sandbox_health', 'licenses']);
   assert.ok(db.prepare('SELECT 1 FROM release_checks WHERE id = ?').get(rec.id), 'stored per release');
+});
+
+test('license policy: the sandbox release SBOM is checked; no SBOM warns, a flagged license warns, a denied one fails and blocks production', async () => {
+  scanRow = { status: 'ok', findings_json: null };
+  const { setTrustPolicy } = await import('../server/services/imageTrust/policy.js');
+  const app = treeApp('lic-a', 'confidential', { 'server.js': 'module.exports = 1;\n' });
+
+  let rec = await rc.runReleaseCheck({ db, app, userId: adminId, trigger: 'promote' });
+  assert.equal(byId(rec, 'licenses').status, 'warn');
+  assert.match(byId(rec, 'licenses').reasons[0], /No SBOM for this release/);
+  assert.equal(byId(rec, 'licenses').label, 'License policy');
+  assert.equal(rec.blocked, false, 'a missing SBOM never blocks');
+
+  attachSbom(app, [MIT('express'), { type: 'library', name: 'ghostdb', version: '2.0.0', licenses: [{ license: { id: 'AGPL-3.0-only' } }] }]);
+  rec = await rc.runReleaseCheck({ db, app, userId: adminId, trigger: 'promote' });
+  assert.equal(byId(rec, 'licenses').status, 'warn', JSON.stringify(byId(rec, 'licenses')));
+  assert.ok(byId(rec, 'licenses').reasons.some((r) => r.includes('ghostdb@2.0.0: AGPL-3.0-only')));
+  assert.equal(rec.blocked, false);
+
+  setTrustPolicy(db, { denied: ['AGPL-3.0-only'] }, adminId);
+  try {
+    rec = await rc.runReleaseCheck({ db, app, userId: adminId, trigger: 'promote' });
+    assert.equal(byId(rec, 'licenses').status, 'fail');
+    assert.equal(rec.result, 'fail');
+    assert.equal(rec.blocked, true, 'a denied license blocks production under enforce');
+    assert.ok(rc.EXCEPTABLE.includes('licenses'), 'a license failure can be excepted like the other checks');
+  } finally {
+    setTrustPolicy(db, { denied: [] }, adminId);
+  }
 });
 
 test('fails on a planted secret, naming file and line but never the value', async () => {
@@ -335,4 +381,255 @@ test('webhook (and every deployApp production path): the in-deploy check fails t
 
   const rb = await rollbackApp(app, 'production', null, adminId);
   assert.equal(db.prepare('SELECT status FROM deployments WHERE id = ?').get(rb.deployment_id).status, 'live', 'rollback to a release that already shipped is not re-gated');
+});
+
+// Served output and Supabase RLS: a real dist on disk served on the app's own
+// sandbox loopback port, crawled for real; a PostgREST imitation stands in for
+// the Supabase project.
+const fx = await import('./served-output-fixtures.js');
+const { encrypt } = await import('../server/services/encryption.js');
+
+async function servedApp(slug, level) {
+  const app = treeApp(slug, level, { 'server.js': '1;\n' });
+  for (let slot = 13101; slot < 13300; slot++) {
+    if (db.prepare('SELECT 1 FROM apps WHERE slot = ?').get(slot)) continue;
+    const dist = fx.buildDist(join(ROOT, 'served', slug), { basePath: `/${slug}-sandbox/` });
+    const s = await fx.serveDir(dist, getPortsForSlot(slot).sand_be).catch(() => null);
+    if (!s) continue;
+    servers.push(s);
+    db.prepare('UPDATE apps SET slot = ? WHERE id = ?').run(slot, app.id);
+    return db.prepare('SELECT * FROM apps WHERE id = ?').get(app.id);
+  }
+  throw new Error('no free sandbox port');
+}
+function assertNoSecret(where, text) {
+  for (const [name, v] of Object.entries(fx.SECRETS)) assert.ok(!String(text).includes(v.slice(0, 20)), `${name} in ${where}`);
+}
+function assertNothingStoredLeaks(app) {
+  assertNoSecret('release_checks', JSON.stringify(db.prepare('SELECT * FROM release_checks WHERE app_id = ?').all(app.id)));
+  assertNoSecret('events', JSON.stringify(db.prepare('SELECT * FROM events WHERE app_id = ?').all(app.id)));
+  assertNoSecret('audit_log', JSON.stringify(db.prepare('SELECT * FROM audit_log').all()));
+}
+
+test('served output: service_role JWT, sk_live, a key in a source map and a served .env fail the check; the anon key is not flagged; values never stored', async () => {
+  scanRow = { status: 'ok', findings_json: null };
+  rc._setReleaseCheckDepsForTests({ scanApp: baseDeps.scanApp, scanTree: baseDeps.scanTree });
+  try {
+    const app = await servedApp('leak-a', 'confidential');
+    const rec = await rc.runReleaseCheck({ db, app, trigger: 'promote' });
+    const s = byId(rec, 'served_secrets');
+    assert.equal(s.status, 'fail', JSON.stringify(s));
+    const rulesSeen = s.reasons.slice(1).map((r) => /\(([a-z-]+),/.exec(r)?.[1]).filter(Boolean).sort();
+    assert.deepEqual(rulesSeen, ['anthropic-key', 'github-token', 'openai-key', 'served-env-file', 'stripe-live-secret', 'supabase-service-role-key']);
+    assert.ok(s.reasons.some((r) => r.startsWith('/assets/index-a1b2c3.js:1 (supabase-service-role-key, eyJhbG... (')), JSON.stringify(s.reasons));
+    assert.ok(s.reasons.some((r) => /1 Supabase anon\/publishable key\(s\) in the output: public by design, not a finding/.test(r)));
+    assert.equal(byId(rec, 'secrets').status, 'pass', 'the source tree itself is clean');
+    assert.equal(rec.blocked, true, 'enforce mode blocks on a served secret');
+    const rls = byId(rec, 'supabase_rls');
+    assert.equal(rls.status, 'warn');
+    assert.match(rls.reasons[0], new RegExp(`${fx.REF} reached with an anon key, but the RLS probe is off`));
+    assertNoSecret('record', JSON.stringify(rec));
+    assertNothingStoredLeaks(app);
+
+    const internal = await servedApp('leak-b', 'internal');
+    const w = await rc.runReleaseCheck({ db, app: internal, trigger: 'promote' });
+    assert.equal(byId(w, 'served_secrets').status, 'fail');
+    assert.equal(w.mode, 'warn');
+    assert.equal(w.blocked, false, 'warn mode records the leak without blocking');
+  } finally {
+    rc._setReleaseCheckDepsForTests(baseDeps);
+  }
+});
+
+test('served output: the in-deploy check refuses production and its deploy log carries no secret', async () => {
+  rc._setReleaseCheckDepsForTests({ scanApp: baseDeps.scanApp, scanTree: baseDeps.scanTree });
+  try {
+    const app = await servedApp('leak-c', 'confidential');
+    const deployId = db.prepare("INSERT INTO deployments (app_id, env, status, deployed_by, log) VALUES (?, 'production', 'deploying', ?, '')").run(app.id, adminId).lastInsertRowid;
+    const log = [];
+    await assert.rejects(rc.enforceReleaseCheckInDeploy({ app, deployId, releaseDir: null, commit: null, appendLog: (l) => log.push(l) }), /No secrets in served output/);
+    assert.ok(log.some((l) => /fail: No secrets in served output/.test(l)), log.join('\n'));
+    assertNoSecret('deploy log', log.join('\n'));
+  } finally {
+    rc._setReleaseCheckDepsForTests(baseDeps);
+  }
+});
+
+test('RLS probe (opt-in): a table that returns rows to anon fails the check; only GETs with the anon key reach the project', async () => {
+  const mock = await fx.postgrestMock();
+  servers.push(mock.server);
+  setClassificationPolicy(db, { probe_supabase_rls: true }, admin);
+  rc._setReleaseCheckDepsForTests({ scanApp: baseDeps.scanApp, scanTree: baseDeps.scanTree, supabaseBaseUrl: (ref) => (ref === fx.REF ? mock.url : null) });
+  try {
+    const app = await servedApp('rls-a', 'confidential');
+    const rec = await rc.runReleaseCheck({ db, app, trigger: 'promote' });
+    const rls = byId(rec, 'supabase_rls');
+    assert.equal(rls.status, 'fail', JSON.stringify(rls));
+    assert.match(rls.reasons[0], new RegExp(`^${fx.REF}: 1 table\\(s\\) return rows to the anon key .*: profiles$`));
+    assert.ok(!JSON.stringify(rec).includes('row-content-must-not-leak'));
+    assert.ok(!JSON.stringify(rec).includes(fx.ANON), 'the anon key is redacted too');
+    assert.ok(mock.requests.length >= 3);
+    for (const q of mock.requests) { assert.equal(q.method, 'GET'); assert.equal(q.apikey, fx.ANON); }
+    assertNothingStoredLeaks(app);
+  } finally {
+    setClassificationPolicy(db, { probe_supabase_rls: false }, admin);
+    rc._setReleaseCheckDepsForTests(baseDeps);
+  }
+});
+
+test('RLS probe reads the URL and anon key from app env, never the service-role key stored beside them', async () => {
+  const mock = await fx.postgrestMock();
+  servers.push(mock.server);
+  setClassificationPolicy(db, { probe_supabase_rls: true }, admin);
+  rc._setReleaseCheckDepsForTests({ ...baseDeps, supabaseBaseUrl: () => mock.url });
+  try {
+    const app = treeApp('rls-env', 'confidential', { 'server.js': '1;\n' });
+    const put = (env, k, v) => db.prepare('INSERT INTO env_vars (app_id, env, key, value_encrypted) VALUES (?, ?, ?, ?)').run(app.id, env, k, encrypt(v));
+    put('production', 'SUPABASE_SERVICE_ROLE_KEY', fx.SECRETS.serviceRole);
+    put('production', 'SUPABASE_URL', `https://${fx.REF}.supabase.co`);
+    put('production', 'VITE_SUPABASE_ANON_KEY', fx.SECRETS.serviceRole);
+    put('sandbox', 'SUPABASE_ANON_KEY', fx.ANON);
+    const rec = await rc.runReleaseCheck({ db, app, trigger: 'promote' });
+    assert.equal(byId(rec, 'supabase_rls').status, 'fail', JSON.stringify(byId(rec, 'supabase_rls')));
+    assert.ok(mock.requests.length >= 3);
+    for (const q of mock.requests) {
+      assert.equal(q.apikey, fx.ANON);
+      assert.ok(!String(q.authorization).includes(fx.SECRETS.serviceRole));
+    }
+    assertNoSecret('record', JSON.stringify(rec));
+  } finally {
+    setClassificationPolicy(db, { probe_supabase_rls: false }, admin);
+    rc._setReleaseCheckDepsForTests(baseDeps);
+  }
+});
+
+test('no Supabase reference: the RLS check does not apply; an unreachable sandbox is a warning, not a pass', async () => {
+  rc._setReleaseCheckDepsForTests({ scanApp: baseDeps.scanApp, scanTree: baseDeps.scanTree });
+  try {
+    const app = treeApp('unreach-a', 'internal', { 'server.js': '1;\n' });
+    const rec = await rc.runReleaseCheck({ db, app, trigger: 'promote' });
+    assert.equal(byId(rec, 'served_secrets').status, 'warn');
+    assert.match(byId(rec, 'served_secrets').reasons[0], /could not fetch \/.*the served output was not scanned/);
+    assert.equal(byId(rec, 'supabase_rls').status, 'pass');
+    assert.equal(byId(rec, 'supabase_rls').applicable, false);
+  } finally {
+    rc._setReleaseCheckDepsForTests(baseDeps);
+  }
+});
+
+// Unauthenticated endpoints: a real app on the sandbox's own loopback port,
+// probed by the real crawl + probe; a recorder on the production port.
+const ux = await import('./unauth-endpoint-fixtures.js');
+const { generateCaddyfile } = await import('../server/services/caddy.js');
+
+async function unauthApp(slug, level) {
+  const app = treeApp(slug, level, { 'server.js': '1;\n' });
+  for (let slot = 13301; slot < 13500; slot++) {
+    if (db.prepare('SELECT 1 FROM apps WHERE slot = ?').get(slot)) continue;
+    const ports = getPortsForSlot(slot);
+    const sand = await ux.appServer({ port: ports.sand_be }).catch(() => null);
+    if (!sand) continue;
+    const prod = await ux.appServer({ port: ports.prod_be }).catch(() => null);
+    if (!prod) { sand.server.close(); continue; }
+    servers.push(sand.server, prod.server);
+    db.prepare('UPDATE apps SET slot = ? WHERE id = ?').run(slot, app.id);
+    return { app: db.prepare('SELECT * FROM apps WHERE id = ?').get(app.id), sand, prod, ports };
+  }
+  throw new Error('no free port pair');
+}
+function assertNoValue(where, text) {
+  for (const v of Object.values(ux.VALUES)) assert.ok(!String(text).includes(v), `${v} in ${where}`);
+}
+/** What the SSO gate adds to a request on its way to this app's sandbox, read from the generated Caddyfile. */
+function gateHeadersFor(slug) {
+  const saved = process.env.CRANE_DOMAIN;
+  process.env.CRANE_DOMAIN = 'crane.example.test';
+  try {
+    const cf = generateCaddyfile();
+    const start = cf.indexOf(`    handle /${slug}-sandbox* {\n`);
+    assert.ok(start >= 0, 'sandbox block emitted');
+    const block = cf.slice(start, cf.indexOf('\n    }\n', start));
+    const names = new Set();
+    for (const m of block.matchAll(/copy_headers ([^\n]+)/g)) for (const h of m[1].trim().split(/\s+/)) names.add(h.toLowerCase());
+    for (const m of block.matchAll(/request_header (X-[A-Za-z-]+) "/g)) names.add(m[1].toLowerCase());
+    for (const m of block.matchAll(/header_up (\S+)/g)) names.add(m[1].toLowerCase());
+    const upstream = /reverse_proxy 127\.0\.0\.1:(\d+)$/m.exec(block)?.[1];
+    return { names, upstream: Number(upstream), forwardAuth: block.includes('forward_auth') };
+  } finally {
+    if (saved === undefined) delete process.env.CRANE_DOMAIN; else process.env.CRANE_DOMAIN = saved;
+  }
+}
+
+test('unauth endpoints: records served with no identity fail the check, found in the bundle and the OpenAPI doc; no gate header is sent; production is never probed', async () => {
+  rc._setReleaseCheckDepsForTests({ scanApp: baseDeps.scanApp, scanTree: baseDeps.scanTree });
+  try {
+    const { app, sand, prod, ports } = await unauthApp('open-a', 'confidential');
+    const rec = await rc.runReleaseCheck({ db, app, trigger: 'promote' });
+    const u = byId(rec, 'unauth_endpoints');
+    assert.equal(u.status, 'fail', JSON.stringify(u, null, 1));
+    assert.equal(rec.blocked, true);
+    assert.ok(u.reasons.includes('GET /api/users 200: array[1] of {id, email, name}'), JSON.stringify(u.reasons));
+    assert.ok(u.reasons.includes('GET /api/reports 200: {reports: array[1] of {id, title}}'), 'discovered from the OpenAPI doc only');
+    assert.ok(u.reasons.includes('GET /api/invoices 200: array[1] of {id, total, customer_email}'), 'discovered from the served bundle only');
+    assert.ok(!u.reasons.some((r) => /\/api\/me|\/api\/health/.test(r)));
+    assert.ok(u.reasons.some((r) => /1 write route\(s\) found but not sent a write \(platform policy probe_unauth_writes is off/.test(r)));
+    assert.deepEqual(u.findings.map((f) => `${f.method} ${f.path} ${f.status}`), ['GET /api/invoices 200', 'GET /api/reports 200', 'GET /api/users 200']);
+    assert.equal(sand.requests.filter((q) => q.method === 'POST').length, 0, 'no write by default');
+    assert.equal(sand.requests.filter((q) => q.path === '/api/health').length, 0, 'health excluded');
+    assert.equal(prod.requests.length, 0, 'production port never contacted');
+
+    const gate = gateHeadersFor(app.slug);
+    assert.equal(gate.forwardAuth, true);
+    assert.equal(gate.upstream, ports.sand_be, 'the probe dials the very upstream the gate proxies to, so the gate is not in its path');
+    assert.ok(gate.names.has('x-appcrane-user-email') && gate.names.has('x-appcrane-identity-sig') && gate.names.has('x-appcrane-auth-mode'), [...gate.names].join(','));
+    for (const q of sand.requests) {
+      const sent = Object.keys(q.headers).map((h) => h.toLowerCase());
+      assert.deepEqual(sent.filter((h) => gate.names.has(h)), [], `${q.method} ${q.path} carried a gate header`);
+      assert.deepEqual(ux.identityHeaderNames(q.headers), []);
+    }
+
+    const stored = db.prepare('SELECT checks_json FROM release_checks WHERE id = ?').get(rec.id).checks_json;
+    assert.equal(JSON.parse(stored).find((c) => c.id === 'unauth_endpoints').findings.length, 3, 'findings stored in the release check record');
+    assertNoValue('record', JSON.stringify(rec));
+    assertNoValue('release_checks', JSON.stringify(db.prepare('SELECT * FROM release_checks WHERE app_id = ?').all(app.id)));
+    assertNoValue('events', JSON.stringify(db.prepare('SELECT * FROM events WHERE app_id = ?').all(app.id)));
+  } finally {
+    rc._setReleaseCheckDepsForTests(baseDeps);
+  }
+});
+
+test('unauth endpoints: write probing is opt-in; with it on, a POST that returns 201 with no identity fails the check', async () => {
+  setClassificationPolicy(db, { probe_unauth_writes: true }, admin);
+  rc._setReleaseCheckDepsForTests({ scanApp: baseDeps.scanApp, scanTree: baseDeps.scanTree });
+  try {
+    const { app, sand, prod } = await unauthApp('open-w', 'internal');
+    const rec = await rc.runReleaseCheck({ db, app, trigger: 'promote' });
+    const u = byId(rec, 'unauth_endpoints');
+    assert.equal(u.status, 'fail');
+    assert.ok(u.reasons.includes('POST /api/items 201'), JSON.stringify(u.reasons));
+    assert.equal(u.writes_probed, true);
+    const posts = sand.requests.filter((q) => q.method === 'POST');
+    assert.deepEqual(posts.map((q) => [q.path, q.body]), [['/api/items', '{}']]);
+    assert.equal(prod.requests.length, 0);
+    assertNoValue('record', JSON.stringify(rec));
+  } finally {
+    setClassificationPolicy(db, { probe_unauth_writes: false }, admin);
+    rc._setReleaseCheckDepsForTests(baseDeps);
+  }
+});
+
+test('unauth endpoints: a release whose commit the sandbox is not running is not probed, and neither is production', async () => {
+  rc._setReleaseCheckDepsForTests({ scanApp: baseDeps.scanApp, scanTree: baseDeps.scanTree });
+  try {
+    const { app, sand, prod } = await unauthApp('open-c', 'internal');
+    const releaseDir = join(ROOT, 'apps', app.slug, 'sandbox', 'releases', 'r1');
+    const rec = await rc.runReleaseCheck({ db, app, trigger: 'deploy', releaseDir, commit: 'fffffff' });
+    const u = byId(rec, 'unauth_endpoints');
+    assert.equal(u.status, 'warn');
+    assert.match(u.reasons[0], /different commit .*production is never probed/);
+    assert.equal(sand.requests.length, 0);
+    assert.equal(prod.requests.length, 0);
+  } finally {
+    rc._setReleaseCheckDepsForTests(baseDeps);
+  }
 });

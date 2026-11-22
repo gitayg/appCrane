@@ -1,0 +1,7 @@
+{
+  "id": "node-react",
+  "name": "Node (Express) + React (Vite)",
+  "description": "Express API and a React SPA in one Node process: verified identity, roles, managed Postgres with migrations, /api/health, MCP tools and tests.",
+  "stack": ["node", "express", "react", "vite", "postgres"],
+  "test_command": "npm install && npm test"
+}

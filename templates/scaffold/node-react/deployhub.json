@@ -1,0 +1,42 @@
+{
+  "name": "__APP_NAME__",
+  "be": {
+    "entry": "node server/index.js",
+    "health": "/api/health"
+  },
+  "fe": {
+    "workdir": "client",
+    "build": "npm run build"
+  },
+  "database": {
+    "engine": "postgres"
+  },
+  "access": {
+    "rules": [
+      { "path": "/api/admin/*", "roles": ["admin"] }
+    ]
+  },
+  "mcp": {
+    "tools": [
+      {
+        "name": "list_notes",
+        "description": "List the 100 most recent notes in __APP_NAME__.",
+        "method": "GET",
+        "path": "/api/notes",
+        "roles": ["viewer"]
+      },
+      {
+        "name": "add_note",
+        "description": "Add a note to __APP_NAME__. body is 1-2000 characters.",
+        "method": "POST",
+        "path": "/api/notes",
+        "input_schema": {
+          "type": "object",
+          "properties": { "body": { "type": "string" } },
+          "required": ["body"]
+        },
+        "roles": ["user"]
+      }
+    ]
+  }
+}

@@ -133,6 +133,9 @@ body.resizing-sidebar .admin-sidebar, body.resizing-sidebar .admin-content { tra
 /* v2.14.1: version + update pill moved under the sidebar logo. */
 .sidebar-version { max-width: 100%; }
 .sidebar-version .topbar-version-pill { max-width: 100%; }
+.sidebar-update-notice { margin-top: 4px; font-size: 0.72rem; line-height: 1.3; opacity: 0.85; overflow-wrap: anywhere; }
+.sidebar-update-notice-bad { color: var(--red); opacity: 1; }
+.sidebar-update-notice .btn-link { background: none; border: 0; padding: 0; color: inherit; text-decoration: underline; cursor: pointer; font: inherit; }
 /* v2.14.1: "+ Add Application" in the sidebar. */
 .sidebar-add-app { display: block; width: calc(100% - 28px); margin: 4px 14px 8px; text-align: center; }
 .admin-sidebar.collapsed .sidebar-add-app { width: 36px; margin: 4px auto 8px; padding: 6px 0; }

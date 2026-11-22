@@ -1,0 +1,224 @@
+#################################################################
+# Example render.yaml                                           #
+# Do not use this file directly! Consult it for reference only. #
+#################################################################
+
+
+previews:
+  generation: automatic # Enable preview environments
+
+
+# List services *except* Render Postgres databases here
+services:
+  # A web service on the Ruby native runtime
+  - type: web
+    runtime: ruby
+    name: sinatra-app
+    repo: https://github.com/render-examples/sinatra # Default: Repo containing render.yaml
+    numInstances: 3 # Manual scaling configuration. Default: 1 for new services
+    region: frankfurt # Default: oregon
+    plan: 1c-2g # Default: 0.5c-512mb
+    branch: prod # Default: Blueprint branch or repo default branch (see below)
+    buildCommand: bundle install
+    preDeployCommand: bundle exec ruby migrate.rb
+    startCommand: bundle exec ruby main.rb
+    autoDeployTrigger: 'off' # Disable automatic deploys
+    maxShutdownDelaySeconds: 120 # Increase graceful shutdown period. Default: 30, Max: 300
+    initialDeployHook: ./seed_database.sh # Runs after the first successful deploy of a service
+    domains: # Custom domains
+      - example.com
+      - www.example.org
+    renderSubdomainPolicy: disabled # Disable access via the service's onrender.com subdomain. Default: enabled
+    envVars: # Environment variables
+      - key: API_BASE_URL
+        value: https://api.example.com # Hardcoded value
+      - key: APP_SECRET
+        generateValue: true # Generate a base64-encoded 256-bit value
+      - key: ANTHROPIC_API_KEY
+        sync: false # Prompt for a value in the Render Dashboard
+      - key: DATABASE_URL
+        fromDatabase: # Reference a property of a database (see available properties below)
+          name: mydatabase
+          property: connectionString
+      - key: MINIO_PASSWORD
+        fromService: # Reference a value from another service
+          name: minio
+          type: pserv
+          envVarKey: MINIO_ROOT_PASSWORD
+      - fromGroup: my-env-group # Add all variables from an environment group
+    ipAllowList: # Optional (defaults to allow all); Scale and Enterprise workspaces only
+      - source: 203.0.113.4/30
+        description: office
+      - source: 198.51.100.1
+        description: home
+
+
+  # A web service that builds from a Dockerfile
+  - type: web
+    runtime: docker
+    name: webdis
+    repo: https://github.com/render-examples/webdis.git # Default: Repo containing render.yaml
+    rootDir: webdis # Default: Repo root
+    dockerCommand: ./webdis.sh # Default: Dockerfile CMD
+    scaling: # Autoscaling configuration
+      minInstances: 1
+      maxInstances: 3
+      targetMemoryPercent: 60 # Optional if targetCPUPercent is set
+      targetCPUPercent: 60 # Optional if targetMemory is set
+    maintenanceMode: # Maintenance mode configuration (paid web services only)
+      enabled: true
+      uri: https://example.com/maintenance # Optional custom maintenance page URL
+    healthCheckPath: /
+    registryCredential: # Default: No credential
+      fromRegistryCreds:
+        name: my-credentials
+    envVars:
+      - key: REDIS_HOST
+        fromService: # Reference a property from another service (see available properties below)
+          type: keyvalue
+          name: lightning
+          property: host
+      - key: REDIS_PORT
+        fromService:
+          type: keyvalue
+          name: lightning
+          property: port
+      - fromGroup: conc-settings
+
+
+  # A private service with an attached persistent disk
+  - type: pserv
+    runtime: docker
+    name: minio
+    repo: https://github.com/render-examples/minio.git # Default: Repo containing render.yaml
+    envVars:
+      - key: MINIO_ROOT_PASSWORD
+        generateValue: true # Generate a base64-encoded 256-bit value
+      - key: MINIO_ROOT_USER
+        sync: false # Prompt for a value in the Render Dashboard
+      - key: PORT
+        value: 10000
+    disk: # Persistent disk configuration
+      name: data
+      mountPath: /data
+      sizeGB: 10 # optional
+
+
+  # A Python cron job that runs every hour
+  - type: cron
+    name: date
+    runtime: python
+    schedule: '0 * * * *'
+    buildCommand: 'true' # ensure it's a string
+    startCommand: date
+    repo: https://github.com/render-examples/docker.git # optional
+
+
+  # A Python workflow
+  - type: workflow
+    name: support-agent
+    runtime: python
+    region: oregon
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+
+
+  # A Dockerfile-based background worker
+  - type: worker
+    name: queue
+    runtime: docker
+    dockerfilePath: ./sub/Dockerfile # Optional
+    dockerContext: ./sub/src # Optional
+    branch: queue # Optional
+
+
+  # A static site
+  - type: web
+    name: my-blog
+    runtime: static
+    buildCommand: yarn build
+    staticPublishPath: ./build
+    previews:
+      generation: automatic # Enable service previews
+    buildFilter:
+      paths:
+        - src/**/*.js
+      ignoredPaths:
+        - src/**/*.test.js
+    headers:
+      - path: /*
+        name: X-Frame-Options
+        value: sameorigin
+    routes:
+      - type: redirect
+        source: /old
+        destination: /new
+      - type: rewrite
+        source: /a/*
+        destination: /a
+    ipAllowList: # Optional (defaults to allow all); Scale and Enterprise workspaces only
+      - source: 203.0.113.4/30
+        description: office
+      - source: 198.51.100.1
+        description: home
+
+
+  # A Key Value instance
+  - type: keyvalue
+    name: lightning
+    ipAllowList: # Required
+      - source: 0.0.0.0/0
+        description: everywhere
+    plan: free # Default: 256mb
+    maxmemoryPolicy: noeviction # Default: allkeys-lru
+    persistenceMode: off # Default: journal-snapshot
+
+
+# List Render Postgres databases here
+databases:
+  # A database with one read replica
+  - name: elephant
+    plan: 0.5c-1g # Read replicas require at least 0.5 CPU and 10 GB storage
+    databaseName: mydb # Optional (Render may add a suffix)
+    user: adrian # Optional
+    ipAllowList: # Optional (defaults to allow all)
+      - source: 203.0.113.4/30
+        description: office
+      - source: 198.51.100.1
+        description: home
+    readReplicas:
+      - name: elephant-replica
+
+
+  # A database that allows only private network connections
+  - name: private database
+    databaseName: private
+    ipAllowList: [] # No entries in the IP allow list
+
+
+  # A database with specified disk size and storage autoscaling
+  - name: pachyderm
+    plan: 0.5c-1g
+    diskSizeGB: 35
+    storageAutoscalingEnabled: true
+
+
+  # A database that enables high availability
+  - name: highly available database
+    plan: 2c-8g
+    highAvailability:
+      enabled: true
+
+
+# Environment groups
+envVarGroups:
+  - name: conc-settings
+    envVars:
+      - key: CONCURRENCY
+        value: 2
+      - key: SECRET
+        generateValue: true
+  - name: stripe
+    envVars:
+      - key: STRIPE_API_URL
+        value: https://api.stripe.com/v2

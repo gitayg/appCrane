@@ -1,0 +1,7 @@
+{
+  "id": "static-site",
+  "name": "Static site",
+  "description": "HTML/CSS/JS from public/, served by a dependency-free Node server that verifies identity on every file, admin-only pages under public/admin/. No database. /api/health and tests included.",
+  "stack": ["html", "node"],
+  "test_command": "npm test"
+}

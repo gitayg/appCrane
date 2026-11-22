@@ -17,6 +17,8 @@ import { esc, bulletList, renderBrandedEmail } from './mail/brandedLayout.js';
 import { dashboardBaseUrl } from './vulnRequests.js';
 import { appOwners, platformAdmins } from './memoryAdmissionMail.js';
 import { DEFAULT_LEVEL, assertLevel, levelPolicy } from './dataClassification.js';
+import { approvalRequiredForAi, getAiProfile, clearAiReview } from './aiAct/classification.js';
+import { appHasAcknowledgedOwner } from './aiAct/literacy.js';
 import log from '../utils/logger.js';
 
 export const INTAKE_MAIL_SOURCE = 'intake';
@@ -63,7 +65,7 @@ export function submitIntake(app, intake = {}) {
   const db = intake.db || getDb();
   const n = normalizeIntake(intake);
   const submittedBy = intake.submitted_by ?? intake.owner ?? null;
-  const required = !!levelPolicy(db, n.data_classification).intake_approval;
+  const required = !!levelPolicy(db, n.data_classification).intake_approval || approvalRequiredForAi(db, app.id);
   const status = required ? 'pending' : 'approved';
   const answers = JSON.stringify({ purpose: n.purpose, personal_data: n.personal_data,
     external_integrations: n.external_integrations, access: n.access, owner: intake.owner ?? null });
@@ -109,8 +111,15 @@ export function getIntake(db, appId) {
 export function intakeGate(db, app) {
   const row = getIntake(db, app.id);
   const level = row?.data_classification || DEFAULT_LEVEL;
-  const required = !!levelPolicy(db, level).intake_approval;
+  const annex = approvalRequiredForAi(db, app.id);
+  const required = !!levelPolicy(db, level).intake_approval || annex;
   const status = row ? row.status : 'none';
+  const ai = getAiProfile(db, app.id);
+  if (ai.uses_ai && !appHasAcknowledgedOwner(db, app.id)) {
+    return { ok: false, required, status, data_classification: level, ai_use: ai.ai_use, ai_literacy_ack: false,
+      message: 'This app is classified as using AI and none of its owners has acknowledged the current AI-literacy statement. An owner acknowledges it in the intake before production.' };
+  }
+  const what = ai.review_required ? `${level} app whose AI use an owner lowered` : annex ? `${level} app with an Annex III AI use` : `${level} app`;
   if (status === 'approved') {
     return { ok: true, required, status, data_classification: level, message: row.grandfathered ? 'Approved (existing app, grandfathered at upgrade)' : 'Intake approved' };
   }
@@ -123,8 +132,8 @@ export function intakeGate(db, app) {
   }
   return { ok: false, required, status, data_classification: level,
     message: status === 'none'
-      ? `This ${level} app has no intake. Submit the intake form; production stays closed until a platform admin approves it. Sandbox deploys are allowed.`
-      : `This ${level} app is waiting for security approval of its intake. Production stays closed until a platform admin approves it. Sandbox deploys are allowed.` };
+      ? `This ${what} has no intake. Submit the intake form; production stays closed until a platform admin approves it. Sandbox deploys are allowed.`
+      : `This ${what} is waiting for security approval of its intake. Production stays closed until a platform admin approves it. Sandbox deploys are allowed.` };
 }
 
 /** Throws 403 INTAKE_NOT_APPROVED when production is closed by intake. */
@@ -149,6 +158,7 @@ export function reviewIntake(db, app, { decision, comment }, user) {
   const status = decision === 'approve' ? 'approved' : 'rejected';
   db.prepare(`UPDATE app_intake SET status = ?, reviewed_by = ?, reviewed_at = datetime('now'), review_comment = ?,
     grandfathered = 0, updated_at = datetime('now') WHERE app_id = ?`).run(status, user.id, note, app.id);
+  if (status === 'approved') clearAiReview(db, app.id);
   const updated = getIntake(db, app.id);
   logAudit(user.id, app.id, `app-intake-${status === 'approved' ? 'approve' : 'reject'}`, { comment: note, data_classification: updated.data_classification });
   recordEvent({

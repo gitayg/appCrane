@@ -65,6 +65,14 @@ export const CONTROLS = [
       + 'The key is rotated with crane rotate-key (AppCrane stopped, backup first, every secret re-encrypted in one transaction and checked); the last rotation is in C1/encryption.json.',
     evidence: ['C1/encryption.json'],
   },
+  {
+    id: 'AI.1', family: 'AI', title: 'AI use: inventory, classification, literacy and log retention',
+    implementation: 'Each app records an intake AI-use answer (none, assistive, decisions about people, or an Annex III area); every change is audited. '
+      + 'The inventory lists apps with LLM gateway traffic or an AI-use answer, with models, providers, first and last call and call volume, and flags apps whose gateway traffic contradicts an answer of none. '
+      + 'Builders acknowledge a versioned AI-literacy statement before classifying an app as using AI. LLM gateway logs of apps classified as using AI are kept at least 184 days. '
+      + 'These files record what AppCrane holds; they do not assess compliance with Regulation (EU) 2024/1689.',
+    evidence: ['AI/ai-inventory.csv', 'AI/ai-use-changes.csv', 'AI/ai-literacy-acknowledgements.csv', 'AI/llm-log-retention.json'],
+  },
 ];
 
 export function controlsForFile(path) {

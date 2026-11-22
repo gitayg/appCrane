@@ -70,6 +70,7 @@ export function AdoptForm({ analysis, onAdopted }: Props) {
                 <span style={{ color: 'var(--dim)', marginLeft: 6 }}>
                   {v.scope === 'client' ? 'client, built into the bundle' : 'server'}
                   {v.value_in_upload ? ' | value found in the uploaded .env, leave blank to use it' : ''}
+                  {v.manifest ? ` | named in ${v.manifest.sources.join(', ')}, value not imported` : ''}
                 </span>
               </span>
               <PasswordInput label={v.key} value={values[v.key] || ''} onChange={e => setValues(s => ({ ...s, [v.key]: e.target.value }))} autoComplete="off" />

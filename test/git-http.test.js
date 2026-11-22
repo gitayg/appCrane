@@ -189,7 +189,7 @@ test('no access, a "none" seat, an unknown slug and a GitHub-backed app are the 
   assert.equal(admin.code, 0, `a platform admin is allowed on every app: ${admin.out}`);
 });
 
-test('git push is refused with a pointer to the supported path, and the repo is unchanged', async () => {
+test('git push by a member without admin or owner role is refused, and the repo is unchanged', async () => {
   const dir = freshDir();
   assert.equal((await git(['clone', urlFor('gh-a', MEMBER.key), dir])).code, 0);
   writeFileSync(join(dir, 'pushed.txt'), 'nope\n');
@@ -199,7 +199,7 @@ test('git push is refused with a pointer to the supported path, and the repo is 
   const refsBefore = bareGit('for-each-ref');
   const p = await git(['push', 'origin', 'HEAD:main'], dir);
   assert.notEqual(p.code, 0, p.out);
-  assert.match(p.out, /does not accept git push/);
+  assert.match(p.out, /requires admin or owner role/);
   const p2 = await git(['push', 'origin', 'HEAD:refs/heads/sneaky'], dir);
   assert.notEqual(p2.code, 0, p2.out);
   assert.equal(await lg.getBranchHeadSha('gh-a', 'main'), before);

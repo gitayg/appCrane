@@ -4,6 +4,7 @@ import { scanSecrets } from './secrets.js';
 import { detectBackends } from './backends.js';
 import { scaffoldFiles } from './scaffold.js';
 import { allDeps, has, jsonOf, scannable } from './projectFiles.js';
+import { platformItems, platformEnv, platformView } from './platformReport.js';
 
 // The adoption report: what works as is, what needs a change (each change can
 // become a request for the coder), the env vars to fill, and the risks found.
@@ -58,7 +59,7 @@ export function buildReport(files, { name = 'app', skipped = [] } = {}) {
       `Lovable projects created since May 2026 use TanStack Start, which renders on the server. The adopted container starts it with "${project.start}". If the build writes its server somewhere else, change the start command.`,
       { request: true }));
   }
-  if (project.framework === 'python-django') {
+  if (project.framework === 'python-django' && !project.start) {
     changes.push(item('change', 'django-start', 'Add a start command for Django',
       'Add gunicorn to requirements.txt and a Dockerfile that runs "gunicorn --bind 0.0.0.0:3000 <project>.wsgi".', { request: true, blocking: true }));
   }
@@ -76,7 +77,7 @@ export function buildReport(files, { name = 'app', skipped = [] } = {}) {
     works.push(item('ok', 'port', 'Port', port.reads_env_port ? 'The server reads PORT from the environment, which AppCrane sets.' : `AppCrane routes to port ${CONTAINER_PORT}.`));
   }
 
-  if (project.kind === 'server' && !project.health_route) {
+  if (project.kind === 'server' && !project.health_route && !project.platform?.health) {
     changes.push(item('change', 'health', 'Add a /api/health endpoint',
       'Every AppCrane deploy checks GET /api/health and expects 200 with JSON {"status":"ok","version":"<app version>"}. Without it the sandbox deploy fails its health check.',
       { request: true, blocking: true }));
@@ -130,13 +131,19 @@ export function buildReport(files, { name = 'app', skipped = [] } = {}) {
       { severity: 'low' }));
   }
 
+  if (project.platform) {
+    const p = platformItems(project, { hasManifest: project.has_manifest });
+    works.push(...p.works);
+    changes.push(...p.changes);
+  }
+
   const risks = secrets.map((s) => ({
     ...item('risk', `secret:${s.rule}:${s.path}:${s.line}`, `${s.title} in ${s.path}:${s.line}`, s.detail),
     severity: s.severity, side: s.side, preview: s.preview, rule: s.rule,
     request: s.severity === 'critical' || s.severity === 'high',
   }));
 
-  const envVars = env.vars.filter((v) => v.scope !== 'supabase-edge');
+  const envVars = platformEnv(env.vars.filter((v) => v.scope !== 'supabase-edge'), project.platform);
   const counts = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
   for (const r of risks) counts[r.severity]++;
   const blocking = changes.filter((c) => c.blocking).length;
@@ -149,7 +156,9 @@ export function buildReport(files, { name = 'app', skipped = [] } = {}) {
       build: project.build, start: project.start, output_dir: project.output_dir, package_manager: project.package_manager,
       port: project.port, health_route: project.health_route, has_dockerfile: project.has_dockerfile, origin: project.origin,
       replit: project.replit ? { run: project.replit.run, deployment: project.replit.deployment, ports: project.replit.ports } : null,
+      start_source: project.start_source || null, build_source: project.build_source || null,
     },
+    platform: platformView(project.platform),
     backends,
     works,
     changes,

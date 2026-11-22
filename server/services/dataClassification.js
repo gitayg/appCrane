@@ -20,6 +20,8 @@ const POLICY_KEY = 'classification_policy';
 export const DEFAULT_POLICY = Object.freeze({
   release_check_mode: 'by_classification',
   block_vulnerable_dependencies: true,
+  probe_supabase_rls: false,
+  probe_unauth_writes: false,
   levels: Object.freeze({
     public:       Object.freeze({ intake_approval: false, release_check: 'warn',    require_access_rules: false, allow_sso_bypass: true,  allow_public_visibility: true,  exceptions_by: 'owner' }),
     internal:     Object.freeze({ intake_approval: false, release_check: 'warn',    require_access_rules: false, allow_sso_bypass: true,  allow_public_visibility: true,  exceptions_by: 'owner' }),
@@ -45,7 +47,9 @@ export function getClassificationPolicy(db) {
   for (const l of LEVELS) levels[l] = { ...DEFAULT_POLICY.levels[l], ...(stored.levels?.[l] || {}) };
   const mode = GLOBAL_MODES.includes(stored.release_check_mode) ? stored.release_check_mode : DEFAULT_POLICY.release_check_mode;
   const blockVuln = typeof stored.block_vulnerable_dependencies === 'boolean' ? stored.block_vulnerable_dependencies : DEFAULT_POLICY.block_vulnerable_dependencies;
-  return { release_check_mode: mode, block_vulnerable_dependencies: blockVuln, levels };
+  const probeRls = typeof stored.probe_supabase_rls === 'boolean' ? stored.probe_supabase_rls : DEFAULT_POLICY.probe_supabase_rls;
+  const probeWrites = typeof stored.probe_unauth_writes === 'boolean' ? stored.probe_unauth_writes : DEFAULT_POLICY.probe_unauth_writes;
+  return { release_check_mode: mode, block_vulnerable_dependencies: blockVuln, probe_supabase_rls: probeRls, probe_unauth_writes: probeWrites, levels };
 }
 
 function validatePatch(patch) {
@@ -59,6 +63,14 @@ function validatePatch(patch) {
   if (patch.block_vulnerable_dependencies !== undefined) {
     if (typeof patch.block_vulnerable_dependencies !== 'boolean') bad('block_vulnerable_dependencies must be true or false');
     out.block_vulnerable_dependencies = patch.block_vulnerable_dependencies;
+  }
+  if (patch.probe_supabase_rls !== undefined) {
+    if (typeof patch.probe_supabase_rls !== 'boolean') bad('probe_supabase_rls must be true or false');
+    out.probe_supabase_rls = patch.probe_supabase_rls;
+  }
+  if (patch.probe_unauth_writes !== undefined) {
+    if (typeof patch.probe_unauth_writes !== 'boolean') bad('probe_unauth_writes must be true or false');
+    out.probe_unauth_writes = patch.probe_unauth_writes;
   }
   if (patch.levels !== undefined) {
     if (!patch.levels || typeof patch.levels !== 'object') bad('levels must be an object');
@@ -95,6 +107,8 @@ export function setClassificationPolicy(db, patch, user) {
   const next = { ...stored };
   if (clean.release_check_mode) next.release_check_mode = clean.release_check_mode;
   if (clean.block_vulnerable_dependencies !== undefined) next.block_vulnerable_dependencies = clean.block_vulnerable_dependencies;
+  if (clean.probe_supabase_rls !== undefined) next.probe_supabase_rls = clean.probe_supabase_rls;
+  if (clean.probe_unauth_writes !== undefined) next.probe_unauth_writes = clean.probe_unauth_writes;
   if (clean.levels) {
     next.levels = { ...(stored.levels || {}) };
     for (const [l, f] of Object.entries(clean.levels)) next.levels[l] = { ...(next.levels[l] || {}), ...f };

@@ -37,6 +37,7 @@ import { RuntimePatchCard } from '../components/autoPatch/RuntimePatchCard'
 import { AppIsolationCard } from '../components/AppIsolationCard'
 import { SignupRequestsCard } from '../components/sso/SignupRequestsCard'
 import { setVisibleInterval } from '../utils/visibleInterval'
+import { ImageTrustPolicyCard } from '../components/imageTrust/ImageTrustPolicyCard'
 
 function SecurityTab() {
   const [certFile, setCertFile] = useState('')
@@ -1485,7 +1486,7 @@ export function Settings() {
       {panel('account', <AccountTab />)}
       {panel('mcp', <Mcp />)}
       {panel('skills', <SkillsTab />)}
-      {panel('security', <><SecurityTab /><SignInPolicyCard /><McpAuthPolicyCard /><OAuthAdminCard /><ClassificationPolicyCard /><VulnAlertsCard /><AutoPatchPolicyCard /><RuntimePatchCard /><CryptographyCard /><SecretsManagerCard /><PlatformAnthropicKeyCard /><LlmGatewaySettingsCard /><SiemSinks /></>)}
+      {panel('security', <><SecurityTab /><SignInPolicyCard /><McpAuthPolicyCard /><OAuthAdminCard /><ClassificationPolicyCard /><VulnAlertsCard /><AutoPatchPolicyCard /><RuntimePatchCard /><CryptographyCard /><SecretsManagerCard /><ImageTrustPolicyCard /><PlatformAnthropicKeyCard /><LlmGatewaySettingsCard /><SiemSinks /></>)}
       {panel('users', <Users />)}
       {panel('roles', <RolesTab />)}
       {panel('github', <GithubTab />)}

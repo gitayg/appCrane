@@ -26,7 +26,7 @@ const web = express();
 web.use(express.json());
 web.use('/api/appstudio', routes);
 web.use(errorHandler);
-const server = web.listen(0);
+const server = await new Promise((resolve) => { const s = web.listen(0, '127.0.0.1', () => resolve(s)); });
 
 after(async () => {
   server.closeAllConnections();

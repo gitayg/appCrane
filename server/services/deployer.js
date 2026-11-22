@@ -8,6 +8,7 @@ import { getDb } from '../db.js';
 import { identitySecretFor } from './identitySignature.js';
 import { decrypt } from './encryption.js';
 import { isSecretRef, resolveStoredEnv } from './secretRefs.js';
+import { isExternalRef } from './externalSecrets/refs.js';
 import log from '../utils/logger.js';
 import { usesLocalRepo } from './managedRepo.js';
 import { scrubToken } from './githubGitAuth.js';
@@ -1192,7 +1193,7 @@ export async function promoteApp(app, userId, opts = {}) {
     const envContent = envRows.map(v => {
       try {
         const plain = decrypt(v.value_encrypted);
-        return isSecretRef(plain) ? `# ${v.key} comes from Secrets Manager at container start` : `${v.key}=${plain}`;
+        return isSecretRef(plain) ? `# ${v.key} comes from ${isExternalRef(plain) ? 'an outside secret store' : 'Secrets Manager'} at container start` : `${v.key}=${plain}`;
       } catch (_) { return `# ERROR decrypting ${v.key}`; }
     }).join('\n');
     const fullEnv = `${envContent}\nPORT=${prodPorts.prod_be}\nFE_PORT=${prodPorts.prod_fe}\nNODE_ENV=production\n`;
@@ -1917,7 +1918,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       appendLog(`Found deployhub.json: ${manifest.name || '(no name)'} v${manifest.version || '(no version)'}`);
     }
 
-    const { values: runtimeEnvVars, decryptFailures, refKeys } = await loadStoredEnv();
+    const { values: runtimeEnvVars, decryptFailures, refKeys, refSources } = await loadStoredEnv();
 
     const bePort = env === 'production' ? ports.prod_be : ports.sand_be;
 
@@ -1975,6 +1976,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     // Which generator built this release, needed 200 lines below to pick the
     // health probe. Null for an image deploy, which never reaches the generator.
     let buildRuntime = null;
+    let builtThisDeploy = isImageDeploy;
 
     if (isImageDeploy) {
       // Nothing to build and nothing to validate a build against: the artifact
@@ -2028,6 +2030,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
         onLog: (line) => { if (deployLog.length < 500) appendLog(`  ${line}`); },
       });
       appendLog(`Image ready (Nixpacks): ${image}`);
+      builtThisDeploy = true;
     } else {
       const { pinnedPhpVersionFor, describePhpBuild } = await import('./phpVersion.js');
       const pinnedPhpVersion = pinnedPhpVersionFor(db, app.id, env);
@@ -2066,6 +2069,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       });
       appendLog(`Image ready: ${image}`);
       if (!wasCached) attemptImage = image;
+      builtThisDeploy = !wasCached;
       const { imageBaseInfo } = await import('./docker.js');
       const base = await imageBaseInfo(image);
       if (base) db.prepare('UPDATE deployments SET base_image = ?, base_digest = ? WHERE id = ?').run(base.image, base.digest, deployId);
@@ -2093,6 +2097,17 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       const { verifyReleaseTree } = await import('./deployIntegrity.js');
       await verifyReleaseTree({ dir: releaseDir, expectedSha: integrity.expectedSha, allowed: integrity.allowed, pinned: integrity.pinned, stage: 'before container swap' });
       appendLog(`Deploy integrity: release tree still exactly commit ${integrity.expectedSha} before the container swap.`);
+    }
+
+    // Supply chain: SBOM, SLSA provenance and this instance's signature for the
+    // image, then verify-before-run, both before anything is stopped. Under
+    // enforce an unsigned or tampered image ends the deploy here with the
+    // previous version still serving; under warn it is logged and the deploy goes on.
+    {
+      const { attestDeployImage } = await import('./imageTrust/attest.js');
+      const { enforceImageTrust } = await import('./imageTrust/verify.js');
+      await attestDeployImage({ db, app, env, deploymentId: deployId, image, fresh: builtThisDeploy, commitSha: integrity?.expectedSha || null, builder: buildRuntime || (isImageDeploy ? 'pull' : null), appendLog });
+      await enforceImageTrust({ db, slug: app.slug, env, image, onLog: appendLog, what: 'deploy' });
     }
 
     // v2.6.16: pre-flight entry-exists check. Validate that the entry
@@ -2136,7 +2151,9 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
         ? `Injecting ${injectedKeys.length} env var(s) into container: ${injectedKeys.join(', ')}`
         : 'No app env vars to inject (env_vars empty for this app/env).'
     );
-    if (refKeys.length) appendLog(`Resolved from AWS Secrets Manager: ${refKeys.join(', ')}`);
+    for (const label of [...new Set(refKeys.map((k) => refSources[k]))]) {
+      appendLog(`Resolved from ${label}: ${refKeys.filter((k) => refSources[k] === label).join(', ')}`);
+    }
     // v2.7.30: a value that fails to decrypt was previously dropped silently —
     // the container came up missing the secret with zero signal. Make it loud.
     if (decryptFailures.length) {
@@ -2214,6 +2231,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       appendLog('Injected APPCRANE_SERVICE_TOKEN + host-gateway CRANE_INTERNAL_URL (email service)');
     }
     { const llm = (await import('./llmGateway/env.js')).llmGatewayEnv(app, env); Object.assign(runtimeEnvVars, llm); if (Object.keys(llm).length) appendLog(`LLM gateway: injected ${Object.keys(llm).join(', ')} (provider keys stay in AppCrane)`); }
+    { const notice = (await import('./aiAct/transparency.js')).aiNoticeEnv(getDb(), app); Object.assign(runtimeEnvVars, notice); if (notice.APPCRANE_AI_NOTICE) appendLog('AI transparency notice: injected APPCRANE_AI_NOTICE, APPCRANE_AI_NOTICE_TEXT'); }
 
     // v2.97.0: the key the app checks its identity headers with (appcrane-tenant
     // verifyIdentity). Every app, multitenant or not: forged identity is a

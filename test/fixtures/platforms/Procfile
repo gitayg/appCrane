@@ -1,0 +1,4 @@
+web: bundle exec rails server -p $PORT
+release:       ./release-tasks.sh
+worker:        env QUEUE=* bundle exec rake resque:work
+urgentworker:  env QUEUE=urgent bundle exec rake resque:work

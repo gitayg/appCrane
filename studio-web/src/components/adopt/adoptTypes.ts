@@ -22,6 +22,20 @@ export interface EnvVar {
   in_template: boolean
   value_in_upload: boolean
   hint: string | null
+  manifest?: { sources: string[]; value: 'literal' | 'generate' | 'prompt' | 'reference' | 'database'; required: boolean; reference: string | null }
+}
+
+export interface PlatformImport {
+  sources: { format: string; file: string; platform: string }[]
+  mapped: { from: string; to: string; value: string }[]
+  unmapped: { source: string; platform: string | null; field: string; kind: string | null; title: string; detail: string }[]
+  notes: string[]
+  start: string | null
+  start_applied: boolean
+  health: { path: string; source: string } | null
+  crons: { name: string; schedule: string; command: string; source: string }[]
+  database: { engine: string; injects: string[]; origin: string } | null
+  release: { command: string; source: string; platform: string }[]
 }
 
 export interface AdoptReport {
@@ -34,7 +48,9 @@ export interface AdoptReport {
     start: string | null
     package_manager: string | null
     origin: { tool: string; label: string; confidence: string; evidence: string[] }
+    start_source?: string | null
   }
+  platform?: PlatformImport | null
   works: ReportItem[]
   changes: ReportItem[]
   risks: ReportItem[]

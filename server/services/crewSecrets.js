@@ -18,7 +18,7 @@
  * the agent can tell its owner what it almost relayed.
  */
 
-const RULES = [
+export const RULES = [
   { id: 'private-key',     re: /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----/ },
   { id: 'aws-access-key',  re: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/ },
   { id: 'appcrane-key',    re: /\bdhk_[A-Za-z0-9]+_[A-Za-z0-9_-]{24,}/ },

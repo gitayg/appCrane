@@ -9,6 +9,7 @@ import { CONTROLS, FRAMEWORK, DISCLAIMER, controlsForFile } from './controls.js'
 import * as C from './collect.js';
 import { renderReadme, renderIndexHtml } from './render.js';
 import { forbiddenValues, scanFiles } from './secretScan.js';
+import { collectAiEvidence } from '../aiAct/evidence.js';
 import { signManifest, sha256, verifyFiles, MANIFEST_FILE, SIG_FILE } from './sign.js';
 
 // Compliance evidence packs: a tar.gz for a chosen period holding, per SOC 2
@@ -147,6 +148,9 @@ async function buildPack(token, period, user) {
     }],
     ['C1 confidentiality', async () => {
       put('C1/encryption.json', await C.encryption(db));
+    }],
+    ['AI use records', async () => {
+      collectAiEvidence(db, period, put);
     }],
   ];
   for (let i = 0; i < steps.length; i++) {

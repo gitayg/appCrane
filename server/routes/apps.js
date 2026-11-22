@@ -152,6 +152,7 @@ import { getSeparateSandboxDb, setSeparateSandboxDb, parseSeparateSandboxDb, SEP
 import { getAppWhatsNewEmail, setAppWhatsNewEmail, parseAppWhatsNewEmail } from '../services/appWhatsNewMail.js';
 import { getShowSandbox, showSandboxByAppId, setShowSandbox, sandboxVisibleFor, parseShowSandbox } from '../services/sandboxVisibility.js';
 import { isAdmin } from '../utils/roles.js';
+import { usesLocalRepo } from '../services/managedRepo.js';
 import log from '../utils/logger.js';
 import { existsSync, mkdirSync, renameSync, unlinkSync } from 'fs';
 import { join } from 'path';
@@ -159,6 +160,7 @@ import { reconcileOrphanedApps } from '../services/reconcile.js';
 import { parseImageRef } from '../services/imageSource.js';
 import { validateContainerCommand, validateVolumePaths } from '../services/containerRuntimeSpec.js';
 import { DEFAULT_IMAGE_RETENTION } from '../services/imageRetention.js';
+import { envIsSleepingById } from '../services/envSleepState.js';
 
 /**
  * An app row as it may leave the server: every `*_encrypted` column removed, and
@@ -169,7 +171,7 @@ import { DEFAULT_IMAGE_RETENTION } from '../services/imageRetention.js';
  */
 function withoutSecretColumns(app) {
   const out = {};
-  for (const [k, v] of Object.entries(app || {})) if (!k.endsWith('_encrypted') && k !== 'secrets_namespace') out[k] = v;
+  for (const [k, v] of Object.entries(app || {})) if (!k.endsWith('_encrypted') && k !== 'service_token_hash' && k !== 'secrets_namespace') out[k] = v;
   return out;
 }
 
@@ -584,11 +586,11 @@ router.get('/', async (req, res) => {
       urls,
       base_path: { production: `/${app.slug}/`, sandbox: `/${app.slug}-sandbox/` },
       production: {
-        health: healthProd ? { status: healthProd.is_down ? 'down' : (healthProd.last_status === 200 ? 'healthy' : 'unknown'), last_check: healthProd.last_check_at, response_ms: healthProd.last_response_ms } : { status: 'unknown' },
+        health: envIsSleepingById(app.id, 'production', db) ? { status: 'sleeping' } : healthProd ? { status: healthProd.is_down ? 'down' : (healthProd.last_status === 200 ? 'healthy' : 'unknown'), last_check: healthProd.last_check_at, response_ms: healthProd.last_response_ms } : { status: 'unknown' },
         deploy: lastDeployProd || null,
       },
       sandbox: {
-        health: healthSand ? { status: healthSand.is_down ? 'down' : (healthSand.last_status === 200 ? 'healthy' : 'unknown'), last_check: healthSand.last_check_at, response_ms: healthSand.last_response_ms } : { status: 'unknown' },
+        health: envIsSleepingById(app.id, 'sandbox', db) ? { status: 'sleeping' } : healthSand ? { status: healthSand.is_down ? 'down' : (healthSand.last_status === 200 ? 'healthy' : 'unknown'), last_check: healthSand.last_check_at, response_ms: healthSand.last_response_ms } : { status: 'unknown' },
         deploy: lastDeploySand || null,
       },
       users,
@@ -1050,9 +1052,17 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
   // platform's service-account token, scoped to whatever URL the row names, so
   // this choice reaches every repo the token can read. Resending the values the
   // row already holds selects nothing, and a form may do that.
+  //
+  // The one exception: the owner of a Crane-hosted app (repo on this host) may
+  // set or clear its github_url. Deploys of that app clone the local repo and
+  // never read github_url, and the GitHub comparison (githubSyncStatus.js) reads
+  // it only with the app's own credential, never the service account's.
   const sourceTypeMoves = source_type !== undefined && source_type !== app.source_type;
   const githubUrlMoves = github_url !== undefined && (github_url || null) !== (app.github_url || null);
-  if ((source_type ?? app.source_type) === 'managed' && (sourceTypeMoves || githubUrlMoves) && !isAdmin(req.user)) {
+  let craneHosted = false;
+  try { craneHosted = usesLocalRepo(app); } catch (_) { /* unknown marker: not local */ }
+  const ownerLinksCraneHostedRepo = craneHosted && isAppOwnerOrPlatformAdmin(req.user, app);
+  if ((source_type ?? app.source_type) === 'managed' && (sourceTypeMoves || githubUrlMoves) && !isAdmin(req.user) && !ownerLinksCraneHostedRepo) {
     throw new AppError(MANAGED_SOURCE_MESSAGE, 403, 'FORBIDDEN');
   }
 

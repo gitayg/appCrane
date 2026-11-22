@@ -42,6 +42,9 @@ const SENSITIVE_KEYS = new Set([
   // SETTING_KEY), encrypted. Read and written only through
   // /api/appstudio/anthropic-key.
   'platform_anthropic_key_encrypted',
+  // The image-signing private key of this instance (services/imageTrust/signingKey.js
+  // PRIVATE_KEY_SETTING), encrypted. Only the public half is ever exported.
+  'image_signing_key_enc',
 ]);
 
 /**
@@ -968,6 +971,9 @@ router.put('/:key', requireAuth, requirePlatformAdmin, (req, res) => {
   // A plaintext value written here would be handed to agents as the key.
   if (req.params.key === 'platform_anthropic_key_encrypted') {
     return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Use /api/appstudio/anthropic-key to change the platform Anthropic key' } });
+  }
+  if (req.params.key.startsWith('image_signing_') || req.params.key.startsWith('image_trust_')) {
+    return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Use /api/image-trust/policy to change image signing and verification' } });
   }
   if (req.params.key === 'auto_approve_rce_fixes' || req.params.key === 'auto_patch_cooldown_hours') {
     return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Use /api/auto-patch/policy to change the auto-patch policy' } });

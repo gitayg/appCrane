@@ -9,6 +9,7 @@ import { isValidDomainFormat } from '../utils/customDomain.js';
 import { platformEmbedAncestors, mergeAncestors } from '../utils/embed.js';
 import { safeFrameAncestors } from '../utils/frameAncestors.js';
 import { INGRESS_HEADER, privateApiPort } from '../utils/ingress.js';
+import { sleepEnabledAnywhere, wakeToken } from './sleepPolicy.js';
 import {
   isolationDomain, isolationTls, appHost, RESERVED_APP_PATH,
   APP_SESSION_COOKIE, HANDOFF_STATE_COOKIE, PLATFORM_SESSION_COOKIE_ISOLATED, PLATFORM_SESSION_COOKIE_LEGACY,
@@ -526,7 +527,7 @@ function redirOrLegacy(app, mount, port, bypassPaths, host, live = true) {
  *     original URI in X-Forwarded-Uri and the handoff returns there.
  */
 function isolatedSiteBody(o) {
-  const { cranePort, port, verifyUri, prefix, isHeadless, fa, ingress } = o;
+  const { cranePort, port, verifyUri, prefix, isHeadless, fa, ingress, wakeHeader = '' } = o;
   // A bypass entry under /__appcrane would out-rank the AppCrane route below
   // (longer path wins) and hand the sign-in landing to the app.
   const reserved = RESERVED_APP_PATH.toLowerCase();
@@ -599,6 +600,7 @@ function isolatedSiteBody(o) {
     s += `        @appdown expression \`{err.status_code} in [502, 503, 504]\`\n`;
     s += `        handle @appdown {\n`;
     s += `            rewrite * /api/_crashed${prefix}{uri}\n`;
+    s += wakeHeader;
     s += craneProxy('            ', cranePort, ingress);
     s += `        }\n`;
     s += `    }\n`;
@@ -677,6 +679,13 @@ export function generateCaddyfile() {
   const craneDomain = process.env.CRANE_DOMAIN || null;
   const liveRows = db.prepare("SELECT app_id, env FROM deployments WHERE status = 'live'").all();
   const liveSet = new Set(liveRows.map(r => `${r.app_id}:${r.env}`));
+  // Environment sleep (services/sleepWakeHandler.js): the crash-page rewrite
+  // carries a token so AppCrane wakes only for requests that came through an
+  // app route. Emitted only while something can sleep, so a box that never
+  // turns sleep on gets the file it got before.
+  const wakeHeader = sleepEnabledAnywhere(db)
+    ? `            request_header X-AppCrane-Wake "${wakeToken(db)}"\n`
+    : '';
 
   // Platform-default embedding allowlist (same registrable domain), merged into
   // every app's frame-ancestors unless an admin disabled it. v2.25.0.
@@ -1068,6 +1077,7 @@ export function generateCaddyfile() {
   caddyfile += `        @appdown expression \`{err.status_code} in [502, 503, 504]\`\n`;
   caddyfile += `        handle @appdown {\n`;
   caddyfile += `            rewrite * /api/_crashed{uri}\n`;
+  caddyfile += wakeHeader;
   caddyfile += craneProxy('            ', cranePort, ingress);
   caddyfile += `        }\n`;
   caddyfile += `    }\n`;
@@ -1108,7 +1118,7 @@ export function generateCaddyfile() {
         caddyfile += `\n${appHost(db, app.slug, env)} {\n`;
         caddyfile += tlsLine;
         caddyfile += isolatedSiteBody({
-          cranePort, port, prefix, fa, refuseBrotli, ingress,
+          cranePort, port, prefix, fa, refuseBrotli, ingress, wakeHeader,
           verifyUri: `/api/identity/verify?app=${app.slug}&env=${env}&host=isolated`,
           isHeadless: app.auth_mode === 'headless',
           bypassPaths: bypassByApp.get(app.id),

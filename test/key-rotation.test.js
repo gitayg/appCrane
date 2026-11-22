@@ -63,6 +63,8 @@ const tokId = Number(db.prepare("INSERT INTO crew_agent_tokens (agent_id, token_
 db.prepare("INSERT INTO crew_tasks (id, from_agent_id, to_agent_id, title, state) VALUES ('t1', ?, ?, 'x', 'submitted')").run(agentId, agentId);
 db.prepare("INSERT INTO crew_push_configs (id, task_id, agent_id, token_id, url, token_enc, auth_credentials_enc) VALUES ('p1', 't1', ?, ?, 'https://x.test', ?, ?)")
   .run(agentId, tokId, put('crew_push_configs.token_enc', 'pushtok'), put('crew_push_configs.auth_credentials_enc', 'creds'));
+db.prepare("INSERT INTO secret_connections (name, provider, app_id, settings_json, credentials_enc) VALUES ('v', 'vault', ?, '{}', ?)")
+  .run(appId, put('secret_connections.credentials_enc', '{"token":"hvs.x"}'));
 // settings: a whole-value blob, the MariaDB key row (never loaded) and the llm gateway JSON.
 db.prepare("INSERT INTO settings (key, value) VALUES ('oidc_client_secret_enc', ?)").run(put('settings.oidc_client_secret_enc', 'oidc-secret'));
 (await import('../server/services/managedDbEncryption.js')).ensureKey(db);

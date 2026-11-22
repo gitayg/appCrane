@@ -1,0 +1,7 @@
+{
+  "id": "python-fastapi",
+  "name": "Python (FastAPI)",
+  "description": "FastAPI service in its own Dockerfile: verified identity, roles, managed Postgres with migrations, /api/health, MCP tools and pytest tests.",
+  "stack": ["python", "fastapi", "postgres"],
+  "test_command": "pip install -r requirements-dev.txt && pytest"
+}

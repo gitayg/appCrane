@@ -1,4 +1,5 @@
 import { purgeRevokedTenants } from './tenants.js';
+import { afterOwnershipWrite } from './appOwnership.js';
 
 /**
  * SCIM group -> app access reconciler.
@@ -87,6 +88,7 @@ export function reconcileGroupAccess(db) {
       }
     }
   })();
+  afterOwnershipWrite(db, 'scim-group');
 
   const emailOf = db.prepare('SELECT email FROM users WHERE id = ?');
   // Returned so a caller (or a test) can wait for the purges; reconcile itself

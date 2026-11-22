@@ -6,6 +6,8 @@ import { isPlatformAdmin } from '../utils/roles.js';
 import { roleForUserOnApp } from '../services/permissions.js';
 import { submitIntake, getIntake, intakeGate, reviewIntake, listIntake } from '../services/appIntake.js';
 import { getClassification, setClassification, getClassificationPolicy, setClassificationPolicy, LEVELS } from '../services/dataClassification.js';
+import { getAiProfile, setAiUse } from '../services/aiAct/classification.js';
+import { sendAckRequired } from './aiAct.js';
 
 const router = Router();
 
@@ -55,6 +57,7 @@ router.get('/apps/:slug/intake', requireAuth, requireAppAccess, (req, res) => {
     intake: getIntake(db, req.app.id),
     classification: getClassification(db, req.app.id),
     gate: intakeGate(db, req.app),
+    ai: getAiProfile(db, req.app.id),
     can_edit: isPlatformAdmin(req.user) || roleForUserOnApp(req.user, req.app) === 'owner',
     can_review: isPlatformAdmin(req.user),
   });
@@ -68,8 +71,11 @@ router.put('/apps/:slug/intake', requireAuth, requireAppAccess, requireOwnerOrPl
   if (current.locked && !isPlatformAdmin(req.user) && body.data_classification && body.data_classification !== current.level) {
     throw new AppError('A platform admin set this classification; ask a platform admin to change it', 403, 'CLASSIFICATION_LOCKED');
   }
+  if (body.ai_use !== undefined) {
+    try { setAiUse(db, req.app, { ai_use: body.ai_use, annex_iii_category: body.annex_iii_category ?? null }, req.user); } catch (e) { return sendAckRequired(res, e); }
+  }
   const out = submitIntake(req.app, { ...body, data_classification: body.data_classification || current.level, owner: req.user.id, submitted_by: req.user.id, db });
-  res.json({ ...out, intake: getIntake(db, req.app.id), gate: intakeGate(db, req.app) });
+  res.json({ ...out, intake: getIntake(db, req.app.id), gate: intakeGate(db, req.app), ai: getAiProfile(db, req.app.id) });
 });
 
 /** POST /api/apps/:slug/intake/review — { decision: 'approve'|'reject', comment }. Platform admin. */

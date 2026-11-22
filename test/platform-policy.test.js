@@ -471,3 +471,15 @@ test('a lever can be turned back off, and the refusal stops immediately', async 
   setVis(APP_PRIVATE, 'private');
   clearPolicy();
 });
+
+test('ban_public_apps holds on the MCP write paths too (set_app_meta and update_app)', async () => {
+  const { callTool } = await import('../server/services/mcpTools.js');
+  clearPolicy();
+  setVis(APP_PRIVATE, 'private');
+  setPolicy(db, { ban_public_apps: true }, platformAdmin.id);
+  try {
+    await assert.rejects(callTool(owner.row || owner, 'appcrane_set_app_meta', { slug: 'pol-private', visibility: 'public' }), /ban_public_apps/);
+    await assert.rejects(callTool(platformAdmin.row || platformAdmin, 'appcrane_update_app', { slug: 'pol-private', visibility: 'public' }), /ban_public_apps/);
+    assert.deepEqual(visOf(APP_PRIVATE), { visibility: 'private', public_access: 0 });
+  } finally { clearPolicy(); }
+});

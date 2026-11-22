@@ -28,6 +28,7 @@ import { getDb } from '../db.js';
 import log from '../utils/logger.js';
 import { jobStarted, trackJob, noteJobFailure } from './jobHealth.js';
 import { inspectContainer, noteContainerDown, noteContainerUp } from './cronContainerGuard.js';
+import { envIsSleepingById } from './envSleepState.js';
 import { runHttpCron } from './cronHttp.js';
 
 const TICK_MS = 60_000;
@@ -218,6 +219,19 @@ export async function runCronJob(jobRow) {
     const app = db.prepare('SELECT id, slug, slot FROM apps WHERE id = ?').get(jobRow.app_id);
     if (!app) return { skipped: true, reason: 'app not found' };
 
+    // Asleep on purpose (envSleeper.js): skipped, recorded, and not reported as
+    // a container that is down. A scheduled run never wakes it, or a
+    // once-a-minute job would keep every sleeping sandbox awake.
+    if (envIsSleepingById(app.id, jobRow.env, db)) {
+      const at = new Date().toISOString();
+      const reason = 'skipped: the environment is asleep';
+      db.prepare(`
+        UPDATE app_cron_jobs
+        SET last_run_at = ?, last_exit_code = NULL, last_log = ?, updated_at = datetime('now')
+        WHERE id = ?
+      `).run(at, `[${at}] ${reason}`, jobRow.id);
+      return { skipped: true, reason };
+    }
     const container = await inspectContainer(containerName(app.slug, jobRow.env));
     if (!container.running) {
       const reason = `skipped: ${container.reason}`;

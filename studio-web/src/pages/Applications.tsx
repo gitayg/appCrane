@@ -8,6 +8,12 @@ import { SurveyCard } from '../components/runtime-topbar/SurveyCard'
 import { WhatsNewModal, type WhatsNewChange } from '../components/WhatsNewModal'
 import { AppAccessModal } from '../components/AppAccessModal'
 import { EnvVarsPanel } from '../components/env/EnvVarsPanel'
+import { GithubSyncStatus } from '../components/GithubSyncStatus'
+import { GithubExportButton } from '../components/GithubExportButton'
+import { EnvSleepCard } from '../components/EnvSleepCard'
+import { UsageCard } from '../components/UsageCard'
+import { OwnerTransferInbox } from '../components/ownership/OwnerTransferInbox'
+import ScaffoldTemplatePicker, { applyScaffoldTemplate, type ScaffoldTemplateId } from '../components/ScaffoldTemplatePicker'
 import { usePeek, type PeekCtx } from '../hooks/usePeek'
 import { Navigate, useLocation } from 'react-router-dom'
 import { useMe, isAdmin, canCreateApps } from '../hooks/useMe'
@@ -305,6 +311,7 @@ export function Applications() {
   const [frame, setFrame] = useState<FrameState>({ open: false, url: '', title: '' })
   const [framePanel, setFramePanel] = useState<'ask' | 'request' | 'bug' | null>(null)
   const [promptModal, setPromptModal] = useState<PromptModal>({ open: false })
+  const [scaffoldTemplate, setScaffoldTemplate] = useState<ScaffoldTemplateId | null>('node-react')
   const [copiedLabel, setCopiedLabel] = useState<string | null>(null)
   function copyText(text: string, label: string) {
     navigator.clipboard.writeText(text).then(() => {
@@ -616,6 +623,14 @@ export function Applications() {
     if (!value) return
     await adminApi.put(`/api/apps/${slug}`, { name: value }).catch(() => {})
     setApps(prev => prev.map(a => a.slug === slug ? { ...a, name: value } : a))
+  }
+
+  async function saveGithubUrl(slug: string, raw: string) {
+    const value = raw.trim()
+    try {
+      await adminApi.put(`/api/apps/${slug}`, { github_url: value })
+    } catch (e) { alert('Could not save the GitHub repository: ' + (e instanceof Error ? e.message : String(e))); return }
+    setApps(prev => prev.map(a => a.slug === slug ? { ...a, github_url: value || undefined } : a))
   }
 
   async function saveDescription(slug: string, desc: string) {
@@ -1235,13 +1250,16 @@ STEP 3 - In any terminal run \`claude\`, then paste:
               <div style={{ fontWeight: 700, fontSize: '.9rem' }}>{section.label}</div>
               <button
                 className="btn btn-xs btn-accent"
-                onClick={() => copyText(section.text, section.label)}
+                onClick={() => copyText(section.label === 'Managed Code' ? applyScaffoldTemplate(section.text, scaffoldTemplate) : section.text, section.label)}
               >
                 {copiedLabel === section.label ? 'Copied ✓' : `Copy ${section.label}`}
               </button>
             </div>
+            {section.label === 'Managed Code' && (
+              <ScaffoldTemplatePicker value={scaffoldTemplate} onChange={setScaffoldTemplate} />
+            )}
             <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 7, padding: '10px 14px', fontSize: '.8rem', color: 'var(--dim)', maxHeight: 240, overflowY: 'auto', whiteSpace: 'pre-wrap', fontFamily: 'monospace' }}>
-              {section.text}
+              {section.label === 'Managed Code' ? applyScaffoldTemplate(section.text, scaffoldTemplate) : section.text}
             </div>
           </div>
         ))}
@@ -1303,6 +1321,7 @@ STEP 3 - In any terminal run \`claude\`, then paste:
           }}
         />
       </div>
+      <OwnerTransferInbox hideWhenEmpty />
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8, fontSize: '.8rem', color: 'var(--dim)' }}>
         <span aria-live="polite">
@@ -1687,7 +1706,7 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                         ) : (
                           <span
                             className="badge"
-                            title="No owner assigned. Set one from /users by promoting an assigned user to owner."
+                            title={`No owner assigned. Set one from /app?slug=${app.slug} (Ownership).`}
                             style={{ background: 'rgba(245,158,11,.15)', color: 'var(--yellow, #f59e0b)', fontSize: '.7rem', fontWeight: 600 }}
                           >
                             ⚠ No owner
@@ -1850,10 +1869,37 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                               <button className="btn btn-xs" onClick={() => copyText(cloneUrl, `clone:${app.slug}`)}>
                                 {copiedLabel === `clone:${app.slug}` ? 'Copied ✓' : 'Copy'}
                               </button>
-                              <span style={{ color: 'var(--dim)' }}>Read-only. Username anything, password = your AppCrane API key.</span>
+                              <span style={{ color: 'var(--dim)' }}>Username anything, password = your AppCrane API key. Owners and app admins can push (no force pushes or deletions).</span>
                             </div>
                           )
                         })()}
+                        {app.source_type === 'managed' && app.repo_backend === 'local' && (isPlatformAdmin || app.app_role === 'owner') && (
+                          <div style={{ marginTop: 6, fontSize: '.78rem', display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                            <span style={{ color: 'var(--dim)' }}>GitHub repository</span>
+                            <EditableCell
+                              value={app.github_url || ''}
+                              onSave={v => saveGithubUrl(app.slug, v)}
+                              placeholder="Set (https://github.com/owner/repo)"
+                              ariaLabel="GitHub repository"
+                              title={app.github_url ? 'Click to change; clear the field to unlink' : 'Click to set'}
+                              inputStyle={{ minWidth: 320 }}
+                            />
+                            {app.github_url && (
+                              <button className="btn btn-xs" onClick={() => saveGithubUrl(app.slug, '')}>Clear</button>
+                            )}
+                            <span style={{ color: 'var(--dim)' }}>Link the GitHub repository you also push to, to see whether it is ahead of or behind AppCrane's copy.</span>
+                          </div>
+                        )}
+                        {app.source_type === 'managed' && app.repo_backend === 'local' && app.github_url && (
+                          <GithubSyncStatus key={app.github_url} slug={app.slug} />
+                        )}
+                        {app.source_type === 'managed' && app.repo_backend === 'local' && app.github_url && (isPlatformAdmin || app.app_role === 'owner') && (
+                          <GithubExportButton slug={app.slug} />
+                        )}
+                        <div style={{ marginTop: 10, display: 'grid', gap: 10 }}>
+                          <EnvSleepCard slug={app.slug} />
+                          <UsageCard slug={app.slug} />
+                        </div>
                       </td>
                     </tr>
                   )}

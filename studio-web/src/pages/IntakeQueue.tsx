@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { adminApi } from '../adminApi'
 import { ClassificationBadge } from '../components/intake/ClassificationBadge'
+import { AiInventoryPanel } from '../components/aiAct/AiInventoryPanel'
 import type { IntakeRow } from '../components/intake/types'
 
 type Status = 'pending' | 'approved' | 'rejected' | 'all'
@@ -71,6 +72,7 @@ export function IntakeQueue() {
           ))}
         </div>
       )}
+      <AiInventoryPanel />
     </div>
   )
 }

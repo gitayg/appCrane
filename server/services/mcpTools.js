@@ -1,4 +1,5 @@
 import { getDb } from '../db.js';
+import { assertVisibilityAllowed } from './platformPolicy.js';
 import { appUrl, isolationEnabled } from './appOrigin.js';
 import { decrypt, encrypt } from './encryption.js';
 import { BUCKETS, bucketize, applyBucket } from './requestStatus.js';
@@ -33,9 +34,10 @@ import { slugRefusal, slugTakenRefusal } from '../utils/slugPolicy.js';
 import { registerAgent, roster, whoIsOn, sendTask, inbox, reply, redactCrewArgs, assertCrewCaller } from './crew.js';
 import { myRules } from './crewDecisions.js';
 import { fetchAppProbe } from './appProbeFetch.js';
+import { envIsSleepingById } from './envSleepState.js';
 import { normalizeFrameAncestors } from '../utils/frameAncestors.js';
 import { secretPreview, opaquePreview, secretFingerprint } from './secretMask.js';
-import { REF_SOURCE, assertStorableValue, assertStoreRequest, isSecretRef, storeAppSecrets } from './secretRefs.js';
+import { REF_SOURCE, assertStorableValue, assertStoreRequest, isSecretRef, refSource, storeAppSecrets } from './secretRefs.js';
 import { isCoderKey, assertCoderToolAllowed, CODER_MCP_TOOLS } from './coderMcpKey.js';
 import { coderRequestsView } from './coderRequestView.js';
 import { recordAuditEvent } from './eventStore.js';
@@ -927,14 +929,18 @@ const TOOLS = [
         ...enriched,
         recent_deployments: recentDeploys,
         health: {
-          production: healthProd
+          production: envIsSleepingById(app.id, 'production', db)
+            ? { status: 'sleeping' }
+            : healthProd
             ? {
                 status: healthProd.is_down ? 'down' : (healthProd.last_status === 200 ? 'healthy' : 'unknown'),
                 last_check: healthProd.last_check_at,
                 response_ms: healthProd.last_response_ms,
               }
             : { status: 'unknown' },
-          sandbox: healthSand
+          sandbox: envIsSleepingById(app.id, 'sandbox', db)
+            ? { status: 'sleeping' }
+            : healthSand
             ? {
                 status: healthSand.is_down ? 'down' : (healthSand.last_status === 200 ? 'healthy' : 'unknown'),
                 last_check: healthSand.last_check_at,
@@ -1079,6 +1085,12 @@ const TOOLS = [
         .get(app.id, env);
       const path = cfg?.endpoint || '/api/health';
       const url = `http://127.0.0.1:${port}${path}`;
+      if (envIsSleepingById(app.id, env, db)) {
+        return {
+          app: app.slug, env, url, ok: false, status: 'sleeping', sleeping: true,
+          note: 'AppCrane stopped this environment on purpose while it was idle. It is not down: the next request to the app wakes it, and so does a deploy.',
+        };
+      }
 
       try {
         const r = await fetchAppProbe(url, { signal: AbortSignal.timeout(5000) });
@@ -1141,7 +1153,7 @@ const TOOLS = [
         let plain = null;
         try { plain = decrypt(r.value_encrypted); } catch (_) { /* below */ }
         if (plain == null) return { key: r.key, is_set: true, error: 'decrypt_failed', updated_at: r.updated_at };
-        const ref = isSecretRef(plain) ? { value: plain, source: REF_SOURCE } : {};
+        const ref = isSecretRef(plain) ? { value: plain, source: refSource(plain) } : {};
         // An app admin who may not reveal production sees neither its length nor its tail.
         if (!canReveal) return { key: r.key, is_set: true, ...ref, preview: opaquePreview(plain), updated_at: r.updated_at };
         return { key: r.key, is_set: true, ...ref, length: plain.length, preview: secretPreview(plain), fingerprint: secretFingerprint(plain), updated_at: r.updated_at };
@@ -1200,7 +1212,7 @@ const TOOLS = [
         logAudit(user.id, app.id, 'secret-reveal', { env, key: args.key });
       } catch (_) { /* audit is best-effort */ }
       log.warn(`MCP: SECRET REVEAL ${app.slug}/${env}/${args.key} by user ${user.id}`);
-      return { app: app.slug, env, key: args.key, value, ...(isSecretRef(value) && { source: REF_SOURCE }), updated_at: row.updated_at };
+      return { app: app.slug, env, key: args.key, value, ...(isSecretRef(value) && { source: refSource(value) }), updated_at: row.updated_at };
     },
   },
 
@@ -1538,6 +1550,7 @@ const TOOLS = [
       const env = args.env === 'production' ? 'production' : 'sandbox';
       const app = getAppForUser(user, args.slug);
       const safePath = validateContainerPath(args.path || '/app');
+      await (await import('./envWake.js')).ensureAwake(app, env, { reason: 'appcrane_ls', userId: user.id });
       const execFileAsync = (await import('util')).promisify((await import('child_process')).execFile);
       const containerName = `appcrane-${app.slug}-${env}`;
       try {
@@ -1573,6 +1586,7 @@ const TOOLS = [
       const env = args.env === 'production' ? 'production' : 'sandbox';
       const app = getAppForUser(user, args.slug);
       const safePath = validateContainerPath(args.path);
+      await (await import('./envWake.js')).ensureAwake(app, env, { reason: 'appcrane_cat', userId: user.id });
       const execFileAsync = (await import('util')).promisify((await import('child_process')).execFile);
       const containerName = `appcrane-${app.slug}-${env}`;
       const MAX_BYTES = 256 * 1024;
@@ -2264,6 +2278,10 @@ const TOOLS = [
       const lines = Math.min(args.lines || 100, 1000);
       const { getAppLogs } = await import('./docker.js');
       const logLines = await getAppLogs(app.slug, env, lines, args.search || '');
+      if (envIsSleepingById(app.id, env)) {
+        return { app: app.slug, env, lines: logLines, count: logLines.length, sleeping: true,
+          note: 'The environment is asleep (stopped on purpose while idle); these are the logs up to when it was stopped. The next request wakes it.' };
+      }
       return { app: app.slug, env, lines: logLines, count: logLines.length };
     },
   },
@@ -2518,6 +2536,7 @@ const TOOLS = [
       // used to leave an app publicly reachable yet catalog-private, which made
       // the launcher prompt users to "Request access" to an already-open app.
       Object.assign(updates, resolveVisibility({ visibility: args.visibility, public_access: args.public_access }));
+      if (updates.visibility !== undefined && updates.visibility !== (app.visibility || 'private')) assertVisibilityAllowed(db, updates.visibility);
       if (args.image_retention !== undefined) {
         const n = parseInt(args.image_retention, 10);
         if (!Number.isFinite(n) || n < 0 || n > 50) throw new Error('image_retention must be 0-50');
@@ -2785,6 +2804,7 @@ const TOOLS = [
       // v2.20.2: shared invariant helper (see resolveVisibility) — no-op when
       // visibility isn't in the patch.
       Object.assign(updates, resolveVisibility({ visibility: args.visibility }));
+      if (updates.visibility !== undefined && updates.visibility !== (app.visibility || 'private')) assertVisibilityAllowed(db, updates.visibility);
 
       if (args.category !== undefined) {
         const newCat = args.category ? String(args.category).trim() : null;
@@ -3751,7 +3771,7 @@ const TOOLS = [
   {
     name: 'appcrane_create_managed_app',
     description:
-      'Create a new managed app — AppCrane creates and owns its git repository, and the agent works against it through appcrane_push_to_managed_app / appcrane_managed_* tools without the end user ever needing a GitHub account or PAT. New managed apps are hosted on this AppCrane server: there is no GitHub repo and no web URL, so github_* tools cannot reach it (managed apps created before this keep their GitHub repo and work as before). Use this when the user does not have a GitHub account or does not want to deal with GitHub at all. Returns the same shape as appcrane_create_app, plus the repo metadata. IDEMPOTENT RECOVERY: if the slug already exists as a managed app but its AMC_ repo was never created (a half-created app from an earlier failure — push then returns REPO_NOT_FOUND), calling this again re-provisions the missing repo where that app\'s repo belongs and returns { repaired: true } instead of erroring. So if a create attempt half-failed, just call it again with the same slug. Owner-or-admin to repair an existing one.',
+      'Create a new managed app — AppCrane creates and owns its git repository, and the agent works against it through appcrane_push_to_managed_app / appcrane_managed_* tools without the end user ever needing a GitHub account or PAT. New managed apps are hosted on this AppCrane server: there is no GitHub repo and no web URL, so github_* tools cannot reach it (managed apps created before this keep their GitHub repo and work as before). Use this when the user does not have a GitHub account or does not want to deal with GitHub at all. Returns the same shape as appcrane_create_app, plus the repo metadata. IDEMPOTENT RECOVERY: if the slug already exists as a managed app but its AMC_ repo was never created (a half-created app from an earlier failure — push then returns REPO_NOT_FOUND), calling this again re-provisions the missing repo where that app\'s repo belongs and returns { repaired: true } instead of erroring. So if a create attempt half-failed, just call it again with the same slug. Owner-or-admin to repair an existing one. TEMPLATE: pass template (node-react, python-fastapi or static-site) to commit a golden-path starter as the repo\'s first commit: identity middleware that verifies AppCrane\'s signed X-AppCrane-* headers and refuses unsigned ones, a role check, managed Postgres with a migration (not static-site), /api/health, tests, env.example, README and CLAUDE.md. The response\'s template field reports the commit; no deploy is started.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -3762,6 +3782,7 @@ const TOOLS = [
         domain:      { type: 'string', description: 'Optional custom domain.' },
         max_ram_mb:      { type: 'number', description: 'Per-container memory cap. Default: 512.' },
         max_cpu_percent: { type: 'number', description: 'Per-container CPU cap. Default: 50.' },
+        template: { type: 'string', enum: ['node-react', 'python-fastapi', 'static-site'], description: 'Optional. Seed the new repo with this starter template (slug and name filled in). node-react: Express + React (Vite); python-fastapi: FastAPI with its own Dockerfile; static-site: public/ served by a dependency-free Node server. Omit for an empty repo.' },
         intake: { type: 'object', additionalProperties: false, description: 'App intake. data_classification decides whether production waits for a platform admin\'s security approval (by default confidential and restricted do; sandbox never waits). Omitted: internal.', properties: { purpose: { type: 'string' }, data_classification: { type: 'string', enum: ['public', 'internal', 'confidential', 'restricted'] }, personal_data: { type: 'boolean', description: 'Stores personal or customer data' }, external_integrations: { type: 'string' }, access: { type: 'string', description: 'Who should have access' } } },
       },
       required: ['name', 'slug'],
@@ -3773,6 +3794,8 @@ const TOOLS = [
       if (!name || !slug) throw new Error('name and slug are required');
       const { submitIntake, normalizeIntake } = await import('./appIntake.js');
       normalizeIntake(args.intake || {});
+      const { assertScaffoldTemplateId, seedManagedAppFromTemplate } = await import('./scaffoldTemplates.js');
+      assertScaffoldTemplateId(args.template);
       { const slugProblem = slugRefusal(slug, user); if (slugProblem) throw new Error(slugProblem); }
       if (args.branch && !/^(?!-)[A-Za-z0-9._/\-]{1,200}$/.test(args.branch)) {
         throw new Error('branch must be alphanumeric with . _ / - (max 200 chars), not starting with -');
@@ -3852,9 +3875,13 @@ const TOOLS = [
         // full_name ('<owner>/AMC_<slug>' on GitHub, 'AMC_<slug>' locally).
         const repairedName = String(repaired.full_name || '').split('/').pop();
         log.info(`MCP: repaired half-created managed app '${slug}' — re-provisioned ${repaired.full_name} (${backend}) by user ${user.id}`);
+        const repairedTemplate = args.template
+          ? await seedManagedAppFromTemplate(db.prepare('SELECT * FROM apps WHERE id = ?').get(existing.id), args.template, { name: existing.name, actorId: user.id })
+          : undefined;
         return {
           app: slug,
           repaired: true,
+          ...(repairedTemplate ? { template: repairedTemplate } : {}),
           repo: backend === REPO_BACKEND_GITHUB
             ? { name: repairedName, html_url: repaired.html_url, default_branch: repaired.default_branch }
             : { name: repairedName, backend, default_branch: repaired.default_branch },
@@ -3928,6 +3955,12 @@ const TOOLS = [
 
       log.info(`MCP: managed app '${slug}' created by user ${user.id}; repo=${repo.full_name} (${backend})`);
       const urls = appUrls(db, slug);
+      const template = args.template
+        ? await seedManagedAppFromTemplate(db.prepare('SELECT * FROM apps WHERE id = ?').get(appId), args.template, { name, actorId: user.id })
+        : undefined;
+      const templateNext = template?.seeded
+        ? `The ${template.id} template is committed (${template.files} files); read its CLAUDE.md for the contract, then appcrane_deploy slug="${slug}" stage="sandbox". To change files: `
+        : template ? `Seeding the ${template.id} template failed (${template.error}); the app and its empty repo exist. ` : '';
       if (backend !== REPO_BACKEND_GITHUB) {
         return {
           app: { slug, name, branch, source_type: 'managed', repo_backend: backend },
@@ -3935,7 +3968,8 @@ const TOOLS = [
           ports,
           urls,
           intake,
-          next: `Push scaffolding via appcrane_push_to_managed_app slug="${slug}" files=[…], then appcrane_deploy slug="${slug}" stage="sandbox". This app's repository is hosted on this AppCrane server, not GitHub — read and change it only through appcrane_push_to_managed_app / appcrane_managed_push_chunk / appcrane_managed_assemble / appcrane_managed_patch. github_* tools cannot reach it.`,
+          ...(template ? { template } : {}),
+          next: `${templateNext}Push scaffolding via appcrane_push_to_managed_app slug="${slug}" files=[…], then appcrane_deploy slug="${slug}" stage="sandbox". This app's repository is hosted on this AppCrane server, not GitHub — read and change it only through appcrane_push_to_managed_app / appcrane_managed_push_chunk / appcrane_managed_assemble / appcrane_managed_patch. github_* tools cannot reach it.`,
         };
       }
       return {
@@ -3944,7 +3978,8 @@ const TOOLS = [
         ports,
         urls,
         intake,
-        next: `Push scaffolding via appcrane_push_to_managed_app slug="${slug}" files=[…], then appcrane_deploy slug="${slug}" stage="sandbox". Do NOT use github_push_files for this repo — that's authed with the user's PAT and has zero access to the service account.`,
+        ...(template ? { template } : {}),
+        next: `${templateNext}Push scaffolding via appcrane_push_to_managed_app slug="${slug}" files=[…], then appcrane_deploy slug="${slug}" stage="sandbox". Do NOT use github_push_files for this repo — that's authed with the user's PAT and has zero access to the service account.`,
       };
     },
   },
@@ -4345,7 +4380,7 @@ const TOOLS = [
         if (failed) throw new Error(`${failed.key}: ${failed.reason}.`);
         [stored] = done;
       } else {
-        assertStorableValue(String(args.value));
+        assertStorableValue(String(args.value), { app });
       }
       const db = getDb();
       const encrypted = encrypt(stored ? stored.reference : String(args.value));
@@ -4488,6 +4523,7 @@ const TOOLS = [
         WHERE app_id = ? AND env = ? AND name = ?
       `).get(app.id, env, String(args.name));
       if (!job) throw new Error(`No cron job named "${args.name}" on ${app.slug}/${env}. Check deployhub.json or appcrane_list_cron.`);
+      await (await import('./envWake.js')).ensureAwake(app, env, { reason: 'appcrane_run_cron_now', userId: user.id });
       const { runCronJob } = await import('./cronScheduler.js');
       const result = await runCronJob(job);
       return { app: app.slug, env, name: job.name, ...result };

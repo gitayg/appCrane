@@ -1,0 +1,14 @@
+Fixture manifests copied from each platform's documentation (fetched 2026-11-20).
+
+render-blueprint-spec.yaml  https://render.com/docs/blueprint-spec ("Example render.yaml", verbatim)
+railway.toml                https://docs.railway.com/config-as-code (the TOML example, verbatim)
+railway.json                https://docs.railway.com/reference/config-as-code (the page's per-field JSON
+                            snippets merged into one file: builder, watchPatterns, buildCommand,
+                            startCommand, preDeployCommand, healthcheckPath/Timeout,
+                            restartPolicyType, cronSchedule, environments.staging)
+app.json                    https://devcenter.heroku.com/articles/app-json-schema ("Example app.json", verbatim)
+heroku.yml                  https://devcenter.heroku.com/articles/build-docker-images-heroku-yml (the full
+                            setup/build/release/run example, verbatim)
+Procfile                    https://devcenter.heroku.com/articles/procfile (the line
+                            "web: bundle exec rails server -p $PORT", then the release / worker /
+                            urgentworker example, verbatim)
