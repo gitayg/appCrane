@@ -1,4 +1,7 @@
 {
+  "2.141.1": [
+    "Maintenance: the GitHub Actions that build, scan and sign AppCrane releases are updated to their latest patch versions. Nothing changes for app owners."
+  ],
   "2.141.0": [
     "You can git push to apps hosted on AppCrane alongside GitHub, see whether GitHub is ahead or behind, and push AppCrane's copy back to GitHub.",
     "Self-update now checks the new version before switching and rolls back on its own if it fails to start. Sandboxes can sleep when idle or on a schedule, and apps nobody uses sleep until their next visit.",
