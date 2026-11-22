@@ -1,4 +1,5 @@
 import { handleUnauthorized } from './sessionExpiry'
+import { requestStepUp, stepUpHintOf } from './stepUp'
 
 // Admin API — all fetch helpers for the admin SPA AND for the shared
 // React panels (Ask / Request / Bug) when mounted in the portal page.
@@ -82,7 +83,7 @@ export class ApiError extends Error {
   }
 }
 
-async function req<T = unknown>(path: string, init?: RequestInit): Promise<T> {
+async function req<T = unknown>(path: string, init?: RequestInit, stepped = false): Promise<T> {
   const r = await fetch(path, {
     ...init,
     headers: {
@@ -91,6 +92,15 @@ async function req<T = unknown>(path: string, init?: RequestInit): Promise<T> {
       ...(init?.headers || {}),
     },
   })
+  // Step-up: the session is fine, the action needs a recent sign-in. Confirm
+  // and retry once (stepUp.ts); a second refusal is reported, not looped on.
+  if (r.status === 401 && !stepped) {
+    const hint = stepUpHintOf(await r.clone().json().catch(() => ({})))
+    if (hint?.mode === 'reauth') {
+      await requestStepUp(hint)
+      return req<T>(path, init, true)
+    }
+  }
   if (r.status === 401) {
     // Any 401 from a session-gated route means the session is gone. The old
     // rule matched the body against five known-bad messages and did nothing

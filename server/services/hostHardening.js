@@ -45,7 +45,11 @@ export const ITEMS = [
   ['unattended-upgrades', 'Unattended security upgrades'],
   ['caddy-log-dir', 'Caddy access-log directory'],
   ['disk-reserve', '1 GiB disk reserve file'],
+  ['gvisor-runtime', 'gVisor (runsc) container runtime'],
 ];
+
+// The release scripts/host-hardening.sh installs; kept equal by a test.
+export const GVISOR_RELEASE = '20261116';
 
 const applied = (detail) => ({ state: 'applied', detail });
 const missing = (detail) => ({ state: 'missing', detail });
@@ -234,6 +238,19 @@ async function reserveItem(d) {
     : `no reserve file at ${reserve} (the script skips it when less than 10 GiB would stay free)`);
 }
 
+async function gvisorItem(d) {
+  const v = await d.exec('/usr/local/bin/runsc', ['--version']);
+  if (v.missing || (v.code !== 0 && !v.stdout)) return missing('gVisor not installed: apps cannot be started with the runsc runtime');
+  const rel = (/runsc version release-(\d+)/.exec(v.stdout || '') || [])[1] || null;
+  const info = await d.exec('docker', ['info', '--format', '{{json .Runtimes}}']);
+  if (info.missing || info.code !== 0) return unknown(`runsc ${rel ? `release-${rel}` : 'present'}; docker info failed: ${reasonLine(info.stderr) || `exit ${info.code}`}`);
+  let names = [];
+  try { names = Object.keys(JSON.parse(info.stdout) || {}); } catch (_) { return unknown('docker info returned no readable runtime list'); }
+  if (!names.includes('runsc')) return missing(`runsc${rel ? ` release-${rel}` : ''} is installed but dockerd has not registered it (runtimes: ${names.join(', ')})`);
+  if (rel !== GVISOR_RELEASE) return missing(`runsc release-${rel || 'unknown'} registered; AppCrane installs release-${GVISOR_RELEASE}`);
+  return applied(`runsc release-${rel} registered with dockerd`);
+}
+
 const CHECKS = {
   journal: journalItem,
   'syslog-rotation': syslogItem,
@@ -243,6 +260,7 @@ const CHECKS = {
   'unattended-upgrades': unattendedItem,
   'caddy-log-dir': caddyDirItem,
   'disk-reserve': reserveItem,
+  'gvisor-runtime': gvisorItem,
 };
 
 export async function checkItems(deps = {}) {

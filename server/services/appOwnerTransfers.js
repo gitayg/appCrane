@@ -52,6 +52,11 @@ function activeHuman(db, { user_id, email }) {
 function setOwner(db, appId, userId) {
   db.prepare(`INSERT INTO app_user_roles (app_id, user_id, app_role) VALUES (?, ?, 'owner')
               ON CONFLICT(app_id, user_id) DO UPDATE SET app_role = 'owner'`).run(appId, userId);
+  // An accepted or assigned owner is a tier set by people, not by an IdP group:
+  // the reconciler stops owning this row, so removing the group (or changing
+  // its tier) no longer deletes or demotes the owner and re-orphans the app.
+  db.prepare(`UPDATE scim_group_access SET created_role = 0, created_membership = 0, updated_at = datetime('now')
+              WHERE app_id = ? AND user_id = ?`).run(appId, userId);
 }
 
 function publicTransfer(db, t) {

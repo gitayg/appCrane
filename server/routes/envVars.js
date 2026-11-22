@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { assertStepUp } from '../services/stepUp.js';
 import { getDb } from '../db.js';
 // requireAppUser: assigned app users only — a global role, on its own, grants
 // no access to env-var values (middleware/auth.js codifies the rule).
@@ -111,6 +112,7 @@ router.get('/:slug/env/:env', requireAppUser, (req, res) => {
   if (showValues && env === 'production' && !isAppOwnerOrPlatformAdmin(req.user, req.app)) {
     throw new AppError('Revealing production secrets requires the app owner or a platform admin.', 403, 'FORBIDDEN');
   }
+  if (showValues && env === 'production') assertStepUp(req, 'reveal_production_secret', req.app);
   const db = getDb();
 
   const vars = db.prepare(
@@ -185,6 +187,7 @@ router.post('/:slug/env/:env/:key/reveal', requireAppUser, (req, res) => {
   if (env === 'production' && !isAppOwnerOrPlatformAdmin(req.user, req.app)) {
     throw new AppError('Revealing production secrets requires the app owner or a platform admin.', 403, 'FORBIDDEN');
   }
+  if (env === 'production') assertStepUp(req, 'reveal_production_secret', req.app);
   const row = getDb().prepare(
     'SELECT key, value_encrypted, updated_at FROM env_vars WHERE app_id = ? AND env = ? AND key = ?'
   ).get(req.app.id, env, key);

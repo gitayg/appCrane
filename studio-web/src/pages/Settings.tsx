@@ -19,13 +19,20 @@ import { useMe, isAdmin } from '../hooks/useMe'
 import { GithubAppCard } from '../components/GithubAppCard'
 import { ClaudeTokenCard } from '../components/ClaudeTokenCard'
 import { ChangePasswordCard } from '../components/ChangePasswordCard'
+import { MySessionsCard } from '../components/sessions/MySessionsCard'
 import { serverDate } from '../utils/serverDate'
 import { TwoFactorCard } from '../components/mfa/TwoFactorCard'
 import { RestoreDrillsCard } from '../components/backup/RestoreDrillsCard'
 import { EvidencePackPanel } from '../components/compliance/EvidencePackPanel'
 import { SignInPolicyCard } from '../components/mfa/SignInPolicyCard'
+import { SignInRiskPanel } from '../components/signinRisk/SignInRiskPanel'
 import { OAuthAdminCard } from '../components/OAuthAdminCard'
+import { BlueprintsCard } from '../components/oauth/BlueprintsCard'
+import { ClientSourcesCard } from '../components/oauth/ClientSourcesCard'
 import { SiemSinks } from '../components/siem/SiemSinks'
+import { AppAuditPlatformCard } from '../components/appAudit/AppAuditPlatformCard'
+import { ItSetupLinksCard } from '../components/itSetup/ItSetupLinksCard'
+import { SsoDomainsCard } from '../components/itSetup/SsoDomainsCard'
 import { LlmGatewaySettingsCard } from '../components/llm/LlmGatewaySettingsCard'
 import { CryptographyCard } from '../components/crypto/CryptographyCard'
 import { SecretsManagerCard } from '../components/SecretsManagerCard'
@@ -35,6 +42,7 @@ import { AutoPatchPolicyCard } from '../components/autoPatch/AutoPatchPolicyCard
 import { VulnAlertsCard } from '../components/vulnAlerts/VulnAlertsCard'
 import { RuntimePatchCard } from '../components/autoPatch/RuntimePatchCard'
 import { AppIsolationCard } from '../components/AppIsolationCard'
+import { ContainerRuntimeCard } from '../components/containerRuntime/ContainerRuntimeCard'
 import { SignupRequestsCard } from '../components/sso/SignupRequestsCard'
 import { setVisibleInterval } from '../utils/visibleInterval'
 import { ImageTrustPolicyCard } from '../components/imageTrust/ImageTrustPolicyCard'
@@ -479,6 +487,7 @@ function SecurityTab() {
       </div>
 
       <AppIsolationCard />
+      <ContainerRuntimeCard />
 
       <div className="setting-card">
         <h3>Brotli-compressed uploads</h3>
@@ -1401,6 +1410,7 @@ function AccountTab() {
     <>
       <ChangePasswordCard />
       <TwoFactorCard />
+      <MySessionsCard />
       <ClaudeTokenCard />
       <ApiKeyCard />
     </>
@@ -1486,7 +1496,7 @@ export function Settings() {
       {panel('account', <AccountTab />)}
       {panel('mcp', <Mcp />)}
       {panel('skills', <SkillsTab />)}
-      {panel('security', <><SecurityTab /><SignInPolicyCard /><McpAuthPolicyCard /><OAuthAdminCard /><ClassificationPolicyCard /><VulnAlertsCard /><AutoPatchPolicyCard /><RuntimePatchCard /><CryptographyCard /><SecretsManagerCard /><ImageTrustPolicyCard /><PlatformAnthropicKeyCard /><LlmGatewaySettingsCard /><SiemSinks /></>)}
+      {panel('security', <><SecurityTab /><SignInPolicyCard /><SignInRiskPanel /><SsoDomainsCard /><ItSetupLinksCard /><McpAuthPolicyCard /><OAuthAdminCard /><ClientSourcesCard /><BlueprintsCard /><ClassificationPolicyCard /><VulnAlertsCard /><AutoPatchPolicyCard /><RuntimePatchCard /><CryptographyCard /><SecretsManagerCard /><ImageTrustPolicyCard /><PlatformAnthropicKeyCard /><LlmGatewaySettingsCard /><SiemSinks /><AppAuditPlatformCard /></>)}
       {panel('users', <Users />)}
       {panel('roles', <RolesTab />)}
       {panel('github', <GithubTab />)}

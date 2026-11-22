@@ -46,7 +46,9 @@ test('no SPA call puts /apps/ in front of a logs or audit path', () => {
     const text = readFileSync(file, 'utf8');
     text.split('\n').forEach((line, i) => {
       if (/^\s*(\/\/|\*)/.test(line)) return;            // prose may cite the wrong URL
-      if (/["'`]\/api\/apps\/[^"'`]*\/(logs|audit)\b/.test(line)) {
+      // A whole segment: /api/apps/:slug/audit-events and /audit-streams are
+      // real routes (routes/appAudit.js, mounted at /api).
+      if (/["'`]\/api\/apps\/[^"'`]*\/(logs|audit)(?![\w-])/.test(line)) {
         offenders.push(`${file.replace(SRC, '')}:${i + 1}  ${line.trim().slice(0, 100)}`);
       }
     });

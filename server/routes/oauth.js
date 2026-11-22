@@ -5,15 +5,20 @@ import log from '../utils/logger.js';
 import { readSessionCookie } from '../utils/sessionCookie.js';
 import {
   OAuthError, issuerOf, mcpResourceOf, resolveScope, isValidCodeChallenge,
-  validateRegistration, SCOPES_SUPPORTED, SCOPE_FULL, AUTH_METHODS, GRANT_TYPES,
+  validateRegistration, SCOPE_FULL, AUTH_METHODS, GRANT_TYPES,
 } from '../services/oauthPolicy.js';
 import {
   pruneStale, registerClient, getClient, authenticateClient, createAuthRequest,
   redeemCode, refreshTokens, revokeToken,
 } from '../services/oauthStore.js';
 import { createOAuthLimiter } from '../services/oauthRateLimit.js';
-import { checkRegistration, clientRefusal } from '../services/oauthClientPolicy.js';
+import { onOAuthClientFailure } from '../services/signinRisk/index.js';
+import { clientIp } from '../utils/clientIp.js';
+import { checkRegistration, clientRefusal, getDcrPolicy } from '../services/oauthClientPolicy.js';
 import { resolveRequestedResource } from '../services/appMcp/oauthResource.js';
+import { isCimdClientId, resolveCimdClient } from '../services/oauthCimd.js';
+import { JWT_BEARER, ID_JAG_PROFILE, redeemIdJag } from '../services/oauthIdJag.js';
+import { ALL_SCOPES } from '../services/mcpScopes.js';
 
 // AppCrane as the OAuth 2.1 authorization server for its own MCP endpoint
 // (MCP authorization spec 2025-11-25): RFC 9728 protected-resource metadata,
@@ -55,6 +60,7 @@ wellKnownRouter.get('/oauth-protected-resource', openCors, protectedResourceMeta
 wellKnownRouter.get('/oauth-protected-resource/api/mcp', openCors, protectedResourceMetadata);
 wellKnownRouter.get('/oauth-authorization-server', openCors, (req, res) => {
   const issuer = issuerOf(req);
+  const policy = getDcrPolicy();
   res.json({
     issuer,
     authorization_endpoint: `${issuer}/oauth/authorize`,
@@ -63,12 +69,14 @@ wellKnownRouter.get('/oauth-authorization-server', openCors, (req, res) => {
     revocation_endpoint: `${issuer}/oauth/revoke`,
     response_types_supported: ['code'],
     response_modes_supported: ['query'],
-    grant_types_supported: GRANT_TYPES,
+    grant_types_supported: policy.id_jag_enabled ? [...GRANT_TYPES, JWT_BEARER] : GRANT_TYPES,
     code_challenge_methods_supported: ['S256'],
     token_endpoint_auth_methods_supported: AUTH_METHODS,
     revocation_endpoint_auth_methods_supported: AUTH_METHODS,
-    scopes_supported: SCOPES_SUPPORTED,
+    scopes_supported: ALL_SCOPES,
     authorization_response_iss_parameter_supported: true,
+    client_id_metadata_document_supported: policy.cimd_enabled,
+    ...(policy.id_jag_enabled ? { authorization_grant_profiles_supported: [ID_JAG_PROFILE] } : {}),
   });
 });
 
@@ -128,8 +136,18 @@ const str = (v) => (typeof v === 'string' ? v : undefined);
 // GET /oauth/authorize. An unknown client or a redirect_uri that is not an
 // exact registered match gets an error page and NO redirect (OAuth 2.1
 // section 4.1.2.1); every other problem is reported to the redirect_uri.
-router.get('/authorize', authorizeLimit, (req, res) => {
+router.get('/authorize', authorizeLimit, async (req, res) => {
   const q = req.query;
+  if (isCimdClientId(str(q.client_id))) {
+    if (!getDcrPolicy().cimd_enabled) return errorPage(res, 400, 'This AppCrane does not accept apps identified by a client metadata document URL.');
+    try {
+      pruneStale();
+      await resolveCimdClient(str(q.client_id));
+    } catch (err) {
+      log.info(`OAuth: client metadata document refused: ${err.message}`);
+      return errorPage(res, 400, err instanceof OAuthError ? err.message : 'The client metadata document could not be checked.');
+    }
+  }
   const client = getClient(str(q.client_id));
   if (!client) return errorPage(res, 400, 'Unknown client_id. The app must register with AppCrane first.');
   let redirectUri = str(q.redirect_uri);
@@ -180,13 +198,16 @@ function presentedClient(req) {
   return { method: 'none', clientId: str(body.client_id) };
 }
 
-router.post('/token', openCors, tokenLimit, (req, res) => {
+router.post('/token', openCors, tokenLimit, async (req, res) => {
   noStore(res);
   try {
     const body = req.body || {};
     const client = authenticateClient(presentedClient(req));
     const grantType = str(body.grant_type);
     if (!grantType) throw new OAuthError('invalid_request', 'grant_type is required');
+    if (grantType === JWT_BEARER) {
+      return res.json(await redeemIdJag({ req, client, assertion: str(body.assertion), resource: str(body.resource), scope: str(body.scope) }));
+    }
     if (!client.grant_types.includes(grantType) || !GRANT_TYPES.includes(grantType)) {
       throw new OAuthError(GRANT_TYPES.includes(grantType) ? 'unauthorized_client' : 'unsupported_grant_type', `grant_type ${grantType} is not allowed for this client`);
     }
@@ -196,6 +217,7 @@ router.post('/token', openCors, tokenLimit, (req, res) => {
       : refreshTokens({ refreshToken: str(body.refresh_token), client, resource });
     res.json(out);
   } catch (err) {
+    if (err?.oauthError === 'invalid_client') onOAuthClientFailure(clientIp(req), presentedClient(req).clientId);
     oauthFail(res, err);
   }
 });
@@ -207,6 +229,7 @@ router.post('/revoke', openCors, tokenLimit, (req, res) => {
     revokeToken({ token: str((req.body || {}).token), client });
     res.status(200).json({});
   } catch (err) {
+    if (err?.oauthError === 'invalid_client') onOAuthClientFailure(clientIp(req), presentedClient(req).clientId);
     oauthFail(res, err);
   }
 });

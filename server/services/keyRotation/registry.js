@@ -18,12 +18,16 @@ export const COLUMNS = [
   ['app_identity_secrets', ['secret_encrypted']],
   ['github_app_config', ['client_secret_enc', 'webhook_secret_enc', 'private_key_enc']],
   ['siem_sinks', ['secrets_enc']],
+  ['app_audit_streams', ['secrets_enc']],
   ['managed_databases', ['password_enc', 'app_password_enc']],
   ['managed_db_servers', ['admin_password_enc']],
   ['managed_db_certs', ['key_enc']],
   ['user_mfa', ['totp_secret_enc', 'pending_secret_enc']],
   ['crew_push_configs', ['token_enc', 'auth_credentials_enc']],
   ['secret_connections', ['credentials_enc']],
+  ['api_connections', ['credentials_enc', 'identity_secret_enc']],
+  ['app_egress_tokens', ['token_encrypted']],
+  ['it_setup_changes', ['after_enc', 'before_enc']],
 ];
 
 // settings: every value shaped like a blob is one (the same structural rule
@@ -39,7 +43,7 @@ export const SETTINGS_HANDLED = new Set(['mfa_recovery_legacy_secrets_enc']);
 // Tables never rewritten: a blob found there is left as it is and reported.
 // audit_log and events are sealed into the tamper-evident chain, so editing a
 // row would break it; a copy of ciphertext in a log line decrypts nothing.
-export const INERT_TABLES = new Set(['audit_log', 'events', 'audit_chain', 'audit_chain_checkpoints', '_migrations']);
+export const INERT_TABLES = new Set(['audit_log', 'events', 'audit_chain', 'audit_chain_checkpoints', 'app_audit_events', 'app_audit_chain', '_migrations']);
 
 export function coveredColumn(table, column) {
   if (table === 'settings' && column === 'value') return true;

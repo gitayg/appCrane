@@ -11,7 +11,9 @@
 //   secrets         no credential-shaped string in the candidate tree
 //   served_secrets  no credential in what the release serves to browsers: the
 //                   live sandbox crawled over its loopback port when it is the
-//                   candidate, else built output committed to the tree
+//                   candidate, else the output directories copied out of the
+//                   image the deploy just built (never run), else built
+//                   output committed to the tree
 //   supabase_rls    no table of a referenced Supabase project returns rows to
 //                   its anon key (probe opt-in: policy probe_supabase_rls)
 //   unauth_endpoints no API route of the live sandbox returns records, or
@@ -44,6 +46,7 @@ import { effectiveRules, parseAccessRules } from './accessRules.js';
 import { scanTreeForSecrets } from './releaseSecretScan.js';
 import { regularFileInside } from '../utils/paths.js';
 import { crawlServed, scanBuiltDir, builtDirsIn, emptySupabase, redact } from './servedOutputScan.js';
+import { manifestNotes, noManifestReason } from './pythonManifests.js';
 import { probeSupabaseRls, supabaseUrlForRef } from './supabaseRlsProbe.js';
 import { isPublicByDesign } from './releaseSecretScan.js';
 import { jwtPayload } from './adopt/secrets.js';
@@ -70,7 +73,7 @@ const MAX_EXCEPTION_DAYS = 90;
 const DEFAULT_SCAN_TIMEOUT_MS = 90_000;
 
 let deps = null;
-/** Test seam: { scanApp, scanTree, scanSecrets, crawlServed, supabaseFetch, supabaseBaseUrl, probeUnauth } replace the real scanners. */
+/** Test seam: { scanApp, scanTree, scanSecrets, crawlServed, scanImageOutput, supabaseFetch, supabaseBaseUrl, probeUnauth } replace the real scanners. */
 export function _setReleaseCheckDepsForTests(d) { deps = d; }
 
 function scanTimeoutMs() {
@@ -129,17 +132,27 @@ function judgeFindings(findings, label) {
   return check('dependencies', 'pass', [`${label}: no known vulnerabilities`], { findings: 0 });
 }
 
+function scanNotes(row) {
+  if (Array.isArray(row?.notes)) return row.notes;
+  try { return row?.notes ? JSON.parse(row.notes) : []; } catch { return []; }
+}
+
 function judgeScanRow(row, label) {
   if (!row) return check('dependencies', 'fail', [`${label}: no scan result`]);
   if (row.status === 'error') return check('dependencies', 'fail', [`${label}: the scan could not complete (${row.error || 'unknown error'}), so the release is not shown to be clean`]);
-  if (row.status === 'skipped') return check('dependencies', 'pass', [`${label}: nothing to scan (${row.error || 'no recognised manifest'})`]);
-  return judgeFindings(row.findings_json ? JSON.parse(row.findings_json) : [], label);
+  const judged = row.status === 'skipped'
+    ? check('dependencies', 'pass', [`${label}: nothing to scan (${row.error || 'no recognised manifest'})`])
+    : judgeFindings(row.findings_json ? JSON.parse(row.findings_json) : [], label);
+  const notes = scanNotes(row);
+  if (!notes.length) return judged;
+  return { ...judged, status: judged.status === 'pass' ? 'warn' : judged.status, reasons: [...judged.reasons, ...notes] };
 }
 
 async function scanTreeDeps(dir) {
   const { findLockfiles, parseLockfile, queryOsv } = await import('./appScan.js');
   const manifests = findLockfiles(dir);
-  if (manifests.length === 0) return { status: 'skipped', error: 'no recognised manifest in the release' };
+  if (manifests.length === 0) return { status: 'skipped', error: noManifestReason(dir, 'no recognised manifest in the release') };
+  const notes = manifestNotes(manifests, dir);
   const seen = new Set();
   const packages = [];
   for (const m of manifests) {
@@ -148,9 +161,10 @@ async function scanTreeDeps(dir) {
       if (!seen.has(k)) { seen.add(k); packages.push(p); }
     }
   }
+  if (packages.length === 0 && notes.length) return { status: 'skipped', error: 'no package is pinned to an exact version, so nothing was scanned', notes };
   const osv = await queryOsv(packages);
-  if (!osv.ok) return { status: 'error', error: osv.error };
-  return { status: osv.findings.length ? 'findings' : 'ok', findings_json: osv.findings.length ? JSON.stringify(osv.findings) : null };
+  if (!osv.ok) return { status: 'error', error: osv.error, notes };
+  return { status: osv.findings.length ? 'findings' : 'ok', findings_json: osv.findings.length ? JSON.stringify(osv.findings) : null, notes };
 }
 
 export const AUTO_PATCH_DELTA = 'auto-patch-delta';
@@ -272,7 +286,16 @@ function sandboxIsCandidate(app, { sandbox, releaseDir, commit }) {
   return !!sandbox && (!releaseDir || app.source_type === 'image' || !!(commit && sandbox.commit_hash && commit === sandbox.commit_hash));
 }
 
-async function servedSecretsCheck(db, app, { sandbox, releaseDir, commit }) {
+async function scanBuiltImage(image, manifest) {
+  const run = deps?.scanImageOutput || (await import('./imageServedOutput.js')).scanImageServedOutput;
+  try {
+    return await withTimeout(Promise.resolve(run({ image, manifest })), 60_000, 'The built-image output scan');
+  } catch (e) {
+    return { ok: false, error: e.message, dirs: [], scan: null };
+  }
+}
+
+async function servedSecretsCheck(db, app, { sandbox, releaseDir, commit, image = null, manifest = null }) {
   const none = { check: null, supabase: emptySupabase(), crawl: null };
   if (await ingressType(db, app) === 'tcp') return { ...none, check: check('served_secrets', 'pass', ['TCP app: nothing is served to browsers over HTTP'], { applicable: false }) };
   const useSandbox = sandboxIsCandidate(app, { sandbox, releaseDir, commit });
@@ -287,13 +310,29 @@ async function servedSecretsCheck(db, app, { sandbox, releaseDir, commit }) {
       return { ...none, check: check('served_secrets', 'warn', [`${label}: ${e.message}; the served output was not scanned`]) };
     }
     if (!scan.ok) return { ...none, check: check('served_secrets', 'warn', [`${label}: ${scan.error}; the served output was not scanned`]) };
-  } else if (releaseDir && builtDirsIn(releaseDir).length) {
-    label = 'Built output committed to the release';
-    scan = scanBuiltDir(releaseDir, builtDirsIn(releaseDir), { deadline: Date.now() + 20_000 });
   } else {
-    return { ...none, check: check('served_secrets', 'warn', [releaseDir
-      ? 'The release being deployed is not served anywhere yet and commits no built output, so its client bundle was not scanned (the check reads the live sandbox when it runs the same commit)'
-      : 'No candidate release to scan: no live sandbox and no release tree'])};
+    // The built image is what production will serve, committed output
+    // included, so it is read first when the deploy has one in hand.
+    let imageNote = null;
+    if (image) {
+      const r = await scanBuiltImage(image, manifest);
+      if (r.ok && r.scan) {
+        label = `Built image ${String(image).slice(0, 80)} (${r.dirs.join(', ')})`;
+        scan = r.scan;
+      } else {
+        imageNote = r.ok
+          ? 'the built image has none of the known output directories (/app/dist, /app/build, /app/out, /app/public, /usr/share/nginx/html and others)'
+          : `the built image could not be read (${r.error})`;
+      }
+    }
+    if (!scan && releaseDir && builtDirsIn(releaseDir).length) {
+      label = 'Built output committed to the release';
+      scan = scanBuiltDir(releaseDir, builtDirsIn(releaseDir), { deadline: Date.now() + 20_000 });
+    } else if (!scan) {
+      return { ...none, check: check('served_secrets', 'warn', [releaseDir || image
+        ? 'The release being deployed is not served anywhere yet and commits no built output, so its client bundle was not scanned (the check reads the live sandbox when it runs the same commit)'
+        : 'No candidate release to scan: no live sandbox and no release tree', imageNote])};
+    }
   }
   const anon = scan.supabase.anonKeys.size;
   const note = anon ? `${anon} Supabase anon/publishable key(s) in the output: public by design, not a finding; they are the input to the RLS check` : null;
@@ -500,7 +539,7 @@ export async function runReleaseCheck(ctx) {
     const delta = ctx.mode === AUTO_PATCH_DELTA && ctx.userId == null ? (ctx.delta || {}) : null;
     checks.push(await dependencyCheck(db, app, { releaseDir: ctx.releaseDir || null, commit: ctx.commit || null, sandbox, delta }));
     checks.push(secretsCheck(app, dir));
-    const served = await servedSecretsCheck(db, app, { sandbox, releaseDir: ctx.releaseDir || null, commit: ctx.commit || null });
+    const served = await servedSecretsCheck(db, app, { sandbox, releaseDir: ctx.releaseDir || null, commit: ctx.commit || null, image: ctx.image || null, manifest: ctx.manifest || null });
     checks.push(served.check);
     checks.push(await supabaseRlsCheck(db, app, fullPolicy, served.supabase));
     checks.push(await unauthEndpointsCheck(db, app, fullPolicy, { sandbox, releaseDir: ctx.releaseDir || null, commit: ctx.commit || null, crawl: served.crawl }));
@@ -576,13 +615,13 @@ export function sendReleaseRefusal(res, err) {
  * any container is stopped or started. Rollbacks, and redeploys of the live
  * release by auto-heal or the bulk redeploy, are not new releases and skip it.
  */
-export async function enforceReleaseCheckInDeploy({ app, deployId, releaseDir, commit, opts = {}, appendLog = () => {} }) {
+export async function enforceReleaseCheckInDeploy({ app, deployId, releaseDir, commit, image = null, manifest = null, opts = {}, appendLog = () => {} }) {
   if (opts.releaseCheck === 'skip') return null;
   const db = getDb();
   const row = db.prepare('SELECT log, deployed_by FROM deployments WHERE id = ?').get(deployId);
   if (/^(auto-heal:|auto-queued after)/.test(row?.log || '')) return null;
   const delta = opts.releaseCheckDelta ? { mode: AUTO_PATCH_DELTA, delta: opts.releaseCheckDelta } : {};
-  const record = await runReleaseCheck({ db, app, userId: row?.deployed_by ?? null, trigger: 'deploy', releaseDir, commit, deploymentId: deployId, ...delta });
+  const record = await runReleaseCheck({ db, app, userId: row?.deployed_by ?? null, trigger: 'deploy', releaseDir, commit, image, manifest, deploymentId: deployId, ...delta });
   appendLog(`Release check #${record.id}: ${record.result} (${record.data_classification}, mode ${record.mode})`);
   for (const c of record.checks) if (c.status !== 'pass') appendLog(`  ${c.status}: ${c.label}: ${c.reasons.join('; ')}`);
   if (record.blocked) {

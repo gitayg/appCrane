@@ -32,6 +32,8 @@ const execFileAsync = promisify(execFile);
 // plane could be exposed raw with every check still passing.
 const CONTAINER_PORT = CONTROL_PLANE_PORT;
 const APPCRANE_LABEL = 'appcrane=true';
+export const IMAGE_REF_LABEL = 'appcrane.image.ref';
+export const IMAGE_REF_FORMAT = `{{index .Config.Labels "${IMAGE_REF_LABEL}"}}|{{.Config.Image}}`;
 
 /**
  * The environment every image build is spawned with (v2.78.2).
@@ -356,9 +358,11 @@ export async function discardImage(ref) {
   }
 }
 
+/** The image reference a container was started from: the tag, also when it was started by verified id. */
 export async function getContainerImage(slug, env) {
   const name = containerName(slug, env);
-  return dockerExec(['inspect', name, '--format', '{{.Config.Image}}'], { timeout: 5000 });
+  const [ref, image] = (await dockerExec(['inspect', name, '--format', IMAGE_REF_FORMAT], { timeout: 5000 })).split('|');
+  return ref || image;
 }
 
 export async function buildImage({ slug, env, contextDir, commitHash, appBasePath, onLog, appDockerfile = false, tag: tagOverride = null }) {
@@ -949,7 +953,7 @@ export async function startApp(opts) {
   assertRunnableCommand(opts.command ?? null);
   // Verify-before-run (services/imageTrust/verify.js): this instance's
   // signature over the image's exact id, before anything is torn down.
-  await (await import('./imageTrust/verify.js')).enforceImageTrust({ slug, env, image: opts.image, onLog: opts.onLog, what: 'start' });
+  const trust = await (await import('./imageTrust/verify.js')).enforceImageTrust({ slug, env, image: opts.image, onLog: opts.onLog, what: 'start' });
   let release = null;
   if (admission !== false) {
     const name = containerName(slug, env);
@@ -957,7 +961,7 @@ export async function startApp(opts) {
     release = reserveMemory(name, guaranteedMb(memoryMb) * 1024 * 1024);
   }
   try {
-    const id = await runAppContainer(opts);
+    const id = await runAppContainer({ ...opts, imageId: trust?.imageId || null });
     markAwakeBySlug(slug, env, 'container started');
     return id;
   } finally {
@@ -965,7 +969,7 @@ export async function startApp(opts) {
   }
 }
 
-async function runAppContainer({ slug, env, image, hostPort, envVars = {}, volumes = [], memoryMb = 512, cpus = 0.5, addHostGateway = false, containerPort = CONTAINER_PORT, command = null }) {
+async function runAppContainer({ slug, env, image, imageId = null, hostPort, envVars = {}, volumes = [], memoryMb = 512, cpus = 0.5, addHostGateway = false, containerPort = CONTAINER_PORT, command = null }) {
   const name = containerName(slug, env);
 
   // The argv-build boundary for the command (services/containerRuntimeSpec.js
@@ -990,6 +994,14 @@ async function runAppContainer({ slug, env, image, hostPort, envVars = {}, volum
   // isolated network fails with that explained and the app still running,
   // instead of being torn down for a start that was never going to happen.
   const network = await ensureAppNetwork();
+  // Egress allow-list (services/egress/container.js): null unless enforced for
+  // this app, and set up before the stop for the same reason as the network.
+  const egressMod = await import('./egress/container.js');
+  const egress = await egressMod.egressPlan({ slug, env });
+  // gVisor (services/containerRuntime.js): [] for runc, ['--runtime=runsc']
+  // when policy requires it, or a throw when the host lacks runsc — before the
+  // stop, so a refused start leaves the running container serving.
+  const runtimeArgs = await (await import('./containerRuntime.js')).runtimeRunArgs(slug);
 
   await stopApp(slug, env).catch(() => {});
   // Now that nothing of this app is running, a declared volume's path is
@@ -1021,6 +1033,7 @@ async function runAppContainer({ slug, env, image, hostPort, envVars = {}, volum
     '--label', APPCRANE_LABEL,
     '--label', `slug=${slug}`,
     '--label', `env=${env}`,
+    ...(imageId ? ['--label', `${IMAGE_REF_LABEL}=${image}`] : []),
     // v2.48.0: on-failure:2, down from 5. The direction was right and the count
     // was not. A process that OOMs under load OOMs again on the way back up, so
     // five attempts re-pressure a host that has no memory left to give, five
@@ -1029,6 +1042,7 @@ async function runAppContainer({ slug, env, image, hostPort, envVars = {}, volum
     // that actually helps — a transient crash — and stops before the loop turns
     // one app's OOM into the host's.
     '--restart=on-failure:2',
+    ...runtimeArgs,
     '--network', network,
     OOM_APP_FLAG,
     CPU_APP_FLAG,
@@ -1165,6 +1179,7 @@ async function runAppContainer({ slug, env, image, hostPort, envVars = {}, volum
 
   const runtimeEnv = {
     ...envVars,
+    ...(egress?.env || {}),
     // Tracks the published port rather than staying pinned at 3000. An image
     // that DOES honour $PORT (most buildpack output, and AppCrane's own builds)
     // must be told the same number the -p above targets; telling it 3000 while
@@ -1179,7 +1194,16 @@ async function runAppContainer({ slug, env, image, hostPort, envVars = {}, volum
     args.push('-e', `${k}=${v}`);
   }
 
-  args.push(image);
+  if (egress) {
+    const { appArgs, publish } = egressMod.applyEgressPlan(args, egress);
+    await egressMod.startAnchor(egress, publish, { slug, env });
+    args.splice(0, args.length, ...appArgs);
+  }
+
+  // The image id image trust verified, not the tag it was read through: a tag
+  // moved between the verify and this run would otherwise start other bytes.
+  // The tag stays on the container as IMAGE_REF_LABEL for every reader of it.
+  args.push(imageId || image);
 
   // Everything from here on is the CONTAINER's argv, not docker's.
   //
@@ -1236,6 +1260,7 @@ export async function stopApp(slug, env) {
   const name = containerName(slug, env);
   try { await dockerExec(['stop', name], { timeout: 15000 }); } catch (e) {}
   try { await dockerExec(['rm', '-f', name]); } catch (e) {}
+  await (await import('./egress/container.js')).removeAnchor(slug, env);
   invalidatePublishedPortsCache();
   invalidateResourcesCache();
   log.debug(`docker stopped: ${name}`);

@@ -53,6 +53,7 @@ db.prepare("INSERT INTO app_identity_secrets (app_id, env, secret_encrypted) VAL
 db.prepare("INSERT INTO github_app_config (id, github_app_id, slug, client_secret_enc, webhook_secret_enc, private_key_enc) VALUES (1, 7, 'g', ?, ?, ?)")
   .run(put('github_app_config.client_secret_enc', 'cs'), put('github_app_config.webhook_secret_enc', 'whs'), put('github_app_config.private_key_enc', 'PEM'));
 db.prepare("INSERT INTO siem_sinks (name, type, secrets_enc) VALUES ('s', 'https', ?)").run(put('siem_sinks.secrets_enc', '{"token":"t"}'));
+db.prepare("INSERT INTO app_audit_streams (app_id, name, type, secrets_enc) VALUES (?, 's', 'https', ?)").run(appId, put('app_audit_streams.secrets_enc', '{"auth_value":"t"}'));
 db.prepare("INSERT INTO managed_databases (app_id, engine, db_name, db_user, password_enc, app_password_enc) VALUES (?, 'postgres', 'd', 'u', ?, ?)")
   .run(appId, put('managed_databases.password_enc', 'pw1'), put('managed_databases.app_password_enc', 'pw2'));
 db.prepare("INSERT INTO managed_db_servers (engine, container_name, image, host_port, admin_password_enc) VALUES ('postgres', 'c', 'i', 5432, ?)")
@@ -65,6 +66,12 @@ db.prepare("INSERT INTO crew_push_configs (id, task_id, agent_id, token_id, url,
   .run(agentId, tokId, put('crew_push_configs.token_enc', 'pushtok'), put('crew_push_configs.auth_credentials_enc', 'creds'));
 db.prepare("INSERT INTO secret_connections (name, provider, app_id, settings_json, credentials_enc) VALUES ('v', 'vault', ?, '{}', ?)")
   .run(appId, put('secret_connections.credentials_enc', '{"token":"hvs.x"}'));
+db.prepare("INSERT INTO api_connections (name, provider, base_url, auth_type, credentials_enc, identity_secret_enc) VALUES ('c', 'generic', 'https://x.test', 'bearer', ?, ?)")
+  .run(put('api_connections.credentials_enc', '{"token":"upstream"}'), put('api_connections.identity_secret_enc', 'acting-secret'));
+db.prepare("INSERT INTO app_egress_tokens (app_id, env, token_hash, token_encrypted) VALUES (?, 'production', 'eh1', ?)").run(appId, put('app_egress_tokens.token_encrypted', 'aceg_x'));
+const itLink = Number(db.prepare("INSERT INTO it_setup_links (token_hash, label, scopes, expires_at) VALUES ('ith1', 'it', '[\"oidc\"]', datetime('now', '+1 day'))").run().lastInsertRowid);
+db.prepare("INSERT INTO it_setup_changes (link_id, scope, after_enc, before_enc) VALUES (?, 'oidc', ?, ?)")
+  .run(itLink, put('it_setup_changes.after_enc', '{"client_secret":"cs-new"}'), put('it_setup_changes.before_enc', '{"rows":[]}'));
 // settings: a whole-value blob, the MariaDB key row (never loaded) and the llm gateway JSON.
 db.prepare("INSERT INTO settings (key, value) VALUES ('oidc_client_secret_enc', ?)").run(put('settings.oidc_client_secret_enc', 'oidc-secret'));
 (await import('../server/services/managedDbEncryption.js')).ensureKey(db);

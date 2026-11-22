@@ -11,7 +11,12 @@ export const OAUTH_LIMITS = Object.freeze({
   authorize: { max: 60, windowMs: 60_000 },
 });
 
-export function createOAuthLimiter(name, limits = OAUTH_LIMITS[name]) {
+const oauthRefuse = (res) => res.status(429).json({ error: 'slow_down', error_description: 'Too many requests' });
+
+// Also the fixed-window limiter for other routes outside /api: `key` picks the
+// bucket (default the client address; null skips the request) and `refuse`
+// writes the 429 (default the OAuth error shape).
+export function createOAuthLimiter(name, limits = OAUTH_LIMITS[name], { key: keyOf = clientIp, refuse = oauthRefuse } = {}) {
   const buckets = new Map();
   const sweeper = setInterval(() => {
     const now = Date.now();
@@ -19,13 +24,14 @@ export function createOAuthLimiter(name, limits = OAUTH_LIMITS[name]) {
   }, 5 * 60_000);
   sweeper.unref?.();
   function limiter(req, res, next) {
-    const key = clientIp(req);
+    const key = keyOf(req);
+    if (key == null) return next();
     const now = Date.now();
     const rec = buckets.get(key);
     if (!rec || now > rec.resetAt) { buckets.set(key, { count: 1, resetAt: now + limits.windowMs }); return next(); }
     if (rec.count >= limits.max) {
       res.set('Retry-After', String(Math.ceil((rec.resetAt - now) / 1000)));
-      return res.status(429).json({ error: 'slow_down', error_description: 'Too many requests' });
+      return refuse(res);
     }
     rec.count++;
     next();

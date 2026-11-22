@@ -134,7 +134,9 @@ function innerBlocks(body) {
 // same list, with the same effect, so it is normalised the same way.
 // v2.125.14 added X-AppCrane-Identity-Sig-V2, listed ahead of -Sig because the
 // copy_headers removal is a substring replace and -Sig is a prefix of it.
-const SIGNATURE_HEADERS = ['X-AppCrane-Identity-Ts', 'X-AppCrane-Identity-Sig-V2', 'X-AppCrane-Identity-Sig', 'X-AppCrane-Auth-Via'];
+// Step-up added X-AppCrane-Auth-Time, -Auth-Mfa and -Identity-Sig-V3 (ahead of
+// -Sig-V2 and -Sig for the same prefix reason).
+const SIGNATURE_HEADERS = ['X-AppCrane-Identity-Ts', 'X-AppCrane-Identity-Sig-V3', 'X-AppCrane-Identity-Sig-V2', 'X-AppCrane-Identity-Sig', 'X-AppCrane-Auth-Via', 'X-AppCrane-Auth-Time', 'X-AppCrane-Auth-Mfa'];
 function withoutIdentitySignature(text) {
   if (text == null) return text;
   return text.split('\n')

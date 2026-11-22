@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { requireStepUp } from '../services/stepUp.js';
 import { getDb } from '../db.js';
 import { generateApiKey, hashApiKey } from '../services/encryption.js';
 import { requireAuth, requirePlatformAdmin } from '../middleware/auth.js';
@@ -67,7 +68,7 @@ function auditCreateOrRotate(req, res, next) {
   return auditMiddleware(req.api_key_first ? 'user-api-key-create' : 'user-api-key-rotate')(req, res, next);
 }
 
-router.post('/me/api-key/rotate', requireAuth, refuseMcpCredential, auditCreateOrRotate, (req, res) => {
+router.post('/me/api-key/rotate', requireAuth, refuseMcpCredential, requireStepUp('manage_api_keys'), auditCreateOrRotate, (req, res) => {
   const db = getDb();
   const user = db.prepare('SELECT id, role, active, api_key_hash FROM users WHERE id = ?').get((req.real_user || req.user).id);
   if (!user || !user.active) throw new AppError('Account is deactivated', 403, 'DEACTIVATED');
@@ -99,7 +100,7 @@ router.get('/api-key-policy', requireAuth, requirePlatformAdmin, (req, res) => {
 });
 
 /** PUT /api/api-key-policy: { max_age_days?, mcp_oauth_only?, mcp_oauth_only_exempt_user_ids? } */
-router.put('/api-key-policy', requireAuth, requirePlatformAdmin, auditMiddleware('api-key-policy-update'), (req, res) => {
+router.put('/api-key-policy', requireAuth, requirePlatformAdmin, requireStepUp('security_settings'), auditMiddleware('api-key-policy-update'), (req, res) => {
   if (req.user_mcp_key) throw new AppError('Change the API key policy from the dashboard', 403, 'KEY_FORBIDDEN');
   try {
     res.json(updatePolicy(getDb(), req.body || {}, req.user.id));

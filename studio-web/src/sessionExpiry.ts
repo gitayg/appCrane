@@ -96,6 +96,8 @@ export function clearCredentialsAndRedirect(): void {
 export async function handleUnauthorized(r: Response, url: string): Promise<string> {
   const body = await r.clone().json().catch(() => ({}))
   const message = (body as { error?: { message?: string } })?.error?.message || ''
+  // STEP_UP_REQUIRED is a live session asked to confirm it's the person, not a lapsed one.
+  if ((body as { error?: { code?: string } })?.error?.code === 'STEP_UP_REQUIRED') return message
   if (!isNonSessionRoute(url)) clearCredentialsAndRedirect()
   return message
 }

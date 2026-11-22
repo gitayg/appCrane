@@ -110,9 +110,17 @@ async function request(conn, { op, method, key = null, query = {}, headers = {},
   const payload = body == null ? null : (Buffer.isBuffer(body) ? body : Buffer.from(body));
   const payloadHash = payload ? sha256hex(payload) : EMPTY_SHA256;
   const signed = signRequest({ conn, method, key, query, headers, payloadHash });
+  // A caller-supplied transport (siem/s3Export.js) dials through its own
+  // network guard. It never follows a redirect, and neither does fetch here: a
+  // redirect would send the request, or take the object, from another host.
+  if (conn.transport) {
+    const r = await conn.transport(signed.url, { method, headers: signed.headers, body: payload });
+    if (r.status < 200 || r.status >= 300) throw s3Error(op, r.status, r.text);
+    return { ok: true, status: r.status, headers: { get: () => null } };
+  }
   let res;
   try {
-    res = await fetch(signed.url, { method, headers: signed.headers, body: payload, signal: AbortSignal.timeout(timeoutMs) });
+    res = await fetch(signed.url, { method, headers: signed.headers, body: payload, redirect: 'error', signal: AbortSignal.timeout(timeoutMs) });
   } catch (e) {
     throw new Error(`S3 ${op} failed: ${e.cause?.code || e.name || 'network error'}`);
   }

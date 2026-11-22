@@ -14,6 +14,12 @@ The signed text is, joined with "\\n":
     one "name:value" line per header in SIGNED_HEADERS_V2 (absent = empty)
 HMAC-SHA256 with the secret, base64url without padding, sent as
 X-AppCrane-Identity-Sig-V2.
+
+AppCrane with step-up also sends X-AppCrane-Identity-Sig-V3: the same over
+SIGNED_HEADERS_V3 (adds x-appcrane-auth-time and x-appcrane-auth-mfa) with
+"appcrane-identity-v3" as the first line. When present it is the one checked,
+and Identity.auth_time says when the person last signed in or stepped up (unix
+seconds; None without v3, or for a key).
 """
 
 from __future__ import annotations
@@ -39,6 +45,7 @@ SIGNED_HEADERS_V2 = (
     "x-appcrane-app-roles",
     "x-appcrane-auth-via",
 )
+SIGNED_HEADERS_V3 = SIGNED_HEADERS_V2 + ("x-appcrane-auth-time", "x-appcrane-auth-mfa")
 MAX_AGE_SEC = 300
 MAX_CLOCK_SKEW_SEC = 60
 
@@ -61,6 +68,8 @@ class Identity:
     is_app_admin: bool
     app_roles: list[str] = field(default_factory=list)
     auth_via: str = "session"
+    auth_time: int | None = None
+    mfa: str | None = None
 
 
 class IdentityError(Exception):
@@ -81,17 +90,32 @@ def sign_identity_v2(secret: str, ts: str | int, headers: Mapping[str, str]) -> 
     return base64.urlsafe_b64encode(mac).rstrip(b"=").decode("ascii")
 
 
+def sign_identity_v3(secret: str, ts: str | int, headers: Mapping[str, str]) -> str:
+    lines = ["appcrane-identity-v3", str(ts)] + [f"{h}:{_get(headers, h)}" for h in SIGNED_HEADERS_V3]
+    mac = hmac.new(secret.encode("utf-8"), "\n".join(lines).encode("utf-8"), hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(mac).rstrip(b"=").decode("ascii")
+
+
+def authenticated_within(identity: Identity, max_age_sec: int, now: float | None = None) -> bool:
+    """True when the person signed in or stepped up within max_age_sec (never without v3)."""
+    if identity.auth_time is None:
+        return False
+    return int(time.time() if now is None else now) - identity.auth_time <= max_age_sec
+
+
 def verify_headers(headers: Mapping[str, str], secret: str | None = None, now: float | None = None) -> Identity:
     """Return the verified Identity, or raise IdentityError. `headers` must be
     case-insensitive or lowercase-keyed (Starlette's request.headers is)."""
     secret = os.environ.get("APPCRANE_IDENTITY_SECRET", "") if secret is None else secret
     if not secret:
         raise IdentityError("IDENTITY_NOT_CONFIGURED", "APPCRANE_IDENTITY_SECRET is not set, so no identity can be verified")
-    sig = _get(headers, "x-appcrane-identity-sig-v2")
+    sig_v3 = _get(headers, "x-appcrane-identity-sig-v3")
+    sig = sig_v3 or _get(headers, "x-appcrane-identity-sig-v2")
     ts = _get(headers, "x-appcrane-identity-ts")
     if not sig or not re.fullmatch(r"\d{1,12}", ts):
         raise IdentityError("IDENTITY_UNSIGNED", "the request carries no signed AppCrane identity")
-    if not hmac.compare_digest(sign_identity_v2(secret, ts, headers).encode(), sig.encode()):
+    expected = sign_identity_v3(secret, ts, headers) if sig_v3 else sign_identity_v2(secret, ts, headers)
+    if not hmac.compare_digest(expected.encode(), sig.encode()):
         raise IdentityError("IDENTITY_FORGED", "the identity signature does not match")
     age = int(time.time() if now is None else now) - int(ts)
     if age > MAX_AGE_SEC or age < -MAX_CLOCK_SKEW_SEC:
@@ -111,4 +135,6 @@ def verify_headers(headers: Mapping[str, str], secret: str | None = None, now: f
         is_app_admin=at_least(app_role, "admin"),
         app_roles=[r.strip() for r in _get(headers, "x-appcrane-app-roles").split(",") if r.strip()],
         auth_via=_get(headers, "x-appcrane-auth-via") or "session",
+        auth_time=int(_get(headers, "x-appcrane-auth-time")) if sig_v3 and re.fullmatch(r"\d{1,12}", _get(headers, "x-appcrane-auth-time")) else None,
+        mfa=(_get(headers, "x-appcrane-auth-mfa") or "none") if sig_v3 else None,
     )

@@ -39,3 +39,10 @@ dependency-free Node server that serves it. Keep every rule below.
 - Run `npm test`; it must pass. Push with `appcrane_push_to_managed_app`, then
   `appcrane_deploy(slug="__APP_SLUG__", stage="sandbox")`. Production only
   when a person asks.
+
+## AppCrane widgets
+- For a user menu, sign-out, session list, member management, access requests
+  or app sign-in keys, use AppCrane's widgets instead of building them:
+  `<script src="/__appcrane/widgets.js" defer>` and the `<appcrane-*>` elements
+  listed in README.md. Do not proxy, wrap or re-implement `/__appcrane/*`, and
+  never route it to the app: AppCrane answers those paths on the app's host.

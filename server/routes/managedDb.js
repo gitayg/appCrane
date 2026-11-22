@@ -6,6 +6,7 @@ import { requireAuth, requireAppUser, requireAppAccess, requirePlatformAdmin } f
 import { auditMiddleware, logAudit } from '../middleware/audit.js';
 import { AppError } from '../utils/errors.js';
 import log from '../utils/logger.js';
+import { checkCapability, recordImplicit, neededEngine } from '../services/capabilities/enforce.js';
 
 /**
  * Managed databases — the HTTP surface.
@@ -268,6 +269,9 @@ router.post('/:slug/database', requireAppUser, auditMiddleware('managed-db-provi
   assertKnownEngine(svc, engine);
 
   const scope = scopeFor(req.app);
+  // Capability approvals: an engine the app does not have yet needs an
+  // approved managed_database grant, or a platform admin (recorded as one).
+  const dbCheck = checkCapability(getDb(), { app: req.app, user: req.user, capability: 'managed_database', needed: neededEngine(getDb(), req.app, engine) });
   try {
     // The return value is DELIBERATELY DISCARDED. provision() resolves to the
     // full connection details including the plaintext password and a URL with
@@ -278,6 +282,7 @@ router.post('/:slug/database', requireAppUser, auditMiddleware('managed-db-provi
   } catch (err) {
     rethrowEngineError(err);
   }
+  recordImplicit(getDb(), { app: req.app, user: req.user, via: 'api', channel: req.auth_kind }, [dbCheck]);
 
   const databases = listPublic(svc, req.app);
   res.json({

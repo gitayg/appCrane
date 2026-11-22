@@ -184,8 +184,10 @@ export function wakeToken(db = getDb()) {
  * the container without it would look like silence:
  *   - a headless app (no forward_auth at all) and auth-bypass paths;
  *   - a tcp or dual ingress, whose public port goes straight to the container;
- *   - production on a custom domain (no forward_auth unless custom_domain_auth,
- *     and no crash-page rewrite to wake it from either way);
+ *   - production on a custom domain without custom_domain_auth (no
+ *     forward_auth there, and no crash-page rewrite to wake it from). With
+ *     custom_domain_auth the domain's requests pass forward_auth and its site
+ *     block carries the wake rewrite (caddy.js), so it is not a blocker;
  *   - production with enabled cron jobs: their work is the app's use, and they
  *     cannot run while it sleeps.
  */
@@ -197,7 +199,9 @@ export function sleepBlockers(db, app, env) {
   }
   if (getIngressForApp(db, app.id).ingress_type !== 'http') reasons.push('the app publishes a raw TCP port that bypasses AppCrane');
   if (env === 'production') {
-    if ((app.domain || '').trim()) reasons.push('production is served on a custom domain, which AppCrane cannot wake it from');
+    if ((app.domain || '').trim() && !(app.custom_domain_auth && app.auth_mode !== 'headless')) {
+      reasons.push('production is served on a custom domain without AppCrane sign-in (custom_domain_auth), so AppCrane does not see its requests there and cannot wake it from it');
+    }
     if (db.prepare("SELECT 1 FROM app_cron_jobs WHERE app_id = ? AND env = 'production' AND enabled = 1 LIMIT 1").get(app.id)) {
       reasons.push('production has enabled cron jobs, which cannot run while it sleeps');
     }

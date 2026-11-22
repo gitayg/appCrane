@@ -105,6 +105,9 @@ const { initDb, getDb } = await import('../server/db.js');
 const { generateApiKey, hashApiKey, encrypt, decrypt } = await import('../server/services/encryption.js');
 initDb();
 const db = getDb();
+// This file is about something other than capability approvals, which
+// require approval for external_secret_connections by default (test/capability-*.test.js).
+db.prepare("INSERT INTO settings (key, value) VALUES ('capability_approval_required:external_secret_connections', '0')").run();
 
 let slot = 15300;
 const mkApp = (slug, sourceType = 'managed') => {

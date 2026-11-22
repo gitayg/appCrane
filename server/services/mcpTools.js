@@ -1,5 +1,6 @@
 import { getDb } from '../db.js';
 import { assertVisibilityAllowed } from './platformPolicy.js';
+import { assertToolStepUp } from './stepUp.js';
 import { appUrl, isolationEnabled } from './appOrigin.js';
 import { decrypt, encrypt } from './encryption.js';
 import { BUCKETS, bucketize, applyBucket } from './requestStatus.js';
@@ -8,10 +9,11 @@ import { userHasAppPermission, userHasPlatformPermission, roleForUserOnApp, isAp
 import { getSeparateSandboxDb, setSeparateSandboxDb, parseSeparateSandboxDb, envForTenant, SEPARATE_SANDBOX_DB_NOTE } from './sandboxDb.js';
 import { getShowSandbox, setShowSandbox, parseShowSandbox } from './sandboxVisibility.js';
 import {
-  listRoles, createRole, listMembersWithRoles, setUserRoleKeys, clearUserRoleGrants,
+  listRoles, createRole, listMembersWithRoles, setUserRoleKeys,
   MAX_ROLES_PER_APP, RESERVED_KEYS,
 } from './appDefinedRoles.js';
 import { isAdmin } from '../utils/roles.js';
+import { applyAppRole } from './appRoleChange.js';
 import log from '../utils/logger.js';
 import { validateBypassPaths } from '../utils/authBypassPaths.js';
 import {
@@ -45,6 +47,9 @@ import { adoptAppTool } from './adopt/mcpTool.js';
 import { deleteAppTool } from './mcpGaps/deleteAppTool.js';
 import { getAuditTool } from './mcpGaps/getAuditTool.js';
 import { submitFeedbackTool } from './feedback/mcpTool.js';
+import { requestCapabilityTool, listCapabilityRequestsTool } from './capabilities/mcpTools.js';
+import { checkCapability, recordImplicit, neededBypassPaths, neededHeadless, neededPublic, neededEngine, portScopeOf, neededUnprotectedDomain, refuseDomainAtCreate } from './capabilities/enforce.js';
+import { assertToolScope, scopesOf, toolListed } from './mcpScopes.js';
 import { redactFeedbackAuditArgs } from './feedback/submit.js';
 import {
   recordPush, recentPushes, singleFilePushAdvice, halfPushedBuildAdvice, largeInlineAdvice,
@@ -1172,7 +1177,7 @@ const TOOLS = [
       'Reveal the PLAINTEXT of ONE secret by key. Use ONLY when the user explicitly needs the actual value — it will appear in this ' +
       'conversation transcript, so treat the transcript as sensitive afterward (and consider rotating the secret if the transcript may be stored/shared). ' +
       'For checking whether a var is set, comparing values, or seeing what exists, use appcrane_get_secret (masked) instead — do NOT reveal just to inspect config. ' +
-      'Single key only — it never dumps the whole env. Every reveal is audit-logged. For a Secrets Manager reference this returns the reference text with source="secrets_manager" and never fetches the value from AWS. Defaults to sandbox; env="production" only when the user explicitly asks. App admins can reveal sandbox values; a PRODUCTION value needs the app owner or a platform admin.',
+      'Single key only — it never dumps the whole env. Every reveal is audit-logged. For a Secrets Manager reference this returns the reference text with source="secrets_manager" and never fetches the value from AWS. Defaults to sandbox; env="production" only when the user explicitly asks. App admins can reveal sandbox values; a PRODUCTION value needs the app owner or a platform admin, and a person\'s recent confirmation: a call refused with STEP_UP_REQUIRED names a link for the user to open and confirm, then retry within the minutes it states.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1197,6 +1202,7 @@ const TOOLS = [
       if (env === 'production' && !isAppOwnerOrPlatformAdmin(user, app)) {
         throw new Error('Forbidden: revealing a production secret requires the app owner or a platform admin. The masked value and fingerprint are available from appcrane_get_secret.');
       }
+      if (env === 'production') assertToolStepUp(user, 'reveal_production_secret', app);
 
       const db = getDb();
       const row = db
@@ -1568,7 +1574,7 @@ const TOOLS = [
   {
     name: 'appcrane_cat',
     description:
-      'Print the contents of a file inside a running app container. Read-only; bound to safe roots (/app and /data only). Refuses files larger than 256KB; truncate by reading the first N bytes via path tricks if you need a tail.',
+      'Print the contents of a file inside a running app container. Read-only; bound to safe roots (/app and /data only). Refuses files larger than 256KB; truncate by reading the first N bytes via path tricks if you need a tail. env="production" needs the app owner or a platform admin and a person\'s recent confirmation, like appcrane_reveal_secret: a call refused with STEP_UP_REQUIRED names a link for the user to open and confirm.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1586,6 +1592,12 @@ const TOOLS = [
       const env = args.env === 'production' ? 'production' : 'sandbox';
       const app = getAppForUser(user, args.slug);
       const safePath = validateContainerPath(args.path);
+      // A production container's files hold its secrets (an .env, a config):
+      // the same owner check and step-up as appcrane_reveal_secret.
+      if (env === 'production' && !isAppOwnerOrPlatformAdmin(user, app)) {
+        throw new Error('Forbidden: reading a production container\'s files requires the app owner or a platform admin.');
+      }
+      if (env === 'production') assertToolStepUp(user, 'reveal_production_secret', app);
       await (await import('./envWake.js')).ensureAwake(app, env, { reason: 'appcrane_cat', userId: user.id });
       const execFileAsync = (await import('util')).promisify((await import('child_process')).execFile);
       const containerName = `appcrane-${app.slug}-${env}`;
@@ -2372,6 +2384,7 @@ const TOOLS = [
       });
       const tokenEncrypted = args.github_token ? encrypt(args.github_token) : null;
       const branch = args.branch || 'main';
+      const domainCheck = refuseDomainAtCreate(db, user, args.domain);
 
       const result = db.prepare(`
         INSERT INTO apps (name, slug, slot, domain, description, category, source_type, github_url, branch, github_token_encrypted, resource_limits, created_by, image_ref, container_port, health_path, image_retention)
@@ -2381,6 +2394,7 @@ const TOOLS = [
         image.image_ref ?? null, image.container_port ?? null, image.health_path ?? null,
         DEFAULT_IMAGE_RETENTION);
       const appId = result.lastInsertRowid;
+      if (domainCheck) recordImplicit(db, { app: { id: appId }, user, via: 'mcp' }, [domainCheck]);
 
       for (const env of ['production', 'sandbox']) {
         db.prepare('INSERT INTO health_configs (app_id, env) VALUES (?, ?)').run(appId, env);
@@ -2507,6 +2521,9 @@ const TOOLS = [
           if (clash) throw new Error(`Domain "${updates.domain}" is already used by app "${clash.slug}"`);
         }
       }
+      const domainCheck = updates.domain !== undefined
+        ? checkCapability(db, { app, user, capability: 'custom_domain_unprotected', needed: neededUnprotectedDomain(app, { domain: updates.domain, auth: app.custom_domain_auth }) })
+        : null;
       if (args.source_type !== undefined) updates.source_type = args.source_type;
       Object.assign(updates, await validateImageFields(args));
       // An app whose source_type says 'image' with no image_ref has nothing to
@@ -2536,7 +2553,13 @@ const TOOLS = [
       // used to leave an app publicly reachable yet catalog-private, which made
       // the launcher prompt users to "Request access" to an already-open app.
       Object.assign(updates, resolveVisibility({ visibility: args.visibility, public_access: args.public_access }));
-      if (updates.visibility !== undefined && updates.visibility !== (app.visibility || 'private')) assertVisibilityAllowed(db, updates.visibility);
+      // Capability approvals: a platform admin's direct setting carries an
+      // implicit grant, recorded after the write; an agent identity is refused.
+      const capChecks = [];
+      if (updates.visibility !== undefined && updates.visibility !== (app.visibility || 'private')) {
+        assertVisibilityAllowed(db, updates.visibility);
+        capChecks.push(checkCapability(db, { app, user, capability: 'public_visibility', needed: neededPublic(app, updates.visibility) }));
+      }
       if (args.image_retention !== undefined) {
         const n = parseInt(args.image_retention, 10);
         if (!Number.isFinite(n) || n < 0 || n > 50) throw new Error('image_retention must be 0-50');
@@ -2545,6 +2568,7 @@ const TOOLS = [
       if (args.frame_ancestors !== undefined) updates.frame_ancestors = normalizeFrameAncestors(args.frame_ancestors);
       if (args.auth_bypass_paths !== undefined) {
         const parsed = validateBypassPaths(args.auth_bypass_paths);
+        capChecks.push(checkCapability(db, { app, user, capability: 'auth_bypass_paths', needed: neededBypassPaths(app, parsed) }));
         updates.auth_bypass_paths = parsed && parsed.length > 0 ? JSON.stringify(parsed) : null;
       }
 
@@ -2602,6 +2626,7 @@ const TOOLS = [
       })();
       if (showSandbox !== undefined) keys.push('show_sandbox');
       if (separateSandboxDb !== undefined) keys.push('separate_sandbox_db');
+      recordImplicit(db, { app, user, via: 'mcp' }, [...capChecks, domainCheck]);
 
       // v2.24.4: on a custom-domain change, keep the old domain alive as a 301
       // redirect to the new one (same as the REST path) so links don't break.
@@ -2804,7 +2829,13 @@ const TOOLS = [
       // v2.20.2: shared invariant helper (see resolveVisibility) — no-op when
       // visibility isn't in the patch.
       Object.assign(updates, resolveVisibility({ visibility: args.visibility }));
-      if (updates.visibility !== undefined && updates.visibility !== (app.visibility || 'private')) assertVisibilityAllowed(db, updates.visibility);
+      // The platform policy and the capability approvals hold here as on
+      // PUT /api/apps/:slug: this tool used to skip ban_public_apps entirely.
+      const capChecks = [];
+      if (updates.visibility !== undefined && updates.visibility !== (app.visibility || 'private')) {
+        assertVisibilityAllowed(db, updates.visibility);
+        capChecks.push(checkCapability(db, { app, user, capability: 'public_visibility', needed: neededPublic(app, updates.visibility) }));
+      }
 
       if (args.category !== undefined) {
         const newCat = args.category ? String(args.category).trim() : null;
@@ -2830,11 +2861,13 @@ const TOOLS = [
         if (!['authenticated', 'headless'].includes(args.auth_mode)) {
           throw new Error("auth_mode must be 'authenticated' or 'headless'");
         }
+        capChecks.push(checkCapability(db, { app, user, capability: 'headless', needed: neededHeadless(app, args.auth_mode) }));
         updates.auth_mode = args.auth_mode;
       }
 
       if (args.auth_bypass_paths !== undefined) {
         const parsed = validateBypassPaths(args.auth_bypass_paths);
+        capChecks.push(checkCapability(db, { app, user, capability: 'auth_bypass_paths', needed: neededBypassPaths(app, parsed) }));
         updates.auth_bypass_paths = parsed && parsed.length > 0 ? JSON.stringify(parsed) : null;
       }
 
@@ -2852,9 +2885,19 @@ const TOOLS = [
         updates.custom_domain_auth = args.custom_domain_auth ? 1 : 0;
       }
 
+      if ('domain' in updates || 'custom_domain_auth' in updates) {
+        capChecks.push(checkCapability(db, {
+          app, user, capability: 'custom_domain_unprotected',
+          needed: neededUnprotectedDomain(app, {
+            domain: 'domain' in updates ? updates.domain : app.domain,
+            auth: 'custom_domain_auth' in updates ? updates.custom_domain_auth : app.custom_domain_auth,
+          }),
+        }));
+      }
       const keys = Object.keys(updates);
       const setClause = keys.map(k => `${k} = ?`).join(', ');
       db.prepare(`UPDATE apps SET ${setClause} WHERE id = ?`).run(...keys.map(k => updates[k]), app.id);
+      recordImplicit(db, { app, user, via: 'mcp' }, capChecks);
 
       // v2.7.22: auth_mode flips the Caddy block shape (forward_auth on/off);
       // v2.7.28: auth_bypass_paths emits inner handle blocks; v2.10.0: domain
@@ -3146,6 +3189,16 @@ const TOOLS = [
       }
 
       const db = getDb();
+      const portCheck = args.ingress_type === 'http' ? null : checkCapability(db, {
+        app, user, capability: 'tcp_ports',
+        needed: portScopeOf({
+          ingress_type: args.ingress_type,
+          public_port: args.public_port !== undefined ? args.public_port : app.public_port,
+          sandbox_public_port: args.sandbox_public_port !== undefined ? args.sandbox_public_port : app.sandbox_public_port,
+          data_plane_port: args.data_plane_port !== undefined ? args.data_plane_port : app.data_plane_port,
+          data_plane_protocol: args.data_plane_protocol !== undefined && !echoedProtocol ? args.data_plane_protocol : storedDataPlaneProtocol(app),
+        }),
+      });
       const before = {
         ingress_type: effectiveIngressType(app.ingress_type),
         public_port: publicPortForApp(app),
@@ -3207,6 +3260,10 @@ const TOOLS = [
         logAudit(user.id, app.id, 'app-ingress-change', { from: before, to: out });
         return out;
       })();
+      if (portCheck?.via === 'implicit') {
+        const row = db.prepare('SELECT ingress_type, public_port, sandbox_public_port, data_plane_port, data_plane_protocol FROM apps WHERE id = ?').get(app.id);
+        recordImplicit(db, { app, user, via: 'mcp' }, [{ ...portCheck, scope: portScopeOf(row) }]);
+      }
 
       log.info(`MCP: app '${app.slug}' ingress set to ${result.ingress_type}${result.public_port ? `:${result.public_port}` : ''}${result.data_plane_port ? ` -> container:${result.data_plane_port}` : ''} by user ${user.id}`);
       return {
@@ -3300,11 +3357,10 @@ const TOOLS = [
         currentRole: db.prepare('SELECT app_role FROM app_user_roles WHERE app_id = ? AND user_id = ?').get(app.id, target.id)?.app_role,
       });
 
-      // The role row IS the access (v2.94.0: app_users is a view of it).
-      db.prepare(`
-        INSERT INTO app_user_roles (app_id, user_id, app_role) VALUES (?, ?, ?)
-        ON CONFLICT(app_id, user_id) DO UPDATE SET app_role = excluded.app_role
-      `).run(app.id, target.id, role);
+      // The role row IS the access (v2.94.0: app_users is a view of it). The
+      // shared write carries the last-active-owner guard: granting the only
+      // owner a lower tier would demote them.
+      await applyAppRole(db, user.id, app, target.id, role, { cause: 'mcp-grant' });
 
       log.info(`MCP: granted ${role} on ${app.slug} to user ${target.id} by ${user.id}`);
       return { app: app.slug, user: { id: target.id, name: target.name, email: target.email }, role };
@@ -3339,36 +3395,14 @@ const TOOLS = [
       `).get(args.user, args.user, args.user);
       if (!target) throw new Error(`User not found: ${args.user}`);
 
-      // Owner-protection: refuse to remove the last owner — would leave
-      // the app un-ownable. Caller must promote a different user first.
       const cur = db.prepare("SELECT app_role FROM app_user_roles WHERE app_id = ? AND user_id = ?").get(app.id, target.id);
       assertMayChangeMemberRole(user, app, { currentRole: cur?.app_role });
-      if (cur?.app_role === 'owner') {
-        const ownerCount = db.prepare("SELECT COUNT(*) AS c FROM app_user_roles WHERE app_id = ? AND app_role = 'owner'").get(app.id).c;
-        if (ownerCount <= 1) {
-          throw new Error(`Refusing to revoke: ${target.email || target.id} is the only owner of ${app.slug}. Promote another user first.`);
-        }
-      }
-
-      const r1 = db.prepare('DELETE FROM app_user_roles WHERE app_id = ? AND user_id = ?').run(app.id, target.id);
-      // v2.41.0: and the roles the APP defined for them. Left behind, they come
-      // back in full the moment the user is re-granted bare access.
-      const appRolesRemoved = clearUserRoleGrants(app.id, target.id);
-
-      // Purge the revoked user's per-tenant DB dir (multitenant apps only).
-      // Best-effort — never let a purge failure fail the revoke.
-      const mt = db.prepare('SELECT multitenant FROM apps WHERE id = ?').get(app.id);
-      if (mt?.multitenant) {
-        try {
-          const { purgeTenant } = await import('./tenants.js');
-          await purgeTenant(app.slug, target.email, target.id);
-        } catch (e) {
-          log.warn(`MCP revoke: tenant purge failed for ${app.slug}/${target.id}: ${e.message}`);
-        }
-      }
+      // The shared write: refuses the last ACTIVE owner, deletes the role row
+      // and the app-defined role grants (v2.41.0), purges the tenant dir.
+      const out = await applyAppRole(db, user.id, app, target.id, 'none', { cause: 'mcp-revoke' });
 
       log.info(`MCP: revoked access on ${app.slug} from user ${target.id} by ${user.id}`);
-      return { app: app.slug, user: { id: target.id, email: target.email }, removed: { roles: r1.changes, members: r1.changes, app_defined_roles: appRolesRemoved } };
+      return { app: app.slug, user: { id: target.id, email: target.email }, removed: { roles: out.removed, members: out.removed, app_defined_roles: out.appRolesRemoved } };
     },
   },
 
@@ -3592,10 +3626,7 @@ const TOOLS = [
         newRole: role,
         currentRole: db.prepare('SELECT app_role FROM app_user_roles WHERE app_id = ? AND user_id = ?').get(app.id, req.user_id)?.app_role,
       });
-      db.prepare(`
-        INSERT INTO app_user_roles (app_id, user_id, app_role) VALUES (?, ?, ?)
-        ON CONFLICT(app_id, user_id) DO UPDATE SET app_role = excluded.app_role
-      `).run(app.id, req.user_id, role);
+      await applyAppRole(db, user.id, app, req.user_id, role, { cause: 'access-approve' });
       db.prepare("UPDATE enhancement_requests SET status = 'done' WHERE id = ?").run(req.id);
 
       log.info(`MCP: approved access request #${req.id} → ${role} on ${app.slug} for user ${req.user_id} by ${user.id}`);
@@ -3764,6 +3795,8 @@ const TOOLS = [
   },
 
   adoptAppTool,
+  requestCapabilityTool,
+  listCapabilityRequestsTool,
   deleteAppTool,
   getAuditTool,
   submitFeedbackTool,
@@ -3896,6 +3929,7 @@ const TOOLS = [
 
       const backend = NEW_MANAGED_APP_REPO_BACKEND;
       if (backend === REPO_BACKEND_GITHUB) await requireServiceAccount();
+      const domainCheck = refuseDomainAtCreate(db, user, args.domain);
       let repo;
       try {
         repo = await createManagedRepo(backend, slug, { description: args.description || '' });
@@ -3922,6 +3956,7 @@ const TOOLS = [
       `).run(name, slug, slot, args.domain || null, args.description || null, null, repo.html_url, branch, resourceLimits, user.id,
         backend === REPO_BACKEND_GITHUB ? null : backend, DEFAULT_IMAGE_RETENTION);
       const appId = result.lastInsertRowid;
+      if (domainCheck) recordImplicit(db, { app: { id: appId }, user, via: 'mcp' }, [domainCheck]);
 
       for (const env of ['production', 'sandbox']) {
         db.prepare('INSERT INTO health_configs (app_id, env) VALUES (?, ?)').run(appId, env);
@@ -5205,6 +5240,9 @@ const TOOLS = [
 
       const app = getAppForUser(user, args.slug);
       requireAppUserTier(user, app, 'provision a database for it');
+      // Capability approvals: an engine the app does not have yet needs an
+      // approved managed_database grant (or a platform admin, recorded as one).
+      const dbCheck = checkCapability(getDb(), { app, user, capability: 'managed_database', needed: neededEngine(getDb(), app, engine) });
 
       // tenant stays null: namesForScope() hashes a tenant into the database
       // and role names, but there is no authorization model for one yet, and a
@@ -5226,6 +5264,7 @@ const TOOLS = [
           + 'back its own row and role on failure — so this is safe to retry once the engine is healthy.'
         );
       }
+      recordImplicit(getDb(), { app, user, via: 'mcp' }, [dbCheck]);
 
       const databases = svc.listForApp(app.id).map((row) => publicManagedDbView(row, app));
       return {
@@ -5523,14 +5562,15 @@ export function listTools(user, userMcpKey = null) {
   const readOnlyKey = isReadOnlyKey(user, userMcpKey);
   const crewOk = crewAllowedFor(user);
   const coderKey = isCoderKey(user, userMcpKey);
-  return TOOLS.filter((t) => (!readOnlyKey || (t.readOnly && !t.revealsSecrets) || readOnlyKeyMayCall(user, t)) && (!t.crew || crewOk) && (!coderKey || CODER_MCP_TOOLS.includes(t.name)) && canUseTool(userView, t)).map((t) => ({
+  const scopes = scopesOf(user, userMcpKey);
+  return TOOLS.filter((t) => toolListed(scopes, t.name) && (!readOnlyKey || (t.readOnly && !t.revealsSecrets) || readOnlyKeyMayCall(user, t)) && (!t.crew || crewOk) && (!coderKey || CODER_MCP_TOOLS.includes(t.name)) && canUseTool(userView, t)).map((t) => ({
     name: t.name,
     description: t.description,
     inputSchema: stageifySchema(t.inputSchema),
   }));
 }
 
-export async function callTool(user, name, args, userMcpKey = null) {
+export async function callTool(user, name, args, userMcpKey = null, stepUpCtx = null) {
   const canonicalName = TOOL_NAME_ALIASES[name] || name;
   const tool = TOOLS.find((t) => t.name === canonicalName);
   if (!tool) {
@@ -5543,6 +5583,7 @@ export async function callTool(user, name, args, userMcpKey = null) {
   // admin's read-only key is still read-only.
   try {
     assertToolAllowedForKey(user, tool, userMcpKey);
+    assertToolScope(scopesOf(user, userMcpKey), tool.name, args);
     assertCoderToolAllowed(user, tool.name, args, userMcpKey);
   } catch (err) {
     auditMcpCall(user, name, args, err);
@@ -5591,7 +5632,7 @@ export async function callTool(user, name, args, userMcpKey = null) {
   }
   // Stash auth context on user so helpers (accessibleSlugsForUser,
   // getAppForUser) can constrain output.
-  const userWithKey = userMcpKey ? { ...user, _mcpUserKey: userMcpKey } : user;
+  const userWithKey = { ...user, ...(userMcpKey && { _mcpUserKey: userMcpKey }), _stepUp: stepUpCtx || { kind: null, credentialHash: null, userId: user?.id ?? null } };
   // v2.11.0: 'stage' is the canonical sandbox/production param; bridge it to the
   // legacy 'env' the handlers still read (and vice-versa, so both callers work).
   const callArgs = { ...(args || {}) };

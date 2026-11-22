@@ -1,5 +1,7 @@
 import { Router } from 'express';
+import { requireStepUp } from '../services/stepUp.js';
 import { purgeRevokedTenants } from '../services/tenants.js';
+import { activeOwners, afterOwnershipWrite } from '../services/appOwnership.js';
 import crypto from 'crypto';
 import { getDb } from '../db.js';
 import { requireAuth, requireAdmin, requireAppAccess } from '../middleware/auth.js';
@@ -161,6 +163,10 @@ import { parseImageRef } from '../services/imageSource.js';
 import { validateContainerCommand, validateVolumePaths } from '../services/containerRuntimeSpec.js';
 import { DEFAULT_IMAGE_RETENTION } from '../services/imageRetention.js';
 import { envIsSleepingById } from '../services/envSleepState.js';
+import {
+  checkCapability, recordImplicit, neededBypassPaths, neededHeadless, neededPublic, portScopeOf, neededUnprotectedDomain, refuseDomainAtCreate,
+} from '../services/capabilities/enforce.js';
+import { approvalRequired } from '../services/capabilities/store.js';
 
 /**
  * An app row as it may leave the server: every `*_encrypted` column removed, and
@@ -726,6 +732,8 @@ router.post('/', requireAuth, auditMiddleware('app-create'), async (req, res) =>
              change what this route does, which is the one thing it must not. */ }
   if (wantedVisibility !== undefined) assertVisibilityAllowed(db, wantedVisibility);
 
+  const domainCheck = refuseDomainAtCreate(db, req.user, domain);
+
   // Check uniqueness: another app's slug, or an old slug one still redirects from.
   const slugTaken = slugTakenRefusal(db, slug);
   if (slugTaken) throw new AppError(slugTaken, 409, 'DUPLICATE');
@@ -751,6 +759,7 @@ router.post('/', requireAuth, auditMiddleware('app-create'), async (req, res) =>
   `).run(name, slug, slot, appDomain, description || null, category || null, source_type || 'github', github_url || null, branch || 'main', tokenEncrypted, resourceLimits, req.user.id, imageRefValue, containerPortValue, healthPathValue, catalogSlugValue, DEFAULT_IMAGE_RETENTION);
 
   const appId = result.lastInsertRowid;
+  if (domainCheck) recordImplicit(db, { app: { id: appId }, user: req.user, via: 'api', channel: req.auth_kind }, [domainCheck]);
 
   // Create health configs for both envs
   for (const env of ['production', 'sandbox']) {
@@ -1146,6 +1155,10 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
   }
 
   const updates = {};
+  // Capability approvals (services/capabilities): each gated field below adds
+  // its check here, and a platform admin's implicit grant is recorded only
+  // after the write commits.
+  const capChecks = [];
   if (adoptCatalogSlug !== undefined) updates.catalog_slug = adoptCatalogSlug;
   if (name !== undefined) updates.name = name;
   if (domain !== undefined) {
@@ -1184,6 +1197,18 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
       }
       updates.custom_domain_auth = next;
     }
+  }
+  // Capability approvals: a custom domain served WITHOUT AppCrane sign-in (a
+  // new one, or sign-in turned off on the current one) needs a grant; with
+  // sign-in on it stays self-service.
+  if ('domain' in updates || 'custom_domain_auth' in updates) {
+    capChecks.push(checkCapability(db, {
+      app, user: req.user, capability: 'custom_domain_unprotected',
+      needed: neededUnprotectedDomain(app, {
+        domain: 'domain' in updates ? updates.domain : app.domain,
+        auth: 'custom_domain_auth' in updates ? updates.custom_domain_auth : app.custom_domain_auth,
+      }),
+    }));
   }
   // Stored as JSON TEXT; validated just below with the rest of the column
   // set, so an invalid value is a 400 rather than a row the deploy path has
@@ -1251,6 +1276,7 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
   if (visibilityUpdates.visibility !== undefined
       && visibilityUpdates.visibility !== (app.visibility || 'hidden')) {
     assertVisibilityAllowed(db, visibilityUpdates.visibility);
+    capChecks.push(checkCapability(db, { app, user: req.user, capability: 'public_visibility', needed: neededPublic(app, visibilityUpdates.visibility) }));
   }
   Object.assign(updates, visibilityUpdates);
   if (github_token !== undefined) updates.github_token_encrypted = encrypt(github_token);
@@ -1334,6 +1360,7 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
     let parsed;
     try { parsed = validateBypassPaths(auth_bypass_paths); }
     catch (e) { throw new AppError(e.message, 400, 'VALIDATION'); }
+    capChecks.push(checkCapability(db, { app, user: req.user, capability: 'auth_bypass_paths', needed: neededBypassPaths(app, parsed) }));
     updates.auth_bypass_paths = parsed && parsed.length > 0 ? JSON.stringify(parsed) : null;
   }
 
@@ -1350,6 +1377,7 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
       if (!globalAdmin && !isOwner) {
         throw new AppError('Only the app owner can change auth_mode.', 403, 'FORBIDDEN');
       }
+      capChecks.push(checkCapability(db, { app, user: req.user, capability: 'headless', needed: neededHeadless(app, auth_mode) }));
     }
     updates.auth_mode = auth_mode;
   }
@@ -1423,9 +1451,22 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
     && currentType !== 'http' && currentPort === null;
 
   let ingressWork = null;
+  let portCheck = null;
   if (wantsTypeChange || wantsPortChange || wantsDataPlaneChange || wantsSandboxPortChange || needsAllocation) {
     if (req.user.role !== 'platform_admin') {
-      throw new AppError('Only platform admins can change ingress_type, public_port, sandbox_public_port, data_plane_port or data_plane_protocol', 403, 'FORBIDDEN');
+      // Capability approvals: with tcp_ports approval on, the app OWNER may
+      // publish what a platform admin approved, exactly within the approved
+      // scope (checked below once the effective values are resolved). Closing
+      // a port (back to http) stays a platform-admin change, and approval off
+      // is the rule from before: platform admins only.
+      const ownerMayApply = approvalRequired(db, 'tcp_ports') && roleForUserOnApp(req.user, app) === 'owner'
+        && (ingress_type === undefined ? currentType : ingress_type) !== 'http';
+      if (!ownerMayApply) {
+        throw new AppError(
+          'Only platform admins can change ingress_type, public_port, sandbox_public_port, data_plane_port or data_plane_protocol'
+            + (approvalRequired(db, 'tcp_ports') ? ', or the app owner publishing within an approved tcp_ports capability grant' : ''),
+          403, 'FORBIDDEN');
+      }
     }
     let nextType = currentType;
     if (ingress_type !== undefined) {
@@ -1541,6 +1582,16 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
       }
       try { validateDataPlanePort(nextDataPlanePort); }
       catch (e) { throw new AppError(e.message, e.status || 400, e.code || 'VALIDATION'); }
+    }
+    if (nextType !== 'http') {
+      const wanted = portScopeOf({
+        ingress_type: nextType,
+        public_port: public_port !== undefined ? public_port : app.public_port,
+        sandbox_public_port: sandbox_public_port !== undefined ? sandbox_public_port : app.sandbox_public_port,
+        data_plane_port: updates.data_plane_port !== undefined ? updates.data_plane_port : app.data_plane_port,
+        data_plane_protocol: updates.data_plane_protocol ?? storedDataPlaneProtocol(app),
+      });
+      portCheck = checkCapability(db, { app, user: req.user, capability: 'tcp_ports', needed: wanted });
     }
     if (nextType !== 'http') {
       // Automatic allocation: switching an app to a publishing type with no
@@ -1659,6 +1710,13 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
     if (e instanceof AppError) throw e;
     throw new AppError(e.message, e.status || 400, e.code || 'VALIDATION');
   }
+  // The implicit grant for a port records what was actually published: the
+  // allocator may have picked the number.
+  if (portCheck?.via === 'implicit') {
+    const row = db.prepare('SELECT ingress_type, public_port, sandbox_public_port, data_plane_port, data_plane_protocol FROM apps WHERE id = ?').get(app.id);
+    capChecks.push({ ...portCheck, scope: portScopeOf(row) });
+  }
+  recordImplicit(db, { app, user: req.user, via: 'api', channel: req.auth_kind }, capChecks);
 
   // v2.24.4: when the custom domain changes, keep the old one alive as a 301
   // redirect to the new one so already-sent login links / bookmarks don't break.
@@ -1768,7 +1826,7 @@ router.delete('/:slug/domain-aliases/:aliasId', requireAppAccess, auditMiddlewar
  * always allowed; per-app deletion follows the role_permissions matrix
  * (default: Owner only). Requires ?confirm=true.
  */
-router.delete('/:slug', requireAppAccess, auditMiddleware('app-delete'), async (req, res) => {
+router.delete('/:slug', requireAppAccess, requireStepUp('delete_app'), auditMiddleware('app-delete'), async (req, res) => {
   if (!userHasAppPermission(req.user, req.app, 'app.delete')) {
     throw new AppError('Deleting this app is not permitted by your role', 403, 'FORBIDDEN');
   }
@@ -1837,7 +1895,7 @@ router.put('/:slug/users', requireAppAccess, auditMiddleware('app-assign-users')
   const before = db.prepare('SELECT user_id FROM app_user_roles WHERE app_id = ?').all(appId).map(r => r.user_id);
   {
     const keepIds = new Set(ids.map(Number));
-    const owners = db.prepare("SELECT user_id FROM app_user_roles WHERE app_id = ? AND app_role = 'owner'").all(appId).map(r => r.user_id);
+    const owners = activeOwners(db, appId).map(o => o.id);
     if (owners.length && !owners.some(u => keepIds.has(u))) {
       throw new AppError('Cannot remove every owner of the app. Keep at least one owner in the list.', 400, 'LAST_OWNER');
     }
@@ -1856,6 +1914,7 @@ router.put('/:slug/users', requireAppAccess, auditMiddleware('app-assign-users')
     // log to explain where the powers came back from.
     pruneGrantsForNonMembers(appId);
   })();
+  afterOwnershipWrite(db, 'member-list', req.user.id);
   const keep = new Set(ids.map(Number));
   const emailOf = db.prepare('SELECT email FROM users WHERE id = ?');
   for (const uid of before) if (!keep.has(uid)) await purgeRevokedTenants(db, uid, emailOf.get(uid)?.email, [appId]);

@@ -17,6 +17,8 @@ import { translate, placeholderPath, ToolArgsError } from '../services/appMcp/tr
 import { identityHeadersFor } from '../services/appMcp/identityHeaders.js';
 import { callApp, takeCall, LIMITS, UpstreamError } from '../services/appMcp/upstream.js';
 import { recordToolCall } from '../services/appMcp/record.js';
+import { effectiveScopes, applyCredentialScopes } from '../services/mcpBlueprints.js';
+import { SCOPE } from '../services/mcpScopes.js';
 
 // MCP front door for hosted apps: POST /api/mcp/apps/<slug> (production) and
 // /api/mcp/apps/<slug>-sandbox is a Streamable HTTP MCP server whose tools are
@@ -119,6 +121,12 @@ function requireAppMcpAuth(req, res, next) {
       kind: row.kind, username: row.username, mcp_app_scope: row.mcp_app_scope, mcp_read_only: !!row.read_only,
     };
     req.user_mcp_key = { id: `oauth-${row.grant_id}`, label: row.client_name, read_only: !!row.read_only };
+    const eff = effectiveScopes({ scope: row.scope, blueprintId: row.blueprint_id });
+    applyCredentialScopes(req.user, req.user_mcp_key, eff);
+    if (eff && !eff.scopes.has(SCOPE.APP_WRITE)) {
+      req.user.mcp_read_only = true;
+      req.user_mcp_key.read_only = true;
+    }
     req.app_mcp_via = 'oauth';
     req.app_mcp_client = row.client_name;
     return next();
@@ -144,6 +152,10 @@ function requireAppMcpAuth(req, res, next) {
       return next(new AppError('This AppCrane accepts only OAuth sign-in for MCP. API keys are turned off for MCP; connect your client again and sign in when it asks.', 401, 'MCP_OAUTH_ONLY'));
     }
     req.app_mcp_via = req.headers['x-api-key'] ? 'key' : 'session';
+    if (Array.isArray(req.user_mcp_key?.scopes) && !req.user_mcp_key.scopes.includes(SCOPE.APP_WRITE)) {
+      req.user.mcp_read_only = true;
+      req.user_mcp_key.read_only = true;
+    }
     next();
   });
 }

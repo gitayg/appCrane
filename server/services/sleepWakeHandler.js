@@ -56,7 +56,10 @@ function wantsHtml(req) {
 export function originalTarget(db, req, slug, env, firstSeg) {
   let uri = req.originalUrl.slice('/api/_crashed'.length) || '/';
   const host = String(req.headers.host || '').toLowerCase().split(':')[0];
-  if (isolationEnabled(db) && host === appHost(db, slug, env)) {
+  const domain = env === 'production'
+    ? String(db.prepare('SELECT domain FROM apps WHERE slug = ?').get(slug)?.domain || '').trim().toLowerCase()
+    : '';
+  if ((isolationEnabled(db) && host === appHost(db, slug, env)) || (domain && host === domain)) {
     const prefix = `/${firstSeg}`;
     if (uri === prefix || uri.startsWith(prefix + '/') || uri.startsWith(prefix + '?')) uri = uri.slice(prefix.length);
   }

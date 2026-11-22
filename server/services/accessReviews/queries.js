@@ -1,10 +1,16 @@
 import { AppError } from '../../utils/errors.js';
 import { canView, canDecide, SCIM_MESSAGE } from './decisions.js';
+import { staleInfoFor } from '../signinRisk/stale.js';
 
 function shape(db, user, r) {
   const items = db.prepare(`SELECT i.*, d.name AS decided_by_name FROM access_review_items i LEFT JOIN users d ON d.id = i.decided_by
                              WHERE i.review_id = ? ORDER BY i.id`).all(r.id)
     .map(i => ({ ...i, scim_managed: i.granted_via === 'scim', scim_message: i.granted_via === 'scim' ? SCIM_MESSAGE : null }));
+  const staleInfo = staleInfoFor(db, items.map(i => i.user_id));
+  for (const i of items) {
+    i.account_stale = !!staleInfo[i.user_id]?.stale;
+    i.account_last_sign_in_at = staleInfo[i.user_id]?.last_sign_in_at ?? null;
+  }
   const reviewers = db.prepare(`SELECT rv.user_id, u.name FROM access_review_reviewers rv LEFT JOIN users u ON u.id = rv.user_id
                                  WHERE rv.review_id = ? ORDER BY rv.user_id`).all(r.id);
   return {

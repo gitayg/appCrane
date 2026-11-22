@@ -1,4 +1,10 @@
 {
+  "2.142.0": [
+    "Sensitive app settings (public visibility, headless and bypass paths, TCP ports, outbound e-mail, outbound internet, API connections, custom domains without AppCrane sign-in) now wait for a platform admin's approval, with scope, expiry and audit. Databases and the LLM gateway stay self-service. Apps can call registered APIs through a gateway that adds the credential, so the app never holds it.",
+    "Dangerous actions ask you to confirm it's you if you have not signed in recently. Sign-ins from a new browser are e-mailed with a \"not you?\" link, repeated password failures lock the account, and credential stuffing from one network is slowed down.",
+    "Apps can write their own audit trail to AppCrane and stream it to the owner's SIEM, and can drop in ready-made user menu, sessions, members, access-request and sign-in key widgets. You can see and end your own sessions.",
+    "New: IT setup links for a customer's IT contact, DNS-verified SSO domains, fine-grained MCP scopes and blueprints, OAuth client metadata documents and ID-JAG, opt-in gVisor isolation for app containers, uv.lock and requirements.txt scanning, sleep on custom domains, and images started by the exact id that was verified."
+  ],
   "2.141.0": [
     "You can git push to apps hosted on AppCrane alongside GitHub, see whether GitHub is ahead or behind, and push AppCrane's copy back to GitHub.",
     "Self-update now checks the new version before switching and rolls back on its own if it fails to start. Sandboxes can sleep when idle or on a schedule, and apps nobody uses sleep until their next visit.",

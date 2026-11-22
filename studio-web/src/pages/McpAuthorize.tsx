@@ -6,6 +6,10 @@ import { PasswordInput } from '../components/secret/PasswordInput'
 interface AuthRequest {
   client_name: string
   client_verified: boolean
+  client_id_document: { url: string; host: string; client_uri: string | null; logo_uri: string | null } | null
+  requested_scopes: string[] | null
+  blueprints: { id: number; name: string; description: string; scopes: string[]; apps: string[] | null }[]
+  client_blueprint: string | null
   redirect_uri: string
   redirect_host: string | null
   loopback: boolean
@@ -35,6 +39,7 @@ export function McpAuthorize() {
   const [readOnly, setReadOnly] = useState(false)
   const [busy, setBusy] = useState(false)
   const [password, setPassword] = useState('')
+  const [blueprintId, setBlueprintId] = useState<number | null>(null)
 
   useEffect(() => {
     if (!id) { setError('This page needs a connection request. Start again from the app.'); return }
@@ -49,7 +54,9 @@ export function McpAuthorize() {
     try {
       const r = await adminApi.post<{ redirect_to: string }>(
         `/api/oauth/authorize-requests/${encodeURIComponent(id)}`,
-        decision === 'approve' ? { decision, read_only: readOnly, ...(password ? { password } : {}) } : { decision },
+        decision === 'approve'
+          ? { decision, read_only: readOnly, ...(password ? { password } : {}), ...(blueprintId != null ? { blueprint_id: blueprintId } : {}) }
+          : { decision },
       )
       window.location.assign(r.redirect_to)
     } catch (e) {
@@ -77,6 +84,7 @@ export function McpAuthorize() {
   return (
     <div style={card}>
       <h1 style={{ fontSize: '1.15rem', marginTop: 0 }}>Connect {req.client_name} to AppCrane?</h1>
+      <ClientIdentity doc={req.client_id_document} />
       {!req.client_verified && (
         <p role="note" style={{ fontSize: '.8rem', margin: '0 0 10px', padding: '6px 10px', borderRadius: 6, border: '1px solid var(--yellow-text, #a16207)', color: 'var(--yellow-text, #a16207)' }}>
           <strong>Unverified app.</strong> Anyone can register an app under any name, so "{req.client_name}" is only what it calls
@@ -100,6 +108,7 @@ export function McpAuthorize() {
           this connection yourself, for example from Claude Code.
         </p>
       )}
+      <BlueprintChoice req={req} value={blueprintId} onChange={setBlueprintId} />
       {!req.read_only_requested && (
         <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: '.85rem', margin: '12px 0' }}>
           <input type="checkbox" checked={readOnly} onChange={e => setReadOnly(e.target.checked)} />
@@ -132,6 +141,42 @@ export function McpAuthorize() {
         <button type="button" className="btn btn-primary" onClick={() => decide('approve')}
           disabled={busy || (r.required && !(r.reason === 'stale_session' && r.has_password && password))}>Approve</button>
       </div>
+    </div>
+  )
+}
+
+/** Where a metadata-document client's identity comes from: the host of its client_id URL. */
+function ClientIdentity({ doc }: { doc: AuthRequest['client_id_document'] }) {
+  if (!doc) return null
+  return (
+    <div role="note" style={{ display: 'flex', gap: 10, alignItems: 'center', fontSize: '.85rem', margin: '0 0 10px', padding: '8px 10px', borderRadius: 6, background: 'var(--surface2)' }}>
+      {doc.logo_uri && <img src={doc.logo_uri} alt="" width={32} height={32} referrerPolicy="no-referrer" style={{ borderRadius: 6 }} />}
+      <div>
+        Published by <strong style={{ fontFamily: 'monospace', fontSize: '1rem' }}>{doc.host}</strong>
+        <div style={{ fontSize: '.72rem', fontFamily: 'monospace', color: 'var(--dim)', wordBreak: 'break-all' }}>{doc.url}</div>
+      </div>
+    </div>
+  )
+}
+
+/** Requested fine-grained scopes, and the optional blueprint that narrows them. */
+function BlueprintChoice({ req, value, onChange }: { req: AuthRequest; value: number | null; onChange: (v: number | null) => void }) {
+  return (
+    <div style={{ fontSize: '.85rem', margin: '0 0 12px' }}>
+      {req.requested_scopes && (
+        <p style={{ margin: '0 0 6px' }}>It asks only for: <code>{req.requested_scopes.join(' ')}</code></p>
+      )}
+      {req.client_blueprint ? (
+        <p style={{ margin: 0 }}>A platform admin limits this app to the <strong>{req.client_blueprint}</strong> blueprint.</p>
+      ) : req.blueprints.length > 0 && (
+        <label style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          Limit to
+          <select value={value ?? ''} onChange={e => onChange(e.target.value ? Number(e.target.value) : null)}>
+            <option value="">no blueprint (what it asks for, within your role)</option>
+            {req.blueprints.map(b => <option key={b.id} value={b.id}>{b.name}: {b.description}</option>)}
+          </select>
+        </label>
+      )}
     </div>
   )
 }

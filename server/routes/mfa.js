@@ -7,6 +7,8 @@ import { verifyPassword } from '../services/encryption.js';
 import * as mfa from '../services/mfa.js';
 import { BOUNDS, DEFAULTS, issueSession, policyFor, readPolicy, writePolicy } from '../services/sessionPolicy.js';
 import { refuseUnlessSsoOptional } from '../services/authPolicy.js';
+import { markSessionMfa, requireStepUp } from '../services/stepUp.js';
+import { onSignInSuccess } from '../services/signinRisk/index.js';
 import { REMEMBER_MAX_DAYS, listDevices, rememberDays, revokeAllDevices, revokeDevice, setRememberDays, trustDevice } from '../services/trustedDevices.js';
 
 // Mounted at /api/identity/mfa. Two halves:
@@ -68,10 +70,12 @@ router.post('/verify', (req, res) => {
   if (!result.ok) throw codeError(result);
   if (!mfa.consumeChallenge(db, challenge.id)) throw new AppError('The sign-in step expired. Sign in again.', 400, 'MFA_TOKEN_INVALID');
   const session = issueSession(db, req, res, user, challenge.app_id);
+  markSessionMfa(db, session.token, result.method);
   // Strictly true: a truthy string from a hand-made request is not consent.
   // Not after SSO: the remembered-device cookie never reaches an SSO callback.
   const trusted = remember_device === true && !challenge.method ? trustDevice(db, req, res, user, { ip }) : null;
   auditLogin(user.id, 'ok', { method: `${challenge.method || 'password'}+${result.method}`, ip });
+  onSignInSuccess(req, res, user, { method: `${challenge.method || 'password'}+${result.method}`, ip });
   res.json({
     ...sessionBody(session, user),
     ...(result.method === 'recovery_code' && { recovery_codes_remaining: result.recovery_codes_remaining }),
@@ -103,7 +107,9 @@ router.post('/enroll/confirm', (req, res) => {
   if (!result.ok) throw codeError(result);
   mfa.consumeChallenge(db, challenge.id);
   const session = issueSession(db, req, res, user, challenge.app_id);
+  markSessionMfa(db, session.token, 'totp');
   auditLogin(user.id, 'ok', { method: 'password+totp-enroll', ip });
+  onSignInSuccess(req, res, user, { method: 'password+totp-enroll', ip });
   res.json({ ...sessionBody(session, user), recovery_codes: result.recovery_codes });
 });
 
@@ -223,7 +229,7 @@ router.get('/policy', requireAuth, requirePlatformAdmin, (req, res) => {
   res.json(policyBody(getDb()));
 });
 
-router.put('/policy', requireAuth, requirePlatformAdmin, (req, res) => {
+router.put('/policy', requireAuth, requirePlatformAdmin, requireStepUp('security_settings'), (req, res) => {
   const db = getDb();
   const { mfa_required, sessions, remember_device_days } = req.body || {};
   const before = policyBody(db);
@@ -272,7 +278,7 @@ router.delete('/users/:id/trusted-devices', requireAuth, requirePlatformAdmin, (
   res.json({ ok: true, revoked: revokeAllDevices(db, target.id, { actorId: req.user.id, reason: 'admin', ip: ipOf(req) }) });
 });
 
-router.post('/users/:id/reset', requireAuth, requirePlatformAdmin, async (req, res) => {
+router.post('/users/:id/reset', requireAuth, requirePlatformAdmin, requireStepUp('disable_mfa'), async (req, res) => {
   const db = getDb();
   const target = targetUser(db, req.params.id);
   const out = await mfa.adminReset(db, req.user, target, { ip: ipOf(req) });

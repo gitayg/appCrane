@@ -36,6 +36,7 @@ export const JOBS = {
   'deploy-log-retention': { label: 'Deploy log retention',          cadenceMs: DAY },
   'build-cache-prune': { label: 'Docker build cache prune',         cadenceMs: 7 * DAY },
   'mfa-trusted-device-purge': { label: 'Expired MFA remembered-device cleanup', cadenceMs: DAY },
+  'signin-stale-sweep': { label: 'Stale account sweep and sign-in risk cleanup', cadenceMs: DAY },
   'host-vulns':       { label: 'Host security updates check',      cadenceMs: DAY },
   'api-key-expiry':   { label: 'API key expiry sweep and warnings', cadenceMs: 5 * MIN },
   'audit-chain':      { label: 'Audit chain sealer and verifier',   cadenceMs: 5 * MIN },
@@ -46,6 +47,8 @@ export const JOBS = {
   'mongo-kernel':     { label: 'Managed MongoDB kernel check',      cadenceMs: 6 * HOUR },
   'node-runtime':     { label: 'AppCrane Node.js security check',   cadenceMs: 6 * HOUR },
   'env-sleeper':      { label: 'Environment sleep and wake',        cadenceMs: MIN },
+  'capability-grants': { label: 'Capability grant expiry sweep',    cadenceMs: 5 * MIN },
+  'domain-verification': { label: 'SSO domain DNS verification',   cadenceMs: HOUR },
 };
 
 const started = new Map();

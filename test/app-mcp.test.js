@@ -226,6 +226,21 @@ test('a read-only key sees and calls only read-only (GET) tools', async () => {
   assert.equal((await call('alpha', full, 'create_order', { item: 'x' })).body.result.isError, false);
 });
 
+test('scoped credentials: no mcp:app:write means read-only app tools; a blueprint app list limits the apps', async () => {
+  const bpId = (n) => db.prepare('SELECT id FROM mcp_scope_blueprints WHERE name = ?').get(n).id;
+  const k = generateApiKey('dhk_mcp');
+  db.prepare('INSERT INTO user_mcp_keys (user_id, key_hash, label, blueprint_id) VALUES (?,?,?,?)').run(owner.id, hashApiKey(k), 'bp', bpId('deploy-sandbox'));
+  assert.match((await call('alpha', { key: k }, 'create_order', { item: 'x' })).body.error.message, /read-only/);
+  assert.equal((await call('alpha', { key: k }, 'list_orders', {})).body.result.isError, false);
+  const writer = generateApiKey('dhk_mcp');
+  db.prepare('INSERT INTO user_mcp_keys (user_id, key_hash, label, blueprint_id) VALUES (?,?,?,?)').run(owner.id, hashApiKey(writer), 'bp', bpId('app-admin'));
+  assert.equal((await call('alpha', { key: writer }, 'create_order', { item: 'x' })).body.result.isError, false);
+  const betaOnly = db.prepare("INSERT INTO mcp_scope_blueprints (name, scopes, apps) VALUES ('beta-only-app', 'mcp:read mcp:app:write', '[\"beta\"]')").run().lastInsertRowid;
+  const limited = generateApiKey('dhk_mcp');
+  db.prepare('INSERT INTO user_mcp_keys (user_id, key_hash, label, blueprint_id) VALUES (?,?,?,?)').run(owner.id, hashApiKey(limited), 'bp', betaOnly);
+  assert.match(JSON.stringify((await rpc('alpha', { key: limited }, 'tools/list')).body), /MCP scope does not include 'alpha'/);
+});
+
 test('OAuth: a token for app A is accepted on A and refused on app B and on another env', async () => {
   const tokA = oauthToken(owner, `${BASE}/api/mcp/apps/alpha`);
   const okA = await call('alpha', { bearer: tokA }, 'list_orders', {});

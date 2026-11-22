@@ -62,6 +62,9 @@ import appRolesRoutes from './routes/appRoles.js';
 import identityRoutes from './routes/identity.js';
 import appHandoffRoutes, { appHostRouter } from './routes/appHandoff.js';
 import { appPickerRouter } from './routes/appPicker.js';
+import { widgetsRouter } from './routes/widgets.js';
+import { meSessionsRouter, adminUserSessionsRouter } from './routes/userSessions.js';
+import widgetSettingsRoutes from './routes/widgetSettings.js';
 import { RESERVED_APP_PATH, withAppFrames } from './services/appOrigin.js';
 import settingsRoutes from './routes/settings.js';
 import configRoutes from './routes/config.js';
@@ -359,7 +362,9 @@ app.use('/a2a', a2aRoutes);
 // git clone/fetch over HTTPS for Crane-hosted apps. Before express.json(): the
 // upload-pack request body is a binary (often gzipped) stream git must read raw.
 app.use('/git', gitHttpRoutes);
+app.use('/api/service/connections', (await import('./routes/connections.js')).default); // Connections gateway for hosted apps (service-token auth, internal-only, raw body; before the 50 MB parser)
 app.use('/api/service/llm', (await import('./routes/llmGateway.js')).default); // LLM gateway for hosted apps (gateway-token auth, internal-only, own body limit; before the 50 MB parser)
+app.use('/api/service/audit', (await import('./routes/appAuditService.js')).default); // app audit events write path (service-token auth, internal-only, own 32 KB parser; before the 50 MB parser)
 app.use('/api', clientErrorsRoutes); // POST /api/client-errors: browser error reports, own 8 KB parser (before the 50 MB one)
 app.use(express.json({ limit: '50mb', type: ['application/json', 'application/scim+json'] }));
 app.use(express.urlencoded({ extended: true }));
@@ -468,6 +473,7 @@ crane init --name admin --email you@example.com</pre>
 // re-pointed into a /<slug> prefix.
 app.use(RESERVED_APP_PATH, appHostRouter);
 app.use(RESERVED_APP_PATH, appPickerRouter);
+app.use(RESERVED_APP_PATH, widgetsRouter); // drop-in widgets on an app host: /__appcrane/widgets.js, /widgets/token, /widgets/api/*
 
 const APPCRANE_PASSTHROUGH = ['/api/identity', '/api/apps', '/api/info', '/api/notices', '/api/_crashed', '/api/me', '/api/directory', '/api/mcp', '/api/service', '/api/enhancements', '/favicon.svg', '/docs', '/a2a', '/.well-known', '/oauth'];
 const APPCRANE_PAGE_SLUGS = new Set(['login', 'portal', 'dashboard', 'applications', 'users-page', 'audit-page', 'settings', 'docs', 'app', 'studio', 'appstudio']);
@@ -1179,6 +1185,13 @@ app.use('/api', (await import('./routes/auditChain.js')).default); // /api/audit
 app.use('/api/adopt', (await import('./routes/adopt.js')).default); // Adopt an app: analyse a GitHub repo or zip, adopt to sandbox
 app.use('/api/llm-gateway', (await import('./routes/llmGateway.js')).adminRouter); // LLM gateway config + usage (platform admin)
 app.use('/api/apps', (await import('./routes/llmGateway.js')).appRouter); // /api/apps/:slug/llm-gateway[/overrides|/usage]
+app.use('/api/connections', (await import('./routes/connections.js')).adminRouter); // platform connections: register, rotate, delete, usage (platform admin)
+app.use('/api/apps', (await import('./routes/connections.js')).appRouter); // /api/apps/:slug/connections: grants + usage (owner, app admin)
+app.use('/api/egress', (await import('./routes/egress.js')).adminRouter); // egress allow-list platform mode (platform admin)
+app.use('/api/apps', (await import('./routes/egress.js')).appRouter); // /api/apps/:slug/egress
+app.use('/api/container-runtime', (await import('./routes/containerRuntime.js')).adminRouter); // gVisor runtime platform default (platform admin)
+app.use('/api/apps', (await import('./routes/containerRuntime.js')).appRouter); // /api/apps/:slug/runtime
+app.use('/api', (await import('./routes/capabilities.js')).default); // capability approvals (migration 200)
 app.use('/api/apps', managedDbRoutes);   // /api/apps/:slug/database — shared Postgres/MariaDB, one DB + one user per app
 app.use('/api/apps', notificationsRoutes); // /api/apps/:slug/notifications
 // /api/apps/:slug/app-roles — the roles an app defines for ITSELF. Distinct
@@ -1190,7 +1203,9 @@ app.use('/api/apps', appRolesRoutes);
 app.use('/api/catalog', catalogRoutes);  // Curated self-hostable app catalogue (requireAuth — every logged-in user)
 app.use('/api/crew', crewRoutes);        // Crew: platform-wide agent hub (requireAuth; per-row ownership in services/crew.js)
 // Mount identity FIRST so its routes don't get caught by other middleware
+app.use('/api/identity/step-up', (await import('./routes/stepUp.js')).default); // recent-authentication step-up (services/stepUp.js)
 app.use('/api/identity/mfa', (await import('./routes/mfa.js')).default); // local MFA second step + self-service + sign-in policy
+app.use('/api/signin-security', (await import('./routes/signinSecurity.js')).default); // sign-in risk signals (platform admin) + public "not you?" link
 app.use('/api/identity', appHandoffRoutes); // GET /handoff (sign-in into an app host), GET /tls-ask (Caddy on-demand TLS)
 app.use('/api/identity', identityRoutes);
 app.use('/api/enhancements', enhancementsRoutes); // Enhancement requests (Bearer auth, must be before logsRoutes)
@@ -1233,6 +1248,9 @@ app.use('/api/secret-connections', (await import('./routes/secretConnections.js'
 app.use('/api/settings', (await import('./routes/restoreDrills.js')).default); // /api/settings/restore-drills (platform admin)
 app.use('/api/evidence-packs', (await import('./routes/evidencePack.js')).default); // compliance evidence packs (platform admin)
 app.use('/api/settings', (await import('./routes/siem.js')).default); // /api/settings/siem: SIEM and log streaming (platform admin)
+const itSetupRoutes = await import('./routes/itSetup.js');
+app.use('/api/it-setup', itSetupRoutes.itRouter); // IT setup page API: cc_itsetup cookie (path /api/it-setup) + CSRF header, per-link scopes
+app.use('/api', itSetupRoutes.adminRouter); // /api/it-setup-links, /api/sso-domains (platform admin)
 app.use('/api/settings', settingsRoutes); // General settings (branding, etc.)
 
 // v2.7.17: meRoutes MUST come before userMcpKeysRoutes. userMcpKeys's
@@ -1248,6 +1266,8 @@ app.use('/api/admin/mcp-keys', (await import('./routes/adminMcpKeys.js')).defaul
 app.use('/api', userMcpKeysRoutes);      // /api/me/mcp-keys — personal MCP keys
 app.use('/api/files/staged', stagedFilesRoutes);   // chunked staged uploads: POST /chunked, PUT /:handle?offset=N, POST /:handle/finalize
 app.use('/api/me/app-keys', userAppKeysRoutes); // personal app sign-in keys (dhk_uak_*), v2.124.0
+app.use('/api/me/sessions', meSessionsRouter); // the caller's own sign-in sessions: list, revoke
+app.use('/api/apps', widgetSettingsRoutes); // /api/apps/:slug/widget-scopes: per-app opt-in for the members/app-keys widgets
 app.use('/api/files', filesRoutes);      // /api/files/staged — staged uploads for MCP-E
 app.use('/api/github-service', githubServiceRoutes); // service-account config + verify (admin)
 app.use('/api/github-app/webhook', githubAppWebhookRoutes); // GitHub App webhook receiver (no auth: X-Hub-Signature-256 only) — must precede the admin router below
@@ -1257,9 +1277,11 @@ app.use('/api/apps', whatsNewRoutes);     // /api/apps/:slug/whats-new — per-u
 app.use('/api/whats-new', platformWhatsNewRoutes); // /api/whats-new/platform — AppCrane update dialog (platform admins)
 app.use('/api/surveys', surveysRoutes);    // /api/surveys — in-app NPS surveys: pending card, answers, results, admin config
 app.use('/api', (await import('./routes/events.js')).default); // /api/events, /api/apps/:slug/events, /api/me/events: shared event store
+app.use('/api', (await import('./routes/appAudit.js')).default); // /api/apps/:slug/audit-events|audit-streams, /api/app-audit-events, /api/app-audit/settings (own guards per route)
 
 app.use('/api', logsRoutes);             // /api/audit, /api/:slug/audit, /api/:slug/logs/:env
 app.use('/api', monitoringRoutes);       // /api/server/health
+app.use('/api/users', adminUserSessionsRouter); // /api/users/:id/sessions (platform admin)
 app.use('/api/users', usersRoutes);
 app.use('/api/apps', webhooksRoutes);     // /api/apps/:slug/webhook config
 app.use('/api/apps', usersRoutes);        // /api/apps/:slug/roles, /api/apps/:slug/identity/users (admin)
@@ -1366,6 +1388,7 @@ app.get('/login-legacy', loginHandler);
 // Admin SPA — all admin routes served by the React admin-app bundle
 // Static marketing page for RAISEME (the managed AI-security app hosted on this platform).
 app.get('/raiseme', (req, res) => sendHtml(res, join(__dirname, '..', 'public', 'raiseme.html')));
+app.use(itSetupRoutes.pageRouter); // /it-setup: the IT contact's setup page (own CSP, no dashboard)
 
 const adminSpa = join(__dirname, '..', 'docs', 'admin-app', 'index.html');
 
@@ -1417,6 +1440,8 @@ app.get('/access-reviews/campaigns', (req, res) => sendHtml(res, adminSpa));
 app.get('/access-reviews/campaigns/:id', (req, res) => sendHtml(res, adminSpa));
 app.get('/audit-integrity', (req, res) => sendHtml(res, adminSpa));
 app.get('/owner-transfers', (req, res) => sendHtml(res, adminSpa));
+app.get('/capability-approvals', (req, res) => sendHtml(res, adminSpa));
+app.get('/step-up', (req, res) => sendHtml(res, adminSpa)); // step-up confirmation (hosted-app return, agent grants)
 app.get('/tasks', (req, res) => sendHtml(res, adminSpa)); // My tasks; task e-mails link to /tasks?task=<id>
 app.get('/surveys', (req, res) => sendHtml(res, adminSpa)); // NPS & surveys; survey e-mails link to /surveys?app=<slug>
 // Found by the same test: /skills is a client-side redirect to /settings#skills,
@@ -1836,6 +1861,13 @@ app.listen(PORT, HOST, async () => {
     log.error('Environment sleeper failed to start: ' + e.message);
   }
 
+  try {
+    const { startDomainVerifier } = await import('./services/domainVerification.js');
+    startDomainVerifier();
+  } catch (e) {
+    log.error('Domain verification job failed to start: ' + e.message);
+  }
+
   // v2.8.0: start the email queue worker. Drains email_queue, sends via Graph
   // (or SMTP), retries with backoff, dead-letters to the platform admin.
   // Failure here is logged but boot continues.
@@ -1860,6 +1892,21 @@ app.listen(PORT, HOST, async () => {
     startAppOwnershipWorker();
   } catch (e) {
     log.error('App owner sweep failed to start: ' + e.message);
+  }
+
+  // Capability approvals: end grants past their expiry (migration 200).
+  try {
+    const { startCapabilityGrantsWorker } = await import('./services/capabilities/sweeper.js');
+    startCapabilityGrantsWorker();
+  } catch (e) {
+    log.error('Capability grants sweep failed to start: ' + e.message);
+  }
+
+  // Egress allow-list: the proxy (and relay) for enforced containers already running.
+  try {
+    await (await import('./services/egress/container.js')).resumeEgress();
+  } catch (e) {
+    log.error('Egress proxy failed to start; enforced app containers have no way out until it does: ' + e.message);
   }
 
   // v2.25.2: probe platform integration credentials (Graph mail secret, GitHub
@@ -1896,11 +1943,14 @@ app.listen(PORT, HOST, async () => {
     try { const { startDeployLogRetention } = await import('./services/deployLogRetention.js'); startDeployLogRetention(); } catch (e) { log.error('Deploy log retention job failed to start: ' + e.message); }
     try { const { startBuildCachePrune } = await import('./services/buildCachePrune.js'); startBuildCachePrune(); } catch (e) { log.error('Build cache prune job failed to start: ' + e.message); }
     try { const { startTrustedDevicePurge } = await import('./services/trustedDevicePurge.js'); startTrustedDevicePurge(); } catch (e) { log.error('Trusted device purge failed to start: ' + e.message); }
+    try { const { startStaleSweep } = await import('./services/signinRisk/stale.js'); startStaleSweep(); } catch (e) { log.error('Stale account sweep failed to start: ' + e.message); }
     try { const { startAuditChain } = await import('./services/auditChain.js'); startAuditChain(); } catch (e) { log.error('Audit chain job failed to start: ' + e.message); }
     try { const { startMongoKernelCheck } = await import('./services/mongoKernelCheck.js'); startMongoKernelCheck(); } catch (e) { log.error('MongoDB kernel check failed to start: ' + e.message); }
     try { const { startNodeSecurityCheck } = await import('./services/nodeSecurityCheck.js'); startNodeSecurityCheck(); } catch (e) { log.error('Node.js security check failed to start: ' + e.message); }
     try { const { startAccessReviews } = await import('./services/accessReviews/index.js'); startAccessReviews(); } catch (e) { log.error('Access review job failed to start: ' + e.message); }
     try { (await import('./services/siem/delivery.js')).startSiemDelivery(); } catch (e) { log.error('SIEM delivery failed to start: ' + e.message); }
+    try { (await import('./services/appAudit/delivery.js')).startAppAuditDelivery(); } catch (e) { log.error('App audit streams failed to start: ' + e.message); }
+    try { (await import('./services/appAudit/retention.js')).startAppAuditRetention(); } catch (e) { log.error('App audit retention failed to start: ' + e.message); }
     try { (await import('./services/identityUpgradeRequests.js')).startIdentityUpgradeRequests(); } catch (e) { log.error('Identity upgrade requests failed to start: ' + e.message); }
   } catch (e) {
     log.error('Host resource monitor failed to start: ' + e.message);

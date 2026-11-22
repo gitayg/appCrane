@@ -74,7 +74,7 @@ export function parseSnapshotInspect(out) {
       name, status: p[1].trim(), pid: Number(p[2]) || 0, startedAt: p[3].trim(), restarts: Number(p[4]) || 0,
       memory: Number(p[5]), memoryReservation: Number(p[6]),
       nanoCpus: Number(p[7]), cpuQuota: Number(p[8]), cpuPeriod: Number(p[9]), cpuShares: Number(p[10]),
-      labels, image: (p[12] || '').trim() || null,
+      labels, image: labels['appcrane.image.ref'] || (p[12] || '').trim() || null,
     });
   }
   return rows;

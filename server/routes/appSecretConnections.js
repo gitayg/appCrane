@@ -3,6 +3,8 @@ import { requireAuth, requireAppUser } from '../middleware/auth.js';
 import { logAudit } from '../middleware/audit.js';
 import { AppError } from '../utils/errors.js';
 import { isAppOwnerOrPlatformAdmin } from '../services/permissions.js';
+import { getDb } from '../db.js';
+import { checkCapability, recordImplicit } from '../services/capabilities/enforce.js';
 import {
   ConnectionError, createConnection, deleteConnection, listConnections, publicView, updateConnection,
 } from '../services/externalSecrets/connections.js';
@@ -39,7 +41,11 @@ router.get('/:slug/secret-connections', requireAuth, requireAppUser, (req, res) 
 router.post('/:slug/secret-connections', requireAuth, requireAppUser, wrap((req, res) => {
   ownerOnly(req);
   const { name, provider, settings, credentials } = req.body || {};
+  const capCheck = typeof provider === 'string'
+    ? checkCapability(getDb(), { app: req.app, user: req.user, capability: 'external_secret_connections', needed: { providers: [provider.toLowerCase()] } })
+    : null;
   const row = createConnection({ appId: req.app.id, name, provider, settings, credentials, userId: req.user.id });
+  recordImplicit(getDb(), { app: req.app, user: req.user, via: 'api', channel: req.auth_kind }, [capCheck]);
   logAudit(req.user.id, req.app.id, 'secret-connection-create', { id: row.id, name: row.name, provider: row.provider, scope: 'app' });
   res.status(201).json({ connection: publicView(row) });
 }));

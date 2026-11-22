@@ -18,6 +18,8 @@ export interface ReviewItem {
   decided_at: string | null
   scim_managed: boolean
   scim_message: string | null
+  account_stale?: boolean
+  account_last_sign_in_at?: string | null
 }
 
 export interface Review {

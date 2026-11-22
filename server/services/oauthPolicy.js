@@ -1,4 +1,5 @@
 import { createHash } from 'crypto';
+import { ALL_SCOPES } from './mcpScopes.js';
 
 // Validation rules for AppCrane's MCP OAuth 2.1 authorization server. Pure
 // functions: no database, no request state beyond what is passed in.
@@ -106,9 +107,11 @@ export function isLoopbackRedirect(uri) {
  */
 export function resolveScope(raw) {
   const asked = typeof raw === 'string' ? raw.split(/\s+/).filter(Boolean) : [];
-  const known = asked.filter(s => SCOPES_SUPPORTED.includes(s));
-  if (known.includes(SCOPE_FULL) || known.length === 0) return { scope: SCOPE_FULL, readOnly: false };
-  return { scope: SCOPE_READ, readOnly: true };
+  const known = [...new Set(asked.filter(s => ALL_SCOPES.includes(s)))];
+  if (known.includes(SCOPE_FULL) || known.length === 0) return { scope: SCOPE_FULL, readOnly: false, scoped: false };
+  if (known.length === 1 && known[0] === SCOPE_READ) return { scope: SCOPE_READ, readOnly: true, scoped: false };
+  // Fine-grained scopes (services/mcpScopes.js): kept as asked, enforced per tool.
+  return { scope: known.sort().join(' '), readOnly: false, scoped: true };
 }
 
 export function scopeFor(readOnly) {

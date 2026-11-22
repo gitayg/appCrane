@@ -124,6 +124,7 @@ const NAV: NavItem[] = [
   // Ungated like Audit: the surveys API answers non-owners with 403 and the page explains.
   { id: 'surveys',      label: 'NPS & surveys', href: '/surveys',     icon: <Icon.Activity /> },
   { id: 'intake',       label: 'Intake',       href: '/intake',       icon: <Icon.ShieldCheck />, platformAdminOnly: true },
+  { id: 'capability-approvals', label: 'Capability approvals', href: '/capability-approvals', icon: <Icon.ShieldCheck />, platformAdminOnly: true },
   { id: 'access-review-campaigns', label: 'Access reviews', href: '/access-reviews/campaigns', icon: <Icon.ShieldCheck />, platformAdminOnly: true },
   { id: 'audit-integrity', label: 'Audit integrity', href: '/audit-integrity', icon: <Icon.ShieldCheck />, platformAdminOnly: true },
   { id: 'docs',         label: 'Docs',         href: '/docs',         icon: <Icon.Book /> },

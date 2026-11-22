@@ -71,6 +71,7 @@ test('background polls in the admin UI go through setVisibleInterval', () => {
   const ALLOWED = new Set([
     'components/mfa/IdleSessionGuard.tsx', 'components/coder/CoderPanel.tsx', 'utils/popupSignIn.ts',
     'hooks/useAskSession.ts', 'components/BackupsCard.tsx', 'pages/Catalog.tsx', 'utils/visibleInterval.ts',
+    'components/StepUpModal.tsx',
   ]);
   const root = fileURLToPath(new URL('../studio-web/src/', import.meta.url));
   const offenders = [];

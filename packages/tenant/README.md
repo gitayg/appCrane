@@ -65,7 +65,9 @@ upgraded the day they return.
 | `tenantQuotaBytes()` | `number` | from `APPCRANE_TENANT_QUOTA_BYTES`, `0` = unlimited |
 | `assertTenantQuota(req, opts?)` | — | throws `TENANT_QUOTA_EXCEEDED` if at/over quota; no-op when unlimited |
 | `tenantKey(req)` | `{ org, userId }` | throws if the request has no identity, or (with `APPCRANE_IDENTITY_SECRET` set) no valid signature |
-| `verifyIdentity(req, opts?)` | `{ userId, email, org }` | throws on a missing, forged, altered or >5 min old signature; `opts`: `{ secret?, maxAgeSec? }` |
+| `verifyIdentity(req, opts?)` | `{ userId, email, org, authVia, authTime, mfa }` | throws on a missing, forged, altered or >5 min old signature; `opts`: `{ secret?, maxAgeSec?, requireV2?, requireV3? }` |
+| `authenticatedWithin(identity, maxAgeSec)` | `boolean` | the person signed in or stepped up within `maxAgeSec`; false without a v3 `authTime` |
+| `stepUpUrl({ craneUrl, app, returnUrl })` | `string` | where to send the person to re-authenticate; AppCrane returns them to `returnUrl`, which must be on this app's own host |
 | `orgFromEmail(email)` | `string` org slug | domain, sanitised, `unknown` fallback |
 
 `req` may be an Express request (`req.get`), a Node request (`req.headers`), or a
@@ -89,7 +91,10 @@ checks `X-AppCrane-Identity-Sig` against `APPCRANE_IDENTITY_SECRET`, and
 `tenantKey()`/`tenantDb()` do so automatically when that variable is set, so a
 forged `X-AppCrane-User-Id` cannot choose someone else's folder; 1.3.0: the v2 signature,
 `X-AppCrane-Identity-Sig-V2` from AppCrane 2.125.14, also covers `X-AppCrane-Auth-Via`, read
-as `verifyIdentity(req).authVia`, with `{ requireV2: true }` to refuse v1-only identity), and the org slug is
+as `verifyIdentity(req).authVia`, with `{ requireV2: true }` to refuse v1-only identity; 1.4.0: the v3
+signature, `X-AppCrane-Identity-Sig-V3`, also covers `X-AppCrane-Auth-Time` and `X-AppCrane-Auth-Mfa`, read as
+`authTime` (unix seconds of the last sign-in or step-up, null for a key) and `mfa`, so an app can demand
+recent authentication with `authenticatedWithin()` and send the person to `stepUpUrl()`), and the org slug is
 sanitised so a hostile email can't traverse out of the tenant root. Consumer
 domains (e.g. `gmail.com`) share an `org` label, but isolation is per-user, so
 data never mixes.

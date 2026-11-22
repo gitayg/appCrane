@@ -2091,7 +2091,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     // same message, the same 'failed' deployment status and the same audit trail
     // it produced when this was awaited at the clone. Nothing has been stopped
     // and nothing has been started at this point.
-    if (env === 'production') await (await import('./releaseCheck.js')).enforceReleaseCheckInDeploy({ app, deployId, releaseDir: isImageDeploy ? null : releaseDir, commit: commitHash, opts, appendLog });
+    if (env === 'production') await (await import('./releaseCheck.js')).enforceReleaseCheckInDeploy({ app, deployId, releaseDir: isImageDeploy ? null : releaseDir, commit: commitHash, image, manifest, opts, appendLog });
     if (supplyChainGate) await supplyChainGate.settle();
     if (integrity) {
       const { verifyReleaseTree } = await import('./deployIntegrity.js');

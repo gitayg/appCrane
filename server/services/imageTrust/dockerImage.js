@@ -22,10 +22,10 @@ export async function inspectImage(ref) {
 /** The image id a container was created from, or { error }. */
 export async function containerImageId(name) {
   try {
-    const { stdout } = await execFileAsync('docker', ['inspect', String(name), '--format', '{{.Image}}|{{.Config.Image}}'], { timeout: 15000 });
-    const [id, ref] = String(stdout).trim().split('|');
+    const { stdout } = await execFileAsync('docker', ['inspect', String(name), '--format', '{{.Image}}|{{index .Config.Labels "appcrane.image.ref"}}|{{.Config.Image}}'], { timeout: 15000 });
+    const [id, label, configured] = String(stdout).trim().split('|');
     if (!IMAGE_ID_RE.test(id)) return { error: `docker did not report an image id for container ${name}` };
-    return { id, ref };
+    return { id, ref: label || configured };
   } catch (err) {
     return { error: `container ${name} could not be inspected (${(err.stderr || err.message || '').trim().split('\n').pop()})` };
   }

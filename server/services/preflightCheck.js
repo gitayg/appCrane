@@ -103,7 +103,7 @@ export async function preflightEntryCheck({ image, entry, timeoutMs = DOCKER_TIM
  * whatever holds its pipes. `onData(chunk, stop)` sees stdout; stop() ends the
  * command early and resolves with code 0.
  */
-function docker(args, { timeoutMs, onData = null }) {
+export function docker(args, { timeoutMs, onData = null }) {
   return new Promise((resolve, reject) => {
     const child = spawn('docker', args, { stdio: ['ignore', onData ? 'pipe' : 'ignore', 'ignore'] });
     let settled = false;
@@ -220,7 +220,7 @@ function paxRecords(body) {
  * ever compared and printed. Handles PAX and GNU long names, which is how a path
  * past 100 characters arrives. A malformed header stops the walk.
  */
-function tarWalker(onEntry, { keepBodies = false } = {}) {
+export function tarWalker(onEntry, { keepBodies = false, want = null } = {}) {
   let pending = Buffer.alloc(0);
   let skip = 0;
   let collect = null;
@@ -277,7 +277,7 @@ function tarWalker(onEntry, { keepBodies = false } = {}) {
       const path = override.path ?? (prefix ? `${prefix}/${name}` : name);
       override = {};
       const regular = type === '0' || type === '7';
-      if (regular && keepBodies) {
+      if (regular && keepBodies && (!want || want(path, size))) {
         collect = { kind: 'file', path, size: padded, bodySize: size };
         continue;
       }

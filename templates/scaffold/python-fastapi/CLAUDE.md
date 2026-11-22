@@ -51,6 +51,9 @@ one of them when you change the code.
 - When the app's LLM gateway is enabled AppCrane injects `ANTHROPIC_BASE_URL` /
   `ANTHROPIC_API_KEY` (and/or the `OPENAI_*` pair) pointing at its gateway. The
   official SDKs read them; never put a provider key in the app.
+- Audit events: `app/audit.py` `audit_event(action, headers=request.headers, ...)`
+  writes to AppCrane's audit store with the service token. Register the action
+  on the app first; passing the headers makes the signed-in user the actor.
 
 ## MCP tools
 - `deployhub.json` `mcp.tools` exposes routes as MCP tools. Calls arrive with
@@ -61,3 +64,10 @@ one of them when you change the code.
 - Push with `appcrane_push_to_managed_app`, then
   `appcrane_deploy(slug="__APP_SLUG__", stage="sandbox")`. Production only when
   a person asks.
+
+## AppCrane widgets
+- For a user menu, sign-out, session list, member management, access requests
+  or app sign-in keys, use AppCrane's widgets instead of building them:
+  `<script src="/__appcrane/widgets.js" defer>` and the `<appcrane-*>` elements
+  listed in README.md. Do not proxy, wrap or re-implement `/__appcrane/*`, and
+  never route it to the app: AppCrane answers those paths on the app's host.

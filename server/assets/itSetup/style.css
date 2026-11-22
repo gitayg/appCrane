@@ -1,0 +1,19 @@
+body { margin: 0; background: #f6f7f9; color: #1f2328; font: 15px/1.5 -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 760px; margin: 0 auto; padding: 24px 16px 64px; }
+h1 { font-size: 22px; margin: 0 0 4px; }
+h2 { font-size: 17px; margin: 0 0 8px; }
+section { background: #fff; border: 1px solid #d8dde3; border-radius: 8px; padding: 16px; margin-top: 16px; }
+label { display: block; margin-top: 10px; font-weight: 600; font-size: 13px; }
+input[type=text], input[type=url], input[type=password], textarea, select { width: 100%; box-sizing: border-box; padding: 7px 9px; border: 1px solid #c4cad1; border-radius: 6px; font: inherit; }
+textarea { min-height: 90px; font-family: ui-monospace, monospace; font-size: 12px; }
+.check { font-weight: 400; display: flex; gap: 6px; align-items: center; }
+button { margin-top: 12px; margin-right: 6px; padding: 7px 14px; border: 1px solid #1f6feb; background: #1f6feb; color: #fff; border-radius: 6px; font: inherit; cursor: pointer; }
+button.ghost { background: #fff; color: #1f6feb; }
+.muted { color: #636c76; font-size: 13px; }
+.ok { color: #1a7f37; }
+.bad { color: #cf222e; }
+.warn { background: #fff8c5; border: 1px solid #d4a72c; border-radius: 6px; padding: 8px 10px; margin-top: 10px; font-size: 13px; }
+code, .mono { font-family: ui-monospace, monospace; font-size: 12px; word-break: break-all; }
+table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
+td, th { text-align: left; border-bottom: 1px solid #eaeef2; padding: 4px 6px; }
+.change { border-top: 1px dashed #d8dde3; margin-top: 12px; padding-top: 8px; }

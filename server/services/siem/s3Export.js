@@ -2,6 +2,7 @@ import zlib from 'zlib';
 import { promisify } from 'util';
 import { s3PutObject } from '../s3.js';
 import { assertResolvable } from './netGuard.js';
+import { postHttps } from './https.js';
 
 // Object export: each delivered batch becomes one JSONL object under a daily
 // prefix, <prefix>dt=YYYY-MM-DD/appcrane-events-<firstId>-<lastId>.jsonl[.gz].
@@ -40,6 +41,7 @@ export async function sendS3(docs, sink, secrets, allowlist, { put = s3PutObject
       key: exportKey(c.prefix, day, Math.min(...ids), Math.max(...ids), gz),
       body: gz ? await gzip(Buffer.from(body)) : body,
       contentType: gz ? 'application/gzip' : 'application/x-ndjson',
+      transport: (url, o) => postHttps(url, { method: o.method, headers: o.headers, body: o.body ?? '', sink, allowlist }),
     });
   }
 }

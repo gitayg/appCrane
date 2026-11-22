@@ -42,7 +42,7 @@ const idsOf = (pkgs) => pkgs.map(p => `${p.name}@${p.version}`).sort();
 // the table
 // ---------------------------------------------------------------------------
 
-test('the table maps nine manifests onto OSV ecosystem names', () => {
+test('the table maps eleven manifests onto OSV ecosystem names', () => {
   assert.deepEqual(
     MANIFESTS.map(m => [m.file, m.ecosystem]),
     [
@@ -55,6 +55,8 @@ test('the table maps nine manifests onto OSV ecosystem names', () => {
       ['Gemfile.lock', 'RubyGems'],
       ['poetry.lock', 'PyPI'],
       ['Pipfile.lock', 'PyPI'],
+      ['uv.lock', 'PyPI'],
+      ['requirements.txt', 'PyPI'],
     ],
     'OSV ecosystem names are matched literally by the API — "cargo", "rubygems" or ' +
     '"pypi" are not errors, they return an empty result set, which records every ' +
@@ -73,7 +75,7 @@ test('PHP is Packagist, capital P, and nothing else', () => {
   assert.equal(php.ecosystem, 'Packagist');
 });
 
-test('three manifests share the npm ecosystem, and two share PyPI', () => {
+test('three manifests share the npm ecosystem, and four share PyPI', () => {
   // The table is keyed by FILE, not by ecosystem, which is what lets a second
   // and third JavaScript package manager be one row each. Order is
   // presentation only — appScan reads every manifest it finds, so a repo
@@ -84,7 +86,7 @@ test('three manifests share the npm ecosystem, and two share PyPI', () => {
     ['package-lock.json', 'yarn.lock', 'pnpm-lock.yaml']);
   assert.deepEqual(
     MANIFESTS.filter(m => m.ecosystem === 'PyPI').map(m => m.file),
-    ['poetry.lock', 'Pipfile.lock']);
+    ['poetry.lock', 'Pipfile.lock', 'uv.lock', 'requirements.txt']);
 });
 
 test('parseManifest dispatches on the filename when no row is passed', () => {
@@ -93,10 +95,8 @@ test('parseManifest dispatches on the filename when no row is passed', () => {
 });
 
 test('an unrecognised filename throws rather than returning nothing', () => {
-  const path = fixture('requirements.txt', 'django>=4.2\nrequests\n');
-  assert.throws(() => parseManifest(path), /no parser for requirements.txt/,
-    'an unreadable manifest returned a package list. requirements.txt pins nothing — ' +
-    'guessing a version from ">=4.2" answers about a release that may not be installed');
+  const path = fixture('requirements.in', 'django>=4.2\nrequests\n');
+  assert.throws(() => parseManifest(path), /no parser for requirements.in/);
 });
 
 test('the recorded error names the manifest that failed', () => {

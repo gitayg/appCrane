@@ -652,7 +652,12 @@ test('both faces of app delete pass on what stays in AWS, and leave it out when 
       assert.equal(r.status, 200, r.text);
       return r.json;
     },
-    MCP: async (slug) => unwrap(await callTool(OWNER.row, 'appcrane_delete_app', { slug, confirm_slug: slug })),
+    MCP: async (slug) => {
+      // An agent deletes only after its person's step-up grant (services/stepUp.js).
+      const { createGrant } = await import('../server/services/stepUp.js');
+      createGrant(db, OWNER.id, 'delete_app', db.prepare('SELECT id FROM apps WHERE slug = ?').get(slug).id);
+      return unwrap(await callTool(OWNER.row, 'appcrane_delete_app', { slug, confirm_slug: slug }));
+    },
   };
   for (const [face, del] of Object.entries(faces)) {
     const slug = `face-${face.toLowerCase()}`;

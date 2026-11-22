@@ -674,5 +674,7 @@ const { registerRotateKey } = await import('./rotateKey.js');
 registerRotateKey(program, out);
 const { registerSecrets } = await import('./secrets.js');
 registerSecrets(program, out);
+const { registerSignin } = await import('./signin.js');
+registerSignin(program, out);
 
 program.parse();

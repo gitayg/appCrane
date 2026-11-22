@@ -27,7 +27,9 @@
  * migration 084 for why the two halves are deliberately not the same table.
  */
 
+import { requireStepUp } from '../services/stepUp.js';
 import { Router } from 'express';
+import { scimRequestLogger } from '../services/scimRequestLog.js';
 import { timingSafeEqual } from 'crypto';
 import { getDb } from '../db.js';
 import { hashApiKey, generateApiKey, hashPassword } from '../services/encryption.js';
@@ -51,6 +53,7 @@ router.use((_req, res, next) => {
   res.type(SCIM_MEDIA_TYPE);
   next();
 });
+router.use(scimRequestLogger);
 
 const SCIM_USER_SCHEMA = 'urn:ietf:params:scim:schemas:core:2.0:User';
 const SCIM_GROUP_SCHEMA = 'urn:ietf:params:scim:schemas:core:2.0:Group';
@@ -1006,7 +1009,7 @@ export const scimAdminRouter = Router();
  * POST /api/auth/scim/token — generate a new SCIM bearer token (admin only)
  * Returns the plaintext token ONCE — it is never stored.
  */
-scimAdminRouter.post('/token', requireAuth, requirePlatformAdmin, (req, res) => {
+scimAdminRouter.post('/token', requireAuth, requirePlatformAdmin, requireStepUp('security_settings'), (req, res) => {
   const db    = getDb();
   const token = generateApiKey('scim');
   const hash  = hashApiKey(token);
@@ -1024,7 +1027,7 @@ scimAdminRouter.post('/token', requireAuth, requirePlatformAdmin, (req, res) => 
 /**
  * PUT /api/auth/scim/config — enable/disable SCIM (admin only)
  */
-scimAdminRouter.put('/config', requireAuth, requirePlatformAdmin, (req, res) => {
+scimAdminRouter.put('/config', requireAuth, requirePlatformAdmin, requireStepUp('security_settings'), (req, res) => {
   const { enabled } = req.body || {};
   const db = getDb();
   db.prepare(`INSERT INTO settings (key, value, updated_by, updated_at) VALUES (?, ?, ?, datetime('now'))
@@ -1087,7 +1090,7 @@ scimAdminRouter.get('/groups', requireAuth, requirePlatformAdmin, (req, res) => 
  * platform_admin session — which is what stops "rename a group in Okta" from
  * being a route to production env vars.
  */
-scimAdminRouter.put('/groups/:id/apps', requireAuth, requirePlatformAdmin, (req, res) => {
+scimAdminRouter.put('/groups/:id/apps', requireAuth, requirePlatformAdmin, requireStepUp('security_settings'), (req, res) => {
   const db    = getDb();
   const id    = pathId(req);
   const group = db.prepare('SELECT * FROM scim_groups WHERE id = ?').get(id);

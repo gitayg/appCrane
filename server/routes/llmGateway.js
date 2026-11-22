@@ -11,6 +11,7 @@ import {
 } from '../services/llmGateway/config.js';
 import { usageSummary, spentSoFar } from '../services/llmGateway/usage.js';
 import { gatewayBaseUrl } from '../services/llmGateway/env.js';
+import { checkCapability, recordImplicit } from '../services/capabilities/enforce.js';
 
 // LLM gateway for hosted apps (services/llmGateway/*).
 //
@@ -97,7 +98,11 @@ appRouter.get('/:slug/llm-gateway', requireAuth, requireAppAccess, requireGatewa
 
 appRouter.put('/:slug/llm-gateway', requireAuth, requireAppAccess, requireGatewayEditor, auditMiddleware('llm-gateway-app'), (req, res) => {
   if (typeof req.body?.enabled !== 'boolean') throw new AppError('enabled must be true or false', 400, 'VALIDATION');
+  const capCheck = req.body.enabled && !getAppSettings(req.app.id).enabled
+    ? checkCapability(getDb(), { app: req.app, user: req.user, capability: 'llm_gateway', needed: {} })
+    : null;
   setAppEnabled(req.app.id, req.body.enabled, req.user.id);
+  recordImplicit(getDb(), { app: req.app, user: req.user, via: 'api', channel: req.auth_kind }, [capCheck]);
   res.json({ ...appView(req.app), redeploy_needed: true });
 });
 

@@ -32,6 +32,9 @@ const { initDb, getDb } = await import('../server/db.js');
 const { generateApiKey, hashApiKey } = await import('../server/services/encryption.js');
 initDb();
 const db = getDb();
+// This file is about something other than capability approvals, which
+// require approval for public_visibility by default (test/capability-*.test.js).
+db.prepare("INSERT INTO settings (key, value) VALUES ('capability_approval_required:public_visibility', '0')").run();
 
 const {
   POLICY_KEYS, getPolicy, setPolicy, assertVisibilityAllowed, policyViolations,

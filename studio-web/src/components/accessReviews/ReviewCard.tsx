@@ -43,6 +43,7 @@ function ItemRow({ item, canDecide, onDecided }: { item: ReviewItem; canDecide: 
       <td style={{ padding: 6 }}>
         <div>{item.user_name || `#${item.user_id}`}</div>
         <div style={{ fontSize: '.75rem', color: 'var(--dim)' }}>{item.user_email}</div>
+        {item.account_stale && <span className="badge" title={`No AppCrane sign-in since ${day(item.account_last_sign_in_at ?? null)}`}>Stale account</span>}
       </td>
       <td style={{ padding: 6 }}>{item.role}</td>
       <td style={{ padding: 6 }}>

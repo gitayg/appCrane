@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { requireStepUp } from '../services/stepUp.js';
 import { existsSync, unlinkSync, symlinkSync, cpSync, writeFileSync, readFileSync, mkdirSync } from 'fs';
 import { resolve, join } from 'path';
 import { getDb } from '../db.js';
@@ -306,7 +307,7 @@ router.post('/:slug/rollback/:env', requireAppAccess, auditMiddleware('rollback'
  * services/deployer.js promoteApp() so REST and the appcrane_promote MCP tool
  * stay in lockstep.
  */
-router.post('/:slug/promote', requireAppAccess, auditMiddleware('promote'), async (req, res) => {
+router.post('/:slug/promote', requireAppAccess, requireStepUp('promote_production'), auditMiddleware('promote'), async (req, res) => {
   // v2.7.12: promotion is owner-only (or global admin). Per-app admins and
   // plain members cannot promote to production.
   if (!isAdmin(req.user) && roleForUserOnApp(req.user, req.app) !== 'owner') {
@@ -355,8 +356,7 @@ router.post('/:slug/restart/:env', requireAppAccess, auditMiddleware('restart'),
   // fall back to the most recent live deployment record.
   let image = null;
   try {
-    const { stdout } = await execFileAsync('docker', ['inspect', containerName, '--format', '{{.Config.Image}}'], { timeout: 10000 });
-    image = stdout.trim();
+    image = await (await import('../services/docker.js')).getContainerImage(app.slug, env);
   } catch (_) {}
 
   if (!image) {

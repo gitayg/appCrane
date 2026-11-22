@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { requireStepUp } from '../services/stepUp.js';
 import { getDb } from '../db.js';
 import { generateApiKey, hashApiKey } from '../services/encryption.js';
 import { requireAuth, requirePlatformAdmin } from '../middleware/auth.js';
@@ -8,6 +9,7 @@ import { isAdmin } from '../utils/roles.js';
 import log from '../utils/logger.js';
 import { maxAgeDays } from '../services/apiKeyExpiry.js';
 import { issueOnboardingKey } from '../services/onboardingMcpKey.js';
+import { findBlueprint } from '../services/mcpBlueprints.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -45,6 +47,19 @@ function parseReadOnly(body) {
 }
 
 /**
+ * Optional `blueprint` (a blueprint name or id, services/mcpBlueprints.js): the
+ * key may then call only the tools that blueprint's scopes cover, on only its
+ * apps, on top of the issuer's role. Omitted keeps today's unscoped key.
+ */
+function parseBlueprint(body) {
+  const v = (body || {}).blueprint;
+  if (v == null) return null;
+  const bp = findBlueprint(v);
+  if (!bp) throw new AppError('blueprint must be the name or id of an existing blueprint', 400, 'VALIDATION');
+  return bp.id;
+}
+
+/**
  * Count of apps this user can reach via a personal MCP key. AppCrane global
  * admins see every app; everyone else only sees apps where they're Owner.
  * Mirrors the resolution in mcpTools.js → accessibleSlugsForUser.
@@ -71,7 +86,7 @@ function storedExpiry(db, id) {
 router.get('/me/mcp-keys', requireSession, (req, res) => {
   const db = getDb();
   const keys = db.prepare(`
-    SELECT id, label, purpose, created_at, issued_at, last_used_at, expires_at, revoked_at, read_only
+    SELECT id, label, purpose, created_at, issued_at, last_used_at, expires_at, revoked_at, read_only, blueprint_id
     FROM user_mcp_keys
     WHERE user_id = ? AND coder_session_id IS NULL
     ORDER BY id DESC
@@ -87,7 +102,7 @@ router.get('/me/mcp-keys', requireSession, (req, res) => {
 /**
  * POST /api/me/mcp-keys — issue a new key. Plaintext returned ONCE.
  */
-router.post('/me/mcp-keys', requireSession, auditMiddleware('user-mcp-key-create'), (req, res) => {
+router.post('/me/mcp-keys', requireSession, requireStepUp('manage_api_keys'), auditMiddleware('user-mcp-key-create'), (req, res) => {
   const { label, expires_at, purpose } = req.body || {};
   if (purpose != null && purpose !== 'onboarding') {
     throw new AppError("purpose must be 'onboarding' or omitted", 400, 'VALIDATION');
@@ -118,20 +133,21 @@ router.post('/me/mcp-keys', requireSession, auditMiddleware('user-mcp-key-create
     throw new AppError('expires_at must be a valid ISO datetime', 400, 'VALIDATION');
   }
   const readOnly = parseReadOnly(req.body);
+  const blueprintId = parseBlueprint(req.body);
 
   const apiKey = generateApiKey('dhk_mcp');
   const keyHash = hashApiKey(apiKey);
   const db = getDb();
   const result = db.prepare(`
-    INSERT INTO user_mcp_keys (user_id, key_hash, label, expires_at, read_only)
-    VALUES (?, ?, ?, ?, ?)
-  `).run(req.user.id, keyHash, label || null, expires_at || null, readOnly);
+    INSERT INTO user_mcp_keys (user_id, key_hash, label, expires_at, read_only, blueprint_id)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(req.user.id, keyHash, label || null, expires_at || null, readOnly, blueprintId);
 
   log.info(`UserMcpKey: created id=${result.lastInsertRowid} user=${req.user.id} read_only=${readOnly}`);
   res.json({
     key: {
       id: result.lastInsertRowid, label: label || null, expires_at: storedExpiry(db, result.lastInsertRowid),
-      read_only: readOnly,
+      read_only: readOnly, blueprint_id: blueprintId,
     },
     api_key: apiKey,
     warning: 'Save this API key — it will not be shown again.',
@@ -155,7 +171,7 @@ router.post('/me/mcp-keys', requireSession, auditMiddleware('user-mcp-key-create
  * another user's password (PUT /api/users/:id/password).
  * Body: { label?, expires_at? } — same shape as the self-issue endpoint.
  */
-router.post('/users/:id/mcp-keys', requirePlatformAdmin, auditMiddleware('user-mcp-key-create-admin'), (req, res) => {
+router.post('/users/:id/mcp-keys', requirePlatformAdmin, requireStepUp('manage_api_keys'), auditMiddleware('user-mcp-key-create-admin'), (req, res) => {
   if (req.user_mcp_key) {
     throw new AppError('Issuing keys for other users requires a session, not an MCP key', 403, 'KEY_FORBIDDEN');
   }
@@ -171,6 +187,7 @@ router.post('/users/:id/mcp-keys', requirePlatformAdmin, auditMiddleware('user-m
   }
 
   const readOnly = parseReadOnly(req.body);
+  const blueprintId = parseBlueprint(req.body);
 
   const db = getDb();
   const target = db.prepare('SELECT id, name, email, active FROM users WHERE id = ?').get(targetId);
@@ -180,15 +197,15 @@ router.post('/users/:id/mcp-keys', requirePlatformAdmin, auditMiddleware('user-m
   const apiKey = generateApiKey('dhk_mcp');
   const keyHash = hashApiKey(apiKey);
   const result = db.prepare(`
-    INSERT INTO user_mcp_keys (user_id, key_hash, label, expires_at, read_only)
-    VALUES (?, ?, ?, ?, ?)
-  `).run(targetId, keyHash, label || `issued-by-admin-${req.user.id}`, expires_at || null, readOnly);
+    INSERT INTO user_mcp_keys (user_id, key_hash, label, expires_at, read_only, blueprint_id)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(targetId, keyHash, label || `issued-by-admin-${req.user.id}`, expires_at || null, readOnly, blueprintId);
 
   log.info(`UserMcpKey: admin id=${req.user.id} issued key id=${result.lastInsertRowid} for user id=${targetId} read_only=${readOnly}`);
   res.json({
     key: {
       id: result.lastInsertRowid, label: label || null, expires_at: storedExpiry(db, result.lastInsertRowid),
-      read_only: readOnly,
+      read_only: readOnly, blueprint_id: blueprintId,
     },
     api_key: apiKey,
     target: { id: target.id, name: target.name, email: target.email },
@@ -205,7 +222,7 @@ router.post('/users/:id/mcp-keys', requirePlatformAdmin, auditMiddleware('user-m
  * so "rotate the key I pasted into that agent" can never quietly hand that
  * agent deploy and secret-write rights.
  */
-router.post('/me/mcp-keys/:id/rotate', requireSession, auditMiddleware('user-mcp-key-rotate'), (req, res) => {
+router.post('/me/mcp-keys/:id/rotate', requireSession, requireStepUp('manage_api_keys'), auditMiddleware('user-mcp-key-rotate'), (req, res) => {
   const keyId = parseInt(req.params.id, 10);
   const db = getDb();
   const existing = db.prepare('SELECT * FROM user_mcp_keys WHERE id = ? AND user_id = ? AND coder_session_id IS NULL').get(keyId, req.user.id);

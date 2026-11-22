@@ -1,5 +1,6 @@
+import { parkPopupDeviceCheck } from '../services/signinRisk/popupDeviceCheck.js';
 import { Router } from 'express';
-import { auditLogin } from '../middleware/audit.js';
+import { auditLogin, logAudit } from '../middleware/audit.js';
 import { findOrLinkSsoUser } from '../services/ssoLink.js';
 import { SAML } from '@node-saml/node-saml';
 import crypto from 'crypto';
@@ -11,6 +12,7 @@ import { readBrowserBinding, ensureBrowserBinding, browserMismatch, issueSsoHand
 import { safeRedirectTarget } from '../utils/safeRedirect.js';
 import { POPUP_MODE, requestedMode, makePopupRelayState, isPopupRelayState, sendPopupComplete, sendPopupFailed, loginErrorCode } from '../utils/ssoPopup.js';
 import { ssoLoginMfaStep } from '../services/ssoMfa.js';
+import { finishIdpStepUp, liveRequestByHash, requireStepUp } from '../services/stepUp.js';
 import log from '../utils/logger.js';
 
 const router = Router();
@@ -135,7 +137,7 @@ router.get('/admin-config', requireAuth, requirePlatformAdmin, (req, res) => {
 /**
  * PUT /api/auth/saml/config — admin: save SAML settings
  */
-router.put('/config', requireAuth, requirePlatformAdmin, (req, res) => {
+router.put('/config', requireAuth, requirePlatformAdmin, requireStepUp('security_settings'), (req, res) => {
   const { enabled, idp_sso_url, idp_cert, provider_name, auto_provision } = req.body || {};
   const db = getDb();
   const save = (k, v) => upsertSetting(db, k, v, req.user.id);
@@ -201,6 +203,26 @@ router.get('/start', async (req, res) => {
 });
 
 /**
+ * Step-up re-login (services/stepUp.js): an AuthnRequest with ForceAuthn, so
+ * the IdP must authenticate the person again. Its ID is recorded on the
+ * step-up request; the signed response's InResponseTo finds it again.
+ */
+export async function startSamlStepUp(req, res, request) {
+  const cfg = getSamlConfig();
+  if (!cfg.enabled || !cfg.idp_sso_url || !cfg.idp_cert) throw new Error('SAML not configured');
+  const binding = ensureBrowserBinding(req, res, SAML_BIND_COOKIE);
+  const requestId = makeRequestId(binding);
+  getDb().prepare('UPDATE step_up_requests SET idp_request_id = ? WHERE id = ?').run(requestId, request.id);
+  const saml = buildSaml(cfg, { generateUniqueId: () => requestId, forceAuthn: true });
+  res.redirect(await saml.getAuthorizeUrlAsync(makePopupRelayState(), req.headers.host, {}));
+}
+
+function authnInstantMs(profile) {
+  const m = /AuthnInstant="([^"]+)"/.exec(profile.getAssertionXml?.() || '');
+  return m ? Date.parse(m[1]) : NaN;
+}
+
+/**
  * POST /api/auth/saml/callback — Okta posts SAMLResponse here
  */
 router.post('/callback', async (req, res) => {
@@ -226,6 +248,17 @@ router.post('/callback', async (req, res) => {
       return res.redirect(303, base + '/api/auth/saml/start' + (restart ? '?' + new URLSearchParams({ redirect: restart }) : ''));
     }
     if (!requestIdIsThisBrowsers(req, profile.inResponseTo)) throw browserMismatch();
+
+    const stepUpRow = getDb().prepare("SELECT handle_hash FROM step_up_requests WHERE idp_request_id = ? AND kind = 'saml'").get(profile.inResponseTo);
+    if (stepUpRow) {
+      const db = getDb();
+      const request = liveRequestByHash(db, stepUpRow.handle_hash, ['saml']);
+      if (!request) throw Object.assign(new Error('Step-up request expired'), { popupCode: 'step_up_expired' });
+      const r = finishIdpStepUp(db, request, { subjectColumn: 'saml_name_id', subject: profile.nameID, authInstantMs: authnInstantMs(profile) });
+      logAudit(request.user_id, null, r.ok ? 'step-up' : 'step-up-refused', { method: 'saml', ...(r.ok ? {} : { reason: r.code }), ip: req.ip });
+      if (!r.ok) throw Object.assign(new Error(`SAML step-up refused: ${r.code}`), { popupCode: r.code });
+      return sendPopupComplete(res);
+    }
 
     // Extract identity from SAML attributes
     const nameId     = profile.nameID;                              // Okta default: email
@@ -312,11 +345,14 @@ router.post('/callback', async (req, res) => {
     // Only a RelayState signed by /start selects popup mode; a forged one is
     // just an unsafe redirect that safeRedirectTarget below drops.
     const popup       = isPopupRelayState(req.body.RelayState);
-    if (popup && !mfaStep) return sendPopupComplete(res);
+    if (popup && !mfaStep) {
+      parkPopupDeviceCheck(token, user.id, 'saml');
+      return sendPopupComplete(res);
+    }
 
     const relayTarget = safeRedirectTarget(req.body.RelayState, '');
     // See SSO handoff in oidc.js: a code, never the session token, in the URL.
-    const p           = new URLSearchParams({ sso_code: issueSsoHandoff(token, SAML_BIND_COOKIE.name, readBrowserBinding(req, SAML_BIND_COOKIE.name), mfaStep) });
+    const p           = new URLSearchParams({ sso_code: issueSsoHandoff(token, SAML_BIND_COOKIE.name, readBrowserBinding(req, SAML_BIND_COOKIE.name), mfaStep, token ? { userId: user.id, method: 'saml' } : null) });
     if (popup) {
       p.set('sso_popup', '1');
     } else if (relayTarget && !relayTarget.includes('/login')) {

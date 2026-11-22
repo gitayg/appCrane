@@ -154,7 +154,13 @@ test('production: app admin and member get 403, owner and platform admin get the
     assert.equal(leaked(r.body), 0, `${who.name}'s refusal carried a value`);
     assert.ok(!revealRows(who.id).some(d => d.env === 'production'), `${who.name}'s refusal was logged as a reveal`);
   }
+  // Step-up (services/stepUp.js): by key, production needs the person's grant first.
+  const { createGrant } = await import('../server/services/stepUp.js');
   for (const who of [OWNER, PLATFORM]) {
+    const refused = await revealOne(who, 'PROD_KEY', 'production');
+    assert.equal(refused.status, 403, `${who.name} revealed production by key with no grant`);
+    assert.equal(leaked(refused.body), 0);
+    createGrant(getDb(), who.id, 'reveal_production_secret', APP);
     const r = await revealOne(who, 'PROD_KEY', 'production');
     assert.equal(r.status, 200, `${who.name} was refused`);
     assert.ok(r.json.value === SECRETS.production.PROD_KEY, `${who.name} did not get the production value`);

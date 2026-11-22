@@ -84,6 +84,11 @@ const IDENTITY_HEADERS = [
   // key (dhk_uak_*) instead of a browser session. An app that lets a script do
   // less than its person relies on it, so a client must not be able to send it.
   'X-AppCrane-Auth-Via',
+  // Step-up: when the session last authenticated and with which second factor,
+  // and the v3 signature that covers them (v1/v2 are unchanged).
+  'X-AppCrane-Auth-Time',
+  'X-AppCrane-Auth-Mfa',
+  'X-AppCrane-Identity-Sig-V3',
 ];
 
 /**
@@ -528,6 +533,7 @@ function redirOrLegacy(app, mount, port, bypassPaths, host, live = true) {
  */
 function isolatedSiteBody(o) {
   const { cranePort, port, verifyUri, prefix, isHeadless, fa, ingress, wakeHeader = '' } = o;
+  const crashPrefix = o.crashPrefix === undefined ? prefix : o.crashPrefix;
   // A bypass entry under /__appcrane would out-rank the AppCrane route below
   // (longer path wins) and hand the sign-in landing to the app.
   const reserved = RESERVED_APP_PATH.toLowerCase();
@@ -593,13 +599,13 @@ function isolatedSiteBody(o) {
   s += `        reverse_proxy 127.0.0.1:${port}\n`;
   s += `    }\n`;
 
-  if (prefix) {
+  if (crashPrefix) {
     // Crash page: AppCrane names the app from the first path segment, which on
-    // an app host is no longer in the URI, so it is put back.
+    // an app host or a custom domain is not in the URI, so it is put back.
     s += `\n    handle_errors {\n`;
     s += `        @appdown expression \`{err.status_code} in [502, 503, 504]\`\n`;
     s += `        handle @appdown {\n`;
-    s += `            rewrite * /api/_crashed${prefix}{uri}\n`;
+    s += `            rewrite * /api/_crashed${crashPrefix}{uri}\n`;
     s += wakeHeader;
     s += craneProxy('            ', cranePort, ingress);
     s += `        }\n`;
@@ -1177,11 +1183,17 @@ export function generateCaddyfile() {
     // domain too, through the same handoff as an app host (production, no
     // /<slug> prefix to undo, no embedding override, as before). With or
     // without isolation. A headless app has no sign-in to apply.
+    //
+    // While sleep is on somewhere, the block also gets the app hosts' crash
+    // rewrite with the wake token, so a request here wakes a sleeping
+    // production (sleepPolicy.sleepBlockers). Its traffic passes forward_auth,
+    // so AppCrane sees it. Without sleep the block is what it was.
     if (app.custom_domain_auth && app.auth_mode !== 'headless') {
       caddyfile += isolatedSiteBody({
-        cranePort, refuseBrotli, ingress,
+        cranePort, refuseBrotli, ingress, wakeHeader,
         port: ports.prod_be,
         prefix: null,
+        crashPrefix: wakeHeader ? `/${app.slug}` : null,
         fa: null,
         verifyUri: `/api/identity/verify?app=${app.slug}&env=production&host=isolated`,
         isHeadless: false,

@@ -106,7 +106,7 @@ router.get('/handoff', (req, res) => {
   if (!session) return res.redirect(302, `/login?redirect=${encodeURIComponent(req.originalUrl)}`);
 
   if (resolveAppRole(db, { user_id: session.user_id, crane_role: session.role }, app) === 'none') {
-    return refuseNoAccess(req, res, app.name || app.slug);
+    return refuseNoAccess(req, res, app.name || app.slug, app.slug);
   }
 
   // The hash of the app host's state cookie (set by verify's redirect). Only

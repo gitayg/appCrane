@@ -1,10 +1,12 @@
 import { getDb } from '../db.js';
 import { hashApiKey } from '../services/encryption.js';
 import { AppError } from '../utils/errors.js';
+import { onApiKeyFailure } from '../services/signinRisk/index.js';
 import { isAdmin } from '../utils/roles.js';
 import { activeViewAs, effectiveUser } from '../services/viewAs.js';
 import { lookupAccessToken } from '../services/oauthStore.js';
 import { ACCESS_PREFIX, canonicalResource, mcpResourceOf } from '../services/oauthPolicy.js';
+import { effectiveScopes, applyCredentialScopes } from '../services/mcpBlueprints.js';
 import { auditExpiredUse, expiredMessage, expireUserKey, isPast } from '../services/apiKeyExpiry.js';
 import { touchSession } from '../services/sessionPolicy.js';
 import { userKeyIngressError } from '../utils/ingress.js';
@@ -54,7 +56,7 @@ export function requireAuth(req, res, next) {
       const keyHash = hashApiKey(apiKey);
       const row = db.prepare(`
         SELECT umk.id AS umk_id, umk.label, umk.expires_at, umk.revoked_at,
-               umk.read_only, umk.coder_session_id, umk.app_id,
+               umk.read_only, umk.coder_session_id, umk.app_id, umk.blueprint_id,
                u.id AS uid, u.name, u.email, u.role, u.active, u.kind, u.username,
                u.mcp_app_scope
         FROM user_mcp_keys umk
@@ -108,6 +110,8 @@ export function requireAuth(req, res, next) {
           id: row.umk_id, label: row.label, read_only: !!row.read_only || !!coder,
           ...(coder ? { coder } : {}),
         };
+        req.auth_kind = 'mcp_key';
+        applyCredentialScopes(req.user, req.user_mcp_key, effectiveScopes({ blueprintId: row.blueprint_id }, db));
         return next();
       }
     }
@@ -141,6 +145,7 @@ export function requireAuth(req, res, next) {
         auditExpiredUse(gone.id, 'user', gone.id, gone.api_key_expires_at, req.ip);
         return next(new AppError(expiredMessage(gone.api_key_expires_at), 401, 'API_KEY_EXPIRED'));
       }
+      onApiKeyFailure(req.ip, userKeyHash);
       return next(new AppError('Invalid API key', 401, 'UNAUTHORIZED'));
     }
     if (!user.active) return next(new AppError('Account is deactivated', 403, 'DEACTIVATED'));
@@ -155,6 +160,7 @@ export function requireAuth(req, res, next) {
     if (ingressErr) return next(ingressErr);
     recordUserKeyUse(user.id, db);
     req.user = user;
+    req.auth_kind = 'api_key';
     applyViewAs(req, apiKey);
     return next();
   }
@@ -173,6 +179,7 @@ export function requireAuth(req, res, next) {
       touchSession(db, { id: _session_id, last_seen_at: _session_last_seen_at, absolute_expires_at: _session_absolute_expires_at }, sessionUser);
     } catch (_) {}
     req.user = sessionUser;
+    req.auth_kind = 'session';
     applyViewAs(req, bearer);
     return next();
   }
@@ -217,6 +224,8 @@ function oauthAccessToken(req, token, next) {
     id: `oauth-${row.grant_id}`, label: row.client_name, read_only: !!row.read_only,
     oauth: { grant_id: row.grant_id, client_id: row.client_id },
   };
+  req.auth_kind = 'oauth';
+  applyCredentialScopes(req.user, req.user_mcp_key, effectiveScopes({ scope: row.scope, blueprintId: row.blueprint_id }));
   return next();
 }
 

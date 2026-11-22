@@ -15,6 +15,12 @@ import {
 
 export const DCR_MODE_SETTING = 'oauth_dcr_mode';
 export const DCR_HOSTS_SETTING = 'oauth_dcr_redirect_hosts';
+// Client ID Metadata Documents (services/oauthCimd.js): on unless turned off.
+// The registration mode above applies to those clients too.
+export const CIMD_SETTING = 'oauth_cimd_enabled';
+// ID-JAG assertions from the configured OIDC IdP (services/oauthIdJag.js): off
+// unless a platform admin turns it on.
+export const ID_JAG_SETTING = 'oauth_id_jag_enabled';
 const MAX_HOSTS = 50;
 
 function setting(db, key) {
@@ -37,7 +43,10 @@ export function getDcrPolicy(db = getDb()) {
       if (Array.isArray(list)) hosts = list.map(normalizeRedirectHost).filter(Boolean);
     } catch (_) { /* keep the default */ }
   }
-  return { mode, redirect_hosts: hosts, default_mode: DCR_DEFAULT_MODE, default_redirect_hosts: DCR_DEFAULT_REDIRECT_HOSTS, modes: DCR_MODES };
+  return {
+    mode, redirect_hosts: hosts, default_mode: DCR_DEFAULT_MODE, default_redirect_hosts: DCR_DEFAULT_REDIRECT_HOSTS, modes: DCR_MODES,
+    cimd_enabled: setting(db, CIMD_SETTING) !== '0', id_jag_enabled: setting(db, ID_JAG_SETTING) === '1',
+  };
 }
 
 /** Validate and store { mode?, redirect_hosts? }. Throws { status: 400 } on a bad value. */
@@ -46,6 +55,11 @@ export function updateDcrPolicy(db, body, userId) {
   if (body.mode !== undefined) {
     if (!DCR_MODES.includes(body.mode)) throw bad(`mode must be one of ${DCR_MODES.join(', ')}`);
     putSetting(db, DCR_MODE_SETTING, body.mode, userId);
+  }
+  for (const [field, key] of [['cimd_enabled', CIMD_SETTING], ['id_jag_enabled', ID_JAG_SETTING]]) {
+    if (body[field] === undefined) continue;
+    if (typeof body[field] !== 'boolean') throw bad(`${field} must be a boolean`);
+    putSetting(db, key, body[field] ? '1' : '0', userId);
   }
   if (body.redirect_hosts !== undefined) {
     if (!Array.isArray(body.redirect_hosts) || body.redirect_hosts.length > MAX_HOSTS) throw bad(`redirect_hosts must be an array of at most ${MAX_HOSTS} hosts`);

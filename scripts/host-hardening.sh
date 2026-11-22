@@ -144,6 +144,127 @@ else
   log "docker: added default log-opts to $DJSON — applies at the next Docker restart"
 fi
 
+# ---------- gVisor (runsc) container runtime -------------------------------
+# Lets AppCrane start app containers with --runtime=runsc (services/
+# containerRuntime.js): a user-space kernel between the app and the host, for
+# apps whose owners do not trust each other. Installing it changes nothing on
+# its own; apps stay on runc until a platform admin picks runsc.
+#
+# A pinned release, checked against the SHA-512 recorded here (not only the
+# .sha512 file served next to it), installed where gVisor's install guide puts
+# it: /usr/local/bin, with gvisor-bin/ beside runsc. Registered by merging one
+# key into daemon.json (every other key kept, the old file backed up, the new
+# one checked with `dockerd --validate` first), then applied with a RELOAD:
+# Docker's docs say "After changing the runtimes configuration in the
+# configuration file, you must reload or restart the daemon", and a reload
+# (SIGHUP) leaves running containers alone. If dockerd does not list runsc
+# after the reload, the backup is put back and reloaded.
+#
+# platform systrap: runsc's default ("systrap (default), ptrace, kvm, auto",
+# `runsc flags`), and the one that needs no /dev/kvm, so it works on EC2
+# instances that are not bare metal. Written explicitly so a later runsc
+# default change does not move it.
+GVISOR_RELEASE=20261116
+GVISOR_PATH=/usr/local/bin/runsc
+case "$(uname -m)" in
+  x86_64)  GVISOR_ARCH=x86_64;  GVISOR_SHA512=c87d792d5842efb70c38ee822124cfe0821a547715e7abcf3f2b14997cd02784edaa0b91e238ec5c27a25a1b9e00bf98113398eb62a0778d8d20d4e222f8b0e0 ;;
+  aarch64) GVISOR_ARCH=aarch64; GVISOR_SHA512=a64ce2d5ba6825a0a6459ee6a9ce40164749c2d276a945b885673988c4e545e66b2f4ef3a08e068a26cca676061c8c5e8ba982156feb786f0eab995f5b8b854d ;;
+  *)       GVISOR_ARCH="" ;;
+esac
+GVISOR_RUNTIME="{\"path\":\"$GVISOR_PATH\",\"runtimeArgs\":[\"--platform=systrap\"]}"
+DJSON=/etc/docker/daemon.json
+
+docker_reload() {
+  if have_systemd && systemctl is-active --quiet docker 2>/dev/null; then
+    systemctl reload docker
+  elif pidof dockerd >/dev/null 2>&1; then
+    kill -HUP "$(pidof dockerd)"
+  else
+    return 2
+  fi
+}
+docker_has_runsc() {
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    docker info --format '{{json .Runtimes}}' 2>/dev/null | jq -e 'has("runsc")' >/dev/null 2>&1 && return 0
+    sleep 1
+  done
+  return 1
+}
+
+if [[ -z "$GVISOR_ARCH" ]]; then
+  warn "gvisor: no gVisor release for $(uname -m) — skipped"
+elif [[ "$(uname -s)" != Linux ]]; then
+  warn "gvisor: not Linux — skipped"
+else
+  _gv_have="$("$GVISOR_PATH" --version 2>/dev/null | sed -n 's/^runsc version release-\([0-9]*\).*/\1/p' || true)"
+  if [[ "$_gv_have" == "$GVISOR_RELEASE" ]]; then
+    log "gvisor: runsc release-$GVISOR_RELEASE already installed"
+  else
+    _gv_tmp="$(mktemp -d)"
+    _gv_url="https://storage.googleapis.com/gvisor/releases/release/$GVISOR_RELEASE/$GVISOR_ARCH/gvisor.tar.bz2"
+    command -v bzip2 >/dev/null 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y -qq bzip2 >/dev/null 2>&1 \
+      || { apt-get update -qq >/dev/null 2>&1 && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq bzip2 >/dev/null 2>&1; } || true
+    if ! curl -fsSL --retry 3 -o "$_gv_tmp/gvisor.tar.bz2" "$_gv_url"; then
+      warn "gvisor: download of $_gv_url failed — runsc not installed"
+    elif ! (cd "$_gv_tmp" && echo "$GVISOR_SHA512  gvisor.tar.bz2" | sha512sum -c --quiet -); then
+      warn "gvisor: $_gv_url does not match the pinned SHA-512 — runsc not installed"
+    elif ! mkdir -p "$_gv_tmp/x" || ! tar -xjf "$_gv_tmp/gvisor.tar.bz2" -C "$_gv_tmp/x" \
+      || [[ ! -f "$_gv_tmp/x/runsc" || ! -f "$_gv_tmp/x/containerd-shim-runsc-v1" ]]; then
+      warn "gvisor: could not unpack gvisor.tar.bz2 (bzip2 missing?) — runsc not installed"
+    else
+      install -o root -g root -m 0755 "$_gv_tmp/x/runsc" "$_gv_tmp/x/containerd-shim-runsc-v1" /usr/local/bin/
+      rm -rf /usr/local/bin/gvisor-bin
+      cp -r "$_gv_tmp/x/gvisor-bin" /usr/local/bin/gvisor-bin
+      chown -R root:root /usr/local/bin/gvisor-bin
+      chmod -R a+rX,go-w /usr/local/bin/gvisor-bin
+      log "gvisor: installed $("$GVISOR_PATH" --version | head -1) at $GVISOR_PATH"
+    fi
+    rm -rf "$_gv_tmp"
+  fi
+
+  if [[ ! -x "$GVISOR_PATH" ]]; then
+    :
+  elif [[ -f "$DJSON" ]] && ! jq empty "$DJSON" >/dev/null 2>&1; then
+    warn "gvisor: $DJSON is not valid JSON — runsc not registered, file left untouched"
+  elif [[ -f "$DJSON" ]] && jq -e --argjson r "$GVISOR_RUNTIME" '.runtimes.runsc == $r' "$DJSON" >/dev/null 2>&1; then
+    log "gvisor: runsc already registered in $DJSON"
+    if docker info >/dev/null 2>&1 && ! docker_has_runsc; then
+      if docker_reload; then docker_has_runsc && log "gvisor: dockerd reloaded, runsc available" || warn "gvisor: dockerd still lists no runsc after a reload"; fi
+    fi
+  else
+    mkdir -p /etc/docker
+    _gv_new="$(mktemp /etc/docker/.daemon.json.XXXXXX)"
+    if [[ -f "$DJSON" ]]; then jq --argjson r "$GVISOR_RUNTIME" '.runtimes = ((.runtimes // {}) + {runsc: $r})' "$DJSON" > "$_gv_new"
+    else jq -n --argjson r "$GVISOR_RUNTIME" '{runtimes: {runsc: $r}}' > "$_gv_new"; fi
+    _gv_valid=yes
+    if command -v dockerd >/dev/null 2>&1 && dockerd --help 2>&1 | grep -q -- '--validate'; then
+      _gv_err="$(dockerd --validate --config-file "$_gv_new" 2>&1)" || _gv_valid="$_gv_err"
+    fi
+    if [[ "$_gv_valid" != yes ]]; then
+      rm -f "$_gv_new"
+      warn "gvisor: dockerd --validate refused the merged daemon.json — left as is: $_gv_valid"
+    else
+      _gv_bak=""
+      if [[ -f "$DJSON" ]]; then _gv_bak="${DJSON}.appcrane-bak.$(date +%s)"; cp -p "$DJSON" "$_gv_bak"; fi
+      chmod 644 "$_gv_new"
+      mv -f "$_gv_new" "$DJSON"
+      log "gvisor: registered runsc (platform systrap) in $DJSON${_gv_bak:+ (previous file: $_gv_bak)}"
+      if ! docker info >/dev/null 2>&1; then
+        log "gvisor: dockerd is not running — runsc is available from its next start"
+      elif ! docker_reload; then
+        warn "gvisor: could not reload dockerd — runsc is available after the next Docker reload"
+      elif docker_has_runsc; then
+        log "gvisor: dockerd reloaded (running containers untouched); runsc is available"
+      else
+        warn "gvisor: dockerd lists no runsc after the reload — restoring the previous $DJSON"
+        if [[ -n "$_gv_bak" ]]; then cp -p "$_gv_bak" "$DJSON"; else rm -f "$DJSON"; fi
+        docker_reload || true
+      fi
+    fi
+  fi
+fi
+
 # ---------- Ubuntu Pro apt news --------------------------------------------
 # apt_news runs hourly and, under AppArmor, logs a denial each time: journal
 # noise with no value on a server.

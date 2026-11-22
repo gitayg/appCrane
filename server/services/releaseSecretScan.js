@@ -58,6 +58,9 @@ export function secretMatches(text) {
   for (const r of CREW_RULES) {
     for (const m of text.matchAll(new RegExp(r.re.source, 'g'))) add(r.id, m[0], m.index);
   }
+  // Fresh copies: extraSecretRule's .test() leaves lastIndex on the shared
+  // regexes, and matchAll starts from it, so a key earlier in the text than the
+  // last line-scan match was missed.
   for (const r of EXTRA_RULES) for (const m of text.matchAll(new RegExp(r.re.source, r.re.flags))) add(r.id, m[0], m.index);
   for (const re of WEAK_JWT_SECRET_RES) for (const m of text.matchAll(new RegExp(re.source, re.flags))) add('weak-jwt-secret', m[0], m.index);
   for (const m of text.matchAll(new RegExp(ASSIGNMENT_RE.source, 'gi'))) {

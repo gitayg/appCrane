@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { assertStepUp, requireStepUp, WINDOW_SETTING } from '../services/stepUp.js';
 import { getDb } from '../db.js';
 import { requireAuth, requirePlatformAdmin } from '../middleware/auth.js';
 import { PERMISSIONS, getMatrix, setMatrix, resetToDefaults } from '../services/permissions.js';
@@ -14,6 +15,7 @@ import { accessSync, statSync, constants as fsConstants } from 'fs';
 import psl from 'psl';
 import log from '../utils/logger.js';
 import { logAudit } from '../middleware/audit.js';
+import { ownedSettingRoute } from '../services/settingsOwnedKeys.js';
 
 const router = Router();
 
@@ -117,7 +119,7 @@ router.get('/role-permissions/catalog', requireAuth, requirePlatformAdmin, (req,
   });
 });
 
-router.put('/role-permissions', requireAuth, requirePlatformAdmin, (req, res) => {
+router.put('/role-permissions', requireAuth, requirePlatformAdmin, requireStepUp('security_settings'), (req, res) => {
   const { matrix } = req.body || {};
   if (!matrix || typeof matrix !== 'object') {
     return res.status(400).json({ error: { code: 'VALIDATION', message: 'matrix required' } });
@@ -126,7 +128,7 @@ router.put('/role-permissions', requireAuth, requirePlatformAdmin, (req, res) =>
   res.json({ matrix: getMatrix() });
 });
 
-router.post('/role-permissions/reset', requireAuth, requirePlatformAdmin, (req, res) => {
+router.post('/role-permissions/reset', requireAuth, requirePlatformAdmin, requireStepUp('security_settings'), (req, res) => {
   const { permissions } = req.body || {};
   resetToDefaults(Array.isArray(permissions) ? permissions : null);
   res.json({ matrix: getMatrix() });
@@ -863,7 +865,7 @@ router.get('/isolation', requireAuth, requirePlatformAdmin, (req, res) => {
  * platform-admin. An omitted field keeps its value; '' clears it. Reloads
  * Caddy after the response (the routing of every app changes) and audits.
  */
-router.put('/isolation', requireAuth, requirePlatformAdmin, async (req, res) => {
+router.put('/isolation', requireAuth, requirePlatformAdmin, requireStepUp('security_settings'), async (req, res) => {
   const db = getDb();
   const body = req.body || {};
   const before = isolationSettings(db);
@@ -978,6 +980,10 @@ router.put('/:key', requireAuth, requirePlatformAdmin, (req, res) => {
   if (req.params.key === 'auto_approve_rce_fixes' || req.params.key === 'auto_patch_cooldown_hours') {
     return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Use /api/auto-patch/policy to change the auto-patch policy' } });
   }
+  const owner = ownedSettingRoute(req.params.key);
+  if (owner) {
+    return res.status(403).json({ error: { code: 'FORBIDDEN', message: `Use ${owner} to change ${req.params.key}` } });
+  }
   const db = getDb();
 
   // Require SSO sign-in is in force only while a provider is enabled
@@ -986,6 +992,10 @@ router.put('/:key', requireAuth, requirePlatformAdmin, (req, res) => {
   if (req.params.key === 'auth_sso_only' && !['true', 'false'].includes(String(value))) {
     return res.status(400).json({ error: { code: 'VALIDATION', message: "auth_sso_only must be 'true' or 'false'" } });
   }
+  if (req.params.key === WINDOW_SETTING) {
+    return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Use PUT /api/identity/step-up/policy to change the step-up window' } });
+  }
+  if (req.params.key === 'auth_sso_only') assertStepUp(req, 'security_settings');
 
   db.prepare(`
     INSERT INTO settings (key, value, updated_by, updated_at) VALUES (?, ?, ?, datetime('now'))

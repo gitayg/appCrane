@@ -105,6 +105,11 @@ test('delete: refused for the owner when the role matrix withdraws app.delete', 
 test('delete: the owner (personal key) deletes; rows go, the deletion is audited', async () => {
   const app = mkApp('del-ok', [[owner, 'owner']]);
   db.prepare("INSERT INTO env_vars (app_id, env, key, value_encrypted) VALUES (?, 'sandbox', 'K', 'x')").run(app.id);
+  // Step-up (services/stepUp.js): an agent deletes only after its person's grant for this app.
+  const { createGrant } = await import('../server/services/stepUp.js');
+  await assert.rejects(del({ ...owner, _mcpUserKey: { id: 4 } }, { slug: 'del-ok', confirm_slug: 'del-ok' }), /STEP_UP_REQUIRED/);
+  assert.equal(exists('del-ok'), true);
+  createGrant(db, owner.id, 'delete_app', app.id);
   const out = await del({ ...owner, _mcpUserKey: { id: 4 } }, { slug: 'del-ok', confirm_slug: 'del-ok' });
   assert.equal(out.deleted, true);
   assert.equal(exists('del-ok'), false);
@@ -118,6 +123,8 @@ test('delete: a platform admin deletes; a Crane-hosted repo is kept and reported
   const lg = await import('../server/services/localGit.js');
   await lg.createAppRepo('del-local');
   db.prepare("INSERT INTO apps (name, slug, slot, source_type, repo_backend, branch) VALUES ('del-local', 'del-local', ?, 'managed', 'local', 'main')").run(getNextSlot(db));
+  const { createGrant } = await import('../server/services/stepUp.js');
+  createGrant(db, padmin.id, 'delete_app', db.prepare("SELECT id FROM apps WHERE slug = 'del-local'").get().id);
   const out = await del(padmin, { slug: 'del-local', confirm_slug: 'del-local' });
   assert.equal(out.deleted, true);
   assert.equal(out.local_repo_kept, 'repos/del-local.git');

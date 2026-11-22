@@ -259,6 +259,9 @@ test('the login page is told when the provider is Google, so it can show the G m
 });
 
 test('a verified email on the list signs up at once, by domain or by address', async () => {
+  // A domain entry admits only once DNS-verified (services/domainVerification.js).
+  const db = dbw();
+  try { db.prepare("UPDATE sso_domains SET status = 'verified' WHERE domain = 'allowed.example'").run(); } finally { db.close(); }
   for (const who of [OK, LISTED]) {
     const r = await signIn(who);
     assert.equal(r.error, null, who.email);

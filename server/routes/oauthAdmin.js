@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { requireStepUp } from '../services/stepUp.js';
 import { getDb } from '../db.js';
 import { requirePlatformAdmin } from '../middleware/auth.js';
 import { logAudit } from '../middleware/audit.js';
@@ -7,6 +8,7 @@ import {
   listAllGrants, revokeGrantAsAdmin, revokeAllGrantsForUser, listClients, setClientApproval, grantLifetimeDays,
 } from '../services/oauthStore.js';
 import { getDcrPolicy, updateDcrPolicy } from '../services/oauthClientPolicy.js';
+import blueprintsRouter from './oauthAdminBlueprints.js';
 
 // Platform admin side of MCP OAuth, mounted at /api/oauth/admin by
 // oauthConsent.js (so behind its requireAuth and its refusal of MCP
@@ -14,6 +16,7 @@ import { getDcrPolicy, updateDcrPolicy } from '../services/oauthClientPolicy.js'
 // with approve, and the registration policy.
 const router = Router();
 router.use(requirePlatformAdmin);
+router.use(blueprintsRouter);
 
 const audit = (req, action, detail) => { try { logAudit(req.user.id, null, action, detail); } catch (_) {} };
 const intParam = (v, what) => {
@@ -55,15 +58,24 @@ router.post('/clients/:clientId/approval', (req, res) => {
   res.json({ client_id: String(req.params.clientId), approved });
 });
 
+// What turning ID-JAG on depends on, so the settings screen can say so.
+function prerequisites() {
+  const oidc = Object.fromEntries(getDb().prepare("SELECT key, value FROM settings WHERE key IN ('oidc_enabled', 'oidc_discovery_url')").all().map((r) => [r.key, r.value]));
+  return { crane_domain_set: !!process.env.CRANE_DOMAIN, oidc_configured: oidc.oidc_enabled === '1' && !!oidc.oidc_discovery_url };
+}
+
 router.get('/policy', (req, res) => {
-  res.json(getDcrPolicy());
+  res.json({ ...getDcrPolicy(), ...prerequisites() });
 });
 
-router.put('/policy', (req, res) => {
+router.put('/policy', requireStepUp('security_settings'), (req, res) => {
+  if ((req.body || {}).id_jag_enabled === true && !process.env.CRANE_DOMAIN) {
+    throw new AppError('Set CRANE_DOMAIN on this server before turning on ID-JAG: the audience an assertion must name has to be fixed, not taken from the request', 400, 'CRANE_DOMAIN_REQUIRED');
+  }
   try {
     const out = updateDcrPolicy(getDb(), req.body || {}, req.user.id);
-    audit(req, 'oauth-dcr-policy-update', { mode: out.mode, redirect_hosts: out.redirect_hosts });
-    res.json(out);
+    audit(req, 'oauth-dcr-policy-update', { mode: out.mode, redirect_hosts: out.redirect_hosts, cimd_enabled: out.cimd_enabled, id_jag_enabled: out.id_jag_enabled });
+    res.json({ ...out, ...prerequisites() });
   } catch (e) {
     if (e.status === 400) throw new AppError(e.message, 400, 'VALIDATION');
     throw e;

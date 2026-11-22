@@ -1,7 +1,8 @@
 import { Router } from 'express';
 import crypto from 'crypto';
 import { auditLogin, logAudit } from '../middleware/audit.js';
-import { identitySecretFor, signIdentity, signIdentityV2 } from '../services/identitySignature.js';
+import { identitySecretFor, signIdentity, signIdentityV2, signIdentityV3 } from '../services/identitySignature.js';
+import { sessionAuth, WINDOW_BOUNDS } from '../services/stepUp.js';
 import { existsSync } from 'fs';
 import { join, resolve } from 'path';
 import { getDb } from '../db.js';
@@ -23,6 +24,7 @@ import { touchSession } from '../services/sessionPolicy.js';
 import { assertUserKeyIngress } from '../utils/ingress.js';
 import { noteRequest } from '../services/envActivity.js';
 import { auditTrustedSkip, clearTrustedDeviceCookie, hasTrustedDeviceCookie, revokeAllDevices, trustedDeviceFor } from '../services/trustedDevices.js';
+import { guardPasswordAttempt, onPasswordFailure, onPasswordSuccess, onSignInSuccess } from '../services/signinRisk/index.js';
 
 const ICON_DIR = resolve(process.env.DATA_DIR || './data', 'apps');
 const ICON_EXTS = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg'];
@@ -108,8 +110,10 @@ router.post('/login', (req, res) => {
   ).get(login, login);
 
   const failed = (reason) => auditLogin(user?.id, 'failed', { method: 'password', reason, login: String(login).slice(0, 200), ip });
+  const risk = guardPasswordAttempt(db, req, res, { user, login, ip });
   if (!user) {
     failed('unknown_user');
+    onPasswordFailure(db, risk, { user: null, login, ip });
     throw new AppError('Invalid credentials', 401, 'INVALID_CREDENTIALS');
   }
 
@@ -131,9 +135,11 @@ router.post('/login', (req, res) => {
   if (!passwordOk) {
     log.warn(`Failed login for "${login}" from ${ip}`);
     failed(legacyUnavailable ? 'legacy_hash_unavailable' : 'bad_password');
+    if (!legacyUnavailable) onPasswordFailure(db, risk, { user, login, ip });
     if (legacyUnavailable) throw new AppError('Your password must be reset by an administrator.', 401, 'PASSWORD_RESET_REQUIRED');
     throw new AppError('Invalid credentials', 401, 'INVALID_CREDENTIALS');
   }
+  onPasswordSuccess(db, risk);
 
   // Check app access if app specified
   let appId = null;
@@ -207,6 +213,7 @@ router.post('/login', (req, res) => {
   // routes and bounced users to /applications.
   auditLogin(user.id, 'ok', { method: trustedDevice ? 'password+trusted_device' : 'password', ip });
   setSessionCookie(res, token, req);
+  onSignInSuccess(req, res, user, { method: 'password', ip });
 
   res.json({
     token,
@@ -266,19 +273,33 @@ export const resolveAppRole = (db, session, appRecord) => {
   return 'none';
 };
 
-// A person with no role on the app, on an app host: there is no platform
-// sign-in page to send them to with a `denied` flag, so they get the answer.
-export function refuseNoAccess(req, res, appLabel) {
+// A person with no role on the app, on an app host or at the handoff: they get
+// the answer here, with a link to the platform's own access-request page for
+// this app (the same /login?denied=1 page the shared-host mode redirects to).
+// The link goes to the platform host; nothing about the app session or the
+// person is put in it, and no session is handed to the app.
+export function accessRequestUrl(slug, appLabel) {
+  const domain = String(process.env.CRANE_DOMAIN || '').replace(/^https?:\/\//, '').replace(/\/+$/, '').toLowerCase();
+  if (!/^[a-z0-9.-]+(:\d+)?$/.test(domain) || typeof slug !== 'string' || !/^[a-z0-9][a-z0-9-]*$/.test(slug)) return null;
+  const q = new URLSearchParams({ denied: '1', app: slug, ...(appLabel ? { name: String(appLabel).slice(0, 200) } : {}) });
+  return `https://${domain}/login?${q}`;
+}
+
+export function refuseNoAccess(req, res, appLabel, slug = null) {
   const message = `You do not have access to ${appLabel}.`;
+  const requestUrl = accessRequestUrl(slug, appLabel);
   res.status(403);
   if (req.accepts(['json', 'html']) === 'html') {
     res.type('html').send(`<!doctype html><meta charset="utf-8"><title>Access denied</title>`
       + `<body style="font-family:system-ui,sans-serif;max-width:40rem;margin:4rem auto;padding:0 1rem">`
       + `<h1>Access denied</h1><p>${escapeHtml(message)}</p>`
-      + `<p>Ask an owner of ${escapeHtml(appLabel)} for access.</p></body>`);
+      + (requestUrl
+        ? `<p><a href="${escapeHtml(requestUrl)}">Request access to ${escapeHtml(appLabel)}</a>. Its owners are notified.</p>`
+        : `<p>Ask an owner of ${escapeHtml(appLabel)} for access.</p>`)
+      + `</body>`);
     return;
   }
-  res.json({ error: { code: 'FORBIDDEN', message } });
+  res.json({ error: { code: 'FORBIDDEN', message }, ...(requestUrl && { request_access_url: requestUrl }) });
 }
 
 /**
@@ -568,7 +589,7 @@ router.get('/verify', (req, res) => {
 
   // Deny access if user has no role for the requested app
   if (appRole === 'none') {
-    if (!isApiClient && isolated) return refuseNoAccess(req, res, appName || appSlug);
+    if (!isApiClient && isolated) return refuseNoAccess(req, res, appName || appSlug, appSlug);
     if (!isApiClient) return loginRedirect({ denied: '1', app: appSlug || '', name: appName || '' });
     throw new AppError('You do not have access to this app', 403, 'FORBIDDEN');
   }
@@ -704,6 +725,18 @@ router.get('/verify', (req, res) => {
   // start rejecting every request.
   if (session.via_app_key) res.setHeader('X-AppCrane-Auth-Via', 'app-key');
 
+  // Step-up (services/stepUp.js): when the person behind a browser session last
+  // authenticated (sign-in or step-up, unix seconds) and with which second
+  // factor, so an app can demand recent authentication itself and send the
+  // person to /api/identity/step-up/app when it is too old. Only a session
+  // has them; a key never authenticated interactively. Signed by v3 only:
+  // adding them to v1 or v2 would change those signed strings.
+  const auth = session.token_hash ? sessionAuth(db, session.token_hash) : null;
+  if (auth && Number.isFinite(auth.authTimeMs)) {
+    res.setHeader('X-AppCrane-Auth-Time', String(Math.floor(auth.authTimeMs / 1000)));
+    res.setHeader('X-AppCrane-Auth-Mfa', auth.mfa || 'none');
+  }
+
   // v2.97.0: sign everything above with the app's own secret, LAST, so the
   // signature covers exactly the values Caddy is about to copy. The app checks
   // it with appcrane-tenant verifyIdentity() and so can reject headers that
@@ -723,6 +756,7 @@ router.get('/verify', (req, res) => {
     res.setHeader('X-AppCrane-Identity-Sig', signIdentity(secret, ts, issued));
     // v2.125.14: v2 also covers X-AppCrane-Auth-Via, which v1 leaves out.
     res.setHeader('X-AppCrane-Identity-Sig-V2', signIdentityV2(secret, ts, issued));
+    res.setHeader('X-AppCrane-Identity-Sig-V3', signIdentityV3(secret, ts, issued));
   }
 
   res.json({
@@ -925,6 +959,7 @@ router.post('/set-password', (req, res) => {
   // Auth: prefer Bearer (matches /me), fall back to X-API-Key (lets a
   // dhk_admin_* / dhk_user_* paste-key user migrate themselves).
   let user = null;
+  let callerAuthMs = NaN;
   const bearer = (req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
   if (bearer) {
     const tokenHash = hashApiKey(bearer);
@@ -933,6 +968,7 @@ router.post('/set-password', (req, res) => {
       JOIN users u ON s.user_id = u.id
       WHERE s.token_hash = ? AND s.scope = 'platform' AND s.expires_at > datetime('now') AND u.active = 1
     `).get(tokenHash);
+    if (user) callerAuthMs = sessionAuth(db, tokenHash)?.authTimeMs ?? NaN;
   }
   if (!user) {
     const apiKey = req.headers['x-api-key'];
@@ -993,6 +1029,14 @@ router.post('/set-password', (req, res) => {
     INSERT INTO identity_sessions (user_id, token_hash, expires_at)
     VALUES (?, ?, ?)
   `).run(user.id, hashApiKey(token), expiresAt);
+  // Without the current password nothing new was proven: the session keeps the
+  // caller's own sign-in time (an API key has none), so it is not a fresh
+  // authentication for step-up or OAuth consent.
+  if (!hadPassword) {
+    const authMs = Number.isFinite(callerAuthMs) ? callerAuthMs : Date.now() - (WINDOW_BOUNDS.max + 1) * 60_000;
+    db.prepare('UPDATE identity_sessions SET created_at = ? WHERE token_hash = ?')
+      .run(new Date(Math.min(authMs, Date.now())).toISOString().slice(0, 19).replace('T', ' '), hashApiKey(token));
+  }
 
   // v2.6.18: set cc_token cookie for the fresh session — same as
   // POST /login. Without this, the user logs in via /set-password

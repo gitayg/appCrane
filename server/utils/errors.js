@@ -57,7 +57,7 @@ export function errorHandler(err, req, res, next) {
     return res.status(status).type('html').send(authErrorPage(req, status, message));
   }
 
-  res.status(status).json({ error: { code, message } });
+  res.status(status).json({ error: { code, message, ...(err.publicDetails && typeof err.publicDetails === 'object' && err.publicDetails) } });
 }
 
 export function notFound(req, res) {

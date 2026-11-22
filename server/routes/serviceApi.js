@@ -18,6 +18,8 @@ import { AppError } from '../utils/errors.js';
 import { appForServiceToken } from '../services/appServiceToken.js';
 import { enqueueEmail } from '../services/emailQueue.js';
 import log from '../utils/logger.js';
+import { getDb } from '../db.js';
+import { requireCapability, recipientDomain } from '../services/capabilities/enforce.js';
 
 const router = Router();
 
@@ -49,6 +51,11 @@ router.post('/email', (req, res) => {
   assertInternal(req);
   const app = authApp(req);
   const { to, subject, text, html, replyTo, env, idempotencyKey, fromName, attachments } = req.body || {};
+  // Capability approvals: with outbound_email approval on, the app sends only
+  // to the recipient domains a platform admin approved (or ["*"]). A malformed
+  // address has no domain; the queue below refuses it with its own message.
+  const domain = recipientDomain(to);
+  if (domain) requireCapability(getDb(), { app, capability: 'outbound_email', needed: { recipient_domains: [domain] } });
 
   try {
     const { id, deduped } = enqueueEmail({

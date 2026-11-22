@@ -1,5 +1,5 @@
 {
-  "count": 74,
+  "count": 76,
   "tools": [
     {
       "name": "appcrane_adopt_app",
@@ -182,6 +182,11 @@
       "readOnly": true
     },
     {
+      "name": "appcrane_list_capability_requests",
+      "requiredRole": "any",
+      "readOnly": true
+    },
+    {
       "name": "appcrane_list_cron",
       "requiredRole": "app_admin",
       "readOnly": true
@@ -254,6 +259,11 @@
     {
       "name": "appcrane_rename_app",
       "requiredRole": "app_admin",
+      "readOnly": false
+    },
+    {
+      "name": "appcrane_request_capability",
+      "requiredRole": "any",
       "readOnly": false
     },
     {

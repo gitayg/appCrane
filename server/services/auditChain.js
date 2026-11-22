@@ -5,6 +5,7 @@ import { deriveSecret } from './encryption.js';
 import { jobStarted, trackJob } from './jobHealth.js';
 import { recordEvent } from './eventStore.js';
 import { getRetention } from './eventRetention.js';
+import { getAppAuditRetentionDays, APP_AUDIT_RETENTION_KEY } from './appAudit/retention.js';
 
 // Tamper-evident audit (migration 146). The sealer appends every new audit_log
 // and events row, in id order, to a per-table hash chain, and signs a
@@ -16,7 +17,9 @@ import { getRetention } from './eventRetention.js';
 // sealed cannot be detected.
 
 export const JOB_ID = 'audit-chain';
-export const SOURCES = Object.freeze(['audit_log', 'events']);
+export const SOURCES = Object.freeze(['audit_log', 'events', 'app_audit_events']);
+const CHAIN_TABLES = { audit_log: 'audit_chain', events: 'audit_chain', app_audit_events: 'app_audit_chain' };
+const chainOf = (src) => CHAIN_TABLES[src];
 export const GENESIS = '0'.repeat(64);
 export const SEAL_MS = 5 * 60_000;
 export const CHECKPOINT_MS = 15 * 60_000;
@@ -46,7 +49,15 @@ function eventTuple(r) {
     r.user_id ?? null, r.subject_user_id ?? null, r.summary ?? null, r.ref_table ?? null, r.ref_id ?? null, r.data ?? null];
 }
 
+function appAuditTuple(r) {
+  return ['app_audit_events', r.id, r.app_id ?? null, r.app_slug ?? null, r.action ?? null, r.occurred_at ?? null,
+    r.actor_type ?? null, r.actor_id ?? null, r.actor_name ?? null, r.actor_verified ?? null, r.identity_env ?? null,
+    r.targets ?? null, r.context ?? null, r.metadata ?? null, r.idempotency_key ?? null, r.payload_hash ?? null,
+    r.unregistered ?? null, r.created_at ?? null];
+}
+
 export function rowHash(src, row) {
+  if (src === 'app_audit_events') return sha256(JSON.stringify(appAuditTuple(row)));
   return sha256(JSON.stringify(src === 'audit_log' ? auditTuple(row) : eventTuple(row)));
 }
 
@@ -67,7 +78,8 @@ function entryFor(src, row) {
   return {
     rowHash: rowHash(src, row),
     alt: src === 'audit_log' ? altHashes(row) : null,
-    meta: src === 'events' ? JSON.stringify([row.ts, row.severity]) : null,
+    meta: src === 'events' ? JSON.stringify([row.ts, row.severity])
+      : src === 'app_audit_events' ? JSON.stringify([row.created_at, APP_AUDIT_RETENTION_KEY]) : null,
   };
 }
 
@@ -120,7 +132,7 @@ function latestValid(db, kind, src) {
 }
 
 function headOf(db, src) {
-  const last = db.prepare('SELECT row_id, chain_hash FROM audit_chain WHERE src = ? ORDER BY row_id DESC LIMIT 1').get(src);
+  const last = db.prepare(`SELECT row_id, chain_hash FROM ${chainOf(src)} WHERE src = ? ORDER BY row_id DESC LIMIT 1`).get(src);
   if (last) return last;
   const floor = latestValid(db, 'compaction', src);
   return floor ? { row_id: floor.upto_row_id, chain_hash: floor.chain_hash } : { row_id: 0, chain_hash: GENESIS };
@@ -134,8 +146,8 @@ let lastSealCheckpointAt = 0;
 /** Append every unsealed row (id above the chain head) to its chain. Returns { audit_log, events } counts. */
 export async function sealNew({ db = getDb(), batch = BATCH } = {}) {
   const sealed = {};
-  const insert = db.prepare('INSERT INTO audit_chain (src, row_id, row_hash, alt_hash, meta, chain_hash) VALUES (?, ?, ?, ?, ?, ?)');
   for (const src of SOURCES) {
+    const insert = db.prepare(`INSERT INTO ${chainOf(src)} (src, row_id, row_hash, alt_hash, meta, chain_hash) VALUES (?, ?, ?, ?, ?, ?)`);
     sealed[src] = 0;
     for (let i = 0; i < MAX_BATCHES; i++) {
       const head = headOf(db, src);
@@ -158,12 +170,12 @@ export async function sealNew({ db = getDb(), batch = BATCH } = {}) {
 }
 
 function retentionChanged(db) {
-  const cur = getRetention(db);
+  const cur = { ...getRetention(db), [APP_AUDIT_RETENTION_KEY]: getAppAuditRetentionDays(db) };
   const last = latestValid(db, 'retention', null);
   if (!last) return cur;
   let prev = null;
   try { prev = JSON.parse(last.data); } catch (_) {}
-  return prev && ['info', 'warning', 'critical'].every(s => prev[s] === cur[s]) ? null : cur;
+  return prev && ['info', 'warning', 'critical', APP_AUDIT_RETENTION_KEY].every(s => prev[s] === cur[s]) ? null : cur;
 }
 
 /** Sign the head of each chain (and the event retention windows when they changed). */
@@ -172,7 +184,7 @@ export function checkpointNow({ db = getDb(), now = Date.now() } = {}) {
   const retention = retentionChanged(db);
   if (retention) out.push(writeCheckpoint(db, { kind: 'retention', data: retention, createdAt: nowSql(now) }));
   for (const src of SOURCES) {
-    const head = db.prepare('SELECT row_id, chain_hash FROM audit_chain WHERE src = ? ORDER BY row_id DESC LIMIT 1').get(src);
+    const head = db.prepare(`SELECT row_id, chain_hash FROM ${chainOf(src)} WHERE src = ? ORDER BY row_id DESC LIMIT 1`).get(src);
     if (!head) continue;
     const last = latestValid(db, 'seal', src);
     if (last && last.upto_row_id === head.row_id) continue;
@@ -202,16 +214,16 @@ export function fingerprintOf(c) {
 
 /** Drop the chain prefix of `src` whose rows retention has already removed, below a signed compaction checkpoint. */
 export async function compact({ db = getDb(), src = 'events', now = Date.now(), min = COMPACT_MIN } = {}) {
-  if (src !== 'events') return 0;
+  if (src !== 'events' && src !== 'app_audit_events') return 0;
   const windows = retentionWindows(db, now);
-  const head = db.prepare('SELECT MIN(row_id) AS lo FROM audit_chain WHERE src = ?').get(src)?.lo;
+  const head = db.prepare(`SELECT MIN(row_id) AS lo FROM ${chainOf(src)} WHERE src = ?`).get(src)?.lo;
   if (head == null) return 0;
   let upto = null;
   let after = head - 1;
   let done = false;
   while (!done) {
     const rows = db.prepare(`SELECT c.row_id, c.chain_hash, c.meta, s.id IS NULL AS gone
-                               FROM audit_chain c LEFT JOIN ${src} s ON s.id = c.row_id
+                               FROM ${chainOf(src)} c LEFT JOIN ${src} s ON s.id = c.row_id
                               WHERE c.src = ? AND c.row_id > ? ORDER BY c.row_id LIMIT ?`).all(src, after, BATCH);
     if (!rows.length) break;
     for (const r of rows) {
@@ -223,11 +235,11 @@ export async function compact({ db = getDb(), src = 'events', now = Date.now(), 
     await yieldTurn();
   }
   if (!upto) return 0;
-  const n = db.prepare('SELECT COUNT(*) AS n FROM audit_chain WHERE src = ? AND row_id <= ?').get(src, upto.row_id).n;
+  const n = db.prepare(`SELECT COUNT(*) AS n FROM ${chainOf(src)} WHERE src = ? AND row_id <= ?`).get(src, upto.row_id).n;
   if (n < min) return 0;
   db.transaction(() => {
     writeCheckpoint(db, { kind: 'compaction', src, upto_row_id: upto.row_id, chain_hash: upto.chain_hash, createdAt: nowSql(now) });
-    db.prepare('DELETE FROM audit_chain WHERE src = ? AND row_id <= ?').run(src, upto.row_id);
+    db.prepare(`DELETE FROM ${chainOf(src)} WHERE src = ? AND row_id <= ?`).run(src, upto.row_id);
   })();
   return n;
 }
@@ -292,10 +304,10 @@ export async function verifyChain({ db = getDb(), now = Date.now(), batch = BATC
     let after = floor ? floor.upto_row_id : 0;
     const seals = valid.filter(c => c.kind === 'seal' && c.src === src && c.upto_row_id > after);
     const wanted = new Map(seals.map(c => [c.upto_row_id, null]));
-    const maxSealed = db.prepare('SELECT MAX(row_id) AS m FROM audit_chain WHERE src = ?').get(src).m ?? after;
+    const maxSealed = db.prepare(`SELECT MAX(row_id) AS m FROM ${chainOf(src)} WHERE src = ?`).get(src).m ?? after;
 
     for (let more = true; more;) {
-      const entries = db.prepare('SELECT * FROM audit_chain WHERE src = ? AND row_id > ? AND row_id <= ? ORDER BY row_id LIMIT ?')
+      const entries = db.prepare(`SELECT * FROM ${chainOf(src)} WHERE src = ? AND row_id > ? AND row_id <= ? ORDER BY row_id LIMIT ?`)
         .all(src, after, maxSealed, batch);
       more = entries.length === batch;
       if (!entries.length) break;
@@ -311,7 +323,7 @@ export async function verifyChain({ db = getDb(), now = Date.now(), batch = BATC
         if (wanted.has(e.row_id)) wanted.set(e.row_id, e.chain_hash);
         const row = live.get(e.row_id);
         if (!row) {
-          if (src === 'events' && prunedByRetention(e.meta, windows)) stats.pruned++;
+          if (src !== 'audit_log' && prunedByRetention(e.meta, windows)) stats.pruned++;
           else problems.push({ type: 'deleted', src, row_id: e.row_id, detail: 'Row was sealed and is now missing' });
           continue;
         }
@@ -320,7 +332,7 @@ export async function verifyChain({ db = getDb(), now = Date.now(), batch = BATC
         else if (cmp === 'modified') problems.push({ type: 'modified', src, row_id: e.row_id, detail: 'Row content differs from what was sealed' });
       }
       const unsealed = db.prepare(`SELECT s.id FROM ${src} s WHERE s.id > ? AND s.id <= ?
-                                     AND NOT EXISTS (SELECT 1 FROM audit_chain c WHERE c.src = ? AND c.row_id = s.id)`).all(after, hi, src);
+                                     AND NOT EXISTS (SELECT 1 FROM ${chainOf(src)} c WHERE c.src = ? AND c.row_id = s.id)`).all(after, hi, src);
       for (const u of unsealed) problems.push({ type: 'unsealed', src, row_id: u.id, detail: 'Row inserted below rows already sealed' });
       after = hi;
       if (more) await yieldTurn();
@@ -400,7 +412,7 @@ async function alertFailure(db, report) {
 
 export function chainStatus(db = getDb()) {
   const chains = SOURCES.map(src => {
-    const r = db.prepare('SELECT COUNT(*) AS n, MAX(row_id) AS head, MAX(sealed_at) AS last_sealed_at FROM audit_chain WHERE src = ?').get(src);
+    const r = db.prepare(`SELECT COUNT(*) AS n, MAX(row_id) AS head, MAX(sealed_at) AS last_sealed_at FROM ${chainOf(src)} WHERE src = ?`).get(src);
     const pending = db.prepare(`SELECT COUNT(*) AS n FROM ${src} WHERE id > ?`).get(r.head ?? headOf(db, src).row_id).n;
     const seal = latestValid(db, 'seal', src);
     const floor = latestValid(db, 'compaction', src);
@@ -442,7 +454,7 @@ export function checkExternalCheckpoints(items, db = getDb()) {
     if (!src || !Number.isInteger(rowId) || rowId < 1 || !/^[0-9a-f]+$/.test(held) || held.length < FINGERPRINT_LEN) {
       return { ...it, result: 'invalid' };
     }
-    const entry = db.prepare('SELECT chain_hash FROM audit_chain WHERE src = ? AND row_id = ?').get(src, rowId);
+    const entry = db.prepare(`SELECT chain_hash FROM ${chainOf(src)} WHERE src = ? AND row_id = ?`).get(src, rowId);
     let current = entry?.chain_hash;
     if (!current) {
       const floor = db.prepare("SELECT * FROM audit_chain_checkpoints WHERE kind = 'compaction' AND src = ? AND upto_row_id = ? ORDER BY id DESC LIMIT 1").get(src, rowId);
@@ -470,6 +482,7 @@ export async function runAuditChainTick({ db = getDb(), now = Date.now(), forceV
     if (forceVerify || now - lastVerifyAt >= VERIFY_MS) {
       lastVerifyAt = now;
       await compact({ db, now });
+      await compact({ db, now, src: 'app_audit_events' });
       verified = await verifyAndRecord({ db, now, trigger: 'job' });
     }
     return { sealed, verified: verified ? { ok: verified.ok, problems: verified.problems.length } : null };

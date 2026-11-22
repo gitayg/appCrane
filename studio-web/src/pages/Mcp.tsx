@@ -5,6 +5,7 @@ import { serverDate } from '../utils/serverDate'
 import { AppKeysCard } from '../components/AppKeysCard'
 import { AdminMcpKeysCard } from '../components/AdminMcpKeysCard'
 import { setVisibleInterval } from '../utils/visibleInterval'
+import { KeyBlueprintSelect } from '../components/mcp/KeyBlueprintSelect'
 
 type McpTool = {
   name: string
@@ -48,6 +49,7 @@ interface CreatedKey {
   label: string | null
   api_key: string
   rotated?: boolean
+  blueprint?: string | null
 }
 
 function CopyBtn({ value, label = 'Copy' }: { value: string; label?: string }) {
@@ -123,6 +125,7 @@ function PersonalKeyCard({ endpoint }: { endpoint: string }) {
   const [isAdmin, setIsAdmin] = useState(false)
   const [busy, setBusy] = useState(false)
   const [draftLabel, setDraftLabel] = useState('')
+  const [draftBlueprint, setDraftBlueprint] = useState('')
   const [created, setCreated] = useState<CreatedKey | null>(null)
   const [copied, setCopied] = useState(false)
   const [maxAgeDays, setMaxAgeDays] = useState<number | null>(null)
@@ -145,13 +148,14 @@ function PersonalKeyCard({ endpoint }: { endpoint: string }) {
     setBusy(true)
     try {
       const r = await adminApi.post<{ key?: UserMcpKey; api_key?: string; accessible_app_count?: number; is_admin?: boolean }>(
-        '/api/me/mcp-keys', { label: draftLabel.trim() || null },
+        '/api/me/mcp-keys', { label: draftLabel.trim() || null, ...(draftBlueprint ? { blueprint: draftBlueprint } : {}) },
       )
       const apiKey = r?.api_key ?? ''
       if (!apiKey) throw new Error('Server returned no key')
-      setCreated({ id: r.key!.id, label: r.key!.label, api_key: apiKey })
+      setCreated({ id: r.key!.id, label: r.key!.label, api_key: apiKey, blueprint: draftBlueprint || null })
       setCopied(false)
       setDraftLabel('')
+      setDraftBlueprint('')
       if (typeof r.accessible_app_count === 'number') setAccessibleCount(r.accessible_app_count)
       if (typeof r.is_admin === 'boolean') setIsAdmin(r.is_admin)
       load()
@@ -293,6 +297,7 @@ function PersonalKeyCard({ endpoint }: { endpoint: string }) {
             borderRadius: 6, color: 'var(--text)',
           }}
         />
+        <KeyBlueprintSelect value={draftBlueprint} onChange={setDraftBlueprint} disabled={busy} />
         <button className="btn btn-accent" onClick={createKey} disabled={busy}>
           {busy ? 'Creating…' : (activeKeys.length > 0 ? '+ Another key' : 'Generate my MCP key')}
         </button>
@@ -318,7 +323,7 @@ function PersonalKeyCard({ endpoint }: { endpoint: string }) {
               ✓ {created.rotated ? 'Key rotated' : 'Key created'}
             </h3>
             <p style={{ color: 'var(--dim)', fontSize: '.85rem', marginBottom: 18 }}>
-              <strong style={{ color: 'var(--text)' }}>{created.label || `#${created.id}`}</strong> · personal · all your owned apps
+              <strong style={{ color: 'var(--text)' }}>{created.label || `#${created.id}`}</strong> · personal · {created.blueprint ? `limited to the ${created.blueprint} blueprint` : 'all your owned apps'}
             </p>
             <div style={{ marginBottom: 14 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>

@@ -6,6 +6,7 @@ import {
   OAuthError, ACCESS_PREFIX, REFRESH_PREFIX, ACCESS_TOKEN_TTL_SECONDS, REFRESH_TOKEN_TTL_DAYS,
   CODE_TTL_SECONDS, AUTH_REQUEST_TTL_SECONDS, pkceMatches, canonicalResource, scopeFor,
 } from './oauthPolicy.js';
+import { effectiveScopes } from './mcpBlueprints.js';
 
 // Persistence for the MCP OAuth authorization server. Every secret is stored
 // as its SHA-256 (hashApiKey) and returned in plaintext exactly once.
@@ -34,6 +35,7 @@ export function pruneStale() {
   db.prepare(`
     DELETE FROM oauth_clients
     WHERE created_at <= datetime('now', '-1 day')
+      AND NOT (is_cimd = 1 AND approved_at IS NOT NULL)
       AND client_id NOT IN (SELECT client_id FROM oauth_grants)
       AND client_id NOT IN (SELECT client_id FROM oauth_codes)
   `).run();
@@ -93,7 +95,8 @@ export function createAuthRequest({ clientId, redirectUri, codeChallenge, scope,
 export function getAuthRequest(id) {
   if (typeof id !== 'string' || !id) return null;
   return getDb().prepare(`
-    SELECT r.*, c.client_name, c.approved_at AS client_approved_at FROM oauth_auth_requests r
+    SELECT r.*, c.client_name, c.approved_at AS client_approved_at, c.is_cimd, c.client_uri, c.logo_uri,
+           c.blueprint_id AS client_blueprint_id FROM oauth_auth_requests r
     JOIN oauth_clients c ON c.client_id = r.client_id
     WHERE r.id = ? AND r.expires_at > datetime('now')
   `).get(id) || null;
@@ -110,24 +113,26 @@ export function takeAuthRequest(id) {
   })();
 }
 
-export function createCode({ clientId, userId, redirectUri, codeChallenge, scope, resource, readOnly }) {
+export function createCode({ clientId, userId, redirectUri, codeChallenge, scope, resource, readOnly, blueprintId = null }) {
   const code = rand(32);
   getDb().prepare(`
-    INSERT INTO oauth_codes (code_hash, client_id, user_id, redirect_uri, code_challenge, scope, resource, read_only, expires_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '+' || ? || ' seconds'))
-  `).run(hashApiKey(code), clientId, userId, redirectUri, codeChallenge, scope, resource, readOnly ? 1 : 0, CODE_TTL_SECONDS);
+    INSERT INTO oauth_codes (code_hash, client_id, user_id, redirect_uri, code_challenge, scope, resource, read_only, blueprint_id, expires_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '+' || ? || ' seconds'))
+  `).run(hashApiKey(code), clientId, userId, redirectUri, codeChallenge, scope, resource, readOnly ? 1 : 0, blueprintId, CODE_TTL_SECONDS);
   return code;
 }
 
-function issueTokens(db, grantId) {
+function issueTokens(db, grantId, { refresh: withRefresh = true } = {}) {
   const access = `${ACCESS_PREFIX}${rand(32)}`;
-  const refresh = `${REFRESH_PREFIX}${rand(32)}`;
+  const refresh = withRefresh ? `${REFRESH_PREFIX}${rand(32)}` : null;
   const days = grantLifetimeDays(db);
   const capped = (offset) => `MIN(datetime('now', ${offset}), (SELECT ${GRANT_EXPIRY_SQL} FROM oauth_grants g WHERE g.id = ?))`;
   db.prepare(`INSERT INTO oauth_tokens (token_hash, grant_id, kind, expires_at)
               VALUES (?, ?, 'access', ${capped("'+' || ? || ' seconds'")})`).run(hashApiKey(access), grantId, ACCESS_TOKEN_TTL_SECONDS, days, grantId);
-  db.prepare(`INSERT INTO oauth_tokens (token_hash, grant_id, kind, expires_at)
-              VALUES (?, ?, 'refresh', ${capped("'+' || ? || ' days'")})`).run(hashApiKey(refresh), grantId, REFRESH_TOKEN_TTL_DAYS, days, grantId);
+  if (refresh) {
+    db.prepare(`INSERT INTO oauth_tokens (token_hash, grant_id, kind, expires_at)
+                VALUES (?, ?, 'refresh', ${capped("'+' || ? || ' days'")})`).run(hashApiKey(refresh), grantId, REFRESH_TOKEN_TTL_DAYS, days, grantId);
+  }
   const exp = db.prepare("SELECT expires_at FROM oauth_tokens WHERE token_hash = ?").get(hashApiKey(access)).expires_at;
   const expiresIn = Math.min(ACCESS_TOKEN_TTL_SECONDS, Math.max(0, Math.ceil((Date.parse(toIso(exp)) - Date.now()) / 1000)));
   return { access, refresh, expiresIn };
@@ -140,12 +145,13 @@ export function revokeGrantById(grantId) {
 }
 
 function tokenResponse(grant, pair) {
+  const eff = effectiveScopes({ scope: grant.scope, blueprintId: grant.blueprint_id ?? null });
   return {
     access_token: pair.access,
     token_type: 'Bearer',
     expires_in: pair.expiresIn ?? ACCESS_TOKEN_TTL_SECONDS,
-    refresh_token: pair.refresh,
-    scope: scopeFor(!!grant.read_only),
+    ...(pair.refresh ? { refresh_token: pair.refresh } : {}),
+    scope: eff ? [...eff.scopes].sort().join(' ') : scopeFor(!!grant.read_only),
   };
 }
 
@@ -173,8 +179,8 @@ export function redeemCode({ code, client, redirectUri, verifier, resource }) {
     const user = db.prepare('SELECT active FROM users WHERE id = ?').get(row.user_id);
     if (!user?.active) throw new OAuthError('invalid_grant', 'The approving account is deactivated');
     const grantId = db.prepare(`
-      INSERT INTO oauth_grants (user_id, client_id, scope, resource, read_only) VALUES (?, ?, ?, ?, ?)
-    `).run(row.user_id, row.client_id, row.scope, row.resource, row.read_only).lastInsertRowid;
+      INSERT INTO oauth_grants (user_id, client_id, scope, resource, read_only, blueprint_id) VALUES (?, ?, ?, ?, ?, ?)
+    `).run(row.user_id, row.client_id, row.scope, row.resource, row.read_only, row.blueprint_id ?? null).lastInsertRowid;
     db.prepare("UPDATE oauth_codes SET used_at = datetime('now'), grant_id = ? WHERE code_hash = ?").run(grantId, hash);
     return { ok: tokenResponse(row, issueTokens(db, grantId)) };
   })();
@@ -196,7 +202,7 @@ export function refreshTokens({ refreshToken, client, resource }) {
   const out = db.transaction(() => {
     const hash = hashApiKey(refreshToken);
     const row = db.prepare(`
-      SELECT t.*, g.client_id, g.user_id, g.read_only, g.resource, g.revoked_at AS grant_revoked_at,
+      SELECT t.*, g.client_id, g.user_id, g.read_only, g.resource, g.scope, g.blueprint_id, g.revoked_at AS grant_revoked_at,
              ${GRANT_EXPIRY_SQL} <= datetime('now') AS grant_expired
       FROM oauth_tokens t JOIN oauth_grants g ON g.id = t.grant_id
       WHERE t.token_hash = ? AND t.kind = 'refresh'
@@ -225,6 +231,21 @@ export function refreshTokens({ refreshToken, client, resource }) {
   return out.ok;
 }
 
+/**
+ * A grant made without a browser consent (an ID-JAG assertion,
+ * services/oauthIdJag.js): an access token only, no refresh token, as the
+ * draft recommends; the client asks for a new assertion instead.
+ */
+export function issueAssertionGrant({ userId, clientId, scope, resource, blueprintId, via }) {
+  const db = getDb();
+  return db.transaction(() => {
+    const grantId = db.prepare(`
+      INSERT INTO oauth_grants (user_id, client_id, scope, resource, read_only, blueprint_id, via) VALUES (?, ?, ?, ?, 0, ?, ?)
+    `).run(userId, clientId, scope, resource, blueprintId ?? null, via).lastInsertRowid;
+    return tokenResponse({ scope, blueprint_id: blueprintId, read_only: 0 }, issueTokens(db, grantId, { refresh: false }));
+  })();
+}
+
 /** RFC 7009. Revoking a refresh token ends the grant; an access token ends just itself. */
 export function revokeToken({ token, client }) {
   if (typeof token !== 'string' || !token) return;
@@ -243,7 +264,7 @@ export function lookupAccessToken(token) {
   if (typeof token !== 'string' || !token.startsWith(ACCESS_PREFIX)) return null;
   const db = getDb();
   const row = db.prepare(`
-    SELECT g.id AS grant_id, g.client_id, g.resource, g.read_only, c.client_name,
+    SELECT g.id AS grant_id, g.client_id, g.resource, g.read_only, g.scope, g.blueprint_id, g.via, c.client_name,
            u.id AS uid, u.name, u.email, u.role, u.active, u.kind, u.username, u.mcp_app_scope
     FROM oauth_tokens t
     JOIN oauth_grants g ON g.id = t.grant_id
@@ -322,6 +343,7 @@ export function revokeAllGrantsForUser(userId) {
 export function listClients() {
   return getDb().prepare(`
     SELECT c.client_id, c.client_name, c.redirect_uris, c.token_endpoint_auth_method, c.created_at, c.approved_at, c.approved_by,
+           c.is_cimd, c.blueprint_id,
            (SELECT COUNT(*) FROM oauth_grants g WHERE g.client_id = c.client_id AND g.revoked_at IS NULL) AS live_grants
     FROM oauth_clients c ORDER BY c.id DESC LIMIT 500
   `).all().map(c => ({ ...c, redirect_uris: JSON.parse(c.redirect_uris) }));

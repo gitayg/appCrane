@@ -131,6 +131,9 @@ const serviceApiRoutes = (await import('../server/routes/serviceApi.js')).defaul
 
 initDb();
 const db = getDb();
+// This file is about something other than capability approvals, which
+// require approval for outbound_email by default (test/capability-*.test.js).
+db.prepare("INSERT INTO settings (key, value) VALUES ('capability_approval_required:outbound_email', '0')").run();
 
 // The reveal fixtures use SANDBOX secrets: since v2.107.5 only the app owner or
 // a platform admin may reveal a production value, and these tests are about the

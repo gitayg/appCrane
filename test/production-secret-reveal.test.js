@@ -37,7 +37,17 @@ const server = await new Promise((r) => { const a = express(); a.use(express.jso
 after(() => { server.closeAllConnections?.(); server.close(); });
 const get = (who, env, reveal) => fetch(`http://127.0.0.1:${server.address().port}/api/apps/reveal/env/${env}${reveal ? '?reveal=true' : ''}`, { headers: { 'x-api-key': who.key } });
 
+// Step-up (services/stepUp.js): a key never reveals production by itself; its
+// person grants it from a freshly stepped-up dashboard session.
+const { createGrant } = await import('../server/services/stepUp.js');
+
 test('REST: production reveal is refused to app admins and members, allowed to the owner and a platform admin', async () => {
+  for (const who of [OWNER, PLATFORM]) {
+    const r = await get(who, 'production', true);
+    assert.equal(r.status, 403, `${who.row.name} revealed production by key with no grant`);
+    assert.equal((await r.json()).error.code, 'STEP_UP_REQUIRED');
+  }
+  for (const who of [APPADMIN, MEMBER, OWNER, PLATFORM]) createGrant(db, who.id, 'reveal_production_secret', APP);
   for (const who of [APPADMIN, MEMBER]) assert.equal((await get(who, 'production', true)).status, 403, `${who.row.name} revealed a production secret`);
   for (const who of [OWNER, PLATFORM]) assert.equal((await get(who, 'production', true)).status, 200, `${who.row.name} was refused`);
   assert.equal((await get(MEMBER, 'production', false)).status, 200, 'the masked list must stay available');

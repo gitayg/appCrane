@@ -18,6 +18,7 @@
 import { existsSync, readdirSync } from 'fs';
 import { join, resolve } from 'path';
 import { MANIFESTS, parseManifest } from './ecosystems.js';
+import { manifestNotes, noManifestReason } from './pythonManifests.js';
 import { assertFinding, assertPackage } from './scanShapes.js';
 import { syncVulnRequests } from './vulnRequests.js';
 import { alertNewFindings } from './vulnAlerts.js';
@@ -577,6 +578,7 @@ export async function scanApp(db, app, env, source = 'deploy') {
   let ecosystem = null;
   let packageCount = 0;
   let status, findingsJson = null, error = null;
+  let notes = [];
 
   if (app.source_type === 'image') {
     try {
@@ -611,13 +613,14 @@ export async function scanApp(db, app, env, source = 'deploy') {
 
     try {
       const manifests = findLockfiles(releaseDir);
+      notes = manifestNotes(manifests, releaseDir);
       if (manifests.length === 0) {
         // Nothing AppCrane can read is not a failure — a static site has no
         // manifest and never will. It is recorded so the fleet view can
         // distinguish "clean" from "never looked at", which an absent row could
         // not.
         status = 'skipped';
-        error = 'no recognised manifest in the live release';
+        error = noManifestReason(releaseDir, 'no recognised manifest in the live release');
       } else {
         // Every ecosystem present, comma-joined, so a mixed repo is not recorded
         // as whichever manifest happened to sort first. The column takes it
@@ -645,8 +648,11 @@ export async function scanApp(db, app, env, source = 'deploy') {
         }
         packageCount = packages.length;
 
-        const osv = await queryOsv(packages);
-        if (!osv.ok) {
+        const osv = packages.length === 0 && notes.length ? null : await queryOsv(packages);
+        if (!osv) {
+          status = 'skipped';
+          error = 'no package is pinned to an exact version, so nothing was scanned';
+        } else if (!osv.ok) {
           status = 'error';
           error = osv.error;
         } else if (osv.findings.length > 0) {
@@ -663,9 +669,9 @@ export async function scanApp(db, app, env, source = 'deploy') {
   }
 
   const info = db.prepare(`
-    INSERT INTO app_vuln_scans (app_id, env, source, ecosystem, status, package_count, findings_json, error)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(app.id, env, source, ecosystem, status, packageCount, findingsJson, error);
+    INSERT INTO app_vuln_scans (app_id, env, source, ecosystem, status, package_count, findings_json, error, notes)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(app.id, env, source, ecosystem, status, packageCount, findingsJson, error, notes.length ? JSON.stringify(notes) : null);
 
   const row = db.prepare('SELECT * FROM app_vuln_scans WHERE id = ?').get(info.lastInsertRowid);
   syncVulnRequests(db, app, row);

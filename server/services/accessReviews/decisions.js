@@ -2,10 +2,8 @@ import { AppError } from '../../utils/errors.js';
 import { isPlatformAdmin } from '../../utils/roles.js';
 import { logAudit } from '../../middleware/audit.js';
 import { recordEvent } from '../eventStore.js';
-import { clearUserRoleGrants } from '../appDefinedRoles.js';
-import { purgeRevokedTenants } from '../tenants.js';
 import { closeCampaign } from './campaigns.js';
-import { assertNotLastActiveOwner, afterOwnershipWrite } from '../appOwnership.js';
+import { applyAppRole } from '../appRoleChange.js';
 
 export const DECISIONS = Object.freeze(['keep', 'remove', 'change']);
 export const APP_ROLES = Object.freeze(['owner', 'admin', 'user']);
@@ -17,19 +15,7 @@ export const SCIM_MESSAGE = 'Managed by your identity provider: this access come
  * role grants and purges the person's tenant data, anything else upserts.
  */
 export async function setAppRole(db, appId, userId, role) {
-  if (role !== 'owner') assertNotLastActiveOwner(db, appId, userId);
-  if (role === 'none') {
-    db.transaction(() => {
-      db.prepare('DELETE FROM app_user_roles WHERE app_id = ? AND user_id = ?').run(appId, userId);
-      clearUserRoleGrants(appId, userId);
-    })();
-    const target = db.prepare('SELECT email FROM users WHERE id = ?').get(userId);
-    await purgeRevokedTenants(db, userId, target?.email, [appId]);
-  } else {
-    db.prepare(`INSERT INTO app_user_roles (app_id, user_id, app_role) VALUES (?, ?, ?)
-                ON CONFLICT(app_id, user_id) DO UPDATE SET app_role = excluded.app_role`).run(appId, userId, role);
-  }
-  afterOwnershipWrite(db, 'access-review');
+  await applyAppRole(db, null, { id: appId }, userId, role, { cause: 'access-review' });
 }
 
 /** Demote a platform admin the way PUT /api/users/:id/role does: never yourself, never the last one. */

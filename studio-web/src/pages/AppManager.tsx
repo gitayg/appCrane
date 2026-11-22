@@ -6,6 +6,7 @@ import { StoredEnvFilesCard } from '../components/StoredEnvFilesCard'
 import { ManagedDatabaseCard } from '../components/ManagedDatabaseCard'
 import { BackupsCard } from '../components/BackupsCard'
 import { AccessRulesCard } from '../components/AccessRulesCard'
+import { WidgetScopesCard } from '../components/WidgetScopesCard'
 import { IntakeCard } from '../components/intake/IntakeCard'
 import { ReleaseCheckPanel } from '../components/intake/ReleaseCheckPanel'
 import { AutoPatchAppCard } from '../components/autoPatch/AutoPatchAppCard'
@@ -14,7 +15,9 @@ import { AppMcpCard } from '../components/appMcp/AppMcpCard'
 import { AppTimeline } from '../components/events/AppTimeline'
 import { WhatsNewMailCard } from '../components/WhatsNewMailCard'
 import { OwnershipCard } from '../components/ownership/OwnershipCard'
+import { CapabilitiesCard } from '../components/capabilities/CapabilitiesCard'
 import { AppSupplyChainCard } from '../components/imageTrust/AppSupplyChainCard'
+import { AppAuditCard } from '../components/appAudit/AppAuditCard'
 import { EnvVarsPanel } from '../components/env/EnvVarsPanel'
 import { serverDate } from '../utils/serverDate'
 import { limitsAppliedText, type LimitApply } from '../utils/limitsApplied'
@@ -1185,13 +1188,16 @@ export function AppManager() {
             {isAdminUser && <LimitsCard slug={currentApp} reload={reloadCounter} onMsg={showMsg} />}
             <SandboxVisibilityCard slug={currentApp} reload={reloadCounter} onMsg={showMsg} />
             <OwnershipCard slug={currentApp} reload={reloadCounter} onMsg={showMsg} />
+            <CapabilitiesCard slug={currentApp} reload={reloadCounter} onMsg={showMsg} />
             <WhatsNewMailCard slug={currentApp} reload={reloadCounter} onMsg={showMsg} />
+            <WidgetScopesCard slug={currentApp} reload={reloadCounter} onMsg={showMsg} />
             <ManagedDatabaseCard slug={currentApp} reload={reloadCounter} onMsg={showMsg} />
             <BackupsCard slug={currentApp} env={currentEnv} reload={reloadCounter} onMsg={showMsg} />
             <AccessRulesCard slug={currentApp} env={currentEnv} reload={reloadCounter} onMsg={showMsg} />
             <IntakeCard slug={currentApp} onMsg={showMsg} />
             <ReleaseCheckPanel slug={currentApp} reload={reloadCounter} onMsg={showMsg} />
             <AppSupplyChainCard slug={currentApp} reload={reloadCounter} />
+            <AppAuditCard slug={currentApp} reload={reloadCounter} onMsg={showMsg} />
             <AutoPatchAppCard slug={currentApp} reload={reloadCounter} onMsg={showMsg} />
             <LlmGatewayAppCard slug={currentApp} isPlatformAdmin={isAdminUser} onMsg={showMsg} />
             <AppMcpCard slug={currentApp} env={currentEnv} reload={reloadCounter} onMsg={showMsg} />

@@ -14,6 +14,12 @@
 //   one "name:value" line per header in SIGNED_HEADERS_V2 (absent = empty)
 // HMAC-SHA256 with the secret, base64url, sent as X-AppCrane-Identity-Sig-V2.
 //
+// AppCrane with step-up also sends X-AppCrane-Identity-Sig-V3: the same over
+// SIGNED_HEADERS_V3 (adds x-appcrane-auth-time and x-appcrane-auth-mfa) with
+// "appcrane-identity-v3" as the first line. When it is present it is the one
+// checked, and identity.authTime says when the person last signed in or
+// stepped up (unix seconds; null without v3, or for a key).
+//
 // Framework-neutral: pass anything with a lowercase `headers` object (Node's
 // http.IncomingMessage, an Express req).
 
@@ -30,6 +36,8 @@ export const SIGNED_HEADERS_V2 = Object.freeze([
   'x-appcrane-app-roles',
   'x-appcrane-auth-via',
 ]);
+
+export const SIGNED_HEADERS_V3 = Object.freeze([...SIGNED_HEADERS_V2, 'x-appcrane-auth-time', 'x-appcrane-auth-mfa']);
 
 export const MAX_AGE_SEC = 300;
 const MAX_CLOCK_SKEW_SEC = 60;
@@ -54,6 +62,17 @@ export function signIdentityV2(secret, ts, headers) {
   return createHmac('sha256', secret).update(lines.join('\n')).digest('base64url');
 }
 
+/** The base64url v3 signature, which also covers when and how the person authenticated. */
+export function signIdentityV3(secret, ts, headers) {
+  const lines = ['appcrane-identity-v3', String(ts), ...SIGNED_HEADERS_V3.map((h) => `${h}:${headerValue(headers, h)}`)];
+  return createHmac('sha256', secret).update(lines.join('\n')).digest('base64url');
+}
+
+/** True when the person signed in or stepped up within maxAgeSec (never without v3). */
+export function authenticatedWithin(identity, maxAgeSec, now = Date.now()) {
+  return Number.isInteger(identity?.authTime) && Math.floor(now / 1000) - identity.authTime <= maxAgeSec;
+}
+
 function sameString(a, b) {
   const x = Buffer.from(a);
   const y = Buffer.from(b);
@@ -75,12 +94,13 @@ export function verifyRequest(req, { secret = process.env.APPCRANE_IDENTITY_SECR
     return { ok: false, code: 'IDENTITY_NOT_CONFIGURED', message: 'APPCRANE_IDENTITY_SECRET is not set, so no identity can be verified' };
   }
   const headers = req?.headers || {};
-  const sig = headerValue(headers, 'x-appcrane-identity-sig-v2');
+  const sigV3 = headerValue(headers, 'x-appcrane-identity-sig-v3');
+  const sig = sigV3 || headerValue(headers, 'x-appcrane-identity-sig-v2');
   const ts = headerValue(headers, 'x-appcrane-identity-ts');
   if (!sig || !/^\d{1,12}$/.test(ts)) {
     return { ok: false, code: 'IDENTITY_UNSIGNED', message: 'the request carries no signed AppCrane identity' };
   }
-  if (!sameString(signIdentityV2(secret, ts, headers), sig)) {
+  if (!sameString(sigV3 ? signIdentityV3(secret, ts, headers) : signIdentityV2(secret, ts, headers), sig)) {
     return { ok: false, code: 'IDENTITY_FORGED', message: 'the identity signature does not match' };
   }
   const age = Math.floor(now / 1000) - Number(ts);
@@ -103,6 +123,8 @@ export function verifyRequest(req, { secret = process.env.APPCRANE_IDENTITY_SECR
       isAppAdmin: atLeast(appRole, 'admin'),
       appRoles: headerValue(headers, 'x-appcrane-app-roles').split(',').map((s) => s.trim()).filter(Boolean),
       authVia: headerValue(headers, 'x-appcrane-auth-via') || 'session',
+      authTime: sigV3 && /^\d{1,12}$/.test(headerValue(headers, 'x-appcrane-auth-time')) ? Number(headerValue(headers, 'x-appcrane-auth-time')) : null,
+      mfa: sigV3 ? headerValue(headers, 'x-appcrane-auth-mfa') || 'none' : null,
     },
   };
 }

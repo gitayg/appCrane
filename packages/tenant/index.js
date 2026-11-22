@@ -77,6 +77,20 @@ export function signIdentityV2(secret, ts, get) {
   return createHmac('sha256', secret).update(lines.join('\n')).digest('base64url');
 }
 
+// 1.4.0: v3 adds when the person behind a browser session last authenticated
+// (X-AppCrane-Auth-Time, unix seconds) and with which second factor
+// (X-AppCrane-Auth-Mfa: totp, recovery_code, idp or none), so an app can
+// require recent authentication itself. Sent beside v1 and v2, which keep
+// their exact signed strings for apps on older versions.
+export const IDENTITY_SIGNED_HEADERS_V3 = Object.freeze([...IDENTITY_SIGNED_HEADERS_V2, 'X-AppCrane-Auth-Time', 'X-AppCrane-Auth-Mfa']);
+
+/** Like signIdentityV2, over IDENTITY_SIGNED_HEADERS_V3 (sent as X-AppCrane-Identity-Sig-V3). */
+export function signIdentityV3(secret, ts, get) {
+  const lines = ['appcrane-identity-v3', String(ts),
+    ...IDENTITY_SIGNED_HEADERS_V3.map((h) => `${h.toLowerCase()}:${get(h) ?? ''}`)];
+  return createHmac('sha256', secret).update(lines.join('\n')).digest('base64url');
+}
+
 function sameSig(expected, sig) {
   const a = Buffer.from(expected);
   const b = Buffer.from(sig);
@@ -93,24 +107,52 @@ function sameSig(expected, sig) {
  * it, and null when only v1 was checked: an AppCrane older than 2.125.14, or a
  * request with the v2 signature removed. Treat null as "not known to be a
  * browser session". requireV2: true rejects v1-only requests outright.
+ *
+ * authTime and mfa (1.4.0) come only from a v3 signature: authTime is the unix
+ * second the person last signed in or stepped up (null for a key, or when v3
+ * is absent), mfa the factor behind it ('none' when there was none).
+ * requireV3: true rejects anything older.
  */
-export function verifyIdentity(req, { secret = process.env.APPCRANE_IDENTITY_SECRET, maxAgeSec = IDENTITY_MAX_AGE_SEC, now = Date.now(), requireV2 = false } = {}) {
+export function verifyIdentity(req, { secret = process.env.APPCRANE_IDENTITY_SECRET, maxAgeSec = IDENTITY_MAX_AGE_SEC, now = Date.now(), requireV2 = false, requireV3 = false } = {}) {
   if (!secret) throw new Error('appcrane-tenant: no APPCRANE_IDENTITY_SECRET to verify the identity signature with');
   const get = (h) => { const v = header(req, h); return v === '' ? undefined : String(v); };
+  const sigV3 = get('X-AppCrane-Identity-Sig-V3');
   const sigV2 = get('X-AppCrane-Identity-Sig-V2');
   const sig = get('X-AppCrane-Identity-Sig');
   const ts = get('X-AppCrane-Identity-Ts');
-  if (!(sigV2 || sig) || !ts || !/^\d+$/.test(ts)) throw new Error('appcrane-tenant: identity signature missing');
-  if (!sigV2 && requireV2) throw new Error('appcrane-tenant: identity signature v2 missing');
-  const ok = sigV2 ? sameSig(signIdentityV2(secret, ts, get), sigV2) : sameSig(signIdentity(secret, ts, get), sig);
+  if (!(sigV3 || sigV2 || sig) || !ts || !/^\d+$/.test(ts)) throw new Error('appcrane-tenant: identity signature missing');
+  if (!sigV3 && requireV3) throw new Error('appcrane-tenant: identity signature v3 missing');
+  if (!sigV3 && !sigV2 && requireV2) throw new Error('appcrane-tenant: identity signature v2 missing');
+  const ok = sigV3 ? sameSig(signIdentityV3(secret, ts, get), sigV3)
+    : sigV2 ? sameSig(signIdentityV2(secret, ts, get), sigV2) : sameSig(signIdentity(secret, ts, get), sig);
   if (!ok) throw new Error('appcrane-tenant: identity signature does not match');
   const age = Math.floor(now / 1000) - Number(ts);
   if (age > maxAgeSec || age < -60) throw new Error(`appcrane-tenant: identity signature expired (${age}s old)`);
   const email = get('X-AppCrane-User-Email') || '';
   return {
     userId: String(get('X-AppCrane-User-Id') || '').replace(/[^0-9]/g, ''), email, org: orgFromEmail(email),
-    authVia: sigV2 ? (get('X-AppCrane-Auth-Via') || 'session') : null,
+    authVia: sigV3 || sigV2 ? (get('X-AppCrane-Auth-Via') || 'session') : null,
+    authTime: sigV3 && /^\d+$/.test(get('X-AppCrane-Auth-Time') || '') ? Number(get('X-AppCrane-Auth-Time')) : null,
+    mfa: sigV3 ? (get('X-AppCrane-Auth-Mfa') || 'none') : null,
   };
+}
+
+/**
+ * True when the verified identity authenticated within maxAgeSec. A request
+ * without a v3 authTime (a key, an older AppCrane) is never recent.
+ */
+export function authenticatedWithin(identity, maxAgeSec, now = Date.now()) {
+  return Number.isInteger(identity?.authTime) && Math.floor(now / 1000) - identity.authTime <= maxAgeSec;
+}
+
+/**
+ * Where to send the person to step up: AppCrane re-authenticates them and
+ * returns them to returnUrl, which must be on this app's own host (anything
+ * else is refused there). craneUrl is AppCrane's origin, e.g. https://crane.example.test.
+ */
+export function stepUpUrl({ craneUrl, app, returnUrl }) {
+  const p = new URLSearchParams({ app: String(app), return: String(returnUrl) });
+  return `${String(craneUrl).replace(/\/+$/, '')}/api/identity/step-up/app?${p}`;
 }
 
 /**

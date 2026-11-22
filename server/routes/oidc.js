@@ -1,15 +1,19 @@
 import { Router } from 'express';
+import { onSignInSuccess } from '../services/signinRisk/index.js';
 import { auditLogin, logAudit } from '../middleware/audit.js';
 import { findOrLinkSsoUser } from '../services/ssoLink.js';
 import { ssoProviderConfigured, SSO_SETTING_KEY } from '../services/authPolicy.js';
 import { isPublicProvider, parseAllowedDomains, signupRefusal, publicProviderVouches } from '../services/ssoSignupDomains.js';
 import { recordSignupRequest, listSignupRequests, approveSignupRequest, denySignupRequest } from '../services/ssoSignupRequests.js';
 import { idpDidMfa, ssoLoginMfaStep } from '../services/ssoMfa.js';
+import { effectiveAllowedDomains, registerListedDomains, domainWarnings } from '../services/domainVerification.js';
+import { browserHoldsRequestSession, finishIdpStepUp, liveRequestByHash, markSessionMfa, requireStepUp, stepUpHandleHash } from '../services/stepUp.js';
 import crypto from 'crypto';
 import { getDb } from '../db.js';
 import { encrypt, decrypt, generateSessionToken, hashApiKey } from '../services/encryption.js';
+import { idpFetch } from '../services/idpFetch.js';
 import { requireAuth, requirePlatformAdmin } from '../middleware/auth.js';
-import { setSessionCookie, readCookie, platformCookieSecure } from '../utils/sessionCookie.js';
+import { setSessionCookie, readCookie, readSessionCookie, platformCookieSecure } from '../utils/sessionCookie.js';
 import { safeRedirectTarget } from '../utils/safeRedirect.js';
 import { POPUP_MODE, requestedMode, sendPopupComplete, sendPopupFailed, popupFailure, idpErrorCode, loginErrorCode } from '../utils/ssoPopup.js';
 import log from '../utils/logger.js';
@@ -23,7 +27,7 @@ const SESSION_DURATION_HOURS = parseInt(process.env.SESSION_DURATION_HOURS) || 2
 const _discoveryCache = new Map();
 const _jwksCache = new Map();
 
-async function getDiscovery(baseUrl) {
+export async function getDiscovery(baseUrl) {
   const now = Date.now();
   const cached = _discoveryCache.get(baseUrl);
   if (cached && now - cached.ts < 5 * 60 * 1000) return cached.doc;
@@ -32,25 +36,25 @@ async function getDiscovery(baseUrl) {
     ? baseUrl
     : baseUrl.replace(/\/$/, '') + '/.well-known/openid-configuration';
 
-  const r = await fetch(url, { signal: AbortSignal.timeout(10000) });
+  const r = await idpFetch(url, { trusted: baseUrl });
   if (!r.ok) throw new Error(`OIDC discovery failed (${r.status}): ${url}`);
   const doc = await r.json();
   _discoveryCache.set(baseUrl, { doc, ts: now });
   return doc;
 }
 
-async function getJwks(jwksUri) {
+async function getJwks(jwksUri, trusted) {
   const now = Date.now();
   const cached = _jwksCache.get(jwksUri);
   if (cached && now - cached.ts < 10 * 60 * 1000) return cached.keys;
-  const r = await fetch(jwksUri, { signal: AbortSignal.timeout(10000) });
+  const r = await idpFetch(jwksUri, { trusted });
   if (!r.ok) throw new Error(`JWKS fetch failed (${r.status})`);
   const { keys } = await r.json();
   _jwksCache.set(jwksUri, { keys, ts: now });
   return keys;
 }
 
-async function verifyIdToken(idToken, jwksUri, clientId, issuer) {
+async function verifyIdToken(idToken, jwksUri, clientId, issuer, trusted) {
   const parts = idToken.split('.');
   if (parts.length !== 3) throw new Error('Malformed id_token');
 
@@ -64,7 +68,7 @@ async function verifyIdToken(idToken, jwksUri, clientId, issuer) {
   if (payload.exp < Math.floor(Date.now() / 1000)) throw new Error('id_token expired');
 
   // Find matching JWK (by kid, then by alg, then first key)
-  const keys = await getJwks(jwksUri);
+  const keys = await getJwks(jwksUri, trusted);
   const jwk = keys.find(k => k.kid === header.kid)
     || keys.find(k => k.alg === header.alg)
     || keys[0];
@@ -93,7 +97,7 @@ async function verifyIdToken(idToken, jwksUri, clientId, issuer) {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-function getOidcConfig() {
+export function getOidcConfig() {
   const db = getDb();
   const rows = db.prepare("SELECT key, value FROM settings WHERE key LIKE 'oidc_%'").all();
   const cfg = Object.fromEntries(rows.map(r => [r.key, r.value]));
@@ -173,14 +177,14 @@ export const SSO_HANDOFF_TTL_MS = 60_000;
 export const SSO_HANDOFF_MAX = 5000;
 const ssoHandoffs = new Map(); // sha256(code) -> record, oldest first
 
-export function issueSsoHandoff(token, cookieName, binding, mfaStep = null) {
+export function issueSsoHandoff(token, cookieName, binding, mfaStep = null, deviceCheck = null) {
   const now = Date.now();
   for (const [k, rec] of ssoHandoffs) {
     if (now <= rec.expiresAt && ssoHandoffs.size < SSO_HANDOFF_MAX) break;
     ssoHandoffs.delete(k);
   }
   const code = crypto.randomBytes(16).toString('base64url');
-  ssoHandoffs.set(bindingHash(code), { token, mfaStep, cookieName, binding: bindingHash(binding), expiresAt: now + SSO_HANDOFF_TTL_MS });
+  ssoHandoffs.set(bindingHash(code), { token, mfaStep, deviceCheck, cookieName, binding: bindingHash(binding), expiresAt: now + SSO_HANDOFF_TTL_MS });
   return code;
 }
 
@@ -223,8 +227,8 @@ function stateIsThisBrowsers(req, stateData) {
 
 // The HMAC proves AppCrane made the state; `b` ties it to the browser. Payload:
 // { r: redirect, n: OIDC nonce, b: binding hash, t: timestamp, m?: 'popup' }
-function makeState(redirect, mode, binding, nonce) {
-  const payload = Buffer.from(JSON.stringify({ r: redirect || '', n: nonce, b: bindingHash(binding), t: Date.now(), ...(mode === POPUP_MODE && { m: POPUP_MODE }) })).toString('base64url');
+function makeState(redirect, mode, binding, nonce, stepUp = null) {
+  const payload = Buffer.from(JSON.stringify({ r: redirect || '', n: nonce, b: bindingHash(binding), t: Date.now(), ...(mode === POPUP_MODE && { m: POPUP_MODE }), ...(stepUp && { su: stepUp }) })).toString('base64url');
   const sig = crypto.createHmac('sha256', process.env.ENCRYPTION_KEY).update(payload).digest('base64url');
   return payload + '.' + sig;
 }
@@ -302,6 +306,7 @@ router.get('/admin-config', requireAuth, requirePlatformAdmin, (req, res) => {
     provider_name:     cfg.provider_name,
     auto_provision:    cfg.auto_provision,
     allowed_domains:   cfg.allowed_domains.join(', '),
+    domain_warnings:   domainWarnings(cfg.allowed_domains),
     redirect_uri:      craneBaseUrl() + '/api/auth/oidc/callback',
   });
 });
@@ -309,7 +314,7 @@ router.get('/admin-config', requireAuth, requirePlatformAdmin, (req, res) => {
 /**
  * PUT /api/auth/oidc/config — admin: save OIDC settings
  */
-router.put('/config', requireAuth, requirePlatformAdmin, (req, res) => {
+router.put('/config', requireAuth, requirePlatformAdmin, requireStepUp('security_settings'), (req, res) => {
   const { enabled, discovery_url, client_id, client_secret, provider_name, auto_provision, allowed_domains } = req.body || {};
   const domains = parseAllowedDomains(allowed_domains);
   // A provider turned on with no client ID cannot sign anyone in, yet it still
@@ -327,6 +332,7 @@ router.put('/config', requireAuth, requirePlatformAdmin, (req, res) => {
   save('oidc_provider_name',  provider_name || 'SSO');
   save('oidc_auto_provision', auto_provision ? '1' : '0');
   save('oidc_allowed_domains', domains.join(','));
+  registerListedDomains(domains, req.user.id, db);
   if (client_secret) save('oidc_client_secret_enc', encrypt(client_secret));
 
   // The first provider turned on leaves password sign-in working, so the admin
@@ -418,6 +424,31 @@ router.get('/start', async (req, res) => {
 });
 
 /**
+ * Step-up re-login (services/stepUp.js): the same authorize request with
+ * prompt=login and max_age=0, so the IdP must authenticate the person again
+ * and report when (auth_time). The signed state carries the hash of the
+ * step-up handle; the callback finishes the step-up instead of signing in.
+ */
+export async function startOidcStepUp(req, res, handle) {
+  const cfg = getOidcConfig();
+  if (!cfg.enabled || !cfg.discovery_url || !cfg.client_id) throw new Error('OIDC not configured');
+  const discovery = await getDiscovery(cfg.discovery_url);
+  const binding = ensureBrowserBinding(req, res, oidcBindCookie(req));
+  const nonce = crypto.randomBytes(16).toString('hex');
+  const params = new URLSearchParams({
+    response_type: 'code',
+    client_id:     cfg.client_id,
+    redirect_uri:  craneBaseUrl() + '/api/auth/oidc/callback',
+    scope:         'openid email profile',
+    state:         makeState('', POPUP_MODE, binding, nonce, stepUpHandleHash(handle)),
+    nonce,
+    prompt:        'login',
+    max_age:       '0',
+  });
+  res.redirect(302, discovery.authorization_endpoint + '?' + params.toString());
+}
+
+/**
  * GET /api/auth/oidc/callback — IdP posts back here with ?code=&state=
  */
 router.get('/callback', async (req, res) => {
@@ -438,7 +469,8 @@ router.get('/callback', async (req, res) => {
     const redirectUri = base + '/api/auth/oidc/callback';
 
     // Exchange authorization code for tokens
-    const tokenRes = await fetch(discovery.token_endpoint, {
+    const tokenRes = await idpFetch(discovery.token_endpoint, {
+      trusted: cfg.discovery_url,
       method:  'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
@@ -447,8 +479,8 @@ router.get('/callback', async (req, res) => {
         redirect_uri:  redirectUri,
         client_id:     cfg.client_id,
         client_secret: cfg.client_secret,
-      }),
-      signal: AbortSignal.timeout(15000),
+      }).toString(),
+      timeoutMs: 15000,
     });
 
     if (!tokenRes.ok) {
@@ -460,10 +492,22 @@ router.get('/callback', async (req, res) => {
     if (!tokens.id_token) throw new Error('No id_token in token response');
 
     // Verify and decode the ID token
-    const claims = await verifyIdToken(tokens.id_token, discovery.jwks_uri, cfg.client_id, discovery.issuer);
+    const claims = await verifyIdToken(tokens.id_token, discovery.jwks_uri, cfg.client_id, discovery.issuer, cfg.discovery_url);
     if (!safeEqual(claims.nonce, stateData.n)) throw new Error('id_token nonce mismatch');
     const { sub, email, name, given_name, family_name } = claims;
     if (!sub) throw new Error('id_token missing sub claim');
+
+    if (stateData.su) {
+      const db = getDb();
+      const request = liveRequestByHash(db, stateData.su, ['oidc']);
+      if (!request) throw popupFailure('step_up_expired', 'Step-up request expired');
+      if (!browserHoldsRequestSession(readSessionCookie(req), request)) throw popupFailure('step_up_wrong_browser', 'Step-up finished outside the session that asked for it');
+      const authInstantMs = typeof claims.auth_time === 'number' ? claims.auth_time * 1000 : NaN;
+      const r = finishIdpStepUp(db, request, { subjectColumn: 'sso_sub', subject: sub, authInstantMs, mfa: idpDidMfa(claims.amr) ? 'idp' : null });
+      logAudit(request.user_id, null, r.ok ? 'step-up' : 'step-up-refused', { method: 'oidc', ...(r.ok ? {} : { reason: r.code }), ip: req.ip });
+      if (!r.ok) throw popupFailure(r.code, `OIDC step-up refused: ${r.code}`);
+      return sendPopupComplete(res);
+    }
 
     const displayName = name
       || [given_name, family_name].filter(Boolean).join(' ')
@@ -502,11 +546,14 @@ router.get('/callback', async (req, res) => {
 
     let refusal = null;
     if (!user && cfg.auto_provision) {
+      // A domain entry admits only once DNS-verified (or legacy); a list whose
+      // every entry is unverified admits nobody, it does not become "no list".
+      const allowed = effectiveAllowedDomains(cfg.allowed_domains, db);
       // A public provider with no list sends every new person to approval.
-      refusal = isPublicProvider(cfg.discovery_url) && !cfg.allowed_domains.length
+      refusal = (isPublicProvider(cfg.discovery_url) || cfg.allowed_domains.length) && !allowed.length
         ? (email && emailVerified ? 'domain_not_allowed' : 'email_unverified')
         : signupRefusal({
-          email, emailVerified, allowed: cfg.allowed_domains,
+          email, emailVerified, allowed,
           hostedDomain: claims.hd, requireHostedDomain: isPublicProvider(cfg.discovery_url),
         });
       if (refusal === 'domain_not_allowed') {
@@ -540,7 +587,9 @@ router.get('/callback', async (req, res) => {
     if (!mfaStep) {
       // Create session and hand token back to the browser via login page JS
       token = createIdentitySession(user.id);
+      if (idpMfa) markSessionMfa(db, token, 'idp');
       auditLogin(user.id, 'ok', { method: 'oidc', ip: req.ip, ...(idpMfa && { idp_amr: claims.amr }) });
+      onSignInSuccess(req, res, user, { method: 'oidc', ip: req.ip });
 
       // v2.6.18: set cc_token cookie server-side on the redirect response, so a
       // browser that goes straight into a per-app route after the callback, without
@@ -585,6 +634,12 @@ router.get('/callback', async (req, res) => {
 router.post('/handoff', (req, res) => {
   const rec = redeemSsoHandoffRecord(req, req.body?.code);
   if (!rec) return res.status(401).json({ error: { code: 'SSO_HANDOFF_REFUSED', message: BROWSER_MISMATCH } });
+  // SAML's callback is a cross-site POST, which carries no SameSite=Lax device
+  // cookie, so its device check runs here, on the same-origin redeem.
+  if (rec.deviceCheck) {
+    const user = getDb().prepare('SELECT * FROM users WHERE id = ?').get(rec.deviceCheck.userId);
+    if (user) onSignInSuccess(req, res, user, { method: rec.deviceCheck.method, ip: req.ip });
+  }
   res.json(rec.mfaStep || { token: rec.token });
 });
 

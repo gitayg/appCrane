@@ -1,17 +1,18 @@
 import { Router } from 'express';
+import { assertStepUp, requireStepUp } from '../services/stepUp.js';
 import { getDb } from '../db.js';
 import { generateApiKey, hashApiKey, hashPassword, encrypt } from '../services/encryption.js';
 import { requireAuth, requireAdmin, requirePlatformAdmin, requireAppAccess } from '../middleware/auth.js';
 import { auditMiddleware } from '../middleware/audit.js';
 import { AppError } from '../utils/errors.js';
 import { roleForUserOnApp } from '../services/permissions.js';
-import { clearUserRoleGrants } from '../services/appDefinedRoles.js';
 import { isAdmin, refuseRetiredAdminRole } from '../utils/roles.js';
 import { purgeRevokedTenants } from '../services/tenants.js';
 import { revokeAllGrantsForUser } from '../services/oauthStore.js';
 import { revokeAllDevices } from '../services/trustedDevices.js';
 import { refuseUnlessSsoOptional } from '../services/authPolicy.js';
-import { assertNotLastActiveOwner, afterOwnershipWrite } from '../services/appOwnership.js';
+import { afterOwnershipWrite } from '../services/appOwnership.js';
+import { setAppRole } from '../services/appRoleChange.js';
 
 const router = Router();
 
@@ -77,6 +78,7 @@ router.post('/', requireAdmin, auditMiddleware('user-create'), (req, res) => {
     if (req.user.role !== 'platform_admin') {
       throw new AppError('Only platform admins can create platform admins', 403, 'FORBIDDEN_PLATFORM_ADMIN');
     }
+    assertStepUp(req, 'grant_platform_admin');
     userRole = 'platform_admin';
   }
   const userKind = kind === 'agent' ? 'agent' : 'human';
@@ -176,6 +178,7 @@ router.put('/:id/role', requirePlatformAdmin, auditMiddleware('user-set-role'), 
 
   const user = db.prepare('SELECT id, role FROM users WHERE id = ?').get(userId);
   if (!user) throw new AppError('User not found', 404, 'NOT_FOUND');
+  if (role === 'platform_admin' && user.role !== 'platform_admin') assertStepUp(req, 'grant_platform_admin');
 
   if (user.role === 'platform_admin' && role !== 'platform_admin') {
     if (userId === req.user.id) {
@@ -195,7 +198,7 @@ router.put('/:id/role', requirePlatformAdmin, auditMiddleware('user-set-role'), 
 /**
  * POST /api/users/:id/regenerate-key - Generate new API key (admin only)
  */
-router.post('/:id/regenerate-key', requireAdmin, auditMiddleware('user-regen-key'), (req, res) => {
+router.post('/:id/regenerate-key', requireAdmin, requireStepUp('manage_api_keys'), auditMiddleware('user-regen-key'), (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   if (url.searchParams.get('confirm') !== 'true') {
     throw new AppError('This will invalidate the current key. Add ?confirm=true to proceed.', 400, 'CONFIRMATION_REQUIRED');
@@ -296,54 +299,8 @@ router.put('/:id/profile', requireAdmin, auditMiddleware('user-update-profile'),
  */
 router.put('/:slug/roles', requireAppAccess, auditMiddleware('app-set-role'), async (req, res) => {
   const app = req.app; // set by requireAppAccess
-  if (!isAdmin(req.user) && roleForUserOnApp(req.user, app) !== 'owner') {
-    throw new AppError('Only the app owner can manage users on this app.', 403, 'FORBIDDEN');
-  }
-
   const { user_id, app_role } = req.body;
-  if (!user_id || !app_role) throw new AppError('user_id and app_role required', 400, 'VALIDATION');
-  if (!['owner', 'admin', 'user', 'none'].includes(app_role)) throw new AppError('app_role must be owner, admin, user, or none', 400, 'VALIDATION');
-
-  const db = getDb();
-
-  // Last-owner guard: don't let the final active owner be demoted/removed.
-  if (app_role !== 'owner') assertNotLastActiveOwner(db, app.id, user_id);
-
-  // v2.42.1: 'none' means REMOVED, so it deletes rather than writes a row.
-  //
-  // This route used to write app_role='none' AND insert an app_users row, which
-  // granted the very access it reads as taking away: requireAppUser checks
-  // app_users, so someone the dashboard showed as 'none' could read DECRYPTED
-  // production env vars via GET /:slug/env/:env?reveal=true, and run
-  // backup/restore/copy-data. Every human-visible signal said no — /api/me
-  // reported 'none' and forward_auth denied them at /<slug> — while the one path
-  // that returns plaintext said yes. That disagreement between the checks WAS
-  // the bug, and it was invisible from the UI.
-  //
-  // Absence is now the only representation of "no role": six different checks
-  // cannot disagree about a row that does not exist. Migration 073 clears the
-  // rows this already created.
-  //
-  // The app-defined roles go too (v2.41.0) — left behind, those grants come back
-  // the moment the person is re-added at any tier, in-app powers restored
-  // silently along with access.
-  if (app_role === 'none') {
-    db.transaction(() => {
-      db.prepare('DELETE FROM app_user_roles WHERE app_id = ? AND user_id = ?').run(app.id, user_id);
-      clearUserRoleGrants(app.id, user_id);
-    })();
-    const target = db.prepare('SELECT email FROM users WHERE id = ?').get(user_id);
-    await purgeRevokedTenants(db, user_id, target?.email, [app.id]);
-  } else {
-    db.transaction(() => {
-      db.prepare(`
-        INSERT INTO app_user_roles (app_id, user_id, app_role) VALUES (?, ?, ?)
-        ON CONFLICT(app_id, user_id) DO UPDATE SET app_role = excluded.app_role
-      `).run(app.id, user_id, app_role);
-    })();
-  }
-  afterOwnershipWrite(db, 'role-change', req.user.id);
-
+  await setAppRole(getDb(), req.user, app, user_id, app_role);
   res.json({ message: `Role '${app_role}' set for user ${user_id} on app ${app.slug}` });
 });
 

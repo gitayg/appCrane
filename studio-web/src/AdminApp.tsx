@@ -6,6 +6,7 @@ import { adminApi } from './adminApi'
 import { Layout } from './components/Layout'
 import { Login } from './components/Login'
 import { IdleSessionGuard } from './components/mfa/IdleSessionGuard'
+import { StepUpModal } from './components/StepUpModal'
 import { PlatformRequestBar } from './components/PlatformRequestBar'
 import { AppTabsProvider } from './components/AppTabsContext'
 import { PersistentAppTabs } from './components/PersistentAppTabs'
@@ -41,6 +42,8 @@ const Adopt = lazyPage(() => import('./pages/Adopt'), 'Adopt')
 const IntakeQueue = lazyPage(() => import('./pages/IntakeQueue'), 'IntakeQueue')
 const AccessReviews = lazyPage(() => import('./pages/AccessReviews'), 'AccessReviews')
 const OwnerTransfers = lazyPage(() => import('./pages/OwnerTransfers'), 'OwnerTransfers')
+const CapabilityApprovals = lazyPage(() => import('./pages/CapabilityApprovals'), 'CapabilityApprovals')
+const StepUp = lazyPage(() => import('./pages/StepUp'), 'StepUp')
 const AccessReviewCampaigns = lazyPage(() => import('./pages/AccessReviewCampaigns'), 'AccessReviewCampaigns')
 const AuditIntegrity = lazyPage(() => import('./pages/AuditIntegrity'), 'AuditIntegrity')
 
@@ -254,6 +257,7 @@ export function AdminApp() {
     <AuthContext.Provider value={auth}>
       <AppTabsProvider>
       <IdleSessionGuard />
+      <StepUpModal />
       <BrowserRouter>
         <Suspense fallback={null}>
         <Routes>
@@ -290,6 +294,7 @@ export function AdminApp() {
           <Route path="/intake" element={<Layout><IntakeQueue /></Layout>} />
           <Route path="/access-reviews" element={<Layout><AccessReviews /></Layout>} />
           <Route path="/owner-transfers" element={<Layout><OwnerTransfers /></Layout>} />
+          <Route path="/capability-approvals" element={<Layout><CapabilityApprovals /></Layout>} />
           <Route path="/access-reviews/campaigns" element={<Layout><AccessReviewCampaigns /></Layout>} />
           <Route path="/access-reviews/campaigns/:id" element={<Layout><AccessReviewCampaigns /></Layout>} />
           <Route path="/audit-integrity" element={<Layout><AuditIntegrity /></Layout>} />
@@ -314,6 +319,7 @@ export function AdminApp() {
           <Route path="/settings"    element={<SettingsRoute />} />
           <Route path="/docs"        element={<DocsRoute />} />
           <Route path="/app"         element={<Layout><AppManager /></Layout>} />
+          <Route path="/step-up"     element={<Layout><StepUp /></Layout>} />
           <Route path="*"            element={<Navigate to="/launch" replace />} />
         </Routes>
         </Suspense>

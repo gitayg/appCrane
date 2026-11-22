@@ -224,8 +224,12 @@ you have not pinned yet.
 Every deploy scans the release's dependency manifests against OSV, and a daily
 pass rescans the fleet — advisories get published after a deploy, so scanning
 only at deploy time goes stale on its own. `package-lock.json`, `go.sum`,
-`Cargo.lock`, `Gemfile.lock`, `poetry.lock` and `Pipfile.lock` are read, with
-the ecosystem tracked per package (OSV's answer depends on it).
+`Cargo.lock`, `Gemfile.lock`, `poetry.lock`, `Pipfile.lock` and `uv.lock` are
+read, with the ecosystem tracked per package (OSV's answer depends on it).
+`requirements.txt` is read for its exact `==` pins only; every other line names
+no installed version, so it is never guessed at and the release check warns
+about it instead. A project with only a `pyproject.toml` has nothing to scan,
+and the scan says so.
 
 Findings are **reported, never blocking**. A scan that fails a deploy turns a
 security signal into an outage, and the first time it does someone switches it
@@ -344,6 +348,68 @@ REST: `PUT /api/apps/:slug/env/:env` with `{ "vars": {...}, "store": "secrets_ma
   secrets: give that AppCrane its own `APPCRANE_SECRETS_APP_PREFIX`.
 - AWS asks for no more than one `PutSecretValue` per secret every 10 minutes, sustained.
 
+## App audit events (an app writes its own audit trail)
+
+A hosted app's server can record what happened inside the app (an invoice
+paid, a document shared, a role changed) in AppCrane's audit store. The events
+are kept apart from AppCrane's own audit log, labelled as written by the app,
+sealed into the tamper-evident audit chain, and kept for the platform's
+retention window (365 days by default).
+
+1. Register each action on the app first: app page > Audit events > Event
+   types (owner or app admin). An unregistered action is refused with 422
+   `UNREGISTERED_ACTION` unless the owner turns on accepting them, in which case
+   the event is flagged `unregistered`.
+2. From the app's **server** (never the browser), POST one event per call:
+
+```
+POST ${CRANE_INTERNAL_URL}/api/service/audit/events
+X-AppCrane-Service-Token: ${APPCRANE_SERVICE_TOKEN}
+Content-Type: application/json
+
+{
+  "action": "invoice.paid",
+  "occurred_at": "2026-11-21T10:00:00Z",
+  "targets": [{ "type": "invoice", "id": "inv_123", "name": "Invoice 123" }],
+  "context": { "location": "203.0.113.9", "user_agent": "Mozilla/5.0" },
+  "metadata": { "amount": 120, "currency": "EUR" },
+  "idempotency_key": "invoice-paid-inv_123",
+  "identity": { "x-appcrane-user-id": "...", "x-appcrane-identity-ts": "...", "x-appcrane-identity-sig-v2": "..." }
+}
+```
+
+- `CRANE_INTERNAL_URL` and `APPCRANE_SERVICE_TOKEN` are injected on every
+  deploy. The path is internal only: a request through the public domain is
+  refused, and a personal API key is not accepted.
+- The event always belongs to the app whose token sent it.
+- **Actor.** To name the signed-in user, forward the `X-AppCrane-*` headers the
+  request arrived with in `identity`. AppCrane checks the signature against the
+  app's own identity secret (at most five minutes old) and records that user.
+  Leave out both `actor` and `identity` and the actor is the app itself. An
+  `actor` of your own (for example `{ "type": "customer", "id": "c-9" }`) is
+  stored as reported and shown as unverified. The types `user` and `app` are
+  reserved.
+- **Limits.** Body 32 KB; metadata 4 KB, 3 levels deep, 50 keys per object; 20
+  targets; `occurred_at` at most 5 minutes ahead and 90 days back; 600 events a
+  minute per app (429 with `Retry-After`).
+- **Retries.** Send the same `idempotency_key` (or an `Idempotency-Key`
+  header): the same event gives 200 `deduped: true` and one row; reusing the
+  key for a different event is a 409 `IDEMPOTENCY_CONFLICT`.
+- The node-react and python-fastapi starters ship a helper:
+  `auditEvent(action, { req, targets, metadata })` in `server/audit.js`,
+  `audit_event(action, headers=request.headers, ...)` in `app/audit.py`.
+
+Reading: owners and app admins see the app's events (filters for action or a
+prefix ending in `.`, actor, target and time, plus CSV / JSON export) on the
+app page, or with `appcrane_get_audit(slug, source: "app")`. Platform admins
+see every app's events under Settings > Security.
+
+Streaming: the app owner can send the app's events to their own SIEM (HTTPS
+presets for generic webhook, Splunk HEC, Datadog, Elastic, Sumo Logic and
+Sentinel; syslog over TLS; S3 / R2 export). The destination must be a public
+address and TLS is always verified. Credentials are stored encrypted and shown
+masked. A platform admin can turn owner streams off for the whole platform.
+
 ## Keeping ENCRYPTION_KEY in systemd encrypted credentials
 
 For hosts without AWS. AppCrane must run as the systemd unit `appcrane` (systemd 250+).
@@ -363,6 +429,27 @@ Rollback: stop the unit, `sudo install` the .env backup back with its old mode a
 `auth_sso_only` is on unless a platform admin turns it off, and it takes effect only while an SSO provider (OIDC or SAML) is enabled. In force, the IdP is the only way to a dashboard session: password login, the MFA second step, setting or changing a password (by session or by personal API key), and admin password resets answer `403 SSO_REQUIRED`, each audited as `sso-required-refused`. API keys, MCP keys, OAuth access tokens and app sign-in keys are API credentials and keep working; none of them creates a session. Migration 170 sets the switch on wherever a provider is enabled. Sessions already issued stay valid until they expire.
 
 Break-glass (IdP down): on the AppCrane host, from the install directory, run `crane sso enforce off`. It writes the setting straight into the database (no network request, so it needs host access) and audits `sso-enforce-cli`. Run `crane sso enforce on` once the IdP is back; `crane sso enforce status` shows the stored switch and whether it is in force.
+
+## Capability approvals, step-up and scoped credentials
+
+- **Capabilities.** Some settings need a platform admin's approval first:
+  auth bypass paths, headless, public visibility, TCP ports, outbound e-mail,
+  an external secret store connection, a custom domain without AppCrane
+  sign-in, egress hosts and `connection:<name>`. A managed database and the LLM
+  gateway are self-service unless a platform admin switched approval on. A
+  write that needs one fails and names the capability. Ask with
+  `appcrane_request_capability` (slug, capability, scope, reason) and check it
+  with `appcrane_list_capability_requests`. No tool can approve: a person
+  decides on the Capability approvals page. Do not retry the write until the
+  request shows `approved`.
+- **Step-up.** An error starting `STEP_UP_REQUIRED` means the action (reveal a
+  production secret, delete an app, security settings, ...) needs a person who
+  signed in within the last few minutes. Your key cannot do that. Give the user
+  the URL in the message, ask them to confirm there, and retry within the
+  window it states. Do not look for another route to the same action.
+- **Scopes.** A key or OAuth connection may be limited to a blueprint (a set
+  of `mcp:*` scopes and, optionally, apps). A tool outside it is refused and
+  is not listed; ask the user to widen the blueprint rather than switching keys.
 
 ## Per-app access management
 
@@ -685,6 +772,8 @@ Settings → Backup than passed through an agent.
 | `appcrane_list_app_members` | List every user who has access to an app, with their per-app role (owner / admin / user / viewer / none) |
 | `appcrane_grant_app_access` | Grant a user access to an app at a specific per-app role |
 | `appcrane_revoke_app_access` | Remove a user's access from an app entirely |
+| `appcrane_request_capability` | Ask a platform admin to approve a capability for an app (owner or app admin), with a scope and a reason |
+| `appcrane_list_capability_requests` | An app's capability policy, grants and open requests; without slug, the queue you can see |
 | `appcrane_list_access_requests` | List pending access requests — enhancement_requests rows whose message starts with "Access request for app …" (the portal's Request-access button p... |
 | `appcrane_approve_access_request` | Approve a pending access request: grants the requester access to the app at `role` (default "user") and marks the enhancement_request as done |
 | `appcrane_deny_access_request` | Deny a pending access request: marks the enhancement_request as done WITHOUT granting access |

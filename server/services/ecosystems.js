@@ -19,18 +19,20 @@
 //     looks fussy is there because the un-fussy version produced a false clean
 //     against the live API.
 //
-// requirements.txt is DELIBERATELY ABSENT. Its specifiers are constraints, not
-// installed versions: `django>=4.2`, `requests~=2.31`, or a bare `boto3` name
-// pin nothing, and the file has no record of what pip actually resolved.
-// Picking the lower bound, the upper bound, or the latest release all produce a
-// confident answer about a version that may not be installed — a wrong CLEAN as
-// easily as a wrong finding. A pip app therefore has no readable manifest and
-// is recorded 'skipped', which says "never looked at" out loud. If it is ever
-// added it must stay 'skipped' with a reason, never a guess.
+// requirements.txt is read for its exact `==` pins ONLY (pythonManifests.js).
+// Its other specifiers are constraints, not installed versions: `django>=4.2`,
+// `requests~=2.31`, or a bare `boto3` name pin nothing, and the file has no
+// record of what pip actually resolved. Picking the lower bound, the upper
+// bound, or the latest release all produce a confident answer about a version
+// that may not be installed — a wrong CLEAN as easily as a wrong finding. So
+// those lines are never queried: they are reported as notes (a release-check
+// warning), and a file with no pin at all is recorded 'skipped' with that
+// reason, never a guess.
 
 import { readFileSync } from 'fs';
 import { basename } from 'path';
 import { assertPackage } from './scanShapes.js';
+import { parseRequirementsTxt } from './pythonManifests.js';
 
 /**
  * Grouped by language, most common first. Order is presentation only: the
@@ -54,6 +56,8 @@ export const MANIFESTS = [
   { file: 'Gemfile.lock',      ecosystem: 'RubyGems',   parse: parseGemfileLock },
   { file: 'poetry.lock',       ecosystem: 'PyPI',       parse: parsePoetryLock },
   { file: 'Pipfile.lock',      ecosystem: 'PyPI',       parse: parsePipfileLock },
+  { file: 'uv.lock',           ecosystem: 'PyPI',       parse: parseUvLock },
+  { file: 'requirements.txt',  ecosystem: 'PyPI',       parse: parseRequirementsTxt },
 ];
 
 /**
@@ -347,6 +351,29 @@ function parsePoetryLock(text, ecosystem) {
     const sourceType = block.keys.get('package.source.type');
     if (sourceType === 'directory' || sourceType === 'file') continue;
 
+    packages.push({ name, version, ecosystem });
+  }
+  return dedupe(packages);
+}
+
+// uv.lock: TOML [[package]] blocks like poetry.lock, with the source as an
+// inline table on one line: { registry = "..." }, { git = "..." },
+// { url = "..." }, or the project itself and its local packages as
+// { editable = "." }, { virtual = "." }, { path = ... }, { directory = ... }.
+const UV_LOCAL_SOURCES = new Set(['editable', 'virtual', 'path', 'directory']);
+
+function parseUvLock(text, ecosystem) {
+  if (!/^version\s*=\s*\d+\s*$/m.test(text)) throw new Error('no top-level "version = <n>" line, so this is not a uv.lock');
+  const blocks = tomlBlocks(text, '[[package]]', new Set(['name', 'version', 'source']));
+  const packages = [];
+  for (const block of blocks) {
+    const name = block.keys.get('name');
+    const version = block.keys.get('version');
+    const kind = /^\{\s*([A-Za-z-]+)\s*=/.exec(block.keys.get('source') || '')?.[1];
+    if (kind && UV_LOCAL_SOURCES.has(kind)) continue;
+    if (!name || !version) {
+      throw new Error(`[[package]] at line ${block.lineNo} has no ${name ? 'version' : 'name'}`);
+    }
     packages.push({ name, version, ecosystem });
   }
   return dedupe(packages);

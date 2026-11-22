@@ -132,6 +132,11 @@ function readSecrets(row) {
   try { return JSON.parse(decrypt(row.secrets_enc)); } catch { return {}; }
 }
 
+const DESTINATION_FIELDS = ['url', 'host', 'port', 'endpoint', 'region', 'dce_url', 'authority', 'site'];
+function destinationOf(config) {
+  return JSON.stringify(DESTINATION_FIELDS.map((k) => (config?.[k] == null ? null : String(config[k]))));
+}
+
 function mergeSecrets(allowed, current, incoming) {
   const out = {};
   for (const k of allowed) if (typeof current[k] === 'string' && current[k]) out[k] = current[k];
@@ -211,7 +216,10 @@ export function validateSink(body, current = null) {
   const skip = body.tls_skip_verify !== undefined ? body.tls_skip_verify === true : !!cur?.tls_skip_verify;
   if (type === 's3' && (skip || ca)) throw bad('the S3 export uses the system trust store; custom CA and skip-verify do not apply');
   const allowed = secretKeysFor(type, preset);
-  const secrets = mergeSecrets(allowed, cur && cur.preset === preset ? cur.secrets : {}, body.secrets);
+  // A stored credential goes only to the destination it was entered for: a
+  // changed host, URL or endpoint needs the credential sent again.
+  const keep = cur && cur.preset === preset && destinationOf(cur.config) === destinationOf(config);
+  const secrets = mergeSecrets(allowed, keep ? cur.secrets : {}, body.secrets);
   if (type === 'https' && preset === 'sumo') httpsUrl(secrets.url, 'secrets.url');
   if (type === 'https' && preset === 'splunk' && !secrets.token) throw bad('secrets.token is required for Splunk HEC');
   if (type === 'https' && preset === 'datadog' && !secrets.api_key) throw bad('secrets.api_key is required for Datadog');

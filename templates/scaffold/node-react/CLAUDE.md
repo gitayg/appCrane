@@ -53,6 +53,9 @@ of them when you change the code.
   `ANTHROPIC_BASE_URL`/`ANTHROPIC_API_KEY` and/or `OPENAI_BASE_URL`/`OPENAI_API_KEY`
   pointing at AppCrane's gateway. Use the official SDKs with those variables;
   never put a provider key in the app.
+- Audit events: `server/audit.js` `auditEvent(action, { req, targets, metadata })`
+  writes to AppCrane's audit store with the service token. Register the action
+  on the app first; pass `req` so the signed-in user is the actor.
 
 ## Frontend
 - Vite `base` stays `process.env.APP_BASE_PATH || './'`. Never `'/'`.
@@ -68,3 +71,10 @@ of them when you change the code.
 - Push with `appcrane_push_to_managed_app`, then
   `appcrane_deploy(slug="__APP_SLUG__", stage="sandbox")`. Deploy to production
   only when a person asks.
+
+## AppCrane widgets
+- For a user menu, sign-out, session list, member management, access requests
+  or app sign-in keys, use AppCrane's widgets instead of building them:
+  `<script src="/__appcrane/widgets.js" defer>` and the `<appcrane-*>` elements
+  listed in README.md. Do not proxy, wrap or re-implement `/__appcrane/*`, and
+  never route it to the app: AppCrane answers those paths on the app's host.

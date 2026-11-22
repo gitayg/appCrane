@@ -6,6 +6,7 @@ import { SetUserPasswordModal } from '../components/SetUserPasswordModal'
 import { UserApiKeyCell } from '../components/UserApiKeyCell'
 import { ResetMfaButton } from '../components/mfa/ResetMfaButton'
 import { ForgetDevicesButton } from '../components/mfa/ForgetDevicesButton'
+import { UserSessionsButton } from '../components/sessions/UserSessionsButton'
 import { OrphanedAppsCard } from '../components/ownership/OrphanedAppsCard'
 import { LeastUsedAppsCard } from '../components/LeastUsedAppsCard'
 
@@ -455,6 +456,7 @@ export function Users() {
                   <UserApiKeyCell user={u} onRotated={loadUsers} />
                   <ResetMfaButton userId={u.id} userName={u.name} />
                   <ForgetDevicesButton userId={u.id} userName={u.name} />
+                  <UserSessionsButton userId={u.id} userName={u.name} />
                 </td>
                 <td>
                   <div style={{ display: 'flex', gap: 4, justifyContent: 'flex-end' }}>

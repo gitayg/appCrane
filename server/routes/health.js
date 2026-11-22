@@ -14,14 +14,17 @@ router.use(requireAuth);
 /**
  * GET /api/apps/:slug/health/:env - Get health config and state
  */
-router.get('/:slug/health/:env', requireAppAccess, (req, res) => {
+router.get('/:slug/health/:env', requireAppAccess, async (req, res) => {
   const { env } = req.params;
   const db = getDb();
 
   const config = db.prepare('SELECT * FROM health_configs WHERE app_id = ? AND env = ?').get(req.app.id, env);
   const state = db.prepare('SELECT * FROM health_state WHERE app_id = ? AND env = ?').get(req.app.id, env);
+  const runtime = ['production', 'sandbox'].includes(env)
+    ? await (await import('../services/containerRuntime.js')).runtimeStatus(req.app, `appcrane-${req.app.slug}-${env}`, db)
+    : null;
 
-  res.json({ env, config, state });
+  res.json({ env, config, state, runtime });
 });
 
 /**

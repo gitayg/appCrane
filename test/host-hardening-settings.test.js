@@ -73,6 +73,8 @@ const HARDENED = {
     'apt-config dump APT::Periodic': { code: 0, stdout: PERIODIC_ON },
     [`df -P ${REPO}/data`]: { code: 0, stdout: DF('/') },
     [`sudo -n -l ${H.INSTALLED_SCRIPT}`]: { code: 0, stdout: `${H.INSTALLED_SCRIPT}\n` },
+    '/usr/local/bin/runsc --version': { code: 0, stdout: `runsc version release-${H.GVISOR_RELEASE}.0\nspec: 1.2.1\n` },
+    'docker info --format {{json .Runtimes}}': { code: 0, stdout: '{"io.containerd.runc.v2":{"path":"runc"},"runc":{"path":"runc"},"runsc":{"path":"/usr/local/bin/runsc"}}\n' },
   },
 };
 
@@ -114,9 +116,27 @@ const SUDO_FILES = { [H.INSTALLED_SCRIPT]: installedCopy };
 
 // ---- status ----
 
+test('gvisor-runtime: not installed, installed but not registered, other release, docker unreadable', async () => {
+  const s = async (exec) => item(await H.checkItems(host({ exec }).deps), 'gvisor-runtime');
+  const none = await s({ '/usr/local/bin/runsc --version': null });
+  assert.equal(none.state, 'missing');
+  assert.match(none.detail, /gVisor not installed/);
+  const unreg = await s({ 'docker info --format {{json .Runtimes}}': { code: 0, stdout: '{"runc":{"path":"runc"}}' } });
+  assert.equal(unreg.state, 'missing');
+  assert.match(unreg.detail, /installed but dockerd has not registered it \(runtimes: runc\)/);
+  const old = await s({ '/usr/local/bin/runsc --version': { code: 0, stdout: 'runsc version release-20250101.0\n' } });
+  assert.equal(old.state, 'missing');
+  assert.match(old.detail, new RegExp(`release-20250101 registered; AppCrane installs release-${H.GVISOR_RELEASE}`));
+  assert.equal((await s({ 'docker info --format {{json .Runtimes}}': { code: 1, stderr: 'Cannot connect to the Docker daemon' } })).state, 'unknown');
+});
+
+test('the release the status checks for is the release the script installs', () => {
+  assert.match(REPO_SRC, new RegExp(`^GVISOR_RELEASE=${H.GVISOR_RELEASE}$`, 'm'));
+});
+
 test('a fully hardened host: every item applied, in the contract order', async () => {
   const items = await H.checkItems(host().deps);
-  assert.deepEqual(items.map((i) => i.id), ['journal', 'syslog-rotation', 'logrotate-hourly', 'docker-log-defaults', 'apt-news', 'unattended-upgrades', 'caddy-log-dir', 'disk-reserve']);
+  assert.deepEqual(items.map((i) => i.id), ['journal', 'syslog-rotation', 'logrotate-hourly', 'docker-log-defaults', 'apt-news', 'unattended-upgrades', 'caddy-log-dir', 'disk-reserve', 'gvisor-runtime']);
   for (const i of items) assert.equal(i.state, 'applied', `${i.id}: ${i.detail}`);
   assert.match(item(items, 'journal').detail, /SystemMaxUse=500M in \/etc\/systemd\/journald\.conf\.d\/50-appcrane\.conf; journal uses 312\.0M/);
   assert.match(item(items, 'disk-reserve').detail, /sudo rm \/appcrane-disk-reserve/);
@@ -345,7 +365,7 @@ test('GET: platform admin only, contract shape, mfa_required follows enrollment'
   assert.equal(r.status, 200);
   assert.deepEqual(Object.keys(r.body).sort(), ['items', 'last_run', 'mfa_required', 'run', 'running', 'supported']);
   assert.equal(r.body.supported, true);
-  assert.equal(r.body.items.length, 8);
+  assert.equal(r.body.items.length, 9);
   assert.deepEqual(r.body.run, { mode: 'root', command: `bash ${REPO}/scripts/host-hardening.sh` });
   assert.equal(r.body.mfa_required, false);
   assert.equal(r.body.running, false);

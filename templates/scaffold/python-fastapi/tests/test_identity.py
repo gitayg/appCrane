@@ -3,7 +3,7 @@ import time
 
 import pytest
 
-from app.identity import IdentityError, at_least, sign_identity_v2, verify_headers
+from app.identity import IdentityError, at_least, authenticated_within, sign_identity_v2, sign_identity_v3, verify_headers
 
 
 def code_of(headers, **kw):
@@ -90,3 +90,29 @@ def test_role_ladder():
     assert at_least("admin", "admin")
     assert not at_least("viewer", "user")
     assert not at_least("bogus", "viewer")
+
+
+def test_v3_matches_appcrane_signer_and_carries_auth_time():
+    # Known answer from appcrane-tenant signIdentityV3.
+    headers = {
+        "x-appcrane-user": "kat@example.test",
+        "x-appcrane-user-id": "7",
+        "x-appcrane-user-email": "kat@example.test",
+        "x-appcrane-user-name": "K%C3%A4t%20Tester",
+        "x-appcrane-user-role": "user",
+        "x-appcrane-app-role": "admin",
+        "x-appcrane-is-admin": "1",
+        "x-appcrane-app-roles": "approver,auditor",
+        "x-appcrane-auth-via": "app-key",
+        "x-appcrane-auth-time": "1699999000",
+        "x-appcrane-auth-mfa": "totp",
+    }
+    assert sign_identity_v3("known-answer-only", 1700000000, headers) == "hRvPjJVpUFxZGYGrcXcV0uQWKXSHGBfklZsx_Bm6i1E"
+    headers.update({"x-appcrane-identity-ts": "1700000000", "x-appcrane-identity-sig-v3": "hRvPjJVpUFxZGYGrcXcV0uQWKXSHGBfklZsx_Bm6i1E"})
+    who = verify_headers(headers, secret="known-answer-only", now=1700000010)
+    assert who.auth_time == 1699999000
+    assert who.mfa == "totp"
+    assert authenticated_within(who, 600, now=1700000010) is False
+    assert authenticated_within(who, 1200, now=1700000010) is True
+    headers["x-appcrane-auth-time"] = "1700000005"
+    assert code_of(headers, secret="known-answer-only", now=1700000010) == "IDENTITY_FORGED"

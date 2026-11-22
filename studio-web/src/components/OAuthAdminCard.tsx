@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { adminApi } from '../adminApi'
+import { ClientBlueprintSelect } from './oauth/ClientBlueprintSelect'
+import type { Blueprint } from './oauth/blueprintTypes'
 
 // Settings > Security (platform admin): every user's MCP OAuth connections with
 // Revoke, who may register an MCP client, and approval of registered clients.
@@ -24,6 +26,8 @@ interface Client {
   created_at: string
   approved_at: string | null
   live_grants: number
+  is_cimd?: number
+  blueprint_id?: number | null
 }
 
 interface Policy { mode: 'open' | 'allowlist' | 'approval'; redirect_hosts: string[]; default_redirect_hosts: string[] }
@@ -44,10 +48,12 @@ export function OAuthAdminCard() {
   const [hosts, setHosts] = useState('')
   const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null)
   const [busy, setBusy] = useState(false)
+  const [blueprints, setBlueprints] = useState<Blueprint[]>([])
 
   const load = useCallback(() => {
     adminApi.get<{ grants: Grant[] }>('/api/oauth/admin/grants').then(r => setGrants(r.grants)).catch(e => setMsg({ text: (e as Error).message, ok: false }))
     adminApi.get<{ clients: Client[] }>('/api/oauth/admin/clients').then(r => setClients(r.clients)).catch(() => {})
+    adminApi.get<{ blueprints: Blueprint[] }>('/api/oauth/admin/blueprints').then(r => setBlueprints(r.blueprints)).catch(() => {})
     adminApi.get<Policy>('/api/oauth/admin/policy').then(p => { setPolicy(p); setHosts(p.redirect_hosts.join('\n')) }).catch(() => {})
   }, [])
   useEffect(load, [load])
@@ -69,6 +75,11 @@ export function OAuthAdminCard() {
   const approve = (c: Client, approved: boolean) => run(
     () => adminApi.post(`/api/oauth/admin/clients/${encodeURIComponent(c.client_id)}/approval`, { approved }),
     approved ? 'Client approved' : 'Approval withdrawn; its connections were ended',
+  )
+
+  const pin = (c: Client, blueprint_id: number | null) => run(
+    () => adminApi.put(`/api/oauth/admin/clients/${encodeURIComponent(c.client_id)}/blueprint`, { blueprint_id }),
+    blueprint_id == null ? 'Blueprint unpinned; new connections use what the person picks' : 'Blueprint pinned; new connections of this client get it',
   )
 
   return (
@@ -132,9 +143,10 @@ export function OAuthAdminCard() {
             <tbody>
               {clients.map(c => (
                 <tr key={c.client_id} style={{ borderTop: '1px solid var(--border)' }}>
-                  <td style={cell}>{c.client_name}</td>
+                  <td style={cell}>{c.client_name}{c.is_cimd ? <div style={{ ...mono, color: 'var(--dim)', wordBreak: 'break-all' }}>{c.client_id}</div> : null}</td>
                   <td style={{ ...cell, ...mono, wordBreak: 'break-all' }}>{c.redirect_uris.join(' ')}</td>
                   <td style={cell}>{c.live_grants} live</td>
+                  <td style={cell}><ClientBlueprintSelect value={c.blueprint_id ?? null} blueprints={blueprints} disabled={busy} onChange={id => pin(c, id)} /></td>
                   <td style={{ ...cell, textAlign: 'right' }}>
                     {c.approved_at
                       ? <button type="button" className="btn btn-xs" onClick={() => approve(c, false)} disabled={busy}>Withdraw approval</button>

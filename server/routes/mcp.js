@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { listTools, callTool, getToolCatalog, isMcpLockedOut } from '../services/mcpTools.js';
+import { ctxFromReq } from '../services/stepUp.js';
 import { noteMcpStart, noteMcpEnd } from '../services/mcpActivity.js';
 import { getDb } from '../db.js';
 import {
@@ -14,6 +15,7 @@ import { AppError } from '../utils/errors.js';
 import { resourceMetadataUrlOf, SCOPE_FULL } from '../services/oauthPolicy.js';
 import { viewAsRefusalMessage } from '../services/viewAs.js';
 import { isMcpOauthOnly, oauthOnlyExemptIds } from '../services/apiKeyExpiry.js';
+import { SCOPE, scopesOf } from '../services/mcpScopes.js';
 
 const router = Router();
 
@@ -45,6 +47,15 @@ function apiKeyRefusedByOauthOnly(req) {
   if (!isMcpOauthOnly(db)) return false;
   const uid = (req.real_user || req.user)?.id;
   return !oauthOnlyExemptIds(db).includes(uid);
+}
+
+// MCP authorization, Scope Challenge Handling: a call the credential's scopes
+// do not cover is HTTP 403 with error="insufficient_scope" and the scope that
+// would cover it, so an OAuth client can step up. The body is still JSON-RPC.
+function insufficientScope(req, res, id, message, scope) {
+  res.status(403);
+  res.set('WWW-Authenticate', `Bearer error="insufficient_scope", scope="${scope}", resource_metadata="${resourceMetadataUrlOf(req)}", error_description="The credential lacks the scope this call needs"`);
+  return res.json({ jsonrpc: '2.0', id, error: { code: -32000, message } });
 }
 
 const READ_ONLY_TOOLS = new Set(getToolCatalog().filter(t => t.readOnly).map(t => t.name));
@@ -222,7 +233,8 @@ router.post('/', requireMcpAuth, async (req, res) => {
         // Append github_* tools if the caller provided X-Github-Token. Lazy-
         // spawns a container; idle-reaped after settings.github_mcp_idle_timeout.
         let githubTools = [];
-        if (req.github_token && !req.user_mcp_key?.coder) {
+        const scoped = scopesOf(req.user, req.user_mcp_key);
+        if (req.github_token && !req.user_mcp_key?.coder && (!scoped || scoped.has(SCOPE.GITHUB))) {
           try {
             githubTools = await ghListTools(req.user.id, req.github_token);
           } catch (e) {
@@ -264,7 +276,7 @@ router.post('/', requireMcpAuth, async (req, res) => {
           }
           if (isAppCraneTool) {
             const upstreamName = stripPrefix(params.name, 'mcp__appcrane__');
-            result = await callTool(req.user, upstreamName, params.arguments, req.user_mcp_key);
+            result = await callTool(req.user, upstreamName, params.arguments, req.user_mcp_key, ctxFromReq(req));
           } else {
             // The coder's key is AppCrane-only: no GitHub passthrough, whatever headers it sends.
             if (req.user_mcp_key?.coder) {
@@ -286,6 +298,10 @@ router.post('/', requireMcpAuth, async (req, res) => {
             // which this branch never enters — so a key the operator had locked
             // out of MCP could still drive the GitHub passthrough and make
             // AppCrane `docker run` a github-mcp-server container on the host.
+            const scoped = scopesOf(req.user, req.user_mcp_key);
+            if (scoped && !scoped.has(SCOPE.GITHUB)) {
+              return insufficientScope(req, res, id, `Forbidden: ${params.name} is a GitHub tool and needs scope ${SCOPE.GITHUB}, which this credential was not granted`, SCOPE.GITHUB);
+            }
             if (isMcpLockedOut(req.user)) {
               return res.json({
                 jsonrpc: '2.0', id,
@@ -308,6 +324,7 @@ router.post('/', requireMcpAuth, async (req, res) => {
     res.json({ jsonrpc: '2.0', id, result });
   } catch (err) {
     log.warn(`MCP ${method} error: ${err.message}`);
+    if (err.insufficientScope) return insufficientScope(req, res, id, err.message, err.requiredScope);
     res.json({ jsonrpc: '2.0', id, error: { code: -32000, message: err.message } });
   } finally {
     noteMcpEnd();

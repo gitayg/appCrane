@@ -20,6 +20,8 @@ import { regularFileInside } from '../utils/paths.js';
 import { SUPPORTED_ENGINES, provision as defaultProvision, credentialsFor as defaultCredentialsFor } from './managedDb.js';
 import { APP_LOGIN_ENGINES, DEFAULT_APP_URL_ENV } from './managedDbAppLogin.js';
 import { SUPPORTED_EXTENSIONS } from './managedDbStats.js';
+import { getDb } from '../db.js';
+import { checkCapability, neededEngine } from './capabilities/enforce.js';
 
 const ENV_NAME_RE = /^[A-Z_][A-Z0-9_]*$/;
 
@@ -215,6 +217,16 @@ export async function ensureManifestDatabase(app, needs, {
   let existing = null;
   try { existing = credentialsFor(dbScope, needs.engine); } catch (_) { existing = null; }
   if (existing) return { provisioned: false };
+
+  // Capability approvals: a deploy creating an engine the app does not have yet
+  // needs an approved managed_database grant. Refused with the reason in the
+  // deploy log rather than skipped: an app started without the database it
+  // declared fails later and less clearly. Nobody is recorded as approving here.
+  try {
+    checkCapability(getDb(), { app, user: null, capability: 'managed_database', needed: neededEngine(getDb(), app, needs.engine) });
+  } catch (err) {
+    throw new Error(`deployhub.json declares a ${needs.engine} database and this app has none yet. ${err.message}`);
+  }
 
   try {
     await provision(dbScope, needs.engine);

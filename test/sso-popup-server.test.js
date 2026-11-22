@@ -300,6 +300,52 @@ test('saml popup callback serves the completion page and sets the session', asyn
   assert.equal(me.status, 200);
 });
 
+// Sign-in risk (services/signinRisk/popupDeviceCheck.js): the cross-site SAML
+// POST carries no Lax device cookie, so the device check runs on the
+// completion page's same-origin complete.js request, bound to the session
+// cookie the callback set.
+test('saml popup: the device check runs on complete.js, once, for the session the callback issued', async () => {
+  const q = (sql, ...a) => { const db = new Database(join(dataDir, 'deployhub.db'), { readonly: true }); const r = db.prepare(sql).get(...a); db.close(); return r; };
+  const alice = q("SELECT id FROM users WHERE email = 'alice@example.com'").id;
+  const devices = () => q('SELECT COUNT(*) n FROM signin_devices WHERE user_id = ?', alice).n;
+  const mails = () => q("SELECT COUNT(*) n FROM email_queue WHERE to_email = 'alice@example.com' AND subject LIKE '%New sign-in%'").n;
+  const deviceCookie = (res) => res.headers.getSetCookie().find((c) => /^cc_device=/.test(c));
+
+  const relay = await samlStart({ redirect: '/x', mode: 'popup' });
+  const cb = await samlCallback(relay);
+  const { token } = await assertPopupComplete(cb, 'saml popup');
+  assert.equal(deviceCookie(cb), undefined, 'the cross-site callback does not decide the device');
+  const d0 = devices();
+  const m0 = mails();
+  const session = `cc_token=${encodeURIComponent(token)}`;
+
+  const none = await fetch(`${base}/api/auth/popup/complete.js`);
+  assert.equal(deviceCookie(none), undefined, 'no session cookie: nothing to check');
+  const js = await fetch(`${base}/api/auth/popup/complete.js`, { headers: { Cookie: session } });
+  assert.equal(js.status, 200);
+  assert.match(await js.text(), /BroadcastChannel/);
+  const set = deviceCookie(js);
+  assert.ok(set, 'a new browser gets its device cookie on complete.js');
+  assert.match(set, /HttpOnly/i);
+  assert.equal(devices(), d0 + 1);
+  assert.ok(d0 > 0, 'earlier sign-ins in this file recorded a baseline device');
+  assert.equal(mails(), m0 + 1, 'new device mailed');
+
+  const again = await fetch(`${base}/api/auth/popup/complete.js`, { headers: { Cookie: session } });
+  assert.equal(deviceCookie(again), undefined, 'single use');
+  assert.equal(devices(), d0 + 1);
+
+  const relay2 = await samlStart({ redirect: '/x', mode: 'popup' });
+  const cb2 = await samlCallback(relay2);
+  const { token: token2 } = await assertPopupComplete(cb2, 'saml popup 2');
+  const m1 = mails();
+  const known = await fetch(`${base}/api/auth/popup/complete.js`, { headers: { Cookie: `cc_token=${encodeURIComponent(token2)}; ${set.split(';')[0]}` } });
+  assert.equal(known.status, 200);
+  assert.equal(deviceCookie(known), undefined);
+  assert.equal(devices(), d0 + 1, 'a known browser adds no device');
+  assert.equal(mails(), m1, 'and no e-mail');
+});
+
 test('saml normal callback still forwards through /login', async () => {
   await samlStart({ redirect: '/product-roadmap-v2' });
   const r = await samlCallback('/product-roadmap-v2');

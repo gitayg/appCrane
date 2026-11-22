@@ -109,6 +109,10 @@ export const POPUP_FAILURE_REASONS = Object.freeze({
   expired: 'The sign-in took too long.',
   unavailable: 'The identity provider could not be reached.',
   failed: 'Sign-in could not be completed.',
+  step_up_wrong_account: 'You confirmed with a different account than the one signed in. Use your own account.',
+  step_up_not_fresh: 'The identity provider did not ask you to sign in again, so this could not confirm it is you. Try again.',
+  step_up_expired: 'The confirmation took too long. Start again.',
+  step_up_wrong_browser: 'Confirm it in the same browser where you are signed in to AppCrane. Start again from there.',
 });
 
 /** A POPUP_FAILURE_REASONS code for an IdP `error` parameter (RFC 6749 4.1.2.1). */

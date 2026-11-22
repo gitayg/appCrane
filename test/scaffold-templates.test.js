@@ -169,7 +169,7 @@ test('the Node templates\' identity module accepts appcrane-tenant\'s signature 
   assert.equal(verifyRequest(req, { secret: randomBytes(32).toString('base64url') }).code, 'IDENTITY_FORGED');
 });
 
-test('every template\'s known-answer vector is what appcrane-tenant signs', () => {
+test('every template\'s known-answer vector is what appcrane-tenant signs', async () => {
   const H = {
     'X-AppCrane-User': 'kat@example.test', 'X-AppCrane-User-Id': '7', 'X-AppCrane-User-Email': 'kat@example.test',
     'X-AppCrane-User-Name': 'K%C3%A4t%20Tester', 'X-AppCrane-User-Role': 'user', 'X-AppCrane-App-Role': 'admin',
@@ -180,6 +180,11 @@ test('every template\'s known-answer vector is what appcrane-tenant signs', () =
   for (const f of ['node-react/test/identity.test.js', 'static-site/test/identity.test.js', 'python-fastapi/tests/test_identity.py']) {
     const text = readFileSync(join(REPO, 'templates/scaffold', f), 'utf8');
     assert.ok(text.includes(full) && text.includes(short), `${f} does not pin AppCrane's real signatures`);
+  }
+  const { signIdentityV3: tenantSignV3 } = await import('../packages/tenant/index.js');
+  const v3 = tenantSignV3('known-answer-only', 1700000000, (n) => ({ ...H, 'X-AppCrane-Auth-Time': '1699999000', 'X-AppCrane-Auth-Mfa': 'totp' })[n]);
+  for (const f of ['node-react/test/identity.test.js', 'static-site/test/identity.test.js', 'python-fastapi/tests/test_identity.py']) {
+    assert.ok(readFileSync(join(REPO, 'templates/scaffold', f), 'utf8').includes(v3), `${f} does not pin AppCrane's real v3 signature`);
   }
 });
 

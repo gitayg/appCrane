@@ -1,0 +1,1 @@
+var e=e=>e?e.name||e.email||`#${e.id}`:`AppCrane`,t=e=>e&&Object.keys(e).length?JSON.stringify(e):`whole capability`;export{t as n,e as t};

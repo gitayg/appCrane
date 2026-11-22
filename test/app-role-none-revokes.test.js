@@ -115,8 +115,11 @@ test("the route deletes on 'none' rather than writing a row", () => {
   // Shape guard. The behavioural tests above drive a local mirror of the route,
   // so this pins the route itself: reinstate the unconditional membership insert
   // and this fails, naming the line that granted the access.
-  const users = readFileSync('server/routes/users.js', 'utf8');
-  const at = users.indexOf("if (app_role === 'none')");
+  // The route's body lives in services/appRoleChange.js (shared with the
+  // members widget); pin that and that the route still calls it.
+  assert.match(readFileSync('server/routes/users.js', 'utf8'), /await setAppRole\(getDb\(\), req\.user, app, user_id, app_role\)/);
+  const users = readFileSync('server/services/appRoleChange.js', 'utf8');
+  const at = users.indexOf("if (appRole === 'none')");
   assert.ok(at > 0, "the 'none' branch is gone from PUT /:slug/roles");
   // Since v2.94.0 app_users is a view over app_user_roles, so the role row IS
   // the membership: deleting it is what removes access.

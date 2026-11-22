@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { TEST_SECRET, signedHeaders } from './helpers.js';
-import { verifyRequest, atLeast, signIdentityV2 } from '../server/identity.js';
+import { verifyRequest, atLeast, signIdentityV2, signIdentityV3, authenticatedWithin } from '../server/identity.js';
 
 const verify = (headers, opts) => verifyRequest({ headers }, opts);
 
@@ -91,4 +91,36 @@ test('role ladder: an owner passes an admin check, a viewer does not pass user',
   assert.equal(atLeast('admin', 'admin'), true);
   assert.equal(atLeast('viewer', 'user'), false);
   assert.equal(atLeast('bogus', 'viewer'), false);
+});
+
+
+// Step-up: v3 also signs when and how the person authenticated. Known answer
+// from appcrane-tenant signIdentityV3.
+test('v3 matches AppCrane\'s signer, carries authTime, and a tampered auth time is refused', () => {
+  const headers = {
+    'x-appcrane-user': 'kat@example.test',
+    'x-appcrane-user-id': '7',
+    'x-appcrane-user-email': 'kat@example.test',
+    'x-appcrane-user-name': 'K%C3%A4t%20Tester',
+    'x-appcrane-user-role': 'user',
+    'x-appcrane-app-role': 'admin',
+    'x-appcrane-is-admin': '1',
+    'x-appcrane-app-roles': 'approver,auditor',
+    'x-appcrane-auth-via': 'app-key',
+    'x-appcrane-auth-time': '1699999000',
+    'x-appcrane-auth-mfa': 'totp',
+  };
+  assert.equal(signIdentityV3('known-answer-only', 1700000000, headers), 'hRvPjJVpUFxZGYGrcXcV0uQWKXSHGBfklZsx_Bm6i1E');
+  const signed = { ...headers, 'x-appcrane-identity-ts': '1700000000', 'x-appcrane-identity-sig-v3': 'hRvPjJVpUFxZGYGrcXcV0uQWKXSHGBfklZsx_Bm6i1E' };
+  const opts = { secret: 'known-answer-only', now: 1700000010 * 1000 };
+  const r = verify(signed, opts);
+  assert.equal(r.ok, true, r.message);
+  assert.equal(r.identity.authTime, 1699999000);
+  assert.equal(r.identity.mfa, 'totp');
+  assert.equal(authenticatedWithin(r.identity, 600, 1700000010 * 1000), false);
+  assert.equal(authenticatedWithin(r.identity, 1200, 1700000010 * 1000), true);
+  assert.equal(verify({ ...signed, 'x-appcrane-auth-time': '1700000005' }, opts).code, 'IDENTITY_FORGED');
+  const v2only = verify(signedHeaders());
+  assert.equal(v2only.ok, true, v2only.message);
+  assert.equal(v2only.identity.authTime, null);
 });
