@@ -3,6 +3,8 @@ import type { EnvStore, MaskedEnvVar } from './envVarsApi'
 import { StoreInSecretsManager } from './StoreInSecretsManager'
 import { SecretValue } from '../secret/SecretValue'
 import { PasswordInput } from '../secret/PasswordInput'
+import { ExternalSecretRefBadge } from './ExternalSecretRefBadge'
+import { isExternalRefSource } from './externalSecretRef'
 
 interface Props {
   v: MaskedEnvVar
@@ -54,6 +56,8 @@ export function EnvVarRow({ v, canReveal, revealRefusal, busy, offerSecretsManag
           </>
         ) : v.error ? (
           <span style={{ color: 'var(--red)' }}>cannot decrypt</span>
+        ) : isExternalRefSource(v.source) ? (
+          <ExternalSecretRefBadge source={v.source} reference={v.value} />
         ) : inSecretsManager ? (
           <>
             <span

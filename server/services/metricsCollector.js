@@ -2,6 +2,7 @@ import { getDb } from '../db.js';
 import { getPortsForSlot } from './portAllocator.js';
 import { getProcessMetrics } from './docker.js';
 import log from '../utils/logger.js';
+import { envIsSleepingById } from './envSleepState.js';
 
 /**
  * Collect metrics for all apps from Docker.
@@ -35,7 +36,7 @@ export async function collectAllMetrics() {
       production: {
         ports: { fe: ports.prod_fe, be: ports.prod_be },
         process: prodProc,
-        health: healthProd ? {
+        health: envIsSleepingById(app.id, 'production', db) ? { status: 'sleeping' } : healthProd ? {
           status: healthProd.is_down ? 'down' : (healthProd.last_status === 200 ? 'healthy' : 'unknown'),
           response_ms: healthProd.last_response_ms,
         } : { status: 'unknown' },
@@ -44,7 +45,7 @@ export async function collectAllMetrics() {
       sandbox: {
         ports: { fe: ports.sand_fe, be: ports.sand_be },
         process: sandProc,
-        health: healthSand ? {
+        health: envIsSleepingById(app.id, 'sandbox', db) ? { status: 'sleeping' } : healthSand ? {
           status: healthSand.is_down ? 'down' : (healthSand.last_status === 200 ? 'healthy' : 'unknown'),
           response_ms: healthSand.last_response_ms,
         } : { status: 'unknown' },

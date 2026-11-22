@@ -11,6 +11,7 @@ import { setSessionCookie, clearSessionCookie, readSessionCookie, readCookie } f
 import { APP_SESSION_COOKIE, HANDOFF_STATE_COOKIE, HANDOFF_STATE_MAX_AGE_SECONDS } from '../services/appOrigin.js';
 import { refuseUnlessSsoOptional } from '../services/authPolicy.js';
 import { roleKeysForUser } from '../services/appDefinedRoles.js';
+import { noticeForIdentity } from '../services/aiAct/transparency.js';
 import { discoverablePortalRow } from '../services/discoverableApps.js';
 import log from '../utils/logger.js';
 import { isSafeRedirect } from '../utils/safeRedirect.js';
@@ -20,6 +21,7 @@ import { revokeAllGrantsForUser } from '../services/oauthStore.js';
 import { passwordLoginMfaStep } from '../services/mfa.js';
 import { touchSession } from '../services/sessionPolicy.js';
 import { assertUserKeyIngress } from '../utils/ingress.js';
+import { noteRequest } from '../services/envActivity.js';
 import { auditTrustedSkip, clearTrustedDeviceCookie, hasTrustedDeviceCookie, revokeAllDevices, trustedDeviceFor } from '../services/trustedDevices.js';
 
 const ICON_DIR = resolve(process.env.DATA_DIR || './data', 'apps');
@@ -596,6 +598,14 @@ router.get('/verify', (req, res) => {
     db.prepare('INSERT OR IGNORE INTO app_visits (user_id, app_id, day) VALUES (?, ?, ?)').run(session.user_id, visitAppId, today);
   }
 
+  // Request activity per environment (services/envActivity.js): only a Caddy
+  // forward_auth call carries X-Forwarded-Uri, so a direct API call to verify
+  // is not counted as use of the app.
+  if (appIdForRoles && appSlug && forwardedUri !== undefined) {
+    const env = isolated ? isolatedEnv : (req.query.prefix === `/${appSlug}-sandbox` ? 'sandbox' : 'production');
+    noteRequest(appIdForRoles, env, session.user_id ?? null);
+  }
+
   // v2.7.19: emit X-AppCrane-* response headers so Caddy's per-app
   // forward_auth blocks can copy_headers them onto the upstream request,
   // and deployed apps read identity directly from the request — no callback
@@ -726,6 +736,7 @@ router.get('/verify', (req, res) => {
       year_of_birth: session.year_of_birth,
     },
     ...(appRole && { role: appRole, app: appSlug || appName }),
+    ...(appIdForRoles && { ai_notice: noticeForIdentity(db, appIdForRoles) }),
     expires_at: session.expires_at,
   });
 });

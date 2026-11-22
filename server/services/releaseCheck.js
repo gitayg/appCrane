@@ -9,6 +9,15 @@
 //                   it when the target advisory is gone and every fixable
 //                   finding left is one production's own scan already has
 //   secrets         no credential-shaped string in the candidate tree
+//   served_secrets  no credential in what the release serves to browsers: the
+//                   live sandbox crawled over its loopback port when it is the
+//                   candidate, else built output committed to the tree
+//   supabase_rls    no table of a referenced Supabase project returns rows to
+//                   its anon key (probe opt-in: policy probe_supabase_rls)
+//   unauth_endpoints no API route of the live sandbox returns records, or
+//                   takes a write (opt-in: policy probe_unauth_writes), to a
+//                   caller with no identity on its loopback port; production
+//                   is never probed
 //   access_rules    path rules present, when the classification requires them
 //   sso_gate        no headless mode, bypass paths, custom domain or public
 //                   visibility, unless the classification allows it
@@ -29,26 +38,39 @@ import { roleForUserOnApp } from './permissions.js';
 import { logAudit } from '../middleware/audit.js';
 import { recordEvent } from './eventStore.js';
 import { intakeGate } from './appIntake.js';
+import { releaseCheckLevel } from './aiAct/classification.js';
 import { getClassification, getClassificationPolicy } from './dataClassification.js';
 import { effectiveRules, parseAccessRules } from './accessRules.js';
 import { scanTreeForSecrets } from './releaseSecretScan.js';
 import { regularFileInside } from '../utils/paths.js';
+import { crawlServed, scanBuiltDir, builtDirsIn, emptySupabase, redact } from './servedOutputScan.js';
+import { probeSupabaseRls, supabaseUrlForRef } from './supabaseRlsProbe.js';
+import { isPublicByDesign } from './releaseSecretScan.js';
+import { jwtPayload } from './adopt/secrets.js';
+import { getPortsForSlot } from './portAllocator.js';
+import { probeUnauthEndpoints } from './unauthEndpointProbe.js';
+import { licensePolicyCheck } from './imageTrust/licensePolicy.js';
+import { sbomForDeployment } from './imageTrust/store.js';
 
-export const CHECK_IDS = Object.freeze(['intake', 'dependencies', 'secrets', 'access_rules', 'sso_gate', 'sandbox_health']);
+export const CHECK_IDS = Object.freeze(['intake', 'dependencies', 'secrets', 'served_secrets', 'supabase_rls', 'unauth_endpoints', 'access_rules', 'sso_gate', 'sandbox_health', 'licenses']);
 export const EXCEPTABLE = Object.freeze(CHECK_IDS.filter((c) => c !== 'intake'));
 const LABELS = {
   intake: 'Intake approved',
   dependencies: 'Dependency scan',
   secrets: 'No secrets in code',
+  served_secrets: 'No secrets in served output',
+  supabase_rls: 'Supabase tables not readable by anon',
+  unauth_endpoints: 'No API data without identity',
   access_rules: 'Access rules',
   sso_gate: 'SSO gate not bypassed',
   sandbox_health: 'Sandbox release healthy',
+  licenses: 'License policy',
 };
 const MAX_EXCEPTION_DAYS = 90;
 const DEFAULT_SCAN_TIMEOUT_MS = 90_000;
 
 let deps = null;
-/** Test seam: { scanApp, scanTree, now } replace the real scanners. */
+/** Test seam: { scanApp, scanTree, scanSecrets, crawlServed, supabaseFetch, supabaseBaseUrl, probeUnauth } replace the real scanners. */
 export function _setReleaseCheckDepsForTests(d) { deps = d; }
 
 function scanTimeoutMs() {
@@ -242,6 +264,160 @@ function secretsCheck(app, dir) {
   return check('secrets', 'pass', [`Scanned ${scan.files} file(s), node_modules skipped`]);
 }
 
+async function ingressType(db, app) {
+  try { return (await import('./tcpIngress.js')).getIngressForApp(db, app.id)?.ingress_type || 'http'; } catch { return 'http'; }
+}
+
+function sandboxIsCandidate(app, { sandbox, releaseDir, commit }) {
+  return !!sandbox && (!releaseDir || app.source_type === 'image' || !!(commit && sandbox.commit_hash && commit === sandbox.commit_hash));
+}
+
+async function servedSecretsCheck(db, app, { sandbox, releaseDir, commit }) {
+  const none = { check: null, supabase: emptySupabase(), crawl: null };
+  if (await ingressType(db, app) === 'tcp') return { ...none, check: check('served_secrets', 'pass', ['TCP app: nothing is served to browsers over HTTP'], { applicable: false }) };
+  const useSandbox = sandboxIsCandidate(app, { sandbox, releaseDir, commit });
+  let scan;
+  let label;
+  if (useSandbox) {
+    label = `Live sandbox release #${sandbox.id}`;
+    const port = getPortsForSlot(app.slot).sand_be;
+    try {
+      scan = await withTimeout(Promise.resolve((deps?.crawlServed || crawlServed)({ baseUrl: `http://localhost:${port}`, basePath: `/${app.slug}-sandbox/` })), 45_000, 'The served-output crawl');
+    } catch (e) {
+      return { ...none, check: check('served_secrets', 'warn', [`${label}: ${e.message}; the served output was not scanned`]) };
+    }
+    if (!scan.ok) return { ...none, check: check('served_secrets', 'warn', [`${label}: ${scan.error}; the served output was not scanned`]) };
+  } else if (releaseDir && builtDirsIn(releaseDir).length) {
+    label = 'Built output committed to the release';
+    scan = scanBuiltDir(releaseDir, builtDirsIn(releaseDir), { deadline: Date.now() + 20_000 });
+  } else {
+    return { ...none, check: check('served_secrets', 'warn', [releaseDir
+      ? 'The release being deployed is not served anywhere yet and commits no built output, so its client bundle was not scanned (the check reads the live sandbox when it runs the same commit)'
+      : 'No candidate release to scan: no live sandbox and no release tree'])};
+  }
+  const anon = scan.supabase.anonKeys.size;
+  const note = anon ? `${anon} Supabase anon/publishable key(s) in the output: public by design, not a finding; they are the input to the RLS check` : null;
+  if (scan.findings.length) {
+    return { supabase: scan.supabase, crawl: useSandbox ? scan : null, check: check('served_secrets', 'fail', [
+      `${label}: ${scan.findings.length}${scan.truncated ? '+' : ''} credential(s) shipped to browsers (prefix and length shown, never the value)`,
+      ...scan.findings.slice(0, 10).map((f) => `${f.file}:${f.line} (${f.rule}, ${f.preview})`),
+      note,
+    ], { scanned: scan.scanned.length }) };
+  }
+  if (scan.truncated) return { supabase: scan.supabase, crawl: useSandbox ? scan : null, check: check('served_secrets', 'warn', [`${label}: scanned ${scan.scanned.length} file(s) before a limit; the rest were not checked`, note]) };
+  const what = useSandbox ? (scan.html ? 'the page, its scripts, styles and source maps, and the .env paths' : 'the root (not an HTML page) and the .env paths') : 'files';
+  return { supabase: scan.supabase, crawl: useSandbox ? scan : null, check: check('served_secrets', 'pass', [`${label}: scanned ${scan.scanned.length} file(s) (${what}), no credential found`, note], { scanned: scan.scanned.length }) };
+}
+
+const SUPABASE_URL_ENV = /SUPABASE.*URL/i;
+const SUPABASE_ANON_ENV = /SUPABASE.*(?:ANON|PUBLISHABLE)/i;
+
+async function supabaseFromEnv(db, app, into) {
+  const { resolveStoredEnv } = await import('./secretRefs.js');
+  for (const env of ['production', 'sandbox']) {
+    const rows = db.prepare('SELECT key, value_encrypted FROM env_vars WHERE app_id = ? AND env = ?').all(app.id, env)
+      .filter((r) => SUPABASE_URL_ENV.test(r.key) || SUPABASE_ANON_ENV.test(r.key));
+    if (!rows.length) continue;
+    const { values } = await resolveStoredEnv(app, env, rows);
+    for (const [k, v] of Object.entries(values || {})) {
+      if (typeof v !== 'string') continue;
+      const url = /^https:\/\/([a-z0-9]{20})\.supabase\.(?:co|in)\/?$/.exec(v.trim());
+      if (SUPABASE_URL_ENV.test(k) && url) into.refs.add(url[1]);
+      if (SUPABASE_ANON_ENV.test(k) && isPublicByDesign(v.trim())) into.anonKeys.set(v.trim(), jwtPayload(v.trim())?.ref ?? null);
+    }
+  }
+}
+
+async function supabaseRlsCheck(db, app, fullPolicy, supabase) {
+  try { await supabaseFromEnv(db, app, supabase); } catch { /* an unreadable env adds no project */ }
+  const projects = new Map();
+  const refs = [...supabase.refs];
+  for (const [key, ref] of supabase.anonKeys) {
+    const target = ref && refs.includes(ref) ? ref : (!ref && refs.length === 1 ? refs[0] : ref);
+    if (target && !projects.has(target)) projects.set(target, key);
+  }
+  if (!projects.size) {
+    return check('supabase_rls', 'pass', [refs.length
+      ? `Supabase project(s) ${refs.join(', ')} referenced, but no anon key for them in the served output or env, so nothing was probed`
+      : 'No Supabase project with an anon key in the served output or env'], { applicable: false });
+  }
+  if (!fullPolicy.probe_supabase_rls) {
+    return check('supabase_rls', 'warn', [
+      `Supabase project(s) ${[...projects.keys()].join(', ')} reached with an anon key, but the RLS probe is off (platform policy probe_supabase_rls), so whether anon can read their tables is not known`,
+    ], { probed: false });
+  }
+  const fails = [];
+  const warns = [];
+  const passes = [];
+  for (const [ref, key] of [...projects].slice(0, 3)) {
+    const baseUrl = deps?.supabaseBaseUrl ? deps.supabaseBaseUrl(ref) : supabaseUrlForRef(ref);
+    if (!baseUrl) { warns.push(`${ref}: not a Supabase project ref, not probed`); continue; }
+    let r;
+    try {
+      r = await probeSupabaseRls({ baseUrl, anonKey: key, tables: [...supabase.tables], ...(deps?.supabaseFetch ? { fetchImpl: deps.supabaseFetch } : {}) });
+    } catch (e) {
+      warns.push(`${ref}: the probe did not run (${e.message})`);
+      continue;
+    }
+    if (!r.ok) { warns.push(`${ref}: ${r.error}; RLS not verified`); continue; }
+    const readable = r.tables.filter((t) => t.status === 'readable').map((t) => t.name);
+    const errored = r.tables.filter((t) => t.status === 'error').map((t) => t.name);
+    if (readable.length) fails.push(`${ref}: ${readable.length} table(s) return rows to the anon key (RLS off or a policy that lets anon read): ${readable.join(', ')}`);
+    if (errored.length) warns.push(`${ref}: ${errored.length} table(s) gave no usable answer: ${errored.join(', ')}`);
+    if (r.truncated) warns.push(`${ref}: more tables than the probe limit; the rest were not probed`);
+    if (!readable.length) passes.push(`${ref}: ${r.tables.length} table(s) probed as anon (listed from ${r.listed_from.join(' + ')}), none returned a row`);
+  }
+  const anonNote = `Probed read-only with the anon key ${[...projects.values()].map(redact).join(', ')}: GET select=*&limit=1, row contents not kept`;
+  if (fails.length) return check('supabase_rls', 'fail', [...fails, ...warns, anonNote], { probed: true });
+  if (warns.length) return check('supabase_rls', 'warn', [...warns, ...passes, anonNote], { probed: true });
+  return check('supabase_rls', 'pass', [...passes, anonNote], { probed: true });
+}
+
+async function unauthEndpointsCheck(db, app, fullPolicy, { sandbox, releaseDir, commit, crawl }) {
+  if (await ingressType(db, app) === 'tcp') return check('unauth_endpoints', 'pass', ['TCP app: no HTTP routes to probe'], { applicable: false });
+  if (!sandboxIsCandidate(app, { sandbox, releaseDir, commit })) {
+    return check('unauth_endpoints', 'warn', [sandbox
+      ? 'The live sandbox runs a different commit from the release being deployed, so its routes were not probed (production is never probed)'
+      : 'No live sandbox to probe (production is never probed), so whether the app answers without identity is not known'], { probed: false });
+  }
+  const label = `Live sandbox release #${sandbox.id}`;
+  const probeWrites = !!fullPolicy.probe_unauth_writes;
+  let r;
+  try {
+    r = await withTimeout(Promise.resolve((deps?.probeUnauth || probeUnauthEndpoints)({
+      baseUrl: `http://localhost:${getPortsForSlot(app.slot).sand_be}`, routes: crawl?.routes, probeWrites,
+    })), 45_000, 'The unauthenticated-endpoint probe');
+  } catch (e) {
+    return check('unauth_endpoints', 'warn', [`${label}: ${e.message}; routes not probed`], { probed: false });
+  }
+  if (!r.ok) return check('unauth_endpoints', 'warn', [`${label}: ${r.error}; routes not probed`], { probed: false });
+  const open = r.reads.filter((x) => x.verdict === 'records');
+  const empty = r.reads.filter((x) => x.verdict === 'empty_list');
+  const accepted = r.writes.filter((x) => x.verdict === 'accepted');
+  const errored = r.reads.filter((x) => x.verdict === 'error');
+  const findings = [...open, ...accepted].map((x) => ({ method: x.method, path: x.path, status: x.status, ...(x.shape ? { shape: x.shape } : {}) }));
+  const extra = { probed: true, routes: r.reads.length, requests: r.requests, findings, writes_probed: probeWrites };
+  const how = 'sent straight to the container port with no Cookie, Authorization, API key or X-AppCrane-* header (the SSO gate is not in this path, so this tests the app\'s own auth)';
+  const where = `${r.reads.length} route(s) probed with GET${r.openapi ? `, ${r.discovered.openapi} listed by ${r.openapi}` : ''}`;
+  const writeNote = !r.write_candidates.length ? null : probeWrites
+    ? `${r.writes.length} write route(s) sent one POST with an empty JSON body`
+    : `${r.write_candidates.length} write route(s) found but not sent a write (platform policy probe_unauth_writes is off; OPTIONS only)`;
+  const fails = [
+    open.length ? `${label}: ${open.length} route(s) return records to a caller with no identity (keys shown, never values)` : null,
+    ...open.slice(0, 10).map((x) => `GET ${x.path} ${x.status}: ${x.shape}`),
+    accepted.length ? `${label}: ${accepted.length} route(s) accept a write with no identity` : null,
+    ...accepted.slice(0, 10).map((x) => `POST ${x.path} ${x.status}`),
+  ].filter(Boolean);
+  const warns = [
+    empty.length ? `${empty.length} route(s) answer an empty list with no identity; whether they would return records is not known: ${empty.slice(0, 5).map((x) => x.path).join(', ')}` : null,
+    errored.length ? `${errored.length} route(s) gave no answer: ${errored.slice(0, 5).map((x) => x.path).join(', ')}` : null,
+    r.truncated ? 'a route, request or time limit was reached; the rest were not probed' : null,
+  ].filter(Boolean);
+  if (fails.length) return check('unauth_endpoints', 'fail', [...fails, ...warns, writeNote, `Requests ${how}`], extra);
+  if (warns.length) return check('unauth_endpoints', 'warn', [`${label}: ${where}`, ...warns, writeNote, `Requests ${how}`], extra);
+  return check('unauth_endpoints', 'pass', [`${label}: ${where}, none returned records without identity`, writeNote, `Requests ${how}`], extra);
+}
+
 function manifestRuleCount(dir) {
   if (!dir) return 0;
   const p = join(dir, 'deployhub.json');
@@ -308,9 +484,10 @@ export async function runReleaseCheck(ctx) {
   const db = ctx.db || getDb();
   const app = db.prepare('SELECT * FROM apps WHERE id = ?').get(ctx.app.id) || ctx.app;
   const { level } = getClassification(db, app.id);
+  const policyLevel = releaseCheckLevel(db, app.id, level);
   const fullPolicy = getClassificationPolicy(db);
-  const policy = fullPolicy.levels[level];
-  const mode = resolveMode(db, level);
+  const policy = fullPolicy.levels[policyLevel];
+  const mode = resolveMode(db, policyLevel);
   const sandbox = sandboxRelease(db, app);
   const dir = ctx.releaseDir || sandbox?.dir || null;
   const candidate = ctx.releaseDir
@@ -323,9 +500,14 @@ export async function runReleaseCheck(ctx) {
     const delta = ctx.mode === AUTO_PATCH_DELTA && ctx.userId == null ? (ctx.delta || {}) : null;
     checks.push(await dependencyCheck(db, app, { releaseDir: ctx.releaseDir || null, commit: ctx.commit || null, sandbox, delta }));
     checks.push(secretsCheck(app, dir));
-    checks.push(accessRulesCheck(db, app, policy, level, dir));
-    checks.push(ssoCheck(app, policy, level));
+    const served = await servedSecretsCheck(db, app, { sandbox, releaseDir: ctx.releaseDir || null, commit: ctx.commit || null });
+    checks.push(served.check);
+    checks.push(await supabaseRlsCheck(db, app, fullPolicy, served.supabase));
+    checks.push(await unauthEndpointsCheck(db, app, fullPolicy, { sandbox, releaseDir: ctx.releaseDir || null, commit: ctx.commit || null, crawl: served.crawl }));
+    checks.push(accessRulesCheck(db, app, policy, policyLevel, dir));
+    checks.push(ssoCheck(app, policy, policyLevel));
     checks.push(sandboxHealthCheck(db, app, sandbox, ctx.trigger));
+    checks.push(licensePolicyCheck(app, sandbox ? sbomForDeployment(db, app.id, sandbox.id) : null));
   }
   const exceptions = activeExceptions(db, app.id);
   for (const c of checks) {

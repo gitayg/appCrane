@@ -1,6 +1,12 @@
 {
-  "2.140.2": [
+  "2.141.1": [
     "Maintenance: the GitHub Actions that build, scan and sign AppCrane releases are updated to their latest patch versions. Nothing changes for app owners."
+  ],
+  "2.141.0": [
+    "You can git push to apps hosted on AppCrane alongside GitHub, see whether GitHub is ahead or behind, and push AppCrane's copy back to GitHub.",
+    "Self-update now checks the new version before switching and rolls back on its own if it fails to start. Sandboxes can sleep when idle or on a schedule, and apps nobody uses sleep until their next visit.",
+    "Release checks now look for leaked keys in what your app serves, open Supabase tables and routes that answer without sign-in. Images are signed with an SBOM and checked before they start.",
+    "New: required app owners with ownership transfer, usage analytics, Vault/Infisical/1Password/AWS SSM secret references, Heroku/Render/Railway import, starter templates and an EU AI Act record pack."
   ],
   "2.140.1": [
     "When connecting the GitHub App to an app fails because the repository isn't covered, AppCrane now says why (the repository isn't selected, or the App isn't installed) and links to the GitHub page that fixes it.",

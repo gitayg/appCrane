@@ -1,6 +1,7 @@
 import { CONTAINER_PORT } from './detect.js';
 import { has, jsonOf } from './projectFiles.js';
 import { pickNodeVersion, DEFAULT_NODE_MAJOR } from '../nodeVersion.js';
+import { platformHealthPath } from './platforms/index.js';
 
 // The files AppCrane adds so an adopted project builds and passes the deploy
 // health gate. Only files the project does not already have are generated, and
@@ -213,8 +214,14 @@ export function scaffoldFiles(files, project, { name }) {
   }
 
   if (!project.has_manifest) {
-    const manifest = { name, version, be: { health: '/api/health' } };
-    add('deployhub.json', `${JSON.stringify(manifest, null, 2)}\n`, 'Tells AppCrane where the health endpoint is.');
+    const plat = project.platform;
+    const health = platformHealthPath(project) || '/api/health';
+    const manifest = { name, version, be: { health } };
+    if (plat?.crons?.length) manifest.cron = plat.crons.map((c) => ({ name: c.name, schedule: c.schedule, command: c.command }));
+    if (plat?.database) manifest.database = plat.database.block;
+    const why = ['Tells AppCrane where the health endpoint is', manifest.cron && `declares the ${manifest.cron.length} cron job(s)`, manifest.database && `declares the managed ${manifest.database.engine} database`]
+      .filter(Boolean).join(', ');
+    add('deployhub.json', `${JSON.stringify(manifest, null, 2)}\n`, `${why}.`);
   }
 
   if (out.some((f) => f.path === 'Dockerfile')) {

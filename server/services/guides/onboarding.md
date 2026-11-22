@@ -92,7 +92,7 @@ key or an OAuth sign-in covers agent work without one.
 
 ```
 appcrane_create_app(name, slug, github_url, github_token, branch?, …)
-appcrane_create_managed_app(name, slug, branch?, description?)  — path (d)
+appcrane_create_managed_app(name, slug, branch?, description?, template?)  — path (d); template = node-react | python-fastapi | static-site
 appcrane_set_env(slug, env, key, value)
 appcrane_deploy(slug, env)                                       — pulls latest commit from the branch + rebuilds
 appcrane_list_releases(slug, env) / appcrane_rollback(slug, env, deployment_id?)  — release history + one-click rollback
@@ -160,6 +160,10 @@ wrote without asking.
    AppCrane creates a private repo named `AMC_<slug>` on its service
    account. The returned `repo.html_url` is the github_url and the repo
    is auto-init'd with a README on the default branch.
+   If the stack matches one, pass `template: "node-react" | "python-fastapi" |
+   "static-site"`: AppCrane commits that starter as the first commit (signed
+   identity check, roles, managed Postgres except static-site, `/api/health`,
+   tests, CLAUDE.md). Read its CLAUDE.md, then change files from there.
 3. **Push scaffolding via `appcrane_push_to_managed_app`, NOT `github_push_files`.**
    This is the most common mistake. The reason: `github_*` tools authenticate
    with your X-Github-Token header — which is the END USER'S personal PAT (or

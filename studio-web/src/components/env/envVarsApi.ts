@@ -1,4 +1,5 @@
 import { adminApi } from '../../adminApi'
+import type { ExternalRefSource } from './externalSecretRef'
 
 export type EnvName = 'production' | 'sandbox'
 export type EnvStore = 'secrets_manager'
@@ -12,8 +13,8 @@ export interface MaskedEnvVar {
   fingerprint?: string
   error?: string
   updated_at?: string
-  // Set on a Secrets Manager reference: value is `secretsmanager:<NAME>`, never the secret.
-  source?: EnvStore
+  // Set on a reference: value is `secretsmanager:<NAME>` or a `ref+<store>://` reference, never the secret.
+  source?: EnvStore | ExternalRefSource
 }
 
 export interface MaskedEnvList {

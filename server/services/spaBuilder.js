@@ -21,7 +21,7 @@
  */
 
 import { execFileSync } from 'child_process';
-import { existsSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import log from '../utils/logger.js';
 
@@ -97,14 +97,25 @@ export function rebuildSpa(repoDir, { onLog } = {}) {
     // deploy servers may have shadows from earlier rebuilds that would
     // (a) shadow .tsx sources via Vite's resolve order on older configs
     // and (b) be picked up by tsc on the next build. Belt + suspenders.
+    // Committed declarations (src/topbar-element/jsx.d.ts) are source, not
+    // shadows: deleting them broke every rebuild from a clean checkout.
     let cleaned = 0;
     try {
+      let tracked = new Set();
+      try {
+        tracked = new Set(execFileSync('git', ['-C', repoDir, 'ls-files', '-z', '--', join(SPA_SOURCE_DIR, 'src')], { stdio: 'pipe', timeout: 10000 })
+          .toString().split('\0').filter(Boolean).map((p) => join(repoDir, p)));
+      } catch (_) { /* not a git checkout: every match is a shadow */ }
       const out = execFileSync('find', [
         join(studioDir, 'src'),
         '(', '-name', '*.js', '-o', '-name', '*.js.map', '-o', '-name', '*.d.ts', ')',
-        '-type', 'f', '-delete', '-print',
+        '-type', 'f', '-print',
       ], { stdio: 'pipe', timeout: 10000 }).toString();
-      cleaned = out.trim() ? out.trim().split('\n').length : 0;
+      for (const f of out.split('\n').filter(Boolean)) {
+        if (tracked.has(f)) continue;
+        unlinkSync(f);
+        cleaned++;
+      }
     } catch (_) { /* find failure is non-fatal */ }
     if (cleaned > 0) emit(`SPA rebuild: removed ${cleaned} stale .js/.d.ts shadow file(s) from src/`);
 

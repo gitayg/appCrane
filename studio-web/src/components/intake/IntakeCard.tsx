@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { adminApi } from '../../adminApi'
 import { ClassificationBadge } from './ClassificationBadge'
 import { IntakeForm } from './IntakeForm'
+import { AiUseCard } from '../aiAct/AiUseCard'
 import { EMPTY_INTAKE, type IntakeDraft, type IntakeGate, type IntakeRow, type Level } from './types'
 
 interface Resp {
@@ -90,6 +91,7 @@ export function IntakeCard({ slug, onMsg }: { slug: string; onMsg: (m: { text: s
           </div>
         )}
       </div>
+      <AiUseCard slug={slug} onMsg={onMsg} />
     </>
   )
 }

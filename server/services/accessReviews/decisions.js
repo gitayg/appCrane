@@ -5,6 +5,7 @@ import { recordEvent } from '../eventStore.js';
 import { clearUserRoleGrants } from '../appDefinedRoles.js';
 import { purgeRevokedTenants } from '../tenants.js';
 import { closeCampaign } from './campaigns.js';
+import { assertNotLastActiveOwner, afterOwnershipWrite } from '../appOwnership.js';
 
 export const DECISIONS = Object.freeze(['keep', 'remove', 'change']);
 export const APP_ROLES = Object.freeze(['owner', 'admin', 'user']);
@@ -16,13 +17,7 @@ export const SCIM_MESSAGE = 'Managed by your identity provider: this access come
  * role grants and purges the person's tenant data, anything else upserts.
  */
 export async function setAppRole(db, appId, userId, role) {
-  if (role !== 'owner') {
-    const target = db.prepare('SELECT app_role FROM app_user_roles WHERE app_id = ? AND user_id = ?').get(appId, userId);
-    if (target?.app_role === 'owner') {
-      const owners = db.prepare("SELECT COUNT(*) AS n FROM app_user_roles WHERE app_id = ? AND app_role = 'owner'").get(appId);
-      if (owners.n <= 1) throw new AppError('Cannot remove the last owner of the app. Assign another owner first.', 400, 'LAST_OWNER');
-    }
-  }
+  if (role !== 'owner') assertNotLastActiveOwner(db, appId, userId);
   if (role === 'none') {
     db.transaction(() => {
       db.prepare('DELETE FROM app_user_roles WHERE app_id = ? AND user_id = ?').run(appId, userId);
@@ -34,6 +29,7 @@ export async function setAppRole(db, appId, userId, role) {
     db.prepare(`INSERT INTO app_user_roles (app_id, user_id, app_role) VALUES (?, ?, ?)
                 ON CONFLICT(app_id, user_id) DO UPDATE SET app_role = excluded.app_role`).run(appId, userId, role);
   }
+  afterOwnershipWrite(db, 'access-review');
 }
 
 /** Demote a platform admin the way PUT /api/users/:id/role does: never yourself, never the last one. */

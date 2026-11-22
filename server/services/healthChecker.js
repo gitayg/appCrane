@@ -10,6 +10,7 @@ import { getIngressForApp } from './tcpIngress.js';
 import log from '../utils/logger.js';
 import { jobStarted, trackJob } from './jobHealth.js';
 import { restoreInProgress } from './managedDbRestoreGuard.js';
+import { envIsSleepingById } from './envSleepState.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -317,6 +318,8 @@ function probeTcp(host, port) {
 async function runCheck(config) {
   // Stopped on purpose for a restore: no failure count, no auto-restart, no DOWN mail.
   if (restoreInProgress(config.slug, config.env)) return;
+  // Asleep on purpose (envSleeper.js): same treatment as a restore.
+  if (envIsSleepingById(config.app_id, config.env)) return;
   const db = getDb();
   const ports = getPortsForSlot(config.slot);
   const port = config.env === 'production' ? ports.prod_be : ports.sand_be;

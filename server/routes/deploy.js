@@ -458,6 +458,7 @@ router.post('/:slug/restart/:env', requireAppAccess, auditMiddleware('restart'),
 
   Object.assign(runtimeEnvVars, carried);
   Object.assign(runtimeEnvVars, (await import('../services/llmGateway/env.js')).llmGatewayEnv(app, env));
+  Object.assign(runtimeEnvVars, (await import('../services/aiAct/transparency.js')).aiNoticeEnv(getDb(), app));
 
   // v2.97.0: the identity-signing secret, for THIS environment, exactly as the
   // deploy path injects it. Restart rebuilds the whole environment, so leaving
@@ -499,6 +500,9 @@ router.post('/:slug/restart/:env', requireAppAccess, auditMiddleware('restart'),
     const { seedNewVolumeMounts } = await import('../services/volumeSeeder.js');
     await seedNewVolumeMounts({ image, volumes: declaredVolumes });
   }
+  // Verified before the stop too: an untrusted image under enforce is refused
+  // with the running container left alone.
+  await (await import('../services/imageTrust/verify.js')).enforceImageTrust({ slug: app.slug, env, image, what: 'restart' });
   // Admitted before the stop: a refusal leaves the running container alone.
   const { admitAppStart } = await import('../services/deployer.js');
   await admitAppStart({ app, env, userId: req.user.id, what: 'restart' });

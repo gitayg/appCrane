@@ -1,0 +1,46 @@
+{
+  "$schema": "http://cyclonedx.org/schema/bom-1.7.schema.json",
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.7",
+  "serialNumber": "urn:uuid:3e671687-395b-41f5-a30f-a58921a69b79",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-11-20T23:54:06+00:00",
+    "tools": {
+      "components": [
+        { "type": "application", "manufacturer": { "name": "Aqua Security Software Ltd." }, "group": "aquasecurity", "name": "trivy", "version": "0.74.0" }
+      ]
+    },
+    "component": {
+      "bom-ref": "pkg:oci/appcrane-fx-sandbox@sha256:dddd",
+      "type": "container",
+      "name": "appcrane-fx-sandbox:abc",
+      "properties": [
+        { "name": "aquasecurity:trivy:ImageID", "value": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" }
+      ]
+    }
+  },
+  "components": [
+    {
+      "bom-ref": "pkg:npm/left-pad@1.3.0", "type": "library", "name": "left-pad", "version": "1.3.0",
+      "hashes": [{ "alg": "SHA-1", "content": "c0723df8a703155aa9aecf829f150e9855578043" }],
+      "licenses": [{ "license": { "id": "WTFPL" } }], "purl": "pkg:npm/left-pad@1.3.0"
+    },
+    {
+      "bom-ref": "pkg:apk/alpine/busybox@1.37.0-r31", "type": "library", "name": "busybox", "version": "1.37.0-r31",
+      "hashes": [{ "alg": "SHA-1", "content": "71cffc2981f2d54b3937c25be2f5169b3fb04532" }],
+      "licenses": [{ "license": { "id": "GPL-2.0-only" } }], "purl": "pkg:apk/alpine/busybox@1.37.0-r31"
+    },
+    {
+      "bom-ref": "pkg:npm/agpl-thing@2.0.0", "type": "library", "name": "agpl-thing", "version": "2.0.0",
+      "hashes": [{ "alg": "SHA-1", "content": "3b79f3d788d1acdb39168c3a30ec7d86a4d9346f" }],
+      "licenses": [{ "license": { "id": "AGPL-3.0-only" } }], "purl": "pkg:npm/agpl-thing@2.0.0"
+    },
+    {
+      "bom-ref": "pkg:npm/no-license@0.1.0", "type": "library", "name": "no-license", "version": "0.1.0",
+      "purl": "pkg:npm/no-license@0.1.0"
+    }
+  ],
+  "dependencies": [],
+  "vulnerabilities": []
+}

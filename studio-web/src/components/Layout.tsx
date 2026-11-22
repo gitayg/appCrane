@@ -11,6 +11,7 @@ import { ViewAsBanner } from './ViewAsBanner'
 import { ViewAsControl } from './ViewAsControl'
 import { useTaskCount } from './tasks/useTaskCount'
 import { UpdateBlockedDialog } from './UpdateBlockedDialog'
+import { LastUpdateNotice } from './LastUpdateNotice'
 import { buildsInFlightOf, isConnectionDrop, waitForNewVersion, type BuildsInFlight } from './selfUpdateFlow'
 import { serverDate } from '../utils/serverDate'
 import { setClientErrorVersion } from '../lib/clientErrors'
@@ -745,6 +746,7 @@ export function Layout({ children, subItems, activeSub }: Props) {
                   AppCrane {updateInfo?.current ? `v${updateInfo.current}` : version}
                 </span>
               )}
+              <LastUpdateNotice />
             </div>
           )}
         </div>

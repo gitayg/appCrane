@@ -1,0 +1,1 @@
+var e={none:`No AI`,assistive:`Assistive (AI helps a person who decides)`,decisions_about_people:`Makes decisions about people`,annex_iii:`An Annex III use (pick the area)`};export{e as t};

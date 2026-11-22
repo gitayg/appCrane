@@ -23,6 +23,7 @@ export const COLUMNS = [
   ['managed_db_certs', ['key_enc']],
   ['user_mfa', ['totp_secret_enc', 'pending_secret_enc']],
   ['crew_push_configs', ['token_enc', 'auth_credentials_enc']],
+  ['secret_connections', ['credentials_enc']],
 ];
 
 // settings: every value shaped like a blob is one (the same structural rule

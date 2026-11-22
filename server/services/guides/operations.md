@@ -547,6 +547,29 @@ about to onboard a new one.
 
 Every `appcrane_*` tool, grouped by purpose. The authoritative input schema for each is on the tool itself (your MCP client shows it) — this is the at-a-glance index.
 
+
+### Values kept in Vault, Infisical, 1Password or AWS SSM
+
+An env var can also hold a reference to an outside secret store. AppCrane reads
+the value at each deploy and restart and keeps only the reference; a reference
+it cannot read fails the deploy.
+
+```
+ref+vault://<mount>/<path>#<key>                  HashiCorp Vault KV (v2 or v1), one key
+ref+infisical://<project>/<env>[/<path>]#<NAME>   Infisical secret
+ref+op://<vault>/<item>[/<section>]/<field>       1Password secret reference
+ref+awsssm:///<param/name>[#<json key>]           AWS SSM Parameter Store, decrypted
+```
+
+Add `?connection=<name>` before the `#` to pick a named connection; otherwise the
+app's own connection for that store is used, else the platform's. Set it like any
+value: `appcrane_set_secret(slug, env, key, value="ref+vault://kv/myapp/db#password")`.
+`appcrane_get_secret` reports `source` (`vault`, `infisical`, `onepassword`, `aws_ssm`).
+
+Connections hold the address and credential, encrypted and never returned:
+platform connections at `/api/secret-connections` (platform admin; each must be
+limited by a `path_prefix` containing `{slug}` or an `allowed_apps` list) and an
+app's own at `/api/apps/:slug/secret-connections` (the app's owner).
 ### Discovery & info
 
 | Tool | What it does |

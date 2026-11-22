@@ -13,6 +13,8 @@ import { LlmGatewayAppCard } from '../components/llm/LlmGatewayAppCard'
 import { AppMcpCard } from '../components/appMcp/AppMcpCard'
 import { AppTimeline } from '../components/events/AppTimeline'
 import { WhatsNewMailCard } from '../components/WhatsNewMailCard'
+import { OwnershipCard } from '../components/ownership/OwnershipCard'
+import { AppSupplyChainCard } from '../components/imageTrust/AppSupplyChainCard'
 import { EnvVarsPanel } from '../components/env/EnvVarsPanel'
 import { serverDate } from '../utils/serverDate'
 import { limitsAppliedText, type LimitApply } from '../utils/limitsApplied'
@@ -1182,12 +1184,14 @@ export function AppManager() {
             <MetricsCard slug={currentApp} env={currentEnv} />
             {isAdminUser && <LimitsCard slug={currentApp} reload={reloadCounter} onMsg={showMsg} />}
             <SandboxVisibilityCard slug={currentApp} reload={reloadCounter} onMsg={showMsg} />
+            <OwnershipCard slug={currentApp} reload={reloadCounter} onMsg={showMsg} />
             <WhatsNewMailCard slug={currentApp} reload={reloadCounter} onMsg={showMsg} />
             <ManagedDatabaseCard slug={currentApp} reload={reloadCounter} onMsg={showMsg} />
             <BackupsCard slug={currentApp} env={currentEnv} reload={reloadCounter} onMsg={showMsg} />
             <AccessRulesCard slug={currentApp} env={currentEnv} reload={reloadCounter} onMsg={showMsg} />
             <IntakeCard slug={currentApp} onMsg={showMsg} />
             <ReleaseCheckPanel slug={currentApp} reload={reloadCounter} onMsg={showMsg} />
+            <AppSupplyChainCard slug={currentApp} reload={reloadCounter} />
             <AutoPatchAppCard slug={currentApp} reload={reloadCounter} onMsg={showMsg} />
             <LlmGatewayAppCard slug={currentApp} isPlatformAdmin={isAdminUser} onMsg={showMsg} />
             <AppMcpCard slug={currentApp} env={currentEnv} reload={reloadCounter} onMsg={showMsg} />

@@ -10,7 +10,7 @@ interface LevelPolicy {
   allow_public_visibility: boolean
   exceptions_by: 'owner' | 'platform_admin'
 }
-interface Policy { release_check_mode: 'by_classification' | 'enforce' | 'warn' | 'off'; block_vulnerable_dependencies: boolean; levels: Record<Level, LevelPolicy> }
+interface Policy { release_check_mode: 'by_classification' | 'enforce' | 'warn' | 'off'; block_vulnerable_dependencies: boolean; probe_supabase_rls: boolean; probe_unauth_writes: boolean; levels: Record<Level, LevelPolicy> }
 
 const BOOLS: { key: keyof LevelPolicy; label: string }[] = [
   { key: 'intake_approval', label: 'Intake approval before production' },
@@ -57,6 +57,16 @@ export function ClassificationPolicyCard() {
         <input type="checkbox" checked={policy.block_vulnerable_dependencies}
           onChange={e => save({ block_vulnerable_dependencies: e.target.checked })} />
         Block production deploys of any app with a vulnerable dependency that has a published fix
+      </label>
+      <label style={{ fontSize: '.85rem', display: 'flex', gap: 8, alignItems: 'center', marginBottom: 10 }}>
+        <input type="checkbox" checked={policy.probe_supabase_rls}
+          onChange={e => save({ probe_supabase_rls: e.target.checked })} />
+        Probe the Supabase projects apps reference, read-only with their public anon key, for tables anon can read (requests leave this server)
+      </label>
+      <label style={{ fontSize: '.85rem', display: 'flex', gap: 8, alignItems: 'center', marginBottom: 10 }}>
+        <input type="checkbox" checked={policy.probe_unauth_writes}
+          onChange={e => save({ probe_unauth_writes: e.target.checked })} />
+        Probe sandbox write routes without identity: one POST with an empty JSON body per route (it can create a record in sandbox data)
       </label>
       <div style={{ overflowX: 'auto' }}>
         <table style={{ fontSize: '.8rem' }}>

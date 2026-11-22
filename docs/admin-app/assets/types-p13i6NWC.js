@@ -1,0 +1,1 @@
+var e={"owner-deactivated":`Owner deactivated`,"owner-deleted":`Owner deleted`,"owner-removed":`Owner role removed`,"no-owner":`Never had an owner`};function t(e){return e<3600?`${Math.max(1,Math.round(e/60))} min`:e<86400?`${Math.round(e/3600)} h`:`${Math.floor(e/86400)} d`}var n=e=>e?e.name||e.email||`#${e.id}`:`someone`;export{t as n,n as r,e as t};

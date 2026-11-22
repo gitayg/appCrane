@@ -13,6 +13,9 @@
 import { getDb } from '../db.js';
 import { decrypt } from './encryption.js';
 import { appSecretName, appSecretRoot, getAppSecret, providerConfig, putAppSecret } from './secretsProvider/index.js';
+import { MALFORMED_EXTERNAL, PROVIDERS, externalSource, isExternalRef, parseExternalRef, providerOfRef } from './externalSecrets/refs.js';
+import { checkExternalRef, resolveExternalRef } from './externalSecrets/resolve.js';
+import { logAudit } from '../middleware/audit.js';
 
 export const REF_PREFIX = 'secretsmanager:';
 export const REF_SOURCE = 'secrets_manager';
@@ -39,12 +42,21 @@ export class SecretRefError extends Error {
  * text. Only the start of the value counts.
  */
 export function isSecretRef(plain) {
-  return typeof plain === 'string' && plain.startsWith(REF_PREFIX);
+  return typeof plain === 'string' && (plain.startsWith(REF_PREFIX) || isExternalRef(plain));
+}
+
+/** The `source` an API reports for a reference: secrets_manager, or the outside store's (vault, infisical, onepassword, aws_ssm). */
+export function refSource(plain) {
+  return isExternalRef(plain) ? externalSource(plain) : REF_SOURCE;
+}
+
+function refLabel(plain) {
+  return isExternalRef(plain) ? (PROVIDERS[providerOfRef(plain)]?.label ?? 'an outside secret store') : 'AWS Secrets Manager';
 }
 
 /** { name, field } or null. Refuses ARNs, slashes and anything that could leave the app's own path. */
 export function parseSecretRef(plain) {
-  if (!isSecretRef(plain)) return null;
+  if (typeof plain !== 'string' || !plain.startsWith(REF_PREFIX)) return null;
   const rest = plain.slice(REF_PREFIX.length);
   const hash = rest.indexOf('#');
   const name = hash < 0 ? rest : rest.slice(0, hash);
@@ -102,13 +114,26 @@ function notFoundAt(namespace, env, name) {
 
 /** rows: [{ key, plain }]. Returns { KEY: value } with references resolved for this app+env. Throws SecretRefError naming the keys (never values) when any fails. */
 export async function resolveEnvValues(app, env, rows, { getSecret } = {}) {
-  const refs = rows.filter((r) => isSecretRef(r.plain));
+  const refs = rows.filter((r) => isSecretRef(r.plain) && !isExternalRef(r.plain));
   const noProvider = refs.length > 0 && !getSecret && !providerActive();
   const read = getSecret || getAppSecret;
   const entries = [];
   const failures = [];
+  const external = [];
+  const sessions = new Map();
   for (const { key, plain } of rows) {
     if (!isSecretRef(plain)) { entries.push([key, plain]); continue; }
+    if (isExternalRef(plain)) {
+      try {
+        const got = await resolveExternalRef(app, plain, sessions);
+        entries.push([key, got.value]);
+        external.push({ key, reference: plain, provider: got.provider, connection: got.connection, ok: true });
+      } catch (e) {
+        failures.push([key, `${plain}: ${e.message}`]);
+        external.push({ key, reference: plain, provider: providerOfRef(plain), ...(e.connection && { connection: e.connection }), ok: false });
+      }
+      continue;
+    }
     const ref = parseSecretRef(plain);
     if (!ref) { failures.push([key, MALFORMED]); continue; }
     if (noProvider) { failures.push([key, 'no secrets provider is configured on this AppCrane (APPCRANE_SECRETS_PROVIDER)']); continue; }
@@ -122,6 +147,9 @@ export async function resolveEnvValues(app, env, rows, { getSecret } = {}) {
     } catch (e) {
       failures.push([key, fetchFailure(e, namespace, env, ref.name)]);
     }
+  }
+  if (external.length && app?.id) {
+    try { logAudit(null, app.id, 'secret-ref-resolve', { env, refs: external }); } catch (_) { /* auditing must not decide a deploy */ }
   }
   if (failures.length) {
     const detail = failures.map(([k, why]) => `${k} (${why})`).join('; ');
@@ -145,12 +173,22 @@ export async function resolveStoredEnv(app, env, rows, opts = {}) {
     catch (_) { decryptFailures.push(r.key); }
   }
   const values = await resolveEnvValues(app, env, plain, opts);
-  return { values, decryptFailures, refKeys: plain.filter((r) => isSecretRef(r.plain)).map((r) => r.key) };
+  const refRows = plain.filter((r) => isSecretRef(r.plain));
+  return {
+    values, decryptFailures, refKeys: refRows.map((r) => r.key),
+    refSources: Object.fromEntries(refRows.map((r) => [r.key, refLabel(r.plain)])),
+  };
 }
 
 /** Refuses a value that starts with the prefix and cannot work. Any other value passes untouched. */
-export function assertStorableValue(plain, { config = providerConfig } = {}) {
+export function assertStorableValue(plain, { config = providerConfig, app = null } = {}) {
   if (!isSecretRef(plain)) return;
+  if (isExternalRef(plain)) {
+    if (!parseExternalRef(plain)) throw new SecretRefError(MALFORMED_EXTERNAL, { code: 'SECRET_REF_MALFORMED' });
+    if (!app) throw new SecretRefError('An outside secret store reference needs the app it belongs to', { code: 'SECRET_REF_MALFORMED' });
+    try { checkExternalRef(app, plain); } catch (e) { throw new SecretRefError(e.message, { code: e.code === 'SECRET_REF_MALFORMED' ? e.code : 'SECRET_REF_UNUSABLE' }); }
+    return;
+  }
   if (!parseSecretRef(plain)) throw new SecretRefError(MALFORMED, { code: 'SECRET_REF_MALFORMED' });
   const cfg = config();
   if (cfg === null) {

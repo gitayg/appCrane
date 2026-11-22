@@ -40,6 +40,7 @@ const Events = lazyPage(() => import('./pages/Events'), 'Events')
 const Adopt = lazyPage(() => import('./pages/Adopt'), 'Adopt')
 const IntakeQueue = lazyPage(() => import('./pages/IntakeQueue'), 'IntakeQueue')
 const AccessReviews = lazyPage(() => import('./pages/AccessReviews'), 'AccessReviews')
+const OwnerTransfers = lazyPage(() => import('./pages/OwnerTransfers'), 'OwnerTransfers')
 const AccessReviewCampaigns = lazyPage(() => import('./pages/AccessReviewCampaigns'), 'AccessReviewCampaigns')
 const AuditIntegrity = lazyPage(() => import('./pages/AuditIntegrity'), 'AuditIntegrity')
 
@@ -288,6 +289,7 @@ export function AdminApp() {
           <Route path="/adopt" element={<Layout><Adopt /></Layout>} />
           <Route path="/intake" element={<Layout><IntakeQueue /></Layout>} />
           <Route path="/access-reviews" element={<Layout><AccessReviews /></Layout>} />
+          <Route path="/owner-transfers" element={<Layout><OwnerTransfers /></Layout>} />
           <Route path="/access-reviews/campaigns" element={<Layout><AccessReviewCampaigns /></Layout>} />
           <Route path="/access-reviews/campaigns/:id" element={<Layout><AccessReviewCampaigns /></Layout>} />
           <Route path="/audit-integrity" element={<Layout><AuditIntegrity /></Layout>} />

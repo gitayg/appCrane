@@ -135,7 +135,8 @@ test('the upgrade is verified against PATH, and a no-op is caught', () => {
 test('the guard runs before npm install on the UPDATE path only', () => {
   const src = readFileSync(new URL('../server/index.js', import.meta.url), 'utf8');
   const guardAt = src.indexOf('planNodeUpgrade');
-  const updateInstall = src.indexOf("execFileSync('npm', ['install', '--omit=dev', '--prefer-offline']", guardAt);
+  // The update installs in a staging clone (services/selfUpdate.js preflightUpdate).
+  const updateInstall = src.indexOf('preflightUpdate({', guardAt);
   assert.ok(guardAt > 0, 'the updater no longer consults planNodeUpgrade at all');
   assert.ok(updateInstall > guardAt,
     'npm install runs before the runtime check, so dependencies land on an unsupported Node first');
@@ -244,8 +245,10 @@ test('self-update installs the bundled Node and puts it on PATH before npm insta
   const pathSet = idx.indexOf('process.env.PATH = `${binDir}:${process.env.PATH}`');
   // The next npm install after the bundled branch is the update's (an earlier
   // one belongs to the auto-rollback path, which reinstalls the old release).
-  const npmInstall = idx.indexOf("execFileSync('npm', ['install', '--omit=dev'", bundled);
-  const reset = idx.indexOf("execFileSync('git', ['reset', '--hard', 'origin/main']", bundled);
-  assert.ok(bundled > 0 && pathSet > bundled && reset > pathSet && npmInstall > reset,
+  // The update installs in staging (preflightUpdate), then switches the tree
+  // (applyStagedRelease); both must come after the bundled Node is on PATH.
+  const npmInstall = idx.indexOf('preflightUpdate({', bundled);
+  const reset = idx.indexOf('applyStagedRelease({', bundled);
+  assert.ok(bundled > 0 && pathSet > bundled && npmInstall > pathSet && reset > npmInstall,
     'npm install can run before the bundled Node is on PATH, installing against the old runtime');
 });

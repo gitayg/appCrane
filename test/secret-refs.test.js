@@ -152,7 +152,7 @@ test('resolveStoredEnv keeps omitting an undecryptable value and still fails on 
     { key: 'REF', value_encrypted: encrypt('secretsmanager:T') },
   ];
   const ok = await resolveStoredEnv(APP, 'sandbox', rows, { getSecret: async () => 'resolved' });
-  assert.deepEqual(ok, { values: { PLAIN: 'p', REF: 'resolved' }, decryptFailures: ['BROKEN'], refKeys: ['REF'] });
+  assert.deepEqual(ok, { values: { PLAIN: 'p', REF: 'resolved' }, decryptFailures: ['BROKEN'], refKeys: ['REF'], refSources: { REF: 'AWS Secrets Manager' } });
   await assert.rejects(resolveStoredEnv(APP, 'sandbox', rows, { getSecret: async () => { throw new Error('x'); } }), /REF/);
 });
 

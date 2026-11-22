@@ -5,6 +5,7 @@ import { getDb } from '../db.js';
 import { isPlatformAdmin } from '../utils/roles.js';
 import { roleForUserOnApp, userHasAppPermission } from '../services/permissions.js';
 import { getClassification, getClassificationPolicy } from '../services/dataClassification.js';
+import { releaseCheckLevel } from '../services/aiAct/classification.js';
 import {
   runReleaseCheck, latestReleaseCheck, listReleaseChecks, activeExceptions,
   addException, revokeException, resolveMode, EXCEPTABLE,
@@ -24,10 +25,12 @@ function requireProductionDeployer(req, _res, next) {
 router.get('/apps/:slug/release-check', requireAuth, requireAppAccess, (req, res) => {
   const db = getDb();
   const { level } = getClassification(db, req.app.id);
-  const policy = getClassificationPolicy(db).levels[level];
+  const policyLevel = releaseCheckLevel(db, req.app.id, level);
+  const policy = getClassificationPolicy(db).levels[policyLevel];
   res.json({
     data_classification: level,
-    mode: resolveMode(db, level),
+    policy_level: policyLevel,
+    mode: resolveMode(db, policyLevel),
     exceptions_by: policy.exceptions_by,
     exceptable: EXCEPTABLE,
     latest: latestReleaseCheck(db, req.app.id),

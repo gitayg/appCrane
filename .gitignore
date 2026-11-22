@@ -29,3 +29,6 @@ studio-web/src/**/*.d.ts
 # test runs with an unset DATA_DIR write here
 undefined/
 **/update-snapshots/
+
+# self-update staging clone and the dependencies/SPA an update replaced (server/services/selfUpdate.js)
+/.self-update/

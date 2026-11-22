@@ -11,6 +11,7 @@ import { purgeRevokedTenants } from '../services/tenants.js';
 import { revokeAllGrantsForUser } from '../services/oauthStore.js';
 import { revokeAllDevices } from '../services/trustedDevices.js';
 import { refuseUnlessSsoOptional } from '../services/authPolicy.js';
+import { assertNotLastActiveOwner, afterOwnershipWrite } from '../services/appOwnership.js';
 
 const router = Router();
 
@@ -149,6 +150,7 @@ router.delete('/:id', requireAdmin, auditMiddleware('user-delete'), async (req, 
     db.prepare('DELETE FROM notification_configs WHERE user_id = ?').run(userId);
     db.prepare('DELETE FROM users WHERE id = ?').run(userId);
   })();
+  afterOwnershipWrite(db, 'user-delete', req.user.id);
   await purgeRevokedTenants(db, userId, user.email, memberOf);
   res.json({ message: `User '${user.name}' deleted` });
 });
@@ -304,14 +306,8 @@ router.put('/:slug/roles', requireAppAccess, auditMiddleware('app-set-role'), as
 
   const db = getDb();
 
-  // Last-owner guard: don't let the final owner be demoted/removed.
-  if (app_role !== 'owner') {
-    const target = db.prepare('SELECT app_role FROM app_user_roles WHERE app_id = ? AND user_id = ?').get(app.id, user_id);
-    if (target?.app_role === 'owner') {
-      const owners = db.prepare("SELECT COUNT(*) AS n FROM app_user_roles WHERE app_id = ? AND app_role = 'owner'").get(app.id);
-      if (owners.n <= 1) throw new AppError('Cannot remove the last owner of the app. Assign another owner first.', 400, 'LAST_OWNER');
-    }
-  }
+  // Last-owner guard: don't let the final active owner be demoted/removed.
+  if (app_role !== 'owner') assertNotLastActiveOwner(db, app.id, user_id);
 
   // v2.42.1: 'none' means REMOVED, so it deletes rather than writes a row.
   //
@@ -346,6 +342,7 @@ router.put('/:slug/roles', requireAppAccess, auditMiddleware('app-set-role'), as
       `).run(app.id, user_id, app_role);
     })();
   }
+  afterOwnershipWrite(db, 'role-change', req.user.id);
 
   res.json({ message: `Role '${app_role}' set for user ${user_id} on app ${app.slug}` });
 });

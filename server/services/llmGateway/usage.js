@@ -1,11 +1,11 @@
 import { getDb } from '../../db.js';
 import { recordEvent } from '../eventStore.js';
+import { pruneLlmUsage } from '../aiAct/retention.js';
 
 // Usage rows are metadata only. Budgets count every forwarded request
 // (outcome other than 'refused'); a refused request is recorded so the
 // dashboard shows it, but it does not spend the budget it was refused by.
 
-const RETENTION_DAYS = 90;
 const PRUNE_EVERY = 500;
 let insertsSincePrune = 0;
 
@@ -21,7 +21,7 @@ export function recordUsage(row, db = getDb()) {
   );
   if (++insertsSincePrune >= PRUNE_EVERY) {
     insertsSincePrune = 0;
-    db.prepare(`DELETE FROM llm_gateway_usage WHERE created_at < datetime('now', ?)`).run(`-${RETENTION_DAYS} days`);
+    pruneLlmUsage({ db });
   }
 }
 

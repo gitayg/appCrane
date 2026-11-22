@@ -33,6 +33,7 @@ import { getDb } from '../db.js';
 import { hashApiKey, generateApiKey, hashPassword } from '../services/encryption.js';
 import { requireAuth, requirePlatformAdmin } from '../middleware/auth.js';
 import { reconcileGroupAccess } from '../services/scimGroupAccess.js';
+import { afterOwnershipWrite } from '../services/appOwnership.js';
 import { revokeAllGrantsForUser } from '../services/oauthStore.js';
 import { revokeAllDevices } from '../services/trustedDevices.js';
 import log from '../utils/logger.js';
@@ -603,6 +604,7 @@ router.put('/Users/:id', requireScimToken, (req, res) => {
   }
 
   const updated = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
+  afterOwnershipWrite(db, user.active && !updated.active ? 'scim-user-deprovision' : 'scim-user-update');
   log.info(`SCIM: replaced user ${id}`);
   res.json(toScimUser(updated, req));
 });
@@ -641,6 +643,7 @@ router.patch('/Users/:id', requireScimToken, (req, res) => {
   }
 
   const updated = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
+  afterOwnershipWrite(db, user.active && !updated.active ? 'scim-user-deprovision' : 'scim-user-update');
   log.info(`SCIM: patched user ${id}`);
   res.json(toScimUser(updated, req));
 });
@@ -656,6 +659,7 @@ router.delete('/Users/:id', requireScimToken, (req, res) => {
 
   db.prepare('DELETE FROM identity_sessions WHERE user_id = ?').run(id);
   db.prepare('DELETE FROM users WHERE id = ?').run(id);
+  afterOwnershipWrite(db, 'scim-user-delete');
   log.info(`SCIM: deleted user ${id} (${user.email})`);
   res.status(204).send();
 });

@@ -1,4 +1,5 @@
 import { SEVERITY_COLOR, VERDICT_TEXT, type Analysis, type ReportItem } from './adoptTypes'
+import { PlatformImportView } from './PlatformImportView'
 
 function Item({ item }: { item: ReportItem }) {
   const color = item.severity ? SEVERITY_COLOR[item.severity] : item.level === 'ok' ? '#22c55e' : item.level === 'decision' ? '#60a5fa' : '#eab308'
@@ -43,6 +44,7 @@ export function ReportView({ analysis }: { analysis: Analysis }) {
       <div style={{ marginTop: 6, fontSize: '.9rem', fontWeight: 600, color: r.verdict === 'critical_risks' ? SEVERITY_COLOR.critical : r.verdict === 'ready' ? '#22c55e' : '#eab308' }}>
         {VERDICT_TEXT[r.verdict]}
       </div>
+      {r.platform && <PlatformImportView platform={r.platform} />}
       <Section title="Risks" items={r.risks} />
       <Section title="Needs changes or a decision" items={r.changes} />
       <Section title="Works as is" items={r.works} />

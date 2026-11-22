@@ -6,6 +6,8 @@ import { SetUserPasswordModal } from '../components/SetUserPasswordModal'
 import { UserApiKeyCell } from '../components/UserApiKeyCell'
 import { ResetMfaButton } from '../components/mfa/ResetMfaButton'
 import { ForgetDevicesButton } from '../components/mfa/ForgetDevicesButton'
+import { OrphanedAppsCard } from '../components/ownership/OrphanedAppsCard'
+import { LeastUsedAppsCard } from '../components/LeastUsedAppsCard'
 
 interface User {
   id: number
@@ -272,6 +274,8 @@ export function Users() {
 
   return (
     <div className="container">
+      <OrphanedAppsCard />
+      <LeastUsedAppsCard />
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
         <h2 style={{ margin: 0 }}>Users</h2>
         <button className="btn btn-sm" onClick={() => setShowForm(v => !v)}>

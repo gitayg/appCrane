@@ -2,6 +2,7 @@ import express from 'express';
 import { basename, dirname, join, resolve, sep } from 'path';
 import { fileURLToPath } from 'url';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, openSync, unlinkSync } from 'fs';
+import { execFileSync as runFile } from 'child_process';
 import { initDb, getDb } from './db.js';
 import { errorHandler, notFound } from './utils/errors.js';
 import log from './utils/logger.js';
@@ -632,6 +633,10 @@ async function maybeAutoRollback(originalError) {
     log.error('Pending self-update file unreadable — cannot auto-rollback.');
     return;
   }
+  if (process.env.APPCRANE_SAFE_BOOT === '1' && pending.health_url) {
+    log.error('Leaving the rollback to scripts/safe-boot.sh, which also restores the previous dependencies and, if migrations ran, the database snapshot.');
+    return;
+  }
   if (pending.completed_at) {
     log.error('Pending update was already completed — boot failure is unrelated to a recent update. Cannot auto-rollback.');
     return;
@@ -756,15 +761,8 @@ app.post('/api/self-update', requireAuth, requirePlatformAdmin, async (req, res)
     // don't tag releases).
     const previousSha = execFileSync('git', ['rev-parse', 'HEAD'], gitOpts).toString().trim();
 
-    // v2.27.0: snapshot the DB + .env BEFORE anything destructive. Code
-    // rollback (maybeAutoRollback) can undo a bad commit; it cannot undo a
-    // damaged database or a clobbered ENCRYPTION_KEY — and losing that key
-    // makes every stored secret permanently unreadable. Non-fatal: a failed
-    // snapshot is reported, not a reason to block the upgrade.
-    const { createPreUpdateSnapshot } = await import('./services/updateSnapshot.js');
-    const snapshot = createPreUpdateSnapshot(cwd, { from: VERSION, sha: previousSha });
-
     execFileSync('git', ['-c', 'credential.helper=', 'fetch', 'origin'], gitOpts);
+    const targetSha = execFileSync('git', ['rev-parse', 'origin/main^{commit}'], gitOpts).toString().trim();
 
     // v2.55.2: the floor of the release being INSTALLED, read without checking
     // it out. NODE_FLOOR is a constant compiled into the running version, so
@@ -891,50 +889,59 @@ app.post('/api/self-update', requireAuth, requirePlatformAdmin, async (req, res)
       }
     }
 
-    // Only now is the working tree moved. Everything above is either read-only
-    // or repairs the host; the first destructive step comes after the runtime
-    // is known to support what is about to be installed.
-    const pullOutput = execFileSync('git', ['reset', '--hard', 'origin/main'], gitOpts).toString().trim();
-
-    execFileSync('npm', ['install', '--omit=dev', '--prefer-offline'], {
-      cwd, stdio: 'pipe', timeout: 120000,
+    const {
+      preflightUpdate, discardStaging, applyStagedRelease, buildPendingRecord,
+    } = await import('./services/selfUpdate.js');
+    const pathNode = execFileSync('node', ['-v'], { stdio: 'pipe' }).toString().trim().replace(/^v/, '');
+    const preflight = preflightUpdate({
+      cwd, sha: targetSha, db: getDb(), nodeVersion: pathNode, skipEngineCheck: !!req.query.force,
+      onLog: (m) => log.info(`[self-update] ${m}`),
     });
-
-    // Rebuild the admin SPA if studio-web/ source changed. Otherwise the
-    // server runs new code while serving a stale UI bundle. Skip-if-unchanged
-    // is gated by docs/admin-app/.built-from stamp file.
-    try {
-      const { ensureSpaBuilt } = await import('./services/spaBuilder.js');
-      const spa = ensureSpaBuilt(cwd, { onLog: (m) => log.info(`[self-update] ${m}`) });
-      if (spa.rebuilt === false && spa.reason === 'up-to-date') {
-        log.info(`Self-update: SPA bundle up-to-date (hash=${spa.hash?.slice(0, 7)})`);
-      } else if (spa.rebuilt) {
-        log.info(`Self-update: SPA rebuilt (${spa.reason}) in ${spa.durationMs}ms`);
-      } else {
-        // Build failed but server install succeeded. Surface the error to
-        // the operator without aborting the upgrade — server will boot on
-        // new code with a (potentially stale) old bundle, which is still
-        // better than a partially-installed-and-crashing process.
-        log.error(`Self-update: SPA rebuild FAILED (${spa.reason}): ${spa.error}`);
-      }
-    } catch (e) {
-      log.error(`Self-update: SPA rebuild step crashed: ${e.message}`);
+    if (!preflight.ok) {
+      discardStaging(cwd);
+      log.error(`[self-update] preflight failed at ${preflight.step}: ${preflight.error}`);
+      try {
+        logAudit(req.user?.id, null, 'self-update-preflight-failed', {
+          from: VERSION, target_sha: targetSha, step: preflight.step, error: preflight.error.slice(0, 1000),
+        });
+      } catch (_) {}
+      return res.status(422).json({
+        error: {
+          code: 'PREFLIGHT_FAILED', step: preflight.step,
+          message: `Update refused before anything changed (${preflight.step}): ${preflight.error}`,
+        },
+      });
     }
+    const targetVersion = preflight.targetVersion;
 
-    const newPkg = JSON.parse(readFileSync(join(cwd, 'package.json'), 'utf8'));
-    const targetVersion = newPkg.version;
+    // v2.27.0: snapshot the DB + .env BEFORE anything destructive. Code
+    // rollback can undo a bad commit; it cannot undo a damaged database or a
+    // clobbered ENCRYPTION_KEY. Non-fatal: a failed snapshot is reported, not a
+    // reason to block the upgrade.
+    const { createPreUpdateSnapshot } = await import('./services/updateSnapshot.js');
+    const snapshot = createPreUpdateSnapshot(cwd, {
+      from: VERSION, to: targetVersion, sha: previousSha, pending: preflight.pendingMigrations,
+    });
 
     const dataDir = selfUpdateDataDir();
     if (!existsSync(dataDir)) mkdirSync(dataDir, { recursive: true });
-    writeFileSync(pendingUpdateFile(), JSON.stringify({
-      previous_version: VERSION,
-      previous_sha: previousSha,
-      target_version: targetVersion,
-      started_at: new Date().toISOString(),
-      pid: process.pid,
-      snapshot: snapshot.ok ? { id: snapshot.id, dir: snapshot.dir, files: snapshot.files } : null,
-      snapshot_error: snapshot.ok ? null : snapshot.error,
-    }, null, 2));
+    const pendingInfo = buildPendingRecord({
+      cwd, previousVersion: VERSION, previousSha, preflight, snapshot, pid: process.pid,
+      healthUrl: `http://${HOST === '0.0.0.0' || HOST === '::' ? '127.0.0.1' : HOST}:${PORT}/api/info`,
+      dbPath: getDb().name,
+    });
+    writeFileSync(pendingUpdateFile(), JSON.stringify(pendingInfo, null, 2));
+
+    let pullOutput;
+    try {
+      pullOutput = applyStagedRelease({ cwd, sha: targetSha, previousSha, spaRebuilt: preflight.spa.rebuilt });
+    } catch (e) {
+      writeFileSync(pendingUpdateFile(), JSON.stringify({
+        ...pendingInfo, completed_at: new Date().toISOString(), success: false, outcome: 'failed',
+        audited_at: new Date().toISOString(), error: e.message,
+      }, null, 2));
+      throw e;
+    }
 
     // v2.29.1: past this point the update has ALREADY been applied (git reset +
     // npm install are done). An unguarded throw here would jump to the catch,
@@ -955,6 +962,7 @@ app.post('/api/self-update', requireAuth, requirePlatformAdmin, async (req, res)
       message: 'Update pulled. Restarting...',
       git: pullOutput,
       version: targetVersion,
+      preflight: { target_sha: targetSha, pending_migrations: preflight.pendingMigrations, spa: preflight.spa },
       // Report the restore point honestly — including when there ISN'T one, so
       // an operator is never left assuming a snapshot exists that doesn't.
       snapshot: snapshot.ok
@@ -1030,7 +1038,20 @@ app.post('/api/self-update/restart', requireAuth, requirePlatformAdmin, async (r
   }, 1200);
 });
 
-app.get('/api/self-update/status', requireAuth, requireAdmin, (req, res) => {
+function headSha() {
+  try { return runFile('git', ['rev-parse', 'HEAD'], { cwd: join(__dirname, '..'), stdio: 'pipe', timeout: 10000 }).toString().trim(); }
+  catch (_) { return null; }
+}
+
+async function selfUpdateRollbackCheck(info) {
+  const { rollbackAvailability, workDirs } = await import('./services/selfUpdate.js');
+  return rollbackAvailability(info, {
+    version: VERSION, headSha: headSha(), underSafeBoot: process.env.APPCRANE_SAFE_BOOT === '1',
+    previousDir: workDirs(join(__dirname, '..')).previous,
+  });
+}
+
+app.get('/api/self-update/status', requireAuth, requireAdmin, async (req, res) => {
   const pending = pendingUpdateFile();
   if (!existsSync(pending)) {
     return res.json({ pending: false, current_version: VERSION });
@@ -1039,16 +1060,67 @@ app.get('/api/self-update/status', requireAuth, requireAdmin, (req, res) => {
     const info = JSON.parse(readFileSync(pending, 'utf8'));
     const age = Date.now() - new Date(info.started_at).getTime();
     const completed = !!info.completed_at;
+    const rollback = await selfUpdateRollbackCheck(info);
     res.json({
       pending: !completed && age < 30000,
       timed_out: !completed && age >= 30000,
       success: info.success ?? null,
       current_version: VERSION,
       ...info,
+      rollback_available: rollback.ok,
+      rollback: rollback.ok ? rollback : { code: rollback.code, message: rollback.message },
     });
   } catch (e) {
     res.json({ pending: false, current_version: VERSION, error: 'Could not read sentinel' });
   }
+});
+
+/**
+ * POST /api/self-update/rollback?confirm=1[&restore_db=1] — return to the
+ * commit, dependencies and admin SPA the last self-update replaced.
+ * scripts/safe-boot.sh does the work between processes, exactly as it does for
+ * an update that fails its health gate; this records the request and exits.
+ * The database is restored from the pre-update snapshot only on restore_db=1,
+ * because everything written since that snapshot is lost with it.
+ */
+app.post('/api/self-update/rollback', requireAuth, requirePlatformAdmin, async (req, res) => {
+  const file = pendingUpdateFile();
+  const { readPending, requestRollback } = await import('./services/selfUpdate.js');
+  const info = readPending(file);
+  const check = await selfUpdateRollbackCheck(info);
+  if (!check.ok) return res.status(409).json({ error: { code: check.code, message: check.message } });
+  const restoreDb = req.query.restore_db === '1';
+  if (restoreDb && !(info.snapshot?.dir && existsSync(join(info.snapshot.dir, 'deployhub.db')))) {
+    return res.status(409).json({ error: { code: 'NO_SNAPSHOT', message: 'The pre-update database snapshot is gone; roll back without restore_db=1.' } });
+  }
+  if (req.query.confirm !== '1') {
+    return res.status(400).json({
+      error: {
+        code: 'CONFIRM_REQUIRED',
+        message: `This restarts AppCrane on v${check.previous_version} (${check.previous_sha.slice(0, 7)}). `
+          + (restoreDb
+            ? `The database is replaced by snapshot ${check.snapshot}; everything written since the update is lost. `
+            : (check.pending_migrations.length ? `The database keeps the ${check.pending_migrations.length} migration(s) the update applied; add restore_db=1 to restore snapshot ${check.snapshot} instead. ` : ''))
+          + 'Repeat with ?confirm=1.',
+      },
+      rollback: check,
+    });
+  }
+  if (!req.query.force) {
+    const { inflightRefusal } = await import('./services/inflightDeploys.js');
+    const refusal = inflightRefusal(getDb(), 'rollback');
+    if (refusal) return res.status(409).json(refusal);
+  }
+  requestRollback(file, info, { by: req.user?.email || req.user?.id || null, restoreDb });
+  try {
+    const { logAudit } = await import('./middleware/audit.js');
+    logAudit(req.user?.id, null, 'self-update-rollback-requested', {
+      from: VERSION, to: check.previous_version, sha: check.previous_sha, restore_db: restoreDb,
+    });
+  } catch (_) {}
+  log.warn(`[rollback] ${req.user?.email || req.user?.id} requested a rollback to v${check.previous_version}`);
+  res.json({ message: `Rolling back to v${check.previous_version}. AppCrane restarts now.`, rollback: { ...check, restore_db: restoreDb } });
+  setTimeout(() => process.exit(0), 1200);
 });
 
 // API Routes
@@ -1086,15 +1158,23 @@ app.use('/api', noticesRoutes);          // /api/notices, /api/apps/:slug/notice
 app.use('/api/apps', appsRoutes);
 app.use('/api/apps', deployRoutes);     // /api/apps/:slug/deploy/:env
 app.use('/api/apps', envVarsRoutes);     // /api/apps/:slug/env/:env
+app.use('/api/apps', (await import('./routes/appSecretConnections.js')).default); // /api/apps/:slug/secret-connections
 app.use('/api/apps', envFilesRoutes);    // /api/apps/:slug/env-files — stored .env files of a Crane-hosted app
 app.use('/api/apps', healthRoutes);      // /api/apps/:slug/health/:env
 app.use('/api/apps', backupsRoutes);     // /api/apps/:slug/backup/:env
 app.use('/api/apps', (await import('./routes/accessRules.js')).default); // /api/apps/:slug/access-rules[/:env]: path role rules
+app.use('/api', (await import('./routes/sleep.js')).default); // /api/apps/:slug/sleep[/:env/wake], /api/sleep/defaults
+app.use('/api', (await import('./routes/usage.js')).default); // /api/apps/:slug/usage[/settings], /api/usage/apps
 app.use('/api', (await import('./routes/apiKeys.js')).default); // /api/me/api-key, /api/me/api-key/rotate, /api/api-key-policy
 app.use('/api', (await import('./routes/intake.js')).default); // /api/apps/:slug/intake[/review], /api/apps/:slug/classification, /api/intake/queue, /api/data-classification/{policy,apps}
 app.use('/api', (await import('./routes/releaseCheck.js')).default); // /api/apps/:slug/release-check[/run|/exceptions]
+app.use('/api', (await import('./routes/githubSyncStatus.js')).default); // /api/apps/:slug/github-sync: GitHub vs AppCrane copy of the deploy branch
+app.use('/api', (await import('./routes/githubExport.js')).default); // POST /api/apps/:slug/github-export: push a Crane-hosted repo to its GitHub repo, fast-forward only, verified
+app.use('/api', (await import('./routes/aiAct.js')).default); // /api/apps/:slug/{ai-act,ai-use,ai-notice}, /api/ai-act/{literacy,inventory,retention}
+app.use('/api', (await import('./routes/imageTrust.js')).default); // /api/apps/:slug/attestations, /api/apps/:slug/deployments/:id/attestation[/:doc], /api/image-trust/*
 app.use('/api', (await import('./routes/autoPatch.js')).default); // /api/auto-patch/policy, /api/apps/:slug/auto-patch
 app.use('/api', (await import('./routes/accessReviews.js')).default); // /api/access-reviews/*: periodic access reviews
+app.use('/api', (await import('./routes/appOwnership.js')).default); // /api/apps/:slug/ownership|owner-transfers|owner, /api/owner-transfers/*, /api/admin/orphaned-apps
 app.use('/api', (await import('./routes/auditChain.js')).default); // /api/audit-chain/*: tamper-evident audit
 app.use('/api/adopt', (await import('./routes/adopt.js')).default); // Adopt an app: analyse a GitHub repo or zip, adopt to sandbox
 app.use('/api/llm-gateway', (await import('./routes/llmGateway.js')).adminRouter); // LLM gateway config + usage (platform admin)
@@ -1149,6 +1229,7 @@ app.use('/api/settings', (await import('./routes/jobHealth.js')).default); // /a
 app.use('/api/settings', (await import('./routes/hostHardening.js')).default); // /api/settings/host-hardening: Host limits (platform admin)
 app.use('/api/settings/client-errors', clientErrorsAdminRoutes); // aggregated browser errors (platform admin)
 app.use('/api/settings/secrets-provider', (await import('./routes/secretsProviderStatus.js')).default); // AWS Secrets Manager status (platform admin)
+app.use('/api/secret-connections', (await import('./routes/secretConnections.js')).default); // Vault / Infisical / 1Password / AWS SSM connections (platform admin)
 app.use('/api/settings', (await import('./routes/restoreDrills.js')).default); // /api/settings/restore-drills (platform admin)
 app.use('/api/evidence-packs', (await import('./routes/evidencePack.js')).default); // compliance evidence packs (platform admin)
 app.use('/api/settings', (await import('./routes/siem.js')).default); // /api/settings/siem: SIEM and log streaming (platform admin)
@@ -1335,6 +1416,7 @@ app.get('/access-reviews', (req, res) => sendHtml(res, adminSpa));
 app.get('/access-reviews/campaigns', (req, res) => sendHtml(res, adminSpa));
 app.get('/access-reviews/campaigns/:id', (req, res) => sendHtml(res, adminSpa));
 app.get('/audit-integrity', (req, res) => sendHtml(res, adminSpa));
+app.get('/owner-transfers', (req, res) => sendHtml(res, adminSpa));
 app.get('/tasks', (req, res) => sendHtml(res, adminSpa)); // My tasks; task e-mails link to /tasks?task=<id>
 app.get('/surveys', (req, res) => sendHtml(res, adminSpa)); // NPS & surveys; survey e-mails link to /surveys?app=<slug>
 // Found by the same test: /skills is a client-side redirect to /settings#skills,
@@ -1374,7 +1456,9 @@ app.get('/docs', (req, res) => sendHtml(res, adminSpa));
 // Friendly crash page. Caddy's handle_errors rewrites failed app proxy requests
 // to /api/_crashed<original-uri> so we can identify the app from the URL and
 // render a useful page instead of a blank upstream error.
-app.all('/api/_crashed/*splat', (req, res) => {
+app.all('/api/_crashed/*splat', async (req, res) => {
+  const { handleSleepingRequest } = await import('./services/sleepWakeHandler.js');
+  if (await handleSleepingRequest(req, res)) return;
   const rawSplat = req.params.splat;
   const rest = Array.isArray(rawSplat) ? rawSplat.join('/') : (rawSplat || '');
   const firstSeg = rest.split(/[/?#]/).filter(Boolean)[0] || '';
@@ -1551,25 +1635,17 @@ app.listen(PORT, HOST, async () => {
 
   // Reconcile a pending self-update — only AFTER DB is healthy, otherwise
   // we'd mark a broken release "success: true" before its migrations have
-  // even run.
+  // even run. Under safe-boot.sh the health gate gives the verdict, and
+  // watchUpdateOutcome audits it once it lands.
   try {
-    const pending = pendingUpdateFile();
-    if (existsSync(pending)) {
-      const info = JSON.parse(readFileSync(pending, 'utf8'));
-      if (!info.completed_at) {
-        const success = info.target_version === VERSION;
-        writeFileSync(pending, JSON.stringify({
-          ...info,
-          completed_at: new Date().toISOString(),
-          success,
-          final_version: VERSION,
-        }, null, 2));
-        log.info(`Self-update reconciled: ${info.previous_version} → ${VERSION} (success: ${success})`);
-        if (success && info.previous_version && info.previous_version !== VERSION) {
-          log.info(`Self-update complete: ${info.previous_version} → ${VERSION}`);
-        }
-      }
-    }
+    const { reconcilePendingUpdate, watchUpdateOutcome } = await import('./services/selfUpdate.js');
+    const { logAudit } = await import('./middleware/audit.js');
+    const audit = (action, detail) => logAudit(null, null, action, detail);
+    const outcome = reconcilePendingUpdate({
+      file: pendingUpdateFile(), version: VERSION, underSafeBoot: process.env.APPCRANE_SAFE_BOOT === '1', audit,
+    });
+    if (outcome) log.info(`Self-update reconciled at v${VERSION}: ${outcome}`);
+    if (outcome === 'verifying') watchUpdateOutcome({ file: pendingUpdateFile(), audit });
   } catch (e) {
     log.warn('Pending self-update reconcile failed: ' + e.message);
   }
@@ -1753,6 +1829,13 @@ app.listen(PORT, HOST, async () => {
     log.error('Cron scheduler failed to start: ' + e.message);
   }
 
+  try {
+    const { startEnvSleeper } = await import('./services/envSleeper.js');
+    startEnvSleeper();
+  } catch (e) {
+    log.error('Environment sleeper failed to start: ' + e.message);
+  }
+
   // v2.8.0: start the email queue worker. Drains email_queue, sends via Graph
   // (or SMTP), retries with backoff, dead-letters to the platform admin.
   // Failure here is logged but boot continues.
@@ -1769,6 +1852,14 @@ app.listen(PORT, HOST, async () => {
     startAppAccessMailWorker();
   } catch (e) {
     log.error('App access mail worker failed to start: ' + e.message);
+  }
+
+  // Required owner: flag apps whose last active owner left (migration 176).
+  try {
+    const { startAppOwnershipWorker } = await import('./services/appOwnership.js');
+    startAppOwnershipWorker();
+  } catch (e) {
+    log.error('App owner sweep failed to start: ' + e.message);
   }
 
   // v2.25.2: probe platform integration credentials (Graph mail secret, GitHub

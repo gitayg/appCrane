@@ -17,7 +17,7 @@ import { notifySecretReveal } from '../services/emailService.js';
 import { secretFingerprint, secretPreview, opaquePreview } from '../services/secretMask.js';
 import { AppError } from '../utils/errors.js';
 import {
-  REF_SOURCE, SecretRefError, assertStorableValue, assertStoreRequest, isSecretRef, retainedSecretName, storeAppSecrets,
+  REF_SOURCE, SecretRefError, assertStorableValue, assertStoreRequest, isSecretRef, refSource, retainedSecretName, storeAppSecrets,
 } from '../services/secretRefs.js';
 
 const router = Router();
@@ -131,7 +131,7 @@ router.get('/:slug/env/:env', requireAppUser, (req, res) => {
   const result = vars.map(v => {
     if (showValues) {
       const value = decrypt(v.value_encrypted);
-      return { id: v.id, key: v.key, value, ...(isSecretRef(value) && { source: REF_SOURCE }), updated_at: v.updated_at };
+      return { id: v.id, key: v.key, value, ...(isSecretRef(value) && { source: refSource(value) }), updated_at: v.updated_at };
     }
     let plain = null;
     try { plain = decrypt(v.value_encrypted); } catch (_) { /* reported below */ }
@@ -141,7 +141,7 @@ router.get('/:slug/env/:env', requireAppUser, (req, res) => {
       key: v.key,
       // A reference is a name, not a value, and it is never fetched to be shown.
       value: isSecretRef(plain) ? plain : '********',
-      ...(isSecretRef(plain) && { source: REF_SOURCE }),
+      ...(isSecretRef(plain) && { source: refSource(plain) }),
       // Length, tail and fingerprint are for people who could read the whole value
       // anyway: a member who can reveal sandbox would otherwise learn a production
       // value by matching its fingerprint against a sandbox one.
@@ -193,7 +193,7 @@ router.post('/:slug/env/:env/:key/reveal', requireAppUser, (req, res) => {
   recordReveal(req, env, [row.key]);
   const value = decrypt(row.value_encrypted);
   res.set('Cache-Control', 'no-store');
-  res.json({ env, key: row.key, value, ...(isSecretRef(value) && { source: REF_SOURCE }), fingerprint: secretFingerprint(value), updated_at: row.updated_at });
+  res.json({ env, key: row.key, value, ...(isSecretRef(value) && { source: refSource(value) }), fingerprint: secretFingerprint(value), updated_at: row.updated_at });
 });
 
 /**
@@ -233,7 +233,7 @@ router.put('/:slug/env/:env', requireAppUser, auditMiddleware('env-set'), async 
       storeFailure = outcome.failed;
       toWrite = Object.fromEntries(stored.map((s) => [s.key, s.reference]));
     } else {
-      for (const value of Object.values(vars)) assertStorableValue(String(value));
+      for (const value of Object.values(vars)) assertStorableValue(String(value), { app: req.app });
     }
   } catch (e) {
     throw refused(e);

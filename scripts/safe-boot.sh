@@ -26,6 +26,14 @@
 #   5. Hard cap of MAX_ROLLBACK_ATTEMPTS (persisted across loop iterations
 #      to the pending file) prevents infinite loop if both versions
 #      are broken.
+#   6. Health gate: on the first spawn after a self-update that recorded a
+#      health_url, the child must answer it with the target version within
+#      APPCRANE_UPDATE_HEALTH_TIMEOUT seconds (default 120). If it exits or
+#      times out, it is stopped and rolled back: previous SHA, the
+#      node_modules and admin SPA kept in .self-update/previous, and the
+#      pre-update database snapshot when the update had pending migrations.
+#   7. A rollback a platform admin requested (POST /api/self-update/rollback)
+#      runs the same way once the child exits.
 #
 # Dependencies:
 #   - jq (for parsing the pending file). `apt install jq` if missing.
@@ -43,10 +51,26 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 APPCRANE_DIR="${APPCRANE_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+
+# systemd does not load .env; the server does, and the first DATA_DIR line
+# there wins. Resolve it the same way so the pending file is the one the server
+# wrote (a relative path is relative to the WorkingDirectory, APPCRANE_DIR).
+env_data_dir() {
+  [ -f "$APPCRANE_DIR/.env" ] || return 0
+  local v
+  v="$(sed -n 's/^[[:space:]]*DATA_DIR[[:space:]]*=[[:space:]]*//p' "$APPCRANE_DIR/.env" | head -1 | sed 's/[[:space:]]*$//')"
+  [ -n "$v" ] || return 0
+  case "$v" in /*) echo "$v" ;; *) echo "$APPCRANE_DIR/${v#./}" ;; esac
+}
+DATA_DIR="${DATA_DIR:-$(env_data_dir)}"
 DATA_DIR="${DATA_DIR:-${APPCRANE_DIR}/data}"
-PENDING_FILE="${DATA_DIR}/.self-update/self-update-pending.json"
+# server/index.js pendingUpdateFile(): DATA_DIR/self-update-pending.json. This
+# used to read DATA_DIR/.self-update/..., a file nothing writes, so the
+# out-of-process rollback never found an update to roll back.
+PENDING_FILE="${DATA_DIR}/self-update-pending.json"
 BOOT_GRACE_SECONDS="${BOOT_GRACE_SECONDS:-30}"
 MAX_ROLLBACK_ATTEMPTS="${MAX_ROLLBACK_ATTEMPTS:-3}"
+HEALTH_TIMEOUT_SECONDS="${APPCRANE_UPDATE_HEALTH_TIMEOUT:-120}"
 
 log() {
   echo "[safe-boot] $*" >&2
@@ -75,10 +99,48 @@ read_pending_field() {
   if [ ! -f "$PENDING_FILE" ]; then
     return 1
   fi
-  jq -r ".${field} // empty" "$PENDING_FILE" 2>/dev/null
+  jq -r ".${field} // empty" "$PENDING_FILE"
 }
 
+# pending_set <jq-filter> [jq args...]: rewrite the pending file atomically.
+pending_set() {
+  local filter="$1" tmp
+  shift
+  tmp="$(mktemp "${PENDING_FILE}.XXXXXX")" || return 1
+  if jq "$@" "$filter" "$PENDING_FILE" > "$tmp"; then mv "$tmp" "$PENDING_FILE"; else rm -f "$tmp"; return 1; fi
+}
+
+now_utc() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+# The database file is swapped only while node is down. The failed release's
+# copy (with its -wal/-shm, which would otherwise replay onto the restored file)
+# is kept beside it as rolled-back-db/ for a post-mortem.
+restore_db_snapshot() {
+  local snap_dir db_file keep
+  snap_dir="$(read_pending_field 'snapshot.dir')"
+  db_file="$(read_pending_field 'db_path')"
+  db_file="${db_file:-$DATA_DIR/deployhub.db}"
+  if [ -z "$snap_dir" ] || [ ! -f "$snap_dir/deployhub.db" ]; then
+    log "database snapshot missing (${snap_dir:-none}) — keeping the database as the failed release left it"
+    return 1
+  fi
+  keep="$(dirname "$db_file")/rolled-back-db"
+  rm -rf "$keep" && mkdir -p "$keep" || return 1
+  for f in "$db_file" "$db_file-wal" "$db_file-shm"; do
+    [ -e "$f" ] && mv "$f" "$keep/"
+  done
+  cp "$snap_dir/deployhub.db" "$db_file.restoring" && mv "$db_file.restoring" "$db_file" || return 1
+  chmod 600 "$db_file" || true
+  log "database restored from snapshot $(basename "$snap_dir"); the failed release's copy is in $keep"
+  return 0
+}
+
+# attempt_rollback <mode> <reason>
+#   crash      node died within BOOT_GRACE_SECONDS of a spawn
+#   gate       an updated release failed the post-update health gate
+#   requested  a platform admin asked for it (POST /api/self-update/rollback)
 attempt_rollback() {
+  local mode="${1:-crash}" reason="${2:-boot crash}"
   if ! command -v jq >/dev/null 2>&1; then
     log "jq not installed — cannot parse pending file. Install jq."
     return 1
@@ -88,16 +150,30 @@ attempt_rollback() {
     return 1
   fi
 
-  local prev_sha prev_version attempts completed
+  local prev_sha prev_version attempts completed health_url health_ok rolled prev_dir restore_db
   prev_sha="$(read_pending_field 'previous_sha')"
   prev_version="$(read_pending_field 'previous_version')"
   attempts="$(read_pending_field 'rollback_attempts')"
   completed="$(read_pending_field 'completed_at')"
+  health_url="$(read_pending_field 'health_url')"
+  health_ok="$(read_pending_field 'health_ok_at')"
+  rolled="$(read_pending_field 'rolled_back_at')"
+  prev_dir="$(read_pending_field 'previous_dir')"
+  restore_db="$(read_pending_field 'restore_db')"
   attempts="${attempts:-0}"
 
-  if [ -n "$completed" ]; then
-    log "pending update already completed — boot crash unrelated to last update"
+  if [ -n "$rolled" ]; then
+    log "the update to $(read_pending_field 'target_version') was already rolled back at $rolled"
     return 1
+  fi
+  if [ "$mode" = "crash" ]; then
+    # A gated update is settled by the health gate; before that, completed_at
+    # is only "the database opened".
+    if [ -n "$health_url" ]; then completed="$health_ok"; fi
+    if [ -n "$completed" ]; then
+      log "pending update already completed — boot crash unrelated to last update"
+      return 1
+    fi
   fi
   if [ -z "$prev_sha" ]; then
     log "pending update has no previous_sha (legacy format pre-v2.1.8) — cannot auto-rollback. Manual recovery: git reset --hard <sha-before-${prev_version}> in $APPCRANE_DIR"
@@ -108,33 +184,99 @@ attempt_rollback() {
     return 1
   fi
 
-  log "rolling back to ${prev_version:-?} @ ${prev_sha:0:7} (attempt $((attempts + 1))/$MAX_ROLLBACK_ATTEMPTS)"
+  log "rolling back to ${prev_version:-?} @ ${prev_sha:0:7} (attempt $((attempts + 1))/$MAX_ROLLBACK_ATTEMPTS): $reason"
 
   # Persist attempt counter BEFORE destructive ops so a crash mid-rollback
   # doesn't burn an attempt without recording it.
-  local tmp
-  tmp="$(mktemp)"
-  jq --arg n "$((attempts + 1))" --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-     '.rollback_attempts = ($n | tonumber) | .last_rollback_at = $t' \
-     "$PENDING_FILE" > "$tmp" && mv "$tmp" "$PENDING_FILE"
+  pending_set '.rollback_attempts = ($n | tonumber) | .last_rollback_at = $t' \
+    --arg n "$((attempts + 1))" --arg t "$(now_utc)"
 
   git config --global --add safe.directory "$APPCRANE_DIR" 2>/dev/null || true
 
-  if ! git fetch origin 2>&1 | sed 's/^/[safe-boot] git fetch: /' >&2; then
-    log "git fetch failed — cannot roll back"
-    return 1
+  # The previous commit is local: it was HEAD before the update. Fetch only if
+  # it somehow is not.
+  if ! git cat-file -e "${prev_sha}^{commit}"; then
+    if ! git fetch origin 2>&1 | sed 's/^/[safe-boot] git fetch: /' >&2; then
+      log "git fetch failed — cannot roll back"
+      return 1
+    fi
   fi
   if ! git reset --hard "$prev_sha" 2>&1 | sed 's/^/[safe-boot] git reset: /' >&2; then
     log "git reset --hard $prev_sha failed"
     return 1
   fi
-  if ! npm install --omit=dev --prefer-offline 2>&1 | sed 's/^/[safe-boot] npm: /' >&2; then
+  if [ -n "$prev_dir" ] && [ -d "$prev_dir/node_modules" ]; then
+    rm -rf "$APPCRANE_DIR/node_modules" && mv "$prev_dir/node_modules" "$APPCRANE_DIR/node_modules" || {
+      log "could not restore the previous node_modules from $prev_dir"
+      return 1
+    }
+    log "restored the previous node_modules"
+  elif ! npm install --omit=dev --prefer-offline 2>&1 | sed 's/^/[safe-boot] npm: /' >&2; then
     log "npm install failed after rollback"
     return 1
   fi
+  if [ -n "$prev_dir" ] && [ -d "$prev_dir/admin-app" ]; then
+    rm -rf "$APPCRANE_DIR/docs/admin-app" && mv "$prev_dir/admin-app" "$APPCRANE_DIR/docs/admin-app" \
+      && log "restored the previous admin SPA"
+  fi
+
+  local db_restored=false
+  if [ "$restore_db" = "true" ] && restore_db_snapshot; then db_restored=true; fi
+
+  pending_set '.rolled_back_at = $t | .rollback_reason = $r | .rollback_mode = $m | .db_restored = ($d == "true") | .outcome = "rolled_back"' \
+    --arg t "$(now_utc)" --arg r "$reason" --arg m "$mode" --arg d "$db_restored"
 
   log "rollback to ${prev_version:-?} complete; re-spawning node"
   return 0
+}
+
+# True when the node just spawned is the first boot of a self-update that
+# asked for a health gate (server/index.js writes health_url) and has no verdict.
+update_gate_pending() {
+  command -v jq >/dev/null 2>&1 || return 1
+  [ -f "$PENDING_FILE" ] || return 1
+  [ -n "$(read_pending_field 'health_url')" ] || return 1
+  [ -z "$(read_pending_field 'health_ok_at')" ] || return 1
+  [ -z "$(read_pending_field 'rolled_back_at')" ] || return 1
+  [ -z "$(read_pending_field 'rollback_requested_at')" ] || return 1
+  return 0
+}
+
+probe_version() {
+  if command -v curl >/dev/null 2>&1; then
+    curl -fs --max-time 3 "$1" | jq -r '.version // empty'
+  else
+    node -e 'fetch(process.argv[1],{signal:AbortSignal.timeout(3000)}).then(r=>r.ok?r.json():{}).then(j=>console.log(j.version||"")).catch(()=>{})' "$1"
+  fi
+}
+
+# Sets GATE_RESULT to ok | exited | timeout | signal. The new process must
+# answer health_url (GET /api/info, which queries the database) with the
+# target version within HEALTH_TIMEOUT_SECONDS.
+health_gate() {
+  local url target deadline seen
+  url="$(read_pending_field 'health_url')"
+  target="$(read_pending_field 'target_version')"
+  deadline=$(( $(date +%s) + HEALTH_TIMEOUT_SECONDS ))
+  log "health gate: waiting up to ${HEALTH_TIMEOUT_SECONDS}s for $url to report v$target"
+  while :; do
+    if [ "$got_signal" -eq 1 ]; then GATE_RESULT=signal; return; fi
+    if ! kill -0 "$child_pid" 2>/dev/null; then GATE_RESULT=exited; return; fi
+    seen="$(probe_version "$url")"
+    if [ "$seen" = "$target" ]; then GATE_RESULT=ok; return; fi
+    GATE_SEEN="$seen"
+    if [ "$(date +%s)" -ge "$deadline" ]; then GATE_RESULT=timeout; return; fi
+    sleep 1
+  done
+}
+
+stop_child() {
+  kill -TERM "$child_pid" 2>/dev/null || true
+  local i=0
+  while kill -0 "$child_pid" 2>/dev/null && [ "$i" -lt 15 ]; do sleep 1; i=$((i + 1)); done
+  kill -KILL "$child_pid" 2>/dev/null || true
+  wait "$child_pid" 2>/dev/null || true
+  child_pid=0
 }
 
 # ---------------------------------------------------------------------------
@@ -355,6 +497,36 @@ while true; do
   log "spawning node server/index.js"
   node server/index.js &
   child_pid=$!
+
+  if update_gate_pending; then
+    GATE_RESULT="" GATE_SEEN=""
+    health_gate
+    case "$GATE_RESULT" in
+      ok)
+        pending_set '.health_ok_at = $t | .outcome = "updated"' --arg t "$(now_utc)"
+        log "health gate passed: v$(read_pending_field 'target_version') is up"
+        ;;
+      timeout)
+        reason="v$(read_pending_field 'target_version') did not answer $(read_pending_field 'health_url') with its version within ${HEALTH_TIMEOUT_SECONDS}s (last seen: ${GATE_SEEN:-no answer})"
+        log "health gate failed: $reason"
+        stop_child
+        if attempt_rollback gate "$reason"; then continue; fi
+        log "no rollback possible — bailing"
+        exit 1
+        ;;
+      exited)
+        wait "$child_pid"
+        exit_code=$?
+        child_pid=0
+        reason="v$(read_pending_field 'target_version') exited with code $exit_code before passing the health check"
+        log "health gate failed: $reason"
+        if attempt_rollback gate "$reason"; then continue; fi
+        log "no rollback possible — bailing with exit=$exit_code"
+        exit "$exit_code"
+        ;;
+    esac
+  fi
+
   wait "$child_pid"
   exit_code=$?
   child_pid=0
@@ -364,6 +536,13 @@ while true; do
   if [ "$got_signal" -eq 1 ]; then
     log "exiting cleanly after signal forward (uptime=${uptime}s, child_exit=$exit_code)"
     exit 0
+  fi
+
+  if [ -n "$(read_pending_field 'rollback_requested_at')" ] && [ -z "$(read_pending_field 'rolled_back_at')" ]; then
+    log "rollback requested by $(read_pending_field 'rollback_requested_by')"
+    if attempt_rollback requested "$(read_pending_field 'rollback_reason')"; then continue; fi
+    log "requested rollback failed — restarting on the code on disk"
+    continue
   fi
 
   if [ "$exit_code" -eq 0 ]; then
@@ -377,7 +556,7 @@ while true; do
   fi
 
   log "node crashed at boot (uptime=${uptime}s, exit=$exit_code) — checking for pending self-update"
-  if attempt_rollback; then
+  if attempt_rollback crash "exited with code $exit_code ${uptime}s after boot"; then
     # Loop continues: next iteration re-spawns node on the rolled-back code.
     continue
   fi

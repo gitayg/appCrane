@@ -378,6 +378,10 @@ test('promote of a local app takes the fresh-rebuild path, pinned to the sandbox
 // ---------------------------------------------------------------------------
 // Supply-chain check
 // ---------------------------------------------------------------------------
+// Each SHA check starts from an empty fetch log: the production deploy above
+// runs the release check, whose served-output crawl and endpoint probe fetch
+// the local sandbox (localhost), and those calls are not the GitHub calls
+// these tests rule out.
 
 function workClone(slug) {
   const dest = mkdtempSync(join(ROOT, 'wc-'));
@@ -387,6 +391,7 @@ function workClone(slug) {
 }
 
 test('SHA check (local): match verifies with no GitHub call, even with a github.com URL on the row', async () => {
+  fetchCalls.length = 0;
   const app = { ...appRow('lc-one'), github_url: 'https://github.com/o/AMC_lc-one' };
   const r = await verifyCommitSha(app, workClone('lc-one'), 'main', () => {});
   assert.equal(r.verified, true);
@@ -396,6 +401,7 @@ test('SHA check (local): match verifies with no GitHub call, even with a github.
 });
 
 test('SHA check (local): a mismatch fails at once, with no retry delay', async () => {
+  fetchCalls.length = 0;
   const dir = workClone('lc-one');
   await tool('appcrane_push_to_managed_app', { slug: 'lc-one', files: [{ path: 'moved.txt', content: 'x' }] });
   const app = { ...appRow('lc-one'), last_managed_push_sha: null };
@@ -425,6 +431,7 @@ test('SHA check (local): an unreadable repo fails closed; the operator hatch rep
 });
 
 test('SHA check: an unknown marker on a managed app fails the check instead of routing anywhere', async () => {
+  fetchCalls.length = 0;
   const app = { ...appRow('lc-one'), repo_backend: 'Local', github_url: 'https://github.com/o/r' };
   await assert.rejects(verifyCommitSha(app, workClone('lc-one'), 'main', () => {}), /does not recognise/);
   assert.equal(fetchCalls.length, 0);

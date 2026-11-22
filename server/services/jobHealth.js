@@ -16,6 +16,7 @@ const ALERT_WATCH_MS = 15 * MIN;
 export const JOBS = {
   'email-queue':      { label: 'E-mail queue worker',              cadenceMs: 5_000 },
   'app-access-mail':  { label: 'App access change e-mails',        cadenceMs: 15_000 },
+  'app-owner-orphans': { label: 'Apps without an owner (orphan sweep)', cadenceMs: 5 * MIN },
   'vuln-scan':        { label: 'Daily vulnerability scan + digest', cadenceMs: DAY },
   'local-backup':     { label: 'Nightly local backup',             cadenceMs: DAY },
   'offsite-backup':   { label: 'Nightly off-site (S3) backup',      cadenceMs: DAY },
@@ -44,6 +45,7 @@ export const JOBS = {
   'runtime-patch':    { label: 'Runtime auto-patch (PHP, Node.js)', cadenceMs: 60 * MIN },
   'mongo-kernel':     { label: 'Managed MongoDB kernel check',      cadenceMs: 6 * HOUR },
   'node-runtime':     { label: 'AppCrane Node.js security check',   cadenceMs: 6 * HOUR },
+  'env-sleeper':      { label: 'Environment sleep and wake',        cadenceMs: MIN },
 };
 
 const started = new Map();

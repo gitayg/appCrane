@@ -16,6 +16,7 @@ import {
 } from './volumeHelper.js';
 import log from '../utils/logger.js';
 import { admitContainer, reserveMemory, guaranteedMb } from './memoryAdmission.js';
+import { markAwakeBySlug } from './envSleepState.js';
 import { appMemorySwapMb } from './hostSwap.js';
 import { OOM_APP_FLAG } from './oomPriority.js';
 import { CPU_APP_FLAG, buildResourceArgs } from './cpuPriority.js';
@@ -946,6 +947,9 @@ export async function startApp(opts) {
   assertNoRestoreInProgress(slug, env);
   // A malformed command is refused before anything touches Docker, measuring included.
   assertRunnableCommand(opts.command ?? null);
+  // Verify-before-run (services/imageTrust/verify.js): this instance's
+  // signature over the image's exact id, before anything is torn down.
+  await (await import('./imageTrust/verify.js')).enforceImageTrust({ slug, env, image: opts.image, onLog: opts.onLog, what: 'start' });
   let release = null;
   if (admission !== false) {
     const name = containerName(slug, env);
@@ -953,7 +957,9 @@ export async function startApp(opts) {
     release = reserveMemory(name, guaranteedMb(memoryMb) * 1024 * 1024);
   }
   try {
-    return await runAppContainer(opts);
+    const id = await runAppContainer(opts);
+    markAwakeBySlug(slug, env, 'container started');
+    return id;
   } finally {
     release?.();
   }
@@ -1237,8 +1243,13 @@ export async function stopApp(slug, env) {
 
 export async function restartApp(slug, env) {
   const name = containerName(slug, env);
+  const running = await (await import('./imageTrust/dockerImage.js')).containerImageId(name);
+  if (!running.error) {
+    await (await import('./imageTrust/verify.js')).enforceImageTrust({ slug, env, image: running.ref, imageId: running.id, what: 'restart' });
+  }
   try {
     await dockerExec(['restart', name], { timeout: 20000 });
+    markAwakeBySlug(slug, env, 'restart');
     log.info(`docker restarted: ${name}`);
   } catch (e) {
     log.warn(`docker restart ${name} failed: ${e.message}`);

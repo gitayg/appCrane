@@ -1,4 +1,5 @@
 import { allDeps, has, hasDir, jsonOf, scannable, textOf } from './projectFiles.js';
+import { detectPlatforms } from './platforms/index.js';
 
 // Static detection only: nothing here runs the project's code or its package
 // manager. Every answer comes from file names and file contents.
@@ -115,6 +116,27 @@ function healthRouteFound(files) {
   return null;
 }
 
+function applyPlatform(result, platform) {
+  if (!platform?.web) return platform;
+  const web = { ...platform.web, applied: false, not_applied: null };
+  if (result.has_dockerfile) web.not_applied = 'dockerfile';
+  else if (result.kind === 'spa' || result.kind === 'static') web.not_applied = 'static';
+  else if (result.runtime !== 'node' && result.runtime !== 'python') web.not_applied = 'runtime';
+  else {
+    if (web.start) {
+      result.start = web.start;
+      result.start_source = web.start_source;
+      web.applied = true;
+    }
+    if (web.build && result.runtime === 'node') {
+      result.build = web.build;
+      result.build_source = web.build_source;
+      web.applied = true;
+    }
+  }
+  return { ...platform, web };
+}
+
 /**
  * What the project is and how it builds and runs. Never executes anything.
  */
@@ -196,6 +218,8 @@ export function detectProject(files) {
   if (replit?.deployment?.run && result.framework === 'unknown') {
     Object.assign(result, { framework: 'replit-run', label: 'Replit run command', kind: 'server', start: replit.deployment.run, build: replit.deployment.build || null });
   }
+
+  result.platform = applyPlatform(result, detectPlatforms(files));
 
   const listen = detectListenPort(files);
   const replitPort = replit?.ports?.find((p) => p.localPort)?.localPort || null;
