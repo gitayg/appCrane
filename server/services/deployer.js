@@ -1120,9 +1120,9 @@ export async function promoteApp(app, userId, opts = {}) {
   const artifactRelease = isArtifactHash(sandboxDeploy.commit_hash);
   if (!artifactRelease && (usesLocalRepo(app) || ((app.source_type === 'github' || app.source_type === 'managed') && app.github_url))) {
     const freshResult = db.prepare(`
-      INSERT INTO deployments (app_id, env, version, status, commit_hash, commit_sha, deployed_by, log)
-      VALUES (?, 'production', ?, 'pending', ?, ?, ?, ?)
-    `).run(app.id, sandboxDeploy.version, sandboxDeploy.commit_hash, sandboxDeploy.commit_sha || null, userId,
+      INSERT INTO deployments (app_id, env, version, status, commit_hash, commit_sha, deployed_by, release_label, log)
+      VALUES (?, 'production', ?, 'pending', ?, ?, ?, ?, ?)
+    `).run(app.id, sandboxDeploy.version, sandboxDeploy.commit_hash, sandboxDeploy.commit_sha || null, userId, sandboxDeploy.release_label ?? null,
       `Promote from sandbox #${sandboxDeploy.id} — fresh production build @ ${sandboxDeploy.commit_hash || 'HEAD'}`);
     const freshDeployId = freshResult.lastInsertRowid;
     // v2.7.12: build production from the EXACT sandbox commit (targetCommit),
@@ -1151,9 +1151,9 @@ export async function promoteApp(app, userId, opts = {}) {
   }
 
   const insertResult = db.prepare(`
-    INSERT INTO deployments (app_id, env, version, status, commit_hash, deployed_by, log)
-    VALUES (?, 'production', ?, 'deploying', ?, ?, ?)
-  `).run(app.id, sandboxDeploy.version, sandboxDeploy.commit_hash, userId,
+    INSERT INTO deployments (app_id, env, version, status, commit_hash, deployed_by, release_label, log)
+    VALUES (?, 'production', ?, 'deploying', ?, ?, ?, ?)
+  `).run(app.id, sandboxDeploy.version, sandboxDeploy.commit_hash, userId, sandboxDeploy.release_label ?? null,
     `Promoted from sandbox deployment #${sandboxDeploy.id}`);
   const newDeployId = insertResult.lastInsertRowid;
   db.prepare(`

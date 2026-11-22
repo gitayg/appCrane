@@ -79,7 +79,11 @@ test('no component reveals a secret from an effect or a list load', () => {
     }
   }
   const revealCallers = sources.filter(({ text }) => /revealEnvVar\(|\/reveal`/.test(text)).map((s) => s.rel).sort();
-  assert.deepEqual(revealCallers, ['components/env/EnvVarsPanel.tsx', 'components/env/envVarsApi.ts']);
+  // The manage page's Env vars tab passes the same one-key reveal to SecretValue, like EnvVarsPanel.
+  const tab = sources.find(s => s.rel === 'components/appManage/EnvVarsTab.tsx').text;
+  assert.match(tab, /<SecretValue\b[\s\S]*?reveal=\{\(\) => reveal\(env, key\)\}/, 'the Env vars tab reveals outside SecretValue');
+  assert.doesNotMatch(tab, /reveal=true/, 'the Env vars tab bulk-reveals an environment');
+  assert.deepEqual(revealCallers, ['components/appManage/EnvVarsTab.tsx', 'components/env/EnvVarsPanel.tsx', 'components/env/envVarsApi.ts']);
 });
 
 test('every password field in the dashboard has the eye', () => {

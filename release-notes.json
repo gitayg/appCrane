@@ -1,7 +1,11 @@
 {
-  "2.142.1": [
+  "2.143.1": [
     "Work Review's prompt checks (vague, done-criteria, correction, go-ahead) are now scored against prompts a person labelled, and the measured error rates are in its known-limitations page.",
     "They also catch more: \"make the tests pass\" now counts as a done-criterion, \"improve the error handling\" as vague, and \"revert that\" or \"undo the last change\" as corrections. The plugin is now version 1.4.0."
+  ],
+  "2.143.0": [
+    "Each app now has one manage page with tabs on top and Production and Sandbox side by side, so you compare the two environments row by row. On a phone the table scrolls sideways.",
+    "A new Releases tab lists every release with its outcome, its What's New, who deployed it (a person or an agent) and its traffic while it was live. Tag a release with a rule-set label, compare two releases, and export the log as CSV. Click the version in an app's top bar to open it."
   ],
   "2.142.0": [
     "Sensitive app settings (public visibility, headless and bypass paths, TCP ports, outbound e-mail, outbound internet, API connections, custom domains without AppCrane sign-in) now wait for a platform admin's approval, with scope, expiry and audit. Databases and the LLM gateway stay self-service. Apps can call registered APIs through a gateway that adds the credential, so the app never holds it.",

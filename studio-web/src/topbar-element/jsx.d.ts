@@ -17,6 +17,7 @@ interface CraneAppTopbarAttrs extends HTMLAttributes<HTMLElement> {
   'show-evict'?:   string | boolean
   'folded'?:       string | boolean
   'sand-hidden'?:  string | boolean
+  'releases-url'?: string
   children?:       ReactNode
 }
 

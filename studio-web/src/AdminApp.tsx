@@ -30,7 +30,7 @@ const Audit = lazyPage(() => import('./pages/Audit'), 'Audit')
 const AppStudio = lazyPage(() => import('./pages/AppStudio'), 'AppStudio')
 const Settings = lazyPage(() => import('./pages/Settings'), 'Settings')
 const Docs = lazyPage(() => import('./pages/Docs'), 'Docs')
-const AppManager = lazyPage(() => import('./pages/AppManager'), 'AppManager')
+const AppManageRoute = lazyPage(() => import('./components/appManage/AppManageRoute'), 'AppManageRoute')
 const MyRequests = lazyPage(() => import('./pages/MyRequests'), 'MyRequests')
 const RequestDetail = lazyPage(() => import('./pages/RequestDetail'), 'RequestDetail')
 const Crew = lazyPage(() => import('./pages/Crew'), 'Crew')
@@ -318,7 +318,7 @@ export function AdminApp() {
           {/* Legacy /settings#skills bookmark → top-level /skills */}
           <Route path="/settings"    element={<SettingsRoute />} />
           <Route path="/docs"        element={<DocsRoute />} />
-          <Route path="/app"         element={<Layout><AppManager /></Layout>} />
+          <Route path="/app"         element={<Layout><AppManageRoute /></Layout>} />
           <Route path="/step-up"     element={<Layout><StepUp /></Layout>} />
           <Route path="*"            element={<Navigate to="/launch" replace />} />
         </Routes>

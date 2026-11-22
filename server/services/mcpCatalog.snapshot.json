@@ -1,5 +1,5 @@
 {
-  "count": 76,
+  "count": 77,
   "tools": [
     {
       "name": "appcrane_adopt_app",
@@ -168,6 +168,11 @@
     },
     {
       "name": "appcrane_list_app_members",
+      "requiredRole": "any",
+      "readOnly": true
+    },
+    {
+      "name": "appcrane_list_app_releases",
       "requiredRole": "any",
       "readOnly": true
     },

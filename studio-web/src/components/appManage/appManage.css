@@ -1,0 +1,88 @@
+.am2 { padding-bottom: 48px; }
+.am2 .am2-wrap { max-width: 1200px; margin: 0 auto; padding: 20px 24px 0; }
+.am2 .am2-crumb { font-size: .78rem; color: var(--dim); margin-bottom: 14px; }
+.am2 .am2-crumb a { color: var(--dim); text-decoration: none; }
+.am2 .am2-crumb a:hover { color: var(--text); }
+
+.am2 .am2-head { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; flex-wrap: wrap; }
+.am2 .am2-icon { width: 44px; height: 44px; border-radius: 10px; background: var(--surface2); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 1.1rem; overflow: hidden; cursor: pointer; flex-shrink: 0; }
+.am2 .am2-icon img { width: 100%; height: 100%; object-fit: cover; }
+.am2 .am2-title { flex: 1; min-width: 200px; }
+.am2 .am2-title h1 { font-size: 1.25rem; font-weight: 600; line-height: 1.2; }
+.am2 .am2-summary { font-size: .8rem; color: var(--dim); margin-top: 3px; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.am2 .am2-summary .sep { opacity: .5; }
+.am2 .am2-head-actions { display: flex; gap: 8px; align-items: center; position: relative; }
+.am2 .am2-menu { position: absolute; right: 0; top: calc(100% + 6px); min-width: 220px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 12px 32px rgba(0,0,0,.35); padding: 4px; z-index: 60; }
+.am2 .am2-menu button, .am2 .am2-menu a { display: block; width: 100%; text-align: left; background: none; border: none; color: var(--text); padding: 7px 10px; border-radius: 5px; font-size: .84rem; cursor: pointer; text-decoration: none; font-family: inherit; }
+.am2 .am2-menu button:hover, .am2 .am2-menu a:hover { background: var(--surface2); }
+.am2 .am2-menu .danger { color: var(--red); }
+.am2 .am2-menu hr { border: none; border-top: 1px solid var(--border); margin: 4px 0; }
+
+.am2 .am2-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); margin-bottom: 18px; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
+.am2 .am2-tab { background: none; border: none; border-bottom: 2px solid transparent; color: var(--dim); padding: 8px 12px; font-size: .86rem; font-weight: 500; cursor: pointer; white-space: nowrap; font-family: inherit; margin-bottom: -1px; }
+.am2 .am2-tab:hover { color: var(--text); }
+.am2 .am2-tab.active { color: var(--text); border-bottom-color: var(--accent); }
+
+.am2 .am2-table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); margin-bottom: 16px; }
+.am2 table.am2-table { overflow: visible; width: 100%; border-collapse: separate; border-spacing: 0; font-size: .84rem; min-width: 640px; }
+.am2 .am2-table th, .am2 .am2-table td { padding: 10px 14px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--border); }
+.am2 .am2-table tr:last-child td { border-bottom: none; }
+.am2 .am2-table thead th { background: var(--surface2); font-weight: 600; font-size: .8rem; white-space: nowrap; }
+.am2 .am2-table th.am2-field, .am2 .am2-table td.am2-field { position: sticky; left: 0; z-index: 2; background: var(--surface); width: 170px; min-width: 130px; color: var(--dim); font-weight: 500; border-right: 1px solid var(--border); }
+.am2 .am2-table thead th.am2-field { background: var(--surface2); z-index: 3; }
+.am2 .am2-table td.am2-env { min-width: 240px; }
+.am2 .am2-table tr.am2-diff td:not(.am2-field) { background: color-mix(in srgb, var(--yellow) 8%, var(--surface)); }
+.am2 .am2-table tr.am2-diff td.am2-field { box-shadow: inset 3px 0 0 var(--yellow); }
+.am2 .am2-envhead { display: flex; align-items: center; gap: 8px; }
+.am2 .am2-envhead .grow { flex: 1; }
+.am2 .am2-span { color: var(--dim); font-size: .78rem; }
+
+.am2 .am2-pill { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 999px; font-size: .74rem; font-weight: 500; background: var(--surface2); border: 1px solid var(--border); white-space: nowrap; }
+.am2 .am2-pill.ok { color: var(--green-text); border-color: color-mix(in srgb, var(--green) 40%, transparent); background: color-mix(in srgb, var(--green) 10%, transparent); }
+.am2 .am2-pill.warn { color: var(--yellow-text); border-color: color-mix(in srgb, var(--yellow) 40%, transparent); background: color-mix(in srgb, var(--yellow) 10%, transparent); }
+.am2 .am2-pill.bad { color: var(--red); border-color: color-mix(in srgb, var(--red) 40%, transparent); background: color-mix(in srgb, var(--red) 10%, transparent); }
+.am2 .am2-pill.info { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.am2 button.am2-pill { cursor: pointer; font-family: inherit; color: var(--text); }
+.am2 button.am2-pill:hover { border-color: var(--accent); }
+.am2 .am2-row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.am2 .am2-mono { font-family: 'SF Mono', Monaco, monospace; font-size: .78rem; }
+.am2 .am2-dim { color: var(--dim); }
+.am2 .am2-small { font-size: .75rem; }
+.am2 .am2-section { margin: 22px 0 10px; font-size: .82rem; font-weight: 600; color: var(--dim); }
+.am2 .am2-cards { display: grid; gap: 12px; }
+.am2 .am2-input { background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 5px 8px; border-radius: 5px; font-size: .82rem; font-family: inherit; }
+.am2 .am2-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+.am2 .am2-toolbar .grow { flex: 1; }
+.am2 .am2-empty { color: var(--dim); padding: 18px; text-align: center; font-size: .84rem; }
+
+.am2 .am2-rel-scroll { overflow-x: auto; }
+.am2 .am2-rel-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; min-width: 760px; }
+.am2 .am2-rel-col h3 { font-size: .86rem; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+.am2 .am2-rel { border: 1px solid var(--border); border-radius: 8px; background: var(--surface); padding: 10px 12px; margin-bottom: 8px; }
+.am2 .am2-rel.picked { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.am2 .am2-rel-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.am2 .am2-rel-top .ver { font-weight: 600; }
+.am2 .am2-rel-top .when { margin-left: auto; color: var(--dim); font-size: .74rem; }
+.am2 .am2-rel-note { font-size: .8rem; margin: 6px 0; white-space: pre-wrap; word-break: break-word; }
+.am2 .am2-rel-meta { font-size: .74rem; color: var(--dim); display: flex; gap: 10px; flex-wrap: wrap; }
+.am2 .am2-rel-metrics { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; margin-top: 8px; }
+.am2 .am2-rel-metrics div { background: var(--surface2); border-radius: 5px; padding: 5px 7px; }
+.am2 .am2-rel-metrics .k { font-size: .66rem; color: var(--dim); }
+.am2 .am2-rel-metrics .v { font-size: .84rem; font-weight: 600; }
+.am2 .am2-up { color: var(--green-text); }
+.am2 .am2-down { color: var(--red); }
+
+.am2 .am2-log { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; height: 52vh; overflow: auto; padding: 10px 14px; font-family: 'SF Mono', Monaco, monospace; font-size: .74rem; line-height: 1.6; white-space: pre-wrap; word-break: break-all; }
+
+.am2-modal-back { position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 10500; display: flex; align-items: center; justify-content: center; }
+.am2-modal { width: min(620px, 92vw); max-height: 85vh; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 16px 48px rgba(0,0,0,.5); display: flex; flex-direction: column; overflow: hidden; }
+.am2-modal-head { padding: 12px 16px; border-bottom: 1px solid var(--border); background: var(--surface2); display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: .95rem; }
+.am2-modal-head button { margin-left: auto; }
+.am2-modal-body { padding: 16px; display: flex; flex-direction: column; gap: 14px; font-size: .85rem; overflow-y: auto; }
+
+@media (max-width: 768px) {
+  .am2 .am2-wrap { padding: 14px 16px 0; }
+  .am2 .am2-table th.am2-field, .am2 .am2-table td.am2-field { width: 120px; min-width: 110px; }
+  .am2 .am2-rel-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .am2 .am2-head-actions { width: 100%; }
+}

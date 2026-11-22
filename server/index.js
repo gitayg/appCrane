@@ -1171,6 +1171,7 @@ app.use('/api/apps', backupsRoutes);     // /api/apps/:slug/backup/:env
 app.use('/api/apps', (await import('./routes/accessRules.js')).default); // /api/apps/:slug/access-rules[/:env]: path role rules
 app.use('/api', (await import('./routes/sleep.js')).default); // /api/apps/:slug/sleep[/:env/wake], /api/sleep/defaults
 app.use('/api', (await import('./routes/usage.js')).default); // /api/apps/:slug/usage[/settings], /api/usage/apps
+app.use('/api', (await import('./routes/releases.js')).default); // /api/apps/:slug/releases[/:id/label] (owner, app admin)
 app.use('/api', (await import('./routes/apiKeys.js')).default); // /api/me/api-key, /api/me/api-key/rotate, /api/api-key-policy
 app.use('/api', (await import('./routes/intake.js')).default); // /api/apps/:slug/intake[/review], /api/apps/:slug/classification, /api/intake/queue, /api/data-classification/{policy,apps}
 app.use('/api', (await import('./routes/releaseCheck.js')).default); // /api/apps/:slug/release-check[/run|/exceptions]

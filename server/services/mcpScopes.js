@@ -61,7 +61,7 @@ const ENV_DEPLOY = 'env-deploy';
 const GROUPS = {
   [SCOPE.READ]: [
     'appcrane_list_apps', 'appcrane_get_app', 'appcrane_top_apps', 'appcrane_top_users', 'appcrane_get_health',
-    'appcrane_get_secret', 'appcrane_list_releases', 'appcrane_list_requests', 'appcrane_ls', 'appcrane_wait_deploy',
+    'appcrane_get_secret', 'appcrane_list_releases', 'appcrane_list_app_releases', 'appcrane_list_requests', 'appcrane_ls', 'appcrane_wait_deploy',
     'appcrane_get_deploy_log', 'appcrane_get_logs', 'appcrane_get_app_context', 'appcrane_get_app_ingress',
     'appcrane_list_app_members', 'appcrane_list_app_roles', 'appcrane_list_access_requests', 'appcrane_get_guide',
     'appcrane_get_audit', 'appcrane_list_cron', 'appcrane_check_resource_limits', 'appcrane_get_backup_status',
