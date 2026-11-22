@@ -10,16 +10,16 @@ What work-review's numbers can and cannot tell you. Each item names the heuristi
 
 ## Instruction quality
 
-- **These are text tests, and they are measured.** The patterns in `scripts/classify.mjs` are scored against prompts a person labelled by meaning (`test/fixtures/work-review-labelled-prompts.json`). On 29 held-out prompts the patterns were not tuned on (labelled 2026-11-22):
+- **These are text tests, and they are measured.** The patterns in `scripts/classify.mjs` are scored against prompts a person labelled by meaning (`test/fixtures/work-review-labelled-prompts.json`). On 34 held-out prompts written after the patterns were last tuned (2026-11-22):
 
   | Test | Precision | Recall | Typical miss |
   |---|---|---|---|
-  | vague | 78% | 100% | "sounds good", "approved": a go-ahead it doesn't recognise is counted as vague |
-  | done-criteria | 67% | 50% | "confirm it still builds", "only stop when every warning is gone" |
-  | correction | 60% | 50% | "put that back", "I didn't ask you to change the CSS"; "Don't use new dependencies" is wrongly counted |
-  | nudge | 100% | 20% | only a fixed list of words counts as a go-ahead |
+  | vague | 88% | 100% | a go-ahead it doesn't recognise ("👍", "please continue") is counted as a vague prompt |
+  | done-criteria | 83% | 100% | "pass it through" reads as "tests pass" |
+  | correction | 75% | 75% | "hold on, that will drop the table" and "scratch that" are missed; "don't add comments" is counted |
+  | go-ahead | 100% | 40% | only a list of words counts, so new phrasings are missed |
 
-  29 prompts is a small sample, so read these as a direction, not exact rates. They lean one way: vague prompts and their cost are overstated, and rework is understated, because half of real corrections are missed.
+  34 prompts is a small sample, so read these as a direction, not exact rates. They lean one way: the vague-prompt count and its cost are somewhat overstated, and rework is understated, because about a quarter of real corrections are missed. A text test cannot tell "don't touch the tests" as a correction from the same words as a first instruction; only the moment it was typed can.
 - **"Vague" ignores context.** A prompt counts as vague if it is short and names no file, code, error, route or URL. "Fix it like yesterday" in a session full of context is flagged although it was clear enough.
 - **Rework is "followed by a correction or interrupt".** A correction about something else, or an interrupt to add information, is still counted.
 - **Cost is charged to the prompt that started the turn.** The cost of work Claude chose to do on its own lands on that prompt.

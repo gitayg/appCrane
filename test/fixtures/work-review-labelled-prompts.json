@@ -1,6 +1,6 @@
 {
   "about": "Prompts typed to Claude Code, labelled by a person by meaning, never by what work-review's patterns say. vague: Claude would have to go find out what or where before it could start. criteria: the prompt says when the work is done or how to check it. correction: it redirects or rejects what Claude just did. nudge: a bare go-ahead with no new instruction. Scored by test/work-review-classify.test.js; add a case whenever a real prompt is misjudged, with the label a person would give it. heldOut: prompts written and labelled after the patterns were last tuned, scored without tuning; they show how the patterns do on prompts they were not fitted to. Never tune against them: when you change a pattern, move them into cases and write a fresh heldOut set.",
-  "labelled": "2026-11-22",
+  "labelled": "2026-11-22 (cases: 104; heldOut: 34, written after the last tuning)",
   "floors": {
     "vague": {
       "precision": 0.95,
@@ -21,20 +21,20 @@
   },
   "heldOutFloors": {
     "vague": {
-      "precision": 0.75,
+      "precision": 0.85,
       "recall": 0.95
     },
     "criteria": {
-      "precision": 0.65,
-      "recall": 0.5
+      "precision": 0.8,
+      "recall": 0.95
     },
     "correction": {
-      "precision": 0.6,
-      "recall": 0.5
+      "precision": 0.7,
+      "recall": 0.7
     },
     "nudge": {
       "precision": 0.95,
-      "recall": 0.2
+      "recall": 0.4
     }
   },
   "cases": [
@@ -372,9 +372,7 @@
       "text": "next, the settings page",
       "nudge": false,
       "vague": true
-    }
-  ],
-  "heldOut": [
+    },
     {
       "text": "the build is red",
       "vague": true
@@ -499,6 +497,157 @@
     },
     {
       "text": "ok, now the tests",
+      "vague": true
+    }
+  ],
+  "heldOut": [
+    {
+      "text": "sort this out",
+      "vague": true
+    },
+    {
+      "text": "the numbers look wrong",
+      "vague": true
+    },
+    {
+      "text": "make the app more secure",
+      "vague": true
+    },
+    {
+      "text": "can you speed up startup",
+      "vague": true
+    },
+    {
+      "text": "we need better tests",
+      "vague": true
+    },
+    {
+      "text": "fix what the reviewer said",
+      "vague": true
+    },
+    {
+      "text": "In api/billing.go the Charge() call ignores the currency; pass it through",
+      "vague": false
+    },
+    {
+      "text": "Add a `--json` flag to the status command",
+      "vague": false
+    },
+    {
+      "text": "KeyError: 'user_id' in workers/sync.py line 88",
+      "vague": false
+    },
+    {
+      "text": "Rewrite the Makefile test target to run in parallel",
+      "vague": false
+    },
+    {
+      "text": "Set LOG_LEVEL=debug in .env and restart the worker",
+      "vague": false
+    },
+    {
+      "text": "Change POST /api/orders to accept an optional note field",
+      "vague": false
+    },
+    {
+      "text": "Migrate tests/test_api.py from unittest to pytest and make sure they all still pass",
+      "vague": false,
+      "criteria": true
+    },
+    {
+      "text": "The export must finish in under 10 seconds for 100k rows",
+      "vague": true,
+      "criteria": true
+    },
+    {
+      "text": "Retry the upload until it succeeds or 5 attempts have failed",
+      "vague": true,
+      "criteria": true
+    },
+    {
+      "text": "Add input validation and then confirm bad emails get a 400",
+      "vague": true,
+      "criteria": true
+    },
+    {
+      "text": "Add a loading spinner to the checkout page",
+      "vague": true
+    },
+    {
+      "text": "Explain how the auth flow works",
+      "vague": true
+    },
+    {
+      "text": "no no, the staging config",
+      "correction": true,
+      "vague": true
+    },
+    {
+      "text": "That's not right, the date should be UTC",
+      "correction": true,
+      "vague": true,
+      "criteria": true
+    },
+    {
+      "text": "Please don't reformat the whole file",
+      "correction": true,
+      "vague": true
+    },
+    {
+      "text": "roll back the migration",
+      "correction": true,
+      "vague": true
+    },
+    {
+      "text": "you missed the second call site",
+      "correction": true,
+      "vague": true
+    },
+    {
+      "text": "I meant the mobile app, not the website",
+      "correction": true,
+      "vague": true
+    },
+    {
+      "text": "Hold on, that will drop the users table",
+      "correction": true,
+      "vague": true
+    },
+    {
+      "text": "Scratch that, let's keep the current schema",
+      "correction": true,
+      "vague": true
+    },
+    {
+      "text": "Don't add comments to the code",
+      "vague": true
+    },
+    {
+      "text": "Actually, one more thing: add a changelog entry",
+      "vague": true
+    },
+    {
+      "text": "great, carry on",
+      "nudge": true
+    },
+    {
+      "text": "looks good, go ahead",
+      "nudge": true
+    },
+    {
+      "text": "👍",
+      "nudge": true
+    },
+    {
+      "text": "yes do that",
+      "nudge": true
+    },
+    {
+      "text": "please continue",
+      "nudge": true
+    },
+    {
+      "text": "ok, now deploy it",
       "vague": true
     }
   ]
