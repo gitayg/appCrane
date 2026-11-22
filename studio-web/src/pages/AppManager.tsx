@@ -24,7 +24,7 @@ import { limitsAppliedText, type LimitApply } from '../utils/limitsApplied'
 import { guaranteedHint } from '../utils/guaranteedMemory'
 import { setVisibleInterval } from '../utils/visibleInterval'
 
-const PAGE_CSS = `
+export const PAGE_CSS = `
 /* margin 0, not -24px: .app-manager has no padding to cancel, so the negative margins made
    the breadcrumb 48px wider than the page and gave every width a horizontal scroll. */
 .app-manager .breadcrumb{font-size:.78rem;color:var(--dim);padding:7px 24px;background:var(--surface);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:5px;margin:0 0 16px;flex-wrap:wrap}

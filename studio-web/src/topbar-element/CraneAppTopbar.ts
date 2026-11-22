@@ -22,10 +22,15 @@
 //                     for viewers who still get the switch (owner / admins), so
 //                     they can tell; a member is simply given no sand-url.
 //   folded          — boolean: collapse to a thin strip with brand + chevron
+//   releases-url    — optional: set only for viewers who may read the release
+//                     log (owners, app admins, platform admins). The version
+//                     pills become links to it; without it they stay text.
 //
 // Events (CustomEvent, bubbles + composed):
 //   crane-back, crane-refresh, crane-evict, crane-fold-toggle ({ folded })
 //   crane-env-change ({ env: 'production' | 'sandbox' })
+//   crane-open-releases ({ url }) — cancel it to navigate yourself; otherwise
+//                     the element follows releases-url
 //
 // CSS custom property set on :host — --crane-topbar-height (44px / 22px).
 // Parents can use it to size the iframe area below.
@@ -80,6 +85,8 @@ const STYLES = `
 .env button.active-prod { background: rgba(34,197,94,.15);  color: #22c55e; border-color: rgba(34,197,94,.4); }
 .env button.active-sand { background: rgba(249,115,22,.15); color: #f97316; border-color: rgba(249,115,22,.4); }
 .env button .ev { font-family: monospace; opacity: .7; font-weight: 400; margin-left: 5px; }
+.rel { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 2px; }
+a.version.rel:hover, .env button .ev.rel:hover { color: var(--text, #e4e4e7); opacity: 1; }
 .env button .hid { opacity: .7; font-weight: 400; font-size: .85em; margin-left: 5px; font-style: italic; }
 button.btn, a.btn {
   background: transparent; color: var(--dim, #a1a1aa);
@@ -133,7 +140,7 @@ export class CraneAppTopbar extends HTMLElement {
       'app-name', 'app-icon-url', 'app-slug',
       'prod-version', 'sand-version',
       'prod-url', 'sand-url', 'env',
-      'current-url', 'show-evict', 'folded', 'sand-hidden',
+      'current-url', 'show-evict', 'folded', 'sand-hidden', 'releases-url',
     ]
   }
 
@@ -182,6 +189,12 @@ export class CraneAppTopbar extends HTMLElement {
         case 'fold':    this.toggleFold(); break
         case 'env-prod': this.emit('crane-env-change', { env: 'production' }); break
         case 'env-sand': this.emit('crane-env-change', { env: 'sandbox' }); break
+        case 'releases': {
+          e.preventDefault()
+          const url = safeUrl(this.getAttribute('releases-url'))
+          if (!this.emit('crane-open-releases', { url })) window.location.assign(url)
+          break
+        }
       }
     })
 
@@ -193,7 +206,7 @@ export class CraneAppTopbar extends HTMLElement {
     // with no menu keeps the browser's own context menu.
     this.root.addEventListener('contextmenu', (e) => {
       const target = e.target as HTMLElement | null
-      const action = target?.closest('[data-action]')?.getAttribute('data-action')
+      const action = target?.closest('[data-action^="env-"]')?.getAttribute('data-action')
       const env = action === 'env-prod' ? 'production' : action === 'env-sand' ? 'sandbox' : null
       if (!env) return
       const ev = e as MouseEvent
@@ -214,6 +227,7 @@ export class CraneAppTopbar extends HTMLElement {
     const currentUrl  = safeUrl(this.getAttribute('current-url'))
     const showEvict   = this.hasAttribute('show-evict')
     const sandHidden  = this.hasAttribute('sand-hidden')
+    const releasesUrl = this.getAttribute('releases-url') ? safeUrl(this.getAttribute('releases-url')) : ''
     const version     = env === 'sandbox' ? sandVersion : prodVersion
     const showSwitch  = !!(prodUrl && sandUrl)
 
@@ -236,9 +250,13 @@ export class CraneAppTopbar extends HTMLElement {
     // (Production v1.19 / Sandbox v1.20); the standalone pill is only for
     // single-env apps that have no switcher.
     const versionHtml = (version && !showSwitch)
-      ? `<span class="version">${verPill(version)}</span>`
+      ? (releasesUrl
+        ? `<a class="version rel" href="${esc(releasesUrl)}" data-action="releases" title="Open the release log">${verPill(version)}</a>`
+        : `<span class="version">${verPill(version)}</span>`)
       : ''
-    const verLabel = (v: string) => v ? ` <span class="ev">${verPill(v)}</span>` : ''
+    const verLabel = (v: string) => !v ? ''
+      : releasesUrl ? ` <span class="ev rel" data-action="releases" role="link" title="Open the release log">${verPill(v)}</span>`
+      : ` <span class="ev">${verPill(v)}</span>`
     const envHtml = showSwitch ? `
       <div class="env">
         <button data-action="env-prod" class="${env === 'production' ? 'active-prod' : ''}">Production${verLabel(prodVersion)}</button>

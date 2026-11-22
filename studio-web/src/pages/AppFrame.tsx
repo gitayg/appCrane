@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { adminApi } from '../adminApi'
 import { usePeek, type PeekCtx } from '../hooks/usePeek'
 import { RequestModal } from '../components/runtime-topbar/RequestModal'
@@ -203,6 +203,7 @@ export function AppFrame({ slug, active, onClose }: Props) {
   // latest. The key remounts the panel, so one that was already open looks the
   // session up again instead of keeping the "no session yet" it found earlier.
   const [searchParams, setSearchParams] = useSearchParams()
+  const navigate = useNavigate()
   const [coderKey, setCoderKey] = useState(0)
   const [coderSession, setCoderSession] = useState<string | null>(null)
   const openCoder = active && searchParams.get('coder') === '1' && stage?.slug === slug
@@ -267,14 +268,22 @@ export function AppFrame({ slug, active, onClose }: Props) {
     el.addEventListener('crane-env-change',  onEnv)
     el.addEventListener('crane-fold-toggle', onFold)
     el.addEventListener('crane-env-menu',    onEnvMenu)
+    const onReleases = (e: Event) => {
+      const url = (e as CustomEvent<{ url: string }>).detail.url
+      if (!url.startsWith('/')) return
+      e.preventDefault()
+      navigate(url)
+    }
+    el.addEventListener('crane-open-releases', onReleases)
     return () => {
+      el.removeEventListener('crane-open-releases', onReleases)
       el.removeEventListener('crane-back',        onBack)
       el.removeEventListener('crane-refresh',     onRefresh)
       el.removeEventListener('crane-env-change',  onEnv)
       el.removeEventListener('crane-fold-toggle', onFold)
       el.removeEventListener('crane-env-menu',    onEnvMenu)
     }
-  }, [stage?.slug, stage?.isOwner, platformAdmin, onClose])
+  }, [stage?.slug, stage?.isOwner, platformAdmin, onClose, navigate])
 
   // Re-check the app's LIVE versions on open, env switch, and every refresh.
   //
@@ -334,6 +343,7 @@ export function AppFrame({ slug, active, onClose }: Props) {
             {...(stage.sandHidden ? { 'sand-hidden': '' } : {})}
             env={stage.env}
             current-url={stage.url}
+            {...(stage.canRelease || platformAdmin ? { 'releases-url': `/app?slug=${encodeURIComponent(stage.slug)}&tab=releases` } : {})}
             {...(folded ? { folded: '' } : {})}
           >
             <span slot="actions" style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>

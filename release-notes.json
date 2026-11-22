@@ -1,4 +1,8 @@
 {
+  "2.143.0": [
+    "Each app now has one manage page with tabs on top and Production and Sandbox side by side, so you compare the two environments row by row. On a phone the table scrolls sideways.",
+    "A new Releases tab lists every release with its outcome, its What's New, who deployed it (a person or an agent) and its traffic while it was live. Tag a release with a rule-set label, compare two releases, and export the log as CSV. Click the version in an app's top bar to open it."
+  ],
   "2.142.0": [
     "Sensitive app settings (public visibility, headless and bypass paths, TCP ports, outbound e-mail, outbound internet, API connections, custom domains without AppCrane sign-in) now wait for a platform admin's approval, with scope, expiry and audit. Databases and the LLM gateway stay self-service. Apps can call registered APIs through a gateway that adds the credential, so the app never holds it.",
     "Dangerous actions ask you to confirm it's you if you have not signed in recently. Sign-ins from a new browser are e-mailed with a \"not you?\" link, repeated password failures lock the account, and credential stuffing from one network is slowed down.",

@@ -1,1 +1,0 @@
-import{t as e}from"./jsx-runtime-BIUEfZIL.js";import{t}from"./OwnerTransferInbox-B2_S_2pg.js";var n=e();function r(){return(0,n.jsxs)(`div`,{className:`container`,children:[(0,n.jsx)(`h2`,{style:{marginTop:0},children:`Owner requests`}),(0,n.jsx)(t,{})]})}export{r as OwnerTransfers};

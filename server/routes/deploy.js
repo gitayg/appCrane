@@ -13,6 +13,7 @@ import log from '../utils/logger.js';
 import { parseContainerCommand, parseVolumePaths, resolveVolumeMounts } from '../services/containerRuntimeSpec.js';
 import { assessRedeployRisk, ACK_PARAM } from '../services/redeployRisk.js';
 import { assertNoRestoreInProgress } from '../services/managedDbRestoreGuard.js';
+import { parseLabel } from '../services/releaseLog.js';
 
 const router = Router();
 
@@ -166,6 +167,7 @@ router.post('/:slug/deploy/:env', requireAppAccess, auditMiddleware('deploy'), a
   if (!['production', 'sandbox'].includes(env)) {
     throw new AppError('env must be production or sandbox', 400, 'VALIDATION');
   }
+  const label = parseLabel(req.body?.label);
 
   // Configurable RBAC: production deploys gated by deploy.production permission
   if (env === 'production' && !userHasAppPermission(req.user, req.app, 'deploy.production')) {
@@ -200,9 +202,9 @@ router.post('/:slug/deploy/:env', requireAppAccess, auditMiddleware('deploy'), a
 
   // Create deployment record
   const result = db.prepare(`
-    INSERT INTO deployments (app_id, env, status, deployed_by)
-    VALUES (?, ?, 'pending', ?)
-  `).run(app.id, env, req.user.id);
+    INSERT INTO deployments (app_id, env, status, deployed_by, release_label)
+    VALUES (?, ?, 'pending', ?, ?)
+  `).run(app.id, env, req.user.id, label);
 
   const deployId = result.lastInsertRowid;
 

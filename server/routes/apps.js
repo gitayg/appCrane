@@ -925,8 +925,9 @@ router.get('/:slug', requireAppAccess, async (req, res) => {
  */
 router.get('/:slug/metrics', requireAppAccess, (req, res) => {
   const app = req.app;
-  const env = ['production', 'sandbox'].includes(req.query.env) ? req.query.env : null;
-  const hours = Math.min(168, Math.max(1, parseInt(req.query.hours, 10) || 24));
+  const q = new URL(req.originalUrl, 'http://x').searchParams;
+  const env = ['production', 'sandbox'].includes(q.get('env')) ? q.get('env') : null;
+  const hours = Math.min(168, Math.max(1, parseInt(q.get('hours'), 10) || 24));
   const db = getDb();
   const args = env ? [app.id, env, `-${hours} hours`] : [app.id, `-${hours} hours`];
   const rows = db.prepare(`

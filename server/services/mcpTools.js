@@ -6,6 +6,7 @@ import { decrypt, encrypt } from './encryption.js';
 import { BUCKETS, bucketize, applyBucket } from './requestStatus.js';
 import { cleanDoneNote } from './requestDoneNote.js';
 import { userHasAppPermission, userHasPlatformPermission, roleForUserOnApp, isAppOwnerOrPlatformAdmin, isAppOwnerAdminOrPlatformAdmin } from './permissions.js';
+import { parseLabel, parseReleaseQuery, listReleases } from './releaseLog.js';
 import { getSeparateSandboxDb, setSeparateSandboxDb, parseSeparateSandboxDb, envForTenant, SEPARATE_SANDBOX_DB_NOTE } from './sandboxDb.js';
 import { getShowSandbox, setShowSandbox, parseShowSandbox } from './sandboxVisibility.js';
 import {
@@ -1248,6 +1249,10 @@ const TOOLS = [
             + 'destroyed. Only set it after the error has told you which paths those are AND the user has agreed '
             + 'to lose them. Ignored when nothing is at risk.',
         },
+        label: {
+          type: 'string',
+          description: 'Optional release label shown in the release log and usable as a filter there, e.g. "rules=v3". 1-40 of letters, digits and . _ = -',
+        },
       },
       required: ['slug'],
       additionalProperties: false,
@@ -1255,6 +1260,7 @@ const TOOLS = [
     requiredRole: 'any', // gated by app-access
     handler: async (user, args) => {
       const env = args.env === 'production' ? 'production' : 'sandbox';
+      const label = parseLabel(args.label);
       const app = getAppForUser(user, args.slug);
       // v2.7.11: production deploys require the deploy.production permission —
       // mirrors POST /api/apps/:slug/deploy/:env. Was missing here, so an
@@ -1279,8 +1285,8 @@ const TOOLS = [
       await refuseDeployForMemory({ db, app, env, userId: user.id });
 
       const result = db
-        .prepare("INSERT INTO deployments (app_id, env, status, deployed_by) VALUES (?, ?, 'pending', ?)")
-        .run(app.id, env, user.id);
+        .prepare("INSERT INTO deployments (app_id, env, status, deployed_by, release_label) VALUES (?, ?, 'pending', ?, ?)")
+        .run(app.id, env, user.id, label);
       const deployId = result.lastInsertRowid;
 
       const ports = getPortsForSlot(app.slot);
@@ -1333,6 +1339,40 @@ const TOOLS = [
         LIMIT ?
       `).all(app.id, env, limit);
       return { app: app.slug, env, releases };
+    },
+  },
+
+  {
+    name: 'appcrane_list_app_releases',
+    description:
+      'The release log of an app: every deployment per environment, newest first, with a derived status (live / replaced / '
+      + 'rolled back / failed / auto-reverted / in progress), its label, What\'s New text, who deployed it (person or agent), '
+      + 'commit, how long it was live, and what the app saw while it was live (requests, active users, restarts, and the same '
+      + 'per day). Error rate and p95 latency are always null: AppCrane does not record them. Filter by env and label to '
+      + 'compare releases, e.g. label "rules=v3" against "rules=v2". Owner, app admin or platform admin only. '
+      + 'For a plain deploy history any member can read, use appcrane_list_releases.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        slug:  { type: 'string' },
+        env:   { type: 'string', enum: ['sandbox', 'production'], description: 'Omit for both environments.' },
+        label: { type: 'string', description: 'Only releases with exactly this label.' },
+        limit: { type: 'integer', minimum: 1, maximum: 200, description: 'Max rows (default 50).' },
+      },
+      required: ['slug'],
+      additionalProperties: false,
+    },
+    requiredRole: 'any', // gated below: owner, app admin or platform admin
+    readOnly: true,
+    handler: async (user, args) => {
+      const app = getAppForUser(user, args.slug);
+      if (!isAppOwnerAdminOrPlatformAdmin(user, app)) {
+        throw new Error('Forbidden: only an owner or admin of this app can read its release log.');
+      }
+      const q = parseReleaseQuery({ env: args.env, label: args.label });
+      const limit = Math.min(Math.max(parseInt(args.limit, 10) || 50, 1), 200);
+      const out = listReleases(getDb(), app, q);
+      return { ...out, releases: out.releases.slice(0, limit) };
     },
   },
 
