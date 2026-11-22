@@ -16,6 +16,9 @@ import { userHasAppPermission, isAppOwnerOrPlatformAdmin } from '../services/per
 import { notifySecretReveal } from '../services/emailService.js';
 import { secretFingerprint, secretPreview, opaquePreview } from '../services/secretMask.js';
 import { AppError } from '../utils/errors.js';
+import {
+  REF_SOURCE, SecretRefError, assertStorableValue, assertStoreRequest, isSecretRef, retainedSecretName, storeAppSecrets,
+} from '../services/secretRefs.js';
 
 const router = Router();
 
@@ -50,6 +53,11 @@ const REVEAL_MAX_PER_WINDOW = 30;
 // one teaches them to filter the rest. One notice per person per app per 30
 // minutes keeps the signal; the audit log keeps the complete record.
 const REVEAL_NOTICE_COOLDOWN_MIN = 30;
+
+function refused(e) {
+  if (!(e instanceof SecretRefError)) return e;
+  return new AppError(e.message, 400, e.code);
+}
 
 // Throttle, audit and notify for a plaintext read of `keys`. Throws 429 (and
 // records nothing) once the caller's reveal budget for this app is spent.
@@ -121,14 +129,19 @@ router.get('/:slug/env/:env', requireAppUser, (req, res) => {
 
   const canReveal = env !== 'production' || isAppOwnerOrPlatformAdmin(req.user, req.app);
   const result = vars.map(v => {
-    if (showValues) return { id: v.id, key: v.key, value: decrypt(v.value_encrypted), updated_at: v.updated_at };
+    if (showValues) {
+      const value = decrypt(v.value_encrypted);
+      return { id: v.id, key: v.key, value, ...(isSecretRef(value) && { source: REF_SOURCE }), updated_at: v.updated_at };
+    }
     let plain = null;
     try { plain = decrypt(v.value_encrypted); } catch (_) { /* reported below */ }
     if (plain == null) return { id: v.id, key: v.key, value: '********', error: 'decrypt_failed', updated_at: v.updated_at };
     return {
       id: v.id,
       key: v.key,
-      value: '********',
+      // A reference is a name, not a value, and it is never fetched to be shown.
+      value: isSecretRef(plain) ? plain : '********',
+      ...(isSecretRef(plain) && { source: REF_SOURCE }),
       // Length, tail and fingerprint are for people who could read the whole value
       // anyway: a member who can reveal sandbox would otherwise learn a production
       // value by matching its fingerprint against a sandbox one.
@@ -180,16 +193,18 @@ router.post('/:slug/env/:env/:key/reveal', requireAppUser, (req, res) => {
   recordReveal(req, env, [row.key]);
   const value = decrypt(row.value_encrypted);
   res.set('Cache-Control', 'no-store');
-  res.json({ env, key: row.key, value, fingerprint: secretFingerprint(value), updated_at: row.updated_at });
+  res.json({ env, key: row.key, value, ...(isSecretRef(value) && { source: REF_SOURCE }), fingerprint: secretFingerprint(value), updated_at: row.updated_at });
 });
 
 /**
  * PUT /api/apps/:slug/env/:env - Set env vars (bulk)
- * Body: { "vars": { "KEY1": "value1", "KEY2": "value2" } }
+ * Body: { "vars": { "KEY1": "value1", "KEY2": "value2" }, "store"?: "secrets_manager" }
+ * With store, each value goes to AWS Secrets Manager under this app+env's path
+ * and env_vars holds only the reference.
  */
-router.put('/:slug/env/:env', requireAppUser, auditMiddleware('env-set'), (req, res) => {
+router.put('/:slug/env/:env', requireAppUser, auditMiddleware('env-set'), async (req, res) => {
   const { env } = req.params;
-  const { vars } = req.body;
+  const { vars, store } = req.body;
 
   if (!vars || typeof vars !== 'object') {
     throw new AppError('Body must contain { vars: { KEY: "value" } }', 400, 'VALIDATION');
@@ -198,6 +213,30 @@ router.put('/:slug/env/:env', requireAppUser, auditMiddleware('env-set'), (req, 
   // Configurable RBAC: production env writes gated by env.write.production
   if (env === 'production' && !userHasAppPermission(req.user, req.app, 'env.write.production')) {
     throw new AppError('Writing production env vars is not permitted by your role on this app', 403, 'FORBIDDEN');
+  }
+  if (store !== undefined && store !== REF_SOURCE) {
+    throw new AppError(`store must be "${REF_SOURCE}"`, 400, 'VALIDATION');
+  }
+  for (const key of Object.keys(vars)) {
+    if (!key.match(/^[A-Z_][A-Z0-9_]*$/i)) {
+      throw new AppError(`Invalid env var key: ${key}`, 400, 'VALIDATION');
+    }
+  }
+  let toWrite = vars;
+  let stored = null;
+  let storeFailure = null;
+  try {
+    if (store) {
+      assertStoreRequest(env, vars);
+      const outcome = await storeAppSecrets(req.app, env, vars);
+      stored = outcome.stored;
+      storeFailure = outcome.failed;
+      toWrite = Object.fromEntries(stored.map((s) => [s.key, s.reference]));
+    } else {
+      for (const value of Object.values(vars)) assertStorableValue(String(value));
+    }
+  } catch (e) {
+    throw refused(e);
   }
 
   const db = getDb();
@@ -212,17 +251,21 @@ router.put('/:slug/env/:env', requireAppUser, auditMiddleware('env-set'), (req, 
 
   const results = [];
   db.transaction(() => {
-    for (const [key, value] of Object.entries(vars)) {
-      if (!key.match(/^[A-Z_][A-Z0-9_]*$/i)) {
-        throw new AppError(`Invalid env var key: ${key}`, 400, 'VALIDATION');
-      }
+    for (const [key, value] of Object.entries(toWrite)) {
       const encrypted = encrypt(String(value));
       upsert.run(req.app.id, env, key, encrypted, req.user.id);
       results.push(key);
     }
   })();
 
-  res.json({ message: `Set ${results.length} env var(s) for ${env}`, keys: results });
+  if (storeFailure) {
+    const done = results.length ? ` ${results.join(', ')} ${results.length === 1 ? 'was' : 'were'} stored.` : '';
+    throw new AppError(`${storeFailure.key}: ${storeFailure.reason}.${done}`, 502, 'SECRETS_PROVIDER_WRITE_FAILED');
+  }
+  res.json({
+    message: `Set ${results.length} env var(s) for ${env}`, keys: results,
+    ...(stored && { source: REF_SOURCE, secrets: stored.map((s) => ({ key: s.key, reference: s.reference, aws_secret: s.name })) }),
+  });
 });
 
 /**
@@ -238,6 +281,12 @@ router.delete('/:slug/env/:env/:key', requireAppUser, auditMiddleware('env-delet
   }
   const db = getDb();
 
+  const existing = db.prepare('SELECT value_encrypted FROM env_vars WHERE app_id = ? AND env = ? AND key = ?').get(req.app.id, env, key);
+  let retained = null;
+  if (existing) {
+    try { retained = retainedSecretName(req.app, env, decrypt(existing.value_encrypted)); } catch (_) { /* an undecryptable row can still be deleted */ }
+  }
+
   const result = db.prepare(
     'DELETE FROM env_vars WHERE app_id = ? AND env = ? AND key = ?'
   ).run(req.app.id, env, key);
@@ -246,7 +295,8 @@ router.delete('/:slug/env/:env/:key', requireAppUser, auditMiddleware('env-delet
     throw new AppError(`Env var '${key}' not found in ${env}`, 404, 'NOT_FOUND');
   }
 
-  res.json({ message: `Deleted ${key} from ${env}` });
+  // The AWS secret is the operator's to delete: AppCrane holds no delete call.
+  res.json({ message: `Deleted ${key} from ${env}`, ...(retained && { aws_secret_retained: retained }) });
 });
 
 export default router;

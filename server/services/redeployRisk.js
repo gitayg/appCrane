@@ -294,6 +294,35 @@ const MAX_REPORTED_PATHS = 12;
 //         every such app read as "would lose data" (RCE auto-patch fell back
 //         on it). ~/.npm is npm's cache and log directory, never app state.
 //
+// EPHEMERAL_SUBPATHS — consecutive path components that mean scratch wherever
+// they appear, for a cache directory whose own name is not one of the segments:
+//
+//   .next/server/route-cache  Next.js's incremental-cache FileSystemCache
+//         (next/dist/server/lib/route-cache-key: ROUTE_CACHE_DIRECTORY =
+//         "route-cache"). MEASURED 2026-11-17 on the SignuDoc catalogue app
+//         (v0.3.0, Next.js 16.4.6) built from AppCrane's own generated
+//         node:24-alpine Dockerfile, /data bind-mounted, after GETs of its
+//         pages, a few /api routes and one 404. `docker diff` (hash cut short, sibling files folded):
+//           C /app
+//           C /app/.next
+//           C /app/.next/cache
+//           A /app/.next/cache/images
+//           C /app/.next/server
+//           A /app/.next/server/route-cache
+//           A /app/.next/server/route-cache/APP_PAGE
+//           A /app/.next/server/route-cache/APP_PAGE/41da0ef9.../$
+//           A /app/.next/server/route-cache/APP_PAGE/41da0ef9.../$/_not-found.html
+//           A .../_not-found.meta, .../_not-found.rsc, .../_not-found.segments/...
+//           A /data
+//           C /home/node/.npm/_logs  (+ its debug log)
+//         Every redeploy reported /app/.next/server/route-cache (6 entries) and
+//         asked for acknowledge_data_loss; /app/.next/cache/images was already
+//         dropped by the `cache` segment. After `rm -f` and a fresh container
+//         the directory is absent until the first 404, and that one request
+//         rewrites the identical entry. Only this subpath is dropped, not
+//         `.next` as a whole: nothing else under it appeared in the diff, so a
+//         broader rule would only hide whatever an app chose to write there.
+//
 // ---------------------------------------------------------------------------
 // Why there is no size threshold and no file-count threshold
 // ---------------------------------------------------------------------------
@@ -343,6 +372,9 @@ export const EPHEMERAL_ROOTS = Object.freeze([
 /** Path components that mean scratch wherever they appear, so that a noisy
  *  subdirectory can be dropped without dropping its parent. */
 export const EPHEMERAL_SEGMENTS = Object.freeze(['tmp', 'temp', 'cache', '.npm']);
+
+/** Runs of path components that mean scratch wherever they appear. */
+export const EPHEMERAL_SUBPATHS = Object.freeze(['.next/server/route-cache']);
 
 /** The parameter a caller passes to say "yes, I know". One spelling, shared by
  *  the REST routes and the MCP tools, so an agent that learns it once from an
@@ -423,6 +455,11 @@ function hasEphemeralSegment(p) {
   return p.split('/').some((seg) => seg && EPHEMERAL_SEGMENTS.includes(seg.toLowerCase()));
 }
 
+/** Does `p` contain one of the scratch subpaths as whole components? */
+function hasEphemeralSubpath(p) {
+  return EPHEMERAL_SUBPATHS.some((s) => `${p}/`.includes(`/${s}/`));
+}
+
 /** Cut `p` down to at most `depth` leading segments. '/a/b/c/d/e' -> '/a/b/c/d' */
 function truncateToDepth(p, depth) {
   const segs = p.split('/').filter(Boolean);
@@ -486,6 +523,7 @@ export function classifyWrittenPaths({ diff = [], mountDestinations = [] } = {})
     if (mounts.some((m) => covers(m, e.path))) { ignored++; continue; } // (2)
     if (EPHEMERAL_ROOTS.some((r) => covers(r, e.path))) { ignored++; continue; }  // (3)
     if (hasEphemeralSegment(e.path)) { ignored++; continue; }                     // (3)
+    if (hasEphemeralSubpath(e.path)) { ignored++; continue; }                     // (3)
     kept.push(e.path);
   }
 

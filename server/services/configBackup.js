@@ -14,6 +14,8 @@
  *                      while the server keeps writing.
  *   - .env           — platform env, crucially the ENCRYPTION_KEY. Without it
  *                      the DB's encrypted env_vars / secrets can't be decrypted.
+ *                      With the key in AWS Secrets Manager it is not here; the
+ *                      manifest's `secrets` says so and names the secret.
  *   - apps/<slug>/icon.*                    — per-app tile icons.
  *   - apps/<slug>/<env>/shared/data/…       — the app's /data mount.
  *   - apps/<slug>/<env>/shared/volumes/…    — every OTHER declared mount,
@@ -66,6 +68,8 @@ import {
   SLUG_RE, repoRoot, dataDir, backupsDir, ensureBackupsDir, newWorkDir, freeBytes,
   createTar, extractTar, walk, treeBytes, readHead, privateFile, readZipDirectory, extractZipEntry,
 } from './backupFiles.js';
+import { backupSecretsNote } from './secretsProvider/index.js';
+import { planRestoredEnv } from './secretsProvider/restorePlan.js';
 import log from '../utils/logger.js';
 
 const dbPath = () => join(dataDir(), 'deployhub.db');
@@ -239,6 +243,7 @@ async function writeDataArchive(opts) {
       throw Object.assign(new Error(`Not enough free space in ${dir}: the data archive needs up to ${required} bytes and ${free} are free.`), { status: 507 });
     }
 
+    const secretsNote = backupSecretsNote();
     const manifest = {
       kind: 'appcrane-config-backup',
       format: 2,
@@ -264,6 +269,7 @@ async function writeDataArchive(opts) {
       repos_included: false,
       repo_set: repoSet,
       image_set: imageSet,
+      ...(secretsNote ? { secrets: secretsNote } : {}),
     };
     await writeFile(join(stage, MANIFEST), JSON.stringify(manifest, null, 2), { mode: 0o600 });
     traceBackup('manifest:end');
@@ -477,6 +483,12 @@ export async function importDataArchive(archivePath, opts = {}) {
       }
     }
 
+    // A host whose keys live in Secrets Manager must not get back an .env that
+    // would make it refuse to boot. Decided here, while nothing has changed.
+    const stagedEnv = join(tree, '.env');
+    const envPlan = restoreEnv && existsSync(stagedEnv) ? planRestoredEnv(await readFile(stagedEnv, 'utf8')) : null;
+    if (envPlan?.action === 'refuse') throw refuse(envPlan.message);
+
     // --- 5. Point of no return. Keep the current DB + .env.
     const stamp = Date.now();
     const preDir = join(dataDir(), `pre-import-${stamp}`);
@@ -492,8 +504,13 @@ export async function importDataArchive(archivePath, opts = {}) {
     for (const suffix of ['-wal', '-shm']) await unlink(`${dbPath()}${suffix}`).catch(() => {});
 
     let envRestored = false;
-    const stagedEnv = join(tree, '.env');
-    if (restoreEnv && existsSync(stagedEnv)) { await copyFile(stagedEnv, envPath()); envRestored = true; }
+    if (envPlan?.action === 'merge') {
+      await writeFile(envPath(), envPlan.text, { mode: 0o600 });
+      envRestored = true;
+    } else if (envPlan) {
+      await copyFile(stagedEnv, envPath());
+      envRestored = true;
+    }
 
     // --- 6. Apps tree: moved in entry by entry (merge, as before), never
     //        through a symlink already on the host.
@@ -567,6 +584,7 @@ export async function importDataArchive(archivePath, opts = {}) {
         note: 'Managed databases are not restored by a whole-system import. Restore one database from this archive with POST /api/settings/backup/restore-database once the server is back up.',
       },
       repoHeads: stagedRepos.map(({ slug, head, headSha }) => ({ slug, head, headSha })),
+      ...(manifest.secrets || envPlan?.action === 'merge' ? { secrets: { ...(manifest.secrets || {}), env_lines_dropped: envPlan?.dropped || [] } } : {}),
     };
   } finally {
     await rm(work, { recursive: true, force: true });

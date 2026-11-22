@@ -764,6 +764,48 @@
     }
   },
   {
+    "name": "SignuDoc",
+    "slug": "signudoc",
+    "category": "Esign",
+    "repo": "NYLLON-SOFTWARE/SignuDoc",
+    "image": null,
+    "home": "https://github.com/NYLLON-SOFTWARE/SignuDoc",
+    "license": "MIT",
+    "short": "Send PDFs for e-signature, sealed and verifiable",
+    "port": 3000,
+    "health": "/",
+    "url_env": "APP_URL",
+    "secrets": [
+      {
+        "env": "BETTER_AUTH_SECRET",
+        "bytes": 32,
+        "encoding": "hex",
+        "label": "Session signing secret"
+      },
+      {
+        "env": "CRON_SECRET",
+        "bytes": 32,
+        "encoding": "hex",
+        "label": "Cron endpoint secret"
+      }
+    ],
+    "needs": {
+      "engine": "postgres",
+      "required": true,
+      "env": null,
+      "url_env": "DATABASE_URL",
+      "note": "Migrations (node db/migrate.mjs) run on every container start, before the server. Mail needs RESEND_API_KEY, which you supply."
+    },
+    "build": {
+      "install": "npm ci",
+      "build": "npm run build",
+      "start": "node db/migrate.mjs && exec npm start",
+      "env": {
+        "STORAGE_LOCAL_DIR": "/data/storage"
+      }
+    }
+  },
+  {
     "name": "Formbricks",
     "slug": "formbricks",
     "category": "Forms",

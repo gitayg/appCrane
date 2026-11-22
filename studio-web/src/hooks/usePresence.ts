@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { adminApi } from '../adminApi'
+import { setVisibleInterval } from '../utils/visibleInterval'
 
 const PING_MS = 15000
 
@@ -34,8 +35,8 @@ export function usePresence(slug: string | null | undefined): Viewer[] {
     }
 
     ping()
-    const t = setInterval(ping, PING_MS)
-    return () => { alive = false; clearInterval(t); setViewers([]) }
+    const stop = setVisibleInterval(ping, PING_MS)
+    return () => { alive = false; stop(); setViewers([]) }
   }, [slug])
 
   return viewers

@@ -617,3 +617,49 @@ test('npm\'s own debug log under ~/.npm (every generated node image runs `npm st
   const withData = risk.classifyWrittenPaths({ diff: [...diff, { kind: 'A', path: '/home/node/app.db' }], mountDestinations: ['/data'] });
   assert.deepEqual(withData.written.map((w) => w.path), ['/home/node']);
 });
+
+// SignuDoc v0.3.0 (Next.js 16.4.6), built from AppCrane's generated node:24-alpine
+// Dockerfile with /data bind-mounted, after GETs of its pages, /api routes and a
+// 404. Verbatim `docker diff`, captured 2026-11-17.
+const SIGNUDOC_NEXT = `
+C /app
+C /app/.next
+C /app/.next/cache
+A /app/.next/cache/images
+C /app/.next/server
+A /app/.next/server/route-cache
+A /app/.next/server/route-cache/APP_PAGE
+A /app/.next/server/route-cache/APP_PAGE/41da0ef926a63354a29f601d8e8d0a5951196c45ebcd28b7d4708fb7f56f3bf1
+A /app/.next/server/route-cache/APP_PAGE/41da0ef926a63354a29f601d8e8d0a5951196c45ebcd28b7d4708fb7f56f3bf1/\$
+A /app/.next/server/route-cache/APP_PAGE/41da0ef926a63354a29f601d8e8d0a5951196c45ebcd28b7d4708fb7f56f3bf1/\$/_not-found.html
+A /app/.next/server/route-cache/APP_PAGE/41da0ef926a63354a29f601d8e8d0a5951196c45ebcd28b7d4708fb7f56f3bf1/\$/_not-found.meta
+A /app/.next/server/route-cache/APP_PAGE/41da0ef926a63354a29f601d8e8d0a5951196c45ebcd28b7d4708fb7f56f3bf1/\$/_not-found.rsc
+A /app/.next/server/route-cache/APP_PAGE/41da0ef926a63354a29f601d8e8d0a5951196c45ebcd28b7d4708fb7f56f3bf1/\$/_not-found.segments
+A /app/.next/server/route-cache/APP_PAGE/41da0ef926a63354a29f601d8e8d0a5951196c45ebcd28b7d4708fb7f56f3bf1/\$/_not-found.segments/_tree.segment.rsc
+A /app/.next/server/route-cache/APP_PAGE/41da0ef926a63354a29f601d8e8d0a5951196c45ebcd28b7d4708fb7f56f3bf1/\$/_not-found.segments/_full.segment.rsc
+A /app/.next/server/route-cache/APP_PAGE/41da0ef926a63354a29f601d8e8d0a5951196c45ebcd28b7d4708fb7f56f3bf1/\$/_not-found.segments/_not-found
+A /app/.next/server/route-cache/APP_PAGE/41da0ef926a63354a29f601d8e8d0a5951196c45ebcd28b7d4708fb7f56f3bf1/\$/_not-found.segments/_not-found/__PAGE__.segment.rsc
+A /data
+C /home
+C /home/node
+C /home/node/.npm
+C /home/node/.npm/_logs
+A /home/node/.npm/_logs/2026-11-17T10_33_18_029Z-debug-0.log
+`;
+
+test('Next.js route-cache (SignuDoc) is regenerable scratch, not data', () => {
+  const diff = risk.parseDockerDiff(SIGNUDOC_NEXT);
+  assert.equal(diff.length, 23);
+  const r = risk.classifyWrittenPaths({ diff, mountDestinations: ['/data'] });
+  assert.deepEqual(r.written, []);
+  const withUploads = risk.classifyWrittenPaths({
+    diff: [...diff, { kind: 'A', path: '/app/uploads' }, { kind: 'A', path: '/app/uploads/contract.pdf' }],
+    mountDestinations: ['/data'],
+  });
+  assert.deepEqual(withUploads.written, [{ path: '/app/uploads', entries: 1 }]);
+  const nextState = risk.classifyWrittenPaths({
+    diff: [...diff, { kind: 'A', path: '/app/.next/server/route-cache-db' }, { kind: 'A', path: '/app/.next/server/route-cache-db/x.sqlite' }],
+    mountDestinations: ['/data'],
+  });
+  assert.deepEqual(nextState.written.map((w) => w.path), ['/app/.next/server/route-cache-db']);
+});

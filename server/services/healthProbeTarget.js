@@ -52,12 +52,13 @@ export const PHP_DEFAULT_HEALTH_PATH = '/';
  *                                 which never reaches the generator.
  * @returns {{ path: string, strict: boolean, source: string }}
  */
-export function resolveHealthProbe({ manifest, app, runtime = null }) {
+export function resolveHealthProbe({ manifest, app, runtime = null, catalogBuild = false }) {
   const declared = manifest?.be?.health;
   const column = app?.health_path;
 
-  // Neither an image nor a generated PHP build owes AppCrane a body shape.
-  const strict = app?.source_type !== 'image' && runtime !== 'php';
+  // Neither an image, a generated PHP build nor a catalogue app built from its
+  // upstream repository by a recipe owes AppCrane a body shape.
+  const strict = app?.source_type !== 'image' && runtime !== 'php' && !catalogBuild;
 
   if (declared) {
     return { path: declared, strict, source: `manifest.be.health="${declared}"` };

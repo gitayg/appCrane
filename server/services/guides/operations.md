@@ -309,6 +309,61 @@ appears in the conversation — reveal only when the user explicitly needs it, n
 to inspect config. Setting an env var does not redeploy automatically — call
 `appcrane_deploy` after changes to make them take effect.
 
+### Values kept in AWS Secrets Manager
+
+When this AppCrane has a secrets provider configured (`APPCRANE_SECRETS_PROVIDER`), an
+env var can hold a reference instead of a value:
+
+```
+appcrane_set_secret(slug, env, key, value, store="secrets_manager")  — value goes to AWS, AppCrane keeps secretsmanager:<KEY>
+appcrane_set_secret(slug, env, key, value="secretsmanager:NAME")     — point at a secret that already exists
+appcrane_set_secret(slug, env, key, value="secretsmanager:NAME#fld") — one field of a JSON secret
+```
+
+REST: `PUT /api/apps/:slug/env/:env` with `{ "vars": {...}, "store": "secrets_manager" }`.
+
+- A reference is a name, not a path. It always resolves to `<prefix>/<namespace>/<env>/<NAME>`
+  (default prefix `appcrane/apps`), so an app reaches only its own secrets and sandbox
+  cannot read production. ARNs, slashes and `..` are refused when set and when resolved.
+- `<namespace>` is a random value on the app's row. It is not the slug or the id, because
+  a slug can pass to another app and a restore hands an id out again. A platform admin gets
+  it from `GET /api/settings/secrets-provider/app-path/<slug>`; a reference that finds no
+  secret fails naming the path it looked at.
+- It is resolved at every deploy and restart and injected like any env var. A reference
+  that cannot be read fails that deploy or restart, names the key, and leaves the running
+  container alone. The reference text is never injected.
+- `appcrane_get_secret`, `appcrane_reveal_secret` and the env list show the reference text
+  with `source: "secrets_manager"`. They never fetch the value.
+- Removing the env var, or deleting the app, does NOT delete the AWS secret. The env var
+  delete response names it as `aws_secret_retained`; an app delete logs the app's path as a
+  warning. No later app can read what is left. Delete it in AWS when you are done: once the
+  app's row is gone, that log line is the only record of the path.
+- Renaming an app changes nothing in AWS, and a restored backup keeps each app's namespace.
+  An app created after that backup loses its namespace in the restore, and its secrets stay
+  in AWS unreachable. A copy of a backup on a second AppCrane reads and writes the same
+  secrets: give that AppCrane its own `APPCRANE_SECRETS_APP_PREFIX`.
+- AWS asks for no more than one `PutSecretValue` per secret every 10 minutes, sustained.
+
+## Keeping ENCRYPTION_KEY in systemd encrypted credentials
+
+For hosts without AWS. AppCrane must run as the systemd unit `appcrane` (systemd 250+).
+
+1. `sudo systemctl stop appcrane`
+2. `sudo crane secrets migrate --provider systemd-creds --dry-run` shows the credential, the drop-in and the .env change.
+3. `sudo crane secrets migrate --provider systemd-creds` backs .env up to /var/backups/appcrane (root, 0600), seals the key with `systemd-creds encrypt` (value on stdin), decrypts it back and compares, writes /etc/systemd/system/appcrane.service.d/credentials.conf (`LoadCredentialEncrypted=appcrane.ENCRYPTION_KEY:/etc/credstore.encrypted/appcrane.ENCRYPTION_KEY`), runs daemon-reload, and only then removes the key from .env. It prints the rollback steps.
+4. `sudo systemctl start appcrane`. The log shows `platform secret loaded (keys: ENCRYPTION_KEY)`.
+5. Keep an offline copy of the key (`sudo systemd-creds decrypt --name=appcrane.ENCRYPTION_KEY /etc/credstore.encrypted/appcrane.ENCRYPTION_KEY -`), then `sudo shred -u` the .env backup. The credential opens only on this host: losing /var/lib/systemd/credential.secret, or the disk, without that copy loses every encrypted value.
+
+The boot fails closed: no CREDENTIALS_DIRECTORY, a missing appcrane.* credential, a name off the allowlist, or a different value in .env stops it; it never falls back to .env. If the credential file itself is missing, systemd refuses the unit (status 243/CREDENTIALS). `sudo crane secrets status` lists the drop-in, the credential files, the keys a boot would load and keys still in .env. `sudo crane rotate-key` (AppCrane stopped) seals the new key as a new credential and never writes it to .env. App secret references (`secretsmanager:<NAME>`) need the AWS provider.
+
+Rollback: stop the unit, `sudo install` the .env backup back with its old mode and owner, remove the drop-in, daemon-reload, start.
+
+## Require SSO sign-in
+
+`auth_sso_only` is on unless a platform admin turns it off, and it takes effect only while an SSO provider (OIDC or SAML) is enabled. In force, the IdP is the only way to a dashboard session: password login, the MFA second step, setting or changing a password (by session or by personal API key), and admin password resets answer `403 SSO_REQUIRED`, each audited as `sso-required-refused`. API keys, MCP keys, OAuth access tokens and app sign-in keys are API credentials and keep working; none of them creates a session. Migration 170 sets the switch on wherever a provider is enabled. Sessions already issued stay valid until they expire.
+
+Break-glass (IdP down): on the AppCrane host, from the install directory, run `crane sso enforce off`. It writes the setting straight into the database (no network request, so it needs host access) and audits `sso-enforce-cli`. Run `crane sso enforce on` once the IdP is back; `crane sso enforce status` shows the stored switch and whether it is in force.
+
 ## Per-app access management
 
 The five tools that replace the old `/users` dashboard for an agent doing
@@ -429,6 +484,27 @@ set `custom_domain_auth` on an app (`appcrane_set_app_meta` or
 `PUT /api/apps/<slug>`) to put the normal AppCrane sign-in, through the same
 handoff, in front of its custom domain; it works with per-app origins on or off.
 
+## Personal API keys on a private port (`APPCRANE_PRIVATE_API_PORT`)
+
+An operator setting in `.env`, not an MCP tool. Set (e.g. `8443`), Caddy adds a
+second site for the platform host on that port with the same certificate, and
+personal user keys (`dhk_user_*` / `dhk_admin_*`) are refused with 403
+`USER_KEY_PRIVATE_PORT_ONLY` on 443 and on every app host: REST, git over
+HTTPS, `/api/identity/verify`, and MCP called with a user key. They work on
+`https://your-crane-host:8443`. MCP keys (`dhk_mcp_*`), MCP OAuth, dashboard
+sessions, SSO, Crew tokens and webhooks are unaffected, so this MCP connection
+keeps working on 443 when it uses an MCP key or OAuth. If a call answers
+`USER_KEY_PRIVATE_PORT_ONLY`, the client is using a personal key on the public
+address: switch it to an MCP key, or point it at the private port from inside
+the SDP/VPN.
+
+Operator checklist: open the private port only to the SDP/VPN (firewall or
+security group), keep Node's own `PORT` (5001) closed to the outside (requests
+that reach it directly are not refused; loopback and app containers use it),
+restart AppCrane so it regenerates and reloads the Caddy config, and check
+`GET /api/api-key-policy` (`private_api.configured`). Refusals are audited as
+`user-key.public-refused`, once per user per hour.
+
 ## Deploys: production vs sandbox
 
 - `appcrane_deploy(slug, env="sandbox")` — default. Always start here.
@@ -492,7 +568,7 @@ Every `appcrane_*` tool, grouped by purpose. The authoritative input schema for 
 | `appcrane_wait_deploy` | Block until a deployment reaches a terminal state (live / failed / rolled_back), then return its final status |
 | `appcrane_rollback` | Roll an env back to a prior release |
 | `appcrane_promote` | Promote the current live SANDBOX release to production — the gated sandbox→prod path |
-| `appcrane_list_cron` | List the scheduled jobs declared in an app's deployhub.json `cron` array (after the most recent deploy) |
+| `appcrane_list_cron` | List an app's scheduled jobs: its deployhub.json `cron` array and the `crons` of its vercel.json (after the most recent deploy) |
 | `appcrane_run_cron_now` | Trigger a scheduled cron job RIGHT NOW, regardless of its schedule |
 | `appcrane_check_resource_limits` | Which containers are NOT running with their configured CPU/RAM? Admin only |
 
@@ -559,8 +635,8 @@ Settings → Backup than passed through an agent.
 
 | Tool | What it does |
 |---|---|
-| `appcrane_get_secret` | List env vars with MASKED values (preview + fingerprint) — safe for chat |
-| `appcrane_reveal_secret` | Reveal ONE env var's plaintext by key (lands in transcript; audited) |
+| `appcrane_get_secret` | List env vars with MASKED values (preview + fingerprint) — safe for chat. A Secrets Manager reference shows its reference text |
+| `appcrane_reveal_secret` | Reveal ONE env var's plaintext by key (lands in transcript; audited). A Secrets Manager reference returns the reference text, never the AWS value |
 | `appcrane_set_env` | Set or update an environment variable on an app |
 | `appcrane_set_data_blob` | Write a blob directly to the app's persistent /data volume on the host — single hop, no container round-trip, no GitHub round-trip, no inline size ... |
 | `appcrane_ls` | List files inside a running app container at a specific path |
@@ -574,7 +650,7 @@ Settings → Backup than passed through an agent.
 | `appcrane_scan_report` | CVE findings for an app, or across the fleet (scoped to apps you can see) |
 | `appcrane_scan_app` | Scan one app's dependency manifests against OSV now, instead of waiting for the daily pass |
 | `appcrane_platform_policy` | Read or set the platform levers: ban public apps, require security scans (platform admin) |
-| `appcrane_push_to_managed_app` | Push a batch of files to a managed app's AMC_<slug> repo, authenticated server-side via AppCrane's service-account credential. `deletions: [path]` removes files in the same commit (Crane-hosted repos only) |
+| `appcrane_push_to_managed_app` | Push a batch of files to a managed app's AMC_<slug> repo, authenticated server-side via AppCrane's service-account credential. `deletions: [path]` removes files in the same commit (Crane-hosted repos only). Push every file of a change in ONE call: each push is one commit and one deploy, and a push that lands while the app is still deploying is queued and deployed once when that deploy ends (`auto_deploy.action: deploy_queued`). Results may carry `advice` on how you deploy; act on it |
 | `appcrane_get_app_context` | Read the operator notes injected into every coder dispatch for an app (app admin/owner) |
 | `appcrane_append_app_context` | Add a note to those operator notes — the default, because it cannot destroy what someone else wrote |
 | `appcrane_set_app_context` | REPLACE those notes wholesale; reports how many bytes it discarded |

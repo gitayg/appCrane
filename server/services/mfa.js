@@ -272,11 +272,11 @@ function storeRecoveryCodes(db, userId, codes) {
 
 // ── challenges (password accepted, second step pending) ───────────────────
 
-export function createChallenge(db, user, purpose, appId = null, nowMs = Date.now()) {
+export function createChallenge(db, user, purpose, appId = null, nowMs = Date.now(), { method = null } = {}) {
   const token = crypto.randomBytes(32).toString('base64url');
   db.prepare("DELETE FROM mfa_challenges WHERE user_id = ? OR datetime(expires_at) < datetime('now')").run(user.id);
-  db.prepare('INSERT INTO mfa_challenges (token_hash, user_id, purpose, app_id, expires_at) VALUES (?, ?, ?, ?, ?)')
-    .run(hashApiKey(token), user.id, purpose, appId, new Date(nowMs + CHALLENGE_TTL_MS).toISOString());
+  db.prepare('INSERT INTO mfa_challenges (token_hash, user_id, purpose, app_id, expires_at, method) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(hashApiKey(token), user.id, purpose, appId, new Date(nowMs + CHALLENGE_TTL_MS).toISOString(), method);
   return token;
 }
 
@@ -290,6 +290,11 @@ export function loadChallenge(db, token, purpose, nowMs = Date.now()) {
   if (!user) return null;
   db.prepare('UPDATE mfa_challenges SET attempts = attempts + 1 WHERE id = ?').run(c.id);
   return { challenge: c, user };
+}
+
+/** The SSO method ('oidc' / 'saml') a challenge belongs to, or null for password sign-in. Counts no attempt. */
+export function challengeMethod(db, token) {
+  return db.prepare('SELECT method FROM mfa_challenges WHERE token_hash = ?').get(hashApiKey(token))?.method || null;
 }
 
 export function consumeChallenge(db, challengeId) {

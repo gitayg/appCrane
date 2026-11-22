@@ -142,8 +142,10 @@ export function auditExpiredUse(userId, kind, credentialId, expiresAt, ip) {
 
 export function _resetAuditThrottleForTests() { auditedAt.clear(); }
 
-// api_key_hash is UNIQUE NOT NULL: 'expired:' || hash keeps both and matches
-// no presented key (every real value is a hex SHA-256).
+// api_key_hash is UNIQUE (NULL since 169 means "never had a key", which must
+// not read as expired): 'expired:' || hash keeps both and matches no presented
+// key (every real value is a hex SHA-256). A NULL hash never matches
+// NOT LIKE 'expired:%', so keyless users are skipped here and in the warnings.
 const MOVE_SQL = `UPDATE users SET api_key_expired_hash = api_key_hash, api_key_hash = 'expired:' || api_key_hash
                    WHERE id = ? AND api_key_hash NOT LIKE 'expired:%'`;
 
@@ -179,10 +181,12 @@ function stageFor(expiresAt, now) {
 }
 
 // Who is warned, per credential kind. A user API key is warned about only once
-// it has been used since it was issued: SSO and SCIM provisioning give every
-// account a random key nobody ever sees, and telling those people a key they
-// never had is about to expire is noise. MCP keys and Crew tokens are always
-// issued on purpose, so they are always warned about.
+// it has been used since it was issued: before 169, SSO and SCIM provisioning
+// gave every account a random key nobody ever saw (accounts are now created
+// with none, api_key_hash NULL, and those rows are never selected), and
+// telling those people a key they never had is about to expire is noise. MCP
+// keys and Crew tokens are always issued on purpose, so they are always warned
+// about.
 function dueCredentials(db) {
   const window = "datetime('now', '+14 days')";
   const human = "u.active = 1 AND u.email IS NOT NULL AND trim(u.email) != ''";

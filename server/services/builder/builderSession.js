@@ -32,6 +32,7 @@ import {
 import { coderSystemPrompt } from './deliveryPrompt.js';
 import { takeOverAppCoder, holderName } from './coderTakeover.js';
 import log from '../../utils/logger.js';
+import { getPlatformAnthropicKey } from '../platformAnthropicKey.js';
 
 const STUDIO_IMAGE  = process.env.APPSTUDIO_IMAGE || 'appcrane-studio:latest';
 
@@ -675,7 +676,7 @@ async function runBuilderTurn(sessionId, state, prompt, model, mode = DEFAULT_CO
     // reached and every turn falls back to the platform key.
     const ownerId = getDb().prepare('SELECT user_id FROM coder_sessions WHERE id = ?').get(sessionId)?.user_id ?? null;
     const credentialKind = agentCredentialKind({
-      actingUserId: ownerId, hasAppCredentials: !!c.credsCleanup, apiKey: process.env.ANTHROPIC_API_KEY,
+      actingUserId: ownerId, hasAppCredentials: !!c.credsCleanup, apiKey: getPlatformAnthropicKey(),
     });
     // This turn's read-only AppCrane MCP key, for the session owner and this
     // app only; revoked in settle(), whichever way the turn ends.
@@ -695,7 +696,7 @@ async function runBuilderTurn(sessionId, state, prompt, model, mode = DEFAULT_CO
         containerId:  c.containerId,
         prompt:       augmentedPrompt,
         model,
-        apiKey:       process.env.ANTHROPIC_API_KEY,
+        apiKey:       getPlatformAnthropicKey(),
         resume:       c.claudeSessionId || undefined,
         hasAppCredentials: !!c.credsCleanup,
         actingUserId: ownerId,

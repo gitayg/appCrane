@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
-import { writeFileInside } from '../utils/paths.js';
+import { regularFileInside, writeFileInside } from '../utils/paths.js';
 import log from '../utils/logger.js';
 import { choosePhpVersion } from './phpVersion.js';
 
@@ -68,7 +68,10 @@ const EXT_TABLE = {
   zip: { apt: ['libzip-dev'] },
 };
 
-function readJson(path) {
+// A repo can commit a link here, and git checks it out as a link: null, like an
+// unparseable file, rather than read whatever host file it names.
+function readJson(releaseDir, path) {
+  if (!regularFileInside(releaseDir, path)) return null;
   try { return JSON.parse(readFileSync(path, 'utf8')); } catch (_) { return null; }
 }
 
@@ -87,7 +90,7 @@ function readJson(path) {
 function packageJsonClaimsApp(releaseDir) {
   const path = join(releaseDir, 'package.json'); // nosemgrep: path-join-resolve-traversal — releaseDir is an internal computed path
   if (!existsSync(path)) return false;
-  const pkg = readJson(path);
+  const pkg = readJson(releaseDir, path);
   if (!pkg) return true;
   return Boolean(pkg.scripts?.start || pkg.main);
 }
@@ -267,7 +270,7 @@ function apacheConfLines(docroot) {
  */
 export function generatePhpDockerfile({ releaseDir, manifest, pinnedPhpVersion = null }) {
   const warnings = [];
-  const composerJson = readJson(join(releaseDir, 'composer.json')); // nosemgrep: path-join-resolve-traversal — releaseDir is an internal computed path
+  const composerJson = readJson(releaseDir, join(releaseDir, 'composer.json')); // nosemgrep: path-join-resolve-traversal — releaseDir is an internal computed path
   if (!composerJson) {
     warnings.push(
       'composer.json is not valid JSON, so no ext-* requirement could be read. The build will ' +
@@ -279,7 +282,7 @@ export function generatePhpDockerfile({ releaseDir, manifest, pinnedPhpVersion =
   // runs Composer only. An app whose CSS/JS comes out of Vite therefore ships
   // whatever it committed — which is the white-page deploy distValidator.js
   // exists to catch, so it must not be silent.
-  const pkg = readJson(join(releaseDir, 'package.json')); // nosemgrep: path-join-resolve-traversal — releaseDir is an internal computed path
+  const pkg = readJson(releaseDir, join(releaseDir, 'package.json')); // nosemgrep: path-join-resolve-traversal — releaseDir is an internal computed path
   if (pkg?.scripts?.build) {
     warnings.push(
       'package.json declares a "build" script, but the PHP build runs Composer only - no npm ' +

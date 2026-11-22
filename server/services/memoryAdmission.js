@@ -43,6 +43,7 @@ import { AppError } from '../utils/errors.js';
 import log from '../utils/logger.js';
 import { recordAdmissionEvent } from './eventStore.js';
 import { admitCpu } from './cpuAdmission.js';
+import { dockerInfo, runningContainers, invalidateDockerSnapshot, _resetDockerSnapshotForTests } from './dockerSnapshot.js';
 
 export const MODE_KEY = 'memory_admission_mode';
 export const RESERVE_KEY = 'memory_reserve_mb';
@@ -55,8 +56,6 @@ export const REFUSED_CODE = 'INSUFFICIENT_MEMORY';
 const MiB = 1024 * 1024;
 const GiB = 1024 * MiB;
 const DOCKER_TIMEOUT_MS = 10_000;
-// The image comes last: labels are JSON, whose strings never hold a raw tab.
-export const INSPECT_FORMAT = '{{.Name}}\t{{.HostConfig.Memory}}\t{{.HostConfig.MemoryReservation}}\t{{json .Config.Labels}}\t{{.Config.Image}}';
 // Container kinds started with --memory-reservation (half the max, docker.js).
 export const RESERVED_KINDS = new Set(['app']);
 
@@ -128,28 +127,22 @@ function describe(name, labels) {
   return { kind: 'other', label: name };
 }
 
-/** Parse `docker inspect` lines of "<name>\t<memory bytes>\t<reservation bytes>\t<labels json>\t<image>". */
-export function parseInspect(out) {
+/** dockerSnapshot rows -> memory rows (new objects: the snapshot is shared and must not be written to). */
+export function memoryRows(snapshot) {
   const rows = [];
-  for (const line of String(out || '').split('\n')) {
-    const parts = line.split('\t');
-    if (parts.length < 4) continue;
-    const name = parts[0].replace(/^\//, '').trim();
-    const mem = Number(parts[1]);
-    if (!name || !Number.isFinite(mem) || mem < 0) continue;
-    const res = Number(parts[2]);
+  for (const r of snapshot) {
+    const mem = r.memory;
+    if (!Number.isFinite(mem) || mem < 0) continue;
+    const res = r.memoryReservation;
     const reservedBytes = Number.isFinite(res) && res > 0 && res <= mem ? res : 0;
-    let labels = {};
-    try { labels = JSON.parse(parts[3]) || {}; } catch (_) { labels = {}; }
-    const image = (parts[4] || '').trim() || null;
-    rows.push({ name, image, capBytes: mem, reservedBytes, unlimited: mem === 0, ...describe(name, labels) });
+    rows.push({ name: r.name, image: r.image, capBytes: mem, reservedBytes, unlimited: mem === 0, ...describe(r.name, r.labels) });
   }
   return rows;
 }
 
-async function readTotal() {
+async function readTotal(fresh) {
   try {
-    const n = Number(String(await docker(['info', '--format', '{{.MemTotal}}'])).trim());
+    const n = (await dockerInfo({ fresh })).memTotal;
     if (Number.isFinite(n) && n > 0) return { totalBytes: n, totalSource: 'docker' };
     throw new Error('docker info returned no MemTotal');
   } catch (e) {
@@ -158,10 +151,8 @@ async function readTotal() {
   }
 }
 
-async function readContainers() {
-  const ids = String(await docker(['ps', '-q', '--no-trunc'])).split('\n').map((s) => s.trim()).filter(Boolean);
-  if (!ids.length) return [];
-  const rows = parseInspect(await docker(['inspect', '--format', INSPECT_FORMAT, ...ids]));
+async function readContainers(fresh) {
+  const rows = memoryRows(await runningContainers({ fresh }));
   const byUsage = rows.filter((r) => r.unlimited || r.kind === 'other');
   if (byUsage.length) {
     const usage = await readUsage(byUsage.map((r) => r.name));
@@ -199,12 +190,12 @@ export async function readUsage(names) {
 export async function measureMemory({ fresh = false, db = getDb() } = {}) {
   if (!fresh && cached && Date.now() - cached.at < CACHE_MS) return cached.value;
   const { reserveMb } = getAdmissionSettings(db);
-  const { totalBytes, totalSource } = await readTotal();
+  const { totalBytes, totalSource } = await readTotal(fresh);
   const reserveBytes = reserveMb != null ? reserveMb * MiB : defaultReserveBytes(totalBytes);
   let containers = [];
   let error = null;
   try {
-    containers = await readContainers();
+    containers = await readContainers(fresh);
   } catch (e) {
     error = `could not list running containers: ${e.message.split('\n')[0]}`;
     log.warn(`[memory-admission] ${error}`);
@@ -221,6 +212,7 @@ export async function measureMemory({ fresh = false, db = getDb() } = {}) {
 
 export function invalidateMemoryMeasurement() {
   cached = null;
+  invalidateDockerSnapshot();
 }
 
 /**
@@ -332,4 +324,5 @@ async function admitMemory({ name, memoryMb, ...ctx }) {
 export function _resetMemoryAdmissionForTests() {
   cached = null;
   reservations.clear();
+  _resetDockerSnapshotForTests();
 }

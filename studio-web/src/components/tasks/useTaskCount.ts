@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { adminApi } from '../../adminApi'
+import { setVisibleInterval } from '../../utils/visibleInterval'
 
 export interface TaskCounts { open_assigned: number; unread: number }
 
@@ -15,9 +16,9 @@ export function useTaskCount(intervalMs = 60_000): TaskCounts {
         .catch(() => {})
     }
     load()
-    const t = window.setInterval(load, intervalMs)
+    const stop = setVisibleInterval(load, intervalMs)
     window.addEventListener('appcrane:tasks-changed', load)
-    return () => { alive = false; window.clearInterval(t); window.removeEventListener('appcrane:tasks-changed', load) }
+    return () => { alive = false; stop(); window.removeEventListener('appcrane:tasks-changed', load) }
   }, [intervalMs])
   return counts
 }

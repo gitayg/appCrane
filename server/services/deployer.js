@@ -1,11 +1,13 @@
-import { execFileSync } from 'child_process';
+import { execFile, execFileSync } from 'child_process';
+import { promisify } from 'util';
 import { assertNoRestoreInProgress } from './managedDbRestoreGuard.js';
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, unlinkSync, symlinkSync, cpSync, writeFileSync, readlinkSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, unlinkSync, symlinkSync, cpSync, writeFileSync, readlinkSync, lstatSync } from 'fs';
 import { join, resolve, basename } from 'path';
 import net from 'net';
 import { getDb } from '../db.js';
 import { identitySecretFor } from './identitySignature.js';
 import { decrypt } from './encryption.js';
+import { isSecretRef, resolveStoredEnv } from './secretRefs.js';
 import log from '../utils/logger.js';
 import { usesLocalRepo } from './managedRepo.js';
 import { scrubToken } from './githubGitAuth.js';
@@ -28,9 +30,14 @@ import { parseContainerCommand, parseVolumePaths, resolveVolumeMounts, declaredV
 import { resolveHealthProbe } from './healthProbeTarget.js';
 import { fetchAppProbe } from './appProbeFetch.js';
 import { imagesToKeep } from './imageRetention.js';
+import { regularFileInside } from '../utils/paths.js';
 import { admitContainer, REFUSED_CODE } from './memoryAdmission.js';
 import { recordDeployEvent, recordRollbackEvent } from './eventStore.js';
 import { createDeployLog } from './deployLog.js';
+import { probeBackoffMs } from './probeBackoff.js';
+import { cloneGitRelease, readReleaseCommit } from './gitDeployClone.js';
+
+const execFileAsync = promisify(execFile);
 
 // ---------------------------------------------------------------------------
 // Managed database credentials -> container environment
@@ -497,6 +504,23 @@ export function assertNoInflightDeploy(db, appId, env, slug) {
 }
 
 /**
+ * Non-throwing twin of assertNoInflightDeploy's check, for deploy-on-push: the
+ * newest in-flight deployment of app+env as { id } when it is fresh (younger
+ * than STALE_DEPLOY_SECONDS), else null. Reclaims nothing.
+ */
+export function freshInflightDeploy(db, appId, env) {
+  const rows = db.prepare(`
+    SELECT id, (strftime('%s','now') - strftime('%s', started_at)) AS age_s
+    FROM deployments
+    WHERE app_id = ? AND env = ? AND status IN ('pending','building','deploying')
+  `).all(appId, env);
+  if (rows.length === 0) return null;
+  const newest = rows.reduce((a, b) => (a.id > b.id ? a : b));
+  if (newest.age_s == null || newest.age_s < STALE_DEPLOY_SECONDS) return { id: newest.id };
+  return null;
+}
+
+/**
  * Health-endpoint contract for AppCrane apps:
  *   - Responds 200 within the timeout
  *   - Body is JSON
@@ -575,6 +599,7 @@ async function probeHealthEndpoint(url, timeoutMs, { strict = true } = {}) {
   let lastErrorClass = null;
   let lastStatus = null;
   let lastBodyPreview = null;
+  let attempt = 0;
 
   while (Date.now() < deadline) {
     try {
@@ -608,7 +633,7 @@ async function probeHealthEndpoint(url, timeoutMs, { strict = true } = {}) {
       lastErrorClass = classifyFetchError(e);
       lastError = lastErrorClass.label + (lastErrorClass.code && lastErrorClass.code !== 'UNKNOWN' ? ` [${lastErrorClass.code}]` : '');
     }
-    await new Promise(r => setTimeout(r, 2000));
+    await new Promise(r => setTimeout(r, probeBackoffMs(attempt++)));
   }
   const cls = lastErrorClass;
   return {
@@ -628,8 +653,8 @@ async function probeHealthEndpoint(url, timeoutMs, { strict = true } = {}) {
  * TCP handshake on the loopback port the container publishes.
  *
  * Same retry envelope as the HTTP gate — attempts until `timeoutMs` elapses,
- * 2s between them — because a container needs the same few seconds to bind
- * whatever protocol it speaks. Each attempt gets healthChecker's 5s connect
+ * with the same backoff between them (probeBackoff.js) — because a container
+ * needs the same few seconds to bind whatever protocol it speaks. Each attempt gets healthChecker's 5s connect
  * budget, clamped to whatever is left of the envelope so the gate cannot
  * overrun it.
  *
@@ -664,13 +689,14 @@ function tcpConnectOnce(host, port, timeoutMs) {
 async function probeTcpListener(host, port, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   let last = null;
+  let attempt = 0;
 
   while (Date.now() < deadline) {
     const attemptMs = Math.min(TCP_ATTEMPT_TIMEOUT_MS, deadline - Date.now());
     const result = await tcpConnectOnce(host, port, attemptMs);
     if (result.ok) return { ok: true };
     last = result;
-    await new Promise(r => setTimeout(r, 2000));
+    await new Promise(r => setTimeout(r, probeBackoffMs(attempt++)));
   }
 
   return {
@@ -951,6 +977,7 @@ export async function rollbackApp(app, env, deploymentId, userId) {
     target.artifact_sha256 ?? null, target.artifact_bytes ?? null,
     target.artifact_filename ?? null, target.declared_commit_sha ?? null, newId,
   );
+  (await import('./deployIntegrity.js')).copyLockfile(db, target.id, newId);
 
   // Mark the previously-live deployment as rolled_back.
   db.prepare("UPDATE deployments SET status = 'rolled_back' WHERE app_id = ? AND env = ? AND status = 'live' AND id != ?")
@@ -983,12 +1010,24 @@ export async function rollbackApp(app, env, deploymentId, userId) {
  *
  * - github apps: a FRESH production build (so the bundler bakes the prod
  *   base path /<slug>/ rather than the sandbox's /<slug>-sandbox/).
- * - managed/upload apps: copies the EXACT tested sandbox release tree into
- *   production (byte-identical artifact), rewriting only the prod .env.
+ * - managed apps: a fresh production build at the exact sandbox commit, like
+ *   github apps.
+ * - upload apps, and any sandbox release made by appcrane_deploy_artifact:
+ *   copies the EXACT tested sandbox release tree into production, rewriting
+ *   only the prod .env.
  *
  * Shared by POST /api/apps/:slug/promote and the appcrane_promote MCP tool.
  * Caller is responsible for authz (must require deploy.production).
  */
+// Release folders are named releases/<ms>-git. A push-triggered deploy and a
+// manual one can start in the same millisecond and pick the same folder, and
+// the second clone then fails with "already exists"; never hand out one twice.
+let lastReleaseTimestamp = 0;
+function releaseTimestamp() {
+  lastReleaseTimestamp = Math.max(Date.now(), lastReleaseTimestamp + 1);
+  return lastReleaseTimestamp;
+}
+
 export async function promoteApp(app, userId, opts = {}) {
   const db = getDb();
 
@@ -1072,7 +1111,13 @@ export async function promoteApp(app, userId, opts = {}) {
   // A local-backed managed app has no github_url (its repo is on this host), so
   // it is selected by its marker, and FIRST: an unknown marker throws here
   // instead of a github_url that happens to be set deciding the path.
-  if (usesLocalRepo(app) || ((app.source_type === 'github' || app.source_type === 'managed') && app.github_url)) {
+  // A sandbox release made by appcrane_deploy_artifact has no commit to build
+  // from: its commit_hash is the bundle's sha256:<digest>, and a git checkout of
+  // that fails at once ("expected a hex SHA"). It takes the copy path below on
+  // any source type, so production gets the bytes sandbox ran.
+  const { isArtifactHash } = await import('./artifactDigest.js');
+  const artifactRelease = isArtifactHash(sandboxDeploy.commit_hash);
+  if (!artifactRelease && (usesLocalRepo(app) || ((app.source_type === 'github' || app.source_type === 'managed') && app.github_url))) {
     const freshResult = db.prepare(`
       INSERT INTO deployments (app_id, env, version, status, commit_hash, commit_sha, deployed_by, log)
       VALUES (?, 'production', ?, 'pending', ?, ?, ?, ?)
@@ -1090,7 +1135,7 @@ export async function promoteApp(app, userId, opts = {}) {
     return { deployment_id: freshDeployId, status: 'pending', mode: 'rebuild', version: sandboxDeploy.version, from_sandbox: sandboxDeploy.id };
   }
 
-  // Upload apps (no git repo): copy the exact sandbox release tree into production.
+  // Upload apps (no git repo) and artifact releases: copy the exact sandbox release tree into production.
   if (!sandboxDeploy.release_path || !existsSync(sandboxDeploy.release_path)) {
     throw new AppError('Sandbox release directory missing on disk (pre-promote-support deploy?)', 409, 'NO_RELEASE_PATH');
   }
@@ -1110,28 +1155,48 @@ export async function promoteApp(app, userId, opts = {}) {
   `).run(app.id, sandboxDeploy.version, sandboxDeploy.commit_hash, userId,
     `Promoted from sandbox deployment #${sandboxDeploy.id}`);
   const newDeployId = insertResult.lastInsertRowid;
+  db.prepare(`
+    UPDATE deployments
+       SET artifact_sha256 = ?, artifact_bytes = ?, artifact_filename = ?, declared_commit_sha = ?
+     WHERE id = ?
+  `).run(
+    sandboxDeploy.artifact_sha256 ?? null, sandboxDeploy.artifact_bytes ?? null,
+    sandboxDeploy.artifact_filename ?? null, sandboxDeploy.declared_commit_sha ?? null, newDeployId,
+  );
 
   try {
-    // 1. Copy sandbox release tree into production releases/ (skip .env + data symlinks).
-    const timestamp = Date.now();
+    // Before anything on disk or in the records moves: past step 5 a failed deploy
+    // leaves the running release marked rolled_back, and a secret that cannot be
+    // read is known now. deployApp resolves again when it starts the container.
+    const envRows = db.prepare('SELECT key, value_encrypted FROM env_vars WHERE app_id = ? AND env = ?').all(app.id, 'production');
+    await resolveStoredEnv(app, 'production', envRows);
+
+    // 1. Copy sandbox release tree into production releases/. Only the
+    //    sandbox's own top-level .env and data symlinks stay behind: a real
+    //    data/ directory, or any nested one, is part of the release.
+    const timestamp = releaseTimestamp();
     const newReleaseDir = resolve(join(prodReleasesDir, `${timestamp}-promote`));
+    const runtimeLinks = new Set([join(sandboxReleaseDir, '.env'), join(sandboxReleaseDir, 'data')]);
     cpSync(sandboxReleaseDir, newReleaseDir, {
       recursive: true,
       dereference: false,
       filter: (src) => {
-        const base = src.split('/').pop();
-        if (base === '.env' || base === 'data') return false;
-        return true;
+        if (!runtimeLinks.has(resolve(src))) return true;
+        try { return !lstatSync(src).isSymbolicLink(); } catch (_) { return false; }
       },
     });
 
     // 2. Rewrite production .env from production env_vars (NEVER copy sandbox env).
-    const envRows = db.prepare('SELECT key, value_encrypted FROM env_vars WHERE app_id = ? AND env = ?').all(app.id, 'production');
+    //    The container gets its env from dockerStart; this host file stays outside
+    //    the build context. A Secrets Manager value is not written to it.
     const envContent = envRows.map(v => {
-      try { return `${v.key}=${decrypt(v.value_encrypted)}`; }
-      catch (_) { return `# ERROR decrypting ${v.key}`; }
+      try {
+        const plain = decrypt(v.value_encrypted);
+        return isSecretRef(plain) ? `# ${v.key} comes from Secrets Manager at container start` : `${v.key}=${plain}`;
+      } catch (_) { return `# ERROR decrypting ${v.key}`; }
     }).join('\n');
     const fullEnv = `${envContent}\nPORT=${prodPorts.prod_be}\nFE_PORT=${prodPorts.prod_fe}\nNODE_ENV=production\n`;
+    mkdirSync(prodSharedDir, { recursive: true });
     writeFileSync(join(prodSharedDir, '.env.production'), fullEnv);
     const envDest = join(newReleaseDir, '.env');
     try { unlinkSync(envDest); } catch (_) {}
@@ -1168,6 +1233,7 @@ export async function promoteApp(app, userId, opts = {}) {
     deployApp(newDeployId, fullApp, 'production', prodPorts, {
       preExtractedDir: newReleaseDir,
       commitHash: sandboxDeploy.commit_hash,
+      expectTreeSha: sandboxDeploy.tree_sha256 || null,
       releaseCheckDelta: opts.releaseCheckDelta,
     }).catch(e => {
       log.error(`Promote deploy failed for ${app.slug}-production (deployment #${newDeployId}): ${e.message}`);
@@ -1184,6 +1250,14 @@ export async function promoteApp(app, userId, opts = {}) {
 export async function deployApp(deployId, app, env, ports, opts = {}) {
   const db = getDb();
   recordDeployEvent(deployId, 'started');
+
+  // One read per deploy, before anything is pulled or built: an unresolved
+  // Secrets Manager reference fails here and the old container keeps running.
+  let storedEnv = null;
+  const loadStoredEnv = () => {
+    storedEnv ??= resolveStoredEnv(app, env, db.prepare('SELECT key, value_encrypted FROM env_vars WHERE app_id = ? AND env = ?').all(app.id, env));
+    return storedEnv;
+  };
 
   // An image app has no release tree — no clone, no bundle, no `current`
   // symlink target. Every step below that reads a file out of a release
@@ -1254,15 +1328,26 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
   // each failure is reported with the path it applies to, because "the app
   // cannot write /config" and "the app cannot write /data" have different
   // causes and different fixes.
+  //
+  // v2.133.0: where AppCrane is not root (an install running it as `ubuntu`),
+  // a host chown cannot take back anything another user owns, so a folder an
+  // older appcrane_cp left owned by root (fixed in v2.123.1) stayed unwritable
+  // for the app on every later deploy. A mount the host chown failed on is
+  // retried just before the container starts (refusedChowns below), in a
+  // throwaway root container of the pinned helper image: there, once the disk
+  // and memory gates have passed and Docker is known to answer, rather than
+  // here, where a deploy about to be refused would pull the helper first.
   const chownDetails = [];
+  const refusedChowns = [];
   for (const vol of hostOwnedVolumes) {
     try {
-      execFileSync('chown', ['-R', '1000:1000', vol.host], { stdio: 'pipe', timeout: 30000 });
+      await execFileAsync('chown', ['-R', '1000:1000', vol.host], { timeout: 30000 });
       chownDetails.push(`chown 1000:1000 ${vol.host} (${vol.container}) → ok`);
     } catch (e) {
+      refusedChowns.push(vol);
       chownDetails.push(
-        `chown 1000:1000 ${vol.host} (${vol.container}) → failed (${e?.stderr?.toString().trim() || e.message}). ` +
-        `App may hit EACCES on ${vol.container} writes if its container runs as a non-root user.`,
+        `chown 1000:1000 ${vol.host} (${vol.container}) → refused on the host (${e?.stderr?.toString().trim() || e.message}); ` +
+        `retried as root in a helper container before the app starts.`,
       );
     }
   }
@@ -1286,6 +1371,10 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
   // Hoisted so the failure handler can still flush its deploy-log lines when
   // the BUILD is what failed. Stays null for source types that never clone.
   let supplyChainGate = null;
+  // Commit pinning (services/deployIntegrity.js): set once a git-sourced
+  // deploy has resolved its commit; checked before the build and again
+  // before the container swap. Stays null for image and upload deploys.
+  let integrity = null;
   // The image this attempt BUILT (null when it reused a cached one or pulled).
   // Pruning only runs after a passing health check, so without this a failed
   // deploy's image stayed on disk forever, and as the newest image it outranked
@@ -1303,6 +1392,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     // Every deploy path (AppStudio, PR poller, rename redeploys, …) passes
     // here, so a restore's stopped container is never replaced mid-restore.
     assertNoRestoreInProgress(app.slug, env);
+    await loadStoredEnv();
     // A rollback reuses a release or image already on disk, so it is the one
     // deploy that stays allowed on a nearly full disk.
     if (!opts.rollback) {
@@ -1319,7 +1409,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     pruneOldReleases(releasesDir, appDir, 5, appendLog);
 
     // 1. Clone or locate release
-    const timestamp = Date.now();
+    const timestamp = releaseTimestamp();
     let commitHash = 'unknown';
     // The full SHA beside the short one (migration 150): auto-patch compares
     // commits exactly, and a short prefix can be brute-forced.
@@ -1514,6 +1604,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
 
       releaseDir = resolve(join(releasesDir, `${timestamp}-git`));
       mkdirSync(releaseDir, { recursive: true });
+      let restoredEnvPaths = [];
 
       if (localRepo) {
         // Same two steps as GitHub — shallow clone of the branch, then (for a
@@ -1538,8 +1629,9 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
         // THIS environment's clone before anything reads or builds it, with this
         // environment's env vars layered on. Paths and key names only in the log.
         const { restoreStoredEnvFiles, describeRestoredEnvFiles } = await import('./envFileStore.js');
-        const restoredEnvFiles = restoreStoredEnvFiles(db, app, env, releaseDir);
+        const restoredEnvFiles = restoreStoredEnvFiles(db, app, env, releaseDir, await loadStoredEnv());
         if (restoredEnvFiles.files.length) appendLog(describeRestoredEnvFiles(restoredEnvFiles));
+        restoredEnvPaths = restoredEnvFiles.files.map((f) => f.path);
       } else {
         let token = null;
         let installationToken = null;
@@ -1591,59 +1683,31 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
           : { timeout: ms, stdio: 'pipe' });
         const scrubGit = (msg) => scrubToken(scrubToken(String(msg), installationToken), token);
 
-        try {
-          execFileSync('git', [
-            'clone', '--depth', '1',
-            '--branch', app.branch || 'main',
-            cloneUrl, releaseDir,
-          ], gitOpts(120000));
-        } catch (err) {
-          throw new Error(scrubGit(err.message));
-        }
-
-        // v2.7.12: pin to an exact commit when asked (promote ships the EXACT
-        // release tested in sandbox, not the branch tip which may have moved).
-        // GitHub serves reachable full SHAs directly; fall back to deepening the
-        // branch history so an abbreviated SHA (deployments.commit_hash is short)
-        // still resolves, then check it out detached.
-        if (opts.targetCommit && opts.targetCommit !== 'unknown') {
-          appendLog(`Pinning to commit ${opts.targetCommit} (exact sandbox release)…`);
-          let fetched = false;
-          try {
-            execFileSync('git', ['-C', releaseDir, 'fetch', '--depth', '1', 'origin', opts.targetCommit], gitOpts(120000));
-            fetched = true;
-          } catch (_) { /* abbreviated SHA or not directly fetchable — deepen below */ }
-          if (!fetched) {
-            try {
-              execFileSync('git', ['-C', releaseDir, 'fetch', '--depth', '200', 'origin', app.branch || 'main'], gitOpts(120000));
-            } catch (_) { /* best effort; checkout will surface a clear error if the commit is unreachable */ }
-          }
-          try {
-            execFileSync('git', ['-C', releaseDir, 'checkout', '--detach', opts.targetCommit], gitOpts(30000));
-          } catch (err) {
-            throw new Error(`Failed to check out commit ${opts.targetCommit} for promotion (is it on branch '${app.branch || 'main'}' within the last 200 commits?): ${scrubGit(err.message)}`);
-          }
-        }
+        await cloneGitRelease({
+          cloneUrl, branch: app.branch || 'main', releaseDir,
+          targetCommit: opts.targetCommit, gitOpts, scrubGit, appendLog,
+        });
       }
 
-      // Get commit hash
-      try {
-        commitHash = execFileSync('git', ['-C', releaseDir, 'rev-parse', '--short', 'HEAD'], { timeout: 5000 })
-          .toString().trim();
-        const full = execFileSync('git', ['-C', releaseDir, 'rev-parse', 'HEAD'], { timeout: 5000 }).toString().trim();
-        if (/^[0-9a-f]{40}$/.test(full)) commitSha = full;
-      } catch (e) {}
-
-      // Get commit message (subject + body). %s is the subject line,
-      // %B includes body — we use %B and trim, capping at 2000 chars
-      // so a verbose merge-commit body doesn't blow up the row.
-      try {
-        const raw = execFileSync('git', ['-C', releaseDir, 'log', '-1', '--format=%B'], { timeout: 5000 })
-          .toString().trim();
-        if (raw) commitMessage = raw.slice(0, 2000);
-      } catch (e) { /* commitMessage stays null */ }
+      // Get commit hash, and the commit message (subject + body, %B, trimmed
+      // and capped at 2000 chars so a verbose merge-commit body doesn't blow
+      // up the row).
+      {
+        const head = await readReleaseCommit(releaseDir);
+        if (head.commitHash !== null) commitHash = head.commitHash;
+        if (head.commitSha !== null) commitSha = head.commitSha;
+        if (head.commitMessage !== null) commitMessage = head.commitMessage;
+      }
 
       appendLog(`Cloned successfully. Commit: ${commitHash}${commitMessage ? ` — ${commitMessage.split('\n')[0].slice(0, 80)}` : ''}`);
+
+      {
+        const { checkRequestedCommit, PIPELINE_WRITTEN } = await import('./deployIntegrity.js');
+        if (!commitSha) throw new Error('Deploy integrity: the checkout\'s HEAD commit could not be read, so what would be built cannot be pinned. The deploy was stopped and the running container was not touched.');
+        const requested = checkRequestedCommit(opts.targetCommit, commitSha);
+        if (!requested.ok) throw new Error(`Deploy integrity: ${requested.message}. The deploy was stopped and the running container was not touched.`);
+        integrity = { expectedSha: commitSha, allowed: [...PIPELINE_WRITTEN, ...restoredEnvPaths], pinned: null };
+      }
 
       // v2.3.6: cross-check local HEAD against GitHub's claim for this
       // branch. Mismatch = refuse deploy. supplyChain.authForApp already
@@ -1733,6 +1797,14 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       );
     }
 
+    // Deploy integrity, first pass: the icon pickup and deployhub.json /
+    // vercel.json below write crons, multitenant and the icon from the release
+    // tree, so the tree is checked before any of it is acted on.
+    if (integrity) {
+      const { verifyReleaseTree } = await import('./deployIntegrity.js');
+      await verifyReleaseTree({ dir: releaseDir, expectedSha: integrity.expectedSha, allowed: integrity.allowed, stage: 'before reading the manifest' });
+    }
+
     // v2.5.22: auto-pickup app icon from the release dir.
     //
     // Convention: an app can ship a tile icon by committing
@@ -1770,8 +1842,12 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       // absence, as the tree path does, would report a problem that isn't one.
       // The tag resolved above is the version.
       manifest = { version: imageVersion };
-    } else if (existsSync(manifestPath)) {
+    } else if (regularFileInside(releaseDir, manifestPath)) {
       manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    } else if (lstatSync(manifestPath, { throwIfNoEntry: false })) {
+      // Same rule as a linked Dockerfile (dockerfileGen.js). Reading through it
+      // printed the first bytes of any file the server can read into the deploy log.
+      throw new Error('deployhub.json is a symbolic link or not a regular file; commit a regular file or none at all');
     } else {
       appendLog('WARNING: No deployhub.json found. Using defaults.');
     }
@@ -1782,6 +1858,15 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     const manifestDbNeeds = parseManifestDatabase(manifest.database);
     const manifestAccessRules = parseAccessRules(manifest.access);
     const manifestMcp = parseAppMcp(manifest.mcp);
+
+    // A catalogue entry with a `build` recipe (catalogBuildRecipe.js) says how
+    // to build a project that ships no Dockerfile and no deployhub.json.
+    const { catalogRecipeFor, applyRecipeHealth } = await import('./catalogBuildRecipe.js');
+    const catalogRecipe = catalogRecipeFor(app, isImageDeploy);
+    if (catalogRecipe) {
+      appendLog(`Catalogue build recipe for '${app.catalog_slug}' applies where the repo declares nothing of its own`);
+      if (applyRecipeHealth(manifest, catalogRecipe.entry)) appendLog(`Health path from the catalogue entry: ${manifest.be.health}`);
+    }
 
     // Sync the per-tenant DB opt-in from the manifest onto the app row, so the
     // revoke path (which runs outside a deploy) knows whether to purge tenant
@@ -1802,6 +1887,12 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     } catch (e) {
       appendLog(`WARNING: cron sync failed (deploy continues): ${e.message}`);
     }
+    try {
+      const { syncVercelCronsForRelease } = await import('./vercelCrons.js');
+      for (const line of syncVercelCronsForRelease(app.id, env, isImageDeploy ? null : releaseDir)) appendLog(line);
+    } catch (e) {
+      appendLog(`WARNING: vercel.json cron sync failed (deploy continues): ${e.message}`);
+    }
 
     // Resolve `version` with precedence:
     //   1. package.json:version (always wins for Node apps — the field
@@ -1811,7 +1902,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     // This eliminates the drift class where deployhub.json:version goes stale
     // because every Node release bumps package.json but forgets the manifest.
     const pkgPath = isImageDeploy ? null : join(releaseDir, 'package.json');
-    if (pkgPath && existsSync(pkgPath)) {
+    if (pkgPath && regularFileInside(releaseDir, pkgPath)) {
       try {
         const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
         if (pkg.version) manifest.version = pkg.version;
@@ -1819,14 +1910,14 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       } catch (e) {
         appendLog(`WARNING: package.json parse failed (${e.message}); falling back to deployhub.json:version`);
       }
+    } else if (pkgPath && lstatSync(pkgPath, { throwIfNoEntry: false })) {
+      appendLog('WARNING: package.json is a symbolic link or not a regular file; not reading it, falling back to deployhub.json:version');
     }
     if (manifestPath && existsSync(manifestPath)) {
       appendLog(`Found deployhub.json: ${manifest.name || '(no name)'} v${manifest.version || '(no version)'}`);
     }
 
-    const envVars = db.prepare(
-      'SELECT key, value_encrypted FROM env_vars WHERE app_id = ? AND env = ?'
-    ).all(app.id, env);
+    const { values: runtimeEnvVars, decryptFailures, refKeys } = await loadStoredEnv();
 
     const bePort = env === 'production' ? ports.prod_be : ports.sand_be;
 
@@ -1861,6 +1952,15 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     const craneInternalUrl = `http://localhost:${cranePort}`;
 
     const appBasePath = env === 'production' ? `/${app.slug}/` : `/${app.slug}-sandbox/`;
+
+    const verifyTreeBeforeBuild = async () => {
+      if (!integrity) return;
+      const { verifyReleaseTree, recordLockfile } = await import('./deployIntegrity.js');
+      integrity.pinned = await verifyReleaseTree({ dir: releaseDir, expectedSha: integrity.expectedSha, allowed: integrity.allowed, stage: 'before build' });
+      const written = Object.keys(integrity.pinned);
+      appendLog(`Deploy integrity: release tree is exactly commit ${integrity.expectedSha}${written.length ? ` (plus files AppCrane wrote: ${written.join(', ')})` : ''}.`);
+      appendLog(recordLockfile(db, { appId: app.id, env, deployId, dir: releaseDir }));
+    };
 
     db.prepare("UPDATE deployments SET status = 'deploying' WHERE id = ?").run(deployId);
 
@@ -1922,6 +2022,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       }
       appendLog('No Dockerfile + non-Node app → building with Nixpacks…');
       image = imageTagFor(app.slug, env, commitHash);
+      await verifyTreeBeforeBuild();
       await nixpacksBuild({
         releaseDir, tag: image, slug: app.slug, env,
         onLog: (line) => { if (deployLog.length < 500) appendLog(`  ${line}`); },
@@ -1930,7 +2031,8 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     } else {
       const { pinnedPhpVersionFor, describePhpBuild } = await import('./phpVersion.js');
       const pinnedPhpVersion = pinnedPhpVersionFor(db, app.id, env);
-      const { userProvided, runtime, php, node } = ensureDockerfile({ releaseDir, manifest, appBasePath, craneUrl, craneInternalUrl, pinnedPhpVersion });
+      const { buildKitEnabled } = await import('./buildkitMode.js');
+      const { userProvided, runtime, php, node } = ensureDockerfile({ releaseDir, manifest, appBasePath, craneUrl, craneInternalUrl, buildkit: buildKitEnabled(), slug: app.slug, recipe: catalogRecipe?.recipe || null, pinnedPhpVersion });
       buildRuntime = runtime ?? null;
 
       if (userProvided) {
@@ -1949,6 +2051,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
         for (const w of node.warnings) appendLog(`⚠ ${w}`);
       }
 
+      await verifyTreeBeforeBuild();
       appendLog('Building docker image...');
       const wasCached = opts.freshBase === true ? false : await imageExists(imageTagFor(app.slug, env, commitHash));
       image = await buildImageIfNeeded({
@@ -1973,9 +2076,9 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     // after the clone and has been running alongside everything since — the
     // manifest read, the dist check, the Dockerfile generation and the build.
     // This is the first point where its answer is needed, and it is deliberately
-    // ahead of all three things that run a container:
+    // ahead of all three things that touch a container:
     //
-    //   preflightEntryCheck  `docker run --rm` against the built image
+    //   preflightEntryCheck  `docker create` + `docker cp`, never started
     //   dockerStop           tears down the version currently serving traffic
     //   dockerStart          starts the new one
     //
@@ -1986,6 +2089,11 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     // and nothing has been started at this point.
     if (env === 'production') await (await import('./releaseCheck.js')).enforceReleaseCheckInDeploy({ app, deployId, releaseDir: isImageDeploy ? null : releaseDir, commit: commitHash, opts, appendLog });
     if (supplyChainGate) await supplyChainGate.settle();
+    if (integrity) {
+      const { verifyReleaseTree } = await import('./deployIntegrity.js');
+      await verifyReleaseTree({ dir: releaseDir, expectedSha: integrity.expectedSha, allowed: integrity.allowed, pinned: integrity.pinned, stage: 'before container swap' });
+      appendLog(`Deploy integrity: release tree still exactly commit ${integrity.expectedSha} before the container swap.`);
+    }
 
     // v2.6.16: pre-flight entry-exists check. Validate that the entry
     // declared in deployhub.json actually resolves in the built image
@@ -2017,12 +2125,6 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
 
     await dockerStop(app.slug, env).catch(() => {});
 
-    const runtimeEnvVars = {};
-    const decryptFailures = [];
-    for (const v of envVars) {
-      try { runtimeEnvVars[v.key] = decrypt(v.value_encrypted); }
-      catch (_) { decryptFailures.push(v.key); }
-    }
     // v2.7.30: surface env injection in the deploy log — KEY NAMES ONLY,
     // never values. Lets an operator confirm a var actually reached the
     // container (e.g. ANTHROPIC_API_KEY) without shelling in or exposing the
@@ -2034,6 +2136,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
         ? `Injecting ${injectedKeys.length} env var(s) into container: ${injectedKeys.join(', ')}`
         : 'No app env vars to inject (env_vars empty for this app/env).'
     );
+    if (refKeys.length) appendLog(`Resolved from AWS Secrets Manager: ${refKeys.join(', ')}`);
     // v2.7.30: a value that fails to decrypt was previously dropped silently —
     // the container came up missing the secret with zero signal. Make it loud.
     if (decryptFailures.length) {
@@ -2158,6 +2261,19 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     const seedResult = await seedNewVolumeMounts({ image, volumes: containerVolumes });
     for (const line of seedResult.log) appendLog(line);
 
+    if (refusedChowns.length) {
+      const { chownTreeAsRoot, ensureHelperImage } = await import('./docker.js');
+      const { HELPER_IMAGE } = await import('./volumeHelper.js');
+      for (const vol of refusedChowns) {
+        try {
+          await chownTreeAsRoot({ hostDir: vol.host, owner: '1000:1000', image: HELPER_IMAGE, ensureImage: ensureHelperImage });
+          appendLog(`chown 1000:1000 ${vol.host} (${vol.container}) → ok in a root helper container`);
+        } catch (e) {
+          appendLog(`chown 1000:1000 ${vol.host} (${vol.container}) → failed (${e.message}). App may hit EACCES on ${vol.container} writes if its container runs as a non-root user.`);
+        }
+      }
+    }
+
     const stagedRules = isImageDeploy ? null : stageManifestRules(app.id, env, manifestAccessRules);
     const limits = parseResourceLimits(app.resource_limits);
     await dockerStart({
@@ -2239,7 +2355,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     // AppCrane-build convention a stock image has no reason to serve — probing
     // it would 404 and mark a working container unhealthy. The column is NULL
     // for every tree-based app, so their behaviour is unchanged.
-    const probeTarget = resolveHealthProbe({ manifest, app, runtime: buildRuntime });
+    const probeTarget = resolveHealthProbe({ manifest, app, runtime: buildRuntime, catalogBuild: Boolean(catalogRecipe) });
     const healthPath = probeTarget.path;
     const healthSource = probeTarget.source;
     const healthUrl = `http://localhost:${bePort}${healthPath}`;

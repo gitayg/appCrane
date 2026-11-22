@@ -28,6 +28,7 @@ import { getDb } from '../db.js';
 import log from '../utils/logger.js';
 import { jobStarted, trackJob, noteJobFailure } from './jobHealth.js';
 import { inspectContainer, noteContainerDown, noteContainerUp } from './cronContainerGuard.js';
+import { runHttpCron } from './cronHttp.js';
 
 const TICK_MS = 60_000;
 const LOG_TAIL_BYTES = 4096;
@@ -141,10 +142,10 @@ export function syncCronJobsFromManifest(appId, env, cronArray) {
   const keepNames = new Set(jobs.map(j => j.name));
   const tx = db.transaction(() => {
     // Remove rows for this (app, env) whose name is no longer in the manifest.
-    const existing = db.prepare('SELECT name FROM app_cron_jobs WHERE app_id = ? AND env = ?').all(appId, env);
+    const existing = db.prepare("SELECT name FROM app_cron_jobs WHERE app_id = ? AND env = ? AND origin = 'manifest'").all(appId, env);
     for (const row of existing) {
       if (!keepNames.has(row.name)) {
-        db.prepare('DELETE FROM app_cron_jobs WHERE app_id = ? AND env = ? AND name = ?').run(appId, env, row.name);
+        db.prepare("DELETE FROM app_cron_jobs WHERE app_id = ? AND env = ? AND name = ? AND origin = 'manifest'").run(appId, env, row.name);
       }
     }
     // Upsert the rest.
@@ -156,6 +157,9 @@ export function syncCronJobsFromManifest(appId, env, cronArray) {
         command         = excluded.command,
         enabled         = excluded.enabled,
         timeout_seconds = excluded.timeout_seconds,
+        kind            = 'exec',
+        origin          = 'manifest',
+        http_path       = NULL,
         updated_at      = datetime('now')
     `);
     for (const j of jobs) {
@@ -211,7 +215,7 @@ export async function runCronJob(jobRow) {
   runningJobs.add(key);
   const db = getDb();
   try {
-    const app = db.prepare('SELECT slug FROM apps WHERE id = ?').get(jobRow.app_id);
+    const app = db.prepare('SELECT id, slug, slot FROM apps WHERE id = ?').get(jobRow.app_id);
     if (!app) return { skipped: true, reason: 'app not found' };
 
     const container = await inspectContainer(containerName(app.slug, jobRow.env));
@@ -229,8 +233,11 @@ export async function runCronJob(jobRow) {
     noteContainerUp(jobRow);
 
     const startedAt = new Date().toISOString();
-    log.info(`[cron] running ${key} (${jobRow.schedule}) → ${jobRow.command}`);
-    const result = await runDockerExec(app.slug, jobRow.env, jobRow.command, jobRow.timeout_seconds);
+    const isHttp = jobRow.kind === 'http';
+    log.info(`[cron] running ${key} (${jobRow.schedule}) → ${isHttp ? `GET ${jobRow.http_path}` : jobRow.command}`);
+    const result = isHttp
+      ? await runHttpCron(app, jobRow)
+      : await runDockerExec(app.slug, jobRow.env, jobRow.command, jobRow.timeout_seconds);
     const finishedAt = new Date().toISOString();
 
     const logHeader = `[${startedAt} → ${finishedAt}, exit=${result.exitCode}]\n`;
@@ -238,16 +245,18 @@ export async function runCronJob(jobRow) {
 
     db.prepare(`
       UPDATE app_cron_jobs
-      SET last_run_at = ?, last_exit_code = ?, last_log = ?, updated_at = datetime('now')
+      SET last_run_at = ?, last_exit_code = ?, last_log = ?, last_http_status = ?, updated_at = datetime('now')
       WHERE id = ?
-    `).run(finishedAt, result.exitCode, persistedLog, jobRow.id);
+    `).run(finishedAt, result.exitCode, persistedLog, isHttp ? result.httpStatus : null, jobRow.id);
 
     if (result.exitCode === 0) {
       log.info(`[cron] ✓ ${key} exit=0`);
     } else {
       log.warn(`[cron] ✗ ${key} exit=${result.exitCode}: ${(result.error || result.log || '').slice(0, 200)}`);
     }
-    return { ran: true, exitCode: result.exitCode, log: persistedLog };
+    return isHttp
+      ? { ran: true, exitCode: result.exitCode, httpStatus: result.httpStatus, log: persistedLog }
+      : { ran: true, exitCode: result.exitCode, log: persistedLog };
   } finally {
     runningJobs.delete(key);
   }
@@ -265,7 +274,7 @@ async function tick() {
     now.setUTCSeconds(0, 0);
 
     const jobs = db.prepare(`
-      SELECT j.id, j.app_id, j.env, j.name, j.schedule, j.command, j.timeout_seconds, j.last_run_at
+      SELECT j.id, j.app_id, j.env, j.name, j.schedule, j.command, j.timeout_seconds, j.last_run_at, j.kind, j.http_path
       FROM app_cron_jobs j
       WHERE j.enabled = 1
     `).all();

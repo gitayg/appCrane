@@ -1,4 +1,113 @@
 {
+  "2.140.1": [
+    "When connecting the GitHub App to an app fails because the repository isn't covered, AppCrane now says why (the repository isn't selected, or the App isn't installed) and links to the GitHub page that fixes it.",
+    "Access requests are e-mailed to the app's admins (or its owners if it has none). Every other request goes to the app's owners. If nobody fits, platform admins get it.",
+    "Platform admins now appear in an app's members list and can make themselves an owner of the app, so they are listed and e-mailed as one."
+  ],
+  "2.140.0": [
+    "If you set up two-factor sign-in in AppCrane, you now enter your code after signing in with Google or single sign-on too, unless your identity provider already asked for a second factor.",
+    "Single sign-on is harder to abuse: the sign-in page shows only fixed error text, one network can file at most 5 requests to join per hour, and approving a request covers only the email address you saw.",
+    "Git deploys now stop, and the running version keeps serving, if the code being built is not exactly the commit that was picked. The deploy log also says whether the app's lockfile changed since the last successful deploy.",
+    "AppCrane's database file can now be read only by the account AppCrane runs as."
+  ],
+  "2.139.6": [
+    "Work Review's review is now read-only: it proposes numbered fixes, and you apply the ones you want with /work-review:apply 1 3 (or all), which also saves a baseline for the next review. /work-review:help lists the commands.",
+    "Work Review ranks MCP tools by what their results cost to read into context, so you can see which connector to ask for less.",
+    "The Work Review hub's team view shows cost per landed commit and rework week by week, still only for weeks with enough people that nobody can be singled out.",
+    "Work Review catches more kinds of secret before an excerpt leaves your machine (GitLab, Stripe, Google, npm, SendGrid and Slack tokens), and lists what its numbers cannot tell you in KNOWN_LIMITATIONS.md. The plugin is now version 1.3.0."
+  ],
+  "2.139.5": [
+    "With Google sign-in, a Google account can no longer take over an existing AppCrane account just because it uses the same email. Google is trusted to link to an existing account only for a gmail.com address or a Google Workspace account that the email's domain manages. A personal Google account made on a work address is refused and the person is told to ask an administrator.",
+    "With * on the Join without approval list, a new account now needs an email the identity provider has verified, as every other list entry already did."
+  ],
+  "2.139.4": [
+    "Housekeeping: the automated checks on the build server have more time to finish, so a healthy run is no longer cancelled for running a few seconds over. AppCrane itself is unchanged."
+  ],
+  "2.139.3": [
+    "The Sign in with Google button on the login page now shows Google's G logo."
+  ],
+  "2.139.2": [
+    "Turning on SSO sign-in without a client ID no longer locks people out. AppCrane now refuses to save it with a message saying what is missing, and a setup saved that way before is ignored: the login page shows no sign-in button that cannot work, and passwords keep working.",
+    "Setting up Google or another SSO provider for the first time now leaves password sign-in on, so you can check that SSO sign-in works before relying on it. Once it does, turn on Require SSO sign-in under Settings > Security if you want SSO to be the only way in. Instances that already use SSO keep their setting."
+  ],
+  "2.139.1": [
+    "With Google sign-in, an email domain on the Join without approval list now lets in only Google Workspace accounts that domain manages. A personal Google account made on a work address, which its owner keeps after leaving, now waits for approval instead. A full address on the list still lets that one person straight in."
+  ],
+  "2.139.0": [
+    "People can sign in and sign up with Google. Settings > Security > OIDC has a Set up Google sign-in button that fills in Google's details, shows the redirect address to paste into Google, and links to the page where you create the client.",
+    "You choose who joins without asking: list email domains or single addresses, or * for anyone. Everyone else who signs in is added to Sign-up requests, where a platform admin approves or declines each person. Approving creates their account, and they get in on their next sign-in.",
+    "With Google and an empty list, every new person needs approval, so turning on sign-up never opens AppCrane to everyone with a Google account. People who already have an account sign in as before."
+  ],
+  "2.138.5": [
+    "Work Review prices Claude Fable 5.2 and Mythos 5.2 at their own rates (they were priced as Fable 5, with cache reads at five times the real price) and Sonnet 5.5 cache reads at $0.10, not $0.20. Requests pinned to US-only processing are priced at 1.1x. A test now holds the price table to Anthropic's pricing page.",
+    "Work Review shows what small or read-only work that ran on Opus or Fable would have cost on Sonnet 5.5 or Haiku 5.5, as an upper bound, with the one-line fix for the subagent.",
+    "A before-and-after Work Review now reads cost and rework together, and says when a cheaper setup is costing it back in corrections.",
+    "The work-review plugin is now version 1.2.1."
+  ],
+  "2.138.4": [
+    "Housekeeping: fourteen automated checks that had been failing on the build server pass again. Some depended on the build server itself (its swap, its system services, its name); others still described AppCrane as it was before recent changes. AppCrane itself is unchanged."
+  ],
+  "2.138.2": [
+    "The end of an app's reply that a scheduled job keeps for its log can no longer show part of the app's CRON_SECRET. Only whole copies were hidden before, so a reply cut in the middle of the secret could leave a piece of it in the log."
+  ],
+  "2.138.1": [
+    "A scheduled job that calls an app now reads at most 1 MB of the app's reply and keeps only the end of it for the job log, so an app that answers with a very large or endless reply can no longer use up AppCrane's memory."
+  ],
+  "2.138.0": [
+    "Apps that schedule jobs in vercel.json now get them on AppCrane too. On each deploy, every entry under \"crons\" in the app's vercel.json becomes a scheduled job that calls that path on the app at the same time Vercel would (times are UTC), sending the app's CRON_SECRET the way Vercel does when the app has one. You can see these jobs, marked as coming from vercel.json, and run one straight away from the AppCrane tools. Jobs you set up yourself are never changed, and a vercel.json with a mistake in it is reported in the deploy log instead of stopping the deploy.",
+    "SignuDoc, an open-source app for sending PDFs to be signed, is now in the app catalogue. AppCrane builds it from its source, gives it its own Postgres database, sets up its database tables on every deploy and schedules its daily cleanup and backup jobs. To send e-mail it needs a Resend API key, which you add yourself.",
+    "An app pinned to a release tag on GitHub, which is what installing from the catalogue does, can now go to production. The security check before a new version goes live asked GitHub for a branch with the tag's name, was told there is none, and stopped the deploy. It now checks the tag's commit instead, and still stops the deploy if that commit is not the one being deployed.",
+    "Redeploying an app built with Next, such as SignuDoc, no longer asks you to confirm data loss because of its page cache. AppCrane now knows that folder is rebuilt automatically, so only real data the app writes inside its container is reported."
+  ],
+  "2.137.1": [
+    "A managed app whose code is still on GitHub can now use this server's GitHub App (the gh app button in Applications). Moving its code onto the server then signs in with the App, which works for GitHub organizations that require single sign-on, where a personal token is refused until someone authorizes it."
+  ],
+  "2.137.0": [
+    "People now get an e-mail when they are given access to an app, when their role on it changes, or when their access is removed. It says which app, the old and new role, what the new role can do and, when AppCrane knows, who made the change. Admins can turn this off in Settings > Mail."
+  ],
+  "2.136.3": [
+    "Security fix: a deactivated account's personal API key, or an expired one, no longer works on Ask, plans, the coder, feedback or account pages; it is refused straight away like everywhere else.",
+    "The check that runs before an AI coding session starts now actually stops the session when a folder it needs can't be used, with a clear message, instead of letting it fail later with a confusing error."
+  ],
+  "2.136.2": [
+    "A personal API key now counts as used on every page and feature that accepts it, including Ask, plans, the coder and feedback, so a key in active use is never mistaken for an unused one."
+  ],
+  "2.136.1": [
+    "Security fix: an app's Claude login, while a session is using it, can no longer be read by other accounts on the server."
+  ],
+  "2.136.0": [
+    "The platform Anthropic key is now set in Settings > Security and stored encrypted in AppCrane's database, moved out of the server's .env file automatically. Neither it nor your own Claude token shows up in the server's container or process listings any more.",
+    "AppCrane's master encryption key can be kept in the server's own encrypted credential store (systemd) instead of the .env file, with no cloud service needed.",
+    "Require SSO sign-in is now on by default wherever single sign-on is set up: passwords and API-key sign-in can't be used to get around your identity provider. Admins can turn it off in Settings > Security.",
+    "Security fix: secret values that very old audit entries recorded in full are now masked."
+  ],
+  "2.135.1": [
+    "Security fix: the AWS Secrets Manager platform secret now accepts only the keys AppCrane uses, so nobody who can edit that secret can change how the server runs.",
+    "Security fix: API rate limits can no longer be stretched by sending extra made-up keys alongside a valid sign-in."
+  ],
+  "2.135.0": [
+    "AppCrane can keep its own keys and your apps' secrets in AWS Secrets Manager instead of files on the server. It is optional and off until you turn it on. An app only ever reaches its own secrets, and sandbox cannot read production's.",
+    "Personal API keys are now created only when someone asks for one (Settings > Account), and can optionally be limited to a private port you keep behind your VPN (APPCRANE_PRIVATE_API_PORT). Sign-in, SSO, MCP and webhooks stay on the normal port.",
+    "MCP keys: the onboarding button no longer piles up keys. Each new onboarding key lasts 30 days and replaces your earlier unused ones. Platform admins get a list of every MCP key on the MCP page, can revoke any of them, and can revoke all keys unused for 30+ days in one go.",
+    "Security fixes: SSO sign-in can no longer be hijacked with a link, credential rate limits can't be bypassed, git fetches are always audited, Ask and plan feedback are limited to people allowed to reach the credentials involved, and several build and pre-flight hardening fixes."
+  ],
+  "2.134.1": [
+    "Fix: promoting an app to production now works when its sandbox release was uploaded as a bundle (appcrane_deploy_artifact). Production gets exactly the files sandbox ran, checked file by file, instead of a rebuild that failed at once with \"expected a hex SHA\". A first promote no longer needs production to have been deployed before, and folders named data inside the bundle are kept."
+  ],
+  "2.134.0": [
+    "AppCrane now coaches the AI agent that deploys your app: push, deploy, deploy-log, file-upload and app-info results carry advice when the way it deploys costs time or breaks builds (one file per push, a build that failed because a change was only partly pushed, very large files sent inline, folders created by an upload), and repeated deploy mistakes are noted once in the app's agent context.",
+    "Pushes that arrive while the app is still deploying no longer start a deploy each: they wait, and AppCrane deploys the latest code once when the running deploy ends. This also stops two deploys of one app running at once (\"container name already in use\").",
+    "Fix: opening an app straight from the side menu showed only the Request and Coder buttons; the app name, environment switch, Refresh, Back and the collapse button are back."
+  ],
+  "2.133.0": [
+    "Faster AppCrane: backups, restores, storage sizes, file listings over MCP and git clones no longer freeze the server while they run, and background checks use far fewer Docker calls (one host spent about 35 s per metrics run before).",
+    "Faster deploys and promotes: build caches survive between sandbox and production, the .git folder no longer goes into generated builds, npm downloads are cached per app, and a healthy new version is detected in a quarter of a second instead of two.",
+    "The admin UI loads about a third as much code on first visit, caches its files, is compressed, and stops polling while its tab is in the background.",
+    "Fix: an app whose data folder held a folder owned by root (left by file uploads before 2.123.1) could not write there on servers where AppCrane does not run as root. Every deploy now repairs the owner on every server."
+  ],
+  "2.132.2": [
+    "Every e-mail AppCrane sends to admins now names the server it came from, in the subject ([AppCrane: your-server]) and in the footer, so an admin of several AppCranes can tell which one a server alert, security notice or deploy result is about."
+  ],
   "2.132.1": [
     "Fix: two apps deploying at the same time could make one of them fail with \"failed to export layer\", because the image cleanup at the end of one deploy removed files the other build was still writing. Builds and image cleanups no longer overlap: a cleanup waits until no build is running, and cleanups asked for in the meantime run once.",
     "Fix: a file sent over MCP in parts as plain text (appcrane_stage_chunk with encoding utf-8) was rejected when assembled, with a SHA-256 mismatch, although each part had been accepted. Text parts now assemble to exactly the bytes sent, alone or mixed with base64 parts."

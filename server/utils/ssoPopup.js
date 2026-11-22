@@ -4,7 +4,7 @@
 // so a framed sign-in page cannot navigate its own frame to the IdP. Instead
 // the SPA opens /api/auth/{oidc,saml}/start?mode=popup in a top-level popup.
 // The callback then answers with a small completion page rather than the
-// usual /login?oidc_token=… forward: the session cookie is set exactly as in
+// usual /login?sso_code=… forward: the session cookie is set exactly as in
 // the normal callback, and the page tells same-origin listeners "signed-in"
 // over a BroadcastChannel and closes itself.
 //
@@ -99,6 +99,13 @@ const POPUP_COMPLETE_HTML = `<!DOCTYPE html>
 export const POPUP_FAILURE_REASONS = Object.freeze({
   denied: 'The identity provider did not approve the sign-in.',
   no_account: 'There is no AppCrane account for this user. Ask an administrator for access.',
+  domain_not_allowed: 'This email domain cannot sign up here. Ask an administrator for access.',
+  email_unverified: 'The identity provider has not verified this email address.',
+  link_refused: 'This Google account cannot sign in to the existing account with this email. Ask an administrator.',
+  pending_approval: 'Your request to join was sent. An administrator has to approve it before you can sign in.',
+  signup_denied: 'An administrator declined your request to join.',
+  signup_rate_limited: 'Too many sign-up requests came from your network. Try again later.',
+  browser_mismatch: 'Sign-in must finish in the browser that started it, with cookies allowed. Start again from the sign-in page.',
   expired: 'The sign-in took too long.',
   unavailable: 'The identity provider could not be reached.',
   failed: 'Sign-in could not be completed.',
@@ -107,6 +114,15 @@ export const POPUP_FAILURE_REASONS = Object.freeze({
 /** A POPUP_FAILURE_REASONS code for an IdP `error` parameter (RFC 6749 4.1.2.1). */
 export function idpErrorCode(error) {
   return error === 'access_denied' ? 'denied' : 'failed';
+}
+
+/**
+ * The code a failed callback puts in /login?sso_error= or ?saml_error=. Only a
+ * code from the table: the IdP's error_description and exception text, which a
+ * crafted link can choose, never reach the page.
+ */
+export function loginErrorCode(e) {
+  return e && Object.hasOwn(POPUP_FAILURE_REASONS, e.popupCode) ? e.popupCode : 'failed';
 }
 
 /** An Error that carries a popup failure code; the message stays server-side. */

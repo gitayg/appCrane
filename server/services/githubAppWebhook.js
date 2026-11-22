@@ -90,10 +90,13 @@ async function handlePush({ deliveryId, payload, payloadHash, deps }) {
     const triggered = await triggerAutoDeploys({
       config, branch, commitSha, commitMessage, logDelivery, source: GITHUB_APP_PUSH_SOURCE, deps,
     });
-    apps.push({ slug: app.slug, action: 'deploy_triggered', triggered });
+    const allQueued = triggered.length > 0 && triggered.every((t) => t.status === 'queued');
+    apps.push({ slug: app.slug, action: allQueued ? 'deploy_queued' : 'deploy_triggered', triggered });
   }
 
-  return { result: apps.some((a) => a.action === 'deploy_triggered') ? 'deploy_triggered' : 'no_deploy', apps };
+  const result = apps.some((a) => a.action === 'deploy_triggered') ? 'deploy_triggered'
+    : apps.some((a) => a.action === 'deploy_queued') ? 'deploy_queued' : 'no_deploy';
+  return { result, apps };
 }
 
 function handleInstallation({ payload }) {

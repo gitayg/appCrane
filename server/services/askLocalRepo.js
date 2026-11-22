@@ -29,6 +29,7 @@
 import { AppError } from '../utils/errors.js';
 import { assertRepoFilePath, getBranchHeadSha, gitReadCapped } from './localGit.js';
 import log from '../utils/logger.js';
+import { getPlatformAnthropicKey } from './platformAnthropicKey.js';
 
 const API_URL = 'https://api.anthropic.com/v1/messages';
 const API_VERSION = '2023-06-01';
@@ -314,9 +315,9 @@ async function callMessages(body, { apiKey, deadline }) {
 export async function runLocalAskJob({
   app, question, history, agentContext, contextDoc, onLog, onTokens, model, limits = LIMITS,
 }) {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+  const apiKey = getPlatformAnthropicKey();
   if (!apiKey) {
-    throw new AppError('ANTHROPIC_API_KEY not configured. Add it to .env and restart.', 503, 'NOT_CONFIGURED');
+    throw new AppError('No platform Anthropic API key. A platform admin sets it in Settings.', 503, 'NOT_CONFIGURED');
   }
   const deadline = Date.now() + limits.timeoutMs;
   const branch = String(app.branch || 'main');

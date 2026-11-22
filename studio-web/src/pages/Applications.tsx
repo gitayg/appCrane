@@ -20,6 +20,7 @@ import { serverDate } from '../utils/serverDate'
 import { appOpenUrl } from '../lib/appLinks'
 import { limitsAppliedText, type LimitApply } from '../utils/limitsApplied'
 import { guaranteedHint } from '../utils/guaranteedMemory'
+import { setVisibleInterval } from '../utils/visibleInterval'
 
 defineCraneAppTopbar()
 
@@ -520,8 +521,8 @@ export function Applications() {
         .catch(() => {})
     }
     refresh()
-    const iv = setInterval(refresh, 30000)
-    return () => { cancelled = true; clearInterval(iv) }
+    const stop = setVisibleInterval(refresh, 30000)
+    return () => { cancelled = true; stop() }
   }, [])
 
   async function setVisibility(slug: string, vis: string) {
@@ -846,7 +847,6 @@ export function Applications() {
   // until v3.0.)
 
   async function generateAgentKey() {
-    const ts = Date.now()
     let failReason = ''
     // v2.7.4: ALWAYS issue a personal MCP key for the logged-in user — admins
     // included. Previously admins got a throwaway role:admin onboarding-agent
@@ -857,8 +857,10 @@ export function Applications() {
     // /api/mcp (auth.js KEY_SCOPE_RESTRICTED) but ties creation/ownership to
     // the human, so they own what they onboard. No admin-only endpoint, works
     // for admins and create_app-granted users alike.
+    // purpose 'onboarding': the server labels it, expires it in 30 days and
+    // revokes this user's earlier onboarding keys that were never used.
     const k = await adminApi.post<{ api_key?: string }>('/api/me/mcp-keys', {
-      label: `onboarding-${ts}`,
+      purpose: 'onboarding',
     }).catch((e: unknown) => { failReason = e instanceof Error ? e.message : String(e); return null })
     const key = k?.api_key ?? ''
     if (!key) {
@@ -1782,7 +1784,7 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                               onClick={() => setHookApp(app)}
                               title="Auto-deploy on git push (webhook)"
                             >auto-deploy</button>
-                            {app.source_type === 'github' && (
+                            {(app.source_type === 'github' || app.source_type === 'managed') && (
                               <button
                                 className="btn btn-xs"
                                 onClick={() => setGhAppFor(app)}
@@ -2388,7 +2390,7 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                     {filtered.map(u => {
                       const status = usersModalSaving[u.id]
                       const isPlatformAdmin = u.role === 'platform_admin'
-                      const value = isPlatformAdmin ? 'owner' : u.app_role
+                      const value = u.app_role
                       return (
                         <tr key={u.id} style={{ borderBottom: '1px solid var(--border-faint, #2a2a2a)' }}>
                           <td style={{ padding: '8px 4px', fontSize: '.88rem' }}>
@@ -2409,9 +2411,9 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                           <td style={{ padding: '8px 4px', textAlign: 'right' }}>
                             <select
                               value={value}
-                              disabled={isPlatformAdmin || status === 'saving'}
+                              disabled={status === 'saving'}
                               title={isPlatformAdmin
-                                ? 'Platform admin has owner-equivalent access to every app. Demote their global role first.'
+                                ? 'Platform admins can manage every app whatever is set here. Set owner to be listed, and e-mailed, as an owner of this app.'
                                 : undefined}
                               onChange={e => changeUserAppRole(u.id, e.target.value as ModalUser['app_role'])}
                               style={{ minWidth: 110 }}
@@ -2423,9 +2425,9 @@ STEP 3 - In any terminal run \`claude\`, then paste:
                             </select>
                           </td>
                           <td style={{ padding: '8px 0', textAlign: 'center', width: 28 }}>
-                            {!isPlatformAdmin && status === 'saving' && <span style={{ color: 'var(--dim)' }}>…</span>}
-                            {!isPlatformAdmin && status === 'saved'  && <span style={{ color: 'var(--green)' }}>✓</span>}
-                            {!isPlatformAdmin && status === 'error'  && <span style={{ color: 'var(--red)' }}>✗</span>}
+                            {status === 'saving' && <span style={{ color: 'var(--dim)' }}>…</span>}
+                            {status === 'saved'  && <span style={{ color: 'var(--green)' }}>✓</span>}
+                            {status === 'error'  && <span style={{ color: 'var(--red)' }}>✗</span>}
                           </td>
                         </tr>
                       )

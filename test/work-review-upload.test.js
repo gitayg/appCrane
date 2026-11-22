@@ -51,6 +51,14 @@ test('scrub removes key material and long tokens', () => {
   assert.match(scrub('commit 3f2a9c4e5b6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f'), /«hex»/);
 });
 
+test('scrub also catches GitLab, Stripe, Google, npm, SendGrid and Slack token shapes, short ones included', () => {
+  // Fixtures are assembled at runtime so no token-shaped literal sits in the source.
+  const fake = (prefix, n, ch = 'a') => prefix + ch.repeat(n);
+  const cases = [fake('glpat-', 20), fake('sk_' + 'live_', 16), fake('rk_' + 'test_', 24), fake('AIza', 35, 'B'), fake('npm_', 36, 'c'),
+    'SG.' + 'd'.repeat(22) + '.' + 'e'.repeat(43), fake('xoxe-', 12, '1')];
+  for (const t of cases) assert.equal(scrub(`use ${t} here`), 'use «secret» here', t.slice(0, 6));
+});
+
 test('upload URL is pinned to https on app.opswat.com', () => {
   assert.equal(checkUrl('https://work-review.app.opswat.com').hostname, 'work-review.app.opswat.com');
   assert.equal(checkUrl('https://app.opswat.com/work-review').hostname, 'app.opswat.com');
@@ -182,4 +190,12 @@ test('the team view is aggregates only, and only once enough people take part', 
   assert.ok(T.peopleWithSetupFinding['agent-unused'] >= 6, 'counted as people, not named');
   assert.ok(!JSON.stringify(T).includes('@'), 'no email, name or row per person anywhere in the team view');
   assert.equal(T.median.usd >= 0, true);
+  // Week by week: the current week has the six uploads above; earlier weeks have
+  // no one, so they show a head count and no figures.
+  assert.equal(T.trend.length, 8);
+  const now = T.trend.at(-1);
+  assert.equal(now.enough, true, JSON.stringify(now));
+  assert.ok(now.people >= 6);
+  assert.ok('medianUsdPerCommit' in now && 'medianReworkShare' in now);
+  assert.deepEqual(T.trend[0], { week: T.trend[0].week, people: 0, enough: false }, 'a thin week carries no figures');
 });

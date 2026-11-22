@@ -1,0 +1,54 @@
+name: Version guard
+
+# Two changes cut from the same main both claim the same next patch, and the
+# second merge silently reuses a released number (the "this PR's release
+# renumbered to 2.139.x" commits). Compared against the base AS IT IS NOW:
+#   pull_request  - the base branch is fetched at run time, not when the PR opened.
+#   merge_group   - the queue's base_sha, i.e. main after the PRs ahead of this one.
+#   push to main  - the previous main commit (github.event.before), so a merge that
+#                   kept a number another merge already took fails loudly on main.
+# GitHub does not re-run PR checks when the base moves; the push job is what
+# catches a PR that was green when opened and merged after its number was taken.
+
+on:
+  pull_request:
+    branches: [main]
+  merge_group:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  version-guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+
+      # SECURITY: refs reach the shell through env, never inlined as ${{ }}.
+      - name: Version is above the base and has release notes
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "pull_request" ]; then
+            printf '%s' "$BASE_REF" | grep -Eq '^[A-Za-z0-9._/-]{1,100}$' || { echo "unsafe base ref" >&2; exit 1; }
+            git fetch --no-tags --depth=1 origin "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
+            node scripts/check-version-bump.mjs --base "origin/$BASE_REF" --label "$BASE_REF (current)"
+            exit 0
+          fi
+          printf '%s' "$BASE_SHA" | grep -Eq '^[0-9a-f]{40}$' || { echo "no base commit for $EVENT" >&2; exit 1; }
+          if [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            echo "version guard: new branch, nothing to compare against"
+            exit 0
+          fi
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          node scripts/check-version-bump.mjs --base "$BASE_SHA" --label "the previous main commit ${BASE_SHA:0:7}"

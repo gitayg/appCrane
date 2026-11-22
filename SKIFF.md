@@ -99,6 +99,16 @@ asks the operator:
   Nothing in the catalogue endpoint generates, stores or returns a secret — that
   endpoint is readable by every logged-in user.
 - `needs` — the managed-database wiring (level 5).
+- `build` — only for an entry with `"image": null` whose repository has no
+  `Dockerfile` and no `deployhub.json` (2.138.0): `{install, build, start, env}`
+  for the generated Node build. `install` replaces `npm ci --omit=dev` (a
+  Next.js build needs its devDependencies), `start` runs on every container
+  start, so a migration step goes there (`node db/migrate.mjs && npm start`),
+  and `env` holds fixed, non-secret defaults written as `ENV` lines, which the
+  app's own environment still overrides. Whatever the repository's own
+  `deployhub.json` declares wins field by field, and a committed `Dockerfile`
+  skips the generator altogether. An entry with a recipe is probed at its
+  `health` path and held to "answers 200", not to the `{status, version}` body.
 
 **Failure mode.** Declare the wrong `port` and the deploy publishes a port
 nothing is listening on: the 30-second health probe times out and the container
@@ -553,6 +563,44 @@ anywhere.
 **Failure mode.** Pinning integration behaviour to a platform version you never
 re-check. Poll `count` on `/api/info` from wherever you already have a
 health-adjacent job, or read the list at boot.
+
+---
+
+## Coming from Vercel: `vercel.json` crons
+
+**What you gain.** Scheduled jobs you already declared for Vercel keep running,
+with no change to your route code (2.138.0).
+
+**The contract.** At each deploy AppCrane reads the release's top-level
+`vercel.json`. Every entry of its `crons` array becomes a job of that app and
+environment, named `vercel:<path>`:
+
+```json
+{ "crons": [ { "path": "/api/internal/retention", "schedule": "0 9 * * *" } ] }
+```
+
+On schedule (UTC, like Vercel), AppCrane sends `GET <path>` to your container on
+its own loopback port, not through the public proxy, so access rules and
+AppCrane sign-in never stand in front of it. Like Vercel it sends
+`Authorization: Bearer <CRON_SECRET>` when the app has `CRON_SECRET` set for
+that environment, a `user-agent` starting `vercel-cron/1.0` and
+`x-vercel-cron-schedule`, and it does not follow redirects. A 2xx answer is
+success; anything else, or no answer within 300 seconds, is a failed run. The
+last status and the tail of the body are kept on the job (the secret is
+removed from them). `appcrane_list_cron` lists the jobs with `origin: "vercel"`
+and `appcrane_run_cron_now` runs one immediately.
+
+Rules, checked at deploy: a path starts with `/` and names no scheme, host,
+`.` or `..`; a schedule uses Vercel's syntax (numbers, `*`, `,`, `-`, `/`, and
+not both day of month and day of week); at most 100 entries. A file that breaks
+any rule, or is not valid JSON, changes nothing: the deploy log says why and the
+deploy carries on with the jobs it had. Only jobs created from `vercel.json` are
+changed or removed by this; a `deployhub.json` `cron` job is never touched, and
+one with the same name wins.
+
+**Failure mode.** A route that requires `CRON_SECRET` while the app has none
+set answers 401 on every run. Set `CRON_SECRET` in the app's environment (the
+same value your route compares against) and redeploy.
 
 ---
 

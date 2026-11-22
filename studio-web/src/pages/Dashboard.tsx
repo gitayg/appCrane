@@ -1,6 +1,7 @@
-import { Fragment, useState, useEffect, useRef, useCallback } from 'react'
+import { Fragment, useState, useEffect, useCallback } from 'react'
 import { Navigate, Link } from 'react-router-dom'
 import { adminApi } from '../adminApi'
+import { setVisibleInterval } from '../utils/visibleInterval'
 import { useMe, isAdmin } from '../hooks/useMe'
 import { ManagedDbSettingsCard } from '../components/ManagedDbSettingsCard'
 
@@ -235,8 +236,6 @@ export function Dashboard() {
   }
 
 
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
-
   const fetchMain = useCallback(async () => {
     try {
       // v2.6.6: every admin-only call gets a `.catch(() => safe-empty)`
@@ -285,41 +284,16 @@ export function Dashboard() {
       .catch(() => {})
   }, [])
 
-  const fetchLiveVersions = useCallback((appList: App[]) => {
-    for (const app of appList) {
-      for (const env of ['production', 'sandbox'] as const) {
-        adminApi.get<{ version?: string }>(`/api/apps/${app.slug}/live-version/${env}`)
-          .then(d => {
-            if (!d.version) return
-            const el = document.getElementById(`ver_${app.slug}_${env}`)
-            if (el) {
-              el.textContent = d.version
-              el.style.color = 'var(--green)'
-            }
-          })
-          .catch(() => {})
-      }
-    }
-  }, [])
-
   useEffect(() => {
     fetchMain().then(() => {
       fetchSecondary()
     })
 
-    intervalRef.current = setInterval(() => {
+    return setVisibleInterval(() => {
       fetchMain()
       fetchSecondary()
     }, 30000)
-
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current)
-    }
   }, [fetchMain, fetchSecondary])
-
-  useEffect(() => {
-    if (apps.length > 0) fetchLiveVersions(apps)
-  }, [apps, fetchLiveVersions])
 
   function dismissOnboard() {
     localStorage.setItem(ONBOARD_KEY, '1')

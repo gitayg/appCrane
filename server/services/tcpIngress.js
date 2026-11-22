@@ -23,6 +23,7 @@
  */
 import { getPortsForSlot } from './portAllocator.js';
 import { isPortSafe } from './blockedPorts.js';
+import { privateApiPort } from '../utils/ingress.js';
 
 /**
  * Two different questions, conflated until v2.45.0 and now separated.
@@ -457,6 +458,9 @@ export function assertPublicPortAssignable(db, port, appId, env = 'production') 
   }
   if (port === cranePort()) {
     throw fail(`Port ${port} is AppCrane's own listening port`, 409, 'PORT_RESERVED');
+  }
+  if (port === privateApiPort()) {
+    throw fail(`Port ${port} is AppCrane's private API port (APPCRANE_PRIVATE_API_PORT)`, 409, 'PORT_RESERVED');
   }
   if (port === caddyAdminPort()) {
     throw fail(

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, symlinkSync, existsSync } from 'fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, symlinkSync, existsSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
@@ -110,6 +110,54 @@ test('context: a linked key file never reaches the prompt', async () => {
   const argv = readFileSync(ARGV, 'utf8');
   assert.match(argv, /ctx-real-file/, 'key files never reached the prompt, so this test would prove nothing');
   assert.doesNotMatch(argv, /host-secret-value/, 'a host file was read through a committed link into the prompt');
+});
+
+test('php: a linked composer.json or package.json is not read for the generated Dockerfile', async () => {
+  const { generatePhpDockerfile, detectPhpApp } = await import('../server/services/dockerfileGenPhp.js');
+  const hostComposer = join(SECRET_DIR, 'composer.json');
+  writeFileSync(hostComposer, JSON.stringify({ require: { 'ext-gmp': '*' } }));
+  const hostPkg = join(SECRET_DIR, 'package.json');
+  writeFileSync(hostPkg, JSON.stringify({ scripts: { build: 'x' } }));
+
+  const dir = release('php-link');
+  symlinkSync(hostComposer, join(dir, 'composer.json'));
+  symlinkSync(hostPkg, join(dir, 'package.json'));
+  const linked = generatePhpDockerfile({ releaseDir: dir, manifest: null });
+  assert.ok(!linked.lines.join('\n').includes('gmp'), 'a host file named by composer.json chose the extensions');
+  assert.ok(!linked.warnings.some((w) => /"build" script/.test(w)), 'a host file named by package.json was read');
+
+  // A linked package.json reads as unparseable, which claims the app for the Node path.
+  const claim = release('php-claim');
+  writeFileSync(join(claim, 'composer.json'), '{}');
+  symlinkSync(hostPkg, join(claim, 'package.json'));
+  assert.equal(detectPhpApp(claim), false);
+
+  const regular = release('php-regular');
+  writeFileSync(join(regular, 'composer.json'), JSON.stringify({ require: { 'ext-gmp': '*' } }));
+  writeFileSync(join(regular, 'package.json'), JSON.stringify({ scripts: { build: 'x' } }));
+  assert.equal(detectPhpApp(regular), true);
+  const plain = generatePhpDockerfile({ releaseDir: regular, manifest: null });
+  assert.ok(plain.lines.join('\n').includes('gmp'), 'regular files must still be read');
+  assert.ok(plain.warnings.some((w) => /"build" script/.test(w)));
+});
+
+test('restart: a linked deployhub.json is not read for the database block, and the error says why', async () => {
+  const { readReleaseManifestDatabase } = await import('../server/services/manifestDatabase.js');
+  const host = join(SECRET_DIR, 'deployhub.json');
+  writeFileSync(host, JSON.stringify({ database: { engine: 'redis' } }));
+  const envDir = release('mdb');
+  const rel = join(envDir, 'releases', 'r1');
+  mkdirSync(rel, { recursive: true });
+  symlinkSync(rel, join(envDir, 'current')); // `current` is itself a link, and must keep working
+  symlinkSync(host, join(rel, 'deployhub.json'));
+  const out = readReleaseManifestDatabase(envDir);
+  assert.equal(out.needs, null);
+  assert.match(out.error, /symbolic link/);
+
+  rmSync(join(rel, 'deployhub.json'));
+  assert.deepEqual(readReleaseManifestDatabase(envDir), { needs: null, error: null });
+  writeFileSync(join(rel, 'deployhub.json'), JSON.stringify({ database: { engine: 'redis' } }));
+  assert.equal(readReleaseManifestDatabase(envDir).needs.engine, 'redis');
 });
 
 test('helpers: writeFileInside and regularFileInside refuse links', async () => {

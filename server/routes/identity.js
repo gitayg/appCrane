@@ -9,7 +9,7 @@ import { verifyPassword, generateSessionToken, hashApiKey, hashPassword } from '
 import { AppError } from '../utils/errors.js';
 import { setSessionCookie, clearSessionCookie, readSessionCookie, readCookie } from '../utils/sessionCookie.js';
 import { APP_SESSION_COOKIE, HANDOFF_STATE_COOKIE, HANDOFF_STATE_MAX_AGE_SECONDS } from '../services/appOrigin.js';
-import { isSsoOnly } from '../services/authPolicy.js';
+import { refuseUnlessSsoOptional } from '../services/authPolicy.js';
 import { roleKeysForUser } from '../services/appDefinedRoles.js';
 import { discoverablePortalRow } from '../services/discoverableApps.js';
 import log from '../utils/logger.js';
@@ -19,6 +19,7 @@ import { decideAccess, effectiveRules } from '../services/accessRules.js';
 import { revokeAllGrantsForUser } from '../services/oauthStore.js';
 import { passwordLoginMfaStep } from '../services/mfa.js';
 import { touchSession } from '../services/sessionPolicy.js';
+import { assertUserKeyIngress } from '../utils/ingress.js';
 import { auditTrustedSkip, clearTrustedDeviceCookie, hasTrustedDeviceCookie, revokeAllDevices, trustedDeviceFor } from '../services/trustedDevices.js';
 
 const ICON_DIR = resolve(process.env.DATA_DIR || './data', 'apps');
@@ -94,13 +95,10 @@ router.post('/login', (req, res) => {
 
   const db = getDb();
 
-  // v2.7.0: SSO-only mode. When a platform admin has set auth_sso_only,
-  // password sign-in is disabled for everyone — the IdP is the only browser
-  // login path. OIDC/SAML callbacks issue sessions elsewhere and are
-  // unaffected; X-API-Key auth stays open as the CLI/recovery path.
-  if (isSsoOnly(db)) {
-    throw new AppError('Password sign-in is disabled. Use single sign-on.', 403, 'SSO_REQUIRED');
-  }
+  // Require SSO sign-in (services/authPolicy.js): on unless turned off, in
+  // force while an SSO provider is enabled. OIDC/SAML callbacks issue sessions
+  // elsewhere and are unaffected; API keys stay API credentials.
+  refuseUnlessSsoOptional(db, req, { method: 'password', message: 'Password sign-in is disabled. Use single sign-on.' });
 
   // Find user by email or username
   const user = db.prepare(
@@ -497,6 +495,9 @@ router.get('/verify', (req, res) => {
       FROM users WHERE api_key_hash = ?
     `).get(keyHash);
     if (u) {
+      // APPCRANE_PRIVATE_API_PORT: forward_auth subrequests from a public site
+      // carry the public stamp, so a personal key cannot open an app host there.
+      if (u.user_active !== 0) assertUserKeyIngress(req, u.user_id, 'verify');
       session = { ...u, app_id: null, expires_at: null };
     }
   } else {
@@ -589,9 +590,7 @@ router.get('/verify', (req, res) => {
   }
 
   // Record visit (one row per user/app/day via UPSERT — no-op if already exists)
-  const visitAppId = appSlug
-    ? db.prepare('SELECT id FROM apps WHERE slug = ?').get(appSlug)?.id
-    : session.app_id;
+  const visitAppId = appSlug ? appIdForRoles : session.app_id;
   if (visitAppId) {
     const today = new Date().toISOString().slice(0, 10);
     db.prepare('INSERT OR IGNORE INTO app_visits (user_id, app_id, day) VALUES (?, ?, ?)').run(session.user_id, visitAppId, today);
@@ -929,9 +928,14 @@ router.post('/set-password', (req, res) => {
     if (apiKey) {
       const keyHash = hashApiKey(apiKey);
       user = db.prepare('SELECT * FROM users WHERE api_key_hash = ? AND active = 1').get(keyHash);
+      // Turning a personal key into a session would carry it past the private port.
+      if (user) assertUserKeyIngress(req, user.id, 'set-password');
     }
   }
   if (!user) throw new AppError('Authentication required', 401, 'UNAUTHORIZED');
+  // A password is a sign-in path of its own, and this route also returns a
+  // session: with SSO required, neither an API key nor a session may get one.
+  refuseUnlessSsoOptional(db, req, { method: 'set-password', userId: user.id });
 
   const ip = req.ip || req.socket?.remoteAddress || 'unknown';
   const audit = (action, detail) => {

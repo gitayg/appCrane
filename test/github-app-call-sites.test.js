@@ -250,7 +250,8 @@ test('the deployer clones an App-backed app with an installation token, and leak
   const clone = argv.find((a) => a[0] === 'clone');
   assert.ok(clone, `no clone ran: ${log}`);
   assert.deepEqual(clone.slice(0, 5), ['clone', '--depth', '1', '--branch', 'main']);
-  assert.equal(clone[5], `${GIT_ORIGIN}/acme/widget.git`, 'the URL carried a credential');
+  assert.equal(clone[5], '--');
+  assert.equal(clone[6], `${GIT_ORIGIN}/acme/widget.git`, 'the URL carried a credential');
   assert.ok(gitAuthSeen.list().some((c) => c.auth === `Basic ${Buffer.from(`x-access-token:${INSTALLATION_TOKEN}`).toString('base64')}`));
   assert.match(log, /GitHub App \(installation token/);
   assert.match(log, new RegExp(`Cloned successfully. Commit: ${HEAD_SHA.slice(0, 7)}`));

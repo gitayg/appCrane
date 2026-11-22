@@ -36,6 +36,7 @@ import { auditMiddleware } from '../middleware/audit.js';
 import { readCookie, readSessionCookie, cookieWriteAllowed } from '../utils/sessionCookie.js';
 import { APP_SESSION_COOKIE } from '../services/appOrigin.js';
 import { resolveAppHost } from './appHandoff.js';
+import { assertUserKeyIngress } from '../utils/ingress.js';
 import {
   userClaudeTokenMeta,
   setUserClaudeToken,
@@ -84,6 +85,7 @@ function platformUser(db, req) {
     const apiKey = req.headers['x-api-key'];
     if (apiKey) {
       user = db.prepare('SELECT * FROM users WHERE api_key_hash = ? AND active = 1').get(hashApiKey(apiKey)) || null;
+      if (user) assertUserKeyIngress(req, user.id, 'me');
     }
   }
   return user;

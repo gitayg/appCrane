@@ -83,32 +83,58 @@ export function notifyRequesterFulfilled(enhancementId, actorUserId) {
 }
 
 /**
- * v2.14.1: email an app's owners/admins when someone requests access to it, so
- * they can approve/deny without waiting to notice it in the dashboard.
+ * Who hears about a new request on an app:
+ *   - an access request goes to the app's admins (app_role 'admin'), who are
+ *     the people that grant access. An app with no admin falls back to its
+ *     owners, then to the platform admins, so a request is never unseen.
+ *   - every other request goes to the app's owners; an app with no owner
+ *     falls back to the platform admins.
  */
+export function newRequestRecipients(db, appId, isAccess) {
+  const byRole = (role) => db.prepare(`
+    SELECT DISTINCT u.email, u.name
+    FROM app_user_roles aur
+    JOIN users u ON u.id = aur.user_id
+    WHERE aur.app_id = ? AND aur.app_role = ? AND u.active = 1 AND u.email IS NOT NULL
+  `).all(appId, role);
+  const platformAdmins = () => db.prepare(
+    "SELECT email, name FROM users WHERE role = 'platform_admin' AND active = 1 AND email IS NOT NULL"
+  ).all();
+  const unique = (rows) => {
+    const seen = new Map();
+    for (const r of rows) {
+      const k = String(r.email).toLowerCase();
+      if (!seen.has(k)) seen.set(k, r);
+    }
+    return [...seen.values()];
+  };
+  if (isAccess) {
+    const admins = byRole('admin');
+    if (admins.length) return unique(admins);
+  }
+  const owners = byRole('owner');
+  return unique(owners.length ? owners : platformAdmins());
+}
+
+/** Email the people who act on a new request for an app (see newRequestRecipients). */
 export function notifyAppAdminsOfNewRequest(enhancementId) {
   try {
     const db = getDb();
-    const row = db.prepare('SELECT id, app_slug, user_name, message FROM enhancement_requests WHERE id = ?').get(enhancementId);
+    const row = db.prepare('SELECT id, app_slug, user_name, message, kind FROM enhancement_requests WHERE id = ?').get(enhancementId);
     if (!row?.app_slug) return;
     const app = db.prepare('SELECT id, name FROM apps WHERE slug = ?').get(row.app_slug);
     if (!app) return;
 
-    const admins = db.prepare(`
-      SELECT DISTINCT u.email, u.name
-      FROM app_user_roles aur
-      JOIN users u ON u.id = aur.user_id
-      WHERE aur.app_id = ? AND aur.app_role IN ('owner', 'admin') AND u.active = 1 AND u.email IS NOT NULL
-    `).all(app.id);
-    if (!admins.length) return;
+    const msg = String(row.message || '').trim();
+    const isAccess = row.kind === 'access' || /^Access request for app/i.test(msg);
+    const recipients = newRequestRecipients(db, app.id, isAccess);
+    if (!recipients.length) return;
 
     const appName = app.name || row.app_slug;
     const who = row.user_name || 'A user';
-    const msg = String(row.message || '').trim();
-    const isAccess = /^Access request for app/i.test(msg);
     const subject = isAccess ? `Access request for ${appName}` : `New request for ${appName}`;
 
-    for (const a of admins) {
+    for (const a of recipients) {
       const hi = `Hi${a.name ? ' ' + a.name : ''},\n\n`;
       const text = isAccess
         ? hi +
@@ -121,9 +147,9 @@ export function notifyAppAdminsOfNewRequest(enhancementId) {
           `Review it in AppCrane -> Requests.\n\n— AppCrane`;
       try { enqueueEmail({ to: a.email, subject, text, source: isAccess ? 'access-request' : 'new-request' }); } catch (_) { /* skip bad recipient */ }
     }
-    log.info(`[request-notify] notified ${admins.length} admin(s) of ${isAccess ? 'access' : 'new'} request #${row.id} for ${appName}`);
+    log.info(`[request-notify] notified ${recipients.length} recipient(s) of ${isAccess ? 'access' : 'new'} request #${row.id} for ${appName}`);
   } catch (e) {
-    log.warn(`[request-notify] could not notify app admins for enhancement ${enhancementId}: ${e.message}`);
+    log.warn(`[request-notify] could not notify for enhancement ${enhancementId}: ${e.message}`);
   }
 }
 

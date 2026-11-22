@@ -56,7 +56,9 @@ export function checkUrl(raw) {
 // redacts obvious secrets; this also strips identifying detail.
 const SCRUBS = [
   [/-----BEGIN [A-Z ]+-----[\s\S]*?(-----END [A-Z ]+-----|$)/g, '«key»'],
-  [/(sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|xox[abpr]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|dhk_[A-Za-z0-9_-]{8,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*)/g, '«secret»'],
+  // Token shapes: OpenAI/Anthropic, GitHub, Slack, AWS, AppCrane, JWT, GitLab,
+  // Stripe live/test secret and restricted keys, Google API, npm and SendGrid.
+  [/(sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|xox[abprse]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|dhk_[A-Za-z0-9_-]{8,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*|glpat-[A-Za-z0-9_-]{20,}|[sr]k_(?:live|test)_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_-]{35}|npm_[A-Za-z0-9]{36}|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,})/g, '«secret»'],
   [/(?<!«)\b(password|passwd|secret|token|api[_-]?key|authorization|bearer)\b(?:\s*[:=]\s*|\s+)(?!«)\S+/gi, '$1 «secret»'],
   [/[\w.+-]+@[\w-]+(\.[\w-]+)+/g, '«email»'],
   [/https?:\/\/\S+/g, '«url»'],

@@ -61,7 +61,7 @@ test('the guard warns rather than exits', () => {
 test('CI does not test above the supported floor', () => {
   // CI on 22 while the floor said 20 is why this was invisible: every check was
   // green on a runtime no production host was guaranteed to have.
-  const workflows = ['role-check.yml', 'release-supply-chain.yml']
+  const workflows = ['role-check.yml', 'release-supply-chain.yml', 'version-guard.yml']
     .map(f => read(`.github/workflows/${f}`));
   for (const wf of workflows) {
     for (const m of wf.matchAll(/node-version:\s*'?(\d+)'?/g)) {

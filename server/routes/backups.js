@@ -4,7 +4,8 @@ import { getDb } from '../db.js';
 import { requireAuth, requireAppUser, requireAppAccess } from '../middleware/auth.js';
 import { auditMiddleware } from '../middleware/audit.js';
 import { AppError } from '../utils/errors.js';
-import { execFileSync } from 'child_process';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import { existsSync, mkdirSync, statSync, mkdtempSync, rmSync } from 'fs';
 import { join, resolve, sep } from 'path';
 import { managedDbScopeFor, SANDBOX_TENANT, envForTenant } from '../services/sandboxDb.js';
@@ -14,6 +15,7 @@ import { logAudit } from '../middleware/audit.js';
 import { isPlatformAdmin } from '../utils/roles.js';
 
 const router = Router();
+const execFileAsync = promisify(execFile);
 
 // Engine handles for the managed-database dump/restore. null = the real ones
 // (managedDb.backupAccess). Tests replace them so the gate and the cross-app
@@ -82,12 +84,12 @@ router.post('/:slug/backup/:env', requireAppUser, auditMiddleware('backup-create
 
   try {
     if (existsSync(sourceDir)) {
-      execFileSync('tar', ['-czf', backupFile, '-C', sourceDir, '.'], { timeout: 120000, stdio: 'pipe' });
+      await execFileAsync('tar', ['-czf', backupFile, '-C', sourceDir, '.'], { timeout: 120000 });
     } else {
       // A database-only app (no /data yet): an empty archive keeps every
       // backup record the same shape, and restoring it extracts nothing.
       const empty = mkdtempSync(join(backupDir, '.empty-'));
-      try { execFileSync('tar', ['-czf', backupFile, '-C', empty, '.'], { timeout: 120000, stdio: 'pipe' }); }
+      try { await execFileAsync('tar', ['-czf', backupFile, '-C', empty, '.'], { timeout: 120000 }); }
       finally { rmSync(empty, { recursive: true, force: true }); }
     }
   } catch (e) {
@@ -224,7 +226,7 @@ router.post('/:slug/restore/:id', requireAppUser, auditMiddleware('backup-restor
   try {
     run = await runWithAppStopped({ app: req.app, envs, keepRunning }, async () => {
       try {
-        execFileSync('tar', ['-xzf', backup.file_path, '-C', targetDir], { timeout: 120000, stdio: 'pipe' });
+        await execFileAsync('tar', ['-xzf', backup.file_path, '-C', targetDir], { timeout: 120000 });
       } catch (e) {
         throw new AppError(`Restore failed: ${e.message}`, 500, 'RESTORE_FAILED');
       }
@@ -291,7 +293,7 @@ router.get('/:slug/restore-status', requireAppUser, (req, res) => {
 /**
  * POST /api/apps/:slug/copy-data - Copy prod data to sandbox
  */
-router.post('/:slug/copy-data', requireAppUser, auditMiddleware('copy-data'), (req, res) => {
+router.post('/:slug/copy-data', requireAppUser, auditMiddleware('copy-data'), async (req, res) => {
   // Security audit 2026-10-06, M2: this copies production data into sandbox,
   // which members can deploy code to and so read.
   if (!isAppOwnerOrPlatformAdmin(req.user, req.app)) {
@@ -308,11 +310,11 @@ router.post('/:slug/copy-data', requireAppUser, auditMiddleware('copy-data'), (r
   mkdirSync(sandData, { recursive: true });
 
   try {
-    execFileSync('rsync', ['-a', '--delete', prodData + '/', sandData + '/'], { timeout: 120000, stdio: 'pipe' });
+    await execFileAsync('rsync', ['-a', '--delete', prodData + '/', sandData + '/'], { timeout: 120000 });
   } catch (e) {
     // Fallback to cp if rsync not available
     try {
-      execFileSync('cp', ['-r', prodData + '/.', sandData + '/'], { timeout: 120000, stdio: 'pipe' });
+      await execFileAsync('cp', ['-r', prodData + '/.', sandData + '/'], { timeout: 120000 });
     } catch (e2) {
       throw new AppError(`Copy failed: ${e2.message}`, 500, 'COPY_FAILED');
     }

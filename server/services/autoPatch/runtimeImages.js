@@ -127,6 +127,8 @@ export function digestFor(ref, repoDigests) {
   return null;
 }
 
+const PULL_CONCURRENCY = 3;
+
 /**
  * Pull each base, then resolve the final base's digest.
  * `run(args, opts)` runs a docker command and resolves stdout or rejects.
@@ -142,17 +144,27 @@ export async function prepareBuildBase({ contextDir, dockerfileText, appDockerfi
   const wanted = !appDockerfile || pullForAppDockerfiles(db);
   const warnings = [];
   if (wanted) {
-    for (const ref of pull) {
-      try {
-        await run(['pull', '--quiet', ref], { timeout: 5 * 60 * 1000 });
-        onLog?.(`Pulled the latest ${ref}`);
-      } catch (e) {
-        const why = String(e?.message || e).split('\n').map((l) => l.trim()).filter(Boolean).pop() || 'unknown error';
-        const w = `⚠ Could not pull a fresh ${ref} (${why.slice(0, 300)}); building on the copy already on this host, which may be missing security fixes.`;
-        warnings.push(w);
-        onLog?.(w);
+    // A few at a time: a multi-stage Dockerfile's bases are independent pulls.
+    // Warnings keep the order of the FROM lines whichever pull finishes first.
+    const found = new Array(pull.length).fill(null);
+    let next = 0;
+    const worker = async () => {
+      while (next < pull.length) {
+        const i = next++;
+        const ref = pull[i];
+        try {
+          await run(['pull', '--quiet', ref], { timeout: 5 * 60 * 1000 });
+          onLog?.(`Pulled the latest ${ref}`);
+        } catch (e) {
+          const why = String(e?.message || e).split('\n').map((l) => l.trim()).filter(Boolean).pop() || 'unknown error';
+          const w = `⚠ Could not pull a fresh ${ref} (${why.slice(0, 300)}); building on the copy already on this host, which may be missing security fixes.`;
+          found[i] = w;
+          onLog?.(w);
+        }
       }
-    }
+    };
+    await Promise.all(Array.from({ length: Math.min(PULL_CONCURRENCY, pull.length) }, worker));
+    for (const w of found) if (w) warnings.push(w);
   } else if (pull.length) {
     onLog?.(`Not pulling ${pull.join(', ')}: pulling bases for app Dockerfiles is turned off in Settings`);
   }

@@ -563,15 +563,14 @@ router.post('/Users', requireScimToken, (req, res) => {
     return res.status(409).json(scimError(409, 'User already exists'));
   }
 
-  const apiKey  = generateApiKey('dhk_user');
-  const keyHash = hashApiKey(apiKey);
+  // No API key: a person gets one only by asking (Settings > Account).
   const active  = body.active !== false ? 1 : 0;
   const dir     = directoryAttrs(body);
 
   const result = db.prepare(`
-    INSERT INTO users (name, email, role, api_key_hash, active, scim_external_id, department, region, location, created_at)
-    VALUES (?, ?, 'user', ?, ?, ?, ?, ?, ?, datetime('now'))
-  `).run(name, email, keyHash, active, body.externalId || null,
+    INSERT INTO users (name, email, role, active, scim_external_id, department, region, location, created_at)
+    VALUES (?, ?, 'user', ?, ?, ?, ?, ?, datetime('now'))
+  `).run(name, email, active, body.externalId || null,
          dir.department ?? null, dir.region ?? null, dir.location ?? null);
 
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(result.lastInsertRowid);

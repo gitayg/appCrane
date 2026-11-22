@@ -1,30 +1,10 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, Suspense } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { AuthContext, useAuthState } from './hooks/useAuth'
 import { useMe, isAdmin } from './hooks/useMe'
 import { adminApi } from './adminApi'
 import { Layout } from './components/Layout'
 import { Login } from './components/Login'
-import { Dashboard } from './pages/Dashboard'
-import { Applications } from './pages/Applications'
-import { Catalog } from './pages/Catalog'
-import { Audit } from './pages/Audit'
-import { AppStudio } from './pages/AppStudio'
-import { Settings } from './pages/Settings'
-import { Docs } from './pages/Docs'
-import { AppManager } from './pages/AppManager'
-import { MyRequests } from './pages/MyRequests'
-import { RequestDetail } from './pages/RequestDetail'
-import { Crew } from './pages/Crew'
-import { McpAuthorize } from './pages/McpAuthorize'
-import { Surveys } from './pages/Surveys'
-import { Tasks } from './pages/Tasks'
-import { Events } from './pages/Events'
-import { Adopt } from './pages/Adopt'
-import { IntakeQueue } from './pages/IntakeQueue'
-import { AccessReviews } from './pages/AccessReviews'
-import { AccessReviewCampaigns } from './pages/AccessReviewCampaigns'
-import { AuditIntegrity } from './pages/AuditIntegrity'
 import { IdleSessionGuard } from './components/mfa/IdleSessionGuard'
 import { PlatformRequestBar } from './components/PlatformRequestBar'
 import { AppTabsProvider } from './components/AppTabsContext'
@@ -35,6 +15,33 @@ import {
   type AttemptStore, type Landing,
 } from './utils/landingRedirect'
 import { AccessDenied, CheckingSession, SignInStuck } from './components/LandingScreens'
+import { lazyPage } from './utils/lazyPage'
+// Registers <crane-app-topbar> and the panel elements at boot: an app tab can be
+// the first page opened, before any lazy page that would register them.
+import './topbar-element/entry'
+
+// Route pages load on first visit; the shell (layout, login, app tabs) stays
+// in the entry chunk.
+const Dashboard = lazyPage(() => import('./pages/Dashboard'), 'Dashboard')
+const Applications = lazyPage(() => import('./pages/Applications'), 'Applications')
+const Catalog = lazyPage(() => import('./pages/Catalog'), 'Catalog')
+const Audit = lazyPage(() => import('./pages/Audit'), 'Audit')
+const AppStudio = lazyPage(() => import('./pages/AppStudio'), 'AppStudio')
+const Settings = lazyPage(() => import('./pages/Settings'), 'Settings')
+const Docs = lazyPage(() => import('./pages/Docs'), 'Docs')
+const AppManager = lazyPage(() => import('./pages/AppManager'), 'AppManager')
+const MyRequests = lazyPage(() => import('./pages/MyRequests'), 'MyRequests')
+const RequestDetail = lazyPage(() => import('./pages/RequestDetail'), 'RequestDetail')
+const Crew = lazyPage(() => import('./pages/Crew'), 'Crew')
+const McpAuthorize = lazyPage(() => import('./pages/McpAuthorize'), 'McpAuthorize')
+const Surveys = lazyPage(() => import('./pages/Surveys'), 'Surveys')
+const Tasks = lazyPage(() => import('./pages/Tasks'), 'Tasks')
+const Events = lazyPage(() => import('./pages/Events'), 'Events')
+const Adopt = lazyPage(() => import('./pages/Adopt'), 'Adopt')
+const IntakeQueue = lazyPage(() => import('./pages/IntakeQueue'), 'IntakeQueue')
+const AccessReviews = lazyPage(() => import('./pages/AccessReviews'), 'AccessReviews')
+const AccessReviewCampaigns = lazyPage(() => import('./pages/AccessReviewCampaigns'), 'AccessReviewCampaigns')
+const AuditIntegrity = lazyPage(() => import('./pages/AuditIntegrity'), 'AuditIntegrity')
 
 function attemptStore(): AttemptStore | null {
   try { return window.sessionStorage } catch { return null }
@@ -166,6 +173,17 @@ export function AdminApp() {
     } catch (_) { /* SSR / non-browser — fine */ }
   }, [])
 
+  // Already signed in (a second tab finishing its SSO), so Login never mounts to
+  // clean the address bar. Effects run child first, so Login has read these by now.
+  useEffect(() => {
+    if (!auth.isAuthed) return
+    const url = new URL(window.location.href)
+    if (!url.searchParams.has('sso_code') && !url.searchParams.has('oidc_token')) return
+    url.searchParams.delete('sso_code')
+    url.searchParams.delete('oidc_token')
+    window.history.replaceState({}, '', url.pathname + url.search + url.hash)
+  }, [auth.isAuthed])
+
   // v2.5.14: when an already-authed user lands at <landing>?redirect=/foo,
   // forward them to the original target instead of leaving them on the landing
   // page. The decision lives in utils/landingRedirect.ts: it used to forward on
@@ -186,14 +204,15 @@ export function AdminApp() {
       if (cancelled) return
       const next = afterCheck(landing.target, check, attemptStore(), Date.now())
       // The refused credential goes, and the sign-in screen renders in place. No
-      // navigation: an ?oidc_token= in this URL is then absorbed by Login.
+      // navigation: an ?sso_code= in this URL is then redeemed by Login.
       if (next.kind === 'stale') forget(false)
       if (next.kind === 'go') {
         // Same Referer concern as Login.tsx: a same-origin hop sends the full
         // URL, and the deep-link target may be a tenant app served at /<slug>.
         const clean = new URL(window.location.href)
-        if (clean.searchParams.has('oidc_token')) {
+        if (clean.searchParams.has('oidc_token') || clean.searchParams.has('sso_code')) {
           clean.searchParams.delete('oidc_token')
+          clean.searchParams.delete('sso_code')
           window.history.replaceState({}, '', clean.pathname + clean.search + clean.hash)
         }
         window.location.replace(next.target)
@@ -235,6 +254,7 @@ export function AdminApp() {
       <AppTabsProvider>
       <IdleSessionGuard />
       <BrowserRouter>
+        <Suspense fallback={null}>
         <Routes>
           {/* v2.21.16: land on the app picker (/launch shows "Select an app")
               instead of the Dashboard, so the first screen is choosing an app. */}
@@ -294,6 +314,7 @@ export function AdminApp() {
           <Route path="/app"         element={<Layout><AppManager /></Layout>} />
           <Route path="*"            element={<Navigate to="/launch" replace />} />
         </Routes>
+        </Suspense>
         <PersistentAppTabs />
       </BrowserRouter>
       </AppTabsProvider>

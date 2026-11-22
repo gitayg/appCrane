@@ -52,11 +52,16 @@ for that app.
 **Ownership follows the connecting key's identity.** Whichever identity the
 MCP key resolves to becomes the app's owner at creation. Onboard with a
 **personal** MCP key (the "+ Add Application" button issues one for the
-logged-in user) — NOT a shared platform-admin key. If a shared admin key
+logged-in user, labelled "App onboarding, <date>", valid 30 days; each click
+revokes that user's earlier onboarding keys that were never used) — NOT a shared platform-admin key. If a shared admin key
 creates the app, the admin identity owns it and the human's personal key
 (scope-restricted to apps they own) won't see it. If that already happened,
 a platform admin can fix it at Settings → Users → the app's Users modal by
 setting the human's per-app role to **Owner**.
+
+People no longer get a personal REST API key (`dhk_user_*`) when they sign in or are
+provisioned. A user creates one at **Settings → Account** only when they need it; an MCP
+key or an OAuth sign-in covers agent work without one.
 
 ## Inputs to gather from the user (first turn, all at once)
 
@@ -1215,6 +1220,18 @@ Inspect / debug jobs with the matching tools:
 Jobs are synced from `deployhub.json` on every deploy: new entries added,
 missing ones removed, existing ones updated. So the source of truth lives
 with the app's code, not in some out-of-band UI.
+
+**Coming from Vercel.** An app that already has `crons` in a top-level
+`vercel.json` (`[{ "path": "/api/cron", "schedule": "0 5 * * *" }]`) needs no
+`deployhub.json` entry: each one becomes a job named `vercel:<path>` that calls
+`GET <path>` on the app's own container (loopback port, not the public proxy),
+in UTC, with `Authorization: Bearer <CRON_SECRET>` when the app has a
+`CRON_SECRET` env var, and without following redirects. A 2xx answer is success;
+the timeout is 300 s. `appcrane_list_cron` shows them with `origin: "vercel"`.
+A `vercel.json` that is not valid JSON, has a path that is not a plain `/...`
+path, a schedule Vercel would refuse, or more than 100 entries is reported in
+the deploy log and changes nothing. Jobs from `deployhub.json` are never
+touched by this.
 
 ## Path-level SSO bypass — when one endpoint takes its own token
 

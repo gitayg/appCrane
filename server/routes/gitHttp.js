@@ -100,7 +100,13 @@ export function createGitHttpRouter({ limits = GIT_HTTP_LIMITS } = {}) {
     if (req.headers['content-type'] !== 'application/x-git-upload-pack-request') {
       return plain(res, 415, 'Expected Content-Type application/x-git-upload-pack-request');
     }
-    serveUploadPack(req, res, { slug: req.gitRepo.slug, userId: req.user.id, advertise: false, limits });
+    const { slug, app } = req.gitRepo;
+    // A POST carrying a known SHA returns a pack without GET info/refs, so it needs
+    // a row of its own. A clone can POST several times, hence not 'git-fetch'.
+    try {
+      logAudit(req.user.id, app.id, 'git-upload-pack', { slug, transport: 'smart-http', ip: clientIp(req) });
+    } catch (_) { /* auditing must never break a fetch */ }
+    serveUploadPack(req, res, { slug, userId: req.user.id, advertise: false, limits });
   });
 
   router.post('/:repo/git-receive-pack', (req, res) => plain(res, 403, PUSH_REFUSED));

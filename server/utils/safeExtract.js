@@ -18,7 +18,7 @@
 // path-traversal before extraction; never trust system unzip/tar."
 
 import { execFileSync } from 'child_process';
-import { existsSync, readdirSync, statSync, realpathSync } from 'fs';
+import { existsSync, lstatSync, readdirSync, readlinkSync, statSync, realpathSync } from 'fs';
 import { join, resolve, sep } from 'path';
 
 const UNSAFE_ENTRY_RE = /(?:^|[/\\])\.\.(?:[/\\]|$)/;
@@ -139,7 +139,15 @@ function walkAndAssertContained(current, root) {
   for (const e of entries) {
     const full = join(current, e.name);
     let real;
-    try { real = realpathSync(full); } catch (_) { continue; }
+    try {
+      real = realpathSync(full);
+    } catch (_) {
+      // A dangling link has no real path yet, but it is valid the moment its
+      // target appears. Judge where it points: `current` is resolved once here
+      // because a relative target is relative to the link's real directory.
+      if (!lstatSync(full, { throwIfNoEntry: false })?.isSymbolicLink()) continue;
+      real = resolve(realpathSync(current), readlinkSync(full));
+    }
     if (!real.startsWith(root + sep) && real !== root) {
       throw new Error(`archive-slip: extracted entry resolves outside ${root}: ${full} -> ${real}`);
     }

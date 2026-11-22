@@ -25,6 +25,7 @@ interface User {
   location?: string | null
   api_key_expires_at?: string | null
   api_key_expired?: number
+  has_api_key?: number
 }
 
 interface App {
@@ -634,7 +635,7 @@ export function Users() {
                   background: 'rgba(245, 158, 11, .2)', color: '#fbbf24',
                   border: '1px solid rgba(245, 158, 11, .4)',
                 }}>
-                  platform_admin — implicit owner everywhere
+                  platform_admin — can manage every app; set owner where they should be listed as one
                 </span>
               )}
               <button
@@ -664,7 +665,7 @@ export function Users() {
                       const cellKey = `${a.slug}:${appsModalUser.id}`
                       const status = roleSaveStatus[cellKey]
                       const isPlatformAdmin = appsModalUser.role === 'platform_admin'
-                      const value = isPlatformAdmin ? 'owner' : (roles[a.slug]?.[appsModalUser.id] ?? 'none')
+                      const value = roles[a.slug]?.[appsModalUser.id] ?? 'none'
                       return (
                         <tr key={a.slug} style={{ borderBottom: '1px solid var(--border-faint, #2a2a2a)' }}>
                           <td style={{ padding: '8px 4px', fontSize: '.88rem' }}>
@@ -674,7 +675,10 @@ export function Users() {
                           <td style={{ padding: '8px 4px', textAlign: 'right' }}>
                             <select
                               value={value}
-                              disabled={isPlatformAdmin || status === 'saving'}
+                              disabled={status === 'saving'}
+                              title={isPlatformAdmin
+                                ? 'Platform admins can manage every app whatever is set here. Set owner to be listed, and e-mailed, as an owner of this app.'
+                                : undefined}
                               onChange={e => changeRole(a.slug, appsModalUser.id, e.target.value as AppRole)}
                               style={{ minWidth: 110 }}
                             >
@@ -685,9 +689,9 @@ export function Users() {
                             </select>
                           </td>
                           <td style={{ padding: '8px 0', textAlign: 'center', width: 28 }}>
-                            {!isPlatformAdmin && status === 'saving' && <span style={{ color: 'var(--dim)' }}>…</span>}
-                            {!isPlatformAdmin && status === 'saved'  && <span style={{ color: 'var(--green)' }}>✓</span>}
-                            {!isPlatformAdmin && status === 'error'  && <span style={{ color: 'var(--red)' }}>✗</span>}
+                            {status === 'saving' && <span style={{ color: 'var(--dim)' }}>…</span>}
+                            {status === 'saved'  && <span style={{ color: 'var(--green)' }}>✓</span>}
+                            {status === 'error'  && <span style={{ color: 'var(--red)' }}>✗</span>}
                           </td>
                         </tr>
                       )

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { adminApi } from '../adminApi'
+import { setVisibleInterval } from '../utils/visibleInterval'
 
 const POLL_MS = 8000
 
@@ -73,8 +74,8 @@ export function useJobsList(slug: string | null | undefined, polling: boolean): 
     let alive = true
     fetchOnce()
     const interval = polling ? POLL_MS : 30000 // background trickle for badge
-    const t = setInterval(() => { if (alive) { tickRef.current++; fetchOnce() } }, interval)
-    return () => { alive = false; clearInterval(t) }
+    const stop = setVisibleInterval(() => { if (alive) { tickRef.current++; fetchOnce() } }, interval)
+    return () => { alive = false; stop() }
   }, [fetchOnce, polling])
 
   const activeJobs = data.active_jobs ?? []

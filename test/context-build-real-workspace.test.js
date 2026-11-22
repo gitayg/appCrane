@@ -75,7 +75,10 @@ test('the codebase summary reads a container-owned workspace, runs as the user, 
 
   const argv = readFileSync(ARGV, 'utf8').split('\x1f');
   const envs = argv.filter((a, i) => argv[i - 1] === '-e').map((e) => e.split('=')[0]);
-  assert.ok(envs.includes('CLAUDE_CODE_OAUTH_TOKEN'), `built on another credential: ${envs.join(', ')}`);
+  // The run-mode credential arrives on stdin; the wrapper names the variable it reads.
+  const reads = argv.join(' ').match(/read -r ([A-Z_]+)/)?.[1];
+  assert.equal(reads, 'CLAUDE_CODE_OAUTH_TOKEN', `built on another credential: ${reads}`);
+  assert.ok(!argv.some((a) => a.includes(USER_TOKEN)), 'the user token is on the argv');
   assert.ok(!envs.includes('ANTHROPIC_API_KEY'), 'the platform key was used for a user on their own token');
   assert.match(argv.join(' '), /server\.js/, 'the summary was built from an empty file tree');
 });

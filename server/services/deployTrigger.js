@@ -17,6 +17,12 @@
  * order of writes — and routes/webhooks.js now calls it. A local push passes a
  * different `source` (its own deployment note, audit action and actor) and
  * nothing else differs.
+ *
+ * One deploy per app+env at a time: a push that lands while a fresh deploy of
+ * that env is in flight starts nothing. It is queued (services/pushCoalescer.js)
+ * as that env's single follow-up, newest push wins, and AppCrane deploys it
+ * once when the in-flight deploy ends. A local push's follow-up re-reads the
+ * branch tip then, so every file pushed meanwhile ships in that one build.
  */
 
 import { getDb } from '../db.js';
@@ -109,25 +115,43 @@ export function recordDelivery({ appId, event, deliveryId, payloadHash, sigValid
  * Per environment: insert the pending deployments row, record the delivery,
  * audit, then hand the row to deployApp without waiting for the build.
  *
- * The caller has already passed evaluatePush. Returns
- * [{ env, deployment_id }] in trigger order.
+ * An env with a fresh deploy already in flight gets no row and no deployApp:
+ * the push is queued behind it (see the header) and reported as
+ * { env, status: 'queued', queued_behind: <in-flight deployment id> }.
  *
- * `deps` exists for tests that must observe deployApp without building
+ * The caller has already passed evaluatePush. Returns
+ * [{ env, deployment_id } | { env, status: 'queued', queued_behind }] in
+ * trigger order.
+ *
+ * `envs` limits the run to those environments (a queued follow-up runs for its
+ * own env only). `refreshCommit`, when given, returns the commit a queued
+ * follow-up deploys, read at follow-up time (a local push passes the branch
+ * tip). `deps` exists for tests that must observe deployApp without building
  * anything; production callers never pass it.
  */
 export async function triggerAutoDeploys({
   config, branch, commitSha, commitMessage, logDelivery,
   source = WEBHOOK_SOURCE, actorId = null, deps = null,
+  envs = null, refreshCommit = null,
 }) {
   const db = getDb();
   const triggered = [];
 
   for (const { env, flag } of ENVIRONMENTS) {
     if (!config[flag]) continue;
+    if (envs && !envs.includes(env)) continue;
     const { restoreInProgress } = await import('./managedDbRestoreGuard.js');
     if (restoreInProgress(config.slug, env)) {
       log.warn(`[deploy-trigger] ${config.slug}/${env}: not deployed, a database restore is running`);
       logDelivery({ actionTaken: 'skipped_restore', branch, commitSha });
+      continue;
+    }
+
+    const queued = await queueBehindInflight({
+      config, env, flag, branch, commitSha, commitMessage, logDelivery, source, actorId, deps, refreshCommit,
+    });
+    if (queued) {
+      triggered.push(queued);
       continue;
     }
 
@@ -158,6 +182,45 @@ export async function triggerAutoDeploys({
 }
 
 /**
+ * When a fresh deploy of config's app+env is in flight, park this push as that
+ * env's follow-up and return its queued entry; otherwise null. Never throws:
+ * if the check itself fails, the push deploys as it always has.
+ */
+async function queueBehindInflight({
+  config, env, flag, branch, commitSha, commitMessage, logDelivery, source, actorId, deps, refreshCommit,
+}) {
+  try {
+    const { freshInflightDeploy } = await import('./deployer.js');
+    const inflight = freshInflightDeploy(getDb(), config.app_id, env);
+    if (!inflight) return null;
+
+    const { queueFollowUp } = await import('./pushCoalescer.js');
+    queueFollowUp({
+      appId: config.app_id, env, slug: config.slug, behind: inflight.id,
+      run: async () => {
+        const current = pushConfigForApp(config.app_id);
+        const gate = current ? evaluatePush(current, branch).action : 'skipped_no_config';
+        if (gate !== 'deploy' || !current[flag]) {
+          log.info(`[push-coalesce] ${config.slug}/${env}: queued push not deployed (${gate !== 'deploy' ? gate : 'skipped_no_auto'})`);
+          logDelivery({ actionTaken: gate !== 'deploy' ? gate : 'skipped_no_auto', branch, commitSha });
+          return;
+        }
+        const sha = refreshCommit ? await refreshCommit() : commitSha;
+        await triggerAutoDeploys({
+          config: current, branch, commitSha: sha, commitMessage, logDelivery,
+          source, actorId, deps, envs: [env], refreshCommit,
+        });
+      },
+    });
+    logDelivery({ actionTaken: 'deploy_queued', branch, commitSha, deployId: inflight.id });
+    return { env, status: 'queued', queued_behind: inflight.id };
+  } catch (e) {
+    log.warn(`[push-coalesce] ${config.slug}/${env}: could not queue behind the running deploy, deploying now: ${e.message}`);
+    return null;
+  }
+}
+
+/**
  * Deploy-on-push for a commit that just landed in a LOCAL managed repo.
  * Called by managedRepo.pushFilesToManagedRepo after the ref update, once per
  * committed push (a staged chunk commits nothing and never gets here).
@@ -170,7 +233,8 @@ export async function triggerAutoDeploys({
  *
  * Never throws — the commit has landed; a deploy that could not be started is
  * reported in the return value and the delivery log, not as a failed push.
- * Returns { action, branch, commit?, triggered: [{ env, deployment_id }], error? }.
+ * Returns { action, branch, commit?, triggered: [...], error? }; action is
+ * 'deploy_queued' when every env was queued behind a running deploy.
  */
 export async function deployAfterLocalPush(app, pushResult, { actorId = null, deps = null } = {}) {
   const branch = pushResult?.branch;
@@ -206,12 +270,14 @@ export async function deployAfterLocalPush(app, pushResult, { actorId = null, de
       return out;
     }
 
-    out.action = 'deploy_triggered';
     out.triggered = await triggerAutoDeploys({
       config, branch, commitSha,
       commitMessage: pushResult?.message?.slice(0, 200),
       logDelivery, source: LOCAL_PUSH_SOURCE, actorId, deps,
+      refreshCommit: async () => (await localBranchHeadSha(app, branch)).slice(0, 8),
     });
+    const allQueued = out.triggered.length > 0 && out.triggered.every((t) => t.status === 'queued');
+    out.action = allQueued ? 'deploy_queued' : 'deploy_triggered';
     return out;
   } catch (e) {
     log.warn(`Deploy-on-push for ${app.slug} could not start: ${e.message}`);
@@ -230,12 +296,26 @@ export async function deployAfterLocalPush(app, pushResult, { actorId = null, de
 export function pushDeployView(slug, result, defaultNext) {
   const ad = result?.auto_deploy;
   if (!ad) return { next: defaultNext };
+  if (ad.action === 'deploy_queued' && ad.triggered?.length) {
+    const behind = [...new Set(ad.triggered.map((t) => t.queued_behind))].join(', ');
+    return {
+      auto_deploy: ad,
+      next: `Pushed. A deploy of this app (deployment ${behind}) is still running; this commit is queued and AppCrane will ` +
+        'deploy the branch tip once, when it finishes, including any files you push meanwhile. Do not call appcrane_deploy. ' +
+        'Push the rest of the change now, ideally all files in ONE appcrane_push_to_managed_app call.',
+    };
+  }
   if (ad.triggered?.length) {
-    const started = ad.triggered.map((t) => `${t.env} deployment ${t.deployment_id}`).join(', ');
+    const startedRows = ad.triggered.filter((t) => t.status !== 'queued');
+    const queuedRows = ad.triggered.filter((t) => t.status === 'queued');
+    const started = startedRows.map((t) => `${t.env} deployment ${t.deployment_id}`).join(', ');
+    const queuedNote = queuedRows.length
+      ? ` ${queuedRows.map((t) => `${t.env} is queued behind deployment ${t.queued_behind}`).join(', ')}; it deploys once that finishes.`
+      : '';
     return {
       auto_deploy: ad,
       next: `Pushed. Deploy on push started ${started} for commit ${ad.commit} — do not call appcrane_deploy for this commit. ` +
-        `Follow it with appcrane_wait_deploy deployment_id=${ad.triggered[0].deployment_id}.`,
+        `Follow it with appcrane_wait_deploy deployment_id=${startedRows[0].deployment_id}.${queuedNote}`,
     };
   }
   const why = {

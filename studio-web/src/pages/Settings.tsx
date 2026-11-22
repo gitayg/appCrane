@@ -28,11 +28,15 @@ import { OAuthAdminCard } from '../components/OAuthAdminCard'
 import { SiemSinks } from '../components/siem/SiemSinks'
 import { LlmGatewaySettingsCard } from '../components/llm/LlmGatewaySettingsCard'
 import { CryptographyCard } from '../components/crypto/CryptographyCard'
+import { SecretsManagerCard } from '../components/SecretsManagerCard'
+import { PlatformAnthropicKeyCard } from '../components/PlatformAnthropicKeyCard'
 import { ClassificationPolicyCard } from '../components/intake/ClassificationPolicyCard'
 import { AutoPatchPolicyCard } from '../components/autoPatch/AutoPatchPolicyCard'
 import { VulnAlertsCard } from '../components/vulnAlerts/VulnAlertsCard'
 import { RuntimePatchCard } from '../components/autoPatch/RuntimePatchCard'
 import { AppIsolationCard } from '../components/AppIsolationCard'
+import { SignupRequestsCard } from '../components/sso/SignupRequestsCard'
+import { setVisibleInterval } from '../utils/visibleInterval'
 
 function SecurityTab() {
   const [certFile, setCertFile] = useState('')
@@ -48,7 +52,10 @@ function SecurityTab() {
   const [oidc, setOidc] = useState({
     enabled: false, provider_name: '', discovery_url: '',
     client_id: '', client_secret_set: false, auto_provision: false,
+    allowed_domains: '', redirect_uri: '',
   })
+  const [oidcError, setOidcError] = useState<string | null>(null)
+  const [redirectCopied, flashRedirectCopied] = useFlash()
   const [oidcSecret, setOidcSecret] = useState('')
   const [oidcSaved, flashOidcSaved] = useFlash()
   const [oidcTest, setOidcTest] = useState<{ ok: boolean; msg: string } | null>(null)
@@ -69,7 +76,7 @@ function SecurityTab() {
 
   // v2.7.0: require-SSO toggle. Disables password sign-in across the
   // instance; the IdP becomes the only browser login path.
-  const [ssoOnly, setSsoOnly] = useState(false)
+  const [ssoOnly, setSsoOnly] = useState(true)
   const [ssoOnlySaved, flashSsoOnlySaved] = useFlash()
   const [ssoOnlyError, setSsoOnlyError] = useState<string | null>(null)
 
@@ -87,7 +94,7 @@ function SecurityTab() {
     adminApi.get<{ value?: string }>('/api/settings/tls_key_file').then(r => { if (r?.value) setKeyFile(r.value) }).catch(() => {})
     adminApi.get<typeof tlsCheck>('/api/server/tls-check').then(setTlsCheck).catch(() => {})
     adminApi.get<typeof oidc & { client_secret_set: boolean }>('/api/auth/oidc/admin-config').then(r => {
-      if (r) setOidc({ enabled: r.enabled, provider_name: r.provider_name, discovery_url: r.discovery_url, client_id: r.client_id, client_secret_set: r.client_secret_set, auto_provision: r.auto_provision })
+      if (r) setOidc({ enabled: r.enabled, provider_name: r.provider_name, discovery_url: r.discovery_url, client_id: r.client_id, client_secret_set: r.client_secret_set, auto_provision: r.auto_provision, allowed_domains: r.allowed_domains ?? '', redirect_uri: r.redirect_uri ?? '' })
     }).catch(() => {})
     adminApi.get<typeof saml>('/api/auth/saml/admin-config').then(r => {
       if (r) setSaml({ enabled: r.enabled, provider_name: r.provider_name, idp_sso_url: r.idp_sso_url, idp_cert_set: r.idp_cert_set, auto_provision: r.auto_provision })
@@ -96,7 +103,8 @@ function SecurityTab() {
     // Absent row means enabled - only an explicit '0' turns the catalogue off.
     adminApi.get<{ value?: string | null }>('/api/settings/catalog_enabled')
       .then(r => setCatalogEnabled(r?.value !== '0')).catch(() => {})
-    adminApi.get<{ value?: string }>('/api/settings/auth_sso_only').then(r => setSsoOnly(r?.value === 'true')).catch(() => {})
+    // On unless an admin stored 'false' (server/services/authPolicy.js).
+    adminApi.get<{ value?: string | null }>('/api/settings/auth_sso_only').then(r => setSsoOnly(r?.value !== 'false')).catch(() => {})
     adminApi.get<typeof embed>('/api/settings/embed/config').then(r => { if (r) setEmbed(r) }).catch(() => {})
     adminApi.get<{ enabled: boolean }>('/api/settings/edge/brotli').then(r => { if (r) setBrotliGuard(r.enabled) }).catch(() => {})
   }, [])
@@ -159,14 +167,21 @@ function SecurityTab() {
     const body: Record<string, unknown> = {
       enabled: oidc.enabled, provider_name: oidc.provider_name,
       discovery_url: oidc.discovery_url, client_id: oidc.client_id,
-      auto_provision: oidc.auto_provision,
+      auto_provision: oidc.auto_provision, allowed_domains: oidc.allowed_domains,
     }
     if (oidcSecret) body.client_secret = oidcSecret
-    await adminApi.put('/api/auth/oidc/config', body).catch(() => {})
+    setOidcError(null)
+    try {
+      await adminApi.put('/api/auth/oidc/config', body)
+    } catch (e) {
+      setOidcError((e as Error).message)
+      return
+    }
     flashOidcSaved()
     setOidcSecret('')
+    adminApi.get<{ value?: string | null }>('/api/settings/auth_sso_only').then(r => setSsoOnly(r?.value !== 'false')).catch(() => {})
     adminApi.get<typeof oidc & { client_secret_set: boolean }>('/api/auth/oidc/admin-config').then(r => {
-      if (r) setOidc({ enabled: r.enabled, provider_name: r.provider_name, discovery_url: r.discovery_url, client_id: r.client_id, client_secret_set: r.client_secret_set, auto_provision: r.auto_provision })
+      if (r) setOidc({ enabled: r.enabled, provider_name: r.provider_name, discovery_url: r.discovery_url, client_id: r.client_id, client_secret_set: r.client_secret_set, auto_provision: r.auto_provision, allowed_domains: r.allowed_domains ?? '', redirect_uri: r.redirect_uri ?? '' })
     }).catch(() => {})
   }
 
@@ -259,7 +274,29 @@ function SecurityTab() {
 
       <div className="setting-card">
         <h3>OIDC / SSO</h3>
-        <p>Configure OpenID Connect single sign-on for your users.</p>
+        <p>Configure OpenID Connect single sign-on for your users, or let people sign in and sign up with Google.</p>
+        <div style={{ ...fieldWrap, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          <button className="btn" onClick={() => setOidc(v => ({
+            ...v, enabled: true, provider_name: 'Google', auto_provision: true,
+            discovery_url: 'https://accounts.google.com/.well-known/openid-configuration',
+          }))}>Set up Google sign-in</button>
+          <span style={{ fontSize: '.8rem', color: 'var(--dim)' }}>
+            Fills in Google's details. Then create a client in{' '}
+            <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noreferrer" style={{ color: 'var(--accent)' }}>Google Cloud Console → Credentials</a>
+            {' '}(Create credentials → OAuth client ID → Web application), add the redirect URI below, and paste its client ID and secret here.
+          </span>
+        </div>
+        {oidc.redirect_uri && (
+          <div style={fieldWrap}>
+            <label style={labelStyle}>Redirect URI (give this to your provider)</label>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <FocusInput value={oidc.redirect_uri} readOnly onFocus={e => e.currentTarget.select()} />
+              <button className="btn" onClick={() => { navigator.clipboard?.writeText(oidc.redirect_uri).then(flashRedirectCopied).catch(() => {}) }}>
+                {redirectCopied ? 'Copied' : 'Copy'}
+              </button>
+            </div>
+          </div>
+        )}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
           <input type="checkbox" id="oidc-enabled" checked={oidc.enabled} onChange={e => setOidc(v => ({ ...v, enabled: e.target.checked }))} />
           <label htmlFor="oidc-enabled" style={{ fontSize: '.85rem' }}>Enable SSO login</label>
@@ -289,12 +326,25 @@ function SecurityTab() {
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
           <input type="checkbox" id="oidc-provision" checked={oidc.auto_provision} onChange={e => setOidc(v => ({ ...v, auto_provision: e.target.checked }))} />
-          <label htmlFor="oidc-provision" style={{ fontSize: '.85rem' }}>Auto-provision new users</label>
+          <label htmlFor="oidc-provision" style={{ fontSize: '.85rem' }}>Let new people sign up (auto-provision)</label>
         </div>
+        {oidc.auto_provision && (
+          <div style={fieldWrap}>
+            <label style={labelStyle}>Join without approval</label>
+            <FocusInput value={oidc.allowed_domains} onChange={e => setOidc(v => ({ ...v, allowed_domains: e.target.value }))} placeholder="example.com, someone@gmail.com" />
+            <div style={{ fontSize: '.78rem', color: 'var(--dim)', marginTop: 4 }}>
+              Email domains or single addresses, comma separated; * lets anyone in. Everyone else waits in Sign-up requests below for a platform admin to approve them.
+              {!oidc.allowed_domains.trim() && !oidc.discovery_url.includes('accounts.google.com') && ' Empty: with your own identity provider, everyone it signs in gets an account.'}
+              {!oidc.allowed_domains.trim() && oidc.discovery_url.includes('accounts.google.com') && ' Empty: with Google, every new person needs approval.'}
+              {oidc.discovery_url.includes('accounts.google.com') && ' With Google, a domain lets in only Google Workspace accounts that domain manages; a personal Google account on that address needs approval unless you list the full address.'}
+            </div>
+          </div>
+        )}
         <div className="save-row">
           <button className="btn" onClick={testOidc}>Test Connection</button>
           <button className="btn btn-accent" onClick={saveOidc}>Save</button>
           {oidcSaved && <span className="saved-msg">Saved ✓</span>}
+          {oidcError && <span style={{ fontSize: '.82rem', color: 'var(--red)' }}>{oidcError}</span>}
           {oidcTest && (
             <span style={{ fontSize: '.82rem', color: oidcTest.ok ? 'var(--green)' : 'var(--red)' }}>
               {oidcTest.ok ? '✓' : '✗'} {oidcTest.msg}
@@ -302,6 +352,8 @@ function SecurityTab() {
           )}
         </div>
       </div>
+
+      {oidc.enabled && oidc.auto_provision && <SignupRequestsCard />}
 
       <div className="setting-card">
         <h3>SAML 2.0 (Okta)</h3>
@@ -341,36 +393,35 @@ function SecurityTab() {
       </div>
 
       <div className="setting-card">
-        <h3>Require SSO</h3>
+        <h3>Require SSO sign-in</h3>
         <p>
-          Disable <strong>interactive password sign-in</strong> for everyone. The SSO button becomes
-          the only browser login path; the API-key break-glass paste is hidden too. OIDC or SAML must
-          be enabled and configured first.
+          Password and API-key sign-in are refused while an SSO provider is on. The SSO button is the
+          only way to sign in to the dashboard; setting or changing a password is refused too. Turning
+          on the first SSO provider leaves this off, so passwords keep working while you check that SSO
+          sign-in works. Turn it on yourself once it does.
         </p>
         <p style={{ fontSize: '.8rem', color: 'var(--dim)' }}>
-          Scope: this governs <em>browser/password</em> login only. Programmatic <strong>API keys</strong>{' '}
-          (<code style={{ fontFamily: 'monospace' }}>dhk_*</code> — CLI, MCP, CI) remain valid machine
-          credentials and are <em>not</em> disabled by this toggle; manage them under Users. To fully
-          cut off non-SSO access you must also revoke API keys.
+          API keys (<code style={{ fontFamily: 'monospace' }}>dhk_*</code> — CLI, MCP, CI) and MCP OAuth
+          tokens keep working as API credentials; they never open a dashboard session. If the identity
+          provider is down, turn this off on the server with{' '}
+          <code style={{ fontFamily: 'monospace' }}>crane sso enforce off</code>.
         </p>
-        {!(oidc.enabled || saml.enabled) && (
-          <div style={{
-            background: 'rgba(234,179,8,.12)', border: '1px solid var(--yellow)', color: 'var(--yellow)',
-            borderRadius: 6, padding: '8px 12px', marginBottom: 12, fontSize: '.84rem',
-          }}>
-            No SSO provider is enabled yet. Configure OIDC or SAML above before requiring SSO.
-          </div>
-        )}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
           <input
             type="checkbox"
             id="sso-only"
             checked={ssoOnly}
-            disabled={!ssoOnly && !(oidc.enabled || saml.enabled)}
             onChange={e => saveSsoOnly(e.target.checked)}
           />
-          <label htmlFor="sso-only" style={{ fontSize: '.85rem' }}>Require SSO (disable password sign-in)</label>
+          <label htmlFor="sso-only" style={{ fontSize: '.85rem' }}>Require SSO sign-in</label>
           {ssoOnlySaved && <span className="saved-msg">Saved ✓</span>}
+        </div>
+        <div style={{ fontSize: '.82rem', color: 'var(--dim)', marginBottom: 8 }}>
+          {!ssoOnly
+            ? 'Off: password sign-in is allowed.'
+            : (oidc.enabled || saml.enabled)
+              ? 'In force: only SSO sign-in is accepted.'
+              : 'No effect yet: no SSO provider is enabled, so password sign-in still works. It takes effect when OIDC or SAML is turned on.'}
         </div>
         {ssoOnlyError && (
           <div style={{ fontSize: '.82rem', color: 'var(--red)' }}>{ssoOnlyError}</div>
@@ -773,8 +824,7 @@ function GithubTab() {
     loadSettings()
     loadContainers()
     loadServiceConfig()
-    const iv = setInterval(loadContainers, 15000)
-    return () => clearInterval(iv)
+    return setVisibleInterval(loadContainers, 15000)
   }, [])
 
   async function save() {
@@ -1034,6 +1084,8 @@ function MailTab() {
   const [test, setTest] = useState<{ ok: boolean; msg: string } | null>(null)
   const [whatsNew, setWhatsNew] = useState(true)
   const [whatsNewSaved, flashWhatsNewSaved] = useFlash()
+  const [accessMail, setAccessMail] = useState(true)
+  const [accessMailSaved, flashAccessMailSaved] = useFlash()
 
   function load() {
     adminApi.get<{ mail: typeof cfg }>('/api/settings/mail/config').then(r => { if (r?.mail) setCfg(r.mail) }).catch(() => {})
@@ -1042,6 +1094,10 @@ function MailTab() {
   useEffect(() => {
     adminApi.get<{ value?: string | null }>('/api/settings/whats_new_email_enabled')
       .then(r => setWhatsNew(r?.value !== '0')).catch(() => {})
+  }, [])
+  useEffect(() => {
+    adminApi.get<{ value?: string | null }>('/api/settings/app_access_mail_enabled')
+      .then(r => setAccessMail(r?.value !== '0')).catch(() => {})
   }, [])
 
   async function save() {
@@ -1117,6 +1173,25 @@ function MailTab() {
       </div>
       <p style={{ fontSize: '.75rem', color: 'var(--dim)', margin: '6px 0 0 24px' }}>
         When an app ships a new production version, its owners and admins get that version's What's new by e-mail. Each app can turn this off on its app page.
+      </p>
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 20 }}>
+        <input
+          type="checkbox"
+          id="app-access-email"
+          checked={accessMail}
+          onChange={async e => {
+            const next = e.target.checked
+            setAccessMail(next)
+            await adminApi.put('/api/settings/app_access_mail_enabled', { value: next ? '1' : '0' }).catch(() => {})
+            flashAccessMailSaved()
+          }}
+        />
+        <label htmlFor="app-access-email" style={{ fontSize: '.85rem' }}>Email users when their app access changes</label>
+        {accessMailSaved && <span style={{ color: 'var(--green)' }}>Saved</span>}
+      </div>
+      <p style={{ fontSize: '.75rem', color: 'var(--dim)', margin: '6px 0 0 24px' }}>
+        A person gets one e-mail when they are given access to an app, their role on it changes, or their access is removed. A change undone within about 30 seconds sends nothing, and the creator of a new app is not told they own it.
       </p>
     </div>
   )
@@ -1410,7 +1485,7 @@ export function Settings() {
       {panel('account', <AccountTab />)}
       {panel('mcp', <Mcp />)}
       {panel('skills', <SkillsTab />)}
-      {panel('security', <><SecurityTab /><SignInPolicyCard /><McpAuthPolicyCard /><OAuthAdminCard /><ClassificationPolicyCard /><VulnAlertsCard /><AutoPatchPolicyCard /><RuntimePatchCard /><CryptographyCard /><LlmGatewaySettingsCard /><SiemSinks /></>)}
+      {panel('security', <><SecurityTab /><SignInPolicyCard /><McpAuthPolicyCard /><OAuthAdminCard /><ClassificationPolicyCard /><VulnAlertsCard /><AutoPatchPolicyCard /><RuntimePatchCard /><CryptographyCard /><SecretsManagerCard /><PlatformAnthropicKeyCard /><LlmGatewaySettingsCard /><SiemSinks /></>)}
       {panel('users', <Users />)}
       {panel('roles', <RolesTab />)}
       {panel('github', <GithubTab />)}

@@ -48,6 +48,7 @@ export const deleteAppTool = {
       deleted: !stillThere,
       slug: out.slug,
       managed_databases: out.managed_databases,
+      ...(out.aws_secrets_retained && { aws_secrets_retained: out.aws_secrets_retained }),
       ...(repoKept ? { local_repo_kept: repoKept, note: 'The Crane-hosted repository was kept (as the dashboard delete does). A new managed app cannot reuse this slug until an operator removes it.' } : {}),
     };
   },

@@ -1,14 +1,18 @@
 import { useEffect, useRef, useState } from 'react'
 import { useAuth } from '../hooks/useAuth'
 import { isSafeRedirect } from '../utils/safeRedirect'
+import { redeemSsoCode } from '../utils/ssoHandoff'
 import { PasswordInput } from './secret/PasswordInput'
 import {
-  POPUP_FEATURES, POPUP_NAME, browserWaitDeps, isFramed, popupStartUrl,
+  POPUP_FEATURES, POPUP_NAME, SSO_CHANNEL, browserWaitDeps, isFramed, popupStartUrl,
   reloadTargetAfterSignIn, signInPlan, waitForPopupSignIn, type SsoProvider,
 } from '../utils/popupSignIn'
 import { EnrollPanel, type EnrollmentStart } from './mfa/EnrollPanel'
 import { RecoveryCodes } from './mfa/RecoveryCodes'
 import { takeSignedOutMessage } from './mfa/idle'
+import { GoogleG } from './sso/GoogleG'
+import { ssoErrorText } from './sso/ssoErrorText'
+import { SSO_POPUP_PARAM, capturingMfaStep, tellOpenerFrame, type SsoMfaStep } from './sso/ssoMfaHandoff'
 
 /**
  * v2.7.8: the cc_token cookie is now httpOnly and set entirely by the
@@ -27,21 +31,32 @@ import { takeSignedOutMessage } from './mfa/idle'
  *
  * SSO callback handling absorbed from docs/login.html so the OIDC and
  * SAML flows still work without the legacy HTML page in the loop:
- *   - ?oidc_token=… (also used by SAML callbacks) → store + clean URL
- *     + go to ?redirect= or /applications
- *   - ?sso_error=… / ?saml_error=… → render inline
+ *   - ?sso_code=… (also used by SAML callbacks) → clean URL, exchange it for
+ *     the session token (utils/ssoHandoff.ts) + go to ?redirect= or /applications
+ *   - ?oidc_token=… → removed, never stored: a session from a URL is how a
+ *     victim got signed in as an attacker
+ *   - ?sso_error=… / ?saml_error=… → a code, rendered as fixed text
+ *     (sso/ssoErrorText.ts); nothing else from the URL is shown
+ *   - the handoff answers with an MFA step instead of a token for a user with
+ *     AppCrane MFA enrolled → the same code prompt password sign-in uses
+ *     (sso/ssoMfaHandoff.ts); ?sso_popup=1 means this is the popup of a framed
+ *     sign-in, which tells the frame and closes once the code is accepted
  *   - ?redirect=… → preserved and used after successful password login
  *
  * Inside an iframe (an embedded app's sign-in step) the IdP refuses to be
  * framed, so SSO opens in a top-level popup instead — see utils/popupSignIn.ts.
  * Password sign-in stays in the frame.
  */
-interface SsoCfg { enabled?: boolean; provider_name?: string }
+const ssoBtnLayout = { display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10 } as const
+
+interface SsoCfg { enabled?: boolean; provider_name?: string; google?: boolean }
+
 type PopupState = 'idle' | 'waiting' | 'blocked' | 'failed' | 'timeout'
-// Second step of password sign-in (server/routes/mfa.js). The password was
-// accepted; no session exists until a code (or first-time enrollment) passes.
+// Second step of password or SSO sign-in (server/routes/mfa.js). The first step
+// passed; no session exists until a code (or first-time enrollment) passes.
+// `popup`: this window is the SSO popup of a framed sign-in.
 type MfaStep =
-  | { kind: 'verify'; token: string; rememberDays: number }
+  | { kind: 'verify'; token: string; rememberDays: number; popup?: boolean }
   | { kind: 'enroll'; token: string; start: EnrollmentStart | null }
   | { kind: 'codes'; codes: string[] }
 
@@ -56,13 +71,14 @@ export function Login() {
   // /api/auth/oidc/config and /api/auth/saml/config, shown only when the
   // provider is enabled. Clicking goes through /api/auth/{oidc,saml}/start
   // which redirects to the IdP; the IdP comes back to /login (now
-  // forwarded to /applications) with ?oidc_token=… that the useEffect
+  // forwarded to /applications) with ?sso_code=… that the useEffect
   // above absorbs.
   const [oidc, setOidc] = useState<SsoCfg>({})
   const [saml, setSaml] = useState<SsoCfg>({})
-  // v2.7.0: SSO-only mode. When a platform admin has required SSO, hide the
-  // password form and the API-key break-glass paste entirely — the IdP
-  // button is the only browser login path (full lockdown).
+  // v2.7.0: SSO-only mode. When SSO sign-in is required, hide the password
+  // form and the API-key paste entirely — the IdP button is the only browser
+  // login path; the server refuses the others too. Break-glass is
+  // `crane sso enforce off` on the host.
   // v2.7.3: tri-state (null = policy not yet fetched). We must NOT render the
   // password form before we know — otherwise an SSO-only instance briefly
   // flashes the username/password screen until the fetch resolves. While
@@ -76,16 +92,23 @@ export function Login() {
   const [mfaBusy, setMfaBusy] = useState(false)
   const [rememberDevice, setRememberDevice] = useState(false)
   const [notice] = useState<string | null>(() => takeSignedOutMessage())
+  const [popupDone, setPopupDone] = useState(false)
 
   const plan = signInPlan({ framed: isFramed(window), ssoEnabled: !!(oidc.enabled || saml.enabled), ssoOnly: !!ssoOnly })
 
+  // "Require SSO sign-in" is on unless an admin stored 'false', and in force
+  // only while a provider is enabled (server/services/authPolicy.js). So the
+  // policy is known only once all three answers are in.
   useEffect(() => {
-    fetch('/api/auth/oidc/config').then(r => r.json()).then(setOidc).catch(() => {})
-    fetch('/api/auth/saml/config').then(r => r.json()).then(setSaml).catch(() => {})
-    fetch('/api/settings/auth_sso_only')
-      .then(r => r.json())
-      .then(d => setSsoOnly(d?.value === 'true'))
-      .catch(() => setSsoOnly(false))
+    const json = (u: string) => fetch(u).then(r => r.json()).catch(() => null)
+    Promise.all([json('/api/auth/oidc/config'), json('/api/auth/saml/config'), json('/api/settings/auth_sso_only')])
+      .then(([o, s, setting]) => {
+        const oc: SsoCfg = o || {}
+        const sc: SsoCfg = s || {}
+        setOidc(oc)
+        setSaml(sc)
+        setSsoOnly(setting?.value !== 'false' && !!(oc.enabled || sc.enabled))
+      })
   }, [])
 
   useEffect(() => () => waitRef.current?.cancel(), [])
@@ -135,32 +158,33 @@ export function Login() {
     listenForPopup()
   }
 
-  // Read SSO callback / redirect query params on mount. Both providers
-  // hand the bearer back via ?oidc_token=…; we store it as cc_identity_token
-  // (same key the unified login uses) and forward to the redirect target.
+  // Read SSO callback / redirect query params on mount. Both providers send
+  // ?sso_code=…, which we exchange for the bearer and store as cc_identity_token
+  // (same key the unified login uses), then forward to the redirect target.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
     const ssoErr = params.get('sso_error') || params.get('saml_error')
     if (ssoErr) {
-      setError('SSO failed: ' + ssoErr)
+      setError(ssoErrorText(ssoErr))
       const url = new URL(window.location.href)
       url.searchParams.delete('sso_error')
       url.searchParams.delete('saml_error')
       window.history.replaceState({}, '', url.toString())
       return
     }
-    const oidcToken = params.get('oidc_token')
-    if (oidcToken) {
-      localStorage.setItem('cc_identity_token', oidcToken)
+    const ssoCode = params.get('sso_code')
+    if (ssoCode || params.has('oidc_token')) {
       // cc_token cookie was already set httpOnly by the SSO callback redirect.
       //
-      // Scrub the token from the address bar BEFORE navigating anywhere.
+      // Scrub these from the address bar BEFORE navigating anywhere. The code is
+      // useless to anyone else, and a stale token is never read, but neither
+      // belongs in a Referer.
       // Referrer-Policy is strict-origin-when-cross-origin, so a SAME-ORIGIN
       // hop sends the FULL current URL as Referer — and tenant apps are served
-      // same-origin at /<slug>. Following a deep link with ?oidc_token= still
-      // in the URL hands that app's container a live platform session token in
-      // its access logs, which an attacker can harvest by deploying an app and
-      // sending victims /login?redirect=/theirapp/.
+      // same-origin at /<slug>. Following a deep link with a credential still
+      // in the URL hands it to that app's container in its access logs, which an
+      // attacker can harvest by deploying an app and sending victims
+      // /login?redirect=/theirapp/.
       //
       // This was unreachable until v2.38.0: the SSO callbacks only ever
       // forwarded absolute `http…` values, which isSafeRedirect rejects, so the
@@ -168,16 +192,32 @@ export function Login() {
       // the other branch live, so the scrub has to precede both.
       const url = new URL(window.location.href)
       url.searchParams.delete('oidc_token')
+      url.searchParams.delete('sso_code')
       window.history.replaceState({}, '', url.pathname + url.search + url.hash)
+      if (!ssoCode) return
 
-      const redirect = params.get('redirect')
-      // v2.35.0: `//attacker.com` passes startsWith('/') — see safeRedirect.ts.
-      if (isSafeRedirect(redirect)) {
-        window.location.replace(redirect as string)
-      } else {
-        url.searchParams.delete('redirect')
-        window.location.replace(url.pathname + url.search + url.hash)
-      }
+      const popup = params.get(SSO_POPUP_PARAM) === '1'
+      const got: { step: SsoMfaStep | null } = { step: null }
+      const capture = capturingMfaStep((u, init) => fetch(u, init), step => { got.step = step })
+      redeemSsoCode(ssoCode, { fetch: capture, store: localStorage }).then(ok => {
+        if (!ok && got.step) {
+          setMfa({ kind: 'verify', token: got.step.token, rememberDays: got.step.rememberDays, popup })
+          return
+        }
+        if (!ok) {
+          setError('SSO failed: this sign-in link is not valid in this browser. Sign in again.')
+          if (popup) tellOpenerFrame(window, SSO_CHANNEL, 'sign-in-failed')
+          return
+        }
+        const redirect = params.get('redirect')
+        // v2.35.0: `//attacker.com` passes startsWith('/') — see safeRedirect.ts.
+        if (isSafeRedirect(redirect)) {
+          window.location.replace(redirect as string)
+        } else {
+          url.searchParams.delete('redirect')
+          window.location.replace(url.pathname + url.search + url.hash)
+        }
+      })
     }
   }, [])
 
@@ -244,6 +284,13 @@ export function Login() {
         ...(mfa.rememberDays > 0 && rememberDevice && { remember_device: true }),
       })
       localStorage.setItem('cc_identity_token', data.token)
+      if (mfa.popup) {
+        setMfa(null)
+        setError('')
+        setPopupDone(true)
+        tellOpenerFrame(window, SSO_CHANNEL, 'signed-in')
+        return
+      }
       postLoginRedirect()
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Sign-in failed')
@@ -270,7 +317,9 @@ export function Login() {
       <div className="login-box">
         <h2 style={{ marginBottom: 4, fontSize: '1.3rem' }}>Sign In</h2>
         {notice && !mfa && <p style={{ color: 'var(--dim)', fontSize: '.85rem', margin: '4px 0 12px' }}>{notice}</p>}
-        {mfa ? (
+        {popupDone ? (
+          <p style={{ color: 'var(--dim)', marginTop: 16, fontSize: '.9rem' }}>Signed in. You can close this window.</p>
+        ) : mfa ? (
           <div style={{ marginTop: 12 }}>
             {error && <div className="login-error">{error}</div>}
             {mfa.kind === 'verify' && (
@@ -363,8 +412,8 @@ export function Login() {
                     type="button"
                     className="btn btn-accent"
                     onClick={() => startPopup('oidc')}
-                    style={{ width: '100%', padding: 10 }}
-                  >{popupLabel(oidc.provider_name || 'SSO')}</button>
+                    style={{ width: '100%', padding: 10, ...ssoBtnLayout }}
+                  >{oidc.google && <GoogleG />}{popupLabel(oidc.provider_name || 'SSO')}</button>
                 )}
                 {saml.enabled && (
                   <button
@@ -399,8 +448,8 @@ export function Login() {
                     type="button"
                     className="btn"
                     onClick={startOidc}
-                    style={{ width: '100%', padding: 10 }}
-                  >Sign in with {oidc.provider_name || 'SSO'}</button>
+                    style={{ width: '100%', padding: 10, ...ssoBtnLayout }}
+                  >{oidc.google && <GoogleG />}Sign in with {oidc.provider_name || 'SSO'}</button>
                 )}
                 {saml.enabled && (
                   <button

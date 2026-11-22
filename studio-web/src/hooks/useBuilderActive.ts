@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { adminApi } from '../adminApi'
+import { setVisibleInterval } from '../utils/visibleInterval'
 
 const POLL_MS = 5000
 
@@ -25,8 +26,8 @@ export function useBuilderActive(slug: string | null | undefined): boolean {
     }
 
     poll()
-    const t = setInterval(poll, POLL_MS)
-    return () => { alive = false; clearInterval(t) }
+    const stop = setVisibleInterval(poll, POLL_MS)
+    return () => { alive = false; stop() }
   }, [slug])
 
   return active

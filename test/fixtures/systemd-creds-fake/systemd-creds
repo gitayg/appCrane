@@ -1,0 +1,38 @@
+#!/usr/bin/env node
+// A stand-in for systemd-creds in test/secrets-provider-systemd-creds.test.js.
+// "Encrypts" reversibly (base64 of the reversed bytes, with the name embedded)
+// and, like the real one, refuses to decrypt under a different --name. Every
+// argv is appended to $FAKE_SYSTEMD_LOG so a test can prove no value is in it.
+// FAKE_CREDS_FAULT: encrypt-fail | decrypt-mismatch | decrypt-fail.
+import { appendFileSync, readFileSync, writeFileSync } from 'fs';
+
+const args = process.argv.slice(2);
+if (process.env.FAKE_SYSTEMD_LOG) appendFileSync(process.env.FAKE_SYSTEMD_LOG, `${JSON.stringify(['systemd-creds', ...args])}\n`);
+const fault = process.env.FAKE_CREDS_FAULT || '';
+const name = (args.find((a) => a.startsWith('--name=')) || '').slice('--name='.length);
+const pos = args.filter((a) => !a.startsWith('--'));
+const readIn = (p) => (p === '-' ? readFileSync(0) : readFileSync(p));
+const writeOut = (p, buf) => (p === '-' ? process.stdout.write(buf) : writeFileSync(p, buf));
+
+if (args[0] === '--version') { console.log('systemd 255 (255.4-fake)'); process.exit(0); }
+if (pos[0] === 'encrypt') {
+  if (fault === 'encrypt-fail') { console.error('Failed to encrypt: fake fault'); process.exit(1); }
+  const plain = readIn(pos[1]);
+  writeOut(pos[2], `FAKECRED1\n${name}\n${Buffer.from(plain).reverse().toString('base64')}\n`);
+  process.exit(0);
+}
+if (pos[0] === 'decrypt') {
+  if (fault === 'decrypt-fail') { console.error('Failed to decrypt: fake fault'); process.exit(1); }
+  let text;
+  try { text = readFileSync(pos[1], 'utf8'); } catch (e) { console.error(`Failed to read encrypted credential data: ${e.code}`); process.exit(1); }
+  const [magic, embedded, body] = text.split('\n');
+  if (magic !== 'FAKECRED1') { console.error('Invalid credential'); process.exit(1); }
+  const want = name || pos[1].split('/').pop();
+  if (embedded !== want) { console.error(`Embedded credential name '${embedded}' does not match filename '${want}', refusing.`); process.exit(1); }
+  let plain = Buffer.from(body, 'base64').reverse();
+  if (fault === 'decrypt-mismatch') plain = Buffer.concat([plain, Buffer.from('0')]);
+  writeOut(pos[2] || '-', plain);
+  process.exit(0);
+}
+console.error(`fake systemd-creds: unsupported ${args.join(' ')}`);
+process.exit(2);

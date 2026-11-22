@@ -61,14 +61,28 @@ export function candidateApps(db) {
   ).all();
 }
 
-/** Production remote: the app's GitHub repo, authenticated as the service account. */
-export async function defaultResolveRemote(app) {
+/**
+ * Production remote: the app's GitHub repo, authenticated with the GitHub App
+ * installation attached to the app when there is one (an org that enforces SAML
+ * SSO refuses an unauthorized personal token), else as the service account.
+ */
+export async function defaultResolveRemote(app, deps = {}) {
   const m = GITHUB_URL_RE.exec(String(app.github_url || ''));
   if (!m) throw Object.assign(new Error(`github_url ${JSON.stringify(app.github_url)} is not a github.com repository URL`), { code: 'NO_GITHUB_URL' });
+  const url = `https://github.com/${m[1]}/${m[2]}.git`;
+  const cred = deps.credential || await import('./githubCredential.js');
+  if (app.id != null && cred.getInstallation(app.id)) {
+    let r;
+    try { r = await cred.resolveGitHubCredential(app); } catch (e) {
+      throw Object.assign(new Error(e?.message || String(e)), { code: 'GITHUB_APP' });
+    }
+    if (!r?.token) throw Object.assign(new Error('the GitHub App installation returned no token'), { code: 'GITHUB_APP' });
+    return { url, token: r.token };
+  }
   const { getServiceTokenInternal } = await import('./githubService.js');
   const token = getServiceTokenInternal();
   if (!token) throw Object.assign(new Error('the GitHub service-account token is not configured'), { code: 'NO_SERVICE_TOKEN' });
-  return { url: `https://github.com/${m[1]}/${m[2]}.git`, token };
+  return { url, token };
 }
 
 /**

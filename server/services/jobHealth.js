@@ -15,6 +15,7 @@ const ALERT_WATCH_MS = 15 * MIN;
 // expected; null means the job is one-shot (never late, only ok or failing).
 export const JOBS = {
   'email-queue':      { label: 'E-mail queue worker',              cadenceMs: 5_000 },
+  'app-access-mail':  { label: 'App access change e-mails',        cadenceMs: 15_000 },
   'vuln-scan':        { label: 'Daily vulnerability scan + digest', cadenceMs: DAY },
   'local-backup':     { label: 'Nightly local backup',             cadenceMs: DAY },
   'offsite-backup':   { label: 'Nightly off-site (S3) backup',      cadenceMs: DAY },

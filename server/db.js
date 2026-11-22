@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import { readFileSync, readdirSync, existsSync, mkdirSync } from 'fs';
+import { readFileSync, readdirSync, existsSync, mkdirSync, chmodSync, statSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import log from './utils/logger.js';
@@ -44,7 +44,50 @@ export function openDb(dataDir) {
   db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
+  restrictDataFiles(dbDir, dbPath);
+  cacheStatements(db);
   return db;
+}
+
+// The database holds every user, role and audit row, so only the account
+// AppCrane runs as may read it. SQLite gives -wal and -shm the main file's mode.
+// A sticky directory (/tmp) is shared by design and is left alone.
+export function restrictDataFiles(dbDir, dbPath) {
+  if (!(statSync(dbDir).mode & 0o1000)) chmodSync(dbDir, 0o700);
+  for (const f of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+    if (existsSync(f)) chmodSync(f, 0o600);
+  }
+}
+
+export const STATEMENT_CACHE_MAX = 500;
+const STATEFUL_METHODS = ['pluck', 'raw', 'expand', 'safeIntegers', 'bind', 'iterate'];
+
+/**
+ * db.prepare(sql) returns one shared Statement per SQL text (LRU, bounded).
+ * Compiling was a fifth of a /verify request's CPU, for the same few strings.
+ *
+ * A shared Statement must never carry one caller's state to the next. The
+ * methods that would — the result-mode switches, bind(), and iterate(), which
+ * keeps the statement busy until the iterator ends — run on a fresh, uncached
+ * Statement instead and return that one, so chained use behaves exactly as
+ * before and the cached copy is left untouched.
+ */
+function cacheStatements(handle) {
+  const compile = handle.prepare.bind(handle);
+  const cache = new Map();
+  handle.prepare = (sql) => {
+    let stmt = cache.get(sql);
+    if (stmt) {
+      cache.delete(sql);
+      cache.set(sql, stmt);
+      return stmt;
+    }
+    stmt = compile(sql);
+    for (const m of STATEFUL_METHODS) stmt[m] = (...args) => compile(sql)[m](...args);
+    cache.set(sql, stmt);
+    if (cache.size > STATEMENT_CACHE_MAX) cache.delete(cache.keys().next().value);
+    return stmt;
+  };
 }
 
 /**

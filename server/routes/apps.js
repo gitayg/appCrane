@@ -21,7 +21,7 @@ import {
 import { pruneGrantsForNonMembers } from '../services/appDefinedRoles.js';
 import { assessMemoryChange } from '../services/memoryBudget.js';
 import { attachedInstallationIds, codeSourceFields } from '../services/codeSource.js';
-import { discoverableApp, ownerNames, pendingAccessRequestSlugs } from '../services/discoverableApps.js';
+import { discoverableApp, pendingAccessRequestSlugs } from '../services/discoverableApps.js';
 import {
   effectiveIngressType, publicPortForApp, pendingPortRelease, validateIngressType,
   assignPublicPort, releasePublicPort, drainingPorts, effectiveDataPlanePort, validateDataPlanePort, storedDataPlaneProtocol, validateDataPlaneProtocol, CONTROL_PLANE_PORT,
@@ -161,14 +161,15 @@ import { validateContainerCommand, validateVolumePaths } from '../services/conta
 import { DEFAULT_IMAGE_RETENTION } from '../services/imageRetention.js';
 
 /**
- * An app row as it may leave the server: every `*_encrypted` column removed.
+ * An app row as it may leave the server: every `*_encrypted` column removed, and
+ * secrets_namespace, which only a platform admin is shown (secretsProviderStatus.js).
  * Responses used to spread the whole row, so the encrypted GitHub token and
  * Claude credentials went to every signed-in user who could list the app. The
  * UI only ever needs the has_* booleans derived from them.
  */
 function withoutSecretColumns(app) {
   const out = {};
-  for (const [k, v] of Object.entries(app || {})) if (!k.endsWith('_encrypted')) out[k] = v;
+  for (const [k, v] of Object.entries(app || {})) if (!k.endsWith('_encrypted') && k !== 'secrets_namespace') out[k] = v;
   return out;
 }
 
@@ -187,6 +188,16 @@ function appUrlsObject(db, slug) {
   if (!process.env.CRANE_DOMAIN && !isolationEnabled(db)) return null;
   const { url, sandbox_url } = appUrlFields(db, slug);
   return { production: url, sandbox: sandbox_url };
+}
+
+// Rows carrying app_id, as app_id -> rows without it, keeping their order.
+function groupByApp(rows) {
+  const out = new Map();
+  for (const { app_id, ...rest } of rows) {
+    if (!out.has(app_id)) out.set(app_id, []);
+    out.get(app_id).push(rest);
+  }
+  return out;
 }
 
 const router = Router();
@@ -230,6 +241,11 @@ export function reloadCaddyAfterResponse(res, label, reload = reloadCaddy) {
 const PLACEHOLDER_GH_OWNERS = new Set([
   'local', 'localhost', 'example', 'test', 'placeholder', 'todo', 'tbd', 'unknown',
 ]);
+
+// No leading dash: a branch is an argument to git, and that would read as an option.
+const BRANCH_RE = /^(?!-)[A-Za-z0-9._/\-]{1,200}$/;
+const BRANCH_MESSAGE = 'branch must be alphanumeric with . _ / - (max 200 chars), not starting with -';
+const MANAGED_SOURCE_MESSAGE = "Choosing a repository for a source_type='managed' app is limited to platform admins: it deploys with the platform's GitHub service account.";
 
 function validateGithubUrl(url) {
   if (!/^https:\/\//.test(url)) {
@@ -475,51 +491,73 @@ router.get('/', async (req, res) => {
 
   const requestedSlugs = isAdmin(req.user) ? null : pendingAccessRequestSlugs(db, req.user.id);
 
+  // One query per kind for the whole list, not per app: this ran ~11 queries
+  // for every app on the platform's hottest listing.
+  const healthByKey = new Map();
+  for (const h of db.prepare('SELECT * FROM health_state').all()) healthByKey.set(`${h.app_id}:${h.env}`, h);
+  const lastDeployByKey = new Map();
+  for (const d of db.prepare(`
+    SELECT d.app_id, d.env, d.version, d.status, d.finished_at
+    FROM (
+      SELECT a.id AS app_id, e.env,
+             (SELECT id FROM deployments WHERE app_id = a.id AND env = e.env ORDER BY started_at DESC LIMIT 1) AS deployment_id
+      FROM apps a CROSS JOIN (SELECT 'production' AS env UNION ALL SELECT 'sandbox') e
+    ) latest
+    JOIN deployments d ON d.id = latest.deployment_id
+  `).all()) {
+    lastDeployByKey.set(`${d.app_id}:${d.env}`, { version: d.version, status: d.status, finished_at: d.finished_at });
+  }
+  // app_users is a view over app_user_roles; its row order within an app is
+  // the order the per-app lookup returned members in.
+  const usersByApp = groupByApp(db.prepare(`
+    SELECT aur.app_id, u.id, u.name, u.email FROM app_user_roles aur
+    JOIN users u ON u.id = aur.user_id
+    WHERE aur.app_role <> 'none'
+    ORDER BY aur.app_id, aur.rowid
+  `).all());
+  const ownersByApp = groupByApp(db.prepare(`
+    SELECT aur.app_id, u.id, u.name, u.email FROM users u
+    JOIN app_user_roles aur ON aur.user_id = u.id
+    WHERE aur.app_role = 'owner'
+    ORDER BY aur.app_id, u.id
+  `).all());
+  const aliasesByApp = groupByApp(db.prepare(
+    'SELECT app_id, id, domain, source, created_at FROM app_domain_aliases ORDER BY app_id, created_at, id'
+  ).all());
+  const absoluteUrls = !!process.env.CRANE_DOMAIN || isolationEnabled(db);
+
   // Enrich with ports and health status
   const enriched = apps.map(app => {
     if (userAppRole(app) === 'none') {
       return discoverableApp(app, {
-        owners: ownerNames(db, app.id),
+        owners: (ownersByApp.get(app.id) ?? []).map(o => ({ name: o.name })),
         hasIcon: hasIconFile(app.slug),
         accessRequested: requestedSlugs.has(app.slug),
       });
     }
     const ports = getPortsForSlot(app.slot);
 
-    const healthProd = db.prepare('SELECT * FROM health_state WHERE app_id = ? AND env = ?').get(app.id, 'production');
-    const healthSand = db.prepare('SELECT * FROM health_state WHERE app_id = ? AND env = ?').get(app.id, 'sandbox');
+    const healthProd = healthByKey.get(`${app.id}:production`);
+    const healthSand = healthByKey.get(`${app.id}:sandbox`);
 
-    const lastDeployProd = db.prepare(
-      'SELECT version, status, finished_at FROM deployments WHERE app_id = ? AND env = ? ORDER BY started_at DESC LIMIT 1'
-    ).get(app.id, 'production');
-    const lastDeploySand = db.prepare(
-      'SELECT version, status, finished_at FROM deployments WHERE app_id = ? AND env = ? ORDER BY started_at DESC LIMIT 1'
-    ).get(app.id, 'sandbox');
+    const lastDeployProd = lastDeployByKey.get(`${app.id}:production`);
+    const lastDeploySand = lastDeployByKey.get(`${app.id}:sandbox`);
 
-    // Get assigned users
-    const users = db.prepare(`
-      SELECT u.id, u.name, u.email FROM users u
-      JOIN app_users au ON u.id = au.user_id
-      WHERE au.app_id = ?
-    `).all(app.id);
+    const users = usersByApp.get(app.id) ?? [];
 
     // The app's owners. Usually one, but multiple are allowed — v2.21.0
     // returns them all (`owners`); `owner` stays as the first for back-compat.
     // Empty when the owner record was never created (e.g. apps from before
     // migration 048 fixed the latent CHECK bug, or apps whose creator was
     // deleted leaving created_by NULL).
-    const ownerRows = db.prepare(`
-      SELECT u.id, u.name, u.email FROM users u
-      JOIN app_user_roles aur ON aur.user_id = u.id
-      WHERE aur.app_id = ? AND aur.app_role = 'owner'
-      ORDER BY u.id
-    `).all(app.id);
+    const ownerRows = ownersByApp.get(app.id) ?? [];
 
-    const urls = appUrlsObject(db, app.slug);
+    const urlFields = appUrlFields(db, app.slug);
+    const urls = absoluteUrls ? { production: urlFields.url, sandbox: urlFields.sandbox_url } : null;
 
     return {
       ...withoutSecretColumns(app),
-      ...appUrlFields(db, app.slug),
+      ...urlFields,
       resource_limits: JSON.parse(app.resource_limits || '{}'),
       auth_bypass_paths: parseBypassPathsField(app.auth_bypass_paths),
       auth_mode: effectiveAuthMode(app.auth_mode),
@@ -555,7 +593,7 @@ router.get('/', async (req, res) => {
       },
       users,
       // v2.24.4: old domains that 301-redirect to this app's primary domain.
-      domain_aliases: db.prepare('SELECT id, domain, source, created_at FROM app_domain_aliases WHERE app_id = ? ORDER BY created_at, id').all(app.id),
+      domain_aliases: aliasesByApp.get(app.id) ?? [],
     };
   });
 
@@ -584,8 +622,11 @@ router.post('/', requireAuth, auditMiddleware('app-create'), async (req, res) =>
   if (slugProblem) throw new AppError(slugProblem, 400, 'VALIDATION');
   if (github_url) validateGithubUrl(github_url);
   // SECURITY: same regex as PUT — branch flows into `sh -c` calls.
-  if (branch && !/^[A-Za-z0-9._/\-]{1,200}$/.test(branch)) {
-    throw new AppError('branch must be alphanumeric with . _ / - (max 200 chars)', 400, 'VALIDATION');
+  if (branch && !BRANCH_RE.test(branch)) {
+    throw new AppError(BRANCH_MESSAGE, 400, 'VALIDATION');
+  }
+  if (source_type === 'managed' && !isAdmin(req.user)) {
+    throw new AppError(MANAGED_SOURCE_MESSAGE, 403, 'FORBIDDEN');
   }
   // v2.3.1: 'upload' is dead. Only 'github' (user/external repo) and
   // 'managed' (service-account-owned repo) are valid for new apps.
@@ -894,14 +935,14 @@ router.get('/:slug/metrics', requireAppAccess, (req, res) => {
  */
 router.get('/:slug/storage', requireAppAccess, async (req, res) => {
   const app = req.app;
-  const { dirSizeBytes } = await import('../services/diskUsage.js');
+  const { dirSizeBytesAsync } = await import('../services/diskUsage.js');
   const dataDir = process.env.DATA_DIR || './data';
   const envs = {};
   for (const env of ['production', 'sandbox']) {
     let bytes = 0;
     try {
       const dataPath = resolveSafe(dataDir, 'apps', app.slug, env, 'shared', 'data');
-      bytes = dirSizeBytes(dataPath);
+      bytes = await dirSizeBytesAsync(dataPath);
     } catch (_) { bytes = 0; }
     envs[env] = bytes;
   }
@@ -1004,6 +1045,15 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
     req.body.catalog_slug !== undefined;
   if (repoFieldChanged && !userHasAppPermission(req.user, app, 'code.modify_repo_settings')) {
     throw new AppError('Modifying repo settings is not permitted by your role on this app', 403, 'FORBIDDEN');
+  }
+  // An owner's right to pick their repo stops at managed: that clone runs on the
+  // platform's service-account token, scoped to whatever URL the row names, so
+  // this choice reaches every repo the token can read. Resending the values the
+  // row already holds selects nothing, and a form may do that.
+  const sourceTypeMoves = source_type !== undefined && source_type !== app.source_type;
+  const githubUrlMoves = github_url !== undefined && (github_url || null) !== (app.github_url || null);
+  if ((source_type ?? app.source_type) === 'managed' && (sourceTypeMoves || githubUrlMoves) && !isAdmin(req.user)) {
+    throw new AppError(MANAGED_SOURCE_MESSAGE, 403, 'FORBIDDEN');
   }
 
   // Same allowlist as POST. 'managed_legacy' stays absent from it: it is the
@@ -1151,8 +1201,8 @@ router.put('/:slug', requireAppAccess, auditMiddleware('app-update'), async (req
     // commands (askClaude.js, generator.js). Validate at the write boundary
     // so a future inline interpolation can't be exploited via this column.
     // Regex matches the chars git accepts in a ref name plus '/' for paths.
-    if (branch && !/^[A-Za-z0-9._/\-]{1,200}$/.test(branch)) {
-      throw new AppError('branch must be alphanumeric with . _ / - (max 200 chars)', 400, 'VALIDATION');
+    if (branch && !BRANCH_RE.test(branch)) {
+      throw new AppError(BRANCH_MESSAGE, 400, 'VALIDATION');
     }
     updates.branch = branch;
   }
@@ -1718,7 +1768,7 @@ router.delete('/:slug', requireAppAccess, auditMiddleware('app-delete'), async (
   }
 
   const { deleteApp } = await import('../services/appDelete.js');
-  const { slug, managed_databases: dbDrop } = await deleteApp(req.app);
+  const { slug, managed_databases: dbDrop, aws_secrets_retained: awsRetained } = await deleteApp(req.app);
 
   // Update Caddy config (removes app routes) — after the 200 is on the wire.
   reloadCaddyAfterResponse(res, 'app delete');
@@ -1726,6 +1776,7 @@ router.delete('/:slug', requireAppAccess, auditMiddleware('app-delete'), async (
   res.json({
     message: `App '${slug}' deleted`,
     managed_databases: dbDrop,
+    ...(awsRetained && { aws_secrets_retained: awsRetained }),
   });
 });
 
@@ -1890,6 +1941,12 @@ router.post('/:slug/icon', requireAuth, requireAppAccess, async (req, res) => {
 router.post('/reconcile', requireAdmin, async (req, res) => {
   const dryRun = req.query.dry_run === '1' || req.body?.dry_run === true;
   const result = await reconcileOrphanedApps({ dryRun });
+  if (!dryRun && result.registered.length > 0) {
+    logAudit(req.user.id, null, 'apps-reconcile', {
+      registered: result.registered.map(r => r.slug),
+      skipped: result.skipped.map(r => r.slug),
+    });
+  }
   res.json({ ...result, dry_run: dryRun });
 });
 

@@ -161,7 +161,11 @@ function fakeHost({ uid = 0, units = ['appcrane.service', 'caddy.service', 'ssh.
   const calls = [];
   return {
     dir, calls,
-    opts: { unitDir: dir, platform: 'linux', uid, isSystemd: () => true, run: (cmd, args) => calls.push([cmd, ...args].join(' ')) },
+    // `exists` is confined to the fake unit dir: unitKnown also looks in
+    // /lib/systemd/system, where a real host (the CI runner has sshd.service)
+    // would add units this fake host does not have.
+    opts: { unitDir: dir, platform: 'linux', uid, isSystemd: () => true, exists: (p) => p.startsWith(dir) && existsSync(p),
+      run: (cmd, args) => calls.push([cmd, ...args].join(' ')) },
   };
 }
 

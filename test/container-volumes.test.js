@@ -400,7 +400,9 @@ describe('a real deploy reads the column', () => {
     // mounts ONLY <shared>/volumes and is handed the container paths.
     assert.ok(existsSync(`${shared}/data`) && statSync(`${shared}/data`).isDirectory());
     assert.ok(statSync(`${shared}/volumes`).isDirectory(), 'the volumes root is AppCrane\'s to create');
-    const helpers = dockerCalls().filter(isHelperRun);
+    // The volume helper only: on a non-root test host the /data chown is also
+    // retried in a root helper (deployer.js, v2.133.0), which mounts /data, not the volumes tree.
+    const helpers = dockerCalls().filter((c) => isHelperRun(c) && c.includes('appcrane-volume-helper'));
     assert.deepEqual(helpers.map((c) => c[c.indexOf('appcrane-volume-helper') + 1]), ['prep', 'chown']);
     for (const h of helpers) {
       assert.deepEqual(h.filter((a, i) => h[i - 1] === '-v'), [`${shared}/volumes:/.appcrane-volumes`]);
@@ -420,6 +422,22 @@ describe('a real deploy reads the column', () => {
     assert.equal(row.status, 'live', row.log);
     assert.deepEqual(mountArgs(args), [`${shared}/data:/data`],
       'one mount, the same literal that used to be inlined at the call site');
+  });
+
+  // v2.133.0: this test process is not root, so the host chown of /data to
+  // 1000:1000 is refused, as it was for AppCrane running as `ubuntu` on a
+  // root-owned folder; the deploy must retry it as root in the helper before
+  // the app container is created.
+  test('a refused /data chown is retried as root in a helper before the app starts', { skip: process.getuid?.() === 0 && 'running as root: the host chown succeeds' }, async () => {
+    const { row, shared } = await deployWith('vol-row-chown', null);
+    assert.equal(row.status, 'live', row.log);
+    const calls = dockerCalls();
+    const chownAt = calls.findIndex((c) => isHelperRun(c) && c.includes(`${shared}/data:/target`) && c.includes('chown'));
+    const appRunAt = calls.findIndex((c) => c[0] === 'run' && !isHelperRun(c));
+    assert.ok(chownAt >= 0, 'no root helper chown of /data was run');
+    assert.deepEqual(calls[chownAt].slice(-3), ['-R', '1000:1000', '/target']);
+    assert.ok(chownAt < appRunAt, 'the chown must land before the app container exists');
+    assert.match(row.log, /ok in a root helper container/);
   });
 
   test('a corrupt column falls back to /data rather than failing the deploy', async () => {

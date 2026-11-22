@@ -219,6 +219,18 @@ test('analyzer tells useful subagents from ones that only paid the overhead', ()
   assert.ok(!S.examples.some(r => r.description === 'p1' || r.description === 'p2'), 'parallel, heavy reading, one-line report: not flagged');
   assert.ok(S.startupUsd > 0 && S.usd >= S.startupUsd);
   assert.equal(S.repeatedDelegations[0].runs, 3, 'the same brief delegated in three sessions is a skill candidate');
+
+  // Model fit: every run here read and edited nothing on Opus 5.5, and the s2/s3
+  // main sessions were one-call jobs. Priced again from the same usage
+  // (1,000 in + 100 out per turn): $0.006 on Opus 5.5, $0.003 on Sonnet 5.5,
+  // $0.00015 on Haiku 5.5.
+  const F = JSON.parse(readFileSync(out, 'utf8')).modelFit;
+  assert.equal(F.subagentRuns, 5);
+  assert.equal(F.sessions, 2, 's1 made six tool calls, so it is not a small task');
+  assert.ok(Math.abs(F.onSonnet - F.usd / 2) < 1e-9, `Sonnet 5.5 is half of Opus 5.5 here: ${F.onSonnet} vs ${F.usd}`);
+  assert.ok(Math.abs(F.onHaiku - F.usd * 0.025) < 1e-9, `Haiku 5.5 is 2.5% of Opus 5.5 here: ${F.onHaiku} vs ${F.usd}`);
+  assert.ok(Math.abs(F.saveSonnet - (F.usd - F.onSonnet)) < 1e-9);
+  assert.equal(F.upperBound, true);
 });
 
 test('--allow-remote keeps only sessions from matching git repositories', () => {
@@ -318,4 +330,40 @@ test('findings are ranked by cost, and --baseline says which signals improved', 
   assert.equal(v('corrections per session'), 'better');
   assert.equal(v('usd per session'), 'better');
   assert.match(md, /## Since/);
+  assert.equal(D.costVsQuality, 'cheaper, with less rework');
+
+  // The same sessions measured against doctored baselines, one per pairing:
+  // spend scaled by `usd`, corrections and rework share set as given.
+  const verdictAgainst = (usdScale, corrections, reworkShare) => {
+    const base = join(mkdtempSync(join(tmpdir(), 'wr-')), 'b.json');
+    writeFileSync(base, JSON.stringify({ ...B, totals: { ...B.totals, usd: B.totals.usd * usdScale, corrections }, instructionQuality: { ...B.instructionQuality, reworkShare } }));
+    const o = join(mkdtempSync(join(tmpdir(), 'wr-')), 'o.json');
+    execFileSync(process.execPath, [SCRIPT, '--root', mk(true), '--json', o, '--baseline', base]);
+    return JSON.parse(readFileSync(o, 'utf8')).delta.costVsQuality;
+  };
+  assert.equal(verdictAgainst(10, 0, 0), 'cheaper, but with more rework: not a saving yet');
+  assert.equal(verdictAgainst(0.1, 0, 0), 'costlier, with more rework');
+  assert.equal(verdictAgainst(0.1, B.totals.corrections * 10, 1), 'costlier, with less rework', 'paying more to cut corrections is named as such');
+});
+
+test('MCP tool results are ranked by what they cost to read into context', () => {
+  const root = mkdtempSync(join(tmpdir(), 'work-review-'));
+  mkdirSync(join(root, '-p'));
+  const ts = new Date().toISOString();
+  const usage = { input_tokens: 100, output_tokens: 10 };
+  const lines = [{ type: 'user', timestamp: ts, message: { role: 'user', content: 'find the open billing tickets' } }];
+  const call = (id, name, chars) => {
+    lines.push({ type: 'assistant', timestamp: ts, message: { id: `m${id}`, model: 'claude-opus-5-5', usage, content: [{ type: 'tool_use', id, name, input: {} }] } });
+    lines.push({ type: 'user', timestamp: ts, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: 'x'.repeat(chars) }] } });
+  };
+  call('a', 'mcp__jira__search', 30000); call('b', 'mcp__jira__search', 10000);
+  call('c', 'mcp__slack__read', 400); call('d', 'Read', 90000);
+  writeFileSync(join(root, '-p', 's.jsonl'), lines.map(l => JSON.stringify(l)).join('\n'));
+  const out = join(root, 'r.json');
+  const md = execFileSync(process.execPath, [SCRIPT, '--root', root, '--json', out], { encoding: 'utf8' });
+  const M = JSON.parse(readFileSync(out, 'utf8')).mcpTools;
+  assert.deepEqual(M.map(t => t.tool), ['mcp__jira__search', 'mcp__slack__read'], 'only MCP tools, costliest first; Read is not one');
+  assert.deepEqual([M[0].server, M[0].calls, M[0].tokens, M[0].avgTokens], ['jira', 2, 10000, 5000]);
+  assert.equal(M[0].usd, 0.05, '10,000 tokens at Opus 5.5 input x1.25 ($5 per million)');
+  assert.match(md, /MCP tool results by cost/);
 });

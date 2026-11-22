@@ -46,6 +46,7 @@ const { initDb, getDb } = await import('../server/db.js');
 initDb();
 const db = getDb();
 const adm = await import('../server/services/memoryAdmission.js');
+const snap = await import('../server/services/dockerSnapshot.js');
 const { notifyMemoryAdmission } = await import('../server/services/memoryAdmissionMail.js');
 const docker = await import('../server/services/docker.js');
 const deployer = await import('../server/services/deployer.js');
@@ -61,10 +62,10 @@ function host({ totalMb = 4096, containers = [], usage = {}, statsFail = false }
   writeFileSync(RULES, JSON.stringify([
     { match: ['network', 'inspect'], stdout: 'false|172.20.0.0/16\n' },
     totalMb == null
-      ? { match: ['info', '--format', '{{.MemTotal}}'], stderr: 'Cannot connect to the Docker daemon', code: 1 }
-      : { match: ['info', '--format', '{{.MemTotal}}'], stdout: `${totalMb * MiB}\n` },
+      ? { match: ['info', '--format', snap.INFO_FORMAT], stderr: 'Cannot connect to the Docker daemon', code: 1 }
+      : { match: ['info', '--format', snap.INFO_FORMAT], stdout: `2\t${totalMb * MiB}\t/var/lib/docker\n` },
     { match: ['ps', '-q'], stdout: ids.join('\n') + (ids.length ? '\n' : '') },
-    { match: ['inspect', adm.INSPECT_FORMAT], stdout: containers.map(c => `/${c.name}\t${c.mb * MiB}\t${(c.resMb || 0) * MiB}\t${JSON.stringify(c.labels || {})}\t${c.image || ''}`).join('\n') + '\n' },
+    { match: ['inspect', snap.SNAPSHOT_INSPECT_FORMAT], stdout: containers.map(c => [`/${c.name}`, 'running', 1, '', 0, c.mb * MiB, (c.resMb || 0) * MiB, 0, 0, 0, 0, JSON.stringify(c.labels || {}), c.image || ''].join('\t')).join('\n') + '\n' },
     statsFail
       ? { match: ['stats', '--no-stream'], stderr: 'stats broke', code: 1 }
       : { match: ['stats', '--no-stream'], stdout: Object.entries(usage).map(([n, mb]) => `${n}\t${mb}MiB / 3.8GiB`).join('\n') + '\n' },
@@ -322,9 +323,12 @@ test('warn mode starts the container and notifies; off mode skips the measuremen
   assert.equal(calls().filter(c => c[0] === 'run').length, 1, 'warn mode still starts it');
 
   setSetting(adm.MODE_KEY, 'off');
+  // CPU admission reads the same docker snapshot, so it is switched off too.
+  setSetting('cpu_admission_mode', 'off');
   if (existsSync(ARGV_LOG)) rmSync(ARGV_LOG);
   adm._resetMemoryAdmissionForTests();
   await docker.startApp(startOpts('w2', 'sandbox', 99999));
+  db.prepare("DELETE FROM settings WHERE key = 'cpu_admission_mode'").run();
   assert.equal(calls().filter(c => c[0] === 'info' || c[0] === 'ps').length, 0, 'off: no measurement');
   assert.equal(calls().filter(c => c[0] === 'run').length, 1);
 });

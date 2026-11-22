@@ -10,6 +10,7 @@ import { isAdmin, refuseRetiredAdminRole } from '../utils/roles.js';
 import { purgeRevokedTenants } from '../services/tenants.js';
 import { revokeAllGrantsForUser } from '../services/oauthStore.js';
 import { revokeAllDevices } from '../services/trustedDevices.js';
+import { refuseUnlessSsoOptional } from '../services/authPolicy.js';
 
 const router = Router();
 
@@ -38,6 +39,7 @@ router.get('/', (req, res) => {
       SELECT u.id, u.name, u.email, u.username, u.role, u.kind, u.created_at, u.last_login_at,
         u.department, u.region, u.location, u.api_key_expires_at, u.api_key_last_used_at,
         CASE WHEN u.api_key_hash LIKE 'expired:%' THEN 1 ELSE 0 END as api_key_expired,
+        CASE WHEN u.api_key_hash IS NULL THEN 0 ELSE 1 END as has_api_key,
         CASE WHEN u.password_hash IS NOT NULL THEN 1 ELSE 0 END as has_password,
         CASE WHEN u.saml_name_id IS NOT NULL THEN 'saml' WHEN u.sso_sub IS NOT NULL THEN 'oidc' ELSE NULL END as sso_provider,
         (SELECT GROUP_CONCAT(a.slug, ', ') FROM app_users au JOIN apps a ON a.id = au.app_id WHERE au.user_id = u.id) as assigned_apps
@@ -77,9 +79,13 @@ router.post('/', requireAdmin, auditMiddleware('user-create'), (req, res) => {
     userRole = 'platform_admin';
   }
   const userKind = kind === 'agent' ? 'agent' : 'human';
+  // An agent authenticates only by key, and this response is where its creator
+  // gets it, so an agent is issued one here. A person is not: they sign in by
+  // password or SSO and create a key themselves (Settings > Account) if they
+  // want one, or an admin issues one with regenerate-key.
   const prefix = (userRole === 'platform_admin') ? 'dhk_admin' : 'dhk_user';
-  const apiKey = generateApiKey(prefix);
-  const keyHash = hashApiKey(apiKey);
+  const apiKey = userKind === 'agent' ? generateApiKey(prefix) : null;
+  const keyHash = apiKey ? hashApiKey(apiKey) : null;
   const pwHash = password ? hashPassword(password) : null;
 
   const db = getDb();
@@ -100,8 +106,10 @@ router.post('/', requireAdmin, auditMiddleware('user-create'), (req, res) => {
     'INSERT INTO users (name, email, role, kind, api_key_hash, username, password_hash, avatar_url, phone, year_of_birth) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
   ).run(name, email || null, userRole, userKind, keyHash, username || null, pwHash, avatar_url || null, phone || null, year_of_birth || null);
 
+  const created = { id: result.lastInsertRowid, name, email, role: userRole, kind: userKind };
+  if (!apiKey) return res.json({ user: created });
   res.json({
-    user: { id: result.lastInsertRowid, name, email, role: userRole, kind: userKind },
+    user: created,
     api_key: apiKey,
     warning: 'Save this API key! It will not be shown again.',
   });
@@ -207,8 +215,12 @@ router.post('/:id/regenerate-key', requireAdmin, auditMiddleware('user-regen-key
   const keyHash = hashApiKey(apiKey);
 
   db.prepare('UPDATE users SET api_key_hash = ? WHERE id = ?').run(keyHash, userId);
-  db.prepare('DELETE FROM identity_sessions WHERE user_id = ?').run(userId);
-  revokeAllGrantsForUser(userId);
+  // Issuing a first key (the account had none) is not a response to a leak:
+  // the user's sessions and grants stay. Replacing a key signs them out.
+  if (user.api_key_hash) {
+    db.prepare('DELETE FROM identity_sessions WHERE user_id = ?').run(userId);
+    revokeAllGrantsForUser(userId);
+  }
 
   res.json({
     user: { id: user.id, name: user.name, role: user.role },
@@ -227,6 +239,9 @@ router.put('/:id/password', requirePlatformAdmin, auditMiddleware('user-set-pass
   if (!password || password.length < 12) throw new AppError('Password must be at least 12 characters', 400, 'VALIDATION');
 
   const db = getDb();
+  // With SSO sign-in required a password signs no one in; setting one is refused
+  // rather than left waiting for the day the requirement is turned off.
+  refuseUnlessSsoOptional(db, req, { method: 'admin-set-password', userId: req.user.id });
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(parseInt(req.params.id));
   if (!user) throw new AppError('User not found', 404, 'NOT_FOUND');
 
@@ -337,7 +352,9 @@ router.put('/:slug/roles', requireAppAccess, auditMiddleware('app-set-role'), as
 
 /**
  * GET /api/apps/:slug/identity/users - List all users + roles for an app.
- * v2.7.9: platform admins OR an owner of this app.
+ * v2.7.9: platform admins OR an owner of this app. Platform admins are listed
+ * with the role recorded for them on this app, so one can be made an owner
+ * (and then counts as one, e.g. for request e-mails) like anyone else.
  */
 router.get('/:slug/identity/users', requireAppAccess, (req, res) => {
   const app = req.app; // set by requireAppAccess
@@ -348,10 +365,9 @@ router.get('/:slug/identity/users', requireAppAccess, (req, res) => {
 
   const users = db.prepare(`
     SELECT u.id, u.name, u.email, u.username, u.avatar_url, u.phone, u.year_of_birth,
-      COALESCE(aur.app_role, 'none') as app_role
+      u.role, COALESCE(aur.app_role, 'none') as app_role
     FROM users u
     LEFT JOIN app_user_roles aur ON u.id = aur.user_id AND aur.app_id = ?
-    WHERE u.role != 'platform_admin'
     ORDER BY u.name
   `).all(app.id);
 

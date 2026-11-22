@@ -60,8 +60,16 @@ const DISK_ALERT_COOLDOWN_MS = 24 * 60 * 60_000;
 // uploads, so a 2 GB /data is already unusual enough to be worth a look.
 const DEFAULT_APP_QUOTA_MB = 2048;
 
+const DISK_CHECK_CONCURRENCY = 3;
+
 let diskTimer = null;
 const diskAlertedAt = new Map();
+
+export async function mapLimit(items, limit, fn) {
+  let next = 0;
+  const worker = async () => { while (next < items.length) { const i = next++; await fn(items[i], i); } };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+}
 
 /**
  * Bytes held under `dir`, or null if it cannot be measured.
@@ -100,7 +108,7 @@ async function measureDirBytes(dir) {
  * install path, not here. Until one of them lands, an app over budget is
  * something a human is told about, not something the kernel refuses.
  */
-async function runDiskChecks() {
+export async function runDiskChecks() {
   const db = getDb();
   const configured = Number(
     db.prepare("SELECT value FROM settings WHERE key = 'app_disk_quota_mb'").get()?.value
@@ -109,42 +117,46 @@ async function runDiskChecks() {
 
   const dataDir = resolve(process.env.DATA_DIR || './data');
   const apps = db.prepare('SELECT id, name, slug FROM apps').all();
-
+  const targets = [];
   for (const app of apps) {
     for (const env of ['production', 'sandbox']) {
       // Mirrors deployer.js: the container's /data is this host directory.
       const dir = resolve(join(dataDir, 'apps', app.slug, env, 'shared', 'data'));
-      if (!existsSync(dir)) continue;
+      if (existsSync(dir)) targets.push({ app, env, dir });
+    }
+  }
+  // A few du walks at a time: one at a time took the sweep past its own
+  // interval on a host with many apps, all at once would saturate the disk.
+  await mapLimit(targets, DISK_CHECK_CONCURRENCY, async (t) => { t.used = await measureDirBytes(t.dir); });
 
-      const used = await measureDirBytes(dir);
-      const key = `${app.id}-${env}`;
+  for (const { app, env, used } of targets) {
+    const key = `${app.id}-${env}`;
 
-      if (used == null || used <= quotaBytes) {
-        // Clear the cooldown once back under, so the next crossing alerts again
-        // instead of being swallowed by a stale 24h suppression.
-        diskAlertedAt.delete(key);
-        continue;
-      }
+    if (used == null || used <= quotaBytes) {
+      // Clear the cooldown once back under, so the next crossing alerts again
+      // instead of being swallowed by a stale 24h suppression.
+      diskAlertedAt.delete(key);
+      continue;
+    }
 
-      log.error(`[disk-quota] ${app.slug} ${env} is over budget: ${Math.round(used / 1024 / 1024)} MB used of ${Math.round(quotaBytes / 1024 / 1024)} MB`);
+    log.error(`[disk-quota] ${app.slug} ${env} is over budget: ${Math.round(used / 1024 / 1024)} MB used of ${Math.round(quotaBytes / 1024 / 1024)} MB`);
 
-      const lastAlert = diskAlertedAt.get(key) || 0;
-      if (Date.now() - lastAlert < DISK_ALERT_COOLDOWN_MS) continue;
-      diskAlertedAt.set(key, Date.now());
+    const lastAlert = diskAlertedAt.get(key) || 0;
+    if (Date.now() - lastAlert < DISK_ALERT_COOLDOWN_MS) continue;
+    diskAlertedAt.set(key, Date.now());
 
-      try {
-        const { logAudit } = await import('../middleware/audit.js');
-        logAudit(null, app.id, 'disk-quota-exceeded', { env, used_bytes: used, quota_bytes: quotaBytes });
-      } catch (e) {
-        log.warn(`[disk-quota] audit write failed for ${app.slug}: ${e.message}`);
-      }
+    try {
+      const { logAudit } = await import('../middleware/audit.js');
+      logAudit(null, app.id, 'disk-quota-exceeded', { env, used_bytes: used, quota_bytes: quotaBytes });
+    } catch (e) {
+      log.warn(`[disk-quota] audit write failed for ${app.slug}: ${e.message}`);
+    }
 
-      try {
-        const { notifyDiskQuota } = await import('./emailService.js');
-        await notifyDiskQuota(app, env, used, quotaBytes);
-      } catch (e) {
-        log.error(`[disk-quota] alert for ${app.slug} ${env} failed to send: ${e.message}`);
-      }
+    try {
+      const { notifyDiskQuota } = await import('./emailService.js');
+      await notifyDiskQuota(app, env, used, quotaBytes);
+    } catch (e) {
+      log.error(`[disk-quota] alert for ${app.slug} ${env} failed to send: ${e.message}`);
     }
   }
 }
@@ -184,16 +196,30 @@ function scheduleCheck(config) {
 
   // Clear existing interval
   if (checkIntervals.has(key)) {
-    clearInterval(checkIntervals.get(key));
+    clearTimeout(checkIntervals.get(key).timer);
   }
 
   const intervalMs = (config.interval_sec || 30) * 1000;
+  const run = () => runCheck(config).catch(e => log.error(`Health check error: ${e.message}`));
 
-  const interval = setInterval(() => {
-    runCheck(config).catch(e => log.error(`Health check error: ${e.message}`));
-  }, intervalMs);
+  // Every app's timer used to start in the same boot tick, so all probes fired
+  // at the same instant every interval. Each now starts at its own offset. The
+  // first probe still waits a full interval, as before: an app scheduled at
+  // creation or right after a deploy is not probed (and counted toward its
+  // fail threshold) in the same instant.
+  const handle = { timer: null };
+  handle.timer = setTimeout(() => {
+    handle.timer = setInterval(run, intervalMs);
+  }, probeOffsetMs(key, intervalMs));
 
-  checkIntervals.set(key, interval);
+  checkIntervals.set(key, handle);
+}
+
+/** A stable offset in [0, intervalMs) for one app-env, so its probes keep their place across restarts. */
+export function probeOffsetMs(key, intervalMs) {
+  let h = 2166136261;
+  for (const ch of String(key)) h = Math.imul(h ^ ch.charCodeAt(0), 16777619) >>> 0;
+  return h % intervalMs;
 }
 
 /**
@@ -404,8 +430,8 @@ async function runCheck(config) {
  * Stop all health checks.
  */
 export function stopHealthChecker() {
-  for (const [key, interval] of checkIntervals) {
-    clearInterval(interval);
+  for (const [key, handle] of checkIntervals) {
+    clearTimeout(handle.timer);
   }
   checkIntervals.clear();
   if (diskTimer) { clearInterval(diskTimer); diskTimer = null; }

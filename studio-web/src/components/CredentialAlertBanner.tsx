@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { adminApi } from '../adminApi'
 import { useMe } from '../hooks/useMe'
+import { setVisibleInterval } from '../utils/visibleInterval'
 
 type Failing = {
   name: string
@@ -56,8 +57,8 @@ export function CredentialAlertBanner() {
       .then(r => { if (!cancelled) setFailing(Array.isArray(r?.failing) ? r.failing : []) })
       .catch(() => { /* transient — keep last state */ })
     load()
-    const t = setInterval(load, 5 * 60_000)
-    return () => { cancelled = true; clearInterval(t) }
+    const stop = setVisibleInterval(load, 5 * 60_000)
+    return () => { cancelled = true; stop() }
   }, [isPlatformAdmin])
 
   if (!isPlatformAdmin || failing.length === 0) return null

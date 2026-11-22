@@ -16,17 +16,12 @@ import { BRAND, esc, bulletList, renderBrandedEmail } from './mail/brandedLayout
 import { readUsage, toMb, needText } from './memoryAdmission.js';
 import { logAudit } from '../middleware/audit.js';
 import log from '../utils/logger.js';
-import { hostname } from 'os';
 
 export const MEMORY_MAIL_SOURCE = 'memory-admission';
 const TOP_N = 5;
 
-// Which AppCrane sent it: an admin of several gets the same mail from each.
-// CRANE_DOMAIN is the public identity; without it the OS hostname still tells
-// two machines apart (as in credentialChecker.js).
-export function serverName() {
-  return (process.env.CRANE_DOMAIN || '').trim() || hostname();
-}
+export { serverName } from './mailServerName.js';
+import { serverName } from './mailServerName.js';
 
 function hourBucket(now = new Date()) {
   return now.toISOString().slice(0, 13);

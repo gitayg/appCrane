@@ -192,6 +192,17 @@ test('a vulnerable dependency with a published fix blocks every app by default; 
   scanRow = { status: 'ok', findings_json: null };
 });
 
+test('a linked deployhub.json does not count towards the required access rules; a regular one does', async () => {
+  const body = JSON.stringify({ access: { rules: [{ path: '/admin/*', roles: ['admin'] }] } });
+  const hostFile = join(ROOT, 'host-deployhub.json');
+  writeFileSync(hostFile, body);
+  const linked = treeApp('rules-link', 'restricted', { 'server.js': '1;\n' });
+  symlinkSync(hostFile, join(ROOT, 'apps', 'rules-link', 'sandbox', 'releases', 'r1', 'deployhub.json'));
+  assert.equal(byId(await rc.runReleaseCheck({ db, app: linked, trigger: 'promote' }), 'access_rules').status, 'fail');
+  const regular = treeApp('rules-file', 'restricted', { 'server.js': '1;\n', 'deployhub.json': body });
+  assert.equal(byId(await rc.runReleaseCheck({ db, app: regular, trigger: 'promote' }), 'access_rules').status, 'pass');
+});
+
 test('restricted apps need access rules', async () => {
   const app = treeApp('rules-a', 'restricted', { 'server.js': '1;\n' });
   const rec = await rc.runReleaseCheck({ db, app, trigger: 'promote' });

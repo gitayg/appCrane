@@ -242,6 +242,7 @@ test('outside the embed policy, only the bypass blocks differ from v2.43.1', () 
   const expected = new Set([
     'handle /bypasser-sandbox/ws/runner*',  // log_skip removed
     'handle /bypasser/ws/runner*',          // log_skip removed
+    'handle',                               // the AppCrane catch-all gained its encode block
   ]);
   const changed = [...craneNow.keys()]
     .filter(k => craneWas.has(k) &&
@@ -281,10 +282,18 @@ test('outside the embed policy, only the bypass blocks differ from v2.43.1', () 
 test('the untouched apps keep their exact routing, headless and aliases included', () => {
   for (const key of ['handle /headless*', 'handle /framed*', 'handle /framed-sandbox*',
                      'handle /aliased*', 'handle /oldname*', 'handle /undeployed*',
-                     'handle /api/service*', 'handle', 'handle_errors']) {
+                     'handle /api/service*', 'handle_errors']) {
     assert.equal(withoutEmbedPolicy(craneNow.get(key)), withoutEmbedPolicy(craneWas.get(key)),
       `${key} changed outside the embed policy`);
   }
+  // The catch-all that proxies to AppCrane itself compresses its own UI and API
+  // (services/caddy.js CRANE_ENCODE); taking that block back out must leave it
+  // exactly as it was.
+  const catchAll = withoutEmbedPolicy(craneNow.get('handle'));
+  const encode = /\n {8}encode zstd gzip \{\n[\s\S]*?\n {8}\}(?=\n)/;
+  assert.match(catchAll, encode, 'the AppCrane catch-all lost its encode block');
+  assert.equal(catchAll.replace(encode, ''), withoutEmbedPolicy(craneWas.get('handle')),
+    'handle changed outside the embed policy and the encode block');
   assert.equal(siteNow.get('old.test.local'), siteWas.get('old.test.local'));
 });
 

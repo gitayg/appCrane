@@ -6,7 +6,8 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import express from 'express';
-import { networkInterfaces, tmpdir } from 'node:os';
+import { tmpdir } from 'node:os';
+import { findLanSelfAddr } from './lanSelfAddr.js';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -19,8 +20,11 @@ const LIMITS = { authed: 50, ip: 5, verify: 12, windowMs: 60_000 };
 const A = '203.0.113.10';
 const B = '203.0.113.20';
 
+// Before any test(): a top-level await after one lets the file's after() run early.
+const { addr: lanAddr, skip: lanSkip } = await findLanSelfAddr();
+
 const servers = [];
-after(() => { for (const s of servers) s.close(); });
+after(() => { for (const s of servers) { s.closeAllConnections(); s.close(); } });
 
 async function startApp({ trust, host = '127.0.0.1' } = {}) {
   const app = express();
@@ -114,11 +118,9 @@ test('credentials still key by credential, not address', () => {
   assert.match(k2.key, /^k:[0-9a-f]{32}$/);
 });
 
-const lanAddr = Object.values(networkInterfaces()).flat()
-  .find(i => i && i.family === 'IPv4' && !i.internal)?.address;
 
 test('direct non-loopback client: forged X-Forwarded-For is ignored and keyed by socket address',
-  { skip: lanAddr ? false : 'no non-loopback IPv4 interface to bind' }, async () => {
+  { skip: lanSkip }, async () => {
     const base = await startApp({ host: lanAddr });
     const r = await hit(base, '/api/whoami', A);
     assert.equal(r.body.ip, lanAddr, 'req.ip must be the socket address, not the forged XFF');

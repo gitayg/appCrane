@@ -243,22 +243,24 @@ export function prepareClaudeCredentialsMount(appSlug) {
     return null;
   }
 
-  mkdirSync(tmpRoot(), { recursive: true });
-  const tmpDir = join(tmpRoot(), randomUUID());
-  // 0o755 dir + 0o666 file (not chown) because the studio image's
+  // 0o700 dirs + 0o666 file (not chown) because the studio image's
   // `studio` user is created via Alpine's `adduser -S` which picks an
   // arbitrary system UID — usually NOT 1000 — so a chown to a hard-coded
-  // UID misses. World-rw is acceptable here: host file is root-owned in
-  // /var/lib/appcrane/... where only AppCrane runs, and the container is
-  // isolated; only reader is the dispatched Claude CLI inside.
+  // UID misses. The file must be world-rw for that user, so the dirs are
+  // what keep other host users out: dockerd resolves the bind-mount source
+  // as root, and inside the container only the file's own mode is checked.
   //
   // CRITICAL: writeFileSync's `mode` is masked by the process umask
   // (default 022 → 0o666 becomes 0o644). The container's `studio` user
   // is "others" relative to root and gets read-only — Claude CLI then
   // fails to refresh the token (write) and surfaces as "Not logged in".
-  // chmodSync bypasses umask. Same for the dir.
-  mkdirSync(tmpDir, { mode: 0o755 });
-  chmodSync(tmpDir, 0o755);
+  // chmodSync bypasses umask. Same for the dirs, and the root is chmodded
+  // every time because earlier versions created it 0o755.
+  mkdirSync(tmpRoot(), { recursive: true, mode: 0o700 });
+  chmodSync(tmpRoot(), 0o700);
+  const tmpDir = join(tmpRoot(), randomUUID());
+  mkdirSync(tmpDir, { mode: 0o700 });
+  chmodSync(tmpDir, 0o700);
   const tmpFile = join(tmpDir, 'credentials.json');
   writeFileSync(tmpFile, payload, { mode: 0o666 });
   chmodSync(tmpFile, 0o666);

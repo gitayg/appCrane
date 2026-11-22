@@ -23,12 +23,12 @@
 // Same rule as memory: a start that does not raise the total (a same-size
 // redeploy or rollback) is always allowed, and a measurement that fails admits.
 
-import { execFile } from 'child_process';
 import { getDb } from '../db.js';
 import { AppError } from '../utils/errors.js';
 import log from '../utils/logger.js';
 import { recordEvent } from './eventStore.js';
 import { hostCores, CPU_SHARES } from './cpuPriority.js';
+import { dockerInfo, runningContainers, _resetDockerSnapshotForTests } from './dockerSnapshot.js';
 
 export const CPU_MODE_KEY = 'cpu_admission_mode';
 export const CPU_RESERVE_KEY = 'cpu_reserve_cores';
@@ -37,8 +37,6 @@ export const DEFAULT_CPU_OVERCOMMIT = 4;
 export const CPU_MODES = ['refuse', 'warn', 'off'];
 export const DEFAULT_CPU_MODE = 'warn';
 export const CPU_REFUSED_CODE = 'INSUFFICIENT_CPU';
-export const CACHE_MS = 15_000;
-export const CPU_INSPECT_FORMAT = '{{.Name}}\t{{.HostConfig.NanoCpus}}\t{{.HostConfig.CpuQuota}}\t{{.HostConfig.CpuPeriod}}\t{{.HostConfig.CpuShares}}\t{{json .Config.Labels}}';
 
 const NANO = 1e9;
 let cached = null;
@@ -63,12 +61,6 @@ export function defaultReserveCores(cores) {
   return Math.max(0.5, cores * 0.25);
 }
 
-function docker(args) {
-  return new Promise((resolve, reject) => {
-    execFile('docker', args, { timeout: 10_000, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => (err ? reject(err) : resolve(String(stdout))));
-  });
-}
-
 function labelOf(name, l = {}) {
   if (l.slug && l.env) return { kind: 'app', label: `${l.slug} (${l.env})` };
   if (l['appcrane-db']) return { kind: 'db', label: `managed ${l['appcrane-db']}${l['appcrane-db-name'] ? ` ${l['appcrane-db-name']}` : ''}` };
@@ -77,46 +69,36 @@ function labelOf(name, l = {}) {
   return { kind: 'other', label: name };
 }
 
-/** `docker inspect` lines in CPU_INSPECT_FORMAT -> rows with the cap in cores (0 = uncapped). */
-export function parseCpuInspect(out) {
+/** dockerSnapshot rows -> rows with the cap in cores (0 = uncapped). */
+export function cpuRows(snapshot) {
   const rows = [];
-  for (const line of String(out || '').split('\n')) {
-    const p = line.split('\t');
-    if (p.length < 6) continue;
-    const name = p[0].replace(/^\//, '').trim();
-    const nano = Number(p[1]);
-    const quota = Number(p[2]);
-    const period = Number(p[3]);
-    const shares = Number(p[4]);
-    if (!name || !Number.isFinite(nano)) continue;
-    let labels = {};
-    try { labels = JSON.parse(p.slice(5).join('\t')) || {}; } catch (_) { labels = {}; }
+  for (const r of snapshot) {
+    if (!Number.isFinite(r.nanoCpus)) continue;
+    const { nanoCpus: nano, cpuQuota: quota, cpuPeriod: period, cpuShares: shares } = r;
     const cores = nano > 0 ? nano / NANO : (quota > 0 && period > 0 ? quota / period : 0);
-    const meta = labelOf(name, labels);
-    rows.push({ name, cores, uncapped: cores === 0, shares: Number.isFinite(shares) ? shares : 0, ours: meta.kind !== 'other', ...meta });
+    const meta = labelOf(r.name, r.labels);
+    rows.push({ name: r.name, cores, uncapped: cores === 0, shares: Number.isFinite(shares) ? shares : 0, ours: meta.kind !== 'other', ...meta });
   }
   return rows;
 }
 
-async function readCores() {
+async function readCores(fresh) {
   try {
-    const n = Number(String(await docker(['info', '--format', '{{.NCPU}}'])).trim());
+    const n = (await dockerInfo({ fresh })).ncpu;
     if (Number.isFinite(n) && n > 0) return { cores: n, coresSource: 'docker' };
   } catch (_) { /* fall through */ }
   return { cores: hostCores(), coresSource: 'os' };
 }
 
-/** One measurement, cached for CACHE_MS. Never throws: `error` is set instead. */
+/** One measurement from the shared Docker snapshot (dockerSnapshot.js). Never throws: `error` is set instead. */
 export async function measureCpu({ fresh = false, db = getDb() } = {}) {
-  if (!fresh && cached && Date.now() - cached.at < CACHE_MS) return cached.value;
   const { reserveCores } = getCpuAdmissionSettings(db);
-  const { cores, coresSource } = await readCores();
+  const { cores, coresSource } = await readCores(fresh);
   const reserve = reserveCores != null ? reserveCores : defaultReserveCores(cores);
   let containers = [];
   let error = null;
   try {
-    const ids = String(await docker(['ps', '-q', '--no-trunc'])).split('\n').map((s) => s.trim()).filter(Boolean);
-    if (ids.length) containers = parseCpuInspect(await docker(['inspect', '--format', CPU_INSPECT_FORMAT, ...ids]));
+    containers = cpuRows(await runningContainers({ fresh }));
   } catch (e) {
     error = `could not list running containers: ${String(e.message).split('\n')[0]}`;
   }
@@ -126,7 +108,7 @@ export async function measureCpu({ fresh = false, db = getDb() } = {}) {
     committedCores: containers.reduce((s, c) => s + c.cores, 0),
     containers, error, measuredAt: new Date().toISOString(),
   };
-  if (!error) cached = { at: Date.now(), value };
+  if (!error) cached = { value };
   return value;
 }
 
@@ -228,6 +210,7 @@ export async function admitCpu({ name, cpus, ...ctx }) {
   throw err;
 }
 
-export function _resetCpuAdmissionForTests(value = null) {
-  cached = value ? { at: Date.now(), value } : null;
+export function _resetCpuAdmissionForTests() {
+  cached = null;
+  _resetDockerSnapshotForTests();
 }

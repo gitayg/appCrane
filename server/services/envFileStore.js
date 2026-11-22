@@ -33,6 +33,7 @@ import { decrypt, encrypt } from './encryption.js';
 import { readNoFollow } from './uploadConversionScan.js';
 import { APPEND_KEY_RE, appendDotenvText, isLoadableEnvName, mergeDotenvText } from './dotenvMerge.js';
 import { parseDotenv } from './dotenvParse.js';
+import { isSecretRef, SecretRefError } from './secretRefs.js';
 
 export const ENV_FILE_MAX_BYTES = 1024 * 1024;
 export const ENVS = ['production', 'sandbox'];
@@ -134,12 +135,20 @@ export function storedEnvFilePaths(db, appId) {
   return out;
 }
 
-/** This environment's env vars, decrypted. Keys that fail to decrypt are returned by name, never applied. */
-function envVarsFor(db, appId, env) {
+/**
+ * This environment's env vars, decrypted. Keys that fail to decrypt are returned by name, never applied.
+ * A Secrets Manager reference needs a network call, so the caller resolves those first and passes
+ * `resolved`. Without it a reference is refused: its text must never reach a file.
+ */
+function envVarsFor(db, appId, env, resolved) {
+  if (resolved) return { vars: new Map(Object.entries(resolved.values)), undecryptable: resolved.decryptFailures };
   const vars = new Map();
   const undecryptable = [];
   for (const r of db.prepare('SELECT key, value_encrypted FROM env_vars WHERE app_id = ? AND env = ? ORDER BY key').all(appId, env)) {
-    try { vars.set(r.key, decrypt(r.value_encrypted)); } catch (_) { undecryptable.push(r.key); }
+    let plain;
+    try { plain = decrypt(r.value_encrypted); } catch (_) { undecryptable.push(r.key); continue; }
+    if (isSecretRef(plain)) throw new SecretRefError(`Could not resolve secret reference for ${r.key}: stored .env files were restored without resolved env vars`, { code: 'SECRET_REF_UNRESOLVED', keys: [r.key] });
+    vars.set(r.key, plain);
   }
   return { vars, undecryptable };
 }
@@ -159,11 +168,14 @@ function envVarsFor(db, appId, env) {
  * app_env_files is never written; the merge exists only in this release copy,
  * so an env var edited or deleted in AppCrane changes the next deploy's file.
  *
+ * `resolved` is secretRefs.resolveStoredEnv's result: a reference layers on as
+ * the secret's value, so this release's copy of the file holds it in plaintext.
+ *
  * Returns { files: [{ path, overridden, appended, unrepresentable, created, not_merged }], undecryptable }.
  * Key names and paths only. Throws ENV_FILE_PATH_REFUSED before writing a file
  * whose path or parents are unsafe.
  */
-export function restoreStoredEnvFiles(db, app, env, releaseDir) {
+export function restoreStoredEnvFiles(db, app, env, releaseDir, resolved = null) {
   if (!ENVS.includes(env)) throw new Error(`invalid env ${JSON.stringify(env)}`);
   const rows = db.prepare('SELECT rel_path, mode, content_encrypted FROM app_env_files WHERE app_id = ? AND env = ? ORDER BY rel_path').all(app.id, env);
   if (rows.length === 0) return { files: [], undecryptable: [] };
@@ -183,7 +195,7 @@ export function restoreStoredEnvFiles(db, app, env, releaseDir) {
     if (st && st.isFile()) files.push({ rel_path: '.env', segs: ['.env'], mode: st.mode & 0o777, content: readNoFollow(existing, ENV_FILE_MAX_BYTES), fromRelease: true });
   }
 
-  const { vars, undecryptable } = envVarsFor(db, app.id, env);
+  const { vars, undecryptable } = envVarsFor(db, app.id, env, resolved);
   const rootDefined = new Set();
   for (const f of files) {
     f.info = { path: f.rel_path, overridden: [], appended: [], unrepresentable: [], created: false, not_merged: null };

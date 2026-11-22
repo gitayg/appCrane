@@ -30,6 +30,16 @@ if (existsSync(envPath)) {
   log.info(`.env loaded (${envPath})`);
 }
 
+// Platform keys from AWS Secrets Manager, when configured. Before anything
+// uses them; a failure stops the boot rather than falling back to .env.
+try {
+  const secrets = await loadPlatformSecrets({ log });
+  if (secrets.active) log.info(`platform secret loaded (keys: ${secrets.keys.join(', ')})`);
+} catch (e) {
+  log.error(`AppCrane cannot start: the platform secret could not be loaded. ${e.message}`);
+  process.exit(1);
+}
+
 const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf8'));
 const VERSION = pkg.version;
 
@@ -62,6 +72,7 @@ import ssoPopupRoutes from './routes/ssoPopup.js';
 import scimRoutes, { scimAdminRouter } from './routes/scim.js';
 import presenceRoutes from './routes/presence.js';
 import askRoutes from './routes/ask.js';
+import { sweepLegacyAskSessions } from './services/askClaude.js';
 import planRoutes from './routes/plan.js';
 import coderRoutes from './routes/coder.js';
 import skillsRoutes from './routes/skills.js';
@@ -91,6 +102,11 @@ import gitHttpRoutes from './routes/gitHttp.js';
 import clientErrorsRoutes, { adminRouter as clientErrorsAdminRoutes } from './routes/clientErrors.js';
 import { refererSlug } from './utils/refererSlug.js';
 import { globalNotices } from './services/platformNotices.js';
+import { adminExists } from './services/adminExists.js';
+import { loadPlatformSecrets } from './services/secretsProvider/index.js';
+import { migratePlatformAnthropicKey } from './services/platformAnthropicKeyBoot.js';
+import { scrubLegacyAuditSecrets } from './services/auditLegacyScrub.js';
+import { getPlatformAnthropicKey } from './services/platformAnthropicKey.js';
 import { enforceFipsAtStartup } from './services/fipsMode.js';
 import appMcpRoutes, { appMcpWellKnownRouter } from './routes/appMcp.js';
 
@@ -107,6 +123,11 @@ initDb();
   const { startBackgroundCheckpoints } = await import('./services/dbCheckpoint.js');
   startBackgroundCheckpoints();
 }
+// ANTHROPIC_API_KEY moves from .env / the environment into the database, and
+// process.env stops carrying it (services/platformAnthropicKeyBoot.js).
+migratePlatformAnthropicKey({ envPath });
+scrubLegacyAuditSecrets();
+sweepLegacyAskSessions();
 // Anonymous daily install check-in: counts and versions only, opt out with
 // APPCRANE_CHECKIN=off (services/installCheckin.js lists every field).
 {
@@ -229,6 +250,11 @@ app.use('/docs', express.static(join(__dirname, '..', 'docs'), {
       const needsLegacy = LEGACY_INLINE_PAGES.has(basename(filePath))
         && !filePath.includes(`${sep}admin-app${sep}`);
       res.setHeader('Content-Security-Policy', htmlCsp(needsLegacy ? LEGACY_HTML_CSP : HTML_CSP));
+      if (filePath.includes(`${sep}admin-app${sep}`)) res.setHeader('Cache-Control', 'no-cache');
+    } else if (filePath.includes(`${sep}admin-app${sep}assets${sep}`)) {
+      // Vite names every file here by its content hash, so a URL never changes
+      // meaning; a new build ships new names and index.html points at them.
+      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
     }
   },
 }));
@@ -383,9 +409,7 @@ app.use((req, res, next) => {
   const isCrashPage = req.path.startsWith('/api/_crashed/');
   if (PUBLIC_PATHS.includes(req.path) || req.path.startsWith('/docs/') || isPublicSettingsRead || isCrashPage || req.method === 'OPTIONS') return next();
 
-  const db = getDb();
-  const adminExists = db.prepare("SELECT COUNT(*) as count FROM users WHERE role = 'platform_admin'").get().count > 0;
-  if (!adminExists) {
+  if (!adminExists(getDb())) {
     const accept = req.headers.accept || '';
     if (accept.includes('text/html')) {
       return res.status(503).send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>AppCrane - Setup</title>
@@ -476,7 +500,7 @@ let caddyReloadStatus = { ok: null, at: null, error: null, restarted: false, unc
 // Public API endpoints (no auth)
 app.get('/api/info', (req, res) => {
   const db = getDb();
-  const adminExists = db.prepare("SELECT COUNT(*) as count FROM users WHERE role = 'platform_admin'").get().count > 0;
+  const ready = adminExists(db);
   // Version is no longer auth-gated. It already leaks through
   // /api/version-check, bundle filenames, GitHub releases, and the
   // sidebar's first /api/info call (which can race auth-state setup).
@@ -484,7 +508,7 @@ app.get('/api/info', (req, res) => {
   res.json({
     name: 'AppCrane',
     version: VERSION,
-    status: adminExists ? 'ready' : 'needs_init',
+    status: ready ? 'ready' : 'needs_init',
     description: 'Self-service app hosting and deployment',
     docs: '/docs',
     dashboard: '/dashboard',
@@ -501,7 +525,7 @@ app.get('/api/info', (req, res) => {
     // endpoint — and costs ~40 bytes. The bodies live one fetch away.
     notices: { url: '/api/notices', count: globalNotices().length },
     caddy_reload_status: caddyReloadStatus,
-    ...(!adminExists && { init: 'POST /api/auth/init -d \'{"name":"admin","email":"you@example.com"}\'' }),
+    ...(!ready && { init: 'POST /api/auth/init -d \'{"name":"admin","email":"you@example.com"}\'' }),
   });
 });
 
@@ -1124,6 +1148,7 @@ app.use('/api/mcp', mcpRoutes);          // Model Context Protocol endpoint (JSO
 app.use('/api/settings', (await import('./routes/jobHealth.js')).default); // /api/settings/job-health (platform admin)
 app.use('/api/settings', (await import('./routes/hostHardening.js')).default); // /api/settings/host-hardening: Host limits (platform admin)
 app.use('/api/settings/client-errors', clientErrorsAdminRoutes); // aggregated browser errors (platform admin)
+app.use('/api/settings/secrets-provider', (await import('./routes/secretsProviderStatus.js')).default); // AWS Secrets Manager status (platform admin)
 app.use('/api/settings', (await import('./routes/restoreDrills.js')).default); // /api/settings/restore-drills (platform admin)
 app.use('/api/evidence-packs', (await import('./routes/evidencePack.js')).default); // compliance evidence packs (platform admin)
 app.use('/api/settings', (await import('./routes/siem.js')).default); // /api/settings/siem: SIEM and log streaming (platform admin)
@@ -1138,6 +1163,7 @@ app.use('/api/settings', settingsRoutes); // General settings (branding, etc.)
 // matches GET /me and the three /me/claude-token methods, none of which
 // collide with /me/mcp-keys/*.
 app.use('/api', meRoutes);               // /api/me — proxied-app identity endpoint (cookie/Bearer/X-API-Key)
+app.use('/api/admin/mcp-keys', (await import('./routes/adminMcpKeys.js')).default); // every user's MCP keys: list, revoke, revoke-unused (platform admin)
 app.use('/api', userMcpKeysRoutes);      // /api/me/mcp-keys — personal MCP keys
 app.use('/api/files/staged', stagedFilesRoutes);   // chunked staged uploads: POST /chunked, PUT /:handle?offset=N, POST /:handle/finalize
 app.use('/api/me/app-keys', userAppKeysRoutes); // personal app sign-in keys (dhk_uak_*), v2.124.0
@@ -1204,7 +1230,7 @@ function loginHandler(req, res) {
 }
 // v2.5.14: collapse the dual-login UX. /login and /portal forward to
 // /applications, which renders the SPA's <Login> when unauthenticated.
-// The SPA handles the SSO query params (`oidc_token`, `sso_error`,
+// The SPA handles the SSO query params (`sso_code`, `sso_error`,
 // `saml_error`, `redirect`) that docs/login.html used to.
 //
 // loginHandler (above) is kept for any iframe-embedded SSO flow that
@@ -1215,7 +1241,7 @@ function loginHandler(req, res) {
 // when unauthenticated, exactly as /applications did, so this only changes
 // where you arrive AFTER authenticating: the tiles you can open, which is the
 // first thing most users want. Query string is preserved so the SSO
-// ?oidc_token=… / ?redirect=… handoff still works.
+// ?sso_code=… / ?redirect=… handoff still works.
 // v2.35.0: strip an unsafe `redirect` before forwarding it. The SPA now
 // validates it too (utils/safeRedirect.ts), but this endpoint is what a
 // phishing link actually targets — `/login?redirect=//attacker.com` — and it
@@ -1643,6 +1669,14 @@ app.listen(PORT, HOST, async () => {
     sweepStaleRuntimes();
   } catch (_) {}
 
+  // Containers left by a pre-flight check that was killed mid-way. Not awaited.
+  try {
+    const { startPreflightSweep } = await import('./services/preflightSweep.js');
+    startPreflightSweep();
+  } catch (e) {
+    log.warn('Pre-flight sweep skipped: ' + e.message);
+  }
+
   // Start health checker
   try {
     const { startHealthChecker } = await import('./services/healthChecker.js');
@@ -1658,7 +1692,7 @@ app.listen(PORT, HOST, async () => {
     // unprocessed on a platform with no ANTHROPIC_API_KEY. Fixing it properly
     // means the worker resolving a credential PER JOB (from
     // enhancement_requests.user_id) and starting unconditionally.
-    if (process.env.ANTHROPIC_API_KEY) {
+    if (getPlatformAnthropicKey()) {
       const { startWorker } = await import('./services/appstudio/worker.js');
       startWorker();
     }
@@ -1727,6 +1761,14 @@ app.listen(PORT, HOST, async () => {
     startEmailWorker();
   } catch (e) {
     log.error('Email worker failed to start: ' + e.message);
+  }
+
+  // Mail a person when their access to an app changes (migration 171 triggers).
+  try {
+    const { startAppAccessMailWorker } = await import('./services/appAccessMail.js');
+    startAppAccessMailWorker();
+  } catch (e) {
+    log.error('App access mail worker failed to start: ' + e.message);
   }
 
   // v2.25.2: probe platform integration credentials (Graph mail secret, GitHub

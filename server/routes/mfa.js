@@ -6,6 +6,7 @@ import { AppError } from '../utils/errors.js';
 import { verifyPassword } from '../services/encryption.js';
 import * as mfa from '../services/mfa.js';
 import { BOUNDS, DEFAULTS, issueSession, policyFor, readPolicy, writePolicy } from '../services/sessionPolicy.js';
+import { refuseUnlessSsoOptional } from '../services/authPolicy.js';
 import { REMEMBER_MAX_DAYS, listDevices, rememberDays, revokeAllDevices, revokeDevice, setRememberDays, trustDevice } from '../services/trustedDevices.js';
 
 // Mounted at /api/identity/mfa. Two halves:
@@ -50,11 +51,17 @@ function sessionBody(session, user) {
 }
 
 // ── second step of password sign-in ───────────────────────────────────────
+// A challenge outlives the password step that created it, so a sign-in begun
+// before "Require SSO sign-in" took effect is refused here too.
 
+// An SSO challenge (challenge.method 'oidc' / 'saml', services/ssoMfa.js) is the
+// second step of an SSO sign-in, so "Require SSO sign-in" does not refuse it.
 router.post('/verify', (req, res) => {
   const db = getDb();
   const ip = ipOf(req);
   const { mfa_token, code, remember_device } = req.body || {};
+  const sso = typeof mfa_token === 'string' && mfa.challengeMethod(db, mfa_token);
+  if (!sso) refuseUnlessSsoOptional(db, req, { method: 'password+mfa' });
   if (!code || typeof code !== 'string') throw new AppError('code is required', 400, 'VALIDATION');
   const { challenge, user } = challengeOr400(db, mfa_token, 'verify');
   const result = mfa.verifyCode(db, user, code, { ip });
@@ -62,8 +69,9 @@ router.post('/verify', (req, res) => {
   if (!mfa.consumeChallenge(db, challenge.id)) throw new AppError('The sign-in step expired. Sign in again.', 400, 'MFA_TOKEN_INVALID');
   const session = issueSession(db, req, res, user, challenge.app_id);
   // Strictly true: a truthy string from a hand-made request is not consent.
-  const trusted = remember_device === true ? trustDevice(db, req, res, user, { ip }) : null;
-  auditLogin(user.id, 'ok', { method: `password+${result.method}`, ip });
+  // Not after SSO: the remembered-device cookie never reaches an SSO callback.
+  const trusted = remember_device === true && !challenge.method ? trustDevice(db, req, res, user, { ip }) : null;
+  auditLogin(user.id, 'ok', { method: `${challenge.method || 'password'}+${result.method}`, ip });
   res.json({
     ...sessionBody(session, user),
     ...(result.method === 'recovery_code' && { recovery_codes_remaining: result.recovery_codes_remaining }),
@@ -73,6 +81,7 @@ router.post('/verify', (req, res) => {
 
 router.post('/enroll/start', (req, res) => {
   const db = getDb();
+  refuseUnlessSsoOptional(db, req, { method: 'password+mfa-enroll' });
   const { mfa_token, algorithm } = req.body || {};
   const { user } = challengeOr400(db, mfa_token, 'enroll');
   try {
@@ -85,6 +94,7 @@ router.post('/enroll/start', (req, res) => {
 
 router.post('/enroll/confirm', (req, res) => {
   const db = getDb();
+  refuseUnlessSsoOptional(db, req, { method: 'password+mfa-enroll' });
   const ip = ipOf(req);
   const { mfa_token, code } = req.body || {};
   if (!code || typeof code !== 'string') throw new AppError('code is required', 400, 'VALIDATION');

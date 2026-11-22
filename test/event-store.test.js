@@ -19,7 +19,7 @@ mkdirSync(SHIM_DIR, { recursive: true });
 writeFileSync(join(SHIM_DIR, 'docker'),
   '#!/usr/bin/env node\n' +
   'const a = process.argv.slice(2);\n' +
-  'if (a[0] === "info") { process.stdout.write(String(1024 * 1024 * 1024) + "\\n"); process.exit(0); }\n' +
+  'if (a[0] === "info") { process.stdout.write("1\\t" + String(1024 * 1024 * 1024) + "\\t/var/lib/docker\\n"); process.exit(0); }\n' +
   'process.exit(0);\n',
   { mode: 0o755 });
 process.env.PATH = `${SHIM_DIR}:${process.env.PATH}`;

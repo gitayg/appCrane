@@ -3,7 +3,9 @@ import { adminApi } from '../adminApi'
 
 // Settings > Account: when the signed-in person's own API key expires, and
 // Rotate (POST /api/me/api-key/rotate), which shows the new key once and makes
-// the old one stop working immediately. Backed by server/routes/apiKeys.js.
+// the old one stop working immediately. Accounts start with no key; the same
+// endpoint creates the first one, so a keyless person sees "No API key" and a
+// Create API key button. Backed by server/routes/apiKeys.js.
 
 interface KeyState {
   has_key: boolean
@@ -25,13 +27,18 @@ export function ApiKeyCard() {
   const [busy, setBusy] = useState(false)
   const [shown, setShown] = useState<string | null>(null)
   const [err, setErr] = useState<string | null>(null)
+  const [created, setCreated] = useState(false)
 
   useEffect(() => {
     adminApi.get<KeyState>('/api/me/api-key').then(setState).catch(e => setErr((e as Error).message))
   }, [])
 
   async function rotate() {
-    if (!confirm('Rotate your API key?\n\nThe current key stops working immediately, everywhere you use it (CLI, scripts, agents). The new key is shown once.')) return
+    const first = !state?.has_key
+    const question = first
+      ? 'Create an API key?\n\nIt is shown once. Anyone holding it can act as you on the AppCrane API until it expires or you rotate it.'
+      : 'Rotate your API key?\n\nThe current key stops working immediately, everywhere you use it (CLI, scripts, agents). The new key is shown once.'
+    if (!confirm(question)) return
     setBusy(true)
     setErr(null)
     try {
@@ -41,6 +48,7 @@ export function ApiKeyCard() {
         if (localStorage.getItem('cc_api_key')) localStorage.setItem('cc_api_key', r.api_key)
       } catch (_) { /* storage unavailable: the person still has the key on screen */ }
       setShown(r.api_key)
+      setCreated(first)
       setState({ has_key: r.has_key, expired: r.expired, issued_at: r.issued_at, expires_at: r.expires_at, last_used_at: r.last_used_at, max_age_days: r.max_age_days })
     } catch (e) {
       setErr((e as Error).message)
@@ -63,19 +71,19 @@ export function ApiKeyCard() {
       {state && (
         <p style={{ fontSize: '.85rem', color: colour, margin: '8px 0' }}>
           {!state.has_key
-            ? 'You have no API key.'
+            ? 'No API key. You only need one for the CLI or scripts; create it when you do.'
             : state.expired
               ? `Expired on ${fmt(state.expires_at)}. Rotate to get a new one.`
               : `Expires on ${fmt(state.expires_at)}${daysLeft != null ? ` (in ${daysLeft} day${daysLeft === 1 ? '' : 's'})` : ''}.`}
-          {state.last_used_at ? ` Last used ${fmt(state.last_used_at)}.` : ''}
+          {state.has_key && state.last_used_at ? ` Last used ${fmt(state.last_used_at)}.` : ''}
         </p>
       )}
-      <button className="btn" onClick={rotate} disabled={busy || !state}>{busy ? 'Rotating...' : (state?.has_key ? 'Rotate' : 'Create')}</button>
+      <button className="btn" onClick={rotate} disabled={busy || !state}>{busy ? (state?.has_key ? 'Rotating...' : 'Creating...') : (state?.has_key ? 'Rotate' : 'Create API key')}</button>
       {err && <p style={{ color: 'var(--red)', fontSize: '.8rem', marginTop: 8 }}>{err}</p>}
       {shown && (
         <div style={{ marginTop: 12 }}>
           <code style={{ display: 'block', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 6, padding: '10px 12px', fontFamily: 'monospace', wordBreak: 'break-all', userSelect: 'all' }}>{shown}</code>
-          <p style={{ fontSize: '.8rem', color: 'var(--yellow)', margin: '8px 0' }}>Shown once. Copy it now; the old key no longer works.</p>
+          <p style={{ fontSize: '.8rem', color: 'var(--yellow)', margin: '8px 0' }}>Shown once. Copy it now{created ? '' : '; the old key no longer works'}.</p>
           <div style={{ display: 'flex', gap: 8 }}>
             <button className="btn" onClick={() => navigator.clipboard.writeText(shown).catch(() => {})}>Copy</button>
             <button className="btn" onClick={() => setShown(null)}>Done</button>

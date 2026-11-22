@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { adminApi } from '../../adminApi'
 import { SinkForm } from './SinkForm'
 import type { Sink, SiemList } from './siemTypes'
+import { setVisibleInterval } from '../../utils/visibleInterval'
 
 function describe(s: Sink): string {
   const c = s.config
@@ -27,7 +28,7 @@ export function SiemSinks() {
     adminApi.get<SiemList>('/api/settings/siem').then(d => { setData(d); setAllow(d.private_allowlist.join('\n')) }).catch(() => {})
   }, [])
   useEffect(() => { load() }, [load])
-  useEffect(() => { const t = setInterval(load, 15000); return () => clearInterval(t) }, [load])
+  useEffect(() => setVisibleInterval(load, 15000), [load])
 
   if (!data) return null
   const note = (k: number | string, m: string) => setMsg(x => ({ ...x, [k]: m }))

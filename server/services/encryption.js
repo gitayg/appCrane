@@ -12,16 +12,22 @@ function getKey() {
 
   const key = process.env.ENCRYPTION_KEY;
   if (!key || key.length < 32) {
+    // With a platform secret configured the key comes from Secrets Manager or
+    // nowhere: boot exits when it cannot be read, so reaching this is a bug,
+    // and an ephemeral key would encrypt data nothing can read back.
+    if (process.env.APPCRANE_SECRETS_PROVIDER && process.env.APPCRANE_SECRETS_ID) {
+      throw new Error('ENCRYPTION_KEY missing or too short (need 32+ hex chars): it was not loaded from the platform secret in AWS Secrets Manager (APPCRANE_SECRETS_ID).');
+    }
     // Production: refuse to start rather than silently generate an ephemeral
     // key (any data encrypted against it would be unreadable after restart).
     if (process.env.NODE_ENV === 'production') {
-      throw new Error('ENCRYPTION_KEY missing or too short (need 32+ hex chars). Set it in .env before starting the server.');
+      throw new Error('ENCRYPTION_KEY missing or too short (need 32+ hex chars). Set it in .env, or in the platform secret when AWS Secrets Manager is configured (crane secrets migrate), before starting the server.');
     }
     // Dev/test: generate a stable key for this process, but never print the
     // key itself — stdout can be captured by PM2/journalctl/log aggregators.
     const generated = crypto.randomBytes(32).toString('hex');
     process.env.ENCRYPTION_KEY = generated;
-    console.warn('[WARN] No ENCRYPTION_KEY in .env. Using an ephemeral key for this process only.');
+    console.warn('[WARN] No ENCRYPTION_KEY in .env or a secrets provider. Using an ephemeral key for this process only.');
     console.warn('[WARN] Any data encrypted now will be UNREADABLE after restart.');
     console.warn('[WARN] Fix: generate one with `openssl rand -hex 32` and add ENCRYPTION_KEY=... to .env');
     _cachedKey = Buffer.from(generated, 'hex');

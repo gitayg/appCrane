@@ -1,8 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync } from 'fs';
+import { readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { shippedBundle } from './admin-bundle.js';
 
 // App-defined roles, admin SPA side (v2.41.0).
 //
@@ -27,8 +28,7 @@ const ADMIN_API = readFileSync(join(ROOT, 'studio-web/src/adminApi.ts'), 'utf8')
 const SERVICE = readFileSync(join(ROOT, 'server/services/appDefinedRoles.js'), 'utf8');
 const ROUTES = readFileSync(join(ROOT, 'server/routes/appRoles.js'), 'utf8');
 
-const ASSETS_DIR = join(ROOT, 'docs/admin-app/assets');
-const INDEX_HTML = readFileSync(join(ROOT, 'docs/admin-app/index.html'), 'utf8');
+const BUNDLE = shippedBundle();
 
 /** Body of a top-level `async function <name>` in the modal, up to the next one. */
 function fnBody(src, name) {
@@ -40,23 +40,22 @@ function fnBody(src, name) {
 
 // ---------------------------------------------------------------- built output
 
-test('exactly one SPA bundle ships — no stale sibling left in docs/admin-app', () => {
-  // Vite hashes the filename, so a rebuild without emptyOutDir leaves the old
-  // bundle sitting next to the new one. Both then get served as static files,
-  // and any assertion that greps "the bundle" starts reading whichever it finds
-  // first. index.html is the only thing that says which is live.
-  const bundles = readdirSync(ASSETS_DIR).filter(f => f.endsWith('.js'));
-  assert.equal(bundles.length, 1,
-    `expected one .js bundle under docs/admin-app/assets, found ${bundles.length}: ` +
-    `${bundles.join(', ')} — delete the stale one(s), rebuild with emptyOutDir`);
-  assert.ok(INDEX_HTML.includes(bundles[0]),
-    `docs/admin-app/index.html does not reference ${bundles[0]} — the shipped ` +
-    'page loads a bundle that is not on disk');
+test('the SPA ships no stale chunk, and index.html loads an entry that is on disk', () => {
+  // Vite hashes every filename, so a rebuild without emptyOutDir leaves the old
+  // chunks sitting next to the new ones. They then get served as static files,
+  // and any assertion that greps "the bundle" can read a dead one. The build is
+  // code-split, so the live set is index.html's entry plus every chunk it
+  // imports, directly or not; anything else under assets/ is stale.
+  assert.ok(BUNDLE.entry, 'docs/admin-app/index.html loads no module script');
+  assert.deepEqual(BUNDLE.missing, [],
+    `docs/admin-app references chunks that are not on disk: ${BUNDLE.missing.join(', ')}`);
+  assert.deepEqual(BUNDLE.stale, [],
+    `stale .js under docs/admin-app/assets, referenced by nothing the page loads: ` +
+    `${BUNDLE.stale.join(', ')} — delete them, rebuild with emptyOutDir`);
 });
 
 test('the shipped bundle carries the app-roles UI, not just the source tree', () => {
-  const bundles = readdirSync(ASSETS_DIR).filter(f => f.endsWith('.js'));
-  const built = readFileSync(join(ASSETS_DIR, bundles[0]), 'utf8');
+  const built = BUNDLE.text;
 
   // Minification renames `slug` to a single letter but leaves the literal
   // segments of the template alone, so the paths survive verbatim apart from

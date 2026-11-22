@@ -281,7 +281,7 @@ test('deploy: shallow clone from GitHub with the token in git\'s environment, pi
   assert.match(releaseDir, new RegExp(`/apps/gh-deploy/sandbox/releases/\\d+-git$`));
   // The URL carries no credential: in argv it was visible to `ps`, and git
   // wrote it into the release's .git/config, where it stayed on disk.
-  assert.deepEqual(clone, ['clone', '--depth', '1', '--branch', 'main', `https://github.com/${OWNER}/AMC_gh-deploy`, releaseDir]);
+  assert.deepEqual(clone, ['clone', '--depth', '1', '--branch', 'main', '--', `https://github.com/${OWNER}/AMC_gh-deploy`, releaseDir]);
   assert.equal(JSON.stringify(argv).includes(TOKEN), false, 'the service token reached git argv');
   const envs = readLog(GIT_ENV_LOG);
   for (const verb of ['clone', '-C']) {
@@ -290,7 +290,7 @@ test('deploy: shallow clone from GitHub with the token in git\'s environment, pi
     assert.equal(e[1], 'http.https://github.com/.extraHeader', `git ${verb} was not given the credential for github.com`);
     assert.equal(e[2], basicFor(TOKEN), `git ${verb} did not get the service token`);
   }
-  assert.deepEqual(argv.find((a) => a[0] === '-C' && a[2] === 'fetch'), ['-C', releaseDir, 'fetch', '--depth', '1', 'origin', target]);
+  assert.deepEqual(argv.find((a) => a[0] === '-C' && a[2] === 'fetch'), ['-C', releaseDir, 'fetch', '--depth', '1', '--', 'origin', target]);
   assert.deepEqual(argv.find((a) => a[0] === '-C' && a[2] === 'checkout'), ['-C', releaseDir, 'checkout', '--detach', target]);
 
   const branchReads = calls.filter((c) => c.url === `https://api.github.com/repos/${OWNER}/AMC_gh-deploy/branches/main`);
@@ -408,11 +408,9 @@ test('AskClaude clones a NULL managed app from github_url, exactly as before', a
     stopSession(sessionId);
     delete process.env.DOCKER_SHIM_MODE;
   }
-  assert.equal(readFileSync(join(ASK_CAPTURE, 'clone_url'), 'utf8'), `https://github.com/${OWNER}/AMC_gh-ask`);
-  assert.doesNotMatch(readFileSync(join(ASK_CAPTURE, 'ls'), 'utf8'), /repo\.bundle/);
   const run = readLog(DOCKER_LOG).find((a) => a[0] === 'run');
-  assert.equal(run[run.length - 1],
-    'CLONE_URL=$(cat /studio/clone_url) && git clone --depth 1 --branch "$BRANCH" "$CLONE_URL" /workspace && git -C /workspace remote remove origin && git -C /workspace config --local credential.helper "" && tail -f /dev/null');
+  assert.deepEqual(run.slice(-3), ['tail', '-f', '/dev/null']);
+  assert.ok(readLog(DOCKER_LOG).some((a) => a[0] === 'exec' && a.includes(`REPO_URL=https://github.com/${OWNER}/AMC_gh-ask`)), 'the clone did not get the app URL');
 });
 
 test('credential probe still checks the service account while a NULL managed app exists', async () => {

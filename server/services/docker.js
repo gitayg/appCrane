@@ -592,7 +592,7 @@ async function runRootHelper({ image, hostDir, mountAt = '/target', entrypoint, 
  * throws with BOTH failures attached -- the host errno alone reads as "you are
  * not root" and hides the reason the container attempt did not save it.
  */
-export async function chownTreeAsRoot({ hostDir, owner, image }) {
+export async function chownTreeAsRoot({ hostDir, owner, image, ensureImage = null }) {
   assertMountablePath(hostDir, 'the directory to chown');
   try {
     await execFileAsync('chown', ['-R', owner, hostDir], { timeout: 30000 });
@@ -600,6 +600,7 @@ export async function chownTreeAsRoot({ hostDir, owner, image }) {
   } catch (hostErr) {
     const hostMsg = (hostErr?.stderr?.toString() || hostErr.message).trim();
     try {
+      if (ensureImage) await ensureImage();
       await runRootHelper({ image, hostDir, entrypoint: 'chown', args: ['-R', owner, '/target'] });
       return 'container';
     } catch (e) {
@@ -669,7 +670,7 @@ function ensureVolumesRoot(root) {
 /** The helper image, on this host. Pulled BY DIGEST when absent: the bytes
  *  are fixed, so the one registry round-trip cannot change what runs. */
 let helperImageReady = false;
-async function ensureHelperImage() {
+export async function ensureHelperImage() {
   if (helperImageReady) return;
   try { await dockerExec(['image', 'inspect', '--format', '{{.Id}}', HELPER_IMAGE], { timeout: 30000 }); } catch {
     await dockerExec(['pull', HELPER_IMAGE], { timeout: 300000 });

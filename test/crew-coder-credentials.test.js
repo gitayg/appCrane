@@ -10,7 +10,7 @@ import { join } from 'path';
 // with network access, and the app login is mounted as a writable copy whose
 // rewrite is stored back for the app (claudeCredentials.js pushCopy), so the
 // copy could be read out or replaced. Here the real credential decision and
-// the real docker argv (runAgentNewArgs) run for each Crew turn, with the app
+// the real docker argv and stdin credential (runAgentNewPlan) of each Crew turn, with the app
 // login stored for the app in every case:
 //   - owner has a Claude token -> CLAUDE_CODE_OAUTH_TOKEN, nothing else;
 //   - owner has none, platform key set -> ANTHROPIC_API_KEY, no app login;
@@ -27,7 +27,7 @@ const { initDb, getDb } = await import('../server/db.js');
 initDb();
 const db = getDb();
 const { defaultCoderRunner } = await import('../server/services/crewAppCoderRunner.js');
-const { runAgentNewArgs } = await import('../server/services/llm/runAgent.js');
+const { runAgentNewArgs, runAgentNewPlan, stdinCredentialScript } = await import('../server/services/llm/runAgent.js');
 const { setCredentials } = await import('../server/services/claudeCredentials.js');
 const { setUserClaudeToken, clearUserClaudeToken } = await import('../server/services/userClaudeToken.js');
 
@@ -45,7 +45,7 @@ const app = db.prepare('SELECT * FROM apps WHERE id = 1').get();
 setCredentials('shop', { access_token: APP_ACCESS, refresh_token: APP_REFRESH });
 
 function harness() {
-  const calls = { argv: [], started: 0, admitted: 0, reserved: 0, released: 0 };
+  const calls = { argv: [], stdin: [], opts: [], started: 0, admitted: 0, reserved: 0, released: 0 };
   const deps = {
     getOrCreateContainer: async () => { calls.started += 1; return { containerId: 'ctr-shop', workspaceDir: WORKSPACE }; },
     setContainerBusy: () => {},
@@ -55,7 +55,10 @@ function harness() {
     removeContainer: () => {},
     // The real argv, from the options the runner hands over.
     runAgentNew: (opts) => {
-      calls.argv.push(runAgentNewArgs(opts));
+      calls.opts.push(opts);
+      const plan = runAgentNewPlan(opts);
+      calls.argv.push(plan.args);
+      calls.stdin.push(plan.stdinCredential);
       const r = new EventEmitter();
       r.start = () => setImmediate(() => {
         r.emit('system', { data: { session_id: 'crew-sid' } });
@@ -76,12 +79,25 @@ function harness() {
   return { deps, calls };
 }
 
-function envOf(argv) {
+/**
+ * Every variable a turn's container gets: the -e pairs plus the credential
+ * written to its stdin, which counts only if the argv really reads it.
+ */
+function envOf(argv, stdin) {
   const out = {};
   for (let i = 0; i < argv.length - 1; i++) {
     if (argv[i] !== '-e') continue;
     const eq = argv[i + 1].indexOf('=');
     out[argv[i + 1].slice(0, eq)] = argv[i + 1].slice(eq + 1);
+    // A credential is never a plain -e (argv is in `ps`, -e is in `docker inspect`).
+    if (/^(ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN)$/.test(argv[i + 1].slice(0, eq))) {
+      assert.equal(argv[i + 1].slice(eq + 1), '', `${argv[i + 1].slice(0, eq)} is on the argv`);
+    }
+  }
+  if (stdin) {
+    assert.ok(argv.includes('-i') && argv.includes(stdinCredentialScript(stdin.name)), `the argv reads ${stdin.name} from stdin`);
+    assert.ok(!argv.some((a) => a.includes(stdin.value)), 'the stdin credential is not also on the argv');
+    out[stdin.name] = stdin.value;
   }
   return out;
 }
@@ -101,7 +117,7 @@ test('owner with a Claude token: only the token, never the app login', async () 
     const { deps, calls } = harness();
     const r = await defaultCoderRunner({ app, userId: 42, prompt: 'P', taskId: 'c1' }, deps);
     assert.equal(r.ok, true, r.reason);
-    const env = envOf(calls.argv[0]);
+    const env = envOf(calls.argv[0], calls.stdin[0]);
     assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, USER_TOKEN);
     assert.ok(!('ANTHROPIC_API_KEY' in env));
     assertNoAppLogin(calls.argv[0]);
@@ -117,8 +133,11 @@ test('owner without a token, platform key set: the platform key, never the app l
     const { deps, calls } = harness();
     const r = await defaultCoderRunner({ app, userId: 42, prompt: 'P', taskId: 'c2' }, deps);
     assert.equal(r.ok, true, r.reason);
-    const env = envOf(calls.argv[0]);
+    const env = envOf(calls.argv[0], calls.stdin[0]);
+    // The key goes to the runner, which writes it to the container's stdin.
+    assert.equal(calls.opts[0].apiKey, API_KEY);
     assert.equal(env.ANTHROPIC_API_KEY, API_KEY);
+    assert.ok(!calls.argv[0].some((a) => a.includes(API_KEY)), 'the key is never on the argv');
     assert.ok(!('CLAUDE_CODE_OAUTH_TOKEN' in env));
     assertNoAppLogin(calls.argv[0]);
   } finally {

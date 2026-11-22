@@ -15,6 +15,7 @@ import {
 import {
   usesLocalRepo, refuseLocalRepoPhase, checkoutForAnalysis, removeAnalysisCheckout, recordAnalysisAsRequest,
 } from './localAnalysis.js';
+import { regularFileInside } from '../../utils/paths.js';
 import log from '../../utils/logger.js';
 
 const POLL_MS          = parseInt(process.env.APPSTUDIO_POLL_MS || '5000', 10);
@@ -626,6 +627,14 @@ async function handleBuild(job) {
   }
 }
 
+export function deployedPackageVersion(slug) {
+  const current = join(resolve(process.env.DATA_DIR || './data'), 'apps', slug, 'production', 'current');
+  const pkgPath = join(current, 'package.json');
+  // A committed symlink would put a value from a host file in the request (utils/paths.js).
+  if (!regularFileInside(current, pkgPath)) return null;
+  return JSON.parse(readFileSync(pkgPath, 'utf8')).version || null; // host-read-ok: production/current, a release dir AppCrane deployed
+}
+
 async function handleOpenPr(job) {
   const db = getDb();
   const enh = getEnhancement(job.enhancement_id);
@@ -768,13 +777,10 @@ async function handleOpenPr(job) {
     // show "v1.2.3" instead of a dead branch name after merge.
     let releasedVersion = null;
     try {
-      const pkgPath = join(resolve(process.env.DATA_DIR || './data'), 'apps', app.slug, 'production', 'current', 'package.json');
-      if (existsSync(pkgPath)) {
-        const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')); // host-read-ok: production/current, a release dir AppCrane deployed
-        if (pkg.version) {
-          releasedVersion = `v${pkg.version}`;
-          db.prepare('UPDATE enhancement_requests SET fix_version = ? WHERE id = ?').run(releasedVersion, enh.id);
-        }
+      const version = deployedPackageVersion(app.slug);
+      if (version) {
+        releasedVersion = `v${version}`;
+        db.prepare('UPDATE enhancement_requests SET fix_version = ? WHERE id = ?').run(releasedVersion, enh.id);
       }
       // Fallback to short SHA if no package.json version exists
       if (!releasedVersion && mergeData.sha) {

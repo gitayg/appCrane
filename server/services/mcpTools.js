@@ -35,6 +35,7 @@ import { myRules } from './crewDecisions.js';
 import { fetchAppProbe } from './appProbeFetch.js';
 import { normalizeFrameAncestors } from '../utils/frameAncestors.js';
 import { secretPreview, opaquePreview, secretFingerprint } from './secretMask.js';
+import { REF_SOURCE, assertStorableValue, assertStoreRequest, isSecretRef, storeAppSecrets } from './secretRefs.js';
 import { isCoderKey, assertCoderToolAllowed, CODER_MCP_TOOLS } from './coderMcpKey.js';
 import { coderRequestsView } from './coderRequestView.js';
 import { recordAuditEvent } from './eventStore.js';
@@ -43,6 +44,10 @@ import { deleteAppTool } from './mcpGaps/deleteAppTool.js';
 import { getAuditTool } from './mcpGaps/getAuditTool.js';
 import { submitFeedbackTool } from './feedback/mcpTool.js';
 import { redactFeedbackAuditArgs } from './feedback/submit.js';
+import {
+  recordPush, recentPushes, singleFilePushAdvice, halfPushedBuildAdvice, largeInlineAdvice,
+  missingDataDirs, uploadCreatedDirAdvice, adviceField, withAdviceNote, toMs, ADVICE_WINDOW_MS,
+} from './deployAdvice.js';
 
 /**
  * The commit part of a managed-push response. A GitHub commit carries its web
@@ -314,6 +319,89 @@ function assertAgentContextSize(text) {
       + 'It is prepended to every coder dispatch, so it has to stay small — summarise or prune it.'
     );
   }
+}
+
+// Deploy advice (deployAdvice.js). Everything below degrades to "no advice":
+// a hint about HOW the agent deploys must never fail the call it rides on.
+
+// A warn-level rule that fired is written once per app into the agent context,
+// so the coder reads it on every dispatch, not only the agent that saw it.
+function persistAdviceNotes(slug, items) {
+  for (const item of items || []) {
+    try {
+      const next = withAdviceNote(readAgentContext(slug), item);
+      if (next == null) continue;
+      assertAgentContextSize(next);
+      writeAgentContext(slug, next);
+    } catch (_) { /* over the cap or unwritable: skip silently */ }
+  }
+}
+
+// After a committed managed push: record it, then R1 (and R3 for inline files).
+// Only a local repository's push deploys through AppCrane, so only those are
+// recorded: a GitHub-backed managed app keeps the push response it always had
+// (test/deploy-on-push-github-unchanged.test.js).
+function pushAdvice(app, result, inlineFiles = []) {
+  try {
+    const files = (result?.files?.length || 0) + (result?.deleted?.length || 0);
+    if (usesLocalRepo(app)) recordPush(app.slug, { files, commit: result?.commit?.sha || null });
+    const field = adviceField([singleFilePushAdvice(app.slug), largeInlineAdvice(inlineFiles)]);
+    if (field.advice) persistAdviceNotes(app.slug, field.advice);
+    return field;
+  } catch (_) { return {}; }
+}
+
+// Pushes to the app, from the in-memory ring and from the managed-push delivery
+// log (which survives a restart and also sees coder releases). One entry per
+// commit: a push that deployed both envs logs two delivery rows.
+function knownPushes(db, appId, slug) {
+  const out = recentPushes(slug).map((p) => ({ at: p.at, commit: p.commit }));
+  try {
+    const rows = db.prepare(
+      "SELECT received_at, commit_hash FROM webhook_deliveries WHERE app_id = ? AND event = 'managed-push' ORDER BY id DESC LIMIT 100",
+    ).all(appId);
+    for (const r of rows) {
+      const at = toMs(r.received_at);
+      if (at == null) continue;
+      const c = r.commit_hash ? String(r.commit_hash).toLowerCase() : null;
+      if (c && out.some((p) => p.commit && String(p.commit).toLowerCase().startsWith(c))) continue;
+      out.push({ at, commit: c });
+    }
+  } catch (_) { /* the ring alone */ }
+  return out;
+}
+
+// R2 for one deployment, plus R1 while it is active. `dep` needs id, status,
+// started_at, commit_hash; its log is read here only when it failed. Called
+// from read-only tools, so the note is written only for a caller who could
+// write the agent context themselves.
+function deploymentAdvice(db, appId, slug, dep, { persist = false } = {}) {
+  try {
+    if (!dep) return {};
+    let d = dep;
+    if (d.status === 'failed' && d.log === undefined) {
+      d = { ...d, log: db.prepare('SELECT log FROM deployments WHERE id = ?').get(d.id)?.log || '' };
+    }
+    const field = adviceField([halfPushedBuildAdvice(slug, d, knownPushes(db, appId, slug)), singleFilePushAdvice(slug)]);
+    if (field.advice && persist) persistAdviceNotes(slug, field.advice);
+    return field;
+  } catch (_) { return {}; }
+}
+
+// appcrane_get_app: the rules active for the app now. R2 counts only for a
+// failed deployment that started inside the window.
+function appAdvice(db, app, recentDeploys, { persist = false } = {}) {
+  try {
+    const now = Date.now();
+    const failed = (recentDeploys || []).find((d) => d.status === 'failed'
+      && toMs(d.started_at) != null && now - toMs(d.started_at) <= ADVICE_WINDOW_MS);
+    if (failed) return deploymentAdvice(db, app.id, app.slug, failed, { persist });
+    return adviceField([singleFilePushAdvice(app.slug)]);
+  } catch (_) { return {}; }
+}
+
+function canWriteAgentContext(user, slug) {
+  try { return isAppAdmin(user, getAppForUser(user, slug)); } catch (_) { return false; }
 }
 
 function isAppAdmin(user, app) {
@@ -887,6 +975,7 @@ const TOOLS = [
           show_sandbox:    getShowSandbox(db, app.id),
           separate_sandbox_db: getSeparateSandboxDb(db, app.id),
         },
+        ...appAdvice(db, app, recentDeploys, { persist: canWriteAgentContext(user, app.slug) }),
       };
     },
   },
@@ -1025,6 +1114,7 @@ const TOOLS = [
       'For a PRODUCTION value you may not reveal (anyone but the app owner or a platform admin), length and fingerprint are left out and the preview is fully masked. ' +
       'This is what you want for "is X set?", "did the key change?", "which vars exist?". ' +
       'Does NOT return plaintext — a secret never lands in the transcript. To read one actual value, use appcrane_reveal_secret with a specific key. ' +
+      'A var that is a Secrets Manager reference also has source="secrets_manager" and value set to the reference text (secretsmanager:<NAME>[#field]); the value in AWS is never fetched. ' +
       'Defaults to sandbox; pass env="production" only when the user explicitly says production. App-admin or AppCrane admin only.',
     inputSchema: {
       type: 'object',
@@ -1051,9 +1141,10 @@ const TOOLS = [
         let plain = null;
         try { plain = decrypt(r.value_encrypted); } catch (_) { /* below */ }
         if (plain == null) return { key: r.key, is_set: true, error: 'decrypt_failed', updated_at: r.updated_at };
+        const ref = isSecretRef(plain) ? { value: plain, source: REF_SOURCE } : {};
         // An app admin who may not reveal production sees neither its length nor its tail.
-        if (!canReveal) return { key: r.key, is_set: true, preview: opaquePreview(plain), updated_at: r.updated_at };
-        return { key: r.key, is_set: true, length: plain.length, preview: secretPreview(plain), fingerprint: secretFingerprint(plain), updated_at: r.updated_at };
+        if (!canReveal) return { key: r.key, is_set: true, ...ref, preview: opaquePreview(plain), updated_at: r.updated_at };
+        return { key: r.key, is_set: true, ...ref, length: plain.length, preview: secretPreview(plain), fingerprint: secretFingerprint(plain), updated_at: r.updated_at };
       });
       log.info(`MCP: env metadata (masked) read for ${app.slug}/${env} by user ${user.id}`);
       return {
@@ -1069,7 +1160,7 @@ const TOOLS = [
       'Reveal the PLAINTEXT of ONE secret by key. Use ONLY when the user explicitly needs the actual value — it will appear in this ' +
       'conversation transcript, so treat the transcript as sensitive afterward (and consider rotating the secret if the transcript may be stored/shared). ' +
       'For checking whether a var is set, comparing values, or seeing what exists, use appcrane_get_secret (masked) instead — do NOT reveal just to inspect config. ' +
-      'Single key only — it never dumps the whole env. Every reveal is audit-logged. Defaults to sandbox; env="production" only when the user explicitly asks. App admins can reveal sandbox values; a PRODUCTION value needs the app owner or a platform admin.',
+      'Single key only — it never dumps the whole env. Every reveal is audit-logged. For a Secrets Manager reference this returns the reference text with source="secrets_manager" and never fetches the value from AWS. Defaults to sandbox; env="production" only when the user explicitly asks. App admins can reveal sandbox values; a PRODUCTION value needs the app owner or a platform admin.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1109,7 +1200,7 @@ const TOOLS = [
         logAudit(user.id, app.id, 'secret-reveal', { env, key: args.key });
       } catch (_) { /* audit is best-effort */ }
       log.warn(`MCP: SECRET REVEAL ${app.slug}/${env}/${args.key} by user ${user.id}`);
-      return { app: app.slug, env, key: args.key, value, updated_at: row.updated_at };
+      return { app: app.slug, env, key: args.key, value, ...(isSecretRef(value) && { source: REF_SOURCE }), updated_at: row.updated_at };
     },
   },
 
@@ -1267,7 +1358,7 @@ const TOOLS = [
   {
     name: 'appcrane_promote',
     description:
-      'Promote the current live SANDBOX release to production — the gated sandbox→prod path. Refuses unless sandbox is live AND currently healthy (you do not ship a broken sandbox to prod), and the promoted prod release is health-checked with auto-revert. For github apps this rebuilds production from the EXACT sandbox commit; for managed/upload apps it copies the exact tested sandbox release. Owner-only (or platform admin).',
+      'Promote the current live SANDBOX release to production — the gated sandbox→prod path. Refuses unless sandbox is live AND currently healthy (you do not ship a broken sandbox to prod), and the promoted prod release is health-checked with auto-revert. For github and managed apps this rebuilds production from the EXACT sandbox commit; for upload apps, and any sandbox release made by appcrane_deploy_artifact, it copies the exact tested sandbox release. Owner-only (or platform admin).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1447,13 +1538,12 @@ const TOOLS = [
       const env = args.env === 'production' ? 'production' : 'sandbox';
       const app = getAppForUser(user, args.slug);
       const safePath = validateContainerPath(args.path || '/app');
-      const { execFileSync } = await import('child_process');
+      const execFileAsync = (await import('util')).promisify((await import('child_process')).execFile);
       const containerName = `appcrane-${app.slug}-${env}`;
       try {
-        const out = execFileSync('docker', ['exec', containerName, 'ls', '-la', '--', safePath], {
-          stdio: 'pipe',
+        const { stdout: out } = await execFileAsync('docker', ['exec', containerName, 'ls', '-la', '--', safePath], {
           timeout: 5000,
-        }).toString();
+        });
         return { app: app.slug, env, path: safePath, listing: out };
       } catch (e) {
         const detail = e.stderr?.toString().trim() || e.message;
@@ -1483,16 +1573,15 @@ const TOOLS = [
       const env = args.env === 'production' ? 'production' : 'sandbox';
       const app = getAppForUser(user, args.slug);
       const safePath = validateContainerPath(args.path);
-      const { execFileSync } = await import('child_process');
+      const execFileAsync = (await import('util')).promisify((await import('child_process')).execFile);
       const containerName = `appcrane-${app.slug}-${env}`;
       const MAX_BYTES = 256 * 1024;
       // Probe size first so we don't pull a multi-MB file into the response.
       let size;
       try {
-        const sizeOut = execFileSync('docker', ['exec', containerName, 'stat', '-c', '%s', '--', safePath], {
-          stdio: 'pipe',
+        const sizeOut = (await execFileAsync('docker', ['exec', containerName, 'stat', '-c', '%s', '--', safePath], {
           timeout: 5000,
-        }).toString().trim();
+        })).stdout.trim();
         size = parseInt(sizeOut, 10);
       } catch (e) {
         const detail = e.stderr?.toString().trim() || e.message;
@@ -1502,11 +1591,10 @@ const TOOLS = [
         throw new Error(`File too large (${size} bytes > ${MAX_BYTES} cap). Use a tail/head invocation outside this tool, or read a specific range.`);
       }
       try {
-        const out = execFileSync('docker', ['exec', containerName, 'cat', '--', safePath], {
-          stdio: 'pipe',
+        const { stdout: out } = await execFileAsync('docker', ['exec', containerName, 'cat', '--', safePath], {
           timeout: 5000,
           maxBuffer: MAX_BYTES + 1024,
-        }).toString();
+        });
         return { app: app.slug, env, path: safePath, size, content: out };
       } catch (e) {
         const detail = e.stderr?.toString().trim() || e.message;
@@ -1914,15 +2002,14 @@ const TOOLS = [
       const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
       if (row.expires_at < now)       throw new Error(`staged file expired at ${row.expires_at}`);
 
-      const { execFileSync } = await import('child_process');
+      const execFileAsync = (await import('util')).promisify((await import('child_process')).execFile);
       const containerName = `appcrane-${app.slug}-${env}`;
       const cpSpec = `${containerName}:${safeDest}`;
       try {
         // -a: the copy belongs to the container's user. Without it docker cp
         // keeps the staged file's owner, root, and an app running as node gets
         // EACCES on its own upload (measured: 0:0 without, 1000:1000 with).
-        execFileSync('docker', ['cp', '-a', row.scratch_path, cpSpec], {
-          stdio: 'pipe',
+        await execFileAsync('docker', ['cp', '-a', row.scratch_path, cpSpec], {
           timeout: 30000,
         });
       } catch (e) {
@@ -1989,10 +2076,16 @@ const TOOLS = [
       if (!initial) throw new Error(`Deployment #${id} not found`);
       // getAppForUser throws Forbidden if the caller can't see the app.
       getAppForUser(user, initial.app_slug);
+      const withAdvice = (out) => ({
+        ...out,
+        ...deploymentAdvice(db, initial.app_id, initial.app_slug, {
+          id, status: out.status, started_at: out.started_at, commit_hash: out.commit_hash,
+        }, { persist: canWriteAgentContext(user, initial.app_slug) }),
+      });
 
       // Already terminal? Return immediately.
       if (TERMINAL.has(initial.status)) {
-        return {
+        return withAdvice({
           deployment_id: id,
           app: initial.app_slug,
           env: initial.env,
@@ -2005,7 +2098,7 @@ const TOOLS = [
           failure_reason: initial.failure_reason ?? null,
           timed_out: false,
           waited_ms: 0,
-        };
+        });
       }
 
       // Poll once per 2s until terminal or timeout. setInterval-style with
@@ -2033,7 +2126,7 @@ const TOOLS = [
           };
         }
         if (TERMINAL.has(row.status)) {
-          return {
+          return withAdvice({
             deployment_id: id,
             app: initial.app_slug,
             env: initial.env,
@@ -2046,13 +2139,13 @@ const TOOLS = [
           failure_reason: row.failure_reason ?? null,
             timed_out: false,
             waited_ms: Date.now() - start,
-          };
+          });
         }
       }
 
       // Timed out — give the caller back the latest known state.
       const last = stmt.get(id) || initial;
-      return {
+      return withAdvice({
         deployment_id: id,
         app: initial.app_slug,
         env: initial.env,
@@ -2066,7 +2159,7 @@ const TOOLS = [
         timed_out: true,
         waited_ms: Date.now() - start,
         next: `Deployment still ${last.status} after ${timeoutSec}s. Call appcrane_wait_deploy again or use appcrane_get_logs to see what's happening.`,
-      };
+      });
     },
   },
 
@@ -2137,6 +2230,7 @@ const TOOLS = [
         line_count:      trimmed.length,
         truncated,
         original_line_count: lines.length,
+        ...deploymentAdvice(db, row.app_id, row.app_slug, row, { persist: canWriteAgentContext(user, row.app_slug) }),
       };
     },
   },
@@ -2220,13 +2314,19 @@ const TOOLS = [
       normalizeIntake(args.intake || {});
       if (!name || !slug) throw new Error('name and slug are required');
       { const slugProblem = slugRefusal(slug, user); if (slugProblem) throw new Error(slugProblem); }
-      if (args.branch && !/^[A-Za-z0-9._/\-]{1,200}$/.test(args.branch)) {
-        throw new Error('branch must be alphanumeric with . _ / - (max 200 chars)');
+      if (args.branch && !/^(?!-)[A-Za-z0-9._/\-]{1,200}$/.test(args.branch)) {
+        throw new Error('branch must be alphanumeric with . _ / - (max 200 chars), not starting with -');
       }
       // image_ref alone is enough to mean 'image'. An agent that passes the
       // reference but forgets the discriminator would otherwise create a github
       // app carrying an image reference nothing reads.
       const sourceType = args.source_type || (args.image_ref ? 'image' : 'github');
+      // The schema's enum leaves 'managed' out, but nothing enforces it at call
+      // time. A managed app with any github_url clones with the platform's
+      // service-account token, and this tool is open to platform.create_app.
+      if (sourceType === 'managed' && !isAdmin(user)) {
+        throw new Error("source_type='managed' with a chosen github_url is limited to platform admins; use appcrane_create_managed_app");
+      }
       const image = await validateImageFields(args);
       if (sourceType === 'image') {
         if (!image.image_ref) throw new Error("source_type='image' requires image_ref");
@@ -2407,8 +2507,8 @@ const TOOLS = [
         updates.github_url = args.github_url || null;
       }
       if (args.branch !== undefined) {
-        if (args.branch && !/^[A-Za-z0-9._/\-]{1,200}$/.test(args.branch)) {
-          throw new Error('branch must be alphanumeric with . _ / - (max 200 chars)');
+        if (args.branch && !/^(?!-)[A-Za-z0-9._/\-]{1,200}$/.test(args.branch)) {
+          throw new Error('branch must be alphanumeric with . _ / - (max 200 chars), not starting with -');
         }
         updates.branch = args.branch || null;
       }
@@ -3674,8 +3774,8 @@ const TOOLS = [
       const { submitIntake, normalizeIntake } = await import('./appIntake.js');
       normalizeIntake(args.intake || {});
       { const slugProblem = slugRefusal(slug, user); if (slugProblem) throw new Error(slugProblem); }
-      if (args.branch && !/^[A-Za-z0-9._/\-]{1,200}$/.test(args.branch)) {
-        throw new Error('branch must be alphanumeric with . _ / - (max 200 chars)');
+      if (args.branch && !/^(?!-)[A-Za-z0-9._/\-]{1,200}$/.test(args.branch)) {
+        throw new Error('branch must be alphanumeric with . _ / - (max 200 chars), not starting with -');
       }
 
       const db = getDb();
@@ -3966,6 +4066,9 @@ const TOOLS = [
         ...(result.deleted ? { deleted: result.deleted } : {}),
         message: result.message,
         ...pushDeployView(app.slug, result, `Files pushed. Next: appcrane_deploy slug="${app.slug}" stage="sandbox" to ship.`),
+        ...pushAdvice(app, result, inputFiles
+          .filter((f) => typeof f?.content === 'string' && !f.staged_token)
+          .map((f) => ({ path: f.path, bytes: f.encoding === 'base64' ? Buffer.from(f.content, 'base64').length : Buffer.byteLength(f.content, 'utf-8') }))),
       };
     },
   },
@@ -4132,6 +4235,7 @@ const TOOLS = [
         branch: result.branch,
         file:   { path: args.path, bytes: buf.length, sha256: fullSha, ...result.files[0] },
         ...pushDeployView(app.slug, result, `File committed. Next: appcrane_deploy slug="${app.slug}" stage="sandbox" to ship.`),
+        ...pushAdvice(app, result),
       };
     },
   },
@@ -4194,6 +4298,7 @@ const TOOLS = [
         branch: result.branch,
         file:   { path: args.path, bytes_before: current.bytes, bytes_after: Buffer.byteLength(patched, 'utf-8'), ...result.files[0] },
         ...pushDeployView(app.slug, result, `Patch committed. Next: appcrane_deploy slug="${app.slug}" stage="sandbox" to ship.`),
+        ...pushAdvice(app, result),
       };
     },
   },
@@ -4202,6 +4307,8 @@ const TOOLS = [
     name: 'appcrane_set_secret',
     description:
       'Set or update a secret (an encrypted environment variable injected into the app). Encrypted at rest; only the running app process can read the plaintext. ' +
+      'With store="secrets_manager" (needs a secrets provider on this AppCrane) the value goes to AWS Secrets Manager under this app and env\'s own path, and AppCrane keeps only the reference secretsmanager:<KEY>; do not call it more than once every 10 minutes per key. ' +
+      'You can also set a reference directly as the value: secretsmanager:<NAME> or secretsmanager:<NAME>#<jsonField>, where NAME holds only letters, digits, _ and - and always resolves under this app and env, never an ARN or a path. A reference is resolved at every deploy and restart, and one that cannot be read fails that deploy or restart. Removing the env var, or the app, does not delete the AWS secret. ' +
       'Defaults to sandbox; require explicit stage="production" only when the user asks. ' +
       'App-admin or AppCrane admin only. Respects the caller\'s mcp_app_scope.',
     inputSchema: {
@@ -4211,6 +4318,7 @@ const TOOLS = [
         env:   { type: 'string', enum: ['sandbox', 'production'], default: 'sandbox' },
         key:   { type: 'string', description: 'Env var name. Letters, digits, underscores; must not start with a digit.' },
         value: { type: 'string', description: 'The value to store (will be encrypted server-side).' },
+        store: { type: 'string', enum: ['secrets_manager'], description: 'Keep the value in AWS Secrets Manager instead of AppCrane\'s database. Omit for an ordinary encrypted env var.' },
       },
       required: ['slug', 'key', 'value'],
       additionalProperties: false,
@@ -4229,8 +4337,18 @@ const TOOLS = [
       if (!/^[A-Z_][A-Z0-9_]*$/i.test(args.key)) {
         throw new Error(`Invalid env var key: ${args.key} (must match /^[A-Z_][A-Z0-9_]*$/i)`);
       }
+      if (args.store !== undefined && args.store !== REF_SOURCE) throw new Error(`store must be "${REF_SOURCE}"`);
+      let stored = null;
+      if (args.store) {
+        assertStoreRequest(env, { [args.key]: args.value });
+        const { stored: done, failed } = await storeAppSecrets(app, env, { [args.key]: args.value });
+        if (failed) throw new Error(`${failed.key}: ${failed.reason}.`);
+        [stored] = done;
+      } else {
+        assertStorableValue(String(args.value));
+      }
       const db = getDb();
-      const encrypted = encrypt(String(args.value));
+      const encrypted = encrypt(stored ? stored.reference : String(args.value));
       db.prepare(`
         INSERT INTO env_vars (app_id, env, key, value_encrypted, updated_by, updated_at)
         VALUES (?, ?, ?, ?, ?, datetime('now'))
@@ -4240,7 +4358,7 @@ const TOOLS = [
           updated_at = excluded.updated_at
       `).run(app.id, env, args.key, encrypted, user.id);
       log.info(`MCP: env var ${args.key} set on ${app.slug}/${env} by user ${user.id}`);
-      return { app: app.slug, env, key: args.key, ok: true };
+      return { app: app.slug, env, key: args.key, ok: true, ...(stored && { source: REF_SOURCE, reference: stored.reference, aws_secret: stored.name }) };
     },
   },
 
@@ -4290,6 +4408,9 @@ const TOOLS = [
         ? Buffer.from(String(args.content), 'base64')
         : Buffer.from(String(args.content), 'utf-8');
 
+      // Measured before the write, which creates whatever is missing.
+      const dataRoot = resolve(process.env.DATA_DIR || './data', 'apps', app.slug, env, 'shared', 'data');
+      const createdDirs = missingDataDirs(dataRoot, rel);
       const { via } = await writeAppData({ dataDir: resolve(process.env.DATA_DIR || './data'), slug: app.slug, env, rel, buf });
 
       const sha256 = createHash('sha256').update(buf).digest('hex');
@@ -4304,6 +4425,7 @@ const TOOLS = [
         container_path: '/data/' + rel,
         container_path: `/data/${rel}`,
         written_via: via,
+        ...adviceField([uploadCreatedDirAdvice(rel, createdDirs)]),
       };
     },
   },
@@ -4311,7 +4433,7 @@ const TOOLS = [
   {
     name: 'appcrane_list_cron',
     description:
-      'List the scheduled jobs declared in an app\'s deployhub.json `cron` array (after the most recent deploy). Each entry includes the cron schedule, the command, when it last ran, the exit code, and the tail of the last run\'s stdout/stderr. Use to verify a job was registered, debug a missing run, or read the recent log. App-admin or owner.',
+      'List the scheduled jobs of an app: those declared in its deployhub.json `cron` array (origin "manifest", kind "exec": a docker exec) and those AppCrane created from the `crons` of its vercel.json (origin "vercel", kind "http": GET http_path on the app\'s own container, with Authorization: Bearer CRON_SECRET when the app sets CRON_SECRET), as of the most recent deploy. Each entry includes the cron schedule (UTC), the command, when it last ran, the exit code (0 = success; for an http job, a 2xx answer), last_http_status for an http job, and the tail of the last run\'s output. Use to verify a job was registered, debug a missing run, or read the recent log. App-admin or owner.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -4330,8 +4452,8 @@ const TOOLS = [
       const filters = args.env ? 'AND env = ?' : '';
       const params = args.env ? [app.id, args.env] : [app.id];
       const rows = db.prepare(`
-        SELECT id, env, name, schedule, command, enabled, timeout_seconds,
-               last_run_at, last_exit_code, last_log
+        SELECT id, env, name, kind, origin, schedule, command, http_path, enabled, timeout_seconds,
+               last_run_at, last_exit_code, last_http_status, last_log
         FROM app_cron_jobs
         WHERE app_id = ? ${filters}
         ORDER BY env, name
@@ -4343,13 +4465,13 @@ const TOOLS = [
   {
     name: 'appcrane_run_cron_now',
     description:
-      'Trigger a scheduled cron job RIGHT NOW, regardless of its schedule. Useful for "I want to test my daily rebuild without waiting until midnight" or "rerun yesterday\'s failed job." Runs the same `docker exec` the tick loop would, against the app\'s container; updates last_run_at / last_exit_code / last_log just like a scheduled run. Returns the exit code and last-log tail. App-admin or owner. Idempotent: if the job is already running (mutex held), reports it and skips rather than overlapping.',
+      'Trigger a scheduled cron job RIGHT NOW, regardless of its schedule. Useful for "I want to test my daily rebuild without waiting until midnight" or "rerun yesterday\'s failed job." Runs the same `docker exec` the tick loop would against the app\'s container, or for a job from vercel.json the same GET of its path; updates last_run_at / last_exit_code / last_log just like a scheduled run. Returns the exit code and last-log tail. App-admin or owner. Idempotent: if the job is already running (mutex held), reports it and skips rather than overlapping.',
     inputSchema: {
       type: 'object',
       properties: {
         slug: { type: 'string' },
         env:  { type: 'string', enum: ['sandbox', 'production'], default: 'sandbox' },
-        name: { type: 'string', description: 'Job name from deployhub.json `cron[].name`.' },
+        name: { type: 'string', description: 'Job name from deployhub.json `cron[].name`, or the vercel:<path> name appcrane_list_cron shows for a vercel.json cron.' },
       },
       required: ['slug', 'name'],
       additionalProperties: false,
@@ -4361,7 +4483,7 @@ const TOOLS = [
       if (!isAppAdmin(user, app)) throw new Error('Forbidden: running cron jobs requires admin or app-admin role on this app');
       const db = getDb();
       const job = db.prepare(`
-        SELECT id, app_id, env, name, schedule, command, timeout_seconds
+        SELECT id, app_id, env, name, schedule, command, timeout_seconds, kind, http_path
         FROM app_cron_jobs
         WHERE app_id = ? AND env = ? AND name = ?
       `).get(app.id, env, String(args.name));
