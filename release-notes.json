@@ -1,4 +1,7 @@
 {
+  "2.140.2": [
+    "Maintenance: the GitHub Actions that build, scan and sign AppCrane releases are updated to their latest patch versions. Nothing changes for app owners."
+  ],
   "2.140.1": [
     "When connecting the GitHub App to an app fails because the repository isn't covered, AppCrane now says why (the repository isn't selected, or the App isn't installed) and links to the GitHub page that fixes it.",
     "Access requests are e-mailed to the app's admins (or its owners if it has none). Every other request goes to the app's owners. If nobody fits, platform admins get it.",
