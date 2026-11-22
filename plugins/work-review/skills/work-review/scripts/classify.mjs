@@ -13,7 +13,7 @@
 // and so is "don't forget ...". "Actually, can you also ..." adds work rather
 // than redirecting it. A soft opener ("hmm,", "ok,") may come first, and
 // "ok but ..." / "yes but ..." is a redirect whatever follows.
-export const CORRECTION_RE = /^(?:(?:hmm+|ok(?:ay)?|yes|sure)[,.]?\s+)?(?:no[,.! ]|nope|don'?t(?! forget)|do not|stop(?:[,.!]|$| it\b| that\b| doing\b)|wrong|actually\b(?![^.?!]*\b(?:also|thinking)\b)|instead|that'?s (?:not|wrong|the wrong)|not (?:what i|like that|that)|i said|i told you|i meant|i didn'?t (?:ask|want|mean|say)|put (?:that|it|them) back|why did you|you (?:forgot|missed|broke)|please don'?t|never |undo\b|revert\b|roll ?back\b|that (?:approach )?won'?t work)|^(?:ok(?:ay)?|yes|sure)[,.]?\s+but\b/i;
+export const CORRECTION_RE = /^(?:(?:hmm+|ok(?:ay)?|yes|sure)[,.]?\s+)?(?:no[,.! ]|nope|don'?t(?! forget)|do not(?! forget)|stop(?:[,.!]|$| it\b| that\b| doing\b)|wrong|actually\b(?![^.?!]*\b(?:also|thinking)\b)|instead|that'?s (?:not|wrong|the wrong)|not (?:what i|like that|that)|i said|i told you|i meant|i didn'?t (?:ask|want|mean|say)|put (?:that|it|them) back|why did you|you (?:forgot|missed|broke)|please don'?t(?! forget)|never |undo\b|revert\b|roll ?back\b|that (?:approach )?won'?t work)|^(?:ok(?:ay)?|yes|sure)[,.]?\s+but\b/i;
 // Concrete anchors in a prompt: a path or file name, code in backticks, an identifier,
 // an error/line reference, an HTTP route, a URL. A prompt with none of them makes
 // Claude go find out. The bare word "error" is not an anchor: "improve the error

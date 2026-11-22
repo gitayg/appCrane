@@ -498,6 +498,14 @@
     {
       "text": "ok, now the tests",
       "vague": true
+    },
+    {
+      "text": "Please don't forget to run the migrations",
+      "vague": true
+    },
+    {
+      "text": "Do not forget the changelog entry",
+      "vague": true
     }
   ],
   "heldOut": [
