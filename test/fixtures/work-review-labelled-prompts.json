@@ -1,0 +1,505 @@
+{
+  "about": "Prompts typed to Claude Code, labelled by a person by meaning, never by what work-review's patterns say. vague: Claude would have to go find out what or where before it could start. criteria: the prompt says when the work is done or how to check it. correction: it redirects or rejects what Claude just did. nudge: a bare go-ahead with no new instruction. Scored by test/work-review-classify.test.js; add a case whenever a real prompt is misjudged, with the label a person would give it. heldOut: prompts written and labelled after the patterns were last tuned, scored without tuning; they show how the patterns do on prompts they were not fitted to. Never tune against them: when you change a pattern, move them into cases and write a fresh heldOut set.",
+  "labelled": "2026-11-22",
+  "floors": {
+    "vague": {
+      "precision": 0.95,
+      "recall": 0.95
+    },
+    "criteria": {
+      "precision": 0.85,
+      "recall": 0.95
+    },
+    "correction": {
+      "precision": 0.9,
+      "recall": 0.95
+    },
+    "nudge": {
+      "precision": 0.95,
+      "recall": 0.95
+    }
+  },
+  "heldOutFloors": {
+    "vague": {
+      "precision": 0.75,
+      "recall": 0.95
+    },
+    "criteria": {
+      "precision": 0.65,
+      "recall": 0.5
+    },
+    "correction": {
+      "precision": 0.6,
+      "recall": 0.5
+    },
+    "nudge": {
+      "precision": 0.95,
+      "recall": 0.2
+    }
+  },
+  "cases": [
+    {
+      "text": "fix the bug",
+      "vague": true
+    },
+    {
+      "text": "it's broken again",
+      "vague": true
+    },
+    {
+      "text": "make it faster",
+      "vague": true
+    },
+    {
+      "text": "clean this up",
+      "vague": true
+    },
+    {
+      "text": "can you look into the login issue",
+      "vague": true
+    },
+    {
+      "text": "the tests are failing, fix them",
+      "vague": true
+    },
+    {
+      "text": "add dark mode",
+      "vague": true
+    },
+    {
+      "text": "why is it slow",
+      "vague": true
+    },
+    {
+      "text": "refactor the payment stuff so it's nicer",
+      "vague": true
+    },
+    {
+      "text": "do the same thing for the other page",
+      "vague": true
+    },
+    {
+      "text": "the deploy didn't work",
+      "vague": true
+    },
+    {
+      "text": "improve the error handling",
+      "vague": true
+    },
+    {
+      "text": "update the docs",
+      "vague": true
+    },
+    {
+      "text": "something is off with the dashboard numbers",
+      "vague": true
+    },
+    {
+      "text": "make the tests pass",
+      "vague": true,
+      "criteria": true
+    },
+    {
+      "text": "fix it so it returns the right thing",
+      "vague": true,
+      "criteria": true
+    },
+    {
+      "text": "the signup form should reject duplicate emails",
+      "vague": true,
+      "criteria": true
+    },
+    {
+      "text": "Fix the crash in `parseConfig` when the file is empty",
+      "vague": false
+    },
+    {
+      "text": "In server/routes/apps.js the PUT handler ignores the `env` field. Make it save it.",
+      "vague": false
+    },
+    {
+      "text": "TypeError: Cannot read properties of undefined (reading 'id') at deploy.js:42",
+      "vague": false
+    },
+    {
+      "text": "Rename getUserById() to findUser() everywhere",
+      "vague": false
+    },
+    {
+      "text": "See https://github.com/acme/api/issues/12 and implement what it asks",
+      "vague": false
+    },
+    {
+      "text": "Add a --dry-run flag to scripts/release.sh that prints the steps without running them",
+      "vague": false
+    },
+    {
+      "text": "npm test fails with status 500 from /api/health; find out why",
+      "vague": false
+    },
+    {
+      "text": "Move the retry logic from client/fetch.ts into a helper and use it in both callers",
+      "vague": false
+    },
+    {
+      "text": "The README.md install section still says Node 18; update it to 22",
+      "vague": false
+    },
+    {
+      "text": "Add a unit test for slugify() with an empty string and a string of only spaces",
+      "vague": false,
+      "criteria": false
+    },
+    {
+      "text": "Bump express in package.json to 5.1 and run the tests",
+      "vague": false
+    },
+    {
+      "text": "In the admin Users page, the role dropdown resets after saving. It should keep the saved role, and reloading the page should still show it. The save goes through the same endpoint as the name field, which works, so compare the two and fix the role one.",
+      "vague": false,
+      "criteria": true
+    },
+    {
+      "text": "We need the invoice export to include the customer's VAT number as its own column, after the company name, and the totals row has to stay last. Finance opens the file in Excel, so keep it as CSV with a header row. When you're done, export last month's invoices and check the column is filled for the EU customers.",
+      "vague": false,
+      "criteria": true
+    },
+    {
+      "text": "Add caching to getPrices() so it only calls the API once per minute; done when two calls within a minute make one request",
+      "vague": false,
+      "criteria": true
+    },
+    {
+      "text": "Make sure `npm run build` still passes after the change",
+      "vague": false,
+      "criteria": true
+    },
+    {
+      "text": "Change the timeout in config.yaml to 30s and verify the health check still passes",
+      "vague": false,
+      "criteria": true
+    },
+    {
+      "text": "Write the migration so that existing rows keep their created_at",
+      "vague": true,
+      "criteria": true
+    },
+    {
+      "text": "Stop the retry loop after 3 attempts instead of forever",
+      "vague": true,
+      "criteria": true
+    },
+    {
+      "text": "Clicking Save twice must not create two records",
+      "vague": true,
+      "criteria": true
+    },
+    {
+      "text": "The endpoint should return 404 for unknown ids, not 500",
+      "vague": true,
+      "criteria": true
+    },
+    {
+      "text": "Keep going until all of test/auth.test.js passes",
+      "vague": false,
+      "criteria": true
+    },
+    {
+      "text": "Add logging to the scheduler",
+      "vague": true,
+      "criteria": false
+    },
+    {
+      "text": "Please write a short summary of what changed in this branch",
+      "vague": true,
+      "criteria": false
+    },
+    {
+      "text": "no, I meant the other file",
+      "correction": true,
+      "vague": true
+    },
+    {
+      "text": "No. Put it back the way it was",
+      "correction": true,
+      "vague": true
+    },
+    {
+      "text": "that's not what I asked for",
+      "correction": true,
+      "vague": true
+    },
+    {
+      "text": "don't touch the tests",
+      "correction": true,
+      "vague": true
+    },
+    {
+      "text": "stop, you're editing the wrong repo",
+      "correction": true,
+      "vague": true
+    },
+    {
+      "text": "wrong branch",
+      "correction": true,
+      "vague": true
+    },
+    {
+      "text": "actually, use Postgres not SQLite",
+      "correction": true,
+      "vague": true
+    },
+    {
+      "text": "why did you delete the config?",
+      "correction": true,
+      "vague": true
+    },
+    {
+      "text": "you forgot the migration",
+      "correction": true,
+      "vague": true
+    },
+    {
+      "text": "Instead of a new endpoint, add the field to the existing GET /apps response",
+      "correction": true,
+      "vague": false
+    },
+    {
+      "text": "I said only the README",
+      "correction": true,
+      "vague": true
+    },
+    {
+      "text": "revert that, it broke the build",
+      "correction": true,
+      "vague": true
+    },
+    {
+      "text": "hmm, that's wrong, the total should include tax",
+      "correction": true,
+      "vague": true,
+      "criteria": true
+    },
+    {
+      "text": "That approach won't work because the worker has no network. Do it at build time.",
+      "correction": true,
+      "vague": true
+    },
+    {
+      "text": "undo the last change",
+      "correction": true,
+      "vague": true
+    },
+    {
+      "text": "not like that, keep the old function name",
+      "correction": true,
+      "vague": true
+    },
+    {
+      "text": "No need to run the full suite, just the auth tests",
+      "correction": true,
+      "vague": true
+    },
+    {
+      "text": "Now also do it for the export page",
+      "vague": true
+    },
+    {
+      "text": "Actually thinking about it more, let's also add a CSV export",
+      "vague": true
+    },
+    {
+      "text": "Don't forget to update the changelog when you're done",
+      "vague": true
+    },
+    {
+      "text": "Stop the dev server when you finish",
+      "vague": true
+    },
+    {
+      "text": "Never mind the styling, the logic is what matters",
+      "correction": true,
+      "vague": true
+    },
+    {
+      "text": "continue",
+      "nudge": true
+    },
+    {
+      "text": "go ahead",
+      "nudge": true
+    },
+    {
+      "text": "yes",
+      "nudge": true
+    },
+    {
+      "text": "ok",
+      "nudge": true
+    },
+    {
+      "text": "do it",
+      "nudge": true
+    },
+    {
+      "text": "keep going",
+      "nudge": true
+    },
+    {
+      "text": "Yes!",
+      "nudge": true
+    },
+    {
+      "text": "sure, go",
+      "nudge": true
+    },
+    {
+      "text": "lgtm, proceed",
+      "nudge": true
+    },
+    {
+      "text": "yes, and also add a test",
+      "nudge": false,
+      "vague": true
+    },
+    {
+      "text": "ok but use tabs",
+      "nudge": false,
+      "correction": true,
+      "vague": true
+    },
+    {
+      "text": "next, the settings page",
+      "nudge": false,
+      "vague": true
+    }
+  ],
+  "heldOut": [
+    {
+      "text": "the build is red",
+      "vague": true
+    },
+    {
+      "text": "look at what's wrong with notifications",
+      "vague": true
+    },
+    {
+      "text": "tidy up the imports",
+      "vague": true
+    },
+    {
+      "text": "can we make the page load quicker",
+      "vague": true
+    },
+    {
+      "text": "handle the edge cases",
+      "vague": true
+    },
+    {
+      "text": "Add pagination to the /api/users endpoint, 50 per page",
+      "vague": false
+    },
+    {
+      "text": "In utils/date.ts, formatDate() drops the timezone; keep it",
+      "vague": false
+    },
+    {
+      "text": "Port the Python script tools/report.py to Node",
+      "vague": false
+    },
+    {
+      "text": "ReferenceError: process is not defined in the browser bundle",
+      "vague": false
+    },
+    {
+      "text": "Upgrade the Dockerfile base image to node:22-slim and confirm the image still builds",
+      "vague": false,
+      "criteria": true
+    },
+    {
+      "text": "The search box should ignore leading spaces",
+      "vague": true,
+      "criteria": true
+    },
+    {
+      "text": "Done when the login page loads in under a second on the staging box",
+      "vague": true,
+      "criteria": true
+    },
+    {
+      "text": "Only stop when every lint warning is gone",
+      "vague": true,
+      "criteria": true
+    },
+    {
+      "text": "Write a commit message for this",
+      "vague": true
+    },
+    {
+      "text": "nope, the other one",
+      "correction": true,
+      "vague": true
+    },
+    {
+      "text": "Hmm no, keep the original wording",
+      "correction": true,
+      "vague": true
+    },
+    {
+      "text": "put that back",
+      "correction": true,
+      "vague": true
+    },
+    {
+      "text": "you broke the header",
+      "correction": true,
+      "vague": true
+    },
+    {
+      "text": "That's the wrong file, I meant routes/auth.js",
+      "correction": true,
+      "vague": false
+    },
+    {
+      "text": "I didn't ask you to change the CSS",
+      "correction": true,
+      "vague": true
+    },
+    {
+      "text": "Don't use any new dependencies for this",
+      "vague": true
+    },
+    {
+      "text": "Stop and summarise where you are",
+      "vague": true
+    },
+    {
+      "text": "Actually, can you also check the mobile layout?",
+      "vague": true
+    },
+    {
+      "text": "go for it",
+      "nudge": true
+    },
+    {
+      "text": "yep, continue",
+      "nudge": true
+    },
+    {
+      "text": "approved",
+      "nudge": true
+    },
+    {
+      "text": "sounds good",
+      "nudge": true
+    },
+    {
+      "text": "yes please",
+      "nudge": true
+    },
+    {
+      "text": "ok, now the tests",
+      "vague": true
+    }
+  ]
+}
