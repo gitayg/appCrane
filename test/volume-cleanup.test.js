@@ -46,7 +46,7 @@ const server = await new Promise((r) => {
 });
 after(() => { server.closeAllConnections?.(); server.close(); });
 
-test('deleting an app removes both envs\' volumes and leaves the data on disk', async () => {
+test('deleting an app removes both envs\' volumes and keeps the data, moved to the trash', async () => {
   db.prepare("INSERT INTO apps (name,slug,slot,source_type) VALUES ('V','vclean',990,'upload')").run();
   const data = join(process.env.DATA_DIR, 'apps', 'vclean', 'production', 'shared', 'volumes', 'config');
   mkdirSync(data, { recursive: true });
@@ -56,7 +56,9 @@ test('deleting an app removes both envs\' volumes and leaves the data on disk', 
   });
   assert.equal(r.status, 200, await r.text());
   assert.deepEqual(volumeRms().sort(), ['appcrane-vols-vclean-production', 'appcrane-vols-vclean-sandbox']);
-  assert.equal(readFileSync(join(data, 'state'), 'utf8'), 'KEEP');
+  const t = db.prepare("SELECT trash_path FROM app_trash WHERE slug = 'vclean' AND kind = 'app_dir'").get();
+  assert.ok(t, 'the data directory was recorded in the trash');
+  assert.equal(readFileSync(join(t.trash_path, 'production', 'shared', 'volumes', 'config', 'state'), 'utf8'), 'KEEP');
 });
 
 test('renaming an app removes the volumes named after the old slug', async () => {

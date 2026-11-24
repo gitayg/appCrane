@@ -58,7 +58,7 @@ function sessionFingerprint(req) {
 const MANUAL_WEBHOOK_STEPS = (slug) => [
   `On GitHub open the App's settings: your account (or organization) Settings → Developer settings → GitHub Apps → ${slug} → Edit.`,
   'Under "Webhook", tick "Active".',
-  'Under "Subscribe to events", tick "Push".',
+  'Under "Subscribe to events", tick "Push" and "Repository".',
   'Click "Save changes".',
 ];
 

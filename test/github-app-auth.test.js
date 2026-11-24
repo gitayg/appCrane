@@ -146,7 +146,7 @@ test('the manifest asks for read-only Contents, Metadata and Pull requests — n
   assert.deepEqual(r.body.manifest.default_permissions, { contents: 'read', metadata: 'read', pull_requests: 'read' });
   // push needs Contents read, which is already requested; CRANE_DOMAIN is unset
   // here, so webhook delivery stays off (test/github-app-webhook.test.js covers set).
-  assert.deepEqual(r.body.manifest.default_events, ['push']);
+  assert.deepEqual(r.body.manifest.default_events, ['push', 'repository']);
   assert.equal(r.body.manifest.public, false);
   assert.equal(r.body.manifest.hook_attributes.active, false);
   assert.ok(String(r.body.action).endsWith('/settings/apps/new'), r.body.action);

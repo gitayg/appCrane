@@ -71,14 +71,16 @@ export function DeploySupplyChain({ slug, a, onError }: { slug: string; a: Attes
   )
 }
 
+interface TrustEvent { env: string; kind: string; what: string | null; image_ref: string | null; image_id: string | null; reason: string | null; count: number; last_at: string }
+
 /** Manage page: SBOM and signature status of this app's recent deploys. */
 export function AppSupplyChainCard({ slug, reload = 0 }: { slug: string; reload?: number }) {
-  const [data, setData] = useState<{ mode: string; attestations: Attestation[] } | null>(null)
+  const [data, setData] = useState<{ mode: string; attestations: Attestation[]; trust_events?: TrustEvent[] } | null>(null)
   const [msg, setMsg] = useState('')
 
   useEffect(() => {
     setMsg('')
-    adminApi.get<{ mode: string; attestations: Attestation[] }>(`/api/apps/${encodeURIComponent(slug)}/attestations`)
+    adminApi.get<{ mode: string; attestations: Attestation[]; trust_events?: TrustEvent[] }>(`/api/apps/${encodeURIComponent(slug)}/attestations`)
       .then(setData)
       .catch((e) => setMsg((e as Error).message))
   }, [slug, reload])
@@ -91,6 +93,12 @@ export function AppSupplyChainCard({ slug, reload = 0 }: { slug: string; reload?
         {data && <> Verify-before-run is <b>{data.mode}</b>.</>}
       </p>
       {msg && <p style={{ ...dim, color: 'var(--red)' }}>{msg}</p>}
+      {(data?.trust_events || []).map((e) => (
+        <p key={`${e.env}/${e.kind}/${e.image_id}`} style={{ ...dim, color: e.kind === 'refused' ? 'var(--red)' : 'var(--orange)' }}>
+          <b>{e.kind === 'refused' ? `Image trust refused to ${e.what || 'start'} ${e.env}` : `${e.env} runs an unsigned image`}</b>
+          {' '}({e.count}x, last {e.last_at}): {e.reason}. {e.kind === 'refused' ? 'The container was left as it was. Redeploy, or ask a platform admin to sign the running images.' : 'Enforce mode would refuse its next restart.'}
+        </p>
+      ))}
       {data && data.attestations.length === 0 && <p style={dim}>No deploy of this app has been signed yet.</p>}
       {data && data.attestations.length > 0 && (
         <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>

@@ -1,5 +1,5 @@
-import { existsSync, renameSync } from 'fs';
-import { join, sep } from 'path';
+import { existsSync, lstatSync, readlinkSync, renameSync, symlinkSync, unlinkSync } from 'fs';
+import { join, relative, resolve, sep } from 'path';
 import { getDb } from '../db.js';
 import { getPortsForSlot } from './portAllocator.js';
 import { resolveSafe } from '../utils/paths.js';
@@ -9,6 +9,8 @@ import { slugRefusal, slugTakenRefusal } from '../utils/slugPolicy.js';
 import { isAppOwnerOrPlatformAdmin } from './permissions.js';
 import log from '../utils/logger.js';
 import { syncAppCoders } from './crew.js';
+import { reconcilerLive } from './reconcileState.js';
+import { appDirsFor, dataRoot } from './appTrash.js';
 
 // Renaming an app, for both front doors.
 //
@@ -74,10 +76,59 @@ export async function renameApp({ app, newSlug, redirect = true, user }) {
   if (existsSync(newDir)) {
     throw new AppError(
       `'${newSlug}' is free as a slug but data/apps/${newSlug} still exists on disk — most likely `
-      + `left behind by a deleted app, which clears the database rows but not the directory. `
-      + `Remove that directory on the server, then rename.`,
+      + `left behind by an app deleted before deletes moved it to the trash. A platform admin can `
+      + `move it to the trash from the Reconcile page (orphan directory), then rename.`,
       409, 'TARGET_DIR_EXISTS',
     );
+  }
+  // A Crane-hosted repository is named after the slug too (localGit.repoPath),
+  // and was never moved: the renamed app pointed at a repository that did not
+  // exist, and the old one sat under the old name.
+  const reposBase = join(process.env.DATA_DIR || './data', 'repos');
+  const oldRepo = resolveSafe(reposBase, `${oldSlug}.git`);
+  const newRepo = resolveSafe(reposBase, `${newSlug}.git`);
+  if (existsSync(oldRepo) && existsSync(newRepo)) {
+    throw new AppError(
+      `'${newSlug}' is free as a slug but repos/${newSlug}.git still exists on disk. A platform admin can `
+      + `move it to the trash from the Reconcile page (orphan repository), then rename.`,
+      409, 'TARGET_REPO_EXISTS',
+    );
+  }
+  // Every other per-app directory is named after the slug too: backups, the
+  // coder's transcripts, attestations, the studio npm cache.
+  const oldDirs = appDirsFor(oldSlug);
+  const newDirs = new Map(appDirsFor(newSlug).dirs);
+  const extraMoves = [];
+  for (const [kind, from] of oldDirs.dirs) {
+    if (kind === 'app_dir' || kind === 'repo') continue;
+    const to = newDirs.get(kind);
+    if (!to) {
+      if (existsSync(from)) throw new AppError(`'${newSlug}' cannot hold this app's ${kind} directory: that name is the platform's own there. Choose a different slug.`, 400, 'VALIDATION');
+      continue;
+    }
+    if (existsSync(from) && existsSync(to)) {
+      throw new AppError(
+        `'${newSlug}' is free as a slug but ${relative(dataRoot(), to)} still exists on disk. `
+        + 'A platform admin can move it to the trash from the Reconcile page, then rename.',
+        409, 'TARGET_DIR_EXISTS',
+      );
+    }
+    extraMoves.push([kind, from, to]);
+  }
+  for (const r of oldDirs.refused) {
+    if (r.kind === 'backups' && db.prepare('SELECT 1 FROM backups WHERE app_id = ?').get(app.id)) {
+      throw new AppError(`This app's backups are in ${r.path}, which also holds the platform's own archives, so they cannot be moved by a rename.`, 409, 'BACKUPS_NOT_MOVABLE');
+    }
+  }
+  // The coder container mounts app-containers/<slug>; a turn in flight would
+  // lose its workspace under it.
+  const coderDir = extraMoves.find(([k]) => k === 'coder_workspace');
+  let coder = null;
+  if (coderDir && existsSync(coderDir[1])) {
+    coder = await import('./builder/appContainer.js');
+    if (coder.getContainer(oldSlug)?.busy) {
+      throw new AppError('The app\'s coder is running a turn. Rename when it has finished.', 409, 'CODER_BUSY');
+    }
   }
 
 
@@ -156,38 +207,69 @@ export async function renameApp({ app, newSlug, redirect = true, user }) {
     await removeAppVolumes(oldSlug).catch(() => {});
   } catch (_) {}
 
-  // The row already says newSlug, so a failure here is the inconsistency in the
-  // other direction — a row naming a path that is not there. Put it back.
-  if (existsSync(oldDir)) {
-    try {
-      renameSync(oldDir, newDir);
-    } catch (e) {
-      db.transaction(() => {
-        db.pragma('defer_foreign_keys = ON');
-        db.prepare('UPDATE app_skills SET app_slug = ? WHERE app_slug = ?').run(oldSlug, newSlug);
-        db.prepare('UPDATE apps SET slug = ?, slug_aliases = ? WHERE id = ?')
-          .run(oldSlug, previousAliases, app.id);
-        db.prepare('DELETE FROM app_slug_renames WHERE id = ?').run(renameLogId);
-      })();
-      throw new AppError(
-        `Could not move the app's data directory (${e.message}). The rename was rolled back; `
-        + `the app is still '${oldSlug}' and its containers have been stopped — redeploy it.`,
-        500, 'RENAME_FAILED',
-      );
-    }
+  // Stopped the way an idle sweep stops it (uncommitted work preserved to a
+  // branch), so nothing writes to the directory while it moves.
+  if (coder) {
+    try { coder.evict(oldSlug, 'app renamed'); } catch (e) { log.warn(`Rename ${oldSlug} -> ${newSlug}: coder container not evicted: ${e.message}`); }
   }
 
-  // deployments.release_path is absolute, under the directory just moved.
-  // Left naming the old slug, rollback and promote refuse every release from
-  // before the rename with "Release directory missing on disk".
+  // The row already says newSlug, so a failure here is the inconsistency in the
+  // other direction — a row naming a path that is not there. Put it back.
+  // Absolute paths under the moved directories are rewritten in the same
+  // step: deployments.release_path (rollback and promote refuse a release
+  // whose directory is missing), backups.file_path and each database dump's
+  // file (restore confines dumps to backups/<slug>), deploy_attestations.dir
+  // and coder_sessions (the coder resumes its conversation by app_slug).
+  // A failure anywhere moves every directory back and restores the slug.
+  const moved = [];
+  const moves = [['app_dir', oldDir, newDir], ['repo', oldRepo, newRepo], ...extraMoves].filter(([, from]) => existsSync(from));
+  try {
+    for (const [, from, to] of moves) { renameSync(from, to); moved.push([from, to]); }
+    rewritePaths(db, app.id, oldSlug, newSlug, moves);
+  } catch (e) {
+    for (const [from, to] of moved.reverse()) {
+      try { renameSync(to, from); } catch (err) { log.error(`Rename rollback: could not move ${to} back: ${err.message}`); }
+    }
+    db.transaction(() => {
+      db.pragma('defer_foreign_keys = ON');
+      db.prepare('UPDATE app_skills SET app_slug = ? WHERE app_slug = ?').run(oldSlug, newSlug);
+      db.prepare('UPDATE apps SET slug = ?, slug_aliases = ? WHERE id = ?')
+        .run(oldSlug, previousAliases, app.id);
+      db.prepare('DELETE FROM app_slug_renames WHERE id = ?').run(renameLogId);
+    })();
+    throw new AppError(
+      `Could not move the app's data directory (${e.message}). The rename was rolled back; `
+      + `the app is still '${oldSlug}' and its containers have been stopped — redeploy it.`,
+      500, 'RENAME_FAILED',
+    );
+  }
   const oldPrefix = oldDir + sep;
-  db.prepare('UPDATE deployments SET release_path = ? || substr(release_path, ?) WHERE app_id = ? AND substr(release_path, 1, ?) = ?')
-    .run(newDir + sep, oldPrefix.length + 1, app.id, oldPrefix.length, oldPrefix);
+
+  // Each env's `current` is an absolute link into the directory just moved, so
+  // it dangled until a redeploy replaced it, and an env that is not redeployed
+  // (nothing live) kept a dead link.
+  for (const env of ['production', 'sandbox']) {
+    const link = join(newDir, env, 'current');
+    try {
+      if (!lstatSync(link, { throwIfNoEntry: false })?.isSymbolicLink()) continue;
+      const target = readlinkSync(link);
+      if (!target.startsWith(oldPrefix)) continue;
+      unlinkSync(link);
+      symlinkSync(newDir + sep + target.slice(oldPrefix.length), link);
+    } catch (e) {
+      log.warn(`Rename ${oldSlug} -> ${newSlug}: could not re-point ${env}/current: ${e.message}`);
+    }
+  }
 
   await reloadCaddy().catch((e) => log.warn(`Caddy reload after rename: ${e.message}`));
 
   // The app's Crew coder is named after the slug ("<slug>-coder").
   syncAppCoders(db, app.id);
+
+  // Each probe timer holds the slug it was armed with; re-arm under the new one.
+  if (reconcilerLive()) {
+    try { (await import('./healthChecker.js')).refreshAppChecks(app.id); } catch (e) { log.warn(`Rename: health checks not re-armed: ${e.message}`); }
+  }
 
   // DISTINCT: past releases keep status 'live', so without it this was one
   // redeploy per release ever shipped, all started at once.
@@ -210,4 +292,34 @@ export async function renameApp({ app, newSlug, redirect = true, user }) {
   }
 
   return { old_slug: oldSlug, new_slug: newSlug, redirect, redeploying: liveEnvs.map((r) => r.env) };
+}
+
+/** Every stored absolute path under a moved directory, re-pointed, in one transaction. */
+export function rewritePaths(db, appId, oldSlug, newSlug, moves) {
+  const pairs = moves.map(([kind, from, to]) => [kind, from + sep, to + sep]);
+  // routes/backups.js stores paths joined from DATA_DIR as configured, which
+  // may be relative; compared resolved, written back absolute.
+  const swap = (p, [, from, to]) => {
+    if (typeof p !== 'string') return p;
+    const abs = resolve(p);
+    return abs.startsWith(from) ? to + abs.slice(from.length) : p;
+  };
+  const prefixUpdate = (table, col, where = 'app_id = ?') => {
+    const stmt = db.prepare(`UPDATE ${table} SET ${col} = ? || substr(${col}, ?) WHERE ${where} AND substr(${col}, 1, ?) = ?`);
+    return (args, [, from, to]) => stmt.run(to, from.length + 1, ...args, from.length, from).changes;
+  };
+  db.transaction(() => {
+    const byKind = new Map(pairs.map((p) => [p[0], p]));
+    if (byKind.has('app_dir')) prefixUpdate('deployments', 'release_path')([appId], byKind.get('app_dir'));
+    if (byKind.has('backups')) {
+      const swapBackup = (p) => swap(p, byKind.get('backups'));
+      for (const b of db.prepare('SELECT id, file_path, databases FROM backups WHERE app_id = ?').all(appId)) {
+        const list = b.databases ? JSON.parse(b.databases).map((d) => ({ ...d, file: swapBackup(d.file) })) : null;
+        db.prepare('UPDATE backups SET file_path = ?, databases = ? WHERE id = ?').run(swapBackup(b.file_path), list ? JSON.stringify(list) : null, b.id);
+      }
+    }
+    if (byKind.has('attestations')) prefixUpdate('deploy_attestations', 'dir')([appId], byKind.get('attestations'));
+    if (byKind.has('coder_workspace')) prefixUpdate('coder_sessions', 'workspace_dir', 'app_slug = ?')([oldSlug], byKind.get('coder_workspace'));
+    db.prepare('UPDATE coder_sessions SET app_slug = ? WHERE app_slug = ?').run(newSlug, oldSlug);
+  })();
 }

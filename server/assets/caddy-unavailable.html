@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<meta name="appcrane-unavailable" content="__APPCRANE_ENV__">
+<meta http-equiv="refresh" content="20">
+<title>__APPCRANE_TITLE__</title>
+<style>
+:root { --bg: #f6f7f9; --card: #ffffff; --line: #e2e5ea; --text: #1b1e24; --muted: #5d6470; --accent: #2563eb; --badge: #eef1f5; }
+@media (prefers-color-scheme: dark) { :root { --bg: #0f1117; --card: #1a1d27; --line: #2a2d3a; --text: #e4e4e7; --muted: #a1a1aa; --accent: #3b82f6; --badge: #2a2d3a; } }
+* { box-sizing: border-box; }
+body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px 16px; background: var(--bg); color: var(--text); font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
+main { width: 100%; max-width: 480px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 32px 28px; text-align: center; }
+h1 { margin: 0 0 6px; font-size: 1.3rem; font-weight: 600; }
+.env { display: inline-block; margin-bottom: 14px; padding: 2px 8px; border-radius: 4px; background: var(--badge); color: var(--muted); font-size: .72rem; letter-spacing: .5px; text-transform: uppercase; }
+p { margin: 8px 0; color: var(--muted); }
+a.btn { display: inline-block; margin-top: 18px; padding: 8px 16px; border-radius: 6px; background: var(--accent); color: #fff; text-decoration: none; font-weight: 500; }
+.hint { margin-top: 16px; font-size: .8rem; }
+</style>
+</head>
+<body>
+<main>
+<h1>__APPCRANE_TITLE__</h1>
+<div class="env">__APPCRANE_ENV__</div>
+<p>__APPCRANE_DETAIL__</p>
+<p>It is usually back within a minute, for example after a restart or a deploy.</p>
+__APPCRANE_LINK__
+<p class="hint">This page tries again every 20 seconds. Served by AppCrane.</p>
+</main>
+</body>
+</html>

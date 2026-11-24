@@ -332,7 +332,13 @@ export async function probeGitHubApp() {
  * Webhook: GitHub's manifest `hook_attributes.active` "defaults to true" and
  * `default_events` is "The list of events the GitHub App subscribes to". The App
  * subscribes to `push` ("a GitHub App must have at least read-level access for
- * the 'Contents' repository permission", which it has). `installation` and
+ * the 'Contents' repository permission", which it has) and to `repository`
+ * ("a GitHub App must have at least read-level access for the 'Metadata'
+ * repository permission", which it has), so a rename or transfer on GitHub
+ * re-points the attached app (services/githubAppWebhook.js). `default_events`
+ * applies when the App is registered: an App registered before `repository`
+ * was listed receives it only once its owner ticks Repository under the App's
+ * "Subscribe to events" on GitHub. `installation` and
  * `installation_repositories` are not listed: "All GitHub Apps receive this
  * event by default. You cannot manually subscribe to this event."
  * Delivery is only switched on when CRANE_DOMAIN is set -- without it the
@@ -348,7 +354,7 @@ export function buildManifest({ baseUrl, name, webhooksActive = false }) {
     setup_url: `${base}/settings`,
     public: false,
     default_permissions: { contents: 'read', metadata: 'read', pull_requests: 'read' },
-    default_events: ['push'],
+    default_events: ['push', 'repository'],
   };
 }
 

@@ -51,6 +51,7 @@ function mkApp(slug, { authMode = 'authenticated', deployedAt = T0 - 30 * DAY } 
 const calls = [];
 const running = new Map();
 const fakeDeps = {
+  verifyTrust: async () => {},
   docker: async (args) => {
     calls.push(args.join(' '));
     if (args[0] === 'stop') running.set(args[1], 'exited');

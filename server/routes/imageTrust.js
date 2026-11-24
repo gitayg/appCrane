@@ -8,6 +8,9 @@ import { getTrustMode, getLicensePolicy, setTrustPolicy, MODES } from '../servic
 import { readDoc, rowForDeployment, FILES } from '../services/imageTrust/store.js';
 import { verifyRowDocuments } from '../services/imageTrust/verify.js';
 import { signCurrentImages } from '../services/imageTrust/backfill.js';
+import { backfillDiskImages } from '../services/imageTrust/diskBackfill.js';
+import { enforceReadiness } from '../services/imageTrust/readiness.js';
+import { openTrustEvents } from '../services/imageTrust/events.js';
 
 const router = Router();
 
@@ -66,7 +69,7 @@ export function summarize(db, row) {
 router.get('/apps/:slug/attestations', requireAuth, requireAppAccess, (req, res) => {
   const db = getDb();
   const rows = db.prepare('SELECT * FROM deploy_attestations WHERE app_id = ? ORDER BY id DESC LIMIT 50').all(req.app.id);
-  res.json({ mode: getTrustMode(db), attestations: rows.map((r) => summarize(db, r)) });
+  res.json({ mode: getTrustMode(db), attestations: rows.map((r) => summarize(db, r)), trust_events: openTrustEvents(db, { appId: req.app.id }) });
 });
 
 /** GET /api/apps/:slug/deployments/:id/attestation — signature status of one deploy. */
@@ -104,22 +107,57 @@ router.get('/image-trust/policy', requireAuth, requirePlatformAdmin, (req, res) 
   res.json({ mode: getTrustMode(db), modes: MODES, ...getLicensePolicy(db), key_id: getPublicKey(db)?.keyId || null });
 });
 
-/** PUT /api/image-trust/policy — { mode?, denied?, flagged? } (platform admin). */
-router.put('/image-trust/policy', requireAuth, requirePlatformAdmin, (req, res) => {
+/**
+ * PUT /api/image-trust/policy — { mode?, denied?, flagged?, acknowledge_unsigned? } (platform admin).
+ * Switching to enforce while running images are unsigned is refused with 409
+ * IMAGE_TRUST_NOT_READY listing them (each would have its next restart refused),
+ * unless acknowledge_unsigned is true; the override is audited with the list.
+ */
+router.put('/image-trust/policy', requireAuth, requirePlatformAdmin, async (req, res) => {
   const db = getDb();
+  const body = req.body || {};
+  let readiness = null;
+  if (body.mode === 'enforce' && getTrustMode(db) !== 'enforce') {
+    readiness = await enforceReadiness(db);
+    if (!readiness.ready && body.acknowledge_unsigned !== true) {
+      const n = readiness.running_unsigned.length;
+      const err = new AppError(
+        `${n} running image(s) are not signed by this instance. Under enforce, each of those apps would have its next restart (health auto-restart, restart, recovery) refused. Sign them first (POST /api/image-trust/sign-current), or send acknowledge_unsigned: true to switch anyway.`,
+        409, 'IMAGE_TRUST_NOT_READY');
+      err.publicDetails = { running_unsigned: readiness.running_unsigned, on_disk_unsigned: readiness.on_disk_unsigned };
+      throw err;
+    }
+  }
   let policy;
   try {
     policy = setTrustPolicy(db, req.body || {}, req.user.id);
   } catch (e) {
     throw new AppError(e.message, e.status || 400, 'VALIDATION');
   }
-  logAudit(req.user.id, null, 'image-trust-policy-set', { mode: policy.mode, denied: policy.denied.length, flagged: policy.flagged.length });
+  logAudit(req.user.id, null, 'image-trust-policy-set', {
+    mode: policy.mode, denied: policy.denied.length, flagged: policy.flagged.length,
+    ...(readiness && !readiness.ready ? { acknowledged_unsigned: readiness.running_unsigned.map((e) => `${e.app}/${e.env} ${e.image_id}`) } : {}),
+  });
   res.json({ ...policy, key_id: getPublicKey(db)?.keyId || null });
 });
 
-/** GET /api/image-trust/census — per live app/env, whether its running image is signed. Signs nothing. */
+/**
+ * GET /api/image-trust/census — per live app/env, whether its running image is signed;
+ * whether enforce can be turned on; unsigned images on disk; warn/refusal events
+ * of images still unsigned. Signs nothing.
+ */
 router.get('/image-trust/census', requireAuth, requirePlatformAdmin, async (req, res) => {
-  res.json({ mode: getTrustMode(getDb()), envs: await signCurrentImages({ dryRun: true }) });
+  const db = getDb();
+  const envs = await signCurrentImages({ db, dryRun: true });
+  const disk = await backfillDiskImages({ db, dryRun: true });
+  res.json({
+    mode: getTrustMode(db),
+    envs,
+    enforce_ready: !envs.some((e) => e.state === 'unsigned'),
+    on_disk: disk.images,
+    ...(disk.error ? { on_disk_error: disk.error } : {}),
+    events: openTrustEvents(db),
+  });
 });
 
 /** POST /api/image-trust/sign-current — sign every live app/env's running image (trust on first use). */
@@ -127,6 +165,17 @@ router.post('/image-trust/sign-current', requireAuth, requirePlatformAdmin, asyn
   const envs = await signCurrentImages({});
   logAudit(req.user.id, null, 'image-trust-backfill', { backfilled: envs.filter((e) => e.state === 'backfilled').length, errors: envs.filter((e) => e.state === 'error').length });
   res.json({ envs });
+});
+
+/** POST /api/image-trust/backfill-disk — sign every on-disk image a live or rolled-back deployment of its app names (trust on first use); lists the rest. */
+router.post('/image-trust/backfill-disk', requireAuth, requirePlatformAdmin, async (req, res) => {
+  const r = await backfillDiskImages({});
+  logAudit(req.user.id, null, 'image-trust-backfill-disk', {
+    backfilled: r.images.filter((i) => i.state === 'backfilled').map((i) => `${i.app}/${i.env} ${i.image_ref} ${i.image_id}`),
+    errors: r.images.filter((i) => i.state === 'error').length,
+    unprovable: r.images.filter((i) => i.state === 'unprovable').length,
+  });
+  res.json(r);
 });
 
 export default router;

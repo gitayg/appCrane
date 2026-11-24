@@ -74,6 +74,14 @@ async function defaultAdmit(app, env) {
   await admitAppStart({ app, env, automatic: true, what: 'wake', onWarn: 'silent' });
 }
 
+async function defaultVerifyTrust(app, env) {
+  const name = containerNameOf(app.slug, env);
+  const running = await (await import('./imageTrust/dockerImage.js')).containerImageId(name);
+  if (!running.error) {
+    await (await import('./imageTrust/verify.js')).enforceImageTrust({ slug: app.slug, env, image: running.ref, imageId: running.id, what: 'wake' });
+  }
+}
+
 async function defaultAudit(appId, action, detail, userId = null) {
   const { logAudit } = await import('../middleware/audit.js');
   logAudit(userId, appId, action, detail, userId ? null : 'system');
@@ -115,6 +123,7 @@ function defaultDeps() {
     docker: dockerCmd,
     probe: probeServing,
     admit: defaultAdmit,
+    verifyTrust: defaultVerifyTrust,
     audit: defaultAudit,
     recoverSoon: async () => (await import('./containerRecovery.js')).recoverSoon(),
     notifyInactive: notifyInactiveSleep,
@@ -187,6 +196,7 @@ export async function wakeEnv(app, env, { reason = 'request', userId = null } = 
     setSleepState(d.db, app.id, env, { state: 'waking', last_error: null });
     try {
       await d.admit(app, env);
+      await d.verifyTrust(app, env);
     } catch (e) {
       setSleepState(d.db, app.id, env, { state: 'sleeping', last_error: String(e.message).slice(0, 500) });
       log.warn(`[env-wake] ${app.slug} ${env} not woken: ${e.message}`);

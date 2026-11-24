@@ -10,12 +10,12 @@ import { platformEmbedAncestors, mergeAncestors } from '../utils/embed.js';
 import { safeFrameAncestors } from '../utils/frameAncestors.js';
 import { INGRESS_HEADER, privateApiPort } from '../utils/ingress.js';
 import { sleepEnabledAnywhere, wakeToken } from './sleepPolicy.js';
+import { unavailablePage, unavailableErrors } from './caddyErrorPage.js';
+import { applyCaddyfile, coalescedApply, startCaddyWatchdog } from './caddyApply.js';
 import {
   isolationDomain, isolationTls, appHost, RESERVED_APP_PATH,
   APP_SESSION_COOKIE, HANDOFF_STATE_COOKIE, PLATFORM_SESSION_COOKIE_ISOLATED, PLATFORM_SESSION_COOKIE_LEGACY,
 } from './appOrigin.js';
-
-const CADDY_ADMIN = process.env.CADDY_ADMIN_URL || 'http://localhost:2019';
 
 /**
  * Remove the platform session cookie from a request before it reaches an app
@@ -225,6 +225,7 @@ function privateSite(o) {
   s += CRANE_ENCODE;
   s += craneProxy('        ', cranePort, 'private');
   s += `    }\n`;
+  s += unavailableErrors('    ', { page: o.page });
   s += `}\n`;
   return s;
 }
@@ -599,18 +600,18 @@ function isolatedSiteBody(o) {
   s += `        reverse_proxy 127.0.0.1:${port}\n`;
   s += `    }\n`;
 
+  // Crash page: AppCrane names the app from the first path segment, which on
+  // an app host or a custom domain is not in the URI, so it is put back. With
+  // no crash route, or with AppCrane itself down, Caddy's own page answers.
+  let crane = '';
   if (crashPrefix) {
-    // Crash page: AppCrane names the app from the first path segment, which on
-    // an app host or a custom domain is not in the URI, so it is put back.
-    s += `\n    handle_errors {\n`;
-    s += `        @appdown expression \`{err.status_code} in [502, 503, 504]\`\n`;
-    s += `        handle @appdown {\n`;
-    s += `            rewrite * /api/_crashed${crashPrefix}{uri}\n`;
-    s += wakeHeader;
-    s += craneProxy('            ', cranePort, ingress);
-    s += `        }\n`;
-    s += `    }\n`;
+    crane += `        handle @appdown {\n`;
+    crane += `            rewrite * /api/_crashed${crashPrefix}{uri}\n`;
+    crane += wakeHeader;
+    crane += craneProxy('            ', cranePort, ingress);
+    crane += `        }\n`;
   }
+  if (o.unavailable) s += '\n' + unavailableErrors('    ', { page: o.unavailable, cranePort, crane });
   return s;
 }
 
@@ -1079,14 +1080,16 @@ export function generateCaddyfile() {
   // 502/503/504 here, rewrite to AppCrane's /api/_crashed handler which
   // extracts the slug from the original path and renders a friendly HTML
   // page with a link to logs.
-  caddyfile += `    handle_errors {\n`;
-  caddyfile += `        @appdown expression \`{err.status_code} in [502, 503, 504]\`\n`;
-  caddyfile += `        handle @appdown {\n`;
-  caddyfile += `            rewrite * /api/_crashed{uri}\n`;
-  caddyfile += wakeHeader;
-  caddyfile += craneProxy('            ', cranePort, ingress);
-  caddyfile += `        }\n`;
-  caddyfile += `    }\n`;
+  //
+  // When the upstream that failed is AppCrane itself, that rewrite has nothing
+  // to reach, so Caddy answers with its own static page instead of an empty 502.
+  let crashHandler = `        handle @appdown {\n`;
+  crashHandler += `            rewrite * /api/_crashed{uri}\n`;
+  crashHandler += wakeHeader;
+  crashHandler += craneProxy('            ', cranePort, ingress);
+  crashHandler += `        }\n`;
+  const platformPage = unavailablePage({ env: 'platform', link: '/dashboard' });
+  caddyfile += unavailableErrors('    ', { page: platformPage, cranePort, crane: crashHandler });
   caddyfile += `}\n`;
 
   // ── Private API port (APPCRANE_PRIVATE_API_PORT) ─────────────────────────
@@ -1096,7 +1099,7 @@ export function generateCaddyfile() {
   // opens this port to the SDP/VPN only.
   if (privatePort) {
     caddyfile += privateSite({
-      craneDomain, port: privatePort, cranePort, refuseBrotli,
+      craneDomain, port: privatePort, cranePort, refuseBrotli, page: platformPage,
       tlsLine: manualTls ? `    tls ${certFile} ${keyFile}\n\n` : '',
     });
   }
@@ -1125,6 +1128,7 @@ export function generateCaddyfile() {
         caddyfile += tlsLine;
         caddyfile += isolatedSiteBody({
           cranePort, port, prefix, fa, refuseBrotli, ingress, wakeHeader,
+          unavailable: unavailablePage({ name: app.name || app.slug, env, link: `https://${craneDomain}/dashboard` }),
           verifyUri: `/api/identity/verify?app=${app.slug}&env=${env}&host=isolated`,
           isHeadless: app.auth_mode === 'headless',
           bypassPaths: bypassByApp.get(app.id),
@@ -1191,6 +1195,7 @@ export function generateCaddyfile() {
     if (app.custom_domain_auth && app.auth_mode !== 'headless') {
       caddyfile += isolatedSiteBody({
         cranePort, refuseBrotli, ingress, wakeHeader,
+        unavailable: unavailablePage({ name: app.name || app.slug, env: 'production', link: `https://${craneDomain}/dashboard` }),
         port: ports.prod_be,
         prefix: null,
         crashPrefix: wakeHeader ? `/${app.slug}` : null,
@@ -1219,6 +1224,9 @@ export function generateCaddyfile() {
     // custom domain is ever pointed at a host that does receive it.
     caddyfile += platformCookieStrip('    ');
     caddyfile += `    reverse_proxy 127.0.0.1:${ports.prod_be}\n`;
+    // No dashboard link: this site's visitors are the app's own public, and
+    // nothing else on it names the platform host.
+    caddyfile += unavailableErrors('    ', { page: unavailablePage({ name: app.name || app.slug, env: 'production', link: null }) });
     caddyfile += `}\n`;
   }
 
@@ -1250,139 +1258,19 @@ export function generateCaddyfile() {
 }
 
 /**
- * Run a command WITHOUT blocking the event loop.
- *
- * Every call below used to be execFileSync. The reload path spends most of a
- * second inside them — `systemctl reload` and, when it escalates, `systemctl
- * restart` — and with execFileSync that is the whole of Node's single thread
- * stopped: AppCrane answered nothing at all for that window, including the
- * health checks that decide whether an app is up, and including the response
- * of the very request that asked for the reload.
- *
- * The rejection carries `.stderr` and `.message` the same way execFileSync's
- * throw did, which is all the callers below read off it.
+ * Apply the generated config to Caddy. Bursts of calls (an app delete makes
+ * several) share one validate + reload; see services/caddyApply.js for why a
+ * failure never restarts Caddy. Resolves { success, ... } and never rejects.
  */
-async function run(file, args, opts) {
-  const { execFile } = await import('child_process');
-  const { promisify } = await import('util');
-  return promisify(execFile)(file, args, opts);
-}
+let onLinux = isLinux;
+export function _setCaddyLinuxCheckForTests(fn) { onLinux = fn || isLinux; }
 
-/**
- * Push config to Caddy admin API and reload.
- */
 export async function reloadCaddy({ force = false } = {}) {
-  if (!isLinux()) {
+  if (!onLinux()) {
     const config = generateCaddyfile();
     log.info('[Caddy mock] Would write Caddyfile:\n' + config);
     return { success: true, mock: true };
   }
-
-  // Write Caddyfile and reload via systemctl (most reliable)
-  try {
-    const { writeFileSync, readFileSync, existsSync, mkdirSync, readdirSync, unlinkSync } = await import('fs');
-    const caddyfile = generateCaddyfile();
-
-    // Pre-apply validation: write to a tmp path, run `caddy adapt` against
-    // it to confirm it parses cleanly. Only swap into /etc/caddy/Caddyfile
-    // if it does. Prevents a bad config from breaking routing for every app
-    // at once.
-    //
-    // We use `caddy adapt` rather than `caddy validate` because validate
-    // runs full provisioning — including loading TLS certs from
-    // /etc/caddy/certs/. AppCrane runs as `ubuntu` (UID 1000) but the certs
-    // are owned by the `caddy` user, so validate fails with EACCES and the
-    // new Caddyfile is silently never written (the failure is .catch()'d at
-    // every callsite as a log.warn). `adapt` parses the Caddyfile to JSON
-    // without touching certs, exits non-zero on syntax errors — exactly
-    // what we want here.
-    const tmpPath = '/tmp/Caddyfile.appcrane-validate';
-    writeFileSync(tmpPath, caddyfile);
-    try {
-      await run('caddy', ['adapt', '--config', tmpPath, '--adapter', 'caddyfile'], {
-        timeout: 8000,
-      });
-    } catch (validateErr) {
-      const detail = validateErr.stderr?.toString().trim() || validateErr.message;
-      log.error(`Caddy adapt failed — refusing reload. Config:\n${caddyfile}\nError: ${detail}`);
-      return { success: false, error: `Generated Caddyfile is invalid: ${detail}` };
-    }
-
-    // Skip-if-unchanged: byte-identical reads of the existing Caddyfile mean
-    // a reload would just disrupt live connections for no reason. Cheap to
-    // check, common case during routine app touches.
-    const livePath = '/etc/caddy/Caddyfile';
-    let prev = '';
-    try { prev = readFileSync(livePath, 'utf8'); } catch (_) { /* first run */ }
-    // v2.21.31: `force` bypasses this. The comparison is generated-vs-FILE, which
-    // says nothing about what the RUNNING Caddy process has loaded. A process can
-    // drift from the file (e.g. it was started before a config feature existed, or
-    // an earlier reload silently failed) and then every subsequent call returns
-    // `unchanged: true` and never reloads — leaving the live proxy permanently
-    // stale with no way to recover through the API. That's exactly how a
-    // correct-on-disk `copy_headers` never reached the running process.
-    if (prev === caddyfile && !force) {
-      log.info('Caddy config unchanged — skipping reload.');
-      return { success: true, unchanged: true };
-    }
-
-    // Backup-before-overwrite. /etc/caddy/.appcrane-backups/Caddyfile-<ts>.
-    // Keeps the last 10; older are pruned. Manual rollback is then a
-    // straight `cp` away — no replay of DB state needed.
-    if (prev && prev !== caddyfile) {
-      try {
-        const backupDir = '/etc/caddy/.appcrane-backups';
-        if (!existsSync(backupDir)) mkdirSync(backupDir, { recursive: true });
-        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-        writeFileSync(`${backupDir}/Caddyfile-${stamp}`, prev);
-        const files = readdirSync(backupDir).filter(f => f.startsWith('Caddyfile-')).sort();
-        const stale = files.slice(0, Math.max(0, files.length - 10));
-        for (const f of stale) {
-          try { unlinkSync(`${backupDir}/${f}`); } catch (_) { /* best-effort */ }
-        }
-      } catch (e) {
-        log.warn(`Caddy backup failed (non-fatal): ${e.message}`);
-      }
-    }
-
-    writeFileSync(livePath, caddyfile);
-    await run('systemctl', ['reload', 'caddy'], { timeout: 10000 });
-
-    // Post-reload verification. systemctl reload returns 0 even when Caddy
-    // logs the reload but rejects the config internally. Hit the admin API
-    // to confirm Caddy is actually answering — a non-2xx or timeout means
-    // we should restart rather than leave it half-loaded.
-    let adminOk = true;
-    try {
-      const r = await fetch(`${CADDY_ADMIN}/config/`, { signal: AbortSignal.timeout(2000) });
-      adminOk = r.ok;
-    } catch (_) {
-      adminOk = false;
-    }
-    if (!adminOk) {
-      log.warn('Caddy admin API not responsive after reload — escalating to restart.');
-      try {
-        await run('systemctl', ['restart', 'caddy'], { timeout: 15000 });
-        log.info('Caddy restarted after unresponsive reload.');
-        return { success: true, restarted: true };
-      } catch (restartErr) {
-        log.error(`Caddy restart after bad reload failed: ${restartErr.message}`);
-        return { success: false, error: `Reload completed but admin API unresponsive; restart also failed: ${restartErr.message}` };
-      }
-    }
-
-    log.info('Caddy reloaded: ' + caddyfile.split('\n').filter(l => l.includes('{')).map(l => l.trim().split(' ')[0]).join(', '));
-    return { success: true };
-  } catch (e) {
-    log.error(`Caddy reload failed: ${e.message}`);
-    // Try restart instead of reload
-    try {
-      await run('systemctl', ['restart', 'caddy'], { timeout: 15000 });
-      log.info('Caddy restarted (reload failed)');
-      return { success: true, restarted: true };
-    } catch (e2) {
-      log.error(`Caddy restart also failed: ${e2.message}`);
-      return { success: false, error: e.message };
-    }
-  }
+  startCaddyWatchdog();
+  return coalescedApply((o) => applyCaddyfile(generateCaddyfile(), o), { force });
 }

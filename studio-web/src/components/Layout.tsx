@@ -127,6 +127,7 @@ const NAV: NavItem[] = [
   { id: 'capability-approvals', label: 'Capability approvals', href: '/capability-approvals', icon: <Icon.ShieldCheck />, platformAdminOnly: true },
   { id: 'access-review-campaigns', label: 'Access reviews', href: '/access-reviews/campaigns', icon: <Icon.ShieldCheck />, platformAdminOnly: true },
   { id: 'audit-integrity', label: 'Audit integrity', href: '/audit-integrity', icon: <Icon.ShieldCheck />, platformAdminOnly: true },
+  { id: 'reconcile', label: 'Reconcile', href: '/reconcile', icon: <Icon.Activity />, platformAdminOnly: true },
   { id: 'docs',         label: 'Docs',         href: '/docs',         icon: <Icon.Book /> },
   { id: 'settings',     label: 'Settings',     href: '/settings',     icon: <Icon.Settings /> },
 ]

@@ -391,7 +391,7 @@ test('manifest: webhooks active with a push subscription only when CRANE_DOMAIN 
   try {
     const on = await adminCall('POST', '/api/github-app/manifest', key, {});
     assert.deepEqual(on.body.manifest.hook_attributes, { url: 'https://crane.example.com/api/github-app/webhook', active: true });
-    assert.deepEqual(on.body.manifest.default_events, ['push']);
+    assert.deepEqual(on.body.manifest.default_events, ['push', 'repository']);
   } finally {
     delete process.env.CRANE_DOMAIN;
   }
@@ -433,6 +433,89 @@ test('existing App: status says what to click; webhook-config PATCHes /app/hook/
   } finally {
     delete process.env.CRANE_DOMAIN;
   }
+});
+
+// repository renamed / transferred, shaped like GitHub's payloads: the docs
+// ("Webhook events and payloads", repository) require `changes` for both
+// actions; octokit/webhooks' schemas give changes.repository.name.from for
+// renamed and changes.owner.from.user for transferred; repository carries id,
+// name, full_name and owner.login.
+const repoObj = (id, owner, name) => ({ id, node_id: `R_${id}`, name, full_name: `${owner}/${name}`, private: true, owner: { login: owner, id: 1, type: 'User' } });
+const sender = { login: 'octocat', id: 1, type: 'User' };
+const renamed = (id, owner, from, to, installationId = 9001) => ({
+  action: 'renamed', changes: { repository: { name: { from } } }, repository: repoObj(id, owner, to), sender, installation: { id: installationId, node_id: 'MDIz' },
+});
+const transferred = (id, fromOwner, toOwner, name) => ({
+  action: 'transferred', changes: { owner: { from: { user: { login: fromOwner, id: 2, type: 'User' } } } }, repository: repoObj(id, toOwner, name), sender, installation: { id: 9001 },
+});
+
+test('repository renamed: matched by repository id (learned from a signed push), repo_full_name and github_url follow, audited', async () => {
+  const a = mkApp({ repo: 'acme/old-name' });
+  const other = mkApp({ repo: 'acme/old-name-2' });
+  const unrelated = mkApp({ repo: 'acme/same-new-name' });
+  const repoId = 50001;
+  const p = await deliver({ ...push('acme/old-name'), repository: repoObj(repoId, 'acme', 'old-name') });
+  assert.equal(p.status, 200, JSON.stringify(p.body));
+  assert.equal(db.prepare('SELECT repo_id FROM app_github_installations WHERE app_id = ?').get(a.appId).repo_id, repoId);
+
+  const bad = await deliver(renamed(repoId, 'acme', 'old-name', 'new-name'), { event: 'repository', secret: 'not-the-secret' });
+  assert.equal(bad.status, 401);
+  assert.equal(db.prepare('SELECT repo_full_name FROM app_github_installations WHERE app_id = ?').get(a.appId).repo_full_name, 'acme/old-name');
+
+  const r = await deliver(renamed(repoId, 'acme', 'old-name', 'new-name'), { event: 'repository' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.result, 'repository_renamed');
+  assert.deepEqual(r.body.apps, [{ slug: a.slug, action: 'updated' }]);
+  assert.equal(db.prepare('SELECT repo_full_name FROM app_github_installations WHERE app_id = ?').get(a.appId).repo_full_name, 'acme/new-name');
+  assert.equal(a.app().github_url, 'https://github.com/acme/new-name');
+  const audit = auditsOf(a.appId).find((x) => x.action === 'github-app-repository-renamed');
+  assert.ok(audit, JSON.stringify(auditsOf(a.appId)));
+  assert.deepEqual(JSON.parse(audit.detail).github_url, { from: 'https://github.com/acme/old-name', to: 'https://github.com/acme/new-name' });
+  assert.equal(other.app().github_url, 'https://github.com/acme/old-name-2', 'an app with no matching id changed');
+  assert.equal(unrelated.app().github_url, 'https://github.com/acme/same-new-name');
+
+  // The renamed repository still deploys: a push under its new name reaches the app.
+  const after = await deliver({ ...push('acme/new-name'), repository: repoObj(repoId, 'acme', 'new-name') });
+  assert.equal(after.body.apps?.[0]?.slug, a.slug, JSON.stringify(after.body));
+});
+
+test('repository renamed with an id no row holds, or a row since re-attached elsewhere, changes nothing', async () => {
+  const a = mkApp({ repo: 'acme/kept' });
+  db.prepare('UPDATE app_github_installations SET repo_id = 60001 WHERE app_id = ?').run(a.appId);
+  const none = await deliver(renamed(69999, 'acme', 'kept', 'gone'), { event: 'repository' });
+  assert.deepEqual([none.status, none.body.result], [200, 'ignored_unattached']);
+  // Same id, but the payload's previous name is not what the row is attached to.
+  const stale = await deliver(renamed(60001, 'acme', 'something-else', 'hijack'), { event: 'repository' });
+  assert.equal(stale.status, 200, JSON.stringify(stale.body));
+  assert.deepEqual(stale.body.apps, [{ slug: a.slug, action: 'skipped_stale_attachment' }]);
+  assert.equal(a.app().github_url, 'https://github.com/acme/kept');
+  assert.equal(db.prepare('SELECT repo_full_name FROM app_github_installations WHERE app_id = ?').get(a.appId).repo_full_name, 'acme/kept');
+  const other = await deliver({ action: 'archived', repository: repoObj(60001, 'acme', 'kept'), sender }, { event: 'repository' });
+  assert.deepEqual([other.status, other.body.result], [202, 'ignored_action']);
+});
+
+test('repository transferred: the new owner is recorded; a github_url someone pointed elsewhere is left alone', async () => {
+  const a = mkApp({ repo: 'acme/moving' });
+  const b = mkApp({ repo: 'acme/pointed-away', attachedRepo: 'acme/moving2' });
+  db.prepare('UPDATE app_github_installations SET repo_id = 70001 WHERE app_id = ?').run(a.appId);
+  db.prepare('UPDATE app_github_installations SET repo_id = 70002 WHERE app_id = ?').run(b.appId);
+  const r = await deliver(transferred(70001, 'acme', 'newco', 'moving'), { event: 'repository' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.result, 'repository_transferred');
+  assert.equal(a.app().github_url, 'https://github.com/newco/moving');
+  assert.equal(db.prepare('SELECT repo_full_name, installation_id FROM app_github_installations WHERE app_id = ?').get(a.appId).repo_full_name, 'newco/moving');
+  assert.equal(db.prepare('SELECT installation_id FROM app_github_installations WHERE app_id = ?').get(a.appId).installation_id, 9001, 'the installation id is not touched');
+  const r2 = await deliver(transferred(70002, 'acme', 'newco', 'moving2'), { event: 'repository' });
+  assert.deepEqual(r2.body.apps, [{ slug: b.slug, action: 'updated_installation_only' }]);
+  assert.equal(b.app().github_url, 'https://github.com/acme/pointed-away');
+  assert.equal(db.prepare('SELECT repo_full_name FROM app_github_installations WHERE app_id = ?').get(b.appId).repo_full_name, 'newco/moving2');
+});
+
+test('installation_repositories added records the repository id', async () => {
+  const a = mkApp({ repo: 'acme/added-one' });
+  const r = await deliver({ action: 'added', installation: { id: 9001 }, repositories_added: [{ id: 80001, full_name: 'acme/added-one' }], repositories_removed: [] }, { event: 'installation_repositories' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(db.prepare('SELECT repo_id FROM app_github_installations WHERE app_id = ?').get(a.appId).repo_id, 80001);
 });
 
 test('no stored webhook secret -> 401; no App configured -> 404', async () => {

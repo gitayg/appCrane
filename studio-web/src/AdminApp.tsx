@@ -46,6 +46,7 @@ const CapabilityApprovals = lazyPage(() => import('./pages/CapabilityApprovals')
 const StepUp = lazyPage(() => import('./pages/StepUp'), 'StepUp')
 const AccessReviewCampaigns = lazyPage(() => import('./pages/AccessReviewCampaigns'), 'AccessReviewCampaigns')
 const AuditIntegrity = lazyPage(() => import('./pages/AuditIntegrity'), 'AuditIntegrity')
+const Reconcile = lazyPage(() => import('./pages/Reconcile'), 'Reconcile')
 
 function attemptStore(): AttemptStore | null {
   try { return window.sessionStorage } catch { return null }
@@ -298,6 +299,7 @@ export function AdminApp() {
           <Route path="/access-reviews/campaigns" element={<Layout><AccessReviewCampaigns /></Layout>} />
           <Route path="/access-reviews/campaigns/:id" element={<Layout><AccessReviewCampaigns /></Layout>} />
           <Route path="/audit-integrity" element={<Layout><AuditIntegrity /></Layout>} />
+          <Route path="/reconcile" element={<Layout><Reconcile /></Layout>} />
           <Route path="/requests/:id" element={<Layout><RequestDetail /></Layout>} />
           <Route path="/my-requests" element={<Navigate to="/requests" replace />} />
           <Route path="/builders"    element={<Navigate to="/requests" replace />} />

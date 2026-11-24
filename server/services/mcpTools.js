@@ -1066,6 +1066,7 @@ const TOOLS = [
       'that a deploy actually landed the expected version, or to check if the app is responding. AppCrane hits the ' +
       'app\'s configured health endpoint (default /api/health) on the internal port directly — no Caddy, no SSO ' +
       'redirect — and returns the response status + body. ' +
+      'Also returns last_incident ({summary, created_at, trigger} of the newest restart, e.g. "memory 99% of 512 MB") and unstable (true while the env is in a restart loop and AppCrane backs off restarting it). ' +
       'Defaults to sandbox; pass stage="production" only when the user asks about prod.',
     inputSchema: {
       type: 'object',
@@ -1091,8 +1092,11 @@ const TOOLS = [
         .get(app.id, env);
       const path = cfg?.endpoint || '/api/health';
       const url = `http://127.0.0.1:${port}${path}`;
+      const ri = await import('./restartIncidents.js');
+      const restarts = { last_incident: ri.lastIncident({ appId: app.id, env, db }), unstable: ri.getStability({ appId: app.id, env, db }).unstable };
       if (envIsSleepingById(app.id, env, db)) {
         return {
+          ...restarts,
           app: app.slug, env, url, ok: false, status: 'sleeping', sleeping: true,
           note: 'AppCrane stopped this environment on purpose while it was idle. It is not down: the next request to the app wakes it, and so does a deploy.',
         };
@@ -1110,6 +1114,7 @@ const TOOLS = [
           status: r.status,
           ok: r.ok,
           body,
+          ...restarts,
         };
       } catch (e) {
         return {
@@ -1118,6 +1123,7 @@ const TOOLS = [
           url,
           ok: false,
           error: e.message || String(e),
+          ...restarts,
         };
       }
     },

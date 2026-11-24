@@ -75,6 +75,7 @@ const HARDENED = {
     [`sudo -n -l ${H.INSTALLED_SCRIPT}`]: { code: 0, stdout: `${H.INSTALLED_SCRIPT}\n` },
     '/usr/local/bin/runsc --version': { code: 0, stdout: `runsc version release-${H.GVISOR_RELEASE}.0\nspec: 1.2.1\n` },
     'docker info --format {{json .Runtimes}}': { code: 0, stdout: '{"io.containerd.runc.v2":{"path":"runc"},"runc":{"path":"runc"},"runsc":{"path":"/usr/local/bin/runsc"}}\n' },
+    'systemctl show caddy -p Restart -p StartLimitIntervalUSec -p LoadState': { code: 0, stdout: 'Restart=on-failure\nStartLimitIntervalUSec=0\nLoadState=loaded\n' },
   },
 };
 
@@ -116,6 +117,18 @@ const SUDO_FILES = { [H.INSTALLED_SCRIPT]: installedCopy };
 
 // ---- status ----
 
+test('caddy-restart-policy: the production defaults are missing; a drop-in not yet loaded says so; no systemd is n/a', async () => {
+  const SHOW = 'systemctl show caddy -p Restart -p StartLimitIntervalUSec -p LoadState';
+  const s = async (over) => item(await H.checkItems(host(over).deps), 'caddy-restart-policy');
+  const prod = await s({ exec: { [SHOW]: { code: 0, stdout: 'Restart=no\nStartLimitIntervalUSec=10s\nLoadState=loaded\n' } } });
+  assert.equal(prod.state, 'missing');
+  assert.match(prod.detail, /Restart=no, StartLimitIntervalUSec=10s: a Caddy that exits stays down; .*appcrane\.conf missing/);
+  const unloaded = await s({ files: { [H.CADDY_DROPIN]: '[Service]\nRestart=on-failure\n' }, exec: { [SHOW]: { code: 0, stdout: 'Restart=no\nStartLimitIntervalUSec=10s\nLoadState=loaded\n' } } });
+  assert.match(unloaded.detail, /systemd has not loaded it \(daemon-reload\)/);
+  assert.equal((await s({ exec: { [SHOW]: null } })).state, 'not-applicable');
+  assert.equal((await s({ exec: { [SHOW]: { code: 0, stdout: 'Restart=no\nStartLimitIntervalUSec=infinity\nLoadState=not-found\n' } } })).state, 'not-applicable');
+});
+
 test('gvisor-runtime: not installed, installed but not registered, other release, docker unreadable', async () => {
   const s = async (exec) => item(await H.checkItems(host({ exec }).deps), 'gvisor-runtime');
   const none = await s({ '/usr/local/bin/runsc --version': null });
@@ -136,7 +149,7 @@ test('the release the status checks for is the release the script installs', () 
 
 test('a fully hardened host: every item applied, in the contract order', async () => {
   const items = await H.checkItems(host().deps);
-  assert.deepEqual(items.map((i) => i.id), ['journal', 'syslog-rotation', 'logrotate-hourly', 'docker-log-defaults', 'apt-news', 'unattended-upgrades', 'caddy-log-dir', 'disk-reserve', 'gvisor-runtime']);
+  assert.deepEqual(items.map((i) => i.id), ['journal', 'syslog-rotation', 'logrotate-hourly', 'docker-log-defaults', 'apt-news', 'unattended-upgrades', 'caddy-log-dir', 'disk-reserve', 'gvisor-runtime', 'caddy-restart-policy']);
   for (const i of items) assert.equal(i.state, 'applied', `${i.id}: ${i.detail}`);
   assert.match(item(items, 'journal').detail, /SystemMaxUse=500M in \/etc\/systemd\/journald\.conf\.d\/50-appcrane\.conf; journal uses 312\.0M/);
   assert.match(item(items, 'disk-reserve').detail, /sudo rm \/appcrane-disk-reserve/);
@@ -365,7 +378,7 @@ test('GET: platform admin only, contract shape, mfa_required follows enrollment'
   assert.equal(r.status, 200);
   assert.deepEqual(Object.keys(r.body).sort(), ['items', 'last_run', 'mfa_required', 'run', 'running', 'supported']);
   assert.equal(r.body.supported, true);
-  assert.equal(r.body.items.length, 9);
+  assert.equal(r.body.items.length, 10);
   assert.deepEqual(r.body.run, { mode: 'root', command: `bash ${REPO}/scripts/host-hardening.sh` });
   assert.equal(r.body.mfa_required, false);
   assert.equal(r.body.running, false);
