@@ -163,6 +163,27 @@ test('a reload Caddy refuses is never followed by a restart; the previous file g
   assert.equal((await jobRow('caddy-reload')).status, 'failing');
 });
 
+test("the admin check is accepted by Caddy's origin rule: real fetch, an admin API that refuses requests with no Origin", async () => {
+  const { createServer } = await import('node:http');
+  const seen = [];
+  const caddyLike = createServer((req, res) => {
+    seen.push(req.headers.origin || null);
+    const origin = req.headers.origin;
+    if (req.headers['sec-fetch-mode'] === 'cors' && !origin) { res.statusCode = 403; return res.end("client is not allowed to access from origin ''"); }
+    if (origin && origin !== `http://127.0.0.1:${caddyLike.address().port}`) { res.statusCode = 403; return res.end('bad origin'); }
+    res.end('{}');
+  });
+  await new Promise((r) => caddyLike.listen(0, '127.0.0.1', r));
+  try {
+    CA._setCaddyApplyDepsForTests({ fetch: (...a) => fetch(...a), adminUrl: `http://127.0.0.1:${caddyLike.address().port}` });
+    const r = await caddy.reloadCaddy();
+    assert.equal(r.success, true, JSON.stringify(r));
+    assert.equal(seen[0], `http://127.0.0.1:${caddyLike.address().port}`);
+  } finally {
+    caddyLike.close();
+  }
+});
+
 test('an admin API that answers a moment after the reload is a success, not a failure', async () => {
   let asked = 0;
   CA._setCaddyApplyDepsForTests({ fetch: async () => ({ ok: ++asked > 2 }) });

@@ -1,4 +1,7 @@
 {
+  "2.144.2": [
+    "AppCrane's check that Caddy is answering after a change now works. It was being refused by Caddy, which made every config change look like a failure and, before 2.144.0, restart Caddy."
+  ],
   "2.144.1": [
     "After a deploy, AppCrane no longer reports a false \"Caddy config apply\" failure when Caddy takes a moment to answer after reloading."
   ],

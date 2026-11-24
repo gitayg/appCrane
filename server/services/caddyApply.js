@@ -149,7 +149,10 @@ async function adminAnswers() {
   for (let i = 0; i < deps.adminTries; i++) {
     if (i) await deps.sleep(deps.adminRetryMs);
     try {
-      const r = await deps.fetch(`${deps.adminUrl}/config/`, { signal: AbortSignal.timeout(2000) });
+      // Node's fetch sends Sec-Fetch-Mode: cors with no Origin, and Caddy's admin
+      // API refuses that with 403 "client is not allowed to access from origin ''"
+      // (measured on a production host, 2026-11-24). Naming the admin origin passes.
+      const r = await deps.fetch(`${deps.adminUrl}/config/`, { headers: { Origin: new URL(deps.adminUrl).origin }, signal: AbortSignal.timeout(2000) });
       if (r.ok) return true;
     } catch (_) { /* asked again below */ }
   }
