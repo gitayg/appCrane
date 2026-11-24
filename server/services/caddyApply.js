@@ -41,6 +41,9 @@ const DEFAULTS = () => ({
   startCooldownMs: MIN,
   watchdogMs: MIN,
   now: () => Date.now(),
+  sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+  adminTries: 10,
+  adminRetryMs: 500,
   audit: async (action, detail) => {
     const { logAudit } = await import('../middleware/audit.js');
     logAudit(null, null, action, detail, 'system');
@@ -139,13 +142,18 @@ function backup(prev) {
   }
 }
 
+// Right after a reload Caddy's admin endpoint can briefly not answer while the
+// new config is swapped in (measured on a production host, 2026-11-24), so it
+// is asked several times before the reload is called unverified.
 async function adminAnswers() {
-  try {
-    const r = await deps.fetch(`${deps.adminUrl}/config/`, { signal: AbortSignal.timeout(2000) });
-    return r.ok;
-  } catch (_) {
-    return false;
+  for (let i = 0; i < deps.adminTries; i++) {
+    if (i) await deps.sleep(deps.adminRetryMs);
+    try {
+      const r = await deps.fetch(`${deps.adminUrl}/config/`, { signal: AbortSignal.timeout(2000) });
+      if (r.ok) return true;
+    } catch (_) { /* asked again below */ }
   }
+  return false;
 }
 
 /** One apply: validate, write, reload (or start a stopped Caddy). Never throws. */

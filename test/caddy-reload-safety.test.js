@@ -65,6 +65,7 @@ function reset(over = {}) {
     livePath: LIVE, tmpPath: join(scratch, 'validate'), backupDir: BACKUPS,
     windowMs: 40, maxWaitMs: 400,
     now: () => clock,
+    sleep: async () => {},
     audit: async (action, detail) => { audits.push({ action, detail }); },
   });
   caddy._setCaddyLinuxCheckForTests(() => true);
@@ -160,6 +161,26 @@ test('a reload Caddy refuses is never followed by a restart; the previous file g
   assert.equal(readFileSync(LIVE, 'utf8'), 'previous good config\n', 'the refused config stayed on disk for the next start');
   assert.equal(readdirSync(BACKUPS).length, 1, 'the previous file was not backed up');
   assert.equal((await jobRow('caddy-reload')).status, 'failing');
+});
+
+test('an admin API that answers a moment after the reload is a success, not a failure', async () => {
+  let asked = 0;
+  CA._setCaddyApplyDepsForTests({ fetch: async () => ({ ok: ++asked > 2 }) });
+  const r = await caddy.reloadCaddy();
+  assert.equal(r.success, true, JSON.stringify(r));
+  assert.equal(asked, 3);
+  noRestart();
+  assert.notEqual((await jobRow('caddy-reload'))?.status, 'failing');
+});
+
+test('an admin API that never answers after a reload is reported, after several tries, and still never restarts Caddy', async () => {
+  let asked = 0;
+  CA._setCaddyApplyDepsForTests({ fetch: async () => { asked++; throw new Error('ECONNREFUSED'); } });
+  const r = await caddy.reloadCaddy();
+  assert.equal(r.success, false);
+  assert.equal(r.stage, 'verify');
+  assert.equal(asked, 10);
+  noRestart();
 });
 
 test('a stopped Caddy is started (reset-failed first), never restarted, and at most once a minute', async () => {
