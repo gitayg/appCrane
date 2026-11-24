@@ -28,7 +28,7 @@ Analysis is local. Transcripts can contain secrets and private code: never send 
 
 ## 1. Measure
 
-Every figure below is an estimate with known blind spots, listed in `${CLAUDE_SKILL_DIR}/../../KNOWN_LIMITATIONS.md`. When a finding rests on one of them (a vague-prompt call, a commit count, a model-fit saving), say so in one clause rather than presenting it as exact.
+Every figure below is an estimate with known blind spots, listed in `${CLAUDE_SKILL_DIR}/../../KNOWN_LIMITATIONS.md`. When a finding rests on one of them (a vague-prompt call, a commit count, a model-fit saving), say so in one clause rather than presenting it as exact. The prompt tests have measured error rates there (vague, done-criteria, correction): quote the vague-prompt and rework figures as rough, and read the flagged prompts yourself before calling any one of them vague.
 
 Run the analyzer (Node, no dependencies):
 

@@ -14,6 +14,7 @@ import { join, basename, dirname } from 'path';
 import { homedir } from 'os';
 import { execFileSync } from 'child_process';
 import { makePricer, PRICES_AS_OF } from './prices.mjs';
+import { CORRECTION_RE, ANCHOR_RE, CRITERIA_RE, NUDGE_RE, VAGUE_MAX_CHARS } from './classify.mjs';
 
 // ── args ─────────────────────────────────────────────────────────
 const args = process.argv.slice(2);
@@ -70,13 +71,6 @@ function normCmd(cmd) {
 const cmdHead = c => normCmd(c).split(' ').slice(0, 2).join(' ');
 const READ_CMD_RE = /^(cat|head|tail|less|sed\s+-n\s+\S+|nl)\s+(?:-\S+\s+)*([^\s|;&>]+)/;
 
-const CORRECTION_RE = /^(no[,.! ]|nope|don'?t|do not|stop|wrong|actually|instead|that'?s not|not what i|i said|i told you|why did you|you (?:forgot|missed|broke)|please don'?t|never )/i;
-// Concrete anchors in a prompt: a path or file name, code in backticks, an identifier,
-// an error/line reference, a URL. A prompt with none of them makes Claude go find out.
-// Case-sensitive on purpose: `camelCase` must not match every lowercase word.
-const ANCHOR_RE = /(`[^`]+`|\b[\w-]+\.(?:js|mjs|ts|tsx|jsx|py|go|rs|java|rb|php|css|html|json|ya?ml|md|sql|sh|toml)\b|(?:^|\s)\.{0,2}\/[\w.-]+\/|https?:\/\/|\b[a-z]+[A-Z]\w*\b|\b\w+\(\)|\b(?:[Ee]rror|[Ee]xception|Traceback|line \d+|status \d{3})\b)/;
-// Done-criteria: tells Claude when to stop and how to check.
-const CRITERIA_RE = /\b(should|must|expect(?:ed)?|so that|done when|until|make sure|verify|passes?|returns?|instead of|acceptance)\b/i;
 // Relative price of a token vs fresh input: output ×5, cache write ×1.25, cache read ×0.1.
 const costUnits = u => (u.input_tokens || 0) + 5 * (u.output_tokens || 0) + 1.25 * (u.cache_creation_input_tokens || 0) + 0.1 * (u.cache_read_input_tokens || 0);
 // Pricing lives in prices.mjs (no side effects, so tests can import it);
@@ -85,7 +79,6 @@ const costUnits = u => (u.input_tokens || 0) + 5 * (u.output_tokens || 0) + 1.25
 const { priceFor, usdOf } = makePricer(PRICE_FILE ? JSON.parse(readFileSync(PRICE_FILE, 'utf8')) : {});
 export { priceFor, usdOf };
 
-const NUDGE_RE = /^(continue|go on|go ahead|proceed|yes|yep|y|ok(?:ay)?|sure|do it|next|keep going|carry on)[.!\s]*$/i;
 const CEREMONY_RE = /^(TodoWrite|TaskCreate|TaskUpdate|EnterPlanMode|ExitPlanMode)$/;
 const BIG_MODEL_RE = /opus|fable|mythos/i;
 // The cheaper models a "would this cost less elsewhere?" estimate prices against.
@@ -557,7 +550,7 @@ const work = allPrompts.filter(p => !p.nudge && p.tools > 0);   // prompts that 
 const median = a => { const b = [...a].sort((x, y) => x - y); return b.length ? b[Math.floor(b.length / 2)] : 0; };
 const group = ps => ({ prompts: ps.length, medianCost: Math.round(median(ps.map(p => p.cost))), medianUsd: +median(ps.map(p => p.usd)).toFixed(4), medianExploreBeforeFirstEdit: median(ps.map(p => p.explore)),
   reworkRate: +(ps.filter(p => p.followedBy).length / Math.max(1, ps.length)).toFixed(2) });
-const vague = p => !p.anchored && p.chars < 300;
+const vague = p => !p.anchored && p.chars < VAGUE_MAX_CHARS;
 const totalCost = allPrompts.reduce((a, p) => a + p.cost, 0);
 const reworked = allPrompts.filter(p => p.followedBy);
 const instructionQuality = {
@@ -724,7 +717,7 @@ const OC = overcomplication;
   out.push('## Instruction quality', '',
     `Prompts followed by a correction or interrupt cost **${usd(Q.reworkUsd)}** (${(Q.reworkShare * 100).toFixed(1)}% of all spend).`, '',
     '| Prompts | Count | Median cost | Median lookups before first edit | Led to rework |', '|---|---|---|---|---|',
-    row('Vague (no file, code, error or URL; <300 chars)', Q.vague), row('Anchored (names a file, code, error or URL)', Q.anchored),
+    row('Vague (no file, code, error, route or URL; <300 chars)', Q.vague), row('Anchored (names a file, code, error, route or URL)', Q.anchored),
     row('States done-criteria', Q.withCriteria), row('No done-criteria', Q.withoutCriteria), '');
   if (Q.costliestBadPrompts.length) { out.push('Costliest prompts that were vague or needed correcting:', ''); Q.costliestBadPrompts.slice(0, 5).forEach(p => out.push(`- ${usd(p.usd)} (${p.why.join('; ')}) \`${p.sessionId.slice(0, 8)}\`: “${clip(p.prompt, 160)}”`)); out.push(''); }
 }

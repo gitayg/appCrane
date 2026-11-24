@@ -1,4 +1,8 @@
 {
+  "2.144.2": [
+    "Work Review's prompt checks (vague, done-criteria, correction, go-ahead) are now scored against prompts a person labelled, and the measured error rates are in its known-limitations page.",
+    "They also catch more: \"make the tests pass\" now counts as a done-criterion, \"improve the error handling\" as vague, and \"revert that\" or \"undo the last change\" as corrections. The plugin is now version 1.4.0."
+  ],
   "2.144.1": [
     "After a deploy, AppCrane no longer reports a false \"Caddy config apply\" failure when Caddy takes a moment to answer after reloading."
   ],
