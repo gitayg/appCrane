@@ -245,6 +245,7 @@ test('outside the embed policy, only the bypass blocks differ from v2.43.1', () 
     'handle /bypasser-sandbox/ws/runner*',  // log_skip removed
     'handle /bypasser/ws/runner*',          // log_skip removed
     'handle',                               // the AppCrane catch-all gained its encode block
+    'handle_errors',                        // Caddy's own page when AppCrane itself is down
   ]);
   const changed = [...craneNow.keys()]
     .filter(k => craneWas.has(k) &&
@@ -281,11 +282,17 @@ test('outside the embed policy, only the bypass blocks differ from v2.43.1', () 
   assert.deepEqual([...craneWas.keys()].filter(k => !craneNow.has(k)), []);
 });
 
+// The AppCrane-down page (services/caddyErrorPage.js) is a handler added ahead
+// of the crash-page rewrite; taking it back out must leave handle_errors as it was.
+const withoutUnavailablePage = (s) => s
+  .replace(/\n {8}@cranedown [^\n]*/, '')
+  .replace(/\n {8}handle @cranedown \{\n[\s\S]*?\nAPPCRANE_UNAVAILABLE_PAGE 503\n {8}\}/, '');
+
 test('the untouched apps keep their exact routing, headless and aliases included', () => {
   for (const key of ['handle /headless*', 'handle /framed*', 'handle /framed-sandbox*',
                      'handle /aliased*', 'handle /oldname*', 'handle /undeployed*',
                      'handle /api/service*', 'handle_errors']) {
-    assert.equal(withoutEmbedPolicy(craneNow.get(key)), withoutEmbedPolicy(craneWas.get(key)),
+    assert.equal(withoutUnavailablePage(withoutEmbedPolicy(craneNow.get(key))), withoutEmbedPolicy(craneWas.get(key)),
       `${key} changed outside the embed policy`);
   }
   // The catch-all that proxies to AppCrane itself compresses its own UI and API

@@ -1172,6 +1172,7 @@ app.use('/api/apps', (await import('./routes/accessRules.js')).default); // /api
 app.use('/api', (await import('./routes/sleep.js')).default); // /api/apps/:slug/sleep[/:env/wake], /api/sleep/defaults
 app.use('/api', (await import('./routes/usage.js')).default); // /api/apps/:slug/usage[/settings], /api/usage/apps
 app.use('/api', (await import('./routes/releases.js')).default); // /api/apps/:slug/releases[/:id/label] (owner, app admin)
+app.use('/api', (await import('./routes/restartIncidents.js')).default); // /api/apps/:slug/incidents?env= (members; log tail owner or platform admin)
 app.use('/api', (await import('./routes/apiKeys.js')).default); // /api/me/api-key, /api/me/api-key/rotate, /api/api-key-policy
 app.use('/api', (await import('./routes/intake.js')).default); // /api/apps/:slug/intake[/review], /api/apps/:slug/classification, /api/intake/queue, /api/data-classification/{policy,apps}
 app.use('/api', (await import('./routes/releaseCheck.js')).default); // /api/apps/:slug/release-check[/run|/exceptions]
@@ -1183,6 +1184,7 @@ app.use('/api', (await import('./routes/autoPatch.js')).default); // /api/auto-p
 app.use('/api', (await import('./routes/accessReviews.js')).default); // /api/access-reviews/*: periodic access reviews
 app.use('/api', (await import('./routes/appOwnership.js')).default); // /api/apps/:slug/ownership|owner-transfers|owner, /api/owner-transfers/*, /api/admin/orphaned-apps
 app.use('/api', (await import('./routes/auditChain.js')).default); // /api/audit-chain/*: tamper-evident audit
+app.use('/api/state-reconcile', (await import('./routes/stateReconcile.js')).default); // deployment records vs Docker and disk: findings, one-click fixes, trash (platform admin)
 app.use('/api/adopt', (await import('./routes/adopt.js')).default); // Adopt an app: analyse a GitHub repo or zip, adopt to sandbox
 app.use('/api/llm-gateway', (await import('./routes/llmGateway.js')).adminRouter); // LLM gateway config + usage (platform admin)
 app.use('/api/apps', (await import('./routes/llmGateway.js')).appRouter); // /api/apps/:slug/llm-gateway[/overrides|/usage]
@@ -1427,6 +1429,7 @@ app.get('/settings', (req, res) => sendHtml(res, adminSpa));
 // SPA route. test/spa-routes.test.js now fails when a route is added to the SPA
 // and not to this list.
 app.get('/catalog', (req, res) => sendHtml(res, adminSpa));
+app.get('/reconcile', (req, res) => sendHtml(res, adminSpa));
 // v2.66.0: /audit is the permission-scoped audit view — no longer admin-only,
 // so it is reachable (and shareable as a link) by anyone holding
 // app.audit.view on at least one app. Same rule as every entry in this block.
@@ -1941,6 +1944,8 @@ app.listen(PORT, HOST, async () => {
     startHostResourceMonitor();
     try { const { startApiKeyExpiryJob } = await import('./services/apiKeyExpiry.js'); startApiKeyExpiryJob(); } catch (e) { log.error('API key expiry job failed to start: ' + e.message); }
     try { const { startEventRetention } = await import('./services/eventRetention.js'); startEventRetention(); } catch (e) { log.error('Event retention job failed to start: ' + e.message); }
+    try { const { startIncidentRetention } = await import('./services/restartIncidents.js'); startIncidentRetention(); } catch (e) { log.error('Restart incident retention failed to start: ' + e.message); }
+    try { const { startRestartWatcher } = await import('./services/restartWatcher.js'); startRestartWatcher(); } catch (e) { log.error('Restart watcher failed to start: ' + e.message); }
     try { const { startDeployLogRetention } = await import('./services/deployLogRetention.js'); startDeployLogRetention(); } catch (e) { log.error('Deploy log retention job failed to start: ' + e.message); }
     try { const { startBuildCachePrune } = await import('./services/buildCachePrune.js'); startBuildCachePrune(); } catch (e) { log.error('Build cache prune job failed to start: ' + e.message); }
     try { const { startTrustedDevicePurge } = await import('./services/trustedDevicePurge.js'); startTrustedDevicePurge(); } catch (e) { log.error('Trusted device purge failed to start: ' + e.message); }
@@ -2128,6 +2133,7 @@ app.listen(PORT, HOST, async () => {
   } catch (e) {
     log.error('Container recovery failed to start: ' + e.message);
   }
+  try { (await import('./services/reconcileState.js')).startStateReconcile(); } catch (e) { log.error('State reconcile failed to start: ' + e.message); }
 
   // Orphan check — warn if Docker containers are running but not tracked in the DB
   try {

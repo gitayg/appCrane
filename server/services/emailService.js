@@ -279,3 +279,53 @@ export async function notifyHealthChange(appId, env, status) {
     });
   }
 }
+
+export const RESTART_LOOP_MAIL_SOURCE = 'restart-loop';
+
+/**
+ * Tell an app's owners that one of its environments is in a restart loop
+ * (restartIncidents.js). Platform admins instead when the app has no owner, as
+ * securityRecipients does. One mail per loop episode per recipient: the
+ * idempotency key carries the episode, so a retry or a second trip inside the
+ * same episode never mails again.
+ */
+export async function notifyRestartLoop({ db, appId, env, episode, rule, restarts, lastSummary, lastAt, nextRestartAt }) {
+  const { enqueueEmail } = await import('./emailQueue.js');
+  const { appOwners, platformAdmins } = await import('./memoryAdmissionMail.js');
+  const { dashboardBaseUrl } = await import('./vulnRequests.js');
+  const app = db.prepare('SELECT id, name, slug FROM apps WHERE id = ?').get(appId);
+  if (!app) return [];
+  const owners = appOwners(db, appId);
+  const seen = new Set();
+  const people = (owners.length ? owners : platformAdmins(db)).filter(u => {
+    const k = u.email.trim().toLowerCase();
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+  if (!people.length) {
+    log.error(`RESTART LOOP on ${app.slug}/${env} could not be notified: no owner and no platform admin has an email address`);
+    return [];
+  }
+  const subject = `[AppCrane] ${app.slug} (${env}) is restarting in a loop`;
+  let body = `AppCrane restarted ${app.name} (${app.slug}, ${env}) ${restarts} times recently, which trips the rule "${rule}".\n\n`;
+  body += `Last restart: ${lastAt || 'unknown'} UTC\n`;
+  body += `Cause: ${lastSummary || 'not recorded'}\n\n`;
+  body += `AppCrane marked this environment unstable and stopped restarting it right away. The next automatic restart is not before ${nextRestartAt} UTC, and each one after that waits twice as long.\n`;
+  body += `A deploy or a manual restart clears this, and so does an hour with the app healthy and no restarts.\n\n`;
+  body += `Restart history with memory, exit state and the last log lines: ${dashboardBaseUrl()}/app?slug=${encodeURIComponent(app.slug)}\n`;
+  const sent = [];
+  for (const u of people) {
+    try {
+      enqueueEmail({
+        appId, env, to: u.email, source: RESTART_LOOP_MAIL_SOURCE, fromName: 'AppCrane',
+        subject, text: `Hi${u.name ? ` ${u.name}` : ''},\n\n${body}\nYou get this because you ${owners.length ? 'own' : 'administer the AppCrane that runs'} ${app.slug}.\n`,
+        idempotencyKey: `${RESTART_LOOP_MAIL_SOURCE}:${env}:${episode}:${u.email.trim().toLowerCase()}`,
+      });
+      sent.push(u.email);
+    } catch (e) {
+      log.warn(`[restart-loop] mail to ${u.email} skipped: ${e.message}`);
+    }
+  }
+  return sent;
+}

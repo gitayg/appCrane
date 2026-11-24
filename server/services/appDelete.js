@@ -3,6 +3,11 @@ import log from '../utils/logger.js';
 import { deleteAppCoderRows } from './crewAppCoderAgents.js';
 import { announce } from './crew.js';
 import { retainedAppSecrets } from './secretRefs.js';
+import { existsSync } from 'fs';
+import { join, sep } from 'path';
+import { logAudit } from '../middleware/audit.js';
+import { appDirsFor, dataRoot, moveToTrash } from './appTrash.js';
+import { reconcilerLive, rescheduleHealthChecks } from './reconcileState.js';
 
 // The body of DELETE /api/apps/:slug, moved here unchanged so appcrane_delete_app
 // runs the same teardown. Caddy is reloaded by the caller.
@@ -67,6 +72,11 @@ export async function deleteApp(app) {
     );
   }
 
+  // The backups rows go with the app (backups.app_id cascades and is NOT NULL),
+  // so what they said is read now and kept in the backups trash entry.
+  const backupRows = db.prepare('SELECT id, env, size_bytes, file_path, databases, created_at FROM backups WHERE app_id = ? ORDER BY id').all(app.id);
+  const offSite = await offSiteCopiesFor(slug);
+
   // Delete related records first to avoid FK constraint failures
   const appId = app.id;
   let crewTaskIds = [];
@@ -91,5 +101,81 @@ export async function deleteApp(app) {
   // Open task streams and a running coder turn for those tasks end on 'deleted'.
   if (crewTaskIds.length) announce(crewTaskIds, 'deleted');
 
-  return { slug, managed_databases: dbDrop, ...(awsRetained && { aws_secrets_retained: awsRetained }) };
+  // The rows are gone; the directories used to stay, and the next app given
+  // this slug found them (rename refused TARGET_DIR_EXISTS, a new managed app
+  // refused the old repository). Moved to the trash, not removed: the data
+  // directory, the Crane-hosted repository, per-app backups, the coder's
+  // transcripts and attachments, image attestations and the studio npm cache.
+  const trashed = [];
+  const kept = [];
+  const { dirs, refused } = appDirsFor(slug);
+  for (const r of refused) {
+    if (existsSync(join(dataRoot(), r.path))) kept.push({ kind: r.kind, error: `${r.path} is not this app's alone (the platform keeps its own files there); left in place` });
+  }
+  if (dirs.some(([kind, path]) => kind === 'coder_workspace' && existsSync(path))) {
+    // The coder container mounts this directory; stop it (its uncommitted work
+    // is preserved to a branch, as on an idle eviction) before the move.
+    try { (await import('./builder/appContainer.js')).evict(slug, 'app deleted'); } catch (e) { log.warn(`App delete '${slug}': coder container not evicted: ${e.message}`); }
+  }
+  for (const [kind, path] of dirs) {
+    if (!existsSync(path)) continue;
+    const detail = kind === 'backups'
+      ? (to) => ({ backups: backupRows.map((b) => backupInTrash(b, path, to)), ...(offSite && { off_site: offSite }) })
+      : (kind === 'app_dir' || kind === 'repo') && offSite ? { off_site: offSite } : null;
+    try {
+      const row = moveToTrash(db, { kind, path, slug, appId, reason: 'app deleted', detail });
+      trashed.push({ kind, trash_id: row.id, expires_at: row.expires_at, ...(kind === 'backups' && { backups: backupRows.length }) });
+    } catch (e) {
+      kept.push({ kind, error: e.message });
+      log.warn(`App delete '${slug}': could not move ${kind} to the trash: ${e.message}`);
+    }
+  }
+  if (offSite) {
+    log.warn(`App delete '${slug}': off-site backups in bucket ${offSite.bucket} still hold this app (${offSite.holds.join('; ')}). AppCrane does not delete remote objects`);
+  }
+  if (trashed.length) logAudit(null, null, 'app-trash', { slug, app_id: appId, trashed, ...(offSite && { off_site: offSite }) });
+
+  // A deleted config keeps its probe timer until the checker is re-armed.
+  if (reconcilerLive()) await rescheduleHealthChecks().catch((e) => log.warn(`App delete '${slug}': health checks not re-armed: ${e.message}`));
+
+  return {
+    slug, managed_databases: dbDrop, moved_to_trash: trashed,
+    ...(kept.length && { leftovers_kept: kept }),
+    ...(awsRetained && { aws_secrets_retained: awsRetained }),
+    ...(offSite && { off_site_copies_retained: offSite }),
+  };
+}
+
+// A backups row as it was, with its file paths pointing at where the files are now.
+function backupInTrash(b, from, to) {
+  const move = (p) => (typeof p === 'string' && p.startsWith(from + sep) ? to + p.slice(from.length) : p);
+  let databases = null;
+  try { databases = b.databases ? JSON.parse(b.databases).map((d) => ({ ...d, file: move(d.file) })) : null; } catch (_) {}
+  return { id: b.id, env: b.env, created_at: b.created_at, size_bytes: b.size_bytes, file_path: move(b.file_path), original_file_path: b.file_path, databases };
+}
+
+// Off-site sets are platform-wide: each holds the whole DATA_DIR archive (this
+// app's /data, icons and managed-database dumps among it) and, when repositories
+// are included, one archive per Crane-hosted repository. They are not deleted;
+// the entry says where they are. Bucket and prefix only, never a credential.
+async function offSiteCopiesFor(slug) {
+  try {
+    const { offSiteState, getBackupConfig } = await import('./backupScheduler.js');
+    const st = offSiteState();
+    if (!st.has_off_site_copy) return null;
+    const cfg = getBackupConfig();
+    const { normalizePrefix } = await import('./backupS3Sets.js');
+    const prefix = normalizePrefix(cfg.prefix);
+    return {
+      bucket: cfg.bucket, prefix, endpoint: cfg.endpoint || null, last_run: st.last_run,
+      holds: [
+        `${prefix}<set>/data.tar.gz* (apps/${slug}, backups/${slug} and its managed-database dumps)`,
+        ...(cfg.include_repos ? [`${prefix}<set>/repos/appcrane-repo-${slug}-* (the Crane-hosted repository)`] : []),
+      ],
+      note: 'Remote objects are not deleted by AppCrane; they age out under the off-site retention (daily/weekly/monthly) or can be deleted in the bucket.',
+    };
+  } catch (e) {
+    log.warn(`App delete '${slug}': off-site backup state not read: ${e.message}`);
+    return null;
+  }
 }

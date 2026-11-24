@@ -10,6 +10,9 @@ import { Icon } from '../components/icons'
 import { EnvActionMenu, type EnvMenuState } from '../components/EnvActionMenu'
 import { WhatsNewModal, type WhatsNewChange } from '../components/WhatsNewModal'
 import { appOpenUrl } from '../lib/appLinks'
+import { useEnvHealth } from '../components/appViewer/useEnvHealth'
+import { EnvStatusPanel, EnvUnstableBanner } from '../components/appViewer/EnvStatusPanel'
+import { frameShowsUnavailable } from '../components/appViewer/envStatus'
 
 /**
  * One app rendered inline, hosted by the <crane-app-topbar> element (env switch,
@@ -321,6 +324,36 @@ export function AppFrame({ slug, active, onClose }: Props) {
     return () => { cancelled = true }
   }, [stage?.slug, stage?.env, stage?.sandUrl, refreshNonce])
 
+  // Health before and while the app is shown: a down or restarting env gets a
+  // status panel instead of an iframe that cannot connect, and the app is
+  // mounted again once it answers.
+  const [healthNonce, setHealthNonce] = useState(0)
+  const [openAnyway, setOpenAnyway] = useState(false)
+  const [frameFailed, setFrameFailed] = useState(false)
+  // Polled for hidden tabs too (every 30 s while up): a tab that waited for a
+  // first answer on becoming active would drop the iframe it keeps alive.
+  const health = useEnvHealth(stage?.slug, stage?.env, true, healthNonce)
+  // A fresh URL, as Refresh makes: the iframe and everything keyed on its URL
+  // (the coder panel, the picker) attach to the new element.
+  const reloadFrame = () => setStage(s => {
+    if (!s) return s
+    const base = s.env === 'sandbox' ? s.sandUrl : s.prodUrl
+    return { ...s, url: `${base}${base.includes('?') ? '&' : '?'}_ts=${Date.now()}` }
+  })
+  useEffect(() => { setOpenAnyway(false); setFrameFailed(false) }, [stage?.slug, stage?.env])
+  useEffect(() => {
+    if (!frameFailed || health.block) return
+    const t = setTimeout(() => { setFrameFailed(false); reloadFrame() }, 15_000)
+    return () => clearTimeout(t)
+  }, [frameFailed, health.block])
+  const showPanel = !openAnyway && (health.block || frameFailed)
+  const wasPanel = useRef(false)
+  useEffect(() => {
+    if (wasPanel.current && !showPanel) reloadFrame()
+    wasPanel.current = showPanel
+  }, [showPanel])
+  const waitingForHealth = health.phase === 'checking'
+
   return (
     <div
       className="lstage-frame"
@@ -380,7 +413,27 @@ export function AppFrame({ slug, active, onClose }: Props) {
               )}
             </span>
           </crane-app-topbar>
-          {stage.url && <iframe key={stage.url} ref={iframeRef} className="lstage-iframe" src={stage.url} title={stage.name} />}
+          {stage.url && showPanel && (
+            <EnvStatusPanel
+              env={stage.env}
+              status={health}
+              frameFailed={frameFailed}
+              manageUrl={stage.canRelease || platformAdmin ? `/app?slug=${encodeURIComponent(stage.slug)}` : undefined}
+              onRetry={() => { setFrameFailed(false); setHealthNonce(n => n + 1) }}
+              onOpenAnyway={() => { setFrameFailed(false); setOpenAnyway(true) }}
+            />
+          )}
+          {stage.url && !showPanel && health.phase === 'unstable' && <EnvUnstableBanner env={stage.env} status={health} />}
+          {stage.url && !showPanel && !waitingForHealth && (
+            <iframe
+              key={stage.url}
+              ref={iframeRef}
+              className="lstage-iframe"
+              src={stage.url}
+              title={stage.name}
+              onLoad={() => { if (frameShowsUnavailable(iframeRef.current)) setFrameFailed(true) }}
+            />
+          )}
           {active && envMenu && (stage.isOwner || platformAdmin) && (
             <EnvActionMenu
               slug={stage.slug}

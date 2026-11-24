@@ -18,6 +18,7 @@ import { SLSA_PREDICATE, CYCLONEDX_PREDICATE } from './provenance.js';
 import { getTrustMode } from './policy.js';
 import { inspectImage } from './dockerImage.js';
 import { readDoc, signedRowFor, signedRowForRef } from './store.js';
+import { recordTrustEvent, recordRefusal } from './events.js';
 
 const sha256 = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
 
@@ -129,10 +130,14 @@ export async function enforceImageTrust(q) {
     const msg = `IMAGE_UNTRUSTED: refusing to start ${where}: ${r.reason}. Image trust is in enforce mode; redeploy to build and sign the image, or have a platform admin sign the running images (POST /api/image-trust/sign-current) or switch the mode to warn.`;
     q.onLog?.(msg);
     log.warn(msg);
+    await recordRefusal({ db: q.db, slug: q.slug, env: q.env, image: q.image, imageId: r.imageId, what: q.what, reason: r.reason });
     throw new AppError(msg, 409, 'IMAGE_UNTRUSTED');
   }
   const msg = `⚠ Image trust (warn mode): ${where}: ${r.reason}. Started anyway; enforce mode would refuse this.`;
   q.onLog?.(msg);
-  log.warn(msg);
+  const db = q.db || getDb();
+  const app = db.prepare('SELECT id FROM apps WHERE slug = ?').get(q.slug);
+  const ev = app ? recordTrustEvent(db, { appId: app.id, env: q.env, imageId: r.imageId, imageRef: q.image, kind: 'warn', what: q.what, reason: r.reason }) : null;
+  if (!ev || ev.log) log.warn(ev && ev.count > 1 ? `${msg} (${ev.count} times so far; logged once a day per image, listed in GET /api/image-trust/census)` : msg);
   return r;
 }

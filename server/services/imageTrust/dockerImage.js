@@ -30,3 +30,19 @@ export async function containerImageId(name) {
     return { error: `container ${name} could not be inspected (${(err.stderr || err.message || '').trim().split('\n').pop()})` };
   }
 }
+
+/** Every local image tagged appcrane-<slug>-<env>:<tag> as { repository, tag, id }, or { error }. */
+export async function listAppcraneImages() {
+  let stdout;
+  try {
+    ({ stdout } = await execFileAsync('docker', ['images', '--no-trunc', '--filter', 'reference=appcrane-*', '--format', '{{.Repository}}|{{.Tag}}|{{.ID}}'], { timeout: 30000, maxBuffer: 16 * 1024 * 1024 }));
+  } catch (err) {
+    return { error: `docker images failed (${(err.stderr || err.message || '').trim().split('\n').pop()})` };
+  }
+  return {
+    images: String(stdout).split('\n').map((l) => l.trim()).filter(Boolean).map((l) => {
+      const [repository, tag, id] = l.split('|');
+      return { repository, tag, id };
+    }).filter((x) => IMAGE_ID_RE.test(x.id) && x.tag && x.tag !== '<none>'),
+  };
+}

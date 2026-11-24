@@ -1,4 +1,10 @@
 {
+  "2.144.0": [
+    "When an app restarts, AppCrane now records why (memory use against its limit, how it exited, its last log lines) and shows it on the app's Overview, for example \"restarted 14:11: memory 99% of 512 MB\". An app that keeps restarting is marked Unstable, stops restarting in a loop, and its owners get an e-mail.",
+    "A new Reconcile page for platform admins lists records that do not match what is running (an environment with no container, failed deploys, leftovers of deleted or renamed apps) with a one-click fix. Deleting an app now moves all of its files to a 30-day trash, and renaming moves them all.",
+    "Caddy changes are checked before they are applied and never restart Caddy, so one bad change can no longer take every site down. A stopped app shows a clear status page instead of a blank frame.",
+    "Turning on image signature enforcement now checks first that every running app is signed, so it cannot leave apps unable to restart."
+  ],
   "2.143.0": [
     "Each app now has one manage page with tabs on top and Production and Sandbox side by side, so you compare the two environments row by row. On a phone the table scrolls sideways.",
     "A new Releases tab lists every release with its outcome, its What's New, who deployed it (a person or an agent) and its traffic while it was live. Tag a release with a rule-set label, compare two releases, and export the log as CSV. Click the version in an app's top bar to open it."

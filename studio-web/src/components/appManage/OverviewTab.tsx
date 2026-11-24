@@ -9,6 +9,7 @@ import { AppDetailsCard } from './AppDetailsCard'
 import { DeployProgress } from './DeployProgress'
 import { useEnvActions } from './useEnvActions'
 import { useEnvStatus } from './useEnvStatus'
+import { IncidentLine, IncidentsCard, useIncidents } from './IncidentsCard'
 import { loadReleases, type Release } from './releaseApi'
 import { errText, fmtBytes, relTime } from './format'
 import { ENVS, type EnvName, type ManageCtx } from './types'
@@ -27,6 +28,7 @@ export function OverviewTab({ ctx }: { ctx: ManageCtx }) {
   const { slug, app, canAdmin, isOwner, isPlatformAdmin } = ctx
   const st = useEnvStatus(slug, ctx.reload)
   const act = useEnvActions(slug, ctx.onMsg, ctx.refresh)
+  const incidents = useIncidents(slug, ctx.reload)
   const [latestRel, setLatestRel] = useState<Partial<Record<EnvName, Release>>>({})
 
   useEffect(() => {
@@ -101,6 +103,7 @@ export function OverviewTab({ ctx }: { ctx: ManageCtx }) {
         {ahead && <span className="am2-pill info" title={st.updates?.latest_message || ''}>New commits · {st.updates?.latest_sha}</span>}
         {st.updates && !ahead && !st.updates.error && <span className="am2-pill">Up to date</span>}
         <button className="btn btn-xs" onClick={() => testHealth(env)}>Test</button>
+        <IncidentLine env={incidents?.envs[env]} />
       </div>
     )
   }
@@ -181,6 +184,7 @@ export function OverviewTab({ ctx }: { ctx: ManageCtx }) {
       <div className="am2-cards">
         <OwnershipCard slug={slug} reload={ctx.reload} onMsg={ctx.onMsg} />
         <AppDetailsCard ctx={ctx} />
+        <IncidentsCard data={incidents} />
         <AppTimeline slug={slug} />
       </div>
       {act.modal}

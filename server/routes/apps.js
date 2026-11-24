@@ -1,3 +1,4 @@
+import { isPlatformAdmin } from '../utils/roles.js';
 import { Router } from 'express';
 import { requireStepUp } from '../services/stepUp.js';
 import { purgeRevokedTenants } from '../services/tenants.js';
@@ -214,8 +215,8 @@ const router = Router();
  * Reload Caddy AFTER this response has gone out, never before it (v2.65.4).
  *
  * reloadCaddy() cycles the proxy the response has to travel back THROUGH, and
- * it escalates to `systemctl restart caddy` whenever the admin API does not
- * answer after a reload (services/caddy.js). A restart destroys every
+ * before v2.144.0 it escalated to `systemctl restart caddy` whenever the admin
+ * API did not answer after a reload (services/caddy.js). A restart destroys every
  * connection Caddy holds, this one included, so the client never receives its
  * 201/200 — it sees a socket closed with no response bytes and re-sends. The
  * re-send finds the work already done, and the route answers it honestly and
@@ -1837,7 +1838,7 @@ router.delete('/:slug', requireAppAccess, requireStepUp('delete_app'), auditMidd
   }
 
   const { deleteApp } = await import('../services/appDelete.js');
-  const { slug, managed_databases: dbDrop, aws_secrets_retained: awsRetained } = await deleteApp(req.app);
+  const { slug, managed_databases: dbDrop, aws_secrets_retained: awsRetained, moved_to_trash: trashed, leftovers_kept: kept, off_site_copies_retained: offSite } = await deleteApp(req.app);
 
   // Update Caddy config (removes app routes) — after the 200 is on the wire.
   reloadCaddyAfterResponse(res, 'app delete');
@@ -1845,6 +1846,9 @@ router.delete('/:slug', requireAppAccess, requireStepUp('delete_app'), auditMidd
   res.json({
     message: `App '${slug}' deleted`,
     managed_databases: dbDrop,
+    moved_to_trash: trashed,
+    ...(kept && { leftovers_kept: kept }),
+    ...(offSite && (isPlatformAdmin(req.user) ? { off_site_copies_retained: offSite } : { off_site_copies_note: 'Platform off-site backups taken before this delete may still contain this app. A platform admin can see where.' })),
     ...(awsRetained && { aws_secrets_retained: awsRetained }),
   });
 });

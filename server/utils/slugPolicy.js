@@ -20,7 +20,7 @@ export const PLATFORM_PATHS = [
   'coder', 'crew', 'dashboard', 'docs', 'enhancements-page', 'favicon.svg', 'git', 'launch', 'login',
   'login-legacy', 'mcp', 'my-requests', 'oauth', 'portal', 'public', 'raiseme', 'requests', 'settings',
   'events', 'skills', 'studio', 'surveys', 'tasks', 'users-page', 'adopt', 'intake', 'access-reviews',
-  'audit-integrity', 'owner-transfers', '__appcrane', 'step-up', 'capability-approvals', 'it-setup',
+  'audit-integrity', 'owner-transfers', '__appcrane', 'step-up', 'capability-approvals', 'it-setup', 'reconcile',
 ];
 
 /**

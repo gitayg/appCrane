@@ -46,6 +46,7 @@ export const ITEMS = [
   ['caddy-log-dir', 'Caddy access-log directory'],
   ['disk-reserve', '1 GiB disk reserve file'],
   ['gvisor-runtime', 'gVisor (runsc) container runtime'],
+  ['caddy-restart-policy', 'Caddy restarts on failure, no start limit'],
 ];
 
 // The release scripts/host-hardening.sh installs; kept equal by a test.
@@ -251,6 +252,25 @@ async function gvisorItem(d) {
   return applied(`runsc release-${rel} registered with dockerd`);
 }
 
+export const CADDY_DROPIN = '/etc/systemd/system/caddy.service.d/appcrane.conf';
+
+// What systemd has loaded, not only the file: a drop-in is read at daemon-reload.
+async function caddyRestartItem(d) {
+  const show = await d.exec('systemctl', ['show', 'caddy', '-p', 'Restart', '-p', 'StartLimitIntervalUSec', '-p', 'LoadState']);
+  if (show.missing) return na('no systemd on this host');
+  if (show.code !== 0) return unknown(`systemctl show caddy failed: ${reasonLine(show.stderr) || `exit ${show.code}`}`);
+  const v = Object.fromEntries(String(show.stdout).trim().split('\n').map((l) => l.split('=')).filter((p) => p.length >= 2).map(([k, ...r]) => [k, r.join('=')]));
+  if (v.LoadState === 'not-found') return na('caddy.service is not installed');
+  const restart = v.Restart || 'unknown';
+  const limit = v.StartLimitIntervalUSec || 'unknown';
+  const ok = restart === 'on-failure' || restart === 'always';
+  const noLimit = limit === '0' || limit === 'infinity';
+  if (ok && noLimit) return applied(`caddy.service: Restart=${restart}, StartLimitIntervalUSec=${limit}`);
+  const file = readState(d, CADDY_DROPIN);
+  const why = file.text != null ? `${CADDY_DROPIN} is present but systemd has not loaded it (daemon-reload)` : `${CADDY_DROPIN} missing`;
+  return missing(`caddy.service: Restart=${restart}, StartLimitIntervalUSec=${limit}: a Caddy that exits stays down; ${why}`);
+}
+
 const CHECKS = {
   journal: journalItem,
   'syslog-rotation': syslogItem,
@@ -261,6 +281,7 @@ const CHECKS = {
   'caddy-log-dir': caddyDirItem,
   'disk-reserve': reserveItem,
   'gvisor-runtime': gvisorItem,
+  'caddy-restart-policy': caddyRestartItem,
 };
 
 export async function checkItems(deps = {}) {

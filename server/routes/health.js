@@ -6,6 +6,7 @@ import { AppError } from '../utils/errors.js';
 import { fetchAppProbe } from '../services/appProbeFetch.js';
 import { getPortsForSlot } from '../services/portAllocator.js';
 import { appOrigin } from '../services/appOrigin.js';
+import { refreshAppChecks } from '../services/healthChecker.js';
 
 const router = Router();
 
@@ -24,7 +25,11 @@ router.get('/:slug/health/:env', requireAppAccess, async (req, res) => {
     ? await (await import('../services/containerRuntime.js')).runtimeStatus(req.app, `appcrane-${req.app.slug}-${env}`, db)
     : null;
 
-  res.json({ env, config, state, runtime });
+  const incidents = ['production', 'sandbox'].includes(env) ? await import('../services/restartIncidents.js') : null;
+  const last_incident = incidents ? incidents.lastIncident({ appId: req.app.id, env, db }) : null;
+  const unstable = incidents ? incidents.getStability({ appId: req.app.id, env, db }).unstable : false;
+
+  res.json({ env, config, state, runtime, last_incident, unstable });
 });
 
 /**
@@ -57,6 +62,7 @@ router.put('/:slug/health/:env', requireAppUser, auditMiddleware('health-config'
     .run(...values, req.app.id, env);
 
   const config = db.prepare('SELECT * FROM health_configs WHERE app_id = ? AND env = ?').get(req.app.id, env);
+  refreshAppChecks(req.app.id);
   res.json({ env, config, message: 'Health config updated' });
 });
 

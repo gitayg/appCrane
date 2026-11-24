@@ -243,6 +243,7 @@ export async function recoverOne(t, deps) {
   }
   const outcome = error ? 'failed' : 'recovered';
   deps.logAudit(null, t.app_id, error ? 'container-recovery-failed' : 'container-recovered', detail, 'system');
+  await (await import('./restartIncidents.js')).recordIncident({ appId: t.app_id, env: t.env, trigger: 'recovery', action: outcome, detail, db });
   try { await deps.notify(db, t, outcome, detail); } catch (e) { log.warn(`[container-recovery] mail for ${t.name} skipped: ${e.message}`); }
   return { outcome, detail };
 }

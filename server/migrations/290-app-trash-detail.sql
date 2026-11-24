@@ -1,0 +1,11 @@
+-- What a trash entry carried with it (services/appTrash.js, services/appDelete.js).
+--
+-- detail_json: a JSON object, NULL for entries written before this column.
+-- For kind 'backups' it lists the app's backups rows as they were at delete
+-- (id, env, created_at, size_bytes, file_path, database dumps), rewritten to
+-- where the files now are in the trash: the rows themselves cannot stay,
+-- because backups.app_id is NOT NULL REFERENCES apps(id) ON DELETE CASCADE.
+-- It also records the off-site (S3) copies AppCrane does NOT delete: the
+-- bucket, prefix and key patterns that hold this app, so an admin knows they
+-- exist. No credential is ever written here.
+ALTER TABLE app_trash ADD COLUMN detail_json TEXT;

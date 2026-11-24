@@ -338,6 +338,41 @@ else
   fi
 fi
 
+# ---------- Caddy restart policy -------------------------------------------
+# The packaged caddy.service has Restart=no and systemd's default start limit
+# (5 starts in 10 s). One burst of restarts while an app was deleted hit that
+# limit and left every site on the box down, with nothing starting Caddy
+# again. This drop-in restarts Caddy when it dies and never gives up. Applied
+# with daemon-reload only: Restart= and the start limit are read from the unit
+# when the next start is due, so the running Caddy is not touched. An operator
+# file that differs is backed up before it is replaced; a later-sorting
+# drop-in (e.g. 60-local.conf) still overrides it.
+CADDY_DROPIN=/etc/systemd/system/caddy.service.d/appcrane.conf
+CADDY_DROPIN_CONF="# Written by AppCrane scripts/host-hardening.sh
+[Unit]
+StartLimitIntervalSec=0
+
+[Service]
+Restart=on-failure
+RestartSec=2"
+if [[ -f "$CADDY_DROPIN" ]] && [[ "$(cat "$CADDY_DROPIN")" != "$CADDY_DROPIN_CONF" ]]; then
+  mkdir -p /var/backups
+  cp -p "$CADDY_DROPIN" "/var/backups/caddy-dropin.appcrane-bak.$(date +%s)"
+fi
+_caddy_dropin_state="$(write_if_changed "$CADDY_DROPIN" "$CADDY_DROPIN_CONF")"
+chmod 0644 "$CADDY_DROPIN"
+log "caddy restart policy: $CADDY_DROPIN $_caddy_dropin_state"
+if have_systemd; then
+  [[ "$_caddy_dropin_state" == changed ]] && { systemctl daemon-reload || warn "daemon-reload failed — the Caddy restart policy applies at next boot"; }
+  # A Caddy already given up on (start limit hit) stays down until reset.
+  if [[ "$(systemctl is-active caddy 2>/dev/null || true)" == failed ]]; then
+    systemctl reset-failed caddy || true
+    systemctl start caddy && log "caddy restart policy: started a failed Caddy" || warn "caddy restart policy: Caddy is failed and would not start — check 'journalctl -u caddy'"
+  fi
+else
+  warn "caddy restart policy: no running systemd — applies when systemd next loads units"
+fi
+
 # ---------- disk reserve file ---------------------------------------------
 # A 1 GiB placeholder on the filesystem holding DATA_DIR. When that disk fills,
 # deleting it frees enough room to log in, run a vacuum and restart services.

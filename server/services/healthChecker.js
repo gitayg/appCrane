@@ -11,6 +11,8 @@ import log from '../utils/logger.js';
 import { jobStarted, trackJob } from './jobHealth.js';
 import { restoreInProgress } from './managedDbRestoreGuard.js';
 import { envIsSleepingById } from './envSleepState.js';
+import { captureContainer } from './restartCapture.js';
+import { recordIncident, restartDecision, noteBackoffRestart, expectPlanned } from './restartIncidents.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -315,7 +317,12 @@ function probeTcp(host, port) {
 /**
  * Run a single health check.
  */
-async function runCheck(config) {
+export async function runCheck(config) {
+  // The row this timer was scheduled with can be stale: a probe disabled at
+  // runtime, or an app deleted, would otherwise keep probing until a restart.
+  const live = getDb().prepare(`SELECT hc.enabled FROM health_configs hc JOIN apps a ON a.id = hc.app_id
+                                 WHERE hc.app_id = ? AND hc.env = ?`).get(config.app_id, config.env);
+  if (!live || !live.enabled) { unscheduleCheck(config.app_id, config.env); return; }
   // Stopped on purpose for a restore: no failure count, no auto-restart, no DOWN mail.
   if (restoreInProgress(config.slug, config.env)) return;
   // Asleep on purpose (envSleeper.js): same treatment as a restore.
@@ -396,26 +403,10 @@ async function runCheck(config) {
       WHERE app_id = ? AND env = ?
     `).run(newFails, status, responseMs, isNowDown ? 1 : 0, config.app_id, config.env);
 
-    // Auto-restart at fail threshold
-    if (newFails === config.fail_threshold) {
-      log.warn(`[AUTO-RESTART] ${config.slug} ${config.env} (${newFails} consecutive failures)`);
-      try {
-        // `docker restart` cannot bring back a container that no longer
-        // exists; container recovery runs the live release again instead.
-        const { containerMissing, recoverSoon } = await import('./containerRecovery.js');
-        if (await containerMissing(config.slug, config.env)) {
-          log.warn(`[AUTO-RESTART] ${config.slug} ${config.env} has no container; handing it to container recovery`);
-          recoverSoon();
-        } else {
-          const { restartApp } = await import('./docker.js');
-          await restartApp(config.slug, config.env);
-
-          const { logAudit } = await import('../middleware/audit.js');
-          logAudit(null, config.app_id, 'health-restart', { env: config.env, consecutive_fails: newFails });
-        }
-      } catch (e) {
-        log.error(`Auto-restart failed for ${config.slug}: ${e.message}`);
-      }
+    // Auto-restart at fail threshold. Past it, only an env in a restart loop
+    // whose backoff has run out is tried again (restartIncidents.js).
+    if (newFails === config.fail_threshold || (newFails > config.fail_threshold && backoffRetryDue(config))) {
+      await autoRestart(config, { newFails, status, probeError: probe.error || null });
     }
 
     // Down notification
@@ -426,6 +417,65 @@ async function runCheck(config) {
         notifyHealthChange(config.app_id, config.env, 'down');
       } catch (e) {}
     }
+  }
+}
+
+export function backoffRetryDue(config) {
+  const d = restartDecision({ appId: config.app_id, env: config.env });
+  return d.unstable && d.allowed;
+}
+
+/**
+ * Restart a failing env, recording why. The container's memory, exit state and
+ * last log lines are captured first (a restart resets the cgroup), under a
+ * deadline so the capture can never hold the restart up for long. An env in a
+ * restart loop is restarted only once its backoff has run out; a skipped
+ * restart is recorded too, with the reason.
+ */
+export async function autoRestart(config, { newFails, status = 0, probeError = null }) {
+  const detail = { consecutive_fails: newFails, probe_error: probeError, last_status: status || null };
+  log.warn(`[AUTO-RESTART] ${config.slug} ${config.env} (${newFails} consecutive failures)`);
+  try {
+    // `docker restart` cannot bring back a container that no longer
+    // exists; container recovery runs the live release again instead.
+    const { containerMissing, recoverSoon } = await import('./containerRecovery.js');
+    if (await containerMissing(config.slug, config.env)) {
+      log.warn(`[AUTO-RESTART] ${config.slug} ${config.env} has no container; handing it to container recovery`);
+      recoverSoon();
+      return { outcome: 'recovery' };
+    }
+    const name = `appcrane-${config.slug}-${config.env}`;
+    const decision = restartDecision({ appId: config.app_id, env: config.env });
+    const capture = await captureContainer(name);
+    if (!decision.allowed) {
+      log.warn(`[AUTO-RESTART] ${config.slug} ${config.env} skipped: ${decision.reason}`);
+      const incident = await recordIncident({ appId: config.app_id, env: config.env, trigger: 'health', action: 'skipped', capture, detail: { ...detail, skipped_reason: decision.reason } });
+      return { outcome: 'skipped', incident };
+    }
+    expectPlanned(config.app_id, config.env, 'health');
+    const { restartApp } = await import('./docker.js');
+    try {
+      await restartApp(config.slug, config.env);
+    } catch (e) {
+      // Image trust in enforce mode refused it before docker restart ran. It
+      // already audits and mails that refusal; this only records it.
+      if (e.code === 'IMAGE_UNTRUSTED') {
+        log.warn(`[AUTO-RESTART] ${config.slug} ${config.env} refused by image trust`);
+        const incident = await recordIncident({ appId: config.app_id, env: config.env, trigger: 'restart_refused', action: 'failed', capture, detail: { ...detail, error: e.message } });
+        return { outcome: 'refused', incident };
+      }
+      const incident = await recordIncident({ appId: config.app_id, env: config.env, trigger: 'health', action: 'failed', capture, detail: { ...detail, error: e.message } });
+      throw Object.assign(e, { incident });
+    }
+    if (decision.unstable) noteBackoffRestart({ appId: config.app_id, env: config.env });
+
+    const { logAudit } = await import('../middleware/audit.js');
+    logAudit(null, config.app_id, 'health-restart', { env: config.env, consecutive_fails: newFails });
+    const incident = await recordIncident({ appId: config.app_id, env: config.env, trigger: 'health', action: 'restarted', capture, detail });
+    return { outcome: 'restarted', incident };
+  } catch (e) {
+    log.error(`Auto-restart failed for ${config.slug}: ${e.message}`);
+    return { outcome: 'error', error: e.message, incident: e.incident || null };
   }
 }
 
@@ -441,11 +491,29 @@ export function stopHealthChecker() {
   log.info('Health checker stopped');
 }
 
+/** Stop probing one app-env. True when a timer was running. */
+export function unscheduleCheck(appId, env) {
+  const key = `${appId}-${env}`;
+  const handle = checkIntervals.get(key);
+  if (!handle) return false;
+  clearTimeout(handle.timer);
+  clearInterval(handle.timer);
+  checkIntervals.delete(key);
+  return true;
+}
+
+/** True while a probe timer runs for this app-env (for tests and diagnostics). */
+export function isCheckScheduled(appId, env) {
+  return checkIntervals.has(`${appId}-${env}`);
+}
+
 /**
- * Refresh checks for a specific app (after config change).
+ * Refresh checks for a specific app (after config change). A disabled env's
+ * timer is dropped; an enabled one is rescheduled with the new settings.
  */
 export function refreshAppChecks(appId) {
   const db = getDb();
+  for (const r of db.prepare('SELECT env FROM health_configs WHERE app_id = ? AND enabled = 0').all(appId)) unscheduleCheck(appId, r.env);
   const configs = db.prepare(`
     SELECT hc.*, a.slug, a.slot, a.health_path FROM health_configs hc
     JOIN apps a ON a.id = hc.app_id

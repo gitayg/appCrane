@@ -119,7 +119,7 @@ test('delete: the owner (personal key) deletes; rows go, the deletion is audited
   assert.deepEqual(JSON.parse(row.detail), { via: 'mcp', slug: 'del-ok' });
 });
 
-test('delete: a platform admin deletes; a Crane-hosted repo is kept and reported', async () => {
+test('delete: a platform admin deletes; a Crane-hosted repo moves to the trash and is reported', async () => {
   const lg = await import('../server/services/localGit.js');
   await lg.createAppRepo('del-local');
   db.prepare("INSERT INTO apps (name, slug, slot, source_type, repo_backend, branch) VALUES ('del-local', 'del-local', ?, 'managed', 'local', 'main')").run(getNextSlot(db));
@@ -127,8 +127,11 @@ test('delete: a platform admin deletes; a Crane-hosted repo is kept and reported
   createGrant(db, padmin.id, 'delete_app', db.prepare("SELECT id FROM apps WHERE slug = 'del-local'").get().id);
   const out = await del(padmin, { slug: 'del-local', confirm_slug: 'del-local' });
   assert.equal(out.deleted, true);
-  assert.equal(out.local_repo_kept, 'repos/del-local.git');
-  assert.equal(existsSync(lg.repoPath('del-local')), true);
+  const repo = out.moved_to_trash.find((t) => t.kind === 'repo');
+  assert.ok(repo, JSON.stringify(out));
+  assert.equal(existsSync(lg.repoPath('del-local')), false);
+  const row = db.prepare('SELECT * FROM app_trash WHERE id = ?').get(repo.trash_id);
+  assert.equal(existsSync(join(row.trash_path, 'HEAD')), true, 'the repository itself is kept, in the trash');
 });
 
 // ---- appcrane_get_audit ----

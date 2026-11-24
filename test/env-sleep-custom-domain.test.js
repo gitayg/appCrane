@@ -57,18 +57,19 @@ test('Caddyfile: the signed-in custom domain gets the wake rewrite only while sl
   db.prepare('DELETE FROM app_sleep_policy').run();
   policy.setPlatformPolicy(db, { sandbox_idle_minutes: 0, inactive_days: 0, sandbox_schedule: 'off' }, null);
   const off = generateCaddyfile();
-  assert.doesNotMatch(siteBlock(off, 'cdauth.example.test'), /handle_errors|_crashed|X-AppCrane-Wake/, 'sleep off must leave the block as it was');
+  // Sleep off, the only error handler is Caddy's own page (services/caddyErrorPage.js).
+  assert.doesNotMatch(siteBlock(off, 'cdauth.example.test'), /_crashed|X-AppCrane-Wake|@cranedown/, 'sleep off must leave the block as it was');
 
   policy.setAppPolicy(db, signedIn.id, { inactive_days: 7 }, null);
   try {
     const token = policy.wakeToken(db);
     const on = generateCaddyfile();
     const block = siteBlock(on, 'cdauth.example.test');
-    assert.match(block, new RegExp(`handle_errors \\{\\n {8}@appdown expression \`\\{err\\.status_code\\} in \\[502, 503, 504\\]\`\\n {8}handle @appdown \\{\\n {12}rewrite \\* /api/_crashed/cdauth\\{uri\\}\\n {12}request_header X-AppCrane-Wake "${token}"\\n {12}reverse_proxy 127\\.0\\.0\\.1:5001`));
+    assert.match(block, new RegExp(`handle_errors \\{\\n {8}@appdown expression \`\\{err\\.status_code\\} in \\[502, 503, 504\\]\`\\n[\\s\\S]*?\\n {8}handle @appdown \\{\\n {12}rewrite \\* /api/_crashed/cdauth\\{uri\\}\\n {12}request_header X-AppCrane-Wake "${token}"\\n {12}reverse_proxy 127\\.0\\.0\\.1:5001`));
     assert.match(block, /forward_auth 127\.0\.0\.1:5001 \{\n {16}uri \/api\/identity\/verify\?app=cdauth&env=production&host=isolated/);
     assert.doesNotMatch(block, /uri strip_prefix|@appcrane_compat/, 'a custom domain has no /<slug> prefix to undo');
-    assert.doesNotMatch(siteBlock(on, 'cdopen.example.test'), /handle_errors|_crashed|X-AppCrane-Wake/);
-    assert.doesNotMatch(siteBlock(on, 'cdheadless.example.test'), /handle_errors|_crashed|X-AppCrane-Wake/);
+    assert.doesNotMatch(siteBlock(on, 'cdopen.example.test'), /_crashed|X-AppCrane-Wake/);
+    assert.doesNotMatch(siteBlock(on, 'cdheadless.example.test'), /_crashed|X-AppCrane-Wake/);
   } finally {
     db.prepare('DELETE FROM app_sleep_policy').run();
   }
