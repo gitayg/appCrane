@@ -183,6 +183,7 @@ test('unattended-upgrades: an operator 20auto-upgrades that turns it off is left
 
 const INSTALL = join(ROOT, 'scripts', 'install-host-hardening.sh');
 const DEST = '/usr/local/lib/appcrane/host-hardening.sh';
+const PUBLISH_HELPER = join(ROOT, 'scripts', 'appcrane-publish-chain.sh');
 
 test('install.sh installs the sudo copy after running the script, passing the run user, without aborting on failure', () => {
   execFileSync('bash', ['-n', INSTALL]);
@@ -210,7 +211,7 @@ const skipSudo = sudoImage ? false : 'docker (or the package mirror) unavailable
 function installRun(runUser, after = '') {
   const body = [
     'mkdir -p /opt/appcrane/scripts /mnt/data',
-    'cp /src/host-hardening.sh /src/install-host-hardening.sh /opt/appcrane/scripts/',
+    'cp /src/host-hardening.sh /src/install-host-hardening.sh /src/appcrane-publish-chain.sh /opt/appcrane/scripts/',
     'chown -R app:app /opt/appcrane',
     'printf "DATA_DIR=/mnt/data\\n" > /opt/appcrane/.env',
     `echo "@@INSTALL"; bash /opt/appcrane/scripts/install-host-hardening.sh ${runUser} 2>&1; echo "@@EXIT $?"`,
@@ -221,11 +222,13 @@ function installRun(runUser, after = '') {
     'echo "@@SUDOERS"; cat /etc/sudoers.d/appcrane-host-hardening 2>/dev/null || echo "@@MISSING"',
     'echo "@@SUDOERSMODE"; stat -c \'%U:%G %a\' /etc/sudoers.d/appcrane-host-hardening 2>&1',
     'echo "@@VISUDO"; visudo -c >/dev/null 2>&1; echo "rc=$?"',
+    'echo "@@PUBHELPER"; stat -c \'%U:%G %a\' /usr/local/lib/appcrane/appcrane-publish-chain.sh 2>&1',
+    'echo "@@PUBSUDOERS"; cat /etc/sudoers.d/appcrane-publish-chain 2>/dev/null || echo "@@MISSING"',
     after,
     'echo "@@END"',
   ].join('\n');
   return execFileSync('docker', ['run', '--rm', '--tmpfs', '/mnt/data:size=64m',
-    '-v', `${SCRIPT}:/src/host-hardening.sh:ro`, '-v', `${INSTALL}:/src/install-host-hardening.sh:ro`,
+    '-v', `${SCRIPT}:/src/host-hardening.sh:ro`, '-v', `${INSTALL}:/src/install-host-hardening.sh:ro`, '-v', `${PUBLISH_HELPER}:/src/appcrane-publish-chain.sh:ro`,
     sudoImage, 'bash', '-c', body], { encoding: 'utf8', timeout: 120000, stdio: ['ignore', 'pipe', 'pipe'] });
 }
 
@@ -248,6 +251,8 @@ test('install-host-hardening: root-owned copy with REPO_DIR baked, sudoers rule 
   assert.match(sec('SUDOERS'), /^app ALL=\(root\) NOPASSWD: \/usr\/local\/lib\/appcrane\/host-hardening\.sh ""$/m);
   assert.equal(sec('SUDOERSMODE').trim(), 'root:root 440');
   assert.equal(sec('VISUDO').trim(), 'rc=0');
+  assert.equal(sec('PUBHELPER').trim(), 'root:root 755');
+  assert.match(sec('PUBSUDOERS'), /^app ALL=\(root\) NOPASSWD: \/usr\/local\/lib\/appcrane\/appcrane-publish-chain\.sh$/m);
   assert.match(sec('L'), /rc=0$/m, 'sudo -n -l <copy> exits 0 when permitted');
   assert.match(sec('LARG'), /rc=1$/m, 'with an argument it is not permitted');
   assert.match(sec('RUN'), /rc=0$/m, sec('RUN'));
@@ -261,4 +266,6 @@ test('install-host-hardening: a root run user gets the copy but no sudoers rule'
   assert.match(out, /^@@EXIT 0$/m, out);
   assert.equal(section(out, 'FILE').trim(), 'root:root 755');
   assert.match(out, /^@@SUDOERS\n@@MISSING$/m, out);
+  assert.equal(section(out, 'PUBHELPER').trim(), 'root:root 755', 'the helper is installed for a root server too');
+  assert.match(out, /^@@PUBSUDOERS\n@@MISSING$/m, out);
 });

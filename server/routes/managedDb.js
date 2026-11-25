@@ -6,6 +6,7 @@ import { requireAuth, requireAppUser, requireAppAccess, requirePlatformAdmin } f
 import { auditMiddleware, logAudit } from '../middleware/audit.js';
 import { AppError } from '../utils/errors.js';
 import log from '../utils/logger.js';
+import { requireStepUp } from '../services/stepUp.js';
 import { checkCapability, recordImplicit, neededEngine } from '../services/capabilities/enforce.js';
 
 /**
@@ -507,6 +508,57 @@ serversRouter.post('/encryption/unload-key', requireAuth, requirePlatformAdmin, 
   }
   logAudit(req.user.id, null, 'managed-db-encryption-key-unload', { engine: 'mariadb', deleted: deleteKey });
   res.json(status);
+});
+
+/**
+ * Logins that can still sign in with a password alone
+ * (services/managedDbPasswordOnly.js), and the per-login conversion.
+ * Platform admin only: the list spans every app.
+ *
+ *   GET  /logins/password-only            SQLite only, never starts a server
+ *   POST /logins/:id/require-certificate  :id is managed_databases.id; converts
+ *                                         that row's owner and `_app` logins
+ *                                         (managedDb.requireCertificate)
+ */
+serversRouter.get('/logins/password-only', requireAuth, requirePlatformAdmin, async (_req, res) => {
+  const { passwordOnlyLogins, certProblems } = await import('../services/managedDbPasswordOnly.js');
+  const { readServerFile } = await import('../services/dbCerts.js');
+  const { isStrictPgHba } = await import('../services/managedDbTls.js');
+  const hba = readServerFile('postgres', 'pg_hba.conf');
+  res.json({
+    logins: passwordOnlyLogins(),
+    cert_problems: certProblems(),
+    postgres_strict: hba == null ? null : isStrictPgHba(hba),
+  });
+});
+
+// It cuts off the app's new connections at once (and, for Mongo, removes the
+// password), so it takes a fresh sign-in (step-up) and an explicit
+// { "confirm": true } in the body.
+serversRouter.post('/logins/:id/require-certificate', requireAuth, requirePlatformAdmin, requireStepUp('security_settings'), async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) throw new AppError('Unknown managed database', 404, 'NOT_FOUND');
+  if (req.body?.confirm !== true) {
+    throw new AppError('Send {"confirm": true}: requiring the certificate refuses the app\'s new connections until it is redeployed with it', 400, 'CONFIRMATION_REQUIRED');
+  }
+  const svc = await engineModule();
+  let result;
+  try {
+    result = await svc.requireCertificate(id);
+  } catch (err) {
+    rethrowEngineError(err);
+  }
+  if (!result) throw new AppError('Unknown managed database', 404, 'NOT_FOUND');
+  const app = getDb().prepare('SELECT slug FROM apps WHERE id = ?').get(result.app_id);
+  logAudit(req.user.id, result.app_id, 'managed-db-require-certificate', { engine: result.engine, logins: result.logins, converted: result.converted });
+  res.json({
+    ...result,
+    app_slug: app?.slug || null,
+    note: `Done: ${result.logins.join(' and ')} now need TLS and their own client certificate`
+      + (result.engine === 'mongo' ? ' (x509: no password). ' : ', as well as the password. ')
+      + `Redeploy or restart ${app?.slug || 'the app'} to mount the certificate and get the TLS connection URL; `
+      + 'until then the engine refuses its new connections.',
+  });
 });
 
 serversRouter.get('/servers', requireAuth, requirePlatformAdmin, async (_req, res) => {

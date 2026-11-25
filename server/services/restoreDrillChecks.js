@@ -8,6 +8,7 @@ import { extractTar, sha256File, readHead } from './backupFiles.js';
 import { runRepoTask, REPO_MANIFEST, REPO_BUNDLE } from './repoArchive.js';
 import { MANIFEST } from './configBackup.js';
 import { decrypt } from './encryption.js';
+import { keyFingerprint, liveKeyHex, shortFingerprint } from './backupCrypto.js';
 
 // The checks a restore drill runs against a backup restored into its scratch
 // directory. Every function here reads only below the scratch path it is
@@ -92,7 +93,14 @@ export async function verifyDataTree(dir, { liveDb, tolerancePct, pgRestoreList 
     backupKey = envKey(await readFile(envFile, 'utf8'));
   }
   const keyInProvider = !backupKey && manifest?.secrets?.encryption_key_in_provider;
-  if (keyInProvider) {
+  if (!backupKey && manifest?.encryption_key?.in_archive === false) {
+    // By design since v2.145.0: the archive names its key by fingerprint and holds no copy of it.
+    const want = manifest.encryption_key.fingerprint;
+    const have = keyFingerprint(liveKeyHex());
+    checks.push(have && have === want
+      ? check('encryption_key', 'Backup names an ENCRYPTION_KEY this host holds', 'pass', `the archive holds no key by design; the live key matches its fingerprint ${shortFingerprint(want)}`)
+      : check('encryption_key', 'Backup names an ENCRYPTION_KEY this host holds', 'fail', `the archive holds no key and needs fingerprint ${shortFingerprint(want) || 'unknown'}; the live key is ${shortFingerprint(have) || 'not loaded'}, so only the recovery key restores it`));
+  } else if (keyInProvider) {
     // By design: the archive holds no key. secrets_decrypt below measures whether the live one opens it.
     const same = manifest.secrets.secret_id && manifest.secrets.secret_id === process.env.APPCRANE_SECRETS_ID;
     checks.push(check('encryption_key', 'Backup carries an ENCRYPTION_KEY', same ? 'pass' : 'warn',

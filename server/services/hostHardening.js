@@ -47,6 +47,7 @@ export const ITEMS = [
   ['disk-reserve', '1 GiB disk reserve file'],
   ['gvisor-runtime', 'gVisor (runsc) container runtime'],
   ['caddy-restart-policy', 'Caddy restarts on failure, no start limit'],
+  ['host-network', 'Host network policy (DOCKER-USER, INPUT, metadata service)'],
 ];
 
 // The release scripts/host-hardening.sh installs; kept equal by a test.
@@ -271,6 +272,69 @@ async function caddyRestartItem(d) {
   return missing(`caddy.service: Restart=${restart}, StartLimitIntervalUSec=${limit}: a Caddy that exits stays down; ${why}`);
 }
 
+export const HOST_NETWORK_STATE = '/var/lib/appcrane/host-network.state';
+export const HOST_NETWORK_CONF = '/etc/appcrane/host-network.conf';
+export const HOST_NETWORK_UNIT = 'appcrane-host-network.service';
+
+/** key=value lines of the state file the network section writes (last one wins). */
+export function parseHostNetworkState(text) {
+  const out = {};
+  for (const line of String(text).split('\n')) {
+    const m = /^([a-z_]+)=(.*)$/.exec(line);
+    if (m) out[m[1]] = m[2];
+  }
+  return out;
+}
+
+// What the last run of the network section decided, from the state file it
+// writes (reading the chains themselves needs root), and whether the unit that
+// re-applies it after a reboot or Docker restart is enabled.
+async function hostNetworkItem(d) {
+  const r = readState(d, HOST_NETWORK_STATE);
+  if (r.error) return unknown(`${HOST_NETWORK_STATE} unreadable: ${r.error}`);
+  if (r.absent) {
+    return missing('host network section not applied: nothing limits the ports Docker publishes on 0.0.0.0 (ufw never sees them), and containers can reach the instance metadata service');
+  }
+  const s = parseHostNetworkState(r.text);
+  const network = {
+    result: s.result || null,
+    ext: s.ext || null,
+    families: s.families || null,
+    input_mode: s.input_mode || null,
+    input_policy: s.input_policy || null,
+    allow: s.allow ? s.allow.split(' ').filter(Boolean) : [],
+    uncovered: s.uncovered ? s.uncovered.split(' ').filter(Boolean) : [],
+    run_user: s.run_user || null,
+    docker_user: s.docker_user || null,
+    publish_drop: s.publish_drop === 'yes',
+    publish_drop_reason: s.publish_drop_reason || null,
+    applied_at: s.applied_at || null,
+  };
+  const withNet = (x) => ({ ...x, network });
+  if (s.result === 'failed') return withNet(missing(`last run of the network section failed: ${s.error || 'unknown error'}; the previous chains, if any, are unchanged`));
+  if (s.result === 'refused') {
+    return withNet(missing(`public interface ${s.ext}; DOCKER-USER set (${s.families}); INPUT policy left ${s.input_policy || 'as it was'}: these listen on non-loopback addresses with no accept rule: ${network.uncovered.join(', ')}. Add them to APPCRANE_INPUT_ALLOW in ${HOST_NETWORK_CONF} (or set APPCRANE_INPUT_FORCE=1 there) and apply again`));
+  }
+  if (s.result !== 'ok') return withNet(unknown(`${HOST_NETWORK_STATE} has no result`));
+  const input = s.input_mode === 'ufw'
+    ? `INPUT: ufw (22, 80, 443/tcp allowed where no rule existed; port ${s.app_port} denied on ${s.ext})`
+    : `INPUT: APPCRANE-INPUT chain, policy ${s.input_policy}, accepting ${s.allow}; port ${s.app_port} dropped on ${s.ext} only`;
+  if (s.publish_drop !== 'yes') {
+    const du = s.docker_user === 'interim'
+      ? 'DOCKER-USER left to the interim appcrane-docker-user unit'
+      : `DOCKER-USER set (${s.families}) WITHOUT the DROP on ${s.ext}: published ports stay open to the internet`;
+    return withNet(missing(`public interface ${s.ext}; ${du}, because ${s.publish_drop_reason || 'the server cannot keep APPCRANE-PUBLISH filled'}; ${input}. Fix that and apply again`));
+  }
+  const facts = `public interface ${s.ext}; DOCKER-USER set (${s.families}): replies, metadata service blocked for containers, ${s.ext} limited to APPCRANE-PUBLISH, then DROP; ${input}`;
+  const en = await d.exec('systemctl', ['is-enabled', HOST_NETWORK_UNIT]);
+  if (en.missing) return withNet(applied(`${facts}; no systemd, so nothing re-applies it after a reboot`));
+  const st = String(en.stdout || '').trim();
+  if (en.code !== 0 || st !== 'enabled') {
+    return withNet(missing(`${facts}; but ${HOST_NETWORK_UNIT} is ${st || 'not enabled'}: the chains are lost at the next reboot`));
+  }
+  return withNet(applied(`${facts}; ${HOST_NETWORK_UNIT} re-applies it after reboots and Docker restarts`));
+}
+
 const CHECKS = {
   journal: journalItem,
   'syslog-rotation': syslogItem,
@@ -282,6 +346,7 @@ const CHECKS = {
   'disk-reserve': reserveItem,
   'gvisor-runtime': gvisorItem,
   'caddy-restart-policy': caddyRestartItem,
+  'host-network': hostNetworkItem,
 };
 
 export async function checkItems(deps = {}) {

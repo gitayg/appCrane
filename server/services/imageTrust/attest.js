@@ -12,7 +12,7 @@ import { getSigningKey } from './signingKey.js';
 import { signStatement, simpleSigningPayload, signBytes } from './envelope.js';
 import { runSbomTool, enrichSbom, sbomCoverage, describedImageId } from './sbom.js';
 import { provenanceStatement, sbomStatement, repositoryOf } from './provenance.js';
-import { licensePolicyCheck } from './licensePolicy.js';
+import { licensePolicyCheck, licenseLogLine } from './licensePolicy.js';
 import { getLicensePolicy, getTrustMode } from './policy.js';
 import { inspectImage } from './dockerImage.js';
 import { FILES, dirFor, writeDoc, insertPending, finishRow, pruneOrphanAttestations, signedRowFor, signedRowForRef } from './store.js';
@@ -142,7 +142,7 @@ export async function attestImage(ctx) {
     if (coverage) {
       const algs = Object.entries(coverage.hashAlgorithms).map(([a, n]) => `${a} ${n}`).join(', ') || 'none';
       appendLog(`Supply chain: CycloneDX ${sbom.specVersion} SBOM, ${coverage.components} component(s); hash ${coverage.withHash}/${coverage.components} (${algs}), license ${coverage.withLicense}/${coverage.components}.`);
-      appendLog(`License policy: ${licenseCheck.status} — ${licenseCheck.reasons[0]}`);
+      appendLog(licenseLogLine(licenseCheck));
     } else {
       appendLog(`Supply chain: no SBOM attestation — ${sbomError}`);
     }
@@ -175,6 +175,10 @@ export async function attestDeployImage(ctx) {
     return { id: null, status: 'error', error: info.error };
   }
   const prior = signedRowFor(db, app.id, env, info.id);
+  if (prior && prior.sbom_status !== 'ok') {
+    appendLog(`Supply chain: attestation #${prior.id} of ${info.id.slice(0, 19)}… has no SBOM (${prior.sbom_error || 'not generated'}); signing it again to add one.`);
+    return attestImage({ ...ctx, imageId: info.id, origin: prior.origin, ...(prior.origin === 'deploy' ? {} : { kind: 'backfill' }) });
+  }
   if (prior) {
     const id = insertPending(db, { deploymentId: ctx.deploymentId ?? null, appId: app.id, env, origin: prior.origin, imageRef: image });
     const keep = ['image_id', 'key_id', 'dir', 'sbom_status', 'sbom_error', 'sbom_sha256', 'sbom_components', 'sbom_hash_coverage', 'sbom_license_coverage', 'license_check_json'];

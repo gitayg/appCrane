@@ -116,3 +116,29 @@ export async function decryptFile(src, dest, key) {
   }
   return { bytes, sha256: hash.digest('hex') };
 }
+
+// Key separation (v2.145.0). A platform backup names the ENCRYPTION_KEY it
+// needs by this fingerprint and never carries the key itself. The label keeps
+// it apart from every deriveSecret() value, and the key is 256 random bits, so
+// the fingerprint says which key without saying anything about it.
+export const KEY_FINGERPRINT_ALG = 'sha256-appcrane-encryption-key-v1';
+const KEY_HEX_RE = /^[0-9a-f]{64}$/;
+
+/** The 64-hex key the way encryption.js uses it (first 64 chars, any case), or null. */
+export function normalizeKeyHex(v) {
+  const k = String(v ?? '').trim().slice(0, 64).toLowerCase();
+  return KEY_HEX_RE.test(k) ? k : null;
+}
+
+export function keyFingerprint(keyHex) {
+  const k = normalizeKeyHex(keyHex);
+  if (!k) return null;
+  return crypto.createHash('sha256').update(`${KEY_FINGERPRINT_ALG}:${k}`).digest('hex');
+}
+
+export const shortFingerprint = (fp) => (fp ? String(fp).slice(0, 16) : null);
+
+/** The key this process encrypts with, or null when none is loaded. */
+export function liveKeyHex(env = process.env) {
+  return normalizeKeyHex(env.ENCRYPTION_KEY);
+}

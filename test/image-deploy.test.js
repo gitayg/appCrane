@@ -243,7 +243,9 @@ test('an image deploy pulls the tag, resolves it, and starts the digest — not 
   assert.ok(!args.includes('odoo:19'),
     `the floating tag must not appear anywhere in the run argv: ${JSON.stringify(args)}`);
 
-  const pulls = dockerCalls().filter(c => c[0] === 'pull');
+  // v2.145.0: a deploy may also pull the pinned image scanner when it is missing; that pull is not the app's.
+  const { SCANNER_IMAGE } = await import('../server/services/imageScan.js');
+  const pulls = dockerCalls().filter(c => c[0] === 'pull' && c[1] !== SCANNER_IMAGE);
   assert.deepEqual(pulls, [['pull', 'odoo:19']],
     'the PULL is by tag — that is how a patch release is picked up. Only the run is pinned.');
 

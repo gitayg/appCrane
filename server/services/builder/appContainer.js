@@ -16,6 +16,7 @@ import { jobStarted, trackJobSync } from '../jobHealth.js';
 import { OOM_APP_FLAG } from '../oomPriority.js';
 import { CPU_APP_FLAG } from '../cpuPriority.js';
 import { admitContainer, reserveMemory } from '../memoryAdmission.js';
+import { resolveHostGatewayAddHostSync } from '../hostGateway.js';
 
 const STUDIO_IMAGE  = process.env.APPSTUDIO_IMAGE || 'appcrane-studio:latest';
 const IDLE_EVICT_MS = parseInt(process.env.CODER_IDLE_MS || '1800000', 10); // 30 min
@@ -283,10 +284,10 @@ function startContainer(slug, workspaceDir, onLog) {
     '--security-opt', 'no-new-privileges:true',
     '--pids-limit=512',
     // The coder's read-only AppCrane MCP endpoint (services/coderMcpKey.js).
-    // A name for a route the bridge already has, the host-gateway convention
-    // CRANE_INTERNAL_URL uses: what the agent may do there is decided by its
-    // per-turn key on the server, not by the network.
-    '--add-host', 'host.docker.internal:host-gateway',
+    // A name for a route the bridge already has, the convention
+    // CRANE_INTERNAL_URL uses (services/hostGateway.js): what the agent may do
+    // there is decided by its per-turn key on the server, not by the network.
+    '--add-host', resolveHostGatewayAddHostSync(),
     '-v', `${workspaceDir}:/workspace`,
     '-v', `${transcriptDir}:${CONTAINER_CLAUDE_PROJECTS_DIR}`,
   ];

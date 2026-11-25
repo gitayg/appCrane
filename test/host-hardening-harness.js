@@ -110,4 +110,51 @@ function run(rel, setup = '', { runs = 1, env = {}, dockerArgs = [] } = {}) {
   return { runs: runsOut, logrotate: lr, logrotateExit: Number(lr.match(/^@@LREXIT (\d+)/m)[1]) };
 }
 
-export { images, RELEASES, skipFor, buildTimeLeft, note, section, run, DUMP };
+// ---- network section (host-network*.test.js) ----
+// The same images plus iptables, ufw, ss and nc, run --privileged so the
+// container has its own netfilter tables to change. bzip2 is preinstalled so
+// the gVisor step does not run apt-get update on every run.
+const netImages = {};
+function buildNetImages(budgetMs = 60000) {
+  const t0 = Date.now();
+  for (const rel of RELEASES) {
+    if (!images[rel] || Date.now() - t0 > budgetMs - 1000) continue;
+    const tag = `appcrane-test-host-network:${rel}`;
+    const t1 = Date.now();
+    try {
+      execFileSync('docker', ['build', '-q', '-t', tag, '-'], {
+        input: `FROM ${images[rel]}\nRUN apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iptables iproute2 ufw netcat-openbsd procps bzip2 sudo >/dev/null && rm -rf /var/lib/apt/lists/*\n`,
+        stdio: ['pipe', 'pipe', 'pipe'], timeout: Math.max(1000, budgetMs - (Date.now() - t0)),
+      });
+      netImages[rel] = tag;
+    } catch (_) { /* the tests below skip */ }
+    note(`ubuntu ${rel} network image`, t1, !!netImages[rel]);
+  }
+  return netImages;
+}
+const skipNet = (rel) => netImages[rel] ? false : 'docker (or the package mirror) unavailable';
+
+// Runs <body> in a privileged container where `hh` runs the script and prints
+// "@@EXIT <code>". /opt/appcrane/scripts also holds install-host-hardening.sh
+// and appcrane-publish-chain.sh. Returns the combined output.
+function runNet(rel, body, { env = {}, timeout = 60000 } = {}) {
+  const script = [
+    'mkdir -p /opt/appcrane/scripts /opt/appcrane/data',
+    'cp /src/scripts/host-hardening.sh /src/scripts/install-host-hardening.sh /src/scripts/appcrane-publish-chain.sh /opt/appcrane/scripts/',
+    'printf "DATA_DIR=/opt/appcrane/data\\n" > /opt/appcrane/.env',
+    'hh() { echo @@RUN; APPCRANE_RESERVE_MIN_FREE_GB=100000 bash /opt/appcrane/scripts/host-hardening.sh 2>&1; echo "@@EXIT $?"; }',
+    body,
+  ].join('\n');
+  const envArgs = Object.entries(env).flatMap(([k, v]) => ['-e', `${k}=${v}`]);
+  return execFileSync('docker', ['run', '--rm', '--privileged', ...envArgs, '-v', `${join(ROOT, 'scripts')}:/src/scripts:ro`, netImages[rel], 'bash', '-c', script],
+    { encoding: 'utf8', timeout, stdio: ['ignore', 'pipe', 'pipe'] });
+}
+
+// Text after "@@<name>" up to the next "@@" marker.
+const block = (out, name) => {
+  const m = out.match(new RegExp(`^@@${name}\\n([\\s\\S]*?)(?=^@@|(?![\\s\\S]))`, 'm'));
+  return m ? m[1] : null;
+};
+const exits = (out) => [...out.matchAll(/^@@EXIT (\d+)$/gm)].map((m) => Number(m[1]));
+
+export { images, RELEASES, skipFor, buildTimeLeft, note, section, run, DUMP, netImages, buildNetImages, skipNet, runNet, block, exits };

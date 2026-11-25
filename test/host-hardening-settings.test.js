@@ -55,6 +55,7 @@ const HARDENED = {
     '/etc/docker/daemon.json': '{"log-opts":{"max-size":"10m","max-file":"3"}}\n',
     '/etc/passwd': 'root:x:0:0:root:/root:/bin/bash\ncaddy:x:998:998::/var/lib/caddy:/usr/sbin/nologin\n',
     [`${REPO}/scripts/host-hardening.sh`]: REPO_SRC,
+    '/var/lib/appcrane/host-network.state': '# Written by AppCrane scripts/host-hardening.sh\napplied_at=2026-11-25T06:08:17Z\nresult=ok\next=eth0\nfamilies=IPv4+IPv6\ninput_mode=appcrane-input\ninput_policy=DROP\nallow=22/tcp 80/tcp 443/tcp 443/udp\napp_port=5001\nuncovered=\nrun_user=root\ndocker_user=skeleton\npublish_drop=yes\npublish_drop_reason=\n',
   },
   dirs: {
     '/etc/systemd/journald.conf.d': ['50-appcrane.conf'],
@@ -76,6 +77,7 @@ const HARDENED = {
     '/usr/local/bin/runsc --version': { code: 0, stdout: `runsc version release-${H.GVISOR_RELEASE}.0\nspec: 1.2.1\n` },
     'docker info --format {{json .Runtimes}}': { code: 0, stdout: '{"io.containerd.runc.v2":{"path":"runc"},"runc":{"path":"runc"},"runsc":{"path":"/usr/local/bin/runsc"}}\n' },
     'systemctl show caddy -p Restart -p StartLimitIntervalUSec -p LoadState': { code: 0, stdout: 'Restart=on-failure\nStartLimitIntervalUSec=0\nLoadState=loaded\n' },
+    'systemctl is-enabled appcrane-host-network.service': { code: 0, stdout: 'enabled\n' },
   },
 };
 
@@ -117,6 +119,50 @@ const SUDO_FILES = { [H.INSTALLED_SCRIPT]: installedCopy };
 
 // ---- status ----
 
+test('host-network: applied with mode and public interface; not applied, refused with listeners, failed, unit not enabled, no systemd', async () => {
+  const STATE = H.HOST_NETWORK_STATE;
+  const EN = 'systemctl is-enabled appcrane-host-network.service';
+  const s = async (over) => item(await H.checkItems(host(over).deps), 'host-network');
+  const ok = await s({});
+  assert.equal(ok.state, 'applied');
+  assert.match(ok.detail, /^public interface eth0; DOCKER-USER set \(IPv4\+IPv6\).*INPUT: APPCRANE-INPUT chain, policy DROP, accepting 22\/tcp 80\/tcp 443\/tcp 443\/udp; port 5001 dropped on eth0 only.*re-applies it after reboots/);
+  assert.equal(ok.network.publish_drop, true);
+  assert.equal(ok.network.ext, 'eth0');
+  assert.equal(ok.network.input_mode, 'appcrane-input');
+  assert.deepEqual(ok.network.allow, ['22/tcp', '80/tcp', '443/tcp', '443/udp']);
+
+  const none = await s({ files: { [STATE]: null } });
+  assert.equal(none.state, 'missing');
+  assert.match(none.detail, /^host network section not applied/);
+
+  const ufw = await s({ files: { [STATE]: 'result=ok\next=ens5\nfamilies=IPv4\ninput_mode=ufw\ninput_policy=DROP\napp_port=5001\npublish_drop=yes\n' } });
+  assert.match(ufw.detail, /INPUT: ufw \(22, 80, 443\/tcp allowed where no rule existed; port 5001 denied on ens5\)/);
+
+  const refused = await s({ files: { [STATE]: 'result=refused\next=eth0\nfamilies=IPv4+IPv6\ninput_mode=refused\ninput_policy=ACCEPT\nuncovered=8080/tcp@0.0.0.0(nc) 41641/udp@*(tailscaled)\n' } });
+  assert.equal(refused.state, 'missing');
+  assert.match(refused.detail, /INPUT policy left ACCEPT: .*8080\/tcp@0\.0\.0\.0\(nc\), 41641\/udp@\*\(tailscaled\)\. Add them to APPCRANE_INPUT_ALLOW in \/etc\/appcrane\/host-network\.conf/);
+  assert.deepEqual(refused.network.uncovered, ['8080/tcp@0.0.0.0(nc)', '41641/udp@*(tailscaled)']);
+
+  const nodrop = await s({ files: { [STATE]: 'result=ok\next=eth0\nfamilies=IPv4\ninput_mode=appcrane-input\ninput_policy=DROP\nallow=22/tcp\napp_port=5001\nrun_user=app\ndocker_user=skeleton\npublish_drop=no\npublish_drop_reason=AppCrane runs as app and /usr/local/lib/appcrane/appcrane-publish-chain.sh is not installed\n' } });
+  assert.equal(nodrop.state, 'missing');
+  assert.match(nodrop.detail, /DOCKER-USER set \(IPv4\) WITHOUT the DROP on eth0: published ports stay open to the internet, because AppCrane runs as app and \/usr\/local\/lib\/appcrane\/appcrane-publish-chain\.sh is not installed/);
+  assert.equal(nodrop.network.publish_drop, false);
+  const interim = await s({ files: { [STATE]: 'result=ok\next=eth0\nfamilies=IPv4\ninput_mode=ufw\ninput_policy=DROP\napp_port=5001\ndocker_user=interim\npublish_drop=no\npublish_drop_reason=AppCrane has not synced published ports yet: APPCRANE-PUBLISH lacks udp:31001\n' } });
+  assert.equal(interim.state, 'missing');
+  assert.match(interim.detail, /DOCKER-USER left to the interim appcrane-docker-user unit, because AppCrane has not synced published ports yet/);
+
+  const failed = await s({ files: { [STATE]: 'result=failed\nerror=no default route: public interface unknown\n' } });
+  assert.equal(failed.state, 'missing');
+  assert.match(failed.detail, /failed: no default route/);
+
+  const disabled = await s({ exec: { [EN]: { code: 1, stdout: 'disabled\n' } } });
+  assert.equal(disabled.state, 'missing');
+  assert.match(disabled.detail, /appcrane-host-network\.service is disabled: the chains are lost at the next reboot/);
+  const nosd = await s({ exec: { [EN]: null } });
+  assert.equal(nosd.state, 'applied');
+  assert.match(nosd.detail, /no systemd/);
+});
+
 test('caddy-restart-policy: the production defaults are missing; a drop-in not yet loaded says so; no systemd is n/a', async () => {
   const SHOW = 'systemctl show caddy -p Restart -p StartLimitIntervalUSec -p LoadState';
   const s = async (over) => item(await H.checkItems(host(over).deps), 'caddy-restart-policy');
@@ -149,7 +195,7 @@ test('the release the status checks for is the release the script installs', () 
 
 test('a fully hardened host: every item applied, in the contract order', async () => {
   const items = await H.checkItems(host().deps);
-  assert.deepEqual(items.map((i) => i.id), ['journal', 'syslog-rotation', 'logrotate-hourly', 'docker-log-defaults', 'apt-news', 'unattended-upgrades', 'caddy-log-dir', 'disk-reserve', 'gvisor-runtime', 'caddy-restart-policy']);
+  assert.deepEqual(items.map((i) => i.id), ['journal', 'syslog-rotation', 'logrotate-hourly', 'docker-log-defaults', 'apt-news', 'unattended-upgrades', 'caddy-log-dir', 'disk-reserve', 'gvisor-runtime', 'caddy-restart-policy', 'host-network']);
   for (const i of items) assert.equal(i.state, 'applied', `${i.id}: ${i.detail}`);
   assert.match(item(items, 'journal').detail, /SystemMaxUse=500M in \/etc\/systemd\/journald\.conf\.d\/50-appcrane\.conf; journal uses 312\.0M/);
   assert.match(item(items, 'disk-reserve').detail, /sudo rm \/appcrane-disk-reserve/);
@@ -378,7 +424,7 @@ test('GET: platform admin only, contract shape, mfa_required follows enrollment'
   assert.equal(r.status, 200);
   assert.deepEqual(Object.keys(r.body).sort(), ['items', 'last_run', 'mfa_required', 'run', 'running', 'supported']);
   assert.equal(r.body.supported, true);
-  assert.equal(r.body.items.length, 10);
+  assert.equal(r.body.items.length, 11);
   assert.deepEqual(r.body.run, { mode: 'root', command: `bash ${REPO}/scripts/host-hardening.sh` });
   assert.equal(r.body.mfa_required, false);
   assert.equal(r.body.running, false);

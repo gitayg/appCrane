@@ -20,6 +20,7 @@ process.env.LOG_LEVEL = 'error';
 process.env.ANTHROPIC_API_KEY = 'sk-ant-test-coder-mcp';
 process.env.GIT_TERMINAL_PROMPT = '0';
 process.env.PORT = '5099';
+delete process.env.HOST_GATEWAY_IP;
 
 const REAL_FETCH = globalThis.fetch.bind(globalThis);
 
@@ -30,6 +31,8 @@ writeFileSync(DOCKER_LOG, '');
 writeFileSync(join(SHIM, 'docker'), `#!/bin/sh
 { for a in "$@"; do printf '%s\\037' "$a"; done; printf '\\n'; } >> "${DOCKER_LOG}"
 case "$1" in
+  info)    echo 'Ubuntu 24.04.1 LTS' ;;
+  network) [ "$2" = inspect ] && [ "$3" = bridge ] && echo '172.17.0.1 ' ;;
   image)   echo 6 ;;
   inspect) echo true ;;
   run)     echo 0123456789abcdef0123456789abcdef ;;
@@ -106,7 +109,9 @@ test('the coder container can resolve host.docker.internal', async () => {
   const run = dockerLines().find((a) => a[0] === 'run' && a.includes('appcrane.container.type=app'));
   assert.ok(run, 'no coder container was started');
   const i = run.indexOf('--add-host');
-  assert.ok(i >= 0 && run[i + 1] === 'host.docker.internal:host-gateway', `run argv: ${run.join(' ')}`);
+  // The shim is a Linux daemon whose bridge gateway is 172.17.0.1: the mapping
+  // is that address, not Docker's host-gateway value (services/hostGateway.js).
+  assert.ok(i >= 0 && run[i + 1] === 'host.docker.internal:172.17.0.1', `run argv: ${run.join(' ')}`);
 });
 
 test('a turn passes claude a strict --mcp-config for this app\'s key, pre-approves the allowlist, and revokes the key at turn end', async () => {

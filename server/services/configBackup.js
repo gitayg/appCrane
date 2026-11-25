@@ -16,6 +16,10 @@
  *                      the DB's encrypted env_vars / secrets can't be decrypted.
  *                      With the key in AWS Secrets Manager it is not here; the
  *                      manifest's `secrets` says so and names the secret.
+ *                      The nightly local archive and the off-site set
+ *                      (option separateKey, v2.145.0) write it WITHOUT the
+ *                      key and name the key by fingerprint in the manifest's
+ *                      `encryption_key`; on-demand exports still carry it.
  *   - apps/<slug>/icon.*                    — per-app tile icons.
  *   - apps/<slug>/<env>/shared/data/…       — the app's /data mount.
  *   - apps/<slug>/<env>/shared/volumes/…    — every OTHER declared mount,
@@ -70,6 +74,9 @@ import {
 } from './backupFiles.js';
 import { backupSecretsNote } from './secretsProvider/index.js';
 import { planRestoredEnv } from './secretsProvider/restorePlan.js';
+import { withKeys } from './secretsProvider/envText.js';
+import { scrubEnvText, keyManifestEntry, planBackupKey } from './backupKeySeparation.js';
+import { liveKeyHex, shortFingerprint } from './backupCrypto.js';
 import log from '../utils/logger.js';
 
 const dbPath = () => join(dataDir(), 'deployhub.db');
@@ -168,6 +175,12 @@ async function collectAppTrees() {
  *              managed_db.failed and does NOT fail the export: the archive
  *              also carries deployhub.db and the ENCRYPTION_KEY, and one
  *              stopped database server must not cost the platform its backup.
+ *   separateKey — write .env WITHOUT ENCRYPTION_KEY (and any other line that
+ *              holds the key) and name the key the archive needs by
+ *              fingerprint in the manifest's `encryption_key`. The nightly
+ *              local archive and the off-site set pass it (v2.145.0); see
+ *              backupKeySeparation.js. importDataArchive then takes the key
+ *              from this host or an admin-supplied recovery key.
  * @returns {{ path, file, bytes, manifest, warnings }}
  */
 export function exportDataArchive(opts = {}) {
@@ -193,7 +206,19 @@ async function writeDataArchive(opts) {
     const dbBytes = (await stat(stagedDb)).size;
 
     const hasEnv = existsSync(envPath());
-    const envBytes = hasEnv ? (await stat(envPath())).size : 0;
+    let envBytes = hasEnv ? (await stat(envPath())).size : 0;
+    let keyEntry = null;
+    if (opts.separateKey) {
+      const live = liveKeyHex();
+      let removed = [];
+      if (hasEnv) {
+        const scrubbed = scrubEnvText(await readFile(envPath(), 'utf8'), live);
+        removed = scrubbed.removed;
+        await writeFile(join(stage, '.env'), scrubbed.text, { mode: 0o600 });
+        envBytes = (await stat(join(stage, '.env'))).size;
+      }
+      keyEntry = keyManifestEntry(removed, live);
+    }
     traceBackup('trees:start');
     const trees = platformOnly
       ? { members: [], skipped: [], bytes: 0, dataVolumes: 0 }
@@ -270,6 +295,7 @@ async function writeDataArchive(opts) {
       repo_set: repoSet,
       image_set: imageSet,
       ...(secretsNote ? { secrets: secretsNote } : {}),
+      ...(keyEntry ? { encryption_key: keyEntry } : {}),
     };
     await writeFile(join(stage, MANIFEST), JSON.stringify(manifest, null, 2), { mode: 0o600 });
     traceBackup('manifest:end');
@@ -281,8 +307,8 @@ async function writeDataArchive(opts) {
     try {
       traceBackup('tar:start');
       ({ warnings } = await createTar(partial, [
-        { cwd: stage, paths: [MANIFEST, 'deployhub.db', ...(managedDb.databases.length ? ['managed-db'] : [])] },
-        ...(hasEnv ? [{ cwd: repoRoot, paths: ['.env'] }] : []),
+        { cwd: stage, paths: [MANIFEST, 'deployhub.db', ...(keyEntry && hasEnv ? ['.env'] : []), ...(managedDb.databases.length ? ['managed-db'] : [])] },
+        ...(hasEnv && !keyEntry ? [{ cwd: repoRoot, paths: ['.env'] }] : []),
         { cwd: dataDir(), paths: trees.members },
       ], { gzip: true }));
       traceBackup('tar:end');
@@ -389,7 +415,9 @@ async function moveEntry(src, dest, type) {
  * a process restart — the caller restarts.
  *
  * @param {string} archivePath  file on disk
- * @param {object} opts         { restoreEnv?: boolean (default true) }
+ * @param {object} opts         { restoreEnv?: boolean (default true),
+ *                                encryptionKey?: hex, the recovery key for an
+ *                                archive written without its key (v2.145.0) }
  */
 export async function importDataArchive(archivePath, opts = {}) {
   const restoreEnv = opts.restoreEnv !== false;
@@ -489,6 +517,12 @@ export async function importDataArchive(archivePath, opts = {}) {
     const envPlan = restoreEnv && existsSync(stagedEnv) ? planRestoredEnv(await readFile(stagedEnv, 'utf8')) : null;
     if (envPlan?.action === 'refuse') throw refuse(envPlan.message);
 
+    // An archive written without its key restores only with the key it names
+    // by fingerprint: this host's, or the admin-supplied recovery key. Checked
+    // (fingerprint, then a decrypt of sampled values) while nothing has changed.
+    const liveEnvText = existsSync(envPath()) ? await readFile(envPath(), 'utf8') : '';
+    const keyPlan = planBackupKey(manifest, { suppliedKey: opts.encryptionKey, stagedDbPath: stagedDb, restoreEnv, liveEnvText });
+
     // --- 5. Point of no return. Keep the current DB + .env.
     const stamp = Date.now();
     const preDir = join(dataDir(), `pre-import-${stamp}`);
@@ -504,7 +538,11 @@ export async function importDataArchive(archivePath, opts = {}) {
     for (const suffix of ['-wal', '-shm']) await unlink(`${dbPath()}${suffix}`).catch(() => {});
 
     let envRestored = false;
-    if (envPlan?.action === 'merge') {
+    if (keyPlan?.writeKey && (envPlan || keyPlan.changesKey)) {
+      const base = envPlan?.action === 'merge' ? envPlan.text : envPlan ? await readFile(stagedEnv, 'utf8') : liveEnvText;
+      await writeFile(envPath(), withKeys(base, { ENCRYPTION_KEY: keyPlan.writeKey }), { mode: 0o600 });
+      envRestored = !!envPlan;
+    } else if (envPlan?.action === 'merge') {
       await writeFile(envPath(), envPlan.text, { mode: 0o600 });
       envRestored = true;
     } else if (envPlan) {
@@ -573,7 +611,7 @@ export async function importDataArchive(archivePath, opts = {}) {
       }
       : { expected_fingerprint: null, expected_count: 0, note: 'This backup predates image archives and names no image set.' };
 
-    log.warn(`[config-backup] IMPORTED backup from ${manifest.exported_at} (format=${isZip ? 'zip' : 'tar.gz'}, env=${envRestored}, icons=${icons}, data-files=${dataFiles}, volume-files=${volumeFiles}, repos=${repos}, refused=${refused}). Restart required. Pre-import copy at ${preDir}`);
+    log.warn(`[config-backup] IMPORTED backup from ${manifest.exported_at} (format=${isZip ? 'zip' : 'tar.gz'}, env=${envRestored}${keyPlan ? `, key=${keyPlan.source} ${shortFingerprint(keyPlan.fingerprint)}` : ''}, icons=${icons}, data-files=${dataFiles}, volume-files=${volumeFiles}, repos=${repos}, refused=${refused}). Restart required. Pre-import copy at ${preDir}`);
     return {
       manifest, format: isZip ? 'legacy-zip' : 'tar.gz',
       envRestored, icons, dataFiles, volumeFiles, refused, preImportDir: preDir, imageSet, repoSet,
@@ -584,6 +622,9 @@ export async function importDataArchive(archivePath, opts = {}) {
         note: 'Managed databases are not restored by a whole-system import. Restore one database from this archive with POST /api/settings/backup/restore-database once the server is back up.',
       },
       repoHeads: stagedRepos.map(({ slug, head, headSha }) => ({ slug, head, headSha })),
+      encryptionKey: keyPlan
+        ? { in_archive: false, source: keyPlan.source, fingerprint: shortFingerprint(keyPlan.fingerprint), written_to_env: !!keyPlan.writeKey && (!!envPlan || keyPlan.changesKey) }
+        : { in_archive: null },
       ...(manifest.secrets || envPlan?.action === 'merge' ? { secrets: { ...(manifest.secrets || {}), env_lines_dropped: envPlan?.dropped || [] } } : {}),
     };
   } finally {

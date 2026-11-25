@@ -15,6 +15,13 @@
 # copy has the repo path baked in, because sudo's env_reset strips the
 # environment and the script needs the repo to find .env / DATA_DIR.
 #
+# It also installs scripts/appcrane-publish-chain.sh, root-owned, at
+# /usr/local/lib/appcrane/appcrane-publish-chain.sh, with a second sudoers rule
+# letting the run user run exactly that path with arguments (it validates them
+# itself): AppCrane keeps the APPCRANE-PUBLISH chain in step with the ports it
+# publishes through it. host-hardening.sh closes the public interface in
+# DOCKER-USER only when AppCrane runs as root or this rule is in place.
+#
 # run-user defaults to the User= of appcrane.service, then $SUDO_USER, then root.
 # A root run user needs no sudoers rule, so none is written.
 
@@ -31,6 +38,9 @@ SRC="$REPO_DIR/scripts/host-hardening.sh"
 DEST_DIR=/usr/local/lib/appcrane
 DEST="$DEST_DIR/host-hardening.sh"
 SUDOERS_FILE=/etc/sudoers.d/appcrane-host-hardening
+PUB_SRC="$REPO_DIR/scripts/appcrane-publish-chain.sh"
+PUB_DEST="$DEST_DIR/appcrane-publish-chain.sh"
+PUB_SUDOERS_FILE=/etc/sudoers.d/appcrane-publish-chain
 
 RUN_USER="${1:-}"
 if [[ -z "$RUN_USER" ]] && [[ -d /run/systemd/system ]] && command -v systemctl >/dev/null 2>&1; then
@@ -39,6 +49,7 @@ fi
 RUN_USER="${RUN_USER:-${SUDO_USER:-root}}"
 
 [[ -f "$SRC" ]] || die "$SRC not found"
+[[ -f "$PUB_SRC" ]] || die "$PUB_SRC not found"
 [[ "$REPO_DIR" != *"'"* ]] || die "Repo path contains a single quote: $REPO_DIR"
 [[ "$RUN_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] || die "Not a valid user name: $RUN_USER"
 id -u "$RUN_USER" >/dev/null 2>&1 || die "User does not exist: $RUN_USER"
@@ -54,6 +65,12 @@ chown root:root "$_tmp"
 chmod 0755 "$_tmp"
 mv -f "$_tmp" "$DEST"
 log "host-hardening: installed $DEST (root:root 0755, repo $REPO_DIR)"
+_tmp="$(mktemp "$DEST_DIR/.appcrane-publish-chain.XXXXXX")"
+cat "$PUB_SRC" > "$_tmp"
+chown root:root "$_tmp"
+chmod 0755 "$_tmp"
+mv -f "$_tmp" "$PUB_DEST"
+log "host-hardening: installed $PUB_DEST (root:root 0755)"
 
 if [[ "$RUN_USER" == root ]]; then
   log "host-hardening: AppCrane runs as root — no sudoers rule needed"
@@ -75,3 +92,17 @@ if ! visudo -cf "$_tmp" >/dev/null; then
 fi
 mv -f "$_tmp" "$SUDOERS_FILE"
 log "host-hardening: sudoers written: $SUDOERS_FILE ($RUN_USER may run $DEST)"
+
+_tmp="$(mktemp /etc/sudoers.d/.appcrane-publish-chain.XXXXXX)"
+cat > "$_tmp" <<SUDOERS
+# Written by AppCrane scripts/install-host-hardening.sh
+# Lets ${RUN_USER} set the APPCRANE-PUBLISH chain; the script accepts only <tcp|udp>:<port> arguments.
+${RUN_USER} ALL=(root) NOPASSWD: ${PUB_DEST}
+SUDOERS
+chown root:root "$_tmp"
+chmod 0440 "$_tmp"
+if ! visudo -cf "$_tmp" >/dev/null; then
+  rm -f "$_tmp"; die "Generated sudoers rule is invalid — $PUB_SUDOERS_FILE not written"
+fi
+mv -f "$_tmp" "$PUB_SUDOERS_FILE"
+log "host-hardening: sudoers written: $PUB_SUDOERS_FILE ($RUN_USER may run $PUB_DEST)"

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { adminApi } from '../adminApi'
 import { serverDate } from '../utils/serverDate'
 import { HostLimitsCard } from '../components/HostLimitsCard'
+import { HostNetworkCard } from '../components/HostNetworkCard'
 import { setVisibleInterval } from '../utils/visibleInterval'
 
 type JobStatus = 'ok' | 'warning' | 'late' | 'failing' | 'never-run' | 'disabled'
@@ -208,6 +209,7 @@ export function JobHealth() {
         </>
       )}
       <HostLimitsCard />
+      <HostNetworkCard />
     </div>
   )
 }

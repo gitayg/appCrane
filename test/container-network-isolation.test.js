@@ -401,10 +401,13 @@ test("v2.42.0's second 0.0.0.0 publish survives the network change", async () =>
   ]);
 });
 
-test('--add-host host.docker.internal:host-gateway still appears, and only when asked for', async () => {
+test('--add-host host.docker.internal still appears, and only when asked for', async () => {
   // The route an email-enabled app uses to reach /api/service on the host. A
   // user-defined network changes the gateway address, so this is exactly the
-  // flag most likely to be broken by the change.
+  // flag most likely to be broken by the change. This shim answers
+  // `network inspect bridge` with no gateway, so the value is hostGateway.js's
+  // fallback, host-gateway; test/host-gateway-argv.test.js covers the Linux
+  // bridge-gateway value.
   const on = await start(HTTP_APP, { addHostGateway: true });
   const i = on.indexOf('host.docker.internal:host-gateway');
   assert.notEqual(i, -1, 'an email-enabled app lost its route back to AppCrane');

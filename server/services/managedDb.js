@@ -123,6 +123,7 @@ import { getManagedDbSettings } from './managedDbSettings.js';
 import * as tde from './managedDbEncryption.js';
 import * as appLogin from './managedDbAppLogin.js';
 import * as pgStats from './managedDbStats.js';
+import { passwordOnlyLogins } from './managedDbPasswordOnly.js';
 import { OOM_DB_FLAG } from './oomPriority.js';
 import { CPU_DB_FLAG } from './cpuPriority.js';
 import { managedDbCpuDrift } from './resourceDrift.js';
@@ -591,7 +592,11 @@ async function prepareServerTls(engine, addrs) {
     // mongod and redis-cli present the server certificate as a CLIENT too.
     bothUsages: engine === 'mongo' || engine === 'redis',
   });
-  const extra = engine === 'postgres' ? { 'pg_hba.conf': tlsCfg.pgHbaConf() } : {};
+  // pg_hba keeps whatever strictness syncPgHba() last decided: rewriting it
+  // non-strict here would loosen a recreated server until the next sync.
+  const extra = engine === 'postgres'
+    ? { 'pg_hba.conf': tlsCfg.pgHbaConf({ strict: tlsCfg.isStrictPgHba(certs.readServerFile('postgres', 'pg_hba.conf')) }) }
+    : {};
   const dir = certs.writeServerFiles(engine, cert, extra);
   return { dir, renewed: cert.renewed };
 }
@@ -647,6 +652,89 @@ async function reloadServerTls(engine, container, coords = null) {
     log.info(`managedDb: ${container} reloaded its renewed TLS certificate`);
   } catch (e) {
     log.warn(`managedDb: ${container} could not reload its renewed TLS certificate (${e.message}); it will use it after its next restart`);
+  }
+}
+
+/**
+ * Strict pg_hba: once no Postgres login can authenticate with a password
+ * alone, the last pg_hba line becomes `reject` (managedDbTls.pgHbaConf), so
+ * no TCP connection gets in without TLS and a client certificate — the
+ * superuser and any role created by hand included. Back to scram-sha-256 the
+ * moment one password-only login exists again (a catalogue app provisioned,
+ * a manifest login between provision and secureLogin).
+ *
+ * strict needs BOTH views to be empty: SQLite's (passwordOnlyLogins) and the
+ * engine's (login roles outside the cert group, superuser aside). A row that
+ * says "certificate" while the engine never got the GRANT keeps the server
+ * non-strict instead of locking that app out.
+ *
+ * Only on a RUNNING server, never starting one, and a reload, never a
+ * restart: the file is copied into the container's private directory again
+ * (installSnippet) and pg_reload_conf() applies it to new connections.
+ * pg_hba_file_rules is checked first, because a reload of an unparsable file
+ * keeps the old rules and only says so in the server log.
+ *
+ * `ops` is a test seam (runAdminSql, containerState, exec); production never
+ * passes it.
+ */
+export async function syncPgHba({ ops = null, loosen = false } = {}) {
+  return withLock('pg-hba', async () => {
+    const o = ops || {
+      runAdminSql,
+      containerState,
+      exec: (args) => dockerExec(args, { timeout: 30000 }),
+    };
+    const cfg = ENGINES.postgres;
+    const logins = passwordOnlyLogins({ engine: 'postgres' });
+    const have = certs.readServerFile('postgres', 'pg_hba.conf');
+    const running = Boolean(serverRow('postgres')) && await o.containerState(cfg.container) === 'running';
+    if (!running) {
+      // loosen (provision, before CREATE ROLE): a stopped server reads the
+      // host file when it starts, so the file alone is enough.
+      if (loosen && tlsCfg.isStrictPgHba(have)) {
+        certs.writeServerFile('postgres', 'pg_hba.conf', tlsCfg.pgHbaConf({ strict: false }));
+        return { running: false, strict: false, changed: true, logins, engineRoles: [] };
+      }
+      return { running: false, strict: null, changed: false, logins, engineRoles: [] };
+    }
+    // loosen: only ever towards scram-sha-256, never decides strict.
+    if (loosen && !tlsCfg.isStrictPgHba(have)) return { running: true, strict: false, changed: false, logins, engineRoles: [] };
+    const engineRoles = loosen ? [] : String(await o.runAdminSql('postgres', tlsCfg.pgPasswordOnlyRolesSql()) || '')
+      .split('\n').map((r) => r.trim()).filter(Boolean);
+    const strict = !loosen && logins.length === 0 && engineRoles.length === 0;
+    const want = tlsCfg.pgHbaConf({ strict });
+    if (have === want) return { running: true, strict, changed: false, logins, engineRoles };
+    const install = () => o.exec(['exec', cfg.container, 'sh', '-c', tlsCfg.installSnippet('postgres')]);
+    certs.writeServerFile('postgres', 'pg_hba.conf', want);
+    try {
+      await install();
+      const errors = String(await o.runAdminSql('postgres',
+        'COPY (SELECT line_number || \': \' || error FROM pg_hba_file_rules WHERE error IS NOT NULL) TO STDOUT;') || '').trim();
+      if (errors) throw new Error(`pg_hba.conf does not parse (${errors})`);
+      await o.runAdminSql('postgres', tlsCfg.RELOAD_STATEMENT.postgres);
+    } catch (e) {
+      // Put the old file back on the host AND in the container's private
+      // copy, so a later container restart does not load the rejected one.
+      if (have != null) {
+        certs.writeServerFile('postgres', 'pg_hba.conf', have);
+        await install().catch((e2) => log.warn(`managedDb: could not copy the previous pg_hba.conf back into ${cfg.container} (${e2.message})`));
+      }
+      throw e;
+    }
+    log.info(strict
+      ? 'managedDb: every Postgres login requires its client certificate; pg_hba now rejects any TCP login without one'
+      : `managedDb: ${logins.length + engineRoles.length} Postgres login(s) still use a password alone; pg_hba falls back to scram-sha-256 for them`);
+    return { running: true, strict, changed: true, logins, engineRoles };
+  });
+}
+
+/** For the paths that change a login: a failed sync is logged, the hourly check retries it. */
+async function syncPgHbaQuietly(sync = syncPgHba) {
+  try {
+    return await sync();
+  } catch (e) {
+    log.warn(`managedDb: could not update the Postgres pg_hba policy (${e.message}); the hourly login check retries it`);
+    return null;
   }
 }
 
@@ -1084,6 +1172,7 @@ async function ensureServerLocked(engine, cfg) {
     await reloadServerTls(engine, cfg.container, engine === 'mongo' ? { port, adminPassword } : null);
   }
   await hardenServer(engine, port, adminPassword);
+  if (engine === 'postgres') await syncPgHbaQuietly();
   if (tdeMode === 'encrypt' && ours) {
     // Logged, never thrown: a conversion problem must not stop a deploy from
     // getting its database. The summary (and any failures) is on the card.
@@ -2113,12 +2202,14 @@ function connectionWithoutTls(row, port) {
  * connection details INCLUDING the password, for the caller to inject into a
  * container's environment. The password is never logged, here or anywhere.
  */
-export async function provision(scope, engine) {
+export async function provision(scope, engine, { ops = null } = {}) {
   if (!ENGINES[engine]) throw new Error(`managedDb: unknown engine '${engine}' (supported: ${SUPPORTED_ENGINES.join(', ')})`);
   if (ENGINES[engine].perScope) return provisionPerScope(scope, engine);
   const { appId, tenant } = normalizeScope(scope);
+  // Test seam (the engine calls and the pg_hba sync); production never passes it.
+  const o = { ensureServer, createInEngine, dropInEngine, syncPgHba, ...(ops || {}) };
 
-  const server = await ensureServer(engine);
+  const server = await o.ensureServer(engine);
 
   const existing = rowFor(scope, engine);
   if (existing) return connectionFor(existing, server.port);
@@ -2148,14 +2239,31 @@ export async function provision(scope, engine) {
     throw e;
   }
 
+  // A new Postgres login is password-only until secureLogin() converts it
+  // (a catalogue login stays so). A strict pg_hba would refuse it, so it is
+  // loosened FIRST, with the row already counted by syncPgHba (so no other
+  // sync can re-tighten in between), and a failure fails the provision: an
+  // app must not be handed a login the server will not let in.
+  if (engine === 'postgres') {
+    try {
+      await o.syncPgHba({ loosen: true });
+    } catch (e) {
+      db.prepare('DELETE FROM managed_databases WHERE app_id = ? AND tenant = ? AND engine = ?')
+        .run(appId, tenant, engine);
+      throw new Error(`managedDb: provisioning postgres database refused: pg_hba.conf could not fall back to scram-sha-256 for the new login (${e.message})`);
+    }
+  }
+
   try {
-    await createInEngine(engine, database, username, password);
+    await o.createInEngine(engine, database, username, password);
   } catch (e) {
     // Engine-side failure with a row already written would leave AppCrane
     // believing in a database that does not exist. Roll both back.
     db.prepare('DELETE FROM managed_databases WHERE app_id = ? AND tenant = ? AND engine = ?')
       .run(appId, tenant, engine);
-    await dropInEngine(engine, database, username).catch(() => {});
+    await o.dropInEngine(engine, database, username).catch(() => {});
+    // Strict again if this was the only password-only login.
+    if (engine === 'postgres') await syncPgHbaQuietly(o.syncPgHba);
     // Redacted HERE, where the password is in scope, rather than by the route.
     //
     // The engine can echo a failing statement back in its error, and
@@ -2170,6 +2278,8 @@ export async function provision(scope, engine) {
   }
 
   log.info(`managedDb: provisioned ${engine} database ${database} for app ${appId}${tenant ? ` tenant ${tenant}` : ''}`);
+  // Re-evaluated now the role exists: still loose while it is password-only.
+  if (engine === 'postgres') await syncPgHbaQuietly(o.syncPgHba);
   return connectionFor(rowFor(scope, engine), server.port);
 }
 
@@ -2385,15 +2495,7 @@ export async function secureLogin(scope, engine, { certRequired = false, image =
   const requireCert = certRequired || row.client_cert_required === 1;
   const settings = getManagedDbSettings(getDb());
 
-  let files = null;
-  if (requireCert) {
-    // Redis: a certificate from the INSTANCE's CA, in redis-client.*, so the
-    // instance accepts this app's certificate and no other app's.
-    const isRedis = engine === 'redis';
-    const cert = isRedis ? certs.ensureRedisClientCert(row.db_name, row.db_user) : certs.ensureClientCert(row.db_user);
-    const owner = await resolveOwner(image);
-    files = certs.writeClientFiles(row.db_user, cert, owner, { prefix: isRedis ? certs.REDIS_CLIENT_PREFIX : '' });
-  }
+  const files = requireCert ? await writeLoginFiles(row, { image, resolveOwner }) : null;
 
   if (ENGINES[engine].perScope) {
     // Redis: the requirement is the instance's own start flags.
@@ -2428,6 +2530,7 @@ export async function secureLogin(scope, engine, { certRequired = false, image =
   if (requireCert && row.client_cert_required !== 1) {
     getDb().prepare('UPDATE managed_databases SET client_cert_required = 1 WHERE id = ?').run(row.id);
     log.info(`managedDb: ${engine} login ${row.db_user} now requires TLS and its client certificate`);
+    if (engine === 'postgres') await syncPgHbaQuietly(ops ? ops.syncPgHba || (async () => null) : syncPgHba);
   }
   const fresh = rowFor(scope, engine);
   return {
@@ -2436,6 +2539,74 @@ export async function secureLogin(scope, engine, { certRequired = false, image =
     tls: requireCert ? tlsFor(fresh) : null,
     mounts: files ? [clientMountFor(fresh, files.hostDir)] : [],
   };
+}
+
+/**
+ * A login's client files, for the container that reads them. Redis: a
+ * certificate from the INSTANCE's CA, in redis-client.*, so the instance
+ * accepts this app's certificate and no other app's.
+ */
+async function writeLoginFiles(row, { image = null, resolveOwner = certs.resolveImageOwner } = {}) {
+  const isRedis = row.engine === 'redis';
+  const cert = isRedis ? certs.ensureRedisClientCert(row.db_name, row.db_user) : certs.ensureClientCert(row.db_user);
+  const owner = await resolveOwner(image);
+  return certs.writeClientFiles(row.db_user, cert, owner, { prefix: isRedis ? certs.REDIS_CLIENT_PREFIX : '' });
+}
+
+/**
+ * Does the ENGINE already hold this login to its client certificate? Read
+ * only: nothing is granted, altered or recreated.
+ *   postgres  a member of the cert group (pg_has_role), so pg_hba sends it
+ *             to `hostssl ... clientcert=verify-full`
+ *   mariadb   REQUIRE SUBJECT '/CN=<login>' on '<login>'@'%'
+ *   mongo     the `$external` x509 user exists and the SCRAM user is gone
+ *   redis     the instance runs with the TLS config label
+ */
+async function engineEnforcesCert(row, o) {
+  const user = assertIdent(row.db_user);
+  if (row.engine === 'postgres') {
+    await o.ensureServer('postgres');
+    return String(await o.runAdminSql('postgres', tlsCfg.pgCertMemberSql(user)) || '').trim() === 't';
+  }
+  if (row.engine === 'mariadb') {
+    await o.ensureServer('mariadb');
+    const out = String(await o.runAdminSql('mariadb', tlsCfg.mariadbRequireSql(user)) || '');
+    return out.split('\n').some((l) => l.trim() === `CERT:SPECIFIED:/CN=${user}`);
+  }
+  if (row.engine === 'mongo') {
+    await o.ensureServer('mongo');
+    const { adminPassword } = adminCoordsFor('mongo');
+    const out = String(await o.runAdminMongo([
+      `db.getSiblingDB('admin').auth(${JSON.stringify(mongo.MONGO_ADMIN_USER)}, ${JSON.stringify(adminPassword)});`,
+      `const x = db.getSiblingDB('$external').getUser(${JSON.stringify(mongo.x509Subject(user))});`,
+      `const s = db.getSiblingDB(${JSON.stringify(assertIdent(row.db_name))}).getUser(${JSON.stringify(user)});`,
+      "print(x && !s ? 'MONGO_CERT_ENFORCED' : 'MONGO_CERT_NOT_ENFORCED');",
+    ].join('\n') + '\n') || '');
+    return /\bMONGO_CERT_ENFORCED\b/.test(out);
+  }
+  if (row.engine === 'redis') {
+    const facts = await o.containerFacts(row.container_name);
+    return facts.owner === 'redis' && facts.config === redis.REDIS_TLS_CONFIG_VERSION;
+  }
+  return false;
+}
+
+/**
+ * For an app that declares no database (deployer.mountUndeclaredCertLogins):
+ * its row says certificate, AppCrane injects no credential, the app carries
+ * its own URL. Unlike secureLogin() this never changes the login: no GRANT,
+ * no REQUIRE, no limits, no Redis recreate. It mounts the certificate only
+ * when the engine ALREADY enforces it, because a mount is all the app can
+ * gain from a deploy; if the engine does not enforce it the app's
+ * password-only URL keeps working, and the caller says so.
+ */
+export async function certMountIfEnforced(scope, engine, { image = null, resolveOwner = certs.resolveImageOwner, ops = null } = {}) {
+  const o = ops || { ensureServer, runAdminSql, runAdminMongo, containerFacts };
+  const row = rowFor(scope, engine);
+  if (!row || row.client_cert_required !== 1) return { required: false, enforced: false, row: row || null, mounts: [], tls: null };
+  if (!(await engineEnforcesCert(row, o))) return { required: true, enforced: false, row, mounts: [], tls: null };
+  const files = await writeLoginFiles(row, { image, resolveOwner });
+  return { required: true, enforced: true, row, mounts: [clientMountFor(row, files.hostDir)], tls: tlsFor(row) };
 }
 
 /**
@@ -2617,6 +2788,7 @@ export async function sandboxPeerAccess(appId, engine, {
       certRequired: true, connLimit: settings.conn_limit, statementTimeoutS: settings.statement_timeout_s,
     }));
     getDb().prepare('UPDATE managed_databases SET client_cert_required = 1 WHERE id = ?').run(row.id);
+    if (engine === 'postgres') await syncPgHbaQuietly(ops ? ops.syncPgHba || (async () => null) : syncPgHba);
   }
   const fresh = rowFor(scope, engine);
   const cert = certs.ensureClientCert(fresh.db_user);
@@ -2626,6 +2798,47 @@ export async function sandboxPeerAccess(appId, engine, {
   return {
     creds: { ...conn, tls: { required: true, x509: false, ...files.files } },
     mounts: [{ host: files.hostDir, container: certs.SANDBOX_PEER_MOUNT_PATH, readOnly: true }],
+  };
+}
+
+/**
+ * The platform admin's "Require certificate" (routes/managedDb.js): convert
+ * ONE database row's logins to TLS + own client certificate + password, for a
+ * login AppCrane did not convert by itself (a catalogue app, whose
+ * third-party image may not speak database TLS — so this is never automatic).
+ *
+ * secureLogin() does the owner login and marks the row (sticky; every later
+ * deploy and restart mounts the certificate and injects the TLS URL). An
+ * enabled `_app` login gets the same engine requirement here, at once, so it
+ * is never the weaker of the two; its files are written by its next deploy
+ * (ensureAppLogin), like the owner's mount.
+ *
+ * The running container keeps its old URL until it is redeployed or
+ * restarted, and the engine refuses its NEW connections from now on: the
+ * caller tells the admin so.
+ */
+export async function requireCertificate(databaseId, { ops = null } = {}) {
+  const { ensureServer: ensure, runAdminSql: sql } = ops || { ensureServer, runAdminSql };
+  const row = getDb().prepare('SELECT * FROM managed_databases WHERE id = ?').get(Number(databaseId));
+  if (!row) return null;
+  const already = row.client_cert_required === 1;
+  const scope = { appId: row.app_id, tenant: row.tenant || null };
+  await secureLogin(scope, row.engine, { certRequired: true, ...(ops ? { ops } : {}) });
+  const appActive = Boolean(row.app_user && row.app_password_enc) && appLogin.APP_LOGIN_ENGINES.includes(row.engine);
+  if (appActive) {
+    const settings = getManagedDbSettings(getDb());
+    await ensure(row.engine);
+    await sql(row.engine, tlsCfg.loginPolicySql(row.engine, assertIdent(row.app_user), {
+      certRequired: true, connLimit: settings.conn_limit, statementTimeoutS: settings.statement_timeout_s,
+    }));
+    if (row.engine === 'postgres') await syncPgHbaQuietly(ops ? ops.syncPgHba || (async () => null) : syncPgHba);
+  }
+  return {
+    converted: !already,
+    engine: row.engine,
+    app_id: row.app_id,
+    logins: [row.db_user, ...(appActive ? [row.app_user] : [])],
+    redeploy_required: true,
   };
 }
 
@@ -2669,6 +2882,7 @@ export async function deprovision(scope, engine) {
   getDb().prepare('DELETE FROM managed_databases WHERE id = ?').run(row.id);
   certs.releaseClientCerts(row);
   log.info(`managedDb: deprovisioned ${engine} database ${row.db_name}`);
+  if (engine === 'postgres') await syncPgHbaQuietly();
   return true;
 }
 
@@ -2722,6 +2936,7 @@ export async function deprovisionApp(appId) {
       log.warn(`managedDb: could not deprovision ${row.engine} database ${row.db_name} for app ${appId}: ${e.message}`);
     }
   }
+  if (rows.some((r) => r.engine === 'postgres')) await syncPgHbaQuietly();
   return { requested: rows.length, dropped };
 }
 

@@ -31,6 +31,7 @@ import {
 } from './backupS3Sets.js';
 import log from '../utils/logger.js';
 import { jobStarted, trackJob, setJobDetail } from './jobHealth.js';
+import { recoveryKeyStatus, RECOVERY_KEY_NOT_DOWNLOADED } from './recoveryKey.js';
 
 const K = {
   enabled: 'backup_s3_enabled', bucket: 'backup_s3_bucket', region: 'backup_s3_region',
@@ -51,7 +52,7 @@ const clampInt = (v, lo, hi, dflt) => {
 };
 
 export const OFFSITE_COVERS = [
-  'deployhub.db', '.env (ENCRYPTION_KEY)', 'app icons', 'per-app /data', 'declared volumes',
+  'deployhub.db', '.env (without ENCRYPTION_KEY: keep the recovery key apart)', 'app icons', 'per-app /data', 'declared volumes',
   'managed database dumps', 'managed-app git repositories',
 ];
 export const OFFSITE_EXCLUDES = ['container images (POST /api/settings/images/export)', 'build artifacts (releases/)', 'the Caddyfile (regenerated on boot)'];
@@ -104,7 +105,69 @@ export function offSiteState() {
     last_error: cfg.last_error,
     has_off_site_copy: hasCopy,
     notice: hasCopy ? null : `${NO_OFFSITE_NOTICE} ${reason}`,
+    health: offSiteHealth(cfg),
   };
+}
+
+export const OFFSITE_MAX_AGE_HOURS = 26;
+
+/**
+ * The Job Health verdict on the platform backup's off-site copy (v2.145.0):
+ * ok only when a destination is configured AND the last successful upload is
+ * at most OFFSITE_MAX_AGE_HOURS old. A copy that exists but stopped being
+ * refreshed is as misleading as none, so `has_off_site_copy` alone is not it.
+ * backup_s3_last_run is written only by a successful upload.
+ *
+ * `severity` adds the recovery key: 'warning' while the off-site copy is fine
+ * but nobody has downloaded the recovery key for the current key fingerprint,
+ * because these backups do not carry ENCRYPTION_KEY. `fix` says exactly what to
+ * configure or do, and travels into the daily admin e-mail.
+ */
+export function offSiteHealth(cfg = getBackupConfig(), now = Date.now(), rk = recoveryKeyStatus()) {
+  const v = offSiteVerdict(cfg, now);
+  const keyMissing = !!rk?.available && !rk.downloaded_for_current_key;
+  const recovery_key = { fingerprint: rk?.fingerprint ?? null, downloaded_for_current_key: !!rk?.downloaded_for_current_key, downloaded_at: rk?.downloaded_at ?? null };
+  const warnings = keyMissing ? [RECOVERY_KEY_NOT_DOWNLOADED] : [];
+  return { ...v, severity: !v.ok ? 'failing' : warnings.length ? 'warning' : 'ok', warnings, recovery_key };
+}
+
+const HOW_TO_CONFIGURE = [
+  'Settings > Backup > Scheduled off-site backup (S3), as a platform admin:',
+  '1. Fill in Bucket, Access key and Secret key. Region defaults to us-east-1 (Cloudflare R2: auto). Endpoint is needed only for an S3-compatible store such as R2 or MinIO (a bare URL, https://<account>.r2.cloudflarestorage.com). Prefix is optional.',
+  '2. The access key needs s3:PutObject, s3:GetObject, s3:ListBucket, s3:DeleteObject and s3:AbortMultipartUpload on that bucket.',
+  '3. Tick "Enable nightly S3 backup", click "Save S3 settings", then "Test connection".',
+  '4. Click "Back up to S3 now". This check passes once that upload succeeds.',
+  'Over the API: PUT /api/settings/backup/s3 with bucket, region, endpoint, prefix, access_key_id, secret_access_key and enabled: true, then POST /api/settings/backup/s3/run. Over MCP: appcrane_set_backup_config, then appcrane_run_backup_now.',
+].join('\n');
+
+function offSiteFix(reason, cfg) {
+  if (reason === 'not-configured') return HOW_TO_CONFIGURE;
+  const lastError = cfg.last_error ? 'Fix the failure named above first (credentials, bucket name, region, endpoint or permissions). Then, in Settings > Backup, ' : '';
+  const enable = cfg.enabled ? '' : 'tick "Enable nightly S3 backup" and click "Save S3 settings", then ';
+  return `${lastError || 'In Settings > Backup, '}${enable}click "Back up to S3 now" (or POST /api/settings/backup/s3/run, or MCP appcrane_run_backup_now) and check that it succeeds.`;
+}
+
+function offSiteVerdict(cfg, now) {
+  const missing = [];
+  if (!cfg.bucket) missing.push('bucket');
+  if (!cfg.access_key_id) missing.push('access_key_id');
+  if (!cfg.has_secret) missing.push('secret_access_key');
+  const base = { max_age_hours: OFFSITE_MAX_AGE_HOURS, last_success_at: cfg.last_run || null, age_hours: null, missing };
+  if (missing.length) {
+    return { ...base, ok: false, reason: 'not-configured', fix: offSiteFix('not-configured', cfg), message: `No off-site destination is configured (missing: ${missing.join(', ')}), so the platform backup exists only on this host.` };
+  }
+  const off = cfg.enabled ? '' : ' The nightly upload is switched off.';
+  const failed = cfg.last_error ? ` The last attempt failed: ${cfg.last_error}` : '';
+  const at = cfg.last_run ? Date.parse(cfg.last_run) : NaN;
+  if (!Number.isFinite(at)) {
+    return { ...base, ok: false, reason: 'never-uploaded', fix: offSiteFix('never-uploaded', cfg), message: `An off-site destination is configured, but no platform backup has ever been uploaded to it.${off}${failed}` };
+  }
+  const ageHours = Math.max(0, (now - at) / 3_600_000);
+  const age = Math.round(ageHours * 10) / 10;
+  if (ageHours > OFFSITE_MAX_AGE_HOURS) {
+    return { ...base, age_hours: age, ok: false, reason: 'stale', fix: offSiteFix('stale', cfg), message: `The last successful off-site upload of a platform backup was at ${cfg.last_run}, ${age} h ago, older than ${OFFSITE_MAX_AGE_HOURS} h.${off}${failed}` };
+  }
+  return { ...base, age_hours: age, ok: true, reason: 'fresh', fix: null, message: `The last successful off-site upload of a platform backup was at ${cfg.last_run}, ${age} h ago (limit ${OFFSITE_MAX_AGE_HOURS} h).` };
 }
 
 // Client-side encryption is on by default for a NEW off-site config. A config
@@ -251,7 +314,7 @@ async function doS3Backup(opts) {
       await rm(path, { force: true });
     };
 
-    const data = await exportDataArchive({ dest: join(work, 'data.tar.gz'), at, managedDbOps: opts.managedDbOps });
+    const data = await exportDataArchive({ dest: join(work, 'data.tar.gz'), at, managedDbOps: opts.managedDbOps, separateKey: true });
     warnings.push(...(data.warnings || []));
     await put('data', 'data.tar.gz', data.path);
 
@@ -271,6 +334,7 @@ async function doS3Backup(opts) {
       kind: MANIFEST_KIND, format: 1, set: setId, host, created_at: at.toISOString(),
       appcrane_version: dm.version,
       encryption: key ? { algorithm: 'aes-256-gcm', key_source: 'derived from ENCRYPTION_KEY', warning: ENCRYPTION_WARNING } : null,
+      encryption_key: dm.encryption_key ? { in_archive: false, fingerprint: dm.encryption_key.fingerprint, fingerprint_alg: dm.encryption_key.fingerprint_alg } : null,
       server_side_encryption: sse ? sse.mode : null,
       covers: cfg.include_repos ? OFFSITE_COVERS : OFFSITE_COVERS.filter((c) => c !== 'managed-app git repositories'),
       excludes: cfg.include_repos ? OFFSITE_EXCLUDES : [...OFFSITE_EXCLUDES, 'managed-app git repositories (switched off)'],
@@ -429,6 +493,7 @@ export function startBackupScheduler() {
     }
   };
   jobStarted('offsite-backup', { enabled: () => getBackupConfig().enabled });
+  import('./platformBackupHealth.js').then((m) => m.startPlatformBackupHealth()).catch((e) => log.warn(`[backup-s3] off-site health check not started: ${e.message}`));
   tick();
   _timer = setInterval(() => { tick().catch(() => {}); }, 60 * 60 * 1000);
   log.info('[backup-s3] scheduler started (hourly check)');

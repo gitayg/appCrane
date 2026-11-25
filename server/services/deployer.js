@@ -18,11 +18,14 @@ import { getIngressForApp } from './tcpIngress.js';
 import { ensureCodebaseContext } from './appstudio/contextBuilder.js';
 import { findEntry } from './catalogService.js';
 import {
-  credentialsFor, secureLogin as defaultSecureLogin, tlsUrl,
+  credentialsFor, secureLogin as defaultSecureLogin, tlsUrl, listForApp,
+  certMountIfEnforced as defaultCertMountIfEnforced,
   ensureAppLogin as defaultEnsureAppLogin, ensurePgExtensions as defaultEnsurePgExtensions,
   sandboxPeerAccess as defaultSandboxPeerAccess,
 } from './managedDb.js';
 import { APP_LOGIN_ENGINES } from './managedDbAppLogin.js';
+import { CLIENT_MOUNT_PATH } from './dbCerts.js';
+import { recordCertProblem } from './managedDbPasswordOnly.js';
 import { parseManifestDatabase, ensureManifestDatabase } from './manifestDatabase.js';
 import { parseAccessRules, storeManifestRules, stageManifestRules, revertStagedManifestRules } from './accessRules.js';
 import { parseAppMcp, storeManifestMcp } from './appMcp/manifest.js';
@@ -285,6 +288,75 @@ export function applyManagedDbEnv(app, runtimeEnvVars, claimedKeys = [], manifes
 }
 
 /**
+ * A database provisioned through the API for an app that declares no
+ * database (no catalogue `needs`, no deployhub.json block): AppCrane injects
+ * no credential for it, the app carries its own URL. When the row is
+ * certificate-required the container still has to HAVE the files.
+ *
+ * This never changes the login (managedDb.certMountIfEnforced is read only):
+ * a deploy or restart must not newly GRANT the cert group, add a REQUIRE or
+ * recreate a Redis instance under an app whose own URL may not send a
+ * certificate. It mounts the login's directory (read-only, this container
+ * only) and injects DB_*_FILE only when the engine ALREADY enforces it, and
+ * says in the deploy log, and on the platform admin's card, when
+ *   - the engine does not enforce it (the password alone still works), or
+ *   - it does, but none of the app's own variables names a file under the
+ *     mount, so its URL cannot send the certificate.
+ * A failed check fails the deploy or restart before the running container
+ * is touched. One login name per scope, so one directory serves all its
+ * engines.
+ */
+async function mountUndeclaredCertLogins(app, env, scope, runtimeEnvVars, claimedKeys, { certMountIfEnforced, image, appendLog }) {
+  const tenant = scope.tenant || '';
+  const rows = listForApp(app.id)
+    .filter((r) => (r.tenant || '') === tenant && r.client_cert_required === 1)
+    .sort((a, b) => (a.engine === 'redis') - (b.engine === 'redis'));
+  const sendsCert = Object.values(runtimeEnvVars).some((v) => typeof v === 'string' && v.includes(`${CLIENT_MOUNT_PATH}/`));
+  let mounts = [];
+  let tls = null;
+  for (const row of rows) {
+    let got;
+    try {
+      got = await certMountIfEnforced(scope, row.engine, { image });
+    } catch (e) {
+      throw new Error(`Checking the managed ${row.engine} database login's certificate requirement failed: ${e.message}`);
+    }
+    if (!got.required) continue;
+    if (!got.enforced) {
+      recordCertProblem(row, 'not_enforced', { env });
+      appendLog(`WARNING: managed ${row.engine} database ${row.db_name}: AppCrane's record says the login ${row.db_user} requires a client certificate, `
+        + 'but the database engine does not enforce it, so the password alone still works. This deploy left the login unchanged and mounted no certificate. '
+        + 'A platform admin can convert it under Managed databases, Require certificate, after setting this app up to send the certificate.');
+      continue;
+    }
+    for (const m of got.mounts || []) {
+      if (!mounts.some((x) => x.container === m.container)) mounts.push(m);
+    }
+    const need = row.engine === 'postgres'
+      ? `sslmode=verify-full&sslrootcert=${got.tls.ca}&sslcert=${got.tls.cert}&sslkey=${got.tls.key}`
+      : `TLS with ${got.tls.ca}, ${got.tls.cert} and ${got.tls.key} (DB_CA_FILE, DB_CERT_FILE, DB_KEY_FILE)`;
+    if (!tls) {
+      tls = got.tls;
+      const claimed = new Set([...Object.keys(runtimeEnvVars), ...claimedKeys]);
+      for (const [k, v] of Object.entries(tlsFileEnv(null, { engine: row.engine, tls }))) {
+        if (!claimed.has(k)) runtimeEnvVars[k] = v;
+      }
+      appendLog(`Managed ${row.engine} database ${row.db_name}: its login requires TLS and its client certificate. `
+        + `The certificate is mounted read-only at ${mounts[0]?.container || '(none)'}; this app sets its own connection URL, which needs ${need}.`);
+    }
+    if (sendsCert) {
+      recordCertProblem(row, null);
+    } else {
+      recordCertProblem(row, 'not_sent', { env });
+      appendLog(`WARNING: managed ${row.engine} database ${row.db_name}: certificate required but the app is not configured to send it. `
+        + `None of this app's environment variables names a file under ${CLIENT_MOUNT_PATH}/, so its own connection URL carries no client certificate `
+        + `and the database refuses the login ${row.db_user}. Add ${need} to the app's connection URL (or its own TLS settings), then restart it.`);
+    }
+  }
+  return { mounts, tls };
+}
+
+/**
  * Resolve, provision when needed, and inject the managed database for ONE
  * environment's container. The deploy and the restart both come through here,
  * so the two cannot disagree about which database a sandbox container gets.
@@ -304,10 +376,14 @@ export function applyManagedDbEnv(app, runtimeEnvVars, claimedKeys = [], manifes
  * A provisioning failure throws: starting a sandbox with no database, or with
  * production's, is worse than a failed deploy.
  */
+function stickyCertRequired(scope, engine) {
+  try { return Boolean(credentialsFor(scope, engine)?.tls); } catch (_) { return false; }
+}
+
 export async function injectManagedDbForEnv({
   app, env, runtimeEnvVars, claimedKeys = [], manifestNeeds = null,
   appendLog = () => {}, isRestart = false, provision,
-  image = null, secureLogin = defaultSecureLogin,
+  image = null, secureLogin = defaultSecureLogin, certMountIfEnforced = defaultCertMountIfEnforced,
   // Test seams for the deployhub.json extras (app_login, extensions,
   // sandbox_url_env); production never passes them.
   ensureAppLogin = defaultEnsureAppLogin, ensurePgExtensions = defaultEnsurePgExtensions,
@@ -340,7 +416,10 @@ export async function injectManagedDbForEnv({
   // certRequired follows the SOURCE: a database the app's own deployhub.json
   // declares (production and its always-separate sandbox scope) must use TLS
   // and that app's own certificate. A catalogue app's third-party image often
-  // cannot be configured for database TLS, so its login only gets the limits.
+  // cannot be configured for database TLS, so its login only gets the limits,
+  // UNLESS its row is already certificate-required (a platform admin's
+  // Require certificate): secureLogin() keeps that sticky, returns the mount,
+  // and applyManagedDbEnv() below injects the TLS URL and DB_*_FILE paths.
   //
   // Fail closed for a manifest login: a deploy whose certificate step failed
   // must not start the app as though it had one. A catalogue login's limits
@@ -359,9 +438,16 @@ export async function injectManagedDbForEnv({
         appendLog(`Managed ${resolved.needs.engine} database: TLS and this app's own client certificate are required; mounted read-only at ${mounts[0]?.container || '(none)'}`);
       }
     } catch (e) {
-      if (certRequired) throw new Error(`Securing the managed ${resolved.needs.engine} database login failed: ${e.message}`);
+      // A catalogue login a platform admin converted (Require certificate) is
+      // sticky like a manifest one: without its mount the URL injected below
+      // names files that are not there, so fail closed for it too.
+      if (certRequired || stickyCertRequired(scope, resolved.needs.engine)) {
+        throw new Error(`Securing the managed ${resolved.needs.engine} database login failed: ${e.message}`);
+      }
       appendLog(`Managed ${resolved.needs.engine} database: could not apply the per-login limits this time (${e.message}); the login works as before.`);
     }
+  } else {
+    ({ mounts, tls } = await mountUndeclaredCertLogins(app, env, scope, runtimeEnvVars, claimedKeys, { certMountIfEnforced, image, appendLog }));
   }
   // Snapshot before ANY managed injection: precedence for the second logins
   // below is "the app set it", not "the owner-login step just set it".

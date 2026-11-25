@@ -115,16 +115,54 @@ export function serverMountArg(hostDir) {
  * The image's own default also had `host all all 127.0.0.1/32 trust`. It is
  * dropped: a TCP connection that arrived from 127.0.0.1 inside the container
  * would have been let in as ANY role with no password.
+ *
+ * STRICT (`strict: true`) turns line 4 into `reject`: no TCP login without
+ * the certificate, for anyone, the superuser included. managedDb.syncPgHba()
+ * writes it once no Postgres login can still authenticate with a password
+ * alone (managedDbPasswordOnly.passwordOnlyLogins, plus the engine's own
+ * list of login roles outside the group) and goes back to line 4 as soon as
+ * one appears. Line 1 stays: AppCrane's own admin path is the unix socket.
  */
-export function pgHbaConf() {
+export function pgHbaConf({ strict = false } = {}) {
   return [
     '# Written by AppCrane (services/managedDbTls.js). Do not edit: it is rewritten on every ensureServer().',
     'local   all  all                       trust',
     `hostssl all  +${PG_CERT_GROUP}  all  scram-sha-256 clientcert=verify-full`,
     `host    all  +${PG_CERT_GROUP}  all  reject`,
-    'host    all  all                  all  scram-sha-256',
+    strict
+      ? 'host    all  all                  all  reject'
+      : 'host    all  all                  all  scram-sha-256',
     '',
   ].join('\n');
+}
+
+/** True when a pg_hba.conf body is the strict one pgHbaConf() writes. */
+export function isStrictPgHba(body) {
+  return pgHbaConf({ strict: true }) === String(body || '');
+}
+
+/**
+ * Login roles the ENGINE would let in over TCP with a password alone: can
+ * log in, not the superuser, not a member of the cert group. COPY ... TO
+ * STDOUT prints one name per line and nothing else, under psql -q.
+ */
+export function pgPasswordOnlyRolesSql() {
+  return [
+    'COPY (SELECT rolname FROM pg_roles r WHERE rolcanlogin AND NOT rolsuper',
+    `  AND NOT pg_has_role(r.oid, '${PG_CERT_GROUP}', 'MEMBER') ORDER BY rolname) TO STDOUT;`,
+  ].join('\n');
+}
+
+/** 't' when the login is a member of the cert group, 'f' otherwise (also for a role that does not exist). */
+export function pgCertMemberSql(username) {
+  if (!SAFE_IDENT.test(username)) throw new Error(`managedDbTls: refusing identifier ${JSON.stringify(username)}`);
+  return `COPY (SELECT EXISTS (SELECT 1 FROM pg_roles r WHERE r.rolname = '${username}' AND pg_has_role(r.oid, '${PG_CERT_GROUP}', 'MEMBER'))) TO STDOUT;\n`;
+}
+
+/** One `CERT:<ssl_type>:<x509_subject>` line for '<login>'@'%'; REQUIRE SUBJECT reads `CERT:SPECIFIED:/CN=<login>`. */
+export function mariadbRequireSql(username) {
+  if (!SAFE_IDENT.test(username)) throw new Error(`managedDbTls: refusing identifier ${JSON.stringify(username)}`);
+  return `SELECT CONCAT('CERT:', ssl_type, ':', x509_subject) FROM mysql.user WHERE User = '${username}' AND Host = '%';\n`;
 }
 
 /**

@@ -1,4 +1,10 @@
 {
+  "2.145.0": [
+    "Host limits now secure the server's network: Docker-published ports are reachable from outside only when AppCrane published them, containers cannot reach the cloud metadata service, and AppCrane's own port is never opened to the internet.",
+    "App containers reach AppCrane and their databases again after a Docker reload: AppCrane passes the gateway address itself, and Job Health lists containers created with a broken one.",
+    "Every managed database login can require its own client certificate, a card lists the ones that still accept a password alone, and Postgres refuses password-only logins once none are left.",
+    "Job Health flags a platform backup with no off-site copy, new backup archives no longer contain the encryption key (download the recovery key once), the image scanner is fetched when missing, and license warnings are counted once per component."
+  ],
   "2.144.2": [
     "AppCrane's check that Caddy is answering after a change now works. It was being refused by Caddy, which made every config change look like a failure and, before 2.144.0, restart Caddy."
   ],

@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { assertStepUp, requireStepUp, WINDOW_SETTING } from '../services/stepUp.js';
+import { assertStepUp, requireStepUp, stepUpRefusal, ctxFromReq, windowMinutes, WINDOW_SETTING } from '../services/stepUp.js';
 import { getDb } from '../db.js';
 import { requireAuth, requirePlatformAdmin } from '../middleware/auth.js';
 import { PERMISSIONS, getMatrix, setMatrix, resetToDefaults } from '../services/permissions.js';
@@ -611,6 +611,41 @@ router.post('/backup/local/run', requireAuth, requirePlatformAdmin, async (_req,
   }
 });
 
+// ── Backup recovery key — platform_admin, dashboard session, step-up (v2.145.0)
+//
+// Platform backups no longer carry ENCRYPTION_KEY (backupKeySeparation.js), so
+// the key has to be kept somewhere else, and this is how a person takes it.
+// Only an interactive dashboard session can: no API key, MCP key or agent
+// reads the key that decrypts every secret on the platform. The session must
+// have authenticated within the step-up window, and every read is audited.
+router.get('/backup/recovery-key', requireAuth, requirePlatformAdmin, async (_req, res) => {
+  const { recoveryKeyStatus } = await import('../services/recoveryKey.js');
+  res.json(recoveryKeyStatus());
+});
+
+function recoveryKeyStepUp(req, res, next) {
+  if (req.auth_kind !== 'session') {
+    return res.status(403).json({ error: { code: 'SESSION_REQUIRED', message: 'The recovery key can only be downloaded from a signed-in dashboard session, not with an API key, MCP key or agent.' } });
+  }
+  const db = getDb();
+  const err = stepUpRefusal(db, ctxFromReq(req), 'security_settings');
+  if (err) err.message = `Confirm it's you: to download the backup recovery key you need to have signed in within the last ${windowMinutes(db)} minutes.`;
+  return next(err || undefined);
+}
+
+router.post('/backup/recovery-key', requireAuth, requirePlatformAdmin, recoveryKeyStepUp, async (req, res) => {
+  const { issueRecoveryKey } = await import('../services/recoveryKey.js');
+  let r;
+  try {
+    r = issueRecoveryKey(req.user.id);
+  } catch (e) {
+    return res.status(e.status || 500).json({ error: { code: e.code || 'RECOVERY_KEY_FAILED', message: e.message } });
+  }
+  logAudit(req.user.id, null, 'backup-recovery-key-download', { fingerprint: r.fingerprint.slice(0, 16) });
+  res.setHeader('Cache-Control', 'no-store');
+  res.json(r);
+});
+
 // ── Managed databases in backups (v2.102.0) ────────────────────────────────
 //
 // Restore ONE app's managed database from a whole-system export archive (the
@@ -699,7 +734,9 @@ router.post('/config/import', requireAuth, requirePlatformAdmin, async (req, res
     let result;
     let error;
     try {
-      result = await importDataArchive(path, { restoreEnv });
+      // A platform backup written without its key (v2.145.0) takes the
+      // recovery key here: a JSON field or a multipart text field. Never logged.
+      result = await importDataArchive(path, { restoreEnv, encryptionKey: (req.body || {}).encryption_key });
     } catch (e) {
       error = e;
     }

@@ -9,7 +9,7 @@ import { readDoc, rowForDeployment, FILES } from '../services/imageTrust/store.j
 import { verifyRowDocuments } from '../services/imageTrust/verify.js';
 import { signCurrentImages } from '../services/imageTrust/backfill.js';
 import { backfillDiskImages } from '../services/imageTrust/diskBackfill.js';
-import { enforceReadiness } from '../services/imageTrust/readiness.js';
+import { enforceReadiness, REFUSED_STATES } from '../services/imageTrust/readiness.js';
 import { openTrustEvents } from '../services/imageTrust/events.js';
 
 const router = Router();
@@ -120,11 +120,11 @@ router.put('/image-trust/policy', requireAuth, requirePlatformAdmin, async (req,
   if (body.mode === 'enforce' && getTrustMode(db) !== 'enforce') {
     readiness = await enforceReadiness(db);
     if (!readiness.ready && body.acknowledge_unsigned !== true) {
-      const n = readiness.running_unsigned.length;
+      const w = readiness.would_refuse;
       const err = new AppError(
-        `${n} running image(s) are not signed by this instance. Under enforce, each of those apps would have its next restart (health auto-restart, restart, recovery) refused. Sign them first (POST /api/image-trust/sign-current), or send acknowledge_unsigned: true to switch anyway.`,
+        `${w.total} running image(s) are not signed by this instance, signed without an SBOM, or whose signature does not verify (${w.unsigned} unsigned, ${w.sbom_missing} without an SBOM, ${w.invalid} not verifying). Under enforce, each of those apps would have its next restart (health auto-restart, restart, recovery) refused. Sign the unsigned and SBOM-less ones first (POST /api/image-trust/sign-current; an image whose signature does not verify is never re-signed and is listed on the census), or send acknowledge_unsigned: true to switch anyway.`,
         409, 'IMAGE_TRUST_NOT_READY');
-      err.publicDetails = { running_unsigned: readiness.running_unsigned, on_disk_unsigned: readiness.on_disk_unsigned };
+      err.publicDetails = { running_unsigned: readiness.running_unsigned, would_refuse: w, on_disk_unsigned: readiness.on_disk_unsigned };
       throw err;
     }
   }
@@ -153,7 +153,7 @@ router.get('/image-trust/census', requireAuth, requirePlatformAdmin, async (req,
   res.json({
     mode: getTrustMode(db),
     envs,
-    enforce_ready: !envs.some((e) => e.state === 'unsigned'),
+    enforce_ready: !envs.some((e) => REFUSED_STATES.has(e.state)),
     on_disk: disk.images,
     ...(disk.error ? { on_disk_error: disk.error } : {}),
     events: openTrustEvents(db),

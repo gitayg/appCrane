@@ -487,6 +487,28 @@ export function writeServerFiles(engine, cert, extra = {}) {
   return dir;
 }
 
+const SERVER_EXTRA_FILES = ['pg_hba.conf'];
+
+/**
+ * One non-key server file (today pg_hba.conf), read back or rewritten on its
+ * own, so the Postgres auth policy can change without touching the
+ * certificate. Returns null for a file that is not there yet.
+ */
+export function readServerFile(engine, file) {
+  if (!SERVER_EXTRA_FILES.includes(file)) throw new Error(`dbCerts: not a server file ${JSON.stringify(file)}`);
+  try { return readFileSync(join(serverTlsDir(engine), file), 'utf8'); } catch (e) {
+    if (e.code === 'ENOENT') return null;
+    throw e;
+  }
+}
+
+export function writeServerFile(engine, file, body) {
+  if (!SERVER_EXTRA_FILES.includes(file)) throw new Error(`dbCerts: not a server file ${JSON.stringify(file)}`);
+  const dir = privateDir(serverTlsDir(engine));
+  atomicWrite(join(dir, file), body, 0o644);
+  return dir;
+}
+
 /**
  * Write a login's client files for the container that will read them.
  *

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { adminApi, ApiError } from '../../adminApi'
 import { downloadAuthed } from './download'
+import { LicenseFindingsList } from './LicenseFindingsList'
 
 const dim = { color: 'var(--dim)', fontSize: '.82rem' }
 
@@ -61,7 +62,7 @@ export function ImageTrustPolicyCard() {
   })
 
   if (!p) return msg ? <div className="card"><h3>Image signing</h3><p style={dim}>{msg}</p></div> : null
-  const unsigned = envs?.filter((e) => e.state === 'unsigned').length ?? 0
+  const unsigned = envs?.filter((e) => e.state === 'unsigned' || e.state === 'sbom-missing').length ?? 0
   const diskUnsigned = census?.on_disk.filter((i) => i.state === 'unsigned').length ?? 0
   return (
     <div className="card">
@@ -98,10 +99,11 @@ export function ImageTrustPolicyCard() {
           <input className="am-input" value={flagged} onChange={(e) => setFlagged(e.target.value)} placeholder="AGPL-3.0-only, unknown" />
         </label>
         <div><button className="btn btn-sm" disabled={busy} onClick={() => save({ denied: toList(denied), flagged: toList(flagged) })}>Save license policy</button></div>
+        <LicenseFindingsList />
       </div>
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 10 }}>
         <button className="btn btn-sm" disabled={busy} onClick={() => act(loadCensus)}>Census of running images</button>
-        <button className="btn btn-sm" disabled={busy || !envs || unsigned === 0} onClick={signRunning}>Sign {unsigned} running unsigned image(s)</button>
+        <button className="btn btn-sm" disabled={busy || !envs || unsigned === 0} onClick={signRunning}>Sign {unsigned} running unsigned or SBOM-less image(s)</button>
         <button className="btn btn-sm" disabled={busy || !census || diskUnsigned === 0} onClick={signDisk}>Sign {diskUnsigned} release image(s) on disk</button>
         {p.key_id && <button className="btn btn-sm" disabled={busy} onClick={() => act(() => downloadAuthed('/api/image-trust/public-key', 'appcrane-signing.pub'))}>Public key ({p.key_id.slice(0, 12)})</button>}
       </div>

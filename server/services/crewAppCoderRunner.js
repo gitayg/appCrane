@@ -55,6 +55,7 @@ import log from '../utils/logger.js';
 import { usesLocalRepo } from './managedRepo.js';
 import { prepareCrewTaskHome, CREW_CODER_CONTAINER_TYPE } from './crewCoderHome.js';
 import { getPlatformAnthropicKey } from './platformAnthropicKey.js';
+import { resolveHostGatewayAddHostSync } from './hostGateway.js';
 
 const SESSION_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 export const NO_CREW_CREDENTIAL_REASON =
@@ -86,7 +87,7 @@ export function crewTurnContainerOptions({ slug, taskId, workspaceDir, claudeHom
       '/home/studio:rw,nosuid,nodev,size=64m,uid=100,gid=101,mode=0700',
     ],
     // The per-turn coder MCP endpoint (services/coderMcpKey.js), as the app container has it.
-    addHosts: ['host.docker.internal:host-gateway'],
+    addHosts: [resolveHostGatewayAddHostSync()],
   };
 }
 

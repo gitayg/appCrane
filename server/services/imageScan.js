@@ -81,14 +81,53 @@ import { assertFinding } from './scanShapes.js';
 import { compareVersions } from './appScan.js';
 import { OOM_APP_FLAG } from './oomPriority.js';
 import { CPU_APP_FLAG } from './cpuPriority.js';
+import { noteJobFailure } from './jobHealth.js';
+import log from '../utils/logger.js';
 
 const execFileAsync = promisify(execFile);
+
+const realDocker = (args, opts) => execFileAsync('docker', args, opts);
+const realClock = {
+  now: () => Date.now(),
+  sleep: (ms) => { let t; const done = new Promise((r) => { t = setTimeout(r, ms); }); return { done, cancel: () => clearTimeout(t) }; },
+};
+let scannerDocker = realDocker;
+let deployWaitMs = null;
+let clock = realClock;
+let inflightPull = null;
+let pullStartedAt = 0;
+let lastPullFailure = null;
+/** Test seam for the scanner's own `docker image inspect` and `docker pull`, and the clock. null restores the real ones. */
+export function _setScannerDockerForTests(fn, { deployPullWaitMs = null, clock: fakeClock = null } = {}) {
+  scannerDocker = fn || realDocker;
+  deployWaitMs = deployPullWaitMs;
+  clock = fakeClock || realClock;
+  inflightPull = null;
+  lastPullFailure = null;
+}
 
 export const SCANNER_IMAGE = 'aquasec/trivy:0.74.0';
 
 // Pulling the scanner happens at most once per box; a first scan on a fresh
 // install should not fail because a 150 MB pull ran long on a slow link.
 const SCANNER_PULL_TIMEOUT_MS = 10 * 60 * 1000;
+
+// How long a DEPLOY waits for that pull. The pull itself is not cut short: it
+// is shared and keeps its own 10-minute deadline, so a deploy that stops
+// waiting leaves it running for the next deploy or the scheduled scan.
+// The wait is counted from the START of the pull, not per caller, so the SBOM
+// step and the vulnerability scan of one deploy (and every deploy that overlaps
+// it) share one budget: whoever arrives after it is spent does not wait again.
+export const DEPLOY_PULL_WAIT_MS = 2 * 60 * 1000;
+
+// After a pull fails, a deploy does not start another one for this long: on a
+// box that cannot reach the registry every deploy would otherwise wait out the
+// whole budget again. Scheduled and manual scans still retry.
+export const PULL_FAILURE_MEMORY_MS = 15 * 60 * 1000;
+
+// The Job Health row a failed scanner pull is recorded on. The scanner exists
+// for the daily scan, and that scan cannot read any image without it.
+export const SCANNER_JOB = 'vuln-scan';
 
 // The scan itself. Trivy's own default is 5 minutes and a scan of a multi-GB
 // image can legitimately approach it. This is the one number that lands on a
@@ -279,8 +318,8 @@ const IMAGE_ID_RE = /^sha256:[a-f0-9]{64}$/;
 async function scannerImageId() {
   let stdout;
   try {
-    ({ stdout } = await execFileAsync(
-      'docker', ['image', 'inspect', SCANNER_IMAGE, '--format', '{{.Id}}'],
+    ({ stdout } = await scannerDocker(
+      ['image', 'inspect', SCANNER_IMAGE, '--format', '{{.Id}}'],
       { timeout: 60000 },
     ));
   } catch {
@@ -299,6 +338,50 @@ async function scannerImageId() {
 }
 
 /**
+ * Start pulling the pinned scanner image, or join the pull already running.
+ * Concurrent deploys, the startup warm-up and the scheduled scan share ONE
+ * `docker pull`. Resolves to { ok, error? }; never rejects. A failure is
+ * recorded on Job Health, except when there is no Docker CLI at all (nothing
+ * on such a box can run, and that is not a pull failure).
+ */
+export function pullScannerImage() {
+  if (inflightPull) return inflightPull;
+  pullStartedAt = clock.now();
+  inflightPull = (async () => {
+    try {
+      await scannerDocker(['pull', SCANNER_IMAGE], {
+        timeout: SCANNER_PULL_TIMEOUT_MS,
+        maxBuffer: 8 * 1024 * 1024,
+      });
+      lastPullFailure = null;
+      return { ok: true };
+    } catch (err) {
+      const error = (err.stderr || err.message || '').trim().split('\n').slice(-3).join(' ') || 'docker pull failed';
+      lastPullFailure = { at: clock.now(), error };
+      if (err.code !== 'ENOENT') noteJobFailure(SCANNER_JOB, new Error(`scanner image ${SCANNER_IMAGE} could not be pulled: ${error}`));
+      log.warn(`[image-scan] pull of ${SCANNER_IMAGE} failed: ${error}`);
+      return { ok: false, error };
+    } finally {
+      inflightPull = null;
+    }
+  })();
+  return inflightPull;
+}
+
+/**
+ * Pull the scanner at startup, in the background, when it is missing, so the
+ * first deploy after an install or an upgrade finds it already here.
+ * @returns {Promise<{ ok: boolean, pulled: boolean, error?: string }>} never rejects
+ */
+export async function warmScannerImage() {
+  if (await scannerImageId()) return { ok: true, pulled: false };
+  log.info(`[image-scan] ${SCANNER_IMAGE} is not on this host; pulling it in the background`);
+  const r = await pullScannerImage();
+  if (r.ok && await scannerImageId()) return { ok: true, pulled: true };
+  return { ok: false, pulled: false, error: r.error || 'the pull reported success but the image is not present' };
+}
+
+/**
  * Make sure the scanner image is on the box.
  *
  * Done as an explicit step rather than leaning on `docker run`'s implicit pull,
@@ -309,38 +392,52 @@ async function scannerImageId() {
  * the platform's own missing dependency into a column that reads as a finding
  * about somebody else's app.
  *
- * A DEPLOY NEVER PULLS THE SCANNER. `allowPull` is false on the deploy-time
- * path and true on the scheduled and manual ones. Obtaining the scanner is a
- * ~150 MB registry fetch of PLATFORM tooling, and doing it inside somebody
- * else's deploy is the same class of surprise as blocking on the result: the
- * app team did not choose this control and should not pay a first-run download
- * for it, on a deploy that is already complete and live. On a box that has
- * never scanned an image, the first deploy therefore records 'skipped' with
- * that reason, the nightly scan pulls the scanner, and every deploy after it
- * scans inline.
+ * Every path pulls a missing scanner (the shared pull above). `allowPull`
+ * false is the deploy path: it waits until DEPLOY_PULL_WAIT_MS after the pull
+ * STARTED (one budget per pull, so one deploy waits at most once), and within
+ * PULL_FAILURE_MEMORY_MS of a failed pull it does not pull or wait at all,
+ * because the deploy is already live and the scan only adds latency to its
+ * response. true (scheduled, manual, enforce-mode deploys) waits for the pull.
+ * Before v2.145.0 a deploy never pulled, so a box whose nightly scan had not
+ * run yet skipped the SBOM of every deploy, and image trust then warned on
+ * every restart of those apps.
  *
  * @returns {Promise<{ ok: boolean, reason?: string }>} never throws
  */
 export async function ensureScanner({ allowPull = true } = {}) {
   if (await scannerImageId()) return { ok: true };
 
-  if (!allowPull) {
+  const failed = lastPullFailure;
+  if (!allowPull && !inflightPull && failed && clock.now() - failed.at < PULL_FAILURE_MEMORY_MS) {
     return {
       ok: false,
       reason:
-        `container image scanner unavailable: ${SCANNER_IMAGE} is not present on this host, and a deploy `
-        + 'does not pull it — the next scheduled scan will, and this app/env is scanned from then on',
+        `container image scanner unavailable: ${SCANNER_IMAGE} is not present on this host and could not be pulled — `
+        + `${failed.error} (at ${new Date(failed.at).toISOString()}; a deploy retries the pull from `
+        + `${new Date(failed.at + PULL_FAILURE_MEMORY_MS).toISOString()}, a scheduled or manual scan retries it now)`,
     };
   }
 
-  let pullError = null;
-  try {
-    await execFileAsync('docker', ['pull', SCANNER_IMAGE], {
-      timeout: SCANNER_PULL_TIMEOUT_MS,
-      maxBuffer: 8 * 1024 * 1024,
-    });
-  } catch (err) {
-    pullError = (err.stderr || err.message || '').trim().split('\n').slice(-3).join(' ');
+  const waitMs = allowPull ? SCANNER_PULL_TIMEOUT_MS : (deployWaitMs ?? DEPLOY_PULL_WAIT_MS);
+  const running = pullScannerImage();
+  let pull;
+  if (allowPull) {
+    pull = await running;
+  } else {
+    const left = pullStartedAt + waitMs - clock.now();
+    const timer = clock.sleep(Math.max(0, left));
+    pull = await Promise.race([running, timer.done.then(() => ({ waiting: true }))]);
+    timer.cancel();
+  }
+
+  if (pull.waiting) {
+    return {
+      ok: false,
+      reason:
+        `container image scanner unavailable: ${SCANNER_IMAGE} is not present on this host yet; its pull did not `
+        + `finish within ${Math.round(waitMs / 1000)}s of starting and continues in the background, so this run was not scanned `
+        + '- the next deploy or scheduled scan uses it once the pull completes',
+    };
   }
 
   // Re-checked after the pull rather than trusting its exit status, for the
@@ -353,7 +450,7 @@ export async function ensureScanner({ allowPull = true } = {}) {
     ok: false,
     reason:
       `container image scanner unavailable: ${SCANNER_IMAGE} is not present on this host`
-      + `${pullError ? ` and could not be pulled — ${pullError}` : ' after a pull that reported success'}`,
+      + `${pull.error ? ` and could not be pulled — ${pull.error}` : ' after a pull that reported success'}`,
   };
 }
 
@@ -422,7 +519,7 @@ export async function runScanner(ref) {
  * the fields appScan.scanApp records, so both scanners land in one INSERT.
  *
  * `allowPull` is threaded through to ensureScanner — false on the deploy path,
- * so a deploy never fetches platform tooling.
+ * so a deploy waits a bounded time for a missing scanner.
  *
  * @returns {Promise<{ status: string, ecosystem: string|null, packageCount: number,
  *                     findings: Array<object>, error: string|null }>}
@@ -508,4 +605,4 @@ export async function scanImage(db, app, env, { allowPull = true } = {}) {
   return { status: 'ok', ecosystem: mapped.ecosystem, packageCount: mapped.packageCount, findings: [], error: null };
 }
 
-export default { SCANNER_IMAGE, scanTargetFor, mapTrivyReport, ensureScanner, runScanner, scanImage };
+export default { SCANNER_IMAGE, scanTargetFor, mapTrivyReport, ensureScanner, pullScannerImage, warmScannerImage, runScanner, scanImage };

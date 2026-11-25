@@ -685,7 +685,9 @@ describe('a real deploy seeds its new mounts', () => {
     const create = calls().filter((c) => c[0] === 'create' && c.includes('appcrane-seed=true'));
     assert.ok(create.length >= 1 && create.every((c) => c.includes('never')));
     const verbs = calls().map((c) => c[0]);
-    assert.equal(verbs.filter((v) => v === 'pull').length, 1);
+    // v2.145.0: the pinned image scanner may be pulled too when it is missing; only the app's pull counts here.
+    const { SCANNER_IMAGE } = await import('../server/services/imageScan.js');
+    assert.equal(calls().filter((c) => c[0] === 'pull' && c[1] !== SCANNER_IMAGE).length, 1);
     // /data still seeds via create + cp + rm (into a staging directory).
     assert.ok(verbs.includes('create') && verbs.includes('cp'));
     // And all of it happens BEFORE the app container exists.

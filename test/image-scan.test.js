@@ -108,6 +108,9 @@ function reset() {
   delete process.env.CRANE_TEST_SCAN_FATAL;
   delete process.env.CRANE_TEST_SCAN_GARBAGE;
   delete process.env.CRANE_TEST_INSPECT_JUNK;
+  // A failed pull is remembered for 15 minutes (deploys skip without waiting);
+  // each test starts from a process that has not tried one.
+  _setScannerDockerForTests(null);
 }
 function setReport(report) {
   writeFileSync(REPORT_FILE, JSON.stringify(report));
@@ -203,7 +206,7 @@ const db = getDb();
 const { assertFindings } = await import('../server/services/scanShapes.js');
 const { scanApp, latestScan, compareVersions } = await import('../server/services/appScan.js');
 const {
-  SCANNER_IMAGE, scanTargetFor, mapTrivyReport, ensureScanner, runScanner, scanImage,
+  SCANNER_IMAGE, scanTargetFor, mapTrivyReport, ensureScanner, runScanner, scanImage, _setScannerDockerForTests,
 } = await import('../server/services/imageScan.js');
 
 let slot = 900;
@@ -474,31 +477,23 @@ test('the scanner image is pulled once when absent, then the scan proceeds', asy
   assert.deepEqual(pulls[0], ['pull', SCANNER_IMAGE]);
 });
 
-test('a DEPLOY never pulls the scanner image', async () => {
+test('a DEPLOY pulls a missing scanner image (one bounded wait) and scans', async () => {
   reset();
   process.env.CRANE_TEST_SCANNER_ABSENT = '1';
   setReport(SUPPORTED_CLEAN_REPORT);
-  const app = makeImageApp('deploy-no-pull');
+  const app = makeImageApp('deploy-pulls');
   liveDeployment(app, 'production', `x@sha256:${'5'.repeat(63)}a`);
 
+  // v2.145.0: before, a deploy never pulled, so a box whose nightly scan had
+  // not run yet skipped the SBOM of every deploy and image trust warned on
+  // every restart. The deploy now pulls the pinned scanner, waiting a bounded
+  // time (DEPLOY_PULL_WAIT_MS) for a pull it shares with any other caller.
   const row = await scanApp(db, app, 'production', 'deploy');
-
-  // Obtaining ~150 MB of PLATFORM tooling inside somebody else's deploy is the
-  // same class of surprise as making the scan blocking: the app team did not
-  // choose this control, and the deploy is already complete and live by the
-  // time this runs. The nightly scan pulls it; every deploy after that scans.
-  assert.equal(row.status, 'skipped');
-  assert.match(row.error, /a deploy does not pull it/);
-  assert.equal(dockerCalls().filter(c => c[0] === 'pull').length, 0);
-  assert.equal(dockerCalls().filter(c => c[0] === 'run').length, 0);
-
-  // …and the same app on the scheduled path does pull, and does scan.
-  reset();
-  process.env.CRANE_TEST_SCANNER_ABSENT = '1';
-  setReport(SUPPORTED_CLEAN_REPORT);
-  const after = await scanApp(db, app, 'production', 'scheduled');
-  assert.equal(after.status, 'ok');
-  assert.equal(dockerCalls().filter(c => c[0] === 'pull').length, 1);
+  assert.equal(row.status, 'ok', row.error);
+  const pulls = dockerCalls().filter(c => c[0] === 'pull');
+  assert.equal(pulls.length, 1);
+  assert.deepEqual(pulls[0], ['pull', SCANNER_IMAGE]);
+  assert.equal(dockerCalls().filter(c => c[0] === 'run').length, 1);
 });
 
 test('an inspect that exits 0 without an image id does not count as present', async () => {

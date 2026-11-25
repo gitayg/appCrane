@@ -23,6 +23,8 @@ import { MySessionsCard } from '../components/sessions/MySessionsCard'
 import { serverDate } from '../utils/serverDate'
 import { TwoFactorCard } from '../components/mfa/TwoFactorCard'
 import { RestoreDrillsCard } from '../components/backup/RestoreDrillsCard'
+import { OffsiteHealthBanner, type OffsiteHealth } from '../components/backup/OffsiteHealthBanner'
+import { RecoveryKeyCard } from '../components/backup/RecoveryKeyCard'
 import { EvidencePackPanel } from '../components/compliance/EvidencePackPanel'
 import { SignInPolicyCard } from '../components/mfa/SignInPolicyCard'
 import { SignInRiskPanel } from '../components/signinRisk/SignInRiskPanel'
@@ -1212,16 +1214,18 @@ function BackupTab() {
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null)
   const [importing, setImporting] = useState(false)
   const [restoreEnv, setRestoreEnv] = useState(true)
+  const [recoveryKey, setRecoveryKey] = useState('')
   const fileRef = useRef<HTMLInputElement>(null)
 
   // v2.21.9: scheduled off-site (S3) backup config.
   // v2.79.0: `off_site` travels with it — the honest state in the server's own
   // words, so this tab and the MCP status tool cannot drift into saying two
   // different things about the same host.
-  type OffSite = { configured?: boolean; has_off_site_copy?: boolean; notice?: string | null; missing?: string[] }
+  type OffSite = { configured?: boolean; has_off_site_copy?: boolean; notice?: string | null; missing?: string[]; health?: OffsiteHealth }
   type S3Cfg = { enabled?: boolean; bucket?: string; region?: string; prefix?: string; endpoint?: string; access_key_id?: string; has_secret?: boolean; hour?: number; last_run?: string | null; last_error?: string | null; off_site?: OffSite }
   const [s3, setS3] = useState<S3Cfg>({})
-  useEffect(() => { adminApi.get<S3Cfg>('/api/settings/backup/s3').then(setS3).catch(() => {}) }, [])
+  const loadS3 = () => adminApi.get<S3Cfg>('/api/settings/backup/s3').then(setS3).catch(() => {})
+  useEffect(() => { loadS3() }, [])
 
   // v2.79.0: scheduled LOCAL backup — on by default, db + .env only.
   type LocalArchive = { file: string; bytes: number; modified_at: string }
@@ -1286,12 +1290,14 @@ function BackupTab() {
     setImporting(true); setMsg(null)
     try {
       const fd = new FormData()
+      if (recoveryKey.trim()) fd.append('encryption_key', recoveryKey.trim())
       fd.append('file', file)
       const r = await fetch(`/api/settings/config/import?restore_env=${restoreEnv ? '1' : '0'}`, {
         method: 'POST', headers: authHeaders(), body: fd,
       })
       const data = await r.json().catch(() => ({}))
       if (!r.ok) throw new Error(data?.error?.message || `Import failed (${r.status})`)
+      setRecoveryKey('')
       setMsg({ ok: true, text: (data.message || 'Imported.') + ' Wait ~10s, then refresh.' })
     } catch (e) {
       setMsg({ ok: false, text: (e as Error).message })
@@ -1317,6 +1323,8 @@ function BackupTab() {
           {s3.off_site.notice}
         </p>
       )}
+      <OffsiteHealthBanner health={s3.off_site?.health} />
+      <RecoveryKeyCard onDownloaded={loadS3} />
       <p className="settings-hint">
         Package the whole AppCrane setup into one zip: the database (apps, users,
         settings, encrypted env vars, roles), the <code>.env</code> (including the
@@ -1343,6 +1351,12 @@ function BackupTab() {
         <input type="checkbox" checked={restoreEnv} onChange={e => setRestoreEnv(e.target.checked)} />
         {' '}Also restore <code>.env</code> (ENCRYPTION_KEY + platform secrets). Leave on when moving to a fresh host.
       </label>
+      <label style={{ display: 'block', margin: '6px 0' }}>
+        Recovery key (only for a nightly or off-site backup from another host):{' '}
+        <PasswordInput label="recovery key" className="editable" autoComplete="off" value={recoveryKey}
+          onChange={e => setRecoveryKey(e.target.value)} placeholder="ENCRYPTION_KEY from the recovery key file"
+          style={{ width: 360, maxWidth: '100%' }} />
+      </label>
       <input ref={fileRef} type="file" accept=".zip" style={{ display: 'none' }}
         onChange={e => { const f = e.target.files?.[0]; if (f) doImport(f) }} />
       <button className="btn" style={{ background: 'var(--red)', color: '#fff' }}
@@ -1364,7 +1378,7 @@ function BackupTab() {
 
       <h3 style={{ marginTop: 24 }}>Scheduled local backup (on by default)</h3>
       <p className="settings-hint">
-        Every night AppCrane writes a copy of <code>deployhub.db</code> and <code>.env</code> to{' '}
+        Every night AppCrane writes a copy of <code>deployhub.db</code> and <code>.env</code> (without <code>ENCRYPTION_KEY</code>: keep the recovery key above) to{' '}
         <code>{local.directory || 'DATA_DIR/backups/local'}</code> and keeps the newest {local.keep ?? 7}.
         That covers a corrupted, deleted or badly-restored database — <b>not</b> the loss of this host,
         and <b>not</b> app icons, per-app <code>/data</code>, declared volumes, managed databases, managed-app repositories

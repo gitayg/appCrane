@@ -14,6 +14,10 @@ import { getLicensePolicy, UNKNOWN_LICENSE } from './policy.js';
 export const CHECK_ID = 'licenses';
 export const LABEL = 'License policy';
 const MAX_LISTED = 10;
+// Structured findings stored with the check (license_check_json). Bounded so a
+// pathological SBOM cannot grow the row without limit; the counts stay exact.
+export const MAX_FINDINGS = 500;
+const LOG_LINE_MAX = 600;
 
 function expressionIds(expr) {
   return String(expr).replace(/[()]/g, ' ').split(/\s+/)
@@ -48,22 +52,30 @@ function label(c) { return `${c.name || '?'}${c.version ? `@${c.version}` : ''}`
 export function licensePolicyCheck(app, sbom, policy = getLicensePolicy()) {
   const who = app?.slug ? ` (${app.slug})` : '';
   if (!sbom || !Array.isArray(sbom.components)) {
-    return { id: CHECK_ID, label: LABEL, status: 'warn', reasons: [`No SBOM for this release${who}, so its licenses were not checked`], components: 0, denied: 0, flagged: 0 };
+    return { id: CHECK_ID, label: LABEL, status: 'warn', reasons: [`No SBOM for this release${who}, so its licenses were not checked`], components: 0, denied: 0, flagged: 0, findings: [] };
   }
   const deny = new Set(policy.denied.map((x) => x.toLowerCase()));
   const flag = new Set(policy.flagged.map((x) => x.toLowerCase()));
   const denied = [];
   const flagged = [];
+  const findings = [];
+  let dropped = 0;
+  const note = (c, rule, ids) => {
+    for (const license of ids) {
+      if (findings.length < MAX_FINDINGS) findings.push({ component: c.name || '?', version: c.version || null, license, rule });
+      else dropped += 1;
+    }
+  };
   let n = 0;
   walk(sbom.components, (c) => {
     n += 1;
     const ids = componentLicenses(c);
     const d = ids.filter((x) => deny.has(x.toLowerCase()));
-    if (d.length) { denied.push(`${label(c)}: ${d.join(', ')}`); return; }
+    if (d.length) { denied.push(`${label(c)}: ${d.join(', ')}`); note(c, 'denied', d); return; }
     const f = ids.filter((x) => flag.has(x.toLowerCase()));
-    if (f.length) flagged.push(`${label(c)}: ${f.join(', ')}`);
+    if (f.length) { flagged.push(`${label(c)}: ${f.join(', ')}`); note(c, 'flagged', f); }
   });
-  const extra = { components: n, denied: denied.length, flagged: flagged.length };
+  const extra = { components: n, denied: denied.length, flagged: flagged.length, findings, findings_truncated: dropped > 0 };
   if (denied.length) {
     return { id: CHECK_ID, label: LABEL, status: 'fail', reasons: [
       `${denied.length} component(s) under a denied license${who}`, ...denied.slice(0, MAX_LISTED),
@@ -74,4 +86,32 @@ export function licensePolicyCheck(app, sbom, policy = getLicensePolicy()) {
     return { id: CHECK_ID, label: LABEL, status: 'warn', reasons: [`${flagged.length} component(s) under a flagged license${who}`, ...flagged.slice(0, MAX_LISTED)], ...extra };
   }
   return { id: CHECK_ID, label: LABEL, status: 'pass', reasons: [`${n} component(s); none under a denied or flagged license`], ...extra };
+}
+
+/**
+ * The one deploy-log line for a check: the summary plus each component it
+ * names with its license and the rule (denied or flagged) that matched,
+ * cut to a bounded length with the number left out stated.
+ */
+export function licenseLogLine(check, max = LOG_LINE_MAX) {
+  const head = `License policy: ${check.status} — ${check.reasons[0]}`;
+  const groups = new Map();
+  for (const f of Array.isArray(check.findings) ? check.findings : []) {
+    const key = `${f.component}${f.version ? `@${f.version}` : ''}`;
+    const g = groups.get(key) || { rule: f.rule, licenses: [] };
+    g.licenses.push(f.license);
+    groups.set(key, g);
+  }
+  if (!groups.size) return head;
+  const total = (check.denied || 0) + (check.flagged || 0);
+  let line = `${head}: `;
+  let shown = 0;
+  for (const [key, g] of groups) {
+    const next = `${shown ? '; ' : ''}${key} ${g.licenses.join(', ')} (${g.rule})`;
+    if (line.length + next.length > max) break;
+    line += next;
+    shown += 1;
+  }
+  if (!shown) return `${head} (component list longer than ${max} characters; see the attestation)`;
+  return shown < total ? `${line}; and ${total - shown} more` : line;
 }

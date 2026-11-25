@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { adminApi } from '../../adminApi'
 import { downloadAuthed } from './download'
+import { LicenseFindingsList } from './LicenseFindingsList'
 
 const dim = { color: 'var(--dim)', fontSize: '.78rem' }
 
@@ -99,6 +100,7 @@ export function AppSupplyChainCard({ slug, reload = 0 }: { slug: string; reload?
           {' '}({e.count}x, last {e.last_at}): {e.reason}. {e.kind === 'refused' ? 'The container was left as it was. Redeploy, or ask a platform admin to sign the running images.' : 'Enforce mode would refuse its next restart.'}
         </p>
       ))}
+      {data && data.attestations.length > 0 && <LicenseFindingsList slug={slug} reload={reload} />}
       {data && data.attestations.length === 0 && <p style={dim}>No deploy of this app has been signed yet.</p>}
       {data && data.attestations.length > 0 && (
         <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>

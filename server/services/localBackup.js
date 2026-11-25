@@ -42,8 +42,14 @@
  * names, so an operator's own manual exports in DATA_DIR/backups are never
  * deleted by it.
  *
- * SECURITY: these archives contain the ENCRYPTION_KEY and every encrypted
- * secret, exactly like the ones Settings → Backup produces. Nothing here logs
+ * SECURITY: these archives contain every encrypted secret but, since
+ * v2.145.0, NOT the ENCRYPTION_KEY that decrypts them (separateKey: the .env
+ * inside has the key lines removed and the manifest names the key by
+ * fingerprint, see backupKeySeparation.js). Measured before that on a
+ * production host: seven nightly archives on the same disk, each holding
+ * deployhub.db and the key that opens it. A restore takes the key from this
+ * host or from the recovery key a platform admin downloads from Settings >
+ * Backup; losing both makes these archives unrestorable. Nothing here logs
  * a credential; the only values written to the settings table are a flag, two
  * integers, timestamps and an error string.
  */
@@ -106,6 +112,10 @@ export function getLocalBackupConfig() {
     last_bytes: Number.isFinite(lastBytes) ? lastBytes : null,
     directory: localBackupsDir(),
     contents: ['deployhub.db', '.env', 'managed databases'],
+    key_separation: {
+      encryption_key_in_archive: false,
+      note: 'The .env in these archives has no ENCRYPTION_KEY. Restoring needs this host\'s key or the recovery key (Settings > Backup).',
+    },
     excludes: ['app icons', 'per-app /data', 'declared volumes', 'managed-app repositories', 'container images'],
   };
 }
@@ -174,7 +184,7 @@ export async function runLocalBackup() {
   await mkdir(dir, { recursive: true, mode: 0o700 });
   const file = localFileName(at);
   try {
-    const out = await exportDataArchive({ dest: join(dir, file), at, contents: 'platform', managedDb: true });
+    const out = await exportDataArchive({ dest: join(dir, file), at, contents: 'platform', managedDb: true, separateKey: true });
     const removed = await pruneLocalBackups(cfg.keep);
     set(db, K.lastRun, at.toISOString());
     set(db, K.lastError, '');

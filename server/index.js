@@ -1180,6 +1180,7 @@ app.use('/api', (await import('./routes/githubSyncStatus.js')).default); // /api
 app.use('/api', (await import('./routes/githubExport.js')).default); // POST /api/apps/:slug/github-export: push a Crane-hosted repo to its GitHub repo, fast-forward only, verified
 app.use('/api', (await import('./routes/aiAct.js')).default); // /api/apps/:slug/{ai-act,ai-use,ai-notice}, /api/ai-act/{literacy,inventory,retention}
 app.use('/api', (await import('./routes/imageTrust.js')).default); // /api/apps/:slug/attestations, /api/apps/:slug/deployments/:id/attestation[/:doc], /api/image-trust/*
+app.use('/api', (await import('./routes/licenseFindings.js')).default); // /api/apps/:slug/license-findings, /api/image-trust/license-findings
 app.use('/api', (await import('./routes/autoPatch.js')).default); // /api/auto-patch/policy, /api/apps/:slug/auto-patch
 app.use('/api', (await import('./routes/accessReviews.js')).default); // /api/access-reviews/*: periodic access reviews
 app.use('/api', (await import('./routes/appOwnership.js')).default); // /api/apps/:slug/ownership|owner-transfers|owner, /api/owner-transfers/*, /api/admin/orphaned-apps
@@ -1245,6 +1246,7 @@ app.use('/api/mcp', mcpRoutes);          // Model Context Protocol endpoint (JSO
 // moving it would have made every setting world-readable.
 app.use('/api/settings', (await import('./routes/jobHealth.js')).default); // /api/settings/job-health (platform admin)
 app.use('/api/settings', (await import('./routes/hostHardening.js')).default); // /api/settings/host-hardening: Host limits (platform admin)
+app.use('/api/platform', (await import('./routes/hostNetwork.js')).default); // /api/platform/host-network (platform admin)
 app.use('/api/settings/client-errors', clientErrorsAdminRoutes); // aggregated browser errors (platform admin)
 app.use('/api/settings/secrets-provider', (await import('./routes/secretsProviderStatus.js')).default); // AWS Secrets Manager status (platform admin)
 app.use('/api/secret-connections', (await import('./routes/secretConnections.js')).default); // Vault / Infisical / 1Password / AWS SSM connections (platform admin)
@@ -1946,6 +1948,9 @@ app.listen(PORT, HOST, async () => {
     try { const { startEventRetention } = await import('./services/eventRetention.js'); startEventRetention(); } catch (e) { log.error('Event retention job failed to start: ' + e.message); }
     try { const { startIncidentRetention } = await import('./services/restartIncidents.js'); startIncidentRetention(); } catch (e) { log.error('Restart incident retention failed to start: ' + e.message); }
     try { const { startRestartWatcher } = await import('./services/restartWatcher.js'); startRestartWatcher(); } catch (e) { log.error('Restart watcher failed to start: ' + e.message); }
+    try { const { startHostFirewall } = await import('./services/hostFirewall/index.js'); startHostFirewall(); } catch (e) { log.error('Host firewall sync failed to start: ' + e.message); }
+    try { const { startHostGatewayCheck } = await import('./services/hostGateway.js'); startHostGatewayCheck(); } catch (e) { log.error('Host gateway check failed to start: ' + e.message); }
+    try { const { startManagedDbLoginsCheck } = await import('./services/managedDbPasswordOnly.js'); startManagedDbLoginsCheck(); } catch (e) { log.error('Managed DB logins check failed to start: ' + e.message); }
     try { const { startDeployLogRetention } = await import('./services/deployLogRetention.js'); startDeployLogRetention(); } catch (e) { log.error('Deploy log retention job failed to start: ' + e.message); }
     try { const { startBuildCachePrune } = await import('./services/buildCachePrune.js'); startBuildCachePrune(); } catch (e) { log.error('Build cache prune job failed to start: ' + e.message); }
     try { const { startTrustedDevicePurge } = await import('./services/trustedDevicePurge.js'); startTrustedDevicePurge(); } catch (e) { log.error('Trusted device purge failed to start: ' + e.message); }
@@ -2023,6 +2028,7 @@ app.listen(PORT, HOST, async () => {
   try {
     const { startVulnScheduler } = await import('./services/vulnDigest.js');
     startVulnScheduler();
+    import('./services/imageScan.js').then(m => m.warmScannerImage()).catch(e => log.warn('Scanner image warm-up failed: ' + e.message));
   } catch (e) {
     log.error('Vulnerability scan scheduler failed to start: ' + e.message);
   }

@@ -1142,11 +1142,12 @@ async function runAppContainer({ slug, env, image, imageId = null, hostPort, env
   }
 
   // v2.8.0: only email-enabled apps need to reach AppCrane from inside the
-  // container (for the email service). host-gateway maps host.docker.internal
-  // to the host so CRANE_INTERNAL_URL resolves. Off by default — every other
-  // container start is unchanged.
+  // container (for the email service). host.docker.internal is mapped to the
+  // host so CRANE_INTERNAL_URL resolves: on Linux to the default bridge's
+  // gateway, not Docker's host-gateway value, which a daemon reload can leave
+  // empty (services/hostGateway.js). Off by default.
   if (addHostGateway) {
-    args.push('--add-host', 'host.docker.internal:host-gateway');
+    args.push('--add-host', await (await import('./hostGateway.js')).resolveHostGatewayAddHost());
   }
 
   // v2.70.0: the second argv-build boundary. `-v` takes a COLON-SEPARATED
