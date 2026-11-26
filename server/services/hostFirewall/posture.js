@@ -160,9 +160,9 @@ export async function computePosture({ deps = {}, db = getDb(), now = Date.now()
         'AppCrane re-syncs it on every container start and stop and every 5 minutes. If this stays, see Job Health > Host network policy.'));
     }
     if (f.input_policy === 'ACCEPT' && !f.table.unconditionalDrop) {
-      findings.push(finding(`input-accept-${fam.id}`, 'low',
-        `The ${label} INPUT policy is ACCEPT, so every port a host process listens on is reachable unless a rule drops it.`,
-        'Set a default-deny INPUT policy that allows only SSH, 80 and 443 (for example with ufw).'));
+      findings.push(finding(`input-accept-${fam.id}`, 'info',
+        `The ${label} INPUT policy is ACCEPT. AppCrane drops only its own ports on the public interface and leaves the rest of the server's policy to you.`,
+        'Optional: a default-deny INPUT policy (for example with ufw) also closes ports other software opens.'));
     }
   }
 

@@ -317,8 +317,8 @@ async function hostNetworkItem(d) {
   }
   if (s.result !== 'ok') return withNet(unknown(`${HOST_NETWORK_STATE} has no result`));
   const input = s.input_mode === 'ufw'
-    ? `INPUT: ufw (22, 80, 443/tcp allowed where no rule existed; port ${s.app_port} denied on ${s.ext})`
-    : `INPUT: APPCRANE-INPUT chain, policy ${s.input_policy}, accepting ${s.allow}; port ${s.app_port} dropped on ${s.ext} only`;
+    ? `INPUT: ufw (port ${s.app_port}${s.db_ports ? ` and database ports ${s.db_ports}` : ''} denied on ${s.ext}; ${s.app_port} allowed from ${s.bridges || 'the container bridges'}; ufw policy not changed by AppCrane)`
+    : `INPUT: APPCRANE-INPUT chain (port ${s.app_port}${s.db_ports ? ` and database ports ${s.db_ports}` : ''} dropped on ${s.ext} only; INPUT policy ${s.input_policy}, not changed by AppCrane)`;
   if (s.publish_drop !== 'yes') {
     const du = s.docker_user === 'interim'
       ? 'DOCKER-USER left to the interim appcrane-docker-user unit'

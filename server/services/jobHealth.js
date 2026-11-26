@@ -36,6 +36,7 @@ export const JOBS = {
   'state-reconcile':  { label: 'Deployment state reconcile',        cadenceMs: 10 * MIN },
   'caddy-reload':     { label: 'Caddy config apply (validate and reload)', cadenceMs: null },
   'caddy-watchdog':   { label: 'Caddy watchdog',                    cadenceMs: MIN },
+  'host-hardening-auto': { label: 'Host limits applied after an upgrade', cadenceMs: null },
   'host-network':     { label: 'Host network policy (DOCKER-USER, INPUT, IMDS)', cadenceMs: 10 * MIN },
   'host-gateway':     { label: 'Container host gateway (host.docker.internal)', cadenceMs: HOUR },
   'managed-db-logins': { label: 'Managed database password-only logins', cadenceMs: HOUR },

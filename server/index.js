@@ -1949,6 +1949,7 @@ app.listen(PORT, HOST, async () => {
     try { const { startIncidentRetention } = await import('./services/restartIncidents.js'); startIncidentRetention(); } catch (e) { log.error('Restart incident retention failed to start: ' + e.message); }
     try { const { startRestartWatcher } = await import('./services/restartWatcher.js'); startRestartWatcher(); } catch (e) { log.error('Restart watcher failed to start: ' + e.message); }
     try { const { startHostFirewall } = await import('./services/hostFirewall/index.js'); startHostFirewall(); } catch (e) { log.error('Host firewall sync failed to start: ' + e.message); }
+    try { const { startHostHardeningAuto } = await import('./services/hostHardeningAuto.js'); startHostHardeningAuto({ version: VERSION }); } catch (e) { log.error('Host limits auto-apply failed to start: ' + e.message); }
     try { const { startHostGatewayCheck } = await import('./services/hostGateway.js'); startHostGatewayCheck(); } catch (e) { log.error('Host gateway check failed to start: ' + e.message); }
     try { const { startManagedDbLoginsCheck } = await import('./services/managedDbPasswordOnly.js'); startManagedDbLoginsCheck(); } catch (e) { log.error('Managed DB logins check failed to start: ' + e.message); }
     try { const { startDeployLogRetention } = await import('./services/deployLogRetention.js'); startDeployLogRetention(); } catch (e) { log.error('Deploy log retention job failed to start: ' + e.message); }

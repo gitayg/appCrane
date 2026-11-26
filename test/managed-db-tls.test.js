@@ -369,7 +369,7 @@ test('both container starts (deploy, rollback) and the restart route pass the ce
   // restart would bring the app back without the certificate it needs.
   const dep = readFileSync(new URL('../server/services/deployer.js', import.meta.url), 'utf8');
   assert.equal((dep.match(/volumes: \[\.\.\.containerVolumes, \.\.\.dbCertMounts\]/g) || []).length, 2, 'deploy start + rollback start');
-  const route = readFileSync(new URL('../server/routes/deploy.js', import.meta.url), 'utf8');
+  const route = readFileSync(new URL('../server/services/containerRecreate.js', import.meta.url), 'utf8');
   assert.match(route, /volumes: \[\.\.\.containerVolumes, \.\.\.dbCertMounts\]/);
   assert.match(route, /image,\n\s+appendLog/);
 });

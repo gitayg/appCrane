@@ -385,26 +385,26 @@ fi
 # interim hand-installed appcrane-docker-user unit is present, DOCKER-USER is
 # left to that unit; both are recorded in the state file.
 #
-# INPUT: with ufw active, rules are only added (22, 80, 443/tcp unless a rule
-# for the port exists; AppCrane's own port denied on <EXT>, prepended), never
-# deleted or reordered. Without ufw, an APPCRANE-INPUT chain jumped from INPUT
-# accepts loopback, replies, ICMP essentials, DHCP, the container bridges
-# (apps reach AppCrane at host.docker.internal:<PORT> and their databases on
-# the bridge gateway), 22/tcp, 80/tcp, 443/tcp+udp and APPCRANE_INPUT_ALLOW,
-# drops AppCrane's own port on <EXT> (it stays reachable on every other
-# interface: tailscale, VPN, private NICs), and only then is the INPUT
-# policy set to DROP — unless a socket listens on a non-loopback address no
-# rule covers, which would be cut off; then the policy is left as it was
-# (APPCRANE_INPUT_FORCE=1 overrides). iptables-persistent / netfilter-persistent
-# save are never used: they would also save Docker's own chains and restore
-# stale copies of them at boot. appcrane-host-network.service re-applies only
-# AppCrane's chains, after Docker starts and whenever it restarts.
-#
-# Knobs (environment, or the same NAME=value lines in /etc/appcrane/
-# host-network.conf, which must be root-owned and writable by root only;
-# Apply runs through sudo, which drops the environment):
-#   APPCRANE_INPUT_ALLOW="8443/tcp 51820/udp"  more INPUT ports to accept
-#   APPCRANE_INPUT_FORCE=1                     set DROP despite uncovered listeners
+# INPUT: AppCrane protects only its own surfaces on <EXT> and leaves the rest
+# of the server to its owner: the INPUT policy and ufw's default policy are
+# never changed, nothing else is accepted or dropped, and no listener check
+# runs (other software, a Tailscale UDP listener for one, is not AppCrane's
+# business). Dropped on <EXT> only, tcp: AppCrane's PORT and the host ports
+# of the managed database servers (MANAGED_DB_POSTGRES_PORT, _MARIADB_PORT,
+# _MONGO_PORT, and _REDIS_PORT_MIN plus the 499 above it, from .env, defaults
+# as the server's; those are bound to 127.0.0.1 and the bridge gateway, so this
+# is defence in depth). Containers reach AppCrane at host.docker.internal:
+# <PORT>, which arrives on a Docker bridge, so that is accepted on docker0 and
+# the appcrane-apps bridge. With ufw active, those are ufw rules commented
+# appcrane-ext and appcrane-bridge (the bridge allows ahead of every deny); a
+# global "deny <PORT>" is replaced by the one on <EXT>, and a commented rule
+# AppCrane no longer wants (an old bridge after appcrane-apps was recreated)
+# is deleted. Without ufw, an APPCRANE-INPUT chain jumped from INPUT holds the
+# same. A v2.145.0 run that set the INPUT policy to DROP itself is undone (back
+# to ACCEPT). iptables-persistent / netfilter-persistent save are never used:
+# they would also save Docker's own chains and restore stale copies of them at
+# boot. appcrane-host-network.service re-applies only AppCrane's chains, after
+# Docker starts and whenever it restarts.
 HN_STATE=/var/lib/appcrane/host-network.state
 HN_CONF=/etc/appcrane/host-network.conf
 HN_BOOT_SCRIPT=/usr/local/sbin/appcrane-host-network.sh
@@ -457,35 +457,112 @@ hn_app_port_ok() {
   [[ "$1" =~ ^[1-9][0-9]{0,4}$ ]] && (( $1 >= 1024 && $1 <= 65535 )) && [[ " $HN_BASE_ALLOW " != *" $1/tcp "* ]]
 }
 
-# hn_input_chain <iptables|ip6tables> <allow list> <app port> <ext>
+# A port or "lo:hi" range from .env or the state file, each end as above.
+hn_port_spec_ok() {
+  [[ "$1" =~ ^[0-9]+(:[0-9]+)?$ ]] && hn_app_port_ok "${1%%:*}" && hn_app_port_ok "${1##*:}" && (( ${1%%:*} <= ${1##*:} ))
+}
+
+hn_env_get() { sed -n "s/^$1=//p" "$REPO_DIR/.env" 2>/dev/null | tail -n1 | tr -d '"'"'"''; }
+
+# The host ports the managed database servers publish (managedDb.js,
+# managedMongo.js, managedRedis.js), one per line; Redis is a 500-port range.
+hn_db_ports() {
+  local spec name v
+  for spec in MANAGED_DB_POSTGRES_PORT:45432 MANAGED_DB_MARIADB_PORT:43306 MANAGED_DB_MONGO_PORT:47017 MANAGED_DB_REDIS_PORT_MIN:46379; do
+    name="${spec%:*}"; v="$(hn_env_get "$name")"
+    [[ -z "$v" || "$v" == 0 ]] && v="${spec#*:}"
+    [[ "$name" == *_MIN && "$v" =~ ^[0-9]{1,5}$ ]] && v="$v:$((10#$v + 499))"
+    if hn_port_spec_ok "$v"; then echo "$v"
+    else warn "network: $name=$v in $REPO_DIR/.env is below 1024, above 65535 or a port the baseline accepts — not dropped on the public interface"; fi
+  done
+}
+
+# hn_input_chain <iptables|ip6tables> <app port> <ext> <db ports>
 hn_input_chain() {
-  local ipt="$1" allow="$2" appport="$3" ext="$4" p rules
-  if [[ "$ipt" == iptables ]]; then
-    rules="-A APPCRANE-INPUT -p icmp --icmp-type echo-request -j ACCEPT
--A APPCRANE-INPUT -p icmp --icmp-type destination-unreachable -j ACCEPT
--A APPCRANE-INPUT -p icmp --icmp-type time-exceeded -j ACCEPT
--A APPCRANE-INPUT -p icmp --icmp-type parameter-problem -j ACCEPT
--A APPCRANE-INPUT -p udp --sport 67 --dport 68 -j ACCEPT"
-  else
-    rules=""
-    for p in 1 2 3 4 128 133 134 135 136; do rules+="-A APPCRANE-INPUT -p ipv6-icmp --icmpv6-type $p -j ACCEPT"$'\n'; done
-    rules+="-A APPCRANE-INPUT -s fe80::/10 -p udp --sport 547 --dport 546 -j ACCEPT"
-  fi
-  for p in $allow; do rules+=$'\n'"-A APPCRANE-INPUT -p ${p#*/} --dport ${p%/*} -j ACCEPT"; done
+  local ipt="$1" appport="$2" ext="$3" p rules=""
+  for p in $4; do rules+="-A APPCRANE-INPUT -i $ext -p tcp --dport $p -j DROP"$'\n'; done
   "${ipt}-restore" -w --noflush <<EOF || return 1
 *filter
 :APPCRANE-INPUT - [0:0]
--A APPCRANE-INPUT -i lo -j ACCEPT
--A APPCRANE-INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
--A APPCRANE-INPUT -i docker0 -j ACCEPT
--A APPCRANE-INPUT -i br-+ -j ACCEPT
+-A APPCRANE-INPUT -i docker0 -p tcp --dport $appport -j ACCEPT
+-A APPCRANE-INPUT -i br-+ -p tcp --dport $appport -j ACCEPT
 -A APPCRANE-INPUT -i $ext -p tcp --dport $appport -j DROP
--A APPCRANE-INPUT -p tcp --dport $appport -j ACCEPT
-$rules
--A APPCRANE-INPUT -j RETURN
+${rules}-A APPCRANE-INPUT -j RETURN
 COMMIT
 EOF
   "$ipt" -w -C INPUT -j APPCRANE-INPUT 2>/dev/null || "$ipt" -w -I INPUT 1 -j APPCRANE-INPUT
+}
+
+# The bridges AppCrane's containers arrive on: the default bridge (docker0)
+# and appcrane-apps (br-<first 12 of its id> unless the network names its
+# bridge). Returns 1 when Docker cannot be asked.
+hn_bridges() {
+  local n out id name
+  command -v docker >/dev/null 2>&1 || return 1
+  for n in bridge appcrane-apps; do
+    if ! out="$(docker network inspect --format '{{.Id}} {{index .Options "com.docker.network.bridge.name"}}' "$n" 2>/dev/null)"; then
+      [[ "$n" == bridge ]] && return 1
+      continue
+    fi
+    read -r id name <<<"$out"
+    [[ -z "$name" || "$name" == '<no value>' ]] && name="br-${id:0:12}"
+    [[ "$name" =~ ^[A-Za-z0-9_.-]{1,15}$ ]] && echo "$name"
+  done
+}
+
+# Whether every appcrane-bridge allow precedes every incoming DENY, REJECT and
+# LIMIT that is not AppCrane's own appcrane-ext, in each family.
+hn_ufw_bridges_first() {
+  ufw status numbered | awk '
+    /^\[ *[0-9]+\]/ {
+      fam = ($0 ~ /\(v6\)/) ? 6 : 4
+      if ($0 ~ /# appcrane-bridge$/) { if (blocked[fam]) bad = 1 }
+      else if ($0 !~ /# appcrane-ext$/ && $0 ~ / (DENY|REJECT|LIMIT) IN /) blocked[fam] = 1
+    }
+    END { exit bad }'
+}
+
+hn_in() { local x="$1" e; shift; for e in "$@"; do [[ "$e" == "$x" ]] && return 0; done; return 1; }
+
+hn_ufw_add() { ufw prepend "$@" >/dev/null 2>&1 || ufw "$@" >/dev/null; }
+
+# hn_ufw <ext> <app port> <db ports> <bridges> <bridges known: yes|no>
+hn_ufw() {
+  local ext="$1" appport="$2" dbs="$3" bridges="$4" known="$5" p b line rule tag
+  local -a ext_rules=() br_rules=()
+  ext_rules+=("deny in on $ext to any port $appport")
+  for p in $dbs; do ext_rules+=("deny in on $ext to any port $p proto tcp"); done
+  for b in $bridges; do br_rules+=("allow in on $b to any port $appport proto tcp"); done
+
+  while IFS= read -r line; do
+    [[ "$line" =~ ^ufw\ (.*)\ comment\ \'appcrane-(ext|bridge)\'$ ]] || continue
+    rule="${BASH_REMATCH[1]}"; tag="${BASH_REMATCH[2]}"
+    [[ "$tag" == bridge && "$known" != yes ]] && continue
+    if [[ "$tag" == ext ]]; then hn_in "$rule" ${ext_rules[@]+"${ext_rules[@]}"} && continue
+    else hn_in "$rule" ${br_rules[@]+"${br_rules[@]}"} && continue; fi
+    # shellcheck disable=SC2086
+    ufw delete $rule >/dev/null && log "network: ufw rule no longer AppCrane's deleted: $rule"
+  done < <(ufw show added 2>/dev/null | grep '^ufw ')
+
+  for rule in "${ext_rules[@]}"; do
+    # shellcheck disable=SC2086
+    hn_ufw_add $rule comment appcrane-ext || warn "network: ufw would not add: $rule"
+  done
+  if ufw show added 2>/dev/null | grep -qx "ufw deny $appport"; then
+    ufw delete deny "$appport" >/dev/null && log "network: ufw deny $appport (every interface, so containers could not reach AppCrane) replaced by the deny on $ext"
+  fi
+  if ! hn_ufw_bridges_first; then
+    for rule in ${br_rules[@]+"${br_rules[@]}"}; do
+      # shellcheck disable=SC2086
+      ufw delete $rule >/dev/null 2>&1 || true
+    done
+  fi
+  for rule in ${br_rules[@]+"${br_rules[@]}"}; do
+    # shellcheck disable=SC2086
+    hn_ufw_add $rule comment appcrane-bridge || warn "network: ufw would not add: $rule"
+  done
+  hn_ufw_bridges_first || warn "network: an AppCrane bridge allow in ufw is behind a deny (ufw has no prepend?); containers may not reach AppCrane at host.docker.internal:$appport"
+  log "network: ufw denies tcp $appport${dbs:+ $dbs} on $ext; allows tcp $appport on ${bridges:-no bridge} ahead of every deny; default policy and other rules untouched"
 }
 
 hn_input_chain_remove() {
@@ -502,47 +579,24 @@ hn_state_get() { [[ -f "$HN_STATE" ]] && sed -n "s/^$1=//p" "$HN_STATE" | tail -
 # Re-applies what the last host-hardening run decided. Run by
 # appcrane-host-network.service; it never widens or narrows anything itself.
 hn_boot() {
-  local ext="" i mode allow appport du drop
+  local ext="" i mode appport du drop dbs="" p
   if [[ ! -f "$HN_STATE" ]]; then warn "network: $HN_STATE missing — run scripts/host-hardening.sh"; return 1; fi
-  mode="$(hn_state_get input_mode)"; allow="$(hn_state_get allow)"; appport="$(hn_state_get app_port)"
+  mode="$(hn_state_get input_mode)"; appport="$(hn_state_get app_port)"
   du="$(hn_state_get docker_user)"; drop="$(hn_state_get publish_drop)"
   if ! hn_app_port_ok "$appport"; then warn "network: app_port '$appport' in $HN_STATE is not usable — INPUT not applied"; mode=none; fi
+  for p in $(hn_state_get db_ports); do
+    if hn_port_spec_ok "$p"; then dbs+=" $p"; else warn "network: db port '$p' in $HN_STATE is not usable — skipped"; fi
+  done
   for i in $(seq 1 30); do ext="$(hn_ext_if)" && break; sleep 1; done
   if [[ -z "$ext" ]]; then warn "network: no default route after 30 s — DOCKER-USER not applied"; return 1; fi
   hn_docker_user_mode iptables 169.254.169.254 "$ext" "$du" "$drop" || return 1
   if hn_have6; then hn_docker_user_mode ip6tables fd00:ec2::254 "$ext" "$du" "$drop" || return 1; fi
   case "$mode" in
     appcrane-input|refused)
-      hn_input_chain iptables "$allow" "$appport" "$ext" || return 1
-      if hn_have6; then hn_input_chain ip6tables "$allow" "$appport" "$ext" || return 1; fi
-      if [[ "$(hn_state_get input_policy)" == DROP ]]; then
-        iptables -w -P INPUT DROP || return 1
-        if hn_have6; then ip6tables -w -P INPUT DROP || return 1; fi
-      fi ;;
+      hn_input_chain iptables "$appport" "$ext" "$dbs" || return 1
+      if hn_have6; then hn_input_chain ip6tables "$appport" "$ext" "$dbs" || return 1; fi ;;
   esac
   log "network: DOCKER-USER (${du:-skeleton}, public interface $ext, DROP ${drop:-no}) and INPUT ($mode) re-applied"
-}
-
-# Listening sockets on non-loopback addresses that no INPUT rule here accepts,
-# one "port/proto@address(process)" per line. Covered: loopback, addresses of
-# docker0/br-*, docker-proxy (published ports go through DOCKER-USER, not
-# INPUT), AppCrane's own TCP port (deliberately dropped; Caddy reaches it on
-# loopback), DHCP client ports and the allow list.
-hn_uncovered() {
-  local allow=" $1 68/udp 546/udp " appport="$2" listeners="$3" bridges proto local proc port addr iface
-  bridges=" $(ip -o addr show 2>/dev/null | awk '$2 == "docker0" || $2 ~ /^br-/ { split($4, a, "/"); printf "%s ", a[1] }') "
-  while read -r proto _ _ _ local _ proc; do
-    port="${local##*:}"; addr="${local%:*}"; addr="${addr#[}"; addr="${addr%]}"; iface=""
-    if [[ "$addr" == *%* ]]; then iface="${addr#*%}"; addr="${addr%%\%*}"; fi
-    case "$addr" in 127.*|::1|::ffff:127.*) continue ;; esac
-    [[ "$iface" == lo || "$iface" == docker0 || "$iface" == br-* ]] && continue
-    [[ "$bridges" == *" $addr "* ]] && continue
-    [[ "$proto" == tcp && "$port" == "$appport" ]] && continue
-    [[ "$proc" == *'"docker-proxy"'* ]] && continue
-    [[ "$allow" == *" $port/$proto "* ]] && continue
-    proc="$(sed -n 's/^users:(("\([^"]*\)".*/\1/p' <<<"$proc")"
-    printf '%s/%s@%s%s\n' "$port" "$proto" "$addr" "${proc:+($proc)}"
-  done <<<"$listeners" | sort -u | tr -cd 'A-Za-z0-9._:/@%()*\n-'
 }
 
 # Ports docker-proxy listens on for 0.0.0.0, :: or * (one "proto:port" per
@@ -595,15 +649,15 @@ hn_publish_maintainer() {
   if ! sudo -n -l -U "$user" "$HN_PUB_HELPER" >/dev/null; then echo "sudoers does not let $user run $HN_PUB_HELPER"; return 1; fi
 }
 
-hn_conf_get() {
-  local name="$1" st
-  [[ -f "$HN_CONF" ]] || return 0
-  st="$(stat -c '%u %a' "$HN_CONF")"
-  if [[ "${st%% *}" != 0 ]] || (( 8#${st##* } & 8#022 )); then
-    warn "network: $HN_CONF is not root-owned or is writable by others — ignored"
-    return 0
-  fi
-  sed -n "s/^$name=//p" "$HN_CONF" | tail -n1 | tr -d '"'"'"''
+# APPCRANE_INPUT_ALLOW and APPCRANE_INPUT_FORCE (v2.145.0) had a meaning only
+# while AppCrane set the INPUT policy to DROP; named anywhere, they get a warning.
+hn_retired_knobs() {
+  local k
+  for k in APPCRANE_INPUT_ALLOW APPCRANE_INPUT_FORCE; do
+    if [[ -n "${!k-}" ]] || { [[ -f "$HN_CONF" ]] && grep -q "^$k=" "$HN_CONF"; }; then
+      warn "network: $k no longer has an effect: AppCrane leaves the INPUT policy and every port but its own to you"
+    fi
+  done
 }
 
 hn_write_state() {
@@ -617,7 +671,7 @@ hn_write_state() {
 # A failed run keeps the last decision, so the boot unit goes on applying it.
 hn_fail() {
   local keep=()
-  [[ -f "$HN_STATE" ]] && mapfile -t keep < <(grep -E '^(input_mode|input_policy|allow|app_port|docker_user|publish_drop|publish_drop_reason|run_user)=' "$HN_STATE")
+  [[ -f "$HN_STATE" ]] && mapfile -t keep < <(grep -E '^(input_mode|input_policy|input_policy_set|allow|app_port|db_ports|bridges|docker_user|publish_drop|publish_drop_reason|run_user)=' "$HN_STATE")
   hn_write_state ${keep[@]+"${keep[@]}"} "result=failed" "error=$1" "ext=${2:-}"
 }
 
@@ -631,7 +685,7 @@ hn_boot_script() {
     '# (DOCKER-USER skeleton, APPCRANE-PUBLISH created empty if missing, APPCRANE-INPUT).' \
     'set -uo pipefail'
   declare -p HN_STATE HN_BASE_ALLOW | sed 's/^declare -- //'
-  declare -f log warn hn_ext_if hn_publish_chain hn_docker_user hn_docker_user_mode hn_app_port_ok hn_input_chain hn_have6 hn_state_get hn_boot
+  declare -f log warn hn_ext_if hn_publish_chain hn_docker_user hn_docker_user_mode hn_app_port_ok hn_port_spec_ok hn_input_chain hn_have6 hn_state_get hn_boot
   printf '%s\n' 'hn_boot'
 }
 
@@ -651,7 +705,7 @@ ExecStart=$HN_BOOT_SCRIPT
 WantedBy=docker.service multi-user.target"
 
 hn_main() {
-  local ext appport allow="" force p bad="" fam="IPv4" mode policy uncovered="" interim=no added n
+  local ext appport dbs fam="IPv4" mode policy interim=no bridges="" known=yes restored="" ipt
   local listeners="" ss_ok=yes runuser drop=yes why="" unsynced du=skeleton have6=no
   if ! command -v iptables >/dev/null 2>&1 || ! command -v iptables-restore >/dev/null 2>&1; then
     log "network: iptables not installed — skipped"
@@ -670,15 +724,8 @@ hn_main() {
     return 1
   fi
 
-  for p in ${APPCRANE_INPUT_ALLOW-$(hn_conf_get APPCRANE_INPUT_ALLOW)}; do
-    n="${p%/*}"
-    if [[ ! "$p" =~ ^[1-9][0-9]{0,4}/(tcp|udp)$ ]] || (( n > 65535 )); then bad+=" $p"
-    elif [[ "$n" == "$appport" ]]; then warn "network: APPCRANE_INPUT_ALLOW names AppCrane's own port $p — never accepted from outside; ignored"
-    else allow+=" $p"; fi
-  done
-  [[ -n "$bad" ]] && warn "network: APPCRANE_INPUT_ALLOW entries ignored (want port/tcp or port/udp):$bad"
-  allow="$(tr ' ' '\n' <<<"$HN_BASE_ALLOW$allow" | awk 'NF && !seen[$0]++' | paste -sd' ' -)"
-  force="${APPCRANE_INPUT_FORCE-$(hn_conf_get APPCRANE_INPUT_FORCE)}"
+  dbs="$(hn_db_ports | paste -sd' ' -)"
+  hn_retired_knobs
   hn_have6 && have6=yes
 
   if ! command -v ss >/dev/null 2>&1; then
@@ -736,49 +783,34 @@ hn_main() {
     mode=ufw
     hn_input_chain_remove iptables
     hn_have6 && hn_input_chain_remove ip6tables
-    added="$(ufw show added 2>/dev/null | grep '^ufw ' || true)"
-    for p in 22/tcp 80/tcp 443/tcp; do
-      n="${p%/*}"
-      if grep -Eq "(^| )(port )?$n(/(tcp|udp))?( |$)" <<<"$added" || { [[ "$n" == 22 ]] && grep -q 'OpenSSH' <<<"$added"; }; then
-        log "network: ufw already has a rule for port $n — left as is"
-      else
-        ufw allow "$p" >/dev/null && log "network: ufw allow $p added"
-      fi
-    done
-    if ufw prepend deny in on "$ext" to any port "$appport" >/dev/null 2>&1 \
-      || ufw deny in on "$ext" to any port "$appport" >/dev/null; then
-      log "network: ufw denies AppCrane's port $appport on $ext (first rule; existing rules untouched)"
-    else
-      warn "network: ufw would not add the deny for port $appport on $ext"
+    if ! bridges="$(hn_bridges | paste -sd' ' -)"; then
+      known=no; bridges=""
+      warn "network: Docker could not be asked for its bridges — ufw bridge allows left as they are"
     fi
-    policy="$(hn_policy iptables)"
+    hn_ufw "$ext" "$appport" "$dbs" "$bridges" "$known"
   else
-    if ! hn_input_chain iptables "$allow" "$appport" "$ext" || { hn_have6 && ! hn_input_chain ip6tables "$allow" "$appport" "$ext"; }; then
+    mode=appcrane-input
+    # v2.145.0 set the INPUT policy to DROP itself (its state has no
+    # input_policy_set): undone, since the accepts it relied on are gone.
+    if [[ "$(hn_state_get input_mode)" == appcrane-input && "$(hn_state_get input_policy)" == DROP && -z "$(hn_state_get input_policy_set)" ]]; then
+      for ipt in iptables ip6tables; do
+        [[ "$ipt" == ip6tables && "$have6" != yes ]] && continue
+        [[ "$(hn_policy "$ipt")" == DROP ]] && "$ipt" -w -P INPUT ACCEPT && restored+=" $ipt"
+      done
+      [[ -n "$restored" ]] && warn "network: INPUT policy set back to ACCEPT (${restored# }) — v2.145.0 had set DROP; AppCrane no longer changes it. Set your own default-deny (for example with ufw) if you want one"
+    fi
+    if ! hn_input_chain iptables "$appport" "$ext" "$dbs" || { [[ "$have6" == yes ]] && ! hn_input_chain ip6tables "$appport" "$ext" "$dbs"; }; then
       warn "network: could not write APPCRANE-INPUT"
       hn_fail "iptables refused the APPCRANE-INPUT chain" "$ext"
       return 1
     fi
-    if [[ "$ss_ok" != yes ]]; then
-      uncovered="$ss_ok"
-    else
-      uncovered="$(hn_uncovered "$allow" "$appport" "$listeners" | paste -sd' ' -)"
-    fi
-    if [[ -n "$uncovered" && "$force" != 1 ]]; then
-      mode=refused
-      warn "network: INPUT policy NOT set to DROP — these listen on non-loopback addresses with no accept rule, and would be cut off: $uncovered"
-      warn "network: add them to APPCRANE_INPUT_ALLOW in $HN_CONF (e.g. APPCRANE_INPUT_ALLOW=\"8443/tcp\"), or set APPCRANE_INPUT_FORCE=1 there, and apply again"
-    else
-      mode=appcrane-input
-      [[ -n "$uncovered" ]] && warn "network: APPCRANE_INPUT_FORCE=1 — setting DROP although these listen uncovered: $uncovered"
-      iptables -w -P INPUT DROP
-      hn_have6 && ip6tables -w -P INPUT DROP
-      log "network: INPUT policy DROP; accepted: loopback, replies, ICMP, DHCP, container bridges, $allow; AppCrane's port $appport on every interface but $ext"
-    fi
-    policy="$(hn_policy iptables)"
+    log "network: APPCRANE-INPUT drops tcp $appport${dbs:+ $dbs} on $ext and accepts tcp $appport from the container bridges; INPUT policy and every other port untouched"
   fi
+  policy="$(hn_policy iptables)"
 
-  hn_write_state "result=$([[ $mode == refused ]] && echo refused || echo ok)" "ext=$ext" "families=$fam" \
-    "input_mode=$mode" "input_policy=$policy" "allow=$allow" "app_port=$appport" "uncovered=$uncovered" \
+  hn_write_state "result=ok" "ext=$ext" "families=$fam" \
+    "input_mode=$mode" "input_policy=$policy" "input_policy_set=no" "input_policy_restored=${restored# }" "allow=" "app_port=$appport" \
+    "db_ports=$dbs" "bridges=$bridges" "uncovered=" \
     "run_user=$runuser" "docker_user=$du" "publish_drop=$drop" "publish_drop_reason=$why"
 
   # Persistence: the boot script and its unit, both root-owned.
@@ -819,7 +851,6 @@ hn_main() {
     fi
     echo "interim_removed=$interim" >> "$HN_STATE"
   fi
-  [[ "$mode" == refused ]] && return 1
   return 0
 }
 

@@ -183,7 +183,7 @@ test('GUARD: no host mkdir/chown of a declared volume path in the deploy or rest
   // deployApp) is in test/container-volumes.test.js. This pins the two loops
   // that used to walk every mount on the host.
   const deployer = readFileSync(new URL('../server/services/deployer.js', import.meta.url), 'utf8');
-  const route = readFileSync(new URL('../server/routes/deploy.js', import.meta.url), 'utf8');
+  const route = readFileSync(new URL('../server/services/containerRecreate.js', import.meta.url), 'utf8');
   assert.doesNotMatch(deployer, /for \(const vol of containerVolumes\)\s*(mkdirSync|\{\s*\n\s*try \{\s*\n\s*execFileSync\('chown')/);
   assert.match(deployer, /const hostOwnedVolumes = containerVolumes\.filter\(\(vol\) => !vol\.base\)/);
   assert.doesNotMatch(route, /for \(const vol of containerVolumes\) mkdirSync/);

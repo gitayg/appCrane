@@ -5,6 +5,7 @@ import { effectivePolicy, inSchedule, sleepBlockers, OUT_OF_WINDOW_IDLE_MIN } fr
 import { activityOf, ensureTracking, flushActivity, fromSqlTime } from './envActivity.js';
 import { sleepRow } from './envSleepState.js';
 import { sleepEnv, wakeEnv, opInFlight } from './envWake.js';
+import { automaticRecreateInFlight } from './containerRecreate.js';
 
 // The env-sleeper job (Job Health: 'env-sleeper'), once a minute:
 //   - sandbox idle: asleep after sandbox_idle_minutes with no request;
@@ -46,7 +47,7 @@ function lastDeployAt(db, appId, env) {
   return fromSqlTime(r?.at);
 }
 
-function deployInFlight(db, appId, env) {
+export function deployInFlight(db, appId, env) {
   return !!db.prepare("SELECT 1 FROM deployments WHERE app_id = ? AND env = ? AND status IN ('pending','building','deploying') LIMIT 1").get(appId, env);
 }
 
@@ -130,7 +131,7 @@ export async function runSleeper(deps = {}) {
     const d = decide(db, app, env, now, { processStart: deps.processStart ?? PROCESS_START });
     if (d.action === 'none') continue;
     const name = `appcrane-${app.slug}-${env}`;
-    if (opInFlight(app.id, env) || deployInFlight(db, app.id, env) || restoreInProgress(app.slug, env)) {
+    if (opInFlight(app.id, env) || deployInFlight(db, app.id, env) || restoreInProgress(app.slug, env) || automaticRecreateInFlight(app.id, env)) {
       skipped.push({ name, why: 'busy' });
       continue;
     }

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { adminApi, ApiError } from '../adminApi'
 import { serverDate } from '../utils/serverDate'
 import { setVisibleInterval } from '../utils/visibleInterval'
+import { HostLimitsAutoLine } from './HostLimitsAutoLine'
 
 type ItemState = 'applied' | 'missing' | 'not-applicable' | 'unknown'
 
@@ -184,6 +185,8 @@ export function HostLimitsCard() {
               </span>
             </p>
           )}
+
+          <HostLimitsAutoLine />
 
           {status.run.installed_copy_stale && (
             <div style={{ marginBottom: 8 }}>

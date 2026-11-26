@@ -1,4 +1,9 @@
 {
+  "2.146.0": [
+    "AppCrane now repairs app containers that cannot reach it because of a broken host.docker.internal mapping: it recreates them itself, never during a deploy, restore or sleep, at most once every 6 hours each, and tells the app's owners.",
+    "Host limits are applied automatically after every upgrade. On a server where AppCrane is not root, a release that changes the hardening script needs one root command, shown in Job Health; other upgrades apply on their own.",
+    "AppCrane no longer changes the server's default firewall policy: it only closes its own port and its database ports to the internet, so Tailscale and other software keep working, and app containers can always reach AppCrane on ufw servers."
+  ],
   "2.145.0": [
     "Host limits now secure the server's network: Docker-published ports are reachable from outside only when AppCrane published them, containers cannot reach the cloud metadata service, and AppCrane's own port is never opened to the internet.",
     "App containers reach AppCrane and their databases again after a Docker reload: AppCrane passes the gateway address itself, and Job Health lists containers created with a broken one.",

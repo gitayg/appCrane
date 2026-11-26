@@ -188,8 +188,9 @@ test('restart re-injects the sandbox credentials, and provisions them if the set
   assert.equal(restarted.url, deployed.url);
   assert.notEqual(parse(restarted.url).user, prodBefore.user);
 
-  // The restart route goes through the same helper, for its own env.
-  const src = readFileSync('server/routes/deploy.js', 'utf8');
+  // The restart route goes through the same helper, for its own env
+  // (its body is services/containerRecreate.js).
+  const src = readFileSync('server/services/containerRecreate.js', 'utf8');
   assert.match(src, /injectManagedDbForEnv\(\{\s*app, env, runtimeEnvVars, claimedKeys: decryptFailures, manifestNeeds: releaseDb\.needs,\s*isRestart: true/);
   const dsrc = readFileSync('server/services/deployer.js', 'utf8');
   assert.match(dsrc, /injectManagedDbForEnv\(\{\s*app, env, runtimeEnvVars, claimedKeys: decryptFailures, manifestNeeds: manifestDbNeeds/);

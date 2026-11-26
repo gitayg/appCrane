@@ -2218,6 +2218,11 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       }
     }
 
+    // An automatic recreate of this env (the host.docker.internal repair) may
+    // be replacing the container right now; wait for it, so this deploy's
+    // container is the one left running.
+    await (await import('./containerRecreate.js')).waitForAutomaticRecreate(app, env, { onWait: appendLog });
+
     // Capture old image tag so we can revert if health check fails (Feature 9)
     let prevImage = null;
     try { prevImage = await getContainerImage(app.slug, env); } catch (_) {}

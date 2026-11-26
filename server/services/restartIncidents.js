@@ -10,6 +10,8 @@
 //   recovery  container recovery started the live release again
 //   manual / deploy / sleep / restore / stop
 //             a planned stop, attributed by restartWatcher.js
+//   host-gateway-repair
+//             the host-gateway check recreated it (hostGateway.js records it)
 //   restart_refused
 //             image trust (enforce) refused the health checker's restart; the
 //             container was not touched, so it is not counted as a restart
@@ -25,9 +27,9 @@ import { getDb } from '../db.js';
 import log from '../utils/logger.js';
 import { scrubSummary, scrubText } from './eventScrub.js';
 
-export const TRIGGERS = ['health', 'crash', 'oom', 'recovery', 'manual', 'deploy', 'sleep', 'restore', 'stop', 'restart_refused'];
+export const TRIGGERS = ['health', 'crash', 'oom', 'recovery', 'manual', 'deploy', 'sleep', 'restore', 'stop', 'restart_refused', 'host-gateway-repair'];
 export const UNPLANNED = ['health', 'crash', 'oom', 'recovery'];
-export const PLANNED = ['manual', 'deploy', 'sleep', 'restore', 'stop'];
+export const PLANNED = ['manual', 'deploy', 'sleep', 'restore', 'stop', 'host-gateway-repair'];
 export const COUNTED_ACTIONS = ['restarted', 'observed', 'recovered', 'failed'];
 export const MEMORY_RATIO = 0.95;
 
@@ -113,7 +115,7 @@ export function classify({ trigger, action, capture = {}, detail = {} }) {
       : `container ${detail.container_state || 'missing'}; live release started again`;
   } else {
     kind = 'planned';
-    const label = { manual: 'manual restart', deploy: 'deploy', sleep: 'put to sleep', restore: 'database restore', stop: 'stopped outside AppCrane' }[trigger];
+    const label = { manual: 'manual restart', deploy: 'deploy', sleep: 'put to sleep', restore: 'database restore', stop: 'stopped outside AppCrane', 'host-gateway-repair': 'recreated to repair host.docker.internal' }[trigger];
     text = mem ? `${label} (${mem})` : label;
   }
   if (action === 'skipped') text = `auto-restart skipped (restart loop): ${text}`;

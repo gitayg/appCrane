@@ -287,7 +287,7 @@ test('the result handed to the logger carries key NAMES only, never a value', ()
 });
 
 test('both call sites log only key names, and both defer to the app\'s own vars', () => {
-  for (const file of ['server/services/deployer.js', 'server/routes/deploy.js']) {
+  for (const file of ['server/services/deployer.js', 'server/services/containerRecreate.js']) {
     const src = readFileSync(file, 'utf8');
     // Both go through deployer.injectManagedDbForEnv (one place decides which
     // scope a container gets), with the decrypt failures as the claimed keys.

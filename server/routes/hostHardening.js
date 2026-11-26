@@ -8,6 +8,8 @@ import {
   DEFAULT_DEPS, LAST_RUN_KEY, checkItems, detectRunMode, publicRun,
   isRunning, claimRun, releaseRun, runScript, readLastRun, writeLastRun,
 } from '../services/hostHardening.js';
+import { SETTING_KEY as AUTO_SETTING_KEY, STATE_KEY as AUTO_STATE_KEY, autoStatus, setEnabled as setAutoEnabled } from '../services/hostHardeningAuto.js';
+import { readFileSync } from 'fs';
 import log from '../utils/logger.js';
 
 // Settings > Job Health > Host limits (platform admin). Mounted at
@@ -32,9 +34,28 @@ async function statusBody(db, user, d, run) {
   return body;
 }
 
+const runningVersion = (d) => JSON.parse(readFileSync(`${d.repoDir}/package.json`, 'utf8')).version;
+
 export function createHostHardeningRouter(deps = {}) {
   const d = { ...DEFAULT_DEPS, ...deps };
+  const version = deps.version || runningVersion(DEFAULT_DEPS);
   const router = Router();
+
+  // Automatic apply after an upgrade: the setting, the last automatic run and
+  // the pending warning (a root-owned copy older than this version).
+  router.get('/host-hardening/auto', requireAuth, requirePlatformAdmin, async (req, res) => {
+    res.json({ version, ...(await autoStatus(getDb(), d, version)) });
+  });
+
+  router.put('/host-hardening/auto', requireAuth, requirePlatformAdmin, async (req, res) => {
+    const enabled = req.body?.enabled;
+    if (typeof enabled !== 'boolean') throw new AppError('enabled must be true or false', 400, 'VALIDATION');
+    const db = getDb();
+    const user = realUser(db, req);
+    setAutoEnabled(db, enabled, user.id);
+    logAudit(user.id, null, 'host-hardening-auto-set', { enabled, ip: ipOf(req) });
+    res.json({ version, ...(await autoStatus(db, d, version)) });
+  });
 
   router.get('/host-hardening', requireAuth, requirePlatformAdmin, async (req, res) => {
     const db = getDb();
@@ -100,13 +121,21 @@ export function createHostHardeningRouter(deps = {}) {
   // PUT /api/settings/:key, which would otherwise let anyone with the
   // settings page forge it; req.params.key is decoded, so an encoded name
   // cannot slip past.
+  // The automatic-apply setting and its last run are guarded the same way: the
+  // setting is changed through PUT /host-hardening/auto (audited), and the last
+  // run is written only by the automatic apply.
+  const GUARDED = {
+    [LAST_RUN_KEY]: 'The last host-limits run is recorded by Apply only',
+    [AUTO_STATE_KEY]: 'The last automatic host-limits run is recorded by AppCrane only',
+    [AUTO_SETTING_KEY]: 'Use PUT /api/settings/host-hardening/auto to change automatic host limits',
+  };
   router.put('/:key', (req, res, next) => {
-    if (req.params.key !== LAST_RUN_KEY) return next();
+    if (!Object.hasOwn(GUARDED, req.params.key)) return next();
     requireAuth(req, res, (err) => {
       if (err) return next(err);
       requirePlatformAdmin(req, res, (err2) => {
         if (err2) return next(err2);
-        next(new AppError('The last host-limits run is recorded by Apply only', 403, 'FORBIDDEN'));
+        next(new AppError(GUARDED[req.params.key], 403, 'FORBIDDEN'));
       });
     });
   });

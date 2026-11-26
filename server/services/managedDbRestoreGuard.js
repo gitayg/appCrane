@@ -4,6 +4,7 @@ import { getDb } from '../db.js';
 import { AppError } from '../utils/errors.js';
 import log from '../utils/logger.js';
 import { SANDBOX_TENANT, getSeparateSandboxDb } from './sandboxDb.js';
+import { assertNoAutomaticRecreate } from './containerRecreate.js';
 
 // Restoring an app's data while the app keeps running interleaves the app's own
 // writes with the restore, and the app goes on serving whatever is half loaded.
@@ -107,6 +108,7 @@ export async function runWithAppStopped({ app, envs, keepRunning = false }, work
   if (active.has(app.slug)) {
     throw new AppError(`A restore of ${app.slug} is already running; wait for it to finish.`, 409, RESTORE_IN_PROGRESS);
   }
+  for (const env of envs) assertNoAutomaticRecreate(app, env);
   const entry = { envs: [...envs], phase: 'starting', startedAt: new Date().toISOString() };
   active.set(app.slug, entry);
   const steps = [];

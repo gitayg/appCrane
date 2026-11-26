@@ -56,15 +56,35 @@ id -u "$RUN_USER" >/dev/null 2>&1 || die "User does not exist: $RUN_USER"
 
 # install -d also resets the owner and mode of a directory that already exists.
 install -d -o root -g root -m 0755 "$DEST_DIR"
+# A temp file left by an aborted run (set -e) is removed on exit.
+_src=""; _tmp=""
+trap 'rm -f -- ${_src:+"$_src"} ${_tmp:+"$_tmp"}' EXIT
+# The source is read once, into a root-owned file, so the stamp below names
+# exactly the bytes the installed copy was made from.
+_src="$(mktemp "$DEST_DIR/.host-hardening-src.XXXXXX")"
+cat "$SRC" > "$_src"
 _tmp="$(mktemp "$DEST_DIR/.host-hardening.XXXXXX")"
-REPO="$REPO_DIR" awk '!done && /^REPO_DIR=/ { print "REPO_DIR='\''" ENVIRON["REPO"] "'\''"; done = 1; next } { print }' "$SRC" > "$_tmp"
+REPO="$REPO_DIR" awk '!done && /^REPO_DIR=/ { print "REPO_DIR='\''" ENVIRON["REPO"] "'\''"; done = 1; next } { print }' "$_src" > "$_tmp"
 if ! grep -qxF "REPO_DIR='$REPO_DIR'" "$_tmp"; then
-  rm -f "$_tmp"; die "No REPO_DIR= line in $SRC"
+  rm -f "$_tmp" "$_src"; die "No REPO_DIR= line in $SRC"
 fi
 chown root:root "$_tmp"
 chmod 0755 "$_tmp"
 mv -f "$_tmp" "$DEST"
 log "host-hardening: installed $DEST (root:root 0755, repo $REPO_DIR)"
+
+# Version stamp: AppCrane runs the installed copy by itself after an upgrade
+# only when source_sha256 equals the sha256 of the checkout's script.
+STAMP="$DEST_DIR/host-hardening.version"
+_ver="$(grep -m1 -oE '"version"[[:space:]]*:[[:space:]]*"[0-9]+\.[0-9]+\.[0-9]+"' "$REPO_DIR/package.json" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || true)"
+_tmp="$(mktemp "$DEST_DIR/.host-hardening-version.XXXXXX")"
+printf 'version=%s\nsource_sha256=%s\ninstalled_sha256=%s\n' \
+  "${_ver:-unknown}" "$(sha256sum "$_src" | cut -d' ' -f1)" "$(sha256sum "$DEST" | cut -d' ' -f1)" > "$_tmp"
+rm -f "$_src"
+chown root:root "$_tmp"
+chmod 0644 "$_tmp"
+mv -f "$_tmp" "$STAMP"
+log "host-hardening: stamped $STAMP (AppCrane ${_ver:-unknown})"
 _tmp="$(mktemp "$DEST_DIR/.appcrane-publish-chain.XXXXXX")"
 cat "$PUB_SRC" > "$_tmp"
 chown root:root "$_tmp"

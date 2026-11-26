@@ -170,21 +170,23 @@ test('Apply before the server synced: with the interim unit present DOCKER-USER 
   assert.match(d, /^publish_drop_reason=AppCrane has not synced published ports yet: APPCRANE-PUBLISH lacks tcp:38080 tcp:38081 tcp:38083$/m);
 });
 
-test('ss failing: its stderr is shown, the listeners count as unchecked, so neither the DOCKER-USER DROP nor the INPUT DROP goes in', { skip: skipNet(R) }, () => {
+test('ss failing: its stderr is shown and the DOCKER-USER DROP does not go in (docker-proxy ports unchecked); INPUT is not gated on listeners, so APPCRANE-INPUT goes in, the policy stays ACCEPT and the run succeeds', { skip: skipNet(R) }, () => {
   const out = runNet(R, `
     printf '#!/bin/sh\\necho "ss: simulated netlink failure" >&2\\nexit 1\\n' > /usr/local/bin/ss; chmod 755 /usr/local/bin/ss
     hh
-    echo @@V; iptables -S DOCKER-USER; iptables -S INPUT | head -1
+    echo @@V; iptables -S DOCKER-USER; iptables -S INPUT
     echo @@S; cat /var/lib/appcrane/host-network.state
   `);
-  assert.deepEqual(exits(out), [3], out);
+  assert.deepEqual(exits(out), [0], out);
   assert.match(out, /ss: simulated netlink failure/);
   assert.match(out, /ss failed, so the listening sockets cannot be checked/);
   const v = block(out, 'V');
-  assert.ok(v.startsWith(`${SKELETON(false)}\n-P INPUT ACCEPT`), v);
+  assert.equal(v, `${SKELETON(false)}\n-P INPUT ACCEPT\n-A INPUT -j APPCRANE-INPUT\n`);
   const s = block(out, 'S');
-  assert.match(s, /^input_mode=refused$/m);
-  assert.match(s, /^uncovered=ss-failed$/m);
+  assert.match(s, /^result=ok$/m);
+  assert.match(s, /^input_mode=appcrane-input$/m);
+  assert.match(s, /^uncovered=$/m);
+  assert.match(s, /^publish_drop=no$/m);
   assert.match(s, /^publish_drop_reason=cannot check which ports docker-proxy listens on \(ss-failed\)$/m);
 });
 
@@ -207,6 +209,10 @@ test('PORT in .env below 1024 or in the base allow list: refused, every chain le
     for t in iptables ip6tables; do $t -P INPUT ACCEPT; $t -F; $t -X; done
     echo @@BOOT22OUT; /usr/local/sbin/appcrane-host-network.sh 2>&1; echo "@@BOOT22 $?"
     echo @@SAVE4; ${SAVE}
+    sed -i -e 's/^app_port=.*/app_port=5001/' -e 's/^db_ports=.*/db_ports=22 1000:2000 45432 70000 50000:40000/' /var/lib/appcrane/host-network.state
+    for t in iptables ip6tables; do $t -P INPUT ACCEPT; $t -F; $t -X; done
+    echo @@BOOTDBOUT; /usr/local/sbin/appcrane-host-network.sh 2>&1; echo "@@BOOTDB $?"
+    echo @@SAVE5; iptables -S APPCRANE-INPUT
   `);
   const ports = ['22', '80', '443', '1023', '0', '99999', 'abc'];
   assert.deepEqual(exits(out), [0, ...ports.map(() => 3)], out);
@@ -228,4 +234,10 @@ test('PORT in .env below 1024 or in the base allow list: refused, every chain le
   const s4 = block(out, 'SAVE4');
   assert.doesNotMatch(s4, /APPCRANE-INPUT|--dport 22/, 'a tampered state never makes the boot script drop 22');
   assert.match(s4, /^-A DOCKER-USER -i eth0 -j DROP$/m);
+  assert.match(out, /^@@BOOTDB 0$/m);
+  for (const p of ['22', '1000:2000', '70000', '50000:40000']) assert.match(block(out, 'BOOTDBOUT'), new RegExp(`db port '${p}' in /var/lib/appcrane/host-network\\.state is not usable — skipped`));
+  assert.deepEqual(block(out, 'SAVE5').split('\n').filter((l) => /-j DROP$/.test(l)), [
+    '-A APPCRANE-INPUT -i eth0 -p tcp -m tcp --dport 5001 -j DROP',
+    '-A APPCRANE-INPUT -i eth0 -p tcp -m tcp --dport 45432 -j DROP',
+  ], 'a tampered db_ports drops only the usable entries');
 });

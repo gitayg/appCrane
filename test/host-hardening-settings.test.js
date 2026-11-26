@@ -125,7 +125,7 @@ test('host-network: applied with mode and public interface; not applied, refused
   const s = async (over) => item(await H.checkItems(host(over).deps), 'host-network');
   const ok = await s({});
   assert.equal(ok.state, 'applied');
-  assert.match(ok.detail, /^public interface eth0; DOCKER-USER set \(IPv4\+IPv6\).*INPUT: APPCRANE-INPUT chain, policy DROP, accepting 22\/tcp 80\/tcp 443\/tcp 443\/udp; port 5001 dropped on eth0 only.*re-applies it after reboots/);
+  assert.match(ok.detail, /^public interface eth0; DOCKER-USER set \(IPv4\+IPv6\).*INPUT: APPCRANE-INPUT chain \(port 5001 dropped on eth0 only; INPUT policy DROP, not changed by AppCrane\).*re-applies it after reboots/);
   assert.equal(ok.network.publish_drop, true);
   assert.equal(ok.network.ext, 'eth0');
   assert.equal(ok.network.input_mode, 'appcrane-input');
@@ -136,7 +136,7 @@ test('host-network: applied with mode and public interface; not applied, refused
   assert.match(none.detail, /^host network section not applied/);
 
   const ufw = await s({ files: { [STATE]: 'result=ok\next=ens5\nfamilies=IPv4\ninput_mode=ufw\ninput_policy=DROP\napp_port=5001\npublish_drop=yes\n' } });
-  assert.match(ufw.detail, /INPUT: ufw \(22, 80, 443\/tcp allowed where no rule existed; port 5001 denied on ens5\)/);
+  assert.match(ufw.detail, /INPUT: ufw \(port 5001 denied on ens5; 5001 allowed from the container bridges; ufw policy not changed by AppCrane\)/);
 
   const refused = await s({ files: { [STATE]: 'result=refused\next=eth0\nfamilies=IPv4+IPv6\ninput_mode=refused\ninput_policy=ACCEPT\nuncovered=8080/tcp@0.0.0.0(nc) 41641/udp@*(tailscaled)\n' } });
   assert.equal(refused.state, 'missing');
